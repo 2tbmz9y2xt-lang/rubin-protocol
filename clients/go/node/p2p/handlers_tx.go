@@ -40,11 +40,10 @@ func (p *peer) handleTx(txBytes []byte) error {
 	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
 		return p.handleRelayDATx(txBytes, tx)
 	}
-	if p.service.txSeen.Has(txid) {
-		return nil
-	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
+	// Add is the one seen-set authority: it reports false for an already-seen
+	// txid, so no separate Has pre-check exists.
 	if !p.service.txSeen.Add(txid) {
 		return nil
 	}
@@ -63,12 +62,16 @@ func (p *peer) handleTx(txBytes []byte) error {
 // this peer's own address and its normalized quota key, so scoring and quota
 // teardown name exactly one subject.
 //
-// A DUPLICATE COMMIT carries the existing negative peer effect
-// (RUBIN_COMPACT_BLOCKS.md Section 5.1): a peer re-announcing a commit the node
-// already retains is the case that adjustment exists for. A duplicate CHUNK is
-// peer-neutral — chunks legitimately race between peers. Every other admission
-// failure stays peer-neutral for the same Go/Rust relay-parity reason the
-// standard path gives.
+// The ONLY negative peer effect on this arm is the existing +10 for
+// SameDAIDCommitConflict — a FULLY VALIDATED different-txid DA_COMMIT_TX
+// competing with the retained same-da_id first-seen commit, reported by the
+// admission's own bool AND applied here only because this arm's provenance is
+// PEER. The effect is never derived from tx kind, from error text or from
+// DUPLICATE alone (RUBIN_COMPACT_BLOCKS.md Section 5.1): an exact retained
+// commit or chunk replay — requested or unsolicited — and a valid same-txid
+// nonexact candidate are peer-neutral DUPLICATE, and every admission failure
+// stays peer-neutral for the same Go/Rust relay-parity reason the standard
+// path gives.
 //
 // The address is read ONCE and both identities are derived from that one value,
 // so scoring and quota accounting can never name two different subjects. A
@@ -95,7 +98,7 @@ func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err != nil {
 		return nil //nolint:nilerr // admission rejections are peer-neutral, exactly as on the standard path
 	}
-	if result.Disposition == node.DAAdmissionDuplicate && tx.TxKind == 0x01 {
+	if result.SameDAIDCommitConflict {
 		reason := fmt.Sprintf("duplicate da commit %x", result.DAID)
 		if p.bumpBan(10, reason) {
 			return errors.New(reason)

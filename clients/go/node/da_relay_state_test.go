@@ -711,12 +711,8 @@ func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
 		t.Fatalf("setup accounting global=%d da=%d want %d", state.orphanBytes, state.orphanBytesForDAID(daID), wantBytes)
 	}
 
-	expired, err := state.advanceOrphanTTL()
-	if err != nil {
+	if err := state.advanceOrphanTTL(); err != nil {
 		t.Fatalf("advance ttl: %v", err)
-	}
-	if len(expired) != 1 || expired[0].daID != daID || expired[0].state != daRelayStateOrphanChunks || expired[0].commitPeerQuotaKey != "" {
-		t.Fatalf("expired=%+v, want orphan da_id without commit attribution", expired)
 	}
 	if _, ok := state.sets[daID]; ok {
 		t.Fatalf("expired orphan da_id record was retained")
@@ -733,9 +729,11 @@ func TestDARelayAdvanceOrphanTTLExpiresOrphanChunksAtomically(t *testing.T) {
 	if err := state.AdvanceOrphanTTL(); err != nil {
 		t.Fatalf("public ttl advance: %v", err)
 	}
-	if expired, err = state.advanceOrphanTTL(); err != nil || len(expired) != 0 {
-		t.Fatalf("second ttl advance expired=%+v err=%v, want no-op", expired, err)
+	emptied := daRelayStateSnapshot(state)
+	if err := state.advanceOrphanTTL(); err != nil {
+		t.Fatalf("second ttl advance: %v", err)
 	}
+	requireDARelayStateUnchanged(t, state, emptied)
 }
 
 func TestDARelayAdvanceOrphanTTLExpiresStagedCommitAccounting(t *testing.T) {
@@ -755,12 +753,8 @@ func TestDARelayAdvanceOrphanTTLExpiresStagedCommitAccounting(t *testing.T) {
 		t.Fatalf("setup commit overhead=%d, want %d", state.orphanCommitOverheadBytes, record.commit.wireBytes)
 	}
 
-	expired, err := state.advanceOrphanTTL()
-	if err != nil {
+	if err := state.advanceOrphanTTL(); err != nil {
 		t.Fatalf("advance ttl: %v", err)
-	}
-	if len(expired) != 1 || expired[0].daID != daID || expired[0].state != daRelayStateStagedCommit || expired[0].commitPeerQuotaKey != "peer-b" {
-		t.Fatalf("expired=%+v, want staged commit attribution to peer-b", expired)
 	}
 	if _, ok := state.sets[daID]; ok {
 		t.Fatalf("expired staged commit da_id record was retained")
@@ -792,12 +786,8 @@ func TestDARelayAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T)
 		t.Fatalf("setup complete state=%v pinned=%d", complete.state, wantPinned)
 	}
 
-	expired, err := state.advanceOrphanTTL()
-	if err != nil {
+	if err := state.advanceOrphanTTL(); err != nil {
 		t.Fatalf("first advance ttl: %v", err)
-	}
-	if len(expired) != 0 {
-		t.Fatalf("first ttl advance expired=%+v, want none", expired)
 	}
 	if got := state.sets[stagedID].ttlBlocksRemaining; got != staged.ttlBlocksRemaining-1 {
 		t.Fatalf("staged ttl after first tick=%d, want %d", got, staged.ttlBlocksRemaining-1)
@@ -806,12 +796,8 @@ func TestDARelayAdvanceOrphanTTLDecrementsAndPreservesCompleteSets(t *testing.T)
 		t.Fatalf("first tick mutated complete set ok=%v pinned=%d want %d", ok, state.pinnedPayloadBytes, wantPinned)
 	}
 
-	expired, err = state.advanceOrphanTTL()
-	if err != nil {
+	if err := state.advanceOrphanTTL(); err != nil {
 		t.Fatalf("second advance ttl: %v", err)
-	}
-	if len(expired) != 1 || expired[0].daID != stagedID {
-		t.Fatalf("second ttl advance expired=%+v, want staged da_id", expired)
 	}
 	if _, ok := state.sets[stagedID]; ok {
 		t.Fatalf("expired staged record was retained")
@@ -830,12 +816,8 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	decrementRecord.ttlBlocksRemaining = 2
 	state.sets[decrementID] = decrementRecord
 	state.orphanBytesByDAID[decrementID] = decrementRecord.wireBytes
-	expired, err := state.advanceOrphanTTL()
-	if err != nil {
+	if err := state.advanceOrphanTTL(); err != nil {
 		t.Fatalf("ttl-only decrement should skip accounting projection: %v", err)
-	}
-	if len(expired) != 0 {
-		t.Fatalf("ttl-only decrement expired=%+v, want none", expired)
 	}
 	if got := state.sets[decrementID].ttlBlocksRemaining; got != 1 {
 		t.Fatalf("ttl-only decrement ttl=%d, want 1", got)
@@ -847,8 +829,7 @@ func TestDARelayAdvanceOrphanTTLReturnsProjectionErrorsWithoutMutation(t *testin
 	expireRecord.ttlBlocksRemaining = 1
 	state.sets[expireID] = expireRecord
 	state.orphanBytesByDAID[expireID] = expireRecord.wireBytes
-	_, err = state.advanceOrphanTTL()
-	requireDAErr(t, err, errDARelayArithmeticOverflow)
+	requireDAErr(t, state.advanceOrphanTTL(), errDARelayArithmeticOverflow)
 	if _, ok := state.sets[expireID]; !ok {
 		t.Fatal("failed ttl expiry deleted corrupt record")
 	}
@@ -858,9 +839,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 	t.Run("empty no-op", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		before := daRelayStateSnapshot(state)
-		expired, err := state.advanceOrphanTTL()
-		if err != nil || len(expired) != 0 {
-			t.Fatalf("empty advance expired=%+v err=%v", expired, err)
+		if err := state.advanceOrphanTTL(); err != nil {
+			t.Fatalf("empty advance: %v", err)
 		}
 		requireDARelayStateUnchanged(t, state, before)
 	})
@@ -870,9 +850,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 		record := mustAddDAChunk(t, state, "peer-ttl", daRelayTestChunk(daID, 0, 7))
 		record.ttlBlocksRemaining = 3
 		state.sets[daID] = record
-		expired, err := state.advanceOrphanTTL()
-		if err != nil || len(expired) != 0 {
-			t.Fatalf("decrement advance expired=%+v err=%v", expired, err)
+		if err := state.advanceOrphanTTL(); err != nil {
+			t.Fatalf("decrement advance: %v", err)
 		}
 		if got := state.sets[daID]; got.ttlBlocksRemaining != 2 || got.receivedTime != record.receivedTime {
 			t.Fatalf("record after decrement=%+v, want ttl 2 and receivedTime %d", got, record.receivedTime)
@@ -888,20 +867,19 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 			s.sets[ids[1]] = record
 		}
 		twin.mu.Lock()
-		_, _, wantErr := twin.advanceOrphanTTLLocked()
+		_, wantErr := twin.advanceOrphanTTLLocked()
 		twin.mu.Unlock()
 		if wantErr != nil {
 			t.Fatalf("build ttl expected image: %v", wantErr)
 		}
 		want := daRelayStateSnapshot(twin)
-		expired, err := state.advanceOrphanTTL()
-		if err != nil {
+		if err := state.advanceOrphanTTL(); err != nil {
 			t.Fatalf("mixed advance: %v", err)
 		}
-		if len(expired) != 2 || expired[0].daID != ids[0] || expired[0].receivedTime != 1 || expired[1].daID != ids[2] || expired[1].receivedTime != 3 {
-			t.Fatalf("mixed expired=%+v, want sorted first and final", expired)
-		}
-		// The accepted-sequence high-water counts MEMBERS, and this fixture has six.
+		// Which records expired is proven by the twin-image equality below: the
+		// published image must equal the twin that expired exactly ids[0] and
+		// ids[2]. The accepted-sequence high-water counts MEMBERS, and this
+		// fixture has six.
 		if got := daRelayStateSnapshot(state); !reflect.DeepEqual(got, want) || got.nextReceivedTime != 6 { //nolint:govet // Complete private state-image equality requires structural comparison.
 			t.Fatalf("ttl success image=%+v, want %+v", got, want)
 		}
@@ -918,9 +896,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 			state, ids := newDARelayAtomicBatchState(t, "peer-ttl")
 			state.orphanBytesByDAID[ids[tt.index]] = 0
 			before := daRelayStateSnapshot(state)
-			expired, err := state.advanceOrphanTTL()
-			if err != errDARelayArithmeticOverflow || expired != nil { //nolint:errorlint // Exact identity is part of the contract.
-				t.Fatalf("underflow expired=%+v err=%v, want nil and %v", expired, err, errDARelayArithmeticOverflow)
+			if err := state.advanceOrphanTTL(); err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact identity is part of the contract.
+				t.Fatalf("underflow err=%v, want %v", err, errDARelayArithmeticOverflow)
 			}
 			requireDARelayStateUnchanged(t, state, before)
 		})
@@ -928,9 +905,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 	t.Run("first error and public propagation", func(t *testing.T) {
 		state, _ := newDARelayFirstErrorState(t)
 		before := daRelayStateSnapshot(state)
-		expired, err := state.advanceOrphanTTL()
-		if err != errDARelayOrphanPeerCapExceeded || expired != nil { //nolint:errorlint // Exact identity is part of the contract.
-			t.Fatalf("first ttl err=%v expired=%+v, want %v and nil", err, expired, errDARelayOrphanPeerCapExceeded)
+		if err := state.advanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
+			t.Fatalf("first ttl err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
 		if err := state.AdvanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
@@ -2335,21 +2311,20 @@ func requirePortHopRejectedWithoutMutation(t *testing.T, state *DARelayState, re
 	}
 }
 
-// advanceOrphanTTL runs the production TTL projection over a private clone and
-// reports the sets it expired. The production entry AdvanceOrphanTTL runs the
-// SAME projection and couples it to the owner's victim claims, discarding the
-// report; these accounting rows need the report to name the exact records, and
-// an unbound relay has no owner half for them to differ over.
-func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
+// advanceOrphanTTL runs the production TTL projection over a private clone,
+// without the owner half: the production entry AdvanceOrphanTTL runs the SAME
+// projection and couples it to the owner's victim claims, and an unbound relay
+// has no owner half for these accounting rows to differ over. Which records
+// expired is asserted from the published image itself.
+func (s *DARelayState) advanceOrphanTTL() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	projected := s.cloneForAtomicBatchLocked()
-	expired, _, err := projected.advanceOrphanTTLLocked()
-	if err != nil {
-		return nil, err
+	if _, err := projected.advanceOrphanTTLLocked(); err != nil {
+		return err
 	}
 	s.publishAtomicBatchLocked(projected)
-	return expired, nil
+	return nil
 }
 
 // releasePeerQuotaKey is advanceOrphanTTL's peer-teardown twin, with the same

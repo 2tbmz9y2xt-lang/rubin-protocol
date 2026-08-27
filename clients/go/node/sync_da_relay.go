@@ -124,14 +124,19 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 // member set, and demanding a claim for a member that was never admitted would
 // latch a healthy node.
 //
-// A nil mo is an engine with no standard/owner image bound, which is the same
-// engine that has no owner at all; there is then no claim domain to bind to and
+// The skip arm covers BOTH ownerless shapes — a nil mo (no standard/owner image
+// was prepared at all) and a mo whose owner is nil (an engine that never bound a
+// pending-outpoint owner): either way there is no claim domain to bind to and
 // the phase is skipped rather than inventing one.
+//
+// bound is deliberately unhinted: it holds only the retained DA members' tokens,
+// and the owner index it is checked against counts every domain's claims, so its
+// population is not derivable from any map length in hand.
 func (s *DARelayState) canonicalDAClaimProjectionLocked(removals []daRelaySetRecord, mo *canonicalMempoolPlan) (canonicalDAClaimProjection, error) {
 	if mo == nil || mo.owner == nil {
 		return canonicalDAClaimProjection{}, nil
 	}
-	bound := make(map[PendingOutpointToken]struct{}, len(mo.ownerIndex.byToken))
+	bound := make(map[PendingOutpointToken]struct{})
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
 		for _, member := range s.sets[daID].members() {
 			if err := checkCanonicalDAMemberClaim(daID, member, mo.ownerIndex, bound); err != nil {

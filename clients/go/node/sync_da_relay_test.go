@@ -637,32 +637,46 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 // can land between a D preparation and its publication. It is the deterministic
 // negative for removing any single fence.
 func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
-	f := newCanonicalMOFixture(t, 2, MempoolConfig{})
-	relay := f.engine.DARelayState()
-	daID := daRelayTestID(0x81)
-	payload := []byte("fenced")
-	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 1400, sha3.Sum256(payload))
-	chunkTx := f.daChunkTx(t, f.ops[1], daRelayTestID(0x82), 0, 1401, payload)
-	fenceProvenance, err := NewPeerDAProvenance("fence-peer", "fence-peer")
-	mustCanonicalMO(t, "NewPeerDAProvenance", err)
-	// An ordered slice, not a map: subtest order is part of what a rerun has to
-	// reproduce.
+	// Every subtest is SELF-CONTAINED: it builds its own fixture, funds its own
+	// transactions and shares no state with any sibling, so running one subtest
+	// alone reproduces exactly what the full run exercises.
 	writers := []struct {
 		name string
-		run  func()
+		run  func(t *testing.T, f *canonicalMOFixture, relay *DARelayState)
 	}{
-		{"AdmitDA commit", func() { _, _ = relay.AdmitDA(commitTx, fenceProvenance) }},
-		{"AdmitDA chunk", func() { _, _ = relay.AdmitDA(chunkTx, fenceProvenance) }},
-		{"AdvanceOrphanTTL", func() { _ = relay.AdvanceOrphanTTL() }},
-		{"ReleasePeerQuotaKey", func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }},
-		{"PlanPrefetch", func() { relay.PlanPrefetch(daID, []string{"fence-peer"}, time.Unix(1, 0)) }},
-		{"ReleasePrefetchPlan", func() { relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daID, PeerKey: "fence-peer"}) }},
+		{"AdmitDA commit", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x81), 1, 1400, sha3.Sum256([]byte("fenced")))
+			_, _ = relay.AdmitDA(commitTx, daRelayTestProvenance(t, "fence-peer"))
+		}},
+		{"AdmitDA chunk", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			chunkTx := f.daChunkTx(t, f.ops[1], daRelayTestID(0x82), 0, 1401, []byte("fenced"))
+			_, _ = relay.AdmitDA(chunkTx, daRelayTestProvenance(t, "fence-peer"))
+		}},
+		{"AdvanceOrphanTTL", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			_ = relay.AdvanceOrphanTTL()
+		}},
+		{"ReleasePeerQuotaKey", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			_ = relay.ReleasePeerQuotaKey("fence-peer")
+		}},
+		{"PlanPrefetch", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			relay.PlanPrefetch(daRelayTestID(0x81), []string{"fence-peer"}, time.Unix(1, 0))
+		}},
+		{"ReleasePrefetchPlan", func(t *testing.T, f *canonicalMOFixture, relay *DARelayState) {
+			relay.ReleasePrefetchPlan(DARelayPrefetchPlan{DAID: daRelayTestID(0x81), PeerKey: "fence-peer"})
+		}},
 	}
 	for _, writer := range writers {
 		t.Run(writer.name, func(t *testing.T) {
+			f := newCanonicalMOFixture(t, 2, MempoolConfig{})
+			relay := f.engine.DARelayState()
+			// ReleasePeerQuotaKey's advisory zero-victim scan returns before any
+			// guard, so its fence row needs a charged key to walk past it.
+			if writer.name == "ReleasePeerQuotaKey" {
+				mustCanonicalMO(t, "seed fenced peer bytes", relay.addDAChunk("fence-peer", daRelayTestChunk(daRelayTestID(0x83), 0, 7)))
+			}
 			done := make(chan struct{})
 			f.engine.chainState.admissionMu.Lock()
-			go func() { defer close(done); writer.run() }()
+			go func() { defer close(done); writer.run(t, f, relay) }()
 			// The BLOCK is proven from the writer's own parked stack, not inferred
 			// from elapsed time: a writer that had merely not been scheduled yet
 			// would never satisfy this barrier, and a writer that took no fence at

@@ -65,22 +65,48 @@ type DACommit struct {
 }
 
 // BeginDAAdmission validates raw DA bytes and retains the admission guard until Close.
+//
+// Order: the message bound and the full canonical parse run BEFORE any guard —
+// a parse failure terminates with its own result and no ChainState or owner
+// observation occurs — and then the shared acquireDAAdmissionHold lifecycle
+// obtains the stable guard and the complete owner context BEFORE candidate
+// validation, so guard/context unavailability or instability selects
+// UNAVAILABLE ahead of every later candidate check
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1 duplicate-handling order).
 func (m *Mempool) BeginDAAdmission(raw []byte) (*DAAdmission, error) {
-	if m == nil {
-		return nil, txAdmitUnavailable("nil mempool")
-	}
-	if m.chainState == nil {
-		return nil, txAdmitUnavailable("nil chainstate")
-	}
-	owner := m.pendingOutpoints
-	if owner == nil {
-		return nil, txAdmitUnavailable("nil pending-outpoint owner")
-	}
-	owned, tx, txid, wtxid, inputs, err := parseDAAdmission(raw)
+	owned, tx, txid, wtxid, inputs, err := m.parseDAAdmissionCandidate(raw)
 	if err != nil {
 		return nil, err
 	}
-	return m.beginDAAdmissionGuarded(owner, owned, tx, txid, wtxid, inputs)
+	hold, err := m.acquireDAAdmissionHold()
+	if err != nil {
+		return nil, err
+	}
+	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
+	if err != nil {
+		hold.release()
+		return nil, err
+	}
+	return admission, nil
+}
+
+// parseDAAdmissionCandidate is the guardless pre-stage shared by
+// BeginDAAdmission and AdmitDA: receiver availability, the message bound and
+// the full canonical parse with structural identity derivation.
+func (m *Mempool) parseDAAdmissionCandidate(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, err error) {
+	if m == nil {
+		err = selectRelayDisposition(txAdmitUnavailable("nil mempool"), RelayAdmissionUnavailable)
+		return
+	}
+	if m.chainState == nil {
+		err = selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
+		return
+	}
+	if m.pendingOutpoints == nil {
+		err = selectRelayDisposition(txAdmitUnavailable("nil pending-outpoint owner"), RelayAdmissionUnavailable)
+		return
+	}
+	return parseDAAdmission(raw)
 }
 
 func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, err error) {
@@ -116,29 +142,69 @@ func matchingDAChunkPayloadHash(tx *consensus.Tx) bool {
 	return tx.TxKind != 0x02 || sha3.Sum256(tx.DaPayload) == tx.DaChunkCore.ChunkHash
 }
 
-func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (*DAAdmission, error) {
+// daAdmissionHold is the ONE factored stable-guard/context acquisition
+// BeginDAAdmission and AdmitDA share, and this file is its sole
+// ChainState.admissionMu.R acquisition site on the admission path. It takes the
+// guard exactly once, reads the complete owner admission context under it, and
+// proves the context's stable tip equals the guarded chainstate tip — so every
+// decision made while the hold lives runs against one stable
+// {tip, generation} identity. Absence, mismatch or instability of that context
+// (an active or latched transition, an exhausted generation, a tip the owner
+// has not committed) selects the existing UNAVAILABLE disposition before any DA
+// observation or candidate validation.
+//
+// The hold is single-goroutine and linear: it ends in exactly one of release()
+// (the guard is unlocked here) or validateDACandidate success (the guard
+// transfers into the returned DAAdmission, whose Close unlocks it). sync.RWMutex
+// is not reentrant, so nothing running under a hold may acquire the guard again.
+type daAdmissionHold struct {
+	mempool *Mempool
+	owner   *PendingOutpointOwner
+	context PendingOutpointAdmissionContext
+	held    bool
+}
+
+func (m *Mempool) acquireDAAdmissionHold() (*daAdmissionHold, error) {
 	m.chainState.admissionMu.RLock()
-	locked := true
-	defer func() {
-		if locked {
-			m.chainState.admissionMu.RUnlock()
-		}
-	}()
+	admission, ok := m.pendingOutpoints.AdmissionContext()
+	if !ok {
+		m.chainState.admissionMu.RUnlock()
+		return nil, selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner admission context unavailable"), RelayAdmissionUnavailable)
+	}
+	if admission.StableTip != pendingOutpointTipOf(m.chainState) {
+		m.chainState.admissionMu.RUnlock()
+		return nil, selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip"), RelayAdmissionUnavailable)
+	}
+	return &daAdmissionHold{mempool: m, owner: m.pendingOutpoints, context: admission, held: true}, nil
+}
+
+// release unlocks a hold that was not converted into a DAAdmission. Exactly one
+// of release and a successful validateDACandidate may run, once.
+func (h *daAdmissionHold) release() {
+	if h == nil || !h.held {
+		panic("DA admission hold is not held")
+	}
+	h.held = false
+	h.mempool.chainState.admissionMu.RUnlock()
+}
+
+// validateDACandidate runs the existing full candidate validation under the
+// held guard and, on success, transfers the guard into the returned DAAdmission
+// (Close then releases it). On failure the hold stays held and the caller
+// releases it, so an error changes no lock state.
+func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (*DAAdmission, error) {
+	if h == nil || !h.held {
+		panic("DA admission hold is not held")
+	}
+	m := h.mempool
 	snapshot := m.chainState.admissionSnapshotForInputs(inputs)
 	policy := m.policySnapshot()
 	checked, _, err := m.checkParsedTransactionWithSnapshot(owned, tx, txid, wtxid, snapshot, policy)
 	if err != nil {
 		return nil, err
 	}
-	admission, ok := owner.AdmissionContext()
-	if !ok {
-		return nil, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
-	}
-	if admission.StableTip != (PendingOutpointTip{HasTip: snapshot.hasTip, Height: snapshot.height, Hash: snapshot.tipHash}) {
-		return nil, txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip")
-	}
 	a := &DAAdmission{
-		guard: &daAdmissionGuard{chainState: m.chainState, owner: owner},
+		guard: &daAdmissionGuard{chainState: m.chainState, owner: h.owner},
 		snapshot: DAAdmissionSnapshot{
 			TxID:          checked.TxID,
 			WTxID:         checked.WTxID,
@@ -147,10 +213,10 @@ func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []b
 			RetainedBytes: uint64(len(checked.Bytes)),
 			Inputs:        inputs,
 		},
-		context: admission,
+		context: h.context,
 	}
 	a.self = a
-	locked = false
+	h.held = false
 	return a, nil
 }
 

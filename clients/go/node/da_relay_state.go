@@ -114,13 +114,6 @@ type daRelayEvictionAccounting struct {
 	receivedTime uint64
 }
 
-type daRelayExpiredSet struct {
-	daID               [32]byte
-	state              daRelaySetState
-	commitPeerQuotaKey string
-	receivedTime       uint64
-}
-
 type daRelayPrefetchState struct {
 	indexes map[[32]byte]map[uint16]string
 	expires map[[32]byte]time.Time
@@ -144,6 +137,12 @@ type DARelayPrefetchPlan struct {
 // identity: since RUB-678 the only way to retain a DA member is AdmitDA, which
 // derives every retained field from the DAAdmissionSnapshot of a fully validated
 // transaction rather than from a caller-supplied struct.
+//
+// Compatibility, construction dimension — deliberate break: RUB-678 REMOVED the
+// exported TxBytes field, so a keyed composite literal naming TxBytes and any
+// unkeyed literal built for the old shape no longer compile. Migration: drop the
+// field — retained bytes now come only from the admission's own snapshot, and
+// this type validates shape, never retention.
 type DARelayChunk struct {
 	DAID        [32]byte
 	ChunkHash   [32]byte
@@ -306,11 +305,12 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // the only entry points, they never nest, and the canonical transition reaches
 // prepare/publish with the WRITE guard already held and so never calls one.
 //
-// An UNBOUND relay — no mempool, or a mempool with no chainstate, which is the
-// test-only construction — has no admission guard to take and keeps its existing
-// unfenced behavior rather than inventing one. The nil RECEIVER arm is load
-// bearing too: ReleasePeerQuotaKey is a pinned nil-safe surface, so the fence
-// must reach that body instead of dereferencing on the way in.
+// An UNBOUND relay — a nil receiver, no mempool, or a mempool with no
+// chainstate, which is the test-only construction — has no admission guard to
+// take and keeps its existing unfenced behavior rather than inventing one. The
+// nil-receiver condition is one arm of that same unbound family, not a
+// nil-safety promise for the prefetch entries, which dereference the receiver
+// immediately after the fence.
 //
 // A LATCHED engine parks a writer here until restart, by design: the terminal
 // fail-closed latch retains admissionMu exclusively, and standard admission
@@ -321,8 +321,9 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // Its ONLY remaining writers are PlanPrefetch and ReleasePrefetchPlan, which
 // mutate request RESERVATIONS and never a retained record or an owner claim.
 // RUB-678 moved every retained-DA writer — AdmitDA, ReleasePeerQuotaKey and
-// AdvanceOrphanTTL — onto the owner-guarded BeginDAAdmission/BeginDARemoval
-// guards, which take admissionMu.R themselves for the guard's whole life. Those
+// AdvanceOrphanTTL — onto the owner-guarded acquisition lifecycle in
+// da_admission.go (acquireDAAdmissionHold for admission, BeginDARemoval for
+// removal), which takes admissionMu.R itself for the guard's whole life. Those
 // paths must never nest inside this fence: sync.RWMutex is not reentrant.
 func (s *DARelayState) lockAdmissionFence() func() {
 	if s == nil || s.mempool == nil || s.mempool.chainState == nil {
@@ -416,8 +417,7 @@ func (s *DARelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 // every member claim it owns. It runs on a private clone, so it publishes
 // nothing; the caller collects the victim claims and publishes both halves under
 // one owner hold.
-func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, []DAAdmissionVictim, error) {
-	var expired []daRelayExpiredSet
+func (s *DARelayState) advanceOrphanTTLLocked() ([]DAAdmissionVictim, error) {
 	var victims []DAAdmissionVictim
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
 		record := s.sets[daID]
@@ -428,16 +428,10 @@ func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, []DAAdmiss
 		}
 		victims = appendDAMemberVictims(victims, record.members())
 		if err := s.removeDASetRecordLocked(record); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		expired = append(expired, daRelayExpiredSet{
-			daID:               record.daID,
-			state:              record.state,
-			commitPeerQuotaKey: record.commit.peerQuotaKey,
-			receivedTime:       record.receivedTime,
-		})
 	}
-	return expired, victims, nil
+	return victims, nil
 }
 
 func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {

@@ -936,40 +936,6 @@ func TestValidateRelayDATxForAdmissionRejectsInvalidChunkShape(t *testing.T) {
 	}
 }
 
-func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
-	daID := daRelayTestID(123)
-	payload := []byte("admitted-da-payload")
-	txBytes := daChunkRelayTxBytes(t, daID, 0, 9153, payload)
-	goodTx, txid, err := parseCanonicalTx(txBytes)
-	if err != nil {
-		t.Fatalf("parse canonical tx: %v", err)
-	}
-	if err := h.service.AnnounceTx(txBytes); err != nil {
-		t.Fatalf("AnnounceTx setup DA chunk: %v", err)
-	}
-	if !h.service.txSeen.Has(txid) {
-		t.Fatal("setup DA chunk was not marked seen")
-	}
-	badTx := *goodTx
-	badTx.DaPayload = []byte("bad-da-payload")
-	badPayloadTx, err := consensus.MarshalTx(&badTx)
-	if err != nil {
-		t.Fatalf("MarshalTx bad DA payload: %v", err)
-	}
-	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
-		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
-	}
-
-	if err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx); !errors.Is(err, node.ErrDARelayChunkHashMismatch) {
-		t.Fatalf("handle seen bad DA chunk err=%v, want hash mismatch at ban threshold", err)
-	}
-	if got, ok := h.service.cfg.TxPool.Get(txid); !ok || !reflect.DeepEqual(got, txBytes) {
-		t.Fatal("bad already-seen DA variant mutated admitted pool bytes")
-	}
-}
-
 func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	canonicalMempool := wireCanonicalMempoolForP2PTest(t, h)

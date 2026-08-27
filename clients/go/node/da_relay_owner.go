@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -107,9 +108,19 @@ const (
 )
 
 // DAAdmissionResult reports which set the admission concerned and how it ended.
+//
+// SameDAIDCommitConflict is true ONLY when Disposition is DAAdmissionDuplicate
+// and a FULLY VALIDATED DA_COMMIT_TX with a DIFFERENT txid competed with the
+// retained first-seen commit for the same da_id (decided before any owner
+// reserve). It is false for an exact replay, for a same-txid nonexact
+// candidate, for every chunk and for every nonduplicate result. P2P applies the
+// existing negative peer effect only from this bool AND PEER provenance — never
+// from tx kind, error text or DUPLICATE alone
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1).
 type DAAdmissionResult struct {
-	DAID        [32]byte
-	Disposition DAAdmissionDisposition
+	DAID                   [32]byte
+	Disposition            DAAdmissionDisposition
+	SameDAIDCommitConflict bool
 }
 
 // DARetainedTxSnapshot is one retained DA member's caller-owned observation.
@@ -132,38 +143,81 @@ type daRelayAdmissionMember struct {
 // provenance. It returns RETAINED with the member resident, or DUPLICATE having
 // changed nothing at all.
 //
-// Order, and it is the whole safety argument:
+// Order, and it is the whole safety argument
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1 duplicate-handling total order):
 //
 //  1. provenance is validated first, so an invalid source never reaches the
 //     owner, the admission guard or any state;
-//  2. BeginDAAdmission is the SOLE ChainState.admissionMu.R acquisition on this
-//     path — it holds that guard for its whole life, sync.RWMutex is not
-//     reentrant, and nothing below may take it again;
-//  3. every allocation, parse, provenance, locator, record, accounting and
+//  2. the message bound and the full canonical parse derive txid, wtxid, kind
+//     and DA identity BEFORE any guard — a failure there owns the result and no
+//     ChainState or DA observation occurs;
+//  3. acquireDAAdmissionHold is the SOLE ChainState.admissionMu.R acquisition
+//     on this path (shared with BeginDAAdmission, factored in da_admission.go).
+//     It obtains the stable guard AND the complete owner context first; guard,
+//     context or owner unavailability and an unstable tip select the existing
+//     UNAVAILABLE before any DA lock. The guard stays held for the whole call —
+//     sync.RWMutex is not reentrant and nothing below may take it again;
+//  4. under that held guard, exactly ONE DARelayState.mu window copies exactly
+//     ONE raw retained observation for the candidate txid, and the DA lock is
+//     released BEFORE any retained parsing or validation. The copy is the
+//     shortcut's only retained byte store; there is no second lookup, retry,
+//     repair or fallback;
+//  5. the copied evidence is validated OFF-lock, still under the guard:
+//     invalid copied evidence selects the existing INTERNAL at this originating
+//     site; an integrity-valid exact (txid, wtxid, raw) replay returns
+//     peer-neutral DUPLICATE with zero ordinary validation, owner work,
+//     mutation, sequence or publication — requested and unsolicited alike;
+//  6. only ABSENT and retained-nonexact evidence continue, under the SAME
+//     guard, through the existing signature, consensus, current-chain, fee and
+//     candidate-integrity order (validateDACandidate) — a same-txid INVALID
+//     candidate keeps its owning validation error and is never a duplicate;
+//  7. every allocation, parse, provenance, locator, record, accounting and
 //     sequence decision happens BEFORE the owner is touched, on a PRIVATE clone
-//     of the retained image;
-//  4. DAAdmission.BeginCommit acquires PendingOutpointOwner.mu LAST and holds it
-//     into the returned DACommit, so the token write, the complete D publication
-//     and Commit all run inside one owner hold with no fallible step between
-//     them.
+//     of the retained image; the final DA lock rechecks duplicate/first-seen —
+//     a VALID same-txid nonexact candidate returns peer-neutral DUPLICATE
+//     there, and a fully validated different-txid same-da_id commit returns
+//     DUPLICATE with SameDAIDCommitConflict, both before any owner reserve;
+//  8. DAAdmission.BeginCommit acquires PendingOutpointOwner.mu LAST and holds
+//     it into the returned DACommit, so the token write, the complete D
+//     publication and Commit all run inside one owner hold with no fallible
+//     step between them.
 //
-// A failure before step 4 leaves D, the locator index and the owner
-// byte-identical. There is deliberately NO Abort call: after BeginCommit
-// succeeds the remaining work is a token assignment into an already-present map
-// slot and two pointer publications, none of which can fail, so no schedule
-// exists that acquires a candidate token and then declines to finalize it.
+// A failure before step 8 leaves D, the locator index and the owner
+// byte-identical, and every exit — error, panic unwind of a fallible step, or
+// duplicate — releases the admission guard exactly once (the deferred Close, or
+// the explicit hold.release on the pre-validation exits). There is deliberately
+// NO Abort call: after BeginCommit succeeds the remaining work is a token
+// assignment into an already-present map slot and two pointer publications;
+// none of those can fail or panic, so no schedule exists that acquires a
+// candidate token and then declines to finalize it.
 //
 // AdmitDA is SYNCHRONOUS by contract: it performs no network action and never
 // waits, because it holds the admission read guard for its whole duration.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
-	if s == nil || s.mempool == nil {
-		return DAAdmissionResult{}, txAdmitUnavailable("no DA relay state bound")
+	if s == nil {
+		return DAAdmissionResult{}, selectRelayDisposition(txAdmitUnavailable("no DA relay state bound"), RelayAdmissionUnavailable)
+	}
+	if s.mempool == nil {
+		return DAAdmissionResult{}, selectRelayDisposition(txAdmitUnavailable("no mempool bound to the DA relay state"), RelayAdmissionUnavailable)
 	}
 	if err := provenance.validate(); err != nil {
 		return DAAdmissionResult{}, err
 	}
-	admission, err := s.mempool.BeginDAAdmission(txBytes)
+	owned, tx, txid, wtxid, inputs, err := s.mempool.parseDAAdmissionCandidate(txBytes)
 	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	hold, err := s.mempool.acquireDAAdmissionHold()
+	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	if result, done, err := s.classifyRetainedReplay(owned, txid, wtxid); done {
+		hold.release()
+		return result, err
+	}
+	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
+	if err != nil {
+		hold.release()
 		return DAAdmissionResult{}, err
 	}
 	defer admission.Close()
@@ -174,9 +228,42 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 	return s.commitDAAdmission(admission, member)
 }
 
+// classifyRetainedReplay is steps 4-5 of AdmitDA: the one guarded raw
+// observation and its off-lock classification. done reports that the
+// observation OWNS the result — an integrity-valid exact replay (peer-neutral
+// DUPLICATE, zero effect) or invalid copied evidence (existing INTERNAL).
+// ABSENT and retained-nonexact evidence return done=false: the shortcut
+// observation is discarded and the ordinary order resumes.
+func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte) (DAAdmissionResult, bool, error) {
+	s.mu.Lock()
+	observation := s.observeRetainedTxLocked(txid)
+	s.mu.Unlock()
+	if !observation.located {
+		return DAAdmissionResult{}, false, nil
+	}
+	snapshot, err := observation.validate(txid)
+	if err != nil {
+		return DAAdmissionResult{}, true, selectRelayDisposition(txAdmitUnavailable("invalid copied retained DA evidence: "+err.Error()), RelayAdmissionInternal)
+	}
+	if snapshot.WTxID == wtxid && bytes.Equal(observation.raw, owned) {
+		return DAAdmissionResult{DAID: observation.locator.daID, Disposition: DAAdmissionDuplicate}, true, nil
+	}
+	return DAAdmissionResult{}, false, nil
+}
+
 // commitDAAdmission is AdmitDA's final DA lock. It rechecks the duplicate
 // against the LIVE locator index, projects the complete new image, and only then
 // reaches the owner.
+//
+// The candidate arriving here is FULLY VALIDATED, so the two duplicate arms
+// below are Section 5.1's post-validation classes: a live locator row for the
+// candidate txid is the valid same-txid duplicate (exact replays that raced a
+// concurrent admission land here too) and returns peer-neutral DUPLICATE; a
+// commit staging refusal for a record that already holds a DIFFERENT txid's
+// commit is the same-da_id commit conflict and returns DUPLICATE with
+// SameDAIDCommitConflict. Both are decided before any owner reserve and both
+// discard the private projection, so nothing mutates and no sequence is
+// consumed.
 func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayAdmissionMember) (DAAdmissionResult, error) {
 	result := DAAdmissionResult{DAID: member.locator.daID}
 	s.mu.Lock()
@@ -188,6 +275,11 @@ func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayA
 	projected := s.cloneForAtomicBatchLocked()
 	dropped, err := projected.stageDAMemberLocked(member)
 	if err != nil {
+		if errors.Is(err, errDARelayDuplicateCommit) && member.locator.kind == daRelayLocatorCommit {
+			result.Disposition = DAAdmissionDuplicate
+			result.SameDAIDCommitConflict = true
+			return result, nil
+		}
 		return DAAdmissionResult{}, err
 	}
 	commit, err := admission.BeginCommit(appendDAMemberVictims(nil, dropped))
@@ -211,6 +303,13 @@ func (s *DARelayState) stageDAMemberLocked(member daRelayAdmissionMember) ([]daR
 // installMemberTokenLocked writes the finalized candidate token into the member
 // slot staging already created. The record and the chunk map entry both exist,
 // so this is assignment into present keys: no allocation, no failure.
+//
+// Aliasing invariant: the receiver is the PRIVATE projection, and the record and
+// chunks map written here are the fresh copies stageDAMemberLocked's
+// cloneForStateMutation created inside that projection — never the live image's
+// maps, which the projection's shallow clone still shares for every UNTOUCHED
+// record. Writing through this method therefore cannot reach live state before
+// publishAtomicBatchLocked installs the projection.
 func (s *DARelayState) installMemberTokenLocked(locator daRelayLocator, token PendingOutpointToken) {
 	record := s.sets[locator.daID]
 	if locator.kind == daRelayLocatorCommit {
@@ -341,10 +440,7 @@ func (s *DARelayState) AdvanceOrphanTTL() error {
 	if s == nil {
 		return nil
 	}
-	return s.commitRetainedDARemoval(func(projected *DARelayState) ([]DAAdmissionVictim, error) {
-		_, victims, err := projected.advanceOrphanTTLLocked()
-		return victims, err
-	})
+	return s.commitRetainedDARemoval((*DARelayState).advanceOrphanTTLLocked)
 }
 
 // ReleasePeerQuotaKey releases the incomplete retained data owned by one peer
@@ -418,6 +514,104 @@ func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
 	return s.mempool.BeginDARemoval()
 }
 
+// daRetainedObservation is ONE atomic raw acquisition for one candidate txid,
+// copied in a single DARelayState.mu window and validated OFF-lock. It is the
+// shared raw-observation shape of BOTH read-only retained observers — the
+// LookupRetainedTx router branch and AdmitDA's duplicate-classification
+// shortcut — so the two cannot disagree about what "integrity-valid retained
+// member" means, and neither holds the DA lock across parsing or validation
+// (RUBIN_COMPACT_BLOCKS.md Sections 5.1 and 17.5).
+//
+// raw is a defensive copy taken under the lock: it is the observation's only
+// retained byte store, it cannot alias the live image, and no consumer re-reads
+// live state after the window closes.
+type daRetainedObservation struct {
+	located          bool
+	locator          daRelayLocator
+	recordPresent    bool
+	recordDAID       [32]byte
+	commitChunkCount uint16
+	memberPresent    bool
+	member           daRelayMemberIdentity
+	raw              []byte
+}
+
+// observeRetainedTxLocked copies the complete evidence for txid: locator
+// presence, record presence and identity, the located member's identity, and
+// the exact retained raw bytes. It validates nothing — validation is the
+// off-lock half — and copies nothing twice.
+func (s *DARelayState) observeRetainedTxLocked(txid [32]byte) daRetainedObservation {
+	locator, located := s.locators[txid]
+	if !located {
+		return daRetainedObservation{}
+	}
+	observation := daRetainedObservation{located: true, locator: locator}
+	record, ok := s.sets[locator.daID]
+	if !ok {
+		return observation
+	}
+	observation.recordPresent = true
+	observation.recordDAID = record.daID
+	observation.commitChunkCount = record.commit.chunkCount
+	member, raw, ok := retainedDAMemberAt(record, locator)
+	if !ok {
+		return observation
+	}
+	observation.memberPresent = true
+	observation.member = member
+	observation.raw = cloneBytes(raw)
+	return observation
+}
+
+// validate is the shared off-lock retained-evidence validator: it proves the
+// copied bytes still ARE the located member — a canonical FULL-CONSUMPTION
+// parse, the exact indexed txid and stored admission-time wtxid, and the DA
+// role, da_id and index the locator claims. Every failure is a PLAIN error:
+// this is a read-only path and its INTERNAL never carries the
+// canonical-transition terminal type (the role checks it reuses wrap one, so
+// their failures are re-rendered as plain text here). It reruns NO consensus,
+// fee, capacity or policy check and repairs nothing.
+func (o daRetainedObservation) validate(txid [32]byte) (DARetainedTxSnapshot, error) {
+	if !o.recordPresent || o.recordDAID != o.locator.daID {
+		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA locator for %x names absent record %x", txid, o.locator.daID)
+	}
+	if !o.memberPresent || o.member.txid != txid {
+		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA locator for %x does not resolve to its own member", txid)
+	}
+	if len(o.raw) == 0 {
+		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA member %x has no retained transaction bytes", o.member.txid)
+	}
+	tx, parsedTxID, parsedWTxID, consumed, err := consensus.ParseTx(o.raw)
+	if err != nil {
+		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA member %x does not canonically parse: %w", o.member.txid, err)
+	}
+	if consumed != len(o.raw) || parsedTxID != o.member.txid || parsedWTxID != o.member.wtxid {
+		return DARetainedTxSnapshot{}, fmt.Errorf("retained DA member %x contradicts its retained bytes", o.member.txid)
+	}
+	if err := o.checkRole(tx); err != nil {
+		return DARetainedTxSnapshot{}, err
+	}
+	return DARetainedTxSnapshot{TxID: o.member.txid, WTxID: o.member.wtxid, TxBytes: o.raw}, nil
+}
+
+// checkRole applies the locator's role/identity claims to the parsed copy. It
+// reuses the canonical transition's own role checkers over a record view built
+// from the copied fields, then strips their transition-terminal carrier: the
+// CHECK is one shared authority, the ERROR CLASS is the caller's.
+func (o daRetainedObservation) checkRole(tx *consensus.Tx) error {
+	var err error
+	if o.locator.kind == daRelayLocatorCommit {
+		err = checkRetainedDACommitRole(tx, daRelaySetRecord{daID: o.recordDAID, commit: daRelayCommit{chunkCount: o.commitChunkCount}})
+	} else {
+		err = checkRetainedDAChunkRole(tx, o.recordDAID, o.locator.chunkIndex)
+	}
+	var terminal *canonicalDATerminalError
+	if errors.As(err, &terminal) {
+		return errors.New(terminal.detail)
+	}
+	return err
+}
+
 // LookupRetainedTx is the READ-ONLY retained-DA observation RUB-1169 consumes.
 // It is tri-state and never repairs:
 //
@@ -428,38 +622,31 @@ func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
 // A DANGLING or CONTRADICTORY locator is INTERNAL, deliberately never absence: a
 // txid the index claims to hold and cannot produce is a retained-state invariant
 // violation, and reporting it as "not retained" would let the caller announce
-// around it. The returned TxBytes are a defensive copy, so a caller that mutates
-// them cannot reach the retained image.
+// around it. The INTERNAL error is a plain error, never the canonical-transition
+// terminal type: a lookup cannot fabricate a canonical-transition terminal. The
+// returned TxBytes are the observation's defensive copy, so a caller that
+// mutates them cannot reach the retained image.
 //
-// It reruns NO consensus or policy check and performs no network action: the
-// bytes were validated by the admission that retained them, and this proves only
-// that the retained member still IS that member.
+// It shares the raw-observation copy and the off-lock validator with AdmitDA's
+// replay shortcut, holds DARelayState.mu only for the copy, reruns NO consensus
+// or policy check and performs no network action: the bytes were validated by
+// the admission that retained them, and this proves only that the retained
+// member still IS that member.
 func (s *DARelayState) LookupRetainedTx(txid [32]byte) (DARetainedTxSnapshot, bool, error) {
 	if s == nil {
 		return DARetainedTxSnapshot{}, false, nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.lookupRetainedTxLocked(txid)
-}
-
-func (s *DARelayState) lookupRetainedTxLocked(txid [32]byte) (DARetainedTxSnapshot, bool, error) {
-	locator, located := s.locators[txid]
-	if !located {
+	observation := s.observeRetainedTxLocked(txid)
+	s.mu.Unlock()
+	if !observation.located {
 		return DARetainedTxSnapshot{}, false, nil
 	}
-	record, ok := s.sets[locator.daID]
-	if !ok || record.daID != locator.daID {
-		return DARetainedTxSnapshot{}, false, fmt.Errorf("retained DA locator for %x names absent record %x", txid, locator.daID)
-	}
-	member, raw, ok := retainedDAMemberAt(record, locator)
-	if !ok || member.txid != txid {
-		return DARetainedTxSnapshot{}, false, fmt.Errorf("retained DA locator for %x does not resolve to its own member", txid)
-	}
-	if err := checkRetainedDAMemberIdentity(record, locator, member, raw); err != nil {
+	snapshot, err := observation.validate(txid)
+	if err != nil {
 		return DARetainedTxSnapshot{}, false, err
 	}
-	return DARetainedTxSnapshot{TxID: member.txid, WTxID: member.wtxid, TxBytes: cloneBytes(raw)}, true, nil
+	return snapshot, true, nil
 }
 
 // retainedDAMemberAt resolves one locator to its member identity and exact
@@ -476,24 +663,4 @@ func retainedDAMemberAt(record daRelaySetRecord, locator daRelayLocator) (daRela
 		return daRelayMemberIdentity{}, nil, false
 	}
 	return chunk.daRelayMemberIdentity, chunk.txBytes, true
-}
-
-// checkRetainedDAMemberIdentity proves the retained bytes still ARE this member:
-// a canonical FULL-CONSUMPTION parse, the exact txid and wtxid the member
-// recorded, and the DA role and index the locator claims.
-func checkRetainedDAMemberIdentity(record daRelaySetRecord, locator daRelayLocator, member daRelayMemberIdentity, raw []byte) error {
-	if len(raw) == 0 {
-		return fmt.Errorf("retained DA member %x has no retained transaction bytes", member.txid)
-	}
-	tx, txid, wtxid, consumed, err := consensus.ParseTx(raw)
-	if err != nil {
-		return fmt.Errorf("retained DA member %x does not canonically parse: %w", member.txid, err)
-	}
-	if consumed != len(raw) || txid != member.txid || wtxid != member.wtxid {
-		return fmt.Errorf("retained DA member %x contradicts its retained bytes", member.txid)
-	}
-	if locator.kind == daRelayLocatorCommit {
-		return checkRetainedDACommitRole(tx, record)
-	}
-	return checkRetainedDAChunkRole(tx, record.daID, locator.chunkIndex)
 }

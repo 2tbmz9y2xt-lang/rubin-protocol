@@ -313,12 +313,24 @@ func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 	return payloadBytes, payloadCommitment
 }
 
+// markComplete finalizes one record as State C. Completion clears ALL member
+// provenance — State C is not peer-quota state and MUST NOT retain a member
+// source (RUBIN_COMPACT_BLOCKS.md Section 18.3; the frozen D00-R3 authority
+// pins state_c_member_provenance FORBIDDEN) — so no later cleanup, scoring or
+// observation can attribute a completed member to the peer that happened to
+// deliver it. The paired per-peer accounting keys are cleared with it: a
+// State C record contributes no orphan accounting, and a cleared source with a
+// live accounting key would be half a member identity.
 func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 	r.payloadBytes = payloadBytes
 	r.state = daRelayStateCompleteSet
 	r.ttlBlocksRemaining = 0
+	r.commit.provenance = DAProvenance{}
+	r.commit.peerQuotaKey = ""
 	for index, chunk := range r.chunks {
 		chunk.payload = nil
+		chunk.provenance = DAProvenance{}
+		chunk.peerQuotaKey = ""
 		r.chunks[index] = chunk
 	}
 }

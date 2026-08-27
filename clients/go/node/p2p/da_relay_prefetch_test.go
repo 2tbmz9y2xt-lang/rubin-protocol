@@ -44,6 +44,28 @@ func TestDAPrefetchPlansAreBoundedDeduplicatedAndReleasable(t *testing.T) {
 	}
 }
 
+// TestDAPrefetchPerPeerByteCapIsReachable drives the production planner into
+// the per-peer byte cap with a REACHABLE fixture: one peer, and a retained
+// commit declaring more chunks than one peer's per-second byte budget covers
+// (per-peer cap 4,000,000 admits exactly 7 CHUNK_BYTES reservations). The
+// planner reserves exactly that budget and reports the per-peer diagnostic for
+// the remainder, so the cap branch is executed rather than argued from bounds.
+func TestDAPrefetchPerPeerByteCapIsReachable(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 2)
+	daID := daRelayTestID(136)
+	perPeerChunks := int(4_000_000 / consensus.CHUNK_BYTES)
+	declared := uint16(perPeerChunks + 1)
+	f.retainCommit(t, daID, declared, "127.0.0.1:19136")
+	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"only-peer"}, time.Unix(1000, 0))
+	if diagnostic != "da prefetch per-peer byte cap exceeded" {
+		t.Fatalf("diagnostic=%q, want the per-peer byte cap", diagnostic)
+	}
+	if len(plans) != 1 || plans[0].PeerKey != "only-peer" || len(plans[0].Indexes) != perPeerChunks {
+		t.Fatalf("plans=%+v, want one plan holding exactly the %d-chunk per-peer budget", plans, perPeerChunks)
+	}
+}
+
 func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 16)

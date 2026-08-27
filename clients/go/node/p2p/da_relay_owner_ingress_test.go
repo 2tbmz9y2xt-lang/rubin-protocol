@@ -2,6 +2,10 @@ package p2p
 
 import (
 	"crypto/sha3"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -24,6 +28,11 @@ type daIngressFixture struct {
 	lastOp  consensus.Outpoint
 	next    int
 	nonce   uint64
+	// built records every signed transaction this fixture produced, so the
+	// image digest below can render State A and State B members — which the
+	// complete-set snapshot alone cannot see — and an "unchanged" comparison
+	// over an incomplete record is never vacuous.
+	built [][]byte
 }
 
 func newDAIngressFixture(t *testing.T, h *testHarness, outpoints int) *daIngressFixture {
@@ -102,6 +111,7 @@ func (f *daIngressFixture) sign(t *testing.T, tx *consensus.Tx) []byte {
 	if err != nil {
 		t.Fatalf("MarshalTx: %v", err)
 	}
+	f.built = append(f.built, raw)
 	return raw
 }
 
@@ -178,10 +188,64 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	}
 }
 
-// TestRemoteDuplicateDACommitScoresThePeerAndChunkDoesNot is A3/M7: an exact
-// replay changes nothing, a duplicate COMMIT carries the existing +10 negative
-// peer effect, and a duplicate CHUNK is peer-neutral.
-func TestRemoteDuplicateDACommitScoresThePeerAndChunkDoesNot(t *testing.T) {
+// frozenD00R3PeerEffect reads ONE case's expected peer_quality_effect from the
+// frozen D00-R3 authority, so the peer-effect assertions below are driven by
+// the inert expected artifact rather than by this package's own constants.
+func frozenD00R3PeerEffect(t *testing.T, caseID string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "conformance", "fixtures", "protocol", "da_admission_expected_v1.json"))
+	if err != nil {
+		t.Fatalf("read frozen D00-R3 authority: %v", err)
+	}
+	var artifact struct {
+		Cases []struct {
+			ID     string `json:"id"`
+			Expect struct {
+				P2P struct {
+					PeerQualityEffect string `json:"peer_quality_effect"`
+				} `json:"p2p_envelope"`
+			} `json:"expect"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatalf("decode frozen D00-R3 authority: %v", err)
+	}
+	for _, row := range artifact.Cases {
+		if row.ID == caseID {
+			if row.Expect.P2P.PeerQualityEffect == "" {
+				t.Fatalf("frozen row %s carries no peer effect", caseID)
+			}
+			return row.Expect.P2P.PeerQualityEffect
+		}
+	}
+	t.Fatalf("frozen row %s is absent from the artifact", caseID)
+	return ""
+}
+
+// requireFrozenPeerEffect maps the frozen peer_quality_effect onto the ban
+// delta this arm applies: UNCHANGED is zero, NEGATIVE_DUPLICATE_COMMIT is the
+// existing +10.
+func requireFrozenPeerEffect(t *testing.T, caseID string, effect string, delta int) {
+	t.Helper()
+	want := 0
+	if effect == "NEGATIVE_DUPLICATE_COMMIT" {
+		want = 10
+	}
+	if delta != want {
+		t.Fatalf("%s: ban delta=%d, frozen effect %q wants %d", caseID, delta, effect, want)
+	}
+}
+
+// TestRemoteExactReplayIsPeerNeutralAndDistinctCommitIsNot executes the frozen
+// D00-R3 peer-effect rows through the REAL remote entry: an exact retained
+// commit or chunk replay — REQUESTED (redelivered by the peer the member came
+// from) and UNSOLICITED (pushed by a peer that never delivered it; this client
+// tracks no requests until RUB-1169, so the entry is deliberately the same and
+// the frozen rows expect identical outcomes) — moves no score, drops no
+// connection and changes no image; ONLY the fully validated different-txid
+// same-da_id commit carries the existing +10, applied from the admission's
+// SameDAIDCommitConflict bool and never from tx kind or DUPLICATE alone.
+func TestRemoteExactReplayIsPeerNeutralAndDistinctCommitIsNot(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 4)
 	daID := daRelayTestID(0x11)
@@ -189,36 +253,52 @@ func TestRemoteDuplicateDACommitScoresThePeerAndChunkDoesNot(t *testing.T) {
 	commitTx := f.commitTx(t, daID, 1, sha3.Sum256(payload))
 	chunkTx := f.chunkTx(t, daID, 0, payload)
 
-	p := daRelayTestPeer(h, "127.0.0.1:19112")
+	origin := daRelayTestPeer(h, "127.0.0.1:19112")
+	stranger := daRelayTestPeer(h, "127.0.0.1:19118")
 	for _, raw := range [][]byte{commitTx, chunkTx} {
-		if err := p.handleTx(raw); err != nil {
+		if err := origin.handleTx(raw); err != nil {
 			t.Fatalf("handleTx: %v", err)
 		}
 	}
-	before := daRelayImageDigest(t, h)
-	banBefore := p.state.BanScore
+	before := f.imageDigest(t)
+	for _, tt := range []struct {
+		caseID string
+		peer   *peer
+		raw    []byte
+	}{
+		{"REMOTE_EXACT_REPLAY", origin, commitTx},
+		{"REMOTE_EXACT_CHUNK_REPLAY", origin, chunkTx},
+		{"REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", stranger, commitTx},
+		{"REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", stranger, chunkTx},
+	} {
+		banBefore := tt.peer.state.BanScore
+		if err := tt.peer.handleTx(tt.raw); err != nil {
+			t.Fatalf("%s: handleTx=%v, want the peer-neutral nil", tt.caseID, err)
+		}
+		requireFrozenPeerEffect(t, tt.caseID, frozenD00R3PeerEffect(t, tt.caseID), tt.peer.state.BanScore-banBefore)
+		if after := f.imageDigest(t); after != before {
+			t.Fatalf("%s mutated the retained image", tt.caseID)
+		}
+	}
 
-	if err := p.handleTx(commitTx); err != nil {
-		t.Fatalf("duplicate commit: %v", err)
+	// The distinct same-da_id commit: fully validated, different txid, same set.
+	// The baseline is retaken AFTER the build: the digest probes every built
+	// transaction, so building one extends the probe set without changing state.
+	distinct := f.commitTx(t, daID, 1, sha3.Sum256([]byte("competitor")))
+	beforeDistinct := f.imageDigest(t)
+	banBefore := stranger.state.BanScore
+	if err := stranger.handleTx(distinct); err != nil {
+		t.Fatalf("distinct commit below threshold: %v", err)
 	}
-	if got := p.state.BanScore - banBefore; got != 10 {
-		t.Fatalf("duplicate commit ban delta=%d, want 10", got)
-	}
-	banAfterCommit := p.state.BanScore
-	if err := p.handleTx(chunkTx); err != nil {
-		t.Fatalf("duplicate chunk: %v", err)
-	}
-	if p.state.BanScore != banAfterCommit {
-		t.Fatalf("duplicate chunk moved the ban score to %d", p.state.BanScore)
-	}
-	if after := daRelayImageDigest(t, h); after != before {
-		t.Fatalf("a duplicate mutated the retained image: %v -> %v", before, after)
+	requireFrozenPeerEffect(t, "CAP_COMPLETE_DUPLICATE_MEMBER", frozenD00R3PeerEffect(t, "CAP_COMPLETE_DUPLICATE_MEMBER"), stranger.state.BanScore-banBefore)
+	if after := f.imageDigest(t); after != beforeDistinct {
+		t.Fatal("the discarded distinct commit mutated the retained image")
 	}
 	// The EXISTING threshold handling, not a new one: once the accumulated score
 	// reaches the configured threshold the same +10 is reported as a hard error.
-	h.service.cfg.PeerRuntimeConfig.BanThreshold = p.state.BanScore + 10
-	if err := p.handleTx(commitTx); err == nil {
-		t.Fatal("a duplicate commit at the ban threshold was reported as peer-neutral")
+	h.service.cfg.PeerRuntimeConfig.BanThreshold = stranger.state.BanScore + 10
+	if err := stranger.handleTx(distinct); err == nil {
+		t.Fatal("a distinct same-da_id commit at the ban threshold was reported as peer-neutral")
 	}
 }
 
@@ -246,14 +326,14 @@ func TestPeerlessDAProvenanceIsAbsentFromPeerQuotaAccounting(t *testing.T) {
 	if node.LocalDAProvenance() == node.DetachedReorgDAProvenance() {
 		t.Fatal("LOCAL and DETACHED_REORG provenance compare equal")
 	}
-	before := daRelayImageDigest(t, h)
+	before := f.imageDigest(t)
 	if err := h.service.daRelay.ReleasePeerQuotaKey(peerQuotaKey("127.0.0.1:19111")); err != nil {
 		t.Fatalf("ReleasePeerQuotaKey: %v", err)
 	}
 	if err := h.service.daRelay.ReleasePeerQuotaKey(""); err != nil {
 		t.Fatalf("ReleasePeerQuotaKey(empty): %v", err)
 	}
-	if after := daRelayImageDigest(t, h); after != before {
+	if after := f.imageDigest(t); after != before {
 		t.Fatalf("peer teardown selected a peerless member: %v -> %v", before, after)
 	}
 }
@@ -274,11 +354,11 @@ func TestDAProvenanceConstructorsRefuseEmptyIdentities(t *testing.T) {
 	if _, err := node.NewPeerDAProvenance(" ", " "); err != nil {
 		t.Fatalf("NewPeerDAProvenance(space) = %v, want accepted", err)
 	}
-	before := daRelayImageDigest(t, h)
+	before := f.imageDigest(t)
 	if _, err := h.service.daRelay.AdmitDA(raw, node.DAProvenance{}); err == nil {
 		t.Fatal("AdmitDA accepted the zero provenance value")
 	}
-	if after := daRelayImageDigest(t, h); after != before {
+	if after := f.imageDigest(t); after != before {
 		t.Fatal("a refused provenance mutated the retained image")
 	}
 }
@@ -290,7 +370,10 @@ func TestAdmitDARefusesNonDAAndMalformedBytes(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 2)
 	valid := f.commitTx(t, daRelayTestID(0x15), 1, sha3.Sum256([]byte("y")))
-	before := daRelayImageDigest(t, h)
+	// The valid commit IS retained first, so the unchanged comparison below
+	// holds a real State B member in view rather than an empty image.
+	f.admit(t, valid, "127.0.0.1:19111")
+	before := f.imageDigest(t)
 
 	for name, raw := range map[string][]byte{
 		"standard kind": minimalValidTxBytes(t),
@@ -302,7 +385,7 @@ func TestAdmitDARefusesNonDAAndMalformedBytes(t *testing.T) {
 			t.Fatalf("AdmitDA(%s) was accepted", name)
 		}
 	}
-	if after := daRelayImageDigest(t, h); after != before {
+	if after := f.imageDigest(t); after != before {
 		t.Fatal("a refused admission mutated the retained image")
 	}
 }
@@ -316,14 +399,22 @@ func mustCanonicalTxID(t *testing.T, raw []byte) [32]byte {
 	return txid
 }
 
-// daRelayImageDigest is the observable retained-DA image from OUTSIDE package
-// node: the complete-set candidate snapshot plus every retained member the
-// locator index can still produce. It is what a "changed nothing" row compares.
-func daRelayImageDigest(t *testing.T, h *testHarness) string {
+// imageDigest is the observable retained-DA image from OUTSIDE package node:
+// every transaction the fixture ever built is probed through LookupRetainedTx —
+// which renders State A, B and C members alike, with their exact bytes — plus
+// the complete-set candidate snapshot. An "unchanged" comparison over a State B
+// image is therefore NON-VACUOUS: a staged commit or orphan chunk appearing,
+// disappearing or changing bytes changes this digest.
+func (f *daIngressFixture) imageDigest(t *testing.T) string {
 	t.Helper()
 	digest := ""
-	for _, candidate := range h.service.CompleteDASetCandidates(1 << 30) {
-		digest += string(candidate.DAID[:]) + string(candidate.CommitTx)
+	for _, raw := range f.built {
+		txid := mustCanonicalTxID(t, raw)
+		snapshot, owned, err := f.h.service.daRelay.LookupRetainedTx(txid)
+		digest += fmt.Sprintf("|%x owned=%v internal=%v bytes=%x", txid, owned, err != nil, sha3.Sum256(snapshot.TxBytes))
+	}
+	for _, candidate := range f.h.service.CompleteDASetCandidates(1 << 30) {
+		digest += "|complete " + string(candidate.DAID[:]) + string(candidate.CommitTx)
 		for _, chunk := range candidate.Chunks {
 			digest += string(chunk.Tx)
 		}

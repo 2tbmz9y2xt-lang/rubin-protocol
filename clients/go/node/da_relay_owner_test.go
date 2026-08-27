@@ -1,11 +1,17 @@
 package node
 
 import (
+	"bytes"
 	"crypto/sha3"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -156,23 +162,389 @@ func TestAdmitDARetainsTheExactMemberLocatorAndFinalizedClaim(t *testing.T) {
 	}
 }
 
-// TestAdmitDADuplicateReservesNothingAndConsumesNoSequence is A3/M7: an exact
-// replay returns DUPLICATE with the complete image unchanged, and a same-txid
-// different-wtxid variant is not classified as a duplicate.
-func TestAdmitDADuplicateReservesNothingAndConsumesNoSequence(t *testing.T) {
+// frozenD00R3Row is one case row of the FROZEN D00-R3 expected authority
+// (conformance/fixtures/protocol/da_admission_expected_v1.json). The rows are
+// inert expected data: the replay matrix below reads its expected outcomes FROM
+// this artifact, so the oracle is the frozen fixture, never this package's own
+// code.
+type frozenD00R3Row struct {
+	ID     string `json:"id"`
+	Expect struct {
+		Result struct {
+			Disposition    string `json:"disposition"`
+			SemanticReason string `json:"semantic_reason_id"`
+			ErrorCode      string `json:"error_code"`
+			Producer       string `json:"producer_disposition"`
+		} `json:"result"`
+		P2P struct {
+			PeerQualityEffect string `json:"peer_quality_effect"`
+		} `json:"p2p_envelope"`
+	} `json:"expect"`
+}
+
+// loadFrozenD00R3Rows loads the frozen artifact's case rows by id, from the
+// read-only fixture file this issue may never edit.
+func loadFrozenD00R3Rows(t *testing.T) map[string]frozenD00R3Row {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "conformance", "fixtures", "protocol", "da_admission_expected_v1.json"))
+	if err != nil {
+		t.Fatalf("read frozen D00-R3 authority: %v", err)
+	}
+	var artifact struct {
+		Cases []frozenD00R3Row `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatalf("decode frozen D00-R3 authority: %v", err)
+	}
+	rows := make(map[string]frozenD00R3Row, len(artifact.Cases))
+	for _, row := range artifact.Cases {
+		rows[row.ID] = row
+	}
+	return rows
+}
+
+// requireFrozenD00R3Outcome maps one frozen row onto the AdmitDA observation
+// and asserts it. The MAPPING is fixed — semantic reasons onto the public
+// result/error surface, the frozen peer effect onto the SameDAIDCommitConflict
+// bool that alone drives P2P's existing +10 — while every expected VALUE comes
+// from the loaded row.
+func requireFrozenD00R3Outcome(t *testing.T, row frozenD00R3Row, result DAAdmissionResult, err error) {
+	t.Helper()
+	if row.ID == "" {
+		t.Fatal("frozen D00-R3 row is absent from the artifact")
+	}
+	want := row.Expect.Result
+	switch {
+	case want.SemanticReason == "DUPLICATE_CONFLICT":
+		if err != nil || result.Disposition != DAAdmissionDuplicate {
+			t.Fatalf("%s: result=%+v err=%v, frozen row wants peer-neutral DUPLICATE", row.ID, result, err)
+		}
+	case want.SemanticReason == "NONE" && strings.HasPrefix(want.Disposition, "RETAINED"):
+		if err != nil || result.Disposition != DAAdmissionRetained {
+			t.Fatalf("%s: result=%+v err=%v, frozen row wants %s", row.ID, result, err, want.Disposition)
+		}
+	case want.SemanticReason == "RUNTIME_UNAVAILABLE" || want.SemanticReason == "INTERNAL":
+		if err == nil || relayDispositionOf(err).String() != want.Producer {
+			t.Fatalf("%s: err=%v disposition=%v, frozen row wants producer %s", row.ID, err, relayDispositionOf(err), want.Producer)
+		}
+	case want.SemanticReason == "PARSE_OR_POLICY_REJECT":
+		// The existing public admission error flattens the consensus error to
+		// its exact "CODE: detail" text (validateTransactionWithConsensus), so
+		// the owning code is asserted from that unchanged public surface.
+		if err == nil || !strings.Contains(err.Error(), want.ErrorCode) {
+			t.Fatalf("%s: err=%v, frozen row wants owning %s", row.ID, err, want.ErrorCode)
+		}
+	default:
+		t.Fatalf("%s: unmapped frozen outcome %+v", row.ID, want)
+	}
+	if wantConflict := row.Expect.P2P.PeerQualityEffect == "NEGATIVE_DUPLICATE_COMMIT"; result.SameDAIDCommitConflict != wantConflict {
+		t.Fatalf("%s: SameDAIDCommitConflict=%v, frozen peer effect is %q", row.ID, result.SameDAIDCommitConflict, row.Expect.P2P.PeerQualityEffect)
+	}
+}
+
+// requireAdmissionGuardReleased proves, by EXPLICIT bounded synchronization,
+// that no admission read hold survived: a goroutine write-locks and releases
+// the guard, and the row fails by timeout — never by hanging the suite — if
+// that writer cannot proceed.
+func requireAdmissionGuardReleased(t *testing.T, chainState *ChainState, step string) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		chainState.admissionMu.Lock()
+		chainState.admissionMu.Unlock() //nolint:staticcheck // The empty critical section IS the probe: acquirability proves release.
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s left the admission guard held", step)
+	}
+}
+
+// resignedDACommitVariant re-signs the SAME parsed commit, producing a VALID
+// same-txid candidate whose witness — and therefore wtxid and raw bytes —
+// differ (ML-DSA-87 signing is hedged, so two signatures over one digest
+// differ with overwhelming probability).
+func (f *daOwnerFixture) resignedDACommitVariant(t *testing.T, commitTx []byte) []byte {
+	t.Helper()
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(commitTx)
+	if err != nil || consumed != len(commitTx) {
+		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
+	}
+	mustCanonicalMO(t, "SignTransaction(resign)", consensus.SignTransaction(tx, f.engine.chainState.Utxos, devnetGenesisChainID, f.signer))
+	variant := mustMarshalTxForNodeTest(t, tx)
+	_, variantTxID, variantWTxID, _, err := consensus.ParseTx(variant)
+	mustCanonicalMO(t, "ParseTx(resign)", err)
+	if variantTxID != txid || variantWTxID == wtxid || bytes.Equal(variant, commitTx) {
+		t.Fatalf("resigned variant txid_same=%v wtxid_same=%v bytes_same=%v, want same txid under new witness", variantTxID == txid, variantWTxID == wtxid, bytes.Equal(variant, commitTx))
+	}
+	return variant
+}
+
+// TestAdmitDAD00R3ReplayMatrix executes every A3/H8/H9 replay case against the
+// FROZEN D00-R3 authority: the expected disposition, semantic reason, owning
+// error code, producer disposition and peer effect of each subtest are READ
+// FROM the frozen artifact, and the retained image, accepted sequence, owner
+// claims and admission guard are proven untouched wherever the frozen row is
+// zero-effect. Requested and unsolicited deliveries are distinguished by peer
+// provenance: this admission API carries no request tracking (RUB-1169 owns
+// request routing), so the SAME entry serves both, which is exactly the frozen
+// expectation — identical zero-effect outcomes for both request classes.
+func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
+	rows := loadFrozenD00R3Rows(t)
+	requested := func(t *testing.T) DAProvenance { return mustPeerProvenance(t, "peer-origin") }
+	unsolicited := func(t *testing.T) DAProvenance { return mustPeerProvenance(t, "peer-unsolicited") }
+
+	// retainCommitFixture retains one commit and returns its exact bytes.
+	retainCommitFixture := func(t *testing.T, f *daOwnerFixture, seed byte) []byte {
+		t.Helper()
+		commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(seed), 1, 2200+uint64(seed), sha3.Sum256([]byte{seed}))
+		mustAdmit(t, f, commitTx, requested(t))
+		return commitTx
+	}
+
+	zeroEffectReplay := func(t *testing.T, rowID string, prepare func(*testing.T, *daOwnerFixture) []byte, provenance func(*testing.T) DAProvenance) {
+		t.Helper()
+		f := newDAOwnerFixture(t, 2)
+		raw := prepare(t, f)
+		before := f.image(t)
+		result, err := f.relay().AdmitDA(raw, provenance(t))
+		requireFrozenD00R3Outcome(t, rows[rowID], result, err)
+		if after := f.image(t); after != before {
+			t.Fatalf("%s mutated the record, locator, claim or accepted-sequence image", rowID)
+		}
+		requireAdmissionGuardReleased(t, f.engine.chainState, rowID)
+	}
+
+	t.Run("REMOTE_EXACT_REPLAY", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_EXACT_REPLAY", func(t *testing.T, f *daOwnerFixture) []byte {
+			return retainCommitFixture(t, f, 0x60)
+		}, requested)
+	})
+	t.Run("REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", func(t *testing.T, f *daOwnerFixture) []byte {
+			return retainCommitFixture(t, f, 0x61)
+		}, unsolicited)
+	})
+	t.Run("REMOTE_EXACT_CHUNK_REPLAY", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_EXACT_CHUNK_REPLAY", func(t *testing.T, f *daOwnerFixture) []byte {
+			chunkTx := f.daChunkTx(t, f.ops[0], daRelayTestID(0x62), 0, 2262, []byte("chunk-replay"))
+			mustAdmit(t, f, chunkTx, requested(t))
+			return chunkTx
+		}, requested)
+	})
+	t.Run("REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", func(t *testing.T, f *daOwnerFixture) []byte {
+			chunkTx := f.daChunkTx(t, f.ops[0], daRelayTestID(0x63), 0, 2263, []byte("chunk-unsolicited"))
+			mustAdmit(t, f, chunkTx, requested(t))
+			return chunkTx
+		}, unsolicited)
+	})
+	t.Run("REMOTE_SAME_TXID_NONEXACT_VALID", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_SAME_TXID_NONEXACT_VALID", func(t *testing.T, f *daOwnerFixture) []byte {
+			return f.resignedDACommitVariant(t, retainCommitFixture(t, f, 0x64))
+		}, unsolicited)
+	})
+	t.Run("REMOTE_SAME_TXID_NONEXACT_INVALID", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_SAME_TXID_NONEXACT_INVALID", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x65)
+			tx, txid, wtxid, consumed, err := consensus.ParseTx(commitTx)
+			if err != nil || consumed != len(commitTx) {
+				t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
+			}
+			if len(tx.Witness) == 0 || len(tx.Witness[0].Signature) == 0 {
+				t.Fatal("the fixture commit carries no witness signature to corrupt")
+			}
+			tx.Witness[0].Signature[0] ^= 0xff
+			variant := mustMarshalTxForNodeTest(t, tx)
+			_, variantTxID, variantWTxID, _, err := consensus.ParseTx(variant)
+			mustCanonicalMO(t, "ParseTx(invalid variant)", err)
+			if variantTxID != txid || variantWTxID == wtxid {
+				t.Fatal("the invalid variant does not carry the same txid under a different wtxid")
+			}
+			return variant
+		}, unsolicited)
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_ABSENT", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 2)
+		commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x66), 1, 2266, sha3.Sum256([]byte("absent")))
+		claimsBefore, _ := f.ownerClaimCount(t)
+		result, err := f.relay().AdmitDA(commitTx, requested(t))
+		requireFrozenD00R3Outcome(t, rows["REMOTE_REPLAY_EVIDENCE_ABSENT"], result, err)
+		claims, _ := f.ownerClaimCount(t)
+		if claims != claimsBefore+1 {
+			t.Fatalf("claims=%d, want the resumed ordinary admission to finalize exactly one", claims)
+		}
+		requireRetained(t, f, txID(t, commitTx), true, "the ABSENT-evidence candidate")
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_UNAVAILABLE", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_REPLAY_EVIDENCE_UNAVAILABLE", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x67)
+			owner := f.owner()
+			// An exhausted canonical-tip generation is fail-closed and never a
+			// stable AdmissionContext (RUBIN_MEMPOOL_POLICY.md Section 6.5).
+			owner.mu.Lock()
+			owner.generation = ^uint64(0)
+			owner.mu.Unlock()
+			return commitTx
+		}, requested)
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_UNSTABLE", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_REPLAY_EVIDENCE_UNSTABLE", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x68)
+			owner := f.owner()
+			// The owner's committed stable tip no longer equals the guarded
+			// chainstate tip: the guard-stability proof must select UNAVAILABLE.
+			owner.mu.Lock()
+			owner.stableTip.Hash[0] ^= 0xff
+			owner.mu.Unlock()
+			return commitTx
+		}, requested)
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_DANGLING", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_REPLAY_EVIDENCE_DANGLING", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x69)
+			relay := f.relay()
+			relay.mu.Lock()
+			relay.locators[txID(t, commitTx)] = daRelayLocator{daID: daRelayTestID(0xee), kind: daRelayLocatorCommit}
+			relay.mu.Unlock()
+			return commitTx
+		}, requested)
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_CORRUPT", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_REPLAY_EVIDENCE_CORRUPT", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x6a)
+			relay := f.relay()
+			relay.mu.Lock()
+			record := relay.sets[daRelayTestID(0x6a)]
+			record.commit.txBytes = append([]byte(nil), commitTx...)
+			record.commit.txBytes[len(record.commit.txBytes)-1] ^= 0xff
+			relay.sets[daRelayTestID(0x6a)] = record
+			relay.mu.Unlock()
+			return commitTx
+		}, requested)
+	})
+	t.Run("REMOTE_REPLAY_EVIDENCE_MISMATCH", func(t *testing.T) {
+		zeroEffectReplay(t, "REMOTE_REPLAY_EVIDENCE_MISMATCH", func(t *testing.T, f *daOwnerFixture) []byte {
+			commitTx := retainCommitFixture(t, f, 0x6b)
+			relay := f.relay()
+			relay.mu.Lock()
+			record := relay.sets[daRelayTestID(0x6b)]
+			record.commit.wtxid[0] ^= 0xff // the stored admission-time wtxid contradicts the retained bytes
+			relay.sets[daRelayTestID(0x6b)] = record
+			relay.mu.Unlock()
+			return commitTx
+		}, requested)
+	})
+	t.Run("REMOTE_REPLAY_D1_REMOVAL_FIRST", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 2)
+		commitTx := retainCommitFixture(t, f, 0x6c)
+		// The REAL canonical D publication path removes the record: the block
+		// spends the member's own confirmed input, the member is no longer
+		// final-chain-valid, and D1 retires the record with its claim.
+		mustCanonicalMO(t, "ApplyBlock(spend)", f.applySpend(t, f.ops[0], 2280))
+		requireRetained(t, f, txID(t, commitTx), false, "the D1-removed member")
+		result, err := f.relay().AdmitDA(commitTx, requested(t))
+		requireFrozenD00R3Outcome(t, rows["REMOTE_REPLAY_D1_REMOVAL_FIRST"], result, err)
+		requireRetained(t, f, txID(t, commitTx), false, "the post-D1 candidate")
+		requireAdmissionGuardReleased(t, f.engine.chainState, "REMOTE_REPLAY_D1_REMOVAL_FIRST")
+	})
+	t.Run("REMOTE_REPLAY_D1_SNAPSHOT_FIRST", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 2)
+		commitTx := retainCommitFixture(t, f, 0x6d)
+		claimsBaseline, _ := f.ownerClaimCount(t)
+		before := f.image(t)
+		result, err := f.relay().AdmitDA(commitTx, requested(t))
+		requireFrozenD00R3Outcome(t, rows["REMOTE_REPLAY_D1_SNAPSHOT_FIRST"], result, err)
+		if after := f.image(t); after != before {
+			t.Fatal("the snapshot-first exact replay mutated the image")
+		}
+		// Removal is ordered AFTER the completed replay, through the real
+		// canonical transition; the replay's result stands and the record,
+		// locator and claim leave together.
+		mustCanonicalMO(t, "ApplyBlock(spend)", f.applySpend(t, f.ops[0], 2281))
+		requireRetained(t, f, txID(t, commitTx), false, "the snapshot-first member after D1")
+		if claims, _ := f.ownerClaimCount(t); claims != claimsBaseline-1 {
+			t.Fatalf("claims=%d, want the removed member's claim released", claims)
+		}
+	})
+}
+
+// TestAdmitDAConcurrentSameBytesRetainExactlyOnce is the bound-fixture AdmitDA
+// concurrency row: two goroutines admit the SAME bytes through the real guard
+// and owner, and exactly one retains while the other observes the peer-neutral
+// duplicate — in either schedule — leaving one member, one locator and one
+// finalized claim.
+func TestAdmitDAConcurrentSameBytesRetainExactlyOnce(t *testing.T) {
 	f := newDAOwnerFixture(t, 2)
-	daID, payload := daRelayTestID(0x31), []byte("dup-payload")
-	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2010, sha3.Sum256(payload))
-	if _, err := f.relay().AdmitDA(commitTx, mustPeerProvenance(t, "peer-a")); err != nil {
-		t.Fatalf("first AdmitDA: %v", err)
+	commitTx := f.daCommitTxCommitting(t, f.ops[0], daRelayTestID(0x6e), 1, 2290, sha3.Sum256([]byte("race")))
+	provenance := mustPeerProvenance(t, "peer-race")
+	type outcome struct {
+		result DAAdmissionResult
+		err    error
 	}
+	outcomes := make(chan outcome, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			result, err := f.relay().AdmitDA(commitTx, provenance)
+			outcomes <- outcome{result: result, err: err}
+		}()
+	}
+	retained, duplicate := 0, 0
+	for i := 0; i < 2; i++ {
+		got := <-outcomes
+		if got.err != nil {
+			t.Fatalf("concurrent AdmitDA: %v", got.err)
+		}
+		switch got.result.Disposition {
+		case DAAdmissionRetained:
+			retained++
+		case DAAdmissionDuplicate:
+			duplicate++
+			if got.result.SameDAIDCommitConflict {
+				t.Fatal("the racing exact duplicate carried the same-da_id conflict bit")
+			}
+		}
+	}
+	if retained != 1 || duplicate != 1 {
+		t.Fatalf("retained=%d duplicate=%d, want exactly one of each", retained, duplicate)
+	}
+	requireRetained(t, f, txID(t, commitTx), true, "the raced member")
+	if claims, _ := f.ownerClaimCount(t); claims != 1 {
+		t.Fatalf("claims=%d, want exactly the raced member's", claims)
+	}
+}
+
+// TestAdmitDASameDAIDDistinctCommitSetsTheConflictBitOnly is
+// CAP_COMPLETE_DUPLICATE_MEMBER's node half, with the frozen fixture as the
+// oracle: only the FULLY VALIDATED different-txid same-da_id commit returns
+// DUPLICATE with SameDAIDCommitConflict, before any owner reserve and with the
+// image byte-identical; the bit never appears on an exact replay.
+func TestAdmitDASameDAIDDistinctCommitSetsTheConflictBitOnly(t *testing.T) {
+	rows := loadFrozenD00R3Rows(t)
+	f := newDAOwnerFixture(t, 3)
+	daID := daRelayTestID(0x6f)
+	first := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2295, sha3.Sum256([]byte("first-seen")))
+	mustAdmit(t, f, first, mustPeerProvenance(t, "peer-a"))
 	before := f.image(t)
-	result, err := f.relay().AdmitDA(commitTx, mustPeerProvenance(t, "peer-b"))
-	if err != nil || result.Disposition != DAAdmissionDuplicate || result.DAID != daID {
-		t.Fatalf("duplicate result=%+v err=%v", result, err)
+	beforeClaims, beforeRows := f.ownerClaimCount(t)
+
+	distinct := f.daCommitTxCommitting(t, f.ops[1], daID, 1, 2296, sha3.Sum256([]byte("competitor")))
+	result, err := f.relay().AdmitDA(distinct, mustPeerProvenance(t, "peer-b"))
+	requireFrozenD00R3Outcome(t, rows["CAP_COMPLETE_DUPLICATE_MEMBER"], result, err)
+	if result.DAID != daID {
+		t.Fatalf("conflict DAID=%x, want %x", result.DAID, daID)
 	}
-	if after := f.image(t); after != before {
-		t.Fatal("a duplicate mutated the record, locator, claim or accepted-sequence image")
+	claims, ownerRows := f.ownerClaimCount(t)
+	if after := f.image(t); after != before || claims != beforeClaims || ownerRows != beforeRows {
+		t.Fatal("the discarded competing commit reserved, mutated or consumed state")
+	}
+	requireRetained(t, f, txID(t, first), true, "the retained first-seen commit")
+	requireRetained(t, f, txID(t, distinct), false, "the discarded competing commit")
+
+	replay, err := f.relay().AdmitDA(first, mustPeerProvenance(t, "peer-c"))
+	if err != nil || replay.Disposition != DAAdmissionDuplicate || replay.SameDAIDCommitConflict {
+		t.Fatalf("exact replay result=%+v err=%v, want peer-neutral DUPLICATE without the conflict bit", replay, err)
 	}
 }
 
@@ -279,6 +651,11 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	if snapshot, owned, err := relay.LookupRetainedTx([32]byte{0xab}); owned || err != nil || snapshot.TxID != ([32]byte{}) {
 		t.Fatalf("absent lookup owned=%v err=%v snapshot=%+v, want ABSENT_DA", owned, err, snapshot)
 	}
+	roleDAID := daRelayTestID(0x3c)
+	roleCommitTx := f.daCommitTxCommitting(t, f.ops[1], roleDAID, 1, 2051, sha3.Sum256([]byte("role")))
+	if _, err := f.relay().AdmitDA(roleCommitTx, mustPeerProvenance(t, "peer-a")); err != nil {
+		t.Fatalf("AdmitDA(role fixture): %v", err)
+	}
 	relay.mu.Lock()
 	// Three corruption classes the index itself can hold: a row naming an absent
 	// record, a row naming a member whose retained txid is a different one, and a
@@ -292,16 +669,29 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	record.commit.txBytes = append([]byte(nil), commitTx...)
 	record.commit.txBytes[len(record.commit.txBytes)-1] ^= 0xff
 	relay.sets[daID] = record
+	// A fifth class, on its OWN record so the byte corruption above cannot mask
+	// it: bytes, txid and wtxid all agree and the record's ROLE claim does not —
+	// the declared chunk count contradicts the retained commit transaction.
+	roleRecord := relay.sets[roleDAID]
+	roleRecord.commit.chunkCount = 9
+	relay.sets[roleDAID] = roleRecord
 	relay.mu.Unlock()
 	for name, txid := range map[string][32]byte{
 		"dangling locator":  {0xcd},
 		"wrong record":      {0xce},
 		"wrong member kind": {0xcf},
 		"corrupted bytes":   txID(t, commitTx),
+		"role mismatch":     txID(t, roleCommitTx),
 	} {
 		snapshot, owned, err := relay.LookupRetainedTx(txid)
 		if owned || err == nil || snapshot.TxID != ([32]byte{}) {
 			t.Fatalf("%s lookup owned=%v err=%v, want INTERNAL", name, owned, err)
+		}
+		// The read-only INTERNAL is a PLAIN error: a lookup can never fabricate
+		// a canonical-transition terminal.
+		var terminal *canonicalDATerminalError
+		if errors.As(err, &terminal) {
+			t.Fatalf("%s lookup leaked the canonical-transition terminal type: %v", name, err)
 		}
 	}
 }
@@ -363,15 +753,32 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 		}
 	})
 
-	t.Run("state C is a no-op", func(t *testing.T) {
+	t.Run("state C is a no-op and completion cleared member provenance", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 4)
 		daID, payload := daRelayTestID(0x45), []byte("complete")
 		commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2090, sha3.Sum256(payload))
 		chunkTx := f.daChunkTx(t, f.ops[1], daID, 0, 2091, payload)
 		mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-p"))
 		mustAdmit(t, f, chunkTx, mustPeerProvenance(t, "peer-p"))
+		relay := f.relay()
+		relay.mu.Lock()
+		record := relay.sets[daID]
+		relay.mu.Unlock()
+		if record.state != daRelayStateCompleteSet {
+			t.Fatalf("record state=%v, want COMPLETE_SET", record.state)
+		}
+		// Completion clears ALL member provenance: the frozen D00-R3 authority
+		// pins state_c_member_provenance FORBIDDEN.
+		for _, member := range record.members() {
+			if member.provenance != (DAProvenance{}) {
+				t.Fatalf("State C member %x retains provenance %+v", member.txid, member.provenance)
+			}
+		}
+		if record.commit.peerQuotaKey != "" {
+			t.Fatalf("State C commit retains peer quota key %q", record.commit.peerQuotaKey)
+		}
 		before := f.image(t)
-		if err := f.relay().ReleasePeerQuotaKey("peer-p"); err != nil {
+		if err := relay.ReleasePeerQuotaKey("peer-p"); err != nil {
 			t.Fatalf("ReleasePeerQuotaKey: %v", err)
 		}
 		if after := f.image(t); after != before {
@@ -423,46 +830,6 @@ func requireRetained(t *testing.T, f *daOwnerFixture, txid [32]byte, want bool, 
 	}
 	if owned != want {
 		t.Fatalf("%s: retained=%v, want %v", what, owned, want)
-	}
-}
-
-// TestAdmitDASameTxidDifferentWtxidIsNotClassifiedAsADuplicate is A3's
-// malleation row: the duplicate test is EXACT txid AND the retained bytes, so a
-// variant carrying the same txid under different witness bytes cannot short-cut
-// to DUPLICATE and cannot replace what is retained — it goes through full
-// validation and is refused there.
-func TestAdmitDASameTxidDifferentWtxidIsNotClassifiedAsADuplicate(t *testing.T) {
-	f := newDAOwnerFixture(t, 2)
-	daID, payload := daRelayTestID(0x38), []byte("wtxid-variant")
-	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2110, sha3.Sum256(payload))
-	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
-	before := f.image(t)
-
-	tx, txid, wtxid, consumed, err := consensus.ParseTx(commitTx)
-	if err != nil || consumed != len(commitTx) {
-		t.Fatalf("ParseTx: consumed=%d err=%v", consumed, err)
-	}
-	if len(tx.Witness) == 0 || len(tx.Witness[0].Signature) == 0 {
-		t.Fatal("the fixture commit carries no witness signature to vary")
-	}
-	tx.Witness[0].Signature[0] ^= 0xff
-	variant, err := consensus.MarshalTx(tx)
-	mustCanonicalMO(t, "MarshalTx(wtxid variant)", err)
-	_, variantTxID, variantWTxID, _, err := consensus.ParseTx(variant)
-	mustCanonicalMO(t, "ParseTx(wtxid variant)", err)
-	if variantTxID != txid || variantWTxID == wtxid {
-		t.Fatalf("variant txid=%x wtxid==original=%v, want the same txid under a different wtxid", variantTxID, variantWTxID == wtxid)
-	}
-
-	result, err := f.relay().AdmitDA(variant, mustPeerProvenance(t, "peer-b"))
-	if err == nil {
-		t.Fatalf("the wtxid variant was accepted as %v", result.Disposition)
-	}
-	if result.Disposition == DAAdmissionDuplicate {
-		t.Fatal("the wtxid variant was classified as a duplicate")
-	}
-	if after := f.image(t); after != before {
-		t.Fatal("the wtxid variant mutated the retained image")
 	}
 }
 
@@ -726,18 +1093,19 @@ func TestPeerCleanupFailsClosedOnEveryDefectiveVictimToken(t *testing.T) {
 
 // TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard is H7
 // EXECUTED: at EVERY fallible step before the first mutation — provenance
-// validation, BeginDAAdmission, member rendering, staging, and the owner reserve
-// inside BeginCommit — AdmitDA publishes no record, locator or claim and resolves
-// any admission guard it took exactly once (the provenance step fails before one
-// exists, and must therefore leave none held either).
+// validation, the pre-guard canonical parse, candidate validation under the
+// held guard, member rendering, staging, and the owner reserve inside
+// BeginCommit — AdmitDA publishes no record, locator or claim and resolves any
+// admission guard it took exactly once (the provenance and parse steps fail
+// before one exists, and must therefore leave none held either).
 //
-// The guard release is proved DIRECTLY, without a schedule that could hang the
-// suite: ChainState.admissionMu must be write-lockable after each failure, which
-// it is not while an admission guard's read hold survives. A double release would
-// not reach the assertion at all — daAdmissionGuard.close panics on a second
-// call — so "exactly once" is the conjunction of the two.
+// The guard release is proved by requireAdmissionGuardReleased's explicit
+// bounded write-lock schedule, which fails by timeout rather than hanging the
+// suite while a leaked read hold survives. A double release would not reach the
+// assertion at all — daAdmissionGuard.close and daAdmissionHold.release panic
+// on a second call — so "exactly once" is the conjunction of the two.
 func TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard(t *testing.T) {
-	f := newDAOwnerFixture(t, 4)
+	f := newDAOwnerFixture(t, 5)
 	daID := daRelayTestID(0x56)
 	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2160, sha3.Sum256([]byte("one-chunk")))
 	mustAdmit(t, f, commitTx, mustPeerProvenance(t, "peer-a"))
@@ -745,19 +1113,27 @@ func TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard(t 
 	if conflicting == ([32]byte{}) {
 		t.Fatal("the conflicting standard entry was not admitted")
 	}
-	before := f.image(t)
-	for _, step := range []struct {
+	steps := []struct {
 		name       string
 		raw        []byte
 		provenance DAProvenance
 		want       string
 	}{
 		{"provenance validation", f.daChunkTx(t, f.ops[1], daRelayTestID(0x57), 0, 2161, []byte("p")), DAProvenance{}, "invalid DA provenance"},
-		{"BeginDAAdmission", f.daChunkTx(t, f.ops[1], daRelayTestID(0x58), 0, 2162, []byte("q"))[:20], mustPeerProvenance(t, "peer-b"), "TX_ERR_PARSE"},
+		{"pre-guard parse", f.daChunkTx(t, f.ops[1], daRelayTestID(0x58), 0, 2162, []byte("q"))[:20], mustPeerProvenance(t, "peer-b"), "TX_ERR_PARSE"},
+		{"candidate validation", f.daChunkTx(t, f.ops[4], daRelayTestID(0x5b), 0, 2166, []byte("unfunded")), mustPeerProvenance(t, "peer-b"), "TX_ERR_MISSING_UTXO"},
 		{"member rendering", f.daCommitTx(t, f.ops[1], daRelayTestID(0x59), 1, 2163), mustPeerProvenance(t, "peer-b"), "does not carry exactly one 32-byte payload commitment"},
 		{"staging", f.daChunkTx(t, f.ops[1], daID, 1, 2164, []byte("out-of-range")), mustPeerProvenance(t, "peer-b"), "da chunk index outside commit"},
 		{"owner reserve", f.daChunkTx(t, f.ops[3], daRelayTestID(0x5a), 0, 2165, []byte("conflict")), mustPeerProvenance(t, "peer-b"), "double-spend conflict"},
-	} {
+	}
+	// Built AFTER every step raw was signed against the funded set: the
+	// candidate-validation step's input leaves the chainstate, so its failure
+	// happens under the held guard, on the ordinary validation path.
+	f.engine.chainState.mu.Lock()
+	delete(f.engine.chainState.Utxos, f.ops[4])
+	f.engine.chainState.mu.Unlock()
+	before := f.image(t)
+	for _, step := range steps {
 		_, err := f.relay().AdmitDA(step.raw, step.provenance)
 		if err == nil || !strings.Contains(err.Error(), step.want) {
 			t.Fatalf("%s: AdmitDA err=%v, want a refusal containing %q", step.name, err, step.want)
@@ -765,10 +1141,7 @@ func TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard(t 
 		if after := f.image(t); after != before {
 			t.Fatalf("%s leaked state:\n before=%s\n after =%s", step.name, before, after)
 		}
-		if !f.engine.chainState.admissionMu.TryLock() {
-			t.Fatalf("%s left the admission guard held", step.name)
-		}
-		f.engine.chainState.admissionMu.Unlock()
+		requireAdmissionGuardReleased(t, f.engine.chainState, step.name)
 	}
 }
 
