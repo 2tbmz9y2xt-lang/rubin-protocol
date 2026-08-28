@@ -55,6 +55,7 @@ const (
 	BLOCK_ERR_DA_SET_INVALID            ErrorCode = "BLOCK_ERR_DA_SET_INVALID"
 	BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID ErrorCode = "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID"
 	BLOCK_ERR_DA_BATCH_EXCEEDED         ErrorCode = "BLOCK_ERR_DA_BATCH_EXCEEDED"
+	BLOCK_ERR_STATE_CAP_EXCEEDED        ErrorCode = "BLOCK_ERR_STATE_CAP_EXCEEDED"
 )
 
 // TxErrorCause is the closed, source-owned classification of WHY a consensus
