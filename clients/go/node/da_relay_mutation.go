@@ -547,3 +547,176 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 	}
 	s.orphanBytesByDAID[daID] = bytes
 }
+
+// daRelayRecordPlacement holds ABSOLUTE counter values, not deltas. Once
+// installed, its record and rows ARE live state by assignment: a caller must not
+// retain or mutate a placement after installing it.
+type daRelayRecordPlacement struct {
+	daID        [32]byte
+	record      daRelaySetRecord
+	remove      bool
+	retire      []daRelayLocatorRow
+	install     []daRelayLocatorRow
+	orphanBytes uint64
+	peerBytes   map[string]uint64
+	daBytes     uint64
+	commitBytes uint64
+	pinnedBytes uint64
+	totalFee    consensus.Uint128
+}
+
+// projectDARecordImageLocked is the FALLIBLE half of the owner-ready retained
+// kernel: it owns EVERY check and mutates nothing on any path, so a refused
+// image leaves the live retained state byte-identical.
+//
+// Refusal priority is fixed, so a doubly-violating image always selects the
+// earlier reason: incompatible live record, then stale image, then unusable
+// candidate member, then locator row, then accounting, then exhausted revision
+// space (RUBIN_COMPACT_BLOCKS.md Sections 18.2 and 18.3).
+//
+// The live counters and the revision high-water are deliberately re-read here
+// rather than frozen into the image: they are shared by every record, so
+// projecting them here is what keeps a decision about one record from being
+// invalidated by, or lost to, a decision about another. received_time and the
+// Section 18.2 accepted sequence are NOT this kernel's and stay untouched.
+func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
+	live, err := s.checkDARecordImageBaselineLocked(image)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	retire, install, err := s.checkDARecordImageLocatorsLocked(image, live)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement, err := s.projectDARecordImageCountersLocked(image, live)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement.retire, placement.install = retire, install
+	if !image.remove {
+		revision, revisionErr := checkedAddUint64(s.records, 1)
+		if revisionErr != nil {
+			return daRelayRecordPlacement{}, revisionErr
+		}
+		placement.record = image.next.cloneOwnerReady()
+		placement.record.revision = revision
+	}
+	return placement, nil
+}
+
+// checkDARecordImageBaselineLocked takes residency from the s.sets lookup alone,
+// never from the record's contents. An absent record has revision 0 and a
+// non-resident staging baseline 0, so one comparison covers both arms.
+func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
+	live, resident := s.sets[image.daID]
+	if resident {
+		if err := live.validateOwnerReady(); err != nil {
+			return daRelaySetRecord{}, err
+		}
+	}
+	if resident != image.present || live.revision != image.baseline {
+		return daRelaySetRecord{}, errDARelayRecordStale
+	}
+	if image.remove {
+		return live, nil
+	}
+	return live, image.member.validate()
+}
+
+// checkDARecordImageLocatorsLocked proves the txid index and the retained image
+// are one bijection (Section 18.3). A nil index is refused rather than allocated,
+// since installDASetRecordLocked may not allocate.
+func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage, live daRelaySetRecord) ([]daRelayLocatorRow, []daRelayLocatorRow, error) {
+	if s.locators == nil {
+		return nil, nil, errDARelayImageIncompatible
+	}
+	retire := live.locatorRows()
+	install := image.next.locatorRows()
+	for _, row := range retire {
+		if s.locators[row.txid] != row.locator {
+			return nil, nil, errDARelayLocatorMismatch
+		}
+	}
+	return retire, install, s.checkDAInstallLocatorRowsLocked(image.daID, install)
+}
+
+func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []daRelayLocatorRow) error {
+	claimed := make(map[[32]byte]bool, len(install))
+	for _, row := range install {
+		if row.locator.daID != daID || claimed[row.txid] {
+			return errDARelayLocatorMismatch
+		}
+		if other, indexed := s.locators[row.txid]; indexed && other.daID != daID {
+			return errDARelayLocatorMismatch
+		}
+		claimed[row.txid] = true
+	}
+	return nil
+}
+
+func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordImage, live daRelaySetRecord) (daRelayRecordPlacement, error) {
+	oldAccounting, _, err := live.ownerReadyAccounting()
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	newAccounting, totalFee, err := image.next.ownerReadyAccounting()
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove, totalFee: totalFee}
+	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.daBytes, err = checkedApplyUint64DeltaCap(s.orphanBytesByDAID[image.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.commitBytes, err = checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, s.caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.pinnedBytes, err = s.projectOwnerReadyPinnedBytesLocked(live, image.next); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	return placement, nil
+}
+
+func (s *DARelayState) projectOwnerReadyPinnedBytesLocked(live, next daRelaySetRecord) (uint64, error) {
+	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, live.pinnedPayloadAccountingBytes(), next.pinnedPayloadAccountingBytes())
+	if err != nil {
+		return 0, err
+	}
+	if pinnedBytes > s.caps.pinnedPayloadBytes {
+		return 0, errDARelayPinnedPayloadCapExceeded
+	}
+	return pinnedBytes, nil
+}
+
+// installDASetRecordLocked is the NON-FALLIBLE half: assignment only. It cannot
+// derive a value, allocate a container, validate anything or fail — the placement
+// carries every one of those already — which is what would let a caller run it
+// after an owner reserve with no fallible step in between. It must be called with
+// the placement projectDARecordImageLocked returned for THIS image, under the
+// SAME lock hold. Retiring precedes installing, so a txid a record keeps across
+// the transition is reinstalled rather than dropped. nextReceivedTime is
+// deliberately not touched (RUBIN_COMPACT_BLOCKS.md Section 18.2).
+func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
+	for _, row := range placement.retire {
+		delete(s.locators, row.txid)
+	}
+	if placement.remove {
+		delete(s.sets, placement.daID)
+	} else {
+		s.sets[placement.daID] = placement.record
+		s.records = placement.record.revision
+	}
+	for _, row := range placement.install {
+		s.locators[row.txid] = row.locator
+	}
+	s.orphanBytes = placement.orphanBytes
+	s.applyProjectedPeerBytes(placement.peerBytes)
+	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
+	s.orphanCommitOverheadBytes = placement.commitBytes
+	s.pinnedPayloadBytes = placement.pinnedBytes
+}

@@ -97,8 +97,16 @@ func (c daRelayCaps) validateRelativeCaps() error {
 }
 
 type daRelaySetRecord struct {
-	daID               [32]byte
-	state              daRelaySetState
+	daID  [32]byte
+	state daRelaySetState
+	// revision is the owner-ready record IDENTITY: two record values are the same
+	// record state exactly when their revisions agree. Minted only by
+	// projectDARecordImageLocked, written only by installDASetRecordLocked, so
+	// every record the LEGACY writers store carries 0 — the same value an absent
+	// record presents, which is why the kernel decides residency from the s.sets
+	// lookup and never from this field. Go-private: never serialized, never
+	// public, never a normative protocol field.
+	revision           uint64
 	receivedTime       uint64
 	payloadBytes       uint64
 	wireBytes          uint64
@@ -180,6 +188,7 @@ type daRelayCommit struct {
 	daID              [32]byte
 	payloadCommitment [32]byte
 	peerQuotaKey      string
+	member            daRelayMemberIdentity
 	chunkCount        uint16
 	wireBytes         uint64
 	txBytes           []byte
@@ -189,11 +198,46 @@ type daRelayChunk struct {
 	daID         [32]byte
 	chunkHash    [32]byte
 	peerQuotaKey string
+	member       daRelayMemberIdentity
 	chunkIndex   uint16
 	payload      []byte
 	wireBytes    uint64
 	txBytes      []byte
 	hashChecked  bool
+}
+
+// daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every
+// field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
+// reconstructed or narrowed, and inputs keep the caller's canonical order
+// verbatim (RUBIN_COMPACT_BLOCKS.md Section 18.1, RUBIN_MEMPOOL_POLICY.md
+// Section 6.4). Its per-peer key is quotaKey's, never the legacy peerQuotaKey.
+type daRelayMemberIdentity struct {
+	txid       [32]byte
+	wtxid      [32]byte
+	fee        consensus.Uint128
+	inputs     []consensus.Outpoint
+	token      PendingOutpointToken
+	provenance daProvenance
+}
+
+type daRelayLocatorKind uint8
+
+const (
+	daRelayLocatorCommit daRelayLocatorKind = iota + 1
+	daRelayLocatorChunk
+)
+
+type daRelayLocator struct {
+	daID       [32]byte
+	kind       daRelayLocatorKind
+	chunkIndex uint16
+}
+
+// daRelayLocatorRow rows travel as an ORDERED slice, never a map, so nothing a
+// caller observes and nothing the installer assigns depends on map order.
+type daRelayLocatorRow struct {
+	txid    [32]byte
+	locator daRelayLocator
 }
 
 type daRelayCompletionSnapshot struct {
@@ -225,6 +269,11 @@ var (
 	errDARelayWireBytesInvalid          = errors.New("da relay wire bytes invalid")
 	errDARelayPinnedPayloadCapExceeded  = errors.New("da pinned payload cap exceeded")
 	errDARelayArithmeticOverflow        = errors.New("da relay arithmetic overflow")
+	errDAProvenanceInvalid              = errors.New("invalid da provenance")
+	errDARelayMemberIncomplete          = errors.New("da relay member is not owner-ready")
+	errDARelayImageIncompatible         = errors.New("da relay retained image is not owner-ready")
+	errDARelayRecordStale               = errors.New("da relay record image is stale")
+	errDARelayLocatorMismatch           = errors.New("da relay locator mismatch")
 )
 
 var (
@@ -250,6 +299,13 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
+	// locators is filled only by installDASetRecordLocked, which has no non-test
+	// caller, so it is empty on every live path today; the atomic-batch pair
+	// carries it so that stops being load bearing.
+	locators map[[32]byte]daRelayLocator
+	// records is the monotone high-water source of revision, minted only by
+	// projectDARecordImageLocked.
+	records uint64
 }
 
 func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) {
@@ -262,6 +318,7 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 		orphanBytesByPeerQuotaKey: map[string]uint64{},
 		orphanBytesByDAID:         map[[32]byte]uint64{},
 		sets:                      make(map[[32]byte]daRelaySetRecord),
+		locators:                  make(map[[32]byte]daRelayLocator),
 	}, nil
 }
 
@@ -481,6 +538,8 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		orphanCommitOverheadBytes: s.orphanCommitOverheadBytes,
 		pinnedPayloadBytes:        s.pinnedPayloadBytes,
 		sets:                      maps.Clone(s.sets),
+		locators:                  maps.Clone(s.locators),
+		records:                   s.records,
 	}
 }
 
@@ -493,6 +552,11 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.orphanCommitOverheadBytes = projected.orphanCommitOverheadBytes
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
+	s.locators = projected.locators
+	// Both callers hold s.mu from the clone through this call, so the projection's
+	// stamp source can only have advanced; on any legacy state both fields are the
+	// zero value and this pair is the identity.
+	s.records = projected.records
 }
 
 func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {
