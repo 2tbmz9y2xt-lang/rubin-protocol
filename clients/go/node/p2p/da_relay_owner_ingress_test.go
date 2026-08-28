@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -490,4 +491,64 @@ func TestRemoteDAAdmissionRejectionIsPeerNeutral(t *testing.T) {
 	if h.service.txSeen.Has(txid) {
 		t.Fatal("a rejected DA transaction entered the standard seen-set")
 	}
+}
+
+// TestRemoteDAAdmissionSerializesOnItsPeerQuotaKey is H5 SAME_QUOTA_LIFECYCLE on
+// the ADMISSION side: registration, admission and teardown of one quota identity
+// all pass through the one key lock, and two different keys still progress
+// independently.
+//
+// The lock is driven exactly as the lifecycle sites drive it — the production
+// helper, held across the window under test — so the row proves participation in
+// the same lock rather than the existence of some lock. Both halves are bounded
+// and report by CHANNEL: a failure is a timeout, never a hung suite.
+func TestRemoteDAAdmissionSerializesOnItsPeerQuotaKey(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h, 2)
+	daID := daRelayTestID(0x1a)
+	held, other := "127.0.0.1:19140", "127.0.0.2:19141"
+
+	// Same key: the admission must not complete while the key is held.
+	unlock := h.service.lockPeerQuotaKey(peerQuotaKey(held))
+	blocked := admitDAInBackground(t, h, f.commitTx(t, daID, 1, sha3.Sum256([]byte("same-key"))), held)
+	select {
+	case err := <-blocked:
+		unlock()
+		t.Fatalf("the admission completed (err=%v) while its own quota key was held", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// A DIFFERENT key is not serialized behind it.
+	free := admitDAInBackground(t, h, f.commitTx(t, daRelayTestID(0x1b), 1, sha3.Sum256([]byte("other-key"))), other)
+	select {
+	case err := <-free:
+		if err != nil {
+			t.Fatalf("the admission on a different quota key failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		unlock()
+		t.Fatal("an admission on a DIFFERENT quota key was serialized behind the held one")
+	}
+
+	unlock()
+	select {
+	case err := <-blocked:
+		if err != nil {
+			t.Fatalf("the released admission failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the admission did not complete after its quota key was released")
+	}
+}
+
+// admitDAInBackground runs one remote DA admission on its own peer and reports
+// the handler result on a channel, so a caller can bound the wait instead of
+// blocking the suite. Every t.Fatalf-worthy input is built by the CALLER, on the
+// test goroutine.
+func admitDAInBackground(t *testing.T, h *testHarness, raw []byte, addr string) <-chan error {
+	t.Helper()
+	p := daRelayTestPeer(h, addr)
+	done := make(chan error, 1)
+	go func() { done <- p.handleTx(raw) }()
+	return done
 }

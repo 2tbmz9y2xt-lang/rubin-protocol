@@ -174,10 +174,13 @@ type daRelayAdmissionMember struct {
 //     guard, through the existing signature, consensus, current-chain, fee and
 //     candidate-integrity order (validateDACandidate) — a same-txid INVALID
 //     candidate keeps its owning validation error and is never a duplicate;
-//  7. every allocation, provenance, locator, record and victim decision is
-//     PLANNED BEFORE the final DA lock, on a PRIVATE copy of the one record
-//     this member joins, taken in its own DARelayState.mu window; nothing that
-//     decides the new record is left to run inside the final lock;
+//  7. every allocation, provenance, locator, record, accounting and victim
+//     decision is PLANNED BEFORE the final DA lock, on a PRIVATE copy of the one
+//     record this member joins, taken in its own DARelayState.mu window; nothing
+//     that decides the new record is left to run inside the final lock. The one
+//     thing the plan cannot carry is the projection of its accounting against the
+//     LIVE counters, which are shared by every record and are therefore re-read
+//     under the final lock — before the owner reserve, and before any mutation;
 //  8. the FINAL DA lock performs only the recheck — duplicate/first-seen, then
 //     the plan's currency, which is what makes every off-lock decision above
 //     authoritative — and then DAAdmission.BeginCommit with the exact victim
@@ -281,9 +284,14 @@ func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte
 // baseline still current before anything is applied, so a decision reached
 // off-lock is never applied to a record it did not observe, and two admissions
 // of DIFFERENT records never invalidate one another.
+// image is the record transition the staging implies, derived HERE from the two
+// frozen record values: the accounting each side contributes and the exact
+// locator rows to retire and install. Carrying it is what leaves the corridor
+// after the owner reserve with nothing to walk or allocate.
 type daRelayAdmissionPlan struct {
 	baseline uint64
 	staged   daRelayStagedMember
+	image    daRelayRecordImage
 	victims  []DAAdmissionVictim
 	stageErr error
 }
@@ -320,6 +328,9 @@ func (s *DARelayState) planDAAdmission(member daRelayAdmissionMember) (daRelayAd
 		return plan, nil
 	}
 	plan.staged = staged
+	if plan.image, err = daRelayRecordImageOf(current, staged.record); err != nil {
+		return plan, err
+	}
 	plan.victims, err = s.appendDAMemberVictims(nil, staged.dropped)
 	return plan, err
 }
@@ -399,7 +410,10 @@ func (s *DARelayState) installDAAdmissionPlanLocked(admission *DAAdmission, memb
 	if record.receivedTime == 0 {
 		record.receivedTime = sequence
 	}
-	placement, err := s.projectDASetRecordLocked(record)
+	// The plan's image, not a fresh derivation: the recheck above proved the live
+	// record still IS the one the image was derived from, and neither the token
+	// write nor the sequence stamp changes a locator row or an accounting value.
+	placement, err := s.projectDARecordImageLocked(member.locator.daID, plan.image)
 	if err != nil {
 		return DAAdmissionResult{}, err
 	}
@@ -749,11 +763,19 @@ func (o daRetainedObservation) checkLocatorShape(txid [32]byte) error {
 	return nil
 }
 
-// checkRecordShape refuses a record whose STATE contradicts its own membership:
+// checkRecordShape refuses a record whose STATE is not a member of the closed
+// set at all, and then one whose state contradicts its own membership:
 // ORPHAN_CHUNKS is exactly the state that holds no commit, so a State A record
 // carrying one — or a staged/complete record carrying none — is corrupt, and a
 // replay against it is not an "integrity-valid exact retained replay".
+//
+// The membership refusal is not implied by the pairwise one: an out-of-set state
+// is not ORPHAN_CHUNKS, so one carrying a commit satisfies the pair and would
+// otherwise answer OWNED_DA, and DUPLICATE to an exact replay.
 func (o daRetainedObservation) checkRecordShape(txid [32]byte) error {
+	if !o.recordState.valid() {
+		return fmt.Errorf("retained DA record for %x holds state %d outside the closed set", txid, o.recordState)
+	}
 	if (o.recordState == daRelayStateOrphanChunks) != (o.commitChunkCount == 0) {
 		return fmt.Errorf("retained DA record for %x is state %d with chunk_count %d", txid, o.recordState, o.commitChunkCount)
 	}

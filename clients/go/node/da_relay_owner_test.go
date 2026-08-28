@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,17 +32,20 @@ func (f *daOwnerFixture) relay() *DARelayState { return f.engine.DARelayState() 
 func (f *daOwnerFixture) owner() *PendingOutpointOwner { return f.mp.PendingOutpointOwner() }
 
 // image renders the retained-DA state a "changed nothing" row proves untouched
-// — every record with its state, sequence stamp, TTL and payload bytes, every
-// member with its provenance, every locator row, all five accounting counters
-// and every live DA claim — as one string equality rather than a list of spot
-// checks.
+// — every record with its state, revision, sequence stamp, TTL and payload
+// bytes, every member with its provenance, every locator row, every prefetch
+// reservation, all five accounting counters, the revision high-water and every
+// live DA claim — as one string equality rather than a list of spot checks.
+//
+// The set it renders is the set of MUTABLE DARelayState fields plus the owner
+// claim population: an oracle narrower than that proves nothing outside itself.
 func (f *daOwnerFixture) image(t *testing.T) string {
 	t.Helper()
 	relay, out := f.relay(), ""
 	relay.mu.Lock()
 	for _, daID := range relay.sortedRetainedDAIDsLocked() {
 		record := relay.sets[daID]
-		out += fmt.Sprintf("|record %x state=%d received=%d ttl=%d payload=%d", daID, record.state, record.receivedTime, record.ttlBlocksRemaining, record.payloadBytes)
+		out += fmt.Sprintf("|record %x state=%d rev=%d received=%d ttl=%d payload=%d", daID, record.state, record.revision, record.receivedTime, record.ttlBlocksRemaining, record.payloadBytes)
 		for _, member := range record.members() {
 			out += fmt.Sprintf("|member txid=%x wtxid=%x token=%d prov=%+v", member.txid, member.wtxid, member.token.seq, member.provenance)
 		}
@@ -62,7 +66,15 @@ func (f *daOwnerFixture) image(t *testing.T) string {
 	}
 	sort.Strings(perKey)
 	out += strings.Join(perKey, "")
-	out += fmt.Sprintf("|orphan=%d overhead=%d pinned=%d", relay.orphanBytes, relay.orphanCommitOverheadBytes, relay.pinnedPayloadBytes)
+	reservations := make([]string, 0, len(relay.prefetch.indexes))
+	for daID, indexes := range relay.prefetch.indexes {
+		for index, peerKey := range indexes {
+			reservations = append(reservations, fmt.Sprintf("|prefetch %x/%d=%q", daID, index, peerKey))
+		}
+	}
+	sort.Strings(reservations)
+	out += strings.Join(reservations, "")
+	out += fmt.Sprintf("|orphan=%d overhead=%d pinned=%d revisions=%d", relay.orphanBytes, relay.orphanCommitOverheadBytes, relay.pinnedPayloadBytes, relay.records)
 	sequence := relay.nextReceivedTime
 	relay.mu.Unlock()
 	owner := f.owner()
@@ -828,7 +840,7 @@ func TestAdmitDAChunkLastMismatchChangesNothing(t *testing.T) {
 // an absent txid is ABSENT_DA, and a locator that cannot produce its own member
 // is INTERNAL rather than absence.
 func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testing.T) {
-	f := newDAOwnerFixture(t, 5)
+	f := newDAOwnerFixture(t, 6)
 	daID, payload := daRelayTestID(0x37), []byte("lookup-payload")
 	commitTx := f.daCommitTxCommitting(t, f.ops[0], daID, 1, 2050, sha3.Sum256(payload))
 	if _, err := f.relay().AdmitDA(commitTx, mustPeerProvenance(t, "peer-a")); err != nil {
@@ -858,6 +870,9 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	indexDAID := daRelayTestID(0x3e)
 	indexCommitTx := f.daCommitTxCommitting(t, f.ops[4], indexDAID, 1, 2054, sha3.Sum256([]byte("index")))
 	mustAdmit(t, f, indexCommitTx, mustPeerProvenance(t, "peer-a"))
+	stateDAID := daRelayTestID(0x3f)
+	stateCommitTx := f.daCommitTxCommitting(t, f.ops[5], stateDAID, 1, 2055, sha3.Sum256([]byte("state")))
+	mustAdmit(t, f, stateCommitTx, mustPeerProvenance(t, "peer-a"))
 
 	relay.mu.Lock()
 	// Three corruption classes the index itself can hold: a row naming an absent
@@ -886,6 +901,13 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 	roleRecord := relay.sets[roleDAID]
 	roleRecord.commit.chunkCount = 9
 	relay.sets[roleDAID] = roleRecord
+	// A sixth class, and the one the PAIRWISE state check cannot see: the record
+	// STATE is not a member of the closed set at all. Bytes, identity, role and
+	// locator all agree, and an out-of-set value is not ORPHAN_CHUNKS, so it
+	// satisfies "ORPHAN_CHUNKS iff no commit" and would answer OWNED_DA.
+	stateRecord := relay.sets[stateDAID]
+	stateRecord.state = daRelaySetState(0xff)
+	relay.sets[stateDAID] = stateRecord
 	relay.mu.Unlock()
 	for name, txid := range map[string][32]byte{
 		"dangling locator":             {0xcd},
@@ -896,6 +918,7 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 		"commit locator with an index": txID(t, indexCommitTx),
 		"corrupted bytes":              txID(t, commitTx),
 		"role mismatch":                txID(t, roleCommitTx),
+		"record state outside the set": txID(t, stateCommitTx),
 	} {
 		snapshot, owned, err := relay.LookupRetainedTx(txid)
 		if owned || err == nil || snapshot.TxID != ([32]byte{}) {
@@ -907,6 +930,14 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 		if errors.As(err, &terminal) {
 			t.Fatalf("%s lookup leaked the canonical-transition terminal type: %v", name, err)
 		}
+	}
+	// The SAME state, through the OTHER consumer of the same observation: a
+	// byte-exact replay against an out-of-set record is INTERNAL, never the
+	// peer-neutral DUPLICATE an integrity-valid exact replay earns. The two
+	// consumers agree because they share one validator.
+	result, err := relay.AdmitDA(stateCommitTx, mustPeerProvenance(t, "peer-a"))
+	if err == nil || relayDispositionOf(err) != RelayAdmissionInternal || result != (DAAdmissionResult{}) {
+		t.Fatalf("exact replay over an out-of-set record result=%+v err=%v, want INTERNAL", result, err)
 	}
 }
 
@@ -1465,6 +1496,22 @@ func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 	if after := f.image(t); after != beforePlan {
 		t.Fatal("planning published state")
 	}
+	// Everything the corridor AFTER the owner reserve assigns is already in the
+	// plan — the locator rows to retire and install, and the accounting each side
+	// contributes — and installDASetRecordLocked takes only this image, so no
+	// schedule exists in which it walks a record or builds a map after
+	// BeginCommit.
+	wantRetire := map[[32]byte]daRelayLocator{txID(t, commitTx): {daID: daID, kind: daRelayLocatorCommit}}
+	wantInstall := map[[32]byte]daRelayLocator{
+		txID(t, commitTx): {daID: daID, kind: daRelayLocatorCommit},
+		txid:              {daID: daID, kind: daRelayLocatorChunk, chunkIndex: 0},
+	}
+	if !maps.Equal(plan.image.retire, wantRetire) || !maps.Equal(plan.image.install, wantInstall) {
+		t.Fatalf("planned locator rows retire=%+v install=%+v, want %+v and %+v", plan.image.retire, plan.image.install, wantRetire, wantInstall)
+	}
+	if plan.image.newAccounting.orphanBytes <= plan.image.oldAccounting.orphanBytes || plan.image.newAccounting.peerBytes["peer-b"] == 0 {
+		t.Fatalf("planned accounting old=%+v new=%+v, want the arriving member already billed off-lock", plan.image.oldAccounting, plan.image.newAccounting)
+	}
 
 	// A raced admission into the SAME record: applying the stale plan would
 	// install a record value that never saw it.
@@ -1480,6 +1527,40 @@ func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 	}
 	requireRetained(t, f, txID(t, raced), true, "the raced member the stale plan would have retired")
 	requireRetained(t, f, txid, false, "the refused candidate")
+	// The recheck is what makes the PRECOMPUTED image safe: the plan's retire set
+	// still names the pre-race record, so a recheck that accepted a stale plan
+	// would retire the raced member's locator row along with it.
+	if _, owned, err := relay.LookupRetainedTx(txID(t, raced)); !owned || err != nil {
+		t.Fatalf("the raced member's locator row after the refusal owned=%v err=%v", owned, err)
+	}
+}
+
+// TestRecordRevisionExhaustionFailsClosedBeforeAnyMutation is 8.4: the record
+// revision stamp is a CHECKED accumulator like every other one in this state. At
+// the ceiling the admission fails closed with the whole image byte-identical —
+// an unchecked ++ would wrap the stamp to 0, which is exactly the value an ABSENT
+// record presents, so the next plan built against a real record would recheck as
+// current.
+func TestRecordRevisionExhaustionFailsClosedBeforeAnyMutation(t *testing.T) {
+	f := newDAOwnerFixture(t, 2)
+	relay := f.relay()
+	daID := daRelayTestID(0x7e)
+	mustAdmit(t, f, f.daChunkTx(t, f.ops[0], daID, 0, 2350, []byte("before-ceiling")), mustPeerProvenance(t, "peer-a"))
+	relay.mu.Lock()
+	relay.records = ^uint64(0)
+	relay.mu.Unlock()
+	before := f.image(t)
+
+	exhausted := f.daChunkTx(t, f.ops[1], daID, 1, 2351, []byte("at-ceiling"))
+	result, err := relay.AdmitDA(exhausted, mustPeerProvenance(t, "peer-b"))
+	if !errors.Is(err, errDARelayArithmeticOverflow) || result != (DAAdmissionResult{}) {
+		t.Fatalf("admission at the revision ceiling result=%+v err=%v, want the checked-arithmetic refusal", result, err)
+	}
+	if after := f.image(t); after != before {
+		t.Fatalf("the refused admission mutated the image:\n before=%s\n after =%s", before, after)
+	}
+	requireRetained(t, f, txID(t, exhausted), false, "the candidate refused at the revision ceiling")
+	requireAdmissionGuardReleased(t, f.mp.chainState, "revision ceiling")
 }
 
 // TestAdmissionMemberRenderingConsumesTheAdmissionsOwnParse is R9's one-parse

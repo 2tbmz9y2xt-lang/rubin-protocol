@@ -14,7 +14,13 @@ import (
 // the transaction it validated.
 //
 // Prefetch scheduling is POST-admission and cannot remap the result: it only
-// requests still-missing chunks for the set the admission concerned.
+// requests still-missing chunks for the set the admission concerned. It follows
+// a STATE CHANGE, never a bare success: a DUPLICATE changed no record, so its
+// set is missing exactly what it was already missing and any outstanding
+// reservation still covers it. Scheduling on one would re-reserve those indexes
+// and, once the earlier reservation expired, emit a fresh getdachunk — an
+// observable effect the exact-replay path may not have
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1).
 func (s *Service) admitRelayDATx(peerAddr string, txBytes []byte, tx *consensus.Tx, provenance node.DAProvenance) (node.DAAdmissionResult, error) {
 	if s == nil || s.daRelay == nil {
 		return node.DAAdmissionResult{}, errors.New("no DA relay state bound")
@@ -32,7 +38,9 @@ func (s *Service) admitRelayDATx(peerAddr string, txBytes []byte, tx *consensus.
 		}
 		return node.DAAdmissionResult{}, err
 	}
-	s.scheduleDAPrefetch(peerAddr, daID)
+	if result.Disposition == node.DAAdmissionRetained {
+		s.scheduleDAPrefetch(peerAddr, daID)
+	}
 	return result, nil
 }
 

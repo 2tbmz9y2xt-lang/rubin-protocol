@@ -237,3 +237,50 @@ func addDAPrefetchTestPeer(svc *Service, addr string, writeErr error) *peer {
 	svc.peersMu.Unlock()
 	return current
 }
+
+// TestExactReplaySchedulesNoPrefetchAndReserves is 8.5: an exact replay is a
+// DUPLICATE that changed no record, so it must leave the prefetch reservations
+// and the outbound getdachunk frames exactly as it found them.
+//
+// The oracle is the two observables the scheduler actually moves — bytes written
+// to the peer's connection, and what the planner still has left to reserve — and
+// the row is non-vacuous only AFTER the earlier reservation expires: while it is
+// live, reserveMissing skips the in-flight indexes and a duplicate that scheduled
+// would emit nothing. So the clock is advanced past the request TTL first, which
+// is exactly the schedule in which a replay re-reserves and re-requests.
+func TestExactReplaySchedulesNoPrefetchAndReserves(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.EnableCompactReceive = true
+	now := time.Unix(3000, 0)
+	h.service.cfg.Now = func() time.Time { return now }
+	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	f := newDAIngressFixture(t, h, 2)
+	daID := daRelayTestID(170)
+	commitTx := f.commitTx(t, daID, 2, sha3.Sum256([]byte("replay-prefetch")))
+	tx := mustParseDATxForTest(t, commitTx)
+	provenance := mustPeerDAProvenance(t, "peer-a")
+
+	result, err := h.service.admitRelayDATx("peer-a", commitTx, tx, provenance)
+	if err != nil || result.Disposition != node.DAAdmissionRetained {
+		t.Fatalf("first admission result=%+v err=%v, want RETAINED", result, err)
+	}
+	requested := len(current.conn.(*scriptedConn).Bytes())
+	if requested == 0 {
+		t.Fatal("the retaining admission requested no chunk, so this row could not see a duplicate that did")
+	}
+
+	// Past the reservation TTL: the indexes are no longer in flight, so a
+	// scheduler reached from the duplicate arm WOULD reserve and request them.
+	now = now.Add(2 * time.Second)
+	replay, err := h.service.admitRelayDATx("peer-a", commitTx, tx, provenance)
+	if err != nil || replay.Disposition != node.DAAdmissionDuplicate {
+		t.Fatalf("exact replay result=%+v err=%v, want DUPLICATE", replay, err)
+	}
+	if after := len(current.conn.(*scriptedConn).Bytes()); after != requested {
+		t.Fatalf("the exact replay wrote %d further bytes to the peer", after-requested)
+	}
+	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now)
+	if len(plans) != 1 || diagnostic != "" || len(plans[0].Indexes) != 2 {
+		t.Fatalf("plans=%+v diagnostic=%q, want both indexes still unreserved after the replay", plans, diagnostic)
+	}
+}

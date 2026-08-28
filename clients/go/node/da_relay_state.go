@@ -31,6 +31,14 @@ const (
 	daRelayStateCompleteSet
 )
 
+// valid reports membership of the CLOSED record-state set. It is the single
+// authority both consumers of a stored state ask — the off-lock retained
+// observation and canonical D preparation — so an out-of-set value can never be
+// read as "some state" by one of them and refused by the other. Every state
+// STORED by a writer comes from the three constants above, so a value outside
+// them is corrupt retained state, never a candidate property.
+func (s daRelaySetState) valid() bool { return s <= daRelayStateCompleteSet }
+
 type daRelayCaps struct {
 	orphanPoolBytes           uint64
 	orphanPoolPerPeerBytes    uint64
@@ -435,8 +443,12 @@ func (s *DARelayState) advanceOrphanTTLLocked() ([]DAAdmissionVictim, error) {
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
 		record := s.sets[daID]
 		if record.ttlBlocksRemaining > 1 {
+			revision, err := s.nextRecordRevisionLocked()
+			if err != nil {
+				return nil, err
+			}
 			record.ttlBlocksRemaining--
-			s.stampRecordLocked(&record)
+			s.stampRecordLocked(&record, revision)
 			s.sets[daID] = record
 			continue
 		}
@@ -490,13 +502,23 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.records = max(s.records, projected.records)
 }
 
-// stampRecordLocked gives one record value a fresh identity. Every writer that
-// installs a record — installDASetRecordLocked and the TTL decrement — calls it,
-// so no two record states of one da_id ever share a revision and a removed
-// da_id's next record never reuses its predecessor's.
-func (s *DARelayState) stampRecordLocked(record *daRelaySetRecord) {
-	s.records++
-	record.revision = s.records
+// nextRecordRevisionLocked is the CHECKED half of the record stamp, and the ONLY
+// producer of a revision value. The add is checked like every other accumulator
+// in this state because an exhausted space would WRAP to 0 — exactly the value an
+// ABSENT record presents — so a plan built against a real record would recheck as
+// current. It writes nothing, so the ceiling fails closed while the caller may.
+func (s *DARelayState) nextRecordRevisionLocked() (uint64, error) {
+	return checkedAddUint64(s.records, 1)
+}
+
+// stampRecordLocked gives one record value the identity nextRecordRevisionLocked
+// derived. Every writer that installs a record — installDASetRecordLocked and the
+// TTL decrement — calls it, so no two record states of one da_id ever share a
+// revision and a removed da_id's next record never reuses its predecessor's. It
+// is assignment only: the fallible half already ran.
+func (s *DARelayState) stampRecordLocked(record *daRelaySetRecord, revision uint64) {
+	s.records = revision
+	record.revision = revision
 }
 
 func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string, now time.Time) ([]daRelayPrefetchPlan, string) {

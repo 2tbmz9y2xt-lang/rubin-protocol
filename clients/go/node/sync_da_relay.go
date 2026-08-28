@@ -474,9 +474,9 @@ func (i *preparedCanonicalDAImage) publish() {
 //
 // Each record is walked TWICE, in ordered phases, never interleaved: phase 1
 // (canonicalRetainedDASetIdentity) parses and role-checks EVERY member and
-// checkRetainedDAStoredIdentity then binds each member's stored identity to that
-// same parse, phase 2 (canonicalRetainedDAMembersFinalChainValid) validates
-// every member against C1.
+// checkRetainedDAStoredIdentity then binds the record's state and each member's
+// stored fields to that same parse, phase 2
+// (canonicalRetainedDAMembersFinalChainValid) validates every member against C1.
 // Precedence follows the loop nesting: the FIRST record in ascending da_id order
 // that reports an error wins, and inside that one record phase 1 outranks phase
 // 2 — so a LATER member's parse/role terminal outranks an EARLIER member's
@@ -495,7 +495,7 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 		if err != nil {
 			return nil, err
 		}
-		if err := checkRetainedDAStoredIdentity(record, identity); err != nil {
+		if err := checkRetainedDAStoredIdentity(record, members); err != nil {
 			return nil, err
 		}
 		valid, err := canonicalRetainedDAMembersFinalChainValid(members, chain)
@@ -510,29 +510,63 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 	return removals, nil
 }
 
-// checkRetainedDAStoredIdentity binds each member's STORED admission identity to
-// the identity its own retained bytes canonically produce, consuming the parse
+// checkRetainedDAStoredIdentity binds each member's STORED admission fields to
+// the canonical parse of its own retained bytes, consuming the parse
 // canonicalRetainedDASetIdentity already performed — no member is parsed twice —
-// in that walk's own order.
+// and walking the members in that same exact-identity order.
 //
 // The role phase proves the bytes are the right ROLE for their slot; nothing
-// else proves they are the right TRANSACTION. A member whose stored txid or
-// wtxid disagrees with its bytes is record-mismatched: the locator index, the DA
-// claim and every removal name it by the stored txid while a block would carry
-// the parsed one, so it is terminal before the durable commit.
-func checkRetainedDAStoredIdentity(record daRelaySetRecord, identity canonicalDASetIdentity) error {
-	if record.commit.chunkCount != 0 {
-		stored := canonicalDATxIdentity{txid: record.commit.txid, wtxid: record.commit.wtxid}
-		if stored != identity.commit {
-			return terminalCanonicalDAError(fmt.Errorf("retained DA commit for %x stores identity %x/%x and its retained bytes are %x/%x", record.daID, stored.txid, stored.wtxid, identity.commit.txid, identity.commit.wtxid))
+// else proves they are the right TRANSACTION. A member whose stored fields
+// disagree with its bytes is record-mismatched: the locator index, the DA claim
+// and every removal name it by those stored fields while a block would carry the
+// parsed ones, so it is terminal before the durable commit.
+//
+// The record's own STATE is checked here too, as membership of the closed set:
+// canonical planning is otherwise the only retained-DA reader that never
+// inspects state at all, so a value outside {ORPHAN_CHUNKS, STAGED_COMMIT,
+// COMPLETE_SET} would survive the transition and keep deciding completion,
+// eviction and peer-cleanup eligibility.
+func checkRetainedDAStoredIdentity(record daRelaySetRecord, members []canonicalRetainedDAMember) error {
+	if !record.state.valid() {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x holds state %d outside the closed set", record.daID, record.state))
+	}
+	stored := record.members()
+	if len(stored) != len(members) {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x holds %d members and its parse walked %d", record.daID, len(stored), len(members)))
+	}
+	for i := range members {
+		if err := checkRetainedDAStoredMember(record, stored[i], members[i]); err != nil {
+			return err
 		}
 	}
-	for _, chunk := range identity.chunks {
-		member := record.chunks[chunk.index]
-		stored := canonicalDATxIdentity{txid: member.txid, wtxid: member.wtxid}
-		if stored != chunk.canonicalDATxIdentity {
-			return terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x stores identity %x/%x and its retained bytes are %x/%x", chunk.index, record.daID, stored.txid, stored.wtxid, chunk.txid, chunk.wtxid))
-		}
+	return nil
+}
+
+// checkRetainedDAStoredMember binds ONE member's stored fields to its own parse:
+// the identity pair, the ordered inputs, and — for a commit — the payload
+// commitment.
+//
+// The INPUTS are the same binding the standard domain makes in
+// checkMempoolSnapshotEntry, and for the same reason: they key the DA claim, its
+// by-outpoint owner rows and every victim descriptor, so a member whose stored
+// inputs name outpoint B while its bytes spend A would have D1 keep a
+// transaction spending A under a claim protecting B — invisible to the claim
+// phase, whose claim was built from those same stored inputs and therefore
+// agrees with itself. The COMMIT's payload commitment is the same class: a
+// cached copy of its own COV_TYPE_DA_COMMIT output, and the sole authority on
+// whether an arriving last chunk completes the set.
+func checkRetainedDAStoredMember(record daRelaySetRecord, stored daRelayMemberIdentity, parsed canonicalRetainedDAMember) error {
+	if stored.txid != parsed.ids.TxID || stored.wtxid != parsed.ids.WTxID {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x stores identity %x/%x and its retained bytes are %x/%x", parsed.label, record.daID, stored.txid, stored.wtxid, parsed.ids.TxID, parsed.ids.WTxID))
+	}
+	if inputs := relayMetadataInputs(parsed.tx); !slices.Equal(stored.inputs, inputs) {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x stores ordered inputs %v and its retained bytes spend %v", parsed.label, record.daID, stored.inputs, inputs))
+	}
+	if parsed.tx.TxKind != 0x01 {
+		return nil
+	}
+	if commitment, ok := daCommitPayloadCommitment(parsed.tx); !ok || commitment != record.commit.payloadCommitment {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x stores payload commitment %x and its retained bytes commit to %x (usable=%v)", parsed.label, record.daID, record.commit.payloadCommitment, commitment, ok))
 	}
 	return nil
 }

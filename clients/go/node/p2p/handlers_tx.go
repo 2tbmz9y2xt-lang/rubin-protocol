@@ -81,6 +81,14 @@ func (p *peer) handleStandardTx(txBytes []byte, tx *consensus.Tx, txid [32]byte)
 // keys the quota lock by it (service_peer_lifecycle.go:79) — but the arm is
 // TOTAL regardless: an addressless peer is refused and the read loop drops the
 // connection (peer_runtime.go:249), with nothing retained and no score moved.
+//
+// The whole admission runs under THIS quota identity's key lock, the same lock
+// registration and teardown take (service_peer_lifecycle.go:80, :103, :141), so
+// an admission and the teardown of the same quota key serialize and two
+// different keys still progress independently. It is the OUTERMOST lock of the
+// admission order — key, then the admission read guard, then DARelayState.mu,
+// then the owner — which is the order every existing holder of this key already
+// takes, so no schedule inverts. It is released on every exit by the defer.
 func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		if p.bumpBan(10, err.Error()) {
@@ -89,10 +97,13 @@ func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 		return nil
 	}
 	addr := p.addr()
-	provenance, err := node.NewPeerDAProvenance(addr, peerQuotaKey(addr))
+	quotaKey := peerQuotaKey(addr)
+	provenance, err := node.NewPeerDAProvenance(addr, quotaKey)
 	if err != nil {
 		return err
 	}
+	unlockQuota := p.service.lockPeerQuotaKey(quotaKey)
+	defer unlockQuota()
 	result, err := p.service.admitRelayDATx(addr, txBytes, tx, provenance)
 	if err != nil {
 		return nil //nolint:nilerr // admission rejections are peer-neutral, exactly as on the standard path

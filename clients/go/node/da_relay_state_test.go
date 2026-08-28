@@ -1616,18 +1616,12 @@ func TestDARelayPinnedPayloadDeltaKeepsOverflowAndCapErrorsDistinct(t *testing.T
 
 	state.pinnedPayloadBytes = 1
 	state.mu.Lock()
-	_, err := state.projectPinnedPayloadDeltaLocked(
-		daRelaySetRecord{state: daRelayStateCompleteSet, payloadBytes: 2},
-		daRelaySetRecord{},
-	)
+	_, err := state.projectPinnedPayloadDeltaLocked(daRelayRecordImage{oldPinned: 2})
 	state.mu.Unlock()
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
 
 	state.mu.Lock()
-	_, err = state.projectPinnedPayloadDeltaLocked(
-		daRelaySetRecord{},
-		daRelaySetRecord{state: daRelayStateCompleteSet, payloadBytes: 2},
-	)
+	_, err = state.projectPinnedPayloadDeltaLocked(daRelayRecordImage{newPinned: 2})
 	state.mu.Unlock()
 	requireDAErr(t, err, errDARelayPinnedPayloadCapExceeded)
 

@@ -252,11 +252,53 @@ func validateDAChunk(chunk daRelayChunk) error {
 	return nil
 }
 
+// daRelayRecordImage is everything about ONE record transition that is a PURE
+// function of the two record values: the accounting and pinned payload each side
+// implies, and the exact locator rows the old one retires and the new one
+// installs. DERIVING it walks both records and builds four maps; APPLYING it is
+// arithmetic and assignment.
+//
+// The split exists so the admission path can derive the image while PLANNING —
+// both of its records are frozen there, and the final lock's revision recheck
+// proves the old one has not moved — and leave the lock window with nothing to
+// walk, build or decide (RUBIN_COMPACT_BLOCKS.md Section 5.1: all allocation,
+// locator, record and accounting planning precedes the final DA lock).
+type daRelayRecordImage struct {
+	oldAccounting daRelayRecordAccounting
+	newAccounting daRelayRecordAccounting
+	oldPinned     uint64
+	newPinned     uint64
+	retire        map[[32]byte]daRelayLocator
+	install       map[[32]byte]daRelayLocator
+}
+
+func daRelayRecordImageOf(oldRecord, newRecord daRelaySetRecord) (daRelayRecordImage, error) {
+	oldAccounting, err := oldRecord.orphanAccounting()
+	if err != nil {
+		return daRelayRecordImage{}, err
+	}
+	newAccounting, err := newRecord.orphanAccounting()
+	if err != nil {
+		return daRelayRecordImage{}, err
+	}
+	return daRelayRecordImage{
+		oldAccounting: oldAccounting,
+		newAccounting: newAccounting,
+		oldPinned:     oldRecord.pinnedPayloadAccountingBytes(),
+		newPinned:     newRecord.pinnedPayloadAccountingBytes(),
+		retire:        oldRecord.locators(),
+		install:       newRecord.locators(),
+	}, nil
+}
+
 // daRelayRecordPlacement is one record's fully computed, cap-checked placement:
-// the record it replaces plus the new ABSOLUTE value of every counter it
-// touches. Producing it is the whole fallible half; applying it cannot fail.
+// the locator rows to retire and install, the record revision to stamp, and the
+// new ABSOLUTE value of every counter the record touches. Producing it is the
+// whole fallible half; applying it cannot fail, allocate or decide anything.
 type daRelayRecordPlacement struct {
-	oldRecord   daRelaySetRecord
+	retire      map[[32]byte]daRelayLocator
+	install     map[[32]byte]daRelayLocator
+	revision    uint64
 	orphanBytes uint64
 	peerBytes   map[string]uint64
 	daBytes     uint64
@@ -276,21 +318,44 @@ func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	return nil
 }
 
-// projectDASetRecordLocked is the FALLIBLE half: it derives every counter the
-// record would leave behind and cap-checks each, mutating nothing. The admission
-// path, which must reach the owner LAST, uses it and installs afterwards.
+// projectDASetRecordLocked is the FALLIBLE half for a caller that has NOT already
+// derived the record image: it derives it here and projects it. The admission
+// path deliberately does not use it — it carries the image in its plan.
 func (s *DARelayState) projectDASetRecordLocked(record daRelaySetRecord) (daRelayRecordPlacement, error) {
-	oldRecord := s.sets[record.daID]
-	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
+	image, err := daRelayRecordImageOf(s.sets[record.daID], record)
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(oldRecord, record)
+	return s.projectDARecordImageLocked(record.daID, image)
+}
+
+// projectDARecordImageLocked cap-checks one already-derived record image against
+// the LIVE counters and mints the record revision. It is checked arithmetic over
+// values the image carries, and it mutates nothing.
+//
+// The live counters and the revision high-water are deliberately NOT part of the
+// image: they are shared by every record, so re-deriving them here is what lets a
+// concurrent admission of a DIFFERENT record neither invalidate this projection
+// nor be lost to it. A REMOVAL shares this projection and so also refuses at the
+// exhausted revision ceiling, though it consumes no revision — fail-closed is the
+// posture a state whose record-identity source is exhausted should take.
+func (s *DARelayState) projectDARecordImageLocked(daID [32]byte, image daRelayRecordImage) (daRelayRecordPlacement, error) {
+	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(daID, image)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(image)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	revision, err := s.nextRecordRevisionLocked()
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
 	return daRelayRecordPlacement{
-		oldRecord:   oldRecord,
+		retire:      image.retire,
+		install:     image.install,
+		revision:    revision,
 		orphanBytes: orphanBytes,
 		peerBytes:   peerBytes,
 		daBytes:     daBytes,
@@ -299,14 +364,15 @@ func (s *DARelayState) projectDASetRecordLocked(record daRelaySetRecord) (daRela
 	}, nil
 }
 
-// installDASetRecordLocked is the NON-FALLIBLE half: assignment only. It stamps
-// the record's revision, which is what a later plan-currency recheck reads, and
-// must be called with the placement projectDASetRecordLocked returned for THIS
-// record, under the same lock hold.
+// installDASetRecordLocked is the NON-FALLIBLE half: assignment only. Nothing
+// here walks a record, builds a map, derives a value or can fail — the placement
+// carries every one of those already — which is what lets the admission path run
+// it AFTER the owner reserve. It must be called with the placement projected for
+// THIS record, under the same lock hold.
 func (s *DARelayState) installDASetRecordLocked(record daRelaySetRecord, placement daRelayRecordPlacement) {
-	s.stampRecordLocked(&record)
+	s.stampRecordLocked(&record, placement.revision)
 	s.sets[record.daID] = record
-	s.replaceLocatorsLocked(placement.oldRecord, record)
+	s.replaceLocatorsLocked(placement)
 	s.orphanBytes = placement.orphanBytes
 	s.applyProjectedPeerBytes(placement.peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, placement.daBytes)
@@ -318,42 +384,45 @@ func (s *DARelayState) installDASetRecordLocked(record daRelaySetRecord, placeme
 }
 
 func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
-	emptyRecord := daRelaySetRecord{daID: record.daID}
-	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(record, emptyRecord)
+	image, err := daRelayRecordImageOf(record, daRelaySetRecord{daID: record.daID})
 	if err != nil {
 		return err
 	}
-	pinnedBytes, err := s.projectPinnedPayloadDeltaLocked(record, emptyRecord)
+	placement, err := s.projectDARecordImageLocked(record.daID, image)
 	if err != nil {
 		return err
 	}
 	delete(s.sets, record.daID)
-	s.replaceLocatorsLocked(record, emptyRecord)
-	s.orphanBytes = orphanBytes
-	s.applyProjectedPeerBytes(peerBytes)
-	s.applyProjectedDAIDBytes(record.daID, daBytes)
-	s.orphanCommitOverheadBytes = commitBytes
-	s.pinnedPayloadBytes = pinnedBytes
+	s.replaceLocatorsLocked(placement)
+	s.orphanBytes = placement.orphanBytes
+	s.applyProjectedPeerBytes(placement.peerBytes)
+	s.applyProjectedDAIDBytes(record.daID, placement.daBytes)
+	s.orphanCommitOverheadBytes = placement.commitBytes
+	s.pinnedPayloadBytes = placement.pinnedBytes
 	s.prefetch.releaseSet(record.daID)
 	return nil
 }
 
-// replaceLocatorsLocked retires the old record's txid rows and installs the new
-// one's. It is called by the only two writers that change record MEMBERSHIP
-// (installMemberTokenLocked and the TTL decrement also assign s.sets, but never
-// add or remove a member), which is what keeps the locator index and the record
-// image one bijection: a row can be neither orphaned by a removal nor
-// duplicated by a restage.
-func (s *DARelayState) replaceLocatorsLocked(oldRecord, newRecord daRelaySetRecord) {
+// replaceLocatorsLocked retires the rows the placement's image named for the old
+// record and installs the ones it named for the new. It is called by the only two
+// writers that change record MEMBERSHIP (installMemberTokenLocked and the TTL
+// decrement also assign s.sets, but never add or remove a member), which is what
+// keeps the locator index and the record image one bijection: a row can be
+// neither orphaned by a removal nor duplicated by a restage.
+//
+// It takes the PLACEMENT, never the two records: the rows are enumerated while
+// the image is derived, so this — which may run after an owner reserve — has no
+// record to walk and no map to build.
+func (s *DARelayState) replaceLocatorsLocked(placement daRelayRecordPlacement) {
 	if s.locators == nil {
 		s.locators = map[[32]byte]daRelayLocator{}
 	}
-	for txid, locator := range oldRecord.locators() {
+	for txid, locator := range placement.retire {
 		if s.locators[txid] == locator {
 			delete(s.locators, txid)
 		}
 	}
-	for txid, locator := range newRecord.locators() {
+	for txid, locator := range placement.install {
 		s.locators[txid] = locator
 	}
 	// A ZERO txid is not an identity and must never be locatable: it is the shape
@@ -363,20 +432,13 @@ func (s *DARelayState) replaceLocatorsLocked(oldRecord, newRecord daRelaySetReco
 	delete(s.locators, [32]byte{})
 }
 
-func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, map[string]uint64, uint64, uint64, error) {
-	oldAccounting, err := oldRecord.orphanAccounting()
-	if err != nil {
-		return 0, nil, 0, 0, err
-	}
-	newAccounting, err := newRecord.orphanAccounting()
-	if err != nil {
-		return 0, nil, 0, 0, err
-	}
+func (s *DARelayState) projectOrphanAccountingDeltaLocked(daID [32]byte, image daRelayRecordImage) (uint64, map[string]uint64, uint64, uint64, error) {
+	oldAccounting, newAccounting := image.oldAccounting, image.newAccounting
 	orphanBytes, err := checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded)
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
-	daBytes, err := checkedApplyUint64DeltaCap(s.orphanBytesByDAID[newRecord.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded)
+	daBytes, err := checkedApplyUint64DeltaCap(s.orphanBytesByDAID[daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded)
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
@@ -391,8 +453,8 @@ func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 	return orphanBytes, peerBytes, daBytes, commitBytes, nil
 }
 
-func (s *DARelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRelaySetRecord) (uint64, error) {
-	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, oldRecord.pinnedPayloadAccountingBytes(), newRecord.pinnedPayloadAccountingBytes())
+func (s *DARelayState) projectPinnedPayloadDeltaLocked(image daRelayRecordImage) (uint64, error) {
+	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, image.oldPinned, image.newPinned)
 	if err != nil {
 		return 0, err
 	}
