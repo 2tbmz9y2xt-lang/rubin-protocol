@@ -14,7 +14,8 @@ import (
 // A DA transaction (tx_kind 0x01 or 0x02) EXITS at that dispatch, before the
 // seen-set, before relay-pool admission, before the metadata producer and before
 // any MSG_TX announcement: remote DA has no standard residency and creates no
-// standard state at all. The standard 0x00 path below is unchanged.
+// standard state at all. The standard 0x00 path in handleStandardTx is
+// unchanged.
 func (p *peer) handleTx(txBytes []byte) error {
 	// Defense-in-depth oversize guard (parity with Rust
 	// `tx_relay::handle_received_tx` oversize guard, surfaced as
@@ -40,6 +41,13 @@ func (p *peer) handleTx(txBytes []byte) error {
 	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
 		return p.handleRelayDATx(txBytes, tx)
 	}
+	return p.handleStandardTx(txBytes, tx, txid)
+}
+
+// handleStandardTx is the remote standard arm (tx_kind 0x00): the seen-set,
+// relay-pool admission and the MSG_TX announcement, reached only after
+// handleTx's dispatch.
+func (p *peer) handleStandardTx(txBytes []byte, tx *consensus.Tx, txid [32]byte) error {
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
 	// Add is the one seen-set authority: it reports false for an already-seen
