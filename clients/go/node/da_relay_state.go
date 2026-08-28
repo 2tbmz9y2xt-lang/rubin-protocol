@@ -32,11 +32,11 @@ const (
 )
 
 // valid reports membership of the CLOSED record-state set. It is the single
-// authority both consumers of a stored state ask — the off-lock retained
-// observation and canonical D preparation — so an out-of-set value can never be
-// read as "some state" by one of them and refused by the other. Every state
-// STORED by a writer comes from the three constants above, so a value outside
-// them is corrupt retained state, never a candidate property.
+// authority every consumer of a stored state asks — the off-lock retained
+// observation, canonical D preparation and peer teardown — so an out-of-set
+// value can never be read as "some state" by one of them and refused by another.
+// Every state STORED by a writer comes from the three constants above, so a value
+// outside them is corrupt retained state, never a candidate property.
 func (s daRelaySetState) valid() bool { return s <= daRelayStateCompleteSet }
 
 type daRelayCaps struct {
@@ -107,13 +107,11 @@ func (c daRelayCaps) validateRelativeCaps() error {
 type daRelaySetRecord struct {
 	daID  [32]byte
 	state daRelaySetState
-	// revision is this record's IDENTITY, not a statistic: every writer that
-	// installs a record value stamps it from the state's monotone counter, so two
-	// record values are the same record state exactly when their revisions agree.
-	// It is what lets an admission plan built OUTSIDE the final DA lock prove,
-	// under that lock, that the record it planned against has not moved. An ABSENT
-	// record reads as the zero value, and no record a writer installs carries
-	// revision 0, so present and absent are never confused.
+	// revision is this record's IDENTITY, not a statistic: two record values are
+	// the same record state exactly when their revisions agree, which is what lets
+	// a plan built OUTSIDE the final DA lock prove under it that its record has not
+	// moved. An ABSENT record reads as the zero value and no installed record
+	// carries revision 0, so present and absent are never confused.
 	revision           uint64
 	receivedTime       uint64
 	payloadBytes       uint64
@@ -194,7 +192,6 @@ type daRelayCommit struct {
 	daRelayMemberIdentity
 	daID              [32]byte
 	payloadCommitment [32]byte
-	peerQuotaKey      string
 	chunkCount        uint16
 	wireBytes         uint64
 	txBytes           []byte
@@ -202,14 +199,13 @@ type daRelayCommit struct {
 
 type daRelayChunk struct {
 	daRelayMemberIdentity
-	daID         [32]byte
-	chunkHash    [32]byte
-	peerQuotaKey string
-	chunkIndex   uint16
-	payload      []byte
-	wireBytes    uint64
-	txBytes      []byte
-	hashChecked  bool
+	daID        [32]byte
+	chunkHash   [32]byte
+	chunkIndex  uint16
+	payload     []byte
+	wireBytes   uint64
+	txBytes     []byte
+	hashChecked bool
 }
 
 type daRelayCompletionSnapshot struct {
@@ -220,9 +216,7 @@ type daRelayCompletionSnapshot struct {
 }
 
 type daRelayCompletionChunkSnapshot struct {
-	chunkHash  [32]byte
-	chunkIndex uint16
-	payload    []byte
+	payload []byte
 }
 
 var (
@@ -266,15 +260,13 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
-	// locators is the txid -> exact member locator index. It is maintained by
-	// applyDASetRecordLocked and removeDASetRecordLocked ONLY, so it cannot drift
-	// from s.sets without one of those two writers, and it is the sole txid
+	// locators is the txid -> exact member locator index, maintained ONLY by
+	// installDASetRecordLocked and removeDASetRecordLocked, and the sole txid
 	// authority: no second raw-byte or record store exists.
 	locators map[[32]byte]daRelayLocator
 	// records is the monotone source of daRelaySetRecord.revision. It is carried
-	// through cloneForAtomicBatchLocked and publishAtomicBatchLocked so a stamp
-	// minted on a projection stays unique once that projection is published, and
-	// it is deliberately not part of the observable image.
+	// through the clone/publish pair so a stamp minted on a projection stays
+	// unique once published, and is not part of the observable image.
 	records uint64
 }
 
@@ -435,9 +427,8 @@ func (s *DARelayState) orphanBytesForDAID(daID [32]byte) uint64 {
 
 // advanceOrphanTTLLocked runs the TTL walk over the PROJECTED image: every
 // incomplete record either loses one TTL block or is removed WHOLE together with
-// every member claim it owns. It runs on a private clone, so it publishes
-// nothing; the caller collects the victim claims and publishes both halves under
-// one owner hold.
+// every member claim it owns. It publishes nothing; the caller couples the
+// projection and the victim claims under one owner hold.
 func (s *DARelayState) advanceOrphanTTLLocked() ([]DAAdmissionVictim, error) {
 	var victims []DAAdmissionVictim
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
@@ -503,10 +494,9 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 }
 
 // nextRecordRevisionLocked is the CHECKED half of the record stamp, and the ONLY
-// producer of a revision value. The add is checked like every other accumulator
-// in this state because an exhausted space would WRAP to 0 — exactly the value an
-// ABSENT record presents — so a plan built against a real record would recheck as
-// current. It writes nothing, so the ceiling fails closed while the caller may.
+// producer of a revision value. The add is checked because an exhausted space
+// would WRAP to 0 — exactly the value an ABSENT record presents — so a stale plan
+// would recheck as current. It writes nothing, so the ceiling fails closed.
 func (s *DARelayState) nextRecordRevisionLocked() (uint64, error) {
 	return checkedAddUint64(s.records, 1)
 }

@@ -255,12 +255,11 @@ func TestCanonicalDAClaimPhaseIsTerminalForEveryClaimDefect(t *testing.T) {
 // LOCATOR half of the one bijection D preparation proves, plus the stored member
 // identity the role checks alone cannot bind.
 //
-// The claim phase walks members and asks the owner about each; none of these
-// defects is visible to it — a member the index forgot, a row pointing at no
-// live member, and a member whose stored identity is not the identity its own
-// retained bytes produce all leave every member-to-claim binding intact. Each is
-// TERMINAL during planning, before the durable commit, with the live image and
-// the prepared candidate untouched.
+// None of these defects is visible to the claim phase — a member the index
+// forgot, a row pointing at no live member, and a member whose stored identity is
+// not the one its own bytes produce all leave every member-to-claim binding
+// intact. Each is TERMINAL during planning, before the durable commit, with the
+// live image and the prepared candidate untouched.
 //
 // The nil-plan arm is deliberately included: the locator index exists whether or
 // not an owner is bound, so the phase must not be skippable with the claim one.

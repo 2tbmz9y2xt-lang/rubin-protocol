@@ -69,32 +69,35 @@ func (p *peer) handleStandardTx(txBytes []byte, tx *consensus.Tx, txid [32]byte)
 // check keeps its existing peer consequence, and PEER provenance is built from
 // this peer's own address and its normalized quota key.
 //
-// The ONLY negative peer effect on this arm is the existing +10, applied from
-// the admission's SameDAIDCommitConflict bool AND this arm's PEER provenance —
+// The ONLY negative peer effect the ADMISSION contributes is the existing +10,
+// applied from its SameDAIDCommitConflict bool AND this arm's PEER provenance —
 // never from tx kind, error text or DUPLICATE alone (RUBIN_COMPACT_BLOCKS.md
-// Section 5.1); every other admission outcome is peer-neutral, exactly as on
-// the standard path.
+// Section 5.1); every other outcome is peer-neutral, as on the standard path.
 //
 // The address is read ONCE and both identities derive from that one value, so
 // scoring and quota accounting name one subject. A REGISTERED peer cannot carry
 // an empty address — the handshake binds it (handshake.go:46) and registerPeer
-// keys the quota lock by it (service_peer_lifecycle.go:79) — but the arm is
-// TOTAL regardless: an addressless peer is refused and the read loop drops the
+// keys the quota lock by it (service_peer_lifecycle.go:79) — but the arm is TOTAL
+// regardless: an addressless peer is refused and the read loop drops the
 // connection (peer_runtime.go:249), with nothing retained and no score moved.
 //
-// On a live engine the whole admission runs under THIS quota identity's key
-// lock, the one registration and teardown take (service_peer_lifecycle.go:80,
-// :103, :141), so an admission and the teardown of one quota key serialize and
-// two different keys still progress independently. It is the OUTERMOST lock of
-// the admission order — key, then the read guard, then DARelayState.mu, then
-// the owner — which is the order every existing holder of this key already
-// takes, so no schedule inverts. It is released on every exit by the defer.
+// On a live engine the whole admission runs under THIS quota identity's key lock,
+// the one registration and teardown take (service_peer_lifecycle.go:80, :103,
+// :141), so an admission and the teardown of one quota key serialize while two
+// different keys still progress independently. It is the OUTERMOST lock of the
+// admission order — key, then the read guard, then DARelayState.mu, then the
+// owner — the order every existing holder of this key already takes, so no
+// schedule inverts, and the defer releases it on every exit.
 //
-// The key is NOT taken on a latched engine: acquireDAAdmissionHold waits on a
-// fence a terminal transition never releases, so holding the key across that
-// wait would park unregisterPeer for the same key forever. A12's residual is a
-// WAITING ADMISSION — which this call still becomes — never a BLOCKED TEARDOWN.
-// Best effort, not a lock order, exactly as in releaseDAQuotaIfInactiveLocked.
+// The key is skipped on an ALREADY-LATCHED engine, the same best-effort check
+// releaseDAQuotaIfInactiveLocked makes and NOT a lock order: acquireDAAdmissionHold
+// waits on a fence a terminal transition never releases (beginCanonicalTransition
+// write-locks admissionMu at sync.go:925 and the terminal arm of
+// canonicalTransition.end latches at sync.go:955 without unlocking it), so taking
+// the key across that wait would park unregisterPeer for it. TerminalFaulted() is
+// read OUTSIDE the state it judges, so a latch landing after this check still
+// parks this call WITH the key, and peer teardown for that key parks with it: the
+// A12/F13 residual, admitted until restart or process termination.
 func (p *peer) handleRelayDATx(txBytes []byte, tx *consensus.Tx) error {
 	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
 		if p.bumpBan(10, err.Error()) {

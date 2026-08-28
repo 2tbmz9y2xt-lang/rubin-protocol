@@ -469,21 +469,21 @@ func TestDARelayAccountingUsesRetainedTxByteLengths(t *testing.T) {
 		daID:  daID,
 		state: daRelayStateStagedCommit,
 		commit: daRelayCommit{
-			daID:         daID,
-			chunkCount:   1,
-			wireBytes:    1,
-			txBytes:      cloneBytes(commitTx),
-			peerQuotaKey: "commit-peer",
+			daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "commit-peer")},
+			daID:                  daID,
+			chunkCount:            1,
+			wireBytes:             1,
+			txBytes:               cloneBytes(commitTx),
 		},
 		chunks: map[uint16]daRelayChunk{
 			0: {
-				daID:         daID,
-				chunkIndex:   0,
-				chunkHash:    sha3.Sum256(payload),
-				payload:      cloneBytes(payload),
-				wireBytes:    1,
-				txBytes:      cloneBytes(chunkTx),
-				peerQuotaKey: "chunk-peer",
+				daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "chunk-peer")},
+				daID:                  daID,
+				chunkIndex:            0,
+				chunkHash:             sha3.Sum256(payload),
+				payload:               cloneBytes(payload),
+				wireBytes:             1,
+				txBytes:               cloneBytes(chunkTx),
 			},
 		},
 	}
@@ -638,7 +638,7 @@ func TestDARelayRejectsDuplicatesBeforeMutation(t *testing.T) {
 	if state.sets[daID].commit.wireBytes != record.commit.wireBytes || state.orphanBytes != record.wireBytes {
 		t.Fatalf("duplicate commit mutated state: commit=%d orphan=%d want commit=%d orphan=%d", state.sets[daID].commit.wireBytes, state.orphanBytes, record.commit.wireBytes, record.wireBytes)
 	}
-	if got := state.sets[daID].commit.peerQuotaKey; got != "peer-a" {
+	if got := state.sets[daID].commit.provenance.quotaKey(); got != "peer-a" {
 		t.Fatalf("duplicate commit peer=%q, want first peer", got)
 	}
 	if got := state.orphanBytesForPeerQuotaKey("peer-b"); got != 0 {
@@ -678,8 +678,8 @@ func TestDARelayDuplicateCommitAfterOrphanChunksKeepsFirstSeenState(t *testing.T
 	requireDAErr(t, err, errDARelayDuplicateCommit)
 	duplicate.txBytes[0] = 'X'
 	stored := state.sets[daID]
-	if stored.commit.wireBytes != record.commit.wireBytes || stored.commit.peerQuotaKey != "peer-b" {
-		t.Fatalf("duplicate commit replaced first commit: wire=%d peer=%q", stored.commit.wireBytes, stored.commit.peerQuotaKey)
+	if stored.commit.wireBytes != record.commit.wireBytes || stored.commit.provenance.quotaKey() != "peer-b" {
+		t.Fatalf("duplicate commit replaced first commit: wire=%d peer=%q", stored.commit.wireBytes, stored.commit.provenance.quotaKey())
 	}
 	if !reflect.DeepEqual(stored.commit.txBytes, []byte("first-commit")) {
 		t.Fatalf("duplicate commit mutated stored tx bytes: %q", stored.commit.txBytes)
@@ -1019,15 +1019,13 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		state, ids := newDARelayAtomicBatchState(t, "peer-drop")
 		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(ids[0], 1, 11))
 		corrupt := daRelayOverflowOrphanAccountingRecord(ids[2])
-		corrupt.commit.peerQuotaKey = "peer-keep"
 		corrupt.commit.provenance = daRelayTestProvenance(t, "peer-keep")
 		sibling := corrupt.chunks[0]
-		sibling.peerQuotaKey = "peer-keep"
 		sibling.provenance = daRelayTestProvenance(t, "peer-keep")
 		corrupt.chunks[0] = sibling
 		corrupt.chunks[1] = daRelayChunk{
 			daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "peer-drop")},
-			daID:                  ids[2], peerQuotaKey: "peer-drop", chunkIndex: 1, payload: []byte{1}, wireBytes: 1,
+			daID:                  ids[2], chunkIndex: 1, payload: []byte{1}, wireBytes: 1,
 		}
 		state.sets[ids[2]] = corrupt
 		state.orphanBytesByDAID[ids[2]] = corrupt.wireBytes
@@ -1629,11 +1627,11 @@ func TestDARelayPinnedPayloadDeltaKeepsOverflowAndCapErrorsDistinct(t *testing.T
 		state:     daRelayStateStagedCommit,
 		wireBytes: ^uint64(0),
 		commit: daRelayCommit{
-			peerQuotaKey: "peer-a",
-			wireBytes:    ^uint64(0),
+			daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "peer-a")},
+			wireBytes:             ^uint64(0),
 		},
 		chunks: map[uint16]daRelayChunk{
-			0: {peerQuotaKey: "peer-a", wireBytes: 1},
+			0: {daRelayMemberIdentity: daRelayMemberIdentity{provenance: daRelayTestProvenance(t, "peer-a")}, wireBytes: 1},
 		},
 	}).orphanAccounting()
 	requireDAErr(t, err, errDARelayArithmeticOverflow)
@@ -1953,7 +1951,6 @@ func daRelayOverflowOrphanAccountingRecord(daID [32]byte) daRelaySetRecord {
 		commit: daRelayCommit{
 			daRelayMemberIdentity: daRelayMemberIdentity{provenance: overflowPeer},
 			daID:                  daID,
-			peerQuotaKey:          "peer-overflow",
 			chunkCount:            2,
 			wireBytes:             ^uint64(0),
 		},
@@ -1961,7 +1958,6 @@ func daRelayOverflowOrphanAccountingRecord(daID [32]byte) daRelaySetRecord {
 			0: {
 				daRelayMemberIdentity: daRelayMemberIdentity{provenance: overflowPeer},
 				daID:                  daID,
-				peerQuotaKey:          "peer-overflow",
 				chunkIndex:            0,
 				payload:               []byte{1},
 				wireBytes:             1,

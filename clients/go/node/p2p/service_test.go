@@ -347,8 +347,6 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
 	f := newDAIngressFixture(t, sink, 2)
-	// Retained while chain-valid, then made final-invalid by spending its input
-	// out from under it in the block the transition applies.
 	txid := retainOrphanDAChunk(t, f, daRelayTestID(100), "127.0.0.1:19111")
 	requireRetainedDA(t, sink, txid, true, "the orphan before any block was applied")
 	// The member is retained while chain-valid and then made final-INVALID: its
@@ -377,10 +375,8 @@ func retainOrphanDAChunk(t *testing.T, f *daIngressFixture, daID [32]byte, peerA
 	return mustCanonicalTxID(t, raw)
 }
 
-// requireRetainedDA asserts retained-DA residency by exact txid. It is the
-// DIRECT observation LookupRetainedTx exists for, and it replaces the older
-// proxy — restaging the same member and reading the duplicate refusal — which no
-// longer exists as a caller-reachable operation.
+// requireRetainedDA asserts retained-DA residency by exact txid, the DIRECT
+// observation LookupRetainedTx exists for.
 func requireRetainedDA(t *testing.T, h *testHarness, txid [32]byte, want bool, what string) {
 	t.Helper()
 	snapshot, owned, err := h.service.daRelay.LookupRetainedTx(txid)

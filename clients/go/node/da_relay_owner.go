@@ -8,11 +8,10 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// Seam: the owner-coupled retained-DA surface. Every retained DA member, its
-// txid locator and its exact finalized PendingOutpointOwner DA claim are ONE
-// bijection, and this file owns the three writers that may change it — remote or
-// direct admission, peer teardown, and TTL expiry — plus the read-only retained
-// lookup RUB-1169 consumes.
+// Seam: the owner-coupled retained-DA surface. Every retained DA member, its txid
+// locator and its exact finalized PendingOutpointOwner DA claim are ONE bijection,
+// and this file owns the three writers that may change it — admission, peer
+// teardown and TTL expiry — plus the read-only lookup RUB-1169 consumes.
 
 // daProvenanceKind is the CLOSED provenance set. Its zero value is not a member,
 // so a DAProvenance{} literal is invalid by construction and there is no fourth
@@ -250,12 +249,11 @@ func (s *DARelayState) checkAdmitDABound() error {
 	return nil
 }
 
-// classifyRetainedReplay is steps 4-5 of AdmitDA: one guarded raw observation,
-// then OFF-lock over the copy — integrity validation first (invalid located
-// evidence selects the existing INTERNAL, agreeing with LookupRetainedTx over
-// the same state), exact (txid, wtxid, raw) equality second (peer-neutral
-// DUPLICATE). ABSENT and integrity-valid nonexact evidence return done=false:
-// the observation is discarded and the ordinary order resumes.
+// classifyRetainedReplay is steps 4-5: ONE guarded raw observation, then OFF-lock
+// over the copy — integrity validation first (invalid located evidence selects
+// the existing INTERNAL, agreeing with LookupRetainedTx over the same state),
+// exact (txid, wtxid, raw) equality second. ABSENT and integrity-valid nonexact
+// evidence return done=false and the ordinary order resumes.
 func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte) (DAAdmissionResult, bool, error) {
 	observation := func() daRetainedObservation {
 		s.mu.Lock()
@@ -284,10 +282,8 @@ func (s *DARelayState) classifyRetainedReplay(owned []byte, txid, wtxid [32]byte
 // baseline still current before anything is applied, so a decision reached
 // off-lock is never applied to a record it did not observe, and two admissions
 // of DIFFERENT records never invalidate one another.
-// image is the record transition the staging implies, derived HERE from the two
-// frozen record values: the accounting each side contributes and the exact
-// locator rows to retire and install. Carrying it is what leaves the corridor
-// after the owner reserve with nothing to walk or allocate.
+// image is the record transition the staging implies (daRelayRecordImage),
+// derived HERE from the two frozen record values.
 type daRelayAdmissionPlan struct {
 	baseline uint64
 	staged   daRelayStagedMember
@@ -296,8 +292,6 @@ type daRelayAdmissionPlan struct {
 	stageErr error
 }
 
-// commitDAAdmission is AdmitDA's steps 7-8. PLANNING (step 7) runs OUTSIDE the
-// final DA lock and APPLICATION (step 8) inside it.
 func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayAdmissionMember) (DAAdmissionResult, error) {
 	plan, err := s.planDAAdmission(member)
 	if err != nil {
@@ -306,10 +300,8 @@ func (s *DARelayState) commitDAAdmission(admission *DAAdmission, member daRelayA
 	return s.applyDAAdmissionPlan(admission, member, plan)
 }
 
-// planDAAdmission is step 7: one DARelayState.mu window copies the record this
-// member belongs to, and every allocation, locator, record and victim decision
-// is then made OFF-lock on that private copy. It publishes nothing, touches no
-// live field and reaches no owner.
+// planDAAdmission is step 7, on a PRIVATE copy of the one record this member
+// joins, taken in its own DARelayState.mu window.
 //
 // Its own error return is reserved for a defect of the RETAINED record the plan
 // walked — a member that owes a claim and carries no token — which is fail-closed
@@ -335,30 +327,13 @@ func (s *DARelayState) planDAAdmission(member daRelayAdmissionMember) (daRelayAd
 	return plan, err
 }
 
-// applyDAAdmissionPlan is step 8, and the whole final DA lock. It rechecks, in
-// the contract's own order, duplicate/first-seen against the LIVE locator index,
-// the LIVE record the plan was built against, the accepted SEQUENCE and the
-// accounting BOUNDS, and only then reaches the owner. Nothing here parses, walks
-// the retained set or decides what the new record is: that is the plan.
-//
-// The recheck is total over what the plan actually froze. The staged record is a
-// pure function of ONE live input — the record itself — so its revision IS the
-// plan/live agreement; the two values the plan did NOT freeze, the accounting
-// counters and the sequence high-water, are re-derived here, which is why a
-// concurrent admission of a DIFFERENT record neither invalidates this plan nor
-// is lost to it. A raced change to THIS record is REFUSED with the existing
-// transient UNAVAILABLE and every image byte-identical.
-//
-// Order is the safety argument: everything fallible — the rechecks, the bound
-// projection and the owner reserve — runs before the FIRST live write, and what
-// follows is assignment into present keys.
-//
-// The candidate arriving here is FULLY VALIDATED, so the two duplicate arms are
-// Section 5.1's post-validation classes, both decided before any owner reserve
-// and both discarding the plan: a live locator row for the candidate txid (an
-// exact replay that raced a concurrent admission lands here) is peer-neutral
-// DUPLICATE, and a commit staging refusal whose staged commit txid is PROVEN
-// here to differ from the candidate's is DUPLICATE with SameDAIDCommitConflict.
+// applyDAAdmissionPlan is step 8 and the whole final DA lock: the duplicate,
+// plan-currency, sequence and bounds rechecks in the contract's own order, then
+// the owner. Nothing here parses, walks the retained set or decides what the new
+// record is — the plan carries all of that — everything fallible precedes the
+// FIRST live write, and the candidate arriving here is FULLY VALIDATED, so both
+// duplicate arms are Section 5.1's post-validation classes, decided before any
+// owner reserve and discarding the plan (recheckDAAdmissionPlanLocked).
 func (s *DARelayState) applyDAAdmissionPlan(admission *DAAdmission, member daRelayAdmissionMember, plan daRelayAdmissionPlan) (DAAdmissionResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -399,10 +374,9 @@ func (s *DARelayState) recheckDAAdmissionPlanLocked(member daRelayAdmissionMembe
 // reserve, and then the writes. Everything fallible precedes the FIRST of them.
 func (s *DARelayState) installDAAdmissionPlanLocked(admission *DAAdmission, member daRelayAdmissionMember, plan daRelayAdmissionPlan) (DAAdmissionResult, error) {
 	record := plan.staged.record
-	// The accepted-sequence RECHECK, in advanceAcceptedSequenceLocked's own
-	// semantics but without its write: one value per accepted member, the record
-	// keeps its FIRST member's stamp, and an exhausted space fails closed here
-	// with the high-water untouched.
+	// The accepted-sequence RECHECK, without advanceAcceptedSequenceLocked's own
+	// write: one value per accepted member, the record keeps its FIRST member's
+	// stamp, and an exhausted space fails closed with the high-water untouched.
 	sequence, err := checkedAddUint64(s.nextReceivedTime, 1)
 	if err != nil {
 		return DAAdmissionResult{}, err
@@ -429,10 +403,9 @@ func (s *DARelayState) installDAAdmissionPlanLocked(admission *DAAdmission, memb
 }
 
 // installMemberToken writes the finalized candidate token into the member slot
-// staging already created: assignment into present keys, no allocation, no
-// failure. Aliasing invariant: the receiver is the PLAN's own record and its
-// chunks map is the fresh copy the pure staging's cloneForStateMutation made —
-// never the live image's — so the write cannot reach live state before
+// staging already created. Aliasing invariant: the receiver is the PLAN's own
+// record and its chunks map is the fresh copy cloneForStateMutation made — never
+// the live image's — so the write cannot reach live state before
 // installDASetRecordLocked.
 func (r *daRelaySetRecord) installMemberToken(locator daRelayLocator, token PendingOutpointToken) {
 	if locator.kind == daRelayLocatorCommit {
@@ -457,11 +430,10 @@ func (m daRelayAdmissionMember) identity() daRelayMemberIdentity {
 // wtxid, fee, retained size and ordered inputs — so nothing a caller supplied
 // can become part of a retained member.
 //
-// It CONSUMES the admission's own canonical parse and never re-parses the
-// bytes: this candidate is parsed exactly once per admission (R9). The
-// self-consistency the former re-parse asserted is structural instead — the
-// admission builds tx, TxBytes, TxID, WTxID and RetainedBytes from ONE
-// consensus.ParseTx of one byte string (validateDACandidate) — and a caller may
+// It CONSUMES the admission's own canonical parse and never re-parses the bytes:
+// this candidate is parsed exactly once per admission (R9). Self-consistency is
+// structural instead — validateDACandidate builds tx, TxBytes, TxID, WTxID and
+// RetainedBytes from ONE consensus.ParseTx of one byte string — and a caller may
 // not supply a transaction, because the parse authority stays inside the owner.
 func daRelayAdmissionMemberOf(admission *DAAdmission, provenance DAProvenance) (daRelayAdmissionMember, error) {
 	snapshot, tx := admission.Snapshot(), admission.parsedTx()
@@ -490,7 +462,6 @@ func daRelayAdmissionCommitOf(tx *consensus.Tx, identity daRelayMemberIdentity, 
 			daRelayMemberIdentity: identity,
 			daID:                  tx.DaCommitCore.DaID,
 			payloadCommitment:     commitment,
-			peerQuotaKey:          identity.provenance.quotaKey(),
 			chunkCount:            tx.DaCommitCore.ChunkCount,
 			wireBytes:             identity.retainedBytes,
 			txBytes:               raw,
@@ -503,7 +474,6 @@ func daRelayAdmissionChunkOf(tx *consensus.Tx, identity daRelayMemberIdentity, r
 		daRelayMemberIdentity: identity,
 		daID:                  tx.DaChunkCore.DaID,
 		chunkHash:             tx.DaChunkCore.ChunkHash,
-		peerQuotaKey:          identity.provenance.quotaKey(),
 		chunkIndex:            tx.DaChunkCore.ChunkIndex,
 		payload:               tx.DaPayload,
 		wireBytes:             identity.retainedBytes,
@@ -631,18 +601,16 @@ func (s *DARelayState) commitRetainedDARemoval(plan func(*DARelayState) ([]DAAdm
 	return nil
 }
 
-// ownerBound reports whether this relay is coupled to a pending-outpoint owner.
-// It is the ONE boundness predicate: the removal guard and the victim assembly
-// must agree about whether a claim can exist at all, and a projection carries
-// the same mempool pointer as the image it was cloned from.
+// ownerBound is the ONE boundness predicate: the removal guard and the victim
+// assembly must agree about whether a claim can exist at all, and a projection
+// carries the same mempool pointer as the image it was cloned from.
 func (s *DARelayState) ownerBound() bool {
 	return s.mempool != nil && s.mempool.chainState != nil && s.mempool.pendingOutpoints != nil
 }
 
 // beginRetainedDARemoval returns the removal guard, or (nil, nil) for an UNBOUND
 // relay — no mempool, no chainstate, or no owner, which is the test-only
-// construction lockAdmissionFence documents. An unbound relay has no owner to
-// couple to and therefore no claim to remove.
+// construction lockAdmissionFence documents.
 func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
 	if !s.ownerBound() {
 		return nil, nil
@@ -659,9 +627,8 @@ func (s *DARelayState) beginRetainedDARemoval() (*DARemoval, error) {
 // "integrity-valid retained member" means, and neither holds the DA lock across
 // parsing or validation (RUBIN_COMPACT_BLOCKS.md Sections 5.1 and 17.5).
 //
-// raw is a defensive copy taken under the lock: it is the observation's only
-// retained byte store, it cannot alias the live image, and no consumer re-reads
-// live state after the window closes.
+// raw is a defensive copy taken under the lock: it cannot alias the live image,
+// and no consumer re-reads live state after the window closes.
 type daRetainedObservation struct {
 	located          bool
 	locator          daRelayLocator
@@ -674,10 +641,9 @@ type daRetainedObservation struct {
 	raw              []byte
 }
 
-// observeRetainedTxLocked copies the complete evidence for txid: locator
-// presence, record presence, identity and STATE, the located member's identity,
-// and the exact retained raw bytes. It validates nothing — validation is the
-// off-lock half — and copies nothing twice.
+// observeRetainedTxLocked copies the complete evidence for txid — locator, record
+// presence, identity and STATE, the located member, and the exact retained raw
+// bytes — and validates nothing: validation is the off-lock half.
 func (s *DARelayState) observeRetainedTxLocked(txid [32]byte) daRetainedObservation {
 	locator, located := s.locators[txid]
 	if !located {
@@ -727,9 +693,9 @@ func (o daRetainedObservation) validate(txid [32]byte) (DARetainedTxSnapshot, er
 	return DARetainedTxSnapshot{TxID: o.member.txid, WTxID: o.member.wtxid, TxBytes: o.raw}, nil
 }
 
-// checkLocatedCoherence is validate's coherence phase over the located copy: the
-// locator's own shape, then its resolution inside the copy to its own record and
-// member, then the member's retained bytes, then the record's shape.
+// checkLocatedCoherence is validate's coherence phase over the located copy, in
+// order: locator shape, resolution to its own record and member, retained bytes,
+// record shape.
 func (o daRetainedObservation) checkLocatedCoherence(txid [32]byte) error {
 	if err := o.checkLocatorShape(txid); err != nil {
 		return err

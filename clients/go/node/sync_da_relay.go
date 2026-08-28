@@ -68,22 +68,13 @@ type canonicalDAClaimProjection map[PendingOutpointToken]struct{}
 // of every member's bytes and the rest of its consensus check are paid again on
 // every transition. A cap on retained members is RUB-1118's, not this slice's.
 //
-// The LAST phase is the LOCATOR phase: every live member must hold exactly one
-// locator row naming its own record, role and index, and no row may survive
-// whose member the image cannot produce. It is deliberately last — the earlier
-// phases own the more specific evidence for an image that is wrong in several
-// ways at once — and it is deliberately UNCONDITIONAL, because the locator index
-// exists whether or not an owner is bound.
-//
-// The third phase is the CLAIM phase, and it runs against the SAME live image
-// and the SAME private O1 candidate the M/O half prepared: every live DA member
-// must correspond to exactly one finalized DA claim in that candidate, no DA
-// claim may be left over, and the claims of the selected removals are then
-// retired from the candidate. Any extra, missing, duplicate, foreign,
-// unfinalized, wrong-domain, txid-, input-, token-, locator- or
-// record-mismatched claim is TERMINAL_LOCAL_INVARIANT here, BEFORE the durable
-// commit, so OLD and every live image stay exactly as they were and admission
-// stays latched.
+// The two later phases are ordered deliberately. The CLAIM phase runs against the
+// SAME live image and the SAME private O1 candidate the M/O half prepared, and
+// retires the selected removals' claims from it. The LOCATOR phase runs LAST —
+// the earlier phases own the more specific evidence for an image that is wrong in
+// several ways at once — and UNCONDITIONALLY, because the locator index exists
+// whether or not an owner is bound. Each phase's own doc states what it refuses,
+// and every refusal is TERMINAL_LOCAL_INVARIANT BEFORE the durable commit.
 //
 // It NEVER calls BeginDARemoval: that guard takes admissionMu.R and the
 // transition already holds the same lock exclusively. It adds no callback and no
@@ -130,10 +121,9 @@ func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdent
 // nothing are invisible to a member-driven walk.
 //
 // Both are TERMINAL_LOCAL_INVARIANT during canonical planning, never absence and
-// never a repair, exactly as they are in LookupRetainedTx. The walk is by
-// ascending raw da_id and, inside a record, commit first then chunks ascending,
-// so the same corrupt image names the same evidence on every run; every member's
-// row is compared in place, leaving only EXTRA rows to catch by population.
+// never a repair, exactly as they are in LookupRetainedTx. The walk is in exact
+// identity order, so the same corrupt image names the same evidence on every run;
+// every member's row is compared in place, leaving EXTRA rows to catch by count.
 func (s *DARelayState) checkCanonicalDALocatorBijectionLocked() error {
 	members := 0
 	for _, daID := range s.sortedRetainedDAIDsLocked() {

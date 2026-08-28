@@ -269,8 +269,8 @@ func TestExactReplaySchedulesNoPrefetchAndReserves(t *testing.T) {
 		t.Fatal("the retaining admission requested no chunk, so this row could not see a duplicate that did")
 	}
 
-	// Past the reservation TTL: the indexes are no longer in flight, so a
-	// scheduler reached from the duplicate arm WOULD reserve and request them.
+	// Past the reservation TTL, where a scheduler reached from the duplicate arm
+	// WOULD reserve and request the indexes again.
 	now = now.Add(2 * time.Second)
 	replay, err := h.service.admitRelayDATx("peer-a", commitTx, tx, provenance)
 	if err != nil || replay.Disposition != node.DAAdmissionDuplicate {

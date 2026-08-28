@@ -59,10 +59,9 @@ func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 // addDACommit stages one commit into the live image under DARelayState.mu, with
 // no owner claim. It is the package-private accounting/cap entry the retained
 // schema's own tests drive; every PRODUCTION admission goes through AdmitDA,
-// which stages the same member through stageDACommitLocked with its exact
-// identity and token.
+// which plans the same member outside the final lock and installs it under it.
 func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) error {
-	commit.peerQuotaKey = peerQuotaKey
+	commit.provenance = stagingDAProvenance(commit.provenance, peerQuotaKey)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	projected := s.cloneForAtomicBatchLocked()
@@ -75,7 +74,7 @@ func (s *DARelayState) addDACommit(peerQuotaKey string, commit daRelayCommit) er
 
 // addDAChunk is addDACommit's chunk half and carries the same contract.
 func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error {
-	chunk.peerQuotaKey = peerQuotaKey
+	chunk.provenance = stagingDAProvenance(chunk.provenance, peerQuotaKey)
 	payload, err := prepareDAChunkPayload(chunk)
 	if err != nil {
 		return err
@@ -91,12 +90,22 @@ func (s *DARelayState) addDAChunk(peerQuotaKey string, chunk daRelayChunk) error
 	return nil
 }
 
+// stagingDAProvenance is the two staging entries' provenance rule. A member's OWN
+// provenance is the single authority and is never overwritten; the quota-key
+// shorthand names a PEER source only for a member that carries none, so these
+// entries produce the same one-field member shape AdmitDA does.
+func stagingDAProvenance(current DAProvenance, quotaKey string) DAProvenance {
+	if current.kind != daProvenanceInvalid || quotaKey == "" {
+		return current
+	}
+	return DAProvenance{kind: daProvenancePeer, peerIdentity: quotaKey, quotaIdentity: quotaKey}
+}
+
 // daRelayStagedMember is ONE member's staging result: the complete new record
 // value and the members the staging dropped, so a caller can turn those into
 // exact victim claims. It is produced by a PURE function of the current record,
-// the caps and the member — no sequence value, no state-level accounting, no
-// image — which is what lets an admission plan the whole record outside the
-// final DA lock and install it there in one assignment.
+// the caps and the member — no sequence value, no state-level accounting and no
+// image.
 type daRelayStagedMember struct {
 	record  daRelaySetRecord
 	dropped []daRelayMemberIdentity
@@ -258,11 +267,10 @@ func validateDAChunk(chunk daRelayChunk) error {
 // installs. DERIVING it walks both records and builds four maps; APPLYING it is
 // arithmetic and assignment.
 //
-// The split exists so the admission path can derive the image while PLANNING —
-// both of its records are frozen there, and the final lock's revision recheck
-// proves the old one has not moved — and leave the lock window with nothing to
-// walk, build or decide (RUBIN_COMPACT_BLOCKS.md Section 5.1: all allocation,
-// locator, record and accounting planning precedes the final DA lock).
+// The split exists so the admission path can derive the image while PLANNING and
+// leave the lock window with nothing to walk, build or decide
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1: all allocation, locator, record and
+// accounting planning precedes the final DA lock).
 type daRelayRecordImage struct {
 	oldAccounting daRelayRecordAccounting
 	newAccounting daRelayRecordAccounting
@@ -293,8 +301,7 @@ func daRelayRecordImageOf(oldRecord, newRecord daRelaySetRecord) (daRelayRecordI
 
 // daRelayRecordPlacement is one record's fully computed, cap-checked placement:
 // the locator rows to retire and install, the record revision to stamp, and the
-// new ABSOLUTE value of every counter the record touches. Producing it is the
-// whole fallible half; applying it cannot fail, allocate or decide anything.
+// new ABSOLUTE value of every counter the record touches.
 type daRelayRecordPlacement struct {
 	retire      map[[32]byte]daRelayLocator
 	install     map[[32]byte]daRelayLocator
@@ -409,10 +416,6 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 // decrement also assign s.sets, but never add or remove a member), which is what
 // keeps the locator index and the record image one bijection: a row can be
 // neither orphaned by a removal nor duplicated by a restage.
-//
-// It takes the PLACEMENT, never the two records: the rows are enumerated while
-// the image is derived, so this — which may run after an owner reserve — has no
-// record to walk and no map to build.
 func (s *DARelayState) replaceLocatorsLocked(placement daRelayRecordPlacement) {
 	if s.locators == nil {
 		s.locators = map[[32]byte]daRelayLocator{}

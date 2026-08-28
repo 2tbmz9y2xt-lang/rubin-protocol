@@ -27,10 +27,9 @@ func lifecycleService(t *testing.T) *Service {
 	return lifecycleHarness(t).service
 }
 
-// lifecycleHarness is lifecycleService plus the harness the DA rows need: since
-// RUB-678 a retained DA member is produced only by AdmitDA, which validates
-// against the harness chainstate, so the genesis row has to be applied and the
-// fixture has to reach the same chainstate.
+// lifecycleHarness is lifecycleService plus the harness the DA rows need: AdmitDA
+// validates against the harness chainstate, so the genesis row has to be applied
+// and the fixture has to reach that same chainstate.
 func lifecycleHarness(t *testing.T) *testHarness {
 	t.Helper()
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)

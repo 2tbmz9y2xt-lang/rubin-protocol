@@ -8,18 +8,18 @@ import (
 )
 
 // admitRelayDATx is the Service's single seam onto the owner-coupled DA
-// admission. It derives NOTHING from the wire beyond the exact transaction
-// bytes: the da_id, role, chunk index, payload commitment, fee and ordered
-// inputs a retained member carries all come from the admission's own snapshot of
-// the transaction it validated.
+// admission. Nothing a RETAINED member carries is derived here: its da_id, role,
+// chunk index, payload commitment, fee and ordered inputs all come from the
+// admission's own validated snapshot. The da_id read below is the PREFETCH
+// subject only.
 //
-// Prefetch scheduling is POST-admission and cannot remap the result: it only
-// requests still-missing chunks for the set the admission concerned. It follows
-// the CANDIDATE, not a state change: NEITHER arm below changes a record, so
-// "still missing what it was missing" is true of both and cannot separate them.
-// DUPLICATE covers the EXACT REPLAY, whose observable effect A3 fixes at zero,
-// the prefetch reservation and the getdachunk a later expiry emits included; a
-// commitment mismatch is a REFUSED candidate for an index the set still lacks
+// Prefetch scheduling is POST-admission and cannot remap the result: it reads the
+// LIVE record, so it requests only indexes the set still lacks. That, not "no
+// record changed", is what the two scheduling arms share — a RETAINED member DOES
+// change the record (it becomes resident) while a REFUSED commitment mismatch
+// changes nothing, and either can leave the set incomplete. DUPLICATE deliberately
+// does NOT schedule: an exact replay's observable effect is fixed at zero by A3,
+// the reservation and the getdachunk a later expiry emits included
 // (RUBIN_COMPACT_BLOCKS.md Section 5.1). Residual: these are scheduleDAPrefetch's
 // ONLY two call sites, so a silenced set waits for the orphan TTL. RUB-1169 owns
 // request composition; re-arming on DUPLICATE is the effect A3 forbids.

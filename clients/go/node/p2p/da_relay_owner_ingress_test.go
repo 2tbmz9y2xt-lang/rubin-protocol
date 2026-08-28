@@ -15,12 +15,10 @@ import (
 
 // daIngressFixture funds and signs the DA transactions these rows admit.
 //
-// Since RUB-678 the ONLY way to retain a DA member is AdmitDA, which admits a
-// FULLY VALIDATED transaction: a DA test transaction therefore needs real
-// inputs, a real signature and a real confirmed UTXO to spend, exactly like a
-// standard one. The fixture seeds those UTXOs directly into the harness
-// chainstate before any peer worker exists, which is the same construction the
-// node package's own canonical fixture uses.
+// Since RUB-678 the ONLY way to retain a DA member is AdmitDA, so a DA test
+// transaction needs real inputs, a real signature and a real confirmed UTXO. The
+// fixture seeds those UTXOs into the harness chainstate before any peer worker
+// exists.
 type daIngressFixture struct {
 	h       *testHarness
 	signer  *consensus.MLDSA87Keypair
@@ -29,10 +27,9 @@ type daIngressFixture struct {
 	lastOp  consensus.Outpoint
 	next    int
 	nonce   uint64
-	// built records every signed transaction this fixture produced, so the
-	// image digest below can render State A and State B members — which the
-	// complete-set snapshot alone cannot see — and an "unchanged" comparison
-	// over an incomplete record is never vacuous.
+	// built records every signed transaction this fixture produced, so the image
+	// digest below renders State A and State B members — which the complete-set
+	// snapshot alone cannot see — and an "unchanged" comparison is never vacuous.
 	built [][]byte
 }
 
@@ -218,8 +215,8 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 }
 
 // frozenD00R3PeerEffect reads ONE case's expected peer_quality_effect from the
-// frozen D00-R3 authority, so the peer-effect assertions below are driven by
-// the inert expected artifact rather than by this package's own constants.
+// frozen D00-R3 authority, so the assertions below are driven by that inert
+// artifact rather than by this package's own constants.
 func frozenD00R3PeerEffect(t *testing.T, caseID string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "conformance", "fixtures", "protocol", "da_admission_expected_v1.json"))
@@ -311,9 +308,8 @@ func TestRemoteExactReplayIsPeerNeutralAndDistinctCommitIsNot(t *testing.T) {
 		}
 	}
 
-	// The distinct same-da_id commit: fully validated, different txid, same set.
-	// The baseline is retaken AFTER the build: the digest probes every built
-	// transaction, so building one extends the probe set without changing state.
+	// The distinct same-da_id commit: fully validated, different txid, same set. The
+	// baseline is retaken AFTER the build, which extends the probe set only.
 	distinct := f.commitTx(t, daID, 1, sha3.Sum256([]byte("competitor")))
 	beforeDistinct := f.imageDigest(t)
 	banBefore := stranger.state.BanScore
@@ -440,9 +436,9 @@ func mustParseDATxForTest(t *testing.T, raw []byte) *consensus.Tx {
 // of the DA arm's provenance construction. A registered peer cannot reach this
 // state — the handshake binds the address and registerPeer already keyed the
 // quota lock by it — so this row constructs the peer directly and pins the
-// documented choice for the impossible case: a hard error that drops the
-// connection, with nothing retained and NO score moved (the shape check already
-// passed, so a ban here would punish a peer for the node's own bookkeeping).
+// documented choice for the impossible case: a hard error that drops the connection
+// with nothing retained and NO score moved (the shape check already passed, so a
+// ban here would punish a peer for the node's own bookkeeping).
 func TestRemoteDAFromAnAddresslessPeerIsRefusedAndRetainsNothing(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 2)
@@ -498,28 +494,38 @@ func TestRemoteDAAdmissionRejectionIsPeerNeutral(t *testing.T) {
 // all pass through the one key lock, and two different keys still progress
 // independently.
 //
-// The lock is driven exactly as the lifecycle sites drive it — the production
-// helper, held across the window under test — so the row proves participation in
-// the same lock rather than the existence of some lock. Both halves are bounded
-// and report by CHANNEL: a failure is a timeout, never a hung suite.
+// The lock is driven as the lifecycle sites drive it — the production helper, held
+// across the window under test — so the row proves participation in the SAME lock.
+// Both halves are bounded and report by CHANNEL: a failure is a timeout, never a
+// hung suite, and the oracles are the retained image itself: "the call has not
+// returned" alone passes on an admission that retained the wrong bytes, or
+// nothing, and merely blocked afterwards.
 func TestRemoteDAAdmissionSerializesOnItsPeerQuotaKey(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h, 2)
 	daID := daRelayTestID(0x1a)
 	held, other := "127.0.0.1:19140", "127.0.0.2:19141"
 
+	sameKeyTx := f.commitTx(t, daID, 1, sha3.Sum256([]byte("same-key")))
+	otherKeyTx := f.commitTx(t, daRelayTestID(0x1b), 1, sha3.Sum256([]byte("other-key")))
+	quiet := f.imageDigest(t)
+
 	// Same key: the admission must not complete while the key is held.
 	unlock := h.service.lockPeerQuotaKey(peerQuotaKey(held))
-	blocked := admitDAInBackground(t, h, f.commitTx(t, daID, 1, sha3.Sum256([]byte("same-key"))), held)
+	blocked := admitDAInBackground(t, h, sameKeyTx, held)
 	select {
 	case err := <-blocked:
 		unlock()
 		t.Fatalf("the admission completed (err=%v) while its own quota key was held", err)
 	case <-time.After(200 * time.Millisecond):
 	}
+	if f.imageDigest(t) != quiet {
+		unlock()
+		t.Fatal("the retained DA image moved while the admission's own quota key was held")
+	}
 
 	// A DIFFERENT key is not serialized behind it.
-	free := admitDAInBackground(t, h, f.commitTx(t, daRelayTestID(0x1b), 1, sha3.Sum256([]byte("other-key"))), other)
+	free := admitDAInBackground(t, h, otherKeyTx, other)
 	select {
 	case err := <-free:
 		if err != nil {
@@ -539,11 +545,20 @@ func TestRemoteDAAdmissionSerializesOnItsPeerQuotaKey(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the admission did not complete after its quota key was released")
 	}
+
+	for _, raw := range [][]byte{sameKeyTx, otherKeyTx} {
+		got, owned, err := h.service.daRelay.LookupRetainedTx(mustCanonicalTxID(t, raw))
+		if !owned || err != nil || string(got.TxBytes) != string(raw) {
+			t.Fatalf("retained member: owned=%v err=%v exact=%v", owned, err, string(got.TxBytes) == string(raw))
+		}
+	}
 }
 
-// TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree is A12's teardown half: an
-// admission waiting at the fence a latched transition never releases must not
-// hold the peer-quota key, or unregisterPeer for it never finishes.
+// TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree is A12's teardown half on an
+// ALREADY-latched engine — the schedule the check closes: an admission that waits
+// at the fence a terminal transition never releases must not hold the peer-quota
+// key, or unregisterPeer for it never finishes. A latch landing AFTER the check is
+// the admitted A12/F13 residual and is deliberately not covered here.
 func TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree(t *testing.T) {
 	h := latchedDAHarness(t, newTestHarness(t, 4, "127.0.0.1:0", nil))
 	f := newDAIngressFixture(t, h, 1)
@@ -559,10 +574,9 @@ func TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree(t *testing.T) {
 	requireReturned(t, done, "unregisterPeer on the quota key of a waiting latched admission")
 }
 
-// admitDAInBackground runs one remote DA admission on its own peer and reports
-// the handler result on a channel, so a caller can bound the wait instead of
-// blocking the suite. Every t.Fatalf-worthy input is built by the CALLER, on the
-// test goroutine.
+// admitDAInBackground runs one remote DA admission on its own peer and reports the
+// handler result on a channel, so a caller can bound the wait instead of blocking
+// the suite. Every t.Fatalf-worthy input is built by the CALLER.
 func admitDAInBackground(t *testing.T, h *testHarness, raw []byte, addr string) <-chan error {
 	t.Helper()
 	p := daRelayTestPeer(h, addr)

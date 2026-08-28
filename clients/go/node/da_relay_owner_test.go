@@ -94,9 +94,8 @@ func mustPeerProvenance(t *testing.T, peer string) DAProvenance {
 }
 
 // TestDAProvenanceIsAClosedSetWithAnInvalidZeroValue is R1 plus the api_contract
-// shape: the zero value is invalid, a PEER needs BOTH identities, the two
-// peerless sources are distinct and carry none, and a forged out-of-set value is
-// refused.
+// shape: the zero value, an incomplete PEER and a forged out-of-set value are all
+// refused, and the two peerless sources are distinct and carry no identity.
 func TestDAProvenanceIsAClosedSetWithAnInvalidZeroValue(t *testing.T) {
 	if LocalDAProvenance() == DetachedReorgDAProvenance() {
 		t.Fatal("LOCAL and DETACHED_REORG compare equal")
@@ -495,9 +494,8 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 		if after := f.image(t); after != before {
 			t.Fatal("the snapshot-first exact replay mutated the image")
 		}
-		// Removal is ordered AFTER the completed replay, through the real
-		// canonical transition; the replay's result stands and the record,
-		// locator and claim leave together.
+		// Removal is ordered AFTER the completed replay: the replay's result stands
+		// and the record, locator and claim leave together.
 		mustCanonicalMO(t, "ApplyBlock(spend)", f.applySpend(t, f.ops[0], 2281))
 		requireRetained(t, f, txID(t, commitTx), false, "the snapshot-first member after D1")
 		if claims, _ := f.ownerClaimCount(t); claims != claimsBaseline-1 {
@@ -999,7 +997,8 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 	})
 
 	// R5's fail-closed corner: an out-of-set stored kind reads as PEERLESS at both
-	// selections, so cleanup would leave a member its quota key is still billed for.
+	// the selection and the charge, so cleanup would strand the member — released by
+	// no teardown and billed to no peer.
 	t.Run("a member provenance outside the closed set is refused", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 4)
 		daID := daRelayTestID(0x48)
@@ -1012,6 +1011,32 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 		relay.mu.Unlock()
 		if err := relay.ReleasePeerQuotaKey("peer-p"); err == nil {
 			t.Fatal("peer cleanup accepted a member whose stored provenance is outside the closed set")
+		}
+	})
+
+	// The two stored CLASSIFICATIONS the selection reads are the record STATE, proven
+	// a member of the closed set BEFORE it is interpreted, and the member PROVENANCE,
+	// which is also the per-peer charge key. wireBytes is a report of what the
+	// members weigh, never an operand of which members are selected.
+	t.Run("only the validated state and the member provenance select", func(t *testing.T) {
+		member := daRelayMemberIdentity{txid: daRelayTestID(0x4a), provenance: mustPeerProvenance(t, "peer-a")}
+		record := daRelaySetRecord{daID: daRelayTestID(0x49), state: daRelayStateOrphanChunks}
+		record.chunks = map[uint16]daRelayChunk{0: {daRelayMemberIdentity: member, payload: []byte{1}, wireBytes: 1}}
+		updated, removed, err := record.peerCleanupPlan("peer-a")
+		if err != nil || len(removed) != 1 || len(updated.chunks) != 0 {
+			t.Fatalf("zero-total record: removed=%d chunks=%d err=%v", len(removed), len(updated.chunks), err)
+		}
+		charged, err := record.orphanAccounting()
+		if err != nil || len(charged.peerBytes) != 1 || charged.peerBytes["peer-a"] == 0 {
+			t.Fatalf("per-peer charge=%v err=%v, want exactly the selecting key", charged.peerBytes, err)
+		}
+		for _, state := range []daRelaySetState{daRelayStateCompleteSet + 1, ^daRelaySetState(0)} {
+			corrupt := record
+			corrupt.state = state
+			updated, removed, err := corrupt.peerCleanupPlan("peer-a")
+			if err == nil || !strings.Contains(err.Error(), "outside the closed set") || len(removed) != 0 || len(updated.chunks) != 0 {
+				t.Fatalf("state %d: err=%v removed=%d, want the closed-set refusal with nothing planned", state, err, len(removed))
+			}
 		}
 	})
 
@@ -1036,8 +1061,9 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 				t.Fatalf("State C member %x retains provenance %+v", member.txid, member.provenance)
 			}
 		}
-		if record.commit.peerQuotaKey != "" {
-			t.Fatalf("State C commit retains peer quota key %q", record.commit.peerQuotaKey)
+		charge, err := record.orphanAccounting()
+		if err != nil || len(charge.peerBytes) != 0 {
+			t.Fatalf("State C per-peer charge=%v err=%v, want nothing charged", charge.peerBytes, err)
 		}
 		before := f.image(t)
 		if err := relay.ReleasePeerQuotaKey("peer-p"); err != nil {
@@ -1158,10 +1184,8 @@ func (f *daOwnerFixture) ownerClaimCount(t *testing.T) (int, int) {
 // complete owner in EITHER scheduling order. The loser publishes no record, no
 // locator and no owner row, and its error names the winner's txid — the claimant
 // of the FIRST conflicting input in canonical order, which the last subtest pins
-// against a second, later conflicting input.
-//
-// The conflict decision itself is the owner's (pending_outpoint_owner.go
-// reserveDAAdmissionLocked): these rows CALL it and never edit it.
+// against a second, later conflicting input. The decision itself is the owner's
+// (reserveDAAdmissionLocked): these rows CALL it and never edit it.
 func TestOwnerConflictOnAConfirmedOutpointHasExactlyOneWinner(t *testing.T) {
 	t.Run("standard first, the DA candidate loses", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 2)
@@ -1343,11 +1367,9 @@ func TestPeerCleanupFailsClosedOnEveryDefectiveVictimToken(t *testing.T) {
 // admission guard it took exactly once (the provenance and parse steps fail
 // before one exists, and must therefore leave none held either).
 //
-// The guard release is proved by requireAdmissionGuardReleased's explicit
-// bounded write-lock schedule, which fails by timeout rather than hanging the
-// suite while a leaked read hold survives. A double release cannot happen —
-// daAdmissionGuard.close panics on a second call and releaseIfHeld stands down
-// once the hold is spent — so "exactly once" is the conjunction of the two.
+// A double release cannot happen — daAdmissionGuard.close panics on a second call
+// and releaseIfHeld stands down once the hold is spent — so "exactly once" is
+// that conjunction with requireAdmissionGuardReleased's bounded schedule.
 func TestAdmitDAFailureAtEveryFallibleStepPublishesNothingAndReleasesTheGuard(t *testing.T) {
 	f := newDAOwnerFixture(t, 5)
 	daID := daRelayTestID(0x56)
@@ -1412,16 +1434,10 @@ func TestAdmitDARejectsAChunkAtTheDeclaredIndexCeiling(t *testing.T) {
 }
 
 // TestTokenlessRetainedMemberFailsClosedOnlyWhereAClaimCanExist is H2/M3/A8's
-// zero-token arm. Whether a zero token is legitimate is a property of the RELAY,
-// not of the member:
-//
-//   - BOUND relay: every member it retained owes exactly one finalized claim, so
-//     a zero token is MISSING token evidence for a claim that exists. Removing
-//     the record around it would publish a record-free, locator-free orphan
-//     claim, so the removal fails closed before any publication and the image is
-//     left byte-identical.
-//   - UNBOUND relay: beginRetainedDARemoval returns no guard at all and no claim
-//     can exist, so the member is simply removed with an empty victim batch.
+// zero-token arm over both relay shapes appendDAMemberVictims distinguishes: a
+// BOUND relay fails closed with the image left byte-identical, and an UNBOUND
+// one — where no claim can exist at all — removes the member with an empty
+// victim batch.
 func TestTokenlessRetainedMemberFailsClosedOnlyWhereAClaimCanExist(t *testing.T) {
 	f := newDAOwnerFixture(t, 2)
 	daID := daRelayTestID(0x5c)
@@ -1474,10 +1490,8 @@ func TestTokenlessRetainedMemberFailsClosedOnlyWhereAClaimCanExist(t *testing.T)
 // built, a second member of the SAME record is then admitted, and the plan is
 // applied. Applying it would install a record that never saw that member, so it
 // is refused with the transient UNAVAILABLE and the whole image byte-identical.
-//
-// The unrelated-record half is the other side of the same property and is
-// covered by the fence suite's six concurrent distinct-record writers: those
-// plans are NOT invalidated by one another.
+// The unrelated-record half is the fence suite's six concurrent distinct-record
+// writers, whose plans are NOT invalidated by one another.
 func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 	f := newDAOwnerFixture(t, 3)
 	relay := f.relay()
@@ -1499,10 +1513,9 @@ func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 	if err != nil || plan.stageErr != nil {
 		t.Fatalf("planDAAdmission: err=%v stageErr=%v", err, plan.stageErr)
 	}
-	// The plan is COMPLETE and the live image is UNTOUCHED: the staged record
-	// already holds this member while the live record does not, and relay.mu is
-	// free — the Lock below returns — so none of it was decided under the final
-	// lock.
+	// The plan is COMPLETE and the live image is UNTOUCHED: the staged record already
+	// holds this member while the live record does not, and relay.mu is free — the
+	// Lock below returns — so none of it was decided under the final lock.
 	txid := txID(t, chunkTx)
 	relay.mu.Lock()
 	liveChunks := len(relay.sets[daID].chunks)
@@ -1513,11 +1526,10 @@ func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 	if after := f.image(t); after != beforePlan {
 		t.Fatal("planning published state")
 	}
-	// Everything the corridor AFTER the owner reserve assigns is already in the
-	// plan — the locator rows to retire and install, and the accounting each side
-	// contributes — and installDASetRecordLocked takes only this image, so no
-	// schedule exists in which it walks a record or builds a map after
-	// BeginCommit.
+	// Everything the corridor AFTER the owner reserve assigns is already in the plan
+	// — the locator rows to retire and install, and the accounting each side
+	// contributes — and installDASetRecordLocked takes only this image, so it cannot
+	// walk a record or build a map after BeginCommit.
 	wantRetire := map[[32]byte]daRelayLocator{txID(t, commitTx): {daID: daID, kind: daRelayLocatorCommit}}
 	wantInstall := map[[32]byte]daRelayLocator{
 		txID(t, commitTx): {daID: daID, kind: daRelayLocatorCommit},
@@ -1553,11 +1565,9 @@ func TestAdmitDAPlansOutsideTheFinalLockAndRefusesARacedPlan(t *testing.T) {
 }
 
 // TestRecordRevisionExhaustionFailsClosedBeforeAnyMutation is 8.4: the record
-// revision stamp is a CHECKED accumulator like every other one in this state. At
-// the ceiling the admission fails closed with the whole image byte-identical —
-// an unchecked ++ would wrap the stamp to 0, which is exactly the value an ABSENT
-// record presents, so the next plan built against a real record would recheck as
-// current.
+// revision stamp is a CHECKED accumulator like every other one in this state, so
+// at the ceiling the admission fails closed with the whole image byte-identical
+// (nextRecordRevisionLocked states what an unchecked ++ would do instead).
 func TestRecordRevisionExhaustionFailsClosedBeforeAnyMutation(t *testing.T) {
 	f := newDAOwnerFixture(t, 2)
 	relay := f.relay()

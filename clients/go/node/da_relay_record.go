@@ -75,10 +75,8 @@ func (r daRelaySetRecord) completeSetCandidate() (CompleteDASetCandidate, bool) 
 // same record advances the high-water but never refreshes the record
 // (RUBIN_COMPACT_BLOCKS.md Section 18.2).
 //
-// The add is checked BEFORE any field moves, so an exhausted space
-// (high-water == 2^64-1, which the previous acceptance was still allowed to
-// take) fails closed with the projected image untouched. A restarted service
-// begins at zero, so the first member of a fresh process is 1.
+// The add is checked BEFORE any field moves, so an exhausted space fails closed
+// with the projected image untouched. A restarted service begins at zero.
 func (s *DARelayState) advanceAcceptedSequenceLocked(record *daRelaySetRecord) error {
 	next, err := checkedAddUint64(s.nextReceivedTime, 1)
 	if err != nil {
@@ -205,8 +203,8 @@ func (r daRelaySetRecord) locators() map[[32]byte]daRelayLocator {
 }
 
 // ownedByPeerQuota reports whether this member was admitted by a PEER whose
-// quota identity is exactly key. It is deliberately NOT a raw peerQuotaKey
-// comparison: a LOCAL or DETACHED_REORG member is peerless and carries the EMPTY
+// quota identity is exactly key. It is deliberately NOT a raw quota-key string
+// compare: a LOCAL or DETACHED_REORG member is peerless and DERIVES the EMPTY
 // quota key, so a string compare would make peer cleanup for "" select exactly
 // the members RUBIN_COMPACT_BLOCKS.md Section 18.3 forbids it to touch.
 func (m daRelayMemberIdentity) ownedByPeerQuota(key string) bool {
@@ -215,16 +213,22 @@ func (m daRelayMemberIdentity) ownedByPeerQuota(key string) bool {
 
 // peerCleanupPlan is Section 18.3's per-record peer-teardown selection for the
 // peer quota identity key, over a record that is NOT a COMPLETE_SET (State C is
-// not peer-quota state and this method is never reached for one).
+// not peer-quota state and this method is never reached for one). The stored
+// state is proven a member of the closed set BEFORE it is interpreted, since
+// "not COMPLETE_SET" would otherwise read an out-of-set value as a live state.
 //
 // A commit is selected ONLY when it is itself PEER(key) AND every retained
 // member of the record has PEER provenance — then the WHOLE staged record goes,
 // PEER(other) members included, with every locator, charge and claim. If any
 // LOCAL or DETACHED_REORG member exists the commit is INELIGIBLE and only the
 // matching PEER(key) CHUNKS are removed, so an observable State B never
-// downgrades to State A.
+// downgrades to State A. wireBytes is a RECOMPUTED report of what the members
+// weigh, never an operand of which members are selected.
 func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRelayMemberIdentity, error) {
-	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
+	if !r.state.valid() {
+		return daRelaySetRecord{}, nil, fmt.Errorf("retained DA set %x holds state %d outside the closed set", r.daID, r.state)
+	}
+	if r.state == daRelayStateCompleteSet {
 		return r, nil, nil
 	}
 	if err := r.checkMemberProvenance(); err != nil {
@@ -247,11 +251,11 @@ func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRel
 }
 
 // checkMemberProvenance refuses a member whose stored provenance is outside the
-// closed set. Both selections below read that field only as "PEER or not", so an
-// out-of-set value reads as PEERLESS: teardown would leave the member behind
-// while orphanAccounting kept billing its peerQuotaKey, and the accounting sweep
-// derives both sides from that key and cannot see it. A COMPLETE_SET returns
-// above, its provenance cleared by markComplete.
+// closed set. Every selection AND every per-peer charge below reads that one
+// field, so an out-of-set value would be silently reinterpreted as PEERLESS by
+// all of them: the member would be billed to no peer, released by no teardown,
+// and invisible to the accounting sweep. A COMPLETE_SET returns above, its
+// provenance cleared by markComplete.
 func (r daRelaySetRecord) checkMemberProvenance() error {
 	for _, member := range r.members() {
 		if err := member.provenance.validate(); err != nil {
@@ -319,11 +323,7 @@ func (r daRelaySetRecord) completionSnapshot() (daRelayCompletionSnapshot, bool)
 		if !ok {
 			return daRelayCompletionSnapshot{}, false
 		}
-		snapshot.chunks = append(snapshot.chunks, daRelayCompletionChunkSnapshot{
-			chunkHash:  chunk.chunkHash,
-			chunkIndex: i,
-			payload:    chunk.payload,
-		})
+		snapshot.chunks = append(snapshot.chunks, daRelayCompletionChunkSnapshot{payload: chunk.payload})
 	}
 	return snapshot, true
 }
@@ -345,19 +345,17 @@ func (s daRelayCompletionSnapshot) payloadCommitment() (uint64, [32]byte) {
 // source (RUBIN_COMPACT_BLOCKS.md Section 18.3; the frozen D00-R3 authority
 // pins state_c_member_provenance FORBIDDEN) — so no later cleanup, scoring or
 // observation can attribute a completed member to the peer that happened to
-// deliver it. The paired per-peer accounting keys are cleared with it: a
-// State C record contributes no orphan accounting, and a cleared source with a
-// live accounting key would be half a member identity.
+// deliver it. Clearing the provenance clears the per-peer accounting key with it:
+// that key is DERIVED from this one field and is never stored beside it, so a
+// State C record can never present a cleared source with a live charge.
 func (r *daRelaySetRecord) markComplete(payloadBytes uint64) {
 	r.payloadBytes = payloadBytes
 	r.state = daRelayStateCompleteSet
 	r.ttlBlocksRemaining = 0
 	r.commit.provenance = DAProvenance{}
-	r.commit.peerQuotaKey = ""
 	for index, chunk := range r.chunks {
 		chunk.payload = nil
 		chunk.provenance = DAProvenance{}
-		chunk.peerQuotaKey = ""
 		r.chunks[index] = chunk
 	}
 }
@@ -410,7 +408,7 @@ func (a *daRelayRecordAccounting) addCommit(commit daRelayCommit) error {
 	commitBytes := retainedTxAccountingBytes(commit.wireBytes, commit.txBytes)
 	a.orphanBytes = commitBytes
 	a.commitBytes = commitBytes
-	return addPeerAccounting(a.peerBytes, commit.peerQuotaKey, commitBytes)
+	return addPeerAccounting(a.peerBytes, commit.provenance.quotaKey(), commitBytes)
 }
 
 func (a *daRelayRecordAccounting) addChunks(chunks map[uint16]daRelayChunk) error {
@@ -432,7 +430,7 @@ func (a *daRelayRecordAccounting) addChunk(chunk daRelayChunk) error {
 		return err
 	}
 	a.orphanBytes = orphanBytes
-	return addPeerAccounting(a.peerBytes, chunk.peerQuotaKey, chunkBytes)
+	return addPeerAccounting(a.peerBytes, chunk.provenance.quotaKey(), chunkBytes)
 }
 
 func orphanChunkAccountingBytes(chunk daRelayChunk) (uint64, error) {
