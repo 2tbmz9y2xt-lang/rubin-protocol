@@ -411,11 +411,11 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 }
 
 // replaceLocatorsLocked retires the rows the placement's image named for the old
-// record and installs the ones it named for the new. It is called by the only two
-// writers that change record MEMBERSHIP (installMemberTokenLocked and the TTL
-// decrement also assign s.sets, but never add or remove a member), which is what
-// keeps the locator index and the record image one bijection: a row can be
-// neither orphaned by a removal nor duplicated by a restage.
+// record and installs the ones it named for the new. Its only two callers —
+// installDASetRecordLocked and removeDASetRecordLocked — are the only writers of
+// record MEMBERSHIP (the TTL decrement assigns s.sets but adds and removes no
+// member), which keeps the locator index and the record image one bijection: a
+// row is neither orphaned by a removal nor duplicated by a restage.
 func (s *DARelayState) replaceLocatorsLocked(placement daRelayRecordPlacement) {
 	if s.locators == nil {
 		s.locators = map[[32]byte]daRelayLocator{}

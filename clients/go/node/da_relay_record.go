@@ -313,9 +313,7 @@ func (r daRelaySetRecord) completionSnapshot() (daRelayCompletionSnapshot, bool)
 		return daRelayCompletionSnapshot{}, false
 	}
 	snapshot := daRelayCompletionSnapshot{
-		daID:                      r.daID,
 		payloadCommitmentExpected: r.commit.payloadCommitment,
-		chunkCount:                r.commit.chunkCount,
 		chunks:                    make([]daRelayCompletionChunkSnapshot, 0, r.commit.chunkCount),
 	}
 	for i := uint16(0); i < r.commit.chunkCount; i++ {

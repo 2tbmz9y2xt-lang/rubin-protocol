@@ -31,12 +31,14 @@ const (
 	daRelayStateCompleteSet
 )
 
-// valid reports membership of the CLOSED record-state set. It is the single
-// authority every consumer of a stored state asks — the off-lock retained
-// observation, canonical D preparation and peer teardown — so an out-of-set
-// value can never be read as "some state" by one of them and refused by another.
-// Every state STORED by a writer comes from the three constants above, so a value
-// outside them is corrupt retained state, never a candidate property.
+// valid reports membership of the CLOSED record-state set. It has exactly three
+// askers — the off-lock retained observation (checkRecordShape), canonical D
+// preparation (checkRetainedDAStoredIdentity) and peer teardown (peerCleanupPlan)
+// — and the two cleanup walks reach them through sortedIncompleteDAIDsLocked,
+// which classifies COMPLETE_SET vs not and nothing else: an out-of-set state
+// reads there as incomplete, then peer teardown refuses it one frame down while
+// the TTL walk removes the record whole. No writer stores a value outside the
+// three constants above, so this is defense in depth, not a live path.
 func (s daRelaySetState) valid() bool { return s <= daRelayStateCompleteSet }
 
 type daRelayCaps struct {
@@ -209,9 +211,7 @@ type daRelayChunk struct {
 }
 
 type daRelayCompletionSnapshot struct {
-	daID                      [32]byte
 	payloadCommitmentExpected [32]byte
-	chunkCount                uint16
 	chunks                    []daRelayCompletionChunkSnapshot
 }
 

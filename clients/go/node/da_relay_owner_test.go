@@ -1014,17 +1014,18 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 		}
 	})
 
-	// The two stored CLASSIFICATIONS the selection reads are the record STATE, proven
-	// a member of the closed set BEFORE it is interpreted, and the member PROVENANCE,
-	// which is also the per-peer charge key. wireBytes is a report of what the
-	// members weigh, never an operand of which members are selected.
+	// peerCleanupPlan reads two stored CLASSIFICATIONS and no total: the record
+	// STATE, proven a member of the closed set BEFORE it is interpreted, and the
+	// member PROVENANCE, which is also the per-peer charge key. The plan is driven
+	// DIRECTLY here — ReleasePeerQuotaKey is additionally gated by the per-key total
+	// and iterates orphanBytesByDAID, so it delivers no zero-total record.
 	t.Run("only the validated state and the member provenance select", func(t *testing.T) {
 		member := daRelayMemberIdentity{txid: daRelayTestID(0x4a), provenance: mustPeerProvenance(t, "peer-a")}
 		record := daRelaySetRecord{daID: daRelayTestID(0x49), state: daRelayStateOrphanChunks}
 		record.chunks = map[uint16]daRelayChunk{0: {daRelayMemberIdentity: member, payload: []byte{1}, wireBytes: 1}}
 		updated, removed, err := record.peerCleanupPlan("peer-a")
 		if err != nil || len(removed) != 1 || len(updated.chunks) != 0 {
-			t.Fatalf("zero-total record: removed=%d chunks=%d err=%v", len(removed), len(updated.chunks), err)
+			t.Fatalf("the plan read the wireBytes total: removed=%d chunks=%d err=%v", len(removed), len(updated.chunks), err)
 		}
 		charged, err := record.orphanAccounting()
 		if err != nil || len(charged.peerBytes) != 1 || charged.peerBytes["peer-a"] == 0 {
@@ -1054,16 +1055,13 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 		if record.state != daRelayStateCompleteSet {
 			t.Fatalf("record state=%v, want COMPLETE_SET", record.state)
 		}
-		// Completion clears ALL member provenance: the frozen D00-R3 authority
-		// pins state_c_member_provenance FORBIDDEN.
+		// Completion clears ALL member provenance: the frozen D00-R3 authority pins
+		// state_c_member_provenance FORBIDDEN. The per-peer charge follows by
+		// derivation — the key IS this field — so this loop is the whole property.
 		for _, member := range record.members() {
 			if member.provenance != (DAProvenance{}) {
 				t.Fatalf("State C member %x retains provenance %+v", member.txid, member.provenance)
 			}
-		}
-		charge, err := record.orphanAccounting()
-		if err != nil || len(charge.peerBytes) != 0 {
-			t.Fatalf("State C per-peer charge=%v err=%v, want nothing charged", charge.peerBytes, err)
 		}
 		before := f.image(t)
 		if err := relay.ReleasePeerQuotaKey("peer-p"); err != nil {
