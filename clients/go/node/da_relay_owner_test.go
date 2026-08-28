@@ -998,6 +998,23 @@ func TestPeerCleanupSelectionIsProvenanceExact(t *testing.T) {
 		}
 	})
 
+	// R5's fail-closed corner: an out-of-set stored kind reads as PEERLESS at both
+	// selections, so cleanup would leave a member its quota key is still billed for.
+	t.Run("a member provenance outside the closed set is refused", func(t *testing.T) {
+		f := newDAOwnerFixture(t, 4)
+		daID := daRelayTestID(0x48)
+		mustAdmit(t, f, f.daChunkTx(t, f.ops[0], daID, 0, 2095, []byte("forged")), mustPeerProvenance(t, "peer-p"))
+		relay := f.relay()
+		relay.mu.Lock()
+		chunk := relay.sets[daID].chunks[0]
+		chunk.provenance = DAProvenance{kind: daProvenanceKind(0x7f)}
+		relay.sets[daID].chunks[0] = chunk
+		relay.mu.Unlock()
+		if err := relay.ReleasePeerQuotaKey("peer-p"); err == nil {
+			t.Fatal("peer cleanup accepted a member whose stored provenance is outside the closed set")
+		}
+	})
+
 	t.Run("state C is a no-op and completion cleared member provenance", func(t *testing.T) {
 		f := newDAOwnerFixture(t, 4)
 		daID, payload := daRelayTestID(0x45), []byte("complete")

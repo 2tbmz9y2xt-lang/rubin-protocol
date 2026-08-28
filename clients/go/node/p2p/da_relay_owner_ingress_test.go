@@ -541,6 +541,24 @@ func TestRemoteDAAdmissionSerializesOnItsPeerQuotaKey(t *testing.T) {
 	}
 }
 
+// TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree is A12's teardown half: an
+// admission waiting at the fence a latched transition never releases must not
+// hold the peer-quota key, or unregisterPeer for it never finishes.
+func TestLatchedEngineLeavesTheDAAdmissionQuotaKeyFree(t *testing.T) {
+	h := latchedDAHarness(t, newTestHarness(t, 4, "127.0.0.1:0", nil))
+	f := newDAIngressFixture(t, h, 1)
+	addr := "127.0.0.1:19150"
+	parked := admitDAInBackground(t, h, f.chunkTx(t, daRelayTestID(0x1c), 0, []byte("latched")), addr)
+	select {
+	case err := <-parked:
+		t.Fatalf("the admission returned (err=%v) instead of waiting at the inherited fence", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	done := make(chan error, 1)
+	go func() { h.service.unregisterPeer(daRelayTestPeer(h, addr)); done <- nil }()
+	requireReturned(t, done, "unregisterPeer on the quota key of a waiting latched admission")
+}
+
 // admitDAInBackground runs one remote DA admission on its own peer and reports
 // the handler result on a channel, so a caller can bound the wait instead of
 // blocking the suite. Every t.Fatalf-worthy input is built by the CALLER, on the

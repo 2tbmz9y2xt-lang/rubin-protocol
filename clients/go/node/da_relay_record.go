@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"fmt"
 	"sort"
 )
 
@@ -226,6 +227,9 @@ func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRel
 	if r.state == daRelayStateCompleteSet || r.wireBytes == 0 {
 		return r, nil, nil
 	}
+	if err := r.checkMemberProvenance(); err != nil {
+		return daRelaySetRecord{}, nil, err
+	}
 	if r.commitEligibleForPeerCleanup(key) {
 		return daRelaySetRecord{daID: r.daID}, r.members(), nil
 	}
@@ -240,6 +244,21 @@ func (r daRelaySetRecord) peerCleanupPlan(key string) (daRelaySetRecord, []daRel
 		return daRelaySetRecord{}, nil, err
 	}
 	return out, removed, nil
+}
+
+// checkMemberProvenance refuses a member whose stored provenance is outside the
+// closed set. Both selections below read that field only as "PEER or not", so an
+// out-of-set value reads as PEERLESS: teardown would leave the member behind
+// while orphanAccounting kept billing its peerQuotaKey, and the accounting sweep
+// derives both sides from that key and cannot see it. A COMPLETE_SET returns
+// above, its provenance cleared by markComplete.
+func (r daRelaySetRecord) checkMemberProvenance() error {
+	for _, member := range r.members() {
+		if err := member.provenance.validate(); err != nil {
+			return fmt.Errorf("retained DA member %x of set %x: %w", member.txid, r.daID, err)
+		}
+	}
+	return nil
 }
 
 // removePeerChunks is peerCleanupPlan's chunk-selection scan: one state-mutation

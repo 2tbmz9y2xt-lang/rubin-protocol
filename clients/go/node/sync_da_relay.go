@@ -525,7 +525,7 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 // canonical planning is otherwise the only retained-DA reader that never
 // inspects state at all, so a value outside {ORPHAN_CHUNKS, STAGED_COMMIT,
 // COMPLETE_SET} would survive the transition and keep deciding completion,
-// eviction and peer-cleanup eligibility.
+// eviction and eligibility; its cached payloads follow in the payload check.
 func checkRetainedDAStoredIdentity(record daRelaySetRecord, members []canonicalRetainedDAMember) error {
 	if !record.state.valid() {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x holds state %d outside the closed set", record.daID, record.state))
@@ -538,6 +538,34 @@ func checkRetainedDAStoredIdentity(record daRelaySetRecord, members []canonicalR
 		if err := checkRetainedDAStoredMember(record, stored[i], members[i]); err != nil {
 			return err
 		}
+	}
+	return checkRetainedDAStoredPayloads(record, members)
+}
+
+// checkRetainedDAStoredPayloads binds a record's cached DA payload bytes to the
+// bytes they were cut from: admission stamps hashChecked true so the payload
+// hash never re-runs, and payloadBytes — the SOLE input to the pinned charge and
+// to CompleteSetCandidates sizing — is invisible to the accounting sweep, which
+// derives both sides from it. Only a COMPLETE_SET carries a total (markComplete),
+// bounded by MAX_DA_CHUNK_COUNT payloads of CHUNK_BYTES; only others cache copies.
+func checkRetainedDAStoredPayloads(record daRelaySetRecord, members []canonicalRetainedDAMember) error {
+	var total uint64
+	complete := record.state == daRelayStateCompleteSet
+	for _, parsed := range members {
+		if parsed.tx.TxKind != 0x02 {
+			continue
+		}
+		payload := parsed.tx.DaPayload
+		if complete {
+			total += uint64(len(payload))
+			payload = nil
+		}
+		if stored := record.chunks[parsed.tx.DaChunkCore.ChunkIndex].payload; !bytes.Equal(stored, payload) {
+			return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x caches %d payload bytes and its retained bytes carry %d", parsed.label, record.daID, len(stored), len(payload)))
+		}
+	}
+	if record.payloadBytes != total {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x stores %d payload bytes and its members carry %d", record.daID, record.payloadBytes, total))
 	}
 	return nil
 }

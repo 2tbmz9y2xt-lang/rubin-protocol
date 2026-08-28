@@ -15,12 +15,14 @@ import (
 //
 // Prefetch scheduling is POST-admission and cannot remap the result: it only
 // requests still-missing chunks for the set the admission concerned. It follows
-// a STATE CHANGE, never a bare success: a DUPLICATE changed no record, so its
-// set is missing exactly what it was already missing and any outstanding
-// reservation still covers it. Scheduling on one would re-reserve those indexes
-// and, once the earlier reservation expired, emit a fresh getdachunk — an
-// observable effect the exact-replay path may not have
-// (RUBIN_COMPACT_BLOCKS.md Section 5.1).
+// the CANDIDATE, not a state change: NEITHER arm below changes a record, so
+// "still missing what it was missing" is true of both and cannot separate them.
+// DUPLICATE covers the EXACT REPLAY, whose observable effect A3 fixes at zero,
+// the prefetch reservation and the getdachunk a later expiry emits included; a
+// commitment mismatch is a REFUSED candidate for an index the set still lacks
+// (RUBIN_COMPACT_BLOCKS.md Section 5.1). Residual: these are scheduleDAPrefetch's
+// ONLY two call sites, so a silenced set waits for the orphan TTL. RUB-1169 owns
+// request composition; re-arming on DUPLICATE is the effect A3 forbids.
 func (s *Service) admitRelayDATx(peerAddr string, txBytes []byte, tx *consensus.Tx, provenance node.DAProvenance) (node.DAAdmissionResult, error) {
 	if s == nil || s.daRelay == nil {
 		return node.DAAdmissionResult{}, errors.New("no DA relay state bound")
@@ -31,8 +33,6 @@ func (s *Service) admitRelayDATx(peerAddr string, txBytes []byte, tx *consensus.
 	}
 	result, err := s.daRelay.AdmitDA(txBytes, provenance)
 	if err != nil {
-		// A chunk-last payload-commitment mismatch retains nothing, so the set is
-		// still missing exactly the chunks it was missing: re-request them.
 		if errors.Is(err, node.ErrDARelayPayloadCommitmentMismatch) {
 			s.scheduleDAPrefetch(peerAddr, daID)
 		}

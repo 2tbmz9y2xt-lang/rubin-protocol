@@ -333,41 +333,47 @@ func TestCanonicalDAPreparationIsTerminalForEveryLocatorAndIdentityDefect(t *tes
 	}
 }
 
-// TestCanonicalDAPreparationIsTerminalForAnOutOfSetRecordState is 8.2's canonical
-// half. Record state is a CLOSED set, and canonical planning was the one retained
-// DA reader that never inspected it at all: an out-of-set value survived every
-// transition and kept deciding completion, eviction and peer-cleanup eligibility.
-//
-// The subject is deliberately an INCOMPLETE record. An out-of-set state on a
-// COMPLETE_SET record ALSO changes what orphanAccounting reports for it, so the
-// accounting sweep would keep the row terminal for a different reason and the row
-// would prove nothing about the membership check.
-func TestCanonicalDAPreparationIsTerminalForAnOutOfSetRecordState(t *testing.T) {
-	c := newCanonicalClaimFixture(t, 1)
-	daID := daRelayTestID(0x79)
-	commitTx := c.f.daCommitTxCommitting(t, c.f.ops[0], daID, 1, 1680, [32]byte{0x01})
-	retainDAMemberForTest(t, c.relay, c.f.mp.PendingOutpointOwner(), commitTx, "peer-commit")
-	mo := c.plan(t)
-	if _, err := prepareCanonicalDAImage(c.relay, nil, c.chain, &mo); err != nil {
-		t.Fatalf("the uncorrupted State B record is already refused: %v", err)
-	}
+// TestCanonicalDAPreparationIsTerminalForEveryCorruptStoredRecordField covers
+// the record-level fields no other walk binds: the closed state set, the cached
+// chunk payload, and payloadBytes — the pinned charge and complete-set sizing
+// input the accounting sweep cannot judge, deriving both sides from it. The
+// subject is deliberately an INCOMPLETE record and every corruption keeps the
+// payload LENGTH: on a COMPLETE_SET, or with a resize, the accounting sweep
+// would keep the row terminal for a reason that is not the binding under test.
+func TestCanonicalDAPreparationIsTerminalForEveryCorruptStoredRecordField(t *testing.T) {
+	for name, corrupt := range map[string]func(record *daRelaySetRecord){
+		"record state outside the closed set":                func(r *daRelaySetRecord) { r.state = daRelaySetState(0xff) },
+		"record payload bytes contradicting its members":     func(r *daRelaySetRecord) { r.payloadBytes++ },
+		"chunk payload contradicting its own retained bytes": func(r *daRelaySetRecord) { r.chunks[0].payload[0] ^= 0xff },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newCanonicalClaimFixture(t, 2)
+			daID, owner := daRelayTestID(0x79), c.f.mp.PendingOutpointOwner()
+			retainDAMemberForTest(t, c.relay, owner, c.f.daCommitTxCommitting(t, c.f.ops[0], daID, 2, 1680, [32]byte{0x01}), "peer-commit")
+			retainDAMemberForTest(t, c.relay, owner, c.f.daChunkTx(t, c.f.ops[1], daID, 0, 1681, []byte("payload")), "peer-chunk")
+			mo := c.plan(t)
+			if _, err := prepareCanonicalDAImage(c.relay, nil, c.chain, &mo); err != nil {
+				t.Fatalf("the uncorrupted State B record is already refused: %v", err)
+			}
 
-	c.relay.mu.Lock()
-	record := c.relay.sets[daID]
-	record.state = daRelaySetState(0xff)
-	c.relay.sets[daID] = record
-	c.relay.mu.Unlock()
-	liveBefore := daRelayStateSnapshot(c.relay)
+			c.relay.mu.Lock()
+			record := c.relay.sets[daID]
+			corrupt(&record)
+			c.relay.sets[daID] = record
+			c.relay.mu.Unlock()
+			liveBefore := daRelayStateSnapshot(c.relay)
 
-	image, err := prepareCanonicalDAImage(c.relay, nil, c.chain, &mo)
-	var terminal *canonicalDATerminalError
-	if !errors.As(err, &terminal) {
-		t.Fatalf("err=%v, want a retained-DA terminal invariant", err)
+			image, err := prepareCanonicalDAImage(c.relay, nil, c.chain, &mo)
+			var terminal *canonicalDATerminalError
+			if !errors.As(err, &terminal) {
+				t.Fatalf("err=%v, want a retained-DA terminal invariant", err)
+			}
+			if image != nil {
+				t.Fatal("a corrupt stored record field still produced a publishable image")
+			}
+			requireDARelayStateUnchanged(t, c.relay, liveBefore)
+		})
 	}
-	if image != nil {
-		t.Fatal("an out-of-set record state still produced a publishable image")
-	}
-	requireDARelayStateUnchanged(t, c.relay, liveBefore)
 }
 
 // TestCanonicalDAClaimPhaseIsSkippedWithoutAnOwnerImage pins the nil-plan arm: an
