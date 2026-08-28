@@ -2267,7 +2267,7 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 		record = record.cloneForStateMutation()
 		record.commit.txBytes = cloneBytes(record.commit.txBytes)
 		// cloneForStateMutation shares member.inputs, so an in-place edit of an
-		// outpoint would be invisible to every "unchanged" assertion below.
+		// outpoint would be invisible to requireDARelayStateUnchanged.
 		record.commit.member = record.commit.member.clone()
 		for index, chunk := range record.chunks {
 			chunk.payload = cloneBytes(chunk.payload)

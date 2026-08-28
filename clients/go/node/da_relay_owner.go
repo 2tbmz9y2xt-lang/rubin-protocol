@@ -21,7 +21,7 @@ type daProvenance struct {
 // field is never an input. A peerless source, and every kind outside the closed
 // set, derives the EMPTY key — which is a shared per-peer bucket, not an
 // exemption from the map: addPeerAccounting charges "" like any other key, under
-// the same cap. A malformed PEER still derives its own quota string; what keeps
+// the same cap. A malformed PEER may still derive its own quota string; what keeps
 // it out of the counters is validate, which projectDARecordImageLocked runs
 // before any accounting.
 func (p daProvenance) quotaKey() string {

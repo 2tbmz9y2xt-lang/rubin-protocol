@@ -299,9 +299,10 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
-	// locators is filled only by installDASetRecordLocked, which has no non-test
-	// caller, so it is empty on every live path today; the atomic-batch pair
-	// carries it so that stops being load bearing.
+	// locators is carried across the atomic-batch pair, so a canonical transition
+	// preserves its rows rather than dropping them; no batch BODY maintains it,
+	// so today the index stays coherent only because installDASetRecordLocked has
+	// no non-test caller.
 	locators map[[32]byte]daRelayLocator
 	// records is the monotone high-water source of revision, minted only by
 	// projectDARecordImageLocked.
@@ -553,9 +554,12 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
 	s.locators = projected.locators
-	// Both callers hold s.mu from the clone through this call, so the projection's
-	// stamp source can only have advanced; on any legacy state both fields are the
-	// zero value and this pair is the identity.
+	// advanceOrphanTTL and releasePeerQuotaKey hold s.mu from the clone through
+	// this call; prepareCanonicalDAImage does NOT — it releases s.mu and publish()
+	// retakes it — and is closed instead by the admission WRITE fence the canonical
+	// transition holds across both, which every ordinary writer respects through
+	// lockAdmissionFence. On any legacy state both fields are the zero value, so
+	// this pair is the identity.
 	s.records = projected.records
 }
 

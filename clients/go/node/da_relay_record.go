@@ -656,9 +656,9 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 // The per-peer key comes from the member's own provenance and from nothing else
 // — never from the cached peerQuotaKey field, which belongs to the legacy path.
 // A peerless member derives the empty key and is charged under it: "" is a
-// shared bucket sharing the per-peer cap, and whether Section 18.1's "State B
-// does not use State A per-peer caps" should separate it is a live-path question
-// this kernel does not own. The walk is over sorted chunk indexes, so neither the
+// shared bucket sharing the per-peer cap, and whether Section 18.1's State B
+// exemption should eventually separate that bucket is a live-path question this
+// kernel does not own. The walk is over sorted chunk indexes, so neither the
 // result nor the identity of a refusal depends on Go map iteration order.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, consensus.Uint128, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
