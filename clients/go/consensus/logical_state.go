@@ -257,8 +257,8 @@ type logicalStatePlanWork struct {
 
 func (w *logicalStatePlanWork) apply(touch logicalTouchedState, old UtxoEntry, oldPresent bool) *logicalStateFailure {
 	entryBytes := logicalStateEntryLength(old)
-	if logicalStateParentInsufficient(w, entryBytes, oldPresent) {
-		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("parent counters are insufficient for present rows")}
+	if failure := logicalStateParentFailure(w, entryBytes, oldPresent); failure != nil {
+		return failure
 	}
 	if failure := logicalStateFinalFailure(touch); failure != nil {
 		return failure
@@ -355,8 +355,26 @@ func logicalStateFinalFailure(t logicalTouchedState) *logicalStateFailure {
 	return nil
 }
 
-func logicalStateParentInsufficient(w *logicalStatePlanWork, n uint64, present bool) bool {
-	return present && (w.oldCount >= w.parent.entries || n > w.parent.bytes-w.oldBytes)
+func logicalStateParentFailure(w *logicalStatePlanWork, entryBytes uint64, present bool) *logicalStateFailure {
+	if !present {
+		return nil
+	}
+	if w.oldCount >= w.parent.entries || entryBytes > w.parent.bytes-w.oldBytes {
+		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("parent counters are insufficient for present rows")}
+	}
+	remainingEntries := w.parent.entries - (w.oldCount + 1)
+	remainingBytes := w.parent.bytes - (w.oldBytes + entryBytes)
+	if !validLogicalStateResidualEnvelope(remainingBytes, remainingEntries) {
+		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("invalid residual logical state counters")}
+	}
+	return nil
+}
+
+func validLogicalStateResidualEnvelope(bytes, entries uint64) bool {
+	if entries == 0 {
+		return bytes == 0
+	}
+	return bytes >= entries*minLogicalStateEntryBytes && bytes <= entries*maxLogicalStateEntryBytes
 }
 
 func logicalStatePutOverflow(w *logicalStatePlanWork, n uint64) bool {

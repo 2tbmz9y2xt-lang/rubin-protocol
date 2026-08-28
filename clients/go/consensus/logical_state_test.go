@@ -64,6 +64,12 @@ func TestLogicalStateEntryBytes(t *testing.T) {
 	}
 }
 
+func TestLogicalStateLimitLiterals(t *testing.T) {
+	if maxLogicalStateBytes != 412316860416 || maxCreatedLogicalStateBytes != 86545430 {
+		t.Fatal("logical state limit literal mismatch")
+	}
+}
+
 func TestLogicalStateRegistryAndLazyEvaluation(t *testing.T) {
 	id1, id2 := filled32(1), filled32(2)
 	for i, rows := range [][]logicalStateCapRegistryRow{{{chainID: make([]byte, 31)}}, {{chainID: make([]byte, 33)}}, {{chainID: id1[:], activationHeight: 1 << 32}}, {{chainID: id1[:]}, {chainID: id1[:]}}, {{chainID: id2[:]}, {chainID: id1[:]}}} {
@@ -169,17 +175,33 @@ func TestLogicalStatePlanFailuresAndPriority(t *testing.T) {
 	if failure == nil || failure.kind != logicalStateFailureStoreIntegrity || !logicalStateSameErrorPointer(failure.cause, cause) || !reflect.DeepEqual(view.lookups, []Outpoint{op1}) {
 		t.Fatal("earlier sorted row failure did not win")
 	}
-	maxEntry := logicalStateTestEntry(MAX_COVENANT_DATA_PER_OUTPUT, 1)
-	bounded := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 2 * maxLogicalStateEntryBytes, entries: 2}}, rows: map[Outpoint]logicalStateRowRead{op1: {kind: logicalStateRowPresent, entry: maxEntry}, op2: {kind: logicalStateRowPresent, entry: maxEntry}}}
-	plan, failure := buildLogicalStatePlan(1, bounded, []logicalTouchedState{{Outpoint: op2}, {Outpoint: op1}}, 0)
-	if failure != nil || len(plan.Deletes) != 2 || plan.Deletes[0].EntryBytes != uint32(maxLogicalStateEntryBytes) || len(plan.Puts) != 0 || !reflect.DeepEqual(bounded.lookups, []Outpoint{op1, op2}) {
-		t.Fatal("maximum old rows were not consumed sequentially into fixed DELETEs")
+	for _, tc := range []struct {
+		name     string
+		counters logicalStateCounters
+		old      UtxoEntry
+	}{{"zero_entries_nonzero_bytes", logicalStateCounters{bytes: 57, entries: 1}, logicalStateTestEntry(0, 1)}, {"below_minimum", logicalStateCounters{bytes: 112, entries: 2}, logicalStateTestEntry(1, 1)}, {"above_maximum", logicalStateCounters{bytes: 65653, entries: 2}, logicalStateTestEntry(0, 1)}} {
+		v := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: tc.counters}, rows: map[Outpoint]logicalStateRowRead{op1: {kind: logicalStateRowPresent, entry: tc.old}, op2: {kind: logicalStateRowLocalInvariant, cause: cause}}}
+		plan, failure := buildLogicalStatePlan(1, v, []logicalTouchedState{{Outpoint: op2}, {Outpoint: op1, Final: UtxoEntry{Value: 1}}}, new(int))
+		if !reflect.DeepEqual(plan, logicalStatePlan[*int]{}) || failure == nil || failure.kind != logicalStateFailureStoreIntegrity || !reflect.DeepEqual(v.lookups, []Outpoint{op1}) {
+			t.Fatalf("residual envelope %s did not fail first", tc.name)
+		}
+	}
+	parent := logicalStateCounters{bytes: 2 * maxLogicalStateEntryBytes, entries: 2}
+	work := logicalStatePlanWork{parent: parent, result: parent}
+	for _, tc := range []struct {
+		touch logicalTouchedState
+		old   UtxoEntry
+		want  logicalStatePlanWork
+	}{{logicalTouchedState{Outpoint: op1}, logicalStateTestEntry(MAX_COVENANT_DATA_PER_OUTPUT, 1), logicalStatePlanWork{deletes: []logicalStateDelete{{Outpoint: op1, EntryBytes: 65596}}, parent: parent, result: logicalStateCounters{bytes: 65596, entries: 1}, oldBytes: 65596, oldCount: 1}}, {logicalTouchedState{Outpoint: op2}, logicalStateTestEntry(MAX_COVENANT_DATA_PER_OUTPUT, 2), logicalStatePlanWork{deletes: []logicalStateDelete{{Outpoint: op1, EntryBytes: 65596}, {Outpoint: op2, EntryBytes: 65596}}, parent: parent, result: logicalStateCounters{}, oldBytes: 131192, oldCount: 2}}} {
+		if failure := work.apply(tc.touch, tc.old, true); failure != nil || !reflect.DeepEqual(work, tc.want) {
+			t.Fatalf("maximum old row retained in work: %#v %v", work, failure)
+		}
 	}
 	insufficient := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 56, entries: 1}}, rows: map[Outpoint]logicalStateRowRead{op1: {kind: logicalStateRowPresent, entry: logicalStateTestEntry(0, 1)}, op2: {kind: logicalStateRowPresent, entry: logicalStateTestEntry(0, 1)}}}
 	if _, failure = buildLogicalStatePlan(1, insufficient, []logicalTouchedState{{Outpoint: op2, Final: UtxoEntry{Value: 1}}, {Outpoint: op1}}, 0); failure == nil || failure.kind != logicalStateFailureStoreIntegrity {
 		t.Fatal("cumulative old-row insufficiency was not STORE_INTEGRITY")
 	}
-	byteInsufficient := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 112, entries: 2}}, rows: map[Outpoint]logicalStateRowRead{op1: {kind: logicalStateRowPresent, entry: logicalStateTestEntry(0, 1)}, op2: {kind: logicalStateRowPresent, entry: maxEntry}}}
+	byteInsufficient := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: 112, entries: 2}}, rows: map[Outpoint]logicalStateRowRead{op1: {kind: logicalStateRowPresent, entry: logicalStateTestEntry(0, 1)}, op2: {kind: logicalStateRowPresent, entry: logicalStateTestEntry(MAX_COVENANT_DATA_PER_OUTPUT, 1)}}}
 	if _, failure = buildLogicalStatePlan(1, byteInsufficient, []logicalTouchedState{{Outpoint: op2, Final: UtxoEntry{Value: 1}}, {Outpoint: op1}}, 0); failure == nil || failure.kind != logicalStateFailureStoreIntegrity {
 		t.Fatal("cumulative old-row byte insufficiency was not STORE_INTEGRITY")
 	}
@@ -193,8 +215,8 @@ func TestLogicalStatePlanFailuresAndPriority(t *testing.T) {
 			t.Fatalf("%s did not fail locally", name)
 		}
 	}
-	work := logicalStatePlanWork{putBytes: maxCreatedLogicalStateBytes}
-	if failure = work.apply(logicalTouchedState{Outpoint: op1, FinalPresent: true, Final: logicalStateTestEntry(0, 1)}, UtxoEntry{}, false); failure == nil || failure.kind != logicalStateFailureLocalInvariant {
+	overflowWork := logicalStatePlanWork{putBytes: maxCreatedLogicalStateBytes}
+	if failure = overflowWork.apply(logicalTouchedState{Outpoint: op1, FinalPresent: true, Final: logicalStateTestEntry(0, 1)}, UtxoEntry{}, false); failure == nil || failure.kind != logicalStateFailureLocalInvariant {
 		t.Fatal("created logical-byte bound was not enforced")
 	}
 }
@@ -204,7 +226,7 @@ func TestEvaluateLogicalStateCapMathAndFailures(t *testing.T) {
 	registry, _ := validateLogicalStateCapRegistry([]logicalStateCapRegistryRow{{chainID: id[:], activationHeight: 1}})
 	entry := logicalStateTestEntry(0, 1)
 	makeView := func(total uint64, row logicalStateRowRead) *logicalStateTestView {
-		entries := (total + maxLogicalStateEntryBytes - 1) / maxLogicalStateEntryBytes
+		entries := (total+maxLogicalStateEntryBytes-1)/maxLogicalStateEntryBytes + 1
 		return &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: total, entries: entries}}, rows: map[Outpoint]logicalStateRowRead{{Txid: id}: row}}
 	}
 	for _, tc := range []struct {
