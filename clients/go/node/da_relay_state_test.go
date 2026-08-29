@@ -2776,7 +2776,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		disowned := stageOwnerReadyMemberForTest(state, member)
 		disowned.next.commit.member.txid = daRelayTestID(40)
 		// A pre-state read from another record: the refusal names the image, not
-		// the locator row that would otherwise catch it two stages later.
+		// the locator row that would otherwise catch it at the next stage.
 		elsewhere := stageOwnerReadyMemberForTest(state, member)
 		elsewhere.daID = daRelayTestID(99)
 
@@ -3019,7 +3019,7 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 
 	t.Run("a legacy resident record is incompatible, never absent", func(t *testing.T) {
 		state := legacyResident(t)
-		// Residency and baseline agree, so only the owner-ready check refuses it.
+		// Residency and baseline agree, so the zero revision is what refuses it.
 		requireDAImageRejected(t, state, stageDAOwnerReadyMember(state.sets[daID], true, member), errDARelayImageIncompatible)
 	})
 

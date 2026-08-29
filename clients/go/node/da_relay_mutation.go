@@ -615,11 +615,11 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	return live, checkStagedOwnerReadyRecord(image, live)
 }
 
-// checkStagedOwnerReadyRecord makes image.next the AUTHORITY: the placement's
-// record and install rows are built from it. A REMOVAL carries an EMPTY next, a
-// non-removal a non-empty one naming the image's own da_id — the first refuses a
-// locator kind outside the closed set, the second a pre-state read from another
-// record. The last check binds image.member to the record BY TXID alone.
+// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY. A
+// REMOVAL carries an EMPTY next; a non-removal a non-empty one naming its own
+// da_id, refusing a pre-state from another record. An out-of-set kind empties
+// next only from a NON-resident pre-state, where the row count catches it; on a
+// resident one validate does. The last check binds BY TXID alone.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -670,9 +670,9 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 
 // checkOwnerReadySlotFree is FIRST-SEEN: staging overwrites the slot it targets,
 // so without this a second member would evict a retained one and move its charge
-// to the new provenance. It raises the legacy errors over a DIFFERENT occupancy
-// notion — a commit slot is taken when it holds a member, where the legacy guard
-// reads chunk_count — so neither layer sees the other's commit; RUB-1273 owns it.
+// to the new provenance. It raises the legacy errors over the COMMIT slot's own
+// occupancy notion — taken when it holds a member, where the legacy guard reads
+// chunk_count — so neither layer sees the other's commit; RUB-1273 owns it.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {

@@ -49,9 +49,9 @@ func (p daProvenance) validate() error {
 }
 
 // validate runs only where a member is required, so nil — the empty-slot marker —
-// is refused here rather than read as an empty slot; the slot tests decide
-// emptiness from the pointer. Token and fee are deliberately NOT checked: a zero
-// token is permitted before the owner reserve.
+// is refused here rather than read as an empty slot; a commit slot's emptiness is
+// that pointer, a chunk slot's its map key. Token and fee are deliberately NOT
+// checked: a zero token is permitted before the owner reserve.
 func (m *daRelayMemberIdentity) validate() error {
 	if m == nil {
 		return errDARelayMemberIncomplete
@@ -75,10 +75,10 @@ type daRelayOwnerReadyMember struct {
 // A commit locator must carry chunk index 0, or two locators for one slot would
 // compare unequal. A chunk index at or above MAX_DA_CHUNK_COUNT and a payload
 // above CHUNK_BYTES are refused on the package's absolute bounds; the commit's
-// DECLARED chunk count stays admission's. wire_bytes and chunk_count go
-// unchecked: this kernel assigns neither, and RUB-1273 owns the layer that does.
-// Retained bytes above MAX_RELAY_MSG_BYTES are refused on that same bound: the
-// package's transport cap is the only ceiling a transaction's bytes carry.
+// DECLARED chunk count stays admission's. wire_bytes and chunk_count reach no
+// check HERE: this kernel assigns neither, and RUB-1273 owns the layer that
+// does. Retained bytes above MAX_RELAY_MSG_BYTES are refused on that same
+// bound: the transport cap is the only ceiling a transaction's bytes carry.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
