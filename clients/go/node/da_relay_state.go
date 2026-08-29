@@ -216,10 +216,10 @@ type daRelayChunk struct {
 //
 // A retained commit or chunk holds it BY POINTER: the live layer never reads it,
 // so an unowned member must cost one word and not the whole identity in resident
-// heap outside the orphan-pool caps, which count wire and payload bytes. nil is
-// therefore the "no owner-ready member" marker; a NON-nil member is required to
-// be complete, so validate refuses nil. Owner-ready commit occupancy is this
-// pointer; checkOwnerReadySlotFree takes a chunk slot's from its map key.
+// heap outside the orphan-pool caps, which count retained transaction and payload
+// bytes. nil is therefore the "no owner-ready member" marker; a NON-nil member is
+// required to be complete, so validate refuses nil. Owner-ready commit occupancy is
+// this pointer; checkOwnerReadySlotFree takes a chunk slot's from its map key.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
