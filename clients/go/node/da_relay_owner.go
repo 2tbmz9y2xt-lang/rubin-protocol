@@ -48,7 +48,7 @@ func (p daProvenance) validate() error {
 	}
 }
 
-// validate runs only where a member is REQUIRED, so nil — the empty-slot marker —
+// validate runs only where a member is required, so nil — the empty-slot marker —
 // is refused here rather than read as an empty slot; the slot tests decide
 // emptiness from the pointer. Token and fee are deliberately NOT checked: a zero
 // token is permitted before the owner reserve.
@@ -138,7 +138,9 @@ func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
 	return r.commit.member.validate()
 }
 
-// checkOwnerReadyChunk refuses a chunk whose map key is not its own index.
+// checkOwnerReadyChunk refuses a chunk whose map key is not its own index. The
+// absolute index and payload bounds are daRelayOwnerReadyMember.validate's, not
+// this record-level check's.
 func (r daRelaySetRecord) checkOwnerReadyChunk(index uint16) error {
 	chunk := r.chunks[index]
 	if chunk.chunkIndex != index || chunk.daID != r.daID {

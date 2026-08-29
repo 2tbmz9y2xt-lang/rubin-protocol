@@ -99,13 +99,13 @@ func (c daRelayCaps) validateRelativeCaps() error {
 type daRelaySetRecord struct {
 	daID  [32]byte
 	state daRelaySetState
-	// revision is the owner-ready record IDENTITY: two record values are the same
-	// record state exactly when their revisions agree. Minted only by
-	// projectDARecordImageLocked, written only by installDASetRecordLocked, so
-	// every record the LEGACY writers store carries 0 — the same value an absent
-	// record presents, which is why the kernel decides residency from the s.sets
-	// lookup and never from this field. Go-private: never serialized, never
-	// public, never a normative protocol field.
+	// revision is the owner-ready record IDENTITY: under installDASetRecordLocked's
+	// SINGLE-USE placement precondition, two record values are the same record state
+	// exactly when their revisions agree. Minted only by projectDARecordImageLocked,
+	// written only by installDASetRecordLocked, so every record the LEGACY writers
+	// store carries 0 — the same value an absent record presents, which is why the
+	// kernel decides residency from the s.sets lookup and never from this field.
+	// Go-private: never serialized, never public, never a normative protocol field.
 	revision           uint64
 	receivedTime       uint64
 	payloadBytes       uint64
