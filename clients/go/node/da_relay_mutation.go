@@ -617,10 +617,40 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	if resident != image.present || live.revision != image.baseline {
 		return daRelaySetRecord{}, errDARelayRecordStale
 	}
+	return live, checkStagedOwnerReadyRecord(image)
+}
+
+// checkStagedOwnerReadyRecord makes image.next the AUTHORITY: the placement's
+// record and install rows are built from it, so it is what must be proven. A
+// REMOVAL must carry an EMPTY next, or a record no check reads could ride along
+// with the retirement; a non-removal must carry a non-empty one, which is what
+// refuses a locator kind outside the closed set. The last check binds
+// image.member to the record it names.
+func checkStagedOwnerReadyRecord(image daRelayRecordImage) error {
+	rows := image.next.locatorRows()
 	if image.remove {
-		return live, nil
+		if len(rows) != 0 {
+			return errDARelayMemberIncomplete
+		}
+		return nil
 	}
-	return live, image.member.validate()
+	if len(rows) == 0 {
+		return errDARelayMemberIncomplete
+	}
+	if err := image.member.validate(); err != nil {
+		return err
+	}
+	if err := image.next.checkOwnerReadyRecord(); err != nil {
+		return err
+	}
+	staged := image.next.chunks[image.member.locator.chunkIndex].member.txid
+	if image.member.locator.kind == daRelayLocatorCommit {
+		staged = image.next.commit.member.txid
+	}
+	if staged != image.member.member.txid {
+		return errDARelayMemberIncomplete
+	}
+	return nil
 }
 
 // checkDARecordImageLocatorsLocked proves the txid index and the retained image
@@ -632,12 +662,29 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 	}
 	retire := live.locatorRows()
 	install := image.next.locatorRows()
-	for _, row := range retire {
-		if s.locators[row.txid] != row.locator {
-			return nil, nil, errDARelayLocatorMismatch
-		}
+	if err := s.checkRetiredLocatorRowsLocked(image.daID, retire); err != nil {
+		return nil, nil, err
 	}
 	return retire, install, s.checkDAInstallLocatorRowsLocked(image.daID, install)
+}
+
+// checkRetiredLocatorRowsLocked proves the bijection BOTH ways: every retired row
+// is the row the index holds, and every indexed row for this da_id is retired. A
+// row the retirement misses is a dangling claim, refused, never repaired.
+func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daRelayLocatorRow) error {
+	retired := make(map[[32]byte]bool, len(retire))
+	for _, row := range retire {
+		if s.locators[row.txid] != row.locator {
+			return errDARelayLocatorMismatch
+		}
+		retired[row.txid] = true
+	}
+	for txid, locator := range s.locators {
+		if locator.daID == daID && !retired[txid] {
+			return errDARelayLocatorMismatch
+		}
+	}
+	return nil
 }
 
 func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []daRelayLocatorRow) error {
@@ -693,10 +740,10 @@ func (s *DARelayState) projectOwnerReadyPinnedBytesLocked(live, next daRelaySetR
 	return pinnedBytes, nil
 }
 
-// installDASetRecordLocked is the NON-FALLIBLE half: assignment only. It cannot
-// derive a value, allocate a container, validate anything or fail — the placement
-// carries every one of those already — which is what would let a caller run it
-// after an owner reserve with no fallible step in between. It must be called with
+// installDASetRecordLocked RETURNS NO ERROR and PERFORMS NO VALIDATION: every
+// check ran in projectDARecordImageLocked, which is what would let a caller run
+// it after an owner reserve with no fallible step in between. It does insert
+// into and delete from live maps, so it is not allocation-free. It must be called with
 // the placement projectDARecordImageLocked returned for THIS image, under the
 // SAME lock hold. Retiring precedes installing, so a txid a record keeps across
 // the transition is reinstalled rather than dropped. nextReceivedTime is
