@@ -133,12 +133,10 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 	return r.cloneWithPayloads(false)
 }
 
-// cloneWithPayloads never touches member, so the clone and r name one identity.
-// The revision does not travel: a legacy clone carries 0, not the owner-ready
-// revision it copied, so the kernel refuses that record, never reads it stale.
+// cloneWithPayloads never touches member or revision, so the clone and r name
+// one identity and carry one stamp.
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
-	out.revision = 0
 	if copyPayloads {
 		out.commit.txBytes = nil
 	}
@@ -607,8 +605,8 @@ func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordI
 // cloneOwnerReady copies every byte slice, map and member of r, so no mutation
 // through one reaches the other; a member's token keeps naming the one shared
 // PendingOutpointOwner, which is a handle, not record state. cloneWithPayloads
-// is not reused: it shares or drops the caller's retained bytes and demotes the
-// revision, where this kernel needs a stamped record owning all of its bytes.
+// is not reused: it shares or drops the caller's retained bytes, where this
+// kernel needs a record that owns every byte it holds.
 func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	out := r
 	out.commit.txBytes = cloneBytes(r.commit.txBytes)

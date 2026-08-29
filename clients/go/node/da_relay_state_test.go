@@ -2266,8 +2266,8 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 	}
 	for daID, record := range state.sets {
 		// cloneOwnerReady, not cloneForStateMutation: it copies every byte slice
-		// and member, so an in-place edit stays visible, and it keeps the revision
-		// a legacy clone drops — a change this oracle has to be able to see.
+		// and member, so an in-place edit through either stays visible to
+		// requireDARelayStateUnchanged.
 		view.sets[daID] = record.cloneOwnerReady()
 	}
 	return view
@@ -3037,6 +3037,7 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 			{"a commit with no identity", func(r *daRelaySetRecord) { r.commit.member.txid = [32]byte{} }},
 			{"a commit with invalid provenance", func(r *daRelaySetRecord) { r.commit.member.provenance = daProvenance{} }},
 			{"a commit with no ordered inputs", func(r *daRelaySetRecord) { r.commit.member.inputs = nil }},
+			{"a revision of zero", func(r *daRelaySetRecord) { r.revision = 0 }},
 			{"a chunk entry with no member", func(r *daRelaySetRecord) {
 				r.chunks = map[uint16]daRelayChunk{0: {daID: r.daID, chunkIndex: 0, txBytes: []byte("x"), payload: []byte("y")}}
 			}},
@@ -3155,16 +3156,6 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		if recreated.record.revision != 2 {
 			t.Fatalf("recreated revision = %d, want 2", recreated.record.revision)
 		}
-	})
-
-	t.Run("a legacy clone cannot present the revision it copied", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		mustInstallOwnerReadyMember(t, state, commit)
-		pre := state.sets[daID]
-		if state.sets[daID] = pre.cloneForStateMutation(); state.sets[daID].revision != 0 {
-			t.Fatalf("the legacy clone carried revision %d", state.sets[daID].revision)
-		}
-		requireDAImageRejected(t, state, stageDAOwnerReadyMember(pre, true, chunk), errDARelayImageIncompatible)
 	})
 
 	t.Run("a stale baseline is refused before mutation", func(t *testing.T) {

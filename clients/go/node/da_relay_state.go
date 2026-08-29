@@ -102,9 +102,11 @@ type daRelaySetRecord struct {
 	// revision is the owner-ready record IDENTITY: under installDASetRecordLocked's
 	// SINGLE-USE placement precondition, two record values are the same record state
 	// exactly when their revisions agree. Minted only by projectDARecordImageLocked,
-	// written only by installDASetRecordLocked, dropped by cloneWithPayloads, so a
-	// legacy clone carries 0 — the value an absent record presents, which is why the
-	// kernel decides residency from the s.sets lookup and never from this field.
+	// written only by installDASetRecordLocked, so a record a LEGACY writer creates
+	// presents 0 — the value an absent record presents, which is why the kernel
+	// decides residency from the s.sets lookup and never from this field. A legacy
+	// writer mutating a stamped record keeps its stamp on every path; RUB-1275 owns
+	// the TTL decrement, and no non-test caller reaches this kernel.
 	// Go-private: never serialized, never public, never a normative protocol field.
 	revision           uint64
 	receivedTime       uint64
