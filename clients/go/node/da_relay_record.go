@@ -620,27 +620,38 @@ func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	return out
 }
 
-func (m daRelayMemberIdentity) clone() daRelayMemberIdentity {
-	if len(m.inputs) != 0 {
-		m.inputs = append([]consensus.Outpoint(nil), m.inputs...)
+// clone is nil-safe in BOTH directions: an empty slot clones to an empty slot,
+// and a present member clones to one sharing nothing mutable with the original.
+func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
+	if m == nil {
+		return nil
 	}
-	return m
+	out := *m
+	if len(m.inputs) != 0 {
+		out.inputs = append([]consensus.Outpoint(nil), m.inputs...)
+	}
+	return &out
 }
 
 // locatorRows emits a FIXED order — commit first, then chunks ascending — one row
-// per occupied slot, so len(rows) is also the member count. No walk here produces
-// a zero-txid row: checkOwnerReadyRecord refuses an entry without an identity.
+// per slot HOLDING a member, so len(rows) is also the member count. A memberless
+// slot emits nothing rather than a zero-txid row; it is also refused, by
+// checkOwnerReadyRecord, before any placement built from these rows installs.
 func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
-	if r.commit.member.txid != ([32]byte{}) {
+	if r.commit.member != nil {
 		rows = append(rows, daRelayLocatorRow{
 			txid:    r.commit.member.txid,
 			locator: daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit},
 		})
 	}
 	for _, index := range sortedRetainedDAChunkIndexes(r) {
+		chunk := r.chunks[index]
+		if chunk.member == nil {
+			continue
+		}
 		rows = append(rows, daRelayLocatorRow{
-			txid:    r.chunks[index].member.txid,
+			txid:    chunk.member.txid,
 			locator: daRelayLocator{daID: r.daID, kind: daRelayLocatorChunk, chunkIndex: index},
 		})
 	}
@@ -659,7 +670,7 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 // the result nor the identity of a refusal depends on map iteration order.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	if r.commit.member.txid != ([32]byte{}) {
+	if r.commit.member != nil {
 		accounting.commitBytes = uint64(len(r.commit.txBytes))
 		if err := accounting.addOwnerReadyMember(r.commit.member, accounting.commitBytes); err != nil {
 			return daRelayRecordAccounting{}, err
@@ -678,7 +689,13 @@ func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error
 	return accounting, nil
 }
 
-func (a *daRelayRecordAccounting) addOwnerReadyMember(member daRelayMemberIdentity, charge uint64) error {
+// addOwnerReadyMember refuses a memberless slot rather than charging it under
+// the empty key: a retained member that carries no source must not be silently
+// uncharged, and no caller may reach the derivation through nil.
+func (a *daRelayRecordAccounting) addOwnerReadyMember(member *daRelayMemberIdentity, charge uint64) error {
+	if member == nil {
+		return errDARelayMemberIncomplete
+	}
 	orphanBytes, err := checkedAddUint64(a.orphanBytes, charge)
 	if err != nil {
 		return err

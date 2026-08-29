@@ -188,7 +188,7 @@ type daRelayCommit struct {
 	daID              [32]byte
 	payloadCommitment [32]byte
 	peerQuotaKey      string
-	member            daRelayMemberIdentity
+	member            *daRelayMemberIdentity
 	chunkCount        uint16
 	wireBytes         uint64
 	txBytes           []byte
@@ -198,7 +198,7 @@ type daRelayChunk struct {
 	daID         [32]byte
 	chunkHash    [32]byte
 	peerQuotaKey string
-	member       daRelayMemberIdentity
+	member       *daRelayMemberIdentity
 	chunkIndex   uint16
 	payload      []byte
 	wireBytes    uint64
@@ -211,6 +211,13 @@ type daRelayChunk struct {
 // reconstructed or narrowed, and inputs keep canonical order verbatim
 // (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). fee, inputs and
 // token are unread here by design — the owner chain is what will trust them.
+//
+// A retained commit or chunk holds it BY POINTER: the live layer never reads it,
+// so an unowned member must cost one word and not the whole identity in resident
+// heap outside the orphan-pool caps, which count wire and payload bytes. nil is
+// therefore the "no owner-ready member" marker; a NON-nil member is required to
+// be complete, so validate refuses nil and every occupancy test reads the
+// pointer, never a zero field inside it.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
@@ -553,12 +560,9 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
 	s.locators = projected.locators
-	// advanceOrphanTTL and releasePeerQuotaKey hold s.mu from the clone through
-	// this call; prepareCanonicalDAImage does NOT — it releases s.mu and publish()
-	// retakes it — and is closed instead by the admission WRITE fence the canonical
-	// transition holds across both, which every ordinary writer respects through
-	// lockAdmissionFence. On any legacy state both fields are the zero value, so
-	// this pair is the identity.
+	// Zero on any legacy state, so this pair is the identity; the canonical
+	// transition's admission WRITE fence closes the window in which it releases
+	// s.mu and publish() retakes it.
 	s.records = projected.records
 }
 

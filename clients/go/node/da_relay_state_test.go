@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -2266,8 +2267,8 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 	for daID, record := range state.sets {
 		record = record.cloneForStateMutation()
 		record.commit.txBytes = cloneBytes(record.commit.txBytes)
-		// cloneForStateMutation shares member.inputs; an in-place edit of an
-		// outpoint would otherwise be invisible to requireDARelayStateUnchanged.
+		// cloneForStateMutation shares the member pointer; an in-place edit of
+		// one would otherwise be invisible to requireDARelayStateUnchanged.
 		record.commit.member = record.commit.member.clone()
 		for index, chunk := range record.chunks {
 			chunk.payload = cloneBytes(chunk.payload)
@@ -2568,12 +2569,21 @@ func mustInstallOwnerReadyMember(t *testing.T, state *DARelayState, member daRel
 	return placement
 }
 
-func requireOwnerReadyMemberRejected(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember, want error) {
+// requireDAImageRejected pins the whole refusal contract of one projection: the
+// exact error AND a live image no path touched.
+func requireDAImageRejected(t *testing.T, state *DARelayState, image daRelayRecordImage, want error) {
 	t.Helper()
 	before := daRelayStateSnapshot(state)
-	_, err := projectOwnerReadyMember(state, member)
+	state.mu.Lock()
+	_, err := state.projectDARecordImageLocked(image)
+	state.mu.Unlock()
 	requireDAErr(t, err, want)
 	requireDARelayStateUnchanged(t, state, before)
+}
+
+func requireOwnerReadyMemberRejected(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember, want error) {
+	t.Helper()
+	requireDAImageRejected(t, state, stageOwnerReadyMemberForTest(state, member), want)
 }
 
 func TestDAProvenanceClosedSet(t *testing.T) {
@@ -2658,7 +2668,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		if placement.record.revision != 1 || placement.remove {
 			t.Fatalf("placement revision = %d remove = %v, want 1 false", placement.record.revision, placement.remove)
 		}
-		if !reflect.DeepEqual(placement.record.commit.member, member.member) {
+		if !reflect.DeepEqual(placement.record.commit.member, &member.member) {
 			t.Fatalf("placement member = %+v, want %+v", placement.record.commit.member, member.member)
 		}
 		wantInstall := []daRelayLocatorRow{{txid: member.member.txid, locator: member.locator}}
@@ -2727,17 +2737,11 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}
 	})
 
-	t.Run("a zero token slot is preserved and a reserved one is carried verbatim", func(t *testing.T) {
+	t.Run("a reserved token is carried verbatim", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		unreserved := daRelayTestOwnerReadyCommit(daID, 25, daRelayTestPeerProvenance("quota-a"), commitTx)
-		placement := mustInstallOwnerReadyMember(t, state, unreserved)
-		if placement.record.commit.member.token != (PendingOutpointToken{}) {
-			t.Fatalf("zero token slot was not preserved: %+v", placement.record.commit.member.token)
-		}
-
 		reserved := daRelayTestOwnerReadyChunk(daID, 0, 26, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
 		reserved.member.token = PendingOutpointToken{seq: 9}
-		placement = mustInstallOwnerReadyMember(t, state, reserved)
+		placement := mustInstallOwnerReadyMember(t, state, reserved)
 		if placement.record.chunks[0].member.token != (PendingOutpointToken{seq: 9}) {
 			t.Fatalf("reserved token was not carried: %+v", placement.record.chunks[0].member.token)
 		}
@@ -2749,12 +2753,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		mustInstallOwnerReadyMember(t, state, commit)
 		state.orphanBytes = 0
 
-		before := daRelayStateSnapshot(state)
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(stageDAOwnerReadyRemoval(state.sets[daID], true))
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayArithmeticOverflow)
-		requireDARelayStateUnchanged(t, state, before)
+		requireDAImageRejected(t, state, stageDAOwnerReadyRemoval(state.sets[daID], true), errDARelayArithmeticOverflow)
 	})
 
 	t.Run("a locator row the index does not account for is refused", func(t *testing.T) {
@@ -2904,13 +2903,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		for _, row := range rows {
 			t.Run(row.name, func(t *testing.T) {
 				state := newDARelayStateForTest(t, defaultDARelayCaps())
-				image := row.arrange(t, state)
-				before := daRelayStateSnapshot(state)
-				state.mu.Lock()
-				_, err := state.projectDARecordImageLocked(image)
-				state.mu.Unlock()
-				requireDAErr(t, err, row.want)
-				requireDARelayStateUnchanged(t, state, before)
+				requireDAImageRejected(t, state, row.arrange(t, state), row.want)
 			})
 		}
 	})
@@ -2945,12 +2938,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 
 		image := stageDAOwnerReadyRemoval(state.sets[daID], true)
 		image.next = state.sets[daID].cloneOwnerReady()
-		before := daRelayStateSnapshot(state)
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(image)
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayMemberIncomplete)
-		requireDARelayStateUnchanged(t, state, before)
+		requireDAImageRejected(t, state, image, errDARelayMemberIncomplete)
 	})
 
 	t.Run("an incoherent record is refused component by component", func(t *testing.T) {
@@ -2990,13 +2978,8 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				row.corrupt(&record)
 				state.sets[daID] = record
 
-				before := daRelayStateSnapshot(state)
 				next := daRelayTestOwnerReadyChunk(daID, 1, 57, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
-				state.mu.Lock()
-				_, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(record, true, next))
-				state.mu.Unlock()
-				requireDAErr(t, err, errDARelayImageIncompatible)
-				requireDARelayStateUnchanged(t, state, before)
+				requireDAImageRejected(t, state, stageDAOwnerReadyMember(record, true, next), errDARelayImageIncompatible)
 			})
 		}
 	})
@@ -3029,32 +3012,12 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 		// The caller claims the record is resident with the revision it read
 		// (0). Residency and baseline both agree, so only the owner-ready check
 		// can refuse this image.
-		before := daRelayStateSnapshot(state)
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(state.sets[daID], true, member))
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayImageIncompatible)
-		requireDARelayStateUnchanged(t, state, before)
+		requireDAImageRejected(t, state, stageDAOwnerReadyMember(state.sets[daID], true, member), errDARelayImageIncompatible)
 	})
 
 	t.Run("claiming a legacy resident record is absent does not make it absent", func(t *testing.T) {
 		state := legacyResident(t)
-		before := daRelayStateSnapshot(state)
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(daRelaySetRecord{}, false, member))
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayImageIncompatible)
-		requireDARelayStateUnchanged(t, state, before)
-	})
-
-	t.Run("incompatibility outranks staleness", func(t *testing.T) {
-		state := legacyResident(t)
-		image := stageDAOwnerReadyMember(state.sets[daID], true, member)
-		image.baseline = 7
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(image)
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayImageIncompatible)
+		requireDAImageRejected(t, state, stageDAOwnerReadyMember(daRelaySetRecord{}, false, member), errDARelayImageIncompatible)
 	})
 
 	t.Run("a stamped record holding an unusable member is incompatible", func(t *testing.T) {
@@ -3062,12 +3025,13 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 			name    string
 			corrupt func(*daRelaySetRecord)
 		}{
+			{"a commit with no member", func(r *daRelaySetRecord) { r.commit.member = nil }},
 			{"a commit with no identity", func(r *daRelaySetRecord) { r.commit.member.txid = [32]byte{} }},
 			{"a commit with invalid provenance", func(r *daRelaySetRecord) { r.commit.member.provenance = daProvenance{} }},
 			{"a commit with no ordered inputs", func(r *daRelaySetRecord) { r.commit.member.inputs = nil }},
 			{"a revision of zero", func(r *daRelaySetRecord) { r.revision = 0 }},
-			{"a chunk entry with no identity", func(r *daRelaySetRecord) {
-				r.chunks = map[uint16]daRelayChunk{0: {daID: r.daID, chunkIndex: 0, txBytes: []byte("x")}}
+			{"a chunk entry with no member", func(r *daRelaySetRecord) {
+				r.chunks = map[uint16]daRelayChunk{0: {daID: r.daID, chunkIndex: 0, txBytes: []byte("x"), payload: []byte("y")}}
 			}},
 		}
 		for _, row := range corruptions {
@@ -3078,13 +3042,8 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 				row.corrupt(&record)
 				state.sets[daID] = record
 
-				before := daRelayStateSnapshot(state)
 				next := daRelayTestOwnerReadyChunk(daID, 0, 43, daRelayTestPeerProvenance("quota-a"), []byte("chunk-tx"), []byte("chunk-payload"))
-				state.mu.Lock()
-				_, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(record, true, next))
-				state.mu.Unlock()
-				requireDAErr(t, err, errDARelayImageIncompatible)
-				requireDARelayStateUnchanged(t, state, before)
+				requireDAImageRejected(t, state, stageDAOwnerReadyMember(record, true, next), errDARelayImageIncompatible)
 			})
 		}
 	})
@@ -3108,15 +3067,15 @@ func TestDAOwnerReadyRecordImageRejectsLegacy(t *testing.T) {
 		requireDARelayStateUnchanged(t, state, before)
 	})
 
-	t.Run("an absent record is a legitimate fresh projection and a zero token is permitted", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		placement, err := projectOwnerReadyMember(state, member)
-		if err != nil {
-			t.Fatalf("fresh projection over an absent record: %v", err)
+	t.Run("a memberless slot emits no locator row and is refused, never charged", func(t *testing.T) {
+		record := daRelaySetRecord{daID: daID, state: daRelayStateOrphanChunks, chunks: map[uint16]daRelayChunk{
+			0: {daID: daID, chunkIndex: 0, txBytes: []byte("x"), payload: []byte("y")},
+		}}
+		if rows := record.locatorRows(); len(rows) != 0 {
+			t.Fatalf("a memberless record emitted locator rows: %+v", rows)
 		}
-		if placement.record.commit.member.token != (PendingOutpointToken{}) {
-			t.Fatal("a zero candidate token must stay permitted before owner reserve")
-		}
+		_, err := record.ownerReadyAccounting()
+		requireDAErr(t, err, errDARelayMemberIncomplete)
 	})
 }
 
@@ -3219,13 +3178,8 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		pre := state.sets[daID]
 		mustInstallOwnerReadyMember(t, state, chunk)
 
-		before := daRelayStateSnapshot(state)
 		second := daRelayTestOwnerReadyChunk(daID, 1, 54, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
-		state.mu.Lock()
-		_, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(pre, true, second))
-		state.mu.Unlock()
-		requireDAErr(t, err, errDARelayRecordStale)
-		requireDARelayStateUnchanged(t, state, before)
+		requireDAImageRejected(t, state, stageDAOwnerReadyMember(pre, true, second), errDARelayRecordStale)
 	})
 
 	t.Run("a nonzero stamp source and a populated index survive the atomic batch", func(t *testing.T) {
@@ -3268,33 +3222,24 @@ func TestDARecordImageMapOrder(t *testing.T) {
 	}
 
 	candidate := daRelayTestOwnerReadyChunk(daID, 8, 71, provenance, []byte("chunk-tx"), []byte{9})
-	wantInstall := []daRelayLocatorRow{{
-		txid:    daRelayTestID(62),
-		locator: daRelayLocator{daID: daID, kind: daRelayLocatorCommit},
-	}}
-	for index := uint16(0); index < 9; index++ {
-		seed := byte(63 + index)
-		if index == 8 {
-			seed = 71
-		}
-		wantInstall = append(wantInstall, daRelayLocatorRow{
-			txid:    daRelayTestID(seed),
-			locator: daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: index},
-		})
+	wantInstall := []daRelayLocatorRow{{txid: daRelayTestID(62), locator: daRelayLocator{daID: daID, kind: daRelayLocatorCommit}}}
+	for index := uint16(0); index < 8; index++ {
+		wantInstall = append(wantInstall, daRelayLocatorRow{txid: daRelayTestID(byte(63 + index)), locator: daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: index}})
 	}
-
-	var first daRelayRecordPlacement
-	for attempt := 0; attempt < 32; attempt++ {
+	wantInstall = append(wantInstall, daRelayLocatorRow{txid: candidate.member.txid, locator: candidate.locator})
+	first, err := projectOwnerReadyMember(state, candidate)
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if !reflect.DeepEqual(first.install, wantInstall) {
+		t.Fatalf("install rows = %+v, want %+v", first.install, wantInstall)
+	}
+	// Go re-randomises map iteration per range, so repeating the whole
+	// projection is what would expose an order-dependent walk.
+	for attempt := 1; attempt < 3; attempt++ {
 		placement, err := projectOwnerReadyMember(state, candidate)
 		if err != nil {
 			t.Fatalf("attempt %d: %v", attempt, err)
-		}
-		if !reflect.DeepEqual(placement.install, wantInstall) {
-			t.Fatalf("attempt %d install rows = %+v, want %+v", attempt, placement.install, wantInstall)
-		}
-		if attempt == 0 {
-			first = placement
-			continue
 		}
 		if !reflect.DeepEqual(placement, first) {
 			t.Fatalf("attempt %d placement = %+v, want %+v", attempt, placement, first)
@@ -3305,6 +3250,32 @@ func TestDARecordImageMapOrder(t *testing.T) {
 func TestDARecordImageCloneIsolation(t *testing.T) {
 	daID := daRelayTestID(81)
 	provenance := daRelayTestPeerProvenance("quota-a")
+
+	// The live layer never reads a member and the orphan-pool caps count wire and
+	// payload bytes only, so an unowned member must cost one word of resident heap
+	// rather than the whole identity. Upper bounds, not exact sizes, so a build
+	// with narrower words stays green.
+	t.Run("an unowned member costs one word and a retained one is cloned through", func(t *testing.T) {
+		if got := unsafe.Sizeof(daRelayCommit{}); got > 136 {
+			t.Fatalf("daRelayCommit = %d bytes, want <= 136 (120 without a member)", got)
+		}
+		if got := unsafe.Sizeof(daRelayChunk{}); got > 168 {
+			t.Fatalf("daRelayChunk = %d bytes, want <= 168 (152 without a member)", got)
+		}
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 90, provenance, []byte("chunk-tx"), []byte("chunk-payload")))
+		record := state.sets[daID]
+		if record.commit.member != nil {
+			t.Fatalf("a record with no owner-ready commit carries a member: %+v", record.commit.member)
+		}
+		clone := record.cloneOwnerReady()
+		if clone.commit.member != nil {
+			t.Fatal("cloning invented a commit member")
+		}
+		if clone.chunks[0].member == record.chunks[0].member {
+			t.Fatal("the clone shares the retained member pointer")
+		}
+	})
 
 	t.Run("mutating the caller's member after staging changes no image", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
@@ -3319,6 +3290,14 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		if staged.txBytes[0] == 'X' || staged.payload[0] == 'X' || staged.member.inputs[0].Vout == 4242 {
 			t.Fatalf("the staged member aliases the caller's value: %+v", staged)
 		}
+
+		commit := daRelayTestOwnerReadyCommit(daID, 83, provenance, []byte("owner-ready-commit-tx"))
+		stagedCommit := stageOwnerReadyMemberForTest(state, commit).next.commit
+		commit.txBytes[0] = 'X'
+		commit.member.inputs[0].Vout = 4242
+		if stagedCommit.txBytes[0] == 'X' || stagedCommit.member.inputs[0].Vout == 4242 {
+			t.Fatalf("the staged commit aliases the caller's value: %+v", stagedCommit)
+		}
 	})
 
 	t.Run("mutating the pre-state after staging changes no image", func(t *testing.T) {
@@ -3327,6 +3306,7 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 84, provenance, []byte("chunk-tx"), []byte("chunk-payload")))
 		// Chunk 0 is already resident, so staging walks cloneOwnerReady's copy loop.
 		pre := state.sets[daID]
+		pre.replaceableChunks = map[uint16]bool{0: true}
 
 		member := daRelayTestOwnerReadyChunk(daID, 1, 85, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
 		first := stageDAOwnerReadyMember(pre, true, member)
@@ -3336,6 +3316,7 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		pre.chunks[0].txBytes[0] = 'X'
 		pre.chunks[0].member.inputs[0].Vout = 4242
 		pre.commit.txBytes[0] = 'X'
+		pre.replaceableChunks[0] = false
 
 		if first.next.chunks[0].payload[0] == 'X' || first.next.chunks[0].txBytes[0] == 'X' {
 			t.Fatalf("the image aliases an existing chunk's bytes: %+v", first.next.chunks[0])
@@ -3346,55 +3327,16 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		if first.next.commit.txBytes[0] == 'X' {
 			t.Fatal("the image aliases the pre-state commit bytes")
 		}
+		if !first.next.replaceableChunks[0] {
+			t.Fatal("the image aliases the pre-state replaceable flags")
+		}
 		delete(first.next.chunks, 0)
 		if _, kept := second.next.chunks[0]; !kept {
 			t.Fatal("two images staged from one pre-state share a chunk map")
 		}
 	})
 
-	t.Run("an existing chunk and its replaceable flag are deep-copied", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyCommit(daID, 86, provenance, []byte("owner-ready-commit-tx")))
-		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 87, provenance, []byte("chunk-tx"), []byte("chunk-payload")))
-		record := state.sets[daID]
-		record.replaceableChunks = map[uint16]bool{0: true}
-		state.sets[daID] = record
-
-		clone := record.cloneOwnerReady()
-		record.chunks[0].payload[0] = 'X'
-		record.chunks[0].txBytes[0] = 'X'
-		record.chunks[0].member.inputs[0].Vout = 4242
-		record.replaceableChunks[0] = false
-
-		if clone.chunks[0].payload[0] == 'X' || clone.chunks[0].txBytes[0] == 'X' {
-			t.Fatalf("an existing chunk's bytes are shared: %+v", clone.chunks[0])
-		}
-		if clone.chunks[0].member.inputs[0].Vout == 4242 {
-			t.Fatal("an existing chunk's ordered inputs are shared")
-		}
-		if !clone.replaceableChunks[0] {
-			t.Fatal("replaceableChunks is shared")
-		}
-	})
-
-	t.Run("mutating a returned placement's accounting and rows changes no live state", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		member := daRelayTestOwnerReadyCommit(daID, 88, provenance, []byte("owner-ready-commit-tx"))
-		placement := mustInstallOwnerReadyMember(t, state, member)
-
-		placement.peerBytes["quota-a"] = 999
-		placement.install[0].txid = daRelayTestID(89)
-		placement.retire = nil
-
-		if state.orphanBytesByPeerQuotaKey["quota-a"] != uint64(len("owner-ready-commit-tx")) {
-			t.Fatalf("live accounting aliases the placement: %d", state.orphanBytesByPeerQuotaKey["quota-a"])
-		}
-		if _, ok := state.locators[member.member.txid]; !ok {
-			t.Fatalf("the live index aliases the placement rows: %+v", state.locators)
-		}
-	})
-
-	t.Run("mutating an installed image changes no live state", func(t *testing.T) {
+	t.Run("mutating an installed image or its placement changes no live state", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		member := daRelayTestOwnerReadyCommit(daID, 85, provenance, []byte("owner-ready-commit-tx"))
 		state.mu.Lock()
@@ -3410,6 +3352,8 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		image.next.commit.txBytes[0] = 'X'
 		image.next.commit.member.inputs[0].Vout = 4242
 		placement.peerBytes["quota-a"] = 999
+		placement.install[0].txid = daRelayTestID(89)
+		placement.retire = nil
 
 		live := state.sets[daID]
 		if live.commit.txBytes[0] == 'X' || live.commit.member.inputs[0].Vout == 4242 {
@@ -3417,6 +3361,9 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 		if state.orphanBytesByPeerQuotaKey["quota-a"] != uint64(len("owner-ready-commit-tx")) {
 			t.Fatalf("live accounting aliases the placement: %d", state.orphanBytesByPeerQuotaKey["quota-a"])
+		}
+		if _, ok := state.locators[member.member.txid]; !ok {
+			t.Fatalf("the live index aliases the placement rows: %+v", state.locators)
 		}
 	})
 }

@@ -602,10 +602,11 @@ func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daR
 // non-resident staging baseline 0, so one comparison covers both arms.
 func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
 	live, resident := s.sets[image.daID]
-	if resident {
-		if err := live.validateOwnerReady(); err != nil {
-			return daRelaySetRecord{}, err
-		}
+	// A RESIDENT record this kernel could not have produced is INCOMPATIBLE
+	// input, never an absent one: residency comes from the lookup alone, and
+	// every record the legacy writers store carries revision 0.
+	if resident && (live.revision == 0 || live.checkOwnerReadyRecord() != nil) {
+		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
 	if resident != image.present || live.revision != image.baseline {
 		return daRelaySetRecord{}, errDARelayRecordStale
@@ -637,11 +638,11 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 	if err := image.next.checkOwnerReadyRecord(); err != nil {
 		return err
 	}
-	staged := image.next.chunks[image.member.locator.chunkIndex].member.txid
-	if image.member.locator.kind == daRelayLocatorCommit {
-		staged = image.next.commit.member.txid
+	staged := image.next.commit.member
+	if image.member.locator.kind == daRelayLocatorChunk {
+		staged = image.next.chunks[image.member.locator.chunkIndex].member
 	}
-	if staged != image.member.member.txid {
+	if staged == nil || staged.txid != image.member.member.txid {
 		return errDARelayMemberIncomplete
 	}
 	return nil
@@ -649,7 +650,7 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 
 // checkDARecordImageLocatorsLocked proves the txid index and the retained image
 // are one bijection (Section 18.3). A nil index is refused rather than allocated,
-// since installDASetRecordLocked may not allocate.
+// since installDASetRecordLocked may not allocate the index itself.
 func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage, live daRelaySetRecord) ([]daRelayLocatorRow, []daRelayLocatorRow, error) {
 	if s.locators == nil {
 		return nil, nil, errDARelayImageIncompatible
@@ -667,7 +668,7 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 // to the new provenance. Same shape, same errors as the legacy path.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
-		if live.commit.member.txid != ([32]byte{}) {
+		if live.commit.member != nil {
 			return errDARelayDuplicateCommit
 		}
 		return nil
@@ -735,17 +736,12 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 
 // installDASetRecordLocked RETURNS NO ERROR and PERFORMS NO VALIDATION: every
 // check ran in projectDARecordImageLocked, which is what would let a caller run
-// it after an owner reserve with no fallible step in between. It does insert
-// into and delete from live maps, so it is not allocation-free.
+// it after an owner reserve with no fallible step in between.
 //
-// PRECONDITION, the caller's to keep: a placement is SINGLE-USE and belongs to
-// the hold that produced it — ONE projection, ONE installation, one continuous
-// hold. Two placements projected before either is installed carry the same
-// minted revision; nothing here detects that, by design. It must be called with
-// the placement projectDARecordImageLocked returned for THIS image, under the
-// SAME lock hold. Retiring precedes installing, so a txid a record keeps across
-// the transition is reinstalled rather than dropped. nextReceivedTime is
-// deliberately not touched (RUBIN_COMPACT_BLOCKS.md Section 18.2).
+// PRECONDITION, the caller's to keep: a placement is SINGLE-USE — ONE projection,
+// ONE installation, one continuous hold, with the placement THIS image's own
+// projection returned. Two placements projected before either installs carry the
+// same minted revision; nothing here detects that, by design.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)

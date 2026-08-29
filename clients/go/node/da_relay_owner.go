@@ -46,9 +46,14 @@ func (p daProvenance) validate() error {
 	}
 }
 
-// A zero txid is the "slot is empty" marker. Token and fee are deliberately NOT
-// checked: a zero token is permitted before the owner reserve.
-func (m daRelayMemberIdentity) validate() error {
+// validate runs only where a member is REQUIRED, so nil — the empty-slot marker —
+// is refused here rather than read as an empty slot; the slot tests decide
+// emptiness from the pointer. Token and fee are deliberately NOT checked: a zero
+// token is permitted before the owner reserve.
+func (m *daRelayMemberIdentity) validate() error {
+	if m == nil {
+		return errDARelayMemberIncomplete
+	}
 	if m.txid == ([32]byte{}) || m.wtxid == ([32]byte{}) {
 		return errDARelayMemberIncomplete
 	}
@@ -87,28 +92,13 @@ func (m daRelayOwnerReadyMember) validate() error {
 	return m.member.validate()
 }
 
-// validateOwnerReady refuses a RESIDENT record this kernel could not have
-// produced, mapping every incoherence to one image-class error. A legacy record
-// carries revision 0, so it is INCOMPATIBLE input — never an absent one, which
-// the projector decides from the s.sets lookup alone.
-func (r daRelaySetRecord) validateOwnerReady() error {
-	if r.revision == 0 || r.checkOwnerReadyRecord() != nil {
-		return errDARelayImageIncompatible
-	}
-	return nil
-}
-
-// ownerReadyState covers only the states this kernel's charge formula is defined
-// for; Section 18.1 gives COMPLETE_SET a domain this slice was not assigned.
-func (r daRelaySetRecord) ownerReadyState() bool {
-	return r.state == daRelayStateOrphanChunks || r.state == daRelayStateStagedCommit
-}
-
 // checkOwnerReadyRecord proves one record internally COHERENT, not merely that
 // its members individually validate. Shared by the pre-state and the staged
 // record, so it carries no revision check — a staged record is unstamped.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
-	if !r.ownerReadyState() {
+	// Only these two states have a charge formula here; the COMPLETE_SET domain
+	// was not assigned to this slice.
+	if r.state != daRelayStateOrphanChunks && r.state != daRelayStateStagedCommit {
 		return errDARelayImageIncompatible
 	}
 	if err := r.checkOwnerReadyCommitSlot(); err != nil {
@@ -122,10 +112,11 @@ func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	return nil
 }
 
-// checkOwnerReadyCommitSlot treats a nonzero txid as occupancy, so legacy
-// metadata without one is refused rather than read as empty.
+// checkOwnerReadyCommitSlot treats a NON-nil member as occupancy, so legacy
+// metadata carrying none is refused rather than read as empty, and a member
+// present but incomplete is refused by validate rather than mistaken for absent.
 func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
-	if r.commit.member.txid == ([32]byte{}) {
+	if r.commit.member == nil {
 		if r.commit.chunkCount != 0 || len(r.commit.txBytes) != 0 {
 			return errDARelayMemberIncomplete
 		}
