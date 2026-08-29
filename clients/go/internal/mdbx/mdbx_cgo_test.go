@@ -417,9 +417,16 @@ func TestPureOwnershipTransitionsAndErrorOrder(t *testing.T) {
 		t.Fatalf("joined order/causes=%v", joined)
 	}
 	resultEngine := adapterError(operationAbort, EngineLocalInvariant, codeThreadMismatch, "result", nil)
-	if orderedErrors(operationAbort, orderNone, primary, result) != nil || orderedErrors(operationAbort, orderPrimary, primary, result) != primary || orderedErrors(operationAbort, orderPrimary, typedNil, result) != typedNil || orderedErrors(operationAbort, orderResult, nil, resultEngine) != resultEngine {
+	if orderedErrors(operationAbort, orderNone, nil, nil) != nil || orderedErrors(operationAbort, orderPrimary, primary, nil) != primary || orderedErrors(operationAbort, orderPrimary, typedNil, nil) != typedNil || orderedErrors(operationAbort, orderResult, nil, resultEngine) != resultEngine {
 		t.Fatal("single-result ordering changed")
 	}
+	requireFallback(t, operationAbort, orderNone, primary, nil, "native errors do not match ordering", "primary", primary)
+	requireFallback(t, operationAbort, orderNone, nil, result, "native errors do not match ordering", "result", result)
+	requireFallback(t, operationAbort, orderPrimary, nil, nil, "native errors do not match ordering", "")
+	requireFallback(t, operationAbort, orderPrimary, primary, result, "native errors do not match ordering", "primary\nresult", primary, result)
+	requireFallback(t, operationAbort, orderResult, primary, resultEngine, "native errors do not match ordering", "primary\n"+resultEngine.Error(), primary, resultEngine)
+	requireFallback(t, operationAbort, orderPrimaryResult, nil, resultEngine, "native errors do not match ordering", resultEngine.Error(), resultEngine)
+	requireFallback(t, operationAbort, orderResultCausesPrimary, nil, resultEngine, "native errors do not match ordering", resultEngine.Error(), resultEngine)
 	if ordered := orderedErrors(operationAbort, orderPrimaryResult, primary, resultEngine); ordered.Error() != "primary\n"+resultEngine.Error() || !errors.Is(ordered, primary) || !errors.Is(ordered, resultEngine) {
 		t.Fatalf("primary/result order=%v", ordered)
 	}
@@ -444,16 +451,16 @@ func TestPureOwnershipTransitionsAndErrorOrder(t *testing.T) {
 	wrapped := fmt.Errorf("wrapped result: %w", resultEngine)
 	wrappedNil := fmt.Errorf("wrapped nil: %w", typedNil)
 	requireFallback(t, operationAbort, orderResult, nil, result, "native result is not an EngineError", "result", result)
-	requireFallback(t, operationAbort, orderResult, nil, nil, "native result is not an EngineError", "")
+	requireFallback(t, operationAbort, orderResult, nil, nil, "native errors do not match ordering", "")
 	if got := requireEngineError(t, orderedErrors(operationAbort, orderResult, nil, typedNil), EngineLocalInvariant, operationAbort, codeProblem); got.Cause != typedNil || errors.Unwrap(got) != typedNil || got.Error() != "abort: LocalInvariant: code -30779: native result is not an EngineError: <nil>" {
 		t.Fatalf("typed-nil result identity=%+v", got)
 	}
 	requireFallback(t, operationAbort, orderPrimaryResult, primary, result, "native result is not an EngineError", "primary\nresult", primary, result)
-	requireFallback(t, operationAbort, orderPrimaryResult, primary, nil, "native result is not an EngineError", "primary", primary)
+	requireFallback(t, operationAbort, orderPrimaryResult, primary, nil, "native errors do not match ordering", "primary", primary)
 	requireFallback(t, operationAbort, orderPrimaryResult, primary, typedNil, "native result is not an EngineError", "primary\n<nil>", primary, typedNil)
 	requireFallback(t, operationAbort, orderResultCausesPrimary, primary, result, "native result is not an EngineError", "primary\nresult", primary, result)
 	requireFallback(t, operationAbort, orderResultCausesPrimary, primary, wrapped, "native result is not an EngineError", "primary\n"+wrapped.Error(), primary, wrapped, resultEngine)
-	requireFallback(t, operationClose, orderResultCausesPrimary, primary, nil, "native result is not an EngineError", "primary", primary)
+	requireFallback(t, operationClose, orderResultCausesPrimary, primary, nil, "native errors do not match ordering", "primary", primary)
 	requireFallback(t, operationAbort, orderResultCausesPrimary, primary, typedNil, "native result is not an EngineError", "primary\n<nil>", primary, typedNil)
 	requireFallback(t, operationClose, orderResultCausesPrimary, primary, wrappedNil, "native result is not an EngineError", "primary\n"+wrappedNil.Error(), primary, wrappedNil, typedNil)
 	requireFallback(t, operationClose, orderResultCausesPrimary, primary, resultEngine, "native result is not an EngineError", "primary\n"+resultEngine.Error(), primary, resultEngine)

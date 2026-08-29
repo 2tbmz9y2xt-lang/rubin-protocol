@@ -307,12 +307,35 @@ func directNativeResult(operation engineOperation, result error) (*EngineError, 
 	return engine, ok && engine != nil && engine.Operation == string(operation) && validEngineClass(engine.Class) && engine.Code != codeSuccess && engine.Class == classifyNative(operation, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
 }
 
+func errorOrderShape(order errorOrder) (bool, bool, bool) {
+	switch order {
+	case orderNone:
+		return false, false, true
+	case orderPrimary:
+		return true, false, true
+	case orderResult:
+		return false, true, true
+	case orderPrimaryResult, orderResultCausesPrimary:
+		return true, true, true
+	default:
+		return false, false, false
+	}
+}
+
 func orderedErrors(operation engineOperation, order errorOrder, primary, result error) error {
 	if !validEngineOperation(operation) {
 		return adapterError(operation, EngineLocalInvariant, codeProblem, "unsupported engine operation", joinErrors(primary, result))
 	}
+	needsPrimary, needsResult, knownOrder := errorOrderShape(order)
+	if !knownOrder {
+		return composeOrderedErrors(operation, order, primary, result, nil)
+	}
+	hasPrimary, hasResult := primary != nil, result != nil
+	if hasPrimary != needsPrimary || hasResult != needsResult {
+		return adapterError(operation, EngineLocalInvariant, codeProblem, "native errors do not match ordering", joinErrors(primary, result))
+	}
 	engine, validResult := directNativeResult(operation, result)
-	if (order == orderResult || order == orderPrimaryResult || order == orderResultCausesPrimary) && !validResult {
+	if needsResult && !validResult {
 		return adapterError(operation, EngineLocalInvariant, codeProblem, "native result is not an EngineError", joinErrors(primary, result))
 	}
 	return composeOrderedErrors(operation, order, primary, result, engine)
