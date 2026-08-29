@@ -19,11 +19,8 @@ type daProvenance struct {
 
 // quotaKey is the ONLY source of the per-peer accounting key: derived on every
 // use, never stored beside the provenance, so no member can present one source
-// with another's charge, and the legacy peerQuotaKey is never an input. A
-// peerless source, and every kind outside the closed set, derives the EMPTY key —
-// a shared per-peer bucket, not an exemption: addPeerAccounting charges "" like
-// any other key, under the same cap. A malformed PEER may still derive its own
-// quota string; validate refuses it before any accounting.
+// with another's charge, and the legacy peerQuotaKey is never an input. The EMPTY
+// key is a shared per-peer bucket, not an exemption: it is charged and capped.
 func (p daProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity
@@ -73,12 +70,9 @@ type daRelayOwnerReadyMember struct {
 }
 
 // A commit locator must carry chunk index 0, or two locators for one slot would
-// compare unequal. A chunk index at or above MAX_DA_CHUNK_COUNT and a payload
-// above CHUNK_BYTES are refused on the package's absolute bounds; the commit's
-// DECLARED chunk count stays admission's. wire_bytes and chunk_count reach no
-// check HERE: this kernel assigns neither, and RUB-1273 owns the layer that
-// does. Retained bytes above MAX_RELAY_MSG_BYTES are refused on that same
-// bound: the transport cap is the only ceiling a transaction's bytes carry.
+// compare unequal. The bounds here are the package's absolute ones; the commit's
+// DECLARED chunk count stays admission's, and wire_bytes and chunk_count reach no
+// check at all: this kernel assigns neither, and RUB-1273 owns the layer that does.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -104,9 +98,8 @@ func (m daRelayOwnerReadyMember) validate() error {
 	return m.member.validate()
 }
 
-// checkOwnerReadyRecord proves one record internally COHERENT, not merely that
-// its members individually validate. It reads no revision, so one check serves
-// both the resident pre-state and the staged record, whatever stamp each has.
+// checkOwnerReadyRecord reads no revision, so one check serves both the resident
+// pre-state and the staged record, whatever stamp each has.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	// Only these two states have a charge formula here; the COMPLETE_SET domain
 	// was not assigned to this slice.
@@ -124,9 +117,6 @@ func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	return nil
 }
 
-// checkOwnerReadyCommitSlot treats a NON-nil member as occupancy, so legacy
-// metadata carrying none is refused rather than read as empty, and a member
-// present but incomplete is refused by validate rather than mistaken for absent.
 func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
 	if r.commit.member == nil {
 		if r.commit.chunkCount != 0 || len(r.commit.txBytes) != 0 {
@@ -140,9 +130,8 @@ func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
 	return r.commit.member.validate()
 }
 
-// checkOwnerReadyChunk refuses a chunk whose map key is not its own index. The
-// absolute index and payload bounds are daRelayOwnerReadyMember.validate's, not
-// this record-level check's.
+// The absolute index and payload bounds are daRelayOwnerReadyMember.validate's,
+// not this record-level check's.
 func (r daRelaySetRecord) checkOwnerReadyChunk(index uint16) error {
 	chunk := r.chunks[index]
 	if chunk.chunkIndex != index || chunk.daID != r.daID {

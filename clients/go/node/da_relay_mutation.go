@@ -603,9 +603,6 @@ func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daR
 // non-resident staging baseline 0, so one comparison covers both arms.
 func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
 	live, resident := s.sets[image.daID]
-	// A RESIDENT record this kernel could not have produced is INCOMPATIBLE
-	// input, never an absent one: only this kernel mints a revision, so a record a
-	// legacy writer CREATES presents 0; one it mutates keeps its stamp (RUB-1275).
 	if resident && (live.revision == 0 || live.checkOwnerReadyRecord() != nil) {
 		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
@@ -615,11 +612,9 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	return live, checkStagedOwnerReadyRecord(image, live)
 }
 
-// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY. A
-// REMOVAL carries an EMPTY next; a non-removal a non-empty one naming its own
-// da_id, refusing a STAGED record that names another. An out-of-set kind empties
-// next only from a NON-resident pre-state, where the row count catches it; on a
-// resident one validate does. The last check binds BY TXID alone.
+// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY: a
+// removal carries an EMPTY next, a non-removal a non-empty one naming its own
+// da_id.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -670,10 +665,9 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 
 // checkOwnerReadySlotFree is FIRST-SEEN over the ONE slot image.member.locator
 // names: staging overwrites it, so without this a second member would evict the
-// retained one and move its charge to the new provenance. On OCCUPANCY both arms
-// are stricter than the legacy guard: a commit slot is taken when it holds a
-// member, where that guard reads chunk_count; a chunk slot on the map key, with
-// no replaceableChunks escape. The chunk-count range arm is RUB-1273's, not here.
+// retained one and move its charge to the new provenance. Both arms are stricter
+// than the legacy guard, which reads chunk_count and honours replaceableChunks.
+// The chunk-count range arm is RUB-1273's, not here.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {
@@ -687,8 +681,6 @@ func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) erro
 	return nil
 }
 
-// checkRetiredLocatorRowsLocked proves the bijection BOTH ways: every retired row
-// is the row the index holds, and every indexed row for this da_id is retired.
 func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daRelayLocatorRow) error {
 	retired := make(map[[32]byte]bool, len(retire))
 	for _, row := range retire {

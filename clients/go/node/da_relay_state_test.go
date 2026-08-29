@@ -2574,7 +2574,11 @@ func requireDAImageRejected(t *testing.T, state *DARelayState, image daRelayReco
 
 func requireOwnerReadyMemberRejected(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember, want error) {
 	t.Helper()
+	// This snapshot precedes STAGING: Go evaluates a call's arguments first, so the
+	// one requireDAImageRejected takes would already carry a staged write.
+	before := daRelayStateSnapshot(state)
 	requireDAImageRejected(t, state, stageOwnerReadyMemberForTest(state, member), want)
+	requireDARelayStateUnchanged(t, state, before)
 }
 
 func TestDAProvenanceClosedSet(t *testing.T) {
@@ -2641,6 +2645,9 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 
 	t.Run("one member stages a complete placement and installs it", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		state.pinnedPayloadBytes = 4096
+		state.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {0: "peer-prefetch"}}
+		state.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(7, 0)}
 		member := daRelayTestOwnerReadyCommit(daID, 21, daRelayTestPeerProvenance("quota-a"), commitTx)
 		before := daRelayStateSnapshot(state)
 		placement, err := projectOwnerReadyMember(state, member)
@@ -2683,6 +2690,11 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		// kernel neither reads nor advances it.
 		if state.nextReceivedTime != 0 {
 			t.Fatalf("the kernel advanced the accepted sequence to %d", state.nextReceivedTime)
+		}
+		// The installer prices no COMPLETE_SET and reserves no prefetch, so the three
+		// counters it skips are the ones a successful install must leave untouched.
+		if got := daRelayStateSnapshot(state); got.pinnedPayloadBytes != before.pinnedPayloadBytes || !reflect.DeepEqual(got.prefetchIndexes, before.prefetchIndexes) || !reflect.DeepEqual(got.prefetchExpires, before.prefetchExpires) {
+			t.Fatalf("the installer touched a counter it does not own: %+v", got)
 		}
 	})
 
@@ -2923,6 +2935,20 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		requireOwnerReadyMemberRejected(t, state, rechunk, errDARelayDuplicateChunk)
 	})
 
+	t.Run("a resident pre-state hides no candidate defect", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		commit := daRelayTestOwnerReadyCommit(daID, 76, daRelayTestPeerProvenance("quota-a"), commitTx)
+		mustInstallOwnerReadyMember(t, state, commit)
+		// The resident member's own txid and pre-state: a kind the candidate check
+		// let past would satisfy every later stage and install.
+		stray := commit
+		stray.locator.kind = daRelayLocatorChunk + 1
+		requireOwnerReadyMemberRejected(t, state, stray, errDARelayMemberIncomplete)
+		// The candidate is refused ahead of the occupied slot it would duplicate.
+		byteless := daRelayTestOwnerReadyCommit(daID, 77, daRelayTestPeerProvenance("quota-a"), nil)
+		requireOwnerReadyMemberRejected(t, state, byteless, errDARelayMemberIncomplete)
+	})
+
 	t.Run("a live locator row the retirement does not name is refused", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		commit := daRelayTestOwnerReadyCommit(daID, 51, daRelayTestPeerProvenance("quota-a"), commitTx)
@@ -2969,6 +2995,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				r.chunks[0] = chunk
 			}},
 			{"a commit naming another record", func(r *daRelaySetRecord) { r.commit.daID = daRelayTestID(99) }},
+			{"a memberless commit carrying a chunk count", func(r *daRelaySetRecord) { r.commit = daRelayCommit{daID: r.daID, chunkCount: 3} }},
 			{"a commit with no retained bytes", func(r *daRelaySetRecord) { r.commit.txBytes = nil }},
 		}
 		for _, row := range rows {
@@ -3123,6 +3150,12 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		if state.sets[daID].revision != 2 || state.records != 2 {
 			t.Fatalf("stored revision = %d, high-water = %d, want 2 and 2", state.sets[daID].revision, state.records)
 		}
+		// A record holding BOTH members is what separates the commit-overhead
+		// counter from the three that carry the whole charge.
+		wantCommit, wantWhole := uint64(len(commitTx)), uint64(len(commitTx)+len(chunkTx)+len(chunkPayload))
+		if state.orphanCommitOverheadBytes != wantCommit || state.orphanBytes != wantWhole || state.orphanBytesByDAID[daID] != wantWhole || state.orphanBytesByPeerQuotaKey["quota-a"] != wantWhole {
+			t.Fatalf("installed counters = %d %d %d %+v", state.orphanCommitOverheadBytes, state.orphanBytes, state.orphanBytesByDAID[daID], state.orphanBytesByPeerQuotaKey)
+		}
 		// The update retires and reinstalls the commit's row in one placement,
 		// so a txid the record keeps across the transition stays indexed.
 		if state.locators[commit.member.txid] != commit.locator || state.locators[chunk.member.txid] != chunk.locator {
@@ -3235,6 +3268,16 @@ func TestDARecordImageMapOrder(t *testing.T) {
 		if !reflect.DeepEqual(placement, first) {
 			t.Fatalf("attempt %d placement = %+v, want %+v", attempt, placement, first)
 		}
+	}
+
+	// The record check walks those same sorted indexes: with two defective entries
+	// staged in descending order, only that order reports index 2's refusal.
+	peerless, byteless := daRelayTestIdentity(90, daProvenance{}), daRelayTestIdentity(91, provenance)
+	pre := state.sets[daID].cloneOwnerReady()
+	pre.chunks[5] = daRelayChunk{daID: daID, chunkIndex: 5, payload: []byte{6}, member: &byteless}
+	pre.chunks[2] = daRelayChunk{daID: daID, chunkIndex: 2, txBytes: []byte("chunk-tx"), payload: []byte{3}, member: &peerless}
+	for attempt := 0; attempt < 8; attempt++ {
+		requireDAImageRejected(t, state, stageDAOwnerReadyMember(pre, true, candidate), errDAProvenanceInvalid)
 	}
 }
 

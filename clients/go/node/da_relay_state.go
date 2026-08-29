@@ -211,15 +211,10 @@ type daRelayChunk struct {
 // daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every
 // field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
 // reconstructed or narrowed, and inputs keep canonical order verbatim
-// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). No check here reads
-// fee or token; validate reads len(inputs) alone, never an input's value.
-//
-// A retained commit or chunk holds it BY POINTER: the live layer never reads it,
-// so an unowned member must cost one word and not the whole identity in resident
-// heap outside the orphan-pool caps, which count retained transaction and payload
-// bytes. nil is therefore the "no owner-ready member" marker; a NON-nil member is
-// required to be complete, so validate refuses nil. Owner-ready commit occupancy is
-// this pointer; checkOwnerReadySlotFree takes a chunk slot's from its map key.
+// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). A retained commit
+// or chunk holds it BY POINTER: the live layer never reads it, so an unowned
+// member costs one word and not the whole identity in resident heap outside the
+// orphan-pool caps, which count retained transaction and payload bytes.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
@@ -242,8 +237,6 @@ type daRelayLocator struct {
 	chunkIndex uint16
 }
 
-// daRelayLocatorRow rows travel as an ORDERED slice, never a map, so nothing a
-// caller observes or the installer assigns depends on map order.
 type daRelayLocatorRow struct {
 	txid    [32]byte
 	locator daRelayLocator

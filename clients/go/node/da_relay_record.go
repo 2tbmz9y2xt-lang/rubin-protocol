@@ -133,8 +133,6 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 	return r.cloneWithPayloads(false)
 }
 
-// cloneWithPayloads never touches member or revision, so the clone and r name
-// one identity and carry one stamp.
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
 	if copyPayloads {
@@ -557,7 +555,6 @@ func cloneBytes(in []byte) []byte {
 // caller-owned pre-state: building one mutates nothing, and the next of two
 // images staged from one pre-state shares no record state. Only next is
 // isolated — member is a shallow copy KEEPING the caller's slice headers.
-// baseline and present are CALLER observations the projector rechecks.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -567,9 +564,6 @@ type daRelayRecordImage struct {
 	remove   bool
 }
 
-// stageDAOwnerReadyMember is total: an unusable member, or a pre-state read from
-// another record, stages an image the projector then refuses. A NON-RESIDENT
-// staging starts from the zero record, so it can install only the one candidate.
 func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
 	image := daRelayRecordImage{daID: member.locator.daID, present: present, member: member}
 	if present {
@@ -602,11 +596,9 @@ func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordI
 	return daRelayRecordImage{daID: pre.daID, present: present, baseline: pre.revision, remove: true}
 }
 
-// cloneOwnerReady copies every byte slice, map and member of r, so no mutation
-// through one reaches the other; a member's token keeps naming the one shared
-// PendingOutpointOwner, which is a handle, not record state. cloneWithPayloads
-// is not reused: it shares or drops the caller's retained bytes, where this
-// kernel needs a record that owns every byte it holds.
+// cloneOwnerReady leaves a member's token naming the one shared
+// PendingOutpointOwner: a handle, not record state. cloneWithPayloads is not
+// reused — it shares or drops the caller's retained bytes instead of owning them.
 func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	out := r
 	out.commit.txBytes = cloneBytes(r.commit.txBytes)
@@ -624,9 +616,6 @@ func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	return out
 }
 
-// clone is nil-safe in BOTH directions: an empty slot clones to an empty slot,
-// and a present member clones to one whose ordered inputs are its own. token
-// keeps the original's *PendingOutpointOwner handle; no reservation is copied.
 func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 	if m == nil {
 		return nil
@@ -638,9 +627,8 @@ func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 	return &out
 }
 
-// locatorRows emits a FIXED order — commit first, then chunks ascending — one row per
-// slot HOLDING a member, so len(rows) is also the member count. checkOwnerReadyRecord
-// refuses a memberless chunk entry; an otherwise EMPTY commit slot is accepted.
+// locatorRows emits a FIXED order — commit first, then chunks ascending — one row
+// per slot HOLDING a member, so len(rows) is also the member count.
 func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
 	if r.commit.member != nil {
@@ -669,9 +657,7 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 // The per-peer key comes from the member's own provenance and nothing else —
 // never the cached peerQuotaKey, which this kernel leaves unset while the legacy
 // readers of that per-peer counter key on it, charging to "" what this charges
-// to the peer; RUB-1276 owns that. A peerless member derives the empty key and
-// IS charged under it: "" is a shared bucket under the same per-peer cap. Sorted
-// chunk indexes keep the result, and which refusal it names, off map order.
+// to the peer; RUB-1276 owns that.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {
@@ -680,8 +666,7 @@ func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error
 			return daRelayRecordAccounting{}, err
 		}
 	}
-	for _, index := range sortedRetainedDAChunkIndexes(r) {
-		chunk := r.chunks[index]
+	for _, chunk := range r.chunks {
 		charge, err := checkedAddUint64(uint64(len(chunk.txBytes)), uint64(len(chunk.payload)))
 		if err != nil {
 			return daRelayRecordAccounting{}, err
@@ -693,9 +678,8 @@ func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error
 	return accounting, nil
 }
 
-// addOwnerReadyMember refuses a memberless slot rather than charging it under
-// the empty key: a retained member that carries no source must not be silently
-// uncharged, and no caller may reach the derivation through nil.
+// A memberless slot is refused rather than charged under the empty key: a
+// retained member carrying no source must never be silently uncharged.
 func (a *daRelayRecordAccounting) addOwnerReadyMember(member *daRelayMemberIdentity, charge uint64) error {
 	if member == nil {
 		return errDARelayMemberIncomplete
