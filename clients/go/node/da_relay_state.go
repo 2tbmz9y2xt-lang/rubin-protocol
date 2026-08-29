@@ -208,9 +208,9 @@ type daRelayChunk struct {
 
 // daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every
 // field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
-// reconstructed or narrowed, and inputs keep the caller's canonical order
-// verbatim (RUBIN_COMPACT_BLOCKS.md Section 18.1, RUBIN_MEMPOOL_POLICY.md
-// Section 6.4). Its per-peer key is quotaKey's, never the legacy peerQuotaKey.
+// reconstructed or narrowed, and inputs keep canonical order verbatim
+// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). fee, inputs and
+// token are unread here by design — the owner chain is what will trust them.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
@@ -234,7 +234,7 @@ type daRelayLocator struct {
 }
 
 // daRelayLocatorRow rows travel as an ORDERED slice, never a map, so nothing a
-// caller observes and nothing the installer assigns depends on map order.
+// caller observes or the installer assigns depends on map order.
 type daRelayLocatorRow struct {
 	txid    [32]byte
 	locator daRelayLocator
@@ -304,8 +304,7 @@ type DARelayState struct {
 	// so today the index stays coherent only because installDASetRecordLocked has
 	// no non-test caller.
 	locators map[[32]byte]daRelayLocator
-	// records is the monotone high-water source of revision, minted only by
-	// projectDARecordImageLocked.
+	// records is the monotone high-water source of revision.
 	records uint64
 }
 

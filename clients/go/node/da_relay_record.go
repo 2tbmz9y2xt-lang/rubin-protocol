@@ -554,7 +554,7 @@ func cloneBytes(in []byte) []byte {
 // daRelayRecordImage is ONE record transition staged as a PURE function of a
 // caller-owned pre-state: building one mutates nothing and two images staged from
 // one pre-state share nothing. baseline and present are CALLER observations the
-// projector rechecks against live state.
+// projector rechecks.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -565,9 +565,9 @@ type daRelayRecordImage struct {
 }
 
 // stageDAOwnerReadyMember is total; an unusable member simply stages a record the
-// projector then refuses. A NON-RESIDENT staging deliberately ignores the
-// pre-state and starts from the zero record, so a projection over an absent record
-// can only ever install the single candidate member.
+// projector then refuses. A NON-RESIDENT staging ignores the pre-state and starts
+// from the zero record, so a projection over an absent record can only install
+// the single candidate member.
 func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
 	image := daRelayRecordImage{daID: member.locator.daID, present: present, member: member}
 	if present {
@@ -628,9 +628,8 @@ func (m daRelayMemberIdentity) clone() daRelayMemberIdentity {
 }
 
 // locatorRows emits a FIXED order — commit first, then chunks ascending — one row
-// per occupied slot, so len(rows) is also the member count. No walk here can
-// produce a zero-txid row: validateOwnerReady refuses a resident record holding an
-// entry without an identity, and staging starts from the zero record.
+// per occupied slot, so len(rows) is also the member count. No walk here produces
+// a zero-txid row: checkOwnerReadyRecord refuses an entry without an identity.
 func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
 	if r.commit.member.txid != ([32]byte{}) {
@@ -649,52 +648,41 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 }
 
 // ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
-// incomplete_member_charge and total_fee(da_id). The legacy wireBytes fallback
-// of retainedTxAccountingBytes has no place here: an owner-ready member always
+// incomplete_member_charge. The legacy wireBytes fallback of
+// retainedTxAccountingBytes has no place here: an owner-ready member always
 // carries its retained bytes.
 //
-// The per-peer key comes from the member's own provenance and from nothing else
-// — never from the cached peerQuotaKey field, which belongs to the legacy path.
-// A peerless member derives the empty key and is charged under it: "" is a
-// shared bucket sharing the per-peer cap, and whether Section 18.1's State B
-// exemption should eventually separate that bucket is a live-path question this
-// kernel does not own. The walk is over sorted chunk indexes, so neither the
-// result nor the identity of a refusal depends on Go map iteration order.
-func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, consensus.Uint128, error) {
+// The per-peer key comes from the member's own provenance and nothing else —
+// never the cached peerQuotaKey, which belongs to the legacy path. A peerless
+// member derives the empty key and IS charged under it: "" is a shared bucket
+// under the same per-peer cap. The walk is over sorted chunk indexes, so neither
+// the result nor the identity of a refusal depends on map iteration order.
+func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
-	var totalFee consensus.Uint128
-	var err error
 	if r.commit.member.txid != ([32]byte{}) {
 		accounting.commitBytes = uint64(len(r.commit.txBytes))
-		if totalFee, err = accounting.addOwnerReadyMember(r.commit.member, accounting.commitBytes, totalFee); err != nil {
-			return daRelayRecordAccounting{}, consensus.Uint128{}, err
+		if err := accounting.addOwnerReadyMember(r.commit.member, accounting.commitBytes); err != nil {
+			return daRelayRecordAccounting{}, err
 		}
 	}
 	for _, index := range sortedRetainedDAChunkIndexes(r) {
 		chunk := r.chunks[index]
-		charge, chargeErr := checkedAddUint64(uint64(len(chunk.txBytes)), uint64(len(chunk.payload)))
-		if chargeErr != nil {
-			return daRelayRecordAccounting{}, consensus.Uint128{}, chargeErr
+		charge, err := checkedAddUint64(uint64(len(chunk.txBytes)), uint64(len(chunk.payload)))
+		if err != nil {
+			return daRelayRecordAccounting{}, err
 		}
-		if totalFee, err = accounting.addOwnerReadyMember(chunk.member, charge, totalFee); err != nil {
-			return daRelayRecordAccounting{}, consensus.Uint128{}, err
+		if err := accounting.addOwnerReadyMember(chunk.member, charge); err != nil {
+			return daRelayRecordAccounting{}, err
 		}
 	}
-	return accounting, totalFee, nil
+	return accounting, nil
 }
 
-func (a *daRelayRecordAccounting) addOwnerReadyMember(member daRelayMemberIdentity, charge uint64, totalFee consensus.Uint128) (consensus.Uint128, error) {
+func (a *daRelayRecordAccounting) addOwnerReadyMember(member daRelayMemberIdentity, charge uint64) error {
 	orphanBytes, err := checkedAddUint64(a.orphanBytes, charge)
 	if err != nil {
-		return consensus.Uint128{}, err
+		return err
 	}
 	a.orphanBytes = orphanBytes
-	if err := addPeerAccounting(a.peerBytes, member.provenance.quotaKey(), charge); err != nil {
-		return consensus.Uint128{}, err
-	}
-	fee, ok := totalFee.CheckedAdd(member.fee)
-	if !ok {
-		return consensus.Uint128{}, errDARelayArithmeticOverflow
-	}
-	return fee, nil
+	return addPeerAccounting(a.peerBytes, member.provenance.quotaKey(), charge)
 }

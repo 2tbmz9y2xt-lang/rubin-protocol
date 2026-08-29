@@ -549,8 +549,7 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 }
 
 // daRelayRecordPlacement holds ABSOLUTE counter values, not deltas. Once
-// installed, its record and rows ARE live state by assignment: a caller must not
-// retain or mutate a placement after installing it.
+// installed, its record and rows ARE live state by assignment.
 type daRelayRecordPlacement struct {
 	daID        [32]byte
 	record      daRelaySetRecord
@@ -561,23 +560,17 @@ type daRelayRecordPlacement struct {
 	peerBytes   map[string]uint64
 	daBytes     uint64
 	commitBytes uint64
-	pinnedBytes uint64
-	totalFee    consensus.Uint128
 }
 
-// projectDARecordImageLocked is the FALLIBLE half of the owner-ready retained
-// kernel: it owns EVERY check and mutates nothing on any path, so a refused
-// image leaves the live retained state byte-identical.
+// projectDARecordImageLocked is the FALLIBLE half: it owns EVERY check and
+// mutates nothing on any path, so a refused image leaves live state
+// byte-identical. Refusal priority is fixed, so a doubly-violating image always
+// selects the earlier reason: incompatible live record, stale image, unusable
+// candidate, locator row, accounting, exhausted revision space
+// (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3).
 //
-// Refusal priority is fixed, so a doubly-violating image always selects the
-// earlier reason: incompatible live record, then stale image, then unusable
-// candidate member, then locator row, then accounting, then exhausted revision
-// space (RUBIN_COMPACT_BLOCKS.md Sections 18.2 and 18.3).
-//
-// The live counters and the revision high-water are deliberately re-read here
-// rather than frozen into the image: they are shared by every record, so
-// projecting them here is what keeps a decision about one record from being
-// invalidated by, or lost to, a decision about another. received_time and the
+// The live counters and the revision high-water are re-read here rather than
+// frozen into the image: they are shared by every record. received_time and the
 // Section 18.2 accepted sequence are NOT this kernel's and stay untouched.
 func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
 	live, err := s.checkDARecordImageBaselineLocked(image)
@@ -617,16 +610,14 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	if resident != image.present || live.revision != image.baseline {
 		return daRelaySetRecord{}, errDARelayRecordStale
 	}
-	return live, checkStagedOwnerReadyRecord(image)
+	return live, checkStagedOwnerReadyRecord(image, live)
 }
 
 // checkStagedOwnerReadyRecord makes image.next the AUTHORITY: the placement's
-// record and install rows are built from it, so it is what must be proven. A
-// REMOVAL must carry an EMPTY next, or a record no check reads could ride along
-// with the retirement; a non-removal must carry a non-empty one, which is what
-// refuses a locator kind outside the closed set. The last check binds
-// image.member to the record it names.
-func checkStagedOwnerReadyRecord(image daRelayRecordImage) error {
+// record and install rows are built from it. A REMOVAL must carry an EMPTY next,
+// a non-removal a non-empty one — which is what refuses a locator kind outside
+// the closed set. The last check binds image.member to the record it names.
+func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
 		if len(rows) != 0 {
@@ -638,6 +629,9 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage) error {
 		return errDARelayMemberIncomplete
 	}
 	if err := image.member.validate(); err != nil {
+		return err
+	}
+	if err := checkOwnerReadySlotFree(live, image.member.locator); err != nil {
 		return err
 	}
 	if err := image.next.checkOwnerReadyRecord(); err != nil {
@@ -668,9 +662,24 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 	return retire, install, s.checkDAInstallLocatorRowsLocked(image.daID, install)
 }
 
+// checkOwnerReadySlotFree is FIRST-SEEN: staging overwrites the slot it targets,
+// so without this a second member would evict a retained one and move its charge
+// to the new provenance. Same shape, same errors as the legacy path.
+func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
+	if locator.kind == daRelayLocatorCommit {
+		if live.commit.member.txid != ([32]byte{}) {
+			return errDARelayDuplicateCommit
+		}
+		return nil
+	}
+	if _, occupied := live.chunks[locator.chunkIndex]; occupied {
+		return errDARelayDuplicateChunk
+	}
+	return nil
+}
+
 // checkRetiredLocatorRowsLocked proves the bijection BOTH ways: every retired row
-// is the row the index holds, and every indexed row for this da_id is retired. A
-// row the retirement misses is a dangling claim, refused, never repaired.
+// is the row the index holds, and every indexed row for this da_id is retired.
 func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daRelayLocatorRow) error {
 	retired := make(map[[32]byte]bool, len(retire))
 	for _, row := range retire {
@@ -702,15 +711,15 @@ func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []
 }
 
 func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordImage, live daRelaySetRecord) (daRelayRecordPlacement, error) {
-	oldAccounting, _, err := live.ownerReadyAccounting()
+	oldAccounting, err := live.ownerReadyAccounting()
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	newAccounting, totalFee, err := image.next.ownerReadyAccounting()
+	newAccounting, err := image.next.ownerReadyAccounting()
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove, totalFee: totalFee}
+	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove}
 	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
@@ -720,30 +729,19 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 	if placement.commitBytes, err = checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, s.caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	if placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes); err != nil {
-		return daRelayRecordPlacement{}, err
-	}
-	if placement.pinnedBytes, err = s.projectOwnerReadyPinnedBytesLocked(live, image.next); err != nil {
-		return daRelayRecordPlacement{}, err
-	}
-	return placement, nil
-}
-
-func (s *DARelayState) projectOwnerReadyPinnedBytesLocked(live, next daRelaySetRecord) (uint64, error) {
-	pinnedBytes, err := checkedApplyUint64Delta(s.pinnedPayloadBytes, live.pinnedPayloadAccountingBytes(), next.pinnedPayloadAccountingBytes())
-	if err != nil {
-		return 0, err
-	}
-	if pinnedBytes > s.caps.pinnedPayloadBytes {
-		return 0, errDARelayPinnedPayloadCapExceeded
-	}
-	return pinnedBytes, nil
+	placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
+	return placement, err
 }
 
 // installDASetRecordLocked RETURNS NO ERROR and PERFORMS NO VALIDATION: every
 // check ran in projectDARecordImageLocked, which is what would let a caller run
 // it after an owner reserve with no fallible step in between. It does insert
-// into and delete from live maps, so it is not allocation-free. It must be called with
+// into and delete from live maps, so it is not allocation-free.
+//
+// PRECONDITION, the caller's to keep: a placement is SINGLE-USE and belongs to
+// the hold that produced it — ONE projection, ONE installation, one continuous
+// hold. Two placements projected before either is installed carry the same
+// minted revision; nothing here detects that, by design. It must be called with
 // the placement projectDARecordImageLocked returned for THIS image, under the
 // SAME lock hold. Retiring precedes installing, so a txid a record keeps across
 // the transition is reinstalled rather than dropped. nextReceivedTime is
@@ -765,5 +763,4 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 	s.applyProjectedPeerBytes(placement.peerBytes)
 	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
 	s.orphanCommitOverheadBytes = placement.commitBytes
-	s.pinnedPayloadBytes = placement.pinnedBytes
 }

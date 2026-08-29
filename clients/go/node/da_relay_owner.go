@@ -15,15 +15,13 @@ type daProvenance struct {
 	quotaIdentity string
 }
 
-// quotaKey is the ONLY source of the per-peer accounting key: it is derived here
-// on every use and never stored beside the provenance, so no member can present
-// one source with another source's charge, and the legacy cached peerQuotaKey
-// field is never an input. A peerless source, and every kind outside the closed
-// set, derives the EMPTY key — which is a shared per-peer bucket, not an
-// exemption from the map: addPeerAccounting charges "" like any other key, under
-// the same cap. A malformed PEER may still derive its own quota string; what keeps
-// it out of the counters is validate, which projectDARecordImageLocked runs
-// before any accounting.
+// quotaKey is the ONLY source of the per-peer accounting key: derived on every
+// use, never stored beside the provenance, so no member can present one source
+// with another's charge, and the legacy peerQuotaKey is never an input. A
+// peerless source, and every kind outside the closed set, derives the EMPTY key —
+// a shared per-peer bucket, not an exemption: addPeerAccounting charges "" like
+// any other key, under the same cap. A malformed PEER may still derive its own
+// quota string; validate refuses it before any accounting.
 func (p daProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity
@@ -48,9 +46,8 @@ func (p daProvenance) validate() error {
 	}
 }
 
-// A zero txid is the "slot is empty" marker, so a member carrying one could never
-// be located. Token and fee are deliberately NOT checked: a zero token is
-// permitted before the owner reserve and every fee value is legal.
+// A zero txid is the "slot is empty" marker. Token and fee are deliberately NOT
+// checked: a zero token is permitted before the owner reserve.
 func (m daRelayMemberIdentity) validate() error {
 	if m.txid == ([32]byte{}) || m.wtxid == ([32]byte{}) {
 		return errDARelayMemberIncomplete
@@ -92,8 +89,8 @@ func (m daRelayOwnerReadyMember) validate() error {
 
 // validateOwnerReady refuses a RESIDENT record this kernel could not have
 // produced, mapping every incoherence to one image-class error. A legacy record
-// carries revision 0, so it is INCOMPATIBLE input — never mistaken for an absent
-// record, which the projector decides from the s.sets lookup alone.
+// carries revision 0, so it is INCOMPATIBLE input — never an absent one, which
+// the projector decides from the s.sets lookup alone.
 func (r daRelaySetRecord) validateOwnerReady() error {
 	if r.revision == 0 || r.checkOwnerReadyRecord() != nil {
 		return errDARelayImageIncompatible
@@ -102,15 +99,14 @@ func (r daRelaySetRecord) validateOwnerReady() error {
 }
 
 // ownerReadyState covers only the states this kernel's charge formula is defined
-// for; Section 18.1 gives COMPLETE_SET a domain this slice was not assigned, so
-// State C and any out-of-set value are refused, never mischarged.
+// for; Section 18.1 gives COMPLETE_SET a domain this slice was not assigned.
 func (r daRelaySetRecord) ownerReadyState() bool {
 	return r.state == daRelayStateOrphanChunks || r.state == daRelayStateStagedCommit
 }
 
 // checkOwnerReadyRecord proves one record internally COHERENT, not merely that
-// its members individually validate. Shared by the resident pre-state and the
-// staged record, so it carries no revision check — a staged record is unstamped.
+// its members individually validate. Shared by the pre-state and the staged
+// record, so it carries no revision check — a staged record is unstamped.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	if !r.ownerReadyState() {
 		return errDARelayImageIncompatible
@@ -126,8 +122,8 @@ func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	return nil
 }
 
-// checkOwnerReadyCommitSlot treats the slot as occupied exactly when it holds a
-// nonzero txid, so legacy metadata without one is refused, not read as empty.
+// checkOwnerReadyCommitSlot treats a nonzero txid as occupancy, so legacy
+// metadata without one is refused rather than read as empty.
 func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
 	if r.commit.member.txid == ([32]byte{}) {
 		if r.commit.chunkCount != 0 || len(r.commit.txBytes) != 0 {

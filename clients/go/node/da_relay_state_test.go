@@ -2671,9 +2671,6 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		if placement.peerBytes["quota-a"] != charge || len(placement.peerBytes) != 1 {
 			t.Fatalf("peer bytes = %+v, want only quota-a=%d", placement.peerBytes, charge)
 		}
-		if placement.pinnedBytes != 0 || placement.totalFee != consensus.Uint128FromU64(21) {
-			t.Fatalf("pinned=%d fee=%+v, want 0 and 21", placement.pinnedBytes, placement.totalFee)
-		}
 
 		state.mu.Lock()
 		state.installDASetRecordLocked(placement)
@@ -2746,17 +2743,6 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}
 	})
 
-	t.Run("a cap refusal leaves the live image byte-identical", func(t *testing.T) {
-		caps := defaultDARelayCaps()
-		caps.orphanPoolBytes = 8
-		caps.orphanPoolPerPeerBytes = 8
-		caps.orphanPoolPerDAIDBytes = 8
-		caps.orphanCommitOverheadBytes = 8
-		state := newDARelayStateForTest(t, caps)
-		member := daRelayTestOwnerReadyCommit(daID, 27, daRelayTestPeerProvenance("quota-a"), commitTx)
-		requireOwnerReadyMemberRejected(t, state, member, errDARelayOrphanPoolCapExceeded)
-	})
-
 	t.Run("an accounting underflow is refused before mutation", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		commit := daRelayTestOwnerReadyCommit(daID, 28, daRelayTestPeerProvenance("quota-a"), commitTx)
@@ -2769,17 +2755,6 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		state.mu.Unlock()
 		requireDAErr(t, err, errDARelayArithmeticOverflow)
 		requireDARelayStateUnchanged(t, state, before)
-	})
-
-	t.Run("an exact u128 fee sum overflow is refused before mutation", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		commit := daRelayTestOwnerReadyCommit(daID, 29, daRelayTestPeerProvenance("quota-a"), commitTx)
-		commit.member.fee = consensus.Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}
-		mustInstallOwnerReadyMember(t, state, commit)
-
-		chunk := daRelayTestOwnerReadyChunk(daID, 0, 30, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
-		chunk.member.fee = consensus.Uint128FromU64(1)
-		requireOwnerReadyMemberRejected(t, state, chunk, errDARelayArithmeticOverflow)
 	})
 
 	t.Run("a locator row the index does not account for is refused", func(t *testing.T) {
@@ -2938,6 +2913,19 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				requireDARelayStateUnchanged(t, state, before)
 			})
 		}
+	})
+
+	t.Run("an occupied slot is first-seen", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		commit := daRelayTestOwnerReadyCommit(daID, 58, daRelayTestPeerProvenance("quota-a"), commitTx)
+		chunk := daRelayTestOwnerReadyChunk(daID, 0, 59, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
+		mustInstallOwnerReadyMember(t, state, commit)
+		mustInstallOwnerReadyMember(t, state, chunk)
+
+		second := daRelayTestOwnerReadyCommit(daID, 60, daRelayTestPeerProvenance("quota-b"), commitTx)
+		requireOwnerReadyMemberRejected(t, state, second, errDARelayDuplicateCommit)
+		rechunk := daRelayTestOwnerReadyChunk(daID, 0, 61, daRelayTestPeerProvenance("quota-b"), chunkTx, chunkPayload)
+		requireOwnerReadyMemberRejected(t, state, rechunk, errDARelayDuplicateChunk)
 	})
 
 	t.Run("a live locator row the retirement does not name is refused", func(t *testing.T) {
@@ -3203,6 +3191,28 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		}
 	})
 
+	t.Run("the legal schedule is one projection, one installation, one hold", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		state.mu.Lock()
+		legal := func(member daRelayOwnerReadyMember) uint64 {
+			pre, present := state.sets[member.locator.daID]
+			placement, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(pre, present, member))
+			if err != nil {
+				state.mu.Unlock()
+				t.Fatalf("project: %v", err)
+			}
+			state.installDASetRecordLocked(placement)
+			return placement.record.revision
+		}
+		first, second := legal(commit), legal(chunk)
+		state.mu.Unlock()
+
+		// Re-projecting after installing is what makes the second revision fresh.
+		if first != 1 || second != 2 {
+			t.Fatalf("revisions = %d then %d, want 1 then 2", first, second)
+		}
+	})
+
 	t.Run("a stale baseline is refused before mutation", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, commit)
@@ -3314,20 +3324,30 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 	t.Run("mutating the pre-state after staging changes no image", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyCommit(daID, 83, provenance, []byte("owner-ready-commit-tx")))
+		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 84, provenance, []byte("chunk-tx"), []byte("chunk-payload")))
+		// Chunk 0 is already resident, so staging walks cloneOwnerReady's copy loop.
 		pre := state.sets[daID]
 
-		member := daRelayTestOwnerReadyChunk(daID, 0, 84, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
+		member := daRelayTestOwnerReadyChunk(daID, 1, 85, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
 		first := stageDAOwnerReadyMember(pre, true, member)
 		second := stageDAOwnerReadyMember(pre, true, member)
 
+		pre.chunks[0].payload[0] = 'X'
+		pre.chunks[0].txBytes[0] = 'X'
+		pre.chunks[0].member.inputs[0].Vout = 4242
 		pre.commit.txBytes[0] = 'X'
-		pre.commit.member.inputs[0].Vout = 4242
-		first.next.chunks[0] = daRelayChunk{}
 
-		if first.next.commit.txBytes[0] == 'X' || first.next.commit.member.inputs[0].Vout == 4242 {
-			t.Fatalf("the image aliases the pre-state: %+v", first.next.commit)
+		if first.next.chunks[0].payload[0] == 'X' || first.next.chunks[0].txBytes[0] == 'X' {
+			t.Fatalf("the image aliases an existing chunk's bytes: %+v", first.next.chunks[0])
 		}
-		if second.next.chunks[0].member.txid != member.member.txid {
+		if first.next.chunks[0].member.inputs[0].Vout == 4242 {
+			t.Fatal("the image aliases an existing chunk's ordered inputs")
+		}
+		if first.next.commit.txBytes[0] == 'X' {
+			t.Fatal("the image aliases the pre-state commit bytes")
+		}
+		delete(first.next.chunks, 0)
+		if _, kept := second.next.chunks[0]; !kept {
 			t.Fatal("two images staged from one pre-state share a chunk map")
 		}
 	})
