@@ -77,6 +77,8 @@ type daRelayOwnerReadyMember struct {
 // above CHUNK_BYTES are refused on the package's absolute bounds; the commit's
 // DECLARED chunk count stays admission's. wire_bytes and chunk_count go
 // unchecked: this kernel assigns neither, and RUB-1273 owns the layer that does.
+// Retained bytes above MAX_RELAY_MSG_BYTES are refused on that same bound: the
+// package's transport cap is the only ceiling a transaction's bytes carry.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -96,7 +98,7 @@ func (m daRelayOwnerReadyMember) validate() error {
 	default:
 		return errDARelayMemberIncomplete
 	}
-	if len(m.txBytes) == 0 {
+	if len(m.txBytes) == 0 || len(m.txBytes) > consensus.MAX_RELAY_MSG_BYTES {
 		return errDARelayMemberIncomplete
 	}
 	return m.member.validate()

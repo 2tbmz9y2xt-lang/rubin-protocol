@@ -2819,6 +2819,9 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 			{"more inputs than a tx may carry", func(m *daRelayOwnerReadyMember) {
 				m.member.inputs = make([]consensus.Outpoint, consensus.MAX_TX_INPUTS+1)
 			}},
+			{"more retained bytes than the transport carries", func(m *daRelayOwnerReadyMember) {
+				m.txBytes = make([]byte, consensus.MAX_RELAY_MSG_BYTES+1)
+			}},
 		}
 		for _, row := range omissions {
 			member := base
