@@ -638,9 +638,9 @@ func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 	return &out
 }
 
-// locatorRows emits a FIXED order — commit first, then chunks ascending — one row
-// per slot HOLDING a member, so len(rows) is also the member count. A memberless
-// slot emits nothing, and checkOwnerReadyRecord refuses it before any install.
+// locatorRows emits a FIXED order — commit first, then chunks ascending — one row per
+// slot HOLDING a member, so len(rows) is also the member count. checkOwnerReadyRecord
+// refuses a memberless chunk entry; an otherwise EMPTY commit slot is accepted.
 func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
 	if r.commit.member != nil {

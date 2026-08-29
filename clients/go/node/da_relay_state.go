@@ -211,15 +211,15 @@ type daRelayChunk struct {
 // daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every
 // field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
 // reconstructed or narrowed, and inputs keep canonical order verbatim
-// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). fee, inputs and
-// token are unread here by design — the owner chain is what will trust them.
+// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). No check here reads
+// fee or token; validate reads len(inputs) alone, never an input's value.
 //
 // A retained commit or chunk holds it BY POINTER: the live layer never reads it,
 // so an unowned member must cost one word and not the whole identity in resident
 // heap outside the orphan-pool caps, which count wire and payload bytes. nil is
 // therefore the "no owner-ready member" marker; a NON-nil member is required to
-// be complete, so validate refuses nil and every occupancy test reads the
-// pointer, never a zero field inside it.
+// be complete, so validate refuses nil. Owner-ready commit occupancy is this
+// pointer; checkOwnerReadySlotFree takes a chunk slot's from its map key.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
