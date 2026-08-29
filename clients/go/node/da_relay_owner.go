@@ -105,8 +105,8 @@ func (m daRelayOwnerReadyMember) validate() error {
 }
 
 // checkOwnerReadyRecord proves one record internally COHERENT, not merely that
-// its members individually validate. Shared by the pre-state and the staged
-// record, so it carries no revision check — a staged record is unstamped.
+// its members individually validate. It reads no revision, so one check serves
+// both the resident pre-state and the staged record, whatever stamp each has.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	// Only these two states have a charge formula here; the COMPLETE_SET domain
 	// was not assigned to this slice.
