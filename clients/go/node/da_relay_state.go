@@ -310,8 +310,8 @@ type DARelayState struct {
 	sets                      map[[32]byte]daRelaySetRecord
 	// locators is carried across the atomic-batch pair, so a canonical transition
 	// preserves its rows rather than dropping them; no batch BODY maintains it,
-	// so today the index stays coherent only because installDASetRecordLocked has
-	// no non-test caller.
+	// and no legacy removal retires a row — RUB-1275's — so today the index stays
+	// coherent only because installDASetRecordLocked has no non-test caller.
 	locators map[[32]byte]daRelayLocator
 	// records is the monotone high-water source of revision.
 	records uint64

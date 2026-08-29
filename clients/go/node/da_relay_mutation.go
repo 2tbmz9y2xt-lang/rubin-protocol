@@ -755,8 +755,8 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 // Three steps the sibling installers take are skipped. The pinned-payload
 // counter is neither projected nor restored: it prices only a COMPLETE_SET, a
 // state the projector refuses, so its delta is 0-to-0. No received-time
-// high-water advances: this kernel assigns no received_time. A removal releases
-// no prefetch reservation, which is RUB-1275's.
+// high-water advances: this kernel assigns no received_time, which is RUB-1273's.
+// A removal releases no prefetch reservation, which is RUB-1275's.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)
