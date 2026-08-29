@@ -605,7 +605,7 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	live, resident := s.sets[image.daID]
 	// A RESIDENT record this kernel could not have produced is INCOMPATIBLE
 	// input, never an absent one: residency comes from the lookup alone, and
-	// every record the legacy writers store carries revision 0.
+	// cloneWithPayloads drops the revision every legacy stage clones through.
 	if resident && (live.revision == 0 || live.checkOwnerReadyRecord() != nil) {
 		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
@@ -616,10 +616,10 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 }
 
 // checkStagedOwnerReadyRecord makes image.next the AUTHORITY: the placement's
-// record and install rows are built from it. A REMOVAL must carry an EMPTY next,
-// a non-removal a non-empty one — which is what refuses a locator kind outside
-// the closed set. The last check binds image.member to the record BY TXID
-// alone: nothing here re-compares the rest of the identity.
+// record and install rows are built from it. A REMOVAL carries an EMPTY next, a
+// non-removal a non-empty one naming the image's own da_id — the first refuses a
+// locator kind outside the closed set, the second a pre-state read from another
+// record. The last check binds image.member to the record BY TXID alone.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -630,6 +630,9 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 	}
 	if len(rows) == 0 {
 		return errDARelayMemberIncomplete
+	}
+	if image.next.daID != image.daID {
+		return errDARelayImageIncompatible
 	}
 	if err := image.member.validate(); err != nil {
 		return err

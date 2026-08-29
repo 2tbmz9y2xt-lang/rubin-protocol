@@ -133,10 +133,12 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 	return r.cloneWithPayloads(false)
 }
 
-// cloneWithPayloads never touches member, so the clone and r name one identity;
-// only the legacy writers reach it and they store none, so today that is nil.
+// cloneWithPayloads never touches member, so the clone and r name one identity.
+// The revision does not travel: a legacy clone carries 0, not the owner-ready
+// revision it copied, so the kernel refuses that record, never reads it stale.
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
+	out.revision = 0
 	if copyPayloads {
 		out.commit.txBytes = nil
 	}
@@ -567,10 +569,9 @@ type daRelayRecordImage struct {
 	remove   bool
 }
 
-// stageDAOwnerReadyMember is total; an unusable member simply stages a record the
-// projector then refuses. A NON-RESIDENT staging ignores the pre-state and starts
-// from the zero record, so a projection over an absent record can only install
-// the single candidate member.
+// stageDAOwnerReadyMember is total: an unusable member, or a pre-state read from
+// another record, stages an image the projector then refuses. A NON-RESIDENT
+// staging starts from the zero record, so it can install only the one candidate.
 func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
 	image := daRelayRecordImage{daID: member.locator.daID, present: present, member: member}
 	if present {
@@ -606,8 +607,8 @@ func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordI
 // cloneOwnerReady copies every byte slice, map and member of r, so no mutation
 // through one reaches the other; a member's token keeps naming the one shared
 // PendingOutpointOwner, which is a handle, not record state. cloneWithPayloads
-// is not reused: it keeps the caller's retained bytes shared at one setting and
-// drops them at the other; this kernel needs a record owning all of its bytes.
+// is not reused: it shares or drops the caller's retained bytes and demotes the
+// revision, where this kernel needs a stamped record owning all of its bytes.
 func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	out := r
 	out.commit.txBytes = cloneBytes(r.commit.txBytes)
@@ -627,8 +628,7 @@ func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 
 // clone is nil-safe in BOTH directions: an empty slot clones to an empty slot,
 // and a present member clones to one whose ordered inputs are its own. token
-// still carries the original's *PendingOutpointOwner handle: the reservation it
-// names lives in that owner and is never copied out into a member.
+// keeps the original's *PendingOutpointOwner handle; no reservation is copied.
 func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 	if m == nil {
 		return nil
@@ -642,8 +642,7 @@ func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 
 // locatorRows emits a FIXED order — commit first, then chunks ascending — one row
 // per slot HOLDING a member, so len(rows) is also the member count. A memberless
-// slot emits nothing rather than a zero-txid row; it is also refused, by
-// checkOwnerReadyRecord, before any placement built from these rows installs.
+// slot emits nothing, and checkOwnerReadyRecord refuses it before any install.
 func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
 	if r.commit.member != nil {
@@ -667,8 +666,7 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 
 // ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
 // incomplete_member_charge. The legacy wireBytes fallback of
-// retainedTxAccountingBytes has no place here: an owner-ready member always
-// carries its retained bytes.
+// retainedTxAccountingBytes has no place: a member always carries its bytes.
 //
 // The per-peer key comes from the member's own provenance and nothing else —
 // never the cached peerQuotaKey, which belongs to the legacy path. A peerless
