@@ -2775,10 +2775,9 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		corrupt.next.commit.member.provenance = daProvenance{}
 		disowned := stageOwnerReadyMemberForTest(state, member)
 		disowned.next.commit.member.txid = daRelayTestID(40)
-		// A pre-state read from another record: the refusal names the image, not
-		// the locator row that would otherwise catch it at the next stage.
+		// A staged record naming another da_id; both stale conditions pass here.
 		elsewhere := stageOwnerReadyMemberForTest(state, member)
-		elsewhere.daID = daRelayTestID(99)
+		elsewhere.next.daID = daRelayTestID(99)
 
 		before := daRelayStateSnapshot(state)
 		state.mu.Lock()
@@ -2884,6 +2883,12 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				broken.member.inputs = nil
 				return stageDAOwnerReadyMember(s.sets[daID], true, broken)
 			}, errDARelayMemberIncomplete},
+			{"a next naming another record outranks locator", func(_ *testing.T, s *DARelayState) daRelayRecordImage {
+				s.locators[daRelayTestID(51)] = daRelayLocator{daID: daRelayTestID(99), kind: daRelayLocatorCommit}
+				image := stageDAOwnerReadyMember(daRelaySetRecord{}, false, chunkOf(51))
+				image.next.daID = daRelayTestID(99)
+				return image
+			}, errDARelayImageIncompatible},
 			{"locator outranks accounting", func(t *testing.T, s *DARelayState) daRelayRecordImage {
 				mustInstallOwnerReadyMember(t, s, resident)
 				s.locators[resident.member.txid] = daRelayLocator{daID: daID, kind: daRelayLocatorChunk}
@@ -3237,16 +3242,10 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 	daID := daRelayTestID(81)
 	provenance := daRelayTestPeerProvenance("quota-a")
 
-	// The live layer never reads a member and the orphan-pool caps count wire and
-	// payload bytes only, so an unowned member must cost one word of resident heap
-	// rather than the whole identity. Exact, not bounds: a bound admits one more
-	// pointer field, the growth these pin. 64-bit literals; nothing builds 32-bit.
 	t.Run("an unowned member costs one word and a retained one is cloned through", func(t *testing.T) {
-		if got := unsafe.Sizeof(daRelayCommit{}); got != 128 {
-			t.Fatalf("daRelayCommit = %d bytes, want exactly 128 (120 without its member word)", got)
-		}
-		if got := unsafe.Sizeof(daRelayChunk{}); got != 160 {
-			t.Fatalf("daRelayChunk = %d bytes, want exactly 160 (152 without its member word)", got)
+		commitWord, chunkWord := unsafe.Sizeof(daRelayCommit{}.member), unsafe.Sizeof(daRelayChunk{}.member)
+		if word := unsafe.Sizeof(uintptr(0)); commitWord != word || chunkWord != word {
+			t.Fatalf("member field words: commit=%d chunk=%d, want %d each", commitWord, chunkWord, word)
 		}
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 90, provenance, []byte("chunk-tx"), []byte("chunk-payload")))

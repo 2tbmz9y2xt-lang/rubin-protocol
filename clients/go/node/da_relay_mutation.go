@@ -617,7 +617,7 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 
 // checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY. A
 // REMOVAL carries an EMPTY next; a non-removal a non-empty one naming its own
-// da_id, refusing a pre-state from another record. An out-of-set kind empties
+// da_id, refusing a STAGED record that names another. An out-of-set kind empties
 // next only from a NON-resident pre-state, where the row count catches it; on a
 // resident one validate does. The last check binds BY TXID alone.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
@@ -668,11 +668,12 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 	return retire, install, s.checkDAInstallLocatorRowsLocked(image.daID, install)
 }
 
-// checkOwnerReadySlotFree is FIRST-SEEN: staging overwrites the slot it targets,
-// so without this a second member would evict a retained one and move its charge
-// to the new provenance. It raises the legacy errors over the COMMIT slot's own
-// occupancy notion — taken when it holds a member, where the legacy guard reads
-// chunk_count — so neither layer sees the other's commit; RUB-1273 owns it.
+// checkOwnerReadySlotFree is FIRST-SEEN over the ONE slot image.member.locator
+// names: staging overwrites it, so without this a second member would evict the
+// retained one and move its charge to the new provenance. Both arms diverge from
+// the legacy guard — a commit slot is taken when it holds a member, where that
+// guard reads chunk_count; a chunk slot on the map key alone, with no
+// replaceableChunks escape, so strictly stricter. RUB-1273 owns that seam.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {
@@ -707,7 +708,7 @@ func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daR
 func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []daRelayLocatorRow) error {
 	claimed := make(map[[32]byte]bool, len(install))
 	for _, row := range install {
-		if row.locator.daID != daID || claimed[row.txid] {
+		if claimed[row.txid] {
 			return errDARelayLocatorMismatch
 		}
 		if other, indexed := s.locators[row.txid]; indexed && other.daID != daID {
