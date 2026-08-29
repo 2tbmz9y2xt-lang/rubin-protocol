@@ -670,10 +670,10 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 
 // checkOwnerReadySlotFree is FIRST-SEEN over the ONE slot image.member.locator
 // names: staging overwrites it, so without this a second member would evict the
-// retained one and move its charge to the new provenance. Both arms diverge from
-// the legacy guard — a commit slot is taken when it holds a member, where that
-// guard reads chunk_count; a chunk slot on the map key alone, with no
-// replaceableChunks escape, so strictly stricter. RUB-1273 owns that seam.
+// retained one and move its charge to the new provenance. On OCCUPANCY both arms
+// are stricter than the legacy guard: a commit slot is taken when it holds a
+// member, where that guard reads chunk_count; a chunk slot on the map key, with
+// no replaceableChunks escape. The chunk-count range arm is RUB-1273's, not here.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {
@@ -707,6 +707,7 @@ func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daR
 
 func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []daRelayLocatorRow) error {
 	claimed := make(map[[32]byte]bool, len(install))
+	// Every row names daID: checkStagedOwnerReadyRecord pinned next.daID, and a removal installs none.
 	for _, row := range install {
 		if claimed[row.txid] {
 			return errDARelayLocatorMismatch

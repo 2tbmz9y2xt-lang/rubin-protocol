@@ -3242,6 +3242,7 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 	daID := daRelayTestID(81)
 	provenance := daRelayTestPeerProvenance("quota-a")
 
+	// Nothing live reads member and no cap counts its bytes, so an unowned slot costs one word, not an identity.
 	t.Run("an unowned member costs one word and a retained one is cloned through", func(t *testing.T) {
 		commitWord, chunkWord := unsafe.Sizeof(daRelayCommit{}.member), unsafe.Sizeof(daRelayChunk{}.member)
 		if word := unsafe.Sizeof(uintptr(0)); commitWord != word || chunkWord != word {
