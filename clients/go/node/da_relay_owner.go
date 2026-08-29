@@ -59,7 +59,7 @@ func (m *daRelayMemberIdentity) validate() error {
 	if m.txid == ([32]byte{}) || m.wtxid == ([32]byte{}) {
 		return errDARelayMemberIncomplete
 	}
-	if len(m.inputs) == 0 {
+	if len(m.inputs) == 0 || len(m.inputs) > consensus.MAX_TX_INPUTS {
 		return errDARelayMemberIncomplete
 	}
 	return m.provenance.validate()

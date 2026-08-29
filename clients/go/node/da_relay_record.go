@@ -133,6 +133,8 @@ func (r daRelaySetRecord) cloneForStateMutation() daRelaySetRecord {
 	return r.cloneWithPayloads(false)
 }
 
+// cloneWithPayloads never touches member, so the clone and r name one identity;
+// only the legacy writers reach it and they store none, so today that is nil.
 func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord {
 	out := r
 	if copyPayloads {
@@ -553,9 +555,9 @@ func cloneBytes(in []byte) []byte {
 
 // daRelayRecordImage is ONE record transition staged as a PURE function of a
 // caller-owned pre-state: building one mutates nothing, and the next of two
-// images staged from one pre-state shares nothing. Only next is isolated —
-// member is a shallow copy KEEPING the caller's slice headers. baseline and
-// present are CALLER observations the projector rechecks.
+// images staged from one pre-state shares no record state. Only next is
+// isolated — member is a shallow copy KEEPING the caller's slice headers.
+// baseline and present are CALLER observations the projector rechecks.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -601,9 +603,11 @@ func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordI
 	return daRelayRecordImage{daID: pre.daID, present: present, baseline: pre.revision, remove: true}
 }
 
-// cloneOwnerReady shares NOTHING mutable with r. cloneWithPayloads is not reused:
-// it keeps the caller's retained bytes shared at one setting and drops them at
-// the other; this kernel needs a record owning all of its bytes.
+// cloneOwnerReady copies every byte slice, map and member of r, so no mutation
+// through one reaches the other; a member's token keeps naming the one shared
+// PendingOutpointOwner, which is a handle, not record state. cloneWithPayloads
+// is not reused: it keeps the caller's retained bytes shared at one setting and
+// drops them at the other; this kernel needs a record owning all of its bytes.
 func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	out := r
 	out.commit.txBytes = cloneBytes(r.commit.txBytes)
@@ -622,7 +626,9 @@ func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 }
 
 // clone is nil-safe in BOTH directions: an empty slot clones to an empty slot,
-// and a present member clones to one sharing nothing mutable with the original.
+// and a present member clones to one whose ordered inputs are its own. token
+// still carries the original's *PendingOutpointOwner handle: the reservation it
+// names lives in that owner and is never copied out into a member.
 func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
 	if m == nil {
 		return nil

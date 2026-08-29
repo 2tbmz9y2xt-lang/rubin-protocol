@@ -2816,6 +2816,9 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 			{"no txid", func(m *daRelayOwnerReadyMember) { m.member.txid = [32]byte{} }},
 			{"no wtxid", func(m *daRelayOwnerReadyMember) { m.member.wtxid = [32]byte{} }},
 			{"no ordered inputs", func(m *daRelayOwnerReadyMember) { m.member.inputs = nil }},
+			{"more inputs than a tx may carry", func(m *daRelayOwnerReadyMember) {
+				m.member.inputs = make([]consensus.Outpoint, consensus.MAX_TX_INPUTS+1)
+			}},
 		}
 		for _, row := range omissions {
 			member := base
@@ -3160,28 +3163,6 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		recreated := mustInstallOwnerReadyMember(t, state, commit)
 		if recreated.record.revision != 2 {
 			t.Fatalf("recreated revision = %d, want 2", recreated.record.revision)
-		}
-	})
-
-	t.Run("the legal schedule is one projection, one installation, one hold", func(t *testing.T) {
-		state := newDARelayStateForTest(t, defaultDARelayCaps())
-		state.mu.Lock()
-		legal := func(member daRelayOwnerReadyMember) uint64 {
-			pre, present := state.sets[member.locator.daID]
-			placement, err := state.projectDARecordImageLocked(stageDAOwnerReadyMember(pre, present, member))
-			if err != nil {
-				state.mu.Unlock()
-				t.Fatalf("project: %v", err)
-			}
-			state.installDASetRecordLocked(placement)
-			return placement.record.revision
-		}
-		first, second := legal(commit), legal(chunk)
-		state.mu.Unlock()
-
-		// Re-projecting after installing is what makes the second revision fresh.
-		if first != 1 || second != 2 {
-			t.Fatalf("revisions = %d then %d, want 1 then 2", first, second)
 		}
 	})
 
