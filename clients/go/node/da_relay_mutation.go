@@ -604,8 +604,8 @@ func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daR
 func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
 	live, resident := s.sets[image.daID]
 	// A RESIDENT record this kernel could not have produced is INCOMPATIBLE
-	// input, never an absent one: residency comes from the lookup alone, and
-	// cloneWithPayloads drops the revision every legacy stage clones through.
+	// input, never an absent one: only this kernel mints a revision, so a record a
+	// legacy writer CREATES presents 0; one it mutates keeps its stamp (RUB-1275).
 	if resident && (live.revision == 0 || live.checkOwnerReadyRecord() != nil) {
 		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
