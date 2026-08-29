@@ -564,10 +564,11 @@ type daRelayRecordPlacement struct {
 
 // projectDARecordImageLocked is the FALLIBLE half: it owns EVERY check and
 // mutates nothing on any path, so a refused image leaves live state
-// byte-identical. Refusal priority is fixed, so a doubly-violating image always
-// selects the earlier reason: incompatible live record, stale image, unusable
-// candidate, locator row, accounting, exhausted revision space
-// (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3).
+// byte-identical. A doubly-violating image selects by STAGE, in this order:
+// incompatible live record, stale image, unusable candidate, locator row,
+// accounting, exhausted revision space (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3).
+// The four pool arms hold that order too, but the per-peer arm walks a map:
+// which violating key is reported, and so which identity surfaces, is unordered.
 //
 // The live counters and the revision high-water are re-read here rather than
 // frozen into the image: they are shared by every record. received_time and the
@@ -617,7 +618,8 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 // checkStagedOwnerReadyRecord makes image.next the AUTHORITY: the placement's
 // record and install rows are built from it. A REMOVAL must carry an EMPTY next,
 // a non-removal a non-empty one — which is what refuses a locator kind outside
-// the closed set. The last check binds image.member to the record it names.
+// the closed set. The last check binds image.member to the record BY TXID
+// alone: nothing here re-compares the rest of the identity.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -665,7 +667,9 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 
 // checkOwnerReadySlotFree is FIRST-SEEN: staging overwrites the slot it targets,
 // so without this a second member would evict a retained one and move its charge
-// to the new provenance. Same shape, same errors as the legacy path.
+// to the new provenance. It raises the legacy errors over a DIFFERENT occupancy
+// notion — a commit slot is taken when it holds a member, where the legacy guard
+// reads chunk_count — so neither layer sees the other's commit; RUB-1273 owns it.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {
@@ -742,6 +746,12 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 // ONE installation, one continuous hold, with the placement THIS image's own
 // projection returned. Two placements projected before either installs carry the
 // same minted revision; nothing here detects that, by design.
+//
+// Three steps the sibling installers take are skipped. The pinned-payload
+// counter is neither projected nor restored: it prices only a COMPLETE_SET, a
+// state the projector refuses, so its delta is 0-to-0. No received-time
+// high-water advances: this kernel assigns no received_time. A removal releases
+// no prefetch reservation, which is RUB-1275's.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)

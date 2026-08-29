@@ -552,9 +552,10 @@ func cloneBytes(in []byte) []byte {
 }
 
 // daRelayRecordImage is ONE record transition staged as a PURE function of a
-// caller-owned pre-state: building one mutates nothing and two images staged from
-// one pre-state share nothing. baseline and present are CALLER observations the
-// projector rechecks.
+// caller-owned pre-state: building one mutates nothing, and the next of two
+// images staged from one pre-state shares nothing. Only next is isolated —
+// member is a shallow copy KEEPING the caller's slice headers. baseline and
+// present are CALLER observations the projector rechecks.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool

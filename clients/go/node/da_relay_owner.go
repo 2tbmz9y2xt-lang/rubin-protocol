@@ -1,5 +1,7 @@
 package node
 
+import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+
 type daProvenanceKind uint8
 
 const (
@@ -71,8 +73,10 @@ type daRelayOwnerReadyMember struct {
 }
 
 // A commit locator must carry chunk index 0, or two locators for one slot would
-// compare unequal. The chunk index is NOT range-checked against the commit's
-// declared chunk count: that bound belongs to admission.
+// compare unequal. A chunk index at or above MAX_DA_CHUNK_COUNT and a payload
+// above CHUNK_BYTES are refused on the package's absolute bounds; the commit's
+// DECLARED chunk count stays admission's. wire_bytes and chunk_count go
+// unchecked: this kernel assigns neither, and RUB-1273 owns the layer that does.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -80,8 +84,14 @@ func (m daRelayOwnerReadyMember) validate() error {
 			return errDARelayMemberIncomplete
 		}
 	case daRelayLocatorChunk:
+		if uint64(m.locator.chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
+			return errDARelayChunkIndexOutOfRange
+		}
 		if len(m.payload) == 0 {
 			return errDARelayMemberIncomplete
+		}
+		if uint64(len(m.payload)) > consensus.CHUNK_BYTES {
+			return errDARelayChunkPayloadSizeInvalid
 		}
 	default:
 		return errDARelayMemberIncomplete

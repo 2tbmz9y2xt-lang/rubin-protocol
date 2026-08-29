@@ -2984,6 +2984,19 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}
 	})
 
+	t.Run("the absolute chunk bounds are refused at the edge", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		atCap := make([]byte, consensus.CHUNK_BYTES)
+		for _, member := range []daRelayOwnerReadyMember{daRelayTestOwnerReadyChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT-1), 71, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload), daRelayTestOwnerReadyChunk(daID, 0, 72, daRelayTestPeerProvenance("quota-a"), chunkTx, atCap)} {
+			if _, err := projectOwnerReadyMember(state, member); err != nil {
+				t.Fatalf("a legal member was refused: %v", err)
+			}
+		}
+		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 73, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload), errDARelayChunkIndexOutOfRange)
+		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, ^uint16(0), 74, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload), errDARelayChunkIndexOutOfRange)
+		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, 0, 75, daRelayTestPeerProvenance("quota-a"), chunkTx, append(atCap, 0)), errDARelayChunkPayloadSizeInvalid)
+	})
+
 	t.Run("a state with no locator index is refused rather than allocated", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		state.locators = nil
@@ -3277,7 +3290,7 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("mutating the caller's member after staging changes no image", func(t *testing.T) {
+	t.Run("mutating the caller's member after staging changes no staged record", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		member := daRelayTestOwnerReadyChunk(daID, 0, 82, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
 		image := stageOwnerReadyMemberForTest(state, member)
@@ -3291,6 +3304,10 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 			t.Fatalf("the staged member aliases the caller's value: %+v", staged)
 		}
 
+		// image.member is a shallow copy; only image.next is isolated.
+		if image.member.payload[0] != 'X' {
+			t.Fatal("image.member stopped tracking the caller's payload")
+		}
 		commit := daRelayTestOwnerReadyCommit(daID, 83, provenance, []byte("owner-ready-commit-tx"))
 		stagedCommit := stageOwnerReadyMemberForTest(state, commit).next.commit
 		commit.txBytes[0] = 'X'
@@ -3336,7 +3353,7 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("mutating an installed image or its placement changes no live state", func(t *testing.T) {
+	t.Run("mutating an installed image or its placement rows changes no live state", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		member := daRelayTestOwnerReadyCommit(daID, 85, provenance, []byte("owner-ready-commit-tx"))
 		state.mu.Lock()
@@ -3364,6 +3381,11 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 		if _, ok := state.locators[member.member.txid]; !ok {
 			t.Fatalf("the live index aliases the placement rows: %+v", state.locators)
+		}
+		// placement.record IS live state by assignment: the single-use exception.
+		placement.record.commit.txBytes[0] = 'Y'
+		if state.sets[daID].commit.txBytes[0] != 'Y' {
+			t.Fatal("placement.record stopped being the installed record")
 		}
 	})
 }
