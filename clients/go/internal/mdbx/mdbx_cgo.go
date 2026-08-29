@@ -301,15 +301,24 @@ func chooseState(condition bool, yes, no storeState) storeState {
 	return no
 }
 
+//nolint:errorlint // Native cleanup results must be direct EngineError pointers.
+func directNativeResult(operation engineOperation, result error) (*EngineError, bool) {
+	engine, ok := result.(*EngineError)
+	return engine, ok && engine != nil && engine.Operation == string(operation) && validEngineClass(engine.Class) && engine.Code != codeSuccess && engine.Class == classifyNative(operation, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+}
+
 func orderedErrors(operation engineOperation, order errorOrder, primary, result error) error {
 	if !validEngineOperation(operation) {
 		return adapterError(operation, EngineLocalInvariant, codeProblem, "unsupported engine operation", joinErrors(primary, result))
 	}
-	engine, validResult := result.(*EngineError)
-	validResult = validResult && engine != nil && engine.Operation == string(operation) && validEngineClass(engine.Class) && engine.Code != codeSuccess && engine.Class == classifyNative(operation, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+	engine, validResult := directNativeResult(operation, result)
 	if (order == orderResult || order == orderPrimaryResult || order == orderResultCausesPrimary) && !validResult {
 		return adapterError(operation, EngineLocalInvariant, codeProblem, "native result is not an EngineError", joinErrors(primary, result))
 	}
+	return composeOrderedErrors(operation, order, primary, result, engine)
+}
+
+func composeOrderedErrors(operation engineOperation, order errorOrder, primary, result error, engine *EngineError) error {
 	switch order {
 	case orderNone:
 		return nil

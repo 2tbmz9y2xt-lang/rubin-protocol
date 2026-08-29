@@ -62,6 +62,7 @@ func expectedNativeDiagnostic(code int) string {
 	return fmt.Sprintf("error %d", code)
 }
 
+//nolint:errorlint // Exact direct EngineError output is required.
 func requireEngineError(t *testing.T, err error, class EngineClass, operation engineOperation, code int) *EngineError {
 	t.Helper()
 	engine, ok := err.(*EngineError)
@@ -83,6 +84,7 @@ func requireFallback(t *testing.T, operation engineOperation, order errorOrder, 
 	}
 }
 
+//nolint:errorlint // Exact unwrap identity is part of the error contract.
 func TestEngineErrorAndPinnedMapping(t *testing.T) {
 	cause := errors.New("cause")
 	var nilEngine *EngineError
@@ -299,6 +301,7 @@ func TestMetadataAndRequiredValueResults(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact cause and passthrough identity are under test.
 func TestIOAndWriterLockResults(t *testing.T) {
 	var nilCause *nilPointerError
 	if got := adapterError(operationInit, EngineIO, codeEIO, "typed nil", nilCause); got.Cause != nilCause || errors.Unwrap(got) != nilCause || got.Error() != fmt.Sprintf("init: IO: code %d: typed nil: nil pointer", int(syscall.EIO)) {
@@ -363,6 +366,7 @@ func TestIOAndWriterLockResults(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact result identity and ordering are under test.
 func TestPureOwnershipTransitionsAndErrorOrder(t *testing.T) {
 	if got, want := [...]storeState{storeOPEN, storeCLOSEBLOCKED, storeCLOSED, storePOISONEDTHREAD}, [...]storeState{"OPEN", "CLOSE_BLOCKED", "CLOSED", "POISONED_THREAD"}; got != want {
 		t.Fatalf("store-state tokens=%v, want %v", got, want)
