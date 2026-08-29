@@ -667,10 +667,11 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 // retainedTxAccountingBytes has no place: a member always carries its bytes.
 //
 // The per-peer key comes from the member's own provenance and nothing else —
-// never the cached peerQuotaKey, which belongs to the legacy path. A peerless
-// member derives the empty key and IS charged under it: "" is a shared bucket
-// under the same per-peer cap. The walk is over sorted chunk indexes, so neither
-// the result nor the identity of a refusal depends on map iteration order.
+// never the cached peerQuotaKey, which this kernel leaves unset while the legacy
+// readers of that per-peer counter key on it, charging to "" what this charges
+// to the peer; RUB-1276 owns that. A peerless member derives the empty key and
+// IS charged under it: "" is a shared bucket under the same per-peer cap. Sorted
+// chunk indexes keep the result, and which refusal it names, off map order.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {
