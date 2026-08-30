@@ -294,8 +294,8 @@ type DARelayState struct {
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
 	// locators is carried across the atomic-batch pair; no batch BODY maintains it,
-	// and no legacy removal retires a row — RUB-1275's — so today the index stays
-	// coherent only because installDASetRecordLocked has no non-test caller.
+	// and no legacy removal retires a row. RUB-1275/RUB-1276 own owner-atomic
+	// removal paths; RUB-678 owns live wiring and legacy-writer retirement.
 	locators map[[32]byte]daRelayLocator
 	// records is the process-local high-water of all issued revisions, including
 	// deleted records. Single-use placement under one uninterrupted lock preserves it.
