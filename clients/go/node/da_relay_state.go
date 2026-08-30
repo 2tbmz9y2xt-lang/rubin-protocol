@@ -99,10 +99,9 @@ func (c daRelayCaps) validateRelativeCaps() error {
 type daRelaySetRecord struct {
 	daID  [32]byte
 	state daRelaySetState
-	// revision is the owner-ready record IDENTITY: under installDASetRecordLocked's
-	// SINGLE-USE precondition, two record values are the same record state exactly when
-	// their revisions agree. A LEGACY writer creates a record presenting 0 and keeps a
-	// stamped record's stamp; RUB-1275 owns the TTL decrement, no non-test caller here.
+	// revision is minted by the owner-ready projector and installed with its SINGLE-USE
+	// placement under one uninterrupted lock hold. A LEGACY writer creates a record
+	// presenting 0 and may keep a stamped record's stamp; RUB-1275 owns the TTL decrement.
 	// Go-private: never serialized, never public, never a normative protocol field.
 	revision           uint64
 	receivedTime       uint64
@@ -548,9 +547,9 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
 	s.sets = projected.sets
 	s.locators = projected.locators
-	// Zero on any legacy state, so this pair is the identity; the canonical
-	// transition's admission WRITE fence closes the window in which it releases
-	// s.mu and publish() retakes it.
+	// Zero on any legacy state, so this pair is the identity. Only the canonical
+	// transition releases s.mu before this assignment; its admission WRITE fence
+	// closes that window. The legacy callers hold s.mu through clone and publish.
 	s.records = projected.records
 }
 
