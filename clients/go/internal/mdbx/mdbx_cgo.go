@@ -468,11 +468,15 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = validateOpenStatic(path, cfg)
+	err = validateOpenStatic(cfg)
 	if err != nil {
 		return nil, err
 	}
 	err = normalizeMDBXModule()
+	if err != nil {
+		return nil, err
+	}
+	err = validatePreopenSnapshot(path)
 	if err != nil {
 		return nil, err
 	}
@@ -715,24 +719,26 @@ func validateOpenArtifacts(path string) (bool, error) {
 	return inspectOpenFile(path, "rubin-writer.lock", true, false)
 }
 
-func validateOpenStatic(path string, cfg ConfigV1) error {
+func validateOpenStatic(cfg ConfigV1) error {
 	_, err := cfg.Encode()
 	if err != nil {
 		return adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)
 	}
-	return validateOpenDataSize(path, cfg.PageSize)
+	return nil
 }
 
-func validateOpenDataSize(path string, pageSize uint32) error {
-	info, err := os.Lstat(filepath.Join(path, "mdbx.dat"))
-	if err != nil {
-		return ioError(operationOpen, "inspect mdbx.dat", err)
+func validatePreopenSnapshot(path string) error {
+	pathBytes := append([]byte(path), 0)
+	var info C.MDBX_envinfo
+	rc := int(C.mdbx_preopen_snapinfo((*C.char)(unsafe.Pointer(&pathBytes[0])), &info, C.size_t(unsafe.Sizeof(info))))
+	runtime.KeepAlive(pathBytes)
+	if rc == codeSuccess {
+		return nil
 	}
-	minimum := int64(pageSize) * 3
-	if info.Size() < minimum {
+	if rc == int(C.MDBX_ENODATA) {
 		return integrityError(operationOpen, "mdbx.dat is undersized", nil)
 	}
-	return nil
+	return nativeError(operationOpen, rc)
 }
 
 func inspectOpenFile(path, name string, empty, missingAllowed bool) (bool, error) {
