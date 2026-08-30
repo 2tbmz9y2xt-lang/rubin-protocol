@@ -1155,6 +1155,8 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 		{492, 4096, 620, "MaxReaders: got 620 outside native rounding [492,619] for system page 4096"},
 		{32767, 4096, 32767, ""},
 		{32767, 4096, 32768, "MaxReaders: got 32768 outside native rounding [32767,32767] for system page 4096"},
+		{492, 256, 492, ""},
+		{492, 16 * 1024 * 1024, 492, ""},
 		{492, 0, 492, "SystemPageSize: got 0 outside supported power-of-two [256,16777216]"},
 		{492, 16, 492, "SystemPageSize: got 16 outside supported power-of-two [256,16777216]"},
 		{492, 768, 492, "SystemPageSize: got 768 outside supported power-of-two [256,16777216]"},
