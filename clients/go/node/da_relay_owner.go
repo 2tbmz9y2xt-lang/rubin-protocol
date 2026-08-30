@@ -17,10 +17,9 @@ type daProvenance struct {
 	quotaIdentity string
 }
 
-// quotaKey is the ONLY source of the per-peer accounting key: derived on every
-// use, never stored beside the provenance, so no member can present one source
-// with another's charge, and the legacy peerQuotaKey is never an input. The EMPTY
-// key is a shared per-peer bucket, not an exemption: it is charged and capped.
+// quotaKey is the ONLY source of the per-peer accounting key: derived on every use,
+// never stored beside the provenance, so no member can present one source with
+// another's charge. The EMPTY key is a shared bucket, charged and capped like any.
 func (p daProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity
@@ -45,10 +44,9 @@ func (p daProvenance) validate() error {
 	}
 }
 
-// validate runs only where a member is required, so nil — the empty-slot marker —
-// is refused here rather than read as an empty slot; a commit slot's emptiness is
-// that pointer, a chunk slot's its map key. Token and fee are deliberately NOT
-// checked: a zero token is permitted before the owner reserve.
+// validate runs only where a member is required, so nil — the empty-slot marker — is
+// refused here; a commit slot's emptiness is that pointer, a chunk slot's its map key.
+// Token and fee are deliberately NOT checked: a zero token precedes the owner reserve.
 func (m *daRelayMemberIdentity) validate() error {
 	if m == nil {
 		return errDARelayMemberIncomplete
@@ -70,9 +68,8 @@ type daRelayOwnerReadyMember struct {
 }
 
 // A commit locator must carry chunk index 0, or two locators for one slot would
-// compare unequal. The bounds here are the package's absolute ones; the commit's
-// DECLARED chunk count stays admission's, and wire_bytes and chunk_count reach no
-// check at all: this kernel assigns neither, and RUB-1273 owns the layer that does.
+// compare unequal. The bounds here are the package's absolute ones; the DECLARED
+// chunk count and wire_bytes reach no check — RUB-1273 owns the layer that assigns.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -130,8 +127,6 @@ func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
 	return r.commit.member.validate()
 }
 
-// The absolute index and payload bounds are daRelayOwnerReadyMember.validate's,
-// not this record-level check's.
 func (r daRelaySetRecord) checkOwnerReadyChunk(index uint16) error {
 	chunk := r.chunks[index]
 	if chunk.chunkIndex != index || chunk.daID != r.daID {

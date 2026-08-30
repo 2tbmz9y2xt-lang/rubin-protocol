@@ -101,12 +101,9 @@ type daRelaySetRecord struct {
 	state daRelaySetState
 	// revision is the owner-ready record IDENTITY: under installDASetRecordLocked's
 	// SINGLE-USE placement precondition, two record values are the same record state
-	// exactly when their revisions agree. Minted only by projectDARecordImageLocked,
-	// written only by installDASetRecordLocked, so a record a LEGACY writer creates
-	// presents 0 — the value an absent record presents, which is why the kernel
-	// decides residency from the s.sets lookup and never from this field. A legacy
-	// writer mutating a stamped record keeps its stamp on every path; RUB-1275 owns
-	// the TTL decrement, and no non-test caller reaches this kernel.
+	// exactly when their revisions agree. A LEGACY writer creates a record presenting
+	// 0 and keeps a stamped record's stamp on every path; RUB-1275 owns the TTL
+	// decrement, and no non-test caller reaches this kernel.
 	// Go-private: never serialized, never public, never a normative protocol field.
 	revision           uint64
 	receivedTime       uint64
@@ -212,9 +209,7 @@ type daRelayChunk struct {
 // field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
 // reconstructed or narrowed, and inputs keep canonical order verbatim
 // (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). A retained commit
-// or chunk holds it BY POINTER: the live layer never reads it, so an unowned
-// member costs one word and not the whole identity in resident heap outside the
-// orphan-pool caps, which count retained transaction and payload bytes.
+// or chunk holds it BY POINTER, so an unowned slot costs one word.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
@@ -301,12 +296,12 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
-	// locators is carried across the atomic-batch pair, so a canonical transition
-	// preserves its rows rather than dropping them; no batch BODY maintains it,
+	// locators is carried across the atomic-batch pair; no batch BODY maintains it,
 	// and no legacy removal retires a row — RUB-1275's — so today the index stays
 	// coherent only because installDASetRecordLocked has no non-test caller.
 	locators map[[32]byte]daRelayLocator
-	// records is the monotone high-water source of revision.
+	// records is the revision source; its monotonicity follows from the single-use
+	// placement and uninterrupted projection-to-install lock precondition.
 	records uint64
 }
 

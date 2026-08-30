@@ -2497,8 +2497,6 @@ func requirePortHopRejectedWithoutMutation(t *testing.T, state *DARelayState, re
 	}
 }
 
-// --- RUB-1272: dormant owner-ready retained-DA record kernel -----------------
-
 // installDASetRecordLocked returns no error, pinned at COMPILE time.
 var _ func(daRelayRecordPlacement) = (*DARelayState)(nil).installDASetRecordLocked
 
@@ -2922,7 +2920,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}
 	})
 
-	t.Run("an occupied slot is first-seen", func(t *testing.T) {
+	t.Run("the staged rows are the live rows plus the candidate at a free slot", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		commit := daRelayTestOwnerReadyCommit(daID, 58, daRelayTestPeerProvenance("quota-a"), commitTx)
 		chunk := daRelayTestOwnerReadyChunk(daID, 0, 59, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
@@ -2933,6 +2931,24 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		requireOwnerReadyMemberRejected(t, state, second, errDARelayDuplicateCommit)
 		rechunk := daRelayTestOwnerReadyChunk(daID, 0, 61, daRelayTestPeerProvenance("quota-b"), chunkTx, chunkPayload)
 		requireOwnerReadyMemberRejected(t, state, rechunk, errDARelayDuplicateChunk)
+
+		candidate := daRelayTestOwnerReadyChunk(daID, 1, 62, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload)
+		alien := daRelayTestIdentity(63, daRelayTestPeerProvenance("quota-a"))
+		alienChunk := daRelayChunk{daID: daID, chunkIndex: 2, member: &alien, txBytes: chunkTx, payload: chunkPayload}
+		// Dropping one of the two live members for a foreign one holds the staged
+		// count at live+1, so the inclusion half alone refuses this image.
+		swap := stageOwnerReadyMemberForTest(state, candidate)
+		delete(swap.next.chunks, 0)
+		swap.next.chunks[2] = alienChunk
+		if got, want := len(swap.next.locatorRows()), len(state.sets[daID].locatorRows())+1; got != want {
+			t.Fatalf("the swapped image staged %d rows, want %d: the count half would refuse it", got, want)
+		}
+		requireDAImageRejected(t, state, swap, errDARelayImageIncompatible)
+		// Every live member kept plus a foreign one satisfies inclusion, so the count
+		// half alone refuses this image.
+		extra := stageOwnerReadyMemberForTest(state, candidate)
+		extra.next.chunks[2] = alienChunk
+		requireDAImageRejected(t, state, extra, errDARelayImageIncompatible)
 	})
 
 	t.Run("a resident pre-state hides no candidate defect", func(t *testing.T) {

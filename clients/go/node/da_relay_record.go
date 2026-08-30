@@ -552,9 +552,8 @@ func cloneBytes(in []byte) []byte {
 }
 
 // daRelayRecordImage is ONE record transition staged as a PURE function of a
-// caller-owned pre-state: building one mutates nothing, and the next of two
-// images staged from one pre-state shares no record state. Only next is
-// isolated — member is a shallow copy KEEPING the caller's slice headers.
+// caller-owned pre-state: building one mutates nothing, and the next of two images
+// staged from one pre-state shares no record state. Only next is isolated.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -596,9 +595,8 @@ func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordI
 	return daRelayRecordImage{daID: pre.daID, present: present, baseline: pre.revision, remove: true}
 }
 
-// cloneOwnerReady leaves a member's token naming the one shared
-// PendingOutpointOwner: a handle, not record state. cloneWithPayloads is not
-// reused — it shares or drops the caller's retained bytes instead of owning them.
+// cloneOwnerReady leaves a member's token naming the one shared PendingOutpointOwner:
+// a handle, not record state. cloneWithPayloads shares or drops the caller's bytes.
 func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	out := r
 	out.commit.txBytes = cloneBytes(r.commit.txBytes)
@@ -652,12 +650,10 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 
 // ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
 // incomplete_member_charge. The legacy wireBytes fallback of
-// retainedTxAccountingBytes has no place: a member always carries its bytes.
-//
-// The per-peer key comes from the member's own provenance and nothing else —
-// never the cached peerQuotaKey, which this kernel leaves unset while the legacy
-// readers of that per-peer counter key on it, charging to "" what this charges
-// to the peer; RUB-1276 owns that.
+// retainedTxAccountingBytes has no place: a member always carries its bytes. The
+// per-peer key comes from the member's own provenance, never the cached
+// peerQuotaKey this kernel leaves unset while the legacy readers of that counter
+// key on it, charging to "" what this charges to the peer; RUB-1276 owns that.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {

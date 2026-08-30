@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"slices"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -548,8 +549,7 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 	s.orphanBytesByDAID[daID] = bytes
 }
 
-// daRelayRecordPlacement holds ABSOLUTE counter values, not deltas. Once
-// installed, its record and rows ARE live state by assignment.
+// daRelayRecordPlacement holds ABSOLUTE counter values, not deltas.
 type daRelayRecordPlacement struct {
 	daID        [32]byte
 	record      daRelaySetRecord
@@ -567,12 +567,9 @@ type daRelayRecordPlacement struct {
 // byte-identical. A doubly-violating image selects by STAGE, in this order:
 // incompatible live record, stale image, unusable candidate, locator row,
 // accounting, exhausted revision space (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3).
-// The four pool arms hold that order too, but the per-peer arm walks a map:
-// which violating key is reported, and so which identity surfaces, is unordered.
-//
-// The live counters and the revision high-water are re-read here rather than
-// frozen into the image: they are shared by every record. received_time and the
-// Section 18.2 accepted sequence are NOT this kernel's and stay untouched.
+// The four pool arms hold that order too, but the per-peer arm walks a map: which
+// violating key is reported, and so which identity surfaces, is unordered. The live
+// counters and the revision high-water are re-read here: they are shared state.
 func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
 	live, err := s.checkDARecordImageBaselineLocked(image)
 	if err != nil {
@@ -612,9 +609,10 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	return live, checkStagedOwnerReadyRecord(image, live)
 }
 
-// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY: a
-// removal carries an EMPTY next, a non-removal a non-empty one naming its own
-// da_id.
+// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY: a removal
+// carries an EMPTY next, a non-removal a non-empty one naming its own da_id whose
+// rows are the live rows plus exactly the candidate. Count alone admits a live member
+// swapped for a foreign one; inclusion alone admits one added beside the candidate.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -645,6 +643,14 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 	if staged == nil || staged.txid != image.member.member.txid {
 		return errDARelayMemberIncomplete
 	}
+	liveRows := live.locatorRows()
+	preserved := len(rows) == len(liveRows)+1
+	for _, row := range liveRows {
+		preserved = preserved && slices.Contains(rows, row)
+	}
+	if !preserved {
+		return errDARelayImageIncompatible
+	}
 	return nil
 }
 
@@ -666,8 +672,7 @@ func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage
 // checkOwnerReadySlotFree is FIRST-SEEN over the ONE slot image.member.locator
 // names: staging overwrites it, so without this a second member would evict the
 // retained one and move its charge to the new provenance. Both arms are stricter
-// than the legacy guard, which reads chunk_count and honours replaceableChunks.
-// The chunk-count range arm is RUB-1273's, not here.
+// than the legacy guard; the chunk-count range arm is RUB-1273's, not here.
 func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
 	if locator.kind == daRelayLocatorCommit {
 		if live.commit.member != nil {
@@ -735,20 +740,19 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 	return placement, err
 }
 
-// installDASetRecordLocked RETURNS NO ERROR and PERFORMS NO VALIDATION: every
-// check ran in projectDARecordImageLocked, which is what would let a caller run
-// it after an owner reserve with no fallible step in between.
+// installDASetRecordLocked PERFORMS NO VALIDATION: every check ran in
+// projectDARecordImageLocked, which is what lets a caller run it after an owner
+// reserve with no fallible step in between.
 //
 // PRECONDITION, the caller's to keep: a placement is SINGLE-USE — ONE projection,
 // ONE installation, one continuous hold, with the placement THIS image's own
 // projection returned. Two placements projected before either installs carry the
 // same minted revision; nothing here detects that, by design.
 //
-// Three steps the sibling installers take are skipped. The pinned-payload
-// counter is neither projected nor restored: it prices only a COMPLETE_SET, a
-// state the projector refuses, so its delta is 0-to-0. No received-time
-// high-water advances: this kernel assigns no received_time, which is RUB-1273's.
-// A removal releases no prefetch reservation, which is RUB-1275's.
+// Three steps the sibling installers take are skipped. The pinned-payload counter
+// is neither projected nor restored: it prices only a COMPLETE_SET, a state the
+// projector refuses, so its delta is 0-to-0. No received-time high-water advances
+// (RUB-1273's), and a removal releases no prefetch reservation (RUB-1275's).
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)
