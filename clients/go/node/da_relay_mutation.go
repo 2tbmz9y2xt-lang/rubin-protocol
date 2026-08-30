@@ -598,7 +598,7 @@ func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daR
 // from the record. Absent means revision 0 and baseline 0, so one comparison does both.
 func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
 	live, resident := s.sets[image.daID]
-	if resident && (live.revision == 0 || live.checkOwnerReadyRecord() != nil) {
+	if resident && (live.revision == 0 || len(live.locatorRows()) == 0 || live.checkOwnerReadyRecord() != nil) {
 		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
 	if resident != image.present || live.revision != image.baseline {
@@ -684,6 +684,7 @@ func samePreservedRecordFields(live, next daRelaySetRecord) bool {
 	return live.state == next.state && live.payloadBytes == next.payloadBytes &&
 		live.receivedTime == next.receivedTime &&
 		live.ttlBlocksRemaining == next.ttlBlocksRemaining &&
+		(live.replaceableChunks == nil) == (next.replaceableChunks == nil) &&
 		maps.Equal(live.replaceableChunks, next.replaceableChunks)
 }
 
@@ -761,7 +762,7 @@ func sameOwnerReadyMember(a, b *daRelayMemberIdentity) bool {
 }
 
 // checkDARecordImageLocatorsLocked proves the txid index and the retained image are one
-// bijection (Section 18.3). A nil index is refused: the installer may not allocate it.
+// bijection (Section 18.3). A nil index is refused: the installer does not construct missing state.
 func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage, live daRelaySetRecord) ([]daRelayLocatorRow, []daRelayLocatorRow, error) {
 	if s.locators == nil {
 		return nil, nil, errDARelayImageIncompatible

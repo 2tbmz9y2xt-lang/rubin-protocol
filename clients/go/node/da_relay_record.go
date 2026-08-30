@@ -683,5 +683,8 @@ func (a *daRelayRecordAccounting) addOwnerReadyMember(member *daRelayMemberIdent
 		return err
 	}
 	a.orphanBytes = orphanBytes
+	if member.provenance.kind != daProvenancePeer {
+		return nil
+	}
 	return addPeerAccounting(a.peerBytes, member.provenance.quotaKey(), charge)
 }

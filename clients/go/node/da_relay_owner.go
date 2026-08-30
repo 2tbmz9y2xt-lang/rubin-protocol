@@ -19,7 +19,7 @@ type daProvenance struct {
 
 // quotaKey is the ONLY source of the per-peer accounting key: derived on every use,
 // never stored beside the provenance, so no member can present one source with
-// another's charge. The EMPTY key is a shared bucket, charged and capped like any.
+// another's charge. Only PEER is charged per peer; the empty key is never a bucket.
 func (p daProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity

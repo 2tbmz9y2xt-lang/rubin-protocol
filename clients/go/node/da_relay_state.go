@@ -297,8 +297,8 @@ type DARelayState struct {
 	// and no legacy removal retires a row — RUB-1275's — so today the index stays
 	// coherent only because installDASetRecordLocked has no non-test caller.
 	locators map[[32]byte]daRelayLocator
-	// records is the revision source; its monotonicity follows from the single-use
-	// placement and uninterrupted projection-to-install lock precondition.
+	// records is the process-local high-water of all issued revisions, including
+	// deleted records. Single-use placement under one uninterrupted lock preserves it.
 	records uint64
 }
 
