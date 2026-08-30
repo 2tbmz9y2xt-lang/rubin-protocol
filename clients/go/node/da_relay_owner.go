@@ -67,11 +67,140 @@ type daRelayOwnerReadyMember struct {
 	payload []byte
 }
 
+type daRelayAdmissionCandidate struct {
+	member            daRelayOwnerReadyMember
+	payloadCommitment [32]byte
+	chunkCount        uint16
+	chunkHash         [32]byte
+}
+
+func (a *DAAdmission) renderDARelayAdmissionCandidate(provenance daProvenance) (daRelayAdmissionCandidate, error) {
+	var zero daRelayAdmissionCandidate
+	a.mustLiveValue()
+	if a.guard.state.Load() != daAdmissionOpen {
+		panic("DA admission candidate is not available")
+	}
+	if err := provenance.validate(); err != nil {
+		return zero, err
+	}
+	if a.tx == nil {
+		return zero, errDARelayMemberIncomplete
+	}
+	candidate := daRelayAdmissionCandidate{member: daRelayOwnerReadyMember{
+		member: daRelayMemberIdentity{
+			txid:       a.snapshot.TxID,
+			wtxid:      a.snapshot.WTxID,
+			fee:        a.snapshot.Fee,
+			inputs:     append([]consensus.Outpoint(nil), a.snapshot.Inputs...),
+			provenance: provenance,
+		},
+		txBytes: append([]byte(nil), a.snapshot.TxBytes...),
+	}}
+	switch a.tx.TxKind {
+	case 0x01:
+		return renderDACommitAdmissionCandidate(candidate, a.tx)
+	case 0x02:
+		return renderDAChunkAdmissionCandidate(candidate, a.tx)
+	default:
+		return zero, errDARelayMemberIncomplete
+	}
+}
+
+func renderDACommitAdmissionCandidate(candidate daRelayAdmissionCandidate, tx *consensus.Tx) (daRelayAdmissionCandidate, error) {
+	var zero daRelayAdmissionCandidate
+	if tx.DaCommitCore == nil || tx.DaChunkCore != nil {
+		return zero, errDARelayMemberIncomplete
+	}
+	if tx.DaCommitCore.ChunkCount == 0 || uint64(tx.DaCommitCore.ChunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return zero, errDARelayChunkCountInvalid
+	}
+	commitment, err := daAdmissionPayloadCommitment(tx)
+	if err != nil {
+		return zero, err
+	}
+	candidate.member.locator = daRelayLocator{daID: tx.DaCommitCore.DaID, kind: daRelayLocatorCommit}
+	candidate.payloadCommitment = commitment
+	candidate.chunkCount = tx.DaCommitCore.ChunkCount
+	if err := candidate.validate(); err != nil {
+		return zero, err
+	}
+	return candidate, nil
+}
+
+func renderDAChunkAdmissionCandidate(candidate daRelayAdmissionCandidate, tx *consensus.Tx) (daRelayAdmissionCandidate, error) {
+	var zero daRelayAdmissionCandidate
+	if tx.DaChunkCore == nil || tx.DaCommitCore != nil {
+		return zero, errDARelayMemberIncomplete
+	}
+	if err := checkOwnerReadyChunkIndex(tx.DaChunkCore.ChunkIndex); err != nil {
+		return zero, err
+	}
+	if err := checkOwnerReadyPayload(tx.DaPayload); err != nil {
+		return zero, err
+	}
+	candidate.member.locator = daRelayLocator{daID: tx.DaChunkCore.DaID, kind: daRelayLocatorChunk, chunkIndex: tx.DaChunkCore.ChunkIndex}
+	candidate.member.payload = append([]byte(nil), tx.DaPayload...)
+	candidate.chunkHash = tx.DaChunkCore.ChunkHash
+	if err := candidate.validate(); err != nil {
+		return zero, err
+	}
+	return candidate, nil
+}
+
+func (c daRelayAdmissionCandidate) validate() error {
+	if err := c.member.validate(); err != nil {
+		return err
+	}
+	if c.member.member.token != (PendingOutpointToken{}) {
+		return errDARelayMemberIncomplete
+	}
+	if c.member.locator.kind == daRelayLocatorCommit {
+		return c.validateCommit()
+	}
+	return c.validateChunk()
+}
+
+func (c daRelayAdmissionCandidate) validateCommit() error {
+	if c.chunkHash != ([32]byte{}) {
+		return errDARelayMemberIncomplete
+	}
+	if c.chunkCount == 0 || uint64(c.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayChunkCountInvalid
+	}
+	return nil
+}
+
+func (c daRelayAdmissionCandidate) validateChunk() error {
+	if c.payloadCommitment != ([32]byte{}) || c.chunkCount != 0 {
+		return errDARelayMemberIncomplete
+	}
+	return nil
+}
+
+func daAdmissionPayloadCommitment(tx *consensus.Tx) ([32]byte, error) {
+	var commitment [32]byte
+	found := false
+	for _, output := range tx.Outputs {
+		if output.CovenantType != consensus.COV_TYPE_DA_COMMIT {
+			continue
+		}
+		if found || len(output.CovenantData) != len(commitment) {
+			return [32]byte{}, errDARelayMemberIncomplete
+		}
+		copy(commitment[:], output.CovenantData)
+		found = true
+	}
+	if !found {
+		return [32]byte{}, errDARelayMemberIncomplete
+	}
+	return commitment, nil
+}
+
 // A commit locator must carry chunk index 0, or two locators for one slot would
 // compare unequal. Every absolute bound below has ONE definition, shared with the
 // record path that installDASetRecordLocked publishes. The descriptor carries neither the DECLARED
-// chunk count nor wire_bytes, so this slice binds neither; RUB-1273 assigns
-// role-specific metadata/chunk_count, while legacy wireBytes remains zero.
+// chunk count nor wire_bytes, so this slice binds neither; the admission candidate keeps
+// role-specific metadata separately, while legacy wireBytes remains zero.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
