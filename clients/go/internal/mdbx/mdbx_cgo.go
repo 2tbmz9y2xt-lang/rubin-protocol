@@ -932,7 +932,8 @@ func openNativeEnvironment(env *C.MDBX_env, path string, flags C.MDBX_env_flags_
 }
 
 type effectiveConfig struct {
-	flags, mode, pageSize, maxReaders     uint32
+	flags, mode, pageSize, systemPageSize uint32
+	maxReaders                            uint32
 	lower, current, upper, growth, shrink uint64
 	maxKey, maxValue                      int64
 	limits                                nativeLimits
@@ -948,7 +949,7 @@ func readEffective(env *C.MDBX_env, txn *C.MDBX_txn, operation engineOperation) 
 		return effectiveConfig{}, nativeError(operation, rc)
 	}
 	pageSize := uint32(info.mi_dxb_pagesize)
-	return effectiveConfig{flags: uint32(flags), mode: uint32(info.mi_mode), pageSize: pageSize, maxReaders: uint32(info.mi_maxreaders), lower: uint64(info.mi_geo.lower), current: uint64(info.mi_geo.current), upper: uint64(info.mi_geo.upper), growth: uint64(info.mi_geo.grow), shrink: uint64(info.mi_geo.shrink), maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS)), maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS)), limits: limitsForPage(pageSize)}, nil
+	return effectiveConfig{flags: uint32(flags), mode: uint32(info.mi_mode), pageSize: pageSize, systemPageSize: uint32(info.mi_sys_pagesize), maxReaders: uint32(info.mi_maxreaders), lower: uint64(info.mi_geo.lower), current: uint64(info.mi_geo.current), upper: uint64(info.mi_geo.upper), growth: uint64(info.mi_geo.grow), shrink: uint64(info.mi_geo.shrink), maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS)), maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS)), limits: limitsForPage(pageSize)}, nil
 }
 
 func validateEffective(cfg ConfigV1, got effectiveConfig) error {
@@ -958,12 +959,17 @@ func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 	if got.mode != 0 {
 		return fmt.Errorf("mode: got %#x, want 0", got.mode)
 	}
+	if got.pageSize != cfg.PageSize {
+		return fmt.Errorf("PageSize: got %d, want %d", got.pageSize, cfg.PageSize)
+	}
+	err := validateEffectiveMaxReaders(cfg.MaxReaders, got.maxReaders, got.systemPageSize)
+	if err != nil {
+		return err
+	}
 	for _, field := range []struct {
 		name      string
 		got, want uint64
 	}{
-		{"PageSize", uint64(got.pageSize), uint64(cfg.PageSize)},
-		{"MaxReaders", uint64(got.maxReaders), uint64(cfg.MaxReaders)},
 		{"Lower", got.lower, cfg.Lower},
 		{"Upper", got.upper, cfg.Upper},
 		{"Growth", got.growth, cfg.Growth},
@@ -983,6 +989,20 @@ func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 		return fmt.Errorf("MaxValue: got %d, want at least 68000125", got.maxValue)
 	}
 	return validateLimits(cfg, got.limits)
+}
+
+func validateEffectiveMaxReaders(requested, effective, systemPageSize uint32) error {
+	if systemPageSize < 256 || systemPageSize > 16*1024*1024 || systemPageSize&(systemPageSize-1) != 0 {
+		return fmt.Errorf("%s: got %d outside supported power-of-two [256,16777216]", "SystemPageSize", systemPageSize)
+	}
+	upper := uint64(requested) + uint64(systemPageSize)/32 - 1
+	if upper > 32767 {
+		upper = 32767
+	}
+	if effective < requested || effective > 32767 || uint64(effective) > upper {
+		return fmt.Errorf("%s: got %d outside native rounding [%d,%d] for system page %d", "MaxReaders", effective, requested, upper, systemPageSize)
+	}
+	return nil
 }
 
 func validEffectiveCurrent(cfg ConfigV1, current uint64) bool {

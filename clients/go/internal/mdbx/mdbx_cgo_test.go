@@ -1138,12 +1138,32 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 	requireEnvironmentError(t, normalizeOwnedFile("\x00", "mdbx.dat", false, operationCreate, "normalize", "read"), EngineInvalidInput, operationCreate, int(syscall.EINVAL), "read")
 	requireEnvironmentError(t, readOwnedFile("\x00", "mdbx.dat", false, operationOpen, "read"), EngineInvalidInput, operationOpen, int(syscall.EINVAL), "read")
 	cfg := environmentConfig()
-	valid := effectiveConfig{flags: 0x02200000, mode: 0, pageSize: 4096, maxReaders: 492, lower: 1 << 20, current: 2 << 20, upper: 256 << 20, growth: 1 << 20, shrink: 2 << 20, maxKey: 77, maxValue: 68_000_125, limits: nativeLimits{minDB: 1, maxDB: 1 << 40, maxKey: 77, maxValue: 68_000_125}}
+	valid := effectiveConfig{flags: 0x02200000, mode: 0, pageSize: 4096, systemPageSize: 4096, maxReaders: 492, lower: 1 << 20, current: 2 << 20, upper: 256 << 20, growth: 1 << 20, shrink: 2 << 20, maxKey: 77, maxValue: 68_000_125, limits: nativeLimits{minDB: 1, maxDB: 1 << 40, maxKey: 77, maxValue: 68_000_125}}
 	if err := validateEffective(cfg, valid); err != nil {
 		t.Fatalf("valid effective tuple: %v", err)
 	}
 	if err := validateStoredConfig(cfg, cfg); err != nil {
 		t.Fatalf("identical stored ConfigV1: %v", err)
+	}
+	for _, tc := range []struct {
+		requested, systemPageSize, effective uint32
+		want                                 string
+	}{
+		{492, 4096, 491, "MaxReaders: got 491 outside native rounding [492,619] for system page 4096"},
+		{492, 4096, 492, ""},
+		{492, 4096, 619, ""},
+		{492, 4096, 620, "MaxReaders: got 620 outside native rounding [492,619] for system page 4096"},
+		{32767, 4096, 32767, ""},
+		{32767, 4096, 32768, "MaxReaders: got 32768 outside native rounding [32767,32767] for system page 4096"},
+		{492, 0, 492, "SystemPageSize: got 0 outside supported power-of-two [256,16777216]"},
+		{492, 16, 492, "SystemPageSize: got 16 outside supported power-of-two [256,16777216]"},
+		{492, 768, 492, "SystemPageSize: got 768 outside supported power-of-two [256,16777216]"},
+		{492, 16*1024*1024 + 1, 492, "SystemPageSize: got 16777217 outside supported power-of-two [256,16777216]"},
+	} {
+		err := validateEffectiveMaxReaders(tc.requested, tc.effective, tc.systemPageSize)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || err.Error() != tc.want) {
+			t.Fatalf("reader envelope (%d,%d,%d)=%v, want %q", tc.requested, tc.systemPageSize, tc.effective, err, tc.want)
+		}
 	}
 	for _, tc := range []struct {
 		want string
@@ -1170,7 +1190,7 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 	}
 	mutations := []func(*effectiveConfig){
 		func(v *effectiveConfig) { v.flags = 0x00200000 }, func(v *effectiveConfig) { v.flags = 0x02200001 }, func(v *effectiveConfig) { v.mode = 1 },
-		func(v *effectiveConfig) { v.pageSize = 8192 }, func(v *effectiveConfig) { v.maxReaders = 493 }, func(v *effectiveConfig) { v.lower++ },
+		func(v *effectiveConfig) { v.pageSize = 8192 }, func(v *effectiveConfig) { v.systemPageSize = 768 }, func(v *effectiveConfig) { v.maxReaders = 620 }, func(v *effectiveConfig) { v.lower++ },
 		func(v *effectiveConfig) { v.upper-- }, func(v *effectiveConfig) { v.growth++ }, func(v *effectiveConfig) { v.shrink++ },
 		func(v *effectiveConfig) { v.current = cfg.Lower - uint64(cfg.PageSize) }, func(v *effectiveConfig) { v.current = cfg.Upper + uint64(cfg.PageSize) }, func(v *effectiveConfig) { v.current = cfg.Lower + 1 },
 		func(v *effectiveConfig) { v.maxKey = 76 }, func(v *effectiveConfig) { v.maxValue = 68_000_124 },
@@ -1452,7 +1472,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 		return true
 	})
-	effectiveWant := "flags: uint32(flags)|mode: uint32(info.mi_mode)|pageSize: pageSize|maxReaders: uint32(info.mi_maxreaders)|lower: uint64(info.mi_geo.lower)|current: uint64(info.mi_geo.current)|upper: uint64(info.mi_geo.upper)|growth: uint64(info.mi_geo.grow)|shrink: uint64(info.mi_geo.shrink)|maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS))|maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS))|limits: limitsForPage(pageSize)"
+	effectiveWant := "flags: uint32(flags)|mode: uint32(info.mi_mode)|pageSize: pageSize|systemPageSize: uint32(info.mi_sys_pagesize)|maxReaders: uint32(info.mi_maxreaders)|lower: uint64(info.mi_geo.lower)|current: uint64(info.mi_geo.current)|upper: uint64(info.mi_geo.upper)|growth: uint64(info.mi_geo.grow)|shrink: uint64(info.mi_geo.shrink)|maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS))|maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS))|limits: limitsForPage(pageSize)"
 	require(strings.Join(effectiveFields, "|") == effectiveWant && strings.Join(effectiveSetup, "|") == "C.mdbx_env_get_flags(env, &flags)|C.mdbx_env_info_ex(env, txn, &info, C.size_t(unsafe.Sizeof(info)))|pageSize := uint32(info.mi_dxb_pagesize)", "effective provenance drifted: %v / %v", effectiveSetup, effectiveFields)
 	var effectiveCalls []string
 	ast.Inspect(functions["readEffective"].Body, func(node ast.Node) bool {
@@ -1461,7 +1481,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 		return true
 	})
-	require(strings.Join(effectiveCalls, "|") == "int|C.mdbx_env_get_flags|nativeError|int|C.mdbx_env_info_ex|C.size_t|unsafe.Sizeof|nativeError|uint32|uint32|uint32|uint32|uint64|uint64|uint64|uint64|uint64|int64|C.mdbx_env_get_maxkeysize_ex|int64|C.mdbx_env_get_maxvalsize_ex|limitsForPage", "effective native-call ownership drifted: %v", effectiveCalls)
+	require(strings.Join(effectiveCalls, "|") == "int|C.mdbx_env_get_flags|nativeError|int|C.mdbx_env_info_ex|C.size_t|unsafe.Sizeof|nativeError|uint32|uint32|uint32|uint32|uint32|uint64|uint64|uint64|uint64|uint64|int64|C.mdbx_env_get_maxkeysize_ex|int64|C.mdbx_env_get_maxvalsize_ex|limitsForPage", "effective native-call ownership drifted: %v", effectiveCalls)
 	storedOrder := `{"Lower", stored.Lower, caller.Lower},
 		{"Now", stored.Now, caller.Now},
 		{"Upper", stored.Upper, caller.Upper},
