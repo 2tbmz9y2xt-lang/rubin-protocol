@@ -44,9 +44,9 @@ func (p daProvenance) validate() error {
 	}
 }
 
-// validate runs only where a member is required, so nil — the empty-slot marker — is
-// refused here; a commit slot's emptiness is that pointer, a chunk slot's its map key.
-// Token and fee are deliberately NOT checked: a zero token precedes the owner reserve.
+// validate runs only where a member is required, so nil — the empty-slot marker — is refused
+// here; a commit slot's emptiness is that pointer, a chunk slot's its map key. Token and fee
+// are deliberately NOT checked: a zero token precedes the owner reserve.
 func (m *daRelayMemberIdentity) validate() error {
 	if m == nil {
 		return errDARelayMemberIncomplete
@@ -69,8 +69,7 @@ type daRelayOwnerReadyMember struct {
 
 // A commit locator must carry chunk index 0, or two locators for one slot would
 // compare unequal. Every absolute bound below has ONE definition, shared with the
-// record path that installDASetRecordLocked publishes: a bound applied to only one
-// of the two paths is not applied. The descriptor carries neither the DECLARED
+// record path that installDASetRecordLocked publishes. The descriptor carries neither the DECLARED
 // chunk count nor wire_bytes, so this validator binds neither; the record path
 // pins wire_bytes to zero and only PRESERVES a chunk count it never ranges —
 // RUB-1273 owns the layer that assigns either.
@@ -121,9 +120,8 @@ func checkOwnerReadyRetainedBytes(txBytes []byte) error {
 }
 
 // checkOwnerReadyRecord reads no revision, so one check serves both the resident
-// pre-state and the staged record, whatever stamp each has. It reads the values
-// installDASetRecordLocked publishes, so a record edited after staging is refused
-// on the same terms as the descriptor it was staged from.
+// pre-state and the staged record. It reads the values installDASetRecordLocked
+// publishes, so a record edited after staging is refused on the descriptor's terms.
 //
 // Legacy wireBytes is pinned to zero at all three levels — record, commit and
 // chunk — which is the INVERSE of the legacy validators, which refuse a zero. That

@@ -551,9 +551,8 @@ func cloneBytes(in []byte) []byte {
 	return append([]byte(nil), in...)
 }
 
-// daRelayRecordImage is ONE record transition staged as a PURE function of a
-// caller-owned pre-state: building one mutates nothing, and the next of two images
-// staged from one pre-state shares no record state. Only next is isolated.
+// daRelayRecordImage is ONE record transition staged as a PURE function of a caller-owned
+// pre-state: building one mutates nothing, two images share no record state, only next is isolated.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -649,11 +648,10 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 }
 
 // ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
-// incomplete_member_charge. The legacy wireBytes fallback of
-// retainedTxAccountingBytes has no place: a member always carries its bytes. The
-// per-peer key comes from the member's own provenance, never the cached
-// peerQuotaKey this kernel leaves unset while the legacy readers of that counter
-// key on it, charging to "" what this charges to the peer; RUB-1276 owns that.
+// incomplete_member_charge. The legacy wireBytes fallback of retainedTxAccountingBytes
+// has no place: a member always carries its bytes. The per-peer key comes from the
+// member's own provenance, never the cached peerQuotaKey this kernel leaves unset while
+// the legacy readers key on it, charging to "" what this charges to the peer; RUB-1276.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {

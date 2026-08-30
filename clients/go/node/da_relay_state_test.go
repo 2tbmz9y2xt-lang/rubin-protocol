@@ -3042,11 +3042,10 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}
 		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, uint16(consensus.MAX_DA_CHUNK_COUNT), 73, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload), errDARelayChunkIndexOutOfRange)
 		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, ^uint16(0), 74, daRelayTestPeerProvenance("quota-a"), chunkTx, chunkPayload), errDARelayChunkIndexOutOfRange)
-		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, 0, 75, daRelayTestPeerProvenance("quota-a"), chunkTx, append(atCap, 0)), errDARelayChunkPayloadSizeInvalid)
+		requireOwnerReadyMemberRejected(t, state, daRelayTestOwnerReadyChunk(daID, 0, 75, daRelayTestPeerProvenance("quota-a"), chunkTx, make([]byte, consensus.CHUNK_BYTES+1)), errDARelayChunkPayloadSizeInvalid)
 	})
 
-	// The record path below is the one installDASetRecordLocked publishes; the
-	// descriptor stays valid in every row, so only a record-path check can refuse.
+	// The descriptor stays valid in every row below, so only a record-path check can refuse.
 	t.Run("the staged chunk slot is bound to the candidate field for field", func(t *testing.T) {
 		other := daRelayTestPeerProvenance("quota-z")
 		rows := []struct {
@@ -3521,7 +3520,7 @@ func TestDARecordImageMapOrder(t *testing.T) {
 	if !reflect.DeepEqual(first.install, wantInstall) {
 		t.Fatalf("install rows = %+v, want %+v", first.install, wantInstall)
 	}
-	// Go re-randomises map iteration per range, so repeating the whole
+	// Go re-randomizes map iteration per range, so repeating the whole
 	// projection is what would expose an order-dependent walk.
 	for attempt := 1; attempt < 3; attempt++ {
 		placement, err := projectOwnerReadyMember(state, candidate)

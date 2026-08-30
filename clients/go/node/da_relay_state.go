@@ -100,10 +100,9 @@ type daRelaySetRecord struct {
 	daID  [32]byte
 	state daRelaySetState
 	// revision is the owner-ready record IDENTITY: under installDASetRecordLocked's
-	// SINGLE-USE placement precondition, two record values are the same record state
-	// exactly when their revisions agree. A LEGACY writer creates a record presenting
-	// 0 and keeps a stamped record's stamp on every path; RUB-1275 owns the TTL
-	// decrement, and no non-test caller reaches this kernel.
+	// SINGLE-USE precondition, two record values are the same record state exactly when
+	// their revisions agree. A LEGACY writer creates a record presenting 0 and keeps a
+	// stamped record's stamp; RUB-1275 owns the TTL decrement, no non-test caller here.
 	// Go-private: never serialized, never public, never a normative protocol field.
 	revision           uint64
 	receivedTime       uint64
@@ -205,11 +204,10 @@ type daRelayChunk struct {
 	hashChecked  bool
 }
 
-// daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every
-// field arrives EXPLICITLY from the caller: nothing is parsed, hashed,
-// reconstructed or narrowed, and inputs keep canonical order verbatim
-// (RUBIN_COMPACT_BLOCKS.md 18.1, RUBIN_MEMPOOL_POLICY.md 6.4). A retained commit
-// or chunk holds it BY POINTER, so an unowned slot costs one word.
+// daRelayMemberIdentity is the owner-ready half of ONE retained DA member. Every field
+// arrives EXPLICITLY from the caller: nothing is parsed, hashed, reconstructed or
+// narrowed, and inputs keep canonical order verbatim (RUBIN_COMPACT_BLOCKS.md 18.1,
+// RUBIN_MEMPOOL_POLICY.md 6.4). A commit or chunk holds it BY POINTER: one word unowned.
 type daRelayMemberIdentity struct {
 	txid       [32]byte
 	wtxid      [32]byte
