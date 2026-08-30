@@ -1045,10 +1045,10 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	requireEnvironmentError(t, invalidOpenReaders.openEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidOpenReaders)
 	normalizedCfg, normalizedPath := environmentConfig(), filepath.Join(t.TempDir(), "normalized")
-	normalizedCfg.Growth, normalizedCfg.Shrink = 4096, 8192
+	normalizedCfg.PageSize, normalizedCfg.Growth, normalizedCfg.Shrink = 256, 256, 512
 	normalized, normalizedErr := Create(normalizedPath, normalizedCfg)
 	normalization := requireNoStore(t, normalized, normalizedErr, EngineIntegrity, operationCreate, codeInvalid, "effective environment mismatch")
-	if normalization.Cause == nil || normalization.Cause.Error() != "Growth: got 16384, want 4096" {
+	if normalization.Cause == nil || normalization.Cause.Error() != fmt.Sprintf("Growth: got %d, want 256", os.Getpagesize()) {
 		t.Fatalf("native normalization Cause=%v", normalization.Cause)
 	}
 	original, geometryPath := environmentConfig(), closedEnvironment(t)
