@@ -2571,8 +2571,10 @@ func requireDAImageRejected(t *testing.T, state *DARelayState, image daRelayReco
 
 func requireOwnerReadyMemberRejected(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember, want error) {
 	t.Helper()
-	// This snapshot precedes STAGING: Go evaluates a call's arguments first, so the
-	// one requireDAImageRejected takes would already carry a staged write.
+	// Deliberately taken BEFORE staging. Staging mutates nothing today; if it ever
+	// did, Go evaluates a call's arguments first, so the snapshot
+	// requireDAImageRejected takes would already carry that write and could not
+	// report it.
 	before := daRelayStateSnapshot(state)
 	requireDAImageRejected(t, state, stageOwnerReadyMemberForTest(state, member), want)
 	requireDARelayStateUnchanged(t, state, before)
@@ -3200,6 +3202,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 			name    string
 			corrupt func(*daRelaySetRecord)
 		}{
+			{"the record state", func(r *daRelaySetRecord) { r.state = daRelayStateStagedCommit }},
 			{"the pinned payload total", func(r *daRelaySetRecord) { r.payloadBytes = 4 }},
 			{"the accepted-sequence stamp", func(r *daRelaySetRecord) { r.receivedTime = 9 }},
 			{"the remaining ttl", func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 2 }},
@@ -3217,6 +3220,47 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 			delete(image.next.chunks, 0)
 			requireDAImageRejected(t, state, image, errDARelayImageIncompatible)
 		})
+	})
+
+	// The commit-target arm and the unskipped chunk loop underneath it: the earlier
+	// commit rows ran against an ABSENT record, where every live value is zero.
+	t.Run("a commit candidate preserves a live record that holds only chunks", func(t *testing.T) {
+		prov := daRelayTestPeerProvenance("quota-a")
+		candidate := daRelayTestOwnerReadyCommit(daID, 68, prov, commitTx)
+		chunkOnly := func(t *testing.T) (*DARelayState, daRelayRecordImage) {
+			t.Helper()
+			state := newDARelayStateForTest(t, defaultDARelayCaps())
+			mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 66, prov, chunkTx, chunkPayload))
+			mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 1, 67, prov, chunkTx, chunkPayload))
+			if state.sets[daID].commit.member != nil {
+				t.Fatal("this arm needs a live record holding no commit")
+			}
+			return state, stageOwnerReadyMemberForTest(state, candidate)
+		}
+		clean, _ := chunkOnly(t)
+		if _, err := projectOwnerReadyMember(clean, candidate); err != nil {
+			t.Fatalf("a legitimate commit onto a chunk-only record was refused: %v", err)
+		}
+		rows := []struct {
+			name    string
+			corrupt func(*daRelayRecordImage)
+		}{
+			{"the commit payload commitment", func(i *daRelayRecordImage) { i.next.commit.payloadCommitment = daRelayTestID(120) }},
+			{"the commit cached legacy quota key", func(i *daRelayRecordImage) { i.next.commit.peerQuotaKey = "legacy-key" }},
+			{"the commit declared chunk count", func(i *daRelayRecordImage) { i.next.commit.chunkCount = 3 }},
+			{"a non-target chunk hash", func(i *daRelayRecordImage) {
+				chunk := i.next.chunks[0]
+				chunk.chunkHash = daRelayTestID(121)
+				i.next.chunks[0] = chunk
+			}},
+		}
+		for _, row := range rows {
+			t.Run(row.name, func(t *testing.T) {
+				state, image := chunkOnly(t)
+				row.corrupt(&image)
+				requireDAImageRejected(t, state, image, errDARelayImageIncompatible)
+			})
+		}
 	})
 
 	t.Run("a state with no locator index is refused rather than allocated", func(t *testing.T) {
@@ -3389,6 +3433,27 @@ func TestDARecordRevisionPlacement(t *testing.T) {
 		}
 	})
 
+	t.Run("a removal releases no counter this kernel does not own", func(t *testing.T) {
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		mustInstallOwnerReadyMember(t, state, commit)
+		state.pinnedPayloadBytes = 4096
+		state.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {0: "peer-prefetch"}}
+		state.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(7, 0)}
+
+		before := daRelayStateSnapshot(state)
+		removeRecord(t, state)
+		if _, resident := state.sets[daID]; resident {
+			t.Fatal("the removal left the record resident")
+		}
+		// RUB-1275 owns the prefetch release; the pinned counter prices only a
+		// COMPLETE_SET, which this kernel refuses.
+		if got := daRelayStateSnapshot(state); got.pinnedPayloadBytes != before.pinnedPayloadBytes ||
+			!reflect.DeepEqual(got.prefetchIndexes, before.prefetchIndexes) ||
+			!reflect.DeepEqual(got.prefetchExpires, before.prefetchExpires) {
+			t.Fatalf("the removal touched a counter this kernel does not own: %+v", got)
+		}
+	})
+
 	t.Run("a stale baseline is refused before mutation", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, commit)
@@ -3539,6 +3604,9 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		pre.chunks[0].txBytes[0] = 'X'
 		pre.chunks[0].member.inputs[0].Vout = 4242
 		pre.commit.txBytes[0] = 'X'
+		pre.commit.member.token = PendingOutpointToken{seq: 77}
+		pre.commit.member.provenance = daProvenance{}
+		pre.commit.member.inputs[0].Vout = 4242
 		pre.replaceableChunks[0] = false
 
 		if first.next.chunks[0].payload[0] == 'X' || first.next.chunks[0].txBytes[0] == 'X' {
@@ -3549,6 +3617,11 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 		if first.next.commit.txBytes[0] == 'X' {
 			t.Fatal("the image aliases the pre-state commit bytes")
+		}
+		for _, image := range []daRelayRecordImage{first, second} {
+			if member := image.next.commit.member; member.token != (PendingOutpointToken{}) || member.provenance != provenance || member.inputs[0].Vout == 4242 {
+				t.Fatalf("the image aliases the pre-state commit member: %+v", member)
+			}
 		}
 		if !first.next.replaceableChunks[0] {
 			t.Fatal("the image aliases the pre-state replaceable flags")

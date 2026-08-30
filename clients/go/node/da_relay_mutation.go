@@ -674,15 +674,19 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 // is free in live, so exactly one chunk may appear and none may be dropped. The
 // chunk walk is map-ordered and every violation yields ONE error identity, so
 // iteration order cannot change the outcome. Every remaining record field is
-// accounted for: da_id, state and wireBytes are pinned by the checks above,
-// revision is REMINTED by projectDARecordImageLocked whatever the image carries,
-// and the four below are compared against the live pre-state. That they move no
+// accounted for: da_id and wireBytes are pinned by the checks above, revision is
+// REMINTED by projectDARecordImageLocked whatever the image carries, and the five
+// below are compared against the live pre-state. checkOwnerReadyRecord admits
+// BOTH OrphanChunks and StagedCommit, so only the state equality stops a resident
+// image from switching between them behind otherwise valid contents. That the
+// other four move no
 // counter at INSTALL time is no argument for leaving them free: the installed
 // record then LIVES in s.sets, where missingChunkIndexes and validateChunkInsert
 // read replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging
 // copies all four out of the pre-state, so a legitimate image already agrees.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
-	if live.payloadBytes != next.payloadBytes || live.receivedTime != next.receivedTime ||
+	if live.state != next.state ||
+		live.payloadBytes != next.payloadBytes || live.receivedTime != next.receivedTime ||
 		live.ttlBlocksRemaining != next.ttlBlocksRemaining ||
 		!maps.Equal(live.replaceableChunks, next.replaceableChunks) {
 		return errDARelayImageIncompatible
