@@ -464,13 +464,13 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	missingSidecar, err := validateOpenArtifacts(path)
+	_, err = validateOpenArtifacts(path)
 	if err != nil {
 		return nil, err
 	}
-	_, err = cfg.Encode()
+	err = validateOpenStatic(path, cfg)
 	if err != nil {
-		return nil, adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)
+		return nil, err
 	}
 	err = normalizeMDBXModule()
 	if err != nil {
@@ -480,7 +480,7 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
 	}
-	writer, err := acquireWriter(path, operationOpen, missingSidecar)
+	writer, err := acquireWriter(path, operationOpen, false)
 	if err != nil {
 		return nil, err
 	}
@@ -712,7 +712,27 @@ func validateOpenArtifacts(path string) (bool, error) {
 			return false, err
 		}
 	}
-	return inspectOpenFile(path, "rubin-writer.lock", true, true)
+	return inspectOpenFile(path, "rubin-writer.lock", true, false)
+}
+
+func validateOpenStatic(path string, cfg ConfigV1) error {
+	_, err := cfg.Encode()
+	if err != nil {
+		return adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)
+	}
+	return validateOpenDataSize(path, cfg.PageSize)
+}
+
+func validateOpenDataSize(path string, pageSize uint32) error {
+	info, err := os.Lstat(filepath.Join(path, "mdbx.dat"))
+	if err != nil {
+		return ioError(operationOpen, "inspect mdbx.dat", err)
+	}
+	minimum := int64(pageSize) * 3
+	if info.Size() < minimum {
+		return integrityError(operationOpen, "mdbx.dat is undersized", nil)
+	}
+	return nil
 }
 
 func inspectOpenFile(path, name string, empty, missingAllowed bool) (bool, error) {

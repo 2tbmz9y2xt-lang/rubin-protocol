@@ -752,6 +752,13 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	if duplicate.poisoned {
 		t.Fatal("duplicate initialization poisoned owner thread")
 	}
+	mustEnvironment(t, os.Remove(filepath.Join(path, "rubin-writer.lock")))
+	second, secondErr = Open(path, cfg)
+	requireNoStore(t, second, secondErr, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "rubin-writer.lock is absent")
+	requireEnvironmentStore(t, store, cfg)
+	if _, statErr := os.Lstat(filepath.Join(path, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing sidecar Open created a replacement: %v", statErr)
+	}
 	mustEnvironment(t, store.Close())
 	if store.self != store || store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || store.terminal != nil {
 		t.Fatalf("Close did not clear ownership: %+v", store)
@@ -791,6 +798,12 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	mustEnvironment(t, os.Remove(filepath.Join(path, "rubin-writer.lock")))
 	mustEnvironment(t, os.WriteFile(filepath.Join(path, "ignored.extra"), []byte{1}, 0o600))
 	reopened, err := Open(path, cfg)
+	requireNoStore(t, reopened, err, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "rubin-writer.lock is absent")
+	if _, statErr := os.Lstat(filepath.Join(path, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing sidecar Open created a replacement: %v", statErr)
+	}
+	mustEnvironment(t, os.WriteFile(filepath.Join(path, "rubin-writer.lock"), nil, 0o600))
+	reopened, err = Open(path, cfg)
 	if err != nil {
 		t.Fatalf("Open with recreated sidecar and extra entry: %v", err)
 	}
@@ -886,6 +899,18 @@ func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) { requireOpenEnvironmentError(t, tc.prepare(t), tc.class, tc.code, tc.diagnostic) })
+	}
+	undersized := closedEnvironment(t)
+	dataPath := filepath.Join(undersized, "mdbx.dat")
+	minimum := int64(3 * environmentConfig().PageSize)
+	mustEnvironment(t, os.Truncate(dataPath, minimum-1))
+	before, readErr := os.ReadFile(dataPath)
+	mustEnvironment(t, readErr)
+	requireOpenEnvironmentError(t, undersized, EngineIntegrity, codeInvalid, "mdbx.dat is undersized")
+	after, readErr := os.ReadFile(dataPath)
+	mustEnvironment(t, readErr)
+	if int64(len(after)) != minimum-1 || string(after) != string(before) {
+		t.Fatal("undersized Open changed mdbx.dat")
 	}
 }
 
@@ -1062,10 +1087,11 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	mustEnvironment(t, os.Chmod(staticCorrupt, 0o700))
 	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "mdbx.dat"), []byte(strings.Repeat("x", 262144)), 0o600))
 	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "mdbx.lck"), []byte(strings.Repeat("x", 262144)), 0o600))
+	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "rubin-writer.lock"), nil, 0o600))
 	requireOpenEnvironmentError(t, staticCorrupt, EngineIntegrity, codeInvalid, expectedNativeDiagnostic(codeInvalid))
 	corrupt := closedEnvironment(t)
 	mustEnvironment(t, os.WriteFile(filepath.Join(corrupt, "mdbx.dat"), []byte("not mdbx"), 0o600))
-	requireOpenEnvironmentError(t, corrupt, EngineIntegrity, codeInvalid, "SchemaV1 main cardinality mismatch")
+	requireOpenEnvironmentError(t, corrupt, EngineIntegrity, codeInvalid, "mdbx.dat is undersized")
 	handle, result, lockErr := filelock.Acquire(filepath.Join(corrupt, "rubin-writer.lock"))
 	if handle == nil || result != "" || lockErr != nil {
 		t.Fatalf("corrupt Open retained writer: %v/%q/%v", handle, result, lockErr)
@@ -1302,7 +1328,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 	}
 	require(len(normalizeSpecs) == 1 && functions["normalizeMDBXModule"] == nil && compact(normalizeSpecs[0]) == "normalizeMDBXModule = sync.OnceValue(func() error { result := C.rubin_mdbx_normalize_debug() return debugNormalizationError(int(result.first), int(result.second)) })", "normalizeMDBXModule OnceValue ownership drifted")
-	for name, expected := range map[string]string{"Create": "validateCreateStatic", "Open": "validatePath,validateOpenArtifacts,cfg.Encode,adapterError"} {
+	for name, expected := range map[string]string{"Create": "validateCreateStatic", "Open": "validatePath,validateOpenArtifacts,validateOpenStatic"} {
 		fn, normalizeAt := functions[name], token.NoPos
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok && callName(call) == "normalizeMDBXModule" {
@@ -1323,7 +1349,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	for name, sequence := range map[string][]string{
 		"Create":                {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
-		"Open":                  {"validatePath", "validateOpenArtifacts", "cfg.Encode", "normalizeMDBXModule", "limitsForPage", "acquireWriter", "openEnvironment", "runLocked"},
+		"Open":                  {"validatePath", "validateOpenArtifacts", "validateOpenStatic", "normalizeMDBXModule", "limitsForPage", "acquireWriter", "openEnvironment", "runLocked"},
+		"validateOpenStatic":    {"cfg.Encode", "adapterError", "validateOpenDataSize"},
 		"validateCreateStatic":  {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
 		"openEnvironment":       {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, artifact.name)"},
 		"inspectSchema":         {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
@@ -1514,6 +1541,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		`integrityError(operationCreate, "environment directory is unsafe", nil)`: 2, `ioError(operationCreate, "normalize environment directory mode", err)`: 1,
 		`adapterError(operationOpen, EngineInvalidInput, codeENOFile, "Open path is absent", nil)`: 1, `ioError(operationOpen, "inspect environment directory", err)`: 1, `integrityError(operationOpen, "environment directory is unsafe", nil)`: 1,
 		`adapterError(operationOpen, EngineInvalidInput, codeENOFile, name+" is absent", nil)`: 1, `ioError(operationOpen, "inspect "+name, err)`: 1, `integrityError(operationOpen, name+" is unsafe", nil)`: 1,
+		`ioError(operationOpen, "inspect mdbx.dat", err)`: 1, `integrityError(operationOpen, "mdbx.dat is undersized", nil)`: 1,
 		`adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization failed", nil)`: 1, `adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization did not stabilize", nil)`: 1,
 		`writerLockError(operation, result, err)`: 1, `ioError(operation, readDiagnostic, err)`: 1, `integrityError(operation, name+" is unsafe", nil)`: 2,
 		`ioError(operation, normalizeDiagnostic, err)`: 1, `ioError(operation, diagnostic, err)`: 1, `integrityError(operationCreate, "effective environment mismatch", err)`: 1,
