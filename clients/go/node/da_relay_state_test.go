@@ -3090,6 +3090,12 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				requireDAImageRejected(t, state, image, row.want)
 			})
 		}
+		t.Run("a slot the staged record never got", func(t *testing.T) {
+			image := stageOwnerReadyMemberForTest(state, candidate)
+			// checkOwnerReadyRecord walks only the keys present; only the lookup sees this.
+			delete(image.next.chunks, 1)
+			requireDAImageRejected(t, state, image, errDARelayMemberIncomplete)
+		})
 	})
 
 	t.Run("the staged commit slot is bound to the candidate field for field", func(t *testing.T) {
@@ -3222,8 +3228,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		})
 	})
 
-	// The commit-target arm and the unskipped chunk loop underneath it: the earlier
-	// commit rows ran against an ABSENT record, where every live value is zero.
+	// The earlier commit rows ran against an ABSENT record, where every live value is zero.
 	t.Run("a commit candidate preserves a live record that holds only chunks", func(t *testing.T) {
 		prov := daRelayTestPeerProvenance("quota-a")
 		candidate := daRelayTestOwnerReadyCommit(daID, 68, prov, commitTx)

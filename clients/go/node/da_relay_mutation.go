@@ -706,8 +706,7 @@ func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLo
 		live.commit.peerQuotaKey != next.commit.peerQuotaKey ||
 		live.commit.chunkCount != next.commit.chunkCount {
 		// A commit candidate owns only da_id, member and txBytes, and
-		// checkOwnerReadyCommitSlot pins wireBytes to zero, so these three
-		// complete the seven-field slot.
+		// checkOwnerReadyCommitSlot pins wireBytes, so these three complete the seven.
 		return errDARelayImageIncompatible
 	}
 	if len(next.chunks) != staged {
