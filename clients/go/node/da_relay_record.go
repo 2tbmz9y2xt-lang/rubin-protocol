@@ -551,8 +551,8 @@ func cloneBytes(in []byte) []byte {
 	return append([]byte(nil), in...)
 }
 
-// daRelayRecordImage is ONE record transition staged as a PURE function of a caller-owned
-// pre-state: building one mutates nothing, two images share no record state, only next is isolated.
+// daRelayRecordImage is ONE record transition staged as a PURE function of caller-owned
+// pre-state and member: descriptor and next are isolated, and two images share no mutable state.
 type daRelayRecordImage struct {
 	daID     [32]byte
 	present  bool
@@ -564,6 +564,8 @@ type daRelayRecordImage struct {
 
 func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
 	image := daRelayRecordImage{daID: member.locator.daID, present: present, member: member}
+	image.member.txBytes, image.member.payload = cloneBytes(member.txBytes), cloneBytes(member.payload)
+	image.member.member = *member.member.clone()
 	if present {
 		image.baseline = pre.revision
 		image.next = pre.cloneOwnerReady()

@@ -3565,27 +3565,21 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("mutating the caller's member after staging changes no staged record", func(t *testing.T) {
+	t.Run("mutating a member after staging changes no image or staged record", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		member := daRelayTestOwnerReadyChunk(daID, 0, 82, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
-		image := stageOwnerReadyMemberForTest(state, member)
-		staged := image.next.chunks[0]
-
-		member.txBytes[0] = 'X'
-		member.payload[0] = 'X'
-		member.member.inputs[0].Vout = 4242
-
-		if staged.txBytes[0] == 'X' || staged.payload[0] == 'X' || staged.member.inputs[0].Vout == 4242 {
-			t.Fatalf("the staged member aliases the caller's value: %+v", staged)
+		first, second := stageOwnerReadyMemberForTest(state, member), stageOwnerReadyMemberForTest(state, member)
+		member.txBytes[0], member.payload[0], member.member.inputs[0].Vout = 'X', 'X', 4242
+		if first.member.txBytes[0] == 'X' || first.member.payload[0] == 'X' || first.member.member.inputs[0].Vout == 4242 || first.next.chunks[0].txBytes[0] == 'X' || first.next.chunks[0].payload[0] == 'X' || first.next.chunks[0].member.inputs[0].Vout == 4242 {
+			t.Fatalf("the first image aliases the caller's value: %+v", first)
 		}
-
-		if image.member.payload[0] != 'X' {
-			t.Fatal("image.member stopped tracking the caller's payload")
+		first.member.txBytes[0], first.member.payload[0], first.member.member.inputs[0].Vout = 'Y', 'Y', 4343
+		if second.member.txBytes[0] == 'Y' || second.member.payload[0] == 'Y' || second.member.member.inputs[0].Vout == 4343 || first.next.chunks[0].txBytes[0] == 'Y' || first.next.chunks[0].payload[0] == 'Y' || first.next.chunks[0].member.inputs[0].Vout == 4343 {
+			t.Fatalf("the descriptor aliases another image or its own next record: first=%+v second=%+v", first, second)
 		}
 		commit := daRelayTestOwnerReadyCommit(daID, 83, provenance, []byte("owner-ready-commit-tx"))
 		stagedCommit := stageOwnerReadyMemberForTest(state, commit).next.commit
-		commit.txBytes[0] = 'X'
-		commit.member.inputs[0].Vout = 4242
+		commit.txBytes[0], commit.member.inputs[0].Vout = 'X', 4242
 		if stagedCommit.txBytes[0] == 'X' || stagedCommit.member.inputs[0].Vout == 4242 {
 			t.Fatalf("the staged commit aliases the caller's value: %+v", stagedCommit)
 		}
