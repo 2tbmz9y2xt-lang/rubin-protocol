@@ -1087,7 +1087,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	consumeNativeTestStore(t, native)
 	invalidReaders, cfg := &Store{}, environmentConfig()
 	cfg.MaxReaders = 0
-	requireEnvironmentError(t, invalidReaders.createEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	requireEnvironmentError(t, invalidReaders.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidReaders)
 	invalidGeometry := &Store{}
 	cfg = environmentConfig()
@@ -1101,9 +1101,12 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	normalizedCfg, normalizedPath := environmentConfig(), filepath.Join(t.TempDir(), "normalized")
 	normalizedCfg.PageSize, normalizedCfg.Growth, normalizedCfg.Shrink = 256, 256, 512
 	normalized, normalizedErr := Create(normalizedPath, normalizedCfg)
-	normalization := requireNoStore(t, normalized, normalizedErr, EngineIntegrity, operationCreate, codeInvalid, "effective environment mismatch")
+	normalization := requireNoStore(t, normalized, normalizedErr, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "ConfigV1 geometry is not natively representable")
 	if normalization.Cause == nil || normalization.Cause.Error() != fmt.Sprintf("Growth: got %d, want 256", os.Getpagesize()) {
 		t.Fatalf("native normalization Cause=%v", normalization.Cause)
+	}
+	if _, statErr := os.Lstat(normalizedPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("native normalization mutated filesystem: %v", statErr)
 	}
 	original, geometryPath := environmentConfig(), closedEnvironment(t)
 	geometryWriter, geometryErr := acquireWriter(geometryPath, operationOpen, false)
@@ -1113,6 +1116,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	geometry := &Store{writer: geometryWriter}
 	geometry.self = geometry
 	mustEnvironment(t, geometry.configureCreateEnvironment(geometryPath, changed))
+	mustEnvironment(t, geometry.createEnvironment(geometryPath, changed))
 	geometryOutcome := runLocked(func() transactionOutcome { return geometry.inspectOpenLocked(original) })
 	geometryMismatch := requireEnvironmentError(t, geometryOutcome.err, EngineIntegrity, operationOpen, codeInvalid, "effective environment mismatch")
 	if geometryMismatch.Cause == nil || geometryMismatch.Cause.Error() != "Upper: got 536870912, want 268435456" {
@@ -1125,11 +1129,13 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 		cause      error
 	}{{[]byte{1}, "required metadata width mismatch", nil}, {make([]byte, 48), "invalid ConfigV1 row", errSchema}} {
 		path := filepath.Join(t.TempDir(), "malformed")
+		malformed := &Store{}
+		malformed.self = malformed
+		mustEnvironment(t, malformed.configureCreateEnvironment(path, original))
 		mustEnvironment(t, createDirectory(path))
 		writer, err := acquireWriter(path, operationCreate, true)
 		mustEnvironment(t, err)
-		malformed := &Store{writer: writer}
-		malformed.self = malformed
+		malformed.writer = writer
 		mustEnvironment(t, malformed.createEnvironment(path, original))
 		outcome := runLocked(func() transactionOutcome { return malformed.initializeLocked(original, tc.encoded) })
 		if outcome.err != nil || outcome.poisoned || malformed.state != storeOPEN {
@@ -1144,6 +1150,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	nativeLink := closedEnvironment(t)
 	mustEnvironment(t, os.Link(filepath.Join(nativeLink, "mdbx.dat"), filepath.Join(nativeLink, "mdbx.dat.alias")))
 	linked := &Store{}
+	mustEnvironment(t, linked.configureCreateEnvironment(nativeLink, environmentConfig()))
 	requireEnvironmentError(t, linked.createEnvironment(nativeLink, environmentConfig()), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
 	consumeNativeTestStore(t, linked)
 	maskedTarget := filepath.Join(t.TempDir(), "owner-rwx-masked")
@@ -1459,8 +1466,11 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		require(stageCalls[name] == 1, "Open native precondition %s calls=%d, want 1", name, stageCalls[name])
 	}
 	for name, sequence := range map[string][]string{
-		"Create":                          {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
+		"Create":                          {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "configureCreateEnvironment", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
 		"Open":                            {"validatePath", "validateOpenArtifacts", "validateOpenStatic", "validateOpenNativePreconditions", "acquireWriter", "openEnvironment", "runLocked"},
+		"configureCreateEnvironment":      {"allocateEnvironment", "C.mdbx_env_set_maxdbs", "C.mdbx_env_set_maxreaders", "C.mdbx_env_set_geometry", "validateCreateGeometry"},
+		"validateCreateGeometry":          {"C.mdbx_env_info_ex", "nativeError", `"PageSize"`, `"Lower"`, `"Now"`, `"Upper"`, `"Growth"`, `"Shrink"`, "adapterError"},
+		"createEnvironment":               {"openNativeEnvironment", "normalizeOwnedFile", "readEffective", "validateEffective"},
 		"validateOpenNativePreconditions": {"normalizeMDBXModule", "validatePreopenSnapshot", "validateLimits", "limitsForPage", "adapterError"},
 		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
 		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
@@ -1488,9 +1498,9 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require(preambleDigest == "19017dc3568a36890760d45263aaa13e90584909802f75d738dd4e3634eaa367", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
-	for _, name := range []string{"Create", "Open"} {
-		require(strings.Count(body(name), "&Store{") == 1 && strings.Count(body(name), "store := &Store{writer: writer}\n\tstore.self = store") == 1, "%s constructor Store publication drifted", name)
-	}
+	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
+	require(strings.Count(body("Open"), "&Store{") == 1 && strings.Count(body("Open"), "store := &Store{writer: writer}\n\tstore.self = store") == 1, "Open Store ownership drifted")
+	require(strings.Count(production, "C.rubin_mdbx_env_create()") == 1 && strings.Count(body("configureCreateEnvironment"), "s.allocateEnvironment(operationCreate)") == 1 && strings.Count(body("configureCreateEnvironment"), "validateCreateGeometry(s.env, cfg)") == 1 && strings.Count(body("createEnvironment"), "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate)") == 1 && !strings.Contains(body("createEnvironment"), "allocateEnvironment"), "single Create env ownership drifted")
 	nativeFiles := "for _, name := range [...]string{\"mdbx.dat\", \"mdbx.lck\"} {\n\t\terr = normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, \"normalize \"+name+\" mode\", \"read back \"+name)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t}"
 	require(strings.Count(body("createEnvironment"), nativeFiles) == 1, "native-created file normalization/readback loop drifted")
 	normalizeBody := `{ info, err := os.Lstat(path) if err != nil { return ioError(operation, readDiagnostic, err) } if !validFileInfo(info, empty, false) { return integrityError(operation, name+" is unsafe", nil) } err = os.Chmod(path, 0o600) if err != nil { return ioError(operation, normalizeDiagnostic, err) } return readOwnedFile(path, name, empty, operation, readDiagnostic) }`
@@ -1661,7 +1671,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	wantErrorCalls := map[string]int{
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
-		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`: 1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
+		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
 		`adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)`: 1, `adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)`: 1,
 		`adapterError(operation, EngineInvalidInput, codeEINVAL, "path must be nonempty, NUL-free, absolute and clean", nil)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeEExist, "Create path already exists", nil)`: 1,
 		`ioError(operationCreate, "inspect Create path", err)`: 1, `ioError(operationCreate, "create environment directory", err)`: 1, `ioError(operationCreate, "read back environment directory", err)`: 2,

@@ -442,16 +442,21 @@ func Create(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
 	}
+	store := &Store{}
+	store.self = store
+	err = store.configureCreateEnvironment(path, cfg)
+	if err != nil {
+		return store.consumeFailure(err)
+	}
 	err = createDirectory(path)
 	if err != nil {
-		return nil, err
+		return store.consumeFailure(err)
 	}
 	writer, err := acquireWriter(path, operationCreate, true)
 	if err != nil {
-		return nil, err
+		return store.consumeFailure(err)
 	}
-	store := &Store{writer: writer}
-	store.self = store
+	store.writer = writer
 	err = store.createEnvironment(path, cfg)
 	if err != nil {
 		return store.consumeFailure(err)
@@ -870,7 +875,7 @@ func validateLimits(cfg ConfigV1, limits nativeLimits) error {
 }
 
 func (s *Store) createEnvironment(path string, cfg ConfigV1) error {
-	err := s.configureCreateEnvironment(path, cfg)
+	err := openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate)
 	if err != nil {
 		return err
 	}
@@ -909,7 +914,24 @@ func (s *Store) configureCreateEnvironment(path string, cfg ConfigV1) error {
 	if rc := int(C.mdbx_env_set_geometry(s.env, C.intptr_t(cfg.Lower), C.intptr_t(cfg.Now), C.intptr_t(cfg.Upper), C.intptr_t(cfg.Growth), C.intptr_t(cfg.Shrink), C.intptr_t(cfg.PageSize))); rc != codeSuccess {
 		return nativeError(operationCreate, rc)
 	}
-	return openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate)
+	return validateCreateGeometry(s.env, cfg)
+}
+
+func validateCreateGeometry(env *C.MDBX_env, cfg ConfigV1) error {
+	var info C.MDBX_envinfo
+	if rc := int(C.mdbx_env_info_ex(env, nil, &info, C.size_t(unsafe.Sizeof(info)))); rc != codeSuccess {
+		return nativeError(operationCreate, rc)
+	}
+	for _, field := range []struct {
+		name      string
+		got, want uint64
+	}{{"PageSize", uint64(info.mi_dxb_pagesize), uint64(cfg.PageSize)}, {"Lower", uint64(info.mi_geo.lower), cfg.Lower}, {"Now", uint64(info.mi_geo.current), cfg.Now}, {"Upper", uint64(info.mi_geo.upper), cfg.Upper}, {"Growth", uint64(info.mi_geo.grow), cfg.Growth}, {"Shrink", uint64(info.mi_geo.shrink), cfg.Shrink}} {
+		if field.got != field.want {
+			err := fmt.Errorf("%s: got %d, want %d", field.name, field.got, field.want)
+			return adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
