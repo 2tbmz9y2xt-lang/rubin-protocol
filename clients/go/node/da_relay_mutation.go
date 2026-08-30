@@ -565,10 +565,10 @@ type daRelayRecordPlacement struct {
 
 // projectDARecordImageLocked is the FALLIBLE half: it owns EVERY check and mutates
 // nothing on any path, so a refused image leaves live state byte-identical. A
-// doubly-violating image selects by STAGE, in this order: incompatible live record,
-// stale image, unusable candidate, locator row, accounting, exhausted revision space
-// (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3). The four pool arms hold that order too, but the
-// per-peer arm walks a map: the unordered key is not observable in its identity-free error taxonomy.
+// doubly-violating image selects by STAGE: incompatible live record, stale image,
+// unusable candidate, locator row, global/per-DA/commit/peer accounting, then
+// exhausted revision space (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3). Within the peer arm,
+// map order can select the first sentinel when keys violate different checks (overflow or peer cap).
 func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
 	live, err := s.checkDARecordImageBaselineLocked(image)
 	if err != nil {
@@ -613,8 +613,8 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 // the record installDASetRecordLocked actually publishes unchecked.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
-	// Removal requires only zero retained member/locator rows; residual scalars or
-	// maps are ignored because the record is not installed. Non-removal requires rows.
+	// Removal requires zero retained member/locator rows; non-removal requires rows.
+	// The record is not installed, but residual chunk entries still reach accounting below.
 	if image.remove != (len(rows) == 0) {
 		return errDARelayMemberIncomplete
 	}
