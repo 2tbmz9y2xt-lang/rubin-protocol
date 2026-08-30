@@ -3,7 +3,10 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"maps"
 	"sort"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 // CompleteSetCandidates returns caller-owned COMPLETE_SET snapshots up to maxPayloadBytes.
@@ -546,4 +549,144 @@ func cloneBytes(in []byte) []byte {
 		return nil
 	}
 	return append([]byte(nil), in...)
+}
+
+// daRelayRecordImage is ONE record transition staged as a PURE function of caller-owned
+// pre-state and member: descriptor and next are isolated, and two images share no mutable state.
+type daRelayRecordImage struct {
+	daID     [32]byte
+	present  bool
+	baseline uint64
+	member   daRelayOwnerReadyMember
+	next     daRelaySetRecord
+	remove   bool
+}
+
+func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
+	image := daRelayRecordImage{daID: member.locator.daID, present: present, member: member}
+	image.member.txBytes, image.member.payload = cloneBytes(member.txBytes), cloneBytes(member.payload)
+	image.member.member = *member.member.clone()
+	if present {
+		image.baseline = pre.revision
+		image.next = pre.cloneOwnerReady()
+	} else {
+		image.next.daID = member.locator.daID
+	}
+	switch member.locator.kind {
+	case daRelayLocatorCommit:
+		image.next.commit.daID = image.next.daID
+		image.next.commit.member = member.member.clone()
+		image.next.commit.txBytes = cloneBytes(member.txBytes)
+	case daRelayLocatorChunk:
+		if image.next.chunks == nil {
+			image.next.chunks = map[uint16]daRelayChunk{}
+		}
+		chunk := image.next.chunks[member.locator.chunkIndex]
+		chunk.daID = image.next.daID
+		chunk.chunkIndex = member.locator.chunkIndex
+		chunk.member = member.member.clone()
+		chunk.txBytes = cloneBytes(member.txBytes)
+		chunk.payload = cloneBytes(member.payload)
+		image.next.chunks[member.locator.chunkIndex] = chunk
+	}
+	return image
+}
+
+func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordImage {
+	return daRelayRecordImage{daID: pre.daID, present: present, baseline: pre.revision, remove: true}
+}
+
+// cloneOwnerReady leaves a member's token naming the one shared PendingOutpointOwner:
+// a handle, not record state. cloneWithPayloads shares or drops the caller's bytes.
+func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
+	out := r
+	out.commit.txBytes = cloneBytes(r.commit.txBytes)
+	out.commit.member = r.commit.member.clone()
+	if r.chunks != nil {
+		out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))
+		for index, chunk := range r.chunks {
+			chunk.txBytes = cloneBytes(chunk.txBytes)
+			chunk.payload = cloneBytes(chunk.payload)
+			chunk.member = chunk.member.clone()
+			out.chunks[index] = chunk
+		}
+	}
+	out.replaceableChunks = maps.Clone(r.replaceableChunks)
+	return out
+}
+
+func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
+	if m == nil {
+		return nil
+	}
+	out := *m
+	if len(m.inputs) != 0 {
+		out.inputs = append([]consensus.Outpoint(nil), m.inputs...)
+	}
+	return &out
+}
+
+// locatorRows emits a FIXED order — commit first, then chunks ascending — one row
+// per slot HOLDING a member, so len(rows) is also the member count.
+func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
+	rows := make([]daRelayLocatorRow, 0, 1+len(r.chunks))
+	if r.commit.member != nil {
+		rows = append(rows, daRelayLocatorRow{
+			txid:    r.commit.member.txid,
+			locator: daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit},
+		})
+	}
+	for _, index := range sortedRetainedDAChunkIndexes(r) {
+		chunk := r.chunks[index]
+		if chunk.member == nil {
+			continue
+		}
+		rows = append(rows, daRelayLocatorRow{
+			txid:    chunk.member.txid,
+			locator: daRelayLocator{daID: r.daID, kind: daRelayLocatorChunk, chunkIndex: index},
+		})
+	}
+	return rows
+}
+
+// ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
+// incomplete_member_charge. The legacy wireBytes fallback of retainedTxAccountingBytes
+// has no place: a member always carries its bytes. The per-peer key comes from the
+// member's own provenance, never the cached peerQuotaKey this kernel leaves unset while
+// the legacy readers key on it, charging to "" what this charges to the peer; RUB-1276.
+func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
+	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
+	if r.commit.member != nil {
+		accounting.commitBytes = uint64(len(r.commit.txBytes))
+		if err := accounting.addOwnerReadyMember(r.commit.member, accounting.commitBytes); err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+	}
+	for _, chunk := range r.chunks {
+		charge, err := checkedAddUint64(uint64(len(chunk.txBytes)), uint64(len(chunk.payload)))
+		if err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+		if err := accounting.addOwnerReadyMember(chunk.member, charge); err != nil {
+			return daRelayRecordAccounting{}, err
+		}
+	}
+	return accounting, nil
+}
+
+// A memberless slot is refused rather than charged under the empty key: a
+// retained member carrying no source must never be silently uncharged.
+func (a *daRelayRecordAccounting) addOwnerReadyMember(member *daRelayMemberIdentity, charge uint64) error {
+	if member == nil {
+		return errDARelayMemberIncomplete
+	}
+	orphanBytes, err := checkedAddUint64(a.orphanBytes, charge)
+	if err != nil {
+		return err
+	}
+	a.orphanBytes = orphanBytes
+	if member.provenance.kind != daProvenancePeer {
+		return nil
+	}
+	return addPeerAccounting(a.peerBytes, member.provenance.quotaKey(), charge)
 }

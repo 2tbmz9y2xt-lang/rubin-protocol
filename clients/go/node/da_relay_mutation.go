@@ -3,6 +3,8 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"maps"
+	"slices"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -546,4 +548,330 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 		return
 	}
 	s.orphanBytesByDAID[daID] = bytes
+}
+
+// daRelayRecordPlacement holds ABSOLUTE counter values, not deltas.
+type daRelayRecordPlacement struct {
+	daID        [32]byte
+	record      daRelaySetRecord
+	remove      bool
+	retire      []daRelayLocatorRow
+	install     []daRelayLocatorRow
+	orphanBytes uint64
+	peerBytes   map[string]uint64
+	daBytes     uint64
+	commitBytes uint64
+}
+
+// projectDARecordImageLocked is the FALLIBLE half: it owns EVERY check and mutates
+// nothing on any path, so a refused image leaves live state byte-identical. A
+// doubly-violating image selects by STAGE: incompatible live record, stale image,
+// unusable candidate, locator row, global/per-DA/commit/peer accounting, then
+// exhausted revision space (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3). Within the peer arm,
+// map order can select the first sentinel when keys violate different checks (overflow or peer cap).
+func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
+	live, err := s.checkDARecordImageBaselineLocked(image)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	retire, install, err := s.checkDARecordImageLocatorsLocked(image, live)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement, err := s.projectDARecordImageCountersLocked(image, live)
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement.retire, placement.install = retire, install
+	if !image.remove {
+		revision, revisionErr := checkedAddUint64(s.records, 1)
+		if revisionErr != nil {
+			return daRelayRecordPlacement{}, revisionErr
+		}
+		placement.record = image.next.cloneOwnerReady()
+		placement.record.revision = revision
+	}
+	return placement, nil
+}
+
+// checkDARecordImageBaselineLocked takes residency from the s.sets lookup alone, never
+// from the record. Absent means revision 0 and baseline 0, so one comparison does both.
+func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
+	live, resident := s.sets[image.daID]
+	if resident && (live.revision == 0 || len(live.locatorRows()) == 0 || live.checkOwnerReadyRecord() != nil) {
+		return daRelaySetRecord{}, errDARelayImageIncompatible
+	}
+	if resident != image.present || live.revision != image.baseline {
+		return daRelaySetRecord{}, errDARelayRecordStale
+	}
+	return live, checkStagedOwnerReadyRecord(image, live)
+}
+
+// checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY: it names
+// its own da_id, holds the candidate at the named slot field for field and every
+// other live slot byte-identically. Reading only the parallel descriptor would leave
+// the record installDASetRecordLocked actually publishes unchecked.
+func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
+	rows := image.next.locatorRows()
+	// Removal requires zero retained member/locator rows; non-removal requires rows.
+	// The record is not installed, but residual chunk entries still reach accounting below.
+	if image.remove != (len(rows) == 0) {
+		return errDARelayMemberIncomplete
+	}
+	if image.remove {
+		return nil
+	}
+	if image.next.daID != image.daID {
+		return errDARelayImageIncompatible
+	}
+	if err := image.member.validate(); err != nil {
+		return err
+	}
+	if err := checkOwnerReadySlotFree(live, image.member.locator); err != nil {
+		return err
+	}
+	if err := image.next.checkOwnerReadyRecord(); err != nil {
+		return err
+	}
+	if err := checkStagedCandidateSlot(image.next, rows, image.member); err != nil {
+		return err
+	}
+	return checkPreservedOwnerReadySlots(live, image.next, image.member.locator)
+}
+
+// checkStagedCandidateSlot binds the ONE slot image.member.locator names to the
+// descriptor across every field the descriptor carries. The locator ROW settles
+// da_id, kind, index and txid together, because locatorRows derives each of them
+// from the staged record itself; the remaining fields are compared one by one.
+func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, candidate daRelayOwnerReadyMember) error {
+	staged, txBytes, payload := next.commit.member, next.commit.txBytes, []byte(nil)
+	if candidate.locator.kind == daRelayLocatorChunk {
+		chunk := next.chunks[candidate.locator.chunkIndex]
+		staged, txBytes, payload = chunk.member, chunk.txBytes, chunk.payload
+	}
+	if staged == nil {
+		return errDARelayMemberIncomplete
+	}
+	if !slices.Contains(rows, daRelayLocatorRow{txid: candidate.member.txid, locator: candidate.locator}) ||
+		!sameOwnerReadyMember(staged, &candidate.member) ||
+		!bytes.Equal(txBytes, candidate.txBytes) ||
+		!bytes.Equal(payload, candidate.payload) {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+// checkPreservedOwnerReadySlots and its three helpers prove every live slot AND the
+// record's own five fields survive BYTE-IDENTICALLY. A locator row carries only txid and
+// position, so a swapped fee, token, provenance, payload commitment or cached legacy key
+// passes it unseen. da_id and wireBytes are pinned above and revision is REMINTED whatever
+// the image carries, so the five complete the record. checkOwnerReadyRecord admits BOTH
+// OrphanChunks and StagedCommit, so only the state equality stops a resident image
+// switching between them; the other four move no counter at INSTALL, but the installed
+// record LIVES in s.sets, where missingChunkIndexes and validateChunkInsert read
+// replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all five.
+func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
+	if !samePreservedRecordFields(live, next) {
+		return errDARelayImageIncompatible
+	}
+	if err := checkPreservedCommitSlot(live, next, target); err != nil {
+		return err
+	}
+	return checkPreservedChunkSlots(live, next, target)
+}
+
+func samePreservedRecordFields(live, next daRelaySetRecord) bool {
+	return live.state == next.state && live.payloadBytes == next.payloadBytes &&
+		live.receivedTime == next.receivedTime &&
+		live.ttlBlocksRemaining == next.ttlBlocksRemaining &&
+		(live.replaceableChunks == nil) == (next.replaceableChunks == nil) &&
+		maps.Equal(live.replaceableChunks, next.replaceableChunks)
+}
+
+// A chunk target must leave the whole commit alone, and the chunk it freshly stages may
+// carry none of the three legacy fields this kernel never assigns. A commit candidate owns
+// da_id, member and txBytes and wireBytes is pinned, so the residual three complete the seven.
+func checkPreservedCommitSlot(live, next daRelaySetRecord, target daRelayLocator) error {
+	if target.kind != daRelayLocatorChunk {
+		type residual struct {
+			commitment [32]byte
+			quotaKey   string
+			chunkCount uint16
+		}
+		a := residual{live.commit.payloadCommitment, live.commit.peerQuotaKey, live.commit.chunkCount}
+		if a != (residual{next.commit.payloadCommitment, next.commit.peerQuotaKey, next.commit.chunkCount}) {
+			return errDARelayImageIncompatible
+		}
+		return nil
+	}
+	if fresh := next.chunks[target.chunkIndex]; fresh.chunkHash != ([32]byte{}) || fresh.peerQuotaKey != "" || fresh.hashChecked {
+		return errDARelayImageIncompatible
+	}
+	if !sameOwnerReadyCommit(live.commit, next.commit) {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+// checkOwnerReadySlotFree already proved the target slot free in live, so exactly one
+// chunk may appear under a chunk target and none under a commit target; in neither may a
+// live one be dropped. The walk is map-ordered but yields ONE error identity, so order-immune.
+func checkPreservedChunkSlots(live, next daRelaySetRecord, target daRelayLocator) error {
+	staged := len(live.chunks)
+	if target.kind == daRelayLocatorChunk {
+		staged++
+	}
+	if len(next.chunks) != staged {
+		return errDARelayImageIncompatible
+	}
+	for index, chunk := range next.chunks {
+		if target.kind == daRelayLocatorChunk && index == target.chunkIndex {
+			continue
+		}
+		if !sameOwnerReadyChunk(live.chunks[index], chunk) {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+// The three comparisons below name EVERY field of their type: none is comparable with
+// ==, and a field left out is one an edited image may change unseen.
+func sameOwnerReadyCommit(a, b daRelayCommit) bool {
+	return a.daID == b.daID && a.payloadCommitment == b.payloadCommitment &&
+		a.peerQuotaKey == b.peerQuotaKey && a.chunkCount == b.chunkCount &&
+		a.wireBytes == b.wireBytes && bytes.Equal(a.txBytes, b.txBytes) &&
+		sameOwnerReadyMember(a.member, b.member)
+}
+
+func sameOwnerReadyChunk(a, b daRelayChunk) bool {
+	return [2][32]byte{a.daID, a.chunkHash} == [2][32]byte{b.daID, b.chunkHash} &&
+		a.peerQuotaKey == b.peerQuotaKey && a.chunkIndex == b.chunkIndex &&
+		a.wireBytes == b.wireBytes && a.hashChecked == b.hashChecked &&
+		bytes.Equal(a.payload, b.payload) && bytes.Equal(a.txBytes, b.txBytes) &&
+		sameOwnerReadyMember(a.member, b.member)
+}
+
+func sameOwnerReadyMember(a, b *daRelayMemberIdentity) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.txid == b.txid && a.wtxid == b.wtxid && a.fee == b.fee &&
+		a.token == b.token && a.provenance == b.provenance &&
+		slices.Equal(a.inputs, b.inputs)
+}
+
+// checkDARecordImageLocatorsLocked proves the txid index and the retained image are one
+// bijection (Section 18.3). A nil index is refused: the installer does not construct missing state.
+func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage, live daRelaySetRecord) ([]daRelayLocatorRow, []daRelayLocatorRow, error) {
+	if s.locators == nil {
+		return nil, nil, errDARelayImageIncompatible
+	}
+	retire := live.locatorRows()
+	install := image.next.locatorRows()
+	if err := s.checkRetiredLocatorRowsLocked(image.daID, retire); err != nil {
+		return nil, nil, err
+	}
+	return retire, install, s.checkDAInstallLocatorRowsLocked(image.daID, install)
+}
+
+// checkOwnerReadySlotFree is FIRST-SEEN over the ONE slot image.member.locator names:
+// staging overwrites it, so without this a second member would evict the retained one and
+// move its charge to the new provenance. Both arms are stricter than the legacy guard; the
+// chunk-count range arm is RUB-1273's, not here.
+func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) error {
+	if locator.kind == daRelayLocatorCommit {
+		if live.commit.member != nil {
+			return errDARelayDuplicateCommit
+		}
+		return nil
+	}
+	if _, occupied := live.chunks[locator.chunkIndex]; occupied {
+		return errDARelayDuplicateChunk
+	}
+	return nil
+}
+
+func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daRelayLocatorRow) error {
+	retired := make(map[[32]byte]bool, len(retire))
+	for _, row := range retire {
+		if s.locators[row.txid] != row.locator {
+			return errDARelayLocatorMismatch
+		}
+		retired[row.txid] = true
+	}
+	for txid, locator := range s.locators {
+		if locator.daID == daID && !retired[txid] {
+			return errDARelayLocatorMismatch
+		}
+	}
+	return nil
+}
+
+func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []daRelayLocatorRow) error {
+	claimed := make(map[[32]byte]bool, len(install))
+	// Every row names daID: checkStagedOwnerReadyRecord pinned next.daID, and a removal installs none.
+	for _, row := range install {
+		if claimed[row.txid] {
+			return errDARelayLocatorMismatch
+		}
+		if other, indexed := s.locators[row.txid]; indexed && other.daID != daID {
+			return errDARelayLocatorMismatch
+		}
+		claimed[row.txid] = true
+	}
+	return nil
+}
+
+func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordImage, live daRelaySetRecord) (daRelayRecordPlacement, error) {
+	oldAccounting, err := live.ownerReadyAccounting()
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	newAccounting, err := image.next.ownerReadyAccounting()
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove}
+	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.daBytes, err = checkedApplyUint64DeltaCap(s.orphanBytesByDAID[image.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	if placement.commitBytes, err = checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, s.caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
+	return placement, err
+}
+
+// installDASetRecordLocked PERFORMS NO VALIDATION: every check ran in
+// projectDARecordImageLocked, so a caller may run it after an owner reserve.
+//
+// PRECONDITION, the caller's to keep: a placement is SINGLE-USE — ONE projection, ONE
+// installation, one continuous hold. Two placements projected before either installs
+// carry the same minted revision; nothing here detects that, by design.
+//
+// Three steps the sibling installers take are skipped. The pinned-payload counter is
+// neither projected nor restored: it prices only a COMPLETE_SET, a state the projector
+// refuses, so 0-to-0. No received-time high-water advances (RUB-1273's), and a removal
+// releases no prefetch reservation (RUB-1275's).
+func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
+	for _, row := range placement.retire {
+		delete(s.locators, row.txid)
+	}
+	if placement.remove {
+		delete(s.sets, placement.daID)
+	} else {
+		s.sets[placement.daID] = placement.record
+		s.records = placement.record.revision
+	}
+	for _, row := range placement.install {
+		s.locators[row.txid] = row.locator
+	}
+	s.orphanBytes = placement.orphanBytes
+	s.applyProjectedPeerBytes(placement.peerBytes)
+	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
+	s.orphanCommitOverheadBytes = placement.commitBytes
 }
