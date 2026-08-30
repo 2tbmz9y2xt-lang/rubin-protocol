@@ -14,9 +14,18 @@ func Acquire(path string) (*Handle, Result, error) {
 	return acquire(path, syscall.O_CREAT)
 }
 
-// AcquireExisting opens and locks an existing path without creating it.
-func AcquireExisting(path string) (*Handle, Result, error) {
-	return acquire(path, 0)
+// AcquireDirectory opens an existing directory without following its final
+// component and holds an exclusive advisory lock on its exact inode.
+func AcquireDirectory(path string) (*Handle, Result, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, ResultInvalidOrUnopenable, err
+	}
+	if err := validateDirectory(fd); err != nil {
+		_ = syscall.Close(fd)
+		return nil, ResultInvalidOrUnopenable, err
+	}
+	return lock(fd)
 }
 
 func acquire(path string, flags int) (*Handle, Result, error) {
@@ -28,6 +37,10 @@ func acquire(path string, flags int) (*Handle, Result, error) {
 		_ = syscall.Close(fd)
 		return nil, ResultInvalidOrUnopenable, err
 	}
+	return lock(fd)
+}
+
+func lock(fd int) (*Handle, Result, error) {
 	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = syscall.Close(fd)
 		if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
@@ -51,6 +64,20 @@ func validate(fd int) error {
 	}
 	if stat.Nlink != 1 {
 		return fmt.Errorf("datadir lock must have one link, got %d", stat.Nlink)
+	}
+	return nil
+}
+
+func validateDirectory(fd int) error {
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&syscall.S_IFMT != syscall.S_IFDIR {
+		return errors.New("datadir lock must be a directory")
+	}
+	if stat.Mode&0o7777 != 0o700 {
+		return fmt.Errorf("datadir lock directory mode must be 0700, got %#o", stat.Mode&0o7777)
 	}
 	return nil
 }

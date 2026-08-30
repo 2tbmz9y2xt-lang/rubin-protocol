@@ -10,8 +10,8 @@ func Acquire(_ string) (*Handle, Result, error) {
 	return nil, ResultUnsupportedHost, errors.New("datadir writer lock is unsupported on this host")
 }
 
-// AcquireExisting is unavailable on hosts without the required syscalls.
-func AcquireExisting(_ string) (*Handle, Result, error) {
+// AcquireDirectory is unavailable on hosts without the required syscalls.
+func AcquireDirectory(_ string) (*Handle, Result, error) {
 	return nil, ResultUnsupportedHost, errors.New("datadir writer lock is unsupported on this host")
 }
 

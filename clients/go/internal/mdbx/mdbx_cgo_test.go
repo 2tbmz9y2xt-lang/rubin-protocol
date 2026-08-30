@@ -790,12 +790,11 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	}
 	var nilStore *Store
 	requireEnvironmentError(t, nilStore.Close(), EngineInvalidInput, operationClose, int(syscall.EINVAL), "nil Store")
-	handle, result, lockErr := filelock.Acquire(filepath.Join(path, "rubin-writer.lock"))
+	handle, result, lockErr := filelock.AcquireDirectory(path)
 	if lockErr != nil || result != "" || handle == nil {
 		t.Fatalf("writer lock not released: %q %v", result, lockErr)
 	}
 	mustEnvironment(t, handle.Release())
-	mustEnvironment(t, os.Remove(filepath.Join(path, "rubin-writer.lock")))
 	mustEnvironment(t, os.WriteFile(filepath.Join(path, "ignored.extra"), []byte{1}, 0o600))
 	reopened, err := Open(path, cfg)
 	requireNoStore(t, reopened, err, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "rubin-writer.lock is absent")
@@ -827,6 +826,41 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	mustEnvironment(t, err)
 	requireEnvironmentStore(t, smallPage, smallPageCfg)
 	mustEnvironment(t, smallPage.Close())
+}
+
+func TestEnvironmentDirectoryLockSurvivesMarkerReplacement(t *testing.T) {
+	const childPath = "RUBIN_MDBX_DIRECTORY_LOCK_CHILD_PATH"
+	if path := os.Getenv(childPath); path != "" {
+		store, err := Open(path, environmentConfig())
+		requireNoStore(t, store, err, EngineConcurrency, operationOpen, -30778, "Rubin writer lock is already held")
+		return
+	}
+
+	path := filepath.Join(t.TempDir(), "db")
+	cfg := environmentConfig()
+	parent, err := Create(path, cfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, parent, cfg)
+	markerPath := filepath.Join(path, "rubin-writer.lock")
+	mustEnvironment(t, os.Remove(markerPath))
+	marker, err := os.OpenFile(markerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	mustEnvironment(t, err)
+	mustEnvironment(t, marker.Close())
+	requireArtifact(t, markerPath, 0o600, true)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnvironmentDirectoryLockSurvivesMarkerReplacement$", "-test.count=1")
+	cmd.Env = append(os.Environ(), childPath+"="+path)
+	if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		t.Fatalf("child Open did not observe directory-lock contention: %v\n%s", runErr, output)
+	}
+	requireEnvironmentStore(t, parent, cfg)
+	mustEnvironment(t, parent.Close())
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, reopened, cfg)
+	mustEnvironment(t, reopened.Close())
 }
 
 func requireArtifact(t *testing.T, path string, mode os.FileMode, empty bool) {
@@ -928,7 +962,7 @@ func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
 	if !os.SameFile(lockBefore, lockAfter) {
 		t.Fatal("undersized Open replaced writer lock")
 	}
-	handle, result, lockErr := filelock.AcquireExisting(lockPath)
+	handle, result, lockErr := filelock.AcquireDirectory(undersized)
 	if handle == nil || result != "" || lockErr != nil {
 		t.Fatalf("undersized Open retained writer lock: %v/%q/%v", handle, result, lockErr)
 	}
@@ -968,18 +1002,38 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	requireEnvironmentError(t, normalizeOwnedFile(unsafe, "mdbx.dat", false, operationCreate, "normalize", "read"), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
 	requireEnvironmentError(t, readOwnedFile(unsafe, "mdbx.dat", false, operationOpen, "read"), EngineIntegrity, operationOpen, codeInvalid, "mdbx.dat is unsafe")
 	absentLockDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(absentLockDir, 0o700))
 	absentHandle, absentLockErr := acquireWriter(absentLockDir, operationOpen, false)
 	if absentHandle != nil {
 		t.Fatal("absent writer returned Handle")
 	}
-	requireEnvironmentError(t, absentLockErr, EngineIO, operationOpen, int(syscall.ENOENT), "acquire Rubin writer lock")
+	requireEnvironmentError(t, absentLockErr, EngineIO, operationOpen, int(syscall.ENOENT), "read back Rubin writer lock")
 	if !errors.Is(absentLockErr, syscall.ENOENT) {
 		t.Fatalf("absent writer lost ENOENT: %v", absentLockErr)
 	}
 	if _, statErr := os.Lstat(filepath.Join(absentLockDir, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("absent writer created sidecar: %v", statErr)
 	}
+	existingMarkerDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(existingMarkerDir, 0o700))
+	existingMarkerPath := filepath.Join(existingMarkerDir, "rubin-writer.lock")
+	mustEnvironment(t, os.WriteFile(existingMarkerPath, []byte("preserve"), 0o600))
+	mustEnvironment(t, os.Chmod(existingMarkerPath, 0o600))
+	existingHandle, existingErr := acquireWriter(existingMarkerDir, operationCreate, true)
+	if existingHandle != nil {
+		t.Fatal("existing marker returned Handle")
+	}
+	requireEnvironmentError(t, existingErr, EngineIO, operationCreate, int(syscall.EEXIST), "acquire Rubin writer lock")
+	if preserved, readErr := os.ReadFile(existingMarkerPath); readErr != nil || string(preserved) != "preserve" {
+		t.Fatalf("Create overwrote existing marker: %q/%v", preserved, readErr)
+	}
+	existingHandle, _, existingErr = filelock.AcquireDirectory(existingMarkerDir)
+	if existingHandle == nil || existingErr != nil {
+		t.Fatalf("existing-marker failure retained directory lock: %v/%v", existingHandle, existingErr)
+	}
+	mustEnvironment(t, existingHandle.Release())
 	lockDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(lockDir, 0o700))
 	mustEnvironment(t, os.WriteFile(filepath.Join(lockDir, "rubin-writer.lock"), nil, 0o644))
 	mustEnvironment(t, os.Chmod(filepath.Join(lockDir, "rubin-writer.lock"), 0o644))
 	handle, lockErr := acquireWriter(lockDir, operationOpen, false)
@@ -988,7 +1042,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	}
 	requireEnvironmentError(t, lockErr, EngineIntegrity, operationOpen, codeInvalid, "rubin-writer.lock is unsafe")
 	mustEnvironment(t, os.Chmod(filepath.Join(lockDir, "rubin-writer.lock"), 0o600))
-	handle, _, lockErr = filelock.Acquire(filepath.Join(lockDir, "rubin-writer.lock"))
+	handle, _, lockErr = filelock.AcquireDirectory(lockDir)
 	if handle == nil || lockErr != nil {
 		t.Fatalf("unsafe writer cleanup retained lock: %v/%v", handle, lockErr)
 	}
@@ -1112,9 +1166,16 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	}
 	missingSidecar := closedEnvironment(t)
 	mustEnvironment(t, os.Remove(filepath.Join(missingSidecar, "rubin-writer.lock")))
-	directOpen := &Store{}
-	requireEnvironmentError(t, directOpen.openEnvironment(missingSidecar, environmentConfig()), EngineIO, operationOpen, int(syscall.ENOENT), "read back Rubin writer lock")
-	consumeNativeTestStore(t, directOpen)
+	missingHandle, missingErr := acquireWriter(missingSidecar, operationOpen, false)
+	if missingHandle != nil {
+		t.Fatal("disappeared marker returned Handle")
+	}
+	requireEnvironmentError(t, missingErr, EngineIO, operationOpen, int(syscall.ENOENT), "read back Rubin writer lock")
+	missingHandle, _, missingErr = filelock.AcquireDirectory(missingSidecar)
+	if missingHandle == nil || missingErr != nil {
+		t.Fatalf("disappeared-marker failure retained directory lock: %v/%v", missingHandle, missingErr)
+	}
+	mustEnvironment(t, missingHandle.Release())
 	staticCorrupt := t.TempDir()
 	mustEnvironment(t, os.Chmod(staticCorrupt, 0o700))
 	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "mdbx.dat"), []byte(strings.Repeat("x", 262144)), 0o600))
@@ -1124,7 +1185,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	corrupt := closedEnvironment(t)
 	mustEnvironment(t, os.WriteFile(filepath.Join(corrupt, "mdbx.dat"), []byte("not mdbx"), 0o600))
 	requireOpenEnvironmentError(t, corrupt, EngineIntegrity, codeInvalid, "mdbx.dat is undersized")
-	handle, result, lockErr := filelock.Acquire(filepath.Join(corrupt, "rubin-writer.lock"))
+	handle, result, lockErr := filelock.AcquireDirectory(corrupt)
 	if handle == nil || result != "" || lockErr != nil {
 		t.Fatalf("corrupt Open retained writer: %v/%q/%v", handle, result, lockErr)
 	}
@@ -1404,7 +1465,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
 		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
 		"validateCreateStatic":            {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
-		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, artifact.name)"},
+		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
 		"inspectSchema":                   {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
 		"openNativeEnvironment":           {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
 		"openSchemaDBIs":                  {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
@@ -1483,7 +1544,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			if name == "C.mdbx_env_set_maxdbs" {
 				ordinaryMaxDBCalls = append(ordinaryMaxDBCalls, fn.Name.Name+":"+compact(call))
 			}
-			if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" || name == "filelock.AcquireExisting" {
+			if name == "os.Mkdir" || name == "os.Chmod" || name == "os.OpenFile" || name == "filelock.AcquireDirectory" {
 				effectCalls = append(effectCalls, fn.Name.Name+":"+compact(call))
 			}
 			return true
@@ -1494,7 +1555,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 7)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
-	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.Acquire(lockPath)|acquireWriter:filelock.AcquireExisting(lockPath)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
+	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.AcquireDirectory(path)|createWriterMarker:os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
 	var packageNativeLimits, packageMaxDBs, packageEffects []string
 	packageRefs, fileRefs := map[string][]string{}, map[string]int{}
 	for _, filename := range names {
@@ -1525,7 +1586,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				if name == "C.mdbx_env_set_maxdbs" {
 					packageMaxDBs = append(packageMaxDBs, owner)
 				}
-				if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" || name == "filelock.AcquireExisting" {
+				if name == "os.Mkdir" || name == "os.Chmod" || name == "os.OpenFile" || name == "filelock.AcquireDirectory" {
 					packageEffects = append(packageEffects, owner)
 				}
 				return true
@@ -1537,7 +1598,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
 		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
 		fileRefs["validatePreopenSnapshot"] != 2 || fileRefs["validateOpenNativePreconditions"] != 2 ||
-		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.Acquire|mdbx_cgo.go:acquireWriter:filelock.AcquireExisting|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
+		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.AcquireDirectory|mdbx_cgo.go:createWriterMarker:os.OpenFile|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
 		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v / %v / %v", packageNativeLimits, packageMaxDBs, packageRefs, fileRefs, packageEffects)
 	}
 	var effectiveFields, effectiveSetup []string
@@ -1609,7 +1670,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		`adapterError(operationOpen, EngineInvalidInput, codeENOFile, name+" is absent", nil)`: 1, `ioError(operationOpen, "inspect "+name, err)`: 1, `integrityError(operationOpen, name+" is unsafe", nil)`: 1,
 		`integrityError(operationOpen, "mdbx.dat is undersized", nil)`:                                           1,
 		`adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization failed", nil)`: 1, `adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization did not stabilize", nil)`: 1,
-		`writerLockError(operation, result, err)`: 1, `ioError(operation, readDiagnostic, err)`: 1, `integrityError(operation, name+" is unsafe", nil)`: 2,
+		`writerLockError(operation, result, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, closeErr)`: 1, `ioError(operation, readDiagnostic, err)`: 1, `integrityError(operation, name+" is unsafe", nil)`: 2,
 		`ioError(operation, normalizeDiagnostic, err)`: 1, `ioError(operation, diagnostic, err)`: 1, `integrityError(operationCreate, "effective environment mismatch", err)`: 1,
 		`adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, nil)`: 2, `adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, native)`: 1,
 		`integrityError(operationOpen, "effective environment mismatch", err)`: 2, `integrityError(operation, "SchemaV1 DBI flags mismatch", nil)`: 1, `integrityError(operation, "SchemaV1 main cardinality mismatch", nil)`: 1,
@@ -1715,7 +1776,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
-	if !strings.HasPrefix(production, "//go:build cgo && (darwin || linux) && (amd64 || arm64)\n") || strings.Contains(production, "os.OpenFile(") || strings.Contains(production, "os.WriteFile(") || strings.Contains(production, "os.Create(") {
+	if !strings.HasPrefix(production, "//go:build cgo && (darwin || linux) && (amd64 || arm64)\n") || strings.Count(production, "os.OpenFile(") != 1 || strings.Contains(production, "os.WriteFile(") || strings.Contains(production, "os.Create(") {
 		t.Fatal("production build expression or native-file ownership drifted")
 	}
 }

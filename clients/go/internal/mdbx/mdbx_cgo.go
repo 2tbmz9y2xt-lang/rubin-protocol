@@ -796,19 +796,15 @@ func debugNormalizationError(first, second int) error {
 
 func acquireWriter(path string, operation engineOperation, create bool) (*filelock.Handle, error) {
 	lockPath := filepath.Join(path, "rubin-writer.lock")
-	var handle *filelock.Handle
-	var result filelock.Result
-	var err error
-	if create {
-		handle, result, err = filelock.Acquire(lockPath)
-	} else {
-		handle, result, err = filelock.AcquireExisting(lockPath)
-	}
+	handle, result, err := filelock.AcquireDirectory(path)
 	if err != nil {
 		return nil, writerLockError(operation, result, err)
 	}
 	if create {
-		err = normalizeOwnedFile(lockPath, "rubin-writer.lock", true, operation, "normalize Rubin writer lock mode", "read back Rubin writer lock")
+		err = createWriterMarker(lockPath, operation)
+		if err == nil {
+			err = normalizeOwnedFile(lockPath, "rubin-writer.lock", true, operation, "normalize Rubin writer lock mode", "read back Rubin writer lock")
+		}
 	} else {
 		err = readOwnedFile(lockPath, "rubin-writer.lock", true, operation, "read back Rubin writer lock")
 	}
@@ -816,6 +812,18 @@ func acquireWriter(path string, operation engineOperation, create bool) (*filelo
 		return nil, joinErrors(err, releaseError(handle))
 	}
 	return handle, nil
+}
+
+func createWriterMarker(lockPath string, operation engineOperation) error {
+	marker, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return writerLockError(operation, filelock.ResultInvalidOrUnopenable, err)
+	}
+	closeErr := marker.Close()
+	if closeErr != nil {
+		return writerLockError(operation, filelock.ResultInvalidOrUnopenable, closeErr)
+	}
+	return nil
 }
 
 func normalizeOwnedFile(path, name string, empty bool, operation engineOperation, normalizeDiagnostic, readDiagnostic string) error {
@@ -919,15 +927,8 @@ func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
 	if err != nil {
 		return err
 	}
-	for _, artifact := range []struct {
-		name, diagnostic string
-		empty            bool
-	}{
-		{"mdbx.dat", "read back mdbx.dat", false},
-		{"mdbx.lck", "read back mdbx.lck", false},
-		{"rubin-writer.lock", "read back Rubin writer lock", true},
-	} {
-		err = readOwnedFile(filepath.Join(path, artifact.name), artifact.name, artifact.empty, operationOpen, artifact.diagnostic)
+	for _, name := range []string{"mdbx.dat", "mdbx.lck"} {
+		err = readOwnedFile(filepath.Join(path, name), name, false, operationOpen, "read back "+name)
 		if err != nil {
 			return err
 		}

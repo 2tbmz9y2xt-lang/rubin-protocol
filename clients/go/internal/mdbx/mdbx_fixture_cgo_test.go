@@ -41,7 +41,7 @@ func TestFixtureModesAndFixedOperations(t *testing.T) {
 			for _, name := range []string{"rubin-writer.lock", "mdbx.dat", "mdbx.lck"} {
 				requireArtifact(t, filepath.Join(path, name), 0o600, name == "rubin-writer.lock")
 			}
-			handle, result, lockErr := filelock.Acquire(filepath.Join(path, "rubin-writer.lock"))
+			handle, result, lockErr := filelock.AcquireDirectory(path)
 			if lockErr != nil || result != "" || handle == nil {
 				t.Fatalf("writer retained: %q %v", result, lockErr)
 			}

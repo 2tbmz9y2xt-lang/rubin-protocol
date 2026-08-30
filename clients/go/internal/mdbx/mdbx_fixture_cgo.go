@@ -264,7 +264,7 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				validConstruction = fixtureShapeRejected(store, shape.mutate, shape.restore) && validConstruction
 			}
 			store.config, store.dbis, store.terminal = cfg, dbis, terminal
-			handle, result, lockErr := filelock.Acquire(filepath.Join(path, "rubin-writer.lock"))
+			handle, result, lockErr := filelock.AcquireDirectory(path)
 			_ = releaseError(handle)
 			if store.state != storeCLOSEBLOCKED || store.env == nil || store.writer == nil || store.terminal != first || again != first || !validOpen || !validPoison || !validShapes || !validConstruction || result != filelock.ResultContended || lockErr == nil || handle != nil {
 				first = adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", first)
