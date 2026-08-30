@@ -3,19 +3,46 @@
 package mdbx
 
 import (
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/build"
+	"go/parser"
+	"go/token"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
+
+func sameError(got, want error) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	gotValue, wantValue := reflect.ValueOf(got), reflect.ValueOf(want)
+	return gotValue.Type() == wantValue.Type() && gotValue.Kind() == reflect.Pointer && gotValue.Pointer() == wantValue.Pointer()
+}
 
 type nilPointerError struct{}
 
 func (*nilPointerError) Error() string { return "nil pointer" }
 func (*nilPointerError) Unwrap() error { return syscall.ENOSPC }
+
+type panicErrorWrapper struct{ cause error }
+
+func (w panicErrorWrapper) Error() string { return w.cause.Error() }
+func (panicErrorWrapper) Unwrap() error   { panic("Unwrap called") }
+func (panicErrorWrapper) As(any) bool     { panic("As called") }
 
 var pinnedNegativeDiagnostics = map[int]string{
 	-1:     "error -1",
@@ -470,4 +497,1297 @@ func TestPureOwnershipTransitionsAndErrorOrder(t *testing.T) {
 	requireFallback(t, operationAbort, orderResultCausesPrimary, primary, forgedReopen, "native result is not an EngineError", "primary\n"+forgedReopen.Error(), primary, forgedReopen)
 	requireFallback(t, operationAbort, errorOrder(255), primary, result, "invalid native result ordering", "primary\nresult", primary, result)
 	requireFallback(t, operationClose, errorOrder(255), primary, result, "invalid native result ordering", "primary\nresult", primary, result)
+}
+
+func environmentConfig() ConfigV1 {
+	return ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 256 << 20, Growth: 1 << 20, Shrink: 2 << 20, PageSize: 4096, MaxReaders: 492}
+}
+
+func createAndClose(path string, cfg ConfigV1) error {
+	store, err := Create(path, cfg)
+	if err != nil {
+		return err
+	}
+	return store.Close()
+}
+
+func requireEnvironmentError(t *testing.T, err error, class EngineClass, operation engineOperation, code int, diagnostic string) *EngineError {
+	engine := requireEngineError(t, err, class, operation, code)
+	if engine.Diagnostic != diagnostic {
+		t.Fatalf("diagnostic=%q, want %q", engine.Diagnostic, diagnostic)
+	}
+	return engine
+}
+
+func requireNoStore(t *testing.T, store *Store, err error, class EngineClass, operation engineOperation, code int, diagnostic string) *EngineError {
+	if store != nil {
+		t.Fatal("rejected environment operation returned Store")
+	}
+	return requireEnvironmentError(t, err, class, operation, code, diagnostic)
+}
+
+func mustEnvironment(t *testing.T, err error) {
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func closedEnvironment(t *testing.T) string {
+	path := filepath.Join(t.TempDir(), "db")
+	mustEnvironment(t, createAndClose(path, environmentConfig()))
+	return path
+}
+
+func requireEnvironmentStore(t *testing.T, store *Store, cfg ConfigV1) {
+	if store == nil || store.self != store || store.state != storeOPEN || store.env == nil || store.writer == nil || store.txn != nil || store.terminal != nil || store.config != cfg || !validRetainedDBIs(store.dbis) {
+		t.Fatalf("Store is not one exact OPEN owner: %+v", store)
+	}
+}
+
+func requireShapeRejection(t *testing.T, store *Store, mutate, restore func()) {
+	t.Helper()
+	mutate()
+	self, env, writer, txn, cfg, dbis, state, terminal := store.self, store.env, store.writer, store.txn, store.config, store.dbis, store.state, store.terminal
+	requireEnvironmentError(t, store.Close(), EngineLocalInvariant, operationClose, -30779, "invalid Store resource shape")
+	if store.self != self || store.env != env || store.writer != writer || store.txn != txn || store.config != cfg || store.dbis != dbis || store.state != state || !sameError(store.terminal, terminal) {
+		t.Fatal("shape rejection mutated Store")
+	}
+	restore()
+}
+
+func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
+	if os.Getenv("RUBIN_MDBX_DEBUG_CHILD") == "1" {
+		base, cfg := os.Getenv("RUBIN_MDBX_DEBUG_PATH"), environmentConfig()
+		type created struct {
+			store *Store
+			err   error
+		}
+		start, release := make(chan struct{}), make(chan struct{})
+		ready, results := make(chan created, 4), make(chan error, 4)
+		for i := 0; i < 4; i++ {
+			go func(path string) {
+				<-start
+				store, err := Create(path, cfg)
+				ready <- created{store, err}
+				<-release
+				if err == nil {
+					err = store.Close()
+				}
+				results <- err
+			}(fmt.Sprintf("%s-%d", base, i))
+		}
+		close(start)
+		for i := 0; i < 4; i++ {
+			result := <-ready
+			mustEnvironment(t, result.err)
+			requireEnvironmentStore(t, result.store, cfg)
+		}
+		close(release)
+		for i := 0; i < 4; i++ {
+			mustEnvironment(t, <-results)
+		}
+		mustEnvironment(t, createAndClose(base+"-repeat", cfg))
+		store, err := Open(base+"-0", cfg)
+		mustEnvironment(t, err)
+		mustEnvironment(t, store.Close())
+		return
+	}
+	parent := t.TempDir()
+	for _, path := range []string{"", "relative", parent + string(os.PathSeparator) + "x" + string(os.PathSeparator) + "..", filepath.Join(parent, "nul") + "\x00"} {
+		created, createErr := Create(path, ConfigV1{})
+		opened, openErr := Open(path, ConfigV1{})
+		if created != nil || opened != nil {
+			t.Fatal("invalid path returned Store")
+		}
+		requireEnvironmentError(t, createErr, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "path must be nonempty, NUL-free, absolute and clean")
+		requireEnvironmentError(t, openErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "path must be nonempty, NUL-free, absolute and clean")
+	}
+	existing := filepath.Join(parent, "existing")
+	mustEnvironment(t, os.Mkdir(existing, 0o700))
+	store, err := Create(existing, ConfigV1{})
+	requireNoStore(t, store, err, EngineInvalidInput, operationCreate, int(syscall.EEXIST), "Create path already exists")
+	absent := filepath.Join(parent, "absent")
+	store, err = Open(absent, ConfigV1{})
+	requireNoStore(t, store, err, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "Open path is absent")
+	invalidOpen := closedEnvironment(t)
+	store, err = Open(invalidOpen, ConfigV1{})
+	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "invalid ConfigV1"); !sameError(invalid.Cause, errSchema) {
+		t.Fatalf("invalid Open ConfigV1 cause=%v", invalid.Cause)
+	}
+	supplied := environmentConfig()
+	supplied.MaxReaders++
+	store, err = Open(invalidOpen, supplied)
+	if mismatch := requireNoStore(t, store, err, EngineIntegrity, operationOpen, codeInvalid, "effective environment mismatch"); mismatch.Cause == nil || mismatch.Cause.Error() != "MaxReaders: got 492, want 493" {
+		t.Fatalf("stored/caller mismatch Cause=%v", mismatch.Cause)
+	}
+	invalidTarget := filepath.Join(parent, "invalid-config")
+	store, err = Create(invalidTarget, ConfigV1{})
+	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "invalid ConfigV1"); !sameError(invalid.Cause, errSchema) {
+		t.Fatalf("invalid ConfigV1 cause=%v", invalid.Cause)
+	}
+	if _, statErr := os.Lstat(invalidTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid ConfigV1 mutated filesystem: %v", statErr)
+	}
+	limitTarget, oversized := filepath.Join(parent, "native-limit"), environmentConfig()
+	oversized.Upper = 0x7fff_ffff_ffff_f000
+	store, err = Create(limitTarget, oversized)
+	limit := requireNoStore(t, store, err, EngineInvalidInput, operationCreate, codeTooLarge, "ConfigV1 exceeds pinned native limits")
+	if limit.Cause == nil || limit.Cause.Error() != "geometry [1048576,2097152,9223372036854771712] outside [12288,8796093022208]" {
+		t.Fatalf("pinned-limit Cause=%q", limit.Cause)
+	}
+	if _, statErr := os.Lstat(limitTarget); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("pinned-limit Create mutated filesystem: %v", statErr)
+	}
+	store, err = Open(invalidOpen, oversized)
+	openLimit := requireNoStore(t, store, err, EngineInvalidInput, operationOpen, codeTooLarge, "ConfigV1 exceeds pinned native limits")
+	if openLimit.Cause == nil || openLimit.Cause.Error() != limit.Cause.Error() {
+		t.Fatalf("Open pinned-limit Cause=%v", openLimit.Cause)
+	}
+	missingParent := filepath.Join(parent, "missing", "db")
+	store, err = Create(missingParent, environmentConfig())
+	requireNoStore(t, store, err, EngineIO, operationCreate, int(syscall.ENOENT), "create environment directory")
+	if _, statErr := os.Lstat(filepath.Dir(missingParent)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Create made parent hierarchy: %v", statErr)
+	}
+
+	debugVars := []string{"MDBX_DBG_ASSERT", "MDBX_DBG_AUDIT", "MDBX_DBG_JITTER", "MDBX_DBG_DUMP", "MDBX_DBG_LEGACY_MULTIOPEN", "MDBX_DBG_LEGACY_OVERLAP", "MDBX_DBG_DONT_UPGRADE"}
+	debugSet := make(map[string]bool, len(debugVars))
+	rows := make([][]string, 0, 15)
+	for _, name := range debugVars {
+		debugSet[name] = true
+		rows = append(rows, []string{name + "="}, []string{name + "=1"})
+	}
+	all := make([]string, len(debugVars))
+	for i, name := range debugVars {
+		all[i] = name + "=1"
+	}
+	rows = append(rows, all)
+	for i, row := range rows {
+		t.Run(fmt.Sprintf("fresh-process-%02d", i), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "db")
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnvironmentPrevalidationAndNormalization$", "-test.count=1")
+			for _, entry := range os.Environ() {
+				key := strings.SplitN(entry, "=", 2)[0]
+				if key != "RUBIN_MDBX_DEBUG_CHILD" && key != "RUBIN_MDBX_DEBUG_PATH" && !debugSet[key] {
+					cmd.Env = append(cmd.Env, entry)
+				}
+			}
+			cmd.Env = append(cmd.Env, "RUBIN_MDBX_DEBUG_CHILD=1", "RUBIN_MDBX_DEBUG_PATH="+path)
+			cmd.Env = append(cmd.Env, row...)
+			if output, runErr := cmd.CombinedOutput(); runErr != nil {
+				t.Fatalf("child failed: %v\n%s", runErr, output)
+			}
+		})
+	}
+}
+
+func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	cfg := environmentConfig()
+	store, err := func() (*Store, error) {
+		oldMask := syscall.Umask(0o100)
+		defer syscall.Umask(oldMask)
+		return Create(path, cfg)
+	}()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	requireEnvironmentStore(t, store, cfg)
+	requireArtifact(t, path, 0o700, false)
+	for _, name := range []string{"rubin-writer.lock", "mdbx.dat", "mdbx.lck"} {
+		requireArtifact(t, filepath.Join(path, name), 0o600, name == "rubin-writer.lock")
+	}
+	mustEnvironment(t, createAndClose(filepath.Join(t.TempDir(), "db"), cfg))
+	second, secondErr := Open(path, cfg)
+	requireNoStore(t, second, secondErr, EngineConcurrency, operationOpen, -30778, "Rubin writer lock is already held")
+	env, writer, dbis := store.env, store.writer, store.dbis
+	forged := &Store{self: store, env: env, writer: writer, config: cfg, dbis: dbis, state: storeOPEN}
+	requireEnvironmentError(t, forged.Close(), EngineLocalInvariant, operationClose, -30779, "invalid Store resource shape")
+	if store.self != store || store.env != env || store.writer != writer || store.state != storeOPEN {
+		t.Fatal("forged value copy changed original owner")
+	}
+	busyTerminal := nativeError(operationClose, codeBusy)
+	published := &Store{env: env, writer: writer, config: cfg, dbis: dbis, state: storeCLOSEBLOCKED, terminal: busyTerminal}
+	published.self = published
+	construction := &Store{env: env, writer: writer, state: storeCLOSEBLOCKED, terminal: orderedErrors(operationClose, orderResultCausesPrimary, errors.New("construction"), busyTerminal)}
+	construction.self = construction
+	unknown := &Store{state: "UNKNOWN"}
+	unknown.self = unknown
+	if !validStoreShape(published) || !validStoreShape(construction) || validStoreShape(unknown) {
+		t.Fatal("published, construction or unknown Store shape changed")
+	}
+	store.operations.RLock()
+	busy := store.Close()
+	store.operations.RUnlock()
+	requireEnvironmentError(t, busy, EngineConcurrency, operationClose, -30778, "store operation in progress")
+	if store.env != env || store.writer != writer || store.dbis != dbis || store.state != storeOPEN || store.terminal != nil {
+		t.Fatal("adapter contention mutated Store")
+	}
+	zeroDBI, duplicateDBI := dbis, dbis
+	zeroDBI[0], duplicateDBI[1] = 0, duplicateDBI[0]
+	if validRetainedDBIs(zeroDBI) || validRetainedDBIs(duplicateDBI) {
+		t.Fatal("zero or duplicate retained DBI accepted")
+	}
+	for _, state := range []storeState{"", "UNKNOWN"} {
+		store.state = state
+		requireEnvironmentError(t, store.Close(), EngineLocalInvariant, operationClose, -30779, "invalid Store state")
+	}
+	store.state = storeOPEN
+	for _, shape := range []struct{ mutate, restore func() }{
+		{func() { store.env = nil }, func() { store.env = env }},
+		{func() { store.writer = nil }, func() { store.writer = writer }},
+		{func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
+		{func() { store.dbis = zeroDBI }, func() { store.dbis = dbis }},
+		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }},
+		{func() { store.self = nil }, func() { store.self = store }},
+	} {
+		requireShapeRejection(t, store, shape.mutate, shape.restore)
+	}
+	encoded, encodeErr := cfg.Encode()
+	mustEnvironment(t, encodeErr)
+	duplicate := runLocked(func() transactionOutcome { return store.initializeLocked(cfg, encoded) })
+	requireEnvironmentError(t, duplicate.err, EngineIntegrity, operationInit, codeKeyExist, expectedNativeDiagnostic(codeKeyExist))
+	if duplicate.poisoned {
+		t.Fatal("duplicate initialization poisoned owner thread")
+	}
+	mustEnvironment(t, os.Remove(filepath.Join(path, "rubin-writer.lock")))
+	second, secondErr = Open(path, cfg)
+	requireNoStore(t, second, secondErr, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "rubin-writer.lock is absent")
+	requireEnvironmentStore(t, store, cfg)
+	if _, statErr := os.Lstat(filepath.Join(path, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing sidecar Open created a replacement: %v", statErr)
+	}
+	mustEnvironment(t, store.Close())
+	if store.self != store || store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || store.terminal != nil {
+		t.Fatalf("Close did not clear ownership: %+v", store)
+	}
+	for _, dbi := range store.dbis {
+		if dbi != 0 {
+			t.Fatal("Close retained a DBI")
+		}
+	}
+	closeNative := nativeError(operationClose, codeEIO)
+	closeRelease := releaseResult(errors.New("release"))
+	for _, terminal := range []error{nil, closeNative, closeRelease, joinErrors(closeNative, closeRelease)} {
+		store.terminal = terminal
+		if !sameError(store.Close(), terminal) {
+			t.Fatal("CLOSED terminal identity changed")
+		}
+	}
+	store.terminal = nil
+	closedDBIs := store.dbis
+	for _, shape := range []struct{ mutate, restore func() }{
+		{func() { store.env = env }, func() { store.env = nil }},
+		{func() { store.writer = writer }, func() { store.writer = nil }},
+		{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
+		{func() { store.dbis = dbis }, func() { store.dbis = closedDBIs }},
+		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }},
+		{func() { store.self = nil }, func() { store.self = store }},
+	} {
+		requireShapeRejection(t, store, shape.mutate, shape.restore)
+	}
+	var nilStore *Store
+	requireEnvironmentError(t, nilStore.Close(), EngineInvalidInput, operationClose, int(syscall.EINVAL), "nil Store")
+	handle, result, lockErr := filelock.AcquireDirectory(path)
+	if lockErr != nil || result != "" || handle == nil {
+		t.Fatalf("writer lock not released: %q %v", result, lockErr)
+	}
+	mustEnvironment(t, handle.Release())
+	mustEnvironment(t, os.WriteFile(filepath.Join(path, "ignored.extra"), []byte{1}, 0o600))
+	reopened, err := Open(path, cfg)
+	requireNoStore(t, reopened, err, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "rubin-writer.lock is absent")
+	if _, statErr := os.Lstat(filepath.Join(path, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("missing sidecar Open created a replacement: %v", statErr)
+	}
+	mustEnvironment(t, os.WriteFile(filepath.Join(path, "rubin-writer.lock"), nil, 0o600))
+	reopened, err = Open(path, cfg)
+	if err != nil {
+		t.Fatalf("Open with recreated sidecar and extra entry: %v", err)
+	}
+	requireEnvironmentStore(t, reopened, cfg)
+	mustEnvironment(t, reopened.Close())
+	if extra, readErr := os.ReadFile(filepath.Join(path, "ignored.extra")); readErr != nil || string(extra) != "\x01" {
+		t.Fatalf("Open/Close changed ignored sibling: %x/%v", extra, readErr)
+	}
+	fixedCfg, fixedPath := cfg, filepath.Join(t.TempDir(), "db")
+	fixedCfg.MaxReaders = 1004
+	mustEnvironment(t, createAndClose(fixedPath, fixedCfg))
+	mustEnvironment(t, os.Truncate(filepath.Join(fixedPath, "mdbx.lck"), 0))
+	fixed, err := Open(fixedPath, fixedCfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, fixed, fixedCfg)
+	mustEnvironment(t, fixed.Close())
+	smallPageCfg, smallPagePath := cfg, filepath.Join(t.TempDir(), "db")
+	smallPageCfg.PageSize = 256
+	mustEnvironment(t, createAndClose(smallPagePath, smallPageCfg))
+	smallPage, err := Open(smallPagePath, smallPageCfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, smallPage, smallPageCfg)
+	mustEnvironment(t, smallPage.Close())
+}
+
+func TestEnvironmentDirectoryLockSurvivesMarkerReplacement(t *testing.T) {
+	const childPath = "RUBIN_MDBX_DIRECTORY_LOCK_CHILD_PATH"
+	if path := os.Getenv(childPath); path != "" {
+		store, err := Open(path, environmentConfig())
+		requireNoStore(t, store, err, EngineConcurrency, operationOpen, -30778, "Rubin writer lock is already held")
+		return
+	}
+
+	path := filepath.Join(t.TempDir(), "db")
+	cfg := environmentConfig()
+	parent, err := Create(path, cfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, parent, cfg)
+	markerPath := filepath.Join(path, "rubin-writer.lock")
+	mustEnvironment(t, os.Remove(markerPath))
+	marker, err := os.OpenFile(markerPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	mustEnvironment(t, err)
+	mustEnvironment(t, marker.Close())
+	requireArtifact(t, markerPath, 0o600, true)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnvironmentDirectoryLockSurvivesMarkerReplacement$", "-test.count=1")
+	cmd.Env = append(os.Environ(), childPath+"="+path)
+	if output, runErr := cmd.CombinedOutput(); runErr != nil {
+		t.Fatalf("child Open did not observe directory-lock contention: %v\n%s", runErr, output)
+	}
+	requireEnvironmentStore(t, parent, cfg)
+	mustEnvironment(t, parent.Close())
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	requireEnvironmentStore(t, reopened, cfg)
+	mustEnvironment(t, reopened.Close())
+}
+
+func requireArtifact(t *testing.T, path string, mode os.FileMode, empty bool) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() {
+		if exactPermissionBits(info.Mode()) != mode {
+			t.Fatalf("%s mode=%v", path, info.Mode())
+		}
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || exactPermissionBits(info.Mode()) != mode || uint64(stat.Nlink) != 1 || empty && info.Size() != 0 {
+		t.Fatalf("%s mode=%v links=%v size=%d", path, info.Mode(), ok && uint64(stat.Nlink) == 1, info.Size())
+	}
+}
+
+func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
+	mutations := []struct {
+		name string
+		run  func(string) error
+	}{
+		{"mode", func(path string) error { return os.Chmod(path, 0o644) }},
+		{"hardlink", func(path string) error { return os.Link(path, path+".alias") }},
+		{"fifo", func(path string) error { return errors.Join(os.Remove(path), syscall.Mkfifo(path, 0o600)) }},
+		{"symlink", func(path string) error {
+			return errors.Join(os.Rename(path, path+".target"), os.Symlink(path+".target", path))
+		}},
+	}
+	for _, artifact := range []string{"mdbx.dat", "mdbx.lck", "rubin-writer.lock"} {
+		for _, mutation := range mutations {
+			t.Run(artifact+"/"+mutation.name, func(t *testing.T) {
+				path := closedEnvironment(t)
+				mustEnvironment(t, mutation.run(filepath.Join(path, artifact)))
+				requireOpenEnvironmentError(t, path, EngineIntegrity, -30793, artifact+" is unsafe")
+			})
+		}
+	}
+	for _, tc := range []struct {
+		name, diagnostic string
+		class            EngineClass
+		code             int
+		prepare          func(*testing.T) string
+	}{
+		{"writer-nonempty", "rubin-writer.lock is unsafe", EngineIntegrity, -30793, func(t *testing.T) string {
+			path := closedEnvironment(t)
+			mustEnvironment(t, os.WriteFile(filepath.Join(path, "rubin-writer.lock"), []byte{1}, 0o600))
+			return path
+		}},
+		{"missing-mdbx.dat", "mdbx.dat is absent", EngineInvalidInput, int(syscall.ENOENT), func(t *testing.T) string {
+			path := closedEnvironment(t)
+			mustEnvironment(t, os.Remove(filepath.Join(path, "mdbx.dat")))
+			return path
+		}},
+		{"missing-mdbx.lck", "mdbx.lck is absent", EngineInvalidInput, int(syscall.ENOENT), func(t *testing.T) string {
+			path := closedEnvironment(t)
+			mustEnvironment(t, os.Remove(filepath.Join(path, "mdbx.lck")))
+			return path
+		}},
+		{"directory-mode", "environment directory is unsafe", EngineIntegrity, -30793, func(t *testing.T) string {
+			path := closedEnvironment(t)
+			mustEnvironment(t, os.Chmod(path, 0o755))
+			return path
+		}},
+		{"directory-symlink", "environment directory is unsafe", EngineIntegrity, -30793, func(t *testing.T) string {
+			real := closedEnvironment(t)
+			path := filepath.Join(filepath.Dir(real), "linked")
+			mustEnvironment(t, os.Symlink(real, path))
+			return path
+		}},
+		{"directory-nondirectory", "environment directory is unsafe", EngineIntegrity, -30793, func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "db")
+			mustEnvironment(t, os.WriteFile(path, nil, 0o700))
+			return path
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { requireOpenEnvironmentError(t, tc.prepare(t), tc.class, tc.code, tc.diagnostic) })
+	}
+	undersizedCfg, undersized := environmentConfig(), closedEnvironment(t)
+	undersizedCfg.PageSize = 256
+	dataPath := filepath.Join(undersized, "mdbx.dat")
+	lockPath := filepath.Join(undersized, "rubin-writer.lock")
+	lockBefore, statErr := os.Lstat(lockPath)
+	mustEnvironment(t, statErr)
+	mustEnvironment(t, os.Truncate(dataPath, 1000))
+	before, readErr := os.ReadFile(dataPath)
+	mustEnvironment(t, readErr)
+	store, openErr := Open(undersized, undersizedCfg)
+	requireNoStore(t, store, openErr, EngineIntegrity, operationOpen, codeInvalid, "mdbx.dat is undersized")
+	after, readErr := os.ReadFile(dataPath)
+	mustEnvironment(t, readErr)
+	lockAfter, statErr := os.Lstat(lockPath)
+	mustEnvironment(t, statErr)
+	if len(after) != 1000 || string(after) != string(before) {
+		t.Fatal("undersized Open changed mdbx.dat")
+	}
+	if !os.SameFile(lockBefore, lockAfter) {
+		t.Fatal("undersized Open replaced writer lock")
+	}
+	handle, result, lockErr := filelock.AcquireDirectory(undersized)
+	if handle == nil || result != "" || lockErr != nil {
+		t.Fatalf("undersized Open retained writer lock: %v/%q/%v", handle, result, lockErr)
+	}
+	mustEnvironment(t, handle.Release())
+}
+
+func requireOpenEnvironmentError(t *testing.T, path string, class EngineClass, code int, diagnostic string) *EngineError {
+	store, err := Open(path, environmentConfig())
+	return requireNoStore(t, store, err, class, operationOpen, code, diagnostic)
+}
+
+func consumeNativeTestStore(t *testing.T, store *Store) {
+	t.Helper()
+	if retained, err := store.consume(nil); retained || err != nil {
+		t.Fatalf("direct native cleanup retained=%v err=%v", retained, err)
+	}
+}
+
+func TestEnvironmentNativeNegativePaths(t *testing.T) {
+	primary := nativeError(operationOpen, codeCorrupted)
+	failed := &Store{}
+	if store, err := finishConstruction(failed, transactionOutcome{err: primary}); store != nil || !sameError(err, primary) || failed.state != storeCLOSED {
+		t.Fatalf("failed construction=%v/%v/%s", store, err, failed.state)
+	}
+	poisoned, poisonErr := &Store{}, nativeError(operationInit, codeThreadMismatch)
+	if store, err := finishConstruction(poisoned, transactionOutcome{err: poisonErr, poisoned: true}); store != poisoned || !sameError(err, poisonErr) {
+		t.Fatalf("poisoned construction identity=%v/%v", store, err)
+	}
+	_, artifactErr := validateOpenArtifacts("\x00")
+	artifact := requireEnvironmentError(t, artifactErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "inspect environment directory")
+	_, fileErr := inspectOpenFile("\x00", "mdbx.dat", false, false)
+	file := requireEnvironmentError(t, fileErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "inspect mdbx.dat")
+	if !errors.Is(artifact, syscall.EINVAL) || !errors.Is(file, syscall.EINVAL) {
+		t.Fatal("filesystem diagnostic lost immediate errno Cause")
+	}
+	unsafe := t.TempDir()
+	requireEnvironmentError(t, normalizeOwnedFile(unsafe, "mdbx.dat", false, operationCreate, "normalize", "read"), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
+	requireEnvironmentError(t, readOwnedFile(unsafe, "mdbx.dat", false, operationOpen, "read"), EngineIntegrity, operationOpen, codeInvalid, "mdbx.dat is unsafe")
+	absentLockDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(absentLockDir, 0o700))
+	absentHandle, absentLockErr := acquireWriter(absentLockDir, operationOpen, false)
+	if absentHandle != nil {
+		t.Fatal("absent writer returned Handle")
+	}
+	requireEnvironmentError(t, absentLockErr, EngineIO, operationOpen, int(syscall.ENOENT), "read back Rubin writer lock")
+	if !errors.Is(absentLockErr, syscall.ENOENT) {
+		t.Fatalf("absent writer lost ENOENT: %v", absentLockErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(absentLockDir, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("absent writer created sidecar: %v", statErr)
+	}
+	existingMarkerDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(existingMarkerDir, 0o700))
+	existingMarkerPath := filepath.Join(existingMarkerDir, "rubin-writer.lock")
+	mustEnvironment(t, os.WriteFile(existingMarkerPath, []byte("preserve"), 0o600))
+	mustEnvironment(t, os.Chmod(existingMarkerPath, 0o600))
+	existingHandle, existingErr := acquireWriter(existingMarkerDir, operationCreate, true)
+	if existingHandle != nil {
+		t.Fatal("existing marker returned Handle")
+	}
+	requireEnvironmentError(t, existingErr, EngineIO, operationCreate, int(syscall.EEXIST), "acquire Rubin writer lock")
+	if preserved, readErr := os.ReadFile(existingMarkerPath); readErr != nil || string(preserved) != "preserve" {
+		t.Fatalf("Create overwrote existing marker: %q/%v", preserved, readErr)
+	}
+	existingHandle, _, existingErr = filelock.AcquireDirectory(existingMarkerDir)
+	if existingHandle == nil || existingErr != nil {
+		t.Fatalf("existing-marker failure retained directory lock: %v/%v", existingHandle, existingErr)
+	}
+	mustEnvironment(t, existingHandle.Release())
+	lockDir := t.TempDir()
+	mustEnvironment(t, os.Chmod(lockDir, 0o700))
+	mustEnvironment(t, os.WriteFile(filepath.Join(lockDir, "rubin-writer.lock"), nil, 0o644))
+	mustEnvironment(t, os.Chmod(filepath.Join(lockDir, "rubin-writer.lock"), 0o644))
+	handle, lockErr := acquireWriter(lockDir, operationOpen, false)
+	if handle != nil {
+		t.Fatal("unsafe writer mode returned Handle")
+	}
+	requireEnvironmentError(t, lockErr, EngineIntegrity, operationOpen, codeInvalid, "rubin-writer.lock is unsafe")
+	mustEnvironment(t, os.Chmod(filepath.Join(lockDir, "rubin-writer.lock"), 0o600))
+	handle, _, lockErr = filelock.AcquireDirectory(lockDir)
+	if handle == nil || lockErr != nil {
+		t.Fatalf("unsafe writer cleanup retained lock: %v/%v", handle, lockErr)
+	}
+	mustEnvironment(t, handle.Release())
+	empty := &Store{}
+	_, effectiveErr := readEffective(empty.env, nil, operationOpen)
+	if effectiveErr == nil {
+		t.Fatal("nil environment accepted by readEffective")
+	}
+	requireEnvironmentError(t, effectiveErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	encoded, encodeErr := environmentConfig().Encode()
+	mustEnvironment(t, encodeErr)
+	initOutcome := empty.initializeLocked(environmentConfig(), encoded)
+	requireEnvironmentError(t, initOutcome.err, EngineInvalidInput, operationInit, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	openOutcome := empty.inspectOpenLocked(environmentConfig())
+	requireEnvironmentError(t, openOutcome.err, EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	if initOutcome.poisoned || openOutcome.poisoned {
+		t.Fatal("nil environment produced a poison owner")
+	}
+	_, initSchemaErr := initializeSchema(empty.txn, encoded)
+	requireEnvironmentError(t, initSchemaErr, EngineInvalidInput, operationInit, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	for _, create := range []bool{false, true} {
+		_, schemaErr := openSchemaDBIs(empty.txn, create, map[bool]engineOperation{false: operationOpen, true: operationInit}[create])
+		requireEnvironmentError(t, schemaErr, EngineInvalidInput, map[bool]engineOperation{false: operationOpen, true: operationInit}[create], int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	}
+	requireEnvironmentError(t, putRequiredMeta(empty.txn, empty.dbis[0], encoded), EngineLocalInvariant, operationInit, codeBadDBI, expectedNativeDiagnostic(codeBadDBI))
+	requireEnvironmentError(t, verifyMainCardinality(empty.txn, operationOpen), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	requireEnvironmentError(t, verifyCreatedMeta(empty.txn, empty.dbis[0], encoded), EngineInvalidInput, operationInit, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	_, metaErr := readRequiredMeta(empty.txn, empty.dbis[0])
+	requireEnvironmentError(t, metaErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	requireEnvironmentError(t, verifyExactValue(empty.txn, empty.dbis[0], []byte{1}, encoded, operationOpen), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	_, valueErr := getSizedValue(empty.txn, empty.dbis[0], []byte{1}, len(encoded), operationOpen)
+	requireEnvironmentError(t, valueErr, EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	abortOutcome := empty.abortLocked(empty.txn, nil)
+	requireEnvironmentError(t, abortOutcome.err, EngineInvalidInput, operationAbort, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	if abortOutcome.poisoned {
+		t.Fatal("nil transaction abort produced a poison owner")
+	}
+	native := &Store{}
+	mustEnvironment(t, native.allocateEnvironment(operationOpen))
+	requireEnvironmentError(t, openNativeEnvironment(native.env, filepath.Join(t.TempDir(), "missing", "db"), 0, 0, operationOpen), EngineIO, operationOpen, int(syscall.ENOENT), expectedNativeDiagnostic(int(syscall.ENOENT)))
+	consumeNativeTestStore(t, native)
+	invalidReaders, cfg := &Store{}, environmentConfig()
+	cfg.MaxReaders = 0
+	requireEnvironmentError(t, invalidReaders.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	consumeNativeTestStore(t, invalidReaders)
+	invalidGeometry := &Store{}
+	cfg = environmentConfig()
+	cfg.PageSize = 3
+	requireEnvironmentError(t, invalidGeometry.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	consumeNativeTestStore(t, invalidGeometry)
+	invalidOpenReaders := &Store{}
+	cfg, cfg.MaxReaders = environmentConfig(), 0
+	requireEnvironmentError(t, invalidOpenReaders.openEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
+	consumeNativeTestStore(t, invalidOpenReaders)
+	normalizedCfg, normalizedPath := environmentConfig(), filepath.Join(t.TempDir(), "normalized")
+	normalizedCfg.PageSize, normalizedCfg.Growth, normalizedCfg.Shrink = 256, 256, 512
+	normalized, normalizedErr := Create(normalizedPath, normalizedCfg)
+	normalization := requireNoStore(t, normalized, normalizedErr, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "ConfigV1 geometry is not natively representable")
+	if normalization.Cause == nil || normalization.Cause.Error() != fmt.Sprintf("Growth: got %d, want 256", os.Getpagesize()) {
+		t.Fatalf("native normalization Cause=%v", normalization.Cause)
+	}
+	if _, statErr := os.Lstat(normalizedPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("native normalization mutated filesystem: %v", statErr)
+	}
+	original, geometryPath := environmentConfig(), closedEnvironment(t)
+	geometryWriter, geometryErr := acquireWriter(geometryPath, operationOpen, false)
+	mustEnvironment(t, geometryErr)
+	changed := original
+	changed.Upper *= 2
+	geometry := &Store{writer: geometryWriter}
+	geometry.self = geometry
+	mustEnvironment(t, geometry.configureCreateEnvironment(geometryPath, changed))
+	mustEnvironment(t, geometry.createEnvironment(geometryPath, changed))
+	geometryOutcome := runLocked(func() transactionOutcome { return geometry.inspectOpenLocked(original) })
+	geometryMismatch := requireEnvironmentError(t, geometryOutcome.err, EngineIntegrity, operationOpen, codeInvalid, "effective environment mismatch")
+	if geometryMismatch.Cause == nil || geometryMismatch.Cause.Error() != "Upper: got 536870912, want 268435456" {
+		t.Fatalf("effective geometry Cause=%v", geometryMismatch.Cause)
+	}
+	consumeNativeTestStore(t, geometry)
+	for _, tc := range []struct {
+		encoded    []byte
+		diagnostic string
+		cause      error
+	}{{[]byte{1}, "required metadata width mismatch", nil}, {make([]byte, 48), "invalid ConfigV1 row", errSchema}} {
+		path := filepath.Join(t.TempDir(), "malformed")
+		malformed := &Store{}
+		malformed.self = malformed
+		mustEnvironment(t, malformed.configureCreateEnvironment(path, original))
+		mustEnvironment(t, createDirectory(path))
+		writer, err := acquireWriter(path, operationCreate, true)
+		mustEnvironment(t, err)
+		malformed.writer = writer
+		mustEnvironment(t, malformed.createEnvironment(path, original))
+		outcome := runLocked(func() transactionOutcome { return malformed.initializeLocked(original, tc.encoded) })
+		if outcome.err != nil || outcome.poisoned || malformed.state != storeOPEN {
+			t.Fatalf("malformed preparation=%v/%v/%s", outcome.err, outcome.poisoned, malformed.state)
+		}
+		mustEnvironment(t, malformed.Close())
+		opened := requireOpenEnvironmentError(t, path, EngineIntegrity, codeInvalid, tc.diagnostic)
+		if !sameError(opened.Cause, tc.cause) {
+			t.Fatalf("malformed %s Cause=%v", tc.diagnostic, opened.Cause)
+		}
+	}
+	nativeLink := closedEnvironment(t)
+	mustEnvironment(t, os.Link(filepath.Join(nativeLink, "mdbx.dat"), filepath.Join(nativeLink, "mdbx.dat.alias")))
+	linked := &Store{}
+	mustEnvironment(t, linked.configureCreateEnvironment(nativeLink, environmentConfig()))
+	requireEnvironmentError(t, linked.createEnvironment(nativeLink, environmentConfig()), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
+	consumeNativeTestStore(t, linked)
+	maskedTarget := filepath.Join(t.TempDir(), "owner-rwx-masked")
+	masked, maskedErr := func() (*Store, error) {
+		old := syscall.Umask(0o777)
+		defer syscall.Umask(old)
+		return Create(maskedTarget, environmentConfig())
+	}()
+	if maskedErr != nil {
+		requireNoStore(t, masked, maskedErr, EngineIO, operationCreate, int(syscall.EACCES), expectedNativeDiagnostic(int(syscall.EACCES)))
+		if _, statErr := os.Lstat(filepath.Join(maskedTarget, "rubin-writer.lock")); statErr != nil {
+			t.Fatalf("failed Create removed owned residue: %v", statErr)
+		}
+	} else {
+		requireEnvironmentStore(t, masked, environmentConfig())
+		for _, name := range []string{"rubin-writer.lock", "mdbx.dat", "mdbx.lck"} {
+			requireArtifact(t, filepath.Join(maskedTarget, name), 0o600, name == "rubin-writer.lock")
+		}
+		mustEnvironment(t, masked.Close())
+	}
+	missingSidecar := closedEnvironment(t)
+	mustEnvironment(t, os.Remove(filepath.Join(missingSidecar, "rubin-writer.lock")))
+	missingHandle, missingErr := acquireWriter(missingSidecar, operationOpen, false)
+	if missingHandle != nil {
+		t.Fatal("disappeared marker returned Handle")
+	}
+	requireEnvironmentError(t, missingErr, EngineIO, operationOpen, int(syscall.ENOENT), "read back Rubin writer lock")
+	missingHandle, _, missingErr = filelock.AcquireDirectory(missingSidecar)
+	if missingHandle == nil || missingErr != nil {
+		t.Fatalf("disappeared-marker failure retained directory lock: %v/%v", missingHandle, missingErr)
+	}
+	mustEnvironment(t, missingHandle.Release())
+	staticCorrupt := t.TempDir()
+	mustEnvironment(t, os.Chmod(staticCorrupt, 0o700))
+	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "mdbx.dat"), []byte(strings.Repeat("x", 262144)), 0o600))
+	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "mdbx.lck"), []byte(strings.Repeat("x", 262144)), 0o600))
+	mustEnvironment(t, os.WriteFile(filepath.Join(staticCorrupt, "rubin-writer.lock"), nil, 0o600))
+	requireOpenEnvironmentError(t, staticCorrupt, EngineIntegrity, codeInvalid, expectedNativeDiagnostic(codeInvalid))
+	corrupt := closedEnvironment(t)
+	mustEnvironment(t, os.WriteFile(filepath.Join(corrupt, "mdbx.dat"), []byte("not mdbx"), 0o600))
+	requireOpenEnvironmentError(t, corrupt, EngineIntegrity, codeInvalid, "mdbx.dat is undersized")
+	handle, result, lockErr := filelock.AcquireDirectory(corrupt)
+	if handle == nil || result != "" || lockErr != nil {
+		t.Fatalf("corrupt Open retained writer: %v/%q/%v", handle, result, lockErr)
+	}
+	mustEnvironment(t, handle.Release())
+}
+
+func TestEnvironmentPureMatrices(t *testing.T) {
+	direct := nativeError(operationInit, codeThreadMismatch)
+	var typedNil *EngineError
+	if engine, ok := directEngineError(direct); !ok || engine == nil {
+		t.Fatal("direct EngineError rejected")
+	}
+	if engine, ok := directEngineError(panicErrorWrapper{cause: direct}); ok || engine != nil {
+		t.Fatal("wrapped EngineError accepted")
+	}
+	if engine, ok := directEngineError(typedNil); ok || engine != nil {
+		t.Fatal("typed-nil EngineError accepted")
+	}
+	for _, tc := range []struct {
+		first, second int
+		diagnostic    string
+	}{
+		{-1, 0, "MDBX debug normalization failed"},
+		{-1, 0x00030000, "MDBX debug normalization failed"},
+		{0, 0, "MDBX debug normalization did not stabilize"},
+		{0x00030000, 0x00030001, "MDBX debug normalization did not stabilize"},
+	} {
+		requireEnvironmentError(t, debugNormalizationError(tc.first, tc.second), EngineLocalInvariant, operationInit, -30779, tc.diagnostic)
+	}
+	if debugNormalizationError(0, 0x00030000) != nil || debugNormalizationError(0x7fffffff, 0x00030000) != nil {
+		t.Fatal("valid packed debug result rejected")
+	}
+	for _, diagnostic := range []string{"mdbx_env_create returned invalid result shape", "mdbx_txn_begin returned invalid result shape"} {
+		mustEnvironment(t, nativePointerResultError(operationOpen, diagnostic, 0, true))
+		requireEnvironmentError(t, nativePointerResultError(operationOpen, diagnostic, 0, false), EngineLocalInvariant, operationOpen, -30779, diagnostic)
+		native := requireEnvironmentError(t, nativePointerResultError(operationOpen, diagnostic, -30778, false), EngineConcurrency, operationOpen, -30778, expectedNativeDiagnostic(-30778))
+		contradiction := requireEnvironmentError(t, nativePointerResultError(operationOpen, diagnostic, -30778, true), EngineLocalInvariant, operationOpen, -30779, diagnostic)
+		if errors.Unwrap(contradiction) == nil || !errors.Is(contradiction, native) && contradiction.Cause.Error() != native.Error() {
+			t.Fatal("failure+nonnil lost native cause")
+		}
+	}
+	shapeDiagnostic := "mdbx_txn_begin returned invalid result shape"
+	for i, tc := range []struct {
+		err   error
+		valid bool
+	}{
+		{nativeError(operationInit, -30416), true},
+		{nativeError(operationAbort, -30416), true},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationInit, -30778)), true},
+		{adapterError(operationOpen, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), true},
+		{nativeError(operationOpen, -30416), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30778, shapeDiagnostic, nativeError(operationInit, -30778)), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, "forged", nativeError(operationInit, -30778)), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nil), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), false},
+		{nil, false},
+	} {
+		if validPoisonTerminal(tc.err) != tc.valid {
+			t.Fatalf("poison terminal row %d validity changed", i)
+		}
+	}
+	requireEnvironmentError(t, nativePointerResultError("unknown", "ignored", 0, true), EngineLocalInvariant, operationInit, -30779, "unsupported engine operation")
+	releaseCause := fmt.Errorf("wrapped: %w", syscall.ENOSPC)
+	release := requireEnvironmentError(t, releaseResult(releaseCause), EngineCapacity, operationClose, int(syscall.ENOSPC), "release Rubin writer lock")
+	if releaseResult(nil) != nil || !sameError(errors.Unwrap(release), releaseCause) {
+		t.Fatal("release result or cause identity changed")
+	}
+	requireEnvironmentError(t, requireCreateTargetAbsent("\x00"), EngineInvalidInput, operationCreate, int(syscall.EINVAL), "inspect Create path")
+	requireEnvironmentError(t, normalizeOwnedFile("\x00", "mdbx.dat", false, operationCreate, "normalize", "read"), EngineInvalidInput, operationCreate, int(syscall.EINVAL), "read")
+	requireEnvironmentError(t, readOwnedFile("\x00", "mdbx.dat", false, operationOpen, "read"), EngineInvalidInput, operationOpen, int(syscall.EINVAL), "read")
+	cfg := environmentConfig()
+	valid := effectiveConfig{flags: 0x02200000, mode: 0, pageSize: 4096, systemPageSize: 4096, maxReaders: 492, lower: 1 << 20, current: 2 << 20, upper: 256 << 20, growth: 1 << 20, shrink: 2 << 20, maxKey: 77, maxValue: 68_000_125, limits: nativeLimits{minDB: 1, maxDB: 1 << 40, maxKey: 77, maxValue: 68_000_125}}
+	if err := validateEffective(cfg, valid); err != nil {
+		t.Fatalf("valid effective tuple: %v", err)
+	}
+	if err := validateStoredConfig(cfg, cfg); err != nil {
+		t.Fatalf("identical stored ConfigV1: %v", err)
+	}
+	for _, tc := range []struct {
+		requested, systemPageSize, effective uint32
+		want                                 string
+	}{
+		{492, 4096, 491, "MaxReaders: got 491 outside native rounding [492,619] for system page 4096"},
+		{492, 4096, 492, ""},
+		{492, 4096, 619, ""},
+		{492, 4096, 620, "MaxReaders: got 620 outside native rounding [492,619] for system page 4096"},
+		{32767, 4096, 32767, ""},
+		{32767, 4096, 32768, "MaxReaders: got 32768 outside native rounding [32767,32767] for system page 4096"},
+		{492, 256, 492, ""},
+		{492, 16 * 1024 * 1024, 492, ""},
+		{492, 0, 492, "SystemPageSize: got 0 outside supported power-of-two [256,16777216]"},
+		{492, 16, 492, "SystemPageSize: got 16 outside supported power-of-two [256,16777216]"},
+		{492, 768, 492, "SystemPageSize: got 768 outside supported power-of-two [256,16777216]"},
+		{492, 16*1024*1024 + 1, 492, "SystemPageSize: got 16777217 outside supported power-of-two [256,16777216]"},
+	} {
+		err := validateEffectiveMaxReaders(tc.requested, tc.effective, tc.systemPageSize)
+		if tc.want == "" && err != nil || tc.want != "" && (err == nil || err.Error() != tc.want) {
+			t.Fatalf("reader envelope (%d,%d,%d)=%v, want %q", tc.requested, tc.systemPageSize, tc.effective, err, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		want string
+		set  func(*ConfigV1)
+	}{
+		{"Lower: got 1052672, want 1048576", func(v *ConfigV1) { v.Lower += 4096 }},
+		{"Now: got 2101248, want 2097152", func(v *ConfigV1) { v.Now += 4096 }},
+		{"Upper: got 268439552, want 268435456", func(v *ConfigV1) { v.Upper += 4096 }},
+		{"Growth: got 1052672, want 1048576", func(v *ConfigV1) { v.Growth += 4096 }},
+		{"Shrink: got 2101248, want 2097152", func(v *ConfigV1) { v.Shrink += 4096 }},
+		{"PageSize: got 8192, want 4096", func(v *ConfigV1) { v.PageSize = 8192 }},
+		{"MaxReaders: got 493, want 492", func(v *ConfigV1) { v.MaxReaders++ }},
+	} {
+		stored := cfg
+		tc.set(&stored)
+		if err := validateStoredConfig(stored, cfg); err == nil || err.Error() != tc.want {
+			t.Fatalf("stored mismatch=%v, want %q", err, tc.want)
+		}
+	}
+	lower, upper := valid, valid
+	lower.current, upper.current = cfg.Lower, cfg.Upper
+	if validateEffective(cfg, lower) != nil || validateEffective(cfg, upper) != nil {
+		t.Fatal("inclusive Current boundary rejected")
+	}
+	mutations := []func(*effectiveConfig){
+		func(v *effectiveConfig) { v.flags = 0x00200000 }, func(v *effectiveConfig) { v.flags = 0x02200001 }, func(v *effectiveConfig) { v.mode = 1 },
+		func(v *effectiveConfig) { v.pageSize = 8192 }, func(v *effectiveConfig) { v.systemPageSize = 768 }, func(v *effectiveConfig) { v.maxReaders = 620 }, func(v *effectiveConfig) { v.lower++ },
+		func(v *effectiveConfig) { v.upper-- }, func(v *effectiveConfig) { v.growth++ }, func(v *effectiveConfig) { v.shrink++ },
+		func(v *effectiveConfig) { v.current = cfg.Lower - uint64(cfg.PageSize) }, func(v *effectiveConfig) { v.current = cfg.Upper + uint64(cfg.PageSize) }, func(v *effectiveConfig) { v.current = cfg.Lower + 1 },
+		func(v *effectiveConfig) { v.maxKey = 76 }, func(v *effectiveConfig) { v.maxValue = 68_000_124 },
+		func(v *effectiveConfig) { v.limits.maxDB = 1 },
+	}
+	for i, mutate := range mutations {
+		got := valid
+		mutate(&got)
+		if validateEffective(cfg, got) == nil {
+			t.Fatalf("effective mutation %d accepted", i)
+		}
+	}
+	limits := nativeLimits{minDB: int64(cfg.Lower), maxDB: int64(cfg.Upper), maxKey: 77, maxValue: 68_000_125}
+	if validateLimits(cfg, limits) != nil {
+		t.Fatal("exact native limits rejected")
+	}
+	for _, bad := range []nativeLimits{{minDB: -1, maxDB: 1, maxKey: 77, maxValue: 68_000_125}, {minDB: 1, maxDB: 0, maxKey: 77, maxValue: 68_000_125}, {minDB: 1, maxDB: 1 << 40, maxKey: 76, maxValue: 68_000_125}, {minDB: 1, maxDB: 1 << 40, maxKey: 77, maxValue: 68_000_124}} {
+		if validateLimits(cfg, bad) == nil {
+			t.Fatalf("invalid native limits accepted: %+v", bad)
+		}
+	}
+}
+
+func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
+	require := func(ok bool, format string, args ...any) {
+		t.Helper()
+		if !ok {
+			t.Fatalf(format, args...)
+		}
+	}
+	context := build.Default
+	context.CgoEnabled = true
+	pkg, err := context.ImportDir(".", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := append(append([]string{}, pkg.GoFiles...), pkg.CgoFiles...)
+	sort.Strings(names)
+	fset := token.NewFileSet()
+	files, sources := make(map[string]*ast.File, len(names)), make(map[string][]byte, len(names))
+	var ordinarySource strings.Builder
+	for _, name := range names {
+		source, readErr := os.ReadFile(name)
+		require(readErr == nil, "%v", readErr)
+		file, parseErr := parser.ParseFile(fset, name, source, 0)
+		require(parseErr == nil, "%v", parseErr)
+		files[name], sources[name] = file, source
+		ordinarySource.Write(source)
+	}
+	file, source := files["mdbx_cgo.go"], sources["mdbx_cgo.go"]
+	require(file != nil, "ordinary build omitted mdbx_cgo.go")
+	allowed := map[token.Pos]bool{}
+	decls := map[string][]*ast.FuncDecl{}
+	functions := map[string]*ast.FuncDecl{}
+	for _, parsed := range files {
+		for _, declaration := range parsed.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok {
+				if parsed == file {
+					functions[fn.Name.Name] = fn
+				}
+				if fn.Recv == nil && (fn.Name.Name == "Create" || fn.Name.Name == "Open") {
+					allowed[fn.Name.Pos()] = true
+					decls[fn.Name.Name] = append(decls[fn.Name.Name], fn)
+				}
+			}
+		}
+	}
+	require(len(decls["Create"]) == 1 && len(decls["Open"]) == 1, "entrypoint declarations Create/Open=%d/%d, want 1/1", len(decls["Create"]), len(decls["Open"]))
+	for _, parsed := range files {
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && (ident.Name == "Create" || ident.Name == "Open") && !allowed[ident.Pos()] {
+				t.Errorf("package-local %s identifier at %s", ident.Name, fset.Position(ident.Pos()))
+			}
+			return true
+		})
+	}
+	body := func(name string) string {
+		fn := functions[name]
+		return string(source[fset.Position(fn.Body.Lbrace).Offset:fset.Position(fn.Body.Rbrace).Offset])
+	}
+	nodeText := func(node ast.Node) string {
+		return string(source[fset.Position(node.Pos()).Offset:fset.Position(node.End()).Offset])
+	}
+	compact := func(node ast.Node) string { return strings.Join(strings.Fields(nodeText(node)), " ") }
+	callName := func(call *ast.CallExpr) string {
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			return fn.Name
+		case *ast.SelectorExpr:
+			if base, ok := fn.X.(*ast.Ident); ok {
+				return base.Name + "." + fn.Sel.Name
+			}
+		}
+		return compact(call.Fun)
+	}
+	var normalizeSpecs []*ast.ValueSpec
+	for _, declaration := range file.Decls {
+		declaration, ok := declaration.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, raw := range declaration.Specs {
+			spec, ok := raw.(*ast.ValueSpec)
+			if ok && len(spec.Names) == 1 && spec.Names[0].Name == "normalizeMDBXModule" {
+				normalizeSpecs = append(normalizeSpecs, spec)
+			}
+		}
+	}
+	require(len(normalizeSpecs) == 1 && functions["normalizeMDBXModule"] == nil && compact(normalizeSpecs[0]) == "normalizeMDBXModule = sync.OnceValue(func() error { result := C.rubin_mdbx_normalize_debug() return debugNormalizationError(int(result.first), int(result.second)) })", "normalizeMDBXModule OnceValue ownership drifted")
+	for name, expected := range map[string]string{"Create": "validateCreateStatic"} {
+		fn, normalizeAt := functions[name], token.NoPos
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok && callName(call) == "normalizeMDBXModule" {
+				normalizeAt = call.Pos()
+			}
+			return true
+		})
+		var got []string
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok && call.Pos() < normalizeAt {
+				got = append(got, callName(call))
+			}
+			return true
+		})
+		if normalizeAt == token.NoPos || strings.Join(got, ",") != expected {
+			t.Errorf("%s pre-normalization calls=%v, want %s", name, got, expected)
+		}
+	}
+	openNativePreconditionCalls := 0
+	ast.Inspect(functions["Open"].Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok && callName(call) == "validateOpenNativePreconditions" {
+			openNativePreconditionCalls++
+		}
+		return true
+	})
+	require(openNativePreconditionCalls == 1, "Open native precondition calls=%d, want 1", openNativePreconditionCalls)
+	stageCalls := map[string]int{}
+	ast.Inspect(functions["validateOpenNativePreconditions"].Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			stageCalls[callName(call)]++
+		}
+		return true
+	})
+	for _, name := range []string{"normalizeMDBXModule", "validatePreopenSnapshot", "validateLimits", "limitsForPage"} {
+		require(stageCalls[name] == 1, "Open native precondition %s calls=%d, want 1", name, stageCalls[name])
+	}
+	for name, sequence := range map[string][]string{
+		"Create":                          {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "configureCreateEnvironment", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
+		"Open":                            {"validatePath", "validateOpenArtifacts", "validateOpenStatic", "validateOpenNativePreconditions", "acquireWriter", "openEnvironment", "runLocked"},
+		"configureCreateEnvironment":      {"allocateEnvironment", "C.mdbx_env_set_maxdbs", "C.mdbx_env_set_maxreaders", "C.mdbx_env_set_geometry", "validateCreateGeometry"},
+		"validateCreateGeometry":          {"C.mdbx_env_info_ex", "nativeError", `"PageSize"`, `"Lower"`, `"Now"`, `"Upper"`, `"Growth"`, `"Shrink"`, "adapterError"},
+		"createEnvironment":               {"openNativeEnvironment", "normalizeOwnedFile", "readEffective", "validateEffective"},
+		"validateOpenNativePreconditions": {"normalizeMDBXModule", "validatePreopenSnapshot", "validateLimits", "limitsForPage", "adapterError"},
+		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
+		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
+		"validateCreateStatic":            {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
+		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
+		"inspectSchema":                   {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
+		"openNativeEnvironment":           {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
+		"openSchemaDBIs":                  {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
+		"getSizedValue":                   {"C.rubin_mdbx_get", "runtime.KeepAlive(key)", "requiredValueResult", "C.GoBytes"},
+		"consume":                         {"nativeOutcome := primary", "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)", "releaseErr := releaseError(s.writer)", "s.terminal = joinErrors(nativeOutcome, releaseErr)", "return false, s.terminal"},
+	} {
+		position := -1
+		for _, call := range sequence {
+			next := strings.Index(body(name), call)
+			if next <= position {
+				t.Errorf("%s call order failed at %s", name, call)
+			}
+			position = next
+		}
+	}
+	production := string(source)
+	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
+	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
+	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(production[preambleStart:preambleEnd+2])))
+	require(preambleDigest == "19017dc3568a36890760d45263aaa13e90584909802f75d738dd4e3634eaa367", "cgo preamble digest=%s", preambleDigest)
+	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
+	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
+	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
+	require(strings.Count(body("Open"), "&Store{") == 1 && strings.Count(body("Open"), "store := &Store{writer: writer}\n\tstore.self = store") == 1, "Open Store ownership drifted")
+	require(strings.Count(production, "C.rubin_mdbx_env_create()") == 1 && strings.Count(body("configureCreateEnvironment"), "s.allocateEnvironment(operationCreate)") == 1 && strings.Count(body("configureCreateEnvironment"), "validateCreateGeometry(s.env, cfg)") == 1 && strings.Count(body("createEnvironment"), "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate)") == 1 && !strings.Contains(body("createEnvironment"), "allocateEnvironment"), "single Create env ownership drifted")
+	nativeFiles := "for _, name := range [...]string{\"mdbx.dat\", \"mdbx.lck\"} {\n\t\terr = normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, \"normalize \"+name+\" mode\", \"read back \"+name)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t}"
+	require(strings.Count(body("createEnvironment"), nativeFiles) == 1, "native-created file normalization/readback loop drifted")
+	normalizeBody := `{ info, err := os.Lstat(path) if err != nil { return ioError(operation, readDiagnostic, err) } if !validFileInfo(info, empty, false) { return integrityError(operation, name+" is unsafe", nil) } err = os.Chmod(path, 0o600) if err != nil { return ioError(operation, normalizeDiagnostic, err) } return readOwnedFile(path, name, empty, operation, readDiagnostic) }`
+	require(compact(functions["normalizeOwnedFile"].Body) == normalizeBody, "owned-file normalization helper drifted")
+	for _, literal := range []string{"C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate", "C.MDBX_NOSTICKYTHREADS, 0, operationOpen", "C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE"} {
+		if strings.Count(production, literal) != 1 {
+			t.Errorf("native literal/call-site %q drifted", literal)
+		}
+	}
+	var maxDBsAssignments, maxDBsCalls, fixtureBranches []string
+	ast.Inspect(functions["configureCreateEnvironment"].Body, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			if len(n.Lhs) == 1 && compact(n.Lhs[0]) == "maxDBs" {
+				maxDBsAssignments = append(maxDBsAssignments, compact(n))
+			}
+		case *ast.IncDecStmt:
+			if compact(n.X) == "maxDBs" {
+				maxDBsAssignments = append(maxDBsAssignments, compact(n))
+			}
+		case *ast.CallExpr:
+			if callName(n) == "C.mdbx_env_set_maxdbs" {
+				maxDBsCalls = append(maxDBsCalls, compact(n))
+			}
+		case *ast.IfStmt:
+			if strings.Contains(compact(n.Cond), "fixtureCreateExtraDBI") {
+				fixtureBranches = append(fixtureBranches, compact(n))
+			}
+		}
+		return true
+	})
+	require(strings.Join(maxDBsAssignments, "|") == "maxDBs := C.MDBX_dbi(7)|maxDBs = 8" && strings.Join(maxDBsCalls, "|") == "C.mdbx_env_set_maxdbs(s.env, maxDBs)" && strings.Join(fixtureBranches, "|") == "if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) { maxDBs = 8 }", "Create maxdbs ownership drifted: %v / %v / %v", maxDBsAssignments, fixtureBranches, maxDBsCalls)
+	var nativeLimitCalls, limitWrapperCalls, ordinaryMaxDBCalls, effectCalls []string
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := callName(call)
+			if strings.HasPrefix(name, "C.mdbx_limits_") {
+				nativeLimitCalls = append(nativeLimitCalls, fn.Name.Name+":"+name)
+			}
+			if name == "limitsForPage" {
+				limitWrapperCalls = append(limitWrapperCalls, fn.Name.Name+":"+compact(call))
+			}
+			if name == "C.mdbx_env_set_maxdbs" {
+				ordinaryMaxDBCalls = append(ordinaryMaxDBCalls, fn.Name.Name+":"+compact(call))
+			}
+			if name == "os.Mkdir" || name == "os.Chmod" || name == "os.OpenFile" || name == "filelock.AcquireDirectory" {
+				effectCalls = append(effectCalls, fn.Name.Name+":"+compact(call))
+			}
+			return true
+		})
+	}
+	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
+		strings.Join(limitWrapperCalls, "|") != "Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
+		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
+	}
+	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 7)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
+	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.AcquireDirectory(path)|createWriterMarker:os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
+	var packageNativeLimits, packageMaxDBs, packageEffects []string
+	packageRefs, fileRefs := map[string][]string{}, map[string]int{}
+	for _, filename := range names {
+		ast.Inspect(files[filename], func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && (ident.Name == "validatePreopenSnapshot" || ident.Name == "validateOpenNativePreconditions") {
+				fileRefs[ident.Name]++
+			}
+			return true
+		})
+		for _, declaration := range files[filename].Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if ident, ok := node.(*ast.Ident); ok && (ident.Name == "validatePreopenSnapshot" || ident.Name == "validateOpenNativePreconditions") {
+					packageRefs[ident.Name] = append(packageRefs[ident.Name], filename+":"+fn.Name.Name)
+				}
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := callName(call)
+				owner := filename + ":" + fn.Name.Name + ":" + name
+				if strings.HasPrefix(name, "C.mdbx_limits_") || name == "limitsForPage" {
+					packageNativeLimits = append(packageNativeLimits, owner)
+				}
+				if name == "C.mdbx_env_set_maxdbs" {
+					packageMaxDBs = append(packageMaxDBs, owner)
+				}
+				if name == "os.Mkdir" || name == "os.Chmod" || name == "os.OpenFile" || name == "filelock.AcquireDirectory" {
+					packageEffects = append(packageEffects, owner)
+				}
+				return true
+			})
+		}
+	}
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
+		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
+		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
+		fileRefs["validatePreopenSnapshot"] != 2 || fileRefs["validateOpenNativePreconditions"] != 2 ||
+		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.AcquireDirectory|mdbx_cgo.go:createWriterMarker:os.OpenFile|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
+		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v / %v / %v", packageNativeLimits, packageMaxDBs, packageRefs, fileRefs, packageEffects)
+	}
+	var effectiveFields, effectiveSetup []string
+	ast.Inspect(functions["readEffective"].Body, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if text := compact(lhs); text == "flags" || text == "info" || text == "pageSize" || strings.HasPrefix(text, "info.") {
+					effectiveSetup = append(effectiveSetup, compact(n))
+					break
+				}
+			}
+		case *ast.IncDecStmt:
+			if text := compact(n.X); text == "flags" || text == "pageSize" || strings.HasPrefix(text, "info.") {
+				effectiveSetup = append(effectiveSetup, compact(n))
+			}
+		case *ast.CallExpr:
+			if name := callName(n); name == "C.mdbx_env_get_flags" || name == "C.mdbx_env_info_ex" {
+				effectiveSetup = append(effectiveSetup, compact(n))
+			}
+		case *ast.CompositeLit:
+			if compact(n.Type) == "effectiveConfig" {
+				for _, elt := range n.Elts {
+					effectiveFields = append(effectiveFields, compact(elt))
+				}
+			}
+		}
+		return true
+	})
+	effectiveWant := "flags: uint32(flags)|mode: uint32(info.mi_mode)|pageSize: pageSize|systemPageSize: uint32(info.mi_sys_pagesize)|maxReaders: uint32(info.mi_maxreaders)|lower: uint64(info.mi_geo.lower)|current: uint64(info.mi_geo.current)|upper: uint64(info.mi_geo.upper)|growth: uint64(info.mi_geo.grow)|shrink: uint64(info.mi_geo.shrink)|maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS))|maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS))|limits: limitsForPage(pageSize)"
+	require(strings.Join(effectiveFields, "|") == effectiveWant && strings.Join(effectiveSetup, "|") == "C.mdbx_env_get_flags(env, &flags)|C.mdbx_env_info_ex(env, txn, &info, C.size_t(unsafe.Sizeof(info)))|pageSize := uint32(info.mi_dxb_pagesize)", "effective provenance drifted: %v / %v", effectiveSetup, effectiveFields)
+	var effectiveCalls []string
+	ast.Inspect(functions["readEffective"].Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			effectiveCalls = append(effectiveCalls, callName(call))
+		}
+		return true
+	})
+	require(strings.Join(effectiveCalls, "|") == "int|C.mdbx_env_get_flags|nativeError|int|C.mdbx_env_info_ex|C.size_t|unsafe.Sizeof|nativeError|uint32|uint32|uint32|uint32|uint32|uint64|uint64|uint64|uint64|uint64|int64|C.mdbx_env_get_maxkeysize_ex|int64|C.mdbx_env_get_maxvalsize_ex|limitsForPage", "effective native-call ownership drifted: %v", effectiveCalls)
+	storedOrder := `{"Lower", stored.Lower, caller.Lower},
+		{"Now", stored.Now, caller.Now},
+		{"Upper", stored.Upper, caller.Upper},
+		{"Growth", stored.Growth, caller.Growth},
+		{"Shrink", stored.Shrink, caller.Shrink},
+		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)},
+		{"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)}`
+	require(strings.Count(body("validateStoredConfig"), storedOrder) == 1, "stored/caller ConfigV1 comparison order drifted")
+	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
+	require(strings.Count(body("consume"), "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)") == 1 && strings.Count(body("consume"), consumeTail) == 1, "consume terminal ordering drifted")
+	errorCalls := map[string]int{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok && call.Pos() >= functions["Create"].Pos() {
+			name := callName(call)
+			if name == "adapterError" || name == "integrityError" || name == "ioError" || name == "writerLockError" {
+				errorCalls[compact(call)]++
+			}
+		}
+		return true
+	})
+	wantErrorCalls := map[string]int{
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
+		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
+		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
+		`adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)`: 1, `adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)`: 1,
+		`adapterError(operation, EngineInvalidInput, codeEINVAL, "path must be nonempty, NUL-free, absolute and clean", nil)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeEExist, "Create path already exists", nil)`: 1,
+		`ioError(operationCreate, "inspect Create path", err)`: 1, `ioError(operationCreate, "create environment directory", err)`: 1, `ioError(operationCreate, "read back environment directory", err)`: 2,
+		`integrityError(operationCreate, "environment directory is unsafe", nil)`: 2, `ioError(operationCreate, "normalize environment directory mode", err)`: 1,
+		`adapterError(operationOpen, EngineInvalidInput, codeENOFile, "Open path is absent", nil)`: 1, `ioError(operationOpen, "inspect environment directory", err)`: 1, `integrityError(operationOpen, "environment directory is unsafe", nil)`: 1,
+		`adapterError(operationOpen, EngineInvalidInput, codeENOFile, name+" is absent", nil)`: 1, `ioError(operationOpen, "inspect "+name, err)`: 1, `integrityError(operationOpen, name+" is unsafe", nil)`: 1,
+		`integrityError(operationOpen, "mdbx.dat is undersized", nil)`:                                           1,
+		`adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization failed", nil)`: 1, `adapterError(operationInit, EngineLocalInvariant, codeProblem, "MDBX debug normalization did not stabilize", nil)`: 1,
+		`writerLockError(operation, result, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, closeErr)`: 1, `ioError(operation, readDiagnostic, err)`: 1, `integrityError(operation, name+" is unsafe", nil)`: 2,
+		`ioError(operation, normalizeDiagnostic, err)`: 1, `ioError(operation, diagnostic, err)`: 1, `integrityError(operationCreate, "effective environment mismatch", err)`: 1,
+		`adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, nil)`: 2, `adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, native)`: 1,
+		`integrityError(operationOpen, "effective environment mismatch", err)`: 2, `integrityError(operation, "SchemaV1 DBI flags mismatch", nil)`: 1, `integrityError(operation, "SchemaV1 main cardinality mismatch", nil)`: 1,
+		`integrityError(operationInit, "SchemaV1 metadata cardinality mismatch", nil)`: 1, `integrityError(operationOpen, "invalid SchemaV1 version row", err)`: 1, `integrityError(operationOpen, "invalid ConfigV1 row", err)`: 1,
+		`integrityError(operation, "required metadata value mismatch", nil)`: 1, `ioError(operationClose, "release Rubin writer lock", err)`: 1,
+	}
+	if len(errorCalls) != len(wantErrorCalls) {
+		t.Fatalf("adapter/io call-site count=%d, want %d: %v", len(errorCalls), len(wantErrorCalls), errorCalls)
+	}
+	for call, count := range wantErrorCalls {
+		if errorCalls[call] != count {
+			t.Errorf("adapter/io call-site %q count=%d, want %d", call, errorCalls[call], count)
+		}
+	}
+	for name, marker := range map[string]string{"initializeLocked": "C.mdbx_txn_commit", "inspectOpenLocked": "s.abortLocked"} {
+		var writes []string
+		var writeAt []token.Pos
+		markerAt := token.NoPos
+		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.CallExpr:
+				if callName(n) == marker {
+					markerAt = n.Pos()
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if text := compact(lhs); text == "*s" || text == "s.state" || text == "s.config" || text == "s.dbis" || strings.HasPrefix(text, "s.config.") {
+						writes, writeAt = append(writes, compact(n)), append(writeAt, n.Pos())
+						break
+					}
+				}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND && (compact(n.X) == "s.state" || compact(n.X) == "s.config" || compact(n.X) == "s.dbis") {
+					writes, writeAt = append(writes, compact(n)), append(writeAt, n.Pos())
+				}
+			case *ast.IncDecStmt:
+				if text := compact(n.X); text == "s.state" || text == "s.config" || text == "s.dbis" {
+					writes, writeAt = append(writes, compact(n)), append(writeAt, n.Pos())
+				}
+			}
+			return true
+		})
+		want := map[string]string{"initializeLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis", "inspectOpenLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis"}[name]
+		if len(writes) != 1 || markerAt == token.NoPos || writes[0] != want || writeAt[0] <= markerAt {
+			t.Errorf("%s publication writes=%v marker=%d", name, writes, markerAt)
+		}
+	}
+	if functions["initializeSchema"].Recv != nil || functions["inspectSchema"].Recv != nil {
+		t.Fatal("transaction schema helpers gained Store ownership")
+	}
+	for _, name := range []string{"initializeSchema", "inspectSchema"} {
+		ast.Inspect(functions[name].Type.Params, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && ident.Name == "Store" {
+				t.Errorf("%s gained a Store parameter", name)
+			}
+			return true
+		})
+	}
+	for name, want := range map[string]string{
+		"initializeLocked":  "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|initializeSchema|s.abortLocked|int|C.mdbx_txn_commit|commitTransition|nativeError|orderedErrors|s.poison",
+		"inspectOpenLocked": "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|inspectSchema|s.abortLocked",
+	} {
+		var calls []string
+		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				calls = append(calls, callName(call))
+			}
+			return true
+		})
+		if strings.Join(calls, "|") != want {
+			t.Errorf("%s helper ownership drifted: %v", name, calls)
+		}
+	}
+	var storeWrites, packageStoreWriteOwners []string
+	for _, filename := range names {
+		for _, declaration := range files[filename].Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				assignment, ok := node.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range assignment.Lhs {
+					_, wholeObject := lhs.(*ast.StarExpr)
+					selector, ok := lhs.(*ast.SelectorExpr)
+					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis") {
+						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
+						if filename == "mdbx_cgo.go" {
+							storeWrites = append(storeWrites, fn.Name.Name+":"+compact(assignment))
+						}
+						break
+					}
+				}
+				return true
+			})
+		}
+	}
+	wantStoreWrites := "initializeLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.terminal = storePOISONEDTHREAD, txn, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
+		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
+	}
+	if !strings.HasPrefix(production, "//go:build cgo && (darwin || linux) && (amd64 || arm64)\n") || strings.Count(production, "os.OpenFile(") != 1 || strings.Contains(production, "os.WriteFile(") || strings.Contains(production, "os.Create(") {
+		t.Fatal("production build expression or native-file ownership drifted")
+	}
 }
