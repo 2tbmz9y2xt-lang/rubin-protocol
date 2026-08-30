@@ -19,6 +19,7 @@ static int rubin_fixture_add_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonic
 static int rubin_fixture_check_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { const unsigned char mk = 2, mv = 0x42, ak[16] = {1}, av[104] = {1}; MDBX_val mkey = {(void *)&mk, 1}, akey = {(void *)ak, 16}, got; int rc = mdbx_get(txn, meta, &mkey, &got); if (rc == MDBX_SUCCESS && (got.iov_len != 1 || memcmp(got.iov_base, &mv, 1))) rc = MDBX_INVALID; if (rc == MDBX_SUCCESS) rc = mdbx_get(txn, canonical, &akey, &got); return rc == MDBX_SUCCESS && (got.iov_len != 104 || memcmp(got.iov_base, av, 104)) ? MDBX_INVALID : rc; }
 static int rubin_fixture_readers_493(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 1, value[48] = {0,0,0,0,0,0x10,0,0, 0,0,0,0,0,0x20,0,0, 0,0,0,0,0x10,0,0,0, 0,0,0,0,0,0x10,0,0, 0,0,0,0,0,0x20,0,0, 0,0,0x10,0, 0,0,1,0xed}; MDBX_val k = {(void *)&key, 1}, v = {(void *)value, 48}; return mdbx_put(txn, meta, &k, &v, MDBX_UPSERT); }
 static int rubin_fixture_check_and_reconfigure(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { int rc = rubin_fixture_check_rows(txn, meta, canonical); return rc == MDBX_SUCCESS ? rubin_fixture_readers_493(txn, meta) : rc; }
+static int rubin_fixture_put(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_UPSERT); }
 */
 import "C"
 
@@ -29,6 +30,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
@@ -167,8 +169,8 @@ func fixtureOpen(path string, cfg ConfigV1, mode fixtureMode) (*Store, error) {
 }
 
 func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_txn) error) error {
-	store.operations.RLock()
-	defer store.operations.RUnlock()
+	store.operations.Lock()
+	defer store.operations.Unlock()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	begun := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
@@ -180,6 +182,37 @@ func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_t
 		return joinErrors(primary, fixtureResult(operationAbort, abortRC))
 	}
 	return fixtureResult(operation, int(C.mdbx_txn_commit(begun.txn)))
+}
+
+type fixtureRawRow struct {
+	dbi        DBI
+	key, value []byte
+}
+
+func fixtureSeedRows(store *Store, rows ...fixtureRawRow) error {
+	for _, row := range rows {
+		if ValidateDBI(row.dbi) != nil || !validKey(row.dbi.Rank, row.key) {
+			return errors.New("fixture raw row is outside SchemaV1")
+		}
+		minimum, maximum := rawValueBounds(row.dbi, row.key)
+		if uint64(len(row.value)) < minimum || uint64(len(row.value)) > maximum {
+			return errors.New("fixture raw row is outside SchemaV1")
+		}
+	}
+	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
+		for _, row := range rows {
+			var value unsafe.Pointer
+			if len(row.value) != 0 {
+				value = unsafe.Pointer(&row.value[0])
+			}
+			rc := int(C.rubin_fixture_put(txn, store.dbis[row.dbi.Rank], unsafe.Pointer(&row.key[0]), C.size_t(len(row.key)), value, C.size_t(len(row.value))))
+			runtime.KeepAlive(row)
+			if err := fixtureResult(operationInit, rc); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func reopenAfterFixture(path string, cfg ConfigV1, store *Store, primary error) (*Store, error) {
