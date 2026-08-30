@@ -2498,6 +2498,7 @@ var _ func(daRelayRecordPlacement) = (*DARelayState)(nil).installDASetRecordLock
 func daRelayTestPeerProvenance(quota string) daProvenance {
 	return daProvenance{kind: daProvenancePeer, peerIdentity: quota + "-addr", quotaIdentity: quota}
 }
+
 func daRelayTestIdentity(seed byte, provenance daProvenance) daRelayMemberIdentity {
 	return daRelayMemberIdentity{
 		txid:       daRelayTestID(seed),
@@ -2507,6 +2508,7 @@ func daRelayTestIdentity(seed byte, provenance daProvenance) daRelayMemberIdenti
 		provenance: provenance,
 	}
 }
+
 func daRelayTestOwnerReadyCommit(daID [32]byte, seed byte, provenance daProvenance, txBytes []byte) daRelayOwnerReadyMember {
 	return daRelayOwnerReadyMember{
 		locator: daRelayLocator{daID: daID, kind: daRelayLocatorCommit},
@@ -2514,6 +2516,7 @@ func daRelayTestOwnerReadyCommit(daID [32]byte, seed byte, provenance daProvenan
 		txBytes: txBytes,
 	}
 }
+
 func daRelayTestOwnerReadyChunk(daID [32]byte, index uint16, seed byte, provenance daProvenance, txBytes, payload []byte) daRelayOwnerReadyMember {
 	return daRelayOwnerReadyMember{
 		locator: daRelayLocator{daID: daID, kind: daRelayLocatorChunk, chunkIndex: index},
@@ -2522,15 +2525,18 @@ func daRelayTestOwnerReadyChunk(daID [32]byte, index uint16, seed byte, provenan
 		payload: payload,
 	}
 }
+
 func stageOwnerReadyMemberForTest(state *DARelayState, member daRelayOwnerReadyMember) daRelayRecordImage {
 	pre, present := state.sets[member.locator.daID]
 	return stageDAOwnerReadyMember(pre, present, member)
 }
+
 func projectOwnerReadyMember(state *DARelayState, member daRelayOwnerReadyMember) (daRelayRecordPlacement, error) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	return state.projectDARecordImageLocked(stageOwnerReadyMemberForTest(state, member))
 }
+
 func mustInstallOwnerReadyMember(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember) daRelayRecordPlacement {
 	t.Helper()
 	state.mu.Lock()
@@ -2542,6 +2548,7 @@ func mustInstallOwnerReadyMember(t *testing.T, state *DARelayState, member daRel
 	state.installDASetRecordLocked(placement)
 	return placement
 }
+
 func requireDAImageRejected(t *testing.T, state *DARelayState, image daRelayRecordImage, want error) {
 	t.Helper()
 	before := daRelayStateSnapshot(state)
@@ -2551,6 +2558,7 @@ func requireDAImageRejected(t *testing.T, state *DARelayState, image daRelayReco
 	requireDAErr(t, err, want)
 	requireDARelayStateUnchanged(t, state, before)
 }
+
 func requireOwnerReadyMemberRejected(t *testing.T, state *DARelayState, member daRelayOwnerReadyMember, want error) {
 	t.Helper()
 	before := daRelayStateSnapshot(state)
@@ -3529,7 +3537,6 @@ func TestDARecordImageMapOrder(t *testing.T) {
 func TestDARecordImageCloneIsolation(t *testing.T) {
 	daID := daRelayTestID(81)
 	provenance := daRelayTestPeerProvenance("quota-a")
-
 	t.Run("the locator map is isolated in both clone directions", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		commit := daRelayTestOwnerReadyCommit(daID, 80, provenance, []byte("owner-ready-commit-tx"))
@@ -3548,7 +3555,6 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 			t.Fatal("mutating the source changed the clone locator map")
 		}
 	})
-
 	t.Run("an unowned member costs no identity and a retained one is cloned through", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyChunk(daID, 0, 90, provenance, []byte("chunk-tx"), []byte("chunk-payload")))
@@ -3564,7 +3570,6 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 			t.Fatal("the clone shares the retained member pointer")
 		}
 	})
-
 	t.Run("mutating a member after staging changes no image or staged record", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		member := daRelayTestOwnerReadyChunk(daID, 0, 82, provenance, []byte("chunk-tx"), []byte("chunk-payload"))
@@ -3584,7 +3589,6 @@ func TestDARecordImageCloneIsolation(t *testing.T) {
 			t.Fatalf("the staged commit aliases the caller's value: %+v", stagedCommit)
 		}
 	})
-
 	t.Run("mutating the pre-state after staging changes no image", func(t *testing.T) {
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustInstallOwnerReadyMember(t, state, daRelayTestOwnerReadyCommit(daID, 83, provenance, []byte("owner-ready-commit-tx")))
