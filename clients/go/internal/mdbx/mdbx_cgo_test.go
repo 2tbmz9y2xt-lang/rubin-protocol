@@ -3,6 +3,7 @@
 package mdbx
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -13,14 +14,24 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
+
+func sameError(got, want error) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	gotValue, wantValue := reflect.ValueOf(got), reflect.ValueOf(want)
+	return gotValue.Type() == wantValue.Type() && gotValue.Kind() == reflect.Pointer && gotValue.Pointer() == wantValue.Pointer()
+}
 
 type nilPointerError struct{}
 
@@ -485,6 +496,7 @@ func TestPureOwnershipTransitionsAndErrorOrder(t *testing.T) {
 func environmentConfig() ConfigV1 {
 	return ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 256 << 20, Growth: 1 << 20, Shrink: 2 << 20, PageSize: 4096, MaxReaders: 492}
 }
+
 func createAndClose(path string, cfg ConfigV1) error {
 	store, err := Create(path, cfg)
 	if err != nil {
@@ -492,6 +504,7 @@ func createAndClose(path string, cfg ConfigV1) error {
 	}
 	return store.Close()
 }
+
 func requireEnvironmentError(t *testing.T, err error, class EngineClass, operation engineOperation, code int, diagnostic string) *EngineError {
 	engine := requireEngineError(t, err, class, operation, code)
 	if engine.Diagnostic != diagnostic {
@@ -499,37 +512,43 @@ func requireEnvironmentError(t *testing.T, err error, class EngineClass, operati
 	}
 	return engine
 }
+
 func requireNoStore(t *testing.T, store *Store, err error, class EngineClass, operation engineOperation, code int, diagnostic string) *EngineError {
 	if store != nil {
 		t.Fatal("rejected environment operation returned Store")
 	}
 	return requireEnvironmentError(t, err, class, operation, code, diagnostic)
 }
+
 func mustEnvironment(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
 }
+
 func closedEnvironment(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "db")
 	mustEnvironment(t, createAndClose(path, environmentConfig()))
 	return path
 }
+
 func requireEnvironmentStore(t *testing.T, store *Store, cfg ConfigV1) {
 	if store == nil || store.self != store || store.state != storeOPEN || store.env == nil || store.writer == nil || store.txn != nil || store.terminal != nil || store.config != cfg || !validRetainedDBIs(store.dbis) {
 		t.Fatalf("Store is not one exact OPEN owner: %+v", store)
 	}
 }
+
 func requireShapeRejection(t *testing.T, store *Store, mutate, restore func()) {
 	t.Helper()
 	mutate()
 	self, env, writer, txn, cfg, dbis, state, terminal := store.self, store.env, store.writer, store.txn, store.config, store.dbis, store.state, store.terminal
 	requireEnvironmentError(t, store.Close(), EngineLocalInvariant, operationClose, -30779, "invalid Store resource shape")
-	if store.self != self || store.env != env || store.writer != writer || store.txn != txn || store.config != cfg || store.dbis != dbis || store.state != state || store.terminal != terminal {
+	if store.self != self || store.env != env || store.writer != writer || store.txn != txn || store.config != cfg || store.dbis != dbis || store.state != state || !sameError(store.terminal, terminal) {
 		t.Fatal("shape rejection mutated Store")
 	}
 	restore()
 }
+
 func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
 	if os.Getenv("RUBIN_MDBX_DEBUG_CHILD") == "1" {
 		base, cfg := os.Getenv("RUBIN_MDBX_DEBUG_PATH"), environmentConfig()
@@ -586,7 +605,7 @@ func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
 	requireNoStore(t, store, err, EngineInvalidInput, operationOpen, int(syscall.ENOENT), "Open path is absent")
 	invalidOpen := closedEnvironment(t)
 	store, err = Open(invalidOpen, ConfigV1{})
-	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "invalid ConfigV1"); invalid.Cause != errSchema {
+	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationOpen, int(syscall.EINVAL), "invalid ConfigV1"); !sameError(invalid.Cause, errSchema) {
 		t.Fatalf("invalid Open ConfigV1 cause=%v", invalid.Cause)
 	}
 	supplied := environmentConfig()
@@ -597,7 +616,7 @@ func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
 	}
 	invalidTarget := filepath.Join(parent, "invalid-config")
 	store, err = Create(invalidTarget, ConfigV1{})
-	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "invalid ConfigV1"); invalid.Cause != errSchema {
+	if invalid := requireNoStore(t, store, err, EngineInvalidInput, operationCreate, int(syscall.EINVAL), "invalid ConfigV1"); !sameError(invalid.Cause, errSchema) {
 		t.Fatalf("invalid ConfigV1 cause=%v", invalid.Cause)
 	}
 	if _, statErr := os.Lstat(invalidTarget); !errors.Is(statErr, os.ErrNotExist) {
@@ -640,7 +659,9 @@ func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
 	for i, row := range rows {
 		t.Run(fmt.Sprintf("fresh-process-%02d", i), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "db")
-			cmd := exec.Command(os.Args[0], "-test.run=^TestEnvironmentPrevalidationAndNormalization$", "-test.count=1")
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnvironmentPrevalidationAndNormalization$", "-test.count=1")
 			for _, entry := range os.Environ() {
 				key := strings.SplitN(entry, "=", 2)[0]
 				if key != "RUBIN_MDBX_DEBUG_CHILD" && key != "RUBIN_MDBX_DEBUG_PATH" && !debugSet[key] {
@@ -655,6 +676,7 @@ func TestEnvironmentPrevalidationAndNormalization(t *testing.T) {
 		})
 	}
 }
+
 func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db")
 	cfg := environmentConfig()
@@ -708,9 +730,12 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	}
 	store.state = storeOPEN
 	for _, shape := range []struct{ mutate, restore func() }{
-		{func() { store.env = nil }, func() { store.env = env }}, {func() { store.writer = nil }, func() { store.writer = writer }},
-		{func() { store.config = ConfigV1{} }, func() { store.config = cfg }}, {func() { store.dbis = zeroDBI }, func() { store.dbis = dbis }},
-		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }}, {func() { store.self = nil }, func() { store.self = store }},
+		{func() { store.env = nil }, func() { store.env = env }},
+		{func() { store.writer = nil }, func() { store.writer = writer }},
+		{func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
+		{func() { store.dbis = zeroDBI }, func() { store.dbis = dbis }},
+		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }},
+		{func() { store.self = nil }, func() { store.self = store }},
 	} {
 		requireShapeRejection(t, store, shape.mutate, shape.restore)
 	}
@@ -734,16 +759,19 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	closeRelease := releaseResult(errors.New("release"))
 	for _, terminal := range []error{nil, closeNative, closeRelease, joinErrors(closeNative, closeRelease)} {
 		store.terminal = terminal
-		if store.Close() != terminal {
+		if !sameError(store.Close(), terminal) {
 			t.Fatal("CLOSED terminal identity changed")
 		}
 	}
 	store.terminal = nil
 	closedDBIs := store.dbis
 	for _, shape := range []struct{ mutate, restore func() }{
-		{func() { store.env = env }, func() { store.env = nil }}, {func() { store.writer = writer }, func() { store.writer = nil }},
-		{func() { store.config = cfg }, func() { store.config = ConfigV1{} }}, {func() { store.dbis = dbis }, func() { store.dbis = closedDBIs }},
-		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }}, {func() { store.self = nil }, func() { store.self = store }},
+		{func() { store.env = env }, func() { store.env = nil }},
+		{func() { store.writer = writer }, func() { store.writer = nil }},
+		{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
+		{func() { store.dbis = dbis }, func() { store.dbis = closedDBIs }},
+		{func() { store.terminal = errors.New("forged") }, func() { store.terminal = nil }},
+		{func() { store.self = nil }, func() { store.self = store }},
 	} {
 		requireShapeRejection(t, store, shape.mutate, shape.restore)
 	}
@@ -774,6 +802,7 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	requireEnvironmentStore(t, fixed, fixedCfg)
 	mustEnvironment(t, fixed.Close())
 }
+
 func requireArtifact(t *testing.T, path string, mode os.FileMode, empty bool) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -790,6 +819,7 @@ func requireArtifact(t *testing.T, path string, mode os.FileMode, empty bool) {
 		t.Fatalf("%s mode=%v links=%v size=%d", path, info.Mode(), ok && uint64(stat.Nlink) == 1, info.Size())
 	}
 }
+
 func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
 	mutations := []struct {
 		name string
@@ -852,24 +882,27 @@ func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) { requireOpenEnvironmentError(t, tc.prepare(t), tc.class, tc.code, tc.diagnostic) })
 	}
 }
+
 func requireOpenEnvironmentError(t *testing.T, path string, class EngineClass, code int, diagnostic string) *EngineError {
 	store, err := Open(path, environmentConfig())
 	return requireNoStore(t, store, err, class, operationOpen, code, diagnostic)
 }
+
 func consumeNativeTestStore(t *testing.T, store *Store) {
 	t.Helper()
 	if retained, err := store.consume(nil); retained || err != nil {
 		t.Fatalf("direct native cleanup retained=%v err=%v", retained, err)
 	}
 }
+
 func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	primary := nativeError(operationOpen, codeCorrupted)
 	failed := &Store{}
-	if store, err := finishConstruction(failed, transactionOutcome{err: primary}); store != nil || err != primary || failed.state != storeCLOSED {
+	if store, err := finishConstruction(failed, transactionOutcome{err: primary}); store != nil || !sameError(err, primary) || failed.state != storeCLOSED {
 		t.Fatalf("failed construction=%v/%v/%s", store, err, failed.state)
 	}
 	poisoned, poisonErr := &Store{}, nativeError(operationInit, codeThreadMismatch)
-	if store, err := finishConstruction(poisoned, transactionOutcome{err: poisonErr, poisoned: true}); store != poisoned || err != poisonErr {
+	if store, err := finishConstruction(poisoned, transactionOutcome{err: poisonErr, poisoned: true}); store != poisoned || !sameError(err, poisonErr) {
 		t.Fatalf("poisoned construction identity=%v/%v", store, err)
 	}
 	_, artifactErr := validateOpenArtifacts("\x00")
@@ -986,7 +1019,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 		}
 		mustEnvironment(t, malformed.Close())
 		opened := requireOpenEnvironmentError(t, path, EngineIntegrity, codeInvalid, tc.diagnostic)
-		if opened.Cause != tc.cause {
+		if !sameError(opened.Cause, tc.cause) {
 			t.Fatalf("malformed %s Cause=%v", tc.diagnostic, opened.Cause)
 		}
 	}
@@ -1033,13 +1066,16 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	}
 	mustEnvironment(t, handle.Release())
 }
+
 func TestEnvironmentPureMatrices(t *testing.T) {
 	for _, tc := range []struct {
 		first, second int
 		diagnostic    string
 	}{
-		{-1, 0, "MDBX debug normalization failed"}, {-1, 0x00030000, "MDBX debug normalization failed"},
-		{0, 0, "MDBX debug normalization did not stabilize"}, {0x00030000, 0x00030001, "MDBX debug normalization did not stabilize"},
+		{-1, 0, "MDBX debug normalization failed"},
+		{-1, 0x00030000, "MDBX debug normalization failed"},
+		{0, 0, "MDBX debug normalization did not stabilize"},
+		{0x00030000, 0x00030001, "MDBX debug normalization did not stabilize"},
 	} {
 		requireEnvironmentError(t, debugNormalizationError(tc.first, tc.second), EngineLocalInvariant, operationInit, -30779, tc.diagnostic)
 	}
@@ -1060,11 +1096,16 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 		err   error
 		valid bool
 	}{
-		{nativeError(operationInit, -30416), true}, {nativeError(operationAbort, -30416), true},
-		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationInit, -30778)), true}, {adapterError(operationOpen, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), true},
-		{nativeError(operationOpen, -30416), false}, {adapterError(operationInit, EngineLocalInvariant, -30778, shapeDiagnostic, nativeError(operationInit, -30778)), false},
-		{adapterError(operationInit, EngineLocalInvariant, -30779, "forged", nativeError(operationInit, -30778)), false}, {adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nil), false},
-		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), false}, {nil, false},
+		{nativeError(operationInit, -30416), true},
+		{nativeError(operationAbort, -30416), true},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationInit, -30778)), true},
+		{adapterError(operationOpen, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), true},
+		{nativeError(operationOpen, -30416), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30778, shapeDiagnostic, nativeError(operationInit, -30778)), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, "forged", nativeError(operationInit, -30778)), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nil), false},
+		{adapterError(operationInit, EngineLocalInvariant, -30779, shapeDiagnostic, nativeError(operationOpen, -30778)), false},
+		{nil, false},
 	} {
 		if validPoisonTerminal(tc.err) != tc.valid {
 			t.Fatalf("poison terminal row %d validity changed", i)
@@ -1073,7 +1114,7 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 	requireEnvironmentError(t, nativePointerResultError("unknown", "ignored", 0, true), EngineLocalInvariant, operationInit, -30779, "unsupported engine operation")
 	releaseCause := fmt.Errorf("wrapped: %w", syscall.ENOSPC)
 	release := requireEnvironmentError(t, releaseResult(releaseCause), EngineCapacity, operationClose, int(syscall.ENOSPC), "release Rubin writer lock")
-	if releaseResult(nil) != nil || errors.Unwrap(release) != releaseCause {
+	if releaseResult(nil) != nil || !sameError(errors.Unwrap(release), releaseCause) {
 		t.Fatal("release result or cause identity changed")
 	}
 	requireEnvironmentError(t, requireCreateTargetAbsent("\x00"), EngineInvalidInput, operationCreate, int(syscall.EINVAL), "inspect Create path")
@@ -1091,9 +1132,12 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 		want string
 		set  func(*ConfigV1)
 	}{
-		{"Lower: got 1052672, want 1048576", func(v *ConfigV1) { v.Lower += 4096 }}, {"Now: got 2101248, want 2097152", func(v *ConfigV1) { v.Now += 4096 }},
-		{"Upper: got 268439552, want 268435456", func(v *ConfigV1) { v.Upper += 4096 }}, {"Growth: got 1052672, want 1048576", func(v *ConfigV1) { v.Growth += 4096 }},
-		{"Shrink: got 2101248, want 2097152", func(v *ConfigV1) { v.Shrink += 4096 }}, {"PageSize: got 8192, want 4096", func(v *ConfigV1) { v.PageSize = 8192 }},
+		{"Lower: got 1052672, want 1048576", func(v *ConfigV1) { v.Lower += 4096 }},
+		{"Now: got 2101248, want 2097152", func(v *ConfigV1) { v.Now += 4096 }},
+		{"Upper: got 268439552, want 268435456", func(v *ConfigV1) { v.Upper += 4096 }},
+		{"Growth: got 1052672, want 1048576", func(v *ConfigV1) { v.Growth += 4096 }},
+		{"Shrink: got 2101248, want 2097152", func(v *ConfigV1) { v.Shrink += 4096 }},
+		{"PageSize: got 8192, want 4096", func(v *ConfigV1) { v.PageSize = 8192 }},
 		{"MaxReaders: got 493, want 492", func(v *ConfigV1) { v.MaxReaders++ }},
 	} {
 		stored := cfg
@@ -1132,6 +1176,7 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 		}
 	}
 }
+
 func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require := func(ok bool, format string, args ...any) {
 		t.Helper()
@@ -1266,9 +1311,9 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	for _, name := range []string{"Create", "Open"} {
 		require(strings.Count(body(name), "&Store{") == 1 && strings.Count(body(name), "store := &Store{writer: writer}\n\tstore.self = store") == 1, "%s constructor Store publication drifted", name)
 	}
-	nativeFiles := "for _, name := range [...]string{\"mdbx.dat\", \"mdbx.lck\"} {\n\t\tif err := normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, \"normalize \"+name+\" mode\", \"read back \"+name); err != nil {\n\t\t\treturn err\n\t\t}\n\t}"
+	nativeFiles := "for _, name := range [...]string{\"mdbx.dat\", \"mdbx.lck\"} {\n\t\terr = normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, \"normalize \"+name+\" mode\", \"read back \"+name)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t}"
 	require(strings.Count(body("createEnvironment"), nativeFiles) == 1, "native-created file normalization/readback loop drifted")
-	normalizeBody := `{ info, err := os.Lstat(path) if err != nil { return ioError(operation, readDiagnostic, err) } if !validFileInfo(info, empty, false) { return integrityError(operation, name+" is unsafe", nil) } if err = os.Chmod(path, 0o600); err != nil { return ioError(operation, normalizeDiagnostic, err) } return readOwnedFile(path, name, empty, operation, readDiagnostic) }`
+	normalizeBody := `{ info, err := os.Lstat(path) if err != nil { return ioError(operation, readDiagnostic, err) } if !validFileInfo(info, empty, false) { return integrityError(operation, name+" is unsafe", nil) } err = os.Chmod(path, 0o600) if err != nil { return ioError(operation, normalizeDiagnostic, err) } return readOwnedFile(path, name, empty, operation, readDiagnostic) }`
 	require(compact(functions["normalizeOwnedFile"].Body) == normalizeBody, "owned-file normalization helper drifted")
 	for _, literal := range []string{"C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate", "C.MDBX_NOSTICKYTHREADS, 0, operationOpen", "C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE"} {
 		if strings.Count(production, literal) != 1 {
@@ -1400,9 +1445,13 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		return true
 	})
 	require(strings.Join(effectiveCalls, "|") == "int|C.mdbx_env_get_flags|nativeError|int|C.mdbx_env_info_ex|C.size_t|unsafe.Sizeof|nativeError|uint32|uint32|uint32|uint32|uint64|uint64|uint64|uint64|uint64|int64|C.mdbx_env_get_maxkeysize_ex|int64|C.mdbx_env_get_maxvalsize_ex|limitsForPage", "effective native-call ownership drifted: %v", effectiveCalls)
-	storedOrder := `{"Lower", stored.Lower, caller.Lower}, {"Now", stored.Now, caller.Now}, {"Upper", stored.Upper, caller.Upper},
-		{"Growth", stored.Growth, caller.Growth}, {"Shrink", stored.Shrink, caller.Shrink},
-		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)}, {"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)}`
+	storedOrder := `{"Lower", stored.Lower, caller.Lower},
+		{"Now", stored.Now, caller.Now},
+		{"Upper", stored.Upper, caller.Upper},
+		{"Growth", stored.Growth, caller.Growth},
+		{"Shrink", stored.Shrink, caller.Shrink},
+		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)},
+		{"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)}`
 	require(strings.Count(body("validateStoredConfig"), storedOrder) == 1, "stored/caller ConfigV1 comparison order drifted")
 	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
 	require(strings.Count(body("consume"), "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)") == 1 && strings.Count(body("consume"), consumeTail) == 1, "consume terminal ordering drifted")

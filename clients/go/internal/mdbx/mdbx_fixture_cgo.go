@@ -55,11 +55,13 @@ func init() {
 	fixtureCreateExtraDBI = fixtureWantsExtraDBI
 	fixtureBeforeInitCensus = fixtureCreateMutation
 }
+
 func fixtureWantsExtraDBI(path string) bool {
 	fixtureOwner.Lock()
 	defer fixtureOwner.Unlock()
 	return fixtureOwner.active && fixtureOwner.path == path && fixtureOwner.mode == fixtureUnexpectedDBI
 }
+
 func claimFixturePath(path string) fixtureMode {
 	fixtureOwner.Lock()
 	defer fixtureOwner.Unlock()
@@ -69,6 +71,7 @@ func claimFixturePath(path string) fixtureMode {
 	fixtureOwner.consumed = true
 	return fixtureOwner.mode
 }
+
 func claimFixture(txn *C.MDBX_txn, operation engineOperation) (fixtureMode, error) {
 	result := C.rubin_fixture_txn_path(txn)
 	if err := nativePointerResultError(operation, "mdbx_env_get_path returned invalid result shape", int(result.rc), result.path != nil); err != nil {
@@ -76,6 +79,7 @@ func claimFixture(txn *C.MDBX_txn, operation engineOperation) (fixtureMode, erro
 	}
 	return claimFixturePath(C.GoString(result.path)), nil
 }
+
 func fixtureCreateMutation(txn *C.MDBX_txn, meta C.MDBX_dbi) error {
 	mode, err := claimFixture(txn, operationInit)
 	if err != nil {
@@ -94,12 +98,14 @@ func fixtureCreateMutation(txn *C.MDBX_txn, meta C.MDBX_dbi) error {
 	}
 	return fixtureResult(operationInit, rc)
 }
+
 func fixtureResult(operation engineOperation, rc int) error {
 	if err := nativeError(operation, rc); err != nil {
 		return err
 	}
 	return nil
 }
+
 func armFixture(path string, mode fixtureMode) error {
 	rel, err := filepath.Rel(os.TempDir(), path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || mode < fixtureUnexpectedDBI || mode > fixtureWrongSchemaVersion {
@@ -113,11 +119,13 @@ func armFixture(path string, mode fixtureMode) error {
 	fixtureOwner.active, fixtureOwner.consumed, fixtureOwner.path, fixtureOwner.mode = true, false, path, mode
 	return nil
 }
+
 func clearFixture() {
 	fixtureOwner.Lock()
 	fixtureOwner.active, fixtureOwner.consumed, fixtureOwner.path, fixtureOwner.mode = false, false, "", 0
 	fixtureOwner.Unlock()
 }
+
 func fixtureCreate(path string, cfg ConfigV1, mode fixtureMode) (*Store, error) {
 	if mode != fixtureUnexpectedDBI && mode != fixtureThirdMetaRow {
 		return nil, errors.New("fixture mode is not a Create mode")
@@ -128,6 +136,7 @@ func fixtureCreate(path string, cfg ConfigV1, mode fixtureMode) (*Store, error) 
 	defer clearFixture()
 	return Create(path, cfg)
 }
+
 func fixtureOpen(path string, cfg ConfigV1, mode fixtureMode) (*Store, error) {
 	if mode != fixtureUnnamedMainRow && mode != fixtureWrongSchemaVersion {
 		return nil, errors.New("fixture mode is not an Open mode")
@@ -156,6 +165,7 @@ func fixtureOpen(path string, cfg ConfigV1, mode fixtureMode) (*Store, error) {
 	})
 	return reopenAfterFixture(path, cfg, store, err)
 }
+
 func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_txn) error) error {
 	store.operations.RLock()
 	defer store.operations.RUnlock()
@@ -171,12 +181,14 @@ func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_t
 	}
 	return fixtureResult(operation, int(C.mdbx_txn_commit(begun.txn)))
 }
+
 func reopenAfterFixture(path string, cfg ConfigV1, store *Store, primary error) (*Store, error) {
 	if err := joinErrors(primary, store.Close()); err != nil {
 		return nil, err
 	}
 	return Open(path, cfg)
 }
+
 func fixtureShapeRejected(store *Store, mutate, restore func()) bool {
 	mutate()
 	self, env, writer, txn, cfg, dbis, state, terminal := store.self, store.env, store.writer, store.txn, store.config, store.dbis, store.state, store.terminal
@@ -185,13 +197,16 @@ func fixtureShapeRejected(store *Store, mutate, restore func()) bool {
 	restore()
 	return unchanged && fixtureShapeError(err)
 }
+
 func fixtureStoreSnapshotMatches(store, self *Store, env *C.MDBX_env, writer *filelock.Handle, txn *C.MDBX_txn, cfg ConfigV1, dbis [7]C.MDBX_dbi, state storeState, terminal error) bool {
 	return store.self == self && store.env == env && store.writer == writer && store.txn == txn && store.config == cfg && store.dbis == dbis && store.state == state && store.terminal == terminal
 }
+
 func fixtureShapeError(err error) bool {
 	engine, ok := err.(*EngineError)
 	return ok && engine != nil && engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "invalid Store resource shape"
 }
+
 func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 	var first error
 	var held *C.MDBX_txn
@@ -203,9 +218,12 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 		store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, poison
 		validPoison := store.Close() == poison
 		poisonShapes := []struct{ mutate, restore func() }{
-			{func() { store.env = nil }, func() { store.env = env }}, {func() { store.writer = nil }, func() { store.writer = writer }},
-			{func() { store.txn = nil }, func() { store.txn = txn }}, {func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-			{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }}, {func() { store.terminal = nil }, func() { store.terminal = poison }},
+			{func() { store.env = nil }, func() { store.env = env }},
+			{func() { store.writer = nil }, func() { store.writer = writer }},
+			{func() { store.txn = nil }, func() { store.txn = txn }},
+			{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
+			{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }},
+			{func() { store.terminal = nil }, func() { store.terminal = poison }},
 			{func() { store.self = nil }, func() { store.self = self }},
 		}
 		for _, shape := range poisonShapes {
@@ -218,9 +236,12 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 		if ok && engine != nil && engine.Code == codeBusy {
 			terminal := store.terminal
 			shapes := []struct{ mutate, restore func() }{
-				{func() { store.env = nil }, func() { store.env = env }}, {func() { store.writer = nil }, func() { store.writer = writer }},
-				{func() { store.txn = txn }, func() { store.txn = nil }}, {func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
-				{func() { store.dbis = [7]C.MDBX_dbi{} }, func() { store.dbis = dbis }}, {func() { store.terminal = nil }, func() { store.terminal = terminal }},
+				{func() { store.env = nil }, func() { store.env = env }},
+				{func() { store.writer = nil }, func() { store.writer = writer }},
+				{func() { store.txn = txn }, func() { store.txn = nil }},
+				{func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
+				{func() { store.dbis = [7]C.MDBX_dbi{} }, func() { store.dbis = dbis }},
+				{func() { store.terminal = nil }, func() { store.terminal = terminal }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}
 			validShapes := true
@@ -231,9 +252,12 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 			store.config, store.dbis, store.terminal = ConfigV1{}, [7]C.MDBX_dbi{}, construction
 			validConstruction := store.Close() == construction
 			constructionShapes := []struct{ mutate, restore func() }{
-				{func() { store.env = nil }, func() { store.env = env }}, {func() { store.writer = nil }, func() { store.writer = writer }},
-				{func() { store.txn = txn }, func() { store.txn = nil }}, {func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-				{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }}, {func() { store.terminal = nativeError(operationClose, codeBusy) }, func() { store.terminal = construction }},
+				{func() { store.env = nil }, func() { store.env = env }},
+				{func() { store.writer = nil }, func() { store.writer = writer }},
+				{func() { store.txn = txn }, func() { store.txn = nil }},
+				{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
+				{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }},
+				{func() { store.terminal = nativeError(operationClose, codeBusy) }, func() { store.terminal = construction }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}
 			for _, shape := range constructionShapes {
@@ -255,12 +279,14 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 	}
 	return first, abortErr, closeErr
 }
+
 func fixtureWriteOwnerMismatch(store *Store) (int, error) {
 	return fixtureHeldWrite(store, func(txn *C.MDBX_txn) (int, bool) {
 		rc := int(C.mdbx_txn_commit(txn))
 		return rc, commitTransition(rc).consumed
 	})
 }
+
 func fixtureHeldWrite(store *Store, attempt func(*C.MDBX_txn) (int, bool)) (int, error) {
 	ready, consumed, cleanup := make(chan *C.MDBX_txn, 1), make(chan bool, 1), make(chan error, 1)
 	go func() {
@@ -309,6 +335,7 @@ func fixtureOpenReverseUTXO(path string) (*Store, []byte, error) {
 	opened, err := reopenAfterFixture(path, cfg, store, joinErrors(copyTxnErr, mutationErr))
 	return opened, copied, err
 }
+
 func fixtureOpenStoredReadersMismatch(path string) (*Store, error) {
 	cfg := ConfigV1{1 << 20, 2 << 20, 256 << 20, 1 << 20, 2 << 20, 4096, 492}
 	store, err := Create(path, cfg)

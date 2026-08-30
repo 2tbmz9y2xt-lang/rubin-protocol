@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -433,13 +434,16 @@ func Create(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = normalizeMDBXModule(); err != nil {
+	err = normalizeMDBXModule()
+	if err != nil {
 		return nil, err
 	}
-	if err = validateLimits(cfg, limitsForPage(cfg.PageSize)); err != nil {
+	err = validateLimits(cfg, limitsForPage(cfg.PageSize))
+	if err != nil {
 		return nil, adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
 	}
-	if err = createDirectory(path); err != nil {
+	err = createDirectory(path)
+	if err != nil {
 		return nil, err
 	}
 	writer, err := acquireWriter(path, operationCreate, true)
@@ -448,26 +452,32 @@ func Create(path string, cfg ConfigV1) (*Store, error) {
 	}
 	store := &Store{writer: writer}
 	store.self = store
-	if err = store.createEnvironment(path, cfg); err != nil {
+	err = store.createEnvironment(path, cfg)
+	if err != nil {
 		return store.consumeFailure(err)
 	}
 	return finishConstruction(store, runLocked(func() transactionOutcome { return store.initializeLocked(cfg, encoded) }))
 }
+
 func Open(path string, cfg ConfigV1) (*Store, error) {
-	if err := validatePath(operationOpen, path); err != nil {
+	err := validatePath(operationOpen, path)
+	if err != nil {
 		return nil, err
 	}
 	missingSidecar, err := validateOpenArtifacts(path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = cfg.Encode(); err != nil {
+	_, err = cfg.Encode()
+	if err != nil {
 		return nil, adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)
 	}
-	if err = normalizeMDBXModule(); err != nil {
+	err = normalizeMDBXModule()
+	if err != nil {
 		return nil, err
 	}
-	if err = validateLimits(cfg, limitsForPage(cfg.PageSize)); err != nil {
+	err = validateLimits(cfg, limitsForPage(cfg.PageSize))
+	if err != nil {
 		return nil, adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
 	}
 	writer, err := acquireWriter(path, operationOpen, missingSidecar)
@@ -476,16 +486,20 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	}
 	store := &Store{writer: writer}
 	store.self = store
-	if err = store.openEnvironment(path, cfg); err != nil {
+	err = store.openEnvironment(path, cfg)
+	if err != nil {
 		return store.consumeFailure(err)
 	}
 	return finishConstruction(store, runLocked(func() transactionOutcome { return store.inspectOpenLocked(cfg) }))
 }
+
 func validateCreateStatic(path string, cfg ConfigV1) ([]byte, error) {
-	if err := validatePath(operationCreate, path); err != nil {
+	err := validatePath(operationCreate, path)
+	if err != nil {
 		return nil, err
 	}
-	if err := requireCreateTargetAbsent(path); err != nil {
+	err = requireCreateTargetAbsent(path)
+	if err != nil {
 		return nil, err
 	}
 	encoded, err := cfg.Encode()
@@ -494,6 +508,7 @@ func validateCreateStatic(path string, cfg ConfigV1) ([]byte, error) {
 	}
 	return encoded, nil
 }
+
 func finishConstruction(store *Store, outcome transactionOutcome) (*Store, error) {
 	if outcome.poisoned {
 		return store, outcome.err
@@ -503,6 +518,7 @@ func finishConstruction(store *Store, outcome transactionOutcome) (*Store, error
 	}
 	return store, nil
 }
+
 func (s *Store) Close() error {
 	if s == nil {
 		return adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)
@@ -523,9 +539,11 @@ func (s *Store) Close() error {
 	_, err := s.consume(nil)
 	return err
 }
+
 func validStoreState(state storeState) bool {
 	return state == storeOPEN || state == storeCLOSEBLOCKED || state == storeCLOSED || state == storePOISONEDTHREAD
 }
+
 func validStoreShape(s *Store) bool {
 	if s.self != s {
 		return false
@@ -543,26 +561,33 @@ func validStoreShape(s *Store) bool {
 		return false
 	}
 }
+
 func validOpenStoreShape(s *Store) bool {
 	return s.env != nil && s.writer != nil && s.txn == nil && s.terminal == nil && s.config.valid() && validRetainedDBIs(s.dbis)
 }
+
 func validCloseBlockedStoreShape(s *Store) bool {
 	engine, terminalOK := directNativeResult(operationClose, s.terminal)
 	resourcesOK := validPublishedStoreResources(s) || validConstructionStoreResources(s, engine, terminalOK)
 	return s.env != nil && s.writer != nil && s.txn == nil && terminalOK && engine.Code == codeBusy && resourcesOK
 }
+
 func validPublishedStoreResources(s *Store) bool {
 	return s.config.valid() && validRetainedDBIs(s.dbis)
 }
+
 func validConstructionStoreResources(s *Store, engine *EngineError, terminalOK bool) bool {
 	return s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && terminalOK && engine.Cause != nil
 }
+
 func validClosedStoreShape(s *Store) bool {
 	return s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validClosedTerminal(s.terminal)
 }
+
 func validPoisonedStoreShape(s *Store) bool {
 	return s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validPoisonTerminal(s.terminal)
 }
+
 func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
 	seen := make(map[C.MDBX_dbi]bool, len(dbis))
 	for _, dbi := range dbis {
@@ -573,25 +598,28 @@ func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
 	}
 	return true
 }
+
 func validPoisonTerminal(err error) bool {
-	engine, ok := err.(*EngineError)
-	if !ok || engine == nil {
+	var engine *EngineError
+	if !errors.As(err, &engine) || engine == nil || reflect.TypeOf(err) != reflect.TypeOf(engine) || reflect.ValueOf(err).Pointer() != reflect.ValueOf(engine).Pointer() {
 		return false
 	}
 	operation := engineOperation(engine.Operation)
 	if engine.Code == codeThreadMismatch && (operation == operationInit || operation == operationAbort) {
-		_, ok = directNativeResult(operation, err)
+		_, ok := directNativeResult(operation, err)
 		return ok
 	}
 	if !validPointerShapePoison(engine, operation) {
 		return false
 	}
-	_, ok = directNativeResult(operation, engine.Cause)
+	_, ok := directNativeResult(operation, engine.Cause)
 	return ok
 }
+
 func validPointerShapePoison(engine *EngineError, operation engineOperation) bool {
 	return engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "mdbx_txn_begin returned invalid result shape" && (operation == operationInit || operation == operationOpen)
 }
+
 func validClosedTerminal(err error) bool {
 	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) {
 		return true
@@ -603,20 +631,24 @@ func validClosedTerminal(err error) bool {
 	parts := joined.Unwrap()
 	return len(parts) == 2 && validConsumedCloseTerminal(parts[0]) && validReleaseTerminal(parts[1])
 }
+
 func validConsumedCloseTerminal(e error) bool {
 	v, ok := directNativeResult(operationClose, e)
 	return ok && v.Code != codeBusy
 }
+
 func validReleaseTerminal(err error) bool {
-	engine, ok := err.(*EngineError)
-	return ok && engine != nil && engine.Operation == string(operationClose) && engine.Diagnostic == "release Rubin writer lock" && engine.Cause != nil && engine.Class == classifyNative(operationClose, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+	var engine *EngineError
+	return errors.As(err, &engine) && engine != nil && reflect.TypeOf(err) == reflect.TypeOf(engine) && reflect.ValueOf(err).Pointer() == reflect.ValueOf(engine).Pointer() && engine.Operation == string(operationClose) && engine.Diagnostic == "release Rubin writer lock" && engine.Cause != nil && engine.Class == classifyNative(operationClose, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
 }
+
 func validatePath(operation engineOperation, path string) error {
 	if path == "" || strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return adapterError(operation, EngineInvalidInput, codeEINVAL, "path must be nonempty, NUL-free, absolute and clean", nil)
 	}
 	return nil
 }
+
 func requireCreateTargetAbsent(path string) error {
 	_, err := os.Lstat(path)
 	if err == nil {
@@ -627,8 +659,10 @@ func requireCreateTargetAbsent(path string) error {
 	}
 	return ioError(operationCreate, "inspect Create path", err)
 }
+
 func createDirectory(path string) error {
-	if err := os.Mkdir(path, 0o700); err != nil {
+	err := os.Mkdir(path, 0o700)
+	if err != nil {
 		return ioError(operationCreate, "create environment directory", err)
 	}
 	info, err := os.Lstat(path)
@@ -638,7 +672,8 @@ func createDirectory(path string) error {
 	if !validDirectoryInfo(info, false) {
 		return integrityError(operationCreate, "environment directory is unsafe", nil)
 	}
-	if err = os.Chmod(path, 0o700); err != nil {
+	err = os.Chmod(path, 0o700)
+	if err != nil {
 		return ioError(operationCreate, "normalize environment directory mode", err)
 	}
 	info, err = os.Lstat(path)
@@ -650,6 +685,7 @@ func createDirectory(path string) error {
 	}
 	return nil
 }
+
 func validateOpenArtifacts(path string) (bool, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -662,12 +698,14 @@ func validateOpenArtifacts(path string) (bool, error) {
 		return false, integrityError(operationOpen, "environment directory is unsafe", nil)
 	}
 	for _, name := range [...]string{"mdbx.dat", "mdbx.lck"} {
-		if _, err = inspectOpenFile(path, name, false, false); err != nil {
+		_, err = inspectOpenFile(path, name, false, false)
+		if err != nil {
 			return false, err
 		}
 	}
 	return inspectOpenFile(path, "rubin-writer.lock", true, true)
 }
+
 func inspectOpenFile(path, name string, empty, missingAllowed bool) (bool, error) {
 	info, err := os.Lstat(filepath.Join(path, name))
 	if errors.Is(err, os.ErrNotExist) {
@@ -684,13 +722,16 @@ func inspectOpenFile(path, name string, empty, missingAllowed bool) (bool, error
 	}
 	return false, nil
 }
+
 func validDirectoryInfo(info os.FileInfo, exactMode bool) bool {
 	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && (!exactMode || exactPermissionBits(info.Mode()) == 0o700)
 }
+
 func validFileInfo(info os.FileInfo, empty, exactMode bool) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return info.Mode().IsRegular() && ok && uint64(stat.Nlink) == 1 && (!empty || info.Size() == 0) && (!exactMode || exactPermissionBits(info.Mode()) == 0o600)
 }
+
 func exactPermissionBits(mode os.FileMode) os.FileMode {
 	return mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
 }
@@ -709,6 +750,7 @@ func debugNormalizationError(first, second int) error {
 	}
 	return nil
 }
+
 func acquireWriter(path string, operation engineOperation, normalize bool) (*filelock.Handle, error) {
 	lockPath := filepath.Join(path, "rubin-writer.lock")
 	handle, result, err := filelock.Acquire(lockPath)
@@ -725,6 +767,7 @@ func acquireWriter(path string, operation engineOperation, normalize bool) (*fil
 	}
 	return handle, nil
 }
+
 func normalizeOwnedFile(path, name string, empty bool, operation engineOperation, normalizeDiagnostic, readDiagnostic string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -733,11 +776,13 @@ func normalizeOwnedFile(path, name string, empty bool, operation engineOperation
 	if !validFileInfo(info, empty, false) {
 		return integrityError(operation, name+" is unsafe", nil)
 	}
-	if err = os.Chmod(path, 0o600); err != nil {
+	err = os.Chmod(path, 0o600)
+	if err != nil {
 		return ioError(operation, normalizeDiagnostic, err)
 	}
 	return readOwnedFile(path, name, empty, operation, readDiagnostic)
 }
+
 func readOwnedFile(path, name string, empty bool, operation engineOperation, diagnostic string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -755,6 +800,7 @@ func limitsForPage(pageSize uint32) nativeLimits {
 	page := C.intptr_t(pageSize)
 	return nativeLimits{minDB: int64(C.mdbx_limits_dbsize_min(page)), maxDB: int64(C.mdbx_limits_dbsize_max(page)), maxKey: int64(C.mdbx_limits_keysize_max(page, C.MDBX_DB_DEFAULTS)), maxValue: int64(C.mdbx_limits_valsize_max(page, C.MDBX_DB_DEFAULTS))}
 }
+
 func validateLimits(cfg ConfigV1, limits nativeLimits) error {
 	if limits.minDB < 0 || limits.maxDB < limits.minDB || limits.maxKey < 77 || limits.maxValue < 68_000_125 {
 		return fmt.Errorf("native limits min=%d max=%d key=%d value=%d", limits.minDB, limits.maxDB, limits.maxKey, limits.maxValue)
@@ -764,12 +810,15 @@ func validateLimits(cfg ConfigV1, limits nativeLimits) error {
 	}
 	return nil
 }
+
 func (s *Store) createEnvironment(path string, cfg ConfigV1) error {
-	if err := s.configureCreateEnvironment(path, cfg); err != nil {
+	err := s.configureCreateEnvironment(path, cfg)
+	if err != nil {
 		return err
 	}
 	for _, name := range [...]string{"mdbx.dat", "mdbx.lck"} {
-		if err := normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, "normalize "+name+" mode", "read back "+name); err != nil {
+		err = normalizeOwnedFile(filepath.Join(path, name), name, false, operationCreate, "normalize "+name+" mode", "read back "+name)
+		if err != nil {
 			return err
 		}
 	}
@@ -777,13 +826,16 @@ func (s *Store) createEnvironment(path string, cfg ConfigV1) error {
 	if err != nil {
 		return err
 	}
-	if err = validateEffective(cfg, effective); err != nil {
+	err = validateEffective(cfg, effective)
+	if err != nil {
 		return integrityError(operationCreate, "effective environment mismatch", err)
 	}
 	return nil
 }
+
 func (s *Store) configureCreateEnvironment(path string, cfg ConfigV1) error {
-	if err := s.allocateEnvironment(operationCreate); err != nil {
+	err := s.allocateEnvironment(operationCreate)
+	if err != nil {
 		return err
 	}
 	maxDBs := C.MDBX_dbi(7)
@@ -801,8 +853,10 @@ func (s *Store) configureCreateEnvironment(path string, cfg ConfigV1) error {
 	}
 	return openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate)
 }
+
 func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
-	if err := s.allocateEnvironment(operationOpen); err != nil {
+	err := s.allocateEnvironment(operationOpen)
+	if err != nil {
 		return err
 	}
 	if rc := int(C.mdbx_env_set_maxdbs(s.env, 7)); rc != codeSuccess {
@@ -811,7 +865,8 @@ func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
 	if rc := int(C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))); rc != codeSuccess {
 		return nativeError(operationOpen, rc)
 	}
-	if err := openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen); err != nil {
+	err = openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)
+	if err != nil {
 		return err
 	}
 	for _, artifact := range []struct {
@@ -822,20 +877,24 @@ func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
 		{"mdbx.lck", "read back mdbx.lck", false},
 		{"rubin-writer.lock", "read back Rubin writer lock", true},
 	} {
-		if err := readOwnedFile(filepath.Join(path, artifact.name), artifact.name, artifact.empty, operationOpen, artifact.diagnostic); err != nil {
+		err = readOwnedFile(filepath.Join(path, artifact.name), artifact.name, artifact.empty, operationOpen, artifact.diagnostic)
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
 func (s *Store) allocateEnvironment(operation engineOperation) error {
 	created := C.rubin_mdbx_env_create()
-	if err := nativePointerResultError(operation, "mdbx_env_create returned invalid result shape", int(created.rc), created.env != nil); err != nil {
+	err := nativePointerResultError(operation, "mdbx_env_create returned invalid result shape", int(created.rc), created.env != nil)
+	if err != nil {
 		return err
 	}
 	s.env = created.env
 	return nil
 }
+
 func nativePointerResultError(operation engineOperation, diagnostic string, rc int, present bool) error {
 	if !validEngineOperation(operation) {
 		return adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, nil)
@@ -852,6 +911,7 @@ func nativePointerResultError(operation engineOperation, diagnostic string, rc i
 	}
 	return adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, native)
 }
+
 func openNativeEnvironment(env *C.MDBX_env, path string, flags C.MDBX_env_flags_t, mode C.mdbx_mode_t, operation engineOperation) error {
 	pathBytes := append([]byte(path), 0)
 	rc := int(C.mdbx_env_open(env, (*C.char)(unsafe.Pointer(&pathBytes[0])), flags, mode))
@@ -881,6 +941,7 @@ func readEffective(env *C.MDBX_env, txn *C.MDBX_txn, operation engineOperation) 
 	pageSize := uint32(info.mi_dxb_pagesize)
 	return effectiveConfig{flags: uint32(flags), mode: uint32(info.mi_mode), pageSize: pageSize, maxReaders: uint32(info.mi_maxreaders), lower: uint64(info.mi_geo.lower), current: uint64(info.mi_geo.current), upper: uint64(info.mi_geo.upper), growth: uint64(info.mi_geo.grow), shrink: uint64(info.mi_geo.shrink), maxKey: int64(C.mdbx_env_get_maxkeysize_ex(env, C.MDBX_DB_DEFAULTS)), maxValue: int64(C.mdbx_env_get_maxvalsize_ex(env, C.MDBX_DB_DEFAULTS)), limits: limitsForPage(pageSize)}, nil
 }
+
 func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 	if got.flags != 0x02200000 {
 		return fmt.Errorf("flags: got %#x, want 0x2200000", got.flags)
@@ -904,7 +965,7 @@ func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 		}
 	}
 	if !validEffectiveCurrent(cfg, got.current) {
-		return fmt.Errorf("Current: got %d outside aligned [%d,%d]", got.current, cfg.Lower, cfg.Upper)
+		return fmt.Errorf("%s: got %d outside aligned [%d,%d]", "Current", got.current, cfg.Lower, cfg.Upper)
 	}
 	if got.maxKey < 77 {
 		return fmt.Errorf("MaxKey: got %d, want at least 77", got.maxKey)
@@ -914,6 +975,7 @@ func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 	}
 	return validateLimits(cfg, got.limits)
 }
+
 func validEffectiveCurrent(cfg ConfigV1, current uint64) bool {
 	return current >= cfg.Lower && current <= cfg.Upper && current%uint64(cfg.PageSize) == 0
 }
@@ -938,9 +1000,11 @@ func runLocked(operation func() transactionOutcome) transactionOutcome {
 	}()
 	return <-result
 }
+
 func (s *Store) initializeLocked(cfg ConfigV1, encodedConfig []byte) transactionOutcome {
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_READWRITE)
-	if err := nativePointerResultError(operationInit, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil); err != nil {
+	err := nativePointerResultError(operationInit, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if err != nil {
 		if begun.txn != nil {
 			return s.poison(begun.txn, err)
 		}
@@ -966,27 +1030,33 @@ func (s *Store) initializeLocked(cfg ConfigV1, encodedConfig []byte) transaction
 	s.state, s.config, s.dbis = storeOPEN, cfg, dbis
 	return transactionOutcome{}
 }
+
 func initializeSchema(txn *C.MDBX_txn, encodedConfig []byte) ([7]C.MDBX_dbi, error) {
 	dbis, err := openSchemaDBIs(txn, true, operationInit)
 	if err != nil {
 		return dbis, err
 	}
-	if err = putRequiredMeta(txn, dbis[0], encodedConfig); err != nil {
+	err = putRequiredMeta(txn, dbis[0], encodedConfig)
+	if err != nil {
 		return dbis, err
 	}
 	if fixtureBeforeInitCensus != nil {
-		if err = fixtureBeforeInitCensus(txn, dbis[0]); err != nil {
+		err = fixtureBeforeInitCensus(txn, dbis[0])
+		if err != nil {
 			return dbis, err
 		}
 	}
-	if err = verifyMainCardinality(txn, operationInit); err != nil {
+	err = verifyMainCardinality(txn, operationInit)
+	if err != nil {
 		return dbis, err
 	}
 	return dbis, verifyCreatedMeta(txn, dbis[0], encodedConfig)
 }
+
 func (s *Store) inspectOpenLocked(cfg ConfigV1) transactionOutcome {
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
-	if err := nativePointerResultError(operationOpen, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil); err != nil {
+	err := nativePointerResultError(operationOpen, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if err != nil {
 		if begun.txn != nil {
 			return s.poison(begun.txn, err)
 		}
@@ -999,8 +1069,10 @@ func (s *Store) inspectOpenLocked(cfg ConfigV1) transactionOutcome {
 	}
 	return outcome
 }
+
 func inspectSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1) ([7]C.MDBX_dbi, error) {
-	if err := verifyMainCardinality(txn, operationOpen); err != nil {
+	err := verifyMainCardinality(txn, operationOpen)
+	if err != nil {
 		return [7]C.MDBX_dbi{}, err
 	}
 	dbis, err := openSchemaDBIs(txn, false, operationOpen)
@@ -1011,7 +1083,8 @@ func inspectSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1) ([7]C.MDBX_db
 	if err != nil {
 		return dbis, err
 	}
-	if err = validateStoredConfig(stored, cfg); err != nil {
+	err = validateStoredConfig(stored, cfg)
+	if err != nil {
 		return dbis, integrityError(operationOpen, "effective environment mismatch", err)
 	}
 	effective, err := readEffective(env, txn, operationOpen)
@@ -1023,14 +1096,19 @@ func inspectSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1) ([7]C.MDBX_db
 	}
 	return dbis, nil
 }
+
 func validateStoredConfig(stored, caller ConfigV1) error {
 	for _, field := range []struct {
 		name        string
 		got, wanted uint64
 	}{
-		{"Lower", stored.Lower, caller.Lower}, {"Now", stored.Now, caller.Now}, {"Upper", stored.Upper, caller.Upper},
-		{"Growth", stored.Growth, caller.Growth}, {"Shrink", stored.Shrink, caller.Shrink},
-		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)}, {"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)},
+		{"Lower", stored.Lower, caller.Lower},
+		{"Now", stored.Now, caller.Now},
+		{"Upper", stored.Upper, caller.Upper},
+		{"Growth", stored.Growth, caller.Growth},
+		{"Shrink", stored.Shrink, caller.Shrink},
+		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)},
+		{"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)},
 	} {
 		if field.got != field.wanted {
 			return fmt.Errorf("%s: got %d, want %d", field.name, field.got, field.wanted)
@@ -1038,6 +1116,7 @@ func validateStoredConfig(stored, caller ConfigV1) error {
 	}
 	return nil
 }
+
 func (s *Store) abortLocked(txn *C.MDBX_txn, primary error) transactionOutcome {
 	rc := int(C.mdbx_txn_abort(txn))
 	decision := abortTransition(rc, primary != nil)
@@ -1051,10 +1130,12 @@ func (s *Store) abortLocked(txn *C.MDBX_txn, primary error) transactionOutcome {
 	}
 	return transactionOutcome{err: result}
 }
+
 func (s *Store) poison(txn *C.MDBX_txn, err error) transactionOutcome {
 	s.state, s.txn, s.terminal = storePOISONEDTHREAD, txn, err
 	return transactionOutcome{err: err, poisoned: true}
 }
+
 func openSchemaDBIs(txn *C.MDBX_txn, create bool, operation engineOperation) ([7]C.MDBX_dbi, error) {
 	var opened [7]C.MDBX_dbi
 	flags := C.MDBX_db_flags_t(C.MDBX_DB_ACCEDE)
@@ -1081,6 +1162,7 @@ func openSchemaDBIs(txn *C.MDBX_txn, create bool, operation engineOperation) ([7
 	}
 	return opened, nil
 }
+
 func putRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) error {
 	for _, row := range []struct{ key, value []byte }{{[]byte{0}, []byte{0, 0, 0, 1}}, {[]byte{1}, encodedConfig}} {
 		rc := int(C.rubin_mdbx_put_required(txn, meta, unsafe.Pointer(&row.key[0]), C.size_t(len(row.key)), unsafe.Pointer(&row.value[0]), C.size_t(len(row.value))))
@@ -1091,6 +1173,7 @@ func putRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) err
 	}
 	return nil
 }
+
 func verifyMainCardinality(txn *C.MDBX_txn, operation engineOperation) error {
 	var main C.MDBX_dbi
 	if rc := int(C.mdbx_dbi_open(txn, nil, C.MDBX_DB_DEFAULTS, &main)); rc != codeSuccess {
@@ -1105,6 +1188,7 @@ func verifyMainCardinality(txn *C.MDBX_txn, operation engineOperation) error {
 	}
 	return nil
 }
+
 func verifyCreatedMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) error {
 	var stat C.MDBX_stat
 	if rc := int(C.mdbx_dbi_stat(txn, meta, &stat, C.size_t(unsafe.Sizeof(stat)))); rc != codeSuccess {
@@ -1118,6 +1202,7 @@ func verifyCreatedMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) e
 	}
 	return verifyExactValue(txn, meta, []byte{1}, encodedConfig, operationInit)
 }
+
 func readRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi) (ConfigV1, error) {
 	version, err := getSizedValue(txn, meta, []byte{0}, 4, operationOpen)
 	if err != nil {
@@ -1136,6 +1221,7 @@ func readRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi) (ConfigV1, error) {
 	}
 	return cfg, nil
 }
+
 func verifyExactValue(txn *C.MDBX_txn, dbi C.MDBX_dbi, key, expected []byte, operation engineOperation) error {
 	value, err := getSizedValue(txn, dbi, key, len(expected), operation)
 	if err != nil {
@@ -1146,6 +1232,7 @@ func verifyExactValue(txn *C.MDBX_txn, dbi C.MDBX_dbi, key, expected []byte, ope
 	}
 	return nil
 }
+
 func getSizedValue(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, size int, operation engineOperation) ([]byte, error) {
 	value := C.rubin_mdbx_get(txn, dbi, unsafe.Pointer(&key[0]), C.size_t(len(key)))
 	runtime.KeepAlive(key)
@@ -1154,6 +1241,7 @@ func getSizedValue(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, size int, operat
 	}
 	return C.GoBytes(unsafe.Pointer(value.bytes), C.int(size)), nil
 }
+
 func (s *Store) consumeFailure(primary error) (*Store, error) {
 	retained, err := s.consume(primary)
 	if retained {
@@ -1161,6 +1249,7 @@ func (s *Store) consumeFailure(primary error) (*Store, error) {
 	}
 	return nil, err
 }
+
 func (s *Store) consume(primary error) (bool, error) {
 	nativeOutcome := primary
 	if s.env != nil {
@@ -1186,9 +1275,11 @@ func (s *Store) consume(primary error) (bool, error) {
 	s.terminal = joinErrors(nativeOutcome, releaseErr)
 	return false, s.terminal
 }
+
 func releaseError(handle *filelock.Handle) error {
 	return releaseResult(handle.Release())
 }
+
 func releaseResult(err error) error {
 	if err == nil {
 		return nil
