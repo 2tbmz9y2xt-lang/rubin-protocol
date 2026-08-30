@@ -1360,7 +1360,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 	}
 	require(len(normalizeSpecs) == 1 && functions["normalizeMDBXModule"] == nil && compact(normalizeSpecs[0]) == "normalizeMDBXModule = sync.OnceValue(func() error { result := C.rubin_mdbx_normalize_debug() return debugNormalizationError(int(result.first), int(result.second)) })", "normalizeMDBXModule OnceValue ownership drifted")
-	for name, expected := range map[string]string{"Create": "validateCreateStatic", "Open": "validatePath,validateOpenArtifacts,validateOpenStatic"} {
+	for name, expected := range map[string]string{"Create": "validateCreateStatic"} {
 		fn, normalizeAt := functions[name], token.NoPos
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok && callName(call) == "normalizeMDBXModule" {
@@ -1379,26 +1379,37 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			t.Errorf("%s pre-normalization calls=%v, want %s", name, got, expected)
 		}
 	}
-	preopenCalls := 0
+	openNativePreconditionCalls := 0
 	ast.Inspect(functions["Open"].Body, func(node ast.Node) bool {
-		if call, ok := node.(*ast.CallExpr); ok && callName(call) == "validatePreopenSnapshot" {
-			preopenCalls++
+		if call, ok := node.(*ast.CallExpr); ok && callName(call) == "validateOpenNativePreconditions" {
+			openNativePreconditionCalls++
 		}
 		return true
 	})
-	require(preopenCalls == 1, "Open preopen snapshot calls=%d, want 1", preopenCalls)
+	require(openNativePreconditionCalls == 1, "Open native precondition calls=%d, want 1", openNativePreconditionCalls)
+	stageCalls := map[string]int{}
+	ast.Inspect(functions["validateOpenNativePreconditions"].Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok {
+			stageCalls[callName(call)]++
+		}
+		return true
+	})
+	for _, name := range []string{"normalizeMDBXModule", "validatePreopenSnapshot", "validateLimits", "limitsForPage"} {
+		require(stageCalls[name] == 1, "Open native precondition %s calls=%d, want 1", name, stageCalls[name])
+	}
 	for name, sequence := range map[string][]string{
-		"Create":                  {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
-		"Open":                    {"validatePath", "validateOpenArtifacts", "validateOpenStatic", "normalizeMDBXModule", "validatePreopenSnapshot", "limitsForPage", "acquireWriter", "openEnvironment", "runLocked"},
-		"validateOpenStatic":      {"cfg.Encode", "adapterError"},
-		"validatePreopenSnapshot": {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
-		"validateCreateStatic":    {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
-		"openEnvironment":         {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, artifact.name)"},
-		"inspectSchema":           {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
-		"openNativeEnvironment":   {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
-		"openSchemaDBIs":          {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
-		"getSizedValue":           {"C.rubin_mdbx_get", "runtime.KeepAlive(key)", "requiredValueResult", "C.GoBytes"},
-		"consume":                 {"nativeOutcome := primary", "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)", "releaseErr := releaseError(s.writer)", "s.terminal = joinErrors(nativeOutcome, releaseErr)", "return false, s.terminal"},
+		"Create":                          {"validateCreateStatic", "normalizeMDBXModule", "limitsForPage", "createDirectory", "acquireWriter", "createEnvironment", "runLocked"},
+		"Open":                            {"validatePath", "validateOpenArtifacts", "validateOpenStatic", "validateOpenNativePreconditions", "acquireWriter", "openEnvironment", "runLocked"},
+		"validateOpenNativePreconditions": {"normalizeMDBXModule", "validatePreopenSnapshot", "validateLimits", "limitsForPage", "adapterError"},
+		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
+		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
+		"validateCreateStatic":            {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
+		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, artifact.name)"},
+		"inspectSchema":                   {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
+		"openNativeEnvironment":           {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
+		"openSchemaDBIs":                  {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
+		"getSizedValue":                   {"C.rubin_mdbx_get", "runtime.KeepAlive(key)", "requiredValueResult", "C.GoBytes"},
+		"consume":                         {"nativeOutcome := primary", "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)", "releaseErr := releaseError(s.writer)", "s.terminal = joinErrors(nativeOutcome, releaseErr)", "return false, s.terminal"},
 	} {
 		position := -1
 		for _, call := range sequence {
@@ -1479,19 +1490,29 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
-		strings.Join(limitWrapperCalls, "|") != "Create:limitsForPage(cfg.PageSize)|Open:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
+		strings.Join(limitWrapperCalls, "|") != "Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 7)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
 	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.Acquire(lockPath)|acquireWriter:filelock.AcquireExisting(lockPath)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
 	var packageNativeLimits, packageMaxDBs, packageEffects []string
+	packageRefs, fileRefs := map[string][]string{}, map[string]int{}
 	for _, filename := range names {
+		ast.Inspect(files[filename], func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && (ident.Name == "validatePreopenSnapshot" || ident.Name == "validateOpenNativePreconditions") {
+				fileRefs[ident.Name]++
+			}
+			return true
+		})
 		for _, declaration := range files[filename].Decls {
 			fn, ok := declaration.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if ident, ok := node.(*ast.Ident); ok && (ident.Name == "validatePreopenSnapshot" || ident.Name == "validateOpenNativePreconditions") {
+					packageRefs[ident.Name] = append(packageRefs[ident.Name], filename+":"+fn.Name.Name)
+				}
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
 					return true
@@ -1511,10 +1532,13 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:Open:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
+		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
+		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
+		fileRefs["validatePreopenSnapshot"] != 2 || fileRefs["validateOpenNativePreconditions"] != 2 ||
 		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.Acquire|mdbx_cgo.go:acquireWriter:filelock.AcquireExisting|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
-		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v", packageNativeLimits, packageMaxDBs, packageEffects)
+		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v / %v / %v", packageNativeLimits, packageMaxDBs, packageRefs, fileRefs, packageEffects)
 	}
 	var effectiveFields, effectiveSetup []string
 	ast.Inspect(functions["readEffective"].Body, func(node ast.Node) bool {

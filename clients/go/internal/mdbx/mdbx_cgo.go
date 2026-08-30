@@ -472,17 +472,9 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	err = normalizeMDBXModule()
+	err = validateOpenNativePreconditions(path, cfg)
 	if err != nil {
 		return nil, err
-	}
-	err = validatePreopenSnapshot(path)
-	if err != nil {
-		return nil, err
-	}
-	err = validateLimits(cfg, limitsForPage(cfg.PageSize))
-	if err != nil {
-		return nil, adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
 	}
 	writer, err := acquireWriter(path, operationOpen, false)
 	if err != nil {
@@ -495,6 +487,22 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 		return store.consumeFailure(err)
 	}
 	return finishConstruction(store, runLocked(func() transactionOutcome { return store.inspectOpenLocked(cfg) }))
+}
+
+func validateOpenNativePreconditions(path string, cfg ConfigV1) error {
+	err := normalizeMDBXModule()
+	if err != nil {
+		return err
+	}
+	err = validatePreopenSnapshot(path)
+	if err != nil {
+		return err
+	}
+	err = validateLimits(cfg, limitsForPage(cfg.PageSize))
+	if err != nil {
+		return adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)
+	}
+	return nil
 }
 
 func validateCreateStatic(path string, cfg ConfigV1) ([]byte, error) {
