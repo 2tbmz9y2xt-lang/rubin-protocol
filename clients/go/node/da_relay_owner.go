@@ -70,9 +70,8 @@ type daRelayOwnerReadyMember struct {
 // A commit locator must carry chunk index 0, or two locators for one slot would
 // compare unequal. Every absolute bound below has ONE definition, shared with the
 // record path that installDASetRecordLocked publishes. The descriptor carries neither the DECLARED
-// chunk count nor wire_bytes, so this validator binds neither; the record path
-// pins wire_bytes to zero and only PRESERVES a chunk count it never ranges —
-// RUB-1273 owns the layer that assigns either.
+// chunk count nor wire_bytes, so this slice binds neither; RUB-1273 assigns
+// role-specific metadata/chunk_count, while legacy wireBytes remains zero.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -127,7 +126,9 @@ func checkOwnerReadyRetainedBytes(txBytes []byte) error {
 // chunk — which is the INVERSE of the legacy validators, which refuse a zero. That
 // is the point: withoutPeerQuotaKey returns early on a zero record wireBytes, and
 // its commit and chunk arms on a zero of their own, so no owner-ready image can
-// reactivate that path. RUB-1273 owns the layer that assigns a nonzero one.
+// reactivate that path. Owner-ready legacy wireBytes remains zero in every
+// successor slice; separate role-specific accounting authority does not
+// reactivate the legacy path.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	// Only these two states have a charge formula here; the COMPLETE_SET domain
 	// was not assigned to this slice.
