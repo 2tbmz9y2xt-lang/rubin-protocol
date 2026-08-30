@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -43,6 +44,79 @@ func TestAcquireContendsUntilRelease(t *testing.T) {
 	}
 }
 
+func TestAcquireDirectoryContendsPerInodeUntilRelease(t *testing.T) {
+	first, second := t.TempDir(), t.TempDir()
+	for _, path := range []string{first, second} {
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	holder, result, err := AcquireDirectory(first)
+	if holder == nil || result != "" || err != nil {
+		t.Fatalf("first directory handle=%v result=%q err=%v", holder, result, err)
+	}
+	sibling, result, err := AcquireDirectory(second)
+	if sibling == nil || result != "" || err != nil {
+		t.Fatalf("second directory handle=%v result=%q err=%v", sibling, result, err)
+	}
+	challenger, result, err := AcquireDirectory(first)
+	if challenger != nil || result != ResultContended || err == nil {
+		t.Fatalf("contended directory handle=%v result=%q err=%v", challenger, result, err)
+	}
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release holder: %v", err)
+	}
+	reused, result, err := AcquireDirectory(first)
+	if reused == nil || result != "" || err != nil {
+		t.Fatalf("reused directory handle=%v result=%q err=%v", reused, result, err)
+	}
+	for name, handle := range map[string]*Handle{"sibling": sibling, "reused": reused} {
+		if err := handle.Release(); err != nil {
+			t.Fatalf("release %s: %v", name, err)
+		}
+	}
+}
+
+func TestAcquireDirectoryRejectsUnsafePaths(t *testing.T) {
+	regular := filepath.Join(t.TempDir(), "regular")
+	if err := os.WriteFile(regular, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unsafeMode := t.TempDir()
+	if err := os.Chmod(unsafeMode, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(t.TempDir(), "directory-link")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, path string }{{"regular", regular}, {"unsafe_mode", unsafeMode}, {"symlink", symlink}} {
+		t.Run(tc.name, func(t *testing.T) {
+			handle, result, err := AcquireDirectory(tc.path)
+			if handle != nil || result != ResultInvalidOrUnopenable || err == nil {
+				t.Fatalf("AcquireDirectory handle=%v result=%q err=%v", handle, result, err)
+			}
+		})
+	}
+	fd, err := syscall.Open(regular, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if err := validateDirectory(fd); err == nil {
+		t.Fatal("validateDirectory accepted a regular file")
+	}
+	if _, sourcePath, _, ok := runtime.Caller(0); !ok {
+		t.Fatal("locate filelock test source")
+	} else if source, err := os.ReadFile(filepath.Join(filepath.Dir(sourcePath), "filelock_unix.go")); err != nil || !strings.Contains(string(source), "syscall.O_DIRECTORY") {
+		t.Fatalf("AcquireDirectory lost O_DIRECTORY: %v", err)
+	}
+}
+
 func TestReleaseAllowsNilAndReleasedHandles(t *testing.T) {
 	var nilHandle *Handle
 	if err := nilHandle.Release(); err != nil {
@@ -63,6 +137,9 @@ func TestReleaseAllowsNilAndReleasedHandles(t *testing.T) {
 func TestValidateReportsFstatFailure(t *testing.T) {
 	if err := validate(-1); !errors.Is(err, syscall.EBADF) {
 		t.Fatalf("validate(-1) error=%v, want EBADF", err)
+	}
+	if err := validateDirectory(-1); !errors.Is(err, syscall.EBADF) {
+		t.Fatalf("validateDirectory(-1) error=%v, want EBADF", err)
 	}
 }
 
