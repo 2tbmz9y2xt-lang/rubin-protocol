@@ -1,4 +1,4 @@
-// Package filelock holds a process-scoped advisory lock on one regular file.
+// Package filelock holds process-scoped advisory locks on validated regular-file or directory inodes.
 package filelock
 
 // Result classifies a failed acquisition without exposing host-specific errno
