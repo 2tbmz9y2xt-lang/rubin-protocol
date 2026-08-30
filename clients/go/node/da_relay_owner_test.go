@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"errors"
 	"reflect"
 	"slices"
 	"testing"
@@ -78,6 +79,7 @@ func newDAAdmissionCandidateFixture(t *testing.T, kind uint8) daAdmissionCandida
 	}
 	return fixture
 }
+
 func requireDAAdmissionCandidate(t *testing.T, got daRelayAdmissionCandidate, want daAdmissionCandidateFixture, provenance daProvenance) {
 	t.Helper()
 	wantLocator := daRelayLocator{daID: want.daID, kind: daRelayLocatorCommit}
@@ -102,13 +104,15 @@ func requireDAAdmissionCandidate(t *testing.T, got daRelayAdmissionCandidate, wa
 		t.Fatalf("chunk candidate mismatch: payload_match=%v hash=%x/%x commitment=%x count=%d", bytes.Equal(got.member.payload, want.payload), got.chunkHash, want.chunkHash, got.payloadCommitment, got.chunkCount)
 	}
 }
+
 func requireDAAdmissionCandidateError(t *testing.T, admission *DAAdmission, provenance daProvenance, want error) {
 	t.Helper()
 	got, err := admission.renderDARelayAdmissionCandidate(provenance)
-	if err != want || !reflect.DeepEqual(got, daRelayAdmissionCandidate{}) {
+	if !errors.Is(err, want) || err != want || !reflect.DeepEqual(got, daRelayAdmissionCandidate{}) { //nolint:errorlint // Contract requires the existing direct sentinel, not a wrapper.
 		t.Fatalf("render err=%v want=%v zero=%v", err, want, reflect.DeepEqual(got, daRelayAdmissionCandidate{}))
 	}
 }
+
 func mustDAAdmissionCandidate(t *testing.T, admission *DAAdmission, provenance daProvenance) daRelayAdmissionCandidate {
 	t.Helper()
 	candidate, err := admission.renderDARelayAdmissionCandidate(provenance)
@@ -117,12 +121,14 @@ func mustDAAdmissionCandidate(t *testing.T, admission *DAAdmission, provenance d
 	}
 	return candidate
 }
+
 func daAdmissionOwnerCounts(admission *DAAdmission) (uint64, int, int) {
 	owner := admission.guard.owner
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	return owner.tokenHighWater, len(owner.byToken), len(owner.byOutpoint)
 }
+
 func TestDAAdmissionCandidateClosedDomain(t *testing.T) {
 	fixture := newDAAdmissionCandidateFixture(t, 0x01)
 	defer fixture.admission.Close()
@@ -144,10 +150,15 @@ func TestDAAdmissionCandidateClosedDomain(t *testing.T) {
 		})
 	}
 	for _, value := range []daProvenance{
-		{}, {kind: daProvenanceKind(99)}, {kind: daProvenancePeer},
-		{kind: daProvenancePeer, peerIdentity: "peer"}, {kind: daProvenancePeer, quotaIdentity: "quota"},
-		{kind: daProvenanceLocal, peerIdentity: "peer"}, {kind: daProvenanceLocal, quotaIdentity: "quota"},
-		{kind: daProvenanceDetachedReorg, peerIdentity: "peer"}, {kind: daProvenanceDetachedReorg, quotaIdentity: "quota"},
+		{},
+		{kind: daProvenanceKind(99)},
+		{kind: daProvenancePeer},
+		{kind: daProvenancePeer, peerIdentity: "peer"},
+		{kind: daProvenancePeer, quotaIdentity: "quota"},
+		{kind: daProvenanceLocal, peerIdentity: "peer"},
+		{kind: daProvenanceLocal, quotaIdentity: "quota"},
+		{kind: daProvenanceDetachedReorg, peerIdentity: "peer"},
+		{kind: daProvenanceDetachedReorg, quotaIdentity: "quota"},
 	} {
 		requireDAAdmissionCandidateError(t, fixture.admission, value, errDAProvenanceInvalid)
 	}
@@ -165,6 +176,7 @@ func TestDAAdmissionCandidateClosedDomain(t *testing.T) {
 		_, _ = resolved.admission.renderDARelayAdmissionCandidate(daProvenance{kind: daProvenanceLocal})
 	})
 }
+
 func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 	provenance := daProvenance{kind: daProvenancePeer, peerIdentity: "peer", quotaIdentity: "quota"}
 	for _, kind := range []uint8{0x01, 0x02} {
@@ -196,7 +208,7 @@ func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 			fixture := newDAAdmissionCandidateFixture(t, tc.kind)
 			candidate := mustDAAdmissionCandidate(t, fixture.admission, provenance)
 			tc.mutate(&candidate)
-			if err := candidate.validate(); err != tc.want {
+			if err := candidate.validate(); !errors.Is(err, tc.want) || err != tc.want { //nolint:errorlint // Contract requires the existing direct sentinel, not a wrapper.
 				t.Fatalf("candidate validate=%v, want %v", err, tc.want)
 			}
 			fixture.admission.Close()
@@ -266,6 +278,7 @@ func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 		fixture.admission.Close()
 	})
 }
+
 func TestDAAdmissionCandidateUsesHeldParse(t *testing.T) {
 	fixture := newDAAdmissionCandidateFixture(t, 0x01)
 	defer fixture.admission.Close()
@@ -278,6 +291,7 @@ func TestDAAdmissionCandidateUsesHeldParse(t *testing.T) {
 	got := mustDAAdmissionCandidate(t, fixture.admission, daProvenance{kind: daProvenanceLocal})
 	requireDAAdmissionCandidate(t, got, fixture, daProvenance{kind: daProvenanceLocal})
 }
+
 func TestDAAdmissionCandidateIsolation(t *testing.T) {
 	fixture := newDAAdmissionCandidateFixture(t, 0x02)
 	defer fixture.admission.Close()
@@ -314,6 +328,7 @@ func TestDAAdmissionCandidateIsolation(t *testing.T) {
 		t.Fatal("candidate mutation changed admission")
 	}
 }
+
 func TestDAAdmissionCandidateErrorOrder(t *testing.T) {
 	provenance := daProvenance{kind: daProvenancePeer}
 	success := newDAAdmissionCandidateFixture(t, 0x01)
@@ -329,6 +344,7 @@ func TestDAAdmissionCandidateErrorOrder(t *testing.T) {
 	beforeHigh, beforeTokens, beforeOutpoints := daAdmissionOwnerCounts(fixture.admission)
 	fixture.admission.tx.DaCommitCore.ChunkCount = 0
 	fixture.admission.tx.Outputs = nil
+	fixture.admission.tx = nil
 	requireDAAdmissionCandidateError(t, fixture.admission, provenance, errDAProvenanceInvalid)
 	afterHigh, afterTokens, afterOutpoints := daAdmissionOwnerCounts(fixture.admission)
 	if fixture.admission.guard.state.Load() != daAdmissionOpen || afterHigh != beforeHigh || afterTokens != beforeTokens || afterOutpoints != beforeOutpoints {

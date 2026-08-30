@@ -76,10 +76,7 @@ type daRelayAdmissionCandidate struct {
 
 func (a *DAAdmission) renderDARelayAdmissionCandidate(provenance daProvenance) (daRelayAdmissionCandidate, error) {
 	var zero daRelayAdmissionCandidate
-	a.mustLiveValue()
-	if a.guard.state.Load() != daAdmissionOpen {
-		panic("DA admission candidate is not available")
-	}
+	snapshot := a.Snapshot()
 	if err := provenance.validate(); err != nil {
 		return zero, err
 	}
@@ -88,13 +85,13 @@ func (a *DAAdmission) renderDARelayAdmissionCandidate(provenance daProvenance) (
 	}
 	candidate := daRelayAdmissionCandidate{member: daRelayOwnerReadyMember{
 		member: daRelayMemberIdentity{
-			txid:       a.snapshot.TxID,
-			wtxid:      a.snapshot.WTxID,
-			fee:        a.snapshot.Fee,
-			inputs:     append([]consensus.Outpoint(nil), a.snapshot.Inputs...),
+			txid:       snapshot.TxID,
+			wtxid:      snapshot.WTxID,
+			fee:        snapshot.Fee,
+			inputs:     snapshot.Inputs,
 			provenance: provenance,
 		},
-		txBytes: append([]byte(nil), a.snapshot.TxBytes...),
+		txBytes: snapshot.TxBytes,
 	}}
 	switch a.tx.TxKind {
 	case 0x01:
