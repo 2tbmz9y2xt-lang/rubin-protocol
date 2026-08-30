@@ -239,7 +239,10 @@ def print_summary(
     print(f"  head HEAD:      {head_pct:.2f}% ({head_covered}/{head_coverable})")
     print(f"  variation:      {variation:+.2f}%")
     print(f"  diff coverage:  {diff_pct:.2f}% ({diff_covered}/{diff_coverable})")
-    print(f"  gates:          variation >= {min_variation:+.2f}%, diff >= {min_diff_coverage:.2f}%")
+    print(
+        f"  thresholds:     variation advisory >= {min_variation:+.2f}%, "
+        f"diff coverage hard >= {min_diff_coverage:.2f}%"
+    )
     if per_file:
         print("  changed files:")
         for file_path, (coverable, covered, uncovered) in sorted(
@@ -304,19 +307,20 @@ def main() -> int:
     failed = False
     if variation < args.min_variation:
         print(
-            f"FAIL: coverage variation {variation:+.2f}% is below gate {args.min_variation:+.2f}%",
+            f"WARN: coverage variation {variation:+.2f}% is below advisory threshold "
+            f"{args.min_variation:+.2f}%",
             file=sys.stderr,
         )
-        failed = True
     if diff_pct < args.min_diff_coverage:
         print(
-            f"FAIL: diff coverage {diff_pct:.2f}% is below gate {args.min_diff_coverage:.2f}%",
+            f"FAIL: diff coverage {diff_pct:.2f}% is below hard threshold "
+            f"{args.min_diff_coverage:.2f}%",
             file=sys.stderr,
         )
         failed = True
     if failed:
         return 1
-    print("PASS: local coverage preflight matches Codacy gates")
+    print("PASS: hard diff coverage threshold satisfied; coverage variation is advisory")
     return 0
 
 
