@@ -953,16 +953,7 @@ func readEffective(env *C.MDBX_env, txn *C.MDBX_txn, operation engineOperation) 
 }
 
 func validateEffective(cfg ConfigV1, got effectiveConfig) error {
-	if got.flags != 0x02200000 {
-		return fmt.Errorf("flags: got %#x, want 0x2200000", got.flags)
-	}
-	if got.mode != 0 {
-		return fmt.Errorf("mode: got %#x, want 0", got.mode)
-	}
-	if got.pageSize != cfg.PageSize {
-		return fmt.Errorf("PageSize: got %d, want %d", got.pageSize, cfg.PageSize)
-	}
-	err := validateEffectiveMaxReaders(cfg.MaxReaders, got.maxReaders, got.systemPageSize)
+	err := validateEffectiveHeader(cfg, got)
 	if err != nil {
 		return err
 	}
@@ -989,6 +980,19 @@ func validateEffective(cfg ConfigV1, got effectiveConfig) error {
 		return fmt.Errorf("MaxValue: got %d, want at least 68000125", got.maxValue)
 	}
 	return validateLimits(cfg, got.limits)
+}
+
+func validateEffectiveHeader(cfg ConfigV1, got effectiveConfig) error {
+	if got.flags != 0x02200000 {
+		return fmt.Errorf("flags: got %#x, want 0x2200000", got.flags)
+	}
+	if got.mode != 0 {
+		return fmt.Errorf("mode: got %#x, want 0", got.mode)
+	}
+	if got.pageSize != cfg.PageSize {
+		return fmt.Errorf("PageSize: got %d, want %d", got.pageSize, cfg.PageSize)
+	}
+	return validateEffectiveMaxReaders(cfg.MaxReaders, got.maxReaders, got.systemPageSize)
 }
 
 func validateEffectiveMaxReaders(requested, effective, systemPageSize uint32) error {
