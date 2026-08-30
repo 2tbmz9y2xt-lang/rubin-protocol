@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"maps"
 	"slices"
 	"sort"
 
@@ -672,13 +673,20 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 // directions are covered — checkOwnerReadySlotFree already proved the target slot
 // is free in live, so exactly one chunk may appear and none may be dropped. The
 // chunk walk is map-ordered and every violation yields ONE error identity, so
-// iteration order cannot change the outcome. The record's remaining fields are all
-// accounted for elsewhere: da_id, state and wireBytes are pinned by the checks
-// above, revision is REMINTED by projectDARecordImageLocked whatever the image
-// carries, and payloadBytes, receivedTime, ttlBlocksRemaining and replaceableChunks
-// reach no charge, locator or claim in this kernel — pinnedPayloadAccountingBytes
-// prices only a COMPLETE_SET, which checkOwnerReadyRecord refuses.
+// iteration order cannot change the outcome. Every remaining record field is
+// accounted for: da_id, state and wireBytes are pinned by the checks above,
+// revision is REMINTED by projectDARecordImageLocked whatever the image carries,
+// and the four below are compared against the live pre-state. That they move no
+// counter at INSTALL time is no argument for leaving them free: the installed
+// record then LIVES in s.sets, where missingChunkIndexes and validateChunkInsert
+// read replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging
+// copies all four out of the pre-state, so a legitimate image already agrees.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
+	if live.payloadBytes != next.payloadBytes || live.receivedTime != next.receivedTime ||
+		live.ttlBlocksRemaining != next.ttlBlocksRemaining ||
+		!maps.Equal(live.replaceableChunks, next.replaceableChunks) {
+		return errDARelayImageIncompatible
+	}
 	staged := len(live.chunks)
 	if target.kind == daRelayLocatorChunk {
 		staged++

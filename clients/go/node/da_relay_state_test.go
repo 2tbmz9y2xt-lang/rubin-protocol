@@ -3196,6 +3196,22 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 				requireDAImageRejected(t, state, image, errDARelayImageIncompatible)
 			})
 		}
+		recordRows := []struct {
+			name    string
+			corrupt func(*daRelaySetRecord)
+		}{
+			{"the pinned payload total", func(r *daRelaySetRecord) { r.payloadBytes = 4 }},
+			{"the accepted-sequence stamp", func(r *daRelaySetRecord) { r.receivedTime = 9 }},
+			{"the remaining ttl", func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 2 }},
+			{"the replaceable-chunk flags", func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{0: true} }},
+		}
+		for _, row := range recordRows {
+			t.Run("the live record loses "+row.name, func(t *testing.T) {
+				state, image := resident(t)
+				row.corrupt(&image.next)
+				requireDAImageRejected(t, state, image, errDARelayImageIncompatible)
+			})
+		}
 		t.Run("the live chunk is dropped", func(t *testing.T) {
 			state, image := resident(t)
 			delete(image.next.chunks, 0)
