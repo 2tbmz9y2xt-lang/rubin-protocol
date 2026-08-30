@@ -903,6 +903,8 @@ func TestEnvironmentRejectsArtifactDrift(t *testing.T) {
 	undersized := closedEnvironment(t)
 	dataPath := filepath.Join(undersized, "mdbx.dat")
 	minimum := int64(3 * environmentConfig().PageSize)
+	mustEnvironment(t, os.Truncate(dataPath, minimum))
+	mustEnvironment(t, validateOpenDataSize(undersized, environmentConfig().PageSize))
 	mustEnvironment(t, os.Truncate(dataPath, minimum-1))
 	before, readErr := os.ReadFile(dataPath)
 	mustEnvironment(t, readErr)
@@ -946,6 +948,18 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	unsafe := t.TempDir()
 	requireEnvironmentError(t, normalizeOwnedFile(unsafe, "mdbx.dat", false, operationCreate, "normalize", "read"), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
 	requireEnvironmentError(t, readOwnedFile(unsafe, "mdbx.dat", false, operationOpen, "read"), EngineIntegrity, operationOpen, codeInvalid, "mdbx.dat is unsafe")
+	absentLockDir := t.TempDir()
+	absentHandle, absentLockErr := acquireWriter(absentLockDir, operationOpen, false)
+	if absentHandle != nil {
+		t.Fatal("absent writer returned Handle")
+	}
+	requireEnvironmentError(t, absentLockErr, EngineIO, operationOpen, int(syscall.ENOENT), "acquire Rubin writer lock")
+	if !errors.Is(absentLockErr, syscall.ENOENT) {
+		t.Fatalf("absent writer lost ENOENT: %v", absentLockErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(absentLockDir, "rubin-writer.lock")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("absent writer created sidecar: %v", statErr)
+	}
 	lockDir := t.TempDir()
 	mustEnvironment(t, os.WriteFile(filepath.Join(lockDir, "rubin-writer.lock"), nil, 0o644))
 	mustEnvironment(t, os.Chmod(filepath.Join(lockDir, "rubin-writer.lock"), 0o644))
@@ -1430,7 +1444,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			if name == "C.mdbx_env_set_maxdbs" {
 				ordinaryMaxDBCalls = append(ordinaryMaxDBCalls, fn.Name.Name+":"+compact(call))
 			}
-			if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" {
+			if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" || name == "filelock.AcquireExisting" {
 				effectCalls = append(effectCalls, fn.Name.Name+":"+compact(call))
 			}
 			return true
@@ -1441,7 +1455,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 7)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
-	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.Acquire(lockPath)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
+	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.Acquire(lockPath)|acquireWriter:filelock.AcquireExisting(lockPath)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
 	var packageNativeLimits, packageMaxDBs, packageEffects []string
 	for _, filename := range names {
 		for _, declaration := range files[filename].Decls {
@@ -1462,7 +1476,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				if name == "C.mdbx_env_set_maxdbs" {
 					packageMaxDBs = append(packageMaxDBs, owner)
 				}
-				if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" {
+				if name == "os.Mkdir" || name == "os.Chmod" || name == "filelock.Acquire" || name == "filelock.AcquireExisting" {
 					packageEffects = append(packageEffects, owner)
 				}
 				return true
@@ -1471,7 +1485,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:Open:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
-		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.Acquire|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
+		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.Acquire|mdbx_cgo.go:acquireWriter:filelock.AcquireExisting|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
 		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v", packageNativeLimits, packageMaxDBs, packageEffects)
 	}
 	var effectiveFields, effectiveSetup []string

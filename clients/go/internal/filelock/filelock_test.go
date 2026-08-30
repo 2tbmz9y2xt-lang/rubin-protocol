@@ -43,6 +43,44 @@ func TestAcquireContendsUntilRelease(t *testing.T) {
 	}
 }
 
+func TestAcquireExistingNeverCreates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holder, result, err := AcquireExisting(path)
+	if holder == nil || result != "" || err != nil {
+		t.Fatalf("existing handle=%v result=%q err=%v", holder, result, err)
+	}
+	challenger, result, err := AcquireExisting(path)
+	if challenger != nil || result != ResultContended || err == nil {
+		t.Fatalf("contended handle=%v result=%q err=%v", challenger, result, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	missing, result, err := AcquireExisting(path)
+	if missing != nil || result != ResultInvalidOrUnopenable || !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("unlinked handle=%v result=%q err=%v", missing, result, err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AcquireExisting recreated path: %v", err)
+	}
+	if err := holder.Release(); err != nil {
+		t.Fatalf("release unlinked holder: %v", err)
+	}
+
+	absent := filepath.Join(dir, "absent")
+	missing, result, err = AcquireExisting(absent)
+	if missing != nil || result != ResultInvalidOrUnopenable || !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("absent handle=%v result=%q err=%v", missing, result, err)
+	}
+	if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent AcquireExisting created path: %v", err)
+	}
+}
+
 func TestReleaseAllowsNilAndReleasedHandles(t *testing.T) {
 	var nilHandle *Handle
 	if err := nilHandle.Release(); err != nil {

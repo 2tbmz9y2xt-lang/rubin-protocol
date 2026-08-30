@@ -780,13 +780,20 @@ func debugNormalizationError(first, second int) error {
 	return nil
 }
 
-func acquireWriter(path string, operation engineOperation, normalize bool) (*filelock.Handle, error) {
+func acquireWriter(path string, operation engineOperation, create bool) (*filelock.Handle, error) {
 	lockPath := filepath.Join(path, "rubin-writer.lock")
-	handle, result, err := filelock.Acquire(lockPath)
+	var handle *filelock.Handle
+	var result filelock.Result
+	var err error
+	if create {
+		handle, result, err = filelock.Acquire(lockPath)
+	} else {
+		handle, result, err = filelock.AcquireExisting(lockPath)
+	}
 	if err != nil {
 		return nil, writerLockError(operation, result, err)
 	}
-	if normalize {
+	if create {
 		err = normalizeOwnedFile(lockPath, "rubin-writer.lock", true, operation, "normalize Rubin writer lock mode", "read back Rubin writer lock")
 	} else {
 		err = readOwnedFile(lockPath, "rubin-writer.lock", true, operation, "read back Rubin writer lock")

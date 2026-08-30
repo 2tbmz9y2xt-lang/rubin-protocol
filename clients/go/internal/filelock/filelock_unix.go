@@ -11,7 +11,16 @@ import (
 // Acquire opens path once and holds an exclusive advisory lock on its exact
 // regular-file inode. Callers own a non-nil Handle until Release.
 func Acquire(path string) (*Handle, Result, error) {
-	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	return acquire(path, syscall.O_CREAT)
+}
+
+// AcquireExisting opens and locks an existing path without creating it.
+func AcquireExisting(path string) (*Handle, Result, error) {
+	return acquire(path, 0)
+}
+
+func acquire(path string, flags int) (*Handle, Result, error) {
+	fd, err := syscall.Open(path, syscall.O_RDWR|flags|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, ResultInvalidOrUnopenable, err
 	}
