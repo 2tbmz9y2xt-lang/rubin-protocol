@@ -610,9 +610,10 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 }
 
 // checkStagedOwnerReadyRecord makes image.next the placement's AUTHORITY: a removal
-// carries an EMPTY next, a non-removal a non-empty one naming its own da_id whose
-// rows are the live rows plus exactly the candidate. Count alone admits a live member
-// swapped for a foreign one; inclusion alone admits one added beside the candidate.
+// carries an EMPTY next, a non-removal a non-empty one naming its own da_id, holding
+// the candidate at the named slot field for field and every other live slot
+// byte-identically. Reading only the parallel descriptor would leave the record
+// installDASetRecordLocked actually publishes unchecked.
 func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord) error {
 	rows := image.next.locatorRows()
 	if image.remove {
@@ -636,22 +637,106 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 	if err := image.next.checkOwnerReadyRecord(); err != nil {
 		return err
 	}
-	staged := image.next.commit.member
-	if image.member.locator.kind == daRelayLocatorChunk {
-		staged = image.next.chunks[image.member.locator.chunkIndex].member
+	if err := checkStagedCandidateSlot(image.next, rows, image.member); err != nil {
+		return err
 	}
-	if staged == nil || staged.txid != image.member.member.txid {
+	return checkPreservedOwnerReadySlots(live, image.next, image.member.locator)
+}
+
+// checkStagedCandidateSlot binds the ONE slot image.member.locator names to the
+// descriptor across every field the descriptor carries. The locator ROW settles
+// da_id, kind, index and txid together, because locatorRows derives each of them
+// from the staged record itself; the remaining fields are compared one by one, so
+// no valid-but-different value reaches the installer.
+func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, candidate daRelayOwnerReadyMember) error {
+	staged, txBytes, payload := next.commit.member, next.commit.txBytes, []byte(nil)
+	if candidate.locator.kind == daRelayLocatorChunk {
+		chunk := next.chunks[candidate.locator.chunkIndex]
+		staged, txBytes, payload = chunk.member, chunk.txBytes, chunk.payload
+	}
+	if staged == nil {
 		return errDARelayMemberIncomplete
 	}
-	liveRows := live.locatorRows()
-	preserved := len(rows) == len(liveRows)+1
-	for _, row := range liveRows {
-		preserved = preserved && slices.Contains(rows, row)
-	}
-	if !preserved {
+	if !slices.Contains(rows, daRelayLocatorRow{txid: candidate.member.txid, locator: candidate.locator}) ||
+		!sameOwnerReadyMember(staged, &candidate.member) ||
+		!bytes.Equal(txBytes, candidate.txBytes) ||
+		!bytes.Equal(payload, candidate.payload) {
 		return errDARelayImageIncompatible
 	}
 	return nil
+}
+
+// checkPreservedOwnerReadySlots proves every live slot survives BYTE-IDENTICALLY.
+// Locator rows cannot: a row carries txid and position, so a swapped fee, token,
+// provenance, payload commitment or cached legacy key passes it unseen. Both
+// directions are covered — checkOwnerReadySlotFree already proved the target slot
+// is free in live, so exactly one chunk may appear and none may be dropped. The
+// chunk walk is map-ordered and every violation yields ONE error identity, so
+// iteration order cannot change the outcome. The record's remaining fields are all
+// accounted for elsewhere: da_id, state and wireBytes are pinned by the checks
+// above, revision is REMINTED by projectDARecordImageLocked whatever the image
+// carries, and payloadBytes, receivedTime, ttlBlocksRemaining and replaceableChunks
+// reach no charge, locator or claim in this kernel — pinnedPayloadAccountingBytes
+// prices only a COMPLETE_SET, which checkOwnerReadyRecord refuses.
+func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
+	staged := len(live.chunks)
+	if target.kind == daRelayLocatorChunk {
+		staged++
+		// The kernel assigns none of these three, and the target slot was free, so
+		// a staged one carrying any of them did not come from this kernel.
+		if fresh := next.chunks[target.chunkIndex]; fresh.chunkHash != ([32]byte{}) || fresh.peerQuotaKey != "" || fresh.hashChecked {
+			return errDARelayImageIncompatible
+		}
+		if !sameOwnerReadyCommit(live.commit, next.commit) {
+			return errDARelayImageIncompatible
+		}
+	} else if live.commit.payloadCommitment != next.commit.payloadCommitment ||
+		live.commit.peerQuotaKey != next.commit.peerQuotaKey ||
+		live.commit.chunkCount != next.commit.chunkCount {
+		// A commit candidate owns only da_id, member and txBytes, and
+		// checkOwnerReadyCommitSlot pins wireBytes to zero, so these three
+		// complete the seven-field slot.
+		return errDARelayImageIncompatible
+	}
+	if len(next.chunks) != staged {
+		return errDARelayImageIncompatible
+	}
+	for index, chunk := range next.chunks {
+		if target.kind == daRelayLocatorChunk && index == target.chunkIndex {
+			continue
+		}
+		if !sameOwnerReadyChunk(live.chunks[index], chunk) {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+// The three comparisons below name EVERY field of their type: none of the three is
+// comparable with ==, and a field left out is a field an edited image may change
+// unseen.
+func sameOwnerReadyCommit(a, b daRelayCommit) bool {
+	return a.daID == b.daID && a.payloadCommitment == b.payloadCommitment &&
+		a.peerQuotaKey == b.peerQuotaKey && a.chunkCount == b.chunkCount &&
+		a.wireBytes == b.wireBytes && bytes.Equal(a.txBytes, b.txBytes) &&
+		sameOwnerReadyMember(a.member, b.member)
+}
+
+func sameOwnerReadyChunk(a, b daRelayChunk) bool {
+	return a.daID == b.daID && a.chunkHash == b.chunkHash &&
+		a.peerQuotaKey == b.peerQuotaKey && a.chunkIndex == b.chunkIndex &&
+		a.wireBytes == b.wireBytes && a.hashChecked == b.hashChecked &&
+		bytes.Equal(a.payload, b.payload) && bytes.Equal(a.txBytes, b.txBytes) &&
+		sameOwnerReadyMember(a.member, b.member)
+}
+
+func sameOwnerReadyMember(a, b *daRelayMemberIdentity) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.txid == b.txid && a.wtxid == b.wtxid && a.fee == b.fee &&
+		a.token == b.token && a.provenance == b.provenance &&
+		slices.Equal(a.inputs, b.inputs)
 }
 
 // checkDARecordImageLocatorsLocked proves the txid index and the retained image

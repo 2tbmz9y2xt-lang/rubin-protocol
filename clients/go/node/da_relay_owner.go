@@ -68,8 +68,12 @@ type daRelayOwnerReadyMember struct {
 }
 
 // A commit locator must carry chunk index 0, or two locators for one slot would
-// compare unequal. The bounds here are the package's absolute ones; the DECLARED
-// chunk count and wire_bytes reach no check — RUB-1273 owns the layer that assigns.
+// compare unequal. Every absolute bound below has ONE definition, shared with the
+// record path that installDASetRecordLocked publishes: a bound applied to only one
+// of the two paths is not applied. The descriptor carries neither the DECLARED
+// chunk count nor wire_bytes, so this validator binds neither; the record path
+// pins wire_bytes to zero and only PRESERVES a chunk count it never ranges —
+// RUB-1273 owns the layer that assigns either.
 func (m daRelayOwnerReadyMember) validate() error {
 	switch m.locator.kind {
 	case daRelayLocatorCommit:
@@ -77,30 +81,62 @@ func (m daRelayOwnerReadyMember) validate() error {
 			return errDARelayMemberIncomplete
 		}
 	case daRelayLocatorChunk:
-		if uint64(m.locator.chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
-			return errDARelayChunkIndexOutOfRange
+		if err := checkOwnerReadyChunkIndex(m.locator.chunkIndex); err != nil {
+			return err
 		}
-		if len(m.payload) == 0 {
-			return errDARelayMemberIncomplete
-		}
-		if uint64(len(m.payload)) > consensus.CHUNK_BYTES {
-			return errDARelayChunkPayloadSizeInvalid
+		if err := checkOwnerReadyPayload(m.payload); err != nil {
+			return err
 		}
 	default:
 		return errDARelayMemberIncomplete
 	}
-	if len(m.txBytes) == 0 || len(m.txBytes) > consensus.MAX_RELAY_MSG_BYTES {
-		return errDARelayMemberIncomplete
+	if err := checkOwnerReadyRetainedBytes(m.txBytes); err != nil {
+		return err
 	}
 	return m.member.validate()
 }
 
+func checkOwnerReadyChunkIndex(chunkIndex uint16) error {
+	if uint64(chunkIndex) >= consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayChunkIndexOutOfRange
+	}
+	return nil
+}
+
+func checkOwnerReadyPayload(payload []byte) error {
+	if len(payload) == 0 {
+		return errDARelayMemberIncomplete
+	}
+	if uint64(len(payload)) > consensus.CHUNK_BYTES {
+		return errDARelayChunkPayloadSizeInvalid
+	}
+	return nil
+}
+
+func checkOwnerReadyRetainedBytes(txBytes []byte) error {
+	if len(txBytes) == 0 || len(txBytes) > consensus.MAX_RELAY_MSG_BYTES {
+		return errDARelayMemberIncomplete
+	}
+	return nil
+}
+
 // checkOwnerReadyRecord reads no revision, so one check serves both the resident
-// pre-state and the staged record, whatever stamp each has.
+// pre-state and the staged record, whatever stamp each has. It reads the values
+// installDASetRecordLocked publishes, so a record edited after staging is refused
+// on the same terms as the descriptor it was staged from.
+//
+// Legacy wireBytes is pinned to zero at all three levels — record, commit and
+// chunk — which is the INVERSE of the legacy validators, which refuse a zero. That
+// is the point: withoutPeerQuotaKey returns early on a zero record wireBytes, and
+// its commit and chunk arms on a zero of their own, so no owner-ready image can
+// reactivate that path. RUB-1273 owns the layer that assigns a nonzero one.
 func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 	// Only these two states have a charge formula here; the COMPLETE_SET domain
 	// was not assigned to this slice.
 	if r.state != daRelayStateOrphanChunks && r.state != daRelayStateStagedCommit {
+		return errDARelayImageIncompatible
+	}
+	if r.wireBytes != 0 {
 		return errDARelayImageIncompatible
 	}
 	if err := r.checkOwnerReadyCommitSlot(); err != nil {
@@ -115,14 +151,20 @@ func (r daRelaySetRecord) checkOwnerReadyRecord() error {
 }
 
 func (r daRelaySetRecord) checkOwnerReadyCommitSlot() error {
+	if r.commit.wireBytes != 0 {
+		return errDARelayImageIncompatible
+	}
 	if r.commit.member == nil {
 		if r.commit.chunkCount != 0 || len(r.commit.txBytes) != 0 {
 			return errDARelayMemberIncomplete
 		}
 		return nil
 	}
-	if r.commit.daID != r.daID || len(r.commit.txBytes) == 0 {
+	if r.commit.daID != r.daID {
 		return errDARelayMemberIncomplete
+	}
+	if err := checkOwnerReadyRetainedBytes(r.commit.txBytes); err != nil {
+		return err
 	}
 	return r.commit.member.validate()
 }
@@ -132,8 +174,17 @@ func (r daRelaySetRecord) checkOwnerReadyChunk(index uint16) error {
 	if chunk.chunkIndex != index || chunk.daID != r.daID {
 		return errDARelayMemberIncomplete
 	}
-	if len(chunk.txBytes) == 0 || len(chunk.payload) == 0 {
-		return errDARelayMemberIncomplete
+	if chunk.wireBytes != 0 {
+		return errDARelayImageIncompatible
+	}
+	if err := checkOwnerReadyChunkIndex(index); err != nil {
+		return err
+	}
+	if err := checkOwnerReadyPayload(chunk.payload); err != nil {
+		return err
+	}
+	if err := checkOwnerReadyRetainedBytes(chunk.txBytes); err != nil {
+		return err
 	}
 	return chunk.member.validate()
 }
