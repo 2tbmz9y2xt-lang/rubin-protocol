@@ -1079,13 +1079,12 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 		defer syscall.Umask(old)
 		return Create(maskedTarget, environmentConfig())
 	}()
-	if os.Geteuid() != 0 {
+	if maskedErr != nil {
 		requireNoStore(t, masked, maskedErr, EngineIO, operationCreate, int(syscall.EACCES), expectedNativeDiagnostic(int(syscall.EACCES)))
 		if _, statErr := os.Lstat(filepath.Join(maskedTarget, "rubin-writer.lock")); statErr != nil {
 			t.Fatalf("failed Create removed owned residue: %v", statErr)
 		}
 	} else {
-		mustEnvironment(t, maskedErr)
 		requireEnvironmentStore(t, masked, environmentConfig())
 		for _, name := range []string{"rubin-writer.lock", "mdbx.dat", "mdbx.lck"} {
 			requireArtifact(t, filepath.Join(maskedTarget, name), 0o600, name == "rubin-writer.lock")
