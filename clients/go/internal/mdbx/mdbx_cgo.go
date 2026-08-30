@@ -600,8 +600,8 @@ func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
 }
 
 func validPoisonTerminal(err error) bool {
-	var engine *EngineError
-	if !errors.As(err, &engine) || engine == nil || reflect.TypeOf(err) != reflect.TypeOf(engine) || reflect.ValueOf(err).Pointer() != reflect.ValueOf(engine).Pointer() {
+	engine, ok := directEngineError(err)
+	if !ok {
 		return false
 	}
 	operation := engineOperation(engine.Operation)
@@ -612,7 +612,7 @@ func validPoisonTerminal(err error) bool {
 	if !validPointerShapePoison(engine, operation) {
 		return false
 	}
-	_, ok := directNativeResult(operation, engine.Cause)
+	_, ok = directNativeResult(operation, engine.Cause)
 	return ok
 }
 
@@ -638,8 +638,17 @@ func validConsumedCloseTerminal(e error) bool {
 }
 
 func validReleaseTerminal(err error) bool {
-	var engine *EngineError
-	return errors.As(err, &engine) && engine != nil && reflect.TypeOf(err) == reflect.TypeOf(engine) && reflect.ValueOf(err).Pointer() == reflect.ValueOf(engine).Pointer() && engine.Operation == string(operationClose) && engine.Diagnostic == "release Rubin writer lock" && engine.Cause != nil && engine.Class == classifyNative(operationClose, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+	engine, ok := directEngineError(err)
+	return ok && engine.Operation == string(operationClose) && engine.Diagnostic == "release Rubin writer lock" && engine.Cause != nil && engine.Class == classifyNative(operationClose, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+}
+
+func directEngineError(err error) (*EngineError, bool) {
+	value := reflect.ValueOf(err)
+	if !value.IsValid() || value.Type() != reflect.TypeFor[*EngineError]() || value.Kind() != reflect.Pointer || value.IsNil() {
+		return nil, false
+	}
+	engine, ok := value.Interface().(*EngineError)
+	return engine, ok
 }
 
 func validatePath(operation engineOperation, path string) error {

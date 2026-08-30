@@ -38,6 +38,12 @@ type nilPointerError struct{}
 func (*nilPointerError) Error() string { return "nil pointer" }
 func (*nilPointerError) Unwrap() error { return syscall.ENOSPC }
 
+type panicErrorWrapper struct{ cause error }
+
+func (w panicErrorWrapper) Error() string { return w.cause.Error() }
+func (panicErrorWrapper) Unwrap() error   { panic("Unwrap called") }
+func (panicErrorWrapper) As(any) bool     { panic("As called") }
+
 var pinnedNegativeDiagnostics = map[int]string{
 	-1:     "error -1",
 	-30799: "MDBX_KEYEXIST: Key/data pair already exists",
@@ -1068,6 +1074,17 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 }
 
 func TestEnvironmentPureMatrices(t *testing.T) {
+	direct := nativeError(operationInit, codeThreadMismatch)
+	var typedNil *EngineError
+	if engine, ok := directEngineError(direct); !ok || engine == nil {
+		t.Fatal("direct EngineError rejected")
+	}
+	if engine, ok := directEngineError(panicErrorWrapper{cause: direct}); ok || engine != nil {
+		t.Fatal("wrapped EngineError accepted")
+	}
+	if engine, ok := directEngineError(typedNil); ok || engine != nil {
+		t.Fatal("typed-nil EngineError accepted")
+	}
 	for _, tc := range []struct {
 		first, second int
 		diagnostic    string
