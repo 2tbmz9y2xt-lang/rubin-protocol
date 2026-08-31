@@ -47,6 +47,7 @@ type DAAdmission struct {
 	self     *DAAdmission
 	guard    *daAdmissionGuard
 	snapshot DAAdmissionSnapshot
+	tx       *consensus.Tx
 	context  PendingOutpointAdmissionContext
 }
 
@@ -142,11 +143,12 @@ func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []b
 		snapshot: DAAdmissionSnapshot{
 			TxID:          checked.TxID,
 			WTxID:         checked.WTxID,
-			TxBytes:       checked.Bytes,
+			TxBytes:       owned,
 			Fee:           checked.Fee,
 			RetainedBytes: uint64(len(checked.Bytes)),
 			Inputs:        inputs,
 		},
+		tx:      tx,
 		context: admission,
 	}
 	a.self = a
