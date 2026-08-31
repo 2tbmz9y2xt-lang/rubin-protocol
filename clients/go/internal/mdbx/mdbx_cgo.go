@@ -550,8 +550,9 @@ func (s *Store) Inspect() (Inspection, error) {
 		return Inspection{}, s.failedReadBegin(begun.txn, beginErr)
 	}
 	inspection, primary := s.inspectReadLocked(begun.txn)
-	if err := s.abortReadLocked(begun.txn, primary, primary != nil); err != nil {
-		return Inspection{}, err
+	cleanupErr := s.abortReadLocked(begun.txn, primary, primary != nil)
+	if cleanupErr != nil {
+		return Inspection{}, cleanupErr
 	}
 	return inspection, nil
 }
