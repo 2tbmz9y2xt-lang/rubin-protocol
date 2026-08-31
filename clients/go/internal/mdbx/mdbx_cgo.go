@@ -434,11 +434,12 @@ type Store struct {
 }
 
 type Reader struct {
-	self   *Reader
-	txn    *C.MDBX_txn
-	dbis   [7]C.MDBX_dbi
-	getMu  sync.Mutex
-	active atomic.Bool
+	self    *Reader
+	txn     *C.MDBX_txn
+	dbis    [7]C.MDBX_dbi
+	getMu   sync.Mutex
+	active  atomic.Bool
+	failure error
 }
 
 type DBIInspection struct {
@@ -493,16 +494,14 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
-		if begun.txn == nil {
-			return beginErr
-		}
-		return s.poison(begun.txn, beginErr).err
+		return s.failedReadBegin(begun.txn, beginErr)
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.active.Store(true)
 	defer func() {
 		reader.expire()
-		err = s.abortLocked(begun.txn, err).err
+		primary, infrastructure := readPrimary(err, reader.failure)
+		err = s.abortReadLocked(begun.txn, primary, infrastructure)
 	}()
 	return callback(reader)
 }
@@ -525,7 +524,12 @@ func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
 	}
 	value := C.rubin_mdbx_get(r.txn, r.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
 	runtime.KeepAlive(key)
-	return copiedGetResult(dbi, key, int(value.rc), unsafe.Pointer(value.bytes), value.length)
+	result, present, err := copiedGetResult(dbi, key, int(value.rc), unsafe.Pointer(value.bytes), value.length)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return result, present, err
 }
 
 func (s *Store) Inspect() (Inspection, error) {
@@ -543,17 +547,55 @@ func (s *Store) Inspect() (Inspection, error) {
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationInspect, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
-		if begun.txn == nil {
-			return Inspection{}, beginErr
-		}
-		return Inspection{}, s.poison(begun.txn, beginErr).err
+		return Inspection{}, s.failedReadBegin(begun.txn, beginErr)
 	}
 	inspection, primary := s.inspectReadLocked(begun.txn)
-	outcome := s.abortLocked(begun.txn, primary)
-	if outcome.err != nil {
-		return Inspection{}, outcome.err
+	if err := s.abortReadLocked(begun.txn, primary, primary != nil); err != nil {
+		return Inspection{}, err
 	}
 	return inspection, nil
+}
+
+func (s *Store) failedReadBegin(txn *C.MDBX_txn, primary error) error {
+	if txn != nil {
+		return s.poison(txn, primary).err
+	}
+	_, err := s.consume(primary)
+	return err
+}
+
+//nolint:errorlint // Only the exact recorded EngineError is de-duplicated.
+func readPrimary(application, infrastructure error) (error, bool) {
+	if infrastructure == nil {
+		return application, false
+	}
+	if recorded, ok := infrastructure.(*EngineError); ok {
+		if returned, exact := application.(*EngineError); exact && returned == recorded {
+			return infrastructure, true
+		}
+	}
+	return joinErrors(application, infrastructure), true
+}
+
+func (s *Store) abortReadLocked(txn *C.MDBX_txn, primary error, infrastructure bool) error {
+	return s.applyReadAbort(txn, primary, infrastructure, int(C.mdbx_txn_abort(txn)))
+}
+
+func (s *Store) applyReadAbort(txn *C.MDBX_txn, primary error, infrastructure bool, rc int) error {
+	decision := abortTransition(rc, primary != nil)
+	var abortErr error
+	if rc != codeSuccess {
+		abortErr = nativeError(operationAbort, rc)
+	}
+	result := orderedErrors(operationAbort, decision.order, primary, abortErr)
+	if !decision.consumed {
+		return s.poison(txn, result).err
+	}
+	if rc == codeSuccess && !infrastructure {
+		return result
+	}
+	_, result = s.consume(result)
+	return result
 }
 
 func (s *Store) observationStateError(operation engineOperation) error {
@@ -914,7 +956,7 @@ func validPointerShapePoison(engine *EngineError, operation engineOperation) boo
 }
 
 func validClosedTerminal(err error) bool {
-	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) {
+	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err) {
 		return true
 	}
 	joined, ok := err.(interface{ Unwrap() []error })
@@ -923,6 +965,49 @@ func validClosedTerminal(err error) bool {
 	}
 	parts := joined.Unwrap()
 	return len(parts) == 2 && validConsumedCloseTerminal(parts[0]) && validReleaseTerminal(parts[1])
+}
+
+func validConsumedReadTerminal(err error) bool {
+	if valid, direct := validDirectConsumedReadTerminal(err); direct {
+		return valid
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return false
+	}
+	parts := joined.Unwrap()
+	if len(parts) != 2 {
+		return false
+	}
+	if validConsumedReadTerminal(parts[1]) {
+		return parts[0] != nil
+	}
+	if validConsumedCleanupTerminal(parts[1]) {
+		return validConsumedReadTerminal(parts[0])
+	}
+	return false
+}
+
+func validDirectConsumedReadTerminal(err error) (bool, bool) {
+	engine, direct := directEngineError(err)
+	if !direct {
+		return false, false
+	}
+	operation := engineOperation(engine.Operation)
+	switch operation {
+	case operationAbort:
+		_, valid := directNativeResult(operationAbort, err)
+		return valid && engine.Code != codeThreadMismatch, true
+	case operationView, operationGet, operationInspect:
+		_, valid := directNativeResult(operation, err)
+		return valid, true
+	default:
+		return false, true
+	}
+}
+
+func validConsumedCleanupTerminal(err error) bool {
+	return validConsumedCloseTerminal(err) || validReleaseTerminal(err)
 }
 
 func validConsumedCloseTerminal(e error) bool {

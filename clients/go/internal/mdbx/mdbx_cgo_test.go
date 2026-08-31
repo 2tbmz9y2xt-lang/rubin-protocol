@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
@@ -1446,6 +1447,105 @@ func TestReaderGetResultMatrix(t *testing.T) {
 	}
 }
 
+//nolint:errorlint // Exact identity and order are the read-disposition contract.
+func TestReadDispositionEffects(t *testing.T) {
+	newStore := func(t *testing.T) *Store {
+		t.Helper()
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		return store
+	}
+	requireClosed := func(t *testing.T, store *Store, terminal error) {
+		t.Helper()
+		zeroDBIs := true
+		for _, dbi := range store.dbis {
+			zeroDBIs = zeroDBIs && dbi == 0
+		}
+		if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !zeroDBIs || !sameError(store.terminal, terminal) {
+			t.Fatalf("read consume resource shape drifted: %s/%p/%p/%p/%v", store.state, store.env, store.writer, store.txn, store.terminal)
+		}
+		if !sameError(store.View(func(*Reader) error { t.Fatal("terminal View callback invoked"); return nil }), terminal) {
+			t.Fatal("terminal View legality drifted")
+		}
+		if inspection, err := store.Inspect(); inspection != (Inspection{}) || !sameError(err, terminal) || !sameError(store.Close(), terminal) {
+			t.Fatal("terminal Inspect/Close legality drifted")
+		}
+	}
+
+	t.Run("begin nil consumes", func(t *testing.T) {
+		store, primary := newStore(t), nativeError(operationView, codeEIO)
+		got := store.failedReadBegin(nil, primary)
+		if got != primary {
+			t.Fatalf("begin nil error identity drifted: %v", got)
+		}
+		requireClosed(t, store, got)
+	})
+	t.Run("begin nonnil poisons", func(t *testing.T) {
+		store := newStore(t)
+		cfg, dbis := store.config, store.dbis
+		txn := store.txn
+		mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
+		primary := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", codeEIO, true)
+		got := store.failedReadBegin(txn, primary)
+		if got != primary || store.state != storePOISONEDTHREAD || store.txn != txn || !validStoreShape(store) || store.Close() != primary {
+			t.Fatalf("begin nonnil poison ownership drifted: %v/%s", got, store.state)
+		}
+		store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+		mustEnvironment(t, store.Close())
+	})
+	t.Run("application stays open", func(t *testing.T) {
+		store, callbackErr := newStore(t), errors.New("callback")
+		if got := store.applyReadAbort(nil, callbackErr, false, codeSuccess); got != callbackErr || store.state != storeOPEN {
+			t.Fatalf("application disposition drifted: %v/%s", got, store.state)
+		}
+		_, err := store.Inspect()
+		mustEnvironment(t, err)
+		mustEnvironment(t, store.Close())
+	})
+	t.Run("infrastructure consumes", func(t *testing.T) {
+		store, primary := newStore(t), nativeError(operationGet, codeEIO)
+		got := store.applyReadAbort(nil, primary, true, codeSuccess)
+		if got != primary {
+			t.Fatalf("infrastructure identity drifted: %v", got)
+		}
+		requireClosed(t, store, got)
+	})
+	t.Run("abort failure consumes in order", func(t *testing.T) {
+		store, primary := newStore(t), errors.New("callback")
+		got := store.applyReadAbort(nil, primary, false, codeEIO)
+		parts, ok := got.(interface{ Unwrap() []error })
+		if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != primary {
+			t.Fatalf("abort failure order drifted: %v", got)
+		}
+		requireEnvironmentError(t, parts.Unwrap()[1], EngineIO, operationAbort, codeEIO, expectedNativeDiagnostic(codeEIO))
+		requireClosed(t, store, got)
+	})
+	t.Run("thread mismatch poisons", func(t *testing.T) {
+		store := newStore(t)
+		cfg, dbis := store.config, store.dbis
+		txn := store.txn
+		mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
+		primary := errors.New("callback")
+		got := store.applyReadAbort(txn, primary, false, codeThreadMismatch)
+		engine := requireEnvironmentError(t, got, EngineLocalInvariant, operationAbort, codeThreadMismatch, expectedNativeDiagnostic(codeThreadMismatch))
+		if engine.Cause != primary || store.state != storePOISONEDTHREAD || store.txn != txn || !validStoreShape(store) || store.Close() != got {
+			t.Fatalf("abort mismatch disposition drifted: %v/%s", got, store.state)
+		}
+		store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+		mustEnvironment(t, store.Close())
+	})
+	t.Run("Inspect integrity consumes", func(t *testing.T) {
+		store := newStore(t)
+		store.config.Lower, store.config.Now = 3<<20, 3<<20
+		inspection, got := store.Inspect()
+		if inspection != (Inspection{}) {
+			t.Fatal("Inspect returned partial infrastructure result")
+		}
+		requireEnvironmentError(t, got, EngineIntegrity, operationInspect, codeInvalid, "effective ConfigV1 Now is invalid")
+		requireClosed(t, store, got)
+	})
+}
+
 func TestViewReaderLifetimeAndConcurrentGet(t *testing.T) {
 	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 	mustEnvironment(t, err)
@@ -1715,9 +1815,13 @@ func TestInspectObservation(t *testing.T) {
 		}
 	}
 	mustEnvironment(t, store.Close())
+	assertReadSurfaceOwnershipAST(t)
 }
 
-func TestReadSurfaceOwnershipAST(t *testing.T) {
+func TestReadSurfaceOwnershipAST(t *testing.T) { assertReadSurfaceOwnershipAST(t) }
+
+func assertReadSurfaceOwnershipAST(t *testing.T) {
+	t.Helper()
 	source, err := os.ReadFile("mdbx_cgo.go")
 	mustEnvironment(t, err)
 	fset := token.NewFileSet()
@@ -1754,11 +1858,12 @@ func TestReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("exclusive observation ownership drifted: %s", name)
 		}
 		requireOrder(name, "exclusive observation ownership drifted", "s.operations.TryLock()", "defer s.operations.Unlock()", "s.observationStateError", "C.rubin_mdbx_txn_begin")
-		if strings.Count(text, "s.poison(begun.txn, beginErr)") != 1 || strings.Count(text, "s.abortLocked") != 1 || strings.Index(text, "s.poison(begun.txn, beginErr)") > strings.Index(text, "s.abortLocked") {
+		if strings.Count(text, "s.failedReadBegin(begun.txn, beginErr)") != 1 || strings.Count(text, "s.abortReadLocked") != 1 || strings.Index(text, "s.failedReadBegin(begun.txn, beginErr)") > strings.Index(text, "s.abortReadLocked") {
 			t.Fatalf("ambiguous txn ownership drifted: %s", name)
 		}
 	}
-	requireOrder("View", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "s.abortLocked")
+	requireOrder("View", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked")
+	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
 	call := func(expr ast.Expr, path ...string) bool {
 		for i := len(path) - 1; i > 0; i-- {
 			selector, ok := expr.(*ast.SelectorExpr)
@@ -1817,6 +1922,133 @@ func TestReadSurfaceOwnershipAST(t *testing.T) {
 	zeroInspection := func(expr ast.Expr) bool {
 		literal, ok := expr.(*ast.CompositeLit)
 		return ok && len(literal.Elts) == 0 && ident(literal.Type, "Inspection")
+	}
+	render := func(node ast.Node) string {
+		var text strings.Builder
+		if err := format.Node(&text, fset, node); err != nil {
+			t.Fatalf("Inspection provenance drifted: %v", err)
+		}
+		return text.String()
+	}
+	literalFields := func(typeName string) map[string]string {
+		var matches []*ast.CompositeLit
+		ast.Inspect(functions["inspectReadLocked"].Body, func(node ast.Node) bool {
+			literal, ok := node.(*ast.CompositeLit)
+			if ok && len(literal.Elts) != 0 && ident(literal.Type, typeName) {
+				matches = append(matches, literal)
+			}
+			return true
+		})
+		if len(matches) != 1 {
+			t.Fatalf("Inspection provenance drifted: %s literals=%d", typeName, len(matches))
+		}
+		fields := make(map[string]string, len(matches[0].Elts))
+		for _, element := range matches[0].Elts {
+			keyed, ok := element.(*ast.KeyValueExpr)
+			if !ok {
+				t.Fatalf("Inspection provenance drifted: unkeyed %s field", typeName)
+			}
+			key, keyedName := keyed.Key.(*ast.Ident)
+			if !keyedName {
+				t.Fatalf("Inspection provenance drifted: unnamed %s field", typeName)
+			}
+			_, duplicate := fields[key.Name]
+			if duplicate {
+				t.Fatalf("Inspection provenance drifted: invalid %s field", typeName)
+			}
+			fields[key.Name] = render(keyed.Value)
+		}
+		return fields
+	}
+	wantInspection := map[string]string{"Config": "s.config", "MapSize": "uint64(info.mi_mapsize)", "FileSize": "uint64(info.mi_dxb_fsize)", "AllocatedSize": "uint64(info.mi_dxb_fallocated)", "MaxReaders": "uint32(info.mi_maxreaders)", "ReaderTableLength": "uint32(info.mi_numreaders)", "RecentTxnID": "uint64(info.mi_recent_txnid)", "LatterReaderTxnID": "uint64(info.mi_latter_reader_txnid)", "UnsyncBytes": "uint64(info.mi_unsync_volume)"}
+	wantDBIInspection := map[string]string{"DBI": "dbi", "Entries": "uint64(stat.ms_entries)", "Depth": "uint32(stat.ms_depth)", "BranchPages": "uint64(stat.ms_branch_pages)", "LeafPages": "uint64(stat.ms_leaf_pages)", "OverflowPages": "uint64(stat.ms_overflow_pages)", "PageSize": "uint32(stat.ms_psize)"}
+	if !reflect.DeepEqual(literalFields("Inspection"), wantInspection) || !reflect.DeepEqual(literalFields("DBIInspection"), wantDBIInspection) {
+		t.Fatal("Inspection provenance drifted: field mapping")
+	}
+	rootedAt := func(expr ast.Expr, name string) bool {
+		for {
+			switch node := expr.(type) {
+			case *ast.Ident:
+				return node.Name == name
+			case *ast.SelectorExpr:
+				expr = node.X
+			case *ast.IndexExpr:
+				expr = node.X
+			case *ast.ParenExpr:
+				expr = node.X
+			case *ast.StarExpr:
+				expr = node.X
+			default:
+				return false
+			}
+		}
+	}
+	var infoCalls, statCalls []*ast.CallExpr
+	var ranges []*ast.RangeStmt
+	var currentWrites, inspectionWrites []*ast.AssignStmt
+	invalidWrites, infoPointers, statPointers, currentPointers, inspectionPointers := 0, 0, 0, 0, 0
+	ast.Inspect(functions["inspectReadLocked"].Body, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.CallExpr:
+			switch render(node.Fun) {
+			case "C.mdbx_env_info_ex":
+				infoCalls = append(infoCalls, node)
+			case "C.mdbx_dbi_stat":
+				statCalls = append(statCalls, node)
+			}
+		case *ast.RangeStmt:
+			ranges = append(ranges, node)
+		case *ast.AssignStmt:
+			for _, lhs := range node.Lhs {
+				if rootedAt(lhs, "inspection") {
+					inspectionWrites = append(inspectionWrites, node)
+				}
+				if rootedAt(lhs, "current") {
+					currentWrites = append(currentWrites, node)
+				}
+				if rootedAt(lhs, "info") || rootedAt(lhs, "stat") {
+					invalidWrites++
+				}
+			}
+		case *ast.IncDecStmt:
+			if rootedAt(node.X, "inspection") || rootedAt(node.X, "current") || rootedAt(node.X, "info") || rootedAt(node.X, "stat") {
+				invalidWrites++
+			}
+		case *ast.UnaryExpr:
+			if node.Op == token.AND {
+				if rootedAt(node.X, "info") {
+					infoPointers++
+				}
+				if rootedAt(node.X, "stat") {
+					statPointers++
+				}
+				if rootedAt(node.X, "current") {
+					currentPointers++
+				}
+				if rootedAt(node.X, "inspection") {
+					inspectionPointers++
+				}
+			}
+		}
+		return true
+	})
+	if len(infoCalls) != 1 || render(infoCalls[0]) != "C.mdbx_env_info_ex(s.env, txn, &info, C.size_t(unsafe.Sizeof(info)))" || infoPointers != 1 || len(currentWrites) != 1 || render(currentWrites[0]) != "current := uint64(info.mi_geo.current)" || currentPointers != 0 || infoCalls[0].Pos() >= currentWrites[0].Pos() {
+		t.Fatal("Inspection provenance drifted: environment producer")
+	}
+	if len(ranges) != 1 || ranges[0].Tok != token.DEFINE || !ident(ranges[0].Key, "i") || !ident(ranges[0].Value, "dbi") || render(ranges[0].X) != "SchemaV1DBIs()" || len(statCalls) != 1 || render(statCalls[0]) != "C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))" || statPointers != 1 || statCalls[0].Pos() < ranges[0].Body.Pos() || statCalls[0].End() > ranges[0].Body.End() {
+		t.Fatal("Inspection provenance drifted: DBI producer")
+	}
+	if len(inspectionWrites) != 3 || invalidWrites != 0 {
+		t.Fatal("Inspection provenance drifted: unexpected overwrite")
+	}
+	initial, now, dbiRow := inspectionWrites[0], inspectionWrites[1], inspectionWrites[2]
+	if len(initial.Rhs) != 1 || len(dbiRow.Rhs) != 1 {
+		t.Fatal("Inspection provenance drifted: consumer shape")
+	}
+	initialLiteral, initialOK := initial.Rhs[0].(*ast.CompositeLit)
+	dbiLiteral, dbiOK := dbiRow.Rhs[0].(*ast.CompositeLit)
+	if render(initial.Lhs[0]) != "inspection" || initial.Tok != token.DEFINE || !initialOK || !ident(initialLiteral.Type, "Inspection") || render(now) != "inspection.Config.Now = current" || now.Pos() <= currentWrites[0].Pos() || render(dbiRow.Lhs[0]) != "inspection.DBIs[i]" || dbiRow.Tok != token.ASSIGN || !dbiOK || !ident(dbiLiteral.Type, "DBIInspection") || statCalls[0].Pos() >= dbiRow.Pos() || dbiRow.Pos() < ranges[0].Body.Pos() || dbiRow.End() > ranges[0].Body.End() || inspectionPointers != 0 {
+		t.Fatal("Inspection provenance drifted: consumer chain")
 	}
 	for _, name := range []string{"inspectReadLocked", "Inspect"} {
 		successReturns := 0

@@ -215,6 +215,16 @@ func fixtureSeedRows(store *Store, rows ...fixtureRawRow) error {
 	})
 }
 
+func fixtureSeedMalformedStoredWidth(store *Store) error {
+	key, value := []byte{0}, []byte{0, 0, 1}
+	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
+		rc := int(C.rubin_fixture_put(txn, store.dbis[0], unsafe.Pointer(&key[0]), C.size_t(len(key)), unsafe.Pointer(&value[0]), C.size_t(len(value))))
+		runtime.KeepAlive(key)
+		runtime.KeepAlive(value)
+		return fixtureResult(operationInit, rc)
+	})
+}
+
 func reopenAfterFixture(path string, cfg ConfigV1, store *Store, primary error) (*Store, error) {
 	if err := joinErrors(primary, store.Close()); err != nil {
 		return nil, err

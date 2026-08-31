@@ -3,6 +3,7 @@
 package mdbx
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -166,4 +167,66 @@ func TestReaderGetNativeFixtures(t *testing.T) {
 		t.Fatalf("Inspection provenance drifted: %+v", inspection)
 	}
 	mustEnvironment(t, store.Close())
+}
+
+//nolint:errorlint // Exact callback, infrastructure and panic identities are required.
+func TestReaderGetMalformedDisposition(t *testing.T) {
+	dbis, key := readDBIsLiteral(), []byte{0}
+	callbackErr, panicValue := errors.New("callback"), &struct{ name string }{"panic"}
+	for _, mode := range []string{"ignored", "exact", "wrapped", "distinct", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+			mustEnvironment(t, err)
+			mustEnvironment(t, fixtureSeedMalformedStoredWidth(store))
+			var recorded, returned error
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				returned = store.View(func(reader *Reader) error {
+					_, _, recorded = reader.Get(dbis[0], key)
+					requireEnvironmentError(t, recorded, EngineIntegrity, operationGet, codeInvalid, "stored value width outside SchemaV1 bound")
+					if _, _, again := reader.Get(dbis[0], key); requireEnvironmentError(t, again, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active").Cause != nil {
+						t.Fatal("failed Reader remained active")
+					}
+					switch mode {
+					case "ignored":
+						return nil
+					case "exact":
+						return recorded
+					case "wrapped":
+						return fmt.Errorf("wrapped: %w", recorded)
+					case "distinct":
+						return callbackErr
+					default:
+						panic(panicValue)
+					}
+				})
+			}()
+			if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !sameError(store.terminal, returned) && mode != "panic" {
+				t.Fatalf("post-native Get disposition drifted: %s/%v", store.state, returned)
+			}
+			switch mode {
+			case "ignored", "exact":
+				if returned != recorded {
+					t.Fatalf("recorded failure identity/duplication drifted: %v", returned)
+				}
+			case "wrapped", "distinct":
+				parts, ok := returned.(interface{ Unwrap() []error })
+				if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[1] != recorded || mode == "distinct" && parts.Unwrap()[0] != callbackErr || mode == "wrapped" && !errors.Is(parts.Unwrap()[0], recorded) {
+					t.Fatalf("callback/recorded order drifted: %v", returned)
+				}
+			case "panic":
+				if recovered != panicValue || returned != nil || store.terminal != recorded {
+					t.Fatalf("panic disposition drifted: %v/%v/%v", recovered, returned, store.terminal)
+				}
+			}
+			terminal := store.terminal
+			if !sameError(store.View(func(*Reader) error { t.Fatal("closed callback invoked"); return nil }), terminal) {
+				t.Fatal("closed View legality drifted")
+			}
+			if inspection, next := store.Inspect(); inspection != (Inspection{}) || !sameError(next, terminal) || !sameError(store.Close(), terminal) {
+				t.Fatal("closed Inspect/Close legality drifted")
+			}
+		})
+	}
 }
