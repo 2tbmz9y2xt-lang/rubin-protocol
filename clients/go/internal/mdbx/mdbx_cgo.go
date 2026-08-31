@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
@@ -46,15 +47,18 @@ var (
 type engineOperation string
 
 const (
-	operationCreate engineOperation = "create"
-	operationOpen   engineOperation = "open"
-	operationInit   engineOperation = "init"
-	operationAbort  engineOperation = "abort"
-	operationClose  engineOperation = "close"
+	operationCreate  engineOperation = "create"
+	operationOpen    engineOperation = "open"
+	operationInit    engineOperation = "init"
+	operationAbort   engineOperation = "abort"
+	operationClose   engineOperation = "close"
+	operationView    engineOperation = "view"
+	operationGet     engineOperation = "get"
+	operationInspect engineOperation = "inspect"
 )
 
 func validEngineOperation(operation engineOperation) bool {
-	return operation == operationCreate || operation == operationOpen || operation == operationInit || operation == operationAbort || operation == operationClose
+	return operation == operationCreate || operation == operationOpen || operation == operationInit || operation == operationAbort || operation == operationClose || operation == operationView || operation == operationGet || operation == operationInspect
 }
 
 type EngineClass string
@@ -429,6 +433,321 @@ type Store struct {
 	terminal   error
 }
 
+type Reader struct {
+	self    *Reader
+	txn     *C.MDBX_txn
+	dbis    [7]C.MDBX_dbi
+	getMu   sync.Mutex
+	active  atomic.Bool
+	failure error
+}
+
+type DBIInspection struct {
+	DBI           DBI
+	Entries       uint64
+	Depth         uint32
+	BranchPages   uint64
+	LeafPages     uint64
+	OverflowPages uint64
+	PageSize      uint32
+}
+
+type Inspection struct {
+	Config            ConfigV1
+	MapSize           uint64
+	FileSize          uint64
+	AllocatedSize     uint64
+	MaxReaders        uint32
+	ReaderTableLength uint32
+	RecentTxnID       uint64
+	LatterReaderTxnID uint64
+	UnsyncBytes       uint64
+	DBIs              [7]DBIInspection
+}
+
+type getResult uint8
+
+const (
+	getResultAbsent getResult = iota
+	getResultEmpty
+	getResultCopy
+	getResultInvalidShape
+	getResultInvalidBound
+	getResultNative
+)
+
+func (s *Store) View(callback func(*Reader) error) (err error) {
+	if s == nil {
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+	}
+	if callback == nil {
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)
+	}
+	if !s.operations.TryLock() {
+		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)
+	}
+	defer s.operations.Unlock()
+	stateErr := s.observationStateError(operationView)
+	if stateErr != nil {
+		return stateErr
+	}
+	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
+	beginErr := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		return s.failedReadBegin(begun.txn, beginErr)
+	}
+	reader := newReader(begun.txn, s.dbis)
+	reader.active.Store(true)
+	defer func() {
+		reader.expire()
+		primary, infrastructure := readPrimary(err, reader.failure)
+		err = s.abortReadLocked(begun.txn, primary, infrastructure)
+	}()
+	return callback(reader)
+}
+
+func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
+	if !r.usable() {
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	dbiErr := ValidateDBI(dbi)
+	if dbiErr != nil {
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV1 DBI", dbiErr)
+	}
+	if !validKey(dbi.Rank, key) {
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV1 key", nil)
+	}
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	value := C.rubin_mdbx_get(r.txn, r.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	result, present, err := copiedGetResult(dbi, key, int(value.rc), unsafe.Pointer(value.bytes), value.length)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return result, present, err
+}
+
+func (s *Store) Inspect() (Inspection, error) {
+	if s == nil {
+		return Inspection{}, adapterError(operationInspect, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+	}
+	if !s.operations.TryLock() {
+		return Inspection{}, adapterError(operationInspect, EngineConcurrency, codeBusy, "store operation in progress", nil)
+	}
+	defer s.operations.Unlock()
+	stateErr := s.observationStateError(operationInspect)
+	if stateErr != nil {
+		return Inspection{}, stateErr
+	}
+	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
+	beginErr := nativePointerResultError(operationInspect, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		return Inspection{}, s.failedReadBegin(begun.txn, beginErr)
+	}
+	inspection, primary := s.inspectReadLocked(begun.txn)
+	cleanupErr := s.abortReadLocked(begun.txn, primary, primary != nil)
+	if cleanupErr != nil {
+		return Inspection{}, cleanupErr
+	}
+	return inspection, nil
+}
+
+func (s *Store) failedReadBegin(txn *C.MDBX_txn, primary error) error {
+	if txn != nil {
+		return s.poison(txn, primary).err
+	}
+	_, err := s.consume(primary)
+	return err
+}
+
+//nolint:errorlint // Only the exact recorded EngineError is de-duplicated.
+func readPrimary(application, infrastructure error) (error, bool) {
+	if infrastructure == nil {
+		return application, false
+	}
+	if recorded, ok := infrastructure.(*EngineError); ok {
+		if returned, exact := application.(*EngineError); exact && returned == recorded {
+			return infrastructure, true
+		}
+	}
+	return joinErrors(application, infrastructure), true
+}
+
+func (s *Store) abortReadLocked(txn *C.MDBX_txn, primary error, infrastructure bool) error {
+	return s.applyReadAbort(txn, primary, infrastructure, int(C.mdbx_txn_abort(txn)))
+}
+
+func (s *Store) applyReadAbort(txn *C.MDBX_txn, primary error, infrastructure bool, rc int) error {
+	decision := abortTransition(rc, primary != nil)
+	var abortErr error
+	if rc != codeSuccess {
+		abortErr = nativeError(operationAbort, rc)
+	}
+	result := orderedErrors(operationAbort, decision.order, primary, abortErr)
+	if !decision.consumed {
+		return s.poison(txn, result).err
+	}
+	if rc == codeSuccess && !infrastructure {
+		return result
+	}
+	_, result = s.consume(result)
+	return result
+}
+
+func (s *Store) observationStateError(operation engineOperation) error {
+	if !validStoreState(s.state) {
+		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store state", nil)
+	}
+	if !validStoreShape(s) {
+		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)
+	}
+	if s.state == storeOPEN {
+		return nil
+	}
+	if s.terminal != nil {
+		return s.terminal
+	}
+	return adapterError(operation, EngineInvalidInput, codeEINVAL, "Store is closed", nil)
+}
+
+func newReader(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi) *Reader {
+	reader := &Reader{txn: txn, dbis: dbis}
+	reader.self = reader
+	return reader
+}
+
+func (r *Reader) usable() bool {
+	return r != nil && r.self == r && r.txn != nil && validRetainedDBIs(r.dbis) && r.active.Load()
+}
+
+func (r *Reader) expire() {
+	r.active.Store(false)
+	r.getMu.Lock()
+	//nolint:staticcheck // Lock acquisition drains every in-flight Get before abort.
+	r.getMu.Unlock()
+}
+
+func copiedGetResult(dbi DBI, key []byte, rc int, bytes unsafe.Pointer, length C.size_t) ([]byte, bool, error) {
+	minimum, maximum := rawValueBounds(dbi, key)
+	decision := getResultDecision(rc, bytes != nil, uint64(length), minimum, maximum)
+	switch decision {
+	case getResultAbsent:
+		return nil, false, nil
+	case getResultEmpty:
+		return []byte{}, true, nil
+	case getResultCopy:
+		return C.GoBytes(bytes, C.int(length)), true, nil
+	case getResultInvalidShape:
+		return nil, false, adapterError(operationGet, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape", nil)
+	case getResultInvalidBound:
+		return nil, false, integrityError(operationGet, "stored value width outside SchemaV1 bound", nil)
+	default:
+		return nil, false, nativeError(operationGet, rc)
+	}
+}
+
+func getResultDecision(rc int, present bool, length, minimum, maximum uint64) getResult {
+	if rc == codeNotFound {
+		if !present && length == 0 {
+			return getResultAbsent
+		}
+		return getResultInvalidShape
+	}
+	if rc != codeSuccess {
+		return getResultNative
+	}
+	if length == 0 {
+		return zeroLengthGetResult(minimum)
+	}
+	if !present {
+		return getResultInvalidShape
+	}
+	if !validRawValueLength(length, minimum, maximum) {
+		return getResultInvalidBound
+	}
+	return getResultCopy
+}
+
+func zeroLengthGetResult(minimum uint64) getResult {
+	if minimum == 0 {
+		return getResultEmpty
+	}
+	return getResultInvalidBound
+}
+
+func validRawValueLength(length, minimum, maximum uint64) bool {
+	return length >= minimum && length <= maximum
+}
+
+func rawValueBounds(dbi DBI, key []byte) (uint64, uint64) {
+	if dbi.Rank == 0 {
+		return metaRawValueBounds(key[0])
+	}
+	if dbi.Rank == 5 {
+		return undoRawValueBounds(key[32])
+	}
+	return rankedRawValueBounds(dbi.Rank)
+}
+
+func metaRawValueBounds(kind byte) (uint64, uint64) {
+	switch kind {
+	case 0x00:
+		return 4, 4
+	case 0x01:
+		return 48, 48
+	case 0x02:
+		return 0, MaxMetadataBytes
+	default:
+		return 16, 16
+	}
+}
+
+func undoRawValueBounds(kind byte) (uint64, uint64) {
+	if kind == 0 {
+		return 33, 33
+	}
+	return 20, 65_560
+}
+
+func rankedRawValueBounds(rank uint8) (uint64, uint64) {
+	switch rank {
+	case 1:
+		return 20, 65_560
+	case 2, 6:
+		return 104, 104
+	case 3:
+		return 116, 116
+	default:
+		return 116, MaxBlockBytes
+	}
+}
+
+func (s *Store) inspectReadLocked(txn *C.MDBX_txn) (Inspection, error) {
+	var info C.MDBX_envinfo
+	if rc := int(C.mdbx_env_info_ex(s.env, txn, &info, C.size_t(unsafe.Sizeof(info)))); rc != codeSuccess {
+		return Inspection{}, nativeError(operationInspect, rc)
+	}
+	current := uint64(info.mi_geo.current)
+	if !validEffectiveCurrent(s.config, current) {
+		return Inspection{}, integrityError(operationInspect, "effective ConfigV1 Now is invalid", nil)
+	}
+	inspection := Inspection{Config: s.config, MapSize: uint64(info.mi_mapsize), FileSize: uint64(info.mi_dxb_fsize), AllocatedSize: uint64(info.mi_dxb_fallocated), MaxReaders: uint32(info.mi_maxreaders), ReaderTableLength: uint32(info.mi_numreaders), RecentTxnID: uint64(info.mi_recent_txnid), LatterReaderTxnID: uint64(info.mi_latter_reader_txnid), UnsyncBytes: uint64(info.mi_unsync_volume)}
+	inspection.Config.Now = current
+	for i, dbi := range SchemaV1DBIs() {
+		var stat C.MDBX_stat
+		if rc := int(C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))); rc != codeSuccess {
+			return Inspection{}, nativeError(operationInspect, rc)
+		}
+		inspection.DBIs[i] = DBIInspection{DBI: dbi, Entries: uint64(stat.ms_entries), Depth: uint32(stat.ms_depth), BranchPages: uint64(stat.ms_branch_pages), LeafPages: uint64(stat.ms_leaf_pages), OverflowPages: uint64(stat.ms_overflow_pages), PageSize: uint32(stat.ms_psize)}
+	}
+	return inspection, nil
+}
+
 func Create(path string, cfg ConfigV1) (*Store, error) {
 	encoded, err := validateCreateStatic(path, cfg)
 	if err != nil {
@@ -634,11 +953,11 @@ func validPoisonTerminal(err error) bool {
 }
 
 func validPointerShapePoison(engine *EngineError, operation engineOperation) bool {
-	return engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "mdbx_txn_begin returned invalid result shape" && (operation == operationInit || operation == operationOpen)
+	return engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "mdbx_txn_begin returned invalid result shape" && (operation == operationInit || operation == operationOpen || operation == operationView || operation == operationInspect)
 }
 
 func validClosedTerminal(err error) bool {
-	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) {
+	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err) {
 		return true
 	}
 	joined, ok := err.(interface{ Unwrap() []error })
@@ -647,6 +966,49 @@ func validClosedTerminal(err error) bool {
 	}
 	parts := joined.Unwrap()
 	return len(parts) == 2 && validConsumedCloseTerminal(parts[0]) && validReleaseTerminal(parts[1])
+}
+
+func validConsumedReadTerminal(err error) bool {
+	if valid, direct := validDirectConsumedReadTerminal(err); direct {
+		return valid
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return false
+	}
+	parts := joined.Unwrap()
+	if len(parts) != 2 {
+		return false
+	}
+	if validConsumedReadTerminal(parts[1]) {
+		return parts[0] != nil
+	}
+	if validConsumedCleanupTerminal(parts[1]) {
+		return validConsumedReadTerminal(parts[0])
+	}
+	return false
+}
+
+func validDirectConsumedReadTerminal(err error) (bool, bool) {
+	engine, direct := directEngineError(err)
+	if !direct {
+		return false, false
+	}
+	operation := engineOperation(engine.Operation)
+	switch operation {
+	case operationAbort:
+		_, valid := directNativeResult(operationAbort, err)
+		return valid && engine.Code != codeThreadMismatch, true
+	case operationView, operationGet, operationInspect:
+		_, valid := directNativeResult(operation, err)
+		return valid, true
+	default:
+		return false, true
+	}
+}
+
+func validConsumedCleanupTerminal(err error) bool {
+	return validConsumedCloseTerminal(err) || validReleaseTerminal(err)
 }
 
 func validConsumedCloseTerminal(e error) bool {
@@ -1229,7 +1591,7 @@ func (s *Store) abortLocked(txn *C.MDBX_txn, primary error) transactionOutcome {
 }
 
 func (s *Store) poison(txn *C.MDBX_txn, err error) transactionOutcome {
-	s.state, s.txn, s.terminal = storePOISONEDTHREAD, txn, err
+	s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, err
 	return transactionOutcome{err: err, poisoned: true}
 }
 
