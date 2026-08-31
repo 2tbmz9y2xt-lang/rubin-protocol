@@ -21,43 +21,99 @@ type daAdmissionCandidateFixture struct {
 	kind                                     uint8
 }
 
-func newDAAdmissionCandidateFixture(t *testing.T, kind uint8) daAdmissionCandidateFixture {
+type daAdmissionCandidateFixtureValues struct {
+	commitCount         uint16
+	chunkIndex          uint16
+	chunkPayload        []byte
+	inputValues         []uint64
+	inputOrder          []int
+	outputValue         uint64
+	fee                 consensus.Uint128
+	onlyCommitment      bool
+	commitmentAfterP2PK bool
+}
+
+func newDAAdmissionCandidateFixture(t *testing.T, kind uint8, values ...daAdmissionCandidateFixtureValues) daAdmissionCandidateFixture {
 	t.Helper()
+	if len(values) > 1 {
+		t.Fatal("multiple DA admission fixture values")
+	}
+	value := daAdmissionCandidateFixtureValues{
+		commitCount:  uint16(consensus.MAX_DA_CHUNK_COUNT),
+		chunkIndex:   1,
+		chunkPayload: []byte("RUB-1273 chunk payload"),
+		inputValues:  []uint64{1_000_000, 1_000_000},
+		inputOrder:   []int{1, 0},
+		outputValue:  1_400_000,
+		fee:          consensus.Uint128{Lo: 600_000},
+	}
+	if len(values) == 1 {
+		value = values[0]
+	}
+	if value.inputValues == nil {
+		value.inputValues = []uint64{1_000_000, 1_000_000}
+	}
+	if value.inputOrder == nil {
+		value.inputOrder = []int{1, 0}
+	}
+	if value.fee.IsZero() {
+		value.fee = consensus.Uint128{Lo: 600_000}
+	}
+	if value.outputValue == 0 && !value.onlyCommitment {
+		value.outputValue = 1_400_000
+	}
 	signer := mustNodeMLDSA87Keypair(t)
 	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
-	state, outpoints := testSpendableChainState(address, []uint64{1_000_000, 1_000_000})
+	state, outpoints := testSpendableChainState(address, value.inputValues)
 	cfg := DefaultMempoolConfig()
 	cfg.PolicyMaxDaBytesPerBlock = consensus.MAX_DA_BYTES_PER_BLOCK
 	mp, err := NewMempoolWithConfig(state, nil, devnetGenesisChainID, cfg)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
-	inputs := []consensus.Outpoint{outpoints[1], outpoints[0]}
+	inputs := make([]consensus.Outpoint, len(value.inputOrder))
+	for i, index := range value.inputOrder {
+		if index < 0 || index >= len(outpoints) {
+			t.Fatalf("input order[%d]=%d outside %d inputs", i, index, len(outpoints))
+		}
+		inputs[i] = outpoints[index]
+	}
 	txInputs := make([]consensus.TxInput, len(inputs))
 	for i, input := range inputs {
 		txInputs[i] = consensus.TxInput{PrevTxid: input.Txid, PrevVout: input.Vout, Sequence: uint32(i + 3)}
 	}
-	const fee = uint64(456_789)
 	daID := [32]byte{0xa1, 0xb2, 0xc3}
 	commitment := sha3.Sum256([]byte("RUB-1273 payload commitment"))
-	payload := []byte("RUB-1273 chunk payload")
 	tx := &consensus.Tx{Version: 1, TxKind: kind, TxNonce: 37, Inputs: txInputs, Locktime: 41}
-	fixture := daAdmissionCandidateFixture{fee: consensus.Uint128FromU64(fee), inputs: append([]consensus.Outpoint(nil), inputs...), daID: daID, commitment: commitment, kind: kind}
+	fixture := daAdmissionCandidateFixture{fee: value.fee, inputs: append([]consensus.Outpoint(nil), inputs...), daID: daID, commitment: commitment, kind: kind}
 	switch kind {
 	case 0x01:
-		fixture.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT)
-		tx.Outputs = []consensus.TxOutput{
-			{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), commitment[:]...)},
-			{Value: 2_000_000 - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)},
+		if value.commitCount == 0 {
+			value.commitCount = uint16(consensus.MAX_DA_CHUNK_COUNT)
+		}
+		fixture.chunkCount = value.commitCount
+		commitOutput := consensus.TxOutput{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), commitment[:]...)}
+		if value.onlyCommitment {
+			tx.Outputs = []consensus.TxOutput{commitOutput}
+		} else {
+			p2pkOutput := consensus.TxOutput{Value: value.outputValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}
+			if value.commitmentAfterP2PK {
+				tx.Outputs = []consensus.TxOutput{p2pkOutput, commitOutput}
+			} else {
+				tx.Outputs = []consensus.TxOutput{commitOutput, p2pkOutput}
+			}
 		}
 		tx.DaPayload = []byte("RUB-1273 manifest")
 		tx.DaCommitCore = &consensus.DaCommitCore{DaID: daID, ChunkCount: fixture.chunkCount, BatchNumber: 7}
 	case 0x02:
-		fixture.chunkIndex = 1
-		fixture.payload = append([]byte(nil), payload...)
-		fixture.chunkHash = sha3.Sum256(payload)
-		tx.Outputs = []consensus.TxOutput{{Value: 2_000_000 - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}}
-		tx.DaPayload = append([]byte(nil), payload...)
+		if value.chunkPayload == nil {
+			value.chunkPayload = []byte("RUB-1273 chunk payload")
+		}
+		fixture.chunkIndex = value.chunkIndex
+		fixture.payload = append([]byte(nil), value.chunkPayload...)
+		fixture.chunkHash = sha3.Sum256(value.chunkPayload)
+		tx.Outputs = []consensus.TxOutput{{Value: value.outputValue, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}}
+		tx.DaPayload = append([]byte(nil), value.chunkPayload...)
 		tx.DaChunkCore = &consensus.DaChunkCore{DaID: daID, ChunkIndex: fixture.chunkIndex, ChunkHash: fixture.chunkHash}
 	default:
 		t.Fatalf("unsupported test kind %#x", kind)
@@ -127,6 +183,13 @@ func daAdmissionOwnerCounts(admission *DAAdmission) (uint64, int, int) {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	return owner.tokenHighWater, len(owner.byToken), len(owner.byOutpoint)
+}
+
+func daAdmissionOwnerState(admission *DAAdmission) (uint64, bool, PendingOutpointTip) {
+	owner := admission.guard.owner
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return owner.generation, owner.inTransition, owner.stableTip
 }
 
 func TestDAAdmissionCandidateClosedDomain(t *testing.T) {
@@ -215,30 +278,49 @@ func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct {
-		name   string
-		kind   uint8
-		mutate func(*daRelayAdmissionCandidate)
+		name  string
+		kind  uint8
+		value daAdmissionCandidateFixtureValues
 	}{
-		{"commit count one", 0x01, func(candidate *daRelayAdmissionCandidate) { candidate.chunkCount = 1 }},
-		{"commit count maximum", 0x01, func(candidate *daRelayAdmissionCandidate) {
-			candidate.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT)
+		{"commit count one", 0x01, daAdmissionCandidateFixtureValues{commitCount: 1}},
+		{"commit count maximum", 0x01, daAdmissionCandidateFixtureValues{commitCount: uint16(consensus.MAX_DA_CHUNK_COUNT)}},
+		{"commit full u128 fee", 0x01, daAdmissionCandidateFixtureValues{
+			commitCount:    1,
+			inputValues:    []uint64{1 << 63, 1 << 63},
+			inputOrder:     []int{1, 0},
+			fee:            consensus.Uint128{Hi: 1},
+			onlyCommitment: true,
 		}},
-		{"chunk index zero", 0x02, func(candidate *daRelayAdmissionCandidate) { candidate.member.locator.chunkIndex = 0 }},
-		{"chunk index maximum", 0x02, func(candidate *daRelayAdmissionCandidate) {
-			candidate.member.locator.chunkIndex = uint16(consensus.MAX_DA_CHUNK_COUNT - 1)
+		{"commit one ordered input", 0x01, daAdmissionCandidateFixtureValues{
+			commitCount: 1,
+			inputValues: []uint64{1_000_000},
+			inputOrder:  []int{0},
+			outputValue: 400_000,
 		}},
-		{"chunk payload one", 0x02, func(candidate *daRelayAdmissionCandidate) { candidate.member.payload = []byte{1} }},
-		{"chunk payload maximum", 0x02, func(candidate *daRelayAdmissionCandidate) {
-			candidate.member.payload = make([]byte, consensus.CHUNK_BYTES)
+		// One signed ML-DSA witness consumes 7,227 bytes; 13 is the largest
+		// count within MAX_WITNESS_BYTES_PER_TX (including the count varint).
+		{"commit thirteen ordered inputs", 0x01, daAdmissionCandidateFixtureValues{
+			commitCount: 1,
+			inputValues: []uint64{
+				1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000,
+				1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000,
+			},
+			inputOrder:  []int{12, 0, 11, 1, 10, 2, 9, 3, 8, 4, 7, 5, 6},
+			outputValue: 12_400_000,
 		}},
+		{"commitment after p2pk", 0x01, daAdmissionCandidateFixtureValues{
+			commitCount:         1,
+			commitmentAfterP2PK: true,
+		}},
+		{"chunk index zero", 0x02, daAdmissionCandidateFixtureValues{chunkIndex: 0, chunkPayload: []byte("RUB-1273 chunk payload")}},
+		{"chunk index maximum", 0x02, daAdmissionCandidateFixtureValues{chunkIndex: uint16(consensus.MAX_DA_CHUNK_COUNT - 1), chunkPayload: []byte("RUB-1273 chunk payload")}},
+		{"chunk payload one", 0x02, daAdmissionCandidateFixtureValues{chunkIndex: 1, chunkPayload: []byte{1}}},
+		{"chunk payload maximum", 0x02, daAdmissionCandidateFixtureValues{chunkIndex: 1, chunkPayload: make([]byte, consensus.CHUNK_BYTES)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newDAAdmissionCandidateFixture(t, tc.kind)
+			fixture := newDAAdmissionCandidateFixture(t, tc.kind, tc.value)
 			candidate := mustDAAdmissionCandidate(t, fixture.admission, provenance)
-			tc.mutate(&candidate)
-			if err := candidate.validate(); err != nil {
-				t.Fatalf("boundary candidate: %v", err)
-			}
+			requireDAAdmissionCandidate(t, candidate, fixture, provenance)
 			fixture.admission.Close()
 		})
 	}
@@ -280,16 +362,34 @@ func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 }
 
 func TestDAAdmissionCandidateUsesHeldParse(t *testing.T) {
-	fixture := newDAAdmissionCandidateFixture(t, 0x01)
-	defer fixture.admission.Close()
-	fixture.raw[0] ^= 0xff
-	snapshot := fixture.admission.Snapshot()
-	snapshot.TxID[0] ^= 0xff
-	snapshot.WTxID[0] ^= 0xff
-	snapshot.TxBytes[0] ^= 0xff
-	snapshot.Inputs[0].Vout++
-	got := mustDAAdmissionCandidate(t, fixture.admission, daProvenance{kind: daProvenanceLocal})
-	requireDAAdmissionCandidate(t, got, fixture, daProvenance{kind: daProvenanceLocal})
+	t.Run("retained commit parse", func(t *testing.T) {
+		fixture := newDAAdmissionCandidateFixture(t, 0x01)
+		defer fixture.admission.Close()
+		commitmentOffset := bytes.Index(fixture.raw, fixture.commitment[:])
+		if commitmentOffset < 0 {
+			t.Fatal("serialized commitment missing")
+		}
+		fixture.raw[commitmentOffset] ^= 0xff
+		snapshot := fixture.admission.Snapshot()
+		snapshot.TxID[0] ^= 0xff
+		snapshot.WTxID[0] ^= 0xff
+		snapshot.TxBytes[0] ^= 0xff
+		snapshot.Inputs[0].Vout++
+		got := mustDAAdmissionCandidate(t, fixture.admission, daProvenance{kind: daProvenanceLocal})
+		requireDAAdmissionCandidate(t, got, fixture, daProvenance{kind: daProvenanceLocal})
+	})
+	t.Run("held chunk hash", func(t *testing.T) {
+		fixture := newDAAdmissionCandidateFixture(t, 0x02)
+		defer fixture.admission.Close()
+		wantHash := [32]byte{0xd4, 0xa1, 0x27}
+		if wantHash == sha3.Sum256(fixture.payload) {
+			t.Fatal("held chunk hash matches payload hash")
+		}
+		fixture.admission.tx.DaChunkCore.ChunkHash = wantHash
+		fixture.chunkHash = wantHash
+		got := mustDAAdmissionCandidate(t, fixture.admission, daProvenance{kind: daProvenanceLocal})
+		requireDAAdmissionCandidate(t, got, fixture, daProvenance{kind: daProvenanceLocal})
+	})
 }
 
 func TestDAAdmissionCandidateIsolation(t *testing.T) {
@@ -298,7 +398,26 @@ func TestDAAdmissionCandidateIsolation(t *testing.T) {
 	provenance := daProvenance{kind: daProvenancePeer, peerIdentity: "peer", quotaIdentity: "quota"}
 	first := mustDAAdmissionCandidate(t, fixture.admission, provenance)
 	second := mustDAAdmissionCandidate(t, fixture.admission, provenance)
-	fixture.raw[0] ^= 0xff
+	candidatePayloadOffset := bytes.Index(first.member.txBytes, first.member.payload)
+	if candidatePayloadOffset < 0 {
+		t.Fatal("candidate payload missing from retained bytes")
+	}
+	payloadByte, txPayloadByte := first.member.payload[0], first.member.txBytes[candidatePayloadOffset]
+	first.member.payload[0] ^= 0xff
+	if first.member.txBytes[candidatePayloadOffset] != txPayloadByte {
+		t.Fatal("candidate payload aliases retained bytes")
+	}
+	first.member.payload[0] = payloadByte
+	first.member.txBytes[candidatePayloadOffset] ^= 0xff
+	if first.member.payload[0] != payloadByte {
+		t.Fatal("candidate retained bytes alias payload")
+	}
+	first.member.txBytes[candidatePayloadOffset] = txPayloadByte
+	payloadOffset := bytes.Index(fixture.raw, fixture.payload)
+	if payloadOffset < 0 {
+		t.Fatal("serialized chunk payload missing")
+	}
+	fixture.raw[payloadOffset] ^= 0xff
 	snapshot := fixture.admission.Snapshot()
 	snapshot.TxBytes[0] ^= 0xff
 	snapshot.Inputs[0].Vout++
@@ -332,10 +451,21 @@ func TestDAAdmissionCandidateIsolation(t *testing.T) {
 func TestDAAdmissionCandidateErrorOrder(t *testing.T) {
 	provenance := daProvenance{kind: daProvenancePeer}
 	success := newDAAdmissionCandidateFixture(t, 0x01)
+	successSnapshot := success.admission.Snapshot()
+	successContext := success.admission.context
+	successTxBytes := mustMarshalTxForNodeTest(t, success.admission.tx)
 	successHigh, successTokens, successOutpoints := daAdmissionOwnerCounts(success.admission)
-	_ = mustDAAdmissionCandidate(t, success.admission, daProvenance{kind: daProvenanceLocal})
+	successGeneration, successTransition, successTip := daAdmissionOwnerState(success.admission)
+	candidate := mustDAAdmissionCandidate(t, success.admission, daProvenance{kind: daProvenanceLocal})
+	requireDAAdmissionCandidate(t, candidate, success, daProvenance{kind: daProvenanceLocal})
 	if high, tokens, outpoints := daAdmissionOwnerCounts(success.admission); high != successHigh || tokens != successTokens || outpoints != successOutpoints || success.admission.guard.state.Load() != daAdmissionOpen {
 		t.Fatalf("successful render changed owner or lifecycle: high=%d/%d tokens=%d/%d outpoints=%d/%d state=%d", high, successHigh, tokens, successTokens, outpoints, successOutpoints, success.admission.guard.state.Load())
+	}
+	if after := success.admission.Snapshot(); !reflect.DeepEqual(after, successSnapshot) || success.admission.context != successContext || !bytes.Equal(mustMarshalTxForNodeTest(t, success.admission.tx), successTxBytes) {
+		t.Fatal("successful render changed admission snapshot, context, or held parse")
+	}
+	if generation, transition, tip := daAdmissionOwnerState(success.admission); generation != successGeneration || transition != successTransition || tip != successTip {
+		t.Fatal("successful render changed owner state")
 	}
 	success.admission.Close()
 

@@ -143,7 +143,7 @@ func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []b
 		snapshot: DAAdmissionSnapshot{
 			TxID:          checked.TxID,
 			WTxID:         checked.WTxID,
-			TxBytes:       checked.Bytes,
+			TxBytes:       owned,
 			Fee:           checked.Fee,
 			RetainedBytes: uint64(len(checked.Bytes)),
 			Inputs:        inputs,
