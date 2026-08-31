@@ -3,6 +3,8 @@
 package mdbx
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -95,4 +97,136 @@ func TestFixtureModesAndFixedOperations(t *testing.T) {
 		t.Fatalf("owner mismatch=%d cleanup=%v state=%s", rc, cleanup, store.state)
 	}
 	mustEnvironment(t, store.Close())
+}
+
+func TestReaderGetNativeFixtures(t *testing.T) {
+	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+	mustEnvironment(t, err)
+	defer func() { _ = store.Close() }()
+	dbis := readDBIsLiteral()
+	emptyKey := []byte{2}
+	counterKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
+	counterValue := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	blockKey := make([]byte, 32)
+	blockValue := make([]byte, 68_000_125)
+	blockValue[0], blockValue[len(blockValue)-1] = 0x7a, 0x5c
+	if err := fixtureSeedRows(store,
+		fixtureRawRow{dbi: dbis[0], key: emptyKey, value: []byte{}},
+		fixtureRawRow{dbi: dbis[0], key: counterKey, value: counterValue},
+		fixtureRawRow{dbi: dbis[4], key: blockKey, value: blockValue},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixtureSeedRows(store, fixtureRawRow{dbi: dbis[0], key: []byte{0}, value: make([]byte, 3)}); err == nil {
+		t.Fatal("fixture accepted an overbound raw row")
+	}
+	panicValue := &struct{ name string }{"maximum"}
+	var maximum []byte
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		viewErr := store.View(func(reader *Reader) error {
+			value, present, getErr := reader.Get(dbis[4], blockKey)
+			if getErr != nil || !present || len(value) != 68_000_125 {
+				return fmt.Errorf("maximum native copy drifted: %d/%v/%w", len(value), present, getErr)
+			}
+			maximum = value
+			panic(panicValue)
+		})
+		if viewErr != nil {
+			t.Fatal(viewErr)
+		}
+	}()
+	if recovered != panicValue || len(maximum) != 68_000_125 || maximum[0] != 0x7a || maximum[len(maximum)-1] != 0x5c {
+		t.Fatalf("maximum panic cleanup drifted: %v/%d", recovered, len(maximum))
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		empty, present, getErr := reader.Get(dbis[0], emptyKey)
+		if getErr != nil || !present || empty == nil || len(empty) != 0 {
+			return fmt.Errorf("present-empty identity drifted: %#v/%v/%w", empty, present, getErr)
+		}
+		first, present, getErr := reader.Get(dbis[0], counterKey)
+		if getErr != nil || !present || len(first) != 16 {
+			return fmt.Errorf("independent copy setup drifted: %x/%v/%w", first, present, getErr)
+		}
+		first[0] = 0xff
+		second, present, getErr := reader.Get(dbis[0], counterKey)
+		if getErr != nil || !present || len(second) != 16 || second[0] != 1 {
+			return fmt.Errorf("returned bytes alias MDBX: %x/%v/%w", second, present, getErr)
+		}
+		absentKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 2}
+		absent, present, getErr := reader.Get(dbis[0], absentKey)
+		if getErr != nil || present || absent != nil {
+			return fmt.Errorf("absence identity drifted: %#v/%v/%w", absent, present, getErr)
+		}
+		return nil
+	}))
+	inspection, err := store.Inspect()
+	mustEnvironment(t, err)
+	if inspection.DBIs[0].Entries != 4 || inspection.DBIs[4].Entries != 1 || inspection.ReaderTableLength == 0 {
+		t.Fatalf("Inspection provenance drifted: %+v", inspection)
+	}
+	mustEnvironment(t, store.Close())
+}
+
+//nolint:errorlint // Exact callback, infrastructure and panic identities are required.
+func TestReaderGetMalformedDisposition(t *testing.T) {
+	dbis, key := readDBIsLiteral(), []byte{0}
+	callbackErr, panicValue := errors.New("callback"), &struct{ name string }{"panic"}
+	for _, mode := range []string{"ignored", "exact", "wrapped", "distinct", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+			mustEnvironment(t, err)
+			mustEnvironment(t, fixtureSeedMalformedStoredWidth(store))
+			var recorded, returned error
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				returned = store.View(func(reader *Reader) error {
+					_, _, recorded = reader.Get(dbis[0], key)
+					requireEnvironmentError(t, recorded, EngineIntegrity, operationGet, codeInvalid, "stored value width outside SchemaV1 bound")
+					if _, _, again := reader.Get(dbis[0], key); requireEnvironmentError(t, again, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active").Cause != nil {
+						t.Fatal("failed Reader remained active")
+					}
+					switch mode {
+					case "ignored":
+						return nil
+					case "exact":
+						return recorded
+					case "wrapped":
+						return fmt.Errorf("wrapped: %w", recorded)
+					case "distinct":
+						return callbackErr
+					default:
+						panic(panicValue)
+					}
+				})
+			}()
+			if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !sameError(store.terminal, returned) && mode != "panic" {
+				t.Fatalf("post-native Get disposition drifted: %s/%v", store.state, returned)
+			}
+			switch mode {
+			case "ignored", "exact":
+				if returned != recorded {
+					t.Fatalf("recorded failure identity/duplication drifted: %v", returned)
+				}
+			case "wrapped", "distinct":
+				parts, ok := returned.(interface{ Unwrap() []error })
+				if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[1] != recorded || mode == "distinct" && parts.Unwrap()[0] != callbackErr || mode == "wrapped" && !errors.Is(parts.Unwrap()[0], recorded) {
+					t.Fatalf("callback/recorded order drifted: %v", returned)
+				}
+			case "panic":
+				if recovered != panicValue || returned != nil || store.terminal != recorded {
+					t.Fatalf("panic disposition drifted: %v/%v/%v", recovered, returned, store.terminal)
+				}
+			}
+			terminal := store.terminal
+			if !sameError(store.View(func(*Reader) error { t.Fatal("closed callback invoked"); return nil }), terminal) {
+				t.Fatal("closed View legality drifted")
+			}
+			if inspection, next := store.Inspect(); inspection != (Inspection{}) || !sameError(next, terminal) || !sameError(store.Close(), terminal) {
+				t.Fatal("closed Inspect/Close legality drifted")
+			}
+		})
+	}
 }
