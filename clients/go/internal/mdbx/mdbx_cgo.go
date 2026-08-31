@@ -501,14 +501,8 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	reader := newReader(begun.txn, s.dbis)
 	reader.active.Store(true)
 	defer func() {
-		panicValue := recover()
 		reader.expire()
-		outcome := s.abortLocked(begun.txn, err)
-		if panicValue != nil {
-			//nolint:forbidigo // Re-panic only after Reader expiry and transaction abort.
-			panic(panicValue)
-		}
-		err = outcome.err
+		err = s.abortLocked(begun.txn, err).err
 	}()
 	return callback(reader)
 }

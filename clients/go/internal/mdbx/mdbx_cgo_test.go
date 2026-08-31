@@ -1532,8 +1532,26 @@ func TestViewReaderLifetimeAndConcurrentGet(t *testing.T) {
 	requireEnvironmentError(t, <-waiter, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
 }
 
+func panicNilViewCallback(*Reader) error {
+	_, _ = fmt.Fprintln(os.Stderr, "RUBIN_MDBX_PANICNIL_TARGET_REACHED")
+	panic(nil) //nolint:govet // Exercises the supported GODEBUG=panicnil=1 compatibility mode.
+}
+
 //nolint:errorlint // Exact callback and panic identities are part of the View contract.
 func TestViewErrorPanicAndCloseCoordination(t *testing.T) {
+	if path := os.Getenv("RUBIN_MDBX_PANICNIL_CHILD_PATH"); path != "" {
+		store, _ := Create(path, environmentConfig())
+		t.Fatalf("View returned after panic(nil): %v", store.View(panicNilViewCallback))
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestViewErrorPanicAndCloseCoordination$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "GODEBUG=panicnil=1", "RUBIN_MDBX_PANICNIL_CHILD_PATH="+filepath.Join(t.TempDir(), "db"))
+	output, runErr := cmd.CombinedOutput()
+	switch {
+	case !strings.Contains(string(output), "RUBIN_MDBX_PANICNIL_TARGET_REACHED"):
+		t.Fatalf("child did not reach View target: %v\n%s", runErr, output)
+	case runErr == nil || !strings.Contains(string(output), "panic: nil") || !strings.Contains(string(output), "panicNilViewCallback"):
+		t.Fatalf("child did not escape through panicNilViewCallback: %v\n%s", runErr, output)
+	}
 	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 	mustEnvironment(t, err)
 	callbackErr := errors.New("callback")
