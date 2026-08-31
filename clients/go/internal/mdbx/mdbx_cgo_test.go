@@ -3,8 +3,10 @@
 package mdbx
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/sha3"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -1351,9 +1353,337 @@ func readDBIsLiteral() [7]DBI {
 	return [7]DBI{{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1}, {Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3}, {Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5}, {Name: "staged-v1", Rank: 6}}
 }
 
+const (
+	planAfterAbsent      AfterKind = 1
+	planAfterLiteral     AfterKind = 2
+	planAfterOldValueRef AfterKind = 3
+)
+
+func updatePlanHashRow() ([]byte, []byte) {
+	value := make([]byte, 116)
+	hash := sha3.Sum256(value)
+	return hash[:], value
+}
+
+func updatePlanBatch(t *testing.T) Batch {
+	t.Helper()
+	dbis := readDBIsLiteral()
+	var block, spent [32]byte
+	block[0], spent[0] = 1, 2
+	utxoDelete, err := UTXOKey(1, spent, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utxoLiteral, err := UTXOKey(2, spent, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refKey, err := UTXOKey(3, spent, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	utxoValue, err := (UTXOValue{}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaCounter, err := MetaKey(0x10, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := HeightKey(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := HeightKey(1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerKey, headerValue := updatePlanHashRow()
+	blockKey, blockValue := updatePlanHashRow()
+	undoEntry := UndoEntryKey(block, spent, 0, 0, 9)
+	return Batch{Mutations: []Mutation{
+		{DBI: dbis[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}},
+		{DBI: dbis[0], Key: metaCounter, BeforePresent: true, AfterKind: planAfterLiteral, Literal: LogicalCounterValue(0, 0)},
+		{DBI: dbis[1], Key: utxoDelete, BeforePresent: true, AfterKind: planAfterAbsent},
+		{DBI: dbis[1], Key: utxoLiteral, AfterKind: planAfterLiteral, Literal: utxoValue},
+		{DBI: dbis[2], Key: canonical, AfterKind: planAfterLiteral, Literal: ChainValue([32]byte{}, [32]byte{}, [40]byte{})},
+		{DBI: dbis[3], Key: headerKey, AfterKind: planAfterLiteral, Literal: headerValue},
+		{DBI: dbis[4], Key: blockKey, AfterKind: planAfterLiteral, Literal: blockValue},
+		{DBI: dbis[5], Key: UndoManifestKey(block), AfterKind: planAfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 0, 0)},
+		{DBI: dbis[5], Key: undoEntry, AfterKind: planAfterOldValueRef, RefDBI: dbis[1], RefKey: refKey},
+		{DBI: dbis[6], Key: staged, AfterKind: planAfterLiteral, Literal: ChainValue([32]byte{}, [32]byte{}, [40]byte{})},
+	}}
+}
+
+func requirePlanInvalid(t *testing.T, batch Batch, marker string) {
+	t.Helper()
+	if _, err := updateOwnedBatch(batch); err == nil {
+		t.Fatal(marker)
+	} else {
+		_ = requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("update"), int(syscall.EINVAL), "invalid Update Batch")
+	}
+}
+
+func requirePlanCapacity(t *testing.T, batch Batch) {
+	t.Helper()
+	if _, err := updateOwnedBatch(batch); err == nil {
+		t.Fatal("plan bound row accepted")
+	} else {
+		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+}
+
+func TestUpdatePlanPayloadMatrix(t *testing.T) {
+	for _, empty := range []Batch{{}, {Mutations: []Mutation{}}} {
+		requirePlanInvalid(t, empty, "plan empty Batch guard drifted")
+	}
+	batch := updatePlanBatch(t)
+	if plan, err := updateOwnedBatch(batch); err != nil || len(plan) != 10 || plan[0].literal == nil || len(plan[0].literal) != 0 {
+		t.Fatalf("valid prepared plan=%d/%v", len(plan), err)
+	}
+	absent := func(m Mutation) Mutation {
+		m.BeforePresent, m.AfterKind, m.Literal, m.RefDBI, m.RefKey = true, planAfterAbsent, nil, DBI{}, nil
+		return m
+	}
+	replacement := func(m Mutation) Mutation { m.BeforePresent = true; return m }
+	for _, mutation := range []Mutation{batch.Mutations[0], replacement(batch.Mutations[0]), batch.Mutations[1], absent(batch.Mutations[1]), batch.Mutations[2], batch.Mutations[3], replacement(batch.Mutations[3]), batch.Mutations[4], replacement(batch.Mutations[4]), absent(batch.Mutations[4]), batch.Mutations[5], absent(batch.Mutations[5]), batch.Mutations[6], absent(batch.Mutations[6]), batch.Mutations[7], absent(batch.Mutations[7]), batch.Mutations[8], absent(batch.Mutations[8]), batch.Mutations[9], replacement(batch.Mutations[9]), absent(batch.Mutations[9])} {
+		if _, err := updateOwnedBatch(Batch{Mutations: []Mutation{mutation}}); err != nil {
+			t.Fatalf("allowed action rejected: %+v / %v", mutation, err)
+		}
+	}
+	for _, kind := range []AfterKind{0, 4} {
+		candidate := updatePlanBatch(t)
+		candidate.Mutations[0].AfterKind = kind
+		requirePlanInvalid(t, candidate, "plan closed domain drifted")
+	}
+	candidate := updatePlanBatch(t)
+	candidate.Mutations[2].BeforePresent = false
+	requirePlanInvalid(t, candidate, "plan ABSENT BeforePresent guard drifted")
+	for _, mutate := range []func(*Batch){
+		func(batch *Batch) { batch.Mutations[0].DBI = DBI{} },
+		func(batch *Batch) { batch.Mutations[0].Key = nil },
+		func(batch *Batch) { batch.Mutations[2].Literal = []byte{0} },
+		func(batch *Batch) { batch.Mutations[2].RefDBI = batch.Mutations[1].DBI },
+		func(batch *Batch) { batch.Mutations[2].RefKey = []byte{} },
+		func(batch *Batch) { batch.Mutations[3].Literal = nil },
+		func(batch *Batch) { batch.Mutations[3].Literal = []byte{} },
+		func(batch *Batch) { batch.Mutations[3].RefDBI = batch.Mutations[1].DBI },
+		func(batch *Batch) { batch.Mutations[3].RefKey = []byte{} },
+		func(batch *Batch) { batch.Mutations[8].Literal = []byte{} },
+		func(batch *Batch) { batch.Mutations[8].RefKey = nil },
+		func(batch *Batch) { batch.Mutations[8].RefDBI = batch.Mutations[4].DBI },
+		func(batch *Batch) { batch.Mutations[8].RefKey[8] ^= 1 },
+		func(batch *Batch) { batch.Mutations[8].BeforePresent = true },
+	} {
+		candidate := updatePlanBatch(t)
+		mutate(&candidate)
+		requirePlanInvalid(t, candidate, "plan payload shape drifted")
+	}
+	for _, mutate := range []func(*Batch){
+		func(batch *Batch) { batch.Mutations[0].Key = []byte{0} },
+		func(batch *Batch) { batch.Mutations[0].Key = []byte{1} },
+		func(batch *Batch) {
+			batch.Mutations[0].AfterKind, batch.Mutations[0].BeforePresent, batch.Mutations[0].Literal = planAfterAbsent, true, nil
+		},
+		func(batch *Batch) { batch.Mutations[5].BeforePresent = true },
+		func(batch *Batch) { batch.Mutations[6].BeforePresent = true },
+		func(batch *Batch) {
+			batch.Mutations[7].AfterKind, batch.Mutations[7].BeforePresent, batch.Mutations[7].Literal = planAfterOldValueRef, false, nil
+			batch.Mutations[7].RefDBI, batch.Mutations[7].RefKey = batch.Mutations[8].RefDBI, batch.Mutations[8].RefKey
+		},
+		func(batch *Batch) {
+			batch.Mutations[8].AfterKind, batch.Mutations[8].Literal = planAfterLiteral, batch.Mutations[3].Literal
+			batch.Mutations[8].RefDBI, batch.Mutations[8].RefKey = DBI{}, nil
+		},
+	} {
+		candidate := updatePlanBatch(t)
+		mutate(&candidate)
+		requirePlanInvalid(t, candidate, "plan action authority drifted")
+	}
+}
+
+func updatePlanAuxBatch(t *testing.T, count int) Batch {
+	t.Helper()
+	dbi := readDBIsLiteral()[2]
+	rows := make([]Mutation, count)
+	value := ChainValue([32]byte{}, [32]byte{}, [40]byte{})
+	for i := range rows {
+		key, err := HeightKey(1, uint64(i+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows[i] = Mutation{DBI: dbi, Key: key, AfterKind: planAfterLiteral, Literal: value}
+	}
+	return Batch{Mutations: rows}
+}
+
+func TestUpdatePlanOrderAndBounds(t *testing.T) {
+	for _, mutate := range []func(*Batch){
+		func(batch *Batch) { batch.Mutations[0], batch.Mutations[1] = batch.Mutations[1], batch.Mutations[0] },
+		func(batch *Batch) { batch.Mutations[1] = batch.Mutations[0] },
+	} {
+		batch := updatePlanBatch(t)
+		mutate(&batch)
+		requirePlanInvalid(t, batch, "plan canonical order drifted")
+	}
+	if plan, err := updateOwnedBatch(updatePlanAuxBatch(t, 16_384)); err != nil || len(plan) != 16_384 {
+		t.Fatalf("exact auxiliary cap=%d/%v", len(plan), err)
+	}
+	invalidTail := updatePlanAuxBatch(t, 16_385)
+	invalidTail.Mutations[len(invalidTail.Mutations)-1].Literal = nil
+	requirePlanInvalid(t, invalidTail, "plan payload shape drifted")
+	requirePlanCapacity(t, updatePlanAuxBatch(t, 16_385))
+	batch := updatePlanBatch(t)
+	rows := []struct {
+		row   Mutation
+		limit uint64
+		set   func(*updateBudget, uint64)
+	}{
+		{batch.Mutations[2], 414_634, func(b *updateBudget, n uint64) { b.utxoDeletes = n }},
+		{batch.Mutations[8], 414_634, func(b *updateBudget, n uint64) { b.undoRefs = n }},
+		{batch.Mutations[3], 1_545_454, func(b *updateBudget, n uint64) { b.utxoLiterals = n }},
+		{batch.Mutations[4], 16_384, func(b *updateBudget, n uint64) { b.aux = n }},
+	}
+	for _, row := range rows {
+		budget := updateBudget{}
+		row.set(&budget, row.limit-1)
+		if err := updateScanMutation(true, Mutation{}, row.row, &budget); err != nil {
+			t.Fatalf("exact family cap: %v", err)
+		}
+		if err := updateScanMutation(true, Mutation{}, row.row, &budget); err == nil {
+			t.Fatal("plan bound row accepted")
+		} else {
+			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+		}
+	}
+	for _, row := range []struct {
+		mutation Mutation
+		used     uint64
+		set      func(*updateBudget, uint64)
+	}{
+		{batch.Mutations[4], 2_391_105, func(b *updateBudget, n uint64) { b.mutations = n }},
+		{batch.Mutations[2], 137_676_154 - uint64(len(batch.Mutations[2].Key)), func(b *updateBudget, n uint64) { b.keyBytes = n }},
+		{batch.Mutations[8], 137_676_154 - uint64(len(batch.Mutations[8].Key)) - uint64(len(batch.Mutations[8].RefKey)), func(b *updateBudget, n uint64) { b.keyBytes = n }},
+		{batch.Mutations[3], 155_659_727 - uint64(len(batch.Mutations[3].Literal)), func(b *updateBudget, n uint64) { b.literals = n }},
+	} {
+		budget := updateBudget{}
+		row.set(&budget, row.used)
+		if err := updateScanMutation(true, Mutation{}, row.mutation, &budget); err != nil {
+			t.Fatalf("exact aggregate cap: %v", err)
+		}
+		if err := updateScanMutation(true, Mutation{}, row.mutation, &budget); err == nil {
+			t.Fatal("plan bound row accepted")
+		} else {
+			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+		}
+	}
+	refCharge := uint64(len(batch.Mutations[8].Key) + len(batch.Mutations[8].RefKey))
+	budget := updateBudget{keyBytes: 137_676_154 - refCharge + 1}
+	if err := updateScanMutation(true, Mutation{}, batch.Mutations[8], &budget); err == nil {
+		t.Fatal("plan bound row accepted")
+	} else {
+		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+	budget = updateBudget{keyBytes: ^uint64(0)}
+	if err := updateScanMutation(true, Mutation{}, batch.Mutations[2], &budget); err == nil {
+		t.Fatal("plan bound row accepted")
+	} else {
+		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+}
+
+func TestUpdatePlanCopyIsolation(t *testing.T) {
+	batch := updatePlanBatch(t)
+	plan, err := updateOwnedBatch(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan[0].literal == nil {
+		t.Fatal("prepared plan alias drifted")
+	}
+	sources := append([]Mutation(nil), batch.Mutations...)
+	for i, mutation := range sources {
+		if plan[i].dbi != mutation.DBI || !bytes.Equal(plan[i].key, mutation.Key) || plan[i].beforePresent != mutation.BeforePresent || plan[i].after != mutation.AfterKind || !bytes.Equal(plan[i].literal, mutation.Literal) || plan[i].refDBI != mutation.RefDBI || !bytes.Equal(plan[i].refKey, mutation.RefKey) || (plan[i].literal == nil) != (mutation.Literal == nil) || (plan[i].refKey == nil) != (mutation.RefKey == nil) {
+			t.Fatal("prepared plan alias drifted")
+		}
+	}
+	keys, literals, refs := make([][]byte, len(plan)), make([][]byte, len(plan)), make([][]byte, len(plan))
+	for i := range plan {
+		keys[i], literals[i], refs[i] = append([]byte(nil), plan[i].key...), append([]byte(nil), plan[i].literal...), append([]byte(nil), plan[i].refKey...)
+	}
+	for i := range batch.Mutations {
+		if len(batch.Mutations[i].Key) != 0 {
+			batch.Mutations[i].Key[0] ^= 0xff
+		}
+		if len(batch.Mutations[i].Literal) != 0 {
+			batch.Mutations[i].Literal[0] ^= 0xff
+		}
+		if len(batch.Mutations[i].RefKey) != 0 {
+			batch.Mutations[i].RefKey[0] ^= 0xff
+		}
+		batch.Mutations[i].DBI, batch.Mutations[i].BeforePresent, batch.Mutations[i].AfterKind, batch.Mutations[i].RefDBI = DBI{}, !batch.Mutations[i].BeforePresent, 0, DBI{}
+	}
+	for i := range plan {
+		if plan[i].dbi != sources[i].DBI || !bytes.Equal(plan[i].key, keys[i]) || plan[i].beforePresent != sources[i].BeforePresent || plan[i].after != sources[i].AfterKind || !bytes.Equal(plan[i].literal, literals[i]) || plan[i].refDBI != sources[i].RefDBI || !bytes.Equal(plan[i].refKey, refs[i]) || (plan[i].literal == nil) != (sources[i].Literal == nil) || (plan[i].refKey == nil) != (sources[i].RefKey == nil) {
+			t.Fatal("prepared plan alias drifted")
+		}
+	}
+	shared, values := make([]byte, 32), make([]byte, 208)
+	shared[7], shared[15], shared[23], shared[31] = 1, 1, 1, 2
+	dbi := readDBIsLiteral()[2]
+	alias := Batch{Mutations: []Mutation{{DBI: dbi, Key: shared[:16], AfterKind: planAfterLiteral, Literal: values[:104]}, {DBI: dbi, Key: shared[16:], AfterKind: planAfterLiteral, Literal: values[104:]}}}
+	owned, err := updateOwnedBatch(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared[7], values[0], values[104] = 9, 9, 9
+	if owned[0].key[7] != 1 || owned[0].literal[0] != 0 || owned[1].literal[0] != 0 {
+		t.Fatal("prepared plan alias drifted")
+	}
+}
+
+func TestUpdatePlanSurfaceOwnership(t *testing.T) {
+	planType, bytesType := reflect.TypeFor[ownedMutation](), reflect.TypeFor[[]byte]()
+	if planType.NumField() != 7 || planType.Field(0).Type != reflect.TypeFor[DBI]() || planType.Field(1).Type != bytesType || planType.Field(2).Type.Kind() != reflect.Bool || planType.Field(3).Type != reflect.TypeFor[AfterKind]() || planType.Field(4).Type != bytesType || planType.Field(5).Type != reflect.TypeFor[DBI]() || planType.Field(6).Type != bytesType {
+		t.Fatal("prepared-plan representation drifted")
+	}
+	source, err := os.ReadFile("mdbx_cgo.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, forbidden := range []string{"CommitTruth", "CommitError", "rubin_mdbx_del", "rubin_mdbx_put_nooverwrite", "rubin_mdbx_bytes_equal", "func (s *Store) Update"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("prepared-plan surface gained forbidden owner: %s", forbidden)
+		}
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), "mdbx_cgo.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || !strings.HasPrefix(function.Name.Name, "update") {
+			continue
+		}
+		var native bool
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				if base, ok := selector.X.(*ast.Ident); ok && base.Name == "C" {
+					native = true
+				}
+			}
+			return true
+		})
+		if native {
+			t.Fatalf("prepared-plan function reached C: %s", function.Name.Name)
+		}
+	}
+}
+
 func TestReadOperationDomain(t *testing.T) {
-	want := [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "inspect"}
-	got := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect}
+	want := [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "inspect", "update"}
+	got := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect, operationUpdate}
 	if got != want {
 		t.Fatalf("read operation domain drifted: %v", got)
 	}
@@ -1362,7 +1692,7 @@ func TestReadOperationDomain(t *testing.T) {
 			t.Fatalf("read operation domain drifted: %q", operation)
 		}
 	}
-	for _, operation := range []engineOperation{"", "read", "update"} {
+	for _, operation := range []engineOperation{"", "read", "write"} {
 		err := adapterError(operation, EngineIO, codeEIO, "ignored", nil)
 		if err.Class != EngineLocalInvariant || err.Operation != "init" || err.Code != codeProblem || err.Diagnostic != "unsupported engine operation" {
 			t.Fatalf("read operation domain drifted: %+v", err)
