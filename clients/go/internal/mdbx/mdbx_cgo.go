@@ -55,10 +55,15 @@ const (
 	operationView    engineOperation = "view"
 	operationGet     engineOperation = "get"
 	operationInspect engineOperation = "inspect"
+	operationUpdate  engineOperation = "update"
 )
 
 func validEngineOperation(operation engineOperation) bool {
-	return operation == operationCreate || operation == operationOpen || operation == operationInit || operation == operationAbort || operation == operationClose || operation == operationView || operation == operationGet || operation == operationInspect
+	switch operation {
+	case operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect, operationUpdate:
+		return true
+	}
+	return false
 }
 
 type EngineClass string
@@ -475,6 +480,217 @@ const (
 	getResultInvalidBound
 	getResultNative
 )
+
+type AfterKind uint8
+
+const (
+	AfterAbsent AfterKind = iota + 1
+	AfterLiteral
+	AfterOldValueRef
+)
+
+type Mutation struct {
+	DBI           DBI
+	Key           []byte
+	BeforePresent bool
+	AfterKind     AfterKind
+	Literal       []byte
+	RefDBI        DBI
+	RefKey        []byte
+}
+
+type Batch struct {
+	Mutations []Mutation
+}
+
+const (
+	maxUpdateInputs    uint64 = 414_634
+	maxUpdateOutputs   uint64 = 1_545_454
+	maxUpdateAux       uint64 = 16_384
+	maxUpdateMutations uint64 = 2_391_106
+	maxUpdateKeyBytes  uint64 = 137_676_154
+	maxUpdateLiterals  uint64 = 155_659_727
+)
+
+type ownedMutation struct {
+	dbi           DBI
+	key           []byte
+	beforePresent bool
+	after         AfterKind
+	literal       []byte
+	refDBI        DBI
+	refKey        []byte
+}
+
+type updateBudget struct {
+	mutations, keyBytes, literals uint64
+	utxoDeletes, undoRefs         uint64
+	utxoLiterals, aux             uint64
+}
+
+func updateInvalidBatch() error {
+	return adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "invalid Update Batch", nil)
+}
+
+func updateBoundError() error {
+	return adapterError(operationUpdate, EngineCapacity, codeTooLarge, "Update Batch exceeds bound", nil)
+}
+
+func updateAdd(total, add, limit uint64) (uint64, bool) {
+	if total > limit || add > limit-total {
+		return 0, false
+	}
+	return total + add, true
+}
+
+func updateClone(bytes []byte) []byte {
+	if bytes == nil {
+		return nil
+	}
+	out := make([]byte, len(bytes))
+	copy(out, bytes)
+	return out
+}
+
+func updateOrdered(previous, next Mutation) bool {
+	if previous.DBI.Rank != next.DBI.Rank {
+		return previous.DBI.Rank < next.DBI.Rank
+	}
+	return bytes.Compare(previous.Key, next.Key) < 0
+}
+
+func updateMutableMeta(key []byte, absent bool) bool {
+	if key[0] == 0 || key[0] == 1 {
+		return false
+	}
+	return !absent || key[0] != 2
+}
+
+func updateLiteralAllowed(m Mutation) bool {
+	switch m.DBI.Rank {
+	case 0:
+		return updateMutableMeta(m.Key, false)
+	case 1, 2, 6:
+		return true
+	case 3, 4:
+		return !m.BeforePresent
+	case 5:
+		return m.Key[32] == 0 && !m.BeforePresent
+	default:
+		return false
+	}
+}
+
+func updateAbsentAllowed(m Mutation) bool {
+	if m.DBI.Rank != 0 {
+		return true
+	}
+	return updateMutableMeta(m.Key, true)
+}
+
+func updateLiteralPayload(m Mutation) bool {
+	return m.Literal != nil && m.RefDBI == (DBI{}) && m.RefKey == nil && updateLiteralAllowed(m)
+}
+
+func updateAbsentPayload(m Mutation) bool {
+	return m.BeforePresent && m.Literal == nil && m.RefDBI == (DBI{}) && m.RefKey == nil && updateAbsentAllowed(m)
+}
+
+func updateRefPayload(m Mutation) bool {
+	dbis := SchemaV1DBIs()
+	return !m.BeforePresent && m.Literal == nil && m.DBI == dbis[5] && len(m.Key) == 77 && m.Key[32] == 1 && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
+}
+
+func updateValidMutation(m Mutation) bool {
+	if ValidateDBI(m.DBI) != nil || !validKey(m.DBI.Rank, m.Key) {
+		return false
+	}
+	switch m.AfterKind {
+	case AfterAbsent:
+		return updateAbsentPayload(m)
+	case AfterLiteral:
+		return updateLiteralPayload(m)
+	case AfterOldValueRef:
+		return updateRefPayload(m)
+	default:
+		return false
+	}
+}
+
+func updateKeyCharge(m Mutation) uint64 {
+	charge := uint64(len(m.Key))
+	if m.AfterKind == AfterOldValueRef {
+		charge += uint64(len(m.RefKey))
+	}
+	return charge
+}
+
+func (budget *updateBudget) addTotals(m Mutation) bool {
+	var ok bool
+	if budget.mutations, ok = updateAdd(budget.mutations, 1, maxUpdateMutations); !ok {
+		return false
+	}
+	if budget.keyBytes, ok = updateAdd(budget.keyBytes, updateKeyCharge(m), maxUpdateKeyBytes); !ok {
+		return false
+	}
+	if budget.literals, ok = updateAdd(budget.literals, uint64(len(m.Literal)), maxUpdateLiterals); !ok {
+		return false
+	}
+	return true
+}
+
+func (budget *updateBudget) addMutation(m Mutation) bool {
+	if !budget.addTotals(m) {
+		return false
+	}
+	var ok bool
+	switch {
+	case m.DBI.Rank == 1 && m.AfterKind == AfterAbsent:
+		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateInputs)
+	case m.DBI.Rank == 5 && m.AfterKind == AfterOldValueRef:
+		budget.undoRefs, ok = updateAdd(budget.undoRefs, 1, maxUpdateInputs)
+	case m.DBI.Rank == 1 && m.AfterKind == AfterLiteral:
+		budget.utxoLiterals, ok = updateAdd(budget.utxoLiterals, 1, maxUpdateOutputs)
+	default:
+		budget.aux, ok = updateAdd(budget.aux, 1, maxUpdateAux)
+	}
+	return ok
+}
+
+func updateScanMutation(first bool, previous, mutation Mutation, budget *updateBudget) error {
+	if !updateValidMutation(mutation) {
+		return updateInvalidBatch()
+	}
+	if !first && !updateOrdered(previous, mutation) {
+		return updateInvalidBatch()
+	}
+	if mutation.AfterKind == AfterLiteral && ValidateRow(mutation.DBI, mutation.Key, mutation.Literal) != nil {
+		return updateInvalidBatch()
+	}
+	if !budget.addMutation(mutation) {
+		return updateBoundError()
+	}
+	return nil
+}
+
+func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
+	if len(batch.Mutations) == 0 {
+		return nil, updateInvalidBatch()
+	}
+	budget, previous := updateBudget{}, Mutation{}
+	for i, mutation := range batch.Mutations {
+		scanErr := updateScanMutation(i == 0, previous, mutation, &budget)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		previous = mutation
+	}
+	owned := make([]ownedMutation, len(batch.Mutations))
+	for i, mutation := range batch.Mutations {
+		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, updateClone(mutation.RefKey)}
+	}
+	return owned, nil
+}
 
 func (s *Store) View(callback func(*Reader) error) (err error) {
 	if s == nil {
