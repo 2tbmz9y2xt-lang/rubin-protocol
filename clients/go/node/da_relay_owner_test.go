@@ -212,9 +212,15 @@ func TestDAAdmissionCandidateClosedDomain(t *testing.T) {
 			requireDAAdmissionCandidate(t, got, fixture, tc.value)
 		})
 	}
+	for kind := uint16(0); kind <= uint16(^uint8(0)); kind++ {
+		value := daProvenance{kind: daProvenanceKind(kind)}
+		switch value.kind {
+		case daProvenancePeer, daProvenanceLocal, daProvenanceDetachedReorg:
+			continue
+		}
+		requireDAAdmissionCandidateError(t, fixture.admission, value, errDAProvenanceInvalid)
+	}
 	for _, value := range []daProvenance{
-		{},
-		{kind: daProvenanceKind(99)},
 		{kind: daProvenancePeer},
 		{kind: daProvenancePeer, peerIdentity: "peer"},
 		{kind: daProvenancePeer, quotaIdentity: "quota"},
@@ -359,6 +365,25 @@ func TestDAAdmissionCandidateRoleMatrix(t *testing.T) {
 		requireDAAdmissionCandidateError(t, fixture.admission, provenance, errDARelayMemberIncomplete)
 		fixture.admission.Close()
 	})
+	for _, shape := range []struct {
+		name string
+		kind uint8
+	}{
+		{"commit", 0x01},
+		{"chunk", 0x02},
+	} {
+		t.Run("unsupported tx kind "+shape.name, func(t *testing.T) {
+			fixture := newDAAdmissionCandidateFixture(t, shape.kind)
+			defer fixture.admission.Close()
+			for kind := uint16(0); kind <= uint16(^uint8(0)); kind++ {
+				if uint8(kind) == 0x01 || uint8(kind) == 0x02 {
+					continue
+				}
+				fixture.admission.tx.TxKind = uint8(kind)
+				requireDAAdmissionCandidateError(t, fixture.admission, daProvenance{kind: daProvenanceLocal}, errDARelayMemberIncomplete)
+			}
+		})
+	}
 }
 
 func TestDAAdmissionCandidateUsesHeldParse(t *testing.T) {
