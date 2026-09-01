@@ -436,15 +436,16 @@ func joinErrors(errs ...error) error {
 }
 
 type Store struct {
-	operations sync.RWMutex
-	self       *Store
-	env        *C.MDBX_env
-	writer     *filelock.Handle
-	txn        *C.MDBX_txn
-	config     ConfigV1
-	dbis       [7]C.MDBX_dbi
-	state      storeState
-	terminal   error
+	operations    sync.RWMutex
+	self          *Store
+	env           *C.MDBX_env
+	writer        *filelock.Handle
+	txn           *C.MDBX_txn
+	config        ConfigV1
+	dbis          [7]C.MDBX_dbi
+	state         storeState
+	terminal      error
+	terminalTruth CommitTruth
 }
 
 type Reader struct {
@@ -714,6 +715,30 @@ func (truth CommitTruth) String() string {
 		return ""
 	}
 	return [...]string{"", "OLD", "NEW", "UNKNOWN"}[truth]
+}
+
+type CommitError struct {
+	Cause         error
+	Truth         CommitTruth
+	ReadbackCause error
+}
+
+func (e *CommitError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	message := fmt.Sprintf("mdbx update %s: %v", e.Truth, e.Cause)
+	if e.ReadbackCause != nil {
+		message += "; readback/cleanup: " + e.ReadbackCause.Error()
+	}
+	return message
+}
+
+func (e *CommitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 type updateNativeOutcome struct {
@@ -1189,6 +1214,143 @@ func (s *Store) updateNative(plan []ownedMutation, old *C.MDBX_txn) updateNative
 	return outcome
 }
 
+func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch Batch, panicValue any, panicked bool, err error) {
+	panicked = true
+	func() {
+		defer func() { panicValue = recover() }()
+		batch, err = callback(reader)
+		panicked = false
+	}()
+	return batch, panicValue, panicked, err
+}
+
+func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, error) {
+	returned := false
+	defer func() {
+		if returned {
+			return
+		}
+		reader.expire()
+		primary, infrastructure := readPrimary(nil, reader.failure)
+		_ = s.abortReadLocked(old, primary, infrastructure)
+	}()
+	batch, panicValue, panicked, callbackErr := invokeUpdate(callback, reader)
+	returned = true
+	reader.expire()
+	primary, infrastructure := readPrimary(callbackErr, reader.failure)
+	if panicked {
+		_ = s.abortReadLocked(old, primary, infrastructure)
+		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
+	}
+	if primary != nil {
+		return nil, s.abortReadLocked(old, primary, infrastructure)
+	}
+	plan, planErr := updateOwnedBatch(batch)
+	if planErr != nil {
+		return nil, s.abortReadLocked(old, planErr, false)
+	}
+	return plan, nil
+}
+
+func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, error) {
+	shapeErr := outcome.valid()
+	if shapeErr != nil {
+		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+	}
+	if !outcome.commitAttempted {
+		return CommitTruthOld, joinErrors(outcome.primary, outcome.secondary, cleanup)
+	}
+	if outcome.primary == nil && cleanup == nil {
+		return outcome.truth, nil
+	}
+	cause, remaining := outcome.primary, joinErrors(outcome.secondary, cleanup)
+	if cause == nil {
+		cause, remaining = cleanup, nil
+	}
+	return outcome.truth, &CommitError{Cause: cause, Truth: outcome.truth, ReadbackCause: remaining}
+}
+
+func updateRetained(outcome updateNativeOutcome) *C.MDBX_txn {
+	if outcome.retainedWrite != nil {
+		return outcome.retainedWrite
+	}
+	return outcome.retainedRead
+}
+
+func updateAbortOld(txn *C.MDBX_txn) (error, bool) {
+	return updateAbortOldResult(int(C.mdbx_txn_abort(txn)))
+}
+
+func updateAbortOldResult(rc int) (error, bool) {
+	if rc == codeSuccess {
+		return nil, false
+	}
+	return nativeError(operationAbort, rc), rc == codeThreadMismatch
+}
+
+func (s *Store) applyUpdateOutcome(outcome updateNativeOutcome, old *C.MDBX_txn, cleanup error, oldRetained bool) (CommitTruth, error) {
+	if shapeErr := outcome.valid(); shapeErr != nil && (outcome.retainedWrite != nil || outcome.retainedRead != nil) {
+		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+	}
+	truth, terminal := updateResult(outcome, cleanup)
+	retained := updateRetained(outcome)
+	if retained == nil && oldRetained {
+		retained = old
+	}
+	if retained != nil {
+		s.terminalTruth = truth
+		return truth, s.poison(retained, terminal).err
+	}
+	if terminal == nil {
+		return truth, nil
+	}
+	s.terminalTruth = truth
+	_, terminal = s.consume(terminal)
+	return truth, terminal
+}
+
+func (s *Store) latchUpdateTerminalTruth() {
+	if s.state != storeOPEN && s.terminalTruth == 0 {
+		s.terminalTruth = CommitTruthOld
+	}
+}
+
+func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, error) {
+	if s == nil {
+		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+	}
+	if callback == nil {
+		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
+	}
+	if !s.operations.TryLock() {
+		return CommitTruthOld, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
+	}
+	defer s.operations.Unlock()
+	stateErr := s.observationStateError(operationUpdate)
+	if stateErr != nil {
+		truth := s.terminalTruth
+		if truth-CommitTruthOld > CommitTruthUnknown-CommitTruthOld {
+			truth = CommitTruthOld
+		}
+		return truth, stateErr
+	}
+	defer s.latchUpdateTerminalTruth()
+	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
+	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		return CommitTruthOld, s.failedReadBegin(begun.txn, beginErr)
+	}
+	reader := newReader(begun.txn, s.dbis)
+	reader.active.Store(true)
+	plan, planErr := s.updatePlan(callback, reader, begun.txn)
+	if planErr != nil {
+		return CommitTruthOld, planErr
+	}
+	outcome := s.updateNative(plan, begun.txn)
+	cleanupErr, oldRetained := updateAbortOld(begun.txn)
+	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
+}
+
 func (s *Store) View(callback func(*Reader) error) (err error) {
 	if s == nil {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)
@@ -1585,7 +1747,11 @@ func (s *Store) Close() error {
 	if s.state == storeCLOSED || s.state == storePOISONEDTHREAD {
 		return s.terminal
 	}
-	_, err := s.consume(nil)
+	var primary error
+	if s.terminalTruth != 0 {
+		primary = s.terminal
+	}
+	_, err := s.consume(primary)
 	return err
 }
 
@@ -1594,7 +1760,7 @@ func validStoreState(state storeState) bool {
 }
 
 func validStoreShape(s *Store) bool {
-	if s.self != s {
+	if s.self != s || !validStoreTerminalTruth(s) {
 		return false
 	}
 	switch s.state {
@@ -1611,14 +1777,28 @@ func validStoreShape(s *Store) bool {
 	}
 }
 
+func validStoreTerminalTruth(s *Store) bool {
+	if s.terminalTruth == 0 {
+		return true
+	}
+	return s.state != storeOPEN && s.terminalTruth >= CommitTruthOld && s.terminalTruth <= CommitTruthUnknown
+}
+
 func validOpenStoreShape(s *Store) bool {
 	return s.env != nil && s.writer != nil && s.txn == nil && s.terminal == nil && s.config.valid() && validRetainedDBIs(s.dbis)
 }
 
 func validCloseBlockedStoreShape(s *Store) bool {
+	if s.terminalTruth != 0 {
+		return validUpdateCloseBlockedStoreShape(s)
+	}
 	engine, terminalOK := directNativeResult(operationClose, s.terminal)
 	resourcesOK := validPublishedStoreResources(s) || validConstructionStoreResources(s, engine, terminalOK)
 	return s.env != nil && s.writer != nil && s.txn == nil && terminalOK && engine.Code == codeBusy && resourcesOK
+}
+
+func validUpdateCloseBlockedStoreShape(s *Store) bool {
+	return s.env != nil && s.writer != nil && s.txn == nil && s.terminal != nil && validPublishedStoreResources(s)
 }
 
 func validPublishedStoreResources(s *Store) bool {
@@ -1630,11 +1810,25 @@ func validConstructionStoreResources(s *Store, engine *EngineError, terminalOK b
 }
 
 func validClosedStoreShape(s *Store) bool {
-	return s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validClosedTerminal(s.terminal)
+	resources := s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	if !resources {
+		return false
+	}
+	if s.terminalTruth != 0 {
+		return s.terminal != nil
+	}
+	return validClosedTerminal(s.terminal)
 }
 
 func validPoisonedStoreShape(s *Store) bool {
-	return s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validPoisonTerminal(s.terminal)
+	resources := s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	if !resources {
+		return false
+	}
+	if s.terminalTruth != 0 {
+		return s.terminal != nil
+	}
+	return validPoisonTerminal(s.terminal)
 }
 
 func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
@@ -1670,7 +1864,7 @@ func validPointerShapePoison(engine *EngineError, operation engineOperation) boo
 }
 
 func validClosedTerminal(err error) bool {
-	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err) {
+	if validDirectClosedTerminal(err) {
 		return true
 	}
 	joined, ok := err.(interface{ Unwrap() []error })
@@ -1679,6 +1873,10 @@ func validClosedTerminal(err error) bool {
 	}
 	parts := joined.Unwrap()
 	return len(parts) == 2 && validConsumedCloseTerminal(parts[0]) && validReleaseTerminal(parts[1])
+}
+
+func validDirectClosedTerminal(err error) bool {
+	return err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err)
 }
 
 func validConsumedReadTerminal(err error) bool {
