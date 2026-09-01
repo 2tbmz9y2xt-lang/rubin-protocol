@@ -5,6 +5,7 @@ package mdbx
 /*
 #cgo CFLAGS: -std=c11
 #include "../../../../third_party/libmdbx/mdbx.h"
+#include <string.h>
 typedef struct { int first; int second; } rubin_mdbx_debug_result;
 static rubin_mdbx_debug_result rubin_mdbx_normalize_debug(void) {
 	rubin_mdbx_debug_result result = {MDBX_PROBLEM, MDBX_PROBLEM};
@@ -19,6 +20,10 @@ static rubin_mdbx_txn_result rubin_mdbx_txn_begin(MDBX_env *env, MDBX_txn_flags_
 static int rubin_mdbx_put_required(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_NOOVERWRITE); }
 typedef struct { int rc; const void *bytes; size_t length; } rubin_mdbx_get_result;
 static rubin_mdbx_get_result rubin_mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_get_result result; result.rc = mdbx_get(txn, dbi, &key, &value); result.bytes = value.iov_base; result.length = value.iov_len; return result; }
+typedef struct { int rc; int equal; int valid; } rubin_mdbx_equal_result;
+static rubin_mdbx_equal_result rubin_mdbx_get_equal(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int expected_present, const void *expected_bytes, size_t expected_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_equal_result result = {MDBX_EINVAL, 0, 0}; if ((expected_present != 0 && expected_present != 1) || (expected_len != 0 && expected_bytes == NULL)) return result; result.rc = mdbx_get(txn, dbi, &key, &value); if (result.rc == MDBX_SUCCESS) { result.valid = value.iov_len == 0 || value.iov_base != NULL; if (expected_present && result.valid && value.iov_len == expected_len && (expected_len == 0 || memcmp(value.iov_base, expected_bytes, expected_len) == 0)) result.equal = 1; } else if (result.rc == MDBX_NOTFOUND) { result.valid = value.iov_base == NULL && value.iov_len == 0; if (!expected_present && result.valid) result.equal = 1; } return result; }
+static int rubin_mdbx_del_exact(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}; return mdbx_del(txn, dbi, &key, NULL); }
+static int rubin_mdbx_put_nooverwrite(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_NOOVERWRITE); }
 */
 import "C"
 
@@ -30,6 +35,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -187,7 +193,10 @@ func reopenRequired(code int) bool {
 	}
 }
 
-func validEngineClass(class EngineClass) bool {
+func validEngineClass(operation engineOperation, class EngineClass) bool {
+	if class == EngineStateMismatch {
+		return operation == operationUpdate
+	}
 	return class == EngineInvalidInput || class == EngineIntegrity || class == EngineCapacity || class == EngineConcurrency || class == EngineTransaction || class == EngineIO || class == EngineLocalInvariant
 }
 
@@ -195,7 +204,7 @@ func engineError(operation engineOperation, class EngineClass, code int, diagnos
 	if !validEngineOperation(operation) {
 		return &EngineError{EngineLocalInvariant, string(operationInit), codeProblem, "unsupported engine operation", cause, false}
 	}
-	if !validEngineClass(class) {
+	if !validEngineClass(operation, class) {
 		return &EngineError{EngineLocalInvariant, string(operation), codeProblem, "unsupported engine class", cause, false}
 	}
 	return &EngineError{class, string(operation), code, diagnostic, cause, reopenRequired(code)}
@@ -340,7 +349,7 @@ func chooseState(condition bool, yes, no storeState) storeState {
 //nolint:errorlint // Native cleanup results must be direct EngineError pointers.
 func directNativeResult(operation engineOperation, result error) (*EngineError, bool) {
 	engine, ok := result.(*EngineError)
-	return engine, ok && engine != nil && engine.Operation == string(operation) && validEngineClass(engine.Class) && engine.Code != codeSuccess && engine.Class == classifyNative(operation, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
+	return engine, ok && engine != nil && engine.Operation == string(operation) && validEngineClass(operation, engine.Class) && engine.Code != codeSuccess && engine.Class == classifyNative(operation, engine.Code) && engine.ReopenRequired == reopenRequired(engine.Code)
 }
 
 func errorOrderShape(order errorOrder) (bool, bool, bool) {
@@ -690,6 +699,494 @@ func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
 		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, updateClone(mutation.RefKey)}
 	}
 	return owned, nil
+}
+
+type CommitTruth uint8
+
+const (
+	CommitTruthOld CommitTruth = iota + 1
+	CommitTruthNew
+	CommitTruthUnknown
+)
+
+func (truth CommitTruth) String() string {
+	if truth > CommitTruthUnknown {
+		return ""
+	}
+	return [...]string{"", "OLD", "NEW", "UNKNOWN"}[truth]
+}
+
+type updateNativeOutcome struct {
+	truth                       CommitTruth
+	commitAttempted             bool
+	primary, secondary          error
+	retainedWrite, retainedRead *C.MDBX_txn
+}
+
+func updateNativeInvariant(diagnostic string) error {
+	return adapterError(operationUpdate, EngineLocalInvariant, codeProblem, diagnostic, nil)
+}
+
+func (outcome updateNativeOutcome) valid() error {
+	if outcome.truth < CommitTruthOld || outcome.truth > CommitTruthUnknown {
+		return updateNativeInvariant("invalid update native outcome shape")
+	}
+	shape := outcome.validConsumed
+	switch {
+	case outcome.retainedWrite != nil:
+		shape = outcome.validRetainedWrite
+	case outcome.retainedRead != nil:
+		shape = outcome.validRetainedRead
+	}
+	if shape() {
+		return nil
+	}
+	return updateNativeInvariant("invalid update native outcome shape")
+}
+
+func (outcome updateNativeOutcome) validRetainedWrite() bool {
+	return outcome.retainedRead == nil && outcome.truth == CommitTruthOld && outcome.primary != nil && (!outcome.commitAttempted || outcome.secondary == nil)
+}
+
+func (outcome updateNativeOutcome) validRetainedRead() bool {
+	return outcome.retainedWrite == nil && outcome.truth == CommitTruthUnknown && outcome.commitAttempted && outcome.primary != nil && outcome.secondary != nil
+}
+
+func (outcome updateNativeOutcome) validConsumed() bool {
+	return (outcome.truth == CommitTruthNew || outcome.primary != nil) && (outcome.truth == CommitTruthOld || outcome.commitAttempted) && (outcome.secondary == nil || outcome.primary != nil)
+}
+
+func updateNativeConsumed(truth CommitTruth, commitAttempted bool, primary, secondary error) updateNativeOutcome {
+	return updateNativeOutcome{truth: truth, commitAttempted: commitAttempted, primary: primary, secondary: secondary}
+}
+
+func updateNativeRetainedWrite(commitAttempted bool, primary, secondary error, txn *C.MDBX_txn) updateNativeOutcome {
+	return updateNativeOutcome{truth: CommitTruthOld, commitAttempted: commitAttempted, primary: primary, secondary: secondary, retainedWrite: txn}
+}
+
+func updateNativeRetainedRead(primary, secondary error, txn *C.MDBX_txn) updateNativeOutcome {
+	return updateNativeOutcome{truth: CommitTruthUnknown, commitAttempted: true, primary: primary, secondary: secondary, retainedRead: txn}
+}
+
+func (outcome updateNativeOutcome) lockedOutcome() transactionOutcome {
+	return transactionOutcome{poisoned: outcome.retainedWrite != nil || outcome.retainedRead != nil}
+}
+
+type updateImage struct {
+	present bool
+	bytes   unsafe.Pointer
+	length  C.size_t
+}
+
+func validUpdateImage(image updateImage) bool {
+	return image.present && (image.length == 0 || image.bytes != nil) || !image.present && image.length == 0 && image.bytes == nil
+}
+
+type updateReference struct {
+	index, target int
+	image         updateImage
+}
+
+func updateOwnedImage(value []byte) (updateImage, error) {
+	if uint64(len(value)) > uint64(^C.size_t(0)) {
+		return updateImage{}, updateNativeInvariant("Go length is not representable as C size_t")
+	}
+	image := updateImage{present: true, length: C.size_t(len(value))}
+	if len(value) != 0 {
+		image.bytes = unsafe.Pointer(&value[0])
+	}
+	return image, nil
+}
+
+func updateNativeImage(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte) (updateImage, error) {
+	keyImage, err := updateOwnedImage(key)
+	if err != nil {
+		return updateImage{}, err
+	}
+	value := C.rubin_mdbx_get(txn, dbi, keyImage.bytes, keyImage.length)
+	runtime.KeepAlive(key)
+	switch rc := int(value.rc); rc {
+	case codeSuccess:
+		image := updateImage{present: true, bytes: unsafe.Pointer(value.bytes), length: value.length}
+		if !validUpdateImage(image) {
+			return updateImage{}, updateNativeInvariant("mdbx_get returned invalid result shape")
+		}
+		return image, nil
+	case codeNotFound:
+		if value.bytes != nil || value.length != 0 {
+			return updateImage{}, updateNativeInvariant("mdbx_get returned invalid result shape")
+		}
+		return updateImage{}, nil
+	default:
+		return updateImage{}, nativeError(operationUpdate, rc)
+	}
+}
+
+// libMDBX borrows all bytes only for this synchronous point operation.
+func updateNativeEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected updateImage) (bool, error) {
+	if !validUpdateImage(expected) {
+		return false, updateNativeInvariant("invalid update image shape")
+	}
+	keyImage, err := updateOwnedImage(key)
+	if err != nil {
+		return false, err
+	}
+	expectedPresent := C.int(0)
+	if expected.present {
+		expectedPresent = 1
+	}
+	value := C.rubin_mdbx_get_equal(txn, dbi, keyImage.bytes, keyImage.length, expectedPresent, expected.bytes, expected.length)
+	runtime.KeepAlive(key)
+	if rc := int(value.rc); rc != codeSuccess && rc != codeNotFound {
+		return false, nativeError(operationUpdate, rc)
+	}
+	if value.valid == 0 {
+		return false, updateNativeInvariant("mdbx_get returned invalid result shape")
+	}
+	return value.equal != 0, nil
+}
+
+func updateNativeImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
+	target := func(dbi DBI, key []byte) int {
+		index := sort.Search(len(plan), func(i int) bool {
+			if plan[i].dbi.Rank != dbi.Rank {
+				return plan[i].dbi.Rank >= dbi.Rank
+			}
+			return bytes.Compare(plan[i].key, key) >= 0
+		})
+		if index < len(plan) && plan[index].dbi == dbi && bytes.Equal(plan[index].key, key) {
+			return index
+		}
+		return -1
+	}
+	targets := make([]updateImage, len(plan))
+	for i, mutation := range plan {
+		image, err := updateNativeImage(old, dbis[mutation.dbi.Rank], mutation.key)
+		if err != nil {
+			return nil, nil, err
+		}
+		targets[i] = image
+	}
+	references := make([]updateReference, 0)
+	for i, mutation := range plan {
+		if mutation.after != AfterOldValueRef {
+			continue
+		}
+		reference := updateReference{index: i, target: target(mutation.refDBI, mutation.refKey)}
+		if reference.target >= 0 {
+			reference.image = targets[reference.target]
+		} else {
+			image, err := updateNativeImage(old, dbis[mutation.refDBI.Rank], mutation.refKey)
+			if err != nil {
+				return nil, nil, err
+			}
+			reference.image = image
+		}
+		if !reference.image.present {
+			return nil, nil, adapterError(operationUpdate, EngineStateMismatch, codeProblem, "OLD_VALUE_REF is absent from OLD", nil)
+		}
+		references = append(references, reference)
+	}
+	return targets, references, nil
+}
+
+func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected updateImage, diagnostic string) error {
+	equal, err := updateNativeEqual(txn, dbi, key, expected)
+	if err == nil && !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return err
+}
+
+func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
+	targets, references, err := updateNativeImages(old, dbis, plan)
+	if err != nil {
+		return nil, err
+	}
+	for i, mutation := range plan {
+		err = updateNativeMatch(write, dbis[mutation.dbi.Rank], mutation.key, targets[i], "OLD/write snapshot mismatch")
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, reference := range references {
+		if reference.target >= 0 {
+			continue
+		}
+		mutation := plan[reference.index]
+		err = updateNativeMatch(write, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image, "OLD/write snapshot mismatch")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return references, nil
+}
+
+// libMDBX does not retain either Go-owned literal or OLD-borrowed bytes.
+func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateImage, keep []byte) error {
+	if !value.present || !validUpdateImage(value) {
+		return updateNativeInvariant("invalid update value shape")
+	}
+	keyImage, err := updateOwnedImage(key)
+	if err != nil {
+		return err
+	}
+	rc := int(C.rubin_mdbx_put_nooverwrite(txn, dbi, keyImage.bytes, keyImage.length, value.bytes, value.length))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(keep)
+	if rc == codeKeyExist {
+		return adapterError(operationUpdate, EngineStateMismatch, rc, nativeDiagnostic(rc), nil)
+	}
+	if rc != codeSuccess {
+		return nativeError(operationUpdate, rc)
+	}
+	return nil
+}
+
+func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) error {
+	for _, mutation := range plan {
+		if mutation.beforePresent {
+			keyImage, keyErr := updateOwnedImage(mutation.key)
+			if keyErr != nil {
+				return keyErr
+			}
+			rc := int(C.rubin_mdbx_del_exact(txn, dbis[mutation.dbi.Rank], keyImage.bytes, keyImage.length))
+			runtime.KeepAlive(mutation.key)
+			if rc == codeNotFound {
+				return adapterError(operationUpdate, EngineStateMismatch, rc, nativeDiagnostic(rc), nil)
+			}
+			if rc != codeSuccess {
+				return nativeError(operationUpdate, rc)
+			}
+		}
+	}
+	return nil
+}
+
+func updateNativeFinalImage(mutation ownedMutation, references []updateReference, at *int, index int) (updateImage, error) {
+	switch mutation.after {
+	case AfterAbsent:
+		return updateImage{}, nil
+	case AfterLiteral:
+		return updateOwnedImage(mutation.literal)
+	case AfterOldValueRef:
+		if *at >= len(references) || references[*at].index != index {
+			return updateImage{}, updateNativeInvariant("invalid update reference shape")
+		}
+		image := references[*at].image
+		*at++
+		return image, nil
+	default:
+		return updateImage{}, updateNativeInvariant("invalid update final image")
+	}
+}
+
+func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+	refAt := 0
+	for i, mutation := range plan {
+		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
+		if err != nil {
+			return err
+		}
+		if mutation.after == AfterAbsent {
+			continue
+		}
+		putErr := updateNativePut(txn, dbis[mutation.dbi.Rank], mutation.key, image, mutation.literal)
+		if putErr != nil {
+			return putErr
+		}
+	}
+	if refAt != len(references) {
+		return updateNativeInvariant("invalid update reference shape")
+	}
+	return nil
+}
+
+func updateNativeVerify(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+	refAt := 0
+	for i, mutation := range plan {
+		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
+		if err != nil {
+			return err
+		}
+		err = updateNativeMatch(txn, dbis[mutation.dbi.Rank], mutation.key, image, "final update image mismatch")
+		runtime.KeepAlive(mutation.literal)
+		if err != nil {
+			return err
+		}
+	}
+	if refAt != len(references) {
+		return updateNativeInvariant("invalid update reference shape")
+	}
+	return updateNativeVerifyReferences(txn, dbis, plan, references)
+}
+
+func updateNativeVerifyReferences(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+	for _, reference := range references {
+		if reference.target >= 0 {
+			continue
+		}
+		mutation := plan[reference.index]
+		matchErr := updateNativeMatch(txn, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image, "final update image mismatch")
+		if matchErr != nil {
+			return matchErr
+		}
+	}
+	return nil
+}
+
+func updateNativeAbort(txn *C.MDBX_txn, primary error) updateNativeOutcome {
+	rc := int(C.mdbx_txn_abort(txn))
+	if rc == codeThreadMismatch {
+		return updateNativeRetainedWrite(false, primary, nativeError(operationAbort, rc), txn)
+	}
+	var secondary error
+	if rc != codeSuccess {
+		secondary = nativeError(operationAbort, rc)
+	}
+	return updateNativeConsumed(CommitTruthOld, false, primary, secondary)
+}
+
+func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) (CommitTruth, error) {
+	targets, references, err := updateNativeImages(old, dbis, plan)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	oldImage, newImage, err := updateNativeReadbackTargets(read, dbis, plan, targets, references)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	oldImage, newImage, err = updateNativeReadbackReferences(read, dbis, plan, references, oldImage, newImage)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	if oldImage {
+		return CommitTruthOld, nil
+	}
+	if newImage {
+		return CommitTruthNew, nil
+	}
+	return CommitTruthUnknown, nil
+}
+
+func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
+	oldImage, newImage, refAt := true, true, 0
+	for i, mutation := range plan {
+		oldEqual, oldErr := updateNativeEqual(read, dbis[mutation.dbi.Rank], mutation.key, targets[i])
+		if oldErr != nil {
+			return false, false, oldErr
+		}
+		oldImage = oldImage && oldEqual
+		final, finalErr := updateNativeFinalImage(mutation, references, &refAt, i)
+		if finalErr != nil {
+			return false, false, finalErr
+		}
+		newEqual, newErr := updateNativeEqual(read, dbis[mutation.dbi.Rank], mutation.key, final)
+		runtime.KeepAlive(mutation.literal)
+		if newErr != nil {
+			return false, false, newErr
+		}
+		newImage = newImage && newEqual
+	}
+	if refAt != len(references) {
+		return false, false, updateNativeInvariant("invalid update reference shape")
+	}
+	return oldImage, newImage, nil
+}
+
+func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, oldImage, newImage bool) (bool, bool, error) {
+	for _, reference := range references {
+		if reference.target >= 0 {
+			continue
+		}
+		mutation := plan[reference.index]
+		equal, compareErr := updateNativeEqual(read, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image)
+		if compareErr != nil {
+			return false, false, compareErr
+		}
+		oldImage, newImage = oldImage && equal, newImage && equal
+	}
+	return oldImage, newImage, nil
+}
+
+func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old *C.MDBX_txn, primary error) updateNativeOutcome {
+	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
+	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		if begun.txn != nil {
+			return updateNativeRetainedRead(primary, beginErr, begun.txn)
+		}
+		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr)
+	}
+	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan)
+	rc := int(C.mdbx_txn_abort(begun.txn))
+	if rc == codeThreadMismatch {
+		return updateNativeRetainedRead(primary, joinErrors(readErr, nativeError(operationAbort, rc)), begun.txn)
+	}
+	var abortErr error
+	if rc != codeSuccess {
+		abortErr = nativeError(operationAbort, rc)
+	}
+	if readErr != nil {
+		truth = CommitTruthUnknown
+	}
+	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr))
+}
+
+func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old, write *C.MDBX_txn) updateNativeOutcome {
+	rc := int(C.mdbx_txn_commit(write))
+	commitErr := nativeError(operationUpdate, rc)
+	switch rc {
+	case codeSuccess:
+		return updateNativeConsumed(CommitTruthNew, true, nil, nil)
+	case codeResultTrue:
+		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil)
+	case codeThreadMismatch:
+		return updateNativeRetainedWrite(true, commitErr, nil, write)
+	case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:
+		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil)
+	}
+	return updateNativeReadback(env, dbis, plan, old, commitErr)
+}
+
+func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old *C.MDBX_txn) updateNativeOutcome {
+	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_READWRITE)
+	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		if begun.txn != nil {
+			return updateNativeRetainedWrite(false, beginErr, nil, begun.txn)
+		}
+		return updateNativeConsumed(CommitTruthOld, false, beginErr, nil)
+	}
+	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan)
+	if preflightErr != nil {
+		return updateNativeAbort(begun.txn, preflightErr)
+	}
+	deleteErr := updateNativeDeletes(begun.txn, dbis, plan)
+	if deleteErr != nil {
+		return updateNativeAbort(begun.txn, deleteErr)
+	}
+	putErr := updateNativePuts(begun.txn, dbis, plan, references)
+	if putErr != nil {
+		return updateNativeAbort(begun.txn, putErr)
+	}
+	verifyErr := updateNativeVerify(begun.txn, dbis, plan, references)
+	if verifyErr != nil {
+		return updateNativeAbort(begun.txn, verifyErr)
+	}
+	return updateNativeCommit(env, dbis, plan, old, begun.txn)
+}
+
+func (s *Store) updateNative(plan []ownedMutation, old *C.MDBX_txn) updateNativeOutcome {
+	if s == nil || s.env == nil || old == nil || len(plan) == 0 || !validRetainedDBIs(s.dbis) {
+		return updateNativeConsumed(CommitTruthOld, false, updateNativeInvariant("invalid native update input"), nil)
+	}
+	var outcome updateNativeOutcome
+	runLocked(func() transactionOutcome {
+		outcome = updateNativeExecute(s.env, s.dbis, plan, old)
+		return outcome.lockedOutcome()
+	})
+	return outcome
 }
 
 func (s *Store) View(callback func(*Reader) error) (err error) {
