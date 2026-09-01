@@ -1039,6 +1039,7 @@ func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) da
 	}
 	return outcome
 }
+
 func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8) daNonReplayTx {
 	chunk := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("complete")})
 	f.admit(chunk, daNonReplayPeer("chunk"))
@@ -2460,6 +2461,7 @@ func TestAdmitDANonReplayPostReserveTailIsClosed(t *testing.T) {
 		})
 	}
 }
+
 func publicPeer(t *testing.T, suffix string) DAProvenance {
 	t.Helper()
 	p, err := NewPeerDAProvenance("peer-"+suffix, "quota-"+suffix)
@@ -2468,12 +2470,14 @@ func publicPeer(t *testing.T, suffix string) DAProvenance {
 	}
 	return p
 }
+
 func requirePublicDAResult(t *testing.T, got DAAdmissionResult, err error, want DAAdmissionResult) {
 	t.Helper()
 	if err != nil || got != want {
 		t.Fatalf("AdmitDA=(%+v,%v), want (%+v,nil)", got, err, want)
 	}
 }
+
 func requirePublicDAFailure(t *testing.T, got DAAdmissionResult, err error, kind TxAdmitErrorKind, message string, disposition ...RelayAdmissionDisposition) {
 	t.Helper()
 	var admit *TxAdmitError
@@ -2481,6 +2485,7 @@ func requirePublicDAFailure(t *testing.T, got DAAdmissionResult, err error, kind
 		t.Fatalf("AdmitDA=(%+v,%v), want zero %s %q", got, err, kind, message)
 	}
 }
+
 func requirePublicDAInternal(t *testing.T, f *daNonReplayFixture, got DAAdmissionResult, err error) {
 	t.Helper()
 	requirePublicDAFailure(t, got, err, TxAdmitRejected, errDARelayImageIncompatible.Error(), RelayAdmissionInternal)
@@ -2489,11 +2494,12 @@ func requirePublicDAInternal(t *testing.T, f *daNonReplayFixture, got DAAdmissio
 	}
 	f.state.admissionMu.Unlock()
 }
+
 func TestAdmitDAPublicAPISurfaceIsClosedAndDormant(t *testing.T) {
-	if _, err := NewPeerDAProvenance("", "quota"); err != errDAProvenanceInvalid {
+	if _, err := NewPeerDAProvenance("", "quota"); err != errDAProvenanceInvalid { //nolint:errorlint // Exact direct sentinel identity is part of the public constructor contract.
 		t.Fatalf("empty peer constructor error=%v", err)
 	}
-	if _, err := NewPeerDAProvenance("peer", ""); err != errDAProvenanceInvalid {
+	if _, err := NewPeerDAProvenance("peer", ""); err != errDAProvenanceInvalid { //nolint:errorlint // Exact direct sentinel identity is part of the public constructor contract.
 		t.Fatalf("empty quota constructor error=%v", err)
 	}
 	for _, provenance := range []DAProvenance{LocalDAProvenance(), DetachedReorgDAProvenance(), publicPeer(t, "surface")} {
@@ -2501,7 +2507,7 @@ func TestAdmitDAPublicAPISurfaceIsClosedAndDormant(t *testing.T) {
 			t.Fatalf("valid public provenance=%+v err=%v", provenance, err)
 		}
 	}
-	if err := (DAProvenance{}).validate(); err != errDAProvenanceInvalid {
+	if err := (DAProvenance{}).validate(); err != errDAProvenanceInvalid { //nolint:errorlint // Exact direct sentinel identity is part of the closed provenance domain.
 		t.Fatalf("zero provenance error=%v", err)
 	}
 	provenanceType := reflect.TypeOf(DAProvenance{})
@@ -2535,6 +2541,7 @@ func TestAdmitDAPublicAPISurfaceIsClosedAndDormant(t *testing.T) {
 	requireDAAdmissionStructure(t)
 	TestDAAdmissionCandidateClosedDomain(t)
 }
+
 func TestAdmitDAOwnerObservationPrecedesCandidateIntegrity(t *testing.T) {
 	unavailable := func(f *daNonReplayFixture, tx daNonReplayTx, suffix, message string) {
 		got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, suffix))
@@ -2579,7 +2586,7 @@ func TestAdmitDAOwnerObservationPrecedesCandidateIntegrity(t *testing.T) {
 			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, row.name))
 			if row.wantErr != nil {
-				if got != (DAAdmissionResult{}) || err != row.wantErr {
+				if got != (DAAdmissionResult{}) || err != row.wantErr { //nolint:errorlint // Exact direct renderer sentinel identity is contract-owned.
 					t.Fatalf("AdmitDA=(%+v,%v), want zero %v", got, err, row.wantErr)
 				}
 			} else {
@@ -2655,6 +2662,7 @@ func TestAdmitDAOwnerObservationPrecedesCandidateIntegrity(t *testing.T) {
 		})
 	}
 }
+
 func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 	for _, row := range []struct {
 		name  string
@@ -2707,7 +2715,7 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 			f.mutateRelay(clear)
 			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, name))
-			if got != (DAAdmissionResult{}) || err != errDARelayImageIncompatible {
+			if got != (DAAdmissionResult{}) || err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct preflight sentinel identity is contract-owned.
 				t.Fatalf("installer preflight %s=(%+v,%v)", name, got, err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
@@ -2754,7 +2762,7 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 		observation.candidate.member.txBytes[0] ^= 0xff
 		observation.candidate.member.payload[0] ^= 0xff
 		observation.candidate.member.member.inputs[0].Vout++
-		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) || f.relay.sets[tx.spec.daID].chunks[0].member.inputs[0].Vout != liveVout {
+		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) || f.relay.sets[tx.spec.daID].chunks[0].member.inputs[0].Vout != liveVout { //nolint:govet // Complete private state-image equality requires structural comparison, including nested alias isolation.
 			t.Fatalf("observation leaked alias: got=%+v want=%+v", got, before)
 		}
 	})

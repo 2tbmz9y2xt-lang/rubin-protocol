@@ -234,6 +234,7 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 	}
 	return s.admitDANonExact(hold, owned, tx, txid, wtxid, inputs, provenance)
 }
+
 func (s *DARelayState) admitDANonExact(hold *daAdmissionHold, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, provenance DAProvenance) (DAAdmissionResult, error) {
 	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
 	if err != nil {
@@ -246,6 +247,7 @@ func (s *DARelayState) admitDANonExact(hold *daAdmissionHold, owned []byte, tx *
 	}
 	return publicDAAdmissionResult(outcome)
 }
+
 func (s *DARelayState) bindDAAdmission() (*Mempool, *PendingOutpointOwner, error) {
 	switch {
 	case s == nil:
@@ -260,6 +262,7 @@ func (s *DARelayState) bindDAAdmission() (*Mempool, *PendingOutpointOwner, error
 		return s.mempool, s.mempool.pendingOutpoints, nil
 	}
 }
+
 func (s *DARelayState) classifyDAReplay(txid, wtxid [32]byte, owned []byte, owner *PendingOutpointOwner) (DAAdmissionResult, bool, error) {
 	observation := s.observeDAAdmission(txid)
 	switch observation.kind {
@@ -279,6 +282,7 @@ func (s *DARelayState) classifyDAReplay(txid, wtxid [32]byte, owned []byte, owne
 		return DAAdmissionResult{}, false, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
 	}
 }
+
 func publicDAAdmissionResult(outcome daRelayAdmissionOutcome) (DAAdmissionResult, error) {
 	switch outcome.disposition {
 	case daRelayAdmissionRetained, daRelayAdmissionDuplicate:
@@ -287,6 +291,7 @@ func publicDAAdmissionResult(outcome daRelayAdmissionOutcome) (DAAdmissionResult
 		return DAAdmissionResult{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
 	}
 }
+
 func (s *DARelayState) observeDAAdmission(txid [32]byte) daAdmissionObservation {
 	if s == nil {
 		return daAdmissionObservation{kind: daAdmissionObservationUnavailable}
@@ -322,6 +327,7 @@ func (s *DARelayState) observeDAAdmission(txid [32]byte) daAdmissionObservation 
 	observation.captureDAAdmissionTarget(locator, record)
 	return observation
 }
+
 func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator, record daRelaySetRecord) {
 	switch locator.kind {
 	case daRelayLocatorCommit:
@@ -346,6 +352,7 @@ func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator
 		}
 	}
 }
+
 func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOutpointOwner) error {
 	switch {
 	case o.validateHeader() != nil, o.validateToken(owner) != nil, o.validateRole() != nil, checkOwnerReadyRetainedBytes(o.candidate.member.txBytes) != nil:
@@ -362,6 +369,7 @@ func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOut
 	}
 	return o.validateRetained(tx)
 }
+
 func (o daAdmissionObservation) validateHeader() error {
 	type header struct {
 		kind    daAdmissionObservationKind
@@ -388,6 +396,7 @@ func (o daAdmissionObservation) validateHeader() error {
 	}
 	return nil
 }
+
 func (o daAdmissionObservation) validateToken(owner *PendingOutpointOwner) error {
 	token := o.candidate.member.member.token
 	switch owner {
@@ -533,6 +542,7 @@ func (o daAdmissionObservation) validateRetained(tx *consensus.Tx) error {
 	}
 	return nil
 }
+
 func sameDAAdmissionCandidate(left, right daRelayAdmissionCandidate) bool {
 	type scalar struct {
 		locator                      daRelayLocator
@@ -579,7 +589,7 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 		return outcome, nil
 	}
 	projection, err := s.prepareDANonReplayProjectionLocked(plan, candidate)
-	if err = cmp.Or(err, s.preflightDANonReplayInstall(projection)); err != nil {
+	if err := cmp.Or(err, s.preflightDANonReplayInstall(projection)); err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
 	placement := projection.placement
