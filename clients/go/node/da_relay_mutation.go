@@ -486,7 +486,7 @@ func (s *DARelayState) projectOrphanAccountingDeltaLocked(oldRecord, newRecord d
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
-	peerBytes, err := s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
+	peerBytes, err := s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes, s.caps.orphanPoolPerPeerBytes)
 	if err != nil {
 		return 0, nil, 0, 0, err
 	}
@@ -504,14 +504,14 @@ func (s *DARelayState) projectPinnedPayloadDeltaLocked(oldRecord, newRecord daRe
 	return pinnedBytes, nil
 }
 
-func (s *DARelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerBytes map[string]uint64) (map[string]uint64, error) {
+func (s *DARelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerBytes map[string]uint64, capBytes uint64) (map[string]uint64, error) {
 	projected := map[string]uint64{}
 	for key, oldBytes := range oldPeerBytes {
 		value, err := checkedApplyUint64Delta(s.orphanBytesByPeerQuotaKey[key], oldBytes, newPeerBytes[key])
 		if err != nil {
 			return nil, err
 		}
-		if value > s.caps.orphanPoolPerPeerBytes {
+		if value > capBytes {
 			return nil, errDARelayOrphanPeerCapExceeded
 		}
 		projected[key] = value
@@ -524,7 +524,7 @@ func (s *DARelayState) projectPeerAccountingDeltaLocked(oldPeerBytes, newPeerByt
 		if err != nil {
 			return nil, err
 		}
-		if value > s.caps.orphanPoolPerPeerBytes {
+		if value > capBytes {
 			return nil, errDARelayOrphanPeerCapExceeded
 		}
 		projected[key] = value
@@ -574,11 +574,15 @@ func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daR
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
+	return s.projectDARecordImageLiveLocked(image, live, s.caps)
+}
+
+func (s *DARelayState) projectDARecordImageLiveLocked(image daRelayRecordImage, live daRelaySetRecord, caps daRelayCaps) (daRelayRecordPlacement, error) {
 	retire, install, err := s.checkDARecordImageLocatorsLocked(image, live)
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	placement, err := s.projectDARecordImageCountersLocked(image, live)
+	placement, err := s.projectDARecordImageCountersLocked(image, live, caps)
 	if err != nil {
 		return daRelayRecordPlacement{}, err
 	}
@@ -603,6 +607,9 @@ func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage
 	}
 	if resident != image.present || live.revision != image.baseline {
 		return daRelaySetRecord{}, errDARelayRecordStale
+	}
+	if image.admission {
+		return live, checkStagedDANonReplayRecord(image, live, s.caps.orphanTTLBlocks)
 	}
 	return live, checkStagedOwnerReadyRecord(image, live)
 }
@@ -637,6 +644,146 @@ func checkStagedOwnerReadyRecord(image daRelayRecordImage, live daRelaySetRecord
 		return err
 	}
 	return checkPreservedOwnerReadySlots(live, image.next, image.member.locator)
+}
+
+func checkStagedDANonReplayRecord(image daRelayRecordImage, live daRelaySetRecord, ttl uint64) error {
+	if image.remove {
+		return errDARelayImageIncompatible
+	}
+	if err := image.member.validate(); err != nil {
+		return err
+	}
+	slotErr := checkOwnerReadySlotFree(live, image.member.locator)
+	if image.member.locator.kind == daRelayLocatorChunk {
+		slotErr = live.validateChunkInsert(image.member.locator.chunkIndex)
+	}
+	if slotErr != nil {
+		return slotErr
+	}
+	if err := image.next.checkDANonReplayShape(); err != nil {
+		return err
+	}
+	if err := checkDANonReplayRecordFields(image, live, ttl); err != nil {
+		return err
+	}
+	if image.member.locator.kind == daRelayLocatorCommit {
+		return checkDANonReplayCommitSlot(image, live)
+	}
+	return checkDANonReplayChunkSlot(image, live)
+}
+
+func checkDANonReplayRecordFields(image daRelayRecordImage, live daRelaySetRecord, ttl uint64) error {
+	next := image.next
+	if err := checkStagedCandidateSlot(next, next.locatorRows(), image.member); err != nil {
+		return err
+	}
+	type fixed struct{ revision, receivedTime, payloadBytes, wireBytes uint64 }
+	if (fixed{next.revision, next.receivedTime, next.payloadBytes, next.wireBytes}) !=
+		(fixed{live.revision, live.receivedTime, live.payloadBytes, live.wireBytes}) || !maps.Equal(next.replaceableChunks, live.replaceableChunks) {
+		return errDARelayImageIncompatible
+	}
+	wantState, wantTTL := live.state, live.ttlBlocksRemaining
+	if image.member.locator.kind == daRelayLocatorCommit {
+		wantState, wantTTL = daRelayStateStagedCommit, ttl
+	}
+	if !image.present && image.member.locator.kind == daRelayLocatorChunk {
+		wantState, wantTTL = daRelayStateOrphanChunks, ttl
+	}
+	if [2]uint64{uint64(next.state), next.ttlBlocksRemaining} != [2]uint64{uint64(wantState), wantTTL} {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func checkDANonReplayCommitSlot(image daRelayRecordImage, live daRelaySetRecord) error {
+	if image.admissionChunkCount == 0 || uint64(image.admissionChunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayImageIncompatible
+	}
+	commit := image.next.commit
+	type residual struct {
+		commitment, chunkHash [32]byte
+		chunkCount            uint16
+		quotaKey              string
+		wireBytes             uint64
+	}
+	if (residual{commit.payloadCommitment, image.admissionChunkHash, commit.chunkCount, commit.peerQuotaKey, commit.wireBytes}) !=
+		(residual{commitment: image.admissionPayloadCommitment, chunkCount: image.admissionChunkCount}) {
+		return errDARelayImageIncompatible
+	}
+	return checkDANonReplayCommitChunks(live, image.next, image.admissionChunkCount)
+}
+
+func checkDANonReplayChunkSlot(image daRelayRecordImage, live daRelaySetRecord) error {
+	chunk := image.next.chunks[image.member.locator.chunkIndex]
+	type residual struct {
+		commitment, chunkHash [32]byte
+		chunkCount            uint16
+		quotaKey              string
+		wireBytes             uint64
+		hashChecked           bool
+	}
+	if (residual{image.admissionPayloadCommitment, chunk.chunkHash, image.admissionChunkCount, chunk.peerQuotaKey, chunk.wireBytes, chunk.hashChecked}) !=
+		(residual{chunkHash: image.admissionChunkHash}) {
+		return errDARelayImageIncompatible
+	}
+	if !sameOwnerReadyCommit(live.commit, image.next.commit) {
+		return errDARelayImageIncompatible
+	}
+	return checkDANonReplayChunkAddition(live, image.next, image.member.locator.chunkIndex)
+}
+
+func checkDANonReplayCommitChunks(live, next daRelaySetRecord, count uint16) error {
+	kept := 0
+	for index, chunk := range live.chunks {
+		staged, present := next.chunks[index]
+		if index >= count {
+			if present {
+				return errDARelayImageIncompatible
+			}
+			continue
+		}
+		kept++
+		if !present || !sameOwnerReadyChunk(chunk, staged) {
+			return errDARelayImageIncompatible
+		}
+	}
+	if len(next.chunks) != kept {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func checkDANonReplayChunkAddition(live, next daRelaySetRecord, target uint16) error {
+	if len(next.chunks) != len(live.chunks)+1 {
+		return errDARelayImageIncompatible
+	}
+	for index, chunk := range next.chunks {
+		if index != target && !sameOwnerReadyChunk(live.chunks[index], chunk) {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func checkDANonReplayVictims(image daRelayRecordImage, live daRelaySetRecord, victims []DAAdmissionVictim) error {
+	next := 0
+	for _, index := range sortedRetainedDAChunkIndexes(live) {
+		if _, preserved := image.next.chunks[index]; preserved {
+			continue
+		}
+		if next == len(victims) {
+			return errDARelayImageIncompatible
+		}
+		member, victim := live.chunks[index].member, victims[next]
+		if member == nil || [2]any{victim.TxID, victim.Token} != [2]any{member.txid, member.token} || !slices.Equal(victim.Inputs, member.inputs) {
+			return errDARelayImageIncompatible
+		}
+		next++
+	}
+	if next != len(victims) {
+		return errDARelayImageIncompatible
+	}
+	return nil
 }
 
 // checkStagedCandidateSlot binds the ONE slot image.member.locator names to the
@@ -823,7 +970,7 @@ func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []
 	return nil
 }
 
-func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordImage, live daRelaySetRecord) (daRelayRecordPlacement, error) {
+func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordImage, live daRelaySetRecord, caps daRelayCaps) (daRelayRecordPlacement, error) {
 	oldAccounting, err := live.ownerReadyAccounting()
 	if err != nil {
 		return daRelayRecordPlacement{}, err
@@ -833,16 +980,16 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 		return daRelayRecordPlacement{}, err
 	}
 	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove}
-	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
+	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	if placement.daBytes, err = checkedApplyUint64DeltaCap(s.orphanBytesByDAID[image.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, s.caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded); err != nil {
+	if placement.daBytes, err = checkedApplyUint64DeltaCap(s.orphanBytesByDAID[image.daID], oldAccounting.orphanBytes, newAccounting.orphanBytes, caps.orphanPoolPerDAIDBytes, errDARelayOrphanDAIDCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	if placement.commitBytes, err = checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, s.caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded); err != nil {
+	if placement.commitBytes, err = checkedApplyUint64DeltaCap(s.orphanCommitOverheadBytes, oldAccounting.commitBytes, newAccounting.commitBytes, caps.orphanCommitOverheadBytes, errDARelayOrphanCommitCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes)
+	placement.peerBytes, err = s.projectPeerAccountingDeltaLocked(oldAccounting.peerBytes, newAccounting.peerBytes, caps.orphanPoolPerPeerBytes)
 	return placement, err
 }
 
@@ -855,8 +1002,7 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 //
 // Three steps the sibling installers take are skipped. The pinned-payload counter is
 // neither projected nor restored: it prices only a COMPLETE_SET, a state the projector
-// refuses, so 0-to-0. No received-time high-water advances (RUB-1273's), and a removal
-// releases no prefetch reservation (RUB-1275's).
+// refuses, so 0-to-0; RUB-1287 checks admission sequence/revision high-water, and removal has no RUB-1275 prefetch reservation.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)
