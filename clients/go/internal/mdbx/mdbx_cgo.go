@@ -1754,7 +1754,11 @@ func (s *Store) Close() error {
 	if s.state == storeCLOSED || s.state == storePOISONEDTHREAD {
 		return s.terminal
 	}
-	_, err := s.consume(nil)
+	var primary error
+	if s.terminalTruth != 0 {
+		primary = s.terminal
+	}
+	_, err := s.consume(primary)
 	return err
 }
 

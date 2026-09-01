@@ -3934,7 +3934,7 @@ func TestUpdateTerminalLegality(t *testing.T) {
 		}
 	}
 	closeBody := updateNativeBody(t, source, "Close")
-	if strings.Index(closeBody, "s.state == storeCLOSED || s.state == storePOISONEDTHREAD") > strings.Index(closeBody, "s.consume(nil)") {
+	if strings.Index(closeBody, "s.state == storeCLOSED || s.state == storePOISONEDTHREAD") > strings.Index(closeBody, "s.consume(") {
 		t.Fatal("terminal legality drifted")
 	}
 
@@ -4006,11 +4006,14 @@ func TestUpdateTerminalLegality(t *testing.T) {
 	if !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}
-	mustEnvironment(t, store.Close())
-	invoked := false
-	nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) { invoked = true; return Batch{}, nil })
-	if nextTruth != CommitTruthUnknown || invoked || store.state != storeCLOSED || store.terminalTruth != CommitTruthUnknown || !validStoreShape(store) {
+	if !sameError(store.Close(), busyTerminal) || store.state != storeCLOSED || store.terminalTruth != CommitTruthUnknown || !sameError(store.terminal, busyTerminal) || !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}
-	requireEnvironmentError(t, nextErr, EngineInvalidInput, operationUpdate, codeEINVAL, "Store is closed")
+	invoked := false
+	nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) { invoked = true; return Batch{}, nil })
+	viewErr := store.View(func(*Reader) error { invoked = true; return nil })
+	inspection, inspectErr := store.Inspect()
+	if nextTruth != CommitTruthUnknown || invoked || !sameError(nextErr, busyTerminal) || !sameError(viewErr, busyTerminal) || inspection != (Inspection{}) || !sameError(inspectErr, busyTerminal) || !sameError(store.Close(), busyTerminal) || store.state != storeCLOSED || store.terminalTruth != CommitTruthUnknown || !sameError(store.terminal, busyTerminal) || !validStoreShape(store) {
+		t.Fatal("terminal legality drifted")
+	}
 }
