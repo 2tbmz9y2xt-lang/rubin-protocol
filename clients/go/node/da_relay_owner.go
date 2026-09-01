@@ -1,7 +1,9 @@
 package node
 
 import (
+	"bytes"
 	"cmp"
+	"slices"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -15,20 +17,36 @@ const (
 	daProvenanceDetachedReorg
 )
 
-type daProvenance struct {
+type DAProvenance struct {
 	kind          daProvenanceKind
 	peerIdentity  string
 	quotaIdentity string
 }
 
-func (p daProvenance) quotaKey() string {
+type daProvenance = DAProvenance
+
+func NewPeerDAProvenance(peerIdentity, quotaIdentity string) (DAProvenance, error) {
+	p := DAProvenance{kind: daProvenancePeer, peerIdentity: peerIdentity, quotaIdentity: quotaIdentity}
+	if err := p.validate(); err != nil {
+		return DAProvenance{}, err
+	}
+	return p, nil
+}
+
+func LocalDAProvenance() DAProvenance { return DAProvenance{kind: daProvenanceLocal} }
+
+func DetachedReorgDAProvenance() DAProvenance {
+	return DAProvenance{kind: daProvenanceDetachedReorg}
+}
+
+func (p DAProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity
 	}
 	return ""
 }
 
-func (p daProvenance) validate() error {
+func (p DAProvenance) validate() error {
 	switch p.kind {
 	case daProvenancePeer:
 		if p.peerIdentity == "" || p.quotaIdentity == "" {
@@ -75,12 +93,25 @@ type daRelayAdmissionCandidate struct {
 	chunkHash         [32]byte
 }
 
-type daRelayAdmissionDisposition uint8
+type DAAdmissionDisposition uint8
 
 const (
-	daRelayAdmissionRetained  daRelayAdmissionDisposition = 1
-	daRelayAdmissionDuplicate daRelayAdmissionDisposition = 2
+	DAAdmissionRetained  DAAdmissionDisposition = 1
+	DAAdmissionDuplicate DAAdmissionDisposition = 2
 )
+
+type daRelayAdmissionDisposition = DAAdmissionDisposition
+
+const (
+	daRelayAdmissionRetained  = DAAdmissionRetained
+	daRelayAdmissionDuplicate = DAAdmissionDuplicate
+)
+
+type DAAdmissionResult struct {
+	DAID                   [32]byte
+	Disposition            DAAdmissionDisposition
+	SameDAIDCommitConflict bool
+}
 
 type daRelayAdmissionOutcome struct {
 	daID                   [32]byte
@@ -146,6 +177,377 @@ func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daPro
 	return s.applyDANonReplayPlan(admission, candidate, s.planDANonReplay(candidate))
 }
 
+type daAdmissionObservationKind uint8
+
+const (
+	daAdmissionObservationUnavailable daAdmissionObservationKind = iota + 1
+	daAdmissionObservationAbsent
+	daAdmissionObservationLocated
+)
+
+type daAdmissionObservation struct {
+	kind                                                    daAdmissionObservationKind
+	indexedTxID                                             [32]byte
+	indexedLocator                                          daRelayLocator
+	recordDAID                                              [32]byte
+	recordState                                             daRelaySetState
+	recordRevision, recordReceivedTime, recordTTLBlocksLeft uint64
+	recordPayloadBytes, recordWireBytes                     uint64
+	recordHasReplaceableChunks                              bool
+	candidate                                               daRelayAdmissionCandidate
+	targetWireBytes                                         uint64
+	targetPeerQuotaKey                                      string
+	targetHashChecked                                       bool
+	stagedCommitPresent                                     bool
+	stagedCommitDAID                                        [32]byte
+	stagedCommitChunkCount                                  uint16
+	stagedCommitWireBytes                                   uint64
+	stagedCommitPeerQuotaKey                                string
+	stagedCommitRaw                                         bool
+}
+
+func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
+	var zero DAAdmissionResult
+	m, owner, err := s.bindDAAdmission()
+	if err != nil {
+		return zero, err
+	}
+	if err = provenance.validate(); err != nil {
+		return zero, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
+	}
+	owned, tx, txid, wtxid, inputs, err := parseDAAdmissionCandidate(txBytes)
+	if err != nil {
+		return zero, selectRelayDisposition(err, RelayAdmissionStableTerminalReject)
+	}
+	hold, err := m.acquireDAAdmissionHold(owner, inputs)
+	if err != nil {
+		return zero, selectRelayDisposition(err, RelayAdmissionUnavailable)
+	}
+	defer hold.release()
+
+	replay, exact, err := s.classifyDAReplay(txid, wtxid, owned, owner)
+	if err != nil {
+		return zero, err
+	}
+	if exact {
+		return replay, nil
+	}
+	return s.admitDANonExact(hold, owned, tx, txid, wtxid, inputs, provenance)
+}
+func (s *DARelayState) admitDANonExact(hold *daAdmissionHold, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, provenance DAProvenance) (DAAdmissionResult, error) {
+	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
+	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	defer admission.Close()
+	outcome, err := s.admitDANonReplay(admission, provenance)
+	if err != nil {
+		return DAAdmissionResult{}, err
+	}
+	return publicDAAdmissionResult(outcome)
+}
+func (s *DARelayState) bindDAAdmission() (*Mempool, *PendingOutpointOwner, error) {
+	switch {
+	case s == nil:
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable("nil DA relay"), RelayAdmissionUnavailable)
+	case s.mempool == nil:
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable("nil mempool"), RelayAdmissionUnavailable)
+	case s.mempool.chainState == nil:
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
+	case s.mempool.pendingOutpoints == nil:
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable("nil pending-outpoint owner"), RelayAdmissionUnavailable)
+	default:
+		return s.mempool, s.mempool.pendingOutpoints, nil
+	}
+}
+func (s *DARelayState) classifyDAReplay(txid, wtxid [32]byte, owned []byte, owner *PendingOutpointOwner) (DAAdmissionResult, bool, error) {
+	observation := s.observeDAAdmission(txid)
+	switch observation.kind {
+	case daAdmissionObservationUnavailable:
+		return DAAdmissionResult{}, false, selectRelayDisposition(txAdmitUnavailable("DA relay owner maps unavailable"), RelayAdmissionUnavailable)
+	case daAdmissionObservationAbsent:
+		return DAAdmissionResult{}, false, nil
+	case daAdmissionObservationLocated:
+		if err := observation.validateDAAdmissionObservation(owner); err != nil {
+			return DAAdmissionResult{}, false, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionInternal)
+		}
+		if wtxid == observation.candidate.member.member.wtxid && bytes.Equal(owned, observation.candidate.member.txBytes) {
+			return DAAdmissionResult{DAID: observation.recordDAID, Disposition: DAAdmissionDuplicate}, true, nil
+		}
+		return DAAdmissionResult{}, false, nil
+	default:
+		return DAAdmissionResult{}, false, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+	}
+}
+func publicDAAdmissionResult(outcome daRelayAdmissionOutcome) (DAAdmissionResult, error) {
+	switch outcome.disposition {
+	case daRelayAdmissionRetained, daRelayAdmissionDuplicate:
+		return DAAdmissionResult{DAID: outcome.daID, Disposition: outcome.disposition, SameDAIDCommitConflict: outcome.sameDAIDCommitConflict}, nil
+	default:
+		return DAAdmissionResult{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+	}
+}
+func (s *DARelayState) observeDAAdmission(txid [32]byte) daAdmissionObservation {
+	if s == nil {
+		return daAdmissionObservation{kind: daAdmissionObservationUnavailable}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sets == nil || s.locators == nil {
+		return daAdmissionObservation{kind: daAdmissionObservationUnavailable}
+	}
+	locator, found := s.locators[txid]
+	if !found {
+		return daAdmissionObservation{kind: daAdmissionObservationAbsent}
+	}
+	observation := daAdmissionObservation{kind: daAdmissionObservationLocated, indexedTxID: txid, indexedLocator: locator}
+	record, found := s.sets[locator.daID]
+	if !found {
+		return observation
+	}
+	observation.recordDAID = record.daID
+	observation.recordState = record.state
+	observation.recordRevision = record.revision
+	observation.recordReceivedTime = record.receivedTime
+	observation.recordTTLBlocksLeft = record.ttlBlocksRemaining
+	observation.recordPayloadBytes = record.payloadBytes
+	observation.recordWireBytes = record.wireBytes
+	observation.recordHasReplaceableChunks = record.replaceableChunks != nil
+	observation.stagedCommitPresent = record.commit.member != nil
+	observation.stagedCommitDAID = record.commit.daID
+	observation.stagedCommitChunkCount = record.commit.chunkCount
+	observation.stagedCommitWireBytes = record.commit.wireBytes
+	observation.stagedCommitPeerQuotaKey = record.commit.peerQuotaKey
+	observation.stagedCommitRaw = len(record.commit.txBytes) != 0
+	observation.captureDAAdmissionTarget(locator, record)
+	return observation
+}
+func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator, record daRelaySetRecord) {
+	switch locator.kind {
+	case daRelayLocatorCommit:
+		o.candidate.member.locator = daRelayLocator{daID: record.commit.daID, kind: daRelayLocatorCommit}
+		member := record.commit.member.clone()
+		o.candidate.member.txBytes = append([]byte(nil), record.commit.txBytes...)
+		o.candidate.payloadCommitment, o.candidate.chunkCount = record.commit.payloadCommitment, record.commit.chunkCount
+		o.targetWireBytes, o.targetPeerQuotaKey = record.commit.wireBytes, record.commit.peerQuotaKey
+		if member != nil {
+			o.candidate.member.member = *member
+		}
+	case daRelayLocatorChunk:
+		chunk := record.chunks[locator.chunkIndex]
+		o.candidate.member.locator = daRelayLocator{daID: chunk.daID, kind: daRelayLocatorChunk, chunkIndex: chunk.chunkIndex}
+		member := chunk.member.clone()
+		o.candidate.member.txBytes = append([]byte(nil), chunk.txBytes...)
+		o.candidate.member.payload = slices.Clone(chunk.payload)
+		o.candidate.chunkHash = chunk.chunkHash
+		o.targetWireBytes, o.targetPeerQuotaKey, o.targetHashChecked = chunk.wireBytes, chunk.peerQuotaKey, chunk.hashChecked
+		if member != nil {
+			o.candidate.member.member = *member
+		}
+	}
+}
+func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOutpointOwner) error {
+	switch {
+	case o.validateHeader() != nil, o.validateToken(owner) != nil, o.validateRole() != nil, checkOwnerReadyRetainedBytes(o.candidate.member.txBytes) != nil:
+		return errDARelayImageIncompatible
+	}
+	tx, parsedTxID, parsedWTxID, err := parseRelayMetadataTx(o.candidate.member.txBytes)
+	if err != nil {
+		return errDARelayImageIncompatible
+	}
+	inputs := relayMetadataInputs(tx)
+	type txidPair struct{ member, parsed [32]byte }
+	if slices.Contains([]bool{!isDAAdmissionTx(tx), uint(len(inputs)-1) >= uint(consensus.MAX_TX_INPUTS), (txidPair{o.candidate.member.member.txid, parsedTxID}) != (txidPair{o.indexedTxID, o.indexedTxID}), parsedWTxID != o.candidate.member.member.wtxid, !slices.Equal(inputs, o.candidate.member.member.inputs)}, true) {
+		return errDARelayImageIncompatible
+	}
+	return o.validateRetained(tx)
+}
+func (o daAdmissionObservation) validateHeader() error {
+	type header struct {
+		kind    daAdmissionObservationKind
+		locator daRelayLocator
+		daID    [32]byte
+	}
+	if (header{o.kind, o.indexedLocator, o.recordDAID}) != (header{daAdmissionObservationLocated, o.candidate.member.locator, o.indexedLocator.daID}) {
+		return errDARelayImageIncompatible
+	}
+	if slices.Contains([]bool{o.recordRevision == 0, o.recordReceivedTime == 0, o.recordState > daRelayStateCompleteSet}, true) {
+		return errDARelayImageIncompatible
+	}
+	var invalid bool
+	switch o.recordState {
+	case daRelayStateOrphanChunks, daRelayStateStagedCommit:
+		invalid = slices.Contains([]bool{o.recordTTLBlocksLeft == 0, o.recordPayloadBytes != 0, o.recordWireBytes != 0, o.recordHasReplaceableChunks}, true)
+	case daRelayStateCompleteSet:
+		invalid = slices.Contains([]bool{o.recordTTLBlocksLeft != 0, o.recordPayloadBytes == 0, o.recordWireBytes <= uint64(len(o.candidate.member.txBytes)), o.recordHasReplaceableChunks}, true)
+	default:
+		invalid = true
+	}
+	if invalid {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+func (o daAdmissionObservation) validateToken(owner *PendingOutpointOwner) error {
+	token := o.candidate.member.member.token
+	switch owner {
+	case nil:
+		if token != (PendingOutpointToken{}) {
+			return errDARelayImageIncompatible
+		}
+	default:
+		if token.owner != owner {
+			return errDARelayImageIncompatible
+		}
+		if token.seq == 0 {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func (o daAdmissionObservation) validateRole() error {
+	switch o.candidate.member.locator.kind {
+	case daRelayLocatorCommit:
+		return o.validateCommitRole()
+	case daRelayLocatorChunk:
+		return o.validateChunkRole()
+	default:
+		return errDARelayImageIncompatible
+	}
+}
+
+func (o daAdmissionObservation) validateCommitRole() error {
+	if o.recordState != daRelayStateStagedCommit && o.recordState != daRelayStateCompleteSet {
+		return errDARelayImageIncompatible
+	}
+	type role struct {
+		index             uint16
+		daID              [32]byte
+		wireBytes         uint64
+		peerQuotaKey      string
+		payloadByteLength int
+	}
+	if (role{o.candidate.member.locator.chunkIndex, o.candidate.member.locator.daID, o.targetWireBytes, o.targetPeerQuotaKey, len(o.candidate.member.payload)}) !=
+		(role{daID: o.recordDAID}) {
+		return errDARelayImageIncompatible
+	}
+	if o.candidate.chunkCount == 0 {
+		return errDARelayImageIncompatible
+	}
+	if uint64(o.candidate.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayImageIncompatible
+	}
+	return o.validateStagedCommit()
+}
+
+func (o daAdmissionObservation) validateChunkRole() error {
+	switch o.recordState {
+	case daRelayStateOrphanChunks, daRelayStateStagedCommit, daRelayStateCompleteSet:
+	default:
+		return errDARelayImageIncompatible
+	}
+	type role struct {
+		daID         [32]byte
+		index        uint16
+		wireBytes    uint64
+		peerQuotaKey string
+		hashChecked  bool
+	}
+	if (role{o.candidate.member.locator.daID, o.candidate.member.locator.chunkIndex, o.targetWireBytes, o.targetPeerQuotaKey, o.targetHashChecked}) !=
+		(role{daID: o.recordDAID, index: o.candidate.member.locator.chunkIndex}) {
+		return errDARelayImageIncompatible
+	}
+	return o.validateStagedCommit()
+}
+
+func (o daAdmissionObservation) validateStagedCommit() error {
+	switch o.recordState {
+	case daRelayStateOrphanChunks:
+		type emptyCommit struct {
+			present    bool
+			daID       [32]byte
+			chunkCount uint16
+			wireBytes  uint64
+			peerQuota  string
+			rawPresent bool
+		}
+		if (emptyCommit{o.stagedCommitPresent, o.stagedCommitDAID, o.stagedCommitChunkCount, o.stagedCommitWireBytes, o.stagedCommitPeerQuotaKey, o.stagedCommitRaw}) != (emptyCommit{}) {
+			return errDARelayImageIncompatible
+		}
+		return nil
+	case daRelayStateStagedCommit, daRelayStateCompleteSet:
+	default:
+		return errDARelayImageIncompatible
+	}
+	type stagedCommit struct {
+		present    bool
+		daID       [32]byte
+		wireBytes  uint64
+		peerQuota  string
+		rawPresent bool
+	}
+	if (stagedCommit{o.stagedCommitPresent, o.stagedCommitDAID, o.stagedCommitWireBytes, o.stagedCommitPeerQuotaKey, o.stagedCommitRaw}) !=
+		(stagedCommit{present: true, daID: o.recordDAID, rawPresent: true}) {
+		return errDARelayImageIncompatible
+	}
+	if o.stagedCommitChunkCount == 0 {
+		return errDARelayImageIncompatible
+	}
+	if uint64(o.stagedCommitChunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayImageIncompatible
+	}
+	if o.candidate.member.locator.chunkIndex >= o.stagedCommitChunkCount {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func (o daAdmissionObservation) validateRetained(tx *consensus.Tx) error {
+	candidate := o.candidate
+	candidate.member.member.token = PendingOutpointToken{}
+	var rendered daRelayAdmissionCandidate
+	var err error
+	switch candidate.member.locator.kind {
+	case daRelayLocatorCommit:
+		rendered, err = renderDACommitAdmissionCandidate(candidate, tx)
+	case daRelayLocatorChunk:
+		retainedPayload := candidate.member.payload
+		candidate.member.payload = tx.DaPayload
+		if !matchingDAChunkPayloadHash(tx) {
+			return errDARelayImageIncompatible
+		}
+		if o.recordState == daRelayStateCompleteSet {
+			if slices.Contains([]bool{retainedPayload != nil, o.recordPayloadBytes < uint64(len(tx.DaPayload))}, true) {
+				return errDARelayImageIncompatible
+			}
+		} else if !bytes.Equal(tx.DaPayload, retainedPayload) {
+			return errDARelayImageIncompatible
+		}
+		rendered, err = renderDAChunkAdmissionCandidate(candidate, tx)
+	default:
+		return errDARelayImageIncompatible
+	}
+	if slices.Contains([]bool{err != nil, !sameDAAdmissionCandidate(rendered, candidate)}, true) {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+func sameDAAdmissionCandidate(left, right daRelayAdmissionCandidate) bool {
+	type scalar struct {
+		locator                      daRelayLocator
+		txid, wtxid                  [32]byte
+		fee                          consensus.Uint128
+		token                        PendingOutpointToken
+		provenance                   daProvenance
+		payloadCommitment, chunkHash [32]byte
+		chunkCount                   uint16
+	}
+	return scalar{left.member.locator, left.member.member.txid, left.member.member.wtxid, left.member.member.fee, left.member.member.token, left.member.member.provenance, left.payloadCommitment, left.chunkHash, left.chunkCount} ==
+		scalar{right.member.locator, right.member.member.txid, right.member.member.wtxid, right.member.member.fee, right.member.member.token, right.member.member.provenance, right.payloadCommitment, right.chunkHash, right.chunkCount} &&
+		slices.Equal(left.member.member.inputs, right.member.member.inputs) && bytes.Equal(left.member.txBytes, right.member.txBytes) && bytes.Equal(left.member.payload, right.member.payload)
+}
+
 func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRelayAdmissionPlan {
 	s.mu.Lock()
 	current, present := s.sets[candidate.member.locator.daID]
@@ -177,7 +579,7 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 		return outcome, nil
 	}
 	projection, err := s.prepareDANonReplayProjectionLocked(plan, candidate)
-	if err != nil {
+	if err = cmp.Or(err, s.preflightDANonReplayInstall(projection)); err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
 	placement := projection.placement
@@ -202,6 +604,13 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 	s.installDASetRecordLocked(placement)
 	commit.Commit()
 	return daRelayAdmissionOutcome{daID: candidate.member.locator.daID, disposition: daRelayAdmissionRetained}, nil
+}
+
+func (s *DARelayState) preflightDANonReplayInstall(projection daNonReplayApplyProjection) error {
+	if slices.Contains([]bool{projection.member == nil, s.sets == nil, s.locators == nil, s.orphanBytesByPeerQuotaKey == nil, s.orphanBytesByDAID == nil}, true) {
+		return errDARelayImageIncompatible
+	}
+	return nil
 }
 
 func (s *DARelayState) prepareDANonReplayProjectionLocked(plan daRelayAdmissionPlan, candidate daRelayAdmissionCandidate) (daNonReplayApplyProjection, error) {

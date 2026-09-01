@@ -42,6 +42,16 @@ type daAdmissionGuard struct {
 	state      atomic.Uint32
 }
 
+// daAdmissionHold owns one admission read guard until candidate validation
+// transfers it into a DAAdmission.
+type daAdmissionHold struct {
+	mempool  *Mempool
+	guard    *daAdmissionGuard
+	snapshot *chainStateAdmissionSnapshot
+	policy   MempoolConfig
+	context  PendingOutpointAdmissionContext
+}
+
 // DAAdmission is a one-shot, chainstate-guarded DA candidate admission.
 type DAAdmission struct {
 	self     *DAAdmission
@@ -85,6 +95,17 @@ func (m *Mempool) BeginDAAdmission(raw []byte) (*DAAdmission, error) {
 }
 
 func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, err error) {
+	owned, tx, txid, wtxid, inputs, err = parseDAAdmissionCandidate(raw)
+	if err != nil {
+		return
+	}
+	if !matchingDAChunkPayloadHash(tx) {
+		err = txAdmitRejected("DA chunk payload hash mismatch")
+	}
+	return
+}
+
+func parseDAAdmissionCandidate(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, err error) {
 	if len(raw) == 0 {
 		err = txAdmitRejected("empty DA transaction")
 		return
@@ -107,14 +128,82 @@ func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [
 		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
 		return
 	}
-	if !matchingDAChunkPayloadHash(tx) {
-		err = txAdmitRejected("DA chunk payload hash mismatch")
-	}
 	return
 }
 
 func matchingDAChunkPayloadHash(tx *consensus.Tx) bool {
 	return tx.TxKind != 0x02 || sha3.Sum256(tx.DaPayload) == tx.DaChunkCore.ChunkHash
+}
+
+func (m *Mempool) acquireDAAdmissionHold(owner *PendingOutpointOwner, inputs []consensus.Outpoint) (*daAdmissionHold, error) {
+	if m == nil {
+		return nil, txAdmitUnavailable("nil mempool")
+	}
+	if m.chainState == nil {
+		return nil, txAdmitUnavailable("nil chainstate")
+	}
+	if owner == nil {
+		return nil, txAdmitUnavailable("nil pending-outpoint owner")
+	}
+	m.chainState.admissionMu.RLock()
+	hold := &daAdmissionHold{mempool: m, guard: &daAdmissionGuard{chainState: m.chainState, owner: owner}}
+	keep := false
+	defer func() {
+		if !keep {
+			hold.release()
+		}
+	}()
+	hold.snapshot = m.chainState.admissionSnapshotForInputs(inputs)
+	hold.policy = m.policySnapshot()
+	context, ok := owner.AdmissionContext()
+	if !ok {
+		return nil, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
+	hold.context = context
+	if hold.context.StableTip != (PendingOutpointTip{HasTip: hold.snapshot.hasTip, Height: hold.snapshot.height, Hash: hold.snapshot.tipHash}) {
+		return nil, txAdmitUnavailable("pending-outpoint owner tip does not match the guarded chainstate tip")
+	}
+	keep = true
+	return hold, nil
+}
+
+func (h *daAdmissionHold) release() {
+	if h == nil || h.guard == nil {
+		return
+	}
+	h.guard.chainState.admissionMu.RUnlock()
+	h.guard = nil
+}
+
+func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (admission *DAAdmission, err error) {
+	if h == nil || h.mempool == nil || h.guard == nil || h.snapshot == nil {
+		return nil, errDARelayImageIncompatible
+	}
+	defer h.release()
+	if !matchingDAChunkPayloadHash(tx) {
+		return nil, txAdmitRejected("DA chunk payload hash mismatch")
+	}
+	checked, _, err := h.mempool.checkParsedTransactionWithSnapshot(owned, tx, txid, wtxid, h.snapshot, h.policy)
+	if err != nil {
+		return nil, err
+	}
+	guard := h.guard
+	h.guard = nil
+	admission = &DAAdmission{
+		guard: guard,
+		snapshot: DAAdmissionSnapshot{
+			TxID:          checked.TxID,
+			WTxID:         checked.WTxID,
+			TxBytes:       owned,
+			Fee:           checked.Fee,
+			RetainedBytes: uint64(len(checked.Bytes)),
+			Inputs:        inputs,
+		},
+		tx:      tx,
+		context: h.context,
+	}
+	admission.self = admission
+	return admission, nil
 }
 
 func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (*DAAdmission, error) {

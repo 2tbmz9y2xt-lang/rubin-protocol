@@ -196,11 +196,13 @@ func requireDAAdmissionStructure(t *testing.T) {
 			t.Fatal("allowed production files omitted by build context")
 		}
 		functions, definitions, callFun, scopes := map[string]bool{}, map[token.Pos]bool{}, map[token.Pos]bool{}, map[string][]sourceScope{}
+		declarations := map[string]*ast.FuncDecl{}
 		for key, file := range files {
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch node := node.(type) {
 				case *ast.FuncDecl:
 					functions[node.Name.Name], definitions[node.Name.Pos()] = true, true
+					declarations[key+":"+node.Name.Name] = node
 					scopes[key] = append(scopes[key], sourceScope{node.Pos(), node.End(), key + ":" + node.Name.Name, node.Name.Name})
 				case *ast.ValueSpec:
 					for _, name := range node.Names {
@@ -221,9 +223,11 @@ func requireDAAdmissionStructure(t *testing.T) {
 				return true
 			})
 		}
-		got, where, edges, allowed := map[string]int{}, map[string]string{}, map[string]map[string]bool{}, map[string]bool{}
+		got, where, edges, allowed, callCounts, scopeReferences, relayCalls, relayReferences := map[string]int{}, map[string]string{}, map[string]map[string]bool{}, map[string]bool{}, map[string]map[string]int{}, map[string]map[string]int{}, map[string]int{}, map[string]int{}
 		add := func(row string, pos token.Pos) { got[row]++; where[row] = fset.Position(pos).String() }
-		targets := map[string]bool{"ParseTx": true, "parseDAAdmission": true, "parseRelayMetadataTx": true, "parseRetainedDAMember": true, "renderDARelayAdmissionCandidate": true, "admitDANonReplay": true, "AdmitDA": true, "Lookup" + "RetainedTx": true}
+		targets := map[string]bool{"ParseTx": true, "parseDAAdmission": true, "parseDAAdmissionCandidate": true, "parseRelayMetadataTx": true, "parseRetainedDAMember": true, "renderDARelayAdmissionCandidate": true, "admitDANonReplay": true, "AdmitDA": true, "Lookup" + "RetainedTx": true}
+		admitTargets := map[string]bool{"AdmitDA": true, "NewPeerDAProvenance": true, "LocalDAProvenance": true, "DetachedReorgDAProvenance": true, "classifyDAReplay": true, "observeDAAdmission": true, "admitDANonExact": true, "admitDANonReplay": true, "BeginDAAdmission": true, "AdmissionContext": true, "claimForToken": true, "claimForTokenLocked": true, "validateEntryClaim": true, "validateEntryClaimLocked": true, "checkNoClaimsLocked": true, "byToken": true, "byOutpoint": true, "Reserve": true, "reserveDAAdmissionLocked": true, "Finalize": true, "Release": true, "validateDAAdmissionVictimsLocked": true, "validateDAAdmissionVictimShape": true, "prepareDAAdmissionVictims": true, "dropClaimLocked": true, "BeginCommit": true, "Commit": true, "Abort": true, "sets": true, "locators": true, "orphanBytesByPeerQuotaKey": true, "orphanBytesByDAID": true, "nextReceivedTime": true, "records": true}
+		observeRanges := 0
 		for key, file := range files {
 			selected := key == "node/da_admission.go" || key == "node/da_relay_owner.go"
 			if selected {
@@ -242,6 +246,10 @@ func requireDAAdmissionStructure(t *testing.T) {
 					}
 				}
 				if id, ok := node.(*ast.Ident); ok && targets[id.Name] {
+					if scopeReferences[scope.symbol] == nil {
+						scopeReferences[scope.symbol] = map[string]int{}
+					}
+					scopeReferences[scope.symbol][id.Name]++
 					category := "value"
 					if definitions[id.Pos()] {
 						category = "decl"
@@ -256,6 +264,9 @@ func requireDAAdmissionStructure(t *testing.T) {
 					}
 					add("edge-"+category+"|"+scope.identity+"|"+id.Name, id.Pos())
 				}
+				if id, ok := node.(*ast.Ident); ok && key == "node/da_relay_owner.go" && admitTargets[id.Name] {
+					relayReferences[id.Name]++
+				}
 				if !selected {
 					return true
 				}
@@ -267,6 +278,25 @@ func requireDAAdmissionStructure(t *testing.T) {
 					category = "gen"
 				case *ast.CallExpr:
 					category = "call"
+					if callCounts[scope.symbol] == nil {
+						callCounts[scope.symbol] = map[string]int{}
+					}
+					switch function := node.Fun.(type) {
+					case *ast.Ident:
+						callCounts[scope.symbol][function.Name]++
+						if key == "node/da_relay_owner.go" {
+							relayCalls[function.Name]++
+						}
+					case *ast.SelectorExpr:
+						callCounts[scope.symbol][function.Sel.Name]++
+						if key == "node/da_relay_owner.go" {
+							relayCalls[function.Sel.Name]++
+						}
+					}
+				case *ast.RangeStmt:
+					if key == "node/da_relay_owner.go" && scope.symbol == "observeDAAdmission" {
+						observeRanges++
+					}
 				case *ast.AssignStmt, *ast.IncDecStmt:
 					category = "write"
 				case *ast.FuncLit:
@@ -292,17 +322,17 @@ func requireDAAdmissionStructure(t *testing.T) {
 				return true
 			})
 		}
-		var reachesParse func(string, map[string]bool) bool
-		reachesParse = func(name string, seen map[string]bool) bool {
-			if name == "ParseTx" {
+		var reaches func(string, string, map[string]bool) bool
+		reaches = func(name, target string, seen map[string]bool) bool {
+			if name == target {
 				return true
 			}
 			if seen[name] {
 				return false
 			}
 			seen[name] = true
-			for target := range edges[name] {
-				if reachesParse(target, seen) {
+			for next := range edges[name] {
+				if reaches(next, target, seen) {
 					return true
 				}
 			}
@@ -310,26 +340,52 @@ func requireDAAdmissionStructure(t *testing.T) {
 		}
 		var capable []string
 		for name := range allowed {
-			if reachesParse(name, map[string]bool{}) {
+			if reaches(name, "ParseTx", map[string]bool{}) {
 				capable = append(capable, name)
 			}
 		}
 		sort.Strings(capable)
-		if strings.Join(capable, ",") != "BeginDAAdmission,parseDAAdmission" {
+		if strings.Join(capable, ",") != "AdmitDA,BeginDAAdmission,parseDAAdmission,parseDAAdmissionCandidate,validateDAAdmissionObservation" {
 			t.Fatalf("parse-capable allowed declarations=%v", capable)
 		}
-		encodedRows, err := base64.StdEncoding.DecodeString(daAdmissionStructuralRowsBase64)
+		legacyRows, err := base64.StdEncoding.DecodeString(daAdmissionStructuralRowsBase64)
 		if err != nil {
 			t.Fatal(err)
 		}
+		changed := func(row string) bool {
+			for _, marker := range strings.Split("node/da_admission.go:lit:\x00node/da_relay_owner.go:lit:\x00node/da_admission.go:parseDAAdmission|\x00parseDAAdmissionCandidate\x00daAdmissionHold\x00acquireDAAdmissionHold\x00validateDACandidate\x00DAProvenance\x00daProvenance\x00DAAdmissionDisposition\x00daRelayAdmissionDisposition\x00node/da_relay_owner.go:daRelayAdmissionRetained|\x00node/da_relay_owner.go:daRelayAdmissionDuplicate|\x00DAAdmissionResult\x00daAdmissionObservation\x00indexedTxID\x00indexedLocator\x00recordDAID\x00recordState\x00recordRevision\x00recordReceivedTime\x00recordTTLBlocksLeft\x00recordPayloadBytes\x00recordWireBytes\x00recordHasReplaceableChunks\x00targetWireBytes\x00targetPeerQuotaKey\x00targetHashChecked\x00stagedCommitPresent\x00stagedCommitDAID\x00stagedCommitChunkCount\x00stagedCommitWireBytes\x00stagedCommitPeerQuotaKey\x00stagedCommitRaw\x00validateDAAdmissionObservation\x00validateHeader\x00validateToken\x00validateRole\x00validateCommitRole\x00validateChunkRole\x00validateStagedCommit\x00validateRetained\x00NewPeerDAProvenance\x00LocalDAProvenance\x00DetachedReorgDAProvenance\x00AdmitDA\x00admitDANonExact\x00bindDAAdmission\x00classifyDAReplay\x00publicDAAdmissionResult\x00observeDAAdmission\x00captureDAAdmissionTarget\x00preflightDANonReplayInstall\x00applyDANonReplayPlan\x00sameDAAdmissionCandidate\x00node/da_relay_owner.go:quotaKey|\x00node/da_relay_owner.go:validate|\x00node/da_admission.go:release|\x00read|node/da_relay_owner.go:file|DAID\x00read|node/da_relay_owner.go:file|Disposition\x00read|node/da_relay_owner.go:file|SameDAIDCommitConflict\x00\"bytes\"\x00\"slices\"\x00gen|node/da_relay_owner.go:file|import (", "\x00") {
+				if strings.Contains(row, marker) {
+					return true
+				}
+			}
+			return strings.Contains(row, "node/da_relay_owner.go:rendered|") || strings.Contains(row, "gen|node/da_relay_owner.go:file|const (\n\tdaRelayAdmissionRetained") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionRetained|") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionDuplicate|")
+		}
 		want := map[string]int{}
-		for _, row := range strings.Split(string(encodedRows), "\x1e") {
-			if row != "" {
+		for _, row := range strings.Split(string(legacyRows), "\x1e") {
+			if row != "" && !changed(row) {
 				want[row]++
 			}
 		}
+		want["read|node/da_relay_owner.go:file|uint8"]++     // Public disposition and observation add two declarations while the private alias is removed.
+		want["read|node/da_relay_owner.go:file|string"] += 2 // Observation adds two quota-key fields; provenance retains its two fields.
+		for _, field := range []string{"Mempool", "daAdmissionGuard", "chainStateAdmissionSnapshot", "MempoolConfig", "PendingOutpointAdmissionContext", "mempool", "guard", "policy", "context"} {
+			want["read|node/da_admission.go:file|"+field]++
+		}
+		want["gen|node/da_relay_owner.go:err|err error"]++
+		want["read|node/da_relay_owner.go:err|error"]++
+		want["read|node/da_relay_owner.go:err|err"]++
+		for row := range map[string]bool{"read|node/da_relay_owner.go:zero|zero": true, "gen|node/da_relay_owner.go:invalid|invalid bool": true, "read|node/da_relay_owner.go:invalid|bool": true, "read|node/da_relay_owner.go:invalid|invalid": true} {
+			want[row]++
+		}
+		for _, field := range []string{"daRelayAdmissionCandidate", "candidate"} {
+			want["read|node/da_relay_owner.go:file|"+field]++
+		}
+		want["value|node/da_admission.go:file|snapshot"]++
+		for field, count := range map[string]int{"byte": 4, "uint64": 4, "kind": 1, "bool": 5, "uint16": 1, "daRelaySetState": 1, "daRelayLocator": 1} {
+			want["read|node/da_relay_owner.go:file|"+field] += count
+		}
 		for row, count := range got {
-			if want[row] != count {
+			if !changed(row) && want[row] != count {
 				t.Fatalf("structural row %q count=%d want=%d at %s", row, count, want[row], where[row])
 			}
 		}
@@ -337,6 +393,62 @@ func requireDAAdmissionStructure(t *testing.T) {
 			if got[row] != count {
 				t.Fatalf("missing structural row %q count=%d want=%d", row, got[row], count)
 			}
+		}
+		begin, prefix, wrapper := declarations["node/da_admission.go:BeginDAAdmission"], declarations["node/da_admission.go:parseDAAdmissionCandidate"], declarations["node/da_admission.go:parseDAAdmission"]
+		public, replay, continuation, observe, capture, held, observed := declarations["node/da_relay_owner.go:AdmitDA"], declarations["node/da_relay_owner.go:classifyDAReplay"], declarations["node/da_relay_owner.go:admitDANonExact"], declarations["node/da_relay_owner.go:observeDAAdmission"], declarations["node/da_relay_owner.go:captureDAAdmissionTarget"], declarations["node/da_admission.go:validateDACandidate"], declarations["node/da_relay_owner.go:validateDAAdmissionObservation"]
+		if begin == nil || prefix == nil || wrapper == nil || public == nil || replay == nil || continuation == nil || observe == nil || capture == nil || held == nil || observed == nil {
+			t.Fatal("required DA admission symbol missing")
+		}
+		if strings.Count(string(sources["node/da_admission.go"]), "parseDAAdmission(") != 2 || strings.Count(string(sources["node/da_admission.go"]), "beginDAAdmissionGuarded(") != 2 {
+			t.Fatal("DA admission wrapper occurrence budget changed")
+		}
+		checkCalls := func(name string, got, want map[string]int) {
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s call shape=%v", name, got)
+			}
+		}
+		checkCalls("BeginDAAdmission", callCounts[begin.Name.Name], map[string]int{"beginDAAdmissionGuarded": 1, "parseDAAdmission": 1, "txAdmitUnavailable": 3})
+		checkCalls("parse wrapper", callCounts[wrapper.Name.Name], map[string]int{"matchingDAChunkPayloadHash": 1, "parseDAAdmissionCandidate": 1, "txAdmitRejected": 1})
+		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 5, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 4})
+		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"checkParsedTransactionWithSnapshot": 1, "len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "txAdmitRejected": 1, "uint64": 1})
+		checkCalls("AdmitDA", callCounts[public.Name.Name], map[string]int{"Error": 1, "acquireDAAdmissionHold": 1, "admitDANonExact": 1, "bindDAAdmission": 1, "classifyDAReplay": 1, "parseDAAdmissionCandidate": 1, "release": 1, "selectRelayDisposition": 3, "txAdmitRejected": 1, "validate": 1})
+		checkCalls("replay classification", callCounts[replay.Name.Name], map[string]int{"Equal": 1, "Error": 2, "observeDAAdmission": 1, "selectRelayDisposition": 3, "txAdmitRejected": 2, "txAdmitUnavailable": 1, "validateDAAdmissionObservation": 1})
+		checkCalls("nonexact continuation", callCounts[continuation.Name.Name], map[string]int{"Close": 1, "admitDANonReplay": 1, "publicDAAdmissionResult": 1, "validateDACandidate": 1})
+		checkCalls("captureDAAdmissionTarget", callCounts[capture.Name.Name], map[string]int{"Clone": 1, "append": 2, "clone": 2})
+		noCopy := scopeReferences[observed.Name.Name]
+		if reaches(observed.Name.Name, "parseDAAdmissionCandidate", map[string]bool{}) || noCopy["parseDAAdmissionCandidate"] != 0 {
+			t.Fatalf("retained validation reaches copying prefix=%v", noCopy)
+		}
+		allCalls, allReferences := relayCalls, relayReferences
+		wantCalls := map[string]int{"classifyDAReplay": 1, "observeDAAdmission": 1, "admitDANonExact": 1, "admitDANonReplay": 1, "BeginCommit": 1, "Commit": 1, "Abort": 2}
+		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 2, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 7, "locators": 4, "orphanBytesByPeerQuotaKey": 1, "orphanBytesByDAID": 1, "nextReceivedTime": 3, "records": 1}
+		for name := range admitTargets {
+			if allCalls[name] != wantCalls[name] || allReferences[name] != wantReferences[name] {
+				t.Fatalf("public replay reference graph calls=%v references=%v", allCalls, allReferences)
+			}
+		}
+		exactAt, continuationAt := -1, -1
+		for i, statement := range public.Body.List {
+			if conditional, ok := statement.(*ast.IfStmt); ok {
+				if exact, ok := conditional.Cond.(*ast.Ident); ok && exact.Name == "exact" && len(conditional.Body.List) == 1 {
+					if _, ok := conditional.Body.List[0].(*ast.ReturnStmt); ok {
+						exactAt = i
+					}
+				}
+			}
+			if returned, ok := statement.(*ast.ReturnStmt); ok && len(returned.Results) == 1 {
+				if call, ok := returned.Results[0].(*ast.CallExpr); ok {
+					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "admitDANonExact" {
+						continuationAt = i
+					}
+				}
+			}
+		}
+		if exactAt < 0 || continuationAt <= exactAt {
+			t.Fatalf("exact terminal/continuation order=%d/%d", exactAt, continuationAt)
+		}
+		if got := callCounts[observe.Name.Name]; observeRanges != 0 || !reflect.DeepEqual(got, map[string]int{"Lock": 1, "Unlock": 1, "captureDAAdmissionTarget": 1, "len": 1}) {
+			t.Fatalf("retained observation call shape=%v", got)
 		}
 	}
 }
@@ -825,6 +937,10 @@ type daNonReplayTxSpec struct {
 	chunkCount, chunkIndex        uint16
 	payload                       []byte
 	commitmentOutputs, inputCount int
+	commitmentOutputData          [][]byte
+	literalCommitmentOutputs      bool
+	chunkHash                     [32]byte
+	literalChunkHash              bool
 	fee                           consensus.Uint128
 }
 type daNonReplayTx struct {
@@ -874,22 +990,35 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 		Outputs: []consensus.TxOutput{{Value: uint64(inputCount)*2_000_000 - spec.fee.Lo, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), f.address...)}},
 	}
 	if spec.kind == 0x01 {
-		for i := 0; i < spec.commitmentOutputs; i++ {
-			tx.Outputs = append([]consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), spec.commitment[:]...)}}, tx.Outputs...)
+		if spec.literalCommitmentOutputs {
+			for _, output := range spec.commitmentOutputData {
+				tx.Outputs = append(tx.Outputs, consensus.TxOutput{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), output...)})
+			}
+		} else {
+			for i := 0; i < spec.commitmentOutputs; i++ {
+				tx.Outputs = append([]consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), spec.commitment[:]...)}}, tx.Outputs...)
+			}
 		}
 		tx.DaPayload = []byte("RUB-1287 manifest")
 		tx.DaCommitCore = &consensus.DaCommitCore{DaID: spec.daID, ChunkCount: spec.chunkCount, BatchNumber: 9}
 	} else {
 		tx.DaPayload = append([]byte(nil), spec.payload...)
-		tx.DaChunkCore = &consensus.DaChunkCore{DaID: spec.daID, ChunkIndex: spec.chunkIndex, ChunkHash: sha3.Sum256(spec.payload)}
+		hash := sha3.Sum256(spec.payload)
+		if spec.literalChunkHash {
+			hash = spec.chunkHash
+		}
+		tx.DaChunkCore = &consensus.DaChunkCore{DaID: spec.daID, ChunkIndex: spec.chunkIndex, ChunkHash: hash}
 	}
 	if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
 		f.t.Fatalf("SignTransaction: %v", err)
 	}
 	raw := mustMarshalTxForNodeTest(f.t, tx)
-	_, txid, wtxid, consumed, err := consensus.ParseTx(raw)
+	parsed, txid, wtxid, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
 		f.t.Fatalf("ParseTx=(%d,%v), want %d,nil", consumed, err, len(raw))
+	}
+	if spec.literalChunkHash && sha3.Sum256(parsed.DaPayload) == parsed.DaChunkCore.ChunkHash {
+		f.t.Fatal("serialized chunk hash unexpectedly matches payload")
 	}
 	return daNonReplayTx{spec: spec, raw: raw, txid: txid, wtxid: wtxid, inputs: inputRows}
 }
@@ -909,6 +1038,24 @@ func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) da
 		f.t.Fatalf("outcome=%+v, want retained da_id=%x", outcome, tx.spec.daID)
 	}
 	return outcome
+}
+func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8) daNonReplayTx {
+	chunk := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("complete")})
+	f.admit(chunk, daNonReplayPeer("chunk"))
+	commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 1, commitment: sha3.Sum256(chunk.spec.payload), commitmentOutputs: 1})
+	_, token := mustFinalizeDAAdmission(f.t, f.mp, commit.raw)
+	f.mutateRelay(func(s *DARelayState) {
+		record := s.sets[daID]
+		record.commit = daRelayCommit{daID: daID, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: append([]consensus.Outpoint(nil), commit.inputs...), token: token, provenance: daNonReplayPeer("commit")}, chunkCount: 1, txBytes: append([]byte(nil), commit.raw...)}
+		record.wireBytes = uint64(len(chunk.raw) + len(commit.raw))
+		record.markComplete(uint64(len(chunk.spec.payload)))
+		s.locators[commit.txid] = daRelayLocator{daID: daID, kind: daRelayLocatorCommit}
+		s.sets[daID] = record
+	})
+	if kind != 0x01 {
+		return chunk
+	}
+	return commit
 }
 func daNonReplayPeer(key string) daProvenance { return daProvenance{daProvenanceKind(1), key, key} }
 func (f *daNonReplayFixture) requireMember(t *testing.T, record daRelaySetRecord, tx daNonReplayTx, tokenSequence uint64, provenance daProvenance) {
@@ -2312,4 +2459,444 @@ func TestAdmitDANonReplayPostReserveTailIsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+func publicPeer(t *testing.T, suffix string) DAProvenance {
+	t.Helper()
+	p, err := NewPeerDAProvenance("peer-"+suffix, "quota-"+suffix)
+	if err != nil {
+		t.Fatalf("NewPeerDAProvenance: %v", err)
+	}
+	return p
+}
+func requirePublicDAResult(t *testing.T, got DAAdmissionResult, err error, want DAAdmissionResult) {
+	t.Helper()
+	if err != nil || got != want {
+		t.Fatalf("AdmitDA=(%+v,%v), want (%+v,nil)", got, err, want)
+	}
+}
+func requirePublicDAFailure(t *testing.T, got DAAdmissionResult, err error, kind TxAdmitErrorKind, message string, disposition ...RelayAdmissionDisposition) {
+	t.Helper()
+	var admit *TxAdmitError
+	if got != (DAAdmissionResult{}) || !errors.As(err, &admit) || admit.Kind != kind || (message != "" && admit.Message != message) || len(disposition) != 0 && relayDispositionOf(err) != disposition[0] {
+		t.Fatalf("AdmitDA=(%+v,%v), want zero %s %q", got, err, kind, message)
+	}
+}
+func requirePublicDAInternal(t *testing.T, f *daNonReplayFixture, got DAAdmissionResult, err error) {
+	t.Helper()
+	requirePublicDAFailure(t, got, err, TxAdmitRejected, errDARelayImageIncompatible.Error(), RelayAdmissionInternal)
+	if !f.state.admissionMu.TryLock() {
+		t.Fatalf("internal result=(%+v,%v) disposition=%v or leaked guard", got, err, relayDispositionOf(err))
+	}
+	f.state.admissionMu.Unlock()
+}
+func TestAdmitDAPublicAPISurfaceIsClosedAndDormant(t *testing.T) {
+	if _, err := NewPeerDAProvenance("", "quota"); err != errDAProvenanceInvalid {
+		t.Fatalf("empty peer constructor error=%v", err)
+	}
+	if _, err := NewPeerDAProvenance("peer", ""); err != errDAProvenanceInvalid {
+		t.Fatalf("empty quota constructor error=%v", err)
+	}
+	for _, provenance := range []DAProvenance{LocalDAProvenance(), DetachedReorgDAProvenance(), publicPeer(t, "surface")} {
+		if err := provenance.validate(); err != nil {
+			t.Fatalf("valid public provenance=%+v err=%v", provenance, err)
+		}
+	}
+	if err := (DAProvenance{}).validate(); err != errDAProvenanceInvalid {
+		t.Fatalf("zero provenance error=%v", err)
+	}
+	provenanceType := reflect.TypeOf(DAProvenance{})
+	for i := 0; i < provenanceType.NumField(); i++ {
+		if provenanceType.Field(i).IsExported() {
+			t.Fatalf("DAProvenance exposes %s", provenanceType.Field(i).Name)
+		}
+	}
+	if DAAdmissionRetained != DAAdmissionDisposition(1) || DAAdmissionDuplicate != DAAdmissionDisposition(2) {
+		t.Fatalf("public disposition values=(%d,%d)", DAAdmissionRetained, DAAdmissionDuplicate)
+	}
+	for _, relay := range []*DARelayState{nil, {}, {mempool: &Mempool{}}, {mempool: &Mempool{chainState: &ChainState{}}}} {
+		got, err := relay.AdmitDA(nil, LocalDAProvenance())
+		requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "", RelayAdmissionUnavailable)
+	}
+	f := newDANonReplayFixture(t, 1)
+	tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x90}, payload: []byte("surface")})
+	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	got, err := f.relay.AdmitDA(nil, LocalDAProvenance())
+	requirePublicDAFailure(t, got, err, TxAdmitRejected, "empty DA transaction", RelayAdmissionStableTerminalReject)
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	got, err = f.relay.AdmitDA(tx.raw, DAProvenance{})
+	requirePublicDAFailure(t, got, err, TxAdmitRejected, "invalid da provenance", RelayAdmissionStableTerminalReject)
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	got, err = publicDAAdmissionResult(daRelayAdmissionOutcome{})
+	requirePublicDAFailure(t, got, err, TxAdmitRejected, errDARelayImageIncompatible.Error(), RelayAdmissionInternal)
+
+	if source, err := os.ReadFile("da_relay_owner.go"); err != nil || bytes.Contains(source, []byte("LookupRetainedTx")) || bytes.Contains(source, []byte("DARetainedTxSnapshot")) {
+		t.Fatalf("forbidden retained API source err=%v", err)
+	}
+	requireDAAdmissionStructure(t)
+	TestDAAdmissionCandidateClosedDomain(t)
+}
+func TestAdmitDAOwnerObservationPrecedesCandidateIntegrity(t *testing.T) {
+	unavailable := func(f *daNonReplayFixture, tx daNonReplayTx, suffix, message string) {
+		got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, suffix))
+		requirePublicDAFailure(t, got, err, TxAdmitUnavailable, message, RelayAdmissionUnavailable)
+		if !f.state.admissionMu.TryLock() {
+			t.Fatal("unavailable observation leaked guard or changed class")
+		}
+		f.state.admissionMu.Unlock()
+	}
+	rows := []struct {
+		name     string
+		output   [][]byte
+		wantErr  error
+		wantKind TxAdmitErrorKind
+		msg      string
+	}{
+		{"zero CORE_DA_COMMIT outputs", nil, errDARelayMemberIncomplete, "", ""},
+		{"two valid CORE_DA_COMMIT outputs", [][]byte{make([]byte, 32), make([]byte, 32)}, errDARelayMemberIncomplete, "", ""},
+		{"31-byte CORE_DA_COMMIT", [][]byte{make([]byte, 31)}, nil, TxAdmitRejected, "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_DA_COMMIT covenant_data length"},
+		{"33-byte CORE_DA_COMMIT", [][]byte{make([]byte, 33)}, nil, TxAdmitRejected, "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_DA_COMMIT covenant_data length"},
+	}
+	for _, row := range rows {
+		t.Run(row.name+" absent", func(t *testing.T) {
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0x91, byte(len(row.name))}, chunkCount: 2, literalCommitmentOutputs: true, commitmentOutputData: row.output})
+			parsed, _, _, consumed, err := consensus.ParseTx(tx.raw)
+			if err != nil || consumed != len(tx.raw) {
+				t.Fatalf("independent ParseTx=(%d,%v)", consumed, err)
+			}
+			count := 0
+			for _, output := range parsed.Outputs {
+				if output.CovenantType == 0x0103 {
+					if count >= len(row.output) || len(output.CovenantData) != len(row.output[count]) {
+						t.Fatalf("literal CORE_DA_COMMIT output[%d] width=%d", count, len(output.CovenantData))
+					}
+					count++
+				}
+			}
+			if count != len(row.output) {
+				t.Fatalf("literal CORE_DA_COMMIT count=%d want=%d", count, len(row.output))
+			}
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, row.name))
+			if row.wantErr != nil {
+				if got != (DAAdmissionResult{}) || err != row.wantErr {
+					t.Fatalf("AdmitDA=(%+v,%v), want zero %v", got, err, row.wantErr)
+				}
+			} else {
+				requirePublicDAFailure(t, got, err, row.wantKind, row.msg)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		})
+		t.Run(row.name+" unavailable", func(t *testing.T) {
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0x92, byte(len(row.name))}, chunkCount: 2, literalCommitmentOutputs: true, commitmentOutputData: row.output})
+			f.mutateRelay(func(s *DARelayState) { s.sets = nil })
+			unavailable(f, tx, "unavailable"+row.name, "DA relay owner maps unavailable")
+		})
+		t.Run(row.name+" located INTERNAL", func(t *testing.T) {
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0x95, byte(len(row.name))}, chunkCount: 2, literalCommitmentOutputs: true, commitmentOutputData: row.output})
+			recordID := [32]byte{0x96, byte(len(row.name))}
+			f.mutateRelay(func(s *DARelayState) {
+				s.sets[recordID] = daRelaySetRecord{daID: recordID, state: daRelayStateOrphanChunks, revision: 1, receivedTime: 1, ttlBlocksRemaining: 1}
+				s.locators[tx.txid] = daRelayLocator{daID: recordID, kind: daRelayLocatorChunk}
+			})
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "internal"+row.name))
+			requirePublicDAInternal(t, f, got, err)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		})
+	}
+	for _, maps := range []func(*DARelayState){func(s *DARelayState) { s.sets = nil }, func(s *DARelayState) { s.locators = nil }} {
+		f := newDANonReplayFixture(t, 1)
+		bad := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x94}, payload: []byte("public replay chunk"), literalChunkHash: true, chunkHash: [32]byte{0xff}})
+		maps(f.relay)
+		unavailable(f, bad, "chunk-map", "DA relay owner maps unavailable")
+	}
+	t.Run("chunk hash mismatch after ABSENT", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		bad := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x97}, payload: []byte("public replay chunk"), literalChunkHash: true, chunkHash: [32]byte{0xff}})
+		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		got, err := f.relay.AdmitDA(bad.raw, publicPeer(t, "chunk-absent"))
+		requirePublicDAFailure(t, got, err, TxAdmitRejected, "DA chunk payload hash mismatch")
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	})
+	t.Run("located corruption outranks chunk hash mismatch", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		bad := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x98}, payload: []byte("public replay chunk"), literalChunkHash: true, chunkHash: [32]byte{0xff}})
+		recordID := [32]byte{0x99}
+		f.mutateRelay(func(s *DARelayState) {
+			s.sets[recordID] = daRelaySetRecord{daID: recordID, state: daRelayStateOrphanChunks, revision: 1, receivedTime: 1, ttlBlocksRemaining: 1}
+			s.locators[bad.txid] = daRelayLocator{daID: recordID, kind: daRelayLocatorChunk}
+		})
+		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		got, err := f.relay.AdmitDA(bad.raw, publicPeer(t, "chunk-internal"))
+		requirePublicDAInternal(t, f, got, err)
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	})
+	for _, row := range []struct {
+		name, message string
+		mutate        func(*PendingOutpointOwner)
+	}{
+		{"transition", "pending-outpoint owner admission context unavailable", func(owner *PendingOutpointOwner) { owner.inTransition = true }},
+		{"generation exhausted", "pending-outpoint owner admission context unavailable", func(owner *PendingOutpointOwner) { owner.generation = ^uint64(0) }},
+		{"stable tip mismatch", "pending-outpoint owner tip does not match the guarded chainstate tip", func(owner *PendingOutpointOwner) { owner.stableTip.Height++ }},
+	} {
+		t.Run("owner context "+row.name+" wins", func(t *testing.T) {
+			f := newDANonReplayFixture(t, 1)
+			bad := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x9a, byte(len(row.name))}, payload: []byte("public replay chunk"), literalChunkHash: true, chunkHash: [32]byte{0xff}})
+			f.mutateRelay(func(s *DARelayState) { s.sets = nil })
+			f.mp.pendingOutpoints.mu.Lock()
+			row.mutate(f.mp.pendingOutpoints)
+			f.mp.pendingOutpoints.mu.Unlock()
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			unavailable(f, bad, row.name, row.message)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		})
+	}
+}
+func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		tx    daNonReplayTxSpec
+		clear bool
+	}{
+		{"A chunk", daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa0}, payload: []byte("replay-a")}, false},
+		{"B commit", daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0xb0}, chunkCount: 2, commitment: [32]byte{0xa5}, commitmentOutputs: 1}, false},
+		{"exact ignores installer accounting", daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa5}, payload: []byte("exact")}, true},
+	} {
+		t.Run(row.name+" exact replay", func(t *testing.T) {
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(row.tx)
+			f.admit(tx, daNonReplayPeer("resident"))
+			if row.clear {
+				f.mutateRelay(func(s *DARelayState) { s.orphanBytesByPeerQuotaKey, s.orphanBytesByDAID = nil, nil })
+			}
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, row.name))
+			requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			if !f.state.admissionMu.TryLock() {
+				t.Fatal("exact replay leaked admission guard")
+			}
+			f.state.admissionMu.Unlock()
+		})
+	}
+	t.Run("ABSENT retains through the established path", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa1}, payload: []byte("absent")})
+		provenance, err := NewPeerDAProvenance("boundary", "boundary")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := f.relay.AdmitDA(tx.raw, provenance)
+		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionRetained})
+		f.requireSingleRetained(t, tx, daRelayStateOrphanChunks)
+	})
+	t.Run("continuation installer preflight", func(t *testing.T) {
+		name := ""
+		defer func() {
+			if panicValue := recover(); panicValue != nil {
+				t.Fatalf("installer preflight %s panic=%v", name, panicValue)
+			}
+		}()
+		for testName, clear := range map[string]func(*DARelayState){"per peer": func(s *DARelayState) { s.orphanBytesByPeerQuotaKey = nil }, "per da_id": func(s *DARelayState) { s.orphanBytesByDAID = nil }} {
+			name = testName
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa4}, payload: []byte(name)})
+			f.mutateRelay(clear)
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, name))
+			if got != (DAAdmissionResult{}) || err != errDARelayImageIncompatible {
+				t.Fatalf("installer preflight %s=(%+v,%v)", name, got, err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			ownerFree, chainFree := f.mp.pendingOutpoints.mu.TryLock(), f.state.admissionMu.TryLock()
+			if ownerFree {
+				f.mp.pendingOutpoints.mu.Unlock()
+			}
+			if chainFree {
+				f.state.admissionMu.Unlock()
+			}
+			if !ownerFree || !chainFree {
+				t.Fatal("installer preflight leaked owner or chain guard")
+			}
+		}
+	})
+	t.Run("valid NONEXACT resumes the existing duplicate path", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa3}, payload: []byte("nonexact")})
+		f.admit(tx, daNonReplayPeer("resident"))
+		parsed, _, _, consumed, err := consensus.ParseTx(tx.raw)
+		if err != nil || consumed != len(tx.raw) {
+			t.Fatalf("independent ParseTx=(%d,%v)", consumed, err)
+		}
+		if err := consensus.SignTransaction(parsed, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
+			t.Fatalf("alternate SignTransaction: %v", err)
+		}
+		alternate := mustMarshalTxForNodeTest(t, parsed)
+		_, alternateTxID, alternateWTxID, consumed, err := consensus.ParseTx(alternate)
+		if err != nil || consumed != len(alternate) || alternateTxID != tx.txid || alternateWTxID == tx.wtxid {
+			t.Fatalf("alternate identifiers=(%x,%x,%d,%v), want same txid and distinct wtxid", alternateTxID, alternateWTxID, consumed, err)
+		}
+		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		got, err := f.relay.AdmitDA(alternate, publicPeer(t, "nonexact"))
+		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	})
+	t.Run("observation is alias-isolated", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa2}, payload: []byte("alias")})
+		f.admit(tx, daNonReplayPeer("resident"))
+		before := daRelayStateSnapshot(f.relay)
+		liveVout := f.relay.sets[tx.spec.daID].chunks[0].member.inputs[0].Vout
+		observation := f.relay.observeDAAdmission(tx.txid)
+		observation.candidate.member.txBytes[0] ^= 0xff
+		observation.candidate.member.payload[0] ^= 0xff
+		observation.candidate.member.member.inputs[0].Vout++
+		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) || f.relay.sets[tx.spec.daID].chunks[0].member.inputs[0].Vout != liveVout {
+			t.Fatalf("observation leaked alias: got=%+v want=%+v", got, before)
+		}
+	})
+}
+
+func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *testing.T) {
+	const (
+		aChunk = iota
+		bCommit
+		bChunk
+		cCommit
+		cChunk
+	)
+	type row struct {
+		name   string
+		role   int
+		drop   bool
+		mutate func(*daRelaySetRecord, *daRelayCommit, *daRelayChunk)
+	}
+	setup := func(role int) (*daNonReplayFixture, daNonReplayTx) {
+		daID := [32]byte{0xb1, byte(role)}
+		switch role {
+		case aChunk:
+			f := newDANonReplayFixture(t, 2)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("corrupt-a"), inputCount: 2})
+			f.admit(tx, daNonReplayPeer("resident"))
+			return f, tx
+		case bCommit:
+			f := newDANonReplayFixture(t, 2)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: [32]byte{0xa5}, commitmentOutputs: 1, inputCount: 2})
+			f.admit(tx, daNonReplayPeer("resident"))
+			return f, tx
+		case cCommit, cChunk:
+			f := newDANonReplayFixture(t, 2)
+			return f, f.completeReplay(daID, uint8(role-cCommit+1))
+		default:
+			f := newDANonReplayFixture(t, 4)
+			f.admit(f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: [32]byte{0xa6}, commitmentOutputs: 1, inputCount: 2}), daNonReplayPeer("commit"))
+			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("corrupt-b"), inputCount: 2})
+			f.admit(tx, daNonReplayPeer("chunk"))
+			return f, tx
+		}
+	}
+	for _, role := range []int{bChunk, cCommit, cChunk} {
+		f, tx := setup(role)
+		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "complete"))
+		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	}
+	for _, row := range []row{
+		{"dangling locator", aChunk, true, nil},
+		{"missing chunk member", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.member = nil }},
+		{"missing commit member", bCommit, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.member = nil }},
+		{"zero revision", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.revision = 0 }},
+		{"zero received time", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.receivedTime = 0 }},
+		{"zero ttl", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.ttlBlocksRemaining = 0 }},
+		{"invalid chunk state", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.state = daRelayStateCompleteSet }},
+		{"invalid commit role", bCommit, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.state = daRelayStateOrphanChunks }},
+		{"invalid staged chunk role", bChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.state = daRelayStateOrphanChunks }},
+		{"missing retained raw", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.txBytes = nil }},
+		{"truncated retained raw", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.txBytes = c.txBytes[:len(c.txBytes)-1] }},
+		{"trailing retained raw", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.txBytes = append(c.txBytes, 0) }},
+		{"indexed member txid", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.member.txid[0] ^= 1 }},
+		{"admission wtxid", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.member.wtxid[0] ^= 1 }},
+		{"commit slot daid", bCommit, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.daID[0] ^= 1 }},
+		{"chunk slot daid", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.daID[0] ^= 1 }},
+		{"chunk slot index", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.chunkIndex++ }},
+		{"ordered inputs", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) {
+			c.member.inputs[0], c.member.inputs[1] = c.member.inputs[1], c.member.inputs[0]
+		}},
+		{"retained provenance", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.member.provenance = DAProvenance{} }},
+		{"retained payload", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.payload = []byte("other") }},
+		{"retained hash", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.chunkHash = [32]byte{0xee} }},
+		{"record payload residual", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.payloadBytes = 1 }},
+		{"record wire residual", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.wireBytes = 1 }},
+		{"record replaceable residual", aChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.replaceableChunks = map[uint16]bool{} }},
+		{"target wire residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.wireBytes = 1 }},
+		{"target peer residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.peerQuotaKey = "moved" }},
+		{"target hash checked residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.hashChecked = !c.hashChecked }},
+		{"staged commit daid", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.daID[0] ^= 1 }},
+		{"staged commit count", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.chunkCount = 0 }},
+		{"staged commit wire", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.wireBytes = 1 }},
+		{"staged commit peer", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.peerQuotaKey = "moved" }},
+		{"staged commit raw", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.txBytes = nil }},
+		{"missing staged member", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.member = nil }},
+		{"staged commit count above max", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) {
+			c.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT + 1)
+		}},
+		{"staged target index outside count", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.chunkCount = 1 }},
+		{"zero token sequence", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.member.token.seq = 0 }},
+		{"foreign token", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) {
+			c.member.token = PendingOutpointToken{owner: newPendingOutpointOwner(PendingOutpointTip{}), seq: 1}
+		}},
+		{"partial token", aChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) {
+			c.member.token = PendingOutpointToken{seq: 1}
+		}},
+		{"C nonzero ttl", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.ttlBlocksRemaining = 1 }},
+		{"C zero retained bytes", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.wireBytes = 0 }},
+		{"C zero payload bytes", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.payloadBytes = 0 }},
+		{"C replaceable", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.replaceableChunks = map[uint16]bool{} }},
+		{"C stored payload", cChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.payload = []byte{} }},
+		{"C retained bytes below raw", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { r.wireBytes = uint64(len(c.txBytes) - 1) }},
+		{"C payload bytes below raw payload", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.payloadBytes = 1 }},
+		{"C commit retained bytes equal raw", cCommit, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) {
+			r.wireBytes = uint64(len(r.commit.txBytes))
+		}},
+		{"C chunk retained bytes equal raw", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { r.wireBytes = uint64(len(c.txBytes)) }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, tx := setup(row.role)
+			f.mutateRelay(func(s *DARelayState) {
+				if row.drop {
+					delete(s.sets, tx.spec.daID)
+					return
+				}
+				r := s.sets[tx.spec.daID]
+				c := r.chunks[tx.spec.chunkIndex]
+				row.mutate(&r, &r.commit, &c)
+				if tx.spec.kind == 0x02 {
+					r.chunks[tx.spec.chunkIndex] = c
+				}
+				s.sets[tx.spec.daID] = r
+			})
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, row.name))
+			requirePublicDAInternal(t, f, got, err)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		})
+	}
+}
+
+func TestConflictBitRequiresAProvenDifferentTxid(t *testing.T) {
+	f := newDANonReplayFixture(t, 2)
+	daID, commitment := [32]byte{0xc1}, [32]byte{0xa5}
+	resident := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: commitment, commitmentOutputs: 1})
+	f.admit(resident, daNonReplayPeer("resident"))
+	candidate := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: commitment, commitmentOutputs: 1})
+	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	got, err := f.relay.AdmitDA(candidate.raw, publicPeer(t, "conflict"))
+	requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: daID, Disposition: DAAdmissionDuplicate, SameDAIDCommitConflict: true})
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+	got, err = f.relay.AdmitDA(resident.raw, publicPeer(t, "exact"))
+	requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: daID, Disposition: DAAdmissionDuplicate})
 }
