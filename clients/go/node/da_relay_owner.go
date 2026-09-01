@@ -1,6 +1,10 @@
 package node
 
-import "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+import (
+	"cmp"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+)
 
 type daProvenanceKind uint8
 
@@ -17,9 +21,6 @@ type daProvenance struct {
 	quotaIdentity string
 }
 
-// quotaKey is the ONLY source of the per-peer accounting key: derived on every use,
-// never stored beside the provenance, so no member can present one source with
-// another's charge. Only PEER is charged per peer; the empty key is never a bucket.
 func (p daProvenance) quotaKey() string {
 	if p.kind == daProvenancePeer {
 		return p.quotaIdentity
@@ -74,6 +75,35 @@ type daRelayAdmissionCandidate struct {
 	chunkHash         [32]byte
 }
 
+type daRelayAdmissionDisposition uint8
+
+const (
+	daRelayAdmissionRetained  daRelayAdmissionDisposition = 1
+	daRelayAdmissionDuplicate daRelayAdmissionDisposition = 2
+)
+
+type daRelayAdmissionOutcome struct {
+	daID                   [32]byte
+	disposition            daRelayAdmissionDisposition
+	sameDAIDCommitConflict bool
+}
+
+type daRelayAdmissionPlan struct {
+	image         daRelayRecordImage
+	victims       []DAAdmissionVictim
+	wouldComplete bool
+	stageErr      error
+}
+
+type daNonReplayApplyProjection struct {
+	placement                                  daRelayRecordPlacement
+	member                                     *daRelayMemberIdentity
+	receivedTime, sequence                     uint64
+	orphanCap, commitCap                       uint64
+	projectedOrphanBytes, projectedCommitBytes uint64
+	stateB                                     bool
+}
+
 func (a *DAAdmission) renderDARelayAdmissionCandidate(provenance daProvenance) (daRelayAdmissionCandidate, error) {
 	var zero daRelayAdmissionCandidate
 	snapshot := a.Snapshot()
@@ -101,6 +131,169 @@ func (a *DAAdmission) renderDARelayAdmissionCandidate(provenance daProvenance) (
 	default:
 		return zero, errDARelayMemberIncomplete
 	}
+}
+
+func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daProvenance) (daRelayAdmissionOutcome, error) {
+	candidate, err := admission.renderDARelayAdmissionCandidate(provenance)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	if s == nil || cmp.Or(s.mempool == nil, admission == nil) || admission.guard == nil ||
+		cmp.Or(s.mempool.chainState == nil, s.mempool.pendingOutpoints == nil,
+			admission.guard.chainState != s.mempool.chainState, admission.guard.owner != s.mempool.pendingOutpoints) {
+		return daRelayAdmissionOutcome{}, errDARelayImageIncompatible
+	}
+	return s.applyDANonReplayPlan(admission, candidate, s.planDANonReplay(candidate))
+}
+
+func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRelayAdmissionPlan {
+	s.mu.Lock()
+	current, present := s.sets[candidate.member.locator.daID]
+	current = current.cloneOwnerReady()
+	s.mu.Unlock()
+
+	plan := daRelayAdmissionPlan{image: daRelayRecordImage{
+		daID: candidate.member.locator.daID, present: present, baseline: current.revision,
+	}}
+	if present {
+		if err := current.checkDANonReplayPrior(candidate.member.locator.daID, s.mempool.pendingOutpoints); err != nil {
+			plan.stageErr = err
+			return plan
+		}
+	}
+	if err := checkOwnerReadySlotFree(current, candidate.member.locator); err != nil {
+		plan.stageErr = err
+		return plan
+	}
+	plan.image, plan.victims = stageDANonReplayCandidate(current, present, candidate, s.caps.orphanTTLBlocks)
+	plan.wouldComplete = plan.image.next.completeByShape()
+	return plan
+}
+
+func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate daRelayAdmissionCandidate, plan daRelayAdmissionPlan) (daRelayAdmissionOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if outcome, duplicate := s.duplicateDANonReplayLocked(candidate); duplicate {
+		return outcome, nil
+	}
+	projection, err := s.prepareDANonReplayProjectionLocked(plan, candidate)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	placement := projection.placement
+	member, receivedTime, sequence := projection.member, projection.receivedTime, projection.sequence
+	stateB, orphanCap, commitCap := projection.stateB, projection.orphanCap, projection.commitCap
+	projectedOrphanBytes, projectedCommitBytes := projection.projectedOrphanBytes, projection.projectedCommitBytes
+	commit, err := admission.BeginCommit(plan.victims)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	if stateB && projectedOrphanBytes > orphanCap {
+		commit.Abort()
+		return daRelayAdmissionOutcome{}, errDARelayOrphanPoolCapExceeded
+	}
+	if stateB && projectedCommitBytes > commitCap {
+		commit.Abort()
+		return daRelayAdmissionOutcome{}, errDARelayOrphanCommitCapExceeded
+	}
+	member.token = commit.CandidateToken()
+	placement.record.receivedTime = receivedTime
+	s.nextReceivedTime = sequence
+	s.installDASetRecordLocked(placement)
+	commit.Commit()
+	return daRelayAdmissionOutcome{daID: candidate.member.locator.daID, disposition: daRelayAdmissionRetained}, nil
+}
+
+func (s *DARelayState) prepareDANonReplayProjectionLocked(plan daRelayAdmissionPlan, candidate daRelayAdmissionCandidate) (daNonReplayApplyProjection, error) {
+	current, present := s.sets[plan.image.daID]
+	if present != plan.image.present || current.revision != plan.image.baseline {
+		return daNonReplayApplyProjection{}, selectRelayDisposition(txAdmitUnavailable("retained DA record moved while this admission was planned"), RelayAdmissionUnavailable)
+	}
+
+	if plan.stageErr != nil {
+		return daNonReplayApplyProjection{}, plan.stageErr
+	}
+	live, err := s.checkDARecordImageBaselineLocked(plan.image)
+	if err != nil {
+		return daNonReplayApplyProjection{}, err
+	}
+	if err := checkDANonReplayVictims(plan.image, live, plan.victims); err != nil {
+		return daNonReplayApplyProjection{}, err
+	}
+	if plan.wouldComplete {
+		return daNonReplayApplyProjection{}, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity owner is not active"), RelayAdmissionUnavailable)
+	}
+	return s.projectDANonReplayAdmissionLocked(plan.image, candidate, live)
+}
+
+func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImage, candidate daRelayAdmissionCandidate, live daRelaySetRecord) (daNonReplayApplyProjection, error) {
+	sequence, err := s.nextDANonReplaySequenceLocked(image)
+	if err != nil {
+		return daNonReplayApplyProjection{}, err
+	}
+	stateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps
+	orphanCap, daCap, peerCap, commitCap := s.caps.orphanPoolBytes, s.caps.orphanPoolPerDAIDBytes, s.caps.orphanPoolPerPeerBytes, s.caps.orphanCommitOverheadBytes
+	projectionCaps.orphanPoolBytes, projectionCaps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
+	projectionCaps.orphanPoolPerPeerBytes, projectionCaps.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
+	placement, err := s.projectDARecordImageLiveLocked(image, live, projectionCaps)
+	if err != nil {
+		return daNonReplayApplyProjection{}, err
+	}
+	member, receivedTime := prepareDANonReplayInstall(&placement, candidate.member.locator, sequence)
+	projection := daNonReplayApplyProjection{
+		placement: placement, member: member, receivedTime: receivedTime, sequence: sequence,
+		orphanCap: orphanCap, commitCap: commitCap, projectedOrphanBytes: placement.orphanBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
+	}
+	if stateB {
+		return projection, nil
+	}
+	if placement.orphanBytes > orphanCap {
+		return daNonReplayApplyProjection{}, errDARelayOrphanPoolCapExceeded
+	}
+	if placement.daBytes > daCap {
+		return daNonReplayApplyProjection{}, errDARelayOrphanDAIDCapExceeded
+	}
+	for _, value := range placement.peerBytes {
+		if value > peerCap {
+			return daNonReplayApplyProjection{}, errDARelayOrphanPeerCapExceeded
+		}
+	}
+	return projection, nil
+}
+
+func (s *DARelayState) duplicateDANonReplayLocked(candidate daRelayAdmissionCandidate) (daRelayAdmissionOutcome, bool) {
+	outcome := daRelayAdmissionOutcome{daID: candidate.member.locator.daID, disposition: daRelayAdmissionDuplicate}
+	if _, duplicate := s.locators[candidate.member.member.txid]; duplicate {
+		return outcome, true
+	}
+	record := s.sets[candidate.member.locator.daID]
+	if candidate.member.locator.kind == daRelayLocatorCommit && record.commit.member != nil {
+		outcome.sameDAIDCommitConflict = record.commit.member.txid != candidate.member.member.txid
+		return outcome, true
+	}
+	_, duplicate := record.chunks[candidate.member.locator.chunkIndex]
+	return outcome, candidate.member.locator.kind == daRelayLocatorChunk && duplicate
+}
+
+func (s *DARelayState) nextDANonReplaySequenceLocked(image daRelayRecordImage) (uint64, error) {
+	if image.present {
+		live := s.sets[image.daID]
+		if s.nextReceivedTime < live.receivedTime || s.records < live.revision {
+			return 0, errDARelayImageIncompatible
+		}
+	}
+	return checkedAddUint64(s.nextReceivedTime, 1)
+}
+
+func prepareDANonReplayInstall(placement *daRelayRecordPlacement, locator daRelayLocator, sequence uint64) (*daRelayMemberIdentity, uint64) {
+	receivedTime := placement.record.receivedTime
+	if receivedTime == 0 {
+		receivedTime = sequence
+	}
+	if locator.kind == daRelayLocatorCommit {
+		return placement.record.commit.member, receivedTime
+	}
+	return placement.record.chunks[locator.chunkIndex].member, receivedTime
 }
 
 func renderDACommitAdmissionCandidate(candidate daRelayAdmissionCandidate, tx *consensus.Tx) (daRelayAdmissionCandidate, error) {
