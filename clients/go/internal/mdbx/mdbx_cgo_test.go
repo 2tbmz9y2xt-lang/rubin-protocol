@@ -3369,10 +3369,14 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 	source, sourceErr := os.ReadFile("mdbx_cgo.go")
 	mustEnvironment(t, sourceErr)
 	invoker, plan := updateNativeBody(t, source, "invokeUpdate"), updateNativeBody(t, source, "updatePlan")
-	if strings.Count(invoker, "callback(reader)") != 1 || !strings.Contains(plan, "invokeUpdate(") || strings.Index(plan, "invokeUpdate(") > strings.Index(plan, "readPrimary(") {
+	if strings.Count(invoker, "callback(reader)") != 1 || !strings.Contains(plan, "invokeUpdate(") || strings.Index(plan, "invokeUpdate(") > strings.LastIndex(plan, "readPrimary(") {
 		t.Fatal("callback invocation drifted")
 	}
-	if strings.Index(plan, "readPrimary(") > strings.Index(plan, "if panicked") || strings.Index(plan, "if panicked") > strings.Index(plan, "abortReadLocked") {
+	if strings.LastIndex(plan, "readPrimary(") > strings.Index(plan, "if panicked") || strings.Index(plan, "if panicked") > strings.LastIndex(plan, "abortReadLocked") {
+		t.Fatal("callback precedence drifted")
+	}
+	goexitCleanup := "defer func() {\n\t\tif returned {\n\t\t\treturn\n\t\t}\n\t\treader.expire()\n\t\tprimary, infrastructure := readPrimary(nil, reader.failure)\n\t\t_ = s.abortReadLocked(old, primary, infrastructure)\n\t}()"
+	if strings.Count(plan, "reader.expire()") != 2 || !strings.Contains(plan, goexitCleanup) || strings.Index(plan, "returned = true") < strings.Index(plan, "invokeUpdate(") {
 		t.Fatal("callback precedence drifted")
 	}
 
@@ -3474,6 +3478,52 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 			mustEnvironment(t, store.Close())
 		}
 	}
+
+	for _, withInfrastructure := range []bool{false, true} {
+		store = newUpdateStore(t)
+		var escaped *Reader
+		infrastructure := error(nil)
+		if withInfrastructure {
+			infrastructure = nativeError(operationGet, codeEIO)
+		}
+		resumed, done := make(chan struct{}, 2), make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = store.Update(func(reader *Reader) (Batch, error) {
+				escaped = reader
+				if infrastructure != nil {
+					reader.failure = infrastructure
+				}
+				runtime.Goexit()
+				resumed <- struct{}{}
+				return Batch{}, nil
+			})
+			resumed <- struct{}{}
+		}()
+		<-done
+		select {
+		case <-resumed:
+			t.Fatal("callback precedence drifted")
+		default:
+		}
+		if escaped == nil || escaped.usable() {
+			t.Fatal("callback precedence drifted")
+		}
+		if !withInfrastructure {
+			truth, err = store.Update(func(*Reader) (Batch, error) { return updateLifecycleBatch(), nil })
+			if truth != CommitTruthNew || err != nil || store.state != storeOPEN {
+				t.Fatal("callback precedence drifted")
+			}
+			mustEnvironment(t, store.Close())
+			continue
+		}
+		if store.state != storeCLOSED || store.terminalTruth != 0 || !sameError(store.terminal, infrastructure) {
+			t.Fatal("callback precedence drifted")
+		}
+		if nextTruth, cached := store.Update(func(*Reader) (Batch, error) { t.Fatal("callback precedence drifted"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(cached, infrastructure) {
+			t.Fatal("callback precedence drifted")
+		}
+	}
 }
 
 func TestUpdateReaderLifetime(t *testing.T) {
@@ -3481,9 +3531,9 @@ func TestUpdateReaderLifetime(t *testing.T) {
 	mustEnvironment(t, sourceErr)
 	plan, update := updateNativeBody(t, source, "updatePlan"), updateNativeBody(t, source, "Update")
 	expire := updateReaderExpireBody(t, source)
-	invokedAt, expiredAt := strings.Index(plan, "invokeUpdate("), strings.Index(plan, "reader.expire()")
-	readAt, preparedAt := strings.Index(plan, "readPrimary("), strings.Index(plan, "updateOwnedBatch(")
-	if strings.Count(plan, "reader.expire()") != 1 || invokedAt < 0 || invokedAt >= expiredAt || expiredAt >= readAt || readAt >= preparedAt || strings.Contains(update, "reader.expire()") || strings.Index(update, "s.updatePlan(") >= strings.Index(update, "s.updateNative(") {
+	invokedAt, returnedAt, expiredAt := strings.Index(plan, "invokeUpdate("), strings.Index(plan, "returned = true"), strings.LastIndex(plan, "reader.expire()")
+	readAt, preparedAt := strings.LastIndex(plan, "readPrimary("), strings.Index(plan, "updateOwnedBatch(")
+	if strings.Count(plan, "reader.expire()") != 2 || invokedAt < 0 || invokedAt >= returnedAt || returnedAt >= expiredAt || expiredAt >= readAt || readAt >= preparedAt || strings.Contains(update, "reader.expire()") || strings.Index(update, "s.updatePlan(") >= strings.Index(update, "s.updateNative(") {
 		t.Fatal("Reader lifetime drifted")
 	}
 	const expireBody = "{\n\tr.active.Store(false)\n\tr.getMu.Lock()\n\t//nolint:staticcheck // Lock acquisition drains every in-flight Get before abort.\n\tr.getMu.Unlock()\n"
@@ -3759,14 +3809,10 @@ func TestUpdateSourceOwnership(t *testing.T) {
 		previous = at
 	}
 	plan := updateNativeBody(t, source, "updatePlan")
-	planOrder := []string{"invokeUpdate", "reader.expire", "readPrimary", "abortReadLocked", "updateOwnedBatch"}
-	previous = -1
-	for _, token := range planOrder {
-		at := strings.Index(plan, token)
-		if at <= previous {
-			t.Fatal("predecessor owner changed")
-		}
-		previous = at
+	invokeAt, expireAt := strings.Index(plan, "invokeUpdate"), strings.LastIndex(plan, "reader.expire")
+	readAt, prepareAt := strings.LastIndex(plan, "readPrimary"), strings.Index(plan, "updateOwnedBatch")
+	if invokeAt < 0 || invokeAt >= expireAt || expireAt >= readAt || readAt >= prepareAt {
+		t.Fatal("predecessor owner changed")
 	}
 	if strings.Count(body, "C.rubin_mdbx_txn_begin(") != 1 || strings.Count(body, "s.updatePlan(") != 1 || strings.Count(body, "s.updateNative(") != 1 || strings.Count(plan, "invokeUpdate(") != 1 || strings.Count(plan, "updateOwnedBatch(") != 1 || strings.Contains(body, "mdbx_txn_commit") || strings.Contains(body, "updateNativeExecute") {
 		t.Fatal("predecessor owner changed")
@@ -3853,14 +3899,8 @@ func TestUpdateTerminalLegality(t *testing.T) {
 			t.Fatalf("terminal legality drifted: %T/%v closed=%v poison=%v", terminal, terminal, closed, poison)
 		}
 	}
-	for _, row := range []struct {
-		state storeState
-		truth CommitTruth
-		valid bool
-	}{{storeOPEN, 0, true}, {storeOPEN, CommitTruthOld, false}, {storeCLOSED, 0, true}, {storeCLOSED, CommitTruthOld, true}, {storePOISONEDTHREAD, CommitTruthUnknown, true}, {storeCLOSED, CommitTruth(4), false}} {
-		if validStoreTerminalTruth(&Store{state: row.state, terminalTruth: row.truth}) != row.valid {
-			t.Fatal("terminal legality drifted")
-		}
+	if !validStoreTerminalTruth(&Store{state: storeOPEN}) || validStoreTerminalTruth(&Store{state: storeOPEN, terminalTruth: CommitTruthOld}) || !validStoreTerminalTruth(&Store{state: storeCLOSED}) || !validStoreTerminalTruth(&Store{state: storeCLOSED, terminalTruth: CommitTruthOld}) || !validStoreTerminalTruth(&Store{state: storePOISONEDTHREAD, terminalTruth: CommitTruthUnknown}) || validStoreTerminalTruth(&Store{state: storeCLOSED, terminalTruth: CommitTruth(4)}) {
+		t.Fatal("terminal legality drifted")
 	}
 	var nilCommit *CommitError
 	if nilCommit.Error() != "<nil>" || nilCommit.Unwrap() != nil {
@@ -3914,7 +3954,7 @@ func TestUpdateTerminalLegality(t *testing.T) {
 	if reflect.TypeOf(terminal) != reflect.TypeFor[*CommitError]() || !errors.As(terminal, &returned) || truth != CommitTruthUnknown || terminal == nil || store.state != storeCLOSED || store.terminalTruth != CommitTruthUnknown || !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}
-	returned.Truth = CommitTruthNew
+	returned.Truth, returned.Cause, returned.ReadbackCause = CommitTruth(4), errors.New("mutated cause"), errors.New("mutated readback")
 	if store.terminalTruth != CommitTruthUnknown || !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}
@@ -3929,9 +3969,33 @@ func TestUpdateTerminalLegality(t *testing.T) {
 	}
 
 	store = newUpdateStore(t)
+	cfg, dbis := store.config, store.dbis
+	retainedTxn := store.txn
+	mustEnvironment(t, store.View(func(reader *Reader) error { retainedTxn = reader.txn; return nil }))
+	truth, terminal = store.applyUpdateOutcome(updateNativeRetainedWrite(true, nativeError(operationUpdate, codeThreadMismatch), nil, retainedTxn), nil, nil, false)
+	returned = nil
+	if reflect.TypeOf(terminal) != reflect.TypeFor[*CommitError]() || !errors.As(terminal, &returned) || truth != CommitTruthOld || store.state != storePOISONEDTHREAD || store.terminalTruth != CommitTruthOld {
+		t.Fatal("terminal legality drifted")
+	}
+	returned.Truth, returned.Cause, returned.ReadbackCause = CommitTruth(4), errors.New("mutated cause"), errors.New("mutated readback")
+	if !validStoreShape(store) {
+		t.Fatal("terminal legality drifted")
+	}
+	if nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal legality drifted"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(nextErr, terminal) || !sameError(store.View(func(*Reader) error { return nil }), terminal) || !sameError(store.Close(), terminal) {
+		t.Fatal("terminal legality drifted")
+	}
+	store.state, store.txn, store.config, store.dbis, store.terminal, store.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+	mustEnvironment(t, store.Close())
+
+	store = newUpdateStore(t)
 	busyCommit := &CommitError{Cause: nativeError(operationUpdate, codeENOSPC), Truth: CommitTruthUnknown, ReadbackCause: nativeError(operationAbort, codeEIO)}
 	busyTerminal := orderedErrors(operationClose, orderResultCausesPrimary, busyCommit, nativeError(operationClose, codeBusy))
 	store.state, store.terminal, store.terminalTruth = storeCLOSEBLOCKED, busyTerminal, CommitTruthUnknown
+	busyEngine, direct := directTestEngineError(busyTerminal)
+	if !direct {
+		t.Fatal("terminal legality drifted")
+	}
+	busyEngine.Operation, busyEngine.Class, busyEngine.Code, busyEngine.Diagnostic, busyEngine.Cause = "mutated", EngineInvalidInput, codeSuccess, "mutated", errors.New("mutated cause")
 	if !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}

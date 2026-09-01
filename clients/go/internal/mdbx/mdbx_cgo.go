@@ -1225,7 +1225,17 @@ func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch 
 }
 
 func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, error) {
+	returned := false
+	defer func() {
+		if returned {
+			return
+		}
+		reader.expire()
+		primary, infrastructure := readPrimary(nil, reader.failure)
+		_ = s.abortReadLocked(old, primary, infrastructure)
+	}()
 	batch, panicValue, panicked, callbackErr := invokeUpdate(callback, reader)
+	returned = true
 	reader.expire()
 	primary, infrastructure := readPrimary(callbackErr, reader.failure)
 	if panicked {
@@ -1777,9 +1787,16 @@ func validOpenStoreShape(s *Store) bool {
 }
 
 func validCloseBlockedStoreShape(s *Store) bool {
+	if s.terminalTruth != 0 {
+		return validUpdateCloseBlockedStoreShape(s)
+	}
 	engine, terminalOK := directNativeResult(operationClose, s.terminal)
 	resourcesOK := validPublishedStoreResources(s) || validConstructionStoreResources(s, engine, terminalOK)
 	return s.env != nil && s.writer != nil && s.txn == nil && terminalOK && engine.Code == codeBusy && resourcesOK
+}
+
+func validUpdateCloseBlockedStoreShape(s *Store) bool {
+	return s.env != nil && s.writer != nil && s.txn == nil && s.terminal != nil && validPublishedStoreResources(s)
 }
 
 func validPublishedStoreResources(s *Store) bool {
@@ -1791,11 +1808,19 @@ func validConstructionStoreResources(s *Store, engine *EngineError, terminalOK b
 }
 
 func validClosedStoreShape(s *Store) bool {
-	return s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validClosedTerminal(s.terminal)
+	resources := s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	return resources && (s.terminalTruth != 0 || validClosedTerminal(s.terminal))
 }
 
 func validPoisonedStoreShape(s *Store) bool {
-	return s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && validPoisonTerminal(s.terminal)
+	resources := s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	if !resources {
+		return false
+	}
+	if s.terminalTruth != 0 {
+		return s.terminal != nil
+	}
+	return validPoisonTerminal(s.terminal)
 }
 
 func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
