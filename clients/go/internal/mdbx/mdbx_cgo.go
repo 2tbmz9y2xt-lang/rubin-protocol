@@ -436,15 +436,16 @@ func joinErrors(errs ...error) error {
 }
 
 type Store struct {
-	operations sync.RWMutex
-	self       *Store
-	env        *C.MDBX_env
-	writer     *filelock.Handle
-	txn        *C.MDBX_txn
-	config     ConfigV1
-	dbis       [7]C.MDBX_dbi
-	state      storeState
-	terminal   error
+	operations    sync.RWMutex
+	self          *Store
+	env           *C.MDBX_env
+	writer        *filelock.Handle
+	txn           *C.MDBX_txn
+	config        ConfigV1
+	dbis          [7]C.MDBX_dbi
+	state         storeState
+	terminal      error
+	terminalTruth CommitTruth
 }
 
 type Reader struct {
@@ -714,6 +715,30 @@ func (truth CommitTruth) String() string {
 		return ""
 	}
 	return [...]string{"", "OLD", "NEW", "UNKNOWN"}[truth]
+}
+
+type CommitError struct {
+	Cause         error
+	Truth         CommitTruth
+	ReadbackCause error
+}
+
+func (e *CommitError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	message := fmt.Sprintf("mdbx update %s: %v", e.Truth, e.Cause)
+	if e.ReadbackCause != nil {
+		message += "; readback/cleanup: " + e.ReadbackCause.Error()
+	}
+	return message
+}
+
+func (e *CommitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 type updateNativeOutcome struct {
@@ -1189,6 +1214,135 @@ func (s *Store) updateNative(plan []ownedMutation, old *C.MDBX_txn) updateNative
 	return outcome
 }
 
+func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch Batch, panicValue any, panicked bool, err error) {
+	panicked = true
+	func() {
+		defer func() { panicValue = recover() }()
+		batch, err = callback(reader)
+		panicked = false
+	}()
+	return batch, panicValue, panicked, err
+}
+
+func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, error) {
+	batch, panicValue, panicked, callbackErr := invokeUpdate(callback, reader)
+	reader.expire()
+	primary, infrastructure := readPrimary(callbackErr, reader.failure)
+	if panicked {
+		_ = s.abortReadLocked(old, primary, infrastructure)
+		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
+	}
+	if primary != nil {
+		return nil, s.abortReadLocked(old, primary, infrastructure)
+	}
+	plan, planErr := updateOwnedBatch(batch)
+	if planErr != nil {
+		return nil, s.abortReadLocked(old, planErr, false)
+	}
+	return plan, nil
+}
+
+func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, error) {
+	shapeErr := outcome.valid()
+	if shapeErr != nil {
+		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+	}
+	if !outcome.commitAttempted {
+		return CommitTruthOld, joinErrors(outcome.primary, outcome.secondary, cleanup)
+	}
+	if outcome.primary == nil && cleanup == nil {
+		return outcome.truth, nil
+	}
+	cause, remaining := outcome.primary, joinErrors(outcome.secondary, cleanup)
+	if cause == nil {
+		cause, remaining = cleanup, nil
+	}
+	return outcome.truth, &CommitError{Cause: cause, Truth: outcome.truth, ReadbackCause: remaining}
+}
+
+func updateRetained(outcome updateNativeOutcome) *C.MDBX_txn {
+	if outcome.retainedWrite != nil {
+		return outcome.retainedWrite
+	}
+	return outcome.retainedRead
+}
+
+func updateAbortOld(txn *C.MDBX_txn) (error, bool) {
+	return updateAbortOldResult(int(C.mdbx_txn_abort(txn)))
+}
+
+func updateAbortOldResult(rc int) (error, bool) {
+	if rc == codeSuccess {
+		return nil, false
+	}
+	return nativeError(operationAbort, rc), rc == codeThreadMismatch
+}
+
+func (s *Store) applyUpdateOutcome(outcome updateNativeOutcome, old *C.MDBX_txn, cleanup error, oldRetained bool) (CommitTruth, error) {
+	if shapeErr := outcome.valid(); shapeErr != nil && (outcome.retainedWrite != nil || outcome.retainedRead != nil) {
+		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+	}
+	truth, terminal := updateResult(outcome, cleanup)
+	retained := updateRetained(outcome)
+	if retained == nil && oldRetained {
+		retained = old
+	}
+	if retained != nil {
+		s.terminalTruth = truth
+		return truth, s.poison(retained, terminal).err
+	}
+	if terminal == nil {
+		return truth, nil
+	}
+	s.terminalTruth = truth
+	_, terminal = s.consume(terminal)
+	return truth, terminal
+}
+
+func directCommitError(err error) (*CommitError, bool) {
+	value := reflect.ValueOf(err)
+	if !value.IsValid() || value.Type() != reflect.TypeFor[*CommitError]() || value.Kind() != reflect.Pointer || value.IsNil() {
+		return nil, false
+	}
+	commit, ok := value.Interface().(*CommitError)
+	return commit, ok
+}
+
+func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, error) {
+	if s == nil {
+		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+	}
+	if callback == nil {
+		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
+	}
+	if !s.operations.TryLock() {
+		return CommitTruthOld, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
+	}
+	defer s.operations.Unlock()
+	stateErr := s.observationStateError(operationUpdate)
+	if stateErr != nil {
+		truth := s.terminalTruth
+		if truth == 0 {
+			truth = CommitTruthOld
+		}
+		return truth, stateErr
+	}
+	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
+	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
+	if beginErr != nil {
+		return CommitTruthOld, s.failedReadBegin(begun.txn, beginErr)
+	}
+	reader := newReader(begun.txn, s.dbis)
+	reader.active.Store(true)
+	plan, planErr := s.updatePlan(callback, reader, begun.txn)
+	if planErr != nil {
+		return CommitTruthOld, planErr
+	}
+	outcome := s.updateNative(plan, begun.txn)
+	cleanupErr, oldRetained := updateAbortOld(begun.txn)
+	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
+}
+
 func (s *Store) View(callback func(*Reader) error) (err error) {
 	if s == nil {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)
@@ -1594,7 +1748,7 @@ func validStoreState(state storeState) bool {
 }
 
 func validStoreShape(s *Store) bool {
-	if s.self != s {
+	if s.self != s || !validStoreTerminalTruth(s) {
 		return false
 	}
 	switch s.state {
@@ -1609,6 +1763,13 @@ func validStoreShape(s *Store) bool {
 	default:
 		return false
 	}
+}
+
+func validStoreTerminalTruth(s *Store) bool {
+	if s.terminalTruth == 0 {
+		return true
+	}
+	return s.state != storeOPEN && s.terminalTruth >= CommitTruthOld && s.terminalTruth <= CommitTruthUnknown
 }
 
 func validOpenStoreShape(s *Store) bool {
@@ -1649,6 +1810,9 @@ func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
 }
 
 func validPoisonTerminal(err error) bool {
+	if validRetainedUpdateTerminal(err) {
+		return true
+	}
 	engine, ok := directEngineError(err)
 	if !ok {
 		return false
@@ -1666,11 +1830,11 @@ func validPoisonTerminal(err error) bool {
 }
 
 func validPointerShapePoison(engine *EngineError, operation engineOperation) bool {
-	return engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "mdbx_txn_begin returned invalid result shape" && (operation == operationInit || operation == operationOpen || operation == operationView || operation == operationInspect)
+	return engine.Class == EngineLocalInvariant && engine.Code == codeProblem && engine.Diagnostic == "mdbx_txn_begin returned invalid result shape" && (operation == operationInit || operation == operationOpen || operation == operationView || operation == operationInspect || operation == operationUpdate)
 }
 
 func validClosedTerminal(err error) bool {
-	if err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err) {
+	if validDirectClosedTerminal(err) || validClosedUpdateTerminal(err) {
 		return true
 	}
 	joined, ok := err.(interface{ Unwrap() []error })
@@ -1679,6 +1843,10 @@ func validClosedTerminal(err error) bool {
 	}
 	parts := joined.Unwrap()
 	return len(parts) == 2 && validConsumedCloseTerminal(parts[0]) && validReleaseTerminal(parts[1])
+}
+
+func validDirectClosedTerminal(err error) bool {
+	return err == nil || validReleaseTerminal(err) || validConsumedCloseTerminal(err) || validConsumedReadTerminal(err)
 }
 
 func validConsumedReadTerminal(err error) bool {
@@ -1718,6 +1886,202 @@ func validDirectConsumedReadTerminal(err error) (bool, bool) {
 	default:
 		return false, true
 	}
+}
+
+func validUpdateStateMismatch(err error) bool {
+	engine, ok := directEngineError(err)
+	if !ok || !validUpdateStateMismatchEngine(engine) {
+		return false
+	}
+	return validUpdateStateMismatchDiagnostic(engine)
+}
+
+func validUpdateStateMismatchEngine(engine *EngineError) bool {
+	return engine.Operation == string(operationUpdate) && engine.Class == EngineStateMismatch && engine.Cause == nil && engine.ReopenRequired == reopenRequired(engine.Code)
+}
+
+func validUpdateStateMismatchDiagnostic(engine *EngineError) bool {
+	switch engine.Code {
+	case codeProblem:
+		return engine.Diagnostic == "OLD_VALUE_REF is absent from OLD" || engine.Diagnostic == "OLD/write snapshot mismatch" || engine.Diagnostic == "final update image mismatch"
+	case codeKeyExist, codeNotFound:
+		return engine.Diagnostic == nativeDiagnostic(engine.Code)
+	default:
+		return false
+	}
+}
+
+func validCommitTerminal(err error) bool {
+	commit, ok := directCommitError(err)
+	if !ok || commit.Truth < CommitTruthOld || commit.Truth > CommitTruthUnknown || !validCommitCause(commit) {
+		return false
+	}
+	if commit.Truth == CommitTruthNew && validUpdateAbortPart(commit.Cause) {
+		return commit.ReadbackCause == nil
+	}
+	valid, _ := validCommitReadback(commit.ReadbackCause)
+	return valid
+}
+
+func validCommitCause(commit *CommitError) bool {
+	if commit.Truth == CommitTruthNew && validUpdateAbortPart(commit.Cause) {
+		return true
+	}
+	return validUpdateNativePart(commit.Cause)
+}
+
+func validRetainedUpdateTerminal(err error) bool {
+	valid, retained := validUpdateTerminal(err)
+	return valid && retained == 1
+}
+
+func validClosedUpdateTerminal(err error) bool {
+	parts, ok := updateTerminalParts(err)
+	if !ok {
+		return false
+	}
+	if validReleaseTerminal(parts[len(parts)-1]) {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) > 0 && validConsumedCloseTerminal(parts[len(parts)-1]) {
+		parts = parts[:len(parts)-1]
+	}
+	valid, retained := validUpdateTerminalParts(parts)
+	return valid && retained == 0
+}
+
+func validUpdateTerminal(err error) (bool, int) {
+	parts, ok := updateTerminalParts(err)
+	if !ok {
+		return false, 0
+	}
+	return validUpdateTerminalParts(parts)
+}
+
+func validUpdateTerminalParts(parts []error) (bool, int) {
+	if len(parts) == 1 && validCommitTerminal(parts[0]) {
+		return validCommitRetention(parts[0])
+	}
+	if len(parts) == 0 || len(parts) > 3 || !validUpdatePrimaryPart(parts[0]) {
+		return false, 0
+	}
+	retained := updateRetention(parts[0])
+	for _, part := range parts[1:] {
+		if !validUpdateAbortPart(part) {
+			return false, 0
+		}
+		retained += updateRetention(part)
+	}
+	return true, retained
+}
+
+func validCommitRetention(err error) (bool, int) {
+	commit, ok := directCommitError(err)
+	if !ok || !validCommitTerminal(err) {
+		return false, 0
+	}
+	retained := updateRetention(commit.Cause)
+	valid, secondary := validCommitReadback(commit.ReadbackCause)
+	return valid, retained + secondary
+}
+
+func validCommitReadback(err error) (bool, int) {
+	if err == nil {
+		return true, 0
+	}
+	parts, ok := updateTerminalParts(err)
+	if !ok || len(parts) > 3 {
+		return false, 0
+	}
+	retained, at := 0, 0
+	if validUpdateSecondaryPart(parts[0]) {
+		retained, at = updateRetention(parts[0]), 1
+	}
+	if len(parts)-at > 2 {
+		return false, 0
+	}
+	for _, part := range parts[at:] {
+		if !validUpdateAbortPart(part) {
+			return false, 0
+		}
+		retained += updateRetention(part)
+	}
+	return true, retained
+}
+
+func updateTerminalParts(err error) ([]error, bool) {
+	return appendUpdateTerminalParts(err, make([]error, 0, 5), 0)
+}
+
+func appendUpdateTerminalParts(err error, parts []error, depth int) ([]error, bool) {
+	if err == nil || depth > 5 || len(parts) >= 5 {
+		return parts, false
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return append(parts, err), true
+	}
+	children := joined.Unwrap()
+	if len(children) < 2 {
+		return parts, false
+	}
+	for _, child := range children {
+		parts, ok = appendUpdateTerminalParts(child, parts, depth+1)
+		if !ok {
+			return parts, false
+		}
+	}
+	return parts, true
+}
+
+func validUpdatePrimaryPart(err error) bool {
+	return validUpdateNativePart(err) || validUpdateStateMismatch(err) || validUpdateInvariantPart(err) || validUpdatePointerPart(err)
+}
+
+func validUpdateSecondaryPart(err error) bool {
+	return validUpdatePrimaryPart(err)
+}
+
+func validUpdateNativePart(err error) bool {
+	engine, ok := directNativeResult(operationUpdate, err)
+	return ok && engine.Cause == nil && engine.Diagnostic == nativeDiagnostic(engine.Code)
+}
+
+func validUpdateAbortPart(err error) bool {
+	engine, ok := directNativeResult(operationAbort, err)
+	return ok && engine.Cause == nil && engine.Diagnostic == nativeDiagnostic(engine.Code)
+}
+
+func validUpdatePointerPart(err error) bool {
+	engine, ok := directEngineError(err)
+	if !ok || !validPointerShapePoison(engine, operationUpdate) {
+		return false
+	}
+	_, ok = directNativeResult(operationUpdate, engine.Cause)
+	return ok
+}
+
+func validUpdateInvariantPart(err error) bool {
+	engine, ok := directEngineError(err)
+	if !ok || engine.Operation != string(operationUpdate) || engine.Class != EngineLocalInvariant || engine.Code != codeProblem || engine.Cause != nil || engine.ReopenRequired != reopenRequired(engine.Code) {
+		return false
+	}
+	switch engine.Diagnostic {
+	case "invalid update native outcome shape", "invalid native update input", "Go length is not representable as C size_t", "mdbx_get returned invalid result shape", "invalid update image shape", "invalid update value shape", "invalid update reference shape", "invalid update final image", "mdbx_txn_begin returned invalid result shape":
+		return true
+	}
+	return false
+}
+
+func updateRetention(err error) int {
+	if validUpdatePointerPart(err) {
+		return 1
+	}
+	engine, ok := directEngineError(err)
+	if ok && engine.Code == codeThreadMismatch && (engine.Operation == string(operationUpdate) || engine.Operation == string(operationAbort)) {
+		return 1
+	}
+	return 0
 }
 
 func validConsumedCleanupTerminal(err error) bool {
