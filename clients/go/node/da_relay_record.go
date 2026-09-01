@@ -554,12 +554,16 @@ func cloneBytes(in []byte) []byte {
 // daRelayRecordImage is ONE record transition staged as a PURE function of caller-owned
 // pre-state and member: descriptor and next are isolated, and two images share no mutable state.
 type daRelayRecordImage struct {
-	daID     [32]byte
-	present  bool
-	baseline uint64
-	member   daRelayOwnerReadyMember
-	next     daRelaySetRecord
-	remove   bool
+	daID                       [32]byte
+	present                    bool
+	baseline                   uint64
+	member                     daRelayOwnerReadyMember
+	next                       daRelaySetRecord
+	remove                     bool
+	admission                  bool
+	admissionPayloadCommitment [32]byte
+	admissionChunkCount        uint16
+	admissionChunkHash         [32]byte
 }
 
 func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayOwnerReadyMember) daRelayRecordImage {
@@ -592,6 +596,39 @@ func stageDAOwnerReadyMember(pre daRelaySetRecord, present bool, member daRelayO
 	return image
 }
 
+func stageDANonReplayCandidate(pre daRelaySetRecord, present bool, candidate daRelayAdmissionCandidate, ttl uint64) (daRelayRecordImage, []DAAdmissionVictim) {
+	image := stageDAOwnerReadyMember(pre, present, candidate.member)
+	image.admission = true
+	image.admissionPayloadCommitment = candidate.payloadCommitment
+	image.admissionChunkCount = candidate.chunkCount
+	image.admissionChunkHash = candidate.chunkHash
+	if candidate.member.locator.kind == daRelayLocatorChunk {
+		index := candidate.member.locator.chunkIndex
+		chunk := image.next.chunks[index]
+		chunk.chunkHash = candidate.chunkHash
+		image.next.chunks[index] = chunk
+		if !present {
+			image.next.state = daRelayStateOrphanChunks
+			image.next.ttlBlocksRemaining = ttl
+		}
+		return image, nil
+	}
+	image.next.commit.payloadCommitment = candidate.payloadCommitment
+	image.next.commit.chunkCount = candidate.chunkCount
+	image.next.state = daRelayStateStagedCommit
+	image.next.ttlBlocksRemaining = ttl
+	var victims []DAAdmissionVictim
+	for _, index := range sortedRetainedDAChunkIndexes(pre) {
+		if index < candidate.chunkCount {
+			continue
+		}
+		member := pre.chunks[index].member
+		victims = append(victims, DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: append([]consensus.Outpoint(nil), member.inputs...)})
+	}
+	image.next.pruneChunksOutsideCommit()
+	return image, victims
+}
+
 func stageDAOwnerReadyRemoval(pre daRelaySetRecord, present bool) daRelayRecordImage {
 	return daRelayRecordImage{daID: pre.daID, present: present, baseline: pre.revision, remove: true}
 }
@@ -613,6 +650,92 @@ func (r daRelaySetRecord) cloneOwnerReady() daRelaySetRecord {
 	}
 	out.replaceableChunks = maps.Clone(r.replaceableChunks)
 	return out
+}
+
+func (r daRelaySetRecord) checkDANonReplayPrior(daID [32]byte, owner *PendingOutpointOwner) error {
+	if r.daID != daID || r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 {
+		return errDARelayImageIncompatible
+	}
+	if err := r.checkDANonReplayShape(); err != nil {
+		return err
+	}
+	return r.checkDANonReplayTokens(owner)
+}
+
+func (r daRelaySetRecord) checkDANonReplayTokens(owner *PendingOutpointOwner) error {
+	if r.commit.member != nil && (r.commit.member.token.owner != owner || r.commit.member.token.seq == 0) {
+		return errDARelayImageIncompatible
+	}
+	for _, chunk := range r.chunks {
+		if chunk.member == nil || chunk.member.token.owner != owner || chunk.member.token.seq == 0 {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func (r daRelaySetRecord) checkDANonReplayShape() error {
+	if err := r.checkOwnerReadyRecord(); err != nil {
+		return err
+	}
+	type residual struct {
+		payloadBytes, wireBytes uint64
+		replaceable             bool
+	}
+	if (residual{r.payloadBytes, r.wireBytes, r.replaceableChunks != nil}) != (residual{}) {
+		return errDARelayImageIncompatible
+	}
+	if err := r.checkDANonReplayCommitShape(); err != nil {
+		return err
+	}
+	upper := uint16(consensus.MAX_DA_CHUNK_COUNT)
+	if r.state == daRelayStateStagedCommit {
+		upper = r.commit.chunkCount
+	}
+	type chunkResidual struct {
+		quotaKey    string
+		wireBytes   uint64
+		hashChecked bool
+	}
+	for index, chunk := range r.chunks {
+		if (chunkResidual{chunk.peerQuotaKey, chunk.wireBytes, chunk.hashChecked}) != (chunkResidual{}) || index >= upper {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func (r daRelaySetRecord) checkDANonReplayCommitShape() error {
+	type residual struct {
+		daID              [32]byte
+		payloadCommitment [32]byte
+		peerQuotaKey      string
+		memberPresent     bool
+		chunkCount        uint16
+		wireBytes         uint64
+		txBytes           int
+	}
+	value := residual{r.commit.daID, r.commit.payloadCommitment, r.commit.peerQuotaKey, r.commit.member != nil, r.commit.chunkCount, r.commit.wireBytes, len(r.commit.txBytes)}
+	if r.state != daRelayStateStagedCommit {
+		if value != (residual{}) {
+			return errDARelayImageIncompatible
+		}
+		return nil
+	}
+	if r.commit.chunkCount == 0 || uint64(r.commit.chunkCount) > consensus.MAX_DA_CHUNK_COUNT {
+		return errDARelayImageIncompatible
+	}
+	type stagedIdentity struct {
+		daID          [32]byte
+		memberPresent bool
+		peerQuotaKey  string
+		wireBytes     uint64
+	}
+	if (stagedIdentity{r.commit.daID, value.memberPresent, value.peerQuotaKey, value.wireBytes}) !=
+		(stagedIdentity{daID: r.daID, memberPresent: true}) {
+		return errDARelayImageIncompatible
+	}
+	return nil
 }
 
 func (m *daRelayMemberIdentity) clone() *daRelayMemberIdentity {
