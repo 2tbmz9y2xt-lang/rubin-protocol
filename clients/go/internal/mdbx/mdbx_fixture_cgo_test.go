@@ -5,7 +5,9 @@ package mdbx
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
@@ -229,4 +231,232 @@ func TestReaderGetMalformedDisposition(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNativeUpdateFixtures(t *testing.T) {
+	source, err := os.ReadFile("mdbx_cgo.go")
+	mustEnvironment(t, err)
+	abort, commit := updateNativeBody(t, source, "updateNativeAbort"), updateNativeBody(t, source, "updateNativeCommit")
+	if !strings.Contains(abort, "if rc == codeThreadMismatch {") || !strings.Contains(abort, "updateNativeRetainedWrite(false") || strings.Count(abort, "updateNativeRetainedWrite") != 1 {
+		t.Fatal("abort ownership drifted")
+	}
+	if !strings.Contains(commit, "case codeThreadMismatch:") || !strings.Contains(commit, "updateNativeRetainedWrite(true") || strings.Count(commit, "updateNativeRetainedWrite") != 1 || !strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil)") {
+		t.Fatal("commit ownership drifted")
+	}
+	truth := updateNativeBody(t, source, "updateNativeReadbackTruth")
+	oldAt, newAt := strings.Index(truth, "if oldImage"), strings.Index(truth, "if newImage")
+	if oldAt < 0 || newAt < 0 || oldAt > newAt {
+		t.Fatal("readback tie-break drifted")
+	}
+	fixture, err := os.ReadFile("mdbx_fixture_cgo.go")
+	mustEnvironment(t, err)
+	post, unreadable := updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPC"), updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPCUnreadable")
+	if strings.Count(post, "updateNativeReadback") != 1 || strings.Count(unreadable, "updateNativeReadback") != 1 {
+		t.Fatal("readback truth drifted")
+	}
+	t.Run("wrong-thread retained write", func(t *testing.T) {
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		defer func() { mustEnvironment(t, store.Close()) }()
+		outcome, release, err := fixtureUpdateWrongThread(store)
+		mustEnvironment(t, err)
+		defer func() { mustEnvironment(t, release()) }()
+		engine := requireEngineError(t, outcome.primary, EngineLocalInvariant, operationUpdate, codeThreadMismatch)
+		if engine.Diagnostic != expectedNativeDiagnostic(codeThreadMismatch) || outcome.truth != CommitTruthOld || !outcome.commitAttempted || outcome.secondary != nil || outcome.retainedWrite == nil || outcome.retainedRead != nil || outcome.valid() != nil {
+			t.Fatalf("commit ownership drifted: %+v", outcome)
+		}
+		if locked := outcome.lockedOutcome(); !locked.poisoned || locked.err != nil {
+			t.Fatalf("commit ownership drifted: %+v", locked)
+		}
+		both := outcome
+		both.retainedRead = outcome.retainedWrite
+		if both.valid() == nil {
+			t.Fatal("commit ownership drifted")
+		}
+		wrongTruth := outcome
+		wrongTruth.truth = CommitTruthNew
+		if wrongTruth.valid() == nil {
+			t.Fatal("commit ownership drifted")
+		}
+		retainedRead := updateNativeRetainedRead(outcome.primary, errors.New("cleanup"), outcome.retainedWrite)
+		if retainedRead.valid() != nil {
+			t.Fatalf("commit ownership drifted: %+v", retainedRead)
+		}
+		retainedRead.secondary = nil
+		if retainedRead.valid() == nil {
+			t.Fatal("commit ownership drifted")
+		}
+		retainedRead.secondary = errors.New("cleanup")
+		retainedRead.commitAttempted = false
+		if retainedRead.valid() == nil {
+			t.Fatal("commit stage drifted")
+		}
+		committed := outcome
+		committed.secondary = errors.New("cleanup")
+		if committed.valid() == nil {
+			t.Fatal("commit ownership drifted")
+		}
+	})
+
+	t.Run("wrong-thread abort retains write", func(t *testing.T) {
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		defer func() { mustEnvironment(t, store.Close()) }()
+		outcome, release, err := fixtureUpdateAbortWrongThread(store)
+		mustEnvironment(t, err)
+		defer func() { mustEnvironment(t, release()) }()
+		primary := requireEngineError(t, outcome.primary, EngineLocalInvariant, operationUpdate, codeNotFound)
+		secondary := requireEngineError(t, outcome.secondary, EngineLocalInvariant, operationAbort, codeThreadMismatch)
+		if primary.Diagnostic != expectedNativeDiagnostic(codeNotFound) || secondary.Diagnostic != expectedNativeDiagnostic(codeThreadMismatch) || outcome.truth != CommitTruthOld || outcome.commitAttempted || outcome.retainedWrite == nil || outcome.retainedRead != nil || outcome.valid() != nil {
+			t.Fatalf("abort ownership drifted: %+v", outcome)
+		}
+	})
+
+	t.Run("break then real commit", func(t *testing.T) {
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		plan := updateNativePlan(t, updatePlanBatch(t).Mutations[8])
+		outcome := fixtureUpdateResultTrue(store, plan)
+		engine := requireEngineError(t, outcome.primary, EngineTransaction, operationUpdate, codeResultTrue)
+		if engine.Diagnostic != expectedNativeDiagnostic(codeResultTrue) {
+			t.Fatalf("RESULT_TRUE disposition drifted: %+v", engine)
+		}
+		if outcome.truth != CommitTruthOld || !outcome.commitAttempted || outcome.secondary != nil || outcome.retainedWrite != nil || outcome.retainedRead != nil || outcome.valid() != nil {
+			t.Fatalf("RESULT_TRUE disposition drifted: %+v", outcome)
+		}
+		mustEnvironment(t, store.Close())
+	})
+
+	t.Run("post-commit ENOSPC OLD", func(t *testing.T) {
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}
+		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
+		outcome, cleanup := fixtureUpdatePostCommitENOSPC(store, updateNativePlan(t, mutation))
+		mustEnvironment(t, cleanup)
+		engine := requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
+		if engine.Diagnostic != expectedNativeDiagnostic(codeENOSPC) {
+			t.Fatalf("readback truth drifted: %+v", engine)
+		}
+		if outcome.truth != CommitTruthOld || !outcome.commitAttempted || outcome.secondary != nil || outcome.retainedWrite != nil || outcome.retainedRead != nil || outcome.valid() != nil {
+			t.Fatalf("readback truth drifted: %+v", outcome)
+		}
+		requireUpdateValue(t, store, mutation.DBI, mutation.Key, mutation.Literal, true)
+		mustEnvironment(t, store.Close())
+	})
+
+	t.Run("post-commit ENOSPC unreadable", func(t *testing.T) {
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}
+		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
+		outcome, cleanup := fixtureUpdatePostCommitENOSPCUnreadable(store, updateNativePlan(t, mutation))
+		mustEnvironment(t, cleanup)
+		if outcome.truth != CommitTruthUnknown || !outcome.commitAttempted || outcome.primary == nil || outcome.secondary == nil || outcome.retainedWrite != nil || outcome.retainedRead != nil || outcome.valid() != nil {
+			t.Fatalf("readback truth drifted: %+v", outcome)
+		}
+		_ = requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
+		mustEnvironment(t, store.Close())
+	})
+}
+
+func TestNativeUpdateImageFamilies(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		t.Run(map[bool]string{false: "non-target reference", true: "target reference alias"}[alias], func(t *testing.T) {
+			batch := updatePlanBatch(t)
+			oldMeta := append([]byte(nil), batch.Mutations[1].Literal...)
+			oldDelete := append([]byte(nil), batch.Mutations[3].Literal...)
+			oldReference := append([]byte(nil), batch.Mutations[3].Literal...)
+			oldMeta[len(oldMeta)-1], oldDelete[0], oldReference[len(oldReference)-1] = 1, 2, 3
+			if alias {
+				batch.Mutations[3].BeforePresent = true
+				batch.Mutations[8].RefKey = append([]byte(nil), batch.Mutations[3].Key...)
+				copy(batch.Mutations[8].Key[41:77], batch.Mutations[3].Key[8:44])
+			}
+			plan := updateNativePlan(t, batch.Mutations...)
+			store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+			mustEnvironment(t, err)
+			rows := []fixtureRawRow{
+				{dbi: batch.Mutations[1].DBI, key: batch.Mutations[1].Key, value: oldMeta},
+				{dbi: batch.Mutations[2].DBI, key: batch.Mutations[2].Key, value: oldDelete},
+			}
+			if alias {
+				rows = append(rows, fixtureRawRow{dbi: batch.Mutations[3].DBI, key: batch.Mutations[3].Key, value: oldReference})
+			} else {
+				rows = append(rows, fixtureRawRow{dbi: batch.Mutations[8].RefDBI, key: batch.Mutations[8].RefKey, value: oldReference})
+			}
+			mustEnvironment(t, fixtureSeedRows(store, rows...))
+			outcome, cleanup := fixtureUpdatePostCommitENOSPC(store, plan)
+			mustEnvironment(t, cleanup)
+			_ = requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
+			requireUpdateTruth(t, outcome, CommitTruthNew, true, outcome.primary, nil)
+			for i, mutation := range batch.Mutations {
+				want, present := mutation.Literal, mutation.AfterKind != planAfterAbsent
+				if mutation.AfterKind == planAfterOldValueRef {
+					want = oldReference
+				}
+				requireUpdateValue(t, store, mutation.DBI, mutation.Key, want, present)
+				if i == 8 && !alias {
+					requireUpdateValue(t, store, mutation.RefDBI, mutation.RefKey, oldReference, true)
+				}
+			}
+			mustEnvironment(t, store.Close())
+		})
+	}
+}
+
+func TestNativeUpdateUnknownImages(t *testing.T) {
+	newPlan := func(t *testing.T, extra bool) ([]ownedMutation, []Mutation) {
+		t.Helper()
+		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}}}
+		if extra {
+			key, err := MetaKey(0x10, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows = append(rows, Mutation{DBI: readDBIsLiteral()[0], Key: key, AfterKind: planAfterLiteral, Literal: LogicalCounterValue(0, 0)})
+		}
+		return updateNativePlan(t, rows...), rows
+	}
+	requireUnknown := func(t *testing.T, outcome updateNativeOutcome) {
+		t.Helper()
+		engine := requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
+		if engine.Diagnostic != expectedNativeDiagnostic(codeENOSPC) {
+			t.Fatalf("UNKNOWN primary=%+v", engine)
+		}
+		requireUpdateTruth(t, outcome, CommitTruthUnknown, true, outcome.primary, nil)
+	}
+	t.Run("third image", func(t *testing.T) {
+		plan, rows := newPlan(t, false)
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		outcome, cleanup := fixtureUpdatePostCommitENOSPCThird(store, plan)
+		mustEnvironment(t, cleanup)
+		requireUnknown(t, outcome)
+		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, []byte{0x7f}, true)
+		mustEnvironment(t, store.Close())
+	})
+	t.Run("mixed image", func(t *testing.T) {
+		plan, rows := newPlan(t, true)
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		outcome, cleanup := fixtureUpdatePostCommitENOSPCThird(store, plan)
+		mustEnvironment(t, cleanup)
+		requireUnknown(t, outcome)
+		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, []byte{0x7f}, true)
+		requireUpdateValue(t, store, rows[1].DBI, rows[1].Key, rows[1].Literal, true)
+		mustEnvironment(t, store.Close())
+	})
+	t.Run("missing image", func(t *testing.T) {
+		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}}
+		plan := updateNativePlan(t, rows...)
+		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+		mustEnvironment(t, err)
+		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: rows[0].DBI, key: rows[0].Key, value: []byte{0x42}}))
+		outcome, cleanup := fixtureUpdatePostCommitENOSPCMissing(store, plan)
+		mustEnvironment(t, cleanup)
+		requireUnknown(t, outcome)
+		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, nil, false)
+		mustEnvironment(t, store.Close())
+	})
 }

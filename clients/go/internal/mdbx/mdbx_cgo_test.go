@@ -103,6 +103,12 @@ func requireEngineError(t *testing.T, err error, class EngineClass, operation en
 	return engine
 }
 
+func directTestEngineError(err error) (*EngineError, bool) {
+	var engine *EngineError
+	ok := reflect.TypeOf(err) == reflect.TypeFor[*EngineError]() && errors.As(err, &engine)
+	return engine, ok && engine != nil
+}
+
 func requireFallback(t *testing.T, operation engineOperation, order errorOrder, primary, result error, diagnostic, causeText string, identities ...error) {
 	got := requireEngineError(t, orderedErrors(operation, order, primary, result), EngineLocalInvariant, operation, codeProblem)
 	if got.Diagnostic != diagnostic || (got.Cause == nil) != (causeText == "") || got.Cause != nil && got.Cause.Error() != causeText {
@@ -266,6 +272,15 @@ func TestEngineDomainClosure(t *testing.T) {
 	}
 	if got := adapterError("", EngineStateMismatch, codeInvalid, "ignored", cause); got.Operation != "init" || got.Diagnostic != "unsupported engine operation" || !errors.Is(got, cause) {
 		t.Fatalf("empty operation precedence=%+v", got)
+	}
+	if got := adapterError(operationUpdate, EngineStateMismatch, codeProblem, "mismatch", cause); got.Class != EngineStateMismatch || got.Operation != string(operationUpdate) || got.Code != codeProblem || got.Diagnostic != "mismatch" || !errors.Is(got, cause) {
+		t.Fatal("StateMismatch operation closure drifted")
+	}
+	for _, operation := range []engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect} {
+		got := adapterError(operation, EngineStateMismatch, codeProblem, "mismatch", cause)
+		if got.Class != EngineLocalInvariant || got.Operation != string(operation) || got.Code != codeProblem || got.Diagnostic != "unsupported engine class" || !errors.Is(got, cause) {
+			t.Fatal("StateMismatch operation closure drifted")
+		}
 	}
 	for _, class := range []EngineClass{EngineStateMismatch, "Persistence"} {
 		got := requireEngineError(t, adapterError(operationAbort, class, codeInvalid, "ignored", cause), EngineLocalInvariant, operationAbort, codeProblem)
@@ -1651,19 +1666,33 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(source)
-	for _, forbidden := range []string{"CommitTruth", "CommitError", "rubin_mdbx_del", "rubin_mdbx_put_nooverwrite", "rubin_mdbx_bytes_equal", "func (s *Store) Update"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("prepared-plan surface gained forbidden owner: %s", forbidden)
-		}
-	}
-	file, err := parser.ParseFile(token.NewFileSet(), "mdbx_cgo.go", source, 0)
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "mdbx_cgo.go", source, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var planEnd token.Pos
+	for _, declaration := range file.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == "updateOwnedBatch" {
+			planEnd = function.End()
+		}
+	}
+	if planEnd == token.NoPos {
+		t.Fatal("prepared-plan owner is missing")
+	}
+	planStart := strings.Index(string(source), "type ownedMutation")
+	if planStart < 0 {
+		t.Fatal("prepared-plan representation is missing")
+	}
+	planText := string(source[planStart:fset.Position(planEnd).Offset])
+	for _, forbidden := range []string{"CommitTruth", "CommitError", "rubin_mdbx_del", "rubin_mdbx_put_nooverwrite", "rubin_mdbx_bytes_equal", "func (s *Store) Update"} {
+		if strings.Contains(planText, forbidden) {
+			t.Fatalf("prepared-plan surface gained forbidden owner: %s", forbidden)
+		}
+	}
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
-		if !ok || !strings.HasPrefix(function.Name.Name, "update") {
+		if !ok || function.Pos() > planEnd || !strings.HasPrefix(function.Name.Name, "update") {
 			continue
 		}
 		var native bool
@@ -2232,13 +2261,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			}
 		}
 	}
-	nativeCalls := 0
-	ast.Inspect(file, func(node ast.Node) bool {
-		if invocation, ok := node.(*ast.CallExpr); ok && call(invocation.Fun, "C", "rubin_mdbx_get") {
-			nativeCalls++
-		}
-		return true
-	})
+	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
 	if len(guards) != 2 || locks != 1 || unlocks != 1 || unlock != lock+1 || guards[0] >= lock || guards[1] <= unlock || native <= guards[1] || nativeCalls != 2 {
 		t.Fatal("concurrent Get serialization drifted")
 	}
@@ -2565,7 +2588,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
 	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(production[preambleStart:preambleEnd+2])))
-	require(preambleDigest == "19017dc3568a36890760d45263aaa13e90584909802f75d738dd4e3634eaa367", "cgo preamble digest=%s", preambleDigest)
+	require(preambleDigest == "e2d0bf31b59d26efe6dc3e3346319eceff38a6a7d79176ce7fdcd507e804ce38", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
 	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
@@ -2859,5 +2882,441 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	if !strings.HasPrefix(production, "//go:build cgo && (darwin || linux) && (amd64 || arm64)\n") || strings.Count(production, "os.OpenFile(") != 1 || strings.Contains(production, "os.WriteFile(") || strings.Contains(production, "os.Create(") {
 		t.Fatal("production build expression or native-file ownership drifted")
+	}
+}
+
+func updateNativePlan(t *testing.T, mutations ...Mutation) []ownedMutation {
+	t.Helper()
+	plan, err := updateOwnedBatch(Batch{Mutations: mutations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+func runNativeUpdate(t *testing.T, store *Store, plan []ownedMutation) updateNativeOutcome {
+	t.Helper()
+	var outcome updateNativeOutcome
+	err := store.View(func(reader *Reader) error {
+		outcome = store.updateNative(plan, reader.txn)
+		return outcome.valid()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return outcome
+}
+
+func requireUpdateValue(t *testing.T, store *Store, dbi DBI, key, want []byte, present bool) {
+	t.Helper()
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		got, found, err := reader.Get(dbi, key)
+		if err != nil || found != present || !bytes.Equal(got, want) {
+			return fmt.Errorf("update image=%x/%v/%w", got, found, err)
+		}
+		return nil
+	}))
+}
+
+func requireUpdateTruth(t *testing.T, outcome updateNativeOutcome, truth CommitTruth, commitAttempted bool, primary, secondary error) {
+	t.Helper()
+	if err := outcome.valid(); err != nil || outcome.truth != truth || outcome.commitAttempted != commitAttempted || !sameError(outcome.primary, primary) || !sameError(outcome.secondary, secondary) || outcome.retainedWrite != nil || outcome.retainedRead != nil {
+		t.Fatalf("update outcome=%+v/%v", outcome, err)
+	}
+}
+
+func TestNativeUpdateImages(t *testing.T) {
+	dbi, key := readDBIsLiteral()[0], []byte{2}
+	create := Mutation{DBI: dbi, Key: key, AfterKind: planAfterLiteral, Literal: []byte{}}
+	path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+	store, err := Create(path, cfg)
+	mustEnvironment(t, err)
+	created := runNativeUpdate(t, store, updateNativePlan(t, create))
+	requireUpdateTruth(t, created, CommitTruthNew, true, nil, nil)
+	requireUpdateValue(t, store, dbi, key, []byte{}, true)
+	var finalErr error
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		finalErr = updateNativeMatch(reader.txn, store.dbis[dbi.Rank], key, updateImage{}, "final update image mismatch")
+		return nil
+	}))
+	primary := requireEngineError(t, finalErr, EngineStateMismatch, operationUpdate, codeProblem)
+	if primary.Diagnostic != "final update image mismatch" {
+		t.Fatalf("final comparison=%+v", primary)
+	}
+	mustEnvironment(t, store.Close())
+
+	store, err = Open(path, cfg)
+	mustEnvironment(t, err)
+	replace := create
+	replace.BeforePresent = true
+	replaced := runNativeUpdate(t, store, updateNativePlan(t, replace))
+	requireUpdateTruth(t, replaced, CommitTruthNew, true, nil, nil)
+	requireUpdateValue(t, store, dbi, key, []byte{}, true)
+	mustEnvironment(t, store.Close())
+
+	store, err = Create(filepath.Join(t.TempDir(), "abort"), cfg)
+	mustEnvironment(t, err)
+	aborted := runNativeUpdate(t, store, updateNativePlan(t, replace))
+	primary = requireEngineError(t, aborted.primary, EngineStateMismatch, operationUpdate, codeNotFound)
+	if primary.Diagnostic != expectedNativeDiagnostic(codeNotFound) {
+		t.Fatalf("precommit error=%+v", primary)
+	}
+	requireUpdateTruth(t, aborted, CommitTruthOld, false, aborted.primary, nil)
+	requireUpdateValue(t, store, dbi, key, nil, false)
+	_ = runNativeUpdate(t, store, updateNativePlan(t, create))
+	keyExists := runNativeUpdate(t, store, updateNativePlan(t, create))
+	primary = requireEngineError(t, keyExists.primary, EngineStateMismatch, operationUpdate, codeKeyExist)
+	if primary.Diagnostic != expectedNativeDiagnostic(codeKeyExist) {
+		t.Fatalf("strict put mismatch=%+v", primary)
+	}
+	requireUpdateTruth(t, keyExists, CommitTruthOld, false, keyExists.primary, nil)
+	mustEnvironment(t, store.Close())
+
+	path = filepath.Join(t.TempDir(), "drift")
+	store, err = Create(path, cfg)
+	mustEnvironment(t, err)
+	meta, err := MetaKey(0x10, 1)
+	mustEnvironment(t, err)
+	oldPlan := updateNativePlan(t, Mutation{DBI: dbi, Key: meta, AfterKind: planAfterLiteral, Literal: LogicalCounterValue(0, 0)})
+	newPlan := updateNativePlan(t, Mutation{DBI: dbi, Key: meta, AfterKind: planAfterLiteral, Literal: LogicalCounterValue(0, 1)})
+	createPlan := updateNativePlan(t, create)
+	var drift updateNativeOutcome
+	func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			concurrent := store.updateNative(newPlan, reader.txn)
+			if err := concurrent.valid(); err != nil || concurrent.truth != CommitTruthNew || !concurrent.commitAttempted {
+				return fmt.Errorf("concurrent update=%+v/%w", concurrent, err)
+			}
+			readbackPrimary := nativeError(operationUpdate, codeENOSPC)
+			old := updateNativeReadback(store.env, store.dbis, createPlan, reader.txn, readbackPrimary)
+			newReadback := updateNativeReadback(store.env, store.dbis, newPlan, reader.txn, readbackPrimary)
+			unknown := updateNativeReadback(store.env, store.dbis, oldPlan, reader.txn, readbackPrimary)
+			requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
+			requireUpdateTruth(t, newReadback, CommitTruthNew, true, readbackPrimary, nil)
+			requireUpdateTruth(t, unknown, CommitTruthUnknown, true, readbackPrimary, nil)
+			retainedWrite := updateNativeRetainedWrite(false, readbackPrimary, nativeError(operationAbort, codeThreadMismatch), reader.txn)
+			retainedRead := updateNativeRetainedRead(readbackPrimary, errors.New("cleanup"), reader.txn)
+			invalid := retainedWrite
+			invalid.retainedRead = reader.txn
+			if retainedWrite.valid() != nil || retainedRead.valid() != nil || invalid.valid() == nil || !retainedWrite.lockedOutcome().poisoned || !retainedRead.lockedOutcome().poisoned {
+				return fmt.Errorf("retained update outcome shape drifted: %+v/%+v", retainedWrite, retainedRead)
+			}
+			if _, err := updateNativeEqual(reader.txn, store.dbis[dbi.Rank], key, updateImage{present: true, length: 1}); err == nil {
+				return errors.New("invalid update image accepted")
+			}
+			if err := updateNativePut(reader.txn, store.dbis[dbi.Rank], key, updateImage{}, nil); err == nil {
+				return errors.New("invalid update value accepted")
+			}
+			malformed := ownedMutation{after: AfterOldValueRef}
+			if _, err := updateNativeFinalImage(malformed, nil, new(int), 0); err == nil {
+				return errors.New("invalid update reference accepted")
+			}
+			if _, err := updateNativeFinalImage(ownedMutation{after: AfterKind(4)}, nil, new(int), 0); err == nil {
+				return errors.New("invalid update final image accepted")
+			}
+			if err := updateNativePuts(reader.txn, store.dbis, []ownedMutation{{after: AfterAbsent}}, []updateReference{{}}); err == nil {
+				return errors.New("invalid update reference count accepted")
+			}
+			if err := updateNativeVerify(reader.txn, store.dbis, []ownedMutation{malformed}, nil); err == nil {
+				return errors.New("invalid update verify reference accepted")
+			}
+			invalidDBIs := store.dbis
+			invalidDBIs[dbi.Rank] = ^invalidDBIs[dbi.Rank]
+			if _, err := updateNativeImage(reader.txn, invalidDBIs[dbi.Rank], key); err == nil {
+				return errors.New("invalid update DBI accepted")
+			}
+			if _, err := updateNativeEqual(reader.txn, invalidDBIs[dbi.Rank], key, updateImage{}); err == nil {
+				return errors.New("invalid update comparison DBI accepted")
+			}
+			badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, reader.txn, readbackPrimary)
+			if badReadback.truth != CommitTruthUnknown || !sameError(badReadback.primary, readbackPrimary) || badReadback.secondary == nil || badReadback.valid() != nil {
+				return fmt.Errorf("invalid update readback=%+v", badReadback)
+			}
+			if err := updateNativeVerifyReferences(reader.txn, invalidDBIs, []ownedMutation{{refDBI: dbi, refKey: key}}, []updateReference{{index: 0, target: -1}}); err == nil {
+				return errors.New("invalid update reference DBI accepted")
+			}
+			invalidImage := updateImage{present: true, length: 1}
+			badPlan := []ownedMutation{{dbi: dbi, key: key, after: AfterOldValueRef}}
+			badReferences := []updateReference{{index: 0, target: -1, image: invalidImage}}
+			badFinal := []ownedMutation{{dbi: dbi, key: key, after: AfterKind(4)}}
+			targets := []updateImage{{}}
+			_, _, targetOldErr := updateNativeReadbackTargets(reader.txn, invalidDBIs, createPlan, targets, nil)
+			_, _, targetFinalErr := updateNativeReadbackTargets(reader.txn, store.dbis, badFinal, targets, nil)
+			_, _, targetNewErr := updateNativeReadbackTargets(reader.txn, store.dbis, badPlan, targets, badReferences)
+			_, _, targetCountErr := updateNativeReadbackTargets(reader.txn, store.dbis, []ownedMutation{{dbi: dbi, key: key, after: AfterAbsent}}, targets, []updateReference{{}})
+			_, truthErr := updateNativeReadbackTruth(reader.txn, reader.txn, store.dbis, badFinal)
+			guardErrors := []error{
+				updateNativePuts(reader.txn, store.dbis, badPlan, badReferences),
+				updateNativeVerify(reader.txn, store.dbis, badPlan, badReferences),
+				updateNativeVerify(reader.txn, store.dbis, nil, []updateReference{{}}),
+				targetOldErr, targetFinalErr, targetNewErr, targetCountErr, truthErr,
+			}
+			for _, guardErr := range guardErrors {
+				if guardErr == nil {
+					return errors.New("invalid native update guard accepted")
+				}
+			}
+			drift = store.updateNative(oldPlan, reader.txn)
+			return drift.valid()
+		}))
+	}()
+	engine, engineOK := directTestEngineError(drift.primary)
+	if !engineOK || engine.Class != EngineStateMismatch || engine.Operation != string(operationUpdate) || engine.Code != codeProblem || engine.Diagnostic != "OLD/write snapshot mismatch" || drift.truth != CommitTruthOld || drift.commitAttempted || drift.secondary != nil || drift.retainedWrite != nil || drift.retainedRead != nil || drift.valid() != nil {
+		t.Fatalf("compare-before-write drifted: %+v", drift)
+	}
+	requireUpdateValue(t, store, dbi, meta, LogicalCounterValue(0, 1), true)
+	mustEnvironment(t, store.Close())
+
+	batch := updatePlanBatch(t)
+	target, reference := batch.Mutations[3], batch.Mutations[8]
+	nonTargetReference := reference
+	nonTargetReference.Key = append([]byte(nil), reference.Key...)
+	nonTargetReference.RefKey = append([]byte(nil), reference.RefKey...)
+	target.BeforePresent = true
+	reference.RefKey = append([]byte(nil), target.Key...)
+	copy(reference.Key[41:77], target.Key[8:44])
+	oldValue, err := (UTXOValue{Value: 1}).Encode()
+	mustEnvironment(t, err)
+	store, err = Create(filepath.Join(t.TempDir(), "alias"), cfg)
+	mustEnvironment(t, err)
+	source := Mutation{DBI: nonTargetReference.RefDBI, Key: nonTargetReference.RefKey, AfterKind: planAfterLiteral, Literal: oldValue}
+	requireUpdateTruth(t, runNativeUpdate(t, store, updateNativePlan(t, source)), CommitTruthNew, true, nil, nil)
+	nonTargetPlan := updateNativePlan(t, nonTargetReference)
+	func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			readbackPrimary := nativeError(operationUpdate, codeENOSPC)
+			old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, reader.txn, readbackPrimary)
+			requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
+			committed := store.updateNative(nonTargetPlan, reader.txn)
+			requireUpdateTruth(t, committed, CommitTruthNew, true, nil, nil)
+			new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, reader.txn, readbackPrimary)
+			requireUpdateTruth(t, new, CommitTruthNew, true, readbackPrimary, nil)
+			return nil
+		}))
+	}()
+	seed := target
+	seed.BeforePresent, seed.Literal = false, oldValue
+	_ = runNativeUpdate(t, store, updateNativePlan(t, seed))
+	aliased := runNativeUpdate(t, store, updateNativePlan(t, target, reference))
+	requireUpdateTruth(t, aliased, CommitTruthNew, true, nil, nil)
+	var got []byte
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		var readErr error
+		got, _, readErr = reader.Get(reference.DBI, reference.Key)
+		return readErr
+	}))
+	if !bytes.Equal(got, oldValue) {
+		t.Fatal("OLD_VALUE_REF source drifted")
+	}
+	mustEnvironment(t, store.Close())
+
+	target.BeforePresent = false
+	store, err = Create(filepath.Join(t.TempDir(), "absent-ref"), cfg)
+	mustEnvironment(t, err)
+	absent := runNativeUpdate(t, store, updateNativePlan(t, target, reference))
+	engine, engineOK = directTestEngineError(absent.primary)
+	if !engineOK || engine.Class != EngineStateMismatch || engine.Operation != string(operationUpdate) || engine.Code != codeProblem || engine.Diagnostic != "OLD_VALUE_REF is absent from OLD" || absent.truth != CommitTruthOld || absent.commitAttempted || absent.secondary != nil || absent.retainedWrite != nil || absent.retainedRead != nil || absent.valid() != nil {
+		t.Fatal("absent OLD_VALUE_REF mutated")
+	}
+	var targetPresent, referencePresent bool
+	if err := store.View(func(reader *Reader) error {
+		_, targetPresent, err = reader.Get(target.DBI, target.Key)
+		if err != nil {
+			return err
+		}
+		_, referencePresent, err = reader.Get(reference.DBI, reference.Key)
+		return err
+	}); err != nil || targetPresent || referencePresent {
+		t.Fatal("absent OLD_VALUE_REF mutated")
+	}
+	mustEnvironment(t, store.Close())
+}
+
+func TestNativeUpdateOutcomeShapes(t *testing.T) {
+	primary, secondary := errors.New("primary"), errors.New("secondary")
+	for _, outcome := range []updateNativeOutcome{
+		{truth: CommitTruthNew, commitAttempted: true},
+		{truth: CommitTruthOld, primary: primary},
+		{truth: CommitTruthOld, commitAttempted: true, primary: primary},
+		{truth: CommitTruthNew, commitAttempted: true, primary: primary, secondary: secondary},
+		{truth: CommitTruthUnknown, commitAttempted: true, primary: primary},
+	} {
+		if err := outcome.valid(); err != nil {
+			t.Fatalf("valid outcome rejected: %+v / %v", outcome, err)
+		}
+	}
+	for _, outcome := range []updateNativeOutcome{
+		{},
+		{truth: CommitTruth(4), primary: primary},
+		{truth: CommitTruthOld},
+		{truth: CommitTruthUnknown, commitAttempted: true},
+		{truth: CommitTruthNew, commitAttempted: true, secondary: secondary},
+		{truth: CommitTruthUnknown, commitAttempted: true, secondary: secondary},
+	} {
+		err := outcome.valid()
+		engine := requireEngineError(t, err, EngineLocalInvariant, operationUpdate, codeProblem)
+		if engine.Diagnostic != "invalid update native outcome shape" {
+			t.Fatalf("outcome shape guard drifted: %+v / %v", outcome, err)
+		}
+	}
+	precommit, commit := updateNativeConsumed(CommitTruthOld, false, primary, nil), updateNativeConsumed(CommitTruthOld, true, primary, nil)
+	if precommit.commitAttempted || !commit.commitAttempted || precommit == commit {
+		t.Fatal("commit stage drifted")
+	}
+	for _, outcome := range []updateNativeOutcome{{truth: CommitTruthNew}, {truth: CommitTruthUnknown, primary: primary}} {
+		if outcome.valid() == nil {
+			t.Fatal("commit stage drifted")
+		}
+	}
+	if got, want := [...]CommitTruth{CommitTruthOld, CommitTruthNew, CommitTruthUnknown}, [...]CommitTruth{1, 2, 3}; got != want {
+		t.Fatalf("CommitTruth values=%v", got)
+	}
+	if got, want := [...]string{CommitTruthOld.String(), CommitTruthNew.String(), CommitTruthUnknown.String(), CommitTruth(0).String(), CommitTruth(4).String()}, [...]string{"OLD", "NEW", "UNKNOWN", "", ""}; got != want {
+		t.Fatalf("CommitTruth strings=%v", got)
+	}
+}
+
+func TestNativeUpdateOwnershipCodePartitions(t *testing.T) {
+	source, err := os.ReadFile("mdbx_cgo.go")
+	mustEnvironment(t, err)
+	abort, commit, readback := updateNativeBody(t, source, "updateNativeAbort"), updateNativeBody(t, source, "updateNativeCommit"), updateNativeBody(t, source, "updateNativeReadback")
+	if !strings.Contains(abort, "if rc == codeThreadMismatch {") || !strings.Contains(abort, "updateNativeRetainedWrite(false") || strings.Count(abort, "updateNativeRetainedWrite") != 1 {
+		t.Fatal("abort ownership code set drifted")
+	}
+	if strings.Contains(commit, "updateNativeRetainedCommit") || !strings.Contains(commit, "case codeThreadMismatch:") || !strings.Contains(commit, "updateNativeRetainedWrite(true") || strings.Count(commit, "updateNativeRetainedWrite") != 1 || !strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil)") {
+		t.Fatal("commit ownership code set drifted")
+	}
+	if !strings.Contains(readback, "if rc == codeThreadMismatch") || strings.Count(readback, "updateNativeRetainedRead") != 2 {
+		t.Fatal("fresh-read abort ownership set drifted")
+	}
+}
+
+func requireNativeUpdateInput(t *testing.T, outcome updateNativeOutcome) {
+	t.Helper()
+	engine := requireEngineError(t, outcome.primary, EngineLocalInvariant, operationUpdate, codeProblem)
+	if engine.Diagnostic != "invalid native update input" || engine.Cause != nil {
+		t.Fatalf("input outcome primary=%+v", engine)
+	}
+	requireUpdateTruth(t, outcome, CommitTruthOld, false, outcome.primary, nil)
+}
+
+func TestNativeUpdateInputGuards(t *testing.T) {
+	var nilStore *Store
+	requireNativeUpdateInput(t, nilStore.updateNative(nil, nil))
+	requireNativeUpdateInput(t, (&Store{}).updateNative(nil, nil))
+	cfg := environmentConfig()
+	store, err := Create(filepath.Join(t.TempDir(), "db"), cfg)
+	mustEnvironment(t, err)
+	defer func() { mustEnvironment(t, store.Close()) }()
+	mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}}
+	plan := updateNativePlan(t, mutation)
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		requireNativeUpdateInput(t, (&Store{}).updateNative(plan, reader.txn))
+		requireNativeUpdateInput(t, store.updateNative(plan, nil))
+		requireNativeUpdateInput(t, store.updateNative(nil, reader.txn))
+		dbis := store.dbis
+		store.dbis[0] = 0
+		requireNativeUpdateInput(t, store.updateNative(plan, reader.txn))
+		store.dbis = dbis
+		value, present, readErr := reader.Get(readDBIsLiteral()[0], []byte{0})
+		if readErr != nil || !present || len(value) != 4 {
+			return fmt.Errorf("input guard reached native update: %x/%v/%w", value, present, readErr)
+		}
+		return nil
+	}))
+	requireEnvironmentStore(t, store, cfg)
+}
+
+func updateNativeBody(t *testing.T, source []byte, name string) string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "mdbx_cgo.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if ok && fn.Name.Name == name {
+			start, end := fset.Position(fn.Body.Lbrace).Offset, fset.Position(fn.Body.Rbrace).Offset
+			return string(source[start:end])
+		}
+	}
+	t.Fatalf("missing %s", name)
+	return ""
+}
+
+func updateNativeCallName(expression ast.Expr) string {
+	switch expression := expression.(type) {
+	case *ast.Ident:
+		return expression.Name
+	case *ast.SelectorExpr:
+		return updateNativeCallName(expression.X) + "." + expression.Sel.Name
+	case *ast.FuncLit:
+		return "<func>"
+	default:
+		return "<other>"
+	}
+}
+
+func updateNativeCalls(t *testing.T, source []byte, name string) map[string]int {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "mdbx_cgo.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != name {
+			continue
+		}
+		calls := map[string]int{}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				calls[updateNativeCallName(call.Fun)]++
+			}
+			return true
+		})
+		return calls
+	}
+	t.Fatalf("missing %s", name)
+	return nil
+}
+
+func TestNativeUpdateSourceOwnership(t *testing.T) {
+	source, err := os.ReadFile("mdbx_cgo.go")
+	mustEnvironment(t, err)
+	require := func(ok bool, marker string) {
+		t.Helper()
+		if !ok {
+			t.Fatal(marker)
+		}
+	}
+	execute, abort, commit := updateNativeBody(t, source, "updateNativeExecute"), updateNativeBody(t, source, "updateNativeAbort"), updateNativeBody(t, source, "updateNativeCommit")
+	preflight, deleteAt, putAt, verifyAt := strings.Index(execute, "updateNativePreflight"), strings.Index(execute, "updateNativeDeletes"), strings.Index(execute, "updateNativePuts"), strings.Index(execute, "updateNativeVerify")
+	require(preflight >= 0 && preflight < deleteAt && deleteAt < putAt, "compare-before-write drifted")
+	deletes, puts := updateNativeBody(t, source, "updateNativeDeletes"), updateNativeBody(t, source, "updateNativePuts")
+	require(strings.Contains(string(source), "return mdbx_del(txn, dbi, &key, NULL);") && strings.Contains(deletes, "for _, mutation := range plan") && strings.Contains(deletes, "mutation.beforePresent"), "strict delete order drifted")
+	putStart := strings.Index(string(source), "static int rubin_mdbx_put_nooverwrite")
+	putEnd := putStart + strings.Index(string(source)[putStart:], "\n")
+	require(putStart >= 0 && putEnd > putStart && strings.Contains(string(source)[putStart:putEnd], "return mdbx_put(txn, dbi, &key, &value, MDBX_NOOVERWRITE);") && strings.Contains(puts, "for i, mutation := range plan") && strings.Contains(puts, "updateNativePut"), "strict put order drifted")
+	commitAt := strings.Index(execute, "return updateNativeCommit")
+	require(strings.Count(commit, "C.mdbx_txn_commit(write)") == 1 && strings.Contains(execute, "if verifyErr") && putAt < verifyAt && verifyAt < commitAt && strings.Count(execute, "updateNativeCommit") == 1, "verify-once-commit-once drifted")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeAbort"), map[string]int{"int": 1, "C.mdbx_txn_abort": 1, "updateNativeRetainedWrite": 1, "nativeError": 2, "updateNativeConsumed": 1}), "abort ownership drifted")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeCommit"), map[string]int{"int": 1, "C.mdbx_txn_commit": 1, "nativeError": 1, "updateNativeConsumed": 3, "updateNativeRetainedWrite": 1, "updateNativeReadback": 1}), "commit ownership drifted")
+	require(strings.Contains(abort, "if rc == codeThreadMismatch {") && strings.Contains(abort, "updateNativeRetainedWrite(false") && !strings.Contains(abort, "updateNativeReadback"), "abort ownership drifted")
+	require(strings.Contains(commit, "case codeThreadMismatch:") && strings.Count(commit, "updateNativeRetainedWrite") == 1 && strings.Contains(commit, "updateNativeRetainedWrite(true") && strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil)") && strings.Index(commit, "updateNativeRetainedWrite") < strings.Index(commit, "updateNativeReadback"), "commit ownership drifted")
+	require(strings.Contains(commit, "case codeResultTrue:") && strings.Contains(commit, "updateNativeConsumed(CommitTruthOld, true, commitErr, nil)") && strings.Index(commit, "codeResultTrue") < strings.Index(commit, "updateNativeReadback"), "RESULT_TRUE disposition drifted")
+	readback := updateNativeBody(t, source, "updateNativeReadback")
+	require(strings.Count(readback, "C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)") == 1 && strings.Count(readback, "updateNativeReadbackTruth") == 1, "readback truth drifted")
+	alias := updateNativeBody(t, source, "updateNativeImages") + updateNativeBody(t, source, "updateNativePreflight") + updateNativeBody(t, source, "updateNativeVerifyReferences")
+	require(strings.Count(alias, "if reference.target >= 0") == 3 && strings.Contains(alias, "reference.image"), "reference alias cache drifted")
+	native := string(source[strings.Index(string(source), "type CommitTruth"):strings.Index(string(source), "func (s *Store) View")])
+	for _, forbidden := range []string{"Store.Update", "commitTransition", "abortTransition", "consume(", "s.state = ", "s.terminal = ", "s.config = ", "s.dbis = ", "s.env = ", "s.writer = ", "s.operations"} {
+		require(!strings.Contains(native, forbidden), "native owner boundary drifted")
 	}
 }
