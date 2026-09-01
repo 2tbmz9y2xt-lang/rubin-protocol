@@ -589,7 +589,7 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 		return outcome, nil
 	}
 	projection, err := s.prepareDANonReplayProjectionLocked(plan, candidate)
-	if err := cmp.Or(err, s.preflightDANonReplayInstall(projection)); err != nil {
+	if err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
 	placement := projection.placement
@@ -614,13 +614,6 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 	s.installDASetRecordLocked(placement)
 	commit.Commit()
 	return daRelayAdmissionOutcome{daID: candidate.member.locator.daID, disposition: daRelayAdmissionRetained}, nil
-}
-
-func (s *DARelayState) preflightDANonReplayInstall(projection daNonReplayApplyProjection) error {
-	if slices.Contains([]bool{projection.member == nil, s.sets == nil, s.locators == nil, s.orphanBytesByPeerQuotaKey == nil, s.orphanBytesByDAID == nil}, true) {
-		return errDARelayImageIncompatible
-	}
-	return nil
 }
 
 func (s *DARelayState) prepareDANonReplayProjectionLocked(plan daRelayAdmissionPlan, candidate daRelayAdmissionCandidate) (daNonReplayApplyProjection, error) {

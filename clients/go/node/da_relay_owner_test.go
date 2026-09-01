@@ -353,7 +353,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			t.Fatal(err)
 		}
 		changed := func(row string) bool {
-			for _, marker := range strings.Split("node/da_admission.go:lit:\x00node/da_relay_owner.go:lit:\x00node/da_admission.go:parseDAAdmission|\x00parseDAAdmissionCandidate\x00daAdmissionHold\x00acquireDAAdmissionHold\x00validateDACandidate\x00DAProvenance\x00daProvenance\x00DAAdmissionDisposition\x00daRelayAdmissionDisposition\x00node/da_relay_owner.go:daRelayAdmissionRetained|\x00node/da_relay_owner.go:daRelayAdmissionDuplicate|\x00DAAdmissionResult\x00daAdmissionObservation\x00indexedTxID\x00indexedLocator\x00recordDAID\x00recordState\x00recordRevision\x00recordReceivedTime\x00recordTTLBlocksLeft\x00recordPayloadBytes\x00recordWireBytes\x00recordHasReplaceableChunks\x00targetWireBytes\x00targetPeerQuotaKey\x00targetHashChecked\x00stagedCommitPresent\x00stagedCommitDAID\x00stagedCommitChunkCount\x00stagedCommitWireBytes\x00stagedCommitPeerQuotaKey\x00stagedCommitRaw\x00validateDAAdmissionObservation\x00validateHeader\x00validateToken\x00validateRole\x00validateCommitRole\x00validateChunkRole\x00validateStagedCommit\x00validateRetained\x00NewPeerDAProvenance\x00LocalDAProvenance\x00DetachedReorgDAProvenance\x00AdmitDA\x00admitDANonExact\x00bindDAAdmission\x00classifyDAReplay\x00publicDAAdmissionResult\x00observeDAAdmission\x00captureDAAdmissionTarget\x00preflightDANonReplayInstall\x00applyDANonReplayPlan\x00sameDAAdmissionCandidate\x00node/da_relay_owner.go:quotaKey|\x00node/da_relay_owner.go:validate|\x00node/da_admission.go:release|\x00read|node/da_relay_owner.go:file|DAID\x00read|node/da_relay_owner.go:file|Disposition\x00read|node/da_relay_owner.go:file|SameDAIDCommitConflict\x00\"bytes\"\x00\"slices\"\x00gen|node/da_relay_owner.go:file|import (", "\x00") {
+			for _, marker := range strings.Split("node/da_admission.go:lit:\x00node/da_relay_owner.go:lit:\x00node/da_admission.go:parseDAAdmission|\x00parseDAAdmissionCandidate\x00daAdmissionHold\x00acquireDAAdmissionHold\x00validateDACandidate\x00DAProvenance\x00daProvenance\x00DAAdmissionDisposition\x00daRelayAdmissionDisposition\x00node/da_relay_owner.go:daRelayAdmissionRetained|\x00node/da_relay_owner.go:daRelayAdmissionDuplicate|\x00DAAdmissionResult\x00daAdmissionObservation\x00indexedTxID\x00indexedLocator\x00recordDAID\x00recordState\x00recordRevision\x00recordReceivedTime\x00recordTTLBlocksLeft\x00recordPayloadBytes\x00recordWireBytes\x00recordHasReplaceableChunks\x00targetWireBytes\x00targetPeerQuotaKey\x00targetHashChecked\x00stagedCommitPresent\x00stagedCommitDAID\x00stagedCommitChunkCount\x00stagedCommitWireBytes\x00stagedCommitPeerQuotaKey\x00stagedCommitRaw\x00validateDAAdmissionObservation\x00validateHeader\x00validateToken\x00validateRole\x00validateCommitRole\x00validateChunkRole\x00validateStagedCommit\x00validateRetained\x00NewPeerDAProvenance\x00LocalDAProvenance\x00DetachedReorgDAProvenance\x00AdmitDA\x00admitDANonExact\x00bindDAAdmission\x00classifyDAReplay\x00publicDAAdmissionResult\x00observeDAAdmission\x00captureDAAdmissionTarget\x00applyDANonReplayPlan\x00sameDAAdmissionCandidate\x00node/da_relay_owner.go:quotaKey|\x00node/da_relay_owner.go:validate|\x00node/da_admission.go:release|\x00read|node/da_relay_owner.go:file|DAID\x00read|node/da_relay_owner.go:file|Disposition\x00read|node/da_relay_owner.go:file|SameDAIDCommitConflict\x00\"bytes\"\x00\"slices\"\x00gen|node/da_relay_owner.go:file|import (", "\x00") {
 				if strings.Contains(row, marker) {
 					return true
 				}
@@ -421,7 +421,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		}
 		allCalls, allReferences := relayCalls, relayReferences
 		wantCalls := map[string]int{"classifyDAReplay": 1, "observeDAAdmission": 1, "admitDANonExact": 1, "admitDANonReplay": 1, "BeginCommit": 1, "Commit": 1, "Abort": 2}
-		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 2, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 7, "locators": 4, "orphanBytesByPeerQuotaKey": 1, "orphanBytesByDAID": 1, "nextReceivedTime": 3, "records": 1}
+		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 2, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 6, "locators": 3, "nextReceivedTime": 3, "records": 1}
 		for name := range admitTargets {
 			if allCalls[name] != wantCalls[name] || allReferences[name] != wantReferences[name] {
 				t.Fatalf("public replay reference graph calls=%v references=%v", allCalls, allReferences)
@@ -2079,25 +2079,6 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 			requireDANonReplayUnchanged(t, b.relay, b.mp.pendingOutpoints, bRelay, bOwner)
 		})
 	}
-	t.Run("caller defer closes on precommit panic", func(t *testing.T) {
-		f := newDANonReplayFixture(t, 1)
-		sentinel := &struct{}{}
-		recovered := func() (value any) {
-			defer func() { value = recover() }()
-			panicAdmission := f.begin(f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x55}, payload: []byte("panic")}))
-			defer panicAdmission.Close()
-			candidate, err := panicAdmission.renderDARelayAdmissionCandidate(daNonReplayPeer("peer"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			_ = f.relay.planDANonReplay(candidate)
-			panic(sentinel)
-		}()
-		if recovered != sentinel || !f.state.admissionMu.TryLock() {
-			t.Fatalf("recovered=%v; admission guard leaked", recovered)
-		}
-		f.state.admissionMu.Unlock()
-	})
 	t.Run("invalid provenance", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x52}, payload: []byte("invalid provenance")})
@@ -2661,6 +2642,31 @@ func TestAdmitDAOwnerObservationPrecedesCandidateIntegrity(t *testing.T) {
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 		})
 	}
+	t.Run("real nonexact snapshot panic closes admission guard", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x9b}, payload: []byte("nonexact-panic")})
+		owned, parsed, txid, wtxid, inputs, err := parseDAAdmissionCandidate(tx.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hold, err := f.mp.acquireDAAdmissionHold(f.mp.pendingOutpoints, inputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hold.guard.state.Store(daAdmissionResolved)
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			_, _ = f.relay.admitDANonExact(hold, owned, parsed, txid, wtxid, inputs, publicPeer(t, "nonexact-panic"))
+		}()
+		if recovered != "DA admission snapshot is not available" {
+			t.Fatalf("recovered=%v", recovered)
+		}
+		if !f.state.admissionMu.TryLock() {
+			t.Fatal("real nonexact panic leaked admission guard")
+		}
+		f.state.admissionMu.Unlock()
+	})
 }
 
 func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
@@ -2700,36 +2706,6 @@ func TestAdmitDAD00R3ReplayMatrix(t *testing.T) {
 		got, err := f.relay.AdmitDA(tx.raw, provenance)
 		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionRetained})
 		f.requireSingleRetained(t, tx, daRelayStateOrphanChunks)
-	})
-	t.Run("continuation installer preflight", func(t *testing.T) {
-		name := ""
-		defer func() {
-			if panicValue := recover(); panicValue != nil {
-				t.Fatalf("installer preflight %s panic=%v", name, panicValue)
-			}
-		}()
-		for testName, clear := range map[string]func(*DARelayState){"per peer": func(s *DARelayState) { s.orphanBytesByPeerQuotaKey = nil }, "per da_id": func(s *DARelayState) { s.orphanBytesByDAID = nil }} {
-			name = testName
-			f := newDANonReplayFixture(t, 1)
-			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa4}, payload: []byte(name)})
-			f.mutateRelay(clear)
-			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, name))
-			if got != (DAAdmissionResult{}) || err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct preflight sentinel identity is contract-owned.
-				t.Fatalf("installer preflight %s=(%+v,%v)", name, got, err)
-			}
-			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
-			ownerFree, chainFree := f.mp.pendingOutpoints.mu.TryLock(), f.state.admissionMu.TryLock()
-			if ownerFree {
-				f.mp.pendingOutpoints.mu.Unlock()
-			}
-			if chainFree {
-				f.state.admissionMu.Unlock()
-			}
-			if !ownerFree || !chainFree {
-				t.Fatal("installer preflight leaked owner or chain guard")
-			}
-		}
 	})
 	t.Run("valid NONEXACT resumes the existing duplicate path", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
