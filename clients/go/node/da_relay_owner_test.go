@@ -853,6 +853,7 @@ func newDANonReplayFixture(t *testing.T, count int) *daNonReplayFixture {
 	}
 	return &daNonReplayFixture{t: t, signer: signer, address: address, state: state, mp: mp, relay: relay, outpoints: outpoints}
 }
+
 func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 	inputCount := max(spec.inputCount, 1)
 	if f.next+inputCount > len(f.outpoints) {
@@ -892,9 +893,11 @@ func (f *daNonReplayFixture) signed(spec daNonReplayTxSpec) daNonReplayTx {
 	}
 	return daNonReplayTx{spec: spec, raw: raw, txid: txid, wtxid: wtxid, inputs: inputRows}
 }
+
 func (f *daNonReplayFixture) begin(tx daNonReplayTx) *DAAdmission {
 	return mustDAAdmission(f.t, f.mp, tx.raw)
 }
+
 func (f *daNonReplayFixture) admit(tx daNonReplayTx, provenance daProvenance) daRelayAdmissionOutcome {
 	admission := f.begin(tx)
 	defer admission.Close()
@@ -931,24 +934,27 @@ func (f *daNonReplayFixture) requireMember(t *testing.T, record daRelaySetRecord
 		t.Fatalf("member mismatch: member=%+v raw=%v payload=%v token=%+v", member, bytes.Equal(raw, tx.raw), bytes.Equal(payload, tx.spec.payload), wantToken)
 	}
 }
+
 func requireDANonReplayUnchanged(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner, relayBefore daRelayStateView, ownerBefore *PendingOutpointOwner) {
-	if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, relayBefore) {
+	if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
 		t.Fatalf("relay mutated: got=%+v want=%+v", got, relayBefore)
 	}
 	if got := cloneDAAdmissionOwner(owner); !reflect.DeepEqual(got, ownerBefore) {
 		t.Fatalf("owner mutated: got=%+v want=%+v", got, ownerBefore)
 	}
 }
+
 func requireDANonReplayRejected(t *testing.T, f *daNonReplayFixture, tx daNonReplayTx, provenance daProvenance, want error) {
 	admission := f.begin(tx)
 	defer admission.Close()
 	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	outcome, err := f.relay.admitDANonReplay(admission, provenance)
-	if outcome != (daRelayAdmissionOutcome{}) || err != want || !errors.Is(err, want) {
+	if outcome != (daRelayAdmissionOutcome{}) || err != want || !errors.Is(err, want) { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 		t.Fatalf("rejection outcome=%+v err=%v want=%v", outcome, err, want)
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 }
+
 func requireDANonReplayClaim(t *testing.T, snapshot, tokenOwner *PendingOutpointOwner, tx daNonReplayTx, sequence uint64) {
 	token := PendingOutpointToken{owner: tokenOwner, seq: sequence}
 	claim := snapshot.byToken[token]
@@ -961,6 +967,7 @@ func requireDANonReplayClaim(t *testing.T, snapshot, tokenOwner *PendingOutpoint
 		}
 	}
 }
+
 func requireDANonReplayRecordHeader(t *testing.T, relay *DARelayState, daID [32]byte, state daRelaySetState, revision, received, ttl uint64) daRelaySetRecord {
 	view := daRelayStateSnapshot(relay)
 	record, ok := view.sets[daID]
@@ -969,6 +976,7 @@ func requireDANonReplayRecordHeader(t *testing.T, relay *DARelayState, daID [32]
 	}
 	return record
 }
+
 func (f *daNonReplayFixture) requireSingleRetained(t *testing.T, tx daNonReplayTx, state daRelaySetState) {
 	record := requireDANonReplayRecordHeader(t, f.relay, tx.spec.daID, state, 1, 1, 7)
 	f.requireMember(t, record, tx, 1, daNonReplayPeer("boundary"))
@@ -987,6 +995,7 @@ func (f *daNonReplayFixture) requireSingleRetained(t *testing.T, tx daNonReplayT
 		t.Fatalf("single owner=%+v", owner)
 	}
 }
+
 func TestAdmitDANonReplayStateMatrix(t *testing.T) {
 	for _, row := range []struct {
 		name  string
@@ -1038,6 +1047,7 @@ func TestAdmitDANonReplayStateMatrix(t *testing.T) {
 	outside := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("outside")})
 	requireDANonReplayRejected(t, f, outside, daNonReplayPeer("outside"), errDARelayChunkIndexOutsideCommit)
 }
+
 func requireDANonReplayCompletionRefusal(t *testing.T, f *daNonReplayFixture, tx daNonReplayTx) {
 	admission := f.begin(tx)
 	defer admission.Close()
@@ -1049,6 +1059,7 @@ func requireDANonReplayCompletionRefusal(t *testing.T, f *daNonReplayFixture, tx
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 }
+
 func TestAdmitDANonReplayWouldCompleteIsUnavailable(t *testing.T) {
 	for _, match := range []bool{true, false} {
 		t.Run("commit last match="+map[bool]string{true: "yes", false: "no"}[match], func(t *testing.T) {
@@ -1089,6 +1100,13 @@ func (f *daNonReplayFixture) planned(tx daNonReplayTx, provenance daProvenance) 
 	}
 	return daNonReplayPlanned{admission: admission, candidate: candidate, plan: f.relay.planDANonReplay(candidate)}
 }
+
+func (f *daNonReplayFixture) mutateRelay(mutate func(*DARelayState)) {
+	f.relay.mu.Lock()
+	defer f.relay.mu.Unlock()
+	mutate(f.relay)
+}
+
 func requireDANonReplayPlanResult(t *testing.T, f *daNonReplayFixture, planned daNonReplayPlanned, want daRelayAdmissionOutcome, wantErr error, message string) {
 	defer planned.admission.Close()
 	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -1102,7 +1120,7 @@ func requireDANonReplayPlanResult(t *testing.T, f *daNonReplayFixture, planned d
 			t.Fatalf("error=%v disposition=%d, want unavailable %q", err, relayDispositionOf(err), message)
 		}
 	} else if wantErr != nil {
-		if err != wantErr || !errors.Is(err, wantErr) {
+		if err != wantErr || !errors.Is(err, wantErr) { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 			t.Fatalf("error=%v, want %v", err, wantErr)
 		}
 	} else if err != nil {
@@ -1110,6 +1128,7 @@ func requireDANonReplayPlanResult(t *testing.T, f *daNonReplayFixture, planned d
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 }
+
 func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 	for _, different := range []bool{false, true} {
 		t.Run(map[bool]string{false: "same txid", true: "different commit"}[different]+" duplicate outranks stale", func(t *testing.T) {
@@ -1155,31 +1174,21 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		if !planned.plan.wouldComplete {
 			t.Fatal("completion plan was not staged")
 		}
-		f.relay.mu.Lock()
-		f.relay.locators[tx.txid] = planned.candidate.member.locator
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.locators[tx.txid] = planned.candidate.member.locator })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{daID: daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
 	})
 	t.Run("duplicate beats live cap projection", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x35}, payload: []byte("cap")})
-		planned := f.planned(tx, daNonReplayPeer("cap"))
-		f.relay.mu.Lock()
-		f.relay.caps.orphanPoolBytes = 1
-		f.relay.locators[tx.txid] = planned.candidate.member.locator
-		f.relay.mu.Unlock()
-		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{daID: tx.spec.daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
+		p := f.planned(tx, daNonReplayPeer("cap"))
+		f.mutateRelay(func(r *DARelayState) { r.caps.orphanPoolBytes = 1; r.locators[tx.txid] = p.candidate.member.locator })
+		requireDANonReplayPlanResult(t, f, p, daRelayAdmissionOutcome{daID: tx.spec.daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
 	})
 	t.Run("stale beats carried completion", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0x36}
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 1, commitment: [32]byte{6}, commitmentOutputs: 1}), daNonReplayPeer("commit"))
 		planned := f.planned(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("last")}), daNonReplayPeer("last"))
-		f.relay.mu.Lock()
-		record := f.relay.sets[daID]
-		record.revision++
-		f.relay.records++
-		f.relay.sets[daID] = record
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { v := r.sets[daID]; v.revision++; r.records++; r.sets[daID] = v })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, nil, "retained DA record moved while this admission was planned")
 	})
 	for _, field := range []string{"received time", "revision", "pruned token", "pruned input", "preserved txid", "preserved wtxid", "preserved full fee", "preserved provenance", "preserved token", "preserved input", "preserved chunk hash", "preserved peer quota", "preserved hash checked", "preserved payload", "preserved tx bytes", "commit payload commitment", "commit peer quota", "commit chunk count", "commit tx bytes", "commit member token"} {
@@ -1238,12 +1247,9 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0x38}
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("seed")}), daNonReplayPeer("seed"))
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("duplicate")})
-		planned := f.planned(tx, daNonReplayPeer("duplicate"))
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = 0
-		f.relay.locators[tx.txid] = planned.candidate.member.locator
-		f.relay.mu.Unlock()
-		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{daID: daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
+		p := f.planned(tx, daNonReplayPeer("duplicate"))
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = 0; r.locators[tx.txid] = p.candidate.member.locator })
+		requireDANonReplayPlanResult(t, f, p, daRelayAdmissionOutcome{daID: daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
 	})
 	t.Run("stale beats carried stage error", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 4), [32]byte{0x39}
@@ -1261,9 +1267,7 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("seed")}), daNonReplayPeer("seed"))
 		planned := f.planned(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 2, payload: []byte("candidate")}), daNonReplayPeer("candidate"))
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("mover")}), daNonReplayPeer("mover"))
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = 0
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = 0 })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, nil, "retained DA record moved while this admission was planned")
 	})
 	t.Run("stage error beats high-water incoherence", func(t *testing.T) {
@@ -1278,7 +1282,7 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		f.relay.nextReceivedTime = 0
 		f.relay.mu.Unlock()
 		planned := f.planned(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("candidate")}), daNonReplayPeer("candidate"))
-		if planned.plan.stageErr != errDAProvenanceInvalid {
+		if planned.plan.stageErr != errDAProvenanceInvalid { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 			t.Fatalf("stage error=%v", planned.plan.stageErr)
 		}
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, errDAProvenanceInvalid, "")
@@ -1288,30 +1292,21 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 1, commitment: [32]byte{0x3c}, commitmentOutputs: 1})
 		f.admit(commit, daNonReplayPeer("commit"))
 		planned := f.planned(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("last")}), daNonReplayPeer("last"))
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = 0
-		delete(f.relay.locators, commit.txid)
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = 0; delete(r.locators, commit.txid) })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, nil, "DA COMPLETE_SET capacity owner is not active")
 	})
 	t.Run("high-water incompatibility beats live cap", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0x3d}
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("seed")}), daNonReplayPeer("seed"))
 		planned := f.planned(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("candidate")}), daNonReplayPeer("candidate"))
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = 0
-		f.relay.caps.orphanPoolBytes = 1
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = 0; r.caps.orphanPoolBytes = 1 })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, errDARelayImageIncompatible, "")
 	})
 	t.Run("sequence exhaustion beats live cap", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x3e}, payload: []byte("candidate")})
 		planned := f.planned(tx, daNonReplayPeer("candidate"))
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = ^uint64(0)
-		f.relay.caps.orphanPoolBytes = 1
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = ^uint64(0); r.caps.orphanPoolBytes = 1 })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, errDARelayArithmeticOverflow, "")
 	})
 	t.Run("live cap beats owner conflict", func(t *testing.T) {
@@ -1326,9 +1321,7 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		if err != nil || f.mp.pendingOutpoints.Finalize(blocker) != nil {
 			t.Fatalf("blocker reserve/finalize: %v", err)
 		}
-		f.relay.mu.Lock()
-		f.relay.caps.orphanPoolBytes = 1
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.caps.orphanPoolBytes = 1 })
 		requireDANonReplayPlanResult(t, f, planned, daRelayAdmissionOutcome{}, errDARelayOrphanPoolCapExceeded, "")
 	})
 	t.Run("unrelated movement reprojects live values", func(t *testing.T) {
@@ -1367,6 +1360,7 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		}
 	})
 }
+
 func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 	t.Run("one concurrent winner", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0x41}
@@ -1465,10 +1459,10 @@ func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 				if !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitErrorKind("conflict") {
 					t.Fatalf("owner precedence error=%v", err)
 				}
-			} else if row.cap == "global" && err != errDARelayOrphanPoolCapExceeded || row.cap == "commit" && err != errDARelayOrphanCommitCapExceeded {
+			} else if row.cap == "global" && err != errDARelayOrphanPoolCapExceeded || row.cap == "commit" && err != errDARelayOrphanCommitCapExceeded { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 				t.Fatalf("cap error=%v", err)
 			}
-			if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, relayBefore) {
+			if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
 				t.Fatal("State-B refusal published relay state")
 			}
 			if got := cloneDAAdmissionOwner(f.mp.pendingOutpoints); !reflect.DeepEqual(got, ownerWant) {
@@ -1538,7 +1532,7 @@ func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 		if outcome != (daRelayAdmissionOutcome{}) || !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitErrorKind("unavailable") || admitErr.Message != "DA victim input mismatch" {
 			t.Fatalf("victim failure outcome=%+v err=%v", outcome, err)
 		}
-		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, relayBefore) {
+		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
 			t.Fatal("victim failure published DA state")
 		}
 		if got := cloneDAAdmissionOwner(f.mp.pendingOutpoints); !reflect.DeepEqual(got, ownerWant) {
@@ -1546,6 +1540,7 @@ func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 		}
 	})
 }
+
 func daNonReplayFunction(t *testing.T, name string) *ast.FuncDecl {
 	path := "da_relay_owner" + map[bool]string{true: "_test"}[strings.HasPrefix(name, "Test") || name == "requireDANonReplayRawCommitOutputs"] + ".go"
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -1561,6 +1556,7 @@ func daNonReplayFunction(t *testing.T, name string) *ast.FuncDecl {
 	t.Fatalf("function %s missing", name)
 	return nil
 }
+
 func daNonReplayOwnedExpression(expression ast.Expr, owned map[string]bool) bool {
 	switch value := expression.(type) {
 	case *ast.Ident:
@@ -1588,6 +1584,7 @@ func daNonReplayOwnedExpression(expression ast.Expr, owned map[string]bool) bool
 	}
 	return false
 }
+
 func daNonReplayLiteralCaptures(literal *ast.FuncLit, owned map[string]bool) bool {
 	for _, statement := range literal.Body.List {
 		if assignment, ok := statement.(*ast.AssignStmt); ok && assignment.Tok == token.DEFINE && len(assignment.Lhs) == 1 && owned[daNonReplaySelector(assignment.Lhs[0])] {
@@ -1607,6 +1604,7 @@ func daNonReplayLiteralCaptures(literal *ast.FuncLit, owned map[string]bool) boo
 	})
 	return captured
 }
+
 func heldDANonReplayMutation(function *ast.FuncDecl) string {
 	owned := map[string]bool{"admission": true}
 	diagnostic := ""
@@ -1683,6 +1681,7 @@ func heldDANonReplayMutation(function *ast.FuncDecl) string {
 	})
 	return diagnostic
 }
+
 func checkDANonReplayCallerDefers(file *ast.File) string {
 	callers, diagnostic, direct := 0, "", map[token.Pos]bool{}
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -1739,6 +1738,7 @@ func checkDANonReplayCallerDefers(file *ast.File) string {
 	}
 	return diagnostic
 }
+
 func parseDANonReplayFixture(t *testing.T, path, source string) *ast.FuncDecl {
 	file, err := parser.ParseFile(token.NewFileSet(), path, source, parser.SkipObjectResolution)
 	if err != nil {
@@ -1746,6 +1746,7 @@ func parseDANonReplayFixture(t *testing.T, path, source string) *ast.FuncDecl {
 	}
 	return file.Decls[0].(*ast.FuncDecl)
 }
+
 func daNonReplayDirectErrorReturn(statement ast.Stmt, failure string) bool {
 	branch, ok := statement.(*ast.IfStmt)
 	if !ok || branch.Else != nil || len(branch.Body.List) != 1 {
@@ -1759,6 +1760,7 @@ func daNonReplayDirectErrorReturn(statement ast.Stmt, failure string) bool {
 	zero, zeroOK := result.Results[0].(*ast.CompositeLit)
 	return zeroOK && daNonReplaySelector(zero.Type) == "daRelayAdmissionOutcome" && len(zero.Elts) == 0
 }
+
 func checkDANonReplayRendererPrefix(function, oracle *ast.FuncDecl) string {
 	statements, renderCalls := function.Body.List, 0
 	ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -1809,6 +1811,7 @@ func checkDANonReplayRendererPrefix(function, oracle *ast.FuncDecl) string {
 	}
 	return ""
 }
+
 func requireDANonReplayRawCommitOutputs(t *testing.T, raw []byte, want int) {
 	tx, _, _, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
@@ -1890,7 +1893,7 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 			defer admission.Close()
 			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			outcome, err := f.relay.admitDANonReplay(admission, daNonReplayPeer("peer"))
-			if outcome != (daRelayAdmissionOutcome{}) || err != errDARelayMemberIncomplete || !errors.Is(err, errDARelayMemberIncomplete) {
+			if outcome != (daRelayAdmissionOutcome{}) || err != errDARelayMemberIncomplete || !errors.Is(err, errDARelayMemberIncomplete) { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 				t.Fatalf("renderer prefix outcome=%+v err=%v", outcome, err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
@@ -1918,7 +1921,7 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 			aRelay, aOwnerBefore := daRelayStateSnapshot(a.relay), cloneDAAdmissionOwner(a.mp.pendingOutpoints)
 			bRelay, bOwner := daRelayStateSnapshot(b.relay), cloneDAAdmissionOwner(b.mp.pendingOutpoints)
 			outcome, err := a.relay.admitDANonReplay(admission, daNonReplayPeer("peer"))
-			if outcome != (daRelayAdmissionOutcome{}) || err != row.want {
+			if outcome != (daRelayAdmissionOutcome{}) || err != row.want { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 				t.Fatalf("foreign outcome=%+v err=%v want=%v", outcome, err, row.want)
 			}
 			requireDANonReplayUnchanged(t, a.relay, a.mp.pendingOutpoints, aRelay, aOwnerBefore)
@@ -1985,11 +1988,7 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 				seed = daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 3, commitment: [32]byte{0x54}, commitmentOutputs: 1}
 			}
 			f.admit(f.signed(seed), daNonReplayPeer("resident"))
-			f.relay.mu.Lock()
-			record := f.relay.sets[daID]
-			row.corrupt(&record)
-			f.relay.sets[daID] = record
-			f.relay.mu.Unlock()
+			f.mutateRelay(func(r *DARelayState) { record := r.sets[daID]; row.corrupt(&record); r.sets[daID] = record })
 			candidate := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("candidate")})
 			requireDANonReplayRejected(t, f, candidate, daNonReplayPeer("candidate"), row.want)
 		})
@@ -2002,14 +2001,10 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 		{"locator mismatch", func(f *daNonReplayFixture, daID [32]byte) {
 			seed := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("seed")})
 			f.admit(seed, daNonReplayPeer("peer"))
-			f.relay.mu.Lock()
-			delete(f.relay.locators, seed.txid)
-			f.relay.mu.Unlock()
+			f.mutateRelay(func(r *DARelayState) { delete(r.locators, seed.txid) })
 		}, errDARelayLocatorMismatch},
 		{"revision overflow", func(f *daNonReplayFixture, _ [32]byte) {
-			f.relay.mu.Lock()
-			f.relay.records = ^uint64(0)
-			f.relay.mu.Unlock()
+			f.mutateRelay(func(r *DARelayState) { r.records = ^uint64(0) })
 		}, errDARelayArithmeticOverflow},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -2020,6 +2015,7 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 		})
 	}
 }
+
 func TestAdmitDANonReplayPrunesOutOfRangeClaims(t *testing.T) {
 	f, daID := newDANonReplayFixture(t, 5), [32]byte{0x61}
 	inside := []daNonReplayTx{
@@ -2081,6 +2077,7 @@ func TestAdmitDANonReplayPrunesOutOfRangeClaims(t *testing.T) {
 		t.Fatalf("pruned owner=%+v", owner)
 	}
 }
+
 func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 	for _, row := range []struct {
 		name, peerKey string
@@ -2162,9 +2159,7 @@ func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 	}
 	t.Run("last sequence then overflow", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 2)
-		f.relay.mu.Lock()
-		f.relay.nextReceivedTime = ^uint64(0) - 1
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = ^uint64(0) - 1 })
 		last := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x73}, payload: []byte("last")})
 		f.admit(last, daNonReplayPeer("peer"))
 		view := daRelayStateSnapshot(f.relay)
@@ -2175,6 +2170,7 @@ func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 		requireDANonReplayRejected(t, f, overflow, daNonReplayPeer("peer"), errDARelayArithmeticOverflow)
 	})
 }
+
 func daNonReplaySelector(expression ast.Expr) string {
 	switch value := expression.(type) {
 	case *ast.Ident:
@@ -2195,10 +2191,12 @@ func daNonReplaySelector(expression ast.Expr) string {
 	}
 	return ""
 }
+
 func daNonReplayAssignment(statement ast.Stmt, left, right string) bool {
 	assignment, ok := statement.(*ast.AssignStmt)
 	return ok && assignment.Tok == token.ASSIGN && len(assignment.Lhs) == 1 && len(assignment.Rhs) == 1 && daNonReplaySelector(assignment.Lhs[0]) == left && daNonReplaySelector(assignment.Rhs[0]) == right
 }
+
 func daNonReplayCall(statement ast.Stmt, name string, argument string) bool {
 	expression, ok := statement.(*ast.ExprStmt)
 	if !ok {
@@ -2207,6 +2205,7 @@ func daNonReplayCall(statement ast.Stmt, name string, argument string) bool {
 	call, ok := expression.X.(*ast.CallExpr)
 	return ok && daNonReplaySelector(call.Fun) == name && (argument == "" && len(call.Args) == 0 || len(call.Args) == 1 && daNonReplaySelector(call.Args[0]) == argument)
 }
+
 func daNonReplayTokenAssignment(statement ast.Stmt) bool {
 	assignment, ok := statement.(*ast.AssignStmt)
 	if !ok || assignment.Tok != token.ASSIGN || len(assignment.Lhs) != 1 || len(assignment.Rhs) != 1 || daNonReplaySelector(assignment.Lhs[0]) != "member.token" {
@@ -2215,6 +2214,7 @@ func daNonReplayTokenAssignment(statement ast.Stmt) bool {
 	call, ok := assignment.Rhs[0].(*ast.CallExpr)
 	return ok && daNonReplaySelector(call.Fun) == "commit.CandidateToken" && len(call.Args) == 0
 }
+
 func daNonReplayCapAbort(statement ast.Stmt, projected, cap, failure string) bool {
 	branch, ok := statement.(*ast.IfStmt)
 	if !ok || branch.Else != nil || len(branch.Body.List) != 2 {
@@ -2232,6 +2232,7 @@ func daNonReplayCapAbort(statement ast.Stmt, projected, cap, failure string) boo
 	zero, zeroOK := result.Results[0].(*ast.CompositeLit)
 	return zeroOK && daNonReplaySelector(zero.Type) == "daRelayAdmissionOutcome" && len(zero.Elts) == 0 && daNonReplaySelector(result.Results[1]) == failure
 }
+
 func checkDANonReplayPostReserveTail(function *ast.FuncDecl) string {
 	calls := map[string]int{}
 	ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -2283,6 +2284,7 @@ func checkDANonReplayPostReserveTail(function *ast.FuncDecl) string {
 	}
 	return ""
 }
+
 func TestAdmitDANonReplayPostReserveTailIsClosed(t *testing.T) {
 	if diagnostic := checkDANonReplayPostReserveTail(daNonReplayFunction(t, "applyDANonReplayPlan")); diagnostic != "" {
 		t.Fatal(diagnostic)
