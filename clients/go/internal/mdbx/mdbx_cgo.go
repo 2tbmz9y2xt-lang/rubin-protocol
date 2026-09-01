@@ -1332,7 +1332,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, erro
 	stateErr := s.observationStateError(operationUpdate)
 	if stateErr != nil {
 		truth := s.terminalTruth
-		if truth == 0 {
+		if truth-CommitTruthOld > CommitTruthUnknown-CommitTruthOld {
 			truth = CommitTruthOld
 		}
 		return truth, stateErr

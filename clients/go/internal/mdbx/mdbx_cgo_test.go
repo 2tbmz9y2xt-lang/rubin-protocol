@@ -3443,6 +3443,16 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 		t.Fatal("callback invocation drifted")
 	}
 	requireEnvironmentError(t, err, EngineLocalInvariant, operationUpdate, codeProblem, "invalid Store state")
+	store.state, store.terminalTruth = storeOPEN, CommitTruth(4)
+	self, env, writer, txn, cfg, dbis, state, terminal := store.self, store.env, store.writer, store.txn, store.config, store.dbis, store.state, store.terminal
+	truth, err = store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
+	if truth != CommitTruthOld || calls != 0 || store.self != self || store.env != env || store.writer != writer || store.txn != txn || store.config != cfg || store.dbis != dbis || store.state != state || !sameError(store.terminal, terminal) || store.terminalTruth != CommitTruth(4) {
+		t.Fatal("callback invocation drifted")
+	}
+	requireEnvironmentError(t, err, EngineLocalInvariant, operationUpdate, codeProblem, "invalid Store resource shape")
+	store.terminalTruth = 0
+	mustEnvironment(t, store.Close())
+	store = newUpdateStore(t)
 	store.state, store.self = storeOPEN, nil
 	truth, err = store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
 	if truth != CommitTruthOld || calls != 0 {
