@@ -1337,6 +1337,11 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, erro
 		}
 		return truth, stateErr
 	}
+	defer func() {
+		if s.state != storeOPEN && s.terminalTruth == 0 {
+			s.terminalTruth = CommitTruthOld
+		}
+	}()
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {

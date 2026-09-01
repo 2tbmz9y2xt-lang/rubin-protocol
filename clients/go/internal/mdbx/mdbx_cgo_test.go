@@ -2877,8 +2877,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|initializeLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|Update:s.terminalTruth = CommitTruthOld|initializeLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:Update|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -3379,14 +3379,12 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 	if strings.Count(plan, "reader.expire()") != 2 || !strings.Contains(plan, goexitCleanup) || strings.Index(plan, "returned = true") < strings.Index(plan, "invokeUpdate(") {
 		t.Fatal("callback precedence drifted")
 	}
-
 	var nilStore *Store
 	truth, err := nilStore.Update(func(*Reader) (Batch, error) { t.Fatal("callback invocation drifted"); return Batch{}, nil })
 	if truth != CommitTruthOld {
 		t.Fatal("callback precedence drifted")
 	}
 	requireEnvironmentError(t, err, EngineInvalidInput, operationUpdate, codeEINVAL, "nil Store")
-
 	store := newUpdateStore(t)
 	store.operations.Lock()
 	truth, err = store.Update(nil)
@@ -3396,24 +3394,21 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 		t.Fatal("callback precedence drifted")
 	}
 	mustEnvironment(t, store.Close())
-
 	callbackErr := errors.New("callback")
 	store = newUpdateStore(t)
 	calls := 0
 	truth, err = store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, callbackErr })
-	if calls != 1 || truth != CommitTruthOld || !sameError(err, callbackErr) || store.state != storeOPEN {
+	if calls != 1 || truth != CommitTruthOld || !sameError(err, callbackErr) || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatalf("callback invocation drifted: %d/%s/%v", calls, truth, err)
 	}
 	mustEnvironment(t, store.Close())
-
 	store = newUpdateStore(t)
 	truth, err = store.Update(func(*Reader) (Batch, error) { return Batch{}, nil })
-	if truth != CommitTruthOld || store.state != storeOPEN {
+	if truth != CommitTruthOld || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatal("callback precedence drifted")
 	}
 	requireEnvironmentError(t, err, EngineInvalidInput, operationUpdate, codeEINVAL, "invalid Update Batch")
 	mustEnvironment(t, store.Close())
-
 	store = newUpdateStore(t)
 	callbackErr, infrastructure := errors.New("callback"), nativeError(operationGet, codeEIO)
 	truth, err = store.Update(func(reader *Reader) (Batch, error) {
@@ -3422,7 +3417,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 		return Batch{}, callbackErr
 	})
 	parts, joined := err.(interface{ Unwrap() []error })
-	if truth != CommitTruthOld || !joined || len(parts.Unwrap()) != 2 || !sameError(parts.Unwrap()[0], callbackErr) || !sameError(parts.Unwrap()[1], infrastructure) || store.state != storeCLOSED {
+	if truth != CommitTruthOld || !joined || len(parts.Unwrap()) != 2 || !sameError(parts.Unwrap()[0], callbackErr) || !sameError(parts.Unwrap()[1], infrastructure) || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !validStoreShape(store) {
 		t.Fatal("callback precedence drifted")
 	}
 	if again, cached := store.Update(func(*Reader) (Batch, error) { t.Fatal("callback invocation drifted"); return Batch{}, nil }); again != CommitTruthOld || !sameError(cached, err) {
@@ -3436,7 +3431,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 		reader.active.Store(false)
 		return updateLifecycleBatch(), nil
 	})
-	if truth != CommitTruthOld || !sameError(err, infrastructure) || store.state != storeCLOSED {
+	if truth != CommitTruthOld || !sameError(err, infrastructure) || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !validStoreShape(store) {
 		t.Fatal("callback precedence drifted")
 	}
 
@@ -3471,7 +3466,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 				panic(panicValue)
 			})
 		}()
-		if recovered != panicValue || (withInfrastructure && store.state != storeCLOSED) || (!withInfrastructure && store.state != storeOPEN) {
+		if recovered != panicValue || (withInfrastructure && (store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !validStoreShape(store))) || (!withInfrastructure && (store.state != storeOPEN || store.terminalTruth != 0)) {
 			t.Fatal("callback precedence drifted")
 		}
 		if !withInfrastructure {
@@ -3517,7 +3512,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 			mustEnvironment(t, store.Close())
 			continue
 		}
-		if store.state != storeCLOSED || store.terminalTruth != 0 || !sameError(store.terminal, infrastructure) {
+		if store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, infrastructure) || !validStoreShape(store) {
 			t.Fatal("callback precedence drifted")
 		}
 		if nextTruth, cached := store.Update(func(*Reader) (Batch, error) { t.Fatal("callback precedence drifted"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(cached, infrastructure) {
@@ -3935,16 +3930,18 @@ func TestUpdateTerminalLegality(t *testing.T) {
 
 	store := newUpdateStore(t)
 	forgedCommit := &CommitError{Cause: nativeError(operationUpdate, codeENOSPC), Truth: CommitTruthNew}
-	wrappedCommit := fmt.Errorf("callback: %w", forgedCommit)
+	wrappedCommit, infrastructure := fmt.Errorf("callback: %w", forgedCommit), nativeError(operationGet, codeEIO)
 	truth, terminal := store.Update(func(reader *Reader) (Batch, error) {
-		reader.failure = nativeError(operationGet, codeEIO)
+		reader.failure = infrastructure
 		reader.active.Store(false)
 		return Batch{}, wrappedCommit
 	})
-	if truth != CommitTruthOld || terminal == nil || store.state != storeCLOSED || store.terminalTruth != 0 || !sameError(store.terminal, terminal) {
+	if truth != CommitTruthOld || terminal == nil || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, terminal) || !validStoreShape(store) {
 		t.Fatal("terminal legality drifted")
 	}
-	if nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal legality drifted"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(nextErr, terminal) {
+	forgedCommit.Truth, forgedCommit.Cause, forgedCommit.ReadbackCause = CommitTruth(4), errors.New("mutated cause"), errors.New("mutated readback")
+	infrastructure.Class, infrastructure.Operation, infrastructure.Code, infrastructure.Diagnostic, infrastructure.Cause, infrastructure.ReopenRequired = EngineInvalidInput, "mutated", codeSuccess, "mutated", errors.New("mutated cause"), true
+	if nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal legality drifted"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(nextErr, terminal) || !validStoreShape(store) || !sameError(store.View(func(*Reader) error { t.Fatal("terminal legality drifted"); return nil }), terminal) || !sameError(store.Close(), terminal) {
 		t.Fatal("terminal legality drifted")
 	}
 
