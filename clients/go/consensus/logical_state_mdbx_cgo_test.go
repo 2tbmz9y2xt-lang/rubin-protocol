@@ -118,19 +118,14 @@ func logicalMDBXSeeded(t *testing.T) *mdbx.Store {
 
 func logicalMDBXView(t *testing.T, store *mdbx.Store, height uint64, body func(*logicalMDBXStateView)) {
 	t.Helper()
-	err := store.View(func(reader *mdbx.Reader) error {
-		body(newLogicalMDBXStateView(reader, logicalMDBXImage, height))
-		return nil
-	})
+	err := store.View(func(r *mdbx.Reader) error { body(newLogicalMDBXStateView(r, logicalMDBXImage, height)); return nil })
 	logicalMDBXAssert(t, err == nil, "view: %v", err)
 }
 
 // logicalMDBXConvert reproduces the required composition: one snapshot, one view,
 // the declared observations and the conversion, all inside a single callback.
-func logicalMDBXConvert(t *testing.T, store *mdbx.Store, height uint64, lookups []Outpoint, build func(*logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata]) (mdbx.Batch, *logicalStateFailure) {
+func logicalMDBXConvert(t *testing.T, store *mdbx.Store, height uint64, lookups []Outpoint, build func(*logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata]) (batch mdbx.Batch, failure *logicalStateFailure) {
 	t.Helper()
-	var batch mdbx.Batch
-	var failure *logicalStateFailure
 	logicalMDBXView(t, store, height, func(view *logicalMDBXStateView) {
 		if height > 0 {
 			view.Counters()
@@ -440,6 +435,12 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 			logicalMDBXCheckExtra(t, tc.label, tc.cause, tc.outcome, tc.extras, image, batch, failure)
 		})
 	}
+	t.Run("rank5 entry reference to the counter row", func(t *testing.T) {
+		// Image 0x1010101010101010 makes the counter key's leading bytes equal the image, so only the RefDBI clause can refuse it.
+		view := &logicalMDBXStateView{imageID: 0x1010101010101010, height: 1, counterPresent: true, counters: logicalMDBXBase}
+		batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, logicalMDBXBase, logicalMDBXBase, nil, nil, mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: entryKey, AfterKind: mdbx.AfterOldValueRef, RefDBI: logicalMDBXDBIs[0], RefKey: logicalMDBXMust(mdbx.MetaKey(0x10, view.imageID))}))
+		logicalMDBXWantFailure(t, "undo provenance drifted", batch, failure, logicalStateFailureLocalInvariant, "utxo-v1")
+	})
 	t.Run("create-once read failure routes through the classifier", func(t *testing.T) {
 		var escaped *mdbx.Reader
 		logicalMDBXAssert(t, store.View(func(reader *mdbx.Reader) error { escaped = reader; return nil }) == nil, "view: escaped reader")

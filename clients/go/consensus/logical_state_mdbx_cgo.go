@@ -294,7 +294,6 @@ func logicalMDBXMutations(view *logicalMDBXStateView, result logicalStateCounter
 // logicalMDBXWithExtras applies the residual policy, owns every emitted extra and sorts once by (DBI.Rank, Key),
 // rejecting any repeated target.
 func logicalMDBXWithExtras(mutations, extras []mdbx.Mutation, view *logicalMDBXStateView) ([]mdbx.Mutation, *logicalStateFailure) {
-	// Bridge-owned rows for provenance; the counter can never match a utxo-v1 RefDBI.
 	logical := mutations[:len(mutations):len(mutations)]
 	for _, extra := range extras {
 		if failure := logicalMDBXExtraPolicy(extra, view, logical); failure != nil {
@@ -348,8 +347,8 @@ func logicalMDBXUndoPolicy(extra mdbx.Mutation, view *logicalMDBXStateView, logi
 	if extra.AfterKind != mdbx.AfterOldValueRef {
 		return nil
 	}
-	if logicalMDBXKeyImage(extra.RefKey) != view.imageID {
-		return localLogicalStateFailure("undo reference key is short or targets a different logical image")
+	if extra.RefDBI.Rank != 1 || logicalMDBXKeyImage(extra.RefKey) != view.imageID {
+		return localLogicalStateFailure("undo reference is not utxo-v1, is short or targets a different logical image")
 	}
 	for _, row := range logical {
 		if row.BeforePresent && row.DBI == extra.RefDBI && bytes.Equal(row.Key, extra.RefKey) {
