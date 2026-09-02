@@ -286,3 +286,278 @@ func canonicalDASetIdentityIncluded(candidates []canonicalDASetIdentity, identit
 	}
 	return false
 }
+
+// preparedCanonicalDAOwnerCandidates is ONE matched pair of private candidates:
+// D1, the retained-DA image the transition would publish, and O1, the owner
+// image that keeps exactly the claims D1's surviving members still hold, with
+// the indexes rebuilt from it. Neither half is publishable alone, and neither
+// half shares a mutable container with the inputs it was derived from or with
+// its sibling.
+type preparedCanonicalDAOwnerCandidates struct {
+	retained   *DARelayState
+	pending    pendingOutpointSnapshot
+	ownerIndex pendingOutpointIndex
+}
+
+// prepareCanonicalDAOwnerCandidates derives the matched D1/O1 pair from ONE
+// caller-owned owner-ready retained snapshot, ONE owner snapshot, the same
+// transition's canonical inclusion identities and its captured final-chain
+// context. It returns both halves or exactly one ordered error and neither half.
+//
+// Both inputs are CALLER-OWNED and stable for the call: this takes no live
+// transition, relay or owner lock, rereads nothing, publishes nothing and
+// mutates neither input nor anything reachable from one. The only mutable state
+// it touches is the fresh image it is building. Retained bytes and stored
+// members are borrowed read-only and cannot escape: every surviving record is
+// deep-copied into D1 and every surviving claim is copied into O1.
+//
+// The phases run in the order RUBIN_MEMPOOL_POLICY.md Section 6.4.1 fixes and
+// are PHASE-MAJOR — every record clears one phase before any record enters the
+// next: (1-3) structure, identity binding, accounting and locator closure of the
+// whole snapshot; (4) every member against the final chain with its exact stored
+// fee, unioned with the exact-inclusion removals; (5) the complete
+// member/finalized-DA-claim bijection against the one owner snapshot; (6) the
+// projected pair and its closing D/O bijection proof. The first defect in
+// ascending raw da_id — inside a record, commit first then ascending chunk index
+// — is the sole result.
+//
+// The three classes of the shared validator are carried verbatim: keep=false is
+// an EXCLUSION that removes a record and raises no error, a canonical precommit
+// plan abort is returned unchanged, and a terminal stays the retained-DA
+// terminal class. This phase-major precedence deliberately differs from the
+// record-major live prepareCanonicalDAImage, which this builder never consults.
+//
+// Cost, accepted deliberately: each removal reproves the locator index through
+// the shared owner-atomic projector rather than trusting the sweep that already
+// ran, so a removal is O(locators). RUB-678 owns the live call site; there is
+// none today.
+func prepareCanonicalDAOwnerCandidates(
+	retained *DARelayState,
+	owner *PendingOutpointOwner,
+	pending pendingOutpointSnapshot,
+	included []canonicalDASetIdentity,
+	chain canonicalFinalChainContext,
+) (preparedCanonicalDAOwnerCandidates, error) {
+	var zero preparedCanonicalDAOwnerCandidates
+	image, err := validateCanonicalDARetainedSnapshot(retained, owner)
+	if err != nil {
+		return zero, err
+	}
+	removed, err := canonicalDAOwnerRemovals(image, included, chain)
+	if err != nil {
+		return zero, err
+	}
+	if err := validateCanonicalDAOwnerClaims(owner, pending, image); err != nil {
+		return zero, err
+	}
+	return buildCanonicalDAOwnerCandidates(retained, owner, pending, image, removed)
+}
+
+// canonicalDAOwnerRemovals is phase 4: EVERY member of EVERY record is judged
+// against the supplied final-chain context before any owner work, so an earlier
+// member's ordinary invalidity can never hide a later member's terminal or plan
+// abort. A record is removed if any member is not final_chain_valid OR if its
+// exact set identity occurs in the inclusion list; the two causes form one
+// union, so a record matched by both is removed once.
+func canonicalDAOwnerRemovals(image canonicalDARetainedImage, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (map[[32]byte]bool, error) {
+	removed := make(map[[32]byte]bool, len(image.records))
+	for i := range image.members {
+		member := image.members[i]
+		checked, keep, err := canonicalRetainedDACheckedMember(member.parsed, chain)
+		if err != nil {
+			return nil, retaggedCanonicalDATerminal(err, member.parsed.label)
+		}
+		if !keep {
+			removed[member.daID] = true
+			continue
+		}
+		if err := canonicalDAMemberFeeBound(member, checked); err != nil {
+			return nil, err
+		}
+	}
+	for i := range image.records {
+		if canonicalDASetIdentityIncluded(included, image.records[i].identity) {
+			removed[image.records[i].daID] = true
+		}
+	}
+	return removed, nil
+}
+
+// validateCanonicalDAOwnerClaims is phase 5: the retained members and the
+// FINALIZED DA claims of the one owner snapshot are proven to be one bijection.
+// Every member resolves its own exclusive claim, that claim is shape-valid for
+// this owner under the snapshot's own high-waters, and no DA claim is left
+// unbound. A standard-domain claim is never bound, removed or reordered; the
+// only property this phase reads of one is that its token is unique, which the
+// rebuilt by-token index depends on.
+func validateCanonicalDAOwnerClaims(owner *PendingOutpointOwner, pending pendingOutpointSnapshot, image canonicalDARetainedImage) error {
+	bound, err := canonicalDAOwnerBoundClaims(owner, pending, image)
+	if err != nil {
+		return err
+	}
+	for i := range pending.claims {
+		if pending.claims[i].domain == PendingOutpointDA && !bound[pending.claims[i].token] {
+			return terminalCanonicalDAError(fmt.Errorf("DA claim for %x binds no retained member", pending.claims[i].txid))
+		}
+	}
+	return nil
+}
+
+// canonicalDAOwnerBoundClaims resolves one claim per retained member in the
+// image's own deterministic order and reports the tokens it bound. Two members
+// naming one token, a token the snapshot does not carry, and a claim that does
+// not describe its member are all terminal.
+func canonicalDAOwnerBoundClaims(owner *PendingOutpointOwner, pending pendingOutpointSnapshot, image canonicalDARetainedImage) (map[PendingOutpointToken]bool, error) {
+	byToken, err := canonicalDAOwnerClaimsByToken(pending)
+	if err != nil {
+		return nil, err
+	}
+	bound := make(map[PendingOutpointToken]bool, len(byToken))
+	for i := range image.members {
+		member := image.members[i]
+		claim, held := byToken[member.stored.token]
+		if !held || bound[member.stored.token] {
+			return nil, terminalCanonicalDAError(fmt.Errorf("retained DA %s of %x holds no exclusive owner claim", member.parsed.label, member.daID))
+		}
+		if err := validateCanonicalMempoolClaimShape(owner, claim, pending); err != nil {
+			return nil, terminalCanonicalDAError(fmt.Errorf("retained DA %s of %x: %w", member.parsed.label, member.daID, err))
+		}
+		if !canonicalDAClaimBindsMember(claim, member.stored) {
+			return nil, terminalCanonicalDAError(fmt.Errorf("retained DA %s of %x is not described by its claim", member.parsed.label, member.daID))
+		}
+		bound[member.stored.token] = true
+	}
+	return bound, nil
+}
+
+// canonicalDAOwnerClaimsByToken indexes the snapshot's claims by token in the
+// snapshot's own order. A token carried twice is terminal before any member is
+// resolved, so no member can bind a claim the image cannot name.
+func canonicalDAOwnerClaimsByToken(pending pendingOutpointSnapshot) (map[PendingOutpointToken]pendingOutpointClaim, error) {
+	byToken := make(map[PendingOutpointToken]pendingOutpointClaim, len(pending.claims))
+	for i := range pending.claims {
+		if _, duplicate := byToken[pending.claims[i].token]; duplicate {
+			return nil, terminalCanonicalDAError(fmt.Errorf("owner snapshot carries one token twice for %x", pending.claims[i].txid))
+		}
+		byToken[pending.claims[i].token] = pending.claims[i]
+	}
+	return byToken, nil
+}
+
+// canonicalDAClaimBindsMember is the exact claim-to-member rule shared by the
+// phase-5 bijection and the pair's closing proof: the DA domain, the member's
+// own txid, its ordered input set, and a finalized claim.
+func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemberIdentity) bool {
+	return claim.domain == PendingOutpointDA && claim.txid == member.txid &&
+		claim.finalized && slices.Equal(claim.inputs, member.inputs)
+}
+
+// buildCanonicalDAOwnerCandidates is phase 6: the pair is projected, every
+// survivor is preserved exactly, the owner indexes are rebuilt from O1 alone,
+// and the pair is returned only after the closing bijection proof.
+//
+// Removal goes through the shared owner-atomic projector, so one removal retires
+// the record, its locator rows and its accounting together; the prefetch
+// reservations that projector leaves alone are released explicitly, as the
+// legacy remover does. Survivors are deep-copied so no chunk map, member or byte
+// slice of the input is reachable through D1.
+func buildCanonicalDAOwnerCandidates(
+	retained *DARelayState,
+	owner *PendingOutpointOwner,
+	pending pendingOutpointSnapshot,
+	image canonicalDARetainedImage,
+	removed map[[32]byte]bool,
+) (preparedCanonicalDAOwnerCandidates, error) {
+	var zero preparedCanonicalDAOwnerCandidates
+	// ...Locked names the projection's own single-owner invariant, not a second
+	// lock: this image is private until RUB-678 publishes it.
+	projected := retained.cloneForAtomicBatchLocked()
+	for i := range image.records {
+		daID := image.records[i].daID
+		if !removed[daID] {
+			projected.sets[daID] = retained.sets[daID].cloneOwnerReady()
+			continue
+		}
+		placement, err := projected.projectDARecordImageLocked(stageDAOwnerReadyRemoval(retained.sets[daID], true))
+		if err != nil {
+			return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
+		}
+		projected.installDASetRecordLocked(placement)
+		projected.prefetch.releaseSet(daID)
+	}
+	candidates := preparedCanonicalDAOwnerCandidates{retained: projected, pending: canonicalDAOwnerPending(pending, image, removed)}
+	candidates.ownerIndex = buildCanonicalOwnerIndex(owner, candidates.pending)
+	if err := canonicalDAOwnerPairClosed(candidates, image, removed); err != nil {
+		return zero, err
+	}
+	return candidates, nil
+}
+
+// canonicalDAOwnerPending is O1: the supplied owner image minus the finalized
+// claim of every removed member, in the snapshot's original order. Every
+// surviving claim — DA and standard alike — is carried with its own copied input
+// slice, and the stable tip and both high-waters are carried verbatim.
+func canonicalDAOwnerPending(pending pendingOutpointSnapshot, image canonicalDARetainedImage, removed map[[32]byte]bool) pendingOutpointSnapshot {
+	dropped := make(map[PendingOutpointToken]bool, len(image.members))
+	for i := range image.members {
+		if removed[image.members[i].daID] {
+			dropped[image.members[i].stored.token] = true
+		}
+	}
+	out := pending
+	out.claims = make([]pendingOutpointClaim, 0, len(pending.claims))
+	for i := range pending.claims {
+		if dropped[pending.claims[i].token] {
+			continue
+		}
+		claim := pending.claims[i]
+		claim.inputs = slices.Clone(claim.inputs)
+		out.claims = append(out.claims, claim)
+	}
+	return out
+}
+
+// canonicalDAOwnerPairClosed is the closing proof the pair is returned only
+// after: every surviving member still resolves its own finalized claim and every
+// outpoint row of that claim through the REBUILT index, O1 carries no DA claim
+// beyond those members, and D1 satisfies the same locator/accounting closure its
+// input snapshot passed.
+func canonicalDAOwnerPairClosed(candidates preparedCanonicalDAOwnerCandidates, image canonicalDARetainedImage, removed map[[32]byte]bool) error {
+	survivors := 0
+	for i := range image.members {
+		if removed[image.members[i].daID] {
+			continue
+		}
+		survivors++
+		if err := canonicalDAOwnerSurvivingClaim(candidates.ownerIndex, image.members[i]); err != nil {
+			return err
+		}
+	}
+	if daClaims := canonicalDAOwnerDomainClaims(candidates.pending); daClaims != survivors {
+		return terminalCanonicalDAError(fmt.Errorf("owner candidate holds %d DA claims against %d surviving retained members", daClaims, survivors))
+	}
+	return canonicalDARetainedImageClosed(candidates.retained, candidates.retained.sortedRetainedDAIDsLocked())
+}
+
+func canonicalDAOwnerSurvivingClaim(index pendingOutpointIndex, member canonicalDARetainedMember) error {
+	claim, err := index.claimForToken(member.stored.token)
+	if err != nil || claim == nil || !canonicalDAClaimBindsMember(*claim, member.stored) {
+		return terminalCanonicalDAError(fmt.Errorf("surviving retained DA %s of %x lost its owner claim", member.parsed.label, member.daID))
+	}
+	for _, input := range member.stored.inputs {
+		if index.byOutpoint[input] != (pendingOutpointRow{token: member.stored.token, txid: member.stored.txid}) {
+			return terminalCanonicalDAError(fmt.Errorf("surviving retained DA %s of %x lost an owner outpoint row", member.parsed.label, member.daID))
+		}
+	}
+	return nil
+}
+
+func canonicalDAOwnerDomainClaims(pending pendingOutpointSnapshot) int {
+	claims := 0
+	for i := range pending.claims {
+		if pending.claims[i].domain == PendingOutpointDA {
+			claims++
+		}
+	}
+	return claims
+}
