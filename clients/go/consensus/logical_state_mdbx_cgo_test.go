@@ -248,24 +248,24 @@ func TestLogicalMDBXErrorClassifier(t *testing.T) {
 
 func TestLogicalMDBXPlanToBatch(t *testing.T) {
 	store := logicalMDBXSeeded(t)
-	entryD, entryE := logicalMDBXEntry(7, 0xd4), logicalMDBXEntry(9, 0xe5)
-	bytesD, bytesE := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD))), uint64(len(logicalStateEntryBytes(logicalMDBXOpB, entryE)))
+	entryD, entryE, entryX := logicalMDBXEntry(7, 0xd4), logicalMDBXEntry(9, 0xe5), logicalMDBXEntry(MAX_COVENANT_DATA_PER_OUTPUT+1, 0x5b)
+	bytesD, bytesE, bytesX := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD))), uint64(len(logicalStateEntryBytes(logicalMDBXOpB, entryE))), uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryX)))
 	delA, delB := []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}, []logicalStateDelete{{Outpoint: logicalMDBXOpB, EntryBytes: logicalMDBXBytesB}}
 	putD, counterOnly := []logicalStatePut{{Outpoint: logicalMDBXOpD, Entry: entryD}}, []mdbx.Mutation{logicalMDBXCounterRow(true, logicalMDBXTotal, 3)}
 	deleteRowA, opE := mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpA), BeforePresent: true, AfterKind: mdbx.AfterAbsent}, Outpoint{Txid: filled32(0x22), Vout: 9}
 	replaceRowB := logicalMDBXUTXORow(logicalMDBXOpB, entryE)
 	replaceRowB.BeforePresent = true
 	afterA, afterE, afterD := logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA, entries: 2}, logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesB + bytesE, entries: 3}, logicalStateCounters{bytes: logicalMDBXTotal + bytesD, entries: 4}
-
 	for _, tc := range []struct {
 		name, label    string
-		cause          string
 		counters       bool
 		height         uint64
 		lookups        []Outpoint
 		parent, result logicalStateCounters
+		cause          string
 		deletes        []logicalStateDelete
 		puts           []logicalStatePut
+		extras         []mdbx.Mutation
 		kind           logicalStateFailureKind
 		want           []mdbx.Mutation
 	}{
@@ -277,10 +277,13 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 		{name: "put sorts before a delete", label: "replacement coalescing drifted", height: 1, lookups: []Outpoint{opE, logicalMDBXOpC}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesC + bytesD, entries: 3}, deletes: []logicalStateDelete{{Outpoint: logicalMDBXOpC, EntryBytes: logicalMDBXBytesC}}, puts: []logicalStatePut{{Outpoint: opE, Entry: entryD}}, want: []mdbx.Mutation{logicalMDBXCounterRow(true, logicalMDBXTotal-logicalMDBXBytesC+bytesD, 3), logicalMDBXUTXORow(opE, entryD), {DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpC), BeforePresent: true, AfterKind: mdbx.AfterAbsent}}},
 		{name: "counter observation mismatch", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: logicalMDBXTotal + 100, entries: 3}, result: logicalStateCounters{bytes: logicalMDBXTotal + 100 - logicalMDBXBytesA, entries: 2}, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "genesis put", label: "counter mutation missing", height: 0, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, want: []mdbx.Mutation{logicalMDBXCounterRow(false, bytesD, 1), logicalMDBXUTXORow(logicalMDBXOpD, entryD)}},
-		{name: "genesis with parent counters", label: "genesis form accepted", height: 0, parent: logicalStateCounters{bytes: 56, entries: 1}, result: logicalStateCounters{bytes: 56 + bytesD, entries: 2}, puts: putD, kind: logicalStateFailureLocalInvariant},
-		{name: "genesis with delete", label: "genesis form accepted", height: 0, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
+		{name: "genesis with parent counters", label: "genesis form accepted", height: 0, parent: logicalStateCounters{bytes: 56, entries: 1}, result: logicalStateCounters{bytes: 56 + bytesD, entries: 2}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
+		{name: "genesis with delete", label: "genesis form accepted", height: 0, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
+		{name: "genesis with delete precedes a cross-image extra", label: "genesis form accepted", height: 0, parent: logicalStateCounters{bytes: 56, entries: 1}, deletes: delA, extras: []mdbx.Mutation{{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage+1, 5)), AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(filled32(1), filled32(2), [40]byte{3})}}, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
+		{name: "genesis with parent counters precedes an arithmetic contradiction", label: "genesis form accepted", height: 0, parent: logicalStateCounters{bytes: 56, entries: 1}, result: logicalStateCounters{bytes: 56 + bytesD, entries: 5}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
 		{name: "genesis with a counter observation", label: "genesis form accepted", height: 0, counters: true, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
-		{name: "genesis with observation", label: "genesis form accepted", height: 0, lookups: []Outpoint{logicalMDBXOpA}, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, kind: logicalStateFailureLocalInvariant},
+		{name: "genesis with observation", label: "genesis form accepted", height: 0, lookups: []Outpoint{logicalMDBXOpA}, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
+		{name: "put over the covenant data bound", label: "covenant bound accepted", height: 0, result: logicalStateCounters{bytes: bytesX, entries: 1}, puts: []logicalStatePut{{Outpoint: logicalMDBXOpD, Entry: entryX}}, kind: logicalStateFailureLocalInvariant, cause: "covenant"},
 		{name: "non-genesis without observations", label: "DELETE observation drifted", height: 1, parent: logicalMDBXBase, result: afterA, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "delete length mismatch", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes + 1, entries: 2}, deletes: []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA - 1}}, kind: logicalStateFailureLocalInvariant},
 		{name: "put over a present row", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: logicalMDBXTotal + logicalMDBXBytesA, entries: 4}, puts: []logicalStatePut{{Outpoint: logicalMDBXOpA, Entry: logicalMDBXEntry(0, 0xa1)}}, kind: logicalStateFailureLocalInvariant},
@@ -299,7 +302,7 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 				if tc.counters {
 					view.Counters()
 				}
-				return logicalMDBXBuild(view, tc.parent, tc.result, tc.deletes, tc.puts)
+				return logicalMDBXBuild(view, tc.parent, tc.result, tc.deletes, tc.puts, tc.extras...)
 			})
 			if tc.kind != 0 {
 				logicalMDBXWantFailure(t, tc.label, batch, failure, tc.kind, tc.cause)
@@ -308,7 +311,6 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 			logicalMDBXWantBatch(t, tc.label, batch, failure, tc.want...)
 		})
 	}
-
 	t.Run("view preconditions precede plan shape", func(t *testing.T) {
 		unsorted := []logicalStateDelete{{Outpoint: logicalMDBXOpB}, {Outpoint: logicalMDBXOpA}}
 		for _, plan := range []logicalStatePlan[logicalMDBXMetadata]{{}, {Deletes: unsorted}, logicalMDBXBuild(newLogicalMDBXStateView(nil, 0, 0), logicalStateCounters{}, logicalStateCounters{}, unsorted, nil)} {
@@ -317,7 +319,6 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 			logicalMDBXAssert(t, strings.Contains(failure.cause.Error(), "view") || strings.Contains(failure.cause.Error(), "image"), "view precondition accepted: reported %v", failure.cause)
 		}
 	})
-
 	t.Run("StateEntryBytes projection", func(t *testing.T) {
 		for _, size := range []int{0, 1, 252, 253, 65_535, 65_536} {
 			entry := logicalMDBXEntry(size, 0x5a)
@@ -334,13 +335,7 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 // logicalMDBXExtraOutcome enumerates every classification an extra can receive.
 type logicalMDBXExtraOutcome uint8
 
-const (
-	logicalMDBXEmit logicalMDBXExtraOutcome = iota
-	logicalMDBXOmit
-	logicalMDBXLocal
-	logicalMDBXIntegrity
-	logicalMDBXAdapterInvalid
-)
+const logicalMDBXEmit, logicalMDBXOmit, logicalMDBXLocal, logicalMDBXIntegrity, logicalMDBXAdapterInvalid logicalMDBXExtraOutcome = 0, 1, 2, 3, 4
 
 func TestLogicalMDBXExtraMatrix(t *testing.T) {
 	store := logicalMDBXSeeded(t)
@@ -503,11 +498,9 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	truth, err := run(0, []logicalTouchedState{{Outpoint: logicalMDBXOpA, FinalPresent: true, Final: entryA}}, header)
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "genesis composition failed: truth=%v err=%v", truth, err)
 	logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(logicalMDBXBytesA, 1)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpA), logicalMDBXValue(entryA)}, [3][]byte{{3}, headerKey, headerValue})
-
 	truth, err = run(1, []logicalTouchedState{{Outpoint: logicalMDBXOpA}, {Outpoint: logicalMDBXOpD, FinalPresent: true, Final: entryD}}, header)
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "height-1 composition failed: truth=%v err=%v", truth, err)
 	logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(entryD)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpA), nil}, [3][]byte{{3}, headerKey, headerValue})
-
 	t.Run("converter rejection keeps the old image", func(t *testing.T) {
 		var inner *logicalStateFailure
 		truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
@@ -524,13 +517,11 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &rejected) && rejected == inner && rejected.kind == logicalStateFailureLocalInvariant, "converter rejection drifted: truth=%v err=%v identity=%v", truth, err, rejected == inner)
 		logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)})
 	})
-
 	t.Run("adapter-invalid extra reaches the adapter", func(t *testing.T) {
 		truth, err := run(1, nil, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{0x00}, AfterKind: mdbx.AfterLiteral, Literal: mdbx.SchemaVersionValue()})
 		var engine *mdbx.EngineError
 		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &engine) && engine.Class == mdbx.EngineInvalidInput, "adapter precondition drifted: truth=%v err=%v", truth, err)
 	})
-
 	t.Run("repeated genesis is a targeted Store mismatch", func(t *testing.T) {
 		truth, err := run(0, []logicalTouchedState{{Outpoint: logicalMDBXOpB, FinalPresent: true, Final: entryA}})
 		var engine *mdbx.EngineError
