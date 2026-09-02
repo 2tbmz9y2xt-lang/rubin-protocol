@@ -419,7 +419,7 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	// Get block MTP
 	blockMTP, err := m.nextBlockMTP(nextHeight)
 	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable(err.Error()), RelayAdmissionUnavailable)
 	}
 
 	// Prepare policy UTXOs if needed
@@ -428,15 +428,18 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 		return nil, nil, err
 	}
 	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(tx, policyUtxos); reject {
-		return nil, nil, txAdmitRejected(reason)
+		return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
 	}
 	if policy.PolicyRejectSimplicityPreActivation {
+		// The (reject, err) tuple discriminates the deployment-set-dependent half
+		// of this lane from its context-complete well-formedness verdict; the
+		// standard producer reads the same tuple at its own site.
 		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
 		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
+			return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForSimplicityPreActivationOutcome(reject, policy.RotationProvider))
 		}
 		if reject {
-			return nil, nil, txAdmitRejected(reason)
+			return nil, nil, selectRelayDisposition(txAdmitRejected(reason), relayDispositionForSimplicityPreActivationOutcome(true, policy.RotationProvider))
 		}
 	}
 
@@ -448,7 +451,10 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 
 	// Apply policy validation
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
+		// Classified from the ORIGINAL fan-out error: its typed wrappers, the
+		// provider-decided Simplicity outcome and the impossible invariant, are
+		// read by type and are lost once the public wrapper renders the message.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForPolicyError(err))
 	}
 
 	// Extract inputs and return

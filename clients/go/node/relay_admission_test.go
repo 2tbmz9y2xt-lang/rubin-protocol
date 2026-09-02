@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -1644,4 +1645,151 @@ func retargetFirstWitnessSuite(t *testing.T, txBytes []byte, suiteID uint8) []by
 		t.Fatalf("MarshalTx after retarget: %v", err)
 	}
 	return out
+}
+
+func mutateDAAdmissionPolicy(f *daNonReplayFixture, mutate func(*MempoolConfig)) {
+	f.mp.mu.Lock()
+	defer f.mp.mu.Unlock()
+	mutate(&f.mp.policy)
+}
+
+// TestAdmitDACandidateFailuresCarryOriginatingDisposition drives ONE
+// independently constructed signed DA candidate per originating branch of the
+// shared parsed-candidate path through the dormant AdmitDA entry point after an
+// ABSENT observation, and pins the exact public kind, the exact unchanged
+// message and the Section 6.5 disposition the branch itself selected. A branch
+// AdmitDA's own prefix makes unreachable is listed below with its structural
+// reason instead of an executed row.
+func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
+	simplicityOutput := consensus.TxOutput{Value: 1, CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x53}, nil)}
+	for _, row := range []struct {
+		name        string
+		build       func(*testing.T, *daNonReplayFixture) []byte
+		kind        TxAdmitErrorKind
+		message     string
+		disposition RelayAdmissionDisposition
+	}{
+		{
+			name: "unavailable chain context",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				raw := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe1}, payload: []byte("context")}).raw
+				f.mp.pendingOutpoints.mu.Lock()
+				f.mp.pendingOutpoints.stableTip = PendingOutpointTip{HasTip: true, Height: ^uint64(0), Hash: f.state.TipHash}
+				f.mp.pendingOutpoints.mu.Unlock()
+				f.state.Height = ^uint64(0)
+				return raw
+			},
+			kind: TxAdmitUnavailable, message: "height overflow", disposition: RelayAdmissionUnavailable,
+		},
+		{
+			name: "unavailable block MTP",
+			build: func(t *testing.T, f *daNonReplayFixture) []byte {
+				f.mp.blockStore = mustCreateBlockStore(t, filepath.Join(t.TempDir(), "blockstore"))
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe2}, payload: []byte("mtp")}).raw
+			},
+			kind: TxAdmitUnavailable, message: "missing canonical hash at height 100 for timestamp context (next_height=101)", disposition: RelayAdmissionUnavailable,
+		},
+		{
+			name: "missing input dependency",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe3}, payload: []byte("dependency")})
+				delete(f.state.Utxos, tx.inputs[0])
+				return tx.raw
+			},
+			kind: TxAdmitRejected, message: "TX_ERR_MISSING_UTXO: utxo not found", disposition: RelayAdmissionMissingDependency,
+		},
+		{
+			name: "static unsupported form",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe4}, payload: []byte("core-ext"),
+					extraOutputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT}}}).raw
+			},
+			kind: TxAdmitRejected, message: "CORE_EXT output unsupported by Go node runtime", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "simplicity pre-activation without a deployment provider",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) { c.PolicyRejectSimplicityPreActivation = true })
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe5}, payload: []byte("frozen"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput}}).raw
+			},
+			kind: TxAdmitRejected, message: "CORE_SIMPLICITY output pre-ACTIVE", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "simplicity pre-activation decided from a deployment provider",
+			build: func(t *testing.T, f *daNonReplayFixture) []byte {
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
+					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = true, knownInactiveSimplicityProvider(t)
+				})
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe6}, payload: []byte("provider"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput}}).raw
+			},
+			kind: TxAdmitRejected, message: "CORE_SIMPLICITY output pre-ACTIVE", disposition: RelayAdmissionUnavailable,
+		},
+		{
+			name: "simplicity well-formedness verdict reads no deployment set",
+			build: func(t *testing.T, f *daNonReplayFixture) []byte {
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
+					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = true, knownInactiveSimplicityProvider(t)
+				})
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe7}, payload: []byte("malformed"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput, {Value: 1, CovenantType: consensus.COV_TYPE_P2PK}}}).raw
+			},
+			kind: TxAdmitRejected, message: "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_P2PK covenant_data length", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "consensus rejection",
+			build: func(t *testing.T, f *daNonReplayFixture) []byte {
+				tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe8}, payload: []byte("consensus")})
+				parsed, _, _, consumed, err := consensus.ParseTx(tx.raw)
+				if err != nil || consumed != len(tx.raw) {
+					t.Fatalf("independent ParseTx=(%d,%v)", consumed, err)
+				}
+				parsed.Outputs[0].Value++
+				return mustMarshalTxForNodeTest(t, parsed)
+			},
+			kind: TxAdmitRejected, message: "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "policy rejection",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) { c.PolicyMaxDaBytesPerBlock = 1 })
+				return f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0xe9}, chunkCount: 1, commitment: [32]byte{0xa8}, commitmentOutputs: 1}).raw
+			},
+			kind: TxAdmitRejected, message: "DA declared chunk budget exceeded (declared_da_bytes=524288 max_da_bytes=1 chunk_count=1 chunk_bytes=524288)", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "DA payload hash mismatch",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xea}, payload: []byte("hash"), literalChunkHash: true, chunkHash: [32]byte{0xff}}).raw
+			},
+			kind: TxAdmitRejected, message: "DA chunk payload hash mismatch", disposition: RelayAdmissionStableTerminalReject,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			raw := row.build(t, f)
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(raw, publicPeer(t, row.name))
+			requirePublicDAFailure(t, got, err, row.kind, row.message, row.disposition)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			if !f.state.admissionMu.TryLock() {
+				t.Fatalf("candidate failure leaked the admission guard: %v", err)
+			}
+			f.state.admissionMu.Unlock()
+		})
+	}
+	// Structurally unreachable through AdmitDA, so listed instead of executed:
+	//
+	//   - validateChainSnapshot's nil-snapshot arm: validateDACandidate refuses a
+	//     nil held snapshot with errDARelayImageIncompatible before the shared
+	//     path runs, so the branch cannot see a nil snapshot here.
+	//   - applyPolicyAgainstState's impossible invariant: the fan-out only ever
+	//     receives the CheckedTransaction a completed consensus validation
+	//     returned, so no candidate property can produce it. Its typed local
+	//     fault must still never become a cache-authorizing stable terminal
+	//     rejection, which is asserted directly below.
+	if got := relayDispositionForPolicyError(&policyImpossibleInvariantError{err: errors.New("nil checked transaction")}); got != RelayAdmissionInternal {
+		t.Fatalf("typed impossible-invariant disposition=%v, want INTERNAL", got)
+	}
 }

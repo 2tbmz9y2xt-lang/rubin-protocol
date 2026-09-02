@@ -211,6 +211,10 @@ type daAdmissionObservation struct {
 	stagedCommitWireBytes                                   uint64
 	stagedCommitPeerQuotaKey                                string
 	stagedCommitRaw                                         bool
+	// companion carries the one staged commit a State B or C chunk target's
+	// recorded relation binds. A commit target leaves it unset, and no target
+	// outside State B or C reads it.
+	companion daRelayAdmissionCandidate
 }
 
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
@@ -340,14 +344,8 @@ func (s *DARelayState) observeDAAdmission(txid [32]byte) daAdmissionObservation 
 func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator, record daRelaySetRecord) {
 	switch locator.kind {
 	case daRelayLocatorCommit:
-		o.candidate.member.locator = daRelayLocator{daID: record.commit.daID, kind: daRelayLocatorCommit}
-		member := record.commit.member.clone()
-		o.candidate.member.txBytes = append([]byte(nil), record.commit.txBytes...)
-		o.candidate.payloadCommitment, o.candidate.chunkCount = record.commit.payloadCommitment, record.commit.chunkCount
+		o.candidate = captureDAAdmissionCommit(record.commit)
 		o.targetWireBytes, o.targetPeerQuotaKey = record.commit.wireBytes, record.commit.peerQuotaKey
-		if member != nil {
-			o.candidate.member.member = *member
-		}
 	case daRelayLocatorChunk:
 		chunk := record.chunks[locator.chunkIndex]
 		o.candidate.member.locator = daRelayLocator{daID: chunk.daID, kind: daRelayLocatorChunk, chunkIndex: chunk.chunkIndex}
@@ -359,12 +357,33 @@ func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator
 		if member != nil {
 			o.candidate.member.member = *member
 		}
+		// The chunk's own recorded relation names this commit, so the same lock
+		// window that copies the target copies it (RUBIN_COMPACT_BLOCKS.md 5.1).
+		o.companion = captureDAAdmissionCommit(record.commit)
 	}
+}
+
+// captureDAAdmissionCommit defensively copies ONE commit slot: identity clone,
+// raw bytes and the scalars the record binds. Nothing here reads live state
+// after the caller releases the DA lock.
+func captureDAAdmissionCommit(commit daRelayCommit) daRelayAdmissionCandidate {
+	captured := daRelayAdmissionCandidate{
+		member: daRelayOwnerReadyMember{
+			locator: daRelayLocator{daID: commit.daID, kind: daRelayLocatorCommit},
+			txBytes: append([]byte(nil), commit.txBytes...),
+		},
+		payloadCommitment: commit.payloadCommitment,
+		chunkCount:        commit.chunkCount,
+	}
+	if member := commit.member.clone(); member != nil {
+		captured.member.member = *member
+	}
+	return captured
 }
 
 func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOutpointOwner) error {
 	switch {
-	case o.validateHeader() != nil, o.validateToken(owner) != nil, o.validateRole() != nil, checkOwnerReadyRetainedBytes(o.candidate.member.txBytes) != nil:
+	case o.validateHeader() != nil, validateToken(o.candidate.member.member.token, owner) != nil, o.validateRole() != nil, checkOwnerReadyRetainedBytes(o.candidate.member.txBytes) != nil:
 		return errDARelayImageIncompatible
 	}
 	tx, parsedTxID, parsedWTxID, err := parseRelayMetadataTx(o.candidate.member.txBytes)
@@ -376,7 +395,45 @@ func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOut
 	if slices.Contains([]bool{!isDAAdmissionTx(tx), uint(len(inputs)-1) >= uint(consensus.MAX_TX_INPUTS), (txidPair{o.candidate.member.member.txid, parsedTxID}) != (txidPair{o.indexedTxID, o.indexedTxID}), parsedWTxID != o.candidate.member.member.wtxid, !slices.Equal(inputs, o.candidate.member.member.inputs)}, true) {
 		return errDARelayImageIncompatible
 	}
-	return o.validateRetained(tx)
+	if err := o.validateRetained(tx); err != nil {
+		return err
+	}
+	return o.validateCompanionCommit(owner)
+}
+
+// validateCompanionCommit binds the one companion commit a State B or C chunk
+// target's recorded relation requires, and only that member: its copied raw is
+// consumed canonically and must re-derive the copied identity and the recorded
+// da_id, chunk count and payload commitment before any exact verdict. A commit
+// target and a State A chunk target have no companion — State A's empty commit
+// tuple is already bound by validateStagedCommit. No live state, sibling chunk
+// or owner claim is read here (RUBIN_COMPACT_BLOCKS.md 5.1, 17.5).
+func (o daAdmissionObservation) validateCompanionCommit(owner *PendingOutpointOwner) error {
+	if o.candidate.member.locator.kind != daRelayLocatorChunk || o.recordState == daRelayStateOrphanChunks {
+		return nil
+	}
+	companion := o.companion
+	// Byte bound, tx-kind role and the renderer's own verdict are all checked even
+	// though the equality below subsumes each today: a consensus-side kind/core
+	// change, or a renderer that stops zeroing on error, must fail closed here.
+	if validateToken(companion.member.member.token, owner) != nil || checkOwnerReadyRetainedBytes(companion.member.txBytes) != nil {
+		return errDARelayImageIncompatible
+	}
+	// The reserve precedes the retained token, so the rendered form compares
+	// tokenless exactly as the target's own retained check does.
+	companion.member.member.token = PendingOutpointToken{}
+	tx, parsedTxID, parsedWTxID, err := parseRelayMetadataTx(companion.member.txBytes)
+	if err != nil {
+		return errDARelayImageIncompatible
+	}
+	rendered, renderErr := renderDACommitAdmissionCandidate(companion, tx)
+	type identity struct{ txid, wtxid [32]byte }
+	if slices.Contains([]bool{renderErr != nil, !isDAAdmissionTx(tx), !sameDAAdmissionCandidate(rendered, companion),
+		(identity{parsedTxID, parsedWTxID}) != (identity{companion.member.member.txid, companion.member.member.wtxid}),
+		!slices.Equal(relayMetadataInputs(tx), companion.member.member.inputs)}, true) {
+		return errDARelayImageIncompatible
+	}
+	return nil
 }
 
 func (o daAdmissionObservation) validateHeader() error {
@@ -406,18 +463,16 @@ func (o daAdmissionObservation) validateHeader() error {
 	return nil
 }
 
-func (o daAdmissionObservation) validateToken(owner *PendingOutpointOwner) error {
-	token := o.candidate.member.member.token
+// validateToken is shared by the target and its companion commit: a bound owner
+// requires that owner's nonzero token, and a nil owner the zero token.
+func validateToken(token PendingOutpointToken, owner *PendingOutpointOwner) error {
 	switch owner {
 	case nil:
 		if token != (PendingOutpointToken{}) {
 			return errDARelayImageIncompatible
 		}
 	default:
-		if token.owner != owner {
-			return errDARelayImageIncompatible
-		}
-		if token.seq == 0 {
+		if token.owner != owner || token.seq == 0 {
 			return errDARelayImageIncompatible
 		}
 	}
