@@ -162,7 +162,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 62, 0}, {"consensus", "../consensus", 59, 3}} {
+		}{{"node", ".", 62, 0}, {"consensus", "../consensus", 60, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
