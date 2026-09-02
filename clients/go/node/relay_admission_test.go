@@ -1132,28 +1132,18 @@ func TestRelayAdmissionDispositionSimplicityDeploymentState(t *testing.T) {
 		want        RelayAdmissionDisposition
 		wantMessage string
 	}{
-		{"provider I/O failure cannot determine the state",
-			relaySimplicityProvider{err: errors.New("deployment store offline")},
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
-		{"ok=false publishes an unobtainable or partial set",
-			relaySimplicityProvider{ok: false},
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
-		{"a set failing its own anchor proves nothing",
-			mismatchedAnchor,
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"provider I/O failure cannot determine the state", relaySimplicityProvider{err: errors.New("deployment store offline")}, RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
+		{"ok=false publishes an unobtainable or partial set", relaySimplicityProvider{ok: false}, RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"a set failing its own anchor proves nothing", mismatchedAnchor, RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
 		// A complete anchor-verified set is still a set the context does not pin:
 		// the same bytes admit at this exact tip and generation once the provider
 		// publishes a descriptor governing this height, and a descriptor's
 		// ActivationHeight makes the rejection flip with height regardless.
-		{"known complete set with no governing surface is still not pinned",
-			known,
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"known complete set with no governing surface is still not pinned", known, RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
 		// The regression guard for the legitimate case, and the default node
 		// wiring: the rotation implements no deployment surface at all, so the
 		// verdict rests on the constructor-frozen configuration.
-		{"no deployment provider configured stays terminal",
-			nil,
-			RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"no deployment provider configured stays terminal", nil, RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1208,12 +1198,9 @@ func TestRelayAdmissionDispositionSimplicityPolicyFanOut(t *testing.T) {
 		want        RelayAdmissionDisposition
 		wantMessage string
 	}{
-		{"provider I/O failure", relaySimplicityProvider{err: errors.New("offline")},
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: offline"},
-		{"unknown deployment state", relaySimplicityProvider{ok: false},
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
-		{"no deployment provider configured", nil,
-			RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"provider I/O failure", relaySimplicityProvider{err: errors.New("offline")}, RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: offline"},
+		{"unknown deployment state", relaySimplicityProvider{ok: false}, RelayAdmissionUnavailable, "CORE_SIMPLICITY output pre-ACTIVE"},
+		{"no deployment provider configured", nil, RelayAdmissionStableTerminalReject, "CORE_SIMPLICITY output pre-ACTIVE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := applyPolicyAgainstStateSimplicity(checked, nil, devnetGenesisChainID, 1, MempoolConfig{
@@ -1334,18 +1321,14 @@ func TestRelayAdmissionDispositionSimplicityGenesisWellFormednessReject(t *testi
 		want        RelayAdmissionDisposition
 		wantMessage string
 	}{
-		{"no deployment provider configured", nil,
-			RelayAdmissionStableTerminalReject, wellFormedness},
+		{"no deployment provider configured", nil, RelayAdmissionStableTerminalReject, wellFormedness},
 		// The regression this carve-out exists for: a provider present must not
 		// turn a verdict that never consulted its set into a retryable one.
-		{"complete inactive set present stays terminal", knownInactiveSimplicityProvider(t),
-			RelayAdmissionStableTerminalReject, wellFormedness},
-		{"unobtainable set present stays terminal", relaySimplicityProvider{ok: false},
-			RelayAdmissionStableTerminalReject, wellFormedness},
+		{"complete inactive set present stays terminal", knownInactiveSimplicityProvider(t), RelayAdmissionStableTerminalReject, wellFormedness},
+		{"unobtainable set present stays terminal", relaySimplicityProvider{ok: false}, RelayAdmissionStableTerminalReject, wellFormedness},
 		// The sibling exit on the SAME bytes: the lookup fails before the
 		// well-formedness check runs, and that verdict does depend on the provider.
-		{"lookup failure stays unavailable", relaySimplicityProvider{err: errors.New("deployment store offline")},
-			RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
+		{"lookup failure stays unavailable", relaySimplicityProvider{err: errors.New("deployment store offline")}, RelayAdmissionUnavailable, "CORE_SIMPLICITY deployment lookup failure: deployment store offline"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newRelayHarness(t, &MempoolConfig{
@@ -1701,8 +1684,10 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 		{
 			name: "static unsupported form",
 			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
-				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe4}, payload: []byte("core-ext"),
-					extraOutputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT}}}).raw
+				return f.signed(daNonReplayTxSpec{
+					kind: 0x02, daID: [32]byte{0xe4}, payload: []byte("core-ext"),
+					extraOutputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT}},
+				}).raw
 			},
 			kind: TxAdmitRejected, message: "CORE_EXT output unsupported by Go node runtime", disposition: RelayAdmissionStableTerminalReject,
 		},
@@ -1710,8 +1695,10 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 			name: "simplicity pre-activation without a deployment provider",
 			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
 				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) { c.PolicyRejectSimplicityPreActivation = true })
-				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe5}, payload: []byte("frozen"),
-					extraOutputs: []consensus.TxOutput{simplicityOutput}}).raw
+				return f.signed(daNonReplayTxSpec{
+					kind: 0x02, daID: [32]byte{0xe5}, payload: []byte("frozen"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput},
+				}).raw
 			},
 			kind: TxAdmitRejected, message: "CORE_SIMPLICITY output pre-ACTIVE", disposition: RelayAdmissionStableTerminalReject,
 		},
@@ -1721,10 +1708,25 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
 					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = true, knownInactiveSimplicityProvider(t)
 				})
-				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe6}, payload: []byte("provider"),
-					extraOutputs: []consensus.TxOutput{simplicityOutput}}).raw
+				return f.signed(daNonReplayTxSpec{
+					kind: 0x02, daID: [32]byte{0xe6}, payload: []byte("provider"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput},
+				}).raw
 			},
 			kind: TxAdmitRejected, message: "CORE_SIMPLICITY output pre-ACTIVE", disposition: RelayAdmissionUnavailable,
+		},
+		{
+			name: "simplicity deployment lookup failure",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
+					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = true, relaySimplicityProvider{err: errors.New("deployment store offline")}
+				})
+				return f.signed(daNonReplayTxSpec{
+					kind: 0x02, daID: [32]byte{0xed}, payload: []byte("lookup"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput},
+				}).raw
+			},
+			kind: TxAdmitRejected, message: "CORE_SIMPLICITY deployment lookup failure: deployment store offline", disposition: RelayAdmissionUnavailable,
 		},
 		{
 			name: "simplicity well-formedness verdict reads no deployment set",
@@ -1732,8 +1734,10 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
 					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = true, knownInactiveSimplicityProvider(t)
 				})
-				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xe7}, payload: []byte("malformed"),
-					extraOutputs: []consensus.TxOutput{simplicityOutput, {Value: 1, CovenantType: consensus.COV_TYPE_P2PK}}}).raw
+				return f.signed(daNonReplayTxSpec{
+					kind: 0x02, daID: [32]byte{0xe7}, payload: []byte("malformed"),
+					extraOutputs: []consensus.TxOutput{simplicityOutput, {Value: 1, CovenantType: consensus.COV_TYPE_P2PK}},
+				}).raw
 			},
 			kind: TxAdmitRejected, message: "TX_ERR_COVENANT_TYPE_INVALID: invalid CORE_P2PK covenant_data length", disposition: RelayAdmissionStableTerminalReject,
 		},
@@ -1749,6 +1753,30 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 				return mustMarshalTxForNodeTest(t, parsed)
 			},
 			kind: TxAdmitRejected, message: "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid", disposition: RelayAdmissionStableTerminalReject,
+		},
+		{
+			name: "consensus rejection with a retryable typed cause",
+			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
+				// Present in the snapshot, so the input-dependency precheck passes and
+				// consensus itself refuses the one-block-short coinbase maturity.
+				entry := f.state.Utxos[f.outpoints[0]]
+				entry.CreationHeight = f.state.Height + 2 - consensus.COINBASE_MATURITY
+				f.state.Utxos[f.outpoints[0]] = entry
+				return f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xeb}, payload: []byte("immature")}).raw
+			},
+			kind: TxAdmitRejected, message: "TX_ERR_COINBASE_IMMATURE: coinbase immature", disposition: RelayAdmissionMissingDependency,
+		},
+		{
+			name: "consensus uncaused suite error under an untrusted native-suite context",
+			build: func(t *testing.T, f *daNonReplayFixture) []byte {
+				// The Simplicity lane is switched off here so its pass-through arm is
+				// also driven; the consensus verdict does not depend on that lane.
+				mutateDAAdmissionPolicy(f, func(c *MempoolConfig) {
+					c.PolicyRejectSimplicityPreActivation, c.RotationProvider = false, &deploymentCauseRotation{}
+				})
+				return retargetFirstWitnessSuite(t, f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xec}, payload: []byte("suite")}).raw, 0x02)
+			},
+			kind: TxAdmitRejected, message: "TX_ERR_SIG_ALG_INVALID: CORE_P2PK suite not in native spend set", disposition: RelayAdmissionUnavailable,
 		},
 		{
 			name: "policy rejection",
@@ -1783,12 +1811,21 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 	//
 	//   - validateChainSnapshot's nil-snapshot arm: validateDACandidate refuses a
 	//     nil held snapshot with errDARelayImageIncompatible before the shared
-	//     path runs, so the branch cannot see a nil snapshot here.
+	//     path runs, so the branch cannot see a nil snapshot here. The arm still
+	//     stamps its own disposition, asserted directly below.
+	//   - buildPolicyInputSnapshotIfNeeded's two impossible-invariant arms: the
+	//     nil parsed transaction (parseDAAdmissionCandidate hands AdmitDA a
+	//     non-nil tx or an error) and the nil UTXO set (admissionSnapshotForInputs
+	//     always allocates the selected set for a non-nil ChainState and returns
+	//     nil only for the nil ChainState acquireDAAdmissionHold refuses).
 	//   - applyPolicyAgainstState's impossible invariant: the fan-out only ever
 	//     receives the CheckedTransaction a completed consensus validation
 	//     returned, so no candidate property can produce it. Its typed local
 	//     fault must still never become a cache-authorizing stable terminal
 	//     rejection, which is asserted directly below.
+	if _, err := validateChainSnapshot(nil); relayDispositionOf(err) != RelayAdmissionUnavailable {
+		t.Fatalf("nil-snapshot arm disposition=%v, want UNAVAILABLE", relayDispositionOf(err))
+	}
 	if got := relayDispositionForPolicyError(&policyImpossibleInvariantError{err: errors.New("nil checked transaction")}); got != RelayAdmissionInternal {
 		t.Fatalf("typed impossible-invariant disposition=%v, want INTERNAL", got)
 	}

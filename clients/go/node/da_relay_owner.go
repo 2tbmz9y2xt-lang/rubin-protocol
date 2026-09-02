@@ -211,9 +211,9 @@ type daAdmissionObservation struct {
 	stagedCommitWireBytes                                   uint64
 	stagedCommitPeerQuotaKey                                string
 	stagedCommitRaw                                         bool
-	// companion carries the one staged commit a State B or C chunk target's
-	// recorded relation binds. A commit target leaves it unset, and no target
-	// outside State B or C reads it.
+	// companion is populated only for a State B or C chunk target, whose
+	// recorded relation binds exactly this staged commit; a commit target and a
+	// State A chunk target leave it unset.
 	companion daRelayAdmissionCandidate
 }
 
@@ -357,9 +357,11 @@ func (o *daAdmissionObservation) captureDAAdmissionTarget(locator daRelayLocator
 		if member != nil {
 			o.candidate.member.member = *member
 		}
-		// The chunk's own recorded relation names this commit, so the same lock
-		// window that copies the target copies it (RUBIN_COMPACT_BLOCKS.md 5.1).
-		o.companion = captureDAAdmissionCommit(record.commit)
+		// Only a State B or C chunk's recorded relation names this commit, and the
+		// same lock window that copies the target copies it (RUBIN_COMPACT_BLOCKS.md 5.1).
+		if record.state != daRelayStateOrphanChunks {
+			o.companion = captureDAAdmissionCommit(record.commit)
+		}
 	}
 }
 
@@ -403,20 +405,25 @@ func (o daAdmissionObservation) validateDAAdmissionObservation(owner *PendingOut
 
 // validateCompanionCommit binds the one companion commit a State B or C chunk
 // target's recorded relation requires, and only that member: its copied raw is
-// consumed canonically and must re-derive the copied identity and the recorded
-// da_id, chunk count and payload commitment before any exact verdict. A commit
+// consumed canonically and must re-derive the copied identity, the recorded
+// da_id, chunk count and payload commitment, and the record-level twins of those
+// scalars copied in the same lock window, before any exact verdict. A commit
 // target and a State A chunk target have no companion — State A's empty commit
-// tuple is already bound by validateStagedCommit. No live state, sibling chunk
-// or owner claim is read here (RUBIN_COMPACT_BLOCKS.md 5.1, 17.5).
+// tuple is already bound by validateStagedCommit — and a chunk target in any
+// other state fails closed. No live state, sibling chunk or owner claim is read
+// here (RUBIN_COMPACT_BLOCKS.md 5.1, 17.5).
 func (o daAdmissionObservation) validateCompanionCommit(owner *PendingOutpointOwner) error {
 	if o.candidate.member.locator.kind != daRelayLocatorChunk || o.recordState == daRelayStateOrphanChunks {
 		return nil
 	}
 	companion := o.companion
-	// Byte bound, tx-kind role and the renderer's own verdict are all checked even
-	// though the equality below subsumes each today: a consensus-side kind/core
-	// change, or a renderer that stops zeroing on error, must fail closed here.
-	if validateToken(companion.member.member.token, owner) != nil || checkOwnerReadyRetainedBytes(companion.member.txBytes) != nil {
+	// A chunk target outside the two companion-bearing states fails closed, as
+	// validateStagedCommit's default arm does; token and byte bound gate the parse.
+	if slices.Contains([]bool{
+		!slices.Contains([]daRelaySetState{daRelayStateStagedCommit, daRelayStateCompleteSet}, o.recordState),
+		validateToken(companion.member.member.token, owner) != nil,
+		checkOwnerReadyRetainedBytes(companion.member.txBytes) != nil,
+	}, true) {
 		return errDARelayImageIncompatible
 	}
 	// The reserve precedes the retained token, so the rendered form compares
@@ -427,10 +434,23 @@ func (o daAdmissionObservation) validateCompanionCommit(owner *PendingOutpointOw
 		return errDARelayImageIncompatible
 	}
 	rendered, renderErr := renderDACommitAdmissionCandidate(companion, tx)
+	// Tx-kind role and the renderer's verdict are checked even though the equality
+	// below subsumes each today (a kind/core change or a renderer that stops zeroing
+	// must fail closed), and an already-decided companion skips the full-raw compare.
+	if renderErr != nil || !isDAAdmissionTx(tx) {
+		return errDARelayImageIncompatible
+	}
+	inputs := relayMetadataInputs(tx)
 	type identity struct{ txid, wtxid [32]byte }
-	if slices.Contains([]bool{renderErr != nil, !isDAAdmissionTx(tx), !sameDAAdmissionCandidate(rendered, companion),
+	// The staged scalars are the record-level twins of the companion's own, copied
+	// in the same lock window; binding them refuses a divergent tuple.
+	if slices.Contains([]bool{
+		!sameDAAdmissionCandidate(rendered, companion),
 		(identity{parsedTxID, parsedWTxID}) != (identity{companion.member.member.txid, companion.member.member.wtxid}),
-		!slices.Equal(relayMetadataInputs(tx), companion.member.member.inputs)}, true) {
+		uint(len(inputs)-1) >= uint(consensus.MAX_TX_INPUTS), !slices.Equal(inputs, companion.member.member.inputs),
+		o.stagedCommitChunkCount != companion.chunkCount, o.stagedCommitPayloadCommitment != companion.payloadCommitment,
+		o.stagedCommitDAID != companion.member.locator.daID,
+	}, true) {
 		return errDARelayImageIncompatible
 	}
 	return nil

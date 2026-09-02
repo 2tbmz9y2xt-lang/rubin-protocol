@@ -1090,6 +1090,11 @@ func (f *daNonReplayFixture) requireMember(t *testing.T, record daRelaySetRecord
 }
 
 func requireDANonReplayUnchanged(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner, relayBefore daRelayStateView, ownerBefore *PendingOutpointOwner) {
+	// A leaked owner lock fails here by name instead of deadlocking the clone.
+	if !owner.mu.TryLock() {
+		t.Fatal("owner mutex leaked")
+	}
+	owner.mu.Unlock()
 	if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
 		t.Fatalf("relay mutated: got=%+v want=%+v", got, relayBefore)
 	}
@@ -2488,7 +2493,7 @@ func requirePublicDAFailure(t *testing.T, got DAAdmissionResult, err error, kind
 	t.Helper()
 	var admit *TxAdmitError
 	if got != (DAAdmissionResult{}) || !errors.As(err, &admit) || admit.Kind != kind || (message != "" && admit.Message != message) || len(disposition) != 0 && relayDispositionOf(err) != disposition[0] {
-		t.Fatalf("AdmitDA=(%+v,%v), want zero %s %q", got, err, kind, message)
+		t.Fatalf("AdmitDA=(%+v,%v) disposition=%v, want zero %s %q disposition=%v", got, err, relayDispositionOf(err), kind, message, disposition)
 	}
 }
 
@@ -2985,8 +2990,13 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 		name   string
 		mutate func(*daNonReplayFixture, daNonReplayTx, *daRelayCommit)
 	}{
-		{"absent companion member", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member = nil }},
-		{"empty companion raw", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.txBytes = nil }},
+		// inherited: killed by validateStagedCommit before validateCompanionCommit runs; kept so the companion path never reopens them.
+		{"inherited: absent companion member", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member = nil }},
+		{"inherited: empty companion raw", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.txBytes = nil }},
+		{"inherited: companion zero chunk count scalar", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.chunkCount = 0 }},
+		{"inherited: companion chunk count above max", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) {
+			c.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT + 1)
+		}},
 		{"truncated companion raw", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) {
 			c.txBytes = slices.Clone(c.txBytes[:len(c.txBytes)-1])
 		}},
@@ -3000,17 +3010,14 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 			c.txBytes = slices.Clone(f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0xd9}, chunkCount: 2, commitment: [32]byte{0xa7}, commitmentOutputs: 1}).raw)
 		}},
 		{"companion chunk count scalar", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.chunkCount += 2 }},
-		{"companion zero chunk count scalar", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.chunkCount = 0 }},
-		{"companion chunk count above max", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) {
-			c.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT + 1)
-		}},
 		{"companion payload commitment scalar", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.payloadCommitment[0] ^= 1 }},
 		{"companion txid", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member.txid[0] ^= 1 }},
 		{"companion admission wtxid", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member.wtxid[0] ^= 1 }},
 		{"companion ordered inputs", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) {
 			c.member.inputs = append([]consensus.Outpoint{{Txid: [32]byte{0x7f}}}, c.member.inputs...)
 		}},
-		{"companion provenance", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member.provenance = DAProvenance{} }},
+		// Zeroing invalidates the provenance KIND; a valid-but-different provenance is undetectable by design, as on the target path.
+		{"companion provenance kind invalid", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) { c.member.provenance = DAProvenance{} }},
 		{"companion zero token", func(_ *daNonReplayFixture, _ daNonReplayTx, c *daRelayCommit) {
 			c.member.token = PendingOutpointToken{}
 		}},
@@ -3051,6 +3058,10 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 			record.commit.txBytes = slices.Clone(chunk.raw)
 			s.sets[chunk.spec.daID] = record
 		})
+		// State A copies no companion, whatever its empty commit slot holds.
+		if observation := f.relay.observeDAAdmission(chunk.txid); !reflect.DeepEqual(observation.companion, daRelayAdmissionCandidate{}) {
+			t.Fatalf("state A chunk target copied a companion: %+v", observation.companion)
+		}
 		requireInternalDAReplay(t, f, chunk)
 	})
 	t.Run("companion copy is alias isolated", func(t *testing.T) {
@@ -3072,13 +3083,54 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 			t.Fatal("mutating live retained bytes reached the companion copy")
 		}
 	})
+	// White-box rows edit the observation copy directly, so each isolates ONE
+	// conjunct of validateCompanionCommit no live-record mutation reaches alone:
+	// the staged twins share their source with the companion, and validateHeader
+	// stops any undeclared record state first.
+	t.Run("white-box: companion twins and state gate", func(t *testing.T) {
+		f, chunk := daCompanionRecordFixture(t, false, 0x02, [32]byte{0xd6})
+		owner := f.mp.pendingOutpoints
+		// A self-consistent commit of ANOTHER da_id: every companion-internal
+		// binding holds, only the record-level da_id twin can refuse it.
+		foreign := f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0xd7}, chunkCount: 2, commitment: [32]byte{0xa6}, commitmentOutputs: 1, inputCount: 2})
+		for _, row := range []struct {
+			name   string
+			direct bool
+			mutate func(*daAdmissionObservation)
+		}{
+			{"staged chunk count twin", false, func(o *daAdmissionObservation) { o.stagedCommitChunkCount++ }},
+			{"staged payload commitment twin", false, func(o *daAdmissionObservation) { o.stagedCommitPayloadCommitment[0] ^= 1 }},
+			{"staged da_id twin against a foreign self-consistent companion", false, func(o *daAdmissionObservation) {
+				o.companion.member.locator.daID, o.companion.member.txBytes = foreign.spec.daID, slices.Clone(foreign.raw)
+				o.companion.member.member.txid, o.companion.member.member.wtxid, o.companion.member.member.inputs = foreign.txid, foreign.wtxid, slices.Clone(foreign.inputs)
+			}},
+			{"chunk target in an undeclared record state", true, func(o *daAdmissionObservation) { o.recordState = 7 }},
+		} {
+			t.Run(row.name, func(t *testing.T) {
+				observation := f.relay.observeDAAdmission(chunk.txid)
+				if err := observation.validateDAAdmissionObservation(owner); err != nil {
+					t.Fatalf("unedited observation=%v", err)
+				}
+				row.mutate(&observation)
+				validate := observation.validateDAAdmissionObservation
+				if row.direct {
+					validate = observation.validateCompanionCommit
+				}
+				if err := validate(owner); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is the internal contract.
+					t.Fatalf("%s=%v, want errDARelayImageIncompatible", row.name, err)
+				}
+			})
+		}
+	})
 }
 
 // TestAdmitDAOutcomeOrderAndDormancyRemainClosed pins the two orders this slice
 // owns — target before companion, observation before the exact byte comparison —
 // proves the companion decision reads only its copied evidence, proves every
-// error return of the shared parsed-candidate path leaves a disposition its own
-// branch selected, and proves the whole surface still has zero non-test callers.
+// error return of the shared parsed-candidate path either leaves a disposition
+// its own branch selected or is validateDACandidate's fail-closed nil-hold
+// sentinel, which AdmitDA never reaches, and proves the whole surface still has
+// zero non-test callers.
 func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 	declaredFunctions := func(path string) map[string]*ast.FuncDecl {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -3093,22 +3145,20 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 		}
 		return out
 	}
+	calleeName := func(call *ast.CallExpr) string {
+		switch function := call.Fun.(type) {
+		case *ast.Ident:
+			return function.Name
+		case *ast.SelectorExpr:
+			return function.Sel.Name
+		}
+		return ""
+	}
 	calledNames := func(node ast.Node, wanted ...string) []string {
 		var order []string
 		ast.Inspect(node, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			name := ""
-			switch function := call.Fun.(type) {
-			case *ast.Ident:
-				name = function.Name
-			case *ast.SelectorExpr:
-				name = function.Sel.Name
-			}
-			if slices.Contains(wanted, name) {
-				order = append(order, name)
+			if call, ok := node.(*ast.CallExpr); ok && slices.Contains(wanted, calleeName(call)) {
+				order = append(order, calleeName(call))
 			}
 			return true
 		})
@@ -3135,7 +3185,12 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 	if order := calledNames(daNonReplayFunction(t, "classifyDAReplay").Body, "validateDAAdmissionObservation", "Equal"); !slices.Equal(order, []string{"validateDAAdmissionObservation", "Equal"}) {
 		t.Fatalf("replay classification order=%v", order)
 	}
-	// BOUNDED SOURCE: the companion decision reads its copied evidence only.
+	// BOUNDED SOURCE: the companion decision reads its copied evidence only. The
+	// identifier and range guard is body-local, not transitive: it trusts the
+	// callees those bodies name (parseRelayMetadataTx, renderDACommitAdmissionCandidate
+	// with daAdmissionPayloadCommitment, sameDAAdmissionCandidate, validateToken,
+	// checkOwnerReadyRetainedBytes, isDAAdmissionTx, relayMetadataInputs,
+	// daRelayMemberIdentity.clone), each of which reads only its arguments.
 	for _, name := range []string{"validateCompanionCommit", "captureDAAdmissionCommit"} {
 		function := daNonReplayFunction(t, name)
 		ast.Inspect(function.Body, func(node ast.Node) bool {
@@ -3162,8 +3217,16 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 				return true
 			}
 			last := returned.Results[len(returned.Results)-1]
-			if names := calledNames(last, "selectRelayDisposition"); len(names) != 0 {
-				shapes = append(shapes, names[0])
+			// stamped:<helper> when the branch's own classifier call selected the
+			// disposition, stamped=<constant> when the site names it literally.
+			if stamp, ok := last.(*ast.CallExpr); ok && calleeName(stamp) == "selectRelayDisposition" && len(stamp.Args) == 2 {
+				if helper, ok := stamp.Args[1].(*ast.CallExpr); ok {
+					shapes = append(shapes, "stamped:"+calleeName(helper))
+				} else if constant, ok := stamp.Args[1].(*ast.Ident); ok {
+					shapes = append(shapes, "stamped="+constant.Name)
+				} else {
+					shapes = append(shapes, fmt.Sprintf("stamped?%T", stamp.Args[1]))
+				}
 				return true
 			}
 			if identifier, ok := last.(*ast.Ident); ok {
@@ -3175,16 +3238,18 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 		})
 		return shapes
 	}
-	const stamped = "selectRelayDisposition"
+	unavailable, terminal := "stamped=RelayAdmissionUnavailable", "stamped=RelayAdmissionStableTerminalReject"
+	simplicity := "stamped:relayDispositionForSimplicityPreActivationOutcome"
 	for _, row := range []struct {
 		path, name string
 		want       []string
 	}{
-		{"mempool.go", "checkParsedTransactionWithSnapshot", []string{"err", stamped, "err", stamped, stamped, stamped, "err", stamped, "nil"}},
-		{"mempolicy_helpers.go", "validateChainSnapshot", []string{stamped, stamped, "nil"}},
-		{"mempolicy_helpers.go", "validateTransactionWithConsensus", []string{stamped, "nil"}},
-		{"mempool_precheck.go", "buildPolicyInputSnapshotIfNeeded", []string{stamped, "nil", stamped, "nil"}},
-		{"da_admission.go", "validateDACandidate", []string{"errDARelayImageIncompatible", stamped, "err", "nil"}},
+		{"mempool.go", "checkParsedTransactionWithSnapshot", []string{"err", unavailable, "err", terminal, "err", "err", "stamped:relayDispositionForPolicyError", "nil"}},
+		{"mempool.go", "rejectSimplicityPreActivationLane", []string{"nil", simplicity, simplicity, "nil"}},
+		{"mempolicy_helpers.go", "validateChainSnapshot", []string{unavailable, unavailable, "nil"}},
+		{"mempolicy_helpers.go", "validateTransactionWithConsensus", []string{"stamped:relayDispositionForConsensusError", "nil"}},
+		{"mempool_precheck.go", "buildPolicyInputSnapshotIfNeeded", []string{"stamped=RelayAdmissionInternal", "nil", "stamped:relayDispositionForInputError", "nil"}},
+		{"da_admission.go", "validateDACandidate", []string{"errDARelayImageIncompatible", terminal, "err", "nil"}},
 	} {
 		function := declaredFunctions(row.path)[row.name]
 		if function == nil {
@@ -3245,13 +3310,7 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 					declarations[node.Name.Name]++
 				}
 			case *ast.CallExpr:
-				name := ""
-				switch function := node.Fun.(type) {
-				case *ast.Ident:
-					name = function.Name
-				case *ast.SelectorExpr:
-					name = function.Sel.Name
-				}
+				name := calleeName(node)
 				if _, tracked := callers[name]; tracked {
 					callers[name]++
 				}
