@@ -206,6 +206,7 @@ type daAdmissionObservation struct {
 	targetHashChecked                                       bool
 	stagedCommitPresent                                     bool
 	stagedCommitDAID                                        [32]byte
+	stagedCommitPayloadCommitment                           [32]byte
 	stagedCommitChunkCount                                  uint16
 	stagedCommitWireBytes                                   uint64
 	stagedCommitPeerQuotaKey                                string
@@ -327,6 +328,7 @@ func (s *DARelayState) observeDAAdmission(txid [32]byte) daAdmissionObservation 
 	observation.recordHasReplaceableChunks = record.replaceableChunks != nil
 	observation.stagedCommitPresent = record.commit.member != nil
 	observation.stagedCommitDAID = record.commit.daID
+	observation.stagedCommitPayloadCommitment = record.commit.payloadCommitment
 	observation.stagedCommitChunkCount = record.commit.chunkCount
 	observation.stagedCommitWireBytes = record.commit.wireBytes
 	observation.stagedCommitPeerQuotaKey = record.commit.peerQuotaKey
@@ -481,14 +483,15 @@ func (o daAdmissionObservation) validateStagedCommit() error {
 	switch o.recordState {
 	case daRelayStateOrphanChunks:
 		type emptyCommit struct {
-			present    bool
-			daID       [32]byte
-			chunkCount uint16
-			wireBytes  uint64
-			peerQuota  string
-			rawPresent bool
+			present           bool
+			daID              [32]byte
+			payloadCommitment [32]byte
+			chunkCount        uint16
+			wireBytes         uint64
+			peerQuota         string
+			rawPresent        bool
 		}
-		if (emptyCommit{o.stagedCommitPresent, o.stagedCommitDAID, o.stagedCommitChunkCount, o.stagedCommitWireBytes, o.stagedCommitPeerQuotaKey, o.stagedCommitRaw}) != (emptyCommit{}) {
+		if (emptyCommit{o.stagedCommitPresent, o.stagedCommitDAID, o.stagedCommitPayloadCommitment, o.stagedCommitChunkCount, o.stagedCommitWireBytes, o.stagedCommitPeerQuotaKey, o.stagedCommitRaw}) != (emptyCommit{}) {
 			return errDARelayImageIncompatible
 		}
 		return nil

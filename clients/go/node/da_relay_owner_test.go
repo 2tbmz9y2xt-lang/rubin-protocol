@@ -353,7 +353,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			t.Fatal(err)
 		}
 		changed := func(row string) bool {
-			for _, marker := range strings.Split("node/da_admission.go:lit:\x00node/da_relay_owner.go:lit:\x00node/da_admission.go:parseDAAdmission|\x00parseDAAdmissionCandidate\x00daAdmissionHold\x00acquireDAAdmissionHold\x00validateDACandidate\x00DAProvenance\x00daProvenance\x00DAAdmissionDisposition\x00daRelayAdmissionDisposition\x00node/da_relay_owner.go:daRelayAdmissionRetained|\x00node/da_relay_owner.go:daRelayAdmissionDuplicate|\x00DAAdmissionResult\x00daAdmissionObservation\x00indexedTxID\x00indexedLocator\x00recordDAID\x00recordState\x00recordRevision\x00recordReceivedTime\x00recordTTLBlocksLeft\x00recordPayloadBytes\x00recordWireBytes\x00recordHasReplaceableChunks\x00targetWireBytes\x00targetPeerQuotaKey\x00targetHashChecked\x00stagedCommitPresent\x00stagedCommitDAID\x00stagedCommitChunkCount\x00stagedCommitWireBytes\x00stagedCommitPeerQuotaKey\x00stagedCommitRaw\x00validateDAAdmissionObservation\x00validateHeader\x00validateToken\x00validateRole\x00validateCommitRole\x00validateChunkRole\x00validateStagedCommit\x00validateRetained\x00NewPeerDAProvenance\x00LocalDAProvenance\x00DetachedReorgDAProvenance\x00AdmitDA\x00admitDANonExact\x00bindDAAdmission\x00classifyDAReplay\x00publicDAAdmissionResult\x00observeDAAdmission\x00captureDAAdmissionTarget\x00applyDANonReplayPlan\x00sameDAAdmissionCandidate\x00node/da_relay_owner.go:quotaKey|\x00node/da_relay_owner.go:validate|\x00node/da_admission.go:release|\x00read|node/da_relay_owner.go:file|DAID\x00read|node/da_relay_owner.go:file|Disposition\x00read|node/da_relay_owner.go:file|SameDAIDCommitConflict\x00\"bytes\"\x00\"slices\"\x00gen|node/da_relay_owner.go:file|import (", "\x00") {
+			for _, marker := range strings.Split("node/da_admission.go:lit:\x00node/da_relay_owner.go:lit:\x00node/da_admission.go:parseDAAdmission|\x00parseDAAdmissionCandidate\x00daAdmissionHold\x00acquireDAAdmissionHold\x00validateDACandidate\x00DAProvenance\x00daProvenance\x00DAAdmissionDisposition\x00daRelayAdmissionDisposition\x00node/da_relay_owner.go:daRelayAdmissionRetained|\x00node/da_relay_owner.go:daRelayAdmissionDuplicate|\x00DAAdmissionResult\x00daAdmissionObservation\x00indexedTxID\x00indexedLocator\x00recordDAID\x00recordState\x00recordRevision\x00recordReceivedTime\x00recordTTLBlocksLeft\x00recordPayloadBytes\x00recordWireBytes\x00recordHasReplaceableChunks\x00targetWireBytes\x00targetPeerQuotaKey\x00targetHashChecked\x00stagedCommitPresent\x00stagedCommitDAID\x00stagedCommitPayloadCommitment\x00stagedCommitChunkCount\x00stagedCommitWireBytes\x00stagedCommitPeerQuotaKey\x00stagedCommitRaw\x00validateDAAdmissionObservation\x00validateHeader\x00validateToken\x00validateRole\x00validateCommitRole\x00validateChunkRole\x00validateStagedCommit\x00validateRetained\x00NewPeerDAProvenance\x00LocalDAProvenance\x00DetachedReorgDAProvenance\x00AdmitDA\x00admitDANonExact\x00bindDAAdmission\x00classifyDAReplay\x00publicDAAdmissionResult\x00observeDAAdmission\x00captureDAAdmissionTarget\x00applyDANonReplayPlan\x00sameDAAdmissionCandidate\x00node/da_relay_owner.go:quotaKey|\x00node/da_relay_owner.go:validate|\x00node/da_admission.go:release|\x00read|node/da_relay_owner.go:file|DAID\x00read|node/da_relay_owner.go:file|Disposition\x00read|node/da_relay_owner.go:file|SameDAIDCommitConflict\x00\"bytes\"\x00\"slices\"\x00gen|node/da_relay_owner.go:file|import (", "\x00") {
 				if strings.Contains(row, marker) {
 					return true
 				}
@@ -381,7 +381,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			want["read|node/da_relay_owner.go:file|"+field]++
 		}
 		want["value|node/da_admission.go:file|snapshot"]++
-		for field, count := range map[string]int{"byte": 4, "uint64": 4, "kind": 1, "bool": 5, "uint16": 1, "daRelaySetState": 1, "daRelayLocator": 1} {
+		for field, count := range map[string]int{"byte": 5, "uint64": 4, "kind": 1, "bool": 5, "uint16": 1, "daRelaySetState": 1, "daRelayLocator": 1} {
 			want["read|node/da_relay_owner.go:file|"+field] += count
 		}
 		for row, count := range got {
@@ -2841,6 +2841,7 @@ func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *tes
 		{"target wire residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.wireBytes = 1 }},
 		{"target peer residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.peerQuotaKey = "moved" }},
 		{"target hash checked residual", bChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.hashChecked = !c.hashChecked }},
+		{"orphan commit commitment residual", aChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.payloadCommitment[0] = 1 }},
 		{"staged commit daid", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.daID[0] ^= 1 }},
 		{"staged commit count", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.chunkCount = 0 }},
 		{"staged commit wire", bChunk, false, func(_ *daRelaySetRecord, c *daRelayCommit, _ *daRelayChunk) { c.wireBytes = 1 }},
