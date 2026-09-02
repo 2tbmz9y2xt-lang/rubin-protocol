@@ -150,7 +150,7 @@ func logicalMDBXBuild(view *logicalMDBXStateView, parent, result logicalStateCou
 func logicalMDBXWantFailure(t *testing.T, label string, batch mdbx.Batch, failure *logicalStateFailure, kind logicalStateFailureKind, cause ...string) {
 	t.Helper()
 	logicalMDBXAssert(t, failure != nil && failure.kind == kind && failure.cause != nil && batch.Mutations == nil, "%s: failure=%+v mutations=%d", label, failure, len(batch.Mutations))
-	logicalMDBXAssert(t, len(cause) == 0 || strings.Contains(failure.cause.Error(), cause[0]), "%s: cause %v does not name %q", label, failure.cause, cause)
+	logicalMDBXAssert(t, len(cause) == 0 || cause[0] == "" || strings.Contains(failure.cause.Error(), cause[0]), "%s: cause %v does not name %q", label, failure.cause, cause)
 }
 
 func logicalMDBXWantBatch(t *testing.T, label string, batch mdbx.Batch, failure *logicalStateFailure, want ...mdbx.Mutation) {
@@ -185,8 +185,8 @@ func TestLogicalMDBXViewReads(t *testing.T) {
 	for i := range reflect.TypeOf(logicalMDBXRowObservation{}).NumField() {
 		logicalMDBXAssert(t, reflect.TypeOf(logicalMDBXRowObservation{}).Field(i).Type.Kind() != reflect.Slice, "bridge retained caller bytes: observation field %d holds bytes", i)
 	}
-	// Malformed persisted bytes are decoder/validator-owned: the store-integrity arms of Counters, Lookup and the
-	// create-once comparison are reachable only through these three calls, never through a Store.Update-written row.
+	// Malformed persisted bytes are decoder/validator-owned: the decode arms of Counters and Lookup, plus the
+	// create-once ValidateRow arm, are reachable only through these three calls, not a Store.Update-written row.
 	badKey, badValue := logicalMDBXHashRow(0x71)
 	_, _, counterErr := mdbx.DecodeLogicalCounterValue(make([]byte, 15))
 	_, utxoErr := mdbx.DecodeUTXOValue(make([]byte, 19))
@@ -306,7 +306,8 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 		{name: "entry count mismatch", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes, entries: 3}, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "byte total mismatch", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpD}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterD.bytes - 1, entries: 4}, puts: putD, kind: logicalStateFailureLocalInvariant},
 		{name: "parent underflow", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
-		{name: "byte total wraps past the parent", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, result: logicalStateCounters{bytes: ^uint64(0) - 54}, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
+		{name: "delete past the parent with a wrap-consistent result", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, result: logicalStateCounters{bytes: ^uint64(0) - 54}, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
+		{name: "entry count carries past uint64", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpD}, parent: logicalStateCounters{bytes: 0, entries: ^uint64(0)}, result: logicalStateCounters{bytes: bytesD, entries: 0}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "match the plan rows"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			batch, failure := logicalMDBXConvert(t, store, tc.height, tc.lookups, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
@@ -595,7 +596,7 @@ func logicalMDBXSnapshot(mutations []mdbx.Mutation) [][]byte {
 // TestLogicalMDBXBridgeDormantCensus is a type-aware structural census: it proves
 // only the dormancy and build rows, never a behavioral assertion.
 func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
-	var listed struct{ GoFiles, CgoFiles []string }
+	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil, "go list: %v", err)
 	logicalMDBXAssert(t, json.Unmarshal(out, &listed) == nil, "go list json is unreadable")
@@ -606,10 +607,8 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		expression, parseErr := constraint.Parse(line)
 		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %q (%v)", name, line, parseErr)
 	}
-	// GoFiles plus CgoFiles is the whole compiled non-test set of this package: go list reports a file that
-	// imports "C" only in CgoFiles. IgnoredGoFiles need no parse because they are excluded by a build constraint
-	// this package still compiles without, so a caller placed there cannot reference a cgo-only bridge symbol.
-	sources := slices.Concat(listed.GoFiles, listed.CgoFiles)
+	// go list's non-test source set is GoFiles+CgoFiles+IgnoredGoFiles: a file ignored on this platform may still compile, and call the bridge, elsewhere.
+	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
 	fset, imports := token.NewFileSet(), 0
 	files := make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
