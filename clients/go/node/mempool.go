@@ -419,7 +419,7 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 	// Get block MTP
 	blockMTP, err := m.nextBlockMTP(nextHeight)
 	if err != nil {
-		return nil, nil, txAdmitUnavailable(err.Error())
+		return nil, nil, selectRelayDisposition(txAdmitUnavailable(err.Error()), RelayAdmissionUnavailable)
 	}
 
 	// Prepare policy UTXOs if needed
@@ -428,16 +428,10 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 		return nil, nil, err
 	}
 	if reject, reason := rejectUnsupportedCoreExtNodeRuntime(tx, policyUtxos); reject {
-		return nil, nil, txAdmitRejected(reason)
+		return nil, nil, selectRelayDisposition(txAdmitRejected(reason), RelayAdmissionStableTerminalReject)
 	}
-	if policy.PolicyRejectSimplicityPreActivation {
-		reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
-		if err != nil {
-			return nil, nil, txAdmitRejected(err.Error())
-		}
-		if reject {
-			return nil, nil, txAdmitRejected(reason)
-		}
+	if err := m.rejectSimplicityPreActivationLane(tx, policyUtxos, nextHeight, policy); err != nil {
+		return nil, nil, err
 	}
 
 	// Perform consensus validation
@@ -448,12 +442,34 @@ func (m *Mempool) checkParsedTransactionWithSnapshot(
 
 	// Apply policy validation
 	if err := m.applyPolicyAgainstState(checked, nextHeight, policyUtxos, policy); err != nil {
-		return nil, nil, txAdmitRejected(err.Error())
+		// Classified from the ORIGINAL fan-out error, read by type before the public
+		// wrapper renders its message: the impossible invariant is the one wrapper
+		// reachable here, the Simplicity wrapper being preempted by the lane above.
+		return nil, nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForPolicyError(err))
 	}
 
 	// Extract inputs and return
 	inputs := extractTxInputs(checked)
 	return checked, inputs, nil
+}
+
+// rejectSimplicityPreActivationLane is checkParsedTransactionWithSnapshot's
+// CORE_SIMPLICITY pre-activation lane. The (reject, err) tuple separates the
+// deployment-set-dependent half from the context-complete well-formedness
+// verdict, and the returned error carries the disposition that tuple selects,
+// as at the standard producer's own site.
+func (m *Mempool) rejectSimplicityPreActivationLane(tx *consensus.Tx, policyUtxos map[consensus.Outpoint]consensus.UtxoEntry, nextHeight uint64, policy MempoolConfig) error {
+	if !policy.PolicyRejectSimplicityPreActivation {
+		return nil
+	}
+	reject, reason, err := rejectCoreSimplicityPreActivation(tx, policyUtxos, m.chainID, nextHeight, policy.RotationProvider)
+	if err != nil {
+		return selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForSimplicityPreActivationOutcome(reject, policy.RotationProvider))
+	}
+	if reject {
+		return selectRelayDisposition(txAdmitRejected(reason), relayDispositionForSimplicityPreActivationOutcome(true, policy.RotationProvider))
+	}
+	return nil
 }
 
 func (m *Mempool) applyPolicyAgainstState(checked *consensus.CheckedTransaction, nextHeight uint64, utxos map[consensus.Outpoint]consensus.UtxoEntry, policy MempoolConfig) error {

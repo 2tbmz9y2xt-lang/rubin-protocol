@@ -10,11 +10,11 @@ import (
 // validateChainSnapshot validates chain state snapshot and extracts next height
 func validateChainSnapshot(snapshot *chainStateAdmissionSnapshot) (uint64, error) {
 	if snapshot == nil {
-		return 0, txAdmitUnavailable("nil chainstate")
+		return 0, selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
 	}
 	nextHeight, _, err := nextBlockContextFromFields(snapshot.hasTip, snapshot.height, snapshot.tipHash)
 	if err != nil {
-		return 0, txAdmitUnavailable(err.Error())
+		return 0, selectRelayDisposition(txAdmitUnavailable(err.Error()), RelayAdmissionUnavailable)
 	}
 	return nextHeight, nil
 }
@@ -47,7 +47,9 @@ func (m *Mempool) validateTransactionWithConsensus(
 		},
 	)
 	if err != nil {
-		return nil, txAdmitRejected(err.Error())
+		// Classified from the ORIGINAL consensus error, before the public wrapper
+		// drops its typed code and cause, exactly as the standard producer does.
+		return nil, selectRelayDisposition(txAdmitRejected(err.Error()), relayDispositionForConsensusError(err, policy))
 	}
 	return checked, nil
 }

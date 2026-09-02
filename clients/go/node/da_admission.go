@@ -181,7 +181,9 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 	}
 	defer h.release()
 	if !matchingDAChunkPayloadHash(tx) {
-		return nil, txAdmitRejected("DA chunk payload hash mismatch")
+		// A candidate whose payload contradicts its own declared hash is invalid
+		// under the bound context alone (RUBIN_MEMPOOL_POLICY.md 6.5).
+		return nil, selectRelayDisposition(txAdmitRejected("DA chunk payload hash mismatch"), RelayAdmissionStableTerminalReject)
 	}
 	checked, _, err := h.mempool.checkParsedTransactionWithSnapshot(owned, tx, txid, wtxid, h.snapshot, h.policy)
 	if err != nil {
