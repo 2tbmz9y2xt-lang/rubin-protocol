@@ -188,11 +188,14 @@ func logicalMDBXPlanToBatch(plan logicalStatePlan[logicalMDBXMetadata]) (mdbx.Ba
 	return mdbx.Batch{Mutations: mutations}, nil
 }
 
-// logicalMDBXPure runs every check needing no read: view and plan shape, order, checked arithmetic, extras.
+// logicalMDBXPure runs every check needing no read: view, declared-height form, plan shape, order, checked arithmetic, extras.
 func logicalMDBXPure(plan logicalStatePlan[logicalMDBXMetadata]) ([]mdbx.Mutation, []logicalMDBXRow, *logicalStateFailure) {
 	view := plan.Metadata.view
 	if view == nil || view.imageID == 0 {
 		return nil, nil, localLogicalStateFailure("nil logical MDBX metadata view or zero image identifier")
+	}
+	if failure := logicalMDBXCheckGenesis(view, plan.Parent, len(plan.Deletes)); failure != nil {
+		return nil, nil, failure
 	}
 	rows, failure := logicalMDBXPlanRows(plan.Deletes, plan.Puts)
 	if failure == nil {
@@ -205,7 +208,8 @@ func logicalMDBXPure(plan logicalStatePlan[logicalMDBXMetadata]) ([]mdbx.Mutatio
 	return mutations, rows, failure
 }
 
-// logicalMDBXPlanRows merges the two ordered plan slices once; unordered or duplicated input stays non-ascending.
+// logicalMDBXPlanRows merges the two ordered plan slices once, refusing a PUT beyond the PLAN covenant bound before
+// encoding it; unordered or duplicated input stays non-ascending.
 func logicalMDBXPlanRows(deletes []logicalStateDelete, puts []logicalStatePut) ([]logicalMDBXRow, *logicalStateFailure) {
 	rows := make([]logicalMDBXRow, 0, len(deletes)+len(puts))
 	for d, p := 0, 0; d < len(deletes) || p < len(puts); {
@@ -216,6 +220,9 @@ func logicalMDBXPlanRows(deletes []logicalStateDelete, puts []logicalStatePut) (
 			d++
 		}
 		if order >= 0 {
+			if len(puts[p].Entry.CovenantData) > MAX_COVENANT_DATA_PER_OUTPUT {
+				return nil, localLogicalStateFailure("logical state plan entry exceeds the covenant data bound")
+			}
 			row.op, row.put, row.literal = puts[p].Outpoint, true, logicalStateEntryBytes(puts[p].Outpoint, puts[p].Entry)[logicalMDBXEntryPrefix:]
 			p++
 		}
@@ -366,11 +373,12 @@ func logicalMDBXKeyImage(key []byte) uint64 {
 	return binary.BigEndian.Uint64(key)
 }
 
-// logicalMDBXCheckObservations proves the plan against what this view observed, with the genesis exception.
+// logicalMDBXCheckObservations proves the plan against what this view observed; the genesis form was already proved at
+// step 1, so declared height zero is the explicit exception and checks nothing here.
 func logicalMDBXCheckObservations(plan logicalStatePlan[logicalMDBXMetadata], rows []logicalMDBXRow) *logicalStateFailure {
 	view := plan.Metadata.view
 	if view.height == 0 {
-		return logicalMDBXCheckGenesis(view, plan.Parent)
+		return nil
 	}
 	if !view.counterPresent || view.counters != plan.Parent {
 		return localLogicalStateFailure("logical counter observation does not match the plan")
@@ -391,10 +399,10 @@ func logicalMDBXRowObserved(view *logicalMDBXStateView, row logicalMDBXRow) bool
 	return !row.before || observation.entryBytes == uint64(row.entryBytes)
 }
 
-// logicalMDBXCheckGenesis holds the declared-height-zero exception: the builder reads nothing, so the view must have
-// observed nothing and the plan must start from empty parent counters; a genesis delete dies earlier, in the arithmetic.
-func logicalMDBXCheckGenesis(view *logicalMDBXStateView, parent logicalStateCounters) *logicalStateFailure {
-	return logicalMDBXReject(view.counterPresent || len(view.rows) != 0 || parent != (logicalStateCounters{}),
+// logicalMDBXCheckGenesis is the step-1 declared-height form: at height zero the builder reads nothing, so the view must
+// have observed nothing and the plan must start from empty parent counters and delete nothing; above zero it adds nothing.
+func logicalMDBXCheckGenesis(view *logicalMDBXStateView, parent logicalStateCounters, deletes int) *logicalStateFailure {
+	return logicalMDBXReject(view.height == 0 && (view.counterPresent || len(view.rows) != 0 || parent != (logicalStateCounters{}) || deletes != 0),
 		"genesis logical state form contradicts the view")
 }
 
