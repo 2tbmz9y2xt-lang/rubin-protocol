@@ -2079,6 +2079,25 @@ func TestAdmitDANonReplayFailurePrefixes(t *testing.T) {
 			requireDANonReplayUnchanged(t, b.relay, b.mp.pendingOutpoints, bRelay, bOwner)
 		})
 	}
+	t.Run("caller defer closes on precommit panic", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		sentinel := &struct{}{}
+		recovered := func() (value any) {
+			defer func() { value = recover() }()
+			panicAdmission := f.begin(f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x55}, payload: []byte("panic")}))
+			defer panicAdmission.Close()
+			candidate, err := panicAdmission.renderDARelayAdmissionCandidate(daNonReplayPeer("peer"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = f.relay.planDANonReplay(candidate)
+			panic(sentinel)
+		}()
+		if recovered != sentinel || !f.state.admissionMu.TryLock() {
+			t.Fatalf("recovered=%v; admission guard leaked", recovered)
+		}
+		f.state.admissionMu.Unlock()
+	})
 	t.Run("invalid provenance", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x52}, payload: []byte("invalid provenance")})

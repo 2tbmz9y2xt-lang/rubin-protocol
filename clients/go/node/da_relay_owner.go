@@ -17,6 +17,7 @@ const (
 	daProvenanceDetachedReorg
 )
 
+// DAProvenance identifies the source used for DA admission. Its zero value is invalid; peer provenance requires nonempty peer and quota identities.
 type DAProvenance struct {
 	kind          daProvenanceKind
 	peerIdentity  string
@@ -25,6 +26,7 @@ type DAProvenance struct {
 
 type daProvenance = DAProvenance
 
+// NewPeerDAProvenance returns peer provenance when both identities are nonempty. Otherwise it returns zero DAProvenance and an error.
 func NewPeerDAProvenance(peerIdentity, quotaIdentity string) (DAProvenance, error) {
 	p := DAProvenance{kind: daProvenancePeer, peerIdentity: peerIdentity, quotaIdentity: quotaIdentity}
 	if err := p.validate(); err != nil {
@@ -33,8 +35,10 @@ func NewPeerDAProvenance(peerIdentity, quotaIdentity string) (DAProvenance, erro
 	return p, nil
 }
 
+// LocalDAProvenance returns local provenance without peer or quota identities.
 func LocalDAProvenance() DAProvenance { return DAProvenance{kind: daProvenanceLocal} }
 
+// DetachedReorgDAProvenance returns detached-reorg provenance without peer or quota identities.
 func DetachedReorgDAProvenance() DAProvenance {
 	return DAProvenance{kind: daProvenanceDetachedReorg}
 }
@@ -93,6 +97,7 @@ type daRelayAdmissionCandidate struct {
 	chunkHash         [32]byte
 }
 
+// DAAdmissionDisposition describes a successful DA admission result. Only DAAdmissionRetained and DAAdmissionDuplicate are valid nonzero values.
 type DAAdmissionDisposition uint8
 
 const (
@@ -107,6 +112,7 @@ const (
 	daRelayAdmissionDuplicate = DAAdmissionDuplicate
 )
 
+// DAAdmissionResult reports a successful DA admission. On error, AdmitDA returns its zero value; SameDAIDCommitConflict is true only for a different-txid same-DAID commit duplicate.
 type DAAdmissionResult struct {
 	DAID                   [32]byte
 	Disposition            DAAdmissionDisposition
@@ -206,6 +212,7 @@ type daAdmissionObservation struct {
 	stagedCommitRaw                                         bool
 }
 
+// AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
 	var zero DAAdmissionResult
 	m, owner, err := s.bindDAAdmission()
