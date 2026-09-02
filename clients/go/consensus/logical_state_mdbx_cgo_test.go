@@ -147,9 +147,10 @@ func logicalMDBXBuild(view *logicalMDBXStateView, parent, result logicalStateCou
 	return logicalStatePlan[logicalMDBXMetadata]{Deletes: deletes, Puts: puts, Parent: parent, Result: result, Metadata: newLogicalMDBXMetadata(view, extras)}
 }
 
-func logicalMDBXWantFailure(t *testing.T, label string, batch mdbx.Batch, failure *logicalStateFailure, kind logicalStateFailureKind) {
+func logicalMDBXWantFailure(t *testing.T, label string, batch mdbx.Batch, failure *logicalStateFailure, kind logicalStateFailureKind, cause ...string) {
 	t.Helper()
 	logicalMDBXAssert(t, failure != nil && failure.kind == kind && failure.cause != nil && batch.Mutations == nil, "%s: failure=%+v mutations=%d", label, failure, len(batch.Mutations))
+	logicalMDBXAssert(t, len(cause) == 0 || strings.Contains(failure.cause.Error(), cause[0]), "%s: cause %v does not name %q", label, failure.cause, cause)
 }
 
 func logicalMDBXWantBatch(t *testing.T, label string, batch mdbx.Batch, failure *logicalStateFailure, want ...mdbx.Mutation) {
@@ -181,10 +182,15 @@ func TestLogicalMDBXViewReads(t *testing.T) {
 		got, recorded := view.rows[logicalMDBXOpD]
 		logicalMDBXAssert(t, absent.kind == logicalStateRowAbsent && absent.cause == nil && recorded && !got.present && got.entryBytes == 0, "absent row drifted: %+v %+v", absent, got)
 	})
-	observation := reflect.TypeOf(logicalMDBXRowObservation{})
-	for i := range observation.NumField() {
-		logicalMDBXAssert(t, observation.Field(i).Type.Kind() != reflect.Slice, "bridge retained caller bytes: observation field %s holds bytes", observation.Field(i).Name)
+	for i := range reflect.TypeOf(logicalMDBXRowObservation{}).NumField() {
+		logicalMDBXAssert(t, reflect.TypeOf(logicalMDBXRowObservation{}).Field(i).Type.Kind() != reflect.Slice, "bridge retained caller bytes: observation field %d holds bytes", i)
 	}
+	// Malformed persisted bytes are decoder/validator-owned: the store-integrity arms of Counters, Lookup and the
+	// create-once comparison are reachable only through these three calls, never through a Store.Update-written row.
+	badKey, badValue := logicalMDBXHashRow(0x71)
+	_, _, counterErr := mdbx.DecodeLogicalCounterValue(make([]byte, 15))
+	_, utxoErr := mdbx.DecodeUTXOValue(make([]byte, 19))
+	logicalMDBXAssert(t, counterErr != nil && utxoErr != nil && mdbx.ValidateRow(logicalMDBXDBIs[3], badKey, badValue[:115]) != nil, "malformed persisted bytes accepted: %v %v", counterErr, utxoErr)
 	t.Run("absent counter above genesis", func(t *testing.T) {
 		fresh := logicalMDBXStore(t)
 		logicalMDBXSeed(t, fresh, logicalMDBXUTXORow(logicalMDBXOpA, logicalMDBXEntry(0, 0xa1)))
@@ -236,14 +242,16 @@ func TestLogicalMDBXErrorClassifier(t *testing.T) {
 		{"transaction", &mdbx.EngineError{Class: mdbx.EngineTransaction}, logicalStateFailureLocalInvariant, nil},
 		{"state mismatch", &mdbx.EngineError{Class: mdbx.EngineStateMismatch}, logicalStateFailureLocalInvariant, nil},
 		{"local invariant", &mdbx.EngineError{Class: mdbx.EngineLocalInvariant}, logicalStateFailureLocalInvariant, nil},
-		{"unknown class", &mdbx.EngineError{Class: mdbx.EngineClass("Rumour")}, logicalStateFailureLocalInvariant, nil},
+		{"unknown class", &mdbx.EngineError{Class: mdbx.EngineClass("Nonesuch")}, logicalStateFailureLocalInvariant, nil},
 		{"typed nil", typedNil, logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead},
 		{"wrapped", wrapped, logicalStateFailureLocalInvariant, wrapped},
 		{"foreign", plain, logicalStateFailureLocalInvariant, plain},
 		{"nil", nil, logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead},
 	} {
 		kind, cause := classifyLogicalMDBXReadError(tc.err)
-		logicalMDBXAssert(t, kind == tc.kind && cause == cmp.Or(tc.cause, tc.err), "logical read class drifted: %s kind=%d want=%d cause=%v", tc.name, kind, tc.kind, cause)
+		counterKind, rowKind := logicalMDBXReadKinds(kind)
+		logicalMDBXAssert(t, kind == tc.kind && cause == cmp.Or(tc.cause, tc.err), "logical read class drifted: %s kind=%d want=%d cause=%v", tc.name, kind, tc.kind, cause) //nolint:errorlint // The contract pins the exact cause pointer, not an errors.Is relation.
+		logicalMDBXAssert(t, counterKind == logicalStateCounterReadKind(tc.kind)+1 && rowKind == logicalStateRowReadKind(tc.kind)+2, "logical read class drifted: %s names counter %d row %d", tc.name, counterKind, rowKind)
 	}
 }
 
@@ -266,6 +274,8 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 
 	for _, tc := range []struct {
 		name, label    string
+		cause          string
+		counters       bool
 		height         uint64
 		lookups        []Outpoint
 		parent, result logicalStateCounters
@@ -283,24 +293,30 @@ func TestLogicalMDBXPlanToBatch(t *testing.T) {
 		{name: "counter observation mismatch", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: logicalMDBXTotal + 100, entries: 3}, result: logicalStateCounters{bytes: logicalMDBXTotal + 100 - logicalMDBXBytesA, entries: 2}, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "genesis put", label: "counter mutation missing", height: 0, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, want: []mdbx.Mutation{logicalMDBXCounterRow(false, bytesD, 1), logicalMDBXUTXORow(logicalMDBXOpD, entryD)}},
 		{name: "genesis with parent counters", label: "genesis form accepted", height: 0, parent: logicalStateCounters{bytes: 56, entries: 1}, result: logicalStateCounters{bytes: 56 + bytesD, entries: 2}, puts: putD, kind: logicalStateFailureLocalInvariant},
-		{name: "genesis with delete", label: "genesis form accepted", height: 0, deletes: delA, kind: logicalStateFailureLocalInvariant},
+		{name: "genesis with delete", label: "genesis form accepted", height: 0, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
+		{name: "genesis with a counter observation", label: "genesis form accepted", height: 0, counters: true, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, kind: logicalStateFailureLocalInvariant, cause: "genesis"},
 		{name: "genesis with observation", label: "genesis form accepted", height: 0, lookups: []Outpoint{logicalMDBXOpA}, result: logicalStateCounters{bytes: bytesD, entries: 1}, puts: putD, kind: logicalStateFailureLocalInvariant},
 		{name: "non-genesis without observations", label: "DELETE observation drifted", height: 1, parent: logicalMDBXBase, result: afterA, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "delete length mismatch", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes + 1, entries: 2}, deletes: []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA - 1}}, kind: logicalStateFailureLocalInvariant},
 		{name: "put over a present row", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: logicalMDBXTotal + logicalMDBXBytesA, entries: 4}, puts: []logicalStatePut{{Outpoint: logicalMDBXOpA, Entry: logicalMDBXEntry(0, 0xa1)}}, kind: logicalStateFailureLocalInvariant},
 		{name: "delete over an absent row", label: "DELETE observation drifted", height: 1, lookups: []Outpoint{logicalMDBXOpD}, parent: logicalMDBXBase, result: afterA, deletes: []logicalStateDelete{{Outpoint: logicalMDBXOpD, EntryBytes: logicalMDBXBytesA}}, kind: logicalStateFailureLocalInvariant},
+		{name: "unsorted plan rows without observations", label: "unsorted rows accepted", height: 1, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes - logicalMDBXBytesB, entries: 1}, deletes: []logicalStateDelete{delB[0], delA[0]}, kind: logicalStateFailureLocalInvariant, cause: "unordered"},
 		{name: "unsorted plan rows", label: "unsorted rows accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA, logicalMDBXOpB}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes - logicalMDBXBytesB, entries: 1}, deletes: []logicalStateDelete{delB[0], delA[0]}, kind: logicalStateFailureLocalInvariant},
 		{name: "duplicate plan rows", label: "duplicate rows accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: logicalMDBXTotal - 2*logicalMDBXBytesA, entries: 1}, deletes: []logicalStateDelete{delA[0], delA[0]}, kind: logicalStateFailureLocalInvariant},
 		{name: "entry count mismatch", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterA.bytes, entries: 3}, deletes: delA, kind: logicalStateFailureLocalInvariant},
 		{name: "byte total mismatch", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpD}, parent: logicalMDBXBase, result: logicalStateCounters{bytes: afterD.bytes - 1, entries: 4}, puts: putD, kind: logicalStateFailureLocalInvariant},
-		{name: "parent underflow", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, deletes: delA, kind: logicalStateFailureLocalInvariant},
+		{name: "parent underflow", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
+		{name: "byte total wraps past the parent", label: "counter arithmetic accepted", height: 1, lookups: []Outpoint{logicalMDBXOpA}, parent: logicalStateCounters{bytes: 1, entries: 1}, result: logicalStateCounters{bytes: ^uint64(0) - 54}, deletes: delA, kind: logicalStateFailureLocalInvariant, cause: "underflow"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			batch, failure := logicalMDBXConvert(t, store, tc.height, tc.lookups, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
+				if tc.counters {
+					view.Counters()
+				}
 				return logicalMDBXBuild(view, tc.parent, tc.result, tc.deletes, tc.puts)
 			})
 			if tc.kind != 0 {
-				logicalMDBXWantFailure(t, tc.label, batch, failure, tc.kind)
+				logicalMDBXWantFailure(t, tc.label, batch, failure, tc.kind, tc.cause)
 				return
 			}
 			logicalMDBXWantBatch(t, tc.label, batch, failure, tc.want...)
@@ -366,54 +382,62 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		return mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: mdbx.UndoEntryKey(filled32(0x74), op.Txid, 0, 0, op.Vout), AfterKind: mdbx.AfterOldValueRef, RefDBI: logicalMDBXDBIs[1], RefKey: logicalMDBXMust(mdbx.UTXOKey(image, op.Txid, op.Vout))}
 	}
 	for _, tc := range []struct {
-		name, label string
-		extras      []mdbx.Mutation
-		outcome     logicalMDBXExtraOutcome
+		name, label, cause string
+		extras             []mdbx.Mutation
+		outcome            logicalMDBXExtraOutcome
 	}{
-		{"rank0 metadata literal", "extra target policy drifted", []mdbx.Mutation{literal(0, metaKey, []byte{9})}, logicalMDBXEmit},
-		{"rank0 counter literal", "extra target policy drifted", []mdbx.Mutation{literal(0, counterKey, mdbx.LogicalCounterValue(1, 1))}, logicalMDBXLocal},
-		{"rank0 counter deletion", "extra target policy drifted", []mdbx.Mutation{absent(0, counterKey)}, logicalMDBXLocal},
-		{"rank0 metadata deletion", "extra target policy drifted", []mdbx.Mutation{absent(0, metaKey)}, logicalMDBXAdapterInvalid},
-		{"rank0 reference", "extra target policy drifted", []mdbx.Mutation{{DBI: logicalMDBXDBIs[0], Key: metaKey, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
-		{"rank1 literal", "extra target policy drifted", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x91)))}, logicalMDBXLocal},
-		{"rank1 deletion", "extra target policy drifted", []mdbx.Mutation{absent(1, logicalMDBXKey(logicalMDBXOpC))}, logicalMDBXLocal},
-		{"rank1 reference", "extra target policy drifted", []mdbx.Mutation{{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpD), AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXLocal},
-		{"rank2 literal same image", "extra target policy drifted", []mdbx.Mutation{literal(2, sameImage, chain)}, logicalMDBXEmit},
-		{"rank2 literal cross image", "extra target policy drifted", []mdbx.Mutation{literal(2, crossImage, chain)}, logicalMDBXLocal},
-		{"rank2 deletion", "extra target policy drifted", []mdbx.Mutation{absent(2, sameImage)}, logicalMDBXEmit},
-		{"rank2 deletion cross image", "extra target policy drifted", []mdbx.Mutation{absent(2, crossImage)}, logicalMDBXLocal},
-		{"rank2 reference", "extra target policy drifted", []mdbx.Mutation{{DBI: logicalMDBXDBIs[2], Key: sameImage, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
-		{"rank6 literal same image", "extra target policy drifted", []mdbx.Mutation{literal(6, sameImage, chain)}, logicalMDBXEmit},
-		{"rank6 literal cross image", "extra target policy drifted", []mdbx.Mutation{literal(6, crossImage, chain)}, logicalMDBXLocal},
-		{"rank6 deletion", "extra target policy drifted", []mdbx.Mutation{absent(6, sameImage)}, logicalMDBXEmit},
-		{"rank3 create absent", "create-once policy drifted", []mdbx.Mutation{literal(3, freshKey, freshValue)}, logicalMDBXEmit},
-		{"rank3 create identical", "create-once policy drifted", []mdbx.Mutation{literal(3, headerKey, headerValue)}, logicalMDBXOmit},
-		{"rank3 create differing", "create-once policy drifted", []mdbx.Mutation{literal(3, headerKey, differing)}, logicalMDBXIntegrity},
-		{"rank3 deletion", "create-once policy drifted", []mdbx.Mutation{absent(3, headerKey)}, logicalMDBXEmit},
-		{"rank3 reference", "create-once policy drifted", []mdbx.Mutation{{DBI: logicalMDBXDBIs[3], Key: headerKey, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
-		{"rank4 create identical", "create-once policy drifted", []mdbx.Mutation{literal(4, blockKey, blockValue)}, logicalMDBXOmit},
-		{"rank4 deletion", "create-once policy drifted", []mdbx.Mutation{absent(4, blockKey)}, logicalMDBXEmit},
-		{"rank5 manifest identical", "create-once policy drifted", []mdbx.Mutation{literal(5, manifestKey, manifestValue)}, logicalMDBXOmit},
-		{"rank5 manifest differing", "create-once policy drifted", []mdbx.Mutation{literal(5, manifestKey, mdbx.UndoManifestValue(2, [16]byte{2}, 2, 2))}, logicalMDBXIntegrity},
-		{"rank5 manifest deletion", "create-once policy drifted", []mdbx.Mutation{absent(5, manifestKey)}, logicalMDBXEmit},
-		{"rank5 entry deletion", "undo provenance drifted", []mdbx.Mutation{absent(5, entryKey)}, logicalMDBXEmit},
-		{"rank5 entry reference to the plan target", "undo provenance drifted", []mdbx.Mutation{ref(logicalMDBXOpA, logicalMDBXImage)}, logicalMDBXEmit},
-		{"rank5 entry reference off plan", "undo provenance drifted", []mdbx.Mutation{ref(logicalMDBXOpC, logicalMDBXImage)}, logicalMDBXLocal},
-		{"rank5 entry reference cross image", "undo provenance drifted", []mdbx.Mutation{ref(logicalMDBXOpA, logicalMDBXImage+1)}, logicalMDBXLocal},
-		{"rank5 entry literal", "undo provenance drifted", []mdbx.Mutation{literal(5, entryKey, logicalMDBXValue(logicalMDBXEntry(1, 0x92)))}, logicalMDBXAdapterInvalid},
-		{"forbidden extra precedes a differing create-once read", "extra target policy drifted", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x93))), literal(3, headerKey, differing)}, logicalMDBXLocal},
-		{"duplicate extra target", "duplicate extra accepted", []mdbx.Mutation{literal(2, sameImage, chain), literal(2, sameImage, chain)}, logicalMDBXLocal},
-		{"shuffled extras sort", "final Batch order drifted", []mdbx.Mutation{literal(6, sameImage, chain), literal(0, metaKey, []byte{9}), literal(3, freshKey, freshValue)}, logicalMDBXEmit},
+		{"rank0 metadata literal", "extra target policy drifted", "", []mdbx.Mutation{literal(0, metaKey, []byte{9})}, logicalMDBXEmit},
+		{"rank0 counter literal", "extra target policy drifted", "", []mdbx.Mutation{literal(0, counterKey, mdbx.LogicalCounterValue(1, 1))}, logicalMDBXLocal},
+		{"rank0 counter deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(0, counterKey)}, logicalMDBXLocal},
+		{"rank0 metadata deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(0, metaKey)}, logicalMDBXAdapterInvalid},
+		{"rank0 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[0], Key: metaKey, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
+		{"rank1 literal", "extra target policy drifted", "", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x91)))}, logicalMDBXLocal},
+		{"rank1 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(1, logicalMDBXKey(logicalMDBXOpC))}, logicalMDBXLocal},
+		{"rank1 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpD), AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXLocal},
+		{"rank2 literal same image", "extra target policy drifted", "", []mdbx.Mutation{literal(2, sameImage, chain)}, logicalMDBXEmit},
+		{"rank2 literal cross image", "extra target policy drifted", "", []mdbx.Mutation{literal(2, crossImage, chain)}, logicalMDBXLocal},
+		{"rank2 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(2, sameImage)}, logicalMDBXEmit},
+		{"rank2 deletion cross image", "extra target policy drifted", "", []mdbx.Mutation{absent(2, crossImage)}, logicalMDBXLocal},
+		{"rank2 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[2], Key: sameImage, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
+		{"rank6 literal same image", "extra target policy drifted", "", []mdbx.Mutation{literal(6, sameImage, chain)}, logicalMDBXEmit},
+		{"rank6 literal cross image", "extra target policy drifted", "", []mdbx.Mutation{literal(6, crossImage, chain)}, logicalMDBXLocal},
+		{"rank6 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(6, sameImage)}, logicalMDBXEmit},
+		{"rank6 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[6], Key: sameImage, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
+		{"rank3 create absent", "create-once policy drifted", "", []mdbx.Mutation{literal(3, freshKey, freshValue)}, logicalMDBXEmit},
+		{"rank3 create identical", "create-once policy drifted", "", []mdbx.Mutation{literal(3, headerKey, headerValue)}, logicalMDBXOmit},
+		{"rank3 create differing", "create-once policy drifted", "", []mdbx.Mutation{literal(3, headerKey, differing)}, logicalMDBXIntegrity},
+		{"rank3 deletion", "create-once policy drifted", "", []mdbx.Mutation{absent(3, headerKey)}, logicalMDBXEmit},
+		{"rank3 reference", "create-once policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[3], Key: headerKey, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
+		{"rank4 create identical", "create-once policy drifted", "", []mdbx.Mutation{literal(4, blockKey, blockValue)}, logicalMDBXOmit},
+		{"rank4 create absent", "create-once policy drifted", "", []mdbx.Mutation{literal(4, freshKey, freshValue)}, logicalMDBXEmit},
+		{"rank4 create differing", "create-once policy drifted", "", []mdbx.Mutation{literal(4, blockKey, differing)}, logicalMDBXIntegrity},
+		{"rank4 deletion", "create-once policy drifted", "", []mdbx.Mutation{absent(4, blockKey)}, logicalMDBXEmit},
+		{"rank4 reference", "create-once policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[4], Key: blockKey, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
+		{"rank5 manifest identical", "create-once policy drifted", "", []mdbx.Mutation{literal(5, manifestKey, manifestValue)}, logicalMDBXOmit},
+		{"rank5 manifest differing", "create-once policy drifted", "", []mdbx.Mutation{literal(5, manifestKey, mdbx.UndoManifestValue(2, [16]byte{2}, 2, 2))}, logicalMDBXIntegrity},
+		{"rank5 manifest deletion", "create-once policy drifted", "", []mdbx.Mutation{absent(5, manifestKey)}, logicalMDBXEmit},
+		{"rank5 entry deletion", "undo provenance drifted", "", []mdbx.Mutation{absent(5, entryKey)}, logicalMDBXEmit},
+		{"rank5 entry reference to the plan target", "undo provenance drifted", "", []mdbx.Mutation{ref(logicalMDBXOpA, logicalMDBXImage)}, logicalMDBXEmit},
+		{"rank5 entry reference off plan", "undo provenance drifted", "", []mdbx.Mutation{ref(logicalMDBXOpC, logicalMDBXImage)}, logicalMDBXLocal},
+		{"rank5 entry reference cross image", "undo provenance drifted", "", []mdbx.Mutation{ref(logicalMDBXOpA, logicalMDBXImage+1)}, logicalMDBXLocal},
+		{"rank5 entry literal", "undo provenance drifted", "", []mdbx.Mutation{literal(5, entryKey, logicalMDBXValue(logicalMDBXEntry(1, 0x92)))}, logicalMDBXAdapterInvalid},
+		{"forbidden extra precedes a differing create-once read", "extra target policy drifted", "", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x93))), literal(3, headerKey, differing)}, logicalMDBXLocal},
+		{"duplicate extra target", "duplicate extra accepted", "", []mdbx.Mutation{literal(2, sameImage, chain), literal(2, sameImage, chain)}, logicalMDBXLocal},
+		{"create-once reads stop at the lowest target", "create-once policy drifted", "rank 3", []mdbx.Mutation{literal(5, manifestKey, mdbx.UndoManifestValue(2, [16]byte{2}, 2, 2)), literal(3, headerKey, differing)}, logicalMDBXIntegrity},
+		{"shuffled extras sort", "final Batch order drifted", "", []mdbx.Mutation{literal(6, sameImage, chain), literal(0, metaKey, []byte{9}), literal(3, freshKey, freshValue)}, logicalMDBXEmit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.outcome == logicalMDBXAdapterInvalid {
-				logicalMDBXWantAdapterReject(t, store, tc.label, tc.extras[0])
+				// A cell the bridge never classifies: the adapter itself refuses it.
+				truth, updateErr := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: tc.extras}, nil })
+				var engine *mdbx.EngineError
+				logicalMDBXAssert(t, errors.As(updateErr, &engine) && engine.Class == mdbx.EngineInvalidInput && truth == mdbx.CommitTruthOld, "%s: adapter accepted a precondition-invalid extra: truth=%v err=%v", tc.label, truth, updateErr)
 				return
 			}
 			batch, failure := logicalMDBXConvert(t, store, 1, []Outpoint{logicalMDBXOpA}, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
 				return logicalMDBXBuild(view, logicalMDBXBase, logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA, entries: 2}, []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}, nil, tc.extras...)
 			})
-			logicalMDBXCheckExtra(t, tc.label, tc.outcome, tc.extras, batch, failure)
+			logicalMDBXCheckExtra(t, tc.label, tc.cause, tc.outcome, tc.extras, batch, failure)
 		})
 	}
 	t.Run("create-once read failure routes through the classifier", func(t *testing.T) {
@@ -422,28 +446,22 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		view := newLogicalMDBXStateView(escaped, logicalMDBXImage, 0)
 		batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, logicalStateCounters{}, logicalStateCounters{}, nil, nil, literal(3, freshKey, freshValue)))
 		logicalMDBXWantFailure(t, "create-once policy drifted", batch, failure, logicalStateFailureLocalInvariant)
-		batch, failure = logicalMDBXConvert(t, store, 1, nil, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(failure.cause, &engine) && engine.Class == mdbx.EngineInvalidInput, "create-once policy drifted: cause %v is not the direct engine error", failure.cause)
+	})
+	t.Run("observation check preempts create-once reads", func(t *testing.T) {
+		batch, failure := logicalMDBXConvert(t, store, 1, nil, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
 			return logicalMDBXBuild(view, logicalMDBXBase, logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA, entries: 2}, []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}, nil, literal(3, headerKey, differing))
 		})
-		logicalMDBXWantFailure(t, "create-once policy drifted", batch, failure, logicalStateFailureLocalInvariant)
+		logicalMDBXWantFailure(t, "create-once policy drifted", batch, failure, logicalStateFailureLocalInvariant, "observation")
 	})
 }
 
-// logicalMDBXWantAdapterReject pins a cell the bridge never classifies: the adapter itself refuses it.
-func logicalMDBXWantAdapterReject(t *testing.T, store *mdbx.Store, label string, extra mdbx.Mutation) {
-	t.Helper()
-	truth, err := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) {
-		return mdbx.Batch{Mutations: []mdbx.Mutation{extra}}, nil
-	})
-	var engine *mdbx.EngineError
-	logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineInvalidInput && truth == mdbx.CommitTruthOld, "%s: adapter accepted a precondition-invalid extra: truth=%v err=%v", label, truth, err)
-}
-
-func logicalMDBXCheckExtra(t *testing.T, label string, outcome logicalMDBXExtraOutcome, extras []mdbx.Mutation, batch mdbx.Batch, failure *logicalStateFailure) {
+func logicalMDBXCheckExtra(t *testing.T, label, cause string, outcome logicalMDBXExtraOutcome, extras []mdbx.Mutation, batch mdbx.Batch, failure *logicalStateFailure) {
 	t.Helper()
 	failing := map[logicalMDBXExtraOutcome]logicalStateFailureKind{logicalMDBXLocal: logicalStateFailureLocalInvariant, logicalMDBXIntegrity: logicalStateFailureStoreIntegrity}
 	if kind, rejected := failing[outcome]; rejected {
-		logicalMDBXWantFailure(t, label, batch, failure, kind)
+		logicalMDBXWantFailure(t, label, batch, failure, kind, cause)
 		return
 	}
 	logicalMDBXAssert(t, failure == nil, "%s: unexpected failure %+v", label, failure)
@@ -468,7 +486,6 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	headerKey, headerValue := logicalMDBXHashRow(0x61)
 	header := mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: headerKey, AfterKind: mdbx.AfterLiteral, Literal: headerValue}
 	bytesD := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD)))
-	var captured mdbx.Batch
 	// One Reader, one view, one declared height, Batch returned in-callback.
 	run := func(height uint64, touched []logicalTouchedState, extras ...mdbx.Mutation) (mdbx.CommitTruth, error) {
 		return store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
@@ -481,7 +498,6 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 			if convertFailure != nil {
 				return mdbx.Batch{}, convertFailure
 			}
-			captured = batch
 			return batch, nil
 		})
 	}
@@ -493,25 +509,20 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "height-1 composition failed: truth=%v err=%v", truth, err)
 	logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(entryD)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpA), nil}, [3][]byte{{3}, headerKey, headerValue})
 
-	t.Run("returned Batch mutation cannot reach the Store", func(t *testing.T) {
-		for i := range captured.Mutations {
-			logicalMDBXFlip(captured.Mutations[i].Key, captured.Mutations[i].Literal)
-		}
-		logicalMDBXWantImage(t, store, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(entryD)}, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)})
-	})
-
 	t.Run("converter rejection keeps the old image", func(t *testing.T) {
+		var inner *logicalStateFailure
 		truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 			view := newLogicalMDBXStateView(reader, logicalMDBXImage, 1)
 			view.Counters()
 			batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, logicalStateCounters{bytes: bytesD, entries: 1}, logicalStateCounters{bytes: bytesD, entries: 9}, nil, nil))
 			if failure != nil {
+				inner = failure
 				return mdbx.Batch{}, failure
 			}
 			return batch, nil
 		})
 		var rejected *logicalStateFailure
-		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &rejected) && rejected.kind == logicalStateFailureLocalInvariant, "converter rejection drifted: truth=%v err=%v", truth, err)
+		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &rejected) && rejected == inner && rejected.kind == logicalStateFailureLocalInvariant, "converter rejection drifted: truth=%v err=%v identity=%v", truth, err, rejected == inner)
 		logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)})
 	})
 
@@ -584,17 +595,24 @@ func logicalMDBXSnapshot(mutations []mdbx.Mutation) [][]byte {
 // TestLogicalMDBXBridgeDormantCensus is a type-aware structural census: it proves
 // only the dormancy and build rows, never a behavioral assertion.
 func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
-	var listed struct{ GoFiles []string }
-	out, err := exec.Command("go", "list", "-e", "-json", ".").Output()
+	var listed struct{ GoFiles, CgoFiles []string }
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil, "go list: %v", err)
 	logicalMDBXAssert(t, json.Unmarshal(out, &listed) == nil, "go list json is unreadable")
 	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go"} {
-		expression := logicalMDBXBuildExpression(t, name)
-		logicalMDBXAssert(t, expression == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %q", name, expression)
+		source, readErr := os.ReadFile(name)
+		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
+		line, _, _ := strings.Cut(string(source), "\n")
+		expression, parseErr := constraint.Parse(line)
+		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %q (%v)", name, line, parseErr)
 	}
+	// GoFiles plus CgoFiles is the whole compiled non-test set of this package: go list reports a file that
+	// imports "C" only in CgoFiles. IgnoredGoFiles need no parse because they are excluded by a build constraint
+	// this package still compiles without, so a caller placed there cannot reference a cgo-only bridge symbol.
+	sources := slices.Concat(listed.GoFiles, listed.CgoFiles)
 	fset, imports := token.NewFileSet(), 0
-	files := make([]*ast.File, 0, len(listed.GoFiles))
-	for _, name := range listed.GoFiles {
+	files := make([]*ast.File, 0, len(sources))
+	for _, name := range sources {
 		parsed, parseErr := parser.ParseFile(fset, name, nil, 0)
 		logicalMDBXAssert(t, parseErr == nil, "parse %s: %v", name, parseErr)
 		for _, spec := range parsed.Imports {
@@ -628,14 +646,4 @@ func (logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
 	pkg := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
 	pkg.MarkComplete()
 	return pkg, nil
-}
-
-func logicalMDBXBuildExpression(t *testing.T, name string) string {
-	t.Helper()
-	source, err := os.ReadFile(name)
-	logicalMDBXAssert(t, err == nil, "read %s: %v", name, err)
-	line, _, _ := strings.Cut(string(source), "\n")
-	expression, err := constraint.Parse(line)
-	logicalMDBXAssert(t, err == nil, "parse constraint of %s: %v", name, err)
-	return expression.String()
 }

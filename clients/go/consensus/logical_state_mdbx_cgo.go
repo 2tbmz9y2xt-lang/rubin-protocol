@@ -7,26 +7,23 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// Dormant bridge from a logical-state plan to one private MDBX Update Batch.
-// No non-test caller exists; adding one is a separate authorized change.
+// Dormant bridge from a logical-state plan to one private MDBX Update Batch. No non-test caller exists; adding one is
+// a separate authorized change.
 //
-// Caller preconditions this file cannot observe: the view is built from the
-// Reader of the same mdbx.Store Update callback, that Reader has not yet failed
-// a read, the same declared height reaches the plan builder and this converter,
-// the view given to buildLogicalStatePlan is also logicalMDBXMetadata.view, the
-// Batch is returned before the callback returns, and at declared height zero the
-// image is fresh. Extras already satisfy the complete mdbx mutation grammar and
-// leave combined capacity for the counter row, every logical row and every
-// extra; mdbx.Store.Update stays the sole defensive validator of that grammar
-// and of every aggregate bound. Read outcomes follow CAP
-// RUBIN_CONSENSUS_STATE_MACHINE.md section 2.5 through the logicalStateView
-// contract; logicalStateFailureLocalInvariant returned here tags caller and
-// shape bugs and is deliberately not the canonical section 2.5 LOCAL_INVARIANT
+// Caller preconditions this file cannot observe: the view is built from the Reader of the same mdbx.Store Update
+// callback, that Reader has not yet failed a read, the same declared height reaches the plan builder and this
+// converter, the view given to buildLogicalStatePlan is also logicalMDBXMetadata.view, the Batch is returned before the
+// callback returns, and at declared height zero the image is fresh. Extras already satisfy the complete mdbx mutation
+// grammar and leave combined capacity for the counter row, every logical row and every extra; mdbx.Store.Update stays
+// the sole defensive validator of that grammar and of every aggregate bound. Read outcomes follow CAP
+// RUBIN_CONSENSUS_STATE_MACHINE.md section 2.5 through the logicalStateView contract; logicalStateFailureLocalInvariant
+// returned here tags caller and shape bugs and is deliberately not the canonical section 2.5 LOCAL_INVARIANT
 // classification, which the first non-test caller must resolve.
 var _ logicalStateView = (*logicalMDBXStateView)(nil)
 
@@ -68,14 +65,15 @@ func (v *logicalMDBXStateView) read(dbi mdbx.DBI, key []byte, keyErr error) ([]b
 	return v.reader.Get(dbi, key)
 }
 
-// Counters performs the required logical-counter read. Postconditions: a present well formed row records the
-// decoded counters once, every other outcome records nothing, and absence above genesis is store integrity.
+// Counters performs the logical-counter read, which the plan requires only above genesis. Postconditions: a present
+// well formed row records the decoded counters once, every other outcome records nothing, and absence is store integrity.
 func (v *logicalMDBXStateView) Counters() logicalStateCounterRead {
 	key, keyErr := mdbx.MetaKey(0x10, v.imageID)
 	value, present, err := v.read(mdbx.SchemaV1DBIs()[0], key, keyErr)
 	if err != nil {
 		kind, cause := classifyLogicalMDBXReadError(err)
-		return logicalStateCounterRead{kind: logicalStateCounterReadKind(kind) + 1, cause: cause}
+		counterKind, _ := logicalMDBXReadKinds(kind)
+		return logicalStateCounterRead{kind: counterKind, cause: cause}
 	}
 	if !present {
 		return logicalStateCounterRead{kind: logicalStateCountersStoreIntegrity, cause: errLogicalMDBXAbsentCounter}
@@ -95,7 +93,8 @@ func (v *logicalMDBXStateView) Lookup(op Outpoint) logicalStateRowRead {
 	value, present, err := v.read(mdbx.SchemaV1DBIs()[1], key, keyErr)
 	if err != nil {
 		kind, cause := classifyLogicalMDBXReadError(err)
-		return logicalStateRowRead{kind: logicalStateRowReadKind(kind) + 2, cause: cause}
+		_, rowKind := logicalMDBXReadKinds(kind)
+		return logicalStateRowRead{kind: rowKind, cause: cause}
 	}
 	if !present {
 		v.rows[op] = logicalMDBXRowObservation{}
@@ -115,23 +114,32 @@ func (v *logicalMDBXStateView) Lookup(op Outpoint) logicalStateRowRead {
 // survives, and a nil or typed-nil input yields one synthesized local cause.
 func classifyLogicalMDBXReadError(err error) (logicalStateFailureKind, error) {
 	engine, direct := err.(*mdbx.EngineError) //nolint:errorlint // A wrapped error is not the adapter's own direct classification.
-	if direct && engine != nil {
-		return logicalMDBXClassKind(engine.Class), err
-	}
-	if !direct && err != nil {
+	if engine == nil {
+		if direct || err == nil {
+			return logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead
+		}
 		return logicalStateFailureLocalInvariant, err
 	}
-	return logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead
+	switch engine.Class {
+	case mdbx.EngineIntegrity:
+		return logicalStateFailureStoreIntegrity, err
+	case mdbx.EngineCapacity, mdbx.EngineConcurrency, mdbx.EngineIO:
+		return logicalStateFailureUnavailable, err
+	default:
+		return logicalStateFailureLocalInvariant, err
+	}
 }
 
-func logicalMDBXClassKind(class mdbx.EngineClass) logicalStateFailureKind {
-	switch class {
-	case mdbx.EngineIntegrity:
-		return logicalStateFailureStoreIntegrity
-	case mdbx.EngineCapacity, mdbx.EngineConcurrency, mdbx.EngineIO:
-		return logicalStateFailureUnavailable
+// logicalMDBXReadKinds names one failure class in both read vocabularies, so neither read
+// depends on the declaration order of the PLAN read-kind enumerations.
+func logicalMDBXReadKinds(kind logicalStateFailureKind) (logicalStateCounterReadKind, logicalStateRowReadKind) {
+	switch kind {
+	case logicalStateFailureUnavailable:
+		return logicalStateCountersUnavailable, logicalStateRowUnavailable
+	case logicalStateFailureStoreIntegrity:
+		return logicalStateCountersStoreIntegrity, logicalStateRowStoreIntegrity
 	default:
-		return logicalStateFailureLocalInvariant
+		return logicalStateCountersLocalInvariant, logicalStateRowLocalInvariant
 	}
 }
 
@@ -168,13 +176,12 @@ type logicalMDBXRow struct {
 // one private failure; it mutates nothing and reads nothing after a failure.
 func logicalMDBXPlanToBatch(plan logicalStatePlan[logicalMDBXMetadata]) (mdbx.Batch, *logicalStateFailure) {
 	mutations, rows, failure := logicalMDBXPure(plan)
-	if failure != nil {
-		return mdbx.Batch{}, failure
+	if failure == nil {
+		failure = logicalMDBXCheckObservations(plan, rows)
 	}
-	if failure = logicalMDBXCheckObservations(plan, rows); failure != nil {
-		return mdbx.Batch{}, failure
+	if failure == nil {
+		mutations, failure = logicalMDBXCreateOnce(plan.Metadata.view, mutations)
 	}
-	mutations, failure = logicalMDBXCreateOnce(plan.Metadata.view, mutations)
 	if failure != nil {
 		return mdbx.Batch{}, failure
 	}
@@ -188,17 +195,13 @@ func logicalMDBXPure(plan logicalStatePlan[logicalMDBXMetadata]) ([]mdbx.Mutatio
 		return nil, nil, localLogicalStateFailure("nil logical MDBX metadata view or zero image identifier")
 	}
 	rows, failure := logicalMDBXPlanRows(plan.Deletes, plan.Puts)
+	if failure == nil {
+		failure = logicalMDBXCheckArithmetic(plan.Parent, plan.Result, rows)
+	}
 	if failure != nil {
 		return nil, nil, failure
 	}
-	if failure = logicalMDBXCheckArithmetic(plan.Parent, plan.Result, rows); failure != nil {
-		return nil, nil, failure
-	}
-	mutations, failure := logicalMDBXMutations(view, plan.Result, rows)
-	if failure != nil {
-		return nil, nil, failure
-	}
-	mutations, failure = logicalMDBXWithExtras(mutations, plan.Metadata.extras, view)
+	mutations, failure := logicalMDBXWithExtras(logicalMDBXMutations(view, plan.Result, rows), plan.Metadata.extras, view)
 	return mutations, rows, failure
 }
 
@@ -240,28 +243,20 @@ func logicalMDBXRowOrder(deletes []logicalStateDelete, puts []logicalStatePut, d
 	return 1
 }
 
-func logicalMDBXAdd(total, add uint64) (uint64, bool) {
-	if add > ^uint64(0)-total {
-		return 0, false
-	}
-	return total + add, true
-}
-
 // logicalMDBXCheckArithmetic re-derives the plan counter equations with checked arithmetic; a replacement
 // counts in both sums, and any contradiction fails before the converter reads anything.
 func logicalMDBXCheckArithmetic(parent, result logicalStateCounters, rows []logicalMDBXRow) *logicalStateFailure {
-	var removed, removedBytes, added, addedBytes uint64
-	var ok bool
+	var removed, removedBytes, added, addedBytes, carry uint64
 	for _, row := range rows {
 		if row.before {
 			removed++
-			if removedBytes, ok = logicalMDBXAdd(removedBytes, uint64(row.entryBytes)); !ok {
+			if removedBytes, carry = bits.Add64(removedBytes, uint64(row.entryBytes), 0); carry != 0 {
 				return localLogicalStateFailure("logical state plan counters overflow")
 			}
 		}
 		if row.put {
 			added++
-			if addedBytes, ok = logicalMDBXAdd(addedBytes, logicalMDBXEntryPrefix+uint64(len(row.literal))); !ok {
+			if addedBytes, carry = bits.Add64(addedBytes, logicalMDBXEntryPrefix+uint64(len(row.literal)), 0); carry != 0 {
 				return localLogicalStateFailure("logical state plan counters overflow")
 			}
 		}
@@ -273,39 +268,31 @@ func logicalMDBXCheckArithmetic(parent, result logicalStateCounters, rows []logi
 }
 
 func logicalMDBXCheckTotals(parent, result logicalStateCounters, removed, removedBytes, added, addedBytes uint64) *logicalStateFailure {
-	entries, entriesOK := logicalMDBXAdd(parent.entries-removed, added)
-	total, bytesOK := logicalMDBXAdd(parent.bytes-removedBytes, addedBytes)
-	return logicalMDBXReject(!entriesOK || !bytesOK || entries != result.entries || total != result.bytes, "logical state plan counters do not match the plan rows")
+	entries, entriesCarry := bits.Add64(parent.entries-removed, added, 0)
+	total, bytesCarry := bits.Add64(parent.bytes-removedBytes, addedBytes, 0)
+	return logicalMDBXReject(entriesCarry|bytesCarry != 0 || entries != result.entries || total != result.bytes, "logical state plan counters do not match the plan rows")
 }
 
 // logicalMDBXMutations builds the always-present counter row then the coalesced rows, so a Batch is never empty.
-func logicalMDBXMutations(view *logicalMDBXStateView, result logicalStateCounters, rows []logicalMDBXRow) ([]mdbx.Mutation, *logicalStateFailure) {
+// MetaKey and UTXOKey cannot fail here: a zero imageID was already rejected at step 1.
+func logicalMDBXMutations(view *logicalMDBXStateView, result logicalStateCounters, rows []logicalMDBXRow) []mdbx.Mutation {
 	dbis := mdbx.SchemaV1DBIs()
-	counterKey, keyErr := mdbx.MetaKey(0x10, view.imageID)
-	if keyErr != nil {
-		return nil, localLogicalStateFailure("invalid logical counter key")
-	}
+	counterKey, _ := mdbx.MetaKey(0x10, view.imageID)
 	mutations := make([]mdbx.Mutation, 0, len(rows)+1)
 	mutations = append(mutations, mdbx.Mutation{DBI: dbis[0], Key: counterKey, BeforePresent: view.counterPresent, AfterKind: mdbx.AfterLiteral, Literal: mdbx.LogicalCounterValue(result.bytes, result.entries)})
 	for _, row := range rows {
-		key, err := mdbx.UTXOKey(view.imageID, row.op.Txid, row.op.Vout)
-		if err != nil {
-			return nil, localLogicalStateFailure("invalid logical row key")
+		key, _ := mdbx.UTXOKey(view.imageID, row.op.Txid, row.op.Vout)
+		mutation := mdbx.Mutation{DBI: dbis[1], Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
+		if row.put {
+			mutation = mdbx.Mutation{DBI: dbis[1], Key: key, BeforePresent: row.before, AfterKind: mdbx.AfterLiteral, Literal: row.literal}
 		}
-		mutations = append(mutations, logicalMDBXRowMutation(dbis[1], key, row))
+		mutations = append(mutations, mutation)
 	}
-	return mutations, nil
-}
-
-func logicalMDBXRowMutation(dbi mdbx.DBI, key []byte, row logicalMDBXRow) mdbx.Mutation {
-	if !row.put {
-		return mdbx.Mutation{DBI: dbi, Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
-	}
-	return mdbx.Mutation{DBI: dbi, Key: key, BeforePresent: row.before, AfterKind: mdbx.AfterLiteral, Literal: row.literal}
+	return mutations
 }
 
 // logicalMDBXWithExtras applies the residual policy, owns every emitted extra and sorts once by (DBI.Rank, Key),
-// rejecting any repeated target, including one colliding with a bridge-owned row.
+// rejecting any repeated target.
 func logicalMDBXWithExtras(mutations, extras []mdbx.Mutation, view *logicalMDBXStateView) ([]mdbx.Mutation, *logicalStateFailure) {
 	// Bridge-owned rows for provenance; the counter can never match a utxo-v1 RefDBI.
 	logical := mutations[:len(mutations):len(mutations)]
@@ -313,6 +300,7 @@ func logicalMDBXWithExtras(mutations, extras []mdbx.Mutation, view *logicalMDBXS
 		if failure := logicalMDBXExtraPolicy(extra, view, logical); failure != nil {
 			return nil, failure
 		}
+		// Cloned a second time so a later Batch mutation cannot reach the owned metadata; one copy per extra.
 		mutations = append(mutations, logicalMDBXCloneMutation(extra))
 	}
 	sort.Slice(mutations, func(i, j int) bool { return logicalMDBXBefore(mutations[i], mutations[j]) })
@@ -336,7 +324,7 @@ func logicalMDBXBefore(previous, next mdbx.Mutation) bool {
 func logicalMDBXExtraPolicy(extra mdbx.Mutation, view *logicalMDBXStateView, logical []mdbx.Mutation) *logicalStateFailure {
 	switch extra.DBI.Rank {
 	case 0:
-		return logicalMDBXReject(len(extra.Key) == 9 && extra.Key[0] == 0x10, "extra targets the bridge-owned logical counter")
+		return logicalMDBXReject(len(extra.Key) == 9 && extra.Key[0] == 0x10, "extra targets a logical counter row")
 	case 1:
 		return localLogicalStateFailure("extra targets a bridge-owned logical row")
 	case 2, 6:
@@ -355,13 +343,13 @@ func logicalMDBXReject(bad bool, message string) *logicalStateFailure {
 	return nil
 }
 
-// logicalMDBXUndoPolicy binds an undo reference to a logical row this Batch itself removes, in this image.
+// logicalMDBXUndoPolicy binds an undo reference to a logical row this Batch itself removes or overwrites, in this image.
 func logicalMDBXUndoPolicy(extra mdbx.Mutation, view *logicalMDBXStateView, logical []mdbx.Mutation) *logicalStateFailure {
 	if extra.AfterKind != mdbx.AfterOldValueRef {
 		return nil
 	}
 	if logicalMDBXKeyImage(extra.RefKey) != view.imageID {
-		return localLogicalStateFailure("undo reference targets a different logical image")
+		return localLogicalStateFailure("undo reference key is short or targets a different logical image")
 	}
 	for _, row := range logical {
 		if row.BeforePresent && row.DBI == extra.RefDBI && bytes.Equal(row.Key, extra.RefKey) {
@@ -383,7 +371,7 @@ func logicalMDBXKeyImage(key []byte) uint64 {
 func logicalMDBXCheckObservations(plan logicalStatePlan[logicalMDBXMetadata], rows []logicalMDBXRow) *logicalStateFailure {
 	view := plan.Metadata.view
 	if view.height == 0 {
-		return logicalMDBXCheckGenesis(view, plan.Parent, len(plan.Deletes))
+		return logicalMDBXCheckGenesis(view, plan.Parent)
 	}
 	if !view.counterPresent || view.counters != plan.Parent {
 		return localLogicalStateFailure("logical counter observation does not match the plan")
@@ -404,10 +392,10 @@ func logicalMDBXRowObserved(view *logicalMDBXStateView, row logicalMDBXRow) bool
 	return !row.before || observation.entryBytes == uint64(row.entryBytes)
 }
 
-// logicalMDBXCheckGenesis holds the declared-height-zero exception: the builder reads nothing, so the view must
-// have observed nothing and the plan must remove nothing from empty parent counters.
-func logicalMDBXCheckGenesis(view *logicalMDBXStateView, parent logicalStateCounters, deletes int) *logicalStateFailure {
-	return logicalMDBXReject(view.counterPresent || len(view.rows) != 0 || deletes != 0 || parent != (logicalStateCounters{}),
+// logicalMDBXCheckGenesis holds the declared-height-zero exception: the builder reads nothing, so the view must have
+// observed nothing and the plan must start from empty parent counters; a genesis delete dies earlier, in the arithmetic.
+func logicalMDBXCheckGenesis(view *logicalMDBXStateView, parent logicalStateCounters) *logicalStateFailure {
+	return logicalMDBXReject(view.counterPresent || len(view.rows) != 0 || parent != (logicalStateCounters{}),
 		"genesis logical state form contradicts the view")
 }
 
@@ -427,7 +415,8 @@ func logicalMDBXCreateOnce(view *logicalMDBXStateView, mutations []mdbx.Mutation
 }
 
 // logicalMDBXCreateOnceEmit decides one create-once row. Postconditions: an absent target keeps its create, an
-// identical SchemaV1-valid present row is omitted, and a differing or malformed one is a store-integrity failure.
+// identical SchemaV1-valid present row is omitted, a differing or malformed one is a store-integrity failure, and a
+// failed read carries the classifier's kind with its exact cause.
 func logicalMDBXCreateOnceEmit(view *logicalMDBXStateView, mutation mdbx.Mutation) (bool, *logicalStateFailure) {
 	if !logicalMDBXCreateOnceTarget(mutation) {
 		return true, nil
@@ -454,5 +443,5 @@ func logicalMDBXCreateOnceTarget(m mdbx.Mutation) bool {
 	if m.AfterKind != mdbx.AfterLiteral || m.BeforePresent {
 		return false
 	}
-	return m.DBI.Rank == 3 || m.DBI.Rank == 4 || m.DBI.Rank == 5 && len(m.Key) == 33
+	return m.DBI.Rank == 3 || m.DBI.Rank == 4 || (m.DBI.Rank == 5 && len(m.Key) == 33)
 }
