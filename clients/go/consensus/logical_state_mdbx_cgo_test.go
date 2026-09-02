@@ -109,10 +109,7 @@ func logicalMDBXSeed(t *testing.T, store *mdbx.Store, mutations ...mdbx.Mutation
 func logicalMDBXSeeded(t *testing.T) *mdbx.Store {
 	t.Helper()
 	store := logicalMDBXStore(t)
-	logicalMDBXSeed(t, store, logicalMDBXCounterRow(false, logicalMDBXTotal, 3),
-		logicalMDBXUTXORow(logicalMDBXOpA, logicalMDBXEntry(0, 0xa1)),
-		logicalMDBXUTXORow(logicalMDBXOpB, logicalMDBXEntry(253, 0xb2)),
-		logicalMDBXUTXORow(logicalMDBXOpC, logicalMDBXEntry(65_536, 0xc3)))
+	logicalMDBXSeed(t, store, logicalMDBXCounterRow(false, logicalMDBXTotal, 3), logicalMDBXUTXORow(logicalMDBXOpA, logicalMDBXEntry(0, 0xa1)), logicalMDBXUTXORow(logicalMDBXOpB, logicalMDBXEntry(253, 0xb2)), logicalMDBXUTXORow(logicalMDBXOpC, logicalMDBXEntry(65_536, 0xc3)))
 	return store
 }
 
@@ -221,7 +218,6 @@ func TestLogicalMDBXViewReads(t *testing.T) {
 
 func TestLogicalMDBXErrorClassifier(t *testing.T) {
 	integrity := &mdbx.EngineError{Class: mdbx.EngineIntegrity, Operation: "get", Code: 1, Diagnostic: "integrity"}
-	var typedNil *mdbx.EngineError
 	plain, wrapped := errors.New("plain"), fmt.Errorf("wrapped: %w", integrity)
 	for _, tc := range []struct {
 		name  string
@@ -238,7 +234,7 @@ func TestLogicalMDBXErrorClassifier(t *testing.T) {
 		{"state mismatch", &mdbx.EngineError{Class: mdbx.EngineStateMismatch}, logicalStateFailureLocalInvariant, nil},
 		{"local invariant", &mdbx.EngineError{Class: mdbx.EngineLocalInvariant}, logicalStateFailureLocalInvariant, nil},
 		{"unknown class", &mdbx.EngineError{Class: mdbx.EngineClass("Nonesuch")}, logicalStateFailureLocalInvariant, nil},
-		{"typed nil", typedNil, logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead},
+		{"typed nil", (*mdbx.EngineError)(nil), logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead},
 		{"wrapped", wrapped, logicalStateFailureLocalInvariant, wrapped},
 		{"foreign", plain, logicalStateFailureLocalInvariant, plain},
 		{"nil", nil, logicalStateFailureLocalInvariant, errLogicalMDBXUnclassifiedRead},
@@ -253,19 +249,13 @@ func TestLogicalMDBXErrorClassifier(t *testing.T) {
 func TestLogicalMDBXPlanToBatch(t *testing.T) {
 	store := logicalMDBXSeeded(t)
 	entryD, entryE := logicalMDBXEntry(7, 0xd4), logicalMDBXEntry(9, 0xe5)
-	bytesD := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD)))
-	bytesE := uint64(len(logicalStateEntryBytes(logicalMDBXOpB, entryE)))
-	delA := []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}
-	delB := []logicalStateDelete{{Outpoint: logicalMDBXOpB, EntryBytes: logicalMDBXBytesB}}
-	putD := []logicalStatePut{{Outpoint: logicalMDBXOpD, Entry: entryD}}
-	counterOnly := []mdbx.Mutation{logicalMDBXCounterRow(true, logicalMDBXTotal, 3)}
-	deleteRowA := mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpA), BeforePresent: true, AfterKind: mdbx.AfterAbsent}
+	bytesD, bytesE := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD))), uint64(len(logicalStateEntryBytes(logicalMDBXOpB, entryE)))
+	delA, delB := []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}, []logicalStateDelete{{Outpoint: logicalMDBXOpB, EntryBytes: logicalMDBXBytesB}}
+	putD, counterOnly := []logicalStatePut{{Outpoint: logicalMDBXOpD, Entry: entryD}}, []mdbx.Mutation{logicalMDBXCounterRow(true, logicalMDBXTotal, 3)}
+	deleteRowA, opE := mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpA), BeforePresent: true, AfterKind: mdbx.AfterAbsent}, Outpoint{Txid: filled32(0x22), Vout: 9}
 	replaceRowB := logicalMDBXUTXORow(logicalMDBXOpB, entryE)
 	replaceRowB.BeforePresent = true
-	afterA := logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA, entries: 2}
-	afterE := logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesB + bytesE, entries: 3}
-	afterD := logicalStateCounters{bytes: logicalMDBXTotal + bytesD, entries: 4}
-	opE := Outpoint{Txid: filled32(0x22), Vout: 9}
+	afterA, afterE, afterD := logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA, entries: 2}, logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesB + bytesE, entries: 3}, logicalStateCounters{bytes: logicalMDBXTotal + bytesD, entries: 4}
 
 	for _, tc := range []struct {
 		name, label    string
@@ -441,6 +431,14 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, logicalMDBXBase, logicalMDBXBase, nil, nil, mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: entryKey, AfterKind: mdbx.AfterOldValueRef, RefDBI: logicalMDBXDBIs[0], RefKey: logicalMDBXMust(mdbx.MetaKey(0x10, view.imageID))}))
 		logicalMDBXWantFailure(t, "undo provenance drifted", batch, failure, logicalStateFailureLocalInvariant, "utxo-v1")
 	})
+	t.Run("rank5 entry reference to a replacement target", func(t *testing.T) {
+		entry, extras := logicalMDBXEntry(3, 0xa9), []mdbx.Mutation{ref(logicalMDBXOpA, logicalMDBXImage)}
+		batch, failure := logicalMDBXConvert(t, store, 1, []Outpoint{logicalMDBXOpA}, func(view *logicalMDBXStateView) logicalStatePlan[logicalMDBXMetadata] {
+			return logicalMDBXBuild(view, logicalMDBXBase, logicalStateCounters{bytes: logicalMDBXTotal - logicalMDBXBytesA + uint64(len(logicalStateEntryBytes(logicalMDBXOpA, entry))), entries: 3}, []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: logicalMDBXBytesA}}, []logicalStatePut{{Outpoint: logicalMDBXOpA, Entry: entry}}, extras...)
+		})
+		logicalMDBXCheckExtra(t, "undo provenance drifted", "", logicalMDBXEmit, extras, image, batch, failure)
+		logicalMDBXAssert(t, batch.Mutations[1].BeforePresent && batch.Mutations[1].AfterKind == mdbx.AfterLiteral && bytes.Equal(batch.Mutations[1].Key, logicalMDBXKey(logicalMDBXOpA)) && bytes.Equal(batch.Mutations[1].Literal, logicalMDBXValue(entry)), "undo provenance drifted: replacement row %+v", batch.Mutations[1])
+	})
 	t.Run("create-once read failure routes through the classifier", func(t *testing.T) {
 		var escaped *mdbx.Reader
 		logicalMDBXAssert(t, store.View(func(reader *mdbx.Reader) error { escaped = reader; return nil }) == nil, "view: escaped reader")
@@ -470,14 +468,10 @@ func logicalMDBXCheckExtra(t *testing.T, label, cause string, outcome logicalMDB
 	logicalMDBXSeed(t, fresh, image...)
 	truth, err := fresh.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return batch, nil })
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "%s: adapter refused the bridge Batch: truth=%v err=%v", label, truth, err)
-	want := 2 + len(extras)
-	if outcome == logicalMDBXOmit {
-		want = 2
-	}
+	want := map[bool]int{false: 2 + len(extras), true: 2}[outcome == logicalMDBXOmit]
 	logicalMDBXAssert(t, len(batch.Mutations) == want, "%s: got %d mutations, want %d", label, len(batch.Mutations), want)
 	for i := 1; i < len(batch.Mutations); i++ {
-		previous, next := batch.Mutations[i-1], batch.Mutations[i]
-		logicalMDBXAssert(t, cmp.Or(cmp.Compare(previous.DBI.Rank, next.DBI.Rank), bytes.Compare(previous.Key, next.Key)) < 0, "final Batch order drifted: rank %d key %x then rank %d key %x", previous.DBI.Rank, previous.Key, next.DBI.Rank, next.Key)
+		logicalMDBXAssert(t, cmp.Or(cmp.Compare(batch.Mutations[i-1].DBI.Rank, batch.Mutations[i].DBI.Rank), bytes.Compare(batch.Mutations[i-1].Key, batch.Mutations[i].Key)) < 0, "final Batch order drifted: rank %d key %x then rank %d key %x", batch.Mutations[i-1].DBI.Rank, batch.Mutations[i-1].Key, batch.Mutations[i].DBI.Rank, batch.Mutations[i].Key)
 	}
 	for _, extra := range extras {
 		present := slices.ContainsFunc(batch.Mutations, func(m mdbx.Mutation) bool { return reflect.DeepEqual(m, extra) })
@@ -602,19 +596,16 @@ func logicalMDBXSnapshot(mutations []mdbx.Mutation) [][]byte {
 func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
-	logicalMDBXAssert(t, err == nil, "go list: %v", err)
-	logicalMDBXAssert(t, json.Unmarshal(out, &listed) == nil, "go list json is unreadable")
+	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
 	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
-		line, _, _ := strings.Cut(string(source), "\n")
-		expression, parseErr := constraint.Parse(line)
-		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %q (%v)", name, line, parseErr)
+		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
+		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %v (%v)", name, expression, parseErr)
 	}
 	// go list's non-test source set is GoFiles+CgoFiles+IgnoredGoFiles: a file ignored on this platform may still compile, and call the bridge, elsewhere.
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
-	fset, imports := token.NewFileSet(), 0
-	files := make([]*ast.File, 0, len(sources))
+	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
 		parsed, parseErr := parser.ParseFile(fset, name, nil, 0)
 		logicalMDBXAssert(t, parseErr == nil, "parse %s: %v", name, parseErr)
@@ -627,11 +618,9 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		files = append(files, parsed)
 	}
 	logicalMDBXAssert(t, imports == 1, "bridge lost dormancy: %d non-test internal/mdbx imports, want 1", imports)
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
-	config := &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
+	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
 	_, _ = config.Check("consensus", fset, files, info)
-	names := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "Counters": true, "Lookup": true}
-	declared := map[types.Object]bool{}
+	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
 	for ident, object := range info.Defs {
 		if names[ident.Name] && object != nil && strings.HasSuffix(fset.Position(ident.Pos()).Filename, "logical_state_mdbx_cgo.go") {
 			declared[object] = true
@@ -640,6 +629,17 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	logicalMDBXAssert(t, len(declared) == len(names), "bridge lost dormancy: resolved %d of %d bridge entrypoints", len(declared), len(names))
 	for ident, object := range info.Uses {
 		logicalMDBXAssert(t, !declared[object], "bridge lost dormancy: non-test use of %s at %s", ident.Name, fset.Position(ident.Pos()))
+		resolved[fset.Position(ident.Pos()).Filename] = true
+	}
+	// The checker swallows its errors, so a vacuous Uses graph would pass the loop above: every parsed file must have resolved a use, and every entrypoint-named identifier outside a declaration must carry a type object.
+	logicalMDBXAssert(t, len(resolved) == len(sources), "bridge census resolved no uses: %d of %d files resolved, unresolved %v", len(resolved), len(sources), slices.DeleteFunc(slices.Clone(sources), func(name string) bool { return resolved[name] }))
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok && names[ident.Name] && info.Defs[ident] == nil {
+				logicalMDBXAssert(t, info.Uses[ident] != nil, "bridge census resolved no uses: %s at %s lacks a type object", ident.Name, fset.Position(ident.Pos()))
+			}
+			return true
+		})
 	}
 }
 
