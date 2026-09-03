@@ -294,10 +294,9 @@ func canonicalDASetIdentityIncluded(candidates []canonicalDASetIdentity, identit
 
 // preparedCanonicalDAOwnerCandidates is ONE matched pair of private candidates:
 // D1, the retained-DA image the transition would publish, and O1, the owner
-// image keeping the DA claims D1's surviving members hold plus every standard
-// claim verbatim, its indexes rebuilt from it. Neither half is publishable
-// alone, and neither shares a mutable container with the inputs it was derived
-// from or with its sibling.
+// image keeping the DA claims D1's surviving members hold plus every standard claim
+// verbatim, its indexes rebuilt from it. Neither half is publishable alone, and
+// neither shares a mutable container with an input or with its sibling.
 type preparedCanonicalDAOwnerCandidates struct {
 	retained   *DARelayState
 	pending    pendingOutpointSnapshot
@@ -312,31 +311,35 @@ type preparedCanonicalDAOwnerCandidates struct {
 //
 // Both inputs are CALLER-OWNED and stable for the call: this takes no live
 // transition, relay or owner lock, rereads nothing, publishes nothing and
-// mutates neither input nor anything reachable from one. It owns only the image
-// it builds; the supplied context's rotation memo and signature cache absorb
-// the per-height rotation observation and signature verification, as the live
-// D preparation above states. Retained bytes and stored members are borrowed
-// read-only and cannot escape: every surviving record is deep-copied into D1
-// and every surviving claim is copied into O1.
+// mutates neither input nor anything reachable from one. The one lock it takes
+// transitively is the supplied chain.final's ChainState.mu, RLocked per member
+// by admissionSnapshotForInputs, so the caller must supply a private clone or
+// never hold that mutex exclusively across this call. It owns only the image it
+// builds; the supplied context's rotation memo and signature cache absorb the
+// per-height rotation observation and signature verification, as the live D
+// preparation above states. Retained bytes and stored members are borrowed
+// read-only and cannot escape.
 //
-// RUBIN_MEMPOOL_POLICY.md Section 6.4.1 says what each phase validates or
-// derives; the PHASE-MAJOR walk is this builder's own rule — every record
-// clears one phase before any enters the next: (1-3) structure, identity
-// binding, accounting and locator closure; (4) every member against the final
-// chain with its exact stored fee, unioned with the exact-inclusion removals;
-// (5) the member/finalized-DA-claim bijection against the one owner snapshot;
-// (6) the projected pair and its closing D/O proof. The first defect in
-// ascending raw da_id, commit first then ascending chunk index, is the sole
-// result, with the shared validator's class carried verbatim: keep=false is an
-// EXCLUSION that removes a record, a canonical precommit plan abort is returned
-// unchanged, a terminal stays the retained-DA terminal class — unlike the
-// record-major live prepareCanonicalDAImage, which this builder never consults.
+// RUBIN_MEMPOOL_POLICY.md Section 6.4.1 says what each phase validates or derives;
+// the PHASE-MAJOR walk is this builder's own rule — every record clears one phase
+// before any enters the next: (1-3) structure, identity binding, accounting and
+// locator closure; (4) the final chain and the exact stored fee, unioned with the
+// exact-inclusion removals; (5) the member/finalized-DA-claim bijection; (6) the
+// pair and its closing D/O proof. The first defect in ascending raw da_id, commit
+// first then ascending chunk index, is the sole result — phase 5's claim-shape
+// sub-phase excepted, which reports the first defect in the owner snapshot's own
+// claim order (ascending token sequence, as snapshot() renders it) — with the class
+// carried verbatim: keep=false is an EXCLUSION that removes a record, a canonical
+// precommit plan abort is returned unchanged, a terminal stays the retained-DA
+// terminal class — unlike the record-major live prepareCanonicalDAImage, which this
+// builder never consults.
 //
-// Cost, accepted deliberately: each removal reproves the locator index through
-// the shared owner-atomic projector, O(locators), and the inclusion scan is
-// O(records × included), included bounded by MAX_DA_BATCHES_PER_BLOCK. A real
-// block identity matches no owner-ready resident until COMPLETE_SET joins that
-// domain (issue 1118); RUB-678 owns the live call site, there is none today.
+// Cost, accepted deliberately: each removal reproves the whole locator index
+// through the shared owner-atomic projector, O(locators) per removal and
+// O(removals × locators) over the call, and the inclusion scan is
+// O(records × included), included bounded by MAX_DA_BATCHES_PER_BLOCK. A real block
+// identity matches no owner-ready resident until COMPLETE_SET joins that domain
+// (issue 1118); RUB-678 owns the live call site, and there is none today.
 func prepareCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -371,14 +374,13 @@ func prepareCanonicalDAOwnerCandidates(
 // canonicalDAOwnerRemovals is phase 4: EVERY member of EVERY record is judged
 // against the supplied final-chain context before any owner work, so an earlier
 // member's ordinary invalidity never hides a later member's terminal or plan
-// abort. The stored fee is bound after the shared validator returns: a
-// policy-half error (plan abort or terminal) outranks a fee mismatch on the
-// same member, a policy-half exclusion does not. A record is removed if any
-// member is not final_chain_valid OR its exact identity is included: one union.
+// abort. The stored fee is bound after the shared validator returns, so a policy-half
+// error (plan abort or terminal) outranks a fee mismatch on the same member and an
+// exclusion does not. A record is removed if any member is not final_chain_valid OR
+// its exact identity is included: one union.
 func canonicalDAOwnerRemovals(image canonicalDARetainedImage, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (map[[32]byte]bool, error) {
 	removed := make(map[[32]byte]bool, len(image.identities))
-	for i := range image.members {
-		member := image.members[i]
+	for _, member := range image.members {
 		checked, keep, err := canonicalRetainedDACheckedMember(member.parsed, chain)
 		if err != nil {
 			return nil, canonicalDARecordTerminal(retaggedCanonicalDATerminal(err, member.parsed.label), member.daID)
@@ -407,12 +409,11 @@ func canonicalDARecordTerminal(err error, daID [32]byte) error {
 	return &canonicalDATerminalError{detail: fmt.Sprintf("retained DA record %x: %s", daID, terminal.detail)}
 }
 
-// validateCanonicalDAOwnerClaims is phase 5: every claim of the one owner
-// snapshot is shape-valid for this owner under the snapshot's own high-waters
-// and claims its outpoints alone, then the retained members and the FINALIZED
-// DA claims are proven one bijection: every member resolves its own exclusive
-// claim, no claim outside the standard domain is left unbound. A standard claim
-// is never bound, removed or reordered: only its shape, token and inputs are read.
+// validateCanonicalDAOwnerClaims is phase 5: every claim of the one owner snapshot
+// is shape-valid for this owner under its own high-waters and claims its outpoints
+// alone, then the members and the FINALIZED DA claims are proven one bijection:
+// every member resolves its own exclusive claim, no claim outside the standard
+// domain is left unbound, and a standard claim is never bound, removed or reordered.
 func validateCanonicalDAOwnerClaims(owner *PendingOutpointOwner, pending pendingOutpointSnapshot, image canonicalDARetainedImage) error {
 	bound, err := canonicalDAOwnerBoundClaims(owner, pending, image)
 	if err != nil {
@@ -435,8 +436,7 @@ func canonicalDAOwnerBoundClaims(owner *PendingOutpointOwner, pending pendingOut
 		return nil, err
 	}
 	bound := make(map[PendingOutpointToken]bool, len(byToken))
-	for i := range image.members {
-		member := image.members[i]
+	for _, member := range image.members {
 		claim, held := byToken[member.stored.token]
 		if !held {
 			return nil, terminalCanonicalDAError(fmt.Errorf("retained DA %s of %x holds no owner claim", member.parsed.label, member.daID))
@@ -452,10 +452,13 @@ func canonicalDAOwnerBoundClaims(owner *PendingOutpointOwner, pending pendingOut
 	return bound, nil
 }
 
-// canonicalDAOwnerClaimsByToken indexes the snapshot's claims by token in
-// snapshot order, shape-checking every claim of every domain on the way. A
-// token carried twice, a malformed claim and an outpoint claimed twice are
-// terminal before any member is resolved.
+// canonicalDAOwnerClaimsByToken indexes the snapshot's claims by token in the
+// snapshot's own claim order, shape-checking every claim of every domain on the
+// way: a token carried twice, a malformed claim and an outpoint claimed twice are
+// terminal before any member is resolved. The owner's buildRestoreLocked builds
+// the same index, but its contract is a held owner mutex this builder never
+// takes, it omits the generation bound validateCanonicalMempoolClaimShape adds,
+// and it reports the owner's internal class, not the retained-DA terminal one.
 func canonicalDAOwnerClaimsByToken(owner *PendingOutpointOwner, pending pendingOutpointSnapshot) (map[PendingOutpointToken]pendingOutpointClaim, error) {
 	byToken := make(map[PendingOutpointToken]pendingOutpointClaim, len(pending.claims))
 	byOutpoint := make(map[consensus.Outpoint]bool, len(pending.claims))
@@ -486,13 +489,15 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 
 // buildCanonicalDAOwnerCandidates is phase 6: the pair is projected, every
 // survivor preserved exactly, the owner indexes rebuilt from O1 alone, and the
-// pair returned only after the closing bijection proof. Removal goes through
-// the shared owner-atomic projector — retiring record, locator rows and
-// accounting together — with every admission cap lifted as the owner-ready
-// admission lifts them: a shrinking projection cannot raise a counter, and that
-// admission caps State A only, so a State B peer may sit above the per-peer
-// cap. Prefetch reservations are released after it; survivors are deep-copied
-// so no input chunk map, member or byte slice reaches D1.
+// pair returned only after the closing bijection proof. Removal goes through the
+// shared owner-atomic projector — retiring record, locator rows and accounting
+// together — with every admission cap lifted as the owner-ready admission lifts
+// them, since a shrinking projection cannot raise a counter. Only the per-peer
+// lift can decide a call: that admission enforces the global and commit-overhead
+// caps for a State B record at apply time and a removal zeroes its own per-da_id
+// counter, so those three lifts are unreachable defense in depth, while a State B
+// peer may legitimately sit above the per-peer cap. Prefetch reservations are
+// released after it; survivors are deep-copied so no input container reaches D1.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -504,8 +509,7 @@ func buildCanonicalDAOwnerCandidates(
 	// ...Locked: the private projection's own invariant (see prepareCanonicalDAImage).
 	projected := retained.cloneForAtomicBatchLocked()
 	uncapped := projected.caps
-	uncapped.orphanPoolBytes, uncapped.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
-	uncapped.orphanPoolPerPeerBytes, uncapped.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
+	uncapped.orphanPoolBytes, uncapped.orphanPoolPerDAIDBytes, uncapped.orphanPoolPerPeerBytes, uncapped.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0)
 	for i := range image.identities {
 		daID := image.identities[i].daID
 		if !removed[daID] {
@@ -532,10 +536,9 @@ func buildCanonicalDAOwnerCandidates(
 	return candidates, nil
 }
 
-// canonicalDAOwnerPending is O1: the supplied owner image minus the finalized
-// claim of every removed member, in original order, every surviving claim — DA
-// and standard alike — with its own copied input slice, stable tip and both
-// high-waters verbatim.
+// canonicalDAOwnerPending is O1: the supplied owner image minus the finalized claim
+// of every removed member, in original order, every surviving claim — DA and
+// standard alike — with its own copied input slice, tip and high-waters verbatim.
 func canonicalDAOwnerPending(pending pendingOutpointSnapshot, image canonicalDARetainedImage, removed map[[32]byte]bool) pendingOutpointSnapshot {
 	dropped := make(map[PendingOutpointToken]bool, len(image.members))
 	for i := range image.members {
@@ -556,10 +559,9 @@ func canonicalDAOwnerPending(pending pendingOutpointSnapshot, image canonicalDAR
 }
 
 // canonicalDAOwnerPairClosed is the closing proof: every surviving member still
-// resolves its own finalized claim and every outpoint row of it through the
-// REBUILT index, O1 carries no DA claim beyond those members, the rebuilt
-// outpoint index holds exactly one row per claimed input, and D1 satisfies the
-// locator/accounting closure its input snapshot passed.
+// resolves its own finalized claim and outpoint rows through the REBUILT index,
+// O1 carries no DA claim beyond those members, that index holds exactly one row
+// per claimed input, and D1 satisfies the closure its input snapshot passed.
 func canonicalDAOwnerPairClosed(candidates preparedCanonicalDAOwnerCandidates, image canonicalDARetainedImage, removed map[[32]byte]bool) error {
 	survivors := 0
 	for i := range image.members {
@@ -606,10 +608,9 @@ func canonicalDAOwnerDomainClaims(pending pendingOutpointSnapshot) int {
 	return claims
 }
 
-func canonicalDAOwnerClaimedInputs(pending pendingOutpointSnapshot) int {
-	inputs := 0
-	for i := range pending.claims {
-		inputs += len(pending.claims[i].inputs)
+func canonicalDAOwnerClaimedInputs(pending pendingOutpointSnapshot) (inputs int) {
+	for _, claim := range pending.claims {
+		inputs += len(claim.inputs)
 	}
 	return inputs
 }
