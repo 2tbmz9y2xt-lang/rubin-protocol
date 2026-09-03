@@ -1002,7 +1002,8 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 //
 // Three steps the sibling installers take are skipped. The pinned-payload counter is
 // neither projected nor restored: it prices only a COMPLETE_SET, a state the projector
-// refuses, so 0-to-0; RUB-1287 checks admission sequence/revision high-water, and removal has no RUB-1275 prefetch reservation.
+// refuses, so 0-to-0; RUB-1287 checks admission sequence/revision high-water, and RUB-1275's
+// owner-ready removal driver, not this installer, releases a whole-removed record's prefetch reservation.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)
@@ -1020,4 +1021,283 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 	s.applyProjectedPeerBytes(placement.peerBytes)
 	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
 	s.orphanCommitOverheadBytes = placement.commitBytes
+}
+
+// releaseOwnerReadyPeerQuota is the DORMANT owner-aware PEER quota cleanup selector.
+// It removes exactly the retained members whose typed provenance is peer with the
+// requested quota identity — never the cached legacy peerQuotaKey and never the
+// orphanBytesByPeerQuotaKey total (RUBIN_COMPACT_BLOCKS.md 18.1) — over one
+// owner-atomic incomplete-record removal batch. An empty quota identity selects
+// nothing. This entrypoint has zero non-test callers until issue 678.
+func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
+	return s.commitOwnerReadyRemoval(func(clone *DARelayState) ([]DAAdmissionVictim, error) {
+		return ownerReadyPeerRemovalVictims(clone, quotaIdentity)
+	})
+}
+
+// advanceOwnerReadyTTL is the DORMANT owner-aware TTL tick selector: each incomplete
+// owner-ready record with ttl greater than one decrements once and mints one fresh
+// revision, ttl one expires as a whole-record removal with no revision, and a resident
+// ttl of zero fails closed before any arithmetic. This entrypoint has zero non-test
+// callers until issue 678.
+func (s *DARelayState) advanceOwnerReadyTTL() error {
+	return s.commitOwnerReadyRemoval(ownerReadyTTLTickVictims)
+}
+
+// commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones
+// the retained image under the existing admission fence and DARelayState.mu, lets
+// selectVictims derive every exact per-record transition and the bound-owner victim tokens
+// on that clone, then validates the full victim batch and publishes the DA image and owner
+// commit through non-fallible operations. An unbound test-only relay has no claim domain,
+// so its DA image is the whole change; any error before publication leaves both complete
+// images unchanged.
+func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState) ([]DAAdmissionVictim, error)) error {
+	if s == nil {
+		return nil
+	}
+	release := s.lockAdmissionFence()
+	defer release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clone := s.cloneForAtomicBatchLocked()
+	victims, err := selectVictims(clone)
+	if err != nil {
+		return err
+	}
+	// A pure TTL decrement releases no member, and an unbound relay owns no claim, so
+	// neither reaches the owner: the DA image is the whole change.
+	owner := s.ownerReadyRemovalOwner()
+	if owner == nil || len(victims) == 0 {
+		s.publishAtomicBatchLocked(clone)
+		return nil
+	}
+	return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
+}
+
+// commitOwnerReadyRemovalClaimsLocked validates the full bound-owner victim batch and, only
+// on success, publishes the DA image and drops every victim claim under one owner-lock hold.
+// It mirrors DACommit's removal commit inline rather than wiring the dormant DARemoval guard,
+// which issue 678 owns: nothing fallible runs after the DA publish, so a record and its claim
+// cannot become observably separated.
+func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpointOwner, clone *DARelayState, victims []DAAdmissionVictim) error {
+	batch, err := prepareDAAdmissionVictims(victims, [32]byte{})
+	if err != nil {
+		return txAdmitFromPendingOutpointError(err)
+	}
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+		return txAdmitFromPendingOutpointError(&failure)
+	}
+	s.publishAtomicBatchLocked(clone)
+	for _, victim := range batch {
+		owner.dropClaimLocked(victim.Token)
+	}
+	return nil
+}
+
+// ownerReadyRemovalOwner returns the shared-owner claim domain only for a fully bound relay,
+// the same condition under which lockAdmissionFence takes the admission guard.
+func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
+	if s.mempool == nil || s.mempool.chainState == nil {
+		return nil
+	}
+	return s.mempool.pendingOutpoints
+}
+
+func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]DAAdmissionVictim, error) {
+	if quotaIdentity == "" {
+		return nil, nil
+	}
+	var victims []DAAdmissionVictim
+	for _, daID := range clone.sortedIncompleteDAIDsLocked() {
+		removed, err := clone.releaseOwnerReadyPeerRecordLocked(daID, quotaIdentity)
+		if err != nil {
+			return nil, err
+		}
+		victims = append(victims, removed...)
+	}
+	return victims, nil
+}
+
+func ownerReadyTTLTickVictims(clone *DARelayState) ([]DAAdmissionVictim, error) {
+	var victims []DAAdmissionVictim
+	for _, daID := range clone.sortedIncompleteDAIDsLocked() {
+		removed, err := clone.tickOwnerReadyTTLRecordLocked(daID)
+		if err != nil {
+			return nil, err
+		}
+		victims = append(victims, removed...)
+	}
+	return victims, nil
+}
+
+// releaseOwnerReadyPeerRecordLocked applies the PEER rule to one record on the clone. A
+// record whose every member matches is a whole-record removal; otherwise any non-matching
+// member protects the commit (RUBIN_COMPACT_BLOCKS.md 5), so only the independently
+// eligible matching chunks are dropped and the state never downgrades.
+func (s *DARelayState) releaseOwnerReadyPeerRecordLocked(daID [32]byte, quotaIdentity string) ([]DAAdmissionVictim, error) {
+	record := s.sets[daID]
+	matchCommit, matchChunks, memberCount := ownerReadyPeerMatches(record, quotaIdentity)
+	matchCount := len(matchChunks)
+	if matchCommit {
+		matchCount++
+	}
+	switch {
+	case matchCount == 0:
+		return nil, nil
+	case matchCount == memberCount:
+		return s.removeOwnerReadyWholeRecordLocked(record)
+	case len(matchChunks) == 0:
+		return nil, nil
+	default:
+		return s.dropOwnerReadyChunksLocked(record, matchChunks, 0)
+	}
+}
+
+// ownerReadyPeerMatches reports the matching commit, the ascending matching chunk indexes
+// and the total retained member count for one record, walking chunks in sorted order so
+// map iteration cannot change the selection.
+func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (bool, []uint16, int) {
+	memberCount := len(record.chunks)
+	if record.commit.member != nil {
+		memberCount++
+	}
+	var matchChunks []uint16
+	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		if ownerReadyMemberMatchesPeer(record.chunks[index].member, quotaIdentity) {
+			matchChunks = append(matchChunks, index)
+		}
+	}
+	return ownerReadyMemberMatchesPeer(record.commit.member, quotaIdentity), matchChunks, memberCount
+}
+
+func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
+	record := s.sets[daID]
+	switch record.ttlBlocksRemaining {
+	case 0:
+		return nil, errDARelayImageIncompatible
+	case 1:
+		return s.removeOwnerReadyWholeRecordLocked(record)
+	default:
+		return s.dropOwnerReadyChunksLocked(record, nil, 1)
+	}
+}
+
+// removeOwnerReadyWholeRecordLocked removes one whole owner-ready incomplete record — every
+// member with its locator, accounting contribution, prefetch reservation and shared-owner
+// claim — through the merged record-image projector, and returns each retired member as a
+// bound-owner victim in locator order.
+func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord) ([]DAAdmissionVictim, error) {
+	placement, err := s.projectDARecordImageLocked(stageDAOwnerReadyRemoval(record, true))
+	if err != nil {
+		return nil, err
+	}
+	s.installDASetRecordLocked(placement)
+	s.prefetch.releaseSet(record.daID)
+	return ownerReadyRecordVictims(record), nil
+}
+
+// dropOwnerReadyChunksLocked keeps one owner-ready record and drops the named chunks,
+// releasing their locators, accounting and claims and minting one fresh revision. ttlDelta
+// decrements the record TTL once (the TTL selector passes 1; the PEER selector passes 0);
+// the caller guarantees ttlDelta is below the resident TTL. The commit and every unnamed
+// member stay byte-identical and the record state never changes.
+func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropIndexes []uint16, ttlDelta uint64) ([]DAAdmissionVictim, error) {
+	survivor := record.cloneOwnerReady()
+	survivor.ttlBlocksRemaining -= ttlDelta
+	var victims []DAAdmissionVictim
+	for _, index := range dropIndexes {
+		victims = append(victims, ownerReadyMemberVictim(record.chunks[index].member))
+		delete(survivor.chunks, index)
+	}
+	image := daRelayRecordImage{daID: record.daID, present: true, baseline: record.revision, next: survivor}
+	placement, err := s.projectOwnerReadyRemovalLocked(image, record)
+	if err != nil {
+		return nil, err
+	}
+	s.installDASetRecordLocked(placement)
+	return victims, nil
+}
+
+// projectOwnerReadyRemovalLocked validates one surviving-record image against the live
+// record and projects the placement, reusing projectDARecordImageLiveLocked for the exact
+// locator and accounting delta and the fresh revision. It is the removal analogue of
+// checkDARecordImageBaselineLocked's staging arm: the surviving record is a byte-identical
+// submultiset of the live members with the state preserved, so no member, token,
+// provenance, commit slot or locator can change unseen.
+func (s *DARelayState) projectOwnerReadyRemovalLocked(image daRelayRecordImage, live daRelaySetRecord) (daRelayRecordPlacement, error) {
+	if err := checkOwnerReadyRemovalBaseline(image, live); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	return s.projectDARecordImageLiveLocked(image, live, s.caps)
+}
+
+func checkOwnerReadyRemovalBaseline(image daRelayRecordImage, live daRelaySetRecord) error {
+	if live.revision == 0 || live.checkOwnerReadyRecord() != nil || len(live.locatorRows()) == 0 {
+		return errDARelayImageIncompatible
+	}
+	if live.revision != image.baseline {
+		return errDARelayRecordStale
+	}
+	return checkOwnerReadyRemovalSurvivor(live, image.next)
+}
+
+func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
+	type fixed struct {
+		daID                                  [32]byte
+		state                                 daRelaySetState
+		receivedTime, payloadBytes, wireBytes uint64
+	}
+	if (fixed{next.daID, next.state, next.receivedTime, next.payloadBytes, next.wireBytes}) !=
+		(fixed{live.daID, live.state, live.receivedTime, live.payloadBytes, live.wireBytes}) {
+		return errDARelayImageIncompatible
+	}
+	if next.ttlBlocksRemaining == 0 || next.ttlBlocksRemaining > live.ttlBlocksRemaining {
+		return errDARelayImageIncompatible
+	}
+	if err := next.checkOwnerReadyRecord(); err != nil {
+		return err
+	}
+	if len(next.locatorRows()) == 0 || !sameOwnerReadyCommit(live.commit, next.commit) {
+		return errDARelayImageIncompatible
+	}
+	return checkOwnerReadySurvivingChunks(live, next)
+}
+
+// checkOwnerReadySurvivingChunks proves every chunk the survivor keeps is byte-identical to
+// the live chunk at that index, so a removal drops members but never rewrites a survivor.
+// The walk is map-ordered but yields one error identity, so it is order-immune.
+func checkOwnerReadySurvivingChunks(live, next daRelaySetRecord) error {
+	for index, chunk := range next.chunks {
+		liveChunk, present := live.chunks[index]
+		if !present || !sameOwnerReadyChunk(liveChunk, chunk) {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func ownerReadyMemberMatchesPeer(member *daRelayMemberIdentity, quotaIdentity string) bool {
+	return member != nil && member.provenance.kind == daProvenancePeer && member.provenance.quotaIdentity == quotaIdentity
+}
+
+// ownerReadyMemberVictim copies one retained member's claim descriptor; the input slice is
+// cloned so no victim aliases live record state before publication.
+func ownerReadyMemberVictim(member *daRelayMemberIdentity) DAAdmissionVictim {
+	return DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: slices.Clone(member.inputs)}
+}
+
+// ownerReadyRecordVictims lists every retained member of one record as a bound-owner victim,
+// commit first then chunks ascending, matching locatorRows order.
+func ownerReadyRecordVictims(record daRelaySetRecord) []DAAdmissionVictim {
+	victims := make([]DAAdmissionVictim, 0, 1+len(record.chunks))
+	if record.commit.member != nil {
+		victims = append(victims, ownerReadyMemberVictim(record.commit.member))
+	}
+	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		victims = append(victims, ownerReadyMemberVictim(record.chunks[index].member))
+	}
+	return victims
 }
