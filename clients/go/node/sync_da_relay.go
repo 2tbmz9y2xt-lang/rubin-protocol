@@ -477,9 +477,11 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 // exactly, rebuilds the owner indexes from O1 alone and returns the pair only after the closing
 // bijection proof. Removal goes through the shared owner-atomic projector — record, locator rows
 // and accounting retired together — with all four admission caps lifted as the owner-ready
-// admission lifts them: a shrinking projection cannot raise a counter, and of the four only the
-// per-peer lift can decide a call. Each removal releases that set's prefetch reservation, which
-// the projector leaves untouched. Survivors are deep-copied, so no input container reaches D1.
+// admission lifts them: a shrinking projection cannot raise a counter, and of the four the per-da_id
+// lift is inert because a removal zeroes that bucket, while the global, commit and per-peer lifts each
+// keep a snapshot admitted under a since-lowered cap from tripping a false terminal. Each removal
+// releases that set's prefetch reservation, which the projector leaves untouched. Survivors are
+// deep-copied, so no input container reaches D1.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,

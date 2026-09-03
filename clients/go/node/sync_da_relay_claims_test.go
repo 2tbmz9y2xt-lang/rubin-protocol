@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math/rand"
 	"os"
 	"reflect"
 	"slices"
@@ -97,6 +98,26 @@ func newCanonicalDAOwnerPeerCapFixture(t *testing.T) *canonicalDAOwnerFixture {
 		t.Fatalf("per-peer bytes %d do not exceed the cap %d", peer, capBytes)
 	}
 	return x
+}
+
+// newCommitOnlyStateBFixture retains ONE staged-commit record whose only member
+// is the commit — a declared chunk count with zero chunks retained, the real
+// state right after StageCommit. It is the one owner-ready shape the two-record
+// fixture never renders, so the positive pair and its removal are covered here.
+func newCommitOnlyStateBFixture(t *testing.T) (*canonicalDAOwnerFixture, [32]byte) {
+	t.Helper()
+	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
+	daID := daRelayTestID(0x44)
+	x.admit("c", daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: sha3.Sum256([]byte("commit-only payload")), commitmentOutputs: 1}, daNonReplayPeer("peer-c"))
+	x.standard = x.reserveStandardClaim()
+	x.capture()
+	// The lone record is not a default fixture id, so the canned prefetch rows
+	// would name absent records; drop them.
+	x.retained.prefetch = daRelayPrefetchState{}
+	if record := x.retained.sets[daID]; len(x.retained.sets) != 1 || record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || record.commit.member == nil {
+		t.Fatalf("commit-only fixture=%+v", x.retained.sets)
+	}
+	return x, daID
 }
 
 // admit retains one member through the real admission and records its name,
@@ -526,6 +547,9 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 			return []canonicalDASetIdentity{identity}
 		}, false},
 		{"I6 no inclusion list removes nothing", func(*canonicalDAOwnerFixture) []canonicalDASetIdentity { return nil }, false},
+		{"I7 a wrong identity before the right one under one da_id still removes it, so the da_id bucket is scanned whole", func(x *canonicalDAOwnerFixture) []canonicalDASetIdentity {
+			return []canonicalDASetIdentity{x.identityOf(x.stateB, "commit", "b1"), x.identityOf(x.stateB, "commit", "b0")}
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			x := newCanonicalDAOwnerFixture(t)
@@ -589,6 +613,17 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 				t.Fatalf("round %d produced another O1 image", round)
 			}
 		}
+	})
+
+	t.Run("B1 a commit-only State B record pairs unchanged, its commit the sole 1:1 member", func(t *testing.T) {
+		x, _ := newCommitOnlyStateBFixture(t)
+		x.requireExactImage(x.requirePair())
+	})
+
+	t.Run("B2 a commit-only State B record is removed whole by its own commit-only identity", func(t *testing.T) {
+		x, daID := newCommitOnlyStateBFixture(t)
+		x.included = []canonicalDASetIdentity{x.identityOf(daID, "c")}
+		x.requireExactImage(x.requirePair(), daID)
 	})
 }
 
@@ -1267,4 +1302,136 @@ func canonicalDACalleeName(fun ast.Expr) string {
 	default:
 		return ""
 	}
+}
+
+// randomizedPropertyIterations keeps the ML-DSA admission path bounded: the
+// shape space is covered by variety across iterations, not by a large count, so
+// the whole test stays well under a second.
+const randomizedPropertyIterations = 48
+
+// TestCanonicalDAOwnerCandidatesRandomizedProperties feeds the builder many
+// owner-ready snapshots built through the REAL admission path under one FIXED
+// seed, each with a random record/member shape, a random exact-identity
+// inclusion subset and a random final-chain-invalidation subset. Every iteration
+// asserts the four standing properties:
+//
+//	(a) the builder never panics — the recover guard reports the reproducing seed
+//	    and iteration;
+//	(b) a valid snapshot returns a pair with neither input moved — never
+//	    (pair, err), never (no pair, nil): a spurious terminal fails requirePair.
+//	    The generator only produces valid, shrinking snapshots, whose sole correct
+//	    outcome is a pair; the ordered-terminal half of the general invariant is
+//	    the hand-built TestCanonicalDAOwnerCandidatesAreTerminalByPhase;
+//	(c) the pair matches the INDEPENDENT requireExactImage oracle — survivors,
+//	    global/per-da_id/per-peer/commit accounting, locators, both high-waters
+//	    and O1 order — which recomputes the image from the fixture's OWN bytes,
+//	    never from the builder's projection, so a wrong subtraction fails here;
+//	(d) the same inputs build DeepEqual pairs twice, catching a hidden map-order
+//	    dependence.
+//
+// No apply-differential against the legacy removeDASetRecordLocked is built:
+// that path bills the legacy orphanAccounting family and retires no locators, so
+// a byte-compare would diverge by design, and re-running the owner-ready
+// projector is tautological; the independent in-test oracle is the honest form.
+func TestCanonicalDAOwnerCandidatesRandomizedProperties(t *testing.T) {
+	const seed = 0x5511_1289
+	t.Logf("randomized property seed=%#x", seed)
+	rng := rand.New(rand.NewSource(seed))
+	for iter := 0; iter < randomizedPropertyIterations; iter++ {
+		x, removed := newRandomizedCanonicalDAOwnerSnapshot(t, rng)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("iteration %d (seed %#x) panicked: %v", iter, seed, r) // (a)
+				}
+			}()
+			// (b): a pair with neither input moved; a spurious terminal fails requirePair.
+			first := x.requirePair()
+			// (c): the independent oracle.
+			x.requireExactImage(first, removed...)
+			// (d): the same inputs, built again.
+			second := x.requirePair()
+			if !reflect.DeepEqual(daRelayStateSnapshot(second.retained), daRelayStateSnapshot(first.retained)) { //nolint:govet // deepequalerrors: image identity across builds is the assertion
+				t.Fatalf("iteration %d: the same inputs built two different D1 images", iter)
+			}
+			if !reflect.DeepEqual(second.pending, first.pending) || !reflect.DeepEqual(second.ownerIndex.byOutpoint, first.ownerIndex.byOutpoint) { //nolint:govet // deepequalerrors: owner-half identity across builds is the assertion
+				t.Fatalf("iteration %d: the same inputs built two different O1 images", iter)
+			}
+		}()
+	}
+}
+
+// newRandomizedCanonicalDAOwnerSnapshot admits a random-but-bounded owner-ready
+// snapshot through the REAL admission path and returns it with the da_ids a
+// correct builder must remove: every record whose exact identity the caller
+// included plus every record with a final-chain-invalidated member. The removed
+// set is computed here, from the fixture's own roster, independently of the
+// builder. State B records stay staged (fewer retained chunks than declared), so
+// no generated record leaves the owner-ready domain and the outcome is a pair.
+func newRandomizedCanonicalDAOwnerSnapshot(t *testing.T, rng *rand.Rand) (*canonicalDAOwnerFixture, [][32]byte) {
+	t.Helper()
+	records := 1 + rng.Intn(4)
+	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, records*3))
+	type genRecord struct {
+		daID   [32]byte
+		commit string
+		chunks []string
+	}
+	built := make([]genRecord, 0, records)
+	for r := 0; r < records; r++ {
+		daID := daRelayTestID(byte(0x40 + r))
+		peer := daNonReplayPeer(fmt.Sprintf("peer-gen-%d", r))
+		provenance := func() daProvenance {
+			switch rng.Intn(3) {
+			case 0:
+				return peer
+			case 1:
+				return LocalDAProvenance()
+			default:
+				return DetachedReorgDAProvenance()
+			}
+		}
+		rec := genRecord{daID: daID}
+		if rng.Intn(2) == 0 {
+			for c, chunks := 0, 1+rng.Intn(2); c < chunks; c++ { // State A: one or two orphan chunks, no commit.
+				name := fmt.Sprintf("r%d-a%d", r, c)
+				x.admit(name, daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: uint16(c), payload: []byte(name)}, provenance())
+				rec.chunks = append(rec.chunks, name)
+			}
+		} else {
+			rec.commit = fmt.Sprintf("r%d-c", r) // State B: a staged commit of two declared chunks...
+			x.admit(rec.commit, daNonReplayTxSpec{kind: 0x01, daID: daID, chunkCount: 2, commitment: sha3.Sum256([]byte(rec.commit)), commitmentOutputs: 1}, provenance())
+			if rng.Intn(2) == 0 { // ...retaining zero or one chunk, so it never completes.
+				name := fmt.Sprintf("r%d-b0", r)
+				x.admit(name, daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 0, payload: []byte(name)}, provenance())
+				rec.chunks = append(rec.chunks, name)
+			}
+		}
+		built = append(built, rec)
+	}
+	x.standard = x.reserveStandardClaim()
+	x.capture()
+	x.retained.prefetch = daRelayPrefetchState{} // generated ids are not the fixture defaults; drop the canned rows.
+	removed := map[[32]byte]bool{}
+	for _, rec := range built {
+		if rng.Intn(5) < 2 { // ~40%: remove by exact inclusion identity.
+			x.included = append(x.included, x.identityOf(rec.daID, rec.commit, rec.chunks...))
+			removed[rec.daID] = true
+		}
+		members := slices.Clone(rec.chunks)
+		if rec.commit != "" {
+			members = append(members, rec.commit)
+		}
+		if rng.Intn(3) == 0 { // ~33%: remove by a final-chain-invalid member.
+			x.spendInput(members[rng.Intn(len(members))])
+			removed[rec.daID] = true
+		}
+	}
+	var removedIDs [][32]byte
+	for _, rec := range built {
+		if removed[rec.daID] {
+			removedIDs = append(removedIDs, rec.daID)
+		}
+	}
+	return x, removedIDs
 }
