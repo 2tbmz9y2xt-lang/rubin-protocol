@@ -784,6 +784,11 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			x.retained.locators[daRelayTestID(0xfe)] = daRelayLocator{daID: daRelayTestID(0xfd), kind: daRelayLocatorCommit}
 		}},
 		{"L4 no locator index at all", "carries no locator index", func(x *canonicalDAOwnerFixture) { x.retained.locators = nil }},
+		{"L5 no record map at all, on the empty snapshot that would otherwise pair", "carries no record map", func(x *canonicalDAOwnerFixture) {
+			x.emptyRetained()
+			x.pending.claims, x.retained.sets = nil, nil
+		}},
+		{"L6 a nil record map is refused before the walk, not as a locator-count mismatch", "carries no record map", func(x *canonicalDAOwnerFixture) { x.retained.sets = nil }},
 		{"AC1 global orphan bytes", "orphan pool bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytes++ }},
 		{"AC2 commit overhead bytes", "orphan commit overhead bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanCommitOverheadBytes++ }},
 		{"AC3 a per-da_id counter", "per-da_id orphan bytes for", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByDAID[x.stateA]-- }},
@@ -794,6 +799,14 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 		{"AC5 a per-da_id entry no record implies", "per-da_id orphan bytes: records imply 2 entries, state holds 3", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByDAID[daRelayTestID(0xfe)] = 1 }},
 		{"AC6 pinned payload bytes in the owner-ready domain", "pinned payload bytes", func(x *canonicalDAOwnerFixture) { x.retained.pinnedPayloadBytes = 1 }},
 		{"AC7 a per-peer entry no record implies", "per-peer orphan bytes: records imply 2 entries, state holds 3", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByPeerQuotaKey["peer-that-owns-nothing"] = 1 }},
+		{"AC8 no per-da_id counter map at all, on the empty snapshot that would otherwise pair", "carries no per-da_id orphan byte index", func(x *canonicalDAOwnerFixture) {
+			x.emptyRetained()
+			x.pending.claims, x.retained.orphanBytesByDAID = nil, nil
+		}},
+		{"AC9 no per-peer counter map at all, on the empty snapshot that would otherwise pair", "carries no per-peer orphan byte index", func(x *canonicalDAOwnerFixture) {
+			x.emptyRetained()
+			x.pending.claims, x.retained.orphanBytesByPeerQuotaKey = nil, nil
+		}},
 		{"A9 a record revision above the stored high-water", "carries revision", func(x *canonicalDAOwnerFixture) {
 			x.corrupt(x.stateA, func(r *daRelaySetRecord) { r.revision = x.retained.records + 1 })
 		}},

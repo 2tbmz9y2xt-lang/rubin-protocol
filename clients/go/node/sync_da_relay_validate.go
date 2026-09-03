@@ -358,8 +358,8 @@ func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember)
 // where checkRetainedDAAccountingLocked closes only the legacy image. It repairs
 // nothing and recomputes no high-water; it closes the input snapshot and D1 alike.
 func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
-	if s.locators == nil {
-		return terminalCanonicalDAError(errors.New("retained DA image carries no locator index"))
+	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
+		return err
 	}
 	indexed := make(map[[32]byte]bool, len(s.locators))
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
@@ -380,6 +380,25 @@ func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 	}
 	if err := totals.checkAgainstLocked(s); err != nil {
 		return terminalCanonicalDAError(err)
+	}
+	return nil
+}
+
+// canonicalDARetainedImageRequiredMaps refuses, before the walk, a snapshot missing any
+// map newDARelayState creates: maps.Clone carries a nil one into D1, where a later
+// admission write panics, so phase 3 refuses it and the closing proof's D1 inherits that
+// refusal — no clone of a non-nil map is nil. The nested prefetch maps stay optional: the
+// constructor leaves them nil and releaseSet only deletes, which a nil map allows.
+func canonicalDARetainedImageRequiredMaps(s *DARelayState) error {
+	switch {
+	case s.locators == nil:
+		return terminalCanonicalDAError(errors.New("retained DA image carries no locator index"))
+	case s.sets == nil:
+		return terminalCanonicalDAError(errors.New("retained DA image carries no record map"))
+	case s.orphanBytesByDAID == nil:
+		return terminalCanonicalDAError(errors.New("retained DA image carries no per-da_id orphan byte index"))
+	case s.orphanBytesByPeerQuotaKey == nil:
+		return terminalCanonicalDAError(errors.New("retained DA image carries no per-peer orphan byte index"))
 	}
 	return nil
 }
