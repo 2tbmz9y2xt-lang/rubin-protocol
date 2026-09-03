@@ -341,9 +341,11 @@ func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember)
 
 // canonicalDARetainedImageClosed is phase 3 over ONE image: every record sits under its da_id,
 // txid locators and retained members are one bijection, no record stands above either high-water,
-// and every recomputable aggregate equals what the records imply, billed by ownerReadyAccounting
-// as the owner-ready projector bills (RUBIN_COMPACT_BLOCKS.md Sections 18.1 and 18.3). It repairs
-// nothing, recomputes no high-water, and closes the input snapshot and D1 alike.
+// and every recomputable aggregate equals what the records imply: ownerReadyAccounting bills the
+// orphan, commit-overhead and per-peer terms as the owner-ready projector bills them, and the
+// legacy pinned-payload term is zero in every owner-ready state, so a stored pinned-payload
+// counter above zero fails the closure (RUBIN_COMPACT_BLOCKS.md Sections 18.1 and 18.3). It
+// repairs nothing, recomputes no high-water, and closes the input snapshot and D1 alike.
 func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
 		return err
@@ -431,8 +433,9 @@ func canonicalDARecordAccounted(s *DARelayState, record daRelaySetRecord, totals
 
 // canonicalDAMemberFeeBound proves one retained member's stored Uint128 fee is the fee the
 // SUPPLIED final-chain context derives for its exact bytes — no narrowing, no other-domain
-// substitute (RUBIN_COMPACT_BLOCKS.md Section 18.1). checked != nil exactly when the consensus
-// half kept the member: a kept member without one is terminal, an excluded one has none.
+// substitute (RUBIN_COMPACT_BLOCKS.md Section 18.1). checked != nil exactly when the CONSENSUS
+// half kept the member, so a policy-excluded member still binds its stored fee; a kept member
+// without one is terminal, only a consensus exclusion carries none.
 func canonicalDAMemberFeeBound(m canonicalDARetainedMember, checked *consensus.CheckedTransaction, keep bool) error {
 	if checked == nil {
 		if keep {
