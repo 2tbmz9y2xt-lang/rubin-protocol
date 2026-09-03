@@ -334,12 +334,22 @@ type preparedCanonicalDAOwnerCandidates struct {
 // terminal class — unlike the record-major live prepareCanonicalDAImage, which this
 // builder never consults.
 //
-// Cost, accepted deliberately: each removal reproves the whole locator index
-// through the shared owner-atomic projector, O(locators) per removal and
-// O(removals × locators) over the call, and the inclusion scan is
-// O(records × included), included bounded by MAX_DA_BATCHES_PER_BLOCK. A real block
-// identity matches no owner-ready resident until COMPLETE_SET joins that domain
-// (issue 1118); RUB-678 owns the live call site, and there is none today.
+// Cost, accepted deliberately: the dominant term is the COPY, not the walks —
+// cloneOwnerReady deep-copies every survivor (commit txBytes, each chunk's
+// txBytes and payload), so the call is O(surviving retained bytes), ~2x them
+// while the input and D1 coexist, bounded by the orphan-pool cap admission bills
+// those same bytes against; the live preparedCanonicalDAImage SHARES that backing
+// instead, and copying is what keeps a mutation of D1 out of the caller's
+// snapshot. Each removal reproves the whole locator index through the shared
+// owner-atomic projector, O(locators) per removal and O(removals × locators) over
+// the call, and the inclusion scan is O(records × included), included bounded by
+// MAX_DA_BATCHES_PER_BLOCK. A real block identity matches no owner-ready resident
+// until COMPLETE_SET joins that domain (issue 1118); RUB-678 owns the live call
+// site, and there is none today — and it must first move P2P ingest onto the
+// owner-ready admission path, since the path behind StageCommit/StageChunk mints
+// no revision and leaves a completed set in COMPLETE_SET, and phase 1 refuses the
+// WHOLE snapshot on the first resident that is not owner-ready; scoping phase 1
+// per record is the alternative.
 func prepareCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -576,8 +586,8 @@ func canonicalDAOwnerPairClosed(candidates preparedCanonicalDAOwnerCandidates, i
 	if daClaims := canonicalDAOwnerDomainClaims(candidates.pending); daClaims != survivors {
 		return terminalCanonicalDAError(fmt.Errorf("owner candidate holds %d DA claims against %d surviving retained members", daClaims, survivors))
 	}
-	if rows := canonicalDAOwnerClaimedInputs(candidates.pending); rows != len(candidates.ownerIndex.byOutpoint) {
-		return terminalCanonicalDAError(fmt.Errorf("owner candidate indexes %d outpoint rows against %d claimed inputs", len(candidates.ownerIndex.byOutpoint), rows))
+	if claimedInputs := canonicalDAOwnerClaimedInputs(candidates.pending); claimedInputs != len(candidates.ownerIndex.byOutpoint) {
+		return terminalCanonicalDAError(fmt.Errorf("owner candidate indexes %d outpoint rows against %d claimed inputs", len(candidates.ownerIndex.byOutpoint), claimedInputs))
 	}
 	return canonicalDARetainedImageClosed(candidates.retained, candidates.retained.sortedRetainedDAIDsLocked())
 }

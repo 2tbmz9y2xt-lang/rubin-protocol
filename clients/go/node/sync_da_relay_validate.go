@@ -333,10 +333,11 @@ func canonicalDACommitCacheBound(commit daRelayCommit, m canonicalDARetainedMemb
 	return nil
 }
 
-// canonicalDAChunkCacheBound proves the stored chunk hash is both the one the
-// chunk's retained bytes declare and the hash of the retained payload, and that the
-// stored payload caches THAT member's own DaPayload — nothing else binds the two
-// here, since phase 4 leaves payload-against-declared-hash to the block rule
+// canonicalDAChunkCacheBound binds three things: the stored chunk hash to the one
+// the chunk's retained bytes declare, that hash to the hash of the retained
+// payload, and the stored payload to THAT member's own DaPayload. Those three
+// conjuncts are the builder's ONLY tie between retained payload and declared hash:
+// phase 4's per-member chain check leaves that to the block rule
 // (validateDAChunkHashes) and to admission. Owner-ready chunks latch no hash.
 func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember) error {
 	if chunk.chunkHash != m.parsed.tx.DaChunkCore.ChunkHash || sha3.Sum256(chunk.payload) != chunk.chunkHash {
