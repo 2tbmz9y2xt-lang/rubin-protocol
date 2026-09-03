@@ -1064,6 +1064,27 @@ func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8) daNonRepl
 	}
 	return commit
 }
+
+// completeReplayPinned builds a production-faithful State C (COMPLETE_SET) record.
+// completeReplay admits its chunk through the real orphan-accounting path but then
+// overwrites the record to complete without migrating that accounting: it leaves the
+// chunk's orphan footprint in the pool and never pins the payload. A real completed
+// set holds NO orphan footprint (its bytes moved to the pinned pool), so this repairs
+// the image to that invariant (R4/A5) — letting a mixed image pass the removal
+// preflight. The chunk is admitted as peer "chunk", which is its only orphan footprint.
+func (f *daNonReplayFixture) completeReplayPinned(daID [32]byte) {
+	f.completeReplay(daID, 0x02)
+	f.mutateRelay(func(s *DARelayState) {
+		record := s.sets[daID]
+		charge := s.orphanBytesByDAID[daID]
+		delete(s.orphanBytesByDAID, daID)
+		s.orphanBytes -= charge
+		if s.orphanBytesByPeerQuotaKey["chunk"] -= charge; s.orphanBytesByPeerQuotaKey["chunk"] == 0 {
+			delete(s.orphanBytesByPeerQuotaKey, "chunk")
+		}
+		s.pinnedPayloadBytes += record.payloadBytes
+	})
+}
 func daNonReplayPeer(key string) daProvenance { return daProvenance{daProvenanceKind(1), key, key} }
 func (f *daNonReplayFixture) requireMember(t *testing.T, record daRelaySetRecord, tx daNonReplayTx, tokenSequence uint64, provenance daProvenance) {
 	var member *daRelayMemberIdentity
@@ -3524,7 +3545,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 	})
 	t.Run("complete set is never a selector victim", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 3), [32]byte{0xd6}
-		f.completeReplay(daID, 0x01)
+		f.completeReplayPinned(daID)
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		if before.sets[daID].state != daRelayStateCompleteSet {
 			t.Fatalf("fixture is not complete: %+v", before.sets[daID])
@@ -3649,6 +3670,76 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
 			t.Fatalf("malformed no-match err=%v, want %v", err, errDARelayImageIncompatible)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a mixed image removes the incomplete record and leaves the complete set byte-identical", func(t *testing.T) {
+		// A legitimate MIXED image — a State C record coexisting with an incomplete one —
+		// is not rejected for being mixed: the incomplete record is removed and the complete
+		// set stays byte-identical (A5). The preflight is a superset of the all-incomplete
+		// check, never a new false-fail.
+		f := newDANonReplayFixture(t, 4)
+		incompleteID, completeID := [32]byte{0xd1}, [32]byte{0xdf}
+		drop := f.ownerReadyChunk(incompleteID, 0, "m0", daNonReplayPeer("drop"))
+		f.completeReplayPinned(completeID)
+		before := daRelayStateSnapshot(f.relay)
+		dropToken := before.sets[incompleteID].chunks[0].member.token
+		completeBefore := before.sets[completeID]
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != nil {
+			t.Fatalf("mixed release: %v", err)
+		}
+		after := daRelayStateSnapshot(f.relay)
+		ownerReadyRecordAbsent(t, after, incompleteID, drop.txid)
+		if got := after.sets[completeID]; !reflect.DeepEqual(got, completeBefore) {
+			t.Fatalf("complete set not byte-identical: got=%+v want=%+v", got, completeBefore)
+		}
+		if after.pinnedPayloadBytes != before.pinnedPayloadBytes {
+			t.Fatalf("removal moved the pinned pool: %d != %d", after.pinnedPayloadBytes, before.pinnedPayloadBytes)
+		}
+		ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), dropToken, drop.inputs)
+	})
+	t.Run("a mixed image with a stray foreign-da_id locator row is terminal", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 4)
+		incompleteID, completeID := [32]byte{0xd2}, [32]byte{0xe9}
+		f.ownerReadyChunk(incompleteID, 0, "s0", daNonReplayPeer("drop"))
+		f.completeReplayPinned(completeID)
+		f.relay.mu.Lock()
+		f.relay.locators[[32]byte{0xce}] = daRelayLocator{daID: [32]byte{0xcf}, kind: daRelayLocatorCommit} // no record implies this row
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("mixed stray-locator err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a mixed image with a stray cached da_id entry is terminal", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 4)
+		incompleteID, completeID := [32]byte{0xd3}, [32]byte{0xea}
+		f.ownerReadyChunk(incompleteID, 0, "s1", daNonReplayPeer("drop"))
+		f.completeReplayPinned(completeID)
+		f.relay.mu.Lock()
+		f.relay.orphanBytesByDAID[[32]byte{0xbb}] = 1 // no record backs this da_id
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("mixed stray-cache err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a mixed image with a stray per-peer entry is terminal", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 4)
+		incompleteID, completeID := [32]byte{0xd4}, [32]byte{0xeb}
+		f.ownerReadyChunk(incompleteID, 0, "s2", daNonReplayPeer("drop"))
+		f.completeReplayPinned(completeID)
+		f.relay.mu.Lock()
+		f.relay.orphanBytesByPeerQuotaKey["ghost"] = 1 // no record implies this peer key
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("mixed stray-peer err=%v, want canonical retained-DA terminal", err)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})

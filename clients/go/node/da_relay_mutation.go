@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
+	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -1030,10 +1031,10 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 // the map is still a legitimate accounting side effect of a successful install) —
 // over one owner-atomic incomplete-record removal batch. A record is whole-removed
 // only when every retained member matches; a matching PEER commit is retained
-// whenever any LOCAL or DETACHED_REORG member protects it (see
-// releaseOwnerReadyPeerRecordLocked below for the exact per-record rule). An empty
-// quota identity selects nothing. This entrypoint has zero non-test callers until
-// issue 678.
+// whenever any non-matching member protects it — a LOCAL, a DETACHED_REORG, or a PEER
+// of a different quota identity (see releaseOwnerReadyPeerRecordLocked below for the
+// exact per-record rule). An empty quota identity selects nothing. This entrypoint has
+// zero non-test callers until issue 678.
 func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
 	return s.commitOwnerReadyRemoval(func(clone *DARelayState) ([]DAAdmissionVictim, error) {
 		return ownerReadyPeerRemovalVictims(clone, quotaIdentity)
@@ -1131,13 +1132,18 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // PEER and TTL selectors consider, ascending, after a fail-closed whole-image
 // preflight. Records — never the cached orphanBytesByDAID total — are the selection
 // authority (R4): the candidates come from s.sets, so a resident record whose cache
-// entry was deleted is no longer silently skipped, and the reused
-// canonicalDARetainedImageClosed then fails the batch closed, without repair, on any
-// derived-versus-live accounting mismatch or non-bijective locator image (R1/R4). A
-// COMPLETE_SET is out of scope (State C): never a candidate and left byte-identical,
-// so the owner-ready closure — which does not model a complete set's pinned
-// accounting — runs only when every retained record is incomplete; a coexisting
-// complete set drops to the per-record projector's own fail-closed accounting checks.
+// entry was deleted is no longer silently skipped, and the preflight then fails the
+// batch closed, without repair, on any derived-versus-live accounting mismatch or
+// non-bijective locator image (R1/R4). A COMPLETE_SET is out of scope (State C):
+// never a candidate and left byte-identical (A5).
+//
+// The preflight runs UNCONDITIONALLY — for an all-incomplete image and for a MIXED
+// image (a State C record coexisting with incomplete records) alike. It cannot reuse
+// canonicalDARetainedImageClosed wholesale: that closure compares pinnedPayloadBytes
+// and assumes s.locators holds exactly the passed records' rows, both false once a
+// State C record is present, since a completed set pins its payload (out of this
+// dormant removal's scope) yet still owns locator rows. See
+// checkOwnerReadyRemovalImageClosedLocked for the mixed-safe composition.
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	retained := s.sortedRetainedDAIDsLocked()
 	candidates := make([][32]byte, 0, len(retained))
@@ -1151,12 +1157,62 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		}
 		candidates = append(candidates, daID)
 	}
-	if len(candidates) == len(retained) {
-		if err := canonicalDARetainedImageClosed(s, candidates); err != nil {
-			return nil, err
-		}
+	if err := s.checkOwnerReadyRemovalImageClosedLocked(retained, candidates); err != nil {
+		return nil, err
 	}
 	return candidates, nil
+}
+
+// checkOwnerReadyRemovalImageClosedLocked is the removal path's whole-image preflight
+// (R1/R4), the mixed-safe analogue of canonicalDARetainedImageClosed that the removal
+// path cannot reuse directly (see ownerReadyRemovalCandidatesLocked). It composes the
+// same per-record helpers so there is no second validator framework:
+//   - a locator bijection over EVERY retained record (incomplete AND State C, because
+//     s.locators holds a row for each of their members) equal to len(s.locators);
+//   - the orphan-domain accounting derived over the INCOMPLETE candidates only,
+//     compared to the live orphan-domain totals and entry counts, EXCLUDING
+//     pinnedPayloadBytes, which a completed set owns and this removal never touches.
+//
+// Any corruption — a stray locator row, a stray orphan-domain entry, a map-key/da_id
+// mismatch or a malformed record — fails closed before selection or publication.
+func (s *DARelayState) checkOwnerReadyRemovalImageClosedLocked(retained, candidates [][32]byte) error {
+	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
+		return err
+	}
+	indexed := make(map[[32]byte]bool, len(s.locators))
+	for _, daID := range retained {
+		record := s.sets[daID]
+		if record.daID != daID {
+			return terminalCanonicalDAError(fmt.Errorf("retained DA record stored under da_id %x carries da_id %x", daID, record.daID))
+		}
+		if err := canonicalDARecordLocatorsIndexed(s, record, indexed); err != nil {
+			return err
+		}
+	}
+	if len(indexed) != len(s.locators) {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA locator index holds %d rows against %d retained members", len(s.locators), len(indexed)))
+	}
+	return s.checkOwnerReadyRemovalOrphanDomainLocked(candidates)
+}
+
+// checkOwnerReadyRemovalOrphanDomainLocked verifies the live orphan-domain accounting
+// is exactly what the incomplete candidates imply (R4), failing closed on any
+// mismatch. pinnedPayloadBytes is deliberately excluded: it belongs to State C, which
+// this dormant removal leaves byte-identical (A5), so the candidate-derived total
+// (always zero — an incomplete record pins nothing) is aligned to the live pinned pool
+// before the shared checkAgainstLocked compares every other, orphan-domain, field.
+func (s *DARelayState) checkOwnerReadyRemovalOrphanDomainLocked(candidates [][32]byte) error {
+	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
+	for _, daID := range candidates {
+		if err := canonicalDARecordAccounted(s, s.sets[daID], &totals); err != nil {
+			return err
+		}
+	}
+	totals.pinnedBytes = s.pinnedPayloadBytes
+	if err := totals.checkAgainstLocked(s); err != nil {
+		return terminalCanonicalDAError(err)
+	}
+	return nil
 }
 
 func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]DAAdmissionVictim, error) {
@@ -1358,9 +1414,12 @@ func ownerReadyMemberVictim(member *daRelayMemberIdentity) DAAdmissionVictim {
 // ownerReadyRecordVictims lists every retained member of one record as a bound-owner victim,
 // commit first then chunks ascending, matching locatorRows order.
 //
-// PRECONDITION: reachable only after projectDARecordImageLocked -> checkOwnerReadyRecord has
-// refused every memberless retained slot on this same clone record (checkOwnerReadyCommitSlot,
-// checkOwnerReadyChunk -> member.validate()), so no member read below is nil.
+// PRECONDITION: reachable only after projectDARecordImageLocked -> checkOwnerReadyRecord.
+// checkOwnerReadyCommitSlot ACCEPTS a legitimately-empty commit slot (a chunk-only
+// OrphanChunks record carries no commit member), so it is NOT a memberless-commit refuser:
+// the commit read below is nil-safe only because of its explicit record.commit.member != nil
+// guard. Every retained chunk member is non-nil because checkOwnerReadyChunk ->
+// member.validate() refuses a memberless chunk slot.
 func ownerReadyRecordVictims(record daRelaySetRecord) []DAAdmissionVictim {
 	victims := make([]DAAdmissionVictim, 0, 1+len(record.chunks))
 	if record.commit.member != nil {
