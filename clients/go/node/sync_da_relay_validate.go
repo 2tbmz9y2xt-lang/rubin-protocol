@@ -379,10 +379,10 @@ func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 // prefetch maps stay optional — the constructor leaves them nil and releaseSet only deletes.
 func canonicalDARetainedImageRequiredMaps(s *DARelayState) error {
 	switch {
-	case s.locators == nil:
-		return terminalCanonicalDAError(errors.New("retained DA image carries no locator index"))
 	case s.sets == nil:
 		return terminalCanonicalDAError(errors.New("retained DA image carries no record map"))
+	case s.locators == nil:
+		return terminalCanonicalDAError(errors.New("retained DA image carries no locator index"))
 	case s.orphanBytesByDAID == nil:
 		return terminalCanonicalDAError(errors.New("retained DA image carries no per-da_id orphan byte index"))
 	case s.orphanBytesByPeerQuotaKey == nil:

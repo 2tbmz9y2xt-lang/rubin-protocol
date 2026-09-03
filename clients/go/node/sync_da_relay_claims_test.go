@@ -824,6 +824,11 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			x.pending.claims, x.retained.sets = nil, nil
 		}},
 		{"L6 a nil record map is refused before the walk, not as a locator-count mismatch", "carries no record map", func(x *canonicalDAOwnerFixture) { x.retained.sets = nil }},
+		{"L7 both the record map and the locator index nil returns the record-map defect, pinning H1 structure-over-locator precedence for combined map corruption", "carries no record map", func(x *canonicalDAOwnerFixture) {
+			x.emptyRetained()
+			x.pending.claims = nil
+			x.retained.sets, x.retained.locators = nil, nil
+		}},
 		{"AC1 global orphan bytes", "orphan pool bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytes++ }},
 		{"AC2 commit overhead bytes", "orphan commit overhead bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanCommitOverheadBytes++ }},
 		{"AC3 a per-da_id counter", "per-da_id orphan bytes for", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByDAID[x.stateA]-- }},
