@@ -182,7 +182,15 @@ func (f *canonicalMOFixture) daChunkTx(t *testing.T, op consensus.Outpoint, daID
 // pool-local policy at all.
 func (f *canonicalMOFixture) canonicalDATestChain(t *testing.T) canonicalFinalChainContext {
 	t.Helper()
-	final := cloneChainState(f.engine.chainState)
+	return canonicalDATestChainFromState(t, f.engine.chainState)
+}
+
+// canonicalDATestChainFromState captures one C1 context over a PRIVATE clone of
+// the supplied chain image, so no row's builder path ever locks the fixture's
+// live state; both retained-DA preparations' unit rows judge against it.
+func canonicalDATestChainFromState(t *testing.T, state *ChainState) canonicalFinalChainContext {
+	t.Helper()
+	final := cloneChainState(state)
 	view := final.view()
 	nextHeight, _, err := nextBlockContextFromFields(view.hasTip, view.height, view.tipHash)
 	mustCanonicalMO(t, "nextBlockContextFromFields", err)
