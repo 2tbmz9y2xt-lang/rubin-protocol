@@ -38,6 +38,8 @@ type canonicalDAOwnerFixture struct {
 	stateA   [32]byte
 	stateB   [32]byte
 	txs      map[string]daNonReplayTx
+	roster   []string
+	keys     map[string]string
 	standard PendingOutpointToken
 }
 
@@ -51,30 +53,60 @@ type canonicalDAOwnerInputs struct {
 
 func newCanonicalDAOwnerFixture(t *testing.T) *canonicalDAOwnerFixture {
 	t.Helper()
-	f := newDANonReplayFixture(t, 10)
-	x := &canonicalDAOwnerFixture{
-		t: t, f: f, owner: f.mp.pendingOutpoints,
-		stateA: daRelayTestID(0x11), stateB: daRelayTestID(0x22),
-		txs: map[string]daNonReplayTx{},
-	}
+	x := canonicalDAOwnerFixtureOver(t, newDANonReplayFixture(t, 10))
 	x.admit("a0", daNonReplayTxSpec{kind: 0x02, daID: x.stateA, chunkIndex: 0, payload: []byte("state-a chunk zero")}, daNonReplayPeer("peer-a"))
 	x.admit("a1", daNonReplayTxSpec{kind: 0x02, daID: x.stateA, chunkIndex: 1, payload: []byte("state-a chunk one")}, LocalDAProvenance())
 	x.admit("commit", daNonReplayTxSpec{kind: 0x01, daID: x.stateB, chunkCount: 2, commitment: sha3.Sum256([]byte("state-b payload")), commitmentOutputs: 1}, daNonReplayPeer("peer-b"))
 	x.admit("b0", daNonReplayTxSpec{kind: 0x02, daID: x.stateB, chunkIndex: 0, payload: []byte("state-b chunk zero"), inputCount: 2}, DetachedReorgDAProvenance())
 	// One unadmitted chunk, so a REAL complete-set identity for the State B
 	// record can be rendered from a block without changing what is retained.
-	x.txs["b1"] = f.signed(daNonReplayTxSpec{kind: 0x02, daID: x.stateB, chunkIndex: 1, payload: []byte("state-b chunk one")})
+	x.txs["b1"] = x.f.signed(daNonReplayTxSpec{kind: 0x02, daID: x.stateB, chunkIndex: 1, payload: []byte("state-b chunk one")})
 	x.standard = x.reserveStandardClaim()
 	x.capture()
 	x.requireFixturePremises()
 	return x
 }
 
+func canonicalDAOwnerFixtureOver(t *testing.T, f *daNonReplayFixture) *canonicalDAOwnerFixture {
+	return &canonicalDAOwnerFixture{
+		t: t, f: f, owner: f.mp.pendingOutpoints,
+		stateA: daRelayTestID(0x11), stateB: daRelayTestID(0x22),
+		txs: map[string]daNonReplayTx{}, keys: map[string]string{},
+	}
+}
+
+// newCanonicalDAOwnerPeerCapFixture retains two State B records — a commit and
+// one chunk each — under ONE peer quota key after lowering the relay's per-peer
+// cap below any member's charge. The REAL admission accepts them because it
+// enforces that cap for State A only, so the captured snapshot is consistent
+// with its peer counter above the cap.
+func newCanonicalDAOwnerPeerCapFixture(t *testing.T) *canonicalDAOwnerFixture {
+	t.Helper()
+	f := newDANonReplayFixture(t, 10)
+	f.relay.caps.orphanPoolPerPeerBytes = 1
+	x := canonicalDAOwnerFixtureOver(t, f)
+	for _, record := range []struct {
+		daID          [32]byte
+		commit, chunk string
+	}{{x.stateA, "commitA", "a0"}, {x.stateB, "commit", "b0"}} {
+		x.admit(record.commit, daNonReplayTxSpec{kind: 0x01, daID: record.daID, chunkCount: 2, commitment: sha3.Sum256([]byte(record.commit)), commitmentOutputs: 1}, daNonReplayPeer("peer-x"))
+		x.admit(record.chunk, daNonReplayTxSpec{kind: 0x02, daID: record.daID, chunkIndex: 0, payload: []byte(record.chunk)}, daNonReplayPeer("peer-x"))
+	}
+	x.capture()
+	if peer, capBytes := x.retained.orphanBytesByPeerQuotaKey["peer-x"], x.retained.caps.orphanPoolPerPeerBytes; peer <= capBytes {
+		t.Fatalf("per-peer bytes %d do not exceed the cap %d", peer, capBytes)
+	}
+	return x
+}
+
+// admit retains one member through the real admission and records its name,
+// quota key and roster position for the exact-image oracle.
 func (x *canonicalDAOwnerFixture) admit(name string, spec daNonReplayTxSpec, provenance daProvenance) {
 	x.t.Helper()
 	tx := x.f.signed(spec)
 	x.f.admit(tx, provenance)
-	x.txs[name] = tx
+	x.txs[name], x.keys[name] = tx, provenance.quotaKey()
+	x.roster = append(x.roster, name)
 }
 
 // reserveStandardClaim installs one finalized STANDARD claim the builder must
@@ -196,6 +228,22 @@ func (x *canonicalDAOwnerFixture) requirePair() preparedCanonicalDAOwnerCandidat
 	}
 	x.requireInputsUnchanged(before)
 	return candidates
+}
+
+// requirePlanAbort requires the shared plan-abort class unchanged, NEITHER half,
+// and both inputs byte-identical.
+func (x *canonicalDAOwnerFixture) requirePlanAbort() {
+	x.t.Helper()
+	before := x.inputs()
+	candidates, err := x.build()
+	var plan *canonicalMOPlanError
+	if !errors.As(err, &plan) || isCanonicalTransitionTerminalError(err) {
+		x.t.Fatalf("err=%v, want the shared plan-abort class", err)
+	}
+	if !reflect.DeepEqual(candidates, preparedCanonicalDAOwnerCandidates{}) { //nolint:govet // deepequalerrors: the zero value of the pair is the assertion
+		x.t.Fatalf("candidates=%+v, want neither half", candidates)
+	}
+	x.requireInputsUnchanged(before)
 }
 
 // requireTerminal requires the retained-DA terminal class naming want, NEITHER
@@ -338,31 +386,18 @@ func (x *canonicalDAOwnerFixture) admitLocktimeChunk(daID [32]byte, locktime uin
 		x.t.Fatalf("ParseTx(locktime chunk): %v", err)
 	}
 	x.txs["locked"] = daNonReplayTx{spec: daNonReplayTxSpec{kind: 0x02, daID: daID, payload: payload}, raw: raw, txid: txid, wtxid: wtxid, inputs: []consensus.Outpoint{outpoint}}
+	x.roster = append(x.roster, "locked")
 }
 
-// membersOf names one record's retained members in the builder's own visit
-// order — commit first, then chunks ascending — from the fixture's fixed roster.
+// membersOf names one record's retained members from the fixture's roster.
 func (x *canonicalDAOwnerFixture) membersOf(daID [32]byte) []string {
 	var names []string
-	for _, name := range []string{"commit", "a0", "a1", "b0", "locked"} {
+	for _, name := range x.roster {
 		if x.txs[name].spec.daID == daID {
 			names = append(names, name)
 		}
 	}
 	return names
-}
-
-// peerQuotaKeyOf is the per-peer accounting key one member implies: its quota
-// identity for PEER provenance, and none for the two keyless kinds.
-func peerQuotaKeyOf(name string) string {
-	switch name {
-	case "a0":
-		return "peer-a"
-	case "commit":
-		return "peer-b"
-	default:
-		return ""
-	}
 }
 
 // requireExactImage proves the pair holds EXACTLY the survivors: D1 is the
@@ -386,10 +421,10 @@ func (x *canonicalDAOwnerFixture) requireExactImage(candidates preparedCanonical
 			want.orphanBytes -= charge
 			delete(want.locators, x.txs[name].txid)
 			dropped[x.tokenOf(name)] = true
-			if name == "commit" {
+			if x.txs[name].spec.kind == 0x01 {
 				want.commitBytes -= charge
 			}
-			if key := peerQuotaKeyOf(name); key != "" {
+			if key := x.keys[name]; key != "" {
 				if want.peerBytes[key] -= charge; want.peerBytes[key] == 0 {
 					delete(want.peerBytes, key)
 				}
@@ -468,10 +503,10 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 		included func(*canonicalDAOwnerFixture) []canonicalDASetIdentity
 		removed  bool
 	}{
-		{"I1 the exact resident identity removes it once", func(x *canonicalDAOwnerFixture) []canonicalDASetIdentity {
+		{"I1 a hand-built partial identity equal to the resident's removes it once", func(x *canonicalDAOwnerFixture) []canonicalDASetIdentity {
 			return []canonicalDASetIdentity{x.identityOf(x.stateB, "commit", "b0")}
 		}, true},
-		{"I5 the same exact identity twice still removes once", func(x *canonicalDAOwnerFixture) []canonicalDASetIdentity {
+		{"I5 the same hand-built partial identity twice still removes once", func(x *canonicalDAOwnerFixture) []canonicalDASetIdentity {
 			identity := x.identityOf(x.stateB, "commit", "b0")
 			return []canonicalDASetIdentity{identity, identity}
 		}, true},
@@ -516,7 +551,7 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 		x.requireExactImage(x.requirePair(), locked)
 	})
 
-	t.Run("H3 final invalidity and exact inclusion together still remove once", func(t *testing.T) {
+	t.Run("H3 final invalidity and a hand-built partial identity together still remove once", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		x.spendInput("commit")
 		x.included = []canonicalDASetIdentity{x.identityOf(x.stateB, "commit", "b0")}
@@ -576,10 +611,28 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 		x.pending.claims, x.owner = nil, nil
 		x.requireTerminal("no pending-outpoint owner")
 	})
-	t.Run("S0b/F7 no final chainstate view is terminal in phase 4 and names the record", func(t *testing.T) {
+	t.Run("S0b a nil final chain is refused at entry, before any record is read", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		x.chain.final = nil
-		x.requireTerminal(fmt.Sprintf("retained DA record %x: no final chainstate view for retained DA chunk 0", x.stateA))
+		if err := x.requireTerminal("no final-chain context"); strings.Contains(err.Error(), "retained DA") {
+			t.Fatalf("terminal=%q names a record, want the entry refusal", err.Error())
+		}
+	})
+	t.Run("S0e an empty snapshot with a nil final chain is terminal", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		x.emptyRetained()
+		x.pending.claims, x.chain.final = nil, nil
+		x.requireTerminal("no final-chain context")
+	})
+	t.Run("S14 the member walk itself refuses a memberless chunk slot instead of dereferencing it", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		record := x.retained.sets[x.stateA].cloneOwnerReady()
+		corruptDAChunk(&record, 1, func(c *daRelayChunk) { c.member = nil })
+		_, err := canonicalDARetainedMemberIdentities(record)
+		var terminal *canonicalDATerminalError
+		if !errors.As(err, &terminal) || !strings.Contains(err.Error(), fmt.Sprintf("retained DA chunk 1 for %x has no stored member", x.stateA)) {
+			t.Fatalf("err=%v, want the terminal memberless-slot refusal", err)
+		}
 	})
 	t.Run("S8b the D1 closure itself refuses a record stored under another da_id", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
@@ -761,16 +814,14 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 	t.Run("F5 a canonical plan abort is returned unchanged, never promoted", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		x.chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
-		before := x.inputs()
-		candidates, err := x.build()
-		var plan *canonicalMOPlanError
-		if !errors.As(err, &plan) || isCanonicalTransitionTerminalError(err) {
-			t.Fatalf("err=%v, want the shared plan-abort class", err)
-		}
-		if !reflect.DeepEqual(candidates, preparedCanonicalDAOwnerCandidates{}) { //nolint:govet // deepequalerrors: the zero value of the pair is the assertion
-			t.Fatalf("candidates=%+v, want neither half", candidates)
-		}
-		x.requireInputsUnchanged(before)
+		x.requirePlanAbort()
+	})
+
+	t.Run("F10 a plan abort outranks a fee mismatch on the same member", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		x.corruptChunk(x.stateA, 0, func(c *daRelayChunk) { c.member.fee.Lo++ })
+		x.chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
+		x.requirePlanAbort()
 	})
 
 	t.Run("Q5 an ordinary exclusion does not hide a plan abort", func(t *testing.T) {
@@ -778,11 +829,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 		x.spendInput("a0")
 		x.spendInput("a1")
 		x.chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
-		_, err := x.build()
-		var plan *canonicalMOPlanError
-		if !errors.As(err, &plan) || isCanonicalTransitionTerminalError(err) {
-			t.Fatalf("err=%v, want the plan-abort class", err)
-		}
+		x.requirePlanAbort()
 	})
 
 	for _, tc := range []struct {
@@ -871,6 +918,12 @@ func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
 		}
 	})
 
+	t.Run("X13 removing one of two State B records of a peer above the per-peer cap yields the pair", func(t *testing.T) {
+		x := newCanonicalDAOwnerPeerCapFixture(t)
+		x.spendInput("commit")
+		x.requireExactImage(x.requirePair(), x.stateB)
+	})
+
 	t.Run("N3 a later mutation of either input cannot reach the pair", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		candidates := x.requirePair()
@@ -935,7 +988,7 @@ func TestCanonicalDAOwnerCandidatesCloseTheClaimBijection(t *testing.T) {
 		want    string
 		corrupt func(*canonicalDAOwnerFixture)
 	}{
-		{"C1 a retained member with no claim", "holds no exclusive owner claim", func(x *canonicalDAOwnerFixture) {
+		{"C1 a retained member with no claim", "holds no owner claim", func(x *canonicalDAOwnerFixture) {
 			token := x.tokenOf("a0")
 			x.pending = clonePendingOutpointSnapshot(x.pending)
 			x.pending.claims = slices.DeleteFunc(x.pending.claims, func(c pendingOutpointClaim) bool { return c.token == token })
@@ -994,11 +1047,11 @@ func TestCanonicalDAOwnerCandidatesCloseTheClaimBijection(t *testing.T) {
 		{"C11 an unfinalized claim", "is not described by its claim", func(x *canonicalDAOwnerFixture) {
 			x.corruptClaim(x.tokenOf("a0"), func(c *pendingOutpointClaim) { c.finalized = false })
 		}},
-		{"H4 two members sharing one token", "holds no exclusive owner claim", func(x *canonicalDAOwnerFixture) {
+		{"H4 two members sharing one token", "shares its token with an earlier retained member", func(x *canonicalDAOwnerFixture) {
 			shared := x.retained.sets[x.stateA].chunks[0].member.token
 			x.corruptChunk(x.stateA, 1, func(c *daRelayChunk) { c.member.token = shared })
 		}},
-		{"H4d a member of another record carrying this chunk's token", "holds no exclusive owner claim", func(x *canonicalDAOwnerFixture) {
+		{"H4d a member of another record carrying this chunk's token", "shares its token with an earlier retained member", func(x *canonicalDAOwnerFixture) {
 			shared := x.retained.sets[x.stateA].chunks[0].member.token
 			x.corruptChunk(x.stateB, 0, func(c *daRelayChunk) { c.member.token = shared })
 		}},
@@ -1149,8 +1202,10 @@ func parseCanonicalDAOwnerPackage(t *testing.T) []canonicalDAOwnerSourceFile {
 		}
 		files = append(files, canonicalDAOwnerSourceFile{name: name, file: parsed})
 	}
-	if len(files) < 60 {
-		t.Fatalf("parsed %d production files, want the whole node package", len(files))
+	for _, seam := range []string{"sync_da_relay.go", "sync_da_relay_validate.go"} {
+		if !slices.ContainsFunc(files, func(file canonicalDAOwnerSourceFile) bool { return file.name == seam }) {
+			t.Fatalf("seam file %s was not parsed", seam)
+		}
 	}
 	return files
 }

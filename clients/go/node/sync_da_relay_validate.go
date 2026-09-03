@@ -3,6 +3,8 @@ package node
 // Seam: one RETAINED record's members — the canonical re-parse of their exact
 // retained bytes, the role/index checks against the record's own claims, and
 // their final-chain validation against C1.
+// The paired builder's whole-snapshot phases live here too: structure, identity
+// binding, locator/accounting closure and the exact stored-fee bound.
 
 import (
 	"crypto/sha3"
@@ -212,48 +214,40 @@ type canonicalDARetainedMember struct {
 	daID   [32]byte
 }
 
-// canonicalDARetainedRecord is one validated record's da_id and exact set identity.
-type canonicalDARetainedRecord struct {
-	daID     [32]byte
-	identity canonicalDASetIdentity
-}
-
 // canonicalDARetainedImage is what phases 1-3 prove about ONE caller-owned
-// owner-ready snapshot: records in ascending raw da_id and members as that walk
-// flattened, commit first then ascending chunk index, so every later phase
-// inherits the order. It borrows stored members and retained bytes READ-ONLY
-// for one synchronous builder call and never reaches the builder's caller.
+// owner-ready snapshot: exact set identities in ascending raw da_id and members
+// as that walk flattened, commit first then ascending chunk index, so every
+// later phase inherits the order. It borrows stored members and retained bytes
+// READ-ONLY for one synchronous builder call and never reaches the builder's caller.
 type canonicalDARetainedImage struct {
-	records []canonicalDARetainedRecord
-	members []canonicalDARetainedMember
+	identities []canonicalDASetIdentity
+	members    []canonicalDARetainedMember
 }
 
 // validateCanonicalDARetainedSnapshot is the intrinsic structure, identity,
 // accounting and locator phase of prepareCanonicalDAOwnerCandidates, its only
-// caller: it reads the caller-owned snapshot, acquires no lock, rereads nothing
-// and mutates nothing reachable from it; a nil snapshot or a nil owner is
-// terminal before any record is read. The walk is PHASE-MAJOR
-// (RUBIN_MEMPOOL_POLICY.md Section 6.4.1 order): every record passes structure
-// before any is parsed, and every record is parsed and bound before the
-// image-wide closure runs. Phase 2 is two sub-phases per record — every member
-// parsed and role-checked, commit first then ascending chunk index, before any
-// member of that record is bound in the same order — so a chunk's parse defect
-// outranks the commit's binding defect. Within one phase the first defect in
-// ascending raw da_id, then in that sub-phase order, is the sole result; every
-// defect is the retained-DA terminal class.
+// caller, which refuses nil inputs before calling it: it reads the caller-owned
+// snapshot, acquires no lock, rereads nothing and mutates nothing reachable
+// from it. What each phase checks is RUBIN_MEMPOOL_POLICY.md Section 6.4.1's;
+// the PHASE-MAJOR walk is the builder's own rule: every record passes phase 1
+// — checkDANonReplayPrior, the owner-ready completeness the admission projector
+// requires of a resident it moves, restated nowhere, plus a memberless-record
+// refusal — before any is parsed, and every record is parsed and bound
+// (bindRetainedRecord's two sub-phases, so a chunk's parse defect outranks the
+// commit's binding defect) before the image-wide closure runs. Within one phase
+// the first defect in ascending raw da_id, then in that sub-phase order, is the
+// sole result; every defect is the retained-DA terminal class.
 func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingOutpointOwner) (canonicalDARetainedImage, error) {
 	var image canonicalDARetainedImage
-	if retained == nil {
-		return image, terminalCanonicalDAError(errors.New("no retained DA snapshot"))
-	}
-	if owner == nil {
-		return image, terminalCanonicalDAError(errors.New("no pending-outpoint owner"))
-	}
 	// ...Locked: the caller-owned snapshot's own invariant (see prepareCanonicalDAImage).
 	daIDs := retained.sortedRetainedDAIDsLocked()
 	for _, daID := range daIDs {
-		if err := canonicalDARetainedStructure(retained.sets[daID], daID, owner); err != nil {
-			return canonicalDARetainedImage{}, err
+		record := retained.sets[daID]
+		if err := record.checkDANonReplayPrior(daID, owner); err != nil {
+			return image, terminalCanonicalDAError(fmt.Errorf("retained DA record %x is not owner-ready: %w", daID, err))
+		}
+		if len(record.locatorRows()) == 0 {
+			return image, terminalCanonicalDAError(fmt.Errorf("retained DA record %x retains no member", daID))
 		}
 	}
 	for _, daID := range daIDs {
@@ -267,20 +261,6 @@ func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingO
 	return image, nil
 }
 
-// canonicalDARetainedStructure is phase 1 for one record: the owner-ready
-// completeness the admission projector requires of a resident it moves — shape,
-// state domain, residual fields and owner token, composed by checkDANonReplayPrior
-// and restated nowhere — plus its memberless-record refusal.
-func canonicalDARetainedStructure(record daRelaySetRecord, daID [32]byte, owner *PendingOutpointOwner) error {
-	if err := record.checkDANonReplayPrior(daID, owner); err != nil {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x is not owner-ready: %w", daID, err))
-	}
-	if len(record.locatorRows()) == 0 {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x retains no member", daID))
-	}
-	return nil
-}
-
 // bindRetainedRecord is phase 2 for one record: ALL its members' exact retained
 // bytes are parsed once with full consumption and role-checked against the
 // record's own claims, and only then is each member, in that same order, bound
@@ -290,7 +270,10 @@ func (i *canonicalDARetainedImage) bindRetainedRecord(record daRelaySetRecord) e
 	if err != nil {
 		return canonicalDARecordTerminal(err, record.daID)
 	}
-	stored := canonicalDARetainedMemberIdentities(record)
+	stored, err := canonicalDARetainedMemberIdentities(record)
+	if err != nil {
+		return err
+	}
 	if len(stored) != len(parsed) {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA record %x retains %d members against %d parsed", record.daID, len(stored), len(parsed)))
 	}
@@ -301,22 +284,27 @@ func (i *canonicalDARetainedImage) bindRetainedRecord(record daRelaySetRecord) e
 		}
 		i.members = append(i.members, member)
 	}
-	i.records = append(i.records, canonicalDARetainedRecord{daID: record.daID, identity: identity})
+	i.identities = append(i.identities, identity)
 	return nil
 }
 
 // canonicalDARetainedMemberIdentities lists the stored member of every OCCUPIED
 // slot in locatorRows order — the order canonicalRetainedDASetIdentity parses
-// in — so the caller's length comparison proves the pairing by position.
-func canonicalDARetainedMemberIdentities(record daRelaySetRecord) []*daRelayMemberIdentity {
+// in — so the caller's length comparison proves the pairing by position. Phase 1
+// already refuses a memberless chunk slot; it is refused here as well so no
+// later phase can dereference one.
+func canonicalDARetainedMemberIdentities(record daRelaySetRecord) ([]*daRelayMemberIdentity, error) {
 	stored := make([]*daRelayMemberIdentity, 0, 1+len(record.chunks))
 	if record.commit.member != nil {
 		stored = append(stored, record.commit.member)
 	}
 	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		if record.chunks[index].member == nil {
+			return nil, terminalCanonicalDAError(fmt.Errorf("retained DA chunk %d for %x has no stored member", index, record.daID))
+		}
 		stored = append(stored, record.chunks[index].member)
 	}
-	return stored
+	return stored, nil
 }
 
 // canonicalDARetainedBinding binds one parsed member to the scalars its slot
@@ -361,7 +349,9 @@ func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember)
 // sits under its own da_id, the txid locator index and the retained members are
 // one bijection, and every recomputable stored aggregate equals what the records
 // imply (RUBIN_COMPACT_BLOCKS.md Sections 18.1 and 18.3), billed with
-// ownerReadyAccounting exactly as the owner-ready projector bills. It never
+// ownerReadyAccounting (provenance key) exactly as the owner-ready projector
+// bills — the closure an owner-ready image gets under RUB-678's wiring, where
+// checkRetainedDAAccountingLocked closes only the legacy image. It never
 // repairs a disagreement, never recomputes the monotone high-waters records and
 // nextReceivedTime, and serves the input snapshot and the projected D1 alike.
 func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
@@ -426,8 +416,16 @@ func canonicalDARecordAccounted(s *DARelayState, record daRelaySetRecord, totals
 // canonicalDAMemberFeeBound proves one retained member's stored Uint128 fee is
 // the fee the SUPPLIED final-chain context derives for its exact bytes — no
 // narrowing, no other-domain substitute (RUBIN_COMPACT_BLOCKS.md Section 18.1).
-// The caller binds every consensus-checked member, policy-excluded or not.
-func canonicalDAMemberFeeBound(m canonicalDARetainedMember, checked *consensus.CheckedTransaction) error {
+// checked != nil exactly when the consensus half kept the member, policy-excluded
+// or not: a kept member without one is a validator defect and terminal, a
+// consensus-excluded member has no fee to bind.
+func canonicalDAMemberFeeBound(m canonicalDARetainedMember, checked *consensus.CheckedTransaction, keep bool) error {
+	if checked == nil {
+		if keep {
+			return terminalCanonicalDAError(fmt.Errorf("no checked transaction for retained DA %s of %x", m.parsed.label, m.daID))
+		}
+		return nil
+	}
 	if checked.Fee != m.stored.fee {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA %s of %x stores fee %+v against final-chain fee %+v", m.parsed.label, m.daID, m.stored.fee, checked.Fee))
 	}
