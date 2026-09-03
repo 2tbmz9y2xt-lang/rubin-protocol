@@ -272,6 +272,7 @@ func (x *canonicalDAOwnerFixture) requireTerminal(want string) error {
 // requireStableTerminal repeats one build so a walk that depended on map
 // iteration order would report another record's or another member's defect on
 // some round instead of the same evidence on every round.
+// Go's iteration over a two-key map is measurably biased (~86/14, not uniform), so a low round count only weakens this pin probabilistically; callers pass a round count high enough that the biased walk cannot pass by chance.
 func (x *canonicalDAOwnerFixture) requireStableTerminal(want string, rounds int) error {
 	x.t.Helper()
 	first := x.requireTerminal(want)
@@ -876,7 +877,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			x := newCanonicalDAOwnerFixture(t)
 			tc.corrupt(x)
-			err := x.requireStableTerminal(tc.want, 4)
+			err := x.requireStableTerminal(tc.want, 16)
 			if strings.Contains(err.Error(), tc.absent) {
 				t.Fatalf("terminal=%q names the lower-precedence defect %q", err.Error(), tc.absent)
 			}
@@ -889,7 +890,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			r.commit.payloadCommitment[0] ^= 1
 			corruptDAChunk(r, 0, func(c *daRelayChunk) { c.chunkHash[0] ^= 1 })
 		})
-		if err := x.requireStableTerminal("commit", 16); strings.Contains(err.Error(), "chunk 0") {
+		if err := x.requireStableTerminal("commit", 64); strings.Contains(err.Error(), "chunk 0") {
 			t.Fatalf("terminal=%q names the later member", err.Error())
 		}
 	})
@@ -900,7 +901,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			r.commit.payloadCommitment[0] ^= 1
 			corruptDAChunk(r, 0, func(c *daRelayChunk) { c.txBytes = append(slices.Clone(c.txBytes), 0x00) })
 		})
-		if err := x.requireStableTerminal(fmt.Sprintf("retained DA record %x: retained DA chunk 0 has trailing bytes", x.stateB), 8); strings.Contains(err.Error(), "commit") {
+		if err := x.requireStableTerminal(fmt.Sprintf("retained DA record %x: retained DA chunk 0 has trailing bytes", x.stateB), 64); strings.Contains(err.Error(), "commit") {
 			t.Fatalf("terminal=%q names the commit's binding defect", err.Error())
 		}
 	})
@@ -912,7 +913,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 				corruptDAChunk(r, 0, func(c *daRelayChunk) { c.member.txid[0] ^= 1 })
 			})
 		}
-		err := x.requireStableTerminal("contradicts its parsed identity", 16)
+		err := x.requireStableTerminal("contradicts its parsed identity", 64)
 		if !strings.Contains(err.Error(), fmt.Sprintf("%x", x.stateA)) || strings.Contains(err.Error(), fmt.Sprintf("%x", x.stateB)) {
 			t.Fatalf("terminal=%q, want the lowest raw da_id record", err.Error())
 		}
