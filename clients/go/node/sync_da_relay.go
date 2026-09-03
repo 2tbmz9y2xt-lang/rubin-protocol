@@ -322,7 +322,7 @@ type preparedCanonicalDAOwnerCandidates struct {
 // retained-DA terminal class; the record-major live prepareCanonicalDAImage is never consulted.
 // Cost: cloneOwnerReady deep-copies every survivor — O(surviving retained bytes), ~2x them while
 // the input and D1 coexist, where the live image shares that backing — and that copy is the
-// isolation; removals cost O(removals x locators), the inclusion scan O(records x included).
+// isolation; removals cost O(removals x locators), the inclusion scan O(records + included).
 // Dormant: no non-test caller. RUB-678 owns the live site and must first move P2P ingest onto
 // the owner-ready admission path: StageCommit/StageChunk mint no revision and leave COMPLETE_SET,
 // and phase 1 refuses the WHOLE snapshot on the first resident that is not owner-ready.
@@ -377,8 +377,12 @@ func canonicalDAOwnerRemovals(image canonicalDARetainedImage, included []canonic
 			removed[member.daID] = true
 		}
 	}
+	inclusion := make(map[[32]byte][]canonicalDASetIdentity, len(included))
+	for i := range included {
+		inclusion[included[i].daID] = append(inclusion[included[i].daID], included[i])
+	}
 	for i := range image.identities {
-		if canonicalDASetIdentityIncluded(included, image.identities[i]) {
+		if canonicalDASetIdentityIncluded(inclusion[image.identities[i].daID], image.identities[i]) {
 			removed[image.identities[i].daID] = true
 		}
 	}

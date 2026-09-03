@@ -1013,7 +1013,8 @@ func clonePendingOutpointClaims(byToken map[PendingOutpointToken]*pendingOutpoin
 
 // TestCanonicalDAOwnerCandidatesCloseTheClaimBijection pins the owner half: every
 // retained member holds its own exclusive finalized DA claim of this owner, no
-// DA claim is left over, and standard claims are never inspected.
+// DA claim is left over, and a standard claim is shape-validated like any other
+// claim but never bound to a member or removed.
 func TestCanonicalDAOwnerCandidatesCloseTheClaimBijection(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
