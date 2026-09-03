@@ -3592,6 +3592,66 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	t.Run("records outrank a deleted cache entry and the mismatch fails closed", func(t *testing.T) {
+		// R4 records-authority: the selectors enumerate da_ids from s.sets, so deleting a
+		// resident record's cached orphanBytesByDAID entry no longer silently skips it (the
+		// pre-fix bug). The record is walked, and the resulting derived-versus-live mismatch
+		// fails the whole batch closed without repair, rather than the pre-fix silent no-op.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xda}
+		f.ownerReadyChunk(daID, 0, "p0", daNonReplayPeer("drop"))
+		f.relay.mu.Lock()
+		delete(f.relay.orphanBytesByDAID, daID)
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("deleted-cache err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("an extra cached da_id entry with no record is terminal before selection", func(t *testing.T) {
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xdb}
+		f.ownerReadyChunk(daID, 0, "e0", daNonReplayPeer("drop"))
+		f.relay.mu.Lock()
+		f.relay.orphanBytesByDAID[[32]byte{0xbb}] = 1 // no record backs this da_id
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("extra-cache err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("an extra locator row with no record is terminal before selection", func(t *testing.T) {
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xdc}
+		f.ownerReadyChunk(daID, 0, "l0", daNonReplayPeer("drop"))
+		f.relay.mu.Lock()
+		f.relay.locators[[32]byte{0xce}] = daRelayLocator{daID: [32]byte{0xcf}, kind: daRelayLocatorCommit} // no record implies this row
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("extra-locator err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a malformed no-match record is validated and terminal before selection", func(t *testing.T) {
+		// Even a record the quota never matches ("keep" vs release "drop") is validated by
+		// the preflight: the pre-fix path only validated selected records, so a malformed
+		// no-match record slipped through. A bad owner-ready state now fails closed.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xdd}
+		f.ownerReadyChunk(daID, 0, "n0", daNonReplayPeer("keep"))
+		f.relay.mu.Lock()
+		record := f.relay.sets[daID]
+		record.wireBytes = 1 // owner-ready records pin legacy wireBytes to zero (R1 closed-state)
+		f.relay.sets[daID] = record
+		f.relay.mu.Unlock()
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+			t.Fatalf("malformed no-match err=%v, want %v", err, errDARelayImageIncompatible)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
 }
 
 func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
@@ -3654,6 +3714,25 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			t.Fatalf("unbound removal touched the owner: got=%+v want=%+v", got, ownerBefore)
 		}
 	})
+	t.Run("a bound relay with a nil owner refuses rather than orphan claims", func(t *testing.T) {
+		// A bound relay (mempool+chainState set) whose pending-outpoint owner is nil is NOT
+		// unbound: publishing a victim-removing DA image without dropping claims would orphan
+		// them. It fails closed with BeginDARemoval's exact refusal, leaving the DA image whole.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xe2}
+		f.ownerReadyChunk(daID, 0, "b0", daNonReplayPeer("q"))
+		before := daRelayStateSnapshot(f.relay)
+		f.relay.mu.Lock()
+		f.relay.mempool.pendingOutpoints = nil // bound, but no claim domain
+		f.relay.mu.Unlock()
+		err := f.relay.releaseOwnerReadyPeerQuota("q")
+		var admitErr *TxAdmitError
+		if !errors.As(err, &admitErr) || admitErr.Message != "nil pending-outpoint owner" {
+			t.Fatalf("bound nil-owner err=%v, want nil pending-outpoint owner", err)
+		}
+		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality requires structural comparison.
+			t.Fatalf("bound nil-owner removal mutated the DA image: got=%+v want=%+v", got, before)
+		}
+	})
 }
 
 func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
@@ -3683,15 +3762,19 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	t.Run("an accounting underflow fails the whole batch", func(t *testing.T) {
+	t.Run("a derived-versus-live accounting mismatch fails the whole batch", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 1), [32]byte{0x03}
 		f.ownerReadyChunk(daID, 0, "under", daNonReplayPeer("drop"))
 		f.relay.mu.Lock()
-		f.relay.orphanBytes = 0 // below this record's retained charge, so the delta underflows
+		f.relay.orphanBytes = 0 // below what the resident record implies: a derived-vs-live mismatch
 		f.relay.mu.Unlock()
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
-			t.Fatalf("underflow err=%v, want %v", err, errDARelayArithmeticOverflow)
+		// The whole-image preflight (R4) catches the orphan-pool mismatch and fails closed
+		// before the per-record projector's arithmetic underflow would; both are terminal
+		// and neither mutates the clone, so both complete images stay unchanged.
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("mismatch err=%v, want canonical retained-DA terminal", err)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
@@ -3740,9 +3823,13 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 				if _, tracked := callers[node.Name.Name]; tracked {
 					declarations[node.Name.Name]++
 				}
-			case *ast.CallExpr:
-				if _, tracked := callers[calleeName(node)]; tracked {
-					callers[calleeName(node)]++
+			case *ast.SelectorExpr:
+				// A SelectorExpr covers both a call (s.method()) and a method-value
+				// reference (f := s.method); the entrypoints are methods, so counting the
+				// selector catches an activation wired through a method value that a
+				// CallExpr-only census would miss.
+				if _, tracked := callers[node.Sel.Name]; tracked {
+					callers[node.Sel.Name]++
 				}
 			}
 			return true
@@ -3755,6 +3842,31 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		if count != 0 || declarations[name] != 1 {
 			t.Fatalf("%s: %d non-test callers, %d declarations", name, count, declarations[name])
 		}
+	}
+	// TEETH: the SelectorExpr census counts a method-value reference the pre-fix
+	// CallExpr-only census would miss. `f := s.advanceOwnerReadyTTL` is a bare
+	// SelectorExpr with no enclosing CallExpr, so the SelectorExpr walk is what keeps
+	// the zero-non-test-reference boundary from passing on an activated function.
+	teeth, parseErr := parser.ParseFile(token.NewFileSet(), "teeth.go", "package node\nfunc wire(s *DARelayState) { f := s.advanceOwnerReadyTTL; _ = f }", parser.SkipObjectResolution)
+	if parseErr != nil {
+		t.Fatalf("parse teeth fixture: %v", parseErr)
+	}
+	selectorHits, callHits := 0, 0
+	ast.Inspect(teeth, func(node ast.Node) bool {
+		switch node := node.(type) {
+		case *ast.SelectorExpr:
+			if node.Sel.Name == "advanceOwnerReadyTTL" {
+				selectorHits++
+			}
+		case *ast.CallExpr:
+			if calleeName(node) == "advanceOwnerReadyTTL" {
+				callHits++
+			}
+		}
+		return true
+	})
+	if selectorHits != 1 || callHits != 0 {
+		t.Fatalf("teeth: selector census=%d (want 1), call-only census=%d (want 0)", selectorHits, callHits)
 	}
 	// SEPARATION: the owner-aware removal path routes only through the owner-ready projector,
 	// so none of its functions calls a legacy removal or apply primitive; the legacy exported
@@ -3771,7 +3883,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		}
 	}
 	legacy := map[string]bool{"removeDASetRecordLocked": true, "applyDASetRecordLocked": true, "advanceOrphanTTLLocked": true, "releasePeerQuotaKeyLocked": true, "releasePeerQuotaKeyRecordLocked": true, "withoutPeerQuotaKey": true, "BeginDARemoval": true}
-	for _, name := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "commitOwnerReadyRemoval", "commitOwnerReadyRemovalClaimsLocked", "removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "releaseOwnerReadyPeerRecordLocked", "tickOwnerReadyTTLRecordLocked"} {
+	for _, name := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "commitOwnerReadyRemoval", "commitOwnerReadyRemovalClaimsLocked", "removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "releaseOwnerReadyPeerRecordLocked", "tickOwnerReadyTTLRecordLocked", "ownerReadyRemovalCandidatesLocked"} {
 		function := mutationFuncs[name]
 		if function == nil {
 			t.Fatalf("owner-ready removal function %s missing from da_relay_mutation.go", name)

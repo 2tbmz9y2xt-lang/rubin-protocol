@@ -1070,14 +1070,26 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 	if err != nil {
 		return err
 	}
-	// A pure TTL decrement releases no member, and an unbound relay owns no claim, so
-	// neither reaches the owner: the DA image is the whole change.
-	owner := s.ownerReadyRemovalOwner()
-	if owner == nil || len(victims) == 0 {
+	// A pure TTL decrement releases no member, so it never reaches the owner on any
+	// relay: the DA image is the whole change.
+	if len(victims) == 0 {
 		s.publishAtomicBatchLocked(clone)
 		return nil
 	}
-	return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
+	owner := s.ownerReadyRemovalOwner()
+	if owner != nil {
+		return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
+	}
+	// owner == nil with victims to drop. A truly unbound test-only relay (mempool or
+	// chainState nil) has no claim domain and publishes the DA image alone; a BOUND
+	// relay whose pending-outpoint owner is nil must never publish a victim-removing
+	// image without dropping claims, so it fails closed — mirroring BeginDARemoval's
+	// nil pending-outpoint owner refusal (da_admission.go).
+	if s.mempool != nil && s.mempool.chainState != nil {
+		return txAdmitUnavailable("nil pending-outpoint owner")
+	}
+	s.publishAtomicBatchLocked(clone)
+	return nil
 }
 
 // commitOwnerReadyRemovalClaimsLocked validates the full bound-owner victim batch and, only
@@ -1105,8 +1117,9 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 // ownerReadyRemovalOwner returns the shared-owner claim domain only for a fully bound relay.
 // The mempool+chainState check mirrors the fence lockAdmissionFence takes, but the actual
 // claim domain is a superset of that guard: the returned owner is s.mempool.pendingOutpoints,
-// which can itself be nil. A nil return means no claim domain, and commitOwnerReadyRemoval
-// treats it as a DA-only publish with no owner-side claim drop.
+// which can itself be nil. A nil return splits two cases in commitOwnerReadyRemoval: a truly
+// unbound relay (mempool or chainState nil) publishes the DA image alone, but a bound relay
+// whose pending-outpoint owner is nil fails closed rather than orphaning victim claims.
 func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 	if s.mempool == nil || s.mempool.chainState == nil {
 		return nil
@@ -1114,12 +1127,48 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 	return s.mempool.pendingOutpoints
 }
 
+// ownerReadyRemovalCandidatesLocked returns the incomplete owner-ready da_ids the
+// PEER and TTL selectors consider, ascending, after a fail-closed whole-image
+// preflight. Records — never the cached orphanBytesByDAID total — are the selection
+// authority (R4): the candidates come from s.sets, so a resident record whose cache
+// entry was deleted is no longer silently skipped, and the reused
+// canonicalDARetainedImageClosed then fails the batch closed, without repair, on any
+// derived-versus-live accounting mismatch or non-bijective locator image (R1/R4). A
+// COMPLETE_SET is out of scope (State C): never a candidate and left byte-identical,
+// so the owner-ready closure — which does not model a complete set's pinned
+// accounting — runs only when every retained record is incomplete; a coexisting
+// complete set drops to the per-record projector's own fail-closed accounting checks.
+func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
+	retained := s.sortedRetainedDAIDsLocked()
+	candidates := make([][32]byte, 0, len(retained))
+	for _, daID := range retained {
+		record := s.sets[daID]
+		if record.state == daRelayStateCompleteSet {
+			continue
+		}
+		if record.revision == 0 || len(record.locatorRows()) == 0 || record.checkOwnerReadyRecord() != nil {
+			return nil, errDARelayImageIncompatible
+		}
+		candidates = append(candidates, daID)
+	}
+	if len(candidates) == len(retained) {
+		if err := canonicalDARetainedImageClosed(s, candidates); err != nil {
+			return nil, err
+		}
+	}
+	return candidates, nil
+}
+
 func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]DAAdmissionVictim, error) {
 	if quotaIdentity == "" {
 		return nil, nil
 	}
+	candidates, err := clone.ownerReadyRemovalCandidatesLocked()
+	if err != nil {
+		return nil, err
+	}
 	var victims []DAAdmissionVictim
-	for _, daID := range clone.sortedIncompleteDAIDsLocked() {
+	for _, daID := range candidates {
 		removed, err := clone.releaseOwnerReadyPeerRecordLocked(daID, quotaIdentity)
 		if err != nil {
 			return nil, err
@@ -1130,8 +1179,12 @@ func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]
 }
 
 func ownerReadyTTLTickVictims(clone *DARelayState) ([]DAAdmissionVictim, error) {
+	candidates, err := clone.ownerReadyRemovalCandidatesLocked()
+	if err != nil {
+		return nil, err
+	}
 	var victims []DAAdmissionVictim
-	for _, daID := range clone.sortedIncompleteDAIDsLocked() {
+	for _, daID := range candidates {
 		removed, err := clone.tickOwnerReadyTTLRecordLocked(daID)
 		if err != nil {
 			return nil, err
