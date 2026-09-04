@@ -3865,6 +3865,33 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	// A State C record with NO retained member is impossible, and it is invisible to every other
+	// arm of the preflight: it implies no locator row to account for and no pinned byte to compare,
+	// so the image below stays closed once its rows and its pinned payload go with its members.
+	// Only the State C member gate can refuse it; without the non-empty requirement both selectors
+	// remove the incomplete record and publish alongside the impossible one.
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("a memberless complete set is terminal before selection on the "+selector.name, func(t *testing.T) {
+			f := newDANonReplayFixture(t, 4)
+			incompleteID, completeID := [32]byte{0xd5}, [32]byte{0xed}
+			f.ownerReadyChunk(incompleteID, 0, "s3", daNonReplayPeer("drop"))
+			f.completeReplayPinned(completeID)
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.sets[completeID]
+				for _, row := range record.locatorRows() {
+					delete(s.locators, row.txid)
+				}
+				s.pinnedPayloadBytes -= record.payloadBytes
+				record.commit.member, record.chunks, record.payloadBytes = nil, nil, 0
+				s.sets[completeID] = record
+			})
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := selector.run(f.relay); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+				t.Fatalf("memberless complete set on the %s: err=%v, want %v", selector.name, err, errDARelayImageIncompatible)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
 	// Each row lowers one of the four lifted caps below its live counter and requires the tick
 	// to proceed anyway; without the lift the absolute arithmetic would abort the batch.
 	for _, row := range []struct {
@@ -4157,25 +4184,36 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
 	}
-	t.Run("a bound relay with a nil owner refuses rather than orphan claims", func(t *testing.T) {
-		// A bound relay (mempool+chainState set) whose pending-outpoint owner is nil is NOT
-		// unbound: publishing a victim-removing DA image without dropping claims would orphan
-		// them. It fails closed with BeginDARemoval's exact refusal, leaving the DA image whole.
-		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xe2}
-		f.ownerReadyChunk(daID, 0, "b0", daNonReplayPeer("q"))
-		before := daRelayStateSnapshot(f.relay)
-		f.relay.mu.Lock()
-		f.relay.mempool.pendingOutpoints = nil // bound, but no claim domain
-		f.relay.mu.Unlock()
-		err := f.relay.releaseOwnerReadyPeerQuota("q")
-		var admitErr *TxAdmitError
-		if !errors.As(err, &admitErr) || admitErr.Message != "nil pending-outpoint owner" {
-			t.Fatalf("bound nil-owner err=%v, want nil pending-outpoint owner", err)
-		}
-		if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality requires structural comparison.
-			t.Fatalf("bound nil-owner removal mutated the DA image: got=%+v want=%+v", got, before)
-		}
-	})
+	// A bound relay (mempool+chainState set) whose pending-outpoint owner is nil is NOT unbound, and
+	// the refusal does not turn on what the batch releases: publishing a victim-removing image
+	// without dropping claims would orphan them, and republishing a member-preserving decrement
+	// mints a revision no claim domain witnessed. Each batch takes BeginDARemoval's exact refusal
+	// and leaves the DA image whole. The zero-victim rows fail against a victim-count-gated refusal.
+	for _, row := range []struct {
+		name string
+		run  func(*DARelayState) error
+	}{
+		{"a victim-carrying peer release", func(s *DARelayState) error { return s.releaseOwnerReadyPeerQuota("q") }},
+		{"a peer release matching nothing", func(s *DARelayState) error { return s.releaseOwnerReadyPeerQuota("other") }},
+		{"a member-preserving ttl decrement", (*DARelayState).advanceOwnerReadyTTL},
+	} {
+		t.Run("a bound relay with a nil owner refuses "+row.name, func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 1), [32]byte{0xe2}
+			f.ownerReadyChunk(daID, 0, "b0", daNonReplayPeer("q"))
+			f.setOwnerReadyTTL(daID, 2) // above one, so the tick decrements and releases nothing
+			before := daRelayStateSnapshot(f.relay)
+			f.relay.mu.Lock()
+			f.relay.mempool.pendingOutpoints = nil // bound, but no claim domain
+			f.relay.mu.Unlock()
+			var admitErr *TxAdmitError
+			if err := row.run(f.relay); !errors.As(err, &admitErr) || admitErr.Message != "nil pending-outpoint owner" {
+				t.Fatalf("bound nil-owner %s: err=%v, want nil pending-outpoint owner", row.name, err)
+			}
+			if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality requires structural comparison.
+				t.Fatalf("bound nil-owner %s mutated the DA image: got=%+v want=%+v", row.name, got, before)
+			}
+		})
+	}
 }
 
 func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {

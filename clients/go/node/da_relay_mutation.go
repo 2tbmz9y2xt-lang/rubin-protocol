@@ -1072,15 +1072,16 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 	if owner := s.ownerReadyRemovalOwner(); owner != nil {
 		return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
 	}
-	return s.publishOwnerReadyRemovalUnbound(clone, victims)
+	return s.publishOwnerReadyRemovalUnbound(clone)
 }
 
 // publishOwnerReadyRemovalUnbound publishes the projected DA image and releases nothing, so the
-// DA image is the whole change. It refuses a victim-carrying batch unless the relay is truly
-// unbound (mempool or chainState nil), rather than publish a removal whose claims stay held —
-// BeginDARemoval's nil pending-outpoint owner refusal (da_admission.go).
-func (s *DARelayState) publishOwnerReadyRemovalUnbound(clone *DARelayState, victims []DAAdmissionVictim) error {
-	if len(victims) != 0 && s.mempool != nil && s.mempool.chainState != nil {
+// DA image is the whole change, and it publishes ONLY for a truly unbound relay (mempool or
+// chainState nil). PRECONDITION: a BOUND relay reaching here has a nil claim domain, so EVERY
+// batch it carries — a member-preserving decrement included — takes BeginDARemoval's exact nil
+// pending-outpoint owner refusal (da_admission.go) instead of republishing the image.
+func (s *DARelayState) publishOwnerReadyRemovalUnbound(clone *DARelayState) error {
+	if s.mempool != nil && s.mempool.chainState != nil {
 		return txAdmitUnavailable("nil pending-outpoint owner")
 	}
 	s.publishAtomicBatchLocked(clone)
@@ -1164,7 +1165,7 @@ func checkOwnerReadyRecordBinding(record daRelaySetRecord, owner *PendingOutpoin
 // claim domain is a superset of that guard: the returned owner is s.mempool.pendingOutpoints,
 // which can itself be nil. A nil return splits two cases in commitOwnerReadyRemoval: a truly
 // unbound relay (mempool or chainState nil) publishes the DA image alone, but a bound relay
-// whose pending-outpoint owner is nil fails closed rather than orphaning victim claims.
+// whose pending-outpoint owner is nil fails closed, whatever the batch would have released.
 func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 	if s.mempool == nil || s.mempool.chainState == nil {
 		return nil
@@ -1236,13 +1237,14 @@ func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
 }
 
-// ownerReadyCompleteSetGateFails reports whether a COMPLETE_SET record's retained members fail
-// member-shape validation — a memberless occupied slot, a malformed identity or an invalid typed
-// provenance; the caller fails the whole image with errDARelayImageIncompatible on a true result.
-// It reads members only: a COMPLETE_SET carries no owner-ready record shape to check.
+// ownerReadyCompleteSetGateFails reports whether a COMPLETE_SET record fails the member shape its
+// own state implies: a commit member plus exactly one member per declared chunk, at least one
+// chunk, each a valid identity. The member set is required NON-EMPTY here — an empty one is a case
+// this gate decides, not an absence of cases — and the caller fails the whole image with
+// errDARelayImageIncompatible on a true result.
 func (r daRelaySetRecord) ownerReadyCompleteSetGateFails() bool {
 	members, err := canonicalDARetainedMemberIdentities(r)
-	if err != nil {
+	if err != nil || r.commit.member == nil || r.commit.chunkCount == 0 || len(members) != 1+int(r.commit.chunkCount) {
 		return true
 	}
 	for _, member := range members {
