@@ -1321,13 +1321,22 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 // the live caps are never written. Every projection in this removal is non-increasing — a whole
 // removal adds nothing, and checkOwnerReadyRemovalSurvivor plus checkOwnerReadySurvivingChunks
 // prove a survivor is a byte-identical submultiset — but the cap arithmetic is ABSOLUTE
-// (checkedApplyUint64DeltaCap refuses current-remove+add above the limit), and a live record can
-// legitimately sit above a cap: projectDANonReplayAdmissionLocked returns for a State B image
-// BEFORE its own orphan/per-da_id/per-peer re-checks, so a staged commit is admitted uncapped.
-// Re-applying them would abort the whole all-or-nothing batch on such a record, which could then
-// never expire. Both siblings lift exactly these four: buildCanonicalDAOwnerCandidates
-// (sync_da_relay.go) and projectDANonReplayAdmissionLocked (da_relay_owner.go). No other cap is
-// lifted; the projector consults no other.
+// (checkedApplyUint64DeltaCap refuses current-remove+add above the limit), so a live record
+// sitting above a cap would abort this all-or-nothing batch and could then never expire. Two
+// distinct mechanisms leave a record there, each covering two of the four caps:
+//   - per-da_id and per-peer: owner-ready admission never re-checks these for a State B image.
+//     projectDANonReplayAdmissionLocked returns at its stateB arm before both, and its caller
+//     applyDANonReplayPlan re-checks only the pool and commit caps, so a staged commit is
+//     admitted above either. buildCanonicalDAOwnerCandidates (sync_da_relay.go) calls its own
+//     per-da_id lift inert because it removes whole records only; this removal also drops single
+//     chunks, which leaves that bucket non-zero, so the lift is load-bearing here.
+//   - pool and commit overhead: admission does enforce these — the projector's State A arm
+//     checks the pool, and applyDANonReplayPlan checks both for State B (only a staged commit
+//     charges commit overhead) — so here the lift instead keeps a snapshot admitted under a
+//     since-lowered cap, a restart or reconfiguration under a smaller pool, from tripping a
+//     false terminal, the reason sync_da_relay.go gives for the same lift.
+//
+// Both siblings lift exactly these four. No other cap is lifted; the projector consults no other.
 func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 	caps := s.caps
 	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)

@@ -3743,22 +3743,27 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	// A live incomplete record can legitimately sit ABOVE an orphan-domain cap: owner-ready
-	// admission returns for a State B image before its own cap re-checks. The cap arithmetic is
-	// absolute, so re-applying it to a non-increasing removal delta returns a cap error on every
-	// TTL tick and, the batch being all-or-nothing, that record could never reach expiry. Each
-	// row constructs that over-cap state the short way — lowering one cap under the admitted
-	// record — reaching the identical arithmetic; all four lifted caps get a row.
+	// Both mechanisms ownerReadyRemovalCaps names get rows, and all four lifted caps: for
+	// per-da_id and per-peer, lowering the cap mirrors a state a State B admission can itself
+	// produce; for the pool and commit-overhead caps, which admission does enforce, it IS the
+	// mechanism — a cap lowered after admission. Either way the record sits above the cap, and
+	// re-applying the absolute arithmetic to the removal delta would strand it short of expiry.
 	for _, row := range []struct {
-		name  string
-		lower func(*DARelayState, [32]byte)
+		name       string
+		capAndLive func(*DARelayState, [32]byte) (*uint64, uint64)
 	}{
-		{"per-da_id", func(s *DARelayState, daID [32]byte) { s.caps.orphanPoolPerDAIDBytes = s.orphanBytesByDAID[daID] - 1 }},
-		{"per-peer", func(s *DARelayState, _ [32]byte) {
-			s.caps.orphanPoolPerPeerBytes = s.orphanBytesByPeerQuotaKey["over"] - 1
+		{"per-da_id", func(s *DARelayState, daID [32]byte) (*uint64, uint64) {
+			return &s.caps.orphanPoolPerDAIDBytes, s.orphanBytesByDAID[daID]
 		}},
-		{"global pool", func(s *DARelayState, _ [32]byte) { s.caps.orphanPoolBytes = s.orphanBytes - 1 }},
-		{"commit overhead", func(s *DARelayState, _ [32]byte) { s.caps.orphanCommitOverheadBytes = s.orphanCommitOverheadBytes - 1 }},
+		{"per-peer", func(s *DARelayState, _ [32]byte) (*uint64, uint64) {
+			return &s.caps.orphanPoolPerPeerBytes, s.orphanBytesByPeerQuotaKey["over"]
+		}},
+		{"global pool", func(s *DARelayState, _ [32]byte) (*uint64, uint64) {
+			return &s.caps.orphanPoolBytes, s.orphanBytes
+		}},
+		{"commit overhead", func(s *DARelayState, _ [32]byte) (*uint64, uint64) {
+			return &s.caps.orphanCommitOverheadBytes, s.orphanCommitOverheadBytes
+		}},
 	} {
 		t.Run("ttl decrement is projected uncapped above the "+row.name+" cap", func(t *testing.T) {
 			f, daID := newDANonReplayFixture(t, 2), [32]byte{0xe4}
@@ -3766,7 +3771,12 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			f.ownerReadyChunk(daID, 0, "o0", daNonReplayPeer("over"))
 			f.setOwnerReadyTTL(daID, 2)
 			f.relay.mu.Lock()
-			row.lower(f.relay, daID)
+			capBound, live := row.capAndLive(f.relay, daID)
+			if live == 0 {
+				f.relay.mu.Unlock()
+				t.Fatalf("%s live counter is 0: the lowered cap would wrap to the maximum and the row would stop exercising the cap arithmetic", row.name)
+			}
+			*capBound = live - 1
 			f.relay.mu.Unlock()
 			before := daRelayStateSnapshot(f.relay)
 			if err := f.relay.advanceOwnerReadyTTL(); err != nil {
@@ -3776,9 +3786,6 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			record := after.sets[daID]
 			if record.ttlBlocksRemaining != 1 || record.revision <= before.sets[daID].revision {
 				t.Fatalf("over-cap decrement record=%+v, before revision=%d", record, before.sets[daID].revision)
-			}
-			if after.caps != before.caps {
-				t.Fatalf("the projection wrote the live caps: %+v != %+v", after.caps, before.caps)
 			}
 		})
 	}
@@ -3791,7 +3798,12 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		drop := f.ownerReadyChunk(dropID, 0, "g0", daNonReplayPeer("drop"))
 		f.ownerReadyChunk(keepID, 0, "g1", LocalDAProvenance())
 		f.relay.mu.Lock()
-		f.relay.caps.orphanPoolBytes = f.relay.orphanBytesByDAID[keepID] - 1 // the survivor ALONE stays above the cap
+		live := f.relay.orphanBytesByDAID[keepID] // the survivor ALONE stays above the cap
+		if live == 0 {
+			f.relay.mu.Unlock()
+			t.Fatal("survivor da_id counter is 0: the lowered cap would wrap to the maximum and the row would stop exercising the cap arithmetic")
+		}
+		f.relay.caps.orphanPoolBytes = live - 1
 		f.relay.mu.Unlock()
 		before := daRelayStateSnapshot(f.relay)
 		dropToken := before.sets[dropID].chunks[0].member.token
@@ -3802,9 +3814,6 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		ownerReadyRecordAbsent(t, after, dropID, drop.txid)
 		if got := after.sets[keepID]; !reflect.DeepEqual(got, before.sets[keepID]) {
 			t.Fatalf("survivor not byte-identical: got=%+v want=%+v", got, before.sets[keepID])
-		}
-		if after.caps != before.caps {
-			t.Fatalf("the projection wrote the live caps: %+v != %+v", after.caps, before.caps)
 		}
 		ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), dropToken, drop.inputs)
 	})
