@@ -3761,6 +3761,11 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			record.wireBytes = 1 // owner-ready records pin legacy wireBytes to zero
 			s.sets[daID] = record
 		}},
+		{"record state", func(s *DARelayState, daID [32]byte) {
+			record := s.sets[daID]
+			record.state = daRelayStateCompleteSet + 1 // outside the two owner-ready states, and not State C
+			s.sets[daID] = record
+		}},
 		{"member provenance", func(s *DARelayState, daID [32]byte) { s.sets[daID].chunks[0].member.provenance = DAProvenance{} }},
 		{"member identity", func(s *DARelayState, daID [32]byte) { s.sets[daID].chunks[0].member.wtxid = [32]byte{} }},
 	} {
@@ -4180,15 +4185,26 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		earlyTx := f.ownerReadyChunk(early, 0, "early", daNonReplayPeer("drop"))
 		f.ownerReadyChunk(late, 0, "late", daNonReplayPeer("drop"))
 		// Corrupt the later record's member inputs so the owner victim preflight fails
-		// after the earlier record has already been projected onto the private clone.
-		f.mutateRelay(func(s *DARelayState) { ownerReadyBreakInputs(s.sets[late].chunks[0].member) })
+		// after the earlier record has already been projected onto the private clone. H2's prefetch
+		// arm needs a reservation the prefix would RELEASE to be worth asserting: early is a whole
+		// record removal, which releases both prefetch rows on the clone, so a published prefix
+		// takes them with it.
+		f.mutateRelay(func(s *DARelayState) {
+			s.prefetch.indexes = map[[32]byte]map[uint16]string{early: {1: "peer"}}
+			s.prefetch.expires = map[[32]byte]time.Time{early: time.Unix(1, 0)}
+			ownerReadyBreakInputs(s.sets[late].chunks[0].member)
+		})
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		err := f.relay.releaseOwnerReadyPeerQuota("drop")
 		var admitErr *TxAdmitError
 		if !errors.As(err, &admitErr) || admitErr.Message != "DA victim input mismatch" {
 			t.Fatalf("victim mismatch err=%v", err)
 		}
-		if _, present := daRelayStateSnapshot(f.relay).sets[early]; !present {
+		after := daRelayStateSnapshot(f.relay)
+		if after.prefetchIndexes[early][1] != "peer" || !after.prefetchExpires[early].Equal(time.Unix(1, 0)) {
+			t.Fatalf("valid-prefix prefetch rows lost: indexes=%+v expires=%+v", after.prefetchIndexes, after.prefetchExpires)
+		}
+		if _, present := after.sets[early]; !present {
 			t.Fatalf("valid-prefix record %x was dropped by a failed batch", earlyTx.txid)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
@@ -4398,6 +4414,11 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		}},
 		{"two retained members sharing one token", false, func(s *DARelayState, incompleteID, _ [32]byte) {
 			s.sets[incompleteID].chunks[1].member.token = s.sets[incompleteID].chunks[0].member.token
+		}},
+		// Uniqueness spans STATES, not just the incomplete records: a State C member is never
+		// selected and never token-bound, but it is still retained in the published image.
+		{"a complete-set member sharing a retained token", false, func(s *DARelayState, incompleteID, completeID [32]byte) {
+			s.sets[completeID].commit.member.token = s.sets[incompleteID].chunks[1].member.token
 		}},
 		{"a complete-set member with an invalid provenance", false, func(s *DARelayState, _, completeID [32]byte) {
 			s.sets[completeID].commit.member.provenance = DAProvenance{}
