@@ -1003,8 +1003,9 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 //
 // Three steps the sibling installers take are skipped. The pinned-payload counter is
 // neither projected nor restored: it prices only a COMPLETE_SET, a state the projector
-// refuses, so 0-to-0; RUB-1287 checks admission sequence/revision high-water, and RUB-1275's
-// owner-ready removal driver, not this installer, releases a whole-removed record's prefetch reservation.
+// refuses, so 0-to-0; RUB-1287 checks admission sequence/revision high-water, and every
+// remove: true caller — removeOwnerReadyWholeRecordLocked below and buildCanonicalDAOwnerCandidates
+// (sync_da_relay.go) — releases the removed record's prefetch reservation itself.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
 	for _, row := range placement.retire {
 		delete(s.locators, row.txid)
@@ -1024,17 +1025,18 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 	s.orphanCommitOverheadBytes = placement.commitBytes
 }
 
-// releaseOwnerReadyPeerQuota is the DORMANT owner-aware PEER quota cleanup selector.
-// It removes exactly the retained members whose typed provenance is peer with the
-// requested quota identity — never the cached legacy peerQuotaKey and never
-// orphanBytesByPeerQuotaKey as selection authority (RUBIN_COMPACT_BLOCKS.md 18.1;
-// the map is still a legitimate accounting side effect of a successful install) —
-// over one owner-atomic incomplete-record removal batch. A record is whole-removed
-// only when every retained member matches; a matching PEER commit is retained
-// whenever any non-matching member protects it — a LOCAL, a DETACHED_REORG, or a PEER
-// of a different quota identity (see releaseOwnerReadyPeerRecordLocked below for the
-// exact per-record rule). An empty quota identity selects nothing. This entrypoint has
-// zero non-test callers until issue 678.
+// releaseOwnerReadyPeerQuota is the DORMANT owner-aware PEER quota cleanup selector. It
+// MATCHES retained members on typed provenance — peer with the requested quota identity,
+// never the cached legacy peerQuotaKey and never orphanBytesByPeerQuotaKey as selection
+// authority (RUBIN_COMPACT_BLOCKS.md 18.1; the map is still a legitimate accounting side
+// effect of a successful install) — and can REMOVE less than it matches, over one
+// owner-atomic incomplete-record removal batch: matching chunks are dropped, but a matching
+// commit goes only with a whole-record removal, so any non-matching member — a LOCAL, a
+// DETACHED_REORG or a PEER of a different quota identity — leaves that commit retained WITH
+// its accounting charge and its owner claim until the record is removed whole, by TTL expiry
+// or by a later release matching every remaining member. State B never downgrades to State A
+// (see releaseOwnerReadyPeerRecordLocked below for the exact per-record rule). An empty quota
+// identity selects nothing. This entrypoint has zero non-test callers until issue 678.
 func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
 	return s.commitOwnerReadyRemoval(func(clone *DARelayState) ([]DAAdmissionVictim, error) {
 		return ownerReadyPeerRemovalVictims(clone, quotaIdentity)
@@ -1148,6 +1150,12 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // provenance, never on the legacy chunk field. So a malformed record is terminal here,
 // before any selection, decrement or publication.
 //
+// checkDANonReplayShape does not read ttlBlocksRemaining, so the gate applies the TTL bound
+// itself, as the canonical retained-record validator does (checkDANonReplayPrior): admission
+// stamps caps.orphanTTLBlocks, which newDARelayState refuses to construct as zero, so a
+// resident incomplete record at ttl 0 is terminal here whether or not a selector would have
+// touched it.
+//
 // The preflight runs UNCONDITIONALLY — for an all-incomplete image and for a MIXED
 // image (a State C record coexisting with incomplete records) alike. It cannot reuse
 // canonicalDARetainedImageClosed wholesale: that closure compares pinnedPayloadBytes
@@ -1163,7 +1171,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		if record.state == daRelayStateCompleteSet {
 			continue
 		}
-		if record.revision == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
+		if record.revision == 0 || record.ttlBlocksRemaining == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
 			return nil, errDARelayImageIncompatible
 		}
 		candidates = append(candidates, daID)
@@ -1357,10 +1365,11 @@ func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord
 // the caller guarantees ttlDelta is below the resident TTL. The commit and every unnamed
 // member stay byte-identical and the record state never changes.
 //
-// Backstop: on the PEER path ttlDelta is always 0, so a resident record already at ttl 0
-// is not decremented here. It is still caught downstream — projectOwnerReadyRemovalLocked's
-// checkOwnerReadyRemovalSurvivor rejects next.ttlBlocksRemaining == 0 — which aborts this
-// whole all-or-nothing batch rather than installing a stalled record.
+// Backstop: a record already at ttl 0 reaches neither selector, because
+// ownerReadyRemovalCandidatesLocked refuses it. Were one to arrive on the PEER path, where
+// ttlDelta is always 0, projectOwnerReadyRemovalLocked's checkOwnerReadyRemovalSurvivor still
+// rejects next.ttlBlocksRemaining == 0 and aborts this whole all-or-nothing batch rather than
+// installing a stalled record.
 func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropIndexes []uint16, ttlDelta uint64) ([]DAAdmissionVictim, error) {
 	survivor := record.cloneOwnerReady()
 	survivor.ttlBlocksRemaining -= ttlDelta
@@ -1401,6 +1410,14 @@ func checkOwnerReadyRemovalBaseline(image daRelayRecordImage, live daRelaySetRec
 	return checkOwnerReadyRemovalSurvivor(live, image.next)
 }
 
+// checkOwnerReadyRemovalSurvivor proves the survivor is the live record minus the dropped
+// members: it pins daID, state, receivedTime, payloadBytes, wireBytes, the whole commit and
+// every surviving chunk byte-identical, lets ttlBlocksRemaining only decrease and never to
+// zero, and leaves revision to the projector's remint. replaceableChunks is the one live field
+// it does not pin, unlike its admission-side twin samePreservedRecordFields:
+// ownerReadyRemovalCandidatesLocked's checkDANonReplayShape already refuses a non-nil
+// replaceableChunks on every record that reaches this path, and cloneOwnerReady carries that
+// nil into the survivor, so no reachable image could kill such a pin.
 func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
 	type fixed struct {
 		daID                                  [32]byte
@@ -1442,6 +1459,11 @@ func ownerReadyMemberMatchesPeer(member *daRelayMemberIdentity, quotaIdentity st
 
 // ownerReadyMemberVictim copies one retained member's claim descriptor; the input slice is
 // cloned so no victim aliases live record state before publication.
+//
+// PRECONDITION shared by both arms: member is non-nil. dropOwnerReadyChunksLocked reads a
+// member only for the indexes ownerReadyPeerMatches accepted, and that predicate starts at
+// member != nil (the TTL selector passes no indexes at all); ownerReadyRecordVictims (below)
+// proves its own commit and chunk arms. A nil guard here would be unreachable, so there is none.
 func ownerReadyMemberVictim(member *daRelayMemberIdentity) DAAdmissionVictim {
 	return DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: slices.Clone(member.inputs)}
 }

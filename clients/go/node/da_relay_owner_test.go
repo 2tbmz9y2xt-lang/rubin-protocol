@@ -3954,6 +3954,19 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	t.Run("a resident ttl-zero record is terminal even when the release matches nothing", func(t *testing.T) {
+		// The candidate gate's own TTL bound, not a selector: checkDANonReplayShape never reads
+		// ttlBlocksRemaining, and this release matches no member, so the PEER selector returns
+		// no victims and would leave the ttl-zero record resident on a published clone.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0x06}
+		f.ownerReadyChunk(daID, 0, "stalled", daNonReplayPeer("keep"))
+		f.setOwnerReadyTTL(daID, 0)
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+			t.Fatalf("ttl-zero no-match err=%v, want %v", err, errDARelayImageIncompatible)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
 	// Each defect below passes the weaker checkOwnerReadyRecord and is invisible to the
 	// accounting arm — an incomplete record pins no payload, so pinnedPayloadAccountingBytes
 	// never reads payloadBytes — so only the candidate gate's full checkDANonReplayShape makes
