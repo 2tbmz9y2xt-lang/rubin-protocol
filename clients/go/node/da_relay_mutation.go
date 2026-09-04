@@ -1317,26 +1317,19 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 	}
 }
 
-// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted, copied by value so
-// the live caps are never written. Every projection in this removal is non-increasing — a whole
-// removal adds nothing, and checkOwnerReadyRemovalSurvivor plus checkOwnerReadySurvivingChunks
-// prove a survivor is a byte-identical submultiset — but the cap arithmetic is ABSOLUTE
-// (checkedApplyUint64DeltaCap refuses current-remove+add above the limit), so a live record
-// sitting above a cap would abort this all-or-nothing batch and could then never expire. Two
-// distinct mechanisms leave a record there, each covering two of the four caps:
-//   - per-da_id and per-peer: owner-ready admission never re-checks these for a State B image.
-//     projectDANonReplayAdmissionLocked returns at its stateB arm before both, and its caller
-//     applyDANonReplayPlan re-checks only the pool and commit caps, so a staged commit is
-//     admitted above either. buildCanonicalDAOwnerCandidates (sync_da_relay.go) calls its own
-//     per-da_id lift inert because it removes whole records only; this removal also drops single
-//     chunks, which leaves that bucket non-zero, so the lift is load-bearing here.
-//   - pool and commit overhead: admission does enforce these — the projector's State A arm
-//     checks the pool, and applyDANonReplayPlan checks both for State B (only a staged commit
-//     charges commit overhead) — so here the lift instead keeps a snapshot admitted under a
-//     since-lowered cap, a restart or reconfiguration under a smaller pool, from tripping a
-//     false terminal, the reason sync_da_relay.go gives for the same lift.
-//
-// Both siblings lift exactly these four. No other cap is lifted; the projector consults no other.
+// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted. The removal runs on
+// commitOwnerReadyRemoval's cloneForAtomicBatchLocked clone and publishAtomicBatchLocked copies
+// no caps field back, so the live caps are out of reach here. Every projection here is
+// non-increasing — a whole removal adds nothing, and checkOwnerReadyRemovalSurvivor with
+// checkOwnerReadySurvivingChunks make a survivor a byte-identical submultiset — but
+// checkedApplyUint64DeltaCap is ABSOLUTE, so a record already above a cap would abort this
+// all-or-nothing batch and could then never expire. One reachable mechanism leaves it there:
+// projectDANonReplayAdmissionLocked returns at its stateB arm before the per-da_id and per-peer
+// checks, so a staged commit is admitted above either; and unlike buildCanonicalDAOwnerCandidates
+// (sync_da_relay.go), which removes whole records only, this removal also drops single chunks and
+// leaves the per-da_id bucket non-zero, so that lift is load-bearing. The pool and commit-overhead
+// lifts add no live scenario — the four caps are const, lowered by no production path — and keep
+// the lifted set identical to that builder and to projectDANonReplayAdmissionLocked's own lift.
 func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 	caps := s.caps
 	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)

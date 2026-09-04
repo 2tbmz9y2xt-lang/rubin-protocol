@@ -3743,11 +3743,9 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	// Both mechanisms ownerReadyRemovalCaps names get rows, and all four lifted caps: for
-	// per-da_id and per-peer, lowering the cap mirrors a state a State B admission can itself
-	// produce; for the pool and commit-overhead caps, which admission does enforce, it IS the
-	// mechanism — a cap lowered after admission. Either way the record sits above the cap, and
-	// re-applying the absolute arithmetic to the removal delta would strand it short of expiry.
+	// The per-da_id and per-peer rows lower the cap to mirror a state a State B admission can
+	// itself produce. The pool and commit-overhead rows build a state no production path produces
+	// today; they pin the lift's arithmetic on the remaining two caps.
 	for _, row := range []struct {
 		name       string
 		capAndLive func(*DARelayState, [32]byte) (*uint64, uint64)
