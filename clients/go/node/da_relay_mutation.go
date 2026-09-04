@@ -1095,7 +1095,7 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 	return nil
 }
 
-// commitOwnerReadyRemovalClaimsLocked validates the full bound-owner victim batch and, only
+// commitOwnerReadyRemovalClaimsLocked validates the batch — shape, disjointness, owner — and only
 // on success, publishes the DA image and drops every victim claim under one owner-lock hold.
 // It mirrors DACommit's removal commit inline rather than wiring the dormant DARemoval guard,
 // which issue 678 owns: nothing fallible runs after the DA publish, so a record and its claim
@@ -1105,6 +1105,9 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 	if err != nil {
 		return txAdmitFromPendingOutpointError(err)
 	}
+	if err := checkOwnerReadyVictimsReleaseRetainedLocked(clone, batch); err != nil {
+		return err
+	}
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
@@ -1113,6 +1116,34 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 	s.publishAtomicBatchLocked(clone)
 	for _, victim := range batch {
 		owner.dropClaimLocked(victim.Token)
+	}
+	return nil
+}
+
+// checkOwnerReadyVictimsReleaseRetainedLocked proves the batch is disjoint from the image about
+// to be published: no dropped token still belongs to a member the clone RETAINS. The candidate
+// gate runs checkDANonReplayShape, which never reads the owner domain; this path never reaches
+// checkDANonReplayTokens, the canonical retained path's owner-domain validator; and
+// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch. So a malformed image
+// carrying one token on two members would publish a survivor whose claim was dropped — a
+// retained member with no claim. The surviving set is derived from the clone's own records, not
+// from the victim list, so map order cannot change the single sentinel this returns.
+func checkOwnerReadyVictimsReleaseRetainedLocked(clone *DARelayState, batch []DAAdmissionVictim) error {
+	retained := make(map[PendingOutpointToken]struct{}, len(clone.locators))
+	for _, record := range clone.sets {
+		if record.commit.member != nil {
+			retained[record.commit.member.token] = struct{}{}
+		}
+		for _, chunk := range record.chunks {
+			if chunk.member != nil {
+				retained[chunk.member.token] = struct{}{}
+			}
+		}
+	}
+	for _, victim := range batch {
+		if _, held := retained[victim.Token]; held {
+			return errDARelayImageIncompatible
+		}
 	}
 	return nil
 }
@@ -1150,11 +1181,13 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // provenance, never on the legacy chunk field. So a malformed record is terminal here,
 // before any selection, decrement or publication.
 //
-// checkDANonReplayShape does not read ttlBlocksRemaining, so the gate applies the TTL bound
-// itself, as the canonical retained-record validator does (checkDANonReplayPrior): admission
-// stamps caps.orphanTTLBlocks, which newDARelayState refuses to construct as zero, so a
-// resident incomplete record at ttl 0 is terminal here whether or not a selector would have
-// touched it.
+// checkDANonReplayShape reads neither ttlBlocksRemaining nor receivedTime, so the gate
+// applies both bounds itself, the way checkDANonReplayPrior applies them to every record on
+// the canonical retained path — one condition over da_id, revision, receivedTime and TTL.
+// Admission stamps caps.orphanTTLBlocks, which newDARelayState refuses to construct as zero,
+// and stamps receivedTime from a monotonic counter it first increments, so neither field is
+// legitimately zero: a resident incomplete record carrying a zero in either is terminal here
+// whether or not a selector would have touched it.
 //
 // The preflight runs UNCONDITIONALLY — for an all-incomplete image and for a MIXED
 // image (a State C record coexisting with incomplete records) alike. It cannot reuse
@@ -1171,7 +1204,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		if record.state == daRelayStateCompleteSet {
 			continue
 		}
-		if record.revision == 0 || record.ttlBlocksRemaining == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
+		if record.revision == 0 || record.receivedTime == 0 || record.ttlBlocksRemaining == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
 			return nil, errDARelayImageIncompatible
 		}
 		candidates = append(candidates, daID)
@@ -1239,12 +1272,16 @@ func (s *DARelayState) checkOwnerReadyRemovalOrphanDomainLocked(candidates [][32
 }
 
 func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]DAAdmissionVictim, error) {
-	if quotaIdentity == "" {
-		return nil, nil
-	}
 	candidates, err := clone.ownerReadyRemovalCandidatesLocked()
 	if err != nil {
 		return nil, err
+	}
+	// A1's empty-key rule selects nothing, but only AFTER the whole-image preflight: an
+	// early return above it would launder a malformed image into a silent success. The
+	// TTL selector below has no early return at all, so the preflight is unconditional
+	// on both entrypoints.
+	if quotaIdentity == "" {
+		return nil, nil
 	}
 	var victims []DAAdmissionVictim
 	for _, daID := range candidates {

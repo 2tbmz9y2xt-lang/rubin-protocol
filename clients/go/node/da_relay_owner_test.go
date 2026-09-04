@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -3391,6 +3392,14 @@ func ownerReadyClaimLive(t *testing.T, owner *PendingOutpointOwner, token Pendin
 	}
 }
 
+// ownerReadyBreakInputs makes one member's input list diverge from the live claim it was
+// reserved with, without touching that claim: the member slice may alias the owner's, so it
+// is copied before the edit.
+func ownerReadyBreakInputs(member *daRelayMemberIdentity) {
+	member.inputs = append([]consensus.Outpoint(nil), member.inputs...)
+	member.inputs[0].Vout++
+}
+
 func ownerReadyRecordAbsent(t *testing.T, view daRelayStateView, daID [32]byte, txids ...[32]byte) {
 	t.Helper()
 	if _, present := view.sets[daID]; present {
@@ -3401,6 +3410,10 @@ func ownerReadyRecordAbsent(t *testing.T, view daRelayStateView, daID [32]byte, 
 	}
 	if _, present := view.prefetchIndexes[daID]; present {
 		t.Fatalf("prefetch reservation for %x survived removal", daID)
+	}
+	// releaseSet owns BOTH prefetch maps, so the expiry row is its own assertion.
+	if _, present := view.prefetchExpires[daID]; present {
+		t.Fatalf("prefetch expiry for %x survived removal", daID)
 	}
 	for _, txid := range txids {
 		if _, present := view.locators[txid]; present {
@@ -3542,6 +3555,68 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			t.Fatalf("empty release: %v", err)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("an empty quota identity still runs the whole-image preflight", func(t *testing.T) {
+		// A1 keeps the empty key selecting nothing, but the pre-fix early return sat ABOVE the
+		// preflight: an empty key was then a silent success over ANY image, malformed included.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xde}
+		f.ownerReadyChunk(daID, 0, "e1", daNonReplayPeer("keep"))
+		f.mutateRelay(func(s *DARelayState) {
+			record := s.sets[daID]
+			record.wireBytes = 1 // owner-ready records pin legacy wireBytes to zero (R1 closed-state)
+			s.sets[daID] = record
+		})
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if err := f.relay.releaseOwnerReadyPeerQuota(""); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+			t.Fatalf("empty-key malformed err=%v, want %v", err, errDARelayImageIncompatible)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a record hidden from every cached total is still records-authority terminal", func(t *testing.T) {
+		// R4 sharpened: deleting only the da_id entry is terminal under EITHER authority, since the
+		// residual orphan/peer bytes stop balancing. Erasing hidden's WHOLE contribution leaves the
+		// cached domain self-consistent, so a cached-total enumeration would publish touched's
+		// removal while a resident record sits outside the accounting; records-authority refuses.
+		f := newDANonReplayFixture(t, 2)
+		hidden, touched := [32]byte{0xdb}, [32]byte{0xdd}
+		f.ownerReadyChunk(hidden, 0, "hidden", daNonReplayPeer("hide"))
+		f.ownerReadyChunk(touched, 0, "touched", daNonReplayPeer("drop"))
+		f.mutateRelay(func(s *DARelayState) {
+			s.orphanBytes -= s.orphanBytesByDAID[hidden]
+			delete(s.orphanBytesByDAID, hidden)
+			delete(s.orphanBytesByPeerQuotaKey, "hide")
+		})
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("hidden-record err=%v, want canonical retained-DA terminal", err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("every tick decrements by one and mints one revision per record in da_id order", func(t *testing.T) {
+		// TTL boundaries above two (4, 3, 2) plus the exact revision sequence: admission order is
+		// deliberately not da_id order, so the pinned arithmetic fails on insertion or map order.
+		f := newDANonReplayFixture(t, 3)
+		ids := [][32]byte{{0xe7}, {0xe8}, {0xec}}
+		for _, i := range []int{2, 0, 1} {
+			f.ownerReadyChunk(ids[i], 0, fmt.Sprintf("o%d", i), daNonReplayPeer("keep"))
+			f.setOwnerReadyTTL(ids[i], 4)
+		}
+		for ttl := uint64(4); ttl > 1; ttl-- {
+			before := daRelayStateSnapshot(f.relay)
+			if err := f.relay.advanceOwnerReadyTTL(); err != nil {
+				t.Fatalf("tick at ttl %d: %v", ttl, err)
+			}
+			after := daRelayStateSnapshot(f.relay)
+			for i, daID := range ids {
+				if got := after.sets[daID]; got.ttlBlocksRemaining != ttl-1 || got.revision != before.records+uint64(i)+1 {
+					t.Fatalf("tick at ttl %d record %x: ttl=%d revision=%d, want ttl=%d revision=%d", ttl, daID, got.ttlBlocksRemaining, got.revision, ttl-1, before.records+uint64(i)+1)
+				}
+			}
+			if after.records != before.records+uint64(len(ids)) {
+				t.Fatalf("tick at ttl %d high-water=%d, want %d", ttl, after.records, before.records+uint64(len(ids)))
+			}
+		}
 	})
 	t.Run("complete set is never a selector victim", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 3), [32]byte{0xd6}
@@ -3822,9 +3897,10 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		commit := f.ownerReadyCommit(daID, 3, daNonReplayPeer("q"))
 		chunk0 := f.ownerReadyChunk(daID, 0, "a0", daNonReplayPeer("q"))
 		chunk1 := f.ownerReadyChunk(daID, 1, "a1", daNonReplayPeer("q"))
-		f.relay.mu.Lock()
-		f.relay.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {2: "peer"}}
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(s *DARelayState) {
+			s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {2: "peer"}}
+			s.prefetch.expires = map[[32]byte]time.Time{daID: time.Unix(1, 0)}
+		})
 		before := daRelayStateSnapshot(f.relay)
 		tokens := []struct {
 			token  PendingOutpointToken
@@ -3876,6 +3952,55 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			t.Fatalf("unbound removal touched the owner: got=%+v want=%+v", got, ownerBefore)
 		}
 	})
+	t.Run("a victim token still held by a surviving member is terminal before publication", func(t *testing.T) {
+		// The owner-domain gap: checkDANonReplayShape never reads tokens and
+		// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch, so one token on
+		// two members would publish the survivor and drop its claim — a member with no claim.
+		f := newDANonReplayFixture(t, 2)
+		dropID, keepID := [32]byte{0xf0}, [32]byte{0xf1}
+		f.ownerReadyChunk(dropID, 0, "alias0", daNonReplayPeer("drop"))
+		f.ownerReadyChunk(keepID, 0, "alias1", LocalDAProvenance())
+		f.mutateRelay(func(s *DARelayState) {
+			s.sets[keepID].chunks[0].member.token = s.sets[dropID].chunks[0].member.token
+		})
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		aliased := before.sets[dropID].chunks[0].member.token
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+			t.Fatalf("aliased-token err=%v, want %v", err, errDARelayImageIncompatible)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		ownerReadyClaimLive(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), aliased)
+	})
+	// Victim order shows in the owner's FIRST refusal: a token beyond the high-water and inputs
+	// that no longer match a claim fail differently, so the message names the first victim.
+	for _, row := range []struct {
+		name    string
+		corrupt func(daRelaySetRecord)
+	}{
+		{"the commit victim precedes every chunk", func(r daRelaySetRecord) {
+			r.commit.member.token.seq = ^uint64(0)
+			ownerReadyBreakInputs(r.chunks[0].member)
+		}},
+		{"chunk victims ascend by index", func(r daRelaySetRecord) {
+			r.chunks[0].member.token.seq = ^uint64(0)
+			ownerReadyBreakInputs(r.chunks[1].member)
+		}},
+	} {
+		t.Run("victim order: "+row.name, func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 3), [32]byte{0xf2}
+			f.ownerReadyCommit(daID, 3, daNonReplayPeer("drop"))
+			f.ownerReadyChunk(daID, 0, "v0", daNonReplayPeer("drop"))
+			f.ownerReadyChunk(daID, 1, "v1", daNonReplayPeer("drop"))
+			f.mutateRelay(func(s *DARelayState) { row.corrupt(s.sets[daID]) })
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			err := f.relay.releaseOwnerReadyPeerQuota("drop")
+			var admitErr *TxAdmitError
+			if !errors.As(err, &admitErr) || admitErr.Message != "invalid DA victim token" {
+				t.Fatalf("%s err=%v, want invalid DA victim token", row.name, err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
 	t.Run("a bound relay with a nil owner refuses rather than orphan claims", func(t *testing.T) {
 		// A bound relay (mempool+chainState set) whose pending-outpoint owner is nil is NOT
 		// unbound: publishing a victim-removing DA image without dropping claims would orphan
@@ -3905,14 +4030,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		f.ownerReadyChunk(late, 0, "late", daNonReplayPeer("drop"))
 		// Corrupt the later record's member inputs so the owner victim preflight fails
 		// after the earlier record has already been projected onto the private clone.
-		f.relay.mu.Lock()
-		record := f.relay.sets[late]
-		chunk := record.chunks[0]
-		chunk.member.inputs = append([]consensus.Outpoint(nil), chunk.member.inputs...)
-		chunk.member.inputs[0].Vout++
-		record.chunks[0] = chunk
-		f.relay.sets[late] = record
-		f.relay.mu.Unlock()
+		f.mutateRelay(func(s *DARelayState) { ownerReadyBreakInputs(s.sets[late].chunks[0].member) })
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		err := f.relay.releaseOwnerReadyPeerQuota("drop")
 		var admitErr *TxAdmitError
@@ -3954,6 +4072,71 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	t.Run("a valid partial prefix leaves no alias of the clone in live state", func(t *testing.T) {
+		// The prefix here SURVIVES partially, so the batch projects a survivor before the later
+		// record fails. cloneForAtomicBatchLocked shares each record's chunk map with live, so only
+		// cloneOwnerReady keeps the in-place drop off live state when nothing is ever published.
+		f := newDANonReplayFixture(t, 3)
+		early, late := [32]byte{0x10}, [32]byte{0x11}
+		f.ownerReadyChunk(early, 0, "p0", daNonReplayPeer("drop"))
+		f.ownerReadyChunk(early, 1, "p1", LocalDAProvenance())
+		f.ownerReadyChunk(late, 0, "p2", daNonReplayPeer("drop"))
+		f.mutateRelay(func(s *DARelayState) { ownerReadyBreakInputs(s.sets[late].chunks[0].member) })
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		err := f.relay.releaseOwnerReadyPeerQuota("drop")
+		var admitErr *TxAdmitError
+		if !errors.As(err, &admitErr) || admitErr.Message != "DA victim input mismatch" {
+			t.Fatalf("partial-prefix err=%v, want DA victim input mismatch", err)
+		}
+		if got := daRelayStateSnapshot(f.relay).sets[early]; len(got.chunks) != 2 {
+			t.Fatalf("projected prefix leaked into live state: chunks=%+v", got.chunks)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
+	t.Run("a tick at the revision ceiling fails closed and whole expiry still needs none", func(t *testing.T) {
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0x07}
+		f.ownerReadyChunk(daID, 0, "ceiling", daNonReplayPeer("keep"))
+		f.setOwnerReadyTTL(daID, 2)
+		f.mutateRelay(func(s *DARelayState) { s.records = ^uint64(0) })
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if err := f.relay.advanceOwnerReadyTTL(); err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+			t.Fatalf("exhausted-revision err=%v, want %v", err, errDARelayArithmeticOverflow)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		// R5: whole-record deletion requests no revision, so the same ceiling does not block it.
+		f.setOwnerReadyTTL(daID, 1)
+		if err := f.relay.advanceOwnerReadyTTL(); err != nil {
+			t.Fatalf("expiry at the ceiling: %v", err)
+		}
+		if after := daRelayStateSnapshot(f.relay); len(after.sets) != 0 || after.records != ^uint64(0) {
+			t.Fatalf("expiry at the ceiling left sets=%d high-water=%d", len(after.sets), after.records)
+		}
+	})
+	// receivedTime is the fourth field of checkDANonReplayPrior's single condition. Both selectors
+	// are driven: the tick would decrement and mint a fresh revision, the release matches nothing.
+	for _, row := range []struct {
+		name string
+		run  func(*DARelayState) error
+	}{
+		{"ttl tick", (*DARelayState).advanceOwnerReadyTTL},
+		{"peer release", func(s *DARelayState) error { return s.releaseOwnerReadyPeerQuota("drop") }},
+	} {
+		t.Run("a resident receivedTime-zero record is terminal on the "+row.name, func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 1), [32]byte{0x08}
+			f.ownerReadyChunk(daID, 0, "clockless", daNonReplayPeer("keep"))
+			f.setOwnerReadyTTL(daID, 2)
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.sets[daID]
+				record.receivedTime = 0
+				s.sets[daID] = record
+			})
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := row.run(f.relay); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+				t.Fatalf("receivedTime-zero %s err=%v, want %v", row.name, err, errDARelayImageIncompatible)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
 	t.Run("a resident ttl-zero record is terminal even when the release matches nothing", func(t *testing.T) {
 		// The candidate gate's own TTL bound, not a selector: checkDANonReplayShape never reads
 		// ttlBlocksRemaining, and this release matches no member, so the PEER selector returns
