@@ -1204,7 +1204,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		if record.state == daRelayStateCompleteSet {
 			continue
 		}
-		if record.revision == 0 || record.receivedTime == 0 || record.ttlBlocksRemaining == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
+		if record.ownerReadyRemovalGateFails() {
 			return nil, errDARelayImageIncompatible
 		}
 		candidates = append(candidates, daID)
@@ -1213,6 +1213,11 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		return nil, err
 	}
 	return candidates, nil
+}
+
+// ownerReadyRemovalGateFails reports whether the record's revision, receivedTime, ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the per-candidate removal gate; the caller fails the whole image with errDARelayImageIncompatible on a true result.
+func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
+	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
 }
 
 // checkOwnerReadyRemovalImageClosedLocked is the removal path's whole-image preflight
