@@ -3392,9 +3392,25 @@ func ownerReadyClaimLive(t *testing.T, owner *PendingOutpointOwner, token Pendin
 	}
 }
 
-// ownerReadyBreakInputs makes one member's input list diverge from the live claim it was
-// reserved with, without touching that claim: the member slice may alias the owner's, so it
-// is copied before the edit.
+// mutateOwnerReadyRecord edits one resident record's own scalars and stores it back, since a
+// map value is not addressable. The caller holds the relay lock.
+func mutateOwnerReadyRecord(s *DARelayState, daID [32]byte, edit func(*daRelaySetRecord)) {
+	record := s.sets[daID]
+	edit(&record)
+	s.sets[daID] = record
+}
+
+// mutateOwnerReadyChunk edits one resident chunk slot and stores it back, for the same reason.
+func mutateOwnerReadyChunk(r *daRelaySetRecord, index uint16, edit func(*daRelayChunk)) {
+	chunk := r.chunks[index]
+	edit(&chunk)
+	r.chunks[index] = chunk
+}
+
+// ownerReadyBreakInputs makes one member's input list diverge from both the transaction it
+// retains and the live claim it was reserved with, without touching either: the member slice
+// may alias the owner's, so it is copied before the edit. The retained-bytes preflight refuses
+// such a member before selection, so this is a pre-selection defect, not a victim-arm one.
 func ownerReadyBreakInputs(member *daRelayMemberIdentity) {
 	member.inputs = append([]consensus.Outpoint(nil), member.inputs...)
 	member.inputs[0].Vout++
@@ -4047,6 +4063,11 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		// The owner-domain gap: checkDANonReplayShape never reads tokens and
 		// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch, so one token on
 		// two members would publish the survivor and drop its claim — a member with no claim.
+		// The arm that now refuses it is the retained-binding claim proof: the survivor's aliased
+		// token resolves the VICTIM's claim, which names another txid, so the survivor is not
+		// described by it. The closing batch-versus-retained comparison no longer sees any
+		// reachable image (see checkOwnerReadyRetainedBindingLocked), so this row pins the
+		// outcome and the unchanged image, not that one arm.
 		f := newDANonReplayFixture(t, 2)
 		dropID, keepID := [32]byte{0xf0}, [32]byte{0xf1}
 		f.ownerReadyChunk(dropID, 0, "alias0", daNonReplayPeer("drop"))
@@ -4062,27 +4083,35 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		ownerReadyClaimLive(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), aliased)
 	})
-	// Victim order shows in the owner's FIRST refusal: a token beyond the high-water and inputs
-	// that no longer match a claim fail differently, so the message names the first victim.
+	// Victim order shows in the owner's FIRST refusal: a token beyond the high-water and an owner
+	// by-outpoint row that no longer names its victim fail differently, so the message names the
+	// first victim. The LATER defect must be one the retained-binding preflight cannot see, and
+	// the owner's byOutpoint index is exactly that: auditing it against retained members is the
+	// widening this slice refuses, so only the victim arm compares it. A defect on the member
+	// itself is now terminal in the preflight, before any victim is assembled.
 	for _, row := range []struct {
 		name    string
 		corrupt func(daRelaySetRecord)
+		later   func(daRelaySetRecord) *daRelayMemberIdentity
 	}{
 		{"the commit victim precedes every chunk", func(r daRelaySetRecord) {
 			r.commit.member.token.seq = ^uint64(0)
-			ownerReadyBreakInputs(r.chunks[0].member)
-		}},
+		}, func(r daRelaySetRecord) *daRelayMemberIdentity { return r.chunks[0].member }},
 		{"chunk victims ascend by index", func(r daRelaySetRecord) {
 			r.chunks[0].member.token.seq = ^uint64(0)
-			ownerReadyBreakInputs(r.chunks[1].member)
-		}},
+		}, func(r daRelaySetRecord) *daRelayMemberIdentity { return r.chunks[1].member }},
 	} {
 		t.Run("victim order: "+row.name, func(t *testing.T) {
 			f, daID := newDANonReplayFixture(t, 3), [32]byte{0xf2}
 			f.ownerReadyCommit(daID, 3, daNonReplayPeer("drop"))
 			f.ownerReadyChunk(daID, 0, "v0", daNonReplayPeer("drop"))
 			f.ownerReadyChunk(daID, 1, "v1", daNonReplayPeer("drop"))
-			f.mutateRelay(func(s *DARelayState) { row.corrupt(s.sets[daID]) })
+			var later *daRelayMemberIdentity
+			f.mutateRelay(func(s *DARelayState) {
+				row.corrupt(s.sets[daID])
+				later = row.later(s.sets[daID])
+			})
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, later.inputs[0]) })
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			err := f.relay.releaseOwnerReadyPeerQuota("drop")
 			var admitErr *TxAdmitError
@@ -4116,12 +4145,18 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			if survivor := daRelayStateSnapshot(f.relay).sets[daID]; len(survivor.chunks) != 1 || survivor.chunks[4].member == nil || survivor.revision != before.records+1 {
 				t.Fatalf("survivor=%+v, want only chunk 4 at revision %d", survivor, before.records+1)
 			}
-			// Victim ORDER shows only in the owner's FIRST refusal, so the second image makes the lowest-index victim fail differently from every later one.
+			// Victim ORDER shows only in the owner's FIRST refusal, so the second image makes the lowest-index victim fail differently from every later one. As above, the later defect sits in the owner's byOutpoint index, the one victim-arm input the preflight does not audit.
 			f, daID = buildOwnerReadyPartial(t, order)
+			var later []*daRelayMemberIdentity
 			f.mutateRelay(func(s *DARelayState) {
 				s.sets[daID].chunks[0].member.token.seq = ^uint64(0)
 				for _, index := range []uint16{1, 2, 3} {
-					ownerReadyBreakInputs(s.sets[daID].chunks[index].member)
+					later = append(later, s.sets[daID].chunks[index].member)
+				}
+			})
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+				for _, member := range later {
+					delete(o.byOutpoint, member.inputs[0])
 				}
 			})
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -4222,16 +4257,20 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		early, late := [32]byte{0x01}, [32]byte{0x02}
 		earlyTx := f.ownerReadyChunk(early, 0, "early", daNonReplayPeer("drop"))
 		f.ownerReadyChunk(late, 0, "late", daNonReplayPeer("drop"))
-		// Corrupt the later record's member inputs so the owner victim preflight fails
-		// after the earlier record has already been projected onto the private clone. H2's prefetch
-		// arm needs a reservation the prefix would RELEASE to be worth asserting: early is a whole
-		// record removal, which releases both prefetch rows on the clone, so a published prefix
-		// takes them with it.
+		// Retire the later record's owner by-outpoint row so the owner victim preflight fails
+		// after the earlier record has already been projected onto the private clone. That index
+		// is the only victim-arm input the retained-binding preflight does not audit, so it is
+		// what keeps a valid prefix REACHABLE at all: a defect on the member itself is terminal
+		// before any record is projected. H2's prefetch arm needs a reservation the prefix would
+		// RELEASE to be worth asserting: early is a whole record removal, which releases both
+		// prefetch rows on the clone, so a published prefix takes them with it.
+		var late0 *daRelayMemberIdentity
 		f.mutateRelay(func(s *DARelayState) {
 			s.prefetch.indexes = map[[32]byte]map[uint16]string{early: {1: "peer"}}
 			s.prefetch.expires = map[[32]byte]time.Time{early: time.Unix(1, 0)}
-			ownerReadyBreakInputs(s.sets[late].chunks[0].member)
+			late0 = s.sets[late].chunks[0].member
 		})
+		ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, late0.inputs[0]) })
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		err := f.relay.releaseOwnerReadyPeerQuota("drop")
 		var admitErr *TxAdmitError
@@ -4286,7 +4325,9 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		f.ownerReadyChunk(early, 0, "p0", daNonReplayPeer("drop"))
 		f.ownerReadyChunk(early, 1, "p1", LocalDAProvenance())
 		f.ownerReadyChunk(late, 0, "p2", daNonReplayPeer("drop"))
-		f.mutateRelay(func(s *DARelayState) { ownerReadyBreakInputs(s.sets[late].chunks[0].member) })
+		var late0 *daRelayMemberIdentity
+		f.mutateRelay(func(s *DARelayState) { late0 = s.sets[late].chunks[0].member })
+		ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, late0.inputs[0]) })
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		err := f.relay.releaseOwnerReadyPeerQuota("drop")
 		var admitErr *TxAdmitError
@@ -4419,6 +4460,77 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
 	}
+	// R1 over the retained BYTES and the scalars they prove — the surface the stored-shape gate
+	// cannot reach. Every member of every incomplete record is re-parsed from its own retained
+	// bytes, role-checked against the record's claims and bound to its stored identity, inputs and
+	// payload cache by the canonical retained validator's own phase 2 (bindRetainedRecord). The
+	// record is provenance "keep", so the "drop" release matches no member, and TTL 2, so the tick
+	// would otherwise decrement and publish a fresh revision of the corrupt record: only a
+	// pre-selection refusal can be red here. Each row also pins the sibling predicate that fired,
+	// so no row can pass on some later arm's refusal of the same image.
+	retainedBytesImage := func(t *testing.T) (*daNonReplayFixture, [32]byte) {
+		f, daID := newDANonReplayFixture(t, 4), [32]byte{0xc3}
+		f.ownerReadyCommit(daID, 3, daNonReplayPeer("keep"))
+		f.ownerReadyChunk(daID, 0, "y0", daNonReplayPeer("keep"))
+		f.setOwnerReadyTTL(daID, 2)
+		return f, daID
+	}
+	setOwnerReadyChunkBytes := func(record daRelaySetRecord, index uint16, txBytes []byte) {
+		chunk := record.chunks[index]
+		chunk.txBytes = txBytes
+		record.chunks[index] = chunk
+	}
+	for _, row := range []struct {
+		name    string
+		detail  string
+		corrupt func(*daNonReplayFixture, *daRelaySetRecord)
+	}{
+		{"retained bytes that do not canonically parse", "does not canonically parse", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			setOwnerReadyChunkBytes(*r, 0, []byte{0x01})
+		}},
+		{"retained bytes carrying a trailing byte", "has trailing bytes", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			setOwnerReadyChunkBytes(*r, 0, append(slices.Clone(r.chunks[0].txBytes), 0x00))
+		}},
+		{"a commit slot retaining the chunk transaction", "is tx_kind 0x02", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			r.commit.txBytes = slices.Clone(r.chunks[0].txBytes)
+		}},
+		{"a commit whose stored chunk_count contradicts its bytes", "record holds 2", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			r.commit.chunkCount = 2
+		}},
+		{"a chunk stored outside the slot its bytes declare", "is stored at index 0 and declares 1", func(f *daNonReplayFixture, r *daRelaySetRecord) {
+			setOwnerReadyChunkBytes(*r, 0, f.signed(daNonReplayTxSpec{kind: 0x02, daID: r.daID, chunkIndex: 1, payload: []byte("y0")}).raw)
+		}},
+		{"a chunk whose bytes declare a foreign da_id", "carries da_id", func(f *daNonReplayFixture, r *daRelaySetRecord) {
+			setOwnerReadyChunkBytes(*r, 0, f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xce}, payload: []byte("y0")}).raw)
+		}},
+		{"a stored txid contradicting the parse", "contradicts its parsed identity", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			r.chunks[0].member.txid[0] ^= 0xff
+		}},
+		{"stored inputs contradicting the parse", "contradicts its parsed identity", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			ownerReadyBreakInputs(r.chunks[0].member)
+		}},
+		{"a stored payload commitment contradicting the commit's bytes", "contradicts its payload commitment", func(_ *daNonReplayFixture, r *daRelaySetRecord) {
+			r.commit.payloadCommitment[0] ^= 0xff
+		}},
+	} {
+		for _, selector := range ownerReadyRemovalSelectors {
+			t.Run(row.name+" is terminal before selection on the "+selector.name, func(t *testing.T) {
+				f, daID := retainedBytesImage(t)
+				f.mutateRelay(func(s *DARelayState) {
+					record := s.sets[daID]
+					row.corrupt(f, &record)
+					s.sets[daID] = record
+				})
+				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				var terminal *canonicalDATerminalError
+				err := selector.run(f.relay)
+				if !errors.As(err, &terminal) || !strings.Contains(err.Error(), row.detail) {
+					t.Fatalf("%s on the %s: err=%v, want retained-DA terminal naming %q", row.name, selector.name, err, row.detail)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+			})
+		}
+	}
 	// R1/R3 over the RETAINED image. One mixed fixture drives both publication arms: the tick
 	// preserves both members and releases none, the "drop" release removes chunk 0 and keeps chunk
 	// 1. Chunk 1 and the State C record survive every selection, so a defect placed on either is
@@ -4454,9 +4566,93 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			s.sets[incompleteID].chunks[1].member.token = s.sets[incompleteID].chunks[0].member.token
 		}},
 		// Uniqueness spans STATES, not just the incomplete records: a State C member is never
-		// selected and never token-bound, but it is still retained in the published image.
+		// selected, but it is still retained in the published image and carries the same token
+		// and live-claim proof every other retained member does.
 		{"a complete-set member sharing a retained token", false, func(s *DARelayState, incompleteID, completeID [32]byte) {
 			s.sets[completeID].commit.member.token = s.sets[incompleteID].chunks[1].member.token
+		}},
+		{"a complete-set member carrying a zero token", false, func(s *DARelayState, _, completeID [32]byte) {
+			s.sets[completeID].commit.member.token = PendingOutpointToken{}
+		}},
+		{"a complete-set member carrying a foreign owner's token", false, func(s *DARelayState, _, completeID [32]byte) {
+			s.sets[completeID].commit.member.token.owner = &PendingOutpointOwner{}
+		}},
+		// The State C scalars, each bound to the value daAdmissionObservation.validateHeader's own
+		// COMPLETE_SET arm requires. Nothing else on this path reads them, so each row publishes
+		// the corrupt record without its clause. The two rows whose field also feeds an accounting
+		// or locator arm repair that arm, so the image they present is closed but for their own
+		// scalar and the kill stays behavioral rather than a swapped error class.
+		{"a complete set carrying a zero revision", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.revision = 0 })
+		}},
+		{"a complete set carrying a zero received time", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.receivedTime = 0 })
+		}},
+		{"a complete set carrying a residual TTL", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 1 })
+		}},
+		{"a complete set pinning no payload", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				s.pinnedPayloadBytes -= r.payloadBytes
+				r.payloadBytes = 0
+			})
+		}},
+		{"a complete set whose wire bytes do not exceed its commit's own", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.wireBytes = uint64(len(r.commit.txBytes)) })
+		}},
+		{"a complete set holding a replaceable-chunk map", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{} })
+		}},
+		{"a complete set holding a chunk outside its declared count", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				chunk := r.chunks[0]
+				chunk.chunkIndex = 1
+				delete(r.chunks, 0)
+				r.chunks[1] = chunk
+				s.locators[chunk.member.txid] = daRelayLocator{daID: completeID, kind: daRelayLocatorChunk, chunkIndex: 1}
+			})
+		}},
+		// The two slot residuals the same observation carries: validateStagedCommit binds the
+		// record's own commit slot for a State C record, and validateChunkRole binds each chunk
+		// slot, both off fields observeDAAdmission copies straight out of the record. The
+		// owner-ready kernel assigns none of the legacy per-slot fields and every slot names its
+		// own record and index, so each row below publishes without its own clause.
+		{"a complete set whose commit slot names another da_id", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.commit.daID = [32]byte{0xcf} })
+		}},
+		{"a complete set whose commit slot retains no bytes", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.commit.txBytes = nil })
+		}},
+		{"a complete set whose commit slot carries legacy wire bytes", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.commit.wireBytes = 1 })
+		}},
+		{"a complete set whose commit slot carries a legacy peer quota key", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) { r.commit.peerQuotaKey = "legacy" })
+		}},
+		{"a complete set whose chunk slot names another da_id", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				mutateOwnerReadyChunk(r, 0, func(c *daRelayChunk) { c.daID = [32]byte{0xcf} })
+			})
+		}},
+		{"a complete set whose chunk slot names another index", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				mutateOwnerReadyChunk(r, 0, func(c *daRelayChunk) { c.chunkIndex = 7 })
+			})
+		}},
+		{"a complete set whose chunk slot carries legacy wire bytes", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				mutateOwnerReadyChunk(r, 0, func(c *daRelayChunk) { c.wireBytes = 1 })
+			})
+		}},
+		{"a complete set whose chunk slot carries a legacy peer quota key", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				mutateOwnerReadyChunk(r, 0, func(c *daRelayChunk) { c.peerQuotaKey = "legacy" })
+			})
+		}},
+		{"a complete set whose chunk slot is marked hash-checked", false, func(s *DARelayState, _, completeID [32]byte) {
+			mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+				mutateOwnerReadyChunk(r, 0, func(c *daRelayChunk) { c.hashChecked = true })
+			})
 		}},
 		{"a complete-set member with an invalid provenance", false, func(s *DARelayState, _, completeID [32]byte) {
 			s.sets[completeID].commit.member.provenance = DAProvenance{}
@@ -4482,6 +4678,95 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 			})
 		}
+	}
+	// R3 over the LIVE claim domain: every retained member — a State C member included — must
+	// resolve a live owner claim that describes it by DA domain, txid, ordered inputs and
+	// finalized, the canonical builder's own phase-5 predicate. Each target SURVIVES both
+	// selectors, so it is never a victim and the victim preflight never reads its claim: only
+	// the retained-binding proof can refuse these, and without it each row publishes a record
+	// whose member has no live claim behind it.
+	for _, target := range []struct {
+		name  string
+		token func(daRelayStateView, [32]byte, [32]byte) PendingOutpointToken
+	}{
+		{"a surviving incomplete member", func(v daRelayStateView, incompleteID, _ [32]byte) PendingOutpointToken {
+			return v.sets[incompleteID].chunks[1].member.token
+		}},
+		{"a complete-set member", func(v daRelayStateView, _, completeID [32]byte) PendingOutpointToken {
+			return v.sets[completeID].commit.member.token
+		}},
+	} {
+		for _, row := range []struct {
+			name string
+			edit func(*PendingOutpointOwner, PendingOutpointToken)
+		}{
+			{"whose live claim is gone", func(o *PendingOutpointOwner, token PendingOutpointToken) {
+				delete(o.byToken, token)
+			}},
+			{"whose claim names another txid", func(o *PendingOutpointOwner, token PendingOutpointToken) {
+				o.byToken[token].txid[0] ^= 0xff
+			}},
+			{"whose claim carries other inputs", func(o *PendingOutpointOwner, token PendingOutpointToken) {
+				o.byToken[token].inputs = slices.Clone(o.byToken[token].inputs)
+				o.byToken[token].inputs[0].Vout++
+			}},
+			{"whose claim is not finalized", func(o *PendingOutpointOwner, token PendingOutpointToken) {
+				o.byToken[token].finalized = false
+			}},
+			{"whose claim left the DA domain", func(o *PendingOutpointOwner, token PendingOutpointToken) {
+				o.byToken[token].domain = PendingOutpointStandardMempool
+			}},
+		} {
+			for _, selector := range ownerReadyRemovalSelectors {
+				t.Run(target.name+" "+row.name+" is terminal on the "+selector.name, func(t *testing.T) {
+					f, incompleteID, completeID := bindingImage(t)
+					token := target.token(daRelayStateSnapshot(f.relay), incompleteID, completeID)
+					ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { row.edit(o, token) })
+					before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+					if err := selector.run(f.relay); !errors.Is(err, errDARelayImageIncompatible) {
+						t.Fatalf("%s %s on the %s: err=%v, want %v", target.name, row.name, selector.name, err, errDARelayImageIncompatible)
+					}
+					requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+				})
+			}
+		}
+	}
+	// The State C chunk-count bound needs the ONE image that isolates it: the member-count arm
+	// demands one member per declared chunk, so a record declaring more than the maximum must
+	// carry that many members, each with its own live finalized DA claim and locator row, or a
+	// cheaper arm refuses it first and the row proves nothing. The extra members are reserved
+	// straight on the owner, so no transaction is signed for them.
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("a complete set declaring more chunks than the maximum is terminal on the "+selector.name, func(t *testing.T) {
+			f, _, completeID := bindingImage(t)
+			f.mutateRelay(func(s *DARelayState) {
+				owner := s.mempool.pendingOutpoints
+				context, ok := owner.AdmissionContext()
+				if !ok {
+					t.Fatal("no admission context for the bulk members")
+				}
+				mutateOwnerReadyRecord(s, completeID, func(r *daRelaySetRecord) {
+					r.commit.chunkCount = uint16(consensus.MAX_DA_CHUNK_COUNT) + 1
+					for index := uint16(1); index < r.commit.chunkCount; index++ {
+						txid, input := [32]byte{0xa0, byte(index)}, consensus.Outpoint{Txid: [32]byte{0xa1, byte(index)}}
+						token, err := owner.Reserve(context, PendingOutpointDA, txid, []consensus.Outpoint{input})
+						if err != nil || owner.Finalize(token) != nil {
+							t.Fatalf("bulk member %d: reserve=%v", index, err)
+						}
+						r.chunks[index] = daRelayChunk{daID: completeID, chunkIndex: index, member: &daRelayMemberIdentity{
+							txid: txid, wtxid: [32]byte{0xa2, byte(index)}, inputs: []consensus.Outpoint{input},
+							token: token, provenance: daNonReplayPeer("bulk"),
+						}}
+						s.locators[txid] = daRelayLocator{daID: completeID, kind: daRelayLocatorChunk, chunkIndex: index}
+					}
+				})
+			})
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := selector.run(f.relay); !errors.Is(err, errDARelayImageIncompatible) {
+				t.Fatalf("over-maximum chunk count on the %s: err=%v, want %v", selector.name, err, errDARelayImageIncompatible)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
 	}
 }
 

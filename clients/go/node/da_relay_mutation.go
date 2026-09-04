@@ -1118,10 +1118,18 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 }
 
 // checkOwnerReadyRetainedBindingLocked proves the clone is publishable under owner: every
-// retained member of every incomplete record is bound to owner, no token appears twice anywhere
-// in the image, and no token in batch still belongs to a member the clone RETAINS. It proves
-// token OWNERSHIP only; a claim's own txid and input set are re-proved for victims alone, by
-// validateDAAdmissionVictimsLocked. The da_id walk ascends, so one image yields one error.
+// retained member of every record — incomplete and COMPLETE_SET alike — is bound to owner and to
+// a live claim that describes it, no token appears twice anywhere in the image, and no token in
+// batch still belongs to a member the clone RETAINS. The da_id walk ascends, so one image yields
+// one error.
+//
+// That closing batch-versus-retained comparison is now a RESIDUAL guard with no reachable input:
+// every retained member is proven to resolve a claim naming its own txid, and every victim's claim
+// is proven by validateDAAdmissionVictimsLocked to name the victim's txid, so one token shared by
+// a victim and a survivor would force those two members to share a txid — and two members sharing
+// a txid share a locator row, which the preflight's image-wide bijection refuses before any
+// selection. It is kept as a fail-closed backstop for a future caller that publishes without that
+// preflight; no test executes it, and an aliased token is red on the claim proof instead.
 func checkOwnerReadyRetainedBindingLocked(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) error {
 	retained := make(map[PendingOutpointToken]struct{}, len(clone.locators))
 	for _, daID := range clone.sortedRetainedDAIDsLocked() {
@@ -1138,21 +1146,25 @@ func checkOwnerReadyRetainedBindingLocked(clone *DARelayState, owner *PendingOut
 }
 
 // checkOwnerReadyRecordBinding proves one record's owner binding and adds its members' tokens to
-// seen, refusing the first token seen twice or a memberless occupied slot. An incomplete
-// record's members must each carry a nonzero token owned by owner (checkDANonReplayTokens, the
-// validator checkDANonReplayPrior applies canonically); a COMPLETE_SET's are counted, not bound.
+// seen, refusing the first token seen twice or a memberless occupied slot. EVERY member — a
+// COMPLETE_SET's included — must carry a nonzero token owned by owner (checkDANonReplayTokens,
+// the token check checkDANonReplayPrior applies canonically) AND resolve a LIVE owner claim that
+// describes it: DA domain, txid, ordered inputs and finalized, through canonicalDAClaimBindsMember,
+// the exact predicate the canonical builder's phase-5 bijection applies (sync_da_relay.go), over
+// the owner's own byToken index — the same live lookup daAdmissionVictimClaimLocked makes.
+// Reading that LIVE index is why the proof lives under the owner mutex here and not in the
+// preflight, which holds no owner lock.
 func checkOwnerReadyRecordBinding(record daRelaySetRecord, owner *PendingOutpointOwner, seen map[PendingOutpointToken]struct{}) error {
-	if record.state != daRelayStateCompleteSet {
-		if err := record.checkDANonReplayTokens(owner); err != nil {
-			return err
-		}
+	if err := record.checkDANonReplayTokens(owner); err != nil {
+		return err
 	}
 	members, err := canonicalDARetainedMemberIdentities(record)
 	if err != nil {
 		return err
 	}
 	for _, member := range members {
-		if _, alias := seen[member.token]; alias {
+		claim := owner.byToken[member.token]
+		if _, alias := seen[member.token]; alias || claim == nil || !canonicalDAClaimBindsMember(*claim, member) {
 			return errDARelayImageIncompatible
 		}
 		seen[member.token] = struct{}{}
@@ -1194,6 +1206,16 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // provenance, never on the legacy chunk field. So a malformed record is terminal here,
 // before any selection, decrement or publication.
 //
+// The shape gate reads stored scalars only, so each candidate then goes through the same
+// validator's phase 2, bindRetainedRecord: a canonical full-consumption re-parse of every
+// member's retained bytes, the role/index/da_id check against the record's own claims, and
+// the binding of each member to the identity pair, ordered inputs and payload cache its slot
+// stores. Cost: that is O(retained bytes) of consensus.ParseTx over every incomplete record on
+// every peer release and every TTL tick, on top of the image clone this path already takes.
+// The cost is accepted for a dormant mechanism and RUB-678 owns measuring it before any live
+// caller; deliberately NO cache, memo or skip-if-unchanged shortcut guards it, because a second
+// path deciding when validation runs is the defect class this gate exists to close.
+//
 // checkDANonReplayShape reads neither ttlBlocksRemaining nor receivedTime, so the gate
 // applies both bounds itself, the way checkDANonReplayPrior applies them to every record on
 // the canonical retained path — one condition over da_id, revision, receivedTime and TTL.
@@ -1224,6 +1246,14 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		if record.ownerReadyRemovalGateFails() {
 			return nil, errDARelayImageIncompatible
 		}
+		// The stored shape above is not the retained BYTES. bindRetainedRecord is phase 2 of
+		// the canonical retained validator itself: it re-parses every member of this record
+		// from its own retained bytes, role-checks the parse against the record's own claims
+		// and binds each member to every stored scalar the parse proves. The image it
+		// accumulates is that builder's output, not this gate's; only its verdict is used.
+		if err := (&canonicalDARetainedImage{}).bindRetainedRecord(record); err != nil {
+			return nil, err
+		}
 		candidates = append(candidates, daID)
 	}
 	if err := s.checkOwnerReadyRemovalImageClosedLocked(retained, candidates); err != nil {
@@ -1232,7 +1262,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	return candidates, nil
 }
 
-// ownerReadyRemovalGateFails reports whether the record's revision, receivedTime, ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the per-candidate removal gate; the caller fails the whole image with errDARelayImageIncompatible on a true result.
+// ownerReadyRemovalGateFails reports whether the record's revision, receivedTime, ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the STORED-SCALAR half of the per-candidate removal gate, whose retained-bytes half is bindRetainedRecord; the caller fails the whole image with errDARelayImageIncompatible on a true result.
 func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
 }
@@ -1241,7 +1271,8 @@ func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 // own state implies: a commit member plus exactly one member per declared chunk, at least one
 // chunk, each a valid identity. The member set is required NON-EMPTY here — an empty one is a case
 // this gate decides, not an absence of cases — and the caller fails the whole image with
-// errDARelayImageIncompatible on a true result.
+// errDARelayImageIncompatible on a true result. Its own state's scalars are then bound by
+// ownerReadyCompleteSetShapeFails below.
 func (r daRelaySetRecord) ownerReadyCompleteSetGateFails() bool {
 	members, err := canonicalDARetainedMemberIdentities(r)
 	if err != nil || r.commit.member == nil || r.commit.chunkCount == 0 || len(members) != 1+int(r.commit.chunkCount) {
@@ -1249,6 +1280,61 @@ func (r daRelaySetRecord) ownerReadyCompleteSetGateFails() bool {
 	}
 	for _, member := range members {
 		if member.validate() != nil {
+			return true
+		}
+	}
+	return r.ownerReadyCompleteSetShapeFails()
+}
+
+// ownerReadyCompleteSetShapeFails reports whether a COMPLETE_SET record contradicts the scalars
+// and slot residuals its own state implies. Every bound is one the ONLY merged validator that
+// admits a State C record at all applies — daAdmissionObservation's validateHeader,
+// validateCommitRole, validateStagedCommit and validateChunkRole (da_relay_owner.go) — read here
+// off the record every one of those fields is observed FROM: observeDAAdmission copies each
+// stagedCommit* and target* field straight out of the record's own commit and chunk slots. The
+// canonical retained validator cannot supply them: it refuses a State C record outright, because
+// checkDANonReplayCommitShape requires an empty commit residual in every state but STAGED_COMMIT
+// and a complete set always carries a populated commit.
+//
+// The TTL bound is the INVERSE of the incomplete one — a complete set has stopped expiring, so
+// its residual TTL is exactly zero — and wireBytes is bounded below by the commit's own retained
+// bytes: validateHeader bounds it against the OBSERVED member's bytes, and the commit is the one
+// member every complete set carries. The two residual groups are the State C
+// twin of checkDANonReplayShape's: the owner-ready kernel assigns none of the legacy per-slot
+// fields, and each slot names its own record and index. Retained BYTES stay out of scope here;
+// only the incomplete records this gate hands on are re-parsed.
+//
+// The chunk-index bound is the one predicate with no sibling helper, though not a new invariant:
+// validateStagedCommit refuses the same out-of-range index for an admission candidate. With the
+// caller's member count already proving one member per declared chunk and map keys distinct by
+// construction, an in-range walk yields exactly [0, chunk_count), so no separate contiguity proof
+// is written. The walk is map-ordered and boolean-valued, so iteration order cannot change it.
+func (r daRelaySetRecord) ownerReadyCompleteSetShapeFails() bool {
+	if slices.Contains([]bool{
+		r.revision == 0,
+		r.receivedTime == 0,
+		r.ttlBlocksRemaining != 0,
+		r.payloadBytes == 0,
+		r.wireBytes <= uint64(len(r.commit.txBytes)),
+		r.replaceableChunks != nil,
+		uint64(r.commit.chunkCount) > consensus.MAX_DA_CHUNK_COUNT,
+		r.commit.daID != r.daID,
+		len(r.commit.txBytes) == 0,
+		r.commit.wireBytes != 0,
+		r.commit.peerQuotaKey != "",
+	}, true) {
+		return true
+	}
+	type chunkResidual struct {
+		daID        [32]byte
+		index       uint16
+		quotaKey    string
+		wireBytes   uint64
+		hashChecked bool
+	}
+	for index, chunk := range r.chunks {
+		if index >= r.commit.chunkCount ||
+			(chunkResidual{chunk.daID, chunk.chunkIndex, chunk.peerQuotaKey, chunk.wireBytes, chunk.hashChecked}) != (chunkResidual{daID: r.daID, index: index}) {
 			return true
 		}
 	}
@@ -1269,8 +1355,8 @@ func (r daRelaySetRecord) ownerReadyCompleteSetGateFails() bool {
 // mismatch or a malformed record — fails closed before selection or publication. This
 // is the accounting and locator-bijection integrity gate only, not a general
 // image-integrity check: a COMPLETE_SET record enters it through its locator rows and
-// its pinned payload alone, so its own revision and receivedTime are never read here,
-// and State C stays byte-identical (A5).
+// its pinned payload alone, so its own revision and receivedTime are never read by this
+// closure (the candidate walk's State C gate binds them), and State C stays byte-identical (A5).
 func (s *DARelayState) checkOwnerReadyRemovalImageClosedLocked(retained, candidates [][32]byte) error {
 	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
 		return err
