@@ -3743,9 +3743,8 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	// The per-da_id and per-peer rows lower the cap to mirror a state a State B admission can
-	// itself produce. The pool and commit-overhead rows build a state no production path produces
-	// today; they pin the lift's arithmetic on the remaining two caps.
+	// Each row lowers one of the four lifted caps below its live counter and requires the
+	// removal to proceed anyway; without the lift the absolute arithmetic would abort the batch.
 	for _, row := range []struct {
 		name       string
 		capAndLive func(*DARelayState, [32]byte) (*uint64, uint64)

@@ -1317,19 +1317,14 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 	}
 }
 
-// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted. The removal runs on
-// commitOwnerReadyRemoval's cloneForAtomicBatchLocked clone and publishAtomicBatchLocked copies
-// no caps field back, so the live caps are out of reach here. Every projection here is
-// non-increasing — a whole removal adds nothing, and checkOwnerReadyRemovalSurvivor with
-// checkOwnerReadySurvivingChunks make a survivor a byte-identical submultiset — but
-// checkedApplyUint64DeltaCap is ABSOLUTE, so a record already above a cap would abort this
-// all-or-nothing batch and could then never expire. One reachable mechanism leaves it there:
-// projectDANonReplayAdmissionLocked returns at its stateB arm before the per-da_id and per-peer
-// checks, so a staged commit is admitted above either; and unlike buildCanonicalDAOwnerCandidates
-// (sync_da_relay.go), which removes whole records only, this removal also drops single chunks and
-// leaves the per-da_id bucket non-zero, so that lift is load-bearing. The pool and commit-overhead
-// lifts add no live scenario — the four caps are const, lowered by no production path — and keep
-// the lifted set identical to that builder and to projectDANonReplayAdmissionLocked's own lift.
+// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted, the same set
+// buildCanonicalDAOwnerCandidates (sync_da_relay.go) and projectDANonReplayAdmissionLocked
+// (da_relay_owner.go) lift. Every projection this removal makes is non-increasing: a whole
+// removal adds nothing, and checkOwnerReadyRemovalSurvivor with checkOwnerReadySurvivingChunks
+// make a survivor a byte-identical submultiset of the live record. The cap arithmetic is
+// ABSOLUTE — checkedApplyUint64DeltaCap refuses a post-delta TOTAL above the limit, not a
+// growth — so without the lift a live counter already at or above a cap would abort this
+// all-or-nothing batch, and every record accounted under that counter could never expire.
 func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 	caps := s.caps
 	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
