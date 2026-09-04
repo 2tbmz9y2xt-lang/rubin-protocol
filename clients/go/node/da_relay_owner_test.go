@@ -3743,6 +3743,71 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	// A live incomplete record can legitimately sit ABOVE an orphan-domain cap: owner-ready
+	// admission returns for a State B image before its own cap re-checks. The cap arithmetic is
+	// absolute, so re-applying it to a non-increasing removal delta returns a cap error on every
+	// TTL tick and, the batch being all-or-nothing, that record could never reach expiry. Each
+	// row constructs that over-cap state the short way — lowering one cap under the admitted
+	// record — reaching the identical arithmetic; all four lifted caps get a row.
+	for _, row := range []struct {
+		name  string
+		lower func(*DARelayState, [32]byte)
+	}{
+		{"per-da_id", func(s *DARelayState, daID [32]byte) { s.caps.orphanPoolPerDAIDBytes = s.orphanBytesByDAID[daID] - 1 }},
+		{"per-peer", func(s *DARelayState, _ [32]byte) {
+			s.caps.orphanPoolPerPeerBytes = s.orphanBytesByPeerQuotaKey["over"] - 1
+		}},
+		{"global pool", func(s *DARelayState, _ [32]byte) { s.caps.orphanPoolBytes = s.orphanBytes - 1 }},
+		{"commit overhead", func(s *DARelayState, _ [32]byte) { s.caps.orphanCommitOverheadBytes = s.orphanCommitOverheadBytes - 1 }},
+	} {
+		t.Run("ttl decrement is projected uncapped above the "+row.name+" cap", func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 2), [32]byte{0xe4}
+			f.ownerReadyCommit(daID, 3, daNonReplayPeer("over"))
+			f.ownerReadyChunk(daID, 0, "o0", daNonReplayPeer("over"))
+			f.setOwnerReadyTTL(daID, 2)
+			f.relay.mu.Lock()
+			row.lower(f.relay, daID)
+			f.relay.mu.Unlock()
+			before := daRelayStateSnapshot(f.relay)
+			if err := f.relay.advanceOwnerReadyTTL(); err != nil {
+				t.Fatalf("over-cap ttl tick: %v", err)
+			}
+			after := daRelayStateSnapshot(f.relay)
+			record := after.sets[daID]
+			if record.ttlBlocksRemaining != 1 || record.revision <= before.sets[daID].revision {
+				t.Fatalf("over-cap decrement record=%+v, before revision=%d", record, before.sets[daID].revision)
+			}
+			if after.caps != before.caps {
+				t.Fatalf("the projection wrote the live caps: %+v != %+v", after.caps, before.caps)
+			}
+		})
+	}
+	t.Run("a whole-record peer removal is projected uncapped above the global pool cap", func(t *testing.T) {
+		// The whole-record arm is the second removal-projection site and needs its own row: a
+		// whole removal zeroes its own per-da_id bucket, so only a cap the SURVIVING records
+		// still exceed can prove the lift reaches this arm too.
+		f := newDANonReplayFixture(t, 2)
+		dropID, keepID := [32]byte{0xe5}, [32]byte{0xe6}
+		drop := f.ownerReadyChunk(dropID, 0, "g0", daNonReplayPeer("drop"))
+		f.ownerReadyChunk(keepID, 0, "g1", LocalDAProvenance())
+		f.relay.mu.Lock()
+		f.relay.caps.orphanPoolBytes = f.relay.orphanBytesByDAID[keepID] - 1 // the survivor ALONE stays above the cap
+		f.relay.mu.Unlock()
+		before := daRelayStateSnapshot(f.relay)
+		dropToken := before.sets[dropID].chunks[0].member.token
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != nil {
+			t.Fatalf("over-cap whole removal: %v", err)
+		}
+		after := daRelayStateSnapshot(f.relay)
+		ownerReadyRecordAbsent(t, after, dropID, drop.txid)
+		if got := after.sets[keepID]; !reflect.DeepEqual(got, before.sets[keepID]) {
+			t.Fatalf("survivor not byte-identical: got=%+v want=%+v", got, before.sets[keepID])
+		}
+		if after.caps != before.caps {
+			t.Fatalf("the projection wrote the live caps: %+v != %+v", after.caps, before.caps)
+		}
+		ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), dropToken, drop.inputs)
+	})
 }
 
 func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
@@ -3883,6 +3948,35 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
+	// Each defect below passes the weaker checkOwnerReadyRecord and is invisible to the
+	// accounting arm — an incomplete record pins no payload, so pinnedPayloadAccountingBytes
+	// never reads payloadBytes — so only the candidate gate's full checkDANonReplayShape makes
+	// it terminal. TTL 2 is the sharpest driver: without the gate the tick decrements and
+	// publishes a fresh revision of the malformed record.
+	for _, row := range []struct {
+		name    string
+		corrupt func(*daRelaySetRecord)
+	}{
+		{"a nonzero payloadBytes", func(r *daRelaySetRecord) { r.payloadBytes = 1 }},
+		{"a non-nil replaceableChunks", func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{} }},
+		{"a state A record carrying a commit slot", func(r *daRelaySetRecord) { r.commit.payloadCommitment = [32]byte{0x01} }},
+	} {
+		t.Run(row.name+" is terminal before any decrement", func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 1), [32]byte{0x05}
+			f.ownerReadyChunk(daID, 0, "shape", daNonReplayPeer("keep"))
+			f.setOwnerReadyTTL(daID, 2)
+			f.relay.mu.Lock()
+			record := f.relay.sets[daID]
+			row.corrupt(&record)
+			f.relay.sets[daID] = record
+			f.relay.mu.Unlock()
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := f.relay.advanceOwnerReadyTTL(); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+				t.Fatalf("%s err=%v, want %v", row.name, err, errDARelayImageIncompatible)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
 }
 
 func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {

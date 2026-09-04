@@ -1137,6 +1137,17 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // non-bijective locator image (R1/R4). A COMPLETE_SET is out of scope (State C):
 // never a candidate and left byte-identical (A5).
 //
+// The per-candidate shape gate is checkDANonReplayShape, the SAME predicate the
+// canonical retained-image validator applies to every retained record
+// (validateCanonicalDARetainedSnapshot, via checkDANonReplayPrior), not the weaker
+// checkOwnerReadyRecord it wraps: it adds the record's payloadBytes/replaceableChunks
+// residual, the state-vs-commit-slot coupling and, per chunk, the legacy
+// peerQuotaKey/hashChecked residual and the index bound. The accounting arm below sees
+// none of them — an incomplete record pins no payload, so pinnedPayloadAccountingBytes
+// never reads payloadBytes, and ownerReadyAccounting keys peer bytes on typed
+// provenance, never on the legacy chunk field. So a malformed record is terminal here,
+// before any selection, decrement or publication.
+//
 // The preflight runs UNCONDITIONALLY — for an all-incomplete image and for a MIXED
 // image (a State C record coexisting with incomplete records) alike. It cannot reuse
 // canonicalDARetainedImageClosed wholesale: that closure compares pinnedPayloadBytes
@@ -1152,7 +1163,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 		if record.state == daRelayStateCompleteSet {
 			continue
 		}
-		if record.revision == 0 || len(record.locatorRows()) == 0 || record.checkOwnerReadyRecord() != nil {
+		if record.revision == 0 || len(record.locatorRows()) == 0 || record.checkDANonReplayShape() != nil {
 			return nil, errDARelayImageIncompatible
 		}
 		candidates = append(candidates, daID)
@@ -1306,12 +1317,36 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 	}
 }
 
+// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted, copied by value so
+// the live caps are never written. Every projection in this removal is non-increasing — a whole
+// removal adds nothing, and checkOwnerReadyRemovalSurvivor plus checkOwnerReadySurvivingChunks
+// prove a survivor is a byte-identical submultiset — but the cap arithmetic is ABSOLUTE
+// (checkedApplyUint64DeltaCap refuses current-remove+add above the limit), and a live record can
+// legitimately sit above a cap: projectDANonReplayAdmissionLocked returns for a State B image
+// BEFORE its own orphan/per-da_id/per-peer re-checks, so a staged commit is admitted uncapped.
+// Re-applying them would abort the whole all-or-nothing batch on such a record, which could then
+// never expire. Both siblings lift exactly these four: buildCanonicalDAOwnerCandidates
+// (sync_da_relay.go) and projectDANonReplayAdmissionLocked (da_relay_owner.go). No other cap is
+// lifted; the projector consults no other.
+func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
+	caps := s.caps
+	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
+	caps.orphanPoolPerPeerBytes, caps.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
+	return caps
+}
+
 // removeOwnerReadyWholeRecordLocked removes one whole owner-ready incomplete record — every
 // member with its locator, accounting contribution, prefetch reservation and shared-owner
 // claim — through the merged record-image projector, and returns each retired member as a
-// bound-owner victim in locator order.
+// bound-owner victim in locator order. It splits projectDARecordImageLocked's two steps to
+// project uncapped, exactly as the canonical removal builder does.
 func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord) ([]DAAdmissionVictim, error) {
-	placement, err := s.projectDARecordImageLocked(stageDAOwnerReadyRemoval(record, true))
+	image := stageDAOwnerReadyRemoval(record, true)
+	live, err := s.checkDARecordImageBaselineLocked(image)
+	if err != nil {
+		return nil, err
+	}
+	placement, err := s.projectDARecordImageLiveLocked(image, live, s.ownerReadyRemovalCaps())
 	if err != nil {
 		return nil, err
 	}
@@ -1357,7 +1392,7 @@ func (s *DARelayState) projectOwnerReadyRemovalLocked(image daRelayRecordImage, 
 	if err := checkOwnerReadyRemovalBaseline(image, live); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
-	return s.projectDARecordImageLiveLocked(image, live, s.caps)
+	return s.projectDARecordImageLiveLocked(image, live, s.ownerReadyRemovalCaps())
 }
 
 func checkOwnerReadyRemovalBaseline(image daRelayRecordImage, live daRelaySetRecord) error {
