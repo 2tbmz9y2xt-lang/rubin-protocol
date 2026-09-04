@@ -3430,6 +3430,16 @@ func ownerReadyRecordAbsent(t *testing.T, view daRelayStateView, daID [32]byte, 
 	}
 }
 
+// ownerReadyRemovalSelectors drives one row through both dormant entrypoints. The peer arm asks
+// for quota "drop", the identity every fixture below gives the members that arm may release.
+var ownerReadyRemovalSelectors = []struct {
+	name string
+	run  func(*DARelayState) error
+}{
+	{"ttl tick", (*DARelayState).advanceOwnerReadyTTL},
+	{"peer release", func(s *DARelayState) error { return s.releaseOwnerReadyPeerQuota("drop") }},
+}
+
 func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 	t.Run("peer state A whole record", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xd0}
@@ -3739,23 +3749,35 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	t.Run("a malformed no-match record is validated and terminal before selection", func(t *testing.T) {
-		// Even a record the quota never matches ("keep" vs release "drop") is validated by
-		// the preflight: the pre-fix path only validated selected records, so a malformed
-		// no-match record slipped through. A bad owner-ready state now fails closed.
-		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xdd}
-		f.ownerReadyChunk(daID, 0, "n0", daNonReplayPeer("keep"))
-		f.relay.mu.Lock()
-		record := f.relay.sets[daID]
-		record.wireBytes = 1 // owner-ready records pin legacy wireBytes to zero (R1 closed-state)
-		f.relay.sets[daID] = record
-		f.relay.mu.Unlock()
-		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
-			t.Fatalf("malformed no-match err=%v, want %v", err, errDARelayImageIncompatible)
+	// R1's closed-state clauses over a record for which NEITHER selector projects a member image —
+	// the "keep" quota matches nothing for the release, TTL 1 expires the record whole — so only
+	// the pre-selection candidate gate can refuse these.
+	for _, row := range []struct {
+		name    string
+		corrupt func(*DARelayState, [32]byte)
+	}{
+		{"record shape", func(s *DARelayState, daID [32]byte) {
+			record := s.sets[daID]
+			record.wireBytes = 1 // owner-ready records pin legacy wireBytes to zero
+			s.sets[daID] = record
+		}},
+		{"member provenance", func(s *DARelayState, daID [32]byte) { s.sets[daID].chunks[0].member.provenance = DAProvenance{} }},
+		{"member identity", func(s *DARelayState, daID [32]byte) { s.sets[daID].chunks[0].member.wtxid = [32]byte{} }},
+	} {
+		for _, selector := range ownerReadyRemovalSelectors {
+			t.Run("a malformed unselected "+row.name+" is terminal before selection on the "+selector.name, func(t *testing.T) {
+				f, daID := newDANonReplayFixture(t, 1), [32]byte{0xdd}
+				f.ownerReadyChunk(daID, 0, "n0", daNonReplayPeer("keep"))
+				f.setOwnerReadyTTL(daID, 1)
+				f.mutateRelay(func(s *DARelayState) { row.corrupt(s, daID) })
+				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				if err := selector.run(f.relay); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+					t.Fatalf("malformed unselected %s on the %s: err=%v, want %v", row.name, selector.name, err, errDARelayImageIncompatible)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+			})
 		}
-		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
-	})
+	}
 	t.Run("a mixed image removes the incomplete record and leaves the complete set byte-identical", func(t *testing.T) {
 		// A legitimate MIXED image — a State C record coexisting with an incomplete one —
 		// is not rejected for being mixed: the incomplete record is removed and the complete
@@ -3909,6 +3931,23 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), dropToken, drop.inputs)
 	})
+	// A5's third clause: repeating an already absent selection is a no-op. Each selector runs to a
+	// SUCCESSFUL whole-record removal first, so the repeat works on the image the first published.
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("repeating an absent "+selector.name+" selection is a no-op", func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 1), [32]byte{0xc0}
+			f.ownerReadyChunk(daID, 0, "a0", daNonReplayPeer("drop"))
+			f.setOwnerReadyTTL(daID, 1)
+			if err := selector.run(f.relay); err != nil {
+				t.Fatalf("first %s: %v", selector.name, err)
+			}
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := selector.run(f.relay); err != nil {
+				t.Fatalf("repeat %s: %v", selector.name, err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
 }
 
 func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
@@ -4226,13 +4265,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 	})
 	// receivedTime is the fourth field of checkDANonReplayPrior's single condition. Both selectors
 	// are driven: the tick would decrement and mint a fresh revision, the release matches nothing.
-	for _, row := range []struct {
-		name string
-		run  func(*DARelayState) error
-	}{
-		{"ttl tick", (*DARelayState).advanceOwnerReadyTTL},
-		{"peer release", func(s *DARelayState) error { return s.releaseOwnerReadyPeerQuota("drop") }},
-	} {
+	for _, row := range ownerReadyRemovalSelectors {
 		t.Run("a resident receivedTime-zero record is terminal on the "+row.name, func(t *testing.T) {
 			f, daID := newDANonReplayFixture(t, 1), [32]byte{0x08}
 			f.ownerReadyChunk(daID, 0, "clockless", daNonReplayPeer("keep"))
@@ -4331,6 +4364,65 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
+	}
+	// R1/R3 over the RETAINED image. One mixed fixture drives both publication arms: the tick
+	// preserves both members and releases none, the "drop" release removes chunk 0 and keeps chunk
+	// 1. Chunk 1 and the State C record survive every selection, so a defect placed on either is
+	// caught only by a check reading the image the batch is about to publish.
+	bindingImage := func(t *testing.T) (*daNonReplayFixture, [32]byte, [32]byte) {
+		f, incompleteID, completeID := newDANonReplayFixture(t, 5), [32]byte{0xc1}, [32]byte{0xc2}
+		f.ownerReadyChunk(incompleteID, 0, "b0", daNonReplayPeer("drop"))
+		f.ownerReadyChunk(incompleteID, 1, "b1", LocalDAProvenance())
+		f.completeReplayPinned(completeID)
+		f.setOwnerReadyTTL(incompleteID, 2)
+		return f, incompleteID, completeID
+	}
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("the binding fixture publishes cleanly on the "+selector.name, func(t *testing.T) {
+			f, _, _ := bindingImage(t)
+			if err := selector.run(f.relay); err != nil {
+				t.Fatalf("uncorrupted binding fixture on the %s: %v", selector.name, err)
+			}
+		})
+	}
+	for _, row := range []struct {
+		name      string
+		canonical bool // refused by the preflight's canonical retained-DA terminal class, not the sentinel
+		corrupt   func(*DARelayState, [32]byte, [32]byte)
+	}{
+		{"a retained member carrying a zero token", false, func(s *DARelayState, incompleteID, _ [32]byte) {
+			s.sets[incompleteID].chunks[1].member.token = PendingOutpointToken{}
+		}},
+		{"a retained member carrying a foreign owner's token", false, func(s *DARelayState, incompleteID, _ [32]byte) {
+			s.sets[incompleteID].chunks[1].member.token.owner = &PendingOutpointOwner{}
+		}},
+		{"two retained members sharing one token", false, func(s *DARelayState, incompleteID, _ [32]byte) {
+			s.sets[incompleteID].chunks[1].member.token = s.sets[incompleteID].chunks[0].member.token
+		}},
+		{"a complete-set member with an invalid provenance", false, func(s *DARelayState, _, completeID [32]byte) {
+			s.sets[completeID].commit.member.provenance = DAProvenance{}
+		}},
+		{"a complete-set member with no inputs", false, func(s *DARelayState, _, completeID [32]byte) {
+			s.sets[completeID].commit.member.inputs = nil
+		}},
+		{"a record stored under a mismatched da_id", true, func(s *DARelayState, _, completeID [32]byte) {
+			s.sets[[32]byte{0xcd}] = s.sets[completeID]
+			delete(s.sets, completeID)
+		}},
+	} {
+		for _, selector := range ownerReadyRemovalSelectors {
+			t.Run(row.name+" is terminal on the "+selector.name, func(t *testing.T) {
+				f, incompleteID, completeID := bindingImage(t)
+				f.mutateRelay(func(s *DARelayState) { row.corrupt(s, incompleteID, completeID) })
+				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				err := selector.run(f.relay)
+				var terminal *canonicalDATerminalError
+				if errors.As(err, &terminal) != row.canonical || (!row.canonical && !errors.Is(err, errDARelayImageIncompatible)) {
+					t.Fatalf("%s on the %s: err=%v, want terminal with canonical=%v", row.name, selector.name, err, row.canonical)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+			})
+		}
 	}
 }
 

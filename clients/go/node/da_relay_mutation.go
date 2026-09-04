@@ -1054,11 +1054,10 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 
 // commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones
 // the retained image under the existing admission fence and DARelayState.mu, lets
-// selectVictims derive every exact per-record transition and the bound-owner victim tokens
-// on that clone, then validates the full victim batch and publishes the DA image and owner
-// commit through non-fallible operations. An unbound test-only relay has no claim domain,
-// so its DA image is the whole change; any error before publication leaves both complete
-// images unchanged.
+// selectVictims derive every exact per-record transition and the bound-owner victim tokens on
+// that clone, and publishes it through the arm the relay's claim domain selects — a batch that
+// releases no member taking the same arm as one that does. Any error before publication leaves
+// both complete images unchanged.
 func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState) ([]DAAdmissionVictim, error)) error {
 	release := s.lockAdmissionFence()
 	defer release()
@@ -1070,45 +1069,45 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 	if err != nil {
 		return err
 	}
-	// A pure TTL decrement releases no member, so it never reaches the owner on any
-	// relay: the DA image is the whole change.
-	if len(victims) == 0 {
-		s.publishAtomicBatchLocked(clone)
-		return nil
-	}
-	owner := s.ownerReadyRemovalOwner()
-	if owner != nil {
+	if owner := s.ownerReadyRemovalOwner(); owner != nil {
 		return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
 	}
-	// owner == nil with victims to drop. A truly unbound test-only relay (mempool or
-	// chainState nil) has no claim domain and publishes the DA image alone; a BOUND
-	// relay whose pending-outpoint owner is nil must never publish a victim-removing
-	// image without dropping claims, so it fails closed — mirroring BeginDARemoval's
-	// nil pending-outpoint owner refusal (da_admission.go).
-	if s.mempool != nil && s.mempool.chainState != nil {
+	return s.publishOwnerReadyRemovalUnbound(clone, victims)
+}
+
+// publishOwnerReadyRemovalUnbound publishes the projected DA image and releases nothing, so the
+// DA image is the whole change. It refuses a victim-carrying batch unless the relay is truly
+// unbound (mempool or chainState nil), rather than publish a removal whose claims stay held —
+// BeginDARemoval's nil pending-outpoint owner refusal (da_admission.go).
+func (s *DARelayState) publishOwnerReadyRemovalUnbound(clone *DARelayState, victims []DAAdmissionVictim) error {
+	if len(victims) != 0 && s.mempool != nil && s.mempool.chainState != nil {
 		return txAdmitUnavailable("nil pending-outpoint owner")
 	}
 	s.publishAtomicBatchLocked(clone)
 	return nil
 }
 
-// commitOwnerReadyRemovalClaimsLocked validates the batch — shape, disjointness, owner — and only
-// on success, publishes the DA image and drops every victim claim under one owner-lock hold.
-// It mirrors DACommit's removal commit inline rather than wiring the dormant DARemoval guard,
-// which issue 678 owns: nothing fallible runs after the DA publish, so a record and its claim
-// cannot become observably separated.
+// commitOwnerReadyRemovalClaimsLocked validates the victim batch and the retained image's owner
+// binding and, only on success, publishes the DA image and drops every victim claim under one
+// owner-lock hold. An empty batch takes the same route, so a member-preserving decrement is
+// proven owner-bound before it republishes. It mirrors DACommit's removal commit inline rather
+// than wiring the dormant DARemoval guard, which issue 678 owns: nothing fallible runs after the
+// DA publish, so a record and its claim cannot become observably separated.
 func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpointOwner, clone *DARelayState, victims []DAAdmissionVictim) error {
-	batch, err := prepareDAAdmissionVictims(victims, [32]byte{})
-	if err != nil {
-		return txAdmitFromPendingOutpointError(err)
-	}
-	if err := checkOwnerReadyVictimsReleaseRetainedLocked(clone, batch); err != nil {
-		return err
+	var batch []DAAdmissionVictim
+	if len(victims) != 0 {
+		var err error
+		if batch, err = prepareDAAdmissionVictims(victims, [32]byte{}); err != nil {
+			return txAdmitFromPendingOutpointError(err)
+		}
 	}
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
 		return txAdmitFromPendingOutpointError(&failure)
+	}
+	if err := checkOwnerReadyRetainedBindingLocked(clone, owner, batch); err != nil {
+		return err
 	}
 	s.publishAtomicBatchLocked(clone)
 	for _, victim := range batch {
@@ -1117,30 +1116,45 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 	return nil
 }
 
-// checkOwnerReadyVictimsReleaseRetainedLocked proves the batch is disjoint from the image about
-// to be published: no dropped token still belongs to a member the clone RETAINS. The candidate
-// gate runs checkDANonReplayShape, which never reads the owner domain; this path never reaches
-// checkDANonReplayTokens, the canonical retained path's owner-domain validator; and
-// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch. So a malformed image
-// carrying one token on two members would publish a survivor whose claim was dropped — a
-// retained member with no claim. The surviving set is derived from the clone's own records, not
-// from the victim list, so map order cannot change the single sentinel this returns.
-func checkOwnerReadyVictimsReleaseRetainedLocked(clone *DARelayState, batch []DAAdmissionVictim) error {
+// checkOwnerReadyRetainedBindingLocked proves the clone is publishable under owner: every
+// retained member of every incomplete record is bound to owner, no token appears twice anywhere
+// in the image, and no token in batch still belongs to a member the clone RETAINS. It proves
+// token OWNERSHIP only; a claim's own txid and input set are re-proved for victims alone, by
+// validateDAAdmissionVictimsLocked. The da_id walk ascends, so one image yields one error.
+func checkOwnerReadyRetainedBindingLocked(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) error {
 	retained := make(map[PendingOutpointToken]struct{}, len(clone.locators))
-	for _, record := range clone.sets {
-		if record.commit.member != nil {
-			retained[record.commit.member.token] = struct{}{}
-		}
-		for _, chunk := range record.chunks {
-			if chunk.member != nil {
-				retained[chunk.member.token] = struct{}{}
-			}
+	for _, daID := range clone.sortedRetainedDAIDsLocked() {
+		if err := checkOwnerReadyRecordBinding(clone.sets[daID], owner, retained); err != nil {
+			return err
 		}
 	}
 	for _, victim := range batch {
 		if _, held := retained[victim.Token]; held {
 			return errDARelayImageIncompatible
 		}
+	}
+	return nil
+}
+
+// checkOwnerReadyRecordBinding proves one record's owner binding and adds its members' tokens to
+// seen, refusing the first token seen twice or a memberless occupied slot. An incomplete
+// record's members must each carry a nonzero token owned by owner (checkDANonReplayTokens, the
+// validator checkDANonReplayPrior applies canonically); a COMPLETE_SET's are counted, not bound.
+func checkOwnerReadyRecordBinding(record daRelaySetRecord, owner *PendingOutpointOwner, seen map[PendingOutpointToken]struct{}) error {
+	if record.state != daRelayStateCompleteSet {
+		if err := record.checkDANonReplayTokens(owner); err != nil {
+			return err
+		}
+	}
+	members, err := canonicalDARetainedMemberIdentities(record)
+	if err != nil {
+		return err
+	}
+	for _, member := range members {
+		if _, alias := seen[member.token]; alias {
+			return errDARelayImageIncompatible
+		}
+		seen[member.token] = struct{}{}
 	}
 	return nil
 }
@@ -1165,7 +1179,8 @@ func (s *DARelayState) ownerReadyRemovalOwner() *PendingOutpointOwner {
 // entry was deleted is no longer silently skipped, and the preflight then fails the
 // batch closed, without repair, on any derived-versus-live accounting mismatch or
 // non-bijective locator image (R1/R4). A COMPLETE_SET is out of scope (State C):
-// never a candidate and left byte-identical (A5).
+// never a candidate and left byte-identical (A5), but its own members are shape-checked
+// here all the same, since either selector publishes a clone that carries them (R1).
 //
 // The per-candidate shape gate is checkDANonReplayShape, the SAME predicate the
 // canonical retained-image validator applies to every retained record
@@ -1200,6 +1215,9 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	for _, daID := range retained {
 		record := s.sets[daID]
 		if record.state == daRelayStateCompleteSet {
+			if record.ownerReadyCompleteSetGateFails() {
+				return nil, errDARelayImageIncompatible
+			}
 			continue
 		}
 		if record.ownerReadyRemovalGateFails() {
@@ -1216,6 +1234,23 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 // ownerReadyRemovalGateFails reports whether the record's revision, receivedTime, ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the per-candidate removal gate; the caller fails the whole image with errDARelayImageIncompatible on a true result.
 func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
+}
+
+// ownerReadyCompleteSetGateFails reports whether a COMPLETE_SET record's retained members fail
+// member-shape validation — a memberless occupied slot, a malformed identity or an invalid typed
+// provenance; the caller fails the whole image with errDARelayImageIncompatible on a true result.
+// It reads members only: a COMPLETE_SET carries no owner-ready record shape to check.
+func (r daRelaySetRecord) ownerReadyCompleteSetGateFails() bool {
+	members, err := canonicalDARetainedMemberIdentities(r)
+	if err != nil {
+		return true
+	}
+	for _, member := range members {
+		if member.validate() != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // checkOwnerReadyRemovalImageClosedLocked is the removal path's whole-image preflight
