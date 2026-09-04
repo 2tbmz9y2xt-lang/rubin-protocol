@@ -1317,14 +1317,13 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 	}
 }
 
-// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted, the same set
-// buildCanonicalDAOwnerCandidates (sync_da_relay.go) and projectDANonReplayAdmissionLocked
-// (da_relay_owner.go) lift. Every projection this removal makes is non-increasing: a whole
-// removal adds nothing, and checkOwnerReadyRemovalSurvivor with checkOwnerReadySurvivingChunks
-// make a survivor a byte-identical submultiset of the live record. The cap arithmetic is
-// ABSOLUTE — checkedApplyUint64DeltaCap refuses a post-delta TOTAL above the limit, not a
-// growth — so without the lift a live counter already at or above a cap would abort this
-// all-or-nothing batch, and every record accounted under that counter could never expire.
+// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted to the uint64
+// maximum, as buildCanonicalDAOwnerCandidates (sync_da_relay.go) and
+// projectDANonReplayAdmissionLocked (da_relay_owner.go) also pass them to the projector.
+// checkedApplyUint64DeltaCap compares a post-delta TOTAL against the limit, so without the
+// lift a counter still above its cap after this removal's own decrease would abort the whole
+// all-or-nothing batch. Growth stays impossible: a whole removal stages an empty record, and
+// a survivor is proven a member-wise byte-identical subset before this cap set is used.
 func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 	caps := s.caps
 	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)

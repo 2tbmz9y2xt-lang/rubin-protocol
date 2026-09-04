@@ -3743,8 +3743,8 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
-	// Each row lowers one of the four lifted caps below its live counter and requires the
-	// removal to proceed anyway; without the lift the absolute arithmetic would abort the batch.
+	// Each row lowers one of the four lifted caps below its live counter and requires the tick
+	// to proceed anyway; without the lift the absolute arithmetic would abort the batch.
 	for _, row := range []struct {
 		name       string
 		capAndLive func(*DARelayState, [32]byte) (*uint64, uint64)
