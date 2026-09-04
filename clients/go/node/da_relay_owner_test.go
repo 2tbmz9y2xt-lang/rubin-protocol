@@ -3400,6 +3400,14 @@ func ownerReadyBreakInputs(member *daRelayMemberIdentity) {
 	member.inputs[0].Vout++
 }
 
+// ownerReadyEditOwner edits the shared claim domain under the owner lock the removal path takes.
+func ownerReadyEditOwner(f *daNonReplayFixture, edit func(*PendingOutpointOwner)) {
+	owner := f.mp.pendingOutpoints
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	edit(owner)
+}
+
 func ownerReadyRecordAbsent(t *testing.T, view daRelayStateView, daID [32]byte, txids ...[32]byte) {
 	t.Helper()
 	if _, present := view.sets[daID]; present {
@@ -3997,6 +4005,98 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			var admitErr *TxAdmitError
 			if !errors.As(err, &admitErr) || admitErr.Message != "invalid DA victim token" {
 				t.Fatalf("%s err=%v, want invalid DA victim token", row.name, err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
+	// H3 PEER PARTIAL arm: the victim-order rows above walk ownerReadyRecordVictims, the WHOLE-record arm.
+	// The partial arm has its own sorted walk, in ownerReadyPeerMatches, which only the chunk map's INSERTION
+	// order can move, so each order must select the same survivor, mint the same revision and refuse first alike.
+	buildOwnerReadyPartial := func(t *testing.T, order []uint16) (*daNonReplayFixture, [32]byte) {
+		f, daID := newDANonReplayFixture(t, 5), [32]byte{0xf3}
+		for _, index := range order {
+			provenance := daNonReplayPeer("drop")
+			if index == 4 {
+				provenance = LocalDAProvenance() // the one non-matching member keeps the removal partial
+			}
+			f.ownerReadyChunk(daID, index, fmt.Sprintf("h%d", index), provenance)
+		}
+		return f, daID
+	}
+	for _, order := range [][]uint16{{0, 1, 2, 3, 4}, {4, 3, 2, 1, 0}, {2, 4, 0, 3, 1}} {
+		t.Run(fmt.Sprintf("peer partial arm ignores chunk insertion order %v", order), func(t *testing.T) {
+			f, daID := buildOwnerReadyPartial(t, order)
+			before := daRelayStateSnapshot(f.relay)
+			if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != nil {
+				t.Fatalf("partial release: %v", err)
+			}
+			if survivor := daRelayStateSnapshot(f.relay).sets[daID]; len(survivor.chunks) != 1 || survivor.chunks[4].member == nil || survivor.revision != before.records+1 {
+				t.Fatalf("survivor=%+v, want only chunk 4 at revision %d", survivor, before.records+1)
+			}
+			// Victim ORDER shows only in the owner's FIRST refusal, so the second image makes the lowest-index victim fail differently from every later one.
+			f, daID = buildOwnerReadyPartial(t, order)
+			f.mutateRelay(func(s *DARelayState) {
+				s.sets[daID].chunks[0].member.token.seq = ^uint64(0)
+				for _, index := range []uint16{1, 2, 3} {
+					ownerReadyBreakInputs(s.sets[daID].chunks[index].member)
+				}
+			})
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			var admitErr *TxAdmitError
+			if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &admitErr) || admitErr.Message != "invalid DA victim token" {
+				t.Fatalf("first refusal=%v, want chunk 0's invalid DA victim token", err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
+	// R3 completeness: every owner-token refusal the contract names fails BEFORE publication, leaving both
+	// complete images unchanged. Names sharing one guard are rowed once, not twice: a partial release and a
+	// superseded claim are the same by-outpoint comparison in daAdmissionVictimInputsMatchLocked — the index
+	// row is gone, or it names a newer token — whose other clause, wrong inputs, the victim-order and
+	// valid-prefix rows above already carry.
+	for _, row := range []struct {
+		name    string
+		message string
+		corrupt func(*daNonReplayFixture, [2]*daRelayMemberIdentity)
+	}{
+		{"a zero victim token", "zero DA victim txid or token", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			f.mutateRelay(func(*DARelayState) { m[0].token = PendingOutpointToken{} })
+		}},
+		{"a token issued by a foreign owner", "invalid DA victim token", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			f.mutateRelay(func(*DARelayState) { m[0].token.owner = &PendingOutpointOwner{} })
+		}},
+		{"two victims sharing one token", "duplicate DA victim token", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			f.mutateRelay(func(*DARelayState) { m[1].token = m[0].token })
+		}},
+		{"a claim whose txid moved", "DA victim claim mismatch", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[m[0].token].txid = [32]byte{0xaa} })
+		}},
+		{"a claim in another domain", "DA victim claim mismatch", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.byToken[m[0].token].domain = PendingOutpointStandardMempool })
+		}},
+		{"a missing claim", "DA victim claim mismatch", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byToken, m[0].token) })
+		}},
+		{"a partially released or superseded claim", "DA victim input mismatch", func(f *daNonReplayFixture, m [2]*daRelayMemberIdentity) {
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { delete(o.byOutpoint, m[0].inputs[0]) })
+		}},
+	} {
+		t.Run("owner refusal: "+row.name, func(t *testing.T) {
+			f, dropID, keepID := newDANonReplayFixture(t, 3), [32]byte{0xf4}, [32]byte{0xf5}
+			f.ownerReadyChunk(dropID, 0, "r0", daNonReplayPeer("drop"))
+			f.ownerReadyChunk(dropID, 1, "r1", daNonReplayPeer("drop"))
+			// A third live claim keeps the missing-claim row inside the claim guard instead of
+			// validateDAAdmissionVictimsLocked's batch-versus-population bound.
+			f.ownerReadyChunk(keepID, 0, "r2", LocalDAProvenance())
+			var members [2]*daRelayMemberIdentity
+			f.mutateRelay(func(s *DARelayState) {
+				members[0], members[1] = s.sets[dropID].chunks[0].member, s.sets[dropID].chunks[1].member
+			})
+			row.corrupt(f, members)
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			var admitErr *TxAdmitError
+			if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &admitErr) || admitErr.Message != row.message {
+				t.Fatalf("%s err=%v, want %s", row.name, err, row.message)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
