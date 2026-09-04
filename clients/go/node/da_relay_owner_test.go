@@ -3779,6 +3779,18 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		if after.pinnedPayloadBytes != before.pinnedPayloadBytes {
 			t.Fatalf("removal moved the pinned pool: %d != %d", after.pinnedPayloadBytes, before.pinnedPayloadBytes)
 		}
+		// "Byte-identical" spans every image a removal can touch, not only the record and the
+		// pinned counter: the complete set keeps each of its own locator rows, and it is the
+		// SOLE surviving locator owner once the incomplete record is gone. It holds no
+		// orphan-domain footprint before or after, so both maps drain to empty here.
+		for _, row := range completeBefore.locatorRows() {
+			if after.locators[row.txid] != row.locator {
+				t.Fatalf("complete set locator row %x: got=%+v want=%+v", row.txid, after.locators[row.txid], row.locator)
+			}
+		}
+		if len(after.locators) != len(completeBefore.locatorRows()) || len(after.daIDBytes) != 0 || len(after.peerBytes) != 0 {
+			t.Fatalf("residual image beside the complete set: locators=%+v daIDBytes=%+v peerBytes=%+v", after.locators, after.daIDBytes, after.peerBytes)
+		}
 		ownerReadyClaimGone(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), dropToken, drop.inputs)
 	})
 	t.Run("a mixed image with a stray foreign-da_id locator row is terminal", func(t *testing.T) {
@@ -4237,16 +4249,57 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		})
 	}
-	t.Run("a resident ttl-zero record is terminal even when the release matches nothing", func(t *testing.T) {
-		// The candidate gate's own TTL bound, not a selector: checkDANonReplayShape never reads
-		// ttlBlocksRemaining, and this release matches no member, so the PEER selector returns
-		// no victims and would leave the ttl-zero record resident on a published clone.
-		f, daID := newDANonReplayFixture(t, 1), [32]byte{0x06}
-		f.ownerReadyChunk(daID, 0, "stalled", daNonReplayPeer("keep"))
-		f.setOwnerReadyTTL(daID, 0)
+	// One row per clause of ownerReadyRemovalGateFails that checkDANonReplayShape does not
+	// carry itself — ttlBlocksRemaining, revision and the locator-row count. The release
+	// matches no member in every row, so without its clause the PEER selector returns no
+	// victims and the corrupt record is republished on a successful clone; each row is
+	// therefore red exactly when its own disjunct is removed. receivedTime, the fourth such
+	// clause, is rowed against both selectors above.
+	for _, row := range []struct {
+		name    string
+		corrupt func(*DARelayState, [32]byte)
+	}{
+		{"ttl-zero", func(s *DARelayState, daID [32]byte) {
+			record := s.sets[daID]
+			record.ttlBlocksRemaining = 0
+			s.sets[daID] = record
+		}},
+		{"revision-zero", func(s *DARelayState, daID [32]byte) {
+			record := s.sets[daID]
+			record.revision = 0
+			s.sets[daID] = record
+		}},
+		// A memberless resident record implies no locator row, no orphan bytes and no peer
+		// entry, so the whole-image preflight still closes and only the locator-row clause
+		// can refuse it. Its revision and receivedTime sit under both live high-waters.
+		{"memberless", func(s *DARelayState, _ [32]byte) {
+			s.sets[[32]byte{0x09}] = daRelaySetRecord{daID: [32]byte{0x09}, state: daRelayStateOrphanChunks, revision: 1, receivedTime: 1, ttlBlocksRemaining: 2}
+		}},
+	} {
+		t.Run("a resident "+row.name+" record is terminal even when the release matches nothing", func(t *testing.T) {
+			f, daID := newDANonReplayFixture(t, 2), [32]byte{0x06}
+			f.ownerReadyChunk(daID, 0, "stalled", daNonReplayPeer("keep"))
+			f.setOwnerReadyTTL(daID, 2)
+			f.mutateRelay(func(s *DARelayState) { row.corrupt(s, daID) })
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
+				t.Fatalf("%s no-match err=%v, want %v", row.name, err, errDARelayImageIncompatible)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
+	t.Run("a nonzero pinned pool over an all-incomplete image is terminal", func(t *testing.T) {
+		// R4 over the pinned domain: every incomplete record pins nothing, so a live pinned
+		// counter no record implies is a derived-versus-live mismatch and fails the batch
+		// closed. The release matches no member, so only the preflight can refuse.
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0x0a}
+		f.ownerReadyChunk(daID, 0, "unpinned", daNonReplayPeer("keep"))
+		f.setOwnerReadyTTL(daID, 2)
+		f.mutateRelay(func(s *DARelayState) { s.pinnedPayloadBytes = 999_999 })
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != errDARelayImageIncompatible { //nolint:errorlint // Exact direct sentinel identity is part of the contract.
-			t.Fatalf("ttl-zero no-match err=%v, want %v", err, errDARelayImageIncompatible)
+		var terminal *canonicalDATerminalError
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); !errors.As(err, &terminal) {
+			t.Fatalf("stray-pinned err=%v, want canonical retained-DA terminal", err)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	})
@@ -4369,19 +4422,36 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 			mutationFuncs[function.Name.Name] = function
 		}
 	}
+	// The censused set is DERIVED from the file, never listed by hand: every FuncDecl whose
+	// name carries "ownerready" case-insensitively. Completeness rests on the naming rule the
+	// surface is written to — each of its functions is named for the owner-ready record it
+	// operates on — so the filter cannot miss a function a later round adds under that rule,
+	// the way a literal list silently would. It is a strict SUPERSET of this slice's own
+	// additions: it also picks up the pre-existing owner-ready staging predicates in this
+	// file, which is the conservative direction.
 	legacy := map[string]bool{"removeDASetRecordLocked": true, "applyDASetRecordLocked": true, "advanceOrphanTTLLocked": true, "releasePeerQuotaKeyLocked": true, "releasePeerQuotaKeyRecordLocked": true, "withoutPeerQuotaKey": true, "BeginDARemoval": true}
-	for _, name := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "commitOwnerReadyRemoval", "commitOwnerReadyRemovalClaimsLocked", "removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "releaseOwnerReadyPeerRecordLocked", "tickOwnerReadyTTLRecordLocked", "ownerReadyRemovalCandidatesLocked"} {
-		function := mutationFuncs[name]
-		if function == nil {
-			t.Fatalf("owner-ready removal function %s missing from da_relay_mutation.go", name)
+	var censused []string
+	for name := range mutationFuncs {
+		if strings.Contains(strings.ToLower(name), "ownerready") {
+			censused = append(censused, name)
 		}
-		ast.Inspect(function.Body, func(node ast.Node) bool {
+	}
+	slices.Sort(censused) // one failing name per corrupt file, whatever the map order
+	for _, name := range censused {
+		ast.Inspect(mutationFuncs[name].Body, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok && legacy[calleeName(call)] {
 				t.Fatalf("%s calls legacy removal primitive %s", name, calleeName(call))
 			}
 			return true
 		})
 	}
+	// Fail closed on a derivation that stopped selecting the surface it claims to cover.
+	for _, entrypoint := range []string{"releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL"} {
+		if !slices.Contains(censused, entrypoint) {
+			t.Fatalf("separation census derived %d functions, none of them entrypoint %s", len(censused), entrypoint)
+		}
+	}
+	t.Logf("separation census covers %d derived owner-ready functions: %v", len(censused), censused)
 	// The new whole-record path releases the prefetch reservation the installer skips.
 	var wholeRecordCallees []string
 	ast.Inspect(mutationFuncs["removeOwnerReadyWholeRecordLocked"].Body, func(node ast.Node) bool {
