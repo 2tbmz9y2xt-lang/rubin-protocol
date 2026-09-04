@@ -1164,7 +1164,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 }
 
 // checkOwnerReadyRemovalImageClosedLocked is the removal path's whole-image preflight
-// (R1/R4), the mixed-safe analogue of canonicalDARetainedImageClosed that the removal
+// (R1/R4), the mixed-safe analog of canonicalDARetainedImageClosed that the removal
 // path cannot reuse directly (see ownerReadyRemovalCandidatesLocked). It composes the
 // same per-record helpers so there is no second validator framework:
 //   - a locator bijection over EVERY retained record (incomplete AND State C, because
@@ -1174,7 +1174,11 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 //     pinnedPayloadBytes, which a completed set owns and this removal never touches.
 //
 // Any corruption — a stray locator row, a stray orphan-domain entry, a map-key/da_id
-// mismatch or a malformed record — fails closed before selection or publication.
+// mismatch or a malformed record — fails closed before selection or publication. This
+// is the orphan-domain and locator-bijection integrity gate only, not a general
+// image-integrity check: a COMPLETE_SET record's own revision, receivedTime and
+// payloadBytes are out of scope and never read here, since State C stays
+// byte-identical (A5) and this dormant removal is never selected against it.
 func (s *DARelayState) checkOwnerReadyRemovalImageClosedLocked(retained, candidates [][32]byte) error {
 	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
 		return err
