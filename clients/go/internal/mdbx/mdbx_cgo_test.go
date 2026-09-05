@@ -138,7 +138,7 @@ func TestEngineErrorAndPinnedMapping(t *testing.T) {
 	if got, want := fmt.Sprint([...]EngineClass{EngineInvalidInput, EngineIntegrity, EngineCapacity, EngineConcurrency, EngineTransaction, EngineIO, EngineStateMismatch, EngineLocalInvariant}), "[InvalidInput Integrity Capacity Concurrency Transaction IO StateMismatch LocalInvariant]"; got != want {
 		t.Fatalf("EngineClass values=%s", got)
 	}
-	if got, want := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect}, [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "inspect"}; got != want {
+	if got, want := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect, operationUpdate}, [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "prefix-page", "inspect", "update"}; got != want {
 		t.Fatalf("engine operations=%v, want %v", got, want)
 	}
 	remoteCode := int(syscall.ENOTBLK)
@@ -276,7 +276,7 @@ func TestEngineDomainClosure(t *testing.T) {
 	if got := adapterError(operationUpdate, EngineStateMismatch, codeProblem, "mismatch", cause); got.Class != EngineStateMismatch || got.Operation != string(operationUpdate) || got.Code != codeProblem || got.Diagnostic != "mismatch" || !errors.Is(got, cause) {
 		t.Fatal("StateMismatch operation closure drifted")
 	}
-	for _, operation := range []engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect} {
+	for _, operation := range []engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect} {
 		got := adapterError(operation, EngineStateMismatch, codeProblem, "mismatch", cause)
 		if got.Class != EngineLocalInvariant || got.Operation != string(operation) || got.Code != codeProblem || got.Diagnostic != "unsupported engine class" || !errors.Is(got, cause) {
 			t.Fatal("StateMismatch operation closure drifted")
@@ -1799,8 +1799,10 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 		for _, rank := range []uint8{0, 3, 4} {
 			assertRejected(dbis[rank], nil, nil, 0, 0, "unsupported prefix-page DBI", nil)
 		}
-		for _, invalid := range [][]byte{nil, make([]byte, 7), make([]byte, 9), make([]byte, 8)} {
-			assertRejected(dbis[1], invalid, nil, 0, 0, "invalid prefix-page prefix", nil)
+		for _, rank := range []uint8{1, 2, 6} {
+			for _, invalid := range [][]byte{nil, make([]byte, 7), make([]byte, 9), make([]byte, 8)} {
+				assertRejected(dbis[rank], invalid, nil, 0, 0, "invalid prefix-page prefix", nil)
+			}
 		}
 		undoPrefix, undoContinuation, _ := prefixPageRequest(5, 0)
 		for _, invalid := range [][]byte{nil, make([]byte, 31), make([]byte, 33)} {
@@ -1815,6 +1817,9 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 		invalidUndo := append([]byte(nil), undoContinuation...)
 		invalidUndo[32] = 2
 		assertRejected(dbis[5], undoPrefix, invalidUndo, 0, 0, "invalid prefix-page continuation", nil)
+		invalidUndoEntry := append(append([]byte(nil), undoPrefix...), make([]byte, 44)...)
+		invalidUndoEntry[32] = 1
+		assertRejected(dbis[5], undoPrefix, invalidUndoEntry, 0, 0, "invalid prefix-page continuation", nil)
 		assertRejected(dbis[1], prefix, continuation, 0, 0, "invalid prefix-page row limit", nil)
 		assertRejected(dbis[1], prefix, continuation, 1_441, 0, "invalid prefix-page row limit", nil)
 		assertRejected(dbis[1], prefix, continuation, 1, minimum-1, "invalid prefix-page byte limit", nil)
@@ -1864,6 +1869,7 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 func TestReaderPrefixPagePublicPath(t *testing.T) {
 	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 	mustEnvironment(t, err)
+	defer func() { mustEnvironment(t, store.Close()) }()
 	dbi := readDBIsLiteral()[2]
 	firstKey, err := HeightKey(23, 1)
 	mustEnvironment(t, err)
@@ -1899,7 +1905,6 @@ func TestReaderPrefixPagePublicPath(t *testing.T) {
 		}
 		return nil
 	}))
-	mustEnvironment(t, store.Close())
 }
 
 func waitForPrefixPageMutex(t *testing.T) {
@@ -2523,7 +2528,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
 	checkLockedRead("PrefixPage", "r", "prefixPageRead")
 	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
-	if nativeCalls != 2 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 {
+	if nativeCalls != 2 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
 		t.Fatal("concurrent Get serialization drifted")
 	}
 	requireOrder("expire", "expired Reader reached native Get", "r.active.Store(false)", "r.getMu.Lock()", "r.getMu.Unlock()")
@@ -2562,7 +2567,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
 		}
 	}
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 4 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") {
+	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 4 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 1 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 {
 		t.Fatal("borrowed native bytes accepted")
 	}
 	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
@@ -2574,7 +2579,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	header, headerErr := os.ReadFile("../../../../third_party/libmdbx/mdbx.h")
 	mustEnvironment(t, headerErr)
 	headerText := string(header)
-	if !strings.Contains(headerText, "On success return \\ref MDBX_SUCCESS if key found exactly") || !strings.Contains(headerText, "Updates BOTH the key and the data for pointing to the actual key-value") {
+	if !strings.Contains(headerText, "On success return \\ref MDBX_SUCCESS if key found exactly") || !strings.Contains(headerText, "and \\ref MDBX_RESULT_TRUE otherwise") || !strings.Contains(headerText, "Updates BOTH the key and the data for pointing to the actual key-value") {
 		t.Fatal("pinned mdbx_get_equal_or_great result ABI drifted")
 	}
 	ident := func(expr ast.Expr, name string) bool { value, ok := expr.(*ast.Ident); return ok && value.Name == name }
@@ -2728,7 +2733,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("Get") + body("PrefixPage") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("View") + body("Get") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)

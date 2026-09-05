@@ -481,6 +481,7 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 			code:       codeProblem,
 			rows:       []fixtureRawRow{{dbi: dbis[2], key: append(fixturePrefixKey(2, 13, 1, false), make([]byte, 62)...), value: make([]byte, 104)}},
 		},
+		{name: "native envelope sibling key", diagnostic: "mdbx_get_equal_or_great returned invalid result shape", class: EngineLocalInvariant, code: codeProblem, rows: []fixtureRawRow{{dbi: dbis[2], key: append(fixturePrefixKey(2, 14, 1, false), make([]byte, 62)...), value: make([]byte, 104)}}},
 		stored("equal malformed key", 2, []byte{0, 0, 0, 0, 0, 0, 0, 13}, make([]byte, 104), keyDiagnostic),
 		stored("invalid key", 2, fixtureMalformedCanonicalKey(13, 1), make([]byte, 104), keyDiagnostic),
 		stored("invalid value", 2, fixturePrefixKey(2, 13, 1, false), make([]byte, 103), valueDiagnostic),
@@ -636,7 +637,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 				}
 			case "wrapped", "distinct", "typed-nil":
 				parts, ok := returned.(interface{ Unwrap() []error })
-				if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[1] != recorded {
+				if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[1] != recorded || !sameError(store.terminal, returned) {
 					t.Fatalf("PrefixPage callback order=%v", returned)
 				}
 				if mode == "distinct" && parts.Unwrap()[0] != callbackErr || mode == "wrapped" && !errors.Is(parts.Unwrap()[0], recorded) {
@@ -652,6 +653,9 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 				if recovered != panicValue || returned != nil || !sameError(store.terminal, recorded) {
 					t.Fatalf("PrefixPage panic disposition=%v/%v", recovered, returned)
 				}
+			}
+			if next := store.View(func(*Reader) error { t.Fatal("terminal callback invoked"); return nil }); !sameError(next, store.terminal) {
+				t.Fatal("PrefixPage terminal next View drifted")
 			}
 		})
 	}
@@ -773,7 +777,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		defer func() { mustEnvironment(t, store.Close()) }()
 		key := fixturePrefixKey(2, 21, 1, false)
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: dbi, key: key, value: make([]byte, 104)}))
-		for _, mode := range []string{"nil", "direct", "typed-nil", "panic"} {
+		for _, mode := range []string{"nil", "direct", "wrapped", "typed-nil", "panic"} {
 			var returned error
 			var recovered any
 			func() {
@@ -788,6 +792,8 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 						return nil
 					case "direct":
 						return callbackErr
+					case "wrapped":
+						return fmt.Errorf("wrapped: %w", callbackErr)
 					case "typed-nil":
 						var typed *nilPointerError
 						return typed
@@ -804,6 +810,9 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 				if !ok || returned == nil {
 					t.Fatal("application-only typed nil changed")
 				}
+			}
+			if mode == "wrapped" && (returned == callbackErr || !errors.Is(returned, callbackErr)) {
+				t.Fatal("application-only wrapped error identity changed")
 			}
 		}
 		truth, updateErr := store.Update(func(reader *Reader) (Batch, error) {
