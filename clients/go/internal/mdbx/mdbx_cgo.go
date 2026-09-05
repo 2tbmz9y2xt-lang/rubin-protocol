@@ -1509,8 +1509,9 @@ func prefixPageMinimumBytes(dbi DBI) uint64 {
 }
 
 func validatePrefixPageRequest(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, maxBytes uint64) error {
-	if err := ValidateDBI(dbi); err != nil {
-		return prefixPageInputError("invalid SchemaV1 DBI", err)
+	dbiErr := ValidateDBI(dbi)
+	if dbiErr != nil {
+		return prefixPageInputError("invalid SchemaV1 DBI", dbiErr)
 	}
 	if !supportedPrefixPageDBI(dbi) {
 		return prefixPageInputError("unsupported prefix-page DBI", nil)
@@ -1559,8 +1560,9 @@ func (r *Reader) PrefixPage(dbi DBI, prefix, afterExclusive []byte, maxRows uint
 	if !r.usable() {
 		return PrefixPage{}, prefixPageInputError("Reader is not active", nil)
 	}
-	if err := validatePrefixPageRequest(dbi, prefix, afterExclusive, maxRows, maxBytes); err != nil {
-		return PrefixPage{}, err
+	requestErr := validatePrefixPageRequest(dbi, prefix, afterExclusive, maxRows, maxBytes)
+	if requestErr != nil {
+		return PrefixPage{}, requestErr
 	}
 	scan := newPrefixPageScan(dbi, prefix, afterExclusive, maxRows, maxBytes)
 	r.getMu.Lock()
@@ -1607,8 +1609,9 @@ func prefixPageNativeRow(dbi DBI, prefix, seek []byte, rc int, keyBytes unsafe.P
 	if !prefixPageFoundCode(rc) {
 		return prefixPageNative{}, nativeError(operationPrefixPage, rc)
 	}
-	if err := prefixPageValueShape(valueBytes, valueLength); err != nil {
-		return prefixPageNative{}, err
+	valueShapeErr := prefixPageValueShape(valueBytes, valueLength)
+	if valueShapeErr != nil {
+		return prefixPageNative{}, valueShapeErr
 	}
 	key, err := prefixPageNativeKey(seek, keyBytes, keyLength)
 	if err != nil {
