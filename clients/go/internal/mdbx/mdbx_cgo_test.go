@@ -1713,8 +1713,8 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 }
 
 func TestReadOperationDomain(t *testing.T) {
-	want := [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "inspect", "update"}
-	got := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect, operationUpdate}
+	want := [...]engineOperation{"create", "open", "init", "abort", "close", "view", "get", "prefix-page", "inspect", "update"}
+	got := [...]engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect, operationUpdate}
 	if got != want {
 		t.Fatalf("read operation domain drifted: %v", got)
 	}
@@ -1730,6 +1730,213 @@ func TestReadOperationDomain(t *testing.T) {
 		}
 	}
 }
+
+func prefixPageRequest(rank uint8, id byte) ([]byte, []byte, uint64) {
+	prefix := []byte{0, 0, 0, 0, 0, 0, 0, id}
+	switch rank {
+	case 1:
+		return prefix, append(append([]byte(nil), prefix...), make([]byte, 36)...), 65_604
+	case 2, 6:
+		return prefix, append(append([]byte(nil), prefix...), make([]byte, 8)...), 120
+	default:
+		prefix = make([]byte, 32)
+		prefix[0] = id
+		return prefix, append(append([]byte(nil), prefix...), byte(0)), 65_637
+	}
+}
+
+func requirePrefixPageError(t *testing.T, page PrefixPage, err error, diagnostic string, cause error) {
+	t.Helper()
+	if page.Rows != nil || page.Stop != 0 {
+		t.Fatalf("PrefixPage error returned partial page: %#v", page)
+	}
+	engine := requireEnvironmentError(t, err, EngineInvalidInput, engineOperation("prefix-page"), codeEINVAL, diagnostic)
+	if !sameError(engine.Cause, cause) || engine.ReopenRequired {
+		t.Fatalf("PrefixPage input Cause/Reopen=%v/%v, want %v/false", engine.Cause, engine.ReopenRequired, cause)
+	}
+}
+
+func TestReaderPrefixPageInputMatrix(t *testing.T) {
+	dbis := readDBIsLiteral()
+	prefix, continuation, minimum := prefixPageRequest(1, 1)
+	page, err := (*Reader)(nil).PrefixPage(dbis[1], prefix, nil, 1, minimum)
+	requirePrefixPageError(t, page, err, "Reader is not active", nil)
+	malformed := &Reader{}
+	malformed.self = malformed
+	malformed.active.Store(true)
+	page, err = malformed.PrefixPage(dbis[1], prefix, nil, 1, minimum)
+	requirePrefixPageError(t, page, err, "Reader is not active", nil)
+	for name, reader := range map[string]*Reader{"nil": nil, "malformed": malformed} {
+		page, err = reader.PrefixPage(DBI{Name: "forged", Rank: 1}, []byte{1}, []byte{}, 0, 0)
+		requirePrefixPageError(t, page, err, "Reader is not active", nil)
+		if reader != nil && reader.failure != nil {
+			t.Fatalf("%s inactive Reader latched combined-invalid input: %v", name, reader.failure)
+		}
+	}
+
+	store, createErr := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+	mustEnvironment(t, createErr)
+	defer func() { _ = store.Close() }()
+	var escaped, copied *Reader
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		escaped = reader
+		copied = &Reader{self: reader.self, txn: reader.txn, dbis: reader.dbis}
+		copied.active.Store(true)
+		page, err = copied.PrefixPage(dbis[1], prefix, nil, 1, minimum)
+		requirePrefixPageError(t, page, err, "Reader is not active", nil)
+
+		assertRejected := func(dbi DBI, prefix, after []byte, rows uint32, bytes uint64, diagnostic string, cause error) {
+			t.Helper()
+			page, err := reader.PrefixPage(dbi, prefix, after, rows, bytes)
+			requirePrefixPageError(t, page, err, diagnostic, cause)
+			value, present, getErr := reader.Get(dbis[0], []byte{1})
+			if getErr != nil || !present || len(value) != 48 {
+				t.Fatalf("input rejection disabled sibling Get: %d/%v/%v", len(value), present, getErr)
+			}
+		}
+
+		assertRejected(DBI{Name: "utxo-v1-forged", Rank: 1}, nil, nil, 0, 0, "invalid SchemaV1 DBI", errSchema)
+		for _, rank := range []uint8{0, 3, 4} {
+			assertRejected(dbis[rank], nil, nil, 0, 0, "unsupported prefix-page DBI", nil)
+		}
+		for _, invalid := range [][]byte{nil, make([]byte, 7), make([]byte, 9), make([]byte, 8)} {
+			assertRejected(dbis[1], invalid, nil, 0, 0, "invalid prefix-page prefix", nil)
+		}
+		undoPrefix, undoContinuation, _ := prefixPageRequest(5, 0)
+		for _, invalid := range [][]byte{nil, make([]byte, 31), make([]byte, 33)} {
+			assertRejected(dbis[5], invalid, nil, 0, 0, "invalid prefix-page prefix", nil)
+		}
+		assertRejected(dbis[1], prefix, []byte{}, 0, 0, "invalid prefix-page continuation", nil)
+		assertRejected(dbis[1], make([]byte, 7), []byte{}, 0, 0, "invalid prefix-page prefix", nil)
+		assertRejected(dbis[1], prefix, continuation[:15], 0, 0, "invalid prefix-page continuation", nil)
+		wrongPrefix := append([]byte(nil), continuation...)
+		wrongPrefix[7] = 2
+		assertRejected(dbis[1], prefix, wrongPrefix, 0, 0, "invalid prefix-page continuation", nil)
+		invalidUndo := append([]byte(nil), undoContinuation...)
+		invalidUndo[32] = 2
+		assertRejected(dbis[5], undoPrefix, invalidUndo, 0, 0, "invalid prefix-page continuation", nil)
+		assertRejected(dbis[1], prefix, continuation, 0, 0, "invalid prefix-page row limit", nil)
+		assertRejected(dbis[1], prefix, continuation, 1_441, 0, "invalid prefix-page row limit", nil)
+		assertRejected(dbis[1], prefix, continuation, 1, minimum-1, "invalid prefix-page byte limit", nil)
+		assertRejected(dbis[1], prefix, continuation, 1, 154_611_152, "invalid prefix-page byte limit", nil)
+
+		for _, rank := range []uint8{1, 2, 5, 6} {
+			validPrefix, validAfter, minBytes := prefixPageRequest(rank, 7)
+			assertRejected(dbis[rank], validPrefix, validAfter, 1, minBytes-1, "invalid prefix-page byte limit", nil)
+			assertRejected(dbis[rank], validPrefix, validAfter[:len(validAfter)-1], 1, minBytes, "invalid prefix-page continuation", nil)
+			wrongPrefix := append([]byte(nil), validAfter...)
+			wrongPrefix[0] = 1
+			assertRejected(dbis[rank], validPrefix, wrongPrefix, 1, minBytes, "invalid prefix-page continuation", nil)
+			for name, after := range map[string][]byte{"nil": nil, "existing-or-absent": validAfter} {
+				page, err := reader.PrefixPage(dbis[rank], validPrefix, after, 1, minBytes)
+				if err != nil || page.Rows != nil || page.Stop != PrefixPageStop(1) {
+					t.Fatalf("valid %s rank %d request=%#v/%v", name, rank, page, err)
+				}
+			}
+			page, err := reader.PrefixPage(dbis[rank], validPrefix, nil, 1_440, 154_611_151)
+			if err != nil || page.Rows != nil || page.Stop != PrefixPageStop(1) {
+				t.Fatalf("upper bounds rank %d=%#v/%v", rank, page, err)
+			}
+		}
+		highBytePrefix := []byte{0x80, 0, 0, 0, 0, 0, 0, 0}
+		page, err := reader.PrefixPage(dbis[1], highBytePrefix, nil, 1, 65_604)
+		if err != nil || page.Rows != nil || page.Stop != PrefixPageStop(1) {
+			t.Fatalf("high-byte image prefix=%#v/%v", page, err)
+		}
+		maxGenerationPrefix := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+		for _, rank := range []uint8{2, 6} {
+			page, err := reader.PrefixPage(dbis[rank], maxGenerationPrefix, nil, 1, 120)
+			if err != nil || page.Rows != nil || page.Stop != PrefixPageStop(1) {
+				t.Fatalf("maximum generation prefix rank %d=%#v/%v", rank, page, err)
+			}
+		}
+		return nil
+	}))
+	for name, reader := range map[string]*Reader{"escaped": escaped, "copied": copied} {
+		page, err := reader.PrefixPage(dbis[1], prefix, nil, 1, minimum)
+		requirePrefixPageError(t, page, err, "Reader is not active", nil)
+		if reader.failure != nil {
+			t.Fatalf("%s Reader input error latched: %v", name, reader.failure)
+		}
+	}
+}
+
+func waitForPrefixPageMutex(t *testing.T) {
+	t.Helper()
+	stack := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := runtime.Stack(stack, true)
+		for _, trace := range strings.Split(string(stack[:n]), "\n\n") {
+			if strings.Contains(trace, "sync.(*Mutex).Lock") && strings.Contains(trace, "(*Reader).PrefixPage") {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PrefixPage waiter did not block at Reader.getMu")
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestReaderPrefixPageLifetimeAndConcurrentGet(t *testing.T) {
+	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+	mustEnvironment(t, err)
+	defer func() { _ = store.Close() }()
+	dbis := readDBIsLiteral()
+	prefix, _, minimum := prefixPageRequest(2, 1)
+
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		go func() {
+			<-start
+			_, _, getErr := reader.Get(dbis[0], []byte{1})
+			results <- getErr
+		}()
+		go func() {
+			<-start
+			page, pageErr := reader.PrefixPage(dbis[2], prefix, nil, 1, minimum)
+			if pageErr == nil && (page.Rows != nil || page.Stop != PrefixPageStop(1)) {
+				pageErr = errors.New("concurrent PrefixPage result drifted")
+			}
+			results <- pageErr
+		}()
+		close(start)
+		for range 2 {
+			if concurrentErr := <-results; concurrentErr != nil {
+				return concurrentErr
+			}
+		}
+		return nil
+	}))
+
+	waiterPassed, waiter := make(chan struct{}), make(chan error, 1)
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		reader.getMu.Lock()
+		go func() {
+			for reader.active.Load() {
+				runtime.Gosched()
+			}
+			reader.getMu.Unlock()
+		}()
+		go func() {
+			if !reader.usable() {
+				waiter <- errors.New("PrefixPage waiter did not pass initial lifetime guard")
+				return
+			}
+			close(waiterPassed)
+			_, getErr := reader.PrefixPage(dbis[2], prefix, nil, 1, minimum)
+			waiter <- getErr
+		}()
+		<-waiterPassed
+		waitForPrefixPageMutex(t)
+		return nil
+	}))
+	requireEnvironmentError(t, <-waiter, EngineInvalidInput, engineOperation("prefix-page"), codeEINVAL, "Reader is not active")
+}
+
+func TestReaderPrefixPageSourceOwnership(t *testing.T) { assertReadSurfaceOwnershipAST(t) }
 
 func TestReaderGetResultMatrix(t *testing.T) {
 	dbis := readDBIsLiteral()
@@ -2225,6 +2432,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 	requireOrder("View", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked")
 	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
+	requireOrder("PrefixPage", "post-native PrefixPage failure was not recorded", "prefixPageRead", "r.failure = err", "r.active.Store(false)", "return page")
 	call := func(expr ast.Expr, path ...string) bool {
 		for i := len(path) - 1; i > 0; i-- {
 			selector, ok := expr.(*ast.SelectorExpr)
@@ -2236,43 +2444,98 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		identifier, ok := expr.(*ast.Ident)
 		return ok && identifier.Name == path[0]
 	}
-	get := functions["Get"]
-	guards, lock, unlock, native := []int{}, -1, -1, -1
-	locks, unlocks := 0, 0
-	for i, statement := range get.Body.List {
-		switch statement := statement.(type) {
-		case *ast.IfStmt:
-			if negation, ok := statement.Cond.(*ast.UnaryExpr); ok && negation.Op == token.NOT {
-				if usable, ok := negation.X.(*ast.CallExpr); ok && call(usable.Fun, "r", "usable") {
-					guards = append(guards, i)
+	checkLockedRead := func(name string, nativePath ...string) {
+		fn := functions[name]
+		if fn == nil {
+			t.Fatalf("concurrent read serialization drifted: missing %s", name)
+		}
+		guards, lock, unlock, native := []int{}, -1, -1, -1
+		locks, unlocks := 0, 0
+		for i, statement := range fn.Body.List {
+			switch statement := statement.(type) {
+			case *ast.IfStmt:
+				if negation, ok := statement.Cond.(*ast.UnaryExpr); ok && negation.Op == token.NOT {
+					if usable, ok := negation.X.(*ast.CallExpr); ok && call(usable.Fun, "r", "usable") {
+						guards = append(guards, i)
+					}
 				}
-			}
-		case *ast.ExprStmt:
-			if invocation, ok := statement.X.(*ast.CallExpr); ok && call(invocation.Fun, "r", "getMu", "Lock") {
-				lock, locks = i, locks+1
-			}
-		case *ast.DeferStmt:
-			if call(statement.Call.Fun, "r", "getMu", "Unlock") {
-				unlock, unlocks = i, unlocks+1
-			}
-		case *ast.AssignStmt:
-			if len(statement.Rhs) == 1 {
-				if invocation, ok := statement.Rhs[0].(*ast.CallExpr); ok && call(invocation.Fun, "C", "rubin_mdbx_get") {
-					native = i
+			case *ast.ExprStmt:
+				if invocation, ok := statement.X.(*ast.CallExpr); ok && call(invocation.Fun, "r", "getMu", "Lock") {
+					lock, locks = i, locks+1
+				}
+			case *ast.DeferStmt:
+				if call(statement.Call.Fun, "r", "getMu", "Unlock") {
+					unlock, unlocks = i, unlocks+1
+				}
+			case *ast.AssignStmt:
+				for _, rhs := range statement.Rhs {
+					if invocation, ok := rhs.(*ast.CallExpr); ok && call(invocation.Fun, nativePath...) {
+						native = i
+					}
 				}
 			}
 		}
+		if len(guards) != 2 || locks != 1 || unlocks != 1 || unlock != lock+1 || guards[0] >= lock || guards[1] <= unlock || native <= guards[1] {
+			t.Fatalf("concurrent %s serialization drifted", name)
+		}
 	}
+	checkLockedRead("Get", "C", "rubin_mdbx_get")
+	checkLockedRead("PrefixPage", "r", "prefixPageRead")
 	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
-	if len(guards) != 2 || locks != 1 || unlocks != 1 || unlock != lock+1 || guards[0] >= lock || guards[1] <= unlock || native <= guards[1] || nativeCalls != 2 {
+	if nativeCalls != 2 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 {
 		t.Fatal("concurrent Get serialization drifted")
 	}
 	requireOrder("expire", "expired Reader reached native Get", "r.active.Store(false)", "r.getMu.Lock()", "r.getMu.Unlock()")
 	production := string(source)
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(production, "C.GoBytes(") != 2 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") {
+	const prefixWrapperSignature = "static rubin_mdbx_prefix_result rubin_mdbx_get_equal_or_great"
+	prefixWrapperStart := strings.Index(production, prefixWrapperSignature)
+	prefixWrapperEnd := -1
+	if prefixWrapperStart >= 0 {
+		prefixWrapperEnd = strings.Index(production[prefixWrapperStart:], "\n}\n")
+	}
+	if prefixWrapperStart < 0 || prefixWrapperEnd < 0 {
+		t.Fatal("prefix-page native wrapper framing drifted")
+	}
+	prefixWrapper := production[prefixWrapperStart : prefixWrapperStart+prefixWrapperEnd+2]
+	if strings.Count(prefixWrapper, "result.rc = mdbx_get_equal_or_great(") != 1 {
+		t.Fatal("prefix-page native lower-bound call drifted")
+	}
+	prefixWrapperParts := []string{
+		"MDBX_val key = {(void *)seek_bytes, seek_len}, value = {NULL, 0};",
+		"rubin_mdbx_prefix_result result = {MDBX_EINVAL, NULL, 0, NULL, 0};",
+		"result.rc = mdbx_get_equal_or_great(txn, dbi, &key, &value);",
+		"result.rc == MDBX_SUCCESS || result.rc == MDBX_RESULT_TRUE",
+		"result.key_bytes = key.iov_base;", "result.key_len = key.iov_len;",
+		"result.value_bytes = value.iov_base;", "result.value_len = value.iov_len;",
+	}
+	position := -1
+	for _, part := range prefixWrapperParts {
+		next := strings.Index(prefixWrapper, part)
+		if next <= position || strings.Count(prefixWrapper, part) != 1 {
+			t.Fatalf("prefix-page native result ABI drifted at %q", part)
+		}
+		position = next
+	}
+	for _, forbidden := range []string{"MDBX_cursor", "mdbx_cursor_open", "mdbx_cursor_close", "mdbx_put(", "mdbx_del(", "mdbx_replace(", "mdbx_drop(", "MDBX_TXN_READWRITE"} {
+		if strings.Contains(prefixWrapper, forbidden) {
+			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
+		}
+	}
+	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 4 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") {
 		t.Fatal("borrowed native bytes accepted")
 	}
 	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
+	requireOrder("prefixPageRead", "PrefixPage bound must precede copy", "prefixPageNativeResult", "prefixPageStop", "copyPrefixPageRow")
+	requireOrder("prefixPageNativeRow", "PrefixPage native envelope order drifted", "prefixPageValueShape", "prefixPageNativeKey")
+	requireOrder("prefixPageNativeKey", "PrefixPage native key defense drifted", "keyBytes == nil", "keyLength == 0", "keyLength > C.size_t(77)", "unsafe.Slice", "bytes.Compare")
+	requireOrder("prefixPageValueShape", "PrefixPage native value defense drifted", "valueLength != 0", "valueBytes == nil", "prefixPageShapeError")
+	requireOrder("copyPrefixPageRow", "PrefixPage copy ownership drifted", "C.GoBytes", "C.GoBytes")
+	header, headerErr := os.ReadFile("../../../../third_party/libmdbx/mdbx.h")
+	mustEnvironment(t, headerErr)
+	headerText := string(header)
+	if !strings.Contains(headerText, "On success return \\ref MDBX_SUCCESS if key found exactly") || !strings.Contains(headerText, "Updates BOTH the key and the data for pointing to the actual key-value") {
+		t.Fatal("pinned mdbx_get_equal_or_great result ABI drifted")
+	}
 	ident := func(expr ast.Expr, name string) bool { value, ok := expr.(*ast.Ident); return ok && value.Name == name }
 	zeroInspection := func(expr ast.Expr) bool {
 		literal, ok := expr.(*ast.CompositeLit)
@@ -2424,7 +2687,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("Get") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("View") + body("Get") + body("PrefixPage") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)
@@ -2590,7 +2853,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
 	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(production[preambleStart:preambleEnd+2])))
-	require(preambleDigest == "e2d0bf31b59d26efe6dc3e3346319eceff38a6a7d79176ce7fdcd507e804ce38", "cgo preamble digest=%s", preambleDigest)
+	require(preambleDigest == "897536d2a447ae5239d5477356481e292113b8077d14883557f6bdf65ea6fb56", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
 	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
@@ -3606,7 +3869,7 @@ func TestUpdateReaderLifetime(t *testing.T) {
 	if strings.Count(plan, "reader.expire()") != 2 || invokedAt < 0 || invokedAt >= returnedAt || returnedAt >= expiredAt || expiredAt >= readAt || readAt >= preparedAt || strings.Contains(update, "reader.expire()") || strings.Index(update, "s.updatePlan(") >= strings.Index(update, "s.updateNative(") {
 		t.Fatal("Reader lifetime drifted")
 	}
-	const expireBody = "{\n\tr.active.Store(false)\n\tr.getMu.Lock()\n\t//nolint:staticcheck // Lock acquisition drains every in-flight Get before abort.\n\tr.getMu.Unlock()\n"
+	const expireBody = "{\n\tr.active.Store(false)\n\tr.getMu.Lock()\n\t//nolint:staticcheck // Lock acquisition drains every in-flight Get and PrefixPage before abort.\n\tr.getMu.Unlock()\n"
 	if expire != expireBody {
 		t.Fatal("Reader lifetime drifted")
 	}
