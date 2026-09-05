@@ -3421,6 +3421,9 @@ func requireOwnerReadySentinel(t *testing.T, f *daNonReplayFixture, run func(*DA
 // detail must appear in the message, so a row cannot pass on another arm's refusal of its image.
 func requireOwnerReadyTerminal(t *testing.T, f *daNonReplayFixture, run func(*DARelayState) error, detail, label string) {
 	t.Helper()
+	if detail == "" {
+		t.Fatalf("%s: strings.Contains accepts the empty detail, so a row must name its own arm's evidence", label)
+	}
 	before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	var terminal *canonicalDATerminalError
 	if err := run(f.relay); !errors.As(err, &terminal) || !strings.Contains(err.Error(), detail) {
@@ -3698,7 +3701,9 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			delete(s.orphanBytesByDAID, hidden)
 			delete(s.orphanBytesByPeerQuotaKey, "hide")
 		})
-		requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, "", "a record hidden from every cached total")
+		// The evidence names HIDDEN's own da_id, which is the row's whole claim: the record the
+		// cached domain no longer mentions is still walked, and refuses before touched is selected.
+		requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, fmt.Sprintf("per-da_id orphan bytes for %x", hidden), "a record hidden from every cached total")
 	})
 	t.Run("every tick decrements by one and mints one revision per record in da_id order", func(t *testing.T) {
 		// TTL boundaries above two (4, 3, 2) plus the exact revision sequence: admission order is
@@ -4329,30 +4334,35 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 	// skipped (the pre-fix bug). The "keep" rows leave the release matching nothing, so only the
 	// preflight can refuse them. The preflight refuses before the per-record projector's own
 	// arithmetic would, and neither mutates the clone.
+	// detail is the evidence string of the arm THIS row reaches, so no row can pass on another
+	// arm's refusal. The six rows reach six distinct messages: the per-record comparison inside
+	// canonicalDARecordAccounted, the locator bijection in checkOwnerReadyRemovalImageClosedLocked,
+	// and four totals across checkAgainstLocked and checkPeerBytesLocked (sync_da_relay.go).
 	for _, row := range []struct {
 		name    string
+		detail  string
 		quota   string
 		ttl     uint64
 		corrupt func(*DARelayState, [32]byte)
 	}{
-		{name: "a deleted cached da_id entry a resident record implies", corrupt: func(s *DARelayState, daID [32]byte) {
+		{name: "a deleted cached da_id entry a resident record implies", detail: "per-da_id orphan bytes for", corrupt: func(s *DARelayState, daID [32]byte) {
 			delete(s.orphanBytesByDAID, daID)
 		}},
-		{name: "an extra cached da_id entry no record backs", corrupt: func(s *DARelayState, _ [32]byte) {
+		{name: "an extra cached da_id entry no record backs", detail: "per-da_id orphan bytes: records imply", corrupt: func(s *DARelayState, _ [32]byte) {
 			s.orphanBytesByDAID[[32]byte{0xbb}] = 1
 		}},
-		{name: "an extra locator row no record implies", corrupt: func(s *DARelayState, _ [32]byte) {
+		{name: "an extra locator row no record implies", detail: "retained DA locator index holds", corrupt: func(s *DARelayState, _ [32]byte) {
 			s.locators[[32]byte{0xce}] = daRelayLocator{daID: [32]byte{0xcf}, kind: daRelayLocatorCommit}
 		}},
-		{name: "an extra per-peer entry no record backs", corrupt: func(s *DARelayState, _ [32]byte) {
+		{name: "an extra per-peer entry no record backs", detail: "per-peer orphan bytes: records imply", corrupt: func(s *DARelayState, _ [32]byte) {
 			s.orphanBytesByPeerQuotaKey["ghost"] = 1
 		}},
-		{name: "an orphan-pool total below what the resident record implies", corrupt: func(s *DARelayState, _ [32]byte) {
+		{name: "an orphan-pool total below what the resident record implies", detail: "orphan pool bytes: records imply", corrupt: func(s *DARelayState, _ [32]byte) {
 			s.orphanBytes = 0
 		}},
 		// Every incomplete record pins nothing, so a live pinned counter no record implies is a
 		// mismatch over the pinned domain alone.
-		{name: "a nonzero pinned pool over an all-incomplete image", quota: "keep", ttl: 2, corrupt: func(s *DARelayState, _ [32]byte) {
+		{name: "a nonzero pinned pool over an all-incomplete image", detail: "pinned payload bytes: records imply", quota: "keep", ttl: 2, corrupt: func(s *DARelayState, _ [32]byte) {
 			s.pinnedPayloadBytes = 999_999
 		}},
 	} {
@@ -4367,7 +4377,7 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 				f.setOwnerReadyTTL(incompleteID, row.ttl)
 			}
 			f.mutateRelay(func(s *DARelayState) { row.corrupt(s, incompleteID) })
-			requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, "", row.name)
+			requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, row.detail, row.name)
 		})
 	}
 	t.Run("a valid partial prefix leaves no alias of the clone in live state", func(t *testing.T) {
