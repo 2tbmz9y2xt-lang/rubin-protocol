@@ -3,7 +3,6 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
-	"fmt"
 	"maps"
 	"slices"
 	"sort"
@@ -1213,16 +1212,29 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // The per-candidate shape gate is checkDANonReplayShape, the predicate
 // validateCanonicalDARetainedSnapshot applies to every retained record — not the weaker
 // checkOwnerReadyRecord it wraps. The TTL and receivedTime bounds it does not read are applied by
-// ownerReadyRemovalGateFails, and the preflight is unconditional; see
-// checkOwnerReadyRemovalImageClosedLocked.
+// ownerReadyRemovalGateFails, and the preflight is unconditional.
 //
-// Cost, under BOTH the admission fence and DARelayState.mu, per peer release and per TTL tick:
-// O(retained bytes) of consensus.ParseTx over every retained record, plus one SHA3-256 per
-// incomplete chunk payload and one re-scan of each commit's outputs, on top of the image clone.
-// Selection then adds checkRetiredLocatorRowsLocked, which walks ALL of s.locators per projected
-// record, so a tick touching every record is O(records x locators) against the legacy O(records).
-// RUB-678 owns measuring that (removal_batch_scan_bound, M_LOCATOR_SCAN) before any live caller;
-// no cache, memo or skip-if-unchanged shortcut guards it, deliberately.
+// The preflight IS canonicalDARetainedImageClosed (sync_da_relay_validate.go), the canonical
+// builder's own phase-3 closure, CALLED over the whole retained set rather than restated: the
+// COMPLETE_SET refusal above leaves every record reaching it incomplete, which is what lets that
+// closure's state-agnostic ownerReadyAccounting bill each one exactly. Postcondition inherited
+// with the call: the first defect is RECORD-major in ascending da_id, so one record's locator
+// bijection and its accounting are both decided before the next record is read.
+//
+// Cost, under BOTH the admission fence and DARelayState.mu, per peer release and per TTL tick.
+// The preflight walks every retained record's bytes once through consensus.ParseTx, plus one
+// SHA3-256 and one payload equality per incomplete chunk and one re-scan of each commit's outputs,
+// on top of the shallow image clone. Selection walks each SURVIVING record's bytes three times
+// more: cloneOwnerReady in dropOwnerReadyChunksLocked, checkOwnerReadyRemovalSurvivor's
+// byte-equality of that clone against its source (a tautology on the TTL arm), and a second
+// cloneOwnerReady in projectDARecordImageLiveLocked — redundant for THIS caller, whose image.next
+// is already private, and kept because that projector is shared with admission, where it is not.
+// So a tick decrementing every record walks the retained bytes four times per record where the
+// legacy tick copied none of them; the whole-record arm pays the preflight walk alone. Selection
+// also runs checkRetiredLocatorRowsLocked over ALL of s.locators per projected record, so that
+// tick is O(records x locators) against the legacy O(records). RUB-678 owns measuring both before
+// any live caller (removal_preflight_reparse_bound, removal_batch_scan_bound, M_LOCATOR_SCAN); no
+// cache, memo or skip-if-unchanged shortcut guards them, deliberately.
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	candidates := s.sortedRetainedDAIDsLocked()
 	for _, daID := range candidates {
@@ -1230,7 +1242,7 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 			return nil, err
 		}
 	}
-	if err := s.checkOwnerReadyRemovalImageClosedLocked(candidates); err != nil {
+	if err := canonicalDARetainedImageClosed(s, candidates); err != nil {
 		return nil, err
 	}
 	return candidates, nil
@@ -1261,58 +1273,6 @@ func checkOwnerReadyRetainedRecordLocked(record daRelaySetRecord) error {
 // whole image with errDARelayImageIncompatible on a true result.
 func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
-}
-
-// checkOwnerReadyRemovalImageClosedLocked is the removal path's whole-image preflight (R1/R4),
-// composing the same per-record helpers as canonicalDARetainedImageClosed rather than a second
-// validator framework, over the candidate list the refusal above makes the whole retained set:
-//   - a locator bijection over every retained record, because s.locators holds a row for each of
-//     their members, equal to len(s.locators);
-//   - the orphan-domain accounting and the pinned-payload total, compared to the live totals and
-//     entry counts.
-//
-// This is the accounting and locator-bijection integrity gate alone; every record's own scalars and
-// retained bytes are bound by the candidate walk instead.
-func (s *DARelayState) checkOwnerReadyRemovalImageClosedLocked(candidates [][32]byte) error {
-	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
-		return err
-	}
-	indexed := make(map[[32]byte]bool, len(s.locators))
-	for _, daID := range candidates {
-		record := s.sets[daID]
-		if record.daID != daID {
-			return terminalCanonicalDAError(fmt.Errorf("retained DA record stored under da_id %x carries da_id %x", daID, record.daID))
-		}
-		if err := canonicalDARecordLocatorsIndexed(s, record, indexed); err != nil {
-			return err
-		}
-	}
-	if len(indexed) != len(s.locators) {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA locator index holds %d rows against %d retained members", len(s.locators), len(indexed)))
-	}
-	return s.checkOwnerReadyRemovalOrphanDomainLocked(candidates)
-}
-
-// checkOwnerReadyRemovalOrphanDomainLocked derives every field checkAgainstLocked compares
-// and exempts none of them, so any derived-versus-live accounting mismatch is terminal (R4).
-// canonicalDARecordAccounted bills BOTH domains for one record — the orphan-domain terms and,
-// through pinnedPayloadAccountingBytes, the pinned-payload term — so this walk adds nothing of its
-// own and every term reaches the derived total exactly once.
-//
-// pinnedPayloadAccountingBytes returns zero in every state but COMPLETE_SET (da_relay_record.go),
-// which the candidate walk refuses, so the derived pinned total is zero on every image that reaches
-// here and the comparison reads as "the live pinned pool must be empty".
-func (s *DARelayState) checkOwnerReadyRemovalOrphanDomainLocked(candidates [][32]byte) error {
-	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
-	for _, daID := range candidates {
-		if err := canonicalDARecordAccounted(s, s.sets[daID], &totals); err != nil {
-			return err
-		}
-	}
-	if err := totals.checkAgainstLocked(s); err != nil {
-		return terminalCanonicalDAError(err)
-	}
-	return nil
 }
 
 func ownerReadyPeerRemovalVictims(clone *DARelayState, quotaIdentity string) ([]DAAdmissionVictim, error) {

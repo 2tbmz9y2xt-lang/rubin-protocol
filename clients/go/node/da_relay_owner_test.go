@@ -4336,8 +4336,8 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 	// arithmetic would, and neither mutates the clone.
 	// detail is the evidence string of the arm THIS row reaches, so no row can pass on another
 	// arm's refusal. The six rows reach six distinct messages: the per-record comparison inside
-	// canonicalDARecordAccounted, the locator bijection in checkOwnerReadyRemovalImageClosedLocked,
-	// and four totals across checkAgainstLocked and checkPeerBytesLocked (sync_da_relay.go).
+	// canonicalDARecordAccounted, the locator bijection in canonicalDARetainedImageClosed, and
+	// four totals across checkAgainstLocked and checkPeerBytesLocked (sync_da_relay.go).
 	for _, row := range []struct {
 		name    string
 		detail  string
@@ -4378,6 +4378,30 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			}
 			f.mutateRelay(func(s *DARelayState) { row.corrupt(s, incompleteID) })
 			requireOwnerReadyTerminal(t, f, ownerReadyDropRelease, row.detail, row.name)
+		})
+	}
+	// FIRST-ERROR ORDER over an image carrying TWO defects on different axes. The closure is
+	// canonicalDARetainedImageClosed, which is RECORD-major: it decides the lower da_id's locator
+	// bijection AND its accounting before reading the higher one, so the accounting refusal is the
+	// sole result. A closure that walked every record's locators first and every record's
+	// accounting second would report the higher da_id's locator refusal instead, and this row's
+	// evidence string is what separates the two orders — the earlier two-record row (0xdb, 0xdd)
+	// carries one defect, so both orders answer it identically. Both records are provenance "keep",
+	// leaving the preflight as the only arm either selector can refuse on.
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("a two-defect image refuses record-major on the "+selector.name, func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			accounted, indexed := [32]byte{0x21}, [32]byte{0x22}
+			f.ownerReadyChunk(accounted, 0, "acct", daNonReplayPeer("keep"))
+			indexedTx := f.ownerReadyChunk(indexed, 0, "loc", daNonReplayPeer("keep"))
+			f.mutateRelay(func(s *DARelayState) {
+				delete(s.orphanBytesByDAID, accounted) // lower da_id: accounting defect
+				row := s.locators[indexedTx.txid]      // higher da_id: locator defect
+				row.chunkIndex++                       // still one row, no longer the one the record implies
+				s.locators[indexedTx.txid] = row
+			})
+			requireOwnerReadyTerminal(t, f, selector.run, fmt.Sprintf("per-da_id orphan bytes for %x", accounted),
+				"a two-defect image on the "+selector.name)
 		})
 	}
 	t.Run("a valid partial prefix leaves no alias of the clone in live state", func(t *testing.T) {
