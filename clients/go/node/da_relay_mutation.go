@@ -1161,13 +1161,15 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 // owner.mu, so the caller runs it before the hold and every allocation of the proof happens here.
 //
 // It returns the members whose live claim the single-span proof had already checked when it stopped:
-// the whole image on success, the prefix before the refusing member otherwise. The da_id walk
+// the prefix the record walk had reached when it refused, the whole image otherwise. The da_id walk
 // ascends and within a record the order is locatorRows order, so one image still yields one error,
-// and checking that prefix under the hold before returning this error yields the exact error the
+// and checking those members under the hold before returning this error yields the exact error the
 // unsplit proof returned.
 //
-// The closing batch-versus-retained comparison is a fail-closed backstop: the preflight's locator
-// bijection already makes an aliased token unreachable, so no test executes that arm.
+// The closing batch-versus-retained comparison is a fail-closed backstop the alias row executes:
+// the preflight's bijection (canonicalDARecordLocatorsIndexed) keys by txid and cannot see a
+// token two members share, so that image lands here as errDARelayImageIncompatible. The live
+// claim proof returns that sentinel first under the hold, so deleting this arm reddens no row.
 func ownerReadyRetainedBindingMembers(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) ([]*daRelayMemberIdentity, error) {
 	image := make([]*daRelayMemberIdentity, 0, len(clone.locators))
 	retained := make(map[PendingOutpointToken]struct{}, len(clone.locators))

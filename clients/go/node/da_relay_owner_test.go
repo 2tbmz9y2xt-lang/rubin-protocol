@@ -4133,11 +4133,11 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		// The owner-domain gap: checkDANonReplayShape never reads tokens and
 		// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch, so one token on
 		// two members would publish the survivor and drop its claim — a member with no claim.
-		// The arm that now refuses it is the retained-binding claim proof: the survivor's aliased
-		// token resolves the VICTIM's claim, which names another txid, so the survivor is not
-		// described by it. The closing batch-versus-retained comparison no longer sees any
-		// reachable image (see ownerReadyRetainedBindingMembers), so this row pins the
-		// outcome and the unchanged image, not that one arm.
+		// Two arms of the binding proof refuse it: ownerReadyRetainedBindingMembers' closing
+		// batch-versus-retained comparison returns the sentinel as bindErr, and under the hold
+		// checkOwnerReadyMemberClaimsLocked returns the same sentinel first, because the survivor's
+		// aliased token resolves the VICTIM's claim, which names another txid. This row pins the
+		// outcome and the unchanged image, not which arm.
 		f := newDANonReplayFixture(t, 2)
 		dropID, keepID := [32]byte{0xf0}, [32]byte{0xf1}
 		f.ownerReadyChunk(dropID, 0, "alias0", daNonReplayPeer("drop"))
