@@ -1054,18 +1054,28 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones
 // the retained image under the existing admission fence and DARelayState.mu, lets
 // selectVictims derive every exact per-record transition and the bound-owner victim tokens on
-// that clone, and then takes the arm BeginDARemoval (da_admission.go) takes on the same relay: a
-// nil mempool alone is unbound and publishes the DA image as the whole change, a nil chainState or
-// a nil pending-outpoint owner is its exact refusal, and any other relay publishes under its claim
-// domain — a batch that releases no member taking the same arm as one that does. Any error before
-// publication leaves both complete images unchanged.
+// that clone, and then binds the relay. TWO of the three arms mirror BeginDARemoval
+// (da_admission.go): a nil chainState and a nil pending-outpoint owner are its exact refusals. The
+// third does not — BeginDARemoval refuses a nil mempool as well, while here a nil mempool leaves no
+// claim domain to bind and publishes the DA image as the whole change. Any other relay publishes
+// under its claim domain, a batch that releases no member taking the same arm as one that does. Any
+// error before publication leaves both complete images unchanged.
 //
 // ERROR CLASSES a caller receives, for RUB-678's removal_error_class_taxonomy to sort into latch
-// and transient: errDARelayImageIncompatible (candidate gate, stored scalars, survivor baseline,
+// and transient. The callees define the set — every sentinel any of them can return is a possible
+// value — and both groups below classify all of it, so a dead family is named, not omitted.
+// REACHABLE: errDARelayImageIncompatible (candidate gate, stored scalars, survivor baseline,
 // retained binding, live claim), errDARelayArithmeticOverflow (revision or accounting),
 // *canonicalDATerminalError (retained parse/bind, map-key, locator bijection, accounting closure)
-// and *TxAdmitError (nil chainstate, nil owner, victim refusal). The locator-row sentinels stay
-// unreachable here: the preflight's bijection already pins every row of every candidate.
+// and *TxAdmitError (nil chainstate, nil owner, victim refusal).
+// STATICALLY PRESENT AND DEAD: errDARelayLocatorMismatch — the preflight's bijection already pins
+// every row of every candidate; errDARelayRecordStale — the whole-record arm mints its image from
+// the same s.sets read checkDARecordImageBaselineLocked repeats; the four orphan cap sentinels —
+// ownerReadyRemovalCaps lifts every cap they guard to the uint64 maximum; and
+// checkOwnerReadyRecord's own family (errDARelayMemberIncomplete, errDARelayChunkIndexOutOfRange,
+// errDARelayChunkPayloadSizeInvalid, errDAProvenanceInvalid) — only checkOwnerReadyRemovalSurvivor
+// propagates it, over a byte-identical submultiset of a record the candidate gate already passed
+// through that same predicate.
 // Postcondition: this path only RETURNS them; it reads and sets no latch of its own.
 //
 // FENCE OWNERSHIP for the issue-678 wiring: this body takes lockAdmissionFence ITSELF, where every
