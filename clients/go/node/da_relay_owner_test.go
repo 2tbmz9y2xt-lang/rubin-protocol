@@ -4054,15 +4054,15 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare victims: %v", err)
 			}
-			// Declared off-lock exactly where production declares it, so the heap cell &failure
-			// forces is taken before the measured region on both sides.
+			// Declared above the measured region exactly where production declares it above the
+			// lock: production's &failure escapes, so its heap cell is taken off-lock, and the
+			// mapper that takes the address runs after the release, outside the hold measured here.
 			var failure PendingOutpointError
 			var failed bool
 			allocs = testing.AllocsPerRun(20, func() {
 				owner.mu.Lock()
 				if failure, failed = owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
 					refusals++
-					refusal = txAdmitFromPendingOutpointError(&failure)
 				}
 				if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
 					refusals++
@@ -4070,6 +4070,9 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 				s.publishAtomicBatchLocked(clone)
 				owner.mu.Unlock()
 			})
+			if failed {
+				refusal = txAdmitFromPendingOutpointError(&failure) // mapped after the release, as production maps it
+			}
 		})
 		if refusals != 0 {
 			t.Fatalf("probe took %d refusals (%v); it must measure the path that reaches publication", refusals, refusal)
@@ -4078,39 +4081,84 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			t.Fatalf("owner hold allocated %v times per run", allocs)
 		}
 		t.Logf("owner hold over 2 records and 4 members: %v allocations per run", allocs)
-		// The probe names the hold's statements, so pin the hold's call set: a later round adding an
-		// allocating call under owner.mu must redden here even though the probe cannot see it.
-		// dropClaimLocked is the one call the probe omits — it mutates, so it cannot be repeated —
-		// and it only reads byToken/byOutpoint and deletes from them. The bound is over the path
-		// that reaches publication: txAdmitFromPendingOutpointError builds the victim refusal's
-		// error inside the hold, as it already did and as BeginCommit does.
-		held, hoisted, inHold := false, false, map[string]bool{}
-		ast.Inspect(daOwnerFileFuncs(t, "da_relay_mutation.go")["commitOwnerReadyRemovalClaimsLocked"].Body, func(node ast.Node) bool {
-			switch node := node.(type) {
-			case *ast.ValueSpec:
-				hoisted = hoisted || !held && node.Names[0].Name == "failure"
-			case *ast.CallExpr:
-				switch name := daNonReplaySelector(node.Fun); {
-				case name == "owner.mu.Lock":
-					held = true
-				case held:
-					inHold[name] = true
+		// The probe names the hold's statements, so pin the hold's call set AND its statement order.
+		// A later round adding an allocating call under owner.mu, or a return that does not release
+		// it first, must redden here: AllocsPerRun sees neither. dropClaimLocked is the one call the
+		// probe omits — it mutates, so it cannot be repeated — and it only reads byToken/byOutpoint
+		// and deletes from them. txAdmitFromPendingOutpointError is NOT in the set and must not be:
+		// production releases owner.mu and only then maps the victim refusal, the shape both
+		// BeginCommit bodies use (da_admission.go). Every branch under the hold must therefore be an
+		// exit — release, then return — so a branch that instead falls back into the hold reddens
+		// here rather than silently outgrowing the flat walk that models it.
+		body := daOwnerFileFuncs(t, "da_relay_mutation.go")["commitOwnerReadyRemovalClaimsLocked"].Body
+		held, offLock, inHold := false, map[string]bool{}, map[string]bool{}
+		names := func(node ast.Node, skip ast.Node, into map[string]bool) {
+			ast.Inspect(node, func(inner ast.Node) bool {
+				switch inner := inner.(type) {
+				case *ast.CallExpr:
+					into[daNonReplaySelector(inner.Fun)] = true
+				case *ast.ValueSpec:
+					into[inner.Names[0].Name] = true
 				}
-			}
-			return true
-		})
-		if !hoisted {
-			t.Fatal("failure is declared inside the hold: &failure escapes, so the hold takes its heap cell")
+				return inner != skip
+			})
 		}
-		want := []string{"checkOwnerReadyMemberClaimsLocked", "owner.dropClaimLocked", "owner.mu.Unlock", "owner.validateDAAdmissionVictimsLocked", "s.publishAtomicBatchLocked", "txAdmitFromPendingOutpointError"}
+		for index, statement := range body.List {
+			branch, isBranch := statement.(*ast.IfStmt)
+			switch {
+			case daNonReplayCall(statement, "owner.mu.Lock", ""):
+				held = true
+			case daNonReplayCall(statement, "owner.mu.Unlock", ""):
+				// The function returns error, so Go's terminating-statement rule guarantees a
+				// statement after this release; it must be the return the release guards.
+				held = false
+				if _, returns := body.List[index+1].(*ast.ReturnStmt); !returns {
+					t.Fatalf("the release at statement %d does not immediately precede a return", index)
+				}
+			case !held:
+				names(statement, nil, offLock)
+			case isBranch:
+				names(branch, branch.Body, inHold)
+				if len(branch.Body.List) != 2 || branch.Else != nil || !daNonReplayCall(branch.Body.List[0], "owner.mu.Unlock", "") {
+					t.Fatalf("the branch at statement %d does not release owner.mu as its first act", index)
+				}
+				if _, returns := branch.Body.List[1].(*ast.ReturnStmt); !returns {
+					t.Fatalf("the branch at statement %d releases owner.mu without returning", index)
+				}
+			default:
+				names(statement, nil, inHold)
+			}
+		}
+		if held {
+			t.Fatal("commitOwnerReadyRemovalClaimsLocked falls through with owner.mu still held")
+		}
+		if !offLock["failure"] {
+			t.Fatal("failure is not declared above the hold: &failure escapes, so the hold takes its heap cell")
+		}
+		want := []string{"checkOwnerReadyMemberClaimsLocked", "owner.dropClaimLocked", "owner.validateDAAdmissionVictimsLocked", "s.publishAtomicBatchLocked"}
 		if got := slices.Sorted(maps.Keys(inHold)); !slices.Equal(got, want) {
 			t.Fatalf("owner hold calls %v, want %v", got, want)
 		}
 		// AllocsPerRun measures the closure, not the hold, so the closure must BE the hold: the same
-		// calls, minus dropClaimLocked. Comparing call sets pins the BINDING form too, because
-		// discarding the refusal descriptor drops txAdmitFromPendingOutpointError with it.
-		measured := map[string]bool{}
+		// calls, minus dropClaimLocked. The lock and the release delimit the hold, so neither is a
+		// member of either set. The walk is scoped to THIS subtest, because the refusal receipt
+		// below measures three closures of its own that are not the hold.
+		var probe ast.Node
 		ast.Inspect(daOwnerFileFuncs(t, "da_relay_owner_test.go")["TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch"].Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || daNonReplaySelector(call.Fun) != "t.Run" || len(call.Args) != 2 {
+				return true
+			}
+			if name, ok := call.Args[0].(*ast.BasicLit); ok && strings.Contains(name.Value, "the owner hold allocates nothing") {
+				probe = call.Args[1]
+			}
+			return true
+		})
+		if probe == nil {
+			t.Fatal("the probe subtest is no longer named 'the owner hold allocates nothing'")
+		}
+		measured := map[string]bool{}
+		ast.Inspect(probe, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
 			if !ok || daNonReplaySelector(call.Fun) != "testing.AllocsPerRun" || len(call.Args) != 2 {
 				return true
@@ -4124,10 +4172,67 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			return false
 		})
 		delete(measured, "owner.mu.Lock")
+		delete(measured, "owner.mu.Unlock")
 		mirror := slices.DeleteFunc(slices.Clone(want), func(name string) bool { return name == "owner.dropClaimLocked" })
 		if got := slices.Sorted(maps.Keys(measured)); !slices.Equal(got, mirror) {
 			t.Fatalf("the probe measures %v, want the hold's %v", got, mirror)
 		}
+	})
+	// The REFUSAL path's receipt. The probe above drives the hold's statements on the path that
+	// publishes; this row drives the REAL commitOwnerReadyRemovalClaimsLocked on a batch the owner
+	// refuses — it mutates nothing on that path, so AllocsPerRun may repeat it — and closes its
+	// allocation accounting: the whole refusal costs the off-lock preparation, the refusal
+	// descriptor's own heap cell and the mapper, with nothing left over.
+	// WHAT THIS ROW CANNOT SEE: placement. Moving txAdmitFromPendingOutpointError back under
+	// owner.mu leaves every measured term unchanged and the identity closing, because the same
+	// allocations happen in a different place; only the statement-order guard above sees that.
+	// What this row does see is an allocation ADDED anywhere on the refusal path, under the hold
+	// included: the identity stops closing wherever the new allocation is put.
+	t.Run("the refusal path allocates only its off-lock preparation, descriptor and mapper", func(t *testing.T) {
+		f, daID := newDANonReplayFixture(t, 2), [32]byte{0xb1}
+		f.ownerReadyChunk(daID, 0, "r0", daNonReplayPeer("q"))
+		owner := f.mp.pendingOutpoints
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		var whole, preparation, mapper float64
+		var refusal error
+		f.mutateRelay(func(s *DARelayState) {
+			clone := s.cloneForAtomicBatchLocked()
+			victim := ownerReadyMemberVictim(clone.sets[daID].chunks[0].member)
+			victim.Token.seq = ^uint64(0) // shape-valid, past the high-water: only the in-hold victim arm refuses it
+			victims := []DAAdmissionVictim{victim}
+			whole = testing.AllocsPerRun(20, func() {
+				refusal = s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
+			})
+			var batch []DAAdmissionVictim
+			var members []*daRelayMemberIdentity
+			preparation = testing.AllocsPerRun(20, func() {
+				batch, _ = prepareDAAdmissionVictims(victims, [32]byte{})
+				members, _ = ownerReadyRetainedBindingMembers(clone, owner, batch)
+			})
+			if len(batch) != 1 || len(members) != 1 {
+				t.Fatalf("preparation yielded batch=%d members=%d, want 1 and 1", len(batch), len(members))
+			}
+			// The mapper alone, over the descriptor the refusal actually produces. failure is
+			// declared outside the closure, so its heap cell is not in this measurement — exactly
+			// as production's is not inside the hold.
+			failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{})
+			if !failed {
+				t.Fatal("the receipt batch must be refused by the victim arm")
+			}
+			mapper = testing.AllocsPerRun(20, func() { refusal = txAdmitFromPendingOutpointError(&failure) })
+		})
+		var admitErr *TxAdmitError
+		if !errors.As(refusal, &admitErr) || admitErr.Message != "invalid DA victim token" {
+			t.Fatalf("receipt refusal=%v, want invalid DA victim token", refusal)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		// One cell for the refusal descriptor: &failure escapes, so every call takes one, above
+		// the lock. It is the one term with no closure of its own to measure.
+		const descriptor = 1
+		if whole != preparation+descriptor+mapper {
+			t.Fatalf("refusal path allocates %v, want preparation %v + descriptor %d + mapper %v", whole, preparation, descriptor, mapper)
+		}
+		t.Logf("refusal path: %v allocations = preparation %v + descriptor %d + mapper %v", whole, preparation, descriptor, mapper)
 	})
 	t.Run("a victim token still held by a surviving member is terminal before publication", func(t *testing.T) {
 		// The owner-domain gap: checkDANonReplayShape never reads tokens and

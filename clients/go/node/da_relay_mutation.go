@@ -1122,9 +1122,14 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 // requires of every caller (pending_outpoint_owner.go) and as BeginCommit does with
 // prepareDAAdmissionVictims (da_admission.go); its error is carried past the victim preflight and
 // the live claim walk, so the first refusal stays the one the single-span proof returned.
-// Postcondition: the path from owner.mu.Lock() to publication allocates nothing. The refusal
-// descriptor is DECLARED above the lock for exactly that reason: &failure escapes, so its heap
-// cell is taken off-lock; declaring it inside the hold moves that allocation under owner.mu.
+// Postcondition: nothing between owner.mu.Lock() and owner.mu.Unlock() allocates, on ANY path.
+// The hold is released EXPLICITLY, never by defer, and the victim refusal is mapped AFTER that
+// release: the shape both BeginCommit bodies use on their refusal path (da_admission.go). Here
+// EVERY return releases, which is where the parity stops — a BeginCommit hands a live hold to
+// its DACommit on success, and this body owns the whole hold.
+// The refusal descriptor is DECLARED above the lock for the same reason: &failure escapes, so
+// its heap cell is taken off-lock. No deferred unlock guards this body, so a return added under
+// the hold leaks owner.mu; the statement-order guard in da_relay_owner_test.go reddens on that.
 func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpointOwner, clone *DARelayState, victims []DAAdmissionVictim) error {
 	var batch []DAAdmissionVictim
 	if len(victims) != 0 {
@@ -1137,20 +1142,23 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 	var failure PendingOutpointError
 	var failed bool
 	owner.mu.Lock()
-	defer owner.mu.Unlock()
 	if failure, failed = owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+		owner.mu.Unlock()
 		return txAdmitFromPendingOutpointError(&failure)
 	}
 	if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
+		owner.mu.Unlock()
 		return err
 	}
 	if bindErr != nil {
+		owner.mu.Unlock()
 		return bindErr
 	}
 	s.publishAtomicBatchLocked(clone)
 	for _, victim := range batch {
 		owner.dropClaimLocked(victim.Token)
 	}
+	owner.mu.Unlock()
 	return nil
 }
 
