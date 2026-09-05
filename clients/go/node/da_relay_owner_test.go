@@ -3577,7 +3577,9 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		whole   bool
 		dropped []uint16
 	}{
+		{name: "a matching commit with no chunk at all removes the whole record", commit: daNonReplayPeer("drop"), whole: true},
 		{name: "a foreign-quota PEER sibling does not protect a matching commit", commit: daNonReplayPeer("drop"), chunks: []daProvenance{daNonReplayPeer("keep")}, whole: true},
+		{name: "a matching chunk under a LOCAL commit drops the chunk alone", commit: LocalDAProvenance(), chunks: []daProvenance{daNonReplayPeer("drop")}, dropped: []uint16{0}},
 		{name: "a matching chunk beside a foreign-quota PEER sibling still removes the whole record", commit: daNonReplayPeer("drop"), chunks: []daProvenance{daNonReplayPeer("drop"), daNonReplayPeer("keep")}, whole: true},
 		{name: "a DETACHED_REORG sibling alone protects a matching commit", commit: daNonReplayPeer("drop"), chunks: []daProvenance{DetachedReorgDAProvenance()}},
 		{name: "a LOCAL sibling protects a matching commit beside a foreign-quota PEER sibling", commit: daNonReplayPeer("drop"), chunks: []daProvenance{daNonReplayPeer("keep"), LocalDAProvenance()}},
@@ -4193,6 +4195,24 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			}
 		})
 	}
+	// A mempool with a LIVE claim domain but no chainstate is the third BeginDARemoval arm, and the
+	// one publishing would harm: the removed member's finalized claim stays in an owner no retained
+	// DA record names any more, so its outpoints never free. Only NewMempoolWithConfig builds a
+	// mempool (mempool_stats.go, which refuses a nil chainstate), so this shape is a hand-built
+	// relay today and the arm keeps it that way.
+	t.Run("a bound relay with a nil chainstate strands no claim", func(t *testing.T) {
+		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xe3}
+		f.ownerReadyChunk(daID, 0, "c0", daNonReplayPeer("q"))
+		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		token := before.sets[daID].chunks[0].member.token
+		f.mutateRelay(func(s *DARelayState) { s.mempool.chainState = nil }) // live owner, no chainstate
+		var admitErr *TxAdmitError
+		if err := f.relay.releaseOwnerReadyPeerQuota("q"); !errors.As(err, &admitErr) || admitErr.Message != "nil chainstate" {
+			t.Fatalf("bound nil-chainstate release: err=%v, want nil chainstate", err)
+		}
+		ownerReadyClaimLive(t, cloneDAAdmissionOwner(f.mp.pendingOutpoints), token)
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+	})
 }
 
 func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {

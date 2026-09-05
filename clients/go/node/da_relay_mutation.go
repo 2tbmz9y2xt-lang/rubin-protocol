@@ -1051,9 +1051,11 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // commitOwnerReadyRemoval runs one owner-atomic incomplete-record removal batch. It clones
 // the retained image under the existing admission fence and DARelayState.mu, lets
 // selectVictims derive every exact per-record transition and the bound-owner victim tokens on
-// that clone, and publishes it through the arm the relay's claim domain selects — a batch that
-// releases no member taking the same arm as one that does. Any error before publication leaves
-// both complete images unchanged.
+// that clone, and then takes the arm BeginDARemoval (da_admission.go) takes on the same relay: a
+// nil mempool alone is unbound and publishes the DA image as the whole change, a nil chainState or
+// a nil pending-outpoint owner is its exact refusal, and any other relay publishes under its claim
+// domain — a batch that releases no member taking the same arm as one that does. Any error before
+// publication leaves both complete images unchanged.
 //
 // FENCE OWNERSHIP for the issue-678 wiring: this body takes lockAdmissionFence ITSELF, where every
 // merged sibling takes it in the exported wrapper. sync.RWMutex is not reentrant, so the wrapper that
@@ -1070,12 +1072,15 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 	if err != nil {
 		return err
 	}
-	if s.mempool == nil || s.mempool.chainState == nil {
+	if s.mempool == nil {
 		s.publishAtomicBatchLocked(clone) // truly unbound: the DA image is the whole change
 		return nil
 	}
+	if s.mempool.chainState == nil {
+		return txAdmitUnavailable("nil chainstate")
+	}
 	owner := s.mempool.pendingOutpoints
-	if owner == nil { // bound but no claim domain: BeginDARemoval's exact refusal, whatever the batch releases
+	if owner == nil {
 		return txAdmitUnavailable("nil pending-outpoint owner")
 	}
 	return s.commitOwnerReadyRemovalClaimsLocked(owner, clone, victims)
@@ -1207,7 +1212,10 @@ func checkOwnerReadyRetainedRecordLocked(record daRelaySetRecord) error {
 	return (&canonicalDARetainedImage{}).bindRetainedRecord(record)
 }
 
-// ownerReadyRemovalGateFails reports whether the record's revision, receivedTime, ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the STORED-SCALAR half of the per-candidate removal gate, whose retained-bytes half is bindRetainedRecord; the caller fails the whole image with errDARelayImageIncompatible on a true result.
+// ownerReadyRemovalGateFails reports whether the record's revision, receivedTime,
+// ttlBlocksRemaining, locator rows, or checkDANonReplayShape fails the STORED-SCALAR half of the
+// per-candidate removal gate, whose retained-bytes half is bindRetainedRecord; the caller fails the
+// whole image with errDARelayImageIncompatible on a true result.
 func (r daRelaySetRecord) ownerReadyRemovalGateFails() bool {
 	return r.revision == 0 || r.receivedTime == 0 || r.ttlBlocksRemaining == 0 || len(r.locatorRows()) == 0 || r.checkDANonReplayShape() != nil
 }
@@ -1244,25 +1252,18 @@ func (s *DARelayState) checkOwnerReadyRemovalImageClosedLocked(candidates [][32]
 
 // checkOwnerReadyRemovalOrphanDomainLocked derives every field checkAgainstLocked compares
 // and exempts none of them, so any derived-versus-live accounting mismatch is terminal (R4).
-// The two terms bill different domains, which is the whole reason this preflight cannot reuse
-// canonicalDARetainedImageClosed wholesale:
-//   - the orphan-domain terms, through canonicalDARecordAccounted;
-//   - the pinned-payload term, through pinnedPayloadAccountingBytes, the same accessor the live
-//     writers bill with.
+// canonicalDARecordAccounted bills BOTH domains for one record — the orphan-domain terms and,
+// through pinnedPayloadAccountingBytes, the pinned-payload term — so this walk adds nothing of its
+// own and every term reaches the derived total exactly once.
 //
 // pinnedPayloadAccountingBytes returns zero in every state but COMPLETE_SET (da_relay_record.go),
 // which the candidate walk refuses, so the derived pinned total is zero on every image that reaches
-// here and the comparison reads as "the live pinned pool must be empty". The term is billed rather
-// than assumed zero: it is what charges a State C record if issue 1118 makes one admissible here.
+// here and the comparison reads as "the live pinned pool must be empty".
 func (s *DARelayState) checkOwnerReadyRemovalOrphanDomainLocked(candidates [][32]byte) error {
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
 	for _, daID := range candidates {
-		record := s.sets[daID]
-		if err := canonicalDARecordAccounted(s, record, &totals); err != nil {
+		if err := canonicalDARecordAccounted(s, s.sets[daID], &totals); err != nil {
 			return err
-		}
-		if err := totals.add(daRelayRecordAccounting{}, record.pinnedPayloadAccountingBytes()); err != nil {
-			return terminalCanonicalDAError(err)
 		}
 	}
 	if err := totals.checkAgainstLocked(s); err != nil {
