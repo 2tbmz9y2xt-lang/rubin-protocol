@@ -1091,6 +1091,12 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 // owner-lock hold. An empty batch takes the same route, so a member-preserving decrement is
 // proven owner-bound before it republishes. Nothing fallible runs after the DA publish, so a
 // record and its claim cannot become observably separated.
+//
+// The binding proof's clone-only half is materialized BEFORE the hold, as the owner's lock contract
+// requires of every caller (pending_outpoint_owner.go) and as BeginCommit does with
+// prepareDAAdmissionVictims (da_admission.go); its error is carried past the victim preflight and
+// the live claim walk, so the first refusal stays the one the single-span proof returned.
+// Postcondition: the path from owner.mu.Lock() to publication allocates nothing.
 func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpointOwner, clone *DARelayState, victims []DAAdmissionVictim) error {
 	var batch []DAAdmissionVictim
 	if len(victims) != 0 {
@@ -1099,13 +1105,17 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 			return txAdmitFromPendingOutpointError(err)
 		}
 	}
+	members, bindErr := ownerReadyRetainedBindingMembers(clone, owner, batch)
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
 		return txAdmitFromPendingOutpointError(&failure)
 	}
-	if err := checkOwnerReadyRetainedBindingLocked(clone, owner, batch); err != nil {
+	if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
 		return err
+	}
+	if bindErr != nil {
+		return bindErr
 	}
 	s.publishAtomicBatchLocked(clone)
 	for _, victim := range batch {
@@ -1114,49 +1124,70 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 	return nil
 }
 
-// checkOwnerReadyRetainedBindingLocked proves the clone is publishable under owner: every
-// retained member of every record is bound to owner and to a live claim that describes it, no
-// token appears twice anywhere in the image, and no token in batch still belongs to a member the
-// clone RETAINS. The da_id walk ascends, so one image yields one error.
+// ownerReadyRetainedBindingMembers is the clone-only half of the proof that the clone is publishable
+// under owner: every retained member carries a nonzero token owned by owner (checkDANonReplayTokens,
+// a pointer and sequence compare that reads no owner map), no token appears twice anywhere in the
+// image, and no token in batch still belongs to a member the clone RETAINS. It reads nothing behind
+// owner.mu, so the caller runs it before the hold and every allocation of the proof happens here.
+//
+// It returns the members whose live claim the single-span proof had already checked when it stopped:
+// the whole image on success, the prefix before the refusing member otherwise. The da_id walk
+// ascends and within a record the order is locatorRows order, so one image still yields one error,
+// and checking that prefix under the hold before returning this error yields the exact error the
+// unsplit proof returned.
 //
 // The closing batch-versus-retained comparison is a fail-closed backstop: the preflight's locator
 // bijection already makes an aliased token unreachable, so no test executes that arm.
-func checkOwnerReadyRetainedBindingLocked(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) error {
+func ownerReadyRetainedBindingMembers(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) ([]*daRelayMemberIdentity, error) {
+	image := make([]*daRelayMemberIdentity, 0, len(clone.locators))
 	retained := make(map[PendingOutpointToken]struct{}, len(clone.locators))
 	for _, daID := range clone.sortedRetainedDAIDsLocked() {
-		if err := checkOwnerReadyRecordBinding(clone.sets[daID], owner, retained); err != nil {
-			return err
+		members, err := ownerReadyRecordMembers(clone.sets[daID], owner, retained)
+		image = append(image, members...)
+		if err != nil {
+			return image, err
 		}
 	}
 	for _, victim := range batch {
 		if _, held := retained[victim.Token]; held {
-			return errDARelayImageIncompatible
+			return image, errDARelayImageIncompatible
 		}
 	}
-	return nil
+	return image, nil
 }
 
-// checkOwnerReadyRecordBinding proves one record's owner binding and adds its members' tokens to
-// seen, refusing the first token seen twice or a memberless occupied slot. EVERY member must carry
-// a nonzero token owned by owner (checkDANonReplayTokens, the token check checkDANonReplayPrior
-// applies canonically) AND resolve a LIVE owner claim that describes it: DA domain, txid, ordered
-// inputs and finalized, through canonicalDAClaimBindsMember, the canonical builder's own phase-5
-// predicate (sync_da_relay.go), over the owner's LIVE byToken index — which is why the proof lives
-// under the owner mutex here and not in the preflight.
-func checkOwnerReadyRecordBinding(record daRelaySetRecord, owner *PendingOutpointOwner, seen map[PendingOutpointToken]struct{}) error {
+// ownerReadyRecordMembers proves one record's clone-only binding and adds its members' tokens to
+// seen, refusing a memberless occupied slot or the first token seen twice. It returns the members
+// the caller must still bind to a live claim, and on the aliased-token refusal only the prefix
+// before the offending member, whose claims the unsplit proof had already checked.
+func ownerReadyRecordMembers(record daRelaySetRecord, owner *PendingOutpointOwner, seen map[PendingOutpointToken]struct{}) ([]*daRelayMemberIdentity, error) {
 	if err := record.checkDANonReplayTokens(owner); err != nil {
-		return err
+		return nil, err
 	}
 	members, err := canonicalDARetainedMemberIdentities(record)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, member := range members {
-		claim := owner.byToken[member.token]
-		if _, alias := seen[member.token]; alias || claim == nil || !canonicalDAClaimBindsMember(*claim, member) {
-			return errDARelayImageIncompatible
+	for i, member := range members {
+		if _, alias := seen[member.token]; alias {
+			return members[:i], errDARelayImageIncompatible
 		}
 		seen[member.token] = struct{}{}
+	}
+	return members, nil
+}
+
+// checkOwnerReadyMemberClaimsLocked is the live half: every prepared member must resolve a LIVE
+// owner claim that describes it — DA domain, txid, ordered inputs and finalized — through
+// canonicalDAClaimBindsMember, the canonical builder's own phase-5 predicate (sync_da_relay.go),
+// over the owner's byToken index. That index is the single input the proof cannot read off-lock,
+// which is why this half alone runs under the owner mutex. It allocates nothing.
+func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*daRelayMemberIdentity) error {
+	for _, member := range members {
+		claim := owner.byToken[member.token]
+		if claim == nil || !canonicalDAClaimBindsMember(*claim, member) {
+			return errDARelayImageIncompatible
+		}
 	}
 	return nil
 }

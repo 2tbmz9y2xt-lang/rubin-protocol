@@ -4007,6 +4007,78 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			t.Fatalf("unbound removal touched the owner: got=%+v want=%+v", got, ownerBefore)
 		}
 	})
+	// The owner hold allocates nothing. The proof used to build the image-wide token set, sort the
+	// da_id list and materialize a member slice per record INSIDE the hold, so one release or tick
+	// blocked every mempool admission for a full retained-image scan; the owner's lock contract
+	// (pending_outpoint_owner.go) puts caller scratch before the hold, and BeginCommit
+	// (da_admission.go) is the shape. The probe drives the hold's own statements, in production
+	// order, over descriptors ownerReadyRetainedBindingMembers built off-lock.
+	t.Run("the owner hold allocates nothing", func(t *testing.T) {
+		f, first, second := newDANonReplayFixture(t, 4), [32]byte{0xa1}, [32]byte{0xa2}
+		f.ownerReadyCommit(first, 3, daNonReplayPeer("q"))
+		f.ownerReadyChunk(first, 0, "s0", daNonReplayPeer("q"))
+		f.ownerReadyChunk(first, 1, "s1", LocalDAProvenance())
+		f.ownerReadyChunk(second, 0, "s2", daNonReplayPeer("q"))
+		owner, refusals := f.mp.pendingOutpoints, 0
+		var allocs float64
+		// s.mu is held across the whole probe exactly as commitOwnerReadyRemoval holds it.
+		f.mutateRelay(func(s *DARelayState) {
+			clone := s.cloneForAtomicBatchLocked()
+			members, err := ownerReadyRetainedBindingMembers(clone, owner, nil)
+			if err != nil {
+				t.Fatalf("prepare binding descriptors: %v", err)
+			}
+			if len(members) != 4 {
+				t.Fatalf("probe image carries %d members, want 4", len(members))
+			}
+			batch, err := prepareDAAdmissionVictims([]DAAdmissionVictim{ownerReadyMemberVictim(clone.sets[second].chunks[0].member)}, [32]byte{})
+			if err != nil {
+				t.Fatalf("prepare victims: %v", err)
+			}
+			allocs = testing.AllocsPerRun(20, func() {
+				owner.mu.Lock()
+				if _, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+					refusals++
+				}
+				if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
+					refusals++
+				}
+				s.publishAtomicBatchLocked(clone)
+				owner.mu.Unlock()
+			})
+		})
+		if refusals != 0 {
+			t.Fatalf("probe took %d refusals; it must measure the path that reaches publication", refusals)
+		}
+		if allocs != 0 {
+			t.Fatalf("owner hold allocated %v times per run", allocs)
+		}
+		t.Logf("owner hold over 2 records and 4 members: %v allocations per run", allocs)
+		// The probe names the hold's statements, so pin the hold's call set: a later round adding an
+		// allocating call under owner.mu must redden here even though the probe cannot see it.
+		// dropClaimLocked is the one call the probe omits — it mutates, so it cannot be repeated —
+		// and it only reads byToken/byOutpoint and deletes from them. The bound is over the path
+		// that reaches publication: txAdmitFromPendingOutpointError builds the victim refusal's
+		// error inside the hold, as it already did and as BeginCommit does.
+		held, inHold := false, map[string]bool{}
+		ast.Inspect(daOwnerFileFuncs(t, "da_relay_mutation.go")["commitOwnerReadyRemovalClaimsLocked"].Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch name := daNonReplaySelector(call.Fun); {
+			case name == "owner.mu.Lock":
+				held = true
+			case held:
+				inHold[name] = true
+			}
+			return true
+		})
+		want := []string{"checkOwnerReadyMemberClaimsLocked", "owner.dropClaimLocked", "owner.mu.Unlock", "owner.validateDAAdmissionVictimsLocked", "s.publishAtomicBatchLocked", "txAdmitFromPendingOutpointError"}
+		if got := slices.Sorted(maps.Keys(inHold)); !slices.Equal(got, want) {
+			t.Fatalf("owner hold calls %v, want %v", got, want)
+		}
+	})
 	t.Run("a victim token still held by a surviving member is terminal before publication", func(t *testing.T) {
 		// The owner-domain gap: checkDANonReplayShape never reads tokens and
 		// prepareDAAdmissionVictims refuses only a duplicate WITHIN the batch, so one token on
@@ -4014,7 +4086,7 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		// The arm that now refuses it is the retained-binding claim proof: the survivor's aliased
 		// token resolves the VICTIM's claim, which names another txid, so the survivor is not
 		// described by it. The closing batch-versus-retained comparison no longer sees any
-		// reachable image (see checkOwnerReadyRetainedBindingLocked), so this row pins the
+		// reachable image (see ownerReadyRetainedBindingMembers), so this row pins the
 		// outcome and the unchanged image, not that one arm.
 		f := newDANonReplayFixture(t, 2)
 		dropID, keepID := [32]byte{0xf0}, [32]byte{0xf1}
