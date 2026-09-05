@@ -1861,6 +1861,47 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 	}
 }
 
+func TestReaderPrefixPagePublicPath(t *testing.T) {
+	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+	mustEnvironment(t, err)
+	dbi := readDBIsLiteral()[2]
+	firstKey, err := HeightKey(23, 1)
+	mustEnvironment(t, err)
+	secondKey, err := HeightKey(23, 2)
+	mustEnvironment(t, err)
+	firstHash, secondHash := [32]byte{1}, [32]byte{2}
+	firstValue := ChainValue(firstHash, [32]byte{}, [40]byte{})
+	secondValue := ChainValue(secondHash, firstHash, [40]byte{3})
+	truth, err := store.Update(func(*Reader) (Batch, error) {
+		return Batch{Mutations: []Mutation{
+			{DBI: dbi, Key: firstKey, AfterKind: AfterLiteral, Literal: firstValue},
+			{DBI: dbi, Key: secondKey, AfterKind: AfterLiteral, Literal: secondValue},
+		}}, nil
+	})
+	if truth != CommitTruthNew || err != nil {
+		t.Fatalf("PrefixPage seed=%s/%v", truth, err)
+	}
+	prefix := append([]byte(nil), firstKey[:8]...)
+	_, shapeErr := prefixPageNativeRow(dbi, prefix, prefix, codeSuccess, nil, 1, nil, 0)
+	requireEnvironmentError(t, shapeErr, EngineLocalInvariant, operationPrefixPage, codeProblem, "mdbx_get_equal_or_great returned invalid result shape")
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		rowPage, pageErr := reader.PrefixPage(dbi, prefix, nil, 1, 1_000)
+		if pageErr != nil || rowPage.Stop != PrefixPageStop(2) || len(rowPage.Rows) != 1 || !bytes.Equal(rowPage.Rows[0].Key, firstKey) || !bytes.Equal(rowPage.Rows[0].Value, firstValue) {
+			t.Fatalf("PrefixPage public row limit=%#v/%v", rowPage, pageErr)
+		}
+		bytePage, pageErr := reader.PrefixPage(dbi, prefix, nil, 10, 120)
+		if pageErr != nil || bytePage.Stop != PrefixPageStop(3) || len(bytePage.Rows) != 1 || !bytes.Equal(bytePage.Rows[0].Key, firstKey) || !bytes.Equal(bytePage.Rows[0].Value, firstValue) {
+			t.Fatalf("PrefixPage public byte limit=%#v/%v", bytePage, pageErr)
+		}
+		finalPage, pageErr := reader.PrefixPage(dbi, prefix, firstKey, 10, 1_000)
+		if pageErr != nil || finalPage.Stop != PrefixPageStop(1) || len(finalPage.Rows) != 1 || !bytes.Equal(finalPage.Rows[0].Key, secondKey) || !bytes.Equal(finalPage.Rows[0].Value, secondValue) {
+			t.Fatalf("PrefixPage public continuation=%#v/%v", finalPage, pageErr)
+		}
+		return nil
+	}))
+	mustEnvironment(t, store.Close())
+}
+
 func waitForPrefixPageMutex(t *testing.T) {
 	t.Helper()
 	stack := make([]byte, 1<<20)
