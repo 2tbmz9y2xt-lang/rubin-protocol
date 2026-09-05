@@ -1056,9 +1056,14 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // selectVictims derive every exact per-record transition and the bound-owner victim tokens on
 // that clone, and then binds the relay. TWO of the three arms mirror BeginDARemoval
 // (da_admission.go): a nil chainState and a nil pending-outpoint owner are its exact refusals. The
-// third does not — BeginDARemoval refuses a nil mempool as well, while here a nil mempool leaves no
-// claim domain to bind and publishes the DA image as the whole change. Any other relay publishes
-// under its claim domain, a batch that releases no member taking the same arm as one that does. Any
+// third does not — BeginDARemoval refuses a nil mempool as well, while here a nil mempool publishes
+// the DA image as the whole change. The ground is REACH, not existence: s.mempool is the relay's
+// only path to pendingOutpoints, so an unbound relay reaches no claim domain, and the arm keeps the
+// unfenced behavior lockAdmissionFence already gives it (da_relay_state.go). It does NOT say that
+// no claim domain exists — the paired row builds a live owner this relay cannot see and asserts it
+// untouched. Where a domain IS reachable but unusable, a nil chainState, the arm refuses instead,
+// because publishing there would strand claims the relay can see. Any other relay publishes under
+// its claim domain, a batch that releases no member taking the same arm as one that does. Any
 // error before publication leaves both complete images unchanged.
 //
 // ERROR CLASSES a caller receives, for RUB-678's removal_error_class_taxonomy to sort into latch
@@ -1117,7 +1122,9 @@ func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState)
 // requires of every caller (pending_outpoint_owner.go) and as BeginCommit does with
 // prepareDAAdmissionVictims (da_admission.go); its error is carried past the victim preflight and
 // the live claim walk, so the first refusal stays the one the single-span proof returned.
-// Postcondition: the path from owner.mu.Lock() to publication allocates nothing.
+// Postcondition: the path from owner.mu.Lock() to publication allocates nothing. The refusal
+// descriptor is DECLARED above the lock for exactly that reason: &failure escapes, so its heap
+// cell is taken off-lock; declaring it inside the hold moves that allocation under owner.mu.
 func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpointOwner, clone *DARelayState, victims []DAAdmissionVictim) error {
 	var batch []DAAdmissionVictim
 	if len(victims) != 0 {
@@ -1127,9 +1134,11 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 		}
 	}
 	members, bindErr := ownerReadyRetainedBindingMembers(clone, owner, batch)
+	var failure PendingOutpointError
+	var failed bool
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
-	if failure, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+	if failure, failed = owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
 		return txAdmitFromPendingOutpointError(&failure)
 	}
 	if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
@@ -1218,6 +1227,12 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // orphanBytesByDAID total — are the selection authority (R4). Every retained record is a candidate:
 // checkOwnerReadyRetainedRecordLocked refuses a whole image carrying a COMPLETE_SET, so no record
 // reaching the preflight is one, and A5's "State C is never selected" holds trivially.
+// COMPLETE_SET is only the named case: that same per-record gate makes ANY resident non-owner-ready
+// record terminal for the WHOLE image on BOTH selectors until it leaves. A legacy-staged record is
+// the reachable instance — zero revision, no locator rows, and a chunk carrying nonzero wireBytes
+// with a nil member identity (the last two refused by checkOwnerReadyChunk) — so a relay still
+// holding legacy bytes can neither tick nor release. RUB-678 owns that ordering before it wires
+// either selector beside the still-exported legacy writers.
 //
 // The per-candidate shape gate is checkDANonReplayShape, the predicate
 // validateCanonicalDARetainedSnapshot applies to every retained record — not the weaker

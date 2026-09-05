@@ -3831,6 +3831,17 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			})
 		}
 	}
+	// The activation constraint RUB-678 inherits, one row per selector: a resident LEGACY record is
+	// not owner-ready, so it is terminal for the WHOLE image — a relay still staging legacy bytes can
+	// neither tick nor release, and the owner-ready record beside it is left untouched.
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("a resident legacy record is terminal on the "+selector.name, func(t *testing.T) {
+			f, ownerReady, legacy := newDANonReplayFixture(t, 1), [32]byte{0xdc}, [32]byte{0xdf}
+			f.ownerReadyChunk(ownerReady, 0, "m0", daNonReplayPeer("keep"))
+			mustAddDAChunk(t, f.relay, "legacypeer", daRelayTestChunk(legacy, 0, 7))
+			requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, "a resident legacy record on the "+selector.name)
+		})
+	}
 	t.Run("one tick mixes a whole expiry with a decrement in da_id order", func(t *testing.T) {
 		// The one selector shape with no row: a single batch whose per-record arms DIFFER. Ascending
 		// da_id reaches the expiry first, and the decrement is the batch's only minted revision.
@@ -4017,7 +4028,9 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 	// blocked every mempool admission for a full retained-image scan; the owner's lock contract
 	// (pending_outpoint_owner.go) puts caller scratch before the hold, and BeginCommit
 	// (da_admission.go) is the shape. The probe drives the hold's own statements, in production
-	// order, over descriptors ownerReadyRetainedBindingMembers built off-lock.
+	// order and in production's BINDING FORMS, over descriptors ownerReadyRetainedBindingMembers
+	// built off-lock: dropping the address-taken refusal binding would measure a body production
+	// does not have, which is what this probe measured before RUB-1275.
 	t.Run("the owner hold allocates nothing", func(t *testing.T) {
 		f, first, second := newDANonReplayFixture(t, 4), [32]byte{0xa1}, [32]byte{0xa2}
 		f.ownerReadyCommit(first, 3, daNonReplayPeer("q"))
@@ -4026,6 +4039,7 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		f.ownerReadyChunk(second, 0, "s2", daNonReplayPeer("q"))
 		owner, refusals := f.mp.pendingOutpoints, 0
 		var allocs float64
+		var refusal error
 		// s.mu is held across the whole probe exactly as commitOwnerReadyRemoval holds it.
 		f.mutateRelay(func(s *DARelayState) {
 			clone := s.cloneForAtomicBatchLocked()
@@ -4040,10 +4054,15 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			if err != nil {
 				t.Fatalf("prepare victims: %v", err)
 			}
+			// Declared off-lock exactly where production declares it, so the heap cell &failure
+			// forces is taken before the measured region on both sides.
+			var failure PendingOutpointError
+			var failed bool
 			allocs = testing.AllocsPerRun(20, func() {
 				owner.mu.Lock()
-				if _, failed := owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
+				if failure, failed = owner.validateDAAdmissionVictimsLocked(batch, PendingOutpointToken{}); failed {
 					refusals++
+					refusal = txAdmitFromPendingOutpointError(&failure)
 				}
 				if err := checkOwnerReadyMemberClaimsLocked(owner, members); err != nil {
 					refusals++
@@ -4053,7 +4072,7 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 			})
 		})
 		if refusals != 0 {
-			t.Fatalf("probe took %d refusals; it must measure the path that reaches publication", refusals)
+			t.Fatalf("probe took %d refusals (%v); it must measure the path that reaches publication", refusals, refusal)
 		}
 		if allocs != 0 {
 			t.Fatalf("owner hold allocated %v times per run", allocs)
@@ -4065,23 +4084,49 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 		// and it only reads byToken/byOutpoint and deletes from them. The bound is over the path
 		// that reaches publication: txAdmitFromPendingOutpointError builds the victim refusal's
 		// error inside the hold, as it already did and as BeginCommit does.
-		held, inHold := false, map[string]bool{}
+		held, hoisted, inHold := false, false, map[string]bool{}
 		ast.Inspect(daOwnerFileFuncs(t, "da_relay_mutation.go")["commitOwnerReadyRemovalClaimsLocked"].Body, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch name := daNonReplaySelector(call.Fun); {
-			case name == "owner.mu.Lock":
-				held = true
-			case held:
-				inHold[name] = true
+			switch node := node.(type) {
+			case *ast.ValueSpec:
+				hoisted = hoisted || !held && node.Names[0].Name == "failure"
+			case *ast.CallExpr:
+				switch name := daNonReplaySelector(node.Fun); {
+				case name == "owner.mu.Lock":
+					held = true
+				case held:
+					inHold[name] = true
+				}
 			}
 			return true
 		})
+		if !hoisted {
+			t.Fatal("failure is declared inside the hold: &failure escapes, so the hold takes its heap cell")
+		}
 		want := []string{"checkOwnerReadyMemberClaimsLocked", "owner.dropClaimLocked", "owner.mu.Unlock", "owner.validateDAAdmissionVictimsLocked", "s.publishAtomicBatchLocked", "txAdmitFromPendingOutpointError"}
 		if got := slices.Sorted(maps.Keys(inHold)); !slices.Equal(got, want) {
 			t.Fatalf("owner hold calls %v, want %v", got, want)
+		}
+		// AllocsPerRun measures the closure, not the hold, so the closure must BE the hold: the same
+		// calls, minus dropClaimLocked. Comparing call sets pins the BINDING form too, because
+		// discarding the refusal descriptor drops txAdmitFromPendingOutpointError with it.
+		measured := map[string]bool{}
+		ast.Inspect(daOwnerFileFuncs(t, "da_relay_owner_test.go")["TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch"].Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || daNonReplaySelector(call.Fun) != "testing.AllocsPerRun" || len(call.Args) != 2 {
+				return true
+			}
+			ast.Inspect(call.Args[1], func(inner ast.Node) bool {
+				if probed, ok := inner.(*ast.CallExpr); ok {
+					measured[daNonReplaySelector(probed.Fun)] = true
+				}
+				return true
+			})
+			return false
+		})
+		delete(measured, "owner.mu.Lock")
+		mirror := slices.DeleteFunc(slices.Clone(want), func(name string) bool { return name == "owner.dropClaimLocked" })
+		if got := slices.Sorted(maps.Keys(measured)); !slices.Equal(got, mirror) {
+			t.Fatalf("the probe measures %v, want the hold's %v", got, mirror)
 		}
 	})
 	t.Run("a victim token still held by a surviving member is terminal before publication", func(t *testing.T) {
