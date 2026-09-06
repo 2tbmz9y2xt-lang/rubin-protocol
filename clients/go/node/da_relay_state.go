@@ -153,7 +153,6 @@ type DARelayChunk struct {
 	ChunkIndex  uint16
 	Payload     []byte
 	WireBytes   uint64
-	TxBytes     []byte
 	HashChecked bool
 }
 
@@ -311,9 +310,10 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 //
 // An UNBOUND relay — no mempool, or a mempool with no chainstate, which is the
 // test-only construction — has no admission guard to take and keeps its existing
-// unfenced behavior rather than inventing one. The nil RECEIVER arm is load
-// bearing too: ReleasePeerQuotaKey is a pinned nil-safe surface, so the fence
-// must reach that body instead of dereferencing on the way in.
+// unfenced behavior rather than inventing one. The nil RECEIVER arm only keeps this
+// function itself from dereferencing s: no fenced body is nil-safe (each takes s.mu
+// next), so nil handling belongs to the exported wrappers — ReleasePeerQuotaKey
+// returns early, AdvanceOrphanTTL promises nothing.
 //
 // A LATCHED engine parks a writer here until restart, by design: the terminal
 // fail-closed latch retains admissionMu exclusively, and standard admission
@@ -352,16 +352,14 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 	return nil
 }
 
-// AdvanceOrphanTTL advances the retained incomplete-set TTL once through the owner-aware
-// tick (ttl above one decrements and mints one revision; ttl one expires whole with its
-// claims). commitOwnerReadyRemoval owns the fence; a nil receiver is not promised.
+// AdvanceOrphanTTL forwards to the owner-aware TTL tick; commitOwnerReadyRemoval owns the
+// fence and a nil receiver is not promised.
 func (s *DARelayState) AdvanceOrphanTTL() error {
 	return s.advanceOwnerReadyTTL()
 }
 
-// ReleasePeerQuotaKey releases the incomplete retained members whose finalized PEER
-// provenance carries key, through the owner-aware selector, inside the caller's per-key
-// quota lock. A nil receiver returns nil; commitOwnerReadyRemoval owns the fence.
+// ReleasePeerQuotaKey releases the finalized PEER members of key through the owner-aware
+// selector inside the caller's per-key lock; nil receiver returns nil; commitOwnerReadyRemoval owns the fence.
 func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
 	if s == nil {
 		return nil

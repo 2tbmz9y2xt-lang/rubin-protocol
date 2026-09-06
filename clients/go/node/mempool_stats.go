@@ -99,9 +99,7 @@ type TxAdmitError struct {
 
 func (e *TxAdmitError) Error() string { return e.Message }
 
-// Unwrap returns the originating sentinel attached by the building branch, or
-// nil for every other error and for a nil receiver, so errors.Is reaches the
-// sentinel through %w-style wrapping while errors.As still stops at this pointer.
+// Unwrap: the building branch's sentinel or nil (nil receiver included); errors.As still stops at this pointer.
 func (e *TxAdmitError) Unwrap() error {
 	if e == nil {
 		return nil

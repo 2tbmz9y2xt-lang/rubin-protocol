@@ -450,11 +450,9 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 		claim.finalized && slices.Equal(claim.inputs, member.inputs)
 }
 
-// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair, preserves every survivor
-// exactly, rebuilds the owner indexes from O1 alone and returns the pair only after the closing
-// bijection proof. Removal reuses the owner-aware whole-record arm (record, its own locator rows,
-// accounting and prefetch reservation retired together under the lifted caps); its victims are
-// not consumed because O1 is rebuilt below. Survivors are deep-copied: no input container reaches D1.
+// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair, deep-copies survivors (no input
+// container reaches D1), removes via the owner-aware whole-record arm (victims unused: O1 is rebuilt),
+// rebuilds the owner indexes from O1 and returns only after the closing bijection proof.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,

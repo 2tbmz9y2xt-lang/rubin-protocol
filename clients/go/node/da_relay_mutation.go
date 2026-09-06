@@ -1429,14 +1429,9 @@ func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 // the baseline guard, retires exactly the record's own rows through the record-local projector,
 // installs none, mints no revision and walks no other record's rows.
 //
-// checkDANonReplayVictims cannot pair this arm's batch: it walks chunks alone, and here the whole
-// record departs COMMIT FIRST. Nothing else pairs it either — the batch and the departure set are
-// both ownerReadyRecordVictims' single derivation — so the equivalent comparison is against
-// locatorRows, the record's other member enumerator, in the same commit-then-chunks-ascending
-// order. An omitted victim would leave a departed member's finalized DA claim live; an extra or
-// reordered one fails the same count-and-txid comparison. It sits BELOW the baseline guard, whose
-// checkOwnerReadyRecord is what makes the victim walk's non-nil member precondition safe, so no
-// input's first error moves. Fail-closed backstop, like the drop arm's: nothing reddens it today.
+// Victims are compared against locatorRows (same commit-then-chunks order): checkDANonReplayVictims
+// walks chunks alone and cannot pair a COMMIT-first departure. Fail-closed backstop below the
+// baseline guard; no input's first error moves.
 func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord) ([]DAAdmissionVictim, error) {
 	image := stageDAOwnerReadyRemoval(record, true)
 	live, err := s.checkDARecordImageBaselineLocked(image)

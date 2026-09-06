@@ -30,9 +30,7 @@ func (p *peer) handleTx(txBytes []byte) error {
 		return nil
 	}
 	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
-		// A DA transaction belongs to the retained-DA owner from here on: it
-		// never consults or marks the standard seen-set, never reaches the relay
-		// pool or the metadata producer, and is never announced as MSG_TX.
+		// DA kinds exit to the retained-DA owner before any standard effect (seen-set, pool, metadata, MSG_TX).
 		return p.handleRelayDATx(txBytes)
 	}
 	return p.handleStandardTx(txBytes, tx, txid)

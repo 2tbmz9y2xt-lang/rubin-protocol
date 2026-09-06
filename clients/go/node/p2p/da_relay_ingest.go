@@ -64,10 +64,8 @@ func (p *peer) handleRelayDATx(txBytes []byte) error {
 	return nil
 }
 
-// remoteDAProvenance captures the peer identity once, derives the quota identity from that
-// string without normalizing again and applies IDENTITY_BOUNDS_V1 before any provenance
-// exists; ok is false for an empty or over-bound identity (the caller exits nil with no
-// effect), and the nonempty check makes NewPeerDAProvenance's only refusal unreachable.
+// remoteDAProvenance: the identity is captured once, the quota key derived from it and IDENTITY_BOUNDS_V1
+// applied before any provenance; ok=false exits nil with zero effect; the nonempty check keeps NewPeerDAProvenance's refusal unreachable.
 func (p *peer) remoteDAProvenance() (peerIdentity, quotaIdentity string, provenance node.DAProvenance, ok bool) {
 	peerIdentity = p.addr()
 	quotaIdentity = peerQuotaKey(peerIdentity)
@@ -130,10 +128,8 @@ func (p *peer) normalizeQualityLocked(height uint64) {
 	p.qualityScore += uint8(min(intervals, uint64(qualityScoreInitial-p.qualityScore))) //nolint:gosec // bounded above by the distance to qualityScoreInitial (<= 50)
 }
 
-// validateRelayDATxForAdmission is the LOCAL standard-domain check kept for
-// Service.AnnounceTx and relayTxFromPool: a locally submitted or pool-resident
-// DA chunk must carry the payload its declared hash names. The remote DA path
-// never calls it; AdmitDA owns that check after its owner observation.
+// validateRelayDATxForAdmission is the LOCAL standard-domain check for Service.AnnounceTx and
+// relayTxFromPool; the remote arm never calls it (AdmitDA owns it after the owner observation).
 func validateRelayDATxForAdmission(txBytes []byte, tx *consensus.Tx) error {
 	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
 		return nil

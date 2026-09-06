@@ -181,12 +181,9 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 	}
 	defer h.release()
 	if !matchingDAChunkPayloadHash(tx) {
-		// A candidate whose payload contradicts its own declared hash is invalid
-		// under the bound context alone (RUBIN_MEMPOOL_POLICY.md 6.5). This branch
-		// alone carries ErrDARelayChunkHashMismatch as its errors.Is cause: it runs
-		// after the owner observation, so a remote consumer penalizes only a
-		// candidate whose own bytes contradict themselves, never one refused for a
-		// local-authority reason; parseDAAdmission's same-text sibling stays cause-free.
+		// Only branch carrying ErrDARelayChunkHashMismatch as errors.Is cause; it runs after the owner
+		// observation, so a remote consumer penalizes only self-contradicting bytes. parseDAAdmission's
+		// same-text sibling stays cause-free.
 		rejected := txAdmitRejected("DA chunk payload hash mismatch")
 		rejected.cause = ErrDARelayChunkHashMismatch
 		return nil, selectRelayDisposition(rejected, RelayAdmissionStableTerminalReject)
