@@ -43,15 +43,16 @@ func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) 
 	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height, peers))
 }
 
-// preferredDAPrefetchPeerKeyLocked returns the trigger peer's quota key when the
-// peer is present, accepts prefetch and, after drifting its quality score for
-// height, still meets the preference minimum; otherwise "". A low score only
-// removes the front-of-list preference: the key stays eligible and the peer
-// remains usable through the ordinary fallback order. For a returned key the
-// only map effect is peersByKey[key] = the trigger pointer, so the ephemeral
-// representative of the preferred key is that exact session rather than the
-// last same-host session allDAPrefetchPeersLocked visited; a key absent from
-// peersByKey is never inserted and every other representative stays as chosen.
+// preferredDAPrefetchPeerKeyLocked returns the trigger's quota key when the peer is
+// present, accepts prefetch, still meets the preference minimum after its quality
+// score drifts to height, and that key is nonempty and present in peersByKey (the
+// contract's fail-closed bound; the production caller's trigger is always listed by
+// allDAPrefetchPeersLocked in the same call, so both arms are defensive); otherwise
+// "" without touching the map. A low score only removes the front-of-list
+// preference: the key stays eligible and the peer stays usable in the ordinary
+// fallback order. On success the only map effect is peersByKey[key] = the trigger
+// pointer, so the preferred key's ephemeral representative is that exact session,
+// not the last same-host session allDAPrefetchPeersLocked visited.
 func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint64, peersByKey map[string]*peer) string {
 	current := s.peers[peerAddr]
 	if !acceptsDAPrefetch(current) || !current.qualityPreferred(height) {

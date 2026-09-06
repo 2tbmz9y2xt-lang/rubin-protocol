@@ -163,13 +163,13 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	expectPrefetchRequests(t, later, wire, "restored trigger", restored, 15, lb, la, lc)
 }
 
-// TestDAPrefetchPreferredConnectionOwnsQuotaKey pins the representative binding: sessions
-// a and b share host 127.0.0.5 (one quota key), c is another host. After six real
-// conflicts take b to 38, the preference helper called for a replaces the seeded wrong
-// representative b with the exact a pointer (the seeding makes the assertion independent
-// of map order), and a fresh set from a is requested through a, never b, while c keeps
-// its ordinary round-robin share. Low-score, alias, missing/disabled/empty trigger and
-// absent/empty key rows return "" without touching the map.
+// TestDAPrefetchPreferredConnectionOwnsQuotaKey pins the representative binding: sessions a
+// and b share host 127.0.0.5 (one quota key), c is another host. After six real conflicts
+// take b to 38, the preference helper called for a replaces the seeded wrong representative
+// b with the exact a pointer, directly and through an alias of a (the seeding makes the
+// assertion independent of map order), and a fresh set from a is requested through a, never
+// b, while c keeps its ordinary round-robin share. The low-score, missing, disabled and
+// empty trigger rows and the absent and empty key rows return "" without touching the map.
 func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
