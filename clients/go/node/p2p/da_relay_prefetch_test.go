@@ -2,159 +2,88 @@ package p2p
 
 import (
 	"bytes"
-	"crypto/sha3"
 	"errors"
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-func TestDAPrefetchPlansAreBoundedDeduplicatedAndReleasable(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	daID := daRelayTestID(130)
-	if err := h.service.daRelay.StageCommit("", node.DARelayCommit{
-		DAID:       daID,
-		ChunkCount: uint16(consensus.MAX_DA_CHUNK_COUNT),
-		WireBytes:  1,
-	}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
+// retainedPrefetchCommit retains one incomplete commit with PEER provenance for peerAddr.
+func retainedPrefetchCommit(t *testing.T, f *daIngressFixture, daID [32]byte, chunkCount uint16, peerAddr string) []byte {
+	t.Helper()
+	raw := f.commit(daID, chunkCount)
+	f.admit(raw, peerAddr)
+	return raw
+}
+
+// readScriptedFrames decodes every getdachunk request written to current's scripted socket.
+func readScriptedFrames(t *testing.T, h *testHarness, current *peer) []getDAChunkPayload {
+	t.Helper()
+	reader := bytes.NewReader(current.conn.(*scriptedConn).Bytes())
+	var requests []getDAChunkPayload
+	for reader.Len() > 0 {
+		frame, err := readFrame(reader, networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
+		must(t, err, "readFrame("+current.addr()+")")
+		request, err := decodeGetDAChunkPayload(frame.Payload)
+		require(t, err == nil && frame.Command == messageGetDAChunk, "frame=%+v request=%+v err=%v", frame, request, err)
+		requests = append(requests, request)
 	}
-	keys := []string{"peer-a", "peer-b", "peer-c", "peer-d", "peer-e", "peer-f", "peer-g", "peer-h", "peer-i"}
-	now := time.Unix(1000, 0)
-	for seed := byte(131); seed < 139; seed++ {
-		id := daRelayTestID(seed)
-		if err := h.service.daRelay.StageCommit("", node.DARelayCommit{DAID: id, ChunkCount: 1, WireBytes: 1}); err != nil {
-			t.Fatalf("StageCommit(%d): %v", seed, err)
-		}
-		if empty, diagnostic := h.service.daRelay.PlanPrefetch(id, nil, now); len(empty) != 0 || diagnostic != "" {
-			t.Fatalf("empty plans=%+v diagnostic=%q", empty, diagnostic)
-		}
-	}
-	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, keys, now)
-	total, unique, maxPeerBytes := summarizeDAPrefetchPlans(plans)
-	if diagnostic != "" || total != int(consensus.MAX_DA_CHUNK_COUNT) || unique != total || maxPeerBytes > 4_000_000 {
-		t.Fatalf("diagnostic=%q total=%d unique=%d max_peer_bytes=%d", diagnostic, total, unique, maxPeerBytes)
-	}
-	if duplicate, diagnostic := h.service.daRelay.PlanPrefetch(daID, keys, now); len(duplicate) != 0 || diagnostic != "" {
-		t.Fatalf("duplicate plans=%d diagnostic=%q", len(duplicate), diagnostic)
-	}
-	if retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, keys, now.Add(time.Second+time.Nanosecond)); len(retry) != len(plans) || diagnostic != "" {
-		t.Fatalf("expired plans=%d diagnostic=%q, want %d", len(retry), diagnostic, len(plans))
-	}
+	return requests
 }
 
 func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(140)
-	first, second := []byte{1}, []byte{2}
-	if err := h.service.daRelay.StageCommit("", node.DARelayCommit{DAID: daID, PayloadCommitment: sha3.Sum256(append(first, second...)), ChunkCount: 2, WireBytes: 1}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
+	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
 	now := time.Unix(1000, 0)
 	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now)
-	if len(plans) != 1 || diagnostic != "" || !reflect.DeepEqual(plans[0].Indexes, []uint16{0, 1}) {
-		t.Fatalf("initial plans=%+v diagnostic=%q", plans, diagnostic)
-	}
-	if err := h.service.daRelay.StageChunk("", node.DARelayChunk{DAID: daID, ChunkIndex: 0, Payload: first, WireBytes: 1, HashChecked: true}); err != nil {
-		t.Fatalf("StageChunk(0): %v", err)
-	}
-	if retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now); len(retry) != 0 || diagnostic != "" {
-		t.Fatalf("fulfilled-index retry=%+v diagnostic=%q", retry, diagnostic)
-	}
+	require(t, len(plans) == 1 && diagnostic == "" && reflect.DeepEqual(plans[0].Indexes, []uint16{0, 1}), "initial plans=%+v diagnostic=%q", plans, diagnostic)
+	f.admit(f.chunk(daID, 0, []byte{1}), "127.0.0.9:19119")
+	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now)
+	require(t, len(retry) == 0 && diagnostic == "", "fulfilled-index retry=%+v diagnostic=%q", retry, diagnostic)
 	h.service.daRelay.ReleasePrefetchPlan(node.DARelayPrefetchPlan{DAID: daID, PeerKey: plans[0].PeerKey, Indexes: []uint16{1}})
-	reserveDAPrefetchSlots(t, h.service, 142)
-}
-
-func TestDAPrefetchCompletionReleasesReservations(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	daID, payload := daRelayTestID(150), []byte{1}
-	commit := node.DARelayCommit{DAID: daID, PayloadCommitment: sha3.Sum256(payload), ChunkCount: 1, WireBytes: 1}
-	if err := h.service.daRelay.StageCommit("", commit); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
-	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0)); len(plans) != 1 || diagnostic != "" {
-		t.Fatalf("plans=%+v diagnostic=%q", plans, diagnostic)
-	}
-	if err := h.service.daRelay.StageChunk("", node.DARelayChunk{DAID: daID, Payload: payload, WireBytes: 1, HashChecked: true}); err != nil {
-		t.Fatalf("StageChunk: %v", err)
-	}
-	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0)); len(plans) != 0 || diagnostic != "" {
-		t.Fatalf("complete plans=%+v diagnostic=%q", plans, diagnostic)
-	}
-	reserveDAPrefetchSlots(t, h.service, 160)
+	retry, diagnostic = h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now)
+	require(t, len(retry) == 1 && diagnostic == "" && reflect.DeepEqual(retry[0].Indexes, []uint16{1}), "released retry=%+v diagnostic=%q, want index 1 alone", retry, diagnostic)
 }
 
 func TestDAPrefetchSendWritesGetDAChunkFrame(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
+	f := newDAIngressFixture(t, h)
 	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
 	daID := daRelayTestID(141)
-	if err := h.service.daRelay.StageCommit("", node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: 1}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
+	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
-	frame, err := readFrame(bytes.NewReader(current.conn.(*scriptedConn).Bytes()), networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize)
-	if err != nil {
-		t.Fatalf("readFrame: %v", err)
-	}
-	request, err := decodeGetDAChunkPayload(frame.Payload)
-	if err != nil || frame.Command != messageGetDAChunk || request.DAID != daID || !reflect.DeepEqual(request.Indexes, []uint16{0, 1}) {
-		t.Fatalf("frame=%+v request=%+v err=%v", frame, request, err)
-	}
+	requests := readScriptedFrames(t, h, current)
+	require(t, len(requests) == 1 && requests[0].DAID == daID && reflect.DeepEqual(requests[0].Indexes, []uint16{0, 1}), "requests=%+v", requests)
 }
 
 func TestDAPrefetchSendFailureReleasesPlan(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
+	f := newDAIngressFixture(t, h)
 	current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("write failed"))
 	daID := daRelayTestID(132)
-	if err := h.service.daRelay.StageCommit("", node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: 1}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
+	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
-	if current.snapshotState().BanScore != 0 || current.snapshotState().LastError == "" {
-		t.Fatalf("state=%+v, want diagnostic without ban", current.snapshotState())
-	}
-	if retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now()); len(retry) != 1 || len(retry[0].Indexes) != 2 || diagnostic != "" {
-		t.Fatalf("released retry plans=%+v diagnostic=%q, want one plan with two indexes", retry, diagnostic)
-	}
+	require(t, current.snapshotState().BanScore == 0 && current.snapshotState().LastError != "", "state=%+v, want diagnostic without ban", current.snapshotState())
+	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+	require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "released retry plans=%+v diagnostic=%q, want one plan with two indexes", retry, diagnostic)
 }
 
 func TestDAPrefetchMissingPeerReleasesPlan(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(135)
-	if err := h.service.daRelay.StageCommit("", node.DARelayCommit{DAID: daID, ChunkCount: 1, WireBytes: 1}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
+	retainedPrefetchCommit(t, f, daID, 1, "127.0.0.9:19119")
 	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0))
-	if len(plans) != 1 || diagnostic != "" {
-		t.Fatalf("plans=%d diagnostic=%q, want one", len(plans), diagnostic)
-	}
+	require(t, len(plans) == 1 && diagnostic == "", "plans=%d diagnostic=%q, want one", len(plans), diagnostic)
 	h.service.sendDAPrefetchPlan(map[string]*peer{}, plans[0])
-	if retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0)); len(retry) != 1 || diagnostic != "" {
-		t.Fatalf("released retry=%d diagnostic=%q", len(retry), diagnostic)
-	}
-}
-
-func TestDAPrefetchPayloadMismatchSchedulesSnapshot(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	h.service.cfg.EnableCompactReceive = true
-	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
-	daID := daRelayTestID(134)
-	if err := h.service.daRelay.StageCommit("peer-a", node.DARelayCommit{DAID: daID, ChunkCount: 2, WireBytes: 1}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
-	}
-	err := h.service.finishDAPrefetch("peer-a", daID, node.ErrDARelayPayloadCommitmentMismatch)
-	if !errors.Is(err, node.ErrDARelayPayloadCommitmentMismatch) {
-		t.Fatalf("finish err=%v, want payload mismatch", err)
-	}
-	if plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now()); len(plans) != 0 || diagnostic != "" || current.snapshotState().BanScore != 0 {
-		t.Fatalf("plans=%d diagnostic=%q state=%+v", len(plans), diagnostic, current.snapshotState())
-	}
+	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0))
+	require(t, len(retry) == 1 && diagnostic == "", "released retry=%d diagnostic=%q", len(retry), diagnostic)
 }
 
 func TestDAPrefetchReportsDiagnostic(t *testing.T) {
@@ -166,54 +95,104 @@ func TestDAPrefetchReportsDiagnostic(t *testing.T) {
 	}
 }
 
+// TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers pins the consumer of
+// COMPETING_SCORE_V1: six real conflicts at 1440 take peer-b to 38 so its fresh set
+// requests first from peer-a, 288 blocks later 40 restores the preference; a low
+// score never removes a key, aliases and sessions on one host collapse to one key.
 func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
-	addDAPrefetchTestPeer(h.service, "peer-a", nil)
-	addDAPrefetchTestPeer(h.service, "peer-b", nil)
-	addDAPrefetchTestPeer(h.service, "peer-c", nil)
+	f := newDAIngressFixture(t, h)
+	a := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	b := addDAPrefetchTestPeer(h.service, "peer-b", nil)
+	c := addDAPrefetchTestPeer(h.service, "peer-c", nil)
 	disabled := testPeerForService(h.service, "peer-disabled", 0)
 	disabled.state.Addr = "peer-disabled"
 	h.service.peersMu.Lock()
-	h.service.peers["peer-disabled"] = disabled
+	h.service.peers["peer-disabled"], h.service.peers["alias-of-b"] = disabled, b
 	h.service.peersMu.Unlock()
-	_, keys := h.service.daPrefetchPeers("peer-b")
-	if want := []string{"peer-b", "peer-a", "peer-c"}; !reflect.DeepEqual(keys, want) {
-		t.Fatalf("keys=%v, want %v", keys, want)
+	expect := func(label, trigger string, want []string) {
+		t.Helper()
+		_, keys := h.service.daPrefetchPeers(trigger)
+		require(t, reflect.DeepEqual(keys, want), "%s: keys=%v, want %v", label, keys, want)
+	}
+	all, bFirst := []string{"peer-a", "peer-b", "peer-c"}, []string{"peer-b", "peer-a", "peer-c"}
+	expect("a preferred trigger leads", "peer-b", bFirst)
+	expect("an alias of the preferred trigger", "alias-of-b", bFirst)
+	expect("an absent trigger", "peer-x", all)
+	expect("a compact-disabled trigger", "peer-disabled", all)
+	expect("no trigger", "", all)
+	daID := daRelayTestID(0xb0)
+	f.admit(f.commit(daID, 2), "127.0.0.9:19119") // the first-seen commit, retained without a scheduler entry
+	competitor := f.commit(daID, 2)
+	for i := 0; i < 6; i++ {
+		must(t, b.handleTx(competitor), "competing commit")
+	}
+	score, anchor := peerQuality(b)
+	require(t, score == 38 && anchor == 1440, "six conflicts: score=%d anchor=%d, want 38 at 1440", score, anchor)
+	expect("score 38 loses the front and nothing else", "peer-b", all)
+	demoted := daRelayTestID(0xb1)
+	must(t, b.handleTx(f.commit(demoted, 15)), "a fresh set from the demoted peer")
+	expectPrefetchRequests(t, h, "demoted trigger", demoted, 15, a, b, c)
+	b.stateMu.Lock()
+	b.qualityScore = 39
+	b.stateMu.Unlock()
+	expect("score 39 loses the front", "peer-b", all)
+	// A sole low-score peer is still the fallback, two sessions on one host are one key,
+	// and a disabled compact receive leaves no eligible key.
+	h.service.peersMu.Lock()
+	delete(h.service.peers, "peer-a")
+	delete(h.service.peers, "peer-c")
+	h.service.peersMu.Unlock()
+	expect("a sole low-score peer", "peer-b", []string{"peer-b"})
+	sole := daRelayTestID(0xb3)
+	must(t, b.handleTx(f.commit(sole, 2)), "a fresh set with the sole peer")
+	expectPrefetchRequests(t, h, "sole peer", sole, 2, b)
+	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
+	addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
+	expect("sessions sharing a quota key", "127.0.0.5:2", []string{"127.0.0.5", "peer-b"})
+	h.service.cfg.EnableCompactReceive = false
+	expect("compact receive disabled", "peer-b", []string{})
+	// 288 blocks later. A synthetic tip move breaks the owner's tip coherence, so
+	// the tuple the six conflicts produced (38 at 1440) is carried onto a harness
+	// whose local tip is 1728, where a fresh set from b normalizes it to 40 and
+	// restores the preference.
+	later := highTipHarness(t, 1728)
+	later.service.cfg.EnableCompactReceive = true
+	lf := newDAIngressFixture(t, later)
+	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", nil), addDAPrefetchTestPeer(later.service, "peer-b", nil), addDAPrefetchTestPeer(later.service, "peer-c", nil)
+	lb.qualityScore, lb.qualityHeight = 38, 1440
+	restored := daRelayTestID(0xb2)
+	must(t, lb.handleTx(lf.commit(restored, 15)), "a fresh set from the restored peer")
+	score, anchor = peerQuality(lb)
+	require(t, score == 40 && anchor == 1728, "288 blocks later: score=%d anchor=%d, want 40 at 1728", score, anchor)
+	expectPrefetchRequests(t, later, "restored trigger", restored, 15, lb, la, lc)
+}
+
+// prefetchWire accumulates the exact frame bytes each scripted peer socket must carry.
+var prefetchWire = map[*peer][]byte{}
+
+// expectPrefetchRequests pins the round-robin split of count missing chunks (within the
+// per-peer per-second budget) in peer order, decoded and as exact connection bytes.
+func expectPrefetchRequests(t *testing.T, h *testHarness, label string, daID [32]byte, count uint16, order ...*peer) {
+	t.Helper()
+	for position, current := range order {
+		indexes := []uint16{}
+		for index := uint16(position); index < count; index += uint16(len(order)) {
+			indexes = append(indexes, index)
+		}
+		payload, err := encodeDAPrefetchPlanPayload(node.DARelayPrefetchPlan{DAID: daID, Indexes: indexes})
+		must(t, err, "encodeDAPrefetchPlanPayload")
+		prefetchWire[current] = append(prefetchWire[current], mustPeerRuntimeFrameBytes(t, current, message{Command: messageGetDAChunk, Payload: payload})...)
+		requests := readScriptedFrames(t, h, current)
+		last := requests[len(requests)-1]
+		require(t, last.DAID == daID && reflect.DeepEqual(last.Indexes, indexes) && bytes.Equal(current.conn.(*scriptedConn).Bytes(), prefetchWire[current]), "%s: %s request=%+v, want %x indexes %v with the exact frame bytes", label, current.addr(), last, daID, indexes)
 	}
 }
 
 func daRelayTestID(seed byte) (out [32]byte) {
 	out[0] = seed
 	return out
-}
-
-func summarizeDAPrefetchPlans(plans []node.DARelayPrefetchPlan) (int, int, uint64) {
-	seen := map[uint16]bool{}
-	var total int
-	var maxPeerBytes uint64
-	for _, plan := range plans {
-		total += len(plan.Indexes)
-		for _, index := range plan.Indexes {
-			seen[index] = true
-		}
-		if bytes := uint64(len(plan.Indexes)) * consensus.CHUNK_BYTES; bytes > maxPeerBytes {
-			maxPeerBytes = bytes
-		}
-	}
-	return total, len(seen), maxPeerBytes
-}
-
-func reserveDAPrefetchSlots(t *testing.T, svc *Service, seed byte) {
-	for i := byte(0); i < 8; i++ {
-		id := daRelayTestID(seed + i)
-		if err := svc.daRelay.StageCommit("", node.DARelayCommit{DAID: id, ChunkCount: 1, WireBytes: 1}); err != nil {
-			t.Fatalf("StageCommit(%d): %v", i, err)
-		}
-		if plans, diagnostic := svc.daRelay.PlanPrefetch(id, []string{fmt.Sprintf("peer-%d", i)}, time.Unix(1000, 0)); len(plans) != 1 || diagnostic != "" {
-			t.Fatalf("plans(%d)=%+v diagnostic=%q", i, plans, diagnostic)
-		}
-	}
 }
 
 func addDAPrefetchTestPeer(svc *Service, addr string, writeErr error) *peer {

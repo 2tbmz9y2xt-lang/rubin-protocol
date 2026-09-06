@@ -42,26 +42,43 @@ type devnetNode struct {
 	timestamp      uint64
 }
 
-func TestDARelayStageChunkOwnsCallerPayload(t *testing.T) {
-	current := newDevnetNode(t, "da-relay-payload-copy", "", nil, 0x77, false)
+// TestDARelayAdmitDAOwnsCallerPayload: AdmitDA retains its own copy of the caller's
+// bytes, so mutating the caller's slice afterwards leaves the retained member exact.
+func TestDARelayAdmitDAOwnsCallerPayload(t *testing.T) {
+	current := newDevnetNode(t, "da-relay-payload-copy", "", nil, 0x77, true)
 	relay := current.syncEngine.DARelayState()
 	if relay == nil {
 		t.Fatal("DA relay state is nil after initial mempool bind")
 	}
-
-	daID := [32]byte{0x77}
+	signer := mustTxGenKeypair(t)
+	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	op := consensus.Outpoint{Txid: [32]byte{0x77, 0x01}}
+	current.chainState.Utxos[op] = consensus.UtxoEntry{Value: 1_000_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}
 	payload := []byte("caller-owned-payload")
-	commitment := sha3.Sum256(payload)
-	if err := relay.StageChunk("peer-a", node.DARelayChunk{
-		DAID: daID, ChunkHash: commitment, Payload: payload, WireBytes: uint64(len(payload)),
-	}); err != nil {
-		t.Fatalf("StageChunk: %v", err)
+	tx := &consensus.Tx{
+		Version: 1, TxKind: 0x02, TxNonce: 1,
+		Inputs:      []consensus.TxInput{{PrevTxid: op.Txid, PrevVout: op.Vout}},
+		Outputs:     []consensus.TxOutput{{Value: 100_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}},
+		DaPayload:   payload,
+		DaChunkCore: &consensus.DaChunkCore{DaID: [32]byte{0x77}, ChunkHash: sha3.Sum256(payload)},
 	}
-	payload[0] ^= 0xff
-	if err := relay.StageCommit("peer-a", node.DARelayCommit{
-		DAID: daID, PayloadCommitment: commitment, ChunkCount: 1, WireBytes: uint64(len(payload)),
-	}); err != nil {
-		t.Fatalf("StageCommit after caller payload mutation: %v", err)
+	if err := consensus.SignTransaction(tx, current.chainState.Utxos, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction: %v", err)
+	}
+	raw, err := consensus.MarshalTx(tx)
+	provenance, provenanceErr := node.NewPeerDAProvenance("peer-a", "peer-a")
+	if err != nil || provenanceErr != nil {
+		t.Fatalf("MarshalTx=%v NewPeerDAProvenance=%v", err, provenanceErr)
+	}
+	original := append([]byte(nil), raw...)
+	if got, err := relay.AdmitDA(raw, provenance); err != nil || got.Disposition != node.DAAdmissionRetained {
+		t.Fatalf("AdmitDA=(%+v,%v), want RETAINED", got, err)
+	}
+	for i := range raw {
+		raw[i] ^= 0xff
+	}
+	if got, err := relay.AdmitDA(original, provenance); err != nil || got.Disposition != node.DAAdmissionDuplicate {
+		t.Fatalf("replay after caller mutation=(%+v,%v), want the exact DUPLICATE", got, err)
 	}
 }
 

@@ -145,19 +145,9 @@ type DARelayPrefetchPlan struct {
 	Indexes []uint16
 }
 
-// DARelayCommit is the retained commit metadata supplied by P2P after peer
-// quota normalization.
-//
-// TxBytes MUST be the EXACT canonical serialization of the tx_kind 0x01
-// transaction this record is the commit of — the bytes Section 5.2 admission
-// validated, fully consuming, with DaCommitCore.DaID == DAID and
-// DaCommitCore.ChunkCount == ChunkCount. Staging does NOT check it, and the
-// transition's re-parse detects only STRUCTURAL violations: bytes that do not
-// parse, trailing bytes, or a kind/da_id/chunk_count contradiction are
-// TERMINAL_LOCAL_INVARIANT(evidence) there — the node latches and publishes
-// nothing. A WELL-FORMED substitute transaction carrying matching metadata is
-// silently adopted as this record's exact identity instead: nothing binds these
-// bytes to the payload commitment or to the transaction admission actually saw.
+// DARelayCommit is the commit descriptor of the retired legacy staging writer.
+// No production path constructs or reads it; retained commits are admitted by
+// AdmitDA from their exact canonical bytes.
 type DARelayCommit struct {
 	DAID              [32]byte
 	PayloadCommitment [32]byte
@@ -166,11 +156,9 @@ type DARelayCommit struct {
 	TxBytes           []byte
 }
 
-// DARelayChunk is one retained chunk supplied by P2P after peer quota
-// normalization.
-//
-// TxBytes carries the same MUST as DARelayCommit.TxBytes, for the tx_kind 0x02
-// transaction at this exact ChunkIndex.
+// DARelayChunk is the unretained chunk descriptor ValidateDARelayChunk checks
+// before local relay admission; retained members are admitted by AdmitDA from
+// their exact canonical bytes instead.
 type DARelayChunk struct {
 	DAID        [32]byte
 	ChunkHash   [32]byte
@@ -293,9 +281,9 @@ type DARelayState struct {
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
 	sets                      map[[32]byte]daRelaySetRecord
-	// locators is carried across the atomic-batch pair; no batch BODY maintains it,
-	// and no legacy removal retires a row. RUB-1275/RUB-1276 own owner-atomic
-	// removal paths; RUB-678 owns live wiring and legacy-writer retirement.
+	// locators is the txid index of every retained member. The owner-aware
+	// admission and removal paths install and retire its rows; the legacy
+	// staging and removal bodies kept for unit tests never maintain it.
 	locators map[[32]byte]daRelayLocator
 	// records is the process-local high-water of all issued revisions, including
 	// deleted records. Single-use placement under one uninterrupted lock preserves it.
@@ -317,9 +305,9 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 }
 
 // lockAdmissionFence takes the bound ChainState admission READ guard for the
-// duration of one complete exported retained-DA mutation and returns its
-// release, so the idiomatic call is `defer s.lockAdmissionFence()()` as the
-// first statement of the wrapper.
+// duration of one complete retained-DA mutation and returns its release, so the
+// idiomatic call is `defer s.lockAdmissionFence()()` as the first statement of
+// the entry that owns the mutation.
 //
 // It is what makes an ordinary retained-DA writer unable to interleave with a
 // canonical transition: the transition holds the same guard EXCLUSIVELY and
@@ -329,9 +317,12 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // prepared image (RUBIN_MEMPOOL_POLICY.md Section 6.4.1).
 //
 // Lock order is peerQuotaLock (when a P2P caller holds one) then this guard then
-// DARelayState.mu, and nothing under this guard re-enters it: the wrappers are
-// the only entry points, they never nest, and the canonical transition reaches
-// prepare/publish with the WRITE guard already held and so never calls one.
+// DARelayState.mu, and nothing under this guard re-enters it: sync.RWMutex is
+// not reentrant, so each entry takes it exactly once — the prefetch wrappers in
+// their own body, the owner-aware cleanups inside commitOwnerReadyRemoval, and
+// admission through the guard AdmitDA's hold owns — and the canonical
+// transition reaches prepare/publish with the WRITE guard already held and so
+// never calls one.
 //
 // An UNBOUND relay — no mempool, or a mempool with no chainstate, which is the
 // test-only construction — has no admission guard to take and keeps its existing
@@ -344,10 +335,6 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // already parks its leased P2P workers the same way (mempool.go, "BLOCKS
 // INDEFINITELY, by design"). Returning instead would mutate retained state the
 // transition proved it cannot reason about.
-//
-// Forward note: RUB-678/RUB-680's owner-guarded paths REPLACE this fence for the
-// writers they take over and must never nest inside it — BeginDAAdmission holds
-// admissionMu.R for its guard's whole life and sync.RWMutex is not reentrant.
 func (s *DARelayState) lockAdmissionFence() func() {
 	if s == nil || s.mempool == nil || s.mempool.chainState == nil {
 		return unfencedDARelayMutation
@@ -360,36 +347,6 @@ func (s *DARelayState) lockAdmissionFence() func() {
 // unfencedDARelayMutation is the release for an unbound relay: it exists as a
 // package-level func so the unbound path allocates no closure per mutation.
 func unfencedDARelayMutation() {}
-
-// StageCommit retains one commit whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence. commit.TxBytes is
-// the caller's obligation, stated on DARelayCommit and unchecked here.
-func (s *DARelayState) StageCommit(peerQuotaKey string, commit DARelayCommit) error {
-	defer s.lockAdmissionFence()()
-	return s.addDACommit(peerQuotaKey, daRelayCommit{
-		daID:              commit.DAID,
-		payloadCommitment: commit.PayloadCommitment,
-		chunkCount:        commit.ChunkCount,
-		wireBytes:         commit.WireBytes,
-		txBytes:           commit.TxBytes,
-	})
-}
-
-// StageChunk retains one chunk whose peer quota key was normalized by P2P.
-// The complete mutation runs under the admission read fence. chunk.TxBytes is
-// the caller's obligation, stated on DARelayChunk and unchecked here.
-func (s *DARelayState) StageChunk(peerQuotaKey string, chunk DARelayChunk) error {
-	defer s.lockAdmissionFence()()
-	return s.addDAChunk(peerQuotaKey, daRelayChunk{
-		daID:        chunk.DAID,
-		chunkHash:   chunk.ChunkHash,
-		chunkIndex:  chunk.ChunkIndex,
-		payload:     chunk.Payload,
-		wireBytes:   chunk.WireBytes,
-		txBytes:     chunk.TxBytes,
-		hashChecked: chunk.HashChecked,
-	})
-}
 
 // ValidateDARelayChunk validates one unretained chunk before relay admission.
 func ValidateDARelayChunk(chunk DARelayChunk) error {
@@ -410,20 +367,25 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 	return nil
 }
 
-// AdvanceOrphanTTL advances the retained incomplete-set TTL once.
-// The complete mutation runs under the admission read fence.
+// AdvanceOrphanTTL advances the retained incomplete-set TTL once through the
+// owner-aware tick: every owner-ready record with ttl above one decrements once
+// and mints one revision, ttl one expires whole with its locators, accounting,
+// prefetch reservation and owner claims. commitOwnerReadyRemoval takes the
+// admission read fence itself, so this wrapper takes none; a nil receiver is
+// not promised and stays the caller's check.
 func (s *DARelayState) AdvanceOrphanTTL() error {
-	defer s.lockAdmissionFence()()
-	_, err := s.advanceOrphanTTL()
-	return err
+	return s.advanceOwnerReadyTTL()
 }
 
-// ReleasePeerQuotaKey releases incomplete retained data owned by key.
-// The complete mutation runs under the admission read fence, taken INSIDE the
-// caller's per-key peer quota lock.
+// ReleasePeerQuotaKey releases the incomplete retained members whose finalized
+// PEER provenance carries key, through the owner-aware selector, inside the
+// caller's per-key peer quota lock. A nil receiver returns nil; every other
+// receiver forwards without taking the fence commitOwnerReadyRemoval owns.
 func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
-	defer s.lockAdmissionFence()()
-	return s.releasePeerQuotaKey(key)
+	if s == nil {
+		return nil
+	}
+	return s.releaseOwnerReadyPeerQuota(key)
 }
 
 // PlanPrefetch reserves missing chunks for the supplied normalized peer keys.

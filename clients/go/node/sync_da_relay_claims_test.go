@@ -1168,17 +1168,19 @@ var canonicalDAOwnerForbiddenCalls = map[string]bool{
 // count, the outpoint-row cardinality and the D1 locator/accounting closure.
 var canonicalDAOwnerClosingClauses = []string{"canonicalDAOwnerSurvivingClaim", "canonicalDAOwnerDomainClaims", "canonicalDAOwnerClaimedInputs", "canonicalDARetainedImageClosed"}
 
-// TestCanonicalDAOwnerCandidateBuilderRemainsDormant proves the pair builder is
-// wired to nothing: exactly one definition, no production caller, exactly one
-// production call of its intrinsic validation phase, and its closing proof still
-// in the path with every clause. The source census covers the two seam files as
-// a WHOLE — every function of theirs but the two live locking ones — so a later
-// helper added beside the builder is covered without being named here.
+// TestCanonicalDAOwnerCandidateBuilderRemainsDormant keeps its name as the
+// contract's anchor and now proves the pair builder is wired to exactly ONE site:
+// one production call from prepareCanonicalFenceImage, one production call of its
+// validation phase from the builder, none of the legacy record-major preparation,
+// and its closing proof still in the path; the source census covers the two seam
+// files as a WHOLE, so a helper added beside the builder is covered unnamed.
 //
 // The behavioral half is stronger than any census: the builder runs to
 // completion while the test holds the live owner lock and the handed snapshot's
 // own mutex, which no implementation that acquired either could do.
 func TestCanonicalDAOwnerCandidateBuilderRemainsDormant(t *testing.T) {
+	refs := productionReferenceCensus(t, "prepareCanonicalDAOwnerCandidates", "validateCanonicalDARetainedSnapshot", "prepareCanonicalDAImage")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"prepareCanonicalDAOwnerCandidates": {"prepareCanonicalFenceImage"}, "validateCanonicalDARetainedSnapshot": {"prepareCanonicalDAOwnerCandidates"}, "prepareCanonicalDAImage": nil}), "production references=%v", refs)
 	definitions, calls, closingCalls := map[string]int{}, map[string]int{}, map[string]bool{}
 	for _, file := range parseCanonicalDAOwnerPackage(t) {
 		ast.Inspect(file.file, func(node ast.Node) bool {
@@ -1203,9 +1205,10 @@ func TestCanonicalDAOwnerCandidateBuilderRemainsDormant(t *testing.T) {
 		}
 	}
 	for name, want := range map[string]int{
-		"prepareCanonicalDAOwnerCandidates":   0,
+		"prepareCanonicalDAOwnerCandidates":   1,
 		"validateCanonicalDARetainedSnapshot": 1,
 		"canonicalDAOwnerPairClosed":          1,
+		"prepareCanonicalDAImage":             0,
 		"BeginDARemoval":                      0,
 	} {
 		if got := calls[name]; got != want {

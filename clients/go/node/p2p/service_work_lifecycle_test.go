@@ -272,15 +272,6 @@ func TestServiceWorkLifecycleCloseWaitsForPublicCallbacks(t *testing.T) {
 	})
 }
 
-func lifecycleDASetPresent(s *Service, daID [32]byte) bool {
-	for _, candidate := range s.CompleteDASetCandidates(^uint64(0)) {
-		if candidate.DAID == daID {
-			return true
-		}
-	}
-	return false
-}
-
 // TestServiceWorkLifecyclePeerWorkerInheritance runs a real peer loop and handler stack: one authorized message finishes its publication and its owed compact fallback while Close waits, and after the drain the worker arms no read deadline and starts no further read.
 func TestServiceWorkLifecyclePeerWorkerInheritance(t *testing.T) {
 	s := lifecycleService(t)
@@ -554,16 +545,20 @@ func TestServiceWorkLifecycleConcurrentClose(t *testing.T) {
 
 // TestServiceWorkLifecycleReadOnlyAfterClose proves read-only queries stay callable without a lease and a retained callback rejects with the exact error and zero state/queue/send delta.
 func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
-	s := lifecycleService(t)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	s := h.service
+	s.ctx = context.Background()
+	f := newDAIngressFixture(t, h)
 	daID, snapshotID := daRelayTestID(0x7e), daRelayTestID(0x7f)
 	payload := []byte("readonly-payload")
-	stageCompleteDASetForService(t, s, daID, payload)
+	retainedSet, snapshotSet := f.commit(daID, 2), f.commit(snapshotID, 2)
+	f.admit(retainedSet, "127.0.0.9:19119")
 	blockBytes := compactTestBlockBytesWithTxs(t, [][]byte{
 		minimalValidTxBytes(t),
 		daCommitRelayTxBytes(t, daID, 1, payload),
 		daChunkRelayTxBytes(t, daID, 0, 2, payload),
 	})
-	stageCompleteDASetForService(t, s, snapshotID, []byte("snapshot-payload"))
+	f.admit(snapshotSet, "127.0.0.9:19119")
 	txBytes := minimalValidTxBytes(t)
 	_, txid, err := parseCanonicalTx(txBytes)
 	must(t, err, "parseCanonicalTx")
@@ -578,7 +573,7 @@ func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	requireReturned(t, lifecycleClose(s), "Close")
 	requireEqual(t, s.Addr() != "", true, "a non-empty Addr() after Close")
 	requireEqual(t, s.PeerLifecycleExits(), exitsBefore, "PeerLifecycleExits after Close")
-	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 2, "defensive DA snapshot candidates after Close")
+	requireEqual(t, len(s.CompleteDASetCandidates(1<<20)), 0, "complete candidates after Close: both retained sets are incomplete")
 	requireClosedRejection(t, s.AnnounceTx(txBytes), "retained AnnounceTx callback")
 	requireClosedRejection(t, s.AnnounceBlock(blockBytes), "retained AnnounceBlock callback")
 	requireEqual(t, metaCalls.Load(), int64(0), "TxMetadataFunc calls after Close") // Every observable owner a won call would have moved: the metadata producer was never invoked, the retained peer's socket saw no frame, and the state owners below are unchanged.
@@ -587,8 +582,9 @@ func TestServiceWorkLifecycleReadOnlyAfterClose(t *testing.T) {
 	requireEqual(t, pooled, false, "the relay-pool entry a rejected AnnounceTx would have added")
 	// blockBytes carries this exact da_id's complete commit+chunk pair, so a
 	// Service that still owned any post-return retained-DA cleanup would have
-	// taken the set here. There is no such authority left: the set survives.
-	requireEqual(t, lifecycleDASetPresent(s, daID), true, "the retained DA set after Close and both rejected callbacks")
+	// taken the set here. There is no such authority left: both sets survive.
+	f.requireRetained(retainedSet, "the retained DA set after Close and both rejected callbacks")
+	f.requireRetained(snapshotSet, "the second retained DA set after Close")
 	requireEqual(t, s.blockSeen.Has(node.DevnetGenesisBlockHash()), false, "the block seen-set entry a rejected AnnounceBlock would have added")
 }
 
@@ -610,33 +606,37 @@ func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	p := testPeerForService(h.service, "remote", 2)
 	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
 	must(t, err, "processRelayedBlock")
-	chunk := stageOrphanQuotaBoundary(t, h.service, 109)
-	// Primed to ONE advance from expiry, so the advance this row skips is the one
-	// that decides: with the gate reverted the orphan is released and the restage
-	// below succeeds instead of refusing.
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(109), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111").handleTx(commit), "retain the commit")
+	// Primed to ONE tick from expiry, so the tick this row skips is the one that
+	// decides: with the gate reverted the record is released and the replay
+	// below readmits instead of reporting the DUPLICATE.
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
 	terminal := errors.New("storage persistence fault")
 	p.acceptRelayedBlockResult(summary.BlockHash, summary, terminal)
-	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
+	f.requireRetained(commit, "the retained record the skipped TTL tick left in place")
 	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
 }
 
-// latchedDAHarness returns a harness whose engine has GENUINELY latched its
-// terminal fault and therefore RETAINS ChainState.admissionMu exclusively — the
-// exact production state the two observer gates below defend against. The latch
-// is the engine's own decision, not an injected seam: the retained DA record
-// staged here carries commit bytes that do not canonically parse, so the next
-// canonical transition's D preparation fails terminally before the durable
-// commit and canonicalTransition.end latches without unlocking. atomicWriteIO,
-// the post-commit persistence-fault seam, is private to package node and no
-// forged latch is available from here.
+// latchedDAHarness returns a harness whose engine has GENUINELY latched its terminal
+// fault and RETAINS ChainState.admissionMu exclusively: a finalized standard-domain
+// owner claim with no resident pool entry is the orphan the next canonical
+// transition's mempool validation refuses terminally before the durable commit.
 func latchedDAHarness(t *testing.T, source *testHarness) *testHarness {
 	t.Helper()
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	stageCompleteDASetForService(t, h.service, daRelayTestID(0x6a), []byte("latch-payload"))
-	if _, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 1), nil); err == nil {
-		t.Fatal("the corrupt retained DA record did not fail the canonical transition")
+	owner := h.mempool.PendingOutpointOwner()
+	ctx, ok := owner.AdmissionContext()
+	requireEqual(t, ok, true, "owner admission context")
+	orphan := [32]byte{0x6a}
+	token, err := owner.Reserve(ctx, node.PendingOutpointStandardMempool, orphan, []consensus.Outpoint{{Txid: orphan}})
+	must(t, err, "Reserve")
+	must(t, owner.Finalize(token), "Finalize")
+	summary, err := h.syncEngine.ApplyBlock(blockAtHeight(t, source, 1), nil)
+	if want := fmt.Sprintf("canonical mempool invariant: orphan standard pending-outpoint claim for %x", orphan); summary != nil || err == nil || err.Error() != want {
+		t.Fatalf("ApplyBlock=(%+v,%v), want a nil summary and %q", summary, err, want)
 	}
 	requireEqual(t, h.syncEngine.TerminalFaulted(), true, "the engine terminal latch")
 	return h
@@ -695,11 +695,13 @@ func TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance(t *testing.T) {
 	p := testPeerForService(h.service, "remote", 2)
 	summary, err := p.processRelayedBlock(blockAtHeight(t, source, 1))
 	must(t, err, "processRelayedBlock")
-	chunk := stageOrphanQuotaBoundary(t, h.service, 111)
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
-	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime orphan TTL")
+	f := newDAIngressFixture(t, h)
+	commit := f.commit(daRelayTestID(111), 2)
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111").handleTx(commit), "retain the commit")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
+	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
 	terminal := errors.New("storage persistence fault")
 	stop := h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, terminal)
 	requireEqual(t, stop, true, "the resolved-orphan walk stop a terminal result forces")
-	requireEqual(t, h.service.daRelay.StageChunk(peerQuotaKey("127.0.0.1:19111"), chunk) != nil, true, "the retained orphan the skipped TTL advance left in place")
+	f.requireRetained(commit, "the retained record the skipped TTL tick left in place")
 }

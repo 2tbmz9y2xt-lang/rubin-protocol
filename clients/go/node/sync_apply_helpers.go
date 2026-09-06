@@ -432,17 +432,26 @@ type canonicalFenceImage struct {
 // prepareCanonicalFenceImage rechecks freshness under the fence and then builds
 // the complete standard/owner image against final C1, binds the prepared owner
 // image's stable tip to C1, and runs the full live preflight under Mempool.mu
-// then PendingOutpointOwner.mu. Only then does it prepare the retained-DA image
-// against the SAME captured C1 context. It publishes nothing: publication is a
-// separate assignment that runs only after the commit selects NEW.
+// then PendingOutpointOwner.mu. Only then does it prepare the paired retained-DA
+// image against the SAME captured C1 context: one shallow private copy of the
+// relay is taken under DARelayState.mu and that mutex released before the
+// owner-candidate builder validates it once, and every returned field is
+// consumed — the retained projection becomes D1 for the live relay through the
+// existing publish carrier, the pending snapshot and owner index replace the M/O
+// image's, so O1 is the builder's pair, never the pre-D owner image. It publishes
+// nothing: publication is a separate assignment that runs only after the commit
+// selects NEW, in the unchanged C1 then M1/O1 then D1 order.
 //
 // The M/O half is deliberately FIRST and complete before the D half starts, so a
 // transition violating both invariants at once reports the standard/owner error:
 // the contract's error order is preparation order, and D preparation is not
-// reached at all once M/O has failed.
+// reached at all once M/O has failed. The write fence held throughout also keeps
+// every retained-DA writer and prefetch producer out while the builder inspects
+// the borrowed input bytes, which are never published.
 //
 // An empty image means no mempool is bound to this engine, which is not an
-// error; a bound mempool always carries the retained-DA state installed with it.
+// error; an engine with a mempool but no retained-DA relay bound prepares no D
+// image and leaves the M/O pair as prepared.
 //
 // The closing validateCanonicalMempoolLiveImage REPEATS the identical call the
 // plan builder already makes inside canonicalMempoolPlanSnapshot, on the same
@@ -472,11 +481,18 @@ func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *c
 	if err := validateCanonicalMempoolLiveImage(tr.mempool, mo.snapshot, mo.snapshotUsedBytes, mo.owner); err != nil {
 		return canonicalFenceImage{}, terminalCanonicalMempoolError(err)
 	}
-	da, err := prepareCanonicalDAImage(tr.daRelay, plan.includedDA, mo.chain)
+	if tr.daRelay == nil {
+		return canonicalFenceImage{mo: &mo}, nil
+	}
+	tr.daRelay.mu.Lock()
+	retained := tr.daRelay.cloneForAtomicBatchLocked()
+	tr.daRelay.mu.Unlock()
+	candidates, err := prepareCanonicalDAOwnerCandidates(retained, mo.owner, mo.pending, plan.includedDA, mo.chain)
 	if err != nil {
 		return canonicalFenceImage{}, err
 	}
-	return canonicalFenceImage{mo: &mo, da: da}, nil
+	mo.pending, mo.ownerIndex = candidates.pending, candidates.ownerIndex
+	return canonicalFenceImage{mo: &mo, da: &preparedCanonicalDAImage{relay: tr.daRelay, projected: candidates.retained}}, nil
 }
 
 // recheckCanonicalTransitionFreshness proves, under the admission fence, that the

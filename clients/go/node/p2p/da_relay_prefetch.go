@@ -23,19 +23,29 @@ func (s *Service) canScheduleDAPrefetch() bool {
 	return s != nil && s.daRelay != nil
 }
 
+// daPrefetchPeers lists every eligible prefetch peer by quota key and moves the
+// trigger peer's key to the front when it still holds its preference. The local
+// tip height the preference reads is captured once, before peersMu, so no chain
+// lock is taken under a peer lock.
 func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
+	height := s.cfg.SyncEngine.LocalTipHeight()
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	peers, keys := s.allDAPrefetchPeersLocked()
 	if peerAddr == "" {
 		return peers, keys
 	}
-	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr))
+	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height))
 }
 
-func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string) string {
+// preferredDAPrefetchPeerKeyLocked returns the trigger peer's quota key when the
+// peer is present, accepts prefetch and, after drifting its quality score for
+// height, still meets the preference minimum; otherwise "". A low score only
+// removes the front-of-list preference: the key stays eligible and the peer
+// remains usable through the ordinary fallback order.
+func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint64) string {
 	current := s.peers[peerAddr]
-	if !acceptsDAPrefetch(current) {
+	if !acceptsDAPrefetch(current) || !current.qualityPreferred(height) {
 		return ""
 	}
 	return peerQuotaKey(current.addr())

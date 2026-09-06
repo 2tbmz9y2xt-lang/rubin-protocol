@@ -4667,6 +4667,30 @@ func TestMinerMineOneSelectsFromMempool(t *testing.T) {
 	}
 }
 
+// TestTxAdmitErrorCauseCompatibility pins the cause bridge: the hash branch attaches the
+// sentinel, Unwrap exposes only it, same-text errors never match, errors.As still reaches
+// the outer pointer, and Error(), Kind and the count buckets are unchanged.
+func TestTxAdmitErrorCauseCompatibility(t *testing.T) {
+	f := newDANonReplayFixture(t, 1)
+	_, hashErr := f.relay.AdmitDA(f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xca}, payload: []byte("cause"), chunkHash: [32]byte{0xff}, literalChunkHash: true}).raw, publicPeer(t, "cause"))
+	require(t, errors.Is(hashErr, ErrDARelayChunkHashMismatch) && hashErr.Error() == "DA chunk payload hash mismatch", "the hash branch did not attach the sentinel: %v", hashErr)
+	require(t, (*TxAdmitError)(nil).Unwrap() == nil, "nil receiver unwraps to %v, want nil", (*TxAdmitError)(nil).Unwrap())
+	bare := txAdmitRejected("DA chunk payload hash mismatch")
+	wrapped := txAdmitRejected("DA chunk payload hash mismatch")
+	wrapped.cause = ErrDARelayChunkHashMismatch
+	require(t, bare.Unwrap() == nil && !errors.Is(bare, ErrDARelayChunkHashMismatch), "cause-free same-text error matched the sentinel: unwrap=%v", bare.Unwrap())
+	require(t, errors.Is(wrapped, ErrDARelayChunkHashMismatch) && !errors.Is(wrapped, errors.New(ErrDARelayChunkHashMismatch.Error())), "errors.Is must select by sentinel identity, never by text")
+	outer := fmt.Errorf("relay: %w", wrapped)
+	var admit *TxAdmitError
+	require(t, errors.As(outer, &admit) && admit == wrapped && errors.Is(outer, ErrDARelayChunkHashMismatch), "errors.As reached %p, want the outer pointer %p", admit, wrapped)
+	require(t, wrapped.Error() == bare.Error() && wrapped.Kind == TxAdmitRejected && wrapped.Message == "DA chunk payload hash mismatch", "cause changed the public rendering: %q %s", wrapped.Error(), wrapped.Kind)
+	m := &Mempool{}
+	for _, err := range []error{wrapped, bare, txAdmitConflict("c"), txAdmitUnavailable("u"), nil} {
+		m.noteAdmissionResult(err)
+	}
+	require(t, m.AdmissionCounts() == MempoolAdmissionCounts{Accepted: 1, Conflict: 1, Rejected: 2, Unavailable: 1}, "admission counts with a caused error=%+v", m.AdmissionCounts())
+}
+
 func mustNodeMLDSA87Keypair(t *testing.T) *consensus.MLDSA87Keypair {
 	t.Helper()
 	kp, err := consensus.NewMLDSA87Keypair()

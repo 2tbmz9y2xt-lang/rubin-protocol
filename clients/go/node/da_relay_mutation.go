@@ -1027,26 +1027,26 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 	s.orphanCommitOverheadBytes = placement.commitBytes
 }
 
-// releaseOwnerReadyPeerQuota is the DORMANT owner-aware PEER quota cleanup selector
+// releaseOwnerReadyPeerQuota is the owner-aware PEER quota cleanup selector
 // (RUBIN_COMPACT_BLOCKS.md 18.1, Section 5 State B). It matches retained members on typed
 // provenance, never the cached peerQuotaKey and never orphanBytesByPeerQuotaKey. Postconditions:
 // a matching commit survives iff a LOCAL or DETACHED_REORG member is retained, keeping its
 // accounting charge and its owner claim; an unblocked whole-record removal also carries every
 // non-matching PEER member; State B never downgrades to State A
 // (releaseOwnerReadyPeerRecordLocked); an empty quota identity selects nothing. It returns
-// commitOwnerReadyRemoval's error classes unwrapped. This entrypoint has zero non-test callers
-// until issue 678.
+// commitOwnerReadyRemoval's error classes unwrapped. Its sole production caller is the
+// exported ReleasePeerQuotaKey wrapper.
 func (s *DARelayState) releaseOwnerReadyPeerQuota(quotaIdentity string) error {
 	return s.commitOwnerReadyRemoval(func(clone *DARelayState) ([]DAAdmissionVictim, error) {
 		return ownerReadyPeerRemovalVictims(clone, quotaIdentity)
 	})
 }
 
-// advanceOwnerReadyTTL is the DORMANT owner-aware TTL tick selector: each incomplete
+// advanceOwnerReadyTTL is the owner-aware TTL tick selector: each incomplete
 // owner-ready record with ttl greater than one decrements once and mints one fresh
 // revision, ttl one expires as a whole-record removal with no revision, and a resident
 // ttl of zero fails closed before any arithmetic. It returns commitOwnerReadyRemoval's error
-// classes unwrapped. This entrypoint has zero non-test callers until issue 678.
+// classes unwrapped. Its sole production caller is the exported AdvanceOrphanTTL wrapper.
 func (s *DARelayState) advanceOwnerReadyTTL() error {
 	return s.commitOwnerReadyRemoval(ownerReadyTTLTickVictims)
 }
@@ -1083,10 +1083,8 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // through that same predicate.
 // Postcondition: this path only RETURNS them; it reads and sets no latch of its own.
 //
-// FENCE OWNERSHIP for the issue-678 wiring: this body takes lockAdmissionFence ITSELF, where every
-// merged sibling takes it in the exported wrapper. sync.RWMutex is not reentrant, so the wrapper that
-// swaps to this path must DROP its own deferred fence and keep the nil-receiver arm
-// ReleasePeerQuotaKey pins today (da_relay_state.go).
+// FENCE OWNERSHIP: this body takes lockAdmissionFence ITSELF and the exported wrappers take
+// none — sync.RWMutex is not reentrant, so the fence is acquired exactly once per cleanup, here.
 func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState) ([]DAAdmissionVictim, error)) error {
 	release := s.lockAdmissionFence()
 	defer release()
@@ -1259,17 +1257,12 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // Cost, under BOTH the admission fence and DARelayState.mu, per peer release and per TTL tick.
 // The preflight walks every retained record's bytes once through consensus.ParseTx, plus one
 // SHA3-256 and one payload equality per incomplete chunk and one re-scan of each commit's outputs,
-// on top of the shallow image clone. Selection walks each SURVIVING record's bytes three times
-// more: cloneOwnerReady in dropOwnerReadyChunksLocked, checkOwnerReadyRemovalSurvivor's
-// byte-equality of that clone against its source (a tautology on the TTL arm), and a second
-// cloneOwnerReady in projectDARecordImageLiveLocked — redundant for THIS caller, whose image.next
-// is already private, and kept because that projector is shared with admission, where it is not.
-// So a tick decrementing every record walks the retained bytes four times per record where the
-// legacy tick copied none of them; the whole-record arm pays the preflight walk alone. Selection
-// also runs checkRetiredLocatorRowsLocked over ALL of s.locators per projected record, so that
-// tick is O(records x locators) against the legacy O(records). RUB-678 owns measuring both before
-// any live caller (removal_preflight_reparse_bound, removal_batch_scan_bound, M_LOCATOR_SCAN); no
-// cache, memo or skip-if-unchanged shortcut guards them, deliberately.
+// on top of the shallow image clone. Selection is record-local: a pure TTL decrement copies the
+// record value only and touches no retained bytes, locators or accounting; a partial PEER
+// removal clones only the record's chunks container and compares each surviving chunk by
+// byte-equality against the shared backing it keeps; a whole removal projects the record's own
+// rows and counters. No arm walks s.locators, so a tick is O(records + retained members). No
+// cache, memo or skip-if-unchanged shortcut guards the preflight, deliberately.
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	candidates := s.sortedRetainedDAIDsLocked()
 	for _, daID := range candidates {
@@ -1375,7 +1368,7 @@ func (s *DARelayState) releaseOwnerReadyPeerRecordLocked(daID [32]byte, quotaIde
 	case len(matchChunks) == 0:
 		return nil, nil
 	default:
-		return s.dropOwnerReadyChunksLocked(record, matchChunks, 0)
+		return s.dropOwnerReadyChunksLocked(record, matchChunks)
 	}
 }
 
@@ -1401,12 +1394,28 @@ func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (match
 	return matchCommit, matchChunks, memberCount, nonPeerChunk
 }
 
+// tickOwnerReadyTTLRecordLocked expires a ttl-one record whole and otherwise decrements
+// the record VALUE in place on the clone: one copy of the struct header, the same chunks
+// container, the same member pointers and byte backing, one checked revision mint, and a
+// direct write of that sets entry and the records high-water. No locator, accounting or
+// prefetch row moves, so a surviving decrement never touches retained bytes.
 func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
 	record := s.sets[daID]
 	if record.ttlBlocksRemaining == 1 {
 		return s.removeOwnerReadyWholeRecordLocked(record)
 	}
-	return s.dropOwnerReadyChunksLocked(record, nil, 1)
+	survivor := record
+	survivor.ttlBlocksRemaining--
+	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
+		return nil, err
+	}
+	revision, err := checkedAddUint64(s.records, 1)
+	if err != nil {
+		return nil, err
+	}
+	survivor.revision = revision
+	s.sets[daID], s.records = survivor, revision
+	return nil, nil
 }
 
 // ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted to the uint64 maximum.
@@ -1423,9 +1432,10 @@ func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 
 // removeOwnerReadyWholeRecordLocked removes one whole owner-ready incomplete record — every
 // member with its locator, accounting contribution, prefetch reservation and shared-owner
-// claim — through the merged record-image projector, and returns each retired member as a
-// bound-owner victim in locator order. It splits projectDARecordImageLocked's two steps to
-// project uncapped, exactly as the canonical removal builder does.
+// claim — and returns each retired member as a bound-owner victim in locator order. It keeps
+// the baseline guard, verifies each of the record's own locator rows by direct lookup, projects
+// the record's counters with the lifted removal caps and installs a placement that retires
+// exactly those rows and installs none; it mints no revision and walks no other record's rows.
 //
 // checkDANonReplayVictims cannot pair this arm's batch: it walks chunks alone, and here the whole
 // record departs COMMIT FIRST. Nothing else pairs it either — the batch and the departure set are
@@ -1450,7 +1460,7 @@ func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord
 			return nil, errDARelayImageIncompatible
 		}
 	}
-	placement, err := s.projectDARecordImageLiveLocked(image, live, s.ownerReadyRemovalCaps())
+	placement, err := s.projectOwnerReadyRetirementLocked(image, live, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -1459,25 +1469,45 @@ func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord
 	return victims, nil
 }
 
+// projectOwnerReadyRetirementLocked is the record-local half both removal arms share: it
+// verifies each row to retire against the live index by DIRECT lookup — never a walk of
+// s.locators — and projects the record's accounting with the lifted removal caps. The
+// placement it returns retires exactly those rows and installs none; the caller adds the
+// survivor record when one remains.
+func (s *DARelayState) projectOwnerReadyRetirementLocked(image daRelayRecordImage, live daRelaySetRecord, retire []daRelayLocatorRow) (daRelayRecordPlacement, error) {
+	for _, row := range retire {
+		if s.locators[row.txid] != row.locator {
+			return daRelayRecordPlacement{}, errDARelayLocatorMismatch
+		}
+	}
+	placement, err := s.projectDARecordImageCountersLocked(image, live, s.ownerReadyRemovalCaps())
+	if err != nil {
+		return daRelayRecordPlacement{}, err
+	}
+	placement.retire = retire
+	return placement, nil
+}
+
 // dropOwnerReadyChunksLocked keeps one owner-ready record and drops the named chunks,
-// releasing their locators, accounting and claims and minting one fresh revision. ttlDelta
-// decrements the record TTL once (the TTL selector passes 1; the PEER selector passes 0).
-// The commit and every unnamed member stay byte-identical and the record state never changes.
-//
-// PRECONDITION: ttlDelta is strictly below the record's resident TTL, so the unsigned
-// subtraction below neither wraps nor lands on zero. ownerReadyRemovalGateFails refuses a
-// resident TTL of zero before either selector runs, which is what makes a delta of 1 safe.
+// releasing their locators, accounting and claims and minting one fresh revision. The
+// survivor is the record VALUE with a cloned chunks container minus the dropped indexes:
+// the commit, every unnamed chunk, their member pointers, inputs, raw bytes and payload
+// backing stay shared with the live record and immutable, the live container itself is
+// never edited, and the set's prefetch reservation is preserved. The record state never changes.
 //
 // checkDANonReplayVictims — the admission path's own pairing — proves the batch is exactly the
 // departed chunks, in sortedRetainedDAChunkIndexes order, txid/token/inputs equal, so no chunk can
 // leave the survivor while its finalized DA claim stays live. It is a fail-closed backstop: the
 // one loop below appends a victim per deleted index, so no reachable input reddens it today.
-func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropIndexes []uint16, ttlDelta uint64) ([]DAAdmissionVictim, error) {
-	survivor := record.cloneOwnerReady()
-	survivor.ttlBlocksRemaining -= ttlDelta
-	var victims []DAAdmissionVictim
+func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropIndexes []uint16) ([]DAAdmissionVictim, error) {
+	survivor := record
+	survivor.chunks = maps.Clone(record.chunks)
+	victims := make([]DAAdmissionVictim, 0, len(dropIndexes))
+	retire := make([]daRelayLocatorRow, 0, len(dropIndexes))
 	for _, index := range dropIndexes {
-		victims = append(victims, ownerReadyMemberVictim(record.chunks[index].member))
+		chunk := record.chunks[index]
+		victims = append(victims, ownerReadyMemberVictim(chunk.member))
+		retire = append(retire, daRelayLocatorRow{txid: chunk.member.txid, locator: daRelayLocator{daID: record.daID, kind: daRelayLocatorChunk, chunkIndex: index}})
 		delete(survivor.chunks, index)
 	}
 	if err := checkOwnerReadyRemovalBaseline(record, survivor); err != nil {
@@ -1487,10 +1517,16 @@ func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropI
 	if err := checkDANonReplayVictims(image, record, victims); err != nil {
 		return nil, err
 	}
-	placement, err := s.projectDARecordImageLiveLocked(image, record, s.ownerReadyRemovalCaps())
+	placement, err := s.projectOwnerReadyRetirementLocked(image, record, retire)
 	if err != nil {
 		return nil, err
 	}
+	revision, err := checkedAddUint64(s.records, 1)
+	if err != nil {
+		return nil, err
+	}
+	survivor.revision = revision
+	placement.record = survivor
 	s.installDASetRecordLocked(placement)
 	return victims, nil
 }

@@ -131,21 +131,47 @@ func (f *canonicalMOFixture) daSet(t *testing.T, relay *DARelayState, daID [32]b
 	var commitment [32]byte
 	copy(commitment[:], hasher.Sum(nil))
 	set.commit = f.daCommitTx(t, ops[0], daID, uint16(len(set.chunks)), nonce)
-	if err := relay.StageCommit("peer-commit", DARelayCommit{
-		DAID: daID, PayloadCommitment: commitment, ChunkCount: uint16(len(set.chunks)),
-		WireBytes: uint64(len(set.commit)), TxBytes: set.commit,
-	}); err != nil {
-		t.Fatalf("StageCommit: %v", err)
+	// Legacy private staging: these rows exercise the preserved record-major
+	// prepareCanonicalDAImage root, never the live transition.
+	if err := relay.addDACommit("peer-commit", daRelayCommit{daID: daID, payloadCommitment: commitment, chunkCount: uint16(len(set.chunks)), wireBytes: uint64(len(set.commit)), txBytes: set.commit}); err != nil {
+		t.Fatalf("addDACommit: %v", err)
 	}
 	for i, chunkTx := range set.chunks {
-		if err := relay.StageChunk("peer-chunk", DARelayChunk{
-			DAID: daID, ChunkHash: sha3.Sum256(set.payloads[i]), ChunkIndex: uint16(i), Payload: set.payloads[i],
-			WireBytes: uint64(len(chunkTx)), TxBytes: chunkTx,
-		}); err != nil {
-			t.Fatalf("StageChunk(%d): %v", i, err)
+		if err := relay.addDAChunk("peer-chunk", daRelayChunk{daID: daID, chunkHash: sha3.Sum256(set.payloads[i]), chunkIndex: uint16(i), payload: set.payloads[i], wireBytes: uint64(len(chunkTx)), txBytes: chunkTx}); err != nil {
+			t.Fatalf("addDAChunk(%d): %v", i, err)
 		}
 	}
 	return set
+}
+
+// ownerReadyCommitTx is daCommitTx plus the one CORE_DA_COMMIT output the
+// owner-ready renderer requires, declaring chunkCount chunks.
+func (f *canonicalMOFixture) ownerReadyCommitTx(t *testing.T, op consensus.Outpoint, daID [32]byte, chunkCount uint16, nonce uint64) []byte {
+	t.Helper()
+	tx, _, _, _, err := consensus.ParseTx(f.daCommitTx(t, op, daID, chunkCount, nonce))
+	mustCanonicalMO(t, "ParseTx(da commit)", err)
+	commitment := sha3.Sum256(daID[:])
+	tx.Outputs = append([]consensus.TxOutput{{Value: 0, CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: commitment[:]}}, tx.Outputs...)
+	mustCanonicalMO(t, "SignTransaction(owner-ready da commit)", consensus.SignTransaction(tx, f.engine.chainState.Utxos, devnetGenesisChainID, f.signer))
+	return mustMarshalTxForNodeTest(t, tx)
+}
+
+// admitOwnerReady retains one signed DA member through the exported AdmitDA,
+// the only live retained-member writer, with test-only peerless provenance.
+func admitOwnerReady(t *testing.T, relay *DARelayState, raw []byte) {
+	t.Helper()
+	got, err := relay.AdmitDA(raw, LocalDAProvenance())
+	require(t, err == nil && got.Disposition == DAAdmissionRetained, "AdmitDA=(%+v,%v), want RETAINED", got, err)
+}
+
+// ownerReadyIncompleteSet admits one owner-ready State B record: the commit on
+// ops[0] declaring len(ops) chunks, then one chunk per ops[1:], never complete.
+func (f *canonicalMOFixture) ownerReadyIncompleteSet(t *testing.T, relay *DARelayState, daID [32]byte, ops []consensus.Outpoint, nonce uint64) {
+	t.Helper()
+	admitOwnerReady(t, relay, f.ownerReadyCommitTx(t, ops[0], daID, uint16(len(ops)), nonce))
+	for i := 1; i < len(ops); i++ {
+		admitOwnerReady(t, relay, f.daChunkTx(t, ops[i], daID, uint16(i-1), nonce+uint64(i), []byte{daID[0], byte(i)}))
+	}
 }
 
 // daCommitTx is the signed DA commit shape mustBuildSignedDaCommitTxWithChunkCount
@@ -332,10 +358,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		f := newCanonicalMOFixture(t, 2, MempoolConfig{})
 		relay, daID, payload := f.engine.DARelayState(), daRelayTestID(0x55), []byte{0x55}
 		chunkTx := f.daChunkTx(t, f.ops[1], daID, 0, 870, payload)
-		mustCanonicalMO(t, "StageChunk", relay.StageChunk("peer-orphan", DARelayChunk{
-			DAID: daID, ChunkHash: sha3.Sum256(payload), Payload: payload,
-			WireBytes: uint64(len(chunkTx)), TxBytes: chunkTx,
-		}))
+		mustCanonicalMO(t, "addDAChunk", relay.addDAChunk("peer-orphan", daRelayChunk{daID: daID, chunkHash: sha3.Sum256(payload), payload: payload, wireBytes: uint64(len(chunkTx)), txBytes: chunkTx}))
 		if got := relay.sets[daID].state; got != daRelayStateOrphanChunks {
 			t.Fatalf("fixture record state=%v, want an INCOMPLETE record", got)
 		}
@@ -568,7 +591,7 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 }
 
 // TestCanonicalDAWritersCannotInterleaveWithTheTransition is the barrier
-// schedule for all six surviving production writers: each one launched while the
+// schedule for all five surviving production writers: each one launched while the
 // admission WRITE guard is held blocks until the guard is released, so no writer
 // can land between a D preparation and its publication. It is the deterministic
 // negative for removing any single fence.
@@ -576,19 +599,14 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 	f := newCanonicalMOFixture(t, 1, MempoolConfig{})
 	relay := f.engine.DARelayState()
 	daID := daRelayTestID(0x81)
-	payload := []byte("fenced")
+	commitTx := f.ownerReadyCommitTx(t, f.ops[0], daID, 2, 810)
 	// An ordered slice, not a map: subtest order is part of what a rerun has to
 	// reproduce.
 	writers := []struct {
 		name string
 		run  func()
 	}{
-		{"StageCommit", func() {
-			_ = relay.StageCommit("fence-peer", DARelayCommit{DAID: daID, PayloadCommitment: sha3.Sum256(payload), ChunkCount: 1, WireBytes: 8})
-		}},
-		{"StageChunk", func() {
-			_ = relay.StageChunk("fence-peer", DARelayChunk{DAID: daRelayTestID(0x82), ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: 8})
-		}},
+		{"AdmitDA", func() { _, _ = relay.AdmitDA(commitTx, LocalDAProvenance()) }},
 		{"AdvanceOrphanTTL", func() { _ = relay.AdvanceOrphanTTL() }},
 		{"ReleasePeerQuotaKey", func() { _ = relay.ReleasePeerQuotaKey("fence-peer") }},
 		{"PlanPrefetch", func() { relay.PlanPrefetch(daID, []string{"fence-peer"}, time.Unix(1, 0)) }},
@@ -626,7 +644,7 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 // exactly the prepared one — no writer's update was lost and no reader could see
 // a tuple no writer produced.
 func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
-	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+	f := newCanonicalMOFixture(t, 9, MempoolConfig{})
 	relay := f.engine.DARelayState()
 	daID := daRelayTestID(0x91)
 	f.daSet(t, relay, daID, f.ops[:3], 1100)
@@ -634,22 +652,25 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 	chain.final.mu.Lock()
 	delete(chain.final.Utxos, f.ops[0])
 	chain.final.mu.Unlock()
+	racing := make([][]byte, 6)
+	for i := range racing {
+		racing[i] = f.daChunkTx(t, f.ops[3+i], daRelayTestID(0xa0+byte(i)), 0, 1110+uint64(i), []byte{byte(i)})
+	}
 
 	tr, err := f.engine.beginCanonicalTransition(&diagnosticBatch{})
 	mustCanonicalMO(t, "beginCanonicalTransition", err)
 	var writers sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for _, raw := range racing {
 		writers.Add(1)
-		go func(seed byte) {
+		go func(raw []byte) {
 			defer writers.Done()
-			payload := []byte{seed}
-			_ = relay.StageChunk("racing-peer", DARelayChunk{DAID: daRelayTestID(0xa0 + seed), ChunkHash: sha3.Sum256(payload), Payload: payload, WireBytes: 8})
-		}(byte(i))
+			_, _ = relay.AdmitDA(raw, LocalDAProvenance())
+		}(raw)
 	}
 	// Every writer is PROVEN parked at admissionMu.RLock before the preparation
 	// runs. Without this the six goroutines might not have reached the fence at
 	// all, and "no writer landed inside the prepared image" would hold vacuously.
-	awaitCanonicalMOAdmissionRLock(t, "StageChunk", 6)
+	awaitCanonicalMOAdmissionRLock(t, "AdmitDA", 6)
 	image := mustPrepareCanonicalDAImage(t, tr.daRelay, nil, chain)
 	prepared := daRelayStateSnapshot(image.projected)
 	plan := &canonicalTransitionPlan{final: cloneChainState(f.engine.chainState)}
@@ -673,23 +694,17 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 	}
 }
 
-// stageRetainedDAMembersOfBlock retains every DA member of these blocks with the
-// exact canonical bytes ingest supplies, so the resident carries the identity
-// that block contributes to I.
-func stageRetainedDAMembersOfBlock(t *testing.T, relay *DARelayState, blocks ...[]byte) {
+// retainBlockDACommits admits the DA COMMIT of every set these blocks carry with
+// its exact canonical bytes and no chunk: an owner-ready INCOMPLETE record whose
+// commit input the block itself spends once it becomes canonical.
+func retainBlockDACommits(t *testing.T, relay *DARelayState, blocks ...[]byte) {
 	t.Helper()
 	for _, blockBytes := range blocks {
 		parsed, err := consensus.ParseBlockBytes(blockBytes)
 		mustCanonicalMO(t, "ParseBlockBytes", err)
 		for _, tx := range parsed.Txs {
-			raw := mustMarshalTxForNodeTest(t, tx)
-			switch tx.TxKind {
-			case 0x01:
-				var commitment [32]byte
-				copy(commitment[:], tx.Outputs[0].CovenantData)
-				mustCanonicalMO(t, "StageCommit", relay.StageCommit("da-peer", DARelayCommit{DAID: tx.DaCommitCore.DaID, PayloadCommitment: commitment, ChunkCount: tx.DaCommitCore.ChunkCount, WireBytes: uint64(len(raw)), TxBytes: raw}))
-			case 0x02:
-				mustCanonicalMO(t, "StageChunk", relay.StageChunk("da-peer", DARelayChunk{DAID: tx.DaChunkCore.DaID, ChunkHash: tx.DaChunkCore.ChunkHash, ChunkIndex: tx.DaChunkCore.ChunkIndex, Payload: tx.DaPayload, WireBytes: uint64(len(raw)), TxBytes: raw}))
+			if tx.TxKind == 0x01 {
+				admitOwnerReady(t, relay, mustMarshalTxForNodeTest(t, tx))
 			}
 		}
 	}
@@ -697,10 +712,10 @@ func stageRetainedDAMembersOfBlock(t *testing.T, relay *DARelayState, blocks ...
 
 // TestCanonicalDAImageIsPreparedOnEveryTransitionPath executes A7: the
 // preferred-reorg, standalone-disconnect and genesis-bootstrap entries all reach
-// the ONE central D prepare/publish seam. Every record is a COMPLETE set, which
-// the orphan TTL never walks, and no capacity eviction runs, so only the D
-// projection can remove one; the last two rows also carry an EMPTY inclusion
-// list, leaving final chain validity as their only cause.
+// the ONE central D prepare/publish seam. Every record is an owner-ready incomplete
+// commit admitted through AdmitDA; with no TTL tick and no capacity eviction on an
+// engine without a Service, and every inclusion identity partial, final chain
+// validity is the only removal cause.
 func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 	t.Run("preferred reorg", func(t *testing.T) {
 		f := newCanonicalDATestFixture(t)
@@ -723,7 +738,7 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		blockB2 := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb2}, payloads: [][]byte{[]byte("b2")}})
 		// Built and never applied: its set is the survivor the branch leaves alone.
 		survivor := fork.blockWithDASets(t, daSetSpec{daID: [32]byte{0xb3}, payloads: [][]byte{[]byte("b3")}})
-		stageRetainedDAMembersOfBlock(t, relay, blockB1, blockB2, survivor)
+		retainBlockDACommits(t, relay, blockB1, blockB2, survivor)
 		_, err = f.engine.ApplyBlockWithReorg(blockB2, nil)
 		mustCanonicalMO(t, "ApplyBlockWithReorg(B2)", err)
 		if depth := f.engine.LastReorgDepth(); depth != 1 {
@@ -742,8 +757,8 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		created := consensus.Outpoint{Txid: txID(t, f.raw(t, f.ops[0], 2, false))}
 		mustCanonicalMO(t, "ApplyBlock(spend)", f.applySpend(t, f.ops[0], 2))
 		relay, dropped, kept := f.engine.DARelayState(), daRelayTestID(0xd1), daRelayTestID(0xd2)
-		f.daSet(t, relay, dropped, []consensus.Outpoint{created, f.ops[1]}, 1200)
-		f.daSet(t, relay, kept, f.ops[2:4], 1210)
+		f.ownerReadyIncompleteSet(t, relay, dropped, []consensus.Outpoint{created}, 1200)
+		f.ownerReadyIncompleteSet(t, relay, kept, f.ops[2:4], 1210)
 		_, err := f.engine.DisconnectTip()
 		mustCanonicalMO(t, "DisconnectTip", err)
 		_, invalidHeld := relay.sets[dropped]
@@ -759,8 +774,11 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		mustCanonicalMO(t, "NewMempoolWithConfig", err)
 		engine.SetMempool(mp)
 		relay, daID := engine.DARelayState(), daRelayTestID(0xd3)
-		// Signed against the other fixture's UTXOs: never valid against genesis C1.
-		f.daSet(t, relay, daID, f.ops[:2], 1220)
+		// Admitted against a seeded copy of the other fixture's output, dropped before
+		// bootstrap: the record is never valid against genesis C1.
+		engine.chainState.Utxos[f.ops[0]] = f.engine.chainState.Utxos[f.ops[0]]
+		admitOwnerReady(t, relay, f.ownerReadyCommitTx(t, f.ops[0], daID, 1, 1220))
+		delete(engine.chainState.Utxos, f.ops[0])
 		mustCanonicalMO(t, "BootstrapCanonicalGenesisIfEmpty", engine.BootstrapCanonicalGenesisIfEmpty())
 		if _, present := relay.sets[daID]; present {
 			t.Fatal("the bootstrap transition retained a record it never validated against C1")
@@ -820,9 +838,13 @@ func TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal(t *testing.T) {
 // abort source is an unbound suite registry, whose backend failure read as an
 // exclusion instead would have REMOVED the record.
 func TestCanonicalDAImagePlanAbortPrecedence(t *testing.T) {
-	f := newCanonicalMOFixture(t, 3, MempoolConfig{SuiteRegistry: unboundAlgSuiteRegistry()})
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
 	relay, daID := f.engine.DARelayState(), daRelayTestID(0x58)
-	f.daSet(t, relay, daID, f.ops[:3], 850)
+	// Admitted under the bound registry; the abort source is installed afterwards.
+	f.ownerReadyIncompleteSet(t, relay, daID, f.ops[:3], 850)
+	f.mp.mu.Lock()
+	f.mp.policy.SuiteRegistry = unboundAlgSuiteRegistry()
+	f.mp.mu.Unlock()
 	chain := f.canonicalDATestChain(t)
 	chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
 
@@ -920,16 +942,10 @@ func newDAAccountingFixture(t *testing.T) *daAccountingFixture {
 	// chunk_count 2 with only chunk 0 retained: the record stays incomplete, so
 	// its members keep their orphan accounting instead of becoming pinned payload.
 	commitTx := f.daCommitTx(t, f.ops[2], a.incomplete, 2, 1310)
-	mustCanonicalMO(t, "StageCommit", a.relay.StageCommit("peer-partial-commit", DARelayCommit{
-		DAID: a.incomplete, PayloadCommitment: sha3.Sum256([]byte("partial")), ChunkCount: 2,
-		WireBytes: uint64(len(commitTx)), TxBytes: commitTx,
-	}))
+	mustCanonicalMO(t, "addDACommit", a.relay.addDACommit("peer-partial-commit", daRelayCommit{daID: a.incomplete, payloadCommitment: sha3.Sum256([]byte("partial")), chunkCount: 2, wireBytes: uint64(len(commitTx)), txBytes: commitTx}))
 	payload := []byte{0x63, 0x00}
 	chunkTx := f.daChunkTx(t, f.ops[3], a.incomplete, 0, 1311, payload)
-	mustCanonicalMO(t, "StageChunk", a.relay.StageChunk("peer-partial-chunk", DARelayChunk{
-		DAID: a.incomplete, ChunkHash: sha3.Sum256(payload), ChunkIndex: 0, Payload: payload,
-		WireBytes: uint64(len(chunkTx)), TxBytes: chunkTx,
-	}))
+	mustCanonicalMO(t, "addDAChunk", a.relay.addDAChunk("peer-partial-chunk", daRelayChunk{daID: a.incomplete, chunkHash: sha3.Sum256(payload), chunkIndex: 0, payload: payload, wireBytes: uint64(len(chunkTx)), txBytes: chunkTx}))
 	a.chain = f.canonicalDATestChain(t)
 	a.requireEveryAggregateIsExercised(t)
 	return a

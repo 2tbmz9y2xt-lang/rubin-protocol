@@ -40,30 +40,18 @@ type preparedCanonicalDAImage struct {
 	projected *DARelayState
 }
 
-// prepareCanonicalDAImage derives D1: the retained DA image with every record
-// removed that either has a member which is not final_chain_valid against C1, or
-// whose exact set identity occurs in the newly canonical inclusion list. The two
-// causes form ONE record union, so a record matched by both is removed once.
+// prepareCanonicalDAImage is the LEGACY record-major D1 derivation, kept with its
+// private helpers as unit-test compatibility only: no production path calls it.
+// The live transition composes prepareCanonicalDAOwnerCandidates from
+// prepareCanonicalFenceImage instead. It removes every record that either has a
+// member which is not final_chain_valid against C1, or whose exact set identity
+// occurs in the newly canonical inclusion list, as ONE record union.
 //
-// It runs under the transition's ChainState admission WRITE fence, so the live
-// image it reads cannot move before publication; of the LIVE state it takes only
-// DARelayState.mu and never the admission guard itself, which is neither
-// reentrant nor available to it. Member validation additionally RLocks the
-// PRIVATE final image's ChainState.mu through admissionSnapshotForInputs — that
-// clone is transition-owned and its mutex never becomes the live one.
-//
-// Everything fallible happens HERE: parsing, validation, every checked
-// accounting projection, and the whole-image accounting sweep that follows the
-// removals (checkRetainedDAAccountingLocked). Publication is assignment only.
-//
-// Cost, accepted deliberately: every retained member is validated against C1 on
-// every canonical transition, including the later members of a record already
-// destined for removal. That is what makes "D1 is independently derived from
-// full validation of every retained member" a statement about the code rather
-// than about the common case. The shared caches absorb exactly the SIGNATURE
-// verification and the per-height rotation observation; the canonical RE-PARSE
-// of every member's bytes and the rest of its consensus check are paid again on
-// every transition. A cap on retained members is RUB-1118's, not this slice's.
+// Of the LIVE state it takes only DARelayState.mu and never the admission guard.
+// Member validation additionally RLocks the PRIVATE final image's ChainState.mu
+// through admissionSnapshotForInputs — that clone is transition-owned and its
+// mutex never becomes the live one. Everything fallible happens HERE; the
+// returned carrier's publication is assignment only.
 func prepareCanonicalDAImage(relay *DARelayState, included []canonicalDASetIdentity, chain canonicalFinalChainContext) (*preparedCanonicalDAImage, error) {
 	if relay == nil {
 		return nil, nil //nolint:nilnil // nil image, nil error = engine with no retained-DA state bound; publish() documents the nil no-op
@@ -219,10 +207,10 @@ func (t retainedDAAccountingTotals) checkPeerBytesLocked(s *DARelayState) error 
 // publish is the D1 half of FIXED_PUBLICATION: it takes DARelayState.mu and
 // assignment-publishes the already prepared image. It allocates nothing, clones
 // nothing, validates nothing, performs no I/O, invokes no callback and cannot
-// fail — every one of those already ran inside prepareCanonicalDAImage, under the
-// same admission write fence that is still held, so the live image cannot have
-// moved since. A nil image is an engine with no retained-DA state bound and
-// publishes nothing.
+// fail — every one of those already ran inside the preparation that built the
+// projected image, under the same admission write fence that is still held, so
+// the live image cannot have moved since. A nil image is an engine with no
+// retained-DA state bound and publishes nothing.
 func (i *preparedCanonicalDAImage) publish() {
 	if i == nil {
 		return
@@ -322,10 +310,10 @@ type preparedCanonicalDAOwnerCandidates struct {
 // retained-DA terminal class; the record-major live prepareCanonicalDAImage is never consulted.
 // Cost: cloneOwnerReady deep-copies every survivor — O(surviving retained bytes), ~2x them while
 // the input and D1 coexist, where the live image shares that backing — and that copy is the
-// isolation; removals cost O(removals x locators), the inclusion scan O(records + included).
-// Dormant: no non-test caller. RUB-678 owns the live site and must first move P2P ingest onto
-// the owner-ready admission path: StageCommit/StageChunk mint no revision and leave COMPLETE_SET,
-// and phase 1 refuses the WHOLE snapshot on the first resident that is not owner-ready.
+// isolation; each removal is record-local, the inclusion scan O(records + included).
+// Live site: prepareCanonicalFenceImage calls it exactly once per transition, on the shallow
+// private image it captures under DARelayState.mu and releases before this call; every retained
+// record is owner-ready because AdmitDA is the only retained-member writer.
 func prepareCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -475,13 +463,11 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 
 // buildCanonicalDAOwnerCandidates is phase 6: it projects the pair, preserves every survivor
 // exactly, rebuilds the owner indexes from O1 alone and returns the pair only after the closing
-// bijection proof. Removal goes through the shared owner-atomic projector — record, locator rows
-// and accounting retired together — with all four admission caps lifted as the owner-ready
-// admission lifts them: a shrinking projection cannot raise a counter, and of the four the per-da_id
-// lift is inert because a removal zeroes that bucket, while the global, commit and per-peer lifts each
-// keep a snapshot admitted under a since-lowered cap from tripping a false terminal. Each removal
-// releases that set's prefetch reservation, which the projector leaves untouched. Survivors are
-// deep-copied, so no input container reaches D1.
+// bijection proof. Removal reuses the owner-aware whole-record arm — record, its own locator
+// rows, its accounting and its prefetch reservation retired together under the lifted removal
+// caps, which keep a snapshot admitted under a since-lowered cap from tripping a false terminal;
+// its returned victims are not consumed here because O1 is rebuilt from the removed set below.
+// Survivors are deep-copied, so no input container reaches D1.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -492,25 +478,15 @@ func buildCanonicalDAOwnerCandidates(
 	var zero preparedCanonicalDAOwnerCandidates
 	// ...Locked: the private projection's own invariant (see prepareCanonicalDAImage).
 	projected := retained.cloneForAtomicBatchLocked()
-	uncapped := projected.caps
-	uncapped.orphanPoolBytes, uncapped.orphanPoolPerDAIDBytes, uncapped.orphanPoolPerPeerBytes, uncapped.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0), ^uint64(0), ^uint64(0)
 	for i := range image.identities {
 		daID := image.identities[i].daID
 		if !removed[daID] {
 			projected.sets[daID] = retained.sets[daID].cloneOwnerReady()
 			continue
 		}
-		removal := stageDAOwnerReadyRemoval(retained.sets[daID], true)
-		live, err := projected.checkDARecordImageBaselineLocked(removal)
-		var placement daRelayRecordPlacement
-		if err == nil {
-			placement, err = projected.projectDARecordImageLiveLocked(removal, live, uncapped)
-		}
-		if err != nil {
+		if _, err := projected.removeOwnerReadyWholeRecordLocked(retained.sets[daID]); err != nil {
 			return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
 		}
-		projected.installDASetRecordLocked(placement)
-		projected.prefetch.releaseSet(daID)
 	}
 	candidates := preparedCanonicalDAOwnerCandidates{retained: projected, pending: canonicalDAOwnerPending(pending, image, removed)}
 	candidates.ownerIndex = buildCanonicalOwnerIndex(owner, candidates.pending)
