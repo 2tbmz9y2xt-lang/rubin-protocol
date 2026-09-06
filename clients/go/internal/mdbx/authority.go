@@ -2,14 +2,16 @@ package mdbx
 
 import "slices"
 
-type GenerationIDV1 = uint64
-type StorageProfileV1 uint8
-type StoragePhaseV1 uint8
-type StorageLifecycleV1 uint8
-type CleanupSpanKindV1 uint8
-type ReplayCursorKindV1 uint8
-type OrdinaryStageV1 uint8
-type RecordedFailureKindV1 uint8
+type (
+	GenerationIDV1        = uint64
+	StorageProfileV1      uint8
+	StoragePhaseV1        uint8
+	StorageLifecycleV1    uint8
+	CleanupSpanKindV1     uint8
+	ReplayCursorKindV1    uint8
+	OrdinaryStageV1       uint8
+	RecordedFailureKindV1 uint8
+)
 
 const (
 	StorageAuthorityVersionV1                                       uint8                 = 1
@@ -27,108 +29,102 @@ const (
 	maxAuthorityHeight, maxArchiveU, maxPrunedB                     uint64                = 0xffffffff, 4_294_965_856, 4_294_952_176
 )
 
-type CleanupSpanV1 struct {
-	Kind                                CleanupSpanKindV1
-	GenerationID                        GenerationIDV1
-	FirstHeight, LastHeight, NextHeight uint64
-}
-type CleanupV1 struct{ Spans []CleanupSpanV1 }
-type RecoveryTargetV1 struct {
-	ChainID, GenesisHash, TipHash [32]byte
-	TipHeight                     uint64
-	CumulativeChainwork           [40]byte
-}
-type ReplayCursorV1 struct {
-	Kind      ReplayCursorKindV1
-	Height    uint64
-	BlockHash [32]byte
-}
-type ReplayV1 struct {
-	TargetProfile      StorageProfileV1
-	TargetGenerationID GenerationIDV1
-	Target             RecoveryTargetV1
-	Cursor             ReplayCursorV1
-}
-type AuthorityPointV1 struct {
-	Height    uint64
-	BlockHash [32]byte
-}
-type InvalidBranchV1 struct {
-	FirstInvalidHeight    uint64
-	FirstInvalidBlockHash [32]byte
-	ExactConsensusError   []byte
-}
-type SelectedSideV1 struct {
-	GenerationID        GenerationIDV1
-	F, TipHeight        uint64
-	TipHash             [32]byte
-	CumulativeChainwork [40]byte
-	RowCount            uint16
-	LogicalBytes        uint64
-}
-type DetachedSuffixEntryV1 struct {
-	Height        uint64
-	Hash          [32]byte
-	BlockBytesLen uint64
-}
-type DetachedSuffixV1 struct {
-	Entries      []DetachedSuffixEntryV1
-	Cursor       AuthorityPointV1
-	EntryCount   uint16
-	LogicalBytes uint64
-}
-type RecordedFailureV1 struct {
-	Kind            RecordedFailureKindV1
-	FailedBlockHash *[32]byte
-	ExactResult     []byte
-	Evidence        []byte
-}
-type OrdinaryApplyV1 struct {
-	Stage                OrdinaryStageV1
-	Cursor               *AuthorityPointV1
-	Target               AuthorityPointV1
-	OldSuffix, NewSuffix []AuthorityPointV1
-	CapturedSelectedSide *SelectedSideV1
-	CarriedCleanup       *CleanupV1
-	RecordedFailure      *RecordedFailureV1
-}
-type StorageAuthorityV1 struct {
-	Version               uint8
-	ActiveProfile         StorageProfileV1
-	B, U                  uint64
-	ActiveGenerationID    GenerationIDV1
-	NextGenerationID      uint64
-	Phase                 StoragePhaseV1
-	Lifecycle             StorageLifecycleV1
-	Cleanup               *CleanupV1
-	Replay                *ReplayV1
-	Ordinary              *OrdinaryApplyV1
-	PendingTargetProfile  *StorageProfileV1
-	ExcludedInvalidBranch *InvalidBranchV1
-	SelectedSide          *SelectedSideV1
-	DetachedSuffix        *DetachedSuffixV1
-}
+type (
+	CleanupSpanV1 struct {
+		Kind                                CleanupSpanKindV1
+		GenerationID                        GenerationIDV1
+		FirstHeight, LastHeight, NextHeight uint64
+	}
+	CleanupV1        struct{ Spans []CleanupSpanV1 }
+	RecoveryTargetV1 struct {
+		ChainID, GenesisHash, TipHash [32]byte
+		TipHeight                     uint64
+		CumulativeChainwork           [40]byte
+	}
+	ReplayCursorV1 struct {
+		Kind      ReplayCursorKindV1
+		Height    uint64
+		BlockHash [32]byte
+	}
+	ReplayV1 struct {
+		TargetProfile      StorageProfileV1
+		TargetGenerationID GenerationIDV1
+		Target             RecoveryTargetV1
+		Cursor             ReplayCursorV1
+	}
+	AuthorityPointV1 struct {
+		Height    uint64
+		BlockHash [32]byte
+	}
+	InvalidBranchV1 struct {
+		FirstInvalidHeight    uint64
+		FirstInvalidBlockHash [32]byte
+		ExactConsensusError   []byte
+	}
+	SelectedSideV1 struct {
+		GenerationID        GenerationIDV1
+		F, TipHeight        uint64
+		TipHash             [32]byte
+		CumulativeChainwork [40]byte
+		RowCount            uint16
+		LogicalBytes        uint64
+	}
+	DetachedSuffixEntryV1 struct {
+		Height        uint64
+		Hash          [32]byte
+		BlockBytesLen uint64
+	}
+	DetachedSuffixV1 struct {
+		Entries      []DetachedSuffixEntryV1
+		Cursor       AuthorityPointV1
+		EntryCount   uint16
+		LogicalBytes uint64
+	}
+	RecordedFailureV1 struct {
+		Kind                  RecordedFailureKindV1
+		FailedBlockHash       *[32]byte
+		ExactResult, Evidence []byte
+	}
+	OrdinaryApplyV1 struct {
+		Stage                OrdinaryStageV1
+		Cursor               *AuthorityPointV1
+		Target               AuthorityPointV1
+		OldSuffix, NewSuffix []AuthorityPointV1
+		CapturedSelectedSide *SelectedSideV1
+		CarriedCleanup       *CleanupV1
+		RecordedFailure      *RecordedFailureV1
+	}
+	StorageAuthorityV1 struct {
+		Version                              uint8
+		ActiveProfile                        StorageProfileV1
+		B, U                                 uint64
+		ActiveGenerationID, NextGenerationID GenerationIDV1
+		Phase                                StoragePhaseV1
+		Lifecycle                            StorageLifecycleV1
+		Cleanup                              *CleanupV1
+		Replay                               *ReplayV1
+		Ordinary                             *OrdinaryApplyV1
+		PendingTargetProfile                 *StorageProfileV1
+		ExcludedInvalidBranch                *InvalidBranchV1
+		SelectedSide                         *SelectedSideV1
+		DetachedSuffix                       *DetachedSuffixV1
+	}
+)
 
 func all(values ...bool) bool     { return !slices.Contains(values, false) }
 func anyTrue(values ...bool) bool { return slices.Contains(values, true) }
 func validProfile(p StorageProfileV1) bool {
 	return anyTrue(p == StorageProfilePrunedV1, p == StorageProfileArchiveV1)
 }
+
 func validWork(w [40]byte) bool {
 	if !all(w[0] == 0, w[1] == 0, w[2] == 0, w[3] <= 1) {
 		return false
 	}
-	nonzero := false
-	for _, n := range w[4:] {
-		if n != 0 {
-			nonzero = true
-		}
-	}
-	if w[3] == 1 {
-		return !nonzero
-	}
-	return nonzero
+	nonzero := slices.ContainsFunc(w[4:], func(n byte) bool { return n != 0 })
+	return nonzero == (w[3] == 0)
 }
+
 func validSelected(s *SelectedSideV1) bool {
 	if s.F >= s.TipHeight || s.TipHeight > maxAuthorityHeight {
 		return false
@@ -141,6 +137,7 @@ func validSelected(s *SelectedSideV1) bool {
 		s.LogicalBytes >= uint64(s.RowCount),
 		s.LogicalBytes <= uint64(s.RowCount)*uint64(MaxBlockBytes))
 }
+
 func validSpan(s CleanupSpanV1) bool {
 	if s.GenerationID == 0 {
 		return false
@@ -153,6 +150,7 @@ func validSpan(s CleanupSpanV1) bool {
 	}
 	return false
 }
+
 func validCleanup(c *CleanupV1) bool {
 	if len(c.Spans) < 1 {
 		return false
@@ -166,6 +164,7 @@ func validCleanup(c *CleanupV1) bool {
 	}
 	return true
 }
+
 func validReplay(v *ReplayV1) bool {
 	if !validProfile(v.TargetProfile) || !validWork(v.Target.CumulativeChainwork) {
 		return false
@@ -182,6 +181,7 @@ func validReplay(v *ReplayV1) bool {
 	}
 	return false
 }
+
 func validDetached(d *DetachedSuffixV1) bool {
 	if !all(len(d.Entries) >= 1, len(d.Entries) <= 1440, int(d.EntryCount) == len(d.Entries)) {
 		return false
@@ -200,27 +200,25 @@ func validDetached(d *DetachedSuffixV1) bool {
 	first := d.Entries[0]
 	return all(d.Cursor == (AuthorityPointV1{Height: first.Height, BlockHash: first.Hash}), d.LogicalBytes == sum)
 }
+
 func validPoints(points []AuthorityPointV1, descending bool, seen map[[32]byte]bool) bool {
 	var previous uint64
 	for i, point := range points {
 		if !all(point.Height <= maxAuthorityHeight, !seen[point.BlockHash]) {
 			return false
 		}
-		if i > 0 {
-			if !validPointStep(previous, point.Height, descending) {
-				return false
-			}
+		if i > 0 && !validPointStep(previous, point.Height, descending) {
+			return false
 		}
 		seen[point.BlockHash], previous = true, point.Height
 	}
 	return true
 }
+
 func validPointStep(previous, current uint64, descending bool) bool {
-	if descending {
-		return previous == current+1
-	}
-	return current == previous+1
+	return descending && previous == current+1 || !descending && current == previous+1
 }
+
 func validFailure(f *RecordedFailureV1, newSuffix []AuthorityPointV1) bool {
 	if f == nil {
 		return true
@@ -241,6 +239,7 @@ func validFailure(f *RecordedFailureV1, newSuffix []AuthorityPointV1) bool {
 	}
 	return false
 }
+
 func validStage(o *OrdinaryApplyV1) bool {
 	switch o.Stage {
 	case OrdinaryStageDisconnectV1:
@@ -254,18 +253,23 @@ func validStage(o *OrdinaryApplyV1) bool {
 	}
 	return false
 }
+
 func validDisconnectStage(o *OrdinaryApplyV1) bool {
 	return len(o.OldSuffix) > 0 && o.RecordedFailure == nil && (o.Cursor == nil || slices.Contains(o.OldSuffix, *o.Cursor))
 }
+
 func validConnectStage(o *OrdinaryApplyV1) bool {
 	return len(o.NewSuffix) > 0 && o.RecordedFailure == nil && (o.Cursor == nil && len(o.OldSuffix) == 0 || o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor))
 }
+
 func validRollbackNewStage(o *OrdinaryApplyV1) bool {
 	return len(o.NewSuffix) > 0 && o.RecordedFailure != nil && o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor) && (len(o.OldSuffix) > 0 || *o.Cursor != o.NewSuffix[0])
 }
+
 func validRestoreOldStage(o *OrdinaryApplyV1) bool {
 	return len(o.OldSuffix) > 0 && o.RecordedFailure != nil && o.Cursor != nil && *o.Cursor != o.OldSuffix[0] && slices.Contains(o.OldSuffix, *o.Cursor)
 }
+
 func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 	if len(points) == 0 {
 		return 0, false
@@ -276,6 +280,7 @@ func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 	}
 	return point.Height - 1, true
 }
+
 func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64, seen map[[32]byte]bool) bool {
 	if len(o.NewSuffix) == 0 {
 		if o.Target.Height != f || seen[o.Target.BlockHash] {
@@ -294,12 +299,14 @@ func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64, seen map[[32]byte]bool) b
 	return all(o.Target == target, side.F == f,
 		side.TipHeight == target.Height, side.TipHash == target.BlockHash)
 }
+
 func laggedPromise(height, window uint64) uint64 {
 	if height < window {
 		return 0
 	}
 	return height - window + 1
 }
+
 func validOrdinaryPromises(a StorageAuthorityV1) bool {
 	height := uint64(0)
 	if len(a.Ordinary.OldSuffix) > 0 {
@@ -309,6 +316,7 @@ func validOrdinaryPromises(a StorageAuthorityV1) bool {
 	}
 	return a.U == laggedPromise(height, 1440)
 }
+
 func validOrdinaryTail(a StorageAuthorityV1, f uint64, seen map[[32]byte]bool) bool {
 	o := a.Ordinary
 	if !validOrdinaryTarget(o, f, seen) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
@@ -319,6 +327,7 @@ func validOrdinaryTail(a StorageAuthorityV1, f uint64, seen map[[32]byte]bool) b
 	}
 	return validOrdinaryPromises(a)
 }
+
 func validOrdinary(a StorageAuthorityV1) bool {
 	o := a.Ordinary
 	if !all(len(o.OldSuffix) <= 1440, len(o.NewSuffix) <= 1440,
@@ -340,6 +349,7 @@ func validOrdinary(a StorageAuthorityV1) bool {
 	f := map[bool]uint64{true: oldF, false: newF}[oldOK]
 	return validOrdinaryTail(a, f, seen)
 }
+
 func validProfilePromises(a StorageAuthorityV1) bool {
 	if a.Version != StorageAuthorityVersionV1 {
 		return false
@@ -358,6 +368,7 @@ func validProfilePromises(a StorageAuthorityV1) bool {
 	}
 	return false
 }
+
 func validTop(a StorageAuthorityV1) bool {
 	if !validProfilePromises(a) || a.ActiveGenerationID == 0 || a.ActiveGenerationID >= a.NextGenerationID {
 		return false
@@ -381,8 +392,11 @@ func validTop(a StorageAuthorityV1) bool {
 		anyTrue(a.DetachedSuffix == nil, all(a.Phase == StoragePhasePruneGCV1, a.Cleanup != nil)),
 		anyTrue(a.SelectedSide == nil, a.DetachedSuffix == nil))
 }
+
 func validPayload(a StorageAuthorityV1) bool {
 	switch a.Phase {
+	case StoragePhaseNoneV1:
+		return true
 	case StoragePhasePruneGCV1:
 		return validCleanup(a.Cleanup)
 	case StoragePhaseReplayV1:
@@ -390,8 +404,9 @@ func validPayload(a StorageAuthorityV1) bool {
 	case StoragePhaseOrdinaryApplyV1:
 		return validOrdinary(a)
 	}
-	return true
+	return false
 }
+
 func validDescriptors(a StorageAuthorityV1) bool {
 	if a.SelectedSide != nil && !validSelected(a.SelectedSide) {
 		return false
@@ -402,6 +417,7 @@ func validDescriptors(a StorageAuthorityV1) bool {
 	branch := a.ExcludedInvalidBranch
 	return branch == nil || branch.FirstInvalidHeight <= maxAuthorityHeight && len(branch.ExactConsensusError) > 0
 }
+
 func authorityOwners(a StorageAuthorityV1) (uint64, *CleanupV1, *SelectedSideV1) {
 	replay, cleanup, side := uint64(0), a.Cleanup, a.SelectedSide
 	if a.Replay != nil {
@@ -412,6 +428,7 @@ func authorityOwners(a StorageAuthorityV1) (uint64, *CleanupV1, *SelectedSideV1)
 	}
 	return replay, cleanup, side
 }
+
 func sideGeneration(cleanup *CleanupV1, selected *SelectedSideV1) (uint64, bool) {
 	side := uint64(0)
 	if selected != nil {
@@ -426,22 +443,23 @@ func sideGeneration(cleanup *CleanupV1, selected *SelectedSideV1) (uint64, bool)
 	}
 	return side, true
 }
+
 func validCleanupRelations(a StorageAuthorityV1, cleanup *CleanupV1, selected *SelectedSideV1, side uint64) (uint64, bool) {
-	obsolete := uint64(0)
+	obsolete, first := uint64(0), uint64(0)
 	if cleanup == nil {
 		return obsolete, true
 	}
-	first := uint64(0)
 	if selected != nil {
 		first = selected.TipHeight - uint64(selected.RowCount) + 1
 	}
 	for _, span := range cleanup.Spans {
-		owner := [5]bool{false,
+		owner := [5]bool{
+			false,
 			all(span.GenerationID != a.ActiveGenerationID, span.GenerationID != side),
 			span.GenerationID == a.ActiveGenerationID, span.GenerationID == a.ActiveGenerationID,
-			span.GenerationID == side}[span.Kind]
-		promise := [5]bool{false, true, all(a.B != 0, span.LastHeight < a.B),
-			all(a.U != 0, span.LastHeight < a.U), anyTrue(selected == nil, span.LastHeight < first)}[span.Kind]
+			span.GenerationID == side,
+		}[span.Kind]
+		promise := [5]bool{false, true, all(a.B != 0, span.LastHeight < a.B), all(a.U != 0, span.LastHeight < a.U), anyTrue(selected == nil, span.LastHeight < first)}[span.Kind]
 		if !all(owner, promise) {
 			return 0, false
 		}
@@ -451,11 +469,11 @@ func validCleanupRelations(a StorageAuthorityV1, cleanup *CleanupV1, selected *S
 	}
 	return obsolete, true
 }
+
 func validGenerationSequence(active, next, replay, side, obsolete uint64) bool {
-	return all(anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active),
-		anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next),
-		anyTrue(obsolete == 0, obsolete < next))
+	return all(anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
 }
+
 func validOwners(a StorageAuthorityV1) bool {
 	replay, cleanup, selected := authorityOwners(a)
 	side, sidesOK := sideGeneration(cleanup, selected)
@@ -468,6 +486,7 @@ func validOwners(a StorageAuthorityV1) bool {
 	}
 	return validGenerationSequence(a.ActiveGenerationID, a.NextGenerationID, replay, side, obsolete)
 }
+
 func ValidateStorageAuthorityV1(a StorageAuthorityV1) error {
 	if !validTop(a) || !validPayload(a) || !validDescriptors(a) || !validOwners(a) {
 		return errSchema

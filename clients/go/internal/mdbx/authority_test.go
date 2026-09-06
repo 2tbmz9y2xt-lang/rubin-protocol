@@ -18,30 +18,27 @@ type mutationCase[T any] struct {
 
 func modelHash(n uint64) (hash [32]byte) { binary.BigEndian.PutUint64(hash[24:], n); return hash }
 func modelWork(maximum bool) (work [40]byte) {
+	work[39] = 1
 	if maximum {
-		work[3] = 1
-	} else {
-		work[39] = 1
+		work[3], work[39] = 1, 0
 	}
 	return work
 }
-func modelPoint(height, hash uint64) AuthorityPointV1 {
-	return AuthorityPointV1{height, modelHash(hash)}
+
+func modelPoint(h, n uint64) AuthorityPointV1 { return AuthorityPointV1{h, modelHash(n)} }
+
+func modelSide(g, f, tip uint64, rows uint16, bytes uint64) *SelectedSideV1 {
+	return &SelectedSideV1{g, f, tip, modelHash(tip), modelWork(false), rows, bytes}
 }
-func modelSide(generation, f, tip uint64, rows uint16, logical uint64) *SelectedSideV1 {
-	return &SelectedSideV1{GenerationID: generation, F: f, TipHeight: tip,
-		TipHash: modelHash(tip), CumulativeChainwork: modelWork(false),
-		RowCount: rows, LogicalBytes: logical}
-}
+
 func modelBase(profile byte, b, u uint64) StorageAuthorityV1 {
-	return StorageAuthorityV1{Version: 1, ActiveProfile: StorageProfileV1(profile),
-		B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 2,
-		Phase: StoragePhaseV1(1), Lifecycle: StorageLifecycleV1(1)}
+	return StorageAuthorityV1{1, StorageProfileV1(profile), b, u, 1, 2, StoragePhaseV1(1), StorageLifecycleV1(1), nil, nil, nil, nil, nil, nil, nil}
 }
+
 func modelCleanup() *CleanupV1 {
-	return &CleanupV1{Spans: []CleanupSpanV1{{Kind: CleanupSpanKindV1(2),
-		GenerationID: 1, FirstHeight: 0, LastHeight: 0, NextHeight: 0}}}
+	return &CleanupV1{[]CleanupSpanV1{{CleanupSpanKindV1(2), 1, 0, 0, 0}}}
 }
+
 func modelPrune(recovery bool) StorageAuthorityV1 {
 	a := modelBase(1, 1, 13681)
 	a.Phase, a.Cleanup = StoragePhaseV1(2), modelCleanup()
@@ -51,24 +48,25 @@ func modelPrune(recovery bool) StorageAuthorityV1 {
 	}
 	return a
 }
+
 func modelTarget() RecoveryTargetV1 {
-	return RecoveryTargetV1{ChainID: modelHash(11), GenesisHash: modelHash(12),
-		TipHash: modelHash(13), TipHeight: 2, CumulativeChainwork: modelWork(false)}
+	return RecoveryTargetV1{modelHash(11), modelHash(12), modelHash(13), 2, modelWork(false)}
 }
+
 func modelReplay(cursor byte) StorageAuthorityV1 {
 	a := modelBase(1, 0, 0)
 	a.NextGenerationID, a.Phase, a.Lifecycle = 3, StoragePhaseV1(3), StorageLifecycleV1(2)
-	a.Replay = &ReplayV1{TargetProfile: StorageProfileV1(2), TargetGenerationID: 2,
-		Target: modelTarget(), Cursor: ReplayCursorV1{Kind: ReplayCursorKindV1(cursor)}}
+	a.Replay = &ReplayV1{StorageProfileV1(2), 2, modelTarget(), ReplayCursorV1{ReplayCursorKindV1(cursor), 0, [32]byte{}}}
 	if cursor == 2 {
 		a.Replay.Cursor.BlockHash = modelHash(14)
 	}
 	return a
 }
+
 func modelFailure(kind byte) *RecordedFailureV1 {
-	return &RecordedFailureV1{Kind: RecordedFailureKindV1(kind),
-		ExactResult: []byte{0x31}, Evidence: []byte{0x41}}
+	return &RecordedFailureV1{RecordedFailureKindV1(kind), nil, []byte{0x31}, []byte{0x41}}
 }
+
 func modelPoints(first uint64, count int, ascending bool, marker uint64) []AuthorityPointV1 {
 	points := make([]AuthorityPointV1, count)
 	for i := range points {
@@ -80,6 +78,7 @@ func modelPoints(first uint64, count int, ascending bool, marker uint64) []Autho
 	}
 	return points
 }
+
 func modelOrdinary(stage byte, d, c int, hOld uint64, profile byte, b, u uint64) StorageAuthorityV1 {
 	a := modelBase(profile, b, u)
 	a.Phase, a.Lifecycle = StoragePhaseV1(4), StorageLifecycleV1(2)
@@ -114,18 +113,18 @@ func modelOrdinary(stage byte, d, c int, hOld uint64, profile byte, b, u uint64)
 	a.Ordinary = o
 	return a
 }
+
 func modelDetached(count int, length uint64) *DetachedSuffixV1 {
-	d := &DetachedSuffixV1{Entries: make([]DetachedSuffixEntryV1, count),
-		EntryCount: uint16(count), LogicalBytes: uint64(count) * length}
+	d := &DetachedSuffixV1{make([]DetachedSuffixEntryV1, count), AuthorityPointV1{}, uint16(count), uint64(count) * length}
 	for i := range d.Entries {
-		d.Entries[i] = DetachedSuffixEntryV1{Height: uint64(count - 1 - i),
-			Hash: modelHash(uint64(i + 1)), BlockBytesLen: length}
+		d.Entries[i] = DetachedSuffixEntryV1{uint64(count - 1 - i), modelHash(uint64(i + 1)), length}
 	}
 	if count > 0 {
-		d.Cursor = AuthorityPointV1{Height: d.Entries[0].Height, BlockHash: d.Entries[0].Hash}
+		d.Cursor = AuthorityPointV1{d.Entries[0].Height, d.Entries[0].Hash}
 	}
 	return d
 }
+
 func wantModel(t *testing.T, name string, a StorageAuthorityV1, valid bool) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
@@ -133,15 +132,16 @@ func wantModel(t *testing.T, name string, a StorageAuthorityV1, valid bool) {
 		if valid && err != nil {
 			t.Fatalf("valid authority rejected: %v", err)
 		}
-		if !valid && err != errSchema {
+		if !valid && (!exactErr(err) || a.Phase > 4 && validPayload(a)) {
 			t.Fatalf("invalid authority error = %v, want exact errSchema", err)
 		}
 	})
 }
-func modelChange(a StorageAuthorityV1, edit func(*StorageAuthorityV1)) StorageAuthorityV1 {
-	edit(&a)
-	return a
-}
+
+func exactErr(err error) bool { return err == errSchema } //nolint:errorlint // Exact sentinel identity is the contract.
+
+func edit(a StorageAuthorityV1, f func(*StorageAuthorityV1)) StorageAuthorityV1 { f(&a); return a }
+
 func TestStorageAuthorityV1Enums(t *testing.T) {
 	for _, row := range []struct {
 		name string
@@ -187,6 +187,7 @@ func TestStorageAuthorityV1Enums(t *testing.T) {
 		wantModel(t, fmt.Sprintf("profile %d rejected", profile), modelBase(profile, 0, 0), false)
 	}
 }
+
 func TestStorageAuthorityV1LegalStateMatrix(t *testing.T) {
 	for phase := byte(1); phase <= 4; phase++ {
 		for lifecycle := byte(1); lifecycle <= 2; lifecycle++ {
@@ -229,24 +230,17 @@ func TestStorageAuthorityV1LegalStateMatrix(t *testing.T) {
 		a.Lifecycle = value
 		wantModel(t, fmt.Sprintf("unknown lifecycle %d", value), a, false)
 	}
-	selected := modelBase(1, 0, 0)
-	selected.NextGenerationID, selected.SelectedSide = 3, modelSide(2, 0, 1, 1, 1)
-	wantModel(t, "stable selected side", selected, true)
-	detached := modelPrune(false)
-	detached.DetachedSuffix = modelDetached(1, 1)
-	wantModel(t, "prune detached suffix", detached, true)
-	noCleanup := modelBase(1, 0, 0)
-	noCleanup.DetachedSuffix = modelDetached(1, 1)
-	wantModel(t, "detached without cleanup", noCleanup, false)
-	both := modelPrune(false)
-	both.NextGenerationID, both.SelectedSide, both.DetachedSuffix = 3, modelSide(2, 0, 1, 1, 1), modelDetached(1, 1)
-	wantModel(t, "selected and detached", both, false)
+	wantModel(t, "stable selected side", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1, 1, 1) }), true)
+	wantModel(t, "prune detached suffix", edit(modelPrune(false), func(a *StorageAuthorityV1) { a.DetachedSuffix = modelDetached(1, 1) }), true)
+	wantModel(t, "detached without cleanup", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.DetachedSuffix = modelDetached(1, 1) }), false)
+	wantModel(t, "selected and detached", edit(modelPrune(false), func(a *StorageAuthorityV1) {
+		a.NextGenerationID, a.SelectedSide, a.DetachedSuffix = 3, modelSide(2, 0, 1, 1, 1), modelDetached(1, 1)
+	}), false)
 }
+
 func TestStorageAuthorityV1GenerationOwners(t *testing.T) {
 	wantModel(t, "generation one next two", modelBase(1, 0, 0), true)
-	maximum := modelBase(1, 0, 0)
-	maximum.ActiveGenerationID, maximum.NextGenerationID = ^uint64(0)-1, ^uint64(0)
-	wantModel(t, "next generation maximum", maximum, true)
+	wantModel(t, "next generation maximum", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.ActiveGenerationID, a.NextGenerationID = ^uint64(0)-1, ^uint64(0) }), true)
 	full := modelPrune(false)
 	full.NextGenerationID = 4
 	full.SelectedSide = modelSide(2, 1, 2, 1, 1)
@@ -257,9 +251,7 @@ func TestStorageAuthorityV1GenerationOwners(t *testing.T) {
 		{Kind: 4, GenerationID: 2, FirstHeight: 0, LastHeight: 0, NextHeight: 0},
 	}
 	wantModel(t, "active obsolete side three ids", full, true)
-	activeZero := modelBase(1, 0, 0)
-	activeZero.ActiveGenerationID = 0
-	wantModel(t, "active zero", activeZero, false)
+	wantModel(t, "active zero", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.ActiveGenerationID = 0 }), false)
 	for _, row := range []mutationCase[StorageAuthorityV1]{
 		{"next zero", func(a *StorageAuthorityV1) { a.NextGenerationID = 0 }},
 		{"next one", func(a *StorageAuthorityV1) { a.NextGenerationID = 1 }},
@@ -285,13 +277,10 @@ func TestStorageAuthorityV1GenerationOwners(t *testing.T) {
 		row.mutate(&a)
 		wantModel(t, row.name, a, false)
 	}
-	replay := modelReplay(1)
-	replay.Replay.TargetGenerationID = 1
-	wantModel(t, "replay equals active", replay, false)
-	replay = modelReplay(1)
-	replay.Replay.TargetGenerationID = 3
-	wantModel(t, "replay future", replay, false)
+	wantModel(t, "replay equals active", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.TargetGenerationID = 1 }), false)
+	wantModel(t, "replay future", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.TargetGenerationID = 3 }), false)
 }
+
 func TestStorageAuthorityV1Cleanup(t *testing.T) {
 	base := modelPrune(false)
 	for _, spans := range [][]CleanupSpanV1{
@@ -333,23 +322,15 @@ func TestStorageAuthorityV1Cleanup(t *testing.T) {
 		a.Cleanup = &CleanupV1{Spans: row.spans}
 		wantModel(t, row.name, a, false)
 	}
-	blockZero := modelPrune(false)
-	blockZero.B, blockZero.U = 0, 0
-	wantModel(t, "blocks with zero promise", blockZero, false)
-	blockEnd := modelPrune(false)
-	blockEnd.Cleanup.Spans[0].LastHeight = blockEnd.B
-	wantModel(t, "blocks reaches promise", blockEnd, false)
-	undoZero := modelPrune(false)
-	undoZero.B, undoZero.U = 0, 0
-	undoZero.Cleanup.Spans[0].Kind = 3
-	wantModel(t, "undo with zero promise", undoZero, false)
-	undoEnd := modelPrune(false)
-	undoEnd.Cleanup.Spans[0].Kind, undoEnd.Cleanup.Spans[0].LastHeight = 3, undoEnd.U
-	wantModel(t, "undo reaches promise", undoEnd, false)
-	standaloneSide := modelPrune(false)
-	standaloneSide.NextGenerationID, standaloneSide.Cleanup.Spans[0] = 3, CleanupSpanV1{Kind: 4, GenerationID: 2}
-	wantModel(t, "standalone SIDE cleanup without selected side", standaloneSide, true)
+	wantModel(t, "blocks with zero promise", edit(modelPrune(false), func(a *StorageAuthorityV1) { a.B, a.U = 0, 0 }), false)
+	wantModel(t, "blocks reaches promise", edit(modelPrune(false), func(a *StorageAuthorityV1) { a.Cleanup.Spans[0].LastHeight = a.B }), false)
+	wantModel(t, "undo with zero promise", edit(modelPrune(false), func(a *StorageAuthorityV1) { a.B, a.U, a.Cleanup.Spans[0].Kind = 0, 0, 3 }), false)
+	wantModel(t, "undo reaches promise", edit(modelPrune(false), func(a *StorageAuthorityV1) { a.Cleanup.Spans[0].Kind, a.Cleanup.Spans[0].LastHeight = 3, a.U }), false)
+	wantModel(t, "standalone SIDE cleanup maximum height without selected side", edit(modelPrune(false), func(a *StorageAuthorityV1) {
+		a.NextGenerationID, a.Cleanup.Spans[0] = 3, CleanupSpanV1{Kind: 4, GenerationID: 2, FirstHeight: 0xffffffff, LastHeight: 0xffffffff, NextHeight: 0xffffffff}
+	}), true)
 }
+
 func TestStorageAuthorityV1ReplayAndOwners(t *testing.T) {
 	wantModel(t, "replay pre-genesis", modelReplay(1), true)
 	applied := modelReplay(2)
@@ -359,9 +340,7 @@ func TestStorageAuthorityV1ReplayAndOwners(t *testing.T) {
 	maximumWork := modelReplay(1)
 	maximumWork.Replay.Target.CumulativeChainwork = modelWork(true)
 	wantModel(t, "replay target chainwork 2^288", maximumWork, true)
-	zeroWork := modelReplay(1)
-	zeroWork.Replay.Target.CumulativeChainwork = [40]byte{}
-	wantModel(t, "replay target chainwork zero", zeroWork, false)
+	wantModel(t, "replay target chainwork zero", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.Target.CumulativeChainwork = [40]byte{} }), false)
 	tooMuchWork := maximumWork
 	tooMuchWork.Replay.Target.CumulativeChainwork[39] = 1
 	wantModel(t, "replay target chainwork 2^288 plus one", tooMuchWork, false)
@@ -385,14 +364,11 @@ func TestStorageAuthorityV1ReplayAndOwners(t *testing.T) {
 		row.mutate(a.Replay)
 		wantModel(t, row.name, a, false)
 	}
-	tooHigh := modelReplay(2)
-	tooHigh.Replay.Cursor.Height = 3
-	wantModel(t, "applied above target", tooHigh, false)
-	wrongTip := modelReplay(2)
-	wrongTip.Replay.Cursor.Height, wrongTip.Replay.Cursor.BlockHash = 2, modelHash(99)
-	wantModel(t, "applied target hash mismatch", wrongTip, false)
-	wantModel(t, "replay target maximum height", modelChange(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.Target.TipHeight = 0xffffffff }), true)
+	wantModel(t, "applied above target", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.Height = 3 }), false)
+	wantModel(t, "applied target hash mismatch", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.Height, a.Replay.Cursor.BlockHash = 2, modelHash(99) }), false)
+	wantModel(t, "replay target maximum height", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.Target.TipHeight = 0xffffffff }), true)
 }
+
 func TestStorageAuthorityV1SelectedSide(t *testing.T) {
 	for _, row := range []struct {
 		name    string
@@ -400,7 +376,7 @@ func TestStorageAuthorityV1SelectedSide(t *testing.T) {
 		rows    uint16
 		logical uint64
 	}{
-		{"C one lower bytes", 0, 1, 1, 1},
+		{"C one maximum height lower bytes", 0xfffffffe, 0xffffffff, 1, 1},
 		{"C one upper bytes", 0, 1, 1, 68_000_125},
 		{"C 1440 lower bytes", 0, 1440, 1440, 1440},
 		{"C 1440 upper bytes", 0, 1440, 1440, 97_920_180_000},
@@ -429,6 +405,7 @@ func TestStorageAuthorityV1SelectedSide(t *testing.T) {
 		wantModel(t, row.name, a, false)
 	}
 }
+
 func TestStorageAuthorityV1DetachedSuffix(t *testing.T) {
 	for _, row := range []struct {
 		name   string
@@ -477,6 +454,7 @@ func TestStorageAuthorityV1DetachedSuffix(t *testing.T) {
 		wantModel(t, row.name, a, false)
 	}
 }
+
 func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	change := func(a StorageAuthorityV1, edit func(*OrdinaryApplyV1)) StorageAuthorityV1 {
 		edit(a.Ordinary)
@@ -530,17 +508,15 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	wantModel(t, "connect partial cursor", connect, true)
 	connect.Ordinary.Cursor = point(connect.Ordinary.NewSuffix[1])
 	wantModel(t, "connect exhausted cursor", connect, true)
-	rollback := modelOrdinary(3, 0, 2, 0, 1, 0, 0)
-	rollback.Ordinary.Cursor = point(rollback.Ordinary.NewSuffix[1])
-	wantModel(t, "rollback new nonterminal D0 cursor", rollback, true)
+	wantModel(t, "rollback new nonterminal D0 cursor", edit(modelOrdinary(3, 0, 2, 0, 1, 0, 0), func(a *StorageAuthorityV1) { a.Ordinary.Cursor = point(a.Ordinary.NewSuffix[1]) }), true)
 	for _, kind := range []byte{1, 2, 3, 4} {
 		a := modelOrdinary(3, 1, 2, 1, 1, 0, 0)
 		a.Ordinary.RecordedFailure = modelFailure(kind)
 		wantModel(t, fmt.Sprintf("failure kind %d", kind), a, true)
 	}
-	consensusHash := modelOrdinary(3, 1, 2, 1, 1, 0, 0)
-	consensusHash.Ordinary.RecordedFailure.FailedBlockHash = hash(consensusHash.Ordinary.NewSuffix[1].BlockHash)
-	wantModel(t, "consensus exact N hash", consensusHash, true)
+	wantModel(t, "consensus exact N hash", edit(modelOrdinary(3, 1, 2, 1, 1, 0, 0), func(a *StorageAuthorityV1) {
+		a.Ordinary.RecordedFailure.FailedBlockHash = hash(a.Ordinary.NewSuffix[1].BlockHash)
+	}), true)
 	bad := []authorityCase{
 		{"D0 C1 selector", modelOrdinary(2, 0, 1, 0, 1, 0, 0)},
 		{"D1441 overflow", modelOrdinary(1, 1441, 0, 2000, 1, 0, 561)},
@@ -621,7 +597,7 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	} {
 		wantModel(t, row.name, row.a, false)
 	}
-	wantModel(t, "old suffix height zero", modelChange(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(a *StorageAuthorityV1) {
+	wantModel(t, "old suffix height zero", edit(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(a *StorageAuthorityV1) {
 		a.Ordinary.OldSuffix[0].Height, a.Ordinary.Target.Height = 0, ^uint64(0)
 	}), false)
 	newStartsAtZero := modelOrdinary(2, 1, 2, 1, 1, 0, 0)
@@ -633,27 +609,28 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	newStartsAtZero.Ordinary.CapturedSelectedSide.RowCount = 1
 	wantModel(t, "present new suffix starts at zero", newStartsAtZero, false)
 }
+
 func TestStorageAuthorityV1Boundaries(t *testing.T) {
-	for _, row := range []struct {
-		name    string
-		profile byte
-		b, u    uint64
-	}{{"archive zero", 2, 0, 0}, {"archive max U", 2, 0, 4_294_965_856},
-		{"pruned zero", 1, 0, 0}, {"pruned B0 max U", 1, 0, 13680},
-		{"pruned positive minimum", 1, 1, 13681},
-		{"pruned maximum", 1, 4_294_952_176, 4_294_965_856}} {
-		wantModel(t, row.name, modelBase(row.profile, row.b, row.u), true)
+	for _, row := range []authorityCase{
+		{"archive zero", modelBase(2, 0, 0)},
+		{"archive max U", modelBase(2, 0, 4_294_965_856)},
+		{"pruned zero", modelBase(1, 0, 0)},
+		{"pruned B0 max U", modelBase(1, 0, 13680)},
+		{"pruned positive minimum", modelBase(1, 1, 13681)},
+		{"pruned maximum", modelBase(1, 4_294_952_176, 4_294_965_856)},
+	} {
+		wantModel(t, row.name, row.a, true)
 	}
-	for _, row := range []struct {
-		name    string
-		profile byte
-		b, u    uint64
-	}{{"archive max U plus one", 2, 0, 4_294_965_857}, {"archive B positive", 2, 1, 0},
-		{"pruned B max plus one", 1, 4_294_952_177, 4_294_965_857},
-		{"pruned U max plus one", 1, 4_294_952_176, 4_294_965_857},
-		{"pruned B0 U13681", 1, 0, 13681}, {"pruned positive U low", 1, 1, 13680},
-		{"pruned positive U high", 1, 1, 13682}} {
-		wantModel(t, row.name, modelBase(row.profile, row.b, row.u), false)
+	for _, row := range []authorityCase{
+		{"archive max U plus one", modelBase(2, 0, 4_294_965_857)},
+		{"archive B positive", modelBase(2, 1, 0)},
+		{"pruned B max plus one", modelBase(1, 4_294_952_177, 4_294_965_857)},
+		{"pruned U max plus one", modelBase(1, 4_294_952_176, 4_294_965_857)},
+		{"pruned B0 U13681", modelBase(1, 0, 13681)},
+		{"pruned positive U low", modelBase(1, 1, 13680)},
+		{"pruned positive U high", modelBase(1, 1, 13682)},
+	} {
+		wantModel(t, row.name, row.a, false)
 	}
 	withWork := func(work [40]byte) StorageAuthorityV1 {
 		a := modelBase(1, 0, 0)
@@ -663,14 +640,7 @@ func TestStorageAuthorityV1Boundaries(t *testing.T) {
 	}
 	wantModel(t, "chainwork one", withWork(modelWork(false)), true)
 	wantModel(t, "chainwork 2^288", withWork(modelWork(true)), true)
-	badWork := [][40]byte{{}, {1}, {0, 1}, {0, 0, 1}}
-	byte3 := [40]byte{}
-	byte3[3] = 2
-	byte3[39] = 1
-	badWork = append(badWork, byte3)
-	tooLarge := modelWork(true)
-	tooLarge[39] = 1
-	badWork = append(badWork, tooLarge)
+	badWork := [][40]byte{{}, {1}, {0, 1}, {0, 0, 1}, {3: 2, 39: 1}, {3: 1, 39: 1}}
 	for i, work := range badWork {
 		wantModel(t, fmt.Sprintf("invalid chainwork %d", i), withWork(work), false)
 	}
@@ -679,26 +649,24 @@ func TestStorageAuthorityV1Boundaries(t *testing.T) {
 		height uint64
 		error  []byte
 		valid  bool
-	}{{"invalid branch height zero", 0, []byte{1}, true},
+	}{
+		{"invalid branch height zero", 0, []byte{1}, true},
 		{"invalid branch height max", 0xffffffff, []byte{1}, true},
 		{"invalid branch height overflow", 0x100000000, []byte{1}, false},
-		{"invalid branch nil error", 0, nil, false}, {"invalid branch empty error", 0, []byte{}, false}} {
+		{"invalid branch nil error", 0, nil, false},
+		{"invalid branch empty error", 0, []byte{}, false},
+	} {
 		a := modelBase(1, 0, 0)
-		a.ExcludedInvalidBranch = &InvalidBranchV1{FirstInvalidHeight: row.height,
-			FirstInvalidBlockHash: modelHash(71), ExactConsensusError: row.error}
+		a.ExcludedInvalidBranch = &InvalidBranchV1{row.height, modelHash(71), row.error}
 		wantModel(t, row.name, a, row.valid)
 	}
-	recoveryDetached := modelPrune(true)
-	recoveryDetached.DetachedSuffix = modelDetached(1, 1)
-	wantModel(t, "recovery cleanup with detached", recoveryDetached, true)
+	wantModel(t, "recovery cleanup with detached", edit(modelPrune(true), func(a *StorageAuthorityV1) { a.DetachedSuffix = modelDetached(1, 1) }), true)
 	for _, pending := range []StorageProfileV1{0, 3, 255} {
 		a := modelPrune(true)
 		*a.PendingTargetProfile = pending
 		wantModel(t, fmt.Sprintf("invalid pending profile %d", pending), a, false)
 	}
-	recoverySelected := modelPrune(true)
-	recoverySelected.NextGenerationID, recoverySelected.SelectedSide = 3, modelSide(2, 0, 1, 1, 1)
-	wantModel(t, "otherwise valid selected in recovery", recoverySelected, false)
+	wantModel(t, "otherwise valid selected in recovery", edit(modelPrune(true), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1, 1, 1) }), false)
 	replayCleanup := modelReplay(1)
 	replayCleanup.B, replayCleanup.U, replayCleanup.Cleanup = 1, 13681, modelCleanup()
 	replayOrdinary := modelReplay(1)
@@ -717,20 +685,29 @@ func TestStorageAuthorityV1Boundaries(t *testing.T) {
 	ordinarySelected.SelectedSide = modelSide(2, 0, 1, 1, 1)
 	ordinaryDetached := modelOrdinary(2, 0, 2, 0, 1, 0, 0)
 	ordinaryDetached.DetachedSuffix = modelDetached(1, 1)
-	pruneStableReplay := modelChange(modelPrune(false), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Replay = 3, modelReplay(1).Replay })
-	pruneRecoveryReplay := modelChange(modelPrune(true), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Replay = 3, modelReplay(1).Replay })
+	pruneStableReplay := edit(modelPrune(false), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Replay = 3, modelReplay(1).Replay })
+	pruneRecoveryReplay := edit(modelPrune(true), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Replay = 3, modelReplay(1).Replay })
 	ordinaryPayload := modelOrdinary(2, 0, 2, 0, 1, 0, 0).Ordinary
-	pruneStableOrdinary := modelChange(modelPrune(false), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Ordinary = 3, ordinaryPayload })
-	pruneRecoveryOrdinary := modelChange(modelPrune(true), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Ordinary = 3, ordinaryPayload })
-	for _, row := range []authorityCase{{"replay extra cleanup", replayCleanup}, {"replay extra ordinary", replayOrdinary},
-		{"replay outer selected", replaySelected}, {"replay outer detached", replayDetached},
-		{"ordinary extra cleanup", ordinaryCleanup}, {"ordinary extra replay", ordinaryReplay},
-		{"ordinary outer selected", ordinarySelected}, {"ordinary outer detached", ordinaryDetached},
-		{"prune stable cleanup extra replay", pruneStableReplay}, {"prune recovery cleanup extra replay", pruneRecoveryReplay},
-		{"prune stable cleanup extra ordinary", pruneStableOrdinary}, {"prune recovery cleanup extra ordinary", pruneRecoveryOrdinary}} {
+	pruneStableOrdinary := edit(modelPrune(false), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Ordinary = 3, ordinaryPayload })
+	pruneRecoveryOrdinary := edit(modelPrune(true), func(a *StorageAuthorityV1) { a.NextGenerationID, a.Ordinary = 3, ordinaryPayload })
+	for _, row := range []authorityCase{
+		{"replay extra cleanup", replayCleanup},
+		{"replay extra ordinary", replayOrdinary},
+		{"replay outer selected", replaySelected},
+		{"replay outer detached", replayDetached},
+		{"ordinary extra cleanup", ordinaryCleanup},
+		{"ordinary extra replay", ordinaryReplay},
+		{"ordinary outer selected", ordinarySelected},
+		{"ordinary outer detached", ordinaryDetached},
+		{"prune stable cleanup extra replay", pruneStableReplay},
+		{"prune recovery cleanup extra replay", pruneRecoveryReplay},
+		{"prune stable cleanup extra ordinary", pruneStableOrdinary},
+		{"prune recovery cleanup extra ordinary", pruneRecoveryOrdinary},
+	} {
 		wantModel(t, row.name, row.a, false)
 	}
 }
+
 func TestStorageAuthorityV1ErrorAndOwnership(t *testing.T) {
 	deep := func() StorageAuthorityV1 {
 		a := modelOrdinary(3, 1, 2, 15120, 1, 1, 13681)
@@ -744,7 +721,7 @@ func TestStorageAuthorityV1ErrorAndOwnership(t *testing.T) {
 		func() StorageAuthorityV1 { a := modelPrune(false); a.DetachedSuffix = modelDetached(2, 1); return a }, // PRUNE_GC detached
 		func() StorageAuthorityV1 {
 			side := modelSide(2, 0, 1, 1, 1)
-			return modelChange(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, side })
+			return edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, side })
 		},
 		deep,
 	} {
@@ -758,14 +735,14 @@ func TestStorageAuthorityV1ErrorAndOwnership(t *testing.T) {
 	}
 	invalid, expected := deep(), deep()
 	invalid.ExcludedInvalidBranch.ExactConsensusError, expected.ExcludedInvalidBranch.ExactConsensusError = []byte{}, []byte{}
-	if err := ValidateStorageAuthorityV1(invalid); err != errSchema || !reflect.DeepEqual(invalid, expected) {
+	if err := ValidateStorageAuthorityV1(invalid); !exactErr(err) || !reflect.DeepEqual(invalid, expected) {
 		t.Fatalf("invalid nested image error or mutation = %v, %#v", err, invalid)
 	}
 	large := modelOrdinary(2, 0, 1440, 0, 1, 0, 0)
 	for _, active := range []uint64{0, large.NextGenerationID, large.NextGenerationID + 1} {
-		candidate := modelChange(large, func(a *StorageAuthorityV1) { a.ActiveGenerationID = active })
+		candidate := edit(large, func(a *StorageAuthorityV1) { a.ActiveGenerationID = active })
 		var err error
-		if allocations := testing.AllocsPerRun(100, func() { err = ValidateStorageAuthorityV1(candidate) }); err != errSchema || allocations != 0 {
+		if allocations := testing.AllocsPerRun(100, func() { err = ValidateStorageAuthorityV1(candidate) }); !exactErr(err) || allocations != 0 {
 			t.Fatalf("active generation %d error/allocations = %v/%v", active, err, allocations)
 		}
 	}
