@@ -20,6 +20,19 @@ static rubin_mdbx_txn_result rubin_mdbx_txn_begin(MDBX_env *env, MDBX_txn_flags_
 static int rubin_mdbx_put_required(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_NOOVERWRITE); }
 typedef struct { int rc; const void *bytes; size_t length; } rubin_mdbx_get_result;
 static rubin_mdbx_get_result rubin_mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_get_result result; result.rc = mdbx_get(txn, dbi, &key, &value); result.bytes = value.iov_base; result.length = value.iov_len; return result; }
+typedef struct { int rc; const void *key_bytes; size_t key_len; const void *value_bytes; size_t value_len; } rubin_mdbx_prefix_result;
+static rubin_mdbx_prefix_result rubin_mdbx_get_equal_or_great(const MDBX_txn *txn, MDBX_dbi dbi, const void *seek_bytes, size_t seek_len) {
+	MDBX_val key = {(void *)seek_bytes, seek_len}, value = {NULL, 0};
+	rubin_mdbx_prefix_result result = {MDBX_EINVAL, NULL, 0, NULL, 0};
+	result.rc = mdbx_get_equal_or_great(txn, dbi, &key, &value);
+	if (result.rc == MDBX_SUCCESS || result.rc == MDBX_RESULT_TRUE) {
+		result.key_bytes = key.iov_base;
+		result.key_len = key.iov_len;
+		result.value_bytes = value.iov_base;
+		result.value_len = value.iov_len;
+	}
+	return result;
+}
 typedef struct { int rc; int equal; int valid; } rubin_mdbx_equal_result;
 static rubin_mdbx_equal_result rubin_mdbx_get_equal(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int expected_present, const void *expected_bytes, size_t expected_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_equal_result result = {MDBX_EINVAL, 0, 0}; if ((expected_present != 0 && expected_present != 1) || (expected_len != 0 && expected_bytes == NULL)) return result; result.rc = mdbx_get(txn, dbi, &key, &value); if (result.rc == MDBX_SUCCESS) { result.valid = value.iov_len == 0 || value.iov_base != NULL; if (expected_present && result.valid && value.iov_len == expected_len && (expected_len == 0 || memcmp(value.iov_base, expected_bytes, expected_len) == 0)) result.equal = 1; } else if (result.rc == MDBX_NOTFOUND) { result.valid = value.iov_base == NULL && value.iov_len == 0; if (!expected_present && result.valid) result.equal = 1; } return result; }
 static int rubin_mdbx_del_exact(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}; return mdbx_del(txn, dbi, &key, NULL); }
@@ -53,20 +66,21 @@ var (
 type engineOperation string
 
 const (
-	operationCreate  engineOperation = "create"
-	operationOpen    engineOperation = "open"
-	operationInit    engineOperation = "init"
-	operationAbort   engineOperation = "abort"
-	operationClose   engineOperation = "close"
-	operationView    engineOperation = "view"
-	operationGet     engineOperation = "get"
-	operationInspect engineOperation = "inspect"
-	operationUpdate  engineOperation = "update"
+	operationCreate     engineOperation = "create"
+	operationOpen       engineOperation = "open"
+	operationInit       engineOperation = "init"
+	operationAbort      engineOperation = "abort"
+	operationClose      engineOperation = "close"
+	operationView       engineOperation = "view"
+	operationGet        engineOperation = "get"
+	operationPrefixPage engineOperation = "prefix-page"
+	operationInspect    engineOperation = "inspect"
+	operationUpdate     engineOperation = "update"
 )
 
 func validEngineOperation(operation engineOperation) bool {
 	switch operation {
-	case operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationInspect, operationUpdate:
+	case operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect, operationUpdate:
 		return true
 	}
 	return false
@@ -455,6 +469,38 @@ type Reader struct {
 	getMu   sync.Mutex
 	active  atomic.Bool
 	failure error
+}
+
+const (
+	// MaxPrefixPageRows bounds copied rows and permits one native lookahead.
+	MaxPrefixPageRows uint32 = 1_440
+	// MaxPrefixPageBytes bounds the sum of copied key and value bytes.
+	MaxPrefixPageBytes uint64 = 154_611_151
+)
+
+// PrefixPageStop identifies the exact reason a successful page ended.
+type PrefixPageStop uint8
+
+const (
+	// PrefixPageExhausted means no greater in-prefix row exists.
+	PrefixPageExhausted PrefixPageStop = iota + 1
+	// PrefixPageRowLimit means another valid row exists beyond the row cap.
+	PrefixPageRowLimit
+	// PrefixPageByteLimit means another valid row exceeds the byte cap.
+	PrefixPageByteLimit
+)
+
+// PrefixRow owns independent Go copies of one native key and value.
+type PrefixRow struct {
+	Key   []byte
+	Value []byte
+}
+
+// PrefixPage is an ordered finite page from one Reader snapshot. Successful
+// pages have a nonzero Stop; an error returns the zero PrefixPage.
+type PrefixPage struct {
+	Rows []PrefixRow
+	Stop PrefixPageStop
 }
 
 type DBIInspection struct {
@@ -1407,6 +1453,249 @@ func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
 	return result, present, err
 }
 
+type prefixPageScan struct {
+	dbi        DBI
+	prefix     []byte
+	seek       [78]byte
+	seekLength int
+	maxRows    uint32
+	maxBytes   uint64
+}
+
+type prefixPageNative struct {
+	key         []byte
+	value       unsafe.Pointer
+	valueLength int
+	charge      uint64
+	outside     bool
+}
+
+func prefixPageInputError(diagnostic string, cause error) *EngineError {
+	return adapterError(operationPrefixPage, EngineInvalidInput, codeEINVAL, diagnostic, cause)
+}
+
+func supportedPrefixPageDBI(dbi DBI) bool {
+	switch dbi.Rank {
+	case 1, 2, 5, 6:
+		return true
+	default:
+		return false
+	}
+}
+
+func validPrefixPagePrefix(dbi DBI, prefix []byte) bool {
+	if dbi.Rank == 5 {
+		return len(prefix) == 32
+	}
+	return validImageKey(prefix, 8)
+}
+
+func validPrefixPageContinuation(dbi DBI, prefix, afterExclusive []byte) bool {
+	if afterExclusive == nil {
+		return true
+	}
+	return validKey(dbi.Rank, afterExclusive) && bytes.HasPrefix(afterExclusive, prefix)
+}
+
+func prefixPageMinimumBytes(dbi DBI) uint64 {
+	switch dbi.Rank {
+	case 1:
+		return 65_604
+	case 2, 6:
+		return 120
+	default:
+		return 65_637
+	}
+}
+
+func validatePrefixPageRequest(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, maxBytes uint64) error {
+	dbiErr := ValidateDBI(dbi)
+	if dbiErr != nil {
+		return prefixPageInputError("invalid SchemaV1 DBI", dbiErr)
+	}
+	if !supportedPrefixPageDBI(dbi) {
+		return prefixPageInputError("unsupported prefix-page DBI", nil)
+	}
+	if !validPrefixPagePrefix(dbi, prefix) {
+		return prefixPageInputError("invalid prefix-page prefix", nil)
+	}
+	if !validPrefixPageContinuation(dbi, prefix, afterExclusive) {
+		return prefixPageInputError("invalid prefix-page continuation", nil)
+	}
+	return validatePrefixPageLimits(dbi, maxRows, maxBytes)
+}
+
+func validatePrefixPageLimits(dbi DBI, maxRows uint32, maxBytes uint64) error {
+	if maxRows == 0 || maxRows > MaxPrefixPageRows {
+		return prefixPageInputError("invalid prefix-page row limit", nil)
+	}
+	if maxBytes < prefixPageMinimumBytes(dbi) || maxBytes > MaxPrefixPageBytes {
+		return prefixPageInputError("invalid prefix-page byte limit", nil)
+	}
+	return nil
+}
+
+func newPrefixPageScan(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, maxBytes uint64) prefixPageScan {
+	scan := prefixPageScan{dbi: dbi, prefix: prefix, maxRows: maxRows, maxBytes: maxBytes}
+	if afterExclusive == nil {
+		scan.seekLength = copy(scan.seek[:], prefix)
+		return scan
+	}
+	scan.seekLength = copy(scan.seek[:], afterExclusive)
+	scan.seek[scan.seekLength] = 0
+	scan.seekLength++
+	return scan
+}
+
+// PrefixPage returns rows after afterExclusive from the Reader's current
+// snapshot. UTXO, canonical, and staged prefixes are exact 8-byte nonzero
+// big-endian image or generation IDs; undo prefixes are any exact 32-byte hash.
+// A non-nil continuation is an exact same-prefix SchemaV1 key. Rows are limited
+// to 1..1440; bytes are limited to 65604 for UTXO, 120 for canonical/staged, or
+// 65637 for undo through 154611151. A nil continuation starts at prefix.
+// Inputs are borrowed only synchronously; results are independent copies and no
+// native cursor escapes. Native or stored-row failure returns a zero page,
+// invalidates the Reader, and follows the existing View/Update disposition.
+func (r *Reader) PrefixPage(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, maxBytes uint64) (PrefixPage, error) {
+	if !r.usable() {
+		return PrefixPage{}, prefixPageInputError("Reader is not active", nil)
+	}
+	requestErr := validatePrefixPageRequest(dbi, prefix, afterExclusive, maxRows, maxBytes)
+	if requestErr != nil {
+		return PrefixPage{}, requestErr
+	}
+	scan := newPrefixPageScan(dbi, prefix, afterExclusive, maxRows, maxBytes)
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return PrefixPage{}, prefixPageInputError("Reader is not active", nil)
+	}
+	page, err := r.prefixPageRead(scan)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return page, err
+}
+
+func prefixPageShapeError() *EngineError {
+	return adapterError(operationPrefixPage, EngineLocalInvariant, codeProblem, "mdbx_get_equal_or_great returned invalid result shape", nil)
+}
+
+func prefixPageNativeKey(seek []byte, keyBytes unsafe.Pointer, keyLength C.size_t) ([]byte, error) {
+	if keyBytes == nil || keyLength == 0 || keyLength > C.size_t(77) {
+		return nil, prefixPageShapeError()
+	}
+	// The 77-byte envelope makes both the int conversion and borrowed view safe.
+	key := unsafe.Slice((*byte)(keyBytes), int(keyLength))
+	if bytes.Compare(key, seek) < 0 {
+		return nil, prefixPageShapeError()
+	}
+	return key, nil
+}
+
+func prefixPageFoundCode(rc int) bool {
+	return rc == codeSuccess || rc == codeResultTrue
+}
+
+func prefixPageValueShape(valueBytes unsafe.Pointer, valueLength C.size_t) error {
+	if valueLength != 0 && valueBytes == nil {
+		return prefixPageShapeError()
+	}
+	return nil
+}
+
+func prefixPageNativeRow(dbi DBI, prefix, seek []byte, rc int, keyBytes unsafe.Pointer, keyLength C.size_t, valueBytes unsafe.Pointer, valueLength C.size_t) (prefixPageNative, error) {
+	if !prefixPageFoundCode(rc) {
+		return prefixPageNative{}, nativeError(operationPrefixPage, rc)
+	}
+	valueShapeErr := prefixPageValueShape(valueBytes, valueLength)
+	if valueShapeErr != nil {
+		return prefixPageNative{}, valueShapeErr
+	}
+	key, err := prefixPageNativeKey(seek, keyBytes, keyLength)
+	if err != nil {
+		return prefixPageNative{}, err
+	}
+	return prefixPageStoredRow(dbi, prefix, key, valueBytes, valueLength)
+}
+
+func prefixPageStoredRow(dbi DBI, prefix, key []byte, valueBytes unsafe.Pointer, valueLength C.size_t) (prefixPageNative, error) {
+	if !bytes.HasPrefix(key, prefix) {
+		return prefixPageNative{outside: true}, nil
+	}
+	if !validKey(dbi.Rank, key) {
+		return prefixPageNative{}, integrityError(operationPrefixPage, "stored key outside SchemaV1 prefix-page domain", nil)
+	}
+	length, valid := prefixPageValueLength(dbi, key, valueLength)
+	if !valid {
+		return prefixPageNative{}, integrityError(operationPrefixPage, "stored value width outside SchemaV1 bound", nil)
+	}
+	return prefixPageNative{key: key, value: valueBytes, valueLength: length, charge: uint64(len(key)) + uint64(length)}, nil
+}
+
+func prefixPageValueLength(dbi DBI, key []byte, valueLength C.size_t) (int, bool) {
+	minimum, maximum := rawValueBounds(dbi, key)
+	if valueLength < C.size_t(minimum) || valueLength > C.size_t(maximum) {
+		return 0, false
+	}
+	return int(valueLength), true
+}
+
+func prefixPageNativeResult(dbi DBI, prefix, seek []byte, rc int, keyBytes unsafe.Pointer, keyLength C.size_t, valueBytes unsafe.Pointer, valueLength C.size_t) (prefixPageNative, bool, error) {
+	if rc == codeNotFound {
+		return prefixPageNative{}, true, nil
+	}
+	row, err := prefixPageNativeRow(dbi, prefix, seek, rc, keyBytes, keyLength, valueBytes, valueLength)
+	return row, false, err
+}
+
+func prefixPageStop(rowCount int, used, charge, maxBytes uint64, maxRows uint32) PrefixPageStop {
+	if uint32(rowCount) == maxRows {
+		return PrefixPageRowLimit
+	}
+	if charge > maxBytes-used {
+		return PrefixPageByteLimit
+	}
+	return 0
+}
+
+func copyPrefixPageRow(row prefixPageNative) PrefixRow {
+	// C.GoBytes copies both borrowed MDBX buffers before the next native seek.
+	key := C.GoBytes(unsafe.Pointer(&row.key[0]), C.int(len(row.key)))
+	value := C.GoBytes(row.value, C.int(row.valueLength))
+	return PrefixRow{Key: key, Value: value}
+}
+
+func advancePrefixPageSeek(scan *prefixPageScan, key []byte) {
+	scan.seekLength = copy(scan.seek[:], key)
+	scan.seek[scan.seekLength] = 0
+	scan.seekLength++
+}
+
+func (r *Reader) prefixPageRead(scan prefixPageScan) (PrefixPage, error) {
+	var rows []PrefixRow
+	var used uint64
+	for {
+		seek := scan.seek[:scan.seekLength]
+		result := C.rubin_mdbx_get_equal_or_great(r.txn, r.dbis[scan.dbi.Rank], unsafe.Pointer(&seek[0]), C.size_t(len(seek)))
+		runtime.KeepAlive(scan)
+		row, exhausted, err := prefixPageNativeResult(scan.dbi, scan.prefix, seek, int(result.rc), unsafe.Pointer(result.key_bytes), result.key_len, unsafe.Pointer(result.value_bytes), result.value_len)
+		if err != nil {
+			return PrefixPage{}, err
+		}
+		if exhausted || row.outside {
+			return PrefixPage{Rows: rows, Stop: PrefixPageExhausted}, nil
+		}
+		if stop := prefixPageStop(len(rows), used, row.charge, scan.maxBytes, scan.maxRows); stop != 0 {
+			return PrefixPage{Rows: rows, Stop: stop}, nil
+		}
+		rows = append(rows, copyPrefixPageRow(row))
+		used += row.charge
+		advancePrefixPageSeek(&scan, row.key)
+	}
+}
+
 func (s *Store) Inspect() (Inspection, error) {
 	if s == nil {
 		return Inspection{}, adapterError(operationInspect, EngineInvalidInput, codeEINVAL, "nil Store", nil)
@@ -1503,7 +1792,7 @@ func (r *Reader) usable() bool {
 func (r *Reader) expire() {
 	r.active.Store(false)
 	r.getMu.Lock()
-	//nolint:staticcheck // Lock acquisition drains every in-flight Get before abort.
+	//nolint:staticcheck // Lock acquisition drains every in-flight Get and PrefixPage before abort.
 	r.getMu.Unlock()
 }
 
@@ -1910,7 +2199,7 @@ func validDirectConsumedReadTerminal(err error) (bool, bool) {
 	case operationAbort:
 		_, valid := directNativeResult(operationAbort, err)
 		return valid && engine.Code != codeThreadMismatch, true
-	case operationView, operationGet, operationInspect:
+	case operationView, operationGet, operationPrefixPage, operationInspect:
 		_, valid := directNativeResult(operation, err)
 		return valid, true
 	default:

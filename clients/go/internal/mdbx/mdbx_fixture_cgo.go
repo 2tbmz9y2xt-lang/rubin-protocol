@@ -21,6 +21,31 @@ static int rubin_fixture_readers_493(MDBX_txn *txn, MDBX_dbi meta) { const unsig
 static int rubin_fixture_check_and_reconfigure(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { int rc = rubin_fixture_check_rows(txn, meta, canonical); return rc == MDBX_SUCCESS ? rubin_fixture_readers_493(txn, meta) : rc; }
 static int rubin_fixture_put(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, const void *value_bytes, size_t value_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {(void *)value_bytes, value_len}; return mdbx_put(txn, dbi, &key, &value, MDBX_UPSERT); }
 static int rubin_fixture_del(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}; return mdbx_del(txn, dbi, &key, NULL); }
+typedef struct { int rc; const void *key_bytes; size_t key_len; const void *value_bytes; size_t value_len; } rubin_fixture_prefix_result;
+static rubin_fixture_prefix_result rubin_fixture_prefix_shape(unsigned mode) {
+	static const unsigned char key[78] = {0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,1};
+	static const unsigned char below[16] = {0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,1};
+	static const unsigned char value[104] = {1};
+	rubin_fixture_prefix_result result = {MDBX_RESULT_TRUE, key, 16, value, 104};
+	if (mode == 1) result.key_bytes = NULL;
+	else if (mode == 2) result.key_len = 0;
+	else if (mode == 3) result.key_len = 78;
+	else if (mode == 4) result.value_bytes = NULL;
+	else if (mode == 5) result.key_bytes = below;
+	return result;
+}
+static rubin_fixture_prefix_result rubin_fixture_prefix_address(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) {
+	MDBX_val key = {(void *)key_bytes, key_len}, value = {NULL, 0};
+	rubin_fixture_prefix_result result = {MDBX_EINVAL, NULL, 0, NULL, 0};
+	result.rc = mdbx_get_equal_or_great(txn, dbi, &key, &value);
+	if (result.rc == MDBX_SUCCESS || result.rc == MDBX_RESULT_TRUE) {
+		result.key_bytes = key.iov_base;
+		result.key_len = key.iov_len;
+		result.value_bytes = value.iov_base;
+		result.value_len = value.iov_len;
+	}
+	return result;
+}
 */
 import "C"
 
@@ -224,6 +249,49 @@ func fixtureSeedMalformedStoredWidth(store *Store) error {
 		runtime.KeepAlive(value)
 		return fixtureResult(operationInit, rc)
 	})
+}
+
+func fixtureSeedPrefixRawRow(store *Store, dbi DBI, key, value []byte) error {
+	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
+		var keyBytes, valueBytes unsafe.Pointer
+		if len(key) != 0 {
+			keyBytes = unsafe.Pointer(&key[0])
+		}
+		if len(value) != 0 {
+			valueBytes = unsafe.Pointer(&value[0])
+		}
+		rc := int(C.rubin_fixture_put(txn, store.dbis[dbi.Rank], keyBytes, C.size_t(len(key)), valueBytes, C.size_t(len(value))))
+		runtime.KeepAlive(key)
+		runtime.KeepAlive(value)
+		return fixtureResult(operationInit, rc)
+	})
+}
+
+func fixtureDeletePrefixRow(store *Store, dbi DBI, key []byte) error {
+	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
+		rc := int(C.rubin_fixture_del(txn, store.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key))))
+		runtime.KeepAlive(key)
+		return fixtureResult(operationInit, rc)
+	})
+}
+
+func fixturePrefixNativeShape(dbi DBI, prefix, seek []byte, mode uint32) error {
+	result := C.rubin_fixture_prefix_shape(C.uint(mode))
+	_, err := prefixPageNativeRow(dbi, prefix, seek, int(result.rc), unsafe.Pointer(result.key_bytes), result.key_len, unsafe.Pointer(result.value_bytes), result.value_len)
+	return err
+}
+
+func fixturePrefixNativeAddresses(reader *Reader, dbi DBI, key []byte, valueLength int) (unsafe.Pointer, unsafe.Pointer, error) {
+	result := C.rubin_fixture_prefix_address(reader.txn, reader.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	if int(result.rc) != codeSuccess || result.key_bytes == nil || result.key_len != C.size_t(len(key)) || result.value_bytes == nil || result.value_len != C.size_t(valueLength) {
+		return nil, nil, errors.New("fixture lower-bound address result was not exact")
+	}
+	return unsafe.Pointer(result.key_bytes), unsafe.Pointer(result.value_bytes), nil
+}
+
+func fixtureBreakPrefixReader(reader *Reader) error {
+	return fixtureResult(operationPrefixPage, int(C.mdbx_txn_break(reader.txn)))
 }
 
 func reopenAfterFixture(path string, cfg ConfigV1, store *Store, primary error) (*Store, error) {
