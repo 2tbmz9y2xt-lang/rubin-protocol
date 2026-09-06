@@ -58,7 +58,7 @@ func modelReplay(cursor byte) StorageAuthorityV1 {
 	a.NextGenerationID, a.Phase, a.Lifecycle = 3, StoragePhaseV1(3), StorageLifecycleV1(2)
 	a.Replay = &ReplayV1{StorageProfileV1(2), 2, modelTarget(), ReplayCursorV1{ReplayCursorKindV1(cursor), 0, [32]byte{}}}
 	if cursor == 2 {
-		a.Replay.Cursor.BlockHash = modelHash(14)
+		a.Replay.Cursor.BlockHash = a.Replay.Target.GenesisHash
 	}
 	return a
 }
@@ -132,7 +132,7 @@ func wantModel(t *testing.T, name string, a StorageAuthorityV1, valid bool) {
 		if valid && err != nil {
 			t.Fatalf("valid authority rejected: %v", err)
 		}
-		if !valid && (!exactErr(err) || a.Phase > 4 && validPayload(a)) {
+		if !valid && !exactErr(err) {
 			t.Fatalf("invalid authority error = %v, want exact errSchema", err)
 		}
 	})
@@ -251,6 +251,9 @@ func TestStorageAuthorityV1GenerationOwners(t *testing.T) {
 		{Kind: 4, GenerationID: 2, FirstHeight: 0, LastHeight: 0, NextHeight: 0},
 	}
 	wantModel(t, "active obsolete side three ids", full, true)
+	adjacent := full
+	adjacent.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 4, GenerationID: 2, FirstHeight: 1, LastHeight: 1, NextHeight: 1}}}
+	wantModel(t, "SIDE cleanup adjacent boundary", adjacent, true)
 	wantModel(t, "active zero", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.ActiveGenerationID = 0 }), false)
 	for _, row := range []mutationCase[StorageAuthorityV1]{
 		{"next zero", func(a *StorageAuthorityV1) { a.NextGenerationID = 0 }},
@@ -337,6 +340,8 @@ func TestStorageAuthorityV1ReplayAndOwners(t *testing.T) {
 	wantModel(t, "replay applied at height zero", applied, true)
 	applied.Replay.Cursor.Height, applied.Replay.Cursor.BlockHash = 2, applied.Replay.Target.TipHash
 	wantModel(t, "replay applied at target", applied, true)
+	wantModel(t, "replay applied below target", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.Height, a.Replay.Cursor.BlockHash = 1, modelHash(14) }), true)
+	wantModel(t, "replay target minimum height", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.Target.TipHeight = 1 }), true)
 	maximumWork := modelReplay(1)
 	maximumWork.Replay.Target.CumulativeChainwork = modelWork(true)
 	wantModel(t, "replay target chainwork 2^288", maximumWork, true)
@@ -364,6 +369,7 @@ func TestStorageAuthorityV1ReplayAndOwners(t *testing.T) {
 		row.mutate(a.Replay)
 		wantModel(t, row.name, a, false)
 	}
+	wantModel(t, "applied genesis hash mismatch", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.BlockHash = modelHash(99) }), false)
 	wantModel(t, "applied above target", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.Height = 3 }), false)
 	wantModel(t, "applied target hash mismatch", edit(modelReplay(2), func(a *StorageAuthorityV1) { a.Replay.Cursor.Height, a.Replay.Cursor.BlockHash = 2, modelHash(99) }), false)
 	wantModel(t, "replay target maximum height", edit(modelReplay(1), func(a *StorageAuthorityV1) { a.Replay.Target.TipHeight = 0xffffffff }), true)
@@ -465,6 +471,7 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	for _, row := range []authorityCase{
 		{"D1 C0 disconnect", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
 		{"D1 C2 disconnect", modelOrdinary(1, 1, 2, 1, 1, 0, 0)},
+		{"D1 C1 disconnect", modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"D0 C2 connect nil cursor H0", modelOrdinary(2, 0, 2, 0, 1, 0, 0)},
 		{"D1 C2 connect", modelOrdinary(2, 1, 2, 15120, 1, 1, 13681)},
 		{"rollback new", modelOrdinary(3, 1, 2, 1, 1, 0, 0)},

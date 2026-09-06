@@ -52,6 +52,7 @@ func validReplay(v *ReplayV1) bool {
 		return all(v.Cursor.Height == 0, v.Cursor.BlockHash == ([32]byte{}))
 	case ReplayCursorAppliedV1:
 		return all(v.Cursor.Height <= v.Target.TipHeight,
+			anyTrue(v.Cursor.Height != 0, v.Cursor.BlockHash == v.Target.GenesisHash),
 			anyTrue(v.Cursor.Height != v.Target.TipHeight, v.Cursor.BlockHash == v.Target.TipHash))
 	}
 	return false

@@ -148,28 +148,24 @@ func validProfilePromises(a StorageAuthorityV1) bool {
 	return false
 }
 
-func validPhaseState(a StorageAuthorityV1) bool {
+func validPhasePayload(a StorageAuthorityV1) bool {
 	pending := a.PendingTargetProfile != nil
 	switch a.Phase {
 	case StoragePhaseNoneV1:
 		return all(a.Lifecycle == StorageLifecycleStableV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary == nil, !pending)
 	case StoragePhasePruneGCV1:
 		return all(a.Cleanup != nil, a.Replay == nil, a.Ordinary == nil,
-			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending)))
+			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanup(a.Cleanup)
 	case StoragePhaseReplayV1:
-		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay != nil, a.Ordinary == nil, !pending)
+		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay != nil, a.Ordinary == nil, !pending) && validReplay(a.Replay)
 	case StoragePhaseOrdinaryApplyV1:
-		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary != nil, !pending)
-	default:
-		return false
+		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary != nil, !pending) && validOrdinary(a)
 	}
+	return false
 }
 
 func validTop(a StorageAuthorityV1) bool {
 	if !validProfilePromises(a) || a.ActiveGenerationID == 0 || a.ActiveGenerationID >= a.NextGenerationID {
-		return false
-	}
-	if !validPhaseState(a) {
 		return false
 	}
 	if a.PendingTargetProfile != nil && !validProfile(*a.PendingTargetProfile) {
@@ -181,22 +177,8 @@ func validTop(a StorageAuthorityV1) bool {
 		anyTrue(a.SelectedSide == nil, a.DetachedSuffix == nil))
 }
 
-func validPayload(a StorageAuthorityV1) bool {
-	switch a.Phase {
-	case StoragePhaseNoneV1:
-		return true
-	case StoragePhasePruneGCV1:
-		return validCleanup(a.Cleanup)
-	case StoragePhaseReplayV1:
-		return validReplay(a.Replay)
-	case StoragePhaseOrdinaryApplyV1:
-		return validOrdinary(a)
-	}
-	return false
-}
-
 func ValidateStorageAuthorityV1(a StorageAuthorityV1) error {
-	if !validTop(a) || !validPayload(a) || !validDescriptors(a) || !validOwners(a) {
+	if !validTop(a) || !validPhasePayload(a) || !validDescriptors(a) || !validOwners(a) {
 		return errSchema
 	}
 	return nil
