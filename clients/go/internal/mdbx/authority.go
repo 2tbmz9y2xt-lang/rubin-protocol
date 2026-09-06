@@ -216,7 +216,7 @@ func validPoints(points []AuthorityPointV1, descending bool, seen map[[32]byte]b
 }
 
 func validPointStep(previous, current uint64, descending bool) bool {
-	return descending && previous == current+1 || !descending && current == previous+1
+	return (descending && previous == current+1) || (!descending && current == previous+1)
 }
 
 func validFailure(f *RecordedFailureV1, newSuffix []AuthorityPointV1) bool {
@@ -259,7 +259,7 @@ func validDisconnectStage(o *OrdinaryApplyV1) bool {
 }
 
 func validConnectStage(o *OrdinaryApplyV1) bool {
-	return len(o.NewSuffix) > 0 && o.RecordedFailure == nil && (o.Cursor == nil && len(o.OldSuffix) == 0 || o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor))
+	return len(o.NewSuffix) > 0 && o.RecordedFailure == nil && ((o.Cursor == nil && len(o.OldSuffix) == 0) || (o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor)))
 }
 
 func validRollbackNewStage(o *OrdinaryApplyV1) bool {
