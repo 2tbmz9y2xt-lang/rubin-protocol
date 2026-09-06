@@ -35,6 +35,12 @@ func (p *peer) handleTx(txBytes []byte) error {
 		// pool or the metadata producer, and is never announced as MSG_TX.
 		return p.handleRelayDATx(txBytes)
 	}
+	return p.handleStandardTx(txBytes, tx, txid)
+}
+
+// handleStandardTx is the unchanged standard arm: seen-set first, then admission,
+// then the MSG_TX announcement.
+func (p *peer) handleStandardTx(txBytes []byte, tx *consensus.Tx, txid [32]byte) error {
 	if p.service.txSeen.Has(txid) {
 		return nil
 	}

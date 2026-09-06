@@ -25,10 +25,13 @@ func (s *Service) canScheduleDAPrefetch() bool {
 
 // daPrefetchPeers lists every eligible prefetch peer by quota key and moves the
 // trigger peer's key to the front when it still holds its preference. The local
-// tip height the preference reads is captured once, before peersMu, so no chain
-// lock is taken under a peer lock.
+// tip height the preference reads is captured once, only when a trigger is named
+// and before peersMu, so no chain lock is taken under a peer lock.
 func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
-	height := s.cfg.SyncEngine.LocalTipHeight()
+	var height uint64
+	if peerAddr != "" {
+		height = s.cfg.SyncEngine.LocalTipHeight()
+	}
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	peers, keys := s.allDAPrefetchPeersLocked()

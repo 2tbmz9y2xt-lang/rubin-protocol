@@ -10,14 +10,6 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-// retainedPrefetchCommit retains one incomplete commit with PEER provenance for peerAddr.
-func retainedPrefetchCommit(t *testing.T, f *daIngressFixture, daID [32]byte, chunkCount uint16, peerAddr string) []byte {
-	t.Helper()
-	raw := f.commit(daID, chunkCount)
-	f.admit(raw, peerAddr)
-	return raw
-}
-
 // readScriptedFrames decodes every getdachunk request written to current's scripted socket.
 func readScriptedFrames(t *testing.T, h *testHarness, current *peer) []getDAChunkPayload {
 	t.Helper()
@@ -37,7 +29,7 @@ func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(140)
-	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
+	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
 	now := time.Unix(1000, 0)
 	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, now)
 	require(t, len(plans) == 1 && diagnostic == "" && reflect.DeepEqual(plans[0].Indexes, []uint16{0, 1}), "initial plans=%+v diagnostic=%q", plans, diagnostic)
@@ -55,7 +47,7 @@ func TestDAPrefetchSendWritesGetDAChunkFrame(t *testing.T) {
 	f := newDAIngressFixture(t, h)
 	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
 	daID := daRelayTestID(141)
-	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
+	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
 	requests := readScriptedFrames(t, h, current)
 	require(t, len(requests) == 1 && requests[0].DAID == daID && reflect.DeepEqual(requests[0].Indexes, []uint16{0, 1}), "requests=%+v", requests)
@@ -67,7 +59,7 @@ func TestDAPrefetchSendFailureReleasesPlan(t *testing.T) {
 	f := newDAIngressFixture(t, h)
 	current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("write failed"))
 	daID := daRelayTestID(132)
-	retainedPrefetchCommit(t, f, daID, 2, "127.0.0.9:19119")
+	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
 	require(t, current.snapshotState().BanScore == 0 && current.snapshotState().LastError != "", "state=%+v, want diagnostic without ban", current.snapshotState())
 	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
@@ -78,7 +70,7 @@ func TestDAPrefetchMissingPeerReleasesPlan(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(135)
-	retainedPrefetchCommit(t, f, daID, 1, "127.0.0.9:19119")
+	f.admit(f.commit(daID, 1), "127.0.0.9:19119")
 	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, time.Unix(1000, 0))
 	require(t, len(plans) == 1 && diagnostic == "", "plans=%d diagnostic=%q, want one", len(plans), diagnostic)
 	h.service.sendDAPrefetchPlan(map[string]*peer{}, plans[0])
@@ -131,9 +123,10 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	score, anchor := peerQuality(b)
 	require(t, score == 38 && anchor == 1440, "six conflicts: score=%d anchor=%d, want 38 at 1440", score, anchor)
 	expect("score 38 loses the front and nothing else", "peer-b", all)
+	wire := map[*peer][]byte{}
 	demoted := daRelayTestID(0xb1)
 	must(t, b.handleTx(f.commit(demoted, 15)), "a fresh set from the demoted peer")
-	expectPrefetchRequests(t, h, "demoted trigger", demoted, 15, a, b, c)
+	expectPrefetchRequests(t, h, wire, "demoted trigger", demoted, 15, a, b, c)
 	b.stateMu.Lock()
 	b.qualityScore = 39
 	b.stateMu.Unlock()
@@ -147,34 +140,32 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	expect("a sole low-score peer", "peer-b", []string{"peer-b"})
 	sole := daRelayTestID(0xb3)
 	must(t, b.handleTx(f.commit(sole, 2)), "a fresh set with the sole peer")
-	expectPrefetchRequests(t, h, "sole peer", sole, 2, b)
+	expectPrefetchRequests(t, h, wire, "sole peer", sole, 2, b)
 	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
 	addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
 	expect("sessions sharing a quota key", "127.0.0.5:2", []string{"127.0.0.5", "peer-b"})
 	h.service.cfg.EnableCompactReceive = false
 	expect("compact receive disabled", "peer-b", []string{})
-	// 288 blocks later. A synthetic tip move breaks the owner's tip coherence, so
-	// the tuple the six conflicts produced (38 at 1440) is carried onto a harness
-	// whose local tip is 1728, where a fresh set from b normalizes it to 40 and
-	// restores the preference.
+	// 288 blocks later: a synthetic tip move breaks the owner's tip coherence, so the tuple the
+	// six conflicts produced (38 at 1440) is carried onto a harness at tip 1728, where b normalizes to 40.
 	later := highTipHarness(t, 1728)
 	later.service.cfg.EnableCompactReceive = true
 	lf := newDAIngressFixture(t, later)
 	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", nil), addDAPrefetchTestPeer(later.service, "peer-b", nil), addDAPrefetchTestPeer(later.service, "peer-c", nil)
+	lb.stateMu.Lock()
 	lb.qualityScore, lb.qualityHeight = 38, 1440
+	lb.stateMu.Unlock()
 	restored := daRelayTestID(0xb2)
 	must(t, lb.handleTx(lf.commit(restored, 15)), "a fresh set from the restored peer")
 	score, anchor = peerQuality(lb)
 	require(t, score == 40 && anchor == 1728, "288 blocks later: score=%d anchor=%d, want 40 at 1728", score, anchor)
-	expectPrefetchRequests(t, later, "restored trigger", restored, 15, lb, la, lc)
+	expectPrefetchRequests(t, later, wire, "restored trigger", restored, 15, lb, la, lc)
 }
 
-// prefetchWire accumulates the exact frame bytes each scripted peer socket must carry.
-var prefetchWire = map[*peer][]byte{}
-
 // expectPrefetchRequests pins the round-robin split of count missing chunks (within the
-// per-peer per-second budget) in peer order, decoded and as exact connection bytes.
-func expectPrefetchRequests(t *testing.T, h *testHarness, label string, daID [32]byte, count uint16, order ...*peer) {
+// per-peer per-second budget) in peer order, decoded and as exact connection bytes; wire
+// accumulates the exact frame bytes each scripted peer socket must carry so far.
+func expectPrefetchRequests(t *testing.T, h *testHarness, wire map[*peer][]byte, label string, daID [32]byte, count uint16, order ...*peer) {
 	t.Helper()
 	for position, current := range order {
 		indexes := []uint16{}
@@ -183,10 +174,11 @@ func expectPrefetchRequests(t *testing.T, h *testHarness, label string, daID [32
 		}
 		payload, err := encodeDAPrefetchPlanPayload(node.DARelayPrefetchPlan{DAID: daID, Indexes: indexes})
 		must(t, err, "encodeDAPrefetchPlanPayload")
-		prefetchWire[current] = append(prefetchWire[current], mustPeerRuntimeFrameBytes(t, current, message{Command: messageGetDAChunk, Payload: payload})...)
+		wire[current] = append(wire[current], mustPeerRuntimeFrameBytes(t, current, message{Command: messageGetDAChunk, Payload: payload})...)
 		requests := readScriptedFrames(t, h, current)
+		require(t, len(requests) > 0, "%s: %s received no getdachunk frame", label, current.addr())
 		last := requests[len(requests)-1]
-		require(t, last.DAID == daID && reflect.DeepEqual(last.Indexes, indexes) && bytes.Equal(current.conn.(*scriptedConn).Bytes(), prefetchWire[current]), "%s: %s request=%+v, want %x indexes %v with the exact frame bytes", label, current.addr(), last, daID, indexes)
+		require(t, last.DAID == daID && reflect.DeepEqual(last.Indexes, indexes) && bytes.Equal(current.conn.(*scriptedConn).Bytes(), wire[current]), "%s: %s request=%+v, want %x indexes %v with the exact frame bytes", label, current.addr(), last, daID, indexes)
 	}
 }
 

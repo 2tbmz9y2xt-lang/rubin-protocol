@@ -1637,7 +1637,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 	})
 }
 
-func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
+func TestDARelayStageChunkRecordLockedRejectsDuplicateWithoutMutation(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	daID := daRelayTestID(59)
 	chunk := daRelayTestChunk(daID, 0, 1)

@@ -92,11 +92,8 @@ type TxAdmitError struct {
 	// neither read it nor change with it. Its zero value means "no branch
 	// selected", which relayDispositionOf reports as INTERNAL, fail closed.
 	disposition RelayAdmissionDisposition
-	// cause is the originating sentinel the branch that BUILT this error attached
-	// for errors.Is consumers, or nil. Like disposition it is unexported and read
-	// by no public mapping: Error(), Kind, Message, the counter buckets and the
-	// HTTP status are unchanged by it. Only Unwrap exposes it, so a consumer must
-	// hold the exact sentinel identity to match; text or Kind never select it.
+	// cause is the originating sentinel the building branch attached for errors.Is, or nil;
+	// only Unwrap exposes it — Error(), Kind, Message, counters and HTTP status never read it.
 	cause error
 }
 

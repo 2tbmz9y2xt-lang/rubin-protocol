@@ -7,25 +7,19 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
 
-// IDENTITY_BOUNDS_V1: the process-local byte limits a remote DA candidate's
-// captured peer identity and its derived quota identity satisfy before any
-// provenance is built. They bound local memory per retained member only; they
-// are not wire, DNS or retained-byte constants.
+// IDENTITY_BOUNDS_V1: process-local byte limits on a remote DA candidate's captured peer
+// identity and derived quota identity, checked before any provenance is built; they bound
+// local memory per retained member and are not wire, DNS or retained-byte constants.
 const (
 	maxDAPeerIdentityBytes  = 263
 	maxDAQuotaIdentityBytes = 255
 )
 
-// COMPETING_SCORE_V1: the connection-local peer-quality policy the remote DA
-// path applies (the RUBIN_COMPACT_BLOCKS.md Section 14 score shape with local
-// magnitudes). A connection starts at qualityScoreInitial; a fully validated
-// distinct commit competing with the retained commit of the same da_id subtracts
-// qualityCompetingCommitDelta, or qualityCompetingCommitGrace while the captured
-// local tip height is below qualityGraceHeight, saturating at 0; the score drifts
-// one point toward qualityScoreInitial per qualityNormalizeBlocks of local
-// height, evaluated lazily; and the DA prefetch scheduler keeps the trigger
-// peer's front-of-list preference only while the score is at least
-// qualityPreferenceMinimum. This task reaches only [0, qualityScoreInitial].
+// COMPETING_SCORE_V1: the connection-local peer-quality policy (the Section 14 score
+// shape of RUBIN_COMPACT_BLOCKS.md with local magnitudes). A connection starts at 50; a
+// validated distinct commit competing for a retained da_id subtracts 2 (1 below height
+// 1440) saturating at 0; the score drifts one point toward 50 per 144 blocks of local
+// height, lazily; the prefetch trigger keeps its front-of-list preference at >= 40.
 const (
 	qualityScoreInitial         uint8  = 50
 	qualityPreferenceMinimum    uint8  = 40
@@ -35,28 +29,19 @@ const (
 	qualityGraceHeight          uint64 = 1440
 )
 
-// handleRelayDATx is the ONE production remote DA admission path: every remote
-// tx_kind 0x01/0x02 transaction that passed the message bound and the full
-// canonical parse arrives here before any standard-pool, seen-set, metadata or
-// inventory effect, and invokes AdmitDA exactly once. Postconditions, in order:
-//   - the peer identity is captured once from the peer state, which handleConn
-//     already normalized, and the quota identity derived from that string; an
-//     identity outside IDENTITY_BOUNDS_V1 returns nil with no effect at all;
-//   - an engine already latched by a terminal transition returns nil before the
-//     quota key is taken and before AdmitDA; a latch landing after that check
-//     keeps the existing same-key teardown/Close limitation until restart, which
-//     this path does not repair;
-//   - the per-quota lock is held only around the one AdmitDA call and released
-//     before any result effect, so the order stays quota key, then the admission
-//     fence, DARelayState.mu and PendingOutpointOwner.mu inside AdmitDA, with
-//     peer-state and peer-map locks never held across that chain;
-//   - no candidate hash, signature, fee or chain check runs here before AdmitDA's
-//     owner observation; errors.Is(err, node.ErrDARelayChunkHashMismatch) alone is
-//     a peer fault, every other AdmitDA error is peer-neutral with no relay effect;
-//   - RETAINED without a conflict flag schedules the bounded prefetch once with
-//     the captured identity; DUPLICATE with SameDAIDCommitConflict applies
-//     COMPETING_SCORE_V1 once to this peer; every other success shape, which
-//     publicDAAdmissionResult cannot emit, returns nil with zero effect.
+// handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
+// transaction past the message bound and full canonical parse invokes AdmitDA exactly once before
+// any standard-pool, seen-set, metadata or inventory effect. The identity is captured once from
+// the peer state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling
+// no normalized address reaches) exits nil with zero effect. The terminal latch is checked before
+// the quota key (a latch landing later keeps the same-key teardown/Close limitation until restart);
+// the key is held only around AdmitDA and released before any effect; no candidate validation
+// precedes AdmitDA's owner observation; errors.Is on the hash sentinel is the only peer fault.
+// RETAINED without conflict schedules the prefetch once; DUPLICATE with conflict applies
+// COMPETING_SCORE_V1 once; DUPLICATE without conflict is the reachable neutral exit (exact/nonexact
+// replay, occupied index); a zero/unknown discriminator or RETAINED with the conflict flag — shapes
+// publicDAAdmissionResult cannot emit — also exit nil. AdmitDA refuses a member that would COMPLETE
+// its set until RUB-1118 activates the COMPLETE_SET owner, so no remote set reaches COMPLETE_SET.
 func (p *peer) handleRelayDATx(txBytes []byte) error {
 	s := p.service
 	peerIdentity, quotaIdentity, provenance, ok := p.remoteDAProvenance()
@@ -81,11 +66,10 @@ func (p *peer) handleRelayDATx(txBytes []byte) error {
 	return nil
 }
 
-// remoteDAProvenance captures the peer identity once, derives the quota identity
-// from that captured string without normalizing it again, and applies
-// IDENTITY_BOUNDS_V1 before any provenance exists. ok is false for an empty or
-// over-bound identity, which the caller answers with nil and no effect; the
-// nonempty check also makes NewPeerDAProvenance's only refusal unreachable.
+// remoteDAProvenance captures the peer identity once, derives the quota identity from that
+// string without normalizing again and applies IDENTITY_BOUNDS_V1 before any provenance
+// exists; ok is false for an empty or over-bound identity (the caller exits nil with no
+// effect), and the nonempty check makes NewPeerDAProvenance's only refusal unreachable.
 func (p *peer) remoteDAProvenance() (peerIdentity, quotaIdentity string, provenance node.DAProvenance, ok bool) {
 	peerIdentity = p.addr()
 	quotaIdentity = peerQuotaKey(peerIdentity)
@@ -96,11 +80,9 @@ func (p *peer) remoteDAProvenance() (peerIdentity, quotaIdentity string, provena
 	return peerIdentity, quotaIdentity, provenance, err == nil
 }
 
-// penalizeDAAdmissionError maps the one peer-attributable AdmitDA error — a
-// candidate chunk whose payload contradicts its own declared hash, selected by
-// sentinel identity alone and never by error kind or text — to the existing +10
-// ban step with the sentinel's text as LastError, returning the sentinel itself
-// only when the ban threshold is reached. Every other error is peer-neutral.
+// penalizeDAAdmissionError maps the hash-mismatch sentinel, selected by errors.Is identity
+// alone, to the +10 ban step with the sentinel's text as LastError, returning the sentinel
+// itself only at the ban threshold; every other error is peer-neutral.
 func (p *peer) penalizeDAAdmissionError(err error) error {
 	if errors.Is(err, node.ErrDARelayChunkHashMismatch) && p.bumpBan(10, node.ErrDARelayChunkHashMismatch.Error()) {
 		return node.ErrDARelayChunkHashMismatch
@@ -108,11 +90,9 @@ func (p *peer) penalizeDAAdmissionError(err error) error {
 	return nil
 }
 
-// applyCompetingCommitScore is COMPETING_SCORE_V1's one event. The caller
-// captured height after AdmitDA released its admission and owner locks and after
-// the quota key was released; under stateMu the score first drifts for every
-// interval that height completed and then loses the grace-adjusted delta with
-// lower saturation. BanScore, LastError and the peer manager are untouched.
+// applyCompetingCommitScore is COMPETING_SCORE_V1's one event: height was captured after
+// every lock was released; under stateMu the score drifts, then loses the grace-adjusted
+// delta with lower saturation. BanScore and LastError are untouched.
 func (p *peer) applyCompetingCommitScore(height uint64) {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
@@ -127,9 +107,8 @@ func (p *peer) applyCompetingCommitScore(height uint64) {
 	p.qualityScore -= delta
 }
 
-// qualityPreferred drifts the score for height and reports whether this peer
-// keeps its DA prefetch front-of-list preference; it never removes the peer
-// from the eligible set or moves score to another session.
+// qualityPreferred drifts the score for height and reports whether this peer keeps its DA
+// prefetch front-of-list preference; it never removes the peer from the eligible set.
 func (p *peer) qualityPreferred(height uint64) bool {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
@@ -137,12 +116,12 @@ func (p *peer) qualityPreferred(height uint64) bool {
 	return p.qualityScore >= qualityPreferenceMinimum
 }
 
-// normalizeQualityLocked consumes every whole qualityNormalizeBlocks interval
-// between the anchor and height: a height at or below the anchor changes
-// nothing, the anchor advances by exactly the completed intervals so a partial
-// interval is kept for a later read, and the score moves toward
-// qualityScoreInitial by at most one point per interval, bounded in uint64
-// before any narrowing. Caller holds stateMu.
+// normalizeQualityLocked consumes every whole qualityNormalizeBlocks interval between the
+// anchor and height: at or below the anchor nothing changes; the anchor advances by exactly
+// the completed intervals (a partial one is kept); the score moves up toward
+// qualityScoreInitial by at most one point per interval, bounded in uint64 before narrowing.
+// Only the negative event and this drift exist, so the score never exceeds
+// qualityScoreInitial and no downward arm is needed. Caller holds stateMu.
 func (p *peer) normalizeQualityLocked(height uint64) {
 	if height <= p.qualityHeight {
 		return
@@ -152,18 +131,7 @@ func (p *peer) normalizeQualityLocked(height uint64) {
 		return
 	}
 	p.qualityHeight += intervals * qualityNormalizeBlocks
-	if p.qualityScore < qualityScoreInitial {
-		p.qualityScore += boundedQualityStep(intervals, qualityScoreInitial-p.qualityScore)
-	} else {
-		p.qualityScore -= boundedQualityStep(intervals, p.qualityScore-qualityScoreInitial)
-	}
-}
-
-func boundedQualityStep(intervals uint64, distance uint8) uint8 {
-	if intervals < uint64(distance) {
-		return uint8(intervals)
-	}
-	return distance
+	p.qualityScore += uint8(min(intervals, uint64(qualityScoreInitial-p.qualityScore))) //nolint:gosec // bounded above by the distance to qualityScoreInitial (<= 50)
 }
 
 // validateRelayDATxForAdmission is the LOCAL standard-domain check kept for

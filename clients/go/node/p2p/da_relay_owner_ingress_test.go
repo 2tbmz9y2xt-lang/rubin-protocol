@@ -161,13 +161,6 @@ func mustParseP2PTx(t *testing.T, raw []byte) *consensus.Tx {
 	return tx
 }
 
-// corruptSignature flips one signature byte: the same txid, a rejected signature.
-func corruptSignature(t *testing.T, raw []byte) []byte {
-	tx := mustParseP2PTx(t, raw)
-	tx.Witness[0].Signature[0] ^= 0xff
-	return mustMarshalPeerRuntimeTx(t, tx)
-}
-
 // resignDATx signs tx with the fixture key: the same core keeps its txid, the
 // fresh randomized signature gives different bytes and wtxid.
 func resignDATx(t *testing.T, f *daIngressFixture, tx *consensus.Tx) []byte {
@@ -208,9 +201,8 @@ func effectsOf(p *peer) peerEffects {
 	return peerEffects{state.BanScore, state.LastError, score, anchor}
 }
 
-// highTipHarness publishes the chainstate at height before the mempool binds, so
-// LocalTipHeight reads height while admission stays coherent with the owner's
-// stable tip; no blockstore is bound, so the synthetic height needs no headers.
+// highTipHarness publishes the chainstate at height before the mempool binds, so LocalTipHeight
+// reads height while admission stays coherent with the owner's stable tip (no headers needed).
 func highTipHarness(t *testing.T, height uint64) *testHarness {
 	t.Helper()
 	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
@@ -266,37 +258,35 @@ var (
 	d00InScopeIDs        = []string{"REMOTE_STANDARD_EXIT", "REMOTE_COMMIT_RETAINED", "REMOTE_CHUNK_RETAINED", "REMOTE_EXACT_REPLAY", "REMOTE_OWNER_CONFLICT", "REMOTE_POLICY_REJECT", "STATE_B_PEER_CHUNK_CLEANUP_PRESERVES_NONPEER", "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED", "REMOTE_EXACT_CHUNK_REPLAY", "REMOTE_SAME_TXID_NONEXACT_VALID", "REMOTE_SAME_TXID_NONEXACT_INVALID", "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", "REMOTE_REPLAY_EVIDENCE_ABSENT", "REMOTE_REPLAY_EVIDENCE_UNAVAILABLE", "REMOTE_REPLAY_EVIDENCE_DANGLING", "REMOTE_REPLAY_EVIDENCE_CORRUPT", "REMOTE_REPLAY_EVIDENCE_MISMATCH", "REMOTE_REPLAY_EVIDENCE_UNSTABLE", "REMOTE_REPLAY_D1_REMOVAL_FIRST", "REMOTE_REPLAY_D1_SNAPSHOT_FIRST"}
 )
 
-// TestRemoteDAExitsBeforeEveryStandardAuthority: remote DA members are retained without
-// reaching the seen-set, pool, metadata producer or MSG_TX; a standard tx reaches each once.
+// TestRemoteDAExitsBeforeEveryStandardAuthority: remote DA members are retained without reaching
+// the seen-set, the canonical pool (its AddTx is the metadata producer under this wiring), MSG_TX
+// or the four admission counters (R8); a standard tx reaches each once and counts one Accepted.
 func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	mempool := wireCanonicalMempoolForP2PTest(t, h)
 	f := newDAIngressFixture(t, h)
 	p := daRelayTestPeer(h, "127.0.0.1:19111")
-	var producerCalls atomic.Int32
-	inner := h.service.cfg.TxMetadataFunc
-	h.service.cfg.TxMetadataFunc = func(b []byte) (node.RelayTxMetadata, error) { producerCalls.Add(1); return inner(b) }
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19119")
 	defer closeProbe()
 	calls := nowCalls(h)
-	daID := daRelayTestID(0x10)
+	daID, counters := daRelayTestID(0x10), mempool.AdmissionCounts()
 	for label, raw := range map[string][]byte{"commit": f.commit(daID, 2), "chunk": f.chunk(daID, 0, []byte("da-exit"))} {
 		txid := mustTxID(t, raw)
 		must(t, p.handleTx(raw), "handleTx("+label+")")
-		_, pooled := h.service.cfg.TxPool.Get(txid)
-		require(t, !h.service.txSeen.Has(txid) && !pooled && producerCalls.Load() == 0, "remote DA %s reached a standard authority: seen=%v pooled=%v producer=%d", label, h.service.txSeen.Has(txid), pooled, producerCalls.Load())
+		require(t, !h.service.txSeen.Has(txid) && !mempool.Contains(txid) && mempool.AdmissionCounts() == counters, "remote DA %s reached a standard authority: seen=%v pooled=%v counters=%+v (before %+v)", label, h.service.txSeen.Has(txid), mempool.Contains(txid), mempool.AdmissionCounts(), counters)
 		assertNoRelayFrame(t, frames, "remote DA "+label)
 		f.requireRetained(raw, label)
 	}
 	require(t, calls.Load() == 2, "scheduler entries after two retained members=%d, want 2", calls.Load())
-	standard := distinctTxBytes(t, 9411)
+	standard, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9411)
 	must(t, p.handleTx(standard), "handleTx(standard)")
-	txid, frame := mustTxID(t, standard), <-frames
-	require(t, h.service.txSeen.Has(txid) && h.service.cfg.TxPool.Has(txid) && producerCalls.Load() == 1 && frame.Command == messageInv && calls.Load() == 2, "standard path seen=%v pooled=%v producer=%d command=%q scheduler entries=%d, want the DA assertions non-vacuous", h.service.txSeen.Has(txid), h.service.cfg.TxPool.Has(txid), producerCalls.Load(), frame.Command, calls.Load())
+	frame := <-frames
+	counters.Accepted++
+	require(t, h.service.txSeen.Has(txid) && mempool.Contains(txid) && frame.Command == messageInv && calls.Load() == 2 && mempool.AdmissionCounts() == counters, "standard path seen=%v pooled=%v command=%q scheduler entries=%d counters=%+v (want %+v), want the DA assertions non-vacuous", h.service.txSeen.Has(txid), mempool.Contains(txid), frame.Command, calls.Load(), mempool.AdmissionCounts(), counters)
 }
 
-// TestRemoteDAResultEffects executes every result row of the remote DA arm on real
-// signed bytes through handleTx: the complete peer tuple, the scheduler-entry
-// count and the retained image for each.
+// TestRemoteDAResultEffects executes every result row of the remote DA arm on real signed
+// bytes through handleTx: the complete peer tuple, scheduler-entry count and retained image.
 func TestRemoteDAResultEffects(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
@@ -491,6 +481,8 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 	conflicting := mustParseP2PTx(t, f.tx(daTxSpec{kind: 0x01, daID: daRelayTestID(0x51), chunkCount: 2}))
 	conflicting.Inputs = []consensus.TxInput{{PrevTxid: conflictOp.Txid, PrevVout: conflictOp.Vout}} // rebuilt on the standard claim's exact input
 	standardExit, _, _ := signedCanonicalP2PTxForHarness(t, h, 9512)
+	corrupt := mustParseP2PTx(t, commit) // one flipped signature byte: the same txid, a rejected signature
+	corrupt.Witness[0].Signature[0] ^= 0xff
 	counters := mempool.AdmissionCounts()
 	rows := map[string]struct {
 		peer *peer
@@ -504,7 +496,7 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 		"REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED": {stranger, commit},
 		"REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED":  {stranger, chunk},
 		"REMOTE_SAME_TXID_NONEXACT_VALID":        {p, resignDATx(t, f, mustParseP2PTx(t, commit))},
-		"REMOTE_SAME_TXID_NONEXACT_INVALID":      {p, corruptSignature(t, commit)},
+		"REMOTE_SAME_TXID_NONEXACT_INVALID":      {p, mustMarshalPeerRuntimeTx(t, corrupt)},
 		"REMOTE_OWNER_CONFLICT":                  {p, resignDATx(t, f, conflicting)},
 		"REMOTE_POLICY_REJECT":                   {p, f.tx(daTxSpec{kind: 0x01, daID: daRelayTestID(0x52), chunkCount: 2, fee: 7})},
 		"REMOTE_REPLAY_EVIDENCE_ABSENT":          {p, f.commit(daRelayTestID(0x53), 2)},
@@ -668,6 +660,11 @@ func TestRemoteDAPeerQualityPolicy(t *testing.T) {
 	expect("h1728 completes the next interval", p, 40, 1728)
 	p.qualityPreferred(1500)
 	expect("a lower height never rewinds", p, 40, 1728)
+	for _, height := range []uint64{39744, 9440064, 618475293504} { // 266 / 65546 / 4294967306 intervals: each narrows below 50 before the bound
+		p.qualityScore, p.qualityHeight = 38, 1440
+		p.qualityPreferred(height)
+		expect(fmt.Sprintf("h%d saturates at 50 after bounding in uint64", height), p, 50, height)
+	}
 	p.qualityScore, p.qualityHeight = 38, 1440
 	p.applyCompetingCommitScore(1728)
 	expect("normalization precedes the subtraction on an interval boundary", p, 38, 1728)
@@ -681,7 +678,7 @@ func TestRemoteDAPeerQualityPolicy(t *testing.T) {
 	expect("a saturated score stays zero", p, 0, 1440)
 	p.qualityScore, p.qualityHeight = 0, 1440
 	require(t, p.qualityPreferred(^uint64(0)), "a normalized score of 50 must keep the preference")
-	expect("a near-maximum height saturates at 50 without narrowing", p, 50, 1440+(^uint64(0)-1440)/144*144)
+	expect("a near-maximum height saturates at 50 without narrowing", p, 50, 18446744073709551600)
 	p.qualityScore = 39
 	require(t, !p.qualityPreferred(^uint64(0)), "score 39 must lose the preference")
 	p.qualityScore = 40
@@ -699,17 +696,24 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 	rivals := []*peer{addDAPrefetchTestPeer(h.service, "127.0.0.1:19111", nil), addDAPrefetchTestPeer(h.service, "127.0.0.1:19112", nil)}
 	const events = 8
 	var wg sync.WaitGroup
+	failures := make(chan error, len(rivals)*events) // asserted on the test goroutine: FailNow is not for workers
 	for _, rival := range rivals {
 		wg.Add(1)
 		go func(rival *peer) {
 			defer wg.Done()
 			for i := 0; i < events; i++ {
-				must(t, rival.handleTx(competitor), "competing commit")
+				if err := rival.handleTx(competitor); err != nil {
+					failures <- err
+				}
 				h.service.daPrefetchPeers(rival.addr())
 			}
 		}(rival)
 	}
 	wg.Wait()
+	close(failures)
+	for err := range failures {
+		must(t, err, "competing commit")
+	}
 	h.service.unregisterPeer(rivals[1])
 	for i, rival := range rivals {
 		score, anchor := peerQuality(rival)
@@ -742,10 +746,8 @@ func calleeOf(call *ast.CallExpr) string {
 	return ""
 }
 
-// TestRemoteDACleanupCallerEffects: the accepted-block and AnnounceBlock TTL ticks
-// (TestAnnounceBlockAdvancesDARelayTTL, run as a subtest) and, as source, the
-// AnnounceBlock error precedence: the broadcast error is checked first and the TTL
-// error is what the last statement returns.
+// TestRemoteDACleanupCallerEffects: the accepted-block and AnnounceBlock TTL ticks (a subtest)
+// and, as source, AnnounceBlock's error precedence: broadcast error first, `return ttlErr` last.
 func TestRemoteDACleanupCallerEffects(t *testing.T) {
 	t.Run("ticks", TestAnnounceBlockAdvancesDARelayTTL)
 	announce := p2pFunction(t, "service.go", "AnnounceBlock")
@@ -764,14 +766,22 @@ func TestRemoteDACleanupCallerEffects(t *testing.T) {
 	require(t, slices.Equal(order, []string{"broadcastErr"}) && ok && len(final.Results) == 1 && types.ExprString(final.Results[0]) == "ttlErr", "AnnounceBlock error checks=%v last statement %T; want the broadcast error checked first and `return ttlErr` last", order, announce.Body.List[len(announce.Body.List)-1])
 }
 
-// TestRemoteDAResultDomainClosure: the structural half of UNREACHABLE_RESULT (two
-// guarded effect arms, bare nil return after a plain release, no candidate
-// validation / normalization / standard authority on the DA arm, DA dispatch before
-// the seen-set, no retired writer in production, handleConn's initial literal).
+// TestRemoteDAResultDomainClosure: the structural half of UNREACHABLE_RESULT (two guarded effect
+// arms, bare nil after a plain release, identity before latch before key, no candidate validation
+// or standard authority on the DA arm, DA before the standard arm, no retired writer, handleConn's literal).
 func TestRemoteDAResultDomainClosure(t *testing.T) {
 	handler := p2pFunction(t, "da_relay_ingest.go", "handleRelayDATx")
-	var unlockAt, switchAt = -1, -1
+	unlockAt, switchAt, identityAt, terminalAt := -1, -1, -1, -1
 	for i, stmt := range handler.Body.List {
+		ast.Inspect(stmt, func(node ast.Node) bool {
+			switch call, ok := node.(*ast.CallExpr); {
+			case ok && calleeOf(call) == "remoteDAProvenance":
+				identityAt = i
+			case ok && calleeOf(call) == "TerminalFaulted":
+				terminalAt = i
+			}
+			return true
+		})
 		switch typed := stmt.(type) {
 		case *ast.ExprStmt:
 			if call, ok := typed.X.(*ast.CallExpr); ok && calleeOf(call) == "unlock" {
@@ -802,6 +812,7 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 	}
 	last, ok := handler.Body.List[len(handler.Body.List)-1].(*ast.ReturnStmt)
 	require(t, unlockAt >= 0 && switchAt > unlockAt && ok && len(last.Results) == 1 && types.ExprString(last.Results[0]) == "nil" && switchAt == len(handler.Body.List)-2, "unlock at %d, switch at %d of %d statements; the switch must follow the release and be followed only by `return nil`", unlockAt, switchAt, len(handler.Body.List))
+	require(t, identityAt >= 0 && terminalAt > identityAt && unlockAt > terminalAt, "identity at %d, terminal latch at %d, unlock at %d; IDENTITY_REFUSAL precedes ALREADY_TERMINAL precedes the quota key", identityAt, terminalAt, unlockAt)
 	forbidden := []string{"validateRelayDATxForAdmission", "ValidateDARelayChunk", "peerAddressKey", "normalizeNetAddr", "normalizeReconnectAddr", "ensureRelayTxAdmitted", "broadcastInventory", "Has", "Add", "Put", "UpsertPeer", "setLastError"}
 	for _, name := range []string{"handleRelayDATx", "remoteDAProvenance", "penalizeDAAdmissionError", "applyCompetingCommitScore", "qualityPreferred", "normalizeQualityLocked"} {
 		ast.Inspect(p2pFunction(t, "da_relay_ingest.go", name).Body, func(node ast.Node) bool {
@@ -811,18 +822,33 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 			return true
 		})
 	}
-	dispatchAt, seenAt := -1, -1
+	dispatchAt, standardAt, hasAt, addAt := -1, -1, -1, -1
 	for i, stmt := range p2pFunction(t, "handlers_tx.go", "handleTx").Body.List {
 		ast.Inspect(stmt, func(node ast.Node) bool {
-			if ident, ok := node.(*ast.Ident); ok && ident.Name == "handleRelayDATx" {
+			ident, ok := node.(*ast.Ident)
+			switch {
+			case ok && ident.Name == "handleRelayDATx":
 				dispatchAt = i
-			} else if ok && ident.Name == "txSeen" && seenAt < 0 {
-				seenAt = i
+			case ok && ident.Name == "handleStandardTx":
+				standardAt = i
+			case ok && ident.Name == "txSeen":
+				t.Fatalf("handleTx names txSeen at statement %d; the seen-set belongs to handleStandardTx", i)
 			}
 			return true
 		})
 	}
-	require(t, dispatchAt >= 0 && seenAt >= 0 && dispatchAt < seenAt, "handleTx dispatches DA at statement %d and consults txSeen at %d; the dispatch must come first", dispatchAt, seenAt)
+	require(t, dispatchAt >= 0 && standardAt > dispatchAt, "handleTx dispatches DA at statement %d and the standard arm at %d; the dispatch must come first", dispatchAt, standardAt)
+	for i, stmt := range p2pFunction(t, "handlers_tx.go", "handleStandardTx").Body.List {
+		ast.Inspect(stmt, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok && calleeOf(call) == "Has" && hasAt < 0 {
+				hasAt = i
+			} else if ok && calleeOf(call) == "Add" && addAt < 0 {
+				addAt = i
+			}
+			return true
+		})
+	}
+	require(t, hasAt >= 0 && addAt > hasAt, "handleStandardTx reads txSeen.Has at %d and Add at %d; Has must come first", hasAt, addAt)
 	entries, err := os.ReadDir(".")
 	must(t, err, "ReadDir")
 	legacy := []string{"StageCommit", "StageChunk", "stageRelayDATx", "stageRelayDACommitTx", "stageRelayDAChunkTx", "finishDAPrefetch", "scheduleDAPrefetchSnapshot", "daRelayCommitPayloadCommitment", "handleSeenRelayTxVariant", "validateAndMarkRelayTxSeen"}

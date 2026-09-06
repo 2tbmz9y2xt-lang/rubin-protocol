@@ -120,13 +120,11 @@ type peer struct {
 
 	stateMu sync.Mutex
 	state   node.PeerState
-	// qualityScore and qualityHeight are COMPETING_SCORE_V1's connection-local
-	// peer-quality state (da_relay_ingest.go), guarded by stateMu like state:
-	// the score, and the local tip height at which its last whole normalization
-	// interval was consumed. handleConn initializes them once per connection
-	// before registration; they are never copied into node.PeerState, so the
-	// peer manager, bumpBan, setLastError and sendcmpct never reset them, and
-	// every alias of one peer pointer shares them. Zero is a valid score.
+	// qualityScore and qualityHeight are COMPETING_SCORE_V1's connection-local state
+	// (da_relay_ingest.go) under stateMu: the score and the local tip height of its last
+	// consumed normalization interval. handleConn initializes them once before
+	// registration; never copied into node.PeerState, so the peer manager, bumpBan,
+	// setLastError and sendcmpct never reset them; zero is a valid score.
 	qualityScore  uint8
 	qualityHeight uint64
 

@@ -102,7 +102,7 @@ func newCanonicalDAOwnerPeerCapFixture(t *testing.T) *canonicalDAOwnerFixture {
 
 // newCommitOnlyStateBFixture retains ONE staged-commit record whose only member
 // is the commit — a declared chunk count with zero chunks retained, the real
-// state right after StageCommit. It is the one owner-ready shape the two-record
+// state right after a commit-only AdmitDA. It is the one owner-ready shape the two-record
 // fixture never renders, so the positive pair and its removal are covered here.
 func newCommitOnlyStateBFixture(t *testing.T) (*canonicalDAOwnerFixture, [32]byte) {
 	t.Helper()

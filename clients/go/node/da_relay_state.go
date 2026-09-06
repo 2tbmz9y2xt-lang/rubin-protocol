@@ -145,20 +145,8 @@ type DARelayPrefetchPlan struct {
 	Indexes []uint16
 }
 
-// DARelayCommit is the commit descriptor of the retired legacy staging writer.
-// No production path constructs or reads it; retained commits are admitted by
-// AdmitDA from their exact canonical bytes.
-type DARelayCommit struct {
-	DAID              [32]byte
-	PayloadCommitment [32]byte
-	ChunkCount        uint16
-	WireBytes         uint64
-	TxBytes           []byte
-}
-
-// DARelayChunk is the unretained chunk descriptor ValidateDARelayChunk checks
-// before local relay admission; retained members are admitted by AdmitDA from
-// their exact canonical bytes instead.
+// DARelayChunk is the unretained chunk descriptor ValidateDARelayChunk checks before
+// local relay admission; retained members are admitted by AdmitDA from exact bytes.
 type DARelayChunk struct {
 	DAID        [32]byte
 	ChunkHash   [32]byte
@@ -317,12 +305,9 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // prepared image (RUBIN_MEMPOOL_POLICY.md Section 6.4.1).
 //
 // Lock order is peerQuotaLock (when a P2P caller holds one) then this guard then
-// DARelayState.mu, and nothing under this guard re-enters it: sync.RWMutex is
-// not reentrant, so each entry takes it exactly once — the prefetch wrappers in
-// their own body, the owner-aware cleanups inside commitOwnerReadyRemoval, and
-// admission through the guard AdmitDA's hold owns — and the canonical
-// transition reaches prepare/publish with the WRITE guard already held and so
-// never calls one.
+// DARelayState.mu. sync.RWMutex is not reentrant, so nothing under this guard
+// re-enters it and each entry takes it exactly once; the canonical transition
+// reaches prepare/publish with the WRITE guard already held and never calls one.
 //
 // An UNBOUND relay — no mempool, or a mempool with no chainstate, which is the
 // test-only construction — has no admission guard to take and keeps its existing
@@ -367,20 +352,16 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 	return nil
 }
 
-// AdvanceOrphanTTL advances the retained incomplete-set TTL once through the
-// owner-aware tick: every owner-ready record with ttl above one decrements once
-// and mints one revision, ttl one expires whole with its locators, accounting,
-// prefetch reservation and owner claims. commitOwnerReadyRemoval takes the
-// admission read fence itself, so this wrapper takes none; a nil receiver is
-// not promised and stays the caller's check.
+// AdvanceOrphanTTL advances the retained incomplete-set TTL once through the owner-aware
+// tick (ttl above one decrements and mints one revision; ttl one expires whole with its
+// claims). commitOwnerReadyRemoval owns the fence; a nil receiver is not promised.
 func (s *DARelayState) AdvanceOrphanTTL() error {
 	return s.advanceOwnerReadyTTL()
 }
 
-// ReleasePeerQuotaKey releases the incomplete retained members whose finalized
-// PEER provenance carries key, through the owner-aware selector, inside the
-// caller's per-key peer quota lock. A nil receiver returns nil; every other
-// receiver forwards without taking the fence commitOwnerReadyRemoval owns.
+// ReleasePeerQuotaKey releases the incomplete retained members whose finalized PEER
+// provenance carries key, through the owner-aware selector, inside the caller's per-key
+// quota lock. A nil receiver returns nil; commitOwnerReadyRemoval owns the fence.
 func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
 	if s == nil {
 		return nil

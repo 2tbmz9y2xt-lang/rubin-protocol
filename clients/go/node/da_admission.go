@@ -187,9 +187,9 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 		// after the owner observation, so a remote consumer penalizes only a
 		// candidate whose own bytes contradict themselves, never one refused for a
 		// local-authority reason; parseDAAdmission's same-text sibling stays cause-free.
-		err := txAdmitRejected("DA chunk payload hash mismatch")
-		err.cause = ErrDARelayChunkHashMismatch
-		return nil, selectRelayDisposition(err, RelayAdmissionStableTerminalReject)
+		rejected := txAdmitRejected("DA chunk payload hash mismatch")
+		rejected.cause = ErrDARelayChunkHashMismatch
+		return nil, selectRelayDisposition(rejected, RelayAdmissionStableTerminalReject)
 	}
 	checked, _, err := h.mempool.checkParsedTransactionWithSnapshot(owned, tx, txid, wtxid, h.snapshot, h.policy)
 	if err != nil {

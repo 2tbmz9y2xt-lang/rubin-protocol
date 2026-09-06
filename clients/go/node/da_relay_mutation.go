@@ -1239,8 +1239,8 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // record terminal for the WHOLE image on BOTH selectors until it leaves. A legacy-staged record is
 // the reachable instance — zero revision, no locator rows, and a chunk carrying nonzero wireBytes
 // with a nil member identity (the last two refused by checkOwnerReadyChunk) — so a relay still
-// holding legacy bytes can neither tick nor release. RUB-678 owns that ordering before it wires
-// either selector beside the still-exported legacy writers.
+// holding legacy bytes can neither tick nor release. Both selectors are live through the
+// exported wrappers, and the legacy staging bodies are reachable from unit tests only.
 //
 // The per-candidate shape gate is checkDANonReplayShape, the predicate
 // validateCanonicalDARetainedSnapshot applies to every retained record — not the weaker
@@ -1257,12 +1257,8 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // Cost, under BOTH the admission fence and DARelayState.mu, per peer release and per TTL tick.
 // The preflight walks every retained record's bytes once through consensus.ParseTx, plus one
 // SHA3-256 and one payload equality per incomplete chunk and one re-scan of each commit's outputs,
-// on top of the shallow image clone. Selection is record-local: a pure TTL decrement copies the
-// record value only and touches no retained bytes, locators or accounting; a partial PEER
-// removal clones only the record's chunks container and compares each surviving chunk by
-// byte-equality against the shared backing it keeps; a whole removal projects the record's own
-// rows and counters. No arm walks s.locators, so a tick is O(records + retained members). No
-// cache, memo or skip-if-unchanged shortcut guards the preflight, deliberately.
+// on top of the shallow image clone. Selection is record-local: no arm walks s.locators, so a
+// tick is O(records + retained members). No cache, memo or skip-if-unchanged shortcut guards it.
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	candidates := s.sortedRetainedDAIDsLocked()
 	for _, daID := range candidates {
@@ -1394,11 +1390,8 @@ func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (match
 	return matchCommit, matchChunks, memberCount, nonPeerChunk
 }
 
-// tickOwnerReadyTTLRecordLocked expires a ttl-one record whole and otherwise decrements
-// the record VALUE in place on the clone: one copy of the struct header, the same chunks
-// container, the same member pointers and byte backing, one checked revision mint, and a
-// direct write of that sets entry and the records high-water. No locator, accounting or
-// prefetch row moves, so a surviving decrement never touches retained bytes.
+// tickOwnerReadyTTLRecordLocked expires a ttl-one record whole; otherwise it copies the record
+// VALUE only (same chunks container and backing), decrements once and mints one checked revision.
 func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
 	record := s.sets[daID]
 	if record.ttlBlocksRemaining == 1 {
@@ -1433,9 +1426,8 @@ func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 // removeOwnerReadyWholeRecordLocked removes one whole owner-ready incomplete record — every
 // member with its locator, accounting contribution, prefetch reservation and shared-owner
 // claim — and returns each retired member as a bound-owner victim in locator order. It keeps
-// the baseline guard, verifies each of the record's own locator rows by direct lookup, projects
-// the record's counters with the lifted removal caps and installs a placement that retires
-// exactly those rows and installs none; it mints no revision and walks no other record's rows.
+// the baseline guard, retires exactly the record's own rows through the record-local projector,
+// installs none, mints no revision and walks no other record's rows.
 //
 // checkDANonReplayVictims cannot pair this arm's batch: it walks chunks alone, and here the whole
 // record departs COMMIT FIRST. Nothing else pairs it either — the batch and the departure set are
@@ -1469,11 +1461,9 @@ func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord
 	return victims, nil
 }
 
-// projectOwnerReadyRetirementLocked is the record-local half both removal arms share: it
-// verifies each row to retire against the live index by DIRECT lookup — never a walk of
-// s.locators — and projects the record's accounting with the lifted removal caps. The
-// placement it returns retires exactly those rows and installs none; the caller adds the
-// survivor record when one remains.
+// projectOwnerReadyRetirementLocked verifies each row to retire by DIRECT lookup and projects the
+// record's counters under the lifted caps; the global locator bijection is proven once per cleanup
+// or transition by the preflight (canonicalDARetainedImageClosed), never per arm.
 func (s *DARelayState) projectOwnerReadyRetirementLocked(image daRelayRecordImage, live daRelaySetRecord, retire []daRelayLocatorRow) (daRelayRecordPlacement, error) {
 	for _, row := range retire {
 		if s.locators[row.txid] != row.locator {
@@ -1488,12 +1478,9 @@ func (s *DARelayState) projectOwnerReadyRetirementLocked(image daRelayRecordImag
 	return placement, nil
 }
 
-// dropOwnerReadyChunksLocked keeps one owner-ready record and drops the named chunks,
-// releasing their locators, accounting and claims and minting one fresh revision. The
-// survivor is the record VALUE with a cloned chunks container minus the dropped indexes:
-// the commit, every unnamed chunk, their member pointers, inputs, raw bytes and payload
-// backing stay shared with the live record and immutable, the live container itself is
-// never edited, and the set's prefetch reservation is preserved. The record state never changes.
+// dropOwnerReadyChunksLocked drops the named chunks from a record VALUE whose chunks container
+// alone is cloned: every kept member's backing stays shared, the live container is never edited,
+// the set's prefetch reservation is preserved and one fresh revision is minted.
 //
 // checkDANonReplayVictims — the admission path's own pairing — proves the batch is exactly the
 // departed chunks, in sortedRetainedDAChunkIndexes order, txid/token/inputs equal, so no chunk can
@@ -1549,7 +1536,9 @@ func checkOwnerReadyRemovalBaseline(live, next daRelaySetRecord) error {
 // every surviving chunk byte-identical, lets ttlBlocksRemaining only decrease and never to
 // zero, and leaves revision to the projector's remint. replaceableChunks is the one live field it
 // does not pin, unlike its admission-side twin samePreservedRecordFields: the candidate gate
-// refuses a non-nil one and cloneOwnerReady carries that nil into the survivor.
+// refuses a non-nil one before either selector runs, and the survivor is a value copy of that
+// same record. Under shared backing the check is structural only (a value copy compares equal
+// to itself): a fail-closed backstop, not an oracle of the removal arms' copy rules.
 func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
 	type fixed struct {
 		daID                                  [32]byte
@@ -1574,7 +1563,8 @@ func checkOwnerReadyRemovalSurvivor(live, next daRelaySetRecord) error {
 
 // checkOwnerReadySurvivingChunks proves every chunk the survivor keeps is byte-identical to
 // the live chunk at that index, so a removal drops members but never rewrites a survivor.
-// The walk is map-ordered but yields one error identity, so it is order-immune.
+// The walk is map-ordered but yields one error identity, so it is order-immune. Like its
+// caller it is structural only under shared backing: a fail-closed backstop, not an oracle.
 func checkOwnerReadySurvivingChunks(live, next daRelaySetRecord) error {
 	for index, chunk := range next.chunks {
 		liveChunk, present := live.chunks[index]

@@ -476,8 +476,8 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 	f.requireAbsent(chunk, "cleanup raced replacement")
 }
 
-// TestHandleConnInitializesPeerQualityPerSession: a peer handleConn constructs starts
-// at 50 anchored at the local tip, and a reconnect from the same address starts over.
+// TestHandleConnInitializesPeerQualityPerSession: a peer handleConn constructs starts at 50 anchored
+// at the local tip (1, while the remote advertises 9999), and a reconnect from the same address starts over.
 func TestHandleConnInitializesPeerQualityPerSession(t *testing.T) {
 	h := newTestHarness(t, 2, "127.0.0.1:0", nil)
 	h.service.ctx = context.Background()
@@ -488,7 +488,7 @@ func TestHandleConnInitializesPeerQualityPerSession(t *testing.T) {
 		local, remote := net.Pipe()
 		done := make(chan struct{})
 		go func() { defer close(done); _ = h.service.handleConn(local, addr) }()
-		must(t, completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 1)), "remote handshake")
+		must(t, completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 9999)), "remote handshake")
 		go func() { _, _ = io.Copy(io.Discard, remote) }()
 		var current *peer
 		waitFor(t, 5*time.Second, func() bool {
@@ -501,7 +501,7 @@ func TestHandleConnInitializesPeerQualityPerSession(t *testing.T) {
 	}
 	first, remote, done := connect()
 	score, anchor := peerQuality(first)
-	require(t, score == 50 && anchor == 1, "session score=%d anchor=%d, want 50 at the local tip 1", score, anchor)
+	require(t, score == 50 && anchor == 1, "session score=%d anchor=%d, want 50 at the local tip 1, not the advertised 9999", score, anchor)
 	first.stateMu.Lock()
 	first.qualityScore = 7
 	first.stateMu.Unlock()
