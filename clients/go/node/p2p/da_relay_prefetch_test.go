@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"reflect"
 	"testing"
 	"time"
@@ -160,6 +161,72 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	score, anchor = peerQuality(lb)
 	require(t, score == 40 && anchor == 1728, "288 blocks later: score=%d anchor=%d, want 40 at 1728", score, anchor)
 	expectPrefetchRequests(t, later, wire, "restored trigger", restored, 15, lb, la, lc)
+}
+
+// TestDAPrefetchPreferredConnectionOwnsQuotaKey pins the representative binding: sessions
+// a and b share host 127.0.0.5 (one quota key), c is another host. After six real
+// conflicts take b to 38, the preference helper called for a replaces the seeded wrong
+// representative b with the exact a pointer (the seeding makes the assertion independent
+// of map order), and a fresh set from a is requested through a, never b, while c keeps
+// its ordinary round-robin share. Low-score, alias, missing/disabled/empty trigger and
+// absent/empty key rows return "" without touching the map.
+func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
+	h := highTipHarness(t, 1440)
+	h.service.cfg.EnableCompactReceive = true
+	f := newDAIngressFixture(t, h)
+	a := addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
+	c := addDAPrefetchTestPeer(h.service, "127.0.0.4:1", nil)
+	blank := addDAPrefetchTestPeer(h.service, "blank", nil)
+	blank.state.Addr = "" // an accepting session whose address yields no quota key
+	disabled := testPeerForService(h.service, "peer-disabled", 0)
+	disabled.state.Addr = "peer-disabled"
+	h.service.peersMu.Lock()
+	h.service.peers["peer-disabled"], h.service.peers["alias-of-a"] = disabled, a
+	h.service.peersMu.Unlock()
+	daID := daRelayTestID(0xc0)
+	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
+	competitor := f.commit(daID, 2)
+	for i := 0; i < 6; i++ {
+		must(t, b.handleTx(competitor), "competing commit")
+	}
+	score, anchor := peerQuality(b)
+	require(t, score == 38 && anchor == 1440, "six conflicts: score=%d anchor=%d, want 38 at 1440", score, anchor)
+	shared, other := "127.0.0.5", "127.0.0.4"
+	// prefer calls the production helper under peersMu.RLock on a seeded map and pins the
+	// returned key plus the exact pointer per key (maps.Equal compares pointers with ==).
+	prefer := func(label, trigger string, seed, want map[string]*peer, wantKey string) {
+		t.Helper()
+		h.service.peersMu.RLock()
+		key := h.service.preferredDAPrefetchPeerKeyLocked(trigger, 1440, seed)
+		h.service.peersMu.RUnlock()
+		require(t, key == wantKey && maps.Equal(seed, want), "%s: key=%q shared=%s other=%s len=%d, want %q shared=%s other=%s len=%d", label, key, peerAddrOrNil(seed[shared]), peerAddrOrNil(seed[other]), len(seed), wantKey, peerAddrOrNil(want[shared]), peerAddrOrNil(want[other]), len(want))
+	}
+	prefer("the preferred session replaces the forced wrong representative", a.addr(), map[string]*peer{shared: b, other: c}, map[string]*peer{shared: a, other: c}, shared)
+	prefer("an alias of the preferred session binds the same pointer", "alias-of-a", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: a, other: c}, shared)
+	prefer("a low-score trigger neither replaces nor leads", b.addr(), map[string]*peer{shared: a, other: c}, map[string]*peer{shared: a, other: c}, "")
+	prefer("a missing trigger", "peer-x", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
+	prefer("a compact-disabled trigger", "peer-disabled", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
+	prefer("an empty trigger", "", map[string]*peer{shared: b, other: c}, map[string]*peer{shared: b, other: c}, "")
+	prefer("a trigger whose key is absent from the map", a.addr(), map[string]*peer{other: c}, map[string]*peer{other: c}, "")
+	prefer("a trigger with an empty key", "blank", map[string]*peer{"": b, shared: b, other: c}, map[string]*peer{"": b, shared: b, other: c}, "")
+	peers, keys := h.service.daPrefetchPeers(b.addr())
+	require(t, reflect.DeepEqual(keys, []string{other, shared}) && len(peers) == 2, "low-score b stays an ordinary fallback: keys=%v peers=%d", keys, len(peers))
+	peers, keys = h.service.daPrefetchPeers("alias-of-a")
+	require(t, reflect.DeepEqual(keys, []string{shared, other}) && len(peers) == 2 && peers[shared] == a && peers[other] == c, "alias of a: keys=%v shared=%s, want one key per host led by %s bound to %s", keys, peerAddrOrNil(peers[shared]), shared, a.addr())
+	// The real path: a's fresh set is planned round-robin over the two host keys within the
+	// per-key budget (7 chunks each) and the shared key's frames reach a, none reach b.
+	fresh := daRelayTestID(0xc1)
+	must(t, a.handleTx(f.commit(fresh, 14)), "a fresh set from the preferred session")
+	expectPrefetchRequests(t, h, map[*peer][]byte{}, "preferred session", fresh, 14, a, c)
+	require(t, len(b.conn.(*scriptedConn).Bytes()) == 0, "b received %d bytes, want no getdachunk frame on the demoted session", len(b.conn.(*scriptedConn).Bytes()))
+}
+
+func peerAddrOrNil(current *peer) string {
+	if current == nil {
+		return "<nil>"
+	}
+	return current.addr()
 }
 
 // expectPrefetchRequests pins the round-robin split of count missing chunks (within the

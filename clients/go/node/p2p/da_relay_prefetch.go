@@ -24,9 +24,11 @@ func (s *Service) canScheduleDAPrefetch() bool {
 }
 
 // daPrefetchPeers lists every eligible prefetch peer by quota key and moves the
-// trigger peer's key to the front when it still holds its preference. The local
-// tip height the preference reads is captured once, only when a trigger is named
-// and before peersMu, so no chain lock is taken under a peer lock.
+// trigger peer's key to the front when it still holds its preference, binding
+// that key's representative in the returned map to the trigger connection so
+// the preferred plan is sent through the session whose score earned it. The
+// local tip height the preference reads is captured once, only when a trigger
+// is named and before peersMu, so no chain lock is taken under a peer lock.
 func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) {
 	var height uint64
 	if peerAddr != "" {
@@ -38,20 +40,29 @@ func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) 
 	if peerAddr == "" {
 		return peers, keys
 	}
-	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height))
+	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height, peers))
 }
 
 // preferredDAPrefetchPeerKeyLocked returns the trigger peer's quota key when the
 // peer is present, accepts prefetch and, after drifting its quality score for
 // height, still meets the preference minimum; otherwise "". A low score only
 // removes the front-of-list preference: the key stays eligible and the peer
-// remains usable through the ordinary fallback order.
-func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint64) string {
+// remains usable through the ordinary fallback order. For a returned key the
+// only map effect is peersByKey[key] = the trigger pointer, so the ephemeral
+// representative of the preferred key is that exact session rather than the
+// last same-host session allDAPrefetchPeersLocked visited; a key absent from
+// peersByKey is never inserted and every other representative stays as chosen.
+func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint64, peersByKey map[string]*peer) string {
 	current := s.peers[peerAddr]
 	if !acceptsDAPrefetch(current) || !current.qualityPreferred(height) {
 		return ""
 	}
-	return peerQuotaKey(current.addr())
+	key := peerQuotaKey(current.addr())
+	if _, ok := peersByKey[key]; key == "" || !ok {
+		return ""
+	}
+	peersByKey[key] = current
+	return key
 }
 
 func (s *Service) allDAPrefetchPeersLocked() (map[string]*peer, []string) {
