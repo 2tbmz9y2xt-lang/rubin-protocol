@@ -31,11 +31,11 @@ func terminalCanonicalDAError(err error) error {
 // preparedCanonicalDAImage is the complete D1 image, projected under the
 // transition's admission write fence and published later by assignment only.
 //
-// The live image comes from buildCanonicalDAOwnerCandidates, which deep-copies every
-// survivor (cloneOwnerReady), so it shares no retained bytes. Only the LEGACY helper
-// prepareCanonicalDAImage below (zero production callers, unit tests) clones through the
-// cloneForAtomicBatchLocked idiom and SHARES each survivor's immutable retained TxBytes and
-// payload bytes: it only deletes map entries, so that image is O(records), not O(bytes).
+// Both the live builder buildCanonicalDAOwnerCandidates and the LEGACY helper
+// prepareCanonicalDAImage below (zero production callers, unit tests) start from the
+// cloneForAtomicBatchLocked idiom. The live builder then replaces every survivor with
+// cloneOwnerReady, so its image shares no retained bytes; only the legacy helper keeps the idiom's
+// SHARED immutable TxBytes and payload bytes: it only deletes map entries, O(records), not O(bytes).
 type preparedCanonicalDAImage struct {
 	relay     *DARelayState
 	projected *DARelayState
@@ -303,7 +303,7 @@ type preparedCanonicalDAOwnerCandidates struct {
 // the input and D1 coexist, where the live image shares that backing — and that copy is the
 // isolation; each removal is record-local, the inclusion scan O(records + included).
 // Live site: prepareCanonicalFenceImage calls it exactly once per transition on a shallow private
-// image captured under DARelayState.mu and released first; AdmitDA is the only retained writer.
+// image captured under DARelayState.mu and released first; AdmitDA is the only retained-member writer.
 func prepareCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,

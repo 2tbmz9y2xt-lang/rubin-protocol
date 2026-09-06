@@ -5014,7 +5014,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	}
 	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the
 	// global locator traversal, the record deep clone or the Live projector, nor range locators.
-	// Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete): the pure-TTL tick arm has none and reaches
+	// Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete, any other call taking the map as argument or receiver): the pure-TTL tick arm has none and reaches
 	// `s` only via s.sets, s.records, the whole-record arm and scanned same-file direct helpers; retirement arms may only delete.
 	isIdent := func(expr ast.Expr, name string) bool { ident, ok := expr.(*ast.Ident); return ok && ident.Name == name }
 	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
@@ -5028,6 +5028,9 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		case *ast.CallExpr:
 			if len(node.Args) == 2 && isIdent(node.Fun, "delete") && isLocators(node.Args[0]) {
 				return "delete"
+			}
+			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && isLocators(sel.X) || slices.ContainsFunc(node.Args, isLocators) {
+				return "call " + calleeName(node)
 			}
 		}
 		for _, expr := range lhs {
