@@ -499,6 +499,7 @@ func TestHandleConnInitializesPeerQualityPerSession(t *testing.T) {
 		})
 		return current, remote, done
 	}
+	h.service.cfg.SyncEngine.RecordBestKnownHeight(9999) // before the first session, so BestKnownHeight already differs from the tip
 	first, remote, done := connect()
 	score, anchor := peerQuality(first)
 	require(t, score == 50 && anchor == 1, "session score=%d anchor=%d, want 50 at the local tip 1, not the advertised 9999", score, anchor)
