@@ -437,8 +437,8 @@ func TestStorageAuthorityV1DetachedSuffix(t *testing.T) {
 		{"detached wrong direction", func(d *DetachedSuffixV1) { d.Entries[1].Height = 2 }},
 		{"detached height gap", func(d *DetachedSuffixV1) { d.Entries[0].Height, d.Cursor.Height = 2, 2 }},
 		{"detached duplicate hash", func(d *DetachedSuffixV1) { d.Entries[1].Hash = d.Entries[0].Hash }},
-		{"detached zero length", func(d *DetachedSuffixV1) { d.Entries[0].BlockBytesLen = 0 }},
-		{"detached length overflow", func(d *DetachedSuffixV1) { d.Entries[0].BlockBytesLen = 68_000_126 }},
+		{"detached zero length", func(d *DetachedSuffixV1) { d.Entries[0].BlockBytesLen, d.LogicalBytes = 0, 1 }},
+		{"detached length overflow", func(d *DetachedSuffixV1) { d.Entries[0].BlockBytesLen, d.LogicalBytes = 68_000_126, 68_000_127 }},
 		{"detached sum low", func(d *DetachedSuffixV1) { d.LogicalBytes = 1 }},
 		{"detached sum high", func(d *DetachedSuffixV1) { d.LogicalBytes = 3 }},
 		{"detached cursor height", func(d *DetachedSuffixV1) { d.Cursor.Height++ }},
@@ -518,6 +518,7 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		a.Ordinary.RecordedFailure.FailedBlockHash = hash(a.Ordinary.NewSuffix[1].BlockHash)
 	}), true)
 	bad := []authorityCase{
+		{"D0 C2 disconnect", modelOrdinary(1, 0, 2, 0, 1, 0, 0)},
 		{"D0 C1 selector", modelOrdinary(2, 0, 1, 0, 1, 0, 0)},
 		{"D1441 overflow", modelOrdinary(1, 1441, 0, 2000, 1, 0, 561)},
 		{"C1441 overflow", modelOrdinary(2, 0, 1441, 0, 1, 0, 0)},
@@ -531,8 +532,14 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 			o.Target, o.CapturedSelectedSide.RowCount, o.CapturedSelectedSide.LogicalBytes = o.NewSuffix[1], 3, 3
 		})},
 		{"old duplicate hash", change(modelOrdinary(1, 2, 0, 2, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[1].BlockHash = o.OldSuffix[0].BlockHash })},
-		{"new duplicate hash", change(modelOrdinary(2, 0, 2, 0, 1, 0, 0), func(o *OrdinaryApplyV1) { o.NewSuffix[1].BlockHash = o.NewSuffix[0].BlockHash })},
-		{"cross-list duplicate hash", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.NewSuffix[0].BlockHash = o.OldSuffix[0].BlockHash })},
+		{"new duplicate hash", change(modelOrdinary(2, 0, 2, 0, 1, 0, 0), func(o *OrdinaryApplyV1) {
+			o.NewSuffix[1].BlockHash = o.NewSuffix[0].BlockHash
+			o.Target.BlockHash, o.CapturedSelectedSide.TipHash = o.NewSuffix[1].BlockHash, o.NewSuffix[1].BlockHash
+		})},
+		{"cross-list duplicate hash", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) {
+			o.NewSuffix[0].BlockHash = o.OldSuffix[0].BlockHash
+			o.Cursor = point(o.NewSuffix[0])
+		})},
 		{"inconsistent F", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) {
 			o.NewSuffix[0].Height, o.NewSuffix[1].Height, o.Target.Height, o.CapturedSelectedSide.F, o.CapturedSelectedSide.TipHeight = 2, 3, 3, 1, 3
 			o.Cursor = point(o.NewSuffix[0])
