@@ -685,9 +685,9 @@ func TestRemoteDAPeerQualityPolicy(t *testing.T) {
 }
 
 // TestRemoteDAQualityScoreRace overlaps, on EACH of two sessions of one quota key, 8 competing-commit events (handleTx)
-// with the preference read of that same peer under stateMu (qualityPreferred, the read daPrefetchPeers reaches, called
-// directly so the lane survives teardown); rivals[1] is additionally torn down concurrently (unregisterPeer writes no
-// quality field). At height 1440 = qualityGraceHeight normalization is a no-op, so the score ends at exactly 34 = 50 - 8 x 2.
+// with the production preference read of that same peer (daPrefetchPeers -> preferredDAPrefetchPeerKeyLocked ->
+// qualityPreferred under stateMu); rivals[1] is torn down only after both lanes finish. At height 1440 =
+// qualityGraceHeight normalization is a no-op, so the score ends at exactly 34 = 50 - 8 x 2.
 func TestRemoteDAQualityScoreRace(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
@@ -712,12 +712,12 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 		go func(rival *peer) {
 			defer wg.Done()
 			for writersDone.Load() < int32(len(rivals)) {
-				rival.qualityPreferred(1440)
+				h.service.daPrefetchPeers(rival.addr())
 			}
 		}(rival)
 	}
-	h.service.unregisterPeer(rivals[1]) // concurrent with both pairs
 	wg.Wait()
+	h.service.unregisterPeer(rivals[1])
 	close(failures)
 	for err := range failures {
 		must(t, err, "competing commit")

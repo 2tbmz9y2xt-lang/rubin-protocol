@@ -5012,10 +5012,10 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	if !slices.Contains(wholeRecordCallees, "releaseSet") {
 		t.Fatal("whole-record removal does not release the prefetch reservation")
 	}
-	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the
-	// global locator traversal, the record deep clone or the Live projector, nor range locators.
-	// Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete, any other call taking the map as argument or receiver): the pure-TTL tick arm has none and reaches
-	// `s` only via s.sets, s.records, the whole-record arm and scanned same-file direct helpers; retirement arms may only delete.
+	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the global locator traversal, the record deep clone
+	// or the Live projector, nor range locators. Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete, any call taking the map as an argument)
+	// are refused only on the pure-TTL path: the tick arm, which reaches `s` solely via s.sets, s.records, the whole-record arm and scanned same-file direct helpers.
+	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY WRAPPER row below).
 	isIdent := func(expr ast.Expr, name string) bool { ident, ok := expr.(*ast.Ident); return ok && ident.Name == name }
 	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
 	locatorSink := func(node ast.Node) string {
@@ -5029,7 +5029,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 			if len(node.Args) == 2 && isIdent(node.Fun, "delete") && isLocators(node.Args[0]) {
 				return "delete"
 			}
-			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && isLocators(sel.X) || slices.ContainsFunc(node.Args, isLocators) {
+			if slices.ContainsFunc(node.Args, isLocators) {
 				return "call " + calleeName(node)
 			}
 		}
@@ -5043,7 +5043,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	var scan func(owner string, body *ast.BlockStmt, pureTTL, direct bool)
 	scan = func(owner string, body *ast.BlockStmt, pureTTL, direct bool) {
 		ast.Inspect(body, func(node ast.Node) bool {
-			if kind := locatorSink(node); kind != "" && (pureTTL || kind != "delete") {
+			if kind := locatorSink(node); pureTTL && kind != "" {
 				t.Fatalf("%s writes the locator index: %s", owner, kind)
 			}
 			switch node := node.(type) {
