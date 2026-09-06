@@ -15,11 +15,10 @@ const (
 	maxDAQuotaIdentityBytes = 255
 )
 
-// COMPETING_SCORE_V1: the connection-local peer-quality policy (the Section 14 score
-// shape of RUBIN_COMPACT_BLOCKS.md with local magnitudes). A connection starts at 50; a
-// validated distinct commit competing for a retained da_id subtracts 2 (1 below height
-// 1440) saturating at 0; the score drifts one point toward 50 per 144 blocks of local
-// height, lazily; the prefetch trigger keeps its front-of-list preference at >= 40.
+// COMPETING_SCORE_V1: the connection-local peer-quality policy (RUBIN_COMPACT_BLOCKS.md Section 14
+// score shape, local magnitudes). A connection starts at 50; a validated distinct commit competing
+// for a retained da_id subtracts 2 (1 below height 1440), saturating at 0; the score drifts one point
+// toward 50 per 144 blocks of local height, lazily; the prefetch trigger keeps its preference at >= 40.
 const (
 	qualityScoreInitial         uint8  = 50
 	qualityPreferenceMinimum    uint8  = 40
@@ -30,18 +29,17 @@ const (
 )
 
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
-// transaction past the message bound and full canonical parse invokes AdmitDA exactly once before
-// any standard-pool, seen-set, metadata or inventory effect. The identity is captured once from
-// the peer state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling
-// no normalized address reaches) exits nil with zero effect. The terminal latch is checked before
-// the quota key (a latch landing later keeps the same-key teardown/Close limitation until restart);
-// the key is held only around AdmitDA and released before any effect; no candidate validation
-// precedes AdmitDA's owner observation; errors.Is on the hash sentinel is the only peer fault.
-// RETAINED without conflict schedules the prefetch once; DUPLICATE with conflict applies
-// COMPETING_SCORE_V1 once; DUPLICATE without conflict is the reachable neutral exit (exact/nonexact
-// replay, occupied index); a zero/unknown discriminator or RETAINED with the conflict flag — shapes
-// publicDAAdmissionResult cannot emit — also exit nil. AdmitDA refuses a member that would COMPLETE
-// its set until RUB-1118 activates the COMPLETE_SET owner, so no remote set reaches COMPLETE_SET.
+// transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
+// standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer
+// state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
+// address reaches) exits nil with zero effect. The terminal latch is checked before the quota key (a
+// latch landing later keeps the same-key teardown/Close limitation until restart); the key is held only
+// around AdmitDA and released before any effect; no candidate validation precedes AdmitDA's owner
+// observation; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
+// schedules the prefetch once; DUPLICATE with conflict applies COMPETING_SCORE_V1 once; DUPLICATE without
+// conflict is the reachable neutral exit (exact/nonexact replay, occupied index); a zero/unknown
+// discriminator or RETAINED with the conflict flag — shapes publicDAAdmissionResult cannot emit — also exit
+// nil. AdmitDA refuses a set-completing member until RUB-1118 activates the COMPLETE_SET owner.
 func (p *peer) handleRelayDATx(txBytes []byte) error {
 	s := p.service
 	peerIdentity, quotaIdentity, provenance, ok := p.remoteDAProvenance()
@@ -80,9 +78,8 @@ func (p *peer) remoteDAProvenance() (peerIdentity, quotaIdentity string, provena
 	return peerIdentity, quotaIdentity, provenance, err == nil
 }
 
-// penalizeDAAdmissionError maps the hash-mismatch sentinel, selected by errors.Is identity
-// alone, to the +10 ban step with the sentinel's text as LastError, returning the sentinel
-// itself only at the ban threshold; every other error is peer-neutral.
+// penalizeDAAdmissionError: only the hash-mismatch sentinel (errors.Is identity alone) takes the +10 ban
+// step with its text as LastError and is returned at the ban threshold; every other error is peer-neutral.
 func (p *peer) penalizeDAAdmissionError(err error) error {
 	if errors.Is(err, node.ErrDARelayChunkHashMismatch) && p.bumpBan(10, node.ErrDARelayChunkHashMismatch.Error()) {
 		return node.ErrDARelayChunkHashMismatch
@@ -90,9 +87,8 @@ func (p *peer) penalizeDAAdmissionError(err error) error {
 	return nil
 }
 
-// applyCompetingCommitScore is COMPETING_SCORE_V1's one event: height was captured after
-// every lock was released; under stateMu the score drifts, then loses the grace-adjusted
-// delta with lower saturation. BanScore and LastError are untouched.
+// applyCompetingCommitScore is COMPETING_SCORE_V1's one event, height captured after every lock was
+// released: under stateMu the score drifts, then loses the grace-adjusted delta saturating at 0; BanScore/LastError untouched.
 func (p *peer) applyCompetingCommitScore(height uint64) {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
