@@ -352,14 +352,21 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 	return nil
 }
 
-// AdvanceOrphanTTL forwards to the owner-aware TTL tick; commitOwnerReadyRemoval owns the
-// fence and a nil receiver is not promised.
+// AdvanceOrphanTTL runs the owner-aware TTL tick once, all-or-nothing: each incomplete owner-ready
+// record with ttl above one decrements once and mints one fresh revision; ttl one expires whole
+// (members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized owner
+// claims) with no revision; a resident ttl of zero fails closed before any arithmetic. It returns
+// commitOwnerReadyRemoval's error classes unwrapped; that body owns the fence; a nil receiver is not promised.
 func (s *DARelayState) AdvanceOrphanTTL() error {
 	return s.advanceOwnerReadyTTL()
 }
 
-// ReleasePeerQuotaKey releases the finalized PEER members of key through the owner-aware
-// selector inside the caller's per-key lock; nil receiver returns nil; commitOwnerReadyRemoval owns the fence.
+// ReleasePeerQuotaKey releases the retained members whose finalized PEER provenance carries key
+// (typed match, never the cached quota key): a matching commit survives iff a LOCAL or DETACHED_REORG
+// chunk is retained, keeping its charge and owner claim; an unblocked whole removal also carries the
+// record's non-matching PEER members; an empty key selects nothing after the same preflight; a nil
+// receiver returns nil. It takes no quota lock (the P2P caller holds the per-key one), returns
+// commitOwnerReadyRemoval's error classes unwrapped, and that body owns the fence.
 func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
 	if s == nil {
 		return nil
