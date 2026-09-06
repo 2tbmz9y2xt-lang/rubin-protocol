@@ -1,8 +1,8 @@
 package node
 
-// Seam: the dormant paired canonical D1/O1 candidate builder — its intrinsic
+// Seam: the paired canonical D1/O1 candidate builder (live) — its intrinsic
 // snapshot validation, its phase-ordered terminals, its exact removals and
-// survivors, its claim bijection, and its dormancy.
+// survivors, its claim bijection, and its single production wiring.
 
 import (
 	"crypto/sha3"
@@ -142,7 +142,7 @@ func (x *canonicalDAOwnerFixture) reserveStandardClaim() PendingOutpointToken {
 	return token
 }
 
-// capture takes the caller-owned snapshot pair exactly as RUB-678 will: the
+// capture takes the caller-owned snapshot pair as prepareCanonicalFenceImage does: the
 // retained image under the relay lock, then every record deep-copied so the
 // snapshot shares no mutable state with the live relay at all, and the owner
 // image under the owner lock.
@@ -1151,11 +1151,10 @@ func TestCanonicalDAOwnerCandidatesCloseTheClaimBijection(t *testing.T) {
 }
 
 // canonicalDAOwnerLockingFunctions are the only functions of the two seam files
-// allowed to name a lock or a publisher: the LIVE canonical D image preparation
-// and its publisher, both untouched by this slice.
+// allowed to name a lock or a publisher: the LEGACY record-major D image preparation (unit tests only) and the shared publisher.
 var canonicalDAOwnerLockingFunctions = map[string]bool{"prepareCanonicalDAImage": true, "publish": true}
 
-// canonicalDAOwnerForbiddenCalls are the selectors a dormant builder must never
+// canonicalDAOwnerForbiddenCalls are the selectors the lock-free builder must never
 // name: any mutex, any owner mutation and any publisher.
 var canonicalDAOwnerForbiddenCalls = map[string]bool{
 	"Lock": true, "Unlock": true, "RLock": true, "RUnlock": true, "TryLock": true,

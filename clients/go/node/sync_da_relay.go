@@ -31,10 +31,11 @@ func terminalCanonicalDAError(err error) error {
 // preparedCanonicalDAImage is the complete D1 image, projected under the
 // transition's admission write fence and published later by assignment only.
 //
-// It clones the relay's metadata and maps through the existing
-// cloneForAtomicBatchLocked idiom and SHARES every surviving record's immutable
-// retained TxBytes and payload bytes: the projection only deletes map entries, so
-// no retained payload is duplicated and the image is O(records), not O(bytes).
+// The live image comes from buildCanonicalDAOwnerCandidates, which deep-copies every
+// survivor (cloneOwnerReady), so it shares no retained bytes. Only the LEGACY helper
+// prepareCanonicalDAImage below (zero production callers, unit tests) clones through the
+// cloneForAtomicBatchLocked idiom and SHARES each survivor's immutable retained TxBytes and
+// payload bytes: it only deletes map entries, so that image is O(records), not O(bytes).
 type preparedCanonicalDAImage struct {
 	relay     *DARelayState
 	projected *DARelayState

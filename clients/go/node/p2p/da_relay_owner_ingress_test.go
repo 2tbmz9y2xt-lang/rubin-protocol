@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -299,7 +298,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		before := effectsOf(peer)
 		calls.Store(0)
 		err := peer.handleTx(raw)
-		require(t, errors.Is(err, wantErr), "%s: handleTx=%v, want %v", label, err, wantErr)
+		require(t, err == wantErr, "%s: handleTx=%v, want exactly %v", label, err, wantErr) //nolint:errorlint // HASH_FAILURE returns the sentinel itself at the threshold, never a wrapper; every other row is nil.
 		require(t, calls.Load() == wantCalls, "%s: scheduler entries=%d, want %d", label, calls.Load(), wantCalls)
 		check(before, effectsOf(peer))
 	}
@@ -685,7 +684,9 @@ func TestRemoteDAPeerQualityPolicy(t *testing.T) {
 	require(t, p.qualityPreferred(^uint64(0)), "score 40 must keep the preference")
 }
 
-// TestRemoteDAQualityScoreRace overlaps competing-commit events on two sessions of one quota key with preference reads and a teardown.
+// TestRemoteDAQualityScoreRace overlaps, on EACH of two sessions of one quota key, competing-commit events (handleTx)
+// with the production preference read of that same peer (daPrefetchPeers -> qualityPreferred) and with rivals[1]'s
+// teardown; at height 1440 = qualityGraceHeight the reader's normalization is a no-op, so the score ends at exactly 34 = 50 - 8 x 2.
 func TestRemoteDAQualityScoreRace(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
@@ -694,31 +695,36 @@ func TestRemoteDAQualityScoreRace(t *testing.T) {
 	must(t, daRelayTestPeer(h, "127.0.0.3:19113").handleTx(f.commit(daID, 2)), "first-seen commit")
 	competitor := f.commit(daID, 2)
 	rivals := []*peer{addDAPrefetchTestPeer(h.service, "127.0.0.1:19111", nil), addDAPrefetchTestPeer(h.service, "127.0.0.1:19112", nil)}
-	const events = 8
 	var wg sync.WaitGroup
-	failures := make(chan error, len(rivals)*events) // asserted on the test goroutine: FailNow is not for workers
+	failures := make(chan error, len(rivals)*8) // asserted on the test goroutine: FailNow is not for workers
+	var writersDone atomic.Int32
 	for _, rival := range rivals {
-		wg.Add(1)
+		wg.Add(2)
 		go func(rival *peer) {
-			defer wg.Done()
-			for i := 0; i < events; i++ {
+			defer func() { writersDone.Add(1); wg.Done() }()
+			for i := 0; i < 8; i++ {
 				if err := rival.handleTx(competitor); err != nil {
 					failures <- err
 				}
+			}
+		}(rival)
+		go func(rival *peer) {
+			defer wg.Done()
+			for writersDone.Load() < int32(len(rivals)) {
 				h.service.daPrefetchPeers(rival.addr())
 			}
 		}(rival)
 	}
+	h.service.unregisterPeer(rivals[1]) // concurrent with both pairs
 	wg.Wait()
 	close(failures)
 	for err := range failures {
 		must(t, err, "competing commit")
 	}
-	h.service.unregisterPeer(rivals[1])
 	for i, rival := range rivals {
 		score, anchor := peerQuality(rival)
 		state := rival.snapshotState()
-		require(t, score == 50-2*events && anchor == 1440 && state.BanScore == 0 && state.LastError == "", "rival %d: score=%d anchor=%d state=%+v, want %d at 1440 with no ban", i, score, anchor, state, 50-2*events)
+		require(t, score == 34 && anchor == 1440 && state.BanScore == 0 && state.LastError == "", "rival %d: score=%d anchor=%d state=%+v, want 34 at 1440 with no ban", i, score, anchor, state)
 	}
 }
 
@@ -790,20 +796,17 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 		case *ast.SwitchStmt:
 			switchAt = i
 			require(t, len(typed.Body.List) == 2, "result switch has %d cases, want exactly RETAINED and DUPLICATE-conflict", len(typed.Body.List))
-			for _, clause := range typed.Body.List {
-				var guards []string
-				for _, expr := range clause.(*ast.CaseClause).List {
-					guards = append(guards, types.ExprString(expr))
-				}
-				guard, effects := strings.Join(guards, " | "), map[string]bool{}
+			for _, clause := range typed.Body.List { // exact guard text, either order; a missing arm is a runtime row's failure
+				require(t, len(clause.(*ast.CaseClause).List) == 1, "result case lists %d expressions, want exactly one guard", len(clause.(*ast.CaseClause).List))
+				guard, effects := types.ExprString(clause.(*ast.CaseClause).List[0]), map[string]bool{}
 				ast.Inspect(clause, func(node ast.Node) bool {
 					if call, ok := node.(*ast.CallExpr); ok {
 						effects[calleeOf(call)] = true
 					}
 					return true
 				})
-				retainedArm := strings.Contains(guard, "DAAdmissionRetained") && strings.Contains(guard, "SameDAIDCommitConflict") && effects["scheduleDAPrefetch"] && len(effects) == 1
-				conflictArm := strings.Contains(guard, "DAAdmissionDuplicate") && strings.Contains(guard, "SameDAIDCommitConflict") && effects["applyCompetingCommitScore"] && effects["LocalTipHeight"] && len(effects) == 2
+				retainedArm := guard == "result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict" && effects["scheduleDAPrefetch"] && len(effects) == 1
+				conflictArm := guard == "result.Disposition == node.DAAdmissionDuplicate && result.SameDAIDCommitConflict" && effects["applyCompetingCommitScore"] && effects["LocalTipHeight"] && len(effects) == 2
 				require(t, retainedArm || conflictArm, "result case %q carries effects %v", guard, effects)
 			}
 		case *ast.DeferStmt:

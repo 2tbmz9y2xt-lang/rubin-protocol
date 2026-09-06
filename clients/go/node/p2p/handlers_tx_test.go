@@ -860,7 +860,7 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	badPayloadTx, txid := badPayloadVariant(t, txBytes)
 	p := daRelayTestPeer(h, "127.0.0.1:19115")
 	err := p.handleTx(badPayloadTx)
-	require(t, errors.Is(err, node.ErrDARelayChunkHashMismatch), "handle bad DA chunk err=%v, want hash mismatch at ban threshold", err)
+	require(t, err == node.ErrDARelayChunkHashMismatch, "handle bad DA chunk err=%v, want the hash-mismatch sentinel itself at ban threshold", err) //nolint:errorlint // the threshold returns the sentinel, never a wrapper
 	state := p.snapshotState()
 	require(t, state.BanScore == 10 && state.LastError == "da chunk hash mismatch", "state=%+v, want the hash penalty and its sentinel text", state)
 	require(t, !h.service.cfg.TxPool.Has(txid) && !h.service.txSeen.Has(txid), "bad same-txid DA payload poisoned relay admission")
@@ -898,7 +898,7 @@ func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
 	must(t, h.service.AnnounceTx(txBytes), "AnnounceTx setup DA chunk")
 	require(t, h.service.txSeen.Has(txid), "setup DA chunk was not marked seen")
 	err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx)
-	require(t, errors.Is(err, node.ErrDARelayChunkHashMismatch), "handle seen bad DA chunk err=%v, want hash mismatch at ban threshold", err)
+	require(t, err == node.ErrDARelayChunkHashMismatch, "handle seen bad DA chunk err=%v, want the hash-mismatch sentinel itself at ban threshold", err) //nolint:errorlint // the threshold returns the sentinel, never a wrapper
 	got, ok := h.service.cfg.TxPool.Get(txid)
 	require(t, ok && reflect.DeepEqual(got, txBytes), "bad already-seen DA variant mutated admitted pool bytes")
 }

@@ -3157,7 +3157,7 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 // error return of the shared parsed-candidate path either leaves a disposition
 // its own branch selected or is validateDACandidate's fail-closed nil-hold
 // sentinel, which AdmitDA never reaches, and proves the whole surface still has
-// zero non-test callers.
+// exactly its live census: one production AdmitDA caller (handleRelayDATx), peerless provenances zero.
 func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 	declaredFunctions := func(path string) map[string]*ast.FuncDecl {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -3606,7 +3606,7 @@ func daOwnerFileFuncs(t *testing.T, path string) map[string]*ast.FuncDecl {
 	return functions
 }
 
-// ownerReadyRemovalSelectors drives one row through both dormant entrypoints.
+// ownerReadyRemovalSelectors drives one row through both owner-ready removal roots (live behind the exported wrappers).
 var ownerReadyRemovalSelectors = []struct {
 	name string
 	run  func(*DARelayState) error
@@ -4969,8 +4969,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	}
 	// SEPARATION: the owner-aware removal path routes only through the owner-ready projector,
 	// so none of its functions calls a legacy removal or apply primitive; the legacy exported
-	// cleanup bodies are therefore untouched and stay byte-identical until issue 678. The
-	// mechanism also never wires the dormant DARemoval guard, which issue 678 owns.
+	// cleanup names are the owner-aware wrappers since issue 678; the DARemoval guard stays unwired.
 	mutationFuncs := daOwnerFileFuncs(t, "da_relay_mutation.go")
 	// The censused set is DERIVED from the file, never listed by hand: every FuncDecl whose
 	// name carries "ownerready" case-insensitively. Completeness rests on the naming rule the
@@ -5015,20 +5014,56 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	}
 	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the
 	// global locator traversal, the record deep clone or the Live projector, nor range locators.
-	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "tickOwnerReadyTTLRecordLocked", "projectOwnerReadyRetirementLocked"} {
-		ast.Inspect(mutationFuncs[name].Body, func(node ast.Node) bool {
+	// Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete): the pure-TTL tick arm has none and reaches
+	// `s` only via s.sets, s.records, the whole-record arm and scanned same-file direct helpers; retirement arms may only delete.
+	isIdent := func(expr ast.Expr, name string) bool { ident, ok := expr.(*ast.Ident); return ok && ident.Name == name }
+	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
+	locatorSink := func(node ast.Node) string {
+		var lhs []ast.Expr
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			lhs = node.Lhs
+		case *ast.IncDecStmt:
+			lhs = []ast.Expr{node.X}
+		case *ast.CallExpr:
+			if len(node.Args) == 2 && isIdent(node.Fun, "delete") && isLocators(node.Args[0]) {
+				return "delete"
+			}
+		}
+		for _, expr := range lhs {
+			if index, ok := expr.(*ast.IndexExpr); ok && isLocators(index.X) || isLocators(expr) {
+				return "assignment"
+			}
+		}
+		return ""
+	}
+	var scan func(owner string, body *ast.BlockStmt, pureTTL, direct bool)
+	scan = func(owner string, body *ast.BlockStmt, pureTTL, direct bool) {
+		ast.Inspect(body, func(node ast.Node) bool {
+			if kind := locatorSink(node); kind != "" && (pureTTL || kind != "delete") {
+				t.Fatalf("%s writes the locator index: %s", owner, kind)
+			}
 			switch node := node.(type) {
+			case *ast.RangeStmt:
+				if isLocators(node.X) {
+					t.Fatalf("%s ranges over the locator index", owner)
+				}
 			case *ast.CallExpr:
 				if callee := calleeName(node); slices.Contains([]string{"checkRetiredLocatorRowsLocked", "checkDARecordImageLocatorsLocked", "projectDARecordImageLiveLocked", "cloneOwnerReady"}, callee) {
-					t.Fatalf("%s calls %s", name, callee)
+					t.Fatalf("%s calls %s", owner, callee)
 				}
-			case *ast.RangeStmt:
-				if selector, ok := node.X.(*ast.SelectorExpr); ok && selector.Sel.Name == "locators" {
-					t.Fatalf("%s ranges over the locator index", name)
+				require(t, !pureTTL || !slices.ContainsFunc(node.Args, func(arg ast.Expr) bool { return isIdent(arg, "s") }), "%s hands the relay state to %s", owner, calleeName(node))
+			case *ast.SelectorExpr:
+				if pureTTL && isIdent(node.X, "s") && !slices.Contains([]string{"sets", "records", "removeOwnerReadyWholeRecordLocked"}, node.Sel.Name) {
+					require(t, !direct && mutationFuncs[node.Sel.Name] != nil, "%s reaches s.%s, which no sink scan covers", owner, node.Sel.Name)
+					scan(owner+"'s direct helper "+node.Sel.Name, mutationFuncs[node.Sel.Name].Body, true, true)
 				}
 			}
 			return true
 		})
+	}
+	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "tickOwnerReadyTTLRecordLocked", "projectOwnerReadyRetirementLocked"} {
+		scan(name, mutationFuncs[name].Body, name == "tickOwnerReadyTTLRecordLocked", false)
 	}
 	// LEGACY ROOT PIN: the private TTL root still decrements in place and mints NO revision.
 	legacyState := newDARelayStateForTest(t, defaultDARelayCaps())
