@@ -257,7 +257,10 @@ type daRelayRecordAccounting struct {
 }
 
 type DARelayState struct {
-	mu                        sync.Mutex
+	mu sync.Mutex
+	// rejectCache is owner-lifetime policy state. Atomic retained-state images
+	// deliberately omit it, and publication leaves the live instance untouched.
+	rejectCache               daRejectCache
 	mempool                   *Mempool
 	caps                      daRelayCaps
 	prefetch                  daRelayPrefetchState

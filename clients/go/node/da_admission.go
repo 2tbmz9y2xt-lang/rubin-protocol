@@ -175,7 +175,7 @@ func (h *daAdmissionHold) release() {
 	h.guard = nil
 }
 
-func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (admission *DAAdmission, err error) {
+func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, cache *daRejectCache) (admission *DAAdmission, err error) {
 	if h == nil || h.mempool == nil || h.guard == nil || h.snapshot == nil {
 		return nil, errDARelayImageIncompatible
 	}
@@ -188,7 +188,7 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 		rejected.cause = ErrDARelayChunkHashMismatch
 		return nil, selectRelayDisposition(rejected, RelayAdmissionStableTerminalReject)
 	}
-	checked, _, err := h.mempool.checkParsedTransactionWithSnapshot(owned, tx, txid, wtxid, h.snapshot, h.policy)
+	checked, _, err := cache.validateCandidate(h.mempool, owned, tx, txid, wtxid, h.snapshot, h.policy, h.context)
 	if err != nil {
 		return nil, err
 	}
