@@ -189,8 +189,10 @@ func TestUpdateReverseRefPayload(t *testing.T) {
 		keys := [7][]byte{{2}, target, height, make([]byte, 32), make([]byte, 32), source, height}
 		for destination := range dbis {
 			for reference := range dbis {
-				row := Mutation{DBI: dbis[destination], Key: keys[destination], AfterKind: AfterOldValueRef,
-					RefDBI: dbis[reference], RefKey: keys[reference]}
+				row := Mutation{
+					DBI: dbis[destination], Key: keys[destination], AfterKind: AfterOldValueRef,
+					RefDBI: dbis[reference], RefKey: keys[reference],
+				}
 				want := destination == 5 && reference == 1 || destination == 1 && reference == 5
 				if updateValidMutation(row) != want {
 					t.Fatalf("reverse ref invalid tuple: direction %d->%d", destination, reference)
