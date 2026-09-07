@@ -326,7 +326,7 @@ func TestServiceLocalDAWorkLifecycle(t *testing.T) {
 	})
 	t.Run("Close waits for panicking accepted admission", func(t *testing.T) {
 		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
-		sentinel := errors.New("local DA admission panic")
+		sentinel := &struct{ message string }{message: "local DA admission panic"}
 		barrier := &localDAAdmissionBarrier{entered: make(chan struct{}), release: make(chan struct{}), panicValue: sentinel}
 		var releaseOnce sync.Once
 		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }

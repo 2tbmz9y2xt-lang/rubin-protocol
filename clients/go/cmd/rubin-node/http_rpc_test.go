@@ -364,7 +364,7 @@ func mustRPCSignedDaChunkTx(t *testing.T, utxos map[consensus.Outpoint]consensus
 func postRPCSubmit(t *testing.T, handler http.Handler, raw []byte) (int, submitTxResponse, []byte) {
 	body := mustSubmitBody(t, raw)
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)))
+	handler.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/submit_tx", strings.NewReader(body)))
 	responseBody := recorder.Body.Bytes()
 	var got submitTxResponse
 	if err := json.Unmarshal(responseBody, &got); err != nil {
@@ -1321,7 +1321,7 @@ func TestDevnetRPCSubmitTxRoutesDAToSharedOwner(t *testing.T) {
 		peerDone := make(chan peerOutcome, 1)
 		go func() {
 			<-start
-			newDevnetRPCHandler(s).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)))
+			newDevnetRPCHandler(s).ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/submit_tx", strings.NewReader(body)))
 			localDone <- recorder.Code
 		}()
 		go func() {
@@ -1537,7 +1537,7 @@ func TestDevnetRPCLocalDAAdmissionAndPostEffectLockOrder(t *testing.T) {
 				done := make(chan int, 1)
 				go func() {
 					recorder := httptest.NewRecorder()
-					handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)))
+					handler.ServeHTTP(recorder, httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader(body)))
 					done <- recorder.Code
 				}()
 				return done
