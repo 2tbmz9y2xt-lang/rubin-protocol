@@ -266,7 +266,7 @@ func frozenD00Cases(t *testing.T) map[string]map[string]any {
 	return cases
 }
 
-// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list.
+// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list; the public order is the execution order, so every replay id follows the row it replays.
 var (
 	d00PublicHandleTxIDs = []string{"REMOTE_COMMIT_RETAINED", "REMOTE_CHUNK_RETAINED", "REMOTE_EXACT_REPLAY", "REMOTE_OWNER_CONFLICT", "REMOTE_POLICY_REJECT", "REMOTE_EXACT_CHUNK_REPLAY", "REMOTE_SAME_TXID_NONEXACT_VALID", "REMOTE_SAME_TXID_NONEXACT_INVALID", "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", "REMOTE_REPLAY_EVIDENCE_ABSENT", "REMOTE_STANDARD_EXIT"}
 	d00CleanupIDs        = []string{"STATE_B_PEER_CHUNK_CLEANUP_PRESERVES_NONPEER", "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED"}
@@ -425,7 +425,8 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	corrupted := mustParseP2PTx(t, valid)
 	corrupted.Witness[0].Signature[0] ^= 0xff
 	invalid := mustMarshalPeerRuntimeTx(t, corrupted)
-	_, validTxID, validWTxID, _, _ := consensus.ParseTx(valid)
+	_, validTxID, validWTxID, _, err := consensus.ParseTx(valid)
+	must(t, err, "ParseTx(valid)")
 	_, txid, wtxid, consumed, err := consensus.ParseTx(invalid)
 	must(t, err, "ParseTx(invalid)")
 	require(t, consumed == len(invalid) && txid == validTxID && wtxid != validWTxID, "the corrupted signature is not a canonical tx with the same txid and a different wtxid: consumed=%d of %d, same txid=%v, same wtxid=%v", consumed, len(invalid), txid == validTxID, wtxid == validWTxID)
@@ -595,10 +596,11 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 				require(t, ok, "%s: the spent input is not in the shared chainstate", id)
 				entry.CovenantData = append([]byte(nil), entry.CovenantData...)
 				ff.h.chainState.Utxos[op] = entry
+				require(t, mustTxID(t, row.raw) == mustTxID(t, valid), "%s: the pre-state commit and the row do not share a txid, so the copied outpoint does not fund it", id)
 				ff.admit(valid, "fresh-peer")
 				ff.requireRetained(valid, id+" pre-state: the same-txid valid commit on the fresh owner")
 				missed, missErr := ff.probe(row.raw)
-				require(t, mustTxID(t, row.raw) == mustTxID(t, valid) && missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: same-txid pre-state=%v, fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, mustTxID(t, row.raw) == mustTxID(t, valid), missed, missErr, errorCode)
+				require(t, missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, missed, missErr, errorCode)
 			}
 			replay := strings.HasPrefix(id, "REMOTE_EXACT") || id == "REMOTE_SAME_TXID_NONEXACT_VALID"
 			require(t, retained == replay, "%s: retained=%v on a replay=%v row: probe=(%+v,%v)", id, retained, replay, got, probeErr)
