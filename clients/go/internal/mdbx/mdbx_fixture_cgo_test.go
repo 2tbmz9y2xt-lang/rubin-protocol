@@ -878,7 +878,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		}
 		mustEnvironment(t, store.View(func(reader *Reader) error {
 			persisted, present, getErr := reader.Get(readDBIsLiteral()[0], []byte{2})
-			if getErr != nil || !present || persisted == nil || len(persisted) != 0 {
+			if getErr != nil || !present || !bytes.Equal(persisted, admissionNone()) {
 				t.Fatalf("successful Update PrefixPage mutation=%x/%v/%v", persisted, present, getErr)
 			}
 			return nil
@@ -1115,7 +1115,7 @@ func TestNativeUpdateFixtures(t *testing.T) {
 	t.Run("post-commit ENOSPC OLD", func(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
-		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}
+		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: admissionNone()}
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
 		outcome, cleanup := fixtureUpdatePostCommitENOSPC(store, updateNativePlan(t, mutation))
 		mustEnvironment(t, cleanup)
@@ -1133,7 +1133,7 @@ func TestNativeUpdateFixtures(t *testing.T) {
 	t.Run("post-commit ENOSPC unreadable", func(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
-		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}
+		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: admissionNone()}
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
 		outcome, cleanup := fixtureUpdatePostCommitENOSPCUnreadable(store, updateNativePlan(t, mutation))
 		mustEnvironment(t, cleanup)
@@ -1193,7 +1193,7 @@ func TestNativeUpdateImageFamilies(t *testing.T) {
 func TestNativeUpdateUnknownImages(t *testing.T) {
 	newPlan := func(t *testing.T, extra bool) ([]ownedMutation, []Mutation) {
 		t.Helper()
-		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}}}
+		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: admissionNone()}}
 		if extra {
 			key, err := MetaKey(0x10, 1)
 			if err != nil {
@@ -1233,7 +1233,7 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 		mustEnvironment(t, store.Close())
 	})
 	t.Run("missing image", func(t *testing.T) {
-		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: []byte{}}}
+		rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: admissionNone()}}
 		plan := updateNativePlan(t, rows...)
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)

@@ -140,13 +140,13 @@ func TestMetadataValuesAndOwnership(t *testing.T) {
 		t.Fatal("semantic metadata encoder reused result bytes")
 	}
 	version, counters = ownedVersion, ownedCounters
-	for kind, in := range map[byte][]byte{0: version, 1: config, 2: {}, 0x10: counters} {
+	for kind, in := range map[byte][]byte{0: version, 1: config, 2: admissionNone(), 0x10: counters} {
 		got, err := MetaValue(kind, in)
 		if err != nil || !bytes.Equal(got, in) {
 			t.Fatalf("meta kind %x rejected", kind)
 		}
 		if kind == 2 && got == nil {
-			t.Fatal("present-empty metadata collapsed to absent")
+			t.Fatal("authority metadata collapsed to absent")
 		}
 		if len(in) > 0 {
 			in[0] ^= 0xff
@@ -155,7 +155,7 @@ func TestMetadataValuesAndOwnership(t *testing.T) {
 			}
 		}
 	}
-	maximum := make([]byte, MaxMetadataBytes)
+	maximum := admissionMaximum()
 	if got, err := MetaValue(2, maximum); err != nil || len(got) != MaxMetadataBytes {
 		t.Fatal("maximum metadata rejected")
 	}
@@ -314,7 +314,7 @@ func TestValidateEveryDBIRow(t *testing.T) {
 	}{
 		{schemaDBIs[0], []byte{0}, version},
 		{schemaDBIs[0], []byte{1}, config},
-		{schemaDBIs[0], []byte{2}, []byte{}},
+		{schemaDBIs[0], []byte{2}, admissionNone()},
 		{schemaDBIs[0], append([]byte{0x10}, be64(1)...), make([]byte, 16)},
 		{schemaDBIs[1], mustUTXOKey(t, 1, hash, 0), utxo},
 		{schemaDBIs[2], mustHeightKey(t, 1, 0), make([]byte, 104)},

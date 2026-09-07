@@ -1419,7 +1419,7 @@ func updatePlanBatch(t *testing.T) Batch {
 	blockKey, blockValue := updatePlanHashRow()
 	undoEntry := UndoEntryKey(block, spent, 0, 0, 9)
 	return Batch{Mutations: []Mutation{
-		{DBI: dbis[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}},
+		{DBI: dbis[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: admissionNone()},
 		{DBI: dbis[0], Key: metaCounter, BeforePresent: true, AfterKind: planAfterLiteral, Literal: LogicalCounterValue(0, 0)},
 		{DBI: dbis[1], Key: utxoDelete, BeforePresent: true, AfterKind: planAfterAbsent},
 		{DBI: dbis[1], Key: utxoLiteral, AfterKind: planAfterLiteral, Literal: utxoValue},
@@ -1455,7 +1455,7 @@ func TestUpdatePlanPayloadMatrix(t *testing.T) {
 		requirePlanInvalid(t, empty, "plan empty Batch guard drifted")
 	}
 	batch := updatePlanBatch(t)
-	if plan, err := updateOwnedBatch(batch); err != nil || len(plan) != 10 || plan[0].literal == nil || len(plan[0].literal) != 0 {
+	if plan, err := updateOwnedBatch(batch); err != nil || len(plan) != 10 || !bytes.Equal(plan[0].literal, admissionNone()) {
 		t.Fatalf("valid prepared plan=%d/%v", len(plan), err)
 	}
 	absent := func(m Mutation) Mutation {
@@ -3375,13 +3375,13 @@ func requireUpdateTruth(t *testing.T, outcome updateNativeOutcome, truth CommitT
 
 func TestNativeUpdateImages(t *testing.T) {
 	dbi, key := readDBIsLiteral()[0], []byte{2}
-	create := Mutation{DBI: dbi, Key: key, AfterKind: planAfterLiteral, Literal: []byte{}}
+	create := Mutation{DBI: dbi, Key: key, AfterKind: planAfterLiteral, Literal: admissionNone()}
 	path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
 	store, err := Create(path, cfg)
 	mustEnvironment(t, err)
 	created := runNativeUpdate(t, store, updateNativePlan(t, create))
 	requireUpdateTruth(t, created, CommitTruthNew, true, nil, nil)
-	requireUpdateValue(t, store, dbi, key, []byte{}, true)
+	requireUpdateValue(t, store, dbi, key, admissionNone(), true)
 	var finalErr error
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		finalErr = updateNativeMatch(reader.txn, store.dbis[dbi.Rank], key, updateImage{}, "final update image mismatch")
@@ -3399,7 +3399,7 @@ func TestNativeUpdateImages(t *testing.T) {
 	replace.BeforePresent = true
 	replaced := runNativeUpdate(t, store, updateNativePlan(t, replace))
 	requireUpdateTruth(t, replaced, CommitTruthNew, true, nil, nil)
-	requireUpdateValue(t, store, dbi, key, []byte{}, true)
+	requireUpdateValue(t, store, dbi, key, admissionNone(), true)
 	mustEnvironment(t, store.Close())
 
 	store, err = Create(filepath.Join(t.TempDir(), "abort"), cfg)
@@ -3660,7 +3660,7 @@ func TestNativeUpdateInputGuards(t *testing.T) {
 	store, err := Create(filepath.Join(t.TempDir(), "db"), cfg)
 	mustEnvironment(t, err)
 	defer func() { mustEnvironment(t, store.Close()) }()
-	mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: []byte{}}
+	mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: admissionNone()}
 	plan := updateNativePlan(t, mutation)
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		requireNativeUpdateInput(t, (&Store{}).updateNative(plan, reader.txn))
@@ -3801,7 +3801,7 @@ func TestNativeUpdateSourceOwnership(t *testing.T) {
 }
 
 func updateLifecycleBatch() Batch {
-	return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: AfterLiteral, Literal: []byte{}}}}
+	return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: AfterLiteral, Literal: admissionNone()}}}
 }
 
 func newUpdateStore(t *testing.T) *Store {

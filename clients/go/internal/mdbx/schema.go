@@ -140,10 +140,8 @@ func validateMetaValue(kind byte, value []byte) error {
 		_, err := DecodeConfigV1(value)
 		return err
 	case 0x02:
-		if len(value) > MaxMetadataBytes {
-			return errSchema
-		}
-		return nil
+		_, err := DecodeStorageAuthorityV1(value)
+		return err
 	case 0x10:
 		_, _, err := DecodeLogicalCounterValue(value)
 		return err
