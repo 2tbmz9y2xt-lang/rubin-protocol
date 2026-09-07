@@ -11,6 +11,7 @@ func decodeAuthority(r *authorityReader) (a StorageAuthorityV1) {
 		return StorageAuthorityV1{}
 	}
 	switch a.Phase {
+	case StoragePhaseNoneV1:
 	case StoragePhasePruneGCV1:
 		a.Cleanup = decodeCleanup(r)
 	case StoragePhaseReplayV1:

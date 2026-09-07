@@ -143,8 +143,8 @@ func (r *authorityReader) number(width int) uint64 {
 	copy(full[8-width:], b)
 	return binary.BigEndian.Uint64(full[:])
 }
-func (r *authorityReader) u16() uint16    { return uint16(r.number(2)) }
-func (r *authorityReader) u32() uint32    { return uint32(r.number(4)) }
+func (r *authorityReader) u16() uint16    { return uint16(r.number(2)) } // #nosec G115 -- number(2) zero-extends exactly two bytes.
+func (r *authorityReader) u32() uint32    { return uint32(r.number(4)) } // #nosec G115 -- number(4) zero-extends exactly four bytes.
 func (r *authorityReader) u64() uint64    { return r.number(8) }
 func (r *authorityReader) remaining() int { return len(r.b) - r.off }
 func (r *authorityReader) tag(max uint8) uint8 {
@@ -174,9 +174,9 @@ func (r *authorityReader) hash32() (out [32]byte) { copy(out[:], r.take(32)); re
 func (r *authorityReader) work40() (out [40]byte) { copy(out[:], r.take(40)); return }
 func (r *authorityReader) blob() []byte {
 	n := uint64(r.u32())
-	if !r.ok || n > uint64(r.remaining()) {
+	if !r.ok || n > uint64(r.remaining()) { // #nosec G115 -- take keeps 0 <= off <= len(b), so remaining is non-negative.
 		r.ok = false
 		return nil
 	}
-	return append([]byte(nil), r.take(int(n))...)
+	return append([]byte(nil), r.take(int(n))...) // #nosec G115 -- n <= remaining <= MaxMetadataBytes is proved above.
 }

@@ -19,7 +19,7 @@ func appendOption(out *[]byte, present bool) {
 }
 
 func appendBlob(out *[]byte, b []byte) {
-	appendU32(out, uint32(len(b)))
+	appendU32(out, uint32(len(b))) // #nosec G115 -- Encode proves the complete record is at most MaxMetadataBytes before emission.
 	*out = append(*out, b...)
 }
 
@@ -30,6 +30,7 @@ func encodeAuthority(out *[]byte, a StorageAuthorityV1) {
 	}
 	*out = append(*out, byte(a.Phase), byte(a.Lifecycle))
 	switch a.Phase {
+	case StoragePhaseNoneV1:
 	case StoragePhasePruneGCV1:
 		encodeCleanup(out, a.Cleanup)
 	case StoragePhaseReplayV1:
@@ -60,7 +61,7 @@ func encodeOuterOptions(out *[]byte, a StorageAuthorityV1) {
 }
 
 func encodeCleanup(out *[]byte, c *CleanupV1) {
-	*out = append(*out, byte(len(c.Spans)))
+	*out = append(*out, byte(len(c.Spans))) // #nosec G115 -- scalar validation limits cleanup spans to 1..4.
 	for _, span := range c.Spans {
 		*out = append(*out, byte(span.Kind))
 		appendU64(out, span.GenerationID)
@@ -104,7 +105,7 @@ func encodeInvalidBranch(out *[]byte, v *InvalidBranchV1) {
 }
 
 func encodeDetached(out *[]byte, v *DetachedSuffixV1) {
-	appendU16(out, uint16(len(v.Entries)))
+	appendU16(out, uint16(len(v.Entries))) // #nosec G115 -- scalar validation limits detached entries to 1..1440.
 	for _, entry := range v.Entries {
 		appendU64(out, entry.Height)
 		*out = append(*out, entry.Hash[:]...)
@@ -139,7 +140,7 @@ func encodeOrdinary(out *[]byte, v *OrdinaryApplyV1) {
 }
 
 func appendPoints(out *[]byte, points []AuthorityPointV1) {
-	appendU16(out, uint16(len(points)))
+	appendU16(out, uint16(len(points))) // #nosec G115 -- scalar validation limits each suffix to 0..1440 points.
 	for _, point := range points {
 		appendPoint(out, point)
 	}
