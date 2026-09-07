@@ -61,7 +61,7 @@ func reverseBatchRequireRefusal(t *testing.T, store *Store, marker string, class
 	engine, direct := directTestEngineError(err)
 	row = batch.Mutations[0]
 	if truth != CommitTruthOld || !direct || engine.Class != class || engine.Operation != "update" || engine.Code != code ||
-		engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired || reader.active.Load() || store.state != storeOPEN ||
+		engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired || reader == nil || reader.active.Load() || store.state != storeOPEN ||
 		store.terminalTruth != 0 || !bytes.Equal(row.Key, key) || !bytes.Equal(row.Literal, literal) || !bytes.Equal(row.RefKey, refKey) {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}

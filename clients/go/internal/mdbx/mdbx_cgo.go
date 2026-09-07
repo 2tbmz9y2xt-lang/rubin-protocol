@@ -567,8 +567,9 @@ type Batch struct {
 	// reference with the same direct InvalidInput refusal ("invalid Update Batch") as a malformed row, decided before ordering,
 	// literal validation and every charge, so only an admitted row can exhaust a family or a ceiling into Capacity; it counts
 	// rank-1 deletions up to maxUpdateOutputs, rank-1 references up to maxUpdateInputs, 77-byte tag-1 rank-5 deletions up to
-	// maxUpdateInputs, every other admitted row up to maxUpdateAux, and key bytes up to maxReverseKeyBytes. False, the zero
-	// value, keeps the default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
+	// maxUpdateInputs, every other admitted row up to maxUpdateAux, and key bytes up to maxReverseKeyBytes; the mutation
+	// count and literal bytes keep maxUpdateMutations and maxUpdateLiterals in both modes. False, the zero value, keeps the
+	// default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
 }
 
@@ -775,8 +776,8 @@ func (budget *updateBudget) addReverseFamily(m Mutation) bool {
 }
 
 // admits reports whether the budget's mode admits a common-valid mutation: false admits every one; true refuses a
-// rank-1 literal, every rank-5 row other than a deletion and every rank outside SchemaV1, and admits ranks 0, 2, 3, 4
-// and 6 unchanged.
+// rank-1 literal and every rank-5 row other than a deletion, admits ranks 0, 2, 3, 4 and 6 unchanged, and admits no
+// other rank.
 func (budget *updateBudget) admits(m Mutation) bool {
 	if !budget.reverse {
 		return true
