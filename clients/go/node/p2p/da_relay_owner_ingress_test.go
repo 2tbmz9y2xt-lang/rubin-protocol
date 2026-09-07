@@ -10,8 +10,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -393,13 +395,17 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	}
 	_, err = f.probe(completing)
 	require(t, err != nil && err.Error() == "DA COMPLETE_SET capacity owner is not active" && len(h.service.CompleteDASetCandidates(^uint64(0))) == 0, "COMPLETE_DEFERRED probe err=%v candidates=%d", err, len(h.service.CompleteDASetCandidates(^uint64(0))))
-	// ALREADY_TERMINAL on a genuinely latched engine: bounded completion, the quota key free,
+	// ALREADY_TERMINAL on a genuinely latched engine: the fixture UTXO and the signed DA bytes are
+	// prepared on the fresh harness BEFORE the latch-producing ApplyBlock and the UTXO set is pinned
+	// unchanged across the latched rows; each row observes bounded completion, the quota key free,
 	// no AdmitDA and no peer effect; malformed bytes and an over-bound identity keep their
 	// earlier refusals ahead of the latch check.
-	lh := latchedDAHarness(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	lh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	lf := newDAIngressFixture(t, lh)
 	lp, wide := daRelayTestPeer(lh, "127.0.0.1:19113"), daRelayTestPeer(lh, strings.Repeat("a", 255)+":12345678")
 	latchedCommit, latchedCalls := lf.commit(daRelayTestID(0x2a), 2), nowCalls(lh)
+	latchDAHarness(t, lh, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	latchedUtxos := maps.Clone(lh.chainState.Utxos)
 	for label, row := range map[string]struct {
 		peer  *peer
 		raw   []byte
@@ -415,6 +421,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		row.check(before, effectsOf(row.peer))
 		require(t, quotaKeyFree(lh.service, peerQuotaKey(row.peer.addr())) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
 	}
+	require(t, reflect.DeepEqual(lh.chainState.Utxos, latchedUtxos), "chainState.Utxos of the latched harness was written after TerminalFaulted: %d entries, %d at the latch", len(lh.chainState.Utxos), len(latchedUtxos))
 	// REJECTED_REPEAT (RUBIN_COMPACT_BLOCKS.md Section 5.3) on a fresh harness and owner: each row below is
 	// labeled with the entry it observes, and the closing standard tx proves the untouched authorities live.
 	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)

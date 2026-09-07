@@ -620,13 +620,12 @@ func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	requireEqual(t, h.service.blockSeen.Has(summary.BlockHash), true, "the seen-set entry the unfenced effects still added")
 }
 
-// latchedDAHarness returns a harness whose engine has GENUINELY latched its terminal
-// fault and RETAINS ChainState.admissionMu exclusively: a finalized standard-domain
-// owner claim with no resident pool entry is the orphan the next canonical
-// transition's mempool validation refuses terminally before the durable commit.
-func latchedDAHarness(t *testing.T, source *testHarness) *testHarness {
+// latchDAHarness GENUINELY latches h's engine, which then RETAINS ChainState.admissionMu
+// exclusively: a finalized standard-domain owner claim with no resident pool entry is the
+// orphan the next canonical transition's mempool validation refuses terminally before the
+// durable commit. Every fixture write to h belongs before this call.
+func latchDAHarness(t *testing.T, h, source *testHarness) {
 	t.Helper()
-	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	owner := h.mempool.PendingOutpointOwner()
 	ctx, ok := owner.AdmissionContext()
 	requireEqual(t, ok, true, "owner admission context")
@@ -639,7 +638,6 @@ func latchedDAHarness(t *testing.T, source *testHarness) *testHarness {
 		t.Fatalf("ApplyBlock=(%+v,%v), want a nil summary and %q", summary, err, want)
 	}
 	requireEqual(t, h.syncEngine.TerminalFaulted(), true, "the engine terminal latch")
-	return h
 }
 
 // TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance is the AnnounceBlock half of
@@ -651,7 +649,8 @@ func latchedDAHarness(t *testing.T, source *testHarness) *testHarness {
 // seen-set effect ahead of it landed.
 func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
-	h := latchedDAHarness(t, source)
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	latchDAHarness(t, h, source)
 	blockHash, blockBytes := testHarnessBlockAtHeight(t, source, 2)
 	done := make(chan error, 1)
 	go func() { done <- h.service.AnnounceBlock(blockBytes) }()
@@ -669,7 +668,8 @@ func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 // image: every exported reader of that image takes the same retained fence, so
 // any such assertion would park exactly like the call under test.
 func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
-	h := latchedDAHarness(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
 	p := &peer{service: h.service, state: node.PeerState{Addr: "127.0.0.1:19111"}}
 	must(t, h.service.registerPeer(p), "registerPeer")
 	exits := h.service.PeerLifecycleExits()
