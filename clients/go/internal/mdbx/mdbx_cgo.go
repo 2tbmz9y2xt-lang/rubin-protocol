@@ -542,6 +542,11 @@ type AfterKind uint8
 const (
 	AfterAbsent AfterKind = iota + 1
 	AfterLiteral
+	// AfterOldValueRef installs into the absent Key the exact bytes the OLD snapshot holds at RefDBI/RefKey; those source bytes
+	// are read from OLD and are neither validated nor consumed. Two directions are admitted: an undo-v1 entry referencing a
+	// utxo-v1 row (Key[41:77] == RefKey[8:44]) and a utxo-v1 row referencing an undo-v1 entry (Key[8:44] == RefKey[41:77]). Only
+	// those outpoint bytes are bound; the image ID and the undo block hash, transaction index and input index are used as
+	// supplied. A reference carries Literal nil and BeforePresent false.
 	AfterOldValueRef
 )
 
@@ -652,9 +657,22 @@ func updateAbsentPayload(m Mutation) bool {
 	return m.BeforePresent && m.Literal == nil && m.RefDBI == (DBI{}) && m.RefKey == nil && updateAbsentAllowed(m)
 }
 
+// updateUndoEntryKey is strictly narrower than validKey for rank 5, which also admits the 33-byte manifest.
+func updateUndoEntryKey(key []byte) bool {
+	return len(key) == 77 && key[32] == 1
+}
+
+func updateForwardRef(m Mutation, dbis [7]DBI) bool {
+	return m.DBI == dbis[5] && updateUndoEntryKey(m.Key) && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
+}
+
+func updateReverseRef(m Mutation, dbis [7]DBI) bool {
+	return m.DBI == dbis[1] && validKey(m.DBI.Rank, m.Key) && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
+}
+
 func updateRefPayload(m Mutation) bool {
 	dbis := SchemaV1DBIs()
-	return !m.BeforePresent && m.Literal == nil && m.DBI == dbis[5] && len(m.Key) == 77 && m.Key[32] == 1 && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
+	return !m.BeforePresent && m.Literal == nil && (updateForwardRef(m, dbis) || updateReverseRef(m, dbis))
 }
 
 func updateValidMutation(m Mutation) bool {
@@ -681,6 +699,11 @@ func updateKeyCharge(m Mutation) uint64 {
 	return charge
 }
 
+// updateRefFamily holds for the forward (rank-5) and reverse (rank-1) reference destinations.
+func updateRefFamily(m Mutation) bool {
+	return m.AfterKind == AfterOldValueRef && (m.DBI.Rank == 1 || m.DBI.Rank == 5)
+}
+
 func (budget *updateBudget) addTotals(m Mutation) bool {
 	var ok bool
 	if budget.mutations, ok = updateAdd(budget.mutations, 1, maxUpdateMutations); !ok {
@@ -703,7 +726,7 @@ func (budget *updateBudget) addMutation(m Mutation) bool {
 	switch {
 	case m.DBI.Rank == 1 && m.AfterKind == AfterAbsent:
 		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateInputs)
-	case m.DBI.Rank == 5 && m.AfterKind == AfterOldValueRef:
+	case updateRefFamily(m):
 		budget.undoRefs, ok = updateAdd(budget.undoRefs, 1, maxUpdateInputs)
 	case m.DBI.Rank == 1 && m.AfterKind == AfterLiteral:
 		budget.utxoLiterals, ok = updateAdd(budget.utxoLiterals, 1, maxUpdateOutputs)
