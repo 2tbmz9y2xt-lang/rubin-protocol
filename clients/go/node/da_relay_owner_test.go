@@ -164,7 +164,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 62, 0}, {"consensus", "../consensus", 60, 3}} {
+		}{{"node", ".", 63, 0}, {"consensus", "../consensus", 60, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -379,6 +379,9 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for row := range map[string]bool{"read|node/da_relay_owner.go:zero|zero": true, "gen|node/da_relay_owner.go:invalid|invalid bool": true, "read|node/da_relay_owner.go:invalid|bool": true, "read|node/da_relay_owner.go:invalid|invalid": true} {
 			want[row]++
 		}
+		want["read|node/da_relay_owner.go:cache|daRejectCache"]++
+		want["read|node/da_relay_owner.go:cache|cache"]++
+		want["gen|node/da_relay_owner.go:cache|cache *daRejectCache"]++
 		for _, field := range []string{"daRelayAdmissionCandidate", "candidate"} {
 			want["read|node/da_relay_owner.go:file|"+field]++
 		}
@@ -416,7 +419,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		checkCalls("BeginDAAdmission", callCounts[begin.Name.Name], map[string]int{"beginDAAdmissionGuarded": 1, "parseDAAdmission": 1, "txAdmitUnavailable": 3})
 		checkCalls("parse wrapper", callCounts[wrapper.Name.Name], map[string]int{"matchingDAChunkPayloadHash": 1, "parseDAAdmissionCandidate": 1, "txAdmitRejected": 1})
 		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 5, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 4})
-		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"checkParsedTransactionWithSnapshot": 1, "len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "selectRelayDisposition": 1, "txAdmitRejected": 1, "uint64": 1})
+		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "selectRelayDisposition": 1, "txAdmitRejected": 1, "uint64": 1, "validateCandidate": 1})
 		checkCalls("AdmitDA", callCounts[public.Name.Name], map[string]int{"Error": 1, "acquireDAAdmissionHold": 1, "admitDANonExact": 1, "bindDAAdmission": 1, "classifyDAReplay": 1, "parseDAAdmissionCandidate": 1, "release": 1, "selectRelayDisposition": 3, "txAdmitRejected": 1, "validate": 1})
 		checkCalls("replay classification", callCounts[replay.Name.Name], map[string]int{"Equal": 1, "Error": 2, "observeDAAdmission": 1, "selectRelayDisposition": 3, "txAdmitRejected": 2, "txAdmitUnavailable": 1, "validateDAAdmissionObservation": 1})
 		checkCalls("nonexact continuation", callCounts[continuation.Name.Name], map[string]int{"Close": 1, "admitDANonReplay": 1, "publicDAAdmissionResult": 1, "validateDACandidate": 1})
