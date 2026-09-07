@@ -4672,8 +4672,11 @@ func TestMinerMineOneSelectsFromMempool(t *testing.T) {
 // the outer pointer, and Error(), Kind and the count buckets are unchanged.
 func TestTxAdmitErrorCauseCompatibility(t *testing.T) {
 	f := newDANonReplayFixture(t, 1)
-	_, hashErr := f.relay.AdmitDA(f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xca}, payload: []byte("cause"), chunkHash: [32]byte{0xff}, literalChunkHash: true}).raw, publicPeer(t, "cause"))
+	bad := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xca}, payload: []byte("cause"), chunkHash: [32]byte{0xff}, literalChunkHash: true})
+	_, hashErr := f.relay.AdmitDA(bad.raw, publicPeer(t, "cause"))
 	require(t, errors.Is(hashErr, ErrDARelayChunkHashMismatch) && hashErr.Error() == "DA chunk payload hash mismatch", "the hash branch did not attach the sentinel: %v", hashErr)
+	_, _, _, _, _, siblingErr := parseDAAdmission(bad.raw)
+	require(t, siblingErr != nil && siblingErr.Error() == hashErr.Error() && !errors.Is(siblingErr, ErrDARelayChunkHashMismatch), "parseDAAdmission's same-text sibling must stay cause-free: %v", siblingErr)
 	require(t, (*TxAdmitError)(nil).Unwrap() == nil, "nil receiver unwraps to %v, want nil", (*TxAdmitError)(nil).Unwrap())
 	bare := txAdmitRejected("DA chunk payload hash mismatch")
 	wrapped := txAdmitRejected("DA chunk payload hash mismatch")

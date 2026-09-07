@@ -3641,9 +3641,11 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		keep := f.ownerReadyChunk(daID, 1, "k1", LocalDAProvenance())
 		drop2 := f.ownerReadyChunk(daID, 2, "d2", daNonReplayPeer("drop"))
 		var liveBefore, liveAfter daRelaySetRecord
+		var keptBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
 		f.mutateRelay(func(s *DARelayState) {
 			s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {3: "peer"}}
 			liveBefore = s.sets[daID]
+			keptBefore = liveBefore.chunks[1]
 		})
 		before := daRelayStateSnapshot(f.relay)
 		dropToken0, keepToken, dropToken2 := before.sets[daID].chunks[0].member.token, before.sets[daID].chunks[1].member.token, before.sets[daID].chunks[2].member.token
@@ -3655,7 +3657,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
 		// Alias rule: a DISTINCT survivor container, the live one unedited, the kept member's backing shared.
 		require(t, reflect.ValueOf(liveAfter.chunks).Pointer() != reflect.ValueOf(liveBefore.chunks).Pointer() && len(liveBefore.chunks) == 3, "partial removal edited the live chunks container in place: before=%d chunks", len(liveBefore.chunks))
-		require(t, liveAfter.chunks[1].member == liveBefore.chunks[1].member && &liveAfter.chunks[1].txBytes[0] == &liveBefore.chunks[1].txBytes[0] && &liveAfter.chunks[1].payload[0] == &liveBefore.chunks[1].payload[0], "partial removal copied the surviving member's backing")
+		require(t, liveAfter.chunks[1].member == keptBefore.member && &liveAfter.chunks[1].txBytes[0] == &keptBefore.txBytes[0] && &liveAfter.chunks[1].payload[0] == &keptBefore.payload[0], "partial removal copied the surviving member's backing")
 		record, ok := after.sets[daID]
 		if !ok || len(record.chunks) != 1 || record.state != daRelayStateOrphanChunks || record.ttlBlocksRemaining != before.sets[daID].ttlBlocksRemaining {
 			t.Fatalf("survivor record=%+v", record)
@@ -3874,9 +3876,11 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		chunk := f.ownerReadyChunk(daID, 0, "t0", daNonReplayPeer("keep"))
 		f.setOwnerReadyTTL(daID, 2)
 		var liveBefore, liveAfter daRelaySetRecord
+		var chunkBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
 		f.mutateRelay(func(s *DARelayState) {
 			s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {2: "peer"}}
 			liveBefore = s.sets[daID]
+			chunkBefore = liveBefore.chunks[0]
 		})
 		before := daRelayStateSnapshot(f.relay)
 		commitToken, chunkToken := before.sets[daID].commit.member.token, before.sets[daID].chunks[0].member.token
@@ -3890,7 +3894,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			t.Fatalf("decremented record=%+v", record)
 		}
 		// Alias rule: the ORIGINAL container and every backing kept; locators, accounting, prefetch byte-equal.
-		require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.commit.member == liveBefore.commit.member && &liveAfter.commit.txBytes[0] == &liveBefore.commit.txBytes[0] && liveAfter.chunks[0].member == liveBefore.chunks[0].member && &liveAfter.chunks[0].payload[0] == &liveBefore.chunks[0].payload[0], "pure TTL decrement copied the chunks container or a member's backing")
+		require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.commit.member == liveBefore.commit.member && &liveAfter.commit.txBytes[0] == &liveBefore.commit.txBytes[0] && liveAfter.chunks[0].member == chunkBefore.member && &liveAfter.chunks[0].txBytes[0] == &chunkBefore.txBytes[0] && &liveAfter.chunks[0].payload[0] == &chunkBefore.payload[0], "pure TTL decrement copied the chunks container or a member's backing")
 		require(t, reflect.DeepEqual(after.locators, before.locators) && after.orphanBytes == before.orphanBytes && reflect.DeepEqual(after.peerBytes, before.peerBytes) && reflect.DeepEqual(after.prefetchIndexes, before.prefetchIndexes), "pure TTL decrement rewrote locators, accounting or prefetch")
 		if record.revision <= before.sets[daID].revision || after.records != record.revision {
 			t.Fatalf("revision high-water=%d record=%d before=%d", after.records, record.revision, before.sets[daID].revision)
@@ -5089,9 +5093,10 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	f.ownerReadyChunk(daID, 0, "wrapped", daNonReplayPeer("keep"))
 	f.setOwnerReadyTTL(daID, 3)
 	var liveBefore, liveAfter daRelaySetRecord
-	f.mutateRelay(func(s *DARelayState) { liveBefore = s.sets[daID] })
+	var chunkBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
+	f.mutateRelay(func(s *DARelayState) { liveBefore = s.sets[daID]; chunkBefore = liveBefore.chunks[0] })
 	err = f.relay.AdvanceOrphanTTL()
 	f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
 	require(t, err == nil && liveAfter.ttlBlocksRemaining == 2 && liveAfter.revision == liveBefore.revision+1 && daRelayStateSnapshot(f.relay).records == liveAfter.revision, "owner-ready AdvanceOrphanTTL err=%v ttl=%d revision=%d (before %d)", err, liveAfter.ttlBlocksRemaining, liveAfter.revision, liveBefore.revision)
-	require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.chunks[0].member == liveBefore.chunks[0].member && &liveAfter.chunks[0].txBytes[0] == &liveBefore.chunks[0].txBytes[0], "owner-ready tick copied the chunks container or a member's backing")
+	require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.chunks[0].member == chunkBefore.member && &liveAfter.chunks[0].txBytes[0] == &chunkBefore.txBytes[0] && &liveAfter.chunks[0].payload[0] == &chunkBefore.payload[0], "owner-ready tick copied the chunks container or a member's backing")
 }
