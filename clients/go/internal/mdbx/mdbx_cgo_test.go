@@ -2746,6 +2746,85 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 }
 
+func packageTypeProofs(files map[string]*ast.File) map[string]*ast.TypeSpec {
+	types := map[string]*ast.TypeSpec{}
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.TYPE {
+				continue
+			}
+			for _, specification := range general.Specs {
+				if named, ok := specification.(*ast.TypeSpec); ok {
+					types[named.Name.Name] = named
+				}
+			}
+		}
+	}
+	return types
+}
+
+func protectedWholePointerWrite(types map[string]*ast.TypeSpec, fn *ast.FuncDecl, lhs ast.Expr) bool {
+	dereference, ok := ast.Unparen(lhs).(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	name, ok := ast.Unparen(dereference.X).(*ast.Ident)
+	if !ok {
+		return true
+	}
+	declared, ok := directFunctionBinding(fn, name)
+	if !ok {
+		return true
+	}
+	pointer, ok := ast.Unparen(declared).(*ast.StarExpr)
+	return !ok || !provenScalarOrSequence(types, pointer.X, map[*ast.TypeSpec]bool{})
+}
+
+func directFunctionBinding(fn *ast.FuncDecl, name *ast.Ident) (ast.Expr, bool) {
+	if name.Obj == nil {
+		return nil, false
+	}
+	for _, fields := range []*ast.FieldList{fn.Recv, fn.Type.Params} {
+		if fields == nil {
+			continue
+		}
+		for _, field := range fields.List {
+			for _, candidate := range field.Names {
+				if candidate.Obj == name.Obj {
+					return field.Type, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func provenScalarOrSequence(types map[string]*ast.TypeSpec, expression ast.Expr, seen map[*ast.TypeSpec]bool) bool {
+	switch value := ast.Unparen(expression).(type) {
+	case *ast.ArrayType:
+		return provenScalarOrSequence(types, value.Elt, seen)
+	case *ast.Ident:
+		if value.Obj != nil {
+			declaration, ok := value.Obj.Decl.(*ast.TypeSpec)
+			bound, declared := types[value.Name]
+			if !ok || !declared || bound != declaration || seen[declaration] {
+				return false
+			}
+			seen[declaration] = true
+			return provenScalarOrSequence(types, declaration.Type, seen)
+		}
+		if _, shadowed := types[value.Name]; shadowed {
+			return false
+		}
+		switch value.Name {
+		case "bool", "byte", "complex64", "complex128", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr":
+			return true
+		}
+	}
+	return false
+}
+
 func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require := func(ok bool, format string, args ...any) {
 		t.Helper()
@@ -2772,6 +2851,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		files[name], sources[name] = file, source
 		ordinarySource.Write(source)
 	}
+	typeProofs := packageTypeProofs(files)
 	file, source := files["mdbx_cgo.go"], sources["mdbx_cgo.go"]
 	require(file != nil, "ordinary build omitted mdbx_cgo.go")
 	allowed := map[token.Pos]bool{}
@@ -3172,7 +3252,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 					return true
 				}
 				for _, lhs := range assignment.Lhs {
-					_, wholeObject := lhs.(*ast.StarExpr)
+					wholeObject := protectedWholePointerWrite(typeProofs, fn, lhs)
 					selector, ok := lhs.(*ast.SelectorExpr)
 					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth") {
 						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
@@ -3193,6 +3273,63 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	if !strings.HasPrefix(production, "//go:build cgo && (darwin || linux) && (amd64 || arm64)\n") || strings.Count(production, "os.OpenFile(") != 1 || strings.Contains(production, "os.WriteFile(") || strings.Contains(production, "os.Create(") {
 		t.Fatal("production build expression or native-file ownership drifted")
+	}
+}
+
+func TestStorageAuthorityV1CodecStoreWriteGuard(t *testing.T) {
+	for _, row := range []struct {
+		name, source string
+		protected    bool
+	}{
+		{"byte slice", `package p; func f(out *[]byte) { *out = nil }`, false},
+		{"named scalar", `package p; type count uint64; func f(n *count) { *n = 1 }`, false},
+		{"renamed Store", `package p; type Store struct{}; func f(x *Store) { *x = Store{} }`, true},
+		{"parenthesized Store", `package p; type Store struct{}; func f(x *Store) { (*x) = Store{} }`, true},
+		{"Store alias", `package p; type Store struct{}; type Alias = Store; func f(x *Alias) { *x = Alias{} }`, true},
+		{"Store pointer alias", `package p; type Store struct{}; type Pointer = *Store; func f(x Pointer) { *x = Store{} }`, true},
+		{"unresolved", `package p; func f(x *Missing) { *x = Missing{} }`, true},
+		{"unsupported pointer", `package p; func f(x **byte) { *x = nil }`, true},
+		{"builtin shadow", `package p; type Store struct{}; type byte = Store; func f(x *[]byte) { *x = nil }`, true},
+		{"local alias", `package p; type Store struct{}; func f(x *Store) { y := x; *y = Store{} }`, true},
+		{"nested block shadow", `package p; type Store struct{}; func f(out *[]byte) { { out := &Store{}; *out = Store{} } }`, true},
+		{"inner function shadow", `package p; type Store struct{}; func f(out *[]byte) { func(out *Store) { *out = Store{} }(&Store{}) }`, true},
+		{"generic builtin shadow", `package p; func f[byte any](out *byte, value byte) { *out = value }`, true},
+		{"generic package type shadow", `package p; type count uint64; func f[count any](out *count, value count) { *out = value }`, true},
+		{"generic pointer type shadow", `package p; type Ptr = *uint64; func f[Ptr ~*T, T any](out Ptr, value T) { *out = value }`, true},
+		{"generic receiver shadow", `package p; type Count uint64; type Box[Count any] struct{}; func (b Box[Count]) f(out *Count, value Count) { *out = value }`, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, "guard.go", row.source, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files := map[string]*ast.File{"guard.go": file}
+			types := packageTypeProofs(files)
+			var fn *ast.FuncDecl
+			for _, declaration := range file.Decls {
+				if candidate, ok := declaration.(*ast.FuncDecl); ok && candidate.Name.Name == "f" {
+					fn = candidate
+				}
+			}
+			if fn == nil {
+				t.Fatal("missing fixture function")
+			}
+			var got bool
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				assignment, ok := node.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range assignment.Lhs {
+					got = got || protectedWholePointerWrite(types, fn, lhs)
+				}
+				return true
+			})
+			if got != row.protected {
+				t.Fatalf("protected=%v, want %v", got, row.protected)
+			}
+		})
 	}
 }
 
