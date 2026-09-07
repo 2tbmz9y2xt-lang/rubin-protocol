@@ -248,7 +248,11 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 }
 
 func (s *DARelayState) admitDANonExact(hold *daAdmissionHold, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, provenance DAProvenance) (DAAdmissionResult, error) {
-	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs)
+	var cache *daRejectCache
+	if provenance.kind == daProvenancePeer {
+		cache = &s.rejectCache
+	}
+	admission, err := hold.validateDACandidate(owned, tx, txid, wtxid, inputs, cache)
 	if err != nil {
 		return DAAdmissionResult{}, err
 	}
