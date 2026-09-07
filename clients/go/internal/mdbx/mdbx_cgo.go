@@ -562,6 +562,12 @@ type Mutation struct {
 
 type Batch struct {
 	Mutations []Mutation
+	// Reverse selects the reverse-block admission envelope: true refuses every rank-1 literal, rank-5 literal and rank-5
+	// reference, counts rank-1 deletions up to 1545454, rank-1 references up to 414634, 77-byte tag-1 rank-5 deletions up
+	// to 414634 and every other admitted row up to 16384, and raises the key-byte ceiling to 151359076; false, the zero
+	// value, keeps the default domain and ceilings. Only admission reads it: the owned plan and the native path carry no
+	// mode.
+	Reverse bool
 }
 
 const (
@@ -571,6 +577,7 @@ const (
 	maxUpdateMutations uint64 = 2_391_106
 	maxUpdateKeyBytes  uint64 = 137_676_154
 	maxUpdateLiterals  uint64 = 155_659_727
+	maxReverseKeyBytes uint64 = 151_359_076 // 1545454*44 + 414634*121 + 414634*77 + 16384*77
 )
 
 type ownedMutation struct {
@@ -587,6 +594,8 @@ type updateBudget struct {
 	mutations, keyBytes, literals uint64
 	utxoDeletes, undoRefs         uint64
 	utxoLiterals, aux             uint64
+	undoEntryDeletes              uint64
+	reverse                       bool
 }
 
 func updateInvalidBatch() error {
@@ -704,12 +713,20 @@ func updateRefFamily(m Mutation) bool {
 	return m.AfterKind == AfterOldValueRef && (m.DBI.Rank == 1 || m.DBI.Rank == 5)
 }
 
+func updateUndoEntryDelete(m Mutation) bool {
+	return m.DBI.Rank == 5 && m.AfterKind == AfterAbsent && updateUndoEntryKey(m.Key)
+}
+
 func (budget *updateBudget) addTotals(m Mutation) bool {
 	var ok bool
 	if budget.mutations, ok = updateAdd(budget.mutations, 1, maxUpdateMutations); !ok {
 		return false
 	}
-	if budget.keyBytes, ok = updateAdd(budget.keyBytes, updateKeyCharge(m), maxUpdateKeyBytes); !ok {
+	keyLimit := maxUpdateKeyBytes
+	if budget.reverse {
+		keyLimit = maxReverseKeyBytes
+	}
+	if budget.keyBytes, ok = updateAdd(budget.keyBytes, updateKeyCharge(m), keyLimit); !ok {
 		return false
 	}
 	if budget.literals, ok = updateAdd(budget.literals, uint64(len(m.Literal)), maxUpdateLiterals); !ok {
@@ -721,6 +738,9 @@ func (budget *updateBudget) addTotals(m Mutation) bool {
 func (budget *updateBudget) addMutation(m Mutation) bool {
 	if !budget.addTotals(m) {
 		return false
+	}
+	if budget.reverse {
+		return budget.addReverseFamily(m)
 	}
 	var ok bool
 	switch {
@@ -736,8 +756,45 @@ func (budget *updateBudget) addMutation(m Mutation) bool {
 	return ok
 }
 
+// addReverseFamily charges exactly one true-mode family of an admitted mutation: a rank-1 deletion to utxoDeletes up
+// to 1545454, a rank-1 reference to undoRefs up to 414634, a 77-byte tag-1 rank-5 deletion to undoEntryDeletes up to
+// 414634 and every other row to aux up to 16384; false reports that family exhausted.
+func (budget *updateBudget) addReverseFamily(m Mutation) bool {
+	var ok bool
+	switch {
+	case m.DBI.Rank == 1 && m.AfterKind == AfterAbsent:
+		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateOutputs)
+	case m.DBI.Rank == 1 && m.AfterKind == AfterOldValueRef:
+		budget.undoRefs, ok = updateAdd(budget.undoRefs, 1, maxUpdateInputs)
+	case updateUndoEntryDelete(m):
+		budget.undoEntryDeletes, ok = updateAdd(budget.undoEntryDeletes, 1, maxUpdateInputs)
+	default:
+		budget.aux, ok = updateAdd(budget.aux, 1, maxUpdateAux)
+	}
+	return ok
+}
+
+// admits reports whether the budget's mode admits a common-valid mutation: false admits every one; true refuses a
+// rank-1 literal and every rank-5 row other than a deletion, and admits every other rank unchanged.
+func (budget *updateBudget) admits(m Mutation) bool {
+	if !budget.reverse {
+		return true
+	}
+	switch m.DBI.Rank {
+	case 1:
+		return m.AfterKind == AfterAbsent || m.AfterKind == AfterOldValueRef
+	case 5:
+		return m.AfterKind == AfterAbsent
+	default:
+		return true
+	}
+}
+
 func updateScanMutation(first bool, previous, mutation Mutation, budget *updateBudget) error {
 	if !updateValidMutation(mutation) {
+		return updateInvalidBatch()
+	}
+	if !budget.admits(mutation) {
 		return updateInvalidBatch()
 	}
 	if !first && !updateOrdered(previous, mutation) {
@@ -756,7 +813,7 @@ func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
 	if len(batch.Mutations) == 0 {
 		return nil, updateInvalidBatch()
 	}
-	budget, previous := updateBudget{}, Mutation{}
+	budget, previous := updateBudget{reverse: batch.Reverse}, Mutation{}
 	for i, mutation := range batch.Mutations {
 		scanErr := updateScanMutation(i == 0, previous, mutation, &budget)
 		if scanErr != nil {
