@@ -1018,9 +1018,8 @@ func requireP2PConsensusTxErrCode(t *testing.T, err error, want consensus.ErrorC
 	}
 }
 
-// registerRelayFrameProbe registers a peer whose connection a goroutine drains until cleanup closes
-// the pipe, forwarding every frame it reads to the returned channel and dropping none, so a frame
-// written after an earlier receive is still observable.
+// registerRelayFrameProbe registers a peer whose connection a goroutine drains until cleanup closes the
+// pipe, forwarding each frame it reads into a 4-slot channel; a caller that leaves the buffer full parks it.
 func registerRelayFrameProbe(t *testing.T, svc *Service, addr string) (<-chan message, func()) {
 	t.Helper()
 

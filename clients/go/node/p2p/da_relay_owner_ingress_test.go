@@ -266,8 +266,7 @@ func frozenD00Cases(t *testing.T) map[string]map[string]any {
 	return cases
 }
 
-// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list;
-// REMOTE_STANDARD_EXIT runs last so the single-frame relay probe is still live for every DA row.
+// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list.
 var (
 	d00PublicHandleTxIDs = []string{"REMOTE_COMMIT_RETAINED", "REMOTE_CHUNK_RETAINED", "REMOTE_EXACT_REPLAY", "REMOTE_OWNER_CONFLICT", "REMOTE_POLICY_REJECT", "REMOTE_EXACT_CHUNK_REPLAY", "REMOTE_SAME_TXID_NONEXACT_VALID", "REMOTE_SAME_TXID_NONEXACT_INVALID", "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", "REMOTE_REPLAY_EVIDENCE_ABSENT", "REMOTE_STANDARD_EXIT"}
 	d00CleanupIDs        = []string{"STATE_B_PEER_CHUNK_CLEANUP_PRESERVES_NONPEER", "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED"}
@@ -416,11 +415,8 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		row.check(before, effectsOf(row.peer))
 		require(t, quotaKeyFree(lh.service, peerQuotaKey(row.peer.addr())) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
 	}
-	// REJECTED_REPEAT on a fresh harness and owner (RUBIN_COMPACT_BLOCKS.md Section 5.3): the first
-	// invalid-signature entry through handleTx is peer-neutral, touches no standard authority and
-	// populates the owner-wide suppression state; the probe then hits it under another peer identity,
-	// a second entry stays neutral, and the untouched valid representation (same txid, different
-	// wtxid) admits normally while the invalid bytes stay suppressed; a closing standard tx proves the untouched authorities live.
+	// REJECTED_REPEAT (RUBIN_COMPACT_BLOCKS.md Section 5.3) on a fresh harness and owner: each row below is
+	// labelled with the entry it observes, and the closing standard tx proves the untouched authorities live.
 	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114")
 	rframes, _ := registerRelayFrameProbe(t, rh.service, "127.0.0.1:19119")
@@ -429,8 +425,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	corrupted := mustParseP2PTx(t, valid)
 	corrupted.Witness[0].Signature[0] ^= 0xff
 	invalid := mustMarshalPeerRuntimeTx(t, corrupted)
-	_, validTxID, validWTxID, _, err := consensus.ParseTx(valid)
-	must(t, err, "ParseTx(valid)")
+	_, validTxID, validWTxID, _, _ := consensus.ParseTx(valid)
 	_, txid, wtxid, consumed, err := consensus.ParseTx(invalid)
 	must(t, err, "ParseTx(invalid)")
 	require(t, consumed == len(invalid) && txid == validTxID && wtxid != validWTxID, "the corrupted signature is not a canonical tx with the same txid and a different wtxid: consumed=%d of %d, same txid=%v, same wtxid=%v", consumed, len(invalid), txid == validTxID, wtxid == validWTxID)
@@ -596,11 +591,14 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 				ff := newDAIngressFixture(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
 				in, valid := mustParseP2PTx(t, row.raw).Inputs[0], rows["REMOTE_COMMIT_RETAINED"].raw
 				op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-				ff.h.chainState.Utxos[op] = h.chainState.Utxos[op]
+				entry, ok := h.chainState.Utxos[op]
+				require(t, ok, "%s: the spent input is not in the shared chainstate", id)
+				entry.CovenantData = append([]byte(nil), entry.CovenantData...)
+				ff.h.chainState.Utxos[op] = entry
 				ff.admit(valid, "fresh-peer")
 				ff.requireRetained(valid, id+" pre-state: the same-txid valid commit on the fresh owner")
 				missed, missErr := ff.probe(row.raw)
-				require(t, missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, missed, missErr, errorCode)
+				require(t, mustTxID(t, row.raw) == mustTxID(t, valid) && missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: same-txid pre-state=%v, fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, mustTxID(t, row.raw) == mustTxID(t, valid), missed, missErr, errorCode)
 			}
 			replay := strings.HasPrefix(id, "REMOTE_EXACT") || id == "REMOTE_SAME_TXID_NONEXACT_VALID"
 			require(t, retained == replay, "%s: retained=%v on a replay=%v row: probe=(%+v,%v)", id, retained, replay, got, probeErr)
