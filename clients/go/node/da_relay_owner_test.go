@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -3159,7 +3160,7 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 // error return of the shared parsed-candidate path either leaves a disposition
 // its own branch selected or is validateDACandidate's fail-closed nil-hold
 // sentinel, which AdmitDA never reaches, and proves the whole surface still has
-// zero non-test callers.
+// exactly its live census: one production AdmitDA caller (handleRelayDATx), peerless provenances zero.
 func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 	declaredFunctions := func(path string) map[string]*ast.FuncDecl {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -3320,10 +3321,32 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 	if !declared["RelayAdmissionDisposition"] || !declared["RelayAdmissionUnavailable"] {
 		t.Fatalf("disposition declarations were not collected: %v", declared)
 	}
-	// DORMANCY: parse every non-test Go source on disk under clients/go, so cgo
-	// and platform-ignored files are covered too, and fail closed if a required
-	// declaration was not seen.
-	callers, declarations := map[string]int{"AdmitDA": 0, "NewPeerDAProvenance": 0, "LocalDAProvenance": 0, "DetachedReorgDAProvenance": 0}, map[string]int{}
+	// OWNED CALLERS: the remote DA ingress is the ONE AdmitDA selector and PEER provenance
+	// builder over every non-test Go source; the peerless provenances have no production caller.
+	refs := productionReferenceCensus(t, "AdmitDA", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"handleRelayDATx"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": nil, "DetachedReorgDAProvenance": nil}), "production references=%v", refs)
+}
+
+// productionReferenceCensus walks every non-test Go source under clients/go (no build tags: cgo
+// and platform-ignored files included) and returns, per tracked name, the sorted enclosing
+// declarations of every identifier use (call, method value, passed value, package-level
+// initializer); each name must be declared exactly once.
+func productionReferenceCensus(t *testing.T, names ...string) map[string][]string {
+	t.Helper()
+	refs, declarations := map[string][]string{}, map[string]int{}
+	for _, name := range names {
+		refs[name] = nil
+	}
+	note := func(node ast.Node, enclosing string) {
+		ast.Inspect(node, func(node ast.Node) bool {
+			if ident, ok := node.(*ast.Ident); ok {
+				if _, tracked := refs[ident.Name]; tracked {
+					refs[ident.Name] = append(refs[ident.Name], enclosing)
+				}
+			}
+			return true
+		})
+	}
 	if err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return err
@@ -3332,28 +3355,35 @@ func TestAdmitDAOutcomeOrderAndDormancyRemainClosed(t *testing.T) {
 		if parseErr != nil {
 			return parseErr
 		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			switch node := node.(type) {
-			case *ast.FuncDecl:
-				if _, tracked := callers[node.Name.Name]; tracked {
-					declarations[node.Name.Name]++
-				}
-			case *ast.CallExpr:
-				name := calleeName(node)
-				if _, tracked := callers[name]; tracked {
-					callers[name]++
-				}
+		for _, decl := range file.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				note(decl, "package-level "+path)
+				continue
 			}
-			return true
-		})
+			if _, tracked := refs[function.Name.Name]; tracked {
+				declarations[function.Name.Name]++
+			}
+			if function.Body != nil {
+				note(function.Body, function.Name.Name)
+			}
+		}
 		return nil
 	}); err != nil {
-		t.Fatalf("dormancy census: %v", err)
+		t.Fatalf("reference census: %v", err)
 	}
-	for name, count := range callers {
-		if count != 0 || declarations[name] != 1 {
-			t.Fatalf("%s: %d non-test callers, %d declarations", name, count, declarations[name])
-		}
+	for _, name := range names {
+		require(t, declarations[name] == 1, "%s: %d declarations, want 1", name, declarations[name])
+		sort.Strings(refs[name])
+	}
+	return refs
+}
+
+// require fails the test with the formatted message unless ok holds.
+func require(t *testing.T, ok bool, format string, args ...any) {
+	t.Helper()
+	if !ok {
+		t.Fatalf(format, args...)
 	}
 }
 
@@ -3487,6 +3517,82 @@ func requireOwnerReadyPeerCharges(t *testing.T, view daRelayStateView) {
 	}
 }
 
+// frozenD00ProducerDisposition reads one case's expected result.producer_disposition
+// from the frozen artifact, the inert authority the correspondence below is driven by.
+func frozenD00ProducerDisposition(t *testing.T, caseID string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "conformance", "fixtures", "protocol", "da_admission_expected_v1.json"))
+	require(t, err == nil, "read frozen D00 authority: %v", err)
+	var artifact struct {
+		Cases []struct {
+			ID     string         `json:"id"`
+			Expect map[string]any `json:"expect"`
+		} `json:"cases"`
+	}
+	require(t, json.Unmarshal(raw, &artifact) == nil, "decode frozen D00 authority")
+	for _, row := range artifact.Cases {
+		if result, _ := row.Expect["result"].(map[string]any); row.ID == caseID && result["producer_disposition"] != nil {
+			return result["producer_disposition"].(string)
+		}
+	}
+	t.Fatalf("frozen row %s is absent or carries no producer disposition", caseID)
+	return ""
+}
+
+// TestRemoteD00InternalObservationCorrespondence maps the five D00 IDs no public P2P input can
+// corrupt onto their existing internal carriers (run as subtests), then drives each row's exact
+// image through the public AdmitDA and compares the producer disposition with the artifact's.
+func TestRemoteD00InternalObservationCorrespondence(t *testing.T) {
+	t.Run("TestAdmitDAOwnerObservationPrecedesCandidateIntegrity", TestAdmitDAOwnerObservationPrecedesCandidateIntegrity)
+	t.Run("TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict", TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict)
+	source, err := os.ReadFile("da_relay_owner_test.go")
+	require(t, err == nil, "read carrier source: %v", err)
+	producer := map[RelayAdmissionDisposition]string{RelayAdmissionUnavailable: "UNAVAILABLE", RelayAdmissionInternal: "INTERNAL"}
+	relayMaps := func(f *daNonReplayFixture, _ daNonReplayTx) { f.mutateRelay(func(s *DARelayState) { s.sets = nil }) }
+	chunk := func(edit func(*daRelayChunk)) func(*daNonReplayFixture, daNonReplayTx) {
+		return func(f *daNonReplayFixture, tx daNonReplayTx) {
+			f.mutateRelay(func(s *DARelayState) {
+				r := s.sets[tx.spec.daID]
+				c := r.chunks[0]
+				edit(&c)
+				r.chunks[0] = c
+				s.sets[tx.spec.daID] = r
+			})
+		}
+	}
+	for _, row := range []struct {
+		id, carrier, subtest string
+		corrupt              func(*daNonReplayFixture, daNonReplayTx)
+		present, rawMissing  bool // the corrupted record's shape: DANGLING is absent, CORRUPT keeps the record with no raw
+	}{
+		{"REMOTE_REPLAY_EVIDENCE_UNAVAILABLE", "TestAdmitDAOwnerObservationPrecedesCandidateIntegrity", "zero CORE_DA_COMMIT outputs unavailable", relayMaps, false, false},
+		{"REMOTE_REPLAY_EVIDENCE_UNSTABLE", "TestAdmitDAOwnerObservationPrecedesCandidateIntegrity", "owner context stable tip mismatch wins", func(f *daNonReplayFixture, tx daNonReplayTx) {
+			relayMaps(f, tx)
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { o.stableTip.Height++ })
+		}, false, false},
+		{"REMOTE_REPLAY_EVIDENCE_DANGLING", "TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict", "dangling locator", func(f *daNonReplayFixture, tx daNonReplayTx) {
+			f.mutateRelay(func(s *DARelayState) { delete(s.sets, tx.spec.daID) })
+		}, false, false},
+		{"REMOTE_REPLAY_EVIDENCE_CORRUPT", "TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict", "missing retained raw", chunk(func(c *daRelayChunk) { c.txBytes = nil }), true, true},
+		{"REMOTE_REPLAY_EVIDENCE_MISMATCH", "TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict", "indexed member txid", chunk(func(c *daRelayChunk) { c.member.txid[0] ^= 1 }), true, false},
+	} {
+		t.Run(row.id, func(t *testing.T) {
+			require(t, bytes.Contains(source, []byte("func "+row.carrier+"(")) && bytes.Contains(source, []byte(`"`+row.subtest+`"`)), "carrier %s subtest %q is not in this file", row.carrier, row.subtest)
+			f := newDANonReplayFixture(t, 1)
+			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xd0, byte(len(row.id))}, payload: []byte(row.id)})
+			f.admit(tx, daNonReplayPeer("resident"))
+			row.corrupt(f, tx)
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			record, present := before.sets[tx.spec.daID]
+			require(t, present == row.present && (!present || (record.chunks[0].txBytes == nil) == row.rawMissing), "%s: corrupted record present=%v (want %v) raw missing=%v (want %v)", row.id, present, row.present, present && record.chunks[0].txBytes == nil, row.rawMissing)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, row.id))
+			want := frozenD00ProducerDisposition(t, row.id)
+			require(t, got == DAAdmissionResult{} && producer[relayDispositionOf(err)] == want, "%s: AdmitDA=(%+v,%v) disposition=%v, want zero result and frozen producer %s", row.id, got, err, relayDispositionOf(err), want)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+		})
+	}
+}
+
 // daOwnerFileFuncs parses one source in this package and indexes its FuncDecls by name.
 func daOwnerFileFuncs(t *testing.T, path string) map[string]*ast.FuncDecl {
 	t.Helper()
@@ -3503,7 +3609,7 @@ func daOwnerFileFuncs(t *testing.T, path string) map[string]*ast.FuncDecl {
 	return functions
 }
 
-// ownerReadyRemovalSelectors drives one row through both dormant entrypoints.
+// ownerReadyRemovalSelectors drives one row through both owner-ready removal roots (live behind the exported wrappers).
 var ownerReadyRemovalSelectors = []struct {
 	name string
 	run  func(*DARelayState) error
@@ -3534,7 +3640,13 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		drop0 := f.ownerReadyChunk(daID, 0, "d0", daNonReplayPeer("drop"))
 		keep := f.ownerReadyChunk(daID, 1, "k1", LocalDAProvenance())
 		drop2 := f.ownerReadyChunk(daID, 2, "d2", daNonReplayPeer("drop"))
-		f.mutateRelay(func(s *DARelayState) { s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {3: "peer"}} })
+		var liveBefore, liveAfter daRelaySetRecord
+		var keptBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
+		f.mutateRelay(func(s *DARelayState) {
+			s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {3: "peer"}}
+			liveBefore = s.sets[daID]
+			keptBefore = liveBefore.chunks[1]
+		})
 		before := daRelayStateSnapshot(f.relay)
 		dropToken0, keepToken, dropToken2 := before.sets[daID].chunks[0].member.token, before.sets[daID].chunks[1].member.token, before.sets[daID].chunks[2].member.token
 		keptCharge := uint64(len(before.sets[daID].chunks[1].txBytes) + len(before.sets[daID].chunks[1].payload))
@@ -3542,6 +3654,10 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			t.Fatalf("release: %v", err)
 		}
 		after := daRelayStateSnapshot(f.relay)
+		f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
+		// Alias rule: a DISTINCT survivor container, the live one unedited, the kept member's backing shared.
+		require(t, reflect.ValueOf(liveAfter.chunks).Pointer() != reflect.ValueOf(liveBefore.chunks).Pointer() && len(liveBefore.chunks) == 3, "partial removal edited the live chunks container in place: before=%d chunks", len(liveBefore.chunks))
+		require(t, liveAfter.chunks[1].member == keptBefore.member && &liveAfter.chunks[1].txBytes[0] == &keptBefore.txBytes[0] && &liveAfter.chunks[1].payload[0] == &keptBefore.payload[0], "partial removal copied the surviving member's backing")
 		record, ok := after.sets[daID]
 		if !ok || len(record.chunks) != 1 || record.state != daRelayStateOrphanChunks || record.ttlBlocksRemaining != before.sets[daID].ttlBlocksRemaining {
 			t.Fatalf("survivor record=%+v", record)
@@ -3759,16 +3875,27 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		commit := f.ownerReadyCommit(daID, 3, daNonReplayPeer("keep"))
 		chunk := f.ownerReadyChunk(daID, 0, "t0", daNonReplayPeer("keep"))
 		f.setOwnerReadyTTL(daID, 2)
+		var liveBefore, liveAfter daRelaySetRecord
+		var chunkBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
+		f.mutateRelay(func(s *DARelayState) {
+			s.prefetch.indexes = map[[32]byte]map[uint16]string{daID: {2: "peer"}}
+			liveBefore = s.sets[daID]
+			chunkBefore = liveBefore.chunks[0]
+		})
 		before := daRelayStateSnapshot(f.relay)
 		commitToken, chunkToken := before.sets[daID].commit.member.token, before.sets[daID].chunks[0].member.token
 		if err := f.relay.advanceOwnerReadyTTL(); err != nil {
 			t.Fatalf("ttl tick: %v", err)
 		}
 		after := daRelayStateSnapshot(f.relay)
+		f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
 		record := after.sets[daID]
 		if record.ttlBlocksRemaining != 1 || record.state != daRelayStateStagedCommit || record.commit.member == nil || len(record.chunks) != 1 {
 			t.Fatalf("decremented record=%+v", record)
 		}
+		// Alias rule: the ORIGINAL container and every backing kept; locators, accounting, prefetch byte-equal.
+		require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.commit.member == liveBefore.commit.member && &liveAfter.commit.txBytes[0] == &liveBefore.commit.txBytes[0] && liveAfter.chunks[0].member == chunkBefore.member && &liveAfter.chunks[0].txBytes[0] == &chunkBefore.txBytes[0] && &liveAfter.chunks[0].payload[0] == &chunkBefore.payload[0], "pure TTL decrement copied the chunks container or a member's backing")
+		require(t, reflect.DeepEqual(after.locators, before.locators) && after.orphanBytes == before.orphanBytes && reflect.DeepEqual(after.peerBytes, before.peerBytes) && reflect.DeepEqual(after.prefetchIndexes, before.prefetchIndexes), "pure TTL decrement rewrote locators, accounting or prefetch")
 		if record.revision <= before.sets[daID].revision || after.records != record.revision {
 			t.Fatalf("revision high-water=%d record=%d before=%d", after.records, record.revision, before.sets[daID].revision)
 		}
@@ -4560,7 +4687,8 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 	t.Run("a valid partial prefix leaves no alias of the clone in live state", func(t *testing.T) {
 		// The prefix here SURVIVES partially, so the batch projects a survivor before the later
 		// record fails. cloneForAtomicBatchLocked shares each record's chunk map with live, so only
-		// cloneOwnerReady keeps the in-place drop off live state when nothing is ever published.
+		// the survivor's cloned chunks container keeps the drop off live state when nothing is
+		// ever published.
 		f := newDANonReplayFixture(t, 3)
 		early, late := [32]byte{0x10}, [32]byte{0x11}
 		f.ownerReadyChunk(early, 0, "p0", daNonReplayPeer("drop"))
@@ -4585,15 +4713,15 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 		f.ownerReadyChunk(daID, 0, "ceiling", daNonReplayPeer("keep"))
 		f.setOwnerReadyTTL(daID, 2)
 		f.mutateRelay(func(s *DARelayState) { s.records = ^uint64(0) })
+		sequence := daRelayStateSnapshot(f.relay).nextReceivedTime
 		requireOwnerReadySentinel(t, f, (*DARelayState).advanceOwnerReadyTTL, errDARelayArithmeticOverflow, "a tick at the revision ceiling")
 		// R5: whole-record deletion requests no revision, so the same ceiling does not block it.
 		f.setOwnerReadyTTL(daID, 1)
 		if err := f.relay.advanceOwnerReadyTTL(); err != nil {
 			t.Fatalf("expiry at the ceiling: %v", err)
 		}
-		if after := daRelayStateSnapshot(f.relay); len(after.sets) != 0 || after.records != ^uint64(0) {
-			t.Fatalf("expiry at the ceiling left sets=%d high-water=%d", len(after.sets), after.records)
-		}
+		after := daRelayStateSnapshot(f.relay)
+		require(t, len(after.sets) == 0 && after.records == ^uint64(0) && after.nextReceivedTime == sequence, "expiry at the ceiling left sets=%d high-water=%d sequence=%d (want %d)", len(after.sets), after.records, after.nextReceivedTime, sequence)
 	})
 	// One row per clause of ownerReadyRemovalGateFails that checkDANonReplayShape does not carry
 	// itself: ttlBlocksRemaining, revision, receivedTime and the locator-row count. The record is
@@ -4820,49 +4948,11 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 		}
 		return ""
 	}
-	// DORMANCY: the two owner-aware removal entrypoints have zero non-test callers on disk,
-	// parsing every non-test Go source under clients/go so cgo and platform-ignored files
-	// are covered, and each is declared exactly once.
-	callers := map[string]int{"releaseOwnerReadyPeerQuota": 0, "advanceOwnerReadyTTL": 0}
-	declarations := map[string]int{}
-	if err := filepath.Walk("..", func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return err
-		}
-		file, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
-		if parseErr != nil {
-			return parseErr
-		}
-		ast.Inspect(file, func(node ast.Node) bool {
-			switch node := node.(type) {
-			case *ast.FuncDecl:
-				if _, tracked := callers[node.Name.Name]; tracked {
-					declarations[node.Name.Name]++
-				}
-			case *ast.SelectorExpr:
-				// A SelectorExpr covers both a call (s.method()) and a method-value
-				// reference (f := s.method); the entrypoints are methods, so counting the
-				// selector catches an activation wired through a method value that a
-				// CallExpr-only census would miss.
-				if _, tracked := callers[node.Sel.Name]; tracked {
-					callers[node.Sel.Name]++
-				}
-			}
-			return true
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("dormancy census: %v", err)
-	}
-	for name, count := range callers {
-		if count != 0 || declarations[name] != 1 {
-			t.Fatalf("%s: %d non-test callers, %d declarations", name, count, declarations[name])
-		}
-	}
-	// TEETH: the SelectorExpr census counts a method-value reference the pre-fix
-	// CallExpr-only census would miss. `f := s.advanceOwnerReadyTTL` is a bare
-	// SelectorExpr with no enclosing CallExpr, so the SelectorExpr walk is what keeps
-	// the zero-non-test-reference boundary from passing on an activated function.
+	// OWNED CALLERS: each owner-aware entrypoint is named once, in its wrapper; the legacy roots never.
+	refs := productionReferenceCensus(t, "releaseOwnerReadyPeerQuota", "advanceOwnerReadyTTL", "releasePeerQuotaKey", "advanceOrphanTTL", "prepareCanonicalDAImage")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"releaseOwnerReadyPeerQuota": {"ReleasePeerQuotaKey"}, "advanceOwnerReadyTTL": {"AdvanceOrphanTTL"}, "releasePeerQuotaKey": nil, "advanceOrphanTTL": nil, "prepareCanonicalDAImage": nil}), "production references=%v", refs)
+	// TEETH: `f := s.advanceOwnerReadyTTL` is a bare SelectorExpr with no CallExpr; the identifier
+	// census must count it, or a second activation through a method value would pass.
 	teeth, parseErr := parser.ParseFile(token.NewFileSet(), "teeth.go", "package node\nfunc wire(s *DARelayState) { f := s.advanceOwnerReadyTTL; _ = f }", parser.SkipObjectResolution)
 	if parseErr != nil {
 		t.Fatalf("parse teeth fixture: %v", parseErr)
@@ -4886,8 +4976,7 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	}
 	// SEPARATION: the owner-aware removal path routes only through the owner-ready projector,
 	// so none of its functions calls a legacy removal or apply primitive; the legacy exported
-	// cleanup bodies are therefore untouched and stay byte-identical until issue 678. The
-	// mechanism also never wires the dormant DARemoval guard, which issue 678 owns.
+	// cleanup names are the owner-aware wrappers since issue 678; the DARemoval guard stays unwired.
 	mutationFuncs := daOwnerFileFuncs(t, "da_relay_mutation.go")
 	// The censused set is DERIVED from the file, never listed by hand: every FuncDecl whose
 	// name carries "ownerready" case-insensitively. Completeness rests on the naming rule the
@@ -4930,8 +5019,63 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	if !slices.Contains(wholeRecordCallees, "releaseSet") {
 		t.Fatal("whole-record removal does not release the prefetch reservation")
 	}
-	// LEGACY BEHAVIOR PIN, the one fact da_relay_state_test.go does not already carry: the
-	// untouched exported TTL cleanup decrements a legacy record in place and mints NO revision.
+	// RECORD-LOCAL WORK: the removal arms and their shared retirement helper never call the global locator traversal, the record deep clone
+	// or the Live projector, nor range locators. Locator WRITE SINKS (indexed assignment/IncDec, rebinding, delete, any call taking the map as an argument)
+	// are refused only on the pure-TTL path: the tick arm, which reaches `s` solely via s.sets, s.records, the whole-record arm and scanned same-file direct helpers.
+	// A bounded shape check, not a proof over arbitrary Go: which rows the retirement arms retire or keep is pinned by the runtime rows (TestAdmitDANonReplayPrunesOutOfRangeClaims, TestOwnerReadyRemovalPeerAndTTLSelectors, the OWNER-READY WRAPPER row below).
+	isIdent := func(expr ast.Expr, name string) bool { ident, ok := expr.(*ast.Ident); return ok && ident.Name == name }
+	isLocators := func(expr ast.Expr) bool { sel, ok := expr.(*ast.SelectorExpr); return ok && sel.Sel.Name == "locators" }
+	locatorSink := func(node ast.Node) string {
+		var lhs []ast.Expr
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			lhs = node.Lhs
+		case *ast.IncDecStmt:
+			lhs = []ast.Expr{node.X}
+		case *ast.CallExpr:
+			if len(node.Args) == 2 && isIdent(node.Fun, "delete") && isLocators(node.Args[0]) {
+				return "delete"
+			}
+			if slices.ContainsFunc(node.Args, isLocators) {
+				return "call " + calleeName(node)
+			}
+		}
+		for _, expr := range lhs {
+			if index, ok := expr.(*ast.IndexExpr); ok && isLocators(index.X) || isLocators(expr) {
+				return "assignment"
+			}
+		}
+		return ""
+	}
+	var scan func(owner string, body *ast.BlockStmt, pureTTL, direct bool)
+	scan = func(owner string, body *ast.BlockStmt, pureTTL, direct bool) {
+		ast.Inspect(body, func(node ast.Node) bool {
+			if kind := locatorSink(node); pureTTL && kind != "" {
+				t.Fatalf("%s writes the locator index: %s", owner, kind)
+			}
+			switch node := node.(type) {
+			case *ast.RangeStmt:
+				if isLocators(node.X) {
+					t.Fatalf("%s ranges over the locator index", owner)
+				}
+			case *ast.CallExpr:
+				if callee := calleeName(node); slices.Contains([]string{"checkRetiredLocatorRowsLocked", "checkDARecordImageLocatorsLocked", "projectDARecordImageLiveLocked", "cloneOwnerReady"}, callee) {
+					t.Fatalf("%s calls %s", owner, callee)
+				}
+				require(t, !pureTTL || !slices.ContainsFunc(node.Args, func(arg ast.Expr) bool { return isIdent(arg, "s") }), "%s hands the relay state to %s", owner, calleeName(node))
+			case *ast.SelectorExpr:
+				if pureTTL && isIdent(node.X, "s") && !slices.Contains([]string{"sets", "records", "removeOwnerReadyWholeRecordLocked"}, node.Sel.Name) {
+					require(t, !direct && mutationFuncs[node.Sel.Name] != nil, "%s reaches s.%s, which no sink scan covers", owner, node.Sel.Name)
+					scan(owner+"'s direct helper "+node.Sel.Name, mutationFuncs[node.Sel.Name].Body, true, true)
+				}
+			}
+			return true
+		})
+	}
+	for _, name := range []string{"removeOwnerReadyWholeRecordLocked", "dropOwnerReadyChunksLocked", "tickOwnerReadyTTLRecordLocked", "projectOwnerReadyRetirementLocked"} {
+		scan(name, mutationFuncs[name].Body, name == "tickOwnerReadyTTLRecordLocked", false)
+	}
+	// LEGACY ROOT PIN: the private TTL root still decrements in place and mints NO revision.
 	legacyState := newDARelayStateForTest(t, defaultDARelayCaps())
 	legacyState.caps.orphanTTLBlocks = 3
 	legacyID := daRelayTestID(0x7a)
@@ -4941,11 +5085,18 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	record.ttlBlocksRemaining = 2
 	legacyState.sets[legacyID] = record
 	legacyState.mu.Unlock()
-	if err := legacyState.AdvanceOrphanTTL(); err != nil {
-		t.Fatalf("legacy AdvanceOrphanTTL: %v", err)
-	}
+	_, err := legacyState.advanceOrphanTTL()
 	after := daRelayStateSnapshot(legacyState)
-	if got := after.sets[legacyID]; got.ttlBlocksRemaining != 1 || got.revision != 0 || after.records != 0 {
-		t.Fatalf("legacy TTL decrement=%+v high-water=%d, want in-place ttl=1 revision=0", got, after.records)
-	}
+	require(t, err == nil && after.sets[legacyID].ttlBlocksRemaining == 1 && after.sets[legacyID].revision == 0 && after.records == 0, "legacy advanceOrphanTTL err=%v record=%+v high-water=%d, want in-place ttl=1 revision=0", err, after.sets[legacyID], after.records)
+	// OWNER-READY WRAPPER: AdvanceOrphanTTL ticks once, mints one revision, keeps the container and backing.
+	f, daID := newDANonReplayFixture(t, 1), [32]byte{0x7b}
+	f.ownerReadyChunk(daID, 0, "wrapped", daNonReplayPeer("keep"))
+	f.setOwnerReadyTTL(daID, 3)
+	var liveBefore, liveAfter daRelaySetRecord
+	var chunkBefore daRelayChunk // a value copy: an in-place edit of the shared live map cannot reach it
+	f.mutateRelay(func(s *DARelayState) { liveBefore = s.sets[daID]; chunkBefore = liveBefore.chunks[0] })
+	err = f.relay.AdvanceOrphanTTL()
+	f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
+	require(t, err == nil && liveAfter.ttlBlocksRemaining == 2 && liveAfter.revision == liveBefore.revision+1 && daRelayStateSnapshot(f.relay).records == liveAfter.revision, "owner-ready AdvanceOrphanTTL err=%v ttl=%d revision=%d (before %d)", err, liveAfter.ttlBlocksRemaining, liveAfter.revision, liveBefore.revision)
+	require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.chunks[0].member == chunkBefore.member && &liveAfter.chunks[0].txBytes[0] == &chunkBefore.txBytes[0] && &liveAfter.chunks[0].payload[0] == &chunkBefore.payload[0], "owner-ready tick copied the chunks container or a member's backing")
 }

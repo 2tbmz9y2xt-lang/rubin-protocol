@@ -120,6 +120,13 @@ type peer struct {
 
 	stateMu sync.Mutex
 	state   node.PeerState
+	// qualityScore and qualityHeight are COMPETING_SCORE_V1's connection-local state
+	// (da_relay_ingest.go) under stateMu: the score and the local tip height of its last
+	// consumed normalization interval. handleConn initializes them once before
+	// registration; never copied into node.PeerState, so the peer manager, bumpBan,
+	// setLastError and sendcmpct never reset them; zero is a valid score.
+	qualityScore  uint8
+	qualityHeight uint64
 
 	writeMu sync.Mutex
 
@@ -313,9 +320,11 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 
 // AnnounceTx admits a locally submitted transaction to the relay pool and
 // announces it. It takes one Service call lease before parsing, admission,
-// DA staging, seen-set mutation or inventory send: once Close has published
-// the non-OPEN state it returns exactly "service already closed" with zero
-// effects, and a call that won the lease first finishes while Close waits.
+// seen-set mutation or inventory send: once Close has published the non-OPEN
+// state it returns exactly "service already closed" with zero effects, and a
+// call that won the lease first finishes while Close waits. A local DA
+// transaction stays in the standard relay pool exactly as before; no retained
+// DA member is staged from here.
 func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -328,11 +337,9 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	if err != nil {
 		return err
 	}
-	admittedTxBytes, admittedTx, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false)
-	if err != nil {
+	if _, _, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false); err != nil {
 		return err
 	}
-	_ = s.stageRelayDATx("", admittedTxBytes, admittedTx, true)
 	if !s.txSeen.Add(txid) {
 		return nil
 	}

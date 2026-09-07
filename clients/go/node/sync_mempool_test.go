@@ -525,17 +525,14 @@ func TestCanonicalMOPlanOwnerClaimsAndDIndependence(t *testing.T) {
 	standard := f.add(t, f.ops[0], 1)
 	retained := f.add(t, f.ops[1], 2)
 	retainedEntry, retainedClaim := residentClaim(t, f.mp, retained)
+	// The DA claim is paired with its retained member: the live canonical fence
+	// refuses an unbound DA-domain claim as terminal.
 	owner := f.mp.PendingOutpointOwner()
-	ctx, ok := owner.AdmissionContext()
-	if !ok {
-		t.Fatal("owner unavailable")
-	}
-	daToken, err := owner.Reserve(ctx, PendingOutpointDA, [32]byte{0xda}, []consensus.Outpoint{f.ops[2]})
-	if err != nil || owner.Finalize(daToken) != nil {
-		t.Fatalf("DA claim: token=%+v err=%v", daToken, err)
-	}
+	admitOwnerReady(t, f.engine.DARelayState(), f.ownerReadyCommitTx(t, f.ops[2], daRelayTestID(0xda), 2, 3))
 	owner.mu.Lock()
-	daBefore, daRowBefore := *owner.byToken[daToken], owner.byOutpoint[f.ops[2]]
+	daRowBefore := owner.byOutpoint[f.ops[2]]
+	daToken := daRowBefore.token
+	daBefore := *owner.byToken[daToken]
 	owner.mu.Unlock()
 	before := owner.snapshot()
 	beforeImage := canonicalMOImageFingerprint(t, f.mp, 0)

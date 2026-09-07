@@ -366,6 +366,18 @@ func TestSyncEngine_RecordBestKnownHeight(t *testing.T) {
 	}
 }
 
+// TestSyncEngineLocalTipHeight pins the local-height source of the P2P peer-quality
+// policy: 0 for a nil engine or no published tip, else the local height, never a remote one.
+func TestSyncEngineLocalTipHeight(t *testing.T) {
+	st := NewChainState()
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, [32]byte{}, ""))
+	require(t, err == nil, "NewSyncEngine: %v", err)
+	require(t, (*SyncEngine)(nil).LocalTipHeight() == 0 && (&SyncEngine{}).LocalTipHeight() == 0 && engine.LocalTipHeight() == 0, "nil engine=%d nil chainstate=%d no-tip engine=%d, want 0, 0 and 0", (*SyncEngine)(nil).LocalTipHeight(), (&SyncEngine{}).LocalTipHeight(), engine.LocalTipHeight())
+	st.HasTip, st.Height = true, 7
+	engine.RecordBestKnownHeight(1_000_000)
+	require(t, engine.LocalTipHeight() == 7, "published local tip height=%d after a remote best height, want 7", engine.LocalTipHeight())
+}
+
 func TestSyncEngine_IsInIBDEdgeCases(t *testing.T) {
 	var nilEngine *SyncEngine
 	if !nilEngine.IsInIBD(0) {

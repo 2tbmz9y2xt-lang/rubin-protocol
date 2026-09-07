@@ -1,7 +1,6 @@
 package p2p
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 
@@ -30,48 +29,31 @@ func (p *peer) handleTx(txBytes []byte) error {
 		}
 		return nil
 	}
+	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
+		// DA kinds exit to the retained-DA owner before any standard effect (seen-set, pool, metadata, MSG_TX).
+		return p.handleRelayDATx(txBytes)
+	}
+	return p.handleStandardTx(txBytes, tx, txid)
+}
+
+// handleStandardTx is the unchanged standard arm: seen-set first, then admission,
+// then the MSG_TX announcement.
+func (p *peer) handleStandardTx(txBytes []byte, tx *consensus.Tx, txid [32]byte) error {
 	if p.service.txSeen.Has(txid) {
-		return p.handleSeenRelayTxVariant(txid, txBytes, tx)
+		return nil
 	}
 	// Mark as seen BEFORE pool admission so that pool-full rejections still
 	// suppress future getdata requests (prevents inv/getdata churn at capacity).
-	if stop, err := p.validateAndMarkRelayTxSeen(txid, txBytes, tx); stop {
-		return err
+	if !p.service.txSeen.Add(txid) {
+		return nil
 	}
-	admittedTxBytes, admittedTx, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true)
-	if err != nil {
+	if _, _, err := p.service.ensureRelayTxAdmitted(txid, txBytes, tx, true); err != nil {
 		// Keep admission and metadata rejections peer-neutral for Go/Rust relay
 		// parity: local policy/runtime state can reject a structurally valid tx,
 		// and Rust surfaces the same branch as non-banworthy MetadataRejected.
 		return nil //nolint:nilerr
 	}
-	_ = p.service.stageRelayDATx(p.addr(), admittedTxBytes, admittedTx, true)
 	_ = p.service.broadcastInventory(p, []InventoryVector{{Type: MSG_TX, Hash: txid}})
-	return nil
-}
-
-func (p *peer) validateAndMarkRelayTxSeen(txid [32]byte, txBytes []byte, tx *consensus.Tx) (bool, error) {
-	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
-		if p.bumpBan(10, err.Error()) {
-			return true, err
-		}
-		return true, nil
-	}
-	return !p.service.txSeen.Add(txid), nil
-}
-
-func (p *peer) handleSeenRelayTxVariant(txid [32]byte, txBytes []byte, tx *consensus.Tx) error {
-	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
-		return nil
-	}
-	if admittedTxBytes, ok := p.service.cfg.TxPool.Get(txid); ok && bytes.Equal(admittedTxBytes, txBytes) {
-		return nil
-	}
-	if err := validateRelayDATxForAdmission(txBytes, tx); err != nil {
-		if p.bumpBan(10, err.Error()) {
-			return err
-		}
-	}
 	return nil
 }
 

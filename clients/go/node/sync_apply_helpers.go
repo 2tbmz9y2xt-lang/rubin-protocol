@@ -432,9 +432,9 @@ type canonicalFenceImage struct {
 // prepareCanonicalFenceImage rechecks freshness under the fence and then builds
 // the complete standard/owner image against final C1, binds the prepared owner
 // image's stable tip to C1, and runs the full live preflight under Mempool.mu
-// then PendingOutpointOwner.mu. Only then does it prepare the retained-DA image
-// against the SAME captured C1 context. It publishes nothing: publication is a
-// separate assignment that runs only after the commit selects NEW.
+// then PendingOutpointOwner.mu. Only then is D prepared against the SAME captured C1, on a
+// private copy taken under DARelayState.mu and released before the builder; O1 is the builder's
+// pair; a nil relay skips D. It publishes nothing: publication runs only after the commit selects NEW.
 //
 // The M/O half is deliberately FIRST and complete before the D half starts, so a
 // transition violating both invariants at once reports the standard/owner error:
@@ -472,11 +472,18 @@ func (s *SyncEngine) prepareCanonicalFenceImage(tr *canonicalTransition, plan *c
 	if err := validateCanonicalMempoolLiveImage(tr.mempool, mo.snapshot, mo.snapshotUsedBytes, mo.owner); err != nil {
 		return canonicalFenceImage{}, terminalCanonicalMempoolError(err)
 	}
-	da, err := prepareCanonicalDAImage(tr.daRelay, plan.includedDA, mo.chain)
+	if tr.daRelay == nil {
+		return canonicalFenceImage{mo: &mo}, nil
+	}
+	tr.daRelay.mu.Lock()
+	retained := tr.daRelay.cloneForAtomicBatchLocked()
+	tr.daRelay.mu.Unlock()
+	candidates, err := prepareCanonicalDAOwnerCandidates(retained, mo.owner, mo.pending, plan.includedDA, mo.chain)
 	if err != nil {
 		return canonicalFenceImage{}, err
 	}
-	return canonicalFenceImage{mo: &mo, da: da}, nil
+	mo.pending, mo.ownerIndex = candidates.pending, candidates.ownerIndex
+	return canonicalFenceImage{mo: &mo, da: &preparedCanonicalDAImage{relay: tr.daRelay, projected: candidates.retained}}, nil
 }
 
 // recheckCanonicalTransitionFreshness proves, under the admission fence, that the

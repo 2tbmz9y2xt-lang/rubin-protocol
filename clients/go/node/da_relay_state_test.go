@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"strings"
@@ -170,7 +171,7 @@ func TestDARelayPeerQuotaKeyPreventsPortHopping(t *testing.T) {
 func TestDARelayReleasePeerQuotaKeySkipsUnchargedPeer(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	record := mustAddDAChunk(t, state, "peer-a", daRelayTestChunk(daRelayTestID(112), 0, 7))
-	if err := state.ReleasePeerQuotaKey("peer-b"); err != nil {
+	if err := state.releasePeerQuotaKey("peer-b"); err != nil {
 		t.Fatalf("release uncharged peer: %v", err)
 	}
 	if got := state.orphanBytesForPeerQuotaKey("peer-a"); got != record.wireBytes {
@@ -916,8 +917,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 			t.Fatalf("first ttl err=%v expired=%+v, want %v and nil", err, expired, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
-		if err := state.AdvanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
-			t.Fatalf("public ttl err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
+		if _, err := state.advanceOrphanTTL(); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
+			t.Fatalf("legacy ttl err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
 	})
@@ -960,7 +961,8 @@ func TestDARelayAdvanceOrphanTTLBatchErrorLeavesWholeImageUnchanged(t *testing.T
 	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
 		state, expected := newDARelayLockedSnapshotState(t, "peer-ttl"), newDARelayLockedSnapshotState(t, "peer-ttl")
 		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
-			return state.AdvanceOrphanTTL()
+			_, err := state.advanceOrphanTTL()
+			return err
 		})
 	})
 }
@@ -973,7 +975,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		state := newDARelayStateForTest(t, defaultDARelayCaps())
 		mustAddDAChunk(t, state, "peer-keep", daRelayTestChunk(daRelayTestID(211), 0, 7))
 		before := daRelayStateSnapshot(state)
-		if err := state.ReleasePeerQuotaKey("peer-drop"); err != nil {
+		if err := state.releasePeerQuotaKey("peer-drop"); err != nil {
 			t.Fatalf("uncharged release: %v", err)
 		}
 		requireDARelayStateUnchanged(t, state, before)
@@ -989,7 +991,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 			t.Fatalf("build peer expected image: %v", wantErr)
 		}
 		completeWant, want := daRelayStateSnapshot(state).sets[daRelayTestID(215)], daRelayStateSnapshot(twin)
-		if err := state.ReleasePeerQuotaKey("peer-drop"); err != nil {
+		if err := state.releasePeerQuotaKey("peer-drop"); err != nil {
 			t.Fatalf("release peer: %v", err)
 		}
 		_, retained := state.sets[daRelayTestID(250)]
@@ -1009,7 +1011,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 			state, ids := newDARelayAtomicBatchState(t, "peer-drop")
 			state.orphanBytesByDAID[ids[tt.index]] = 0
 			before := daRelayStateSnapshot(state)
-			err := state.ReleasePeerQuotaKey("peer-drop")
+			err := state.releasePeerQuotaKey("peer-drop")
 			if err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact identity is part of the contract.
 				t.Fatalf("underflow err=%v, want %v", err, errDARelayArithmeticOverflow)
 			}
@@ -1031,7 +1033,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 		state.sets[ids[2]] = corrupt
 		state.orphanBytesByDAID[ids[2]] = corrupt.wireBytes
 		before := daRelayStateSnapshot(state)
-		err := state.ReleasePeerQuotaKey("peer-drop")
+		err := state.releasePeerQuotaKey("peer-drop")
 		if err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("overflow err=%v, want %v", err, errDARelayArithmeticOverflow)
 		}
@@ -1040,7 +1042,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 	t.Run("first error wins", func(t *testing.T) {
 		state, _ := newDARelayFirstErrorState(t)
 		before := daRelayStateSnapshot(state)
-		if err := state.ReleasePeerQuotaKey("peer-drop"); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
+		if err := state.releasePeerQuotaKey("peer-drop"); err != errDARelayOrphanPeerCapExceeded { //nolint:errorlint // Exact identity is part of the contract.
 			t.Fatalf("first peer err=%v, want %v", err, errDARelayOrphanPeerCapExceeded)
 		}
 		requireDARelayStateUnchanged(t, state, before)
@@ -1048,7 +1050,7 @@ func TestDARelayReleasePeerQuotaKeyBatchErrorLeavesWholeImageUnchanged(t *testin
 	t.Run("locked test snapshots preserve complete images", func(t *testing.T) {
 		state, expected := newDARelayLockedSnapshotState(t, "peer-drop"), newDARelayLockedSnapshotState(t, "peer-drop")
 		requireDARelayLockedSnapshotImages(t, state, expected, func(state *DARelayState) error {
-			return state.ReleasePeerQuotaKey("peer-drop")
+			return state.releasePeerQuotaKey("peer-drop")
 		})
 	})
 }
@@ -1635,7 +1637,7 @@ func TestDARelayRejectsMismatchApplyFailureBeforeMutation(t *testing.T) {
 	})
 }
 
-func TestDARelayStageChunkRejectsDuplicateWithoutMutation(t *testing.T) {
+func TestDARelayStageChunkRecordLockedRejectsDuplicateWithoutMutation(t *testing.T) {
 	state := newDARelayStateForTest(t, defaultDARelayCaps())
 	daID := daRelayTestID(59)
 	chunk := daRelayTestChunk(daID, 0, 1)
@@ -1718,7 +1720,7 @@ func TestDARelayCompletionTransitionsRejectStaleSnapshots(t *testing.T) {
 		if err != nil || !complete {
 			t.Fatalf("capture commit-last snapshot complete=%v err=%v", complete, err)
 		}
-		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
+		if err := state.releasePeerQuotaKey("peer-a"); err != nil {
 			t.Fatalf("release snapshotted chunk: %v", err)
 		}
 		payloadBytes, _ := snapshot.payloadCommitment()
@@ -1745,7 +1747,7 @@ func TestDARelayCompletionTransitionsRejectStaleSnapshots(t *testing.T) {
 		if err != nil || !complete {
 			t.Fatalf("capture chunk-last snapshot complete=%v err=%v", complete, err)
 		}
-		if err := state.ReleasePeerQuotaKey("peer-a"); err != nil {
+		if err := state.releasePeerQuotaKey("peer-a"); err != nil {
 			t.Fatalf("release snapshotted chunk: %v", err)
 		}
 		payloadBytes, _ := snapshot.payloadCommitment()
@@ -2181,12 +2183,57 @@ func newDARelayStateForTest(t *testing.T, caps daRelayCaps) *DARelayState {
 	return state
 }
 
+// The two prefetch planning rows relocated from package p2p: their record shapes
+// (a MAX_DA_CHUNK_COUNT commit above the policy cap, a completing chunk the deferred
+// COMPLETE_SET guard refuses) are reachable only through the legacy unit-test roots.
+func TestDAPrefetchPlansAreBoundedDeduplicatedAndReleasable(t *testing.T) {
+	state, err := newDARelayState(nil, defaultDARelayCaps())
+	require(t, err == nil, "newDARelayState: %v", err)
+	daID := daRelayTestID(130)
+	mustAddDACommit(t, state, "", daRelayCommit{daID: daID, chunkCount: uint16(consensus.MAX_DA_CHUNK_COUNT), wireBytes: 1})
+	keys := []string{"peer-a", "peer-b", "peer-c", "peer-d", "peer-e", "peer-f", "peer-g", "peer-h", "peer-i"}
+	now := time.Unix(1000, 0)
+	for seed := byte(131); seed < 139; seed++ {
+		mustAddDACommit(t, state, "", daRelayCommit{daID: daRelayTestID(seed), chunkCount: 1, wireBytes: 1})
+		empty, diagnostic := state.PlanPrefetch(daRelayTestID(seed), nil, now)
+		require(t, len(empty) == 0 && diagnostic == "", "empty plans=%+v diagnostic=%q", empty, diagnostic)
+	}
+	plans, diagnostic := state.PlanPrefetch(daID, keys, now)
+	seen, total, maxPeerBytes := map[uint16]bool{}, 0, uint64(0)
+	for _, plan := range plans {
+		total += len(plan.Indexes)
+		for _, index := range plan.Indexes {
+			seen[index] = true
+		}
+		maxPeerBytes = max(maxPeerBytes, uint64(len(plan.Indexes))*consensus.CHUNK_BYTES)
+	}
+	require(t, diagnostic == "" && total == int(consensus.MAX_DA_CHUNK_COUNT) && len(seen) == total && maxPeerBytes <= 4_000_000, "diagnostic=%q total=%d unique=%d max_peer_bytes=%d", diagnostic, total, len(seen), maxPeerBytes)
+	duplicate, diagnostic := state.PlanPrefetch(daID, keys, now)
+	require(t, len(duplicate) == 0 && diagnostic == "", "duplicate plans=%d diagnostic=%q", len(duplicate), diagnostic)
+	retry, diagnostic := state.PlanPrefetch(daID, keys, now.Add(time.Second+time.Nanosecond))
+	require(t, len(retry) == len(plans) && diagnostic == "", "expired plans=%d diagnostic=%q, want %d", len(retry), diagnostic, len(plans))
+}
+
+func TestDAPrefetchCompletionReleasesReservations(t *testing.T) {
+	state, err := newDARelayState(nil, defaultDARelayCaps())
+	require(t, err == nil, "newDARelayState: %v", err)
+	daID, payload, now := daRelayTestID(150), []byte{1}, time.Unix(1000, 0)
+	mustAddDACommit(t, state, "", daRelayCommit{daID: daID, payloadCommitment: sha3.Sum256(payload), chunkCount: 1, wireBytes: 1})
+	plans, diagnostic := state.PlanPrefetch(daID, []string{"peer-a"}, now)
+	require(t, len(plans) == 1 && diagnostic == "", "plans=%+v diagnostic=%q", plans, diagnostic)
+	mustAddDAChunk(t, state, "", daRelayChunk{daID: daID, payload: payload, wireBytes: 1, hashChecked: true})
+	plans, diagnostic = state.PlanPrefetch(daID, []string{"peer-a"}, now)
+	require(t, len(plans) == 0 && diagnostic == "", "complete plans=%+v diagnostic=%q", plans, diagnostic)
+	for i := byte(0); i < 8; i++ {
+		mustAddDACommit(t, state, "", daRelayCommit{daID: daRelayTestID(160 + i), chunkCount: 1, wireBytes: 1})
+		plans, diagnostic := state.PlanPrefetch(daRelayTestID(160+i), []string{fmt.Sprintf("peer-%d", i)}, now)
+		require(t, len(plans) == 1 && diagnostic == "", "plans(%d)=%+v diagnostic=%q", i, plans, diagnostic)
+	}
+}
+
 func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRelayChunk) daRelaySetRecord {
 	t.Helper()
-	if err := state.StageChunk(peer, DARelayChunk{
-		DAID: chunk.daID, ChunkHash: chunk.chunkHash, ChunkIndex: chunk.chunkIndex, Payload: chunk.payload,
-		WireBytes: chunk.wireBytes, TxBytes: chunk.txBytes, HashChecked: chunk.hashChecked,
-	}); err != nil {
+	if err := state.addDAChunk(peer, chunk); err != nil {
 		t.Fatalf("add DA chunk: %v", err)
 	}
 	return state.sets[chunk.daID].clone()
@@ -2194,10 +2241,7 @@ func mustAddDAChunk(t *testing.T, state *DARelayState, peer string, chunk daRela
 
 func mustAddDACommit(t *testing.T, state *DARelayState, peer string, commit daRelayCommit) daRelaySetRecord {
 	t.Helper()
-	if err := state.StageCommit(peer, DARelayCommit{
-		DAID: commit.daID, PayloadCommitment: commit.payloadCommitment, ChunkCount: commit.chunkCount,
-		WireBytes: commit.wireBytes, TxBytes: commit.txBytes,
-	}); err != nil {
+	if err := state.addDACommit(peer, commit); err != nil {
 		t.Fatalf("add DA commit: %v", err)
 	}
 	return state.sets[commit.daID].clone()

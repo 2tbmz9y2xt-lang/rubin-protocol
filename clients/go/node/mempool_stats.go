@@ -92,9 +92,20 @@ type TxAdmitError struct {
 	// neither read it nor change with it. Its zero value means "no branch
 	// selected", which relayDispositionOf reports as INTERNAL, fail closed.
 	disposition RelayAdmissionDisposition
+	// cause is the originating sentinel the building branch attached for errors.Is, or nil;
+	// only Unwrap exposes it — Error(), Kind, Message, counters and HTTP status never read it.
+	cause error
 }
 
 func (e *TxAdmitError) Error() string { return e.Message }
+
+// Unwrap: the building branch's sentinel or nil (nil receiver included); errors.As still stops at this pointer.
+func (e *TxAdmitError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 func txAdmitConflict(msg string) *TxAdmitError {
 	return &TxAdmitError{Kind: TxAdmitConflict, Message: msg}

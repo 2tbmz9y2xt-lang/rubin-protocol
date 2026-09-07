@@ -26,6 +26,20 @@ func (s *SyncEngine) RecordBestKnownHeight(height uint64) {
 	}
 }
 
+// LocalTipHeight is the published local tip height read through the coherent
+// chainstate view, or 0 for a nil engine/chainstate or no published tip; it is
+// never BestKnownHeight and is the P2P peer-quality policy's only height source.
+func (s *SyncEngine) LocalTipHeight() uint64 {
+	if s == nil {
+		return 0
+	}
+	view := s.chainState.view()
+	if !view.hasTip {
+		return 0
+	}
+	return view.height
+}
+
 func (s *SyncEngine) BestKnownHeight() uint64 {
 	if s == nil {
 		return 0

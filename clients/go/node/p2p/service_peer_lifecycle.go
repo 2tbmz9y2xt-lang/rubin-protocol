@@ -40,9 +40,11 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	}
 
 	current := &peer{
-		conn:    conn,
-		service: s,
-		state:   state,
+		conn:          conn,
+		service:       s,
+		state:         state,
+		qualityScore:  qualityScoreInitial,
+		qualityHeight: s.cfg.SyncEngine.LocalTipHeight(),
 	}
 	current.state.Addr = peerAddressKey(outboundAddr, current.state.Addr)
 	if err := s.registerPeer(current); err != nil {
