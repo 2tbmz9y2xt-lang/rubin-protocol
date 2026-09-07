@@ -145,6 +145,16 @@ func requireSuppressed(t *testing.T, got node.DAAdmissionResult, err error, labe
 	require(t, got == node.DAAdmissionResult{} && errors.As(err, &admit) && admit.Kind == node.TxAdmitUnavailable && admit.Message == "DA repeated stable rejection suppressed", "%s: probe=(%+v,%v), want the zero result with TxAdmitUnavailable \"DA repeated stable rejection suppressed\"", label, got, err)
 }
 
+func requireInvFrame(t *testing.T, frames <-chan message, txid [32]byte, label string) {
+	t.Helper()
+	select {
+	case frame := <-frames:
+		assertInventoryFrameHashes(t, []message{frame}, []InventoryVector{{Type: MSG_TX, Hash: txid}})
+	case <-time.After(time.Second):
+		t.Fatalf("%s: no relay frame within 1s", label)
+	}
+}
+
 // admit retains raw through the production entry with PEER provenance for peer.
 func (f *daIngressFixture) admit(raw []byte, peer string) {
 	f.t.Helper()
@@ -288,9 +298,9 @@ func TestRemoteDAExitsBeforeEveryStandardAuthority(t *testing.T) {
 	require(t, calls.Load() == 2, "scheduler entries after two retained members=%d, want 2", calls.Load())
 	standard, txid, _ := signedCanonicalP2PTxForHarness(t, h, 9411)
 	must(t, p.handleTx(standard), "handleTx(standard)")
-	frame := <-frames
+	requireInvFrame(t, frames, txid, "standard path")
 	counters.Accepted++
-	require(t, h.service.txSeen.Has(txid) && mempool.Contains(txid) && frame.Command == messageInv && calls.Load() == 2 && mempool.AdmissionCounts() == counters, "standard path seen=%v pooled=%v command=%q scheduler entries=%d counters=%+v (want %+v), want the DA assertions non-vacuous", h.service.txSeen.Has(txid), mempool.Contains(txid), frame.Command, calls.Load(), mempool.AdmissionCounts(), counters)
+	require(t, h.service.txSeen.Has(txid) && mempool.Contains(txid) && calls.Load() == 2 && mempool.AdmissionCounts() == counters, "standard path seen=%v pooled=%v scheduler entries=%d counters=%+v (want %+v), want the DA assertions non-vacuous", h.service.txSeen.Has(txid), mempool.Contains(txid), calls.Load(), mempool.AdmissionCounts(), counters)
 }
 
 // TestRemoteDAResultEffects executes every result row of the remote DA arm on real signed
@@ -445,8 +455,9 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	rf.requireRetained(valid, "the valid representation after its suppressed invalid witness")
 	standard, stxid, _ := signedCanonicalP2PTxForHarness(t, rh, 9413)
 	must(t, rp.handleTx(standard), "handleTx(standard)")
+	requireInvFrame(t, rframes, stxid, "REJECTED_REPEAT standard control")
 	counters.Accepted++
-	require(t, rh.service.txSeen.Has(stxid) && rmempool.Contains(stxid) && (<-rframes).Command == messageInv && rmempool.AdmissionCounts() == counters, "REJECTED_REPEAT standard control: seen=%v pooled=%v counters=%+v (want %+v), want every untouched authority live", rh.service.txSeen.Has(stxid), rmempool.Contains(stxid), rmempool.AdmissionCounts(), counters)
+	require(t, rh.service.txSeen.Has(stxid) && rmempool.Contains(stxid) && rmempool.AdmissionCounts() == counters, "REJECTED_REPEAT standard control: seen=%v pooled=%v counters=%+v (want %+v), want every untouched authority live", rh.service.txSeen.Has(stxid), rmempool.Contains(stxid), rmempool.AdmissionCounts(), counters)
 }
 
 // TestRemoteDAIdentityBoundsPrecedeAdmission pins IDENTITY_BOUNDS_V1 at both limits
@@ -564,7 +575,7 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 		standardTouched := h.service.txSeen.Has(txid) || mempool.Contains(txid)
 		require(t, frozenFlag(want, "standard_present") == standardTouched && !frozenFlag(p2p, "standard_fallback"), "%s: standard present=%v, frozen standard_present=%v standard_fallback=%v", id, standardTouched, want["standard_present"], p2p["standard_fallback"])
 		if standardTouched {
-			<-frames // the one MSG_TX announcement of the standard exit
+			requireInvFrame(t, frames, txid, id)
 			counters.Accepted++
 		} else {
 			assertNoRelayFrame(t, frames, id)
@@ -580,13 +591,15 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 			require(t, calls.Load() == 1 && retained, "%s: entries=%d probe=(%+v,%v), want one scheduler entry and a retained member", id, calls.Load(), got, probeErr)
 		case "REJECTED":
 			require(t, calls.Load() == 0 && !frozenFlag(p2p, "replay_inventory_publications"), "%s: entries=%d probe=(%+v,%v)", id, calls.Load(), got, probeErr)
-			if errorCode != "" { // the PEER re-probe of the rejected bytes is the Section 5.3 hit; the frozen code is the same bytes' PEER miss on a fresh owner holding a copy of the spent input
+			if errorCode != "" { // the PEER re-probe of the rejected bytes is the Section 5.3 hit; the frozen code is the same bytes' PEER miss on a fresh owner in the row's frozen pre-state REMOTE_SAME_TXID_NONEXACT_COMMIT_RETAINED: the spent input funded, the same-txid valid commit retained
 				requireSuppressed(t, got, probeErr, id)
-				fresh := newTestHarness(t, 2, "127.0.0.1:0", nil)
-				in := mustParseP2PTx(t, row.raw).Inputs[0]
+				ff := newDAIngressFixture(t, newTestHarness(t, 2, "127.0.0.1:0", nil))
+				in, valid := mustParseP2PTx(t, row.raw).Inputs[0], rows["REMOTE_COMMIT_RETAINED"].raw
 				op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-				fresh.chainState.Utxos[op] = h.chainState.Utxos[op]
-				missed, missErr := newDAIngressFixture(t, fresh).probe(row.raw)
+				ff.h.chainState.Utxos[op] = h.chainState.Utxos[op]
+				ff.admit(valid, "fresh-peer")
+				ff.requireRetained(valid, id+" pre-state: the same-txid valid commit on the fresh owner")
+				missed, missErr := ff.probe(row.raw)
 				require(t, missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, missed, missErr, errorCode)
 			}
 			replay := strings.HasPrefix(id, "REMOTE_EXACT") || id == "REMOTE_SAME_TXID_NONEXACT_VALID"
