@@ -138,6 +138,13 @@ func (f *daIngressFixture) requireAbsent(raw []byte, label string) {
 	require(f.t, err == nil && got.Disposition == node.DAAdmissionRetained, "%s: readmit=(%+v,%v), want RETAINED", label, got, err)
 }
 
+// requireSuppressed asserts the Section 5.3 hit on a probe result: the zero result, TxAdmitUnavailable, the exact suppression message.
+func requireSuppressed(t *testing.T, got node.DAAdmissionResult, err error, label string) {
+	t.Helper()
+	var admit *node.TxAdmitError
+	require(t, got == node.DAAdmissionResult{} && errors.As(err, &admit) && admit.Kind == node.TxAdmitUnavailable && admit.Message == "DA repeated stable rejection suppressed", "%s: probe=(%+v,%v), want the zero result with TxAdmitUnavailable \"DA repeated stable rejection suppressed\"", label, got, err)
+}
+
 // admit retains raw through the production entry with PEER provenance for peer.
 func (f *daIngressFixture) admit(raw []byte, peer string) {
 	f.t.Helper()
@@ -424,9 +431,8 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	}
 	suppressed := func(label string) {
 		t.Helper()
-		var admit *node.TxAdmitError
 		got, err := rf.probe(invalid)
-		require(t, got == node.DAAdmissionResult{} && errors.As(err, &admit) && admit.Kind == node.TxAdmitUnavailable && admit.Message == "DA repeated stable rejection suppressed", "%s: probe=(%+v,%v), want the zero result with TxAdmitUnavailable \"DA repeated stable rejection suppressed\"", label, got, err)
+		requireSuppressed(t, got, err, label)
 	}
 	run("REJECTED_REPEAT first entry", rp, invalid, nil, 0, same)
 	suppressed("REJECTED_REPEAT probe after the first entry")
@@ -568,7 +574,12 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 		case "RETAINED_INCOMPLETE":
 			require(t, calls.Load() == 1 && retained, "%s: entries=%d probe=(%+v,%v), want one scheduler entry and a retained member", id, calls.Load(), got, probeErr)
 		case "REJECTED":
-			require(t, calls.Load() == 0 && !frozenFlag(p2p, "replay_inventory_publications") && (errorCode == "" || (probeErr != nil && strings.Contains(probeErr.Error(), errorCode))), "%s: entries=%d probe=(%+v,%v), frozen error_code %q", id, calls.Load(), got, probeErr, errorCode)
+			require(t, calls.Load() == 0 && !frozenFlag(p2p, "replay_inventory_publications"), "%s: entries=%d probe=(%+v,%v)", id, calls.Load(), got, probeErr)
+			if errorCode != "" { // the PEER re-probe of the rejected bytes is the Section 5.3 hit; the frozen code is observed under LOCAL provenance, which never consults the cache
+				requireSuppressed(t, got, probeErr, id)
+				local, localErr := h.service.daRelay.AdmitDA(row.raw, node.LocalDAProvenance())
+				require(t, localErr != nil && strings.Contains(localErr.Error(), errorCode) && local == node.DAAdmissionResult{}, "%s: LOCAL admission=(%+v,%v), frozen error_code %q", id, local, localErr, errorCode)
+			}
 			replay := strings.HasPrefix(id, "REMOTE_EXACT") || id == "REMOTE_SAME_TXID_NONEXACT_VALID"
 			require(t, retained == replay, "%s: retained=%v on a replay=%v row: probe=(%+v,%v)", id, retained, replay, got, probeErr)
 		default:
