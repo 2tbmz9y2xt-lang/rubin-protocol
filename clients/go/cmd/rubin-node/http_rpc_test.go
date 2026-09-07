@@ -26,6 +26,7 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node/p2p"
 )
 
 func mustRPCState(t *testing.T, withGenesis bool) *devnetRPCState {
@@ -64,6 +65,24 @@ func mustRPCStateAtDir(t *testing.T, dir string, withGenesis bool) *devnetRPCSta
 	state := newDevnetRPCState(syncEngine, blockStore, mempool, peerManager, nil, nil, io.Discard, nil)
 	state.nowUnix = func() uint64 { return 0 }
 	return state
+}
+
+func wireRPCDAService(t *testing.T, state *devnetRPCState) *p2p.Service {
+	service, err := p2p.NewService(p2p.ServiceConfig{
+		BindAddr:       "127.0.0.1:0",
+		PeerManager:    state.peerManager,
+		SyncEngine:     state.syncEngine,
+		BlockStore:     state.blockStore,
+		TxPool:         p2p.NewCanonicalMempoolTxPool(state.mempool),
+		TxMetadataFunc: p2p.CanonicalMempoolRelayMetadata,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	state.admitLocalDA = service.AdmitLocalDA
+	state.prefetchLocalDA = service.ScheduleLocalDAPrefetch
+	t.Cleanup(func() { _ = service.Close() })
+	return service
 }
 
 func mustRPCMLDSA87Keypair(t *testing.T) *consensus.MLDSA87Keypair {
@@ -235,15 +254,24 @@ func mustRPCSignedDaCommitTx(
 	signer *consensus.MLDSA87Keypair,
 	toAddress []byte,
 	commitTxPayload []byte,
-	singleChunkPayload []byte,
+	chunkPayloads ...[]byte,
 ) ([]byte, string) {
 	t.Helper()
 	if len(commitTxPayload) == 0 {
 		t.Fatalf("DA_COMMIT tx payload must be non-empty")
 	}
-	if len(singleChunkPayload) == 0 {
-		t.Fatalf("DA_COMMIT chunk payload must be non-empty")
+	if len(chunkPayloads) == 0 || len(chunkPayloads) > int(^uint16(0)) {
+		t.Fatalf("DA_COMMIT chunk payload count=%d", len(chunkPayloads))
 	}
+	hasher := sha3.New256()
+	for i, payload := range chunkPayloads {
+		if len(payload) == 0 {
+			t.Fatalf("DA_COMMIT chunk payload %d must be non-empty", i)
+		}
+		_, _ = hasher.Write(payload)
+	}
+	var commitment [32]byte
+	copy(commitment[:], hasher.Sum(nil))
 	entry, ok := utxos[input]
 	if !ok {
 		t.Fatalf("missing utxo for %x:%d", input.Txid, input.Vout)
@@ -251,7 +279,6 @@ func mustRPCSignedDaCommitTx(
 	if entry.Value < fee {
 		t.Fatalf("utxo value=%d, want at least fee=%d", entry.Value, fee)
 	}
-	chunkPayloadCommitment := sha3.Sum256(singleChunkPayload)
 	tx := &consensus.Tx{
 		Version: 1,
 		TxKind:  0x01,
@@ -261,22 +288,15 @@ func mustRPCSignedDaCommitTx(
 			PrevVout: input.Vout,
 			Sequence: 0,
 		}},
-		Outputs: []consensus.TxOutput{{
-			Value:        0,
-			CovenantType: consensus.COV_TYPE_DA_COMMIT,
-			CovenantData: chunkPayloadCommitment[:],
-		}, {
-			Value:        entry.Value - fee,
-			CovenantType: consensus.COV_TYPE_P2PK,
-			CovenantData: append([]byte(nil), toAddress...),
-		}},
 		Locktime:  0,
 		DaPayload: append([]byte(nil), commitTxPayload...),
 		DaCommitCore: &consensus.DaCommitCore{
-			ChunkCount:  1,
+			ChunkCount:  uint16(len(chunkPayloads)),
 			BatchNumber: 1,
 		},
 	}
+	tx.Outputs = append(tx.Outputs, consensus.TxOutput{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: commitment[:]})
+	tx.Outputs = append(tx.Outputs, consensus.TxOutput{Value: entry.Value - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), toAddress...)})
 	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
 		t.Fatalf("SignTransaction(da): %v", err)
 	}
@@ -302,18 +322,55 @@ func mustRPCSignedDaCommitTx(
 		if out.CovenantType != consensus.COV_TYPE_DA_COMMIT {
 			continue
 		}
-		daCommitOutputs++
 		if out.Value != 0 {
 			t.Fatalf("CORE_DA_COMMIT output value=%d, want 0", out.Value)
 		}
-		if !bytes.Equal(out.CovenantData, chunkPayloadCommitment[:]) {
+		if !bytes.Equal(out.CovenantData, commitment[:]) {
 			t.Fatalf("CORE_DA_COMMIT output commitment mismatch")
 		}
+		daCommitOutputs++
 	}
 	if daCommitOutputs != 1 {
 		t.Fatalf("CORE_DA_COMMIT outputs=%d, want 1", daCommitOutputs)
 	}
 	return txBytes, hex.EncodeToString(txid[:])
+}
+
+func mustRPCSignedDaChunkTx(t *testing.T, utxos map[consensus.Outpoint]consensus.UtxoEntry, input consensus.Outpoint, nonce uint64, signer *consensus.MLDSA87Keypair, toAddress []byte, daID [32]byte, index uint16, payload []byte) ([]byte, string) {
+	t.Helper()
+	entry := utxos[input]
+	hash := sha3.Sum256(payload)
+	tx := &consensus.Tx{
+		Version: 1, TxKind: 0x02, TxNonce: nonce,
+		Inputs:      []consensus.TxInput{{PrevTxid: input.Txid, PrevVout: input.Vout}},
+		Outputs:     []consensus.TxOutput{{Value: entry.Value - 100_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), toAddress...)}},
+		DaPayload:   append([]byte(nil), payload...),
+		DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: index, ChunkHash: hash},
+	}
+	if err := consensus.SignTransaction(tx, utxos, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction(chunk): %v", err)
+	}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx(chunk): %v", err)
+	}
+	_, txid, _, consumed, err := consensus.ParseTx(raw)
+	if err != nil || consumed != len(raw) {
+		t.Fatalf("ParseTx(chunk): consumed=%d/%d err=%v", consumed, len(raw), err)
+	}
+	return raw, hex.EncodeToString(txid[:])
+}
+
+func postRPCSubmit(t *testing.T, handler http.Handler, raw []byte) (int, submitTxResponse, []byte) {
+	body := mustSubmitBody(t, raw)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)))
+	responseBody := recorder.Body.Bytes()
+	var got submitTxResponse
+	if err := json.Unmarshal(responseBody, &got); err != nil {
+		t.Fatalf("Unmarshal %q: %v", responseBody, err)
+	}
+	return recorder.Code, got, responseBody
 }
 
 func mustRPCSignedAnchorOutputTx(
@@ -941,6 +998,7 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 		announced = append(announced, append([]byte(nil), tx...))
 		return nil
 	})
+	wireRPCDAService(t, state)
 	txBytes, wantTxID := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 7, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
@@ -971,14 +1029,11 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 	if got.Error != "" {
 		t.Fatalf("error=%q, want empty", got.Error)
 	}
-	if len(announced) != 1 {
-		t.Fatalf("announceTx calls=%d, want 1", len(announced))
+	if len(announced) != 0 {
+		t.Fatalf("announceTx calls=%d, want 0 for DA", len(announced))
 	}
-	if !bytes.Equal(announced[0], txBytes) {
-		t.Fatalf("announceTx payload mismatch")
-	}
-	if got := state.mempool.Len(); got != 1 {
-		t.Fatalf("mempool len=%d, want 1", got)
+	if got := state.mempool.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0 for DA", got)
 	}
 	wantTxIDBytes, err := hex.DecodeString(wantTxID)
 	if err != nil || len(wantTxIDBytes) != 32 {
@@ -986,22 +1041,18 @@ func TestDevnetRPCSubmitTxAcceptsDaCommitUnderDefaultPolicy(t *testing.T) {
 	}
 	var wantTxIDArray [32]byte
 	copy(wantTxIDArray[:], wantTxIDBytes)
-	mempoolTx, ok := state.mempool.TxByID(wantTxIDArray)
-	if !ok {
-		t.Fatalf("mempool missing accepted DA_COMMIT txid %q", wantTxID)
-	}
-	if !bytes.Equal(mempoolTx, txBytes) {
-		t.Fatalf("mempool tx bytes mismatch for accepted DA_COMMIT txid %q", wantTxID)
+	if _, ok := state.mempool.TxByID(wantTxIDArray); ok {
+		t.Fatalf("standard mempool contains accepted DA_COMMIT txid %q", wantTxID)
 	}
 	admission := state.mempool.AdmissionCounts()
-	if admission.Accepted != 1 || admission.Rejected != 0 || admission.Conflict != 0 || admission.Unavailable != 0 {
-		t.Fatalf("admission counts=%+v, want one accepted AddTx", admission)
+	if admission != (node.MempoolAdmissionCounts{}) {
+		t.Fatalf("standard admission counts=%+v, want zero for DA", admission)
 	}
 	metrics := renderPrometheusMetrics(state)
 	for _, want := range []string{
 		`rubin_node_submit_tx_total{result="accepted"} 1`,
-		`rubin_node_mempool_admit_total{result="accepted"} 1`,
-		`rubin_node_mempool_txs 1`,
+		`rubin_node_mempool_admit_total{result="accepted"} 0`,
+		`rubin_node_mempool_txs 0`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("missing %q in metrics %q", want, metrics)
@@ -1142,6 +1193,7 @@ func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *tes
 		announceCalled = true
 		return nil
 	}, mempoolConfig)
+	wireRPCDAService(t, state)
 	txBytes, _ := mustRPCSignedDaCommitTx(t, utxos, input, 1, 8, fromKey, toAddress, []byte("commitmeta"), []byte("chunkdata0"))
 	server := httptest.NewServer(newDevnetRPCHandler(state))
 	defer server.Close()
@@ -1179,18 +1231,361 @@ func TestDevnetRPCSubmitTxRejectsLowFeeDaCommitWhenSurchargePolicyEnabled(t *tes
 		t.Fatalf("mempool len=%d, want 0", got)
 	}
 	admission := state.mempool.AdmissionCounts()
-	if admission.Rejected != 1 || admission.Accepted != 0 || admission.Conflict != 0 || admission.Unavailable != 0 {
-		t.Fatalf("admission counts=%+v, want one rejected AddTx", admission)
+	if admission != (node.MempoolAdmissionCounts{}) {
+		t.Fatalf("standard admission counts=%+v, want zero for DA", admission)
 	}
 	metrics := renderPrometheusMetrics(state)
 	for _, want := range []string{
 		`rubin_node_submit_tx_total{result="rejected"} 1`,
-		`rubin_node_mempool_admit_total{result="rejected"} 1`,
+		`rubin_node_mempool_admit_total{result="rejected"} 0`,
 		`rubin_node_mempool_txs 0`,
 	} {
 		if !strings.Contains(metrics, want) {
 			t.Fatalf("missing %q in metrics %q", want, metrics)
 		}
+	}
+}
+
+func TestDevnetRPCSubmitTxRoutesDAToSharedOwner(t *testing.T) {
+	fromKey, toKey := mustRPCMLDSA87Keypair(t), mustRPCMLDSA87Keypair(t)
+	from, to := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes()), consensus.P2PKCovenantDataForPubkey(toKey.PubkeyBytes())
+	announced := 0
+	state, inputs, utxos := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, from, []uint64{1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000}, func([]byte) error { announced++; return nil }, node.DefaultMempoolConfig())
+	service := wireRPCDAService(t, state)
+	ownerCalls, prefetchCalls := 0, 0
+	admit := state.admitLocalDA
+	state.admitLocalDA = func(raw []byte) (node.DAAdmissionResult, error) { ownerCalls++; return admit(raw) }
+	state.prefetchLocalDA = func(daID [32]byte) error { prefetchCalls++; return service.ScheduleLocalDAPrefetch(daID) }
+	standard, standardID := mustRPCSignedTransferTxWithFee(t, utxos, inputs[0], 100_000, 100_000, 1, fromKey, to)
+	commit, commitID := mustRPCSignedDaCommitTx(t, utxos, inputs[1], 100_000, 2, fromKey, to, []byte("manifest"), []byte("chunk-0"), []byte("chunk-1"))
+	chunk, chunkID := mustRPCSignedDaChunkTx(t, utxos, inputs[2], 3, fromKey, to, [32]byte{}, 0, []byte("chunk-0"))
+	parsedCommit, _, _, _, err := consensus.ParseTx(commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := consensus.SignTransaction(parsedCommit, utxos, node.DevnetGenesisChainID(), fromKey); err != nil {
+		t.Fatal(err)
+	}
+	sameTxIDCommit, err := consensus.MarshalTx(parsedCommit)
+	if err != nil || bytes.Equal(sameTxIDCommit, commit) {
+		t.Fatalf("same-txid nonexact commit: equal=%v err=%v", bytes.Equal(sameTxIDCommit, commit), err)
+	}
+	occupiedChunk, _ := mustRPCSignedDaChunkTx(t, utxos, inputs[3], 4, fromKey, to, [32]byte{}, 0, []byte("other-chunk"))
+	competingCommit, _ := mustRPCSignedDaCommitTx(t, utxos, inputs[4], 100_000, 5, fromKey, to, []byte("competing"), []byte("different"))
+	handler := newDevnetRPCHandler(state)
+	for _, row := range []struct {
+		name, txid string
+		raw        []byte
+		status     int
+	}{
+		{"standard", standardID, standard, http.StatusOK},
+		{"commit retained", commitID, commit, http.StatusOK},
+		{"chunk retained", chunkID, chunk, http.StatusOK},
+		{"commit exact replay", "", commit, http.StatusConflict},
+		{"chunk exact replay", "", chunk, http.StatusConflict},
+		{"same txid nonexact", "", sameTxIDCommit, http.StatusConflict},
+		{"occupied chunk index", "", occupiedChunk, http.StatusConflict},
+		{"competing same-id commit", "", competingCommit, http.StatusConflict},
+	} {
+		status, got, _ := postRPCSubmit(t, handler, row.raw)
+		if status != row.status || got.Accepted != (row.status == http.StatusOK) || got.TxID != row.txid {
+			t.Fatalf("%s response=%d %+v, want status=%d txid=%q", row.name, status, got, row.status, row.txid)
+		}
+	}
+	if state.mempool.Len() != 1 || announced != 1 || ownerCalls != 7 || prefetchCalls != 2 {
+		t.Fatalf("effects: mempool=%d announce=%d owner=%d prefetch=%d", state.mempool.Len(), announced, ownerCalls, prefetchCalls)
+	}
+	counts := state.mempool.AdmissionCounts()
+	if counts.Accepted != 1 || counts.Conflict != 0 || counts.Rejected != 0 || counts.Unavailable != 0 {
+		t.Fatalf("standard admission counts=%+v, want only the ordinary AddTx", counts)
+	}
+	t.Run("LOCAL and PEER share one confirmed input", func(t *testing.T) {
+		signer := mustRPCMLDSA87Keypair(t)
+		address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+		announceCalls := 0
+		s, input, funds := mustRPCStateWithSpendableUTXO(t, address, func([]byte) error { announceCalls++; return nil })
+		wireRPCDAService(t, s)
+		local, localID := mustRPCSignedDaChunkTx(t, funds, input, 10, signer, address, [32]byte{0x11}, 0, []byte("local"))
+		peer, peerID := mustRPCSignedDaChunkTx(t, funds, input, 11, signer, address, [32]byte{0x22}, 0, []byte("peer"))
+		provenance, err := node.NewPeerDAProvenance("peer", "peer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := mustSubmitBody(t, local)
+		recorder := httptest.NewRecorder()
+		start, localDone := make(chan struct{}), make(chan int, 1)
+		type peerOutcome struct {
+			result node.DAAdmissionResult
+			err    error
+		}
+		peerDone := make(chan peerOutcome, 1)
+		go func() {
+			<-start
+			newDevnetRPCHandler(s).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/submit_tx", strings.NewReader(body)))
+			localDone <- recorder.Code
+		}()
+		go func() {
+			<-start
+			result, err := s.syncEngine.DARelayState().AdmitDA(peer, provenance)
+			peerDone <- peerOutcome{result, err}
+		}()
+		close(start)
+		var status int
+		select {
+		case status = <-localDone:
+		case <-time.After(testJoinWatchdog):
+			t.Fatal("LOCAL admission did not return")
+		}
+		var peerResult peerOutcome
+		select {
+		case peerResult = <-peerDone:
+		case <-time.After(testJoinWatchdog):
+			t.Fatal("PEER admission did not return")
+		}
+		var peerErr *node.TxAdmitError
+		localWon := status == http.StatusOK && errors.As(peerResult.err, &peerErr) && peerErr.Kind == node.TxAdmitConflict
+		peerWon := peerResult.err == nil && peerResult.result.Disposition == node.DAAdmissionRetained && status == http.StatusConflict
+		if localID == peerID || !localWon && !peerWon || s.mempool.Len() != 0 || s.mempool.AdmissionCounts() != (node.MempoolAdmissionCounts{}) || announceCalls != 0 {
+			t.Fatalf("LOCAL status=%d PEER=%+v standard len=%d counts=%+v announces=%d", status, peerResult, s.mempool.Len(), s.mempool.AdmissionCounts(), announceCalls)
+		}
+	})
+}
+
+func TestDevnetRPCSubmitTxMapsDAOwnerOutcomes(t *testing.T) {
+	key := mustRPCMLDSA87Keypair(t)
+	_, input, utxos := mustRPCStateWithSpendableUTXO(t, consensus.P2PKCovenantDataForPubkey(key.PubkeyBytes()), nil)
+	raw, txid := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 1, key, consensus.P2PKCovenantDataForPubkey(key.PubkeyBytes()), []byte("map"), []byte("chunk"), []byte("missing"))
+	conflict := func(msg string) error { return &node.TxAdmitError{Kind: node.TxAdmitConflict, Message: msg} }
+	unavailable := func(msg string) error { return &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: msg} }
+	rejected := func(msg string) error { return &node.TxAdmitError{Kind: node.TxAdmitRejected, Message: msg} }
+	retained := node.DAAdmissionResult{DAID: [32]byte{0xa5}, Disposition: node.DAAdmissionRetained}
+	duplicate := node.DAAdmissionResult{DAID: [32]byte{0xb6}, Disposition: node.DAAdmissionDuplicate}
+	unknown := node.DAAdmissionResult{DAID: [32]byte{0xc7}, Disposition: node.DAAdmissionDisposition(9)}
+	rows := []struct {
+		name                   string
+		result                 node.DAAdmissionResult
+		err, prefetchErr       error
+		admitBound, fetchBound bool
+		status                 int
+		metric, message        string
+		accepted, wantPrefetch bool
+	}{
+		{"both callbacks missing", node.DAAdmissionResult{}, nil, nil, false, false, 503, "unavailable", "DA admission unavailable", false, false},
+		{"admit missing", node.DAAdmissionResult{}, nil, nil, false, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"prefetch missing", retained, nil, nil, true, false, 503, "unavailable", "DA admission unavailable", false, false},
+		{"retained", retained, nil, nil, true, true, 200, "accepted", "", true, true},
+		{"retained prefetch error", retained, nil, errors.New("prefetch failed"), true, true, 200, "accepted", "", true, true},
+		{"retained closed-service prefetch", retained, nil, errors.New("service already closed"), true, true, 200, "accepted", "", true, true},
+		{"retained conflict bit", node.DAAdmissionResult{Disposition: node.DAAdmissionRetained, SameDAIDCommitConflict: true}, nil, nil, true, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"duplicate", duplicate, nil, nil, true, true, 409, "conflict", "DA transaction duplicate or conflict", false, false},
+		{"duplicate conflict bit", node.DAAdmissionResult{Disposition: node.DAAdmissionDuplicate, SameDAIDCommitConflict: true}, nil, nil, true, true, 409, "conflict", "DA transaction duplicate or conflict", false, false},
+		{"zero", node.DAAdmissionResult{}, nil, nil, true, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"zero conflict bit", node.DAAdmissionResult{SameDAIDCommitConflict: true}, nil, nil, true, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"unknown", unknown, nil, nil, true, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"unknown conflict bit", node.DAAdmissionResult{Disposition: node.DAAdmissionDisposition(9), SameDAIDCommitConflict: true}, nil, nil, true, true, 503, "unavailable", "DA admission unavailable", false, false},
+		{"direct conflict dominates retained", retained, conflict("direct conflict"), nil, true, true, 409, "conflict", "direct conflict", false, false},
+		{"wrapped conflict dominates duplicate", duplicate, fmt.Errorf("wrapped: %w", conflict("conflict")), nil, true, true, 409, "conflict", "wrapped: conflict", false, false},
+		{"direct unavailable dominates zero", node.DAAdmissionResult{}, unavailable("direct unavailable"), nil, true, true, 503, "unavailable", "direct unavailable", false, false},
+		{"wrapped unavailable dominates unknown", unknown, fmt.Errorf("wrapped: %w", unavailable("unavailable")), nil, true, true, 503, "unavailable", "wrapped: unavailable", false, false},
+		{"capacity unavailable", retained, unavailable("DA COMPLETE_SET capacity owner is not active"), nil, true, true, 503, "unavailable", "DA COMPLETE_SET capacity owner is not active", false, false},
+		{"direct rejected", retained, rejected("direct rejected"), nil, true, true, 422, "rejected", "direct rejected", false, false},
+		{"wrapped rejected", duplicate, fmt.Errorf("wrapped: %w", rejected("rejected")), nil, true, true, 422, "rejected", "wrapped: rejected", false, false},
+		{"other error", retained, errors.New("owner failure"), nil, true, true, 422, "rejected", "owner failure", false, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s := mustRPCState(t, false)
+			beforeLen, beforeCounts := s.mempool.Len(), s.mempool.AdmissionCounts()
+			admitCalls, fetchCalls := 0, 0
+			var fetched [32]byte
+			if row.admitBound {
+				s.admitLocalDA = func(got []byte) (node.DAAdmissionResult, error) {
+					admitCalls++
+					if !bytes.Equal(got, raw) {
+						t.Fatal("owner received different bytes")
+					}
+					return row.result, row.err
+				}
+			}
+			if row.fetchBound {
+				s.prefetchLocalDA = func(daID [32]byte) error { fetchCalls++; fetched = daID; return row.prefetchErr }
+			}
+			status, got, body := postRPCSubmit(t, newDevnetRPCHandler(s), raw)
+			if status != row.status || got.Accepted != row.accepted || got.Error != row.message {
+				t.Fatalf("response=%d %+v, want status=%d accepted=%v error=%q", status, got, row.status, row.accepted, row.message)
+			}
+			if row.accepted && got.TxID != txid || !row.accepted && (got.TxID != "" || bytes.Contains(body, []byte(`"txid"`))) {
+				t.Fatalf("txid shape=%q body=%s accepted=%v, want parsed txid only on success", got.TxID, body, row.accepted)
+			}
+			if admitCalls > 1 || fetchCalls > 1 || (admitCalls == 1) != (row.admitBound && row.fetchBound) || (fetchCalls == 1) != row.wantPrefetch || row.wantPrefetch && fetched != row.result.DAID {
+				t.Fatalf("calls admit=%d prefetch=%d daid=%x want=%x", admitCalls, fetchCalls, fetched, row.result.DAID)
+			}
+			if s.mempool.Len() != beforeLen || s.mempool.AdmissionCounts() != beforeCounts {
+				t.Fatalf("standard state changed from len=%d counts=%+v to len=%d counts=%+v", beforeLen, beforeCounts, s.mempool.Len(), s.mempool.AdmissionCounts())
+			}
+			_, submits := s.metrics.snapshot()
+			if len(submits) != 1 || submits[row.metric] != 1 {
+				t.Fatalf("submit metrics=%v, want one %s", submits, row.metric)
+			}
+		})
+	}
+	for _, row := range []struct {
+		name, existingPayload, completingPayload string
+		commitFirst                              bool
+	}{
+		{"chunk-last matching", "matching", "matching", true},
+		{"chunk-last set mismatch", "expected", "actual", true},
+		{"commit-last matching", "matching", "matching", false},
+		{"commit-last set mismatch", "actual", "expected", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			signer := mustRPCMLDSA87Keypair(t)
+			address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+			s, inputs, funds := mustRPCStateWithSpendableUTXOsAndMempoolConfig(t, address, []uint64{1_000_000, 1_000_000}, nil, node.DefaultMempoolConfig())
+			service := wireRPCDAService(t, s)
+			prefetches := 0
+			s.prefetchLocalDA = func(daID [32]byte) error { prefetches++; return service.ScheduleLocalDAPrefetch(daID) }
+			commit := func(input consensus.Outpoint, payload string, nonce uint64) []byte {
+				raw, _ := mustRPCSignedDaCommitTx(t, funds, input, 100_000, nonce, signer, address, []byte("manifest"), []byte(payload))
+				return raw
+			}
+			chunk := func(input consensus.Outpoint, payload string, nonce uint64) []byte {
+				raw, _ := mustRPCSignedDaChunkTx(t, funds, input, nonce, signer, address, [32]byte{}, 0, []byte(payload))
+				return raw
+			}
+			first, completing := commit(inputs[0], row.existingPayload, 10), chunk(inputs[1], row.completingPayload, 11)
+			if !row.commitFirst {
+				first, completing = chunk(inputs[0], row.existingPayload, 10), commit(inputs[1], row.completingPayload, 11)
+			}
+			handler := newDevnetRPCHandler(s)
+			status, got, _ := postRPCSubmit(t, handler, first)
+			if status != 200 || !got.Accepted || prefetches != 1 {
+				t.Fatalf("first member=%d %+v prefetches=%d, want retained", status, got, prefetches)
+			}
+			beforeLen, beforeCounts := s.mempool.Len(), s.mempool.AdmissionCounts()
+			status, got, body := postRPCSubmit(t, handler, completing)
+			if status != 503 || got.Accepted || got.TxID != "" || got.Error != "DA COMPLETE_SET capacity owner is not active" || bytes.Contains(body, []byte(`"txid"`)) {
+				t.Fatalf("completion=%d %s, want exact 503 capacity-unavailable", status, body)
+			}
+			if prefetches != 1 || s.mempool.Len() != beforeLen || s.mempool.AdmissionCounts() != beforeCounts {
+				t.Fatalf("completion effects: prefetch=%d mempool=%d/%d counts=%+v/%+v", prefetches, s.mempool.Len(), beforeLen, s.mempool.AdmissionCounts(), beforeCounts)
+			}
+			_, submits := s.metrics.snapshot()
+			if submits["accepted"] != 1 || submits["unavailable"] != 1 {
+				t.Fatalf("metrics=%v, want accepted=1 unavailable=1", submits)
+			}
+		})
+	}
+	t.Run("individual chunk payload-hash mismatch", func(t *testing.T) {
+		signer := mustRPCMLDSA87Keypair(t)
+		address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+		s, input, funds := mustRPCStateWithSpendableUTXO(t, address, nil)
+		wireRPCDAService(t, s)
+		bad, _ := mustRPCSignedDaChunkTx(t, funds, input, 20, signer, address, [32]byte{}, 0, []byte("before"))
+		parsed, _, _, _, err := consensus.ParseTx(bad)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed.DaPayload = []byte("after")
+		if err := consensus.SignTransaction(parsed, funds, node.DevnetGenesisChainID(), signer); err != nil {
+			t.Fatal(err)
+		}
+		bad, err = consensus.MarshalTx(parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, got, _ := postRPCSubmit(t, newDevnetRPCHandler(s), bad)
+		if status != 422 || got.Accepted || got.Error != "DA chunk payload hash mismatch" || s.mempool.Len() != 0 {
+			t.Fatalf("hash mismatch=%d %+v mempool=%d", status, got, s.mempool.Len())
+		}
+	})
+}
+
+func TestDevnetRPCLocalDAAdmissionAndPostEffectLockOrder(t *testing.T) {
+	signer := mustRPCMLDSA87Keypair(t)
+	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	_, input, funds := mustRPCStateWithSpendableUTXO(t, address, nil)
+	raw, _ := mustRPCSignedDaCommitTx(t, funds, input, 100_000, 1, signer, address, []byte("lock"), []byte("chunk"), []byte("missing"))
+	for _, prefetchBarrier := range []bool{false, true} {
+		name := "admission holds rpcMut"
+		if prefetchBarrier {
+			name = "prefetch runs after rpcMut"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := mustRPCMineNextState(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+			state.admitLocalDA = func([]byte) (node.DAAdmissionResult, error) {
+				if !prefetchBarrier {
+					close(entered)
+					<-release
+				}
+				return node.DAAdmissionResult{DAID: [32]byte{0x44}, Disposition: node.DAAdmissionRetained}, nil
+			}
+			state.prefetchLocalDA = func([32]byte) error {
+				if prefetchBarrier {
+					close(entered)
+					<-release
+				}
+				return nil
+			}
+			defer releaseBarrier()
+			body := []byte(mustSubmitBody(t, raw))
+			handler := newDevnetRPCHandler(state)
+			post := func(path string, body []byte) <-chan int {
+				done := make(chan int, 1)
+				go func() {
+					recorder := httptest.NewRecorder()
+					handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body)))
+					done <- recorder.Code
+				}()
+				return done
+			}
+			submitDone := post("/submit_tx", body)
+			select {
+			case <-entered:
+			case <-time.After(testJoinWatchdog):
+				t.Fatal("barrier not entered")
+			}
+			mineDone := post("/mine_next", nil)
+			if prefetchBarrier {
+				select {
+				case status := <-mineDone:
+					if status != http.StatusOK {
+						t.Fatalf("mine_next=%d", status)
+					}
+				case <-time.After(testJoinWatchdog):
+					t.Fatal("mine_next blocked on post-unlock prefetch")
+				}
+			} else {
+				waitBlockedOnRPCMut(t, "handleMineNext")
+				select {
+				case status := <-mineDone:
+					t.Fatalf("mine_next returned inside admission: %d", status)
+				default:
+				}
+			}
+			releaseBarrier()
+			select {
+			case status := <-submitDone:
+				if status != http.StatusOK {
+					t.Fatalf("submit_tx=%d", status)
+				}
+			case <-time.After(testJoinWatchdog):
+				t.Fatal("submit_tx did not return")
+			}
+			if !prefetchBarrier {
+				select {
+				case status := <-mineDone:
+					if status != http.StatusOK {
+						t.Fatalf("mine_next=%d", status)
+					}
+				case <-time.After(testJoinWatchdog):
+					t.Fatal("mine_next did not return after admission")
+				}
+			}
+		})
 	}
 }
 

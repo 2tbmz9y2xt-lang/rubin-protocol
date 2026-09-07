@@ -22,6 +22,23 @@ const (
 	lifecycleSettle   = 100 * time.Millisecond
 )
 
+type localDAAdmissionBarrier struct {
+	consensus.DefaultRotationProvider
+	entered    chan struct{}
+	release    chan struct{}
+	panicValue any
+	once       sync.Once
+}
+
+func (b *localDAAdmissionBarrier) NativeSpendSuites(height uint64) *consensus.NativeSuiteSet {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	if b.panicValue != nil {
+		panic(b.panicValue)
+	}
+	return b.DefaultRotationProvider.NativeSpendSuites(height)
+}
+
 func lifecycleService(t *testing.T) *Service {
 	t.Helper()
 	s := newTestHarness(t, 0, "127.0.0.1:0", nil).service
@@ -268,6 +285,126 @@ func TestServiceWorkLifecycleCloseWaitsForPublicCallbacks(t *testing.T) {
 		must(t, remote.SetReadDeadline(time.Now().Add(lifecycleSettle)), "SetReadDeadline")
 		if n, err := remote.Read(make([]byte, 1)); err == nil {
 			t.Fatalf("socket owner received %d more bytes after Close returned", n)
+		}
+	})
+}
+
+func TestServiceLocalDAWorkLifecycle(t *testing.T) {
+	t.Run("nil and closed reject before effects", func(t *testing.T) {
+		var nilService *Service
+		got, err := nilService.AdmitLocalDA(nil)
+		var admitErr *node.TxAdmitError
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "nil service" {
+			t.Fatalf("nil AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := nilService.ScheduleLocalDAPrefetch([32]byte{}); err == nil || err.Error() != "nil service" {
+			t.Fatalf("nil ScheduleLocalDAPrefetch=%v", err)
+		}
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe1), 2)
+		must(t, h.service.Close(), "Close")
+		got, err = h.service.AdmitLocalDA(raw)
+		admitErr = nil
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "service already closed" {
+			t.Fatalf("closed AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := h.service.ScheduleLocalDAPrefetch([32]byte{}); !errors.Is(err, errServiceClosed) {
+			t.Fatalf("closed ScheduleLocalDAPrefetch=%v", err)
+		}
+	})
+	t.Run("accepted calls release their work", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		got, err := h.service.AdmitLocalDA(f.commit(daRelayTestID(0xe2), 2))
+		if err != nil || got.Disposition != node.DAAdmissionRetained {
+			t.Fatalf("AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if _, err := h.service.AdmitLocalDA([]byte{0x00}); err == nil {
+			t.Fatal("malformed AdmitLocalDA returned nil")
+		}
+		requireReturned(t, lifecycleClose(h.service), "Close after retained and error exits")
+	})
+	t.Run("Close waits for panicking accepted admission", func(t *testing.T) {
+		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		sentinel := errors.New("local DA admission panic")
+		barrier := &localDAAdmissionBarrier{entered: make(chan struct{}), release: make(chan struct{}), panicValue: sentinel}
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
+		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
+		must(t, err, "NewSyncEngine")
+		mempoolCfg := node.DefaultMempoolConfig()
+		mempoolCfg.RotationProvider = barrier
+		mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), mempoolCfg)
+		must(t, err, "NewMempoolWithConfig")
+		engine.SetMempool(mempool)
+		serviceCfg := base.service.cfg
+		serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
+		service, err := NewService(serviceCfg)
+		must(t, err, "NewService")
+		defer releaseBarrier()
+		h := &testHarness{chainState: base.chainState, service: service}
+		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe4), 2)
+		done := make(chan any, 1)
+		go func() { defer func() { done <- recover() }(); _, _ = service.AdmitLocalDA(raw) }()
+		select {
+		case <-barrier.entered:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("admission barrier not entered")
+		}
+		closeDone := lifecycleClose(service)
+		waitDraining(t, service)
+		requireStillBlocked(t, closeDone, "Close")
+		releaseBarrier()
+		select {
+		case recovered := <-done:
+			if recovered != sentinel {
+				t.Fatalf("panic=%v, want original %v", recovered, sentinel)
+			}
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("AdmitLocalDA did not return")
+		}
+		requireReturned(t, closeDone, "Close")
+	})
+	t.Run("Close waits for accepted prefetch", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		daID := daRelayTestID(0xe3)
+		f.admit(f.commit(daID, 2), "127.0.0.9:19119")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseBarrier()
+		h.service.cfg.Now = func() time.Time { close(entered); <-release; return time.Unix(1, 0) }
+		done := make(chan error, 1)
+		go func() { done <- h.service.ScheduleLocalDAPrefetch(daID) }()
+		select {
+		case <-entered:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("prefetch barrier not entered")
+		}
+		closeDone := lifecycleClose(h.service)
+		waitDraining(t, h.service)
+		requireStillBlocked(t, closeDone, "Close")
+		rejected := f.commit(daRelayTestID(0xe5), 2)
+		got, err := h.service.AdmitLocalDA(rejected)
+		var admitErr *node.TxAdmitError
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "service already closed" {
+			t.Fatalf("draining AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := h.service.ScheduleLocalDAPrefetch(daID); !errors.Is(err, errServiceClosed) {
+			t.Fatalf("draining ScheduleLocalDAPrefetch=%v", err)
+		}
+		releaseBarrier()
+		select {
+		case err := <-done:
+			must(t, err, "ScheduleLocalDAPrefetch")
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("prefetch did not return")
+		}
+		requireReturned(t, closeDone, "Close")
+		retained, err := h.service.daRelay.AdmitDA(rejected, node.LocalDAProvenance())
+		if err != nil || retained.Disposition != node.DAAdmissionRetained {
+			t.Fatalf("draining rejection changed owner: (%+v,%v)", retained, err)
 		}
 	})
 }
