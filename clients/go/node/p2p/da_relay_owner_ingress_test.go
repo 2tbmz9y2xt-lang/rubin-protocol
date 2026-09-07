@@ -256,9 +256,10 @@ func frozenD00Cases(t *testing.T) map[string]map[string]any {
 	return cases
 }
 
-// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list.
+// The four disjoint D00 evidence sets of the contract and their union, its d00_in_scope_case_ids list;
+// REMOTE_STANDARD_EXIT runs last so the single-frame relay probe is still live for every DA row.
 var (
-	d00PublicHandleTxIDs = []string{"REMOTE_STANDARD_EXIT", "REMOTE_COMMIT_RETAINED", "REMOTE_CHUNK_RETAINED", "REMOTE_EXACT_REPLAY", "REMOTE_OWNER_CONFLICT", "REMOTE_POLICY_REJECT", "REMOTE_EXACT_CHUNK_REPLAY", "REMOTE_SAME_TXID_NONEXACT_VALID", "REMOTE_SAME_TXID_NONEXACT_INVALID", "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", "REMOTE_REPLAY_EVIDENCE_ABSENT"}
+	d00PublicHandleTxIDs = []string{"REMOTE_COMMIT_RETAINED", "REMOTE_CHUNK_RETAINED", "REMOTE_EXACT_REPLAY", "REMOTE_OWNER_CONFLICT", "REMOTE_POLICY_REJECT", "REMOTE_EXACT_CHUNK_REPLAY", "REMOTE_SAME_TXID_NONEXACT_VALID", "REMOTE_SAME_TXID_NONEXACT_INVALID", "REMOTE_EXACT_COMMIT_REPLAY_UNSOLICITED", "REMOTE_EXACT_CHUNK_REPLAY_UNSOLICITED", "REMOTE_REPLAY_EVIDENCE_ABSENT", "REMOTE_STANDARD_EXIT"}
 	d00CleanupIDs        = []string{"STATE_B_PEER_CHUNK_CLEANUP_PRESERVES_NONPEER", "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED"}
 	d00InternalIDs       = []string{"REMOTE_REPLAY_EVIDENCE_UNAVAILABLE", "REMOTE_REPLAY_EVIDENCE_DANGLING", "REMOTE_REPLAY_EVIDENCE_CORRUPT", "REMOTE_REPLAY_EVIDENCE_MISMATCH", "REMOTE_REPLAY_EVIDENCE_UNSTABLE"}
 	d00CanonicalIDs      = []string{"REMOTE_REPLAY_D1_REMOVAL_FIRST", "REMOTE_REPLAY_D1_SNAPSHOT_FIRST"}
@@ -409,7 +410,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	// invalid-signature entry through handleTx is peer-neutral, touches no standard authority and
 	// populates the owner-wide suppression state; the probe then hits it under another peer identity,
 	// a second entry stays neutral, and the untouched valid representation (same txid, different
-	// wtxid) admits normally while the invalid bytes stay suppressed.
+	// wtxid) admits normally while the invalid bytes stay suppressed; a closing standard tx proves the untouched authorities live.
 	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114")
 	rframes, _ := registerRelayFrameProbe(t, rh.service, "127.0.0.1:19119")
@@ -436,12 +437,16 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	}
 	run("REJECTED_REPEAT first entry", rp, invalid, nil, 0, same)
 	suppressed("REJECTED_REPEAT probe after the first entry")
-	untouched("REJECTED_REPEAT first entry")
+	untouched("REJECTED_REPEAT first entry and probe")
 	run("REJECTED_REPEAT second entry", rp, invalid, nil, 0, same)
 	untouched("REJECTED_REPEAT second entry")
 	run("REJECTED_REPEAT valid representation", rp, valid, nil, 1, same)
-	rf.requireRetained(valid, "the valid representation after its suppressed invalid witness")
 	suppressed("REJECTED_REPEAT probe after the valid representation")
+	rf.requireRetained(valid, "the valid representation after its suppressed invalid witness")
+	standard, stxid, _ := signedCanonicalP2PTxForHarness(t, rh, 9413)
+	must(t, rp.handleTx(standard), "handleTx(standard)")
+	counters.Accepted++
+	require(t, rh.service.txSeen.Has(stxid) && rmempool.Contains(stxid) && (<-rframes).Command == messageInv && rmempool.AdmissionCounts() == counters, "REJECTED_REPEAT standard control: seen=%v pooled=%v counters=%+v (want %+v), want every untouched authority live", rh.service.txSeen.Has(stxid), rmempool.Contains(stxid), rmempool.AdmissionCounts(), counters)
 }
 
 // TestRemoteDAIdentityBoundsPrecedeAdmission pins IDENTITY_BOUNDS_V1 at both limits
@@ -575,10 +580,14 @@ func TestRemoteD00ReachableCutoverCases(t *testing.T) {
 			require(t, calls.Load() == 1 && retained, "%s: entries=%d probe=(%+v,%v), want one scheduler entry and a retained member", id, calls.Load(), got, probeErr)
 		case "REJECTED":
 			require(t, calls.Load() == 0 && !frozenFlag(p2p, "replay_inventory_publications"), "%s: entries=%d probe=(%+v,%v)", id, calls.Load(), got, probeErr)
-			if errorCode != "" { // the PEER re-probe of the rejected bytes is the Section 5.3 hit; the frozen code is observed under LOCAL provenance, which never consults the cache
+			if errorCode != "" { // the PEER re-probe of the rejected bytes is the Section 5.3 hit; the frozen code is the same bytes' PEER miss on a fresh owner holding a copy of the spent input
 				requireSuppressed(t, got, probeErr, id)
-				local, localErr := h.service.daRelay.AdmitDA(row.raw, node.LocalDAProvenance())
-				require(t, localErr != nil && strings.Contains(localErr.Error(), errorCode) && local == node.DAAdmissionResult{}, "%s: LOCAL admission=(%+v,%v), frozen error_code %q", id, local, localErr, errorCode)
+				fresh := newTestHarness(t, 2, "127.0.0.1:0", nil)
+				in := mustParseP2PTx(t, row.raw).Inputs[0]
+				op := consensus.Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+				fresh.chainState.Utxos[op] = h.chainState.Utxos[op]
+				missed, missErr := newDAIngressFixture(t, fresh).probe(row.raw)
+				require(t, missErr != nil && strings.Contains(missErr.Error(), errorCode) && missed == node.DAAdmissionResult{}, "%s: fresh-owner PEER admission=(%+v,%v), frozen error_code %q", id, missed, missErr, errorCode)
 			}
 			replay := strings.HasPrefix(id, "REMOTE_EXACT") || id == "REMOTE_SAME_TXID_NONEXACT_VALID"
 			require(t, retained == replay, "%s: retained=%v on a replay=%v row: probe=(%+v,%v)", id, retained, replay, got, probeErr)
