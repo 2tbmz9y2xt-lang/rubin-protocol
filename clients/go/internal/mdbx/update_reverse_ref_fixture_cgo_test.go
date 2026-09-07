@@ -37,6 +37,9 @@ func TestUpdateReverseRefRawTransport(t *testing.T) {
 		{"width valid, schema invalid", append(make([]byte, 19), 0xff)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			if _, decodeErr := DecodeUTXOValue(row.value); decodeErr == nil {
+				t.Fatalf("reverse ref raw literal decodes as a UTXOValue: %s", row.name)
+			}
 			path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
 			store, err := Create(path, cfg)
 			mustEnvironment(t, err)

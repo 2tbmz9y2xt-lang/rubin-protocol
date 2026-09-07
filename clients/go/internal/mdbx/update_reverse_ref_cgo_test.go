@@ -247,10 +247,16 @@ func TestUpdateReverseRefPayload(t *testing.T) {
 	t.Run("public rejection", func(t *testing.T) {
 		store := newUpdateStore(t)
 		value := reverseValues(t)[0]
+		counter, keyErr := MetaKey(0x10, 3)
+		mustEnvironment(t, keyErr)
+		before, after := LogicalCounterValue(1, 1), LogicalCounterValue(2, 2)
+		replacement := Mutation{DBI: dbis[0], Key: counter, BeforePresent: true, AfterKind: AfterLiteral, Literal: after}
+		requireUpdateCommit(t, store, "reverse ref seed", Mutation{DBI: dbis[0], Key: counter, AfterKind: AfterLiteral, Literal: before})
 		reverseSeed(t, store, target, source, value)
-		requireReversePlanRejection(t, store, "reverse ref invalid tuple", reverseRefRow(target, UndoManifestKey(reverseBlockHash)))
-		requireReversePlanRejection(t, store, "reverse ref invalid tuple",
+		requireReversePlanRejection(t, store, "reverse ref invalid tuple", replacement, reverseRefRow(target, UndoManifestKey(reverseBlockHash)))
+		requireReversePlanRejection(t, store, "reverse ref invalid tuple", replacement,
 			Mutation{DBI: dbis[1], Key: target, AfterKind: AfterOldValueRef, Literal: []byte{}, RefDBI: dbis[5], RefKey: source})
+		requireReverseValue(t, store, dbis[0], counter, before, "reverse ref unchanged counter")
 		requireUpdateValue(t, store, dbis[1], target, nil, false)
 		requireReverseValue(t, store, dbis[5], source, value, "reverse ref retained source bytes")
 		requireUpdateCommit(t, store, "reverse ref NEW tuple", reverseRefRow(target, source))
@@ -318,10 +324,17 @@ func TestUpdateReverseRefBounds(t *testing.T) {
 			charged := row.budget
 			err := updateScanMutation(true, Mutation{}, row.mutation, &charged)
 			if (err == nil) != row.ok {
-				t.Fatalf("%s: %v", row.name, err)
+				t.Fatalf("%s: want ok=%v, got %v: %+v", row.name, row.ok, err, charged)
 			}
 			if err != nil {
 				requireEnvironmentError(t, err, EngineCapacity, operationUpdate, codeTooLarge, "Update Batch exceeds bound")
+			}
+		}
+		for _, rank := range []uint8{0, 2, 3, 4, 6} {
+			charged, row := updateBudget{undoRefs: maxUpdateInputs}, reverse
+			row.DBI.Rank = rank
+			if !charged.addMutation(row) || charged.undoRefs != maxUpdateInputs || charged.aux != 1 {
+				t.Fatalf("reverse ref illegal destination rank %d: %+v", rank, charged)
 			}
 		}
 	})

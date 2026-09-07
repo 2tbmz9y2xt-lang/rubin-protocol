@@ -661,7 +661,7 @@ func updateForwardRef(m Mutation, dbis [7]DBI) bool {
 	return m.DBI == dbis[5] && updateUndoEntryKey(m.Key) && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
 }
 
-// updateReverseRef slices m.Key[8:44]: updateValidMutation proves validKey(1, m.Key) before dispatching here.
+// updateReverseRef requires a width-checked rank-1 m.Key: it slices m.Key[8:44].
 func updateReverseRef(m Mutation, dbis [7]DBI) bool {
 	return m.DBI == dbis[1] && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
 }
@@ -695,6 +695,11 @@ func updateKeyCharge(m Mutation) uint64 {
 	return charge
 }
 
+// updateRefFamily holds for the forward (rank-5) and reverse (rank-1) reference destinations.
+func updateRefFamily(m Mutation) bool {
+	return m.AfterKind == AfterOldValueRef && (m.DBI.Rank == 1 || m.DBI.Rank == 5)
+}
+
 func (budget *updateBudget) addTotals(m Mutation) bool {
 	var ok bool
 	if budget.mutations, ok = updateAdd(budget.mutations, 1, maxUpdateMutations); !ok {
@@ -717,7 +722,7 @@ func (budget *updateBudget) addMutation(m Mutation) bool {
 	switch {
 	case m.DBI.Rank == 1 && m.AfterKind == AfterAbsent:
 		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateInputs)
-	case m.AfterKind == AfterOldValueRef:
+	case updateRefFamily(m):
 		budget.undoRefs, ok = updateAdd(budget.undoRefs, 1, maxUpdateInputs)
 	case m.DBI.Rank == 1 && m.AfterKind == AfterLiteral:
 		budget.utxoLiterals, ok = updateAdd(budget.utxoLiterals, 1, maxUpdateOutputs)
