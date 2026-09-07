@@ -243,9 +243,9 @@ func TestUpdateReverseRefPayload(t *testing.T) {
 				t.Fatalf("reverse ref invalid tuple: %s mutated the caller keys", row.name)
 			}
 		}
-		for _, key := range [][]byte{nil, {}, short(target, 43), append(short(target, 44), 0)} {
+		for _, key := range [][]byte{nil, {}, short(target, 43), append(short(target, 44), 0), zeroImage} {
 			if updateReverseRef(reverseRefRow(key, source), dbis) {
-				t.Fatalf("reverse ref invalid tuple: direct destination key %d", len(key))
+				t.Fatalf("reverse ref invalid tuple: direct destination key %d bytes %x", len(key), key)
 			}
 		}
 	})
