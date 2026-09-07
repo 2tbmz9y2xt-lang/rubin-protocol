@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -397,6 +398,44 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		row.check(before, effectsOf(row.peer))
 		require(t, quotaKeyFree(lh.service, peerQuotaKey(row.peer.addr())) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
 	}
+	// REJECTED_REPEAT on a fresh harness and owner (RUBIN_COMPACT_BLOCKS.md Section 5.3): the first
+	// invalid-signature entry through handleTx is peer-neutral, touches no standard authority and
+	// populates the owner-wide suppression state; the probe then hits it under another peer identity,
+	// a second entry stays neutral, and the untouched valid representation (same txid, different
+	// wtxid) admits normally while the invalid bytes stay suppressed.
+	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114")
+	rframes, _ := registerRelayFrameProbe(t, rh.service, "127.0.0.1:19119")
+	calls = nowCalls(rh)
+	valid := rf.commit(daRelayTestID(0x2b), 2)
+	corrupted := mustParseP2PTx(t, valid)
+	corrupted.Witness[0].Signature[0] ^= 0xff
+	invalid := mustMarshalPeerRuntimeTx(t, corrupted)
+	_, validTxID, validWTxID, _, err := consensus.ParseTx(valid)
+	must(t, err, "ParseTx(valid)")
+	_, txid, wtxid, consumed, err := consensus.ParseTx(invalid)
+	must(t, err, "ParseTx(invalid)")
+	require(t, consumed == len(invalid) && txid == validTxID && wtxid != validWTxID, "the corrupted signature is not a canonical tx with the same txid and a different wtxid: consumed=%d of %d, same txid=%v, same wtxid=%v", consumed, len(invalid), txid == validTxID, wtxid == validWTxID)
+	counters := rmempool.AdmissionCounts()
+	untouched := func(label string) {
+		t.Helper()
+		require(t, !rh.service.txSeen.Has(txid) && !rmempool.Contains(txid) && rmempool.AdmissionCounts() == counters, "%s: reached a standard authority: seen=%v pooled=%v counters=%+v (before %+v)", label, rh.service.txSeen.Has(txid), rmempool.Contains(txid), rmempool.AdmissionCounts(), counters)
+		assertNoRelayFrame(t, rframes, label)
+	}
+	suppressed := func(label string) {
+		t.Helper()
+		var admit *node.TxAdmitError
+		got, err := rf.probe(invalid)
+		require(t, got == node.DAAdmissionResult{} && errors.As(err, &admit) && admit.Kind == node.TxAdmitUnavailable && admit.Message == "DA repeated stable rejection suppressed", "%s: probe=(%+v,%v), want the zero result with TxAdmitUnavailable \"DA repeated stable rejection suppressed\"", label, got, err)
+	}
+	run("REJECTED_REPEAT first entry", rp, invalid, nil, 0, same)
+	suppressed("REJECTED_REPEAT probe after the first entry")
+	untouched("REJECTED_REPEAT first entry")
+	run("REJECTED_REPEAT second entry", rp, invalid, nil, 0, same)
+	untouched("REJECTED_REPEAT second entry")
+	run("REJECTED_REPEAT valid representation", rp, valid, nil, 1, same)
+	rf.requireRetained(valid, "the valid representation after its suppressed invalid witness")
+	suppressed("REJECTED_REPEAT probe after the valid representation")
 }
 
 // TestRemoteDAIdentityBoundsPrecedeAdmission pins IDENTITY_BOUNDS_V1 at both limits
