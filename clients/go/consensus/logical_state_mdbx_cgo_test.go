@@ -367,7 +367,7 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		extras             []mdbx.Mutation
 		outcome            logicalMDBXExtraOutcome
 	}{
-		{"rank0 metadata literal", "extra target policy drifted", "", []mdbx.Mutation{literal(0, metaKey, []byte{9})}, logicalMDBXEmit},
+		{"rank0 metadata literal", "extra target policy drifted", "", []mdbx.Mutation{literal(0, metaKey, logicalMDBXAuthorityLiteral())}, logicalMDBXEmit},
 		{"rank0 counter literal", "extra target policy drifted", "", []mdbx.Mutation{literal(0, counterKey, mdbx.LogicalCounterValue(1, 1))}, logicalMDBXLocal},
 		{"rank0 counter deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(0, counterKey)}, logicalMDBXLocal},
 		{"rank0 metadata deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(0, metaKey)}, logicalMDBXAdapterInvalid},
@@ -404,7 +404,7 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		{"forbidden extra precedes a differing create-once read", "extra target policy drifted", "", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x93))), literal(4, blockKey, blockDiffering)}, logicalMDBXLocal},
 		{"duplicate extra target", "duplicate extra accepted", "", []mdbx.Mutation{literal(2, sameImage, chain), literal(2, sameImage, chain)}, logicalMDBXLocal},
 		{"create-once reads stop at the lowest target", "create-once policy drifted", "rank 4", []mdbx.Mutation{literal(5, manifestKey, mdbx.UndoManifestValue(2, [16]byte{2}, 2, 2)), literal(4, blockKey, blockDiffering)}, logicalMDBXIntegrity},
-		{"shuffled extras sort", "final Batch order drifted", "", []mdbx.Mutation{literal(6, sameImage, chain), literal(0, metaKey, []byte{9}), literal(3, freshKey, freshValue)}, logicalMDBXEmit},
+		{"shuffled extras sort", "final Batch order drifted", "", []mdbx.Mutation{literal(6, sameImage, chain), literal(0, metaKey, logicalMDBXAuthorityLiteral()), literal(3, freshKey, freshValue)}, logicalMDBXEmit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.outcome == logicalMDBXAdapterInvalid {
@@ -527,6 +527,54 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 		var engine *mdbx.EngineError
 		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &engine) && engine.Class == mdbx.EngineStateMismatch, "repeated genesis drifted: truth=%v err=%v", truth, err)
 	})
+}
+
+func logicalMDBXAuthorityLiteral() []byte {
+	// Independent NONE/STABLE authority: pruned, active generation 1, next 2.
+	return []byte{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 0, 0, 0, 0}
+}
+
+func TestLogicalMDBXAuthorityAdmissionBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	cfg := mdbx.ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 256 << 20, Growth: 1 << 20, Shrink: 2 << 20, PageSize: 4096, MaxReaders: 492}
+	store, err := mdbx.Create(path, cfg)
+	logicalMDBXAssert(t, err == nil, "authority bridge store: %v", err)
+	authority := logicalMDBXAuthorityLiteral()
+	entry := logicalMDBXEntry(0, 0xa1)
+	logicalMDBXSeed(t, store, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, AfterKind: mdbx.AfterLiteral, Literal: authority}, logicalMDBXCounterRow(false, logicalMDBXBytesA, 1), logicalMDBXUTXORow(logicalMDBXOpA, entry))
+	old := [][3][]byte{{{0}, {2}, slices.Clone(authority)}, {{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(logicalMDBXBytesA, 1)}, {{1}, logicalMDBXKey(logicalMDBXOpA), logicalMDBXValue(entry)}}
+	logicalMDBXWantImage(t, store, old...)
+	run := func(value []byte) (mdbx.CommitTruth, error) {
+		return store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+			view := newLogicalMDBXStateView(reader, logicalMDBXImage, 1)
+			extra := mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: value}
+			plan, failure := buildLogicalStatePlan(1, view, []logicalTouchedState{{Outpoint: logicalMDBXOpA}}, newLogicalMDBXMetadata(view, []mdbx.Mutation{extra}))
+			logicalMDBXAssert(t, failure == nil, "authority bridge plan: %v", failure)
+			batch, failure := logicalMDBXPlanToBatch(plan)
+			logicalMDBXAssert(t, failure == nil && len(batch.Mutations) == 3, "authority bridge domain narrowed: failure=%v rows=%d", failure, len(batch.Mutations))
+			logicalMDBXAssert(t, reflect.DeepEqual(batch.Mutations[0], extra), "authority bridge domain narrowed: extra changed")
+			return batch, nil
+		})
+	}
+	truth, err := run([]byte{9})
+	var engine *mdbx.EngineError
+	direct := reflect.TypeOf(err) == reflect.TypeFor[*mdbx.EngineError]() && errors.As(err, &engine)
+	logicalMDBXAssert(t, truth.String() == "OLD" && direct && engine != nil && string(engine.Class) == "InvalidInput" && engine.Operation == "update" && engine.Code == 22 && engine.Diagnostic == "invalid Update Batch" && engine.Cause == nil && !engine.ReopenRequired, "authority bridge schema rejection tuple: truth=%v err=%v", truth, err)
+	logicalMDBXWantImage(t, store, old...)
+	logicalMDBXAssert(t, store.Close() == nil, "authority bridge close")
+	store, err = mdbx.Open(path, cfg)
+	logicalMDBXAssert(t, err == nil, "authority bridge reopen: %v", err)
+	logicalMDBXWantImage(t, store, old...)
+	authority[1] = 2
+	truth, err = run(authority)
+	logicalMDBXAssert(t, truth.String() == "NEW" && err == nil, "authority bridge valid composition: truth=%v err=%v", truth, err)
+	current := [][3][]byte{{{0}, {2}, authority}, {{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(0, 0)}, {{1}, logicalMDBXKey(logicalMDBXOpA), nil}}
+	logicalMDBXWantImage(t, store, current...)
+	logicalMDBXAssert(t, store.Close() == nil, "authority bridge close")
+	store, err = mdbx.Open(path, cfg)
+	logicalMDBXAssert(t, err == nil, "authority bridge reopen: %v", err)
+	logicalMDBXWantImage(t, store, current...)
+	logicalMDBXAssert(t, store.Close() == nil, "authority bridge close")
 }
 
 // logicalMDBXWantImage checks {rank, key, value} rows; a nil value means absent.
