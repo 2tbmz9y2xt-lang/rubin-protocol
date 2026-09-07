@@ -543,10 +543,11 @@ const (
 	AfterAbsent AfterKind = iota + 1
 	AfterLiteral
 	// AfterOldValueRef installs into the absent Key the exact bytes the OLD snapshot holds at RefDBI/RefKey; those source bytes
-	// are read from OLD and are neither validated nor consumed. Two directions are admitted: an undo-v1 entry referencing a
-	// utxo-v1 row (Key[41:77] == RefKey[8:44]) and a utxo-v1 row referencing an undo-v1 entry (Key[8:44] == RefKey[41:77]). Only
-	// those outpoint bytes are bound; the image ID and the undo block hash, transaction index and input index are used as
-	// supplied. A reference carries Literal nil and BeforePresent false.
+	// are read from OLD and are neither validated nor consumed. Two directions are admitted by the common grammar: an undo-v1
+	// entry referencing a utxo-v1 row (Key[41:77] == RefKey[8:44]) and a utxo-v1 row referencing an undo-v1 entry (Key[8:44] ==
+	// RefKey[41:77]); Batch.Reverse refuses the forward one (the undo-v1 destination). Only those outpoint bytes are bound; the
+	// image ID and the undo block hash, transaction index and input index are used as supplied. A reference carries Literal
+	// nil and BeforePresent false.
 	AfterOldValueRef
 )
 
@@ -562,11 +563,12 @@ type Mutation struct {
 
 type Batch struct {
 	Mutations []Mutation
-	// Reverse selects the reverse-block admission envelope: true refuses every rank-1 literal, rank-5 literal and rank-5
-	// reference, counts rank-1 deletions up to 1545454, rank-1 references up to 414634, 77-byte tag-1 rank-5 deletions up
-	// to 414634 and every other admitted row up to 16384, and raises the key-byte ceiling to 151359076; false, the zero
-	// value, keeps the default domain and ceilings. Only admission reads it: the owned plan and the native path carry no
-	// mode.
+	// Reverse selects the reverse-block admission envelope. True refuses a rank-1 literal, a rank-5 literal and a rank-5
+	// reference with the same direct InvalidInput refusal ("invalid Update Batch") as a malformed row, decided before ordering,
+	// literal validation and every charge, so only an admitted row can exhaust a family or a ceiling into Capacity; it counts
+	// rank-1 deletions up to maxUpdateOutputs, rank-1 references up to maxUpdateInputs, 77-byte tag-1 rank-5 deletions up to
+	// maxUpdateInputs, every other admitted row up to maxUpdateAux, and key bytes up to maxReverseKeyBytes. False, the zero
+	// value, keeps the default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
 }
 
@@ -577,7 +579,7 @@ const (
 	maxUpdateMutations uint64 = 2_391_106
 	maxUpdateKeyBytes  uint64 = 137_676_154
 	maxUpdateLiterals  uint64 = 155_659_727
-	maxReverseKeyBytes uint64 = 151_359_076 // 1545454*44 + 414634*121 + 414634*77 + 16384*77
+	maxReverseKeyBytes uint64 = 151_359_076 // 1545454*44 + 414634*121 + 414634*77 + 16384*77 (conservative: reverse auxiliary keys are at most 33 bytes)
 )
 
 type ownedMutation struct {
@@ -756,9 +758,7 @@ func (budget *updateBudget) addMutation(m Mutation) bool {
 	return ok
 }
 
-// addReverseFamily charges exactly one true-mode family of an admitted mutation: a rank-1 deletion to utxoDeletes up
-// to 1545454, a rank-1 reference to undoRefs up to 414634, a 77-byte tag-1 rank-5 deletion to undoEntryDeletes up to
-// 414634 and every other row to aux up to 16384; false reports that family exhausted.
+// addReverseFamily charges exactly one true-mode family of an admitted mutation; false reports that family exhausted.
 func (budget *updateBudget) addReverseFamily(m Mutation) bool {
 	var ok bool
 	switch {
@@ -775,7 +775,8 @@ func (budget *updateBudget) addReverseFamily(m Mutation) bool {
 }
 
 // admits reports whether the budget's mode admits a common-valid mutation: false admits every one; true refuses a
-// rank-1 literal and every rank-5 row other than a deletion, and admits every other rank unchanged.
+// rank-1 literal, every rank-5 row other than a deletion and every rank outside SchemaV1, and admits ranks 0, 2, 3, 4
+// and 6 unchanged.
 func (budget *updateBudget) admits(m Mutation) bool {
 	if !budget.reverse {
 		return true
@@ -785,8 +786,10 @@ func (budget *updateBudget) admits(m Mutation) bool {
 		return m.AfterKind == AfterAbsent || m.AfterKind == AfterOldValueRef
 	case 5:
 		return m.AfterKind == AfterAbsent
-	default:
+	case 0, 2, 3, 4, 6:
 		return true
+	default:
+		return false
 	}
 }
 

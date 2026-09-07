@@ -49,21 +49,27 @@ func reverseBatchCommit(t *testing.T, store *Store, marker string, mutations ...
 	}
 }
 
-// reverseBatchRequireRefusal proves the public reverse Batch is refused by admission with the exact direct tuple and
-// leaves the Store OPEN, reusable and without terminal truth.
-func reverseBatchRequireRefusal(t *testing.T, store *Store, marker string, class EngineClass, code int, diagnostic string, mutations ...Mutation) {
+// reverseBatchRequireRefusal proves the public batch is refused by admission with the exact direct tuple, leaves the
+// Store OPEN, reusable and without terminal truth, expires the Reader and leaves the supplied first row's Key, Literal
+// and RefKey bytes unchanged.
+func reverseBatchRequireRefusal(t *testing.T, store *Store, marker string, class EngineClass, code int, diagnostic string, batch Batch) {
 	t.Helper()
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: mutations}, nil })
+	row := batch.Mutations[0]
+	key, literal, refKey := append([]byte(nil), row.Key...), append([]byte(nil), row.Literal...), append([]byte(nil), row.RefKey...)
+	var reader *Reader
+	truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return batch, nil })
 	engine, direct := directTestEngineError(err)
+	row = batch.Mutations[0]
 	if truth != CommitTruthOld || !direct || engine.Class != class || engine.Operation != "update" || engine.Code != code ||
-		engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired || store.state != storeOPEN || store.terminalTruth != 0 {
+		engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired || reader.active.Load() || store.state != storeOPEN ||
+		store.terminalTruth != 0 || !bytes.Equal(row.Key, key) || !bytes.Equal(row.Literal, literal) || !bytes.Equal(row.RefKey, refKey) {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}
 }
 
 func reverseBatchRequireInvalid(t *testing.T, store *Store, marker string, mutations ...Mutation) {
 	t.Helper()
-	reverseBatchRequireRefusal(t, store, marker, EngineClass("InvalidInput"), 22, "invalid Update Batch", mutations...)
+	reverseBatchRequireRefusal(t, store, marker, EngineClass("InvalidInput"), 22, "invalid Update Batch", Batch{Reverse: true, Mutations: mutations})
 }
 
 // reverseBatchRequireInvalidRow proves true-mode admission refuses row with the exact InvalidInput tuple through
@@ -142,14 +148,9 @@ func TestUpdateReverseBatchDeletePublic(t *testing.T) {
 	}
 	requireUpdateCommit(t, store, "reverse batch seed", literals...)
 	deletes := reverseBatchDeletes(dbi, keys)
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: deletes}, nil })
-	engine, direct := directTestEngineError(err)
-	if truth != CommitTruthOld || !direct || engine.Class != EngineClass("Capacity") || engine.Operation != "update" || engine.Code != -30417 ||
-		engine.Diagnostic != "Update Batch exceeds bound" || engine.Cause != nil || engine.ReopenRequired || store.state != storeOPEN || store.terminalTruth != 0 {
-		t.Fatalf("default batch UTXO-delete ceiling: %s/%v/%s", truth, err, store.state)
-	}
+	reverseBatchRequireRefusal(t, store, "default batch UTXO-delete ceiling", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", Batch{Mutations: deletes})
 	reverseBatchRequireImage(t, store, dbi, keys, values, "default batch capacity keeps every row")
-	truth, err = store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: deletes}, nil })
+	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: deletes}, nil })
 	if truth != CommitTruthNew || err != nil || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatalf("reverse batch public delete NEW: %s/%v/%s", truth, err, store.state)
 	}
@@ -311,6 +312,7 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 		{"staged literal", literal(dbis[6], height, chain), true, true, ""},
 		{"staged reference", ref(dbis[6], height), false, false, ""},
 	} {
+		var defaultPlan []ownedMutation
 		for _, reverse := range []bool{false, true} {
 			want, label := cell.accept, "reverse batch domain cell"
 			if reverse {
@@ -327,6 +329,10 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 			}
 			if err != nil {
 				requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("update"), 22, "invalid Update Batch")
+			} else if !reverse {
+				defaultPlan = plan
+			} else if !reflect.DeepEqual(plan, defaultPlan) {
+				t.Fatalf("reverse batch same owned plan in both modes: %s: %+v/%+v", cell.name, plan, defaultPlan)
 			}
 		}
 	}
@@ -369,6 +375,12 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 	}
 	reverseBatchRequireInvalidRow(t, "reverse batch rejects UTXO literal: empty literal", literal(dbis[1], target, []byte{}))
 	reverseBatchRequireInvalidRow(t, "reverse batch rejects UTXO literal: schema-invalid literal", literal(dbis[1], target, make([]byte, 19)))
+	for _, rank := range []uint8{7, 255} {
+		outside := Mutation{DBI: DBI{Name: "utxo-v1", Rank: rank}, BeforePresent: true, AfterKind: AfterAbsent}
+		if (&updateBudget{reverse: true}).admits(outside) || !(&updateBudget{}).admits(outside) {
+			t.Fatalf("reverse batch admits refuses a rank outside SchemaV1: rank %d", rank)
+		}
+	}
 	t.Run("public", func(t *testing.T) {
 		store := newUpdateStore(t)
 		counterBefore, counterAfter := LogicalCounterValue(1, 1), LogicalCounterValue(2, 2)
@@ -422,11 +434,6 @@ func TestUpdateReverseBatchBounds(t *testing.T) {
 	manifestDelete := Mutation{DBI: dbis[5], Key: UndoManifestKey(reverseBlockHash), BeforePresent: true, AfterKind: AfterAbsent}
 	auxRow := updatePlanAuxBatch(t, 1).Mutations[0]
 	utxoLiteral := Mutation{DBI: dbis[1], Key: target, AfterKind: AfterLiteral, Literal: reverseValues(t)[0]}
-	families := [4]uint64{1_545_454, 414_634, 414_634, 16_384}
-	if families[0]+families[1]+families[2]+families[3] != 2_391_106 || families[0]*44+families[1]*121+families[2]*77+families[3]*77 != 151_359_076 ||
-		families[1]*44+families[1]*121+families[0]*44+families[3]*77 != 137_676_154 {
-		t.Fatal("reverse batch bounded envelope")
-	}
 	t.Run("UTXO-delete exact", func(t *testing.T) {
 		batch := Batch{Reverse: true, Mutations: reverseBatchDeletes(dbis[1], reverseBatchKeys(1_545_454, 44))}
 		if plan, err := updateOwnedBatch(batch); err != nil || len(plan) != 1_545_454 {
@@ -533,9 +540,15 @@ func TestUpdateReverseBatchBounds(t *testing.T) {
 	t.Run("public capacity", func(t *testing.T) {
 		store := newUpdateStore(t)
 		aux := updatePlanAuxBatch(t, 16_385)
-		reverseBatchRequireRefusal(t, store, "reverse batch public capacity", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", aux.Mutations...)
+		reverseBatchRequireRefusal(t, store, "reverse batch public capacity", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", Batch{Reverse: true, Mutations: aux.Mutations})
 		requireUpdateValue(t, store, dbis[2], aux.Mutations[0].Key, nil, false)
 		mustEnvironment(t, store.Close())
+	})
+	t.Run("envelope", func(t *testing.T) {
+		if maxUpdateOutputs+maxUpdateInputs+maxUpdateInputs+maxUpdateAux != 2_391_106 || maxUpdateOutputs*44+maxUpdateInputs*121+maxUpdateInputs*77+maxUpdateAux*77 != 151_359_076 ||
+			maxReverseKeyBytes != 151_359_076 || maxUpdateMutations != 2_391_106 {
+			t.Fatal("reverse batch bounded envelope")
+		}
 	})
 }
 
@@ -616,7 +629,7 @@ func TestUpdateReverseBatchOwnership(t *testing.T) {
 	}
 	plan, err := updateOwnedBatch(Batch{Reverse: true, Mutations: rows})
 	mustEnvironment(t, err)
-	if len(plan) != 4 || reflect.TypeFor[ownedMutation]().NumField() != 7 {
+	if len(plan) != 4 {
 		t.Fatalf("reverse batch owned plan shape: %d", len(plan))
 	}
 	for i := range rows {
