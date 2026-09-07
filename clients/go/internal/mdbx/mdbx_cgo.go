@@ -545,6 +545,10 @@ const (
 	AfterOldValueRef
 )
 
+// Mutation with AfterKind AfterOldValueRef installs into the absent Key the exact bytes the OLD snapshot holds at
+// RefDBI/RefKey; those source bytes are read from OLD and are neither validated nor consumed. Two directions are
+// admitted: an undo-v1 entry referencing a utxo-v1 row (Key[41:77] == RefKey[8:44]) and a utxo-v1 row referencing an
+// undo-v1 entry (Key[8:44] == RefKey[41:77]). A reference carries Literal nil and BeforePresent false.
 type Mutation struct {
 	DBI           DBI
 	Key           []byte
@@ -661,9 +665,8 @@ func updateForwardRef(m Mutation, dbis [7]DBI) bool {
 	return m.DBI == dbis[5] && updateUndoEntryKey(m.Key) && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
 }
 
-// updateReverseRef requires a width-checked rank-1 m.Key: it slices m.Key[8:44].
 func updateReverseRef(m Mutation, dbis [7]DBI) bool {
-	return m.DBI == dbis[1] && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
+	return m.DBI == dbis[1] && len(m.Key) == 44 && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
 }
 
 func updateRefPayload(m Mutation) bool {

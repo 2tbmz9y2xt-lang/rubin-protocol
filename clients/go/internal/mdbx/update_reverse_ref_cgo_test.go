@@ -243,6 +243,11 @@ func TestUpdateReverseRefPayload(t *testing.T) {
 				t.Fatalf("reverse ref invalid tuple: %s mutated the caller keys", row.name)
 			}
 		}
+		for _, key := range [][]byte{nil, {}, short(target, 43), append(short(target, 44), 0)} {
+			if updateReverseRef(reverseRefRow(key, source), dbis) {
+				t.Fatalf("reverse ref invalid tuple: direct destination key %d", len(key))
+			}
+		}
 	})
 	t.Run("public rejection", func(t *testing.T) {
 		store := newUpdateStore(t)
@@ -392,16 +397,20 @@ func TestUpdateReverseRefNativeMismatch(t *testing.T) {
 		code        int
 		diagnostic  string
 		targetValue []byte
+		sourceValue []byte
 		rows        func(target, source, second []byte) []Mutation
 	}{
-		{"absent source", codeProblem, "OLD_VALUE_REF is absent from OLD", nil, func(target, source, _ []byte) []Mutation {
+		{"absent source", codeProblem, "OLD_VALUE_REF is absent from OLD", nil, nil, func(target, source, _ []byte) []Mutation {
 			return []Mutation{reverseRefRow(target, source)}
 		}},
-		{"source scheduled for creation", codeProblem, "OLD_VALUE_REF is absent from OLD", nil, func(target, source, second []byte) []Mutation {
+		{"source scheduled for creation", codeProblem, "OLD_VALUE_REF is absent from OLD", nil, nil, func(target, source, second []byte) []Mutation {
 			return []Mutation{reverseRefRow(target, source), forwardRefRow(source, second)}
 		}},
-		{"existing target, equal bytes", codeKeyExist, expectedNativeDiagnostic(codeKeyExist), values[1], nil},
-		{"existing target, different bytes", codeKeyExist, expectedNativeDiagnostic(codeKeyExist), values[0], nil},
+		{"forward source scheduled for creation", codeProblem, "OLD_VALUE_REF is absent from OLD", nil, values[1], func(target, source, _ []byte) []Mutation {
+			return []Mutation{reverseRefRow(target, source), forwardRefRow(source, target)}
+		}},
+		{"existing target, equal bytes", codeKeyExist, expectedNativeDiagnostic(codeKeyExist), values[1], values[1], nil},
+		{"existing target, different bytes", codeKeyExist, expectedNativeDiagnostic(codeKeyExist), values[0], values[1], nil},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
@@ -411,11 +420,13 @@ func TestUpdateReverseRefNativeMismatch(t *testing.T) {
 			second, _ := reverseKeys(t, 2, 4)
 			requireUpdateCommit(t, store, "reverse ref seed", Mutation{DBI: dbis[0], Key: counter, AfterKind: AfterLiteral, Literal: before})
 			mutations := []Mutation{{DBI: dbis[0], Key: counter, BeforePresent: true, AfterKind: AfterLiteral, Literal: after}}
+			if row.sourceValue != nil {
+				reverseSeed(t, store, target, source, row.sourceValue)
+			}
 			if row.rows != nil {
 				requireUpdateCommit(t, store, "reverse ref seed", Mutation{DBI: dbis[1], Key: second, AfterKind: AfterLiteral, Literal: values[1]})
 				mutations = append(mutations, row.rows(target, source, second)...)
 			} else {
-				reverseSeed(t, store, target, source, values[1])
 				requireUpdateCommit(t, store, "reverse ref seed", Mutation{DBI: dbis[1], Key: target, AfterKind: AfterLiteral, Literal: row.targetValue})
 				mutations = append(mutations, reverseRefRow(target, source))
 			}
@@ -440,15 +451,11 @@ func TestUpdateReverseRefNativeMismatch(t *testing.T) {
 			}); !sameError(viewErr, err) {
 				t.Fatalf("reverse ref native tuple: terminal reuse %v", viewErr)
 			}
-			var sourceValue []byte
-			if row.rows == nil {
-				sourceValue = values[1]
-			}
 			reopened, openErr := Open(path, cfg)
 			mustEnvironment(t, openErr)
 			requireReverseValue(t, reopened, dbis[0], counter, before, "reverse ref rolled back earlier write")
 			requireUpdateValue(t, reopened, dbis[1], target, row.targetValue, row.targetValue != nil)
-			requireUpdateValue(t, reopened, dbis[5], source, sourceValue, sourceValue != nil)
+			requireUpdateValue(t, reopened, dbis[5], source, row.sourceValue, row.sourceValue != nil)
 			mustEnvironment(t, reopened.Close())
 		})
 	}
