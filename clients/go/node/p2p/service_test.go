@@ -1018,6 +1018,9 @@ func requireP2PConsensusTxErrCode(t *testing.T, err error, want consensus.ErrorC
 	}
 }
 
+// registerRelayFrameProbe registers a peer whose connection a goroutine drains until cleanup closes
+// the pipe, forwarding every frame it reads to the returned channel and dropping none, so a frame
+// written after an earlier receive is still observable.
 func registerRelayFrameProbe(t *testing.T, svc *Service, addr string) (<-chan message, func()) {
 	t.Helper()
 
@@ -1036,10 +1039,13 @@ func registerRelayFrameProbe(t *testing.T, svc *Service, addr string) (<-chan me
 	svc.peers[remotePeer.addr()] = remotePeer
 	svc.peersMu.Unlock()
 
-	frames := make(chan message, 1)
+	frames := make(chan message, 4)
 	go func() {
-		frame, err := readFrame(remote, networkMagic(svc.cfg.PeerRuntimeConfig.Network), svc.cfg.PeerRuntimeConfig.MaxMessageSize)
-		if err == nil {
+		for {
+			frame, err := readFrame(remote, networkMagic(svc.cfg.PeerRuntimeConfig.Network), svc.cfg.PeerRuntimeConfig.MaxMessageSize)
+			if err != nil {
+				return
+			}
 			frames <- frame
 		}
 	}()
