@@ -298,7 +298,7 @@ func TestDARejectCachePrecedence(t *testing.T) {
 			render := fixture.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0x25}, chunkCount: 2})
 			relayBefore, ownerBefore := daRelayStateSnapshot(fixture.relay), cloneDAAdmissionOwner(fixture.mp.pendingOutpoints)
 			got, err := fixture.relay.AdmitDA(render.raw, publicPeer(t, "render"))
-			if got != (DAAdmissionResult{}) || err != errDARelayMemberIncomplete {
+			if got != (DAAdmissionResult{}) || err != errDARelayMemberIncomplete { //nolint:errorlint // Exact direct renderer sentinel identity is contract-owned.
 				t.Fatalf("render result=(%+v,%v)", got, err)
 			}
 			requireDANonReplayUnchanged(t, fixture.relay, fixture.mp.pendingOutpoints, relayBefore, ownerBefore)
@@ -306,7 +306,7 @@ func TestDARejectCachePrecedence(t *testing.T) {
 			fixture.relay.caps.orphanPoolBytes = 1
 			relayBefore, ownerBefore = daRelayStateSnapshot(fixture.relay), cloneDAAdmissionOwner(fixture.mp.pendingOutpoints)
 			got, err = fixture.relay.AdmitDA(capacity.raw, publicPeer(t, "capacity"))
-			if got != (DAAdmissionResult{}) || err != errDARelayOrphanPoolCapExceeded {
+			if got != (DAAdmissionResult{}) || err != errDARelayOrphanPoolCapExceeded { //nolint:errorlint // Exact direct DA sentinel identity is contract-owned.
 				t.Fatalf("capacity result=(%+v,%v)", got, err)
 			}
 			requireDANonReplayUnchanged(t, fixture.relay, fixture.mp.pendingOutpoints, relayBefore, ownerBefore)
@@ -352,7 +352,7 @@ func TestDARejectCachePrecedence(t *testing.T) {
 			tx := sequence.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x2b}, payload: []byte("sequence")})
 			relayBefore, ownerBefore = daRelayStateSnapshot(sequence.relay), cloneDAAdmissionOwner(sequence.mp.pendingOutpoints)
 			got, err = sequence.relay.AdmitDA(tx.raw, publicPeer(t, "sequence"))
-			if got != (DAAdmissionResult{}) || err != errDARelayArithmeticOverflow {
+			if got != (DAAdmissionResult{}) || err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact direct DA sentinel identity is contract-owned.
 				t.Fatalf("sequence result=(%+v,%v)", got, err)
 			}
 			requireDANonReplayUnchanged(t, sequence.relay, sequence.mp.pendingOutpoints, relayBefore, ownerBefore)
@@ -560,7 +560,6 @@ func TestDARejectCacheConcurrency(t *testing.T) {
 	results := make(chan error, sameKeyWorkers)
 	var workers sync.WaitGroup
 	for _, hold := range holds {
-		hold := hold
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -597,7 +596,6 @@ func TestDARejectCacheConcurrency(t *testing.T) {
 	}
 	start = make(chan struct{})
 	for value := uint64(daRejectCacheCapacity - 99); value <= daRejectCacheCapacity+100; value++ {
-		value := value
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
