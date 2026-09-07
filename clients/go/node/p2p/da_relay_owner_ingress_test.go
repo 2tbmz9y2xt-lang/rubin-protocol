@@ -416,7 +416,7 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		require(t, quotaKeyFree(lh.service, peerQuotaKey(row.peer.addr())) && latchedCalls.Load() == 0, "%s: quota key held or scheduler entries=%d", label, latchedCalls.Load())
 	}
 	// REJECTED_REPEAT (RUBIN_COMPACT_BLOCKS.md Section 5.3) on a fresh harness and owner: each row below is
-	// labelled with the entry it observes, and the closing standard tx proves the untouched authorities live.
+	// labeled with the entry it observes, and the closing standard tx proves the untouched authorities live.
 	rh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	rmempool, rf, rp := wireCanonicalMempoolForP2PTest(t, rh), newDAIngressFixture(t, rh), daRelayTestPeer(rh, "127.0.0.1:19114")
 	rframes, _ := registerRelayFrameProbe(t, rh.service, "127.0.0.1:19119")
