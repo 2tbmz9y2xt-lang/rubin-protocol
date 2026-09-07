@@ -545,8 +545,8 @@ const (
 	// AfterOldValueRef installs into the absent Key the exact bytes the OLD snapshot holds at RefDBI/RefKey; those source bytes
 	// are read from OLD and are neither validated nor consumed. Two directions are admitted: an undo-v1 entry referencing a
 	// utxo-v1 row (Key[41:77] == RefKey[8:44]) and a utxo-v1 row referencing an undo-v1 entry (Key[8:44] == RefKey[41:77]). Only
-	// those outpoint bytes are bound; the destination image ID and the source block hash, transaction index and input index are
-	// used as supplied, so one undo entry may feed several image IDs. A reference carries Literal nil and BeforePresent false.
+	// those outpoint bytes are bound; the image ID and the undo block hash, transaction index and input index are used as
+	// supplied. A reference carries Literal nil and BeforePresent false.
 	AfterOldValueRef
 )
 
