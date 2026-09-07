@@ -652,9 +652,23 @@ func updateAbsentPayload(m Mutation) bool {
 	return m.BeforePresent && m.Literal == nil && m.RefDBI == (DBI{}) && m.RefKey == nil && updateAbsentAllowed(m)
 }
 
+// updateUndoEntryKey is strictly narrower than validKey for rank 5, which also admits the 33-byte manifest.
+func updateUndoEntryKey(key []byte) bool {
+	return len(key) == 77 && key[32] == 1
+}
+
+func updateForwardRef(m Mutation, dbis [7]DBI) bool {
+	return m.DBI == dbis[5] && updateUndoEntryKey(m.Key) && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
+}
+
+// updateReverseRef slices m.Key[8:44]: updateValidMutation proves validKey(1, m.Key) before dispatching here.
+func updateReverseRef(m Mutation, dbis [7]DBI) bool {
+	return m.DBI == dbis[1] && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
+}
+
 func updateRefPayload(m Mutation) bool {
 	dbis := SchemaV1DBIs()
-	return !m.BeforePresent && m.Literal == nil && m.DBI == dbis[5] && len(m.Key) == 77 && m.Key[32] == 1 && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
+	return !m.BeforePresent && m.Literal == nil && (updateForwardRef(m, dbis) || updateReverseRef(m, dbis))
 }
 
 func updateValidMutation(m Mutation) bool {
@@ -703,7 +717,7 @@ func (budget *updateBudget) addMutation(m Mutation) bool {
 	switch {
 	case m.DBI.Rank == 1 && m.AfterKind == AfterAbsent:
 		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateInputs)
-	case m.DBI.Rank == 5 && m.AfterKind == AfterOldValueRef:
+	case m.AfterKind == AfterOldValueRef:
 		budget.undoRefs, ok = updateAdd(budget.undoRefs, 1, maxUpdateInputs)
 	case m.DBI.Rank == 1 && m.AfterKind == AfterLiteral:
 		budget.utxoLiterals, ok = updateAdd(budget.utxoLiterals, 1, maxUpdateOutputs)
