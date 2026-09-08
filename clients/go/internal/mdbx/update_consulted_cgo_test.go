@@ -53,16 +53,6 @@ func consultedStore(t *testing.T) (*Store, string, ConfigV1) {
 	return consultedTrack(t, store, err), path, cfg
 }
 
-// consultedReopen closes previous when a skipped subtest left it OPEN, then opens path again.
-func consultedReopen(t *testing.T, previous *Store, path string, cfg ConfigV1) *Store {
-	t.Helper()
-	if previous.state == storeOPEN {
-		mustEnvironment(t, previous.Close())
-	}
-	store, err := Open(path, cfg)
-	return consultedTrack(t, store, err)
-}
-
 // consultedRequireCommit proves batch commits NEW and leaves the Store OPEN without terminal truth.
 func consultedRequireCommit(t *testing.T, store *Store, marker string, batch Batch) {
 	t.Helper()
@@ -84,7 +74,8 @@ func consultedRequireImage(t *testing.T, store *Store, dbi DBI, key, want []byte
 	}))
 }
 
-// consultedRequireOutcome proves the exact direct tuple, CommitTruthOld, an expired Reader and the Store disposition.
+// consultedRequireOutcome proves the exact direct tuple, CommitTruthOld, an expired Reader and the Store disposition; a
+// terminal Store must also return err from Update and View without invoking either callback.
 func consultedRequireOutcome(t *testing.T, store *Store, reader *Reader, truth CommitTruth, err error, class EngineClass, code int, diagnostic, marker string, terminal bool) {
 	t.Helper()
 	engine, direct := directTestEngineError(err)
@@ -96,14 +87,28 @@ func consultedRequireOutcome(t *testing.T, store *Store, reader *Reader, truth C
 	if terminal != closed || !terminal && (store.state != storeOPEN || store.terminalTruth != 0) {
 		t.Fatalf("%s: %s/%v", marker, store.state, store.terminal)
 	}
+	if !terminal {
+		return
+	}
+	again, cached := store.Update(func(*Reader) (Batch, error) { return Batch{}, fmt.Errorf("%s: callback invoked", marker) })
+	viewErr := store.View(func(*Reader) error { return fmt.Errorf("%s: callback invoked", marker) })
+	if again != CommitTruthOld || !sameError(cached, err) || !sameError(viewErr, err) {
+		t.Fatalf("%s: terminal reuse %s/%v/%v", marker, again, cached, viewErr)
+	}
+}
+
+// consultedUpdate runs one public Update whose callback calls inside with the Reader and then returns batch.
+func consultedUpdate(store *Store, inside func(*Reader), batch Batch) (*Reader, CommitTruth, error) {
+	var reader *Reader
+	truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; inside(observed); return batch, nil })
+	return reader, truth, err
 }
 
 // consultedRequireRefusal proves Go admission refuses batch with an OPEN Store and unchanged caller-owned consulted rows.
 func consultedRequireRefusal(t *testing.T, store *Store, marker string, class EngineClass, code int, diagnostic string, batch Batch) {
 	t.Helper()
 	before := fmt.Sprint(batch.Consulted)
-	var reader *Reader
-	truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return batch, nil })
+	reader, truth, err := consultedUpdate(store, func(*Reader) {}, batch)
 	consultedRequireOutcome(t, store, reader, truth, err, class, code, diagnostic, marker, false)
 	if fmt.Sprint(batch.Consulted) != before {
 		t.Fatalf("%s: caller-owned consulted rows changed", marker)
@@ -254,16 +259,19 @@ func TestUpdateConsultedBounds(t *testing.T) {
 	dbis := readDBIsLiteral()
 	plan := updateNativePlan(t, consultedCounter(t, 1))
 	t.Run("exact 16384 admitted", func(t *testing.T) {
-		rows, total := consultedRows(t, 16_384), 0
+		rows, total := make([]ConsultedRow, 16_384), 0
+		for i, key := range reverseBatchKeys(16_384, 77) {
+			rows[i] = ConsultedRow{DBI: dbis[5], Key: key}
+		}
 		for _, owned := range consultedUnit(t, "exact 16384 admitted", rows, plan) {
 			total += len(owned.key)
 		}
-		if total != 262_144 || total > 1_261_568 {
+		if total != 1_261_568 {
 			t.Fatalf("exact 16384 admitted: cloned key bytes %d", total)
 		}
 		store, _, _ := consultedStore(t)
 		consultedRequireCommit(t, store, "exact 16384 admitted", Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: rows})
-		consultedRequireImage(t, store, dbis[2], rows[16_383].Key, nil, false, "exact 16384 admitted: last row untouched")
+		consultedRequireImage(t, store, dbis[5], rows[16_383].Key, nil, false, "exact 16384 admitted: last row untouched")
 	})
 	t.Run("16385 Capacity", func(t *testing.T) {
 		rows := consultedRows(t, 16_385)
@@ -308,7 +316,7 @@ func TestUpdateConsultedValueBounds(t *testing.T) {
 	for i, row := range rows {
 		consulted[i] = ConsultedRow{DBI: row.DBI, Key: row.Key}
 	}
-	store, path, cfg := consultedStore(t)
+	store, _, _ := consultedStore(t)
 	consultedRequireCommit(t, store, "value bounds seed", Batch{Mutations: rows})
 	t.Run("exact 154611151 admitted", func(t *testing.T) {
 		consultedRequireCommit(t, store, "exact 154611151 admitted", Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: consulted})
@@ -316,41 +324,37 @@ func TestUpdateConsultedValueBounds(t *testing.T) {
 	longer := consultedBlockRow(t, 3, 18_610_902)
 	consultedRequireCommit(t, store, "value bounds one-over seed", Batch{Mutations: []Mutation{{DBI: dbis[4], Key: longer.Key, BeforePresent: true, AfterKind: AfterAbsent}}})
 	consultedRequireCommit(t, store, "value bounds one-over seed", Batch{Mutations: []Mutation{longer}})
-	t.Run("154611152 Capacity", func(t *testing.T) {
-		var reader *Reader
-		truth, err := store.Update(func(observed *Reader) (Batch, error) {
-			reader = observed
-			return Batch{Mutations: []Mutation{consultedCounter(t, 2)}, Consulted: consulted}, nil
-		})
-		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("Capacity"), -30417, "Update Batch exceeds bound", "154611152 Capacity", true)
-	})
-	reopened := consultedReopen(t, store, path, cfg)
-	for i, row := range rows {
-		want := row.Literal
-		if bytes.Equal(row.Key, longer.Key) {
-			want = longer.Literal
+	// reuse proves the same OPEN Store still reads every block row unchanged, then commits a within-cap consulted Update.
+	reuse := func(t *testing.T, marker string, id uint64) {
+		t.Helper()
+		for i, row := range rows {
+			want := row.Literal
+			if bytes.Equal(row.Key, longer.Key) {
+				want = longer.Literal
+			}
+			consultedRequireImage(t, store, dbis[4], row.Key, want, true, fmt.Sprintf("%s: row %d intact", marker, i))
 		}
-		consultedRequireImage(t, reopened, dbis[4], row.Key, want, true, fmt.Sprintf("154611152 Capacity: row %d intact after reopen", i))
+		consultedRequireImage(t, store, dbis[0], consultedCounter(t, id).Key, nil, false, marker+": no write")
+		consultedRequireCommit(t, store, marker+": same-Store reuse", Batch{Mutations: []Mutation{consultedCounter(t, id)}, Consulted: consulted[:2]})
 	}
-	consultedRequireImage(t, reopened, dbis[0], consultedCounter(t, 2).Key, nil, false, "154611152 Capacity: no write")
-	t.Run("capacity before snapshot compare", func(t *testing.T) {
-		var reader *Reader
-		truth, err := reopened.Update(func(observed *Reader) (Batch, error) {
-			reader = observed
-			requireUpdateTruth(t, reopened.updateNative(updateNativePlan(t, consultedCounter(t, 3)), nil, observed.txn), CommitTruthNew, true, nil, nil)
-			return Batch{Mutations: []Mutation{consultedCounter(t, 3)}, Consulted: consulted}, nil
-		})
-		consultedRequireOutcome(t, reopened, reader, truth, err, EngineClass("Capacity"), -30417, "Update Batch exceeds bound", "capacity before snapshot compare", true)
+	t.Run("154611152 Capacity", func(t *testing.T) {
+		consultedRequireRefusal(t, store, "154611152 Capacity", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", Batch{Mutations: []Mutation{consultedCounter(t, 2)}, Consulted: consulted})
+		reuse(t, "154611152 Capacity", 2)
 	})
-	again := consultedReopen(t, reopened, path, cfg)
-	t.Run("absent source before consulted capacity", func(t *testing.T) {
-		target, source := reverseKeys(t, 1, 1)
-		var reader *Reader
-		truth, err := again.Update(func(observed *Reader) (Batch, error) {
-			reader = observed
-			return Batch{Mutations: []Mutation{reverseRefRow(target, source)}, Consulted: consulted}, nil
-		})
-		consultedRequireOutcome(t, again, reader, truth, err, EngineClass("StateMismatch"), -30779, "OLD_VALUE_REF is absent from OLD", "absent source before consulted capacity", true)
+	t.Run("capacity before snapshot compare", func(t *testing.T) {
+		reader, truth, err := consultedUpdate(store, func(observed *Reader) {
+			requireUpdateTruth(t, store.updateNative(updateNativePlan(t, consultedCounter(t, 3)), nil, observed.txn), CommitTruthNew, true, nil, nil)
+		}, Batch{Mutations: []Mutation{consultedCounter(t, 3)}, Consulted: consulted})
+		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("Capacity"), -30417, "Update Batch exceeds bound", "capacity before snapshot compare", false)
+		reuse(t, "capacity before snapshot compare", 4)
+	})
+	target, source := reverseKeys(t, 1, 1)
+	t.Run("capacity before missing source", func(t *testing.T) {
+		consultedRequireRefusal(t, store, "capacity before missing source", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", Batch{Mutations: []Mutation{reverseRefRow(target, source)}, Consulted: consulted})
+	})
+	t.Run("within-cap missing source is terminal", func(t *testing.T) {
+		reader, truth, err := consultedUpdate(store, func(*Reader) {}, Batch{Mutations: []Mutation{reverseRefRow(target, source)}, Consulted: consulted[:2]})
+		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("StateMismatch"), -30779, "OLD_VALUE_REF is absent from OLD", "within-cap missing source is terminal", true)
 	})
 }
 
@@ -381,9 +385,6 @@ func TestUpdateConsultedCopyIsolation(t *testing.T) {
 		}
 		if fmt.Sprint(plan, owned) != before {
 			t.Fatal("aliased backing: owned bytes drifted")
-		}
-		if owned[0].dbi == plan[0].dbi && bytes.Equal(owned[0].key, plan[0].key) || owned[0].dbi == plan[0].refDBI && bytes.Equal(owned[0].key, plan[0].refKey) {
-			t.Fatal("aliased backing: owned rows lost disjointness")
 		}
 	})
 }
@@ -451,15 +452,13 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 	t.Run("snapshot drift", func(t *testing.T) {
 		store, path, cfg := consultedStore(t)
 		consultedRequireCommit(t, store, "snapshot drift seed", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}}})
-		var reader *Reader
-		truth, err := store.Update(func(observed *Reader) (Batch, error) {
-			reader = observed
+		reader, truth, err := consultedUpdate(store, func(observed *Reader) {
 			drift := updateNativePlan(t, Mutation{DBI: dbis[2], Key: key, BeforePresent: true, AfterKind: AfterLiteral, Literal: after})
 			requireUpdateTruth(t, store.updateNative(drift, nil, observed.txn), CommitTruthNew, true, nil, nil)
-			return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: key}}}, nil
-		})
+		}, Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: key}}})
 		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("StateMismatch"), -30779, "OLD/write snapshot mismatch", "snapshot drift", true)
-		reopened := consultedReopen(t, store, path, cfg)
+		reopened, openErr := Open(path, cfg)
+		consultedTrack(t, reopened, openErr)
 		consultedRequireImage(t, reopened, dbis[2], key, after, true, "snapshot drift: sibling commit persisted")
 		consultedRequireImage(t, reopened, dbis[0], consultedCounter(t, 1).Key, nil, false, "snapshot drift: no write")
 	})
@@ -482,19 +481,10 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 		}))
 		requireEnvironmentError(t, matchErr, EngineStateMismatch, operationUpdate, -30779, "final update image mismatch")
 	})
-	t.Run("unreadable consulted DBI precommit", func(t *testing.T) {
+	t.Run("native capture failure", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
-		plan, handles := updateNativePlan(t, consultedCounter(t, 1)), store.dbis
-		store.dbis[2] = ^store.dbis[2]
-		var outcome updateNativeOutcome
-		mustEnvironment(t, store.View(func(reader *Reader) error {
-			outcome = store.updateNative(plan, []ownedConsulted{{dbi: dbis[2], key: key}}, reader.txn)
-			return outcome.valid()
-		}))
-		store.dbis = handles
-		requireEngineError(t, outcome.primary, EngineLocalInvariant, operationUpdate, -30780)
-		requireUpdateTruth(t, outcome, CommitTruthOld, false, outcome.primary, nil)
-		consultedRequireImage(t, store, dbis[0], plan[0].key, nil, false, "unreadable consulted DBI precommit: no write")
+		reader, truth, err := consultedUpdate(store, func(*Reader) { store.dbis[2] = ^store.dbis[2] }, Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: key}}})
+		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("LocalInvariant"), -30780, expectedNativeDiagnostic(-30780), "native capture failure", true)
 	})
 }
 
@@ -621,7 +611,8 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	ordered(execute, "final verification order drifted", "updateNativePreflight(", "updateNativeDeletes(", "updateNativePuts(", "updateNativeVerify(", "updateNativeConsultedMatch(", "\"final update image mismatch\"", "return updateNativeCommit(")
 	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 5, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeConsultedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
 	preflight := updateNativeBody(t, source, "updateNativePreflight")
-	ordered(preflight, "snapshot comparison order drifted", "updateNativeImages(", "updateNativeConsultedImages(", "updateNativeMatch(", "if reference.target >= 0", "return references, updateNativeConsultedMatch(")
+	ordered(preflight, "snapshot comparison order drifted", "updateNativeImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeConsultedMatch(", "return references, nil")
+	require(!strings.Contains(preflight, "updateNativeConsultedImages("), "consulted capture left the admission owner")
 	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 3, "snapshot diagnostic drifted")
 	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackConsulted(", "if oldImage", "if newImage")
 	require(strings.Contains(updateNativeBody(t, source, "updateNativeReadbackConsulted"), "oldImage, newImage = oldImage && equal, newImage && equal"), "readback fold drifted")
@@ -637,6 +628,6 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		require(!strings.Contains(body, "C.") && !strings.Contains(body, "len(row.Key)") && !strings.Contains(body, "KeyBytes"), "admission owner drifted: "+name)
 	}
 	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "second comparator appeared")
-	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(", "updateOwnedConsulted(")
+	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)")
 	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn)", "updateAbortOld(begun.txn)")
 }

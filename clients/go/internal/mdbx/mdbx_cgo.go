@@ -578,11 +578,13 @@ type Batch struct {
 	// count and literal bytes keep maxUpdateMutations and maxUpdateLiterals in both modes. False, the zero value, keeps the
 	// default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
-	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed
-	// readback, with no delete and no put. It is admitted after every mutation: exact SchemaV1 DBI/key shape, strictly
-	// increasing by (DBI.Rank, key), disjoint from every target and OLD_VALUE_REF source, at most maxUpdateConsulted rows
-	// and at most MaxOperationDataBytes present value bytes; nil and empty select the same behavior. The caller leaves
-	// the rows and their key bytes unchanged until Update returns.
+	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed readback,
+	// with no delete and no put. Admitted after every mutation with exact SchemaV1 DBI/key shape, strictly increasing (DBI.Rank,
+	// key), disjoint from every target and OLD_VALUE_REF source, at most 16,384 rows and at most MaxOperationDataBytes
+	// present-value bytes, captured once from OLD before any write transaction. Those refusals return the direct EngineError,
+	// truth OLD, and an open reusable Store; a native read failure there keeps its error and the existing infrastructure
+	// lifecycle. A mismatch on possible-crossed readback fails both predicates: Update returns CommitTruthUnknown with the
+	// original CommitError. Nil and empty behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
 }
 
@@ -1145,24 +1147,25 @@ func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 }
 
 // updateNativeConsultedImages captures each consulted row's OLD image in declared order, charging only present value
-// lengths against MaxOperationDataBytes (absent and present-empty charge zero and stay distinct); the first read error or
-// over-bound charge stops the capture before any comparison.
-func updateNativeConsultedImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted) error {
+// lengths against MaxOperationDataBytes (absent and present-empty charge zero and stay distinct). It returns (false, nil),
+// (false, updateBoundError()) only for its own byte charge, or (true, err) with the unchanged first updateNativeImage
+// error; the flag is never derived from err.
+func updateNativeConsultedImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted) (infrastructure bool, err error) {
 	var total uint64
 	for i, row := range consulted {
-		image, err := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
-		if err != nil {
-			return err
+		image, readErr := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
+		if readErr != nil {
+			return true, readErr
 		}
 		if image.present {
 			var ok bool
 			if total, ok = updateAdd(total, uint64(image.length), MaxOperationDataBytes); !ok {
-				return updateBoundError()
+				return false, updateBoundError()
 			}
 		}
 		consulted[i].image = image
 	}
-	return nil
+	return false, nil
 }
 
 // updateNativeConsultedMatch returns the first comparison error, or the StateMismatch diagnostic for the first consulted
@@ -1182,10 +1185,6 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 	if err != nil {
 		return nil, err
 	}
-	err = updateNativeConsultedImages(old, dbis, consulted)
-	if err != nil {
-		return nil, err
-	}
 	for i, mutation := range plan {
 		err = updateNativeMatch(write, dbis[mutation.dbi.Rank], mutation.key, targets[i], "OLD/write snapshot mismatch")
 		if err != nil {
@@ -1202,7 +1201,10 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 			return nil, err
 		}
 	}
-	return references, updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch")
+	if err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch"); err != nil {
+		return nil, err
+	}
+	return references, nil
 }
 
 // libMDBX does not retain either Go-owned literal or OLD-borrowed bytes.
@@ -1531,6 +1533,10 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
 		return nil, nil, s.abortReadLocked(old, consultedErr, false)
+	}
+	infrastructure, captureErr := updateNativeConsultedImages(old, s.dbis, consulted)
+	if captureErr != nil {
+		return nil, nil, s.abortReadLocked(old, captureErr, infrastructure)
 	}
 	return plan, consulted, nil
 }
