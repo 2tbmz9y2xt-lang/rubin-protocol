@@ -165,7 +165,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 63, 0}, {"consensus", "../consensus", 60, 3}} {
+		}{{"node", ".", 64, 0}, {"consensus", "../consensus", 60, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -394,6 +394,44 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for field, count := range map[string]int{"byte": 5, "uint64": 4, "kind": 1, "bool": 5, "uint16": 1, "daRelaySetState": 1, "daRelayLocator": 1} {
 			want["read|node/da_relay_owner.go:file|"+field] += count
 		}
+		for _, replacement := range []struct {
+			scope, oldStatement, newStatement string
+		}{
+			{
+				"node/da_admission.go:beginDAAdmissionGuarded",
+				"\tm.chainState.admissionMu.RLock()\n",
+				"\tif !m.chainState.admissionMu.RLockUnlessTerminal() {\n\t\treturn nil, txAdmitUnavailable(\"pending-outpoint owner admission context unavailable\")\n\t}\n",
+			},
+			{
+				"node/da_admission.go:BeginDARemoval",
+				"\tm.chainState.admissionMu.RLock()\n",
+				"\tif !m.chainState.admissionMu.RLockUnlessTerminal() {\n\t\treturn nil, txAdmitUnavailable(\"pending-outpoint owner admission context unavailable\")\n\t}\n",
+			},
+		} {
+			declarationReplaced := false
+			for row, count := range maps.Clone(want) {
+				if !strings.Contains(row, "|"+replacement.scope+"|") {
+					continue
+				}
+				var updated string
+				if strings.HasPrefix(row, "declaration|") {
+					updated = strings.Replace(row, replacement.oldStatement, replacement.newStatement, 1)
+					declarationReplaced = updated != row
+				} else {
+					updated = strings.Replace(row, "RLock", "RLockUnlessTerminal", 1)
+				}
+				if updated != row {
+					delete(want, row)
+					want[updated] += count
+				}
+			}
+			if !declarationReplaced {
+				t.Fatalf("missing baseline declaration for %s", replacement.scope)
+			}
+			want["call|"+replacement.scope+"|txAdmitUnavailable(\"pending-outpoint owner admission context unavailable\")"]++
+			want["read|"+replacement.scope+"|txAdmitUnavailable"]++
+			want["read|"+replacement.scope+"|nil"]++
+		}
 		for row, count := range got {
 			if !changed(row) && want[row] != count {
 				t.Fatalf("structural row %q count=%d want=%d at %s", row, count, want[row], where[row])
@@ -418,6 +456,8 @@ func requireDAAdmissionStructure(t *testing.T) {
 			}
 		}
 		checkCalls("BeginDAAdmission", callCounts[begin.Name.Name], map[string]int{"beginDAAdmissionGuarded": 1, "parseDAAdmission": 1, "txAdmitUnavailable": 3})
+		checkCalls("guarded admission", callCounts["beginDAAdmissionGuarded"], map[string]int{"AdmissionContext": 1, "RLockUnlessTerminal": 1, "admissionSnapshotForInputs": 1, "checkParsedTransactionWithSnapshot": 1, "len": 1, "policySnapshot": 1, "txAdmitUnavailable": 3, "uint64": 1})
+		checkCalls("BeginDARemoval", callCounts["BeginDARemoval"], map[string]int{"RLockUnlessTerminal": 1, "txAdmitUnavailable": 4})
 		checkCalls("parse wrapper", callCounts[wrapper.Name.Name], map[string]int{"matchingDAChunkPayloadHash": 1, "parseDAAdmissionCandidate": 1, "txAdmitRejected": 1})
 		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 5, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 4})
 		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "selectRelayDisposition": 1, "txAdmitRejected": 1, "uint64": 1, "validateCandidate": 1})
@@ -3325,10 +3365,19 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	// non-test Go source; only the local bridge constructs LOCAL provenance.
 	refs := productionReferenceCensus(t, "AdmitDA", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
 	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "handleRelayDATx"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA"}, "DetachedReorgDAProvenance": nil}), "production references=%v", refs)
-	bindings := map[string][]string{}
+	bindings, directBindings := map[string][]string{}, map[string][]string{}
 	serverStarted := false
 	run := declaredFunctions("../cmd/rubin-node/main.go")["run"]
 	require(t, run != nil, "production run function missing")
+	directServerAt := token.NoPos
+	for _, statement := range run.Body.List {
+		if assign, ok := statement.(*ast.AssignStmt); ok && len(assign.Rhs) == 1 {
+			if call, ok := assign.Rhs[0].(*ast.CallExpr); ok && calleeName(call) == "startDevnetRPCServer" {
+				directServerAt = statement.Pos()
+			}
+		}
+	}
+	require(t, directServerAt != token.NoPos, "direct production startDevnetRPCServer statement missing")
 	ast.Inspect(run.Body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok && calleeName(call) == "startDevnetRPCServer" {
 			serverStarted = true
@@ -3358,6 +3407,9 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 				rhs = "late:" + rhs
 			}
 			bindings[left.Sel.Name] = append(bindings[left.Sel.Name], rhs)
+			if slices.Contains(run.Body.List, ast.Stmt(assign)) && assign.Pos() < directServerAt {
+				directBindings[left.Sel.Name] = append(directBindings[left.Sel.Name], rhs)
+			}
 		}
 		return true
 	})
@@ -3365,6 +3417,7 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	for field, want := range map[string]string{"admitLocalDA": "p2pService.AdmitLocalDA", "prefetchLocalDA": "p2pService.ScheduleLocalDAPrefetch"} {
 		got := bindings[field]
 		require(t, reflect.DeepEqual(got, []string{want}), "%s bindings=%v, want one %s before server start", field, got, want)
+		require(t, reflect.DeepEqual(directBindings[field], []string{want}), "%s direct bindings=%v, want one direct %s before direct server start", field, directBindings[field], want)
 	}
 }
 

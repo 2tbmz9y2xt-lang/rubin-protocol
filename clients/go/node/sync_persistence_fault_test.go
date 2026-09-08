@@ -174,15 +174,15 @@ func TestSyncEnginePostCommitFailuresDoNotCompensate(t *testing.T) {
 // TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch pins the terminal
 // fail-closed contract for an ambiguous atomic POST-COMMIT persistence failure:
 // the fault is latched, the owner stays transition-active so AdmissionContext
-// stays unavailable, the continuous admission guard is never released so a
-// standard-admission waiter cannot pass it, and a later SyncEngine mutator
+// stays unavailable, the continuous admission guard is never released while a
+// standard-admission reader returns unavailable, and a later SyncEngine mutator
 // acquires mutationMu and returns the latched fault instead of blocking forever.
 //
 // The controlling goroutine deliberately NEVER acquires admissionMu before it
 // releases the injected block: the transition holds that guard across
 // persistence by design, so taking it here would deadlock the test rather than
 // observe anything. Everything below is proven from the owner and the engine
-// instead, and the admission waiter runs on its own goroutine.
+// instead, and the admission result is joined with a bounded watchdog.
 func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 	engine, store, _ := newPersistenceFaultEngine(t)
 	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
@@ -199,6 +199,9 @@ func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 	if _, ok := owner.AdmissionContext(); ok {
 		t.Error("AdmissionContext was available during an active transition")
 	}
+	admitted := make(chan error, 1)
+	go func() { admitted <- mempool.AddTx(DevnetGenesisBlockBytes()) }()
+	awaitCanonicalMOAdmissionRLock(t, "AddTx", 1)
 	close(release)
 	requirePersistenceFault(t, engine, awaitPersistenceResult(t, result, "failed apply"), atomicWriteOverwrite)
 
@@ -209,14 +212,24 @@ func TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch(t *testing.T) {
 		t.Errorf("AdmissionContext became available after the latched fault: %+v", ctx)
 	}
 
-	// The guard is still held, so a standard-admission attempt blocks. It is
-	// left parked on purpose: nothing in-process may release that guard.
-	admitted := make(chan error, 1)
-	go func() { admitted <- mempool.AddTx(DevnetGenesisBlockBytes()) }()
-	select {
-	case err := <-admitted:
-		t.Errorf("standard admission passed the latched guard: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	// Terminal notification wakes the queued standard-admission reader without
+	// releasing the writer or allowing any admission effect.
+	admitErr := awaitPersistenceResult(t, admitted, "terminal standard admission")
+	var typed *TxAdmitError
+	if !errors.As(admitErr, &typed) || typed.Kind != TxAdmitUnavailable || admitErr.Error() != "pending-outpoint owner admission context unavailable" {
+		t.Fatalf("terminal standard admission=%T %v, want exact unavailable", admitErr, admitErr)
+	}
+	fresh := make(chan error, 1)
+	go func() { fresh <- mempool.AddTx(DevnetGenesisBlockBytes()) }()
+	if err := awaitPersistenceResult(t, fresh, "fresh terminal standard admission"); !errors.As(err, &typed) || typed.Kind != TxAdmitUnavailable || err.Error() != "pending-outpoint owner admission context unavailable" {
+		t.Fatalf("fresh terminal standard admission=%T %v, want exact unavailable", err, err)
+	}
+	if got := mempool.AdmissionCounts(); got != (MempoolAdmissionCounts{Unavailable: 2}) {
+		t.Fatalf("terminal standard admission counts=%+v, want two unavailable", got)
+	}
+	if engine.chainState.admissionMu.TryLock() {
+		engine.chainState.admissionMu.Unlock()
+		t.Fatal("terminal admission writer was released")
 	}
 
 	// mutationMu, unlike admissionMu, was released when the failed transition
@@ -379,5 +392,4 @@ func TestSyncEngineTerminalFaultedSnapshot(t *testing.T) {
 		}
 		requireAtomicTest(t, engine.persistenceFault == fault && errors.Is(fault.cause, os.ErrPermission), "fault=%+v", engine.persistenceFault)
 	})
-
 }

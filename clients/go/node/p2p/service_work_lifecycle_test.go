@@ -736,7 +736,10 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
 }
 
-// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance is the latched-engine schedule. On TERMINAL_PERSISTENCE(new) the transition publishes the summary, returns the terminal error and RETAINS ChainState.admissionMu exclusively (publishCanonicalTransition's latched arm returns before its Unlock), so the post-return TTL advance — the ONLY step of noteAcceptedBlock that takes that fence — must be skipped: invoked, AdvanceOrphanTTL would park this worker at admissionMu.RLock forever and the terminal error would never reach the caller. node's TestCanonicalDAWritersCannotInterleaveWithTheTransition pins that AdvanceOrphanTTL does block on a held write guard, and TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch that the terminal latch never releases it; this row owns the remaining half — that the chain no longer invokes it. A published summary alongside a non-nil apply error is exactly that shape at both engine seams and the error identity is deliberately never read, so the sentinel stands in for the fault, whose injection seam (atomicWriteIO) is private to package node.
+// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance pins that a published
+// terminal result still skips the post-return TTL mutation. The shared fence
+// now refuses a truly latched race; this row separately preserves the existing
+// no-TTL-effect branch selected from the returned terminal shape.
 func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -777,13 +780,53 @@ func latchDAHarness(t *testing.T, h, source *testHarness) {
 	requireEqual(t, h.syncEngine.TerminalFaulted(), true, "the engine terminal latch")
 }
 
-// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance is the AnnounceBlock half of
-// the latched-park class. The post-return orphan-TTL advance is the only step of
-// AnnounceBlock that takes the admission read fence, and a latched transition
-// never releases the write guard, so an ungated advance parks this leased caller
-// forever. The row proves the call RETURNS while the engine is genuinely
-// latched, and that it got far enough to reach the gated line: the unfenced
-// seen-set effect ahead of it landed.
+func TestLocalDATerminalWorkDrains(t *testing.T) {
+	const unavailable = "pending-outpoint owner admission context unavailable"
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe8), 2)
+	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
+
+	type admissionOutcome struct {
+		result node.DAAdmissionResult
+		err    error
+	}
+	admitted := make(chan admissionOutcome, 1)
+	go func() {
+		result, err := h.service.AdmitLocalDA(raw)
+		admitted <- admissionOutcome{result: result, err: err}
+	}()
+	var got admissionOutcome
+	select {
+	case got = <-admitted:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatal("terminal AdmitLocalDA did not return")
+	}
+	var typed *node.TxAdmitError
+	if got.result != (node.DAAdmissionResult{}) || !errors.As(got.err, &typed) || typed.Kind != node.TxAdmitUnavailable || got.err.Error() != unavailable {
+		t.Fatalf("terminal AdmitLocalDA=(%+v,%T %v), want exact unavailable", got.result, got.err, got.err)
+	}
+
+	prefetched := make(chan error, 1)
+	go func() { prefetched <- h.service.ScheduleLocalDAPrefetch(daRelayTestID(0xe8)) }()
+	requireReturned(t, prefetched, "terminal ScheduleLocalDAPrefetch")
+	requireReturned(t, lifecycleClose(h.service), "Service.Close after terminal local work")
+
+	retained := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	daID := daRelayTestID(0xe9)
+	if result, err := retained.service.AdmitLocalDA(newDAIngressFixture(t, retained).commit(daID, 2)); err != nil || result.Disposition != node.DAAdmissionRetained {
+		t.Fatalf("retained AdmitLocalDA=(%+v,%v)", result, err)
+	}
+	latchDAHarness(t, retained, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	prefetched = make(chan error, 1)
+	go func() { prefetched <- retained.service.ScheduleLocalDAPrefetch(daID) }()
+	requireReturned(t, prefetched, "post-retained terminal ScheduleLocalDAPrefetch")
+	requireReturned(t, lifecycleClose(retained.service), "Service.Close after retained terminal prefetch")
+}
+
+// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance preserves the early
+// already-latched skip. A latch racing this check is refused by the shared
+// fence; this row also proves the unfenced seen-set effect ahead of the check
+// still lands.
 func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -795,15 +838,12 @@ func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 	requireEqual(t, h.service.blockSeen.Has(blockHash), true, "the seen-set entry the unfenced effects still added")
 }
 
-// TestLatchedEngineSkipsThePeerQuotaRelease is the peer-teardown half. The
-// best-effort quota release takes the same fence, so an ungated release parks
-// unregisterPeer against a latched engine and strands the peer worker. The
-// lifecycle-exit counter increments only AFTER the gated call, so it is the
-// observation that the teardown ran past it rather than merely started.
+// TestLatchedEngineSkipsThePeerQuotaRelease preserves the early already-latched
+// cleanup skip. A latch racing this check is refused by the shared fence. The
+// lifecycle-exit counter observes that teardown ran past the skip.
 //
-// The skipped release itself is deliberately not observed through the retained
-// image: every exported reader of that image takes the same retained fence, so
-// any such assertion would park exactly like the call under test.
+// The skipped release itself is not observed here because package p2p has no
+// read-only retained-image accessor; the node fence tests pin that state.
 func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))

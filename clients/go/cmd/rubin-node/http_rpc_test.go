@@ -81,7 +81,18 @@ func wireRPCDAService(t *testing.T, state *devnetRPCState) *p2p.Service {
 	}
 	state.admitLocalDA = service.AdmitLocalDA
 	state.prefetchLocalDA = service.ScheduleLocalDAPrefetch
-	t.Cleanup(func() { _ = service.Close() })
+	t.Cleanup(func() {
+		done := make(chan error, 1)
+		go func() { done <- service.Close() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Service.Close cleanup: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("Service.Close cleanup did not return")
+		}
+	})
 	return service
 }
 
@@ -1587,6 +1598,168 @@ func TestDevnetRPCLocalDAAdmissionAndPostEffectLockOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func latchRPCTerminalDA(state *devnetRPCState) error {
+	owner := state.mempool.PendingOutpointOwner()
+	context, ok := owner.AdmissionContext()
+	if !ok {
+		return errors.New("pending-outpoint owner was unavailable before terminal setup")
+	}
+	orphan := [32]byte{0x6a}
+	token, err := owner.Reserve(context, node.PendingOutpointStandardMempool, orphan, []consensus.Outpoint{{Txid: orphan}})
+	if err != nil {
+		return fmt.Errorf("reserve terminal orphan: %w", err)
+	}
+	if err := owner.Finalize(token); err != nil {
+		return fmt.Errorf("finalize terminal orphan: %w", err)
+	}
+	if summary, err := state.syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); summary != nil || err == nil || !strings.Contains(err.Error(), "orphan standard pending-outpoint claim") {
+		return fmt.Errorf("terminal ApplyBlock=(%+v,%w)", summary, err)
+	}
+	if !state.syncEngine.TerminalFaulted() {
+		return errors.New("terminal setup did not latch the engine")
+	}
+	return nil
+}
+
+func TestDevnetRPCTerminalDALifecycle(t *testing.T) {
+	const unavailable = "pending-outpoint owner admission context unavailable"
+	client := &http.Client{Timeout: 5 * time.Second}
+	post := func(t *testing.T, server *runningDevnetRPCServer, raw []byte) (int, submitTxResponse, []byte) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+server.addr+"/submit_tx", strings.NewReader(mustSubmitBody(t, raw)))
+		if err != nil {
+			t.Fatalf("NewRequestWithContext: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /submit_tx: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		var got submitTxResponse
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("Unmarshal %q: %v", body, err)
+		}
+		return resp.StatusCode, got, body
+	}
+	cleanupServer := func(t *testing.T, server *runningDevnetRPCServer) {
+		t.Helper()
+		t.Cleanup(func() {
+			done := make(chan error, 1)
+			go func() { done <- server.Close(context.Background()) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("RPC Close cleanup: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("RPC Close cleanup did not return")
+			}
+		})
+	}
+	closeBoth := func(t *testing.T, server *runningDevnetRPCServer, service *p2p.Service) {
+		t.Helper()
+		rpcDone, serviceDone := make(chan error, 1), make(chan error, 1)
+		go func() { rpcDone <- server.Close(context.Background()) }()
+		go func() { serviceDone <- service.Close() }()
+		if err := joinErr(t, rpcDone, "terminal RPC Close"); err != nil {
+			t.Fatalf("RPC Close: %v", err)
+		}
+		if err := joinErr(t, serviceDone, "terminal Service.Close"); err != nil {
+			t.Fatalf("Service.Close: %v", err)
+		}
+	}
+
+	signer := mustRPCMLDSA87Keypair(t)
+	address := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	fakeInput := consensus.Outpoint{Txid: [32]byte{0x71}}
+	fakeUTXOs := map[consensus.Outpoint]consensus.UtxoEntry{fakeInput: {Value: 1_000_000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: address}}
+	terminalRaw, _ := mustRPCSignedDaChunkTx(t, fakeUTXOs, fakeInput, 1, signer, address, [32]byte{0x72}, 0, []byte("terminal"))
+	terminalTx, _, _, _, err := consensus.ParseTx(terminalRaw)
+	if err != nil {
+		t.Fatalf("ParseTx terminal chunk: %v", err)
+	}
+	terminalTx.DaChunkCore.ChunkHash[0] ^= 0xff
+	if err := consensus.SignTransaction(terminalTx, fakeUTXOs, node.DevnetGenesisChainID(), signer); err != nil {
+		t.Fatalf("SignTransaction terminal chunk: %v", err)
+	}
+	terminalRaw, err = consensus.MarshalTx(terminalTx)
+	if err != nil {
+		t.Fatalf("MarshalTx terminal chunk: %v", err)
+	}
+	if sha3.Sum256(terminalTx.DaPayload) == terminalTx.DaChunkCore.ChunkHash {
+		t.Fatal("terminal chunk did not retain the intended payload-hash mismatch")
+	}
+
+	t.Run("pre-latched admission", func(t *testing.T) {
+		state := mustRPCState(t, false)
+		service := wireRPCDAService(t, state)
+		server, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
+		if err != nil {
+			t.Fatalf("startDevnetRPCServer: %v", err)
+		}
+		cleanupServer(t, server)
+		if err := latchRPCTerminalDA(state); err != nil {
+			t.Fatal(err)
+		}
+		status, got, body := post(t, server, terminalRaw)
+		if status != http.StatusServiceUnavailable || got.Accepted || got.TxID != "" || got.Error != unavailable || bytes.Contains(body, []byte(`"txid"`)) {
+			t.Fatalf("terminal submit=%d %s, want exact 503 unavailable without txid", status, body)
+		}
+		if state.mempool.AdmissionCounts() != (node.MempoolAdmissionCounts{}) || state.mempool.Len() != 0 {
+			t.Fatalf("terminal DA changed standard state: len=%d counts=%+v", state.mempool.Len(), state.mempool.AdmissionCounts())
+		}
+		if _, submits := state.metrics.snapshot(); submits["unavailable"] != 1 || submits["accepted"] != 0 {
+			t.Fatalf("terminal submit metrics=%v", submits)
+		}
+		malformedStatus, malformed, _ := post(t, server, []byte{0x00})
+		if malformedStatus != http.StatusUnprocessableEntity || malformed.Accepted || malformed.Error == unavailable {
+			t.Fatalf("malformed terminal submit=%d %+v, want pre-guard rejection", malformedStatus, malformed)
+		}
+		closeBoth(t, server, service)
+	})
+
+	t.Run("retained before terminal prefetch", func(t *testing.T) {
+		state, input, utxos := mustRPCStateWithSpendableUTXO(t, address, nil)
+		service := wireRPCDAService(t, state)
+		raw, txid := mustRPCSignedDaCommitTx(t, utxos, input, 100_000, 2, signer, address, []byte("retained"), []byte("missing"), []byte("chunks"))
+		terminalResult := make(chan error, 1)
+		state.prefetchLocalDA = func(daID [32]byte) error {
+			terminalErr := latchRPCTerminalDA(state)
+			terminalResult <- terminalErr
+			if terminalErr != nil {
+				return terminalErr
+			}
+			return service.ScheduleLocalDAPrefetch(daID)
+		}
+		server, err := startDevnetRPCServer("127.0.0.1:0", state, nil, nil)
+		if err != nil {
+			t.Fatalf("startDevnetRPCServer: %v", err)
+		}
+		cleanupServer(t, server)
+		status, got, body := post(t, server, raw)
+		select {
+		case terminalErr := <-terminalResult:
+			if terminalErr != nil {
+				t.Fatalf("terminal prefetch setup: %v", terminalErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("terminal prefetch setup did not complete")
+		}
+		if status != http.StatusOK || !got.Accepted || got.TxID != txid || got.Error != "" || !state.syncEngine.TerminalFaulted() {
+			t.Fatalf("retained terminal submit=%d %s terminal=%v, want preserved 200", status, body, state.syncEngine.TerminalFaulted())
+		}
+		if _, submits := state.metrics.snapshot(); submits["accepted"] != 1 || submits["unavailable"] != 0 {
+			t.Fatalf("retained terminal metrics=%v", submits)
+		}
+		closeBoth(t, server, service)
+	})
 }
 
 func TestDevnetRPCSubmitTxRejectsNonCoinbaseCoreAnchorByPolicy(t *testing.T) {
