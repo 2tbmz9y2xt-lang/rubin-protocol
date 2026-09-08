@@ -579,13 +579,14 @@ type Batch struct {
 	// default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
 	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed readback,
-	// with no delete and no put. Admitted after every mutation with exact SchemaV1 DBI/key shape, strictly increasing (DBI.Rank,
-	// key), disjoint from every target and OLD_VALUE_REF source, at most 16,384 rows and MaxOperationDataBytes present-value
-	// bytes, captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and an
-	// open reusable Store; a native capture read failure keeps its error and the existing infrastructure lifecycle. A row
-	// differing from that OLD image at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no
-	// reusable Store. A possible-crossed readback mismatch fails both predicates: Update returns CommitTruthUnknown with the
-	// original CommitError. Nil and empty behave alike; the caller leaves rows and key bytes unchanged until Update returns.
+	// with no delete and no put. Admitted after every mutation: exact SchemaV1 DBI/key shape, strict (DBI.Rank, key) increase and
+	// the 16,384-row count are decided per row in declared order, then disjointness from every target and OLD_VALUE_REF source
+	// over that set, so an over-cap overlapping set refuses as Capacity; at most MaxOperationDataBytes present-value bytes,
+	// captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and an open
+	// reusable Store; a native capture read failure keeps its error and the existing infrastructure lifecycle. A row differing
+	// from that OLD image at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no reusable Store.
+	// A possible-crossed readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original
+	// CommitError. Nil and empty behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
 }
 
@@ -855,7 +856,7 @@ func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
 }
 
 // ownedConsulted is one admitted consulted row: its validated DBI, a key cloned after complete Go admission and the
-// OLD image captured by updateNativeConsultedImages, whose present bytes stay borrowed from the retained OLD transaction.
+// OLD image captured by updateNativeConsultedImages, whose present bytes stay borrowed from the live OLD transaction.
 type ownedConsulted struct {
 	dbi   DBI
 	key   []byte

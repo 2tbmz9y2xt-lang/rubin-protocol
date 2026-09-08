@@ -223,17 +223,18 @@ func TestUpdateConsultedAdmission(t *testing.T) {
 		}
 		consultedUnit(t, "all widths", rows, updateNativePlan(t, consultedCounter(t, 9)))
 	})
+	// The overlap is the middle of a three-row set: on a one-row hit the correct and the operand-swapped search predicate agree.
 	t.Run("overlap target", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
-		target := ConsultedRow{DBI: plan[0].dbi, Key: append([]byte(nil), plan[0].key...)}
-		consultedRequireRefusal(t, store, "overlap target", EngineClass("InvalidInput"), 22, "invalid Update Batch", Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{target}})
+		target := consultedCounter(t, 2)
+		consultedRequireRefusal(t, store, "overlap target", EngineClass("InvalidInput"), 22, "invalid Update Batch", Batch{Mutations: []Mutation{target}, Consulted: []ConsultedRow{row(0, consultedCounter(t, 1).Key), row(0, consultedCounter(t, 2).Key), row(0, consultedCounter(t, 3).Key)}})
 		consultedRequireImage(t, store, target.DBI, target.Key, nil, false, "overlap target: no native work")
 	})
 	t.Run("overlap reference source", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
 		target, source := reverseKeys(t, 1, 1)
 		reverseSeed(t, store, target, source, reverseValues(t)[0])
-		consultedRequireRefusal(t, store, "overlap reference source", EngineClass("InvalidInput"), 22, "invalid Update Batch", Batch{Mutations: []Mutation{reverseRefRow(target, source)}, Consulted: []ConsultedRow{row(5, source)}})
+		consultedRequireRefusal(t, store, "overlap reference source", EngineClass("InvalidInput"), 22, "invalid Update Batch", Batch{Mutations: []Mutation{reverseRefRow(target, source)}, Consulted: []ConsultedRow{row(2, consultedRows(t, 1)[0].Key), row(5, source), row(6, consultedRows(t, 1)[0].Key)}})
 		consultedRequireImage(t, store, dbis[1], target, nil, false, "overlap reference source: no native work")
 	})
 	t.Run("consulted without mutations", func(t *testing.T) {
@@ -627,7 +628,9 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		body := updateNativeBody(t, source, name)
 		require(!strings.Contains(body, "C.") && !strings.Contains(body, "len(row.Key)") && !strings.Contains(body, "KeyBytes"), "admission owner drifted: "+name)
 	}
-	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "second comparator appeared")
+	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "updateKeyOrdered body drifted")
+	// The three production comparisons: updateKeyOrdered, the updateNativeImages target closure and the prefix-page seek.
+	require(strings.Count(text, "bytes.Compare(") == 3, "bytes.Compare census drifted")
 	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)")
 	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn)", "updateAbortOld(begun.txn)")
 }
