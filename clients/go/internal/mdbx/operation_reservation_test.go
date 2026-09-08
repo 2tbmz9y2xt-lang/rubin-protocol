@@ -485,16 +485,18 @@ func reservationParse(t *testing.T, name string) reservationCensus {
 		return names
 	}
 	var c reservationCensus
+	for name := range file.Scope.Objects {
+		c.exports = exported(c.exports, ast.NewIdent(name))
+	}
 	ast.Inspect(file, func(node ast.Node) bool {
 		switch node := node.(type) {
 		case *ast.ImportSpec:
 			c.imports = append(c.imports, node.Path.Value)
 		case *ast.FuncDecl:
-			c.exports = exported(c.exports, node.Name)
-		case *ast.TypeSpec:
-			c.exports = exported(c.exports, node.Name)
+			if node.Recv != nil {
+				c.exports = exported(c.exports, node.Name)
+			}
 		case *ast.ValueSpec:
-			c.exports = exported(c.exports, node.Names...)
 			if len(node.Values) == 1 && node.Names[0].Name == "MaxPrefixPageBytes" {
 				if lit, ok := node.Values[0].(*ast.BasicLit); ok {
 					c.sibling = lit.Value
