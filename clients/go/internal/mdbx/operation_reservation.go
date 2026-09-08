@@ -37,7 +37,8 @@ type operationReservationToken struct {
 
 // OperationReservationOwner admits storage operation bytes against one process-local
 // limit. Every copy of an owner shares the same limit and live counter, nothing is
-// persisted, and the zero value refuses every WithReservation call.
+// persisted, and the zero value refuses every WithReservation call. An owner and every
+// copy of it is safe for concurrent use.
 type OperationReservationOwner struct {
 	shared *operationReservationState
 }
@@ -53,10 +54,8 @@ func NewOperationReservationOwner(limit uint64) (*OperationReservationOwner, err
 
 // reserve charges bytes to the live counter and returns its token; it refuses without
 // change when bytes exceeds MaxOperationDataBytes, the live counter exceeds the limit,
-// or bytes exceeds the remaining capacity. The receiver is valid; WithReservation owns
-// that check.
-func (o *OperationReservationOwner) reserve(bytes uint64) (operationReservationToken, error) {
-	s := o.shared
+// or bytes exceeds the remaining capacity.
+func (s *operationReservationState) reserve(bytes uint64) (operationReservationToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if bytes > MaxOperationDataBytes || s.live > s.limit || bytes > s.limit-s.live {
@@ -66,13 +65,10 @@ func (o *OperationReservationOwner) reserve(bytes uint64) (operationReservationT
 	return operationReservationToken{origin: s, grant: &operationReservationGrant{bytes: bytes}}, nil
 }
 
-// release subtracts the bytes of an unreleased token issued by this owner and reports
+// release subtracts the bytes of an unreleased token issued by this state and reports
 // whether it did; a nil, foreign, released or oversized token changes nothing. The
-// receiver is valid; WithReservation owns that check. The report is the exactly-once
-// signal for same-package callers: WithReservation's release of its own fresh token is
-// never false.
-func (o *OperationReservationOwner) release(token operationReservationToken) bool {
-	s := o.shared
+// report is the exactly-once signal for same-package callers.
+func (s *operationReservationState) release(token operationReservationToken) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g := token.grant
@@ -99,10 +95,11 @@ func (o *OperationReservationOwner) WithReservation(bytes uint64, callback func(
 	if o == nil || o.shared == nil || callback == nil {
 		return errOperationReservationInput
 	}
-	token, err := o.reserve(bytes)
+	s := o.shared
+	token, err := s.reserve(bytes)
 	if err != nil {
 		return err
 	}
-	defer o.release(token)
+	defer s.release(token)
 	return callback()
 }

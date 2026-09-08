@@ -105,7 +105,7 @@ func reservationNested(t *testing.T, label string, owner *OperationReservationOw
 
 func reservationReserve(t *testing.T, label string, owner *OperationReservationOwner, bytes uint64) operationReservationToken {
 	t.Helper()
-	token, err := owner.reserve(bytes)
+	token, err := owner.shared.reserve(bytes)
 	if err != nil || token.grant == nil {
 		t.Fatalf("%s: reserve(%d): %+v %v", label, bytes, token, err)
 	}
@@ -262,22 +262,23 @@ func TestOperationReservationOwnerLifecycle(t *testing.T) {
 	wrapped := fmt.Errorf("wrapped: %w", direct)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	exit := func(want error, exit func() error) func(t *testing.T, label string) {
+	exit := func(want error, exit func(owner *OperationReservationOwner) error) func(t *testing.T, label string) {
 		return func(t *testing.T, label string) {
 			owner, calls := reservationOwner(t, 154611151), 0
-			got := owner.WithReservation(154611151, func() error { calls++; return exit() })
+			state := owner.shared
+			got := owner.WithReservation(154611151, func() error { calls++; return exit(owner) })
 			if got != want || calls != 1 { //nolint:errorlint // Exact callback error identity is the contract.
 				t.Fatalf("%s: err=%v calls=%d", label, got, calls)
 			}
-			reservationMustAdmit(t, label, owner, 154611151)
+			reservationMustAdmit(t, label, &OperationReservationOwner{shared: state}, 154611151)
 		}
 	}
 	reservationRows(t, []reservationRow{
-		{"lifecycle nil error", exit(nil, func() error { return nil })},
-		{"lifecycle direct error", exit(direct, func() error { return direct })},
-		{"lifecycle wrapped error", exit(wrapped, func() error { return wrapped })},
-		{"lifecycle canceled", exit(context.Canceled, func() error { cancel(); return ctx.Err() })},
-		{"lifecycle deadline", exit(context.DeadlineExceeded, func() error { return context.DeadlineExceeded })},
+		{"lifecycle nil error", exit(nil, func(*OperationReservationOwner) error { return nil })},
+		{"lifecycle direct error", exit(direct, func(*OperationReservationOwner) error { return direct })},
+		{"lifecycle wrapped error", exit(wrapped, func(*OperationReservationOwner) error { return wrapped })},
+		{"lifecycle canceled", exit(context.Canceled, func(*OperationReservationOwner) error { cancel(); return ctx.Err() })},
+		{"lifecycle deadline", exit(context.DeadlineExceeded, func(*OperationReservationOwner) error { return context.DeadlineExceeded })},
 		{"lifecycle panic identity", func(t *testing.T, label string) {
 			value := &struct{ id int }{1}
 			recovered, _, calls := reservationPanicCycle(t, label, value)
@@ -290,6 +291,7 @@ func TestOperationReservationOwnerLifecycle(t *testing.T) {
 				t.Fatalf("%s: capacity still charged at recovery", label)
 			}
 		}},
+		{"lifecycle owner overwritten during callback", exit(nil, func(owner *OperationReservationOwner) error { *owner = OperationReservationOwner{}; return nil })},
 	})
 }
 
@@ -320,10 +322,10 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			owner := reservationOwner(t, 154611151)
 			token := reservationReserve(t, label, owner, 100)
 			reservationReserve(t, label, owner, 100)
-			if !owner.release(token) || reservationLive(owner) != 100 {
+			if !owner.shared.release(token) || reservationLive(owner) != 100 {
 				t.Fatalf("%s: first release left live=%d", label, reservationLive(owner))
 			}
-			if owner.release(token) || reservationLive(owner) != 100 {
+			if owner.shared.release(token) || reservationLive(owner) != 100 {
 				t.Fatalf("%s: second release left live=%d", label, reservationLive(owner))
 			}
 		}},
@@ -332,7 +334,7 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			token := reservationReserve(t, label, owner, 100)
 			reservationReserve(t, label, owner, 100)
 			dup := token
-			if !owner.release(token) || owner.release(dup) || reservationLive(owner) != 100 {
+			if !owner.shared.release(token) || owner.shared.release(dup) || reservationLive(owner) != 100 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 		}},
@@ -340,10 +342,10 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			a, b := reservationOwner(t, 154611151), reservationOwner(t, 154611151)
 			token := reservationReserve(t, label, a, 100)
 			reservationReserve(t, label, b, 100)
-			if b.release(token) || reservationLive(a) != 100 || reservationLive(b) != 100 {
+			if b.shared.release(token) || reservationLive(a) != 100 || reservationLive(b) != 100 {
 				t.Fatalf("%s: a=%d b=%d", label, reservationLive(a), reservationLive(b))
 			}
-			if !a.release(token) || reservationLive(a) != 0 {
+			if !a.shared.release(token) || reservationLive(a) != 0 {
 				t.Fatalf("%s: origin release left a=%d", label, reservationLive(a))
 			}
 		}},
@@ -353,28 +355,28 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			newer := reservationOwner(t, 154611151)
 			reservationMustAdmit(t, label, newer, 154611151)
 			reservationReserve(t, label, newer, 100)
-			if newer.release(token) || reservationLive(newer) != 100 || reservationLive(older) != 100 {
+			if newer.shared.release(token) || reservationLive(newer) != 100 || reservationLive(older) != 100 {
 				t.Fatalf("%s: newer=%d older=%d", label, reservationLive(newer), reservationLive(older))
 			}
 		}},
 		{"identity zero token", func(t *testing.T, label string) {
 			owner := reservationOwner(t, 154611151)
 			reservationReserve(t, label, owner, 100)
-			if owner.release(operationReservationToken{}) || reservationLive(owner) != 100 {
+			if owner.shared.release(operationReservationToken{}) || reservationLive(owner) != 100 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 		}},
 		{"identity nil grant token", func(t *testing.T, label string) {
 			owner := reservationOwner(t, 154611151)
 			token := reservationReserve(t, label, owner, 100)
-			if owner.release(operationReservationToken{origin: token.origin}) || reservationLive(owner) != 100 {
+			if owner.shared.release(operationReservationToken{origin: token.origin}) || reservationLive(owner) != 100 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 		}},
 		{"identity zero-byte token releases once", func(t *testing.T, label string) {
 			owner := reservationOwner(t, 154611151)
 			token := reservationReserve(t, label, owner, 0)
-			if !owner.release(token) || owner.release(token) || reservationLive(owner) != 0 {
+			if !owner.shared.release(token) || owner.shared.release(token) || reservationLive(owner) != 0 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 		}},
@@ -384,7 +386,7 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			reservationNested(t, label, owner, []uint64{154611151}, func() { reservationMustRefuse(t, label, &dup, 1) })
 			reservationMustAdmit(t, label, &dup, 154611151)
 			token := reservationReserve(t, label, &dup, 100)
-			if !owner.release(token) || reservationLive(owner) != 0 {
+			if !owner.shared.release(token) || reservationLive(owner) != 0 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 		}},
@@ -392,7 +394,7 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 			owner := reservationOwner(t, 154611151)
 			token := reservationReserve(t, label, owner, 100)
 			reservationInjectLive(owner, 50)
-			if owner.release(token) || reservationLive(owner) != 50 {
+			if owner.shared.release(token) || reservationLive(owner) != 50 {
 				t.Fatalf("%s: live=%d", label, reservationLive(owner))
 			}
 			reservationInjectLive(owner, 0)
@@ -476,7 +478,7 @@ func reservationParse(t *testing.T, name string) reservationCensus {
 	forbidden := []string{"Store", "Reader", "ConfigV1", "Batch", "Mutation", "updateBudget", "DBI"}
 	exported := func(names []string, idents ...*ast.Ident) []string {
 		for _, ident := range idents {
-			if ast.IsExported(ident.Name) {
+			if ident != nil && ast.IsExported(ident.Name) {
 				names = append(names, ident.Name)
 			}
 		}
@@ -500,7 +502,11 @@ func reservationParse(t *testing.T, name string) reservationCensus {
 			}
 		case *ast.StructType:
 			for _, field := range node.Fields.List {
-				c.fields = exported(c.fields, field.Names...)
+				names := field.Names
+				if len(names) == 0 { // An embedded field carries every identifier of its type expression.
+					ast.Inspect(field.Type, func(n ast.Node) bool { ident, _ := n.(*ast.Ident); names = append(names, ident); return true })
+				}
+				c.fields = exported(c.fields, names...)
 			}
 		case *ast.Ident:
 			if slices.Contains(forbidden, node.Name) {
