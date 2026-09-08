@@ -3346,7 +3346,7 @@ func runNativeUpdate(t *testing.T, store *Store, plan []ownedMutation) updateNat
 	t.Helper()
 	var outcome updateNativeOutcome
 	err := store.View(func(reader *Reader) error {
-		outcome = store.updateNative(plan, reader.txn)
+		outcome = store.updateNative(plan, nil, reader.txn)
 		return outcome.valid()
 	})
 	if err != nil {
@@ -3433,14 +3433,14 @@ func TestNativeUpdateImages(t *testing.T) {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 		mustEnvironment(t, store.View(func(reader *Reader) error {
-			concurrent := store.updateNative(newPlan, reader.txn)
+			concurrent := store.updateNative(newPlan, nil, reader.txn)
 			if err := concurrent.valid(); err != nil || concurrent.truth != CommitTruthNew || !concurrent.commitAttempted {
 				return fmt.Errorf("concurrent update=%+v/%w", concurrent, err)
 			}
 			readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-			old := updateNativeReadback(store.env, store.dbis, createPlan, reader.txn, readbackPrimary)
-			newReadback := updateNativeReadback(store.env, store.dbis, newPlan, reader.txn, readbackPrimary)
-			unknown := updateNativeReadback(store.env, store.dbis, oldPlan, reader.txn, readbackPrimary)
+			old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
+			newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary)
+			unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary)
 			requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
 			requireUpdateTruth(t, newReadback, CommitTruthNew, true, readbackPrimary, nil)
 			requireUpdateTruth(t, unknown, CommitTruthUnknown, true, readbackPrimary, nil)
@@ -3478,7 +3478,7 @@ func TestNativeUpdateImages(t *testing.T) {
 			if _, err := updateNativeEqual(reader.txn, invalidDBIs[dbi.Rank], key, updateImage{}); err == nil {
 				return errors.New("invalid update comparison DBI accepted")
 			}
-			badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, reader.txn, readbackPrimary)
+			badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, nil, reader.txn, readbackPrimary)
 			if badReadback.truth != CommitTruthUnknown || !sameError(badReadback.primary, readbackPrimary) || badReadback.secondary == nil || badReadback.valid() != nil {
 				return fmt.Errorf("invalid update readback=%+v", badReadback)
 			}
@@ -3494,7 +3494,7 @@ func TestNativeUpdateImages(t *testing.T) {
 			_, _, targetFinalErr := updateNativeReadbackTargets(reader.txn, store.dbis, badFinal, targets, nil)
 			_, _, targetNewErr := updateNativeReadbackTargets(reader.txn, store.dbis, badPlan, targets, badReferences)
 			_, _, targetCountErr := updateNativeReadbackTargets(reader.txn, store.dbis, []ownedMutation{{dbi: dbi, key: key, after: AfterAbsent}}, targets, []updateReference{{}})
-			_, truthErr := updateNativeReadbackTruth(reader.txn, reader.txn, store.dbis, badFinal)
+			_, truthErr := updateNativeReadbackTruth(reader.txn, reader.txn, store.dbis, badFinal, nil)
 			guardErrors := []error{
 				updateNativePuts(reader.txn, store.dbis, badPlan, badReferences),
 				updateNativeVerify(reader.txn, store.dbis, badPlan, badReferences),
@@ -3506,7 +3506,7 @@ func TestNativeUpdateImages(t *testing.T) {
 					return errors.New("invalid native update guard accepted")
 				}
 			}
-			drift = store.updateNative(oldPlan, reader.txn)
+			drift = store.updateNative(oldPlan, nil, reader.txn)
 			return drift.valid()
 		}))
 	}()
@@ -3537,11 +3537,11 @@ func TestNativeUpdateImages(t *testing.T) {
 		defer runtime.UnlockOSThread()
 		mustEnvironment(t, store.View(func(reader *Reader) error {
 			readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-			old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, reader.txn, readbackPrimary)
+			old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
 			requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
-			committed := store.updateNative(nonTargetPlan, reader.txn)
+			committed := store.updateNative(nonTargetPlan, nil, reader.txn)
 			requireUpdateTruth(t, committed, CommitTruthNew, true, nil, nil)
-			new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, reader.txn, readbackPrimary)
+			new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
 			requireUpdateTruth(t, new, CommitTruthNew, true, readbackPrimary, nil)
 			return nil
 		}))
@@ -3654,8 +3654,8 @@ func requireNativeUpdateInput(t *testing.T, outcome updateNativeOutcome) {
 
 func TestNativeUpdateInputGuards(t *testing.T) {
 	var nilStore *Store
-	requireNativeUpdateInput(t, nilStore.updateNative(nil, nil))
-	requireNativeUpdateInput(t, (&Store{}).updateNative(nil, nil))
+	requireNativeUpdateInput(t, nilStore.updateNative(nil, nil, nil))
+	requireNativeUpdateInput(t, (&Store{}).updateNative(nil, nil, nil))
 	cfg := environmentConfig()
 	store, err := Create(filepath.Join(t.TempDir(), "db"), cfg)
 	mustEnvironment(t, err)
@@ -3663,12 +3663,12 @@ func TestNativeUpdateInputGuards(t *testing.T) {
 	mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: planAfterLiteral, Literal: admissionNone()}
 	plan := updateNativePlan(t, mutation)
 	mustEnvironment(t, store.View(func(reader *Reader) error {
-		requireNativeUpdateInput(t, (&Store{}).updateNative(plan, reader.txn))
-		requireNativeUpdateInput(t, store.updateNative(plan, nil))
-		requireNativeUpdateInput(t, store.updateNative(nil, reader.txn))
+		requireNativeUpdateInput(t, (&Store{}).updateNative(plan, nil, reader.txn))
+		requireNativeUpdateInput(t, store.updateNative(plan, nil, nil))
+		requireNativeUpdateInput(t, store.updateNative(nil, nil, reader.txn))
 		dbis := store.dbis
 		store.dbis[0] = 0
-		requireNativeUpdateInput(t, store.updateNative(plan, reader.txn))
+		requireNativeUpdateInput(t, store.updateNative(plan, nil, reader.txn))
 		store.dbis = dbis
 		value, present, readErr := reader.Get(readDBIsLiteral()[0], []byte{0})
 		if readErr != nil || !present || len(value) != 4 {

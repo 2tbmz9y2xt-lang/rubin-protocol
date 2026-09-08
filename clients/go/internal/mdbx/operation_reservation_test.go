@@ -9,7 +9,6 @@ import (
 	"go/token"
 	"runtime"
 	"slices"
-	"strconv"
 	"sync"
 	"testing"
 )
@@ -463,10 +462,10 @@ func TestOperationReservationOwnerConcurrent(t *testing.T) {
 
 // reservationCensus is the parsed surface of one package file: imports, sorted exported
 // top-level and method names, exported struct field names, storage identifiers and the
-// MaxPrefixPageBytes literal.
+// MaxPrefixPageBytes value expression.
 type reservationCensus struct {
 	imports, exports, fields, storage []string
-	sibling                           string
+	sibling                           ast.Expr
 }
 
 func reservationParse(t *testing.T, name string) reservationCensus {
@@ -498,9 +497,7 @@ func reservationParse(t *testing.T, name string) reservationCensus {
 			}
 		case *ast.ValueSpec:
 			if len(node.Values) == 1 && node.Names[0].Name == "MaxPrefixPageBytes" {
-				if lit, ok := node.Values[0].(*ast.BasicLit); ok {
-					c.sibling = lit.Value
-				}
+				c.sibling = node.Values[0]
 			}
 		case *ast.StructType:
 			for _, field := range node.Fields.List {
@@ -522,12 +519,10 @@ func reservationParse(t *testing.T, name string) reservationCensus {
 }
 
 func TestOperationReservationOwnerSurface(t *testing.T) {
-	bound, err := strconv.ParseUint(reservationParse(t, "mdbx_cgo.go").sibling, 0, 64)
-	if err != nil || bound != 154611151 {
-		t.Fatalf("surface sibling bound: MaxPrefixPageBytes=%d %v", bound, err)
-	}
-	if bound != MaxOperationDataBytes {
-		t.Fatalf("surface sibling bound: MaxPrefixPageBytes=%d MaxOperationDataBytes=%d", bound, MaxOperationDataBytes)
+	// The cgo-only MaxPrefixPageBytes is bound to this identifier by the cgo build; its value is the alias target's.
+	sibling := reservationParse(t, "mdbx_cgo.go").sibling
+	if alias, ok := sibling.(*ast.Ident); !ok || alias.Name != "MaxOperationDataBytes" || MaxOperationDataBytes != 154611151 {
+		t.Fatalf("surface sibling alias: MaxPrefixPageBytes=%T %+v MaxOperationDataBytes=%d, want the identifier MaxOperationDataBytes = 154611151", sibling, sibling, MaxOperationDataBytes)
 	}
 	own := reservationParse(t, "operation_reservation.go")
 	if !slices.Equal(own.imports, []string{`"errors"`, `"sync"`}) {
