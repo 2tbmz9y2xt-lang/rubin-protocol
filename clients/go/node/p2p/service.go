@@ -278,14 +278,9 @@ func (s *Service) workAuthorized() bool {
 // call that won the lease first finishes while Close waits for it.
 //
 // The retained-DA TTL advance is additionally gated on the engine's terminal
-// latch. A latched canonical transition RETAINS ChainState.admissionMu
-// exclusively until restart, and advanceDAOrphanTTL is the only step here that
-// takes that fence, so invoking it would park this leased worker forever instead
-// of announcing and returning. The check is BEST EFFORT, not a lock order: a
-// latch landing between it and the RLock still parks the caller. It closes the
-// schedule that matters — a node already latched when the announce arrives — and
-// claims nothing about a transition still in flight, which the fence itself
-// continues to serialize. TerminalFaulted() is nil-safe by its own
+// latch so an already-latched node skips the work. If a latch lands after this
+// check, the shared admission fence returns unavailable before retained-state
+// access; an ordinary transition still serializes the advance. TerminalFaulted() is nil-safe by its own
 // documented contract, and no constructed Service reaches this gate with a
 // nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) AnnounceBlock(blockBytes []byte) error {

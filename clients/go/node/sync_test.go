@@ -2833,6 +2833,7 @@ func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 		(*Mempool).publishCanonicalMempoolPlanLocked,
 		(*PendingOutpointOwner).publishRestoreLocked,
 		(*SyncEngine).storeTerminalFault,
+		(*admissionMutex).notifyTerminal,
 	} {
 		if out := reflect.TypeOf(fn).NumOut(); out != 0 {
 			t.Fatalf("%v returns %d values: postcommit publication must not be able to fail", reflect.TypeOf(fn), out)

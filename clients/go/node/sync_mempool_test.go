@@ -96,7 +96,7 @@ func awaitCanonicalMOError(t *testing.T, ch <-chan error, label string) error {
 }
 
 // awaitCanonicalMOAdmissionRLock blocks until at least want goroutines whose
-// stack names caller are PARKED at ChainState.admissionMu.RLock. It is the
+// stack names caller are PARKED in the admission domain's Cond.Wait. It is the
 // forcing barrier that replaces "wait a while and hope": a goroutine that merely
 // had not started yet never satisfies it, so a row built on it cannot pass for a
 // scheduling reason.
@@ -113,8 +113,8 @@ func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string, want int) {
 		}
 		parked := 0
 		for _, goroutine := range strings.Split(string(stack[:n]), "\n\n") {
-			atRLock := strings.Contains(goroutine, "sync.(*RWMutex).RLock") || strings.Contains(goroutine, "sync.runtime_SemacquireRWMutexR")
-			if atRLock && strings.Contains(goroutine, caller) {
+			atAdmissionWait := strings.Contains(goroutine, "sync.(*Cond).Wait") && strings.Contains(goroutine, "(*admissionMutex).RLockUnlessTerminal")
+			if atAdmissionWait && strings.Contains(goroutine, caller) {
 				parked++
 			}
 		}
@@ -123,7 +123,7 @@ func awaitCanonicalMOAdmissionRLock(t *testing.T, caller string, want int) {
 		}
 		runtime.Gosched()
 	}
-	t.Fatalf("fewer than %d %s goroutines blocked at admissionMu.RLock", want, caller)
+	t.Fatalf("fewer than %d %s goroutines blocked in admission Cond.Wait", want, caller)
 }
 
 func newCanonicalMOFixture(t *testing.T, inputs int, cfg MempoolConfig) *canonicalMOFixture {

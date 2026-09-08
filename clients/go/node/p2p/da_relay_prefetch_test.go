@@ -42,6 +42,18 @@ func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 	require(t, len(retry) == 1 && diagnostic == "" && reflect.DeepEqual(retry[0].Indexes, []uint16{1}), "released retry=%+v diagnostic=%q, want index 1 alone", retry, diagnostic)
 }
 
+func TestScheduleLocalDAPrefetchUsesAllEligiblePeers(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.EnableCompactReceive = true
+	a := addDAPrefetchTestPeer(h.service, "127.0.0.2:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "127.0.0.3:1", nil)
+	daID := daRelayTestID(0xd1)
+	result, err := h.service.AdmitLocalDA(newDAIngressFixture(t, h).commit(daID, 2))
+	require(t, err == nil && result == (node.DAAdmissionResult{DAID: daID, Disposition: node.DAAdmissionRetained}) && h.service.txSeen.Len() == 0, "local admission=(%+v,%v) txSeen=%d", result, err, h.service.txSeen.Len())
+	must(t, h.service.ScheduleLocalDAPrefetch(daID), "ScheduleLocalDAPrefetch")
+	expectPrefetchRequests(t, h, map[*peer][]byte{}, "local all-peer prefetch", daID, 2, a, b)
+}
+
 func TestDAPrefetchSendWritesGetDAChunkFrame(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true

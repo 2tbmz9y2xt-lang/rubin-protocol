@@ -1,11 +1,26 @@
 package p2p
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
+
+// ScheduleLocalDAPrefetch registers one local post-admission effect and uses
+// the existing peerless scheduler path, which considers every eligible peer.
+func (s *Service) ScheduleLocalDAPrefetch(daID [32]byte) error {
+	if s == nil {
+		return errors.New("nil service")
+	}
+	if !s.acquireWork() {
+		return errServiceClosed
+	}
+	defer s.releaseWork()
+	s.scheduleDAPrefetch("", daID)
+	return nil
+}
 
 func (s *Service) scheduleDAPrefetch(peerAddr string, daID [32]byte) {
 	if !s.canScheduleDAPrefetch() {

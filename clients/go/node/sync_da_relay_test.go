@@ -616,6 +616,12 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 		t.Run(writer.name, func(t *testing.T) {
 			done := make(chan struct{})
 			f.engine.chainState.admissionMu.Lock()
+			locked := true
+			defer func() {
+				if locked {
+					f.engine.chainState.admissionMu.Unlock()
+				}
+			}()
 			go func() { defer close(done); writer.run() }()
 			// The BLOCK is proven from the writer's own parked stack, not inferred
 			// from elapsed time: a writer that had merely not been scheduled yet
@@ -624,11 +630,11 @@ func TestCanonicalDAWritersCannotInterleaveWithTheTransition(t *testing.T) {
 			awaitCanonicalMOAdmissionRLock(t, writer.name, 1)
 			select {
 			case <-done:
-				f.engine.chainState.admissionMu.Unlock()
 				t.Fatal("the writer ran while the admission write guard was held")
 			default:
 			}
 			f.engine.chainState.admissionMu.Unlock()
+			locked = false
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
@@ -667,7 +673,7 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 			_, _ = relay.AdmitDA(raw, LocalDAProvenance())
 		}(raw)
 	}
-	// Every writer is PROVEN parked at admissionMu.RLock before the preparation
+	// Every writer is PROVEN parked in the admission condition before the preparation
 	// runs. Without this the six goroutines might not have reached the fence at
 	// all, and "no writer landed inside the prepared image" would hold vacuously.
 	awaitCanonicalMOAdmissionRLock(t, "AdmitDA", 6)

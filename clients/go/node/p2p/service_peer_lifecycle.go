@@ -149,14 +149,10 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 // by quotaKey once no live peer still holds that key, under the caller's per-key
 // peer quota lock.
 //
-// The release is best-effort cleanup, so it is skipped on a latched engine: a
-// terminal canonical transition RETAINS ChainState.admissionMu exclusively until
-// restart and ReleasePeerQuotaKey takes that fence around its whole mutation, so
-// calling it would park peer teardown forever rather than let unregisterPeer
-// finish. The check is BEST EFFORT, not a lock order: a latch landing between it
-// and the RLock still parks the caller. It closes the schedule that matters — a
-// node already latched when the peer goes away — and claims nothing about a
-// transition still in flight. TerminalFaulted() is nil-safe by its own
+// The release is best-effort cleanup, so an already-latched engine skips it. If
+// a latch lands after this check, the shared admission fence returns unavailable
+// before retained-state access; an ordinary transition still serializes the
+// cleanup. TerminalFaulted() is nil-safe by its own
 // documented contract, and no constructed Service reaches this gate with a
 // nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {

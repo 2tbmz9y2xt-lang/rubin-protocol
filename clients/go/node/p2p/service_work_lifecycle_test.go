@@ -22,6 +22,23 @@ const (
 	lifecycleSettle   = 100 * time.Millisecond
 )
 
+type localDAAdmissionBarrier struct {
+	consensus.DefaultRotationProvider
+	entered    chan struct{}
+	release    chan struct{}
+	panicValue any
+	once       sync.Once
+}
+
+func (b *localDAAdmissionBarrier) NativeSpendSuites(height uint64) *consensus.NativeSuiteSet {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	if b.panicValue != nil {
+		panic(b.panicValue)
+	}
+	return b.DefaultRotationProvider.NativeSpendSuites(height)
+}
+
 func lifecycleService(t *testing.T) *Service {
 	t.Helper()
 	s := newTestHarness(t, 0, "127.0.0.1:0", nil).service
@@ -268,6 +285,126 @@ func TestServiceWorkLifecycleCloseWaitsForPublicCallbacks(t *testing.T) {
 		must(t, remote.SetReadDeadline(time.Now().Add(lifecycleSettle)), "SetReadDeadline")
 		if n, err := remote.Read(make([]byte, 1)); err == nil {
 			t.Fatalf("socket owner received %d more bytes after Close returned", n)
+		}
+	})
+}
+
+func TestServiceLocalDAWorkLifecycle(t *testing.T) {
+	t.Run("nil and closed reject before effects", func(t *testing.T) {
+		var nilService *Service
+		got, err := nilService.AdmitLocalDA(nil)
+		var admitErr *node.TxAdmitError
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "nil service" {
+			t.Fatalf("nil AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := nilService.ScheduleLocalDAPrefetch([32]byte{}); err == nil || err.Error() != "nil service" {
+			t.Fatalf("nil ScheduleLocalDAPrefetch=%v", err)
+		}
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe1), 2)
+		must(t, h.service.Close(), "Close")
+		got, err = h.service.AdmitLocalDA(raw)
+		admitErr = nil
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "service already closed" {
+			t.Fatalf("closed AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := h.service.ScheduleLocalDAPrefetch([32]byte{}); !errors.Is(err, errServiceClosed) {
+			t.Fatalf("closed ScheduleLocalDAPrefetch=%v", err)
+		}
+	})
+	t.Run("accepted calls release their work", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		got, err := h.service.AdmitLocalDA(f.commit(daRelayTestID(0xe2), 2))
+		if err != nil || got.Disposition != node.DAAdmissionRetained {
+			t.Fatalf("AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if _, err := h.service.AdmitLocalDA([]byte{0x00}); err == nil {
+			t.Fatal("malformed AdmitLocalDA returned nil")
+		}
+		requireReturned(t, lifecycleClose(h.service), "Close after retained and error exits")
+	})
+	t.Run("Close waits for panicking accepted admission", func(t *testing.T) {
+		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		sentinel := &struct{ message string }{message: "local DA admission panic"}
+		barrier := &localDAAdmissionBarrier{entered: make(chan struct{}), release: make(chan struct{}), panicValue: sentinel}
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
+		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
+		must(t, err, "NewSyncEngine")
+		mempoolCfg := node.DefaultMempoolConfig()
+		mempoolCfg.RotationProvider = barrier
+		mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), mempoolCfg)
+		must(t, err, "NewMempoolWithConfig")
+		engine.SetMempool(mempool)
+		serviceCfg := base.service.cfg
+		serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
+		service, err := NewService(serviceCfg)
+		must(t, err, "NewService")
+		defer releaseBarrier()
+		h := &testHarness{chainState: base.chainState, service: service}
+		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe4), 2)
+		done := make(chan any, 1)
+		go func() { defer func() { done <- recover() }(); _, _ = service.AdmitLocalDA(raw) }()
+		select {
+		case <-barrier.entered:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("admission barrier not entered")
+		}
+		closeDone := lifecycleClose(service)
+		waitDraining(t, service)
+		requireStillBlocked(t, closeDone, "Close")
+		releaseBarrier()
+		select {
+		case recovered := <-done:
+			if recovered != sentinel {
+				t.Fatalf("panic=%v, want original %v", recovered, sentinel)
+			}
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("AdmitLocalDA did not return")
+		}
+		requireReturned(t, closeDone, "Close")
+	})
+	t.Run("Close waits for accepted prefetch", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		daID := daRelayTestID(0xe3)
+		f.admit(f.commit(daID, 2), "127.0.0.9:19119")
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseBarrier()
+		h.service.cfg.Now = func() time.Time { close(entered); <-release; return time.Unix(1, 0) }
+		done := make(chan error, 1)
+		go func() { done <- h.service.ScheduleLocalDAPrefetch(daID) }()
+		select {
+		case <-entered:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("prefetch barrier not entered")
+		}
+		closeDone := lifecycleClose(h.service)
+		waitDraining(t, h.service)
+		requireStillBlocked(t, closeDone, "Close")
+		rejected := f.commit(daRelayTestID(0xe5), 2)
+		got, err := h.service.AdmitLocalDA(rejected)
+		var admitErr *node.TxAdmitError
+		if got != (node.DAAdmissionResult{}) || !errors.As(err, &admitErr) || admitErr.Kind != node.TxAdmitUnavailable || err.Error() != "service already closed" {
+			t.Fatalf("draining AdmitLocalDA=(%+v,%v)", got, err)
+		}
+		if err := h.service.ScheduleLocalDAPrefetch(daID); !errors.Is(err, errServiceClosed) {
+			t.Fatalf("draining ScheduleLocalDAPrefetch=%v", err)
+		}
+		releaseBarrier()
+		select {
+		case err := <-done:
+			must(t, err, "ScheduleLocalDAPrefetch")
+		case <-time.After(lifecycleWatchdog):
+			t.Fatal("prefetch did not return")
+		}
+		requireReturned(t, closeDone, "Close")
+		retained, err := h.service.daRelay.AdmitDA(rejected, node.LocalDAProvenance())
+		if err != nil || retained.Disposition != node.DAAdmissionRetained {
+			t.Fatalf("draining rejection changed owner: (%+v,%v)", retained, err)
 		}
 	})
 }
@@ -599,7 +736,10 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
 }
 
-// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance is the latched-engine schedule. On TERMINAL_PERSISTENCE(new) the transition publishes the summary, returns the terminal error and RETAINS ChainState.admissionMu exclusively (publishCanonicalTransition's latched arm returns before its Unlock), so the post-return TTL advance — the ONLY step of noteAcceptedBlock that takes that fence — must be skipped: invoked, AdvanceOrphanTTL would park this worker at admissionMu.RLock forever and the terminal error would never reach the caller. node's TestCanonicalDAWritersCannotInterleaveWithTheTransition pins that AdvanceOrphanTTL does block on a held write guard, and TestSyncEnginePostCommitFaultKeepsAdmissionClosedAfterLatch that the terminal latch never releases it; this row owns the remaining half — that the chain no longer invokes it. A published summary alongside a non-nil apply error is exactly that shape at both engine seams and the error identity is deliberately never read, so the sentinel stands in for the fault, whose injection seam (atomicWriteIO) is private to package node.
+// TestTerminalPersistenceNewSkipsTheFencedTTLAdvance pins that a published
+// terminal result still skips the post-return TTL mutation. The shared fence
+// now refuses a truly latched race; this row separately preserves the existing
+// no-TTL-effect branch selected from the returned terminal shape.
 func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	source := newTestHarness(t, 3, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -640,13 +780,53 @@ func latchDAHarness(t *testing.T, h, source *testHarness) {
 	requireEqual(t, h.syncEngine.TerminalFaulted(), true, "the engine terminal latch")
 }
 
-// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance is the AnnounceBlock half of
-// the latched-park class. The post-return orphan-TTL advance is the only step of
-// AnnounceBlock that takes the admission read fence, and a latched transition
-// never releases the write guard, so an ungated advance parks this leased caller
-// forever. The row proves the call RETURNS while the engine is genuinely
-// latched, and that it got far enough to reach the gated line: the unfenced
-// seen-set effect ahead of it landed.
+func TestLocalDATerminalWorkDrains(t *testing.T) {
+	const unavailable = "pending-outpoint owner admission context unavailable"
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xe8), 2)
+	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
+
+	type admissionOutcome struct {
+		result node.DAAdmissionResult
+		err    error
+	}
+	admitted := make(chan admissionOutcome, 1)
+	go func() {
+		result, err := h.service.AdmitLocalDA(raw)
+		admitted <- admissionOutcome{result: result, err: err}
+	}()
+	var got admissionOutcome
+	select {
+	case got = <-admitted:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatal("terminal AdmitLocalDA did not return")
+	}
+	var typed *node.TxAdmitError
+	if got.result != (node.DAAdmissionResult{}) || !errors.As(got.err, &typed) || typed.Kind != node.TxAdmitUnavailable || got.err.Error() != unavailable {
+		t.Fatalf("terminal AdmitLocalDA=(%+v,%T %v), want exact unavailable", got.result, got.err, got.err)
+	}
+
+	prefetched := make(chan error, 1)
+	go func() { prefetched <- h.service.ScheduleLocalDAPrefetch(daRelayTestID(0xe8)) }()
+	requireReturned(t, prefetched, "terminal ScheduleLocalDAPrefetch")
+	requireReturned(t, lifecycleClose(h.service), "Service.Close after terminal local work")
+
+	retained := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	daID := daRelayTestID(0xe9)
+	if result, err := retained.service.AdmitLocalDA(newDAIngressFixture(t, retained).commit(daID, 2)); err != nil || result.Disposition != node.DAAdmissionRetained {
+		t.Fatalf("retained AdmitLocalDA=(%+v,%v)", result, err)
+	}
+	latchDAHarness(t, retained, newTestHarness(t, 2, "127.0.0.1:0", nil))
+	prefetched = make(chan error, 1)
+	go func() { prefetched <- retained.service.ScheduleLocalDAPrefetch(daID) }()
+	requireReturned(t, prefetched, "post-retained terminal ScheduleLocalDAPrefetch")
+	requireReturned(t, lifecycleClose(retained.service), "Service.Close after retained terminal prefetch")
+}
+
+// TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance preserves the early
+// already-latched skip. A latch racing this check is refused by the shared
+// fence; this row also proves the unfenced seen-set effect ahead of the check
+// still lands.
 func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 	source := newTestHarness(t, 4, "127.0.0.1:0", nil)
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -658,15 +838,12 @@ func TestLatchedEngineSkipsTheAnnounceBlockTTLAdvance(t *testing.T) {
 	requireEqual(t, h.service.blockSeen.Has(blockHash), true, "the seen-set entry the unfenced effects still added")
 }
 
-// TestLatchedEngineSkipsThePeerQuotaRelease is the peer-teardown half. The
-// best-effort quota release takes the same fence, so an ungated release parks
-// unregisterPeer against a latched engine and strands the peer worker. The
-// lifecycle-exit counter increments only AFTER the gated call, so it is the
-// observation that the teardown ran past it rather than merely started.
+// TestLatchedEngineSkipsThePeerQuotaRelease preserves the early already-latched
+// cleanup skip. A latch racing this check is refused by the shared fence. The
+// lifecycle-exit counter observes that teardown ran past the skip.
 //
-// The skipped release itself is deliberately not observed through the retained
-// image: every exported reader of that image takes the same retained fence, so
-// any such assertion would park exactly like the call under test.
+// The skipped release itself is not observed here because package p2p has no
+// read-only retained-image accessor; the node fence tests pin that state.
 func TestLatchedEngineSkipsThePeerQuotaRelease(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))

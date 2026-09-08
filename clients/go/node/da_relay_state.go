@@ -295,9 +295,8 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 }
 
 // lockAdmissionFence takes the bound ChainState admission READ guard for the
-// duration of one complete retained-DA mutation and returns its release, so the
-// idiomatic call is `defer s.lockAdmissionFence()()` as the first statement of
-// the entry that owns the mutation.
+// duration of one complete retained-DA mutation. It returns the release or a
+// terminal-refusal error before the entry reaches retained state.
 //
 // It is what makes an ordinary retained-DA writer unable to interleave with a
 // canonical transition: the transition holds the same guard EXCLUSIVELY and
@@ -318,18 +317,17 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 // next), so nil handling belongs to the exported wrappers — ReleasePeerQuotaKey
 // returns early, AdvanceOrphanTTL promises nothing.
 //
-// A LATCHED engine parks a writer here until restart, by design: the terminal
-// fail-closed latch retains admissionMu exclusively, and standard admission
-// already parks its leased P2P workers the same way (mempool.go, "BLOCKS
-// INDEFINITELY, by design"). Returning instead would mutate retained state the
-// transition proved it cannot reason about.
-func (s *DARelayState) lockAdmissionFence() func() {
+// A latched engine returns unavailable before retained state is accessed. The
+// terminal writer remains held, so the closed image cannot be reopened.
+func (s *DARelayState) lockAdmissionFence() (func(), error) {
 	if s == nil || s.mempool == nil || s.mempool.chainState == nil {
-		return unfencedDARelayMutation
+		return unfencedDARelayMutation, nil
 	}
 	fence := &s.mempool.chainState.admissionMu
-	fence.RLock()
-	return fence.RUnlock
+	if !fence.RLockUnlessTerminal() {
+		return unfencedDARelayMutation, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
+	return fence.RUnlock, nil
 }
 
 // unfencedDARelayMutation is the release for an unbound relay: it exists as a
@@ -380,7 +378,11 @@ func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
 // PlanPrefetch reserves missing chunks for the supplied normalized peer keys.
 // The complete reservation runs under the admission read fence.
 func (s *DARelayState) PlanPrefetch(daID [32]byte, peerKeys []string, now time.Time) ([]DARelayPrefetchPlan, string) {
-	defer s.lockAdmissionFence()()
+	release, err := s.lockAdmissionFence()
+	if err != nil {
+		return nil, err.Error()
+	}
+	defer release()
 	plans, diagnostic := s.planDAPrefetch(daRelaySetRecord{daID: daID}, peerKeys, now)
 	out := make([]DARelayPrefetchPlan, len(plans))
 	for i, plan := range plans {
@@ -389,10 +391,15 @@ func (s *DARelayState) PlanPrefetch(daID [32]byte, peerKeys []string, now time.T
 	return out, diagnostic
 }
 
-// ReleasePrefetchPlan releases one previously reserved prefetch plan.
-// The complete release runs under the admission read fence.
+// ReleasePrefetchPlan releases one previously reserved prefetch plan under the
+// admission read fence. Terminal refusal leaves the reservation frozen until
+// restart.
 func (s *DARelayState) ReleasePrefetchPlan(plan DARelayPrefetchPlan) {
-	defer s.lockAdmissionFence()()
+	release, err := s.lockAdmissionFence()
+	if err != nil {
+		return
+	}
+	defer release()
 	s.releaseDAPrefetchPlan(daRelayPrefetchPlan{daID: plan.DAID, peerKey: plan.PeerKey, indexes: plan.Indexes})
 }
 

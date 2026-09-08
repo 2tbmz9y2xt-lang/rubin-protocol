@@ -96,10 +96,10 @@ func (m *Mempool) withLockedParsedBlock(block *consensus.ParsedBlock, fn func(*c
 	// transition's snapshot/restore window, and an abort would then resurrect
 	// an entry the caller was told had been removed.
 	//
-	// Like standard admission, that RLock BLOCKS INDEFINITELY by design in the
-	// fail-closed terminal state described on canonicalTransition.end.
 	if m.chainState != nil {
-		m.chainState.admissionMu.RLock()
+		if !m.chainState.admissionMu.RLockUnlessTerminal() {
+			return txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+		}
 		defer m.chainState.admissionMu.RUnlock()
 	}
 	m.mu.Lock()

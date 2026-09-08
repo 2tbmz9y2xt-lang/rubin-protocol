@@ -22,11 +22,13 @@ import (
 )
 
 type devnetRPCState struct {
-	syncEngine  *node.SyncEngine
-	blockStore  *node.BlockStore
-	mempool     *node.Mempool
-	peerManager *node.PeerManager
-	announceTx  func([]byte) error
+	syncEngine      *node.SyncEngine
+	blockStore      *node.BlockStore
+	mempool         *node.Mempool
+	peerManager     *node.PeerManager
+	announceTx      func([]byte) error
+	admitLocalDA    func([]byte) (node.DAAdmissionResult, error)
+	prefetchLocalDA func([32]byte) error
 	// announceBlock is the P2P full-block announcement hook for locally
 	// mined blocks. It is best-effort at the RPC boundary; process-level
 	// devnet evidence must still prove peer adoption instead of treating
@@ -35,7 +37,7 @@ type devnetRPCState struct {
 	stderr        io.Writer
 	nowUnix       func() uint64
 	metrics       *rpcMetrics
-	// rpcMut serializes mutating devnet RPC work (mempool admits + live mining)
+	// rpcMut serializes mutating devnet RPC work (transaction admits + live mining)
 	// so concurrent HTTP handlers cannot interleave chain/mempool updates.
 	rpcMut sync.Mutex
 	miner  *node.Miner // devnet live mining for POST /mine_next; nil disables the route
@@ -1242,7 +1244,7 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	_, txid, _, consumed, err := consensus.ParseTx(raw)
+	tx, txid, _, consumed, err := consensus.ParseTx(raw)
 	if err != nil || consumed != len(raw) {
 		state.metrics.noteSubmit("rejected")
 		writeJSONResponse(state, route, w, http.StatusUnprocessableEntity, submitTxResponse{
@@ -1254,10 +1256,10 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 	state.rpcMut.Lock()
 	// RUBIN_NODE_RPC_DEVNET.md 3.3: the last defined cancellation check runs
 	// after every validation above and after rpcMut acquisition, immediately
-	// before mempool admission entry. Observing it here MUST leave pool state
+	// before the selected admission owner. Observing it here MUST leave owner state
 	// untouched and answer 503 `rpc unavailable` with accepted=false and no
 	// txid, counted under the existing `unavailable` result value. A clean
-	// check hands the decision to AddTx: nothing observed later remaps it.
+	// check hands the decision to AddTx or AdmitLocalDA: nothing observed later remaps it.
 	if state.lifecycleErr() != nil {
 		state.rpcMut.Unlock()
 		state.metrics.noteSubmit("unavailable")
@@ -1265,6 +1267,35 @@ func handleSubmitTx(state *devnetRPCState, w http.ResponseWriter, r *http.Reques
 			Accepted: false,
 			Error:    "rpc unavailable",
 		})
+		return
+	}
+	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
+		if state.admitLocalDA == nil || state.prefetchLocalDA == nil {
+			state.rpcMut.Unlock()
+			state.metrics.noteSubmit("unavailable")
+			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{Accepted: false, Error: "DA admission unavailable"})
+			return
+		}
+		result, admitErr := state.admitLocalDA(raw)
+		state.rpcMut.Unlock()
+		if admitErr != nil {
+			status, metric := classifySubmitErr(admitErr)
+			state.metrics.noteSubmit(metric)
+			writeJSONResponse(state, route, w, status, submitTxResponse{Accepted: false, Error: admitErr.Error()})
+			return
+		}
+		switch {
+		case result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict:
+			_ = state.prefetchLocalDA(result.DAID)
+			state.metrics.noteSubmit("accepted")
+			writeJSONResponse(state, route, w, http.StatusOK, submitTxResponse{Accepted: true, TxID: hex.EncodeToString(txid[:])})
+		case result.Disposition == node.DAAdmissionDuplicate:
+			state.metrics.noteSubmit("conflict")
+			writeJSONResponse(state, route, w, http.StatusConflict, submitTxResponse{Accepted: false, Error: "DA transaction duplicate or conflict"})
+		default:
+			state.metrics.noteSubmit("unavailable")
+			writeJSONResponse(state, route, w, http.StatusServiceUnavailable, submitTxResponse{Accepted: false, Error: "DA admission unavailable"})
+		}
 		return
 	}
 	admitErr := state.mempool.AddTx(raw)

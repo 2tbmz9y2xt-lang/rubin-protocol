@@ -28,6 +28,20 @@ const (
 	qualityGraceHeight          uint64 = 1440
 )
 
+// AdmitLocalDA registers one local admission as Service work and delegates the
+// unchanged bytes to the shared DA owner with LOCAL provenance.
+func (s *Service) AdmitLocalDA(txBytes []byte) (node.DAAdmissionResult, error) {
+	var zero node.DAAdmissionResult
+	if s == nil {
+		return zero, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil service"}
+	}
+	if !s.acquireWork() {
+		return zero, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: errServiceClosed.Error()}
+	}
+	defer s.releaseWork()
+	return s.daRelay.AdmitDA(txBytes, node.LocalDAProvenance())
+}
+
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
 // transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer

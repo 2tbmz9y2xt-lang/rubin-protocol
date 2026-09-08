@@ -1086,7 +1086,10 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // FENCE OWNERSHIP: this body takes lockAdmissionFence ITSELF and the exported wrappers take
 // none — sync.RWMutex is not reentrant, so the fence is acquired exactly once per cleanup, here.
 func (s *DARelayState) commitOwnerReadyRemoval(selectVictims func(*DARelayState) ([]DAAdmissionVictim, error)) error {
-	release := s.lockAdmissionFence()
+	release, err := s.lockAdmissionFence()
+	if err != nil {
+		return err
+	}
 	defer release()
 	s.mu.Lock()
 	defer s.mu.Unlock()

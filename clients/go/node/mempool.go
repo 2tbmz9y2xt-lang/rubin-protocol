@@ -291,9 +291,8 @@ func (m *Mempool) AddReorgTx(txBytes []byte) (retErr error) {
 // caller-declared origin in the mempool entry. Source provenance does not
 // grant admission priority or bypass; invalid source values reject.
 //
-// Its ChainState.admissionMu.RLock below BLOCKS INDEFINITELY, by design, once a
-// canonical transition has entered the fail-closed terminal state described on
-// canonicalTransition.end: waiting for the required restart is the contract.
+// Its ChainState admission read returns unavailable once a canonical transition
+// has entered the fail-closed terminal state described on canonicalTransition.end.
 //
 // probe is the per-call relay sink AddRemoteTxForRelay supplies and every
 // legacy entry point leaves nil. It carries identity, the proven admission
@@ -303,18 +302,21 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 	if m == nil {
 		return selectRelayDisposition(txAdmitUnavailable("nil mempool"), RelayAdmissionUnavailable)
 	}
-	// Exactly one admission counter increment per non-nil-receiver call, and
-	// NEVER outside the admission guard. Only the nil-ChainState guard can
-	// precede it — there is no ChainState to take the guard from — so it counts
-	// at its own return site through the same noteAdmissionResult mapping. A nil
-	// receiver counts nothing.
+	// Exactly one admission counter increment per non-nil-receiver call. The
+	// nil-ChainState and terminal guards count at their return sites; ordinary
+	// outcomes remain counted inside the admission guard. A nil receiver counts
+	// nothing.
 	if m.chainState == nil {
 		err := selectRelayDisposition(txAdmitUnavailable("nil chainstate"), RelayAdmissionUnavailable)
 		m.noteAdmissionResult(err)
 		return err
 	}
 
-	m.chainState.admissionMu.RLock()
+	if !m.chainState.admissionMu.RLockUnlessTerminal() {
+		retErr = selectRelayDisposition(txAdmitUnavailable("pending-outpoint owner admission context unavailable"), RelayAdmissionUnavailable)
+		m.noteAdmissionResult(retErr)
+		return retErr
+	}
 	defer m.chainState.admissionMu.RUnlock()
 	// Registered AFTER the guard, so LIFO runs the count BEFORE the RUnlock
 	// above: the whole lifecycle — validation, insertion, outcome count — is
@@ -328,8 +330,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 	m.bindRelayAdmissionContext(probe)
 
 	// Inside the guard, so its rejection and count belong to that contained
-	// lifecycle and it waits on a terminally latched engine like every other
-	// admission: caller metadata never reports an outcome the binding cannot see.
+	// lifecycle: caller metadata never reports an outcome the binding cannot see.
 	//
 	// Every entry point pins the source constant itself, so an invalid source is
 	// an impossible invariant rather than a candidate property.
@@ -384,7 +385,9 @@ func (m *Mempool) RelayMetadata(txBytes []byte) (RelayTxMetadata, error) {
 	if err != nil {
 		return RelayTxMetadata{}, err
 	}
-	m.chainState.admissionMu.RLock()
+	if !m.chainState.admissionMu.RLockUnlessTerminal() {
+		return RelayTxMetadata{}, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
 	defer m.chainState.admissionMu.RUnlock()
 	snapshot := m.chainState.admissionSnapshotForInputs(relayMetadataInputs(tx))
 	policy := m.policySnapshot()

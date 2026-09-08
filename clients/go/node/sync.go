@@ -785,12 +785,10 @@ func (s *SyncEngine) reportMempoolBindingRejected(diag *diagnosticBatch, err err
 // without stalling or deadlocking a mutator. Write errors are ignored: a
 // diagnostic never changes a consensus, persistence, publication or mempool result.
 //
-// ONE carve-out: the terminal fail-closed latch (canonicalTransition.end)
-// retains the ChainState admission guard until restart, so that single flush
-// runs with that guard held. A writer that blocks or re-enters there must not
-// expect an admission-taking call to complete — nothing can pass that guard
-// again in this process either way, and every mutation entry point refuses at
-// mutationAllowed before touching it.
+// ONE carve-out: terminal fail-closed publication retains the physical ChainState
+// admission writer until restart while its diagnostic flush runs. Fallible read
+// consumers complete with unavailable; direct exclusive acquisition stays closed.
+// SyncEngine mutations refuse through mutationAllowed before touching that guard.
 //
 // The replacement is a race-free pointer store under s.mu; a flush already in
 // progress keeps the writer it snapshotted.
@@ -965,16 +963,18 @@ func (s *SyncEngine) latchTerminalFault(cause error) {
 	s.storeTerminalFault(&storagePersistenceFault{cause: cause})
 }
 
-// storeTerminalFault installs an ALREADY BUILT fault: locks and stores, no
-// allocation. The publication corridor calls this one.
+// storeTerminalFault installs an ALREADY BUILT fault, then publishes terminal
+// admission refusal without retaining a SyncEngine lock. The publication
+// corridor calls this one.
 func (s *SyncEngine) storeTerminalFault(fault *storagePersistenceFault) {
 	s.persistenceFaultMu.Lock()
-	defer s.persistenceFaultMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.persistenceFault == nil {
 		s.persistenceFault = fault
 	}
+	s.mu.Unlock()
+	s.persistenceFaultMu.Unlock()
+	s.chainState.admissionMu.notifyTerminal()
 }
 
 // reportTerminalTransition makes the fail-closed latch visible to an operator:

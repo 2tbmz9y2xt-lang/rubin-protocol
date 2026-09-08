@@ -145,7 +145,9 @@ func (m *Mempool) acquireDAAdmissionHold(owner *PendingOutpointOwner, inputs []c
 	if owner == nil {
 		return nil, txAdmitUnavailable("nil pending-outpoint owner")
 	}
-	m.chainState.admissionMu.RLock()
+	if !m.chainState.admissionMu.RLockUnlessTerminal() {
+		return nil, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
 	hold := &daAdmissionHold{mempool: m, guard: &daAdmissionGuard{chainState: m.chainState, owner: owner}}
 	keep := false
 	defer func() {
@@ -212,7 +214,9 @@ func (h *daAdmissionHold) validateDACandidate(owned []byte, tx *consensus.Tx, tx
 }
 
 func (m *Mempool) beginDAAdmissionGuarded(owner *PendingOutpointOwner, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint) (*DAAdmission, error) {
-	m.chainState.admissionMu.RLock()
+	if !m.chainState.admissionMu.RLockUnlessTerminal() {
+		return nil, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
 	locked := true
 	defer func() {
 		if locked {
@@ -373,7 +377,9 @@ func (m *Mempool) BeginDARemoval() (*DARemoval, error) {
 	if m.pendingOutpoints == nil {
 		return nil, txAdmitUnavailable("nil pending-outpoint owner")
 	}
-	m.chainState.admissionMu.RLock()
+	if !m.chainState.admissionMu.RLockUnlessTerminal() {
+		return nil, txAdmitUnavailable("pending-outpoint owner admission context unavailable")
+	}
 	r := &DARemoval{guard: &daAdmissionGuard{chainState: m.chainState, owner: m.pendingOutpoints}}
 	r.self = r
 	return r, nil

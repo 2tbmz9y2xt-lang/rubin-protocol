@@ -51,7 +51,7 @@ const (
 )
 
 type ChainState struct {
-	admissionMu      sync.RWMutex
+	admissionMu      admissionMutex
 	mu               sync.RWMutex
 	Utxos            map[consensus.Outpoint]consensus.UtxoEntry
 	Height           uint64
