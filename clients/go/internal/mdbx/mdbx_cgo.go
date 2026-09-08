@@ -580,10 +580,11 @@ type Batch struct {
 	Reverse bool
 	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed readback,
 	// with no delete and no put. Admitted after every mutation with exact SchemaV1 DBI/key shape, strictly increasing (DBI.Rank,
-	// key), disjoint from every target and OLD_VALUE_REF source, at most 16,384 rows and at most MaxOperationDataBytes
-	// present-value bytes, captured once from OLD before any write transaction. Those refusals return the direct EngineError,
-	// truth OLD, and an open reusable Store; a native read failure there keeps its error and the existing infrastructure
-	// lifecycle. A mismatch on possible-crossed readback fails both predicates: Update returns CommitTruthUnknown with the
+	// key), disjoint from every target and OLD_VALUE_REF source, at most 16,384 rows and MaxOperationDataBytes present-value
+	// bytes, captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and an
+	// open reusable Store; a native capture read failure keeps its error and the existing infrastructure lifecycle. A row
+	// differing from that OLD image at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no
+	// reusable Store. A possible-crossed readback mismatch fails both predicates: Update returns CommitTruthUnknown with the
 	// original CommitError. Nil and empty behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
 }
@@ -879,10 +880,7 @@ func updateScanConsulted(first bool, previous, row ConsultedRow, count *uint64) 
 // updateConsultedContains reports whether the strictly ordered consulted rows hold exactly (dbi, key).
 func updateConsultedContains(consulted []ConsultedRow, dbi DBI, key []byte) bool {
 	index := sort.Search(len(consulted), func(i int) bool {
-		if consulted[i].DBI.Rank != dbi.Rank {
-			return consulted[i].DBI.Rank >= dbi.Rank
-		}
-		return bytes.Compare(consulted[i].Key, key) >= 0
+		return !updateKeyOrdered(consulted[i].DBI.Rank, consulted[i].Key, dbi.Rank, key)
 	})
 	return index < len(consulted) && consulted[index].DBI == dbi && bytes.Equal(consulted[index].Key, key)
 }
@@ -1201,7 +1199,8 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 			return nil, err
 		}
 	}
-	if err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch"); err != nil {
+	err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch")
+	if err != nil {
 		return nil, err
 	}
 	return references, nil
