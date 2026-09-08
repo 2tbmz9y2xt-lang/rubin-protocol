@@ -582,11 +582,12 @@ type Batch struct {
 	// with no delete and no put. Admitted after every mutation: exact SchemaV1 DBI/key shape, strict (DBI.Rank, key) increase and
 	// the 16,384-row count are decided per row in declared order, then disjointness from every target and OLD_VALUE_REF source
 	// over that set, so an over-cap overlapping set refuses as Capacity; at most MaxOperationDataBytes present-value bytes,
-	// captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and an open
-	// reusable Store; a native capture read failure keeps its error and the existing infrastructure lifecycle. A row differing
-	// from that OLD image at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no reusable Store.
-	// A possible-crossed readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original
-	// CommitError. Nil and empty behave alike; the caller leaves rows and key bytes unchanged until Update returns.
+	// captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and, when the
+	// OLD abort succeeds, an open reusable Store; an abort failure keeps the existing terminal or retained lifecycle, and a
+	// native capture read failure keeps its error and the existing infrastructure lifecycle. A row differing from that OLD image
+	// at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no reusable Store. A possible-crossed
+	// readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original CommitError. Nil and empty
+	// behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
 }
 

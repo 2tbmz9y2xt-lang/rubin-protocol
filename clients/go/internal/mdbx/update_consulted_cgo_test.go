@@ -24,14 +24,19 @@ func consultedCounter(t *testing.T, id uint64) Mutation {
 	return Mutation{DBI: readDBIsLiteral()[0], Key: key, AfterKind: AfterLiteral, Literal: LogicalCounterValue(id, id)}
 }
 
-// consultedRows returns count strictly ascending canonical-v1 rows over independent key allocations.
-func consultedRows(t *testing.T, count int) []ConsultedRow {
-	t.Helper()
-	rows := make([]ConsultedRow, count)
-	for i, mutation := range updatePlanAuxBatch(t, count).Mutations {
+// consultedOf projects mutations onto consulted rows of the same DBI and key, in the same order.
+func consultedOf(mutations []Mutation) []ConsultedRow {
+	rows := make([]ConsultedRow, len(mutations))
+	for i, mutation := range mutations {
 		rows[i] = ConsultedRow{DBI: mutation.DBI, Key: mutation.Key}
 	}
 	return rows
+}
+
+// consultedRows returns count strictly ascending canonical-v1 rows over independent key allocations.
+func consultedRows(t *testing.T, count int) []ConsultedRow {
+	t.Helper()
+	return consultedOf(updatePlanAuxBatch(t, count).Mutations)
 }
 
 // consultedTrack closes store at cleanup unless a native refusal already consumed it.
@@ -147,8 +152,7 @@ func consultedUnitRefusal(t *testing.T, marker string, rows []ConsultedRow, plan
 // consultedSeedEmptyMeta stores an empty value under meta-v1 key {2}, the only SchemaV1 key with raw minimum 0.
 func consultedSeedEmptyMeta(t *testing.T, store *Store) {
 	t.Helper()
-	plan := []ownedMutation{{dbi: readDBIsLiteral()[0], key: []byte{2}, after: AfterLiteral, literal: []byte{}}}
-	requireUpdateTruth(t, runNativeUpdate(t, store, plan), CommitTruthNew, true, nil, nil)
+	requireUpdateTruth(t, runNativeUpdate(t, store, []ownedMutation{{dbi: readDBIsLiteral()[0], key: []byte{2}, after: AfterLiteral, literal: []byte{}}}), CommitTruthNew, true, nil, nil)
 }
 
 func TestUpdateConsultedImages(t *testing.T) {
@@ -217,11 +221,8 @@ func TestUpdateConsultedAdmission(t *testing.T) {
 		consultedUnitRefusal(t, "same key different DBI descending", []ConsultedRow{row(6, key), row(2, key)}, plan, false)
 	})
 	t.Run("all widths", func(t *testing.T) {
-		mutations, rows := updatePlanBatch(t).Mutations, make([]ConsultedRow, 0, 9)
-		for _, i := range []int{0, 1, 2, 4, 5, 6, 7, 8, 9} {
-			rows = append(rows, ConsultedRow{DBI: mutations[i].DBI, Key: mutations[i].Key})
-		}
-		consultedUnit(t, "all widths", rows, updateNativePlan(t, consultedCounter(t, 9)))
+		mutations := updatePlanBatch(t).Mutations
+		consultedUnit(t, "all widths", append(consultedOf(mutations[:3]), consultedOf(mutations[4:])...), updateNativePlan(t, consultedCounter(t, 9)))
 	})
 	// The overlap is the middle of a three-row set: on a one-row hit the correct and the operand-swapped search predicate agree.
 	t.Run("overlap target", func(t *testing.T) {
@@ -313,10 +314,7 @@ func TestUpdateConsultedValueBounds(t *testing.T) {
 	dbis := readDBIsLiteral()
 	rows := []Mutation{consultedBlockRow(t, 1, 68_000_125), consultedBlockRow(t, 2, 68_000_125), consultedBlockRow(t, 3, 18_610_901)}
 	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].Key, rows[j].Key) < 0 })
-	consulted := make([]ConsultedRow, len(rows))
-	for i, row := range rows {
-		consulted[i] = ConsultedRow{DBI: row.DBI, Key: row.Key}
-	}
+	consulted := consultedOf(rows)
 	store, _, _ := consultedStore(t)
 	consultedRequireCommit(t, store, "value bounds seed", Batch{Mutations: rows})
 	t.Run("exact 154611151 admitted", func(t *testing.T) {
@@ -325,15 +323,12 @@ func TestUpdateConsultedValueBounds(t *testing.T) {
 	longer := consultedBlockRow(t, 3, 18_610_902)
 	consultedRequireCommit(t, store, "value bounds one-over seed", Batch{Mutations: []Mutation{{DBI: dbis[4], Key: longer.Key, BeforePresent: true, AfterKind: AfterAbsent}}})
 	consultedRequireCommit(t, store, "value bounds one-over seed", Batch{Mutations: []Mutation{longer}})
+	rows[sort.Search(len(rows), func(i int) bool { return bytes.Compare(rows[i].Key, longer.Key) >= 0 })].Literal = longer.Literal
 	// reuse proves the same OPEN Store still reads every block row unchanged, then commits a within-cap consulted Update.
 	reuse := func(t *testing.T, marker string, id uint64) {
 		t.Helper()
 		for i, row := range rows {
-			want := row.Literal
-			if bytes.Equal(row.Key, longer.Key) {
-				want = longer.Literal
-			}
-			consultedRequireImage(t, store, dbis[4], row.Key, want, true, fmt.Sprintf("%s: row %d intact", marker, i))
+			consultedRequireImage(t, store, dbis[4], row.Key, row.Literal, true, fmt.Sprintf("%s: row %d intact", marker, i))
 		}
 		consultedRequireImage(t, store, dbis[0], consultedCounter(t, id).Key, nil, false, marker+": no write")
 		consultedRequireCommit(t, store, marker+": same-Store reuse", Batch{Mutations: []Mutation{consultedCounter(t, id)}, Consulted: consulted[:2]})
@@ -360,7 +355,6 @@ func TestUpdateConsultedValueBounds(t *testing.T) {
 }
 
 func TestUpdateConsultedCopyIsolation(t *testing.T) {
-	dbis := readDBIsLiteral()
 	t.Run("owned after return", func(t *testing.T) {
 		plan, rows := updateNativePlan(t, consultedCounter(t, 1)), consultedRows(t, 3)
 		owned := consultedUnit(t, "owned after return", rows, plan)
@@ -376,9 +370,8 @@ func TestUpdateConsultedCopyIsolation(t *testing.T) {
 	t.Run("aliased backing", func(t *testing.T) {
 		target, source := reverseKeys(t, 1, 1)
 		backing := append(append(append(make([]byte, 0, 137), target...), source...), consultedRows(t, 9)[8].Key...)
-		batch := Batch{Mutations: []Mutation{reverseRefRow(backing[:44], backing[44:121])}, Consulted: []ConsultedRow{{DBI: dbis[6], Key: backing[121:137]}}}
-		plan, err := updateOwnedBatch(batch)
-		mustEnvironment(t, err)
+		batch := Batch{Mutations: []Mutation{reverseRefRow(backing[:44], backing[44:121])}, Consulted: []ConsultedRow{{DBI: readDBIsLiteral()[6], Key: backing[121:137]}}}
+		plan := updateNativePlan(t, batch.Mutations...)
 		owned := consultedUnit(t, "aliased backing", batch.Consulted, plan)
 		before := fmt.Sprint(plan, owned)
 		for i := range backing {
@@ -394,8 +387,7 @@ func TestUpdateConsultedReverse(t *testing.T) {
 	dbis := readDBIsLiteral()
 	key := consultedRows(t, 1)[0].Key
 	rows := []ConsultedRow{{DBI: dbis[2], Key: key}, {DBI: dbis[6], Key: append([]byte(nil), key...)}}
-	forward, err := updateOwnedBatch(Batch{Mutations: []Mutation{consultedCounter(t, 1)}})
-	mustEnvironment(t, err)
+	forward := updateNativePlan(t, consultedCounter(t, 1))
 	reverse, err := updateOwnedBatch(Batch{Reverse: true, Mutations: []Mutation{consultedCounter(t, 1)}})
 	mustEnvironment(t, err)
 	reverseOwned, err := updateOwnedConsulted(Batch{Reverse: true, Consulted: rows}, reverse)
@@ -467,8 +459,7 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 		store, _, _ := consultedStore(t)
 		consulted := []ownedConsulted{{dbi: dbis[2], key: key}}
 		mustEnvironment(t, store.View(func(reader *Reader) error {
-			var err error
-			consulted[0].image, err = updateNativeImage(reader.txn, store.dbis[2], key)
+			_, err := updateNativeConsultedImages(reader.txn, store.dbis, consulted)
 			return err
 		}))
 		if consulted[0].image != (updateImage{}) {
@@ -487,6 +478,19 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 		reader, truth, err := consultedUpdate(store, func(*Reader) { store.dbis[2] = ^store.dbis[2] }, Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: key}}})
 		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("LocalInvariant"), -30780, expectedNativeDiagnostic(-30780), "native capture failure", true)
 	})
+	// The row above sees the disposition, not the capture origin: the snapshot stage reproduces the same code on the flipped handle.
+	t.Run("capture keeps its error", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		handles := store.dbis
+		handles[2] = ^handles[2]
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			infrastructure, captureErr := updateNativeConsultedImages(reader.txn, handles, []ownedConsulted{{dbi: dbis[2], key: key}})
+			if engine := requireEnvironmentError(t, captureErr, EngineLocalInvariant, operationUpdate, -30780, expectedNativeDiagnostic(-30780)); !infrastructure || engine.Cause != nil {
+				return fmt.Errorf("capture keeps its error: infrastructure=%v err=%w", infrastructure, captureErr)
+			}
+			return nil
+		}))
+	})
 }
 
 // consultedReadback captures rows' OLD images, commits the NEW-witness target and change, then reads back one plan.
@@ -500,11 +504,10 @@ func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitne
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		consulted := make([]ownedConsulted, len(rows))
 		for i, row := range rows {
-			image, err := updateNativeImage(reader.txn, store.dbis[row.DBI.Rank], row.Key)
-			if err != nil {
-				return err
-			}
-			consulted[i] = ownedConsulted{dbi: row.DBI, key: row.Key, image: image}
+			consulted[i] = ownedConsulted{dbi: row.DBI, key: row.Key}
+		}
+		if _, err := updateNativeConsultedImages(reader.txn, store.dbis, consulted); err != nil {
+			return err
 		}
 		requireUpdateTruth(t, store.updateNative(created, nil, reader.txn), CommitTruthNew, true, nil, nil)
 		if change != nil {
@@ -531,7 +534,6 @@ func TestUpdateConsultedReadback(t *testing.T) {
 	present, absent, chain := consultedRows(t, 1)[0].Key, consultedRows(t, 2)[1].Key, ChainValue([32]byte{2}, [32]byte{3}, [40]byte{4})
 	rows := []ConsultedRow{{DBI: dbis[0], Key: []byte{2}}, {DBI: dbis[2], Key: present}, {DBI: dbis[2], Key: absent}}
 	deletePresent := updateNativePlan(t, Mutation{DBI: dbis[2], Key: present, BeforePresent: true, AfterKind: AfterAbsent})
-	createAbsent := updateNativePlan(t, Mutation{DBI: dbis[2], Key: absent, AfterKind: AfterLiteral, Literal: chain})
 	for _, row := range []struct {
 		name                                         string
 		metaBytes, newWitness, unreadable, malformed bool
@@ -544,7 +546,7 @@ func TestUpdateConsultedReadback(t *testing.T) {
 		{"consulted absent after old targets", false, false, false, false, deletePresent, CommitTruthUnknown, 0},
 		{"consulted absent after new targets", false, true, false, false, deletePresent, CommitTruthUnknown, 0},
 		{"present bytes became empty", true, false, false, false, []ownedMutation{{dbi: dbis[0], key: []byte{2}, beforePresent: true, after: AfterLiteral, literal: []byte{}}}, CommitTruthUnknown, 0},
-		{"absent became present", false, true, false, false, createAbsent, CommitTruthUnknown, 0},
+		{"absent became present", false, true, false, false, updateNativePlan(t, Mutation{DBI: dbis[2], Key: absent, AfterKind: AfterLiteral, Literal: chain}), CommitTruthUnknown, 0},
 		{"unreadable consulted DBI", false, false, true, false, nil, CommitTruthUnknown, -30780},
 		{"malformed consulted image", false, true, false, true, nil, CommitTruthUnknown, -30779},
 	} {
