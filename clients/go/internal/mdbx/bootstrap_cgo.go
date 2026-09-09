@@ -55,7 +55,10 @@ func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *Opera
 // own OLD transaction, refuses anything but the exact-empty image before reading or
 // allocating anything else, revalidates the two required metadata rows it binds as
 // consulted, and returns the fixed two-row initial plan. The first count mismatch returns
-// immediately and there is no second census.
+// immediately and there is no second census. Update holds Store.operations from OLD
+// snapshot creation through write/readback and cleanup. The Store's lifetime directory
+// advisory lock excludes other cooperating Rubin writers, so the census cannot change
+// before this fixed two-row plan is applied.
 func bootstrapBatch(s *Store, reader *Reader, profile StorageProfileV1) (Batch, error) {
 	inspection, err := bootstrapInspect(s, reader)
 	if err != nil {
