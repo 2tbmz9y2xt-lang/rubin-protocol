@@ -3887,7 +3887,7 @@ func TestCanonicalCutoverWinningReorgTerminalNewRequeuesNothing(t *testing.T) {
 	select {
 	case got = <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("terminal NEW invoked a requeue owner and blocked on the retained admission guard")
+		t.Fatal("requeue owner invoked outside ordinary NEW: terminal NEW blocked on the retained admission guard")
 	}
 	if !injected || got.err == nil || got.summary == nil || len(got.summary.CanonicalAppliedBlocks) != 2 {
 		t.Fatalf("injected=%v summary=%+v err=%v, want the published NEW image with a terminal error", injected, got.summary, got.err)
@@ -4155,13 +4155,8 @@ func TestWinningReorgHoldsTwoImagesUnderPVShadow(t *testing.T) {
 
 // TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind pins the Section 11.1 owner
 // selection for the current line, from the row's ALREADY PARSED tx_kind and with
-// no second classifier: the standard row is admitted exactly once and the two DA
-// kinds invoke zero owners. The coinbase row at index 0 is skipped before any of
-// them.
-//
-// The DA rows are a bounded intermediate guard, NOT Section 11.1's DA
-// re-admission: routing them into the standard owner would admit them under the
-// wrong domain's rules, and their real owner arrives with RUB-680.
+// no second classifier: the standard row and each DA kind invoke exactly their
+// one selected owner. The coinbase row at index 0 is skipped before any of them.
 //
 // {0x00, 0x01, 0x02} is the COMPLETE reachable domain here: a disconnected row
 // always comes from a canonical parse, and the canonical codec refuses any other
@@ -4191,21 +4186,19 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 		if rows[i].kind != want {
 			t.Fatalf("row %d kind=0x%02x, want 0x%02x", i, rows[i].kind, want)
 		}
-		// A row no owner will receive is never serialized: only the standard
-		// row carries bytes.
-		if hasBytes := rows[i].txBytes != nil; hasBytes != (want == 0x00) {
-			t.Fatalf("row %d kind=0x%02x carries bytes=%v", i, want, hasBytes)
-		}
+		wantRaw := [][]byte{standard, commit, chunk}[i]
+		require(t, bytes.Equal(rows[i].txBytes, wantRaw), "row %d kind=0x%02x bytes differ from canonical input", i, want)
 	}
 
-	// The two dropped rows of THIS block produce exactly ONE retained record
-	// carrying their count, so a DA-heavy block cannot evict the standard rows'
-	// own diagnostics behind the bounded batch's truncation marker.
+	var detached [][]byte
+	f.engine.reorgDAAdmission = func(raw []byte) error {
+		detached = append(detached, append([]byte(nil), raw...))
+		return nil
+	}
 	batch := &diagnosticBatch{}
 	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, batch)
-	if len(batch.records) != 1 || !strings.Contains(batch.records[0], "2 row(s)") {
-		t.Fatalf("requeue diagnostics=%q, want one per-block record naming 2 dropped rows", batch.records)
-	}
+	require(t, len(batch.records) == 0, "successful requeue diagnostics=%q, want none", batch.records)
+	require(t, len(detached) == 2 && bytes.Equal(detached[0], commit) && bytes.Equal(detached[1], chunk), "detached owner bytes=%x, want commit then chunk", detached)
 
 	standardTxid, _, err := canonicalTxIDsForNodeTest(standard)
 	if err != nil {
@@ -4220,6 +4213,264 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 	if len(admitted) != 1 || admitted[0] != standardTxid {
 		t.Fatalf("admitted=%x, want exactly the standard row %x", admitted, standardTxid)
 	}
+}
+
+func TestReorgDARoutingOrderAndBestEffort(t *testing.T) {
+	f := newCanonicalDATestFixture(t)
+	fork := f.forkFrom(t)
+	mp, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
+	require(t, err == nil, "NewMempool: %v", err)
+	f.engine.SetMempool(mp)
+	ids := [2][32]byte{daRelayTestID(0xc1), daRelayTestID(0xc2)}
+	da, standard, fees := [2][][]byte{}, [2][]byte{}, uint64(0)
+	for i, id := range ids {
+		da[i], fees = f.daSetTxs(t, daSetSpec{daID: id, payloads: [][]byte{[]byte("routing-order")}})
+		input, value := f.nextSpendableInput(t)
+		standard[i] = f.signAndMarshal(t, &consensus.Tx{Version: 1, TxKind: 0x00, TxNonce: f.takeNonce(), Inputs: []consensus.TxInput{input}, Outputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: f.address}}})
+		rows, wtxids := append(da[i], standard[i]), [][32]byte{{}}
+		for _, raw := range rows {
+			_, _, wtxid, _, err := consensus.ParseTx(raw)
+			require(t, err == nil, "ParseTx: %v", err)
+			wtxids = append(wtxids, wtxid)
+		}
+		subsidy := consensus.BlockSubsidy(f.height, f.alreadyGenerated)
+		coinbase := reorgTestCoinbaseForWtxids(t, f.height, subsidy+fees+value-1, f.address, wtxids)
+		raw := buildMultiTxBlock(t, f.prevHash, f.target, reorgTestTimestamp(f.height), append([][]byte{coinbase}, rows...)...)
+		applied, err := f.engine.ApplyBlock(raw, nil)
+		require(t, err == nil && applied != nil && len(applied.CanonicalAppliedBlocks) == 1 && applied.BlockHeight == f.height && f.engine.chainState.TipHash == applied.BlockHash && reflect.DeepEqual(applied.CanonicalAppliedBlocks[0].CompleteDAIDs, [][32]byte{id}), "old canonical DA block %d rejected or not published: summary=%+v err=%v", i, applied, err)
+		f.prevHash, f.height, f.alreadyGenerated = applied.BlockHash, f.height+1, f.alreadyGenerated+subsidy
+	}
+	for _, raw := range [][]byte{fork.blockWithDASets(t), fork.blockWithDASets(t)} {
+		parsed, hash := mustParseReorgBlockForTest(t, raw)
+		require(t, f.store.StoreBlock(hash, parsed.HeaderBytes, raw) == nil, "store competing ancestor")
+	}
+	branch, owner := fork.blockWithDASets(t), f.engine.DARelayState()
+	type event struct {
+		raw      []byte
+		returned bool
+		result   DAAdmissionResult
+		err      error
+		counts   MempoolAdmissionCounts
+	}
+	events, release, done := make(chan event, 8), make(chan struct{}), make(chan error, 1)
+	f.engine.reorgDAAdmission = func(raw []byte) error {
+		e := event{raw: bytes.Clone(raw), counts: mp.AdmissionCounts()}
+		events <- e
+		<-release
+		e.result, e.err = owner.AdmitDA(raw, DetachedReorgDAProvenance())
+		e.returned, e.counts = true, mp.AdmissionCounts()
+		events <- e
+		return e.err
+	}
+	summary, diagnostics := new(ChainStateConnectSummary), new(bytes.Buffer)
+	f.engine.SetStderr(diagnostics)
+	go func() {
+		defer close(done)
+		summary, err = f.engine.ApplyBlockWithReorg(branch, nil)
+		done <- err
+	}()
+	t.Cleanup(func() { close(release); _ = awaitCanonicalMOError(t, done, "reorg routing cleanup") })
+	for i := range 4 {
+		raw := da[1-i/2][i%2]
+		for _, returned := range []bool{false, true} {
+			var got event
+			select {
+			case got = <-events:
+			case <-time.After(5 * time.Second):
+				t.Fatal("reorg owner events mismatch: missing owner entry/return")
+			}
+			tx, id, _, _, parseErr := consensus.ParseTx(got.raw)
+			require(t, parseErr == nil && bytes.Equal(got.raw, raw) && id == txID(t, raw) && tx.TxKind == uint8(i%2+1) && got.returned == returned && got.counts == (MempoolAdmissionCounts{Accepted: uint64(i / 2)}), "reorg owner events mismatch: row=%d return=%v got id=%x returned=%v counts=%+v", i, returned, id, got.returned, got.counts)
+			if !returned {
+				require(t, !mp.Contains(txID(t, standard[1-i/2])) && len(done) == 0, "owner attempt has not returned: later standard row or reorg return ran")
+				release <- struct{}{}
+			} else if i%2 == 0 {
+				require(t, got.err == nil && got.result == (DAAdmissionResult{DAID: ids[1-i/2], Disposition: DAAdmissionRetained}), "reorg owner events mismatch: commit result=%+v err=%v", got.result, got.err)
+			} else {
+				var refusal *TxAdmitError
+				require(t, errors.As(got.err, &refusal) && refusal.Kind == TxAdmitUnavailable && refusal.Message == "DA COMPLETE_SET capacity owner is not active" && got.result == (DAAdmissionResult{}), "reorg owner events mismatch: chunk result=%+v err=%v", got.result, got.err)
+			}
+		}
+	}
+	require(t, awaitCanonicalMOError(t, done, "reorg routing") == nil, "ordinary NEW reorg failed")
+	height, hash, exists, tipErr := f.store.Tip()
+	require(t, tipErr == nil && exists && height == fork.height-1 && hash == fork.prevHash && f.engine.chainState.TipHash == hash && summary != nil && summary.BlockHash == hash && summary.BlockHeight == height && f.engine.chainState.Height == height && len(summary.CanonicalAppliedBlocks) == 3 && !f.engine.TerminalFaulted(), "ordinary NEW canonical truth mismatch: summary=%+v tip=%d/%x err=%v", summary, height, hash, tipErr)
+	require(t, len(events) == 0 && mp.AdmissionCounts() == (MempoolAdmissionCounts{Accepted: 2}) && mp.Len() == 2, "unexpected standard residency: counts=%+v len=%d extra events=%d", mp.AdmissionCounts(), mp.Len(), len(events))
+	for i, raw := range standard {
+		got, ok := mp.TxByID(txID(t, raw))
+		require(t, ok && bytes.Equal(got, raw), "unexpected standard residency: exact raw/txid missing")
+		record := daRelayStateSnapshot(owner).sets[ids[i]]
+		require(t, bytes.Equal(record.commit.txBytes, da[i][0]) && record.commit.member.txid == txID(t, da[i][0]) && len(record.chunks) == 0, "reorg owner events mismatch: retained commit or unavailable chunk state")
+	}
+	require(t, diagnostics.String() == strings.Repeat("da relay: requeue-tx: DA COMPLETE_SET capacity owner is not active\n", 2), "reorg owner events mismatch: diagnostics=%q", diagnostics.String())
+}
+
+func TestReorgDARoutingCapturedOwners(t *testing.T) {
+	f := newCanonicalMOFixture(t, 4, MempoolConfig{})
+	standard := f.raw(t, f.ops[0], 61, false)
+	commit := f.daCommitTx(t, f.ops[1], daRelayTestID(0xc2), 1, 62)
+	chunk := f.daChunkTx(t, f.ops[2], daRelayTestID(0xc2), 0, 63, []byte("captured-owner"))
+	parsed, err := consensus.ParseBlockBytes(daExtractionBlockBytes(t, standard, commit, chunk))
+	require(t, err == nil, "ParseBlockBytes: %v", err)
+	f.engine.chainState.admissionMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			f.engine.chainState.admissionMu.Unlock()
+		}
+	}()
+	batch := &diagnosticBatch{}
+	done := make(chan error)
+	go func() {
+		defer close(done)
+		f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, batch)
+	}()
+	t.Cleanup(func() {
+		_ = awaitCanonicalMOError(t, done, "captured-owner cleanup")
+	})
+	awaitCanonicalMOAdmissionRLock(t, "requeueParsedBlockRows", 1)
+	boundCalls := 0
+	_, applyErr := f.engine.ClaimDARelayState(f.engine.DARelayState(), func([]byte) error { boundCalls++; return nil })
+	require(t, applyErr == nil, "ClaimDARelayState: %v", applyErr)
+	f.engine.chainState.admissionMu.Unlock()
+	locked = false
+	_ = awaitCanonicalMOError(t, done, "captured-owner requeue")
+	require(t, boundCalls == 0 && len(batch.records) == 2, "reorg binding changed within invocation: bound calls=%d diagnostics=%q", boundCalls, batch.records)
+	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, nil)
+	require(t, boundCalls == 2, "later invocation bound calls=%d, want 2", boundCalls)
+}
+
+func TestReorgDANilOwnersStillAttempt(t *testing.T) {
+	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
+	standard := f.raw(t, f.ops[0], 71, false)
+	commit := f.daCommitTx(t, f.ops[1], daRelayTestID(0xc3), 1, 72)
+	block := daExtractionBlockBytes(t, standard, commit)
+	parsed, hash := mustParseReorgBlockForTest(t, block)
+	storeErr := f.store.StoreBlock(hash, parsed.HeaderBytes, block)
+	require(t, storeErr == nil, "StoreBlock: %v", storeErr)
+	f.engine.mu.Lock()
+	f.engine.mempool = nil
+	f.engine.mu.Unlock()
+	batch := &diagnosticBatch{}
+	f.engine.requeueCanonicalDisconnectedRows([]canonicalRowDescriptor{{hash: hash}}, batch)
+	require(t, !(len(batch.records) != 2 || !strings.HasPrefix(batch.records[0], "mempool: requeue-tx: nil mempool") || !strings.HasPrefix(batch.records[1], "da relay: requeue-tx: detached DA admission is not initialized")), "missing selected-owner attempt: diagnostics=%q", batch.records)
+}
+
+func TestReorgDAGateExcludesFailedAndTerminal(t *testing.T) {
+	t.Run("failed", func(t *testing.T) {
+		fixture := newCanonicalDATestFixture(t)
+		fork := fixture.forkFrom(t)
+		old := fixture.blockWithDASets(t, daSetSpec{daID: daRelayTestID(0xc5), payloads: [][]byte{[]byte("failed-gate")}})
+		oldSummary, err := fixture.engine.ApplyBlock(old, nil)
+		require(t, err == nil, "ApplyBlock(old DA block): %v", err)
+		branchOne := fork.blockWithDASets(t)
+		parsedOne, hashOne := mustParseReorgBlockForTest(t, branchOne)
+		storeErr := fixture.store.StoreBlock(hashOne, parsedOne.HeaderBytes, branchOne)
+		require(t, storeErr == nil, "StoreBlock(branch one): %v", storeErr)
+		branchTwo := fork.blockWithDASets(t)
+		ownerCalls := 0
+		fixture.engine.reorgDAAdmission = func([]byte) error { ownerCalls++; return nil }
+		previous := writeFileAtomicFn
+		t.Cleanup(func() { writeFileAtomicFn = previous })
+		indexWrites := 0
+		writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+			if path == fixture.store.indexPath {
+				indexWrites++
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+			}
+			return previous(path, data, mode)
+		}
+		summary, err := fixture.engine.ApplyBlockWithReorg(branchTwo, nil)
+		require(t, indexWrites == 1 && errors.Is(err, os.ErrPermission) && summary == nil, "failed reorg commit seam: index writes=%d result=(%+v,%v)", indexWrites, summary, err)
+		require(t, ownerCalls == 0 && fixture.engine.chainState.TipHash == oldSummary.BlockHash, "requeue owner invoked outside ordinary NEW: calls=%d tip=%x want=%x", ownerCalls, fixture.engine.chainState.TipHash, oldSummary.BlockHash)
+	})
+	t.Run("terminal_new", func(t *testing.T) {
+		fixture := newCanonicalDATestFixture(t)
+		fork := fixture.forkFrom(t)
+		old := fixture.blockWithDASets(t, daSetSpec{daID: daRelayTestID(0xc6), payloads: [][]byte{[]byte("terminal-gate")}})
+		_, applyErr := fixture.engine.ApplyBlock(old, nil)
+		require(t, applyErr == nil, "ApplyBlock(old DA block): %v", applyErr)
+		branchOne := fork.blockWithDASets(t)
+		parsedOne, hashOne := mustParseReorgBlockForTest(t, branchOne)
+		storeErr := fixture.store.StoreBlock(hashOne, parsedOne.HeaderBytes, branchOne)
+		require(t, storeErr == nil, "StoreBlock(branch one): %v", storeErr)
+		branchTwo := fork.blockWithDASets(t)
+		ownerCalls := 0
+		fixture.engine.reorgDAAdmission = func([]byte) error { ownerCalls++; return nil }
+		previous := writeFileAtomicFn
+		t.Cleanup(func() { writeFileAtomicFn = previous })
+		injected := false
+		writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+			if path == fixture.store.indexPath && !injected {
+				injected = true
+				if err := previous(path, data, mode); err != nil {
+					return err
+				}
+				return newAtomicWriteError(atomicWriteAfterNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+			}
+			return previous(path, data, mode)
+		}
+		summary, err := fixture.engine.ApplyBlockWithReorg(branchTwo, nil)
+		require(t, injected && err != nil && summary != nil && len(summary.CanonicalAppliedBlocks) == 2, "terminal NEW result: injected=%v summary=%+v err=%v", injected, summary, err)
+		require(t, ownerCalls == 0, "requeue owner invoked outside ordinary NEW: terminal calls=%d", ownerCalls)
+	})
+}
+
+func TestReorgDAOwnerRunsOutsideTransitionGuard(t *testing.T) {
+	fixture := newCanonicalDATestFixture(t)
+	fork := fixture.forkFrom(t)
+	old := fixture.blockWithDASets(t, daSetSpec{daID: daRelayTestID(0xc4), payloads: [][]byte{[]byte("lock-boundary")}})
+	_, applyErr := fixture.engine.ApplyBlock(old, nil)
+	require(t, applyErr == nil, "ApplyBlock(old DA block): %v", applyErr)
+	branchOne := fork.blockWithDASets(t)
+	parsedOne, hashOne := mustParseReorgBlockForTest(t, branchOne)
+	storeErr := fixture.store.StoreBlock(hashOne, parsedOne.HeaderBytes, branchOne)
+	require(t, storeErr == nil, "StoreBlock(branch one): %v", storeErr)
+	branchTwo := fork.blockWithDASets(t)
+	ownerCalls := 0
+	var workers []chan struct{}
+	t.Cleanup(func() {
+		for _, done := range workers {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("reorg owner lock boundary: progress cleanup did not finish")
+			}
+		}
+	})
+	fixture.engine.reorgDAAdmission = func([]byte) error {
+		ownerCalls++
+		if fixture.engine.mutationMu.TryLock() {
+			fixture.engine.mutationMu.Unlock()
+			t.Fatal("canonical mutation interleaved: reorg released outer serialization before owner return")
+		}
+		progress := make(chan bool, 1)
+		done := make(chan struct{})
+		workers = append(workers, done)
+		go func() {
+			defer close(done)
+			fixture.engine.mu.Lock()
+			_ = fixture.engine.daRelayClaimed
+			fixture.engine.mu.Unlock()
+			if !fixture.engine.chainState.admissionMu.RLockUnlessTerminal() {
+				progress <- false
+				return
+			}
+			fixture.engine.chainState.admissionMu.RUnlock()
+			progress <- true
+		}()
+		select {
+		case ok := <-progress:
+			require(t, ok, "reorg owner lock boundary: admission guard unavailable")
+		case <-time.After(time.Second):
+			t.Fatal("reorg owner lock boundary: SyncEngine mutex or transition guard held")
+		}
+		return nil
+	}
+	if summary, err := fixture.engine.ApplyBlockWithReorg(branchTwo, nil); err != nil || summary == nil || len(summary.CanonicalAppliedBlocks) != 2 {
+		t.Fatalf("ApplyBlockWithReorg: summary=%+v err=%v", summary, err)
+	}
+	require(t, ownerCalls == 2, "reorg owner lock boundary: calls=%d, want commit and chunk", ownerCalls)
 }
 
 func canonicalTxIDsForNodeTest(raw []byte) ([32]byte, [32]byte, error) {

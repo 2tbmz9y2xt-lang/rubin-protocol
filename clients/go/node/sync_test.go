@@ -1690,18 +1690,19 @@ func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
 func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
+	admit := func([]byte) error { return nil }
 	if got := f.engine.DARelayState(); got != want {
 		t.Fatalf("getter=%p, want %p", got, want)
 	}
-	if got, err := f.engine.ClaimDARelayState(); err != nil || got != want {
+	if got, err := f.engine.ClaimDARelayState(want, admit); err != nil || got != want {
 		t.Fatalf("first claim state=%p err=%v, want %p nil", got, err, want)
 	}
 	f.engine.SetMempool(f.mempool)
-	if got, err := f.engine.ClaimDARelayState(); got != nil || err == nil || err.Error() != "sync engine DA relay state is already claimed" {
+	if got, err := f.engine.ClaimDARelayState(nil, nil); got != nil || err == nil || err.Error() != "sync engine DA relay state is already claimed" {
 		t.Fatalf("second claim state=%p err=%v", got, err)
 	}
 	for _, engine := range []*SyncEngine{nil, {}} {
-		if _, err := engine.ClaimDARelayState(); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
+		if _, err := engine.ClaimDARelayState(nil, nil); err == nil || err.Error() != "sync engine DA relay state is not initialized" {
 			t.Fatalf("uninitialized claim: %v", err)
 		}
 	}
@@ -1713,34 +1714,92 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 	type result struct {
 		state *DARelayState
 		err   error
+		owner int
 	}
 	start := make(chan struct{})
 	results := make(chan result, 2)
-	for range 2 {
-		go func() {
+	sentinels := []error{errors.New("claim callback zero"), errors.New("claim callback one")}
+	calls := []int{0, 0}
+	for owner := range 2 {
+		go func(owner int) {
 			<-start
-			state, err := f.engine.ClaimDARelayState()
-			results <- result{state, err}
-		}()
+			state, err := f.engine.ClaimDARelayState(want, func([]byte) error { calls[owner]++; return sentinels[owner] })
+			results <- result{state, err, owner}
+		}(owner)
 	}
 	close(start)
-	winners := 0
+	winners, winningOwner := 0, -1
 	for range 2 {
-		result := <-results
-		if result.err == nil {
-			if result.state != want {
+		var got result
+		select {
+		case got = <-results:
+		case <-time.After(5 * time.Second):
+			t.Fatal("reorg claim binding mismatch: concurrent claim did not return within 5s")
+		}
+		if got.err == nil {
+			if got.state != want {
 				t.Fatal("wrong winning state")
 			}
 			winners++
+			winningOwner = got.owner
 			continue
 		}
-		if result.state != nil || result.err.Error() != "sync engine DA relay state is already claimed" {
+		if got.state != nil || got.err.Error() != "sync engine DA relay state is already claimed" {
 			t.Fatal("wrong losing claim")
 		}
 	}
 	if winners != 1 {
 		t.Fatalf("claim winners=%d, want one", winners)
 	}
+	if calls[0] != 0 || calls[1] != 0 {
+		t.Fatalf("reorg claim binding mismatch: claims invoked callbacks: %v", calls)
+	}
+	if err := f.engine.reorgDAAdmission(nil); err != sentinels[winningOwner] || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
+		t.Fatalf("reorg claim binding mismatch: published callback owner=%d err=%v calls=%v", winningOwner, err, calls)
+	}
+}
+
+func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
+	callback := func([]byte) error { return nil }
+	uninitialized := &SyncEngine{daRelayClaimed: true, reorgDAAdmission: callback}
+	for _, engine := range []*SyncEngine{nil, {}, uninitialized} {
+		got, err := engine.ClaimDARelayState(nil, nil)
+		require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state is not initialized", "reorg claim binding mismatch: B1 claim=(%p,%v)", got, err)
+	}
+	require(t, uninitialized.daRelay == nil && uninitialized.daRelayClaimed && reflect.ValueOf(uninitialized.reorgDAAdmission).Pointer() == reflect.ValueOf(callback).Pointer(), "reorg claim binding mismatch: B1 mutated fields")
+	f := newPendingOutpointSyncFixture(t)
+	want := f.engine.DARelayState()
+	winnerCalls := 0
+	winner := func(raw []byte) error {
+		winnerCalls++
+		require(t, bytes.Equal(raw, []byte{0xa5}), "winner raw=%x", raw)
+		return nil
+	}
+	for _, row := range []struct {
+		name     string
+		expected *DARelayState
+		admit    func([]byte) error
+		want     string
+	}{
+		{name: "mismatched", expected: &DARelayState{}, admit: winner, want: "sync engine DA relay state binding mismatch"},
+		{name: "nil expected", admit: winner, want: "sync engine DA relay state binding mismatch"},
+		{name: "nil callback", expected: want, want: "sync engine detached DA admission is not initialized"},
+		{name: "nil expected and callback", want: "sync engine DA relay state binding mismatch"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, err := f.engine.ClaimDARelayState(row.expected, row.admit)
+			require(t, got == nil && err != nil && err.Error() == row.want, "reorg claim binding mismatch: claim=(%p,%v), want nil/%q", got, err, row.want)
+			require(t, !f.engine.daRelayClaimed && f.engine.reorgDAAdmission == nil && winnerCalls == 0, "reorg claim binding mismatch: refused claim mutated fields: claimed=%v callback=%v calls=%d", f.engine.daRelayClaimed, f.engine.reorgDAAdmission != nil, winnerCalls)
+		})
+	}
+	got, err := f.engine.ClaimDARelayState(want, winner)
+	require(t, got == want && err == nil, "reorg claim binding mismatch: B5 claim=(%p,%v), want %p/nil", got, err, want)
+	require(t, winnerCalls == 0 && f.engine.daRelayClaimed && f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: claimed=%v callback=%v calls=%d", f.engine.daRelayClaimed, f.engine.reorgDAAdmission != nil, winnerCalls)
+	got, err = f.engine.ClaimDARelayState(nil, nil)
+	require(t, got == nil && err != nil && err.Error() == "sync engine DA relay state is already claimed", "reorg claim binding mismatch: B2 claim=(%p,%v)", got, err)
+	require(t, f.engine.reorgDAAdmission != nil, "reorg claim binding mismatch: B2 replaced the winning callback")
+	f.engine.reorgDAAdmission([]byte{0xa5})
+	require(t, winnerCalls == 1, "reorg claim binding mismatch: published callback calls=%d, want 1", winnerCalls)
 }
 
 // poolFingerprint is the deep observable image of one candidate pool and its

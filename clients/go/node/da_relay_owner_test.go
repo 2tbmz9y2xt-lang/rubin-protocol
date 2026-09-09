@@ -3200,7 +3200,7 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 // error return of the shared parsed-candidate path either leaves a disposition
 // its own branch selected or is validateDACandidate's fail-closed nil-hold
 // sentinel, which AdmitDA never reaches, and proves the whole surface still has
-// exactly its live census: remote and local production callers, with no detached-reorg caller.
+// exactly its live census: remote, local and detached-reorg production callers.
 func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	declaredFunctions := func(path string) map[string]*ast.FuncDecl {
 		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
@@ -3361,10 +3361,90 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	if !declared["RelayAdmissionDisposition"] || !declared["RelayAdmissionUnavailable"] {
 		t.Fatalf("disposition declarations were not collected: %v", declared)
 	}
-	// OWNED CALLERS: remote and local ingress are the only AdmitDA selectors over every
-	// non-test Go source; only the local bridge constructs LOCAL provenance.
-	refs := productionReferenceCensus(t, "AdmitDA", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
-	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "handleRelayDATx"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA"}, "DetachedReorgDAProvenance": nil}), "production references=%v", refs)
+	// OWNED CALLERS: remote, local and detached-reorg ingress are the only
+	// AdmitDA selectors over every non-test Go source.
+	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
+	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
+	newService, detached := declaredFunctions("p2p/service.go")["NewService"], declaredFunctions("p2p/da_relay_ingest.go")["admitDetachedReorgDA"]
+	require(t, newService != nil && detached != nil, "detached admission binding functions missing")
+	storedRelays, ownerCalls := 0, 0
+	writes, identifiers := map[string]int{}, map[ast.Expr]string{}
+	serviceAt := token.NoPos
+	var claimCall *ast.CallExpr
+	ast.Inspect(newService.Body, func(node ast.Node) bool {
+		switch node.(type) {
+		case *ast.DeferStmt, *ast.GoStmt:
+			t.Fatal("reorg claim binding mismatch: deferred or concurrent initialization")
+		}
+		if assign, ok := node.(*ast.AssignStmt); ok {
+			for _, left := range assign.Lhs {
+				name := daNonReplaySelector(left)
+				writes[name]++
+				if !slices.Contains([]string{"service", "expectedRelay"}, name) {
+					continue
+				}
+				require(t, assign.Tok == token.DEFINE && len(assign.Lhs) == 1 && len(assign.Rhs) == 1, "reorg claim binding mismatch: assignment to %s", name)
+				if name == "expectedRelay" {
+					getter, ok := ast.Unparen(assign.Rhs[0]).(*ast.CallExpr)
+					require(t, ok && calleeName(getter) == "DARelayState" && len(getter.Args) == 0, "reorg claim binding mismatch: expected relay getter")
+					continue
+				}
+				serviceAt = assign.Pos()
+				address, ok := ast.Unparen(assign.Rhs[0]).(*ast.UnaryExpr)
+				require(t, ok && address.Op == token.AND, "reorg claim binding mismatch: service construction")
+				literal, ok := ast.Unparen(address.X).(*ast.CompositeLit)
+				require(t, ok, "reorg claim binding mismatch: service literal")
+				identifiers[literal.Type] = "Service"
+				for _, element := range literal.Elts {
+					field, ok := element.(*ast.KeyValueExpr)
+					require(t, ok, "reorg claim binding mismatch: unkeyed service field")
+					if daNonReplaySelector(field.Key) == "daRelay" {
+						identifiers[field.Value] = "expectedRelay"
+						storedRelays++
+					}
+				}
+			}
+		}
+		if call, ok := node.(*ast.CallExpr); ok && calleeName(call) == "ClaimDARelayState" {
+			claimCall = call
+			require(t, len(call.Args) == 2, "NewService detached claim argument count=%d", len(call.Args))
+			second, secondOK := call.Args[1].(*ast.SelectorExpr)
+			require(t, secondOK && second.Sel.Name == "admitDetachedReorgDA", "reorg claim binding mismatch: callback is %T", call.Args[1])
+			identifiers[call.Args[0]], identifiers[second.X] = "expectedRelay", "service"
+		}
+		return true
+	})
+	ast.Inspect(detached.Body, func(node ast.Node) bool {
+		if call, ok := node.(*ast.CallExpr); ok && calleeName(call) == "AdmitDA" {
+			ownerCalls++
+			require(t, len(call.Args) == 2, "detached admission owner argument count=%d", len(call.Args))
+			provenance, provenanceOK := call.Args[1].(*ast.CallExpr)
+			require(t, provenanceOK && calleeName(provenance) == "DetachedReorgDAProvenance", "detached admission owner arguments=%#v", call.Args)
+			identifiers[call.Args[0]] = "txBytes"
+		}
+		return true
+	})
+	tail := newService.Body.List
+	require(t, len(tail) >= 3 && tail[len(tail)-3].Pos() == serviceAt, "reorg claim binding mismatch: construction is not immediately before claim")
+	require(t, writes["service"] == 1 && writes["expectedRelay"] == 1 && writes["service.daRelay"] == 0, "reorg claim binding mismatch: writes=%v", writes)
+	claimIf, ifOK := tail[len(tail)-2].(*ast.IfStmt)
+	require(t, ifOK && claimIf.Else == nil && len(claimIf.Body.List) == 1, "reorg claim binding mismatch: claim statement shape")
+	init, initOK := claimIf.Init.(*ast.AssignStmt)
+	require(t, initOK && init.Tok == token.DEFINE && len(init.Lhs) == 2 && len(init.Rhs) == 1 && init.Rhs[0] == claimCall, "reorg claim binding mismatch: claim initializer")
+	condition, conditionOK := claimIf.Cond.(*ast.BinaryExpr)
+	require(t, conditionOK && condition.Op == token.NEQ, "reorg claim binding mismatch: claim condition")
+	identifiers[init.Lhs[0]], identifiers[init.Lhs[1]], identifiers[condition.X], identifiers[condition.Y] = "_", "err", "err", "nil"
+	for i, statement := range []ast.Stmt{claimIf.Body.List[0], tail[len(tail)-1]} {
+		returned, ok := statement.(*ast.ReturnStmt)
+		require(t, ok && len(returned.Results) == 2, "reorg claim binding mismatch: return statement shape %d", i)
+		want := [2][2]string{{"nil", "err"}, {"service", "nil"}}[i]
+		identifiers[returned.Results[0]], identifiers[returned.Results[1]] = want[0], want[1]
+	}
+	for expression, want := range identifiers {
+		name, ok := expression.(*ast.Ident)
+		require(t, ok && name.Name == want, "reorg claim binding mismatch: expected identifier %s, got %T", want, expression)
+	}
+	require(t, storedRelays == 1 && ownerCalls == 1, "detached admission binding stored_relays=%d owner_calls=%d", storedRelays, ownerCalls)
 	bindings, directBindings := map[string][]string{}, map[string][]string{}
 	serverStarted := false
 	run := declaredFunctions("../cmd/rubin-node/main.go")["run"]

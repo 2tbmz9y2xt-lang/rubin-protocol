@@ -1,12 +1,15 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,12 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
 )
+
+type canonicalRelayDAProvider []node.CompleteDASetCandidate
+
+func (p canonicalRelayDAProvider) CompleteDASetCandidates(uint64) []node.CompleteDASetCandidate {
+	return p
+}
 
 type canonicalRelayFixture struct {
 	SchemaVersion  int                          `json:"schema_version"`
@@ -384,4 +393,165 @@ func TestCanonicalBlockRelayOwningIngress(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
+	source := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	sink := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	signer := mustP2PMLDSA87Keypair(t)
+	mineAddress := consensus.P2PKCovenantDataForPubkey(signer.PubkeyBytes())
+	timestamp := uint64(1_778_000_000)
+	minerConfig := func(provider node.CompleteDASetProvider, offset uint64) node.MinerConfig {
+		cfg := node.DefaultMinerConfig()
+		cfg.MineAddress = append([]byte(nil), mineAddress...)
+		cfg.CompleteDASetProvider = provider
+		cfg.TimestampSource = func() uint64 { timestamp += offset; return timestamp }
+		return cfg
+	}
+	commonMiner, err := node.NewMiner(source.chainState, source.blockStore, source.syncEngine, minerConfig(nil, 1))
+	must(t, err, "NewMiner(common)")
+	spendable := make([]consensus.Outpoint, 0, 2)
+	for height := uint64(1); height <= consensus.COINBASE_MATURITY+1; height++ {
+		mined, err := commonMiner.MineOne(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("MineOne(common height %d): %v", height, err)
+		}
+		block, err := source.blockStore.GetBlockByHash(mined.Hash)
+		must(t, err, "GetBlockByHash(common)")
+		parsed, err := consensus.ParseBlockBytes(block)
+		must(t, err, "ParseBlockBytes(common)")
+		if height <= 2 {
+			coinbase, err := consensus.MarshalTx(parsed.Txs[0])
+			must(t, err, "MarshalTx(common coinbase)")
+			_, txid, _, _, err := consensus.ParseTx(coinbase)
+			must(t, err, "ParseTx(common coinbase)")
+			spendable = append(spendable, consensus.Outpoint{Txid: txid, Vout: 0})
+		}
+		if summary, err := sink.syncEngine.ApplyBlock(block, nil); err != nil || summary == nil || summary.BlockHash != mined.Hash {
+			t.Fatalf("apply common height %d: summary=%+v err=%v", height, summary, err)
+		}
+	}
+	if source.chainState.Height != sink.chainState.Height || source.chainState.TipHash != sink.chainState.TipHash || len(spendable) != 2 {
+		t.Fatalf("common history mismatch: source=(%d,%x) sink=(%d,%x) spendable=%d", source.chainState.Height, source.chainState.TipHash, sink.chainState.Height, sink.chainState.TipHash, len(spendable))
+	}
+	daID, payload := [32]byte{0xd4}, []byte("canonical detached reorg")
+	commitment, chunkHash := sha3.Sum256(payload), sha3.Sum256(payload)
+	commit := &consensus.Tx{
+		Version: 1, TxKind: 0x01, TxNonce: 1,
+		Inputs:       []consensus.TxInput{{PrevTxid: spendable[0].Txid, PrevVout: spendable[0].Vout}},
+		Outputs:      []consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: commitment[:]}},
+		DaCommitCore: &consensus.DaCommitCore{DaID: daID, ChunkCount: 1, BatchNumber: 1},
+	}
+	chunk := &consensus.Tx{
+		Version: 1, TxKind: 0x02, TxNonce: 2,
+		Inputs:      []consensus.TxInput{{PrevTxid: spendable[1].Txid, PrevVout: spendable[1].Vout}},
+		DaChunkCore: &consensus.DaChunkCore{DaID: daID, ChunkIndex: 0, ChunkHash: chunkHash},
+		DaPayload:   append([]byte(nil), payload...),
+	}
+	for _, tx := range []*consensus.Tx{commit, chunk} {
+		if err := consensus.SignTransaction(tx, sink.chainState.Utxos, node.DevnetGenesisChainID(), signer); err != nil {
+			t.Fatalf("SignTransaction(kind=0x%02x): %v", tx.TxKind, err)
+		}
+	}
+	commitRaw, err := consensus.MarshalTx(commit)
+	if err != nil {
+		t.Fatalf("MarshalTx(commit): %v", err)
+	}
+	chunkRaw, err := consensus.MarshalTx(chunk)
+	if err != nil {
+		t.Fatalf("MarshalTx(chunk): %v", err)
+	}
+	provider := canonicalRelayDAProvider{{
+		DAID: daID, PayloadBytes: uint64(len(payload)), CommitTx: commitRaw,
+		Chunks: []node.CompleteDASetChunkCandidate{{Index: 0, Tx: chunkRaw}},
+	}}
+	oldMiner, err := node.NewMiner(sink.chainState, sink.blockStore, sink.syncEngine, minerConfig(provider, 1))
+	if err != nil {
+		t.Fatalf("NewMiner(old): %v", err)
+	}
+	old, err := oldMiner.MineOne(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("MineOne(old DA block): %v", err)
+	}
+	oldBlock, err := sink.blockStore.GetBlockByHash(old.Hash)
+	if err != nil {
+		t.Fatalf("GetBlockByHash(old DA block): %v", err)
+	}
+	parsedOld, err := consensus.ParseBlockBytes(oldBlock)
+	if err != nil || len(parsedOld.Txs) != 3 {
+		t.Fatalf("old DA block parse: txs=%d err=%v", len(parsedOld.Txs), err)
+	}
+	for index, raw := range [][]byte{commitRaw, chunkRaw} {
+		_, want, _, _, err := consensus.ParseTx(raw)
+		if err != nil {
+			t.Fatalf("ParseTx(expected %d): %v", index, err)
+		}
+		gotRaw, err := consensus.MarshalTx(parsedOld.Txs[index+1])
+		if err != nil {
+			t.Fatalf("MarshalTx(old row %d): %v", index, err)
+		}
+		_, got, _, _, err := consensus.ParseTx(gotRaw)
+		if err != nil || got != want {
+			t.Fatalf("old block DA txid[%d]=%x err=%v, want %x", index, got, err, want)
+		}
+	}
+	branchMiner, err := node.NewMiner(source.chainState, source.blockStore, source.syncEngine, minerConfig(nil, 100))
+	if err != nil {
+		t.Fatalf("NewMiner(branch): %v", err)
+	}
+	branch := make([][]byte, 0, 2)
+	var parentHash [32]byte
+	var parentHeight uint64
+	for i := 0; i < 2; i++ {
+		mined, err := branchMiner.MineOne(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("MineOne(branch %d): %v", i, err)
+		}
+		block, err := source.blockStore.GetBlockByHash(mined.Hash)
+		if err != nil {
+			t.Fatalf("GetBlockByHash(branch %d): %v", i, err)
+		}
+		if i == 0 {
+			parentHash, parentHeight = mined.Hash, mined.Height
+		}
+		branch = append(branch, block)
+	}
+	schedulerCalls := 0
+	sink.service.cfg.Now = func() time.Time {
+		pcs := make([]uintptr, 16)
+		for frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)]); ; {
+			frame, more := frames.Next()
+			if strings.Contains(frame.Function, ".scheduleDAPrefetch") {
+				schedulerCalls++
+				break
+			}
+			if !more {
+				break
+			}
+		}
+		return time.Unix(int64(timestamp+1000), 0)
+	}
+	origin := testPeerForService(sink.service, "detached-reorg-origin", 1)
+	if summary, err := origin.processRelayedBlock(branch[1]); err != nil || summary != nil || sink.service.orphans.Len() != 1 {
+		t.Fatalf("retain longer-branch descendant: summary=%+v err=%v orphans=%d", summary, err, sink.service.orphans.Len())
+	}
+	summary, err := origin.processRelayedBlock(branch[0])
+	parentApplied := bytes.Compare(parentHash[:], old.Hash[:]) < 0
+	if err != nil || summary == nil || summary.BlockHash != parentHash || summary.BlockHeight != parentHeight || parentApplied && (len(summary.CanonicalAppliedBlocks) != 1 || summary.CanonicalAppliedBlocks[0].Hash != parentHash || len(summary.CanonicalAppliedBlocks[0].CompleteDAIDs) != 0) || !parentApplied && len(summary.CanonicalAppliedBlocks) != 0 || sink.chainState.Height != source.chainState.Height || sink.chainState.TipHash != source.chainState.TipHash || sink.service.orphans.Len() != 0 {
+		t.Fatalf("winning public reorg: summary=%+v err=%v sink=(%d,%x) source=(%d,%x) orphans=%d", summary, err, sink.chainState.Height, sink.chainState.TipHash, source.chainState.Height, source.chainState.TipHash, sink.service.orphans.Len())
+	}
+	if schedulerCalls != 1 {
+		t.Fatalf("detached reorg effect missing: scheduler calls=%d, want one retained member", schedulerCalls)
+	}
+	if sink.mempool.Len() != 0 || sink.service.txSeen.Len() != 0 {
+		t.Fatalf("detached rows reached standard state: mempool=%d seen=%d", sink.mempool.Len(), sink.service.txSeen.Len())
+	}
+	result, err := sink.service.daRelay.AdmitDA(commitRaw, node.DetachedReorgDAProvenance())
+	if err != nil || result.Disposition != node.DAAdmissionDuplicate {
+		t.Fatalf("retained detached commit probe=(%+v,%v)", result, err)
+	}
+	result, err = sink.service.daRelay.AdmitDA(chunkRaw, node.DetachedReorgDAProvenance())
+	if result != (node.DAAdmissionResult{}) || err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" {
+		t.Fatalf("current would-complete probe=(%+v,%v)", result, err)
+	}
 }

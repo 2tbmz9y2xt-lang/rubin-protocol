@@ -141,14 +141,11 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		return nil, err
 	}
 	cfg = normalizeServiceConfig(cfg)
-	daRelay, err := cfg.SyncEngine.ClaimDARelayState()
-	if err != nil {
-		return nil, err
-	}
+	expectedRelay := cfg.SyncEngine.DARelayState()
 	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
 	addrMgr := newAddrManager(cfg.Now)
 	seedAddrManagerFromBootstrap(addrMgr, outboundAddrs)
-	return &Service{
+	service := &Service{
 		cfg:            cfg,
 		peers:          make(map[string]*peer),
 		peerQuotaLocks: make(map[string]*peerQuotaLock),
@@ -160,8 +157,12 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		blockSeen:      newBoundedHashSet(defaultBlockSeenCapacity),
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 		orphans:        newOrphanPool(500),
-		daRelay:        daRelay,
-	}, nil
+		daRelay:        expectedRelay,
+	}
+	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
+		return nil, err
+	}
+	return service, nil
 }
 
 func validateServiceConfig(cfg ServiceConfig) error {
