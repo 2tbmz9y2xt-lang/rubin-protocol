@@ -318,8 +318,8 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 // announces it. It takes one Service call lease before parsing, admission,
 // seen-set mutation or inventory send: once Close has published the non-OPEN
 // state it returns exactly "service already closed" with zero effects, and a
-// call that won the lease first finishes while Close waits. A local DA
-// transaction stays in the standard relay pool exactly as before; no retained
+// call that won the lease first finishes while Close waits. The canonical
+// standard pool now refuses every DA kind, so local DA never lands; no retained
 // DA member is staged from here.
 func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {

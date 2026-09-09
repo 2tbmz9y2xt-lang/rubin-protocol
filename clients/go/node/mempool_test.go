@@ -6294,7 +6294,7 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 // production message fails these rows rather than following them.
 const daGuardRejectMessage = "standard mempool accepts only tx_kind=0x00"
 
-// daGuardCandidate is one signed DA candidate together with the kind it carries.
+// daGuardCandidate is one signed DA candidate: its row label and its raw bytes.
 type daGuardCandidate struct {
 	name string
 	raw  []byte
@@ -6349,8 +6349,9 @@ func daGuardContext(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext 
 
 // daGuardImage is the same-instance admission image a refusal must leave
 // untouched: the canonical M/O fingerprint, plus the four things that
-// fingerprint does not carry — index and owner nilness, lowWaterBytes, the
-// resident-eviction counter, and the caller's own raw candidate bytes. It is
+// fingerprint does not carry — index nilness, lowWaterBytes, the
+// resident-eviction counter, and the caller's own raw candidate bytes. Owner
+// nilness is restated below although the fingerprint already carries it. It is
 // not a whole-instance no-change promise: m.sigCache is excluded because the
 // earlier signature validation inserts a positive entry before the guard
 // runs, which the state contract permits.
@@ -6629,8 +6630,10 @@ func TestMempoolDAKindGuardRelayResult(t *testing.T) {
 
 // TestMempoolDAKindGuardPreservesEarlierErrors is R1-R4: every terminal,
 // canonical, consensus and DA-policy refusal that already owned a DA candidate
-// still owns it, with its exact baseline kind, message and disposition. Each
-// row varies exactly one dimension of an otherwise valid signed DA candidate.
+// still owns it, with its exact baseline kind and disposition and a message
+// pinned by containment, because the DA-policy texts carry trailing detail.
+// Each row varies exactly one dimension of an otherwise valid signed DA
+// candidate.
 func TestMempoolDAKindGuardPreservesEarlierErrors(t *testing.T) {
 	rows := []struct {
 		name       string
@@ -6718,11 +6721,16 @@ func TestMempoolDAKindGuardPreservesEarlierErrors(t *testing.T) {
 			mp, raw := row.build(t)
 			got := mp.AddRemoteTxForRelay(raw, nil)
 			var admitErr *TxAdmitError
-			if !errors.As(got.Err, &admitErr) || admitErr.Kind != row.wantKind || !strings.Contains(admitErr.Message, row.wantMsg) {
-				t.Fatalf("err=%v, want %s carrying %q", got.Err, row.wantKind, row.wantMsg)
+			if !errors.As(got.Err, &admitErr) {
+				t.Fatalf("err=%v (%T), want a *TxAdmitError", got.Err, got.Err)
 			}
+			// Runs before the generic check below so a preemption reports
+			// itself instead of being masked by the message mismatch.
 			if admitErr.Message == daGuardRejectMessage {
 				t.Fatalf("the kind guard preempted the earlier %s refusal", row.name)
+			}
+			if admitErr.Kind != row.wantKind || !strings.Contains(admitErr.Message, row.wantMsg) {
+				t.Fatalf("err=%v, want %s carrying %q", got.Err, row.wantKind, row.wantMsg)
 			}
 			if got.Disposition != row.wantDisp || got.HasAdmissionContext || got.AdmissionContext != (PendingOutpointAdmissionContext{}) {
 				t.Fatalf("disposition=%v hasContext=%v, want %v with no published context", got.Disposition, got.HasAdmissionContext, row.wantDisp)

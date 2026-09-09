@@ -369,9 +369,10 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 
 // rejectNonStandardKindLocked is the standard-candidate kind slot of
 // RUBIN_MEMPOOL_POLICY.md sections 6.1 and 6.2. It returns nil exactly for kind
-// 0x00; every other kind gets the identity slot's resident-duplicate error when
-// one applies, and otherwise the standard-domain rejection, tagged
-// STABLE_TERMINAL_REJECT because that verdict reads only the candidate bytes.
+// 0x00; every other kind gets the identity slot's txid-then-wtxid duplicate
+// error when one applies, its third arm — the zero-txid INTERNAL refusal —
+// being unreachable for a checked candidate, and otherwise the standard-domain
+// rejection, tagged STABLE_TERMINAL_REJECT: it reads only the candidate bytes.
 //
 // It writes nothing and takes no lock: two index reads and one error, so a
 // candidate it refuses is left with no token, no sequence and no index row.
