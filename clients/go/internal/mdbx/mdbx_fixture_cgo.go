@@ -454,7 +454,7 @@ func fixtureUpdateWrongThread(store *Store) (updateNativeOutcome, func() error, 
 	if err != nil {
 		return updateNativeConsumed(CommitTruthOld, false, err, nil), nil, err
 	}
-	return updateNativeCommit(store.env, store.dbis, nil, nil, txn), release, nil
+	return updateNativeCommit(store.env, store.dbis, nil, nil, nil, txn), release, nil
 }
 
 func fixtureUpdateAbortWrongThread(store *Store) (updateNativeOutcome, func() error, error) {
@@ -483,7 +483,7 @@ func fixtureUpdateResultTrue(store *Store, plan []ownedMutation) updateNativeOut
 	if rc := int(C.mdbx_txn_break(begun.txn)); rc != codeSuccess {
 		return updateNativeAbort(begun.txn, nativeError(operationUpdate, rc))
 	}
-	return updateNativeCommit(store.env, store.dbis, plan, old.txn, begun.txn)
+	return updateNativeCommit(store.env, store.dbis, plan, nil, old.txn, begun.txn)
 }
 
 func fixtureCleanNew(outcome updateNativeOutcome) bool {
@@ -491,7 +491,7 @@ func fixtureCleanNew(outcome updateNativeOutcome) bool {
 }
 
 func fixtureCommittedUpdate(store *Store, plan []ownedMutation, old *C.MDBX_txn) (updateNativeOutcome, error) {
-	outcome := updateNativeExecute(store.env, store.dbis, plan, old)
+	outcome := updateNativeExecute(store.env, store.dbis, plan, nil, old)
 	if !fixtureCleanNew(outcome) {
 		return outcome, updateNativeInvariant("fixed post-commit fixture did not finish one write")
 	}
@@ -510,7 +510,7 @@ func fixtureUpdatePostCommitENOSPC(store *Store, plan []ownedMutation) (updateNa
 		_ = C.mdbx_txn_abort(old.txn)
 		return committed, err
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
 	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -531,7 +531,7 @@ func fixtureUpdatePostCommitENOSPCUnreadable(store *Store, plan []ownedMutation)
 	}
 	dbis := store.dbis
 	dbis[plan[0].dbi.Rank] = ^C.MDBX_dbi(0)
-	outcome := updateNativeReadback(store.env, dbis, plan, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
 	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -568,7 +568,7 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 		_ = C.mdbx_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil), nativeError(operationUpdate, rc)
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
 	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -604,7 +604,7 @@ func fixtureUpdatePostCommitENOSPCMissing(store *Store, plan []ownedMutation) (u
 		_ = C.mdbx_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil), nativeError(operationUpdate, rc)
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
 	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}

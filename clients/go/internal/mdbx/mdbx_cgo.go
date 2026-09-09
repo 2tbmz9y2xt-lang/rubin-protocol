@@ -475,7 +475,7 @@ const (
 	// MaxPrefixPageRows bounds copied rows and permits one native lookahead.
 	MaxPrefixPageRows uint32 = 1_440
 	// MaxPrefixPageBytes bounds the sum of copied key and value bytes.
-	MaxPrefixPageBytes uint64 = 154_611_151
+	MaxPrefixPageBytes uint64 = MaxOperationDataBytes
 )
 
 // PrefixPageStop identifies the exact reason a successful page ended.
@@ -561,6 +561,13 @@ type Mutation struct {
 	RefKey        []byte
 }
 
+// ConsultedRow names one exact-key row the callback read and requires unchanged through commit; it carries no value
+// and no expected bytes (RUBIN_MEMPOOL_POLICY.md Section 6.4.1).
+type ConsultedRow struct {
+	DBI DBI
+	Key []byte
+}
+
 type Batch struct {
 	Mutations []Mutation
 	// Reverse selects the reverse-block admission envelope. True refuses a rank-1 literal, a rank-5 literal and a rank-5
@@ -571,6 +578,17 @@ type Batch struct {
 	// count and literal bytes keep maxUpdateMutations and maxUpdateLiterals in both modes. False, the zero value, keeps the
 	// default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
+	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed readback,
+	// with no delete and no put. Admitted after every mutation: exact SchemaV1 DBI/key shape, strict (DBI.Rank, key) increase and
+	// the 16,384-row count are decided per row in declared order, then disjointness from every target and OLD_VALUE_REF source
+	// over that set, so an over-cap overlapping set refuses as Capacity; at most MaxOperationDataBytes present-value bytes,
+	// captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and, when the
+	// OLD abort succeeds, an open reusable Store; an abort failure keeps the existing terminal or retained lifecycle, and a
+	// native capture read failure keeps its error and the existing infrastructure lifecycle. A row differing from that OLD image
+	// at the write snapshot or the final image returns EngineStateMismatch, truth OLD and no reusable Store. A possible-crossed
+	// readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original CommitError. Nil and empty
+	// behave alike; the caller leaves rows and key bytes unchanged until Update returns.
+	Consulted []ConsultedRow
 }
 
 const (
@@ -581,6 +599,7 @@ const (
 	maxUpdateKeyBytes  uint64 = 137_676_154
 	maxUpdateLiterals  uint64 = 155_659_727
 	maxReverseKeyBytes uint64 = 151_359_076 // 1545454*44 + 414634*121 + 414634*77 + 16384*77 (conservative: reverse auxiliary keys are at most 33 bytes)
+	maxUpdateConsulted uint64 = 16_384
 )
 
 type ownedMutation struct {
@@ -626,10 +645,15 @@ func updateClone(bytes []byte) []byte {
 }
 
 func updateOrdered(previous, next Mutation) bool {
-	if previous.DBI.Rank != next.DBI.Rank {
-		return previous.DBI.Rank < next.DBI.Rank
+	return updateKeyOrdered(previous.DBI.Rank, previous.Key, next.DBI.Rank, next.Key)
+}
+
+// updateKeyOrdered reports (previousRank, previousKey) strictly before (rank, key): by rank, then by bytes.Compare.
+func updateKeyOrdered(previousRank uint8, previousKey []byte, rank uint8, key []byte) bool {
+	if previousRank != rank {
+		return previousRank < rank
 	}
-	return bytes.Compare(previous.Key, next.Key) < 0
+	return bytes.Compare(previousKey, key) < 0
 }
 
 func updateMutableMeta(key []byte, absent bool) bool {
@@ -828,6 +852,75 @@ func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
 	owned := make([]ownedMutation, len(batch.Mutations))
 	for i, mutation := range batch.Mutations {
 		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, updateClone(mutation.RefKey)}
+	}
+	return owned, nil
+}
+
+// ownedConsulted is one admitted consulted row: its validated DBI, a key cloned after complete Go admission and the
+// OLD image captured by updateNativeConsultedImages, whose present bytes stay borrowed from the live OLD transaction.
+type ownedConsulted struct {
+	dbi   DBI
+	key   []byte
+	image updateImage
+}
+
+// updateScanConsulted admits one row: exact DBI/key shape and strict order before its charge against maxUpdateConsulted.
+func updateScanConsulted(first bool, previous, row ConsultedRow, count *uint64) error {
+	if ValidateDBI(row.DBI) != nil || !validKey(row.DBI.Rank, row.Key) {
+		return updateInvalidBatch()
+	}
+	if !first && !updateKeyOrdered(previous.DBI.Rank, previous.Key, row.DBI.Rank, row.Key) {
+		return updateInvalidBatch()
+	}
+	var ok bool
+	if *count, ok = updateAdd(*count, 1, maxUpdateConsulted); !ok {
+		return updateBoundError()
+	}
+	return nil
+}
+
+// updateConsultedContains reports whether the strictly ordered consulted rows hold exactly (dbi, key).
+func updateConsultedContains(consulted []ConsultedRow, dbi DBI, key []byte) bool {
+	index := sort.Search(len(consulted), func(i int) bool {
+		return !updateKeyOrdered(consulted[i].DBI.Rank, consulted[i].Key, dbi.Rank, key)
+	})
+	return index < len(consulted) && consulted[index].DBI == dbi && bytes.Equal(consulted[index].Key, key)
+}
+
+// updateConsultedDisjoint reports whether no mutation target and no OLD_VALUE_REF source is a consulted row.
+func updateConsultedDisjoint(consulted []ConsultedRow, plan []ownedMutation) bool {
+	for _, mutation := range plan {
+		if updateConsultedContains(consulted, mutation.dbi, mutation.key) {
+			return false
+		}
+		if mutation.after == AfterOldValueRef && updateConsultedContains(consulted, mutation.refDBI, mutation.refKey) {
+			return false
+		}
+	}
+	return true
+}
+
+// updateOwnedConsulted admits batch.Consulted after plan was admitted: nil for an empty set; otherwise rows are validated
+// and charged in declared order, the whole set is checked disjoint from plan, and keys are cloned only after all of that.
+func updateOwnedConsulted(batch Batch, plan []ownedMutation) ([]ownedConsulted, error) {
+	if len(batch.Consulted) == 0 {
+		return nil, nil
+	}
+	var count uint64
+	previous := ConsultedRow{}
+	for i, row := range batch.Consulted {
+		scanErr := updateScanConsulted(i == 0, previous, row, &count)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		previous = row
+	}
+	if !updateConsultedDisjoint(batch.Consulted, plan) {
+		return nil, updateInvalidBatch()
+	}
+	owned := make([]ownedConsulted, len(batch.Consulted))
+	for i, row := range batch.Consulted {
+		owned[i] = ownedConsulted{dbi: row.DBI, key: updateClone(row.Key)}
 	}
 	return owned, nil
 }
@@ -1053,7 +1146,41 @@ func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 	return err
 }
 
-func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
+// updateNativeConsultedImages captures each consulted row's OLD image in declared order, charging only present value
+// lengths against MaxOperationDataBytes (absent and present-empty charge zero and stay distinct). It returns (false, nil),
+// (false, updateBoundError()) only for its own byte charge, or (true, err) with the unchanged first updateNativeImage
+// error; the flag is never derived from err.
+func updateNativeConsultedImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted) (infrastructure bool, err error) {
+	var total uint64
+	for i, row := range consulted {
+		image, readErr := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
+		if readErr != nil {
+			return true, readErr
+		}
+		if image.present {
+			var ok bool
+			if total, ok = updateAdd(total, uint64(image.length), MaxOperationDataBytes); !ok {
+				return false, updateBoundError()
+			}
+		}
+		consulted[i].image = image
+	}
+	return false, nil
+}
+
+// updateNativeConsultedMatch returns the first comparison error, or the StateMismatch diagnostic for the first consulted
+// row whose image in txn differs from its captured OLD image.
+func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string) error {
+	for _, row := range consulted {
+		matchErr := updateNativeMatch(txn, dbis[row.dbi.Rank], row.key, row.image, diagnostic)
+		if matchErr != nil {
+			return matchErr
+		}
+	}
+	return nil
+}
+
+func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) ([]updateReference, error) {
 	targets, references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return nil, err
@@ -1073,6 +1200,10 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 		if err != nil {
 			return nil, err
 		}
+	}
+	err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch")
+	if err != nil {
+		return nil, err
 	}
 	return references, nil
 }
@@ -1202,7 +1333,7 @@ func updateNativeAbort(txn *C.MDBX_txn, primary error) updateNativeOutcome {
 	return updateNativeConsumed(CommitTruthOld, false, primary, secondary)
 }
 
-func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) (CommitTruth, error) {
+func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
 	targets, references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return CommitTruthUnknown, err
@@ -1212,6 +1343,10 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan [
 		return CommitTruthUnknown, err
 	}
 	oldImage, newImage, err = updateNativeReadbackReferences(read, dbis, plan, references, oldImage, newImage)
+	if err != nil {
+		return CommitTruthUnknown, err
+	}
+	oldImage, newImage, err = updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
@@ -1264,7 +1399,20 @@ func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan [
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old *C.MDBX_txn, primary error) updateNativeOutcome {
+// updateNativeReadbackConsulted folds each consulted row's equality with its OLD image (the updateNativeConsultedImages
+// capture from the still-live OLD transaction) into both predicates; the first comparison error returns both false.
+func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
+	for _, row := range consulted {
+		equal, compareErr := updateNativeEqual(read, dbis[row.dbi.Rank], row.key, row.image)
+		if compareErr != nil {
+			return false, false, compareErr
+		}
+		oldImage, newImage = oldImage && equal, newImage && equal
+	}
+	return oldImage, newImage, nil
+}
+
+func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
@@ -1273,7 +1421,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutat
 		}
 		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr)
 	}
-	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan)
+	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted)
 	rc := int(C.mdbx_txn_abort(begun.txn))
 	if rc == codeThreadMismatch {
 		return updateNativeRetainedRead(primary, joinErrors(readErr, nativeError(operationAbort, rc)), begun.txn)
@@ -1288,7 +1436,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutat
 	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr))
 }
 
-func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old, write *C.MDBX_txn) updateNativeOutcome {
+func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn) updateNativeOutcome {
 	rc := int(C.mdbx_txn_commit(write))
 	commitErr := nativeError(operationUpdate, rc)
 	switch rc {
@@ -1301,10 +1449,10 @@ func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutatio
 	case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:
 		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil)
 	}
-	return updateNativeReadback(env, dbis, plan, old, commitErr)
+	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr)
 }
 
-func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, old *C.MDBX_txn) updateNativeOutcome {
+func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_READWRITE)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
@@ -1313,7 +1461,7 @@ func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutati
 		}
 		return updateNativeConsumed(CommitTruthOld, false, beginErr, nil)
 	}
-	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan)
+	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan, consulted)
 	if preflightErr != nil {
 		return updateNativeAbort(begun.txn, preflightErr)
 	}
@@ -1329,16 +1477,20 @@ func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutati
 	if verifyErr != nil {
 		return updateNativeAbort(begun.txn, verifyErr)
 	}
-	return updateNativeCommit(env, dbis, plan, old, begun.txn)
+	consultedErr := updateNativeConsultedMatch(begun.txn, dbis, consulted, "final update image mismatch")
+	if consultedErr != nil {
+		return updateNativeAbort(begun.txn, consultedErr)
+	}
+	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn)
 }
 
-func (s *Store) updateNative(plan []ownedMutation, old *C.MDBX_txn) updateNativeOutcome {
+func (s *Store) updateNative(plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
 	if s == nil || s.env == nil || old == nil || len(plan) == 0 || !validRetainedDBIs(s.dbis) {
 		return updateNativeConsumed(CommitTruthOld, false, updateNativeInvariant("invalid native update input"), nil)
 	}
 	var outcome updateNativeOutcome
 	runLocked(func() transactionOutcome {
-		outcome = updateNativeExecute(s.env, s.dbis, plan, old)
+		outcome = updateNativeExecute(s.env, s.dbis, plan, consulted, old)
 		return outcome.lockedOutcome()
 	})
 	return outcome
@@ -1354,7 +1506,7 @@ func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch 
 	return batch, panicValue, panicked, err
 }
 
-func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, error) {
+func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, error) {
 	returned := false
 	defer func() {
 		if returned {
@@ -1373,13 +1525,21 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
 	}
 	if primary != nil {
-		return nil, s.abortReadLocked(old, primary, infrastructure)
+		return nil, nil, s.abortReadLocked(old, primary, infrastructure)
 	}
 	plan, planErr := updateOwnedBatch(batch)
 	if planErr != nil {
-		return nil, s.abortReadLocked(old, planErr, false)
+		return nil, nil, s.abortReadLocked(old, planErr, false)
 	}
-	return plan, nil
+	consulted, consultedErr := updateOwnedConsulted(batch, plan)
+	if consultedErr != nil {
+		return nil, nil, s.abortReadLocked(old, consultedErr, false)
+	}
+	infrastructure, captureErr := updateNativeConsultedImages(old, s.dbis, consulted)
+	if captureErr != nil {
+		return nil, nil, s.abortReadLocked(old, captureErr, infrastructure)
+	}
+	return plan, consulted, nil
 }
 
 func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, error) {
@@ -1472,11 +1632,11 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, erro
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.active.Store(true)
-	plan, planErr := s.updatePlan(callback, reader, begun.txn)
+	plan, consulted, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
 		return CommitTruthOld, planErr
 	}
-	outcome := s.updateNative(plan, begun.txn)
+	outcome := s.updateNative(plan, consulted, begun.txn)
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
 }
