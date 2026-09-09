@@ -6310,8 +6310,8 @@ func daGuardCandidates(t *testing.T) (*Mempool, []daGuardCandidate) {
 }
 
 // daGuardWrapper adapts one public standard producer to a common
-// error-returning shape. The set below is exactly the referencing set of
-// addTxWithSource.
+// error-returning shape. The set below is exactly the public referencing set
+// of addTxWithSource; its remaining references are in-package tests.
 type daGuardWrapper struct {
 	name   string
 	source mempoolTxSource
@@ -6347,10 +6347,13 @@ func daGuardContext(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext 
 	return &admission
 }
 
-// daGuardImage is the complete same-instance admission image a refusal must
-// leave untouched: the canonical M/O fingerprint, plus the four things that
+// daGuardImage is the same-instance admission image a refusal must leave
+// untouched: the canonical M/O fingerprint, plus the four things that
 // fingerprint does not carry — index and owner nilness, lowWaterBytes, the
-// resident-eviction counter, and the caller's own raw candidate bytes.
+// resident-eviction counter, and the caller's own raw candidate bytes. It is
+// not a whole-instance no-change promise: m.sigCache is excluded because the
+// earlier signature validation inserts a positive entry before the guard
+// runs, which the state contract permits.
 func daGuardImage(t *testing.T, mp *Mempool, raw []byte) string {
 	t.Helper()
 	fingerprint := canonicalMOImageFingerprint(t, mp, 0)
