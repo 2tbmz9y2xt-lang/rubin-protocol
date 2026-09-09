@@ -6696,7 +6696,8 @@ func TestMempoolDAKindGuardPreservesEarlierErrors(t *testing.T) {
 		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_TX_NONCE_INVALID: tx_nonce must be >= 1 for non-coinbase", true, MempoolAdmissionCounts{Rejected: 1}},
 		{"R3_retired_core_ext_covenant", func(t *testing.T) (*Mempool, []byte) {
 			h := newRelayHarness(t, nil, 1_000_000)
-			tx := &consensus.Tx{Version: 1, TxKind: 0x01, TxNonce: 7,
+			tx := &consensus.Tx{
+				Version: 1, TxKind: 0x01, TxNonce: 7,
 				Inputs:       []consensus.TxInput{{PrevTxid: h.outpoints[0].Txid, PrevVout: h.outpoints[0].Vout}},
 				Outputs:      []consensus.TxOutput{{Value: 100_000, CovenantType: 0x0102, CovenantData: []byte{0x01}}},
 				DaPayload:    []byte("0123456789"),
