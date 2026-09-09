@@ -357,11 +357,37 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 	defer m.mu.Unlock()
 
 	entry := newMempoolEntry(checked, inputs, source)
+	if err := m.rejectNonStandardKindLocked(entry, checked.Tx.TxKind); err != nil {
+		return err
+	}
 	if err := m.addEntryLockedProbed(entry, snappedFloor, probe); err != nil {
 		return err
 	}
 	m.noteRetainedLocked(entry, probe)
 	return nil
+}
+
+// rejectNonStandardKindLocked is the standard-candidate kind slot of
+// RUBIN_MEMPOOL_POLICY.md sections 6.1 and 6.2. It returns nil exactly for kind
+// 0x00; every other kind gets the identity slot's txid-then-wtxid duplicate
+// error when one applies, its third arm — the zero-txid INTERNAL refusal —
+// being unreachable for a checked candidate, and otherwise the standard-domain
+// rejection, tagged STABLE_TERMINAL_REJECT because that verdict rests on the kind.
+//
+// It writes nothing and takes no lock: two index reads and one error, so a
+// candidate it refuses is left with no token, no sequence and no index row.
+//
+// kind is the parsed tx_kind of the completed checked transaction, whose
+// reachable domain the canonical parser already closed to {0x00, 0x01, 0x02}.
+// The caller holds m.mu.
+func (m *Mempool) rejectNonStandardKindLocked(entry *mempoolEntry, kind uint8) error {
+	if kind == 0x00 {
+		return nil
+	}
+	if err := m.validateEntryIdentityLocked(entry); err != nil {
+		return err
+	}
+	return selectRelayDisposition(txAdmitRejected("standard mempool accepts only tx_kind=0x00"), RelayAdmissionStableTerminalReject)
 }
 
 // RelayMetadata returns the metadata a relay peer needs to forward the

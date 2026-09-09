@@ -269,9 +269,7 @@ func TestMempoolAddTxDaCommitPreservesBaseChainState(t *testing.T) {
 		toAddress,
 		[]byte("0123456789"),
 	)
-	if err := mp.AddTx(txBytes); err != nil {
-		t.Fatalf("AddTx(da): %v", err)
-	}
+	requireDAKindReject(t, mp.AddTx(txBytes))
 	assertChainStateUnchanged(t, before, snapshotChainState(t, state))
 }
 

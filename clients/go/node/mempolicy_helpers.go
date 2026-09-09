@@ -70,25 +70,16 @@ func applyPolicyAgainstStateDA(checked *consensus.CheckedTransaction, policy Mem
 	}
 	// Stage C DA fee policy: only enter the helper for DA-bearing tx when
 	// the DA-side floor is configured (MinDaFeeRate > 0) or a per-byte
-	// surcharge applies. Non-DA tx skip the helper entirely on the hot
-	// admit path; their relay-floor handling remains in
-	// validateFeeFloorLocked.
+	// surcharge applies. Non-DA tx skip the helper entirely.
 	//
-	// The mempool admit path enforces the rolling relay-fee floor through
-	// validateFeeFloorLocked (TxAdmitUnavailable — transient/retryable),
-	// so this caller intentionally passes currentMempoolMinFeeRate=0 so
-	// max(relay_fee_floor, da_required_fee) collapses to da_required_fee.
-	// Without the zero override, a DA tx that pays the DA-side floor but
-	// not the rolling relay floor would surface here as TxAdmitRejected
-	// ("DA fee below Stage C floor ... relay_fee_floor=...") instead of
-	// the symmetric TxAdmitUnavailable that non-DA tx receive from
-	// validateFeeFloorLocked. With currentMin=0 the helper enforces only
-	// the DA-specific terms and validateFeeFloorLocked owns relay-floor
-	// classification uniformly for both DA and non-DA admissions.
-	//
-	// The miner caller (rejectCandidate) keeps using the live rolling
-	// floor because it has no validateFeeFloorLocked equivalent — the
-	// miner template needs to skip a tx whenever it fails any floor.
+	// The zero currentMempoolMinFeeRate below collapses
+	// max(relay_fee_floor, da_required_fee) to da_required_fee, so this
+	// helper enforces the DA-specific terms only and never reports a
+	// rolling-floor verdict. That split still matters for every caller that
+	// reaches it with a DA transaction: standard Add* admission now refuses
+	// a policy-valid DA at rejectNonStandardKindLocked, downstream of these
+	// terms, while RelayMetadata and the miner's rejectCandidate keep their
+	// own unchanged floor checks against the live rolling floor.
 	if checked.DaBytes > 0 && (policy.MinDaFeeRate > 0 || policy.PolicyDaSurchargePerByte > 0) {
 		reject, _, reason, err := RejectDaAnchorTxPolicy(
 			checked.Tx,
