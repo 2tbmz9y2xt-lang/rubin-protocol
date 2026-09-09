@@ -1690,7 +1690,7 @@ func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
 func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
-	admit := func([]byte) (func(bool), error) { return nil, nil }
+	admit := func([]byte) (completion func(bool), err error) { return }
 	if got := f.engine.DARelayState(); got != want {
 		t.Fatalf("getter=%p, want %p", got, want)
 	}
@@ -1760,7 +1760,7 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 }
 
 func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
-	callback := func([]byte) (func(bool), error) { return nil, nil }
+	callback := func([]byte) (completion func(bool), err error) { return }
 	uninitialized := &SyncEngine{daRelayClaimed: true, reorgDAAdmission: callback}
 	for _, engine := range []*SyncEngine{nil, {}, uninitialized} {
 		got, err := engine.ClaimDARelayState(nil, nil)
@@ -1770,10 +1770,10 @@ func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
 	winnerCalls := 0
-	winner := func(raw []byte) (func(bool), error) {
+	winner := func(raw []byte) (completion func(bool), err error) {
 		winnerCalls++
 		require(t, bytes.Equal(raw, []byte{0xa5}), "winner raw=%x", raw)
-		return nil, nil
+		return
 	}
 	for _, row := range []struct {
 		name     string

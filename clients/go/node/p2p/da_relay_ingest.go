@@ -61,7 +61,7 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 		return nil, err
 	}
 	if result.Disposition != node.DAAdmissionRetained || result.SameDAIDCommitConflict {
-		return nil, nil
+		return completion, err
 	}
 	daID := result.DAID
 	consumed := false

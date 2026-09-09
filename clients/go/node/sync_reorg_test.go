@@ -4196,9 +4196,9 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 	}
 
 	var detached [][]byte
-	f.engine.reorgDAAdmission = func(raw []byte) (func(bool), error) {
+	f.engine.reorgDAAdmission = func(raw []byte) (completion func(bool), err error) {
 		detached = append(detached, append([]byte(nil), raw...))
-		return nil, nil
+		return
 	}
 	batch := &diagnosticBatch{}
 	f.engine.requeueParsedDisconnectedTransactions([]*consensus.ParsedBlock{parsed}, batch)
@@ -4335,7 +4335,7 @@ func TestReorgDARoutingCapturedOwners(t *testing.T) {
 	})
 	awaitCanonicalMOAdmissionRLock(t, "requeueParsedBlockRows", 1)
 	boundCalls := 0
-	_, applyErr := f.engine.ClaimDARelayState(f.engine.DARelayState(), func([]byte) (func(bool), error) { boundCalls++; return nil, nil })
+	_, applyErr := f.engine.ClaimDARelayState(f.engine.DARelayState(), func([]byte) (completion func(bool), err error) { boundCalls++; return })
 	require(t, applyErr == nil, "ClaimDARelayState: %v", applyErr)
 	f.engine.chainState.admissionMu.Unlock()
 	locked = false
@@ -4376,7 +4376,7 @@ func TestReorgDAGateExcludesFailedAndTerminal(t *testing.T) {
 		require(t, storeErr == nil, "StoreBlock(branch one): %v", storeErr)
 		branchTwo := fork.blockWithDASets(t)
 		ownerCalls := 0
-		fixture.engine.reorgDAAdmission = func([]byte) (func(bool), error) { ownerCalls++; return nil, nil }
+		fixture.engine.reorgDAAdmission = func([]byte) (completion func(bool), err error) { ownerCalls++; return }
 		previous := writeFileAtomicFn
 		t.Cleanup(func() { writeFileAtomicFn = previous })
 		indexWrites := 0
@@ -4403,7 +4403,7 @@ func TestReorgDAGateExcludesFailedAndTerminal(t *testing.T) {
 		require(t, storeErr == nil, "StoreBlock(branch one): %v", storeErr)
 		branchTwo := fork.blockWithDASets(t)
 		ownerCalls := 0
-		fixture.engine.reorgDAAdmission = func([]byte) (func(bool), error) { ownerCalls++; return nil, nil }
+		fixture.engine.reorgDAAdmission = func([]byte) (completion func(bool), err error) { ownerCalls++; return }
 		previous := writeFileAtomicFn
 		t.Cleanup(func() { writeFileAtomicFn = previous })
 		injected := false
@@ -4445,7 +4445,7 @@ func TestReorgDAOwnerRunsOutsideTransitionGuard(t *testing.T) {
 			}
 		}
 	})
-	fixture.engine.reorgDAAdmission = func([]byte) (func(bool), error) {
+	fixture.engine.reorgDAAdmission = func([]byte) (completion func(bool), err error) {
 		ownerCalls++
 		if fixture.engine.mutationMu.TryLock() {
 			fixture.engine.mutationMu.Unlock()
@@ -4472,7 +4472,7 @@ func TestReorgDAOwnerRunsOutsideTransitionGuard(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("reorg owner lock boundary: SyncEngine mutex or transition guard held")
 		}
-		return nil, nil
+		return
 	}
 	if summary, err := fixture.engine.ApplyBlockWithReorg(branchTwo, nil); err != nil || summary == nil || len(summary.CanonicalAppliedBlocks) != 2 {
 		t.Fatalf("ApplyBlockWithReorg: summary=%+v err=%v", summary, err)
@@ -4611,8 +4611,8 @@ func TestReorgDAPostLockEffects(t *testing.T) {
 	completions.finish()
 	var order []int
 	completions.pending = []func(bool){
-		func(run bool) { require(t, run, "first completion cancelled"); order = append(order, 1) },
-		func(run bool) { require(t, run, "second completion cancelled"); order = append(order, 2) },
+		func(run bool) { require(t, run, "first completion canceled"); order = append(order, 1) },
+		func(run bool) { require(t, run, "second completion canceled"); order = append(order, 2) },
 	}
 	completions.finish()
 	completions.finish()

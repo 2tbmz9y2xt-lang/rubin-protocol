@@ -434,7 +434,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		must(t, err, "open detached admission")
 		require(t, finish != nil, "retained detached admission has no completion")
 		t.Cleanup(func() { finish(false) })
-		h.service.cfg.Now = func() time.Time { t.Fatal("cancelled completion read scheduler clock"); return time.Time{} }
+		h.service.cfg.Now = func() time.Time { t.Fatal("canceled completion read scheduler clock"); return time.Time{} }
 		closed := lifecycleClose(h.service)
 		waitDraining(t, h.service)
 		requireStillBlocked(t, closed, "pending detached completion lease")

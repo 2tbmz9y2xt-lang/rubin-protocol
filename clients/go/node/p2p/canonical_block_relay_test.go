@@ -571,8 +571,8 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 	}()
 	select {
 	case err := <-mutationDone:
-		parseErr, ok := err.(*consensus.TxError)
-		require(t, ok && parseErr.Code == consensus.BLOCK_ERR_PARSE && parseErr.Msg == "block too short", "concurrent mutation error=%v, want BLOCK_ERR_PARSE: block too short", err)
+		var parseErr *consensus.TxError
+		require(t, errors.As(err, &parseErr) && errors.Is(parseErr, err) && parseErr.Code == consensus.BLOCK_ERR_PARSE && parseErr.Msg == "block too short", "concurrent mutation error=%v, want BLOCK_ERR_PARSE: block too short", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("SyncEngine mutation blocked behind detached reorg effect")
 	}
