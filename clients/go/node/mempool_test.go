@@ -1292,7 +1292,11 @@ func TestMempoolPolicyRejectsLowFeeDaCommit(t *testing.T) {
 	}
 }
 
-func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
+// TestMempoolPolicySufficientFeeDaCommitRejectedAtKindGuard is the A6 row: a DA
+// commit that clears the Stage C fee terms is still policy-valid — RelayMetadata
+// returns its exact fee and serialized size and inserts nothing — while standard
+// admission refuses the same bytes at the tx_kind guard.
+func TestMempoolPolicySufficientFeeDaCommitRejectedAtKindGuard(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -1307,8 +1311,13 @@ func TestMempoolPolicyAllowsSufficientFeeDaCommit(t *testing.T) {
 	}
 
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 100_000, 900_000, 1, fromKey, toAddress, []byte("0123456789"))
-	if err := mp.AddTx(txBytes); err != nil {
-		t.Fatalf("expected DA tx admission, got %v", err)
+	metadata, err := mp.RelayMetadata(txBytes)
+	if err != nil || metadata.Fee != consensus.Uint128FromU64(900_000) || metadata.Size != len(txBytes) {
+		t.Fatalf("RelayMetadata=(%+v,%v), want the exact fee 900000 and size %d", metadata, err, len(txBytes))
+	}
+	requireDAKindReject(t, mp.AddTx(txBytes))
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
 	}
 }
 
@@ -1367,7 +1376,11 @@ func TestMempoolPolicyRejectsDaCommitDeclaredChunkBudget(t *testing.T) {
 	}
 }
 
-func TestMempoolPolicyAllowsDaCommitAtDeclaredChunkBudget(t *testing.T) {
+// TestMempoolPolicyDaCommitAtDeclaredChunkBudgetRejectedAtKindGuard keeps the
+// at-budget boundary: a DA commit whose declared chunk budget exactly fits still
+// passes rejectDaCommitDeclaredBudget, so RelayMetadata succeeds and inserts
+// nothing, and standard admission refuses it at the tx_kind guard instead.
+func TestMempoolPolicyDaCommitAtDeclaredChunkBudgetRejectedAtKindGuard(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -1388,11 +1401,9 @@ func TestMempoolPolicyAllowsDaCommitAtDeclaredChunkBudget(t *testing.T) {
 	if got := mp.Len(); got != 0 {
 		t.Fatalf("RelayMetadata inserted tx; mempool len=%d, want 0", got)
 	}
-	if err := mp.AddTx(txBytes); err != nil {
-		t.Fatalf("AddTx at budget: %v", err)
-	}
-	if got := mp.Len(); got != 1 {
-		t.Fatalf("mempool len=%d, want 1", got)
+	requireDAKindReject(t, mp.AddTx(txBytes))
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
 	}
 }
 
@@ -1431,16 +1442,17 @@ func TestMempoolAdmissionSourceWrappersRejectDaCommitDeclaredBudget(t *testing.T
 	}
 }
 
-// TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx
+// TestMempoolPartialConfigBackfillsMinDaFeeRateAndRejectsDaTxAtKindGuard
 // pins the default-config path for PR #1368: a partial MempoolConfig
 // literal is interpreted as defaults plus overrides, so an omitted
 // MinDaFeeRate backfills to DefaultMinDaFeeRate and a DA-bearing tx that
-// pays both the DA-side floor and relay floor still admits.
+// pays both the DA-side floor and relay floor clears every fee term.
 //
-// Proof assertion: mp.AddTx returns nil and the entry appears in the
-// mempool. The test also pins mp.policy.MinDaFeeRate so partial configs
-// cannot silently fall back to the old surcharge-only behavior.
-func TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx(t *testing.T) {
+// Proof assertion: mp.policy.MinDaFeeRate is the backfilled default, so partial
+// configs cannot silently fall back to the old surcharge-only behavior, and the
+// fee-clearing DA candidate is refused at the tx_kind guard rather than by any
+// fee term.
+func TestMempoolPartialConfigBackfillsMinDaFeeRateAndRejectsDaTxAtKindGuard(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -1460,11 +1472,9 @@ func TestMempoolPartialConfigBackfillsMinDaFeeRateAndAdmitsSufficientDaTx(t *tes
 	}
 
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 950_000, 1, fromKey, toAddress, []byte("0123456789"))
-	if err := mp.AddTx(txBytes); err != nil {
-		t.Fatalf("AddTx for sufficient-fee DA tx under partial config: %v", err)
-	}
-	if got := mp.Len(); got != 1 {
-		t.Fatalf("mempool len=%d, want 1", got)
+	requireDAKindReject(t, mp.AddTx(txBytes))
+	if got := mp.Len(); got != 0 {
+		t.Fatalf("mempool len=%d, want 0", got)
 	}
 }
 
@@ -1584,22 +1594,20 @@ func TestMempoolNilReceiverCurrentMinFeeRateSnapshotReturnsBaseline(t *testing.T
 	}
 }
 
-// TestMempoolDaTxBelowRelayFloorReturnsUnavailable pins the wave-6 fix
-// for PR #1368: relay-floor failures on DA-bearing tx must surface as
-// TxAdmitUnavailable (transient — the rolling local floor will decay)
-// the same way non-DA tx do, NOT as TxAdmitRejected from the Stage C
-// helper. The mempool admit caller passes currentMempoolMinFeeRate=0 to
-// RejectDaAnchorTxPolicy so the helper enforces only the DA-side terms;
-// validateFeeFloorLocked owns relay-floor classification uniformly for
-// both DA and non-DA admissions.
+// TestMempoolDAKindGuardPrecedesStandardRollingFloor pins the tx_kind guard
+// against the standard rolling relay floor: a DA candidate that pays at or
+// above the DA-side floor but far below an inflated rolling floor is refused by
+// the kind guard, which sits before the locked floor check, and the floor state
+// it never consulted is left exactly as arranged.
 //
-// Proof assertion: AddTx returns *TxAdmitError with Kind=TxAdmitUnavailable
-// when the DA tx pays at or above the DA-side floor but below the
-// inflated rolling relay floor. A future edit that drops the
-// `currentMin=0` override would surface the same input as
-// TxAdmitRejected with a "DA fee below Stage C floor ... relay_fee_floor=..."
-// reason and fail this assertion.
-func TestMempoolDaTxBelowRelayFloorReturnsUnavailable(t *testing.T) {
+// It also keeps the wave-6 proof for PR #1368 alive on the surface that still
+// classifies a DA relay floor: the admit caller passes
+// currentMempoolMinFeeRate=0 to RejectDaAnchorTxPolicy so the Stage C helper
+// enforces only the DA-side terms, and RelayMetadata therefore still reports
+// the same input as the transient TxAdmitUnavailable non-DA transactions get,
+// never as a Stage C "DA fee below Stage C floor ... relay_fee_floor=..."
+// rejection.
+func TestMempoolDAKindGuardPrecedesStandardRollingFloor(t *testing.T) {
 	fromKey := mustNodeMLDSA87Keypair(t)
 	toKey := mustNodeMLDSA87Keypair(t)
 	fromAddress := consensus.P2PKCovenantDataForPubkey(fromKey.PubkeyBytes())
@@ -1620,24 +1628,24 @@ func TestMempoolDaTxBelowRelayFloorReturnsUnavailable(t *testing.T) {
 	mp.currentMinFeeRate = 1_000_000 // inflated rolling relay floor
 	mp.mu.Unlock()
 
-	// Build a DA tx that pays well above DA-side floor (daBytes*1) but
-	// far below weight*1_000_000. With the wave-6 fix the helper passes
-	// (currentMin=0 → max collapses to daRequired) and validateFeeFloorLocked
-	// fails the entry as TxAdmitUnavailable.
+	// Build a DA tx that pays well above the DA-side floor (daBytes*1) but far
+	// below weight*1_000_000, so the rolling floor is the only later check that
+	// could have decided this candidate.
 	txBytes := mustBuildSignedDaCommitTx(t, st.Utxos, outpoints[0], 50_000, 999_950_000, 1, fromKey, toAddress, []byte("0123456789"))
-	err = mp.AddTx(txBytes)
-	if err == nil {
-		t.Fatalf("expected admit error, got nil (tx admitted under inflated relay floor?)")
+	requireDAKindReject(t, mp.AddTx(txBytes))
+	mp.mu.RLock()
+	floor, used, seq := mp.currentMinFeeRate, mp.usedBytes, mp.lastAdmissionSeq
+	mp.mu.RUnlock()
+	if floor != 1_000_000 || used != 0 || seq != 0 || mp.Len() != 0 {
+		t.Fatalf("floor=%d used=%d seq=%d len=%d, want the arranged floor and an untouched pool", floor, used, seq, mp.Len())
 	}
+
+	// RelayMetadata still owns the relay-floor classification for the same
+	// bytes, and it is still the transient TxAdmitUnavailable, not Stage C.
+	_, err = mp.RelayMetadata(txBytes)
 	var txErr *TxAdmitError
-	if !errors.As(err, &txErr) {
-		t.Fatalf("expected *TxAdmitError, got %T: %v", err, err)
-	}
-	if txErr.Kind != TxAdmitUnavailable {
-		t.Fatalf("got Kind=%s, want TxAdmitUnavailable; reason=%q", txErr.Kind, txErr.Message)
-	}
-	if !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
-		t.Fatalf("reason %q does not match validateFeeFloorLocked wording", txErr.Message)
+	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable || !strings.Contains(txErr.Message, "mempool fee below rolling minimum") {
+		t.Fatalf("RelayMetadata err=%v, want TxAdmitUnavailable carrying the rolling-floor wording", err)
 	}
 }
 
@@ -6279,4 +6287,452 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 				mp.sigCache.Hits(), mp.sigCache.Misses(), mp.sigCache.Len())
 		}
 	})
+}
+
+// daGuardRejectMessage is the exact standard-domain rejection text, written
+// here as a literal instead of read from production so that changing the
+// production message fails these rows rather than following them.
+const daGuardRejectMessage = "standard mempool accepts only tx_kind=0x00"
+
+// daGuardCandidate is one signed DA candidate together with the kind it carries.
+type daGuardCandidate struct {
+	name string
+	raw  []byte
+}
+
+// daGuardCandidates returns a fresh standard mempool plus the signed
+// {DA_COMMIT 0x01, DA_CHUNK 0x02} pair daAdmissionTestMempool builds over its
+// alternating outpoints, so a row cannot silently cover only one DA kind.
+func daGuardCandidates(t *testing.T) (*Mempool, []daGuardCandidate) {
+	t.Helper()
+	mp, raw := daAdmissionTestMempool(t, 2)
+	return mp, []daGuardCandidate{{"commit_0x01", raw[0]}, {"chunk_0x02", raw[1]}}
+}
+
+// daGuardWrapper adapts one public standard producer to a common
+// error-returning shape. The set below is exactly the referencing set of
+// addTxWithSource.
+type daGuardWrapper struct {
+	name   string
+	source mempoolTxSource
+	admit  func(*Mempool, []byte) error
+}
+
+func daGuardWrappers() []daGuardWrapper {
+	return []daGuardWrapper{
+		{"AddTx", mempoolTxSourceLocal, func(mp *Mempool, raw []byte) error { return mp.AddTx(raw) }},
+		{"AddRemoteTx", mempoolTxSourceRemote, func(mp *Mempool, raw []byte) error { return mp.AddRemoteTx(raw) }},
+		{"AddReorgTx", mempoolTxSourceReorg, func(mp *Mempool, raw []byte) error { return mp.AddReorgTx(raw) }},
+		{"AddRemoteTxForRelay", mempoolTxSourceRemote, func(mp *Mempool, raw []byte) error { return mp.AddRemoteTxForRelay(raw, nil).Err }},
+	}
+}
+
+// requireDAKindReject pins the exact public rejection by equality on both the
+// kind and the whole message, never by substring and never by errors.Is.
+func requireDAKindReject(t *testing.T, err error) {
+	t.Helper()
+	var admitErr *TxAdmitError
+	if !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitRejected || admitErr.Message != daGuardRejectMessage || err.Error() != daGuardRejectMessage {
+		t.Fatalf("err=%v (%T), want TxAdmitRejected %q", err, err, daGuardRejectMessage)
+	}
+}
+
+// daGuardContext is the owner's current exact admission context.
+func daGuardContext(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext {
+	t.Helper()
+	admission, ok := mp.PendingOutpointOwner().AdmissionContext()
+	if !ok {
+		t.Fatal("owner admission context unavailable")
+	}
+	return &admission
+}
+
+// daGuardImage is the complete same-instance admission image a refusal must
+// leave untouched: the canonical M/O fingerprint, plus the four things that
+// fingerprint does not carry — index and owner nilness, lowWaterBytes, the
+// resident-eviction counter, and the caller's own raw candidate bytes.
+func daGuardImage(t *testing.T, mp *Mempool, raw []byte) string {
+	t.Helper()
+	fingerprint := canonicalMOImageFingerprint(t, mp, 0)
+	mp.mu.RLock()
+	defer mp.mu.RUnlock()
+	return fmt.Sprintf("%s txsNil=%v wtxidsNil=%v ownerNil=%v low=%d evicted=%d caller=%x",
+		fingerprint, mp.txs == nil, mp.wtxids == nil, mp.pendingOutpoints == nil,
+		mp.lowWaterBytes, mp.evictedResidentTotal.Load(), raw)
+}
+
+// requireDAGuardPreservedImage runs one refusal and pins both halves of the
+// state contract: the image is identical across the call, and the four
+// admission buckets read exactly wantCounts afterwards.
+func requireDAGuardPreservedImage(t *testing.T, mp *Mempool, raw []byte, admit func() error, wantCounts MempoolAdmissionCounts) {
+	t.Helper()
+	before := daGuardImage(t, mp, raw)
+	requireDAKindReject(t, admit())
+	if after := daGuardImage(t, mp, raw); after != before {
+		t.Fatalf("admission image changed across the refusal:\n before %s\n after  %s", before, after)
+	}
+	if got := mp.AdmissionCounts(); got != wantCounts {
+		t.Fatalf("admission counts=%+v, want %+v", got, wantCounts)
+	}
+}
+
+// TestMempoolRejectsDAKindAcrossAllEntryPoints is the A1/A2 row: each of the
+// four public standard producers refuses both signed DA kinds with the exact
+// standard-domain rejection and no state effect, refuses the same bytes again
+// on the same pool without accumulating anything, and still admits an ordinary
+// tx_kind=0x00 with its existing source, residency, owner token and counter.
+func TestMempoolRejectsDAKindAcrossAllEntryPoints(t *testing.T) {
+	for _, wrapper := range daGuardWrappers() {
+		for _, index := range []int{0, 1} {
+			mp, candidates := daGuardCandidates(t)
+			candidate := candidates[index]
+			t.Run("reject/"+wrapper.name+"/"+candidate.name, func(t *testing.T) {
+				requireDAGuardPreservedImage(t, mp, candidate.raw, func() error { return wrapper.admit(mp, candidate.raw) }, MempoolAdmissionCounts{Rejected: 1})
+				requireDAGuardPreservedImage(t, mp, candidate.raw, func() error { return wrapper.admit(mp, candidate.raw) }, MempoolAdmissionCounts{Rejected: 2})
+			})
+		}
+	}
+	for _, wrapper := range daGuardWrappers() {
+		t.Run("ordinary/"+wrapper.name, func(t *testing.T) {
+			h := newRelayHarness(t, nil, 1_000_000)
+			raw := h.tx(0, 100_000, 100_000, 1)
+			if err := wrapper.admit(h.mp, raw); err != nil {
+				t.Fatalf("ordinary tx_kind=0x00 admission: %v", err)
+			}
+			h.mp.mu.RLock()
+			entry, seq, used := h.mp.txs[txID(t, raw)], h.mp.lastAdmissionSeq, h.mp.usedBytes
+			h.mp.mu.RUnlock()
+			if entry == nil || entry.source != wrapper.source || entry.token == (PendingOutpointToken{}) || seq != 1 || used != len(raw) {
+				t.Fatalf("entry=%+v seq=%d used=%d, want one retained entry under source %q holding an owner token", entry, seq, used, wrapper.source)
+			}
+			if got := h.mp.AdmissionCounts(); got != (MempoolAdmissionCounts{Accepted: 1}) {
+				t.Fatalf("ordinary counts=%+v, want exactly one Accepted", got)
+			}
+		})
+	}
+	t.Run("ordinary/AddRemoteTxForRelay/typed", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		raw := h.tx(0, 100_000, 100_000, 1)
+		got := h.mp.AddRemoteTxForRelay(raw, nil)
+		if got.Err != nil || got.Disposition != RelayAdmissionRetained || got.TxID != txID(t, raw) || got.WTxID == ([32]byte{}) || got.HasAdmissionContext || got.AdmissionContext != (PendingOutpointAdmissionContext{}) {
+			t.Fatalf("typed ordinary result=%+v, want RETAINED with parsed identities and no cache-authorizing context", got)
+		}
+	})
+}
+
+// TestMempoolDAKindGuardPreservesIdentityPrecedence is the A3 row: the resident
+// txid slot and then the resident wtxid slot decide before the kind slot, and
+// txid wins when both are resident. The index rows below are TEST-ARRANGED
+// structural precedence witnesses; they claim no naturally reachable DA
+// residency and no same-wtxid/different-txid candidate.
+func TestMempoolDAKindGuardPreservesIdentityPrecedence(t *testing.T) {
+	resident := [32]byte{0xAB}
+	rows := []struct {
+		name    string
+		arrange func(mp *Mempool, txid, wtxid [32]byte)
+		wantMsg string
+	}{
+		{"arranged_txid_present", func(mp *Mempool, txid, _ [32]byte) { mp.txs[txid] = &mempoolEntry{txid: txid} }, "tx already in mempool"},
+		{"arranged_wtxid_only", func(mp *Mempool, _, wtxid [32]byte) { mp.wtxids[wtxid] = resident }, fmt.Sprintf("mempool wtxid conflict with %x", resident)},
+		{"arranged_both_txid_wins", func(mp *Mempool, txid, wtxid [32]byte) {
+			mp.txs[txid] = &mempoolEntry{txid: txid}
+			mp.wtxids[wtxid] = resident
+		}, "tx already in mempool"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			mp, candidates := daGuardCandidates(t)
+			raw := candidates[0].raw
+			tx, txid, wtxid, _, err := consensus.ParseTx(raw)
+			if err != nil || tx.TxKind != 0x01 {
+				t.Fatalf("ParseTx(commit) err=%v, want a signed kind 0x01 candidate", err)
+			}
+			mp.mu.Lock()
+			row.arrange(mp, txid, wtxid)
+			mp.mu.Unlock()
+			before := daGuardImage(t, mp, raw)
+			got := mp.AddRemoteTxForRelay(raw, daGuardContext(t, mp))
+			var admitErr *TxAdmitError
+			if !errors.As(got.Err, &admitErr) || admitErr.Kind != TxAdmitConflict || admitErr.Message != row.wantMsg {
+				t.Fatalf("err=%v, want TxAdmitConflict %q rather than the kind rejection", got.Err, row.wantMsg)
+			}
+			if got.Disposition != RelayAdmissionDuplicate || got.HasAdmissionContext {
+				t.Fatalf("disposition=%v hasContext=%v, want DUPLICATE with no published context", got.Disposition, got.HasAdmissionContext)
+			}
+			if after := daGuardImage(t, mp, raw); after != before {
+				t.Fatalf("identity refusal changed the image:\n before %s\n after  %s", before, after)
+			}
+			if counts := mp.AdmissionCounts(); counts != (MempoolAdmissionCounts{Conflict: 1}) {
+				t.Fatalf("counts=%+v, want exactly one Conflict", counts)
+			}
+		})
+	}
+}
+
+// TestMempoolDAKindGuardDoesNotReservePendingOutpoints is the A4 owner half and
+// the A7 reuse row: a refused DA candidate claims no pending outpoint, so a
+// real standard input conflict never decides its outcome, a never-initialized
+// owner and index pair is not lazily created, and the same confirmed input is
+// still spendable by an ordinary transaction on the SAME pool with no owner,
+// index or chainstate reset in between.
+func TestMempoolDAKindGuardDoesNotReservePendingOutpoints(t *testing.T) {
+	t.Run("kind_wins_over_a_real_standard_input_conflict", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		if err := h.mp.AddTx(h.tx(0, 100_000, 100_000, 1)); err != nil {
+			t.Fatalf("seed the standard claim on outpoint 0: %v", err)
+		}
+		da := mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 100_000, 900_000, 2, h.fromKey, h.toAddr, []byte("0123456789"))
+		before := cloneDAAdmissionOwner(h.mp.PendingOutpointOwner())
+		requireDAGuardPreservedImage(t, h.mp, da, func() error { return h.mp.AddTx(da) }, MempoolAdmissionCounts{Accepted: 1, Rejected: 1})
+		if after := cloneDAAdmissionOwner(h.mp.PendingOutpointOwner()); !reflect.DeepEqual(after, before) {
+			t.Fatalf("owner image changed across the refusal:\n before %+v\n after  %+v", before, after)
+		}
+		if got := h.mp.AddRemoteTxForRelay(da, nil); got.Disposition != RelayAdmissionStableTerminalReject {
+			t.Fatalf("disposition=%v, want STABLE_TERMINAL_REJECT rather than the later CONFLICT", got.Disposition)
+		}
+	})
+	t.Run("never_initialized_owner_and_indexes_stay_nil", func(t *testing.T) {
+		mp, candidates := daGuardCandidates(t)
+		mp.mu.Lock()
+		mp.pendingOutpoints, mp.txs, mp.wtxids = nil, nil, nil
+		mp.mu.Unlock()
+		raw := candidates[1].raw
+		requireDAGuardPreservedImage(t, mp, raw, func() error { return mp.AddTx(raw) }, MempoolAdmissionCounts{Rejected: 1})
+		mp.mu.RLock()
+		defer mp.mu.RUnlock()
+		if mp.pendingOutpoints != nil || mp.txs != nil || mp.wtxids != nil {
+			t.Fatal("the refusal lazily created an owner or an index")
+		}
+	})
+	t.Run("reject_then_ordinary_reuse_of_the_same_confirmed_input", func(t *testing.T) {
+		h := newRelayHarness(t, nil, 1_000_000)
+		da := mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 100_000, 900_000, 1, h.fromKey, h.toAddr, []byte("0123456789"))
+		requireDAGuardPreservedImage(t, h.mp, da, func() error { return h.mp.AddTx(da) }, MempoolAdmissionCounts{Rejected: 1})
+		if err := h.mp.AddTx(h.tx(0, 100_000, 100_000, 2)); err != nil {
+			t.Fatalf("ordinary spend of the still-unclaimed confirmed input: %v", err)
+		}
+		if counts := h.mp.AdmissionCounts(); counts != (MempoolAdmissionCounts{Accepted: 1, Rejected: 1}) {
+			t.Fatalf("counts=%+v, want one rejection followed by one acceptance", counts)
+		}
+	})
+}
+
+// TestMempoolDAKindGuardLeavesCapacitySequenceAndOwnerUnchanged is the rest of
+// A4: each later standard pressure is arranged INDEPENDENTLY and the kind
+// rejection still wins, leaving the complete image, the eviction counter and
+// the four admission buckets exact.
+func TestMempoolDAKindGuardLeavesCapacitySequenceAndOwnerUnchanged(t *testing.T) {
+	rows := []struct {
+		name    string
+		cfg     *MempoolConfig
+		values  []uint64
+		arrange func(t *testing.T, h *relayHarness) MempoolAdmissionCounts
+	}{
+		{"raised_rolling_floor", nil, []uint64{1_000_000}, func(t *testing.T, h *relayHarness) MempoolAdmissionCounts {
+			h.mp.SetCurrentMinFeeRateForTest(1 << 40)
+			return MempoolAdmissionCounts{}
+		}},
+		{"full_count_capacity", &MempoolConfig{MaxTransactions: 1, MaxBytes: 1 << 20}, []uint64{1_000_000, 1_000_000}, func(t *testing.T, h *relayHarness) MempoolAdmissionCounts {
+			if err := h.mp.AddTx(h.tx(1, 100_000, 100_000, 9)); err != nil {
+				t.Fatalf("seed the single resident entry: %v", err)
+			}
+			return MempoolAdmissionCounts{Accepted: 1}
+		}},
+		{"insufficient_byte_capacity", &MempoolConfig{MaxTransactions: 10, MaxBytes: 1024}, []uint64{1_000_000}, func(*testing.T, *relayHarness) MempoolAdmissionCounts {
+			return MempoolAdmissionCounts{}
+		}},
+		{"exhausted_admission_sequence", nil, []uint64{1_000_000}, func(_ *testing.T, h *relayHarness) MempoolAdmissionCounts {
+			h.mp.mu.Lock()
+			h.mp.lastAdmissionSeq = ^uint64(0)
+			h.mp.mu.Unlock()
+			return MempoolAdmissionCounts{}
+		}},
+		{"exhausted_owner_token_sequence", nil, []uint64{1_000_000}, func(_ *testing.T, h *relayHarness) MempoolAdmissionCounts {
+			owner := h.mp.PendingOutpointOwner()
+			owner.mu.Lock()
+			owner.tokenHighWater = ^uint64(0)
+			owner.mu.Unlock()
+			return MempoolAdmissionCounts{}
+		}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			h := newRelayHarness(t, row.cfg, row.values...)
+			want := row.arrange(t, h)
+			want.Rejected++
+			da := mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 100_000, 900_000, 1, h.fromKey, h.toAddr, []byte("0123456789"))
+			requireDAGuardPreservedImage(t, h.mp, da, func() error { return h.mp.AddTx(da) }, want)
+		})
+	}
+}
+
+// TestMempoolDAKindGuardRelayResult is the A5 row: every published field of the
+// typed producer result for a refused DA candidate, over both signed DA kinds.
+// Only the exact complete context the read-only probe proved for this call
+// authorizes evidence; a nil, generation-stale or tip-mismatched one publishes
+// none, and the later reserve/context refusal never preempts the kind
+// rejection.
+func TestMempoolDAKindGuardRelayResult(t *testing.T) {
+	rows := []struct {
+		name        string
+		expected    func(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext
+		wantContext bool
+	}{
+		{"nil_expected_context", func(*testing.T, *Mempool) *PendingOutpointAdmissionContext { return nil }, false},
+		{"exact_current_complete_context", daGuardContext, true},
+		{"same_tip_stale_generation", func(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext {
+			stale := daGuardContext(t, mp)
+			owner := mp.PendingOutpointOwner()
+			if _, err := owner.beginTransition(); err != nil {
+				t.Fatalf("beginTransition: %v", err)
+			}
+			if err := owner.commitStableTip(pendingOutpointTipOf(mp.chainState)); err != nil {
+				t.Fatalf("commitStableTip: %v", err)
+			}
+			return stale
+		}, false},
+		{"mismatched_tip_same_generation", func(t *testing.T, mp *Mempool) *PendingOutpointAdmissionContext {
+			mismatched := *daGuardContext(t, mp)
+			mismatched.StableTip.Height++
+			mismatched.StableTip.Hash[0] ^= 0xFF
+			return &mismatched
+		}, false},
+	}
+	for _, row := range rows {
+		for _, index := range []int{0, 1} {
+			mp, candidates := daGuardCandidates(t)
+			candidate := candidates[index]
+			t.Run(row.name+"/"+candidate.name, func(t *testing.T) {
+				expected := row.expected(t, mp)
+				got := mp.AddRemoteTxForRelay(candidate.raw, expected)
+				requireDAKindReject(t, got.Err)
+				if got.Disposition != RelayAdmissionStableTerminalReject {
+					t.Fatalf("disposition=%v, want STABLE_TERMINAL_REJECT", got.Disposition)
+				}
+				if got.TxID != txID(t, candidate.raw) || got.WTxID == ([32]byte{}) {
+					t.Fatalf("identities=%x/%x, want the producer-parsed candidate pair", got.TxID, got.WTxID)
+				}
+				want := PendingOutpointAdmissionContext{}
+				if row.wantContext {
+					want = *expected
+				}
+				if got.HasAdmissionContext != row.wantContext || got.AdmissionContext != want {
+					t.Fatalf("hasContext=%v context=%+v, want %v and %+v", got.HasAdmissionContext, got.AdmissionContext, row.wantContext, want)
+				}
+			})
+		}
+	}
+}
+
+// TestMempoolDAKindGuardPreservesEarlierErrors is R1-R4: every terminal,
+// canonical, consensus and DA-policy refusal that already owned a DA candidate
+// still owns it, with its exact baseline kind, message and disposition. Each
+// row varies exactly one dimension of an otherwise valid signed DA candidate.
+func TestMempoolDAKindGuardPreservesEarlierErrors(t *testing.T) {
+	rows := []struct {
+		name       string
+		build      func(t *testing.T) (*Mempool, []byte)
+		wantKind   TxAdmitErrorKind
+		wantDisp   RelayAdmissionDisposition
+		wantMsg    string
+		wantIDs    bool
+		wantCounts MempoolAdmissionCounts
+	}{
+		{"R1_nil_receiver", func(t *testing.T) (*Mempool, []byte) {
+			_, candidates := daGuardCandidates(t)
+			return nil, candidates[0].raw
+		}, TxAdmitUnavailable, RelayAdmissionUnavailable, "nil mempool", false, MempoolAdmissionCounts{}},
+		{"R1_nil_chainstate", func(t *testing.T) (*Mempool, []byte) {
+			_, candidates := daGuardCandidates(t)
+			return &Mempool{}, candidates[0].raw
+		}, TxAdmitUnavailable, RelayAdmissionUnavailable, "nil chainstate", false, MempoolAdmissionCounts{Unavailable: 1}},
+		{"R1_terminal_admission_guard", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			mp.chainState.admissionMu.notifyTerminal()
+			return mp, candidates[0].raw
+		}, TxAdmitUnavailable, RelayAdmissionUnavailable, "pending-outpoint owner admission context unavailable", false, MempoolAdmissionCounts{Unavailable: 1}},
+		{"R2_truncated_bytes", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			return mp, candidates[0].raw[:len(candidates[0].raw)-1]
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_PARSE: unexpected EOF (bytes)", false, MempoolAdmissionCounts{Rejected: 1}},
+		{"R2_trailing_bytes", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			return mp, append(append([]byte(nil), candidates[0].raw...), 0x00)
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "trailing bytes after canonical tx", false, MempoolAdmissionCounts{Rejected: 1}},
+		{"R2_unsupported_kind_byte", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			unsupported := append([]byte(nil), candidates[0].raw...)
+			unsupported[4] = 0x03
+			return mp, unsupported
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_PARSE: unsupported tx_kind", false, MempoolAdmissionCounts{Rejected: 1}},
+		{"R2_invalid_kind_payload_shape", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			reshaped := append([]byte(nil), candidates[0].raw...)
+			reshaped[4] = 0x02
+			return mp, reshaped
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_PARSE: da_payload_len out of range for tx_kind=0x02", false, MempoolAdmissionCounts{Rejected: 1}},
+		{"R3_invalid_signature", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			return mp, corruptFirstWitnessSignature(t, candidates[0].raw)
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid", true, MempoolAdmissionCounts{Rejected: 1}},
+		{"R3_missing_confirmed_utxo", func(t *testing.T) (*Mempool, []byte) {
+			mp, candidates := daGuardCandidates(t)
+			tx, _, _, _, err := consensus.ParseTx(candidates[0].raw)
+			if err != nil {
+				t.Fatalf("ParseTx(commit): %v", err)
+			}
+			delete(mp.chainState.Utxos, consensus.Outpoint{Txid: tx.Inputs[0].PrevTxid, Vout: tx.Inputs[0].PrevVout})
+			return mp, candidates[0].raw
+		}, TxAdmitRejected, RelayAdmissionMissingDependency, "TX_ERR_MISSING_UTXO: utxo not found", true, MempoolAdmissionCounts{Rejected: 1}},
+		{"R3_zero_tx_nonce", func(t *testing.T) (*Mempool, []byte) {
+			h := newRelayHarness(t, nil, 1_000_000)
+			return h.mp, mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 100_000, 900_000, 0, h.fromKey, h.toAddr, []byte("0123456789"))
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_TX_NONCE_INVALID: tx_nonce must be >= 1 for non-coinbase", true, MempoolAdmissionCounts{Rejected: 1}},
+		{"R3_retired_core_ext_covenant", func(t *testing.T) (*Mempool, []byte) {
+			h := newRelayHarness(t, nil, 1_000_000)
+			tx := &consensus.Tx{Version: 1, TxKind: 0x01, TxNonce: 7,
+				Inputs:       []consensus.TxInput{{PrevTxid: h.outpoints[0].Txid, PrevVout: h.outpoints[0].Vout}},
+				Outputs:      []consensus.TxOutput{{Value: 100_000, CovenantType: 0x0102, CovenantData: []byte{0x01}}},
+				DaPayload:    []byte("0123456789"),
+				DaCommitCore: &consensus.DaCommitCore{ChunkCount: 1, BatchNumber: 1},
+			}
+			if err := consensus.SignTransaction(tx, h.st.Utxos, devnetGenesisChainID, h.fromKey); err != nil {
+				t.Fatalf("SignTransaction(retired covenant): %v", err)
+			}
+			return h.mp, mustMarshalTxForNodeTest(t, tx)
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "CORE_EXT output unsupported by Go node runtime", true, MempoolAdmissionCounts{Rejected: 1}},
+		{"R4_da_fee_below_stage_c_floor", func(t *testing.T) (*Mempool, []byte) {
+			h := newRelayHarness(t, &MempoolConfig{PolicyDaSurchargePerByte: 1}, 100)
+			return h.mp, mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 99, 1, 1, h.fromKey, h.toAddr, []byte("0123456789"))
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "DA fee below Stage C floor", true, MempoolAdmissionCounts{Rejected: 1}},
+		{"R4_declared_chunk_budget_exceeded", func(t *testing.T) (*Mempool, []byte) {
+			h := newRelayHarness(t, &MempoolConfig{PolicyMaxDaBytesPerBlock: consensus.CHUNK_BYTES - 1}, 1_000_000)
+			return h.mp, mustBuildSignedDaCommitTxWithChunkCount(t, h.st.Utxos, h.outpoints[0], 50_000, 950_000, 1, h.fromKey, h.toAddr, 1, []byte("0123456789"))
+		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "DA declared chunk budget exceeded", true, MempoolAdmissionCounts{Rejected: 1}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			mp, raw := row.build(t)
+			got := mp.AddRemoteTxForRelay(raw, nil)
+			var admitErr *TxAdmitError
+			if !errors.As(got.Err, &admitErr) || admitErr.Kind != row.wantKind || !strings.Contains(admitErr.Message, row.wantMsg) {
+				t.Fatalf("err=%v, want %s carrying %q", got.Err, row.wantKind, row.wantMsg)
+			}
+			if admitErr.Message == daGuardRejectMessage {
+				t.Fatalf("the kind guard preempted the earlier %s refusal", row.name)
+			}
+			if got.Disposition != row.wantDisp || got.HasAdmissionContext || got.AdmissionContext != (PendingOutpointAdmissionContext{}) {
+				t.Fatalf("disposition=%v hasContext=%v, want %v with no published context", got.Disposition, got.HasAdmissionContext, row.wantDisp)
+			}
+			if hasIDs := got.TxID != ([32]byte{}); hasIDs != row.wantIDs {
+				t.Fatalf("published identity=%v (%x), want %v", hasIDs, got.TxID, row.wantIDs)
+			}
+			if counts := mp.AdmissionCounts(); counts != row.wantCounts {
+				t.Fatalf("counts=%+v, want %+v", counts, row.wantCounts)
+			}
+			if mp.Len() != 0 {
+				t.Fatalf("mempool len=%d after an earlier refusal, want 0", mp.Len())
+			}
+		})
+	}
 }
