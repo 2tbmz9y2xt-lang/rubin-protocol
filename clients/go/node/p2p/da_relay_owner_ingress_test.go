@@ -33,6 +33,16 @@ func require(t *testing.T, ok bool, format string, args ...any) {
 	}
 }
 
+func runDetachedReorgDAAdmission(s *Service, raw []byte) error {
+	finish, err := s.admitDetachedReorgDA(raw)
+	if finish != nil {
+		finish(true)
+		finish(true)
+		finish(false)
+	}
+	return err
+}
+
 // daIngressFixture funds and signs the DA transactions the remote ingress rows
 // admit: AdmitDA is the only retained-member writer, so every member needs a real
 // confirmed input (one seeded P2PK output), a real signature and its own nonce.
@@ -193,6 +203,136 @@ func nowCalls(h *testHarness) *atomic.Int32 { // scheduleDAPrefetch calls cfg.No
 	inner := h.service.cfg.Now
 	h.service.cfg.Now = func() time.Time { calls.Add(1); return inner() }
 	return &calls
+}
+
+func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	h.service.cfg.EnableCompactReceive = true
+	current := addDAPrefetchTestPeer(h.service, "detached-effects-peer", nil)
+	peerBefore := effectsOf(current)
+	f := newDAIngressFixture(t, h)
+	calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
+	standardCounts, standardLen, seenLen, relayLen := h.mempool.AdmissionCounts(), h.mempool.Len(), h.service.txSeen.Len(), relayPool.Len()
+	requireStandardUnchanged := func(label string) {
+		t.Helper()
+		require(t, h.mempool.AdmissionCounts() == standardCounts && h.mempool.Len() == standardLen && h.service.txSeen.Len() == seenLen && relayPool.Len() == relayLen,
+			"%s: detached DA effects mismatch: standard counts=%+v/%+v len=%d/%d seen=%d/%d relay=%d/%d", label, h.mempool.AdmissionCounts(), standardCounts, h.mempool.Len(), standardLen, h.service.txSeen.Len(), seenLen, relayPool.Len(), relayLen)
+	}
+	admit := func(raw []byte, wantCompletion bool) error {
+		t.Helper()
+		finish, err := h.service.admitDetachedReorgDA(raw)
+		if finish != nil {
+			defer finish(false)
+		}
+		require(t, (finish != nil) == wantCompletion, "detached DA completion=%v want=%v", finish != nil, wantCompletion)
+		if finish != nil {
+			finish(true)
+			finish(true)
+		}
+		return err
+	}
+
+	daID := daRelayTestID(0xd8)
+	retained := f.commit(daID, 2)
+	original := append([]byte(nil), retained...)
+	if err := admit(retained, true); err != nil || calls.Load() != 1 {
+		t.Fatalf("detached DA effects mismatch: E1 retained err=%v scheduler calls=%d", err, calls.Load())
+	}
+	framesAfterRetained := len(current.conn.(*scriptedConn).Bytes())
+	require(t, framesAfterRetained > 0, "detached DA effects mismatch: E1 retained emitted no getdachunk request")
+	retained[0] ^= 0xff
+	f.requireRetained(original, "E1 detached retained raw ownership")
+	requireStandardUnchanged("E1")
+
+	if err := admit(original, false); err != nil || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
+		t.Fatalf("detached DA effects mismatch: E2 exact duplicate err=%v scheduler calls=%d", err, calls.Load())
+	}
+	nonexact := resignDATx(t, f, mustParseP2PTx(t, original))
+	if err := admit(nonexact, false); err != nil || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
+		t.Fatalf("E2 nonexact duplicate err=%v scheduler calls=%d", err, calls.Load())
+	}
+	conflict := f.commit(daID, 2)
+	if err := admit(conflict, false); err != nil || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
+		t.Fatalf("E3 competing commit err=%v scheduler calls=%d", err, calls.Load())
+	}
+	requireStandardUnchanged("E2/E3")
+
+	err := admit(nil, false)
+	var admitErr *node.TxAdmitError
+	if !errors.As(err, &admitErr) || admitErr == nil || errors.Unwrap(err) != nil || !errors.Is(admitErr, err) || admitErr.Kind != node.TxAdmitRejected || admitErr.Message != "empty DA transaction" || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
+		t.Fatalf("detached DA effects mismatch: E4 owner error=%v scheduler calls=%d", err, calls.Load())
+	}
+	requireStandardUnchanged("E4")
+
+	commitFirstID := daRelayTestID(0xda)
+	commitFirst := f.commit(commitFirstID, 1)
+	if err := admit(commitFirst, true); err != nil || calls.Load() != 2 {
+		t.Fatalf("E5 commit-first retained err=%v calls=%d", err, calls.Load())
+	}
+	framesBeforeComplete := len(current.conn.(*scriptedConn).Bytes())
+	if err := admit(f.chunk(commitFirstID, 0, []byte("complete")), false); err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" || calls.Load() != 2 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
+		t.Fatalf("E5 chunk-last err=%v calls=%d", err, calls.Load())
+	}
+	f.requireRetained(commitFirst, "E5 commit-first preservation")
+
+	commitLastID := daRelayTestID(0xdb)
+	chunkFirst := f.chunk(commitLastID, 0, []byte("complete"))
+	if err := admit(chunkFirst, true); err != nil || calls.Load() != 3 {
+		t.Fatalf("E5 chunk-first retained err=%v calls=%d", err, calls.Load())
+	}
+	framesBeforeComplete = len(current.conn.(*scriptedConn).Bytes())
+	if err := admit(f.commit(commitLastID, 1), false); err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" || calls.Load() != 3 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
+		t.Fatalf("E5 commit-last err=%v calls=%d", err, calls.Load())
+	}
+	f.requireRetained(chunkFirst, "E5 chunk-first preservation")
+	requireStandardUnchanged("E5")
+	requests := readScriptedFrames(t, h, current)
+	require(t, len(requests) == 2 && requests[0].DAID == daID && requests[1].DAID == commitFirstID && effectsOf(current) == peerBefore, "detached DA effects mismatch: getdachunk=%+v peer=%+v/%+v (third retained scheduler is the bounded plan-refusal row)", requests, effectsOf(current), peerBefore)
+
+	t.Run("E6 no eligible peer", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
+		raw, relayLen := f.commit(daRelayTestID(0xdc), 2), relayPool.Len()
+		if err := runDetachedReorgDAAdmission(h.service, raw); err != nil || calls.Load() != 1 || relayPool.Len() != relayLen {
+			t.Fatalf("detached DA effects mismatch: peerless detached admission err=%v scheduler=%d relay=%d/%d", err, calls.Load(), relayPool.Len(), relayLen)
+		}
+		f.requireRetained(raw, "peerless detached admission")
+	})
+	t.Run("E6 send failure through combined entry", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		h.service.cfg.EnableCompactReceive = true
+		current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("detached send failure"))
+		before := effectsOf(current)
+		f := newDAIngressFixture(t, h)
+		calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
+		daID := daRelayTestID(0xdd)
+		raw, relayLen := f.commit(daID, 2), relayPool.Len()
+		if err := runDetachedReorgDAAdmission(h.service, raw); err != nil || calls.Load() != 1 || relayPool.Len() != relayLen {
+			t.Fatalf("detached DA effects mismatch: send-failure detached admission err=%v scheduler=%d relay=%d/%d", err, calls.Load(), relayPool.Len(), relayLen)
+		}
+		f.requireRetained(raw, "send-failure detached admission")
+		after := effectsOf(current)
+		require(t, after.ban == before.ban && after.score == before.score && after.anchor == before.anchor && after.last != "", "send failure peer effects=%+v/%+v", after, before)
+		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+		require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "send failure retry ownership=%+v diagnostic=%q", retry, diagnostic)
+	})
+	t.Run("E6 missing peer releases plan", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		calls, relayPool := nowCalls(h), h.service.cfg.TxPool.(*MemoryTxPool)
+		daID := daRelayTestID(0xde)
+		raw, relayLen := f.commit(daID, 1), relayPool.Len()
+		if err := runDetachedReorgDAAdmission(h.service, raw); err != nil || calls.Load() != 1 || relayPool.Len() != relayLen {
+			t.Fatalf("detached DA effects mismatch: missing-peer detached admission err=%v scheduler=%d relay=%d/%d", err, calls.Load(), relayPool.Len(), relayLen)
+		}
+		f.requireRetained(raw, "missing-peer detached admission")
+		plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+		require(t, len(plans) == 1 && diagnostic == "", "missing-peer plans=%+v diagnostic=%q", plans, diagnostic)
+		h.service.sendDAPrefetchPlan(map[string]*peer{}, plans[0])
+		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+		require(t, len(retry) == 1 && diagnostic == "", "missing-peer released retry=%+v diagnostic=%q", retry, diagnostic)
+	})
 }
 
 func peerQuality(p *peer) (uint8, uint64) {

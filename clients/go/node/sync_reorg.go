@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -22,6 +23,46 @@ type verifiedStoredBlock struct {
 	lookupHash [32]byte
 	blockBytes []byte
 	parsed     *consensus.ParsedBlock
+}
+
+type reorgDACompletions struct {
+	pending []func(bool)
+}
+
+type reorgDADiagnostics struct {
+	failures int
+	first    string
+}
+
+func (d *reorgDADiagnostics) record(err error) {
+	d.failures++
+	if d.failures == 1 {
+		formatted := fmt.Sprint(err)
+		d.first = strings.Clone(formatted[:min(len(formatted), diagnosticBatchMaxBytes)])
+	}
+}
+
+func (d *reorgDADiagnostics) flush(s *SyncEngine, diag *diagnosticBatch) {
+	if d.failures == 1 {
+		s.diagnose(diag, "da relay: requeue-tx: %s\n", d.first)
+	} else if d.failures > 1 {
+		s.diagnose(diag, "da relay: requeue-tx: %d failures; first: %s\n", d.failures, d.first)
+	}
+}
+
+func (c *reorgDACompletions) drain(run bool) {
+	for len(c.pending) > 0 {
+		completion := c.pending[0]
+		c.pending[0] = nil
+		c.pending = c.pending[1:]
+		completion(run)
+	}
+	c.pending = nil
+}
+
+func (c *reorgDACompletions) finish() {
+	defer c.drain(false)
+	c.drain(true)
 }
 
 // ApplyBlockWithReorg is the relay entry point: it connects a tip extension, or
@@ -47,32 +88,53 @@ type verifiedStoredBlock struct {
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
-	if s == nil {
-		return nil, errors.New("sync engine is not initialized")
-	}
-	diag := &diagnosticBatch{}
-	defer s.flushDiagnostics(diag)
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-	if err := s.mutationAllowed(); err != nil {
-		return nil, err
-	}
-	pb, blockHash, err := parseReorgBlock(blockBytes)
-	if err != nil {
-		return nil, err
-	}
+	summary, finish, err := s.ApplyBlockWithReorgDeferred(blockBytes, prevTimestamps)
+	finish()
+	return summary, err
+}
 
-	if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps, diag); handled {
-		return summary, err
-	}
-	branch, commonAncestorHeight, switchToBranch, candidateHeight, err := s.evaluateSideBranch(blockHash, blockBytes, pb)
-	if err != nil {
-		return nil, err
-	}
-	if !switchToBranch {
-		return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
-	}
-	return s.applyPreferredBranch(branch, commonAncestorHeight, diag)
+// ApplyBlockWithReorgDeferred keeps admissions serialized and returns a nonnil
+// finish that owns every pending retained-result lease. The caller must invoke
+// it synchronously and immediately after releasing its outer canonical lock,
+// including on returned error. finish is serial and idempotent.
+// A panic before handoff cancels pending leases, including diagnostic panics.
+func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, func(), error) {
+	completions := &reorgDACompletions{}
+	transferred := false
+	defer func() {
+		if !transferred {
+			completions.drain(false)
+		}
+	}()
+	summary, err := func() (*ChainStateConnectSummary, error) {
+		if s == nil {
+			return nil, errors.New("sync engine is not initialized")
+		}
+		diag := &diagnosticBatch{}
+		defer s.flushDiagnostics(diag)
+		s.mutationMu.Lock()
+		defer s.mutationMu.Unlock()
+		if err := s.mutationAllowed(); err != nil {
+			return nil, err
+		}
+		pb, blockHash, err := parseReorgBlock(blockBytes)
+		if err != nil {
+			return nil, err
+		}
+		if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps, diag); handled {
+			return summary, err
+		}
+		branch, commonAncestorHeight, switchToBranch, candidateHeight, err := s.evaluateSideBranch(blockHash, blockBytes, pb)
+		if err != nil {
+			return nil, err
+		}
+		if !switchToBranch {
+			return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
+		}
+		return s.applyPreferredBranch(branch, commonAncestorHeight, diag, completions)
+	}()
+	transferred = true
+	return summary, completions.finish, err
 }
 
 func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -274,6 +336,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	diag *diagnosticBatch,
+	completions *reorgDACompletions,
 ) (*ChainStateConnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
@@ -296,7 +359,7 @@ func (s *SyncEngine) applyPreferredBranch(
 		// image but invokes zero requeue owners. This runs after the transition
 		// reopened admission and still under the entry point's mutationMu, so its
 		// diagnostics join the same batch.
-		s.requeueCanonicalDisconnectedRows(plan.disconnect, diag)
+		s.requeueCanonicalDisconnectedRows(plan.disconnect, diag, completions)
 	}
 	return summary, err
 }
@@ -727,28 +790,35 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 // (the reorg path), or nil for a caller outside a mutation, which holds none of
 // the engine's locks and may therefore write directly.
 // Section 11.1 selects ONE owner per disconnected non-coinbase row from the
-// row's own tx_kind, and this is that selection for the current line:
+// row's own tx_kind:
 //
 //	tx_kind 0x00                 -> exactly one standard-owner attempt
-//	tx_kind 0x01/0x02 (DA)       -> zero owners, dropped
-//	every other/unsupported kind -> zero owners, dropped
+//	tx_kind 0x01/0x02 (DA)       -> exactly one detached DA-owner attempt
+//	every other/unsupported kind -> zero owners
 //
-// The DA row is a BOUNDED INTERMEDIATE SAFETY GUARD, not Section 11.1's DA
-// re-admission: routing a DA_COMMIT_TX or DA_CHUNK_TX into the standard owner
-// would admit it under the wrong domain's rules, so until RUB-680 owns the
-// detached DA owner the row invokes no owner at all. This is deliberately a
-// smaller behavior than the subsection describes, and it MUST NOT be read as
-// completing it.
-//
-// Dropped rows record ONE diagnostic PER BLOCK carrying their count and the
-// per-kind breakdown, not one per row: the retained batch is bounded, and a
-// DA-heavy block emitting per-row records would evict the standard rows' own
-// diagnostics behind the truncation marker. An owner's own admission FAILURE
-// stays per-row, since each carries a distinct error. The drop touches no DA
-// owner and no peer quota.
+// The Mempool and detached callback are captured together once so a concurrent
+// first Service claim cannot change owners within this invocation. Owner errors
+// are bounded diagnostics and never stop later rows.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
-	if s == nil || s.mempool == nil || len(disconnectedBlocks) == 0 {
+	completions := &reorgDACompletions{}
+	defer completions.drain(false)
+	s.requeueParsedDisconnectedTransactionsDeferred(disconnectedBlocks, diag, completions)
+	completions.finish()
+}
+
+func (s *SyncEngine) requeueParsedDisconnectedTransactionsDeferred(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch, completions *reorgDACompletions) {
+	if s == nil || len(disconnectedBlocks) == 0 {
 		return
+	}
+	daDiagnostics := &reorgDADiagnostics{}
+	defer daDiagnostics.flush(s, diag)
+	s.mu.RLock()
+	mempool, admitDetachedReorg := s.mempool, s.reorgDAAdmission
+	s.mu.RUnlock()
+	if admitDetachedReorg == nil {
+		admitDetachedReorg = func([]byte) (func(bool), error) {
+			return nil, &TxAdmitError{Kind: TxAdmitUnavailable, Message: "detached DA admission is not initialized"}
+		}
 	}
 	// Disconnect helpers append blocks tip-down, matching h_max -> h_min requeue order.
 	for _, parsed := range disconnectedBlocks {
@@ -756,34 +826,27 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		if err != nil {
 			continue
 		}
-		s.requeueParsedBlockRows(rows, diag)
+		s.requeueParsedBlockRows(rows, mempool, admitDetachedReorg, diag, completions, daDiagnostics)
 	}
 }
 
-// requeueParsedBlockRows applies the selection above to ONE disconnected block's rows and emits its single dropped-rows record.
-func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, diag *diagnosticBatch) {
-	// Indexed by tx_kind, so the breakdown below renders in ascending kind
-	// order without a map or a sort.
-	var dropped [256]int
-	total := 0
+// requeueParsedBlockRows synchronously applies the selected owner to one
+// disconnected block's rows in canonical order.
+func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, mempool *Mempool, admitDetachedReorg func([]byte) (func(bool), error), diag *diagnosticBatch, completions *reorgDACompletions, daDiagnostics *reorgDADiagnostics) {
 	for _, row := range rows {
-		if row.kind != 0x00 {
-			dropped[row.kind]++
-			total++
-			continue
-		}
-		if err := s.mempool.AddReorgTx(row.txBytes); err != nil {
-			s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
-		}
-	}
-	if total != 0 {
-		kinds := ""
-		for kind, count := range dropped {
-			if count != 0 {
-				kinds = fmt.Sprintf("%s 0x%02x x%d", kinds, kind, count)
+		switch row.kind {
+		case 0x00:
+			if err := mempool.AddReorgTx(row.txBytes); err != nil {
+				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
+			}
+		case 0x01, 0x02:
+			completion, err := admitDetachedReorg(row.txBytes)
+			if err != nil {
+				daDiagnostics.record(err)
+			} else if completion != nil {
+				completions.pending = append(completions.pending, completion)
 			}
 		}
-		s.diagnose(diag, "mempool: requeue-tx: %d row(s) of a non-standard tx_kind invoke no owner in this line:%s\n", total, kinds)
 	}
 }
 
@@ -792,8 +855,8 @@ func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, diag *di
 // kind travels with the bytes precisely so the requeue selection never re-parses
 // and never falls back to a second classifier.
 //
-// txBytes is populated ONLY for kind 0x00, the one kind that reaches an owner;
-// a dropped row carries its kind and nil bytes.
+// txBytes is populated for every supported owner kind; an unsupported row
+// carries its kind and nil bytes.
 type canonicalRequeueRow struct {
 	txBytes []byte
 	kind    uint8
@@ -803,8 +866,8 @@ type canonicalRequeueRow struct {
 // canonical body order — the coinbase row at index 0 is skipped and invokes zero
 // owners whatever it parsed as.
 //
-// The kind is tested BEFORE the serialization, so a row no owner will receive is
-// never marshaled.
+// Unsupported rows are classified without serialization because no owner will
+// receive them.
 func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([]canonicalRequeueRow, error) {
 	if pb == nil {
 		return nil, errors.New("nil parsed block")
@@ -819,7 +882,8 @@ func nonCoinbaseParsedBlockTransactions(pb *consensus.ParsedBlock) ([]canonicalR
 			return nil, fmt.Errorf("parsed block row %d is nil", txIndex)
 		}
 		row := canonicalRequeueRow{kind: tx.TxKind}
-		if row.kind == 0x00 {
+		switch row.kind {
+		case 0x00, 0x01, 0x02:
 			txBytes, err := consensus.MarshalTx(tx)
 			if err != nil {
 				return nil, err

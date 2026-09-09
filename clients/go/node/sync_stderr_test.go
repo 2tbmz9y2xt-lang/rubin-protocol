@@ -202,6 +202,7 @@ func TestSyncEngineStderrRaceAllProducers(t *testing.T) {
 	// drain before the slower producers reach their diagnostic, and then an
 	// unsynchronized read has nothing to race against. Under -race this fails on
 	// any diagnostic site that reads the writer field directly.
+	f.engine.SetStderr(&lockedWriter{})
 	sinks := []io.Writer{io.Discard, &lockedWriter{}, &lockedWriter{}}
 	done := make(chan struct{})
 	var churn sync.WaitGroup

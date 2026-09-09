@@ -647,18 +647,18 @@ func assignCanonicalChainState(dst *ChainState, src *ChainState) {
 	dst.mu.Unlock()
 }
 
-// requeueCanonicalDisconnectedRows runs the existing best-effort standard requeue
+// requeueCanonicalDisconnectedRows runs selected standard and DA admission
 // over the rows this transition disconnected, tip-down, which is the Section 11.1
 // h_max..h_min order. It RE-READS each row from the store rather than retaining
 // its bytes: the rows are retained healthy noncanonical artifacts, so the
 // transition itself never has to carry depth-proportional payload ACROSS the
-// commit. Requeue is not free — it materializes each disconnected parse here,
-// transiently, one row at a time — but that lives entirely after the transition
-// released admission. A row that can no longer be read is skipped with a
+// commit. Requeue is not free — it buffers every successfully read and parsed
+// disconnected block before routing any rows — but that lives entirely after
+// the transition released admission. A row that can no longer be read is skipped with a
 // diagnostic: requeue is a downstream best-effort effect and cannot change
 // commit truth.
-func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescriptor, diag *diagnosticBatch) {
-	if s.mempool == nil || s.blockStore == nil || len(rows) == 0 {
+func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescriptor, diag *diagnosticBatch, completions *reorgDACompletions) {
+	if s.blockStore == nil || len(rows) == 0 {
 		return
 	}
 	parsed := make([]*consensus.ParsedBlock, 0, len(rows))
@@ -675,7 +675,7 @@ func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescrip
 		}
 		parsed = append(parsed, pb)
 	}
-	s.requeueParsedDisconnectedTransactions(parsed, diag)
+	s.requeueParsedDisconnectedTransactionsDeferred(parsed, diag, completions)
 }
 
 // canonicalSequenceDescriptors turns a contiguous canonical-index range into

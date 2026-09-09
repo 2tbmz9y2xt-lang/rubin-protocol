@@ -110,6 +110,7 @@ type SyncEngine struct {
 	mempool            *Mempool
 	daRelay            *DARelayState
 	daRelayClaimed     bool
+	reorgDAAdmission   func([]byte) (func(bool), error)
 	cfg                SyncConfig
 	stderr             io.Writer
 	mu                 sync.RWMutex
@@ -620,8 +621,9 @@ func (s *SyncEngine) DARelayState() *DARelayState {
 	return s.daRelay
 }
 
-// ClaimDARelayState atomically returns the sole lifetime Service claim.
-func (s *SyncEngine) ClaimDARelayState() (*DARelayState, error) {
+// ClaimDARelayState atomically publishes the sole lifetime Service claim and
+// its detached-reorg admission callback.
+func (s *SyncEngine) ClaimDARelayState(expectedRelay *DARelayState, admitDetachedReorg func([]byte) (func(bool), error)) (*DARelayState, error) {
 	if s == nil {
 		return nil, errors.New("sync engine DA relay state is not initialized")
 	}
@@ -633,6 +635,13 @@ func (s *SyncEngine) ClaimDARelayState() (*DARelayState, error) {
 	if s.daRelayClaimed {
 		return nil, errors.New("sync engine DA relay state is already claimed")
 	}
+	if expectedRelay == nil || expectedRelay != s.daRelay {
+		return nil, errors.New("sync engine DA relay state binding mismatch")
+	}
+	if admitDetachedReorg == nil {
+		return nil, errors.New("sync engine detached DA admission is not initialized")
+	}
+	s.reorgDAAdmission = admitDetachedReorg
 	s.daRelayClaimed = true
 	return s.daRelay, nil
 }

@@ -42,6 +42,41 @@ func (s *Service) AdmitLocalDA(txBytes []byte) (node.DAAdmissionResult, error) {
 	return s.daRelay.AdmitDA(txBytes, node.LocalDAProvenance())
 }
 
+// admitDetachedReorgDA transfers a retained result's work lease to its
+// once-only post-lock completion.
+func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), err error) {
+	if s == nil {
+		return nil, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil service"}
+	}
+	if !s.acquireWork() {
+		return nil, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: errServiceClosed.Error()}
+	}
+	defer func() {
+		if completion == nil {
+			s.releaseWork()
+		}
+	}()
+	result, err := s.daRelay.AdmitDA(txBytes, node.DetachedReorgDAProvenance())
+	if err != nil {
+		return nil, err
+	}
+	if result.Disposition != node.DAAdmissionRetained || result.SameDAIDCommitConflict {
+		return completion, err
+	}
+	daID := result.DAID
+	consumed := false
+	return func(run bool) {
+		if consumed {
+			return
+		}
+		consumed = true
+		defer s.releaseWork()
+		if run {
+			s.scheduleDAPrefetch("", daID)
+		}
+	}, nil
+}
+
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
 // transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer

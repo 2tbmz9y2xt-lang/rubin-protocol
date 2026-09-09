@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +59,125 @@ func TestNewServiceCloseDoesNotReleaseEngineClaim(t *testing.T) {
 	if _, err := NewService(h.service.cfg); err == nil || err.Error() != "sync engine DA relay state is already claimed" {
 		t.Fatalf("NewService after Close: %v", err)
 	}
+}
+
+func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
+	t.Run("complete service is published once", func(t *testing.T) {
+		cfg := unclaimedServiceConfig(t)
+		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}
+		service, err := NewService(cfg)
+		require(t, err == nil, "NewService: %v", err)
+		require(t, service != nil && service.daRelay != nil && service.daRelay == cfg.SyncEngine.DARelayState() && service.cfg.Now != nil && service.addrMgr != nil && service.peers != nil && service.peerQuotaLocks != nil && service.inFlightDial != nil && service.reconnectState != nil && service.handshakeSlots != nil && service.blockSeen != nil && service.txSeen != nil && service.orphans != nil, "published incomplete Service: %+v", service)
+		_, err = NewService(cfg)
+		require(t, err != nil && err.Error() == "sync engine DA relay state is already claimed", "competing NewService error=%v", err)
+		err = service.Close()
+		require(t, err == nil, "Close: %v", err)
+		_, err = NewService(cfg)
+		require(t, err != nil && err.Error() == "sync engine DA relay state is already claimed", "post-Close NewService error=%v", err)
+	})
+
+	t.Run("constructor panic consumes no claim", func(t *testing.T) {
+		cfg := unclaimedServiceConfig(t)
+		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}
+		sentinel := &struct{}{}
+		cfg.Now = func() time.Time { panic(sentinel) }
+		func() {
+			defer func() {
+				got := recover()
+				require(t, got == sentinel, "constructor panic=%v, want original %v", got, sentinel)
+			}()
+			_, _ = NewService(cfg)
+		}()
+		cfg.Now = time.Now
+		service, err := NewService(cfg)
+		require(t, err == nil, "NewService after panic: %v", err)
+		err = service.Close()
+		require(t, err == nil, "Close: %v", err)
+	})
+
+	t.Run("nil getter racing first binding fails mismatch", func(t *testing.T) {
+		base := newTestHarness(t, 0, "127.0.0.1:0", nil)
+		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
+		require(t, err == nil, "NewSyncEngine: %v", err)
+		cfg := base.service.cfg
+		cfg.SyncEngine = engine
+		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}
+		entered, release := make(chan struct{}), make(chan struct{})
+		var enteredOnce, releaseOnce sync.Once
+		releaseConstructor := func() { releaseOnce.Do(func() { close(release) }) }
+		cfg.Now = func() time.Time { enteredOnce.Do(func() { close(entered) }); <-release; return time.Unix(1, 0) }
+		result, constructionDone := make(chan error, 1), make(chan struct{})
+		go func() {
+			defer close(constructionDone)
+			_, err := NewService(cfg)
+			result <- err
+		}()
+		t.Cleanup(func() {
+			releaseConstructor()
+			select {
+			case <-constructionDone:
+			case <-time.After(lifecycleWatchdog):
+				t.Errorf("racing NewService cleanup did not return within %s", lifecycleWatchdog)
+			}
+		})
+		select {
+		case <-entered:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatalf("reorg claim binding mismatch: NewService clock barrier did not enter within %s", lifecycleWatchdog)
+		}
+		mempool, err := node.NewMempool(base.chainState, base.blockStore, node.DevnetGenesisChainID())
+		require(t, err == nil, "NewMempool: %v", err)
+		engine.SetMempool(mempool)
+		releaseConstructor()
+		var raceErr error
+		select {
+		case raceErr = <-result:
+		case <-time.After(lifecycleWatchdog):
+			t.Fatalf("reorg claim binding mismatch: racing NewService did not return within %s", lifecycleWatchdog)
+		}
+		require(t, raceErr != nil && raceErr.Error() == "sync engine DA relay state binding mismatch", "racing NewService error=%v", raceErr)
+		cfg.Now = time.Now
+		service, err := NewService(cfg)
+		require(t, err == nil, "NewService after refused race: %v", err)
+		err = service.Close()
+		require(t, err == nil, "Close: %v", err)
+	})
+
+	t.Run("concurrent construction has one winner", func(t *testing.T) {
+		cfg := unclaimedServiceConfig(t)
+		start := make(chan struct{})
+		type constructionResult struct {
+			service *Service
+			err     error
+		}
+		results := make(chan constructionResult, 2)
+		for range 2 {
+			go func() {
+				<-start
+				service, err := NewService(cfg)
+				results <- constructionResult{service, err}
+			}()
+		}
+		close(start)
+		winners := 0
+		for range 2 {
+			var result constructionResult
+			select {
+			case result = <-results:
+			case <-time.After(lifecycleWatchdog):
+				t.Fatalf("reorg claim binding mismatch: concurrent NewService did not return within %s", lifecycleWatchdog)
+			}
+			if result.err == nil {
+				winners++
+				require(t, result.service != nil && result.service.daRelay == cfg.SyncEngine.DARelayState(), "winning Service=%+v", result.service)
+				err := result.service.Close()
+				require(t, err == nil, "Close: %v", err)
+				continue
+			}
+			require(t, result.service == nil && result.err.Error() == "sync engine DA relay state is already claimed", "losing construction=(%p,%v)", result.service, result.err)
+		}
+		require(t, winners == 1, "construction winners=%d, want 1", winners)
+	})
 }
 
 func TestNewServiceRejectsUninitializedEngineAfterConfigValidation(t *testing.T) {

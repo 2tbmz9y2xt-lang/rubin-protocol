@@ -41,6 +41,16 @@ func (p *peer) blockInventoryAfterLocators(req GetBlocksPayload) ([]InventoryVec
 	return items, nil
 }
 
+func (s *Service) applyBlockWithReorg(blockBytes []byte) (*node.ChainStateConnectSummary, error) {
+	summary, finish, err := func() (*node.ChainStateConnectSummary, func(), error) {
+		s.chainMu.Lock()
+		defer s.chainMu.Unlock()
+		return s.cfg.SyncEngine.ApplyBlockWithReorgDeferred(blockBytes, nil)
+	}()
+	finish()
+	return summary, err
+}
+
 func (p *peer) handleBlock(blockBytes []byte) error {
 	summary, err := p.processRelayedBlock(blockBytes)
 	if err != nil {
@@ -71,9 +81,7 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 		return nil, nil
 	}
 
-	p.service.chainMu.Lock()
-	summary, err := p.service.cfg.SyncEngine.ApplyBlockWithReorg(blockBytes, nil)
-	p.service.chainMu.Unlock()
+	summary, err := p.service.applyBlockWithReorg(blockBytes)
 	if summary != nil {
 		return p.acceptRelayedBlockResult(blockHash, summary, err)
 	}
@@ -250,9 +258,7 @@ func (s *Service) resolveRelayedOrphans(source *peer, suppliedHash, blockHash [3
 			if err != nil {
 				continue
 			}
-			s.chainMu.Lock()
-			summary, applyErr := s.cfg.SyncEngine.ApplyBlockWithReorg(child.blockBytes, nil)
-			s.chainMu.Unlock()
+			summary, applyErr := s.applyBlockWithReorg(child.blockBytes)
 			if s.acceptResolvedOrphanResult(source, suppliedHash, childHash, summary, applyErr) {
 				return
 			}
