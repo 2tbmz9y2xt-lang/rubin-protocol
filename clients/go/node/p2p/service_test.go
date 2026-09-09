@@ -6,9 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"go/ast"
-	"go/token"
-	"go/types"
 	"io"
 	"net"
 	"os"
@@ -65,31 +62,6 @@ func TestNewServiceCloseDoesNotReleaseEngineClaim(t *testing.T) {
 }
 
 func TestNewServiceBindsDetachedReorgAdmission(t *testing.T) {
-	constructor := p2pFunction(t, "service.go", "NewService")
-	ast.Inspect(constructor.Body, func(n ast.Node) bool {
-		switch n.(type) {
-		case *ast.DeferStmt, *ast.GoStmt:
-			t.Fatal("reorg claim binding mismatch: deferred or concurrent initialization")
-		}
-		return true
-	})
-	tail := constructor.Body.List
-	require(t, len(tail) >= 3, "reorg claim binding mismatch: missing publication tail")
-	built, ok := tail[len(tail)-3].(*ast.AssignStmt)
-	require(t, ok && built.Tok == token.DEFINE && len(built.Lhs) == 1 && len(built.Rhs) == 1 && types.ExprString(built.Lhs[0]) == "service", "reorg claim binding mismatch: construction must immediately precede claim")
-	address, ok := built.Rhs[0].(*ast.UnaryExpr)
-	require(t, ok && address.Op == token.AND, "reorg claim binding mismatch: service address")
-	literal, ok := address.X.(*ast.CompositeLit)
-	require(t, ok && types.ExprString(literal.Type) == "Service", "reorg claim binding mismatch: service literal")
-	claim, ok := tail[len(tail)-2].(*ast.IfStmt)
-	require(t, ok && claim.Else == nil && len(claim.Body.List) == 1 && types.ExprString(claim.Cond) == "err != nil", "reorg claim binding mismatch: claim condition or body")
-	init, ok := claim.Init.(*ast.AssignStmt)
-	require(t, ok && init.Tok == token.DEFINE && len(init.Lhs) == 2 && len(init.Rhs) == 1 && types.ExprString(init.Lhs[0]) == "_" && types.ExprString(init.Lhs[1]) == "err" && types.ExprString(init.Rhs[0]) == "cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA)", "reorg claim binding mismatch: claim initializer")
-	for i, statement := range []ast.Stmt{claim.Body.List[0], tail[len(tail)-1]} {
-		returned, ok := statement.(*ast.ReturnStmt)
-		want := [2][2]string{{"nil", "err"}, {"service", "nil"}}[i]
-		require(t, ok && len(returned.Results) == 2 && types.ExprString(returned.Results[0]) == want[0] && types.ExprString(returned.Results[1]) == want[1], "reorg claim binding mismatch: return %d has effects", i)
-	}
 	t.Run("complete service is published once", func(t *testing.T) {
 		cfg := unclaimedServiceConfig(t)
 		cfg.BootstrapPeers = []string{"127.0.0.9:19119"}

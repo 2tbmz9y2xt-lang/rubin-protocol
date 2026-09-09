@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -22,6 +23,46 @@ type verifiedStoredBlock struct {
 	lookupHash [32]byte
 	blockBytes []byte
 	parsed     *consensus.ParsedBlock
+}
+
+type reorgDACompletions struct {
+	pending []func(bool)
+}
+
+type reorgDADiagnostics struct {
+	failures int
+	first    string
+}
+
+func (d *reorgDADiagnostics) record(err error) {
+	d.failures++
+	if d.failures == 1 {
+		formatted := fmt.Sprint(err)
+		d.first = strings.Clone(formatted[:min(len(formatted), diagnosticBatchMaxBytes)])
+	}
+}
+
+func (d *reorgDADiagnostics) flush(s *SyncEngine, diag *diagnosticBatch) {
+	if d.failures == 1 {
+		s.diagnose(diag, "da relay: requeue-tx: %s\n", d.first)
+	} else if d.failures > 1 {
+		s.diagnose(diag, "da relay: requeue-tx: %d failures; first: %s\n", d.failures, d.first)
+	}
+}
+
+func (c *reorgDACompletions) drain(run bool) {
+	for len(c.pending) > 0 {
+		completion := c.pending[0]
+		c.pending[0] = nil
+		c.pending = c.pending[1:]
+		completion(run)
+	}
+	c.pending = nil
+}
+
+func (c *reorgDACompletions) finish() {
+	defer c.drain(false)
+	c.drain(true)
 }
 
 // ApplyBlockWithReorg is the relay entry point: it connects a tip extension, or
@@ -47,32 +88,53 @@ type verifiedStoredBlock struct {
 //
 // Nil-safe on the receiver, like the other exported SyncEngine methods.
 func (s *SyncEngine) ApplyBlockWithReorg(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, error) {
-	if s == nil {
-		return nil, errors.New("sync engine is not initialized")
-	}
-	diag := &diagnosticBatch{}
-	defer s.flushDiagnostics(diag)
-	s.mutationMu.Lock()
-	defer s.mutationMu.Unlock()
-	if err := s.mutationAllowed(); err != nil {
-		return nil, err
-	}
-	pb, blockHash, err := parseReorgBlock(blockBytes)
-	if err != nil {
-		return nil, err
-	}
+	summary, finish, err := s.ApplyBlockWithReorgDeferred(blockBytes, prevTimestamps)
+	finish()
+	return summary, err
+}
 
-	if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps, diag); handled {
-		return summary, err
-	}
-	branch, commonAncestorHeight, switchToBranch, candidateHeight, err := s.evaluateSideBranch(blockHash, blockBytes, pb)
-	if err != nil {
-		return nil, err
-	}
-	if !switchToBranch {
-		return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
-	}
-	return s.applyPreferredBranch(branch, commonAncestorHeight, diag)
+// ApplyBlockWithReorgDeferred keeps admissions serialized and returns a nonnil
+// finish that owns every pending retained-result lease. The caller must invoke
+// it synchronously and immediately after releasing its outer canonical lock,
+// including on returned error. finish is serial and idempotent.
+// A panic before handoff cancels pending leases, including diagnostic panics.
+func (s *SyncEngine) ApplyBlockWithReorgDeferred(blockBytes []byte, prevTimestamps []uint64) (*ChainStateConnectSummary, func(), error) {
+	completions := &reorgDACompletions{}
+	transferred := false
+	defer func() {
+		if !transferred {
+			completions.drain(false)
+		}
+	}()
+	summary, err := func() (*ChainStateConnectSummary, error) {
+		if s == nil {
+			return nil, errors.New("sync engine is not initialized")
+		}
+		diag := &diagnosticBatch{}
+		defer s.flushDiagnostics(diag)
+		s.mutationMu.Lock()
+		defer s.mutationMu.Unlock()
+		if err := s.mutationAllowed(); err != nil {
+			return nil, err
+		}
+		pb, blockHash, err := parseReorgBlock(blockBytes)
+		if err != nil {
+			return nil, err
+		}
+		if summary, handled, err := s.applyDirectBlockIfPossible(pb, blockBytes, prevTimestamps, diag); handled {
+			return summary, err
+		}
+		branch, commonAncestorHeight, switchToBranch, candidateHeight, err := s.evaluateSideBranch(blockHash, blockBytes, pb)
+		if err != nil {
+			return nil, err
+		}
+		if !switchToBranch {
+			return s.storeSideBlockAndSummary(branch, commonAncestorHeight, candidateHeight)
+		}
+		return s.applyPreferredBranch(branch, commonAncestorHeight, diag, completions)
+	}()
+	transferred = true
+	return summary, completions.finish, err
 }
 
 func parseReorgBlock(blockBytes []byte) (*consensus.ParsedBlock, [32]byte, error) {
@@ -274,6 +336,7 @@ func (s *SyncEngine) applyPreferredBranch(
 	branch []reorgBranchBlock,
 	commonAncestorHeight uint64,
 	diag *diagnosticBatch,
+	completions *reorgDACompletions,
 ) (*ChainStateConnectSummary, error) {
 	canonicalIndex, err := s.canonicalIndexPreflight()
 	if err != nil {
@@ -296,7 +359,7 @@ func (s *SyncEngine) applyPreferredBranch(
 		// image but invokes zero requeue owners. This runs after the transition
 		// reopened admission and still under the entry point's mutationMu, so its
 		// diagnostics join the same batch.
-		s.requeueCanonicalDisconnectedRows(plan.disconnect, diag)
+		s.requeueCanonicalDisconnectedRows(plan.disconnect, diag, completions)
 	}
 	return summary, err
 }
@@ -737,15 +800,24 @@ func (s *SyncEngine) requeueDisconnectedTransactions(disconnectedBlocks [][]byte
 // first Service claim cannot change owners within this invocation. Owner errors
 // are bounded diagnostics and never stop later rows.
 func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch) {
+	completions := &reorgDACompletions{}
+	defer completions.drain(false)
+	s.requeueParsedDisconnectedTransactionsDeferred(disconnectedBlocks, diag, completions)
+	completions.finish()
+}
+
+func (s *SyncEngine) requeueParsedDisconnectedTransactionsDeferred(disconnectedBlocks []*consensus.ParsedBlock, diag *diagnosticBatch, completions *reorgDACompletions) {
 	if s == nil || len(disconnectedBlocks) == 0 {
 		return
 	}
+	daDiagnostics := &reorgDADiagnostics{}
+	defer daDiagnostics.flush(s, diag)
 	s.mu.RLock()
 	mempool, admitDetachedReorg := s.mempool, s.reorgDAAdmission
 	s.mu.RUnlock()
 	if admitDetachedReorg == nil {
-		admitDetachedReorg = func([]byte) error {
-			return &TxAdmitError{Kind: TxAdmitUnavailable, Message: "detached DA admission is not initialized"}
+		admitDetachedReorg = func([]byte) (func(bool), error) {
+			return nil, &TxAdmitError{Kind: TxAdmitUnavailable, Message: "detached DA admission is not initialized"}
 		}
 	}
 	// Disconnect helpers append blocks tip-down, matching h_max -> h_min requeue order.
@@ -754,13 +826,13 @@ func (s *SyncEngine) requeueParsedDisconnectedTransactions(disconnectedBlocks []
 		if err != nil {
 			continue
 		}
-		s.requeueParsedBlockRows(rows, mempool, admitDetachedReorg, diag)
+		s.requeueParsedBlockRows(rows, mempool, admitDetachedReorg, diag, completions, daDiagnostics)
 	}
 }
 
 // requeueParsedBlockRows synchronously applies the selected owner to one
 // disconnected block's rows in canonical order.
-func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, mempool *Mempool, admitDetachedReorg func([]byte) error, diag *diagnosticBatch) {
+func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, mempool *Mempool, admitDetachedReorg func([]byte) (func(bool), error), diag *diagnosticBatch, completions *reorgDACompletions, daDiagnostics *reorgDADiagnostics) {
 	for _, row := range rows {
 		switch row.kind {
 		case 0x00:
@@ -768,8 +840,11 @@ func (s *SyncEngine) requeueParsedBlockRows(rows []canonicalRequeueRow, mempool 
 				s.diagnose(diag, "mempool: requeue-tx: %v\n", err)
 			}
 		case 0x01, 0x02:
-			if err := admitDetachedReorg(row.txBytes); err != nil {
-				s.diagnose(diag, "da relay: requeue-tx: %v\n", err)
+			completion, err := admitDetachedReorg(row.txBytes)
+			if err != nil {
+				daDiagnostics.record(err)
+			} else if completion != nil {
+				completions.pending = append(completions.pending, completion)
 			}
 		}
 	}

@@ -1690,7 +1690,7 @@ func TestSetMempoolConcurrentCandidatesKeepOneDARelayPair(t *testing.T) {
 func TestClaimDARelayStateSecondClaimRejected(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
-	admit := func([]byte) error { return nil }
+	admit := func([]byte) (func(bool), error) { return nil, nil }
 	if got := f.engine.DARelayState(); got != want {
 		t.Fatalf("getter=%p, want %p", got, want)
 	}
@@ -1723,7 +1723,7 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 	for owner := range 2 {
 		go func(owner int) {
 			<-start
-			state, err := f.engine.ClaimDARelayState(want, func([]byte) error { calls[owner]++; return sentinels[owner] })
+			state, err := f.engine.ClaimDARelayState(want, func([]byte) (func(bool), error) { calls[owner]++; return nil, sentinels[owner] })
 			results <- result{state, err, owner}
 		}(owner)
 	}
@@ -1754,13 +1754,13 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 	if calls[0] != 0 || calls[1] != 0 {
 		t.Fatalf("reorg claim binding mismatch: claims invoked callbacks: %v", calls)
 	}
-	if err := f.engine.reorgDAAdmission(nil); !errors.Is(err, sentinels[winningOwner]) || errors.Unwrap(err) != nil || !errors.Is(sentinels[winningOwner], err) || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
+	if _, err := f.engine.reorgDAAdmission(nil); !errors.Is(err, sentinels[winningOwner]) || errors.Unwrap(err) != nil || !errors.Is(sentinels[winningOwner], err) || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
 		t.Fatalf("reorg claim binding mismatch: published callback owner=%d err=%v calls=%v", winningOwner, err, calls)
 	}
 }
 
 func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
-	callback := func([]byte) error { return nil }
+	callback := func([]byte) (func(bool), error) { return nil, nil }
 	uninitialized := &SyncEngine{daRelayClaimed: true, reorgDAAdmission: callback}
 	for _, engine := range []*SyncEngine{nil, {}, uninitialized} {
 		got, err := engine.ClaimDARelayState(nil, nil)
@@ -1770,15 +1770,15 @@ func TestClaimDARelayStateAtomicReorgBinding(t *testing.T) {
 	f := newPendingOutpointSyncFixture(t)
 	want := f.engine.DARelayState()
 	winnerCalls := 0
-	winner := func(raw []byte) error {
+	winner := func(raw []byte) (func(bool), error) {
 		winnerCalls++
 		require(t, bytes.Equal(raw, []byte{0xa5}), "winner raw=%x", raw)
-		return nil
+		return nil, nil
 	}
 	for _, row := range []struct {
 		name     string
 		expected *DARelayState
-		admit    func([]byte) error
+		admit    func([]byte) (func(bool), error)
 		want     string
 	}{
 		{name: "mismatched", expected: &DARelayState{}, admit: winner, want: "sync engine DA relay state binding mismatch"},

@@ -42,24 +42,39 @@ func (s *Service) AdmitLocalDA(txBytes []byte) (node.DAAdmissionResult, error) {
 	return s.daRelay.AdmitDA(txBytes, node.LocalDAProvenance())
 }
 
-// admitDetachedReorgDA keeps admission and its retained-result prefetch under
-// one Service work lease.
-func (s *Service) admitDetachedReorgDA(txBytes []byte) error {
+// admitDetachedReorgDA transfers a retained result's work lease to its
+// once-only post-lock completion.
+func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), err error) {
 	if s == nil {
-		return &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil service"}
+		return nil, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "nil service"}
 	}
 	if !s.acquireWork() {
-		return &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: errServiceClosed.Error()}
+		return nil, &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: errServiceClosed.Error()}
 	}
-	defer s.releaseWork()
+	defer func() {
+		if completion == nil {
+			s.releaseWork()
+		}
+	}()
 	result, err := s.daRelay.AdmitDA(txBytes, node.DetachedReorgDAProvenance())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict {
-		s.scheduleDAPrefetch("", result.DAID)
+	if result.Disposition != node.DAAdmissionRetained || result.SameDAIDCommitConflict {
+		return nil, nil
 	}
-	return nil
+	daID := result.DAID
+	consumed := false
+	return func(run bool) {
+		if consumed {
+			return
+		}
+		consumed = true
+		defer s.releaseWork()
+		if run {
+			s.scheduleDAPrefetch("", daID)
+		}
+	}, nil
 }
 
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02

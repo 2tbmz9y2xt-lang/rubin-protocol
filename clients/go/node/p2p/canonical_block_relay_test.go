@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -413,9 +415,7 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 	spendable := make([]consensus.Outpoint, 0, 2)
 	for height := uint64(1); height <= consensus.COINBASE_MATURITY+1; height++ {
 		mined, err := commonMiner.MineOne(context.Background(), nil)
-		if err != nil {
-			t.Fatalf("MineOne(common height %d): %v", height, err)
-		}
+		must(t, err, fmt.Sprintf("MineOne(common height %d)", height))
 		block, err := source.blockStore.GetBlockByHash(mined.Hash)
 		must(t, err, "GetBlockByHash(common)")
 		parsed, err := consensus.ParseBlockBytes(block)
@@ -449,80 +449,63 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 		DaPayload:   append([]byte(nil), payload...),
 	}
 	for _, tx := range []*consensus.Tx{commit, chunk} {
-		if err := consensus.SignTransaction(tx, sink.chainState.Utxos, node.DevnetGenesisChainID(), signer); err != nil {
-			t.Fatalf("SignTransaction(kind=0x%02x): %v", tx.TxKind, err)
-		}
+		must(t, consensus.SignTransaction(tx, sink.chainState.Utxos, node.DevnetGenesisChainID(), signer), fmt.Sprintf("SignTransaction(kind=0x%02x)", tx.TxKind))
 	}
 	commitRaw, err := consensus.MarshalTx(commit)
-	if err != nil {
-		t.Fatalf("MarshalTx(commit): %v", err)
-	}
+	must(t, err, "MarshalTx(commit)")
 	chunkRaw, err := consensus.MarshalTx(chunk)
-	if err != nil {
-		t.Fatalf("MarshalTx(chunk): %v", err)
-	}
+	must(t, err, "MarshalTx(chunk)")
 	provider := canonicalRelayDAProvider{{
 		DAID: daID, PayloadBytes: uint64(len(payload)), CommitTx: commitRaw,
 		Chunks: []node.CompleteDASetChunkCandidate{{Index: 0, Tx: chunkRaw}},
 	}}
 	oldMiner, err := node.NewMiner(sink.chainState, sink.blockStore, sink.syncEngine, minerConfig(provider, 1))
-	if err != nil {
-		t.Fatalf("NewMiner(old): %v", err)
-	}
+	must(t, err, "NewMiner(old)")
 	old, err := oldMiner.MineOne(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("MineOne(old DA block): %v", err)
-	}
+	must(t, err, "MineOne(old DA block)")
 	oldBlock, err := sink.blockStore.GetBlockByHash(old.Hash)
-	if err != nil {
-		t.Fatalf("GetBlockByHash(old DA block): %v", err)
-	}
+	must(t, err, "GetBlockByHash(old DA block)")
 	parsedOld, err := consensus.ParseBlockBytes(oldBlock)
-	if err != nil || len(parsedOld.Txs) != 3 {
-		t.Fatalf("old DA block parse: txs=%d err=%v", len(parsedOld.Txs), err)
-	}
+	must(t, err, "ParseBlockBytes(old DA block)")
+	require(t, len(parsedOld.Txs) == 3, "old DA block txs=%d, want coinbase/commit/chunk", len(parsedOld.Txs))
 	for index, raw := range [][]byte{commitRaw, chunkRaw} {
 		_, want, _, _, err := consensus.ParseTx(raw)
-		if err != nil {
-			t.Fatalf("ParseTx(expected %d): %v", index, err)
-		}
+		must(t, err, fmt.Sprintf("ParseTx(expected %d)", index))
 		gotRaw, err := consensus.MarshalTx(parsedOld.Txs[index+1])
-		if err != nil {
-			t.Fatalf("MarshalTx(old row %d): %v", index, err)
-		}
+		must(t, err, fmt.Sprintf("MarshalTx(old row %d)", index))
 		_, got, _, _, err := consensus.ParseTx(gotRaw)
 		if err != nil || got != want {
 			t.Fatalf("old block DA txid[%d]=%x err=%v, want %x", index, got, err, want)
 		}
 	}
 	branchMiner, err := node.NewMiner(source.chainState, source.blockStore, source.syncEngine, minerConfig(nil, 100))
-	if err != nil {
-		t.Fatalf("NewMiner(branch): %v", err)
-	}
+	must(t, err, "NewMiner(branch)")
 	branch := make([][]byte, 0, 2)
 	var parentHash [32]byte
 	var parentHeight uint64
 	for i := 0; i < 2; i++ {
 		mined, err := branchMiner.MineOne(context.Background(), nil)
-		if err != nil {
-			t.Fatalf("MineOne(branch %d): %v", i, err)
-		}
+		must(t, err, fmt.Sprintf("MineOne(branch %d)", i))
 		block, err := source.blockStore.GetBlockByHash(mined.Hash)
-		if err != nil {
-			t.Fatalf("GetBlockByHash(branch %d): %v", i, err)
-		}
+		must(t, err, fmt.Sprintf("GetBlockByHash(branch %d)", i))
 		if i == 0 {
 			parentHash, parentHeight = mined.Hash, mined.Height
 		}
 		branch = append(branch, block)
 	}
 	schedulerCalls := 0
+	effectEntered, effectRelease := make(chan struct{}), make(chan struct{})
+	var releaseEffectOnce sync.Once
+	releaseEffect := func() { releaseEffectOnce.Do(func() { close(effectRelease) }) }
+	t.Cleanup(releaseEffect)
 	sink.service.cfg.Now = func() time.Time {
 		pcs := make([]uintptr, 16)
 		for frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)]); ; {
 			frame, more := frames.Next()
 			if strings.Contains(frame.Function, ".scheduleDAPrefetch") {
 				schedulerCalls++
+				close(effectEntered)
+				<-effectRelease
 				break
 			}
 			if !more {
@@ -535,7 +518,72 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 	if summary, err := origin.processRelayedBlock(branch[1]); err != nil || summary != nil || sink.service.orphans.Len() != 1 {
 		t.Fatalf("retain longer-branch descendant: summary=%+v err=%v orphans=%d", summary, err, sink.service.orphans.Len())
 	}
-	summary, err := origin.processRelayedBlock(branch[0])
+	type applyResult struct {
+		summary *node.ChainStateConnectSummary
+		err     error
+	}
+	applied := make(chan applyResult, 1)
+	applyDone := make(chan struct{})
+	workers := []chan struct{}{applyDone}
+	t.Cleanup(func() {
+		releaseEffect()
+		for _, done := range workers {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("detached reorg worker cleanup did not return")
+			}
+		}
+	})
+	go func() {
+		defer close(applyDone)
+		summary, err := origin.processRelayedBlock(branch[0])
+		applied <- applyResult{summary, err}
+	}()
+	select {
+	case <-effectEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("detached reorg effect did not start")
+	}
+	if !sink.service.chainMu.TryLock() {
+		t.Fatal("detached reorg effect retained chainMu")
+	}
+	sink.service.chainMu.Unlock()
+	locatorDone := make(chan struct{})
+	workers = append(workers, locatorDone)
+	go func() {
+		_, _ = origin.blockInventoryAfterLocators(GetBlocksPayload{})
+		close(locatorDone)
+	}()
+	select {
+	case <-locatorDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("P2P locator read blocked behind detached reorg effect")
+	}
+	require(t, sink.syncEngine.LocalTipHeight() > 0, "tip read returned zero during detached effect")
+	mutationDone := make(chan error, 1)
+	mutationExited := make(chan struct{})
+	workers = append(workers, mutationExited)
+	go func() {
+		defer close(mutationExited)
+		_, err := sink.syncEngine.ApplyBlockWithReorg([]byte{0}, nil)
+		mutationDone <- err
+	}()
+	select {
+	case err := <-mutationDone:
+		parseErr, ok := err.(*consensus.TxError)
+		require(t, ok && parseErr.Code == consensus.BLOCK_ERR_PARSE && parseErr.Msg == "block too short", "concurrent mutation error=%v, want BLOCK_ERR_PARSE: block too short", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SyncEngine mutation blocked behind detached reorg effect")
+	}
+	releaseEffect()
+	var got applyResult
+	select {
+	case got = <-applied:
+	case <-time.After(5 * time.Second):
+		t.Fatal("winning reorg did not return after effect release")
+	}
+	summary, err := got.summary, got.err
 	parentApplied := bytes.Compare(parentHash[:], old.Hash[:]) < 0
 	if err != nil || summary == nil || summary.BlockHash != parentHash || summary.BlockHeight != parentHeight || parentApplied && (len(summary.CanonicalAppliedBlocks) != 1 || summary.CanonicalAppliedBlocks[0].Hash != parentHash || len(summary.CanonicalAppliedBlocks[0].CompleteDAIDs) != 0) || !parentApplied && len(summary.CanonicalAppliedBlocks) != 0 || sink.chainState.Height != source.chainState.Height || sink.chainState.TipHash != source.chainState.TipHash || sink.service.orphans.Len() != 0 {
 		t.Fatalf("winning public reorg: summary=%+v err=%v sink=(%d,%x) source=(%d,%x) orphans=%d", summary, err, sink.chainState.Height, sink.chainState.TipHash, source.chainState.Height, source.chainState.TipHash, sink.service.orphans.Len())

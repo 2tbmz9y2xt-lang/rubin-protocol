@@ -657,7 +657,7 @@ func assignCanonicalChainState(dst *ChainState, src *ChainState) {
 // the transition released admission. A row that can no longer be read is skipped with a
 // diagnostic: requeue is a downstream best-effort effect and cannot change
 // commit truth.
-func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescriptor, diag *diagnosticBatch) {
+func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescriptor, diag *diagnosticBatch, completions *reorgDACompletions) {
 	if s.blockStore == nil || len(rows) == 0 {
 		return
 	}
@@ -675,7 +675,7 @@ func (s *SyncEngine) requeueCanonicalDisconnectedRows(rows []canonicalRowDescrip
 		}
 		parsed = append(parsed, pb)
 	}
-	s.requeueParsedDisconnectedTransactions(parsed, diag)
+	s.requeueParsedDisconnectedTransactionsDeferred(parsed, diag, completions)
 }
 
 // canonicalSequenceDescriptors turns a contiguous canonical-index range into

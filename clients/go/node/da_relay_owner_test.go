@@ -3408,6 +3408,7 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 		}
 		if call, ok := node.(*ast.CallExpr); ok && calleeName(call) == "ClaimDARelayState" {
 			claimCall = call
+			require(t, daNonReplaySelector(call.Fun) == "cfg.SyncEngine.ClaimDARelayState", "reorg claim binding mismatch: receiver")
 			require(t, len(call.Args) == 2, "NewService detached claim argument count=%d", len(call.Args))
 			second, secondOK := call.Args[1].(*ast.SelectorExpr)
 			require(t, secondOK && second.Sel.Name == "admitDetachedReorgDA", "reorg claim binding mismatch: callback is %T", call.Args[1])

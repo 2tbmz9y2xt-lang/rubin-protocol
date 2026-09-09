@@ -424,15 +424,25 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 	}
 	t.Run("nil closed error and normal drain", func(t *testing.T) {
 		var nilService *Service
-		err := nilService.admitDetachedReorgDA(nil)
+		err := runDetachedReorgDAAdmission(nilService, nil)
 		var admitErr *node.TxAdmitError
 		require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "nil service", "nil detached admission=%v", err)
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		f := newDAIngressFixture(t, h)
-		must(t, h.service.admitDetachedReorgDA(f.commit(daRelayTestID(0xec), 2)), "open detached admission")
-		require(t, h.service.admitDetachedReorgDA([]byte{0x00}) != nil, "detached owner error returned nil")
-		requireReturned(t, lifecycleClose(h.service), "detached work did not drain after normal/error exits")
-		err = h.service.admitDetachedReorgDA(nil)
+		require(t, runDetachedReorgDAAdmission(h.service, []byte{0x00}) != nil, "detached owner error returned nil")
+		finish, err := h.service.admitDetachedReorgDA(f.commit(daRelayTestID(0xec), 2))
+		must(t, err, "open detached admission")
+		require(t, finish != nil, "retained detached admission has no completion")
+		t.Cleanup(func() { finish(false) })
+		h.service.cfg.Now = func() time.Time { t.Fatal("cancelled completion read scheduler clock"); return time.Time{} }
+		closed := lifecycleClose(h.service)
+		waitDraining(t, h.service)
+		requireStillBlocked(t, closed, "pending detached completion lease")
+		finish(false)
+		finish(false)
+		finish(true)
+		requireReturned(t, closed, "detached work did not drain after normal/error exits")
+		err = runDetachedReorgDAAdmission(h.service, nil)
 		require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "service already closed", "closed detached admission=%v", err)
 	})
 	t.Run("owner unavailable releases work for the next operation", func(t *testing.T) {
@@ -440,7 +450,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xeb), 2)
 		latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
 		for range 2 {
-			err := h.service.admitDetachedReorgDA(raw)
+			err := runDetachedReorgDAAdmission(h.service, raw)
 			var admitErr *node.TxAdmitError
 			require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "pending-outpoint owner admission context unavailable", "detached owner unavailable=%T %v", err, err)
 		}
@@ -486,7 +496,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 			t.Fatal("canonical admission guard barrier did not enter")
 		}
 		admitted, admissionDone := make(chan error, 1), make(chan struct{})
-		go func() { defer close(admissionDone); admitted <- service.admitDetachedReorgDA(raw) }()
+		go func() { defer close(admissionDone); admitted <- runDetachedReorgDAAdmission(service, raw) }()
 		t.Cleanup(func() { releaseBarrier(); joinDone(t, admissionDone, "guarded detached admission cleanup") })
 		stack := make([]byte, 1<<20)
 		waitUntil(t, func() bool {
@@ -510,7 +520,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		service.cfg.Now = func() time.Time { scheduler.Add(1); return inner() }
 		raw := f.commit(daRelayTestID(0xed), 2)
 		admitted, admissionDone := make(chan error, 1), make(chan struct{})
-		go func() { defer close(admissionDone); admitted <- service.admitDetachedReorgDA(raw) }()
+		go func() { defer close(admissionDone); admitted <- runDetachedReorgDAAdmission(service, raw) }()
 		var releaseOnce sync.Once
 		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
 		t.Cleanup(func() {
@@ -540,7 +550,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		go func() {
 			defer close(panicDone)
 			defer func() { done <- recover() }()
-			_ = service.admitDetachedReorgDA(f.commit(daRelayTestID(0xee), 2))
+			_ = runDetachedReorgDAAdmission(service, f.commit(daRelayTestID(0xee), 2))
 		}()
 		var releaseOnce sync.Once
 		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
@@ -576,7 +586,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		var recovered any
 		func() {
 			defer func() { recovered = recover() }()
-			_ = h.service.admitDetachedReorgDA(raw)
+			_ = runDetachedReorgDAAdmission(h.service, raw)
 		}()
 		require(t, recovered == sentinel, "detached panic identity changed: got %v want %v", recovered, sentinel)
 		requireReturned(t, lifecycleClose(h.service), "detached work did not drain after retained panic")
@@ -599,7 +609,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		h.service.cfg.Now = func() time.Time { enteredOnce.Do(func() { close(entered) }); return inner() }
 		raw := newDAIngressFixture(t, h).commit(daRelayTestID(0xf0), 2)
 		admitted, admissionDone := make(chan error, 1), make(chan struct{})
-		go func() { defer close(admissionDone); admitted <- h.service.admitDetachedReorgDA(raw) }()
+		go func() { defer close(admissionDone); admitted <- runDetachedReorgDAAdmission(h.service, raw) }()
 		t.Cleanup(func() {
 			joinDone(t, admissionDone, "blocked-write admission cleanup")
 			requireReturned(t, lifecycleClose(h.service), "Close after blocked-write admission cleanup")
@@ -628,7 +638,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		f, daID := newDAIngressFixture(t, h), daRelayTestID(0xf1)
 		raw := f.commit(daID, 2)
 		admitted, admissionDone := make(chan error, 1), make(chan struct{})
-		go func() { defer close(admissionDone); admitted <- h.service.admitDetachedReorgDA(raw) }()
+		go func() { defer close(admissionDone); admitted <- runDetachedReorgDAAdmission(h.service, raw) }()
 		var releaseOnce sync.Once
 		releaseWrite := func() { releaseOnce.Do(func() { close(release) }) }
 		t.Cleanup(func() {
