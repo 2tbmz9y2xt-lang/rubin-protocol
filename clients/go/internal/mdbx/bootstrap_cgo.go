@@ -26,13 +26,15 @@ const bootstrapOperationBytes uint64 = 188
 // no class, code, operation, cause or truth is rewritten.
 //
 // A store whose seven entry counts are not the exact-empty census is refused with
-// EngineStateMismatch and stays open, reusable and byte-identical: nothing is reset and no
-// image is classified as corrupt. A store that passes that census while a required metadata
-// row is absent, undecodable or disagrees with this Store's config is refused with
-// EngineIntegrity instead, and like a native inspection failure or a Reader.Get failure it
-// travels the existing infrastructure path, so the Store ends terminal and no partial
-// initial image exists. The caller supplies an already-open Store and one long-lived shared
-// reservation owner; no Reader, Inspection, buffer or token escapes this call.
+// EngineStateMismatch: nothing is reset and no image is classified as corrupt, and after a
+// successful OLD abort the Store stays open, reusable and byte-identical; a cleanup failure
+// keeps its own existing lifecycle instead. A store that passes that census while a required
+// metadata row is absent, of a width Reader.Get itself refuses, undecodable or disagreeing
+// with this Store's config is refused with EngineIntegrity instead, and like a native
+// inspection failure or a Reader.Get failure it travels the existing infrastructure path, so
+// the Store ends terminal and no partial initial image exists. The caller supplies an
+// already-open Store and one long-lived shared reservation owner; no Reader, Inspection,
+// buffer or token escapes this call.
 func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *OperationReservationOwner) (CommitTruth, error) {
 	if s == nil {
 		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)

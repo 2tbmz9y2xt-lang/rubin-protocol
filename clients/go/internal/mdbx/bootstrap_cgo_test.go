@@ -186,11 +186,11 @@ func TestStorageBootstrapInput(t *testing.T) {
 		{"nil Store", absent, StorageProfilePrunedV1, owner, "nil Store"},
 		{"nil Store before profile", absent, 0, owner, "nil Store"},
 		{"nil Store before owner", absent, 0, nil, "nil Store"},
-		{"profile 0", newUpdateStore(t), 0, owner, "invalid bootstrap profile"},
-		{"profile 3", newUpdateStore(t), 3, owner, "invalid bootstrap profile"},
-		{"profile 255", newUpdateStore(t), 255, owner, "invalid bootstrap profile"},
-		{"profile before nil owner", newUpdateStore(t), 3, nil, "invalid bootstrap profile"},
-		{"profile before zero owner", newUpdateStore(t), 3, &OperationReservationOwner{}, "invalid bootstrap profile"},
+		{"profile 0", consultedTrack(t, newUpdateStore(t), nil), 0, owner, "invalid bootstrap profile"},
+		{"profile 3", consultedTrack(t, newUpdateStore(t), nil), 3, owner, "invalid bootstrap profile"},
+		{"profile 255", consultedTrack(t, newUpdateStore(t), nil), 255, owner, "invalid bootstrap profile"},
+		{"profile before nil owner", consultedTrack(t, newUpdateStore(t), nil), 3, nil, "invalid bootstrap profile"},
+		{"profile before zero owner", consultedTrack(t, newUpdateStore(t), nil), 3, &OperationReservationOwner{}, "invalid bootstrap profile"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			truth, err := row.store.BootstrapStorageV1(row.profile, row.owner)
@@ -206,7 +206,7 @@ func TestStorageBootstrapInput(t *testing.T) {
 	}
 	// A held operations lock proves the static guards invoke no Store method: reaching
 	// Store.Update would return the busy tuple instead of the input refusal.
-	locked := newUpdateStore(t)
+	locked := consultedTrack(t, newUpdateStore(t), nil)
 	locked.operations.Lock()
 	truth, err := locked.BootstrapStorageV1(3, owner)
 	locked.operations.Unlock()
@@ -215,7 +215,7 @@ func TestStorageBootstrapInput(t *testing.T) {
 		name  string
 		owner *OperationReservationOwner
 	}{{"nil owner", nil}, {"zero owner", &OperationReservationOwner{}}} {
-		store := newUpdateStore(t)
+		store := consultedTrack(t, newUpdateStore(t), nil)
 		truth, err = store.BootstrapStorageV1(StorageProfilePrunedV1, row.owner)
 		if truth != CommitTruthOld || !sameError(err, errOperationReservationInput) {
 			t.Fatalf("%s: %s/%v", row.name, truth, err)
@@ -416,6 +416,7 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 	differing.MaxReaders++
 	differingBytes, err := differing.Encode()
 	mustEnvironment(t, err)
+	const widthRefusal = "stored value width outside SchemaV1 bound"
 	for _, row := range []struct {
 		name       string
 		plan       []ownedMutation
@@ -427,6 +428,12 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 		{"absent config row", []ownedMutation{bootstrapDeleteMeta([]byte{1}), bootstrapSpareCounter()}, "invalid bootstrap metadata 01", false},
 		{"undecodable config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 48))}, "invalid bootstrap metadata 01", false},
 		{"valid but differing config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, differingBytes)}, "invalid bootstrap metadata 01", false},
+		// A row of the wrong width never reaches a bootstrap predicate: Reader.Get refuses it on
+		// the SchemaV1 bound, and that inherited error is what the caller must see.
+		{"short version row", []ownedMutation{bootstrapReplaceMeta([]byte{0}, make([]byte, 3))}, widthRefusal, false},
+		{"long version row", []ownedMutation{bootstrapReplaceMeta([]byte{0}, make([]byte, 5))}, widthRefusal, false},
+		{"short config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 47))}, widthRefusal, false},
+		{"long config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 49))}, widthRefusal, false},
 		{"both rows invalid", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 2}), bootstrapReplaceMeta([]byte{1}, make([]byte, 48))}, "invalid bootstrap metadata 00", false},
 		{"count mismatch wins over metadata", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 2}), bootstrapSpareCounter()}, "", true},
 	} {
@@ -564,8 +571,8 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		unknown := newUpdateStore(t)
 		primary, readback := nativeError(operationUpdate, codeENOSPC), nativeError(operationUpdate, codeEIO)
 		projectedTruth, projected := unknown.applyUpdateOutcome(updateNativeConsumed(CommitTruthUnknown, true, primary, readback), nil, nil, false)
-		if projectedTruth != CommitTruthUnknown || unknown.terminalTruth != CommitTruthUnknown {
-			t.Fatalf("R7 cached UNKNOWN: %s/%s", projectedTruth, unknown.terminalTruth)
+		if projectedTruth != CommitTruthUnknown || unknown.terminalTruth != CommitTruthUnknown || unknown.state != storeCLOSED {
+			t.Fatalf("R7 cached UNKNOWN: %s/%s/%s", projectedTruth, unknown.terminalTruth, unknown.state)
 		}
 		var commit *CommitError
 		if !errors.As(projected, &commit) || !sameError(commit.Cause, primary) || commit.Truth != CommitTruthUnknown {
@@ -713,18 +720,29 @@ func TestStorageBootstrapComposition(t *testing.T) {
 		// behavioral oracle: observing at runtime that the charge is held for the whole
 		// transaction, or that reader.getMu is held across the census, needs a scheduler seam
 		// or a fault hook inside the internal callback, and non_scope forbids both.
-		if strings.Count(text, "s.Inspect(") != 0 || strings.Count(text, "s.inspectReadLocked(reader.txn)") != 1 || strings.Count(text, "inspectReadLocked(") != 1 {
+		// The route is counted over selectors in the parsed file, not over receiver-qualified
+		// text: an alias or a method value (view := s; get := reader.Get) would keep a text count
+		// while moving the work, and a comment can never inflate one.
+		route := bootstrapFile(t, source)
+		if bootstrapSelectors(route, "Inspect") != 0 || bootstrapSelectors(route, "inspectReadLocked") != 1 ||
+			strings.Count(text, "s.inspectReadLocked(reader.txn)") != 1 {
 			t.Fatal("census transaction ownership drifted")
 		}
-		if strings.Count(text, "reader.Get(") != 2 || strings.Count(text, "s.Update(") != 1 || strings.Count(text, "WithReservation(") != 1 {
+		if bootstrapSelectors(route, "Get") != 2 || bootstrapSelectors(route, "Update") != 1 || bootstrapSelectors(route, "WithReservation") != 1 {
 			t.Fatal("call route drifted: exactly two required-metadata reads, one Update and one reservation")
 		}
 		// Those counts pin uniqueness but not nesting: charging, releasing and only then
 		// updating keeps every one of them. The charge spanning the transaction is the single
 		// Update call sitting inside the callback the single reservation runs.
-		if reservation := bootstrapCall(bootstrapFile(t, source), "WithReservation"); reservation == nil ||
+		if reservation := bootstrapCall(route, "WithReservation"); reservation == nil ||
 			bootstrapCall(reservation.Args[1], "Update") == nil {
 			t.Fatal("Store.Update runs outside the reservation callback: the charge is not held for the transaction")
+		}
+		// The negative control for that pin: this source keeps both counts and the nesting shape
+		// while the Update call runs from a local the callback only defines.
+		deferred := "package p\nfunc b() {\n\to.WithReservation(n, func() error { run = func() error { return s.Update(c) }; return nil })\n\trun()\n}\n"
+		if bootstrapCall(bootstrapCall(bootstrapFile(t, []byte(deferred)), "WithReservation").Args[1], "Update") != nil {
+			t.Fatal("the nesting pin counts an Update the callback only defines")
 		}
 		batchBody := updateNativeBody(t, source, "bootstrapBatch")
 		order := []string{"bootstrapInspect(", "Entries != want", "[]byte{0x00}, []byte{0x01}", "bootstrapMetadata(", "bootstrapAuthority(", "Consulted:"}
@@ -760,10 +778,28 @@ func bootstrapFile(t *testing.T, source []byte) *ast.File {
 	return file
 }
 
-// bootstrapCall returns a call to name somewhere inside node, or nil when node holds none.
+// bootstrapSelectors counts every reference to the named method inside node, including a
+// method value that is never called at its reference site.
+func bootstrapSelectors(node ast.Node, name string) int {
+	count := 0
+	ast.Inspect(node, func(current ast.Node) bool {
+		if selector, isSelector := current.(*ast.SelectorExpr); isSelector && selector.Sel.Name == name {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
+// bootstrapCall returns a call to name in node's OWN function scope, or nil when node holds
+// none. A call inside a further nested literal is a definition, not an execution: that literal
+// can run after node has returned, so it does not witness the call happening inside node.
 func bootstrapCall(node ast.Node, name string) *ast.CallExpr {
 	var found *ast.CallExpr
 	ast.Inspect(node, func(current ast.Node) bool {
+		if _, nested := current.(*ast.FuncLit); nested && current != node {
+			return false
+		}
 		call, isCall := current.(*ast.CallExpr)
 		if !isCall {
 			return true
