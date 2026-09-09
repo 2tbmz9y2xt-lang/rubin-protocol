@@ -235,8 +235,8 @@ func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 	requireStandardUnchanged("E2/E3")
 
 	err := h.service.admitDetachedReorgDA(nil)
-	admitErr, exact := err.(*node.TxAdmitError)
-	if !exact || admitErr.Kind != node.TxAdmitRejected || admitErr.Message != "empty DA transaction" || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
+	var admitErr *node.TxAdmitError
+	if !errors.As(err, &admitErr) || admitErr == nil || errors.Unwrap(err) != nil || !errors.Is(admitErr, err) || admitErr.Kind != node.TxAdmitRejected || admitErr.Message != "empty DA transaction" || calls.Load() != 1 || len(current.conn.(*scriptedConn).Bytes()) != framesAfterRetained {
 		t.Fatalf("detached DA effects mismatch: E4 owner error=%v scheduler calls=%d", err, calls.Load())
 	}
 	requireStandardUnchanged("E4")

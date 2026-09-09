@@ -1754,7 +1754,7 @@ func TestClaimDARelayStateConcurrentSingleWinner(t *testing.T) {
 	if calls[0] != 0 || calls[1] != 0 {
 		t.Fatalf("reorg claim binding mismatch: claims invoked callbacks: %v", calls)
 	}
-	if err := f.engine.reorgDAAdmission(nil); err != sentinels[winningOwner] || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
+	if err := f.engine.reorgDAAdmission(nil); !errors.Is(err, sentinels[winningOwner]) || errors.Unwrap(err) != nil || !errors.Is(sentinels[winningOwner], err) || calls[winningOwner] != 1 || calls[1-winningOwner] != 0 {
 		t.Fatalf("reorg claim binding mismatch: published callback owner=%d err=%v calls=%v", winningOwner, err, calls)
 	}
 }

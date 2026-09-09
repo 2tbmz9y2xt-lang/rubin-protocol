@@ -3366,10 +3366,11 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
 	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
 	newService, detached := declaredFunctions("p2p/service.go")["NewService"], declaredFunctions("p2p/da_relay_ingest.go")["admitDetachedReorgDA"]
-	require(t, newService != nil && detached != nil, "detached admission binding functions missing")
-	storedRelays, ownerCalls := 0, 0
+	if newService == nil || detached == nil {
+		t.Fatal("detached admission binding functions missing")
+	}
+	storedRelays, ownerCalls, serviceAt := 0, 0, token.NoPos
 	writes, identifiers := map[string]int{}, map[ast.Expr]string{}
-	serviceAt := token.NoPos
 	var claimCall *ast.CallExpr
 	ast.Inspect(newService.Body, func(node ast.Node) bool {
 		switch node.(type) {

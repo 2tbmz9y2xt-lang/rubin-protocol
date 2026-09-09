@@ -425,16 +425,15 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 	t.Run("nil closed error and normal drain", func(t *testing.T) {
 		var nilService *Service
 		err := nilService.admitDetachedReorgDA(nil)
-		admitErr, exact := err.(*node.TxAdmitError)
-		require(t, exact && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "nil service", "nil detached admission=%v", err)
+		var admitErr *node.TxAdmitError
+		require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "nil service", "nil detached admission=%v", err)
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		f := newDAIngressFixture(t, h)
 		must(t, h.service.admitDetachedReorgDA(f.commit(daRelayTestID(0xec), 2)), "open detached admission")
 		require(t, h.service.admitDetachedReorgDA([]byte{0x00}) != nil, "detached owner error returned nil")
 		requireReturned(t, lifecycleClose(h.service), "detached work did not drain after normal/error exits")
 		err = h.service.admitDetachedReorgDA(nil)
-		admitErr, exact = err.(*node.TxAdmitError)
-		require(t, exact && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "service already closed", "closed detached admission=%v", err)
+		require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "service already closed", "closed detached admission=%v", err)
 	})
 	t.Run("owner unavailable releases work for the next operation", func(t *testing.T) {
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -442,8 +441,8 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		latchDAHarness(t, h, newTestHarness(t, 2, "127.0.0.1:0", nil))
 		for range 2 {
 			err := h.service.admitDetachedReorgDA(raw)
-			admitErr, exact := err.(*node.TxAdmitError)
-			require(t, exact && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "pending-outpoint owner admission context unavailable", "detached owner unavailable=%T %v", err, err)
+			var admitErr *node.TxAdmitError
+			require(t, errors.As(err, &admitErr) && admitErr != nil && errors.Unwrap(err) == nil && errors.Is(admitErr, err) && admitErr.Kind == node.TxAdmitUnavailable && admitErr.Message == "pending-outpoint owner admission context unavailable", "detached owner unavailable=%T %v", err, err)
 		}
 		requireReturned(t, lifecycleClose(h.service), "detached unavailable work did not drain")
 	})

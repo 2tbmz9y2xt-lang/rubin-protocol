@@ -4353,7 +4353,7 @@ func TestReorgDANilOwnersStillAttempt(t *testing.T) {
 	f.engine.mu.Unlock()
 	batch := &diagnosticBatch{}
 	f.engine.requeueCanonicalDisconnectedRows([]canonicalRowDescriptor{{hash: hash}}, batch)
-	require(t, !(len(batch.records) != 2 || !strings.HasPrefix(batch.records[0], "mempool: requeue-tx: nil mempool") || !strings.HasPrefix(batch.records[1], "da relay: requeue-tx: detached DA admission is not initialized")), "missing selected-owner attempt: diagnostics=%q", batch.records)
+	require(t, len(batch.records) == 2 && strings.HasPrefix(batch.records[0], "mempool: requeue-tx: nil mempool") && strings.HasPrefix(batch.records[1], "da relay: requeue-tx: detached DA admission is not initialized"), "missing selected-owner attempt: diagnostics=%q", batch.records)
 }
 
 func TestReorgDAGateExcludesFailedAndTerminal(t *testing.T) {
