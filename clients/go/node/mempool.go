@@ -372,7 +372,7 @@ func (m *Mempool) addTxWithSource(txBytes []byte, source mempoolTxSource, probe 
 // 0x00; every other kind gets the identity slot's txid-then-wtxid duplicate
 // error when one applies, its third arm — the zero-txid INTERNAL refusal —
 // being unreachable for a checked candidate, and otherwise the standard-domain
-// rejection, tagged STABLE_TERMINAL_REJECT: it reads only the candidate bytes.
+// rejection, tagged STABLE_TERMINAL_REJECT because that verdict rests on the kind.
 //
 // It writes nothing and takes no lock: two index reads and one error, so a
 // candidate it refuses is left with no token, no sequence and no index row.
