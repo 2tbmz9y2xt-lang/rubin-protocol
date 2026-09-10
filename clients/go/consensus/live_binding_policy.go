@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	liveBindingPolicyVersion                        = 1
-	liveBindingPolicyErrStem                        = "live_binding_policy"
-	liveBindingPolicyRuntimeOpenSSLDigest32         = "openssl_digest32_v1"
-	CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 = "verify_sig_ext_openssl_digest32_v1"
+	liveBindingPolicyVersion                  = 1
+	liveBindingPolicyErrStem                  = "live_binding_policy"
+	liveBindingPolicyRuntimeOpenSSLDigest32   = "openssl_digest32_v1"
+	liveBindingNameVerifySigOpenSSLDigest32V1 = "verify_sig_openssl_digest32_v1"
 )
 
 // Derived runtime copy of conformance/fixtures/protocol/live_binding_policy_v1.json.
@@ -371,12 +371,12 @@ func (entry liveBindingPolicyEntry) validate(
 				ML_DSA_87_SIG_BYTES,
 			)
 		}
-		if entry.LiveBindingName != CoreExtBindingNameVerifySigExtOpenSSLDigest32V1 {
+		if entry.LiveBindingName != liveBindingNameVerifySigOpenSSLDigest32V1 {
 			return liveBindingPolicyError(
 				"entries[%d]: runtime_binding %q requires live_binding_name %q",
 				index,
 				entry.RuntimeBinding,
-				CoreExtBindingNameVerifySigExtOpenSSLDigest32V1,
+				liveBindingNameVerifySigOpenSSLDigest32V1,
 			)
 		}
 	default:

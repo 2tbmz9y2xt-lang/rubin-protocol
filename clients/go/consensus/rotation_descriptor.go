@@ -16,7 +16,6 @@ import "fmt"
 //   - Both suites are registered native suites
 //   - H1 < H2
 //   - H4 > H2 if defined (H4 != 0)
-//   - No CORE_EXT-only suite IDs (i.e., both must be in the native registry)
 type CryptoRotationDescriptor struct {
 	Name         string
 	OldSuiteID   uint8
