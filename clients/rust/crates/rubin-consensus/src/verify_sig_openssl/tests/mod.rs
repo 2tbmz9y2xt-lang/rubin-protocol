@@ -647,33 +647,6 @@ fn runtime_suite_params_for_verification_unknown_suite_preserves_error_surface()
 }
 
 #[test]
-fn resolve_suite_verifier_binding_matches_core_ext_descriptor() {
-    let params = canonical_default_suite_params();
-    let binding =
-        resolve_suite_verifier_binding(params.alg_name, params.pubkey_len, params.sig_len)
-            .expect("binding");
-    let descriptor = crate::core_ext_openssl_digest32_binding_descriptor_bytes(
-        params.alg_name,
-        params.pubkey_len,
-        params.sig_len,
-    )
-    .expect("descriptor");
-    let parsed =
-        crate::parse_core_ext_openssl_digest32_binding_descriptor(&descriptor).expect("parse");
-    match binding {
-        SuiteVerifierBinding::OpenSslDigest32V1 {
-            alg,
-            pubkey_len,
-            sig_len,
-        } => {
-            assert_eq!(alg.to_str().expect("alg utf8"), parsed.openssl_alg);
-            assert_eq!(pubkey_len, parsed.pubkey_len);
-            assert_eq!(sig_len, parsed.sig_len);
-        }
-    }
-}
-
-#[test]
 fn resolve_suite_verifier_binding_live_policy_pins_canonical_legacy_v1_binding() {
     let entry = crate::live_binding_policy::live_binding_policy_runtime_entry(
         "ML-DSA-87",

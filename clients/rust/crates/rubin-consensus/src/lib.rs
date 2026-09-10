@@ -4,7 +4,6 @@ mod compact_relay;
 mod compactsize;
 pub mod connect_block_inmem;
 pub mod constants;
-pub mod core_ext;
 mod covenant_genesis;
 pub mod da_verify_parallel;
 pub mod error;
@@ -59,17 +58,6 @@ pub use connect_block_inmem::{
     connect_block_parallel_sig_verify,
     connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context,
     ConnectBlockBasicSummary, InMemoryChainState,
-};
-pub use core_ext::{
-    core_ext_openssl_digest32_binding_descriptor_bytes, core_ext_profile_set_anchor_v1,
-    core_ext_verification_binding_from_name,
-    core_ext_verification_binding_from_name_and_descriptor,
-    core_ext_verification_binding_from_normalized_name_and_descriptor,
-    live_core_ext_verification_binding_from_name_and_descriptor,
-    live_core_ext_verification_binding_from_normalized_name_and_descriptor, normalize_binding_name,
-    normalize_live_binding_name, parse_core_ext_covenant_data,
-    parse_core_ext_openssl_digest32_binding_descriptor, CoreExtDeploymentProfile,
-    CoreExtOpenSslDigest32BindingDescriptor, CoreExtVerificationBinding, GovernanceReplayToken,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use da_verify_parallel::{

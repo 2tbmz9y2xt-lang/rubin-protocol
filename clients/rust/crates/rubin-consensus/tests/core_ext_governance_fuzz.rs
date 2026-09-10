@@ -1,146 +1,18 @@
-//! Deterministic fuzz-style tests for core_ext governance:
-//! GovernanceReplayToken, featurebit_state_at_height_from_window_counts,
+//! Deterministic fuzz-style tests for activation governance:
+//! featurebit_state_at_height_from_window_counts,
 //! flagday_active_at_height, validate_deployment_bit_uniqueness.
 //!
-//! Mirrors Go FuzzGovernanceReplayToken, FuzzFeatureBitStateAtHeightFromWindowCounts,
+//! Mirrors Go FuzzFeatureBitStateAtHeightFromWindowCounts,
 //! FuzzFlagDayHelpers.
 //!
-//! Invariant: no panic; deterministic; roundtrip canonicality.
+//! Invariant: no panic; deterministic.
 
 use rubin_consensus::flagday::validate_deployment_bit_uniqueness;
 use rubin_consensus::{
     constants::{SIGNAL_THRESHOLD, SIGNAL_WINDOW},
     featurebit_state_at_height_from_window_counts, flagday_active_at_height, FeatureBitDeployment,
-    FlagDayDeployment, GovernanceReplayToken,
+    FlagDayDeployment,
 };
-
-// =============================================================
-// GovernanceReplayToken — roundtrip, determinism, validation
-// =============================================================
-
-#[test]
-fn token_roundtrip_basic() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let encoded = token.to_bytes();
-    assert_eq!(encoded.len(), 26);
-    let decoded = GovernanceReplayToken::from_bytes(&encoded).unwrap();
-    assert_eq!(decoded, token);
-}
-
-#[test]
-fn token_roundtrip_zeros() {
-    let token = GovernanceReplayToken::issue(0, 0, 0, 0);
-    let encoded = token.to_bytes();
-    let decoded = GovernanceReplayToken::from_bytes(&encoded).unwrap();
-    assert_eq!(decoded, token);
-}
-
-#[test]
-fn token_roundtrip_max_values() {
-    let token = GovernanceReplayToken::issue(u16::MAX, u64::MAX, u64::MAX, u64::MAX);
-    let encoded = token.to_bytes();
-    let decoded = GovernanceReplayToken::from_bytes(&encoded).unwrap();
-    assert_eq!(decoded, token);
-}
-
-#[test]
-fn token_from_bytes_wrong_len() {
-    assert!(GovernanceReplayToken::from_bytes(&[]).is_err());
-    assert!(GovernanceReplayToken::from_bytes(&[0u8; 25]).is_err());
-    assert!(GovernanceReplayToken::from_bytes(&[0u8; 27]).is_err());
-}
-
-#[test]
-fn token_from_bytes_all_zeros() {
-    let token = GovernanceReplayToken::from_bytes(&[0u8; 26]).unwrap();
-    assert_eq!(token.ext_id, 0);
-    assert_eq!(token.nonce, 0);
-    assert_eq!(token.issued_at_height, 0);
-    assert_eq!(token.validity_window, 0);
-}
-
-#[test]
-fn token_from_bytes_all_ff() {
-    let token = GovernanceReplayToken::from_bytes(&[0xFF; 26]).unwrap();
-    assert_eq!(token.ext_id, u16::MAX);
-    assert_eq!(token.nonce, u64::MAX);
-    assert_eq!(token.issued_at_height, u64::MAX);
-    assert_eq!(token.validity_window, u64::MAX);
-}
-
-#[test]
-fn token_validate_valid() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    assert!(token.validate(7, 100, 1).is_ok());
-    assert!(token.validate(7, 149, 1).is_ok());
-}
-
-#[test]
-fn token_validate_ext_id_mismatch() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let err = token.validate(8, 100, 1).unwrap_err();
-    assert!(err.contains("ext_id mismatch"));
-}
-
-#[test]
-fn token_validate_nonce_mismatch() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let err = token.validate(7, 100, 2).unwrap_err();
-    assert!(err.contains("nonce mismatch"));
-}
-
-#[test]
-fn token_validate_not_yet_valid() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let err = token.validate(7, 99, 1).unwrap_err();
-    assert!(err.contains("not yet valid"));
-}
-
-#[test]
-fn token_validate_expired() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let err = token.validate(7, 150, 1).unwrap_err();
-    assert!(err.contains("expired"));
-}
-
-#[test]
-fn token_validate_saturation_no_overflow() {
-    // validity_window = u64::MAX → expiry saturates, never wraps
-    let token = GovernanceReplayToken::issue(7, 1, u64::MAX, u64::MAX);
-    // At u64::MAX height, should NOT be expired (saturated expiry = u64::MAX)
-    // Actually issued_at_height = u64::MAX, so current_height = u64::MAX is valid (not before)
-    // But expiry = u64::MAX.saturating_add(u64::MAX) = u64::MAX, so current >= expiry → expired
-    let r = token.validate(7, u64::MAX, 1);
-    assert!(r.is_err()); // expired because expiry == current
-}
-
-#[test]
-fn token_roundtrip_then_validate_deterministic() {
-    let token = GovernanceReplayToken::issue(7, 1, 100, 50);
-    let encoded = token.to_bytes();
-    let decoded = GovernanceReplayToken::from_bytes(&encoded).unwrap();
-
-    let r1 = token.validate(7, 120, 1);
-    let r2 = decoded.validate(7, 120, 1);
-    assert_eq!(r1.is_ok(), r2.is_ok());
-}
-
-#[test]
-fn token_raw_bytes_roundtrip_canonical() {
-    // Test with raw 26-byte data
-    let raw = [0x42u8; 26];
-    let decoded = GovernanceReplayToken::from_bytes(&raw).unwrap();
-    let reencoded = decoded.to_bytes();
-    assert_eq!(&raw[..], &reencoded[..]);
-}
-
-#[test]
-fn token_incremental_raw_lengths_no_panic() {
-    for len in 0..=50 {
-        let buf = vec![0x55u8; len];
-        let _ = GovernanceReplayToken::from_bytes(&buf);
-    }
-}
 
 // =============================================================
 // FeatureBitStateAtHeightFromWindowCounts — determinism, invariants
