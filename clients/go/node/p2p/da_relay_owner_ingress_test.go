@@ -1097,3 +1097,388 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 	})
 	require(t, initialized, "handleConn's peer literal does not initialize qualityScore from the initial literal")
 }
+
+// spyTxPool counts every standard relay-pool call, so the DA arm's zero standard access is a
+// recorded zero and never an inference from final residency.
+type spyTxPool struct {
+	inner TxPool
+	ops   atomic.Int32
+}
+
+func (p *spyTxPool) Get(txid [32]byte) ([]byte, bool) { p.ops.Add(1); return p.inner.Get(txid) }
+
+func (p *spyTxPool) Has(txid [32]byte) bool { p.ops.Add(1); return p.inner.Has(txid) }
+
+func (p *spyTxPool) Put(txid [32]byte, raw []byte, fee consensus.Uint128, size int) bool {
+	p.ops.Add(1)
+	return p.inner.Put(txid, raw, fee, size)
+}
+
+// standardState is the whole standard domain as one comparable value. Every row samples it
+// before any assertion introspects an owner, so a read is never mistaken for an absence.
+type standardState struct {
+	pool, metadata, scheduler int32
+	seen, resident, bytes     int
+	counts                    node.MempoolAdmissionCounts
+}
+
+// scheduled returns before with only its scheduler entries advanced.
+func scheduled(before standardState, entries int32) standardState {
+	before.scheduler += entries
+	return before
+}
+
+// localDAHarness wires the standard-domain observers around one Service: counted pool and
+// metadata calls, the captured relay frames, and cfg.Now as the scheduler-entry oracle.
+type localDAHarness struct {
+	*testHarness
+	f        *daIngressFixture
+	pool     *spyTxPool
+	metadata atomic.Int32
+	calls    *atomic.Int32
+	frames   <-chan message
+}
+
+func newLocalDAHarness(t *testing.T, canonical bool) *localDAHarness {
+	t.Helper()
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	if canonical {
+		wireCanonicalMempoolForP2PTest(t, h)
+	}
+	l := &localDAHarness{testHarness: h, pool: &spyTxPool{inner: h.service.cfg.TxPool}}
+	h.service.cfg.TxPool = l.pool
+	metadata := h.service.cfg.TxMetadataFunc
+	h.service.cfg.TxMetadataFunc = func(raw []byte) (node.RelayTxMetadata, error) {
+		l.metadata.Add(1)
+		return metadata(raw)
+	}
+	l.f, l.calls = newDAIngressFixture(t, h), nowCalls(h)
+	l.frames, _ = registerRelayFrameProbe(t, h.service, "127.0.0.99:19119") // its own quota key: never an eligible prefetch peer
+	return l
+}
+
+func (l *localDAHarness) state() standardState {
+	return standardState{l.pool.ops.Load(), l.metadata.Load(), l.calls.Load(), l.service.txSeen.Len(), l.mempool.Len(), l.mempool.BytesUsed(), l.mempool.AdmissionCounts()}
+}
+
+// ordinaryTx returns the kind 0x00 control the current wiring admits.
+func (l *localDAHarness) ordinaryTx(t *testing.T, canonical bool, nonce uint64) ([]byte, [32]byte) {
+	t.Helper()
+	if canonical {
+		raw, txid, _ := signedCanonicalP2PTxForHarness(t, l.testHarness, nonce)
+		return raw, txid
+	}
+	raw := distinctTxBytes(t, nonce)
+	return raw, mustTxID(t, raw)
+}
+
+// TestAnnounceTxLocalDAOwnerRouting: both local DA kinds leave AnnounceTx for the shared DA
+// owner before every standard authority, under both Service pool wirings, while an ordinary
+// transaction still reaches each of them; the caller's buffer is neither mutated nor aliased.
+func TestAnnounceTxLocalDAOwnerRouting(t *testing.T) {
+	for _, canonical := range []bool{false, true} {
+		t.Run(map[bool]string{false: "memory relay pool", true: "canonical mempool"}[canonical], func(t *testing.T) {
+			l := newLocalDAHarness(t, canonical)
+			daID := daRelayTestID(0xb0)
+			for _, row := range []struct {
+				label string
+				raw   []byte
+			}{{"commit", l.f.commit(daID, 2)}, {"chunk", l.f.chunk(daID, 0, []byte("local-da"))}} {
+				before := l.state()
+				must(t, l.service.AnnounceTx(row.raw), "AnnounceTx "+row.label)
+				after := l.state()
+				require(t, after == scheduled(before, 1), "local DA %s: standard state %+v -> %+v, want one scheduler entry and nothing else", row.label, before, after)
+				assertNoRelayFrame(t, l.frames, "local DA "+row.label)
+				l.f.requireRetained(row.raw, "the locally announced DA "+row.label)
+			}
+			raw := l.f.commit(daRelayTestID(0xb1), 2)
+			original := append([]byte(nil), raw...)
+			must(t, l.service.AnnounceTx(raw), "AnnounceTx the aliasing row")
+			require(t, bytes.Equal(raw, original), "AnnounceTx mutated the caller's buffer")
+			raw[0] ^= 0xff
+			l.f.requireRetained(original, "the retained member after the caller mutated its buffer")
+			ordinary, txid := l.ordinaryTx(t, canonical, 9421)
+			before := l.state()
+			must(t, l.service.AnnounceTx(ordinary), "AnnounceTx the ordinary control")
+			after := l.state()
+			requireInvFrame(t, l.frames, txid, "the ordinary control")
+			require(t, after.pool > before.pool && after.seen == before.seen+1 && after.scheduler == before.scheduler && l.service.txSeen.Has(txid),
+				"ordinary control: standard state %+v -> %+v, want every DA observer above live", before, after)
+		})
+	}
+}
+
+// TestAnnounceTxLocalDAOutcomes: the local arm's result rows on real signed bytes — one
+// peerless plan for a newly retained member, reserved across the eligible keys in their
+// existing sorted order under the returned da_id, no scheduler or peer effect for either
+// duplicate form, and two scheduler outcomes that never unretain a member.
+func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
+	l := newLocalDAHarness(t, false)
+	l.service.cfg.EnableCompactReceive = true
+	first, second := addDAPrefetchTestPeer(l.service, "127.0.0.1:19151", nil), addDAPrefetchTestPeer(l.service, "127.0.0.2:19152", nil)
+	require(t, peerQuotaKey(first.addr()) < peerQuotaKey(second.addr()), "the fixture peers do not sort as written")
+	daID := daRelayTestID(0xb2)
+	commit := l.f.commit(daID, 2)
+	before, peersBefore := l.state(), [2]peerEffects{effectsOf(first), effectsOf(second)}
+	must(t, l.service.AnnounceTx(commit), "AnnounceTx the retained commit")
+	after := l.state()
+	require(t, after == scheduled(before, 1), "retained commit: standard state %+v -> %+v", before, after)
+	firstPlan, secondPlan := readScriptedFrames(t, l.testHarness, first), readScriptedFrames(t, l.testHarness, second)
+	require(t, reflect.DeepEqual(firstPlan, []getDAChunkPayload{{Version: daChunkRequestVersion, DAID: daID, Indexes: []uint16{0}}}) &&
+		reflect.DeepEqual(secondPlan, []getDAChunkPayload{{Version: daChunkRequestVersion, DAID: daID, Indexes: []uint16{1}}}),
+		"peerless plan frames=%+v/%+v, want the two declared indexes reserved in sorted key order under %x", firstPlan, secondPlan, daID)
+	for _, row := range []struct {
+		label string
+		raw   []byte
+	}{
+		{"exact replay", commit},
+		{"same-txid nonexact replay", resignDATx(t, l.f, mustParseP2PTx(t, commit))},
+		{"different-txid competing commit", l.f.commit(daID, 2)},
+	} {
+		before := l.state()
+		frames := [2]int{len(first.conn.(*scriptedConn).Bytes()), len(second.conn.(*scriptedConn).Bytes())}
+		must(t, l.service.AnnounceTx(row.raw), "AnnounceTx the "+row.label)
+		after, framesAfter := l.state(), [2]int{len(first.conn.(*scriptedConn).Bytes()), len(second.conn.(*scriptedConn).Bytes())}
+		require(t, after == before && framesAfter == frames && [2]peerEffects{effectsOf(first), effectsOf(second)} == peersBefore,
+			"%s: standard state %+v -> %+v frames=%v/%v peers=%+v", row.label, before, after, frames, framesAfter, peersBefore)
+	}
+	l.f.requireRetained(commit, "the first-seen commit after every duplicate form")
+	t.Run("no eligible peer", func(t *testing.T) {
+		l := newLocalDAHarness(t, false)
+		raw := l.f.commit(daRelayTestID(0xb3), 2)
+		before := l.state()
+		must(t, l.service.AnnounceTx(raw), "AnnounceTx without an eligible peer")
+		after := l.state()
+		require(t, after == scheduled(before, 1), "peerless row: standard state %+v -> %+v", before, after)
+		l.f.requireRetained(raw, "the member admitted with no eligible peer")
+	})
+	t.Run("prefetch send failure keeps the member and releases its plan", func(t *testing.T) {
+		l := newLocalDAHarness(t, false)
+		l.service.cfg.EnableCompactReceive = true
+		current := addDAPrefetchTestPeer(l.service, "127.0.0.3:19153", errors.New("local prefetch send failure"))
+		daID := daRelayTestID(0xb4)
+		raw := l.f.commit(daID, 2)
+		before, peerBefore := l.state(), effectsOf(current)
+		must(t, l.service.AnnounceTx(raw), "AnnounceTx with a failing prefetch socket")
+		after, peerAfter := l.state(), effectsOf(current)
+		require(t, after == scheduled(before, 1) && peerAfter.ban == peerBefore.ban && peerAfter.score == peerBefore.score && peerAfter.anchor == peerBefore.anchor && peerAfter.last != "",
+			"send-failure row: standard state %+v -> %+v peer %+v -> %+v", before, after, peerBefore, peerAfter)
+		l.f.requireRetained(raw, "the member whose prefetch send failed")
+		retry, diagnostic := l.service.daRelay.PlanPrefetch(daID, []string{peerQuotaKey(current.addr())}, time.Unix(1, 0))
+		require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "the failed plan was not released: retry=%+v diagnostic=%q", retry, diagnostic)
+	})
+}
+
+// TestAnnounceTxLocalDAErrorsAndReuse: the local arm returns the shared owner's own error
+// object for every refusal family a local announcement reaches — dispatcher parse, candidate,
+// validation, availability, capacity and the peer rejection cache it must bypass — with no
+// wrapper, no standard effect, no scheduler entry, and both domains usable afterwards.
+func TestAnnounceTxLocalDAErrorsAndReuse(t *testing.T) {
+	l := newLocalDAHarness(t, false)
+	neutral := addDAPrefetchTestPeer(l.service, "127.0.0.4:19154", nil) // compact receive is off: it can never be planned
+	peerBefore := effectsOf(neutral)
+	f := l.f
+	commit := f.commit(daRelayTestID(0xb5), 2)
+	for _, row := range []struct {
+		label, message string
+		raw            []byte
+	}{
+		{"trailing canonical bytes", "non-canonical tx bytes", append(append([]byte(nil), commit...), 0x00)},
+		{"truncated kind payload", "TX_ERR_PARSE: unexpected EOF (bytes)", commit[:len(commit)-1]},
+		{"unsupported kind", "TX_ERR_PARSE: unsupported tx_kind", mustUnsupportedKindTxBytes(t)},
+	} {
+		t.Run(row.label, func(t *testing.T) {
+			before := l.state()
+			err := l.service.AnnounceTx(row.raw)
+			after := l.state()
+			require(t, err != nil && err.Error() == row.message && after == before,
+				"AnnounceTx=%v, want the dispatcher's own %q with no standard, scheduler or DA effect: %+v -> %+v", err, row.message, before, after)
+		})
+	}
+
+	badHash := f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0xb6), payload: []byte("bad"), chunkHash: [32]byte{0xff}})
+	unfunded := f.chunk(daRelayTestID(0xb7), 0, []byte("unfunded"))
+	delete(l.chainState.Utxos, f.lastOp)
+	validCommit := f.commit(daRelayTestID(0xb8), 2)
+	corrupted := mustParseP2PTx(t, validCommit)
+	corrupted.Witness[0].Signature[0] ^= 0xff
+	lowFee := f.tx(daTxSpec{kind: 0x01, daID: daRelayTestID(0xb9), chunkCount: 2, fee: 7})
+	weight, daBytes, _, err := consensus.TxWeightAndStats(mustParseP2PTx(t, lowFee))
+	must(t, err, "TxWeightAndStats(the low-fee fixture)")
+	require(t, daBytes == 8, "the low-fee fixture declares %d DA bytes, want the 8-byte manifest payload", daBytes)
+	conflictOp := f.op()
+	standard := mustBuildSignedP2PTx(t, l.chainState.Utxos, []consensus.Outpoint{conflictOp}, 100_000, 100_000, 9431, f.signer, f.address, f.address)
+	must(t, l.mempool.AddTx(standard), "the standard claim on the conflicting input")
+	conflicting := mustParseP2PTx(t, f.tx(daTxSpec{kind: 0x01, daID: daRelayTestID(0xba), chunkCount: 2}))
+	conflicting.Inputs = []consensus.TxInput{{PrevTxid: conflictOp.Txid, PrevVout: conflictOp.Vout}}
+	commitFirstID, chunkFirstID := daRelayTestID(0xbb), daRelayTestID(0xbc)
+	commitFirst, chunkFirst := f.commit(commitFirstID, 1), f.chunk(chunkFirstID, 0, []byte("complete"))
+	must(t, l.service.AnnounceTx(commitFirst), "AnnounceTx the commit of a one-chunk set")
+	must(t, l.service.AnnounceTx(chunkFirst), "AnnounceTx the chunk of a one-chunk set")
+
+	for _, row := range []struct {
+		label, message string
+		kind           node.TxAdmitErrorKind
+		sentinel       error
+		raw            []byte
+	}{
+		{"own-chunk payload hash mismatch", "DA chunk payload hash mismatch", node.TxAdmitRejected, node.ErrDARelayChunkHashMismatch, badHash},
+		{"missing confirmed input", "TX_ERR_MISSING_UTXO: utxo not found", node.TxAdmitRejected, nil, unfunded},
+		{"invalid signature", "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid", node.TxAdmitRejected, nil, mustMarshalPeerRuntimeTx(t, corrupted)},
+		{"DA fee below the Stage C floor", fmt.Sprintf("DA fee below Stage C floor (fee=7 required_fee=8 relay_fee_floor=0 da_fee_floor=8 da_surcharge=0 weight=%d da_payload_len=8)", weight), node.TxAdmitRejected, nil, lowFee},
+		{"pending-outpoint conflict", fmt.Sprintf("mempool double-spend conflict with %x", mustTxID(t, standard)), node.TxAdmitConflict, nil, resignDATx(t, f, conflicting)},
+		{"set-completing chunk after its commit", "DA COMPLETE_SET capacity owner is not active", node.TxAdmitUnavailable, nil, f.chunk(commitFirstID, 0, []byte("complete"))},
+		{"set-completing commit after its chunk", "DA COMPLETE_SET capacity owner is not active", node.TxAdmitUnavailable, nil, f.commit(chunkFirstID, 1)},
+	} {
+		t.Run(row.label, func(t *testing.T) {
+			before := l.state()
+			err := l.service.AnnounceTx(row.raw)
+			after := l.state()
+			var admit *node.TxAdmitError
+			//nolint:errorlint // Immediate-cause identity is the assertion: the nil rows pin the absence of a wrapper, which errors.Is cannot express.
+			require(t, errors.As(err, &admit) && errors.Is(admit, err) && errors.Unwrap(err) == row.sentinel && admit.Kind == row.kind && admit.Message == row.message &&
+				(row.sentinel == nil || errors.Is(err, row.sentinel)) && after == before && effectsOf(neutral) == peerBefore,
+				"AnnounceTx=%v (%T), want the owner's own *node.TxAdmitError %s/%q with no standard, scheduler or peer effect: %+v -> %+v",
+				err, err, row.kind, row.message, before, after)
+		})
+	}
+	f.requireRetained(commitFirst, "the retained prefix of the commit-first set")
+	f.requireRetained(chunkFirst, "the retained prefix of the chunk-first set")
+
+	for _, row := range []struct {
+		label, message string
+		prepare        func(*testing.T, *localDAHarness)
+	}{
+		{"nil DA relay", "nil DA relay", func(_ *testing.T, l *localDAHarness) { l.service.daRelay = nil }},
+		{"terminal admission latch", "pending-outpoint owner admission context unavailable", func(t *testing.T, l *localDAHarness) {
+			latchDAHarness(t, l.testHarness, newTestHarness(t, 2, "127.0.0.1:0", nil))
+		}},
+	} {
+		t.Run(row.label, func(t *testing.T) {
+			l := newLocalDAHarness(t, false)
+			raw := l.f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0xbd), payload: []byte("bad"), chunkHash: [32]byte{0xff}})
+			row.prepare(t, l)
+			before := l.state()
+			err := l.service.AnnounceTx(raw)
+			after := l.state()
+			var admit *node.TxAdmitError
+			require(t, errors.As(err, &admit) && errors.Is(admit, err) && errors.Unwrap(err) == nil && admit.Kind == node.TxAdmitUnavailable && admit.Message == row.message && after == before,
+				"AnnounceTx=%v, want the earlier unavailability rather than this candidate's hash failure: %+v -> %+v", err, before, after)
+		})
+	}
+
+	t.Run("local bypasses the peer rejection record set", func(t *testing.T) {
+		const refusal = "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid"
+		l := newLocalDAHarness(t, false)
+		valid := l.f.commit(daRelayTestID(0xbe), 2)
+		corrupted := mustParseP2PTx(t, valid)
+		corrupted.Witness[0].Signature[0] ^= 0xff
+		invalid := mustMarshalPeerRuntimeTx(t, corrupted)
+		localRefusal := func(label string) {
+			t.Helper()
+			err := l.service.AnnounceTx(invalid)
+			require(t, err != nil && err.Error() == refusal, "%s: AnnounceTx=%v, want the ordinary owner refusal", label, err)
+		}
+		localRefusal("the first LOCAL attempt")
+		localRefusal("the repeated LOCAL attempt")
+		got, err := l.f.probe(invalid)
+		require(t, err != nil && err.Error() == refusal && got == node.DAAdmissionResult{}, "the first PEER probe=(%+v,%v), want a miss: the LOCAL attempts wrote no record", got, err)
+		got, err = l.f.probe(invalid)
+		requireSuppressed(t, got, err, "the PEER probe once its own record is eligible")
+		localRefusal("the LOCAL attempt against an eligible PEER record")
+		localRefusal("the repeated LOCAL attempt against an eligible PEER record")
+		must(t, l.service.AnnounceTx(valid), "the corrected DA announcement on the same instance")
+		l.f.requireRetained(valid, "the corrected DA member")
+		ordinary, txid := l.ordinaryTx(t, false, 9441)
+		must(t, l.service.AnnounceTx(ordinary), "the ordinary announcement after the refusals")
+		require(t, l.service.txSeen.Has(txid), "the ordinary control after the refusals was not marked seen")
+	})
+}
+
+// TestAnnounceTxLocalDAProvenance: a LOCAL member is charged to no peer, so an unrelated peer
+// teardown that removes that peer's own DA members leaves it retained.
+func TestAnnounceTxLocalDAProvenance(t *testing.T) {
+	l := newLocalDAHarness(t, false)
+	current := daRelayTestPeer(l.testHarness, "127.0.0.6:19156")
+	must(t, l.service.registerPeer(current), "registerPeer")
+	daID := daRelayTestID(0xbf)
+	peerMember := l.f.chunk(daID, 0, []byte("peer-chunk"))
+	must(t, current.handleTx(peerMember), "the PEER member")
+	localMember := l.f.commit(daID, 3)
+	before := l.state()
+	must(t, l.service.AnnounceTx(localMember), "AnnounceTx the LOCAL member")
+	after := l.state()
+	require(t, after == scheduled(before, 1), "LOCAL member: standard state %+v -> %+v", before, after)
+	l.service.unregisterPeer(current)
+	l.f.requireAbsent(peerMember, "the torn-down peer's own member")
+	l.f.requireRetained(localMember, "the LOCAL member after the unrelated peer teardown")
+}
+
+// TestAnnounceTxLocalDAStructure pins the local arm's finite source shape: the dispatch reads
+// the parsed kind alone and precedes the standard admission, and the helper's whole call set is
+// the one owner call, the LOCAL constructor and the guarded peerless scheduler — no nested
+// Service entry, no recovery, no eager candidate check, no wrapper.
+func TestAnnounceTxLocalDAStructure(t *testing.T) {
+	announce := p2pFunction(t, "service.go", "AnnounceTx")
+	dispatchAt, standardAt, condition := -1, -1, ""
+	for i, stmt := range announce.Body.List {
+		if branch, ok := stmt.(*ast.IfStmt); ok {
+			ast.Inspect(branch, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && calleeOf(call) == "announceLocalDA" {
+					dispatchAt, condition = i, types.ExprString(branch.Cond)
+				}
+				return true
+			})
+		}
+		ast.Inspect(stmt, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok && calleeOf(call) == "ensureRelayTxAdmitted" && standardAt < 0 {
+				standardAt = i
+			}
+			return true
+		})
+	}
+	require(t, condition == "tx.TxKind == 0x01 || tx.TxKind == 0x02" && dispatchAt >= 0 && standardAt > dispatchAt,
+		"AnnounceTx dispatches %q at statement %d and admits to the standard pool at %d", condition, dispatchAt, standardAt)
+
+	helper := p2pFunction(t, "da_relay_ingest.go", "announceLocalDA")
+	calls, scheduler := map[string]int{}, ""
+	var guards, returns []string
+	ast.Inspect(helper.Body, func(n ast.Node) bool {
+		switch typed := n.(type) {
+		case *ast.CallExpr:
+			calls[calleeOf(typed)]++
+			if calleeOf(typed) == "scheduleDAPrefetch" {
+				scheduler = types.ExprString(typed)
+			}
+		case *ast.IfStmt:
+			guards = append(guards, types.ExprString(typed.Cond))
+		case *ast.ReturnStmt:
+			for _, result := range typed.Results {
+				returns = append(returns, types.ExprString(result))
+			}
+		case *ast.FuncLit:
+			t.Fatal("announceLocalDA introduces a function literal")
+		case *ast.DeferStmt:
+			t.Fatal("announceLocalDA defers work of its own")
+		case *ast.GoStmt:
+			t.Fatal("announceLocalDA starts a goroutine")
+		}
+		return true
+	})
+	require(t, reflect.DeepEqual(calls, map[string]int{"AdmitDA": 1, "LocalDAProvenance": 1, "scheduleDAPrefetch": 1}),
+		"announceLocalDA call set=%v, want exactly one owner call, one LOCAL constructor and one scheduler entry", calls)
+	require(t, slices.Equal(guards, []string{"err != nil", "result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict"}),
+		"announceLocalDA guards=%q, want the direct error guard and the retained-and-unconflicted membership guard", guards)
+	require(t, scheduler == `s.scheduleDAPrefetch("", result.DAID)`, "announceLocalDA schedules %q, want the empty peerless trigger and the returned da_id", scheduler)
+	require(t, slices.Equal(returns, []string{"err", "nil"}), "announceLocalDA returns=%q, want the owner's own error object and nil", returns)
+}
+
+// mustUnsupportedKindTxBytes raises the one kind byte of a canonical kind 0x00 transaction past
+// the parser's closed domain, so the dispatcher's own parse refuses it before any DA arm.
+func mustUnsupportedKindTxBytes(t *testing.T) []byte {
+	t.Helper()
+	raw := distinctTxBytes(t, 9451)
+	require(t, raw[4] == 0x00, "the marshaled header does not carry tx_kind at byte 4: %x", raw[:5])
+	raw[4] = 0x03
+	return raw
+}

@@ -414,6 +414,27 @@ func TestServiceLocalDAWorkLifecycle(t *testing.T) {
 	})
 }
 
+// newDABarrierService builds a Service whose DA candidate validation runs through a
+// localDAAdmissionBarrier, so a test can park or panic one admission inside the shared owner.
+func newDABarrierService(t *testing.T, panicValue any) (*Service, *daIngressFixture, *localDAAdmissionBarrier) {
+	t.Helper()
+	base := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	barrier := &localDAAdmissionBarrier{entered: make(chan struct{}), release: make(chan struct{}), panicValue: panicValue}
+	engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
+	must(t, err, "NewSyncEngine")
+	cfg := node.DefaultMempoolConfig()
+	cfg.RotationProvider = barrier
+	mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), cfg)
+	must(t, err, "NewMempoolWithConfig")
+	engine.SetMempool(mempool)
+	serviceCfg := base.service.cfg
+	serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
+	service, err := NewService(serviceCfg)
+	must(t, err, "NewService")
+	h := &testHarness{chainState: base.chainState, service: service, mempool: mempool}
+	return service, newDAIngressFixture(t, h), barrier
+}
+
 func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 	joinDone := func(t *testing.T, done <-chan struct{}, label string) {
 		select {
@@ -456,26 +477,8 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		}
 		requireReturned(t, lifecycleClose(h.service), "detached unavailable work did not drain")
 	})
-	newBarrierService := func(t *testing.T, panicValue any) (*Service, *daIngressFixture, *localDAAdmissionBarrier) {
-		t.Helper()
-		base := newTestHarness(t, 1, "127.0.0.1:0", nil)
-		barrier := &localDAAdmissionBarrier{entered: make(chan struct{}), release: make(chan struct{}), panicValue: panicValue}
-		engine, err := node.NewSyncEngine(base.chainState, base.blockStore, base.syncCfg)
-		must(t, err, "NewSyncEngine")
-		cfg := node.DefaultMempoolConfig()
-		cfg.RotationProvider = barrier
-		mempool, err := node.NewMempoolWithConfig(base.chainState, base.blockStore, node.DevnetGenesisChainID(), cfg)
-		must(t, err, "NewMempoolWithConfig")
-		engine.SetMempool(mempool)
-		serviceCfg := base.service.cfg
-		serviceCfg.SyncEngine, serviceCfg.TxPool = engine, NewCanonicalMempoolTxPool(mempool)
-		service, err := NewService(serviceCfg)
-		must(t, err, "NewService")
-		h := &testHarness{chainState: base.chainState, service: service, mempool: mempool}
-		return service, newDAIngressFixture(t, h), barrier
-	}
 	t.Run("ordinary admission guard holds registered detached work", func(t *testing.T) {
-		service, f, barrier := newBarrierService(t, nil)
+		service, f, barrier := newDABarrierService(t, nil)
 		barrier.armed = &atomic.Bool{}
 		raw, standard := f.commit(daRelayTestID(0xea), 2), mustBuildSignedP2PTx(t, f.h.chainState.Utxos, []consensus.Outpoint{f.op()}, 800_000, 100_000, 1, f.signer, f.address, f.address)
 		must(t, f.h.mempool.AddTx(standard), "resident ordinary admission")
@@ -514,7 +517,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		f.requireRetained(raw, "guarded detached admission")
 	})
 	t.Run("accepted effect stays under lease during Close", func(t *testing.T) {
-		service, f, barrier := newBarrierService(t, nil)
+		service, f, barrier := newDABarrierService(t, nil)
 		var scheduler atomic.Int32
 		inner := service.cfg.Now
 		service.cfg.Now = func() time.Time { scheduler.Add(1); return inner() }
@@ -544,7 +547,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 	})
 	t.Run("pre-result panic keeps identity and drains", func(t *testing.T) {
 		sentinel := &struct{ label string }{"detached admission panic"}
-		service, f, barrier := newBarrierService(t, sentinel)
+		service, f, barrier := newDABarrierService(t, sentinel)
 		done := make(chan any, 1)
 		panicDone := make(chan struct{})
 		go func() {
@@ -1151,4 +1154,158 @@ func TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance(t *testing.T) {
 	stop := h.service.acceptResolvedOrphanResult(p, summary.BlockHash, summary.BlockHash, summary, terminal)
 	requireEqual(t, stop, true, "the resolved-orphan walk stop a terminal result forces")
 	f.requireRetained(commit, "the retained record the skipped TTL tick left in place")
+}
+
+// TestAnnounceTxLocalDAWorkLifecycle: the DA arm runs entirely inside AnnounceTx's original
+// call lease. Close observes exactly one registered call across validation and the synchronous
+// prefetch, an original panic from either boundary propagates unchanged and still releases, and
+// the same Service and owners stay usable after a refusal or a panic with no Close at all.
+func TestAnnounceTxLocalDAWorkLifecycle(t *testing.T) {
+	t.Run("L1 the closed refusal precedes the parse", func(t *testing.T) {
+		var nilService *Service
+		require(t, nilService.AnnounceTx([]byte{0x01}) != nil && nilService.AnnounceTx([]byte{0x01}).Error() == "nil service", "nil AnnounceTx=%v", nilService.AnnounceTx([]byte{0x01}))
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		valid := f.commit(daRelayTestID(0xc1), 2)
+		calls := nowCalls(h)
+		must(t, h.service.Close(), "Close")
+		requireClosedRejection(t, h.service.AnnounceTx(valid), "the closed AnnounceTx of a valid DA transaction")
+		requireClosedRejection(t, h.service.AnnounceTx([]byte{0x00}), "the closed AnnounceTx of malformed bytes")
+		require(t, calls.Load() == 0, "the closed AnnounceTx entered the scheduler %d times", calls.Load())
+		f.requireAbsent(valid, "the candidate the closed AnnounceTx refused")
+	})
+	t.Run("L2 Close waits for the admission and its authorized prefetch", func(t *testing.T) {
+		service, f, barrier := newDABarrierService(t, nil)
+		var scheduler atomic.Int32
+		inner := service.cfg.Now
+		service.cfg.Now = func() time.Time { scheduler.Add(1); return inner() }
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
+		defer releaseBarrier()
+		raw := f.commit(daRelayTestID(0xc2), 2)
+		announced := make(chan error, 1)
+		go func() { announced <- service.AnnounceTx(raw) }()
+		requireChannelClosed(t, barrier.entered, "the local DA admission")
+		closeDone := lifecycleClose(service)
+		waitDraining(t, service)
+		requireStillBlocked(t, closeDone, "Close")
+		got, err := service.AdmitLocalDA(f.commit(daRelayTestID(0xc3), 2))
+		require(t, got == (node.DAAdmissionResult{}) && err != nil && err.Error() == "service already closed", "the draining nested public entry=(%+v,%v)", got, err)
+		releaseBarrier()
+		requireReturned(t, announced, "the pre-authorized AnnounceTx")
+		requireReturned(t, closeDone, "Close")
+		require(t, scheduler.Load() == 1, "the authorized prefetch was lost during drain: scheduler entries=%d", scheduler.Load())
+		f.requireRetained(raw, "the member retained while Close waited")
+	})
+	t.Run("L3 Close waits for the prefetch callback", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var enteredOnce, releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseBarrier()
+		inner := h.service.cfg.Now
+		h.service.cfg.Now = func() time.Time {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+			return inner()
+		}
+		raw := f.commit(daRelayTestID(0xc4), 2)
+		announced := make(chan error, 1)
+		go func() { announced <- h.service.AnnounceTx(raw) }()
+		requireChannelClosed(t, entered, "the prefetch callback")
+		closeDone := lifecycleClose(h.service)
+		waitDraining(t, h.service)
+		requireStillBlocked(t, closeDone, "Close")
+		releaseBarrier()
+		requireReturned(t, announced, "the pre-authorized AnnounceTx")
+		requireReturned(t, closeDone, "Close")
+		f.requireRetained(raw, "the member retained across the paused prefetch")
+	})
+	t.Run("L4 a validation panic during Close propagates and releases", func(t *testing.T) {
+		sentinel := &struct{ label string }{"local DA validation panic under Close"}
+		service, f, barrier := newDABarrierService(t, sentinel)
+		barrier.armed = &atomic.Bool{}
+		barrier.armed.Store(true)
+		var releaseOnce sync.Once
+		releaseBarrier := func() { releaseOnce.Do(func() { close(barrier.release) }) }
+		defer releaseBarrier()
+		raw := f.commit(daRelayTestID(0xc5), 2)
+		recovered := make(chan any, 1)
+		go func() { defer func() { recovered <- recover() }(); _ = service.AnnounceTx(raw) }()
+		requireChannelClosed(t, barrier.entered, "the panicking local DA admission")
+		closeDone := lifecycleClose(service)
+		waitDraining(t, service)
+		requireStillBlocked(t, closeDone, "Close")
+		releaseBarrier()
+		requireRecovered(t, recovered, sentinel, "the local DA validation panic under Close")
+		requireReturned(t, closeDone, "Close")
+		barrier.armed.Store(false)
+		f.requireAbsent(raw, "the candidate the panicking validation refused")
+	})
+	t.Run("L5 a refusal leaves both domains usable", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		bad := f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0xc6), payload: []byte("bad"), chunkHash: [32]byte{0xff}})
+		require(t, h.service.AnnounceTx(bad) != nil, "the bad-hash local announcement returned nil")
+		valid := f.commit(daRelayTestID(0xc6), 2)
+		must(t, h.service.AnnounceTx(valid), "the valid DA announcement after the refusal")
+		f.requireRetained(valid, "the member admitted after the refusal")
+		ordinary := distinctTxBytes(t, 9461)
+		must(t, h.service.AnnounceTx(ordinary), "the ordinary announcement after the refusal")
+		require(t, h.service.txSeen.Has(mustTxID(t, ordinary)), "the ordinary control after the refusal was not marked seen")
+		requireReturned(t, lifecycleClose(h.service), "Close after the refusal and its successors")
+	})
+	t.Run("L6 a validation panic with no Close leaves the instance usable", func(t *testing.T) {
+		sentinel := &struct{ label string }{"local DA validation panic"}
+		service, f, barrier := newDABarrierService(t, sentinel)
+		barrier.armed = &atomic.Bool{}
+		barrier.armed.Store(true)
+		close(barrier.release)
+		raw := f.commit(daRelayTestID(0xc7), 2)
+		var recovered any
+		func() { defer func() { recovered = recover() }(); _ = service.AnnounceTx(raw) }()
+		require(t, recovered == sentinel, "AnnounceTx panic=%v, want the original %v", recovered, sentinel)
+		barrier.armed.Store(false)
+		f.requireAbsent(raw, "the candidate the panicking validation refused")
+		must(t, service.AnnounceTx(raw), "the corrected DA announcement on the same Service and owner")
+		f.requireRetained(raw, "the member admitted after the panic")
+		requireReturned(t, lifecycleClose(service), "Close after the validation panic")
+	})
+	t.Run("L7 a prefetch panic with no Close preserves the retained member", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+		f := newDAIngressFixture(t, h)
+		raw := f.commit(daRelayTestID(0xc8), 2)
+		sentinel := &struct{ label string }{"local DA prefetch panic"}
+		var entries atomic.Int32
+		h.service.cfg.Now = func() time.Time { entries.Add(1); panic(sentinel) }
+		var recovered any
+		func() { defer func() { recovered = recover() }(); _ = h.service.AnnounceTx(raw) }()
+		require(t, recovered == sentinel && entries.Load() == 1, "AnnounceTx panic=%v scheduler entries=%d, want the original %v after one entry", recovered, entries.Load(), sentinel)
+		f.requireRetained(raw, "the member retained before the prefetch panic")
+		must(t, h.service.AnnounceTx(raw), "the exact replay after the prefetch panic")
+		require(t, entries.Load() == 1, "the duplicate replay entered the still-panicking scheduler again: entries=%d", entries.Load())
+		requireReturned(t, lifecycleClose(h.service), "Close after the prefetch panic")
+	})
+}
+
+// requireChannelClosed waits for a barrier to park the call it gates.
+func requireChannelClosed(t *testing.T, entered <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("%s did not park within %s", label, lifecycleWatchdog)
+	}
+}
+
+// requireRecovered asserts the goroutine boundary observed the original panic value.
+func requireRecovered(t *testing.T, recovered <-chan any, want any, label string) {
+	t.Helper()
+	select {
+	case got := <-recovered:
+		require(t, got == want, "%s=%v, want the original %v", label, got, want)
+	case <-time.After(lifecycleWatchdog):
+		t.Fatalf("%s did not return within %s", label, lifecycleWatchdog)
+	}
 }

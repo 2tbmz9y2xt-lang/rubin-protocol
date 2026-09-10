@@ -403,26 +403,30 @@ func TestAnnounceTx(t *testing.T) {
 	})
 }
 
-// TestAnnounceTxStagesDAOnceAcrossLocalAndInbound: a locally announced DA transaction
-// keeps its standard-domain pool, seen-set and MSG_TX effects; its inbound copy takes
-// the remote DA arm, which never touches that state and retains nothing unfunded.
+// TestAnnounceTxStagesDAOnceAcrossLocalAndInbound: a locally announced funded DA transaction
+// is staged once, by the shared DA owner, with no standard pool, seen-set or MSG_TX effect;
+// its inbound copy is that same owner's exact replay, adding no admission effect and no
+// second prefetch.
 func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
 	p := daRelayTestPeer(h, "127.0.0.1:19113")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19119")
 	defer closeProbe()
+	calls := nowCalls(h)
 	daID := daRelayTestID(122)
-	commitTx := daCommitRelayTxBytes(t, daID, 9301, []byte("relay-da-local-payload"))
+	commitTx := f.commit(daID, 2)
 	txid := mustTxID(t, commitTx)
 	must(t, h.service.AnnounceTx(commitTx), "AnnounceTx DA commit")
-	frame := <-frames
-	require(t, frame.Command == messageInv && h.service.txSeen.Has(txid) && h.service.cfg.TxPool.Has(txid), "local DA announcement command=%q seen=%v pooled=%v", frame.Command, h.service.txSeen.Has(txid), h.service.cfg.TxPool.Has(txid))
+	staged := calls.Load()
+	require(t, staged == 1 && !h.service.txSeen.Has(txid) && !h.service.cfg.TxPool.Has(txid), "local DA announcement scheduler=%d seen=%v pooled=%v", staged, h.service.txSeen.Has(txid), h.service.cfg.TxPool.Has(txid))
+	assertNoRelayFrame(t, frames, "the local DA announcement")
+	f.requireRetained(commitTx, "the locally announced DA commit")
 	must(t, p.handleTx(commitTx), "handleTx inbound copy")
 	assertNoRelayFrame(t, frames, "the inbound copy")
-	got, ok := h.service.cfg.TxPool.Get(txid)
-	require(t, ok && reflect.DeepEqual(got, commitTx) && h.service.txSeen.Has(txid) && p.snapshotState().BanScore == 0, "inbound copy moved the standard state: pooled=%v seen=%v state=%+v", ok, h.service.txSeen.Has(txid), p.snapshotState())
-	plans, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"probe"}, time.Unix(1, 0))
-	require(t, len(plans) == 0 && diagnostic == "", "the unfunded inbound copy was retained: plans=%d diagnostic=%q", len(plans), diagnostic)
+	require(t, calls.Load() == staged && !h.service.txSeen.Has(txid) && !h.service.cfg.TxPool.Has(txid) && p.snapshotState().BanScore == 0,
+		"the inbound copy staged the member again: scheduler=%d/%d seen=%v pooled=%v state=%+v", calls.Load(), staged, h.service.txSeen.Has(txid), h.service.cfg.TxPool.Has(txid), p.snapshotState())
+	f.requireRetained(commitTx, "the retained member after the inbound replay")
 }
 
 func TestAnnounceTxRelaysIntoCanonicalMempoolAndMiner(t *testing.T) {
@@ -867,6 +871,8 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	_, err = f.probe(badPayloadTx)
 	require(t, err != nil, "the bad-hash chunk was retained")
 	must(t, h.service.AnnounceTx(txBytes), "AnnounceTx correct DA chunk after bad variant")
+	f.requireRetained(txBytes, "the corrected local retry on the same input")
+	require(t, !h.service.cfg.TxPool.Has(txid) && !h.service.txSeen.Has(txid), "the corrected local retry reached a standard authority")
 }
 
 func TestValidateRelayDATxForAdmissionRejectsInvalidChunkShape(t *testing.T) {
@@ -887,8 +893,10 @@ func TestValidateRelayDATxForAdmissionRejectsInvalidChunkShape(t *testing.T) {
 	}
 }
 
-// TestHandleTxAlreadySeenRejectsBadDAChunkVariant is the HASH_FAILURE row on a txid
-// the seen-set already holds: the DA arm never consults it, so AdmitDA still penalizes.
+// TestHandleTxAlreadySeenRejectsBadDAChunkVariant is the HASH_FAILURE row on a txid the
+// seen-set already holds. No DA announcement marks one any more, so the row is arranged
+// directly: the remote DA arm never consults the seen-set, so AdmitDA still penalizes, the
+// standard pool stays empty and the retained DA member survives.
 func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.PeerRuntimeConfig.BanThreshold = 10
@@ -896,11 +904,11 @@ func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
 	txBytes := f.chunk(daRelayTestID(123), 0, []byte("admitted-da-payload"))
 	badPayloadTx, txid := badPayloadVariant(t, txBytes)
 	must(t, h.service.AnnounceTx(txBytes), "AnnounceTx setup DA chunk")
-	require(t, h.service.txSeen.Has(txid), "setup DA chunk was not marked seen")
+	require(t, h.service.txSeen.Add(txid), "the seen-set row this test arranges for itself")
 	err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx)
 	require(t, err == node.ErrDARelayChunkHashMismatch, "handle seen bad DA chunk err=%v, want the hash-mismatch sentinel itself at ban threshold", err) //nolint:errorlint // the threshold returns the sentinel, never a wrapper
-	got, ok := h.service.cfg.TxPool.Get(txid)
-	require(t, ok && reflect.DeepEqual(got, txBytes), "bad already-seen DA variant mutated admitted pool bytes")
+	require(t, !h.service.cfg.TxPool.Has(txid), "the bad already-seen DA variant reached the standard pool")
+	f.requireRetained(txBytes, "the retained DA member after the bad already-seen variant")
 }
 
 func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
@@ -926,38 +934,26 @@ func TestAnnounceTxAlreadyAdmittedSkipsMetadataValidation(t *testing.T) {
 	}
 }
 
+// TestAnnounceTxAlreadyAdmittedRejectsBadDAChunkVariant: the bad same-txid payload is refused
+// by the shared DA owner with its own hash cause. The legacy standard row planted on that txid
+// is only a witness — the DA arm neither reads it nor mutates its exact bytes.
 func TestAnnounceTxAlreadyAdmittedRejectsBadDAChunkVariant(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	daID := daRelayTestID(122)
-	payload := []byte("admitted-da-payload")
-	txBytes := daChunkRelayTxBytes(t, daID, 0, 9152, payload)
-	goodTx, txid, err := parseCanonicalTx(txBytes)
-	if err != nil {
-		t.Fatalf("parse canonical tx: %v", err)
-	}
+	f := newDAIngressFixture(t, h)
+	txBytes := f.chunk(daRelayTestID(122), 0, []byte("admitted-da-payload"))
+	badPayloadTx, txid := badPayloadVariant(t, txBytes)
 	meta := node.RelayTxMetadata{Fee: consensus.Uint128FromU64(1), Size: len(txBytes)}
-	if !h.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size) {
-		t.Fatal("setup admitted DA chunk")
-	}
-	badTx := *goodTx
-	badTx.DaPayload = []byte("bad-da-payload")
-	badPayloadTx, err := consensus.MarshalTx(&badTx)
-	if err != nil {
-		t.Fatalf("MarshalTx bad DA payload: %v", err)
-	}
-	if badTxid, err := canonicalTxID(badPayloadTx); err != nil || badTxid != txid {
-		t.Fatalf("bad DA payload txid=%x err=%v, want %x", badTxid, err, txid)
-	}
+	require(t, h.service.cfg.TxPool.Put(txid, txBytes, meta.Fee, meta.Size), "setup admitted DA chunk")
 
-	if err := h.service.AnnounceTx(badPayloadTx); !errors.Is(err, node.ErrDARelayChunkHashMismatch) {
-		t.Fatalf("AnnounceTx bad same-txid DA payload err=%v, want hash mismatch", err)
-	}
-	if h.service.txSeen.Has(txid) {
-		t.Fatal("bad already-admitted DA variant marked tx seen")
-	}
-	if got, ok := h.service.cfg.TxPool.Get(txid); !ok || !reflect.DeepEqual(got, txBytes) {
-		t.Fatal("bad already-admitted DA variant mutated admitted pool bytes")
-	}
+	err := h.service.AnnounceTx(badPayloadTx)
+	var admit *node.TxAdmitError
+	require(t, errors.As(err, &admit) && admit.Kind == node.TxAdmitRejected && admit.Message == "DA chunk payload hash mismatch" && errors.Is(err, node.ErrDARelayChunkHashMismatch),
+		"AnnounceTx bad same-txid DA payload err=%v, want the owner's hash mismatch", err)
+	require(t, !h.service.txSeen.Has(txid), "bad already-admitted DA variant marked tx seen")
+	got, ok := h.service.cfg.TxPool.Get(txid)
+	require(t, ok && reflect.DeepEqual(got, txBytes), "bad already-admitted DA variant mutated admitted pool bytes")
+	_, probeErr := f.probe(badPayloadTx)
+	require(t, probeErr != nil, "the bad same-txid DA payload was retained")
 }
 
 func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
@@ -984,6 +980,9 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 		poolRaw []byte
 		txBytes []byte
 		want    string
+		// daArm: the submitted kind leaves for the DA owner, which refuses this zero-input
+		// candidate with its own message before the poisoned static pool is ever read.
+		daArm bool
 	}{
 		{
 			name:    "noncanonical admitted bytes",
@@ -998,27 +997,30 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 			want:    "admitted txid mismatch",
 		},
 		{
-			name:    "admitted DA validation failure",
+			name:    "DA kind refused before any admitted-pool read",
 			poolRaw: badDATxBytes,
 			txBytes: goodDATxBytes,
-			want:    "admitted tx failed DA relay validation",
+			want:    "DA transaction must have 1..MAX_TX_INPUTS inputs",
+			daArm:   true,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-			h.service.cfg.TxPool = staticTxPool{raw: tc.poolRaw}
-			txid, err := canonicalTxID(tc.txBytes)
-			if err != nil {
-				t.Fatalf("canonicalTxID: %v", err)
+			pool := &spyTxPool{inner: staticTxPool{raw: tc.poolRaw}}
+			h.service.cfg.TxPool = pool
+			calls := nowCalls(h)
+			txid := mustTxID(t, tc.txBytes)
+			err := h.service.AnnounceTx(tc.txBytes)
+			reads, scheduled, seen := pool.ops.Load(), calls.Load(), h.service.txSeen.Has(txid)
+			if tc.daArm {
+				var admit *node.TxAdmitError
+				require(t, errors.As(err, &admit) && admit.Kind == node.TxAdmitRejected && admit.Message == tc.want && reads == 0 && scheduled == 0 && !seen,
+					"AnnounceTx DA row err=%v standard calls=%d scheduler=%d seen=%v, want the owner's exact %q with no standard access", err, reads, scheduled, seen, tc.want)
+				return
 			}
-			err = h.service.AnnounceTx(tc.txBytes)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("AnnounceTx err=%v, want containing %q", err, tc.want)
-			}
-			if h.service.txSeen.Has(txid) {
-				t.Fatal("AnnounceTx should not mark invalid admitted pool bytes seen")
-			}
+			require(t, err != nil && strings.Contains(err.Error(), tc.want) && reads > 0 && !seen,
+				"AnnounceTx err=%v standard calls=%d seen=%v, want containing %q with the standard observer live", err, reads, seen, tc.want)
 		})
 	}
 }

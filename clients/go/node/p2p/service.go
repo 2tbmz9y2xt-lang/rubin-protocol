@@ -318,9 +318,10 @@ func (s *Service) AnnounceBlock(blockBytes []byte) error {
 // announces it. It takes one Service call lease before parsing, admission,
 // seen-set mutation or inventory send: once Close has published the non-OPEN
 // state it returns exactly "service already closed" with zero effects, and a
-// call that won the lease first finishes while Close waits. A
-// CanonicalMempoolTxPool refuses every DA kind, so no local DA lands there; no
-// retained DA member is staged from here.
+// call that won the lease first finishes while Close waits. A parsed DA kind
+// leaves for announceLocalDA under that same lease, before any standard-pool,
+// metadata, seen-set or inventory access; only kind 0x00 reaches the arm below,
+// and a CanonicalMempoolTxPool refuses every DA kind anyway.
 func (s *Service) AnnounceTx(txBytes []byte) error {
 	if s == nil {
 		return errors.New("nil service")
@@ -332,6 +333,9 @@ func (s *Service) AnnounceTx(txBytes []byte) error {
 	tx, txid, err := parseCanonicalTx(txBytes)
 	if err != nil {
 		return err
+	}
+	if tx.TxKind == 0x01 || tx.TxKind == 0x02 {
+		return s.announceLocalDA(txBytes)
 	}
 	if _, _, err := s.ensureRelayTxAdmitted(txid, txBytes, tx, false); err != nil {
 		return err
