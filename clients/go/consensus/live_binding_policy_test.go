@@ -42,8 +42,9 @@ func TestLoadLiveBindingPolicyAcceptsEmbeddedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if manifest.Version != liveBindingPolicyVersion {
-		t.Fatalf("version=%d, want %d", manifest.Version, liveBindingPolicyVersion)
+	// Expected values are transcribed from conformance/fixtures/protocol/live_binding_policy_v1.json, not the production constants.
+	if manifest.Version != 1 {
+		t.Fatalf("version=%d, want 1", manifest.Version)
 	}
 	if len(manifest.Entries) != 1 {
 		t.Fatalf("entries=%d, want 1", len(manifest.Entries))
@@ -51,6 +52,18 @@ func TestLoadLiveBindingPolicyAcceptsEmbeddedManifest(t *testing.T) {
 	entry := manifest.Entries[0]
 	if entry.AlgName != "ML-DSA-87" {
 		t.Fatalf("alg_name=%q, want %q", entry.AlgName, "ML-DSA-87")
+	}
+	if entry.PubkeyLen != 2592 {
+		t.Fatalf("pubkey_len=%d, want 2592", entry.PubkeyLen)
+	}
+	if entry.SigLen != 4627 {
+		t.Fatalf("sig_len=%d, want 4627", entry.SigLen)
+	}
+	if entry.RuntimeBinding != "openssl_digest32_v1" {
+		t.Fatalf("runtime_binding=%q, want %q", entry.RuntimeBinding, "openssl_digest32_v1")
+	}
+	if entry.OpenSSLAlg != "ML-DSA-87" {
+		t.Fatalf("openssl_alg=%q, want %q", entry.OpenSSLAlg, "ML-DSA-87")
 	}
 	if entry.LiveBindingName != "verify_sig_openssl_digest32_v1" {
 		t.Fatalf("live_binding_name=%q, want %q", entry.LiveBindingName, "verify_sig_openssl_digest32_v1")
@@ -486,7 +499,8 @@ func TestLoadLiveBindingPolicyRejectsFieldAndCanonicalMismatches(t *testing.T) {
 }
 
 func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
-	runtimeEntry, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	// Positive lookup keys are transcribed from conformance/fixtures/protocol/live_binding_policy_v1.json, not the production constants.
+	runtimeEntry, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", 2592, 4627)
 	if err != nil {
 		t.Fatalf("liveBindingPolicyRuntimeEntry(valid): %v", err)
 	}
@@ -494,7 +508,7 @@ func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
 		t.Fatalf("openssl_alg=%q, want %q", runtimeEntry.OpenSSLAlg, "ML-DSA-87")
 	}
 	runtimeEntry.OpenSSLAlg = "MUTATED"
-	runtimeEntryAgain, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
+	runtimeEntryAgain, err := liveBindingPolicyRuntimeEntry("ML-DSA-87", 2592, 4627)
 	if err != nil {
 		t.Fatalf("liveBindingPolicyRuntimeEntry(reload): %v", err)
 	}
@@ -513,15 +527,15 @@ func TestLiveBindingPolicyLookupHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("liveBindingPolicyBindingNameEntry(valid): %v", err)
 	}
-	if liveBindingEntry.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
-		t.Fatalf("runtime_binding=%q, want %q", liveBindingEntry.RuntimeBinding, liveBindingPolicyRuntimeOpenSSLDigest32)
+	if liveBindingEntry.RuntimeBinding != "openssl_digest32_v1" {
+		t.Fatalf("runtime_binding=%q, want %q", liveBindingEntry.RuntimeBinding, "openssl_digest32_v1")
 	}
 	liveBindingEntry.RuntimeBinding = "MUTATED"
 	liveBindingEntryAgain, err := liveBindingPolicyBindingNameEntry("verify_sig_openssl_digest32_v1")
 	if err != nil {
 		t.Fatalf("liveBindingPolicyBindingNameEntry(reload): %v", err)
 	}
-	if liveBindingEntryAgain.RuntimeBinding != liveBindingPolicyRuntimeOpenSSLDigest32 {
+	if liveBindingEntryAgain.RuntimeBinding != "openssl_digest32_v1" {
 		t.Fatalf("lookup must return copy, got runtime_binding=%q", liveBindingEntryAgain.RuntimeBinding)
 	}
 	liveBindingMiss, err := liveBindingPolicyBindingNameEntry("verify_sig_ext_openssl_digest32_v1")

@@ -3,7 +3,6 @@ use super::{
     live_binding_policy_binding_name_entry, live_binding_policy_binding_name_entry_not_found_error,
     live_binding_policy_runtime_entry, live_binding_policy_runtime_entry_not_found_error,
     load_live_binding_policy_from_json, LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON,
-    LIVE_BINDING_POLICY_VERSION,
 };
 use std::cell::Cell;
 use std::fs;
@@ -38,9 +37,14 @@ fn embedded_live_binding_policy_matches_canonical_fixture() {
 #[test]
 fn load_default_live_binding_policy_accepts_embedded_manifest() {
     let manifest = default_live_binding_policy().expect("load default manifest");
-    assert_eq!(manifest.version, LIVE_BINDING_POLICY_VERSION);
+    // Expected values are transcribed from conformance/fixtures/protocol/live_binding_policy_v1.json, not the production constants.
+    assert_eq!(manifest.version, 1);
     assert_eq!(manifest.entries.len(), 1);
     assert_eq!(manifest.entries[0].alg_name, "ML-DSA-87");
+    assert_eq!(manifest.entries[0].pubkey_len, 2592);
+    assert_eq!(manifest.entries[0].sig_len, 4627);
+    assert_eq!(manifest.entries[0].runtime_binding, "openssl_digest32_v1");
+    assert_eq!(manifest.entries[0].openssl_alg, "ML-DSA-87");
     assert_eq!(
         manifest.entries[0].live_binding_name,
         "verify_sig_openssl_digest32_v1"
@@ -547,12 +551,9 @@ fn cached_live_binding_policy_latches_first_error() {
 
 #[test]
 fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
-    let runtime_entry = live_binding_policy_runtime_entry(
-        "ML-DSA-87",
-        crate::constants::ML_DSA_87_PUBKEY_BYTES,
-        crate::constants::ML_DSA_87_SIG_BYTES,
-    )
-    .expect("lookup runtime entry");
+    // Positive lookup keys are transcribed from conformance/fixtures/protocol/live_binding_policy_v1.json, not the production constants.
+    let runtime_entry =
+        live_binding_policy_runtime_entry("ML-DSA-87", 2592, 4627).expect("lookup runtime entry");
     assert_eq!(runtime_entry.openssl_alg, "ML-DSA-87");
 
     let runtime_miss = live_binding_policy_runtime_entry(
