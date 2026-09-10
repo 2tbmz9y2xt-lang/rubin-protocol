@@ -11,6 +11,10 @@ Policy:
 
 ---
 
+## 2026-09-10 — Native live-binding label detached from the extension SDK (RUB-1332)
+
+Manual edit (no JSON generator) renames only the `live_binding_name` VALUE in the shared protocol fixture from `verify_sig_ext_openssl_digest32_v1` to `verify_sig_openssl_digest32_v1`, so the native ML-DSA-87 live-binding label is no longer spelled as an extension identifier. Kept byte-for-byte identical across all three copies (conformance fixture + Go/Rust embedded; md5 `00ec6ed8ba39669275544afa659651ea`). Changed fixture: `protocol/live_binding_policy_v1.json`. Label ownership moved with the value: Go `live_binding_policy.go` holds the unexported `liveBindingNameVerifySigOpenSSLDigest32V1`, Rust `live_binding_policy.rs` holds `pub(crate) LIVE_BINDING_NAME_VERIFY_SIG_OPENSSL_DIGEST32_V1` and `core_ext.rs` imports it, so the live loader no longer depends on `core_ext`; the old Go exported constant and the old `lib.rs` public reexport are deleted with no alias, and both loaders plus the Rust SDK name helper gain a reject case for the retired label. Non-goals: no `CV-*.json`/covenant vectors, no `MATRIX.md` row change, no JSON key rename, no change to `version`, entry cardinality, `ML-DSA-87`, 2592/4627, `runtime_binding` or `openssl_alg`, no provider/FFI/sighash/native-registry change, no consensus behavior change, no SDK removal. Exact validation commands: `python3 tools/check_conformance_fixtures_policy.py`, `python3 tools/gen_conformance_matrix.py --check`, `python3 tools/check_crypto_backend_policy.py`, `go test ./consensus -run 'LiveBindingPolicy|ResolveSuiteVerifierBinding|VerifySig' -count=1`, `cargo test --workspace`, and `git diff --check`. Changed fixture files: `protocol/live_binding_policy_v1.json` and this changelog.
+
 ## 2026-08-27 — D00-R3 DA expected authority and merge-OID rebind (RUB-1267)
 
 Manual authoring (no JSON generator) extends the inert `FROZEN_EXPECTED` artifact from 66 to 79 expected-only cases: 1 exact chunk replay, 2 same-txid nonexact rows, 2 unsolicited exact replay rows, 6 retained-authority observations, and 2 D1 linearization orders; it retains 19 closed obligations and zero outstanding.

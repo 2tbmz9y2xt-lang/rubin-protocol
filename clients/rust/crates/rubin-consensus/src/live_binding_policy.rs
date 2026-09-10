@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 pub(crate) const LIVE_BINDING_POLICY_VERSION: u64 = 1;
 pub(crate) const LIVE_BINDING_POLICY_ERR_STEM: &str = "live_binding_policy";
 pub(crate) const LIVE_BINDING_POLICY_RUNTIME_OPENSSL_DIGEST32_V1: &str = "openssl_digest32_v1";
+pub(crate) const LIVE_BINDING_NAME_VERIFY_SIG_OPENSSL_DIGEST32_V1: &str =
+    "verify_sig_openssl_digest32_v1";
 pub(crate) const LIVE_BINDING_POLICY_V1_JSON: &str =
     include_str!("live_binding_policy_v1_embedded.json");
 
@@ -260,13 +262,10 @@ impl LiveBindingPolicyEntry {
                         crate::constants::ML_DSA_87_SIG_BYTES
                     )));
                 }
-                if self.live_binding_name
-                    != crate::core_ext::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
-                {
+                if self.live_binding_name != LIVE_BINDING_NAME_VERIFY_SIG_OPENSSL_DIGEST32_V1 {
                     return Err(live_binding_policy_error(format!(
                         "entries[{index}]: runtime_binding {:?} requires live_binding_name {:?}",
-                        self.runtime_binding,
-                        crate::core_ext::CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1
+                        self.runtime_binding, LIVE_BINDING_NAME_VERIFY_SIG_OPENSSL_DIGEST32_V1
                     )));
                 }
             }

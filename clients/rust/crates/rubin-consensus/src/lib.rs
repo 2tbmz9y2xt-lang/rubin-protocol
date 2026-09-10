@@ -70,7 +70,6 @@ pub use core_ext::{
     normalize_live_binding_name, parse_core_ext_covenant_data,
     parse_core_ext_openssl_digest32_binding_descriptor, CoreExtDeploymentProfile,
     CoreExtOpenSslDigest32BindingDescriptor, CoreExtVerificationBinding, GovernanceReplayToken,
-    CORE_EXT_BINDING_NAME_VERIFY_SIG_EXT_OPENSSL_DIGEST32_V1,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use da_verify_parallel::{
