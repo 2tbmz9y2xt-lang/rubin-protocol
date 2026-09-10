@@ -1,4 +1,4 @@
-//! Deterministic fuzz-style tests for core_ext governance:
+//! Deterministic fuzz-style tests for activation governance:
 //! featurebit_state_at_height_from_window_counts,
 //! flagday_active_at_height, validate_deployment_bit_uniqueness.
 //!
