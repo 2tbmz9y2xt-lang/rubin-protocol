@@ -1,7 +1,6 @@
 use super::{
     cached_live_binding_policy, default_live_binding_policy,
-    live_binding_policy_binding_name_entry, live_binding_policy_binding_name_entry_not_found_error,
-    live_binding_policy_runtime_entry, live_binding_policy_runtime_entry_not_found_error,
+    live_binding_policy_binding_name_entry, live_binding_policy_runtime_entry,
     load_live_binding_policy_from_json, LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON,
 };
 use std::cell::Cell;
@@ -566,13 +565,10 @@ fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
         runtime_miss,
         LiveBindingPolicyLookupError::NotFound(_)
     ));
+    // Miss messages are independent literals mirroring clients/go/consensus/live_binding_policy_test.go; comparing against the production formatter would be a tautology.
     assert_eq!(
         runtime_miss.to_string(),
-        live_binding_policy_runtime_entry_not_found_error(
-            "ML-DSA-87",
-            crate::constants::ML_DSA_87_PUBKEY_BYTES,
-            crate::constants::ML_DSA_87_SIG_BYTES - 1,
-        )
+        r#"live_binding_policy: runtime tuple not found alg="ML-DSA-87" pubkey_len=2592 sig_len=4626"#
     );
 
     let live_binding_entry =
@@ -589,8 +585,6 @@ fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
     ));
     assert_eq!(
         live_binding_miss.to_string(),
-        live_binding_policy_binding_name_entry_not_found_error(
-            "verify_sig_ext_openssl_digest32_v1"
-        )
+        r#"live_binding_policy: live_binding_name not found "verify_sig_ext_openssl_digest32_v1""#
     );
 }
