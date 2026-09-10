@@ -44,10 +44,6 @@ pub(crate) fn live_binding_policy_runtime_entry_not_found_error(
     ))
 }
 
-pub(crate) fn live_binding_policy_binding_name_entry_not_found_error(binding_name: &str) -> String {
-    live_binding_policy_error(format!("live_binding_name not found {binding_name:?}"))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LiveBindingPolicyLookupError {
     NotFound(String),
@@ -315,21 +311,6 @@ pub(crate) fn live_binding_policy_runtime_entry(
         .ok_or_else(|| {
             LiveBindingPolicyLookupError::NotFound(
                 live_binding_policy_runtime_entry_not_found_error(alg_name, pubkey_len, sig_len),
-            )
-        })
-}
-
-pub(crate) fn live_binding_policy_binding_name_entry(
-    binding_name: &str,
-) -> Result<&'static LiveBindingPolicyEntry, LiveBindingPolicyLookupError> {
-    let manifest = default_live_binding_policy().map_err(LiveBindingPolicyLookupError::Invalid)?;
-    manifest
-        .entries
-        .iter()
-        .find(|entry| entry.live_binding_name == binding_name)
-        .ok_or_else(|| {
-            LiveBindingPolicyLookupError::NotFound(
-                live_binding_policy_binding_name_entry_not_found_error(binding_name),
             )
         })
 }

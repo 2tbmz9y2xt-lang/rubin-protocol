@@ -1,6 +1,5 @@
 use super::{
-    cached_live_binding_policy, default_live_binding_policy,
-    live_binding_policy_binding_name_entry, live_binding_policy_runtime_entry,
+    cached_live_binding_policy, default_live_binding_policy, live_binding_policy_runtime_entry,
     load_live_binding_policy_from_json, LiveBindingPolicyLookupError, LIVE_BINDING_POLICY_V1_JSON,
 };
 use std::cell::Cell;
@@ -569,22 +568,5 @@ fn live_binding_policy_lookup_helpers_match_embedded_manifest() {
     assert_eq!(
         runtime_miss.to_string(),
         r#"live_binding_policy: runtime tuple not found alg="ML-DSA-87" pubkey_len=2592 sig_len=4626"#
-    );
-
-    let live_binding_entry =
-        live_binding_policy_binding_name_entry("verify_sig_openssl_digest32_v1")
-            .expect("lookup live_binding entry");
-    assert_eq!(live_binding_entry.runtime_binding, "openssl_digest32_v1");
-
-    let live_binding_miss =
-        live_binding_policy_binding_name_entry("verify_sig_ext_openssl_digest32_v1")
-            .expect_err("lookup live_binding miss");
-    assert!(matches!(
-        live_binding_miss,
-        LiveBindingPolicyLookupError::NotFound(_)
-    ));
-    assert_eq!(
-        live_binding_miss.to_string(),
-        r#"live_binding_policy: live_binding_name not found "verify_sig_ext_openssl_digest32_v1""#
     );
 }

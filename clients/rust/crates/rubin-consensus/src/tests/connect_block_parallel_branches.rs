@@ -76,11 +76,6 @@ fn p2pk_sig_cache_tuple(tx: &crate::tx::Tx, input_index: usize) -> (u8, &[u8], &
     (witness.suite_id, &witness.pubkey, crypto_signature, digest)
 }
 
-fn core_ext_covdata(ext_id: u16, payload: &[u8]) -> Vec<u8> {
-    crate::core_ext::encode_core_ext_covenant_data(ext_id, payload)
-        .expect("CORE_EXT covenant_data encode")
-}
-
 fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
     let mut cov = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
     let key_id = sha3_256(pubkey);
@@ -949,7 +944,8 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
     let mut disallowed_destination_tx = tx_base(crate::tx::TxOutput {
         value: 50,
         covenant_type: COV_TYPE_CORE_EXT,
-        covenant_data: core_ext_covdata(1, &[]),
+        // ext_id:u16le(1) || ext_payload_len:CompactSize(0).
+        covenant_data: vec![0x01, 0x00, 0x00],
     });
     disallowed_destination_tx.witness = vec![
         sign_input_witness(&disallowed_destination_tx, 0, 100, ZERO_CHAIN_ID, &vault_kp),
