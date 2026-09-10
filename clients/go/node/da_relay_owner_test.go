@@ -3361,10 +3361,10 @@ func TestAdmitDAOutcomeOrderAndLocalCallerCensus(t *testing.T) {
 	if !declared["RelayAdmissionDisposition"] || !declared["RelayAdmissionUnavailable"] {
 		t.Fatalf("disposition declarations were not collected: %v", declared)
 	}
-	// OWNED CALLERS: remote, local and detached-reorg ingress are the only
+	// OWNED CALLERS: remote, both local arms and detached-reorg ingress are the only
 	// AdmitDA selectors over every non-test Go source.
 	refs := productionReferenceCensus(t, "AdmitDA", "ClaimDARelayState", "NewPeerDAProvenance", "LocalDAProvenance", "DetachedReorgDAProvenance")
-	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
+	require(t, reflect.DeepEqual(refs, map[string][]string{"AdmitDA": {"AdmitLocalDA", "admitDetachedReorgDA", "announceLocalDA", "handleRelayDATx"}, "ClaimDARelayState": {"NewService"}, "NewPeerDAProvenance": {"remoteDAProvenance"}, "LocalDAProvenance": {"AdmitLocalDA", "announceLocalDA"}, "DetachedReorgDAProvenance": {"admitDetachedReorgDA"}}), "production references=%v", refs)
 	newService, detached := declaredFunctions("p2p/service.go")["NewService"], declaredFunctions("p2p/da_relay_ingest.go")["admitDetachedReorgDA"]
 	if newService == nil || detached == nil {
 		t.Fatal("detached admission binding functions missing")

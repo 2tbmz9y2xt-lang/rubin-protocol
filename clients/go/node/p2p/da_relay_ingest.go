@@ -42,6 +42,25 @@ func (s *Service) AdmitLocalDA(txBytes []byte) (node.DAAdmissionResult, error) {
 	return s.daRelay.AdmitDA(txBytes, node.LocalDAProvenance())
 }
 
+// announceLocalDA is Service.AnnounceTx's DA arm and runs under that call's
+// existing lease: it registers no work of its own and never re-enters a public
+// entry. It hands the unchanged bytes to the shared DA owner once with LOCAL
+// provenance, returns the owner's own error object unwrapped, and for a newly
+// retained member schedules the peerless prefetch exactly once, after AdmitDA
+// released its holds. Both duplicate forms exit nil with no scheduler and no
+// peer effect, and a no-plan or handled send failure leaves the member
+// retained.
+func (s *Service) announceLocalDA(txBytes []byte) error {
+	result, err := s.daRelay.AdmitDA(txBytes, node.LocalDAProvenance())
+	if err != nil {
+		return err
+	}
+	if result.Disposition == node.DAAdmissionRetained && !result.SameDAIDCommitConflict {
+		s.scheduleDAPrefetch("", result.DAID)
+	}
+	return nil
+}
+
 // admitDetachedReorgDA transfers a retained result's work lease to its
 // once-only post-lock completion.
 func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), err error) {
@@ -177,8 +196,12 @@ func (p *peer) normalizeQualityLocked(height uint64) {
 	p.qualityScore += uint8(min(intervals, uint64(qualityScoreInitial-p.qualityScore))) //nolint:gosec // bounded above by the distance to qualityScoreInitial (<= 50)
 }
 
-// validateRelayDATxForAdmission is the LOCAL standard-domain check for Service.AnnounceTx and
-// relayTxFromPool; the remote arm never calls it (AdmitDA owns it after the owner observation).
+// validateRelayDATxForAdmission is the standard-domain chunk check: it rejects a kind-0x02 tx
+// whose chunk shape is invalid and passes every other tx. Both production call sites
+// (ensureRelayTxAdmitted's unvalidated-submission check, relayTxFromPool's read-back guard on
+// the pluggable TxPool) run only for a kind-0x00 request, and a txid commits to the tx_kind
+// byte, so a read-back cannot substitute a kind-0x02 entry: the DA branch has no reachable
+// production input, and DA kinds are checked by the DA owner instead.
 func validateRelayDATxForAdmission(txBytes []byte, tx *consensus.Tx) error {
 	if tx == nil || tx.TxKind != 0x02 || tx.DaChunkCore == nil {
 		return nil
