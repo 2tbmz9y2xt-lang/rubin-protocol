@@ -99,10 +99,6 @@ engines:
       - "clients/go/node/p2p/addr_manager.go"
       - "clients/go/node/p2p/compact_reconstruct.go"
       - "clients/go/node/p2p/compact_wire.go"
-      # DA relay staged/orphan accounting is branch-dense P2P state-machine code;
-      # keep this metric-only exclusion narrow while targeted DA tests and review
-      # cover validation-before-mutation, accounting, and quota invariants.
-      - "clients/go/node/p2p/da_relay_state.go"
       - "clients/go/node/p2p/handlers_block.go"
       - "clients/go/node/p2p/handshake.go"
       - "clients/go/node/p2p/mempool.go"
@@ -118,10 +114,9 @@ engines:
       - "clients/go/node/sync_mempool.go"
       - "clients/go/node/sync_reorg.go"
       - "clients/go/node/undo.go"
-      # Consensus parser / UTXO / CORE_EXT / block-policy branch closures.
+      # Consensus parser / UTXO / block-policy branch closures.
       - "clients/go/consensus/block_basic.go"
       - "clients/go/consensus/block_basic_weight.go"
-      - "clients/go/consensus/core_ext.go"
       - "clients/go/consensus/live_binding_policy.go"
       - "clients/go/consensus/tx_parse.go"
       - "clients/go/consensus/tx_validate_worker.go"
@@ -135,7 +130,6 @@ engines:
       - "clients/go/consensus/simplicity/context_host.go"
       - "clients/rust/crates/rubin-consensus/src/block_basic/da_set.rs"
       - "clients/rust/crates/rubin-consensus/src/block_basic/weight.rs"
-      - "clients/rust/crates/rubin-consensus/src/core_ext.rs"
       - "clients/rust/crates/rubin-consensus/src/da_verify_parallel.rs"
       - "clients/rust/crates/rubin-consensus/src/live_binding_policy.rs"
       - "clients/rust/crates/rubin-consensus/src/sig_queue.rs"

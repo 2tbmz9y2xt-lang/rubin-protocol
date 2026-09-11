@@ -32,13 +32,6 @@ PV_TOUCH_NEEDLES = (
     "cv-pv",
 )
 
-CORE_EXT_TOUCH_NEEDLES = (
-    "core_ext",
-    "cv-ext",
-    "CORE_EXT",
-    "verify_sig_ext",
-)
-
 
 REQ_MARKERS = [
     # Structural anchors.
@@ -112,14 +105,12 @@ def changed_files(base: str, head: str, pr_mode: bool) -> list[str]:
     return sorted(set(files))
 
 
-def touches_pv_or_core_ext(paths: list[str]) -> bool:
+def touches_pv(paths: list[str]) -> bool:
     for p in paths:
         if not p.startswith(PV_TOUCH_PREFIXES):
             continue
         low = p.lower()
         if any(n in low for n in PV_TOUCH_NEEDLES):
-            return True
-        if any(n.lower() in low for n in CORE_EXT_TOUCH_NEEDLES):
             return True
     return False
 
@@ -157,7 +148,7 @@ def fetch_pr_body(repo: str, pr_number: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Fail-closed PV/CORE_EXT doc compliance gate for PRs touching sensitive paths."
+        description="Fail-closed PV doc compliance gate for PRs touching sensitive paths."
     )
     ap.add_argument("--repo", default=os.getenv("GITHUB_REPOSITORY", ""), help="owner/repo")
     args = ap.parse_args()
@@ -169,8 +160,8 @@ def main() -> int:
     base, head, pr_mode = detected
     files = changed_files(base, head, pr_mode)
 
-    if not touches_pv_or_core_ext(files):
-        print("PV_DOC_COMPLIANCE: SKIP (no PV/CORE_EXT sensitive paths touched)")
+    if not touches_pv(files):
+        print("PV_DOC_COMPLIANCE: SKIP (no PV sensitive paths touched)")
         return 0
 
     pr_number = pr_number_from_event()
@@ -221,7 +212,7 @@ def main() -> int:
 
     if missing or boundary_errors:
         print("PV_DOC_COMPLIANCE: FAIL")
-        print("PR touches PV/CORE_EXT sensitive paths but is missing required PR-body markers.")
+        print("PR touches PV sensitive paths but is missing required PR-body markers.")
         if missing:
             print("Missing structural markers (regex):")
             for m in missing:

@@ -35,10 +35,6 @@ GO_ALLOWLIST = {
     "connect_block_parallel.go:applyNonCoinbaseTxBasicWorkQ",
     # build overlay map→map, order-neutral
     "connect_block_parallel_precompute.go:PrecomputeTxContexts",
-    # clone set map[uint8]struct{}, order-neutral
-    "core_ext.go:cloneAllowedSuites",
-    # collect keys → sort.Slice before return
-    "core_ext.go:sortedAllowedSuites",
     # collect items → sort by key → deterministic hash
     "state_digest.go:UtxoSetHash",
     # deep-copy map→map, order-neutral
