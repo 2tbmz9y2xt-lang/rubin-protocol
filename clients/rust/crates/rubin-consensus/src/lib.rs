@@ -104,9 +104,7 @@ pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction
 pub use tx_validate_worker::{
     first_tx_error, run_tx_validation_workers, validate_tx_local, TxValidationResult,
 };
-pub use txcontext::{
-    TxContextBase, TxContextContinuing, TxOutputView, Uint128, TXCONTEXT_MAX_CONTINUING_OUTPUTS,
-};
+pub use txcontext::Uint128;
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,
