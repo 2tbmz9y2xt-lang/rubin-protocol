@@ -679,11 +679,18 @@ fn apply_non_coinbase_tx_basic_workq_vault_creation_ok() {
             script_sig: vec![],
             sequence: 0,
         }],
-        outputs: vec![crate::tx::TxOutput {
-            value: 90,
-            covenant_type: COV_TYPE_VAULT,
-            covenant_data: vault_cov,
-        }],
+        outputs: vec![
+            crate::tx::TxOutput {
+                value: 1,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: dest_cov,
+            },
+            crate::tx::TxOutput {
+                value: 89,
+                covenant_type: COV_TYPE_VAULT,
+                covenant_data: vault_cov,
+            },
+        ],
         locktime: 0,
         witness: vec![],
         da_payload: vec![],
@@ -707,7 +714,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_creation_ok() {
 
     let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 200).expect("vault creation");
     assert_eq!(summary.fee, 10);
-    assert_eq!(next_utxos.len(), 1);
+    assert_eq!(next_utxos.len(), 2);
 }
 
 #[test]
