@@ -874,6 +874,22 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
     let err = deferred_apply(&fee_sponsor_tx, [0u8; 32], &sponsor_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultFeeSponsorForbidden);
 
+    let mut bad_signature_sponsor_tx = fee_sponsor_tx.clone();
+    bad_signature_sponsor_tx.witness[0].signature[0] ^= 0x01;
+    let err = crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+        &bad_signature_sponsor_tx,
+        [0u8; 32],
+        &sponsor_utxos,
+        200,
+        0,
+        0,
+        ZERO_CHAIN_ID,
+        None,
+        None,
+    )
+    .expect_err("non-owner sponsor precedes bad Vault signature");
+    assert_eq!(err.code, ErrorCode::TxErrVaultFeeSponsorForbidden);
+
     let outsider_kp = kp_or_skip!();
     let outsider_cov = p2pk_covenant_data_for_pubkey(&outsider_kp.pubkey);
     let mut not_whitelisted_tx = tx_base(crate::tx::TxOutput {

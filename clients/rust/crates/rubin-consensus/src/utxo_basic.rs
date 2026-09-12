@@ -222,23 +222,52 @@ pub(crate) fn validate_non_coinbase_input_encoding(input: &TxInput) -> Result<()
     Ok(())
 }
 
+struct UtxoApplyState<'tx, 'queue> {
+    work: HashMap<Outpoint, UtxoEntry>,
+    sighash_cache: SighashV1PrehashCache<'tx>,
+    sig_queue: Option<&'queue mut SigCheckQueue>,
+    sum_in: u128,
+    sum_in_vault: u128,
+    sum_out: u128,
+    vault_input_count: usize,
+    creates_vault: bool,
+    vault_spend: Option<VaultSpendState>,
+    witness_cursor: usize,
+    input_lock_ids: Vec<[u8; 32]>,
+    input_cov_types: Vec<u16>,
+    seen_inputs: HashMap<Outpoint, ()>,
+    resolved_inputs: Vec<UtxoEntry>,
+    resolved_witness_ranges: Vec<Range<usize>>,
+    resolved_outpoints: Vec<Outpoint>,
+}
+
+struct VaultSpendState {
+    keys: Vec<[u8; 32]>,
+    threshold: u8,
+    witness_range: Range<usize>,
+    input_index: u32,
+    input_value: u64,
+    owner_lock_id: [u8; 32],
+    whitelist: Vec<[u8; 32]>,
+}
+
 fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
     ctx: UtxoApplyImplContext<'_>,
     sig_queue: Option<&mut SigCheckQueue>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    let UtxoApplyImplContext {
-        tx,
-        txid,
-        utxo_set,
-        height,
-        block_timestamp,
-        block_mtp,
-        chain_id,
-        rotation,
-        registry,
-    } = ctx;
-    let _ = block_timestamp;
-    let mut sig_queue = sig_queue;
+    validate_apply_inputs(&ctx)?;
+    let mut state = UtxoApplyState::new(&ctx, sig_queue)?;
+    state.resolve_inputs(&ctx)?;
+    state.validate_spends(&ctx)?;
+    state.add_outputs(&ctx)?;
+    state.validate_vault_creation(&ctx)?;
+    state.validate_vault_spend(&ctx)?;
+    state.finish()
+}
+
+fn validate_apply_inputs(ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+    let tx = ctx.tx;
+    let _ = ctx.block_timestamp;
     if tx.tx_nonce == 0 {
         return Err(TxError::new(
             ErrorCode::TxErrTxNonceInvalid,
@@ -251,299 +280,466 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
             "non-coinbase must have at least one input",
         ));
     }
+    validate_tx_covenants_genesis(tx, ctx.height, ctx.rotation)
+}
 
-    validate_tx_covenants_genesis(tx, height, rotation)?;
+impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
+    fn new(
+        ctx: &UtxoApplyImplContext<'tx>,
+        sig_queue: Option<&'queue mut SigCheckQueue>,
+    ) -> Result<Self, TxError> {
+        let work = ctx.utxo_set.clone();
+        let sighash_cache = SighashV1PrehashCache::new(ctx.tx)?;
+        Ok(Self {
+            work,
+            sighash_cache,
+            sig_queue,
+            sum_in: 0,
+            sum_in_vault: 0,
+            sum_out: 0,
+            vault_input_count: 0,
+            creates_vault: false,
+            vault_spend: None,
+            witness_cursor: 0,
+            input_lock_ids: Vec::with_capacity(ctx.tx.inputs.len()),
+            input_cov_types: Vec::with_capacity(ctx.tx.inputs.len()),
+            seen_inputs: HashMap::with_capacity(ctx.tx.inputs.len()),
+            resolved_inputs: Vec::with_capacity(ctx.tx.inputs.len()),
+            resolved_witness_ranges: Vec::with_capacity(ctx.tx.inputs.len()),
+            resolved_outpoints: Vec::with_capacity(ctx.tx.inputs.len()),
+        })
+    }
 
-    let mut work = utxo_set.clone();
-    let mut sighash_cache = SighashV1PrehashCache::new(tx)?;
-    let mut sum_in: u128 = 0;
-    let mut sum_in_vault: u128 = 0;
-    let mut vault_input_count: usize = 0;
-    let mut vault_whitelist: Vec<[u8; 32]> = Vec::new();
-    let mut vault_owner_lock_id: [u8; 32] = [0u8; 32];
-    let mut vault_sig_keys: Vec<[u8; 32]> = Vec::new();
-    let mut vault_sig_threshold: u8 = 0;
-    let mut vault_sig_witness_range: Option<Range<usize>> = None;
-    let mut vault_sig_input_index: u32 = 0;
-    let mut vault_sig_input_value: u64 = 0;
-    let mut have_vault_sig: bool = false;
-    let mut witness_cursor: usize = 0;
-    let mut input_lock_ids: Vec<[u8; 32]> = Vec::with_capacity(tx.inputs.len());
-    let mut input_cov_types: Vec<u16> = Vec::with_capacity(tx.inputs.len());
-    let mut seen_inputs: HashMap<Outpoint, ()> = HashMap::with_capacity(tx.inputs.len());
-    let mut resolved_inputs: Vec<UtxoEntry> = Vec::with_capacity(tx.inputs.len());
-    let mut resolved_witness_ranges: Vec<Range<usize>> = Vec::with_capacity(tx.inputs.len());
-    let mut resolved_outpoints: Vec<Outpoint> = Vec::with_capacity(tx.inputs.len());
+    fn resolve_inputs(&mut self, ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+        for input in &ctx.tx.inputs {
+            self.resolve_input(ctx, input)?;
+        }
+        if self.witness_cursor != ctx.tx.witness.len() {
+            return Err(TxError::new(
+                ErrorCode::TxErrParse,
+                "witness_count mismatch",
+            ));
+        }
+        Ok(())
+    }
 
-    for input in &tx.inputs {
+    fn resolve_input(
+        &mut self,
+        ctx: &UtxoApplyImplContext<'_>,
+        input: &TxInput,
+    ) -> Result<(), TxError> {
         validate_non_coinbase_input_encoding(input)?;
         let op = Outpoint {
             txid: input.prev_txid,
             vout: input.prev_vout,
         };
-        if seen_inputs.contains_key(&op) {
+        if self.seen_inputs.contains_key(&op) {
             return Err(TxError::new(
                 ErrorCode::TxErrParse,
                 "duplicate input outpoint",
             ));
         }
-        seen_inputs.insert(op.clone(), ());
-        let entry = match work.get(&op) {
+        self.seen_inputs.insert(op.clone(), ());
+        let entry = match self.work.get(&op) {
             Some(v) => v.clone(),
             None => return Err(TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found")),
         };
+        validate_input_availability(&entry, ctx.height)?;
+        self.validate_input_covenant(&entry)?;
+        self.record_resolved_input(ctx.tx, entry, op)
+    }
 
-        if entry.covenant_type == COV_TYPE_ANCHOR || entry.covenant_type == COV_TYPE_DA_COMMIT {
-            return Err(TxError::new(
-                ErrorCode::TxErrMissingUtxo,
-                "attempt to spend non-spendable covenant",
-            ));
+    fn record_resolved_input(
+        &mut self,
+        tx: &Tx,
+        entry: UtxoEntry,
+        op: Outpoint,
+    ) -> Result<(), TxError> {
+        let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
+        if slots == 0 {
+            return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
         }
+        if self.witness_cursor + slots > tx.witness.len() {
+            return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
+        }
+        let assigned_range = self.witness_cursor..self.witness_cursor + slots;
+        self.resolved_inputs.push(entry);
+        self.resolved_witness_ranges.push(assigned_range);
+        self.resolved_outpoints.push(op);
+        self.witness_cursor += slots;
+        Ok(())
+    }
 
-        // Overflow-safe maturity check: avoid entry.creation_height + COINBASE_MATURITY wrapping.
-        if entry.created_by_coinbase
-            && (height < entry.creation_height
-                || height - entry.creation_height < COINBASE_MATURITY)
-        {
-            return Err(TxError::new(
-                ErrorCode::TxErrCoinbaseImmature,
-                "coinbase immature",
-            ));
-        }
+    fn validate_input_covenant(&mut self, entry: &UtxoEntry) -> Result<(), TxError> {
         if entry.covenant_type == COV_TYPE_VAULT {
-            vault_input_count += 1;
-            if vault_input_count > 1 {
+            self.vault_input_count += 1;
+            if self.vault_input_count > 1 {
                 return Err(TxError::new(
                     ErrorCode::TxErrVaultMultiInputForbidden,
                     "multiple CORE_VAULT inputs forbidden",
                 ));
             }
         }
-        // Fail-closed: a CORE_SIMPLICITY (0x0106) spend is rejected with the
-        // dedicated message ahead of the generic check_spend_covenant/witness
-        // errors, matching Go's input-resolution order.
+        // Preserve the dedicated refusal before generic covenant/witness checks.
         if entry.covenant_type == COV_TYPE_CORE_SIMPLICITY {
             return Err(reject_core_simplicity_spend());
         }
-        check_spend_covenant(entry.covenant_type, &entry.covenant_data)?;
-        let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
-        if slots == 0 {
-            return Err(TxError::new(ErrorCode::TxErrParse, "invalid witness slots"));
-        }
-        if witness_cursor + slots > tx.witness.len() {
-            return Err(TxError::new(ErrorCode::TxErrParse, "witness underflow"));
-        }
-        let assigned_range = witness_cursor..witness_cursor + slots;
-        resolved_inputs.push(entry);
-        resolved_witness_ranges.push(assigned_range);
-        resolved_outpoints.push(op);
-        witness_cursor += slots;
-    }
-    if witness_cursor != tx.witness.len() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "witness_count mismatch",
-        ));
+        check_spend_covenant(entry.covenant_type, &entry.covenant_data)
     }
 
-    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED and already rejected by
-    // `check_spend_covenant`/`witness_slots` (TxErrCovenantTypeInvalid) during
-    // input resolution above, so no CORE_EXT profile gating runs here.
-
-    for (input_index, ((entry, assigned_range), op)) in resolved_inputs
-        .iter()
-        .zip(resolved_witness_ranges.iter())
-        .zip(resolved_outpoints.iter())
-        .enumerate()
-    {
-        let assigned = &tx.witness[assigned_range.clone()];
-        match entry.covenant_type {
-            COV_TYPE_P2PK => {
-                if assigned.len() != 1 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "CORE_P2PK witness_slots must be 1",
-                    ));
-                }
-                validate_p2pk_spend_q(
-                    entry,
-                    &assigned[0],
-                    input_index as u32,
-                    entry.value,
-                    chain_id,
-                    height,
-                    &mut sighash_cache,
-                    sig_queue.as_deref_mut(),
-                    rotation,
-                    registry,
-                )?;
-            }
-            COV_TYPE_MULTISIG => {
-                let m = parse_multisig_covenant_data(&entry.covenant_data)?;
-                validate_threshold_sig_spend_q(
-                    &m.keys,
-                    m.threshold,
-                    assigned,
-                    input_index as u32,
-                    entry.value,
-                    chain_id,
-                    height,
-                    "CORE_MULTISIG",
-                    &mut sighash_cache,
-                    sig_queue.as_deref_mut(),
-                    rotation,
-                    registry,
-                )?;
-            }
-            COV_TYPE_VAULT => {
-                let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
-                // CORE_VAULT signature threshold is checked later (CANONICAL §24.1),
-                // after owner-authorization and no-fee-sponsorship checks.
-                vault_sig_keys = v.keys.clone();
-                vault_sig_threshold = v.threshold;
-                vault_sig_witness_range = Some(assigned_range.clone());
-                vault_sig_input_index = input_index as u32;
-                vault_sig_input_value = entry.value;
-                vault_owner_lock_id = v.owner_lock_id;
-                vault_whitelist = v.whitelist;
-                have_vault_sig = true;
-            }
-            COV_TYPE_HTLC => {
-                if assigned.len() != 2 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "CORE_HTLC witness_slots must be 2",
-                    ));
-                }
-                validate_htlc_spend_q(
-                    entry,
-                    &assigned[0],
-                    &assigned[1],
-                    HtlcSpendContext {
-                        input_index: input_index as u32,
-                        input_value: entry.value,
-                        chain_id,
-                        block_height: height,
-                        block_mtp,
-                    },
-                    &mut sighash_cache,
-                    sig_queue.as_deref_mut(),
-                    rotation,
-                    registry,
-                )?;
-            }
-            COV_TYPE_CORE_STEALTH => {
-                if assigned.len() != 1 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "CORE_STEALTH witness_slots must be 1",
-                    ));
-                }
-                validate_stealth_spend_q(
-                    entry,
-                    &assigned[0],
-                    input_index as u32,
-                    entry.value,
-                    chain_id,
-                    height,
-                    &mut sighash_cache,
-                    sig_queue.as_deref_mut(),
-                    rotation,
-                    registry,
-                )?;
-            }
-            _ => {}
-        }
-
-        let desc = output_descriptor_bytes(entry.covenant_type, &entry.covenant_data);
-        let input_lock_id = sha3_256(&desc);
-        input_lock_ids.push(input_lock_id);
-        input_cov_types.push(entry.covenant_type);
-
-        sum_in = sum_in
-            .checked_add(entry.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
-        if entry.covenant_type == COV_TYPE_VAULT {
-            sum_in_vault = sum_in_vault
+    fn validate_spends(&mut self, ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+        // 0x0102 is unassigned and already rejected during input resolution.
+        for (input_index, ((entry, range), op)) in self
+            .resolved_inputs
+            .iter()
+            .zip(self.resolved_witness_ranges.iter())
+            .zip(self.resolved_outpoints.iter())
+            .enumerate()
+        {
+            validate_resolved_spend(
+                ctx,
+                entry,
+                range,
+                input_index,
+                &mut self.sighash_cache,
+                &mut self.sig_queue,
+                &mut self.vault_spend,
+            )?;
+            let desc = output_descriptor_bytes(entry.covenant_type, &entry.covenant_data);
+            self.input_lock_ids.push(sha3_256(&desc));
+            self.input_cov_types.push(entry.covenant_type);
+            self.sum_in = self
+                .sum_in
                 .checked_add(entry.value as u128)
                 .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+            if entry.covenant_type == COV_TYPE_VAULT {
+                self.sum_in_vault = self
+                    .sum_in_vault
+                    .checked_add(entry.value as u128)
+                    .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+            }
+            self.work.remove(op);
         }
-        work.remove(op);
+        Ok(())
     }
 
-    let mut sum_out: u128 = 0;
-    let mut creates_vault = false;
-    for (i, out) in tx.outputs.iter().enumerate() {
-        sum_out = sum_out
-            .checked_add(out.value as u128)
-            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
-
-        if out.covenant_type == COV_TYPE_VAULT {
-            creates_vault = true;
-        }
-
-        if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
-            continue;
-        }
-
-        work.insert(
-            Outpoint {
-                txid,
-                vout: i as u32,
-            },
-            UtxoEntry {
-                value: out.value,
-                covenant_type: out.covenant_type,
-                covenant_data: out.covenant_data.clone(),
-                creation_height: height,
-                created_by_coinbase: false,
-            },
-        );
-    }
-
-    // CORE_VAULT creation rule: any tx creating CORE_VAULT outputs must include an owner-authorized input.
-    if creates_vault {
-        for out in &tx.outputs {
-            if out.covenant_type != COV_TYPE_VAULT {
+    fn add_outputs(&mut self, ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+        for (i, out) in ctx.tx.outputs.iter().enumerate() {
+            self.sum_out = self
+                .sum_out
+                .checked_add(out.value as u128)
+                .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "u128 overflow"))?;
+            if out.covenant_type == COV_TYPE_VAULT {
+                self.creates_vault = true;
+            }
+            if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
                 continue;
             }
-            let v = parse_vault_covenant_data(&out.covenant_data)?;
-            let owner_lock_id = v.owner_lock_id;
-
-            if !has_owner_authorized_input(&input_lock_ids, &input_cov_types, owner_lock_id) {
-                return Err(TxError::new(
-                    ErrorCode::TxErrVaultOwnerAuthRequired,
-                    "missing owner-authorized input for CORE_VAULT creation",
-                ));
-            }
+            self.work.insert(
+                Outpoint {
+                    txid: ctx.txid,
+                    vout: i as u32,
+                },
+                UtxoEntry {
+                    value: out.value,
+                    covenant_type: out.covenant_type,
+                    covenant_data: out.covenant_data.clone(),
+                    creation_height: ctx.height,
+                    created_by_coinbase: false,
+                },
+            );
         }
+        Ok(())
     }
 
-    // CORE_VAULT spend rules: safe-only model with owner binding and strict whitelist.
-    if vault_input_count == 1 {
-        if !have_vault_sig {
+    fn validate_vault_creation(&self, ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+        // Any CORE_VAULT creation requires an owner-authorized input.
+        if self.creates_vault {
+            for out in &ctx.tx.outputs {
+                if out.covenant_type != COV_TYPE_VAULT {
+                    continue;
+                }
+                let v = parse_vault_covenant_data(&out.covenant_data)?;
+                if !has_owner_authorized_input(
+                    &self.input_lock_ids,
+                    &self.input_cov_types,
+                    v.owner_lock_id,
+                ) {
+                    return Err(TxError::new(
+                        ErrorCode::TxErrVaultOwnerAuthRequired,
+                        "missing owner-authorized input for CORE_VAULT creation",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_vault_spend(&mut self, ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
+        if self.vault_input_count == 1 {
+            let vault = self.vault_spend.take().ok_or_else(|| {
+                TxError::new(
+                    ErrorCode::TxErrParse,
+                    "missing CORE_VAULT signature context",
+                )
+            })?;
+            vault.validate_owner_and_sponsor(&self.input_lock_ids, &self.input_cov_types)?;
+            vault.validate_no_recursion(ctx.tx)?;
+            // CANONICAL §24.1 step 7 follows owner, sponsor and recursion checks.
+            vault.validate_signature(
+                ctx,
+                &mut self.sighash_cache,
+                self.sig_queue.as_deref_mut(),
+            )?;
+            vault.validate_destinations(ctx.tx)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+        if self.sum_out > self.sum_in {
             return Err(TxError::new(
-                ErrorCode::TxErrParse,
-                "missing CORE_VAULT signature context",
+                ErrorCode::TxErrValueConservation,
+                "sum_out exceeds sum_in",
             ));
         }
-        // Owner input required.
-        if !has_owner_lock_input(&input_lock_ids, vault_owner_lock_id) {
+        if self.vault_input_count == 1 && self.sum_out < self.sum_in_vault {
+            return Err(TxError::new(
+                ErrorCode::TxErrValueConservation,
+                "CORE_VAULT value must not fund miner fee",
+            ));
+        }
+        // Exact u128 fee: accepted fees above u64 are never narrowed.
+        let fee = self.sum_in - self.sum_out;
+        let summary = UtxoApplySummary {
+            fee,
+            utxo_count: self.work.len() as u64,
+        };
+        Ok((self.work, summary))
+    }
+}
+
+fn validate_input_availability(entry: &UtxoEntry, height: u64) -> Result<(), TxError> {
+    if entry.covenant_type == COV_TYPE_ANCHOR || entry.covenant_type == COV_TYPE_DA_COMMIT {
+        return Err(TxError::new(
+            ErrorCode::TxErrMissingUtxo,
+            "attempt to spend non-spendable covenant",
+        ));
+    }
+    // Avoid overflowing creation_height + COINBASE_MATURITY.
+    if entry.created_by_coinbase
+        && (height < entry.creation_height || height - entry.creation_height < COINBASE_MATURITY)
+    {
+        return Err(TxError::new(
+            ErrorCode::TxErrCoinbaseImmature,
+            "coinbase immature",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_resolved_spend(
+    ctx: &UtxoApplyImplContext<'_>,
+    entry: &UtxoEntry,
+    range: &Range<usize>,
+    input_index: usize,
+    cache: &mut SighashV1PrehashCache<'_>,
+    queue: &mut Option<&mut SigCheckQueue>,
+    vault: &mut Option<VaultSpendState>,
+) -> Result<(), TxError> {
+    let assigned = &ctx.tx.witness[range.clone()];
+    match entry.covenant_type {
+        COV_TYPE_P2PK => apply_p2pk_spend(
+            ctx,
+            entry,
+            assigned,
+            input_index,
+            cache,
+            queue.as_deref_mut(),
+        )?,
+        COV_TYPE_MULTISIG => apply_multisig_spend(
+            ctx,
+            entry,
+            assigned,
+            input_index,
+            cache,
+            queue.as_deref_mut(),
+        )?,
+        COV_TYPE_VAULT => *vault = Some(VaultSpendState::capture(entry, range, input_index)?),
+        COV_TYPE_HTLC => apply_htlc_spend(
+            ctx,
+            entry,
+            assigned,
+            input_index,
+            cache,
+            queue.as_deref_mut(),
+        )?,
+        COV_TYPE_CORE_STEALTH => apply_stealth_spend(
+            ctx,
+            entry,
+            assigned,
+            input_index,
+            cache,
+            queue.as_deref_mut(),
+        )?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_p2pk_spend(
+    ctx: &UtxoApplyImplContext<'_>,
+    entry: &UtxoEntry,
+    assigned: &[crate::tx::WitnessItem],
+    input_index: usize,
+    cache: &mut SighashV1PrehashCache<'_>,
+    queue: Option<&mut SigCheckQueue>,
+) -> Result<(), TxError> {
+    if assigned.len() != 1 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_P2PK witness_slots must be 1",
+        ));
+    }
+    validate_p2pk_spend_q(
+        entry,
+        &assigned[0],
+        input_index as u32,
+        entry.value,
+        ctx.chain_id,
+        ctx.height,
+        cache,
+        queue,
+        ctx.rotation,
+        ctx.registry,
+    )?;
+    Ok(())
+}
+
+fn apply_multisig_spend(
+    ctx: &UtxoApplyImplContext<'_>,
+    entry: &UtxoEntry,
+    assigned: &[crate::tx::WitnessItem],
+    input_index: usize,
+    cache: &mut SighashV1PrehashCache<'_>,
+    queue: Option<&mut SigCheckQueue>,
+) -> Result<(), TxError> {
+    let m = parse_multisig_covenant_data(&entry.covenant_data)?;
+    validate_threshold_sig_spend_q(
+        &m.keys,
+        m.threshold,
+        assigned,
+        input_index as u32,
+        entry.value,
+        ctx.chain_id,
+        ctx.height,
+        "CORE_MULTISIG",
+        cache,
+        queue,
+        ctx.rotation,
+        ctx.registry,
+    )?;
+    Ok(())
+}
+
+fn apply_htlc_spend(
+    ctx: &UtxoApplyImplContext<'_>,
+    entry: &UtxoEntry,
+    assigned: &[crate::tx::WitnessItem],
+    input_index: usize,
+    cache: &mut SighashV1PrehashCache<'_>,
+    queue: Option<&mut SigCheckQueue>,
+) -> Result<(), TxError> {
+    if assigned.len() != 2 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_HTLC witness_slots must be 2",
+        ));
+    }
+    validate_htlc_spend_q(
+        entry,
+        &assigned[0],
+        &assigned[1],
+        HtlcSpendContext {
+            input_index: input_index as u32,
+            input_value: entry.value,
+            chain_id: ctx.chain_id,
+            block_height: ctx.height,
+            block_mtp: ctx.block_mtp,
+        },
+        cache,
+        queue,
+        ctx.rotation,
+        ctx.registry,
+    )?;
+    Ok(())
+}
+
+fn apply_stealth_spend(
+    ctx: &UtxoApplyImplContext<'_>,
+    entry: &UtxoEntry,
+    assigned: &[crate::tx::WitnessItem],
+    input_index: usize,
+    cache: &mut SighashV1PrehashCache<'_>,
+    queue: Option<&mut SigCheckQueue>,
+) -> Result<(), TxError> {
+    if assigned.len() != 1 {
+        return Err(TxError::new(
+            ErrorCode::TxErrParse,
+            "CORE_STEALTH witness_slots must be 1",
+        ));
+    }
+    validate_stealth_spend_q(
+        entry,
+        &assigned[0],
+        input_index as u32,
+        entry.value,
+        ctx.chain_id,
+        ctx.height,
+        cache,
+        queue,
+        ctx.rotation,
+        ctx.registry,
+    )?;
+    Ok(())
+}
+
+impl VaultSpendState {
+    fn capture(
+        entry: &UtxoEntry,
+        range: &Range<usize>,
+        input_index: usize,
+    ) -> Result<Self, TxError> {
+        let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
+        // Capture now; threshold verification remains after authorization.
+        Ok(Self {
+            keys: v.keys.clone(),
+            threshold: v.threshold,
+            witness_range: range.clone(),
+            input_index: input_index as u32,
+            input_value: entry.value,
+            owner_lock_id: v.owner_lock_id,
+            whitelist: v.whitelist,
+        })
+    }
+
+    fn validate_owner_and_sponsor(&self, locks: &[[u8; 32]], types: &[u16]) -> Result<(), TxError> {
+        if !has_owner_lock_input(locks, self.owner_lock_id) {
             return Err(TxError::new(
                 ErrorCode::TxErrVaultOwnerAuthRequired,
                 "missing owner-authorized input for CORE_VAULT spend",
             ));
         }
-
-        // No fee sponsorship: all non-vault inputs must be owned by the same owner lock.
-        if !non_vault_inputs_owned_by(&input_lock_ids, &input_cov_types, vault_owner_lock_id) {
+        if !non_vault_inputs_owned_by(locks, types, self.owner_lock_id) {
             return Err(TxError::new(
                 ErrorCode::TxErrVaultFeeSponsorForbidden,
                 "non-owner non-vault input forbidden in CORE_VAULT spend",
             ));
         }
+        Ok(())
+    }
 
-        // Circular-reference hardening: vault spends MUST NOT create new CORE_VAULT outputs.
+    fn validate_no_recursion(&self, tx: &Tx) -> Result<(), TxError> {
         for out in &tx.outputs {
             if out.covenant_type == COV_TYPE_VAULT {
                 return Err(TxError::new(
@@ -552,28 +748,32 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
                 ));
             }
         }
+        Ok(())
+    }
 
-        // Signature threshold check (CANONICAL §24.1 step 7).
-        let vault_sig_witness = match vault_sig_witness_range.as_ref() {
-            Some(range) => &tx.witness[range.clone()],
-            None => unreachable!("vault witness range must exist when have_vault_sig is true"),
-        };
+    fn validate_signature(
+        &self,
+        ctx: &UtxoApplyImplContext<'_>,
+        cache: &mut SighashV1PrehashCache<'_>,
+        queue: Option<&mut SigCheckQueue>,
+    ) -> Result<(), TxError> {
         validate_threshold_sig_spend_q(
-            &vault_sig_keys,
-            vault_sig_threshold,
-            vault_sig_witness,
-            vault_sig_input_index,
-            vault_sig_input_value,
-            chain_id,
-            height,
+            &self.keys,
+            self.threshold,
+            &ctx.tx.witness[self.witness_range.clone()],
+            self.input_index,
+            self.input_value,
+            ctx.chain_id,
+            ctx.height,
             "CORE_VAULT",
-            &mut sighash_cache,
-            sig_queue,
-            rotation,
-            registry,
-        )?;
+            cache,
+            queue,
+            ctx.rotation,
+            ctx.registry,
+        )
+    }
 
-        // Whitelist enforcement: all outputs must be whitelisted.
+    fn validate_destinations(&self, tx: &Tx) -> Result<(), TxError> {
         for out in &tx.outputs {
             if out.covenant_type != COV_TYPE_P2PK
                 && out.covenant_type != COV_TYPE_MULTISIG
@@ -586,40 +786,16 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
             }
             let desc = output_descriptor_bytes(out.covenant_type, &out.covenant_data);
             let h = sha3_256(&desc);
-            if !hash_in_sorted_32(&vault_whitelist, &h) {
+            if !hash_in_sorted_32(&self.whitelist, &h) {
                 return Err(TxError::new(
                     ErrorCode::TxErrVaultOutputNotWhitelisted,
                     "output not whitelisted for CORE_VAULT",
                 ));
             }
         }
+        Ok(())
     }
-
-    if sum_out > sum_in {
-        return Err(TxError::new(
-            ErrorCode::TxErrValueConservation,
-            "sum_out exceeds sum_in",
-        ));
-    }
-    if vault_input_count == 1 && sum_out < sum_in_vault {
-        return Err(TxError::new(
-            ErrorCode::TxErrValueConservation,
-            "CORE_VAULT value must not fund miner fee",
-        ));
-    }
-
-    // Exact u128 fee: width alone is never a parse or value-conservation
-    // error, so a fee above u64 is accepted when ordinary validation passes.
-    let fee = sum_in - sum_out;
-
-    let summary = UtxoApplySummary {
-        fee,
-        utxo_count: work.len() as u64,
-    };
-
-    Ok((work, summary))
 }
-
 pub fn apply_non_coinbase_tx_basic(
     tx: &Tx,
     txid: [u8; 32],
@@ -736,7 +912,11 @@ mod tests {
     fn core_ext_0x0102_unassigned_rejects_at_genesis_and_spend() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let pubkey = keypair.pubkey_bytes();
+        assert_unassigned_core_ext_creation(&pubkey);
+        assert_unassigned_core_ext_spends(&pubkey);
+    }
 
+    fn assert_unassigned_core_ext_creation(pubkey: &[u8]) {
         // Creation (genesis): a tx producing a 0x0102 output is rejected by
         // `validate_tx_covenants_genesis` before any input spend checks, so the
         // funding input does not even need a valid signature.
@@ -747,7 +927,7 @@ mod tests {
             prev_txid,
             100,
             COV_TYPE_P2PK,
-            p2pk_covenant_data_for_pubkey(&pubkey),
+            p2pk_covenant_data_for_pubkey(pubkey),
         )]);
         let create_tx = unsigned_tx(
             0x00,
@@ -760,7 +940,9 @@ mod tests {
         )
         .expect_err("0x0102 creation must reject");
         assert_eq!(create_err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
 
+    fn assert_unassigned_core_ext_spends(pubkey: &[u8]) {
         // Spend: a tx consuming a 0x0102 UTXO is rejected, for any covenant_data.
         // `check_spend_covenant`/`witness_slots` reject during input resolution
         // before any signature verification, so the witness contents are
@@ -777,7 +959,7 @@ mod tests {
                 vec![tx_output(
                     90,
                     COV_TYPE_P2PK,
-                    p2pk_covenant_data_for_pubkey(&pubkey),
+                    p2pk_covenant_data_for_pubkey(pubkey),
                 )],
             );
             spend_tx.witness = vec![WitnessItem {
@@ -1080,114 +1262,132 @@ mod tests {
 
     #[test]
     fn section16_structural_first_error_order() {
+        section16_count_and_prevout_cases();
+        section16_input_order_cases();
+    }
+
+    fn section16_count_and_prevout_cases() {
         let coinbase_prevout = TxInput {
             prev_txid: [0u8; 32],
             prev_vout: u32::MAX,
             script_sig: vec![],
             sequence: 0,
         };
-        let cases = vec![
-            (
-                "nonce_before_input_count",
-                0,
-                vec![],
-                ErrorCode::TxErrTxNonceInvalid,
-                "tx_nonce must be >= 1 for non-coinbase",
-            ),
-            (
-                "input_count_only",
-                1,
-                vec![],
-                ErrorCode::TxErrParse,
-                "non-coinbase must have at least one input",
-            ),
-            (
-                "coinbase_prevout_before_script_sig",
-                1,
-                vec![TxInput {
-                    script_sig: vec![0x01],
-                    ..coinbase_prevout.clone()
-                }],
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
-            ),
-            (
-                "coinbase_prevout_before_sequence",
-                1,
-                vec![TxInput {
-                    sequence: 0x8000_0000,
-                    ..coinbase_prevout.clone()
-                }],
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
-            ),
-            (
-                "input_index_order",
-                1,
-                vec![
-                    TxInput {
-                        prev_txid: [0x51; 32],
-                        prev_vout: 0,
-                        script_sig: vec![],
-                        sequence: 0x8000_0000,
-                    },
-                    coinbase_prevout.clone(),
-                ],
-                ErrorCode::TxErrSequenceInvalid,
-                "sequence exceeds 0x7fffffff",
-            ),
-            (
-                "script_sig_only",
-                1,
-                vec![TxInput {
-                    prev_txid: [0x52; 32],
-                    prev_vout: 0,
-                    script_sig: vec![0x01],
-                    sequence: 0,
-                }],
-                ErrorCode::TxErrParse,
-                "script_sig must be empty under genesis covenant set",
-            ),
-            (
-                "sequence_only",
-                1,
-                vec![TxInput {
-                    prev_txid: [0x53; 32],
+        assert_section16_error(
+            "nonce_before_input_count",
+            0,
+            vec![],
+            ErrorCode::TxErrTxNonceInvalid,
+            "tx_nonce must be >= 1 for non-coinbase",
+        );
+        assert_section16_error(
+            "input_count_only",
+            1,
+            vec![],
+            ErrorCode::TxErrParse,
+            "non-coinbase must have at least one input",
+        );
+        assert_section16_error(
+            "coinbase_prevout_before_script_sig",
+            1,
+            vec![TxInput {
+                script_sig: vec![0x01],
+                ..coinbase_prevout.clone()
+            }],
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        );
+        assert_section16_error(
+            "coinbase_prevout_before_sequence",
+            1,
+            vec![TxInput {
+                sequence: 0x8000_0000,
+                ..coinbase_prevout.clone()
+            }],
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        );
+    }
+
+    fn section16_input_order_cases() {
+        let coinbase_prevout = TxInput {
+            prev_txid: [0u8; 32],
+            prev_vout: u32::MAX,
+            script_sig: vec![],
+            sequence: 0,
+        };
+        assert_section16_error(
+            "input_index_order",
+            1,
+            vec![
+                TxInput {
+                    prev_txid: [0x51; 32],
                     prev_vout: 0,
                     script_sig: vec![],
                     sequence: 0x8000_0000,
-                }],
-                ErrorCode::TxErrSequenceInvalid,
-                "sequence exceeds 0x7fffffff",
-            ),
-        ];
+                },
+                coinbase_prevout.clone(),
+            ],
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        );
+        assert_section16_error(
+            "script_sig_only",
+            1,
+            vec![TxInput {
+                prev_txid: [0x52; 32],
+                prev_vout: 0,
+                script_sig: vec![0x01],
+                sequence: 0,
+            }],
+            ErrorCode::TxErrParse,
+            "script_sig must be empty under genesis covenant set",
+        );
+        assert_section16_error(
+            "sequence_only",
+            1,
+            vec![TxInput {
+                prev_txid: [0x53; 32],
+                prev_vout: 0,
+                script_sig: vec![],
+                sequence: 0x8000_0000,
+            }],
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        );
+    }
 
-        for (name, nonce, inputs, want, message) in cases {
-            let tx = unsigned_tx(
-                0x00,
-                nonce,
-                inputs,
-                vec![tx_output(
-                    1,
-                    COV_TYPE_P2PK,
-                    p2pk_covenant_data_for_pubkey(&[0x54; 32]),
-                )],
-            );
-            let utxo_set = HashMap::from([utxo(
-                [0x55; 32],
+    fn assert_section16_error(
+        name: &str,
+        nonce: u64,
+        inputs: Vec<TxInput>,
+        want: ErrorCode,
+        message: &str,
+    ) {
+        let tx = unsigned_tx(
+            0x00,
+            nonce,
+            inputs,
+            vec![tx_output(
                 1,
                 COV_TYPE_P2PK,
-                p2pk_covenant_data_for_pubkey(&[0x55; 32]),
-            )]);
-            let original = utxo_set.clone();
-            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
-                &tx, [0x56; 32], &utxo_set, 1, 0, 0, [0u8; 32], None, None,
-            )
-            .expect_err(name);
-            assert_eq!(err.code, want, "{name}");
-            assert_eq!(err.msg, message, "{name}");
-            assert_eq!(utxo_set, original, "{name}: caller UTXOs changed");
-        }
+                p2pk_covenant_data_for_pubkey(&[0x54; 32]),
+            )],
+        );
+        let utxo_set = HashMap::from([utxo(
+            [0x55; 32],
+            1,
+            COV_TYPE_P2PK,
+            p2pk_covenant_data_for_pubkey(&[0x55; 32]),
+        )]);
+        let original = utxo_set.clone();
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx, [0x56; 32], &utxo_set, 1, 0, 0, [0u8; 32], None, None,
+        )
+        .expect_err(name);
+        assert_eq!(err.code, want, "{name}");
+        assert_eq!(err.msg, message, "{name}");
+        assert_eq!(utxo_set, original, "{name}: caller UTXOs changed");
     }
 
     fn signed_p2pk_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
