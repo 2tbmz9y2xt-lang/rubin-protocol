@@ -382,6 +382,26 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
 
+    let witness_count_cov = valid_p2pk_covenant_data();
+    let mut witness_count_tx = p2pk_tx(
+        1,
+        vec![p2pk_input([0x43; 32])],
+        90,
+        witness_count_cov.clone(),
+    );
+    witness_count_tx.witness = vec![sentinel_witness_item(), sentinel_witness_item()];
+    let witness_count_utxos = HashMap::from([(
+        Outpoint {
+            txid: [0x43; 32],
+            vout: 0,
+        },
+        p2pk_utxo(witness_count_cov),
+    )]);
+    let err = deferred_apply(&witness_count_tx, [0x44; 32], &witness_count_utxos, 1)
+        .expect_err("extra witness must fail");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "witness_count mismatch");
+
     let kp = kp_or_skip!();
     let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
     let mut missing_utxo_tx = crate::tx::Tx {
@@ -679,18 +699,11 @@ fn apply_non_coinbase_tx_basic_workq_vault_creation_ok() {
             script_sig: vec![],
             sequence: 0,
         }],
-        outputs: vec![
-            crate::tx::TxOutput {
-                value: 1,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: dest_cov,
-            },
-            crate::tx::TxOutput {
-                value: 89,
-                covenant_type: COV_TYPE_VAULT,
-                covenant_data: vault_cov,
-            },
-        ],
+        outputs: vec![crate::tx::TxOutput {
+            value: 90,
+            covenant_type: COV_TYPE_VAULT,
+            covenant_data: vault_cov,
+        }],
         locktime: 0,
         witness: vec![],
         da_payload: vec![],
@@ -714,7 +727,7 @@ fn apply_non_coinbase_tx_basic_workq_vault_creation_ok() {
 
     let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 200).expect("vault creation");
     assert_eq!(summary.fee, 10);
-    assert_eq!(next_utxos.len(), 2);
+    assert_eq!(next_utxos.len(), 1);
 }
 
 #[test]
