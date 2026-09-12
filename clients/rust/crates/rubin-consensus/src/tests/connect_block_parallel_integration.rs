@@ -670,8 +670,7 @@ fn run_connect_block_first_error_cases(
     let reject = |block: &[u8], want, cov: &[u8], value, want_msg: Option<&str>| {
         let mut seq = state(cov, value);
         let seq_before = seq.clone();
-        let seq_err =
-            crate::connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+        let seq_err = crate::connect_block_basic_in_memory_at_height_with_suite_context(
             block,
             Some(prev),
             Some(target),
@@ -682,7 +681,7 @@ fn run_connect_block_first_error_cases(
             rotation,
             None,
         )
-            .expect_err("sequential rejection");
+        .expect_err("sequential rejection");
         assert_eq!(err_code(&seq_err), want);
         if let Some(msg) = want_msg {
             assert_eq!(seq_err.msg, msg);
@@ -691,7 +690,7 @@ fn run_connect_block_first_error_cases(
         let mut par = state(cov, value);
         let par_before = par.clone();
         let par_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            crate::connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context(
+            crate::connect_block_parallel_sig_verify_with_suite_context(
                 block,
                 Some(prev),
                 Some(target),

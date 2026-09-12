@@ -14,8 +14,8 @@ use crate::htlc::validate_htlc_spend_q;
 use crate::suite_registry::SuiteRegistry;
 use crate::tx::WitnessItem;
 use crate::utxo_basic::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks,
-    Outpoint, UtxoEntry,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks, Outpoint,
+    UtxoEntry,
 };
 use crate::verify_sig_openssl::Mldsa87Keypair;
 use crate::SighashV1PrehashCache;
@@ -331,7 +331,7 @@ fn check_refund_deferred(
         entry,
     )]);
     let before = utxos.clone();
-    let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+    let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
         &tx,
         [0x58; 32],
         &utxos,

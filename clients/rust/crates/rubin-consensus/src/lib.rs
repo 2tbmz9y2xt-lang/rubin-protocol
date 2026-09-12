@@ -54,10 +54,9 @@ pub use compactsize::encode_compact_size;
 pub use compactsize::read_compact_size_bytes;
 pub use connect_block_inmem::{
     connect_block_basic_in_memory_at_height,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
-    connect_block_parallel_sig_verify,
-    connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context,
-    ConnectBlockBasicSummary, InMemoryChainState,
+    connect_block_basic_in_memory_at_height_with_suite_context, connect_block_parallel_sig_verify,
+    connect_block_parallel_sig_verify_with_suite_context, ConnectBlockBasicSummary,
+    InMemoryChainState,
 };
 pub use covenant_genesis::validate_tx_covenants_genesis;
 pub use da_verify_parallel::{
@@ -108,8 +107,8 @@ pub use txcontext::Uint128;
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks,
     apply_non_coinbase_tx_basic_with_mtp, Outpoint, UtxoApplySummary, UtxoEntry,
 };
 pub use utxo_snapshot::{utxo_snapshot_shard, UtxoSnapshot};

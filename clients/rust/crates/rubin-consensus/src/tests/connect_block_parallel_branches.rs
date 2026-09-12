@@ -7,7 +7,7 @@ fn deferred_apply(
     utxos: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, crate::UtxoApplySummary), crate::error::TxError> {
-    crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+    crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
         tx,
         txid,
         utxos,
@@ -381,6 +381,26 @@ fn apply_non_coinbase_tx_basic_workq_error_paths() {
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
+
+    let witness_count_cov = valid_p2pk_covenant_data();
+    let mut witness_count_tx = p2pk_tx(
+        1,
+        vec![p2pk_input([0x43; 32])],
+        90,
+        witness_count_cov.clone(),
+    );
+    witness_count_tx.witness = vec![sentinel_witness_item(), sentinel_witness_item()];
+    let witness_count_utxos = HashMap::from([(
+        Outpoint {
+            txid: [0x43; 32],
+            vout: 0,
+        },
+        p2pk_utxo(witness_count_cov),
+    )]);
+    let err = deferred_apply(&witness_count_tx, [0x44; 32], &witness_count_utxos, 1)
+        .expect_err("extra witness must fail");
+    assert_eq!(err.code, ErrorCode::TxErrParse);
+    assert_eq!(err.msg, "witness_count mismatch");
 
     let kp = kp_or_skip!();
     let cov_data = p2pk_covenant_data_for_pubkey(&kp.pubkey);
@@ -874,6 +894,22 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
     let err = deferred_apply(&fee_sponsor_tx, [0u8; 32], &sponsor_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultFeeSponsorForbidden);
 
+    let mut bad_signature_sponsor_tx = fee_sponsor_tx.clone();
+    bad_signature_sponsor_tx.witness[0].signature[0] ^= 0x01;
+    let err = crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+        &bad_signature_sponsor_tx,
+        [0u8; 32],
+        &sponsor_utxos,
+        200,
+        0,
+        0,
+        ZERO_CHAIN_ID,
+        None,
+        None,
+    )
+    .expect_err("non-owner sponsor precedes bad Vault signature");
+    assert_eq!(err.code, ErrorCode::TxErrVaultFeeSponsorForbidden);
+
     let outsider_kp = kp_or_skip!();
     let outsider_cov = p2pk_covenant_data_for_pubkey(&outsider_kp.pubkey);
     let mut not_whitelisted_tx = tx_base(crate::tx::TxOutput {
@@ -1271,17 +1307,18 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
 
     for (label, over_cap, at_cap, utxos, control_error) in cases {
         let before = utxos.clone();
-        let sequential = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-            &over_cap,
-            [0xc1; 32],
-            &utxos,
-            1,
-            0,
-            0,
-            ZERO_CHAIN_ID,
-            Some(&active),
-            None,
-        );
+        let sequential =
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+                &over_cap,
+                [0xc1; 32],
+                &utxos,
+                1,
+                0,
+                0,
+                ZERO_CHAIN_ID,
+                Some(&active),
+                None,
+            );
         match sequential {
             Ok((work, summary)) => {
                 panic!("{label}: expected no work or summary, got {work:?} / {summary:?}")
@@ -1291,7 +1328,7 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
         assert_eq!(utxos, before, "{label}: sequential rejection mutated UTXOs");
 
         assert_eq!(
-            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
                 &at_cap,
                 [0xc2; 32],
                 &utxos,
@@ -1322,7 +1359,7 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
         let prefix_len = queue.len();
         let prefix_debug = format!("{queue:?}");
         assert_eq!(prefix_len, 1, "{label}: queued prefix was not seeded");
-        match crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        match crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             &over_cap,
             [0xc3; 32],
             &utxos,
@@ -1508,7 +1545,7 @@ fn queued_sigchecks_transaction_entry_rollback_to_mark() {
         p2pk_utxo(covenant_data),
     )]);
     let apply = |tx: &crate::tx::Tx, queue: &mut crate::sig_queue::SigCheckQueue| {
-        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             tx, [0x7a; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, queue,
         )
     };
@@ -1616,7 +1653,7 @@ fn queued_sigchecks_transaction_entry_success_retains_tasks() {
     let cache = crate::sig_cache::SigCache::new(1);
     let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_cache(cache.clone());
     assert!(queue.is_empty());
-    crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
         &tx, [0x7d; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
     )
     .expect("queue valid two-input transaction");
@@ -1669,7 +1706,7 @@ fn queued_sigchecks_transaction_entry_unbound_registry_rollback() {
     let apply = |tx: &crate::tx::Tx,
                  registry: &crate::SuiteRegistry,
                  queue: &mut crate::sig_queue::SigCheckQueue| {
-        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             tx,
             [0x7f; 32],
             &utxos,
@@ -1769,7 +1806,7 @@ fn apply_non_coinbase_tx_basic_deferred_htlc_creation_first_error_order() {
     assert_eq!(utxos, before, "caller UTXOs changed on deferred rejection");
 
     let mut queue = crate::sig_queue::SigCheckQueue::new(1);
-    let queued_err = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    let queued_err = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
         &tx,
         [0x66u8; 32],
         &utxos,
