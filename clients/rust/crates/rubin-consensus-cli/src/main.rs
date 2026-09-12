@@ -23,7 +23,6 @@ use rubin_consensus::{
     ROTATION_V1_PRODUCTION_FINITE_H4_REQUIRED_ERR_STEM,
 };
 use rubin_node::{devnet_genesis_chain_id, ChainState, TxPool, TxPoolAdmitErrorKind, TxPoolConfig};
-use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
@@ -45,41 +44,6 @@ const ROTATION_NEW_SUITE_NOT_REGISTERED_MSG: &str = "rotation: new suite ";
 const ROTATION_EQUAL_SUITE_IDS_MSG: &str = "must differ from new suite";
 const ROTATION_CREATE_HEIGHT_ORDER_MSG: &str = "rotation: create_height (";
 const ROTATION_SUNSET_HEIGHT_ORDER_MSG: &str = "rotation: sunset_height (";
-
-#[derive(Default)]
-struct RetiredCoreExtProfiles {
-    has_items: bool,
-}
-
-fn deserialize_retired_core_ext_profiles<'de, D>(
-    deserializer: D,
-) -> Result<RetiredCoreExtProfiles, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct RetiredCoreExtProfilesVisitor;
-
-    impl<'de> Visitor<'de> for RetiredCoreExtProfilesVisitor {
-        type Value = RetiredCoreExtProfiles;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("an array")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut has_items = false;
-            while seq.next_element::<IgnoredAny>()?.is_some() {
-                has_items = true;
-            }
-            Ok(RetiredCoreExtProfiles { has_items })
-        }
-    }
-
-    deserializer.deserialize_seq(RetiredCoreExtProfilesVisitor)
-}
 
 fn matches_wrapped_prefix_validation_err(err: &str, expected: &str) -> bool {
     err.starts_with(expected) || err.contains(&format!(": {expected}"))
@@ -204,12 +168,6 @@ struct Request {
 
     #[serde(default)]
     utxos: Vec<UtxoJson>,
-
-    #[serde(default, deserialize_with = "deserialize_retired_core_ext_profiles")]
-    core_ext_profiles: RetiredCoreExtProfiles,
-
-    #[serde(default)]
-    core_ext_profile_set_anchor_hex: String,
 
     #[serde(default)]
     height: u64,
@@ -1848,20 +1806,7 @@ fn relay_metadata_parse_reject(message: &str) -> bool {
         || message.contains("trailing bytes after canonical tx")
 }
 
-fn reject_core_ext_profiles_from_json(
-    profiles: &RetiredCoreExtProfiles,
-    expected_set_anchor_hex: &str,
-) -> Result<(), String> {
-    if !expected_set_anchor_hex.trim().is_empty() {
-        return Err("core_ext_profile_set_anchor_hex unsupported by Rust runtime".to_string());
-    }
-    if profiles.has_items {
-        return Err("core_ext_profiles unsupported by Rust runtime".to_string());
-    }
-    Ok(())
-}
-
-fn build_core_ext_suite_context(
+fn build_native_suite_context(
     req: &Request,
 ) -> Result<(Option<DescriptorRotationProvider>, Option<SuiteRegistry>), String> {
     let registry = build_suite_registry_from_json(&req.suite_registry)?;
@@ -3489,19 +3434,7 @@ fn main() {
                 chain_id.copy_from_slice(&b);
             }
 
-            if let Err(e) = reject_core_ext_profiles_from_json(
-                &req.core_ext_profiles,
-                &req.core_ext_profile_set_anchor_hex,
-            ) {
-                let resp = Response {
-                    ok: false,
-                    err: Some(e),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            let (rotation, registry) = match build_core_ext_suite_context(&req) {
+            let (rotation, registry) = match build_native_suite_context(&req) {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response {
@@ -3782,19 +3715,7 @@ fn main() {
                 }
                 chain_id.copy_from_slice(&b);
             }
-            if let Err(e) = reject_core_ext_profiles_from_json(
-                &req.core_ext_profiles,
-                &req.core_ext_profile_set_anchor_hex,
-            ) {
-                let resp = Response {
-                    ok: false,
-                    err: Some(e),
-                    ..Default::default()
-                };
-                let _ = serde_json::to_writer(std::io::stdout(), &resp);
-                return;
-            }
-            let (rotation, registry) = match build_core_ext_suite_context(&req) {
+            let (rotation, registry) = match build_native_suite_context(&req) {
                 Ok(v) => v,
                 Err(e) => {
                     let resp = Response {
@@ -5726,36 +5647,16 @@ mod tests {
     }
 
     #[test]
-    fn core_ext_profiles_empty_input_is_retired_noop() {
-        reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles::default(), "")
-            .expect("empty retired profile input");
-    }
-
-    #[test]
-    fn core_ext_profiles_non_empty_input_is_unsupported() {
-        let err =
-            reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles { has_items: true }, "")
-                .unwrap_err();
-        assert_eq!(err, "core_ext_profiles unsupported by Rust runtime");
-    }
-
-    #[test]
-    fn core_ext_profiles_legacy_json_deserializes_to_unsupported_error() {
-        let req: Request = serde_json::from_str(
-            r#"{"op":"utxo_apply_basic","core_ext_profiles":[{"ext_id":9,"tx_context_enabled":2}]}"#,
+    fn request_ignores_unrecognized_key() {
+        let plain: Request =
+            serde_json::from_str(r#"{"op":"featurebits_state"}"#).expect("request");
+        let extra: Request = serde_json::from_str(
+            r#"{"op":"featurebits_state","unrecognized_probe_key":{"value":1}}"#,
         )
-        .expect("legacy profile envelope should deserialize before fail-closed rejection");
-        let err = reject_core_ext_profiles_from_json(&req.core_ext_profiles, "").unwrap_err();
-        assert_eq!(err, "core_ext_profiles unsupported by Rust runtime");
-    }
-
-    #[test]
-    fn core_ext_profile_set_anchor_input_is_unsupported() {
-        let err = reject_core_ext_profiles_from_json(&RetiredCoreExtProfiles::default(), "00")
-            .unwrap_err();
+        .expect("request with unknown key");
         assert_eq!(
-            err,
-            "core_ext_profile_set_anchor_hex unsupported by Rust runtime"
+            serde_json::to_value(op_featurebits_state(&plain)).unwrap(),
+            serde_json::to_value(op_featurebits_state(&extra)).unwrap()
         );
     }
 

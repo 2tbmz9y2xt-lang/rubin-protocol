@@ -26,17 +26,8 @@ fn run_cli(payload: &str) -> serde_json::Value {
 }
 
 #[test]
-fn retired_core_ext_tooling_ops_return_unknown_op() {
-    for op in [
-        "txctx_spend_vector",
-        "txctx_governance_vector",
-        "ext_envelope_parse",
-        "ext_activation_check",
-        "ext_pre_activation_spend",
-        "ext_enforcement_check",
-        "ext_error_priority",
-        "ext_duplicate_profile",
-    ] {
+fn unrecognized_ops_return_unknown_op() {
+    for op in ["definitely_not_an_op", " parse_tx ", "parse_tx_extra"] {
         let response = run_cli(&format!(r#"{{"op":"{op}"}}"#));
 
         assert_eq!(

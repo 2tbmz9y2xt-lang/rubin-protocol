@@ -33,9 +33,9 @@ else:
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
-    def test_core_ext_gates_are_retired(self):
-        self.assertEqual(RETIRED_GATES, frozenset({"CV-EXT", "CV-TXCTX"}))
-        self.assertTrue(is_retired_gate("CV-EXT"))
+    def test_core_ext_gate_is_no_longer_retired(self):
+        self.assertEqual(RETIRED_GATES, frozenset({"CV-TXCTX"}))
+        self.assertFalse(is_retired_gate("CV-EXT"))
         self.assertTrue(is_retired_gate("CV-TXCTX"))
         self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
 
@@ -44,7 +44,7 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
 
         self.assertEqual(
             known_gate_names(fixtures),
-            {"CV-UTXO-BASIC", "CV-EXT", "CV-TXCTX"},
+            {"CV-UTXO-BASIC", "CV-TXCTX"},
         )
         selected, retired, unknown = select_requested_fixtures(fixtures, ["CV-TXCTX"])
         self.assertEqual(selected, [])
@@ -59,8 +59,8 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
             ["CV-NOT-A-GATE", "CV-EXT"],
         )
         self.assertEqual(selected, [])
-        self.assertEqual(retired, {"CV-EXT"})
-        self.assertEqual(unknown, ["CV-NOT-A-GATE"])
+        self.assertEqual(unknown, ["CV-EXT", "CV-NOT-A-GATE"])
+        self.assertEqual(retired, set())
 
     def test_only_deleted_retired_gate_prints_retired_summary(self):
         fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
@@ -77,18 +77,21 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
             stdout.getvalue(),
         )
 
-    def test_active_utxo_apply_basic_rejects_core_ext_profiles(self):
-        vector = {"id": "CV-U-EXT-ACTIVE", "op": "utxo_apply_basic", "tx_hex": "00", "utxos": [],
-                  "height": 1, "block_timestamp": 1, "core_ext_profiles": [{"ext_id": 1}]}
-        with mock.patch(f"{validate_vector.__module__}.call_tool") as call_tool:
-            problems, skipped = normalize_validation_result(
+    def test_active_utxo_apply_basic_ignores_unrecognized_key(self):
+        vector = {"id": "CV-U-UNKNOWN", "op": "utxo_apply_basic", "tx_hex": "00", "utxos": [],
+                  "height": 1, "block_timestamp": 1, "expect_ok": True}
+        with mock.patch(f"{validate_vector.__module__}.call_tool", return_value={"ok": True}) as call_tool:
+            self.assertEqual(normalize_validation_result(
                 validate_vector("CV-UTXO-BASIC", vector, Path("go-cli"), Path("rust-cli"), {})
-            )
-
-        self.assertEqual((problems, skipped), ([
-            "CV-UTXO-BASIC/CV-U-EXT-ACTIVE: core_ext_profiles retired from active utxo_apply_basic gates"
-        ], False))
-        call_tool.assert_not_called()
+            ), ([], False))
+            plain_calls = call_tool.call_args_list[:]
+            call_tool.reset_mock()
+            vector["unrecognized_probe_key"] = {"value": 1}
+            self.assertEqual(normalize_validation_result(
+                validate_vector("CV-UTXO-BASIC", vector, Path("go-cli"), Path("rust-cli"), {})
+            ), ([], False))
+            self.assertTrue(call_tool.called)
+            self.assertEqual(call_tool.call_args_list, plain_calls)
 
     def test_whitespace_only_op_is_preserved_for_validation_error(self):
         op = normalized_vector_op("CV-OTHER", {"id": "X", "op": "   "})

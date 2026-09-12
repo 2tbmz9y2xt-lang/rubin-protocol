@@ -1036,9 +1036,6 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := rejectRemovedGenesisCoreExtKeys(raw); err != nil {
-		return cfg, err
-	}
 	var payload genesisPack
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return cfg, err
@@ -1052,19 +1049,6 @@ func parseGenesisConfigFull(path string) (parsedGenesisConfig, error) {
 		return cfg, err
 	}
 	return cfg, nil
-}
-
-func rejectRemovedGenesisCoreExtKeys(raw []byte) error {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return err
-	}
-	for _, key := range []string{"core_ext_profiles", "core_ext_profile_set_anchor_hex"} {
-		if _, ok := fields[key]; ok {
-			return fmt.Errorf("unsupported genesis field %q: Go node CORE_EXT profile wiring was removed", key)
-		}
-	}
-	return nil
 }
 
 func parseGenesisChainID(path string) ([32]byte, error) {

@@ -167,31 +167,6 @@ type Request struct {
 	JetCost              *uint64                  `json:"jet_cost,omitempty"`
 }
 
-type requestEnvelope struct {
-	Request
-	// core_ext_profiles is typed as a sequence so a non-array (string/object)
-	// payload fails envelope decoding as a schema/bad-request error — matching
-	// the pre-removal []CoreExtProfileJSON behavior and the Rust CLI, which
-	// deserializes the same retired field as a sequence.
-	CoreExtProfiles            []json.RawMessage `json:"core_ext_profiles,omitempty"`
-	CoreExtProfileSetAnchorHex string            `json:"core_ext_profile_set_anchor_hex,omitempty"`
-}
-
-// rejectRetiredCoreExtProfiles preserves the Go runtime's explicit rejection of
-// the retired CORE_EXT request fields, matching the Rust consensus CLI. 0x0102
-// (CORE_EXT) is unassigned, so a request still carrying a non-empty
-// core_ext_profiles array / core_ext_profile_set_anchor_hex is rejected — not
-// silently ignored. (A non-array core_ext_profiles already fails at decode.)
-func rejectRetiredCoreExtProfiles(profiles []json.RawMessage, anchorHex string) error {
-	if strings.TrimSpace(anchorHex) != "" {
-		return fmt.Errorf("core_ext_profile_set_anchor_hex unsupported by Go runtime")
-	}
-	if len(profiles) != 0 {
-		return fmt.Errorf("core_ext_profiles unsupported by Go runtime")
-	}
-	return nil
-}
-
 const rotationDescriptorNotActivatedErr = "descriptor-not-activated"
 
 const (
@@ -410,7 +385,7 @@ func buildSuiteRegistry(items []SuiteParamsJSON) (*consensus.SuiteRegistry, erro
 	return consensus.NewSuiteRegistryFromParams(params), nil
 }
 
-func buildCoreExtSuiteContext(req Request) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
+func buildNativeSuiteContext(req Request) (consensus.RotationProvider, *consensus.SuiteRegistry, error) {
 	reg, err := buildSuiteRegistry(req.SuiteRegistry)
 	if err != nil {
 		return nil, nil, err
@@ -1446,12 +1421,11 @@ func toBool(v any, def bool) bool {
 }
 
 func runFromStdin() {
-	var envelope requestEnvelope
-	if err := json.NewDecoder(os.Stdin).Decode(&envelope); err != nil {
+	var req Request
+	if err := json.NewDecoder(os.Stdin).Decode(&req); err != nil {
 		writeResp(os.Stdout, Response{Ok: false, Err: fmt.Sprintf("bad request: %v", err)})
 		return
 	}
-	req := envelope.Request
 
 	switch req.Op {
 	case "simplicity_exec_vector":
@@ -1953,11 +1927,7 @@ func runFromStdin() {
 			return
 		}
 
-		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
-			return
-		}
-		rotation, registry, err := buildCoreExtSuiteContext(req)
+		rotation, registry, err := buildNativeSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
@@ -2036,11 +2006,7 @@ func runFromStdin() {
 			return
 		}
 
-		if err := rejectRetiredCoreExtProfiles(envelope.CoreExtProfiles, envelope.CoreExtProfileSetAnchorHex); err != nil {
-			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
-			return
-		}
-		rotation, registry, err := buildCoreExtSuiteContext(req)
+		rotation, registry, err := buildNativeSuiteContext(req)
 		if err != nil {
 			writeResp(os.Stdout, Response{Ok: false, Err: err.Error()})
 			return
