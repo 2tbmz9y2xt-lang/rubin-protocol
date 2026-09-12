@@ -593,22 +593,21 @@ fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
         return;
     };
 
-    let sequential =
-        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-            &tx,
-            txid,
-            &utxo_set,
-            1,
-            0,
-            0,
-            ZERO_CHAIN_ID,
-            None,
-            None,
-        )
-        .expect("sequential apply");
+    let sequential = crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+        &tx,
+        txid,
+        &utxo_set,
+        1,
+        0,
+        0,
+        ZERO_CHAIN_ID,
+        None,
+        None,
+    )
+    .expect("sequential apply");
 
     let deferred =
-        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
             &tx,
             txid,
             &utxo_set,
@@ -652,7 +651,7 @@ fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_missing_utxo_fails_befo
     tx.witness = vec![sign_input_witness(&tx, 0, 100, ZERO_CHAIN_ID, &kp)];
 
     let err =
-        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+        crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
             &tx,
             [0u8; 32],
             &HashMap::new(),

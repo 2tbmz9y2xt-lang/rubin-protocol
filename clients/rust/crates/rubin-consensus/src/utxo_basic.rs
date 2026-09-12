@@ -86,7 +86,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
     block_mtp: u64,
     chain_id: [u8; 32],
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
         tx,
         txid,
         utxo_set,
@@ -100,7 +100,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
     tx: &Tx,
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
@@ -111,7 +111,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
     rotation: Option<&dyn RotationProvider>,
     registry: Option<&SuiteRegistry>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
         UtxoApplyImplContext {
             tx,
             txid,
@@ -128,7 +128,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
     tx: &Tx,
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
@@ -141,21 +141,20 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
     sig_queue: &mut SigCheckQueue,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let entry_mark = sig_queue.mark();
-    let result =
-        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
-            UtxoApplyImplContext {
-                tx,
-                txid,
-                utxo_set,
-                height,
-                block_timestamp,
-                block_mtp,
-                chain_id,
-                rotation,
-                registry,
-            },
-            Some(&mut *sig_queue),
-        );
+    let result = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
+        UtxoApplyImplContext {
+            tx,
+            txid,
+            utxo_set,
+            height,
+            block_timestamp,
+            block_mtp,
+            chain_id,
+            rotation,
+            registry,
+        },
+        Some(&mut *sig_queue),
+    );
     if result.is_err() {
         sig_queue.rollback_to(entry_mark);
     }
@@ -163,7 +162,7 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
     tx: &Tx,
     txid: [u8; 32],
     utxo_set: &HashMap<Outpoint, UtxoEntry>,
@@ -176,7 +175,7 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_sui
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let mut sig_queue = SigCheckQueue::new(1);
     let queue_mark = sig_queue.mark();
-    let result = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    let result = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
         tx,
         txid,
         utxo_set,
@@ -223,7 +222,7 @@ pub(crate) fn validate_non_coinbase_input_encoding(input: &TxInput) -> Result<()
     Ok(())
 }
 
-fn apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_impl(
+fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
     ctx: UtxoApplyImplContext<'_>,
     sig_queue: Option<&mut SigCheckQueue>,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
@@ -756,11 +755,10 @@ mod tests {
             vec![tx_input(prev_txid)],
             vec![tx_output(90, COV_TYPE_CORE_EXT, vec![0x07, 0x00, 0x00])],
         );
-        let create_err =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &create_tx, txid, &funding, 1, 0, 0, chain_id, None, None,
-            )
-            .expect_err("0x0102 creation must reject");
+        let create_err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &create_tx, txid, &funding, 1, 0, 0, chain_id, None, None,
+        )
+        .expect_err("0x0102 creation must reject");
         assert_eq!(create_err.code, ErrorCode::TxErrCovenantTypeInvalid);
 
         // Spend: a tx consuming a 0x0102 UTXO is rejected, for any covenant_data.
@@ -787,7 +785,7 @@ mod tests {
                 pubkey: pubkey.to_vec(),
                 signature: vec![0u8; 1],
             }];
-            let spend_err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            let spend_err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
                 &spend_tx,
                 spend_txid,
                 &spend_set,
@@ -831,7 +829,7 @@ mod tests {
                 pubkey: pubkey.to_vec(),
                 signature: vec![0u8; 1],
             }];
-            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
                 &spend_tx,
                 spend_txid,
                 &spend_set,
@@ -881,19 +879,18 @@ mod tests {
                 p2pk_covenant_data_for_pubkey(&pubkey),
             )],
         );
-        let err =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                [0x68u8; 32],
-                &set,
-                COINBASE_MATURITY - 1,
-                0,
-                0,
-                [0u8; 32],
-                None,
-                None,
-            )
-            .expect_err("immature coinbase precedes disabled spend");
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx,
+            [0x68u8; 32],
+            &set,
+            COINBASE_MATURITY - 1,
+            0,
+            0,
+            [0u8; 32],
+            None,
+            None,
+        )
+        .expect_err("immature coinbase precedes disabled spend");
         assert_eq!(err.code, ErrorCode::TxErrCoinbaseImmature);
     }
 
@@ -920,19 +917,18 @@ mod tests {
                 p2pk_covenant_data_for_pubkey(&pubkey),
             )],
         );
-        let err =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                [0xE3u8; 32],
-                &set,
-                1,
-                0,
-                0,
-                [0u8; 32],
-                None,
-                None,
-            )
-            .expect_err("simplicity precedes later missing utxo");
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx,
+            [0xE3u8; 32],
+            &set,
+            1,
+            0,
+            0,
+            [0u8; 32],
+            None,
+            None,
+        )
+        .expect_err("simplicity precedes later missing utxo");
         assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
         assert!(
             format!("{err}").contains("CORE_SIMPLICITY spend evaluation not enabled"),
@@ -972,19 +968,18 @@ mod tests {
                 p2pk_covenant_data_for_pubkey(&pubkey),
             )],
         );
-        let err =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                [0xE4u8; 32],
-                &set,
-                1,
-                0,
-                0,
-                [0u8; 32],
-                None,
-                None,
-            )
-            .expect_err("earlier p2pk underflow precedes later simplicity");
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx,
+            [0xE4u8; 32],
+            &set,
+            1,
+            0,
+            0,
+            [0u8; 32],
+            None,
+            None,
+        )
+        .expect_err("earlier p2pk underflow precedes later simplicity");
         assert_eq!(err.code, ErrorCode::TxErrParse);
         assert!(format!("{err}").contains("witness underflow"), "got: {err}");
     }
@@ -1014,19 +1009,18 @@ mod tests {
                 p2pk_covenant_data_for_pubkey(&pubkey),
             )],
         );
-        let err =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                [0xE9u8; 32],
-                &set,
-                1,
-                0,
-                0,
-                [0u8; 32],
-                None,
-                None,
-            )
-            .expect_err("earlier witness underflow precedes later validation");
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx,
+            [0xE9u8; 32],
+            &set,
+            1,
+            0,
+            0,
+            [0u8; 32],
+            None,
+            None,
+        )
+        .expect_err("earlier witness underflow precedes later validation");
         assert_eq!(err.code, ErrorCode::TxErrParse);
         assert!(format!("{err}").contains("witness underflow"), "got: {err}");
     }
@@ -1186,16 +1180,8 @@ mod tests {
                 p2pk_covenant_data_for_pubkey(&[0x55; 32]),
             )]);
             let original = utxo_set.clone();
-            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                [0x56; 32],
-                &utxo_set,
-                1,
-                0,
-                0,
-                [0u8; 32],
-                None,
-                None,
+            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+                &tx, [0x56; 32], &utxo_set, 1, 0, 0, [0u8; 32], None, None,
             )
             .expect_err(name);
             assert_eq!(err.code, want, "{name}");
@@ -1603,11 +1589,10 @@ mod tests {
         chain_id: [u8; 32],
     ) {
         let original = utxo_set.clone();
-        let (_work, summary) =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                tx, txid, utxo_set, 200, 1_000, 1_000, chain_id, None, None,
-            )
-            .expect("apply");
+        let (_work, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            tx, txid, utxo_set, 200, 1_000, 1_000, chain_id, None, None,
+        )
+        .expect("apply");
         assert!(summary.fee > 0);
         assert_eq!(utxo_set, &original, "caller utxo set mutated");
     }
@@ -1616,14 +1601,13 @@ mod tests {
     fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_matches_sequential() {
         let (tx, utxo_set, txid, chain_id) = signed_p2pk_case();
 
-        let sequential =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
-            )
-            .expect("sequential apply");
+        let sequential = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
+        )
+        .expect("sequential apply");
 
         let deferred =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+            apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
                 &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
             )
             .expect("deferred apply");
@@ -1678,7 +1662,7 @@ mod tests {
         let (mut tx, utxo_set, txid, chain_id) = signed_p2pk_case();
         tx.witness[0].signature[0] ^= 0x01;
 
-        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
             &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
         )
         .expect_err("bad signature must fail");
@@ -1691,7 +1675,7 @@ mod tests {
         let (mut tx, utxo_set, txid, chain_id) = signed_p2pk_case();
         tx.outputs[0].value = 101;
 
-        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
             &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
         )
         .expect_err("late value-conservation failure must return error, not leave queued tasks");

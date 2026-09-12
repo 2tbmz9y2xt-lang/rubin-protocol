@@ -7,9 +7,8 @@ use rubin_consensus::constants::{
 use rubin_consensus::merkle::witness_merkle_root_wtxids;
 use rubin_consensus::uint128_json;
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    block_hash, compact_shortid,
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context, block_hash, compact_shortid,
+    connect_block_basic_in_memory_at_height_with_suite_context,
     featurebit_state_at_height_from_window_counts, flagday_active_at_height, merkle_root_txids,
     parse_tx, pow_check, retarget_v1, retarget_v1_clamped, sighash_v1_digest, simplicity,
     tx_weight_and_stats_at_height, tx_weight_and_stats_public,
@@ -3515,7 +3514,7 @@ fn main() {
                 }
             };
 
-            match connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+            match connect_block_basic_in_memory_at_height_with_suite_context(
                 &block_bytes,
                 expected_prev,
                 expected_target,
@@ -3807,18 +3806,17 @@ fn main() {
                     return;
                 }
             };
-            let apply_result =
-                apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                    &tx,
-                    txid,
-                    &utxo_set,
-                    req.height,
-                    req.block_timestamp,
-                    block_mtp,
-                    chain_id,
-                    rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
-                    registry.as_ref(),
-                );
+            let apply_result = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+                &tx,
+                txid,
+                &utxo_set,
+                req.height,
+                req.block_timestamp,
+                block_mtp,
+                chain_id,
+                rotation.as_ref().map(|rp| rp as &dyn RotationProvider),
+                registry.as_ref(),
+            );
 
             match apply_result {
                 Ok((_next_utxos, summary)) => {
@@ -5285,7 +5283,7 @@ mod tests {
             utxos: HashMap::new(),
             already_generated,
         };
-        connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+        connect_block_basic_in_memory_at_height_with_suite_context(
             block,
             None,
             Some(rubin_consensus::constants::POW_LIMIT),

@@ -7,7 +7,7 @@ fn deferred_apply(
     utxos: &HashMap<Outpoint, UtxoEntry>,
     height: u64,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, crate::UtxoApplySummary), crate::error::TxError> {
-    crate::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_deferred_sigchecks(
+    crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
         tx,
         txid,
         utxos,
@@ -1271,17 +1271,18 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
 
     for (label, over_cap, at_cap, utxos, control_error) in cases {
         let before = utxos.clone();
-        let sequential = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-            &over_cap,
-            [0xc1; 32],
-            &utxos,
-            1,
-            0,
-            0,
-            ZERO_CHAIN_ID,
-            Some(&active),
-            None,
-        );
+        let sequential =
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+                &over_cap,
+                [0xc1; 32],
+                &utxos,
+                1,
+                0,
+                0,
+                ZERO_CHAIN_ID,
+                Some(&active),
+                None,
+            );
         match sequential {
             Ok((work, summary)) => {
                 panic!("{label}: expected no work or summary, got {work:?} / {summary:?}")
@@ -1291,7 +1292,7 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
         assert_eq!(utxos, before, "{label}: sequential rejection mutated UTXOs");
 
         assert_eq!(
-            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
                 &at_cap,
                 [0xc2; 32],
                 &utxos,
@@ -1322,7 +1323,7 @@ fn apply_non_coinbase_tx_basic_output_group_cap_atomic() {
         let prefix_len = queue.len();
         let prefix_debug = format!("{queue:?}");
         assert_eq!(prefix_len, 1, "{label}: queued prefix was not seeded");
-        match crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        match crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             &over_cap,
             [0xc3; 32],
             &utxos,
@@ -1508,7 +1509,7 @@ fn queued_sigchecks_transaction_entry_rollback_to_mark() {
         p2pk_utxo(covenant_data),
     )]);
     let apply = |tx: &crate::tx::Tx, queue: &mut crate::sig_queue::SigCheckQueue| {
-        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             tx, [0x7a; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, queue,
         )
     };
@@ -1616,7 +1617,7 @@ fn queued_sigchecks_transaction_entry_success_retains_tasks() {
     let cache = crate::sig_cache::SigCache::new(1);
     let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_cache(cache.clone());
     assert!(queue.is_empty());
-    crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
         &tx, [0x7d; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
     )
     .expect("queue valid two-input transaction");
@@ -1669,7 +1670,7 @@ fn queued_sigchecks_transaction_entry_unbound_registry_rollback() {
     let apply = |tx: &crate::tx::Tx,
                  registry: &crate::SuiteRegistry,
                  queue: &mut crate::sig_queue::SigCheckQueue| {
-        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+        crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
             tx,
             [0x7f; 32],
             &utxos,
@@ -1769,7 +1770,7 @@ fn apply_non_coinbase_tx_basic_deferred_htlc_creation_first_error_order() {
     assert_eq!(utxos, before, "caller UTXOs changed on deferred rejection");
 
     let mut queue = crate::sig_queue::SigCheckQueue::new(1);
-    let queued_err = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
+    let queued_err = crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
         &tx,
         [0x66u8; 32],
         &utxos,

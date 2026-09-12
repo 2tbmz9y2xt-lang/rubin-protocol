@@ -11,9 +11,9 @@ use crate::sig_queue::SigCheckQueue;
 use crate::subsidy::block_subsidy;
 use crate::suite_registry::{RotationProvider, SuiteRegistry};
 use crate::utxo_basic::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks,
-    Outpoint, UtxoEntry,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks, Outpoint,
+    UtxoEntry,
 };
 
 const UTXO_SET_HASH_DST: &[u8] = b"RUBINv1-utxo-set-hash/";
@@ -69,7 +69,7 @@ pub fn connect_block_basic_in_memory_at_height(
     state: &mut InMemoryChainState,
     chain_id: [u8; 32],
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+    connect_block_basic_in_memory_at_height_with_suite_context(
         block_bytes,
         expected_prev_hash,
         expected_target,
@@ -83,7 +83,7 @@ pub fn connect_block_basic_in_memory_at_height(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn connect_block_basic_in_memory_at_height_and_core_ext_deployments_with_suite_context(
+pub fn connect_block_basic_in_memory_at_height_with_suite_context(
     block_bytes: &[u8],
     expected_prev_hash: Option<[u8; 32]>,
     expected_target: Option<[u8; 32]>,
@@ -120,7 +120,7 @@ pub fn connect_block_parallel_sig_verify(
     chain_id: [u8; 32],
     workers: usize,
 ) -> Result<ConnectBlockBasicSummary, TxError> {
-    connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context(
+    connect_block_parallel_sig_verify_with_suite_context(
         block_bytes,
         expected_prev_hash,
         expected_target,
@@ -135,7 +135,7 @@ pub fn connect_block_parallel_sig_verify(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn connect_block_parallel_sig_verify_and_core_ext_deployments_with_suite_context(
+pub fn connect_block_parallel_sig_verify_with_suite_context(
     block_bytes: &[u8],
     expected_prev_hash: Option<[u8; 32]>,
     expected_target: Option<[u8; 32]>,
@@ -251,18 +251,17 @@ fn apply_non_coinbase_txs_sequential(
     for (tx, txid) in pb.txs.iter().zip(&pb.txids).skip(1) {
         ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
         let base_utxos = work_utxos.as_ref().unwrap_or(state_utxos);
-        let (next_utxos, summary) =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                tx,
-                *txid,
-                base_utxos,
-                block_height,
-                pb.header.timestamp,
-                block_mtp,
-                chain_id,
-                rotation,
-                registry,
-            )?;
+        let (next_utxos, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            tx,
+            *txid,
+            base_utxos,
+            block_height,
+            pb.header.timestamp,
+            block_mtp,
+            chain_id,
+            rotation,
+            registry,
+        )?;
         work_utxos = Some(next_utxos);
         sum_fees = add_block_fee(sum_fees, summary.fee)?;
     }
@@ -324,11 +323,19 @@ fn collect_queued_non_coinbase_txs(
     let mut seen_nonces = HashSet::with_capacity(prepared.pb.txs.len());
     for (tx, txid) in prepared.pb.txs.iter().zip(&prepared.pb.txids).skip(1) {
         ParsedBlock::validate_non_coinbase_block_tx(tx, &mut seen_nonces)?;
-        let (next_utxos, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context_queued_sigchecks(
-            tx, *txid, &work_utxos, prepared.block_height,
-            prepared.pb.header.timestamp, prepared.block_mtp, ctx.chain_id, ctx.rotation,
-            ctx.registry, sig_queue,
-        )?;
+        let (next_utxos, summary) =
+            apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+                tx,
+                *txid,
+                &work_utxos,
+                prepared.block_height,
+                prepared.pb.header.timestamp,
+                prepared.block_mtp,
+                ctx.chain_id,
+                ctx.rotation,
+                ctx.registry,
+                sig_queue,
+            )?;
         work_utxos = next_utxos;
         sum_fees = add_block_fee(sum_fees, summary.fee)?;
     }

@@ -199,7 +199,7 @@ pub fn validate_tx_local(
 
 /// Dispatch a single input to the appropriate spend validator based on
 /// covenant type. Mirrors the switch in
-/// `apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context`
+/// `apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context`
 /// but without UTXO mutations.
 #[allow(clippy::too_many_arguments)]
 fn validate_input_spend(

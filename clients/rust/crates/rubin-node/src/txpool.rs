@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use rubin_consensus::uint128_json::{compare_fee_rate as compare_fee_rate_exact, fee_below_rate};
 use rubin_consensus::{
-    apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context,
+    apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context,
     constants::{COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, MAX_RELAY_MSG_BYTES},
     parse_block_header_bytes, parse_tx, tx_weight_and_stats_public, validate_tx_covenants_genesis,
     DefaultRotationProvider, NativeSuiteSet, Outpoint, RotationProvider, SuiteRegistry,
@@ -816,19 +816,18 @@ impl TxPool {
                 return Err(rejected(reason));
             }
         }
-        let (_, summary) =
-            apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-                &tx,
-                txid,
-                &chain_state.utxos,
-                next_height,
-                block_mtp,
-                block_mtp,
-                chain_id,
-                rotation,
-                registry,
-            )
-            .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+        let (_, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &tx,
+            txid,
+            &chain_state.utxos,
+            next_height,
+            block_mtp,
+            block_mtp,
+            chain_id,
+            rotation,
+            registry,
+        )
+        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
         // RUB-18/RUB-162 ordering: run post-consensus policy before
         // mempool duplicate/conflict checks, then run the final rolling
         // floor after duplicate/conflict checks. This mirrors Go:
@@ -1498,19 +1497,18 @@ pub(crate) fn relay_metadata(
             return Err(rejected(reason));
         }
     }
-    let (_, summary) =
-        apply_non_coinbase_tx_basic_update_with_mtp_and_core_ext_profiles_and_suite_context(
-            &tx,
-            txid,
-            &chain_state.utxos,
-            next_height,
-            block_mtp,
-            block_mtp,
-            chain_id,
-            rotation,
-            registry,
-        )
-        .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
+    let (_, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+        &tx,
+        txid,
+        &chain_state.utxos,
+        next_height,
+        block_mtp,
+        block_mtp,
+        chain_id,
+        rotation,
+        registry,
+    )
+    .map_err(|err| rejected(format!("transaction rejected: {err}")))?;
     // RUB-162/RUB-197 relay drift-prevention: relay must run the
     // post-consensus policy sequence (cfg-clone with cfg-zero override
     // -> apply_policy -> rolling-floor enforcement) read-only. Admission
