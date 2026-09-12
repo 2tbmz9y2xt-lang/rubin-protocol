@@ -402,7 +402,7 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
                 range,
                 input_index,
                 &mut self.sighash_cache,
-                &mut self.sig_queue,
+                self.sig_queue.as_deref_mut(),
                 &mut self.vault_spend,
             )?;
             let desc = output_descriptor_bytes(entry.covenant_type, &entry.covenant_data);
@@ -435,10 +435,13 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
             if out.covenant_type == COV_TYPE_ANCHOR || out.covenant_type == COV_TYPE_DA_COMMIT {
                 continue;
             }
+            // Preserve the low 32 bits of public-object indices on either pointer width.
+            let vout = u32::try_from(i & (usize::MAX >> usize::BITS.saturating_sub(u32::BITS)))
+                .unwrap_or_default();
             self.work.insert(
                 Outpoint {
                     txid: ctx.txid,
-                    vout: i as u32,
+                    vout,
                 },
                 UtxoEntry {
                     value: out.value,
@@ -544,67 +547,48 @@ fn validate_resolved_spend(
     range: &Range<usize>,
     input_index: usize,
     cache: &mut SighashV1PrehashCache<'_>,
-    queue: &mut Option<&mut SigCheckQueue>,
+    queue: Option<&mut SigCheckQueue>,
     vault: &mut Option<VaultSpendState>,
 ) -> Result<(), TxError> {
-    let assigned = &ctx.tx.witness[range.clone()];
+    let assigned = ctx
+        .tx
+        .witness
+        .get(range.clone())
+        .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "witness underflow"))?;
+    let input_index =
+        u32::try_from(input_index & (usize::MAX >> usize::BITS.saturating_sub(u32::BITS)))
+            .unwrap_or_default();
     match entry.covenant_type {
-        COV_TYPE_P2PK => apply_p2pk_spend(
-            ctx,
-            entry,
-            assigned,
-            input_index,
-            cache,
-            queue.as_deref_mut(),
-        )?,
-        COV_TYPE_MULTISIG => apply_multisig_spend(
-            ctx,
-            entry,
-            assigned,
-            input_index,
-            cache,
-            queue.as_deref_mut(),
-        )?,
-        COV_TYPE_VAULT => *vault = Some(VaultSpendState::capture(entry, range, input_index)?),
-        COV_TYPE_HTLC => apply_htlc_spend(
-            ctx,
-            entry,
-            assigned,
-            input_index,
-            cache,
-            queue.as_deref_mut(),
-        )?,
-        COV_TYPE_CORE_STEALTH => apply_stealth_spend(
-            ctx,
-            entry,
-            assigned,
-            input_index,
-            cache,
-            queue.as_deref_mut(),
-        )?,
-        _ => {}
+        COV_TYPE_P2PK => apply_p2pk_spend(ctx, entry, assigned, input_index, cache, queue),
+        COV_TYPE_MULTISIG => apply_multisig_spend(ctx, entry, assigned, input_index, cache, queue),
+        COV_TYPE_VAULT => VaultSpendState::capture(entry, range, input_index)
+            .map(|captured| *vault = Some(captured)),
+        COV_TYPE_HTLC => apply_htlc_spend(ctx, entry, assigned, input_index, cache, queue),
+        COV_TYPE_CORE_STEALTH => {
+            apply_stealth_spend(ctx, entry, assigned, input_index, cache, queue)
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn apply_p2pk_spend(
     ctx: &UtxoApplyImplContext<'_>,
     entry: &UtxoEntry,
     assigned: &[crate::tx::WitnessItem],
-    input_index: usize,
+    input_index: u32,
     cache: &mut SighashV1PrehashCache<'_>,
     queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
-    if assigned.len() != 1 {
+    let [witness] = assigned else {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "CORE_P2PK witness_slots must be 1",
         ));
-    }
+    };
     validate_p2pk_spend_q(
         entry,
-        &assigned[0],
-        input_index as u32,
+        witness,
+        input_index,
         entry.value,
         ctx.chain_id,
         ctx.height,
@@ -620,7 +604,7 @@ fn apply_multisig_spend(
     ctx: &UtxoApplyImplContext<'_>,
     entry: &UtxoEntry,
     assigned: &[crate::tx::WitnessItem],
-    input_index: usize,
+    input_index: u32,
     cache: &mut SighashV1PrehashCache<'_>,
     queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
@@ -629,7 +613,7 @@ fn apply_multisig_spend(
         &m.keys,
         m.threshold,
         assigned,
-        input_index as u32,
+        input_index,
         entry.value,
         ctx.chain_id,
         ctx.height,
@@ -646,22 +630,22 @@ fn apply_htlc_spend(
     ctx: &UtxoApplyImplContext<'_>,
     entry: &UtxoEntry,
     assigned: &[crate::tx::WitnessItem],
-    input_index: usize,
+    input_index: u32,
     cache: &mut SighashV1PrehashCache<'_>,
     queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
-    if assigned.len() != 2 {
+    let [selector, witness] = assigned else {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "CORE_HTLC witness_slots must be 2",
         ));
-    }
+    };
     validate_htlc_spend_q(
         entry,
-        &assigned[0],
-        &assigned[1],
+        selector,
+        witness,
         HtlcSpendContext {
-            input_index: input_index as u32,
+            input_index,
             input_value: entry.value,
             chain_id: ctx.chain_id,
             block_height: ctx.height,
@@ -679,20 +663,20 @@ fn apply_stealth_spend(
     ctx: &UtxoApplyImplContext<'_>,
     entry: &UtxoEntry,
     assigned: &[crate::tx::WitnessItem],
-    input_index: usize,
+    input_index: u32,
     cache: &mut SighashV1PrehashCache<'_>,
     queue: Option<&mut SigCheckQueue>,
 ) -> Result<(), TxError> {
-    if assigned.len() != 1 {
+    let [witness] = assigned else {
         return Err(TxError::new(
             ErrorCode::TxErrParse,
             "CORE_STEALTH witness_slots must be 1",
         ));
-    }
+    };
     validate_stealth_spend_q(
         entry,
-        &assigned[0],
-        input_index as u32,
+        witness,
+        input_index,
         entry.value,
         ctx.chain_id,
         ctx.height,
@@ -705,18 +689,14 @@ fn apply_stealth_spend(
 }
 
 impl VaultSpendState {
-    fn capture(
-        entry: &UtxoEntry,
-        range: &Range<usize>,
-        input_index: usize,
-    ) -> Result<Self, TxError> {
+    fn capture(entry: &UtxoEntry, range: &Range<usize>, input_index: u32) -> Result<Self, TxError> {
         let v = parse_vault_covenant_data_for_spend(&entry.covenant_data)?;
         // Capture now; threshold verification remains after authorization.
         Ok(Self {
             keys: v.keys.clone(),
             threshold: v.threshold,
             witness_range: range.clone(),
-            input_index: input_index as u32,
+            input_index,
             input_value: entry.value,
             owner_lock_id: v.owner_lock_id,
             whitelist: v.whitelist,
@@ -757,10 +737,15 @@ impl VaultSpendState {
         cache: &mut SighashV1PrehashCache<'_>,
         queue: Option<&mut SigCheckQueue>,
     ) -> Result<(), TxError> {
+        let witness = ctx
+            .tx
+            .witness
+            .get(self.witness_range.clone())
+            .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, "witness underflow"))?;
         validate_threshold_sig_spend_q(
             &self.keys,
             self.threshold,
-            &ctx.tx.witness[self.witness_range.clone()],
+            witness,
             self.input_index,
             self.input_value,
             ctx.chain_id,
