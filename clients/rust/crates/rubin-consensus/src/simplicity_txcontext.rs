@@ -15,7 +15,7 @@ use crate::hash::sha3_256;
 use crate::simplicity;
 use crate::simplicity_covenant::parse_core_simplicity_covenant_data;
 use crate::tx::{DaCommitCore, Tx, TxOutput};
-use crate::txcontext::Uint128;
+use crate::uint128::Uint128;
 use crate::utxo_basic::UtxoEntry;
 use crate::vault::output_descriptor_bytes;
 
