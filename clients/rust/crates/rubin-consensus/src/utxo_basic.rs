@@ -882,26 +882,26 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
 mod tests {
     use super::*;
     use crate::constants::{
-        COV_TYPE_CORE_EXT, LOCK_MODE_HEIGHT, MAX_STEALTH_COVENANT_DATA, SIGHASH_ALL,
-        SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+        LOCK_MODE_HEIGHT, MAX_STEALTH_COVENANT_DATA, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
+        SUITE_ID_SENTINEL,
     };
     use crate::sighash::sighash_v1_digest;
     use crate::tx::{DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
     use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
     use crate::verify_sig_openssl::Mldsa87Keypair;
 
-    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14 and MUST be
+    // 0x0102 is UNASSIGNED per CANONICAL §14 and MUST be
     // rejected as TxErrCovenantTypeInvalid at BOTH creation (genesis) and spend,
     // for ANY covenant_data (RUB-514 / RUB-585). Mirrors the Go reject behavior.
     #[test]
-    fn core_ext_0x0102_unassigned_rejects_at_genesis_and_spend() {
+    fn unknown_covenant_0x0102_unassigned_rejects_at_genesis_and_spend() {
         let keypair = Mldsa87Keypair::generate().expect("keypair");
         let pubkey = keypair.pubkey_bytes();
-        assert_unassigned_core_ext_creation(&pubkey);
-        assert_unassigned_core_ext_spends(&pubkey);
+        assert_unassigned_unknown_covenant_creation(&pubkey);
+        assert_unassigned_unknown_covenant_spends(&pubkey);
     }
 
-    fn assert_unassigned_core_ext_creation(pubkey: &[u8]) {
+    fn assert_unassigned_unknown_covenant_creation(pubkey: &[u8]) {
         // Creation (genesis): a tx producing a 0x0102 output is rejected by
         // `validate_tx_covenants_genesis` before any input spend checks, so the
         // funding input does not even need a valid signature.
@@ -918,7 +918,7 @@ mod tests {
             0x00,
             1,
             vec![tx_input(prev_txid)],
-            vec![tx_output(90, COV_TYPE_CORE_EXT, vec![0x07, 0x00, 0x00])],
+            vec![tx_output(90, 0x0102, vec![0x07, 0x00, 0x00])],
         );
         let create_err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
             &create_tx, txid, &funding, 1, 0, 0, chain_id, None, None,
@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(create_err.code, ErrorCode::TxErrCovenantTypeInvalid);
     }
 
-    fn assert_unassigned_core_ext_spends(pubkey: &[u8]) {
+    fn assert_unassigned_unknown_covenant_spends(pubkey: &[u8]) {
         // Spend: a tx consuming a 0x0102 UTXO is rejected, for any covenant_data.
         // `check_spend_covenant`/`witness_slots` reject during input resolution
         // before any signature verification, so the witness contents are
@@ -936,7 +936,7 @@ mod tests {
         let spend_txid = [0x82; 32];
         let spend_chain = [0x83; 32];
         for cov_data in [vec![], vec![0x07, 0x00, 0x00], vec![0xffu8; 8]] {
-            let spend_set = HashMap::from([utxo(spend_prev, 100, COV_TYPE_CORE_EXT, cov_data)]);
+            let spend_set = HashMap::from([utxo(spend_prev, 100, 0x0102, cov_data)]);
             let mut spend_tx = unsigned_tx(
                 0x00,
                 2,

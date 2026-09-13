@@ -974,13 +974,13 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
         deferred_apply(&creation_missing_owner_tx, [0u8; 32], &creation_utxos, 200).unwrap_err();
     assert_eq!(err.code, ErrorCode::TxErrVaultOwnerAuthRequired);
 
-    // A CORE_EXT (0x0102) destination output is UNASSIGNED and rejected by the
+    // A 0x0102 destination output is UNASSIGNED and rejected by the
     // genesis covenant check (TxErrCovenantTypeInvalid) BEFORE the vault output
     // whitelist check runs.
     let mut disallowed_destination_tx = tx_base(crate::tx::TxOutput {
         value: 50,
-        covenant_type: COV_TYPE_CORE_EXT,
-        // ext_id:u16le(1) || ext_payload_len:CompactSize(0).
+        covenant_type: 0x0102,
+        // Opaque covenant data.
         covenant_data: vec![0x01, 0x00, 0x00],
     });
     disallowed_destination_tx.witness = vec![
@@ -992,10 +992,9 @@ fn apply_non_coinbase_tx_basic_workq_vault_error_paths() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_workq_core_ext_0x0102_rejects() {
-    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED: spending an input of this
-    // covenant type is rejected as TxErrCovenantTypeInvalid. The CORE_EXT
-    // covenant-spend runtime has been removed.
+fn apply_non_coinbase_tx_basic_workq_unknown_covenant_0x0102_rejects() {
+    // 0x0102 is UNASSIGNED: spending an input of this covenant type is rejected
+    // as TxErrCovenantTypeInvalid.
     let out_kp = kp_or_skip!();
     let out_cov = p2pk_covenant_data_for_pubkey(&out_kp.pubkey);
     let prev_txid = [0xa0; 32];
@@ -1033,8 +1032,8 @@ fn apply_non_coinbase_tx_basic_workq_core_ext_0x0102_rejects() {
         },
         UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_CORE_EXT,
-            // ext_id:u16le(1) || ext_payload_len:CompactSize(0)
+            covenant_type: 0x0102,
+            // Opaque covenant data.
             covenant_data: vec![0x01, 0x00, 0x00],
             creation_height: 0,
             created_by_coinbase: false,

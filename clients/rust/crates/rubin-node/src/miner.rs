@@ -952,8 +952,8 @@ mod tests {
     use std::path::PathBuf;
 
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT,
-        COV_TYPE_P2PK, MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK as MDB, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT, COV_TYPE_P2PK,
+        MAX_BLOCK_WEIGHT, MAX_DA_BATCHES_PER_BLOCK as MDB, TX_WIRE_VERSION,
     };
     use rubin_consensus::merkle::{witness_commitment_hash, witness_merkle_root_wtxids};
     use rubin_consensus::{
@@ -1518,7 +1518,7 @@ mod tests {
         let (_dir, _block_store, mut sync) = test_sync("rub1335-mine-one-unassigned");
         sync.bootstrap_canonical_genesis_if_empty()
             .expect("bootstrap");
-        let (tx, utxos) = one_input_policy_tx(0x77, 1, COV_TYPE_CORE_EXT, vec![0x01]);
+        let (tx, utxos) = one_input_policy_tx(0x77, 1, 0x0102, vec![0x01]);
         sync.chain_state.utxos.extend(utxos);
         let state_before = sync.chain_state.clone();
         let sync_tip_before = sync.tip().expect("sync tip before");

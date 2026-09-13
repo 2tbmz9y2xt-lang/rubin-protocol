@@ -201,26 +201,26 @@ func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
 	}
 }
 
-func TestCoverage_CoreExtRetirementAndValueContextBranches(t *testing.T) {
-	// CORE_EXT (0x0102) is unassigned per CANONICAL §14 — consensus rejects it as
+func TestCoverage_UnknownCovenantRetirementAndValueContextBranches(t *testing.T) {
+	// 0x0102 is unassigned per CANONICAL §14 — consensus rejects it as
 	// TX_ERR_COVENANT_TYPE_INVALID at creation, witness assignment, and spend covenant
 	// validation, for any covenant_data (well-formed or malformed) (RUB-585).
-	wellFormed := wcCoreExtEntry(1, 1).CovenantData // ext_id + compactSize(0): well-formed under the retired parser
-	for _, cd := range [][]byte{wellFormed, {0x01}, {}} {
-		out := TxOutput{Value: 1, CovenantType: COV_TYPE_CORE_EXT, CovenantData: cd}
+	opaque := wcUnknownCovenantEntry(1).CovenantData
+	for _, cd := range [][]byte{opaque, {0x01}, {}} {
+		out := TxOutput{Value: 1, CovenantType: 0x0102, CovenantData: cd}
 		err := ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{out}}, [32]byte{}, 0, nil)
 		if err == nil {
-			t.Fatalf("genesis create CORE_EXT covenant_data=%x: expected reject", cd)
+			t.Fatalf("genesis create unknown covenant_data=%x: expected reject", cd)
 		}
 		if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
-			t.Fatalf("genesis create CORE_EXT covenant_data=%x: code=%s, want %s", cd, got, TX_ERR_COVENANT_TYPE_INVALID)
+			t.Fatalf("genesis create unknown covenant_data=%x: code=%s, want %s", cd, got, TX_ERR_COVENANT_TYPE_INVALID)
 		}
 	}
-	if _, err := WitnessSlots(COV_TYPE_CORE_EXT, wellFormed); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("WitnessSlots(CORE_EXT) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
+	if _, err := WitnessSlots(0x0102, opaque); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("WitnessSlots(0x0102) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
 	}
-	if err := checkSpendCovenant(COV_TYPE_CORE_EXT, wellFormed); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("checkSpendCovenant(CORE_EXT) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
+	if err := checkSpendCovenant(0x0102, opaque); err == nil || mustTxErrCode(t, err) != TX_ERR_COVENANT_TYPE_INVALID {
+		t.Fatalf("checkSpendCovenant(0x0102) must reject with TX_ERR_COVENANT_TYPE_INVALID, got %v", err)
 	}
 	if got := CheckValueConservationTxWide(nil, false, Uint128{}); got == nil || got.Code != TX_ERR_PARSE {
 		t.Fatalf("nil txcontext base code=%v, want %s", got, TX_ERR_PARSE)

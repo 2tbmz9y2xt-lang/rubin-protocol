@@ -39,17 +39,11 @@ pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
-// COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: consensus rejects it as
-// TxErrCovenantTypeInvalid at creation and spend (RUB-514/RUB-585). Retained only so the node
-// pre-activation mempool policy can name it; it carries NO consensus covenant semantics.
-pub const COV_TYPE_CORE_EXT: u16 = 0x0102;
 pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
 pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 pub const COV_TYPE_CORE_SIMPLICITY: u16 = 0x0106;
 pub const SIMPLICITY_WITNESS_SLOTS: u64 = 1;
 
-#[deprecated(note = "use COV_TYPE_CORE_EXT")]
-pub const COV_TYPE_EXT: u16 = COV_TYPE_CORE_EXT;
 #[deprecated(note = "use COV_TYPE_CORE_STEALTH")]
 pub const COV_TYPE_STEALTH: u16 = COV_TYPE_CORE_STEALTH;
 
@@ -98,14 +92,6 @@ pub const VERIFY_COST_UNKNOWN_SUITE: u64 = 64;
 /// Simplicity envelope. Mirror of Go `SIMPLICITY_BASE_VERIFY_COST`.
 pub const SIMPLICITY_BASE_VERIFY_COST: u64 = 64;
 
-/// EXT_BASE_COST is a policy/activation prerequisite constant for CORE_EXT tracks.
-/// It is defined as a stable numeric baseline derived from devnet-style measurement
-/// and exposed on the consensus parameter surface for cross-client parity.
-///
-/// NOTE: This constant does not change consensus validity by itself; it is not wired
-/// into weight or fee rules unless explicitly specified by a separate consensus change.
-pub const EXT_BASE_COST: u64 = 64;
-
 pub const SIGNAL_WINDOW: u64 = 2016;
 pub const SIGNAL_THRESHOLD: u32 = 1815;
 
@@ -121,11 +107,9 @@ mod tests {
 
     #[test]
     fn core_cov_type_names_preserve_wire_values() {
-        assert_eq!(COV_TYPE_CORE_EXT, 0x0102);
         assert_eq!(COV_TYPE_DA_COMMIT, 0x0103);
         assert_eq!(COV_TYPE_CORE_STEALTH, 0x0105);
         assert_eq!(COV_TYPE_CORE_SIMPLICITY, 0x0106);
-        assert_eq!(COV_TYPE_CORE_EXT.to_le_bytes(), 0x0102u16.to_le_bytes());
         assert_eq!(COV_TYPE_CORE_STEALTH.to_le_bytes(), 0x0105u16.to_le_bytes());
         assert_eq!(
             COV_TYPE_CORE_SIMPLICITY.to_le_bytes(),
@@ -137,9 +121,7 @@ mod tests {
     #[allow(deprecated)]
     #[test]
     fn legacy_cov_type_aliases_preserve_wire_values() {
-        assert_eq!(COV_TYPE_EXT, COV_TYPE_CORE_EXT);
         assert_eq!(COV_TYPE_STEALTH, COV_TYPE_CORE_STEALTH);
-        assert_eq!(COV_TYPE_EXT.to_le_bytes(), COV_TYPE_CORE_EXT.to_le_bytes());
         assert_eq!(
             COV_TYPE_STEALTH.to_le_bytes(),
             COV_TYPE_CORE_STEALTH.to_le_bytes()

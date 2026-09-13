@@ -1136,7 +1136,7 @@ fn apply_non_coinbase_tx_basic_vault_whitelist_rejects_output() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_vault_rejects_unassigned_core_ext_destination() {
+fn apply_non_coinbase_tx_basic_vault_rejects_unassigned_unknown_covenant_destination() {
     let mut prev_vault = [0u8; 32];
     prev_vault[0] = 0xe4;
     let mut prev_fee = [0u8; 32];
@@ -1153,15 +1153,11 @@ fn apply_non_coinbase_tx_basic_vault_rejects_unassigned_core_ext_destination() {
         &owner_cov,
     ));
 
-    // CORE_EXT (0x0102) is UNASSIGNED: even when whitelisted, a CORE_EXT
+    // 0x0102 is UNASSIGNED: even when whitelisted, this unknown covenant
     // destination output is rejected by the genesis covenant check
     // (TxErrCovenantTypeInvalid) BEFORE the vault output whitelist check runs.
-    // ext_id:u16le(1) || ext_payload_len:CompactSize(0).
-    let core_ext_cov = vec![0x01, 0x00, 0x00];
-    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(
-        COV_TYPE_CORE_EXT,
-        &core_ext_cov,
-    ));
+    let unknown_cov = vec![0x01, 0x00, 0x00];
+    let whitelist_h = sha3_256(&crate::vault::output_descriptor_bytes(0x0102, &unknown_cov));
 
     let vault_key_id = sha3_256(&vault_kp.pubkey);
     let vault_cov = encode_vault_covenant_data(owner_lock_id, 1, &[vault_key_id], &[whitelist_h]);
@@ -1186,8 +1182,8 @@ fn apply_non_coinbase_tx_basic_vault_rejects_unassigned_core_ext_destination() {
         ],
         outputs: vec![crate::tx::TxOutput {
             value: 100,
-            covenant_type: COV_TYPE_CORE_EXT,
-            covenant_data: core_ext_cov,
+            covenant_type: 0x0102,
+            covenant_data: unknown_cov,
         }],
         locktime: 0,
         da_commit_core: None,
