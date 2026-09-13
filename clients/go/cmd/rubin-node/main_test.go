@@ -1847,32 +1847,25 @@ func TestParseGenesisConfigFullRejectsInvalidChainID(t *testing.T) {
 	}
 }
 
-func TestParseGenesisConfigFullRejectsRemovedCoreExtFields(t *testing.T) {
-	dir := t.TempDir()
-	chainIDBytes := node.DevnetGenesisChainID()
-	genesisHashBytes := node.DevnetGenesisBlockHash()
-	chainID := hex.EncodeToString(chainIDBytes[:])
-	genesisHash := hex.EncodeToString(genesisHashBytes[:])
-
-	for _, tc := range []struct {
-		name  string
-		field string
-		value string
-	}{
-		{name: "profiles", field: "core_ext_profiles", value: `[]`},
-		{name: "profile_set_anchor", field: "core_ext_profile_set_anchor_hex", value: `"00"`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(dir, tc.name+".json")
-			payload := `{"chain_id_hex":"0x` + chainID + `","genesis_hash_hex":"0x` + genesisHash + `","` + tc.field + `":` + tc.value + `}`
-			if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
-				t.Fatalf("write genesis file: %v", err)
-			}
-
-			if _, err := parseGenesisConfigFull(path); err == nil || !strings.Contains(err.Error(), `unsupported genesis field "`+tc.field+`"`) {
-				t.Fatalf("expected removed field rejection for %s, got %v", tc.field, err)
-			}
-		})
+func TestParseGenesisConfigFullIgnoresUnrecognizedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "genesis.json")
+	chainID := node.DevnetGenesisChainID()
+	genesisHash := node.DevnetGenesisBlockHash()
+	base := `{"chain_id_hex":"0x` + hex.EncodeToString(chainID[:]) + `","genesis_hash_hex":"0x` + hex.EncodeToString(genesisHash[:]) + `"`
+	var plain parsedGenesisConfig
+	for i, suffix := range []string{`}`, `,"unrecognized_probe_key":{"value":1}}`} {
+		if err := os.WriteFile(path, []byte(base+suffix), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := parseGenesisConfigFull(path)
+		if err != nil || cfg.ChainID != chainID || cfg.GenesisHash != genesisHash {
+			t.Fatalf("genesis load: cfg=%+v err=%v", cfg, err)
+		}
+		if i == 0 {
+			plain = cfg
+		} else if cfg.ChainID != plain.ChainID || cfg.GenesisHash != plain.GenesisHash {
+			t.Fatalf("unknown key changed genesis: %+v != %+v", cfg, plain)
+		}
 	}
 }
 

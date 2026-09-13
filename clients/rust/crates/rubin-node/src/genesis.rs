@@ -139,7 +139,6 @@ pub fn load_genesis_config(
         .map_err(|e| format!("read genesis file {}: {e}", path.display()))?;
     let raw_json: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
-    reject_removed_genesis_core_ext_keys(&raw_json)?;
     let payload: GenesisPack = serde_json::from_value(raw_json)
         .map_err(|e| format!("parse genesis file {}: {e}", path.display()))?;
     let mut trimmed = payload.chain_id_hex.trim();
@@ -173,20 +172,6 @@ pub fn load_genesis_config(
             network,
         )?,
     })
-}
-
-fn reject_removed_genesis_core_ext_keys(raw_json: &serde_json::Value) -> Result<(), String> {
-    let Some(fields) = raw_json.as_object() else {
-        return Ok(());
-    };
-    for key in ["core_ext_profiles", "core_ext_profile_set_anchor_hex"] {
-        if fields.contains_key(key) {
-            return Err(format!(
-                "unsupported genesis field {key:?}: Rust node CORE_EXT profile wiring was removed"
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn normalize_suite_alg_name(value: &str) -> Result<&'static str, String> {
@@ -566,38 +551,29 @@ mod tests {
     }
 
     #[test]
-    fn load_genesis_config_rejects_removed_core_ext_fields() {
+    fn load_genesis_config_ignores_unrecognized_key() {
         let dir = std::env::temp_dir().join(format!(
-            "rubin-node-genesis-removed-core-ext-{}",
+            "rubin-node-genesis-unknown-key-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("time")
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
-        for (name, field, value) in [
-            ("profiles", "core_ext_profiles", "[]"),
-            (
-                "profile_set_anchor",
-                "core_ext_profile_set_anchor_hex",
-                "\"00\"",
-            ),
-        ] {
-            let path = dir.join(format!("{name}.json"));
-            std::fs::write(
-                &path,
-                format!(
-                    "{{\"chain_id_hex\":\"0x88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103\",\"{field}\":{value}}}"
-                ),
-            )
-            .expect("write");
-            let err = load_genesis_config(Some(&path), "devnet").expect_err("removed field");
-            assert!(
-                err.contains(&format!("unsupported genesis field \"{field}\"")),
-                "unexpected error for {field}: {err}"
-            );
-        }
-
+        let path = dir.join("genesis.json");
+        let base = format!(r#"{{"chain_id_hex":"0x{}""#, super::GENESIS_CHAIN_ID_HEX);
+        std::fs::write(&path, format!("{base}}}")).expect("write");
+        let plain = load_genesis_config(Some(&path), "devnet").expect("load");
+        std::fs::write(
+            &path,
+            format!(r#"{base},"unrecognized_probe_key":{{"value":1}}}}"#),
+        )
+        .expect("write");
+        let extra = load_genesis_config(Some(&path), "devnet").expect("load unknown key");
+        assert_eq!(extra.chain_id, devnet_genesis_chain_id());
+        assert_eq!(extra.genesis_hash, Some(super::devnet_genesis_hash()));
+        assert_eq!(extra.chain_id, plain.chain_id);
+        assert_eq!(extra.genesis_hash, plain.genesis_hash);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
