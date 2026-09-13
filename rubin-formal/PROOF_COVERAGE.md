@@ -4,14 +4,14 @@
 Машинный реестр: `rubin-formal/proof_coverage.json`
 
 Текущее состояние: machine-readable source-of-truth (`proof_coverage.json`) фиксирует
-`proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 32 current coverage entries и явные
+`proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 31 current coverage entries и явные
 `notes` / `limitations` для non-universal claims. Conformance-фикстуры
 Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fixtures,
 представленные модулями, импортированными `RubinFormal.Conformance.Index`.
 Runtime/parallel-only `CV-PV-*` gates в этот Lean replay scope не входят.
 
 `SECTION_HASHES` manifest membership and formal `coverage[]` registry membership
-are independent sets, not a one-to-one mapping. The registry has exactly 32
+are independent sets, not a one-to-one mapping. The registry has exactly 31
 formal coverage entries. A `section_heading` is a registry row label: some
 values are exact specification headings; others identify residual, bridge,
 model, or other bounded formal scopes. Row status, evidence, and claims apply
@@ -48,15 +48,15 @@ universal/model section proof evidence.
 
 Связка с hash-pinning:
 
-- `proof_coverage.json` сейчас содержит 32 machine-checked registry entries.
-- Status counts: `24` `proved`, `5` `proved_with_axiom`, `3` `stated`, `0` `deferred`.
-- Не все 32 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
+- `proof_coverage.json` сейчас содержит 31 machine-checked registry entries.
+- Status counts: `23` `proved`, `5` `proved_with_axiom`, `3` `stated`, `0` `deferred`.
+- Не все 31 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
 - Extra formal-only theorems do not establish a registered formal coverage row
   unless they are represented by a registry entry.
 
 ## Текущая раскладка evidence levels
 
-- `machine_checked_universal`: 23
+- `machine_checked_universal`: 22
 - `machine_checked_assumption_backed`: 5
 - `machine_checked_model`: 3
 - `machine_checked_contract`: 1

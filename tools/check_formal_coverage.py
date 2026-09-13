@@ -55,7 +55,6 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "fork_choice": "machine_checked_model",
     "block_validation_order": "machine_checked_model",
     "parallel_validation_equivalence": "machine_checked_universal",
-    "txcontext_formal": "machine_checked_universal",
     "native_rotation": "machine_checked_universal",
     "spend_gate_bridge": "machine_checked_universal",
     "threshold_stealth_spend_suite_gate": "machine_checked_universal",
@@ -70,13 +69,13 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 70,
-    "reconcile_current_protocol_path_count": 22,
+    "byte_exact_path_count": 67,
+    "reconcile_current_protocol_path_count": 25,
     "drop_retired_generated_source_path_count": 4, "drop_retired_source_path_count": 3, "drop_stale_source_path_count": 7,
     "import_adapt_single_owner_path_count": 1,
     "transplant_check_logic_path_count": 2,
     "import_package_check_or_test_path_count": 7,
-    "active_partition_equation": "70 + 22 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "67 + 25 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
 }
 EXPECTED_SOURCE_MANIFEST_PIN_SHA256 = "62f58d1c3151e98f4252d5bfb570d141c03f64ab4feb070c1328912b6bbf39c1"
@@ -92,6 +91,9 @@ SOURCE_REBIND_COUNT_KEYS = {
 }
 EXPECTED_SOURCE_REBIND_PATHS = {
     "reconcile_current_protocol_paths": {
+        "RubinFormal/BlockTimestampBehavioral.lean",
+        "RubinFormal/TxContextBehavioral.lean",
+        "RubinFormal/TxContextFormal.lean",
         "RubinFormal/BlockValidationOrder.lean",
         "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
         "RubinFormal/ConnectBlockFull.lean",

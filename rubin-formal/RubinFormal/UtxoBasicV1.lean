@@ -21,10 +21,11 @@ def COINBASE_MATURITY : Nat := 100
 def COV_TYPE_P2PK : Nat := 0x0000
 def COV_TYPE_ANCHOR : Nat := 0x0002
 def COV_TYPE_VAULT : Nat := 0x0101
-def COV_TYPE_EXT : Nat := 0x0102
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
 def COV_TYPE_HTLC : Nat := 0x0100
 def COV_TYPE_MULTISIG : Nat := 0x0104
+-- Retained for CV-ST-U-01 (RUB-1340 item 5); no stealth-specific validation.
+def COV_TYPE_STEALTH : Nat := 0x0105
 
 /- Pre-rotation: only ML-DSA-87 for native P2PK spend.
    Post-rotation (Q-FORMAL-ROTATION-04): `suite ∉ NATIVE_SPEND_SUITES(h)`. -/
@@ -579,8 +580,11 @@ def scanSingleInputStep
     let suite := (e.covenantData.get! 0).toNat
     if !NativeSpendCreateGate.liveSpendGateAllows rotDesc? height suite then
       throw "TX_ERR_SIG_ALG_INVALID"
-  else if e.covenantType == COV_TYPE_EXT then
-    -- 0x0102 is unassigned and therefore rejected independently of payload.
+  else if e.covenantType != COV_TYPE_P2PK &&
+      e.covenantType != COV_TYPE_HTLC &&
+      e.covenantType != COV_TYPE_VAULT &&
+      e.covenantType != COV_TYPE_MULTISIG &&
+      e.covenantType != COV_TYPE_STEALTH then
     throw "TX_ERR_COVENANT_TYPE_INVALID"
 
   let lockId := outputDescriptorLockId e
@@ -728,6 +732,12 @@ def validateBasicWitnesses
     (enforceSigOracle : Bool) : Except String Unit := do
   let mut witnessCursor : Nat := 0
   for entry in inputState.inputEntries do
+    if entry.covenantType != COV_TYPE_P2PK &&
+        entry.covenantType != COV_TYPE_HTLC &&
+        entry.covenantType != COV_TYPE_VAULT &&
+        entry.covenantType != COV_TYPE_MULTISIG &&
+        entry.covenantType != COV_TYPE_STEALTH then
+      throw "TX_ERR_COVENANT_TYPE_INVALID"
     if entry.covenantType == COV_TYPE_VAULT then
       let vault ← CovenantGenesisV1.parseVaultCovenantData entry.covenantData
       if witnessCursor + vault.keyCount > tx.witness.length then
@@ -740,13 +750,99 @@ def validateBasicWitnesses
       let witness := tx.witness.get! witnessCursor
       if entry.covenantType == COV_TYPE_P2PK then
         validateBasicP2PKSpend entry witness txBytes enforceSigOracle
-      else if entry.covenantType == COV_TYPE_EXT then
-        -- Kept total even though input scanning rejects 0x0102 first.
-        throw "TX_ERR_COVENANT_TYPE_INVALID"
       witnessCursor := witnessCursor + 1
   if witnessCursor != tx.witness.length then
     throw "TX_ERR_PARSE"
   pure ()
+
+-- Bounded-domain regression cases; expectations are independent public literals.
+example : (Id.run do
+    let input : TxIn := default
+    let op := txInOutpoint input
+    let empty := InputScanState.empty
+    let prior := { empty with sumIn := 7, sumInVault := 3, vaultInputs := 1, inputCovTypes := [0x0100], requiredWitnessSlots := 2, consumedOutpoints := [{ op with vout := 1 }] }
+    for tag in [0x0102, 0x0106, 0x0107, 0x00FF, 0xFFFF, 0x10000, 0x10001] do
+      let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
+      let m := (Std.RBMap.empty : Std.RBMap Outpoint UtxoEntry cmpOutpoint).insert op e
+      for acc in [empty, prior] do
+        match scanSingleInputStep input m 100 acc with
+        | .error "TX_ERR_COVENANT_TYPE_INVALID" => pure ()
+        | _ => return false
+      -- Maturity precedes domain refusal even for a nonempty accumulator.
+      match scanSingleInputStep input (m.insert op { e with createdByCoinbase := true }) 0 prior with
+      | .error "TX_ERR_COINBASE_IMMATURE" => pure ()
+      | _ => return false
+    -- Duplicate precedes missing lookup; missing lookup precedes all entry checks.
+    match scanSingleInputStep input Std.RBMap.empty 0 { prior with consumedOutpoints := [op] } with
+    | .error "TX_ERR_PARSE" => pure ()
+    | _ => return false
+    match scanSingleInputStep input Std.RBMap.empty 0 prior with
+    | .error "TX_ERR_MISSING_UTXO" => pure ()
+    | _ => return false
+    for tag in [0x0002, 0x0103] do
+      let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, true⟩
+      match scanSingleInputStep input (Std.RBMap.empty.insert op e) 0 prior with
+      | .error "TX_ERR_MISSING_UTXO" => pure ()
+      | _ => return false
+    -- Retained non-P2PK/non-vault entries keep the complete accumulator update.
+    for tag in [0x0100, 0x0104, 0x0105] do
+      let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
+      match scanSingleInputStep input (Std.RBMap.empty.insert op e) 100 prior with
+      | .error _ => return false
+      | .ok next =>
+        if next.sumIn != 18 || next.sumInVault != 3 || next.vaultInputs != 1 ||
+            next.inputCovTypes != [0x0100, tag] || next.requiredWitnessSlots != 3 ||
+            next.inputEntries != [e] || next.consumedOutpoints != [{ op with vout := 1 }, op] ||
+            next.inputLockIds != [outputDescriptorLockId e] ||
+            next.vaultWhitelist != prior.vaultWhitelist || next.vaultOwnerLockId != prior.vaultOwnerLockId then
+          return false
+    -- P2PK still requires the suite-prefixed 33-byte descriptor.
+    let p2pk : UtxoEntry := ⟨11, 0x0000, RubinFormal.bytes (([1] ++ List.replicate 32 0 : List UInt8).toArray), 0, false⟩
+    match scanSingleInputStep input (Std.RBMap.empty.insert op p2pk) 100 empty with
+    | .ok next => if next.sumIn != 11 || next.requiredWitnessSlots != 1 then return false
+    | _ => return false
+    -- A malformed vault keeps its own parse error, ahead of multi-input rejection.
+    let badVault : UtxoEntry := ⟨11, 0x0101, ByteArray.empty, 0, false⟩
+    match scanSingleInputStep input (Std.RBMap.empty.insert op badVault) 100 prior with
+    | .error "TX_ERR_VAULT_MALFORMED" => pure ()
+    | _ => return false
+    -- Two keys retain two slots, and a second vault retains its earlier rejection.
+    let data := RubinFormal.bytes ((List.replicate 32 0x10 ++ [1, 2] ++ List.replicate 32 0x20 ++ List.replicate 32 0x21 ++ [1, 0] ++ List.replicate 32 0x30 : List UInt8).toArray)
+    let vault := { badVault with covenantData := data }
+    match scanSingleInputStep input (Std.RBMap.empty.insert op vault) 100 empty with
+    | .ok next => if next.sumInVault != 11 || next.vaultInputs != 1 || next.requiredWitnessSlots != 2 then return false
+    | _ => return false
+    match scanSingleInputStep input (Std.RBMap.empty.insert op vault) 100 prior with
+    | .error "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN" => pure ()
+    | _ => return false
+    let state := { empty with inputEntries := [vault] }
+    match validateBasicWitnesses ByteArray.empty { (default : Tx) with witness := [default, default] } state false with
+    | .ok () => pure ()
+    | _ => return false
+    match validateBasicWitnesses ByteArray.empty { (default : Tx) with witness := [default] } state false with
+    | .error "TX_ERR_PARSE" => pure ()
+    | _ => return false
+    return true) = true := by native_decide
+
+-- Direct caller-built states include Anchor/DA-commit, unreachable from scanning.
+example : (Id.run do
+    for tag in [0x0002, 0x0103, 0x0102, 0x0106, 0x0107, 0x00FF, 0x10000] do
+      let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
+      for witnesses in [[], [default]] do
+        let tx : Tx := { (default : Tx) with witness := witnesses }
+        match validateBasicWitnesses ByteArray.empty tx { InputScanState.empty with inputEntries := [e] } false with
+        | .error "TX_ERR_COVENANT_TYPE_INVALID" => pure ()
+        | _ => return false
+    for tag in [0x0100, 0x0104, 0x0105] do
+      let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
+      let state := { InputScanState.empty with inputEntries := [e] }
+      match validateBasicWitnesses ByteArray.empty { (default : Tx) with witness := [default] } state false with
+      | .ok () => pure ()
+      | _ => return false
+      match validateBasicWitnesses ByteArray.empty default state false with
+      | .error "TX_ERR_PARSE" => pure ()
+      | _ => return false
+    return true) = true := by native_decide
 
 def validateBasicTxEnvelope (tx : Tx) : Except String Unit := do
   if tx.txNonce == 0 then
