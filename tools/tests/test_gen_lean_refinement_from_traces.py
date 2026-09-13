@@ -61,7 +61,7 @@ class GoTraceV1GeneratorTests(unittest.TestCase):
 
         self.assertIn("duplicate vector id CV-SE-001", str(ctx.exception))
 
-    def test_core_ext_utxo_negative_trace_rows_are_emitted(self) -> None:
+    def test_unknown_covenant_utxo_negative_trace_rows_are_emitted(self) -> None:
         text = _emit_go_trace_v1(
             Header(
                 repo_commit="test",
@@ -71,7 +71,7 @@ class GoTraceV1GeneratorTests(unittest.TestCase):
                 {
                     "type": "entry",
                     "gate": "CV-UTXO-BASIC",
-                    "vector_id": "CV-U-EXT-NEG",
+                    "vector_id": "CV-U-UNKCOV-NEG",
                     "op": "utxo_apply_basic",
                     "ok": False,
                     "err": "TX_ERR_COVENANT_TYPE_INVALID",
@@ -98,7 +98,7 @@ class GoTraceV1GeneratorTests(unittest.TestCase):
             ],
         )
 
-        self.assertIn('{ id := "CV-U-EXT-NEG", ok := false', text)
+        self.assertIn('{ id := "CV-U-UNKCOV-NEG", ok := false', text)
         self.assertNotIn("CV-U-NEG", text)
         self.assertNotIn("CV-PARSE-NEG", text)
 

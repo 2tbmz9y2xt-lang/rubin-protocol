@@ -330,10 +330,10 @@
         "CV-U-11",
         "CV-U-13",
         "CV-U-19",
-        "CV-U-EXT-01",
-        "CV-U-EXT-02",
-        "CV-U-EXT-03",
-        "CV-U-EXT-06",
+        "CV-U-UNKCOV-01",
+        "CV-U-UNKCOV-02",
+        "CV-U-UNKCOV-03",
+        "CV-U-UNKCOV-06",
         "CV-U-FEE-U128-01"
       ],
       "supporting_theorems": [

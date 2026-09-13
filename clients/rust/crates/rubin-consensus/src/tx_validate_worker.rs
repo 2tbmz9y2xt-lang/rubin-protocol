@@ -145,9 +145,8 @@ pub fn validate_tx_local(
     block_mtp: u64,
     sig_cache: Option<&SigCache>,
 ) -> TxValidationResult {
-    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED and rejected by `witness_slots`
-    // (TxErrCovenantTypeInvalid) before any spend dispatch, so no CORE_EXT
-    // profile gating runs here.
+    // 0x0102 is UNASSIGNED and rejected by `witness_slots`
+    // (TxErrCovenantTypeInvalid) before any spend dispatch.
     let tx = &pb.txs[ptc.tx_block_idx];
 
     // Fail-closed upfront guard (mirror Go ValidateTxLocal): a 0x0106 spend is

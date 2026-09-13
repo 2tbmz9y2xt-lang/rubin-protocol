@@ -214,7 +214,7 @@ def _emit_go_trace_v1(
         op = str(e.get("op", ""))
         ok = bool(e.get("ok", False))
         keep_negative = gate == "CV-SIMPLICITY-EXEC" or (
-            gate == "CV-UTXO-BASIC" and vector_id.startswith("CV-U-EXT-")
+            gate == "CV-UTXO-BASIC" and vector_id.startswith("CV-U-UNKCOV-")
         )
         if not ok and not keep_negative:
             continue  # skip negatives except rows required by active refinement coverage

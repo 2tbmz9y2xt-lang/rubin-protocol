@@ -451,11 +451,10 @@ fn validate_tx_local_unknown_covenant_witness_slots_error() {
     assert_eq!(r.err.unwrap().code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
-/// A CORE_EXT (0x0102) input with malformed covenant data is rejected during
-/// worker spend dispatch (`witness_slots` -> TxErrCovenantTypeInvalid), since
-/// 0x0102 is UNASSIGNED. No CORE_EXT profile machinery is involved.
+/// A 0x0102 input with opaque covenant data is rejected by `witness_slots`
+/// before spend dispatch because 0x0102 is UNASSIGNED.
 #[test]
-fn validate_tx_local_ext_context_build_error() {
+fn validate_tx_local_unknown_covenant_opaque_data_rejected() {
     let mut tx = simple_p2pk_tx(0x42);
     tx.witness = vec![dummy_witness()];
 
@@ -470,8 +469,8 @@ fn validate_tx_local_ext_context_build_error() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_CORE_EXT,
-            covenant_data: vec![0u8; 4], // malformed: too short for ext_id parse
+            covenant_type: 0x0102,
+            covenant_data: vec![0u8; 4],
             creation_height: 1,
             created_by_coinbase: false,
         }],
@@ -485,7 +484,7 @@ fn validate_tx_local_ext_context_build_error() {
     };
     let r = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, None);
     assert!(!r.valid);
-    assert!(r.err.is_some());
+    assert_eq!(r.err.unwrap().code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 /// Covers the full successful validation path with a real ML-DSA-87 signature:
@@ -632,10 +631,10 @@ fn validate_tx_local_stealth_valid() {
 }
 
 #[test]
-fn validate_tx_local_core_ext_0x0102_rejects_unassigned() {
-    // COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED: the worker rejects a resolved
+fn validate_tx_local_unknown_covenant_0x0102_rejects_unassigned() {
+    // 0x0102 is UNASSIGNED: the worker rejects a resolved
     // input of this covenant type via witness_slots with TxErrCovenantTypeInvalid,
-    // before any (removed) CORE_EXT spend runtime could run.
+    // before spend dispatch.
     let prev_txid = [0x77u8; 32];
     let tx = simple_p2pk_tx(0x77);
     let pb = make_parsed_block(simple_coinbase(), vec![tx]);
@@ -645,8 +644,8 @@ fn validate_tx_local_core_ext_0x0102_rejects_unassigned() {
         txid: [0u8; 32],
         resolved_inputs: vec![UtxoEntry {
             value: 100,
-            covenant_type: COV_TYPE_CORE_EXT,
-            // ext_id:u16le(1) || ext_payload_len:CompactSize(0)
+            covenant_type: 0x0102,
+            // Opaque covenant data.
             covenant_data: vec![0x01, 0x00, 0x00],
             creation_height: 1,
             created_by_coinbase: false,

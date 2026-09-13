@@ -61,10 +61,6 @@ const (
 	COV_TYPE_RESERVED_FUTURE = 0x00FF
 	COV_TYPE_HTLC            = 0x0100
 	COV_TYPE_VAULT           = 0x0101
-	// COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: consensus rejects it as
-	// TX_ERR_COVENANT_TYPE_INVALID at creation and spend (RUB-585). Retained only so the node
-	// pre-activation mempool policy can name it; it carries NO consensus covenant semantics.
-	COV_TYPE_CORE_EXT        = 0x0102
 	COV_TYPE_DA_COMMIT       = 0x0103
 	COV_TYPE_MULTISIG        = 0x0104
 	COV_TYPE_CORE_STEALTH    = 0x0105

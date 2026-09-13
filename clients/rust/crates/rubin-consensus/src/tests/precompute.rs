@@ -231,12 +231,12 @@ fn precompute_single_p2pk() {
 
 // Pins the precompute path to the sequential path for output covenant genesis:
 // a transaction that spends an otherwise-valid P2PK input but creates an
-// unassigned 0x0102 (CORE_EXT) output must be rejected during precompute, not
+// unassigned 0x0102 output must be rejected during precompute, not
 // reported valid. Workers only validate inputs, so without the genesis check in
 // precompute this tx would precompute successfully while sequential apply
 // rejects it.
 #[test]
-fn precompute_core_ext_0x0102_output_rejected() {
+fn precompute_unknown_covenant_0x0102_output_rejected() {
     let cov_data = valid_p2pk_covenant_data();
     let prev_txid = sha3_256(b"core-ext-output-precompute");
     let op = Outpoint {
@@ -264,10 +264,10 @@ fn precompute_core_ext_0x0102_output_rejected() {
             script_sig: Vec::new(),
             sequence: 0,
         }],
-        // Unassigned 0x0102 CORE_EXT output: invalid at creation time.
+        // Unassigned 0x0102 output: invalid at creation time.
         outputs: vec![TxOutput {
             value: 900,
-            covenant_type: COV_TYPE_CORE_EXT,
+            covenant_type: 0x0102,
             covenant_data: vec![0x07, 0x00, 0x00],
         }],
         locktime: 0,

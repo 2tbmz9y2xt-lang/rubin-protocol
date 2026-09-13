@@ -2727,7 +2727,7 @@ func TestMempoolPolicyRejectsNilCheckedTransaction(t *testing.T) {
 	if err := mp.applyPolicyAgainstState(&consensus.CheckedTransaction{}, 0, nil, MempoolConfig{}); err == nil || !strings.Contains(err.Error(), "nil checked transaction") {
 		t.Fatalf("expected nil checked tx rejection, got %v", err)
 	}
-	if kind := covenantPolicyKind(nil, nil, consensus.COV_TYPE_CORE_EXT); kind != "" {
+	if kind := covenantPolicyKind(nil, nil, 0x0102); kind != "" {
 		t.Fatalf("nil tx policy kind=%q", kind)
 	}
 	tx := &consensus.Tx{Inputs: []consensus.TxInput{{}}}
@@ -6685,7 +6685,7 @@ func TestMempoolDAKindGuardPreservesEarlierErrors(t *testing.T) {
 			h := newRelayHarness(t, nil, 1_000_000)
 			return h.mp, mustBuildSignedDaCommitTx(t, h.st.Utxos, h.outpoints[0], 100_000, 900_000, 0, h.fromKey, h.toAddr, []byte("0123456789"))
 		}, TxAdmitRejected, RelayAdmissionStableTerminalReject, "TX_ERR_TX_NONCE_INVALID: tx_nonce must be >= 1 for non-coinbase", true, MempoolAdmissionCounts{Rejected: 1}},
-		{"R3_retired_core_ext_covenant", func(t *testing.T) (*Mempool, []byte) {
+		{"R3_unassigned_unknown_covenant", func(t *testing.T) (*Mempool, []byte) {
 			h := newRelayHarness(t, nil, 1_000_000)
 			tx := &consensus.Tx{
 				Version: 1, TxKind: 0x01, TxNonce: 7,

@@ -1246,7 +1246,7 @@ func TestRelayAdmissionDispositionSimplicityPolicyFanOut(t *testing.T) {
 func TestRelayAdmissionDispositionUnassignedCovenantReject(t *testing.T) {
 	h := newRelayHarness(t, nil, 1_000_000)
 	raw := txWithOneInputOneOutput(h.outpoints[0].Txid, h.outpoints[0].Vout, 1,
-		consensus.COV_TYPE_CORE_EXT, nil, nil)
+		0x0102, nil, nil)
 
 	got := h.mp.AddRemoteTxForRelay(raw, h.context())
 	if got.Disposition != RelayAdmissionStableTerminalReject {
@@ -1275,7 +1275,7 @@ func TestRelayAdmissionDispositionUnassignedCovenantReject(t *testing.T) {
 func TestRelayAdmissionDispositionUnassignedCovenantSpendReject(t *testing.T) {
 	h := newRelayHarness(t, nil, 1_000_000)
 	entry := h.st.Utxos[h.outpoints[0]]
-	entry.CovenantType = consensus.COV_TYPE_CORE_EXT
+	entry.CovenantType = 0x0102
 	h.st.Utxos[h.outpoints[0]] = entry
 	raw := txWithOneInputOneOutput(h.outpoints[0].Txid, h.outpoints[0].Vout, 1,
 		consensus.COV_TYPE_P2PK, h.toAddr, nil)
@@ -1725,7 +1725,7 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 			build: func(_ *testing.T, f *daNonReplayFixture) []byte {
 				return f.signed(daNonReplayTxSpec{
 					kind: 0x02, daID: [32]byte{0xe4}, payload: []byte("core-ext"),
-					extraOutputs: []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_EXT}},
+					extraOutputs: []consensus.TxOutput{{Value: 1, CovenantType: 0x0102}},
 				}).raw
 			},
 			kind: TxAdmitRejected, message: "TX_ERR_COVENANT_TYPE_INVALID: unknown covenant_type", disposition: RelayAdmissionStableTerminalReject,

@@ -2569,8 +2569,8 @@ mod tests {
 
     use rubin_consensus::block::BLOCK_HEADER_BYTES;
     use rubin_consensus::constants::{
-        COV_TYPE_ANCHOR, COV_TYPE_CORE_EXT, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS,
-        SUITE_ID_SENTINEL, TX_WIRE_VERSION,
+        COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_P2PK, MAX_TX_INPUTS, SUITE_ID_SENTINEL,
+        TX_WIRE_VERSION,
     };
     use rubin_consensus::{
         marshal_tx, p2pk_covenant_data_for_pubkey, parse_tx, sign_transaction,
@@ -2710,7 +2710,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        let (_state_b, raw_b) = core_ext_spend_state_and_tx(7);
+        let (_state_b, raw_b) = unknown_covenant_spend_state_and_tx(vec![7, 0, 0]);
         let (txid_a, item_a) = txpool_snapshot_entry_from_raw(raw_a, 19_992, TxSource::Remote, 1);
         let (txid_b, item_b) = txpool_snapshot_entry_from_raw(raw_b, 1, TxSource::Reorg, 2);
         let max_bytes = item_a.entry.size + item_b.entry.size + 100;
@@ -2792,18 +2792,6 @@ mod tests {
         state
     }
 
-    fn empty_core_ext_covenant_data(ext_id: u16) -> Vec<u8> {
-        core_ext_covenant_data_with_payload(ext_id, &[])
-    }
-
-    fn core_ext_covenant_data_with_payload(ext_id: u16, payload: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&ext_id.to_le_bytes());
-        rubin_consensus::encode_compact_size(payload.len() as u64, &mut out);
-        out.extend_from_slice(payload);
-        out
-    }
-
     fn signed_p2pk_state_and_tx(
         input_value: u64,
         outputs: Vec<TxOutput>,
@@ -2854,7 +2842,7 @@ mod tests {
         (state, raw)
     }
 
-    fn core_ext_spend_state_and_tx(ext_id: u16) -> (ChainState, Vec<u8>) {
+    fn unknown_covenant_spend_state_and_tx(covenant_data: Vec<u8>) -> (ChainState, Vec<u8>) {
         let input = Outpoint {
             txid: [0x33; 32],
             vout: 0,
@@ -2864,8 +2852,8 @@ mod tests {
             input.clone(),
             UtxoEntry {
                 value: 10,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: empty_core_ext_covenant_data(ext_id),
+                covenant_type: 0x0102,
+                covenant_data,
                 creation_height: 0,
                 created_by_coinbase: false,
             },
@@ -2895,7 +2883,7 @@ mod tests {
             }],
             da_payload: Vec::new(),
         };
-        let raw = marshal_tx(&tx).expect("marshal core_ext spend");
+        let raw = marshal_tx(&tx).expect("marshal unknown covenant spend");
         (state, raw)
     }
 
@@ -3268,13 +3256,13 @@ mod tests {
     }
 
     #[test]
-    fn relay_metadata_rejects_core_ext_outputs_as_unsupported_runtime() {
+    fn relay_metadata_rejects_unknown_covenant_outputs() {
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: empty_core_ext_covenant_data(7),
+                covenant_type: 0x0102,
+                covenant_data: vec![7, 0, 0],
             }],
             0x00,
             None,
@@ -4784,15 +4772,15 @@ mod tests {
     }
 
     #[test]
-    fn admit_rejects_core_ext_output_as_unsupported_runtime_before_floor() {
-        // The candidate is floor-compliant; the test pins CORE_EXT
-        // unsupported-runtime classification independent of fee floor.
+    fn admit_rejects_unknown_covenant_output_before_floor() {
+        // The candidate is floor-compliant; the test pins unknown-covenant
+        // rejection independent of fee floor.
         let (state, raw) = signed_p2pk_state_and_tx(
             7700,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: empty_core_ext_covenant_data(7),
+                covenant_type: 0x0102,
+                covenant_data: vec![7, 0, 0],
             }],
             0x00,
             None,
@@ -4806,10 +4794,10 @@ mod tests {
     }
 
     #[test]
-    fn admit_rejects_core_ext_spend_as_unsupported_runtime_before_floor() {
+    fn admit_rejects_unknown_covenant_spend_before_floor() {
         // Spend-side twin of the output test. The candidate is made
-        // floor-compliant so the unsupported-runtime policy is the winner.
-        let (mut state, raw) = core_ext_spend_state_and_tx(9);
+        // floor-compliant so unknown-covenant rejection is the winner.
+        let (mut state, raw) = unknown_covenant_spend_state_and_tx(vec![9, 0, 0]);
         for entry in state.utxos.values_mut() {
             entry.value = 7700;
         }
@@ -6151,24 +6139,24 @@ mod tests {
     }
 
     /// RUB-162 cross-pollination ordering PIN — sub-floor tx with a
-    /// CORE_EXT output while the node runtime does not support CORE_EXT.
+    /// Unknown 0x0102 output.
     /// Same ordering invariant as the DA-anchor cross-pollination test above.
     ///
-    /// Proof assertion: build a sub-floor P2PK->CORE_EXT tx;
+    /// Proof assertion: build a sub-floor P2PK-to-0x0102 tx;
     /// `assert_eq!(err.kind, Rejected)` plus
     /// `err.message.contains("TX_ERR_COVENANT_TYPE_INVALID")` below pin
     /// the class winner against the alternative
     /// `Unavailable("mempool fee below rolling minimum")` outcome.
     #[test]
-    fn rub162_admit_sub_floor_core_ext_classifies_as_core_ext_rejected_not_floor_unavailable() {
+    fn rub162_admit_sub_floor_unknown_covenant_rejects_before_floor() {
         // input=10 / output=9 → fee=1 with weight≈7533 ⇒ sub-floor.
-        // CORE_EXT output with ext_id=7 => unsupported-runtime guard rejects.
+        // Unknown 0x0102 output rejects before the fee-floor check.
         let (state, raw) = signed_p2pk_state_and_tx(
             10,
             vec![TxOutput {
                 value: 9,
-                covenant_type: COV_TYPE_CORE_EXT,
-                covenant_data: empty_core_ext_covenant_data(7),
+                covenant_type: 0x0102,
+                covenant_data: vec![7, 0, 0],
             }],
             0x00,
             None,
@@ -6177,11 +6165,11 @@ mod tests {
         let mut pool = TxPool::new();
         let err = pool
             .admit(&raw, &state, None, [0u8; 32])
-            .expect_err("admit must reject when both sub-floor and unsupported CORE_EXT");
+            .expect_err("admit must reject the unknown covenant before the fee floor");
         assert_eq!(
             err.kind,
             TxPoolAdmitErrorKind::Rejected,
-            "CORE_EXT unsupported class must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
+            "unknown-covenant rejection must win when apply_policy runs before validate_fee_floor; got kind={:?} message={}",
             err.kind,
             err.message
         );

@@ -63,8 +63,8 @@
         ],
         "CV-UTXO-BASIC": [
           "CV-U-05",
-          "CV-U-EXT-02",
-          "CV-U-EXT-03"
+          "CV-U-UNKCOV-02",
+          "CV-U-UNKCOV-03"
         ],
         "CV-VAULT-POLICY": [
           "CV-V-01",

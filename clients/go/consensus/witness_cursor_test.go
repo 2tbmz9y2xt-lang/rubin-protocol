@@ -1,7 +1,6 @@
 package consensus
 
 import (
-	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -36,11 +35,8 @@ func wcVaultEntry(value uint64, threshold, keyCount uint8) UtxoEntry {
 	return UtxoEntry{Value: value, CovenantType: COV_TYPE_VAULT, CovenantData: data}
 }
 
-func wcCoreExtEntry(value uint64, extID uint16) UtxoEntry {
-	b := make([]byte, 3)
-	binary.LittleEndian.PutUint16(b[0:2], extID)
-	b[2] = 0x00
-	return UtxoEntry{Value: value, CovenantType: COV_TYPE_CORE_EXT, CovenantData: b}
+func wcUnknownCovenantEntry(value uint64) UtxoEntry {
+	return UtxoEntry{Value: value, CovenantType: 0x0102, CovenantData: []byte{0x01, 0x00, 0x00}}
 }
 
 func wcCoreStealthEntry(value uint64) UtxoEntry {
@@ -156,13 +152,13 @@ func TestComputeWitnessAssignments_SingleVault(t *testing.T) {
 	}
 }
 
-func TestComputeWitnessAssignments_CoreExtRejected(t *testing.T) {
-	// CORE_EXT (0x0102) is unassigned per CANONICAL §14 — witness assignment rejects it (RUB-585).
+func TestComputeWitnessAssignments_UnknownCovenant0x0102Rejected(t *testing.T) {
+	// 0x0102 is unassigned per CANONICAL §14, so witness assignment rejects it.
 	tx := makeCursorTx(oneInput(), 1)
-	entries := []UtxoEntry{wcCoreExtEntry(100, 0x0001)}
+	entries := []UtxoEntry{wcUnknownCovenantEntry(100)}
 
 	if _, _, err := ComputeWitnessAssignments(tx, entries); err == nil {
-		t.Fatalf("expected CORE_EXT witness assignment to be rejected")
+		t.Fatalf("expected unassigned 0x0102 witness assignment to be rejected")
 	} else if got := mustTxErrCode(t, err); got != TX_ERR_COVENANT_TYPE_INVALID {
 		t.Fatalf("code=%s, want %s", got, TX_ERR_COVENANT_TYPE_INVALID)
 	}

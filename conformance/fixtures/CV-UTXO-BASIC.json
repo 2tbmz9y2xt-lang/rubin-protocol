@@ -347,7 +347,7 @@
       "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
       "height": 500000,
-      "id": "CV-U-EXT-01",
+      "id": "CV-U-UNKCOV-01",
       "op": "utxo_apply_basic",
       "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
@@ -367,7 +367,7 @@
       "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
       "height": 500000,
-      "id": "CV-U-EXT-02",
+      "id": "CV-U-UNKCOV-02",
       "op": "utxo_apply_basic",
       "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
@@ -429,7 +429,7 @@
       "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
       "height": 500000,
-      "id": "CV-U-EXT-03",
+      "id": "CV-U-UNKCOV-03",
       "op": "utxo_apply_basic",
       "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [
@@ -449,7 +449,7 @@
       "expect_err": "TX_ERR_COVENANT_TYPE_INVALID",
       "expect_ok": false,
       "height": 500000,
-      "id": "CV-U-EXT-06",
+      "id": "CV-U-UNKCOV-06",
       "op": "utxo_apply_basic",
       "tx_hex": "0100000000010000000000000001eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee000000000000000000015a00000000000000000021011111111111111111111111111111111111111111111111111111111111111111000000000100000000",
       "utxos": [

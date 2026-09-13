@@ -5,12 +5,13 @@ use libfuzzer_sys::fuzz_target;
 // Fuzz `validate_tx_local`: the per-transaction worker dispatcher.
 //
 // Parses arbitrary bytes into a Tx, builds a synthetic `PrecomputedTxContext`
-// and minimal `ParsedBlock`, then calls `validate_tx_local` which dispatches
-// to per-covenant-type spend validators (P2PK, HTLC, VAULT, MULTISIG,
-// CORE_EXT, STEALTH).
+// and minimal `ParsedBlock`, then calls `validate_tx_local`. Known covenant
+// types reach their spend validators; the arbitrary unknown 0x0102 value is
+// rejected before spend dispatch.
 //
-// Goal: exercise the dispatch switch across all covenant types, witness slot
-// accounting, sighash cache, sig queue flush, and error paths — without panic.
+// Goal: exercise known-covenant spend dispatch and the pre-dispatch unknown
+// rejection, witness allocation, sighash cache, sig queue flush, and error
+// paths — without panic.
 //
 // Invariants checked:
 // - Determinism: two calls with same input produce identical result.
@@ -41,22 +42,21 @@ fuzz_target!(|data: &[u8]| {
     let block_height = u64::from_le_bytes(params[32..40].try_into().unwrap());
     let block_mtp = u64::from_le_bytes(params[40..48].try_into().unwrap());
 
-    // Select covenant type from fuzz data to exercise all dispatch branches,
-    // not just P2PK. This ensures HTLC/VAULT/MULTISIG/EXT/STEALTH paths
-    // are reachable.
+    // Select known covenant types plus arbitrary unknown 0x0102. Known values
+    // exercise spend dispatch; 0x0102 exercises rejection before dispatch.
     let cov_selector = params[48] % 6;
     let covenant_type: u16 = match cov_selector {
         0 => 0x0000, // COV_TYPE_P2PK
         1 => 0x0100, // COV_TYPE_HTLC
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
-        4 => 0x0102, // COV_TYPE_CORE_EXT
+        4 => 0x0102,
         5 => 0x0105, // COV_TYPE_CORE_STEALTH
         _ => unreachable!(),
     };
 
-    // Build covenant_data matching the selected covenant type.
-    // Each type requires specific layout for witness_slots() to succeed.
+    // Build synthetic covenant_data for the selected type. Known types use
+    // their layouts; the unassigned 0x0102 value deliberately uses opaque data.
     let build_covenant_data = |suite_id: u8, pk: &[u8]| -> Vec<u8> {
         match covenant_type {
             0x0000 => {
@@ -67,16 +67,6 @@ fuzz_target!(|data: &[u8]| {
                     key_id[j] = *b;
                 }
                 cd.extend_from_slice(&key_id);
-                cd
-            }
-            0x0102 => {
-                // EXT: ext_id(2, LE u16) + compact_size(varint) + ext_payload(N)
-                // Matches parse_core_ext_covenant_data layout.
-                // Use ext_id=0x0001, payload=1 byte → total = 2 + 1 + 1 = 4 bytes.
-                let mut cd = Vec::with_capacity(4);
-                cd.extend_from_slice(&1u16.to_le_bytes()); // ext_id
-                cd.push(1u8); // compact_size varint: payload_len=1
-                cd.push(suite_id); // ext_payload (1 byte)
                 cd
             }
             0x0105 => {
@@ -152,10 +142,10 @@ fuzz_target!(|data: &[u8]| {
         }
     };
 
-    // Compute witness slots per input for this covenant type.
-    // Mirrors consensus witness_slots() logic.
+    // Allocate synthetic witness slots for each input. The unassigned 0x0102
+    // case is still expected to reject before spend dispatch.
     let slots_per_input: usize = match covenant_type {
-        0x0000 | 0x0102 | 0x0105 => 1, // P2PK / EXT / STEALTH
+        0x0000 | 0x0102 | 0x0105 => 1, // P2PK / unknown / STEALTH
         0x0100 => 2,                     // HTLC
         0x0104 => 1,                     // MULTISIG (threshold=1)
         0x0101 => 1,                     // VAULT (threshold=1)

@@ -356,10 +356,10 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("core_ext_0x0102_unassigned_rejected", func(t *testing.T) {
-		// 0x0102 (CORE_EXT) is unassigned per CANONICAL §14 — the parallel work-queue apply
-		// path must reject it as TX_ERR_COVENANT_TYPE_INVALID (RUB-585), even with well-formed
-		// covenant_data (ext_id=7 || compactSize(0) = 070000) that the retired parser accepted.
+	t.Run("unknown_covenant_0x0102_unassigned_rejected", func(t *testing.T) {
+		// 0x0102 is unassigned per CANONICAL §14 — the parallel work-queue apply
+		// path must reject it as TX_ERR_COVENANT_TYPE_INVALID (RUB-585), even with
+		// opaque covenant_data 070000.
 		prevTxid := hashWithPrefix(0x67)
 		tx := &Tx{
 			Version: 1,
@@ -370,12 +370,12 @@ func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
 			Witness: []WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87}},
 		}
 		utxos := map[Outpoint]UtxoEntry{
-			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: COV_TYPE_CORE_EXT, CovenantData: []byte{0x07, 0x00, 0x00}},
+			{Txid: prevTxid, Vout: 0}: {Value: 100, CovenantType: 0x0102, CovenantData: []byte{0x07, 0x00, 0x00}},
 		}
 		q := NewSigCheckQueue(1)
 		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 1, 0, [32]byte{}, q, nil, nil)
 		if err == nil {
-			t.Fatal("expected CORE_EXT 0x0102 to be rejected")
+			t.Fatal("expected unknown covenant 0x0102 to be rejected")
 		}
 		if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
 			t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)

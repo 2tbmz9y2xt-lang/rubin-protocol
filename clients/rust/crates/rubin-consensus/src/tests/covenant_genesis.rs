@@ -357,18 +357,15 @@ fn validate_tx_covenants_genesis_htlc_creation_first_error_order() {
     }
 }
 
-// COV_TYPE_CORE_EXT (0x0102) is UNASSIGNED per CANONICAL §14: a well-formed
-// 0x0102 creation output MUST reject as TxErrCovenantTypeInvalid (RUB-514).
+// 0x0102 is UNASSIGNED per CANONICAL §14: creation with opaque data MUST
+// reject as TxErrCovenantTypeInvalid (RUB-514).
 #[test]
-fn validate_tx_covenants_genesis_ext_unassigned_rejected() {
+fn validate_tx_covenants_genesis_unknown_covenant_unassigned_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    let mut cov = Vec::new();
-    cov.extend_from_slice(&7u16.to_le_bytes());
-    crate::compactsize::encode_compact_size(2, &mut cov);
-    cov.extend_from_slice(&[0xaa, 0xbb]);
+    let cov = vec![0x07, 0x00, 0x02, 0xaa, 0xbb];
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
-        covenant_type: COV_TYPE_CORE_EXT,
+        covenant_type: 0x0102,
         covenant_data: cov,
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
@@ -376,14 +373,12 @@ fn validate_tx_covenants_genesis_ext_unassigned_rejected() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_ext_zero_value_rejected() {
+fn validate_tx_covenants_genesis_unknown_covenant_zero_value_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    let mut cov = Vec::new();
-    cov.extend_from_slice(&7u16.to_le_bytes());
-    crate::compactsize::encode_compact_size(0, &mut cov);
+    let cov = vec![0x07, 0x00, 0x00];
     tx.outputs = vec![crate::tx::TxOutput {
         value: 0,
-        covenant_type: COV_TYPE_CORE_EXT,
+        covenant_type: 0x0102,
         covenant_data: cov,
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
