@@ -26,9 +26,6 @@ GO_CONSENSUS_DIRS = [
 # Allowlist: files where map iteration is known-safe (e.g. test helpers,
 # non-consensus paths, or iteration followed by immediate sort).
 GO_ALLOWLIST = {
-    # txcontext.go collects into map then sorts — the range is safe
-    # because the sorted slice is what gets used downstream.
-    "txcontext.go:collectTxContextExtIDs",
     # collect keys → sort.Slice before use
     "block_basic.go:sortedDAIDs",
     # clone map→map, order-neutral
@@ -41,9 +38,6 @@ GO_ALLOWLIST = {
     "utxo_basic.go:cloneUtxoSet",
     # shallow-copy map→map, order-neutral
     "utxo_snapshot.go:NewUtxoSnapshot",
-    # range outputExtIDCache[extID] — value type is []ExtIDCacheEntry (slice),
-    # not a map. Outer loop is over sorted extIDs slice.
-    "txcontext.go:BuildTxContext",
 }
 
 # Pattern: `for <var> := range <identifier>` where identifier is NOT a slice/array
@@ -77,9 +71,6 @@ RUST_CONSENSUS_DIRS = [
 
 # Allowlist for Rust
 RUST_ALLOWLIST = {
-    # TxContextBundle.continuing is HashMap but only accessed via .get() —
-    # sorted_ext_ids() provides the deterministic view.
-    "txcontext.rs:sorted_ext_ids",
     # collect keys → sort_unstable before use
     "block_basic.rs:sorted_da_ids",
 }

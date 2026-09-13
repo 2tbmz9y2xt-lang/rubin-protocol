@@ -30,7 +30,7 @@ pub mod tx;
 pub mod tx_dep_graph;
 mod tx_helpers;
 pub mod tx_validate_worker;
-pub mod txcontext;
+pub mod uint128;
 pub mod uint128_json;
 mod utxo_basic;
 pub mod utxo_snapshot;
@@ -103,7 +103,7 @@ pub use tx_helpers::{marshal_tx, p2pk_covenant_data_for_pubkey, sign_transaction
 pub use tx_validate_worker::{
     first_tx_error, run_tx_validation_workers, validate_tx_local, TxValidationResult,
 };
-pub use txcontext::Uint128;
+pub use uint128::Uint128;
 pub use utxo_basic::{
     apply_non_coinbase_tx_basic, apply_non_coinbase_tx_basic_update,
     apply_non_coinbase_tx_basic_update_with_mtp,

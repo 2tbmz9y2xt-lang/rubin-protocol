@@ -1,4 +1,4 @@
-use crate::txcontext::Uint128;
+use crate::uint128::Uint128;
 
 #[test]
 fn uint128_roundtrips_native() {

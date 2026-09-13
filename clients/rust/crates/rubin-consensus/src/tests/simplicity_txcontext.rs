@@ -6,7 +6,7 @@ use crate::constants::{
 };
 use crate::error::ErrorCode;
 use crate::tx::{DaChunkCore, DaCommitCore, Tx, TxInput, TxOutput};
-use crate::txcontext::Uint128;
+use crate::uint128::Uint128;
 use crate::utxo_basic::UtxoEntry;
 
 fn covenant(program_cmr: [u8; 32], state: &[u8]) -> Vec<u8> {
