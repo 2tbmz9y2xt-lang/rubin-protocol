@@ -71,8 +71,6 @@ RUST_CONSENSUS_DIRS = [
 
 # Allowlist for Rust
 RUST_ALLOWLIST = {
-    # collect keys → sort_unstable before use
-    "block_basic.rs:sorted_da_ids",
 }
 
 RUST_HASHMAP_ITER_RE = re.compile(
