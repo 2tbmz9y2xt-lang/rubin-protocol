@@ -252,7 +252,7 @@
       "limitations": [
         "Scope is the singleton pre-rotation native registry fragment only. The counted manifest theorems are universal over any singleton registry extensionally equal to `[ML_DSA_87_ENTRY]`, not over arbitrary post-rotation registries, arbitrary additional native suites, or the full Section 4 `NativeSuiteEntry` production profile lifecycle.",
         "This row closes the native tuple / bytes / hash fragment and the pre-signature live binding slice for the default ML-DSA-87 entry, but it does not by itself claim full native verifier cryptographic correctness beyond the authoritative `binding_profile` token and the supporting live/bridge theorems already counted here.",
-        "This row also does not claim the `CORE_EXT` profile-set half of the chain-instance canonical binding manifest, manifest publication/governance ownership, or release-time runtime-table drift checks. Those remain outside the current formal Section 4 theorem surface."
+        "This row also does not claim manifest publication/governance ownership or release-time runtime-table drift checks. Those remain outside the current formal Section 4 theorem surface."
       ],
       "evidence_level": "machine_checked_universal"
     },
