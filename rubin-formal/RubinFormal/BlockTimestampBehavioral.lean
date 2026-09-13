@@ -197,7 +197,7 @@ theorem validateBlockBasicCheck_timestamp_stage
   | none =>
       cases expectedPrevHash with
       | none =>
-          simp [validateBlockBasicCheck, enforceSigSuiteActivation, Bind.bind, Except.bind,
+          simp [validateBlockBasicCheck, Bind.bind, Except.bind,
             Pure.pure, Except.pure, hParse, hPow, hMerkle, hWmr, hCommit, hCommitFalse,
             bytes_bne_self_false]
           cases hMtp : medianTimePast prevTimestamps with
@@ -214,7 +214,7 @@ theorem validateBlockBasicCheck_timestamp_stage
           have hPrevFalse : (pb.header.prevHash != prev) = false := by
             subst hPrev
             exact bytes_bne_self_false _
-          simp [validateBlockBasicCheck, enforceSigSuiteActivation, Bind.bind, Except.bind,
+          simp [validateBlockBasicCheck, Bind.bind, Except.bind,
             Pure.pure, Except.pure, hParse, hPow, hPrevFalse, hMerkle, hWmr, hCommit,
             hCommitFalse, bytes_bne_self_false]
           cases hMtp : medianTimePast prevTimestamps with
@@ -233,7 +233,7 @@ theorem validateBlockBasicCheck_timestamp_stage
         exact bytes_bne_self_false _
       cases expectedPrevHash with
       | none =>
-          simp [validateBlockBasicCheck, enforceSigSuiteActivation, Bind.bind, Except.bind,
+          simp [validateBlockBasicCheck, Bind.bind, Except.bind,
             Pure.pure, Except.pure, hParse, hPow, hTargetFalse, hMerkle, hWmr, hCommit,
             hCommitFalse, bytes_bne_self_false]
           cases hMtp : medianTimePast prevTimestamps with
@@ -250,7 +250,7 @@ theorem validateBlockBasicCheck_timestamp_stage
           have hPrevFalse : (pb.header.prevHash != prev) = false := by
             subst hPrev
             exact bytes_bne_self_false _
-          simp [validateBlockBasicCheck, enforceSigSuiteActivation, Bind.bind, Except.bind,
+          simp [validateBlockBasicCheck, Bind.bind, Except.bind,
             Pure.pure, Except.pure, hParse, hPow, hTargetFalse, hPrevFalse, hMerkle, hWmr,
             hCommit, hCommitFalse, bytes_bne_self_false]
           cases hMtp : medianTimePast prevTimestamps with

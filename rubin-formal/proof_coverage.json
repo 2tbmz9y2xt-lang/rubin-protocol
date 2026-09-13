@@ -13,9 +13,10 @@
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 70,
-    "reconcile_current_protocol_path_count": 22,
+    "byte_exact_path_count": 67,
+    "reconcile_current_protocol_path_count": 25,
     "reconcile_current_protocol_paths": [
+      "RubinFormal/BlockTimestampBehavioral.lean",
       "RubinFormal/BlockValidationOrder.lean",
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean",
       "RubinFormal/ConnectBlockFull.lean",
@@ -35,6 +36,8 @@
       "RubinFormal/SpendGateLiveBridge.lean",
       "RubinFormal/StructuralRulesBehavioral.lean",
       "RubinFormal/ThresholdSpendSuiteGateBridge.lean",
+      "RubinFormal/TxContextBehavioral.lean",
+      "RubinFormal/TxContextFormal.lean",
       "RubinFormal/TxWireTxAfterDaCoreStep.lean",
       "RubinFormal/TxWireTxFinalizeContract.lean",
       "RubinFormal/VaultStateMachine.lean"
@@ -62,12 +65,12 @@
       "tests/test_strip_lean_comments.py",
       "tests/test_validation.py"
     ],
-    "active_partition_equation": "70 + 22 + 1 + 2 + 7 = 102",
+    "active_partition_equation": "67 + 25 + 1 + 2 + 7 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
     "active_path_manifest": {
       "REGISTRY_COMPLETENESS_POLICY.md": {"disposition":"IMPORT_ADAPT_SINGLE_OWNER","source_sha256":"9af957d4fefad13471a00ca18f1ee1c146c8b34e551cf3f9b179c517e5be8c3c","candidate_sha256":"b8808d222b5ebbc120993b5c4082551c35b24d0b6c4afee44060d6c2b74c8846"},
       "RubinFormal/BlockHeaderRoundtrip.lean": {"disposition":"BYTE_EXACT","source_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec","candidate_sha256":"3239aac537d9d53f4d8af01716b8a959fa4fe3b057b8e9d6b9d75d85b6f860ec"},
-      "RubinFormal/BlockTimestampBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5","candidate_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5"},
+      "RubinFormal/BlockTimestampBehavioral.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"c21d4899dc9fe505b48e8037c04eb66599b558bb1f184b1676d84da12c0e35d5","candidate_sha256":"4da375b2a38be21668a6da7b24611b4d07f7e1cb26036826f6043ada60fa036f"},
       "RubinFormal/BlockValidationOrder.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"a63d141bd53dac280a0012a3a1e742ecf059c9d2736774ae97e8dc3d3957549f","candidate_sha256":"0716940a9a99bfb5f7dfcf0c20cb1710f9866fc3d19090ee39c1a9b38a9aff35"},
       "RubinFormal/BlockValidationOrderBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"ff3babb8806a22a1826db0c8f7e5538224b7959a71463b7f4022a9ac1c8578f6","candidate_sha256":"ff3babb8806a22a1826db0c8f7e5538224b7959a71463b7f4022a9ac1c8578f6"},
       "RubinFormal/ByteWireLegacy.lean": {"disposition":"BYTE_EXACT","source_sha256":"75d9e9bf54b5d633737f436d1a2cea2eb25563778a289fa617ec1fe9d2bf7ebb","candidate_sha256":"75d9e9bf54b5d633737f436d1a2cea2eb25563778a289fa617ec1fe9d2bf7ebb"},
@@ -77,10 +80,10 @@
       "RubinFormal/CoinbaseBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495","candidate_sha256":"6df50d672213bcc08a21a4c2a0775f1a700c675d143e0a939eeb1e6607cca495"},
       "RubinFormal/CoinbaseSubsidyBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c","candidate_sha256":"97dcfb4144c55a756b4020d8b970f5f8257189176da039114dbb25395400fa2c"},
       "RubinFormal/Conformance/CVVaultLifecycleReplay.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e3848f52dd3cfe22e94208cc2b512e95d265c24dc93b66ec653f0c84185286f6","candidate_sha256":"4c5565dfba1541412d6b5b49381560392439952ada3f5f1e8887b1412ab2b895"},
-      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"ad9ae39dfaa44f603563670f7fbe9faab067dc64a9361e15f20ab3f155faf9a1"},
+      "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"8ffc9ef313d980eb13fe0b87a5bb9e43494d16bb7173b5bd870bf32d7d4b26d4"},
       "RubinFormal/ConnectBlockStrong.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9b8aed27abe1b618aa6cede957c1e9a0b28d04dc3e81cff2f4c86234a83a0258","candidate_sha256":"601b49906968020a63fdd813f4291019a81897699d660fd258ab2fce446c5691"},
       "RubinFormal/CovenantParserGaps.lean": {"disposition":"BYTE_EXACT","source_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0","candidate_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0"},
-      "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"e45a870a1a03ff1bd06d5ee111f695ea07400f8252476e655fe12dc3db966d30"},
+      "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"13cdcb1269b04dcf93d243babbaf77733527d8ebb18c5fa1cbedbab9dbc4e3d0"},
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"a1a5c7a767e90b3c258c1b06581923160a8f6474856e31589bdea64522106848"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
@@ -98,7 +101,7 @@
       "RubinFormal/NativeRegistryResolution.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"aedf173855f265a3d100c944197398dd38ddc9496cb645b4d5a021105addfd28","candidate_sha256":"7c4c183d51833827243bc54bea1548eb967a12764e423b170d725dddc070965a"},
       "RubinFormal/NativeSpendCreateGate.lean": {"disposition":"BYTE_EXACT","source_sha256":"22220172555bf402c42104f90a3b8706b8eb5c2d3b06265a48cddae799aaaeae","candidate_sha256":"22220172555bf402c42104f90a3b8706b8eb5c2d3b06265a48cddae799aaaeae"},
       "RubinFormal/NativeSuiteRotation.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9bd781f9b8c2b9961ac8ca4aa2a07b35693f42308172c4c4c108db4dfc7a7658","candidate_sha256":"deecde2b0f4e7b25392b2d939ac038f50e833657e356d2571801881ddd7ec56f"},
-      "RubinFormal/PerTxStateMachine.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e33dcd76ea9aa30b87c03e539e08e7ca51b23d4e61a54654d7692b31e1fbcacb","candidate_sha256":"974d35748a9af1917616885dcf31e4e7de58fdd85d8fad3ec2ec70f2ed7e8989"},
+      "RubinFormal/PerTxStateMachine.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e33dcd76ea9aa30b87c03e539e08e7ca51b23d4e61a54654d7692b31e1fbcacb","candidate_sha256":"9c58e92dd8709ebb53aba6449f52f5f98357a18f8c03e3e9bada1ef72f755f07"},
       "RubinFormal/PrimitiveEncodingRoundtrip.lean": {"disposition":"BYTE_EXACT","source_sha256":"c38203178af4b122279ea8d5cb4a7f7eed7c86ad80efb7a040fd114a11938f02","candidate_sha256":"c38203178af4b122279ea8d5cb4a7f7eed7c86ad80efb7a040fd114a11938f02"},
       "RubinFormal/Refinement/AbortSoundness.lean": {"disposition":"BYTE_EXACT","source_sha256":"05bf8f3ab9d6a1395ce61bb5c5caaa62591c6c07385de3618f2bd4ea44d26eac","candidate_sha256":"05bf8f3ab9d6a1395ce61bb5c5caaa62591c6c07385de3618f2bd4ea44d26eac"},
       "RubinFormal/RefinementBridgeV1.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"a198093fa6a1c5ebcbf4b1cefbf6465c4bcdd1380170d4ae988ce4d562d5f8c6","candidate_sha256":"b7c1b458150e39b20cfef7a0572d87f7c5ad3d6abdc69081be96a86feb703220"},
@@ -114,8 +117,8 @@
       "RubinFormal/StructuralRulesBehavioral.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"4637050a98a2fe9c1417693ecb2ee1c5c5ef7ad3e54cb79f385dbc8701727204","candidate_sha256":"48e8034d9a94086b4a59a797ed563afcdcc857f73d192452a5690f198ce916bf"},
       "RubinFormal/ThresholdSpendSuiteGateBridge.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"ee8efc8dd52950651d113e423c6683b9638a3f3f842dd161aa5265f21429fd09","candidate_sha256":"e7355dd136a610c35bb4933c16a2799687eba75ab4ebc5a75c9536d92661b8eb"},
       "RubinFormal/TransactionWireBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"3834145bbe9ef59b522536a0cb7b6ad7a735ca87164aee03eba7a4e21cde943b","candidate_sha256":"3834145bbe9ef59b522536a0cb7b6ad7a735ca87164aee03eba7a4e21cde943b"},
-      "RubinFormal/TxContextBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"b65561ead964e92fb9db3c8b954f36249d5523f70583a5d061a818ba97bd07fb","candidate_sha256":"b65561ead964e92fb9db3c8b954f36249d5523f70583a5d061a818ba97bd07fb"},
-      "RubinFormal/TxContextFormal.lean": {"disposition":"BYTE_EXACT","source_sha256":"b51d1a0b09fb05365023ed441e1d6aba8758b9d2812e414c21505b5ab6813fa8","candidate_sha256":"b51d1a0b09fb05365023ed441e1d6aba8758b9d2812e414c21505b5ab6813fa8"},
+      "RubinFormal/TxContextBehavioral.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"b65561ead964e92fb9db3c8b954f36249d5523f70583a5d061a818ba97bd07fb","candidate_sha256":"18ca0eb5ac4b2caefceff6f8d0026e0960e3c1e975d3b3e603587fdba028097d"},
+      "RubinFormal/TxContextFormal.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"b51d1a0b09fb05365023ed441e1d6aba8758b9d2812e414c21505b5ab6813fa8","candidate_sha256":"80be0d85ef38cbcedd9d033472a729290315967808742563b7d00a9642406fd2"},
       "RubinFormal/TxIdBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"c41a91bd7f875fb8255bdc44ce1b0699fb903d4307d0dce8cdc677b3cb927ca0","candidate_sha256":"c41a91bd7f875fb8255bdc44ce1b0699fb903d4307d0dce8cdc677b3cb927ca0"},
       "RubinFormal/TxWeightBehavioral.lean": {"disposition":"BYTE_EXACT","source_sha256":"1c5139fa2235e68f805c17f393f3bf22b430231b36f11f27278d67d6afc0a3bb","candidate_sha256":"1c5139fa2235e68f805c17f393f3bf22b430231b36f11f27278d67d6afc0a3bb"},
       "RubinFormal/TxWireCompactSizeLemmas.lean": {"disposition":"BYTE_EXACT","source_sha256":"9032ee3e51ac84fc7f8193d8fcfd0b74916d7b7ec08e5b89ef522fa151e06c03","candidate_sha256":"9032ee3e51ac84fc7f8193d8fcfd0b74916d7b7ec08e5b89ef522fa151e06c03"},
@@ -166,7 +169,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"e9f7f8e81d64e03349c6adcd341598607931268b84b566cf46efe52dc69b552a"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"99547df73c2ce8328d049281bc85e274800a79f36c0392b24cdbb806f87b6c6f"}
     }
   },
   "coverage": [
@@ -249,7 +252,7 @@
       "limitations": [
         "Scope is the singleton pre-rotation native registry fragment only. The counted manifest theorems are universal over any singleton registry extensionally equal to `[ML_DSA_87_ENTRY]`, not over arbitrary post-rotation registries, arbitrary additional native suites, or the full Section 4 `NativeSuiteEntry` production profile lifecycle.",
         "This row closes the native tuple / bytes / hash fragment and the pre-signature live binding slice for the default ML-DSA-87 entry, but it does not by itself claim full native verifier cryptographic correctness beyond the authoritative `binding_profile` token and the supporting live/bridge theorems already counted here.",
-        "This row also does not claim the `CORE_EXT` profile-set half of the chain-instance canonical binding manifest, manifest publication/governance ownership, or release-time runtime-table drift checks. Those remain outside the current formal Section 4 theorem surface."
+        "This row also does not claim manifest publication/governance ownership or release-time runtime-table drift checks. Those remain outside the current formal Section 4 theorem surface."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -836,7 +839,7 @@
         "Scope: static Lean model/helper for bounded u16 tag disposition only; no live implementation bridge is claimed. This row does not claim output acceptance, activation or deployment behavior, descriptor semantics, spend rules, cryptographic semantics, or client equivalence.",
         "The retained validateOutGenesis evidence consists of canonical accepted samples, unknown/reserved rejection theorems, and CV-COVENANT-GENESIS replay for the legacy genesis-model surface. It does not claim a universal acceptance characterization and does not cover CORE_STEALTH or CORE_SIMPLICITY."
       ],
-      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: the named accepted tags, reserved 0x00FF, deployment-gated CORE_SIMPLICITY at 0x0106, explicit invalid 0x0001 and 0x0102, and every other u16 tag invalid with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The 0x0102 entry is reserved only as a non-executable registry annotation, remains invalid and unassigned, and has no activation, support, or executable semantics. This is tag disposition only and not a live implementation bridge. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they neither define activation or descriptor behavior nor cover CORE_STEALTH or CORE_SIMPLICITY."
+      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: the named accepted tags, reserved 0x00FF, deployment-gated CORE_SIMPLICITY at 0x0106, explicit invalid 0x0001, and the generic invalid complement including 0x0102 and all other unnamed u16 tags, with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The tag 0x0102 remains invalid and unassigned, with no activation, support, or executable semantics. This is tag disposition only and not a live implementation bridge. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they neither define activation or descriptor behavior nor cover CORE_STEALTH or CORE_SIMPLICITY."
     },
     {
       "section_key": "difficulty_update",
@@ -1039,17 +1042,9 @@
         "RubinFormal.coinbase_no_vault_rejects",
         "RubinFormal.coinbase_no_vault_accepts",
         "RubinFormal.coinbase_nonspendable_excluded",
-        "RubinFormal.buildTxContext_nil",
-        "RubinFormal.buildTxContext_some",
-        "RubinFormal.continuing_bound_is_invariant",
-        "RubinFormal.max_continuing_is_two",
         "RubinFormal.connectBlockFull_preserves_noncoinbase_invariants",
         "RubinFormal.connectBlockFull_coinbase_bound",
         "RubinFormal.connectBlockFull_no_vault",
-        "RubinFormal.connectBlockFull_produces_txcontext",
-        "RubinFormal.connectBlockFull_no_txcontext_when_empty",
-        "RubinFormal.connectBlockFull_txcontext_ext_ids",
-        "RubinFormal.connectBlockFull_txcontext_base_values",
         "RubinFormal.addCoinbaseOutputs_all_nonspendable",
         "RubinFormal.addCoinbaseOutputs_empty",
         "RubinFormal.listFind?_insert_self",
@@ -1095,17 +1090,9 @@
         "RubinFormal.coinbase_no_vault_rejects": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.coinbase_no_vault_accepts": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.coinbase_nonspendable_excluded": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
-        "RubinFormal.buildTxContext_nil": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_some": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.continuing_bound_is_invariant": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.max_continuing_is_two": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
         "RubinFormal.connectBlockFull_preserves_noncoinbase_invariants": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
         "RubinFormal.connectBlockFull_coinbase_bound": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
         "RubinFormal.connectBlockFull_no_vault": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFull_produces_txcontext": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFull_no_txcontext_when_empty": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFull_txcontext_ext_ids": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
-        "RubinFormal.connectBlockFull_txcontext_base_values": "rubin-formal/RubinFormal/ConnectBlockFull.lean",
         "RubinFormal.addCoinbaseOutputs_all_nonspendable": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.addCoinbaseOutputs_empty": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
         "RubinFormal.listFind?_insert_self": "rubin-formal/RubinFormal/CoinbaseBehavioral.lean",
@@ -1129,9 +1116,10 @@
         "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
         "RubinFormal.utxo_apply_basic_chain_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean"
       },
-      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. TxContext parameters are caller-provided. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
+      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
       "limitations": [
         "RUB-1252's U_pre_genesis/U_parent selection, genesis S0 = 0, complete final-genesis S1, StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
+        "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal is not a live-consensus claim. CORE_STEALTH 0x0105 remains accepted for CV-ST-U-01 without stealth-specific validation, not as evidence of a consensus-valid stealth spend.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
@@ -1175,14 +1163,18 @@
         "RubinFormal.utxo_conservation_theorem",
         "RubinFormal.value_conservation_single_tx",
         "RubinFormal.value_conservation_block_txs",
-        "RubinFormal.utxo_apply_basic_universal_refinement"
+        "RubinFormal.utxo_apply_basic_universal_refinement",
+        "RubinFormal.vault_bridge_no_vault",
+        "RubinFormal.vault_bridge_with_vault"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
       "theorem_files": {
         "RubinFormal.utxo_conservation_theorem": "rubin-formal/RubinFormal/ConnectBlockStrong.lean",
         "RubinFormal.value_conservation_single_tx": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
         "RubinFormal.value_conservation_block_txs": "rubin-formal/RubinFormal/ValueConservationBehavioral.lean",
-        "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean"
+        "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
+        "RubinFormal.vault_bridge_no_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
+        "RubinFormal.vault_bridge_with_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean"
       },
       "notes": "Universal theorem lane: value conservation at single-tx level (`sum_in = sum_out + fee` via `scanInputs` / `sumOutputs`) and block level (`connectBlockTxs` preserves conservation across all txs), backed by the current `utxo_apply_basic_universal_refinement` bridge on the real UTXO-map model rather than an abstract ledger. Separate fixture lane: CV-SUBSIDY replay on the shipped vectors. That executable lane is complementary regression evidence only and does not replace the universal theorem lane.",
       "evidence_level": "machine_checked_universal"
@@ -1462,68 +1454,8 @@
       },
       "notes": "The counted theorem is `accept_reject_equivalence_live`: for one identical precheck result and signature-task list, sequential reduction and the live SigCheckQueue.Flush accept/reject helper contract return the same verdict. Helper/model reducer lemmas remain in ParallelEquivalence.lean as supporting mathematics rather than separate coverage.",
       "limitations": [
-        "No theorem composes `accept_reject_equivalence_live` with `connectBlockFullComputed*` into end-to-end sequential-versus-parallel block equality. The retained caller-supplied ConnectBlockFull wrapper lemmas are experimental and unregistered.",
+        "No theorem composes `accept_reject_equivalence_live` into end-to-end sequential-versus-parallel block equality.",
         "Auxiliary tagged-result lowest-index theorems remain in ParallelEquivalence.lean for helper reasoning only; they are not counted here because the live queue may early-abort and surface a deterministic submission-order error instead of the absolute lowest failing index."
-      ],
-      "evidence_level": "machine_checked_universal"
-    },
-    {
-      "section_key": "txcontext_formal",
-      "section_heading": "## SPEC-TXCTX-01 §14. TxContext Construction and Bounds",
-      "status": "proved",
-      "proof_trust": "compiler_trusted",
-      "theorems": [
-        "RubinFormal.sortExtIds_order_independent",
-        "RubinFormal.buildTxContext_ext_ids",
-        "RubinFormal.compareUint128_native_equivalence",
-        "RubinFormal.continuing_output_count_rejects_overflow",
-        "RubinFormal.continuing_outputs_length_is_invariant",
-        "RubinFormal.buildTxContext_all_continuings_outputs_bounded",
-        "RubinFormal.vault_bridge_no_vault",
-        "RubinFormal.vault_bridge_with_vault",
-        "RubinFormal.sortExtIds_eq_model",
-        "RubinFormal.compareUint128_eq_true_iff_model",
-        "RubinFormal.continuing_output_count_accepts_in_range",
-        "RubinFormal.buildTxContext_some",
-        "RubinFormal.buildTxContext_base_values",
-        "RubinFormal.buildTxContext_continuing_data",
-        "RubinFormal.buildTxContext_preserves_nodup",
-        "RubinFormal.buildTxContextFromValues_totalIn_real",
-        "RubinFormal.buildTxContextFromValues_totalOut_real",
-        "RubinFormal.buildTxContextFromValues_height_real",
-        "RubinFormal.buildTxContext_all_continuings_bounded",
-        "RubinFormal.buildTxContextFromValues_value_conservation",
-        "RubinFormal.buildTxContextLive_eq_fromValues",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext"
-      ],
-      "file": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-      "theorem_files": {
-        "RubinFormal.sortExtIds_order_independent": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_ext_ids": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.compareUint128_native_equivalence": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.continuing_output_count_rejects_overflow": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.continuing_outputs_length_is_invariant": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_all_continuings_outputs_bounded": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.vault_bridge_no_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.vault_bridge_with_vault": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.sortExtIds_eq_model": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.compareUint128_eq_true_iff_model": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.continuing_output_count_accepts_in_range": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_some": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_base_values": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_continuing_data": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_preserves_nodup": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextFromValues_totalIn_real": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextFromValues_totalOut_real": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextFromValues_height_real": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContext_all_continuings_bounded": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextFromValues_value_conservation": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextLive_eq_fromValues": "rubin-formal/RubinFormal/TxContextBehavioral.lean",
-        "RubinFormal.buildTxContextLive_eq_buildTxContext": "rubin-formal/RubinFormal/TxContextBehavioral.lean"
-      },
-      "notes": "§14 closure over TxContext helper construction, value conservation, and continuing-output bounds. The 22 counted theorems cover sortExtIds, buildTxContext, buildTxContextFromValues, buildTxContextLive, compareUint128, validateContinuingOutputCount, and value conservation. The retained caller-supplied ConnectBlockFull computed-wrapper lemmas are experimental and unregistered; they do not establish a transaction/UTXO-derived live TxContext. The retired CORE_EXT/CV-TXCTX sighash allowlist policy is not an active premise or claim. Zero fixture dependencies; source syntax is reviewed separately and does not override compiler_trusted/Lean.ofReduceBool closure.",
-      "limitations": [
-        "No registered theorem derives TxContextData from the connected transactions or UTXOs; the retained ConnectBlockFull computed wrapper surface is model-only."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1748,18 +1680,17 @@
     }
   ],
   "coverage_summary": {
-    "section_rows": 32,
-    "proved_rows": 24,
+    "section_rows": 31,
+    "proved_rows": 23,
     "proved_with_axiom_rows": 5,
     "stated_rows": 3,
     "deferred_rows": 0,
-    "theorem_references": 520,
-    "unique_theorem_names": 505,
+    "theorem_references": 492,
+    "unique_theorem_names": 478,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
       "RubinFormal.UtxoApplyGenesisV1.validateWitnessItemLengths_eq_registry_pre_rotation",
-      "RubinFormal.buildTxContext_some",
       "RubinFormal.cov_type_da_commit_value",
       "RubinFormal.dispatch_unknown_covenant_error",
       "RubinFormal.mldsa87_empty_sig_rejected_registry_pre_rotation",
@@ -1779,7 +1710,7 @@
     "allowed": [
       "Lean executable semantics replay the non-CV-PV conformance fixtures represented by modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope",
       "Lean evidence is op-scoped and mixed; any correspondence to Go/Rust is human-reviewed rather than machine-checked implementation equivalence",
-      "The registry currently covers 32 machine-checked coverage entries: 24 proved, 5 proved_with_axiom, and 3 stated. Evidence levels comprise 23 universal, 5 assumption-backed, 3 model, and 1 contract entries.",
+      "The registry currently covers 31 machine-checked coverage entries: 23 proved, 5 proved_with_axiom, and 3 stated. Evidence levels comprise 22 universal, 5 assumption-backed, 3 model, and 1 contract entries.",
       "formal claims are bounded by explicit forbidden claims below",
       "Bridge theorems (LIVE/BRIDGE class) prove properties of Lean transcriptions of Go/Rust functions. Lean-to-Go/Rust parity is verified by human code review, not machine-checked. The behavioral claim applies to the Lean transcription; transfer to Go/Rust binary relies on the reviewed parity."
     ],

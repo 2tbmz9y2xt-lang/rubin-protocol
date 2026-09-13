@@ -8,7 +8,7 @@ state transitions. Each theorem operates on `applyNonCoinbaseTxBasicState`
 — the LIVE per-tx function that updates the UTXO map.
 
 Combined with block-level ConnectBlockFull.lean, this gives full coverage:
-- Block-level: connectBlockFull pipeline (conservation, coinbase, TxContext)
+- Block-level: connectBlockFull pipeline (conservation, coinbase)
 - Per-tx level: state transition, fee extraction, error propagation
 -/
 
@@ -107,25 +107,6 @@ theorem connectBlockTxs_empty_zero_fees
     (utxoMap : Std.RBMap Outpoint UtxoEntry cmpOutpoint)
     (height blockTimestamp : Nat) (chainId : Bytes) :
     connectBlockTxs [] utxoMap height blockTimestamp chainId = .ok (0, utxoMap) := rfl
-
-/-! ## Per-tx TxContext (modeling per-tx BuildTxContext in Go) -/
-
-/-- For each individual tx with active ext_ids, buildTxContext produces a bundle.
-    In Go, BuildTxContext is called PER-TX inside the parallel loop.
-    In our Lean model, connectBlockFull calls it once per block with aggregated totals.
-    This theorem bridges: if per-tx ext_ids are active, bundle exists. -/
-theorem perTx_txcontext_when_active
-    (ids : List Nat) (hIds : ids.length > 0)
-    (txTotalIn txTotalOut height : Nat)
-    (cd : List (Nat × TxContextContinuing)) :
-    (buildTxContext ids txTotalIn txTotalOut height cd).isSome = true :=
-  buildTxContext_some ids hIds txTotalIn txTotalOut height cd
-
-/-- For each tx with no active ext_ids, no TxContext bundle. -/
-theorem perTx_txcontext_when_inactive
-    (txTotalIn txTotalOut height : Nat)
-    (cd : List (Nat × TxContextContinuing)) :
-    buildTxContext [] txTotalIn txTotalOut height cd = none := rfl
 
 /-! ## UTXO map monotonicity (input consumption + output creation) -/
 

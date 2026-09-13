@@ -12,10 +12,6 @@ namespace BlockBasicCheckV1
 
 def MAX_FUTURE_DRIFT : Nat := 7200
 
-def enforceSigSuiteActivation (_txs : List Bytes) (_blockHeight : Nat) : Except String Unit :=
-  -- Legacy structural no-op: retired profiles, including CORE_EXT, are not active or supported.
-  pure ()
-
 def insertNat (x : Nat) : List Nat → List Nat
   | [] => [x]
   | y :: ys =>
@@ -125,9 +121,6 @@ def validateBlockBasicCheck
     (blockHeight : Nat)
     (prevTimestamps : List Nat) : Except String Unit := do
   let pb ← BlockBasicV1.parseBlock blockBytes
-
-  -- Signature-suite activation gate (no-op; kept for legacy structure).
-  enforceSigSuiteActivation pb.txs blockHeight
 
   -- §25 step order (post-PR#418): pow → target → linkage → merkle → witness_commitment → timestamp
   BlockBasicV1.powCheck pb.header
