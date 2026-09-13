@@ -5,9 +5,9 @@ use libfuzzer_sys::fuzz_target;
 // Structural fuzz of the spend-dispatch path via `validate_tx_local`.
 //
 // Constructs a minimal Tx with fuzzed covenant type, covenant data, and
-// witness items. Derives witness slot count from covenant_type to ensure
-// HTLC (2 slots), VAULT/MULTISIG (threshold-dependent) branches are
-// reachable, not just P2PK/EXT/STEALTH (1 slot).
+// witness items. Derives slot counts for known covenants to exercise
+// HTLC (2 slots), VAULT/MULTISIG (threshold-dependent), and P2PK/STEALTH
+// (1 slot). The unassigned 0x0102 case exercises rejection before dispatch.
 //
 // Invariants checked:
 // - Determinism: two calls with same input produce identical result.
@@ -23,9 +23,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut pos = 0;
 
-    // Map raw fuzz bytes to valid covenant IDs so spend-dispatch branches
-    // are reliably reached instead of failing at witness_slots() for ~99.99%
-    // of random u16 values.
+    // Select known covenants for spend-dispatch coverage and 0x0102 for
+    // unknown-covenant rejection before witness-slot assignment.
     let cov_selector = data[pos] % 6;
     let covenant_type: u16 = match cov_selector {
         0 => 0x0000, // COV_TYPE_P2PK
@@ -101,9 +100,9 @@ fuzz_target!(|data: &[u8]| {
     let mut chain_id = [0u8; 32];
     chain_id.copy_from_slice(&data[pos..pos + 32]);
 
-    // Compute witness slot count from covenant_type to match consensus logic
-    // (vault.rs witness_slots). This ensures multi-slot covenants like HTLC
-    // (2 slots), VAULT/MULTISIG (threshold-dependent) are reachable.
+    // Provide witness items for known covenants, including multi-slot paths.
+    // The unassigned 0x0102 input uses an arbitrary slot count and is rejected
+    // before witness-slot assignment.
     let witness_slot_count: usize = match covenant_type {
         0x0000 => 1, // COV_TYPE_P2PK
         0x0102 => 1,
