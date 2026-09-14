@@ -33,23 +33,23 @@ else:
 
 
 class RunCvBundleOpNormalizationTests(unittest.TestCase):
-    def test_core_ext_gate_is_no_longer_retired(self):
-        self.assertEqual(RETIRED_GATES, frozenset({"CV-TXCTX"}))
+    def test_no_gates_are_retired(self):
+        self.assertEqual(RETIRED_GATES, frozenset())
         self.assertFalse(is_retired_gate("CV-EXT"))
-        self.assertTrue(is_retired_gate("CV-TXCTX"))
+        self.assertFalse(is_retired_gate("CV-TXCTX"))
         self.assertFalse(is_retired_gate("CV-UTXO-BASIC"))
 
-    def test_deleted_retired_gates_are_known_for_requested_runs(self):
+    def test_deleted_gate_is_unknown_for_requested_runs(self):
         fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
 
         self.assertEqual(
             known_gate_names(fixtures),
-            {"CV-UTXO-BASIC", "CV-TXCTX"},
+            {"CV-UTXO-BASIC"},
         )
         selected, retired, unknown = select_requested_fixtures(fixtures, ["CV-TXCTX"])
         self.assertEqual(selected, [])
-        self.assertEqual(retired, {"CV-TXCTX"})
-        self.assertEqual(unknown, [])
+        self.assertEqual(retired, set())
+        self.assertEqual(unknown, ["CV-TXCTX"])
 
     def test_unknown_requested_gate_is_reported(self):
         fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
@@ -62,9 +62,25 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
         self.assertEqual(unknown, ["CV-EXT", "CV-NOT-A-GATE"])
         self.assertEqual(retired, set())
 
-    def test_only_deleted_retired_gate_prints_retired_summary(self):
+    def test_deleted_gate_fails_before_tool_build_or_execution(self):
         fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
-        argv = ["run_cv_bundle.py", "--only-gates", "CV-TXCTX"]
+        for gates in (["CV-TXCTX"], ["CV-UTXO-BASIC", "CV-TXCTX"]):
+            with self.subTest(gates=gates), mock.patch.object(
+                sys, "argv", ["run_cv_bundle.py", "--only-gates", *gates]
+            ), mock.patch(f"{main.__module__}.load_fixtures", return_value=fixtures), mock.patch(
+                f"{main.__module__}.build_tools", return_value=(Path("go-cli"), Path("rust-cli"))
+            ) as build, mock.patch(f"{main.__module__}.validate_vector") as validate, mock.patch(
+                "sys.stdout", new_callable=io.StringIO
+            ) as stdout:
+                rc = main()
+                self.assertEqual(rc, 1)
+                self.assertEqual(stdout.getvalue(), "FAIL unknown gate(s): CV-TXCTX\n")
+                build.assert_not_called()
+                validate.assert_not_called()
+
+    def test_list_gates_omits_deleted_gate(self):
+        fixtures = [{"gate": "CV-UTXO-BASIC", "vectors": []}]
+        argv = ["run_cv_bundle.py", "--list-gates"]
 
         with mock.patch.object(sys, "argv", argv):
             with mock.patch(f"{main.__module__}.load_fixtures", return_value=fixtures):
@@ -72,10 +88,7 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
                     rc = main()
 
         self.assertEqual(rc, 0)
-        self.assertIn(
-            "retired gates skipped: CV-TXCTX (0 vectors)",
-            stdout.getvalue(),
-        )
+        self.assertEqual(stdout.getvalue(), "CV-UTXO-BASIC\n")
 
     def test_active_utxo_apply_basic_ignores_unrecognized_key(self):
         vector = {"id": "CV-U-UNKNOWN", "op": "utxo_apply_basic", "tx_hex": "00", "utxos": [],

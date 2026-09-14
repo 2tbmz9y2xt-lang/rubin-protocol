@@ -41,7 +41,7 @@ LOCAL_OPS = {
     if op.strip()
 }
 
-RETIRED_GATES = frozenset({"CV-TXCTX"})
+RETIRED_GATES = frozenset()
 
 
 def is_retired_gate(gate: str) -> bool:
