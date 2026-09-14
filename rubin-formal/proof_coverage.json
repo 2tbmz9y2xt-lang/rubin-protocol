@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "cf6d65e9f0211e7537e5900f20cecae7aaeaf1e5917bc0e6805d3c1d89646414",
+  "spec_section_hashes_sha3_256": "3186811b0c45c29f10d82b13aaa1de43cbd9d0cd89d5e2749252799b255fdeba",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -1372,7 +1372,7 @@
     },
     {
       "section_key": "fork_choice",
-      "section_heading": "## 23. Fork-Choice Rule (Non-Validation Procedure)",
+      "section_heading": "## 23. Chainwork and Fork Choice (Non-Validation Procedure)",
       "status": "stated",
       "proof_trust": "compiler_trusted",
       "theorems": [
