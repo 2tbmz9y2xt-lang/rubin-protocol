@@ -68,7 +68,7 @@ class RunCvBundleOpNormalizationTests(unittest.TestCase):
             with self.subTest(gates=gates), mock.patch.object(
                 sys, "argv", ["run_cv_bundle.py", "--only-gates", *gates]
             ), mock.patch(f"{main.__module__}.load_fixtures", return_value=fixtures), mock.patch(
-                f"{main.__module__}.build_tools"
+                f"{main.__module__}.build_tools", return_value=(Path("go-cli"), Path("rust-cli"))
             ) as build, mock.patch(f"{main.__module__}.validate_vector") as validate, mock.patch(
                 "sys.stdout", new_callable=io.StringIO
             ) as stdout:
