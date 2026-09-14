@@ -712,9 +712,6 @@ struct Response {
     anchor_bytes: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    ext_id: Option<u16>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     suite_ids: Option<Vec<u8>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]

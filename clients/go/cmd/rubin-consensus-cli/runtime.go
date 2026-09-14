@@ -508,7 +508,6 @@ type Response struct {
 	VerifyCalled       bool               `json:"verify_called,omitempty"`
 	CommitBearing      bool               `json:"commit_bearing,omitempty"`
 	Prioritize         bool               `json:"prioritize,omitempty"`
-	ExtID              uint16             `json:"ext_id,omitempty"`
 	SuiteIDs           []uint8            `json:"suite_ids,omitempty"`
 	Accepted           *bool              `json:"accepted,omitempty"`
 	FinalCounter       *uint64            `json:"final_counter,omitempty"`
