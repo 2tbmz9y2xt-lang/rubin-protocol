@@ -39,7 +39,7 @@ RUST_JSON="$OUT_DIR/rust_metrics.json"
 
 pushd "$REPO_ROOT" >/dev/null
 
-go_bench_regex='^(BenchmarkMempoolAddTx|BenchmarkMempoolRelayMetadata|BenchmarkMinerBuildContext|BenchmarkCloneChainState|BenchmarkCopyUtxoSet|BenchmarkConnectBlockWithCoreExtProfilesAndSuiteContext|BenchmarkConnectBlockWithSuiteContext|BenchmarkConnectBlockParallelSigsWithSuiteContext)$'
+go_bench_regex='^(BenchmarkMempoolAddTx|BenchmarkMempoolRelayMetadata|BenchmarkMinerBuildContext|BenchmarkCloneChainState|BenchmarkCopyUtxoSet|BenchmarkConnectBlockWithSuiteContext|BenchmarkConnectBlockParallelSigsWithSuiteContext)$'
 
 set +e
 (cd clients/go && go test ./node -run '^$' -bench "$go_bench_regex" -benchmem -count=1) | tee "$GO_OUT"

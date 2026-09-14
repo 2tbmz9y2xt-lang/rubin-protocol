@@ -8,7 +8,6 @@ Rust: direct `.iter()` / `.keys()` / `.values()` on HashMap in consensus crate
 
 Exit 0 = clean, Exit 1 = violations found.
 
-Refs: Q-CI-TXCTX-EXTID-LINT-01, SPEC-TXCTX-01 §5.2 ext_id ordering.
 """
 from __future__ import annotations
 
