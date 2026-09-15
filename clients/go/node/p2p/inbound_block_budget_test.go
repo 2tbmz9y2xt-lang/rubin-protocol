@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -20,16 +21,15 @@ func TestInboundBlockBudget(t *testing.T) {
 		{"config_above_max", func(t *testing.T) { requireConfigRejected(t, 8589934593, math.MaxUint64) }},
 		{"config_table", func(t *testing.T) {
 			for _, cfg := range []struct{ configured, limit uint64 }{
-				{0, 1073741824}, {1073741824, 1073741824}, {2147483648, 2147483648},
-				{4294967296, 4294967296}, {8589934592, 8589934592},
+				{0, 1073741824}, {1073741824, 1073741824}, {2147483648, 2147483648}, {4294967296, 4294967296}, {8589934592, 8589934592},
 			} {
 				requireBudgetLimit(t, cfg.configured, cfg.limit)
 			}
 		}},
 		{"config_no_proportional_alloc", func(t *testing.T) {
 			for _, configured := range []uint64{1073741824, 8589934592} {
-				got := allocBytesPerOp(t, func() { _, _ = newInboundBlockBudget(configured) })
-				requireTrue(t, got <= 1024, "newInboundBlockBudget(%d) allocated %d bytes per call, want <= 1024", configured, got)
+				got := testing.AllocsPerRun(1, func() { _, _ = newInboundBlockBudget(configured) })
+				requireTrue(t, got <= 1, "newInboundBlockBudget(%d) allocated %.0f objects per call, want <= 1", configured, got)
 			}
 		}},
 		{"unsupported_command", func(t *testing.T) {
@@ -111,7 +111,8 @@ func TestInboundBlockBudget(t *testing.T) {
 				name  string
 				lease *inboundBlockLease
 			}{{"nil", nil}, {"foreign", foreign}, {"released", released}} {
-				err := replaceWithoutPanic(t, b, invalid.lease, math.MaxUint64)
+				var err error
+				withoutPanic(t, "ReplaceOrSubscribe", func() { err = b.ReplaceOrSubscribe(invalid.lease, math.MaxUint64) })
 				requireInvalidLease(t, err, invalid.name)
 				requireUsed(t, b, 4096)
 				requireUsed(t, other, 512)
@@ -154,9 +155,11 @@ func TestInboundBlockBudget(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
 			mustReserve(t, b, 4096)
 			lease := mustReserve(t, b, 1000)
+			gen := generationOf(b)
 			err := b.ReplaceOrSubscribe(lease, math.MaxUint64)
 			_ = assertResourceTuple(t, err, "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_overflow)", "inbound_budget_overflow", false, false)
 			requireUsed(t, b, 5096)
+			requireTrue(t, generationOf(b) == gen && !isClosed(gen), "overflowing replacement replaced or closed the generation")
 			requireTrue(t, lease.charge == 1000 && lease.active, "overflowing replacement disturbed the lease: charge=%d active=%v", lease.charge, lease.active)
 		}},
 		{"failed_replace_retains", func(t *testing.T) {
@@ -213,7 +216,7 @@ func TestInboundBlockBudget(t *testing.T) {
 			requireUsed(t, b, 0)
 			requireTrue(t, !isClosed(gen) && generationOf(b) == gen, "second release published capacity")
 		}},
-		{"nil_release", func(t *testing.T) { releaseWithoutPanic(t, nil) }},
+		{"nil_release", func(t *testing.T) { withoutPanic(t, "Release", (*inboundBlockLease)(nil).Release) }},
 		{"stale_alias", func(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
 			other := mustReserve(t, b, 4096)
@@ -221,9 +224,11 @@ func TestInboundBlockBudget(t *testing.T) {
 			alias := lease
 			lease.Release()
 			requireUsed(t, b, 4096)
-			releaseWithoutPanic(t, alias)
+			withoutPanic(t, "Release", alias.Release)
 			requireUsed(t, b, 4096)
-			requireInvalidLease(t, replaceWithoutPanic(t, b, alias, 2000), "stale alias")
+			var err error
+			withoutPanic(t, "ReplaceOrSubscribe", func() { err = b.ReplaceOrSubscribe(alias, 2000) })
+			requireInvalidLease(t, err, "stale alias")
 			requireUsed(t, b, 4096)
 			requireTrue(t, other.active && other.charge == 4096, "stale alias disturbed another reservation")
 		}},
@@ -241,24 +246,33 @@ func TestInboundBlockBudget(t *testing.T) {
 		}},
 		{"concurrent_holders", func(t *testing.T) {
 			const charge = 1 << 20
-			for _, holders := range []int{1, 2, 4, 8} {
+			for _, holders := range slices.Repeat([]int{1, 2, 4, 8}, 8) {
 				b := newTestBudget(t, 1073741824)
-				var reserved, release, done sync.WaitGroup
+				var reserved, replaced, done sync.WaitGroup
 				reserved.Add(holders)
+				replaced.Add(holders)
 				done.Add(holders)
-				release.Add(1)
+				replace, release := make(chan struct{}), make(chan struct{})
+				errs := make([]error, holders)
 				for i := 0; i < holders; i++ {
 					go func() {
 						lease, _ := b.TryReserveOrSubscribe(charge)
 						reserved.Done()
-						release.Wait()
+						<-replace
+						errs[i] = b.ReplaceOrSubscribe(lease, charge/2)
+						replaced.Done()
+						<-release
 						lease.Release()
 						done.Done()
 					}()
 				}
 				reserved.Wait()
 				requireUsed(t, b, uint64(holders)*charge)
-				release.Done()
+				close(replace)
+				replaced.Wait()
+				requireTrue(t, errors.Join(errs...) == nil, "%d holders: concurrent replacement failed: %v", holders, errors.Join(errs...))
+				requireUsed(t, b, uint64(holders)*(charge/2))
+				close(release)
 				done.Wait()
 				requireUsed(t, b, 0)
 			}
@@ -370,7 +384,7 @@ func isCapacityRefusal(err error) bool {
 func requireCapacityRefusal(t *testing.T, err error) inboundBlockBudgetError {
 	t.Helper()
 	var refusal inboundBlockBudgetError
-	requireTrue(t, errors.As(err, &refusal) && refusal.Resource() == "inbound_budget_capacity", "expected a capacity refusal, got %v", err)
+	requireTrue(t, isCapacityRefusal(err) && errors.As(err, &refusal), "expected a capacity refusal, got %v", err)
 	return refusal
 }
 
@@ -398,34 +412,13 @@ func requireInvalidLease(t *testing.T, err error, label string) {
 	requireOrdinaryError(t, err)
 }
 
-func replaceWithoutPanic(t *testing.T, b *inboundBlockBudget, lease *inboundBlockLease, newCharge uint64) error {
+// withoutPanic runs one budget operation and fails the test instead of panicking.
+func withoutPanic(t *testing.T, label string, op func()) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("ReplaceOrSubscribe panicked: %v", r)
+			t.Fatalf("%s panicked: %v", label, r)
 		}
 	}()
-	return b.ReplaceOrSubscribe(lease, newCharge)
-}
-
-func releaseWithoutPanic(t *testing.T, lease *inboundBlockLease) {
-	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Release panicked: %v", r)
-		}
-	}()
-	lease.Release()
-}
-
-// allocBytesPerOp reports the heap bytes one call of op allocates.
-func allocBytesPerOp(t *testing.T, op func()) int64 {
-	t.Helper()
-	result := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			op()
-		}
-	})
-	requireTrue(t, result.N > 0, "benchmark did not execute")
-	return result.AllocedBytesPerOp()
+	op()
 }

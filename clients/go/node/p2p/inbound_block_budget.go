@@ -58,7 +58,9 @@ func (e inboundBlockBudgetError) Resource() string { return e.resource }
 func (e inboundBlockBudgetError) Notification() <-chan struct{} { return e.notify }
 
 // BlockHash returns the identity of the retained header bytes when the refusal carries
-// one: which bytes arrived, not their validity (RUBIN_L1_P2P_AUX.md Section 2.0).
+// one: which bytes arrived, not their validity (RUBIN_L1_P2P_AUX.md Section 2.0). A refusal
+// without that evidence carries no block identity, so a consumer decides retry eligibility
+// from a proven hash rather than from this field.
 func (e inboundBlockBudgetError) BlockHash() ([32]byte, bool) { return e.hash, e.hashOK }
 
 // newInboundBlockBudget returns a budget whose limit is exactly the accepted
@@ -137,9 +139,10 @@ func (b *inboundBlockBudget) ReplaceOrSubscribe(lease *inboundBlockLease, newCha
 }
 
 // Release subtracts an active lease's charge exactly once and publishes any capacity that
-// frees. A nil receiver and every later call change nothing.
+// frees. A nil receiver, a lease that reached no budget, and every later call change
+// nothing.
 func (l *inboundBlockLease) Release() {
-	if l == nil {
+	if l == nil || l.owner == nil {
 		return
 	}
 	b := l.owner

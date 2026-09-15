@@ -13,7 +13,10 @@ import (
 // byte lease. Success returns the exact payload plus the live lease its caller now owns;
 // every other exit returns no payload and no lease, and reports the read or checksum error
 // ahead of any local capacity result (RUBIN_L1_P2P_AUX.md Section 2). Its caller supplies
-// a non-nil reader and a header already validated by readFrameHeader.
+// a non-nil reader and a header already validated by readFrameHeader. Stream position per
+// exit: a precheck refusal reads nothing, a capacity refusal and a checksum error consume
+// the declared payload, a non-capacity refusal stops after the fixed prefix, and a read
+// error stops mid-frame.
 func readInboundBlockPayload(r io.Reader, header frameHeader, budget *inboundBlockBudget) ([]byte, *inboundBlockLease, error) {
 	charge, err := inboundBlockPrechecks(header, budget)
 	if err != nil {
@@ -27,7 +30,11 @@ func readInboundBlockPayload(r io.Reader, header frameHeader, budget *inboundBlo
 	prefix := storage[:prefixLen]
 	lease, err := budget.TryReserveOrSubscribe(charge)
 	if err != nil {
-		return nil, nil, refuseInboundBlockPayload(r, header, prefix, err)
+		var capacity inboundBlockBudgetError
+		if !errors.As(err, &capacity) || capacity.resource != inboundBudgetCapacityResource {
+			return nil, nil, err
+		}
+		return nil, nil, discardRefusedInboundBlockPayload(r, header, prefix, capacity)
 	}
 	return readInboundBlockBody(r, header, prefix, lease)
 }
@@ -49,18 +56,23 @@ func inboundBlockPrechecks(header frameHeader, budget *inboundBlockBudget) (uint
 	return charge, nil
 }
 
-// inboundBlockPayloadCap returns the payload cap of one of the two commands
-// inboundBlockCharge accepts (RUBIN_COMPACT_BLOCKS.md Section 1).
+// inboundBlockPayloadCap returns the cap its existing owner gives one of the two commands
+// this reader accepts; every other command caps at zero, so any nonzero size exceeds it
+// (RUBIN_COMPACT_BLOCKS.md Section 1).
 func inboundBlockPayloadCap(command string) uint32 {
-	if command == messageCmpctBlock {
-		return uint32(consensus.MAX_RELAY_MSG_BYTES)
+	switch command {
+	case messageBlock:
+		return variablePostHandshakePayloadCap(command, 0, 0)
+	case messageCmpctBlock:
+		return compactRelayPayloadCap(command)
 	}
-	return uint32(consensus.MAX_BLOCK_BYTES)
+	return 0
 }
 
 // readInboundBlockPrefix stores the first min(size, 116) payload bytes in storage and
-// reports how many it stored, without any size-dependent allocation. An error carried back
-// with those bytes survives unless they already complete the whole declared payload.
+// reports how many it stored, without any size-dependent allocation. Unlike
+// readPayloadPrefix, whose io.ReadFull drops an error co-returned with a full buffer, this
+// loop keeps that error unless those bytes complete the whole declared payload.
 func readInboundBlockPrefix(r io.Reader, size uint32, storage *[consensus.BLOCK_HEADER_BYTES]byte) (int, error) {
 	want := len(storage)
 	if size < uint32(want) {
@@ -73,7 +85,7 @@ func readInboundBlockPrefix(r io.Reader, size uint32, storage *[consensus.BLOCK_
 		if err == nil {
 			continue
 		}
-		if uint32(read) == size {
+		if read == int(size) {
 			break
 		}
 		return read, payloadReadError(size, 0, read, err)
@@ -99,30 +111,20 @@ func readInboundBlockBody(r io.Reader, header frameHeader, prefix []byte, lease 
 	return payload, lease, nil
 }
 
-// refuseInboundBlockPayload completes a frame whose reservation was refused: an arithmetic
-// refusal leaves the stream untouched, a capacity refusal is returned only after the
-// declared payload has been drained.
-func refuseInboundBlockPayload(r io.Reader, header frameHeader, prefix []byte, refusal error) error {
-	var capacity inboundBlockBudgetError
-	if !errors.As(refusal, &capacity) || capacity.resource != inboundBudgetCapacityResource {
-		return refusal
-	}
-	return discardRefusedInboundBlockPayload(r, header, prefix, capacity)
-}
-
 // discardRefusedInboundBlockPayload drains the rest of the declared payload through one
 // fixed scratch buffer, keeping the existing absolute 32768-byte read boundaries, and
 // returns the captured refusal only once the envelope checksum matches. A complete header
 // adds its identity to that refusal; a shorter payload adds none.
 func discardRefusedInboundBlockPayload(r io.Reader, header frameHeader, prefix []byte, refusal inboundBlockBudgetError) error {
 	hasher := sha3.New256()
+	// hash.Hash.Write never reports an error (its stdlib contract).
 	_, _ = hasher.Write(prefix)
 	var scratch [streamReadChunkBytes]byte
-	for received := uint32(len(prefix)); received < header.Size; {
-		window := inboundBlockDiscardWindow(received, header.Size)
+	for received := len(prefix); received < int(header.Size); {
+		window := inboundBlockDiscardWindow(received, int(header.Size))
 		n, err := io.ReadFull(r, scratch[:window])
 		if err != nil {
-			return payloadReadError(header.Size, int(received), n, err)
+			return payloadReadError(header.Size, received, n, err)
 		}
 		_, _ = hasher.Write(scratch[:window])
 		received += window
@@ -131,19 +133,18 @@ func discardRefusedInboundBlockPayload(r io.Reader, header frameHeader, prefix [
 	if [4]byte{sum[0], sum[1], sum[2], sum[3]} != header.Checksum {
 		return errors.New("invalid envelope checksum")
 	}
-	if len(prefix) == consensus.BLOCK_HEADER_BYTES {
-		refusal.hash, _ = consensus.BlockHash(prefix)
-		refusal.hashOK = true
+	if h, err := consensus.BlockHash(prefix); err == nil {
+		refusal.hash, refusal.hashOK = h, true
 	}
 	return refusal
 }
 
 // inboundBlockDiscardWindow returns the read length that ends at the next absolute
 // 32768-byte payload boundary, or at the declared size.
-func inboundBlockDiscardWindow(received, size uint32) uint32 {
-	end := (received/streamReadChunkBytes + 1) * streamReadChunkBytes
-	if end > size {
-		end = size
+func inboundBlockDiscardWindow(received, size int) int {
+	remaining := size - received
+	if step := streamReadChunkBytes - received%streamReadChunkBytes; step < remaining {
+		return step
 	}
-	return end - received
+	return remaining
 }

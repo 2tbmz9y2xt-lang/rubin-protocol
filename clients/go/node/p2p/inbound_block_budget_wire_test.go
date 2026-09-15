@@ -57,8 +57,11 @@ func TestInboundBlockPayload(t *testing.T) {
 		}},
 		{"unsupported_command", func(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
-			for _, command := range []string{"", "blocktxn", "tx", "getdata"} {
-				_ = rejectRead(t, frameHeader{Command: command, Size: 200}, b, "unsupported inbound block budget command")
+			for _, refused := range []struct {
+				command string
+				size    uint32
+			}{{"", 200}, {"blocktxn", 200}, {"tx", 200}, {"getdata", 200}, {"tx", 96000001}} {
+				_ = rejectRead(t, frameHeader{Command: refused.command, Size: refused.size}, b, "unsupported inbound block budget command")
 			}
 			requireUsed(t, b, 0)
 		}},
@@ -75,15 +78,11 @@ func TestInboundBlockPayload(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
 			requireCapCommand(t, rejectRead(t, frameHeader{Command: "block", Size: 72000001}, b, "message exceeds command cap"), "block")
 			requireUsed(t, b, 0)
-			mirror := variablePostHandshakePayloadCap("block", 0, 0)
-			requireTrue(t, mirror == 72000000, "existing block cap = %d, want 72000000", mirror)
 		}},
 		{"compact_cap", func(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
 			requireCapCommand(t, rejectRead(t, frameHeader{Command: "cmpctblock", Size: 96000001}, b, "message exceeds command cap"), "cmpctblock")
 			requireUsed(t, b, 0)
-			mirror := compactRelayPayloadCap("cmpctblock")
-			requireTrue(t, mirror == 96000000, "existing cmpctblock cap = %d, want 96000000", mirror)
 		}},
 		{"block_exact_cap", func(t *testing.T) { requireExactCapDiscard(t, "block", 72000000, [4]byte{0x35, 0x06, 0xff, 0xb3}) }},
 		{"compact_exact_cap", func(t *testing.T) { requireExactCapDiscard(t, "cmpctblock", 96000000, [4]byte{0x6f, 0xc4, 0x1f, 0xc3}) }},
@@ -131,12 +130,7 @@ func TestInboundBlockPayload(t *testing.T) {
 				command  string
 				size     uint32
 				checksum [4]byte
-			}{
-				{"block", 1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}},
-				{"cmpctblock", 1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}},
-				{"block", 16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}},
-				{"cmpctblock", 16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}},
-			} {
+			}{{"block", 1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}}, {"cmpctblock", 1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}}, {"block", 16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}}, {"cmpctblock", 16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}}} {
 				stream := &blockStream{size: refused.size}
 				err := refuseRead(t, stream, frameHeader{Command: refused.command, Size: refused.size, Checksum: refused.checksum})
 				_ = requireCapacityRefusal(t, err)
@@ -192,24 +186,23 @@ func TestInboundBlockPayload(t *testing.T) {
 			for _, sized := range []struct {
 				size     uint32
 				checksum [4]byte
-			}{
-				{1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}},
-				{16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}},
-			} {
+			}{{1048576, [4]byte{0x7e, 0x18, 0x39, 0xfd}}, {16777216, [4]byte{0x90, 0x50, 0xbe, 0x05}}} {
 				b := preheldBudget(t)
 				header := frameHeader{Command: "block", Size: sized.size, Checksum: sized.checksum}
 				stream := &blockStream{size: sized.size}
 				refused := true
-				measured := allocBytesPerOp(t, func() {
-					stream.served = 0
-					body, held, refusal := readInboundBlockPayload(stream, header, b)
-					if body != nil || held != nil || !isCapacityRefusal(refusal) {
-						refused = false
+				result := testing.Benchmark(func(bench *testing.B) {
+					for i := 0; i < bench.N; i++ {
+						stream.served = 0
+						body, held, refusal := readInboundBlockPayload(stream, header, b)
+						if body != nil || held != nil || !isCapacityRefusal(refusal) {
+							refused = false
+						}
 					}
 				})
-				requireTrue(t, refused, "size %d: the measured reader stopped refusing", sized.size)
+				requireTrue(t, result.N > 0 && refused, "size %d: the measured reader ran %d rounds, refusals intact=%v", sized.size, result.N, refused)
 				requireTrue(t, stream.served == sized.size, "size %d: last refusal drained %d bytes", sized.size, stream.served)
-				requireTrue(t, measured <= 131072, "size %d allocated %d bytes per refusal, want <= 131072", sized.size, measured)
+				requireTrue(t, result.AllocedBytesPerOp() <= 131072, "size %d allocated %d bytes per refusal, want <= 131072", sized.size, result.AllocedBytesPerOp())
 				requireUsed(t, b, 1073741824)
 			}
 		}},
@@ -231,15 +224,20 @@ func TestInboundBlockPayload(t *testing.T) {
 			stream := &blockStream{size: 70000, failAt: 33000, failErr: wrapped}
 			err := refuseRead(t, stream, frameHeader{Command: "block", Size: 70000})
 			requireOrdinaryError(t, err)
-			requireTrue(t, err == wrapped && errors.Is(err, sentinel) && stream.served == 33000, "read error %v after %d drained bytes", err, stream.served)
+			requireTrue(t, err == wrapped && errors.Is(err, sentinel) && stream.served == 33000, "read error %v after %d drained bytes", err, stream.served) //nolint:errorlint // H5 pins the exact error object, not an errors.Is relation.
 		}},
 		{"capacity_timeout", func(t *testing.T) {
-			stream := &blockStream{size: 70000, failAt: 33000, failErr: os.ErrDeadlineExceeded}
-			err := refuseRead(t, stream, frameHeader{Command: "block", Size: 70000})
-			requireOrdinaryError(t, err)
-			var partial partialFrameTimeoutError
-			requireTrue(t, errors.As(err, &partial) && errors.Is(err, os.ErrDeadlineExceeded), "timeout error = %v", err)
-			requireTrue(t, partial.part == "payload" && partial.read == 33024 && partial.want == 70024, "partial frame timeout = {%q, %d, %d}, want {payload, 33024, 70024}", partial.part, partial.read, partial.want)
+			for _, timed := range []struct {
+				size, failAt      uint32
+				wantRead, wantAll int
+			}{{300, 50, 74, 324}, {70000, 33000, 33024, 70024}} {
+				stream := &blockStream{size: timed.size, failAt: timed.failAt, failErr: os.ErrDeadlineExceeded}
+				err := refuseRead(t, stream, frameHeader{Command: "block", Size: timed.size})
+				requireOrdinaryError(t, err)
+				var partial partialFrameTimeoutError
+				requireTrue(t, errors.As(err, &partial) && errors.Is(err, os.ErrDeadlineExceeded), "size %d: timeout error = %v", timed.size, err)
+				requireTrue(t, partial.part == "payload" && partial.read == timed.wantRead && partial.want == timed.wantAll, "size %d: partial frame timeout = {%q, %d, %d}, want {payload, %d, %d}", timed.size, partial.part, partial.read, partial.want, timed.wantRead, timed.wantAll)
+			}
 		}},
 		{"capacity_bad_checksum", func(t *testing.T) {
 			checksum := wireChecksum(make([]byte, 200))
@@ -255,7 +253,7 @@ func TestInboundBlockPayload(t *testing.T) {
 			b := newTestBudget(t, 1073741824)
 			stream := &blockStream{size: 32770, payload: payload, failAt: 32769, failErr: sentinel}
 			got, lease, err := readInboundBlockPayload(stream, inboundTestHeader("block", payload), b)
-			requireTrue(t, got == nil && lease == nil && err == sentinel && stream.served == 32769, "incomplete last chunk = (%x, %v, %v) after %d bytes", got, lease, err, stream.served)
+			requireTrue(t, got == nil && lease == nil && err == sentinel && stream.served == 32769, "incomplete last chunk = (%x, %v, %v) after %d bytes", got, lease, err, stream.served) //nolint:errorlint // H5 pins the exact error object, not an errors.Is relation.
 			requireUsed(t, b, 0)
 
 			header := inboundTestHeader("block", payload)
@@ -275,7 +273,7 @@ func TestInboundBlockPayload(t *testing.T) {
 			}}
 			func() {
 				defer func() {
-					requireTrue(t, recover() == boom, "the reader's own panic value was not propagated")
+					requireTrue(t, recover() == boom, "the reader's own panic value was not propagated") //nolint:errorlint // H3 pins the identical panic value, not an error relation.
 				}()
 				_, _, _ = readInboundBlockPayload(stream, inboundTestHeader("block", payload), b)
 				t.Fatalf("reader returned instead of propagating the panic")
@@ -286,12 +284,10 @@ func TestInboundBlockPayload(t *testing.T) {
 			const want = "0cb94a64118ca106b5d62b7b0323085551b7688abb99fc47ad6f46aef79ad0e7"
 			for _, suffix := range []byte{0x00, 0xff} {
 				payload := make([]byte, 200)
-				for i := range payload[:116] {
+				for i := range payload {
 					payload[i] = byte(i)
 				}
-				for i := 116; i < len(payload); i++ {
-					payload[i] = suffix
-				}
+				copy(payload[116:], bytes.Repeat([]byte{suffix}, len(payload)-116))
 				err := refuseRead(t, &blockStream{size: 200, payload: payload}, inboundTestHeader("block", payload))
 				hash, ok := requireCapacityRefusal(t, err).BlockHash()
 				requireTrue(t, ok && hex.EncodeToString(hash[:]) == want, "suffix %#x: BlockHash = (%x, %v)", suffix, hash, ok)
@@ -317,16 +313,14 @@ func TestInboundBlockPayload(t *testing.T) {
 		{"prefix_completed_with_error", func(t *testing.T) {
 			sentinel := errors.New("prefix boundary failure")
 			payload := patternBytes(117)
-			for _, preheld := range []bool{false, true} {
+			for _, used := range []uint64{0, 1073741824} {
 				b := newTestBudget(t, 1073741824)
-				var used uint64
-				if preheld {
-					mustReserve(t, b, 1073741824)
-					used = 1073741824
+				if used > 0 {
+					mustReserve(t, b, used)
 				}
 				stream := &blockStream{size: 117, payload: payload, failAt: 116, failErr: sentinel}
 				got, lease, err := readInboundBlockPayload(stream, inboundTestHeader("block", payload), b)
-				requireTrue(t, got == nil && lease == nil && err == sentinel && stream.served == 116, "preheld=%v: completed prefix = (%x, %v, %v) after %d bytes", preheld, got, lease, err, stream.served)
+				requireTrue(t, got == nil && lease == nil && err == sentinel && stream.served == 116, "preheld=%d: completed prefix = (%x, %v, %v) after %d bytes", used, got, lease, err, stream.served) //nolint:errorlint // H5 pins the exact error object, not an errors.Is relation.
 				requireUsed(t, b, used)
 			}
 		}},
@@ -467,7 +461,7 @@ func refuseRead(t *testing.T, stream *blockStream, header frameHeader) error {
 	return err
 }
 
-// rejectRead pins a refusal that read no payload byte and charged nothing.
+// rejectRead pins a refusal that read nothing, charged nothing and left the generation open.
 func rejectRead(t *testing.T, header frameHeader, budget *inboundBlockBudget, wantText string) error {
 	t.Helper()
 	defer func() {
@@ -475,10 +469,15 @@ func rejectRead(t *testing.T, header frameHeader, budget *inboundBlockBudget, wa
 			t.Fatalf("reader panicked on a refused frame: %v", r)
 		}
 	}()
+	var gen <-chan struct{}
+	if budget != nil {
+		gen = generationOf(budget)
+	}
 	stream := &blockStream{size: 200, requests: []int{}}
 	payload, lease, err := readInboundBlockPayload(stream, header, budget)
 	requireTrue(t, payload == nil && lease == nil && err != nil && err.Error() == wantText, "refusal = (%x, %v, %v), want error %q", payload, lease, err, wantText)
 	requireTrue(t, stream.served == 0 && len(stream.requests) == 0, "refusal read %d payload bytes in %d requests", stream.served, len(stream.requests))
+	requireTrue(t, budget == nil || (generationOf(budget) == gen && !isClosed(gen)), "refusal replaced or closed the generation")
 	requireOrdinaryError(t, err)
 	return err
 }
