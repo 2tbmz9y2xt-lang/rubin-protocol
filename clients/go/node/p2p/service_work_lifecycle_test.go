@@ -1029,12 +1029,29 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 		closeDone := lifecycleClose(s)
 		waitDraining(t, s)
 		requireStillBlocked(t, closeDone, "Close")
+		select { // DRAINING is published but the Service context is not cancelled yet, so the waiter is still parked
+		case <-slot.done:
+			t.Fatal("the retry waiter ended before Close cancelled the Service context")
+		default:
+		}
 		s.startWG.Done()
 		requireReturned(t, closeDone, "Close")
 		requireDoneAtReturn(t, slot, "Close")
 		requireNoBlockRetryEffect(t, p, conn, "waiter woken by Close")
 	})
 	t.Run("close_fails_in_flight_write", func(t *testing.T) {
+		// A waiter held inside a write that ignores the connection close keeps Close blocked after Close cancelled the Service context and closed the connection.
+		held := blockRetryService(t, lifecycleService(t))
+		heldPeer, heldConn := blockRetryPeer(held, "lifecycle-retry-held-peer")
+		held.peers[heldPeer.addr()] = heldPeer
+		heldSlot, _, release := parkBlockRetryWrite(t, heldPeer, heldConn, hash)
+		heldClose := lifecycleClose(held)
+		requireCallReturns(t, "Close closing the held peer connection", func() { <-heldConn.closed })
+		requireStillBlocked(t, heldClose, "Close")
+		release()
+		requireReturned(t, heldClose, "Close")
+		requireDoneAtReturn(t, heldSlot, "Close")
+
 		s := blockRetryService(t, lifecycleService(t))
 		local, remote := net.Pipe()
 		defer func() { _ = remote.Close() }()
@@ -1055,14 +1072,15 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 		s := blockRetryService(t, lifecycleService(t))
 		armed, _ := blockRetryPeer(s, "lifecycle-retry-armed")
 		absent, absentConn := blockRetryPeer(s, "lifecycle-retry-absent")
-		slot := armBlockRetrySlot(t, armed, hash, make(chan struct{}), time.Now())
+		receiveStart := time.Now()
+		slot := armBlockRetrySlot(t, armed, hash, make(chan struct{}), receiveStart)
 		s.startWG.Add(1)
 		closeDone := lifecycleClose(s)
 		waitDraining(t, s)
 		requireEqual(t, absent.armBlockRetry(hash, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm with no slot while DRAINING")
 		requireNoBlockRetryEffect(t, absent, absentConn, "arm refused while DRAINING")
 		requireEqual(t, armed.armBlockRetry([32]byte{0x39}, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm with a slot while DRAINING")
-		requireBlockRetrySlot(t, armed, slot, hash, slot.deadline, blockRetryWaiting, "slot after the arm refused while DRAINING")
+		requireBlockRetrySlot(t, armed, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "slot after the arm refused while DRAINING")
 		s.startWG.Done()
 		requireReturned(t, closeDone, "Close")
 		requireDoneAtReturn(t, slot, "Close")

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// blockRetryDeadline is the life of a block re-request slot, measured from the receive
+// blockRetryDeadline bounds the life of a block re-request slot, measured from the receive
 // start of the refused frame; nothing observed later extends it.
 const blockRetryDeadline = 30 * time.Second
 
@@ -29,7 +29,7 @@ const (
 
 // blockRetrySlot is the one dormant block re-request a peer may hold. Every field except
 // phase is fixed at arm; phase is written only by the slot's waiter, under peer.retryMu.
-// The slot retains no block bytes, lease, reader or budget state.
+// The slot retains no block bytes, inbound block lease, reader or budget state.
 type blockRetrySlot struct {
 	hash     [32]byte
 	notify   <-chan struct{}
@@ -42,17 +42,20 @@ type blockRetrySlot struct {
 
 // armBlockRetry arms the peer's re-request slot for hash, given the capacity release
 // notification observed at the refusal and the refused frame's receive start (a time.Now
-// reading). It returns the first refusal in this order:
-//   - notify is nil: blockRetryNoNotification, before any lease, context or slot check.
+// reading). Call it only from the owning registered peer's frame-processing sequence, before
+// handleConn joins the waiter through finishBlockRetry, and without Service peersMu held
+// (acquireWork takes it). It returns the first refusal in this order:
+//   - notify is nil: blockRetryNoNotification, before any Service work lease, context or
+//     slot check.
 //   - the Service refuses a work lease, or its context is nil, already cancelled or has no
-//     cancel function beside it: blockRetryServiceClosed; a lease taken by the call is
-//     released before return and an existing slot is left unchanged.
+//     cancel function beside it: blockRetryServiceClosed; a Service work lease taken by the
+//     call is released before return and an existing slot is left unchanged.
 //   - a slot exists in either phase: blockRetryAlreadyArmed; its hash, notify, deadline,
-//     phase and waiter are unchanged and the lease taken by the call is released.
+//     phase and waiter are unchanged and the Service work lease taken by the call is released.
 //
 // Otherwise it publishes one WAITING slot whose deadline is receiveStart plus
-// blockRetryDeadline, transfers the lease to one started waiter and returns
-// blockRetryArmed. Arm sends nothing and changes no peer state.
+// blockRetryDeadline, transfers the Service work lease to one started waiter and returns
+// blockRetryArmed. Arm sends nothing, touches no connection and changes no PeerState.
 func (p *peer) armBlockRetry(hash [32]byte, notify <-chan struct{}, receiveStart time.Time) blockRetryArm {
 	if notify == nil {
 		return blockRetryNoNotification
@@ -85,8 +88,9 @@ func (p *peer) armBlockRetry(hash [32]byte, notify <-chan struct{}, receiveStart
 // runBlockRetry is the slot's only waiter. After notify closes it sends at most one getdata
 // (sendBlockRetry); it ends on the slot context, on the deadline timer, or after a send that
 // did not happen or failed. On exit it clears peer.retry, closes done and releases the
-// transferred lease inside one retryMu section, so no retryMu holder sees the slot cleared
-// while its lease is still held, and Service Close never returns before done is closed.
+// transferred Service work lease inside one retryMu section, so no retryMu holder sees the
+// slot cleared while that lease is still held, and Service Close never returns before done
+// is closed.
 func (p *peer) runBlockRetry(slot *blockRetrySlot, timer *time.Timer) {
 	defer func() {
 		timer.Stop()
@@ -115,11 +119,14 @@ func (p *peer) runBlockRetry(slot *blockRetrySlot, timer *time.Timer) {
 }
 
 // sendBlockRetry runs the send path after an observed release and reports whether the
-// getdata frame was written and SENT published. It writes nothing when the slot context is
-// cancelled, the engine terminal latch is set, or the bounded writer acquisition is cancelled
-// or reaches the slot deadline; the connection stays open on those paths. Any frame write
-// error is a send failure: the writer mutex is released first, then the error is recorded
-// with setLastError and only this connection is closed.
+// getdata frame was written and SENT published. It returns without writing, and leaves the
+// connection open, when its first check finds the slot context cancelled or the engine
+// terminal latch set, or when the bounded writer acquisition observes cancellation or the
+// slot deadline while contended or at its recheck after acquiring. The latch is checked only
+// at that first check, before the acquisition, so a latch set later may let this one getdata
+// go, as may a cancellation after the recheck. Any error from the frame write, including its
+// own deadline checks, is a send failure: the writer mutex is released first, then the error
+// is recorded with setLastError and only this connection is closed.
 func (p *peer) sendBlockRetry(slot *blockRetrySlot) bool {
 	if slot.ctx.Err() != nil || p.service.cfg.SyncEngine.TerminalFaulted() {
 		return false
@@ -157,10 +164,10 @@ func (p *peer) disposeBlockRetry(hash [32]byte) {
 
 // finishBlockRetry joins the slot's waiter. With no slot it returns at once; otherwise it
 // cancels the slot, closes the peer connection so a write in progress fails instead of
-// outliving the join, and returns only after done is closed and the waiter's lease is
-// released. A repeated call after the join finds no slot and returns at once. handleConn runs
-// it after the peer's frame reader has returned; arming a slot after it is outside the
-// supported path.
+// outliving the join, and returns only after done is closed and the waiter's Service work
+// lease is released. A repeated call after the join finds no slot and returns at once.
+// handleConn defers it, so it runs only when the peer's frame reader is not running; arming a
+// slot after it is outside the supported path.
 func (p *peer) finishBlockRetry() {
 	p.retryMu.Lock()
 	slot := p.retry
@@ -171,6 +178,6 @@ func (p *peer) finishBlockRetry() {
 	slot.cancel()
 	_ = p.conn.Close()
 	<-slot.done
-	p.retryMu.Lock() // barrier: the waiter releases its lease in the retryMu section that closed done
+	p.retryMu.Lock() // barrier: the waiter releases its Service work lease in the retryMu section that closed done
 	p.retryMu.Unlock()
 }

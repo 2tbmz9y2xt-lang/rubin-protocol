@@ -175,8 +175,9 @@ func requireNoBlockRetryEffect(t *testing.T, p *peer, conn *blockRetryConn, labe
 }
 
 // parkBlockRetryWrite arms hash with a released notification and holds the waiter inside its
-// first frame write until release is called; the write then succeeds.
-func parkBlockRetryWrite(t *testing.T, p *peer, conn *blockRetryConn, hash [32]byte) (*blockRetrySlot, func()) {
+// first frame write until release is called; the write then succeeds. It also returns the
+// receive start the slot was armed with.
+func parkBlockRetryWrite(t *testing.T, p *peer, conn *blockRetryConn, hash [32]byte) (*blockRetrySlot, time.Time, func()) {
 	t.Helper()
 	entered, gate := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -185,9 +186,10 @@ func parkBlockRetryWrite(t *testing.T, p *peer, conn *blockRetryConn, hash [32]b
 		<-gate
 		return len(b), nil
 	}
-	slot := armBlockRetrySlot(t, p, hash, blockRetryReleased(), time.Now())
+	receiveStart := time.Now()
+	slot := armBlockRetrySlot(t, p, hash, blockRetryReleased(), receiveStart)
 	requireChannelClosed(t, entered, "the waiter's gated write")
-	return slot, func() { close(gate) }
+	return slot, receiveStart, func() { close(gate) }
 }
 
 func requireCallReturns(t *testing.T, label string, call func()) {
@@ -206,8 +208,16 @@ func TestBlockRetryArm(t *testing.T) {
 		slot := armBlockRetrySlot(t, p, hash, notify, receiveStart)
 		require(t, slot.notify == notify, "slot notify is not the armed channel")
 		requireBlockRetrySlot(t, p, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "armed slot")
-		written, _ := conn.snapshot()
+		written, closes := conn.snapshot()
+		conn.mu.Lock()
+		deadlines := len(conn.deadlines)
+		conn.mu.Unlock()
+		state := p.snapshotState()
 		requireEqual(t, len(written), 0, "bytes written by arm")
+		requireEqual(t, closes, 0, "connection closes by arm")
+		requireEqual(t, deadlines, 0, "write deadlines set by arm")
+		requireEqual(t, state.LastError, "", "LastError after arm")
+		requireEqual(t, state.BanScore, 0, "BanScore after arm")
 		p.disposeBlockRetry(hash)
 		waitBlockRetryDone(t, slot, "dispose")
 		requireReturned(t, lifecycleClose(p.service), "Close")
@@ -216,9 +226,9 @@ func TestBlockRetryArm(t *testing.T) {
 		p, conn := blockRetryPeer(blockRetryService(t, nil), "block-retry-peer")
 		requireEqual(t, p.armBlockRetry(hash, nil, time.Now()), blockRetryNoNotification, "nil notify on an OPEN Service")
 		require(t, blockRetrySlotOf(p) == nil, "a nil notify created a slot")
-		slot, release := parkBlockRetryWrite(t, p, conn, hash)
+		slot, receiveStart, release := parkBlockRetryWrite(t, p, conn, hash)
 		requireEqual(t, p.armBlockRetry(other, nil, time.Now()), blockRetryNoNotification, "nil notify while a slot is armed")
-		requireBlockRetrySlot(t, p, slot, hash, slot.deadline, blockRetryWaiting, "slot after the nil notify")
+		requireBlockRetrySlot(t, p, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "slot after the nil notify")
 		release()
 		waitBlockRetrySent(t, p)
 		requireReturned(t, lifecycleClose(p.service), "Close")
@@ -272,40 +282,43 @@ func TestBlockRetryArm(t *testing.T) {
 		s.ctx, s.cancel = cancelled, cancel
 		refused("Service context cancelled without Close")
 		blockRetryService(t, s)
-		slot, release := parkBlockRetryWrite(t, p, conn, hash)
+		slot, receiveStart, release := parkBlockRetryWrite(t, p, conn, hash)
 		s.cancel()
 		requireEqual(t, p.armBlockRetry(other, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm on a cancelled Service context while a slot is armed")
-		requireBlockRetrySlot(t, p, slot, hash, slot.deadline, blockRetryWaiting, "slot after the refused arm")
+		requireBlockRetrySlot(t, p, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "slot after the refused arm")
 		release()
 		waitBlockRetryDone(t, slot, "the released waiter")
 		requireReturned(t, lifecycleClose(s), "Close")
 		refused("arm after Close returned")
-		requireReturned(t, lifecycleClose(s), "Close after every refused arm")
+		requireCallReturns(t, "the Service lease wait after the arm refused on a closed Service", s.loopWG.Wait) // a later Close only joins the first one
 	})
 	t.Run("concurrent_arm_single_slot", func(t *testing.T) {
 		p, conn := blockRetryPeer(blockRetryService(t, nil), "block-retry-peer")
-		notify, start := make(chan struct{}), make(chan struct{})
-		results := make(chan blockRetryArm, 16)
+		notify, start, receiveStart := make(chan struct{}), make(chan struct{}), time.Now()
+		var results [16]blockRetryArm
 		var arms sync.WaitGroup
-		for i := range 16 {
+		for i := range results {
 			arms.Go(func() {
 				<-start
-				results <- p.armBlockRetry([32]byte{byte(i)}, notify, time.Now())
+				results[i] = p.armBlockRetry([32]byte{byte(i)}, notify, receiveStart)
 			})
 		}
 		close(start)
 		arms.Wait()
-		close(results)
-		counts := map[blockRetryArm]int{}
-		for result := range results {
+		counts, armedHash := map[blockRetryArm]int{}, [32]byte{}
+		for i, result := range results {
 			counts[result]++
+			if result == blockRetryArmed {
+				armedHash = [32]byte{byte(i)}
+			}
 		}
 		require(t, counts[blockRetryArmed] == 1 && counts[blockRetryAlreadyArmed] == 15, "arm results=%v, want 1 armed and 15 already armed", counts)
 		slot := blockRetrySlotOf(p)
+		requireBlockRetrySlot(t, p, slot, armedHash, receiveStart.Add(30*time.Second), blockRetryWaiting, "the one armed slot")
 		close(notify)
 		waitBlockRetrySent(t, p)
 		written, _ := conn.snapshot()
-		require(t, bytes.Equal(written, blockRetryFrame(slot.hash)), "written=%x, want one frame for the armed hash", written)
+		require(t, bytes.Equal(written, blockRetryFrame(armedHash)), "written=%x, want one frame for the armed hash", written)
 		requireReturned(t, lifecycleClose(p.service), "Close")
 		waitBlockRetryDone(t, slot, "Close")
 	})
@@ -320,8 +333,13 @@ func TestBlockRetryArm(t *testing.T) {
 		slot := rearm("first arm", 1, make(chan struct{}), time.Now())
 		p.disposeBlockRetry([32]byte{1})
 		waitBlockRetryDone(t, slot, "dispose completion")
-		slot = rearm("arm after dispose", 2, blockRetryReleased(), time.Now().Add(-29*time.Second))
+		before, closes := conn.snapshot()
+		lastError := p.snapshotState().LastError
+		slot = rearm("arm after dispose", 2, blockRetryReleased(), time.Now().Add(-28*time.Second)) // deadline 2 s away, room for the send before it
 		waitBlockRetryDone(t, slot, "deadline completion after the send")
+		written, closesAfter := conn.snapshot()
+		require(t, bytes.Equal(written[len(before):], blockRetryFrame([32]byte{2})) && closesAfter == closes && p.snapshotState().LastError == lastError,
+			"deadline completion after the send: sent=%x closes=%d lastError=%q, want the getdata frame for hash 2 and no Close or LastError change", written[len(before):], closesAfter-closes, p.snapshotState().LastError)
 		slot = rearm("arm after the SENT deadline", 3, make(chan struct{}), time.Now().Add(-29*time.Second))
 		waitBlockRetryDone(t, slot, "timeout completion before release")
 		failing, gate := errors.New("block retry rearm write failure"), make(chan struct{})
@@ -510,8 +528,8 @@ func TestBlockRetryDispose(t *testing.T) {
 	})
 	t.Run("dispose_other_hash", func(t *testing.T) {
 		p, _ := blockRetryPeer(blockRetryService(t, nil), "block-retry-peer")
-		notify := make(chan struct{})
-		slot := armBlockRetrySlot(t, p, hash, notify, time.Now())
+		notify, receiveStart := make(chan struct{}), time.Now()
+		slot := armBlockRetrySlot(t, p, hash, notify, receiveStart)
 		for _, phase := range []blockRetryPhase{blockRetryWaiting, blockRetrySent} {
 			if phase == blockRetrySent {
 				close(notify)
@@ -522,7 +540,7 @@ func TestBlockRetryDispose(t *testing.T) {
 			case <-slot.done:
 			case <-time.After(lifecycleSettle):
 			}
-			requireBlockRetrySlot(t, p, slot, hash, slot.deadline, phase, "slot after dispose with another hash")
+			requireBlockRetrySlot(t, p, slot, hash, receiveStart.Add(30*time.Second), phase, "slot after dispose with another hash")
 		}
 		p.disposeBlockRetry(hash)
 		waitBlockRetryDone(t, slot, "dispose")
@@ -554,7 +572,7 @@ func TestBlockRetryDispose(t *testing.T) {
 		// The one-send history the race above almost never reaches: the dispose lands after the writer recheck,
 		// while the waiter is inside its write, so that write completes and the waiter then exits without a second send.
 		before, _ := conn.snapshot()
-		slot, release := parkBlockRetryWrite(t, p, conn, hash)
+		slot, _, release := parkBlockRetryWrite(t, p, conn, hash)
 		p.disposeBlockRetry(hash)
 		release()
 		waitBlockRetryDone(t, slot, "dispose during the write")
