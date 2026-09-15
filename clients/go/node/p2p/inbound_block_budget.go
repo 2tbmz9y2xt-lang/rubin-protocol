@@ -112,9 +112,10 @@ func (b *inboundBlockBudget) TryReserveOrSubscribe(charge uint64) (*inboundBlock
 	return &inboundBlockLease{owner: b, charge: charge, active: true}, nil
 }
 
-// ReplaceOrSubscribe re-prices one active lease of this budget in a single step. A refusal
-// keeps the old charge and the old used bytes; a success creates no second lease and
-// publishes freed capacity only when the charge strictly decreases.
+// ReplaceOrSubscribe re-prices one active lease of this budget in one step. A refusal keeps
+// the old charge and used bytes; a success creates no second lease and publishes freed
+// capacity only when the charge strictly decreases. A refused holder that waits on that
+// notification without releasing first, or bounding the wait, can starve.
 func (b *inboundBlockBudget) ReplaceOrSubscribe(lease *inboundBlockLease, newCharge uint64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

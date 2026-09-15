@@ -9,14 +9,15 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// readInboundBlockPayload reads one block or cmpctblock payload under a single checked
-// byte lease. Success returns the exact payload plus the live lease its caller now owns;
-// every other exit returns no payload and no lease, and reports the read or checksum error
-// ahead of any local capacity result (RUBIN_L1_P2P_AUX.md Section 2). Its caller supplies
-// a non-nil reader and a header already validated by readFrameHeader. Stream position per
-// exit: a precheck refusal reads nothing, a capacity refusal and a checksum error consume
-// the declared payload, a non-capacity refusal stops after the fixed prefix, and a read
-// error stops mid-frame.
+// readInboundBlockPayload reads one block or cmpctblock payload under one checked byte
+// lease. Success returns the exact payload with the live lease its caller owns; every other
+// exit returns no payload or lease and reports the read or checksum error ahead of any
+// local capacity result (RUBIN_L1_P2P_AUX.md Section 2). Its caller supplies a non-nil
+// reader and a header already validated by readFrameHeader and by the caller's own per-peer
+// cap; this reader rechecks only the fixed command cap, so compact negotiation stays the
+// caller's gate. Stream position per exit: a precheck refusal reads nothing, a capacity
+// refusal and a checksum error consume the declared payload, a non-capacity refusal stops
+// after the fixed prefix, and a read error stops mid-frame.
 func readInboundBlockPayload(r io.Reader, header frameHeader, budget *inboundBlockBudget) ([]byte, *inboundBlockLease, error) {
 	charge, err := inboundBlockPrechecks(header, budget)
 	if err != nil {

@@ -27,10 +27,13 @@ func TestInboundBlockBudget(t *testing.T) {
 			}
 		}},
 		{"config_no_proportional_alloc", func(t *testing.T) {
-			for _, configured := range []uint64{1073741824, 8589934592} {
-				got := testing.AllocsPerRun(1, func() { _, _ = newInboundBlockBudget(configured) })
-				requireTrue(t, got <= 1, "newInboundBlockBudget(%d) allocated %.0f objects per call, want <= 1", configured, got)
+			build := func(rounds int, configured uint64) {
+				for i := 0; i < rounds; i++ {
+					_, _ = newInboundBlockBudget(configured)
+				}
 			}
+			small, large := testing.Benchmark(func(bench *testing.B) { build(bench.N, 1073741824) }), testing.Benchmark(func(bench *testing.B) { build(bench.N, 8589934592) })
+			requireTrue(t, small.N > 0 && large.N > 0 && small.AllocedBytesPerOp() == large.AllocedBytesPerOp(), "newInboundBlockBudget allocated %d bytes per call over %d rounds at limit 1073741824 and %d over %d rounds at 8589934592", small.AllocedBytesPerOp(), small.N, large.AllocedBytesPerOp(), large.N)
 		}},
 		{"unsupported_command", func(t *testing.T) {
 			for _, command := range []string{"", "blocktxn", "tx", "getdata", "BLOCK", "block "} {
