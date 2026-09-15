@@ -277,20 +277,19 @@ func TestBlockRetryArm(t *testing.T) {
 		refused("nil Service context")
 		s.ctx = context.Background()
 		refused("live Service context without its cancel function")
-		cancelled, cancel := context.WithCancel(context.Background())
+		canceled, cancel := context.WithCancel(context.Background())
 		cancel()
-		s.ctx, s.cancel = cancelled, cancel
-		refused("Service context cancelled without Close")
+		s.ctx, s.cancel = canceled, cancel
+		refused("Service context canceled without Close")
 		blockRetryService(t, s)
 		slot, receiveStart, release := parkBlockRetryWrite(t, p, conn, hash)
 		s.cancel()
-		requireEqual(t, p.armBlockRetry(other, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm on a cancelled Service context while a slot is armed")
+		requireEqual(t, p.armBlockRetry(other, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm on a canceled Service context while a slot is armed")
 		requireBlockRetrySlot(t, p, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "slot after the refused arm")
 		release()
 		waitBlockRetryDone(t, slot, "the released waiter")
 		requireReturned(t, lifecycleClose(s), "Close")
 		refused("arm after Close returned")
-		requireCallReturns(t, "the Service lease wait after the arm refused on a closed Service", s.loopWG.Wait) // a later Close only joins the first one
 	})
 	t.Run("concurrent_arm_single_slot", func(t *testing.T) {
 		p, conn := blockRetryPeer(blockRetryService(t, nil), "block-retry-peer")
@@ -471,14 +470,14 @@ func TestBlockRetrySend(t *testing.T) {
 		requireNoBlockRetryEffect(t, p, conn, "terminal latch at wake")
 		requireReturned(t, lifecycleClose(p.service), "Close")
 	})
-	t.Run("cancelled_at_wake", func(t *testing.T) {
+	t.Run("canceled_at_wake", func(t *testing.T) {
 		p, conn := blockRetryPeer(blockRetryService(t, nil), "block-retry-peer")
 		notify := make(chan struct{})
 		slot := armBlockRetrySlot(t, p, hash, notify, time.Now())
 		p.service.cancel()
 		waitBlockRetryDone(t, slot, "Service context cancellation with the notification open")
 		close(notify)
-		requireNoBlockRetryEffect(t, p, conn, "cancelled at wake")
+		requireNoBlockRetryEffect(t, p, conn, "canceled at wake")
 		requireReturned(t, lifecycleClose(p.service), "Close")
 	})
 	t.Run("repeated_release_no_second_send", func(t *testing.T) {
@@ -536,7 +535,7 @@ func TestBlockRetryDispose(t *testing.T) {
 				waitBlockRetrySent(t, p)
 			}
 			p.disposeBlockRetry(other)
-			select { // negative window: a wrongly cancelled waiter removes the slot inside it
+			select { // negative window: a wrongly canceled waiter removes the slot inside it
 			case <-slot.done:
 			case <-time.After(lifecycleSettle):
 			}

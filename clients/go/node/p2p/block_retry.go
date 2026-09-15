@@ -47,7 +47,7 @@ type blockRetrySlot struct {
 // (acquireWork takes it). It returns the first refusal in this order:
 //   - notify is nil: blockRetryNoNotification, before any Service work lease, context or
 //     slot check.
-//   - the Service refuses a work lease, or its context is nil, already cancelled or has no
+//   - the Service refuses a work lease, or its context is nil, already canceled or has no
 //     cancel function beside it: blockRetryServiceClosed; a Service work lease taken by the
 //     call is released before return and an existing slot is left unchanged.
 //   - a slot exists in either phase: blockRetryAlreadyArmed; its hash, notify, deadline,
@@ -120,7 +120,7 @@ func (p *peer) runBlockRetry(slot *blockRetrySlot, timer *time.Timer) {
 
 // sendBlockRetry runs the send path after an observed release and reports whether the
 // getdata frame was written and SENT published. It returns without writing, and leaves the
-// connection open, when its first check finds the slot context cancelled or the engine
+// connection open, when its first check finds the slot context canceled or the engine
 // terminal latch set, or when the bounded writer acquisition observes cancellation or the
 // slot deadline while contended or at its recheck after acquiring. The latch is checked only
 // at that first check, before the acquisition, so a latch set later may let this one getdata
@@ -178,6 +178,6 @@ func (p *peer) finishBlockRetry() {
 	slot.cancel()
 	_ = p.conn.Close()
 	<-slot.done
-	p.retryMu.Lock() // barrier: the waiter releases its Service work lease in the retryMu section that closed done
-	p.retryMu.Unlock()
+	p.retryMu.Lock()   // barrier: the waiter releases its Service work lease in the retryMu section that closed done
+	p.retryMu.Unlock() //nolint:gocritic,staticcheck // badLock, SA2001: the empty critical section is the join barrier described above
 }

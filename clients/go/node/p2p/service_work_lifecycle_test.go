@@ -1010,7 +1010,7 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
 }
 
-// TestServiceWorkLifecycleBlockRetry proves the block re-request waiter is a leased Service worker: Close wakes or fails it and returns only after it ended, a draining Service refuses to arm, and handleConn joins it before unregistering the peer.
+// TestServiceWorkLifecycleBlockRetry proves the block re-request waiter is a leased Service worker: Close wakes it before the release, fails its in-flight write or waits for a write that outlives the connection close, and returns only after it ended; a draining Service refuses to arm with or without a slot; and handleConn joins it before unregistering the peer.
 func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 	hash := [32]byte{0x28}
 	requireDoneAtReturn := func(t *testing.T, slot *blockRetrySlot, label string) {
@@ -1029,9 +1029,9 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 		closeDone := lifecycleClose(s)
 		waitDraining(t, s)
 		requireStillBlocked(t, closeDone, "Close")
-		select { // DRAINING is published but the Service context is not cancelled yet, so the waiter is still parked
+		select { // DRAINING is published but the Service context is not canceled yet, so the waiter is still parked
 		case <-slot.done:
-			t.Fatal("the retry waiter ended before Close cancelled the Service context")
+			t.Fatal("the retry waiter ended before Close canceled the Service context")
 		default:
 		}
 		s.startWG.Done()
@@ -1040,7 +1040,7 @@ func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
 		requireNoBlockRetryEffect(t, p, conn, "waiter woken by Close")
 	})
 	t.Run("close_fails_in_flight_write", func(t *testing.T) {
-		// A waiter held inside a write that ignores the connection close keeps Close blocked after Close cancelled the Service context and closed the connection.
+		// A waiter held inside a write that ignores the connection close keeps Close blocked after Close canceled the Service context and closed the connection.
 		held := blockRetryService(t, lifecycleService(t))
 		heldPeer, heldConn := blockRetryPeer(held, "lifecycle-retry-held-peer")
 		held.peers[heldPeer.addr()] = heldPeer
