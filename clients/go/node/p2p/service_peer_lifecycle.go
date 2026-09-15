@@ -51,6 +51,7 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 	defer s.unregisterPeer(current)
+	defer current.finishBlockRetry() // runs first: the retry waiter is joined before unregistration
 
 	s.cfg.SyncEngine.RecordBestKnownHeight(state.RemoteVersion.BestHeight)
 	if err := s.sendPostHandshakeAnnouncements(current); err != nil {

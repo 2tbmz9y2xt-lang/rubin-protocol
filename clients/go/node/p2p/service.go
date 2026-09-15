@@ -132,6 +132,10 @@ type peer struct {
 
 	compactMu sync.Mutex
 	compact   peerCompactRelayState
+
+	// retry is the peer's single block re-request slot (block_retry.go); nil is no slot.
+	retryMu sync.Mutex
+	retry   *blockRetrySlot
 }
 
 // NewService validates and normalizes cfg before atomically claiming the
