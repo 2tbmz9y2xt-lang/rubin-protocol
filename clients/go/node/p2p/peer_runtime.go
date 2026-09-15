@@ -35,6 +35,7 @@ func (e blockTxnStaleBodyError) Error() string {
 var (
 	errLateBlockTxnIgnored      = errors.New("ignored late blocktxn response")
 	errStaleLateBlockTxnIgnored = errors.New("ignored stale blocktxn response")
+	errInboundBlockDrained      = errors.New("inbound block frame drained for capacity")
 )
 
 type postHandshakeFrameTiming struct {
@@ -199,6 +200,7 @@ func boundedFrameStallBudget(configured time.Duration) time.Duration {
 }
 
 func (p *peer) run(ctx context.Context) error {
+	defer p.releaseInboundLease()
 	var lateBlockTxn *compactOutstandingRequest
 	recordExpiredFallback := func() error {
 		expired, committed, err := p.sendExpiredCompactOutstandingFallback(ctx, time.Time{})
@@ -235,7 +237,7 @@ func (p *peer) run(ctx context.Context) error {
 		frame, nextLateBlockTxn, err := p.readPostHandshakeFrame(ctx, lateBlockTxn)
 		lateBlockTxn = nextLateBlockTxn
 		if err != nil {
-			if errors.Is(err, errLateBlockTxnIgnored) || errors.Is(err, errStaleLateBlockTxnIgnored) || shouldIgnoreReadError(err) {
+			if errors.Is(err, errLateBlockTxnIgnored) || errors.Is(err, errStaleLateBlockTxnIgnored) || errors.Is(err, errInboundBlockDrained) || shouldIgnoreReadError(err) {
 				continue
 			}
 			return normalizeReadError(err)
@@ -246,7 +248,9 @@ func (p *peer) run(ctx context.Context) error {
 				return err
 			}
 		}
-		if err := p.handleMessage(frame); err != nil {
+		err = p.handleMessage(frame)
+		p.releaseInboundLease()
+		if err != nil {
 			return err
 		}
 		if !fallbackBeforeMessage {
@@ -284,6 +288,9 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, lateBlockTxn *compact
 	if err := timing.validatePayload(header.Size); err != nil {
 		return frame, lateBlockTxn, err
 	}
+	if header.Command == messageBlock {
+		return p.readBudgetedBlockFrame(header, reader)
+	}
 	return p.readPostHandshakePayload(header, reader)
 }
 
@@ -298,6 +305,36 @@ func (p *peer) readPostHandshakePayload(header frameHeader, reader *compactFallb
 		return message{}, lateBlockTxn, err
 	}
 	return message{Command: header.Command, Payload: payload}, lateBlockTxn, nil
+}
+
+// readBudgetedBlockFrame reads a validated block frame's payload under one lease of the
+// Service inbound budget and passes the read result through finishPayload. On success
+// p.inboundLease holds that lease; every error return has released it. When finishPayload
+// reports a capacity refusal, it returns errInboundBlockDrained with the stream at the next
+// frame, after calling armBlockRetry with the refusal's header hash when it carries one and
+// ignoring the arm result; any other error is returned as finishPayload reports it.
+func (p *peer) readBudgetedBlockFrame(header frameHeader, reader *compactFallbackReader) (message, *compactOutstandingRequest, error) {
+	payload, lease, err := readInboundBlockPayload(reader, header, p.service.inboundBudget)
+	err = normalizeNestedPartialFrameTimeout(err)
+	if err = reader.timing.finishPayload(err); err == nil {
+		p.inboundLease = lease
+		return message{Command: header.Command, Payload: payload}, reader.lateBlockTxn, nil
+	}
+	lease.Release()
+	var refusal inboundBlockBudgetError
+	if !errors.As(err, &refusal) || refusal.Resource() != inboundBudgetCapacityResource {
+		return message{}, reader.lateBlockTxn, err
+	}
+	if hash, ok := refusal.BlockHash(); ok {
+		p.armBlockRetry(hash, refusal.Notification(), reader.timing.frameStart)
+	}
+	return message{}, reader.lateBlockTxn, errInboundBlockDrained
+}
+
+// releaseInboundLease releases the lease p.inboundLease holds, if any, and clears it.
+func (p *peer) releaseInboundLease() {
+	p.inboundLease.Release()
+	p.inboundLease = nil
 }
 
 func (p *peer) readSpecializedBlockTxnFrame(header frameHeader, reader *compactFallbackReader, lateBlockTxn *compactOutstandingRequest) (message, *compactOutstandingRequest, bool, error) {

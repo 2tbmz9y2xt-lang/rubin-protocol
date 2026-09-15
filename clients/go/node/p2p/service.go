@@ -40,6 +40,11 @@ type ServiceConfig struct {
 	TxPool               TxPool
 	TxMetadataFunc       func([]byte) (node.RelayTxMetadata, error)
 	Now                  func() time.Time
+	// InboundBlockBudgetBytes is the byte limit of the Service inbound budget under which peer
+	// readers read block message payloads after the handshake. Zero selects 1073741824; any other
+	// value outside 1073741824 to 8589934592 inclusive fails NewService with the budget range
+	// error, which follows the other configuration checks and precedes the DA relay state claim.
+	InboundBlockBudgetBytes uint64
 }
 
 type Service struct {
@@ -107,6 +112,7 @@ type Service struct {
 	// labeled buckets cannot be proven non-overlapping under the
 	// current cleanup graph (issue #1307).
 	peerLifecycleExits atomic.Uint64
+	inboundBudget      *inboundBlockBudget
 }
 
 type peerQuotaLock struct {
@@ -136,6 +142,9 @@ type peer struct {
 	// retry is the peer's single block re-request slot (block_retry.go); nil is no slot.
 	retryMu sync.Mutex
 	retry   *blockRetrySlot
+	// inboundLease is the budget lease of the block frame this peer is handling, nil between
+	// frames. Only the peer's run loop goroutine touches it, so no lock guards it.
+	inboundLease *inboundBlockLease
 }
 
 // NewService validates and normalizes cfg before atomically claiming the
@@ -145,6 +154,10 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		return nil, err
 	}
 	cfg = normalizeServiceConfig(cfg)
+	inboundBudget, err := newInboundBlockBudget(cfg.InboundBlockBudgetBytes)
+	if err != nil {
+		return nil, err
+	}
 	expectedRelay := cfg.SyncEngine.DARelayState()
 	outboundAddrs := normalizeDialTargets(cfg.BootstrapPeers)
 	addrMgr := newAddrManager(cfg.Now)
@@ -162,6 +175,7 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		txSeen:         newBoundedHashSet(defaultTxSeenCapacity),
 		orphans:        newOrphanPool(500),
 		daRelay:        expectedRelay,
+		inboundBudget:  inboundBudget,
 	}
 	if _, err := cfg.SyncEngine.ClaimDARelayState(expectedRelay, service.admitDetachedReorgDA); err != nil {
 		return nil, err
