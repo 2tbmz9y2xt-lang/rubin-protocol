@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"runtime"
 	"sync"
@@ -1007,6 +1008,132 @@ func TestServiceWorkLifecycleFreshServiceIndependent(t *testing.T) {
 	must(t, fresh.AnnounceTx(minimalValidTxBytes(t)), "fresh Service AnnounceTx")
 	requireClosedRejection(t, closedService.AnnounceBlock(node.DevnetGenesisBlockBytes()), "closed AnnounceBlock")
 	requireReturned(t, lifecycleClose(fresh), "fresh Close")
+}
+
+// TestServiceWorkLifecycleBlockRetry proves the block re-request waiter is a leased Service worker: Close wakes it before the release, fails its in-flight write or waits for a write that outlives the connection close, and returns only after it ended; a draining Service refuses to arm with or without a slot; and handleConn joins it before unregistering the peer.
+func TestServiceWorkLifecycleBlockRetry(t *testing.T) {
+	hash := [32]byte{0x28}
+	requireDoneAtReturn := func(t *testing.T, slot *blockRetrySlot, label string) {
+		t.Helper()
+		select {
+		case <-slot.done:
+		default:
+			t.Fatalf("%s returned before the retry waiter closed done", label)
+		}
+	}
+	t.Run("close_wakes_parked_waiter", func(t *testing.T) {
+		s := blockRetryService(t, lifecycleService(t))
+		p, conn := blockRetryPeer(s, "lifecycle-retry-peer")
+		slot := armBlockRetrySlot(t, p, hash, make(chan struct{}), time.Now())
+		s.startWG.Add(1) // parks Close after its DRAINING publication, before it cancels the Service context
+		closeDone := lifecycleClose(s)
+		waitDraining(t, s)
+		requireStillBlocked(t, closeDone, "Close")
+		select { // DRAINING is published but the Service context is not canceled yet, so the waiter is still parked
+		case <-slot.done:
+			t.Fatal("the retry waiter ended before Close canceled the Service context")
+		default:
+		}
+		s.startWG.Done()
+		requireReturned(t, closeDone, "Close")
+		requireDoneAtReturn(t, slot, "Close")
+		requireNoBlockRetryEffect(t, p, conn, "waiter woken by Close")
+	})
+	t.Run("close_fails_in_flight_write", func(t *testing.T) {
+		// A waiter held inside a write that ignores the connection close keeps Close blocked after Close canceled the Service context and closed the connection.
+		held := blockRetryService(t, lifecycleService(t))
+		heldPeer, heldConn := blockRetryPeer(held, "lifecycle-retry-held-peer")
+		held.peers[heldPeer.addr()] = heldPeer
+		heldSlot, _, release := parkBlockRetryWrite(t, heldPeer, heldConn, hash)
+		heldClose := lifecycleClose(held)
+		requireCallReturns(t, "Close closing the held peer connection", func() { <-heldConn.closed })
+		requireStillBlocked(t, heldClose, "Close")
+		release()
+		requireReturned(t, heldClose, "Close")
+		requireDoneAtReturn(t, heldSlot, "Close")
+
+		s := blockRetryService(t, lifecycleService(t))
+		local, remote := net.Pipe()
+		defer func() { _ = remote.Close() }()
+		var writes atomic.Int64
+		p := &peer{conn: &lifecycleGateConn{Conn: local, writes: &writes}, service: s, state: node.PeerState{Addr: "lifecycle-retry-write-peer"}}
+		s.peers[p.addr()] = p
+		slot := armBlockRetrySlot(t, p, hash, blockRetryReleased(), time.Now())
+		must(t, remote.SetReadDeadline(time.Now().Add(lifecycleWatchdog)), "SetReadDeadline")
+		_, err := remote.Read(make([]byte, 1)) // one header byte: the waiter is inside its frame write, parked on the rest
+		must(t, err, "read the first getdata byte")
+		requireReturned(t, lifecycleClose(s), "Close")
+		requireDoneAtReturn(t, slot, "Close")
+		state := p.snapshotState()
+		require(t, state.LastError == io.ErrClosedPipe.Error() && state.BanScore == 0 && writes.Load() == 1 && blockRetrySlotOf(p) == nil,
+			"lastError=%q ban=%d writes=%d slot=%v, want the closed-pipe write failure, no ban, one write, no slot", state.LastError, state.BanScore, writes.Load(), blockRetrySlotOf(p) != nil)
+	})
+	t.Run("arm_rejected_while_draining", func(t *testing.T) {
+		s := blockRetryService(t, lifecycleService(t))
+		armed, _ := blockRetryPeer(s, "lifecycle-retry-armed")
+		absent, absentConn := blockRetryPeer(s, "lifecycle-retry-absent")
+		receiveStart := time.Now()
+		slot := armBlockRetrySlot(t, armed, hash, make(chan struct{}), receiveStart)
+		s.startWG.Add(1)
+		closeDone := lifecycleClose(s)
+		waitDraining(t, s)
+		requireEqual(t, absent.armBlockRetry(hash, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm with no slot while DRAINING")
+		requireNoBlockRetryEffect(t, absent, absentConn, "arm refused while DRAINING")
+		requireEqual(t, armed.armBlockRetry([32]byte{0x39}, make(chan struct{}), time.Now()), blockRetryServiceClosed, "arm with a slot while DRAINING")
+		requireBlockRetrySlot(t, armed, slot, hash, receiveStart.Add(30*time.Second), blockRetryWaiting, "slot after the arm refused while DRAINING")
+		s.startWG.Done()
+		requireReturned(t, closeDone, "Close")
+		requireDoneAtReturn(t, slot, "Close")
+	})
+	t.Run("handle_conn_joins_before_unregister", func(t *testing.T) {
+		h := newTestHarness(t, 1, "127.0.0.1:0", nil) // eight peer-manager slots, so a late send-failure upsert would re-insert the removed peer
+		s := blockRetryService(t, h.service)
+		s.cfg.PeerRuntimeConfig.ReadDeadline = 0
+		cfg := s.cfg.PeerRuntimeConfig
+		local, remote := net.Pipe()
+		defer func() { _ = remote.Close() }()
+		parked := make(chan struct{})
+		conn := newBlockRetryConn(local)
+		conn.writeHook = func(b []byte) (int, error) {
+			if !bytes.Contains(b, []byte("getdata")) {
+				return local.Write(b)
+			}
+			close(parked)
+			<-conn.closed // only this wrapper's own Close releases the write; the remote close does not
+			return 0, net.ErrClosed
+		}
+		const addr = "127.0.0.1:19112"
+		handled := make(chan error, 1)
+		go func() { handled <- s.handleConn(conn, addr) }()
+		must(t, remote.SetReadDeadline(time.Now().Add(lifecycleWatchdog)), "SetReadDeadline")
+		must(t, completeRemoteHandshake(remote, cfg, testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)), "remote handshake")
+		for command := ""; command != messageGetAddr; { // getaddr is the last announcement written through the plain writer lock
+			frame, err := readFrame(remote, networkMagic(cfg.Network), cfg.MaxMessageSize)
+			must(t, err, "read a post-handshake announcement")
+			command = frame.Command
+		}
+		s.peersMu.RLock()
+		current := s.peers[addr]
+		s.peersMu.RUnlock()
+		require(t, current != nil, "peer %q is not registered after its announcements", addr)
+		notify := make(chan struct{})
+		slot := armBlockRetrySlot(t, current, hash, notify, time.Now())
+		close(notify)
+		requireChannelClosed(t, parked, "the waiter's getdata write")
+		must(t, remote.Close(), "close the remote end") // ends the peer's read loop; it cannot release the parked getdata write
+		select {
+		case err := <-handled: // the close can land before the read loop sets its read deadline, which then fails on the closed pipe
+			require(t, err == nil || errors.Is(err, io.ErrClosedPipe), "handleConn err=%v, want nil or the closed-pipe read-side error", err)
+		case <-time.After(lifecycleWatchdog):
+			t.Fatalf("handleConn did not return within %s", lifecycleWatchdog)
+		}
+		requireDoneAtReturn(t, slot, "handleConn")
+		require(t, blockRetrySlotOf(current) == nil, "slot still present after handleConn returned")
+		for _, state := range h.peerManager.Snapshot() {
+			require(t, state.Addr != addr, "peer manager holds %+v after handleConn returned", state)
+		}
+		requireReturned(t, lifecycleClose(s), "Close")
+	})
 }
 
 // TestTerminalPersistenceNewSkipsTheFencedTTLAdvance pins that a published
