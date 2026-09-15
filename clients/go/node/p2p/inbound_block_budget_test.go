@@ -75,6 +75,8 @@ func TestInboundBlockBudget(t *testing.T) {
 			spawned := runtime.NumGoroutine() - before
 			requireTrue(t, spawned <= 10, "1000 refusals left %d new goroutines", spawned)
 			requireUsed(t, b, 1000)
+			_, wider := newTestBudget(t, 1073741824).TryReserveOrSubscribe(1073741825)
+			_ = assertResourceTuple(t, wider, "LOCAL_RESOURCE_UNAVAILABLE(inbound_budget_capacity)", "inbound_budget_capacity", true, false)
 			requireTrue(t, holder.active && holder.charge == 1000, "refusal disturbed the existing holder: active=%v charge=%d", holder.active, holder.charge)
 			holder.Release()
 			mustReserve(t, b, 1073741824)
