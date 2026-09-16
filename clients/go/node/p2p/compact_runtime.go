@@ -22,7 +22,9 @@ type compactModeSnapshot struct {
 type peerCompactRelayState struct {
 	remoteMode  compactModeSnapshot
 	outstanding *compactOutstandingRequest
-	announced   []compactBlockAnnouncement
+	// outstandingLease is the inbound budget lease bound to outstanding, nil when none is bound.
+	outstandingLease *inboundBlockLease
+	announced        []compactBlockAnnouncement
 }
 
 type compactBlockAnnouncement struct {
@@ -192,7 +194,43 @@ func (p *peer) sendCompactOutstandingRequest(req compactOutstandingRequest) erro
 		return err
 	}
 	p.activateCompactOutstandingRequest(req)
+	p.bindCompactOutstandingLease(p.inboundLease)
+	p.inboundLease = nil
 	return nil
+}
+
+// bindCompactOutstandingLease makes lease, which may be nil, the lease bound to the outstanding
+// request and releases the lease it replaces after compactMu is dropped.
+func (p *peer) bindCompactOutstandingLease(lease *inboundBlockLease) {
+	p.compactMu.Lock()
+	previous := p.compact.outstandingLease
+	p.compact.outstandingLease = lease
+	p.compactMu.Unlock()
+	previous.Release()
+}
+
+// takeCompactOutstandingLeaseForBlock detaches and returns the bound lease when the outstanding
+// request is for blockHash, expired or not, and leaves that request in place; otherwise it
+// returns nil.
+func (p *peer) takeCompactOutstandingLeaseForBlock(blockHash [32]byte) *inboundBlockLease {
+	p.compactMu.Lock()
+	defer p.compactMu.Unlock()
+	if p.compact.outstanding == nil || p.compact.outstanding.BlockHash != blockHash {
+		return nil
+	}
+	lease := p.compact.outstandingLease
+	p.compact.outstandingLease = nil
+	return lease
+}
+
+// releaseCompactOutstandingLease releases the bound lease, if any, after compactMu is dropped and
+// leaves the outstanding request in place.
+func (p *peer) releaseCompactOutstandingLease() {
+	p.compactMu.Lock()
+	lease := p.compact.outstandingLease
+	p.compact.outstandingLease = nil
+	p.compactMu.Unlock()
+	lease.Release()
 }
 
 func (p *peer) compactOutstandingRequestSnapshot() (compactOutstandingRequest, bool) {
@@ -235,35 +273,45 @@ func (p *peer) popCompactOutstandingRequest() (compactOutstandingRequest, bool) 
 	}
 	// Stored outstanding requests are immutable; keep large tx-byte cloning outside compactMu.
 	req := *p.compact.outstanding
-	p.compact.outstanding = nil
+	lease := p.compact.outstandingLease
+	p.compact.outstanding, p.compact.outstandingLease = nil, nil
 	p.compactMu.Unlock()
+	lease.Release()
 	return cloneCompactOutstandingRequest(req), true
 }
 
 func (p *peer) popExpiredCompactOutstandingBlockHashAndPayloadCap() ([32]byte, uint32, bool) {
 	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
 	if p.compact.outstanding == nil || !p.compactOutstandingRequestExpiredLocked() {
+		p.compactMu.Unlock()
 		return [32]byte{}, 0, false
 	}
 	blockHash := p.compact.outstanding.BlockHash
 	blockTxnPayloadCap := p.compact.outstanding.BlockTxnPayloadCap
-	p.compact.outstanding = nil
+	lease := p.compact.outstandingLease
+	p.compact.outstanding, p.compact.outstandingLease = nil, nil
+	p.compactMu.Unlock()
+	lease.Release()
 	return blockHash, blockTxnPayloadCap, true
 }
 
 func (p *peer) clearCompactOutstandingRequestForBlock(blockHash [32]byte) {
+	var lease *inboundBlockLease
 	p.compactMu.Lock()
 	if p.compact.outstanding != nil && p.compact.outstanding.BlockHash == blockHash {
-		p.compact.outstanding = nil
+		lease = p.compact.outstandingLease
+		p.compact.outstanding, p.compact.outstandingLease = nil, nil
 	}
 	p.compactMu.Unlock()
+	lease.Release()
 }
 
 func (p *peer) clearCompactOutstandingRequest() {
 	p.compactMu.Lock()
-	p.compact.outstanding = nil
+	lease := p.compact.outstandingLease
+	p.compact.outstanding, p.compact.outstandingLease = nil, nil
 	p.compactMu.Unlock()
+	lease.Release()
 }
 
 func (p *peer) compactOutstandingRequestExpiredLocked() bool {

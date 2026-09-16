@@ -717,7 +717,7 @@ func TestHandleCmpctBlockIgnoresMalformedLocalCandidates(t *testing.T) {
 	p.service.cfg.TxPool = pool
 	payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Nonce1: 201, Nonce2: 202, ShortIDs: []compactShortID{shortID}})
 
-	if err := p.handleCmpctBlock(payload); err != nil {
+	if err := p.handleCmpctBlock(compactFrameLease(t, p, payload)); err != nil {
 		t.Fatalf("handleCmpctBlock with malformed local candidate: %v", err)
 	}
 	if p.snapshotState().BanScore != 0 {
@@ -752,7 +752,7 @@ func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
 	p := newCompactScriptedPeer(t)
 	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
-	requireNoCompactErr(t, p.handleCmpctBlock(full), "already-have compact block")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, full)), "already-have compact block")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("already-have compact block did not clear matching outstanding request")
 	}
@@ -764,7 +764,7 @@ func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
 	tinyTarget[31] = 0x01
 	powInvalidHeader := compactHeaderWithTarget(header, tinyTarget)
 	p = newCompactScriptedPeer(t)
-	err := p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: powInvalidHeader, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}}))
+	err := p.handleCmpctBlock(compactFrameLease(t, p, mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: powInvalidHeader, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})))
 	if err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("pow-invalid compact header err=%v state=%+v", err, p.snapshotState())
 	}
@@ -776,14 +776,14 @@ func TestHandleCmpctBlockValidationAndFallbackEdges(t *testing.T) {
 	// predicate follows the ENGINE, so the engine is what must move off devnet.
 	retargetPeerEngine(t, p, "regtest", node.DevnetGenesisChainID())
 	p.service.cfg.SyncConfig.ExpectedTarget = &wrongExpected
-	err = p.handleCmpctBlock(full)
+	err = p.handleCmpctBlock(compactFrameLease(t, p, full))
 	if err == nil || !strings.Contains(err.Error(), "target mismatch") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("target-mismatch compact header err=%v state=%+v", err, p.snapshotState())
 	}
 
 	p = newCompactScriptedPeer(t)
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 301, 302), 301, 302)
-	requireNoCompactErr(t, p.handleCmpctBlock(missing), "missing compact block with existing outstanding")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, missing)), "missing compact block with existing outstanding")
 	requireCompactFrame(t, p, messageGetData)
 
 	p = newCompactScriptedPeer(t)
@@ -1049,14 +1049,14 @@ func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
 	full := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
 
 	p := newCompactScriptedPeer(t)
-	if err := p.handleCmpctBlock(nil); err == nil || p.snapshotState().BanScore == 0 {
+	if err := p.handleCmpctBlock(compactFrameLease(t, p, nil)); err == nil || p.snapshotState().BanScore == 0 {
 		t.Fatalf("malformed cmpctblock err=%v state=%+v", err, p.snapshotState())
 	}
 
 	p = newCompactScriptedPeer(t)
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 801, 802), 801, 802)
 	p.service.cfg.BlockStore = nil
-	if err := p.handleCmpctBlock(full); err == nil || !strings.Contains(err.Error(), "nil blockstore") {
+	if err := p.handleCmpctBlock(compactFrameLease(t, p, full)); err == nil || !strings.Contains(err.Error(), "nil blockstore") {
 		t.Fatalf("hasBlock cmpctblock err=%v, want nil blockstore", err)
 	}
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
@@ -1064,7 +1064,7 @@ func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
 	}
 
 	p = newCompactScriptedPeer(t)
-	requireNoCompactErr(t, p.handleCmpctBlock(missing), "missing compact block")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, missing)), "missing compact block")
 	requireCompactFrame(t, p, messageGetBlockTxn)
 	if snap, ok := p.compactOutstandingRequestSnapshot(); !ok || snap.BlockHash != blockHash || snap.BlockTxnPayloadCap == 0 {
 		t.Fatalf("outstanding=%+v ok=%v", snap, ok)
@@ -1072,12 +1072,12 @@ func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
 
 	p = newCompactScriptedPeer(t)
 	tooMany := oversizedCmpctBlockShortIDPayload(header)
-	requireNoCompactErr(t, p.handleCmpctBlock(tooMany), "missing overflow fallback")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, tooMany)), "missing overflow fallback")
 	requireCompactFrame(t, p, messageGetData)
 
 	p = newCompactScriptedPeer(t)
 	truncatedTooMany := oversizedCmpctBlockShortIDCountPayload(header)
-	if err := p.handleCmpctBlock(truncatedTooMany); err == nil || !strings.Contains(err.Error(), "cmpctblock payload truncated short IDs") {
+	if err := p.handleCmpctBlock(compactFrameLease(t, p, truncatedTooMany)); err == nil || !strings.Contains(err.Error(), "cmpctblock payload truncated short IDs") {
 		t.Fatalf("truncated oversized short IDs err=%v, want malformed truncated short IDs", err)
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
@@ -1085,7 +1085,7 @@ func TestInternalCompactReceiveMissingAndFallbackBranches(t *testing.T) {
 	}
 
 	p = newCompactScriptedPeer(t)
-	requireNoCompactErr(t, p.handleCmpctBlock(full), "prefilled compact block")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, full)), "prefilled compact block")
 	if have, err := p.service.hasBlock(blockHash); err != nil || !have {
 		t.Fatalf("hasBlock=%v err=%v", have, err)
 	}
@@ -1096,7 +1096,7 @@ func TestCompactOversizedFallbackSkipsAlreadyStoredBlock(t *testing.T) {
 	p := newCompactScriptedPeer(t)
 	requireNoCompactErr(t, p.handleBlock(node.DevnetGenesisBlockBytes()), "seed existing block")
 	setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 901, 902), 901, 902)
-	requireNoCompactErr(t, p.handleCmpctBlock(oversizedCmpctBlockShortIDPayload(header)), "already-have oversized compact fallback")
+	requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, oversizedCmpctBlockShortIDPayload(header))), "already-have oversized compact fallback")
 	if _, ok := p.compactOutstandingRequestSnapshot(); ok {
 		t.Fatal("already-have oversized compact fallback did not clear matching outstanding request")
 	}
@@ -1111,7 +1111,7 @@ func TestCompactOversizedFallbackValidatesHeaderAndShape(t *testing.T) {
 	tinyTarget[31] = 0x01
 	powInvalidHeader := compactHeaderWithTarget(header, tinyTarget)
 	p := newCompactScriptedPeer(t)
-	if err := p.handleCmpctBlock(oversizedCmpctBlockShortIDPayload(powInvalidHeader)); err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
+	if err := p.handleCmpctBlock(compactFrameLease(t, p, oversizedCmpctBlockShortIDPayload(powInvalidHeader))); err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("invalid oversized fallback header err=%v state=%+v", err, p.snapshotState())
 	}
 	if p.conn.(*scriptedConn).Buffer.Len() != 0 {
@@ -1128,7 +1128,7 @@ func TestHandleCmpctBlockValidatesHeaderBeforeBlockstore(t *testing.T) {
 
 	p := newCompactScriptedPeer(t)
 	p.service.cfg.BlockStore = nil
-	err := p.handleCmpctBlock(payload)
+	err := p.handleCmpctBlock(compactFrameLease(t, p, payload))
 	if err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("pow-invalid compact header err=%v state=%+v", err, p.snapshotState())
 	}
@@ -1145,7 +1145,7 @@ func TestHandleCmpctBlockRejectsMalformedTailBeforeHeaderValidation(t *testing.T
 	payload := cmpctBlockMissingPrefilledTailPayload(powInvalidHeader, maxCompactRelayEntries)
 
 	p := newCompactScriptedPeer(t)
-	err := p.handleCmpctBlock(payload)
+	err := p.handleCmpctBlock(compactFrameLease(t, p, payload))
 	if err == nil || !strings.Contains(err.Error(), "cmpctblock payload truncated prefilled index") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("malformed compact tail err=%v state=%+v", err, p.snapshotState())
 	}
@@ -1165,7 +1165,7 @@ func TestHandleCmpctBlockValidatesHeaderBeforeNonCanonicalPrefilledDecode(t *tes
 	payload := cmpctBlockNonCanonicalPrefilledPayload(powInvalidHeader, append(minimalBlockTxnTestTxBytes(77), 0x00))
 
 	p := newCompactScriptedPeer(t)
-	err := p.handleCmpctBlock(payload)
+	err := p.handleCmpctBlock(compactFrameLease(t, p, payload))
 	if err == nil || !strings.Contains(err.Error(), "pow invalid") || p.snapshotState().BanScore == 0 {
 		t.Fatalf("non-canonical compact tail err=%v state=%+v, want header validation first", err, p.snapshotState())
 	}
@@ -1478,6 +1478,14 @@ func newCompactScriptedPeer(t *testing.T) *peer {
 	return p
 }
 
+// compactFrameLease installs on p the lease the budgeted reader holds for a cmpctblock frame of
+// payload, 3 bytes per payload byte, and returns payload.
+func compactFrameLease(t *testing.T, p *peer, payload []byte) []byte {
+	t.Helper()
+	p.inboundLease = mustReserve(t, p.service.inboundBudget, 3*uint64(len(payload)))
+	return payload
+}
+
 func setCompactTestOutstanding(p *peer, blockHash [32]byte, header [consensus.BLOCK_HEADER_BYTES]byte, shortID compactShortID, nonce1, nonce2 uint64) {
 	p.activateCompactOutstandingRequest(compactOutstandingRequest{
 		BlockHash:          blockHash,
@@ -1615,10 +1623,10 @@ func TestTargetScheduleRuntimeCompactStaticTargetGate(t *testing.T) {
 			if tc.target != nil {
 				relayed = compactHeaderWithTarget(header, *tc.target)
 			}
-			err := p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
+			err := p.handleCmpctBlock(compactFrameLease(t, p, mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
 				Header:    relayed,
 				Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}},
-			}))
+			})))
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || p.snapshotState().BanScore == 0 {
 					t.Fatalf("err=%v state=%+v, want %q with a ban", err, p.snapshotState(), tc.wantErr)
@@ -1689,10 +1697,10 @@ func TestTargetScheduleRuntimeCompactOrphanRetainedNotBanned(t *testing.T) {
 	}
 	// Prefilled-only: no short ids, so the apply path does not fall back to a
 	// full-block request and the orphan disposition is what gets exercised.
-	err = p.handleCmpctBlock(mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
+	err = p.handleCmpctBlock(compactFrameLease(t, p, mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{
 		Header:    orphanHeader,
 		Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}},
-	}))
+	})))
 	if err != nil {
 		t.Fatalf("unresolved-parent compact block returned a connection-level error: %v", err)
 	}

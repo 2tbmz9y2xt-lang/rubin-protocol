@@ -14,6 +14,9 @@ const (
 	// well below the full block cap.
 	compactLocalTxCandidateLimit      = defaultMaxTxPoolSize
 	compactLocalTxCandidateBytesLimit = 1 << 20
+	// compactReconstructionCharge is the inbound budget charge a cmpctblock frame lease carries
+	// from its replacement on: twelve times the 72000000-byte block cap.
+	compactReconstructionCharge = 864000000
 )
 
 var (
@@ -270,14 +273,8 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return err
 	}
 	blockHash, _ := consensus.BlockHash(block.Header[:]) // fixed-size header slice cannot hit the length error path
-	have, err := p.service.hasBlock(blockHash)
-	if err != nil {
-		p.clearCompactOutstandingRequestForBlock(blockHash)
+	if reconstruct, err := p.beginCompactReconstruction(blockHash); !reconstruct {
 		return err
-	}
-	if have {
-		p.clearCompactOutstandingRequestForBlock(blockHash)
-		return nil
 	}
 	localTxs := compactRelayLocalTransactionsForBlock(block, p.service.cfg.TxPool)
 	result, err := reconstructCompactBlock(block, localTxs)
@@ -294,6 +291,26 @@ func (p *peer) handleCmpctBlock(payload []byte) error {
 		return p.processCompactTransactions(blockHash, block.Header, result.Transactions, len(block.ShortIDs) > 0)
 	}
 	return p.requestMissingCompactTransactions(block, blockHash, result)
+}
+
+// beginCompactReconstruction returns true, with a nil error, only when blockHash is not stored
+// and the frame lease on p.inboundLease was replaced in place by compactReconstructionCharge.
+// Otherwise it returns false: a stored block or a presence error clears the outstanding request
+// for blockHash and returns the presence error, nil for a stored block; a capacity refusal of the
+// replacement returns the result of requestCompactFullBlockFallback; any other refusal is
+// returned unchanged.
+func (p *peer) beginCompactReconstruction(blockHash [32]byte) (bool, error) {
+	have, err := p.service.hasBlock(blockHash)
+	if err != nil || have {
+		p.clearCompactOutstandingRequestForBlock(blockHash)
+		return false, err
+	}
+	err = p.service.inboundBudget.ReplaceOrSubscribe(p.inboundLease, compactReconstructionCharge)
+	var refusal inboundBlockBudgetError
+	if errors.As(err, &refusal) && refusal.Resource() == inboundBudgetCapacityResource {
+		return false, p.requestCompactFullBlockFallback(blockHash)
+	}
+	return err == nil, err
 }
 
 func (p *peer) validateCmpctBlockReceiveHeader(payload []byte) error {
@@ -345,27 +362,9 @@ func (p *peer) requestMissingCompactTransactions(block cmpctBlockPayload, blockH
 }
 
 func (p *peer) handleBlockTxn(payload []byte) error {
-	if len(payload) < 32 {
-		return p.rejectBlockTxn("blocktxn payload missing block hash")
-	}
-	var responseHash [32]byte
-	copy(responseHash[:], payload[:32])
-	blockHash, ok := p.compactOutstandingBlockHash()
+	req, ok, err := p.blockTxnOutstandingRequest(payload)
 	if !ok {
-		p.setLastError("ignored unexpected blocktxn response")
-		return nil
-	}
-	if responseHash != blockHash {
-		if len(payload) > blockTxnHashPayloadBytes {
-			return blockTxnStaleBodyError{}
-		}
-		p.setLastError("ignored stale blocktxn response")
-		return nil
-	}
-	req, ok := p.compactOutstandingRequestSnapshot()
-	if !ok {
-		p.setLastError("ignored unexpected blocktxn response")
-		return nil
+		return err
 	}
 	if uint64(len(payload)) > uint64(req.BlockTxnPayloadCap) {
 		p.clearCompactOutstandingRequestForBlock(req.BlockHash)
@@ -378,6 +377,7 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 		p.bumpBan(10, err.Error())
 		return err
 	}
+	p.inboundLease = p.takeCompactOutstandingLeaseForBlock(req.BlockHash)
 	p.clearCompactOutstandingRequestForBlock(req.BlockHash)
 	txs, err := compactFillResponseTransactions(req, response)
 	if err != nil {
@@ -388,6 +388,36 @@ func (p *peer) handleBlockTxn(payload []byte) error {
 		return err
 	}
 	return p.processCompactTransactions(req.BlockHash, req.Header, txs, true)
+}
+
+// blockTxnOutstandingRequest returns, with true, the snapshot of the outstanding request whose
+// block hash a blocktxn payload carries. For a payload that answers none it returns false and
+// the error to report: the rejectBlockTxn error for a payload shorter than a block hash,
+// blockTxnStaleBodyError for another hash with a body, and nil after a LastError diagnostic
+// otherwise.
+func (p *peer) blockTxnOutstandingRequest(payload []byte) (compactOutstandingRequest, bool, error) {
+	if len(payload) < 32 {
+		return compactOutstandingRequest{}, false, p.rejectBlockTxn("blocktxn payload missing block hash")
+	}
+	var responseHash [32]byte
+	copy(responseHash[:], payload[:32])
+	blockHash, ok := p.compactOutstandingBlockHash()
+	if !ok {
+		p.setLastError("ignored unexpected blocktxn response")
+		return compactOutstandingRequest{}, false, nil
+	}
+	if responseHash != blockHash {
+		if len(payload) > blockTxnHashPayloadBytes {
+			return compactOutstandingRequest{}, false, blockTxnStaleBodyError{}
+		}
+		p.setLastError("ignored stale blocktxn response")
+		return compactOutstandingRequest{}, false, nil
+	}
+	req, ok := p.compactOutstandingRequestSnapshot()
+	if !ok {
+		p.setLastError("ignored unexpected blocktxn response")
+	}
+	return req, ok, nil
 }
 
 func (p *peer) handleGetBlockTxn(payload []byte) error {
@@ -588,6 +618,7 @@ func (p *peer) compactApplyErrorFallback(pb *consensus.ParsedBlock, blockHash [3
 
 func (p *peer) requestCompactFullBlockFallback(blockHash [32]byte) error {
 	p.clearCompactOutstandingRequestForBlock(blockHash)
+	p.releaseInboundLease()
 	body, err := encodeInventoryVectors([]InventoryVector{{Type: MSG_BLOCK, Hash: blockHash}})
 	if err != nil {
 		return err

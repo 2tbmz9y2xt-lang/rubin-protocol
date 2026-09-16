@@ -338,19 +338,6 @@ func TestBlockIngressReader(t *testing.T) {
 			"outstanding=%v slot=%v written=%d used=%d, want the request and the slot for the hash and no other effect", ok && outstanding.BlockHash == refusedHash, slot != nil, len(written), usedBytes(p.service.inboundBudget))
 		requireReturned(t, lifecycleClose(p.service), "Close")
 	})
-	t.Run("compact_frame_unbudgeted", func(t *testing.T) {
-		p := newPeerRuntimeTestPeer(t)
-		p.service.cfg.EnableCompactReceive = true
-		p.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
-		header, genesisHash, txs := compactPartsFromBlockBytes(t, node.DevnetGenesisBlockBytes())
-		payload := mustEncodeCmpctBlockPayload(t, cmpctBlockPayload{Header: header, Prefilled: []prefilledTxn{{Index: 0, Tx: txs[0]}}})
-		mustReserve(t, p.service.inboundBudget, 1073741824)
-		conn, _ := serve(t, p, message{Command: messageCmpctBlock, Payload: payload})
-		must(t, p.run(context.Background()), "run over the cmpctblock frame")
-		written, _ := conn.snapshot()
-		have, err := p.service.hasBlock(genesisHash)
-		require(t, len(written) == 0 && err == nil && have && usedBytes(p.service.inboundBudget) == 1073741824, "written=%d hasBlock=(%v, %v) used=%d, want no bytes, the reconstructed genesis and the held bytes only", len(written), have, err, usedBytes(p.service.inboundBudget))
-	})
 	t.Run("capacity_refusal_uses_frame_start", func(t *testing.T) {
 		p := newPeerRuntimeTestPeer(t)
 		hold(t, p)
