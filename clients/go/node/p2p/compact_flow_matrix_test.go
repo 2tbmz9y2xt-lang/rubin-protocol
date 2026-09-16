@@ -21,7 +21,7 @@ func TestCompactFlowHardeningMatrix(t *testing.T) {
 			run: func(t *testing.T) {
 				p := newCompactScriptedPeer(t)
 
-				requireNoCompactErr(t, p.handleCmpctBlock(missing), "missing compact block")
+				requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, missing)), "missing compact block")
 				requireGetBlockTxnRequest(t, p, blockHash, []uint64{0})
 				snap, ok := p.compactOutstandingRequestSnapshot()
 				if !ok || snap.BlockHash != blockHash || snap.BlockTxnPayloadCap <= blockTxnHashPayloadBytes {
@@ -35,7 +35,7 @@ func TestCompactFlowHardeningMatrix(t *testing.T) {
 				p := newCompactScriptedPeer(t)
 				setCompactTestOutstanding(p, blockHash, header, compactShortIDForTx(t, txs[0], 201, 202), 201, 202)
 
-				requireNoCompactErr(t, p.handleCmpctBlock(missing), "overlapping missing compact block")
+				requireNoCompactErr(t, p.handleCmpctBlock(compactFrameLease(t, p, missing)), "overlapping missing compact block")
 				requireFallbackGetData(t, p, blockHash)
 				requireNoCompactOutstanding(t, p)
 			},

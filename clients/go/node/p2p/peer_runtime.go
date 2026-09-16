@@ -288,7 +288,8 @@ func (p *peer) readPostHandshakeFrame(ctx context.Context, lateBlockTxn *compact
 	if err := timing.validatePayload(header.Size); err != nil {
 		return frame, lateBlockTxn, err
 	}
-	if header.Command == messageBlock {
+	switch header.Command {
+	case messageBlock, messageCmpctBlock:
 		return p.readBudgetedBlockFrame(header, reader)
 	}
 	return p.readPostHandshakePayload(header, reader)
@@ -460,6 +461,7 @@ func (p *peer) commitCompactFallbackWrite(ctx context.Context, deadline time.Tim
 	if peerRunContextDone(ctx) || p.expiredCompactOutstandingRequest(req, false) == nil {
 		return compactOutstandingRequest{}, false, nil
 	}
+	p.releaseCompactOutstandingLease()
 	body := append([]byte{MSG_BLOCK}, req.BlockHash[:]...)
 	if err := p.writePostHandshakeFrame(messageGetData, body, deadline); err != nil {
 		return compactOutstandingRequest{}, false, err
@@ -474,15 +476,19 @@ func (p *peer) commitCompactFallbackWrite(ctx context.Context, deadline time.Tim
 }
 
 func (p *peer) expiredCompactOutstandingRequest(req *compactOutstandingRequest, clear bool) *compactOutstandingRequest {
+	var lease *inboundBlockLease
 	p.compactMu.Lock()
-	defer p.compactMu.Unlock()
 	current := p.compact.outstanding
 	if current == nil || req != nil && current != req || !p.compactOutstandingRequestExpiredLocked() {
+		p.compactMu.Unlock()
 		return nil
 	}
 	if clear {
-		p.compact.outstanding = nil
+		lease = p.compact.outstandingLease
+		p.compact.outstanding, p.compact.outstandingLease = nil, nil
 	}
+	p.compactMu.Unlock()
+	lease.Release()
 	return current
 }
 

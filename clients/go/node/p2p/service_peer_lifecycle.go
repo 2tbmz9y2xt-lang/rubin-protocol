@@ -50,6 +50,7 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 	if err := s.registerPeer(current); err != nil {
 		return err
 	}
+	defer current.releaseCompactOutstandingLease() // runs after finishBlockRetry: a released charge wakes retry slots waiting on the budget
 	defer s.unregisterPeer(current)
 	defer current.finishBlockRetry() // runs first: the retry waiter is joined before unregistration
 
