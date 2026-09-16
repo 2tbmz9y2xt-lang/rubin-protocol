@@ -71,6 +71,7 @@ func (p *peer) processRelayedBlock(blockBytes []byte) (*node.ChainStateConnectSu
 	if pb == nil {
 		return nil, errors.New("nil parsed block")
 	}
+	defer p.disposeBlockRetry(blockHash)
 	have, err := p.service.hasBlock(blockHash)
 	if err != nil {
 		p.clearCompactOutstandingRequestForBlock(blockHash)
