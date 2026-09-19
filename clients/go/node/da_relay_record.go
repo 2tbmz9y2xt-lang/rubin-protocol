@@ -775,8 +775,8 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 // ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
 // incomplete_member_charge. The legacy wireBytes fallback of retainedTxAccountingBytes
 // has no place: a member always carries its bytes. The per-peer key comes from the
-// member's own provenance, never the cached peerQuotaKey this kernel leaves unset while
-// the legacy readers key on it, charging to "" what this charges to the peer; RUB-1276.
+// member's own provenance for State A. Live State B charges only the staged domain;
+// the independent commit overhead and each member's provenance remain unchanged.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {
@@ -793,6 +793,11 @@ func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error
 		if err := accounting.addOwnerReadyMember(chunk.member, charge); err != nil {
 			return daRelayRecordAccounting{}, err
 		}
+	}
+	// Raw pre-admission images have not acquired State B yet.
+	if r.state == daRelayStateStagedCommit {
+		accounting.stagedBytes, accounting.orphanBytes = accounting.orphanBytes, 0
+		clear(accounting.peerBytes)
 	}
 	return accounting, nil
 }

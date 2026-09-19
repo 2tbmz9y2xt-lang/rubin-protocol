@@ -389,6 +389,45 @@ func requireDAAdmissionStructure(t *testing.T) {
 		// The observation gains exactly ONE field, the companion commit a State B/C
 		// chunk target's recorded relation binds: its name and its candidate type.
 		want["read|node/da_relay_owner.go:file|companion"]++
+		for row, count := range maps.Clone(want) {
+			if !strings.Contains(row, "node/da_relay_owner.go:") {
+				continue
+			}
+			updated := strings.ReplaceAll(row, "projectedOrphanBytes", "projectedStagedBytes")
+			updated = strings.ReplaceAll(updated, "orphanCap, commitCap                       uint64", "stagedCap, commitCap                       uint64")
+			updated = strings.ReplaceAll(updated, "orphanCap: orphanCap", "stagedCap: s.caps.stagedBytes")
+			updated = strings.ReplaceAll(updated, "projectedStagedBytes: placement.orphanBytes", "projectedStagedBytes: placement.stagedBytes")
+			updated = strings.ReplaceAll(updated, "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n", "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n\tprojectionCaps.stagedBytes = ^uint64(0)\n")
+			if row == "read|node/da_relay_owner.go:file|orphanCap" {
+				updated = "read|node/da_relay_owner.go:file|stagedCap"
+			}
+			if updated != row {
+				delete(want, row)
+				want[updated] += count
+			}
+		}
+		for row, count := range map[string]int{
+			"write|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps.stagedBytes = ^uint64(0)": 1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps.stagedBytes":              1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement.stagedBytes":                   1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.caps.stagedBytes":                      1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.caps":                                  1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement.orphanBytes":                   -1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps":                           1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|stagedBytes":                              3,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|uint64":                                   1,
+			"call|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|uint64(0)":                                1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|stagedCap":                                1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s":                                        1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|caps":                                     1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|orphanCap":                                -2,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|orphanBytes":                              -1,
+		} {
+			want[row] += count
+			if want[row] == 0 {
+				delete(want, row)
+			}
+		}
 		want["read|node/da_relay_owner.go:file|daRelayAdmissionCandidate"]++
 		want["value|node/da_admission.go:file|snapshot"]++
 		for field, count := range map[string]int{"byte": 5, "uint64": 4, "kind": 1, "bool": 5, "uint16": 1, "daRelaySetState": 1, "daRelayLocator": 1} {
@@ -1215,7 +1254,11 @@ func (f *daNonReplayFixture) requireSingleRetained(t *testing.T, tx daNonReplayT
 	}
 	view := daRelayStateSnapshot(f.relay)
 	locator := daRelayLocator{daID: tx.spec.daID, kind: kind, chunkIndex: tx.spec.chunkIndex}
-	if len(view.sets) != 1 || len(view.locators) != 1 || view.locators[tx.txid] != locator || view.orphanBytes != charge || view.daIDBytes[tx.spec.daID] != charge || view.commitBytes != map[bool]uint64{true: charge}[kind == daRelayLocatorKind(1)] || len(view.peerBytes) != 1 || view.peerBytes["boundary"] != charge {
+	orphan, staged, entries := charge, uint64(0), 1
+	if tx.spec.kind == 0x01 {
+		orphan, staged, entries = 0, charge, 0
+	}
+	if len(view.sets) != 1 || len(view.locators) != 1 || view.locators[tx.txid] != locator || view.orphanBytes != orphan || view.stagedBytes != staged || view.daIDBytes[tx.spec.daID] != orphan || len(view.daIDBytes) != entries || view.commitBytes != staged || len(view.peerBytes) != entries || view.peerBytes["boundary"] != orphan {
 		t.Fatalf("single image locator=%+v counters=(%d,%d,%d,%+v)", view.locators, view.orphanBytes, view.daIDBytes[tx.spec.daID], view.commitBytes, view.peerBytes)
 	}
 	owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -1568,7 +1611,7 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		outcome, err := f.relay.applyDANonReplayPlan(planned.admission, planned.candidate, planned.plan)
 		view := daRelayStateSnapshot(f.relay)
 		seedCharge, targetCharge, otherCharge := uint64(len(seed.raw)+len(seed.spec.payload)), uint64(len(target.raw)+len(target.spec.payload)), uint64(len(other.raw))
-		if err != nil || outcome != (daRelayAdmissionOutcome{daID: targetID, disposition: daRelayAdmissionDisposition(1)}) || len(view.sets) != 2 || view.nextReceivedTime != 3 || view.records != 3 || view.orphanBytes != seedCharge+targetCharge+otherCharge || view.commitBytes != otherCharge || view.daIDBytes[targetID] != seedCharge+targetCharge || view.daIDBytes[otherID] != otherCharge || len(view.daIDBytes) != 2 || view.peerBytes["seed"] != seedCharge || view.peerBytes["target"] != targetCharge || view.peerBytes["other"] != otherCharge || len(view.peerBytes) != 3 || view.locators[seed.txid] != (daRelayLocator{daID: targetID, kind: daRelayLocatorKind(2)}) || view.locators[target.txid] != (daRelayLocator{daID: targetID, kind: daRelayLocatorKind(2), chunkIndex: 2}) || view.locators[other.txid] != (daRelayLocator{daID: otherID, kind: daRelayLocatorKind(1)}) || len(view.locators) != 3 {
+		if err != nil || outcome != (daRelayAdmissionOutcome{daID: targetID, disposition: daRelayAdmissionDisposition(1)}) || len(view.sets) != 2 || view.nextReceivedTime != 3 || view.records != 3 || view.stagedBytes != otherCharge || view.orphanBytes != seedCharge+targetCharge || view.commitBytes != otherCharge || view.daIDBytes[targetID] != seedCharge+targetCharge || view.daIDBytes[otherID] != 0 || len(view.daIDBytes) != 1 || view.peerBytes["seed"] != seedCharge || view.peerBytes["target"] != targetCharge || view.peerBytes["other"] != 0 || len(view.peerBytes) != 2 || view.locators[seed.txid] != (daRelayLocator{daID: targetID, kind: daRelayLocatorKind(2)}) || view.locators[target.txid] != (daRelayLocator{daID: targetID, kind: daRelayLocatorKind(2), chunkIndex: 2}) || view.locators[other.txid] != (daRelayLocator{daID: otherID, kind: daRelayLocatorKind(1)}) || len(view.locators) != 3 {
 			t.Fatalf("cross-record outcome=%+v err=%v view=%+v", outcome, err, view)
 		}
 		if a, b := view.sets[targetID], view.sets[otherID]; a.revision != 3 || a.receivedTime != 1 || a.state != daRelayStateOrphanChunks || b.revision != 2 || b.receivedTime != 2 || b.state != daRelayStateStagedCommit {
@@ -1591,6 +1634,127 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 }
 
 func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
+	for _, shape := range []string{"commit-first", "commit-last", "chunk-later"} {
+		for _, over := range []bool{false, true} {
+			t.Run("public staged cap "+shape+fmt.Sprint(over), func(t *testing.T) {
+				f, id := newDANonReplayFixture(t, 4), [32]byte{0xa1}
+				commit := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 3, commitment: [32]byte{1}, commitmentOutputs: 1})
+				inside := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 0, payload: []byte("inside")})
+				outside := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 4, payload: []byte("outside")})
+				candidate, charge := commit, uint64(len(commit.raw))
+				switch shape {
+				case "commit-last":
+					f.admit(inside, LocalDAProvenance())
+					f.admit(outside, daNonReplayPeer("outside"))
+					charge += uint64(len(inside.raw) + len(inside.spec.payload))
+				case "chunk-later":
+					f.admit(commit, DetachedReorgDAProvenance())
+					candidate = inside
+					charge += uint64(len(inside.raw) + len(inside.spec.payload))
+				}
+				f.mutateRelay(func(s *DARelayState) {
+					s.caps.stagedBytes = charge
+					if over {
+						s.caps.stagedBytes--
+					}
+				})
+				before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				result, err := f.relay.AdmitDA(candidate.raw, daNonReplayPeer("incoming"))
+				if over {
+					if err != errDARelayOrphanPoolCapExceeded || result != (DAAdmissionResult{}) { //nolint:errorlint // Direct sentinel identity is owned here.
+						t.Fatalf("staged cap refusal: result=%+v err=%v", result, err)
+					}
+					owner.tokenHighWater++
+					requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+					f.mutateRelay(func(s *DARelayState) { s.caps.stagedBytes = charge })
+					result, err = f.relay.AdmitDA(candidate.raw, daNonReplayPeer("incoming"))
+				}
+				if err != nil || result != (DAAdmissionResult{DAID: id, Disposition: DAAdmissionDisposition(1)}) {
+					t.Fatalf("staged equality/reuse: %+v %v", result, err)
+				}
+				view := daRelayStateSnapshot(f.relay)
+				if view.stagedBytes != charge || view.orphanBytes != 0 || len(view.daIDBytes) != 0 || len(view.peerBytes) != 0 || view.commitBytes != uint64(len(commit.raw)) {
+					t.Fatalf("exact staged domain: %+v", view)
+				}
+				if shape == "commit-last" {
+					if _, present := view.locators[outside.txid]; present {
+						t.Fatal("outside locator survived")
+					}
+					f.requireMember(t, view.sets[id], inside, 1, LocalDAProvenance())
+				}
+				if shape == "chunk-later" {
+					f.requireMember(t, view.sets[id], commit, 1, DetachedReorgDAProvenance())
+				}
+			})
+		}
+	}
+	for _, capName := range []string{"staged", "commit"} {
+		for _, refusal := range []string{"shape", "transition", "tip", "generation", "exhaustion", "conflict", "victim"} {
+			t.Run("owner before "+capName+" "+refusal, func(t *testing.T) {
+				f, id := newDANonReplayFixture(t, 3), [32]byte{0xa2}
+				victim := f.ownerReadyChunk(id, 4, "victim", daNonReplayPeer("peer"))
+				candidate := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 3, commitment: [32]byte{2}, commitmentOutputs: 1, inputCount: 2})
+				p := f.planned(candidate, LocalDAProvenance())
+				defer p.admission.Close()
+				f.mutateRelay(func(s *DARelayState) {
+					if capName == "staged" {
+						s.caps.stagedBytes = 0
+					} else {
+						s.caps.orphanCommitOverheadBytes = 0
+					}
+				})
+				kind, message := TxAdmitErrorKind("unavailable"), ""
+				ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+					switch refusal {
+					case "shape":
+						p.admission.snapshot.Inputs = nil
+						message = "empty pending-outpoint input set"
+					case "transition": // Active transition and published latch share this owner flag.
+						o.inTransition = true
+						message = "pending-outpoint owner transition in progress"
+					case "tip":
+						p.admission.context.StableTip.Hash[0] ^= 1
+						message = "pending-outpoint expected tip mismatch"
+					case "generation":
+						p.admission.context.Generation++
+						message = "pending-outpoint expected generation mismatch"
+					case "exhaustion":
+						o.tokenHighWater = ^uint64(0)
+						message = "pending-outpoint token sequence exhausted"
+					case "conflict":
+						o.byOutpoint[candidate.inputs[0]] = pendingOutpointRow{txid: [32]byte{0x31}}
+						o.byOutpoint[candidate.inputs[1]] = pendingOutpointRow{txid: [32]byte{0x32}}
+						kind, message = TxAdmitErrorKind("conflict"), fmt.Sprintf("mempool double-spend conflict with %x", [32]byte{0x31})
+					case "victim":
+						delete(o.byOutpoint, victim.inputs[0])
+						message = "DA victim input mismatch"
+					}
+				})
+				before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				if refusal == "victim" {
+					owner.tokenHighWater++
+				}
+				result, err := f.relay.applyDANonReplayPlan(p.admission, p.candidate, p.plan)
+				var admitErr *TxAdmitError
+				if result != (daRelayAdmissionOutcome{}) || !errors.As(err, &admitErr) || admitErr.Kind != kind || admitErr.Message != message {
+					t.Fatalf("owner precedence: %+v %v want=%s %q", result, err, kind, message)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+			})
+		}
+	}
+	t.Run("staged cap precedes commit cap", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0xa3}, chunkCount: 2, commitment: [32]byte{3}, commitmentOutputs: 1})
+		f.mutateRelay(func(s *DARelayState) { s.caps.stagedBytes, s.caps.orphanCommitOverheadBytes = 0, 0 })
+		before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		_, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance())
+		if err != errDARelayOrphanPoolCapExceeded { //nolint:errorlint // Exact direct sentinel order.
+			t.Fatalf("both caps error=%v", err)
+		}
+		owner.tokenHighWater++
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+	})
 	t.Run("one concurrent winner", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0x41}
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 4, payload: []byte("one-winner"), inputCount: 2})
@@ -1648,15 +1812,16 @@ func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 			f.admit(seed, daNonReplayPeer("victim"))
 			candidate := f.signed(map[bool]daNonReplayTxSpec{false: {kind: 0x01, daID: daID, chunkCount: 2, commitment: [32]byte{0x46}, commitmentOutputs: 1}, true: {kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("chunk")}}[row.chunk])
 			view, candidateCharge := daRelayStateSnapshot(f.relay), uint64(len(candidate.raw)+len(candidate.spec.payload))
-			globalCharge, commitCharge := map[bool]uint64{false: uint64(len(candidate.raw)), true: view.orphanBytes + candidateCharge}[row.chunk], map[bool]uint64{false: uint64(len(candidate.raw)), true: view.commitBytes}[row.chunk]
+			globalCharge, commitCharge := map[bool]uint64{false: uint64(len(candidate.raw)), true: uint64(len(seed.raw)) + candidateCharge}[row.chunk], map[bool]uint64{false: uint64(len(candidate.raw)), true: view.commitBytes}[row.chunk]
 			f.relay.mu.Lock()
 			f.relay.caps.orphanPoolBytes, f.relay.caps.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
-			cap := map[string]*uint64{"global": &f.relay.caps.orphanPoolBytes, "commit": &f.relay.caps.orphanCommitOverheadBytes, "da": &f.relay.caps.orphanPoolPerDAIDBytes, "peer": &f.relay.caps.orphanPoolPerPeerBytes, "state-a": &f.relay.caps.orphanPoolPerDAIDBytes}[row.cap]
+			cap := map[string]*uint64{"global": &f.relay.caps.stagedBytes, "commit": &f.relay.caps.orphanCommitOverheadBytes, "da": &f.relay.caps.orphanPoolPerDAIDBytes, "peer": &f.relay.caps.orphanPoolPerPeerBytes, "state-a": &f.relay.caps.orphanPoolPerDAIDBytes}[row.cap]
 			*cap = map[string]uint64{"global": globalCharge, "commit": commitCharge, "da": globalCharge, "peer": globalCharge, "state-a": 1}[row.cap]
 			if !row.accept || row.cap == "da" || row.cap == "peer" {
 				*cap--
 			}
 			if row.cap == "state-a" {
+				f.relay.caps.orphanPoolBytes = *cap
 				f.relay.caps.orphanPoolPerPeerBytes = *cap
 			}
 			f.relay.mu.Unlock()
@@ -1677,6 +1842,10 @@ func TestAdmitDANonReplayOwnerAtomicity(t *testing.T) {
 			if row.accept {
 				if err != nil || outcome != (daRelayAdmissionOutcome{daID: daID, disposition: daRelayAdmissionDisposition(1)}) {
 					t.Fatalf("equal cap outcome=%+v err=%v", outcome, err)
+				}
+				got := daRelayStateSnapshot(f.relay)
+				if got.stagedBytes != globalCharge || got.orphanBytes != 0 || len(got.daIDBytes) != 0 || len(got.peerBytes) != 0 || got.commitBytes != commitCharge {
+					t.Fatalf("State B accounting: staged=%d want=%d orphan=%d da=%v peers=%v commit=%d", got.stagedBytes, globalCharge, got.orphanBytes, got.daIDBytes, got.peerBytes, got.commitBytes)
 				}
 				return
 			}
@@ -2288,7 +2457,7 @@ func TestAdmitDANonReplayPrunesOutOfRangeClaims(t *testing.T) {
 	if len(view.locators) != 3 || view.locators[commit.txid] != (daRelayLocator{daID: daID, kind: daRelayLocatorKind(1)}) {
 		t.Fatalf("locators=%+v, want commit plus two survivors", view.locators)
 	}
-	if view.orphanBytes != insideCharge+commitCharge || view.daIDBytes[daID] != insideCharge+commitCharge || view.commitBytes != commitCharge || view.peerBytes["peer-0"] != uint64(len(inside[0].raw)+len(inside[0].spec.payload)) || view.peerBytes["peer-1"] != uint64(len(inside[1].raw)+len(inside[1].spec.payload)) || view.peerBytes["peer-2"] != 0 || view.peerBytes["peer-3"] != 0 || view.peerBytes["peer-commit"] != commitCharge || len(view.peerBytes) != 3 {
+	if view.stagedBytes != insideCharge+commitCharge || view.orphanBytes != 0 || len(view.daIDBytes) != 0 || view.commitBytes != commitCharge || len(view.peerBytes) != 0 {
 		t.Fatalf("accounting global=%d da=%d commit=%d peers=%+v", view.orphanBytes, view.daIDBytes[daID], view.commitBytes, view.peerBytes)
 	}
 	owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -2308,6 +2477,15 @@ func TestAdmitDANonReplayPrunesOutOfRangeClaims(t *testing.T) {
 }
 
 func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
+	for _, total := range []uint64{0, ^uint64(0) - 1, ^uint64(0)} {
+		t.Run(fmt.Sprintf("staged arithmetic %d", total), func(t *testing.T) {
+			f, id := newDANonReplayFixture(t, 2), [32]byte{0xa4}
+			f.ownerReadyCommit(id, 3, LocalDAProvenance())
+			tx := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 0, payload: []byte("arithmetic")})
+			f.mutateRelay(func(s *DARelayState) { s.stagedBytes = total })
+			requireDANonReplayRejected(t, f, tx, DetachedReorgDAProvenance(), errDARelayArithmeticOverflow)
+		})
+	}
 	for _, row := range []struct {
 		name, peerKey string
 		provenance    daProvenance
@@ -2319,7 +2497,7 @@ func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 		{"detached", "", daProvenance{kind: daProvenanceKind(3)}, 0, consensus.Uint128{Lo: 600_000}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			f, daID := newDANonReplayFixture(t, max(row.inputCount, 1)), [32]byte{0x71, byte(len(row.name))}
+			f, daID := newDANonReplayFixture(t, max(row.inputCount, 1)+2), [32]byte{0x71, byte(len(row.name))}
 			for _, input := range f.outpoints[:row.inputCount] {
 				utxo := f.state.Utxos[input]
 				utxo.Value += 1 << 63
@@ -2328,7 +2506,7 @@ func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 			tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: uint16(len(row.name)), payload: []byte("accounting"), inputCount: row.inputCount, fee: row.fee})
 			f.admit(tx, row.provenance)
 			view, charge := daRelayStateSnapshot(f.relay), uint64(len(tx.raw)+len(tx.spec.payload))
-			if view.nextReceivedTime != 1 || view.records != 1 || view.orphanBytes != charge || view.daIDBytes[daID] != charge || view.commitBytes != 0 || view.sets[daID].receivedTime != 1 {
+			if view.stagedBytes != 0 || view.nextReceivedTime != 1 || view.records != 1 || view.orphanBytes != charge || view.daIDBytes[daID] != charge || view.commitBytes != 0 || view.sets[daID].receivedTime != 1 {
 				t.Fatalf("accounting sequence=%d revision=%d global=%d da=%d commit=%d", view.nextReceivedTime, view.records, view.orphanBytes, view.daIDBytes[daID], view.commitBytes)
 			}
 			if row.peerKey == "" {
@@ -2339,6 +2517,18 @@ func TestAdmitDANonReplaySequenceAndAccounting(t *testing.T) {
 				t.Fatalf("peer buckets=%+v, want %q=%d", view.peerBytes, row.peerKey, charge)
 			}
 			f.requireMember(t, view.sets[daID], tx, 1, row.provenance)
+			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: daID, chunkCount: tx.spec.chunkIndex + 3, commitment: [32]byte{1}, commitmentOutputs: 1})
+			f.admit(commit, row.provenance)
+			later := f.signed(daNonReplayTxSpec{kind: 2, daID: daID, chunkIndex: tx.spec.chunkIndex + 1, payload: []byte("later")})
+			f.admit(later, row.provenance)
+			view = daRelayStateSnapshot(f.relay)
+			want := charge + uint64(len(commit.raw)+len(later.raw)+len(later.spec.payload))
+			if view.stagedBytes != want || view.orphanBytes != 0 || len(view.daIDBytes) != 0 || len(view.peerBytes) != 0 || view.commitBytes != uint64(len(commit.raw)) {
+				t.Fatalf("%s staged accounting=%+v want=%d", row.name, view, want)
+			}
+			f.requireMember(t, view.sets[daID], tx, 1, row.provenance)
+			f.requireMember(t, view.sets[daID], commit, 2, row.provenance)
+			f.requireMember(t, view.sets[daID], later, 3, row.provenance)
 		})
 	}
 	for _, provenance := range []daProvenance{daNonReplayPeer("cap"), {kind: daProvenanceKind(2)}, {kind: daProvenanceKind(3)}} {
@@ -2495,7 +2685,7 @@ func checkDANonReplayPostReserveTail(function *ast.FuncDecl) string {
 		unsafeAccess = unsafeAccess || index || dereference
 		return !unsafeAccess
 	})
-	if unsafeAccess || len(tail) != 8 || !daNonReplayCapAbort(tail[0], "projectedOrphanBytes", "orphanCap", "errDARelayOrphanPoolCapExceeded") || !daNonReplayCapAbort(tail[1], "projectedCommitBytes", "commitCap", "errDARelayOrphanCommitCapExceeded") || !daNonReplayTokenAssignment(tail[2]) || !daNonReplayAssignment(tail[3], "placement.record.receivedTime", "receivedTime") || !daNonReplayAssignment(tail[4], "s.nextReceivedTime", "sequence") || !daNonReplayCall(tail[5], "s.installDASetRecordLocked", "placement") || !daNonReplayCall(tail[6], "commit.Commit", "") {
+	if unsafeAccess || len(tail) != 8 || !daNonReplayCapAbort(tail[0], "projectedStagedBytes", "stagedCap", "errDARelayOrphanPoolCapExceeded") || !daNonReplayCapAbort(tail[1], "projectedCommitBytes", "commitCap", "errDARelayOrphanCommitCapExceeded") || !daNonReplayTokenAssignment(tail[2]) || !daNonReplayAssignment(tail[3], "placement.record.receivedTime", "receivedTime") || !daNonReplayAssignment(tail[4], "s.nextReceivedTime", "sequence") || !daNonReplayCall(tail[5], "s.installDASetRecordLocked", "placement") || !daNonReplayCall(tail[6], "commit.Commit", "") {
 		return "post-reserve tail shape or publication order changed"
 	}
 	result, ok := tail[7].(*ast.ReturnStmt)
@@ -2519,7 +2709,7 @@ func TestAdmitDANonReplayPostReserveTailIsClosed(t *testing.T) {
 		t.Fatal(diagnostic)
 	}
 	success := "return daRelayAdmissionOutcome{daID: candidate.member.locator.daID, disposition: daRelayAdmissionRetained}, nil"
-	valid := "if stateB && projectedOrphanBytes > orphanCap { commit.Abort(); return daRelayAdmissionOutcome{}, errDARelayOrphanPoolCapExceeded }\nif stateB && projectedCommitBytes > commitCap { commit.Abort(); return daRelayAdmissionOutcome{}, errDARelayOrphanCommitCapExceeded }\nmember.token = commit.CandidateToken()\nplacement.record.receivedTime = receivedTime\ns.nextReceivedTime = sequence\ns.installDASetRecordLocked(placement)\ncommit.Commit()\n" + success
+	valid := "if stateB && projectedStagedBytes > stagedCap { commit.Abort(); return daRelayAdmissionOutcome{}, errDARelayOrphanPoolCapExceeded }\nif stateB && projectedCommitBytes > commitCap { commit.Abort(); return daRelayAdmissionOutcome{}, errDARelayOrphanCommitCapExceeded }\nmember.token = commit.CandidateToken()\nplacement.record.receivedTime = receivedTime\ns.nextReceivedTime = sequence\ns.installDASetRecordLocked(placement)\ncommit.Commit()\n" + success
 	for name, tail := range map[string]string{
 		"helper":               "helper()\n" + valid,
 		"function literal":     "func() {}()\n" + valid,
@@ -3671,25 +3861,27 @@ func ownerReadyRecordAbsent(t *testing.T, view daRelayStateView, daID [32]byte, 
 	}
 }
 
-// requireOwnerReadyPeerCharges pins what every quota key still HOLDS after a cleanup ran: the
-// per-peer counters equal the charge the SURVIVING members imply, key for key, so a released key
-// whose last member left is ABSENT rather than zero and a key whose commit survived still carries
-// that commit's bytes. Every published record is billed: an image carrying a COMPLETE_SET is
-// terminal before publication, so no surviving view holds one.
+// requireOwnerReadyPeerCharges derives both domains from retained bytes, independently
+// of production accounting: only State A PEER chunks consume peer quota.
 func requireOwnerReadyPeerCharges(t *testing.T, view daRelayStateView) {
 	t.Helper()
 	want := map[string]uint64{}
+	var staged uint64
 	for _, record := range view.sets {
-		accounting, err := record.ownerReadyAccounting()
-		if err != nil {
-			t.Fatalf("surviving record %x accounting: %v", record.daID, err)
+		if record.state == daRelayStateStagedCommit {
+			staged += uint64(len(record.commit.txBytes))
 		}
-		for key, charge := range accounting.peerBytes {
-			want[key] += charge
+		for _, chunk := range record.chunks {
+			charge := uint64(len(chunk.txBytes) + len(chunk.payload))
+			if record.state == daRelayStateStagedCommit {
+				staged += charge
+			} else if chunk.member.provenance.kind == daProvenanceKind(1) {
+				want[chunk.member.provenance.quotaKey()] += charge
+			}
 		}
 	}
-	if !maps.Equal(want, view.peerBytes) {
-		t.Fatalf("per-peer charge: surviving members imply %+v, state holds %+v", want, view.peerBytes)
+	if !maps.Equal(want, view.peerBytes) || view.stagedBytes != staged {
+		t.Fatalf("survivor charges: peers=%v want=%v staged=%d want=%d", view.peerBytes, want, view.stagedBytes, staged)
 	}
 }
 
@@ -3795,6 +3987,41 @@ var ownerReadyRemovalSelectors = []struct {
 }
 
 func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
+	t.Run("whole staged removal leaves an over-cap survivor and repeats once", func(t *testing.T) {
+		f, dropID, keepID := newDANonReplayFixture(t, 2), [32]byte{0xa5}, [32]byte{0xa6}
+		drop := f.ownerReadyCommit(dropID, 2, daNonReplayPeer("drop"))
+		keep := f.ownerReadyCommit(keepID, 2, LocalDAProvenance())
+		f.mutateRelay(func(s *DARelayState) { s.caps.stagedBytes = uint64(len(keep.raw)) - 1 })
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != nil {
+			t.Fatal(err)
+		}
+		view := daRelayStateSnapshot(f.relay)
+		ownerReadyRecordAbsent(t, view, dropID, drop.txid)
+		if view.stagedBytes != uint64(len(keep.raw)) || view.commitBytes != uint64(len(keep.raw)) {
+			t.Fatalf("whole staged removal bytes=%d commit=%d", view.stagedBytes, view.commitBytes)
+		}
+		owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if err := f.relay.releaseOwnerReadyPeerQuota("drop"); err != nil {
+			t.Fatal(err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, view, owner)
+		f.setOwnerReadyTTL(keepID, 1)
+		if err := f.relay.AdvanceOrphanTTL(); err != nil {
+			t.Fatal(err)
+		}
+		view = daRelayStateSnapshot(f.relay)
+		if view.stagedBytes != 0 || view.commitBytes != 0 || len(view.sets) != 0 || len(view.locators) != 0 {
+			t.Fatalf("TTL staged residue: %+v", view)
+		}
+		owner = cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		if len(owner.byToken) != 0 || len(owner.byOutpoint) != 0 {
+			t.Fatal("TTL claims survived")
+		}
+		if err := f.relay.AdvanceOrphanTTL(); err != nil {
+			t.Fatal(err)
+		}
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, view, owner)
+	})
 	t.Run("peer state A whole record", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 1), [32]byte{0xd0}
 		tx := f.ownerReadyChunk(daID, 0, "drop-a", daNonReplayPeer("drop"))
@@ -3947,11 +4174,10 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		if _, kept := record.chunks[1]; !kept {
 			t.Fatalf("protected chunk missing")
 		}
-		// F2: the released key still HOLDS the protected commit's charge. Every earlier peer row
-		// pinned only what LEFT, which is why a commit surviving its own cleanup went unseen.
+		// The protected commit keeps its provenance and staged charge, with no peer quota.
 		requireOwnerReadyPeerCharges(t, after)
-		if want := uint64(len(before.sets[daID].commit.txBytes)); after.peerBytes["drop"] != want {
-			t.Fatalf("released quota holds %d bytes, want the protected commit's %d", after.peerBytes["drop"], want)
+		if want := uint64(len(commit.raw) + len(keep.raw) + len(keep.spec.payload)); after.stagedBytes != want || len(after.peerBytes) != 0 {
+			t.Fatalf("protected staged charge=%d want=%d peers=%v", after.stagedBytes, want, after.peerBytes)
 		}
 		owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		ownerReadyClaimGone(t, owner, dropToken, drop.inputs)
@@ -4179,7 +4405,7 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		ownerReadyClaimGone(t, owner, expiringToken, expiring.inputs)
 		ownerReadyClaimLive(t, owner, survivingToken)
 	})
-	// Each row lowers one of the four lifted caps below its live counter and requires the tick
+	// Each row lowers one of the five lifted caps below its live counter and requires the tick
 	// to proceed anyway; without the lift the absolute arithmetic would abort the batch.
 	for _, row := range []struct {
 		name       string
@@ -4197,10 +4423,15 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 		{"commit overhead", func(s *DARelayState, _ [32]byte) (*uint64, uint64) {
 			return &s.caps.orphanCommitOverheadBytes, s.orphanCommitOverheadBytes
 		}},
+		{"staged shared", func(s *DARelayState, _ [32]byte) (*uint64, uint64) {
+			return &s.caps.stagedBytes, s.stagedBytes
+		}},
 	} {
 		t.Run("ttl decrement is projected uncapped above the "+row.name+" cap", func(t *testing.T) {
 			f, daID := newDANonReplayFixture(t, 2), [32]byte{0xe4}
-			f.ownerReadyCommit(daID, 3, daNonReplayPeer("over"))
+			if row.name == "commit overhead" || row.name == "staged shared" {
+				f.ownerReadyCommit(daID, 3, daNonReplayPeer("over"))
+			}
 			f.ownerReadyChunk(daID, 0, "o0", daNonReplayPeer("over"))
 			f.setOwnerReadyTTL(daID, 2)
 			f.relay.mu.Lock()
@@ -4749,6 +4980,21 @@ func TestOwnerReadyRemovalIsAtomicWithClaimsAndPrefetch(t *testing.T) {
 }
 
 func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
+	for _, selector := range ownerReadyRemovalSelectors {
+		t.Run("staged underflow "+selector.name, func(t *testing.T) {
+			f, id := newDANonReplayFixture(t, 1), [32]byte{0xa7}
+			f.ownerReadyCommit(id, 2, daNonReplayPeer("drop"))
+			f.setOwnerReadyTTL(id, 1)
+			f.mutateRelay(func(s *DARelayState) { s.stagedBytes = 0 })
+			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			err := selector.run(f.relay)
+			var terminal *canonicalDATerminalError
+			if !errors.As(err, &terminal) || !strings.Contains(err.Error(), "staged retained bytes") {
+				t.Fatalf("staged underflow=%v", err)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+		})
+	}
 	t.Run("a later victim mismatch publishes nothing", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 2)
 		early, late := [32]byte{0x01}, [32]byte{0x02}

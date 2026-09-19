@@ -552,6 +552,7 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 
 // daRelayRecordPlacement holds ABSOLUTE counter values, not deltas.
 type daRelayRecordPlacement struct {
+	stagedBytes uint64
 	daID        [32]byte
 	record      daRelaySetRecord
 	remove      bool
@@ -566,7 +567,7 @@ type daRelayRecordPlacement struct {
 // projectDARecordImageLocked is the FALLIBLE half: it owns EVERY check and mutates
 // nothing on any path, so a refused image leaves live state byte-identical. A
 // doubly-violating image selects by STAGE: incompatible live record, stale image,
-// unusable candidate, locator row, global/per-DA/commit/peer accounting, then
+// unusable candidate, locator row, staged/global/per-DA/commit/peer accounting, then
 // exhausted revision space (RUBIN_COMPACT_BLOCKS.md 18.2, 18.3). Within the peer arm,
 // map order can select the first sentinel when keys violate different checks (overflow or peer cap).
 func (s *DARelayState) projectDARecordImageLocked(image daRelayRecordImage) (daRelayRecordPlacement, error) {
@@ -984,6 +985,9 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 		return daRelayRecordPlacement{}, err
 	}
 	placement := daRelayRecordPlacement{daID: image.daID, remove: image.remove}
+	if placement.stagedBytes, err = checkedApplyUint64DeltaCap(s.stagedBytes, oldAccounting.stagedBytes, newAccounting.stagedBytes, caps.stagedBytes, errDARelayOrphanPoolCapExceeded); err != nil {
+		return daRelayRecordPlacement{}, err
+	}
 	if placement.orphanBytes, err = checkedApplyUint64DeltaCap(s.orphanBytes, oldAccounting.orphanBytes, newAccounting.orphanBytes, caps.orphanPoolBytes, errDARelayOrphanPoolCapExceeded); err != nil {
 		return daRelayRecordPlacement{}, err
 	}
@@ -1022,6 +1026,7 @@ func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement
 		s.locators[row.txid] = row.locator
 	}
 	s.orphanBytes = placement.orphanBytes
+	s.stagedBytes = placement.stagedBytes
 	s.applyProjectedPeerBytes(placement.peerBytes)
 	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
 	s.orphanCommitOverheadBytes = placement.commitBytes
@@ -1253,7 +1258,7 @@ func checkOwnerReadyMemberClaimsLocked(owner *PendingOutpointOwner, members []*d
 // The preflight IS canonicalDARetainedImageClosed (sync_da_relay_validate.go), the canonical
 // builder's own phase-3 closure, CALLED over the whole retained set rather than restated: the
 // COMPLETE_SET refusal above leaves every record reaching it incomplete, which is what lets that
-// closure's state-agnostic ownerReadyAccounting bill each one exactly. Postcondition inherited
+// closure's State A/B-aware ownerReadyAccounting bill each one exactly. Postcondition inherited
 // with the call: the first defect is RECORD-major in ascending da_id, so one record's locator
 // bijection and its accounting are both decided before the next record is read.
 //
@@ -1414,13 +1419,14 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 	return nil, nil
 }
 
-// ownerReadyRemovalCaps is s.caps with the four orphan-domain caps lifted to the uint64 maximum.
+// ownerReadyRemovalCaps lifts the staged and four orphan-domain caps to the uint64 maximum.
 // checkedApplyUint64DeltaCap compares a post-delta TOTAL against the limit, so without the
 // lift a counter still above its cap after this removal's own decrease would abort the whole
 // all-or-nothing batch. Growth stays impossible: a whole removal stages an empty record, and
 // a survivor is proven a member-wise byte-identical subset before this cap set is used.
 func (s *DARelayState) ownerReadyRemovalCaps() daRelayCaps {
 	caps := s.caps
+	caps.stagedBytes = ^uint64(0)
 	caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
 	caps.orphanPoolPerPeerBytes, caps.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
 	return caps

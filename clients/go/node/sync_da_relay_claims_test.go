@@ -80,7 +80,7 @@ func canonicalDAOwnerFixtureOver(t *testing.T, f *daNonReplayFixture) *canonical
 // one chunk each — under ONE peer quota key after lowering the relay's per-peer
 // cap below any member's charge. The REAL admission accepts them because it
 // enforces that cap for State A only, so the captured snapshot is consistent
-// with its peer counter above the cap.
+// with no orphan peer counter despite retaining more than that quota.
 func newCanonicalDAOwnerPeerCapFixture(t *testing.T) *canonicalDAOwnerFixture {
 	t.Helper()
 	f := newDANonReplayFixture(t, 10)
@@ -94,8 +94,8 @@ func newCanonicalDAOwnerPeerCapFixture(t *testing.T) *canonicalDAOwnerFixture {
 		x.admit(record.chunk, daNonReplayTxSpec{kind: 0x02, daID: record.daID, chunkIndex: 0, payload: []byte(record.chunk)}, daNonReplayPeer("peer-x"))
 	}
 	x.capture()
-	if peer, capBytes := x.retained.orphanBytesByPeerQuotaKey["peer-x"], x.retained.caps.orphanPoolPerPeerBytes; peer <= capBytes {
-		t.Fatalf("per-peer bytes %d do not exceed the cap %d", peer, capBytes)
+	if x.retained.stagedBytes != x.memberCharge("commitA")+x.memberCharge("a0")+x.memberCharge("commit")+x.memberCharge("b0") || len(x.retained.orphanBytesByPeerQuotaKey) != 0 {
+		t.Fatal("State B staged charge or absent peer quota differs")
 	}
 	return x
 }
@@ -169,6 +169,7 @@ func (x *canonicalDAOwnerFixture) emptyRetained() {
 	x.retained.sets, x.retained.locators = map[[32]byte]daRelaySetRecord{}, map[[32]byte]daRelayLocator{}
 	x.retained.orphanBytesByDAID, x.retained.orphanBytesByPeerQuotaKey = map[[32]byte]uint64{}, map[string]uint64{}
 	x.retained.orphanBytes, x.retained.orphanCommitOverheadBytes, x.retained.prefetch = 0, 0, daRelayPrefetchState{}
+	x.retained.stagedBytes = 0
 }
 
 // requireFixturePremises fails the FIXTURE rather than a row when the real
@@ -188,7 +189,7 @@ func (x *canonicalDAOwnerFixture) requireFixturePremises() {
 	if x.retained.orphanBytes == 0 || x.retained.orphanCommitOverheadBytes == 0 || x.retained.pinnedPayloadBytes != 0 {
 		x.t.Fatalf("fixture aggregates orphan=%d commit=%d pinned=%d", x.retained.orphanBytes, x.retained.orphanCommitOverheadBytes, x.retained.pinnedPayloadBytes)
 	}
-	if len(x.retained.orphanBytesByPeerQuotaKey) != 2 || len(x.retained.orphanBytesByDAID) != 2 || len(x.retained.locators) != 4 {
+	if x.retained.stagedBytes != x.memberCharge("commit")+x.memberCharge("b0") || len(x.retained.orphanBytesByPeerQuotaKey) != 1 || len(x.retained.orphanBytesByDAID) != 1 || len(x.retained.locators) != 4 {
 		x.t.Fatalf("fixture peers=%v da_ids=%v locators=%d", x.retained.orphanBytesByPeerQuotaKey, x.retained.orphanBytesByDAID, len(x.retained.locators))
 	}
 	standard := slices.IndexFunc(x.pending.claims, func(c pendingOutpointClaim) bool {
@@ -443,13 +444,17 @@ func (x *canonicalDAOwnerFixture) requireExactImage(candidates preparedCanonical
 		delete(want.prefetchExpires, daID)
 		for _, name := range x.membersOf(daID) {
 			charge := x.memberCharge(name)
-			want.orphanBytes -= charge
+			if x.retained.sets[daID].state == daRelayStateStagedCommit {
+				want.stagedBytes -= charge
+			} else {
+				want.orphanBytes -= charge
+			}
 			delete(want.locators, x.txs[name].txid)
 			dropped[x.tokenOf(name)] = true
 			if x.txs[name].spec.kind == 0x01 {
 				want.commitBytes -= charge
 			}
-			if key := x.keys[name]; key != "" {
+			if key := x.keys[name]; key != "" && x.retained.sets[daID].state == daRelayStateOrphanChunks {
 				if want.peerBytes[key] -= charge; want.peerBytes[key] == 0 {
 					delete(want.peerBytes, key)
 				}
@@ -503,7 +508,9 @@ func (x *canonicalDAOwnerFixture) reinsert() {
 	daIDBytes := make(map[[32]byte]uint64, len(x.retained.orphanBytesByDAID))
 	for _, daID := range [][32]byte{x.stateB, x.stateA} {
 		sets[daID] = x.retained.sets[daID]
-		daIDBytes[daID] = x.retained.orphanBytesByDAID[daID]
+		if value, present := x.retained.orphanBytesByDAID[daID]; present {
+			daIDBytes[daID] = value
+		}
 	}
 	locators := make(map[[32]byte]daRelayLocator, len(x.retained.locators))
 	for _, name := range []string{"b0", "commit", "a1", "a0"} {
@@ -634,6 +641,27 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 // HIGHER-precedence defect in the LATER record, so a record-major walk would
 // report the other one.
 func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
+	for _, total := range []uint64{0, 1, ^uint64(0) - 1, ^uint64(0)} {
+		t.Run(fmt.Sprintf("staged scalar corruption %d", total), func(t *testing.T) {
+			x := newCanonicalDAOwnerFixture(t)
+			x.retained.stagedBytes = total
+			x.spendInput("b0")
+			x.requireTerminal("staged retained bytes")
+		})
+	}
+	t.Run("extra staged scalar in empty image", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		x.emptyRetained()
+		x.pending.claims = nil
+		x.retained.stagedBytes = 1
+		x.requireTerminal("staged retained bytes")
+	})
+	t.Run("lower record accounting precedes wrong staged scalar", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		x.retained.orphanBytesByDAID[x.stateA]--
+		x.retained.stagedBytes++
+		x.requireTerminal("per-da_id orphan bytes for")
+	})
 	t.Run("S0a no retained snapshot", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		x.retained = nil
@@ -836,9 +864,9 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			x.retained.orphanBytesByPeerQuotaKey[""] = x.retained.orphanBytesByPeerQuotaKey["peer-a"]
 			delete(x.retained.orphanBytesByPeerQuotaKey, "peer-a")
 		}},
-		{"AC5 a per-da_id entry no record implies", "per-da_id orphan bytes: records imply 2 entries, state holds 3", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByDAID[daRelayTestID(0xfe)] = 1 }},
+		{"AC5 a per-da_id entry no record implies", "per-da_id orphan bytes: records imply 1 entries, state holds 2", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByDAID[daRelayTestID(0xfe)] = 1 }},
 		{"AC6 pinned payload bytes in the owner-ready domain", "pinned payload bytes", func(x *canonicalDAOwnerFixture) { x.retained.pinnedPayloadBytes = 1 }},
-		{"AC7 a per-peer entry no record implies", "per-peer orphan bytes: records imply 2 entries, state holds 3", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByPeerQuotaKey["peer-that-owns-nothing"] = 1 }},
+		{"AC7 a per-peer entry no record implies", "per-peer orphan bytes: records imply 1 entries, state holds 2", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytesByPeerQuotaKey["peer-that-owns-nothing"] = 1 }},
 		{"AC8 no per-da_id counter map at all, on the empty snapshot that would otherwise pair", "carries no per-da_id orphan byte index", func(x *canonicalDAOwnerFixture) {
 			x.emptyRetained()
 			x.pending.claims, x.retained.orphanBytesByDAID = nil, nil
@@ -978,6 +1006,19 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 // shares a mutable container with an input or with its sibling — in either
 // direction.
 func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
+	t.Run("staged pair publication is old then complete new", func(t *testing.T) {
+		x := newCanonicalDAOwnerFixture(t)
+		old := daRelayStateSnapshot(x.f.relay)
+		x.spendInput("b0")
+		pair := x.requirePair()
+		if old.stagedBytes != x.memberCharge("commit")+x.memberCharge("b0") || pair.retained.stagedBytes != 0 {
+			t.Fatal("staged old/new totals differ")
+		}
+		requireDARelayStateUnchanged(t, x.f.relay, old)
+		image := preparedCanonicalDAImage{relay: x.f.relay, projected: pair.retained}
+		image.publish()
+		requireDARelayStateUnchanged(t, x.f.relay, daRelayStateSnapshot(pair.retained))
+	})
 	t.Run("X1-X9 a removal leaves exactly the survivors in both halves", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
 		x.spendInput("b0")
@@ -1007,6 +1048,7 @@ func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
 		delete(x.retained.sets[x.stateA].chunks, 1)
 		delete(x.retained.locators, x.txs["a0"].txid)
 		x.retained.orphanBytes++
+		x.retained.stagedBytes++
 		x.pending.claims[0].inputs[0].Vout ^= 1
 		if !reflect.DeepEqual(daRelayStateSnapshot(candidates.retained), relayBefore) { //nolint:govet // deepequalerrors: image identity is the assertion
 			t.Fatal("mutating the retained input moved D1")
@@ -1028,6 +1070,7 @@ func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
 		delete(candidates.retained.sets[x.stateA].chunks, 1)
 		delete(candidates.retained.locators, x.txs["a0"].txid)
 		candidates.retained.orphanBytesByPeerQuotaKey["peer-a"] = 0
+		candidates.retained.stagedBytes++
 		candidates.pending.claims[0].inputs[0].Vout ^= 1
 		candidates.pending.claims[0].finalized = !candidates.pending.claims[0].finalized
 		candidates.ownerIndex.byOutpoint[consensus.Outpoint{Vout: 41}] = pendingOutpointRow{}

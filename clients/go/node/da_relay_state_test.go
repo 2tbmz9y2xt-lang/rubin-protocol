@@ -22,6 +22,7 @@ func TestDefaultDARelayCapsMatchSpec(t *testing.T) {
 		got  uint64
 		want uint64
 	}{
+		{name: "staged shared", got: caps.stagedBytes, want: 536870912},
 		{name: "orphan pool", got: caps.orphanPoolBytes, want: 64 << 20},
 		{name: "per peer orphan pool", got: caps.orphanPoolPerPeerBytes, want: 4 << 20},
 		{name: "per da id orphan pool", got: caps.orphanPoolPerDAIDBytes, want: 8 << 20},
@@ -78,6 +79,9 @@ func TestNewDARelayStateInitializesEmptyAccounting(t *testing.T) {
 		t.Fatalf("new DA relay state: %v", err)
 	}
 
+	if state.stagedBytes != 0 {
+		t.Fatalf("staged bytes = %d, want 0", state.stagedBytes)
+	}
 	if state.orphanBytes != 0 {
 		t.Fatalf("orphan bytes = %d, want 0", state.orphanBytes)
 	}
@@ -2273,6 +2277,7 @@ func requireAddDAChunkErrWithin(t *testing.T, state *DARelayState, peer string, 
 // rejected operation can be compared against the whole prior state, matching
 // the Rust mirror's `assert_eq!(state, before)`.
 type daRelayStateView struct {
+	stagedBytes        uint64
 	mempool            *Mempool
 	caps               daRelayCaps
 	prefetchIndexes    map[[32]byte]map[uint16]string
@@ -2293,6 +2298,7 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 	defer state.mu.Unlock()
 
 	view := daRelayStateView{
+		stagedBytes:        state.stagedBytes,
 		mempool:            state.mempool,
 		caps:               state.caps,
 		prefetchIndexes:    cloneDARelayPrefetchIndexes(state.prefetch.indexes),
@@ -3579,6 +3585,25 @@ func TestDARecordImageMapOrder(t *testing.T) {
 }
 
 func TestDARecordImageCloneIsolation(t *testing.T) {
+	t.Run("live staged scalar clone and publication", func(t *testing.T) {
+		f, id := newDANonReplayFixture(t, 1), [32]byte{0xa8}
+		commit := f.ownerReadyCommit(id, 2, LocalDAProvenance())
+		f.relay.mu.Lock()
+		clone := f.relay.cloneForAtomicBatchLocked()
+		f.relay.mu.Unlock()
+		if clone.stagedBytes != uint64(len(commit.raw)) {
+			t.Fatalf("clone staged=%d", clone.stagedBytes)
+		}
+		clone.stagedBytes = 17
+		if got := daRelayStateSnapshot(f.relay).stagedBytes; got != uint64(len(commit.raw)) {
+			t.Fatalf("clone aliases live staged=%d", got)
+		}
+		f.mutateRelay(func(s *DARelayState) { s.publishAtomicBatchLocked(clone) })
+		clone.stagedBytes = 19
+		if got := daRelayStateSnapshot(f.relay).stagedBytes; got != 17 {
+			t.Fatalf("published staged=%d want=17", got)
+		}
+	})
 	daID := daRelayTestID(81)
 	provenance := daRelayTestPeerProvenance("quota-a")
 	t.Run("the locator map is isolated in both clone directions", func(t *testing.T) {
