@@ -26,6 +26,9 @@ type daCompleteCommitPlan struct {
 }
 
 func (s *DARelayState) prepareDACompleteCommit(admission *DAAdmission, result daCompletePreparation) (*daCompleteCommitPlan, error) {
+	if result.duplicate != nil {
+		return s.prepareDACompleteDuplicate(admission, result)
+	}
 	source, err := daCompleteCommitSource(result)
 	if err != nil {
 		return nil, err
@@ -35,11 +38,6 @@ func (s *DARelayState) prepareDACompleteCommit(admission *DAAdmission, result da
 		return nil, errDARelayImageIncompatible
 	}
 	p := &daCompleteCommitPlan{relay: s, admission: admission}
-	if result.duplicate != nil {
-		duplicate := *result.duplicate
-		p.duplicate = &duplicate
-		return p, nil
-	}
 	if !s.sameDACompleteAdmission(admission, source) {
 		return nil, errDARelayImageIncompatible
 	}
@@ -53,13 +51,20 @@ func (s *DARelayState) prepareDACompleteCommit(admission *DAAdmission, result da
 	return p, nil
 }
 
+func (s *DARelayState) prepareDACompleteDuplicate(admission *DAAdmission, result daCompletePreparation) (*daCompleteCommitPlan, error) {
+	if result.prepared != nil || result.mismatch != nil || result.duplicate.disposition != daRelayAdmissionDuplicate {
+		return nil, errDARelayImageIncompatible
+	}
+	admission.mustLiveValue()
+	if admission.guard.state.Load() != daAdmissionOpen {
+		return nil, errDARelayImageIncompatible
+	}
+	duplicate := *result.duplicate
+	return &daCompleteCommitPlan{relay: s, admission: admission, duplicate: &duplicate}, nil
+}
+
 func daCompleteCommitSource(result daCompletePreparation) (*daCompleteSnapshot, error) {
 	switch [3]bool{result.duplicate != nil, result.prepared != nil, result.mismatch != nil} {
-	case [3]bool{true, false, false}:
-		if result.duplicate.disposition != daRelayAdmissionDuplicate {
-			return nil, errDARelayImageIncompatible
-		}
-		return nil, nil
 	case [3]bool{false, true, false}:
 		if result.prepared.image.next.state != daRelayStateCompleteSet {
 			return nil, errDARelayImageIncompatible

@@ -68,18 +68,18 @@ func TestDACompleteSnapshotPublicationBase(t *testing.T) {
 	unrelated := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{90}, payload: []byte{9}})
 	f.admit(unrelated, LocalDAProvenance())
 	s := daCompleteTestCapture(t, f, c)
-	if s.publicationBase == nil || !reflect.DeepEqual(daRelayStateSnapshot(s.publicationBase), daRelayStateSnapshot(f.relay)) {
+	if s.publicationBase == nil {
 		t.Fatal("publication base must share the first coherent capture")
 	}
 	base := daRelayStateSnapshot(s.publicationBase)
+	baseOwner := cloneDAAdmissionOwner(s.owner)
+	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints))
 	delete(f.relay.locators, unrelated.txid)
 	r := f.relay.sets[unrelated.spec.daID]
 	r.ttlBlocksRemaining--
 	f.relay.sets[r.daID] = r
 	f.relay.sets[[32]byte{1}].chunks[0].txBytes[0]++
-	if !reflect.DeepEqual(base, daRelayStateSnapshot(s.publicationBase)) {
-		t.Fatal("publication base containers and selected records are immutable")
-	}
+	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, base, baseOwner)
 }
 
 func daCompleteTestPrepare(t *testing.T, f *daNonReplayFixture, a *DAAdmission, s *daCompleteSnapshot) (daCompletePreparation, error) {

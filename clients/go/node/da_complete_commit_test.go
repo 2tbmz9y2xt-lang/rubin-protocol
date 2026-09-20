@@ -499,7 +499,7 @@ func TestDACompleteCommitMismatch(t *testing.T) {
 	}
 	before, owner = daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	plan, err := f.relay.prepareDACompleteCommit(a, result)
-	if plan != nil || err != ErrDARelayPayloadCommitmentMismatch || a.guard.state.Load() != 0 {
+	if plan != nil || !daCompleteTestError(err, ErrDARelayPayloadCommitmentMismatch) || a.guard.state.Load() != 0 {
 		t.Fatal("chunk mismatch without reserve or sequence")
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
@@ -550,7 +550,7 @@ func TestDACompleteCommitMismatchOrder(t *testing.T) {
 				}
 			} else {
 				wantError := map[string]error{"shared": errDARelayOrphanPoolCapExceeded, "commit": errDARelayOrphanCommitCapExceeded, "sequence": errDARelayArithmeticOverflow}[name]
-				if err != wantError {
+				if !daCompleteTestError(err, wantError) {
 					t.Fatal("shared then commit then sequence", err)
 				}
 			}
@@ -602,7 +602,7 @@ func TestDACompleteCommitLifecycle(t *testing.T) {
 		t.Fatal("original admission guard consumed")
 	}
 	before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-	if out, rejected, err := f.relay.applyDACompleteCommit(a, p); out != (daRelayAdmissionOutcome{}) || rejected || err != errDARelayImageIncompatible {
+	if out, rejected, err := f.relay.applyDACompleteCommit(a, p); out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayImageIncompatible) {
 		t.Fatal("second attempt requires new admission")
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
@@ -671,7 +671,7 @@ func TestDACompleteCommitPreparation(t *testing.T) {
 			}
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			p, err := f.relay.prepareDACompleteCommit(a, result)
-			if p != nil || err != want || a.guard.state.Load() != 0 {
+			if p != nil || !daCompleteTestError(err, want) || a.guard.state.Load() != 0 {
 				t.Fatal("same admission identity and owner closed preparation", name, err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
@@ -680,6 +680,7 @@ func TestDACompleteCommitPreparation(t *testing.T) {
 	f, a, c := daCompleteTestCandidate(t, true, 1, 0)
 	s := daCompleteTestCapture(t, f, c)
 	base := daRelayStateSnapshot(s.publicationBase)
+	baseOwner := cloneDAAdmissionOwner(s.owner)
 	result, err := prepareDACompleteSnapshot(s, daRelayAdmissionOutcome{})
 	if err != nil {
 		t.Fatal(err)
@@ -693,13 +694,12 @@ func TestDACompleteCommitPreparation(t *testing.T) {
 	result.prepared.image.next.commit.txBytes[0]++
 	result.prepared.image.next.commit.member.inputs[0].Vout++
 	projected := p.projected.sets[[32]byte{1}].commit
-	if !reflect.DeepEqual(base, daRelayStateSnapshot(s.publicationBase)) || !bytes.Equal(projected.txBytes, a.snapshot.TxBytes) || !slices.Equal(projected.member.inputs, a.snapshot.Inputs) || !slices.Equal(p.owner.candidate.inputs, a.snapshot.Inputs) {
+	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, base, baseOwner)
+	if !bytes.Equal(projected.txBytes, a.snapshot.TxBytes) || !slices.Equal(projected.member.inputs, a.snapshot.Inputs) || !slices.Equal(p.owner.candidate.inputs, a.snapshot.Inputs) {
 		t.Fatal("owned snapshot remains unchanged")
 	}
 	f.relay.sets[[32]byte{1}].chunks[0].txBytes[0]++
-	if !reflect.DeepEqual(base, daRelayStateSnapshot(s.publicationBase)) {
-		t.Fatal("owned snapshot remains unchanged after selected-record storage reuse")
-	}
+	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, base, baseOwner)
 	for _, name := range []string{"nil source", "kind zero", "kind other", "wrong role", "missing image"} {
 		f, a, c := daCompleteCommitMismatchFixture(t, true)
 		s := daCompleteTestCapture(t, f, c)
@@ -719,7 +719,7 @@ func TestDACompleteCommitPreparation(t *testing.T) {
 		case "missing image":
 			result.mismatch.image = daRelayRecordImage{}
 		}
-		if p, err := f.relay.prepareDACompleteCommit(a, result); p != nil || err != errDARelayImageIncompatible || a.guard.state.Load() != 0 {
+		if p, err := f.relay.prepareDACompleteCommit(a, result); p != nil || !daCompleteTestError(err, errDARelayImageIncompatible) || a.guard.state.Load() != 0 {
 			t.Fatal("closed mismatch shape", name, err)
 		}
 	}
@@ -968,7 +968,7 @@ func TestDACompleteCommitAtomicity(t *testing.T) {
 	}
 	close(start)
 	first, second := <-results, <-results
-	if !((first == 1 && second == 2) || (first == 2 && second == 1)) || len(f2.mp.pendingOutpoints.byToken) != 2 {
+	if ((first != 1 || second != 2) && (first != 2 || second != 1)) || len(f2.mp.pendingOutpoints.byToken) != 2 {
 		t.Fatal("same-input race one winner no leaked claim")
 	}
 }
@@ -1066,9 +1066,12 @@ func TestDACompleteCommitStructure(t *testing.T) {
 		body  string
 		valid bool
 	}{
-		{"x := make([]byte, 1); _ = x", false}, {"x := append([]byte(nil), source...); _ = x", false},
-		{"alias := prepareDAAdmissionCommit; alias(a, victims)", false}, {"func() { make([]byte, 1) }()", false},
-		{"p := projected; s.sets = (p.sets)", true}, {"x := PendingOutpointToken{}; _ = x", true},
+		{"x := make([]byte, 1); _ = x", false},
+		{"x := append([]byte(nil), source...); _ = x", false},
+		{"alias := prepareDAAdmissionCommit; alias(a, victims)", false},
+		{"func() { make([]byte, 1) }()", false},
+		{"p := projected; s.sets = (p.sets)", true},
+		{"x := PendingOutpointToken{}; _ = x", true},
 		{"p := projected; *s = (*p)", true},
 		{"x := &DACommit{}; _ = x", false},
 		{"x := &(DACommit{}); _ = x", false},
