@@ -283,34 +283,64 @@ func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error
 		panic("DA admission is not available for BeginCommit")
 	}
 	defer g.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+	prepared, err := prepareDAAdmissionCommit(a, victims)
+	if err != nil {
+		return nil, txAdmitFromPendingOutpointError(err)
+	}
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	if failed {
+		return nil, txAdmitFromPendingOutpointError(&failure)
+	}
+	return commit, nil
+}
+
+// daPreparedAdmissionCommit is exclusively held caller scratch, without an owner token.
+type daPreparedAdmissionCommit struct {
+	candidate *pendingOutpointClaim
+	commit    *DACommit
+	context   PendingOutpointAdmissionContext
+}
+
+// prepareDAAdmissionCommit requires a valid, exclusively held admission. It does
+// not claim the public attempt or take DA/owner locks.
+func prepareDAAdmissionCommit(a *DAAdmission, victims []DAAdmissionVictim) (*daPreparedAdmissionCommit, error) {
 	if len(a.snapshot.Inputs) > consensus.MAX_TX_INPUTS {
-		return nil, txAdmitFromPendingOutpointError(pendingOutpointInternal("invalid DA candidate input count"))
+		return nil, pendingOutpointInternal("invalid DA candidate input count")
 	}
 	if err := validatePendingOutpointRequest(PendingOutpointDA, a.snapshot.TxID, a.snapshot.Inputs); err != nil {
-		return nil, txAdmitFromPendingOutpointError(err)
+		return nil, err
 	}
 	candidate := &pendingOutpointClaim{domain: PendingOutpointDA, txid: a.snapshot.TxID, inputs: append([]consensus.Outpoint(nil), a.snapshot.Inputs...)}
 	batch, err := prepareDAAdmissionVictims(victims, a.snapshot.TxID)
 	if err != nil {
-		return nil, txAdmitFromPendingOutpointError(err)
+		return nil, err
 	}
-	commit := &DACommit{guard: g, victims: batch}
+	commit := &DACommit{guard: a.guard, victims: batch}
 	commit.self = commit
+	return &daPreparedAdmissionCommit{candidate: candidate, commit: commit, context: a.context}, nil
+}
+
+// reservePreparedDAAdmissionCommit consumes scratch once under the caller's
+// successful OPEN->ATTEMPTING claim. Success transfers the owner hold to commit;
+// failure returns an unformatted descriptor after releasing that hold.
+func reservePreparedDAAdmissionCommit(prepared *daPreparedAdmissionCommit) (*DACommit, PendingOutpointError, bool) {
+	commit := prepared.commit
+	g := commit.guard
 	g.owner.mu.Lock()
-	token, failure, failed := g.owner.reserveDAAdmissionLocked(a.context, candidate)
+	token, failure, failed := g.owner.reserveDAAdmissionLocked(prepared.context, prepared.candidate)
 	if !failed {
-		failure, failed = g.owner.validateDAAdmissionVictimsLocked(batch, token)
+		failure, failed = g.owner.validateDAAdmissionVictimsLocked(commit.victims, token)
 	}
 	if failed {
 		if token != (PendingOutpointToken{}) {
 			g.owner.dropClaimLocked(token)
 		}
 		g.owner.mu.Unlock()
-		return nil, txAdmitFromPendingOutpointError(&failure)
+		return nil, failure, true
 	}
 	commit.candidate = token
 	g.state.Store(daAdmissionLive)
-	return commit, nil
+	return commit, PendingOutpointError{}, false
 }
 
 func prepareDAAdmissionVictims(victims []DAAdmissionVictim, candidate [32]byte) ([]DAAdmissionVictim, error) {

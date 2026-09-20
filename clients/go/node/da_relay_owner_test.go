@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/sha3"
 	"encoding/base64"
 	"encoding/json"
@@ -144,6 +145,164 @@ func captureDAAdmissionPurity(admission *DAAdmission) []any {
 		snapshot, admission.Snapshot(), daAdmissionSlice(admission.snapshot.TxBytes), daAdmissionSlice(admission.snapshot.Inputs), admission.context, admission.guard.state.Load(),
 		cloneDAAdmissionTx(admission.tx), daAdmissionTxSlices(admission.tx), cloneDAAdmissionOwner(admission.guard.owner), cloneChainState(admission.guard.chainState), marshaled, err == nil,
 	}
+}
+
+// These literal expectations replace only the extracted admission declaration;
+// the current production AST and all historical removal/caller rows stay checked.
+const daPreparedCommitSource = `package node
+func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error) {
+	a.mustLiveValue()
+	g := a.guard
+	if !g.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting) {
+		panic("DA admission is not available for BeginCommit")
+	}
+	defer g.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+	prepared, err := prepareDAAdmissionCommit(a, victims)
+	if err != nil {
+		return nil, txAdmitFromPendingOutpointError(err)
+	}
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	if failed {
+		return nil, txAdmitFromPendingOutpointError(&failure)
+	}
+	return commit, nil
+}
+type daPreparedAdmissionCommit struct {
+	candidate *pendingOutpointClaim
+	commit    *DACommit
+	context   PendingOutpointAdmissionContext
+}
+func prepareDAAdmissionCommit(a *DAAdmission, victims []DAAdmissionVictim) (*daPreparedAdmissionCommit, error) {
+	if len(a.snapshot.Inputs) > consensus.MAX_TX_INPUTS {
+		return nil, pendingOutpointInternal("invalid DA candidate input count")
+	}
+	if err := validatePendingOutpointRequest(PendingOutpointDA, a.snapshot.TxID, a.snapshot.Inputs); err != nil {
+		return nil, err
+	}
+	candidate := &pendingOutpointClaim{domain: PendingOutpointDA, txid: a.snapshot.TxID, inputs: append([]consensus.Outpoint(nil), a.snapshot.Inputs...)}
+	batch, err := prepareDAAdmissionVictims(victims, a.snapshot.TxID)
+	if err != nil {
+		return nil, err
+	}
+	commit := &DACommit{guard: a.guard, victims: batch}
+	commit.self = commit
+	return &daPreparedAdmissionCommit{candidate: candidate, commit: commit, context: a.context}, nil
+}
+func reservePreparedDAAdmissionCommit(prepared *daPreparedAdmissionCommit) (*DACommit, PendingOutpointError, bool) {
+	commit := prepared.commit
+	g := commit.guard
+	g.owner.mu.Lock()
+	token, failure, failed := g.owner.reserveDAAdmissionLocked(prepared.context, prepared.candidate)
+	if !failed {
+		failure, failed = g.owner.validateDAAdmissionVictimsLocked(commit.victims, token)
+	}
+	if failed {
+		if token != (PendingOutpointToken{}) {
+			g.owner.dropClaimLocked(token)
+		}
+		g.owner.mu.Unlock()
+		return nil, failure, true
+	}
+	commit.candidate = token
+	g.state.Store(daAdmissionLive)
+	return commit, PendingOutpointError{}, false
+}
+`
+
+func adjustDAPreparedCommitRows(t *testing.T, want map[string]int, functions map[string]bool, legacyRows string) {
+	t.Helper()
+	old := ""
+	for _, row := range strings.Split(legacyRows, "\x1e") {
+		if strings.HasPrefix(row, "declaration|node/da_admission.go:BeginCommit|func (a *DAAdmission)") {
+			old = "package node\n" + strings.SplitN(row, "|", 3)[2]
+		}
+	}
+	if old == "" {
+		t.Fatal("missing historical DAAdmission BeginCommit")
+	}
+	for index, source := range []string{old, daPreparedCommitSource} {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, "expected.go", source, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		definitions, callFun := map[token.Pos]bool{}, map[token.Pos]bool{}
+		ast.Inspect(file, func(node ast.Node) bool {
+			if decl, ok := node.(*ast.FuncDecl); ok {
+				definitions[decl.Name.Pos()] = true
+			}
+			if call, ok := node.(*ast.CallExpr); ok {
+				ast.Inspect(call.Fun, func(child ast.Node) bool {
+					if id, ok := child.(*ast.Ident); ok {
+						callFun[id.Pos()] = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+		for _, declaration := range file.Decls {
+			scope := "node/da_admission.go:file"
+			if decl, ok := declaration.(*ast.FuncDecl); ok {
+				scope = "node/da_admission.go:" + decl.Name.Name
+			}
+			ast.Inspect(declaration, func(node ast.Node) bool {
+				category := ""
+				switch node := node.(type) {
+				case *ast.FuncDecl:
+					category = "declaration"
+				case *ast.GenDecl:
+					category = "gen"
+				case *ast.CallExpr:
+					category = "call"
+				case *ast.AssignStmt:
+					category = "write"
+				case *ast.DeferStmt:
+					category = "defer"
+				case *ast.SelectorExpr:
+					category = "field"
+				case *ast.Ident:
+					category = "read"
+					if functions[node.Name] && !callFun[node.Pos()] && !definitions[node.Pos()] {
+						category = "value"
+					}
+				}
+				if category != "" {
+					row := category + "|" + scope + "|" + source[fset.Position(node.Pos()).Offset:fset.Position(node.End()).Offset]
+					want[row] += 2*index - 1
+					if want[row] == 0 {
+						delete(want, row)
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+func TestDAPreparedCommitStructure(t *testing.T) {
+	// The complete owner helper closure is unchanged at the bound base. This
+	// includes indirect callees; map bucket growth remains allowed by Reserve.
+	source, err := os.ReadFile("pending_outpoint_owner.go")
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "c6b2db12cf9c8fec91003773dad2ec98b6b8ba108bf67c311a5a41d0a1965461" {
+		t.Fatal("owner phase rebuilds prepared scratch: owner closure changed")
+	}
+	source, err = os.ReadFile("da_admission.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	expected, err := parser.ParseFile(fset, "expected.go", daPreparedCommitSource, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, declaration := range expected.Decls {
+		literal := daPreparedCommitSource[fset.Position(declaration.Pos()).Offset:fset.Position(declaration.End()).Offset]
+		if strings.Count(string(source), literal) != 1 {
+			t.Fatal("owner phase rebuilds prepared scratch: exact caller/helper/carrier flow changed")
+		}
+	}
+	requireDAAdmissionStructure(t)
 }
 
 func requireDAAdmissionStructure(t *testing.T) {
@@ -370,6 +529,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 				want[row]++
 			}
 		}
+		adjustDAPreparedCommitRows(t, want, functions, string(legacyRows))
 		want["read|node/da_relay_owner.go:file|uint8"]++     // Public disposition and observation add two declarations while the private alias is removed.
 		want["read|node/da_relay_owner.go:file|string"] += 2 // Observation adds two quota-key fields; provenance retains its two fields.
 		for _, field := range []string{"Mempool", "daAdmissionGuard", "chainStateAdmissionSnapshot", "MempoolConfig", "PendingOutpointAdmissionContext", "mempool", "guard", "policy", "context"} {

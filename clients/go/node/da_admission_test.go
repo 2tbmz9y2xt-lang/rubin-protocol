@@ -5,7 +5,9 @@ import (
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
+	"slices"
 	"testing"
 	"time"
 
@@ -550,4 +552,352 @@ func TestDACommit(t *testing.T) {
 		t.Fatal("concurrent terminal left an unfinalized candidate")
 	}
 	live.Close()
+}
+
+func TestDAPreparedCommitLifecycle(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 1)
+	a := mustDAAdmission(t, mp, raw[0])
+	before := cloneDAAdmissionOwner(a.guard.owner)
+	assertPanic := func(want string, call func()) {
+		t.Helper()
+		defer func() {
+			if got := recover(); got != want {
+				t.Fatalf("failed public attempt remains one-shot: panic=%v want=%s", got, want)
+			}
+		}()
+		call()
+	}
+	if commit, err := a.BeginCommit([]DAAdmissionVictim{{}}); commit != nil || daAdmit(t, err, TxAdmitUnavailable).Message != "zero DA victim txid or token" || a.guard.state.Load() != daAdmissionResolved {
+		t.Fatal("failed public attempt remains one-shot")
+	}
+	for _, tc := range []struct {
+		call func()
+		want string
+	}{
+		{func() { _, _ = a.BeginCommit(nil) }, "DA admission is not available for BeginCommit"},
+		{func() { _ = a.Snapshot() }, "DA admission snapshot is not available"},
+	} {
+		assertPanic(tc.want, tc.call)
+	}
+	if !reflect.DeepEqual(before, cloneDAAdmissionOwner(a.guard.owner)) {
+		t.Fatal("failed public attempt changed owner")
+	}
+	a.Close()
+	assertPanic("DA admission is not available for BeginCommit", func() { _, _ = a.BeginCommit(nil) })
+	var nilAdmission *DAAdmission
+	assertPanic("invalid DAAdmission", func() { _, _ = nilAdmission.BeginCommit(nil) })
+	a = mustDAAdmission(t, mp, raw[0])
+	copy := *a
+	assertPanic("invalid DAAdmission", func() { _, _ = copy.BeginCommit(nil) })
+	commit, err := a.BeginCommit(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPanic("DA admission is not available for BeginCommit", func() { _, _ = a.BeginCommit(nil) })
+	commit.Abort()
+	a.Close()
+}
+
+func TestDAPreparedCommitIsolation(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 3)
+	owner := mp.PendingOutpointOwner()
+	victims := make([]DAAdmissionVictim, 2)
+	for i := range victims {
+		snapshot, token := mustFinalizeDAAdmission(t, mp, raw[i])
+		victims[i] = DAAdmissionVictim{TxID: snapshot.TxID, Inputs: snapshot.Inputs, Token: token}
+	}
+	a := mustDAAdmission(t, mp, raw[2])
+	before, snapshot := cloneDAAdmissionOwner(owner), a.Snapshot()
+	prepared, err := prepareDAAdmissionCommit(a, victims)
+	if err != nil || prepared == nil || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) || !reflect.DeepEqual(snapshot, a.Snapshot()) {
+		t.Fatal("preparation changed admission or owner")
+	}
+	a.snapshot.Inputs[0].Vout++
+	for i := range victims {
+		victims[i].Inputs[0].Vout++
+		victims[i].TxID[0]++
+		victims[i].Token = PendingOutpointToken{}
+	}
+	if !slices.Equal(prepared.candidate.inputs, snapshot.Inputs) {
+		t.Fatal("prepared inputs alias caller: candidate")
+	}
+	for _, victim := range prepared.commit.victims {
+		claim := before.byToken[victim.Token]
+		if claim == nil || claim.txid != victim.TxID || !slices.Equal(claim.inputs, victim.Inputs) {
+			t.Fatal("prepared inputs alias caller: victim")
+		}
+	}
+	if !a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting) {
+		t.Fatal("claim attempt")
+	}
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	if failed || failure != (PendingOutpointError{}) || commit != prepared.commit {
+		t.Fatal("prepared inputs alias caller: reservation")
+	}
+	commit.Commit()
+	a.Close()
+	if len(owner.byToken) != 1 || !owner.byToken[commit.candidate].finalized || !slices.Equal(owner.byToken[commit.candidate].inputs, snapshot.Inputs) {
+		t.Fatal("copied claims not committed")
+	}
+}
+
+func TestDAPreparedCommitOrder(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 1)
+	owner := mp.PendingOutpointOwner()
+	base := DAAdmissionVictim{TxID: [32]byte{2}, Inputs: []consensus.Outpoint{testOutpoint(2)}, Token: PendingOutpointToken{owner: owner, seq: 1}}
+	duplicate := fmt.Sprintf("duplicate pending-outpoint input txid=%x vout=%d", testOutpoint(2).Txid, testOutpoint(2).Vout)
+	for _, tc := range []struct {
+		name, want string
+		inputs     []consensus.Outpoint
+		zeroTxID   bool
+		victims    []DAAdmissionVictim
+	}{
+		{"count before request", "invalid DA candidate input count", make([]consensus.Outpoint, 1025), true, []DAAdmissionVictim{{}}},
+		{"txid before inputs", "zero pending-outpoint txid", nil, true, []DAAdmissionVictim{{}}},
+		{"empty before victims", "empty pending-outpoint input set", nil, false, []DAAdmissionVictim{{}}},
+		{"duplicate before victims", duplicate, []consensus.Outpoint{testOutpoint(2), testOutpoint(2)}, false, []DAAdmissionVictim{{}}},
+		{"victim zero txid", "zero DA victim txid or token", base.Inputs, false, []DAAdmissionVictim{{Token: base.Token, Inputs: base.Inputs}}},
+		{"victim zero token", "zero DA victim txid or token", base.Inputs, false, []DAAdmissionVictim{{TxID: base.TxID, Inputs: base.Inputs}}},
+		{"victim empty", "invalid DA victim input count", base.Inputs, false, []DAAdmissionVictim{{TxID: base.TxID, Token: base.Token}}},
+		{"victim oversized", "invalid DA victim input count", base.Inputs, false, []DAAdmissionVictim{{TxID: base.TxID, Token: base.Token, Inputs: make([]consensus.Outpoint, 1025)}}},
+		{"victim duplicate input", duplicate, base.Inputs, false, []DAAdmissionVictim{{TxID: base.TxID, Token: base.Token, Inputs: []consensus.Outpoint{testOutpoint(2), testOutpoint(2)}}}},
+		{"duplicate txid before token", "duplicate DA victim txid", base.Inputs, false, []DAAdmissionVictim{base, base}},
+		{"duplicate token", "duplicate DA victim token", base.Inputs, false, []DAAdmissionVictim{base, {TxID: [32]byte{3}, Token: base.Token, Inputs: base.Inputs}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := mustDAAdmission(t, mp, raw[0])
+			a.snapshot.Inputs = tc.inputs
+			if tc.zeroTxID {
+				a.snapshot.TxID = [32]byte{}
+			}
+			owner.inTransition = true
+			before, snapshot := cloneDAAdmissionOwner(owner), a.Snapshot()
+			prepared, err := prepareDAAdmissionCommit(a, tc.victims)
+			var failure *PendingOutpointError
+			if prepared != nil || !errors.As(err, &failure) || *failure != (PendingOutpointError{Kind: PendingOutpointInternal, Msg: tc.want}) || !reflect.DeepEqual(snapshot, a.Snapshot()) || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) {
+				t.Fatalf("preparation error before owner: %v", err)
+			}
+			if commit, err := a.BeginCommit(tc.victims); commit != nil || daAdmit(t, err, TxAdmitUnavailable).Message != tc.want || a.guard.state.Load() != daAdmissionResolved || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) {
+				t.Fatalf("preparation error before owner: public %v", err)
+			}
+			owner.inTransition = false
+			a.Close()
+		})
+	}
+	a := mustDAAdmission(t, mp, raw[0])
+	for _, victims := range [][]DAAdmissionVictim{
+		{{TxID: a.snapshot.TxID, Token: base.Token, Inputs: base.Inputs}},
+		make([]DAAdmissionVictim, daAdmissionMaxVictims+1),
+	} {
+		want := "DA candidate is also a victim"
+		if len(victims) > 1 {
+			want = "DA victim batch exceeds bound"
+		}
+		if prepared, err := prepareDAAdmissionCommit(a, victims); prepared != nil || err == nil || err.Error() != want {
+			t.Fatal("preparation error before owner: batch bounds/identity")
+		}
+	}
+	a.Close()
+	// The second input conflicts; the first does not. A later conflict and an
+	// invalid live victim must not replace the first conflict descriptor.
+	a = mustDAAdmission(t, mp, raw[0])
+	a.snapshot.Inputs = []consensus.Outpoint{testOutpoint(1), testOutpoint(2), testOutpoint(3)}
+	mustReserve(t, owner, [32]byte{8}, testOutpoint(2))
+	mustReserve(t, owner, [32]byte{9}, testOutpoint(3))
+	prepared, err := prepareDAAdmissionCommit(a, []DAAdmissionVictim{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cloneDAAdmissionOwner(owner)
+	a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	if !owner.mu.TryLock() {
+		t.Fatal("reserve before live victim validation: refusal retained owner")
+	}
+	owner.mu.Unlock()
+	if commit != nil || !failed || failure != (PendingOutpointError{Kind: PendingOutpointConflict, Outpoint: testOutpoint(2), InputIndex: 1, ExistingTxid: [32]byte{8}}) || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) {
+		t.Fatal("reserve before live victim validation")
+	}
+	a.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+	a.Close()
+}
+
+func TestDAPreparedCommitContext(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 1)
+	owner := mp.PendingOutpointOwner()
+	for _, tc := range []struct {
+		name, message string
+	}{
+		{"transition", "pending-outpoint owner transition in progress"},
+		{"tip", "pending-outpoint expected tip mismatch"},
+		{"generation", "pending-outpoint expected generation mismatch"},
+		{"exhaustion", "pending-outpoint token sequence exhausted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := mustDAAdmission(t, mp, raw[0])
+			public := mustDAAdmission(t, mp, raw[0])
+			prepared, err := prepareDAAdmissionCommit(a, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			context := a.context
+			owner.tokenHighWater = ^uint64(0)
+			if tc.name != "exhaustion" {
+				owner.generation++
+			}
+			if tc.name == "tip" || tc.name == "transition" {
+				owner.stableTip.Height++
+			}
+			owner.inTransition = tc.name == "transition"
+			// The owner and original admission now agree; only captured data is stale.
+			a.context = PendingOutpointAdmissionContext{StableTip: owner.stableTip, Generation: owner.generation}
+			before := cloneDAAdmissionOwner(owner)
+			a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+			commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+			if !owner.mu.TryLock() {
+				t.Fatal("captured admission context: refusal retained owner")
+			}
+			owner.mu.Unlock()
+			if commit != nil || !failed || failure != (PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: tc.message}) || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) || a.guard.state.Load() != daAdmissionAttempting {
+				t.Fatal("captured admission context")
+			}
+			a.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+			a.Close()
+			if commit, err := public.BeginCommit(nil); commit != nil || daAdmit(t, err, TxAdmitUnavailable).Message != tc.message || public.guard.state.Load() != daAdmissionResolved || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) {
+				t.Fatal("captured admission context: public mapping")
+			}
+			public.Close()
+			owner.tokenHighWater, owner.generation, owner.stableTip, owner.inTransition = 0, context.Generation, context.StableTip, false
+		})
+	}
+}
+
+func TestDAPreparedCommitOwnerEffects(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 3)
+	owner := mp.PendingOutpointOwner()
+	victims := make([]DAAdmissionVictim, 2)
+	for i := range victims {
+		admission := mustDAAdmission(t, mp, raw[i])
+		snapshot := admission.Snapshot()
+		token, err := owner.Reserve(admission.context, PendingOutpointDA, snapshot.TxID, snapshot.Inputs)
+		if err != nil {
+			admission.Close()
+			t.Fatal(err)
+		}
+		if err := owner.Finalize(token); err != nil {
+			admission.Close()
+			t.Fatal(err)
+		}
+		admission.Close()
+		victims[i] = DAAdmissionVictim{TxID: snapshot.TxID, Inputs: snapshot.Inputs, Token: token}
+	}
+	a := mustDAAdmission(t, mp, raw[2])
+	bad := slices.Clone(victims)
+	bad[1].TxID = [32]byte{9}
+	prepared, err := prepareDAAdmissionCommit(a, bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cloneDAAdmissionOwner(owner)
+	a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	before.tokenHighWater++
+	if !owner.mu.TryLock() {
+		t.Fatal("post-reserve refusal state: owner retained")
+	}
+	owner.mu.Unlock()
+	if commit != nil || !failed || failure != (PendingOutpointError{Kind: PendingOutpointInternal, Msg: "DA victim claim mismatch"}) || !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) || a.guard.state.Load() != daAdmissionAttempting {
+		t.Fatal("post-reserve refusal state")
+	}
+	a.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+	a.Close()
+	for count := 0; count <= 2; count++ {
+		a = mustDAAdmission(t, mp, raw[2])
+		prepared, err = prepareDAAdmissionCommit(a, victims[:count])
+		if err != nil {
+			t.Fatal(err)
+		}
+		high := owner.tokenHighWater
+		a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+		commit, failure, failed = reservePreparedDAAdmissionCommit(prepared)
+		if failed || failure != (PendingOutpointError{}) || commit != prepared.commit || commit.candidate != (PendingOutpointToken{owner: owner, seq: high + 1}) || a.guard.state.Load() != daAdmissionLive || owner.tokenHighWater != high+1 || owner.byToken[commit.candidate] != prepared.candidate {
+			t.Fatal("single live commit transfer")
+		}
+		if owner.mu.TryLock() {
+			owner.mu.Unlock()
+			t.Fatal("single live commit transfer: owner not held")
+		}
+		commit.Abort()
+		a.Close()
+		before.tokenHighWater++
+		if !reflect.DeepEqual(before, cloneDAAdmissionOwner(owner)) {
+			t.Fatal("Abort changed surviving victims")
+		}
+	}
+}
+
+func TestDAPreparedCommitIdentity(t *testing.T) {
+	mp, raw := daAdmissionTestMempool(t, 1)
+	owner := mp.PendingOutpointOwner()
+	for _, count := range []int{1, 1024} {
+		a := mustDAAdmission(t, mp, raw[0])
+		inputs := make([]consensus.Outpoint, count)
+		for i := range inputs {
+			inputs[i] = consensus.Outpoint{Txid: [32]byte{7}, Vout: uint32(i)}
+		}
+		a.snapshot.Inputs = inputs
+		a.context = PendingOutpointAdmissionContext{StableTip: PendingOutpointTip{HasTip: true, Height: 17, Hash: [32]byte{6}}, Generation: 19}
+		victims := []DAAdmissionVictim{{TxID: [32]byte{3}, Inputs: []consensus.Outpoint{testOutpoint(3)}, Token: PendingOutpointToken{owner: owner, seq: 5}}, {TxID: [32]byte{4}, Inputs: []consensus.Outpoint{testOutpoint(4)}, Token: PendingOutpointToken{owner: owner, seq: 6}}}
+		prepared, err := prepareDAAdmissionCommit(a, victims)
+		if err != nil || prepared == nil || prepared.candidate.domain != PendingOutpointDomain(2) || prepared.candidate.txid != a.snapshot.TxID || !slices.Equal(prepared.candidate.inputs, inputs) || prepared.candidate.token != (PendingOutpointToken{}) || prepared.candidate.generation != 0 || prepared.candidate.finalized || prepared.context != (PendingOutpointAdmissionContext{StableTip: PendingOutpointTip{HasTip: true, Height: 17, Hash: [32]byte{6}}, Generation: 19}) || prepared.commit.guard != a.guard || prepared.commit.self != prepared.commit || prepared.commit.candidate != (PendingOutpointToken{}) || !reflect.DeepEqual(prepared.commit.victims, victims) {
+			t.Fatal("exact prepared identity and failure descriptor")
+		}
+		a.Close()
+	}
+	for _, unavailable := range []bool{false, true} {
+		a := mustDAAdmission(t, mp, raw[0])
+		prepared, err := prepareDAAdmissionCommit(a, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner.inTransition = unavailable
+		a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+		commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+		want := PendingOutpointError{}
+		if unavailable {
+			want = PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint owner transition in progress"}
+		}
+		if failure != want || failed != unavailable || (!unavailable && commit != prepared.commit) || (unavailable && commit != nil) {
+			t.Fatal("exact prepared identity and failure descriptor")
+		}
+		if unavailable {
+			a.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+		} else {
+			commit.Abort()
+		}
+		a.Close()
+		owner.inTransition = false
+	}
+	// A nonzero index distinguishes an omitted InputIndex from the first conflict.
+	a := mustDAAdmission(t, mp, raw[0])
+	a.snapshot.Inputs = []consensus.Outpoint{testOutpoint(1), testOutpoint(2)}
+	mustReserve(t, owner, [32]byte{8}, testOutpoint(2))
+	prepared, err := prepareDAAdmissionCommit(a, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting)
+	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
+	if commit != nil || !failed || failure != (PendingOutpointError{Kind: PendingOutpointConflict, Msg: "", Outpoint: testOutpoint(2), InputIndex: 1, ExistingTxid: [32]byte{8}}) {
+		t.Fatal("exact prepared identity and failure descriptor")
+	}
+	if !owner.mu.TryLock() {
+		t.Fatal("raw failure retained owner")
+	}
+	owner.mu.Unlock()
+	if daAdmit(t, txAdmitFromPendingOutpointError(&failure), TxAdmitConflict).Message != fmt.Sprintf("mempool double-spend conflict with %x", [32]byte{8}) {
+		t.Fatal("raw failure mapping")
+	}
+	a.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
+	a.Close()
 }
