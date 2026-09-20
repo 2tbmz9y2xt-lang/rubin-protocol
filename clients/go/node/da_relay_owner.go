@@ -136,8 +136,8 @@ type daNonReplayApplyProjection struct {
 	placement                                  daRelayRecordPlacement
 	member                                     *daRelayMemberIdentity
 	receivedTime, sequence                     uint64
-	orphanCap, commitCap                       uint64
-	projectedOrphanBytes, projectedCommitBytes uint64
+	stagedCap, commitCap                       uint64
+	projectedStagedBytes, projectedCommitBytes uint64
 	stateB                                     bool
 }
 
@@ -683,13 +683,13 @@ func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate da
 	}
 	placement := projection.placement
 	member, receivedTime, sequence := projection.member, projection.receivedTime, projection.sequence
-	stateB, orphanCap, commitCap := projection.stateB, projection.orphanCap, projection.commitCap
-	projectedOrphanBytes, projectedCommitBytes := projection.projectedOrphanBytes, projection.projectedCommitBytes
+	stateB, stagedCap, commitCap := projection.stateB, projection.stagedCap, projection.commitCap
+	projectedStagedBytes, projectedCommitBytes := projection.projectedStagedBytes, projection.projectedCommitBytes
 	commit, err := admission.BeginCommit(plan.victims)
 	if err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
-	if stateB && projectedOrphanBytes > orphanCap {
+	if stateB && projectedStagedBytes > stagedCap {
 		commit.Abort()
 		return daRelayAdmissionOutcome{}, errDARelayOrphanPoolCapExceeded
 	}
@@ -733,6 +733,7 @@ func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImag
 		return daNonReplayApplyProjection{}, err
 	}
 	stateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps
+	projectionCaps.stagedBytes = ^uint64(0)
 	orphanCap, daCap, peerCap, commitCap := s.caps.orphanPoolBytes, s.caps.orphanPoolPerDAIDBytes, s.caps.orphanPoolPerPeerBytes, s.caps.orphanCommitOverheadBytes
 	projectionCaps.orphanPoolBytes, projectionCaps.orphanPoolPerDAIDBytes = ^uint64(0), ^uint64(0)
 	projectionCaps.orphanPoolPerPeerBytes, projectionCaps.orphanCommitOverheadBytes = ^uint64(0), ^uint64(0)
@@ -743,7 +744,7 @@ func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImag
 	member, receivedTime := prepareDANonReplayInstall(&placement, candidate.member.locator, sequence)
 	projection := daNonReplayApplyProjection{
 		placement: placement, member: member, receivedTime: receivedTime, sequence: sequence,
-		orphanCap: orphanCap, commitCap: commitCap, projectedOrphanBytes: placement.orphanBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
+		stagedCap: s.caps.stagedBytes, commitCap: commitCap, projectedStagedBytes: placement.stagedBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
 	}
 	if stateB {
 		return projection, nil

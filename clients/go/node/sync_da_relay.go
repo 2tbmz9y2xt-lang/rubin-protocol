@@ -95,8 +95,8 @@ func (s *DARelayState) checkRetainedDAAccountingLocked() error {
 }
 
 // retainedDAAccountingTotals is what the surviving records THEMSELVES imply for
-// every RECOMPUTABLE stored aggregate: the five counters compared below —
-// orphanBytes, orphanCommitOverheadBytes, pinnedPayloadBytes, and the per-peer
+// every RECOMPUTABLE stored aggregate: the six counters compared below —
+// stagedBytes, orphanBytes, orphanCommitOverheadBytes, pinnedPayloadBytes, and the per-peer
 // and per-da_id maps — plus the map-key/record-da_id agreement checked in the
 // walk. DARelayState.nextReceivedTime is stored by the same writers and is
 // deliberately NOT here: it is a monotone high-water mark that removal never
@@ -106,6 +106,7 @@ func (s *DARelayState) checkRetainedDAAccountingLocked() error {
 // inside the walk where its da_id is already in hand, leaving only EXTRA stored
 // entries to catch afterwards.
 type retainedDAAccountingTotals struct {
+	stagedBytes uint64
 	orphanBytes uint64
 	commitBytes uint64
 	pinnedBytes uint64
@@ -147,6 +148,9 @@ func (s *DARelayState) recomputeRetainedDAAccountingLocked() (retainedDAAccounti
 // string depends on iteration order.
 func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pinned uint64) error {
 	var err error
+	if t.stagedBytes, err = checkedAddUint64(t.stagedBytes, accounting.stagedBytes); err != nil {
+		return err
+	}
 	if t.orphanBytes, err = checkedAddUint64(t.orphanBytes, accounting.orphanBytes); err != nil {
 		return err
 	}
@@ -166,6 +170,8 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 
 func (t retainedDAAccountingTotals) checkAgainstLocked(s *DARelayState) error {
 	switch {
+	case t.stagedBytes != s.stagedBytes:
+		return fmt.Errorf("staged retained bytes: records imply %d, state holds %d", t.stagedBytes, s.stagedBytes)
 	case t.orphanBytes != s.orphanBytes:
 		return fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
 	case t.commitBytes != s.orphanCommitOverheadBytes:

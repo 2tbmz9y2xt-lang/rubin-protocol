@@ -15,6 +15,7 @@ const (
 	daOrphanPoolPerPeerMaxBytes     uint64 = 4 << 20
 	daOrphanPoolPerDAIDMaxBytes     uint64 = 8 << 20
 	daOrphanCommitOverheadMaxBytes  uint64 = 8 << 20
+	daStagedSharedMaxBytes          uint64 = 536870912
 	daOrphanTTLBlocks               uint64 = 3
 	daMempoolPinnedPayloadMaxBytes  uint64 = 96_000_000
 	daPrefetchPerPeerBytesPerSecond uint64 = 4_000_000
@@ -32,6 +33,7 @@ const (
 )
 
 type daRelayCaps struct {
+	stagedBytes               uint64
 	orphanPoolBytes           uint64
 	orphanPoolPerPeerBytes    uint64
 	orphanPoolPerDAIDBytes    uint64
@@ -42,6 +44,7 @@ type daRelayCaps struct {
 
 func defaultDARelayCaps() daRelayCaps {
 	return daRelayCaps{
+		stagedBytes:               daStagedSharedMaxBytes,
 		orphanPoolBytes:           daOrphanPoolSizeBytes,
 		orphanPoolPerPeerBytes:    daOrphanPoolPerPeerMaxBytes,
 		orphanPoolPerDAIDBytes:    daOrphanPoolPerDAIDMaxBytes,
@@ -251,6 +254,7 @@ var (
 )
 
 type daRelayRecordAccounting struct {
+	stagedBytes uint64
 	orphanBytes uint64
 	commitBytes uint64
 	peerBytes   map[string]uint64
@@ -265,6 +269,7 @@ type DARelayState struct {
 	caps                      daRelayCaps
 	prefetch                  daRelayPrefetchState
 	nextReceivedTime          uint64
+	stagedBytes               uint64
 	orphanBytes               uint64
 	orphanBytesByPeerQuotaKey map[string]uint64
 	orphanBytesByDAID         map[[32]byte]uint64
@@ -484,6 +489,7 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		caps:                      s.caps,
 		prefetch:                  daRelayPrefetchState{indexes: prefetchIndexes, expires: maps.Clone(s.prefetch.expires)},
 		nextReceivedTime:          s.nextReceivedTime,
+		stagedBytes:               s.stagedBytes,
 		orphanBytes:               s.orphanBytes,
 		orphanBytesByPeerQuotaKey: maps.Clone(s.orphanBytesByPeerQuotaKey),
 		orphanBytesByDAID:         maps.Clone(s.orphanBytesByDAID),
@@ -498,6 +504,7 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.prefetch = projected.prefetch
 	s.nextReceivedTime = projected.nextReceivedTime
+	s.stagedBytes = projected.stagedBytes
 	s.orphanBytes = projected.orphanBytes
 	s.orphanBytesByPeerQuotaKey = projected.orphanBytesByPeerQuotaKey
 	s.orphanBytesByDAID = projected.orphanBytesByDAID
