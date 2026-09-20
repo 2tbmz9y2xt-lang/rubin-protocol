@@ -165,7 +165,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 65, 0}, {"consensus", "../consensus", 60, 3}} {
+		}{{"node", ".", 66, 0}, {"consensus", "../consensus", 60, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -364,6 +364,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			return strings.Contains(row, "node/da_relay_owner.go:rendered|") || strings.Contains(row, "gen|node/da_relay_owner.go:file|const (\n\tdaRelayAdmissionRetained") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionRetained|") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionDuplicate|")
 		}
 		want := map[string]int{}
+		want["edge-call|node/da_complete_snapshot.go:parseDACompleteMember|parseRetainedDAMember"] = 1
 		for _, row := range strings.Split(string(legacyRows), "\x1e") {
 			if row != "" && !changed(row) {
 				want[row]++

@@ -2278,6 +2278,8 @@ func requireAddDAChunkErrWithin(t *testing.T, state *DARelayState, peer string, 
 // the Rust mirror's `assert_eq!(state, before)`.
 type daRelayStateView struct {
 	stagedBytes        uint64
+	completeBytes      uint64
+	completeCount      uint64
 	mempool            *Mempool
 	caps               daRelayCaps
 	prefetchIndexes    map[[32]byte]map[uint16]string
@@ -2299,6 +2301,8 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 
 	view := daRelayStateView{
 		stagedBytes:        state.stagedBytes,
+		completeBytes:      state.completeBytes,
+		completeCount:      state.completeCount,
 		mempool:            state.mempool,
 		caps:               state.caps,
 		prefetchIndexes:    cloneDARelayPrefetchIndexes(state.prefetch.indexes),
@@ -2317,6 +2321,27 @@ func daRelayStateSnapshot(state *DARelayState) daRelayStateView {
 		view.sets[daID] = record.cloneOwnerReady()
 	}
 	return view
+}
+
+func TestDACompleteSnapshotCounters(t *testing.T) {
+	state := &DARelayState{completeBytes: 731, completeCount: 9}
+	view := daRelayStateSnapshot(state)
+	if view.completeBytes != 731 || view.completeCount != 9 {
+		t.Fatal("complete counters preserved: view")
+	}
+	state.mu.Lock()
+	clone := state.cloneForAtomicBatchLocked()
+	state.mu.Unlock()
+	if clone.completeBytes != 731 || clone.completeCount != 9 {
+		t.Fatal("complete counters preserved: clone")
+	}
+	clone.completeBytes, clone.completeCount = 811, 11
+	state.mu.Lock()
+	state.publishAtomicBatchLocked(clone)
+	state.mu.Unlock()
+	if state.completeBytes != 811 || state.completeCount != 11 {
+		t.Fatal("complete counters preserved: publish")
+	}
 }
 
 func cloneDARelayPrefetchIndexes(indexes map[[32]byte]map[uint16]string) map[[32]byte]map[uint16]string {
