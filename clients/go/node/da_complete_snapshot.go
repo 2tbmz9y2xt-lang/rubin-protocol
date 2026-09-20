@@ -73,8 +73,10 @@ func (s *DARelayState) copyDACompleteSnapshotLocked(candidate daRelayAdmissionCa
 	out := &daCompleteSnapshot{
 		candidate: candidate, prior: prior.cloneOwnerReady(), owner: s.mempool.pendingOutpoints,
 		residents: make([]daRelaySetRecord, 0, count), locators: make(map[[32]byte]daRelayLocator),
-		input: daCompleteCapacityInput{byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
-			completeBytes: s.completeBytes, completeCount: s.completeCount, completePayload: s.pinnedPayloadBytes},
+		input: daCompleteCapacityInput{
+			byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
+			completeBytes: s.completeBytes, completeCount: s.completeCount, completePayload: s.pinnedPayloadBytes,
+		},
 		records: s.records, nextReceivedTime: s.nextReceivedTime, ttl: s.caps.orphanTTLBlocks,
 	}
 	out.candidate.member.member = *candidate.member.member.clone()

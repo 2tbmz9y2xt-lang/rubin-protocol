@@ -99,9 +99,11 @@ func TestDACompleteSnapshotPlannerInput(t *testing.T) {
 				payload = uint64(len(c.member.payload))
 				credit = priorRaw
 			}
-			want := daCompleteCapacityInput{byteCap: 536870912, stagedBytes: credit, priorCredit: credit,
+			want := daCompleteCapacityInput{
+				byteCap: 536870912, stagedBytes: credit, priorCredit: credit,
 				completeBytes: f.relay.completeBytes, completeCount: uint64(residents), completePayload: uint64(residents),
-				candidate: daCompleteCapacitySet{id: [32]byte{1}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: priorRaw + uint64(len(c.member.txBytes)), payloadBytes: payload, receivedSequence: s.prior.receivedTime}}
+				candidate: daCompleteCapacitySet{id: [32]byte{1}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: priorRaw + uint64(len(c.member.txBytes)), payloadBytes: payload, receivedSequence: s.prior.receivedTime},
+			}
 			for i := 1; i <= residents; i++ {
 				r := f.relay.sets[[32]byte{byte(10 + i)}]
 				want.residents = append(want.residents, daCompleteCapacitySet{id: [32]byte{byte(10 + i)}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: uint64(len(r.commit.txBytes) + len(r.chunks[0].txBytes)), payloadBytes: 1, receivedSequence: r.receivedTime})
@@ -131,8 +133,10 @@ func TestDACompleteSnapshotPlannerInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := daCompleteTestPrepare(t, f, a, daCompleteTestCapture(t, f, c))
-		want := daCompleteCapacityInput{byteCap: 536870912, candidate: daCompleteCapacitySet{id: id,
-			fee: consensus.Uint128{Lo: 1800000}, totalBytes: uint64(len(first.raw) + len(second.raw) + len(commit.raw)), payloadBytes: 9, receivedSequence: 1}}
+		want := daCompleteCapacityInput{byteCap: 536870912, candidate: daCompleteCapacitySet{
+			id:  id,
+			fee: consensus.Uint128{Lo: 1800000}, totalBytes: uint64(len(first.raw) + len(second.raw) + len(commit.raw)), payloadBytes: 9, receivedSequence: 1,
+		}}
 		if err != nil || out.prepared == nil || out.mismatch != nil || out.duplicate != nil || !reflect.DeepEqual(out.prepared.input, want) {
 			t.Fatal("prepared planner input: ascending chunks", err)
 		}
