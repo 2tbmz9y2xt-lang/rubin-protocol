@@ -97,7 +97,15 @@ func (out *daCompleteSnapshot) copyResidents(s *DARelayState) error {
 		if id != record.daID {
 			return errDARelayImageIncompatible
 		}
-		out.residents = append(out.residents, record.cloneOwnerReady())
+		copied := record.cloneOwnerReady()
+		for index, chunk := range record.chunks {
+			if len(chunk.payload) == 0 {
+				retained := copied.chunks[index]
+				retained.payload = slices.Clone(chunk.payload)
+				copied.chunks[index] = retained
+			}
+		}
+		out.residents = append(out.residents, copied)
 		ids[id] = true
 	}
 	ids[out.candidate.member.locator.daID] = true
@@ -171,14 +179,14 @@ func (s *daCompleteSnapshot) stageCandidate() (daRelayRecordImage, []DAAdmission
 	if err := s.prior.checkDANonReplayPrior(candidate.member.locator.daID, s.owner); err != nil {
 		return daRelayRecordImage{}, nil, errDARelayImageIncompatible
 	}
-	if _, _, err := parseDACompleteRecord(s.prior); err != nil {
+	if _, _, err := parseDACompleteMembers(s.prior); err != nil {
 		return daRelayRecordImage{}, nil, err
 	}
 	image, pruned := stageDANonReplayCandidate(s.prior, true, candidate, s.ttl)
 	if !image.next.completeByShape() {
 		return daRelayRecordImage{}, nil, errDARelayImageIncompatible
 	}
-	if err := s.checkRetainedIdentities([]daRelaySetRecord{s.prior}, false); err != nil {
+	if err := s.checkRetainedRecord(s.prior, make(map[[32]byte]bool), make(map[PendingOutpointToken]bool)); err != nil {
 		return daRelayRecordImage{}, nil, err
 	}
 	return image, pruned, nil
@@ -234,28 +242,48 @@ func parseDACompleteMember(raw []byte, identity *daRelayMemberIdentity) (canonic
 	return member, nil
 }
 
-// Parse all retained slots, including sparse/pruned prior chunks, exactly once
-// per record walk. The hash streams payloads; it creates no concatenated buffer.
 func parseDACompleteRecord(record daRelaySetRecord) (daCompleteCapacitySet, bool, error) {
-	set := daCompleteCapacitySet{id: record.daID, receivedSequence: record.receivedTime}
+	indexes, payloads, err := parseDACompleteMembers(record)
+	if err != nil {
+		return daCompleteCapacitySet{}, false, err
+	}
+	return sumDACompleteRecord(record, indexes, payloads)
+}
+
+// Bind every member before sums; pruned prior members contribute no completing fee.
+func parseDACompleteMembers(record daRelaySetRecord) ([]uint16, [][]byte, error) {
 	if record.commit.member != nil {
 		if err := parseDACompleteCommit(record); err != nil {
-			return daCompleteCapacitySet{}, false, err
+			return nil, nil, err
 		}
+	}
+	indexes := sortedRetainedDAChunkIndexes(record)
+	payloads := make([][]byte, len(indexes))
+	for i, index := range indexes {
+		payload, err := parseDACompleteChunk(record, index)
+		if err != nil {
+			return nil, nil, err
+		}
+		payloads[i] = payload
+	}
+	return indexes, payloads, nil
+}
+
+func sumDACompleteRecord(record daRelaySetRecord, indexes []uint16, payloads [][]byte) (daCompleteCapacitySet, bool, error) {
+	set := daCompleteCapacitySet{id: record.daID, receivedSequence: record.receivedTime}
+	if record.commit.member != nil {
 		if err := addDACompleteMember(&set, record.commit.member, record.commit.txBytes, nil); err != nil {
 			return daCompleteCapacitySet{}, false, err
 		}
 	}
-	hash := sha3.New256()
-	for _, index := range sortedRetainedDAChunkIndexes(record) {
+	for i, index := range indexes {
 		chunk := record.chunks[index]
-		payload, err := parseDACompleteChunk(record, index)
-		if err != nil {
+		if err := addDACompleteMember(&set, chunk.member, chunk.txBytes, payloads[i]); err != nil {
 			return daCompleteCapacitySet{}, false, err
 		}
-		if err := addDACompleteMember(&set, chunk.member, chunk.txBytes, payload); err != nil {
-			return daCompleteCapacitySet{}, false, err
-		}
+	}
+	hash := sha3.New256()
+	for _, payload := range payloads {
 		_, _ = hash.Write(payload)
 	}
 	return set, bytes.Equal(hash.Sum(nil), record.commit.payloadCommitment[:]), nil
@@ -343,24 +371,43 @@ func (s *daCompleteSnapshot) capacityInput(candidate daCompleteCapacitySet) (daC
 		return daCompleteCapacityInput{}, err
 	}
 	in.priorCredit = accounting.stagedBytes
+	txids, tokens := make(map[[32]byte]bool), make(map[PendingOutpointToken]bool)
+	if err := s.checkRetainedRecord(s.prior, txids, tokens); err != nil {
+		return daCompleteCapacityInput{}, err
+	}
 	sort.Slice(s.residents, func(i, j int) bool { return bytes.Compare(s.residents[i].daID[:], s.residents[j].daID[:]) < 0 })
 	for _, record := range s.residents {
-		set, matches, err := parseDACompleteRecord(record)
+		set, err := s.prepareResident(record, txids, tokens)
 		if err != nil {
 			return daCompleteCapacityInput{}, err
 		}
-		if !matches || s.checkResidentShape(record, set.payloadBytes) != nil {
-			return daCompleteCapacityInput{}, errDARelayImageIncompatible
-		}
 		in.residents = append(in.residents, set)
 	}
-	if err := s.checkRetainedIdentities(append([]daRelaySetRecord{s.prior}, s.residents...), true); err != nil {
-		return daCompleteCapacityInput{}, err
+	if len(txids) != len(s.locators) {
+		return daCompleteCapacityInput{}, errDARelayImageIncompatible
 	}
 	if err := validateDACompleteCapacity(in); err != nil {
 		return daCompleteCapacityInput{}, err
 	}
 	return in, nil
+}
+
+func (s *daCompleteSnapshot) prepareResident(record daRelaySetRecord, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool) (daCompleteCapacitySet, error) {
+	indexes, payloads, err := parseDACompleteMembers(record)
+	if err != nil {
+		return daCompleteCapacitySet{}, err
+	}
+	if err := s.checkRetainedRecord(record, txids, tokens); err != nil {
+		return daCompleteCapacitySet{}, err
+	}
+	set, matches, err := sumDACompleteRecord(record, indexes, payloads)
+	if err != nil {
+		return daCompleteCapacitySet{}, err
+	}
+	if !matches || s.checkResidentShape(record, set.payloadBytes) != nil {
+		return daCompleteCapacitySet{}, errDARelayImageIncompatible
+	}
+	return set, nil
 }
 
 func (s *daCompleteSnapshot) checkResidentShape(record daRelaySetRecord, payload uint64) error {
@@ -402,22 +449,15 @@ func checkDACompleteResidues(record daRelaySetRecord, payload uint64) error {
 	return nil
 }
 
-func (s *daCompleteSnapshot) checkRetainedIdentities(records []daRelaySetRecord, all bool) error {
-	txids := make(map[[32]byte]bool)
-	tokens := make(map[PendingOutpointToken]bool)
-	for _, record := range records {
-		for _, row := range record.locatorRows() {
-			member := record.commit.member
-			if row.locator.kind == daRelayLocatorChunk {
-				member = record.chunks[row.locator.chunkIndex].member
-			}
-			if err := s.checkRetainedIdentity(row, member, txids, tokens); err != nil {
-				return err
-			}
+func (s *daCompleteSnapshot) checkRetainedRecord(record daRelaySetRecord, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool) error {
+	for _, row := range record.locatorRows() {
+		member := record.commit.member
+		if row.locator.kind == daRelayLocatorChunk {
+			member = record.chunks[row.locator.chunkIndex].member
 		}
-	}
-	if all && len(txids) != len(s.locators) {
-		return errDARelayImageIncompatible
+		if err := s.checkRetainedIdentity(row, member, txids, tokens); err != nil {
+			return err
+		}
 	}
 	return nil
 }

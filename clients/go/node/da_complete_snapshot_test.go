@@ -155,6 +155,10 @@ func TestDACompleteSnapshotPrune(t *testing.T) {
 	for _, count := range []int{0, 1, 2} {
 		f, a, c := daCompleteTestCandidate(t, true, count, 0)
 		s := daCompleteTestCapture(t, f, c)
+		if count == 2 { // Synthetic sum-layer witness: pruned fees do not aggregate.
+			s.prior.chunks[3].member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
+			s.prior.chunks[4].member.fee = consensus.Uint128{Lo: 1}
+		}
 		result, err := daCompleteTestPrepare(t, f, a, s)
 		if err != nil || result.prepared == nil {
 			t.Fatalf("exact isolated prune evidence: %v", err)
@@ -173,6 +177,32 @@ func TestDACompleteSnapshotPrune(t *testing.T) {
 
 func TestDACompleteSnapshotRepresentation(t *testing.T) {
 	f, a, c := daCompleteTestCandidate(t, true, 0, 1)
+	for _, shadow := range [][]byte{nil, {}, {1}} {
+		r := f.relay.sets[[32]byte{11}]
+		chunk := r.chunks[0]
+		chunk.payload = shadow
+		r.chunks[0] = chunk
+		s := daCompleteTestCapture(t, f, c)
+		out, err := daCompleteTestPrepare(t, f, a, s)
+		if shadow == nil {
+			if err != nil || out.prepared == nil {
+				t.Fatal("complete representation binding: live nil shadow", err)
+			}
+		} else if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
+			t.Fatal("complete representation binding: live nonnil shadow", err)
+		}
+		live := f.relay.sets[[32]byte{11}].chunks[0].payload
+		if (live == nil) != (shadow == nil) || !slices.Equal(live, shadow) {
+			t.Fatal("complete representation binding: live shadow changed")
+		}
+		s.nextReceivedTime = math.MaxUint64
+		out, err = daCompleteTestPrepare(t, f, a, s)
+		if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
+			t.Fatal("complete representation binding: sequence precedes resident shadow", err)
+		}
+		chunk.payload = nil
+		r.chunks[0] = chunk
+	}
 	t.Run("chunk last retained token", func(t *testing.T) {
 		f, a, c := daCompleteTestCandidate(t, false, 0, 0)
 		s := daCompleteTestCapture(t, f, c)
@@ -347,6 +377,10 @@ func TestDACompleteSnapshotMismatch(t *testing.T) {
 		// Change canonical bytes and the bound descriptor together. The signed
 		// alternate is only a commitment-mismatch witness, not a new admission.
 		wrong := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{1}, chunkCount: 1, commitment: [32]byte{99}, commitmentOutputs: 1})
+		resident := f.relay.sets[[32]byte{11}]
+		shadow := resident.chunks[0]
+		shadow.payload = []byte{}
+		resident.chunks[0] = shadow
 		s := daCompleteTestCapture(t, f, c)
 		identity := daRelayMemberIdentity{txid: wrong.txid, wtxid: wrong.wtxid, fee: wrong.spec.fee, inputs: slices.Clone(wrong.inputs), provenance: LocalDAProvenance()}
 		if commitLast {
@@ -470,6 +504,19 @@ func TestDACompleteSnapshotIsolation(t *testing.T) {
 }
 
 func TestDACompleteSnapshotIntegrity(t *testing.T) {
+	t.Run("set parse before fee overflow", func(t *testing.T) {
+		f, a, c := daCompleteTestCandidate(t, true, 2, 0)
+		s := daCompleteTestCapture(t, f, c)
+		s.prior.chunks[0].member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
+		s.prior.chunks[3].member.fee = consensus.Uint128{Lo: 1}
+		last := s.prior.chunks[4]
+		last.txBytes = []byte{0}
+		s.prior.chunks[4] = last
+		out, err := daCompleteTestPrepare(t, f, a, s)
+		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
+			t.Fatal("set parse before fee overflow", err)
+		}
+	})
 	f, a, c := daCompleteTestCandidate(t, true, 1, 2)
 	baseline, err := daCompleteTestPrepare(t, f, a, daCompleteTestCapture(t, f, c))
 	if err != nil || baseline.prepared == nil || len(baseline.prepared.input.residents) != 2 {
@@ -749,6 +796,33 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 			}
 		}
 	})
+	t.Run("resident token before fee overflow", func(t *testing.T) {
+		for _, role := range []string{"zero", "foreign", "duplicate prior", "duplicate resident"} {
+			s := daCompleteTestCapture(t, f, c)
+			for i := range s.residents {
+				if s.residents[i].daID != ([32]byte{12}) {
+					continue
+				}
+				r := &s.residents[i]
+				r.commit.member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
+				r.chunks[0].member.fee = consensus.Uint128{Lo: 1}
+				switch role {
+				case "zero":
+					r.commit.member.token = PendingOutpointToken{}
+				case "foreign":
+					r.commit.member.token.owner = &PendingOutpointOwner{}
+				case "duplicate prior":
+					r.commit.member.token = s.prior.chunks[0].member.token
+				case "duplicate resident":
+					r.commit.member.token = f.relay.sets[[32]byte{11}].commit.member.token
+				}
+			}
+			out, err := daCompleteTestPrepare(t, f, a, s)
+			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
+				t.Fatal("resident token before fee overflow", role, err)
+			}
+		}
+	})
 	t.Run("identity owner", func(t *testing.T) {
 		// These are identity-layer witnesses; no modified scalar claims to be
 		// a canonical transaction. Each guard is isolated from parser rejection.
@@ -766,7 +840,7 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 				s.candidate = c
 			case "extra row":
 				s.locators[[32]byte{99}] = row.locator
-				err = s.checkRetainedIdentities(append([]daRelaySetRecord{s.prior}, s.residents...), true)
+				_, err = s.capacityInput(baseline.prepared.input.candidate)
 			}
 			if !daCompleteTestError(err, errDARelayImageIncompatible) {
 				t.Fatal("retained identity bijection", mode, err)
