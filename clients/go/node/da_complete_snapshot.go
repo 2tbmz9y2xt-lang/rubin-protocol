@@ -14,6 +14,7 @@ import (
 // its continuously held ChainState guard. It neither acquires nor ends that guard.
 // Tokens below are opaque identities; their live claims belong to the effect owner.
 type daCompleteSnapshot struct {
+	publicationBase                *DARelayState
 	candidate                      daRelayAdmissionCandidate
 	prior                          daRelaySetRecord
 	residents                      []daRelaySetRecord
@@ -84,6 +85,11 @@ func (s *DARelayState) copyDACompleteSnapshotLocked(candidate daRelayAdmissionCa
 	out.candidate.member.payload = cloneBytes(candidate.member.payload)
 	if err := out.copyResidents(s); err != nil {
 		return nil, err
+	}
+	out.publicationBase = s.cloneForAtomicBatchLocked()
+	out.publicationBase.sets[out.prior.daID] = out.prior
+	for _, record := range out.residents {
+		out.publicationBase.sets[record.daID] = record
 	}
 	return out, nil
 }
