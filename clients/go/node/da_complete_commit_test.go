@@ -44,6 +44,13 @@ func daCompleteCommitTestApply(t *testing.T, f *daNonReplayFixture, a *DAAdmissi
 	}
 }
 
+func requireDACompleteCommitReplayRejected(t *testing.T, f *daNonReplayFixture, a *DAAdmission, p *daCompleteCommitPlan, before daRelayStateView, owner *PendingOutpointOwner, wantState uint32) {
+	if out, rejected, err := f.relay.applyDACompleteCommit(a, p); out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayImageIncompatible) || a.guard.state.Load() != wantState {
+		t.Fatal("complete plan replay")
+	}
+	requireDANonReplayUnchanged(t, f.relay, a.guard.owner, before, owner)
+}
+
 func TestDACompleteCommitMatching(t *testing.T) {
 	for _, commitLast := range []bool{true, false} {
 		t.Run(fmt.Sprint(commitLast), func(t *testing.T) {
@@ -156,7 +163,6 @@ func TestDACompleteCommitMatching(t *testing.T) {
 func TestDACompleteCommitCapacity(t *testing.T) {
 	for _, individual := range []bool{false, true} {
 		f, a, c := daCompleteTestCandidate(t, true, 1, 0)
-		// Numerical owner-image boundary: fixed B occupancy, without allocating 512 MiB.
 		f.relay.stagedBytes = 536870912
 		s := daCompleteTestCapture(t, f, c)
 		r, err := prepareDACompleteSnapshot(s, daRelayAdmissionOutcome{})
@@ -406,8 +412,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 	}
 }
 
-// Signed DA members and finalized claims; fixed-B pressure is a numerical image.
-// No setup path invokes the completion consumer under mutation.
+// Signed members and finalized claims use numerical fixed-B pressure; setup never invokes completion.
 func daCompleteCommitPhysicalVictims(t *testing.T, count int) (*daNonReplayFixture, *DAAdmission, daRelayAdmissionCandidate, []daRelaySetRecord) {
 	t.Helper()
 	f := newDANonReplayFixture(t, 12)
@@ -558,6 +563,9 @@ func TestDACompleteCommitMismatchOrder(t *testing.T) {
 				owner.tokenHighWater++
 			}
 			requireDANonReplayUnchanged(t, f.relay, o, before, owner)
+			if name == "stale A" {
+				requireDACompleteCommitReplayRejected(t, f, a, p, before, owner, 0)
+			}
 		})
 	}
 }
@@ -590,7 +598,7 @@ func TestDACompleteCommitLifecycle(t *testing.T) {
 			t.Fatal("duplicate leaves OPEN no CAS")
 		}
 		_ = a.Snapshot()
-		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+		requireDACompleteCommitReplayRejected(t, f, a, p, before, owner, 0)
 	}
 	f, a, c := daCompleteTestCandidate(t, true, 0, 0)
 	p, _ := daCompleteCommitTestPlan(t, f, a, c)
@@ -602,11 +610,7 @@ func TestDACompleteCommitLifecycle(t *testing.T) {
 		t.Fatal("original admission guard consumed")
 	}
 	before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-	if out, rejected, err := f.relay.applyDACompleteCommit(a, p); out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayImageIncompatible) {
-		t.Fatal("second attempt requires new admission")
-	}
-	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
-
+	requireDACompleteCommitReplayRejected(t, f, a, p, before, owner, 4)
 	f, a, c = daCompleteTestCandidate(t, true, 0, 0)
 	p, _ = daCompleteCommitTestPlan(t, f, a, c)
 	o := f.mp.pendingOutpoints
@@ -738,8 +742,7 @@ func TestDACompleteCommitVictims(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Direct valid owner-image expansion, independent of canonical snapshot parsing.
-			// 65 two-member records prove the 129th claim, without 130 signatures.
+			// Direct owner-image expansion proves the 129th claim without canonical parsing or 130 signatures.
 			o := f.mp.pendingOutpoints
 			var removed []PendingOutpointToken
 			var ids [][32]byte

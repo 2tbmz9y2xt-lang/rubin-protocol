@@ -7,8 +7,7 @@ import (
 	"slices"
 )
 
-// The plan is exclusive, single-use scratch under the original admission guard.
-// Public admission remains on the existing non-completing path.
+// The plan is exclusive, single-use scratch; public admission remains on the existing non-completing path.
 type daCompleteCommitPlan struct {
 	relay            *DARelayState
 	admission        *DAAdmission
@@ -221,7 +220,6 @@ func (p *daCompleteCommitPlan) projectCompleteTotals(capacity daCompleteCapacity
 	return err
 }
 
-// No equality helper below allocates or follows a fallible preparation path.
 func sameDACompleteRecord(a, b daRelaySetRecord) bool {
 	type header struct {
 		id                                     [32]byte
@@ -263,6 +261,7 @@ func (s *DARelayState) applyDACompleteCommit(admission *DAAdmission, p *daComple
 	if (binding{p.relay, p.admission}) != (binding{s, admission}) || admission.guard.state.Load() != daAdmissionOpen {
 		return daRelayAdmissionOutcome{}, false, errDARelayImageIncompatible
 	}
+	p.admission = nil
 	if p.duplicate != nil {
 		return *p.duplicate, false, nil
 	}
