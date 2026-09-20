@@ -270,6 +270,8 @@ type DARelayState struct {
 	prefetch                  daRelayPrefetchState
 	nextReceivedTime          uint64
 	stagedBytes               uint64
+	completeBytes             uint64
+	completeCount             uint64
 	orphanBytes               uint64
 	orphanBytesByPeerQuotaKey map[string]uint64
 	orphanBytesByDAID         map[[32]byte]uint64
@@ -490,6 +492,8 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		prefetch:                  daRelayPrefetchState{indexes: prefetchIndexes, expires: maps.Clone(s.prefetch.expires)},
 		nextReceivedTime:          s.nextReceivedTime,
 		stagedBytes:               s.stagedBytes,
+		completeBytes:             s.completeBytes,
+		completeCount:             s.completeCount,
 		orphanBytes:               s.orphanBytes,
 		orphanBytesByPeerQuotaKey: maps.Clone(s.orphanBytesByPeerQuotaKey),
 		orphanBytesByDAID:         maps.Clone(s.orphanBytesByDAID),
@@ -505,6 +509,8 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.prefetch = projected.prefetch
 	s.nextReceivedTime = projected.nextReceivedTime
 	s.stagedBytes = projected.stagedBytes
+	s.completeBytes = projected.completeBytes
+	s.completeCount = projected.completeCount
 	s.orphanBytes = projected.orphanBytes
 	s.orphanBytesByPeerQuotaKey = projected.orphanBytesByPeerQuotaKey
 	s.orphanBytesByDAID = projected.orphanBytesByDAID
