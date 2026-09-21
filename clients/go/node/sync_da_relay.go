@@ -94,30 +94,20 @@ func (s *DARelayState) checkRetainedDAAccountingLocked() error {
 	return nil
 }
 
-// retainedDAAccountingTotals is what the surviving records THEMSELVES imply for
-// every RECOMPUTABLE stored aggregate: the six counters compared below —
-// stagedBytes, orphanBytes, orphanCommitOverheadBytes, pinnedPayloadBytes, and the per-peer
-// and per-da_id maps — plus the map-key/record-da_id agreement checked in the
-// walk. DARelayState.nextReceivedTime is stored by the same writers and is
-// deliberately NOT here: it is a monotone high-water mark that removal never
-// lowers, so it is not derivable from the surviving records at all.
-//
 // daIDEntries is a COUNT, not a rebuilt map: each per-da_id value is compared
 // inside the walk where its da_id is already in hand, leaving only EXTRA stored
 // entries to catch afterwards.
 type retainedDAAccountingTotals struct {
-	stagedBytes uint64
-	orphanBytes uint64
-	commitBytes uint64
-	pinnedBytes uint64
-	peerBytes   map[string]uint64
-	daIDEntries int
+	stagedBytes   uint64
+	completeBytes uint64
+	completeCount uint64
+	orphanBytes   uint64
+	commitBytes   uint64
+	pinnedBytes   uint64
+	peerBytes     map[string]uint64
+	daIDEntries   int
 }
 
-// recomputeRetainedDAAccountingLocked derives the totals from retained_tx(R) via
-// the SAME per-record accounting the mutation path bills with, so the sweep and
-// the writers cannot disagree about what a record contributes — only about what
-// the counters say it contributed.
 func (s *DARelayState) recomputeRetainedDAAccountingLocked() (retainedDAAccountingTotals, error) {
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
@@ -151,6 +141,9 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 	if t.stagedBytes, err = checkedAddUint64(t.stagedBytes, accounting.stagedBytes); err != nil {
 		return err
 	}
+	if err := t.addComplete(accounting); err != nil {
+		return err
+	}
 	if t.orphanBytes, err = checkedAddUint64(t.orphanBytes, accounting.orphanBytes); err != nil {
 		return err
 	}
@@ -168,10 +161,23 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 	return nil
 }
 
+func (t *retainedDAAccountingTotals) addComplete(accounting daRelayRecordAccounting) error {
+	var err error
+	if t.completeBytes, err = checkedAddUint64(t.completeBytes, accounting.completeBytes); err != nil {
+		return err
+	}
+	t.completeCount, err = checkedAddUint64(t.completeCount, accounting.completeCount)
+	return err
+}
+
 func (t retainedDAAccountingTotals) checkAgainstLocked(s *DARelayState) error {
 	switch {
 	case t.stagedBytes != s.stagedBytes:
 		return fmt.Errorf("staged retained bytes: records imply %d, state holds %d", t.stagedBytes, s.stagedBytes)
+	case t.completeBytes != s.completeBytes:
+		return fmt.Errorf("complete retained bytes: records imply %d, state holds %d", t.completeBytes, s.completeBytes)
+	case t.completeCount != s.completeCount:
+		return fmt.Errorf("complete retained count: records imply %d, state holds %d", t.completeCount, s.completeCount)
 	case t.orphanBytes != s.orphanBytes:
 		return fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
 	case t.commitBytes != s.orphanCommitOverheadBytes:
@@ -457,9 +463,10 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 		claim.finalized && slices.Equal(claim.inputs, member.inputs)
 }
 
-// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair, deep-copies survivors (no input
-// container reaches D1), removes via the owner-aware whole-record arm (victims unused: O1 is rebuilt),
-// rebuilds the owner indexes from O1 and returns only after the closing bijection proof.
+// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair and deep-copies survivors (no
+// input container reaches D1). State C is projected directly from the already-validated private
+// image; State A/B use the owner-aware whole-record arm. O1 is rebuilt, then the closing bijection
+// proof runs.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -476,7 +483,24 @@ func buildCanonicalDAOwnerCandidates(
 			projected.sets[daID] = retained.sets[daID].cloneOwnerReady()
 			continue
 		}
-		if _, err := projected.removeOwnerReadyWholeRecordLocked(projected.sets[daID]); err != nil {
+		record := projected.sets[daID]
+		if record.state == daRelayStateCompleteSet {
+			accounting, accountingErr := record.ownerReadyAccounting()
+			completeBytes, bytesErr := checkedApplyUint64Delta(projected.completeBytes, accounting.completeBytes, 0)
+			completeCount, countErr := checkedApplyUint64Delta(projected.completeCount, accounting.completeCount, 0)
+			pinnedPayloadBytes, pinnedErr := checkedApplyUint64Delta(projected.pinnedPayloadBytes, record.pinnedPayloadAccountingBytes(), 0)
+			if err := errors.Join(accountingErr, bytesErr, countErr, pinnedErr); err != nil {
+				return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
+			}
+			projected.completeBytes, projected.completeCount, projected.pinnedPayloadBytes = completeBytes, completeCount, pinnedPayloadBytes
+			for _, row := range record.locatorRows() {
+				delete(projected.locators, row.txid)
+			}
+			delete(projected.sets, daID)
+			projected.prefetch.releaseSet(daID)
+			continue
+		}
+		if _, err := projected.removeOwnerReadyWholeRecordLocked(record); err != nil {
 			return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
 		}
 	}
