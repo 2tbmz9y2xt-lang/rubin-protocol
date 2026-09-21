@@ -341,10 +341,6 @@ func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember)
 
 // canonicalDARetainedImageClosed is phase 3 over ONE image: every record sits under its da_id,
 // txid locators and retained members are one bijection, no record stands above either high-water,
-// and every recomputable aggregate equals what the records imply: ownerReadyAccounting bills the
-// orphan, commit-overhead and per-peer terms as the owner-ready projector bills them, and the
-// legacy pinned-payload term is zero in every owner-ready state, so a stored pinned-payload
-// counter above zero fails the closure (RUBIN_COMPACT_BLOCKS.md Sections 18.1 and 18.3). It
 // repairs nothing, recomputes no high-water, and closes the input snapshot and D1 alike.
 func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
