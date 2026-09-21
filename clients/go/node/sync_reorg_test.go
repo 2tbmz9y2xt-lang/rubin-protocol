@@ -2551,6 +2551,64 @@ func (f *canonicalDATestFixture) signAndMarshal(t *testing.T, tx *consensus.Tx) 
 	return raw
 }
 
+func stageCanonicalStateCFromBlock(t *testing.T, f *canonicalDATestFixture, block []byte) daRelaySetRecord {
+	t.Helper()
+	parsed, err := consensus.ParseBlockBytes(block)
+	if err != nil {
+		t.Fatalf("ParseBlockBytes(State C): %v", err)
+	}
+	var commit []byte
+	var daID [32]byte
+	for _, tx := range parsed.Txs {
+		raw := mustMarshalTxForNodeTest(t, tx)
+		switch tx.TxKind {
+		case 0x01:
+			commit, daID = raw, tx.DaCommitCore.DaID
+		case 0x02:
+			admitOwnerReady(t, f.engine.DARelayState(), raw)
+		}
+	}
+	if len(commit) == 0 || daID != daRelayTestID(0x01) {
+		t.Fatalf("State C block commit da_id=%x bytes=%d", daID, len(commit))
+	}
+	mp := f.engine.mempool
+	admission := mustDAAdmission(t, mp, commit)
+	defer admission.Close()
+	candidate, err := admission.renderDARelayAdmissionCandidate(LocalDAProvenance())
+	if err != nil {
+		t.Fatalf("render State C candidate: %v", err)
+	}
+	wrapper := &daNonReplayFixture{t: t, state: f.engine.chainState, mp: mp, relay: f.engine.DARelayState()}
+	plan, _ := daCompleteCommitTestPlan(t, wrapper, admission, candidate)
+	daCompleteCommitTestApply(t, wrapper, admission, plan)
+	record := wrapper.relay.sets[daID]
+	if record.state != daRelayStateCompleteSet || wrapper.relay.completeCount != 1 || wrapper.relay.completeBytes == 0 || wrapper.relay.pinnedPayloadBytes == 0 {
+		t.Fatalf("staged State C record=%+v accounting=(%d,%d,%d)", record, wrapper.relay.completeBytes, wrapper.relay.completeCount, wrapper.relay.pinnedPayloadBytes)
+	}
+	return record.cloneOwnerReady()
+}
+
+func requireCanonicalStateCRemoved(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner, record daRelaySetRecord) {
+	t.Helper()
+	if _, present := relay.sets[record.daID]; present || relay.completeBytes != 0 || relay.completeCount != 0 || relay.pinnedPayloadBytes != 0 {
+		t.Fatalf("published State C image retains record=%v complete=(%d,%d) pinned=%d", present, relay.completeBytes, relay.completeCount, relay.pinnedPayloadBytes)
+	}
+	members := []*daRelayMemberIdentity{record.commit.member}
+	for _, index := range sortedRetainedDAChunkIndexes(record) {
+		members = append(members, record.chunks[index].member)
+	}
+	for _, member := range members {
+		if _, present := relay.locators[member.txid]; present || owner.byToken[member.token] != nil {
+			t.Fatalf("removed State C member txid=%x retains locator=%v claim=%v", member.txid, present, owner.byToken[member.token] != nil)
+		}
+		for _, input := range member.inputs {
+			if row, present := owner.byOutpoint[input]; present && row.token == member.token {
+				t.Fatalf("removed State C member retains outpoint row %+v", input)
+			}
+		}
+	}
+}
+
 func mustBlockHashForTest(t *testing.T, blockBytes []byte) [32]byte {
 	t.Helper()
 	hash, err := consensus.BlockHash(blockHeaderBytes(t, blockBytes))
@@ -3752,6 +3810,123 @@ func TestCanonicalCutoverRetainsOnlyChargedRowMetadata(t *testing.T) {
 	if storeHeight, storeHash, ok, err := f.store.Tip(); err != nil || !ok || storeHash != summaryA.BlockHash || storeHeight != summaryA.BlockHeight {
 		t.Fatalf("planning moved the blockstore tip to (%d,%x,ok=%v,err=%v)", storeHeight, storeHash, ok, err)
 	}
+}
+
+func bindCanonicalStateCTestMempool(t *testing.T, f *canonicalDATestFixture) *Mempool {
+	t.Helper()
+	mp, err := NewMempool(f.engine.chainState, f.store, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	f.engine.SetMempool(mp)
+	return mp
+}
+
+func canonicalStateCTestBlock(t *testing.T, f *canonicalDATestFixture) []byte {
+	t.Helper()
+	return f.blockWithDASets(t, daSetSpec{daID: daRelayTestID(0x01), payloads: [][]byte{[]byte("c0"), []byte("c1")}})
+}
+
+func TestCanonicalCompleteSetD1O1Publication(t *testing.T) {
+	t.Run("direct canonical NEW publishes the prepared C-aware pair", func(t *testing.T) {
+		f := newCanonicalDATestFixture(t)
+		mp := bindCanonicalStateCTestMempool(t, f)
+		block := canonicalStateCTestBlock(t, f)
+		record := stageCanonicalStateCFromBlock(t, f, block)
+		if _, err := f.engine.ApplyBlock(block, nil); err != nil {
+			t.Fatalf("ApplyBlock(State C): %v", err)
+		}
+		requireCanonicalStateCRemoved(t, f.engine.DARelayState(), mp.pendingOutpoints, record)
+	})
+
+	t.Run("winning reorg NEW publishes the prepared C-aware pair", func(t *testing.T) {
+		f := newCanonicalDATestFixture(t)
+		mp := bindCanonicalStateCTestMempool(t, f)
+		fork := f.forkFrom(t)
+		if _, err := f.engine.ApplyBlock(f.blockWithDASets(t), nil); err != nil {
+			t.Fatalf("ApplyBlock(A1): %v", err)
+		}
+		b1 := fork.blockWithDASets(t)
+		parsedB1, hashB1 := mustParseReorgBlockForTest(t, b1)
+		if err := f.store.StoreBlock(hashB1, parsedB1.HeaderBytes, b1); err != nil {
+			t.Fatalf("StoreBlock(B1): %v", err)
+		}
+		b2 := canonicalStateCTestBlock(t, fork)
+		record := stageCanonicalStateCFromBlock(t, f, b2)
+		if _, err := f.engine.ApplyBlockWithReorg(b2, nil); err != nil {
+			t.Fatalf("ApplyBlockWithReorg(B2): %v", err)
+		}
+		if f.engine.LastReorgDepth() != 1 {
+			t.Fatalf("LastReorgDepth=%d, want 1", f.engine.LastReorgDepth())
+		}
+		requireCanonicalStateCRemoved(t, f.engine.DARelayState(), mp.pendingOutpoints, record)
+	})
+}
+
+func TestCanonicalCompleteSetD1O1AbortPreservesOld(t *testing.T) {
+	t.Run("preparation error preserves the complete S0 pair", func(t *testing.T) {
+		f := newCanonicalDATestFixture(t)
+		mp := bindCanonicalStateCTestMempool(t, f)
+		block := canonicalStateCTestBlock(t, f)
+		record := stageCanonicalStateCFromBlock(t, f, block)
+		relay := f.engine.DARelayState()
+		corrupt := relay.sets[record.daID]
+		corrupt.wireBytes = 1
+		relay.sets[record.daID] = corrupt
+		before, ownerBefore := daRelayStateSnapshot(relay), cloneDAAdmissionOwner(mp.pendingOutpoints)
+		ownerBefore.generation++
+		ownerBefore.inTransition = true
+		beforeTip := f.engine.chainState.view()
+		_, err := f.engine.ApplyBlock(block, nil)
+		var terminal *canonicalDATerminalError
+		if !errors.As(err, &terminal) {
+			t.Fatalf("ApplyBlock malformed State C err=%v, want retained terminal", err)
+		}
+		if !f.engine.persistenceFaulted() {
+			t.Fatal("preparation terminal did not latch the engine")
+		}
+		requireDANonReplayUnchanged(t, relay, mp.pendingOutpoints, before, ownerBefore)
+		afterTip := f.engine.chainState.view()
+		if afterTip.height != beforeTip.height || afterTip.tipHash != beforeTip.tipHash {
+			t.Fatalf("preparation error moved tip from (%d,%x) to (%d,%x)", beforeTip.height, beforeTip.tipHash, afterTip.height, afterTip.tipHash)
+		}
+	})
+
+	t.Run("OLD preserves the complete S0 pair", func(t *testing.T) {
+		f := newCanonicalDATestFixture(t)
+		mp := bindCanonicalStateCTestMempool(t, f)
+		block := canonicalStateCTestBlock(t, f)
+		stageCanonicalStateCFromBlock(t, f, block)
+		relay := f.engine.DARelayState()
+		before, ownerBefore := daRelayStateSnapshot(relay), cloneDAAdmissionOwner(mp.pendingOutpoints)
+		ownerBefore.generation++
+		ownerBefore.inTransition = false
+		beforeTip := f.engine.chainState.view()
+		previous := writeFileAtomicFn
+		t.Cleanup(func() { writeFileAtomicFn = previous })
+		injected := false
+		writeFileAtomicFn = func(path string, data []byte, mode os.FileMode) error {
+			if path == f.store.indexPath {
+				injected = true
+				return newAtomicWriteError(atomicWriteBeforeNamespaceCommit, path, atomicWriteOverwrite, os.ErrPermission)
+			}
+			return previous(path, data, mode)
+		}
+		if _, err := f.engine.ApplyBlock(block, nil); err == nil || !injected {
+			t.Fatalf("ApplyBlock precommit refusal err=%v injected=%v", err, injected)
+		}
+		if f.engine.persistenceFaulted() {
+			t.Fatal("ordinary precommit OLD latched the engine")
+		}
+		if _, open := mp.pendingOutpoints.AdmissionContext(); !open {
+			t.Fatal("ordinary precommit OLD did not reopen admission")
+		}
+		requireDANonReplayUnchanged(t, relay, mp.pendingOutpoints, before, ownerBefore)
+		afterTip := f.engine.chainState.view()
+		if afterTip.height != beforeTip.height || afterTip.tipHash != beforeTip.tipHash {
+			t.Fatalf("OLD moved tip from (%d,%x) to (%d,%x)", beforeTip.height, beforeTip.tipHash, afterTip.height, afterTip.tipHash)
+		}
+	})
 }
 
 // TestCanonicalCutoverWinningReorgOneCommit pins the winning-reorg row: one
