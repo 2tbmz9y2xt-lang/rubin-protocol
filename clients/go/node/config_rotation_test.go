@@ -809,6 +809,7 @@ func TestValidateConfig_RejectsNegativeSuiteRegistryLengthsJSON(t *testing.T) {
 		"bind_addr":"0.0.0.0:19111",
 		"log_level":"info",
 		"max_peers":64,
+		"da_mempool_size":536870912,
 		"mine_address":"",
 		"suite_registry":[{"suite_id":66,"pubkey_len":-1,"sig_len":4627,"verify_cost":19,"alg_name":"ML-DSA-87"}]
 	}`), &cfg)
@@ -827,6 +828,7 @@ func TestValidateConfig_RejectsMissingSuiteRegistryAlgName(t *testing.T) {
 		"max_peers":64,
 		"mempool_max_txs":300,
 		"mempool_max_bytes":96000000,
+		"da_mempool_size":536870912,
 		"mine_address":"",
 		"suite_registry":[{"suite_id":66,"pubkey_len":2592,"sig_len":4627,"verify_cost":19}]
 	}`), &cfg); err != nil {
@@ -846,6 +848,7 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 		MaxPeers:        64,
 		MempoolMaxTxs:   DefaultMempoolMaxTransactions,
 		MempoolMaxBytes: DefaultMempoolMaxBytes,
+		DAMempoolSize:   536870912,
 		RotationDescriptor: &RotationConfigJSON{
 			Name:         "test",
 			OldSuiteID:   1,
@@ -899,6 +902,9 @@ func TestRotationConfigJSON_Roundtrip(t *testing.T) {
 	if restored.RotationDescriptor.SunsetHeight != 300 {
 		t.Fatalf("sunset=%d, want 300", restored.RotationDescriptor.SunsetHeight)
 	}
+	if restored.DAMempoolSize != 536870912 {
+		t.Fatalf("da_mempool_size=%d, want 536870912", restored.DAMempoolSize)
+	}
 	if len(restored.SuiteRegistry) != 1 {
 		t.Fatalf("suite_registry len=%d, want 1", len(restored.SuiteRegistry))
 	}
@@ -920,6 +926,7 @@ func TestValidateConfig_AcceptsLegacySuiteRegistryOpenSSLAlgAlias(t *testing.T) 
 		"max_peers":64,
 		"mempool_max_txs":300,
 		"mempool_max_bytes":96000000,
+		"da_mempool_size":536870912,
 		"mine_address":"",
 		"suite_registry":[{"suite_id":66,"pubkey_len":2592,"sig_len":4627,"verify_cost":8,"openssl_alg":"ML-DSA-87"}]
 	}`), &cfg); err != nil {

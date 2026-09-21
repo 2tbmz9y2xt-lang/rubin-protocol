@@ -49,6 +49,89 @@ func TestDefaultSyncConfigAndEngineInit_Defaults(t *testing.T) {
 	}
 }
 
+func TestSyncDAMempoolSize(t *testing.T) {
+	const (
+		defaultSize = uint64(536870912)
+		customSize  = uint64(1073741824)
+		maxSize     = uint64(4294967295)
+	)
+
+	if got := DefaultSyncConfig(nil, devnetGenesisChainID, "").DAMempoolSize; got != defaultSize {
+		t.Fatalf("DefaultSyncConfig da_mempool_size=%d, want %d", got, defaultSize)
+	}
+	t.Run("zero normalization literal oracle", func(t *testing.T) {
+		cfg := SyncConfig{DAMempoolSize: 0}
+		if got := normalizeSyncConfig(cfg).DAMempoolSize; got != 536870912 {
+			t.Fatalf("internal zero did not default: got %d, want 536870912", got)
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		input uint64
+		want  uint64
+	}{
+		{name: "zero defaults", input: 0, want: defaultSize},
+		{name: "custom propagates", input: customSize, want: customSize},
+		{name: "max propagates", input: maxSize, want: maxSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewChainState()
+			cfg := DefaultSyncConfig(nil, devnetGenesisChainID, "")
+			cfg.DAMempoolSize = tc.input
+			engine, err := NewSyncEngine(st, nil, cfg)
+			if err != nil {
+				t.Fatalf("NewSyncEngine: %v", err)
+			}
+			if engine.cfg.DAMempoolSize != tc.want {
+				t.Fatalf("effective da_mempool_size=%d, want %d", engine.cfg.DAMempoolSize, tc.want)
+			}
+			mempool, err := NewMempool(st, nil, devnetGenesisChainID)
+			if err != nil {
+				t.Fatalf("NewMempool: %v", err)
+			}
+			engine.SetMempool(mempool)
+			relay := engine.DARelayState()
+			if relay == nil {
+				t.Fatal("DA relay state was not initialized")
+			}
+			if relay.caps.stagedBytes != tc.want {
+				t.Fatalf("relay staged cap=%d, want %d", relay.caps.stagedBytes, tc.want)
+			}
+			defaults := defaultDARelayCaps()
+			for _, cap := range []struct {
+				name string
+				got  uint64
+				want uint64
+			}{
+				{name: "orphan pool", got: relay.caps.orphanPoolBytes, want: defaults.orphanPoolBytes},
+				{name: "orphan per peer", got: relay.caps.orphanPoolPerPeerBytes, want: defaults.orphanPoolPerPeerBytes},
+				{name: "orphan per da", got: relay.caps.orphanPoolPerDAIDBytes, want: defaults.orphanPoolPerDAIDBytes},
+				{name: "commit overhead", got: relay.caps.orphanCommitOverheadBytes, want: defaults.orphanCommitOverheadBytes},
+				{name: "ttl", got: relay.caps.orphanTTLBlocks, want: defaults.orphanTTLBlocks},
+				{name: "pinned payload", got: relay.caps.pinnedPayloadBytes, want: defaults.pinnedPayloadBytes},
+			} {
+				if cap.got != cap.want {
+					t.Errorf("%s cap=%d, want %d", cap.name, cap.got, cap.want)
+				}
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		size uint64
+		want string
+	}{
+		{size: defaultSize - 1, want: "da_mempool_size must be >= 536870912"},
+		{size: maxSize + 1, want: "da_mempool_size must be <= 4294967295"},
+	} {
+		cfg := DefaultSyncConfig(nil, devnetGenesisChainID, "")
+		cfg.DAMempoolSize = tc.size
+		if _, err := NewSyncEngine(NewChainState(), nil, cfg); err == nil || err.Error() != tc.want {
+			t.Errorf("internal da_mempool_size=%d error=%v, want %q", tc.size, err, tc.want)
+		}
+	}
+}
+
 func TestNewSyncEngine_ParallelValidationModeParse(t *testing.T) {
 	st := NewChainState()
 	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
