@@ -224,12 +224,12 @@ type canonicalDARetainedImage struct {
 
 // validateCanonicalDARetainedSnapshot is the intrinsic structure, identity, accounting and
 // locator phase of prepareCanonicalDAOwnerCandidates, its only caller, whose read-only contract
-// it inherits: every State A/B record passes checkDANonReplayPrior, every State C record passes
-// checkOwnerReadyRetainedRecordLocked, and every record retains a member before any is parsed;
-// every record is parsed and bound before the image-wide closure runs. What each phase
-// checks is RUBIN_MEMPOOL_POLICY.md Section 6.4.1's; the PHASE-MAJOR walk is the builder's own
-// rule. Within one phase the first defect in ascending raw da_id, then in sub-phase order, is
-// the sole result, always the retained-DA terminal class.
+// it inherits: every State A/B record passes checkDANonReplayPrior, while every State C record
+// passes checkOwnerReadyRetainedRecordLocked, whose complete-record gate includes its own parse.
+// All records then pass the common parse/bind walk before the image-wide closure runs. What each
+// outer phase checks is RUBIN_MEMPOOL_POLICY.md Section 6.4.1's; within one phase the first defect
+// in ascending raw da_id, then in sub-phase order, is the sole result, always the retained-DA
+// terminal class.
 func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingOutpointOwner) (canonicalDARetainedImage, error) {
 	var image canonicalDARetainedImage
 	// ...Locked: the caller-owned snapshot's own invariant (see prepareCanonicalDAImage).
