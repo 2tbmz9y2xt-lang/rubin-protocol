@@ -256,9 +256,9 @@ func TestConfigDAMempoolSize(t *testing.T) {
 		t.Fatalf("default da_mempool_size=%d, want %d", cfg.DAMempoolSize, minSize)
 	}
 	for _, size := range []uint64{minSize, 1 << 30, maxSize} {
-		cfg := DefaultConfig()
-		cfg.DAMempoolSize = size
-		if err := ValidateConfig(cfg); err != nil {
+		sizeCfg := DefaultConfig()
+		sizeCfg.DAMempoolSize = size
+		if err := ValidateConfig(sizeCfg); err != nil {
 			t.Errorf("da_mempool_size=%d rejected: %v", size, err)
 		}
 	}
@@ -270,9 +270,9 @@ func TestConfigDAMempoolSize(t *testing.T) {
 		{size: minSize - 1, want: "da_mempool_size must be >= 536870912"},
 		{size: maxSize + 1, want: "da_mempool_size must be <= 4294967295"},
 	} {
-		cfg := DefaultConfig()
-		cfg.DAMempoolSize = tc.size
-		if err := ValidateConfig(cfg); err == nil || err.Error() != tc.want {
+		sizeCfg := DefaultConfig()
+		sizeCfg.DAMempoolSize = tc.size
+		if err := ValidateConfig(sizeCfg); err == nil || err.Error() != tc.want {
 			t.Errorf("da_mempool_size=%d error=%v, want %q", tc.size, err, tc.want)
 		}
 	}
