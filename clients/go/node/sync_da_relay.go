@@ -463,9 +463,10 @@ func canonicalDAClaimBindsMember(claim pendingOutpointClaim, member *daRelayMemb
 		claim.finalized && slices.Equal(claim.inputs, member.inputs)
 }
 
-// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair, deep-copies survivors (no input
-// container reaches D1), removes via the owner-aware whole-record arm (victims unused: O1 is rebuilt),
-// rebuilds the owner indexes from O1 and returns only after the closing bijection proof.
+// buildCanonicalDAOwnerCandidates is phase 6: it projects the pair and deep-copies survivors (no
+// input container reaches D1). State C is projected directly from the already-validated private
+// image; State A/B use the owner-aware whole-record arm. O1 is rebuilt, then the closing bijection
+// proof runs.
 func buildCanonicalDAOwnerCandidates(
 	retained *DARelayState,
 	owner *PendingOutpointOwner,
@@ -482,7 +483,24 @@ func buildCanonicalDAOwnerCandidates(
 			projected.sets[daID] = retained.sets[daID].cloneOwnerReady()
 			continue
 		}
-		if _, err := projected.removeOwnerReadyWholeRecordLocked(projected.sets[daID]); err != nil {
+		record := projected.sets[daID]
+		if record.state == daRelayStateCompleteSet {
+			accounting, accountingErr := record.ownerReadyAccounting()
+			completeBytes, bytesErr := checkedApplyUint64Delta(projected.completeBytes, accounting.completeBytes, 0)
+			completeCount, countErr := checkedApplyUint64Delta(projected.completeCount, accounting.completeCount, 0)
+			pinnedPayloadBytes, pinnedErr := checkedApplyUint64Delta(projected.pinnedPayloadBytes, record.pinnedPayloadAccountingBytes(), 0)
+			if err := errors.Join(accountingErr, bytesErr, countErr, pinnedErr); err != nil {
+				return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
+			}
+			projected.completeBytes, projected.completeCount, projected.pinnedPayloadBytes = completeBytes, completeCount, pinnedPayloadBytes
+			for _, row := range record.locatorRows() {
+				delete(projected.locators, row.txid)
+			}
+			delete(projected.sets, daID)
+			projected.prefetch.releaseSet(daID)
+			continue
+		}
+		if _, err := projected.removeOwnerReadyWholeRecordLocked(record); err != nil {
 			return zero, terminalCanonicalDAError(fmt.Errorf("retained DA record %x removal: %w", daID, err))
 		}
 	}

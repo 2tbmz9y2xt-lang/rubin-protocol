@@ -205,8 +205,8 @@ func canonicalRetainedDACheckedMember(member canonicalRetainedDAMember, chain ca
 	return checked, keep, err
 }
 
-// canonicalDARetainedMember pairs ONE retained slot's stored identity with the
-// parse of the exact bytes that slot retains, so no member is parsed twice.
+// canonicalDARetainedMember stores the canonical phase-2 parse reused by later
+// phases, paired with ONE retained slot's stored identity.
 type canonicalDARetainedMember struct {
 	parsed canonicalRetainedDAMember
 	stored *daRelayMemberIdentity
@@ -224,18 +224,25 @@ type canonicalDARetainedImage struct {
 
 // validateCanonicalDARetainedSnapshot is the intrinsic structure, identity, accounting and
 // locator phase of prepareCanonicalDAOwnerCandidates, its only caller, whose read-only contract
-// it inherits: every record passes checkDANonReplayPrior and retains a member before any is
-// parsed, every record is parsed and bound before the image-wide closure runs. What each phase
-// checks is RUBIN_MEMPOOL_POLICY.md Section 6.4.1's; the PHASE-MAJOR walk is the builder's own
-// rule. Within one phase the first defect in ascending raw da_id, then in sub-phase order, is
-// the sole result, always the retained-DA terminal class.
+// it inherits: every State A/B record passes checkDANonReplayPrior, while every State C record
+// passes checkOwnerReadyRetainedRecordLocked, whose complete-record gate includes its own parse.
+// All records then pass the common parse/bind walk before the image-wide closure runs. What each
+// outer phase checks is RUBIN_MEMPOOL_POLICY.md Section 6.4.1's; within one phase the first defect
+// in ascending raw da_id, then in sub-phase order, is the sole result, always the retained-DA
+// terminal class.
 func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingOutpointOwner) (canonicalDARetainedImage, error) {
 	var image canonicalDARetainedImage
 	// ...Locked: the caller-owned snapshot's own invariant (see prepareCanonicalDAImage).
 	daIDs := retained.sortedRetainedDAIDsLocked()
 	for _, daID := range daIDs {
 		record := retained.sets[daID]
-		if err := record.checkDANonReplayPrior(daID, owner); err != nil {
+		var err error
+		if record.state == daRelayStateCompleteSet {
+			err = checkOwnerReadyRetainedRecordLocked(record)
+		} else {
+			err = record.checkDANonReplayPrior(daID, owner)
+		}
+		if err != nil {
 			return canonicalDARetainedImage{}, terminalCanonicalDAError(fmt.Errorf("retained DA record %x is not owner-ready: %w", daID, err))
 		}
 		if len(record.locatorRows()) == 0 {
@@ -309,7 +316,7 @@ func canonicalDARetainedBinding(record daRelaySetRecord, m canonicalDARetainedMe
 	if m.parsed.tx.TxKind == 0x01 {
 		return canonicalDACommitCacheBound(record.commit, m)
 	}
-	return canonicalDAChunkCacheBound(record.chunks[m.parsed.tx.DaChunkCore.ChunkIndex], m)
+	return canonicalDAChunkCacheBound(record.state, record.chunks[m.parsed.tx.DaChunkCore.ChunkIndex], m)
 }
 
 // canonicalDACommitCacheBound keeps the helper's refusal (no single usable
@@ -325,15 +332,18 @@ func canonicalDACommitCacheBound(commit daRelayCommit, m canonicalDARetainedMemb
 	return nil
 }
 
-// canonicalDAChunkCacheBound binds the stored chunk hash to the one the chunk's retained bytes
-// declare, that hash to the hash of the retained payload, and the stored payload to THAT member's
-// own DaPayload — the builder's ONLY tie between retained payload and declared hash, phase 4
-// leaving that to validateDAChunkHashes and admission (owner-ready chunks latch no hash).
-func canonicalDAChunkCacheBound(chunk daRelayChunk, m canonicalDARetainedMember) error {
-	if chunk.chunkHash != m.parsed.tx.DaChunkCore.ChunkHash || sha3.Sum256(chunk.payload) != chunk.chunkHash {
+// canonicalDAChunkCacheBound binds the stored hash to the retained transaction's declaration.
+// State A/B additionally bind their payload cache; State C's required nil cache was validated in
+// phase 1, so phase 2 hashes the canonical parse's DaPayload instead.
+func canonicalDAChunkCacheBound(state daRelaySetState, chunk daRelayChunk, m canonicalDARetainedMember) error {
+	payload := chunk.payload
+	if state == daRelayStateCompleteSet {
+		payload = m.parsed.tx.DaPayload
+	}
+	if chunk.chunkHash != m.parsed.tx.DaChunkCore.ChunkHash || sha3.Sum256(payload) != chunk.chunkHash {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x contradicts its payload hash", m.parsed.label, m.daID))
 	}
-	if !bytes.Equal(chunk.payload, m.parsed.tx.DaPayload) {
+	if state != daRelayStateCompleteSet && !bytes.Equal(chunk.payload, m.parsed.tx.DaPayload) {
 		return terminalCanonicalDAError(fmt.Errorf("retained DA %s for %x retains a payload its bytes do not carry", m.parsed.label, m.daID))
 	}
 	return nil
