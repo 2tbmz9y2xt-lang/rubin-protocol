@@ -377,6 +377,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.IntVar(&cfg.MaxPeers, "max-peers", defaults.MaxPeers, "max connected peers")
 	fs.IntVar(&cfg.MempoolMaxTxs, "mempool-max-txs", defaults.MempoolMaxTxs, "maximum canonical mempool transactions")
 	fs.IntVar(&cfg.MempoolMaxBytes, "mempool-max-bytes", defaults.MempoolMaxBytes, "maximum canonical mempool serialized transaction bytes")
+	fs.Uint64Var(&cfg.DAMempoolSize, "da-mempool-size", defaults.DAMempoolSize, "maximum retained DA staged bytes")
 	fs.StringVar(&cfg.MineAddress, "mine-address", "", "miner pubkey: 64-char hex key_id or 66-char hex suite_id||key_id")
 	mineBlocks := fs.Int("mine-blocks", 0, "mine N blocks locally after startup")
 	mineExit := fs.Bool("mine-exit", false, "exit immediately after local mining")
@@ -574,6 +575,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	chainState.Registry = registry
 	syncCfg := node.DefaultSyncConfig(nil, chainIDFromGenesis, chainStatePath)
 	syncCfg.Network = cfg.Network
+	syncCfg.DAMempoolSize = cfg.DAMempoolSize
 	applySuiteContextToSyncConfig(&syncCfg, rotation, registry)
 	syncCfg.ParallelValidationMode = *pvMode
 	syncCfg.PVShadowMaxSamples = *pvShadowMax

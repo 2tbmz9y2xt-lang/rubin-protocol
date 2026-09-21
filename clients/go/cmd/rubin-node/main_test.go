@@ -1935,6 +1935,108 @@ func TestRunPassesMempoolLimitsToMempoolAndPrintsConfig(t *testing.T) {
 	}
 }
 
+func TestRunDAMempoolSizeFlag(t *testing.T) {
+	t.Run("registration source pin", func(t *testing.T) {
+		source, err := os.ReadFile("main.go")
+		if err != nil {
+			t.Fatalf("read main.go: %v", err)
+		}
+		const registration = `fs.Uint64Var(&cfg.DAMempoolSize, "da-mempool-size", defaults.DAMempoolSize`
+		if fields, names, exact := strings.Count(string(source), "&cfg.DAMempoolSize"), strings.Count(string(source), `"da-mempool-size"`), strings.Count(string(source), registration); fields != 1 || names != 1 || exact != 1 {
+			t.Fatalf("unexpected DA capacity flag alias/parser: field_refs=%d names=%d exact_uint64=%d", fields, names, exact)
+		}
+	})
+
+	prev := newSyncEngineFn
+	var gotCfg node.SyncConfig
+	newSyncEngineFn = func(st *node.ChainState, store *node.BlockStore, cfg node.SyncConfig) (*node.SyncEngine, error) {
+		gotCfg = cfg
+		return node.NewSyncEngine(st, store, cfg)
+	}
+	t.Cleanup(func() { newSyncEngineFn = prev })
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want uint64
+	}{
+		{name: "default", want: 536870912},
+		{name: "explicit min", args: []string{"--da-mempool-size", "536870912"}, want: 536870912},
+		{name: "max", args: []string{"--da-mempool-size", "4294967295"}, want: 4294967295},
+		{name: "hex min", args: []string{"--da-mempool-size", "0x20000000"}, want: 536870912},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			seedBlockStore(t, dir)
+			gotCfg = node.SyncConfig{}
+			var out, errOut bytes.Buffer
+			args := append([]string{"--dry-run", "--datadir", dir}, tc.args...)
+			if code := run(args, &out, &errOut); code != 0 {
+				t.Fatalf("code=%d, want 0 (stderr=%q)", code, errOut.String())
+			}
+			if gotCfg.DAMempoolSize != tc.want {
+				t.Fatalf("SyncConfig da_mempool_size=%d, want %d", gotCfg.DAMempoolSize, tc.want)
+			}
+			wantJSON := fmt.Sprintf(`"da_mempool_size": %d`, tc.want)
+			if !strings.Contains(out.String(), wantJSON) {
+				t.Fatalf("dry-run JSON missing %q: %q", wantJSON, out.String())
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "zero", value: "0", want: "invalid config: da_mempool_size must be >= 536870912"},
+		{name: "min minus one", value: "536870911", want: "invalid config: da_mempool_size must be >= 536870912"},
+		{name: "max plus one", value: "4294967296", want: "invalid config: da_mempool_size must be <= 4294967295"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var errOut bytes.Buffer
+			code := run([]string{"--dry-run", "--datadir", t.TempDir(), "--da-mempool-size", tc.value}, io.Discard, &errOut)
+			if code != 2 || !strings.Contains(errOut.String(), tc.want) {
+				t.Fatalf("code=%d stderr=%q, want %q", code, errOut.String(), tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "uint64 overflow", value: "18446744073709551616", want: `invalid value "18446744073709551616" for flag -da-mempool-size: value out of range`},
+		{name: "negative", value: "-1", want: `invalid value "-1" for flag -da-mempool-size: parse error`},
+		{name: "empty", value: "", want: `invalid value "" for flag -da-mempool-size: parse error`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var errOut bytes.Buffer
+			code := run([]string{"--dry-run", "--datadir", t.TempDir(), "--da-mempool-size", tc.value}, io.Discard, &errOut)
+			if code != 2 || !strings.Contains(errOut.String(), tc.want) || strings.Contains(errOut.String(), "invalid config:") {
+				t.Fatalf("code=%d stderr=%q, want parser rejection %q", code, errOut.String(), tc.want)
+			}
+		})
+	}
+
+	t.Run("no alias", func(t *testing.T) {
+		var errOut bytes.Buffer
+		code := run([]string{"--dry-run", "--datadir", t.TempDir(), "--da-mempool-bytes", "536870912"}, io.Discard, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), "flag provided but not defined") {
+			t.Fatalf("code=%d stderr=%q, want unknown alias rejection", code, errOut.String())
+		}
+	})
+
+	t.Run("max peers refusal precedes DA cap", func(t *testing.T) {
+		var errOut bytes.Buffer
+		code := run([]string{"--dry-run", "--datadir", t.TempDir(), "--max-peers", "0", "--da-mempool-size", "0"}, io.Discard, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), "invalid config: max_peers must be > 0") || strings.Contains(errOut.String(), "da_mempool_size") {
+			t.Fatalf("code=%d stderr=%q, want max_peers refusal first", code, errOut.String())
+		}
+	})
+}
+
 func TestRunWiresP2PToCanonicalMempool(t *testing.T) {
 	prev := newP2PServiceFn
 	var captured p2p.ServiceConfig
@@ -3788,6 +3890,7 @@ func TestRunDryRunWritesNothingWithEveryLegalFlag(t *testing.T) {
 		{"--peer", "127.0.0.1:19111"},
 		{"--peers", "127.0.0.1:19111,127.0.0.1:19112"},
 		{"--mempool-max-txs", "7", "--mempool-max-bytes", "4096"},
+		{"--da-mempool-size", "1073741824"},
 		{"--mine-address", strings.Repeat("ab", 32)},
 		{"--mine-blocks", "5", "--mine-exit"},
 		{"--pv-mode", "shadow", "--pv-shadow-max", "1"},

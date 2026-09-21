@@ -245,6 +245,61 @@ func TestValidateConfigRejectsInvalidMempoolLimits(t *testing.T) {
 	}
 }
 
+func TestConfigDAMempoolSize(t *testing.T) {
+	const (
+		minSize = uint64(536870912)
+		maxSize = uint64(4294967295)
+	)
+
+	cfg := DefaultConfig()
+	if cfg.DAMempoolSize != minSize {
+		t.Fatalf("default da_mempool_size=%d, want %d", cfg.DAMempoolSize, minSize)
+	}
+	for _, size := range []uint64{minSize, 1 << 30, maxSize} {
+		sizeCfg := DefaultConfig()
+		sizeCfg.DAMempoolSize = size
+		if err := ValidateConfig(sizeCfg); err != nil {
+			t.Errorf("da_mempool_size=%d rejected: %v", size, err)
+		}
+	}
+	for _, tc := range []struct {
+		size uint64
+		want string
+	}{
+		{size: 0, want: "da_mempool_size must be >= 536870912"},
+		{size: minSize - 1, want: "da_mempool_size must be >= 536870912"},
+		{size: maxSize + 1, want: "da_mempool_size must be <= 4294967295"},
+	} {
+		sizeCfg := DefaultConfig()
+		sizeCfg.DAMempoolSize = tc.size
+		if err := ValidateConfig(sizeCfg); err == nil || err.Error() != tc.want {
+			t.Errorf("da_mempool_size=%d error=%v, want %q", tc.size, err, tc.want)
+		}
+	}
+
+	cfg = DefaultConfig()
+	cfg.MaxPeers = 0
+	cfg.DAMempoolSize = 0
+	if err := ValidateConfig(cfg); err == nil || err.Error() != "max_peers must be > 0" {
+		t.Fatalf("combined invalid config error=%v, want max_peers refusal first", err)
+	}
+
+	raw, err := json.Marshal(DefaultConfig())
+	if err != nil {
+		t.Fatalf("marshal default config: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"da_mempool_size":536870912`)) {
+		t.Fatalf("default config JSON missing da_mempool_size: %s", raw)
+	}
+	var missing Config
+	if err := json.Unmarshal([]byte(`{"network":"devnet","data_dir":"/tmp/test","bind_addr":"0.0.0.0:19111","log_level":"info","max_peers":64,"mempool_max_txs":300,"mempool_max_bytes":96000000,"mine_address":""}`), &missing); err != nil {
+		t.Fatalf("unmarshal config without da_mempool_size: %v", err)
+	}
+	if err := ValidateConfig(missing); err == nil || err.Error() != "da_mempool_size must be >= 536870912" {
+		t.Fatalf("missing da_mempool_size error=%v, want lower-bound refusal", err)
+	}
+}
+
 func TestParseMineAddressAcceptsKeyIDAndCanonicalEncoding(t *testing.T) {
 	raw := strings.Repeat("11", mineAddressKeyIDBytes)
 	got, err := ParseMineAddress(raw)

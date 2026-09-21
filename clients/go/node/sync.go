@@ -26,6 +26,7 @@ type SyncConfig struct {
 	ChainStatePath   string
 	HeaderBatchLimit uint64
 	IBDLagSeconds    uint64
+	DAMempoolSize    uint64
 	ChainID          [32]byte
 	Network          string
 	RotationProvider consensus.RotationProvider
@@ -149,6 +150,7 @@ func DefaultSyncConfig(expectedTarget *[32]byte, chainID [32]byte, chainStatePat
 	return SyncConfig{
 		HeaderBatchLimit:       512,
 		IBDLagSeconds:          defaultIBDLagSeconds,
+		DAMempoolSize:          daStagedSharedMaxBytes,
 		ExpectedTarget:         expectedTarget,
 		ChainID:                chainID,
 		ChainStatePath:         chainStatePath,
@@ -163,6 +165,9 @@ func NewSyncEngine(chainState *ChainState, blockStore *BlockStore, cfg SyncConfi
 		return nil, errors.New("nil chainstate")
 	}
 	cfg = normalizeSyncConfig(cfg)
+	if err := validateDAMempoolSize(cfg.DAMempoolSize); err != nil {
+		return nil, err
+	}
 	if err := validateMainnetGenesisGuard(cfg); err != nil {
 		return nil, err
 	}
@@ -191,6 +196,9 @@ func normalizeSyncConfig(cfg SyncConfig) SyncConfig {
 	}
 	if cfg.IBDLagSeconds == 0 {
 		cfg.IBDLagSeconds = defaultIBDLagSeconds
+	}
+	if cfg.DAMempoolSize == 0 {
+		cfg.DAMempoolSize = daStagedSharedMaxBytes
 	}
 	cfg.Network = normalizedNetworkName(cfg.Network)
 	if strings.TrimSpace(cfg.ParallelValidationMode) == "" {
@@ -723,7 +731,9 @@ func (s *SyncEngine) installInitialMempool(mempool *Mempool, admission PendingOu
 	if err := checkInitialMempoolOwnerLocked(owner, admission); err != nil {
 		return err
 	}
-	daRelay, err := newDARelayState(mempool, defaultDARelayCaps())
+	caps := defaultDARelayCaps()
+	caps.stagedBytes = s.cfg.DAMempoolSize
+	daRelay, err := newDARelayState(mempool, caps)
 	if err != nil {
 		return err
 	}

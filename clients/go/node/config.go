@@ -23,6 +23,7 @@ type Config struct {
 	MaxPeers           int                 `json:"max_peers"`
 	MempoolMaxTxs      int                 `json:"mempool_max_txs"`
 	MempoolMaxBytes    int                 `json:"mempool_max_bytes"`
+	DAMempoolSize      uint64              `json:"da_mempool_size"`
 	ChainID            string              `json:"chain_id_hex,omitempty"`
 	MineAddress        string              `json:"mine_address"`
 	RotationDescriptor *RotationConfigJSON `json:"rotation_descriptor,omitempty"`
@@ -379,6 +380,7 @@ func DefaultConfig() Config {
 		MaxPeers:        64,
 		MempoolMaxTxs:   mempoolDefaults.MaxTransactions,
 		MempoolMaxBytes: mempoolDefaults.MaxBytes,
+		DAMempoolSize:   daStagedSharedMaxBytes,
 	}
 }
 
@@ -465,6 +467,21 @@ func validateConfigLimits(cfg Config) error {
 	}
 	if cfg.MempoolMaxBytes <= 0 {
 		return errors.New("mempool_max_bytes must be > 0")
+	}
+	if err := validateDAMempoolSize(cfg.DAMempoolSize); err != nil {
+		return err
+	}
+	return nil
+}
+
+const daMempoolMaxBytes uint64 = 4294967295
+
+func validateDAMempoolSize(size uint64) error {
+	if size < daStagedSharedMaxBytes {
+		return fmt.Errorf("da_mempool_size must be >= %d", daStagedSharedMaxBytes)
+	}
+	if size > daMempoolMaxBytes {
+		return fmt.Errorf("da_mempool_size must be <= %d", daMempoolMaxBytes)
 	}
 	return nil
 }
