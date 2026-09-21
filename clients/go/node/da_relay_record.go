@@ -772,12 +772,10 @@ func (r daRelaySetRecord) locatorRows() []daRelayLocatorRow {
 	return rows
 }
 
-// ownerReadyAccounting derives RUBIN_COMPACT_BLOCKS.md Section 18.1's
-// incomplete_member_charge. The legacy wireBytes fallback of retainedTxAccountingBytes
-// has no place: a member always carries its bytes. The per-peer key comes from the
-// member's own provenance for State A. Live State B charges only the staged domain;
-// the independent commit overhead and each member's provenance remain unchanged.
 func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error) {
+	if r.state == daRelayStateCompleteSet {
+		return r.ownerReadyCompleteAccounting()
+	}
 	accounting := daRelayRecordAccounting{peerBytes: map[string]uint64{}}
 	if r.commit.member != nil {
 		accounting.commitBytes = uint64(len(r.commit.txBytes))
@@ -798,6 +796,24 @@ func (r daRelaySetRecord) ownerReadyAccounting() (daRelayRecordAccounting, error
 	if r.state == daRelayStateStagedCommit {
 		accounting.stagedBytes, accounting.orphanBytes = accounting.orphanBytes, 0
 		clear(accounting.peerBytes)
+	}
+	return accounting, nil
+}
+
+func (r daRelaySetRecord) ownerReadyCompleteAccounting() (daRelayRecordAccounting, error) {
+	if r.commit.member == nil {
+		return daRelayRecordAccounting{}, errDARelayMemberIncomplete
+	}
+	accounting := daRelayRecordAccounting{completeBytes: uint64(len(r.commit.txBytes)), completeCount: 1, peerBytes: map[string]uint64{}}
+	for _, chunk := range r.chunks {
+		if chunk.member == nil {
+			return daRelayRecordAccounting{}, errDARelayMemberIncomplete
+		}
+		var err error
+		accounting.completeBytes, err = checkedAddUint64(accounting.completeBytes, uint64(len(chunk.txBytes)))
+		if err != nil {
+			return daRelayRecordAccounting{}, err
+		}
 	}
 	return accounting, nil
 }

@@ -254,10 +254,12 @@ var (
 )
 
 type daRelayRecordAccounting struct {
-	stagedBytes uint64
-	orphanBytes uint64
-	commitBytes uint64
-	peerBytes   map[string]uint64
+	stagedBytes   uint64
+	completeBytes uint64
+	completeCount uint64
+	orphanBytes   uint64
+	commitBytes   uint64
+	peerBytes     map[string]uint64
 }
 
 type DARelayState struct {
@@ -363,7 +365,7 @@ func ValidateDARelayChunk(chunk DARelayChunk) error {
 // AdvanceOrphanTTL runs the owner-aware TTL tick once, all-or-nothing: each incomplete owner-ready
 // record with ttl above one decrements once and mints one fresh revision; ttl one expires whole
 // (members, locator rows, accounting, prefetch reservation and, on a bound relay, finalized owner
-// claims) with no revision; a resident ttl of zero fails closed before any arithmetic. It returns
+// claims) with no revision; valid C is a validated zero-TTL no-op, while zero A/B TTL fails. It returns
 // commitOwnerReadyRemoval's error classes unwrapped; that body owns the fence; a nil receiver is not promised.
 func (s *DARelayState) AdvanceOrphanTTL() error {
 	return s.advanceOwnerReadyTTL()
@@ -373,7 +375,7 @@ func (s *DARelayState) AdvanceOrphanTTL() error {
 // (typed match, never the cached quota key): a matching commit survives iff a LOCAL or DETACHED_REORG
 // chunk is retained, keeping its charge and owner claim; an unblocked whole removal also carries the
 // record's non-matching PEER members; an empty key selects nothing after the same preflight; a nil
-// receiver returns nil. It takes no quota lock (the P2P caller holds the per-key one), returns
+// receiver returns nil. Valid C is validated but never selected. It takes no quota lock and returns
 // commitOwnerReadyRemoval's error classes unwrapped, and that body owns the fence.
 func (s *DARelayState) ReleasePeerQuotaKey(key string) error {
 	if s == nil {

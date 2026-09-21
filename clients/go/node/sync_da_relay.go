@@ -94,30 +94,20 @@ func (s *DARelayState) checkRetainedDAAccountingLocked() error {
 	return nil
 }
 
-// retainedDAAccountingTotals is what the surviving records THEMSELVES imply for
-// every RECOMPUTABLE stored aggregate: the six counters compared below —
-// stagedBytes, orphanBytes, orphanCommitOverheadBytes, pinnedPayloadBytes, and the per-peer
-// and per-da_id maps — plus the map-key/record-da_id agreement checked in the
-// walk. DARelayState.nextReceivedTime is stored by the same writers and is
-// deliberately NOT here: it is a monotone high-water mark that removal never
-// lowers, so it is not derivable from the surviving records at all.
-//
 // daIDEntries is a COUNT, not a rebuilt map: each per-da_id value is compared
 // inside the walk where its da_id is already in hand, leaving only EXTRA stored
 // entries to catch afterwards.
 type retainedDAAccountingTotals struct {
-	stagedBytes uint64
-	orphanBytes uint64
-	commitBytes uint64
-	pinnedBytes uint64
-	peerBytes   map[string]uint64
-	daIDEntries int
+	stagedBytes   uint64
+	completeBytes uint64
+	completeCount uint64
+	orphanBytes   uint64
+	commitBytes   uint64
+	pinnedBytes   uint64
+	peerBytes     map[string]uint64
+	daIDEntries   int
 }
 
-// recomputeRetainedDAAccountingLocked derives the totals from retained_tx(R) via
-// the SAME per-record accounting the mutation path bills with, so the sweep and
-// the writers cannot disagree about what a record contributes — only about what
-// the counters say it contributed.
 func (s *DARelayState) recomputeRetainedDAAccountingLocked() (retainedDAAccountingTotals, error) {
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
@@ -151,6 +141,9 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 	if t.stagedBytes, err = checkedAddUint64(t.stagedBytes, accounting.stagedBytes); err != nil {
 		return err
 	}
+	if err := t.addComplete(accounting); err != nil {
+		return err
+	}
 	if t.orphanBytes, err = checkedAddUint64(t.orphanBytes, accounting.orphanBytes); err != nil {
 		return err
 	}
@@ -168,10 +161,23 @@ func (t *retainedDAAccountingTotals) add(accounting daRelayRecordAccounting, pin
 	return nil
 }
 
+func (t *retainedDAAccountingTotals) addComplete(accounting daRelayRecordAccounting) error {
+	var err error
+	if t.completeBytes, err = checkedAddUint64(t.completeBytes, accounting.completeBytes); err != nil {
+		return err
+	}
+	t.completeCount, err = checkedAddUint64(t.completeCount, accounting.completeCount)
+	return err
+}
+
 func (t retainedDAAccountingTotals) checkAgainstLocked(s *DARelayState) error {
 	switch {
 	case t.stagedBytes != s.stagedBytes:
 		return fmt.Errorf("staged retained bytes: records imply %d, state holds %d", t.stagedBytes, s.stagedBytes)
+	case t.completeBytes != s.completeBytes:
+		return fmt.Errorf("complete retained bytes: records imply %d, state holds %d", t.completeBytes, s.completeBytes)
+	case t.completeCount != s.completeCount:
+		return fmt.Errorf("complete retained count: records imply %d, state holds %d", t.completeCount, s.completeCount)
 	case t.orphanBytes != s.orphanBytes:
 		return fmt.Errorf("orphan pool bytes: records imply %d, state holds %d", t.orphanBytes, s.orphanBytes)
 	case t.commitBytes != s.orphanCommitOverheadBytes:
