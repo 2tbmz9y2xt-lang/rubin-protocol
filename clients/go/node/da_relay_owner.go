@@ -671,8 +671,8 @@ func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRe
 	return plan
 }
 
-// applyDANonReplayPlan bounds State B by staged plus live completeBytes <= caps.stagedBytes:
-// the checked sum refuses on overflow before owner reserve, the cap after it; State C is never touched.
+// applyDANonReplayPlan implements RUBIN_COMPACT_BLOCKS.md section 18.3 and section 5.2. Postcondition: State B keeps
+// staged plus live completeBytes <= caps.stagedBytes (overflow refused before owner reserve, cap after it); State C is untouched.
 func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate daRelayAdmissionCandidate, plan daRelayAdmissionPlan) (daRelayAdmissionOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

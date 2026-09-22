@@ -6174,7 +6174,7 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 		{"E2 over", "a-to-b", "", local, 1, "A-to-B one-over published State B; LOCAL one-over published State B"},
 		{"E3 fit", "later", "", reorg, 0, ""},
 		{"E3 over", "later", "", reorg, 1, "DETACHED_REORG one-over published State B"},
-		{"E3 above State-A caps", "later", "stateA", reorg, 0, ""},
+		{"E3 above State-A caps", "later", "stateA", peer, 0, ""},
 		{"dual violation", "absent", "dual", local, 1, "dual violation admitted"},
 		{"owner conflict", "absent", "conflict", local, 1, ""},
 		{"planning growth", "absent", "growth", peer, 0, "State C growth after planning was not compared"},
@@ -6227,6 +6227,10 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				switch r.mode {
 				case "growth":
 					f.completeReplayPinned(c2)
+					grown := daRelayStateSnapshot(f.relay).sets[c2]
+					f.mutateRelay(func(s *DARelayState) {
+						s.caps.stagedBytes += uint64(len(grown.commit.txBytes)+len(grown.chunks[0].txBytes)) - 1
+					})
 				case "overflow":
 					f.mutateRelay(func(s *DARelayState) { s.completeBytes = ^uint64(0) })
 				case "conflict":
@@ -6241,8 +6245,14 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 					result = DAAdmissionResult{DAID: outcome.daID, Disposition: DAAdmissionDisposition(outcome.disposition)}
 				}
 			}
-			view := daRelayStateSnapshot(f.relay)
+			view, ownerAfter := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			cChanged := !reflect.DeepEqual(cImage(view), cImage(before))
+			cClaims := func(o *PendingOutpointOwner) (out []any) {
+				for _, m := range []*daRelayMemberIdentity{before.sets[c1].commit.member, before.sets[c1].chunks[0].member} {
+					out = append(out, o.byToken[m.token], o.byOutpoint[m.inputs[0]])
+				}
+				return out
+			}
 			var admitErr *TxAdmitError
 			switch {
 			case r.mode == "conflict":
@@ -6276,9 +6286,18 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				if result != (DAAdmissionResult{DAID: id, Disposition: DAAdmissionDisposition(1)}) || view.stagedBytes != charge || view.sets[id].state != daRelayStateStagedCommit {
 					t.Fatalf("exact-fit result=%+v view=%+v", result, view)
 				}
+				if !reflect.DeepEqual(cClaims(ownerAfter), cClaims(owner)) {
+					t.Fatal("B-only admission changed a State C claim")
+				}
 				if r.shape == "a-to-b" {
 					if _, present := view.locators[outside.txid]; present {
 						t.Fatal("out-of-range chunk survived A-to-B")
+					}
+					if _, kept := ownerAfter.byOutpoint[outside.inputs[0]]; kept {
+						t.Fatal("A-to-B kept the pruned chunk claim")
+					}
+					if ownerAfter.byOutpoint[inside.inputs[0]].txid != inside.txid {
+						t.Fatal("A-to-B released the surviving chunk claim")
 					}
 					f.requireMember(t, view.sets[id], inside, 3, local)
 				}
