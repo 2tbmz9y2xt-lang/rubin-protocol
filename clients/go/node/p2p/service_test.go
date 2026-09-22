@@ -761,6 +761,8 @@ func TestRemoteVersionDAMempoolSizeIsAdvisory(t *testing.T) {
 		bound, err := service.cfg.SyncEngine.EffectiveDAMempoolSize()
 		require(t, err == nil && bound == localCap, "remote %d: remote advertisement changed bound relay cap: %d %v", remoteSize, bound, err)
 		_ = remote.Close()
+		for range frames { // drain until the reader exits, so no send blocks past this iteration
+		}
 		<-done
 	}
 }
