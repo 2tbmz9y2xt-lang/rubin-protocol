@@ -1307,7 +1307,7 @@ func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8, payload .
 	f.mutateRelay(func(s *DARelayState) {
 		record := s.sets[daID]
 		record.commit = daRelayCommit{daID: daID, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: append([]consensus.Outpoint(nil), commit.inputs...), token: token, provenance: daNonReplayPeer("commit")}, chunkCount: 1, txBytes: append([]byte(nil), commit.raw...)}
-		record.wireBytes = uint64(len(chunk.raw) + len(commit.raw))
+		record.wireBytes = 0
 		record.markComplete(uint64(len(chunk.spec.payload)))
 		s.locators[commit.txid] = daRelayLocator{daID: daID, kind: daRelayLocatorCommit}
 		s.sets[daID] = record
@@ -1328,8 +1328,6 @@ func (f *daNonReplayFixture) completeReplayPinned(daID [32]byte) {
 		if s.orphanBytesByPeerQuotaKey["chunk"] -= charge; s.orphanBytesByPeerQuotaKey["chunk"] == 0 {
 			delete(s.orphanBytesByPeerQuotaKey, "chunk")
 		}
-		record.wireBytes = 0
-		s.sets[daID] = record
 		s.completeBytes, s.completeCount = s.completeBytes+uint64(len(record.commit.txBytes)+len(record.chunks[0].txBytes)), s.completeCount+1
 		s.pinnedPayloadBytes += record.payloadBytes
 	})
@@ -3236,6 +3234,7 @@ func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *tes
 			return f, tx
 		}
 	}
+	// bChunk, cCommit and cChunk (merged State-C, record wire 0) replay byte-exactly to DUPLICATE, relay and owner unchanged.
 	for _, role := range []int{bChunk, cCommit, cChunk} {
 		f, tx := setup(role)
 		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -3292,16 +3291,14 @@ func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *tes
 			c.member.token = PendingOutpointToken{seq: 1}
 		}},
 		{"C nonzero ttl", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.ttlBlocksRemaining = 1 }},
-		{"C zero retained bytes", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.wireBytes = 0 }},
 		{"C zero payload bytes", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.payloadBytes = 0 }},
 		{"C replaceable", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.replaceableChunks = map[uint16]bool{} }},
 		{"C stored payload", cChunk, false, func(_ *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { c.payload = []byte{} }},
-		{"C retained bytes below raw", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { r.wireBytes = uint64(len(c.txBytes) - 1) }},
 		{"C payload bytes below raw payload", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.payloadBytes = 1 }},
-		{"C commit retained bytes equal raw", cCommit, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) {
-			r.wireBytes = uint64(len(r.commit.txBytes))
+		{"C commit nonzero record wire", cCommit, false, func(r *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) {
+			r.wireBytes = uint64(len(r.commit.txBytes) + len(c.txBytes))
 		}},
-		{"C chunk retained bytes equal raw", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, c *daRelayChunk) { r.wireBytes = uint64(len(c.txBytes)) }},
+		{"C chunk nonzero record wire", cChunk, false, func(r *daRelaySetRecord, _ *daRelayCommit, _ *daRelayChunk) { r.wireBytes = 1 }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f, tx := setup(row.role)
@@ -3543,6 +3540,140 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestAdmitDAExactReplayStateC replays each member of a merged State-C record
+// byte-exactly through the public entry: DUPLICATE with no retained, sequence,
+// owner, guard or reject-cache effect.
+func TestAdmitDAExactReplayStateC(t *testing.T) {
+	for _, kind := range []uint8{0x01, 0x02} {
+		t.Run(fmt.Sprintf("kind=%d", kind), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			tx := f.completeReplay([32]byte{0xe1, kind}, kind)
+			if err := checkOwnerReadyRetainedRecordLocked(daRelayStateSnapshot(f.relay).sets[tx.spec.daID]); err != nil {
+				t.Fatalf("kind %d fixture is not the merged State-C representation: %v", kind, err)
+			}
+			relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-exact"))
+			if err != nil && relayDispositionOf(err) == RelayAdmissionInternal {
+				t.Fatalf("State-C exact replay returned INTERNAL: kind=%d err=%v", kind, err)
+			}
+			requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
+			if after := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(after, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
+				t.Fatalf("exact replay mutated retained/sequence snapshot: got=%+v want=%+v", after, relayBefore)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			if !f.state.admissionMu.TryLock() {
+				t.Fatalf("kind %d exact State-C replay leaked the admission guard", kind)
+			}
+			f.state.admissionMu.Unlock()
+			if !reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore) {
+				t.Fatalf("kind %d exact State-C replay touched rejectCache", kind)
+			}
+		})
+	}
+}
+
+// TestAdmitDAStateCReplayCapturedCorruption corrupts, per row, the captured
+// evidence of a merged State-C record, sends the target's original bytes and
+// expects INTERNAL with no retained or owner effect.
+func TestAdmitDAStateCReplayCapturedCorruption(t *testing.T) {
+	for i, row := range []struct {
+		label  string
+		kind   uint8
+		mutate func(*daRelaySetRecord, *daRelayChunk) // nil drops the record behind both locators
+	}{
+		{"nonzero record wire residue accepted", 0x01, func(r *daRelaySetRecord, c *daRelayChunk) {
+			r.wireBytes = uint64(len(r.commit.txBytes) + len(c.txBytes))
+		}},
+		{"nonzero record wire residue accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.wireBytes = 1 }},
+		{"nonzero State-C TTL accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.ttlBlocksRemaining = 1 }},
+		{"zero State-C payloadBytes accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.payloadBytes = 0 }},
+		{"replaceable State-C accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.replaceableChunks = map[uint16]bool{} }},
+		{"nonzero State-C chunk target wire accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.wireBytes = 1 }},
+		{"nonempty State-C chunk target quota accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.peerQuotaKey = "moved" }},
+		{"State-C chunk target hashChecked residue accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.hashChecked = true }},
+		{"nonzero State-C commit target wire accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.wireBytes = 1 }},
+		{"nonempty State-C commit target quota accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.peerQuotaKey = "moved" }},
+		{"nonnil State-C shadow payload accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.payload = []byte("complete") }},
+		{"target payload exceeds record payloadBytes", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.payloadBytes-- }},
+		{"corrupt companion commit accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.member.txid[0] ^= 1 }},
+		{"missing target raw accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.txBytes = nil }},
+		{"malformed target raw accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.txBytes = append(r.commit.txBytes, 0) }},
+		{"wrong target txid accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.member.txid[0] ^= 1 }},
+		{"wrong target wtxid accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.member.wtxid[0] ^= 1 }},
+		{"wrong target da_id accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.daID[0] ^= 1 }},
+		{"wrong target index accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.chunkIndex++ }},
+		{"wrong target token accepted", 0x01, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.member.token.seq = 0 }},
+		{"wrong target input identity accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) {
+			c.member.inputs = append([]consensus.Outpoint{{Vout: 9}}, c.member.inputs...)
+		}},
+		{"missing target member accepted", 0x02, func(_ *daRelaySetRecord, c *daRelayChunk) { c.member = nil }},
+		{"dangling target locator accepted", 0x02, nil},
+		{"nonzero State-C companion wire accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.wireBytes = 1 }},
+		{"nonempty State-C companion quota accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.peerQuotaKey = "moved" }},
+		{"malformed companion raw accepted", 0x02, func(r *daRelaySetRecord, _ *daRelayChunk) {
+			r.commit.txBytes = r.commit.txBytes[:len(r.commit.txBytes)-1]
+		}},
+	} {
+		t.Run(fmt.Sprintf("%d %s kind=%d", i, row.label, row.kind), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			tx := f.completeReplay([32]byte{0xe2, byte(i)}, row.kind)
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.sets[tx.spec.daID]
+				if row.mutate == nil {
+					delete(s.sets, tx.spec.daID)
+					return
+				}
+				chunk := record.chunks[0]
+				row.mutate(&record, &chunk)
+				record.chunks[0] = chunk
+				s.sets[tx.spec.daID] = record
+			})
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-corrupt"))
+			if err == nil {
+				t.Fatalf("%s: AdmitDA=(%+v,nil)", row.label, got)
+			}
+			requirePublicDAInternal(t, f, got, err)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		})
+	}
+}
+
+// TestAdmitDASameTxIDNonexactStateC sends each merged State-C member back with a
+// corrupted witness (same txid, other wtxid). It never takes the exact shortcut:
+// the resumed signature check owns the result, and a corrupt capture still ends
+// INTERNAL before that decision.
+func TestAdmitDASameTxIDNonexactStateC(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		for _, kind := range []uint8{0x01, 0x02} {
+			t.Run(fmt.Sprintf("kind=%d corrupt=%v", kind, corrupt), func(t *testing.T) {
+				f := newDANonReplayFixture(t, 2)
+				nonexact := invalidDAWitness(t, f.completeReplay([32]byte{0xe3, kind}, kind))
+				if corrupt {
+					f.mutateRelay(func(s *DARelayState) {
+						record := s.sets[nonexact.spec.daID]
+						record.wireBytes = 1
+						s.sets[nonexact.spec.daID] = record
+					})
+				}
+				relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				got, err := f.relay.AdmitDA(nonexact.raw, publicPeer(t, "state-c-nonexact"))
+				switch {
+				case err == nil:
+					t.Fatalf("same-txid nonexact took DUPLICATE shortcut: kind=%d corrupt=%v result=%+v", kind, corrupt, got)
+				case corrupt && relayDispositionOf(err) != RelayAdmissionInternal:
+					t.Fatalf("corrupt State-C header let nonexact bypass INTERNAL: kind=%d err=%v", kind, err)
+				case corrupt:
+					requirePublicDAInternal(t, f, got, err)
+				default:
+					requireDARejectSignature(t, got, err)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			})
+		}
+	}
 }
 
 // TestAdmitDAOutcomeOrderAndLocalCallerCensus pins the two orders this slice
