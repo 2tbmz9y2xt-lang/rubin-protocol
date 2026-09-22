@@ -6198,7 +6198,8 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				f.admit(commit, reorg)
 				candidate, charge = inside, charge+insideCharge
 			}
-			cBytes := daRelayStateSnapshot(f.relay).completeBytes
+			c1Record := daRelayStateSnapshot(f.relay).sets[c1]
+			cBytes := uint64(len(c1Record.commit.txBytes) + len(c1Record.chunks[0].txBytes))
 			f.mutateRelay(func(s *DARelayState) {
 				s.caps.stagedBytes = charge + cBytes - r.over
 				switch r.mode {
@@ -6249,7 +6250,7 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 					result = DAAdmissionResult{DAID: outcome.daID, Disposition: DAAdmissionDisposition(outcome.disposition)}
 				}
 			}
-			view, ownerAfter := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			view := daRelayStateSnapshot(f.relay)
 			cChanged := !reflect.DeepEqual(cImage(view), cImage(before))
 			cClaims := func(o *PendingOutpointOwner) (out []any) {
 				for _, m := range []*daRelayMemberIdentity{before.sets[c1].commit.member, before.sets[c1].chunks[0].member} {
@@ -6290,6 +6291,7 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				if result != (DAAdmissionResult{DAID: id, Disposition: DAAdmissionDisposition(1)}) || view.stagedBytes != charge || view.sets[id].state != daRelayStateStagedCommit {
 					t.Fatalf("exact-fit result=%+v view=%+v", result, view)
 				}
+				ownerAfter := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				if !reflect.DeepEqual(cClaims(ownerAfter), cClaims(owner)) {
 					t.Fatal("B-only admission changed a State C claim")
 				}
