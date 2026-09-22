@@ -559,7 +559,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes, projectedCommitBytes uint64\n", "projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes\n")
 			updated = strings.ReplaceAll(updated, "orphanCap: orphanCap", "stagedCap: s.caps.stagedBytes")
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes: placement.orphanBytes", "projectedStagedBytes: placement.stagedBytes")
-			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tif projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes); err != nil {\n\t\t\treturn daNonReplayApplyProjection{}, err\n\t\t}\n\t\treturn projection, nil\n")
+			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tprojection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)\n\t\treturn projection, err\n")
 			updated = strings.ReplaceAll(updated, "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n", "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n\tprojectionCaps.stagedBytes = ^uint64(0)\n")
 			if row == "read|node/da_relay_owner.go:file|orphanCap" {
 				updated = "read|node/da_relay_owner.go:file|stagedCap"
@@ -591,13 +591,12 @@ func requireDAAdmissionStructure(t *testing.T) {
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.completeBytes":                                                                                 1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|completeBytes":                                                                                    1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement":                                                                                        1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|err":                                                                                              3,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|err":                                                                                              2,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|checkedAddUint64":                                                                                 1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection":                                                                                       1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectedStagedBytes":                                                                             1,
 			"write|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)": 1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|nil":                                                                                              1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|daNonReplayApplyProjection":                                                                       1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|nil":                                                                                              -1,
 		} {
 			want[row] += count
 			if want[row] == 0 {

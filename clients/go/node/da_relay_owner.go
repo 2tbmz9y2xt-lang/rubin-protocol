@@ -749,10 +749,8 @@ func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImag
 		stagedCap: s.caps.stagedBytes, commitCap: commitCap, projectedStagedBytes: placement.stagedBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
 	}
 	if stateB {
-		if projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes); err != nil {
-			return daNonReplayApplyProjection{}, err
-		}
-		return projection, nil
+		projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)
+		return projection, err
 	}
 	if placement.orphanBytes > orphanCap {
 		return daNonReplayApplyProjection{}, errDARelayOrphanPoolCapExceeded
