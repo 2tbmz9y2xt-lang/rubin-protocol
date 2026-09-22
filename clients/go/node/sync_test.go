@@ -132,6 +132,68 @@ func TestSyncDAMempoolSize(t *testing.T) {
 	}
 }
 
+// TestSyncEffectiveDAMempoolSize: the advertisement observation reads only the bound relay's
+// staged cap, accepts exactly 536870912..4294967295 and otherwise fails closed (RUB-1415 A2/R1).
+func TestSyncEffectiveDAMempoolSize(t *testing.T) {
+	// Relay construction never validates the staged cap: every u64 class is reachable directly.
+	// Each configuration copy lies across a range edge from its relay cap: reading the copy flips the verdict.
+	boundTo := func(stagedBytes, configured uint64) *SyncEngine {
+		caps := defaultDARelayCaps()
+		caps.stagedBytes = stagedBytes
+		relay, err := newDARelayState(nil, caps)
+		if err != nil {
+			t.Fatalf("newDARelayState(%d): %v", stagedBytes, err)
+		}
+		return &SyncEngine{cfg: SyncConfig{DAMempoolSize: configured}, daRelay: relay}
+	}
+	for _, tc := range []struct {
+		label  string
+		engine *SyncEngine
+	}{
+		{"nil engine", nil},
+		{"nil relay", new(SyncEngine)},
+		{"below-minimum relay cap", boundTo(0, 536870912)},
+		{"below-minimum relay cap", boundTo(536870911, 536870912)},
+		{"out-of-u32 relay cap", boundTo(4294967296, 4294967295)},
+		{"out-of-u32 relay cap", boundTo(18446744073709551615, 4294967295)},
+	} {
+		if got, err := tc.engine.EffectiveDAMempoolSize(); err == nil {
+			t.Errorf("%s returned success: %d", tc.label, got)
+		} else if got != 0 {
+			t.Errorf("%s returned value %d with its error", tc.label, got)
+		} else if strings.HasSuffix(tc.label, "relay cap") && (!strings.HasPrefix(err.Error(), "bound DA relay capacity ") || errors.Unwrap(err) == nil) {
+			t.Errorf("%s error not attributed to the bound relay with the validator error wrapped: %v", tc.label, err)
+		}
+	}
+	for _, tc := range []struct{ relay, configured uint64 }{{536870912, 536870911}, {4294967295, 4294967296}} {
+		if got, err := boundTo(tc.relay, tc.configured).EffectiveDAMempoolSize(); err != nil || uint64(got) != tc.relay {
+			t.Errorf("in-range relay cap %d refused: got=%d err=%v", tc.relay, got, err)
+		}
+	}
+	st := NewChainState()
+	engine, err := NewSyncEngine(st, nil, DefaultSyncConfig(nil, devnetGenesisChainID, ""))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	mempool, err := NewMempool(st, nil, devnetGenesisChainID)
+	if err != nil {
+		t.Fatalf("NewMempool: %v", err)
+	}
+	engine.SetMempool(mempool)
+	relay := engine.DARelayState()
+	if got, err := engine.EffectiveDAMempoolSize(); err != nil || got != 536870912 {
+		t.Fatalf("production binding observation=%d err=%v, want 536870912", got, err)
+	}
+	if claimed, err := engine.ClaimDARelayState(relay, func([]byte) (func(bool), error) { return func(bool) {}, nil }); err != nil || claimed != relay {
+		t.Fatalf("observation consumed the lifetime Service claim: claimed=%p err=%v", claimed, err)
+	}
+	// The configured 536870912 stays while the bound relay moves: the relay is the only source.
+	engine.daRelay = boundTo(1073741824, 0).daRelay
+	if got, err := engine.EffectiveDAMempoolSize(); err != nil || got != 1073741824 {
+		t.Fatalf("observation diverged from bound relay cap: got=%d err=%v, want 1073741824", got, err)
+	}
+}
+
 func TestNewSyncEngine_ParallelValidationModeParse(t *testing.T) {
 	st := NewChainState()
 	cfg := DefaultSyncConfig(nil, [32]byte{}, "")
