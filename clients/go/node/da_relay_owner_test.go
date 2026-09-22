@@ -6200,7 +6200,7 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				f.admit(commit, reorg)
 				candidate, charge = inside, charge+insideCharge
 			case "orphan":
-				candidate, charge = inside, insideCharge
+				candidate, charge = inside, 0
 			}
 			c1Record := daRelayStateSnapshot(f.relay).sets[c1]
 			cBytes := uint64(len(c1Record.commit.txBytes) + len(c1Record.chunks[0].txBytes))
