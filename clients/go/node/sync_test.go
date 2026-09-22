@@ -135,12 +135,6 @@ func TestSyncDAMempoolSize(t *testing.T) {
 // TestSyncEffectiveDAMempoolSize: the advertisement observation reads only the bound relay's
 // staged cap, accepts exactly 536870912..4294967295 and otherwise fails closed (RUB-1415 A2/R1).
 func TestSyncEffectiveDAMempoolSize(t *testing.T) {
-	if got, err := (*SyncEngine)(nil).EffectiveDAMempoolSize(); err == nil {
-		t.Errorf("nil engine returned success: %d", got)
-	}
-	if got, err := new(SyncEngine).EffectiveDAMempoolSize(); err == nil {
-		t.Errorf("nil relay returned success: %d", got)
-	}
 	// Relay construction never validates the staged cap: every u64 class is reachable directly.
 	// Each configuration copy lies across a range edge from its relay cap: reading the copy flips the verdict.
 	boundTo := func(stagedBytes, configured uint64) *SyncEngine {
@@ -152,14 +146,21 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 		}
 		return &SyncEngine{cfg: SyncConfig{DAMempoolSize: configured}, daRelay: relay}
 	}
-	for _, size := range []uint64{0, 536870911} {
-		if got, err := boundTo(size, 536870912).EffectiveDAMempoolSize(); err == nil {
-			t.Errorf("below-minimum relay cap returned success: cap=%d got=%d", size, got)
-		}
-	}
-	for _, size := range []uint64{4294967296, 18446744073709551615} {
-		if got, err := boundTo(size, 4294967295).EffectiveDAMempoolSize(); err == nil {
-			t.Errorf("out-of-u32 relay cap returned success: cap=%d got=%d", size, got)
+	for _, tc := range []struct {
+		label  string
+		engine *SyncEngine
+	}{
+		{"nil engine", nil},
+		{"nil relay", new(SyncEngine)},
+		{"below-minimum relay cap", boundTo(0, 536870912)},
+		{"below-minimum relay cap", boundTo(536870911, 536870912)},
+		{"out-of-u32 relay cap", boundTo(4294967296, 4294967295)},
+		{"out-of-u32 relay cap", boundTo(18446744073709551615, 4294967295)},
+	} {
+		if got, err := tc.engine.EffectiveDAMempoolSize(); err == nil {
+			t.Errorf("%s returned success: %d", tc.label, got)
+		} else if got != 0 {
+			t.Errorf("%s returned value %d with its error", tc.label, got)
 		}
 	}
 	for _, tc := range []struct{ relay, configured uint64 }{{536870912, 536870911}, {4294967295, 4294967296}} {
@@ -177,8 +178,12 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 		t.Fatalf("NewMempool: %v", err)
 	}
 	engine.SetMempool(mempool)
+	relay := engine.DARelayState()
 	if got, err := engine.EffectiveDAMempoolSize(); err != nil || got != 536870912 {
 		t.Fatalf("production binding observation=%d err=%v, want 536870912", got, err)
+	}
+	if claimed, err := engine.ClaimDARelayState(relay, func([]byte) (func(bool), error) { return func(bool) {}, nil }); err != nil || claimed != relay {
+		t.Fatalf("observation consumed the lifetime Service claim: claimed=%p err=%v", claimed, err)
 	}
 	// The configured 536870912 stays while the bound relay moves: the relay is the only source.
 	engine.daRelay = boundTo(1073741824, 0).daRelay

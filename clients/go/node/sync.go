@@ -632,12 +632,12 @@ func (s *SyncEngine) DARelayState() *DARelayState {
 // EffectiveDAMempoolSize observes the DA capacity the bound relay enforces so
 // Version.da_mempool_size can advertise it (RUBIN_COMPACT_BLOCKS.md Section
 // 18.3, RUBIN_L1_P2P_AUX.md Section 3.1). Postconditions: the bound relay's
-// staged cap is the only source, SyncConfig.DAMempoolSize is never read and no
-// copy is cached, so the advertisement cannot mask a relay/configuration
-// divergence; the value is accepted only inside 536870912..4294967295 before the
-// u32 narrowing; a nil engine, an engine with no bound relay, and a bound cap
-// outside that range (zero, below the minimum, above u32) return an error and
-// no value; nothing is mutated and the lifetime Service claim is not consumed.
+// staged cap, read on every call, is the only source, so a successful result
+// equals the cap that relay enforces whatever any configuration copy holds;
+// the cap is accepted only inside 536870912..4294967295 before the u32
+// narrowing; a nil engine, an engine with no bound relay, and a bound cap
+// outside that range (zero, below the minimum, above u32) return 0 and an
+// error; nothing is mutated and the lifetime Service claim is not consumed.
 func (s *SyncEngine) EffectiveDAMempoolSize() (uint32, error) {
 	relay := s.DARelayState()
 	if relay == nil {
