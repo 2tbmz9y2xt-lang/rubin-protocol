@@ -591,7 +591,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.completeBytes":                                                                                 1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|completeBytes":                                                                                    1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement":                                                                                        1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|err":                                                                                              2,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|err":                                                                                              3,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|checkedAddUint64":                                                                                 1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection":                                                                                       1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectedStagedBytes":                                                                             1,
