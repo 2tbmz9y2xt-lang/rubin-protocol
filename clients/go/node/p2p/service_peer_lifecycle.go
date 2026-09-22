@@ -233,11 +233,15 @@ func (s *Service) localVersion() (node.VersionPayloadV1, error) {
 	if !ok {
 		bestHeight = 0
 	}
+	daMempoolSize, err := s.cfg.SyncEngine.EffectiveDAMempoolSize()
+	if err != nil {
+		return node.VersionPayloadV1{}, err
+	}
 	return node.VersionPayloadV1{
 		ProtocolVersion:   ProtocolVersion,
 		TxRelay:           true,
 		PrunedBelowHeight: 0,
-		DaMempoolSize:     0,
+		DaMempoolSize:     daMempoolSize,
 		ChainID:           s.cfg.SyncConfig.ChainID,
 		GenesisHash:       s.cfg.GenesisHash,
 		BestHeight:        bestHeight,

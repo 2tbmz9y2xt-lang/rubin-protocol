@@ -634,6 +634,129 @@ func TestHandleConnInitializesPeerQualityPerSession(t *testing.T) {
 	require(t, second != first && score == 50 && anchor == 1, "reconnect peer same=%v score=%d anchor=%d, want a fresh session at 50", second == first, score, anchor)
 }
 
+// serviceWithBoundDACapacity binds an engine enforcing relayCap (zero selects the CAP default)
+// into a Service whose own SyncConfig copy carries serviceCopy instead.
+func serviceWithBoundDACapacity(t *testing.T, relayCap, serviceCopy uint64) *Service {
+	t.Helper()
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	syncCfg := h.syncCfg
+	syncCfg.DAMempoolSize = relayCap
+	engine, err := node.NewSyncEngine(h.chainState, h.blockStore, syncCfg)
+	must(t, err, "NewSyncEngine")
+	mempool, err := node.NewMempool(h.chainState, h.blockStore, node.DevnetGenesisChainID())
+	must(t, err, "NewMempool")
+	engine.SetMempool(mempool)
+	cfg := h.service.cfg
+	cfg.SyncEngine, cfg.SyncConfig.DAMempoolSize = engine, serviceCopy
+	service, err := NewService(cfg)
+	must(t, err, "NewService")
+	t.Cleanup(func() { _ = service.Close() })
+	return service
+}
+
+// TestLocalVersionAdvertisesEffectiveDAMempoolSize: localVersion and the real handshake advertise
+// the bound relay's capacity, never the Service-side SyncConfig copy, and an unavailable observation
+// stops handleConn before any Version frame or peer registration (RUB-1415 A1-A3, A5, R1).
+func TestLocalVersionAdvertisesEffectiveDAMempoolSize(t *testing.T) {
+	unconfigured := serviceWithBoundDACapacity(t, 0, 0)
+	t.Run("unconfigured", func(t *testing.T) {
+		version, err := unconfigured.localVersion()
+		must(t, err, "localVersion")
+		require(t, version.DaMempoolSize == 536870912, "da_mempool_size=%d want bound relay capacity", version.DaMempoolSize)
+	})
+	for _, tc := range []struct {
+		name                  string
+		relayCap, serviceCopy uint64
+	}{{"interior", 1073741824, 4294967295}, {"maximum", 4294967295, 1073741824}} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := serviceWithBoundDACapacity(t, tc.relayCap, tc.serviceCopy)
+			local, remote := net.Pipe()
+			done := make(chan error, 1)
+			go func() { done <- service.handleConn(local, "") }()
+			frame, err := readFrame(remote, networkMagic(service.cfg.PeerRuntimeConfig.Network), service.cfg.PeerRuntimeConfig.MaxMessageSize)
+			must(t, err, "readFrame(version)")
+			_ = remote.Close()
+			<-done
+			require(t, frame.Command == messageVersion && len(frame.Payload) == 89, "first frame=%q len=%d, want version of 89 bytes", frame.Command, len(frame.Payload))
+			sent, err := decodeVersionPayload(frame.Payload)
+			must(t, err, "decodeVersionPayload")
+			require(t, uint64(sent.DaMempoolSize) != tc.serviceCopy, "Service configuration copy advertised instead of bound relay cap")
+			require(t, uint64(sent.DaMempoolSize) == tc.relayCap, "da_mempool_size=%d want configured non-default capacity", sent.DaMempoolSize)
+			want := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "", 0)
+			want.DaMempoolSize = sent.DaMempoolSize
+			require(t, sent == want, "version=%+v, want every other field unchanged: %+v", sent, want)
+		})
+	}
+	t.Run("unbound relay", func(t *testing.T) {
+		unbound, err := node.NewSyncEngine(node.NewChainState(), nil, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), ""))
+		must(t, err, "NewSyncEngine(unbound)")
+		unconfigured.cfg.SyncEngine = unbound
+		version, err := unconfigured.localVersion()
+		require(t, err != nil && version == (node.VersionPayloadV1{}), "localVersion swallowed observation error: %+v", version)
+		local, remote := net.Pipe()
+		written := make(chan int64, 1)
+		go func() { n, _ := io.Copy(io.Discard, remote); written <- n }()
+		require(t, unconfigured.handleConn(local, "") != nil, "handleConn returned success after observation error")
+		require(t, <-written == 0, "Version frame sent after observation error")
+		unconfigured.peersMu.RLock()
+		registered := len(unconfigured.peers)
+		unconfigured.peersMu.RUnlock()
+		require(t, registered == 0 && unconfigured.cfg.PeerManager.Count() == 0, "peer registered after observation error")
+	})
+}
+
+// TestRemoteVersionDAMempoolSizeIsAdvisory: a remote da_mempool_size from every u32 class is kept
+// only as RemoteVersion metadata; the peer stays registered, answering and unpenalized, and neither
+// the local Version nor the bound relay capacity changes (RUB-1415 A4/R2).
+func TestRemoteVersionDAMempoolSizeIsAdvisory(t *testing.T) {
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	h.service.ctx = context.Background()
+	h.service.cfg.PeerRuntimeConfig.ReadDeadline, h.service.cfg.PeerRuntimeConfig.WriteDeadline = 0, 0
+	magic, maxMessage := networkMagic(h.service.cfg.PeerRuntimeConfig.Network), h.service.cfg.PeerRuntimeConfig.MaxMessageSize
+	const addr = "127.0.0.1:19115"
+	for _, remoteSize := range []uint32{0, 1, 536870911, 1073741824, 4294967295} {
+		local, remote := net.Pipe()
+		done := make(chan struct{})
+		go func() { defer close(done); _ = h.service.handleConn(local, addr) }()
+		advertised := testVersionPayload(node.DevnetGenesisChainID(), node.DevnetGenesisBlockHash(), "remote", 0)
+		advertised.DaMempoolSize = remoteSize
+		err := completeRemoteHandshake(remote, h.service.cfg.PeerRuntimeConfig, advertised)
+		require(t, err == nil, "remote %d: remote advertisement changed peer handling: handshake failed: %v", remoteSize, err)
+		frames := make(chan message, 16)
+		go func() {
+			defer close(frames)
+			for {
+				frame, err := readFrame(remote, magic, maxMessage)
+				if err != nil {
+					return
+				}
+				frames <- frame
+			}
+		}()
+		// Only a registered peer with a running session answers getaddr; a closed one ends the stream.
+		_ = writeFrame(remote, magic, message{Command: messageGetAddr}, maxMessage)
+		answered := false
+		for frame := range frames {
+			if answered = frame.Command == messageAddr; answered {
+				break
+			}
+		}
+		h.service.peersMu.RLock()
+		current := h.service.peers[addr]
+		h.service.peersMu.RUnlock()
+		require(t, answered && current != nil, "remote %d: remote advertisement changed peer handling: answered=%v registered=%v", remoteSize, answered, current != nil)
+		state := current.snapshotState()
+		score, _ := peerQuality(current)
+		require(t, state.HandshakeComplete && state.RemoteVersion.DaMempoolSize == remoteSize && state.BanScore == 0 && state.LastError == "" && score == 50, "remote %d: remote advertisement changed peer handling: state=%+v score=%d", remoteSize, state, score)
+		version, err := h.service.localVersion()
+		require(t, err == nil && version.DaMempoolSize == 536870912, "remote %d: remote advertisement changed local Version: %d %v", remoteSize, version.DaMempoolSize, err)
+		bound, err := h.syncEngine.EffectiveDAMempoolSize()
+		require(t, err == nil && bound == 536870912, "remote %d: remote advertisement changed bound relay cap: %d %v", remoteSize, bound, err)
+		_ = remote.Close()
+		<-done
+	}
+}
+
 func blockAtHeight(t *testing.T, h *testHarness, height uint64) []byte {
 	_, block := testHarnessBlockAtHeight(t, h, height)
 	return block
