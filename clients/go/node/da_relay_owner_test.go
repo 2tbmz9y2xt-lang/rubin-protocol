@@ -556,6 +556,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			}
 			updated := strings.ReplaceAll(row, "projectedOrphanBytes", "projectedStagedBytes")
 			updated = strings.ReplaceAll(updated, "orphanCap, commitCap                       uint64", "stagedCap, commitCap                       uint64")
+			updated = strings.ReplaceAll(updated, "projectedStagedBytes, projectedCommitBytes uint64\n", "projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes\n")
 			updated = strings.ReplaceAll(updated, "orphanCap: orphanCap", "stagedCap: s.caps.stagedBytes")
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes: placement.orphanBytes", "projectedStagedBytes: placement.stagedBytes")
 			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tprojection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)\n\t\treturn projection, err\n")
@@ -6209,6 +6210,9 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 			})
 			if r.mode == "stateA" && insideCharge <= commitCharge {
 				t.Fatal("fixture chunk charge does not exceed the State A caps")
+			}
+			if cBytes == 0 {
+				t.Fatal("fixture State C occupancy is zero")
 			}
 			cImage := func(v daRelayStateView) [5]any {
 				return [5]any{v.sets[c1], v.sets[c2], v.completeBytes, v.completeCount, v.pinnedPayloadBytes}

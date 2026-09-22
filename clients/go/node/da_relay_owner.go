@@ -137,7 +137,7 @@ type daNonReplayApplyProjection struct {
 	member                                     *daRelayMemberIdentity
 	receivedTime, sequence                     uint64
 	stagedCap, commitCap                       uint64
-	projectedStagedBytes, projectedCommitBytes uint64
+	projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes
 	stateB                                     bool
 }
 
