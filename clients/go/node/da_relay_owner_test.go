@@ -559,7 +559,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes, projectedCommitBytes uint64\n", "projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes\n")
 			updated = strings.ReplaceAll(updated, "orphanCap: orphanCap", "stagedCap: s.caps.stagedBytes")
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes: placement.orphanBytes", "projectedStagedBytes: placement.stagedBytes")
-			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tprojection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)\n\t\treturn projection, err\n")
+			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tif projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes); err != nil {\n\t\t\treturn daNonReplayApplyProjection{}, err\n\t\t}\n\t\treturn projection, nil\n")
 			updated = strings.ReplaceAll(updated, "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n", "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n\tprojectionCaps.stagedBytes = ^uint64(0)\n")
 			if row == "read|node/da_relay_owner.go:file|orphanCap" {
 				updated = "read|node/da_relay_owner.go:file|stagedCap"
@@ -596,7 +596,8 @@ func requireDAAdmissionStructure(t *testing.T) {
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection":                                                                                       1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectedStagedBytes":                                                                             1,
 			"write|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)": 1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|nil":                                                                                              -1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|nil":                                                                                              1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|daNonReplayApplyProjection":                                                                       1,
 		} {
 			want[row] += count
 			if want[row] == 0 {
@@ -6180,6 +6181,7 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 		{"owner conflict", "absent", "conflict", local, 1, ""},
 		{"planning growth", "absent", "growth", peer, 0, "State C growth after planning was not compared"},
 		{"overflow", "absent", "overflow", peer, 0, ""},
+		{"State A over shared", "orphan", "", peer, 1, ""},
 	} {
 		t.Run(r.name, func(t *testing.T) {
 			f, id, c1, c2 := newDANonReplayFixture(t, 8), [32]byte{0xb1}, [32]byte{0xc1}, [32]byte{0xc2}
@@ -6197,6 +6199,8 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 			case "later":
 				f.admit(commit, reorg)
 				candidate, charge = inside, charge+insideCharge
+			case "orphan":
+				candidate, charge = inside, insideCharge
 			}
 			c1Record := daRelayStateSnapshot(f.relay).sets[c1]
 			cBytes := uint64(len(c1Record.commit.txBytes) + len(c1Record.chunks[0].txBytes))
@@ -6209,14 +6213,11 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 					s.caps.orphanCommitOverheadBytes = commitCharge - 1
 				}
 			})
-			if r.mode == "stateA" && insideCharge <= commitCharge {
-				t.Fatal("fixture chunk charge does not exceed the State A caps")
-			}
-			if cBytes == 0 {
-				t.Fatal("fixture State C occupancy is zero")
-			}
-			cImage := func(v daRelayStateView) [5]any {
-				return [5]any{v.sets[c1], v.sets[c2], v.completeBytes, v.completeCount, v.pinnedPayloadBytes}
+			require(t, r.mode != "stateA" || insideCharge > commitCharge, "fixture chunk charge does not exceed the State A caps")
+			require(t, r.mode != "dual" || uint64(len(commit.raw)) > f.relay.caps.orphanCommitOverheadBytes, "fixture commit-overhead cap is not exceeded")
+			require(t, cBytes != 0, "fixture State C occupancy is zero")
+			cImage := func(v daRelayStateView) [7]any {
+				return [7]any{v.sets[c1], v.sets[c2], v.completeBytes, v.completeCount, v.pinnedPayloadBytes, v.locators[c1Record.commit.member.txid], v.locators[c1Record.chunks[0].member.txid]}
 			}
 			var before daRelayStateView
 			var owner *PendingOutpointOwner
@@ -6278,16 +6279,13 @@ func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
 				}
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
 				return
+			case r.shape == "orphan":
+				require(t, err == nil && !cChanged && view.sets[id].state == daRelayStateOrphanChunks, "State A admission gated by the shared B+C bound: %v", err)
+				return
 			case r.over == 0 && r.mode != "growth":
-				if cChanged {
-					t.Fatal("B-only admission evicted State C")
-				}
-				if err != nil && r.mode == "stateA" {
-					t.Fatalf("State B refused by State-A cap: %v", err)
-				}
-				if err != nil {
-					t.Fatalf("exact-fit B+C rejected: %v", err)
-				}
+				require(t, !cChanged, "B-only admission evicted State C")
+				require(t, err == nil || r.mode != "stateA", "State B refused by State-A cap: %v", err)
+				require(t, err == nil, "exact-fit B+C rejected: %v", err)
 				if result != (DAAdmissionResult{DAID: id, Disposition: DAAdmissionDisposition(1)}) || view.stagedBytes != charge || view.sets[id].state != daRelayStateStagedCommit {
 					t.Fatalf("exact-fit result=%+v view=%+v", result, view)
 				}
