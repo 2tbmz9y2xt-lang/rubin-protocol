@@ -477,7 +477,7 @@ func (o daAdmissionObservation) validateHeader() error {
 	case daRelayStateOrphanChunks, daRelayStateStagedCommit:
 		invalid = slices.Contains([]bool{o.recordTTLBlocksLeft == 0, o.recordPayloadBytes != 0, o.recordWireBytes != 0, o.recordHasReplaceableChunks}, true)
 	case daRelayStateCompleteSet:
-		invalid = slices.Contains([]bool{o.recordTTLBlocksLeft != 0, o.recordPayloadBytes == 0, o.recordWireBytes <= uint64(len(o.candidate.member.txBytes)), o.recordHasReplaceableChunks}, true)
+		invalid = slices.Contains([]bool{o.recordTTLBlocksLeft != 0, o.recordPayloadBytes == 0, o.recordWireBytes != 0, o.recordHasReplaceableChunks}, true)
 	default:
 		invalid = true
 	}
