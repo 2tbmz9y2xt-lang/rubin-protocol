@@ -1328,8 +1328,6 @@ func (f *daNonReplayFixture) completeReplayPinned(daID [32]byte) {
 		if s.orphanBytesByPeerQuotaKey["chunk"] -= charge; s.orphanBytesByPeerQuotaKey["chunk"] == 0 {
 			delete(s.orphanBytesByPeerQuotaKey, "chunk")
 		}
-		record.wireBytes = 0
-		s.sets[daID] = record
 		s.completeBytes, s.completeCount = s.completeBytes+uint64(len(record.commit.txBytes)+len(record.chunks[0].txBytes)), s.completeCount+1
 		s.pinnedPayloadBytes += record.payloadBytes
 	})
@@ -3236,7 +3234,7 @@ func TestReplayClassificationValidatesTheObservationBeforeTheExactVerdict(t *tes
 			return f, tx
 		}
 	}
-	// cCommit/cChunk replay the merged State-C record wire 0, the flipped "C zero retained bytes" row.
+	// bChunk, cCommit and cChunk (merged State-C, record wire 0) replay byte-exactly to DUPLICATE, relay and owner unchanged.
 	for _, role := range []int{bChunk, cCommit, cChunk} {
 		f, tx := setup(role)
 		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -3549,35 +3547,36 @@ func TestAdmitDAChunkReplayValidatesBoundedCompanionCommit(t *testing.T) {
 // owner, guard or reject-cache effect.
 func TestAdmitDAExactReplayStateC(t *testing.T) {
 	for _, kind := range []uint8{0x01, 0x02} {
-		f := newDANonReplayFixture(t, 2)
-		tx := f.completeReplay([32]byte{0xe1, kind}, kind)
-		if err := checkOwnerReadyRetainedRecordLocked(daRelayStateSnapshot(f.relay).sets[tx.spec.daID]); err != nil {
-			t.Fatalf("kind %d fixture is not the merged State-C representation: %v", kind, err)
-		}
-		relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
-		got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-exact"))
-		if err != nil && relayDispositionOf(err) == RelayAdmissionInternal {
-			t.Fatalf("State-C exact replay returned INTERNAL: kind=%d err=%v", kind, err)
-		}
-		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
-		if after := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(after, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
-			t.Fatalf("exact replay mutated retained/sequence snapshot: got=%+v want=%+v", after, relayBefore)
-		}
-		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
-		if !f.state.admissionMu.TryLock() {
-			t.Fatalf("kind %d exact State-C replay leaked the admission guard", kind)
-		}
-		f.state.admissionMu.Unlock()
-		if !reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore) {
-			t.Fatalf("kind %d exact State-C replay touched rejectCache", kind)
-		}
+		t.Run(fmt.Sprintf("kind=%d", kind), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			tx := f.completeReplay([32]byte{0xe1, kind}, kind)
+			if err := checkOwnerReadyRetainedRecordLocked(daRelayStateSnapshot(f.relay).sets[tx.spec.daID]); err != nil {
+				t.Fatalf("kind %d fixture is not the merged State-C representation: %v", kind, err)
+			}
+			relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-exact"))
+			if err != nil && relayDispositionOf(err) == RelayAdmissionInternal {
+				t.Fatalf("State-C exact replay returned INTERNAL: kind=%d err=%v", kind, err)
+			}
+			requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: tx.spec.daID, Disposition: DAAdmissionDuplicate})
+			if after := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(after, relayBefore) { //nolint:govet // Complete private state-image equality requires structural comparison, error identities included.
+				t.Fatalf("exact replay mutated retained/sequence snapshot: got=%+v want=%+v", after, relayBefore)
+			}
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			if !f.state.admissionMu.TryLock() {
+				t.Fatalf("kind %d exact State-C replay leaked the admission guard", kind)
+			}
+			f.state.admissionMu.Unlock()
+			if !reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore) {
+				t.Fatalf("kind %d exact State-C replay touched rejectCache", kind)
+			}
+		})
 	}
 }
 
-// TestAdmitDAStateCReplayCapturedCorruption replays the BYTE-EXACT target of a
-// merged State-C record whose captured header, target or companion is corrupt:
-// exact equality never substitutes for those checks, so each row is INTERNAL
-// with no retained or owner effect.
+// TestAdmitDAStateCReplayCapturedCorruption corrupts, per row, the captured
+// evidence of a merged State-C record, sends the target's original bytes and
+// expects INTERNAL with no retained or owner effect.
 func TestAdmitDAStateCReplayCapturedCorruption(t *testing.T) {
 	for i, row := range []struct {
 		label  string
@@ -3617,26 +3616,28 @@ func TestAdmitDAStateCReplayCapturedCorruption(t *testing.T) {
 			r.commit.txBytes = r.commit.txBytes[:len(r.commit.txBytes)-1]
 		}},
 	} {
-		f := newDANonReplayFixture(t, 2)
-		tx := f.completeReplay([32]byte{0xe2, byte(i)}, row.kind)
-		f.mutateRelay(func(s *DARelayState) {
-			record := s.sets[tx.spec.daID]
-			if row.mutate == nil {
-				delete(s.sets, tx.spec.daID)
-				return
+		t.Run(fmt.Sprintf("%d %s kind=%d", i, row.label, row.kind), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
+			tx := f.completeReplay([32]byte{0xe2, byte(i)}, row.kind)
+			f.mutateRelay(func(s *DARelayState) {
+				record := s.sets[tx.spec.daID]
+				if row.mutate == nil {
+					delete(s.sets, tx.spec.daID)
+					return
+				}
+				chunk := record.chunks[0]
+				row.mutate(&record, &chunk)
+				record.chunks[0] = chunk
+				s.sets[tx.spec.daID] = record
+			})
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-corrupt"))
+			if err == nil {
+				t.Fatalf("%s: AdmitDA=(%+v,nil)", row.label, got)
 			}
-			chunk := record.chunks[0]
-			row.mutate(&record, &chunk)
-			record.chunks[0] = chunk
-			s.sets[tx.spec.daID] = record
+			requirePublicDAInternal(t, f, got, err)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 		})
-		relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "state-c-corrupt"))
-		if err == nil {
-			t.Fatalf("%s: AdmitDA=(%+v,nil)", row.label, got)
-		}
-		requirePublicDAInternal(t, f, got, err)
-		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 	}
 }
 
@@ -3647,28 +3648,30 @@ func TestAdmitDAStateCReplayCapturedCorruption(t *testing.T) {
 func TestAdmitDASameTxIDNonexactStateC(t *testing.T) {
 	for _, corrupt := range []bool{false, true} {
 		for _, kind := range []uint8{0x01, 0x02} {
-			f := newDANonReplayFixture(t, 2)
-			nonexact := invalidDAWitness(t, f.completeReplay([32]byte{0xe3, kind}, kind))
-			if corrupt {
-				f.mutateRelay(func(s *DARelayState) {
-					record := s.sets[nonexact.spec.daID]
-					record.wireBytes = 1
-					s.sets[nonexact.spec.daID] = record
-				})
-			}
-			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-			got, err := f.relay.AdmitDA(nonexact.raw, publicPeer(t, "state-c-nonexact"))
-			switch {
-			case err == nil:
-				t.Fatalf("same-txid nonexact took DUPLICATE shortcut: kind=%d corrupt=%v result=%+v", kind, corrupt, got)
-			case corrupt && relayDispositionOf(err) != RelayAdmissionInternal:
-				t.Fatalf("corrupt State-C header let nonexact bypass INTERNAL: kind=%d err=%v", kind, err)
-			case corrupt:
-				requirePublicDAInternal(t, f, got, err)
-			default:
-				requireDARejectSignature(t, got, err)
-			}
-			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			t.Run(fmt.Sprintf("kind=%d corrupt=%v", kind, corrupt), func(t *testing.T) {
+				f := newDANonReplayFixture(t, 2)
+				nonexact := invalidDAWitness(t, f.completeReplay([32]byte{0xe3, kind}, kind))
+				if corrupt {
+					f.mutateRelay(func(s *DARelayState) {
+						record := s.sets[nonexact.spec.daID]
+						record.wireBytes = 1
+						s.sets[nonexact.spec.daID] = record
+					})
+				}
+				relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				got, err := f.relay.AdmitDA(nonexact.raw, publicPeer(t, "state-c-nonexact"))
+				switch {
+				case err == nil:
+					t.Fatalf("same-txid nonexact took DUPLICATE shortcut: kind=%d corrupt=%v result=%+v", kind, corrupt, got)
+				case corrupt && relayDispositionOf(err) != RelayAdmissionInternal:
+					t.Fatalf("corrupt State-C header let nonexact bypass INTERNAL: kind=%d err=%v", kind, err)
+				case corrupt:
+					requirePublicDAInternal(t, f, got, err)
+				default:
+					requireDARejectSignature(t, got, err)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			})
 		}
 	}
 }
