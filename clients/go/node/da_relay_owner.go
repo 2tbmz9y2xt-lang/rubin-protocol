@@ -671,6 +671,8 @@ func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRe
 	return plan
 }
 
+// applyDANonReplayPlan bounds State B by staged plus live completeBytes <= caps.stagedBytes:
+// the checked sum refuses on overflow before owner reserve, the cap after it; State C is never touched.
 func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate daRelayAdmissionCandidate, plan daRelayAdmissionPlan) (daRelayAdmissionOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -747,7 +749,8 @@ func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImag
 		stagedCap: s.caps.stagedBytes, commitCap: commitCap, projectedStagedBytes: placement.stagedBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
 	}
 	if stateB {
-		return projection, nil
+		projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)
+		return projection, err
 	}
 	if placement.orphanBytes > orphanCap {
 		return daNonReplayApplyProjection{}, errDARelayOrphanPoolCapExceeded
