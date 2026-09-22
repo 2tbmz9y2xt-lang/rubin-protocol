@@ -137,7 +137,7 @@ type daNonReplayApplyProjection struct {
 	member                                     *daRelayMemberIdentity
 	receivedTime, sequence                     uint64
 	stagedCap, commitCap                       uint64
-	projectedStagedBytes, projectedCommitBytes uint64
+	projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes
 	stateB                                     bool
 }
 
@@ -671,6 +671,8 @@ func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRe
 	return plan
 }
 
+// applyDANonReplayPlan implements RUBIN_COMPACT_BLOCKS.md section 18.3 and section 5.2. Postcondition: State B keeps
+// staged plus live completeBytes <= caps.stagedBytes (overflow refused before owner reserve, cap after it); State C is untouched.
 func (s *DARelayState) applyDANonReplayPlan(admission *DAAdmission, candidate daRelayAdmissionCandidate, plan daRelayAdmissionPlan) (daRelayAdmissionOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -747,7 +749,8 @@ func (s *DARelayState) projectDANonReplayAdmissionLocked(image daRelayRecordImag
 		stagedCap: s.caps.stagedBytes, commitCap: commitCap, projectedStagedBytes: placement.stagedBytes, projectedCommitBytes: placement.commitBytes, stateB: stateB,
 	}
 	if stateB {
-		return projection, nil
+		projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)
+		return projection, err
 	}
 	if placement.orphanBytes > orphanCap {
 		return daNonReplayApplyProjection{}, errDARelayOrphanPoolCapExceeded

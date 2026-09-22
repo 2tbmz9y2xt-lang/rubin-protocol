@@ -556,8 +556,10 @@ func requireDAAdmissionStructure(t *testing.T) {
 			}
 			updated := strings.ReplaceAll(row, "projectedOrphanBytes", "projectedStagedBytes")
 			updated = strings.ReplaceAll(updated, "orphanCap, commitCap                       uint64", "stagedCap, commitCap                       uint64")
+			updated = strings.ReplaceAll(updated, "projectedStagedBytes, projectedCommitBytes uint64\n", "projectedStagedBytes, projectedCommitBytes uint64 // staged: State B = staged + live completeBytes (shared B+C), State A = staged bytes\n")
 			updated = strings.ReplaceAll(updated, "orphanCap: orphanCap", "stagedCap: s.caps.stagedBytes")
 			updated = strings.ReplaceAll(updated, "projectedStagedBytes: placement.orphanBytes", "projectedStagedBytes: placement.stagedBytes")
+			updated = strings.ReplaceAll(updated, "\tif stateB {\n\t\treturn projection, nil\n", "\tif stateB {\n\t\tprojection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)\n\t\treturn projection, err\n")
 			updated = strings.ReplaceAll(updated, "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n", "\tstateB, projectionCaps := image.next.state == daRelayStateStagedCommit, s.caps\n\tprojectionCaps.stagedBytes = ^uint64(0)\n")
 			if row == "read|node/da_relay_owner.go:file|orphanCap" {
 				updated = "read|node/da_relay_owner.go:file|stagedCap"
@@ -570,19 +572,31 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for row, count := range map[string]int{
 			"write|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps.stagedBytes = ^uint64(0)": 1,
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps.stagedBytes":              1,
-			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement.stagedBytes":                   1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement.stagedBytes":                   2,
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.caps.stagedBytes":                      1,
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.caps":                                  1,
 			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement.orphanBytes":                   -1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectionCaps":                           1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|stagedBytes":                              3,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|stagedBytes":                              4,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|uint64":                                   1,
 			"call|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|uint64(0)":                                1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|stagedCap":                                1,
-			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s":                                        1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s":                                        2,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|caps":                                     1,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|orphanCap":                                -2,
 			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|orphanBytes":                              -1,
+			// RUB-1417: the State B projection adds live completeBytes by checked sum.
+			"call|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|checkedAddUint64(placement.stagedBytes, s.completeBytes)":                                         1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection.projectedStagedBytes":                                                                 1,
+			"field|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|s.completeBytes":                                                                                 1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|completeBytes":                                                                                    1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|placement":                                                                                        1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|err":                                                                                              2,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|checkedAddUint64":                                                                                 1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection":                                                                                       1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projectedStagedBytes":                                                                             1,
+			"write|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|projection.projectedStagedBytes, err = checkedAddUint64(placement.stagedBytes, s.completeBytes)": 1,
+			"read|node/da_relay_owner.go:projectDANonReplayAdmissionLocked|nil":                                                                                              -1,
 		} {
 			want[row] += count
 			if want[row] == 0 {
@@ -6143,4 +6157,181 @@ func TestOwnerReadyRemovalRemainsDormant(t *testing.T) {
 	f.mutateRelay(func(s *DARelayState) { liveAfter = s.sets[daID] })
 	require(t, err == nil && liveAfter.ttlBlocksRemaining == 2 && liveAfter.revision == liveBefore.revision+1 && daRelayStateSnapshot(f.relay).records == liveAfter.revision, "owner-ready AdvanceOrphanTTL err=%v ttl=%d revision=%d (before %d)", err, liveAfter.ttlBlocksRemaining, liveAfter.revision, liveBefore.revision)
 	require(t, reflect.ValueOf(liveAfter.chunks).Pointer() == reflect.ValueOf(liveBefore.chunks).Pointer() && liveAfter.chunks[0].member == chunkBefore.member && &liveAfter.chunks[0].txBytes[0] == &chunkBefore.txBytes[0] && &liveAfter.chunks[0].payload[0] == &chunkBefore.payload[0], "owner-ready tick copied the chunks container or a member's backing")
+}
+
+// TestAdmitDANonReplaySharedCapacity pins the RUB-1417 shared B+C bound for
+// every non-completing State B entry kind over valid fixture-built State C.
+func TestAdmitDANonReplaySharedCapacity(t *testing.T) {
+	peer, local, reorg := daNonReplayPeer("incoming"), LocalDAProvenance(), DetachedReorgDAProvenance()
+	for _, r := range []struct {
+		name, shape, mode string
+		prov              daProvenance
+		over              uint64
+		label             string
+	}{
+		{"E1 fit", "absent", "", peer, 0, ""},
+		{"E1 over", "absent", "", peer, 1, "absent-record commit one-over published State B; PEER one-over published State B"},
+		{"E2 fit", "a-to-b", "", local, 0, ""},
+		{"E2 over", "a-to-b", "", local, 1, "A-to-B one-over published State B; LOCAL one-over published State B"},
+		{"E3 fit", "later", "", reorg, 0, ""},
+		{"E3 over", "later", "", reorg, 1, "DETACHED_REORG one-over published State B"},
+		{"E3 above State-A caps", "later", "stateA", peer, 0, ""},
+		{"dual violation", "absent", "dual", local, 1, "dual violation admitted"},
+		{"owner conflict", "absent", "conflict", local, 1, ""},
+		{"planning growth", "absent", "growth", peer, 0, "State C growth after planning was not compared"},
+		{"overflow", "absent", "overflow", peer, 0, ""},
+		{"State A over shared", "orphan", "", peer, 1, ""},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			f, id, c1, c2 := newDANonReplayFixture(t, 8), [32]byte{0xb1}, [32]byte{0xc1}, [32]byte{0xc2}
+			f.completeReplayPinned(c1)
+			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 3, commitment: [32]byte{1}, commitmentOutputs: 1})
+			inside := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 0, payload: bytes.Repeat([]byte("i"), 2048)})
+			outside := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 4, payload: []byte("outside")})
+			candidate, commitCharge, insideCharge := commit, uint64(len(commit.raw)), uint64(len(inside.raw)+len(inside.spec.payload))
+			charge := commitCharge
+			switch r.shape {
+			case "a-to-b":
+				f.admit(inside, local)
+				f.admit(outside, daNonReplayPeer("outside"))
+				charge += insideCharge
+			case "later":
+				f.admit(commit, reorg)
+				candidate, charge = inside, charge+insideCharge
+			case "orphan":
+				candidate, charge = inside, 0
+			}
+			c1Record := daRelayStateSnapshot(f.relay).sets[c1]
+			cBytes := uint64(len(c1Record.commit.txBytes) + len(c1Record.chunks[0].txBytes))
+			f.mutateRelay(func(s *DARelayState) {
+				s.caps.stagedBytes = charge + cBytes - r.over
+				switch r.mode {
+				case "stateA":
+					s.caps.orphanPoolBytes, s.caps.orphanPoolPerPeerBytes, s.caps.orphanPoolPerDAIDBytes, s.caps.orphanCommitOverheadBytes = commitCharge, commitCharge, commitCharge, commitCharge
+				case "dual":
+					s.caps.orphanCommitOverheadBytes = commitCharge - 1
+				}
+			})
+			require(t, r.mode != "stateA" || insideCharge > commitCharge, "fixture chunk charge does not exceed the State A caps")
+			require(t, r.mode != "dual" || uint64(len(commit.raw)) > f.relay.caps.orphanCommitOverheadBytes, "fixture commit-overhead cap is not exceeded")
+			require(t, cBytes != 0, "fixture State C occupancy is zero")
+			cImage := func(v daRelayStateView) [7]any {
+				return [7]any{v.sets[c1], v.sets[c2], v.completeBytes, v.completeCount, v.pinnedPayloadBytes, v.locators[c1Record.commit.member.txid], v.locators[c1Record.chunks[0].member.txid]}
+			}
+			var before daRelayStateView
+			var owner *PendingOutpointOwner
+			var cache daRejectCacheView
+			var result DAAdmissionResult
+			var err error
+			if r.mode == "" || r.mode == "stateA" || r.mode == "dual" {
+				before, owner, cache = daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
+				result, err = f.relay.AdmitDA(candidate.raw, r.prov)
+			} else {
+				p := f.planned(candidate, r.prov)
+				defer p.admission.Close()
+				switch r.mode {
+				case "growth":
+					f.completeReplayPinned(c2)
+					grown := daRelayStateSnapshot(f.relay).sets[c2]
+					f.mutateRelay(func(s *DARelayState) {
+						s.caps.stagedBytes += uint64(len(grown.commit.txBytes)+len(grown.chunks[0].txBytes)) - 1
+					})
+				case "overflow":
+					f.mutateRelay(func(s *DARelayState) { s.completeBytes = ^uint64(0) })
+				case "conflict":
+					ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+						o.byOutpoint[candidate.inputs[0]] = pendingOutpointRow{txid: [32]byte{0x31}}
+					})
+				}
+				before, owner, cache = daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
+				var outcome daRelayAdmissionOutcome
+				outcome, err = f.relay.applyDANonReplayPlan(p.admission, p.candidate, p.plan)
+				if err == nil {
+					result = DAAdmissionResult{DAID: outcome.daID, Disposition: DAAdmissionDisposition(outcome.disposition)}
+				}
+			}
+			view := daRelayStateSnapshot(f.relay)
+			cChanged := !reflect.DeepEqual(cImage(view), cImage(before))
+			cClaims := func(o *PendingOutpointOwner) (out []any) {
+				for _, m := range []*daRelayMemberIdentity{before.sets[c1].commit.member, before.sets[c1].chunks[0].member} {
+					out = append(out, o.byToken[m.token], o.byOutpoint[m.inputs[0]])
+				}
+				return out
+			}
+			var admitErr *TxAdmitError
+			switch {
+			case r.mode == "conflict":
+				if !errors.As(err, &admitErr) || admitErr.Kind != TxAdmitErrorKind("conflict") || admitErr.Message != fmt.Sprintf("mempool double-spend conflict with %x", [32]byte{0x31}) {
+					t.Fatalf("owner conflict did not precede capacity: %v", err)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+				return
+			case r.mode == "overflow":
+				if err == nil {
+					t.Fatal("wrapped shared sum admitted State B")
+				}
+				if got := cloneDAAdmissionOwner(f.mp.pendingOutpoints).tokenHighWater; got != owner.tokenHighWater {
+					t.Fatalf("overflow refusal advanced the owner high-water: %d -> %d", owner.tokenHighWater, got)
+				}
+				if err != errDARelayArithmeticOverflow { //nolint:errorlint // Exact direct sentinel identity.
+					t.Fatalf("overflow error=%v", err)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+				return
+			case r.shape == "orphan":
+				require(t, err == nil && !cChanged && view.sets[id].state == daRelayStateOrphanChunks, "State A admission gated by the shared B+C bound: %v", err)
+				return
+			case r.over == 0 && r.mode != "growth":
+				require(t, !cChanged, "B-only admission evicted State C")
+				require(t, err == nil || r.mode != "stateA", "State B refused by State-A cap: %v", err)
+				require(t, err == nil, "exact-fit B+C rejected: %v", err)
+				if result != (DAAdmissionResult{DAID: id, Disposition: DAAdmissionDisposition(1)}) || view.stagedBytes != charge || view.sets[id].state != daRelayStateStagedCommit {
+					t.Fatalf("exact-fit result=%+v view=%+v", result, view)
+				}
+				ownerAfter := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				if !reflect.DeepEqual(cClaims(ownerAfter), cClaims(owner)) {
+					t.Fatal("B-only admission changed a State C claim")
+				}
+				if r.shape == "a-to-b" {
+					if _, present := view.locators[outside.txid]; present {
+						t.Fatal("out-of-range chunk survived A-to-B")
+					}
+					if _, kept := ownerAfter.byOutpoint[outside.inputs[0]]; kept {
+						t.Fatal("A-to-B kept the pruned chunk claim")
+					}
+					if ownerAfter.byOutpoint[inside.inputs[0]].txid != inside.txid {
+						t.Fatal("A-to-B released the surviving chunk claim")
+					}
+					f.requireMember(t, view.sets[id], inside, 3, local)
+				}
+				return
+			}
+			if cChanged && err == nil {
+				t.Fatal("B-only admission evicted State C")
+			}
+			if cChanged {
+				t.Fatal("State C image changed on B capacity refusal")
+			}
+			if err == nil {
+				t.Fatalf("one-over B+C admission retained: %s", r.label)
+			}
+			if err == errDARelayOrphanCommitCapExceeded { //nolint:errorlint // Exact direct sentinel order.
+				t.Fatal("dual violation returned commit-overhead refusal first")
+			}
+			if err != errDARelayOrphanPoolCapExceeded { //nolint:errorlint // Exact direct sentinel identity.
+				t.Fatalf("one-over error=%v", err)
+			}
+			if !reflect.DeepEqual(view.sets, before.sets) || !reflect.DeepEqual(view.locators, before.locators) {
+				t.Fatal("State A image changed on A-to-B capacity refusal")
+			}
+			if view.nextReceivedTime != before.nextReceivedTime {
+				t.Fatal("capacity refusal consumed a sequence")
+			}
+			if after := snapshotDARejectCache(&f.relay.rejectCache); len(after.entries) != len(cache.entries) || !slices.Equal(after.fifo, cache.fifo) {
+				t.Fatalf("capacity refusal inserted a reject-cache row: %+v", after)
+			}
+			owner.tokenHighWater++
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
+		})
+	}
 }
