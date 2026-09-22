@@ -644,7 +644,7 @@ func (s *SyncEngine) EffectiveDAMempoolSize() (uint32, error) {
 		return 0, errors.New("sync engine DA relay state is not initialized")
 	}
 	if err := validateDAMempoolSize(relay.caps.stagedBytes); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("bound DA relay capacity %d: %w", relay.caps.stagedBytes, err)
 	}
 	return uint32(relay.caps.stagedBytes), nil //nolint:gosec // G115: validateDAMempoolSize bounds the cap to <= 4294967295
 }

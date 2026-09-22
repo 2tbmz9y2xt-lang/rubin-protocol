@@ -161,6 +161,8 @@ func TestSyncEffectiveDAMempoolSize(t *testing.T) {
 			t.Errorf("%s returned success: %d", tc.label, got)
 		} else if got != 0 {
 			t.Errorf("%s returned value %d with its error", tc.label, got)
+		} else if strings.HasSuffix(tc.label, "relay cap") && (!strings.HasPrefix(err.Error(), "bound DA relay capacity ") || errors.Unwrap(err) == nil) {
+			t.Errorf("%s error not attributed to the bound relay with the validator error wrapped: %v", tc.label, err)
 		}
 	}
 	for _, tc := range []struct{ relay, configured uint64 }{{536870912, 536870911}, {4294967295, 4294967296}} {
