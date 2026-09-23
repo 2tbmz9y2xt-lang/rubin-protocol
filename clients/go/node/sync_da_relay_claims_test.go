@@ -776,6 +776,65 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 	})
 }
 
+func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
+	x := newCanonicalDAOwnerStateCFixture(t, false)
+	source := x.retained.sets[x.stateC]
+	wantCommit := slices.Clone(source.commit.txBytes)
+	wantCommitInputs := slices.Clone(source.commit.member.inputs)
+	var wantChunks [2][]byte
+	var wantChunkInputs [2][]consensus.Outpoint
+	for i := range wantChunks {
+		wantChunks[i] = slices.Clone(source.chunks[uint16(i)].txBytes)
+		wantChunkInputs[i] = slices.Clone(source.chunks[uint16(i)].member.inputs)
+	}
+	wantIntrinsic := intrinsicFromRetainedOracle(t, source, x.stateC, [][]byte{[]byte("state-c chunk zero"), []byte("state-c chunk one")}, 1)
+	candidates := x.requirePair()
+	survivor := candidates.retained.sets[x.stateC]
+	if source.completeIntrinsic != wantIntrinsic || survivor.completeIntrinsic != wantIntrinsic || survivor.commit.member.token != source.commit.member.token {
+		t.Fatal("canonical survivor descriptor or owner tokens changed")
+	}
+	survivor.commit.txBytes[0] ^= 1
+	survivor.commit.member.inputs[0].Vout++
+	for i := range wantChunks {
+		chunk := survivor.chunks[uint16(i)]
+		if chunk.member.token != source.chunks[uint16(i)].member.token {
+			t.Fatalf("canonical survivor chunk %d token changed", i)
+		}
+		chunk.txBytes[0] ^= 1
+		chunk.member.inputs[0].Vout++
+		survivor.chunks[uint16(i)] = chunk
+	}
+	candidates.retained.sets[x.stateC] = survivor
+	if !slices.Equal(source.commit.txBytes, wantCommit) || !slices.Equal(source.commit.member.inputs, wantCommitInputs) {
+		t.Fatal("canonical survivor aliases source mutable containers")
+	}
+	for i := range wantChunks {
+		if !slices.Equal(source.chunks[uint16(i)].txBytes, wantChunks[i]) || !slices.Equal(source.chunks[uint16(i)].member.inputs, wantChunkInputs[i]) {
+			t.Fatalf("canonical survivor chunk %d aliases source", i)
+		}
+	}
+
+	fresh := x.requirePair().retained.sets[x.stateC]
+	live := x.retained.sets[x.stateC]
+	live.commit.txBytes[0] ^= 1
+	live.commit.member.inputs[0].Vout++
+	for i := range wantChunks {
+		liveChunk := live.chunks[uint16(i)]
+		liveChunk.txBytes[0] ^= 1
+		liveChunk.member.inputs[0].Vout++
+		live.chunks[uint16(i)] = liveChunk
+	}
+	x.retained.sets[x.stateC] = live
+	if !slices.Equal(fresh.commit.txBytes, wantCommit) || !slices.Equal(fresh.commit.member.inputs, wantCommitInputs) {
+		t.Fatal("canonical source aliases survivor mutable containers")
+	}
+	for i := range wantChunks {
+		if !slices.Equal(fresh.chunks[uint16(i)].txBytes, wantChunks[i]) || !slices.Equal(fresh.chunks[uint16(i)].member.inputs, wantChunkInputs[i]) {
+			t.Fatalf("canonical source chunk %d aliases survivor", i)
+		}
+	}
+}
+
 // TestCanonicalDAOwnerCandidatesAreTerminalByPhase is the ordered-terminal half.
 // Every row corrupts ONE field of the caller-owned snapshot, or of the supplied
 // context, and requires the retained-DA terminal class naming that defect, no

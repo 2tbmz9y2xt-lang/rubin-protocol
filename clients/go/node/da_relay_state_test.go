@@ -3274,6 +3274,7 @@ func TestDAOwnerReadyRecordImage(t *testing.T) {
 		}{
 			{"the record state", func(r *daRelaySetRecord) { r.state = daRelayStateStagedCommit }},
 			{"the pinned payload total", func(r *daRelaySetRecord) { r.payloadBytes = 4 }},
+			{"the complete intrinsic descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes = 1 }},
 			{"the accepted-sequence stamp", func(r *daRelaySetRecord) { r.receivedTime = 9 }},
 			{"the remaining ttl", func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 2 }},
 			{"the replaceable-chunk flags", func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{0: true} }},
@@ -3610,6 +3611,21 @@ func TestDARecordImageMapOrder(t *testing.T) {
 }
 
 func TestDARecordImageCloneIsolation(t *testing.T) {
+	t.Run("complete intrinsic follows retained bytes", func(t *testing.T) {
+		intrinsic := daCompleteCapacitySet{id: daRelayTestID(80), fee: consensus.Uint128{Lo: 7}, totalBytes: 9, payloadBytes: 3, receivedSequence: 2}
+		record := daRelaySetRecord{daID: intrinsic.id, completeIntrinsic: intrinsic}
+		if record.clone().completeIntrinsic != (daCompleteCapacitySet{}) {
+			t.Fatal("bytes-stripping clone retained intrinsic descriptor")
+		}
+		if record.cloneForStateMutation().completeIntrinsic != intrinsic || record.cloneOwnerReady().completeIntrinsic != intrinsic {
+			t.Fatal("retained-byte clone dropped intrinsic descriptor")
+		}
+		state := newDARelayStateForTest(t, defaultDARelayCaps())
+		state.sets[intrinsic.id] = record
+		if state.cloneForAtomicBatchLocked().sets[intrinsic.id].completeIntrinsic != intrinsic {
+			t.Fatal("atomic clone dropped intrinsic descriptor")
+		}
+	})
 	t.Run("live staged scalar clone and publication", func(t *testing.T) {
 		f, id := newDANonReplayFixture(t, 1), [32]byte{0xa8}
 		commit := f.ownerReadyCommit(id, 2, LocalDAProvenance())

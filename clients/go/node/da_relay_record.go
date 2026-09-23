@@ -137,6 +137,7 @@ func (r daRelaySetRecord) cloneWithPayloads(copyPayloads bool) daRelaySetRecord 
 	out := r
 	if copyPayloads {
 		out.commit.txBytes = nil
+		out.completeIntrinsic = daCompleteCapacitySet{}
 	}
 	if r.chunks != nil {
 		out.chunks = make(map[uint16]daRelayChunk, len(r.chunks))

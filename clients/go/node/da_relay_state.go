@@ -111,6 +111,7 @@ type daRelaySetRecord struct {
 	payloadBytes       uint64
 	wireBytes          uint64
 	ttlBlocksRemaining uint64
+	completeIntrinsic  daCompleteCapacitySet
 	commit             daRelayCommit
 	chunks             map[uint16]daRelayChunk
 	replaceableChunks  map[uint16]bool
