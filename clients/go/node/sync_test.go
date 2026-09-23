@@ -1560,15 +1560,23 @@ func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
 
 func TestPendingOutpointSyncFixtureCopiesAreIndependent(t *testing.T) {
 	a, b := newPendingOutpointSyncFixture(t), newPendingOutpointSyncFixture(t)
-	if a.store.rootPath == b.store.rootPath || a.store.rootPath == BlockStorePath(pendingOutpointTemplate.dir) {
-		t.Fatalf("fixture store roots a=%s b=%s template=%s, want distinct", a.store.rootPath, b.store.rootPath, pendingOutpointTemplate.dir)
+	tmplRoot := BlockStorePath(pendingOutpointTemplate.dir)
+	if a.store.rootPath == b.store.rootPath || a.store.rootPath == tmplRoot || b.store.rootPath == tmplRoot {
+		t.Fatalf("fixture store roots a=%s b=%s template=%s, want distinct", a.store.rootPath, b.store.rootPath, tmplRoot)
 	}
 	summary := a.applyForkBlock(t)
 	if _, err := a.store.GetBlockByHash(summary.BlockHash); err != nil {
 		t.Fatalf("a.GetBlockByHash: %v", err)
 	}
+	tmplStore, err := OpenBlockStore(tmplRoot)
+	if err != nil {
+		t.Fatalf("OpenBlockStore(template): %v", err)
+	}
 	if _, err := b.store.GetBlockByHash(summary.BlockHash); err == nil {
 		t.Fatal("block applied through fixture a is present in fixture b")
+	}
+	if _, err := tmplStore.GetBlockByHash(summary.BlockHash); err == nil {
+		t.Fatal("block applied through fixture a is present in the template")
 	}
 }
 
