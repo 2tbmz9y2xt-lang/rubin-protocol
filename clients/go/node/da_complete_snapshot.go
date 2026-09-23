@@ -3,9 +3,7 @@ package node
 import (
 	"bytes"
 	"crypto/sha3"
-	"math"
 	"slices"
-	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -14,21 +12,19 @@ import (
 // its continuously held ChainState guard. It neither acquires nor ends that guard.
 // Tokens below are opaque identities; their live claims belong to the effect owner.
 type daCompleteSnapshot struct {
-	publicationBase                *DARelayState
-	candidate                      daRelayAdmissionCandidate
-	prior                          daRelaySetRecord
-	residents                      []daRelaySetRecord
-	locators                       map[[32]byte]daRelayLocator
-	owner                          *PendingOutpointOwner
-	input                          daCompleteCapacityInput
-	records, nextReceivedTime, ttl uint64
+	candidate daRelayAdmissionCandidate
+	prior     daRelaySetRecord
+	locators  map[[32]byte]daRelayLocator // target rows only
+	mempool   *Mempool
+	owner     *PendingOutpointOwner
+	ttl       uint64
 }
 
 type daCompletePrepared struct {
 	source *daCompleteSnapshot
 	image  daRelayRecordImage
 	pruned []DAAdmissionVictim
-	input  daCompleteCapacityInput
+	set    daCompleteCapacitySet
 }
 
 type daCompleteMismatch struct {
@@ -58,88 +54,24 @@ func (s *DARelayState) captureDACompleteSnapshot(candidate daRelayAdmissionCandi
 }
 
 func (s *DARelayState) copyDACompleteSnapshotLocked(candidate daRelayAdmissionCandidate) (*daCompleteSnapshot, error) {
-	count := 0
-	for _, record := range s.sets {
-		if record.state == daRelayStateCompleteSet {
-			count++
-		}
-	}
-	if count > 65536 {
-		return nil, errDARelayImageIncompatible
-	}
 	prior, present := s.sets[candidate.member.locator.daID]
 	if !present || prior.daID != candidate.member.locator.daID {
 		return nil, errDARelayImageIncompatible
 	}
 	out := &daCompleteSnapshot{
-		candidate: candidate, prior: prior.cloneOwnerReady(), owner: s.mempool.pendingOutpoints,
-		residents: make([]daRelaySetRecord, 0, count), locators: make(map[[32]byte]daRelayLocator),
-		input: daCompleteCapacityInput{
-			byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
-			completeBytes: s.completeBytes, completeCount: s.completeCount, completePayload: s.pinnedPayloadBytes,
-		},
-		records: s.records, nextReceivedTime: s.nextReceivedTime, ttl: s.caps.orphanTTLBlocks,
+		candidate: candidate, prior: prior.cloneOwnerReady(), mempool: s.mempool, owner: s.mempool.pendingOutpoints,
+		locators: make(map[[32]byte]daRelayLocator, 1+len(prior.chunks)), ttl: s.caps.orphanTTLBlocks,
 	}
 	out.candidate.member.member = *candidate.member.member.clone()
 	out.candidate.member.txBytes = cloneBytes(candidate.member.txBytes)
 	out.candidate.member.payload = cloneBytes(candidate.member.payload)
-	if err := out.copyResidents(s); err != nil {
-		return nil, err
-	}
-	out.publicationBase = s.cloneForAtomicBatchLocked()
-	out.publicationBase.sets[out.prior.daID] = out.prior
-	for _, record := range out.residents {
-		out.publicationBase.sets[record.daID] = record
+	for _, row := range prior.locatorRows() {
+		if _, duplicate := out.locators[row.txid]; duplicate || s.locators[row.txid] != row.locator {
+			return nil, errDARelayImageIncompatible
+		}
+		out.locators[row.txid] = row.locator
 	}
 	return out, nil
-}
-
-func (out *daCompleteSnapshot) copyResidents(s *DARelayState) error {
-	ids := make(map[[32]byte]bool, cap(out.residents)+1)
-	for id, record := range s.sets {
-		if record.state != daRelayStateCompleteSet {
-			continue
-		}
-		if id != record.daID {
-			return errDARelayImageIncompatible
-		}
-		copied := record.cloneOwnerReady()
-		for index, chunk := range record.chunks {
-			if len(chunk.payload) == 0 {
-				retained := copied.chunks[index]
-				retained.payload = slices.Clone(chunk.payload)
-				copied.chunks[index] = retained
-			}
-		}
-		out.residents = append(out.residents, copied)
-		ids[id] = true
-	}
-	ids[out.candidate.member.locator.daID] = true
-	for txid, locator := range s.locators {
-		if ids[locator.daID] {
-			out.locators[txid] = locator
-		}
-	}
-	return out.checkCapturedLocators()
-}
-
-func (s *daCompleteSnapshot) checkCapturedLocators() error {
-	expected := make(map[[32]byte]daRelayLocator)
-	for _, record := range append([]daRelaySetRecord{s.prior}, s.residents...) {
-		for _, row := range record.locatorRows() {
-			if _, present := expected[row.txid]; present {
-				return errDARelayImageIncompatible
-			}
-			expected[row.txid] = row.locator
-			if locator, present := s.locators[row.txid]; !present || locator != row.locator {
-				return errDARelayImageIncompatible
-			}
-		}
-	}
-	if len(expected) != len(s.locators) {
-		return errDARelayImageIncompatible
-	}
-	return nil
 }
 
 // The caller passes the captured snapshot exclusively to this off-lock phase.
@@ -166,19 +98,12 @@ func prepareDACompleteSnapshot(source *daCompleteSnapshot, duplicate daRelayAdmi
 }
 
 func (source *daCompleteSnapshot) prepareMatching(image daRelayRecordImage, pruned []DAAdmissionVictim, set daCompleteCapacitySet) (daCompletePreparation, error) {
-	if source.nextReceivedTime == math.MaxUint64 {
-		return daCompletePreparation{}, errDARelayArithmeticOverflow
-	}
-	input, err := source.capacityInput(set)
-	if err != nil {
-		return daCompletePreparation{}, err
-	}
 	image.next.markComplete(set.payloadBytes)
 	if set.id != image.next.daID || set.totalBytes == 0 || set.payloadBytes != image.next.payloadBytes || set.receivedSequence != image.next.receivedTime {
 		return daCompletePreparation{}, errDARelayImageIncompatible
 	}
 	image.next.completeIntrinsic = set
-	return daCompletePreparation{prepared: &daCompletePrepared{source: source, image: image, pruned: pruned, input: input}}, nil
+	return daCompletePreparation{prepared: &daCompletePrepared{source: source, image: image, pruned: pruned, set: set}}, nil
 }
 
 func (s *daCompleteSnapshot) stageCandidate() (daRelayRecordImage, []DAAdmissionVictim, error) {
@@ -205,9 +130,6 @@ func (s *daCompleteSnapshot) stageCandidate() (daRelayRecordImage, []DAAdmission
 func (s *daCompleteSnapshot) checkCandidateDomain() error {
 	c := s.candidate
 	if s.owner == nil || c.member.validate() != nil || c.member.member.token != (PendingOutpointToken{}) {
-		return errDARelayImageIncompatible
-	}
-	if s.prior.receivedTime > s.nextReceivedTime || s.prior.revision > s.records {
 		return errDARelayImageIncompatible
 	}
 	return s.checkCandidateRole()
@@ -373,59 +295,169 @@ func (s *daCompleteSnapshot) mismatch(image daRelayRecordImage) *daCompleteMisma
 	return out
 }
 
-func (s *daCompleteSnapshot) capacityInput(candidate daCompleteCapacitySet) (daCompleteCapacityInput, error) {
-	in := s.input
-	in.candidate = candidate
-	accounting, err := s.prior.ownerReadyAccounting()
+// capacityInput reads only current scalar metadata while the final DA lock is held.
+type daCompleteLiveTotals struct {
+	staged, commitBytes, completeBytes, payload uint64
+}
+
+func (s *DARelayState) capacityInput(source *daCompleteSnapshot, candidate daCompleteCapacitySet) (daCompleteCapacityInput, error) {
+	in := daCompleteCapacityInput{byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
+		completeBytes: s.completeBytes, completeCount: s.completeCount, completePayload: s.pinnedPayloadBytes, candidate: candidate}
+	accounting, err := source.prior.ownerReadyAccounting()
 	if err != nil {
 		return daCompleteCapacityInput{}, err
 	}
 	in.priorCredit = accounting.stagedBytes
 	txids, tokens := make(map[[32]byte]bool), make(map[PendingOutpointToken]bool)
-	if err := s.checkRetainedRecord(s.prior, txids, tokens); err != nil {
+	if err := source.checkRetainedRecord(source.prior, txids, tokens); err != nil {
 		return daCompleteCapacityInput{}, err
 	}
-	sort.Slice(s.residents, func(i, j int) bool { return bytes.Compare(s.residents[i].daID[:], s.residents[j].daID[:]) < 0 })
-	for _, record := range s.residents {
-		set, err := s.prepareResident(record, txids, tokens)
-		if err != nil {
-			return daCompleteCapacityInput{}, err
-		}
-		in.residents = append(in.residents, set)
+	totals := daCompleteLiveTotals{}
+	if err := s.scanDACompleteLive(&in, source.owner, txids, tokens, &totals); err != nil {
+		return daCompleteCapacityInput{}, err
 	}
-	if len(txids) != len(s.locators) {
+	if totals != (daCompleteLiveTotals{s.stagedBytes, s.orphanCommitOverheadBytes, s.completeBytes, s.pinnedPayloadBytes}) || uint64(len(in.residents)) != s.completeCount {
 		return daCompleteCapacityInput{}, errDARelayImageIncompatible
 	}
-	if err := validateDACompleteCapacity(in); err != nil {
+	if err := s.checkLiveCompleteLocators(source, txids); err != nil {
 		return daCompleteCapacityInput{}, err
 	}
 	return in, nil
 }
 
-func (s *daCompleteSnapshot) prepareResident(record daRelaySetRecord, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool) (daCompleteCapacitySet, error) {
-	indexes, payloads, err := parseDACompleteMembers(record)
+func (s *DARelayState) scanDACompleteLive(in *daCompleteCapacityInput, owner *PendingOutpointOwner, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool, totals *daCompleteLiveTotals) error {
+	for id, record := range s.sets {
+		if id != record.daID {
+			return errDARelayImageIncompatible
+		}
+		switch record.state {
+		case daRelayStateOrphanChunks:
+			// State A is outside the shared bound.
+		case daRelayStateStagedCommit:
+			if err := totals.addB(record); err != nil {
+				return err
+			}
+		case daRelayStateCompleteSet:
+			if err := s.addLiveC(in, record, owner, txids, tokens, totals); err != nil {
+				return err
+			}
+		default:
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func (totals *daCompleteLiveTotals) addB(record daRelaySetRecord) error {
+	charge, err := record.ownerReadyAccounting()
 	if err != nil {
-		return daCompleteCapacitySet{}, err
+		return errDARelayImageIncompatible
 	}
-	if err := s.checkRetainedRecord(record, txids, tokens); err != nil {
-		return daCompleteCapacitySet{}, err
-	}
-	set, matches, err := sumDACompleteRecord(record, indexes, payloads)
+	totals.staged, err = checkedAddUint64(totals.staged, charge.stagedBytes)
 	if err != nil {
-		return daCompleteCapacitySet{}, err
+		return errDARelayImageIncompatible
 	}
-	if !matches || record.completeIntrinsic != set || s.checkResidentShape(record, set.payloadBytes) != nil {
+	totals.commitBytes, err = checkedAddUint64(totals.commitBytes, charge.commitBytes)
+	if err != nil {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func (s *DARelayState) addLiveC(in *daCompleteCapacityInput, record daRelaySetRecord, owner *PendingOutpointOwner, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool, totals *daCompleteLiveTotals) error {
+	set, err := s.prepareResident(record, owner, txids, tokens)
+	if err != nil {
+		return err
+	}
+	in.residents = append(in.residents, set)
+	totals.completeBytes, err = checkedAddUint64(totals.completeBytes, set.totalBytes)
+	if err != nil {
+		return errDARelayImageIncompatible
+	}
+	totals.payload, err = checkedAddUint64(totals.payload, set.payloadBytes)
+	if err != nil {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func (s *DARelayState) checkLiveCompleteLocators(source *daCompleteSnapshot, txids map[[32]byte]bool) error {
+	for txid, locator := range s.locators {
+		record, present := s.sets[locator.daID]
+		if !present {
+			return errDARelayImageIncompatible
+		}
+		if locator.daID == source.prior.daID || record.state == daRelayStateCompleteSet {
+			if !txids[txid] {
+				return errDARelayImageIncompatible
+			}
+		}
+	}
+	return nil
+}
+
+func (s *DARelayState) prepareResident(record daRelaySetRecord, owner *PendingOutpointOwner, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool) (daCompleteCapacitySet, error) {
+	set := daCompleteCapacitySet{id: record.daID, receivedSequence: record.receivedTime, payloadBytes: record.payloadBytes}
+	if s.checkResidentShape(record, set.payloadBytes) != nil {
+		return daCompleteCapacitySet{}, errDARelayImageIncompatible
+	}
+	for _, row := range record.locatorRows() {
+		member, raw := record.commit.member, record.commit.txBytes
+		if row.locator.kind == daRelayLocatorChunk {
+			chunk := record.chunks[row.locator.chunkIndex]
+			member, raw = chunk.member, chunk.txBytes
+		}
+		if s.checkDACompleteLiveMember(row, member, raw, owner, txids, tokens) != nil {
+			return daCompleteCapacitySet{}, errDARelayImageIncompatible
+		}
+		if err := addDACompleteMember(&set, member, raw, nil); err != nil {
+			return daCompleteCapacitySet{}, errDARelayImageIncompatible
+		}
+		txids[row.txid], tokens[member.token] = true, true
+	}
+	type bounds struct {
+		intrinsic                         daCompleteCapacitySet
+		nonzero, withinCap, payloadWithin bool
+	}
+	if (bounds{record.completeIntrinsic, set.totalBytes != 0, set.totalBytes <= s.caps.stagedBytes, set.payloadBytes <= set.totalBytes}) != (bounds{set, true, true, true}) {
 		return daCompleteCapacitySet{}, errDARelayImageIncompatible
 	}
 	return set, nil
 }
 
-func (s *daCompleteSnapshot) checkResidentShape(record daRelaySetRecord, payload uint64) error {
-	if record.state != daRelayStateCompleteSet || record.commit.member == nil || len(record.chunks) != int(record.commit.chunkCount) {
+func (s *DARelayState) checkDACompleteLiveMember(row daRelayLocatorRow, member *daRelayMemberIdentity, raw []byte, owner *PendingOutpointOwner, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool) error {
+	if member == nil || member.validate() != nil {
 		return errDARelayImageIncompatible
 	}
-	if record.revision == 0 || record.revision > s.records || record.receivedTime == 0 || record.receivedTime > s.nextReceivedTime {
+	type binding struct {
+		owner                             *PendingOutpointOwner
+		nonzero, freshTx, freshToken, raw bool
+		locator                           daRelayLocator
+	}
+	if (binding{member.token.owner, member.token.seq != 0, !txids[row.txid], !tokens[member.token], len(raw) != 0, s.locators[row.txid]}) != (binding{owner, true, true, true, true, row.locator}) {
 		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func (s *DARelayState) checkResidentShape(record daRelaySetRecord, payload uint64) error {
+	type header struct {
+		state                                                                                         daRelaySetState
+		commit, chunks, raw, count, countWithin, revision, revisionCurrent, received, receivedCurrent bool
+	}
+	if (header{record.state, record.commit.member != nil, len(record.chunks) == int(record.commit.chunkCount), len(record.commit.txBytes) != 0, record.commit.chunkCount != 0, uint64(record.commit.chunkCount) <= consensus.MAX_DA_CHUNK_COUNT, record.revision != 0, record.revision <= s.records, record.receivedTime != 0, record.receivedTime <= s.nextReceivedTime}) != (header{daRelayStateCompleteSet, true, true, true, true, true, true, true, true, true}) {
+		return errDARelayImageIncompatible
+	}
+	type chunkShape struct {
+		member          bool
+		index           uint16
+		id              [32]byte
+		raw, payloadNil bool
+	}
+	for index, chunk := range record.chunks {
+		if (chunkShape{chunk.member != nil, chunk.chunkIndex, chunk.daID, len(chunk.txBytes) != 0, chunk.payload == nil}) != (chunkShape{true, index, record.daID, true, true}) {
+			return errDARelayImageIncompatible
+		}
 	}
 	return checkDACompleteResidues(record, payload)
 }

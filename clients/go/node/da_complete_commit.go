@@ -13,10 +13,14 @@ type daCompleteCommitPlan struct {
 	admission        *DAAdmission
 	duplicate        *daRelayAdmissionOutcome
 	source           *daCompleteSnapshot
-	projected        *DARelayState
+	result           daCompletePreparation
+	next             daRelaySetRecord
+	placement        daRelayRecordPlacement
+	capacity         daCompleteCapacityPlan
+	retire           []daRelayLocatorRow
+	sequence         uint64
 	owner            *daPreparedAdmissionCommit
 	original         []DAAdmissionVictim
-	prefetch         [][32]byte
 	member           *daRelayMemberIdentity
 	outcome          daRelayAdmissionOutcome
 	capacityRejected bool
@@ -44,8 +48,16 @@ func (s *DARelayState) prepareDACompleteCommit(admission *DAAdmission, result da
 		return nil, ErrDARelayPayloadCommitmentMismatch
 	}
 	p.source = source
-	if err := p.prepareEffects(result); err != nil {
-		return nil, err
+	if result.prepared != nil {
+		prepared := *result.prepared
+		prepared.image.next = prepared.image.next.cloneOwnerReady()
+		prepared.pruned = slices.Clone(prepared.pruned)
+		p.result.prepared = &prepared
+	} else {
+		mismatch := *result.mismatch
+		mismatch.image.next = mismatch.image.next.cloneOwnerReady()
+		mismatch.removed = slices.Clone(mismatch.removed)
+		p.result.mismatch = &mismatch
 	}
 	return p, nil
 }
@@ -65,7 +77,7 @@ func (s *DARelayState) prepareDACompleteDuplicate(admission *DAAdmission, result
 func daCompleteCommitSource(result daCompletePreparation) (*daCompleteSnapshot, error) {
 	switch [3]bool{result.duplicate != nil, result.prepared != nil, result.mismatch != nil} {
 	case [3]bool{false, true, false}:
-		if result.prepared.image.next.state != daRelayStateCompleteSet {
+		if result.prepared.source == nil || result.prepared.image.next.state != daRelayStateCompleteSet || result.prepared.image.next.completeIntrinsic != result.prepared.set || result.prepared.set.id != result.prepared.source.prior.daID {
 			return nil, errDARelayImageIncompatible
 		}
 		return result.prepared.source, nil
@@ -90,10 +102,10 @@ func daCompleteMismatchSource(m *daCompleteMismatch) (*daCompleteSnapshot, error
 }
 
 func (s *DARelayState) sameDACompleteAdmission(a *DAAdmission, source *daCompleteSnapshot) bool {
-	if source == nil || source.publicationBase == nil {
+	if source == nil || s.mempool == nil {
 		return false
 	}
-	if s.mempool != source.publicationBase.mempool || source.owner != a.guard.owner || s.mempool.pendingOutpoints != source.owner {
+	if s.mempool != source.mempool || source.owner != a.guard.owner || s.mempool.pendingOutpoints != source.owner {
 		return false
 	}
 	m, snapshot := source.candidate.member, a.snapshot
@@ -105,40 +117,112 @@ func sameDACompleteAdmissionBuffers(m daRelayOwnerReadyMember, snapshot DAAdmiss
 	return bytes.Equal(m.txBytes, snapshot.TxBytes) && slices.Equal(m.member.inputs, snapshot.Inputs)
 }
 
-func (p *daCompleteCommitPlan) prepareEffects(result daCompletePreparation) error {
-	var image daRelayRecordImage
+func (p *daCompleteCommitPlan) prepareEffects(s *DARelayState, admission *DAAdmission) error {
 	var victims []DAAdmissionVictim
-	var capacity daCompleteCapacityPlan
 	var err error
-	if result.prepared != nil {
-		capacity, err = planDACompleteCapacity(result.prepared.input)
-		image, victims = result.prepared.image, result.prepared.pruned
-		p.capacityRejected = !capacity.accepted
-		if p.capacityRejected {
-			victims = nil
+	if p.result.prepared != nil {
+		input, err := s.capacityInput(p.source, p.result.prepared.set)
+		if err != nil {
+			return err
+		}
+		p.capacity, err = planDACompleteCapacity(input)
+		if err != nil {
+			return err
+		}
+		p.capacityRejected = !p.capacity.accepted
+		p.next = p.result.prepared.image.next.cloneOwnerReady()
+		if !p.capacityRejected {
+			victims = slices.Clone(p.result.prepared.pruned)
 		}
 	} else {
-		image, victims = result.mismatch.image, result.mismatch.removed
 		p.mismatch = true
+		p.next = p.result.mismatch.image.next.cloneOwnerReady()
+		victims = slices.Clone(p.result.mismatch.removed)
 	}
-	if err != nil {
+	if err := p.checkCompletingMember(); err != nil {
 		return err
 	}
-	p.projected = p.source.publicationBase.cloneForAtomicBatchLocked()
-	p.original = daCompleteRecordClaims(p.source.prior)
-	for _, record := range p.source.residents {
-		p.original = append(p.original, daCompleteRecordClaims(record)...)
-	}
-	victims = slices.Clone(victims)
-	for _, id := range capacity.victims {
-		victims = append(victims, daCompleteRecordClaims(p.projected.sets[id])...)
-		p.removeRecord(id)
-	}
-	p.owner, err = prepareDAAdmissionCommit(p.admission, victims)
+	p.prepareOriginalClaims(s)
+	p.prepareRetire(s, &victims)
+	p.owner, err = prepareDAAdmissionCommit(admission, victims)
 	if err != nil {
 		return selectRelayDisposition(txAdmitFromPendingOutpointError(err), relayDispositionForOwnerError(err))
 	}
-	return p.projectCompletion(image.next.cloneOwnerReady(), capacity)
+	return p.projectCompletion(s)
+}
+
+func (p *daCompleteCommitPlan) checkCompletingMember() error {
+	if err := p.checkDACompleteNextShape(); err != nil {
+		return err
+	}
+	p.member = p.next.commit.member
+	raw := p.next.commit.txBytes
+	if p.source.candidate.member.locator.kind == daRelayLocatorChunk {
+		chunk, present := p.next.chunks[p.source.candidate.member.locator.chunkIndex]
+		if !present || chunk.member == nil {
+			return errDARelayImageIncompatible
+		}
+		p.member, raw = chunk.member, chunk.txBytes
+	}
+	if !sameOwnerReadyMember(p.member, &p.source.candidate.member.member) || !bytes.Equal(raw, p.source.candidate.member.txBytes) {
+		return errDARelayImageIncompatible
+	}
+	return nil
+}
+
+func (p *daCompleteCommitPlan) checkDACompleteNextShape() error {
+	if p.next.commit.member == nil || p.next.daID != p.source.prior.daID {
+		return errDARelayImageIncompatible
+	}
+	if p.mismatch {
+		return nil
+	}
+	if len(p.next.chunks) != int(p.next.commit.chunkCount) {
+		return errDARelayImageIncompatible
+	}
+	type chunkShape struct {
+		present bool
+		index   uint16
+		inRange bool
+	}
+	for index, chunk := range p.next.chunks {
+		if (chunkShape{chunk.member != nil, chunk.chunkIndex, index < p.next.commit.chunkCount}) != (chunkShape{true, index, true}) {
+			return errDARelayImageIncompatible
+		}
+	}
+	return nil
+}
+
+func (p *daCompleteCommitPlan) prepareOriginalClaims(s *DARelayState) {
+	p.original = daCompleteRecordClaims(p.source.prior)
+	if p.mismatch {
+		return
+	}
+	for _, record := range s.sets {
+		if record.state == daRelayStateCompleteSet {
+			p.original = append(p.original, daCompleteRecordClaims(record)...)
+		}
+	}
+}
+
+func (p *daCompleteCommitPlan) prepareRetire(s *DARelayState, victims *[]DAAdmissionVictim) {
+	for _, resident := range p.capacity.victims {
+		record := s.sets[resident]
+		*victims = append(*victims, daCompleteRecordClaims(record)...)
+		p.retire = append(p.retire, record.locatorRows()...)
+	}
+	nextRows := p.next.locatorRows()
+	for _, row := range p.source.prior.locatorRows() {
+		if row.txid != p.source.candidate.member.member.txid {
+			found := false
+			for _, next := range nextRows {
+				found = found || row == next
+			}
+			if !found {
+				p.retire = append(p.retire, row)
+			}
+		}
+	}
 }
 
 func daCompleteRecordClaims(record daRelaySetRecord) []DAAdmissionVictim {
@@ -154,21 +238,12 @@ func daCompleteRecordClaims(record daRelaySetRecord) []DAAdmissionVictim {
 	return claims
 }
 
-func (p *daCompleteCommitPlan) removeRecord(id [32]byte) {
-	for _, row := range p.projected.sets[id].locatorRows() {
-		delete(p.projected.locators, row.txid)
-	}
-	delete(p.projected.sets, id)
-	p.prefetch = append(p.prefetch, id)
-}
-
-func (p *daCompleteCommitPlan) projectCompletion(next daRelaySetRecord, capacity daCompleteCapacityPlan) error {
-	s := p.projected
+func (p *daCompleteCommitPlan) projectCompletion(s *DARelayState) error {
 	old := p.source.prior
 	// The existing counter projector only sees A/B. C totals come from its planner.
 	billed := daRelaySetRecord{daID: old.daID}
 	if p.mismatch {
-		billed = next
+		billed = p.next
 	}
 	caps := s.caps
 	caps.stagedBytes, caps.orphanPoolBytes, caps.orphanPoolPerDAIDBytes = math.MaxUint64, math.MaxUint64, math.MaxUint64
@@ -177,46 +252,22 @@ func (p *daCompleteCommitPlan) projectCompletion(next daRelaySetRecord, capacity
 	if err != nil {
 		return err
 	}
-	s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes = accounting.stagedBytes, accounting.orphanBytes, accounting.commitBytes
-	s.applyProjectedPeerBytes(accounting.peerBytes)
-	s.applyProjectedDAIDBytes(old.daID, accounting.daBytes)
-	if err := p.projectCompleteTotals(capacity); err != nil {
-		return err
-	}
-	next.revision, err = checkedAddUint64(p.source.records, 1)
-	if err != nil {
-		return err
-	}
-	p.removeRecord(old.daID)
-	s.records = next.revision
-	// Mismatch sequence exhaustion is selected after Reserve and both B bounds.
-	s.nextReceivedTime = p.source.nextReceivedTime + 1
-	next.receivedTime = old.receivedTime
-	s.sets[old.daID] = next
-	for _, row := range next.locatorRows() {
-		s.locators[row.txid] = row.locator
-	}
-	p.member = next.commit.member
-	if p.source.candidate.member.locator.kind == daRelayLocatorChunk {
-		p.member = next.chunks[p.source.candidate.member.locator.chunkIndex].member
-	}
-	p.outcome = daRelayAdmissionOutcome{daID: old.daID, disposition: daRelayAdmissionRetained}
-	return nil
-}
-
-func (p *daCompleteCommitPlan) projectCompleteTotals(capacity daCompleteCapacityPlan) error {
-	s := p.projected
-	if p.mismatch {
-		var err error
-		p.sharedBytes, err = checkedAddUint64(s.stagedBytes, s.completeBytes)
-		return err
-	}
+	p.placement = accounting
 	if p.capacityRejected {
 		return nil
 	}
-	var err error
-	s.completeBytes, err = checkedApplyUint64Delta(capacity.sharedBytes, s.stagedBytes, 0)
-	s.completeCount, s.pinnedPayloadBytes = capacity.completeCount, capacity.payloadBytes
+	p.next.revision, err = checkedAddUint64(s.records, 1)
+	if err != nil {
+		return err
+	}
+	p.next.receivedTime = old.receivedTime
+	p.outcome = daRelayAdmissionOutcome{daID: old.daID, disposition: daRelayAdmissionRetained}
+	if p.mismatch {
+		p.sharedBytes, err = checkedAddUint64(accounting.stagedBytes, s.completeBytes)
+		return err
+	} else {
+		_, err = checkedApplyUint64Delta(p.capacity.sharedBytes, accounting.stagedBytes, 0)
+	}
 	return err
 }
 
@@ -241,25 +292,36 @@ func sameDACompleteChunk(a, b daRelayChunk) bool {
 	return (a.payload == nil) == (b.payload == nil) && sameOwnerReadyChunk(a, b)
 }
 
-func (s *DARelayState) sameDACompleteBaseline(base *DARelayState, owner *PendingOutpointOwner) bool {
-	if s.mempool != base.mempool || s.mempool.pendingOutpoints != owner || s.caps != base.caps {
+func (s *DARelayState) sameDACompleteTarget(source *daCompleteSnapshot) bool {
+	if s.mempool == nil {
 		return false
 	}
-	a := [8]uint64{s.stagedBytes, s.completeBytes, s.completeCount, s.orphanBytes, s.orphanCommitOverheadBytes, s.pinnedPayloadBytes, s.records, s.nextReceivedTime}
-	b := [8]uint64{base.stagedBytes, base.completeBytes, base.completeCount, base.orphanBytes, base.orphanCommitOverheadBytes, base.pinnedPayloadBytes, base.records, base.nextReceivedTime}
-	return a == b && maps.Equal(s.orphanBytesByPeerQuotaKey, base.orphanBytesByPeerQuotaKey) &&
-		maps.Equal(s.orphanBytesByDAID, base.orphanBytesByDAID) && maps.Equal(s.locators, base.locators) && maps.EqualFunc(s.sets, base.sets, sameDACompleteRecord)
+	type binding struct {
+		mempool *Mempool
+		owner   *PendingOutpointOwner
+	}
+	if (binding{s.mempool, s.mempool.pendingOutpoints}) != (binding{source.mempool, source.owner}) {
+		return false
+	}
+	if !sameDACompleteRecord(s.sets[source.prior.daID], source.prior) {
+		return false
+	}
+	for txid, locator := range source.locators {
+		if s.locators[txid] != locator {
+			return false
+		}
+	}
+	count := 0
+	for _, locator := range s.locators {
+		if locator.daID == source.prior.daID {
+			count++
+		}
+	}
+	return count == len(source.locators)
 }
 
 func (s *DARelayState) applyDACompleteCommit(admission *DAAdmission, p *daCompleteCommitPlan) (daRelayAdmissionOutcome, bool, error) {
-	if p == nil {
-		return daRelayAdmissionOutcome{}, false, errDARelayImageIncompatible
-	}
-	type binding struct {
-		relay     *DARelayState
-		admission *DAAdmission
-	}
-	if (binding{p.relay, p.admission}) != (binding{s, admission}) || admission.guard.state.Load() != daAdmissionOpen {
+	if !p.readyForDACompleteApply(s, admission) {
 		return daRelayAdmissionOutcome{}, false, errDARelayImageIncompatible
 	}
 	p.admission = nil
@@ -271,31 +333,86 @@ func (s *DARelayState) applyDACompleteCommit(admission *DAAdmission, p *daComple
 		s.mu.Unlock()
 		return duplicate, false, nil
 	}
-	if p.mismatch && !sameDACompleteRecord(s.sets[p.source.prior.daID], p.source.prior) {
+	if err := s.checkDACompleteFinalTarget(p); err != nil {
 		s.mu.Unlock()
-		return daRelayAdmissionOutcome{}, false, daCompleteStaleError()
+		return daRelayAdmissionOutcome{}, false, err
+	}
+	if err := p.prepareEffects(s, admission); err != nil {
+		s.mu.Unlock()
+		return daRelayAdmissionOutcome{}, false, err
+	}
+	if err := s.preflightDACompleteCommit(p); err != nil {
+		s.mu.Unlock()
+		return daRelayAdmissionOutcome{}, false, err
 	}
 	return s.reserveDACompleteCommit(admission, p)
 }
 
+func (p *daCompleteCommitPlan) readyForDACompleteApply(s *DARelayState, admission *DAAdmission) bool {
+	if p == nil {
+		return false
+	}
+	type binding struct {
+		relay     *DARelayState
+		admission *DAAdmission
+	}
+	return (binding{p.relay, p.admission}) == (binding{s, admission}) && admission.guard.state.Load() == daAdmissionOpen
+}
+
+func (s *DARelayState) checkDACompleteFinalTarget(p *daCompleteCommitPlan) error {
+	if !s.sameDACompleteTarget(p.source) {
+		return daCompleteStaleError()
+	}
+	if p.source.prior.receivedTime > s.nextReceivedTime || p.source.prior.revision > s.records {
+		return errDARelayImageIncompatible
+	}
+	if p.result.prepared != nil && s.nextReceivedTime == math.MaxUint64 {
+		return errDARelayArithmeticOverflow
+	}
+	return nil
+}
+
+func (s *DARelayState) preflightDACompleteCommit(p *daCompleteCommitPlan) error {
+	if ([4]bool{s.sets != nil, s.locators != nil, s.orphanBytesByDAID != nil, s.orphanBytesByPeerQuotaKey != nil}) != ([4]bool{true, true, true, true}) {
+		return errDARelayImageIncompatible
+	}
+	s.sets[p.source.prior.daID] = s.sets[p.source.prior.daID]
+	if value, ok := s.orphanBytesByDAID[p.source.prior.daID]; ok {
+		s.orphanBytesByDAID[p.source.prior.daID] = value
+	}
+	for key := range p.placement.peerBytes {
+		if value, ok := s.orphanBytesByPeerQuotaKey[key]; ok {
+			s.orphanBytesByPeerQuotaKey[key] = value
+		}
+	}
+	txid := p.source.candidate.member.member.txid
+	if _, present := s.locators[txid]; present {
+		return errDARelayImageIncompatible
+	}
+	s.locators[txid] = p.source.candidate.member.locator
+	return nil
+}
+
+func (s *DARelayState) discardDACompleteProvisional(p *daCompleteCommitPlan) {
+	delete(s.locators, p.source.candidate.member.member.txid)
+}
+
 func (s *DARelayState) reserveDACompleteCommit(admission *DAAdmission, p *daCompleteCommitPlan) (daRelayAdmissionOutcome, bool, error) {
 	if !admission.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting) {
+		s.discardDACompleteProvisional(p)
 		s.mu.Unlock()
 		return daRelayAdmissionOutcome{}, false, errDARelayImageIncompatible
 	}
 	defer admission.guard.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
 	commit, failure, failed := reservePreparedDAAdmissionCommit(p.owner)
 	if failed {
+		s.discardDACompleteProvisional(p)
 		s.mu.Unlock()
 		return daRelayAdmissionOutcome{}, false, selectRelayDisposition(txAdmitFromPendingOutpointError(&failure), relayDispositionForOwnerError(&failure))
 	}
-	if !s.sameDACompleteBaseline(p.source.publicationBase, p.source.owner) {
-		commit.Abort()
-		s.mu.Unlock()
-		return daRelayAdmissionOutcome{}, false, daCompleteStaleError()
-	}
 	if failure, failed = p.source.owner.validateDAAdmissionVictimsLocked(p.original, commit.candidate); failed {
 		commit.Abort()
+		s.discardDACompleteProvisional(p)
 		s.mu.Unlock()
 		return daRelayAdmissionOutcome{}, false, selectRelayDisposition(txAdmitFromPendingOutpointError(&failure), relayDispositionForOwnerError(&failure))
 	}
@@ -306,29 +423,31 @@ func daCompleteStaleError() error {
 	return selectRelayDisposition(txAdmitUnavailable("retained DA record moved while this admission was planned"), RelayAdmissionUnavailable)
 }
 
-func (p *daCompleteCommitPlan) mismatchRefusal() error {
+func (p *daCompleteCommitPlan) mismatchRefusal(s *DARelayState) error {
 	if !p.mismatch {
 		return nil
 	}
-	if p.sharedBytes > p.projected.caps.stagedBytes {
+	if p.sharedBytes > s.caps.stagedBytes {
 		return errDARelayOrphanPoolCapExceeded
 	}
-	if p.projected.orphanCommitOverheadBytes > p.projected.caps.orphanCommitOverheadBytes {
+	if p.placement.commitBytes > s.caps.orphanCommitOverheadBytes {
 		return errDARelayOrphanCommitCapExceeded
 	}
-	if p.source.nextReceivedTime == math.MaxUint64 {
+	if s.nextReceivedTime == math.MaxUint64 {
 		return errDARelayArithmeticOverflow
 	}
 	return nil
 }
 
 func (s *DARelayState) finishDACompleteCommit(p *daCompleteCommitPlan, commit *DACommit) (daRelayAdmissionOutcome, bool, error) {
-	err := p.mismatchRefusal()
+	err := p.mismatchRefusal(s)
 	if err != nil || p.capacityRejected {
 		commit.Abort()
+		s.discardDACompleteProvisional(p)
 		s.mu.Unlock()
 		return daRelayAdmissionOutcome{}, p.capacityRejected, err
 	}
+	p.sequence = s.nextReceivedTime + 1
 	p.member.token = commit.candidate
 	s.publishDACompleteLocked(p)
 	commit.Commit()
@@ -337,20 +456,25 @@ func (s *DARelayState) finishDACompleteCommit(p *daCompleteCommitPlan, commit *D
 }
 
 func (s *DARelayState) publishDACompleteLocked(p *daCompleteCommitPlan) {
-	projected := p.projected
-	s.nextReceivedTime = projected.nextReceivedTime
-	s.stagedBytes = projected.stagedBytes
-	s.completeBytes = projected.completeBytes
-	s.completeCount = projected.completeCount
-	s.orphanBytes = projected.orphanBytes
-	s.orphanBytesByPeerQuotaKey = projected.orphanBytesByPeerQuotaKey
-	s.orphanBytesByDAID = projected.orphanBytesByDAID
-	s.orphanCommitOverheadBytes = projected.orphanCommitOverheadBytes
-	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
-	s.sets = projected.sets
-	s.locators = projected.locators
-	s.records = projected.records
-	for _, id := range p.prefetch {
+	for _, row := range p.retire {
+		delete(s.locators, row.txid)
+	}
+	for _, id := range p.capacity.victims {
+		delete(s.sets, id)
 		s.prefetch.releaseSet(id)
 	}
+	s.sets[p.source.prior.daID] = p.next
+	s.nextReceivedTime = p.sequence
+	s.records = p.next.revision
+	s.stagedBytes = p.placement.stagedBytes
+	s.orphanBytes = p.placement.orphanBytes
+	s.orphanCommitOverheadBytes = p.placement.commitBytes
+	s.applyProjectedPeerBytes(p.placement.peerBytes)
+	s.applyProjectedDAIDBytes(p.source.prior.daID, p.placement.daBytes)
+	if !p.mismatch {
+		s.completeBytes = p.capacity.sharedBytes - p.placement.stagedBytes
+		s.completeCount = p.capacity.completeCount
+		s.pinnedPayloadBytes = p.capacity.payloadBytes
+	}
+	s.prefetch.releaseSet(p.source.prior.daID)
 }
