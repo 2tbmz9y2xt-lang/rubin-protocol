@@ -42,9 +42,9 @@ func TestAtomicWriteRealDurableSyncOnDarwin(t *testing.T) {
 			}
 			_, scratchIsOSFile = file.(*os.File)
 			return scratchSyncOverride{file, func() error {
-				err := file.Sync()
-				fileSyncs = append(fileSyncs, err)
-				return err
+				syncErr := file.Sync()
+				fileSyncs = append(fileSyncs, syncErr)
+				return syncErr
 			}}, nil
 		}
 		ops.syncParent = func(dir string) error {
