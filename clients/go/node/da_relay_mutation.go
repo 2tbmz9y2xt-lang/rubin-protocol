@@ -810,14 +810,14 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 }
 
 // checkPreservedOwnerReadySlots and its three helpers prove every live slot AND the
-// record's own five fields survive BYTE-IDENTICALLY. A locator row carries only txid and
+// record's own six fields survive BYTE-IDENTICALLY. A locator row carries only txid and
 // position, so a swapped fee, token, provenance, payload commitment or cached legacy key
 // passes it unseen. da_id and wireBytes are pinned above and revision is REMINTED whatever
-// the image carries, so the five complete the record. checkOwnerReadyRecord admits BOTH
+// the image carries, so the six complete the record. checkOwnerReadyRecord admits BOTH
 // OrphanChunks and StagedCommit, so only the state equality stops a resident image
-// switching between them; the other four move no counter at INSTALL, but the installed
+// switching between them; the other five move no counter at INSTALL, but the installed
 // record LIVES in s.sets, where missingChunkIndexes and validateChunkInsert read
-// replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all five.
+// replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all six.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
 	if !samePreservedRecordFields(live, next) {
 		return errDARelayImageIncompatible
@@ -829,7 +829,7 @@ func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLo
 }
 
 func samePreservedRecordFields(live, next daRelaySetRecord) bool {
-	return live.state == next.state && live.payloadBytes == next.payloadBytes &&
+	return live.state == next.state && live.payloadBytes == next.payloadBytes && live.completeIntrinsic == next.completeIntrinsic &&
 		live.receivedTime == next.receivedTime &&
 		live.ttlBlocksRemaining == next.ttlBlocksRemaining &&
 		(live.replaceableChunks == nil) == (next.replaceableChunks == nil) &&
@@ -1287,22 +1287,8 @@ func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 
 func checkOwnerReadyRetainedRecordLocked(record daRelaySetRecord) error {
 	if record.state == daRelayStateCompleteSet {
-		set, matches, err := parseDACompleteRecord(record)
-		if err != nil {
-			return errDARelayImageIncompatible
-		}
-		if !matches {
-			return errDARelayImageIncompatible
-		}
-		type completeShape struct {
-			member, chunks, revision, received, locators bool
-		}
-		shape := completeShape{record.commit.member != nil, len(record.chunks) == int(record.commit.chunkCount), record.revision != 0, record.receivedTime != 0, len(record.locatorRows()) != 0}
-		if shape != (completeShape{true, true, true, true, true}) {
-			return errDARelayImageIncompatible
-		}
-		if checkDACompleteResidues(record, set.payloadBytes) != nil {
-			return errDARelayImageIncompatible
+		if err := checkOwnerReadyCompleteRecord(record); err != nil {
+			return err
 		}
 	} else {
 		if record.ownerReadyRemovalGateFails() {
@@ -1313,6 +1299,21 @@ func checkOwnerReadyRetainedRecordLocked(record daRelaySetRecord) error {
 		}
 	}
 	return checkOwnerReadyRetainedInputs(record)
+}
+
+func checkOwnerReadyCompleteRecord(record daRelaySetRecord) error {
+	set, matches, err := parseDACompleteRecord(record)
+	if err != nil || !matches || record.completeIntrinsic != set {
+		return errDARelayImageIncompatible
+	}
+	type completeShape struct {
+		member, chunks, revision, received, locators bool
+	}
+	shape := completeShape{record.commit.member != nil, len(record.chunks) == int(record.commit.chunkCount), record.revision != 0, record.receivedTime != 0, len(record.locatorRows()) != 0}
+	if shape != (completeShape{true, true, true, true, true}) {
+		return errDARelayImageIncompatible
+	}
+	return checkDACompleteResidues(record, set.payloadBytes)
 }
 
 func checkOwnerReadyRetainedInputs(record daRelaySetRecord) error {

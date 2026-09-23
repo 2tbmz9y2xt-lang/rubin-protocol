@@ -44,6 +44,33 @@ func daCompleteCommitTestApply(t *testing.T, f *daNonReplayFixture, a *DAAdmissi
 	}
 }
 
+// Reconstruct the descriptor from retained transactions, without the completion parser.
+func intrinsicFromRetainedOracle(t *testing.T, record daRelaySetRecord, id [32]byte, payloads [][]byte, first uint64) daCompleteCapacitySet {
+	t.Helper()
+	if record.daID != id || record.receivedTime != first {
+		t.Fatal("retained DA identity or first accepted sequence")
+	}
+	commit, txid, wtxid, n, err := consensus.ParseTx(record.commit.txBytes)
+	if err != nil || n != len(record.commit.txBytes) || commit.DaCommitCore == nil || commit.DaCommitCore.DaID != id || int(commit.DaCommitCore.ChunkCount) != len(payloads) || record.commit.member == nil || record.commit.member.txid != txid || record.commit.member.wtxid != wtxid || record.commit.member.fee != (consensus.Uint128{Lo: 600_000}) {
+		t.Fatal("retained commit parse, identity or admission fee")
+	}
+	want := daCompleteCapacitySet{id: id, fee: consensus.Uint128{Lo: 600_000}, totalBytes: uint64(n), receivedSequence: first}
+	for i, payload := range payloads {
+		chunk := record.chunks[uint16(i)]
+		tx, chunkID, chunkWID, used, parseErr := consensus.ParseTx(chunk.txBytes)
+		if parseErr != nil || used != len(chunk.txBytes) || tx.DaChunkCore == nil || tx.DaChunkCore.DaID != id || tx.DaChunkCore.ChunkIndex != uint16(i) || !bytes.Equal(tx.DaPayload, payload) || sha3.Sum256(tx.DaPayload) != tx.DaChunkCore.ChunkHash || chunk.member == nil || chunk.member.txid != chunkID || chunk.member.wtxid != chunkWID || chunk.member.fee != (consensus.Uint128{Lo: 600_000}) {
+			t.Fatalf("retained chunk %d parse, payload, identity or admission fee", i)
+		}
+		want.fee.Lo += 600_000
+		want.totalBytes += uint64(used)
+		want.payloadBytes += uint64(len(tx.DaPayload))
+	}
+	if len(record.chunks) != len(payloads) || record.commit.payloadCommitment != sha3.Sum256(bytes.Join(payloads, nil)) {
+		t.Fatal("retained complete set shape or payload commitment")
+	}
+	return want
+}
+
 func requireDACompleteCommitReplayRejected(t *testing.T, f *daNonReplayFixture, a *DAAdmission, p *daCompleteCommitPlan, before daRelayStateView, owner *PendingOutpointOwner, wantState uint32) {
 	if out, rejected, err := f.relay.applyDACompleteCommit(a, p); out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayImageIncompatible) || a.guard.state.Load() != wantState {
 		t.Fatal("complete plan replay")
@@ -84,6 +111,10 @@ func TestDACompleteCommitMatching(t *testing.T) {
 			}
 			if r.state != 2 || r.ttlBlocksRemaining != 0 || r.wireBytes != 0 || r.replaceableChunks != nil || r.chunks[0].payload != nil || len(r.chunks) != 1 {
 				t.Fatal("exact C representation")
+			}
+			wantIntrinsic := intrinsicFromRetainedOracle(t, r, [32]byte{1}, [][]byte{[]byte("complete payload")}, 1)
+			if r.completeIntrinsic != wantIntrinsic {
+				t.Fatalf("State C intrinsic=%+v, want %+v", r.completeIntrinsic, wantIntrinsic)
 			}
 			if len(got.locators) != 2 || got.locators[c.member.member.txid] != c.member.locator {
 				t.Fatal("candidate locator")
@@ -157,6 +188,102 @@ func TestDACompleteCommitMatching(t *testing.T) {
 	}
 	if f.relay.completeCount != 1 || f.relay.pinnedPayloadBytes != 16 || f.relay.completeBytes != uint64(len(a.snapshot.TxBytes)+len(p.source.prior.chunks[0].txBytes)) {
 		t.Fatal("victim C bytes count payload")
+	}
+}
+
+func TestDAStateCIntrinsicOwnership(t *testing.T) {
+	for _, commitLast := range []bool{true, false} {
+		t.Run(fmt.Sprint(commitLast), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 8)
+			id, payload := [32]byte{1}, []byte("complete payload")
+			chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: id, payload: payload, inputCount: 2})
+			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 1, commitment: sha3.Sum256(payload), commitmentOutputs: 1})
+			last, survivor := chunk, commit
+			if commitLast {
+				f.admit(chunk, daNonReplayPeer("retained"))
+				last, survivor = commit, chunk
+			} else {
+				f.admit(commit, DetachedReorgDAProvenance())
+			}
+			prior := f.relay.sets[id]
+			if prior.completeIntrinsic != (daCompleteCapacitySet{}) {
+				t.Fatal("State A/B carried a complete intrinsic descriptor")
+			}
+			wantCommitRaw, wantChunkRaw := slices.Clone(commit.raw), slices.Clone(chunk.raw)
+			wantCommitInputs, wantChunkInputs := slices.Clone(commit.inputs), slices.Clone(chunk.inputs)
+			a := f.begin(last)
+			t.Cleanup(func() {
+				if a.guard.state.Load() != daAdmissionClosed {
+					a.Close()
+				}
+			})
+			candidate, err := a.renderDARelayAdmissionCandidate(LocalDAProvenance())
+			if err != nil {
+				t.Fatal(err)
+			}
+			last.raw[0] ^= 1
+			survivor.raw[0] ^= 1
+			ownerHigh := f.mp.pendingOutpoints.tokenHighWater
+			plan, result := daCompleteCommitTestPlan(t, f, a, candidate)
+			candidate.member.txBytes[0] ^= 1
+			candidate.member.member.inputs[0].Vout++
+			result.prepared.image.next.commit.txBytes[0] ^= 1
+			result.prepared.image.next.commit.member.inputs[0].Vout++
+			imageChunk := result.prepared.image.next.chunks[0]
+			imageChunk.txBytes[0] ^= 1
+			imageChunk.member.inputs[0].Vout++
+			result.prepared.image.next.chunks[0] = imageChunk
+			daCompleteCommitTestApply(t, f, a, plan)
+
+			record := f.relay.sets[id]
+			wantIntrinsic := intrinsicFromRetainedOracle(t, record, id, [][]byte{payload}, 1)
+			if record.completeIntrinsic != wantIntrinsic {
+				t.Fatalf("published State C intrinsic=%+v, want %+v", record.completeIntrinsic, wantIntrinsic)
+			}
+			if !bytes.Equal(record.commit.txBytes, wantCommitRaw) || !bytes.Equal(record.chunks[0].txBytes, wantChunkRaw) || !slices.Equal(record.commit.member.inputs, wantCommitInputs) || !slices.Equal(record.chunks[0].member.inputs, wantChunkInputs) {
+				t.Fatal("retained commit/chunk/input aliases changed through caller or source image")
+			}
+			candidateToken := PendingOutpointToken{owner: f.mp.pendingOutpoints, seq: ownerHigh + 1}
+			if (commitLast && (record.commit.member.token != candidateToken || record.chunks[0].member.token != prior.chunks[0].member.token)) || (!commitLast && (record.chunks[0].member.token != candidateToken || record.commit.member.token != prior.commit.member.token)) {
+				t.Fatal("State C owner tokens differ from reserved/surviving values")
+			}
+
+			provided := f.relay.CompleteSetCandidates(math.MaxUint64)
+			if len(provided) != 1 || len(provided[0].Chunks) != 1 {
+				t.Fatalf("provider snapshot=%+v", provided)
+			}
+			provided[0].CommitTx[0] ^= 1
+			provided[0].Chunks[0].Tx[0] ^= 1
+			provided[0].Chunks = nil
+			again := f.relay.CompleteSetCandidates(math.MaxUint64)
+			if len(again) != 1 || len(again[0].Chunks) != 1 || !bytes.Equal(again[0].CommitTx, wantCommitRaw) || !bytes.Equal(again[0].Chunks[0].Tx, wantChunkRaw) || f.relay.sets[id].completeIntrinsic != wantIntrinsic {
+				t.Fatal("provider snapshot aliases retained State C")
+			}
+			a.Close()
+			replay := last
+			if commitLast {
+				replay.raw = slices.Clone(wantCommitRaw)
+			} else {
+				replay.raw = slices.Clone(wantChunkRaw)
+			}
+			requireExactDADuplicate(t, f, replay)
+
+			corrupt := record.cloneOwnerReady()
+			corrupt.commit.txBytes[0] ^= 1
+			if !daCompleteTestError(checkOwnerReadyRetainedRecordLocked(corrupt), errDARelayImageIncompatible) {
+				t.Fatal("direct retained-byte corruption bypassed full validation")
+			}
+			corrupt = record.cloneOwnerReady()
+			corrupt.completeIntrinsic.totalBytes++
+			if !daCompleteTestError(checkOwnerReadyRetainedRecordLocked(corrupt), errDARelayImageIncompatible) {
+				t.Fatal("descriptor mismatch bypassed owner-ready validation")
+			}
+			corrupt = record.cloneOwnerReady()
+			corrupt.completeIntrinsic = daCompleteCapacitySet{}
+			if !daCompleteTestError(checkOwnerReadyRetainedRecordLocked(corrupt), errDARelayImageIncompatible) {
+				t.Fatal("legacy zero descriptor was promoted to owner-ready State C")
+			}
+		})
 	}
 }
 
@@ -313,7 +440,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"C survivor record", "C survivor payload nilness", "C survivor token", "C survivor input", "C victim record", "C victim claim before baseline"} {
+	for _, name := range []string{"C survivor record", "C survivor intrinsic", "C survivor payload nilness", "C survivor token", "C survivor input", "C victim record", "C victim claim before baseline"} {
 		t.Run(name, func(t *testing.T) {
 			f, a, c, residents := daCompleteCommitPhysicalVictims(t, 2)
 			f.relay.stagedBytes -= 2 // Select the first C record; the second survives.
@@ -328,6 +455,10 @@ func TestDACompleteCommitStale(t *testing.T) {
 			case "C survivor record", "C victim record":
 				updated := chosen.cloneOwnerReady()
 				updated.commit.txBytes[0]++
+				f.relay.sets[chosen.daID] = updated
+			case "C survivor intrinsic":
+				updated := chosen.cloneOwnerReady()
+				updated.completeIntrinsic.totalBytes++
 				f.relay.sets[chosen.daID] = updated
 			case "C survivor payload nilness":
 				updated := chosen.cloneOwnerReady()
@@ -472,7 +603,7 @@ func TestDACompleteCommitMismatch(t *testing.T) {
 	daCompleteCommitTestApply(t, f, a, p)
 	got := daRelayStateSnapshot(f.relay)
 	r := got.sets[[32]byte{1}]
-	if r.state != 1 || len(r.chunks) != 0 || len(got.locators) != 1 || got.locators[a.snapshot.TxID] != c.member.locator {
+	if r.state != 1 || r.completeIntrinsic != (daCompleteCapacitySet{}) || len(r.chunks) != 0 || len(got.locators) != 1 || got.locators[a.snapshot.TxID] != c.member.locator {
 		t.Fatal("exact removed-set includes in-range and out-of-range")
 	}
 	if got.stagedBytes != uint64(len(a.snapshot.TxBytes)) || got.commitBytes != uint64(len(a.snapshot.TxBytes)) || got.orphanBytes != 0 || len(got.peerBytes) != 0 || len(got.daIDBytes) != 0 || got.completeBytes != 0 || got.completeCount != 0 || got.pinnedPayloadBytes != 0 {

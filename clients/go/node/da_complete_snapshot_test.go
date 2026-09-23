@@ -678,6 +678,7 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 			change func(*daRelaySetRecord)
 		}{
 			{"parse", func(r *daRelaySetRecord) { r.commit.txBytes = []byte{0} }},
+			{"intrinsic descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes++ }},
 			{"payload total", func(r *daRelaySetRecord) { r.payloadBytes++ }},
 			{"revision zero", func(r *daRelaySetRecord) { r.revision = 0 }},
 			{"revision high", func(r *daRelaySetRecord) { r.revision = math.MaxUint64 }},

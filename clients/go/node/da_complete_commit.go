@@ -225,10 +225,11 @@ func sameDACompleteRecord(a, b daRelaySetRecord) bool {
 		id                                     [32]byte
 		state                                  daRelaySetState
 		revision, received, payload, wire, ttl uint64
+		intrinsic                              daCompleteCapacitySet
 		replaceable, chunks                    bool
 	}
-	x := header{a.daID, a.state, a.revision, a.receivedTime, a.payloadBytes, a.wireBytes, a.ttlBlocksRemaining, a.replaceableChunks == nil, a.chunks == nil}
-	y := header{b.daID, b.state, b.revision, b.receivedTime, b.payloadBytes, b.wireBytes, b.ttlBlocksRemaining, b.replaceableChunks == nil, b.chunks == nil}
+	x := header{a.daID, a.state, a.revision, a.receivedTime, a.payloadBytes, a.wireBytes, a.ttlBlocksRemaining, a.completeIntrinsic, a.replaceableChunks == nil, a.chunks == nil}
+	y := header{b.daID, b.state, b.revision, b.receivedTime, b.payloadBytes, b.wireBytes, b.ttlBlocksRemaining, b.completeIntrinsic, b.replaceableChunks == nil, b.chunks == nil}
 	if x != y || !maps.Equal(a.replaceableChunks, b.replaceableChunks) || !sameOwnerReadyCommit(a.commit, b.commit) {
 		return false
 	}

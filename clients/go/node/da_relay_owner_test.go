@@ -1323,6 +1323,11 @@ func (f *daNonReplayFixture) completeReplay(daID [32]byte, kind uint8, payload .
 		record.commit = daRelayCommit{daID: daID, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: append([]consensus.Outpoint(nil), commit.inputs...), token: token, provenance: daNonReplayPeer("commit")}, chunkCount: 1, txBytes: append([]byte(nil), commit.raw...)}
 		record.wireBytes = 0
 		record.markComplete(uint64(len(chunk.spec.payload)))
+		set, matches, err := parseDACompleteRecord(record)
+		if err != nil || !matches {
+			f.t.Fatalf("complete replay intrinsic: matches=%v err=%v", matches, err)
+		}
+		record.completeIntrinsic = set
 		s.locators[commit.txid] = daRelayLocator{daID: daID, kind: daRelayLocatorCommit}
 		s.sets[daID] = record
 	})
@@ -4957,7 +4962,9 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		{"zero revision", false, func(x completeCorruptionTarget) { x.record.revision = 0 }},
 		{"zero accepted sequence", false, func(x completeCorruptionTarget) { x.record.receivedTime = 0 }},
 		{"revision above high-water", true, func(x completeCorruptionTarget) { x.record.revision = ^uint64(0) }},
-		{"accepted sequence above high-water", true, func(x completeCorruptionTarget) { x.record.receivedTime = ^uint64(0) }},
+		{"accepted sequence above high-water", true, func(x completeCorruptionTarget) {
+			x.record.receivedTime, x.record.completeIntrinsic.receivedSequence = ^uint64(0), ^uint64(0)
+		}},
 	} {
 		for _, selector := range ownerReadyRemovalSelectors {
 			f, id := newDANonReplayFixture(t, 4), [32]byte{0xc7}

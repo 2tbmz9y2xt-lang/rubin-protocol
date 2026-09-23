@@ -174,6 +174,10 @@ func (source *daCompleteSnapshot) prepareMatching(image daRelayRecordImage, prun
 		return daCompletePreparation{}, err
 	}
 	image.next.markComplete(set.payloadBytes)
+	if set.id != image.next.daID || set.totalBytes == 0 || set.payloadBytes != image.next.payloadBytes || set.receivedSequence != image.next.receivedTime {
+		return daCompletePreparation{}, errDARelayImageIncompatible
+	}
+	image.next.completeIntrinsic = set
 	return daCompletePreparation{prepared: &daCompletePrepared{source: source, image: image, pruned: pruned, input: input}}, nil
 }
 
@@ -410,7 +414,7 @@ func (s *daCompleteSnapshot) prepareResident(record daRelaySetRecord, txids map[
 	if err != nil {
 		return daCompleteCapacitySet{}, err
 	}
-	if !matches || s.checkResidentShape(record, set.payloadBytes) != nil {
+	if !matches || record.completeIntrinsic != set || s.checkResidentShape(record, set.payloadBytes) != nil {
 		return daCompleteCapacitySet{}, errDARelayImageIncompatible
 	}
 	return set, nil
