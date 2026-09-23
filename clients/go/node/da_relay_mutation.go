@@ -1266,16 +1266,22 @@ func ownerReadyClaimIndexBound(key PendingOutpointToken, claim *pendingOutpointC
 	return true
 }
 
-// The per-candidate shape gate is checkDANonReplayShape, the predicate
-// validateCanonicalDARetainedSnapshot applies to every retained record — not the weaker
-// checkOwnerReadyRecord it wraps. The TTL and receivedTime bounds it does not read are applied by
-// ownerReadyRemovalGateFails, and the preflight is unconditional.
+// Cleanup keeps the existing A/B shape, scalar and retained-binding checks; C uses its metadata validator; canonical D1/O1 retains full checkOwnerReadyRetainedRecordLocked validation.
 //
-// Cost under the admission fence and DARelayState.mu: A/B use their shape/binder path, C uses parseDACompleteRecord plus exact shape/residue/input checks, and bound cleanup scans byToken (including claim inputs) and byOutpoint once over off-lock censuses after the full retained-byte, locator and accounting pass.
+// Cost under the admission fence and DARelayState.mu: A/B use their shape/binder path, C uses
+// producer-proven intrinsic metadata plus exact shape/residue/input checks, and bound cleanup scans
+// byToken (including claim inputs) and byOutpoint once after the locator and accounting pass.
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	candidates := s.sortedRetainedDAIDsLocked()
 	for _, daID := range candidates {
-		if err := checkOwnerReadyRetainedRecordLocked(s.sets[daID]); err != nil {
+		record := s.sets[daID]
+		var err error
+		if record.state == daRelayStateCompleteSet {
+			err = checkOwnerReadyCleanupCompleteRecord(record)
+		} else {
+			err = checkOwnerReadyRetainedRecordLocked(record)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1299,6 +1305,69 @@ func checkOwnerReadyRetainedRecordLocked(record daRelaySetRecord) error {
 		}
 	}
 	return checkOwnerReadyRetainedInputs(record)
+}
+
+func checkOwnerReadyCleanupCompleteRecord(record daRelaySetRecord) error {
+	type completeHeader struct {
+		state       daRelaySetState
+		descriptor  bool
+		commit      bool
+		count       bool
+		countWithin bool
+		chunks      bool
+		revision    bool
+		received    bool
+	}
+	header := completeHeader{
+		record.state,
+		record.completeIntrinsic != (daCompleteCapacitySet{}),
+		record.commit.member != nil,
+		record.commit.chunkCount != 0,
+		uint64(record.commit.chunkCount) <= consensus.MAX_DA_CHUNK_COUNT,
+		len(record.chunks) == int(record.commit.chunkCount),
+		record.revision != 0,
+		record.receivedTime != 0,
+	}
+	if header != (completeHeader{daRelayStateCompleteSet, true, true, true, true, true, true, true}) {
+		return errDARelayImageIncompatible
+	}
+	set := daCompleteCapacitySet{id: record.daID, payloadBytes: record.payloadBytes, receivedSequence: record.receivedTime}
+	if addOwnerReadyCleanupCompleteMember(&set, record.commit.member, record.commit.txBytes) != nil {
+		return errDARelayImageIncompatible
+	}
+	for index, chunk := range record.chunks {
+		if checkOwnerReadyCleanupCompleteChunk(&set, record.daID, index, chunk) != nil {
+			return errDARelayImageIncompatible
+		}
+	}
+	type completeTotals struct {
+		set     daCompleteCapacitySet
+		nonzero bool
+	}
+	if (completeTotals{set, set.totalBytes != 0}) != (completeTotals{record.completeIntrinsic, true}) {
+		return errDARelayImageIncompatible
+	}
+	if err := checkDACompleteResidues(record, record.payloadBytes); err != nil {
+		return err
+	}
+	return checkOwnerReadyRetainedInputs(record)
+}
+
+func checkOwnerReadyCleanupCompleteChunk(set *daCompleteCapacitySet, daID [32]byte, index uint16, chunk daRelayChunk) error {
+	if chunk.chunkIndex != index || chunk.daID != daID || chunk.payload != nil {
+		return errDARelayImageIncompatible
+	}
+	return addOwnerReadyCleanupCompleteMember(set, chunk.member, chunk.txBytes)
+}
+
+func addOwnerReadyCleanupCompleteMember(set *daCompleteCapacitySet, member *daRelayMemberIdentity, raw []byte) error {
+	if member.validate() != nil || checkOwnerReadyRetainedBytes(raw) != nil {
+		return errDARelayImageIncompatible
+	}
+	if err := addDACompleteMember(set, member, raw, nil); err != nil {
+		return errDARelayImageIncompatible
+	}
+	return nil
 }
 
 func checkOwnerReadyCompleteRecord(record daRelaySetRecord) error {
