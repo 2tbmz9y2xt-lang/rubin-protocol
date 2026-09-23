@@ -308,6 +308,9 @@ func TestDevnetLongestChainWinsReplayGate(t *testing.T) {
 }
 
 func TestDevnetSoakWithTxGenAndRestart(t *testing.T) {
+	if os.Getenv("RUBIN_DEVNET_SOAK") != "1" {
+		t.Skip("devnet soak test runs only with RUBIN_DEVNET_SOAK=1")
+	}
 	const (
 		targetHeight    = 1000
 		checkpointEvery = 100

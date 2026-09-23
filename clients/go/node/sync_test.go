@@ -1431,18 +1431,70 @@ type pendingOutpointSyncFixture struct {
 	alreadyGenerated uint64
 }
 
-func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
+// pendingOutpointTemplate is the height-100 chain every fixture copies: built
+// once by the first caller that needs it and removed by TestMain. f holds the
+// template's keys and chain values; its engine, store, mempool and owner stay nil.
+var pendingOutpointTemplate struct {
+	sync.Mutex
+	dir    string
+	destKP *consensus.MLDSA87Keypair
+	f      *pendingOutpointSyncFixture
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if tmpl := &pendingOutpointTemplate; tmpl.f != nil {
+		tmpl.f.sourceKP.Close()
+		tmpl.destKP.Close()
+		_ = os.RemoveAll(tmpl.dir)
+	}
+	os.Exit(code)
+}
+
+// buildPendingOutpointTemplate runs under the template lock. A build that ends
+// early removes its directory and keys and leaves the template unbuilt.
+func buildPendingOutpointTemplate(t *testing.T) {
 	t.Helper()
-	engine, store, target := newReorgTestEngine(t)
-	sourceKP := mustReorgMLDSA87Keypair(t)
-	destKP := mustReorgMLDSA87Keypair(t)
+	dir, err := os.MkdirTemp("", "rubin-pending-outpoint-template-")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	var keys []*consensus.MLDSA87Keypair
+	defer func() {
+		if pendingOutpointTemplate.f == nil {
+			for _, kp := range keys {
+				kp.Close()
+			}
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	store, err := CreateBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("CreateBlockStore: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	engine, err := NewSyncEngine(NewChainState(), store, DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir)))
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
+	if _, err := engine.ApplyBlock(devnetGenesisBlockBytes, nil); err != nil {
+		t.Fatalf("ApplyBlock(genesis): %v", err)
+	}
+	for range 2 {
+		kp, err := consensus.NewMLDSA87Keypair()
+		if err != nil {
+			if strings.Contains(err.Error(), "unsupported") {
+				t.Skipf("ML-DSA backend unavailable in this OpenSSL build: %v", err)
+			}
+			t.Fatalf("NewMLDSA87Keypair: %v", err)
+		}
+		keys = append(keys, kp)
+	}
 	f := &pendingOutpointSyncFixture{
-		engine:        engine,
-		store:         store,
 		target:        target,
-		sourceKP:      sourceKP,
-		sourceAddress: consensus.P2PKCovenantDataForPubkey(sourceKP.PubkeyBytes()),
-		destAddress:   consensus.P2PKCovenantDataForPubkey(destKP.PubkeyBytes()),
+		sourceKP:      keys[0],
+		sourceAddress: consensus.P2PKCovenantDataForPubkey(keys[0].PubkeyBytes()),
+		destAddress:   consensus.P2PKCovenantDataForPubkey(keys[1].PubkeyBytes()),
 		tipHash:       devnetGenesisBlockHash,
 	}
 	// COINBASE_MATURITY blocks so the height-1 coinbase output is spendable.
@@ -1462,13 +1514,62 @@ func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
 		}
 		f.tipHash, f.tipHeight, f.alreadyGenerated = summary.BlockHash, height, f.alreadyGenerated+subsidy
 	}
+	pendingOutpointTemplate.dir, pendingOutpointTemplate.destKP, pendingOutpointTemplate.f = dir, keys[1], f
+}
+
+// newPendingOutpointSyncFixture gives the caller its own byte copy of the
+// template chain, opened as a fresh engine with its own mempool and owner.
+func newPendingOutpointSyncFixture(t *testing.T) *pendingOutpointSyncFixture {
+	t.Helper()
+	tmpl := &pendingOutpointTemplate
+	tmpl.Lock()
+	defer tmpl.Unlock()
+	if tmpl.f == nil {
+		buildPendingOutpointTemplate(t)
+	}
+	f := *tmpl.f
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(tmpl.dir)); err != nil {
+		t.Fatalf("CopyFS(template): %v", err)
+	}
+	store, err := OpenBlockStore(BlockStorePath(dir))
+	if err != nil {
+		t.Fatalf("OpenBlockStore: %v", err)
+	}
+	state, err := LoadChainState(ChainStatePath(dir))
+	if err != nil {
+		t.Fatalf("LoadChainState: %v", err)
+	}
+	target := consensus.POW_LIMIT
+	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, ChainStatePath(dir))
+	if _, err := ReconcileChainStateWithBlockStore(state, store, cfg); err != nil {
+		t.Fatalf("ReconcileChainStateWithBlockStore: %v", err)
+	}
+	engine, err := NewSyncEngine(state, store, cfg)
+	if err != nil {
+		t.Fatalf("NewSyncEngine: %v", err)
+	}
 	mempool, err := NewMempool(engine.chainState, store, devnetGenesisChainID)
 	if err != nil {
 		t.Fatalf("NewMempool: %v", err)
 	}
 	engine.SetMempool(mempool)
-	f.mempool, f.owner = mempool, mempool.PendingOutpointOwner()
-	return f
+	f.engine, f.store, f.mempool, f.owner = engine, store, mempool, mempool.PendingOutpointOwner()
+	return &f
+}
+
+func TestPendingOutpointSyncFixtureCopiesAreIndependent(t *testing.T) {
+	a, b := newPendingOutpointSyncFixture(t), newPendingOutpointSyncFixture(t)
+	if a.store.rootPath == b.store.rootPath || a.store.rootPath == BlockStorePath(pendingOutpointTemplate.dir) {
+		t.Fatalf("fixture store roots a=%s b=%s template=%s, want distinct", a.store.rootPath, b.store.rootPath, pendingOutpointTemplate.dir)
+	}
+	summary := a.applyForkBlock(t)
+	if _, err := a.store.GetBlockByHash(summary.BlockHash); err != nil {
+		t.Fatalf("a.GetBlockByHash: %v", err)
+	}
+	if _, err := b.store.GetBlockByHash(summary.BlockHash); err == nil {
+		t.Fatal("block applied through fixture a is present in fixture b")
+	}
 }
 
 // spend builds a signed transfer of the fixture's spendable coinbase output.
