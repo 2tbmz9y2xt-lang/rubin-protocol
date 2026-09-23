@@ -696,13 +696,14 @@ func TestDACompleteCommitStale(t *testing.T) {
 			o := f.mp.pendingOutpoints
 			member := f.relay.sets[[32]byte{1}].chunks[0].member
 			want := "DA victim claim mismatch"
-			if field == "survivor input" || field == "baseline before survivor" {
+			switch field {
+			case "survivor input", "baseline before survivor":
 				delete(o.byOutpoint, member.inputs[0])
 				want = "DA victim input mismatch"
-			} else if field == "victim before baseline" {
+			case "victim before baseline":
 				member = f.relay.sets[[32]byte{1}].chunks[3].member
 				o.byToken[member.token].finalized = false
-			} else {
+			case "survivor token":
 				o.byToken[member.token].finalized = false
 			}
 			if field == "baseline before survivor" || field == "victim before baseline" {
@@ -779,6 +780,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 		})
 	}
 }
+
 func daCompleteCommitPhysicalVictims(t *testing.T, count int) (*daNonReplayFixture, *DAAdmission, daRelayAdmissionCandidate, []daRelaySetRecord) {
 	t.Helper()
 	f := newDANonReplayFixture(t, 12)

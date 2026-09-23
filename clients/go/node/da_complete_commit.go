@@ -376,7 +376,8 @@ func (s *DARelayState) preflightDACompleteCommit(p *daCompleteCommitPlan) error 
 	if ([4]bool{s.sets != nil, s.locators != nil, s.orphanBytesByDAID != nil, s.orphanBytesByPeerQuotaKey != nil}) != ([4]bool{true, true, true, true}) {
 		return errDARelayImageIncompatible
 	}
-	s.sets[p.source.prior.daID] = s.sets[p.source.prior.daID]
+	value := s.sets[p.source.prior.daID]
+	s.sets[p.source.prior.daID] = value
 	if value, ok := s.orphanBytesByDAID[p.source.prior.daID]; ok {
 		s.orphanBytesByDAID[p.source.prior.daID] = value
 	}

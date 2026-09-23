@@ -301,8 +301,11 @@ type daCompleteLiveTotals struct {
 }
 
 func (s *DARelayState) capacityInput(source *daCompleteSnapshot, candidate daCompleteCapacitySet) (daCompleteCapacityInput, error) {
-	in := daCompleteCapacityInput{byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
-		completeBytes: s.completeBytes, completeCount: s.completeCount, completePayload: s.pinnedPayloadBytes, candidate: candidate}
+	in := daCompleteCapacityInput{
+		byteCap: s.caps.stagedBytes, stagedBytes: s.stagedBytes,
+		completeBytes: s.completeBytes, completeCount: s.completeCount,
+		completePayload: s.pinnedPayloadBytes, candidate: candidate,
+	}
 	accounting, err := source.prior.ownerReadyAccounting()
 	if err != nil {
 		return daCompleteCapacityInput{}, err
