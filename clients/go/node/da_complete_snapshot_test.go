@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -16,7 +17,6 @@ func daCompleteTestError(err, want error) bool {
 }
 
 // Signed fixture bytes and real admission tokens supply identity/provenance.
-// Direct fee edits in Accounting below are sum-layer evidence only.
 func daCompleteTestCandidate(t *testing.T, commitLast bool, prune, residents int) (*daNonReplayFixture, *DAAdmission, daRelayAdmissionCandidate) {
 	t.Helper()
 	f := newDANonReplayFixture(t, 20)
@@ -63,25 +63,6 @@ func daCompleteTestCapture(t *testing.T, f *daNonReplayFixture, c daRelayAdmissi
 	return s
 }
 
-func TestDACompleteSnapshotPublicationBase(t *testing.T) {
-	f, _, c := daCompleteTestCandidate(t, true, 1, 1)
-	unrelated := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{90}, payload: []byte{9}})
-	f.admit(unrelated, LocalDAProvenance())
-	s := daCompleteTestCapture(t, f, c)
-	if s.publicationBase == nil {
-		t.Fatal("publication base must share the first coherent capture")
-	}
-	base := daRelayStateSnapshot(s.publicationBase)
-	baseOwner := cloneDAAdmissionOwner(s.owner)
-	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints))
-	delete(f.relay.locators, unrelated.txid)
-	r := f.relay.sets[unrelated.spec.daID]
-	r.ttlBlocksRemaining--
-	f.relay.sets[r.daID] = r
-	f.relay.sets[[32]byte{1}].chunks[0].txBytes[0]++
-	requireDANonReplayUnchanged(t, s.publicationBase, s.owner, base, baseOwner)
-}
-
 func daCompleteTestPrepare(t *testing.T, f *daNonReplayFixture, a *DAAdmission, s *daCompleteSnapshot) (daCompletePreparation, error) {
 	t.Helper()
 	before, owner, admission := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), a.Snapshot()
@@ -91,6 +72,20 @@ func daCompleteTestPrepare(t *testing.T, f *daNonReplayFixture, a *DAAdmission, 
 		t.Fatal("preparation changed admission lifecycle")
 	}
 	return result, err
+}
+
+func requireDACompleteImageRefusal(t *testing.T, f *daNonReplayFixture, a *DAAdmission, result daCompletePreparation) {
+	t.Helper()
+	p, err := f.relay.prepareDACompleteCommit(a, result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	out, rejected, err := f.relay.applyDACompleteCommit(a, p)
+	if out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayImageIncompatible) || a.guard.state.Load() != daAdmissionOpen {
+		t.Fatal("live image refusal before Reserve", out, rejected, err)
+	}
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
 }
 
 func daCompleteTestChunk(s *daCompleteSnapshot, mutate func(*daRelayChunk)) {
@@ -103,37 +98,34 @@ func TestDACompleteSnapshotPlannerInput(t *testing.T) {
 	for _, commitLast := range []bool{true, false} {
 		for _, residents := range []int{0, 1, 2} {
 			f, a, c := daCompleteTestCandidate(t, commitLast, 0, residents)
-			s := daCompleteTestCapture(t, f, c)
-			result, err := daCompleteTestPrepare(t, f, a, s)
+			source := daCompleteTestCapture(t, f, c)
+			result, err := daCompleteTestPrepare(t, f, a, source)
 			if err != nil || result.prepared == nil || result.duplicate != nil || result.mismatch != nil {
-				t.Fatalf("prepared planner input: result=%+v err=%v", result, err)
+				t.Fatalf("candidate preparation: %+v %v", result, err)
 			}
-			p := result.prepared
 			priorRaw, payload, credit := uint64(0), uint64(0), uint64(0)
 			if commitLast {
-				priorRaw = uint64(len(s.prior.chunks[0].txBytes))
-				payload = uint64(len(s.prior.chunks[0].payload))
+				priorRaw = uint64(len(source.prior.chunks[0].txBytes))
+				payload = uint64(len(source.prior.chunks[0].payload))
 			} else {
-				priorRaw = uint64(len(s.prior.commit.txBytes))
+				priorRaw = uint64(len(source.prior.commit.txBytes))
 				payload = uint64(len(c.member.payload))
 				credit = priorRaw
 			}
-			want := daCompleteCapacityInput{
-				byteCap: 536870912, stagedBytes: credit, priorCredit: credit,
-				completeBytes: f.relay.completeBytes, completeCount: uint64(residents), completePayload: uint64(residents),
-				candidate: daCompleteCapacitySet{id: [32]byte{1}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: priorRaw + uint64(len(c.member.txBytes)), payloadBytes: payload, receivedSequence: s.prior.receivedTime},
+			wantSet := daCompleteCapacitySet{id: [32]byte{1}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: priorRaw + uint64(len(c.member.txBytes)), payloadBytes: payload, receivedSequence: source.prior.receivedTime}
+			if result.prepared.set != wantSet || result.prepared.source != source {
+				t.Fatalf("off-DA candidate descriptor: got=%+v want=%+v", result.prepared.set, wantSet)
 			}
+			f.relay.mu.Lock()
+			input, err := f.relay.capacityInput(source, result.prepared.set)
+			f.relay.mu.Unlock()
+			want := daCompleteCapacityInput{byteCap: 536870912, stagedBytes: credit, priorCredit: credit, completeBytes: f.relay.completeBytes, completeCount: uint64(residents), completePayload: uint64(residents), candidate: wantSet}
 			for i := 1; i <= residents; i++ {
 				r := f.relay.sets[[32]byte{byte(10 + i)}]
-				want.residents = append(want.residents, daCompleteCapacitySet{id: [32]byte{byte(10 + i)}, fee: consensus.Uint128{Lo: 1200000}, totalBytes: uint64(len(r.commit.txBytes) + len(r.chunks[0].txBytes)), payloadBytes: 1, receivedSequence: r.receivedTime})
+				want.residents = append(want.residents, r.completeIntrinsic)
 			}
-			if !reflect.DeepEqual(p.input, want) || p.source != s {
-				t.Fatalf("prepared planner input: got=%+v want=%+v", p.input, want)
-			}
-			plan, err := planDACompleteCapacity(p.input)
-			wantPlan := daCompleteCapacityPlan{accepted: true, sharedBytes: want.completeBytes + want.candidate.totalBytes, completeCount: uint64(residents + 1), payloadBytes: uint64(residents) + payload}
-			if err != nil || !reflect.DeepEqual(plan, wantPlan) {
-				t.Fatalf("prepared planner input: plan=%+v want=%+v err=%v", plan, wantPlan, err)
+			if err != nil || input.byteCap != want.byteCap || input.stagedBytes != want.stagedBytes || input.priorCredit != want.priorCredit || input.completeBytes != want.completeBytes || input.completeCount != want.completeCount || input.completePayload != want.completePayload || input.candidate != want.candidate || !sameDACompleteSets(input.residents, want.residents) {
+				t.Fatalf("final-lock planner input: got=%+v want=%+v err=%v", input, want, err)
 			}
 		}
 	}
@@ -152,84 +144,79 @@ func TestDACompleteSnapshotPlannerInput(t *testing.T) {
 			t.Fatal(err)
 		}
 		out, err := daCompleteTestPrepare(t, f, a, daCompleteTestCapture(t, f, c))
-		want := daCompleteCapacityInput{byteCap: 536870912, candidate: daCompleteCapacitySet{
-			id:  id,
-			fee: consensus.Uint128{Lo: 1800000}, totalBytes: uint64(len(first.raw) + len(second.raw) + len(commit.raw)), payloadBytes: 9, receivedSequence: 1,
-		}}
-		if err != nil || out.prepared == nil || out.mismatch != nil || out.duplicate != nil || !reflect.DeepEqual(out.prepared.input, want) {
-			t.Fatal("prepared planner input: ascending chunks", err)
+		want := daCompleteCapacitySet{id: id, fee: consensus.Uint128{Lo: 1800000}, totalBytes: uint64(len(first.raw) + len(second.raw) + len(commit.raw)), payloadBytes: 9, receivedSequence: 1}
+		if err != nil || out.prepared == nil || out.prepared.set != want {
+			t.Fatal("ascending candidate descriptor", err)
 		}
 		r := out.prepared.image.next
-		if !slices.Equal(r.chunks[0].member.inputs, first.inputs) || !slices.Equal(r.chunks[1].member.inputs, second.inputs) || !slices.Equal(r.commit.member.inputs, commit.inputs) || r.chunks[0].member.token.seq != 2 || r.chunks[1].member.token.seq != 1 || r.commit.chunkCount != 2 {
-			t.Fatal("prepared planner input: exact retained members")
-		}
-		plan, err := planDACompleteCapacity(out.prepared.input)
-		if err != nil || !reflect.DeepEqual(plan, daCompleteCapacityPlan{accepted: true, sharedBytes: want.candidate.totalBytes, completeCount: 1, payloadBytes: 9}) {
-			t.Fatal("prepared planner input: ascending plan", err)
+		if !slices.Equal(r.chunks[0].member.inputs, first.inputs) || !slices.Equal(r.chunks[1].member.inputs, second.inputs) || !slices.Equal(r.commit.member.inputs, commit.inputs) || r.chunks[0].member.token.seq != 2 || r.chunks[1].member.token.seq != 1 {
+			t.Fatal("ascending retained members")
 		}
 	})
+}
+
+func sameDACompleteSets(a, b []daCompleteCapacitySet) bool {
+	return len(a) == len(b) && !slices.ContainsFunc(b, func(set daCompleteCapacitySet) bool { return !slices.Contains(a, set) })
 }
 
 func TestDACompleteSnapshotPrune(t *testing.T) {
 	for _, count := range []int{0, 1, 2} {
 		f, a, c := daCompleteTestCandidate(t, true, count, 0)
 		s := daCompleteTestCapture(t, f, c)
-		if count == 2 { // Synthetic sum-layer witness: pruned fees do not aggregate.
+		if count == 2 {
 			s.prior.chunks[3].member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
 			s.prior.chunks[4].member.fee = consensus.Uint128{Lo: 1}
 		}
 		result, err := daCompleteTestPrepare(t, f, a, s)
 		if err != nil || result.prepared == nil {
-			t.Fatalf("exact isolated prune evidence: %v", err)
+			t.Fatal("isolated prune", err)
 		}
-		p := result.prepared
 		var want []DAAdmissionVictim
 		for i := 0; i < count; i++ {
 			m := s.prior.chunks[uint16(i+3)].member
 			want = append(want, DAAdmissionVictim{TxID: m.txid, Token: m.token, Inputs: slices.Clone(m.inputs)})
 		}
-		if !reflect.DeepEqual(p.pruned, want) || len(p.image.next.chunks) != 1 || p.input.candidate.fee != (consensus.Uint128{Lo: 1200000}) || p.input.candidate.totalBytes != uint64(len(c.member.txBytes)+len(s.prior.chunks[0].txBytes)) {
-			t.Fatal("exact isolated prune evidence")
+		if !reflect.DeepEqual(result.prepared.pruned, want) || len(result.prepared.image.next.chunks) != 1 || result.prepared.set.fee != (consensus.Uint128{Lo: 1200000}) || result.prepared.set.totalBytes != uint64(len(c.member.txBytes)+len(s.prior.chunks[0].txBytes)) {
+			t.Fatal("pruned fee or exact claim list")
 		}
 	}
 }
 
 func TestDACompleteSnapshotRepresentation(t *testing.T) {
 	f, a, c := daCompleteTestCandidate(t, true, 0, 1)
+	for _, field := range []string{"incomplete cache", "incomplete hash", "incomplete empty shadow"} {
+		s := daCompleteTestCapture(t, f, c)
+		switch field {
+		case "incomplete cache":
+			daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.payload[0] ^= 1 })
+		case "incomplete hash":
+			daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.chunkHash[0] ^= 1 })
+		case "incomplete empty shadow":
+			daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.payload = []byte{} })
+		}
+		out, err := daCompleteTestPrepare(t, f, a, s)
+		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
+			t.Fatal(field, err)
+		}
+	}
 	for _, shadow := range [][]byte{nil, {}, {1}} {
 		r := f.relay.sets[[32]byte{11}]
 		chunk := r.chunks[0]
 		chunk.payload = shadow
 		r.chunks[0] = chunk
+		f.relay.sets[r.daID] = r
 		s := daCompleteTestCapture(t, f, c)
 		out, err := daCompleteTestPrepare(t, f, a, s)
-		if shadow == nil {
-			if err != nil || out.prepared == nil {
-				t.Fatal("complete representation binding: live nil shadow", err)
-			}
-		} else if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-			t.Fatal("complete representation binding: live nonnil shadow", err)
+		if err != nil || out.prepared == nil {
+			t.Fatal("C must not be inspected off DA", err)
 		}
-		live := f.relay.sets[[32]byte{11}].chunks[0].payload
-		if (live == nil) != (shadow == nil) || !slices.Equal(live, shadow) {
-			t.Fatal("complete representation binding: live shadow changed")
+		f.relay.mu.Lock()
+		_, err = f.relay.capacityInput(s, out.prepared.set)
+		f.relay.mu.Unlock()
+		if (shadow == nil && err != nil) || (shadow != nil && !daCompleteTestError(err, errDARelayImageIncompatible)) {
+			t.Fatal("C nil shadow validated only under final DA", err)
 		}
-		s.nextReceivedTime = math.MaxUint64
-		out, err = daCompleteTestPrepare(t, f, a, s)
-		if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
-			t.Fatal("complete representation binding: sequence precedes resident shadow", err)
-		}
-		chunk.payload = nil
-		r.chunks[0] = chunk
 	}
-	t.Run("chunk last retained token", func(t *testing.T) {
-		f, a, c := daCompleteTestCandidate(t, false, 0, 0)
-		s := daCompleteTestCapture(t, f, c)
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if err != nil || out.prepared == nil || out.prepared.image.next.commit.member.token != s.prior.commit.member.token || out.prepared.image.next.receivedTime != s.prior.receivedTime {
-			t.Fatal("complete representation binding", err)
-		}
-	})
 	t.Run("canonical payload hash", func(t *testing.T) {
 		s := daCompleteTestCapture(t, f, c)
 		wrong := f.signed(daNonReplayTxSpec{kind: 2, daID: s.prior.daID, payload: []byte("mutated! payload"), literalChunkHash: true, chunkHash: s.prior.chunks[0].chunkHash})
@@ -241,58 +228,22 @@ func TestDACompleteSnapshotRepresentation(t *testing.T) {
 		s.locators[wrong.txid] = daRelayLocator{daID: s.prior.daID, kind: daRelayLocatorChunk}
 		out, err := daCompleteTestPrepare(t, f, a, s)
 		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-			t.Fatal("complete representation binding", err)
+			t.Fatal("candidate canonical payload hash", err)
 		}
 	})
-	for _, row := range []struct {
-		name   string
-		change func(*daCompleteSnapshot)
-	}{
-		{"C shadow", func(s *daCompleteSnapshot) {
-			r := &s.residents[0]
-			ch := r.chunks[0]
-			ch.payload = []byte{1}
-			r.chunks[0] = ch
-		}},
-		{"C empty nonnil shadow", func(s *daCompleteSnapshot) {
-			r := &s.residents[0]
-			ch := r.chunks[0]
-			ch.payload = []byte{}
-			r.chunks[0] = ch
-		}},
-		{"incomplete cache", func(s *daCompleteSnapshot) { daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.payload[0] ^= 1 }) }},
-		{"incomplete hash", func(s *daCompleteSnapshot) { daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.chunkHash[0] ^= 1 }) }},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			s := daCompleteTestCapture(t, f, c)
-			row.change(s)
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatalf("complete representation binding: %+v %v", out, err)
-			}
-		})
-	}
 	s := daCompleteTestCapture(t, f, c)
 	out, err := daCompleteTestPrepare(t, f, a, s)
 	if err != nil || out.prepared == nil {
-		t.Fatal("complete representation binding", err)
+		t.Fatal(err)
 	}
 	r := out.prepared.image.next
-	if r.state != daRelaySetState(2) || r.ttlBlocksRemaining != 0 || r.payloadBytes != 16 || r.replaceableChunks != nil || r.wireBytes != 0 || r.chunks[0].payload != nil || r.revision != s.prior.revision || r.receivedTime != s.prior.receivedTime || r.chunks[0].member.token != s.prior.chunks[0].member.token || r.commit.member.token != (PendingOutpointToken{}) {
-		t.Fatal("complete representation binding")
-	}
-	if !reflect.DeepEqual(r.chunks[0].txBytes, s.prior.chunks[0].txBytes) || !reflect.DeepEqual(r.commit.txBytes, c.member.txBytes) {
-		t.Fatal("complete representation binding: retained bytes")
+	if r.state != 2 || r.ttlBlocksRemaining != 0 || r.payloadBytes != 16 || r.replaceableChunks != nil || r.wireBytes != 0 || r.chunks[0].payload != nil || r.revision != s.prior.revision || r.receivedTime != s.prior.receivedTime || r.chunks[0].member.token != s.prior.chunks[0].member.token || r.commit.member.token != (PendingOutpointToken{}) {
+		t.Fatal("candidate complete representation")
 	}
 }
 
 func TestDACompleteSnapshotAccounting(t *testing.T) {
 	f, a, c := daCompleteTestCandidate(t, false, 0, 2)
-	s := daCompleteTestCapture(t, f, c)
-	baseline, err := daCompleteTestPrepare(t, f, a, s)
-	if err != nil || baseline.prepared == nil || baseline.prepared.input.priorCredit != uint64(len(s.prior.commit.txBytes)) {
-		t.Fatal("captured totals or prior credit", err)
-	}
 	for _, row := range []struct {
 		name                    string
 		prior, completing, want consensus.Uint128
@@ -310,96 +261,44 @@ func TestDACompleteSnapshotAccounting(t *testing.T) {
 			out, err := daCompleteTestPrepare(t, f, a, s)
 			if row.overflow {
 				if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
-					t.Fatal("exact arithmetic overflow", err)
+					t.Fatal("candidate fee overflow", err)
 				}
-				return
-			}
-			if err != nil || out.prepared == nil || out.prepared.input.candidate.fee != row.want {
-				t.Fatal("exact retained accounting", err)
-			}
-			if out.prepared.input.priorCredit != uint64(len(s.prior.commit.txBytes)) || out.prepared.input.residents[0].totalBytes != uint64(len(s.residents[0].commit.txBytes)+len(s.residents[0].chunks[0].txBytes)) {
-				t.Fatal("captured totals or prior credit")
+			} else if err != nil || out.prepared == nil || out.prepared.set.fee != row.want {
+				t.Fatal("candidate exact fee", err)
 			}
 		})
 	}
-	for _, field := range []string{"bytes", "count", "payload", "staged", "byte cap"} {
+	for _, field := range []string{"bytes", "count", "payload", "staged", "byte cap", "commit overhead"} {
 		t.Run(field, func(t *testing.T) {
+			f, a, c := daCompleteTestCandidate(t, false, 0, 2)
 			s := daCompleteTestCapture(t, f, c)
+			out, err := daCompleteTestPrepare(t, f, a, s)
+			if err != nil {
+				t.Fatal(err)
+			}
 			switch field {
 			case "bytes":
-				s.input.completeBytes++
-			case "count":
-				s.input.completeCount++
-			case "payload":
-				s.input.completePayload++
-			case "staged":
-				s.input.stagedBytes = 0
-			case "byte cap":
-				s.input.byteCap = 536870911
-			}
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatal("captured totals or prior credit", err)
-			}
-		})
-	}
-	t.Run("resident sum overflow", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		s.residents[0].commit.member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
-			t.Fatal("exact arithmetic overflow", err)
-		}
-	})
-	for _, field := range []string{"live bytes", "live count", "live payload"} {
-		t.Run(field, func(t *testing.T) {
-			originalBytes, originalCount, originalPayload := f.relay.completeBytes, f.relay.completeCount, f.relay.pinnedPayloadBytes
-			defer func() {
-				f.relay.completeBytes, f.relay.completeCount, f.relay.pinnedPayloadBytes = originalBytes, originalCount, originalPayload
-			}()
-			switch field {
-			case "live bytes":
 				f.relay.completeBytes++
-			case "live count":
+			case "count":
 				f.relay.completeCount++
-			case "live payload":
+			case "payload":
 				f.relay.pinnedPayloadBytes++
+			case "staged":
+				f.relay.stagedBytes++
+			case "byte cap":
+				f.relay.caps.stagedBytes = 536870911
+			case "commit overhead":
+				f.relay.orphanCommitOverheadBytes++
 			}
-			s := daCompleteTestCapture(t, f, c)
-			if s.input.completeBytes != f.relay.completeBytes || s.input.completeCount != f.relay.completeCount || s.input.completePayload != f.relay.pinnedPayloadBytes {
-				t.Fatal("captured totals or prior credit")
-			}
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatal("captured totals or prior credit", err)
-			}
+			requireDACompleteImageRefusal(t, f, a, out)
 		})
 	}
-	t.Run("oversized scalar never hides last resident", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		for i := range s.residents {
-			if s.residents[i].daID == ([32]byte{12}) {
-				s.residents[i].payloadBytes++
-			}
-		}
-		// This is the source-to-scalar boundary, not a synthetic parsing claim.
-		in, err := s.capacityInput(daCompleteCapacitySet{id: [32]byte{1}, totalBytes: 536870913, receivedSequence: 1})
-		if !daCompleteTestError(err, errDARelayImageIncompatible) || !reflect.DeepEqual(in, daCompleteCapacityInput{}) {
-			t.Fatal("captured totals or prior credit", err)
-		}
-	})
 }
 
 func TestDACompleteSnapshotMismatch(t *testing.T) {
 	for _, commitLast := range []bool{true, false} {
 		f, a, c := daCompleteTestCandidate(t, commitLast, 2, 1)
-		// Change canonical bytes and the bound descriptor together. The signed
-		// alternate is only a commitment-mismatch witness, not a new admission.
 		wrong := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{1}, chunkCount: 1, commitment: [32]byte{99}, commitmentOutputs: 1})
-		resident := f.relay.sets[[32]byte{11}]
-		shadow := resident.chunks[0]
-		shadow.payload = []byte{}
-		resident.chunks[0] = shadow
 		s := daCompleteTestCapture(t, f, c)
 		identity := daRelayMemberIdentity{txid: wrong.txid, wtxid: wrong.wtxid, fee: wrong.spec.fee, inputs: slices.Clone(wrong.inputs), provenance: LocalDAProvenance()}
 		if commitLast {
@@ -415,110 +314,48 @@ func TestDACompleteSnapshotMismatch(t *testing.T) {
 			s.prior.commit.txBytes = slices.Clone(wrong.raw)
 			s.prior.commit.payloadCommitment = [32]byte{99}
 		}
-		s.nextReceivedTime = math.MaxUint64
-		s.residents[0].commit.txBytes = []byte{0} // No resident parse on mismatch.
+		f.relay.nextReceivedTime = math.MaxUint64
+		resident := f.relay.sets[[32]byte{11}]
+		resident.commit.txBytes = []byte{0}
+		f.relay.sets[resident.daID] = resident
 		out, err := daCompleteTestPrepare(t, f, a, s)
 		if err != nil || out.mismatch == nil || out.prepared != nil || out.duplicate != nil {
-			t.Fatal("mismatch before sequence and capacity", err)
-		}
-		m := out.mismatch
-		if m.kind != c.member.locator.kind || m.source != s {
-			t.Fatal("mismatch before sequence and capacity: role")
+			t.Fatal("mismatch before sequence and C scan", err)
 		}
 		if commitLast {
-			var want []DAAdmissionVictim
-			for _, index := range []uint16{0, 3, 4} {
-				member := s.prior.chunks[index].member
-				want = append(want, DAAdmissionVictim{TxID: member.txid, Token: member.token, Inputs: slices.Clone(member.inputs)})
+			if len(out.mismatch.removed) != 3 || len(out.mismatch.image.next.chunks) != 0 || out.mismatch.image.next.state != 1 {
+				t.Fatal("exact commit-last mismatch removal")
 			}
-			if !reflect.DeepEqual(m.removed, want) || len(m.image.next.chunks) != 0 || m.image.next.state != daRelaySetState(1) || m.image.next.commit.member.txid != wrong.txid {
-				t.Fatal("exact mismatch removal set")
-			}
-		} else if len(m.removed) != 0 || !reflect.DeepEqual(m.image.next, s.prior) {
-			t.Fatal("exact mismatch removal set")
+		} else if len(out.mismatch.removed) != 0 || !reflect.DeepEqual(out.mismatch.image.next, s.prior) {
+			t.Fatal("chunk-last mismatch preserves B")
 		}
 	}
-	t.Run("chunk last retained sibling", func(t *testing.T) {
-		f := newDANonReplayFixture(t, 4)
-		id := [32]byte{42}
-		commit := f.signed(daNonReplayTxSpec{kind: 1, daID: id, chunkCount: 2, commitment: [32]byte{99}, commitmentOutputs: 1})
-		f.admit(commit, LocalDAProvenance())
-		first := f.signed(daNonReplayTxSpec{kind: 2, daID: id, payload: []byte{1}})
-		f.admit(first, LocalDAProvenance())
-		last := f.signed(daNonReplayTxSpec{kind: 2, daID: id, chunkIndex: 1, payload: []byte{2}})
-		a := f.begin(last)
-		defer a.Close()
-		c, err := a.renderDARelayAdmissionCandidate(LocalDAProvenance())
-		if err != nil {
-			t.Fatal(err)
-		}
-		s := daCompleteTestCapture(t, f, c)
-		s.nextReceivedTime = math.MaxUint64
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if err != nil || out.mismatch == nil || out.prepared != nil || out.duplicate != nil {
-			t.Fatal("mismatch before sequence and capacity", err)
-		}
-		if len(out.mismatch.removed) != 0 || !reflect.DeepEqual(out.mismatch.image.next, s.prior) || len(out.mismatch.image.next.chunks) != 1 {
-			t.Fatal("exact mismatch removal set")
-		}
-	})
 }
 
 func TestDACompleteSnapshotIsolation(t *testing.T) {
-	f, a, c := daCompleteTestCandidate(t, true, 2, 1)
-	s := daCompleteTestCapture(t, f, c)
-	wantCandidateRaw := slices.Clone(c.member.txBytes)
-	wantCandidateInputs := slices.Clone(c.member.member.inputs)
-	wantPriorRaw := slices.Clone(s.prior.chunks[0].txBytes)
-	wantPayload := slices.Clone(s.prior.chunks[0].payload)
-	wantInputs := slices.Clone(s.prior.chunks[0].member.inputs)
-	wantToken, wantProvenance := s.prior.chunks[0].member.token, s.prior.chunks[0].member.provenance
-	wantResidentRaw := slices.Clone(s.residents[0].commit.txBytes)
-	wantResidentInputs := slices.Clone(s.residents[0].commit.member.inputs)
-	wantLocator := s.locators[s.residents[0].commit.member.txid]
-	// Independently exercise each capture ownership boundary.
-	c.member.txBytes[0] ^= 1
-	c.member.member.inputs[0].Vout++
-	r := f.relay.sets[[32]byte{1}]
-	r.chunks[0].txBytes[0] ^= 1
-	r.chunks[0].payload[0] ^= 1
-	r.chunks[0].member.inputs[0].Vout++
-	r.chunks[0].member.provenance = DetachedReorgDAProvenance()
-	r.chunks[0].member.token.seq++
-	delete(r.chunks, 3)
-	f.relay.sets[[32]byte{1}] = r
-	resident := f.relay.sets[[32]byte{11}]
-	resident.commit.txBytes[0] ^= 1
-	resident.commit.member.inputs[0].Vout++
-	delete(f.relay.locators, resident.commit.member.txid)
-	if !slices.Equal(s.candidate.member.txBytes, wantCandidateRaw) || !slices.Equal(s.candidate.member.member.inputs, wantCandidateInputs) || !slices.Equal(s.prior.chunks[0].txBytes, wantPriorRaw) || !slices.Equal(s.prior.chunks[0].payload, wantPayload) || !slices.Equal(s.prior.chunks[0].member.inputs, wantInputs) || s.prior.chunks[0].member.token != wantToken || s.prior.chunks[0].member.provenance != wantProvenance || len(s.prior.chunks) != 3 || !slices.Equal(s.residents[0].commit.txBytes, wantResidentRaw) || !slices.Equal(s.residents[0].commit.member.inputs, wantResidentInputs) || s.locators[s.residents[0].commit.member.txid] != wantLocator {
-		t.Fatal("snapshot aliases retained state")
-	}
-	out, err := daCompleteTestPrepare(t, f, a, s)
-	if err != nil || out.prepared == nil {
-		t.Fatal(err)
-	}
-	before := daRelayStateSnapshot(f.relay)
-	p := out.prepared
-	p.image.next.commit.txBytes[0] ^= 1
-	p.image.next.chunks[0].member.inputs[0].Vout++
-	p.image.next.chunks[0].member.token.seq++
-	p.pruned[0].Inputs[0].Vout++
-	p.input.residents[0].fee.Lo++
-	requireDARelayStateUnchanged(t, f.relay, before)
-	if s.prior.chunks[0].member.token.owner != f.mp.pendingOutpoints {
-		t.Fatal("snapshot cloned opaque token owner")
-	}
-	f, _, c = daCompleteTestCandidate(t, false, 0, 0)
-	s = daCompleteTestCapture(t, f, c)
-	wantPayload = slices.Clone(c.member.payload)
-	wantPriorRaw = slices.Clone(s.prior.commit.txBytes)
-	wantInputs = slices.Clone(s.prior.commit.member.inputs)
-	c.member.payload[0] ^= 1
-	f.relay.sets[[32]byte{1}].commit.txBytes[0] ^= 1
-	f.relay.sets[[32]byte{1}].commit.member.inputs[0].Vout++
-	if !slices.Equal(s.candidate.member.payload, wantPayload) || !slices.Equal(s.prior.commit.txBytes, wantPriorRaw) || !slices.Equal(s.prior.commit.member.inputs, wantInputs) {
-		t.Fatal("snapshot aliases retained state")
+	for _, commitLast := range []bool{true, false} {
+		f, a, c := daCompleteTestCandidate(t, commitLast, 1, 1)
+		s := daCompleteTestCapture(t, f, c)
+		wantCandidate := slices.Clone(s.candidate.member.txBytes)
+		wantInputs := slices.Clone(s.candidate.member.member.inputs)
+		wantPrior := s.prior.cloneOwnerReady()
+		c.member.txBytes[0] ^= 1
+		c.member.member.inputs[0].Vout++
+		live := f.relay.sets[[32]byte{1}]
+		if commitLast {
+			live.chunks[0].txBytes[0] ^= 1
+			live.chunks[0].member.inputs[0].Vout++
+		} else {
+			live.commit.txBytes[0] ^= 1
+			live.commit.member.inputs[0].Vout++
+		}
+		if !slices.Equal(s.candidate.member.txBytes, wantCandidate) || !slices.Equal(s.candidate.member.member.inputs, wantInputs) || !reflect.DeepEqual(s.prior, wantPrior) || len(s.locators) != len(wantPrior.locatorRows()) {
+			t.Fatal("candidate/target snapshot aliases caller or live state")
+		}
+		out, err := daCompleteTestPrepare(t, f, a, s)
+		if err != nil || out.prepared == nil {
+			t.Fatal("off-lock parse uses owned target bytes", err)
+		}
 	}
 }
 
@@ -528,71 +365,12 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 		s := daCompleteTestCapture(t, f, c)
 		s.prior.chunks[0].member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
 		s.prior.chunks[3].member.fee = consensus.Uint128{Lo: 1}
-		last := s.prior.chunks[4]
-		last.txBytes = []byte{0}
-		s.prior.chunks[4] = last
+		invalid := s.prior.chunks[4]
+		invalid.txBytes = []byte{0}
+		s.prior.chunks[4] = invalid
 		out, err := daCompleteTestPrepare(t, f, a, s)
 		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-			t.Fatal("set parse before fee overflow", err)
-		}
-	})
-	f, a, c := daCompleteTestCandidate(t, true, 1, 2)
-	baseline, err := daCompleteTestPrepare(t, f, a, daCompleteTestCapture(t, f, c))
-	if err != nil || baseline.prepared == nil || len(baseline.prepared.input.residents) != 2 {
-		t.Fatal("resident integrity before capacity", err)
-	}
-	t.Run("canonical txid binding", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		ch := s.prior.chunks[0]
-		ch.member.txid[0] ^= 1
-		_, err := parseDACompleteMember(ch.txBytes, ch.member)
-		if !daCompleteTestError(err, errDARelayImageIncompatible) {
-			t.Fatal("exact snapshot integrity error", err)
-		}
-	})
-	t.Run("canonical role bindings", func(t *testing.T) {
-		for _, field := range []string{"chunk id", "chunk index", "commit id", "commit count", "chunk kind", "commit kind"} {
-			t.Run(field, func(t *testing.T) {
-				defer func() {
-					if recover() != nil {
-						t.Fatal("exact snapshot integrity error: role panic")
-					}
-				}()
-				s := daCompleteTestCapture(t, f, c)
-				r := s.residents[0]
-				var err error
-				switch field {
-				case "chunk id":
-					r.daID[0] ^= 1
-					ch := r.chunks[0]
-					ch.daID = r.daID
-					r.chunks[0] = ch
-					_, err = parseDACompleteChunk(r, 0)
-				case "chunk index":
-					ch := r.chunks[0]
-					ch.chunkIndex = 1
-					r.chunks[1] = ch
-					_, err = parseDACompleteChunk(r, 1)
-				case "commit id":
-					r.daID[0] ^= 1
-					r.commit.daID = r.daID
-					err = parseDACompleteCommit(r)
-				case "commit count":
-					r.commit.chunkCount = 2
-					err = parseDACompleteCommit(r)
-				case "chunk kind":
-					ch := r.chunks[0]
-					ch.txBytes, ch.member = r.commit.txBytes, r.commit.member
-					r.chunks[0] = ch
-					_, err = parseDACompleteChunk(r, 0)
-				case "commit kind":
-					r.commit.txBytes, r.commit.member = r.chunks[0].txBytes, r.chunks[0].member
-					err = parseDACompleteCommit(r)
-				}
-				if !daCompleteTestError(err, errDARelayImageIncompatible) {
-					t.Fatal("exact snapshot integrity error", field, err)
-				}
-			})
+			t.Fatal("candidate set parse must precede fee overflow", err)
 		}
 	})
 	for _, row := range []struct {
@@ -631,17 +409,10 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 		}},
 		{"completing token", func(s *daCompleteSnapshot) { s.candidate.member.member.token = s.prior.chunks[0].member.token }},
 		{"missing locator", func(s *daCompleteSnapshot) { delete(s.locators, s.prior.chunks[0].member.txid) }},
-		{"extra locator", func(s *daCompleteSnapshot) {
-			s.locators[[32]byte{99}] = daRelayLocator{daID: s.prior.daID, kind: daRelayLocatorChunk}
-		}},
 		{"wrong locator", func(s *daCompleteSnapshot) {
 			s.locators[s.prior.chunks[0].member.txid] = daRelayLocator{daID: s.prior.daID, kind: daRelayLocatorCommit}
 		}},
-		{"pruned canonical corruption", func(s *daCompleteSnapshot) {
-			ch := s.prior.chunks[3]
-			ch.txBytes = []byte{0}
-			s.prior.chunks[3] = ch
-		}},
+		{"pruned canonical corruption", func(s *daCompleteSnapshot) { ch := s.prior.chunks[3]; ch.txBytes = []byte{0}; s.prior.chunks[3] = ch }},
 		{"not completing", func(s *daCompleteSnapshot) { delete(s.prior.chunks, 0) }},
 		{"already C", func(s *daCompleteSnapshot) { s.prior.state = daRelayStateCompleteSet }},
 		{"unknown state", func(s *daCompleteSnapshot) { s.prior.state = 255 }},
@@ -652,9 +423,7 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 		{"declared count", func(s *daCompleteSnapshot) { s.candidate.chunkCount = 2 }},
 		{"commitment output", func(s *daCompleteSnapshot) { s.candidate.payloadCommitment[0] ^= 1 }},
 		{"prior revision zero", func(s *daCompleteSnapshot) { s.prior.revision = 0 }},
-		{"prior revision high", func(s *daCompleteSnapshot) { s.prior.revision = s.records + 1 }},
 		{"prior sequence zero", func(s *daCompleteSnapshot) { s.prior.receivedTime = 0 }},
-		{"prior sequence high", func(s *daCompleteSnapshot) { s.prior.receivedTime = s.nextReceivedTime + 1 }},
 		{"prior ttl", func(s *daCompleteSnapshot) { s.prior.ttlBlocksRemaining = 0 }},
 		{"prior wire", func(s *daCompleteSnapshot) { s.prior.wireBytes = 1 }},
 		{"prior payload", func(s *daCompleteSnapshot) { s.prior.payloadBytes = 1 }},
@@ -664,282 +433,150 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 		{"prior chunk hash checked", func(s *daCompleteSnapshot) { daCompleteTestChunk(s, func(ch *daRelayChunk) { ch.hashChecked = true }) }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
+			f, a, c := daCompleteTestCandidate(t, true, 1, 0)
 			s := daCompleteTestCapture(t, f, c)
 			row.change(s)
 			out, err := daCompleteTestPrepare(t, f, a, s)
 			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatalf("exact snapshot integrity error: out=%+v err=%v", out, err)
+				t.Fatalf("candidate integrity %s: %+v %v", row.name, out, err)
 			}
 		})
 	}
-	t.Run("resident corruption", func(t *testing.T) {
-		for _, row := range []struct {
-			name   string
-			change func(*daRelaySetRecord)
-		}{
-			{"parse", func(r *daRelaySetRecord) { r.commit.txBytes = []byte{0} }},
-			{"intrinsic descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes++ }},
-			{"payload total", func(r *daRelaySetRecord) { r.payloadBytes++ }},
-			{"revision zero", func(r *daRelaySetRecord) { r.revision = 0 }},
-			{"revision high", func(r *daRelaySetRecord) { r.revision = math.MaxUint64 }},
-			{"sequence zero", func(r *daRelaySetRecord) { r.receivedTime = 0 }},
-			{"sequence high", func(r *daRelaySetRecord) { r.receivedTime = math.MaxUint64 }},
-			{"TTL", func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 1 }},
-			{"replaceable", func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{} }},
-			{"record wire", func(r *daRelaySetRecord) { r.wireBytes = 1 }},
-			{"commit wire", func(r *daRelaySetRecord) { r.commit.wireBytes = 1 }},
-			{"commit quota", func(r *daRelaySetRecord) { r.commit.peerQuotaKey = "x" }},
-			{"commit id", func(r *daRelaySetRecord) { r.commit.daID[0] ^= 1 }},
-			{"chunk wire", func(r *daRelaySetRecord) {
-				ch := r.chunks[0]
-				ch.wireBytes = 1
-				r.chunks[0] = ch
-			}},
-			{"chunk quota", func(r *daRelaySetRecord) {
-				ch := r.chunks[0]
-				ch.peerQuotaKey = "x"
-				r.chunks[0] = ch
-			}},
-			{"chunk hash checked", func(r *daRelaySetRecord) {
-				ch := r.chunks[0]
-				ch.hashChecked = true
-				r.chunks[0] = ch
-			}},
-			{"absent chunk", func(r *daRelaySetRecord) { delete(r.chunks, 0) }},
-			{"extra chunk", func(r *daRelaySetRecord) { r.chunks[1] = r.chunks[0] }},
-			{"missing commit", func(r *daRelaySetRecord) { r.commit.member = nil }},
-			{"token zero", func(r *daRelaySetRecord) { r.commit.member.token = PendingOutpointToken{} }},
-		} {
-			t.Run(row.name, func(t *testing.T) {
+	t.Run("chunk candidate role residues", func(t *testing.T) {
+		for _, field := range []string{"count", "commitment", "outside commit"} {
+			t.Run(field, func(t *testing.T) {
+				f, a, c := daCompleteTestCandidate(t, false, 0, 0)
 				s := daCompleteTestCapture(t, f, c)
-				// Raw-id last, independently of initial map insertion order.
-				for i := range s.residents {
-					if s.residents[i].daID == ([32]byte{12}) {
-						row.change(&s.residents[i])
-					}
+				switch field {
+				case "count":
+					s.candidate.chunkCount = 1
+				case "commitment":
+					s.candidate.payloadCommitment[0] = 1
+				case "outside commit":
+					s.candidate.member.locator.chunkIndex = 1
 				}
 				out, err := daCompleteTestPrepare(t, f, a, s)
 				if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-					t.Fatal("resident integrity before capacity", err)
+					t.Fatal("chunk candidate role residue", field, err)
 				}
 			})
 		}
 	})
-	t.Run("sequence", func(t *testing.T) {
-		for _, seq := range []uint64{math.MaxUint64 - 1, math.MaxUint64} {
+	for _, row := range []struct {
+		name   string
+		change func(*daRelaySetRecord)
+	}{
+		{"missing descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic = daCompleteCapacitySet{} }},
+		{"zero total bytes", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes = 0 }},
+		{"intrinsic descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes++ }},
+		{"fee descriptor", func(r *daRelaySetRecord) { r.commit.member.fee.Lo++ }},
+		{"record identity", func(r *daRelaySetRecord) { r.daID[0]++ }},
+		{"payload total", func(r *daRelaySetRecord) { r.payloadBytes++ }},
+		{"payload shadow", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.payload = []byte{}; r.chunks[0] = ch }},
+		{"payload nonempty shadow", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.payload = []byte{1}; r.chunks[0] = ch }},
+		{"revision zero", func(r *daRelaySetRecord) { r.revision = 0 }},
+		{"revision high", func(r *daRelaySetRecord) { r.revision = math.MaxUint64 }},
+		{"sequence zero", func(r *daRelaySetRecord) { r.receivedTime = 0 }},
+		{"sequence high", func(r *daRelaySetRecord) { r.receivedTime = math.MaxUint64 }},
+		{"TTL", func(r *daRelaySetRecord) { r.ttlBlocksRemaining = 1 }},
+		{"replaceable", func(r *daRelaySetRecord) { r.replaceableChunks = map[uint16]bool{} }},
+		{"record wire", func(r *daRelaySetRecord) { r.wireBytes = 1 }},
+		{"commit wire", func(r *daRelaySetRecord) { r.commit.wireBytes = 1 }},
+		{"commit quota", func(r *daRelaySetRecord) { r.commit.peerQuotaKey = "x" }},
+		{"commit id", func(r *daRelaySetRecord) { r.commit.daID[0] ^= 1 }},
+		{"chunk wire", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.wireBytes = 1; r.chunks[0] = ch }},
+		{"chunk quota", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.peerQuotaKey = "x"; r.chunks[0] = ch }},
+		{"chunk hash checked", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.hashChecked = true; r.chunks[0] = ch }},
+		{"chunk id", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.daID[0]++; r.chunks[0] = ch }},
+		{"chunk index", func(r *daRelaySetRecord) { ch := r.chunks[0]; ch.chunkIndex++; r.chunks[0] = ch }},
+		{"absent chunk", func(r *daRelaySetRecord) { delete(r.chunks, 0) }},
+		{"extra chunk", func(r *daRelaySetRecord) { r.chunks[1] = r.chunks[0] }},
+		{"missing commit", func(r *daRelaySetRecord) { r.commit.member = nil }},
+		{"token zero", func(r *daRelaySetRecord) { r.commit.member.token = PendingOutpointToken{} }},
+		{"token foreign", func(r *daRelaySetRecord) { r.commit.member.token.owner = &PendingOutpointOwner{} }},
+		{"duplicate member token", func(r *daRelaySetRecord) { r.chunks[0].member.token = r.commit.member.token }},
+		{"fee overflow", func(r *daRelaySetRecord) {
+			r.commit.member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
+			r.chunks[0].member.fee = consensus.Uint128{Lo: 1}
+		}},
+	} {
+		t.Run("resident "+row.name, func(t *testing.T) {
+			f, a, c := daCompleteTestCandidate(t, true, 1, 2)
 			s := daCompleteTestCapture(t, f, c)
-			s.nextReceivedTime = seq
 			out, err := daCompleteTestPrepare(t, f, a, s)
-			if seq == math.MaxUint64 {
-				if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
-					t.Fatal("exact arithmetic overflow", err)
-				}
-			} else if err != nil || out.prepared == nil || out.prepared.input.candidate.receivedSequence != s.prior.receivedTime {
-				t.Fatal("last available sequence", err)
+			if err != nil || out.prepared == nil {
+				t.Fatal(err)
 			}
-		}
-	})
-	t.Run("capture", func(t *testing.T) {
-		for _, row := range []struct {
-			name   string
-			change func(*DARelayState)
-		}{
-			{"absent", func(r *DARelayState) { delete(r.sets, [32]byte{1}) }},
-			{"nil sets", func(r *DARelayState) { r.sets = nil }},
-			{"nil locators", func(r *DARelayState) { r.locators = nil }},
-			{"prior key", func(r *DARelayState) {
-				p := r.sets[[32]byte{1}]
-				p.daID[0] = 8
-				r.sets[[32]byte{1}] = p
-			}},
-			{"resident key", func(r *DARelayState) {
-				p := r.sets[[32]byte{11}]
-				p.daID[0] = 8
-				r.sets[[32]byte{11}] = p
-			}},
-			{"locator missing", func(r *DARelayState) { delete(r.locators, r.sets[[32]byte{1}].chunks[0].member.txid) }},
-			{"locator extra", func(r *DARelayState) {
-				r.locators[[32]byte{99}] = daRelayLocator{daID: [32]byte{1}, kind: daRelayLocatorChunk}
-			}},
-			{"locator duplicate slot", func(r *DARelayState) {
-				p := r.sets[[32]byte{1}]
-				ch := p.chunks[3]
-				ch.member = p.chunks[0].member.clone()
-				p.chunks[3] = ch
-				r.sets[p.daID] = p
-			}},
-		} {
-			t.Run(row.name, func(t *testing.T) {
-				originalSets, originalLocators := f.relay.sets, f.relay.locators
-				view := daRelayStateSnapshot(f.relay)
-				f.relay.sets, f.relay.locators = view.sets, view.locators
-				defer func() { f.relay.sets, f.relay.locators = originalSets, originalLocators }()
-				row.change(f.relay)
-				before := daRelayStateSnapshot(f.relay)
-				s, duplicate, err := f.relay.captureDACompleteSnapshot(c)
-				if !daCompleteTestError(err, errDARelayImageIncompatible) || s != nil || duplicate != (daRelayAdmissionOutcome{}) {
-					t.Fatal("duplicate or locator closure", err)
-				}
-				requireDARelayStateUnchanged(t, f.relay, before)
-			})
+			r := f.relay.sets[[32]byte{12}].cloneOwnerReady()
+			row.change(&r)
+			f.relay.sets[[32]byte{12}] = r
+			requireDACompleteImageRefusal(t, f, a, out)
+		})
+	}
+	for _, field := range []string{"missing C locator", "extra C locator", "wrong C locator", "duplicate target token"} {
+		t.Run(field, func(t *testing.T) {
+			f, a, c := daCompleteTestCandidate(t, true, 0, 2)
+			s := daCompleteTestCapture(t, f, c)
+			out, err := daCompleteTestPrepare(t, f, a, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := f.relay.sets[[32]byte{12}]
+			switch field {
+			case "missing C locator":
+				delete(f.relay.locators, r.commit.member.txid)
+			case "extra C locator":
+				f.relay.locators[[32]byte{99}] = daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit}
+			case "wrong C locator":
+				f.relay.locators[r.commit.member.txid] = daRelayLocator{daID: r.daID, kind: daRelayLocatorChunk}
+			case "duplicate target token":
+				r.commit.member.token = s.prior.chunks[0].member.token
+				f.relay.sets[r.daID] = r
+			}
+			requireDACompleteImageRefusal(t, f, a, out)
+		})
+	}
+	t.Run("capture target only", func(t *testing.T) {
+		for _, name := range []string{"absent", "nil sets", "nil locators", "prior key", "locator missing", "locator duplicate slot"} {
+			f, _, c := daCompleteTestCandidate(t, true, 1, 1)
+			switch name {
+			case "absent":
+				delete(f.relay.sets, [32]byte{1})
+			case "nil sets":
+				f.relay.sets = nil
+			case "nil locators":
+				f.relay.locators = nil
+			case "prior key":
+				r := f.relay.sets[[32]byte{1}]
+				r.daID[0]++
+				f.relay.sets[[32]byte{1}] = r
+			case "locator missing":
+				delete(f.relay.locators, f.relay.sets[[32]byte{1}].chunks[0].member.txid)
+			case "locator duplicate slot":
+				r := f.relay.sets[[32]byte{1}]
+				ch := r.chunks[3]
+				ch.member = r.chunks[0].member.clone()
+				r.chunks[3] = ch
+				f.relay.sets[r.daID] = r
+			}
+			got, dup, err := f.relay.captureDACompleteSnapshot(c)
+			if got != nil || dup != (daRelayAdmissionOutcome{}) || !daCompleteTestError(err, errDARelayImageIncompatible) {
+				t.Fatal("target-only capture", name, err)
+			}
 		}
 	})
 	t.Run("duplicate", func(t *testing.T) {
-		retained := f.relay.sets[[32]byte{1}].chunks[0]
-		duplicateCandidate := c
-		duplicateCandidate.member.member = *retained.member.clone()
-		s, duplicate, err := f.relay.captureDACompleteSnapshot(duplicateCandidate)
-		want := daRelayAdmissionOutcome{daID: [32]byte{1}, disposition: daRelayAdmissionDisposition(2)}
+		f, _, c := daCompleteTestCandidate(t, true, 1, 0)
+		c.member.member = *f.relay.sets[[32]byte{1}].chunks[0].member.clone()
+		delete(f.relay.sets, [32]byte{1}) // duplicate wins over a missing target
+		s, duplicate, err := f.relay.captureDACompleteSnapshot(c)
+		want := daRelayAdmissionOutcome{daID: [32]byte{1}, disposition: 2}
 		if err != nil || s != nil || duplicate != want {
-			t.Fatal("duplicate or locator closure", err)
+			t.Fatal("duplicate before target capture", err)
 		}
 		out, err := prepareDACompleteSnapshot(s, duplicate)
-		if err != nil || out.duplicate == nil || *out.duplicate != want || out.prepared != nil || out.mismatch != nil {
-			t.Fatal("duplicate or locator closure", err)
-		}
-	})
-	t.Run("token bijection", func(t *testing.T) {
-		for _, slot := range []string{"prior prune", "resident commit", "resident chunk"} {
-			s := daCompleteTestCapture(t, f, c)
-			token := s.prior.chunks[0].member.token
-			switch slot {
-			case "prior prune":
-				s.prior.chunks[3].member.token = token
-			case "resident commit":
-				s.residents[0].commit.member.token = token
-			case "resident chunk":
-				s.residents[0].chunks[0].member.token = token
-			}
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatal("retained identity bijection", slot, err)
-			}
-		}
-	})
-	t.Run("resident token before fee overflow", func(t *testing.T) {
-		for _, role := range []string{"zero", "foreign", "duplicate prior", "duplicate resident"} {
-			s := daCompleteTestCapture(t, f, c)
-			for i := range s.residents {
-				if s.residents[i].daID != ([32]byte{12}) {
-					continue
-				}
-				r := &s.residents[i]
-				r.commit.member.fee = consensus.Uint128{Hi: math.MaxUint64, Lo: math.MaxUint64}
-				r.chunks[0].member.fee = consensus.Uint128{Lo: 1}
-				switch role {
-				case "zero":
-					r.commit.member.token = PendingOutpointToken{}
-				case "foreign":
-					r.commit.member.token.owner = &PendingOutpointOwner{}
-				case "duplicate prior":
-					r.commit.member.token = s.prior.chunks[0].member.token
-				case "duplicate resident":
-					r.commit.member.token = f.relay.sets[[32]byte{11}].commit.member.token
-				}
-			}
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatal("resident token before fee overflow", role, err)
-			}
-		}
-	})
-	t.Run("identity owner", func(t *testing.T) {
-		// These are identity-layer witnesses; no modified scalar claims to be
-		// a canonical transaction. Each guard is isolated from parser rejection.
-		s := daCompleteTestCapture(t, f, c)
-		row := s.prior.locatorRows()[0]
-		member := s.prior.chunks[row.locator.chunkIndex].member
-		for _, mode := range []string{"retained txid", "completing txid", "extra row"} {
-			var err error
-			switch mode {
-			case "retained txid":
-				err = s.checkRetainedIdentity(row, member, map[[32]byte]bool{row.txid: true}, map[PendingOutpointToken]bool{})
-			case "completing txid":
-				s.candidate.member.member.txid = row.txid
-				err = s.checkRetainedIdentity(row, member, map[[32]byte]bool{}, map[PendingOutpointToken]bool{})
-				s.candidate = c
-			case "extra row":
-				s.locators[[32]byte{99}] = row.locator
-				_, err = s.capacityInput(baseline.prepared.input.candidate)
-			}
-			if !daCompleteTestError(err, errDARelayImageIncompatible) {
-				t.Fatal("retained identity bijection", mode, err)
-			}
-		}
-	})
-	t.Run("matching sequence precedes resident", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		s.nextReceivedTime = math.MaxUint64
-		s.residents[0].commit.txBytes = []byte{0}
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if !daCompleteTestError(err, errDARelayArithmeticOverflow) || out != (daCompletePreparation{}) {
-			t.Fatal("exact arithmetic overflow: sequence precedes resident", err)
-		}
-	})
-	t.Run("resident commitment mismatch", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		r := &s.residents[0]
-		wrong := f.signed(daNonReplayTxSpec{kind: 1, daID: r.daID, chunkCount: 1, commitment: [32]byte{99}, commitmentOutputs: 1})
-		delete(s.locators, r.commit.member.txid)
-		r.commit.txBytes = slices.Clone(wrong.raw)
-		r.commit.member.txid, r.commit.member.wtxid = wrong.txid, wrong.wtxid
-		r.commit.member.inputs = slices.Clone(wrong.inputs)
-		r.commit.payloadCommitment = [32]byte{99}
-		s.locators[wrong.txid] = daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit}
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-			t.Fatal("resident integrity before capacity", err)
-		}
-	})
-	t.Run("resident count with matching commitment", func(t *testing.T) {
-		s := daCompleteTestCapture(t, f, c)
-		r := &s.residents[0]
-		wrong := f.signed(daNonReplayTxSpec{kind: 1, daID: r.daID, chunkCount: 2, commitment: r.commit.payloadCommitment, commitmentOutputs: 1})
-		delete(s.locators, r.commit.member.txid)
-		r.commit.txBytes = slices.Clone(wrong.raw)
-		r.commit.member.txid, r.commit.member.wtxid = wrong.txid, wrong.wtxid
-		r.commit.member.inputs = slices.Clone(wrong.inputs)
-		r.commit.chunkCount = 2
-		s.locators[wrong.txid] = daRelayLocator{daID: r.daID, kind: daRelayLocatorCommit}
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-			t.Fatal("resident integrity before capacity", err)
-		}
-	})
-	t.Run("unrelated A and B", func(t *testing.T) {
-		for _, state := range []daRelaySetState{0, 1} {
-			id := [32]byte{byte(80 + state)}
-			f.relay.sets[id] = daRelaySetRecord{state: state, chunks: map[uint16]daRelayChunk{9: {txBytes: []byte{0}}}}
-		}
-		defer delete(f.relay.sets, [32]byte{80})
-		defer delete(f.relay.sets, [32]byte{81})
-		s := daCompleteTestCapture(t, f, c)
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if err != nil || out.prepared == nil || len(s.residents) != 2 {
-			t.Fatal("unrelated A/B bodies were captured or validated", err)
-		}
-	})
-	t.Run("chunk role payload shape", func(t *testing.T) {
-		f, a, c := daCompleteTestCandidate(t, false, 0, 0)
-		for _, field := range []string{"count", "commitment", "outside commit"} {
-			s := daCompleteTestCapture(t, f, c)
-			switch field {
-			case "count":
-				s.candidate.chunkCount = 1
-			case "commitment":
-				s.candidate.payloadCommitment[0] = 1
-			case "outside commit":
-				s.candidate.member.locator.chunkIndex = 1
-			}
-			out, err := daCompleteTestPrepare(t, f, a, s)
-			if !daCompleteTestError(err, errDARelayImageIncompatible) || out != (daCompletePreparation{}) {
-				t.Fatal("exact snapshot integrity error", field, err)
-			}
-		}
-		s := daCompleteTestCapture(t, f, c)
-		out, err := daCompleteTestPrepare(t, f, a, s)
-		if err != nil || out.prepared == nil || out.prepared.image.next.commit.member.token != s.prior.commit.member.token || out.prepared.image.next.receivedTime != s.prior.receivedTime {
-			t.Fatal("complete representation binding: chunk last", err)
+		if err != nil || out.duplicate == nil || *out.duplicate != want {
+			t.Fatal("duplicate preparation", err)
 		}
 	})
 	t.Run("commit duplicate outcome", func(t *testing.T) {
@@ -954,28 +591,84 @@ func TestDACompleteSnapshotIntegrity(t *testing.T) {
 			s, duplicate, err := f.relay.captureDACompleteSnapshot(candidate)
 			want := daRelayAdmissionOutcome{daID: [32]byte{1}, disposition: 2, sameDAIDCommitConflict: !same}
 			if err != nil || s != nil || duplicate != want {
-				t.Fatal("duplicate or locator closure", err)
+				t.Fatal("same/competing commit", err)
 			}
 		}
 	})
 }
 
+func TestDACompleteResidentNoRawTouch(t *testing.T) {
+	f, a, c, residents := daCompleteCommitPhysicalVictims(t, 1)
+	p, _ := daCompleteCommitTestPlan(t, f, a, c)
+	victim := residents[0]
+	corrupt := f.relay.sets[victim.daID].cloneOwnerReady()
+	corrupt.commit.txBytes[0] ^= 1
+	f.relay.sets[victim.daID] = corrupt
+	if !daCompleteTestError(checkOwnerReadyRetainedRecordLocked(corrupt), errDARelayImageIncompatible) {
+		t.Fatal("canonical removal must still reject corrupt retained bytes")
+	}
+	beforeSequence, beforeHigh := f.relay.nextReceivedTime, f.mp.pendingOutpoints.tokenHighWater
+	daCompleteCommitTestApply(t, f, a, p)
+	if !slices.Equal(p.capacity.victims, [][32]byte{victim.daID}) || f.relay.completeCount != 65536 || f.relay.pinnedPayloadBytes != 65535+16 || f.relay.nextReceivedTime != beforeSequence+1 || f.mp.pendingOutpoints.tokenHighWater != beforeHigh+1 {
+		t.Fatal("completion read resident raw bytes or ignored metadata victim order")
+	}
+	if _, present := f.relay.sets[victim.daID]; present {
+		t.Fatal("metadata-selected victim survived")
+	}
+	for _, member := range []*daRelayMemberIdentity{victim.commit.member, victim.chunks[0].member} {
+		if f.mp.pendingOutpoints.byToken[member.token] != nil || f.relay.locators[member.txid] != (daRelayLocator{}) {
+			t.Fatal("metadata-selected victim claim or locator survived")
+		}
+	}
+	measure := func(large bool) uint64 {
+		f, a, c := daCompleteTestCandidate(t, true, 0, 0)
+		id := [32]byte{11}
+		f.completeReplayPinned(id)
+		if large {
+			record := f.relay.sets[id]
+			chunk := record.chunks[0]
+			delta := uint64(8<<20 - len(chunk.txBytes))
+			chunk.txBytes = make([]byte, 8<<20) // actual owned C bytes, not an inflated counter alone
+			record.chunks[0] = chunk
+			record.completeIntrinsic.totalBytes += delta
+			f.relay.sets[id], f.relay.completeBytes = record, f.relay.completeBytes+delta
+		}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		source, duplicate, err := f.relay.captureDACompleteSnapshot(c)
+		if err != nil || duplicate != (daRelayAdmissionOutcome{}) {
+			t.Fatal("first DA capture", err)
+		}
+		result, err := prepareDACompleteSnapshot(source, duplicate)
+		if err != nil {
+			t.Fatal("off-DA preparation", err)
+		}
+		plan, err := f.relay.prepareDACompleteCommit(a, result)
+		if err != nil {
+			t.Fatal("commit preparation", err)
+		}
+		out, rejected, err := f.relay.applyDACompleteCommit(a, plan)
+		runtime.ReadMemStats(&after)
+		if err != nil || rejected || out != (daRelayAdmissionOutcome{daID: [32]byte{1}, disposition: daRelayAdmissionRetained}) || f.relay.completeCount != 2 || len(plan.capacity.victims) != 0 {
+			t.Fatal("full completion attempt with C owned bytes", err)
+		}
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	small, large := measure(false), measure(true)
+	if large > small+(4<<20) {
+		t.Fatalf("completion cloned resident bytes: small=%d large=%d", small, large)
+	}
+}
+
 func TestDACompleteSnapshotCaptureBound(t *testing.T) {
 	f, _, c := daCompleteTestCandidate(t, true, 0, 0)
-	// Capture-count evidence only; these empty records are never parsed or
-	// represented as canonically valid complete residents.
-	for i := 0; i < 65536; i++ {
-		id := [32]byte{2, byte(i), byte(i >> 8)}
+	for i := 0; i <= 65536; i++ {
+		id := [32]byte{2, byte(i), byte(i >> 8), byte(i >> 16)}
 		f.relay.sets[id] = daRelaySetRecord{daID: id, state: daRelayStateCompleteSet}
 	}
 	s, duplicate, err := f.relay.captureDACompleteSnapshot(c)
-	if err != nil || s == nil || len(s.residents) != 65536 || duplicate != (daRelayAdmissionOutcome{}) {
-		t.Fatal("capture count inclusive boundary", err)
-	}
-	id := [32]byte{3}
-	f.relay.sets[id] = daRelaySetRecord{daID: id, state: daRelayStateCompleteSet}
-	s, duplicate, err = f.relay.captureDACompleteSnapshot(c)
-	if !daCompleteTestError(err, errDARelayImageIncompatible) || s != nil || duplicate != (daRelayAdmissionOutcome{}) {
-		t.Fatal("capture count exclusive boundary", err)
+	if len(f.relay.sets) != 65538 || err != nil || s == nil || duplicate != (daRelayAdmissionOutcome{}) || len(s.locators) != 1 {
+		t.Fatal("65537 distinct C residents changed target-only first DA capture", err)
 	}
 }
