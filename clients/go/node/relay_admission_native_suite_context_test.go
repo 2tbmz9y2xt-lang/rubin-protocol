@@ -181,7 +181,7 @@ func TestRelayNativeSuiteAvailability(t *testing.T) {
 				}
 				return clone
 			}
-			_, originErr := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(raw, cloneUtxos(), 1, 0, devnetGenesisChainID, rotation, tc.registry)
+			_, originErr := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(raw, cloneUtxos(), h.st.Height+1, 0, devnetGenesisChainID, rotation, tc.registry)
 			var txErr *consensus.TxError
 			if !errors.As(originErr, &txErr) || txErr.Cause() != tc.cause || originErr.Error() != tc.message {
 				t.Fatalf("origin error=%v cause=%v", originErr, txErr)
