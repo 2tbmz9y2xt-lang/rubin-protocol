@@ -4,7 +4,6 @@ package node
 
 import (
 	"bytes"
-	"cmp"
 	"crypto/sha3"
 	"maps"
 	"reflect"
@@ -24,8 +23,8 @@ func TestDAObserverConformanceSurface(t *testing.T) {
 		t.Fatalf("nil owner counts=%+v", got)
 	}
 	o := newPendingOutpointOwner(PendingOutpointTip{})
-	mustReserve(t, o, [32]byte{1}, consensus.Outpoint{Txid: [32]byte{1}})
-	if got := DAObserverReadOwnerCounts(o); got != (DAObserverOwnerCounts{ReserveCalls: 1, ReservationsAcquired: 1}) {
+	o.reserveCalls, o.reservationsAcquired, o.finalizations, o.candidateReleases = 11, 12, 13, 14
+	if got := DAObserverReadOwnerCounts(o); got != (DAObserverOwnerCounts{11, 12, 13, 14}) {
 		t.Fatalf("owner counts=%+v", got)
 	}
 	stamped := selectRelayDisposition(txAdmitUnavailable("x"), RelayAdmissionCapacity)
@@ -88,101 +87,69 @@ func daObserverImageFixture(t *testing.T) (*daNonReplayFixture, map[[32]byte][]d
 	return f, txs
 }
 
-// requireDAObserverMember checks an image member against the fixture tx and the live member.
-func requireDAObserverMember(t *testing.T, got *DAObserverMember, live *daRelayMemberIdentity, tx daNonReplayTx, kind string) {
-	t.Helper()
-	if got == nil || live == nil || got.TxID != tx.txid || got.WTxID != tx.wtxid || got.Fee != tx.spec.fee || !slices.Equal(got.Inputs, tx.inputs) ||
-		got.TokenSeq != live.token.seq || got.Provenance != (DAObserverProvenance{kind, live.provenance.peerIdentity, live.provenance.quotaIdentity}) {
-		t.Fatalf("member=%+v live=%+v tx=%x", got, live, tx.txid)
+// daObserverSyntheticImage builds live state in which every copied field has a
+// distinct nonzero value, plus each Kind/Domain/State fallback, and the image
+// the contract requires for it. A field sourced from its zero value or from a
+// same-typed sibling therefore changes the image.
+func daObserverSyntheticImage() (*DARelayState, DAObserverStateImage) {
+	id := func(b byte) [32]byte { return [32]byte{b} }
+	op := func(b byte, vout uint32) []consensus.Outpoint { return []consensus.Outpoint{{Txid: id(b), Vout: vout}} }
+	o := newPendingOutpointOwner(PendingOutpointTip{})
+	for _, c := range []*pendingOutpointClaim{
+		{token: PendingOutpointToken{o, 3}, domain: PendingOutpointStandardMempool, txid: id(0x31), inputs: op(0x41, 5), generation: 7},
+		{token: PendingOutpointToken{o, 9}, domain: PendingOutpointDA, txid: id(0x32), inputs: op(0x42, 6), generation: 8, finalized: true},
+		{token: PendingOutpointToken{o, 4}, txid: id(0x33), inputs: op(0x41, 2), generation: 10},
+	} {
+		o.byToken[c.token] = c
+		o.byOutpoint[c.inputs[0]] = pendingOutpointRow{token: c.token, txid: c.txid}
+	}
+	m1 := &daRelayMemberIdentity{id(0x71), id(0x72), consensus.Uint128{Lo: 141, Hi: 142}, op(0x73, 143), PendingOutpointToken{o, 144}, DAProvenance{daProvenancePeer, "pp", "qq"}}
+	m2 := &daRelayMemberIdentity{id(0x74), id(0x75), consensus.Uint128{Lo: 145}, op(0x76, 146), PendingOutpointToken{o, 147}, DetachedReorgDAProvenance()}
+	s := &DARelayState{
+		mempool: &Mempool{pendingOutpoints: o}, nextReceivedTime: 101, stagedBytes: 102, completeBytes: 103, completeCount: 104,
+		orphanBytes: 105, orphanCommitOverheadBytes: 106, pinnedPayloadBytes: 107, records: 108,
+		orphanBytesByPeerQuotaKey: map[string]uint64{"k2": 112, "k1": 111}, orphanBytesByDAID: map[[32]byte]uint64{id(0x52): 114, id(0x51): 113},
+		locators: map[[32]byte]daRelayLocator{id(0x81): {id(0x61), daRelayLocatorCommit, 0}, id(0x82): {id(0x61), daRelayLocatorChunk, 5}, id(0x83): {id(0x60), 7, 9}},
+		sets: map[[32]byte]daRelaySetRecord{
+			id(0x5E): {daID: id(0x5E)}, id(0x5F): {daID: id(0x5F), state: daRelayStateStagedCommit}, id(0x60): {daID: id(0x60), state: 9},
+			id(0x61): {
+				daID: id(0x61), state: daRelayStateCompleteSet, revision: 121, receivedTime: 122, payloadBytes: 123, wireBytes: 124, ttlBlocksRemaining: 125,
+				completeIntrinsic: daCompleteCapacitySet{id(0x62), consensus.Uint128{Lo: 126, Hi: 127}, 128, 129, 130},
+				commit:            daRelayCommit{id(0x63), id(0x64), "cq", m1, 131, 132, []byte{0xC1}},
+				chunks: map[uint16]daRelayChunk{
+					5: {id(0x65), id(0x66), "q5", m2, 5, []byte{0xD5}, 133, []byte{0xE5}, true},
+					2: {daID: id(0x67), chunkHash: id(0x68), peerQuotaKey: "q2", chunkIndex: 2, wireBytes: 134, txBytes: []byte{0xE2}},
+				},
+				replaceableChunks: map[uint16]bool{7: true, 3: false},
+			},
+		},
+	}
+	return s, DAObserverStateImage{
+		Records: []DAObserverRecord{{DAID: id(0x5E), State: "ORPHAN_CHUNKS"}, {DAID: id(0x5F), State: "STAGED_COMMIT"}, {DAID: id(0x60), State: "INVALID"}, {
+			DAID: id(0x61), State: "COMPLETE_SET", Revision: 121, ReceivedTime: 122, PayloadBytes: 123, WireBytes: 124, TTLBlocksRemaining: 125,
+			CompleteIntrinsic: DAObserverCapacitySet{id(0x62), consensus.Uint128{Lo: 126, Hi: 127}, 128, 129, 130},
+			Commit:            DAObserverCommit{id(0x63), id(0x64), "cq", &DAObserverMember{id(0x71), id(0x72), consensus.Uint128{Lo: 141, Hi: 142}, op(0x73, 143), 144, DAObserverProvenance{"PEER", "pp", "qq"}}, 131, 132, []byte{0xC1}},
+			Chunks: []DAObserverChunk{
+				{DAID: id(0x67), ChunkHash: id(0x68), PeerQuotaKey: "q2", ChunkIndex: 2, WireBytes: 134, TxBytes: []byte{0xE2}},
+				{id(0x65), id(0x66), "q5", &DAObserverMember{id(0x74), id(0x75), consensus.Uint128{Lo: 145}, op(0x76, 146), 147, DAObserverProvenance{Kind: "DETACHED_REORG"}}, 5, []byte{0xD5}, 133, []byte{0xE5}, true},
+			},
+			ReplaceableChunks: []DAObserverReplaceable{{3, false}, {7, true}},
+		}},
+		Locators:         []DAObserverLocator{{id(0x81), id(0x61), "COMMIT", 0}, {id(0x82), id(0x61), "CHUNK", 5}, {id(0x83), id(0x60), "INVALID", 9}},
+		Claims:           []DAObserverClaim{{3, "STANDARD", id(0x31), op(0x41, 5), false, 7}, {4, "INVALID", id(0x33), op(0x41, 2), false, 10}, {9, "DA", id(0x32), op(0x42, 6), true, 8}},
+		OutpointRows:     []DAObserverOutpointRow{{op(0x41, 2)[0], 4, id(0x33)}, {op(0x41, 5)[0], 3, id(0x31)}, {op(0x42, 6)[0], 9, id(0x32)}},
+		NextReceivedTime: 101, StagedBytes: 102, CompleteBytes: 103, CompleteCount: 104, OrphanBytes: 105, OrphanCommitOverheadBytes: 106, PinnedPayloadBytes: 107, RecordRevisionHighWater: 108,
+		OrphanBytesByPeerQuotaKey: []DAObserverKeyBytes{{"k1", 111}, {"k2", 112}},
+		OrphanBytesByDAID:         []DAObserverIDBytes{{id(0x51), 113}, {id(0x52), 114}},
 	}
 }
 
 func TestDAObserverConformanceStateImage(t *testing.T) {
-	f, txs := daObserverImageFixture(t)
-	s, o := f.relay, f.mp.pendingOutpoints
+	s, want := daObserverSyntheticImage()
 	image, err := DAObserverReadStateImage(s)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || !reflect.DeepEqual(image, want) {
+		t.Fatalf("image (err=%v):\n got %+v\nwant %+v", err, image, want)
 	}
-	if !slices.EqualFunc(image.Records, []string{"ORPHAN_CHUNKS", "STAGED_COMMIT", "COMPLETE_SET"}, func(r DAObserverRecord, state string) bool { return r.State == state }) {
-		t.Fatalf("records=%+v", image.Records)
-	}
-	for _, r := range image.Records {
-		live, tx, kind := s.sets[r.DAID], txs[r.DAID], "LOCAL"
-		if r.DAID == [32]byte{0xA1} {
-			kind = "PEER"
-		}
-		c := live.completeIntrinsic
-		if r.Revision != live.revision || r.ReceivedTime != live.receivedTime || r.PayloadBytes != live.payloadBytes || r.WireBytes != live.wireBytes || r.TTLBlocksRemaining != live.ttlBlocksRemaining ||
-			r.CompleteIntrinsic != (DAObserverCapacitySet{c.id, c.fee, c.totalBytes, c.payloadBytes, c.receivedSequence}) || len(r.ReplaceableChunks) != len(live.replaceableChunks) {
-			t.Fatalf("record %x header=%+v live=%+v", r.DAID, r, live)
-		}
-		commit, chunks := r.Commit, r.Chunks
-		if tx[0].spec.kind == 1 {
-			if commit.DAID != live.commit.daID || commit.PayloadCommitment != tx[0].spec.commitment || commit.ChunkCount != tx[0].spec.chunkCount || commit.PeerQuotaKey != live.commit.peerQuotaKey || commit.WireBytes != live.commit.wireBytes || !bytes.Equal(commit.TxBytes, tx[0].raw) {
-				t.Fatalf("record %x commit=%+v", r.DAID, commit)
-			}
-			requireDAObserverMember(t, commit.Member, live.commit.member, tx[0], "LOCAL")
-			tx = tx[1:]
-		} else if commit.Member != nil || commit.TxBytes != nil {
-			t.Fatalf("record %x has an empty commit slot image %+v", r.DAID, commit)
-		}
-		if len(chunks) != len(tx) || len(live.chunks) != len(tx) {
-			t.Fatalf("record %x chunks=%d want %d", r.DAID, len(chunks), len(tx))
-		}
-		for i, chunk := range chunks {
-			l := live.chunks[chunk.ChunkIndex]
-			if chunk.DAID != l.daID || chunk.ChunkHash != sha3.Sum256(tx[i].spec.payload) || chunk.PeerQuotaKey != l.peerQuotaKey || chunk.ChunkIndex != tx[i].spec.chunkIndex ||
-				!bytes.Equal(chunk.Payload, l.payload) || (chunk.Payload == nil) != (l.payload == nil) || chunk.WireBytes != l.wireBytes || !bytes.Equal(chunk.TxBytes, tx[i].raw) || chunk.HashChecked != l.hashChecked {
-				t.Fatalf("record %x chunk=%+v live=%+v", r.DAID, chunk, l)
-			}
-			requireDAObserverMember(t, chunk.Member, l.member, tx[i], kind)
-		}
-	}
-	if (image.NextReceivedTime != s.nextReceivedTime || image.StagedBytes != s.stagedBytes || image.CompleteBytes != s.completeBytes || image.CompleteCount != s.completeCount) ||
-		(image.OrphanBytes != s.orphanBytes || image.OrphanCommitOverheadBytes != s.orphanCommitOverheadBytes || image.PinnedPayloadBytes != s.pinnedPayloadBytes || image.RecordRevisionHighWater != s.records) || image.CompleteCount != 1 || image.OrphanBytes == 0 {
-		t.Fatalf("image scalars=%+v", image)
-	}
-	if len(image.Locators) != len(s.locators) || !slices.IsSortedFunc(image.Locators, func(a, b DAObserverLocator) int { return bytes.Compare(a.TxID[:], b.TxID[:]) }) {
-		t.Fatalf("locators=%+v", image.Locators)
-	}
-	for _, l := range image.Locators {
-		live := s.locators[l.TxID]
-		if l.DAID != live.daID || l.ChunkIndex != live.chunkIndex || l.Kind != map[daRelayLocatorKind]string{daRelayLocatorCommit: "COMMIT", daRelayLocatorChunk: "CHUNK"}[live.kind] {
-			t.Fatalf("locator=%+v live=%+v", l, live)
-		}
-	}
-	if len(image.Claims) != len(o.byToken) || len(image.Claims) != 4 || !slices.IsSortedFunc(image.Claims, func(a, b DAObserverClaim) int { return cmp.Compare(a.TokenSeq, b.TokenSeq) }) {
-		t.Fatalf("claims=%+v", image.Claims)
-	}
-	for _, c := range image.Claims {
-		live := o.byToken[PendingOutpointToken{owner: o, seq: c.TokenSeq}]
-		if live == nil || c.Domain != "DA" || c.TxID != live.txid || !slices.Equal(c.Inputs, live.inputs) || c.Finalized != live.finalized || c.Generation != live.generation {
-			t.Fatalf("claim=%+v live=%+v", c, live)
-		}
-	}
-	if len(image.OutpointRows) != len(o.byOutpoint) || !slices.IsSortedFunc(image.OutpointRows, func(a, b DAObserverOutpointRow) int { return compareDAObserverOutpoint(a.Outpoint, b.Outpoint) }) {
-		t.Fatalf("outpoint rows=%+v", image.OutpointRows)
-	}
-	for _, row := range image.OutpointRows {
-		if live := o.byOutpoint[row.Outpoint]; row.TokenSeq != live.token.seq || row.TxID != live.txid {
-			t.Fatalf("outpoint row=%+v live=%+v", row, live)
-		}
-	}
-	peer := map[string]uint64{}
-	for _, row := range image.OrphanBytesByPeerQuotaKey {
-		peer[row.Key] = row.Bytes
-	}
-	daid := map[[32]byte]uint64{}
-	for _, row := range image.OrphanBytesByDAID {
-		daid[row.DAID] = row.Bytes
-	}
-	if !maps.Equal(peer, s.orphanBytesByPeerQuotaKey) || !maps.Equal(daid, s.orphanBytesByDAID) || len(peer) == 0 {
-		t.Fatalf("orphan charges peer=%v daid=%v", peer, daid)
-	}
-
-	second, _ := DAObserverReadStateImage(s)
-	liveBefore, ownerBefore := daRelayStateSnapshot(s), cloneDAAdmissionOwner(o)
 	flip := func(b []byte) {
 		if len(b) != 0 {
 			b[0] ^= 0xff
@@ -205,9 +172,27 @@ func TestDAObserverConformanceStateImage(t *testing.T) {
 	for _, c := range image.Claims {
 		c.Inputs[0].Vout++
 	}
-	requireDANonReplayUnchanged(t, s, o, liveBefore, ownerBefore)
-	if third, _ := DAObserverReadStateImage(s); !reflect.DeepEqual(third, second) {
-		t.Fatal("mutating an image changed a later read")
+	if again, _ := DAObserverReadStateImage(s); !reflect.DeepEqual(again, want) {
+		t.Fatal("mutating an image changed live state")
+	}
+
+	// Admitted State A, B and C records reach the image with their retained bytes.
+	f, txs := daObserverImageFixture(t)
+	image, err = DAObserverReadStateImage(f.relay)
+	if err != nil || len(image.Records) != 3 {
+		t.Fatalf("admitted image=%+v err=%v", image, err)
+	}
+	for i, r := range image.Records {
+		var raws [][]byte
+		if r.Commit.TxBytes != nil {
+			raws = append(raws, r.Commit.TxBytes)
+		}
+		for _, chunk := range r.Chunks {
+			raws = append(raws, chunk.TxBytes)
+		}
+		if r.State != []string{"ORPHAN_CHUNKS", "STAGED_COMMIT", "COMPLETE_SET"}[i] || !slices.EqualFunc(raws, txs[r.DAID], func(raw []byte, tx daNonReplayTx) bool { return bytes.Equal(raw, tx.raw) }) {
+			t.Fatalf("admitted record %x=%+v", r.DAID, r)
+		}
 	}
 
 	for name, relay := range map[string]*DARelayState{
@@ -234,34 +219,37 @@ func TestDAObserverConformanceInjectors(t *testing.T) {
 		{"retained raw malformed", DAObserverFaultRetainedRawMalformed, RelayAdmissionInternal},
 		{"admission wtxid mismatch", DAObserverFaultAdmissionWTxIDMismatch, RelayAdmissionInternal},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			f := newDANonReplayFixture(t, 2)
-			commit := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0xD1}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1})
-			chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0xD1}, payload: []byte("fault")})
-			for _, tx := range []daNonReplayTx{commit, chunk} {
-				if _, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance()); err != nil {
+		for target, name := range []string{"commit", "chunk"} {
+			t.Run(row.name+" on "+name, func(t *testing.T) {
+				f := newDANonReplayFixture(t, 2)
+				commit := f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0xD1}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1})
+				chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0xD1}, payload: []byte("fault")})
+				for _, tx := range []daNonReplayTx{commit, chunk} {
+					if _, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := daRelayStateSnapshot(f.relay)
+				if err := DAObserverInjectRetainedFault(f.relay, [32]byte{0xEE}, row.fault); err == nil {
+					t.Fatal("unlocated injection succeeded")
+				}
+				if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality is the assertion.
+					t.Fatal("unlocated injection changed state")
+				}
+				for _, tx := range []daNonReplayTx{commit, chunk} {
+					if result, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance()); err != nil || result.Disposition != DAAdmissionDuplicate {
+						t.Fatalf("before injection replay=(%+v,%v)", result, err)
+					}
+				}
+				located := []daNonReplayTx{commit, chunk}[target]
+				if err := DAObserverInjectRetainedFault(f.relay, located.txid, row.fault); err != nil {
 					t.Fatal(err)
 				}
-			}
-			before := daRelayStateSnapshot(f.relay)
-			if err := DAObserverInjectRetainedFault(f.relay, [32]byte{0xEE}, row.fault); err == nil {
-				t.Fatal("unlocated injection succeeded")
-			}
-			if got := daRelayStateSnapshot(f.relay); !reflect.DeepEqual(got, before) { //nolint:govet // Complete private state-image equality is the assertion.
-				t.Fatal("unlocated injection changed state")
-			}
-			for _, tx := range []daNonReplayTx{commit, chunk} {
-				if result, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance()); err != nil || result.Disposition != DAAdmissionDuplicate {
-					t.Fatalf("before injection replay=(%+v,%v)", result, err)
+				if result, err := f.relay.AdmitDA(located.raw, LocalDAProvenance()); err == nil || DAObserverRelayDisposition(err) != row.want {
+					t.Fatalf("after %s replay=(%+v,%v), want disposition %d", row.name, result, err, row.want)
 				}
-			}
-			if err := DAObserverInjectRetainedFault(f.relay, chunk.txid, row.fault); err != nil {
-				t.Fatal(err)
-			}
-			if result, err := f.relay.AdmitDA(chunk.raw, LocalDAProvenance()); err == nil || DAObserverRelayDisposition(err) != row.want {
-				t.Fatalf("after %s replay=(%+v,%v), want disposition %d", row.name, result, err, row.want)
-			}
-		})
+			})
+		}
 	}
 	t.Run("owner transition", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 2)

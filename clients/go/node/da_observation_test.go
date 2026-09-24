@@ -164,12 +164,62 @@ func daObservationHeld(mu *sync.Mutex) bool {
 	return true
 }
 
-// runDAObservationScript drives AdmitDA over a fixed script and returns one
-// signature per step; observe installs an observer that checks each call.
-func runDAObservationScript(t *testing.T, observe bool) []string {
-	f := newDANonReplayFixture(t, 6)
+// daObservationTwin returns a fresh mempool and relay over f's exact UTXO set,
+// chain and signer, so transactions signed on f admit identically on both.
+func daObservationTwin(t *testing.T, f *daNonReplayFixture) *daNonReplayFixture {
+	state, outpoints := testSpendableChainState(f.address, slices.Repeat([]uint64{2_000_000}, len(f.outpoints)))
+	cfg := DefaultMempoolConfig()
+	cfg.PolicyMaxDaBytesPerBlock = consensus.MAX_DA_BYTES_PER_BLOCK
+	mp, err := NewMempoolWithConfig(state, nil, devnetGenesisChainID, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caps := defaultDARelayCaps()
+	caps.orphanTTLBlocks = 7
+	relay, err := newDARelayState(mp, caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &daNonReplayFixture{t: t, signer: f.signer, address: f.address, state: state, mp: mp, relay: relay, outpoints: outpoints}
+}
+
+// daObservationImage is every retained-state and owner-state observable of f,
+// with the owner identity cleared so twin fixtures compare equal.
+func daObservationImage(f *daNonReplayFixture) []any {
+	view := daRelayStateSnapshot(f.relay)
+	view.mempool = nil
+	clearOwner := func(m *daRelayMemberIdentity) {
+		if m != nil {
+			m.token.owner = nil
+		}
+	}
+	for _, r := range view.sets {
+		clearOwner(r.commit.member)
+		for _, chunk := range r.chunks {
+			clearOwner(chunk.member)
+		}
+	}
+	owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	claims, rows := map[uint64]pendingOutpointClaim{}, map[consensus.Outpoint]pendingOutpointRow{}
+	for token, claim := range owner.byToken {
+		claim.token.owner = nil
+		claims[token.seq] = *claim
+	}
+	for op, row := range owner.byOutpoint {
+		row.token.owner = nil
+		rows[op] = row
+	}
+	owner.byToken, owner.byOutpoint = nil, nil
+	return []any{view, claims, rows, owner, daObservationCounts(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)}
+}
+
+// runDAObservationScript drives AdmitDA over txs and returns one signature per
+// step. With observe it installs an observer that checks each call and a no-op
+// plan hook, and returns the number of hook calls.
+func runDAObservationScript(t *testing.T, f *daNonReplayFixture, txs []daNonReplayTx, observe bool) ([]string, int) {
 	o := f.mp.pendingOutpoints
 	var calls []daAdmitCall
+	hooked := 0
 	if observe {
 		observer := func(call daAdmitCall) {
 			if daObservationHeld(&f.relay.mu) || daObservationHeld(&o.mu) {
@@ -178,6 +228,7 @@ func runDAObservationScript(t *testing.T, observe bool) []string {
 			calls = append(calls, call)
 		}
 		f.relay.admitObserver.Store(&observer)
+		f.relay.completeHook = func(daCompleteStage, *daCompleteCommitPlan) { hooked++ }
 	}
 	var signatures []string
 	// want is the success disposition, or zero with the refusal's relay disposition.
@@ -192,52 +243,53 @@ func runDAObservationScript(t *testing.T, observe bool) []string {
 		}
 		signatures = append(signatures, fmt.Sprintf("%s: %+v %v", label, got, err))
 	}
-	chunk := func(id byte) daNonReplayTx {
-		return f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, id}, payload: []byte{id}})
-	}
-	retained, peer := chunk(1), publicPeer(t, "observed")
-	admit("retained", retained.raw, peer, DAAdmissionRetained, 0)
-	admit("exact replay", retained.raw, LocalDAProvenance(), DAAdmissionDuplicate, 0)
-	admit("policy rejection", append(slices.Clip(retained.raw), 0), LocalDAProvenance(), 0, RelayAdmissionStableTerminalReject)
-	conflicted := chunk(2)
-	mustReserve(t, o, [32]byte{0x99}, conflicted.inputs[0])
-	admit("owner conflict", conflicted.raw, LocalDAProvenance(), 0, RelayAdmissionConflict)
-	local := chunk(3)
+	admit("retained", txs[0].raw, publicPeer(t, "observed"), DAAdmissionRetained, 0)
+	admit("exact replay", txs[0].raw, LocalDAProvenance(), DAAdmissionDuplicate, 0)
+	admit("policy rejection", append(slices.Clip(txs[0].raw), 0), LocalDAProvenance(), 0, RelayAdmissionStableTerminalReject)
+	mustReserve(t, o, [32]byte{0x99}, txs[1].inputs[0])
+	admit("owner conflict", txs[1].raw, LocalDAProvenance(), 0, RelayAdmissionConflict)
 	if _, err := o.beginTransition(); err != nil {
 		t.Fatal(err)
 	}
-	admit("hold unavailable", local.raw, LocalDAProvenance(), 0, RelayAdmissionUnavailable)
+	admit("hold unavailable", txs[2].raw, LocalDAProvenance(), 0, RelayAdmissionUnavailable)
 	o.endTransitionAborted()
-	admit("invalid provenance", local.raw, DAProvenance{}, 0, RelayAdmissionStableTerminalReject)
-	admit("local", local.raw, LocalDAProvenance(), DAAdmissionRetained, 0)
-	admit("detached reorg", chunk(4).raw, DetachedReorgDAProvenance(), DAAdmissionRetained, 0)
+	admit("invalid provenance", txs[2].raw, DAProvenance{}, 0, RelayAdmissionStableTerminalReject)
+	admit("local", txs[2].raw, LocalDAProvenance(), DAAdmissionRetained, 0)
+	admit("detached reorg", txs[3].raw, DetachedReorgDAProvenance(), DAAdmissionRetained, 0)
+	admit("staged commit", txs[4].raw, LocalDAProvenance(), DAAdmissionRetained, 0)
+	admit("completing chunk", txs[5].raw, LocalDAProvenance(), DAAdmissionRetained, 0)
 	f.relay.admitObserver.Store(nil)
 	installed := observe
 	observe = false
-	admit("uninstalled", chunk(5).raw, LocalDAProvenance(), DAAdmissionRetained, 0)
+	admit("uninstalled", txs[6].raw, LocalDAProvenance(), DAAdmissionRetained, 0)
 	if installed && len(calls) != 0 {
 		t.Fatalf("uninstalled observer was called: %+v", calls)
 	}
-	view := daRelayStateSnapshot(f.relay)
-	signatures = append(signatures, fmt.Sprintf("image sets=%d locators=%d owner=%v", len(view.sets), len(view.locators), daObservationCounts(o)))
-	return signatures
+	return signatures, hooked
 }
 
 func TestDAObservationAdmitObserver(t *testing.T) {
-	observed := runDAObservationScript(t, true)
-	if unobserved := runDAObservationScript(t, false); !slices.Equal(observed, unobserved) {
-		t.Fatalf("observer changed outcomes:\nobserved=%q\nunobserved=%q", observed, unobserved)
+	f := newDANonReplayFixture(t, 7)
+	chunk := func(id byte, payload []byte) daNonReplayTx {
+		return f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, id}, payload: payload})
+	}
+	complete := []byte("observed complete")
+	txs := []daNonReplayTx{chunk(1, []byte{1}), chunk(2, []byte{2}), chunk(3, []byte{3}), chunk(4, []byte{4}),
+		f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0x70, 9}, chunkCount: 1, commitment: sha3.Sum256(complete), commitmentOutputs: 1}), chunk(9, complete), chunk(5, []byte{5})}
+	twin := daObservationTwin(t, f)
+	observed, hooked := runDAObservationScript(t, f, txs, true)
+	unobserved, _ := runDAObservationScript(t, twin, txs, false)
+	if !slices.Equal(observed, unobserved) || !reflect.DeepEqual(daObservationImage(f), daObservationImage(twin)) || hooked != 2 {
+		t.Fatalf("observer and no-op hook (hook calls=%d) changed outcomes or state:\nobserved=%q\nunobserved=%q", hooked, observed, unobserved)
 	}
 	got, err := (*DARelayState)(nil).AdmitDA(nil, LocalDAProvenance())
 	requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "nil DA relay", RelayAdmissionUnavailable)
-	f := newDANonReplayFixture(t, 1)
 	observer := func(daAdmitCall) {}
 	f.relay.admitObserver.Store(&observer)
-	f.relay.completeHook = func(daCompleteStage, *daCompleteCommitPlan) {}
 	f.relay.mu.Lock()
 	image := f.relay.cloneForAtomicBatchLocked()
 	f.relay.mu.Unlock()
-	if image.admitObserver.Load() != nil || image.completeHook != nil {
+	if image.admitObserver.Load() != nil || image.completeHook != nil || f.relay.completeHook == nil {
 		t.Fatal("retained-state image copied the observer or hook")
 	}
 }

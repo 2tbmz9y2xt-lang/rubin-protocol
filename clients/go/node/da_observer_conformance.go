@@ -302,8 +302,9 @@ const (
 )
 
 // DAObserverInjectRetainedFault installs fault for the retained member txid
-// under one s.mu hold. A nil relay, an unlocated txid, a located txid whose
-// member is absent, or an unknown fault returns an error and changes nothing.
+// under one s.mu hold. A nil relay, an unlocated txid or an unknown fault
+// returns an error and changes nothing; so does LocatorDangling when the located
+// record is absent, and either member fault when the located member is absent.
 func DAObserverInjectRetainedFault(s *DARelayState, txid [32]byte, fault DAObserverRetainedFault) error {
 	if s == nil {
 		return errors.New("nil DA relay")
