@@ -1643,3 +1643,51 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 	requireNonce(t, "detached adapter", node.DAAdmissionResult{}, err)
 	requireReturned(t, lifecycleClose(h.service), "AO11 local and detached entries released their work leases")
 }
+
+// TestDAIngressZeroInputOrderAndEffects: nonzero-nonce DA bytes with zero inputs reach the guarded owner from every entry
+// (A6/H5): a wrong own-chunk hash is the requested and unsolicited PEER +10 fault with no cache row, a first eligible PEER
+// miss inserts and the repeat is suppressed peer-neutrally, and LOCAL, AnnounceTx and the detached adapter bypass the row.
+func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
+	const parse = "TX_ERR_PARSE: non-coinbase must have at least one input"
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	p, stranger := daRelayTestPeer(h, "127.0.0.1:19141"), daRelayTestPeer(h, "127.0.0.3:19148")
+	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19149")
+	defer closeProbe()
+	calls := nowCalls(h)
+	inputless := func(raw []byte) []byte {
+		tx := mustParseP2PTx(t, raw)
+		tx.Inputs, tx.Witness = nil, nil
+		return mustMarshalPeerRuntimeTx(t, tx)
+	}
+	requireParse := func(t *testing.T, label string, err error) {
+		t.Helper()
+		var admit *node.TxAdmitError
+		require(t, errors.As(err, &admit) && admit.Kind == node.TxAdmitRejected && admit.Message == parse && calls.Load() == 0, "%s: err=%v scheduler=%d, want %q", label, err, calls.Load(), parse)
+	}
+	badHash := inputless(f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0x72), payload: []byte("zero-input-bad"), chunkHash: [32]byte{0xff}}))
+	for _, row := range []struct {
+		label string
+		peer  *peer
+	}{{"requested", p}, {"unsolicited", stranger}, {"requested again, nothing cached", p}} {
+		before := effectsOf(row.peer)
+		require(t, row.peer.handleTx(badHash) == nil && effectsOf(row.peer) == peerEffects{before.ban + 10, "da chunk hash mismatch", before.score, before.anchor}, "%s wrong hash: peer effects %+v -> %+v", row.label, before, effectsOf(row.peer))
+	}
+	commit := inputless(f.commit(daRelayTestID(0x73), 2))
+	for _, peer := range []*peer{p, stranger} {
+		before := effectsOf(peer)
+		require(t, peer.handleTx(commit) == nil && effectsOf(peer) == before && quotaKeyFree(h.service, peerQuotaKey(peer.addr())), "zero-input commit: peer effects %+v -> %+v or quota key held", before, effectsOf(peer))
+	}
+	assertNoRelayFrame(t, frames, "zero-input commit")
+	got, err := f.probe(commit)
+	requireSuppressed(t, got, err, "the first PEER miss inserted the row")
+	got, err = h.service.AdmitLocalDA(commit)
+	require(t, got == node.DAAdmissionResult{}, "AdmitLocalDA result=%+v", got)
+	requireParse(t, "AdmitLocalDA", err)
+	requireParse(t, "AnnounceTx", h.service.AnnounceTx(commit))
+	finish, err := h.service.admitDetachedReorgDA(commit)
+	require(t, finish == nil, "detached adapter returned a completion")
+	requireParse(t, "detached adapter", err)
+	assertNoRelayFrame(t, frames, "local entries")
+	requireReturned(t, lifecycleClose(h.service), "zero-input local and detached entries released their work leases")
+}

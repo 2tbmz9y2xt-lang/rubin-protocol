@@ -1000,7 +1000,7 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 			name:    "DA kind refused before any admitted-pool read",
 			poolRaw: badDATxBytes,
 			txBytes: goodDATxBytes,
-			want:    "DA transaction must have 1..MAX_TX_INPUTS inputs",
+			want:    "TX_ERR_PARSE: non-coinbase must have at least one input",
 			daArm:   true,
 		},
 	}

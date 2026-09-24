@@ -269,9 +269,6 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 	if tx.TxNonce == 0 {
 		return zero, selectRelayDisposition(txAdmitRejected(string(consensus.TX_ERR_TX_NONCE_INVALID)+": tx_nonce must be >= 1 for non-coinbase"), RelayAdmissionStableTerminalReject)
 	}
-	if len(inputs) == 0 { // canonical parse already bounds input_count by MAX_TX_INPUTS
-		return zero, selectRelayDisposition(txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs"), RelayAdmissionStableTerminalReject)
-	}
 	hold, err := m.acquireDAAdmissionHold(owner, inputs)
 	if err != nil {
 		return zero, selectRelayDisposition(err, RelayAdmissionUnavailable)
