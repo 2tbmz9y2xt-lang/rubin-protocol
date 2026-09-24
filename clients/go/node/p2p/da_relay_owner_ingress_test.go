@@ -596,8 +596,9 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	// ALREADY_TERMINAL on a genuinely latched engine: the fixture UTXO and the signed DA bytes are
 	// prepared on the fresh harness BEFORE the latch-producing ApplyBlock, and the UTXO set is
 	// snapshotted before that ApplyBlock and pinned unchanged after the last latched row; each row
-	// observes bounded completion, the quota key free and no AdmitDA; the valid and over-bound-identity
-	// rows leave the peer untouched, while malformed bytes keep their earlier +10 refusal ahead of the latch check.
+	// observes bounded completion, the quota key free and no scheduler entry (the valid row reaches the
+	// owner's terminal UNAVAILABLE); the valid and over-bound-identity rows leave the peer untouched,
+	// while malformed bytes keep their earlier +10 refusal ahead of the owner.
 	lh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	lf := newDAIngressFixture(t, lh)
 	lp, wide := daRelayTestPeer(lh, "127.0.0.1:19113"), daRelayTestPeer(lh, strings.Repeat("a", 255)+":12345678")
@@ -1067,11 +1068,12 @@ func TestRemoteDACleanupCallerEffects(t *testing.T) {
 }
 
 // TestRemoteDAResultDomainClosure: the structural half of UNREACHABLE_RESULT (two guarded effect
-// arms, bare nil after a plain release, identity before latch before key, no candidate validation
-// or standard authority on the DA arm, DA before the standard arm, no retired writer, handleConn's literal).
+// arms, bare nil after a plain release, identity before key, the identity refusal the only return
+// before AdmitDA with no terminal-latch shortcut, no candidate validation or standard authority on the
+// DA arm, DA before the standard arm, no retired writer, handleConn's literal).
 func TestRemoteDAResultDomainClosure(t *testing.T) {
 	handler := p2pFunction(t, "da_relay_ingest.go", "handleRelayDATx")
-	unlockAt, switchAt, identityAt, terminalAt := -1, -1, -1, -1
+	unlockAt, switchAt, identityAt, terminalAt, admitAt, returnsBeforeAdmit := -1, -1, -1, -1, -1, 0
 	for i, stmt := range handler.Body.List {
 		ast.Inspect(stmt, func(node ast.Node) bool {
 			switch call, ok := node.(*ast.CallExpr); {
@@ -1079,6 +1081,11 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 				identityAt = i
 			case ok && calleeOf(call) == "TerminalFaulted":
 				terminalAt = i
+			case ok && calleeOf(call) == "AdmitDA":
+				admitAt = i
+			}
+			if _, ok := node.(*ast.ReturnStmt); ok && admitAt < 0 {
+				returnsBeforeAdmit++
 			}
 			return true
 		})
@@ -1109,7 +1116,8 @@ func TestRemoteDAResultDomainClosure(t *testing.T) {
 	}
 	last, ok := handler.Body.List[len(handler.Body.List)-1].(*ast.ReturnStmt)
 	require(t, unlockAt >= 0 && switchAt > unlockAt && ok && len(last.Results) == 1 && types.ExprString(last.Results[0]) == "nil" && switchAt == len(handler.Body.List)-2, "unlock at %d, switch at %d of %d statements; the switch must follow the release and be followed only by `return nil`", unlockAt, switchAt, len(handler.Body.List))
-	require(t, identityAt >= 0 && terminalAt > identityAt && unlockAt > terminalAt, "identity at %d, terminal latch at %d, unlock at %d; IDENTITY_REFUSAL precedes ALREADY_TERMINAL precedes the quota key", identityAt, terminalAt, unlockAt)
+	require(t, identityAt >= 0 && unlockAt > identityAt, "identity at %d, unlock at %d; IDENTITY_REFUSAL precedes the quota key", identityAt, unlockAt)
+	require(t, terminalAt < 0 && admitAt > identityAt && returnsBeforeAdmit == 1, "terminal latch at %d, AdmitDA at %d after %d returns; a valid remote DA candidate must reach the owner, whose nonce rejection precedes its guard", terminalAt, admitAt, returnsBeforeAdmit)
 	forbidden := []string{"validateRelayDATxForAdmission", "ValidateDARelayChunk", "peerAddressKey", "normalizeNetAddr", "normalizeReconnectAddr", "ensureRelayTxAdmitted", "broadcastInventory", "Has", "Add", "Put", "UpsertPeer", "setLastError"}
 	for _, name := range []string{"handleRelayDATx", "remoteDAProvenance", "penalizeDAAdmissionError", "applyCompetingCommitScore", "qualityPreferred", "normalizeQualityLocked"} {
 		ast.Inspect(p2pFunction(t, "da_relay_ingest.go", name).Body, func(node ast.Node) bool {
@@ -1577,4 +1585,61 @@ func mustUnsupportedKindTxBytes(t *testing.T) []byte {
 	require(t, raw[4] == 0x00, "the marshaled header does not carry tx_kind at byte 4: %x", raw[:5])
 	raw[4] = 0x03
 	return raw
+}
+
+// TestDAIngressAO11OrderAndEffects: a within-bound, fully parsed zero-nonce DA candidate reaches the owner from every
+// entry and ends with the nonce rejection: PEER is peer-neutral with no scheduler or INV, LOCAL and AnnounceTx return
+// the error, the detached adapter returns no completion, and every work lease is released; bound and parse refusals
+// keep their earlier ban.
+func TestDAIngressAO11OrderAndEffects(t *testing.T) {
+	const nonce = "TX_ERR_TX_NONCE_INVALID: tx_nonce must be >= 1 for non-coinbase"
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	p, stranger := daRelayTestPeer(h, "127.0.0.1:19131"), daRelayTestPeer(h, "127.0.0.3:19138")
+	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19139")
+	defer closeProbe()
+	calls := nowCalls(h)
+	zero := func(raw []byte) []byte {
+		tx := mustParseP2PTx(t, raw)
+		tx.TxNonce = 0
+		return resignDATx(t, f, tx)
+	}
+	requireNonce := func(t *testing.T, label string, got node.DAAdmissionResult, err error) {
+		t.Helper()
+		var admit *node.TxAdmitError
+		require(t, got == node.DAAdmissionResult{} && errors.As(err, &admit) && admit.Kind == node.TxAdmitRejected && admit.Message == nonce && calls.Load() == 0, "%s: (%+v,%v) scheduler=%d, want the zero result and the nonce rejection", label, got, err, calls.Load())
+	}
+	daID := daRelayTestID(0x70)
+	commit, chunk := zero(f.commit(daID, 2)), zero(f.chunk(daID, 0, []byte("ao11")))
+	badHash := f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0x71), payload: []byte("ao11-bad"), chunkHash: [32]byte{0xff}})
+	zeroBadHash := zero(badHash)
+	for _, row := range []struct {
+		label string
+		peer  *peer
+		raw   []byte
+	}{{"commit", p, commit}, {"chunk", p, chunk}, {"unsolicited chunk", stranger, chunk}, {"H1 wrong own-chunk hash", p, zeroBadHash}, {"H1 unsolicited", stranger, zeroBadHash}} {
+		t.Run(row.label, func(t *testing.T) {
+			before := effectsOf(row.peer)
+			require(t, row.peer.handleTx(row.raw) == nil && effectsOf(row.peer) == before && quotaKeyFree(h.service, peerQuotaKey(row.peer.addr())), "peer effects %+v -> %+v or quota key held", before, effectsOf(row.peer))
+			assertNoRelayFrame(t, frames, row.label)
+			got, err := f.probe(row.raw)
+			requireNonce(t, "probe", got, err)
+		})
+	}
+	before := effectsOf(p)
+	require(t, p.handleTx(badHash) == nil && effectsOf(p).ban == before.ban+10, "nonzero wrong-hash twin was not a peer fault: %+v -> %+v", before, effectsOf(p))
+	oversize := append(slices.Clone(commit), make([]byte, consensus.MAX_RELAY_MSG_BYTES+1-len(commit))...)
+	for reason, raw := range map[string][]byte{"non-canonical tx bytes": append(slices.Clone(commit), 0), fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(oversize), consensus.MAX_RELAY_MSG_BYTES): oversize} {
+		before := effectsOf(p)
+		require(t, p.handleTx(raw) == nil && effectsOf(p) == peerEffects{before.ban + 10, reason, before.score, before.anchor}, "%s: peer effects %+v -> %+v", reason, before, effectsOf(p))
+	}
+
+	got, err := h.service.AdmitLocalDA(commit)
+	requireNonce(t, "AdmitLocalDA", got, err)
+	requireNonce(t, "AnnounceTx", node.DAAdmissionResult{}, h.service.AnnounceTx(chunk))
+	assertNoRelayFrame(t, frames, "AnnounceTx")
+	finish, err := h.service.admitDetachedReorgDA(chunk)
+	require(t, finish == nil, "detached adapter returned a completion for the nonce rejection")
+	requireNonce(t, "detached adapter", node.DAAdmissionResult{}, err)
+	requireReturned(t, lifecycleClose(h.service), "AO11 local and detached entries released their work leases")
 }

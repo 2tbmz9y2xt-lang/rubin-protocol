@@ -100,10 +100,9 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer
 // state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
-// address reaches) exits nil with zero effect. The terminal latch is checked before the quota key (a
-// latch landing later keeps the same-key teardown/Close limitation until restart); the key is held only
-// around AdmitDA and released before any effect; no candidate validation precedes AdmitDA's owner
-// observation; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
+// address reaches) exits nil with zero effect. Every other identity reaches AdmitDA with no terminal-latch
+// shortcut; the key is held only around AdmitDA and released before any effect; no candidate validation
+// precedes AdmitDA's owner observation; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
 // schedules the prefetch once; DUPLICATE with conflict applies COMPETING_SCORE_V1 once; DUPLICATE without
 // conflict is the reachable neutral exit (exact/nonexact replay, occupied index); a zero/unknown
 // discriminator or RETAINED with the conflict flag — shapes publicDAAdmissionResult cannot emit — also exit
@@ -112,9 +111,6 @@ func (p *peer) handleRelayDATx(txBytes []byte) error {
 	s := p.service
 	peerIdentity, quotaIdentity, provenance, ok := p.remoteDAProvenance()
 	if !ok {
-		return nil
-	}
-	if s.cfg.SyncEngine.TerminalFaulted() {
 		return nil
 	}
 	unlock := s.lockPeerQuotaKey(quotaIdentity)
