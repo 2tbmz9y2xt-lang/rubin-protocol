@@ -599,33 +599,38 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 		t.Fatalf("provider observations create=%d spend=%d deployments=%d first=%v second=%v", create, spend, deployments, f.mp.Contains(first), f.mp.Contains(second))
 	}
 	for _, row := range []struct {
-		name string
-		cfg  func(*canonicalMOProvider) MempoolConfig
-		raw  func(*canonicalMOFixture) []byte
+		name      string
+		cfg       func(*canonicalMOProvider) MempoolConfig
+		raw       func(*canonicalMOFixture) []byte
+		wantAbort bool
 	}{
 		{"native_create_rotation", func(p *canonicalMOProvider) MempoolConfig {
 			p.createSet = consensus.NewNativeSuiteSet()
 			return MempoolConfig{RotationProvider: p}
-		}, func(f *canonicalMOFixture) []byte { return f.raw(t, f.ops[0], 1, false) }},
+		}, func(f *canonicalMOFixture) []byte { return f.raw(t, f.ops[0], 1, false) }, false},
 		{"native_spend_rotation", func(p *canonicalMOProvider) MempoolConfig {
 			p.spendSet = consensus.NewNativeSuiteSet()
 			return MempoolConfig{RotationProvider: p}
-		}, func(f *canonicalMOFixture) []byte { return f.raw(t, f.ops[0], 1, false) }},
+		}, func(f *canonicalMOFixture) []byte { return f.raw(t, f.ops[0], 1, false) }, false},
 		{"unsupported_suite", func(p *canonicalMOProvider) MempoolConfig { return MempoolConfig{RotationProvider: p} }, func(f *canonicalMOFixture) []byte {
 			return rewriteSyncTestWitnessSuiteID(t, f.raw(t, f.ops[0], 1, false), 0x7b)
-		}},
+		}, false},
 		{"unregistered_suite", func(p *canonicalMOProvider) MempoolConfig {
 			p.spendSet = consensus.NewNativeSuiteSet(0x7b)
 			return MempoolConfig{RotationProvider: p}
 		}, func(f *canonicalMOFixture) []byte {
 			return rewriteSyncTestWitnessSuiteID(t, f.raw(t, f.ops[0], 1, false), 0x7b)
-		}},
+		}, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			p := newCanonicalMOProvider(t, devnetGenesisChainID)
 			g := newCanonicalMOFixture(t, 1, row.cfg(p))
 			id := g.installRaw(t, row.raw(g))
-			if err := g.applyCoinbase(t); err != nil || g.mp.Contains(id) {
+			if row.wantAbort {
+				if err := assertCanonicalMOPlanAbort(t, g); err == nil || !g.mp.Contains(id) {
+					t.Fatalf("native availability abort err=%v retained=%v", err, g.mp.Contains(id))
+				}
+			} else if err := g.applyCoinbase(t); err != nil || g.mp.Contains(id) {
 				t.Fatalf("determined native reject err=%v retained=%v", err, g.mp.Contains(id))
 			}
 		})
