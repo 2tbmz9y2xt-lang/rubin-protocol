@@ -114,7 +114,9 @@ func TestNativeSuiteAuthorityIncoherence(t *testing.T) {
 	}
 
 	var typedNil *nativeSuiteAvailabilityRotation
-	mustTxErrorCause(t, f.origins()[0].run(typedNil, nil), TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native create set", TxErrorCauseNativeSuiteSetUnavailable)
+	for _, origin := range f.origins() {
+		mustTxErrorCause(t, origin.run(typedNil, DefaultSuiteRegistry()), TX_ERR_SIG_ALG_INVALID, origin.message, TxErrorCauseNativeSuiteSetUnavailable)
+	}
 	for _, origin := range f.origins() {
 		for _, tc := range []struct {
 			name string
@@ -196,12 +198,22 @@ func TestNativeSuiteRegistryEntryUnavailable(t *testing.T) {
 			}
 		})
 	}
-	err := f.origins()[1].run(&nativeSuiteAvailabilityRotation{spend: NewNativeSuiteSet()}, emptyRegistry)
-	mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native spend set", TxErrorCauseUnspecified)
-	badLengths := f.w
-	badLengths.Pubkey = badLengths.Pubkey[:1]
-	err = validateP2PKSpendAtHeight(testP2PKSpendCheck(f.entry, badLengths, testSpendSigEnv{tx: f.tx, inputValue: 100, rotation: DefaultRotationProvider{}, registry: DefaultSuiteRegistry()}))
-	mustTxErrorCause(t, err, TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths", TxErrorCauseUnspecified)
+	for _, origin := range f.origins() {
+		if origin.create {
+			continue
+		}
+		err := origin.run(&nativeSuiteAvailabilityRotation{spend: NewNativeSuiteSet()}, emptyRegistry)
+		mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, origin.message, TxErrorCauseUnspecified)
+	}
+	bad := f
+	bad.w.Pubkey = bad.w.Pubkey[:1]
+	for _, origin := range bad.origins() {
+		if origin.create {
+			continue
+		}
+		err := origin.run(DefaultRotationProvider{}, DefaultSuiteRegistry())
+		mustTxErrorCause(t, err, TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths", TxErrorCauseUnspecified)
+	}
 }
 
 func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
@@ -223,15 +235,35 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 		{"stealth", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error { return validateCoreStealthSpendQ(f.stealthEntry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q, prefix := seed()
-			mustTxErrorCause(t, tc.run(q, &nativeSuiteAvailabilityRotation{}, DefaultSuiteRegistry()), TX_ERR_SIG_ALG_INVALID, "CORE_"+map[string]string{"p2pk": "P2PK", "htlc": "HTLC", "stealth": "STEALTH"}[tc.name]+" suite not in native spend set", TxErrorCauseNativeSuiteSetUnavailable)
-			if !samePrefix(q, prefix) {
-				t.Fatalf("queue prefix changed: %+v", q.tasks)
-			}
-			if err := q.Flush(); err != nil {
-				t.Fatalf("seed flush: %v", err)
+			for _, missingRegistry := range []bool{false, true} {
+				q, prefix := seed()
+				rotation := &nativeSuiteAvailabilityRotation{}
+				registry, suffix, cause := DefaultSuiteRegistry(), "not in native spend set", TxErrorCauseNativeSuiteSetUnavailable
+				if missingRegistry {
+					rotation.spend, registry, suffix, cause = NewNativeSuiteSet(SUITE_ID_ML_DSA_87), NewSuiteRegistryFromParams(nil), "not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable
+				}
+				message := "CORE_" + map[string]string{"p2pk": "P2PK", "htlc": "HTLC", "stealth": "STEALTH"}[tc.name] + " suite " + suffix
+				mustTxErrorCause(t, tc.run(q, rotation, registry), TX_ERR_SIG_ALG_INVALID, message, cause)
+				if !samePrefix(q, prefix) {
+					t.Fatalf("queue prefix changed: %+v", q.tasks)
+				}
+				if err := tc.run(q, nil, nil); err != nil || q.Len() != 2 {
+					t.Fatalf("subsequent validation err=%v queue=%d", err, q.Len())
+				}
+				if err := q.Flush(); err != nil {
+					t.Fatalf("subsequent flush: %v", err)
+				}
 			}
 		})
+	}
+	nextThreshold := func(q *SigCheckQueue, context string) {
+		sentinel := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
+		if err := validateThresholdSigSpendQ([][32]byte{f.keyID, {}}, 1, []WitnessItem{f.w, sentinel}, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, context, nil, nil); err != nil || q.Len() != 2 {
+			t.Fatalf("subsequent threshold err=%v queue=%d", err, q.Len())
+		}
+		if err := q.Flush(); err != nil {
+			t.Fatalf("subsequent threshold flush: %v", err)
+		}
 	}
 
 	q, prefix := seed()
@@ -240,6 +272,7 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 	if !samePrefix(q, prefix) {
 		t.Fatalf("threshold set rollback changed prefix: %+v", q.tasks)
 	}
+	nextThreshold(q, "CORE_MULTISIG")
 
 	q, prefix = seed()
 	first := f.w
@@ -251,16 +284,7 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 	if !samePrefix(q, prefix) {
 		t.Fatalf("late registry rollback changed prefix: %+v", q.tasks)
 	}
-	sentinel := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
-	if err := validateThresholdSigSpendQ([][32]byte{f.keyID, {}}, 1, []WitnessItem{first, sentinel}, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, "CORE_VAULT", nil, nil); err != nil {
-		t.Fatalf("subsequent threshold validation: %v", err)
-	}
-	if q.Len() != 2 {
-		t.Fatalf("subsequent queue length=%d", q.Len())
-	}
-	if err := q.Flush(); err != nil {
-		t.Fatalf("subsequent flush: %v", err)
-	}
+	nextThreshold(q, "CORE_VAULT")
 }
 
 func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
@@ -286,6 +310,54 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 	}
 	if err := ValidateHTLCSpendAtHeight(f.htlcEntry, f.path, f.w, f.tx, 0, 100, [32]byte{}, 1, 0, f.cache, nil, nil); err != nil {
 		t.Fatalf("subsequent HTLC validation: %v", err)
+	}
+	htlcEarlier := func(queued bool, entry UtxoEntry, path WitnessItem, height, mtp uint64) func(RotationProvider) error {
+		return func(rotation RotationProvider) error {
+			if queued {
+				return validateHTLCSpendQ(entry, path, f.w, f.tx, 0, 100, [32]byte{}, height, mtp, f.cache, NewSigCheckQueue(1), rotation, DefaultSuiteRegistry())
+			}
+			return ValidateHTLCSpendAtHeight(entry, path, f.w, f.tx, 0, 100, [32]byte{}, height, mtp, f.cache, rotation, DefaultSuiteRegistry())
+		}
+	}
+	claimKeyID, wrongKey := [32]byte{0x71}, [32]byte{0x99}
+	wrongPreimage := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: encodeHTLCClaimPayload([]byte("0123456789abcdef"))}
+	claimKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: []byte{0x00}}
+	refundKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: []byte{0x01}}
+	timestampEntry := makeHTLCEntry([32]byte{0x72}, LOCK_MODE_TIMESTAMP, 1, claimKeyID, f.keyID)
+	for _, queued := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, message string
+			code          ErrorCode
+			run           func(RotationProvider) error
+		}{
+			{"htlc_shape", "CORE_HTLC covenant_data length mismatch", TX_ERR_COVENANT_TYPE_INVALID, htlcEarlier(queued, UtxoEntry{CovenantType: COV_TYPE_HTLC}, f.path, 1, 0)},
+			{"wrong_preimage", "CORE_HTLC claim preimage hash mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, wrongPreimage, 1, 0)},
+			{"height_lock", "CORE_HTLC height lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, f.htlcEntry, f.path, 0, 0)},
+			{"timestamp_lock", "CORE_HTLC timestamp lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, timestampEntry, f.path, 1, 0)},
+			{"claim_key", "CORE_HTLC claim key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, claimKeyMismatch, 1, 0)},
+			{"refund_key", "CORE_HTLC refund key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, refundKeyMismatch, 1, 0)},
+		} {
+			rotation := &nativeSuiteAvailabilityRotation{}
+			mustTxErrorCause(t, tc.run(rotation), tc.code, tc.message, TxErrorCauseUnspecified)
+			if rotation.spendCalls != 0 {
+				t.Fatalf("queued=%v case=%s provider calls=%d", queued, tc.name, rotation.spendCalls)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name, message string
+		run           func(RotationProvider) error
+	}{
+		{"create_value", "CORE_P2PK value must be > 0", func(rotation RotationProvider) error { return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{CovenantType: COV_TYPE_P2PK, CovenantData: f.entry.CovenantData}}}, [32]byte{}, 1, rotation) }},
+		{"create_shape", "invalid CORE_P2PK covenant_data length", func(rotation RotationProvider) error { return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK}}}, [32]byte{}, 1, rotation) }},
+		{"stealth_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error { return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{entry: UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, w: f.w, rotation: rotation, registry: DefaultSuiteRegistry()}) }},
+		{"stealth_q_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error { return validateCoreStealthSpendQ(UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, DefaultSuiteRegistry()) }},
+	} {
+		rotation := &nativeSuiteAvailabilityRotation{}
+		mustTxErrorCause(t, tc.run(rotation), TX_ERR_COVENANT_TYPE_INVALID, tc.message, TxErrorCauseUnspecified)
+		if rotation.createCalls != 0 || rotation.spendCalls != 0 {
+			t.Fatalf("case=%s provider calls=%d/%d", tc.name, rotation.createCalls, rotation.spendCalls)
+		}
 	}
 
 	prev := [32]byte{0x73}
