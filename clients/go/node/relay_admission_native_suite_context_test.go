@@ -1,11 +1,24 @@
 package node
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
+
+type nativeSuiteRelayAvailabilityRotation struct {
+	consensus.DefaultRotationProvider
+	spend *consensus.NativeSuiteSet
+	calls int
+}
+
+func (p *nativeSuiteRelayAvailabilityRotation) NativeSpendSuites(uint64) *consensus.NativeSuiteSet {
+	p.calls++
+	return p.spend
+}
 
 type nativeSuiteRelayContextMutableRotation struct {
 	consensus.DefaultRotationProvider
@@ -140,5 +153,75 @@ func TestNativeSuiteRelayContextTrust(t *testing.T) {
 	got = h.mp.AddRemoteTxForRelay(corruptFirstWitnessSignature(t, h.tx(0, 100_000, 100_000, 1)), h.context())
 	if got.Disposition != RelayAdmissionStableTerminalReject || !got.HasAdmissionContext || admitKind(t, got.Err) != TxAdmitRejected || got.Err.Error() != "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid" || h.mp.Len() != 0 {
 		t.Fatalf("unrelated result=%+v", got)
+	}
+}
+
+func TestRelayNativeSuiteAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name, message string
+		cause         consensus.TxErrorCause
+		registry      *consensus.SuiteRegistry
+		spend         *consensus.NativeSuiteSet
+	}{
+		{"set_unavailable", "TX_ERR_SIG_ALG_INVALID: CORE_P2PK suite not in native spend set", consensus.TxErrorCauseNativeSuiteSetUnavailable, consensus.DefaultSuiteRegistry(), nil},
+		{"registry_entry_unavailable", "TX_ERR_SIG_ALG_INVALID: CORE_P2PK suite not registered", consensus.TxErrorCauseNativeSuiteRegistryEntryUnavailable, consensus.NewSuiteRegistryFromParams(nil), consensus.NewNativeSuiteSet(consensus.SUITE_ID_ML_DSA_87)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rotation := &nativeSuiteRelayAvailabilityRotation{spend: tc.spend}
+			h := newRelayHarness(t, &MempoolConfig{RotationProvider: rotation, SuiteRegistry: tc.registry}, 1_000_000)
+			raw := h.tx(0, 100_000, 100_000, 1)
+			_, wantTxID, wantWTxID, consumed, err := consensus.ParseTx(raw)
+			if err != nil || consumed != len(raw) || wantTxID == ([32]byte{}) || wantWTxID == ([32]byte{}) {
+				t.Fatalf("fixture ids txid=%x wtxid=%x consumed=%d err=%v", wantTxID, wantWTxID, consumed, err)
+			}
+			cloneUtxos := func() map[consensus.Outpoint]consensus.UtxoEntry {
+				clone := make(map[consensus.Outpoint]consensus.UtxoEntry, len(h.st.Utxos))
+				for outpoint, entry := range h.st.Utxos {
+					clone[outpoint] = entry
+				}
+				return clone
+			}
+			_, originErr := consensus.CheckTransactionWithOwnedUtxoSetAndSuiteContext(raw, cloneUtxos(), h.st.Height+1, 0, devnetGenesisChainID, rotation, tc.registry)
+			var txErr *consensus.TxError
+			if !errors.As(originErr, &txErr) || txErr.Cause() != tc.cause || originErr.Error() != tc.message {
+				t.Fatalf("origin error=%v cause=%v", originErr, txErr)
+			}
+			before, err := snapshotMempool(h.mp)
+			if err != nil {
+				t.Fatalf("snapshot before: %v", err)
+			}
+			expectedContext := h.context()
+			beforeCalls := rotation.calls
+			got := h.mp.AddRemoteTxForRelay(raw, expectedContext)
+			after, err := snapshotMempool(h.mp)
+			if err != nil {
+				t.Fatalf("snapshot after: %v", err)
+			}
+			if got.Disposition != RelayAdmissionUnavailable || got.TxID != wantTxID || got.WTxID != wantWTxID || got.Err == nil || admitKind(t, got.Err) != TxAdmitRejected || got.Err.Error() != tc.message || got.HasAdmissionContext || got.AdmissionContext != (PendingOutpointAdmissionContext{}) {
+				t.Fatalf("result=%+v want ids=%x/%x message=%q", got, wantTxID, wantWTxID, tc.message)
+			}
+			if !reflect.DeepEqual(before, after) || rotation.calls != beforeCalls+2 || h.mp.Len() != 0 {
+				t.Fatalf("failure effects before=%+v after=%+v calls=%d want=%d", before, after, rotation.calls, beforeCalls+2)
+			}
+			if current := h.context(); *current != *expectedContext {
+				t.Fatalf("admission context moved: before=%+v after=%+v", *expectedContext, *current)
+			}
+			for _, err := range []error{originErr, fmt.Errorf("wrapped: %w", originErr)} {
+				for _, fallback := range []RelayAdmissionDisposition{RelayAdmissionStableTerminalReject, RelayAdmissionInternal} {
+					if got := relayDispositionForInputError(err, fallback); got != RelayAdmissionUnavailable {
+						t.Fatalf("classifier=%v fallback=%v", got, fallback)
+					}
+				}
+			}
+
+			rotation.spend = consensus.DefaultRotationProvider{}.NativeSpendSuites(1)
+			h.mp.mu.Lock()
+			h.mp.policy.SuiteRegistry = consensus.DefaultSuiteRegistry()
+			h.mp.mu.Unlock()
+			healthy := h.mp.AddRemoteTxForRelay(raw, expectedContext)
+			if healthy.Err != nil || healthy.Disposition != RelayAdmissionRetained || h.mp.Len() != 1 {
+				t.Fatalf("subsequent healthy result=%+v len=%d", healthy, h.mp.Len())
+			}
+		})
 	}
 }

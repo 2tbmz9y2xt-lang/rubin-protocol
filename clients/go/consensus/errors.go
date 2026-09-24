@@ -139,6 +139,12 @@ const (
 	// selected a suite other than mandatory 0xF0. It is candidate-intrinsic and
 	// independent of provider or policy, so it remains stable terminal invalidity.
 	TxErrorCauseSimplicityWitnessSuiteInvalid
+	// TxErrorCauseNativeSuiteSetUnavailable means a reached native-suite
+	// membership decision had no set to decide from.
+	TxErrorCauseNativeSuiteSetUnavailable
+	// TxErrorCauseNativeSuiteRegistryEntryUnavailable means membership was
+	// established, but the bound registry had no entry for that suite.
+	TxErrorCauseNativeSuiteRegistryEntryUnavailable
 )
 
 type TxError struct {
@@ -186,4 +192,11 @@ func txerr(code ErrorCode, msg string) error {
 // inner error's own Cause() and never a cause literal of its own.
 func txerrWithCause(code ErrorCode, msg string, cause TxErrorCause) error {
 	return &TxError{Code: code, Msg: msg, cause: cause}
+}
+
+func nativeSuiteMembershipError(nativeSuites *NativeSuiteSet, msg string) error {
+	if nativeSuites == nil {
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, msg, TxErrorCauseNativeSuiteSetUnavailable)
+	}
+	return txerr(TX_ERR_SIG_ALG_INVALID, msg)
 }
