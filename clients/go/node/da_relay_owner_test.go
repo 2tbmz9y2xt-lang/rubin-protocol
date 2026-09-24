@@ -285,7 +285,7 @@ func TestDAPreparedCommitStructure(t *testing.T) {
 	// The complete owner helper closure is unchanged at the bound base. This
 	// includes indirect callees; map bucket growth remains allowed by Reserve.
 	source, err := os.ReadFile("pending_outpoint_owner.go")
-	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "d4da14dd6cba3232cc7298245eacf4d8c226c7cf357c54324ce1f8bc68e3a9ba" {
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "8ca97be4877cd200f9041b04e0a2333e646bfd8ecea7cf5a3b3a92bd8c951103" {
 		t.Fatal("owner phase rebuilds prepared scratch: owner closure changed")
 	}
 	source, err = os.ReadFile("da_admission.go")

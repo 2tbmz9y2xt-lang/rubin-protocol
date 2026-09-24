@@ -321,9 +321,10 @@ func (o *PendingOutpointOwner) daAdmissionVictimInputsMatchLocked(victim DAAdmis
 // mutates nothing and consumes no sequence. Availability failures — active
 // transition, expected-tip mismatch, expected-generation mismatch, sequence
 // exhaustion — and the first conflict in canonical input order likewise mutate
-// nothing: every check is a pure read that completes before the first write
-// below. On success exactly one sequence is consumed and the complete reserved
-// claim is installed.
+// no claim, index or sequence: every check is a pure read that completes before
+// the first such write below; only the reserveCalls observation count moves. On
+// success exactly one sequence is consumed and the complete reserved claim is
+// installed.
 func (o *PendingOutpointOwner) Reserve(
 	expectedContext PendingOutpointAdmissionContext,
 	domain PendingOutpointDomain,
