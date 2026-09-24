@@ -25,11 +25,12 @@ its existing local cap before rollout. Peer scoring and disconnect thresholds
 are local relay policy parameters; they are not consensus inputs and are not
 specified by this document.
 
-Transport byte caps below distinguish between a frame currently being read and
-queued decoded relay work. A node MUST NOT reject a single otherwise-valid frame
-only because its payload is larger than the queued-work cap; large-but-allowed
-frames must either be streamed or accounted separately from queued decoded
-payloads.
+Transport byte caps distinguish one `CURRENT_FRAME`, one `PROCESSING_ACTIVE`,
+and the FIFO `QUEUED_WAITING` backlog of complete frames. The 64-message and
+8_388_608-byte limits charge only `QUEUED_WAITING`; current and active frames
+remain separately bounded and subject to their applicable per-message caps.
+A legal current frame larger than 8 MiB may complete without a waiting-backlog
+charge. Queue saturation cannot pause a frame already started.
 
 ## 1. Decision
 
@@ -66,8 +67,13 @@ Production defaults:
 P2P_READ_DEADLINE_MS = 15_000
 P2P_MAX_PAYLOAD_READ_BYTES = MAX_RELAY_MSG_BYTES
 P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
-P2P_MAX_QUEUED_DECODED_BYTES_PER_CONN = 8_388_608
+P2P_MAX_INFLIGHT_BYTES_PER_CONN = 8_388_608
 ```
+
+Local queue capacity gates read eligibility before the first header byte. A
+full waiting count or byte budget delays that read until backlog use falls;
+kernel-buffered TCP bytes do not start a frame. Once its first byte is consumed,
+the frame retains its original deadline and applicable per-message cap.
 
 Every post-handshake Go/Rust frame with validated payload length `L` uses `absolute_budget_ms(L) = max(15_000, (120_000 * L + 71_999_999) div 72_000_000)`. Boundaries are `15_000 ms` through `L = 9_000_000`, `53_334 ms` at `32_000_000`, `120_000 ms` at `72_000_000`, and `160_000 ms` at `96_000_000`.
 Read idle behavior before the first envelope-header byte is unchanged. That byte starts a provisional 15-second header deadline, effective as `min(provisional_header_deadline, stall_deadline)`; after structural, global, and command-cap validation it becomes `frame_start + absolute_budget_ms(L)`, not a second budget. A decoded `blocktxn` instead promotes after structural and global validation, before its command-cap, body, and classification checks.
@@ -94,10 +100,11 @@ connection and MUST NOT be followed by parsing later bytes as a fresh frame.
 A checksum failure is a terminal frame-read error for that connection. It
 remains corruption detection only, not adversarial tamper protection.
 
-If queued decoded caps are exceeded, stop admitting more decoded relay work from
-the peer until backlog falls below cap. Persistent offenders SHOULD be penalized
-and disconnected. This queued-work cap does not lower
-`P2P_MAX_PAYLOAD_READ_BYTES`.
+Local waiting-queue saturation is receiver-side backpressure only: it MUST NOT
+by itself change peer score, ban, or disconnect a peer, however long local
+processing takes. It does not lower `P2P_MAX_PAYLOAD_READ_BYTES`. Independent
+malformed-frame, checksum, terminal-timeout, and other peer-fault rules retain
+their existing dispositions; saturation adds none and suppresses none.
 
 ## 5. Handshake Rules
 
