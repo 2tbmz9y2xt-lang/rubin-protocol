@@ -1644,8 +1644,8 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 }
 
 // TestDAIngressZeroInputOrderAndEffects: nonzero-nonce DA bytes with zero inputs reach the guarded owner from every entry
-// (A6/H5): a wrong own-chunk hash is the requested and unsolicited PEER +10 fault with no cache row, a first eligible PEER
-// miss inserts and the repeat is suppressed peer-neutrally, and LOCAL, AnnounceTx and the detached adapter bypass the row.
+// (A6/H5): a wrong own-chunk hash is the requested and unsolicited PEER +10 fault, a first eligible PEER miss inserts and
+// the repeat is suppressed peer-neutrally, LOCAL, AnnounceTx and the detached adapter bypass the row, and the owner stays live.
 func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
 	const parse = "TX_ERR_PARSE: non-coinbase must have at least one input"
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
@@ -1688,5 +1688,6 @@ func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
 	require(t, finish == nil, "detached adapter returned a completion")
 	requireParse(t, "detached adapter", err)
 	assertNoRelayFrame(t, frames, "local entries")
+	f.admit(f.chunk(daRelayTestID(0x74), 0, []byte("follow-on")), "follow-on-peer")
 	requireReturned(t, lifecycleClose(h.service), "zero-input local and detached entries released their work leases")
 }

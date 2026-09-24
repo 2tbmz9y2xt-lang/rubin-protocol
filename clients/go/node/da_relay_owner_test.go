@@ -7123,6 +7123,8 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 			inserted := snapshotDARejectCache(&f.relay.rejectCache)
 			_, present := inserted.entries[tx.wtxid]
 			require(t, present && len(inserted.entries) == 1 && slices.Equal(inserted.fifo, [][32]byte{tx.wtxid}), "first PEER miss cache=%+v", inserted)
+			f.relay.rejectCache.insert(daRejectContext(t, f), [32]byte{0xee}) // the hit row is no longer the FIFO tail
+			inserted = snapshotDARejectCache(&f.relay.rejectCache)
 			got, err = f.relay.AdmitDA(tx.raw, peerRepeat)
 			requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "DA repeated stable rejection suppressed", RelayAdmissionUnavailable)
 			for _, provenance := range []DAProvenance{LocalDAProvenance(), DetachedReorgDAProvenance()} {
@@ -7135,16 +7137,18 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 		})
 	}
 	t.Run("ineligible PEER profile bypasses lookup and insertion", func(t *testing.T) {
-		f := newDANonReplayFixture(t, 1)
+		f := newDANonReplayFixture(t, 2)
 		tx := zeroInputs(f, chunk)
 		f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid) // a lookup would hit this row
 		f.mp.mu.Lock()
 		f.mp.policy.RotationProvider = &daRejectTestRotation{}
 		f.mp.mu.Unlock()
-		cacheBefore := snapshotDARejectCache(&f.relay.rejectCache)
+		relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
 		got, err := f.relay.AdmitDA(tx.raw, peer)
 		requirePublicDAFailure(t, got, err, TxAdmitRejected, daZeroInputParseMessage, RelayAdmissionStableTerminalReject)
 		require(t, reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore), "ineligible profile changed the cache")
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		requireReleasedAndAdmissible(t, f)
 	})
 	hashMismatch := func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
 		require(t, errors.Is(err, ErrDARelayChunkHashMismatch), "err=%v, want the hash sentinel", err)
@@ -7200,9 +7204,10 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 		})
 	}
 	for _, registered := range []bool{false, true} {
-		t.Run(fmt.Sprintf("writer registered behind reader=%t makes it wait", registered), func(t *testing.T) {
-			f := newDANonReplayFixture(t, 1)
+		t.Run(fmt.Sprintf("writer registered behind reader=%t makes it wait and it uses the post-wait context", registered), func(t *testing.T) {
+			f := newDANonReplayFixture(t, 2)
 			tx := zeroInputs(f, chunk)
+			f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid) // only the pre-wait context would hit this row
 			acquired := make(chan struct{})
 			if registered {
 				f.state.admissionMu.RLock()
@@ -7214,27 +7219,40 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 				f.state.admissionMu.Lock()
 			}
 			done := make(chan error, 1)
-			go func() { _, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance()); done <- err }()
+			go func() { _, err := f.relay.AdmitDA(tx.raw, peer); done <- err }()
 			awaitCanonicalMOAdmissionRLock(t, "TestAdmitDAZeroInputOrderAndEffects", 1)
 			if registered {
 				f.state.admissionMu.RUnlock()
 				<-acquired
 			}
+			_, err := f.mp.pendingOutpoints.beginTransition() // the writer advances the generation
+			require(t, err == nil, "beginTransition: %v", err)
+			f.mp.pendingOutpoints.endTransitionAborted()
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			f.state.admissionMu.Unlock() // the parked admission wakes only on this writer's release
 			requirePublicDAFailure(t, DAAdmissionResult{}, <-done, TxAdmitRejected, daZeroInputParseMessage, RelayAdmissionStableTerminalReject)
+			cache := snapshotDARejectCache(&f.relay.rejectCache)
+			require(t, cache.context == daRejectContext(t, f) && slices.Equal(cache.fifo, [][32]byte{tx.wtxid}), "cache=%+v, want one row under the post-wait context", cache)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			requireReleasedAndAdmissible(t, f)
 		})
 	}
 	for _, terminal := range []bool{true, false} {
 		t.Run(fmt.Sprintf("candidate-only BeginDAAdmission keeps its early refusal, terminal guard=%t", terminal), func(t *testing.T) {
-			f := newDANonReplayFixture(t, 1)
+			f := newDANonReplayFixture(t, 2)
 			tx := zeroInputs(f, chunk)
 			if terminal {
 				f.state.admissionMu.Lock()
 				f.state.admissionMu.notifyTerminal()
 			}
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			admission, err := f.mp.BeginDAAdmission(tx.raw)
 			require(t, admission == nil, "candidate-only admission began")
 			requirePublicDAFailure(t, DAAdmissionResult{}, err, TxAdmitRejected, "DA transaction must have 1..MAX_TX_INPUTS inputs")
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			if !terminal {
+				requireReleasedAndAdmissible(t, f)
+			}
 		})
 	}
 }
