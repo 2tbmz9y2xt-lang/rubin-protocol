@@ -63,9 +63,11 @@ if body:
 try:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         print(resp.read().decode("utf-8"), end="")
+        if method == "POST" and path == "/submit_tx" and resp.status != 200:
+            sys.exit(24)
 except urllib.error.HTTPError as exc:
     print(exc.read().decode("utf-8"), end="")
-    sys.exit(22)
+    sys.exit(22 if exc.code == 409 else 23)
 except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
     print(f"request failed timeout={timeout}: {getattr(exc, 'reason', exc)}", end="")
     sys.exit(1)
@@ -117,21 +119,8 @@ wait_peers_ready() {
   return 1
 }
 
-wait_mempool_contains() {
-  local label="$1" addr="$2" txid="$3" deadline=$((SECONDS + 30)) last="<none>"
-  while (( SECONDS < deadline )); do
-    if last="$(rpc_json GET "${addr}" /get_mempool 2>/dev/null)" &&
-      printf '%s' "${last}" | python3 -c 'import json,sys; want=sys.argv[1]; d=json.load(sys.stdin); sys.exit(0 if want in (d.get("txids") or []) else 1)' "${txid}"; then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "timeout waiting for ${label} mempool tx addr=${addr} txid=${txid} last=${last}" >&2
-  return 1
-}
-
 submit_tx_hex() {
-  local addr="$1" tx_hex="$2" body response
+  local addr="$1" tx_hex="$2" want="$3" body response rc
   body="$(python3 - "${tx_hex}" <<'PY'
 import json, re, sys
 tx_hex = sys.argv[1]
@@ -140,8 +129,16 @@ if not re.fullmatch(r"[0-9a-f]+", tx_hex) or len(tx_hex) % 2 != 0 or len(tx_hex)
 print(json.dumps({"tx_hex": tx_hex}, separators=(",", ":")))
 PY
 )" || return 1
-  response="$(rpc_json POST "${addr}" /submit_tx "${body}")" || { echo "submit failed: ${response}" >&2; return 1; }
-  printf '%s' "${response}" | python3 -c 'import json,re,sys; d=json.load(sys.stdin); txid=d.get("txid"); sys.exit(0 if d.get("accepted") is True and isinstance(txid, str) and re.fullmatch(r"[0-9a-f]{64}", txid) else 1)'
+  if response="$(rpc_json POST "${addr}" /submit_tx "${body}")"; then
+    [[ "${want}" != "duplicate" ]] || { echo "duplicate DA commit unexpectedly accepted" >&2; return 1; }
+    printf '%s' "${response}" | python3 -c 'import json,sys; p=json.load(sys.stdin, object_pairs_hook=tuple); d=dict(p) if isinstance(p, tuple) else {}; sys.exit(0 if isinstance(p, tuple) and len(p) == len(d) == 2 and set(d) == {"accepted", "txid"} and d["accepted"] is True and d["txid"] == sys.argv[1] else 1)' "${want}" ||
+      { echo "accepted submit returned unexpected body: ${response}" >&2; return 1; }
+  else
+    rc=$?
+    [[ "${want}" == "duplicate" && "${rc}" == "22" ]] || { echo "submit failed: ${response}" >&2; return 1; }
+    printf '%s' "${response}" | python3 -c 'import json,sys; p=json.load(sys.stdin, object_pairs_hook=tuple); d=dict(p) if isinstance(p, tuple) else {}; sys.exit(0 if isinstance(p, tuple) and len(p) == len(d) == 2 and set(d) == {"accepted", "error"} and d["accepted"] is False and d["error"] == "DA transaction duplicate or conflict" else 1)' ||
+      { echo "duplicate DA commit returned unexpected body: ${response}" >&2; return 1; }
+  fi
 }
 
 mine_next_tsv() {
@@ -300,21 +297,22 @@ import json, os
 e = os.environ
 i = lambda key: int(e[key])
 report = {
-    "scenario": "go_two_node_da_relay_process_smoke",
+    "scenario": "go_two_node_da_block_process_smoke",
     "verdict": "PASS",
     "participants": [
         {"name": "node-a", "implementation": "go", "pid": i("A_PID"), "binary": e["NODE_BIN"], "rpc": e["A_RPC_ADDR"], "p2p": e["A_P2P_ADDR"], "datadir": e["A_DIR"], "handshake_peers": i("A_PEERS")},
         {"name": "node-b", "implementation": "go", "pid": i("B_PID"), "binary": e["NODE_BIN"], "rpc": e["B_RPC_ADDR"], "p2p": e["B_P2P_ADDR"], "datadir": e["B_DIR"], "handshake_peers": i("B_PEERS")},
     ],
     "da_relay_evidence": {
-        "submitter_to_peer_relay": {"submitted_to": "node-b", "observed_in_mempool": "node-a"},
+        "local_da_submission": {"submitted_to": ["node-a", "node-b"], "preblock_da_peer_relay": "not_measured"},
         "incomplete_set_not_mined": {"mined_by": "node-a", "height": i("INCOMPLETE_MINE_HEIGHT"), "block_hash": e["INCOMPLETE_MINE_HASH"], "tx_count": i("INCOMPLETE_TX_COUNT"), "omitted_chunk_txid": e["CHUNK0_TXID"]},
         "staged_commit_not_mined_until_complete": {"mined_by": "node-a", "height": i("STAGED_MINE_HEIGHT"), "block_hash": e["STAGED_MINE_HASH"], "tx_count": i("STAGED_TX_COUNT"), "omitted_commit_txid": e["COMMIT_TXID"]},
         "complete_set_mined": {"mined_by": "node-a", "height": i("COMPLETE_MINE_HEIGHT"), "block_hash": e["COMPLETE_MINE_HASH"], "tx_count": i("COMPLETE_TX_COUNT"), "included_commit_txid": e["COMMIT_TXID"], "included_chunk_txids": [e["CHUNK0_TXID"], e["CHUNK1_TXID"]]},
         "duplicate_commit_first_seen_no_replacement": {"duplicate_txid": e["DUP_TXID"], "evidence": "duplicate txid omitted from parsed complete block"},
+        "block_propagation": {"node_a": {"height": i("A_FINAL_HEIGHT"), "tip_hash": e["A_FINAL_HASH"]}, "node_b": {"height": i("B_FINAL_HEIGHT"), "tip_hash": e["B_FINAL_HASH"]}},
     },
     "tx_generator": {"kind": "temporary_go_helper", "evidence_scope": "signed_tx_generation_only_not_runtime_proof"},
-    "out_of_scope": ["rust", "mixed_client", "production_runtime_change", "final_devnet_readiness"],
+    "out_of_scope": ["rust", "mixed_client", "preblock_da_peer_relay", "production_runtime_change", "final_devnet_readiness"],
 }
 if report["participants"][0]["datadir"] == report["participants"][1]["datadir"] or report["participants"][0]["pid"] == report["participants"][1]["pid"]: raise SystemExit("participants are not distinct")
 if report["da_relay_evidence"]["incomplete_set_not_mined"]["tx_count"] != 1: raise SystemExit("incomplete set was mined or tx_count proof missing")
@@ -358,8 +356,8 @@ A_PEERS="$(wait_peers_ready node-a "${A_RPC_ADDR}")"
 B_PEERS="$(wait_peers_ready node-b "${B_RPC_ADDR}")"
 IFS=$'\t' read -r _ BASE_HASH < <(tip_tsv "${A_RPC_ADDR}")
 wait_tip_exact node-b "${B_RPC_ADDR}" "${BASE_HEIGHT}" "${BASE_HASH}" 30
-submit_tx_hex "${B_RPC_ADDR}" "${CHUNK0_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${CHUNK0_TXID}"
+submit_tx_hex "${B_RPC_ADDR}" "${CHUNK0_HEX}" "${CHUNK0_TXID}" >/dev/null
+submit_tx_hex "${A_RPC_ADDR}" "${CHUNK0_HEX}" "${CHUNK0_TXID}" >/dev/null
 IFS=$'\t' read -r INCOMPLETE_MINE_HEIGHT INCOMPLETE_MINE_HASH INCOMPLETE_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
 [[ "${INCOMPLETE_MINE_HEIGHT}" == "${INCOMPLETE_HEIGHT}" && "${INCOMPLETE_TX_COUNT}" == "1" ]] || {
   echo "incomplete DA set mined unexpectedly height=${INCOMPLETE_MINE_HEIGHT} tx_count=${INCOMPLETE_TX_COUNT}" >&2
@@ -368,17 +366,17 @@ IFS=$'\t' read -r INCOMPLETE_MINE_HEIGHT INCOMPLETE_MINE_HASH INCOMPLETE_TX_COUN
 wait_tip_exact node-b "${B_RPC_ADDR}" "${INCOMPLETE_HEIGHT}" "${INCOMPLETE_MINE_HASH}" 60
 INCOMPLETE_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${INCOMPLETE_HEIGHT}")"
 assert_block_txids "${INCOMPLETE_BLOCK_HEX}" "${INCOMPLETE_MINE_HASH}" "1" "-" "${CHUNK0_TXID}"
-submit_tx_hex "${B_RPC_ADDR}" "${COMMIT_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${COMMIT_TXID}"
+submit_tx_hex "${B_RPC_ADDR}" "${COMMIT_HEX}" "${COMMIT_TXID}" >/dev/null
+submit_tx_hex "${A_RPC_ADDR}" "${COMMIT_HEX}" "${COMMIT_TXID}" >/dev/null
 IFS=$'\t' read -r STAGED_MINE_HEIGHT STAGED_MINE_HASH STAGED_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
 [[ "${STAGED_MINE_HEIGHT}" == "$((INCOMPLETE_HEIGHT + 1))" && "${STAGED_TX_COUNT}" == "1" ]] || { echo "staged DA set mined unexpectedly height=${STAGED_MINE_HEIGHT} tx_count=${STAGED_TX_COUNT}" >&2; exit 1; }
 wait_tip_exact node-b "${B_RPC_ADDR}" "${STAGED_MINE_HEIGHT}" "${STAGED_MINE_HASH}" 60
 STAGED_BLOCK_HEX="$(block_hex "${A_RPC_ADDR}" "${STAGED_MINE_HEIGHT}")"
 assert_block_txids "${STAGED_BLOCK_HEX}" "${STAGED_MINE_HASH}" "1" "-" "${CHUNK0_TXID},${COMMIT_TXID}"
-submit_tx_hex "${B_RPC_ADDR}" "${DUP_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${DUP_TXID}"
-submit_tx_hex "${B_RPC_ADDR}" "${CHUNK1_HEX}" >/dev/null
-wait_mempool_contains node-a "${A_RPC_ADDR}" "${CHUNK1_TXID}"
+submit_tx_hex "${B_RPC_ADDR}" "${DUP_HEX}" duplicate
+submit_tx_hex "${A_RPC_ADDR}" "${DUP_HEX}" duplicate
+submit_tx_hex "${B_RPC_ADDR}" "${CHUNK1_HEX}" "${CHUNK1_TXID}" >/dev/null
+submit_tx_hex "${A_RPC_ADDR}" "${CHUNK1_HEX}" "${CHUNK1_TXID}" >/dev/null
 COMPLETE_FOUND=0
 for _ in 1 2 3 4 5; do
   IFS=$'\t' read -r COMPLETE_MINE_HEIGHT COMPLETE_MINE_HASH COMPLETE_TX_COUNT < <(mine_next_tsv "${A_RPC_ADDR}")
@@ -395,4 +393,4 @@ IFS=$'\t' read -r B_FINAL_HEIGHT B_FINAL_HASH < <(tip_tsv "${B_RPC_ADDR}")
 }
 
 write_report
-echo "PASS: Go DA relay process smoke completed; report=${REPORT_JSON}"
+echo "PASS: Go DA block propagation process smoke completed; report=${REPORT_JSON}"
