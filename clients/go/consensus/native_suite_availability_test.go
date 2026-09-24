@@ -137,8 +137,18 @@ func TestNativeSuiteAuthorityIncoherence(t *testing.T) {
 			})
 		}
 	}
-	if err := f.origins()[1].run(nil, nil); err != nil {
-		t.Fatalf("nil configuration defaults: %v", err)
+	for _, tc := range []struct {
+		name     string
+		rotation RotationProvider
+		registry *SuiteRegistry
+	}{
+		{"both_nil", nil, nil},
+		{"nil_rotation", nil, DefaultSuiteRegistry()},
+		{"nil_registry", DefaultRotationProvider{}, nil},
+	} {
+		if err := f.origins()[1].run(tc.rotation, tc.registry); err != nil {
+			t.Fatalf("%s defaults: %v", tc.name, err)
+		}
 	}
 
 	sentinel := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
