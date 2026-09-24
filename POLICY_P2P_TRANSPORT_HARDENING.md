@@ -30,7 +30,8 @@ and the FIFO `QUEUED_WAITING` backlog of complete frames. The 64-message and
 8_388_608-byte limits charge only `QUEUED_WAITING`; current and active frames
 remain separately bounded and subject to their applicable per-message caps.
 A legal current frame larger than 8 MiB may complete without a waiting-backlog
-charge. Queue saturation cannot pause a frame already started.
+charge. It cannot queue; if it cannot start handling, it remains `CURRENT_FRAME`
+and blocks later reads. Queue saturation cannot pause a started frame.
 
 ## 1. Decision
 
@@ -70,10 +71,11 @@ P2P_MAX_INFLIGHT_MSGS_PER_CONN = 64
 P2P_MAX_INFLIGHT_BYTES_PER_CONN = 8_388_608
 ```
 
-Local queue capacity gates read eligibility before the first header byte. A
-full waiting count or byte budget delays that read until backlog use falls;
-kernel-buffered TCP bytes do not start a frame. Once its first byte is consumed,
-the frame retains its original deadline and applicable per-message cap.
+`READ_ELIGIBLE` in `RUBIN_L1_P2P_AUX.md` §2.1 requires `OPEN`, no
+`CURRENT_FRAME` or older `READ_BARRIER_PENDING`, and both waiting counters
+below cap; when active is empty, an older FIFO head is promoted first.
+Kernel-buffered TCP bytes do not start a frame. A started frame retains its
+first-byte deadline and applicable per-message cap.
 
 Every post-handshake Go/Rust frame with validated payload length `L` uses `absolute_budget_ms(L) = max(15_000, (120_000 * L + 71_999_999) div 72_000_000)`. Boundaries are `15_000 ms` through `L = 9_000_000`, `53_334 ms` at `32_000_000`, `120_000 ms` at `72_000_000`, and `160_000 ms` at `96_000_000`.
 Read idle behavior before the first envelope-header byte is unchanged. That byte starts a provisional 15-second header deadline, effective as `min(provisional_header_deadline, stall_deadline)`; after structural, global, and command-cap validation it becomes `frame_start + absolute_budget_ms(L)`, not a second budget. A decoded `blocktxn` instead promotes after structural and global validation, before its command-cap, body, and classification checks.
