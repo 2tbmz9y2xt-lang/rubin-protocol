@@ -684,10 +684,10 @@ func requireDAAdmissionStructure(t *testing.T) {
 		checkCalls("BeginDAAdmission", callCounts[begin.Name.Name], map[string]int{"beginDAAdmissionGuarded": 1, "parseDAAdmission": 1, "txAdmitUnavailable": 3})
 		checkCalls("guarded admission", callCounts["beginDAAdmissionGuarded"], map[string]int{"AdmissionContext": 1, "RLockUnlessTerminal": 1, "admissionSnapshotForInputs": 1, "checkParsedTransactionWithSnapshot": 1, "len": 1, "policySnapshot": 1, "txAdmitUnavailable": 3, "uint64": 1})
 		checkCalls("BeginDARemoval", callCounts["BeginDARemoval"], map[string]int{"RLockUnlessTerminal": 1, "txAdmitUnavailable": 4})
-		checkCalls("parse wrapper", callCounts[wrapper.Name.Name], map[string]int{"matchingDAChunkPayloadHash": 1, "parseDAAdmissionCandidate": 1, "txAdmitRejected": 1})
-		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 5, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 4})
+		checkCalls("parse wrapper", callCounts[wrapper.Name.Name], map[string]int{"len": 1, "matchingDAChunkPayloadHash": 1, "parseDAAdmissionCandidate": 1, "txAdmitRejected": 2})
+		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 3, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 3})
 		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "selectRelayDisposition": 1, "txAdmitRejected": 1, "uint64": 1, "validateCandidate": 1})
-		checkCalls("AdmitDA", callCounts[public.Name.Name], map[string]int{"Error": 1, "acquireDAAdmissionHold": 1, "admitDANonExact": 1, "bindDAAdmission": 1, "classifyDAReplay": 1, "parseDAAdmissionCandidate": 1, "release": 1, "selectRelayDisposition": 4, "string": 1, "txAdmitRejected": 2, "validate": 1})
+		checkCalls("AdmitDA", callCounts[public.Name.Name], map[string]int{"Error": 1, "acquireDAAdmissionHold": 1, "admitDANonExact": 1, "bindDAAdmission": 1, "classifyDAReplay": 1, "len": 1, "parseDAAdmissionCandidate": 1, "release": 1, "selectRelayDisposition": 5, "string": 1, "txAdmitRejected": 3, "validate": 1})
 		checkCalls("replay classification", callCounts[replay.Name.Name], map[string]int{"Equal": 1, "Error": 2, "observeDAAdmission": 1, "selectRelayDisposition": 3, "txAdmitRejected": 2, "txAdmitUnavailable": 1, "validateDAAdmissionObservation": 1})
 		checkCalls("nonexact continuation", callCounts[continuation.Name.Name], map[string]int{"Close": 1, "admitDANonReplay": 1, "publicDAAdmissionResult": 1, "validateDACandidate": 1})
 		checkCalls("captureDAAdmissionTarget", callCounts[capture.Name.Name], map[string]int{"Clone": 1, "append": 1, "captureDAAdmissionCommit": 2, "clone": 1})
@@ -6863,7 +6863,8 @@ func TestAdmitDAAO11OrderAndEffects(t *testing.T) {
 		}
 	})
 
-	// R1/R4: bound, parse, structural, provenance and binding refusals keep their earlier results.
+	// R1/R4: bound, parse (input_count overflow included), identity, provenance and binding refusals keep their
+	// earlier results; zero inputs follow the nonce decision (CANONICAL Section 16 items 1-2).
 	f := newDANonReplayFixture(t, 1)
 	zero := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xa8}, payload: []byte("ao11-prefix"), zeroNonce: true})
 	parsed, _, _, _, err := consensus.ParseTx(zero.raw)
@@ -6872,6 +6873,10 @@ func TestAdmitDAAO11OrderAndEffects(t *testing.T) {
 	standard := mustMarshalTxForNodeTest(t, parsed)
 	parsed.TxKind, parsed.DaChunkCore, parsed.DaPayload, parsed.Inputs, parsed.Witness = 0x02, &consensus.DaChunkCore{DaID: [32]byte{0xa8}, ChunkHash: sha3.Sum256([]byte("x"))}, []byte("x"), nil, nil
 	inputless := mustMarshalTxForNodeTest(t, parsed)
+	parsed.TxNonce = 7
+	inputlessNonzero := mustMarshalTxForNodeTest(t, parsed)
+	parsed.TxNonce, parsed.Inputs = 0, make([]consensus.TxInput, consensus.MAX_TX_INPUTS+1)
+	overflow := mustMarshalTxForNodeTest(t, parsed)
 	_, _, _, _, truncatedErr := consensus.ParseTx(zero.raw[:len(zero.raw)-1])
 	oversize := append(slices.Clone(zero.raw), make([]byte, consensus.MAX_RELAY_MSG_BYTES+1-len(zero.raw))...)
 	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -6884,7 +6889,9 @@ func TestAdmitDAAO11OrderAndEffects(t *testing.T) {
 		{"truncated", truncatedErr.Error(), zero.raw[:len(zero.raw)-1], provenances["LOCAL"]},
 		{"trailing byte", "trailing bytes after canonical tx", append(slices.Clone(zero.raw), 0), provenances["PEER"]},
 		{"standard kind", "transaction is not a DA commit or DA chunk", standard, provenances["LOCAL"]},
-		{"no inputs", "DA transaction must have 1..MAX_TX_INPUTS inputs", inputless, provenances["DETACHED_REORG"]},
+		{"input_count overflow, zero nonce", "TX_ERR_PARSE: input_count overflow", overflow, provenances["LOCAL"]},
+		{"no inputs, zero nonce", daZeroNonceMessage, inputless, provenances["DETACHED_REORG"]},
+		{"no inputs, nonzero nonce", "DA transaction must have 1..MAX_TX_INPUTS inputs", inputlessNonzero, provenances["PEER"]},
 		{"invalid provenance", "invalid da provenance", zero.raw, DAProvenance{}},
 	} {
 		got, err := f.relay.AdmitDA(row.raw, row.provenance)

@@ -99,6 +99,10 @@ func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [
 	if err != nil {
 		return
 	}
+	if len(inputs) == 0 { // canonical parse already bounds input_count by MAX_TX_INPUTS
+		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
+		return
+	}
 	if !matchingDAChunkPayloadHash(tx) {
 		err = txAdmitRejected("DA chunk payload hash mismatch")
 	}
@@ -124,10 +128,6 @@ func parseDAAdmissionCandidate(raw []byte) (owned []byte, tx *consensus.Tx, txid
 		return
 	}
 	inputs = relayMetadataInputs(tx)
-	if len(inputs) == 0 || len(inputs) > consensus.MAX_TX_INPUTS {
-		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
-		return
-	}
 	return
 }
 
