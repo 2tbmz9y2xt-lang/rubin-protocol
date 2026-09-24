@@ -231,8 +231,7 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 		if len(q.tasks) != 1 {
 			return false
 		}
-		typedError, ok := q.tasks[0].errOnFail.(*TxError)
-		return ok && q.tasks[0].suiteID == prefix.suiteID && bytes.Equal(q.tasks[0].pubkey, prefix.pubkey) && bytes.Equal(q.tasks[0].sig, prefix.sig) && q.tasks[0].digest == prefix.digest && errors.Is(typedError, prefix.errOnFail)
+		return q.tasks[0].suiteID == prefix.suiteID && bytes.Equal(q.tasks[0].pubkey, prefix.pubkey) && bytes.Equal(q.tasks[0].sig, prefix.sig) && q.tasks[0].digest == prefix.digest && errors.Is(prefix.errOnFail, q.tasks[0].errOnFail)
 	}
 	for _, tc := range []struct {
 		name string
