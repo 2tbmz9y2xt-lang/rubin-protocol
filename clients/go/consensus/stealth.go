@@ -69,12 +69,12 @@ func validateCoreStealthSpendAtHeight(input coreStealthSpendValidation) error {
 
 	nativeSpend := input.rotation.NativeSpendSuites(input.blockHeight)
 	if !nativeSpend.Contains(input.w.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_STEALTH suite not in native spend set")
 	}
 
 	params, ok := input.registry.Lookup(input.w.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(input.w.Pubkey) != params.PubkeyLen || len(input.w.Signature) != params.SigLen+1 {

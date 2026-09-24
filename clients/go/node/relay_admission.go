@@ -603,7 +603,9 @@ func relayDispositionForInputError(err error, nonDependency RelayAdmissionDispos
 			return RelayAdmissionInternal
 		case consensus.TxErrorCauseSimplicityDeploymentUnavailable,
 			consensus.TxErrorCauseSimplicityDeploymentEvidenceInvalid,
-			consensus.TxErrorCauseSimplicityDeploymentInactiveProvider:
+			consensus.TxErrorCauseSimplicityDeploymentInactiveProvider,
+			consensus.TxErrorCauseNativeSuiteSetUnavailable,
+			consensus.TxErrorCauseNativeSuiteRegistryEntryUnavailable:
 			return RelayAdmissionUnavailable
 		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen, consensus.TxErrorCauseSimplicityWitnessSuiteInvalid:
 			return RelayAdmissionStableTerminalReject

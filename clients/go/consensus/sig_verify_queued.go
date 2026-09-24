@@ -79,12 +79,12 @@ func validateP2PKSpendQ(
 
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	if !nativeSpend.Contains(w.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_P2PK suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(w.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
@@ -148,12 +148,12 @@ func validateThresholdSigSpendQ(
 		}
 
 		if !nativeSpend.Contains(w.SuiteID) {
-			return rollbackOnError(txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not in native spend set"))
+			return rollbackOnError(nativeSuiteMembershipError(nativeSpend, context+" suite not in native spend set"))
 		}
 
 		params, ok := registry.Lookup(w.SuiteID)
 		if !ok {
-			return rollbackOnError(txerr(TX_ERR_SIG_ALG_INVALID, context+" suite not registered"))
+			return rollbackOnError(txerrWithCause(TX_ERR_SIG_ALG_INVALID, context+" suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable))
 		}
 
 		if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
@@ -262,12 +262,12 @@ func validateHTLCSpendQ(
 
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	if !nativeSpend.Contains(sigItem.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_HTLC suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(sigItem.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(sigItem.Pubkey) != params.PubkeyLen || len(sigItem.Signature) != params.SigLen+1 {
@@ -327,12 +327,12 @@ func validateCoreStealthSpendQ(
 
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	if !nativeSpend.Contains(w.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_STEALTH suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(w.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_STEALTH suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {

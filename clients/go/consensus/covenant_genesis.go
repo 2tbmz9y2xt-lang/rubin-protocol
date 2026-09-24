@@ -92,8 +92,9 @@ func validateP2PKGenesisOutput(out TxOutput, blockHeight uint64, rotation Rotati
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "invalid CORE_P2PK covenant_data length")
 	}
 	suiteID := out.CovenantData[0]
-	if !rotation.NativeCreateSuites(blockHeight).Contains(suiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native create set")
+	nativeCreate := rotation.NativeCreateSuites(blockHeight)
+	if !nativeCreate.Contains(suiteID) {
+		return nativeSuiteMembershipError(nativeCreate, "CORE_P2PK suite not in native create set")
 	}
 	return nil
 }

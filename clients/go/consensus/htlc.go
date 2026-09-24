@@ -246,12 +246,12 @@ func validateHTLCSignaturePrecheck(
 ) error {
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	if !nativeSpend.Contains(sigItem.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_HTLC suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(sigItem.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_HTLC suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(sigItem.Pubkey) != params.PubkeyLen || len(sigItem.Signature) != params.SigLen+1 {

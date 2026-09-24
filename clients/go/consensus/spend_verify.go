@@ -135,12 +135,12 @@ func validateP2PKSpendAtHeight(check p2pkSpendCheck) error {
 	w := check.witness
 	nativeSpend := rotation.NativeSpendSuites(check.blockHeight)
 	if !nativeSpend.Contains(w.SuiteID) {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not in native spend set")
+		return nativeSuiteMembershipError(nativeSpend, "CORE_P2PK suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(w.SuiteID)
 	if !ok {
-		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered")
+		return txerrWithCause(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
@@ -214,12 +214,12 @@ func validateThresholdWitness(w WitnessItem, key [32]byte, nativeSpend *NativeSu
 	}
 
 	if !nativeSpend.Contains(w.SuiteID) {
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, sig.context+" suite not in native spend set")
+		return false, nativeSuiteMembershipError(nativeSpend, sig.context+" suite not in native spend set")
 	}
 
 	params, ok := registry.Lookup(w.SuiteID)
 	if !ok {
-		return false, txerr(TX_ERR_SIG_ALG_INVALID, sig.context+" suite not registered")
+		return false, txerrWithCause(TX_ERR_SIG_ALG_INVALID, sig.context+" suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	}
 
 	if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {

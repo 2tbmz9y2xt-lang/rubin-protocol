@@ -139,6 +139,12 @@ const (
 	// selected a suite other than mandatory 0xF0. It is candidate-intrinsic and
 	// independent of provider or policy, so it remains stable terminal invalidity.
 	TxErrorCauseSimplicityWitnessSuiteInvalid
+	// TxErrorCauseNativeSuiteSetUnavailable means a reached native-suite
+	// membership decision had no set to decide from.
+	TxErrorCauseNativeSuiteSetUnavailable
+	// TxErrorCauseNativeSuiteRegistryEntryUnavailable means membership was
+	// established, but the bound registry had no entry for that suite.
+	TxErrorCauseNativeSuiteRegistryEntryUnavailable
 )
 
 type TxError struct {

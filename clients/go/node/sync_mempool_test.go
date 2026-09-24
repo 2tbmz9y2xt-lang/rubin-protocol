@@ -236,6 +236,7 @@ type canonicalMOProvider struct {
 	err                         error
 	volatile                    bool
 	createSet, spendSet         *consensus.NativeSuiteSet
+	nilSpend                    bool
 	entered, release            chan struct{}
 }
 
@@ -264,7 +265,11 @@ func (p *canonicalMOProvider) NativeSpendSuites(height uint64) *consensus.Native
 	p.mu.Lock()
 	p.spend, p.spendHeights = p.spend+1, append(p.spendHeights, height)
 	call, volatile := p.spend, p.volatile
+	nilSpend := p.nilSpend
 	p.mu.Unlock()
+	if nilSpend {
+		return nil
+	}
 	if volatile && call > 1 {
 		return consensus.NewNativeSuiteSet()
 	}
@@ -754,6 +759,55 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	}
 	if create, spend, deployments := early.counts(); create != 0 || spend != 0 || deployments != 0 {
 		t.Fatalf("early invariant read provider create=%d spend=%d deployments=%d", create, spend, deployments)
+	}
+}
+
+func TestCanonicalMempoolNativeSuiteAvailability(t *testing.T) {
+	for _, cause := range []consensus.TxErrorCause{
+		consensus.TxErrorCauseNativeSuiteSetUnavailable,
+		consensus.TxErrorCauseNativeSuiteRegistryEntryUnavailable,
+	} {
+		if !canonicalMempoolCauseAbortsPlan(cause) {
+			t.Fatalf("cause %d did not abort", cause)
+		}
+	}
+	for _, tc := range []struct {
+		name      string
+		configure func(*canonicalMOProvider) MempoolConfig
+		restore   func(*canonicalMOFixture, *canonicalMOProvider)
+	}{
+		{
+			name: "set_unavailable",
+			configure: func(provider *canonicalMOProvider) MempoolConfig {
+				provider.nilSpend = true
+				return MempoolConfig{RotationProvider: provider}
+			},
+			restore: func(_ *canonicalMOFixture, provider *canonicalMOProvider) { provider.nilSpend = false },
+		},
+		{
+			name: "registry_entry_unavailable",
+			configure: func(provider *canonicalMOProvider) MempoolConfig {
+				return MempoolConfig{RotationProvider: provider, SuiteRegistry: consensus.NewSuiteRegistryFromParams(nil)}
+			},
+			restore: func(f *canonicalMOFixture, _ *canonicalMOProvider) {
+				f.mp.mu.Lock()
+				f.mp.policy.SuiteRegistry = consensus.DefaultSuiteRegistry()
+				f.mp.mu.Unlock()
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newCanonicalMOProvider(t, devnetGenesisChainID)
+			f := newCanonicalMOFixture(t, 1, tc.configure(provider))
+			id := f.install(t, f.ops[0], 1, false)
+			if err := assertCanonicalMOPlanAbort(t, f); err == nil || !f.mp.Contains(id) {
+				t.Fatalf("plan abort err=%v retained=%v", err, f.mp.Contains(id))
+			}
+			tc.restore(f, provider)
+			if err := f.applyCoinbase(t); err != nil || !f.mp.Contains(id) {
+				t.Fatalf("subsequent healthy plan err=%v retained=%v", err, f.mp.Contains(id))
+			}
+		})
 	}
 }
 
