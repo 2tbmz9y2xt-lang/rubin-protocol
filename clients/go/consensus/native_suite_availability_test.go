@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -227,15 +228,25 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 		return q, prefix
 	}
 	samePrefix := func(q *SigCheckQueue, prefix sigCheckTask) bool {
-		return len(q.tasks) == 1 && q.tasks[0].suiteID == prefix.suiteID && bytes.Equal(q.tasks[0].pubkey, prefix.pubkey) && bytes.Equal(q.tasks[0].sig, prefix.sig) && q.tasks[0].digest == prefix.digest && q.tasks[0].errOnFail == prefix.errOnFail
+		if len(q.tasks) != 1 {
+			return false
+		}
+		typedError, ok := q.tasks[0].errOnFail.(*TxError)
+		return ok && q.tasks[0].suiteID == prefix.suiteID && bytes.Equal(q.tasks[0].pubkey, prefix.pubkey) && bytes.Equal(q.tasks[0].sig, prefix.sig) && q.tasks[0].digest == prefix.digest && errors.Is(typedError, prefix.errOnFail)
 	}
 	for _, tc := range []struct {
 		name string
 		run  func(*SigCheckQueue, RotationProvider, *SuiteRegistry) error
 	}{
-		{"p2pk", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error { return validateP2PKSpendQ(f.entry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg) }},
-		{"htlc", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error { return validateHTLCSpendQ(f.htlcEntry, f.path, f.w, f.tx, 0, 100, [32]byte{}, 1, 0, f.cache, q, r, reg) }},
-		{"stealth", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error { return validateCoreStealthSpendQ(f.stealthEntry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg) }},
+		{"p2pk", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error {
+			return validateP2PKSpendQ(f.entry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg)
+		}},
+		{"htlc", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error {
+			return validateHTLCSpendQ(f.htlcEntry, f.path, f.w, f.tx, 0, 100, [32]byte{}, 1, 0, f.cache, q, r, reg)
+		}},
+		{"stealth", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error {
+			return validateCoreStealthSpendQ(f.stealthEntry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg)
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, missingRegistry := range []bool{false, true} {
@@ -365,10 +376,18 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 		name, message string
 		run           func(RotationProvider) error
 	}{
-		{"create_value", "CORE_P2PK value must be > 0", func(rotation RotationProvider) error { return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{CovenantType: COV_TYPE_P2PK, CovenantData: f.entry.CovenantData}}}, [32]byte{}, 1, rotation) }},
-		{"create_shape", "invalid CORE_P2PK covenant_data length", func(rotation RotationProvider) error { return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK}}}, [32]byte{}, 1, rotation) }},
-		{"stealth_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error { return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{entry: UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, w: f.w, rotation: rotation, registry: DefaultSuiteRegistry()}) }},
-		{"stealth_q_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error { return validateCoreStealthSpendQ(UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, DefaultSuiteRegistry()) }},
+		{"create_value", "CORE_P2PK value must be > 0", func(rotation RotationProvider) error {
+			return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{CovenantType: COV_TYPE_P2PK, CovenantData: f.entry.CovenantData}}}, [32]byte{}, 1, rotation)
+		}},
+		{"create_shape", "invalid CORE_P2PK covenant_data length", func(rotation RotationProvider) error {
+			return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK}}}, [32]byte{}, 1, rotation)
+		}},
+		{"stealth_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error {
+			return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{entry: UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, w: f.w, rotation: rotation, registry: DefaultSuiteRegistry()})
+		}},
+		{"stealth_q_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error {
+			return validateCoreStealthSpendQ(UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, DefaultSuiteRegistry())
+		}},
 	} {
 		rotation := &nativeSuiteAvailabilityRotation{}
 		mustTxErrorCause(t, tc.run(rotation), TX_ERR_COVENANT_TYPE_INVALID, tc.message, TxErrorCauseUnspecified)
