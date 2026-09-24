@@ -40,6 +40,7 @@ func newNativeSuiteAvailabilityFixture(t *testing.T) nativeSuiteAvailabilityFixt
 	entry, w, tx, cleanup := buildP2PKTestData(t, SUITE_ID_ML_DSA_87, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES)
 	t.Cleanup(cleanup)
 	entry.Value = 100
+	tx.TxNonce, tx.Outputs[0] = 1, TxOutput{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: bytes.Clone(entry.CovenantData)}
 	tx.Witness = []WitnessItem{w}
 	cache, err := NewSighashV1PrehashCache(tx)
 	if err != nil {
@@ -259,8 +260,7 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 		})
 	}
 	nextThreshold := func(q *SigCheckQueue, context string) {
-		sentinel := WitnessItem{SuiteID: SUITE_ID_SENTINEL}
-		if err := validateThresholdSigSpendQ([][32]byte{f.keyID, {}}, 1, []WitnessItem{f.w, sentinel}, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, context, nil, nil); err != nil || q.Len() != 2 {
+		if err := validateThresholdSigSpendQ([][32]byte{f.keyID}, 1, []WitnessItem{f.w}, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, context, nil, nil); err != nil || q.Len() != 2 {
 			t.Fatalf("subsequent threshold err=%v queue=%d", err, q.Len())
 		}
 		if err := q.Flush(); err != nil {
@@ -277,11 +277,24 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 	nextThreshold(q, "CORE_MULTISIG")
 
 	q, prefix = seed()
-	first := f.w
-	second := f.w
-	second.SuiteID = 0x02
+	secondPub := bytes.Clone(f.w.Pubkey)
+	secondPub[0] ^= 1
+	firstKey, secondKey := sortKeys32(f.keyID, sha3_256(secondPub))
+	first, second := f.w, f.w
+	if firstKey == f.keyID {
+		second.Pubkey = secondPub
+	} else {
+		first.Pubkey = secondPub
+	}
+	first.SuiteID, second.SuiteID = SUITE_ID_ML_DSA_87, 0x02
+	thresholdTx := *f.tx
+	thresholdTx.Witness = []WitnessItem{first, second}
+	thresholdCache, cacheErr := NewSighashV1PrehashCache(&thresholdTx)
+	if cacheErr != nil {
+		t.Fatalf("threshold cache: %v", cacheErr)
+	}
 	rotation := &nativeSuiteAvailabilityRotation{spend: NewNativeSuiteSet(SUITE_ID_ML_DSA_87, 0x02)}
-	err = validateThresholdSigSpendQ([][32]byte{f.keyID, f.keyID}, 2, []WitnessItem{first, second}, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, "CORE_VAULT", rotation, DefaultSuiteRegistry())
+	err = validateThresholdSigSpendQ([][32]byte{firstKey, secondKey}, 2, []WitnessItem{first, second}, &thresholdTx, 0, 100, [32]byte{}, 1, thresholdCache, q, "CORE_VAULT", rotation, DefaultSuiteRegistry())
 	mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, "CORE_VAULT suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable)
 	if !samePrefix(q, prefix) {
 		t.Fatalf("late registry rollback changed prefix: %+v", q.tasks)
@@ -321,13 +334,13 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 			return ValidateHTLCSpendAtHeight(entry, path, f.w, f.tx, 0, 100, [32]byte{}, height, mtp, f.cache, rotation, DefaultSuiteRegistry())
 		}
 	}
-	claimKeyID, wrongKey := [32]byte{0x71}, [32]byte{0x99}
-	claimPreimage := []byte("0123456789abcdef")
-	wrongPreimage := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: encodeHTLCClaimPayload(claimPreimage)}
+	otherKey, wrongKey := [32]byte{0x71}, [32]byte{0x99}
+	claimPreimage, wrongClaimPreimage := []byte("0123456789abcdef"), []byte("fedcba9876543210")
+	wrongPreimage := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: f.keyID[:], Signature: encodeHTLCClaimPayload(wrongClaimPreimage)}
 	claimKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: encodeHTLCClaimPayload(claimPreimage)}
 	refundKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: []byte{0x01}}
-	claimKeyEntry := makeHTLCEntry(sha3_256(claimPreimage), LOCK_MODE_HEIGHT, 1, claimKeyID, f.keyID)
-	timestampEntry := makeHTLCEntry([32]byte{0x72}, LOCK_MODE_TIMESTAMP, 1, claimKeyID, f.keyID)
+	claimKeyEntry := makeHTLCEntry(sha3_256(claimPreimage), LOCK_MODE_HEIGHT, 1, f.keyID, otherKey)
+	timestampEntry := makeHTLCEntry([32]byte{0x72}, LOCK_MODE_TIMESTAMP, 1, otherKey, f.keyID)
 	for _, queued := range []bool{false, true} {
 		for _, tc := range []struct {
 			name, message string
@@ -335,7 +348,7 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 			run           func(RotationProvider) error
 		}{
 			{"htlc_shape", "CORE_HTLC covenant_data length mismatch", TX_ERR_COVENANT_TYPE_INVALID, htlcEarlier(queued, UtxoEntry{CovenantType: COV_TYPE_HTLC}, f.path, 1, 0)},
-			{"wrong_preimage", "CORE_HTLC claim preimage hash mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, wrongPreimage, 1, 0)},
+			{"wrong_preimage", "CORE_HTLC claim preimage hash mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, claimKeyEntry, wrongPreimage, 1, 0)},
 			{"height_lock", "CORE_HTLC height lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, f.htlcEntry, f.path, 0, 0)},
 			{"timestamp_lock", "CORE_HTLC timestamp lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, timestampEntry, f.path, 1, 0)},
 			{"claim_key", "CORE_HTLC claim key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, claimKeyEntry, claimKeyMismatch, 1, 0)},
@@ -377,7 +390,12 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 		t.Fatalf("subsequent public transaction: %v", err)
 	}
 
-	results, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{{TxIndex: 1, Tx: f.tx, ResolvedInputs: []UtxoEntry{f.entry}, WitnessStart: 0, WitnessEnd: 1, SighashCache: f.cache}}, [32]byte{}, 1, 0, nil)
+	parsed, txid := mustParseTxForUtxo(t, raw)
+	workerContext, err := precomputeTxContext(1, parsed, txid, utxos(), 1)
+	if err != nil {
+		t.Fatalf("precomputeTxContext: %v", err)
+	}
+	results, err := RunTxValidationWorkers(context.Background(), 1, []TxValidationContext{workerContext}, [32]byte{}, 1, 0, nil)
 	if err != nil || len(results) != 1 || results[0].Err != nil || !results[0].Value.Valid {
 		t.Fatalf("worker result=%+v err=%v", results, err)
 	}
