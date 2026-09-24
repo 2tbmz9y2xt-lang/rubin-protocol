@@ -254,6 +254,9 @@ func TestDAObserverConformanceInjectors(t *testing.T) {
 	t.Run("owner transition", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 2)
 		chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0xD2}, payload: []byte("transition")})
+		if end, err := DAObserverBeginOwnerTransition(nil); err == nil || end != nil {
+			t.Fatal("nil owner transition reported success")
+		}
 		end, err := DAObserverBeginOwnerTransition(f.mp.pendingOutpoints)
 		if err != nil {
 			t.Fatal(err)

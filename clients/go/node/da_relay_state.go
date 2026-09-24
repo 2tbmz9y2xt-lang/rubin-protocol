@@ -290,13 +290,17 @@ type DARelayState struct {
 	// deleted records. Single-use placement under one uninterrupted lock preserves it.
 	records uint64
 	// admitObserver receives every AdmitDA outcome on a non-nil receiver after
-	// the outcome is final, with no DA relay or owner mutex held. It must not
-	// call AdmitDA. Nil at construction; retained-state images never copy it.
+	// the outcome is final, with no DA relay or owner mutex held; a panicking
+	// call has no outcome and is not observed. It must not call AdmitDA. Nil at
+	// construction; retained-state images never copy it.
 	admitObserver atomic.Pointer[func(daAdmitCall)]
 	// completeHook, when set by package tests, runs once at each reached stage
 	// of one completing admission: daCompletePlanned with only the admission
 	// hold held, daCompleteEffects with s.mu held and the owner mutex not held.
-	// Nil at construction; retained-state images never copy it.
+	// At daCompleteEffects it must not take s.mu, call AdmitDA or call
+	// DAObserverReadStateImage; it may read and mutate DA relay fields directly
+	// and may take the owner mutex. Nil at construction; retained-state images
+	// never copy it.
 	completeHook func(daCompleteStage, *daCompleteCommitPlan)
 }
 

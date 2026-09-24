@@ -245,7 +245,8 @@ func runDAObservationScript(t *testing.T, f *daNonReplayFixture, txs []daNonRepl
 	}
 	admit("retained", txs[0].raw, publicPeer(t, "observed"), DAAdmissionRetained, 0)
 	admit("exact replay", txs[0].raw, LocalDAProvenance(), DAAdmissionDuplicate, 0)
-	admit("policy rejection", append(slices.Clip(txs[0].raw), 0), LocalDAProvenance(), 0, RelayAdmissionStableTerminalReject)
+	admit("parse rejection", append(slices.Clip(txs[0].raw), 0), LocalDAProvenance(), 0, RelayAdmissionStableTerminalReject)
+	admit("policy rejection", txs[7].raw, LocalDAProvenance(), 0, RelayAdmissionStableTerminalReject)
 	mustReserve(t, o, [32]byte{0x99}, txs[1].inputs[0])
 	admit("owner conflict", txs[1].raw, LocalDAProvenance(), 0, RelayAdmissionConflict)
 	if _, err := o.beginTransition(); err != nil {
@@ -269,16 +270,20 @@ func runDAObservationScript(t *testing.T, f *daNonReplayFixture, txs []daNonRepl
 }
 
 func TestDAObservationAdmitObserver(t *testing.T) {
-	f := newDANonReplayFixture(t, 7)
+	f := newDANonReplayFixture(t, 8)
 	chunk := func(id byte, payload []byte) daNonReplayTx {
 		return f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, id}, payload: payload})
 	}
 	complete := []byte("observed complete")
 	txs := []daNonReplayTx{chunk(1, []byte{1}), chunk(2, []byte{2}), chunk(3, []byte{3}), chunk(4, []byte{4}),
-		f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0x70, 9}, chunkCount: 1, commitment: sha3.Sum256(complete), commitmentOutputs: 1}), chunk(9, complete), chunk(5, []byte{5})}
+		f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0x70, 9}, chunkCount: 1, commitment: sha3.Sum256(complete), commitmentOutputs: 1}), chunk(9, complete), chunk(5, []byte{5}),
+		f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, 6}, payload: make([]byte, 4096), fee: consensus.Uint128{Lo: 100}})}
 	twin := daObservationTwin(t, f)
 	observed, hooked := runDAObservationScript(t, f, txs, true)
 	unobserved, _ := runDAObservationScript(t, twin, txs, false)
+	if !strings.HasPrefix(observed[3], "policy rejection: {DAID:[0") || !strings.Contains(observed[3], "DA fee below Stage C floor") {
+		t.Fatalf("policy step=%q, want the DA fee-floor policy rejection", observed[3])
+	}
 	if !slices.Equal(observed, unobserved) || !reflect.DeepEqual(daObservationImage(f), daObservationImage(twin)) || hooked != 2 {
 		t.Fatalf("observer and no-op hook (hook calls=%d) changed outcomes or state:\nobserved=%q\nunobserved=%q", hooked, observed, unobserved)
 	}
@@ -392,6 +397,27 @@ func TestDAObservationPlanHook(t *testing.T) {
 		}
 		requireDAObservationDelta(t, o, before, [4]uint64{1, 1, 0, 1}, "post-reservation victim failure")
 	})
+	for _, stage := range []daCompleteStage{daCompletePlanned, daCompleteEffects} {
+		t.Run(fmt.Sprintf("panic at stage %d is not observed", stage), func(t *testing.T) {
+			f, chunk := daObservationCompleting(t)
+			calls := 0
+			observer := func(daAdmitCall) { calls++ }
+			f.relay.admitObserver.Store(&observer)
+			hookDAObservation(f, func(at daCompleteStage, _ *daCompleteCommitPlan) {
+				if at == stage {
+					panic("hook panic") //nolint:forbidigo // The row drives AdmitDA through a panic.
+				}
+			})
+			recovered := func() (r any) {
+				defer func() { r = recover() }()
+				f.relay.AdmitDA(chunk.raw, LocalDAProvenance())
+				return nil
+			}()
+			if recovered != "hook panic" || calls != 0 {
+				t.Fatalf("panic=%v observer calls=%d, want the original panic and no call", recovered, calls)
+			}
+		})
+	}
 	t.Run("failed preparation", func(t *testing.T) {
 		f, a, _ := daCompleteCommitMismatchFixture(t, false)
 		stages := hookDAObservation(f, nil)

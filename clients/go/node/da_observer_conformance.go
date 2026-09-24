@@ -53,7 +53,7 @@ type DAObserverAdmitCall struct {
 // DAObserverSetAdmitObserver installs fn as the AdmitDA observer of s; a nil fn
 // uninstalls it and a nil s is a no-op. fn runs once per AdmitDA call after the
 // outcome is final, with no DA relay or owner mutex held, and must not call
-// AdmitDA.
+// AdmitDA. A panicking AdmitDA call is not observed.
 func DAObserverSetAdmitObserver(s *DARelayState, fn func(DAObserverAdmitCall)) {
 	if s == nil {
 		return
@@ -356,8 +356,12 @@ func (s *DARelayState) injectDAObserverMemberFaultLocked(locator daRelayLocator,
 }
 
 // DAObserverBeginOwnerTransition begins a pending-outpoint owner transition so
-// the DA admission hold cannot be acquired; end aborts that transition.
+// the DA admission hold cannot be acquired; end aborts that transition. A nil
+// owner, or a transition that cannot begin, returns an error and no end.
 func DAObserverBeginOwnerTransition(o *PendingOutpointOwner) (end func(), err error) {
+	if o == nil {
+		return nil, errors.New("nil pending-outpoint owner")
+	}
 	if _, err = o.beginTransition(); err != nil {
 		return nil, err
 	}

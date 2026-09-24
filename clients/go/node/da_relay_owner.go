@@ -258,13 +258,20 @@ type daAdmissionObservation struct {
 // retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
 	// Registered first so it runs last, after the admission hold is released.
+	// A panicking call has no final result: it is not observed, and its panic
+	// value is re-raised unchanged.
 	defer func() {
 		if s == nil {
 			return
 		}
-		if observe := s.admitObserver.Load(); observe != nil {
-			(*observe)(daAdmitCall{provenance: provenance, result: result, err: err})
+		observe := s.admitObserver.Load()
+		if observe == nil {
+			return
 		}
+		if r := recover(); r != nil {
+			panic(r) //nolint:forbidigo // Re-raises the caller's own panic value unchanged.
+		}
+		(*observe)(daAdmitCall{provenance: provenance, result: result, err: err})
 	}()
 	var zero DAAdmissionResult
 	m, owner, err := s.bindDAAdmission()
