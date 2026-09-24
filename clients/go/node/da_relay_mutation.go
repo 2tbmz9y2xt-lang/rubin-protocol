@@ -1341,10 +1341,10 @@ func checkOwnerReadyCleanupCompleteRecord(record daRelaySetRecord) error {
 		}
 	}
 	type completeTotals struct {
-		set     daCompleteCapacitySet
-		nonzero bool
+		set                    daCompleteCapacitySet
+		nonzero, payloadWithin bool
 	}
-	if (completeTotals{set, set.totalBytes != 0}) != (completeTotals{record.completeIntrinsic, true}) {
+	if (completeTotals{set, set.totalBytes != 0, set.payloadBytes <= set.totalBytes}) != (completeTotals{record.completeIntrinsic, true, true}) {
 		return errDARelayImageIncompatible
 	}
 	if err := checkDACompleteResidues(record, record.payloadBytes); err != nil {

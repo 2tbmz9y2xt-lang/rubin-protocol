@@ -1,10 +1,14 @@
 package node
 
 import (
+	"crypto/sha3"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
 func TestDACleanupIntrinsicMetadata(t *testing.T) {
@@ -20,15 +24,23 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 	}
 	for _, row := range []struct {
 		name   string
-		mutate func(*daCompleteCapacitySet)
+		mutate func(*daRelaySetRecord)
 	}{
-		{"absent descriptor", func(x *daCompleteCapacitySet) { *x = daCompleteCapacitySet{} }},
-		{"wrong da_id", func(x *daCompleteCapacitySet) { x.id[0] ^= 0xff }},
-		{"wrong fee", func(x *daCompleteCapacitySet) { x.fee.Lo++ }},
-		{"zero total bytes", func(x *daCompleteCapacitySet) { x.totalBytes = 0 }},
-		{"wrong nonzero total bytes", func(x *daCompleteCapacitySet) { x.totalBytes++ }},
-		{"wrong payload bytes", func(x *daCompleteCapacitySet) { x.payloadBytes++ }},
-		{"wrong received sequence", func(x *daCompleteCapacitySet) { x.receivedSequence++ }},
+		{"absent descriptor", func(r *daRelaySetRecord) { r.completeIntrinsic = daCompleteCapacitySet{} }},
+		{"wrong da_id", func(r *daRelaySetRecord) { r.completeIntrinsic.id[0] ^= 0xff }},
+		{"wrong fee", func(r *daRelaySetRecord) { r.completeIntrinsic.fee.Lo++ }},
+		{"zero total bytes", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes = 0 }},
+		{"wrong nonzero total bytes", func(r *daRelaySetRecord) { r.completeIntrinsic.totalBytes++ }},
+		{"wrong payload bytes", func(r *daRelaySetRecord) { r.completeIntrinsic.payloadBytes++ }},
+		{"payload exceeds total bytes", func(r *daRelaySetRecord) {
+			r.payloadBytes, r.completeIntrinsic.payloadBytes = r.completeIntrinsic.totalBytes+1, r.completeIntrinsic.totalBytes+1
+		}},
+		{"wrong received sequence", func(r *daRelaySetRecord) { r.completeIntrinsic.receivedSequence++ }},
+		{"member fee overflow", func(r *daRelaySetRecord) {
+			*r = r.cloneOwnerReady()
+			r.commit.member.fee, r.chunks[0].member.fee = consensus.Uint128{Hi: ^uint64(0), Lo: ^uint64(0)}, consensus.Uint128FromU64(1)
+			r.completeIntrinsic.fee = consensus.Uint128{}
+		}},
 	} {
 		for _, selector := range selectors {
 			t.Run(row.name+" on "+selector.name, func(t *testing.T) {
@@ -37,21 +49,74 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 				clean, ownerClean := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				f.mutateRelay(func(s *DARelayState) {
 					record := s.sets[id]
-					row.mutate(&record.completeIntrinsic)
-					s.sets[id] = record
+					row.mutate(&record)
+					s.sets[id], s.pinnedPayloadBytes = record, record.payloadBytes
 				})
 				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				if err := selector.run(f.relay); !errors.Is(err, errDARelayImageIncompatible) {
 					t.Fatalf("cleanup accepted inconsistent C metadata: err=%v, want %v", err, errDARelayImageIncompatible)
 				}
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
-				f.mutateRelay(func(s *DARelayState) { s.sets[id] = clean.sets[id] })
+				f.mutateRelay(func(s *DARelayState) { s.sets[id], s.pinnedPayloadBytes = clean.sets[id], clean.pinnedPayloadBytes })
 				if err := selector.run(f.relay); err != nil {
 					t.Fatalf("State C cleanup ceased to be a successful no-op: corrected cleanup: %v", err)
 				}
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, clean, ownerClean)
 			})
 		}
+	}
+	buildMaxCount := func(t *testing.T) (*daNonReplayFixture, [32]byte, daRelayStateView, *PendingOutpointOwner) {
+		count, id := uint16(consensus.MAX_DA_CHUNK_COUNT), [32]byte{0xd2}
+		f, payloads := newDANonReplayFixture(t, int(count)+3), make([]byte, count)
+		for index := uint16(0); index < count; index++ {
+			payloads[index] = byte(index + 1)
+			f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: id, chunkIndex: index, payload: payloads[index : index+1]}), LocalDAProvenance())
+		}
+		commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: id, chunkCount: count, commitment: sha3.Sum256(payloads), commitmentOutputs: 1})
+		_, token := mustFinalizeDAAdmission(t, f.mp, commit.raw)
+		f.mutateRelay(func(s *DARelayState) {
+			record := s.sets[id]
+			record.commit = daRelayCommit{daID: id, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: commit.inputs, token: token, provenance: LocalDAProvenance()}, chunkCount: count, txBytes: commit.raw}
+			record.markComplete(uint64(count))
+			set, matches, err := parseDACompleteRecord(record)
+			require(t, err == nil && matches, "maximum-count G1 fixture: matches=%v err=%v", matches, err)
+			record.completeIntrinsic = set
+			charge := s.orphanBytesByDAID[id]
+			delete(s.orphanBytesByDAID, id)
+			s.orphanBytes, s.completeBytes, s.completeCount, s.pinnedPayloadBytes = s.orphanBytes-charge, s.completeBytes+set.totalBytes, s.completeCount+1, s.pinnedPayloadBytes+set.payloadBytes
+			s.locators[commit.txid], s.sets[id] = daRelayLocator{daID: id, kind: daRelayLocatorCommit}, record
+		})
+		clean, ownerClean := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+		return f, id, clean, ownerClean
+	}
+	for _, selector := range selectors {
+		t.Run("excessive chunk count on "+selector.name, func(t *testing.T) {
+			f, id, clean, ownerClean := buildMaxCount(t)
+			require(t, selector.run(f.relay) == nil, "valid maximum chunk count failed on %s", selector.name)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, clean, ownerClean)
+			extra := f.signed(daNonReplayTxSpec{kind: 0x02, daID: id, payload: []byte("over")})
+			_, extraToken := mustFinalizeDAAdmission(t, f.mp, extra.raw)
+			// The over-MAX image uses signed/claimed bytes; only their R5 byte role differs from cached slot MAX.
+			f.mutateRelay(func(s *DARelayState) {
+				record, index := s.sets[id], uint16(consensus.MAX_DA_CHUNK_COUNT)
+				member := &daRelayMemberIdentity{txid: extra.txid, wtxid: extra.wtxid, fee: extra.spec.fee, inputs: extra.inputs, token: extraToken, provenance: LocalDAProvenance()}
+				record.commit.chunkCount, record.chunks[index] = index+1, daRelayChunk{daID: id, chunkHash: sha3.Sum256(extra.spec.payload), member: member, chunkIndex: index, txBytes: extra.raw}
+				record.payloadBytes, record.completeIntrinsic.payloadBytes = record.payloadBytes+uint64(len(extra.spec.payload)), record.completeIntrinsic.payloadBytes+uint64(len(extra.spec.payload))
+				record.completeIntrinsic.fee.Lo, record.completeIntrinsic.totalBytes = record.completeIntrinsic.fee.Lo+extra.spec.fee.Lo, record.completeIntrinsic.totalBytes+uint64(len(extra.raw))
+				s.sets[id], s.completeBytes, s.pinnedPayloadBytes, s.locators[extra.txid] = record, s.completeBytes+uint64(len(extra.raw)), s.pinnedPayloadBytes+uint64(len(extra.spec.payload)), daRelayLocator{daID: id, kind: daRelayLocatorChunk, chunkIndex: index}
+			})
+			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "cleanup accepted excessive C chunk count")
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
+			f.mutateRelay(func(s *DARelayState) {
+				s.sets, s.locators, s.completeBytes, s.pinnedPayloadBytes = maps.Clone(clean.sets), maps.Clone(clean.locators), clean.completeBytes, clean.pinnedPayloadBytes
+			})
+			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
+				o.byToken, o.byOutpoint, o.tokenHighWater = maps.Clone(ownerClean.byToken), maps.Clone(ownerClean.byOutpoint), ownerClean.tokenHighWater
+			})
+			require(t, selector.run(f.relay) == nil, "corrected excessive chunk count failed on %s", selector.name)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, clean, ownerClean)
+		})
 	}
 	t.Run("mixed eligible removal is atomic with invalid C metadata", func(t *testing.T) {
 		f, incompleteID, completeID := newDANonReplayFixture(t, 4), [32]byte{0xa1}, [32]byte{0xc1}
