@@ -186,14 +186,6 @@ func TestRelayNativeSuiteAvailability(t *testing.T) {
 			if !errors.As(originErr, &txErr) || txErr.Cause() != tc.cause || originErr.Error() != tc.message {
 				t.Fatalf("origin error=%v cause=%v", originErr, txErr)
 			}
-			for _, err := range []error{originErr, fmt.Errorf("wrapped: %w", originErr)} {
-				for _, fallback := range []RelayAdmissionDisposition{RelayAdmissionStableTerminalReject, RelayAdmissionInternal} {
-					if got := relayDispositionForInputError(err, fallback); got != RelayAdmissionUnavailable {
-						t.Fatalf("classifier=%v fallback=%v", got, fallback)
-					}
-				}
-			}
-
 			before, err := snapshotMempool(h.mp)
 			if err != nil {
 				t.Fatalf("snapshot before: %v", err)
@@ -213,6 +205,13 @@ func TestRelayNativeSuiteAvailability(t *testing.T) {
 			}
 			if current := h.context(); *current != *expectedContext {
 				t.Fatalf("admission context moved: before=%+v after=%+v", *expectedContext, *current)
+			}
+			for _, err := range []error{originErr, fmt.Errorf("wrapped: %w", originErr)} {
+				for _, fallback := range []RelayAdmissionDisposition{RelayAdmissionStableTerminalReject, RelayAdmissionInternal} {
+					if got := relayDispositionForInputError(err, fallback); got != RelayAdmissionUnavailable {
+						t.Fatalf("classifier=%v fallback=%v", got, fallback)
+					}
+				}
 			}
 
 			rotation.spend = consensus.DefaultRotationProvider{}.NativeSpendSuites(1)

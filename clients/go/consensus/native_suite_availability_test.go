@@ -221,7 +221,9 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 	seed := func() (*SigCheckQueue, sigCheckTask) {
 		q := NewSigCheckQueue(1)
 		q.Push(SUITE_ID_ML_DSA_87, f.w.Pubkey, f.w.Signature[:len(f.w.Signature)-1], [32]byte{0x61}, txerr(TX_ERR_SIG_INVALID, "seed"))
-		return q, q.tasks[0]
+		prefix := q.tasks[0]
+		prefix.pubkey, prefix.sig = bytes.Clone(prefix.pubkey), bytes.Clone(prefix.sig)
+		return q, prefix
 	}
 	samePrefix := func(q *SigCheckQueue, prefix sigCheckTask) bool {
 		return len(q.tasks) == 1 && q.tasks[0].suiteID == prefix.suiteID && bytes.Equal(q.tasks[0].pubkey, prefix.pubkey) && bytes.Equal(q.tasks[0].sig, prefix.sig) && q.tasks[0].digest == prefix.digest && q.tasks[0].errOnFail == prefix.errOnFail
@@ -320,9 +322,11 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 		}
 	}
 	claimKeyID, wrongKey := [32]byte{0x71}, [32]byte{0x99}
-	wrongPreimage := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: encodeHTLCClaimPayload([]byte("0123456789abcdef"))}
-	claimKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: []byte{0x00}}
+	claimPreimage := []byte("0123456789abcdef")
+	wrongPreimage := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: claimKeyID[:], Signature: encodeHTLCClaimPayload(claimPreimage)}
+	claimKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: encodeHTLCClaimPayload(claimPreimage)}
 	refundKeyMismatch := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: wrongKey[:], Signature: []byte{0x01}}
+	claimKeyEntry := makeHTLCEntry(sha3_256(claimPreimage), LOCK_MODE_HEIGHT, 1, claimKeyID, f.keyID)
 	timestampEntry := makeHTLCEntry([32]byte{0x72}, LOCK_MODE_TIMESTAMP, 1, claimKeyID, f.keyID)
 	for _, queued := range []bool{false, true} {
 		for _, tc := range []struct {
@@ -334,7 +338,7 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 			{"wrong_preimage", "CORE_HTLC claim preimage hash mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, wrongPreimage, 1, 0)},
 			{"height_lock", "CORE_HTLC height lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, f.htlcEntry, f.path, 0, 0)},
 			{"timestamp_lock", "CORE_HTLC timestamp lock not met", TX_ERR_TIMELOCK_NOT_MET, htlcEarlier(queued, timestampEntry, f.path, 1, 0)},
-			{"claim_key", "CORE_HTLC claim key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, claimKeyMismatch, 1, 0)},
+			{"claim_key", "CORE_HTLC claim key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, claimKeyEntry, claimKeyMismatch, 1, 0)},
 			{"refund_key", "CORE_HTLC refund key_id mismatch", TX_ERR_SIG_INVALID, htlcEarlier(queued, f.htlcEntry, refundKeyMismatch, 1, 0)},
 		} {
 			rotation := &nativeSuiteAvailabilityRotation{}
