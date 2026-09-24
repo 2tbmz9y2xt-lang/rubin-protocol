@@ -99,6 +99,10 @@ func parseDAAdmission(raw []byte) (owned []byte, tx *consensus.Tx, txid, wtxid [
 	if err != nil {
 		return
 	}
+	if len(inputs) == 0 { // canonical parse already bounds input_count by MAX_TX_INPUTS
+		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
+		return
+	}
 	if !matchingDAChunkPayloadHash(tx) {
 		err = txAdmitRejected("DA chunk payload hash mismatch")
 	}
@@ -124,10 +128,6 @@ func parseDAAdmissionCandidate(raw []byte) (owned []byte, tx *consensus.Tx, txid
 		return
 	}
 	inputs = relayMetadataInputs(tx)
-	if len(inputs) == 0 || len(inputs) > consensus.MAX_TX_INPUTS {
-		err = txAdmitRejected("DA transaction must have 1..MAX_TX_INPUTS inputs")
-		return
-	}
 	return
 }
 
@@ -275,7 +275,9 @@ func (a *DAAdmission) Snapshot() DAAdmissionSnapshot {
 	}
 }
 
-// BeginCommit is one-shot; its successful input-bearing candidate has a nonzero token.
+// BeginCommit is one-shot; its successful input-bearing candidate has a nonzero token. A refusal returns a nil
+// commit and an error whose relay disposition is selected here from the owner error kind: UNAVAILABLE for an
+// unavailable owner, CONFLICT for an occupied input, INTERNAL otherwise.
 func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error) {
 	a.mustLiveValue()
 	g := a.guard
@@ -285,11 +287,11 @@ func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error
 	defer g.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
 	prepared, err := prepareDAAdmissionCommit(a, victims)
 	if err != nil {
-		return nil, txAdmitFromPendingOutpointError(err)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(err), relayDispositionForOwnerError(err))
 	}
 	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
 	if failed {
-		return nil, txAdmitFromPendingOutpointError(&failure)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(&failure), relayDispositionForOwnerError(&failure))
 	}
 	return commit, nil
 }

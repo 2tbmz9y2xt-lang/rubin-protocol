@@ -251,6 +251,8 @@ type daAdmissionObservation struct {
 }
 
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
+// A bound, parsed candidate with tx_nonce 0 returns the stable-terminal TX_ERR_TX_NONCE_INVALID rejection before any guard,
+// retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
 	var zero DAAdmissionResult
 	m, owner, err := s.bindDAAdmission()
@@ -263,6 +265,9 @@ func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmis
 	owned, tx, txid, wtxid, inputs, err := parseDAAdmissionCandidate(txBytes)
 	if err != nil {
 		return zero, selectRelayDisposition(err, RelayAdmissionStableTerminalReject)
+	}
+	if tx.TxNonce == 0 {
+		return zero, selectRelayDisposition(txAdmitRejected(string(consensus.TX_ERR_TX_NONCE_INVALID)+": tx_nonce must be >= 1 for non-coinbase"), RelayAdmissionStableTerminalReject)
 	}
 	hold, err := m.acquireDAAdmissionHold(owner, inputs)
 	if err != nil {

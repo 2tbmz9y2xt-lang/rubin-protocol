@@ -981,7 +981,7 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 		txBytes []byte
 		want    string
 		// daArm: the submitted kind leaves for the DA owner, which refuses this zero-input
-		// candidate with its own message before the poisoned static pool is ever read.
+		// candidate through ordinary validation before the poisoned static pool is ever read.
 		daArm bool
 	}{
 		{
@@ -1000,7 +1000,7 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 			name:    "DA kind refused before any admitted-pool read",
 			poolRaw: badDATxBytes,
 			txBytes: goodDATxBytes,
-			want:    "DA transaction must have 1..MAX_TX_INPUTS inputs",
+			want:    "TX_ERR_PARSE: non-coinbase must have at least one input",
 			daArm:   true,
 		},
 	}
