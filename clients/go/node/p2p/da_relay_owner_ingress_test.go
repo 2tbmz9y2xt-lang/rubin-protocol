@@ -1612,11 +1612,16 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 	commit, chunk := zero(f.commit(daID, 2)), zero(f.chunk(daID, 0, []byte("ao11")))
 	badHash := f.tx(daTxSpec{kind: 0x02, daID: daRelayTestID(0x71), payload: []byte("ao11-bad"), chunkHash: [32]byte{0xff}})
 	zeroBadHash := zero(badHash)
+	shaped := mustParseP2PTx(t, commit)
+	shaped.Inputs, shaped.Witness = nil, nil
+	inputless := mustMarshalPeerRuntimeTx(t, shaped)
+	shaped.Inputs = make([]consensus.TxInput, consensus.MAX_TX_INPUTS+1)
+	overflow := mustMarshalPeerRuntimeTx(t, shaped)
 	for _, row := range []struct {
 		label string
 		peer  *peer
 		raw   []byte
-	}{{"commit", p, commit}, {"chunk", p, chunk}, {"unsolicited chunk", stranger, chunk}, {"H1 wrong own-chunk hash", p, zeroBadHash}, {"H1 unsolicited", stranger, zeroBadHash}} {
+	}{{"commit", p, commit}, {"chunk", p, chunk}, {"unsolicited chunk", stranger, chunk}, {"H1 wrong own-chunk hash", p, zeroBadHash}, {"H1 unsolicited", stranger, zeroBadHash}, {"zero inputs", p, inputless}} {
 		t.Run(row.label, func(t *testing.T) {
 			before := effectsOf(row.peer)
 			require(t, row.peer.handleTx(row.raw) == nil && effectsOf(row.peer) == before && quotaKeyFree(h.service, peerQuotaKey(row.peer.addr())), "peer effects %+v -> %+v or quota key held", before, effectsOf(row.peer))
@@ -1628,7 +1633,7 @@ func TestDAIngressAO11OrderAndEffects(t *testing.T) {
 	before := effectsOf(p)
 	require(t, p.handleTx(badHash) == nil && effectsOf(p).ban == before.ban+10, "nonzero wrong-hash twin was not a peer fault: %+v -> %+v", before, effectsOf(p))
 	oversize := append(slices.Clone(commit), make([]byte, consensus.MAX_RELAY_MSG_BYTES+1-len(commit))...)
-	for reason, raw := range map[string][]byte{"non-canonical tx bytes": append(slices.Clone(commit), 0), fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(oversize), consensus.MAX_RELAY_MSG_BYTES): oversize} {
+	for reason, raw := range map[string][]byte{"non-canonical tx bytes": append(slices.Clone(commit), 0), "TX_ERR_PARSE: input_count overflow": overflow, fmt.Sprintf("tx payload exceeds MAX_RELAY_MSG_BYTES: %d > %d", len(oversize), consensus.MAX_RELAY_MSG_BYTES): oversize} {
 		before := effectsOf(p)
 		require(t, p.handleTx(raw) == nil && effectsOf(p) == peerEffects{before.ban + 10, reason, before.score, before.anchor}, "%s: peer effects %+v -> %+v", reason, before, effectsOf(p))
 	}

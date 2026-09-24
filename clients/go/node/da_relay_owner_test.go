@@ -7164,11 +7164,6 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 	}{
 		{"wrong own-chunk hash", nil, hashMismatch, false},
 		{"wrong own-chunk hash, no seeded row", nil, hashMismatch, true},
-		{"located invalid evidence", func(f *daNonReplayFixture, tx daNonReplayTx) {
-			f.mutateRelay(func(s *DARelayState) {
-				s.locators[tx.txid] = daRelayLocator{daID: [32]byte{0xc6}, kind: daRelayLocatorChunk}
-			})
-		}, requirePublicDAInternal, false},
 		{"unavailable owner", func(f *daNonReplayFixture, _ daNonReplayTx) { f.mutateRelay(func(s *DARelayState) { s.sets = nil }) }, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
 			requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "DA relay owner maps unavailable", RelayAdmissionUnavailable)
 		}, false},
@@ -7203,6 +7198,25 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 			}
 		})
 	}
+	t.Run("located zero-input retained evidence fails integrity before the cache", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 3)
+		f.admit(f.signed(chunk), daNonReplayPeer("resident"))
+		tx := zeroInputs(f, chunk) // the same da_id, index and payload as the resident member it replaces
+		f.mutateRelay(func(s *DARelayState) {
+			mutateOwnerReadyRecord(s, chunk.daID, func(r *daRelaySetRecord) {
+				member := r.chunks[0]
+				replaceOwnerReadyMember(f, s, member.member, &member.txBytes, tx, daRelayLocator{daID: chunk.daID, kind: daRelayLocatorChunk})
+				r.chunks[0] = member
+			})
+		})
+		f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid)
+		relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), snapshotDARejectCache(&f.relay.rejectCache)
+		got, err := f.relay.AdmitDA(tx.raw, peer)
+		requirePublicDAInternal(t, f, got, err)
+		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+		require(t, reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore), "cache changed")
+		requireReleasedAndAdmissible(t, f)
+	})
 	for _, registered := range []bool{false, true} {
 		t.Run(fmt.Sprintf("writer registered behind reader=%t makes it wait and it uses the post-wait context", registered), func(t *testing.T) {
 			f := newDANonReplayFixture(t, 2)
