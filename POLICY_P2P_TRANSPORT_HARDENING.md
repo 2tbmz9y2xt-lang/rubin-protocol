@@ -192,6 +192,10 @@ p2p_genesis_hash_mismatch_total
 p2p_malformed_compact_payload_total
 ```
 
+`p2p_queued_decoded_byte_cap_hit_total` counts hits on the
+`P2P_MAX_INFLIGHT_BYTES_PER_CONN` bound over complete `QUEUED_WAITING` frame
+payload lengths; its suffix does not define a separate decoded-work budget.
+
 ## 9. Security Wording
 
 Operator-facing output MUST NOT describe the 4-byte checksum as:
