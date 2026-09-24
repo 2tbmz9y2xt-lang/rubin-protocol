@@ -206,7 +206,7 @@ func TestNativeSuiteRegistryEntryUnavailable(t *testing.T) {
 		mustTxErrorCause(t, err, TX_ERR_SIG_ALG_INVALID, origin.message, TxErrorCauseUnspecified)
 	}
 	bad := f
-	bad.w.Pubkey = bad.w.Pubkey[:1]
+	bad.w.Signature = []byte{SIGHASH_ALL}
 	for _, origin := range bad.origins() {
 		if origin.create {
 			continue
