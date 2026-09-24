@@ -275,7 +275,9 @@ func (a *DAAdmission) Snapshot() DAAdmissionSnapshot {
 	}
 }
 
-// BeginCommit is one-shot; its successful input-bearing candidate has a nonzero token.
+// BeginCommit is one-shot; its successful input-bearing candidate has a nonzero token. A refusal returns a nil
+// commit and an error whose relay disposition is selected here from the owner error kind: UNAVAILABLE for an
+// unavailable owner, CONFLICT for an occupied input, INTERNAL otherwise.
 func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error) {
 	a.mustLiveValue()
 	g := a.guard

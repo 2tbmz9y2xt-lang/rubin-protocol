@@ -101,8 +101,8 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer
 // state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
 // address reaches) exits nil with zero effect. Every other identity reaches AdmitDA with no terminal-latch
-// shortcut; the key is held only around AdmitDA and released before any effect; no candidate validation
-// precedes AdmitDA's owner observation; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
+// shortcut; the key is held only around AdmitDA and released before any effect; this function performs no
+// candidate validation of its own before calling AdmitDA; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
 // schedules the prefetch once; DUPLICATE with conflict applies COMPETING_SCORE_V1 once; DUPLICATE without
 // conflict is the reachable neutral exit (exact/nonexact replay, occupied index); a zero/unknown
 // discriminator or RETAINED with the conflict flag — shapes publicDAAdmissionResult cannot emit — also exit
