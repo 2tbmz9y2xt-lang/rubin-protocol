@@ -6988,6 +6988,26 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 			release()
 		})
 	}
+	t.Run("writer registered under a held admission is not an active transition", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		admission := f.begin(f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xb9}, payload: []byte("pending-writer")}))
+		acquired := make(chan struct{})
+		go func() { f.state.admissionMu.Lock(); close(acquired); f.state.admissionMu.Unlock() }()
+		for f.state.admissionMu.TryRLock() { // a refused TryRLock under the held admission is the writer's registration
+			f.state.admissionMu.RUnlock()
+		}
+		high := f.mp.pendingOutpoints.tokenHighWater
+		commit, err := admission.BeginCommit(nil)
+		require(t, err == nil && commit.CandidateToken() == PendingOutpointToken{owner: f.mp.pendingOutpoints, seq: high + 1}, "Reserve under a pending writer err=%v", err)
+		commit.Abort()
+		select {
+		case <-acquired:
+			t.Fatal("writer acquired while the admission held the guard")
+		default:
+		}
+		admission.Close()
+		<-acquired
+	})
 }
 
 // TestAdmitDAAO12ReserveMixedFailures: every refusal row of the shared DA Reserve site wins over all lower rows with
@@ -7043,7 +7063,7 @@ func TestAdmitDAAO12ReserveMixedFailures(t *testing.T) {
 			case 7:
 				admission.snapshot.TxID = [32]byte{}
 			}
-			defer fail(row % 5)() // rows 5-7 set every Reserve refusal
+			defer fail(min(row, 5) % 5)() // rows 5-7 set every Reserve refusal
 			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
 			if row == 3 || row == 4 { // the public State A/B owner: H3 exhaustion with the occupied input, then the occupied input alone
 				got, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance())
