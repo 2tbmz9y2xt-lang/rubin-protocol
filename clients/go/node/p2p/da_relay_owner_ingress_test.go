@@ -270,18 +270,20 @@ func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 		t.Fatalf("E5 commit-first retained err=%v calls=%d", err, calls.Load())
 	}
 	framesBeforeComplete := len(current.conn.(*scriptedConn).Bytes())
-	if err := admit(f.chunk(commitFirstID, 0, []byte("complete")), false); err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" || calls.Load() != 2 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
+	if err := admit(f.chunk(commitFirstID, 0, commitFirstID[:]), true); err != nil || calls.Load() != 3 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
 		t.Fatalf("E5 chunk-last err=%v calls=%d", err, calls.Load())
 	}
 	f.requireRetained(commitFirst, "E5 commit-first preservation")
 
 	commitLastID := daRelayTestID(0xdb)
 	chunkFirst := f.chunk(commitLastID, 0, []byte("complete"))
-	if err := admit(chunkFirst, true); err != nil || calls.Load() != 3 {
+	if err := admit(chunkFirst, true); err != nil || calls.Load() != 4 {
 		t.Fatalf("E5 chunk-first retained err=%v calls=%d", err, calls.Load())
 	}
 	framesBeforeComplete = len(current.conn.(*scriptedConn).Bytes())
-	if err := admit(f.commit(commitLastID, 1), false); err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" || calls.Load() != 3 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
+	commitment := sha3.Sum256([]byte("complete"))
+	commitLast := f.tx(daTxSpec{kind: 0x01, daID: commitLastID, chunkCount: 1, commitment: [][]byte{commitment[:]}})
+	if err := admit(commitLast, true); err != nil || calls.Load() != 5 || len(current.conn.(*scriptedConn).Bytes()) != framesBeforeComplete {
 		t.Fatalf("E5 commit-last err=%v calls=%d", err, calls.Load())
 	}
 	f.requireRetained(chunkFirst, "E5 chunk-first preservation")
@@ -333,6 +335,49 @@ func TestDetachedReorgDAAdmissionEffects(t *testing.T) {
 		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
 		require(t, len(retry) == 1 && diagnostic == "", "missing-peer released retry=%+v diagnostic=%q", retry, diagnostic)
 	})
+	for _, panicScheduler := range []bool{false, true} {
+		t.Run(fmt.Sprintf("completed C callback panic=%t", panicScheduler), func(t *testing.T) {
+			h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+			f := newDAIngressFixture(t, h)
+			id := daRelayTestID(0xdf)
+			f.admit(f.commit(id, 1), "local-prefix")
+			chunk := f.chunk(id, 0, id[:])
+			finish, err := h.service.admitDetachedReorgDA(chunk)
+			require(t, err == nil && finish != nil, "completed detached callback=%v err=%v", finish != nil, err)
+			sentinel := &struct{}{}
+			h.service.cfg.Now = func() time.Time { panic(sentinel) }
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				finish(panicScheduler)
+			}()
+			if panicScheduler {
+				require(t, recovered == sentinel, "completed C callback panic=%v", recovered)
+			} else {
+				require(t, recovered == nil, "run=false called scheduler: %v", recovered)
+			}
+			finish(true)
+			finish(false)
+			requireReturned(t, lifecycleClose(h.service), "completed C callback leaked work lease")
+			f.requireRetained(chunk, "completed C after callback")
+		})
+	}
+}
+
+func TestAnnounceTxLocalDACompleteSetLeavesSchedulingToCaller(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	id := daRelayTestID(0xe0)
+	f.admit(f.commit(id, 1), "prefix")
+	calls := nowCalls(h)
+	chunk := f.chunk(id, 0, id[:])
+	got, err := h.service.AdmitLocalDA(chunk)
+	require(t, err == nil && got == (node.DAAdmissionResult{DAID: id, Disposition: node.DAAdmissionRetained}) && calls.Load() == 0,
+		"AdmitLocalDA complete=(%+v,%v) scheduler calls=%d", got, err, calls.Load())
+	require(t, len(h.service.CompleteDASetCandidates(^uint64(0))) == 1, "LOCAL completion did not publish provider C")
+	got, err = h.service.AdmitLocalDA(chunk)
+	require(t, err == nil && got == (node.DAAdmissionResult{DAID: id, Disposition: node.DAAdmissionDuplicate}) && calls.Load() == 0,
+		"AdmitLocalDA C replay=(%+v,%v) scheduler calls=%d", got, err, calls.Load())
 }
 
 func peerQuality(p *peer) (uint8, uint64) {
@@ -510,6 +555,19 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	h.service.cfg.PeerRuntimeConfig.BanThreshold = 1000
 	_, err = f.probe(bad)
 	require(t, err != nil, "the bad-hash chunk was retained")
+	mismatchID := daRelayTestID(0x2b)
+	run("RETAINED mismatch prefix", p, f.commit(mismatchID, 1), nil, 1, same)
+	mismatching := f.chunk(mismatchID, 0, []byte("different commitment"))
+	run("PAYLOAD_MISMATCH chunk-last", p, mismatching, nil, 0, same)
+	if got, err := f.probe(mismatching); got != (node.DAAdmissionResult{}) || !errors.Is(err, node.ErrDARelayPayloadCommitmentMismatch) {
+		t.Fatalf("mismatching peer chunk=(%+v,%v)", got, err)
+	}
+	commitLastMismatchID := daRelayTestID(0x2c)
+	run("RETAINED mismatch chunk prefix", p, f.chunk(commitLastMismatchID, 0, []byte("different commitment")), nil, 1, same)
+	mismatchingCommit := f.commit(commitLastMismatchID, 1)
+	run("PAYLOAD_MISMATCH commit-last B", p, mismatchingCommit, nil, 1, same)
+	f.requireRetained(mismatchingCommit, "commit-last mismatch retained B")
+	require(t, len(h.service.CompleteDASetCandidates(^uint64(0))) == 0, "commit-last mismatch exposed an incomplete provider set")
 	// OTHER_ADMIT_ERROR: owner, validation and renderer refusals are peer-neutral, schedule
 	// nothing and retain nothing; each carries the zero result.
 	unfunded := f.chunk(daRelayTestID(0x22), 0, []byte("unfunded"))
@@ -525,16 +583,16 @@ func TestRemoteDAResultEffects(t *testing.T) {
 		got, err := f.probe(raw)
 		require(t, err != nil && got == node.DAAdmissionResult{}, "OTHER_ADMIT_ERROR %s: probe=(%+v,%v), want a zero result with the owning error", label, got, err)
 	}
-	// COMPLETE_DEFERRED: the completing chunk keeps the exact temporary guard, schedules
-	// nothing and leaves no complete candidate; a second delivery refuses again.
+	// COMPLETE_SET: the completing chunk publishes C once; its replay schedules nothing.
 	deferredID := daRelayTestID(0x29)
 	run("RETAINED single-chunk commit", p, f.commit(deferredID, 1), nil, 1, same)
-	completing := f.chunk(deferredID, 0, []byte("complete"))
-	for i := 0; i < 2; i++ {
-		run(fmt.Sprintf("COMPLETE_DEFERRED delivery %d", i), p, completing, nil, 0, same)
-	}
-	_, err = f.probe(completing)
-	require(t, err != nil && err.Error() == "DA COMPLETE_SET capacity owner is not active" && len(h.service.CompleteDASetCandidates(^uint64(0))) == 0, "COMPLETE_DEFERRED probe err=%v candidates=%d", err, len(h.service.CompleteDASetCandidates(^uint64(0))))
+	completing := f.chunk(deferredID, 0, deferredID[:])
+	run("COMPLETE_SET first delivery", p, completing, nil, 1, same)
+	run("COMPLETE_SET replay", p, completing, nil, 0, same)
+	got, err := f.probe(completing)
+	require(t, err == nil && got.Disposition == node.DAAdmissionDuplicate && got.DAID == deferredID && len(h.service.CompleteDASetCandidates(^uint64(0))) == 1, "COMPLETE_SET probe=(%+v,%v) candidates=%d", got, err, len(h.service.CompleteDASetCandidates(^uint64(0))))
+	run("DISTINCT_COMMIT after C", other, f.commit(deferredID, 1), nil, 0, graceStep)
+	run("EXACT_REPLAY State C after conflict", p, completing, nil, 0, same)
 	// ALREADY_TERMINAL on a genuinely latched engine: the fixture UTXO and the signed DA bytes are
 	// prepared on the fresh harness BEFORE the latch-producing ApplyBlock, and the UTXO set is
 	// snapshotted before that ApplyBlock and pinned unchanged after the last latched row; each row
@@ -601,6 +659,19 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	requireInvFrame(t, rframes, stxid, "REJECTED_REPEAT standard control")
 	counters.Accepted++
 	require(t, rh.service.txSeen.Has(stxid) && rmempool.Contains(stxid) && rmempool.AdmissionCounts() == counters, "REJECTED_REPEAT standard control: seen=%v pooled=%v counters=%+v (want %+v), want every untouched authority live", rh.service.txSeen.Has(stxid), rmempool.Contains(stxid), rmempool.AdmissionCounts(), counters)
+}
+
+func TestRemoteDACompletionCapacityIsPeerNeutral(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	p := daRelayTestPeer(h, "127.0.0.1:19120")
+	before := effectsOf(p)
+	err := &node.TxAdmitError{Kind: node.TxAdmitUnavailable, Message: "DA COMPLETE_SET capacity rejected"}
+	if got := p.penalizeDAAdmissionError(err); got != nil || effectsOf(p) != before {
+		t.Fatalf("capacity refusal changed peer effects: returned=%v before=%+v after=%+v", got, before, effectsOf(p))
+	}
+	if got := p.penalizeDAAdmissionError(node.ErrDARelayPayloadCommitmentMismatch); got != nil || effectsOf(p) != before {
+		t.Fatalf("set commitment mismatch changed peer effects: returned=%v before=%+v after=%+v", got, before, effectsOf(p))
+	}
 }
 
 // TestRemoteDAIdentityBoundsPrecedeAdmission pins IDENTITY_BOUNDS_V1 at both limits
@@ -1243,6 +1314,20 @@ func TestAnnounceTxLocalDAOutcomes(t *testing.T) {
 			"%s: standard state %+v -> %+v frames=%v/%v peers=%+v", row.label, before, after, frames, framesAfter, peersBefore)
 	}
 	l.f.requireRetained(commit, "the first-seen commit after every duplicate form")
+	completeID := daRelayTestID(0xb3)
+	completeCommit := l.f.commit(completeID, 1)
+	before = l.state()
+	must(t, l.service.AnnounceTx(completeCommit), "AnnounceTx the complete-set commit prefix")
+	require(t, l.state() == scheduled(before, 1), "complete-set prefix was not scheduled once")
+	completeChunk := l.f.chunk(completeID, 0, completeID[:])
+	before = l.state()
+	must(t, l.service.AnnounceTx(completeChunk), "AnnounceTx the matching complete-set chunk")
+	require(t, l.state() == scheduled(before, 1) && len(l.service.CompleteDASetCandidates(^uint64(0))) == 1,
+		"AnnounceTx completing C did not schedule once or publish provider C")
+	before = l.state()
+	must(t, l.service.AnnounceTx(completeChunk), "AnnounceTx exact completed-C replay")
+	require(t, l.state() == before && [2]peerEffects{effectsOf(first), effectsOf(second)} == peersBefore,
+		"completed-C replay scheduled or changed peer effects")
 	t.Run("no eligible peer", func(t *testing.T) {
 		l := newLocalDAHarness(t, false)
 		raw := l.f.commit(daRelayTestID(0xb3), 2)
@@ -1327,8 +1412,6 @@ func TestAnnounceTxLocalDAErrorsAndReuse(t *testing.T) {
 		{"invalid signature", "TX_ERR_SIG_INVALID: CORE_P2PK signature invalid", node.TxAdmitRejected, nil, mustMarshalPeerRuntimeTx(t, corrupted)},
 		{"DA fee below the Stage C floor", fmt.Sprintf("DA fee below Stage C floor (fee=7 required_fee=8 relay_fee_floor=0 da_fee_floor=8 da_surcharge=0 weight=%d da_payload_len=8)", weight), node.TxAdmitRejected, nil, lowFee},
 		{"pending-outpoint conflict", fmt.Sprintf("mempool double-spend conflict with %x", mustTxID(t, standard)), node.TxAdmitConflict, nil, resignDATx(t, f, conflicting)},
-		{"set-completing chunk after its commit", "DA COMPLETE_SET capacity owner is not active", node.TxAdmitUnavailable, nil, f.chunk(commitFirstID, 0, []byte("complete"))},
-		{"set-completing commit after its chunk", "DA COMPLETE_SET capacity owner is not active", node.TxAdmitUnavailable, nil, f.commit(chunkFirstID, 1)},
 	} {
 		t.Run(row.label, func(t *testing.T) {
 			before := l.state()
@@ -1342,8 +1425,21 @@ func TestAnnounceTxLocalDAErrorsAndReuse(t *testing.T) {
 				err, err, row.kind, row.message, before, after)
 		})
 	}
+	beforeMismatch := l.state()
+	mismatchChunk := f.chunk(commitFirstID, 0, []byte("complete"))
+	err = l.service.AnnounceTx(mismatchChunk)
+	//nolint:errorlint // Direct payload-mismatch sentinel identity is contract-owned.
+	require(t, err == node.ErrDARelayPayloadCommitmentMismatch && errors.Is(err, node.ErrDARelayPayloadCommitmentMismatch) && l.state() == beforeMismatch && effectsOf(neutral) == peerBefore,
+		"chunk-last mismatch=%v state=%+v/%+v", err, l.state(), beforeMismatch)
+	beforeMismatch = l.state()
+	mismatchCommit := f.commit(chunkFirstID, 1)
+	must(t, l.service.AnnounceTx(mismatchCommit), "commit-last mismatch retains commit-only B")
+	require(t, l.state() == scheduled(beforeMismatch, 1) && effectsOf(neutral) == peerBefore,
+		"commit-last mismatch state=%+v/%+v", l.state(), beforeMismatch)
+	f.requireRetained(mismatchCommit, "commit-last mismatch retained B")
 	f.requireRetained(commitFirst, "the retained prefix of the commit-first set")
-	f.requireRetained(chunkFirst, "the retained prefix of the chunk-first set")
+	got, err := f.probe(chunkFirst)
+	require(t, got == (node.DAAdmissionResult{}) && err != nil, "mismatching chunk remained after commit-last B: %+v %v", got, err)
 
 	for _, row := range []struct {
 		label, message string

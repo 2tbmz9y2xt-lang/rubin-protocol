@@ -495,7 +495,7 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 	}
 	schedulerCalls := 0
 	effectEntered, effectRelease := make(chan struct{}), make(chan struct{})
-	var releaseEffectOnce sync.Once
+	var releaseEffectOnce, enterEffectOnce sync.Once
 	releaseEffect := func() { releaseEffectOnce.Do(func() { close(effectRelease) }) }
 	t.Cleanup(releaseEffect)
 	sink.service.cfg.Now = func() time.Time {
@@ -504,7 +504,7 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 			frame, more := frames.Next()
 			if strings.Contains(frame.Function, ".scheduleDAPrefetch") {
 				schedulerCalls++
-				close(effectEntered)
+				enterEffectOnce.Do(func() { close(effectEntered) })
 				<-effectRelease
 				break
 			}
@@ -588,8 +588,8 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 	if err != nil || summary == nil || summary.BlockHash != parentHash || summary.BlockHeight != parentHeight || parentApplied && (len(summary.CanonicalAppliedBlocks) != 1 || summary.CanonicalAppliedBlocks[0].Hash != parentHash || len(summary.CanonicalAppliedBlocks[0].CompleteDAIDs) != 0) || !parentApplied && len(summary.CanonicalAppliedBlocks) != 0 || sink.chainState.Height != source.chainState.Height || sink.chainState.TipHash != source.chainState.TipHash || sink.service.orphans.Len() != 0 {
 		t.Fatalf("winning public reorg: summary=%+v err=%v sink=(%d,%x) source=(%d,%x) orphans=%d", summary, err, sink.chainState.Height, sink.chainState.TipHash, source.chainState.Height, source.chainState.TipHash, sink.service.orphans.Len())
 	}
-	if schedulerCalls != 1 {
-		t.Fatalf("detached reorg effect missing: scheduler calls=%d, want one retained member", schedulerCalls)
+	if schedulerCalls != 2 {
+		t.Fatalf("detached reorg effect missing: scheduler calls=%d, want two retained members", schedulerCalls)
 	}
 	if sink.mempool.Len() != 0 || sink.service.txSeen.Len() != 0 {
 		t.Fatalf("detached rows reached standard state: mempool=%d seen=%d", sink.mempool.Len(), sink.service.txSeen.Len())
@@ -599,7 +599,7 @@ func TestCanonicalBlockRelayDetachedDAReorg(t *testing.T) {
 		t.Fatalf("retained detached commit probe=(%+v,%v)", result, err)
 	}
 	result, err = sink.service.daRelay.AdmitDA(chunkRaw, node.DetachedReorgDAProvenance())
-	if result != (node.DAAdmissionResult{}) || err == nil || err.Error() != "DA COMPLETE_SET capacity owner is not active" {
-		t.Fatalf("current would-complete probe=(%+v,%v)", result, err)
+	if err != nil || result.DAID != daID || result.Disposition != node.DAAdmissionDuplicate || len(sink.service.CompleteDASetCandidates(^uint64(0))) != 1 {
+		t.Fatalf("completed detached set probe=(%+v,%v)", result, err)
 	}
 }

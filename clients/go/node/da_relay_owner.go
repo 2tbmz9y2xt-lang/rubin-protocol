@@ -129,6 +129,8 @@ type daRelayAdmissionPlan struct {
 	image         daRelayRecordImage
 	victims       []DAAdmissionVictim
 	wouldComplete bool
+	complete      *daCompleteSnapshot
+	duplicate     *daRelayAdmissionOutcome
 	stageErr      error
 }
 
@@ -180,7 +182,38 @@ func (s *DARelayState) admitDANonReplay(admission *DAAdmission, provenance daPro
 			admission.guard.chainState != s.mempool.chainState, admission.guard.owner != s.mempool.pendingOutpoints) {
 		return daRelayAdmissionOutcome{}, errDARelayImageIncompatible
 	}
-	return s.applyDANonReplayPlan(admission, candidate, s.planDANonReplay(candidate))
+	plan := s.planDANonReplay(candidate)
+	if plan.duplicate != nil {
+		return *plan.duplicate, nil
+	}
+	if plan.wouldComplete {
+		// A failed target copy leaves nil and its image-incompatible error is preserved by preparation.
+		return s.admitDAComplete(admission, plan.complete)
+	}
+	return s.applyDANonReplayPlan(admission, candidate, plan)
+}
+
+func (s *DARelayState) admitDAComplete(admission *DAAdmission, snapshot *daCompleteSnapshot) (daRelayAdmissionOutcome, error) {
+	prepared, err := prepareDACompleteSnapshot(snapshot, daRelayAdmissionOutcome{})
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	plan, err := s.prepareDACompleteCommit(admission, prepared)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	outcome, rejected, err := s.applyDACompleteCommit(admission, plan)
+	if err != nil {
+		return daRelayAdmissionOutcome{}, err
+	}
+	if rejected {
+		if outcome != (daRelayAdmissionOutcome{}) {
+			return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitRejected(errDARelayImageIncompatible.Error()), RelayAdmissionInternal)
+		}
+		return daRelayAdmissionOutcome{}, selectRelayDisposition(txAdmitUnavailable("DA COMPLETE_SET capacity rejected"), RelayAdmissionCapacity)
+	}
+	// The sole public caller rejects any other disposition as INTERNAL.
+	return outcome, nil
 }
 
 type daAdmissionObservationKind uint8
@@ -650,12 +683,21 @@ func sameDAAdmissionCandidate(left, right daRelayAdmissionCandidate) bool {
 func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRelayAdmissionPlan {
 	s.mu.Lock()
 	current, present := s.sets[candidate.member.locator.daID]
-	current = current.cloneOwnerReady()
-	s.mu.Unlock()
 
 	plan := daRelayAdmissionPlan{image: daRelayRecordImage{
 		daID: candidate.member.locator.daID, present: present, baseline: current.revision,
 	}}
+	if outcome, duplicate := s.duplicateDANonReplayLocked(candidate); duplicate {
+		plan.duplicate = &outcome
+	}
+	if plan.duplicate == nil && wouldCompleteDANonReplay(current, present, candidate) {
+		plan.wouldComplete = true
+		plan.complete, plan.stageErr = s.copyDACompleteSnapshotLocked(candidate)
+		s.mu.Unlock()
+		return plan
+	}
+	current = current.cloneOwnerReady()
+	s.mu.Unlock()
 	if present {
 		if err := current.checkDANonReplayPrior(candidate.member.locator.daID, s.mempool.pendingOutpoints); err != nil {
 			plan.stageErr = err
@@ -669,6 +711,41 @@ func (s *DARelayState) planDANonReplay(candidate daRelayAdmissionCandidate) daRe
 	plan.image, plan.victims = stageDANonReplayCandidate(current, present, candidate, s.caps.orphanTTLBlocks)
 	plan.wouldComplete = plan.image.next.completeByShape()
 	return plan
+}
+
+func wouldCompleteDANonReplay(current daRelaySetRecord, present bool, candidate daRelayAdmissionCandidate) bool {
+	if !present {
+		return false
+	}
+	locator := candidate.member.locator
+	count := daCompletingChunkCount(current, candidate)
+	if count == 0 || count > consensus.MAX_DA_CHUNK_COUNT {
+		return false
+	}
+	for index := uint16(0); index < count; index++ {
+		if locator.kind == daRelayLocatorChunk && index == locator.chunkIndex {
+			continue
+		}
+		if _, present := current.chunks[index]; !present {
+			return false
+		}
+	}
+	return true
+}
+
+func daCompletingChunkCount(current daRelaySetRecord, candidate daRelayAdmissionCandidate) uint16 {
+	locator := candidate.member.locator
+	switch locator.kind {
+	case daRelayLocatorCommit:
+		if current.state == daRelayStateOrphanChunks && current.commit.member == nil {
+			return candidate.chunkCount
+		}
+	case daRelayLocatorChunk:
+		if current.state == daRelayStateStagedCommit && current.commit.member != nil && locator.chunkIndex < current.commit.chunkCount {
+			return current.commit.chunkCount
+		}
+	}
+	return 0
 }
 
 // applyDANonReplayPlan implements RUBIN_COMPACT_BLOCKS.md section 18.3 and section 5.2. Postcondition: State B keeps

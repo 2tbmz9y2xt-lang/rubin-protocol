@@ -107,7 +107,7 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // schedules the prefetch once; DUPLICATE with conflict applies COMPETING_SCORE_V1 once; DUPLICATE without
 // conflict is the reachable neutral exit (exact/nonexact replay, occupied index); a zero/unknown
 // discriminator or RETAINED with the conflict flag — shapes publicDAAdmissionResult cannot emit — also exit
-// nil. AdmitDA refuses a set-completing member until RUB-1118 activates the COMPLETE_SET owner.
+// nil. A retained completing member reaches this same post-unlock scheduler path.
 func (p *peer) handleRelayDATx(txBytes []byte) error {
 	s := p.service
 	peerIdentity, quotaIdentity, provenance, ok := p.remoteDAProvenance()

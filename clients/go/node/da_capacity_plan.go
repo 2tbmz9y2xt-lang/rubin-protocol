@@ -7,8 +7,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// These scalar descriptors require canonical provenance from the future snapshot
-// owner. This dormant decision does not validate retained bodies or publish state.
+// These scalar descriptors require canonical provenance from the completion snapshot
+// owner. This decision does not validate retained bodies or publish state.
 type daCompleteCapacitySet struct {
 	id               [32]byte
 	fee              consensus.Uint128

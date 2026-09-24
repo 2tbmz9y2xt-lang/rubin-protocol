@@ -7,7 +7,7 @@ import (
 	"slices"
 )
 
-// The plan is exclusive, single-use scratch; public admission remains on the existing non-completing path.
+// The plan is exclusive, single-use scratch for completion admission.
 type daCompleteCommitPlan struct {
 	relay            *DARelayState
 	admission        *DAAdmission
