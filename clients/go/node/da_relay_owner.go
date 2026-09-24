@@ -202,6 +202,9 @@ func (s *DARelayState) admitDAComplete(admission *DAAdmission, snapshot *daCompl
 	if err != nil {
 		return daRelayAdmissionOutcome{}, err
 	}
+	if s.completeHook != nil {
+		s.completeHook(daCompletePlanned, plan)
+	}
 	outcome, rejected, err := s.applyDACompleteCommit(admission, plan)
 	if err != nil {
 		return daRelayAdmissionOutcome{}, err
@@ -253,7 +256,16 @@ type daAdmissionObservation struct {
 // AdmitDA admits txBytes using provenance. It returns a zero DAAdmissionResult on error and a retained or duplicate disposition on success.
 // A bound, parsed candidate with tx_nonce 0 returns the stable-terminal TX_ERR_TX_NONCE_INVALID rejection before any guard,
 // retained, cache or owner access (RUBIN_COMPACT_BLOCKS.md Section 5.1 item 3).
-func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (DAAdmissionResult, error) {
+func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
+	// Registered first so it runs last, after the admission hold is released.
+	defer func() {
+		if s == nil {
+			return
+		}
+		if observe := s.admitObserver.Load(); observe != nil {
+			(*observe)(daAdmitCall{provenance: provenance, result: result, err: err})
+		}
+	}()
 	var zero DAAdmissionResult
 	m, owner, err := s.bindDAAdmission()
 	if err != nil {
