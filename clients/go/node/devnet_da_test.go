@@ -133,8 +133,8 @@ func TestDevnetThreeNodeCanonicalDAAndRestart(t *testing.T) {
 		assertBlockContainsTxID(t, c, mined.Hash, txid)
 	}
 	assertSameTip(t, a, b, c)
-	before := snapshotNodeImage(t, c)
 	c.stop()
+	before := snapshotNodeImage(t, c)
 	oldStore := c.blockStore
 	reopened, err := node.OpenBlockStore(node.BlockStorePath(c.dir))
 	if err != nil {
