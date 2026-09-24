@@ -159,11 +159,11 @@ func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error
 	defer g.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
 	prepared, err := prepareDAAdmissionCommit(a, victims)
 	if err != nil {
-		return nil, txAdmitFromPendingOutpointError(err)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(err), relayDispositionForOwnerError(err))
 	}
 	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
 	if failed {
-		return nil, txAdmitFromPendingOutpointError(&failure)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(&failure), relayDispositionForOwnerError(&failure))
 	}
 	return commit, nil
 }
@@ -6918,10 +6918,11 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 			owner.endTransitionAborted()
 			f.state.admissionMu.Unlock()
 		}
-		release, acquired, proceed := write, make(chan struct{}), make(chan struct{})
+		acquired := make(chan struct{})
 		if registered {
 			f.state.admissionMu.RLock()
-			go func() { f.state.admissionMu.Lock(); close(acquired); <-proceed; write() }()
+			// Once registered and acquired, the lock is held for the test goroutine, which acts as the writer.
+			go func() { f.state.admissionMu.Lock(); close(acquired) }()
 			for f.state.admissionMu.TryRLock() { // a refused TryRLock under the held reader is the writer's registration
 				f.state.admissionMu.RUnlock()
 			}
@@ -6943,7 +6944,6 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 			}
 			f.state.admissionMu.RUnlock()
 			<-acquired
-			release = func() { close(proceed) }
 		}
 		select {
 		case got := <-done:
@@ -6951,7 +6951,7 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 		default:
 		}
 		requireDANonReplayUnchanged(t, f.relay, owner, relayBefore, ownerBefore)
-		return f, tx, done, release
+		return f, tx, done, write
 	}
 	join := func(t *testing.T, done chan outcome) outcome {
 		select {
@@ -6963,7 +6963,7 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 		}
 	}
 	for _, registered := range []bool{false, true} {
-		t.Run(fmt.Sprintf("registered behind reader=%t", registered), func(t *testing.T) {
+		t.Run(fmt.Sprintf("registered behind reader=%t post-wait context", registered), func(t *testing.T) {
 			f, tx, done, release := start(t, fmt.Sprintf("queued-%t", registered), registered)
 			generation := f.mp.pendingOutpoints.generation
 			release()
@@ -6977,16 +6977,17 @@ func TestAdmitDAAO12QueuedWriterPriority(t *testing.T) {
 				require(t, claim.txid == tx.txid && claim.generation == owner.generation, "claim=%+v, want the post-wait generation %d", claim, owner.generation)
 			}
 		})
+		t.Run(fmt.Sprintf("registered behind reader=%t terminal wakeup", registered), func(t *testing.T) {
+			f, _, done, release := start(t, fmt.Sprintf("terminal-%t", registered), registered)
+			relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), daRejectCacheImage(&f.relay.rejectCache)
+			f.state.admissionMu.notifyTerminal()
+			got := join(t, done)
+			requirePublicDAFailure(t, got.result, got.err, TxAdmitUnavailable, "pending-outpoint owner admission context unavailable", RelayAdmissionUnavailable)
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			require(t, reflect.DeepEqual(daRejectCacheImage(&f.relay.rejectCache), cacheBefore), "terminal waiter changed the reject cache")
+			release()
+		})
 	}
-	t.Run("terminal publication wakes the waiter", func(t *testing.T) {
-		f, _, done, _ := start(t, "queued-terminal", false)
-		relayBefore, ownerBefore, cacheBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints), daRejectCacheImage(&f.relay.rejectCache)
-		f.state.admissionMu.notifyTerminal()
-		got := join(t, done)
-		requirePublicDAFailure(t, got.result, got.err, TxAdmitUnavailable, "pending-outpoint owner admission context unavailable", RelayAdmissionUnavailable)
-		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
-		require(t, reflect.DeepEqual(daRejectCacheImage(&f.relay.rejectCache), cacheBefore), "terminal waiter changed the reject cache")
-	})
 }
 
 // TestAdmitDAAO12ReserveMixedFailures: every refusal row of the shared DA Reserve site wins over all lower rows with
@@ -7018,40 +7019,41 @@ func TestAdmitDAAO12ReserveMixedFailures(t *testing.T) {
 			owner.mu.Unlock()
 		}
 	}
-	restore := fail(3) // H3 through the public owner: exhaustion and an occupied input
-	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
-	got, err := f.relay.AdmitDA(tx.raw, publicPeer(t, "mixed"))
-	requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "pending-outpoint token sequence exhausted")
-	requireDANonReplayUnchanged(t, f.relay, owner, relayBefore, ownerBefore)
-	restore()
 	for row, want := range []struct {
-		kind    TxAdmitErrorKind
-		message string
+		kind        TxAdmitErrorKind
+		message     string
+		disposition RelayAdmissionDisposition
 	}{
-		{TxAdmitUnavailable, "pending-outpoint owner transition in progress"},
-		{TxAdmitUnavailable, "pending-outpoint expected tip mismatch"},
-		{TxAdmitUnavailable, "pending-outpoint expected generation mismatch"},
-		{TxAdmitUnavailable, "pending-outpoint token sequence exhausted"},
-		{TxAdmitConflict, conflict},
-		{TxAdmitUnavailable, "empty pending-outpoint input set"},
-		{TxAdmitUnavailable, fmt.Sprintf("duplicate pending-outpoint input txid=%x vout=%d", tx.inputs[0].Txid, tx.inputs[0].Vout)},
-		{TxAdmitUnavailable, "zero pending-outpoint txid"},
+		{TxAdmitUnavailable, "pending-outpoint owner transition in progress", RelayAdmissionUnavailable},
+		{TxAdmitUnavailable, "pending-outpoint expected tip mismatch", RelayAdmissionUnavailable},
+		{TxAdmitUnavailable, "pending-outpoint expected generation mismatch", RelayAdmissionUnavailable},
+		{TxAdmitUnavailable, "pending-outpoint token sequence exhausted", RelayAdmissionUnavailable},
+		{TxAdmitConflict, conflict, RelayAdmissionConflict},
+		{TxAdmitUnavailable, "empty pending-outpoint input set", RelayAdmissionInternal},
+		{TxAdmitUnavailable, fmt.Sprintf("duplicate pending-outpoint input txid=%x vout=%d", tx.inputs[0].Txid, tx.inputs[0].Vout), RelayAdmissionInternal},
+		{TxAdmitUnavailable, "zero pending-outpoint txid", RelayAdmissionInternal},
 	} {
-		admission := f.begin(tx)
-		switch row {
-		case 5:
-			admission.snapshot.Inputs = nil
-		case 6:
-			admission.snapshot.Inputs = append(slices.Clone(tx.inputs), tx.inputs[0])
-		case 7:
-			admission.snapshot.TxID = [32]byte{}
-		}
-		restore := fail(row % 5) // rows 5-7 set every Reserve refusal
-		ownerBefore := cloneDAAdmissionOwner(owner)
-		commit, err := admission.BeginCommit(nil)
-		require(t, commit == nil && reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore), "row %d reserved or changed the owner", row)
-		requirePublicDAFailure(t, DAAdmissionResult{}, err, want.kind, want.message)
-		restore()
-		admission.Close()
+		t.Run(fmt.Sprintf("row %d", row), func(t *testing.T) {
+			admission := f.begin(tx)
+			switch row {
+			case 5:
+				admission.snapshot.Inputs = nil
+			case 6:
+				admission.snapshot.Inputs = append(slices.Clone(tx.inputs), tx.inputs[0])
+			case 7:
+				admission.snapshot.TxID = [32]byte{}
+			}
+			defer fail(row % 5)() // rows 5-7 set every Reserve refusal
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(owner)
+			if row == 3 || row == 4 { // the public State A/B owner: H3 exhaustion with the occupied input, then the occupied input alone
+				got, err := f.relay.AdmitDA(tx.raw, LocalDAProvenance())
+				requirePublicDAFailure(t, got, err, want.kind, want.message, want.disposition)
+				requireDANonReplayUnchanged(t, f.relay, owner, relayBefore, ownerBefore)
+			}
+			commit, err := admission.BeginCommit(nil)
+			admission.Close()
+			require(t, commit == nil && reflect.DeepEqual(cloneDAAdmissionOwner(owner), ownerBefore), "row %d reserved or changed the owner", row)
+			requirePublicDAFailure(t, DAAdmissionResult{}, err, want.kind, want.message, want.disposition)
+		})
 	}
 }

@@ -285,11 +285,11 @@ func (a *DAAdmission) BeginCommit(victims []DAAdmissionVictim) (*DACommit, error
 	defer g.state.CompareAndSwap(daAdmissionAttempting, daAdmissionResolved)
 	prepared, err := prepareDAAdmissionCommit(a, victims)
 	if err != nil {
-		return nil, txAdmitFromPendingOutpointError(err)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(err), relayDispositionForOwnerError(err))
 	}
 	commit, failure, failed := reservePreparedDAAdmissionCommit(prepared)
 	if failed {
-		return nil, txAdmitFromPendingOutpointError(&failure)
+		return nil, selectRelayDisposition(txAdmitFromPendingOutpointError(&failure), relayDispositionForOwnerError(&failure))
 	}
 	return commit, nil
 }
