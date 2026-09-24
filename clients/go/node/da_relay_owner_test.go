@@ -4635,13 +4635,13 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			delete(before.locators, member.txid)
 			maps.DeleteFunc(ownerWant.byOutpoint, func(_ consensus.Outpoint, row pendingOutpointRow) bool { return row.token == member.token })
 		}
-		require(t, selector.run(f.relay) == nil, "%s selector failed", selector.name)
+		require(t, selector.run(f.relay) == nil, "State C cleanup ceased to be a successful no-op: %s selector failed", selector.name)
 		after := daRelayStateSnapshot(f.relay)
 		ownerReadyRecordAbsent(t, after, stateAID, stateA.txid)
 		ownerReadyRecordAbsent(t, after, stateBID, stateB.txid)
-		require(t, reflect.DeepEqual(after.sets[completeID], before.sets[completeID]) && reflect.DeepEqual(after.locators, before.locators) && after.completeBytes == before.completeBytes && after.completeCount == before.completeCount && after.pinnedPayloadBytes == before.pinnedPayloadBytes, "%s changed State C: before=%+v after=%+v", selector.name, before, after)
+		require(t, reflect.DeepEqual(after.sets[completeID], before.sets[completeID]) && reflect.DeepEqual(after.locators, before.locators) && after.completeBytes == before.completeBytes && after.completeCount == before.completeCount && after.pinnedPayloadBytes == before.pinnedPayloadBytes, "State C cleanup ceased to be a successful no-op: %s changed State C: before=%+v after=%+v", selector.name, before, after)
 		owner := cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-		require(t, reflect.DeepEqual(owner, ownerWant), "%s changed surviving owner claims: got=%+v want=%+v", selector.name, owner, ownerWant)
+		require(t, reflect.DeepEqual(owner, ownerWant), "cleanup changed surviving C claims: %s got=%+v want=%+v", selector.name, owner, ownerWant)
 	}
 	t.Run("ttl greater than one decrements and mints one revision", func(t *testing.T) {
 		f, daID := newDANonReplayFixture(t, 2), [32]byte{0xd7}
@@ -4890,7 +4890,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		before := daRelayStateSnapshot(f.relay)
 		for attempt := range [6]int{1, 1, 1, 1, 2, 1}[index] {
 			if err := run(f.relay); err != nil {
-				t.Fatalf("C-only row %d attempt %d: %v", index, attempt, err)
+				t.Fatalf("State C cleanup ceased to be a successful no-op: C-only row %d attempt %d: %v", index, attempt, err)
 			}
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		}
@@ -4911,7 +4911,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			f, id := newDANonReplayFixture(t, 2), [32]byte{0xc6}
 			f.completeReplayPinned(id)
 			f.mutateRelay(func(s *DARelayState) { row.corrupt(s, id) })
-			requireOwnerReadyTerminal(t, f, selector.run, row.detail, row.name+" "+selector.name)
+			requireOwnerReadyTerminal(t, f, selector.run, row.detail, "cleanup accepted inconsistent retained image: "+row.name+" "+selector.name)
 		}
 	}
 	type completeCorruptionTarget struct {
@@ -4919,50 +4919,56 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		record  *daRelaySetRecord
 		chunk   *daRelayChunk
 	}
+	const (
+		completeCleanupSentinel = iota
+		completeCleanupTerminal
+		completeCleanupNoop
+	)
 	for _, row := range []struct {
-		name      string
-		canonical bool
-		corrupt   func(completeCorruptionTarget)
+		name    string
+		cleanup int
+		corrupt func(completeCorruptionTarget)
 	}{
-		{"missing commit member", false, func(x completeCorruptionTarget) { x.record.commit.member = nil }},
-		{"missing chunk", false, func(x completeCorruptionTarget) { delete(x.record.chunks, 0) }},
-		{"wrong chunk count", false, func(x completeCorruptionTarget) { x.record.commit.chunkCount++ }},
-		{"commit role", false, func(x completeCorruptionTarget) {
+		{"missing commit member", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.commit.member = nil }},
+		{"missing chunk", completeCleanupSentinel, func(x completeCorruptionTarget) { delete(x.record.chunks, 0) }},
+		{"wrong chunk count", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.commit.chunkCount++ }},
+		{"commit role", completeCleanupNoop, func(x completeCorruptionTarget) {
 			x.record.commit.txBytes, x.chunk.txBytes = slices.Clone(x.chunk.txBytes), slices.Clone(x.record.commit.txBytes)
 			x.record.commit.member, x.chunk.member = x.chunk.member, x.record.commit.member
 			x.fixture.relay.locators[x.record.commit.member.txid], x.fixture.relay.locators[x.chunk.member.txid] = daRelayLocator{daID: x.record.daID, kind: daRelayLocatorCommit}, daRelayLocator{daID: x.record.daID, kind: daRelayLocatorChunk}
 		}},
-		{"noncanonical retained bytes", false, func(x completeCorruptionTarget) { x.chunk.txBytes = []byte{1} }},
-		{"foreign chunk da_id", false, func(x completeCorruptionTarget) {
+		{"noncanonical retained bytes", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.txBytes = []byte{1} }},
+		{"same-length retained-byte corruption", completeCleanupNoop, func(x completeCorruptionTarget) { x.chunk.txBytes[len(x.chunk.txBytes)-1] ^= 0xff }},
+		{"foreign chunk da_id", completeCleanupNoop, func(x completeCorruptionTarget) {
 			tx := x.fixture.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xfe}, payload: []byte("complete")})
 			replaceOwnerReadyMember(x.fixture, x.fixture.relay, x.chunk.member, &x.chunk.txBytes, tx, daRelayLocator{daID: x.record.daID, kind: daRelayLocatorChunk})
 		}},
-		{"wrong cached txid", false, func(x completeCorruptionTarget) { x.chunk.member.txid[0] ^= 0xff }},
-		{"wrong cached wtxid", false, func(x completeCorruptionTarget) { x.chunk.member.wtxid[0] ^= 0xff }},
-		{"wrong cached inputs", false, func(x completeCorruptionTarget) {
+		{"wrong cached txid", completeCleanupTerminal, func(x completeCorruptionTarget) { x.chunk.member.txid[0] ^= 0xff }},
+		{"wrong cached wtxid", completeCleanupNoop, func(x completeCorruptionTarget) { x.chunk.member.wtxid[0] ^= 0xff }},
+		{"wrong cached inputs", completeCleanupSentinel, func(x completeCorruptionTarget) {
 			x.chunk.member.inputs = slices.Clone(x.chunk.member.inputs)
 			x.chunk.member.inputs[0].Vout++
 		}},
-		{"zero member txid", false, func(x completeCorruptionTarget) { x.chunk.member.txid = [32]byte{} }},
-		{"missing member inputs", false, func(x completeCorruptionTarget) { x.chunk.member.inputs = nil }},
-		{"invalid member provenance", false, func(x completeCorruptionTarget) { x.chunk.member.provenance = daProvenance{} }},
-		{"zero member token", false, func(x completeCorruptionTarget) { x.chunk.member.token = PendingOutpointToken{} }},
-		{"foreign member token owner", false, func(x completeCorruptionTarget) { x.chunk.member.token.owner = &PendingOutpointOwner{} }},
-		{"wrong cached chunk index", false, func(x completeCorruptionTarget) { x.chunk.chunkIndex = 1 }},
-		{"wrong cached chunk da_id", false, func(x completeCorruptionTarget) { x.chunk.daID[0] ^= 0xff }},
-		{"wrong payload hash", false, func(x completeCorruptionTarget) { x.chunk.chunkHash[0] ^= 0xff }},
-		{"wrong payload bytes", false, func(x completeCorruptionTarget) { x.record.payloadBytes++ }},
-		{"wrong commitment", false, func(x completeCorruptionTarget) { x.record.commit.payloadCommitment[0] ^= 0xff }},
-		{"record wire residue", false, func(x completeCorruptionTarget) { x.record.wireBytes = 1 }},
-		{"chunk payload residue", false, func(x completeCorruptionTarget) { x.chunk.payload = []byte{} }},
-		{"chunk wire residue", false, func(x completeCorruptionTarget) { x.chunk.wireBytes = 1 }},
-		{"chunk hash-check residue", false, func(x completeCorruptionTarget) { x.chunk.hashChecked = true }},
-		{"replaceable residue", false, func(x completeCorruptionTarget) { x.record.replaceableChunks = map[uint16]bool{} }},
-		{"nonzero C ttl", false, func(x completeCorruptionTarget) { x.record.ttlBlocksRemaining = 1 }},
-		{"zero revision", false, func(x completeCorruptionTarget) { x.record.revision = 0 }},
-		{"zero accepted sequence", false, func(x completeCorruptionTarget) { x.record.receivedTime = 0 }},
-		{"revision above high-water", true, func(x completeCorruptionTarget) { x.record.revision = ^uint64(0) }},
-		{"accepted sequence above high-water", true, func(x completeCorruptionTarget) {
+		{"zero member txid", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.member.txid = [32]byte{} }},
+		{"missing member inputs", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.member.inputs = nil }},
+		{"invalid member provenance", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.member.provenance = daProvenance{} }},
+		{"zero member token", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.member.token = PendingOutpointToken{} }},
+		{"foreign member token owner", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.member.token.owner = &PendingOutpointOwner{} }},
+		{"wrong cached chunk index", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.chunkIndex = 1 }},
+		{"wrong cached chunk da_id", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.daID[0] ^= 0xff }},
+		{"wrong payload hash", completeCleanupNoop, func(x completeCorruptionTarget) { x.chunk.chunkHash[0] ^= 0xff }},
+		{"wrong payload bytes", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.payloadBytes++ }},
+		{"wrong commitment", completeCleanupNoop, func(x completeCorruptionTarget) { x.record.commit.payloadCommitment[0] ^= 0xff }},
+		{"record wire residue", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.wireBytes = 1 }},
+		{"chunk payload residue", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.payload = []byte{} }},
+		{"chunk wire residue", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.wireBytes = 1 }},
+		{"chunk hash-check residue", completeCleanupSentinel, func(x completeCorruptionTarget) { x.chunk.hashChecked = true }},
+		{"replaceable residue", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.replaceableChunks = map[uint16]bool{} }},
+		{"nonzero C ttl", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.ttlBlocksRemaining = 1 }},
+		{"zero revision", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.revision = 0 }},
+		{"zero accepted sequence", completeCleanupSentinel, func(x completeCorruptionTarget) { x.record.receivedTime = 0 }},
+		{"revision above high-water", completeCleanupTerminal, func(x completeCorruptionTarget) { x.record.revision = ^uint64(0) }},
+		{"accepted sequence above high-water", completeCleanupTerminal, func(x completeCorruptionTarget) {
 			x.record.receivedTime, x.record.completeIntrinsic.receivedSequence = ^uint64(0), ^uint64(0)
 		}},
 	} {
@@ -4978,10 +4984,31 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 					}
 				})
 			})
-			if row.canonical {
-				requireOwnerReadyTerminal(t, f, selector.run, "above the high-water", row.name+" "+selector.name)
-			} else {
+			if row.name != "zero member token" && row.name != "foreign member token owner" {
+				_, err := validateCanonicalDARetainedSnapshot(f.relay, f.mp.pendingOutpoints)
+				var terminal *canonicalDATerminalError
+				if !errors.As(err, &terminal) {
+					t.Fatalf("%s canonical err=%v, want canonical terminal", row.name, err)
+				}
+			}
+			switch row.cleanup {
+			case completeCleanupTerminal:
+				detail := "above the high-water"
+				if row.name == "wrong cached txid" {
+					detail = "is not the sole locator"
+				}
+				requireOwnerReadyTerminal(t, f, selector.run, detail, row.name+" "+selector.name)
+			case completeCleanupSentinel:
 				requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, row.name+" "+selector.name)
+			case completeCleanupNoop:
+				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+				if err := checkOwnerReadyRetainedRecordLocked(before.sets[id]); !errors.Is(err, errDARelayImageIncompatible) {
+					t.Fatalf("%s canonical err=%v, want %v", row.name, err, errDARelayImageIncompatible)
+				}
+				if err := selector.run(f.relay); err != nil {
+					t.Fatalf("%s cleanup on the %s: %v", row.name, selector.name, err)
+				}
+				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 			}
 		}
 	}
@@ -5022,7 +5049,7 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 			f.completeReplayPinned(id)
 			record := daRelayStateSnapshot(f.relay).sets[id]
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) { row.corrupt(claimCorruptionTarget{o, record}) })
-			requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, row.name+" "+selector.name)
+			requireOwnerReadySentinel(t, f, selector.run, errDARelayImageIncompatible, "cleanup accepted inconsistent C claims: "+row.name+" "+selector.name)
 		}
 	}
 	for _, role := range []string{"commit", "chunk"} {
