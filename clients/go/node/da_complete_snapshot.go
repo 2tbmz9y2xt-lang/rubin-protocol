@@ -8,7 +8,7 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
 
-// This dormant producer requires an open, same-relay canonical DAAdmission and
+// Completion capture requires an open, same-relay canonical DAAdmission and
 // its continuously held ChainState guard. It neither acquires nor ends that guard.
 // Tokens below are opaque identities; their live claims belong to the effect owner.
 type daCompleteSnapshot struct {

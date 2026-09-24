@@ -1398,7 +1398,7 @@ func TestDevnetRPCSubmitTxMapsDAOwnerOutcomes(t *testing.T) {
 		{"wrapped conflict dominates duplicate", duplicate, fmt.Errorf("wrapped: %w", conflict("conflict")), nil, true, true, 409, "conflict", "wrapped: conflict", false, false},
 		{"direct unavailable dominates zero", node.DAAdmissionResult{}, unavailable("direct unavailable"), nil, true, true, 503, "unavailable", "direct unavailable", false, false},
 		{"wrapped unavailable dominates unknown", unknown, fmt.Errorf("wrapped: %w", unavailable("unavailable")), nil, true, true, 503, "unavailable", "wrapped: unavailable", false, false},
-		{"capacity unavailable", retained, unavailable("DA COMPLETE_SET capacity owner is not active"), nil, true, true, 503, "unavailable", "DA COMPLETE_SET capacity owner is not active", false, false},
+		{"capacity unavailable", retained, unavailable("DA COMPLETE_SET capacity rejected"), nil, true, true, 503, "unavailable", "DA COMPLETE_SET capacity rejected", false, false},
 		{"direct rejected", retained, rejected("direct rejected"), nil, true, true, 422, "rejected", "direct rejected", false, false},
 		{"wrapped rejected", duplicate, fmt.Errorf("wrapped: %w", rejected("rejected")), nil, true, true, 422, "rejected", "wrapped: rejected", false, false},
 		{"other error", retained, errors.New("owner failure"), nil, true, true, 422, "rejected", "owner failure", false, false},
@@ -1475,15 +1475,30 @@ func TestDevnetRPCSubmitTxMapsDAOwnerOutcomes(t *testing.T) {
 			}
 			beforeLen, beforeCounts := s.mempool.Len(), s.mempool.AdmissionCounts()
 			status, got, body := postRPCSubmit(t, handler, completing)
-			if status != 503 || got.Accepted || got.TxID != "" || got.Error != "DA COMPLETE_SET capacity owner is not active" || bytes.Contains(body, []byte(`"txid"`)) {
-				t.Fatalf("completion=%d %s, want exact 503 capacity-unavailable", status, body)
+			if row.commitFirst && row.existingPayload != row.completingPayload {
+				if status != 422 || got.Accepted || got.TxID != "" || got.Error != "da payload commitment mismatch" || bytes.Contains(body, []byte(`"txid"`)) {
+					t.Fatalf("chunk-last mismatch=%d %s, want exact 422 rejection", status, body)
+				}
+			} else {
+				_, txid, _, consumed, parseErr := consensus.ParseTx(completing)
+				if parseErr != nil || consumed != len(completing) || status != 200 || !got.Accepted || got.TxID != fmt.Sprintf("%x", txid) || got.Error != "" {
+					t.Fatalf("retained completion=%d %s, want exact 200 accepted", status, body)
+				}
 			}
-			if prefetches != 1 || s.mempool.Len() != beforeLen || s.mempool.AdmissionCounts() != beforeCounts {
+			wantPrefetches := 2
+			if row.commitFirst && row.existingPayload != row.completingPayload {
+				wantPrefetches = 1
+			}
+			if prefetches != wantPrefetches || s.mempool.Len() != beforeLen || s.mempool.AdmissionCounts() != beforeCounts {
 				t.Fatalf("completion effects: prefetch=%d mempool=%d/%d counts=%+v/%+v", prefetches, s.mempool.Len(), beforeLen, s.mempool.AdmissionCounts(), beforeCounts)
 			}
 			_, submits := s.metrics.snapshot()
-			if submits["accepted"] != 1 || submits["unavailable"] != 1 {
-				t.Fatalf("metrics=%v, want accepted=1 unavailable=1", submits)
+			if row.commitFirst && row.existingPayload != row.completingPayload {
+				if submits["accepted"] != 1 || submits["rejected"] != 1 {
+					t.Fatalf("chunk-last metrics=%v", submits)
+				}
+			} else if submits["accepted"] != 2 || submits["unavailable"] != 0 {
+				t.Fatalf("retained completion metrics=%v", submits)
 			}
 		})
 	}

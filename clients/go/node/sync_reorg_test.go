@@ -2571,19 +2571,11 @@ func stageCanonicalStateCFromBlock(t *testing.T, f *canonicalDATestFixture, bloc
 	if len(commit) == 0 || daID != daRelayTestID(0x01) {
 		t.Fatalf("State C block commit da_id=%x bytes=%d", daID, len(commit))
 	}
-	mp := f.engine.mempool
-	admission := mustDAAdmission(t, mp, commit)
-	defer admission.Close()
-	candidate, err := admission.renderDARelayAdmissionCandidate(LocalDAProvenance())
-	if err != nil {
-		t.Fatalf("render State C candidate: %v", err)
-	}
-	wrapper := &daNonReplayFixture{t: t, state: f.engine.chainState, mp: mp, relay: f.engine.DARelayState()}
-	plan, _ := daCompleteCommitTestPlan(t, wrapper, admission, candidate)
-	daCompleteCommitTestApply(t, wrapper, admission, plan)
-	record := wrapper.relay.sets[daID]
-	if record.state != daRelayStateCompleteSet || wrapper.relay.completeCount != 1 || wrapper.relay.completeBytes == 0 || wrapper.relay.pinnedPayloadBytes == 0 {
-		t.Fatalf("staged State C record=%+v accounting=(%d,%d,%d)", record, wrapper.relay.completeBytes, wrapper.relay.completeCount, wrapper.relay.pinnedPayloadBytes)
+	relay := f.engine.DARelayState()
+	admitOwnerReady(t, relay, commit)
+	record := relay.sets[daID]
+	if record.state != daRelayStateCompleteSet || relay.completeCount != 1 || relay.completeBytes == 0 || relay.pinnedPayloadBytes == 0 {
+		t.Fatalf("staged State C record=%+v accounting=(%d,%d,%d)", record, relay.completeBytes, relay.completeCount, relay.pinnedPayloadBytes)
 	}
 	return record.cloneOwnerReady()
 }
@@ -4467,8 +4459,7 @@ func TestReorgDARoutingOrderAndBestEffort(t *testing.T) {
 			} else if i%2 == 0 {
 				require(t, got.err == nil && got.result == (DAAdmissionResult{DAID: ids[1-i/2], Disposition: DAAdmissionRetained}), "reorg owner events mismatch: commit result=%+v err=%v", got.result, got.err)
 			} else {
-				var refusal *TxAdmitError
-				require(t, errors.As(got.err, &refusal) && refusal.Kind == TxAdmitUnavailable && refusal.Message == "DA COMPLETE_SET capacity owner is not active" && got.result == (DAAdmissionResult{}), "reorg owner events mismatch: chunk result=%+v err=%v", got.result, got.err)
+				require(t, got.err == nil && got.result == (DAAdmissionResult{DAID: ids[1-i/2], Disposition: DAAdmissionRetained}), "reorg owner events mismatch: chunk result=%+v err=%v", got.result, got.err)
 			}
 		}
 	}
@@ -4480,9 +4471,9 @@ func TestReorgDARoutingOrderAndBestEffort(t *testing.T) {
 		got, ok := mp.TxByID(txID(t, raw))
 		require(t, ok && bytes.Equal(got, raw), "unexpected standard residency: exact raw/txid missing")
 		record := daRelayStateSnapshot(owner).sets[ids[i]]
-		require(t, bytes.Equal(record.commit.txBytes, da[i][0]) && record.commit.member.txid == txID(t, da[i][0]) && len(record.chunks) == 0, "reorg owner events mismatch: retained commit or unavailable chunk state")
+		require(t, record.state == daRelaySetState(2) && bytes.Equal(record.commit.txBytes, da[i][0]) && record.commit.member.txid == txID(t, da[i][0]) && len(record.chunks) == 1 && bytes.Equal(record.chunks[0].txBytes, da[i][1]), "reorg owner events mismatch: full State C image")
 	}
-	require(t, diagnostics.String() == "da relay: requeue-tx: 2 failures; first: DA COMPLETE_SET capacity owner is not active\n", "reorg owner events mismatch: diagnostics=%q", diagnostics.String())
+	require(t, diagnostics.String() == "", "reorg owner events mismatch: diagnostics=%q", diagnostics.String())
 }
 
 func TestReorgDARoutingCapturedOwners(t *testing.T) {
@@ -4752,8 +4743,8 @@ func TestReorgDADiagnosticsAggregate(t *testing.T) {
 						require(t, err == nil && result.Disposition == DAAdmissionRetained, "diagnostic prefix was not retained: %+v %v", result, err)
 						return func(run bool) { cleanup = append(cleanup, run) }, nil
 					}
-					require(t, result == (DAAdmissionResult{}) && err != nil && err.Error() == "DA COMPLETE_SET capacity owner is not active", "diagnostic prefix was not real refusal: %+v %v", result, err)
-					return nil, err
+					require(t, result.Disposition == DAAdmissionRetained && err == nil, "diagnostic prefix was not retained: %+v %v", result, err)
+					return func(bool) {}, nil
 				}
 			}
 			var diagnostics bytes.Buffer
@@ -4766,7 +4757,7 @@ func TestReorgDADiagnosticsAggregate(t *testing.T) {
 			require(t, f.engine.chainState.TipHash == fork.prevHash && f.engine.chainState.Height == fork.height-1, "diagnostic requeue changed committed tip")
 			if tc.panicAdmission {
 				require(t, recovered == sentinel && calls == 3 && reflect.DeepEqual(cleanup, []bool{false}), "diagnostic panic cleanup: panic=%v calls=%d cleanup=%v", recovered, calls, cleanup)
-				require(t, diagnostics.String() == "da relay: requeue-tx: DA COMPLETE_SET capacity owner is not active\n", "production traversal lost panic-prefix summary: %q", diagnostics.String())
+				require(t, diagnostics.String() == "", "production traversal emitted a diagnostic before panic: %q", diagnostics.String())
 				require(t, bytes.Equal(daRelayStateSnapshot(owner).sets[[32]byte{0xe1}].commit.txBytes, rows[0]), "diagnostic panic lost retained prefix")
 				return
 			}
