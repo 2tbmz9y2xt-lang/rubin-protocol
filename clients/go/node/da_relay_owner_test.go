@@ -7099,6 +7099,14 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 	commit := daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0xc1}, chunkCount: 2, commitment: [32]byte{0xc2}, commitmentOutputs: 1}
 	chunk := daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xc3}, payload: []byte("zero-input")}
 	badHash := daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xc4}, payload: []byte("zero-input-hash"), literalChunkHash: true, chunkHash: [32]byte{0xff}}
+	requireReleasedAndAdmissible := func(t *testing.T, f *daNonReplayFixture) {
+		t.Helper()
+		require(t, f.state.admissionMu.TryLock(), "guard leaked")
+		f.state.admissionMu.Unlock()
+		valid := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xc5}, payload: []byte("follow-on")})
+		got, err := f.relay.AdmitDA(valid.raw, peer)
+		requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: valid.spec.daID, Disposition: DAAdmissionRetained})
+	}
 	simplicity := commit
 	simplicity.extraOutputs = []consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_CORE_SIMPLICITY, CovenantData: simplicityCovenantDataForNodeTest([32]byte{0x53}, nil)}}
 	for name, row := range map[string]struct {
@@ -7123,16 +7131,13 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 			}
 			require(t, reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), inserted), "repeat, LOCAL or DETACHED_REORG changed the cache")
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
-			require(t, f.state.admissionMu.TryLock(), "guard leaked")
-			f.state.admissionMu.Unlock()
-			valid := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0xc5}, payload: []byte("follow-on")})
-			got, err = f.relay.AdmitDA(valid.raw, peer)
-			requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: valid.spec.daID, Disposition: DAAdmissionRetained})
+			requireReleasedAndAdmissible(t, f)
 		})
 	}
-	t.Run("ineligible PEER profile bypasses the cache", func(t *testing.T) {
+	t.Run("ineligible PEER profile bypasses lookup and insertion", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := zeroInputs(f, chunk)
+		f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid) // a lookup would hit this row
 		f.mp.mu.Lock()
 		f.mp.policy.RotationProvider = &daRejectTestRotation{}
 		f.mp.mu.Unlock()
@@ -7141,35 +7146,41 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 		requirePublicDAFailure(t, got, err, TxAdmitRejected, daZeroInputParseMessage, RelayAdmissionStableTerminalReject)
 		require(t, reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore), "ineligible profile changed the cache")
 	})
-	// Each earlier authority wins over the wrong own-chunk hash and a seeded same-context cache row, which stays unchanged.
+	hashMismatch := func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
+		require(t, errors.Is(err, ErrDARelayChunkHashMismatch), "err=%v, want the hash sentinel", err)
+		requirePublicDAFailure(t, got, err, TxAdmitRejected, "DA chunk payload hash mismatch", RelayAdmissionStableTerminalReject)
+	}
+	// Each earlier authority wins over the wrong own-chunk hash and a seeded same-context cache row, which stays unchanged;
+	// the unseeded hash row shows that the hash refusal inserts nothing.
 	for _, row := range []struct {
-		name  string
-		setup func(*daNonReplayFixture, daNonReplayTx)
-		check func(*testing.T, *daNonReplayFixture, DAAdmissionResult, error)
+		name     string
+		setup    func(*daNonReplayFixture, daNonReplayTx)
+		check    func(*testing.T, *daNonReplayFixture, DAAdmissionResult, error)
+		unseeded bool
 	}{
-		{"wrong own-chunk hash", nil, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
-			require(t, errors.Is(err, ErrDARelayChunkHashMismatch), "err=%v, want the hash sentinel", err)
-			requirePublicDAFailure(t, got, err, TxAdmitRejected, "DA chunk payload hash mismatch", RelayAdmissionStableTerminalReject)
-		}},
+		{"wrong own-chunk hash", nil, hashMismatch, false},
+		{"wrong own-chunk hash, no seeded row", nil, hashMismatch, true},
 		{"located invalid evidence", func(f *daNonReplayFixture, tx daNonReplayTx) {
 			f.mutateRelay(func(s *DARelayState) {
 				s.locators[tx.txid] = daRelayLocator{daID: [32]byte{0xc6}, kind: daRelayLocatorChunk}
 			})
-		}, requirePublicDAInternal},
+		}, requirePublicDAInternal, false},
 		{"unavailable owner", func(f *daNonReplayFixture, _ daNonReplayTx) { f.mutateRelay(func(s *DARelayState) { s.sets = nil }) }, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
 			requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "DA relay owner maps unavailable", RelayAdmissionUnavailable)
-		}},
+		}, false},
 		{"terminal guard", func(f *daNonReplayFixture, _ daNonReplayTx) {
 			f.state.admissionMu.Lock()
 			f.state.admissionMu.notifyTerminal()
 		}, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
 			requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "pending-outpoint owner admission context unavailable", RelayAdmissionUnavailable)
-		}},
+		}, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			f := newDANonReplayFixture(t, 1)
+			f := newDANonReplayFixture(t, 2)
 			tx := zeroInputs(f, badHash)
-			f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid)
+			if !row.unseeded {
+				f.relay.rejectCache.insert(daRejectContext(t, f), tx.wtxid)
+			}
 			if row.setup != nil {
 				row.setup(f, tx)
 			}
@@ -7178,6 +7189,14 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 			row.check(t, f, got, err)
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
 			require(t, reflect.DeepEqual(snapshotDARejectCache(&f.relay.rejectCache), cacheBefore), "cache changed")
+			if row.name != "terminal guard" { // restore the injected owner maps, then require a released guard and a live owner
+				f.mutateRelay(func(s *DARelayState) {
+					if s.sets == nil {
+						s.sets = map[[32]byte]daRelaySetRecord{}
+					}
+				})
+				requireReleasedAndAdmissible(t, f)
+			}
 		})
 	}
 	for _, registered := range []bool{false, true} {

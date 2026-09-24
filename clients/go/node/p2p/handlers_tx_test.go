@@ -981,7 +981,7 @@ func TestAnnounceTxRejectsInvalidAdmittedPoolBytes(t *testing.T) {
 		txBytes []byte
 		want    string
 		// daArm: the submitted kind leaves for the DA owner, which refuses this zero-input
-		// candidate with its own message before the poisoned static pool is ever read.
+		// candidate through ordinary validation before the poisoned static pool is ever read.
 		daArm bool
 	}{
 		{

@@ -596,9 +596,8 @@ func TestRemoteDAResultEffects(t *testing.T) {
 	// ALREADY_TERMINAL on a genuinely latched engine: the fixture UTXO and the signed DA bytes are
 	// prepared on the fresh harness BEFORE the latch-producing ApplyBlock, and the UTXO set is
 	// snapshotted before that ApplyBlock and pinned unchanged after the last latched row; each row
-	// observes bounded completion, the quota key free and no scheduler entry (the valid row reaches the
-	// owner's terminal UNAVAILABLE); the valid and over-bound-identity rows leave the peer untouched,
-	// while malformed bytes keep their earlier +10 refusal ahead of the owner.
+	// observes bounded completion, the quota key free and no scheduler entry; the valid and over-bound-identity
+	// rows leave the peer untouched, while malformed bytes keep their earlier +10 refusal.
 	lh := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	lf := newDAIngressFixture(t, lh)
 	lp, wide := daRelayTestPeer(lh, "127.0.0.1:19113"), daRelayTestPeer(lh, strings.Repeat("a", 255)+":12345678")
@@ -1669,7 +1668,7 @@ func TestDAIngressZeroInputOrderAndEffects(t *testing.T) {
 	for _, row := range []struct {
 		label string
 		peer  *peer
-	}{{"requested", p}, {"unsolicited", stranger}, {"requested again, nothing cached", p}} {
+	}{{"requested", p}, {"unsolicited", stranger}, {"requested again", p}} {
 		before := effectsOf(row.peer)
 		require(t, row.peer.handleTx(badHash) == nil && effectsOf(row.peer) == peerEffects{before.ban + 10, "da chunk hash mismatch", before.score, before.anchor}, "%s wrong hash: peer effects %+v -> %+v", row.label, before, effectsOf(row.peer))
 	}
