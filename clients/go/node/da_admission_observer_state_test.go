@@ -1082,28 +1082,31 @@ func daNodeObserverStateCandidateMatches(image DAObserverStateImage, candidate d
 	if !ok || member.WTxID != candidate.WTxID || member.Fee != candidate.Fee || member.Provenance != daObserverProvenance(candidate.Provenance) || !reflect.DeepEqual(member.Inputs, candidate.Inputs) || !bytes.Equal(raw, candidate.Raw) {
 		return false
 	}
-	for _, claim := range image.Claims {
-		if claim.TxID == candidate.TxID {
-			if claim.Domain != "DA" || !claim.Finalized || claim.TokenSeq != member.TokenSeq || !reflect.DeepEqual(claim.Inputs, candidate.Inputs) {
-				return false
-			}
-			kind := "CHUNK"
-			if candidate.Key.MemberOrdinal == 0 {
-				kind = "COMMIT"
-			}
-			locatorCount := 0
-			for _, locator := range image.Locators {
-				if locator.TxID == candidate.TxID {
-					locatorCount++
-					if locator.DAID != candidate.DAID || locator.Kind != kind || locator.ChunkIndex != candidate.ChunkIndex {
-						return false
-					}
-				}
-			}
-			return locatorCount == 1
-		}
+	claims := slices.DeleteFunc(slices.Clone(image.Claims), func(row DAObserverClaim) bool {
+		return row.TxID != candidate.TxID && row.TokenSeq != member.TokenSeq
+	})
+	if len(claims) != 1 {
+		return false
 	}
-	return false
+	claim := claims[0]
+	if claim.TxID != candidate.TxID || claim.Domain != "DA" || !claim.Finalized || claim.TokenSeq != member.TokenSeq || !reflect.DeepEqual(claim.Inputs, candidate.Inputs) {
+		return false
+	}
+	kind := "CHUNK"
+	if candidate.Key.MemberOrdinal == 0 {
+		kind = "COMMIT"
+	}
+	locators := slices.DeleteFunc(slices.Clone(image.Locators), func(row DAObserverLocator) bool {
+		return row.TxID != candidate.TxID
+	})
+	outpoints := slices.DeleteFunc(slices.Clone(image.OutpointRows), func(row DAObserverOutpointRow) bool {
+		return row.TxID != candidate.TxID && row.TokenSeq != member.TokenSeq
+	})
+	want := make([]DAObserverOutpointRow, len(candidate.Inputs))
+	for i, input := range candidate.Inputs {
+		want[i] = DAObserverOutpointRow{Outpoint: input, TokenSeq: member.TokenSeq, TxID: candidate.TxID}
+	}
+	return slices.Equal(locators, []DAObserverLocator{{TxID: candidate.TxID, DAID: candidate.DAID, Kind: kind, ChunkIndex: candidate.ChunkIndex}}) && slices.Equal(outpoints, want)
 }
 
 func daNodeObserverStateSurvivorsEqual(before, after DAObserverStateImage, removedRecords, removedMembers [][32]byte) bool {
@@ -1719,9 +1722,7 @@ func TestDAAdmissionObserverNodeStateIsolation(t *testing.T) {
 	poisoned, err := poisonDANodeObserverExpectations(raw)
 	require(t, err == nil, "observer state: %v", err)
 	actual, err := collectDANodeObserverState(poisoned)
-	if err != nil || !bytes.Equal(actual, baseline) {
-		t.Fatalf("observer state expected isolation: %v", err)
-	}
+	require(t, err == nil && bytes.Equal(actual, baseline), "observer state expected isolation: %v", err)
 }
 
 func TestDAAdmissionObserverNodeStateReachability(t *testing.T) {
@@ -1761,9 +1762,7 @@ func TestDAAdmissionObserverNodeStateReachability(t *testing.T) {
 			delete(actual.Actual, "follow_up")
 			left, _ := json.Marshal(baseline)
 			right, _ := json.Marshal(actual)
-			if err != nil || bytes.Equal(left, right) {
-				t.Fatalf("observer state input reachability: %s: %v", row.Case.ID, err)
-			}
+			require(t, err == nil && !bytes.Equal(left, right), "observer state input reachability: %s: %v", row.Case.ID, err)
 		})
 	}
 }
@@ -1789,9 +1788,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			row.ID = "UNKNOWN_STATE_CASE"
 			bad.Cases[0], _ = json.Marshal(row)
 		}
-		if _, err := selectDANodeObserverStateCases(bad); err == nil || !strings.Contains(err.Error(), "observer census") {
-			t.Fatalf("observer state integrity census %d: %v", mode, err)
-		}
+		_, err := selectDANodeObserverStateCases(bad)
+		require(t, err != nil && strings.Contains(err.Error(), "observer census"), "observer state integrity census %d: %v", mode, err)
 	}
 	for _, field := range []string{"execution_boundary", "construction_ref", "case_ordinal", "accepted_sequence", "follow_up"} {
 		for _, value := range []string{"null", `"UNKNOWN"`, `"-1"`, `"18446744073709551616"`} {
@@ -1799,9 +1797,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			_ = json.Unmarshal(cases[0].Case.Input, &input)
 			input[field] = json.RawMessage(value)
 			raw, _ := json.Marshal(input)
-			if _, err := validateDANodeObserverStateInput(cases[0].Case.ID, raw); err == nil || !strings.Contains(err.Error(), "observer input") {
-				t.Fatalf("observer state integrity %s=%s: %v", field, value, err)
-			}
+			_, err := validateDANodeObserverStateInput(cases[0].Case.ID, raw)
+			require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity %s=%s: %v", field, value, err)
 		}
 	}
 	for _, row := range cases[:11] {
@@ -1812,9 +1809,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			_ = json.Unmarshal(row.Input.Control, &bad)
 			delete(bad, field)
 			raw, _ := json.Marshal(bad)
-			if _, err := validateDANodeObserverStateControl(raw); err == nil {
-				t.Fatalf("observer state integrity missing control.%s in %s", field, row.Case.ID)
-			}
+			_, err := validateDANodeObserverStateControl(raw)
+			require(t, err != nil, "observer state integrity missing control.%s in %s", field, row.Case.ID)
 		}
 	}
 	for _, field := range []string{"class_ordinal", "resident_ordinal", "member_ordinal"} {
@@ -1825,9 +1821,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		delete(member, field)
 		control["member"], _ = json.Marshal(member)
 		raw, _ := json.Marshal(control)
-		if _, err := validateDANodeObserverStateControl(raw); err == nil {
-			t.Fatalf("observer state integrity missing member.%s", field)
-		}
+		_, err := validateDANodeObserverStateControl(raw)
+		require(t, err != nil, "observer state integrity missing member.%s", field)
 	}
 	for _, raw := range []string{
 		`{"phase":"UNKNOWN","action":"NONE"}`, `{"phase":"NONE","action":"UNKNOWN"}`,
@@ -1837,9 +1832,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		`{"phase":"PLANNED","action":"CORRUPT_RESIDENT_LOCATOR_DA_ID","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true,"locator_da_id":"zz"}`,
 		`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"18446744073709551616"}`,
 	} {
-		if _, err := validateDANodeObserverStateControl([]byte(raw)); err == nil {
-			t.Fatalf("observer state integrity accepted control %s", raw)
-		}
+		_, err := validateDANodeObserverStateControl([]byte(raw))
+		require(t, err != nil, "observer state integrity accepted control %s", raw)
 	}
 	for _, raw := range []string{`[{"source":"UNKNOWN"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, `[{"source":"PEER"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, `[{"source":"LOCAL","peer_identity":"x"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`} {
 		if _, err := parseDANodeObserverStateProvenance([]byte(raw)); err == nil {
@@ -1876,9 +1870,7 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		t.Fatal("observer state integrity: invalid signature retained")
 	}
 	unchanged, err := observerImageOutsideHook(f)
-	if err != nil || !reflect.DeepEqual(initial, unchanged) {
-		t.Fatalf("observer state integrity: invalid signature changed retained state: %v", err)
-	}
+	require(t, err == nil && reflect.DeepEqual(initial, unchanged), "observer state integrity: invalid signature changed retained state: %v", err)
 }
 
 func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
@@ -1908,16 +1900,12 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		if row.reason == "NONE" {
 			disposition = "COMMIT_WITH_VICTIMS"
 		}
-		if err != nil || !reflect.DeepEqual(actual, map[string]any{"disposition": disposition, "semantic_reason_id": row.reason}) {
-			t.Fatalf("observer state projection result %s: %v %v", row.reason, actual, err)
-		}
+		require(t, err == nil && reflect.DeepEqual(actual, map[string]any{"disposition": disposition, "semantic_reason_id": row.reason}), "observer state projection result %s: %v %v", row.reason, actual, err)
 	}
-	if _, err := daNodeObserverStateResult(DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}, 0, false); err == nil {
-		t.Fatal("observer state projection: retained result without publication accepted")
-	}
-	if _, err := daNodeObserverStateResult(DAObserverAdmitCall{Err: errors.New("unknown")}, 0, false); err == nil {
-		t.Fatal("observer state projection: unknown error accepted")
-	}
+	_, err = daNodeObserverStateResult(DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}, 0, false)
+	require(t, err != nil, "observer state projection: retained result without publication accepted")
+	_, err = daNodeObserverStateResult(DAObserverAdmitCall{Err: errors.New("unknown")}, 0, false)
+	require(t, err != nil, "observer state projection: unknown error accepted")
 	commit := daNodeObserverStateMember{Key: daNodeObserverStateMemberKey{MemberOrdinal: 0}, DAID: [32]byte{9}, TxID: [32]byte{1}, Provenance: LocalDAProvenance()}
 	chunk := daNodeObserverStateMember{Key: daNodeObserverStateMemberKey{MemberOrdinal: 1}, DAID: [32]byte{9}, TxID: [32]byte{2}, Provenance: DAProvenance{kind: daProvenancePeer, peerIdentity: "p", quotaIdentity: "q"}}
 	small := &daNodeObserverStateFixture{Members: map[daNodeObserverStateMemberKey]daNodeObserverStateMember{commit.Key: commit, chunk.Key: chunk}}
@@ -1934,6 +1922,8 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	commit.Raw, chunk.Raw = []byte{1}, []byte{2, 3}
 	small.TargetCommit, small.Candidate = commit, chunk
 	cm.TokenSeq, ch.TokenSeq = 1, 2
+	chunk.Inputs = []consensus.Outpoint{{Txid: [32]byte{42}, Vout: 7}}
+	ch.Inputs, small.Candidate = slices.Clone(chunk.Inputs), chunk
 	commitLocator := DAObserverLocator{TxID: commit.TxID, DAID: commit.DAID, Kind: "COMMIT"}
 	commitClaim := DAObserverClaim{TxID: commit.TxID, TokenSeq: 1, Domain: "DA", Finalized: true}
 	base := DAObserverStateImage{Records: []DAObserverRecord{record}, Locators: []DAObserverLocator{commitLocator}, Claims: []DAObserverClaim{commitClaim}}
@@ -1941,7 +1931,9 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	published.Records = []DAObserverRecord{record}
 	published.Records[0].Chunks = []DAObserverChunk{{Member: ch, TxBytes: []byte{2, 3}}}
 	published.Locators = append(slices.Clone(base.Locators), DAObserverLocator{TxID: chunk.TxID, DAID: chunk.DAID, Kind: "CHUNK"})
-	published.Claims = append(slices.Clone(base.Claims), DAObserverClaim{TxID: chunk.TxID, TokenSeq: 2, Domain: "DA", Finalized: true})
+	published.Claims = append(slices.Clone(base.Claims), DAObserverClaim{TxID: chunk.TxID, TokenSeq: 2, Domain: "DA", Inputs: slices.Clone(chunk.Inputs), Finalized: true})
+	owned := DAObserverOutpointRow{Outpoint: chunk.Inputs[0], TxID: chunk.TxID, TokenSeq: 2}
+	published.OutpointRows = []DAObserverOutpointRow{owned}
 	for mode := 0; mode < 4; mode++ {
 		run := daNodeObserverStateAdmission{Invocations: 7, Before: daNodeObserverStateObservation{Image: base, Owner: before}, After: daNodeObserverStateObservation{Image: published, Owner: before}, Call: DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}}
 		run.After.Image.Records = slices.Clone(published.Records)
@@ -1966,14 +1958,28 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		want := map[string]any{"candidate_published": mode != 3, "retained_counters": map[string]any{"staged_retained_bytes": "0", "complete_retained_bytes": "0", "complete_set_count": uint64(0), "complete_payload_bytes": "0", "accepted_sequence": "0"}, "target_first_received_sequence": "2", "removed": map[string]any{"record_count": 0, "member_locator_count": 0, "claim_count": 0}, "surviving_members_and_claims_unchanged": mode != 2, key: flag}
 		require(t, reflect.DeepEqual(image, want), "observer state projection consumer mode %d: got %v want %v", mode, image, want)
 	}
+	for _, rows := range [][]DAObserverOutpointRow{
+		nil,
+		{{Outpoint: owned.Outpoint, TxID: owned.TxID, TokenSeq: 3}},
+		{{Outpoint: owned.Outpoint, TxID: [32]byte{99}, TokenSeq: 2}},
+		{{Outpoint: consensus.Outpoint{Vout: 99}, TxID: owned.TxID, TokenSeq: 2}},
+		{owned, owned},
+		{owned, {Outpoint: consensus.Outpoint{Vout: 99}, TxID: [32]byte{99}, TokenSeq: 2}},
+	} {
+		broken := published
+		broken.OutpointRows = rows
+		actual, _, err := daNodeObserverStateAdmissionImageOutput(small, daNodeObserverStateAdmission{Before: daNodeObserverStateObservation{Image: base, Owner: before}, After: daNodeObserverStateObservation{Image: broken, Owner: before}, Call: DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}})
+		require(t, err == nil && actual["state_image"].(map[string]any)["candidate_members_match_construction"] == false, "observer state candidate outpoint bindings: rows=%v error=%v", rows, err)
+	}
+	duplicated := published
+	duplicated.Claims = append(slices.Clone(published.Claims), published.Claims[len(published.Claims)-1])
+	require(t, !daNodeObserverStateCandidateMatches(duplicated, chunk), "observer state candidate claim multiplicity")
 	_, _, cases, profile := stateTestData(t)
 	f, err := newDANodeObserverStateFixture(cases[5], profile)
 	require(t, err == nil, "observer state: %v", err)
 	defer f.Signer.Close()
 	primary, err := admitDANodeObserverStateCandidate(f, cases[5].Input.control)
-	if err != nil || primary.Call.Err == nil || primary.After.Owner.Counts.ReservationsAcquired-primary.Before.Owner.Counts.ReservationsAcquired != 1 {
-		t.Fatalf("observer state follow-up high-water continuity: primary refusal not observed: %v", err)
-	}
+	require(t, err == nil && primary.Call.Err != nil && primary.After.Owner.Counts.ReservationsAcquired-primary.Before.Owner.Counts.ReservationsAcquired == 1, "observer state follow-up high-water continuity: primary refusal not observed: %v", err)
 	saved := primary.After.Owner
 	original := f.Relay.sets[f.Candidate.DAID].commit.txBytes
 	independent := bytes.Clone(original)
@@ -1984,17 +1990,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	require(t, err == nil, "observer state: %v", err)
 	stateAssertJSON(t, follow["result"], `{"disposition":"COMMIT_WITH_VICTIMS","semantic_reason_id":"NONE"}`)
 	final, err := observerImageOutsideHook(f)
-	if err != nil || final.Owner.Identity != saved.Identity || final.Owner.TokenHighWater != saved.TokenHighWater+1 || final.Owner.Counts.ReservationsAcquired != saved.Counts.ReservationsAcquired+1 || daNodeObserverStateCandidateToken(final.Image, f.Candidate) <= saved.TokenHighWater {
-		t.Fatalf("observer state follow-up high-water continuity: %v", err)
-	}
-	if !daNodeObserverStateCandidateMatches(final.Image, f.Candidate) || !daNodeObserverStateSurvivorsEqual(final.Image, final.Image, nil, nil) {
-		t.Fatal("observer state projection: valid member comparison failed")
-	}
+	require(t, err == nil && final.Owner.Identity == saved.Identity && final.Owner.TokenHighWater == saved.TokenHighWater+1 && final.Owner.Counts.ReservationsAcquired == saved.Counts.ReservationsAcquired+1 && daNodeObserverStateCandidateToken(final.Image, f.Candidate) > saved.TokenHighWater, "observer state follow-up high-water continuity: %v", err)
+	require(t, daNodeObserverStateCandidateMatches(final.Image, f.Candidate) && daNodeObserverStateSurvivorsEqual(final.Image, final.Image, nil, nil), "observer state projection: valid member comparison failed")
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	changed, err := observerImageOutsideHook(f)
 	require(t, err == nil && bytes.Equal(final.Image.Records[len(final.Image.Records)-1].Commit.TxBytes, independent), "observer state alias: final baseline changed: %v", err)
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
-	if daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil) || daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit) {
-		t.Fatal("observer state projection: changed member reported equal")
-	}
+	require(t, !daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil) && !daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit), "observer state projection: changed member reported equal")
 }
