@@ -1705,14 +1705,11 @@ func stateTestData(t *testing.T) ([]byte, daNodeObserverCorpus, []daNodeObserver
 func stateAssertJSON(t *testing.T, got any, want string) {
 	t.Helper()
 	var expected any
-	if err := json.Unmarshal([]byte(want), &expected); err != nil {
-		t.Fatal(err)
-	}
+	err := json.Unmarshal([]byte(want), &expected)
+	require(t, err == nil, "observer expected JSON: %v", err)
 	actual, err := json.Marshal(got)
 	target, _ := json.Marshal(expected)
-	if err != nil || !bytes.Equal(actual, target) {
-		t.Fatalf("observer state projection: got %s, want %s (%v)", actual, target, err)
-	}
+	require(t, err == nil && bytes.Equal(actual, target), "observer state projection: got %s, want %s (%v)", actual, target, err)
 }
 
 func TestDAAdmissionObserverNodeStateIsolation(t *testing.T) {
