@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"os"
 	"reflect"
-	"strconv"
-	"sort"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,8 +45,8 @@ type daNodeObserverStateInput struct {
 	FollowUp          string          `json:"follow_up"`
 	MemberProvenance  json.RawMessage `json:"member_provenance"`
 	CleanupSelector   json.RawMessage `json:"cleanup_selector"`
-	acceptedSequence uint64
-	control          daNodeObserverStateControl
+	acceptedSequence  uint64
+	control           daNodeObserverStateControl
 }
 
 type daNodeObserverStateControl struct {
@@ -82,9 +82,9 @@ type daNodeObserverCleanupSelector struct {
 }
 
 type daNodeObserverStateCase struct {
-	Case        daNodeObserverCase
-	Input       daNodeObserverStateInput
-	Provenance  []DAProvenance
+	Case       daNodeObserverCase
+	Input      daNodeObserverStateInput
+	Provenance []DAProvenance
 }
 
 type daNodeObserverStateFixtures struct {
@@ -109,26 +109,26 @@ type daNodeObserverStateCanonicalProfile struct {
 	} `json:"input"`
 	Nonce   string `json:"nonce"`
 	Signing struct {
-		SuiteID                        uint8  `json:"suite_id"`
-		PubkeyBytes                    uint64 `json:"pubkey_bytes"`
+		SuiteID                         uint8  `json:"suite_id"`
+		PubkeyBytes                     uint64 `json:"pubkey_bytes"`
 		SignatureBytesIncludingSelector uint64 `json:"signature_bytes_including_selector"`
-		SighashSelector                uint8  `json:"sighash_selector"`
-		KeyBinding                     string `json:"key_binding"`
+		SighashSelector                 uint8  `json:"sighash_selector"`
+		KeyBinding                      string `json:"key_binding"`
 	} `json:"signing"`
 	Outputs struct {
 		Change     string `json:"change"`
 		CommitOnly string `json:"commit_only"`
 	} `json:"outputs"`
 	Commit struct {
-		ManifestHex      string `json:"manifest_hex"`
-		BatchNumber      string `json:"batch_number"`
-		RetlDomainID     string `json:"retl_domain_id"`
-		TxDataRoot       string `json:"tx_data_root"`
-		StateRoot        string `json:"state_root"`
-		WithdrawalsRoot  string `json:"withdrawals_root"`
-		BatchSigSuite    uint8  `json:"batch_sig_suite"`
-		BatchSigHex      string `json:"batch_sig_hex"`
-		ChunkCount       string `json:"chunk_count"`
+		ManifestHex     string `json:"manifest_hex"`
+		BatchNumber     string `json:"batch_number"`
+		RetlDomainID    string `json:"retl_domain_id"`
+		TxDataRoot      string `json:"tx_data_root"`
+		StateRoot       string `json:"state_root"`
+		WithdrawalsRoot string `json:"withdrawals_root"`
+		BatchSigSuite   uint8  `json:"batch_sig_suite"`
+		BatchSigHex     string `json:"batch_sig_hex"`
+		ChunkCount      string `json:"chunk_count"`
 	} `json:"commit"`
 	Chunk struct {
 		ChunkIndex string `json:"chunk_index"`
@@ -136,10 +136,10 @@ type daNodeObserverStateCanonicalProfile struct {
 		Payload    string `json:"payload"`
 	} `json:"chunk"`
 	Policy struct {
-		MinDAFeeRate              string `json:"min_da_fee_rate"`
-		DASurchargePerByte        string `json:"da_surcharge_per_byte"`
-		PolicyMaxDABytesPerBlock  string `json:"policy_max_da_bytes_per_block"`
-		RollingFeeFloor           string `json:"rolling_fee_floor"`
+		MinDAFeeRate             string `json:"min_da_fee_rate"`
+		DASurchargePerByte       string `json:"da_surcharge_per_byte"`
+		PolicyMaxDABytesPerBlock string `json:"policy_max_da_bytes_per_block"`
+		RollingFeeFloor          string `json:"rolling_fee_floor"`
 	} `json:"policy"`
 	WireSize struct {
 		Commit string `json:"commit"`
@@ -150,21 +150,21 @@ type daNodeObserverStateCanonicalProfile struct {
 }
 
 type daNodeObserverStateResidentClass struct {
-	ClassOrdinal uint64   `json:"class_ordinal"`
-	ResidentCount uint64  `json:"resident_count"`
-	ChunkCount   uint64   `json:"chunk_count"`
-	ChunkLengths []uint64 `json:"chunk_lengths"`
-	PayloadByte  string   `json:"payload_byte"`
-	CommitFee    string   `json:"commit_fee"`
-	ChunkFee     string   `json:"chunk_fee"`
+	ClassOrdinal  uint64   `json:"class_ordinal"`
+	ResidentCount uint64   `json:"resident_count"`
+	ChunkCount    uint64   `json:"chunk_count"`
+	ChunkLengths  []uint64 `json:"chunk_lengths"`
+	PayloadByte   string   `json:"payload_byte"`
+	CommitFee     string   `json:"commit_fee"`
+	ChunkFee      string   `json:"chunk_fee"`
 }
 
 type daNodeObserverStateCompleteProfile struct {
-	MemberTemplateRef string                                `json:"member_template_ref"`
-	InitialSource     string                                `json:"initial_source"`
-	DAID              string                                `json:"da_id"`
-	AdmissionOrder    string                                `json:"admission_order"`
-	ResidentClasses   []daNodeObserverStateResidentClass    `json:"resident_classes"`
+	MemberTemplateRef string                             `json:"member_template_ref"`
+	InitialSource     string                             `json:"initial_source"`
+	DAID              string                             `json:"da_id"`
+	AdmissionOrder    string                             `json:"admission_order"`
+	ResidentClasses   []daNodeObserverStateResidentClass `json:"resident_classes"`
 	Target            struct {
 		ClassOrdinal           uint64   `json:"class_ordinal"`
 		ResidentOrdinal        uint64   `json:"resident_ordinal"`
@@ -180,32 +180,32 @@ type daNodeObserverStateCompleteProfile struct {
 	CompleteSetMaxCount    uint64 `json:"complete_set_max_count"`
 	PinnedPayloadMax       string `json:"pinned_payload_max"`
 	AcceptedSequence       string `json:"accepted_sequence"`
-	EqualityFeeOverride   struct {
-		Scope       string `json:"scope"`
-		MemberFee   string `json:"member_fee"`
+	EqualityFeeOverride    struct {
+		Scope        string `json:"scope"`
+		MemberFee    string `json:"member_fee"`
 		OtherClasses string `json:"other_classes"`
 	} `json:"equality_fee_override"`
 	FaultBaseline string `json:"fault_baseline"`
 }
 
 type daNodeObserverStateMixedProfile struct {
-	MemberTemplateRef     string   `json:"member_template_ref"`
-	ClassOrdinal          uint64   `json:"class_ordinal"`
-	ResidentOrdinal       uint64   `json:"resident_ordinal"`
-	DAID                  string   `json:"da_id"`
-	ChunkCount            uint64   `json:"chunk_count"`
-	ChunkLengths          []uint64 `json:"chunk_lengths"`
-	PayloadByte           string   `json:"payload_byte"`
-	CommitFee             string   `json:"commit_fee"`
-	ChunkFee              string   `json:"chunk_fee"`
-	AdmissionOrder        []uint64 `json:"admission_order"`
+	MemberTemplateRef      string   `json:"member_template_ref"`
+	ClassOrdinal           uint64   `json:"class_ordinal"`
+	ResidentOrdinal        uint64   `json:"resident_ordinal"`
+	DAID                   string   `json:"da_id"`
+	ChunkCount             uint64   `json:"chunk_count"`
+	ChunkLengths           []uint64 `json:"chunk_lengths"`
+	PayloadByte            string   `json:"payload_byte"`
+	CommitFee              string   `json:"commit_fee"`
+	ChunkFee               string   `json:"chunk_fee"`
+	AdmissionOrder         []uint64 `json:"admission_order"`
 	RetainedMemberOrdinals []uint64 `json:"retained_member_ordinals"`
-	AbsentMemberOrdinals  []uint64 `json:"absent_member_ordinals"`
-	MemberOrdinals        string   `json:"member_ordinals"`
-	AdmissionOrdinals     []uint64 `json:"admission_ordinals"`
-	AcceptedSequence      string   `json:"accepted_sequence"`
-	FirstReceivedSequence string   `json:"first_received_sequence"`
-	PeerQuotaAccounting   []any    `json:"peer_quota_accounting"`
+	AbsentMemberOrdinals   []uint64 `json:"absent_member_ordinals"`
+	MemberOrdinals         string   `json:"member_ordinals"`
+	AdmissionOrdinals      []uint64 `json:"admission_ordinals"`
+	AcceptedSequence       string   `json:"accepted_sequence"`
+	FirstReceivedSequence  string   `json:"first_received_sequence"`
+	PeerQuotaAccounting    []any    `json:"peer_quota_accounting"`
 }
 
 type daNodeObserverStateChain struct {
@@ -226,14 +226,14 @@ type daNodeObserverStateMemberKey struct {
 }
 
 type daNodeObserverStateMember struct {
-	Key           daNodeObserverStateMemberKey
-	DAID          [32]byte
-	TxID, WTxID   [32]byte
-	Fee           consensus.Uint128
-	Inputs        []consensus.Outpoint
-	Raw           []byte
-	Provenance    DAProvenance
-	ChunkIndex    uint16
+	Key         daNodeObserverStateMemberKey
+	DAID        [32]byte
+	TxID, WTxID [32]byte
+	Fee         consensus.Uint128
+	Inputs      []consensus.Outpoint
+	Raw         []byte
+	Provenance  DAProvenance
+	ChunkIndex  uint16
 }
 
 type daNodeObserverStateFixture struct {
@@ -467,8 +467,8 @@ func buildDANodeObserverStateMemberOnce(f *daNodeObserverStateFixture, row daNod
 	f.Mempool.chainState.Utxos[input] = entry
 	tx := &consensus.Tx{
 		Version: p.Canonical.Version, TxKind: kind, TxNonce: 100 + admissionOrdinal,
-		Inputs: []consensus.TxInput{{PrevTxid: input.Txid, PrevVout: input.Vout, Sequence: p.Canonical.Input.Sequence}},
-		Outputs: []consensus.TxOutput{{Value: 10000000 - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}},
+		Inputs:   []consensus.TxInput{{PrevTxid: input.Txid, PrevVout: input.Vout, Sequence: p.Canonical.Input.Sequence}},
+		Outputs:  []consensus.TxOutput{{Value: 10000000 - fee, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: append([]byte(nil), address...)}},
 		Locktime: p.Canonical.Locktime,
 	}
 	if kind == 0x01 {
@@ -654,7 +654,7 @@ func parseDANodeObserverStateProvenance(raw json.RawMessage) ([]DAProvenance, er
 				return nil, fmt.Errorf("observer input member_provenance[%d]: forbidden peer identities", i)
 			}
 			if source == "LOCAL" {
-			out[i] = LocalDAProvenance()
+				out[i] = LocalDAProvenance()
 			} else {
 				out[i] = DetachedReorgDAProvenance()
 			}
@@ -679,8 +679,8 @@ func parseDANodeObserverStateProvenance(raw json.RawMessage) ([]DAProvenance, er
 }
 
 type daNodeObserverStateOwnerImage struct {
-	Identity      *PendingOutpointOwner
-	Counts        DAObserverOwnerCounts
+	Identity       *PendingOutpointOwner
+	Counts         DAObserverOwnerCounts
 	TokenHighWater uint64
 }
 
@@ -701,8 +701,8 @@ type daNodeObserverStateAdmission struct {
 
 func ownerImageLocked(owner *PendingOutpointOwner) daNodeObserverStateOwnerImage {
 	return daNodeObserverStateOwnerImage{
-		Identity: owner,
-		Counts: DAObserverOwnerCounts{owner.reserveCalls, owner.reservationsAcquired, owner.finalizations, owner.candidateReleases},
+		Identity:       owner,
+		Counts:         DAObserverOwnerCounts{owner.reserveCalls, owner.reservationsAcquired, owner.finalizations, owner.candidateReleases},
 		TokenHighWater: owner.tokenHighWater,
 	}
 }
@@ -940,11 +940,11 @@ func admitDANodeObserverStateCandidate(f *daNodeObserverStateFixture, control da
 
 func daNodeObserverStateCounters(image DAObserverStateImage) map[string]any {
 	return map[string]any{
-		"staged_retained_bytes": daNodeObserverStateDecimal(image.StagedBytes),
+		"staged_retained_bytes":   daNodeObserverStateDecimal(image.StagedBytes),
 		"complete_retained_bytes": daNodeObserverStateDecimal(image.CompleteBytes),
-		"complete_set_count": image.CompleteCount,
-		"complete_payload_bytes": daNodeObserverStateDecimal(image.PinnedPayloadBytes),
-		"accepted_sequence": daNodeObserverStateDecimal(image.NextReceivedTime),
+		"complete_set_count":      image.CompleteCount,
+		"complete_payload_bytes":  daNodeObserverStateDecimal(image.PinnedPayloadBytes),
+		"accepted_sequence":       daNodeObserverStateDecimal(image.NextReceivedTime),
 	}
 }
 
@@ -1163,16 +1163,16 @@ func daNodeObserverStateDecimal(value uint64) string { return strconv.FormatUint
 
 func daNodeObserverStateOwnerOutput(invocations uint64, delta daNodeObserverStateOwnerDelta, releaseScope string) map[string]any {
 	pending := map[string]any{
-		"reserve_calls": delta.Counts.ReserveCalls,
+		"reserve_calls":         delta.Counts.ReserveCalls,
 		"reservations_acquired": delta.Counts.ReservationsAcquired,
-		"finalizations": delta.Counts.Finalizations,
-		"exact_releases": delta.Counts.CandidateReleases,
+		"finalizations":         delta.Counts.Finalizations,
+		"exact_releases":        delta.Counts.CandidateReleases,
 	}
 	return map[string]any{
-		"admission_entrypoint": map[string]any{"domain": "DA", "invocations": invocations},
-		"pending_outpoint": pending,
+		"admission_entrypoint":   map[string]any{"domain": "DA", "invocations": invocations},
+		"pending_outpoint":       pending,
 		"token_high_water_delta": daNodeObserverStateDecimal(delta.HighWater),
-		"exact_release_scope": releaseScope,
+		"exact_release_scope":    releaseScope,
 	}
 }
 
@@ -1213,10 +1213,10 @@ func daNodeObserverStateAdmissionImageOutput(f *daNodeObserverStateFixture, run 
 		return nil, nil, fmt.Errorf("observer state image: target record is absent")
 	}
 	stateImage := map[string]any{
-		"candidate_published": candidatePublished,
-		"retained_counters": daNodeObserverStateCounters(after),
-		"target_first_received_sequence": daNodeObserverStateDecimal(firstSequence),
-		"removed": map[string]any{"record_count": len(removedRecords), "member_locator_count": len(removedLocators), "claim_count": len(removedClaims)},
+		"candidate_published":                    candidatePublished,
+		"retained_counters":                      daNodeObserverStateCounters(after),
+		"target_first_received_sequence":         daNodeObserverStateDecimal(firstSequence),
+		"removed":                                map[string]any{"record_count": len(removedRecords), "member_locator_count": len(removedLocators), "claim_count": len(removedClaims)},
 		"surviving_members_and_claims_unchanged": survivors,
 	}
 	if candidatePublished {
@@ -1296,7 +1296,7 @@ func daNodeObserverStateAdmissionFollowUp(row daNodeObserverStateCase, fixture *
 		return map[string]any{
 			"result": result, "owner": owner,
 			"image_and_prior_claims_unchanged": reflect.DeepEqual(run.Before.Image, run.After.Image),
-			"accepted_sequence": daNodeObserverStateDecimal(run.After.Image.NextReceivedTime),
+			"accepted_sequence":                daNodeObserverStateDecimal(run.After.Image.NextReceivedTime),
 		}, nil
 	}
 	if run.After.Owner.Counts.ReservationsAcquired < run.Before.Owner.Counts.ReservationsAcquired ||
@@ -1394,13 +1394,13 @@ func projectDANodeObserverStateCleanup(f *daNodeObserverStateFixture, row daNode
 	}
 	out := map[string]any{
 		"cleanup_result": result, "selected_member_ordinals": selected,
-		"released_charge": daNodeObserverStateDecimal(released),
-		"removed_locator_count": len(daNodeObserverStateRemovedLocators(before.Image.Locators, after.Image.Locators)),
-		"removed_claim_count": len(daNodeObserverStateRemovedClaims(before.Image.Claims, after.Image.Claims)),
-		"owner_high_water_delta": daNodeObserverStateDecimal(delta.HighWater),
-		"after_image": map[string]any{"state": record.State, "da_id": daNodeObserverHexID(record.DAID), "received_sequence": daNodeObserverStateDecimal(record.ReceivedTime), "commit_chunk_count": record.Commit.ChunkCount, "members": members, "retained_counters": daNodeObserverStateCounters(after.Image), "peer_quota_accounting": quota},
+		"released_charge":                        daNodeObserverStateDecimal(released),
+		"removed_locator_count":                  len(daNodeObserverStateRemovedLocators(before.Image.Locators, after.Image.Locators)),
+		"removed_claim_count":                    len(daNodeObserverStateRemovedClaims(before.Image.Claims, after.Image.Claims)),
+		"owner_high_water_delta":                 daNodeObserverStateDecimal(delta.HighWater),
+		"after_image":                            map[string]any{"state": record.State, "da_id": daNodeObserverHexID(record.DAID), "received_sequence": daNodeObserverStateDecimal(record.ReceivedTime), "commit_chunk_count": record.Commit.ChunkCount, "members": members, "retained_counters": daNodeObserverStateCounters(after.Image), "peer_quota_accounting": quota},
 		"surviving_members_and_claims_unchanged": daNodeObserverStateSurvivorsEqual(before.Image, after.Image, nil, removedIDs),
-		"whole_record_removed": !exists,
+		"whole_record_removed":                   !exists,
 	}
 	if row.Case.ID == "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED" {
 		out["image_byte_identical"] = reflect.DeepEqual(before.Image, after.Image)
@@ -1482,13 +1482,16 @@ func validateDANodeObserverStateControl(raw json.RawMessage) (daNodeObserverStat
 		return c, fmt.Errorf("observer input control: unknown phase/action")
 	}
 	for _, field := range []struct {
-		name string
-		raw json.RawMessage
+		name     string
+		raw      json.RawMessage
 		required bool
 	}{
-		{"member", c.Member, member}, {"preserve_other_fields", c.PreserveOtherFields, preserve},
-		{"locator_da_id", c.LocatorDAID, locator}, {"target_revision", c.TargetRevision, revision},
-		{"global_record_revision", c.GlobalRecordRevision, revision}, {"intrinsic_total_bytes_delta", c.IntrinsicTotalBytesDelta, delta},
+		{"member", c.Member, member},
+		{"preserve_other_fields", c.PreserveOtherFields, preserve},
+		{"locator_da_id", c.LocatorDAID, locator},
+		{"target_revision", c.TargetRevision, revision},
+		{"global_record_revision", c.GlobalRecordRevision, revision},
+		{"intrinsic_total_bytes_delta", c.IntrinsicTotalBytesDelta, delta},
 	} {
 		if (len(field.raw) != 0) != field.required {
 			return c, fmt.Errorf("observer input control.%s: missing or forbidden payload", field.name)
@@ -1511,7 +1514,7 @@ func validateDANodeObserverStateControl(raw json.RawMessage) (daNodeObserverStat
 		return c, fmt.Errorf("observer input control.preserve_other_fields: must be true")
 	}
 	for _, field := range []struct {
-		raw json.RawMessage
+		raw  json.RawMessage
 		kind string
 	}{{c.LocatorDAID, "locator"}, {c.IntrinsicTotalBytesDelta, "delta"}, {c.TargetRevision, "revision"}, {c.GlobalRecordRevision, "revision"}} {
 		if len(field.raw) == 0 {
@@ -1879,7 +1882,6 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(initial, unchanged) {
 		t.Fatalf("observer state integrity: invalid signature changed retained state: %v", err)
 	}
-
 }
 
 func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
@@ -1894,7 +1896,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	require(t, err == nil, "observer state: %v", err)
 	stateAssertJSON(t, victims, `["0100000000000000000000000000000000000000000000000000000000000000"]`)
 	for _, row := range []struct {
-		call DAObserverAdmitCall
+		call   DAObserverAdmitCall
 		reason string
 	}{
 		{DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}, "NONE"},
@@ -1964,7 +1966,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		if mode == 3 {
 			key, flag = "image_and_prior_claims_unchanged_from_control_baseline", true
 		}
-		want := map[string]any{"candidate_published": mode != 3, "retained_counters": map[string]any{"staged_retained_bytes":"0","complete_retained_bytes":"0","complete_set_count":uint64(0),"complete_payload_bytes":"0","accepted_sequence":"0"}, "target_first_received_sequence":"2", "removed":map[string]any{"record_count":0,"member_locator_count":0,"claim_count":0}, "surviving_members_and_claims_unchanged":mode != 2, key:flag}
+		want := map[string]any{"candidate_published": mode != 3, "retained_counters": map[string]any{"staged_retained_bytes": "0", "complete_retained_bytes": "0", "complete_set_count": uint64(0), "complete_payload_bytes": "0", "accepted_sequence": "0"}, "target_first_received_sequence": "2", "removed": map[string]any{"record_count": 0, "member_locator_count": 0, "claim_count": 0}, "surviving_members_and_claims_unchanged": mode != 2, key: flag}
 		require(t, reflect.DeepEqual(image, want), "observer state projection consumer mode %d: got %v want %v", mode, image, want)
 	}
 	_, _, cases, profile := stateTestData(t)
