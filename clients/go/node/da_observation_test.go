@@ -403,8 +403,10 @@ func TestDAObservationPlanHook(t *testing.T) {
 		stage daCompleteStage
 		value any
 	}{
-		{daCompletePlanned, "hook panic"}, {daCompleteEffects, "hook panic"},
-		{daCompletePlanned, nil}, {daCompleteEffects, nil},
+		{daCompletePlanned, "hook panic"},
+		{daCompleteEffects, "hook panic"},
+		{daCompletePlanned, nil},
+		{daCompleteEffects, nil},
 	} {
 		t.Run(fmt.Sprintf("panic %v at stage %d is not observed", row.value, row.stage), func(t *testing.T) {
 			f, chunk := daObservationCompleting(t)
