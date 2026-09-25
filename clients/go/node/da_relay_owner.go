@@ -259,49 +259,60 @@ type daAdmissionObservation struct {
 func (s *DARelayState) AdmitDA(txBytes []byte, provenance DAProvenance) (result DAAdmissionResult, err error) {
 	// Registered first so it runs last, after the admission hold is released.
 	// A panicking call has no final result: it is not observed, and its panic
-	// value is re-raised unchanged.
+	// propagates unchanged.
+	completed := false
 	defer func() {
-		if s == nil {
+		if !completed || s == nil {
 			return
 		}
 		observe := s.admitObserver.Load()
 		if observe == nil {
 			return
 		}
-		if r := recover(); r != nil {
-			panic(r) //nolint:forbidigo // Re-raises the caller's own panic value unchanged.
-		}
 		(*observe)(daAdmitCall{provenance: provenance, result: result, err: err})
 	}()
 	var zero DAAdmissionResult
 	m, owner, err := s.bindDAAdmission()
 	if err != nil {
+		completed = true
 		return zero, err
 	}
 	if err = provenance.validate(); err != nil {
-		return zero, selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
+		err = selectRelayDisposition(txAdmitRejected(err.Error()), RelayAdmissionStableTerminalReject)
+		completed = true
+		return zero, err
 	}
 	owned, tx, txid, wtxid, inputs, err := parseDAAdmissionCandidate(txBytes)
 	if err != nil {
-		return zero, selectRelayDisposition(err, RelayAdmissionStableTerminalReject)
+		err = selectRelayDisposition(err, RelayAdmissionStableTerminalReject)
+		completed = true
+		return zero, err
 	}
 	if tx.TxNonce == 0 {
-		return zero, selectRelayDisposition(txAdmitRejected(string(consensus.TX_ERR_TX_NONCE_INVALID)+": tx_nonce must be >= 1 for non-coinbase"), RelayAdmissionStableTerminalReject)
+		err = selectRelayDisposition(txAdmitRejected(string(consensus.TX_ERR_TX_NONCE_INVALID)+": tx_nonce must be >= 1 for non-coinbase"), RelayAdmissionStableTerminalReject)
+		completed = true
+		return zero, err
 	}
 	hold, err := m.acquireDAAdmissionHold(owner, inputs)
 	if err != nil {
-		return zero, selectRelayDisposition(err, RelayAdmissionUnavailable)
+		err = selectRelayDisposition(err, RelayAdmissionUnavailable)
+		completed = true
+		return zero, err
 	}
 	defer hold.release()
 
 	replay, exact, err := s.classifyDAReplay(txid, wtxid, owned, owner)
 	if err != nil {
+		completed = true
 		return zero, err
 	}
 	if exact {
+		completed = true
 		return replay, nil
 	}
-	return s.admitDANonExact(hold, owned, tx, txid, wtxid, inputs, provenance)
+	result, err = s.admitDANonExact(hold, owned, tx, txid, wtxid, inputs, provenance)
+	completed = true
+	return result, err
 }
 
 func (s *DARelayState) admitDANonExact(hold *daAdmissionHold, owned []byte, tx *consensus.Tx, txid, wtxid [32]byte, inputs []consensus.Outpoint, provenance DAProvenance) (DAAdmissionResult, error) {

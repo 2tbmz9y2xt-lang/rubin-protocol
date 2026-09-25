@@ -723,21 +723,21 @@ func requireDAAdmissionStructure(t *testing.T) {
 		exactAt, continuationAt := -1, -1
 		for i, statement := range public.Body.List {
 			if conditional, ok := statement.(*ast.IfStmt); ok {
-				if exact, ok := conditional.Cond.(*ast.Ident); ok && exact.Name == "exact" && len(conditional.Body.List) == 1 {
-					if _, ok := conditional.Body.List[0].(*ast.ReturnStmt); ok {
+				if exact, ok := conditional.Cond.(*ast.Ident); ok && exact.Name == "exact" && len(conditional.Body.List) == 2 {
+					if _, ok := conditional.Body.List[1].(*ast.ReturnStmt); ok {
 						exactAt = i
 					}
 				}
 			}
-			if returned, ok := statement.(*ast.ReturnStmt); ok && len(returned.Results) == 1 {
-				if call, ok := returned.Results[0].(*ast.CallExpr); ok {
+			if assigned, ok := statement.(*ast.AssignStmt); ok && len(assigned.Rhs) == 1 {
+				if call, ok := assigned.Rhs[0].(*ast.CallExpr); ok {
 					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "admitDANonExact" {
 						continuationAt = i
 					}
 				}
 			}
 		}
-		if exactAt < 0 || continuationAt <= exactAt {
+		if exactAt < 0 || continuationAt <= exactAt || continuationAt != len(public.Body.List)-3 {
 			t.Fatalf("exact terminal/continuation order=%d/%d", exactAt, continuationAt)
 		}
 		if got := callCounts[observe.Name.Name]; observeRanges != 0 || !reflect.DeepEqual(got, map[string]int{"Lock": 1, "Unlock": 1, "captureDAAdmissionTarget": 1, "len": 1}) {

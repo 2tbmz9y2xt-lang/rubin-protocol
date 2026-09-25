@@ -399,24 +399,32 @@ func TestDAObservationPlanHook(t *testing.T) {
 		}
 		requireDAObservationDelta(t, o, before, [4]uint64{1, 1, 0, 1}, "post-reservation victim failure")
 	})
-	for _, stage := range []daCompleteStage{daCompletePlanned, daCompleteEffects} {
-		t.Run(fmt.Sprintf("panic at stage %d is not observed", stage), func(t *testing.T) {
+	for _, row := range []struct {
+		stage daCompleteStage
+		value any
+	}{
+		{daCompletePlanned, "hook panic"}, {daCompleteEffects, "hook panic"},
+		{daCompletePlanned, nil}, {daCompleteEffects, nil},
+	} {
+		t.Run(fmt.Sprintf("panic %v at stage %d is not observed", row.value, row.stage), func(t *testing.T) {
 			f, chunk := daObservationCompleting(t)
 			calls := 0
 			observer := func(daAdmitCall) { calls++ }
 			f.relay.admitObserver.Store(&observer)
 			hookDAObservation(f, func(at daCompleteStage, _ *daCompleteCommitPlan) {
-				if at == stage {
-					panic("hook panic") //nolint:forbidigo // The row drives AdmitDA through a panic.
+				if at == row.stage {
+					panic(row.value) //nolint:forbidigo // The row drives AdmitDA through a panic.
 				}
 			})
+			returned := false
 			recovered := func() (r any) {
 				defer func() { r = recover() }()
 				f.relay.AdmitDA(chunk.raw, LocalDAProvenance())
+				returned = true
 				return nil
 			}()
-			if recovered != "hook panic" || calls != 0 {
-				t.Fatalf("panic=%v observer calls=%d, want the original panic and no call", recovered, calls)
+			if returned || calls != 0 || row.value != nil && recovered != row.value {
+				t.Fatalf("returned=%v panic=%v observer calls=%d, want panic %v and no call", returned, recovered, calls, row.value)
 			}
 			if !f.relay.mu.TryLock() {
 				t.Fatal("relay mutex stayed locked after hook panic")
@@ -426,6 +434,9 @@ func TestDAObservationPlanHook(t *testing.T) {
 				t.Fatal("admission fence stayed locked after hook panic")
 			}
 			f.mp.chainState.admissionMu.Unlock()
+			f.relay.completeHook = nil
+			got, err := f.relay.AdmitDA(chunk.raw, LocalDAProvenance())
+			requirePublicDAResult(t, got, err, DAAdmissionResult{DAID: [32]byte{0x51}, Disposition: DAAdmissionRetained})
 		})
 	}
 	t.Run("failed preparation", func(t *testing.T) {

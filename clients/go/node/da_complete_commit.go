@@ -343,13 +343,14 @@ func (s *DARelayState) applyDACompleteCommit(admission *DAAdmission, p *daComple
 	}
 	if s.completeHook != nil {
 		func() {
+			returned := false
 			defer func() {
-				if recovered := recover(); recovered != nil {
+				if !returned {
 					s.mu.Unlock()
-					panic(recovered)
 				}
 			}()
 			s.completeHook(daCompleteEffects, p)
+			returned = true
 		}()
 	}
 	if err := s.preflightDACompleteCommit(p); err != nil {
