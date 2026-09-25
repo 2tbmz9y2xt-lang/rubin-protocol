@@ -110,14 +110,14 @@ type daNodePlannerInput struct {
 				First *uint64 `json:"first"`
 				Last  *uint64 `json:"last"`
 			} `json:"resident_ordinal_range"`
-			TotalFee               string `json:"total_fee"`
-			TotalFeeLast           string `json:"total_fee_last"`
-			TotalFeeStep           string `json:"total_fee_step"`
+			TotalFee               string          `json:"total_fee"`
+			TotalFeeLast           json.RawMessage `json:"total_fee_last"`
+			TotalFeeStep           json.RawMessage `json:"total_fee_step"`
 			TotalBytes             string `json:"total_bytes"`
 			PayloadBytes           string `json:"payload_bytes"`
-			ReceivedSequenceFirst  string `json:"received_sequence_first"`
-			ReceivedSequenceLast   string `json:"received_sequence_last"`
-			ReceivedSequenceStep   string `json:"received_sequence_step"`
+			ReceivedSequenceFirst  string          `json:"received_sequence_first"`
+			ReceivedSequenceLast   json.RawMessage `json:"received_sequence_last"`
+			ReceivedSequenceStep   json.RawMessage `json:"received_sequence_step"`
 		} `json:"resident_classes"`
 		RetainedCounters struct {
 			StagedRetainedBytes   string `json:"staged_retained_bytes"`
@@ -161,6 +161,37 @@ func parseDANodeObserverU128(label, value string) (consensus.Uint128, error) {
 	lo := v.Uint64()
 	hi := new(big.Int).Rsh(new(big.Int).Set(v), 64).Uint64()
 	return consensus.Uint128{Hi: hi, Lo: lo}, nil
+}
+
+func optionalDANodeObserverDecimal(raw json.RawMessage, label string) (string, bool, error) {
+	if len(raw) == 0 {
+		return "", false, nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", true, fmt.Errorf("observer input %s: invalid decimal", label)
+	}
+	return value, true, nil
+}
+
+func TestDAAdmissionObserverNodeU128Conversion(t *testing.T) {
+	cases := []struct {
+		decimal string
+		want    consensus.Uint128
+	}{
+		{decimal: "0", want: consensus.Uint128{Hi: 0, Lo: 0}},
+		{decimal: "18446744073709551616", want: consensus.Uint128{Hi: 1, Lo: 0}},
+		{decimal: "340282366920938463463374607431768211455", want: consensus.Uint128{Hi: 18446744073709551615, Lo: 18446744073709551615}},
+	}
+	for _, testCase := range cases {
+		got, err := parseDANodeObserverU128("test", testCase.decimal)
+		if err != nil {
+			t.Fatalf("parse u128 %s: %v", testCase.decimal, err)
+		}
+		if got != testCase.want {
+			t.Fatalf("parse u128 %s: got %+v, want %+v", testCase.decimal, got, testCase.want)
+		}
+	}
 }
 
 func daNodeObserverIdentity(caseOrdinal, classOrdinal, residentOrdinal uint64) [32]byte {
@@ -243,56 +274,102 @@ func daNodeObserverExpandPlanner(id string, in daNodePlannerInput) (daCompleteCa
 			return out, fmt.Errorf("observer input %s: missing required resident ordinal", id)
 		}
 		firstOrdinal, lastOrdinal := *row.ResidentOrdinalRange.First, *row.ResidentOrdinalRange.Last
-		if row.ResidentCount == 0 { return out, fmt.Errorf("observer input %s: invalid resident count", id) }
+		if row.ResidentCount == 0 {
+			return out, fmt.Errorf("observer input %s: invalid resident count", id)
+		}
 		if uint64(len(out.residents)) > daCompleteSetMaxCount || row.ResidentCount > daCompleteSetMaxCount-uint64(len(out.residents)) {
 			return out, fmt.Errorf("observer input %s: resident count exceeds construction bound", id)
 		}
-		if lastOrdinal < firstOrdinal || lastOrdinal-firstOrdinal != row.ResidentCount-1 { return out, fmt.Errorf("observer input %s: invalid resident range", id) }
+		if lastOrdinal < firstOrdinal || lastOrdinal-firstOrdinal != row.ResidentCount-1 {
+			return out, fmt.Errorf("observer input %s: invalid resident range", id)
+		}
 		fee, err := parseDANodeObserverU128("resident.total_fee", row.TotalFee)
-		if err != nil { return out, err }
+		if err != nil {
+			return out, err
+		}
+		feeStepText, feeStepPresent, err := optionalDANodeObserverDecimal(row.TotalFeeStep, "resident.total_fee_step")
+		if err != nil {
+			return out, err
+		}
 		feeStep := new(big.Int)
-		if row.TotalFeeStep != "" {
-			if _, ok := feeStep.SetString(row.TotalFeeStep, 10); !ok || feeStep.Sign() < 0 || feeStep.BitLen() > 128 { return out, fmt.Errorf("observer input %s: invalid resident fee step", id) }
+		if feeStepPresent {
+			if _, ok := feeStep.SetString(feeStepText, 10); !ok || feeStep.Sign() < 0 || feeStep.BitLen() > 128 {
+				return out, fmt.Errorf("observer input %s: invalid resident fee step", id)
+			}
 		}
 		seqFirst, err := parseDANodeObserverUint("resident.received_sequence_first", row.ReceivedSequenceFirst)
-		if err != nil { return out, err }
+		if err != nil {
+			return out, err
+		}
+		seqStepText, seqStepPresent, err := optionalDANodeObserverDecimal(row.ReceivedSequenceStep, "resident.received_sequence_step")
+		if err != nil {
+			return out, err
+		}
 		seqStep := uint64(0)
-		if row.ReceivedSequenceStep != "" {
-			seqStep, err = parseDANodeObserverUint("resident.received_sequence_step", row.ReceivedSequenceStep)
-			if err != nil { return out, err }
+		if seqStepPresent {
+			seqStep, err = parseDANodeObserverUint("resident.received_sequence_step", seqStepText)
+			if err != nil {
+				return out, err
+			}
 		}
 		bytes, err := parseDANodeObserverUint("resident.total_bytes", row.TotalBytes)
-		if err != nil { return out, err }
+		if err != nil {
+			return out, err
+		}
 		payload, err := parseDANodeObserverUint("resident.payload_bytes", row.PayloadBytes)
-		if err != nil { return out, err }
+		if err != nil {
+			return out, err
+		}
 		firstID := daNodeObserverHexID(daNodeObserverIdentity(caseOrdinal, *row.ClassOrdinal, firstOrdinal))
 		lastID := daNodeObserverHexID(daNodeObserverIdentity(caseOrdinal, *row.ClassOrdinal, lastOrdinal))
 		if row.DAIDRange.First != firstID || row.DAIDRange.Last != lastID {
 			return out, fmt.Errorf("observer input %s: resident identity range mismatch", id)
 		}
 		for ordinal := uint64(0); ordinal < row.ResidentCount; ordinal++ {
-			if seqStep != 0 && ordinal > (^uint64(0)-seqFirst)/seqStep { return out, fmt.Errorf("observer input %s: resident sequence overflow", id) }
+			if seqStep != 0 && ordinal > (^uint64(0)-seqFirst)/seqStep {
+				return out, fmt.Errorf("observer input %s: resident sequence overflow", id)
+			}
 			residentFee := new(big.Int).Add(new(big.Int).SetBytes(feeBytes(fee)), new(big.Int).Mul(feeStep, new(big.Int).SetUint64(ordinal)))
-			if residentFee.BitLen() > 128 { return out, fmt.Errorf("observer input %s: resident fee overflow", id) }
+			if residentFee.BitLen() > 128 {
+				return out, fmt.Errorf("observer input %s: resident fee overflow", id)
+			}
 			feeValue, err := parseDANodeObserverU128("resident fee", residentFee.String())
 			if err != nil {
 				return out, err
 			}
 			seq := seqFirst + ordinal*seqStep
 			residentID := daNodeObserverIdentity(caseOrdinal, *row.ClassOrdinal, firstOrdinal+ordinal)
-			if _, ok := ids[residentID]; ok || residentID == out.candidate.id { return out, fmt.Errorf("observer input %s: duplicate planner identity", id) }
+			if _, ok := ids[residentID]; ok || residentID == out.candidate.id {
+				return out, fmt.Errorf("observer input %s: duplicate planner identity", id)
+			}
 			ids[residentID] = struct{}{}
 			out.residents = append(out.residents, daCompleteCapacitySet{id: residentID, fee: feeValue, totalBytes: bytes, payloadBytes: payload, receivedSequence: seq})
 		}
-		if row.TotalFeeLast != "" && len(out.residents) > 0 {
-			last, err := parseDANodeObserverU128("resident.total_fee_last", row.TotalFeeLast)
-			if err != nil { return out, err }
-			if out.residents[len(out.residents)-1].fee != last { return out, fmt.Errorf("observer input %s: resident fee endpoint mismatch", id) }
+		feeLastText, feeLastPresent, err := optionalDANodeObserverDecimal(row.TotalFeeLast, "resident.total_fee_last")
+		if err != nil {
+			return out, err
 		}
-		if row.ReceivedSequenceLast != "" && len(out.residents) > 0 {
-			last, err := parseDANodeObserverUint("resident.received_sequence_last", row.ReceivedSequenceLast)
-			if err != nil { return out, err }
-			if out.residents[len(out.residents)-1].receivedSequence != last { return out, fmt.Errorf("observer input %s: resident sequence endpoint mismatch", id) }
+		if feeLastPresent && len(out.residents) > 0 {
+			last, err := parseDANodeObserverU128("resident.total_fee_last", feeLastText)
+			if err != nil {
+				return out, err
+			}
+			if out.residents[len(out.residents)-1].fee != last {
+				return out, fmt.Errorf("observer input %s: resident fee endpoint mismatch", id)
+			}
+		}
+		seqLastText, seqLastPresent, err := optionalDANodeObserverDecimal(row.ReceivedSequenceLast, "resident.received_sequence_last")
+		if err != nil {
+			return out, err
+		}
+		if seqLastPresent && len(out.residents) > 0 {
+			last, err := parseDANodeObserverUint("resident.received_sequence_last", seqLastText)
+			if err != nil {
+				return out, err
+			}
+			if out.residents[len(out.residents)-1].receivedSequence != last {
+				return out, fmt.Errorf("observer input %s: resident sequence endpoint mismatch", id)
+			}
 		}
 	}
 	return out, nil
@@ -531,7 +608,7 @@ func requireDANodeObserverInputFailure(t *testing.T, raw []byte, id, label, diag
 	changed := mutateDANodeObserverInput(t, raw, id, mutate)
 	_, err := collectDANodeObserver(changed)
 	matched := err != nil && strings.Contains(err.Error(), diagnostic)
-	if diagnostic == "resident sequence overflow" || diagnostic == "resident fee overflow" || diagnostic == "resident identity range mismatch" || diagnostic == "resident count exceeds construction bound" {
+	if diagnostic == "resident sequence overflow" || diagnostic == "resident fee overflow" || diagnostic == "resident identity range mismatch" || diagnostic == "resident count exceeds construction bound" || diagnostic == "invalid resident range" || diagnostic == "resident fee endpoint mismatch" || diagnostic == "resident sequence endpoint mismatch" {
 		matched = err != nil && strings.HasSuffix(err.Error(), diagnostic)
 	}
 	if !matched {
@@ -583,6 +660,14 @@ func TestDAAdmissionObserverNodeIntegrity(t *testing.T) {
 			})
 		}
 	}
+	residentField := func(field string, value json.RawMessage) func(map[string]json.RawMessage) error {
+		return func(input map[string]json.RawMessage) error {
+			return editDANodeObserverResident(input, 0, func(resident map[string]json.RawMessage) error {
+				resident[field] = value
+				return nil
+			})
+		}
+	}
 	mutations := []struct {
 		label, id, diagnostic string
 		edit func(map[string]json.RawMessage) error
@@ -601,12 +686,65 @@ func TestDAAdmissionObserverNodeIntegrity(t *testing.T) {
 		{"hex width", "CAP_RETAINED_BYTES_BELOW", "candidate identity is not 32 bytes", candidateField("da_id", json.RawMessage(`"00"`))},
 		{"candidate identity", "CAP_RETAINED_BYTES_BELOW", "candidate identity does not match", candidateField("da_id", json.RawMessage(`"5000000000000000000000000000001f000000000000ffff0000000000000000"`))},
 		{"missing resident range", "CAP_RETAINED_BYTES_BELOW", "missing required resident ordinal", removeDANodeObserverResidentRange},
+		{
+			"missing last ordinal", "CAP_RETAINED_BYTES_BELOW", "missing required resident ordinal",
+			removeDANodeObserverResidentLastOrdinal,
+		},
 		{"identity mapping", "CAP_RETAINED_BYTES_BELOW", "invalid planner shape", identityMappingDANodeObserverMutation},
 		{"range endpoint", "CAP_RETAINED_BYTES_BELOW", "resident identity range mismatch", rangeEndpointDANodeObserverMutation},
+		{
+			"reversed ordinal range", "CAP_RETAINED_BYTES_BELOW", "invalid resident range",
+			reversedDANodeObserverResidentRange,
+		},
+		{
+			"count range mismatch", "CAP_RETAINED_BYTES_BELOW", "invalid resident range",
+			inconsistentDANodeObserverResidentCountRange,
+		},
+		{
+			"fee endpoint mismatch", "CAP_SET_COUNT_BELOW", "resident fee endpoint mismatch",
+			residentField("total_fee_last", json.RawMessage(`"65533"`)),
+		},
+		{
+			"sequence endpoint mismatch", "CAP_SET_COUNT_BELOW", "resident sequence endpoint mismatch",
+			residentField("received_sequence_last", json.RawMessage(`"65533"`)),
+		},
 		{"sequence progression overflow", "CAP_SET_COUNT_BELOW", "resident sequence overflow", func(in map[string]json.RawMessage) error { return editDANodeObserverResident(in, 0, func(r map[string]json.RawMessage) error { r["received_sequence_first"] = json.RawMessage(`"18446744073709551615"`); r["received_sequence_step"] = json.RawMessage(`"1"`); return nil }) }},
 		{"fee progression overflow", "CAP_SET_COUNT_BELOW", "resident fee overflow", func(in map[string]json.RawMessage) error { return editDANodeObserverResident(in, 0, func(r map[string]json.RawMessage) error { r["total_fee"] = json.RawMessage(`"340282366920938463463374607431768211455"`); r["total_fee_step"] = json.RawMessage(`"1"`); return nil }) }},
 		{"resident bound", "CAP_SET_COUNT_BELOW", "resident count exceeds construction bound", residentBoundDANodeObserverMutation},
+		{
+			"cumulative resident bound", "CAP_SET_COUNT_ABOVE", "resident count exceeds construction bound",
+			cumulativeDANodeObserverResidentBoundMutation,
+		},
 		{"duplicate identity", "CAP_RETAINED_BYTES_BELOW", "duplicate planner identity", duplicateDANodeObserverResident},
+	}
+	optionalFields := []struct {
+		name       string
+		diagnostic string
+	}{
+		{name: "total_fee_step", diagnostic: "resident.total_fee_step"},
+		{name: "total_fee_last", diagnostic: "resident.total_fee_last"},
+		{name: "received_sequence_step", diagnostic: "resident.received_sequence_step"},
+		{name: "received_sequence_last", diagnostic: "resident.received_sequence_last"},
+	}
+	invalidDecimals := []struct {
+		label string
+		raw   json.RawMessage
+	}{
+		{label: "empty", raw: json.RawMessage(`""`)},
+		{label: "null", raw: json.RawMessage(`null`)},
+	}
+	for _, field := range optionalFields {
+		for _, invalid := range invalidDecimals {
+			mutations = append(mutations, struct {
+				label, id, diagnostic string
+				edit                  func(map[string]json.RawMessage) error
+			}{
+				label:      field.name + " " + invalid.label,
+				id:         "CAP_RETAINED_BYTES_BELOW",
+				diagnostic: field.diagnostic,
+				edit:       residentField(field.name, invalid.raw),
+			})
+		}
 	}
 	for _, mutation := range mutations {
 		requireDANodeObserverInputFailure(t, raw, mutation.id, mutation.label, mutation.diagnostic, mutation.edit)
@@ -644,6 +782,76 @@ func editDANodeObserverResident(input map[string]json.RawMessage, index int, edi
 func removeDANodeObserverResidentRange(input map[string]json.RawMessage) error {
 	return editDANodeObserverResident(input, 0, func(resident map[string]json.RawMessage) error {
 		delete(resident, "resident_ordinal_range")
+		return nil
+	})
+}
+
+func removeDANodeObserverResidentLastOrdinal(input map[string]json.RawMessage) error {
+	return editDANodeObserverResident(input, 0, func(resident map[string]json.RawMessage) error {
+		return editDANodeObserverNested(resident, "resident_ordinal_range", func(ordinals map[string]json.RawMessage) error {
+			delete(ordinals, "last")
+			return nil
+		})
+	})
+}
+
+func reversedDANodeObserverResidentRange(input map[string]json.RawMessage) error {
+	var planner daNodePlannerInput
+	encodedInput, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(encodedInput, &planner); err != nil {
+		return err
+	}
+	if planner.CaseOrdinal == nil || len(planner.LogicalPrestate.ResidentClasses) == 0 {
+		return fmt.Errorf("observer input range mutation: missing resident identity")
+	}
+	row := planner.LogicalPrestate.ResidentClasses[0]
+	if row.ClassOrdinal == nil || row.ResidentOrdinalRange.Last == nil {
+		return fmt.Errorf("observer input range mutation: missing ordinals")
+	}
+	last := *row.ResidentOrdinalRange.Last
+	if last == ^uint64(0) {
+		return fmt.Errorf("observer input range mutation: ordinal overflow")
+	}
+	first := last + 1
+	firstID := daNodeObserverHexID(daNodeObserverIdentity(*planner.CaseOrdinal, *row.ClassOrdinal, first))
+	lastID := daNodeObserverHexID(daNodeObserverIdentity(*planner.CaseOrdinal, *row.ClassOrdinal, last))
+	return editDANodeObserverResident(input, 0, func(resident map[string]json.RawMessage) error {
+		if err := editDANodeObserverNested(resident, "resident_ordinal_range", func(ordinals map[string]json.RawMessage) error {
+			encodedFirst, err := json.Marshal(first)
+			if err != nil {
+				return err
+			}
+			ordinals["first"] = encodedFirst
+			return nil
+		}); err != nil {
+			return err
+		}
+		return editDANodeObserverNested(resident, "da_id_range", func(ids map[string]json.RawMessage) error {
+			encodedFirst, err := json.Marshal(firstID)
+			if err != nil {
+				return err
+			}
+			encodedLast, err := json.Marshal(lastID)
+			if err != nil {
+				return err
+			}
+			ids["first"] = encodedFirst
+			ids["last"] = encodedLast
+			return nil
+		})
+	})
+}
+
+func inconsistentDANodeObserverResidentCountRange(input map[string]json.RawMessage) error {
+	return editDANodeObserverResident(input, 0, func(resident map[string]json.RawMessage) error {
+		count, err := json.Marshal(uint64(2))
+		if err != nil {
+			return err
+		}
+		resident["resident_count"] = count
 		return nil
 	})
 }
@@ -690,6 +898,60 @@ func residentBoundDANodeObserverMutation(input map[string]json.RawMessage) error
 			if err == nil { r["last"] = raw }
 			return err
 		})
+	})
+}
+
+func cumulativeDANodeObserverResidentBoundMutation(input map[string]json.RawMessage) error {
+	return editDANodeObserverNested(input, "logical_prestate", func(logical map[string]json.RawMessage) error {
+		var residents []json.RawMessage
+		if err := json.Unmarshal(logical["resident_classes"], &residents); err != nil {
+			return err
+		}
+		if len(residents) == 0 {
+			return fmt.Errorf("observer input cumulative bound mutation: no resident class")
+		}
+		var second map[string]json.RawMessage
+		if err := json.Unmarshal(residents[0], &second); err != nil {
+			return err
+		}
+		var caseOrdinal, classOrdinal uint64
+		if err := json.Unmarshal(input["case_ordinal"], &caseOrdinal); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(second["class_ordinal"], &classOrdinal); err != nil {
+			return err
+		}
+		if classOrdinal == ^uint64(0) {
+			return fmt.Errorf("observer input cumulative bound mutation: class ordinal overflow")
+		}
+		classOrdinal++
+		count, err := json.Marshal(uint64(1))
+		if err != nil {
+			return err
+		}
+		second["class_ordinal"], err = json.Marshal(classOrdinal)
+		if err != nil {
+			return err
+		}
+		second["resident_count"] = count
+		second["resident_ordinal_range"], err = json.Marshal(map[string]uint64{"first": 0, "last": 0})
+		if err != nil {
+			return err
+		}
+		identity := daNodeObserverHexID(daNodeObserverIdentity(caseOrdinal, classOrdinal, 0))
+		second["da_id_range"], err = json.Marshal(map[string]string{"first": identity, "last": identity})
+		if err != nil {
+			return err
+		}
+		second["total_fee_last"] = json.RawMessage(bytes.Clone(second["total_fee"]))
+		second["received_sequence_last"] = json.RawMessage(bytes.Clone(second["received_sequence_first"]))
+		encodedSecond, err := json.Marshal(second)
+		if err != nil {
+			return err
+		}
+		residents = append(residents, encodedSecond)
+		logical["resident_classes"], err = json.Marshal(residents)
+		return err
 	})
 }
 
