@@ -272,6 +272,15 @@ func TestDAObserverConformanceInjectors(t *testing.T) {
 			t.Fatalf("during transition=(%+v,%v)", result, err)
 		}
 		end()
+		nextEnd, err := DAObserverBeginOwnerTransition(f.mp.pendingOutpoints)
+		if err != nil {
+			t.Fatal(err)
+		}
+		end()
+		if result, err := f.relay.AdmitDA(chunk.raw, LocalDAProvenance()); DAObserverRelayDisposition(err) != RelayAdmissionUnavailable {
+			t.Fatalf("stale end reopened next transition: result=%+v err=%v", result, err)
+		}
+		nextEnd()
 		result, err := f.relay.AdmitDA(chunk.raw, LocalDAProvenance())
 		requirePublicDAResult(t, result, err, DAAdmissionResult{DAID: [32]byte{0xD2}, Disposition: DAAdmissionRetained})
 	})

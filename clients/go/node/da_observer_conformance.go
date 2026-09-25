@@ -8,6 +8,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"sync"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 )
@@ -361,8 +362,8 @@ func (s *DARelayState) injectDAObserverMemberFaultLocked(locator daRelayLocator,
 }
 
 // DAObserverBeginOwnerTransition begins a pending-outpoint owner transition so
-// the DA admission hold cannot be acquired; end aborts that transition. A nil
-// owner, or a transition that cannot begin, returns an error and no end.
+// the DA admission hold cannot be acquired; end aborts that transition once.
+// A nil owner, or a transition that cannot begin, returns an error and no end.
 func DAObserverBeginOwnerTransition(o *PendingOutpointOwner) (end func(), err error) {
 	if o == nil {
 		return nil, errors.New("nil pending-outpoint owner")
@@ -370,5 +371,6 @@ func DAObserverBeginOwnerTransition(o *PendingOutpointOwner) (end func(), err er
 	if _, err = o.beginTransition(); err != nil {
 		return nil, err
 	}
-	return o.endTransitionAborted, nil
+	var once sync.Once
+	return func() { once.Do(o.endTransitionAborted) }, nil
 }
