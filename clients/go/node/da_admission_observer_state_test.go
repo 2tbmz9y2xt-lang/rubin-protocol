@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -691,7 +692,7 @@ type daNodeObserverStateAdmission struct {
 	Before       daNodeObserverStateObservation
 	After        daNodeObserverStateObservation
 	PlanOrder    [][32]byte
-	Restore      func()
+	Restore      func() error
 	ControlReach bool
 	Invocations  uint64
 }
@@ -772,15 +773,20 @@ func stateSelectedMember(f *daNodeObserverStateFixture, control daNodeObserverSt
 	return member, nil
 }
 
-func lockedRestore(mu sync.Locker, restore func()) func() {
-	return func() {
+// lockedRestore undoes one named corruption only while its target still carries it.
+func lockedRestore(mu sync.Locker, corrupted func() bool, restore func()) func() error {
+	return func() error {
 		mu.Lock()
+		defer mu.Unlock()
+		if !corrupted() {
+			return fmt.Errorf("observer state restore: named corruption target is absent or no longer corrupted")
+		}
 		restore()
-		mu.Unlock()
+		return nil
 	}
 }
 
-func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, control daNodeObserverStateControl) (func(), error) {
+func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, control daNodeObserverStateControl) (func() error, error) {
 	relay := f.Relay
 	if control.action == "ADVANCE_TARGET_AND_GLOBAL_REVISION" {
 		relay.mu.Lock()
@@ -811,13 +817,18 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 		if !ok || locator.daID != member.DAID {
 			return nil, fmt.Errorf("observer state control: selected locator is absent")
 		}
-		relay.locators[member.TxID] = daRelayLocator{daID: control.locator, kind: locator.kind, chunkIndex: locator.chunkIndex}
-		return lockedRestore(&relay.mu, func() { relay.locators[member.TxID] = locator }), nil
+		corrupt := daRelayLocator{daID: control.locator, kind: locator.kind, chunkIndex: locator.chunkIndex}
+		relay.locators[member.TxID] = corrupt
+		return lockedRestore(&relay.mu, func() bool { current, ok := relay.locators[member.TxID]; return ok && current == corrupt },
+			func() { relay.locators[member.TxID] = locator }), nil
 	case "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES":
 		old := record.completeIntrinsic.totalBytes
 		record.completeIntrinsic.totalBytes += control.delta
 		relay.sets[member.DAID] = record
-		return lockedRestore(&relay.mu, func() {
+		return lockedRestore(&relay.mu, func() bool {
+			current, ok := relay.sets[member.DAID]
+			return ok && current.completeIntrinsic.totalBytes == record.completeIntrinsic.totalBytes
+		}, func() {
 			current := relay.sets[member.DAID]
 			current.completeIntrinsic.totalBytes = old
 			relay.sets[member.DAID] = current
@@ -833,11 +844,11 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 		}
 		delete(record.chunks, index)
 		relay.sets[member.DAID] = record
-		return lockedRestore(&relay.mu, func() {
-			current := relay.sets[member.DAID]
-			current.chunks[index] = chunk
-			relay.sets[member.DAID] = current
-		}), nil
+		return lockedRestore(&relay.mu, func() bool {
+			current, ok := relay.sets[member.DAID]
+			_, present := current.chunks[index]
+			return ok && current.chunks != nil && !present
+		}, func() { relay.sets[member.DAID].chunks[index] = chunk }), nil
 	default:
 		return nil, fmt.Errorf("observer input control: invalid PLANNED action %q", control.action)
 	}
@@ -861,7 +872,7 @@ func ownerClaimForMemberLocked(owner *PendingOutpointOwner, member daNodeObserve
 	return found, claim, nil
 }
 
-func applyDANodeObserverStateEffectsControl(f *daNodeObserverStateFixture, control daNodeObserverStateControl) (func(), error) {
+func applyDANodeObserverStateEffectsControl(f *daNodeObserverStateFixture, control daNodeObserverStateControl) (func() error, error) {
 	member, err := stateSelectedMember(f, control)
 	if err != nil {
 		return nil, err
@@ -877,10 +888,16 @@ func applyDANodeObserverStateEffectsControl(f *daNodeObserverStateFixture, contr
 	case "CLEAR_PRIOR_CLAIM_FINALIZED":
 		old := claim.finalized
 		claim.finalized = false
-		return lockedRestore(&owner.mu, func() { claim.finalized = old }), nil
+		return lockedRestore(&owner.mu, func() bool { return owner.byToken[token] == claim && !claim.finalized }, func() { claim.finalized = old }), nil
 	case "REMOVE_PRIOR_CLAIM":
 		delete(owner.byToken, token)
-		return lockedRestore(&owner.mu, func() { owner.byToken[token] = claim }), nil
+		restore := lockedRestore(&owner.mu, func() bool {
+			locator, retained := f.Relay.locators[member.TxID]
+			_, present := owner.byToken[token]
+			return retained && locator.daID == member.DAID && !present
+		}, func() { owner.byToken[token] = claim })
+		// DA->owner lock order: the claim returns only while its member is still retained.
+		return func() error { f.Relay.mu.Lock(); defer f.Relay.mu.Unlock(); return restore() }, nil
 	default:
 		return nil, fmt.Errorf("observer input control: invalid EFFECTS action %q", control.action)
 	}
@@ -1184,7 +1201,9 @@ func daNodeObserverStateAdmissionImageOutput(f *daNodeObserverStateFixture, run 
 	}
 	imageUnchanged := reflect.DeepEqual(before, after)
 	targetCommitMatches := daNodeObserverStateCandidateMatches(after, f.TargetCommit, run.After.Owner.Generation)
+	// The completion value also requires the retained target commit to still match its construction.
 	survivors := daNodeObserverStateSurvivorsEqual(before, after, removedRecords, nil, f.Candidate.TxID) && targetCommitMatches
+
 	firstSequence := targetRecord.ReceivedTime
 	if firstSequence == 0 {
 		return nil, nil, fmt.Errorf("observer state image: target record is absent")
@@ -1247,13 +1266,15 @@ func daNodeObserverStateAdmissionFollowUp(row daNodeObserverStateCase, fixture *
 		if primary.Restore == nil {
 			return nil, fmt.Errorf("observer input %s: named control has no restorable field", row.Case.ID)
 		}
-		primary.Restore()
+		if err := primary.Restore(); err != nil {
+			return nil, err
+		}
 	}
 	prior, err := observerImageOutsideHook(fixture, false)
 	if err != nil {
 		return nil, err
 	}
-	if row.Input.FollowUp != "REPEAT_IDENTICAL_ADMISSION" && primary.After.Owner != prior.Owner {
+	if primary.After.Owner != prior.Owner {
 		return nil, fmt.Errorf("observer state follow-up high-water continuity: owner identity or counters changed before retry")
 	}
 	run, err := admitDANodeObserverStateCandidate(fixture, daNodeObserverStateControl{phase: "NONE", action: "NONE"})
@@ -1327,6 +1348,13 @@ func stateCleanupMembers(f *daNodeObserverStateFixture, image DAObserverStateIma
 		charges[member.TxID] = charge
 		members = append(members, output)
 	}
+	actual := len(record.Chunks)
+	if record.Commit.Member != nil {
+		actual++
+	}
+	if len(members) != actual {
+		return nil, nil, record, false, fmt.Errorf("observer state cleanup: retained record member has no constructed input")
+	}
 	return members, charges, record, exists, nil
 }
 
@@ -1355,6 +1383,9 @@ func projectDANodeObserverStateCleanup(f *daNodeObserverStateFixture, row daNode
 			}
 			released += charge
 		}
+	}
+	if before.Image.StagedBytes < after.Image.StagedBytes || released != before.Image.StagedBytes-after.Image.StagedBytes {
+		return nil, fmt.Errorf("observer state cleanup: released charge %d is not Go's staged-bytes delta", released)
 	}
 	slices.Sort(selected)
 	quota := make([]any, 0, len(after.Image.OrphanBytesByPeerQuotaKey))
@@ -1495,7 +1526,7 @@ func validateDANodeObserverStateControl(raw json.RawMessage) (daNodeObserverStat
 			c.locator, err = daNodeObserverStateHex32("locator_da_id", text)
 		case "delta":
 			c.delta, err = stateDANodeObserverUint("intrinsic_total_bytes_delta", text)
-			if c.delta == 0 {
+			if err == nil && c.delta == 0 {
 				err = fmt.Errorf("observer input control delta: must be positive")
 			}
 		case "revision":
@@ -1521,7 +1552,7 @@ func validateDANodeObserverStateInput(id string, raw json.RawMessage) (daNodeObs
 	switch input.ExecutionBoundary {
 	case "COMPLETE_COMMIT_PRECONDITION":
 		if input.ConstructionRef != "COMPLETE_COMMIT_7_SETS" || len(input.MemberProvenance) != 0 || len(input.CleanupSelector) != 0 {
-			return input, fmt.Errorf("observer input %s: invalid complete-commit shape", id)
+			return input, fmt.Errorf("observer input %s: construction_ref or payload shape is not complete-commit", id)
 		}
 		sequenceText, err := decodeDANodeObserverStateString(input.AcceptedSequence, "accepted_sequence")
 		sequence, parseErr := stateDANodeObserverUint("accepted_sequence", sequenceText)
@@ -1602,6 +1633,9 @@ func selectDANodeObserverStateCases(corpus daNodeObserverCorpus) ([]daNodeObserv
 		if err != nil {
 			return nil, err
 		}
+		if strings.HasPrefix(row.ID, "CAP_") != (input.ExecutionBoundary == "COMPLETE_COMMIT_PRECONDITION") {
+			return nil, fmt.Errorf("observer census: case %q in the wrong execution_boundary", row.ID)
+		}
 		selected = append(selected, daNodeObserverStateCase{Case: row, Input: input})
 	}
 	if len(selected) != len(daNodeObserverStateIDs) {
@@ -1626,6 +1660,11 @@ func collectDANodeObserverState(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return emitDANodeObserverState(cases, profile, "")
+}
+
+// emitDANodeObserverState writes path, when set, only after every row was collected.
+func emitDANodeObserverState(cases []daNodeObserverStateCase, profile daNodeObserverStateProfile, path string) ([]byte, error) {
 	out := daNodeObserverOutput{FormatVersion: 1, Cases: make([]daNodeObserverOutCase, 0, len(cases))}
 	for _, row := range cases {
 		observed, err := collectDANodeObserverStateCase(row, profile)
@@ -1638,22 +1677,23 @@ func collectDANodeObserverState(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("observer output: %w", err)
 	}
-	return append(encoded, '\n'), nil
+	encoded = append(encoded, '\n')
+	if path != "" {
+		if err := os.WriteFile(path, encoded, 0o600); err != nil {
+			return nil, fmt.Errorf("observer output write: %w", err)
+		}
+	}
+	return encoded, nil
 }
 
 func TestDAAdmissionObserverNodeState(t *testing.T) {
-	_, raw, err := loadDANodeObserverCorpus(daNodeObserverCorpusPath())
-	require(t, err == nil, "observer input corpus: %v", err)
-	actual, err := collectDANodeObserverState(raw)
+	_, _, cases, profile := stateTestData(t)
+	actual, err := emitDANodeObserverState(cases, profile, os.Getenv("RUBIN_DA_NODE_STATE_ACTUAL_OUT"))
 	require(t, err == nil, "observer state: %v", err)
 	var output daNodeObserverOutput
 	err = json.Unmarshal(actual, &output)
 	require(t, err == nil, "observer output: %v", err)
 	require(t, output.FormatVersion == 1 && len(output.Cases) == len(daNodeObserverStateIDs), "observer census: output version=%d cases=%d", output.FormatVersion, len(output.Cases))
-	if path := os.Getenv("RUBIN_DA_NODE_STATE_ACTUAL_OUT"); path != "" {
-		err := os.WriteFile(path, actual, 0o600)
-		require(t, err == nil, "observer output write: %v", err)
-	}
 }
 
 func stateTestData(t *testing.T) ([]byte, daNodeObserverCorpus, []daNodeObserverStateCase, daNodeObserverStateProfile) {
@@ -1733,6 +1773,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	}
 	unknownCommit, unknownCleanup := cases[0].Case, cases[12].Case
 	unknownCommit.ID, unknownCleanup.ID = "UNKNOWN_STATE_CASE", "UNKNOWN_STATE_CASE"
+	cleanupAsCommit, commitAsCleanup := cases[0].Case, cases[12].Case
+	cleanupAsCommit.Input, commitAsCleanup.Input = cases[12].Case.Input, cases[0].Case.Input
 	for mode, probe := range []struct {
 		mutate func([]json.RawMessage) []json.RawMessage
 		want   string
@@ -1742,6 +1784,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		{func(c []json.RawMessage) []json.RawMessage { c[0], c[1] = c[1], c[0]; return c }, "observer census: duplicate or out-of-order"},
 		{func(c []json.RawMessage) []json.RawMessage { c[0], _ = json.Marshal(unknownCommit); return c }, "observer census: unknown owned case"},
 		{func(c []json.RawMessage) []json.RawMessage { c[12], _ = json.Marshal(unknownCleanup); return c }, "observer census: unknown owned case"},
+		{func(c []json.RawMessage) []json.RawMessage { c[0], _ = json.Marshal(cleanupAsCommit); return c }, `case "CAP_ALL_MEMBERS_REMOVED" in the wrong execution_boundary`},
+		{func(c []json.RawMessage) []json.RawMessage { c[12], _ = json.Marshal(commitAsCleanup); return c }, `case "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED" in the wrong execution_boundary`},
 	} {
 		bad := corpus
 		bad.Cases = probe.mutate(slices.Clone(owned))
@@ -1760,7 +1804,7 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 				input[field] = json.RawMessage(value)
 				raw, _ := json.Marshal(input)
 				_, err := validateDANodeObserverStateInput(probe.row.Case.ID, raw)
-				require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity %s %s=%s: %v", probe.row.Case.ID, field, value, err)
+				require(t, err != nil && strings.Contains(err.Error(), "observer input") && strings.Contains(err.Error(), field), "observer state integrity %s %s=%s: %v", probe.row.Case.ID, field, value, err)
 			}
 		}
 	}
@@ -1772,40 +1816,47 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			delete(bad, field)
 			raw, _ := json.Marshal(bad)
 			_, err := validateDANodeObserverStateControl(raw)
-			require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity missing control.%s in %s: %v", field, row.Case.ID, err)
+			require(t, err != nil && strings.Contains(err.Error(), "observer input control."+field+":"), "observer state integrity missing control.%s in %s: %v", field, row.Case.ID, err)
 		}
 	}
-	for _, raw := range []string{
-		`{"phase":"UNKNOWN","action":"NONE"}`, `{"phase":"NONE","action":"UNKNOWN"}`,
-		`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":false}`,
-		`{"phase":"NONE","action":"NONE","member":null}`, `{"phase":"NONE","action":"NONE","extra":1}`,
-		`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":2,"resident_ordinal":2,"member_ordinal":1},"preserve_other_fields":true}`,
-		`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`,
-		`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`,
-		`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0},"preserve_other_fields":true}`,
-		`{"phase":"PLANNED","action":"CORRUPT_RESIDENT_LOCATOR_DA_ID","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true,"locator_da_id":"zz"}`,
-		`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"18446744073709551616"}`,
+	for _, probe := range [][2]string{
+		{`{"phase":"UNKNOWN","action":"NONE"}`, "control: unknown phase/action"}, {`{"phase":"NONE","action":"UNKNOWN"}`, "control: unknown phase/action"},
+		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":false}`, "control.preserve_other_fields: must be true"},
+		{`{"phase":"NONE","action":"NONE","member":null}`, "control.member: missing or forbidden"}, {`{"phase":"NONE","action":"NONE","extra":1}`, `unknown field "extra"`},
+		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":2,"resident_ordinal":2,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: absent member"},
+		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: invalid selector"},
+		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: invalid selector"},
+		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0},"preserve_other_fields":true}`, "control.member: invalid selector"},
+		{`{"phase":"PLANNED","action":"CORRUPT_RESIDENT_LOCATOR_DA_ID","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true,"locator_da_id":"zz"}`, "locator_da_id: expected 32-byte hex"},
+		{`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"18446744073709551616"}`, "intrinsic_total_bytes_delta: invalid decimal"},
 	} {
-		_, err := validateDANodeObserverStateControl([]byte(raw))
-		require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity accepted control %s: %v", raw, err)
+		_, err := validateDANodeObserverStateControl([]byte(probe[0]))
+		require(t, err != nil && strings.Contains(err.Error(), "observer input") && strings.Contains(err.Error(), probe[1]), "observer state integrity accepted control %s: %v", probe[0], err)
 	}
-	for _, raw := range []string{`[{"source":"UNKNOWN"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, `[{"source":"PEER"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, `[{"source":"LOCAL","peer_identity":"x"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`} {
-		_, err := parseDANodeObserverStateProvenance([]byte(raw))
-		require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity accepted provenance %s: %v", raw, err)
+	for _, probe := range [][2]string{
+		{`[{"source":"UNKNOWN"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance: unknown source"},
+		{`[{"source":"PEER"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance.peer_identity: missing string"},
+		{`[{"source":"LOCAL","peer_identity":"x"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance[0]: forbidden peer identities"},
+	} {
+		_, err := parseDANodeObserverStateProvenance([]byte(probe[0]))
+		require(t, err != nil && strings.Contains(err.Error(), "observer input "+probe[1]), "observer state integrity accepted provenance %s: %v", probe[0], err)
 	}
-	for mode, mutate := range []func(*daNodeObserverStateProfile){
-		func(p *daNodeObserverStateProfile) { p.Mixed.MemberTemplateRef = "UNKNOWN" },
-		func(p *daNodeObserverStateProfile) { p.Mixed.ChunkCount = 65536 },
-		func(p *daNodeObserverStateProfile) { p.Complete.Target.ChunkLengths = []uint64{^uint64(0)} },
-		func(p *daNodeObserverStateProfile) { p.Canonical.Input.Value = "18446744073709551616" },
-		func(p *daNodeObserverStateProfile) { p.Complete.EffectiveDAMempoolSize = "536870913" },
-		func(p *daNodeObserverStateProfile) { p.Complete.PinnedPayloadMax = "96000001" },
-		func(p *daNodeObserverStateProfile) { p.Complete.CompleteSetMaxCount = 65537 },
+	for _, probe := range []struct {
+		mutate func(*daNodeObserverStateProfile)
+		want   string
+	}{
+		{func(p *daNodeObserverStateProfile) { p.Mixed.MemberTemplateRef = "UNKNOWN" }, "STATE_B_MIXED: unsupported cleanup profile"},
+		{func(p *daNodeObserverStateProfile) { p.Mixed.ChunkCount = 65536 }, "STATE_B_MIXED: unsupported cleanup profile"},
+		{func(p *daNodeObserverStateProfile) { p.Complete.Target.ChunkLengths = []uint64{^uint64(0)} }, "COMPLETE_COMMIT_7_SETS: invalid target"},
+		{func(p *daNodeObserverStateProfile) { p.Canonical.Input.Value = "18446744073709551616" }, "CANONICAL_MEMBER: unsupported signed-member profile"},
+		{func(p *daNodeObserverStateProfile) { p.Complete.EffectiveDAMempoolSize = "536870913" }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
+		{func(p *daNodeObserverStateProfile) { p.Complete.PinnedPayloadMax = "96000001" }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
+		{func(p *daNodeObserverStateProfile) { p.Complete.CompleteSetMaxCount = 65537 }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
 	} {
 		bad := profile
-		mutate(&bad)
+		probe.mutate(&bad)
 		err := validateDANodeObserverStateProfile(bad)
-		require(t, err != nil && strings.Contains(err.Error(), "observer input"), "observer state integrity accepted construction %d: %v", mode, err)
+		require(t, err != nil && strings.Contains(err.Error(), "observer input "+probe.want), "observer state integrity accepted construction %s: %v", probe.want, err)
 	}
 	f, err := newDANodeObserverStateFixture(cases[0], profile)
 	require(t, err == nil, "observer state: %v", err)
@@ -1840,8 +1891,21 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	floor.Canonical.Policy.RollingFeeFloor = "2"
 	_, err = newDANodeObserverStateFixture(cases[11], floor)
 	require(t, err != nil && strings.Contains(err.Error(), "rolling_fee_floor"), "observer state integrity: unbound rolling fee floor accepted: %v", err)
-	// The rejected invalid txid is cached, so the closure probe takes a fresh fixture; a per-peer
-	// entry added at EFFECTS survives Go's pre-mutation owner-ready check and publication.
+	// Each named restore succeeds once and then refuses: its target no longer carries the corruption.
+	for _, row := range cases[1:9] {
+		control, apply := row.Input.control, applyDANodeObserverStatePlannedControl
+		if control.phase == "EFFECTS" {
+			apply = applyDANodeObserverStateEffectsControl
+		}
+		if control.selected == nil {
+			continue
+		}
+		restore, err := apply(f, control)
+		require(t, err == nil && restore() == nil, "observer state restore %s: %v", row.Case.ID, err)
+		err = restore()
+		require(t, err != nil && strings.Contains(err.Error(), "no longer corrupted"), "observer state restore %s: repeated restore accepted: %v", row.Case.ID, err)
+	}
+	// A per-peer entry added at EFFECTS survives Go's pre-mutation owner-ready check and publication.
 	m, err := newDANodeObserverStateFixture(cases[0], profile)
 	require(t, err == nil, "observer state: %v", err)
 	defer m.Signer.Close()
@@ -1854,7 +1918,20 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	require(t, err != nil && strings.Contains(err.Error(), "accounting closure"), "observer state accounting closure: retained admission accepted stale accounting: %v", err)
 	_, open := observerImageOutsideHook(m, false)
 	_, closed := observerImageOutsideHook(m, true)
+
 	require(t, open == nil && closed != nil && strings.Contains(closed.Error(), "accounting closure"), "observer state accounting closure: closed=%v open=%v", closed, open)
+	// A collection failure on the thirteenth row, after the census passed, writes no output.
+	existing, missing := filepath.Join(t.TempDir(), "existing.json"), filepath.Join(t.TempDir(), "missing.json")
+	require(t, os.WriteFile(existing, []byte("prior\n"), 0o600) == nil, "observer output: seed write failed")
+	broken := slices.Clone(cases)
+	broken[12].Input.provenance = broken[12].Input.provenance[:2]
+	for _, path := range []string{existing, missing} {
+		_, err = emitDANodeObserverState(broken, profile, path)
+		require(t, err != nil && strings.Contains(err.Error(), "invalid member sequence"), "observer state last row: collection failure not observed: %v", err)
+	}
+	kept, err := os.ReadFile(existing)
+	_, statErr := os.Stat(missing)
+	require(t, err == nil && string(kept) == "prior\n" && os.IsNotExist(statErr), "observer state output: failed last-row collection wrote output: %q %v", kept, statErr)
 }
 
 func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
@@ -1906,6 +1983,15 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	require(t, err == nil && stale["surviving_members_and_claims_unchanged"] == false, "observer state cleanup: removed member outpoint row survived: %v", err)
 	_, err = projectDANodeObserverStateCleanup(small, daNodeObserverStateCase{}, prior, daNodeObserverStateObservation{Owner: before})
 	require(t, err != nil, "observer state cleanup: absent record projected as zero values")
+	extra := next
+	extra.Image.OutpointRows, extra.Image.Records = nil, []DAObserverRecord{record}
+	extra.Image.Records[0].Chunks = []DAObserverChunk{{Member: &DAObserverMember{TxID: [32]byte{7}}}}
+	_, err = projectDANodeObserverStateCleanup(small, daNodeObserverStateCase{}, prior, extra)
+	require(t, err != nil && strings.Contains(err.Error(), "no constructed input"), "observer state cleanup: unconstructed surviving member dropped: %v", err)
+	skewed := next
+	skewed.Image.OutpointRows, skewed.Image.StagedBytes = nil, 2
+	_, err = projectDANodeObserverStateCleanup(small, daNodeObserverStateCase{}, prior, skewed)
+	require(t, err != nil && strings.Contains(err.Error(), "staged-bytes delta"), "observer state cleanup: released charge not bound to Go accounting: %v", err)
 	stateAssertJSON(t, cleanup, `{"cleanup_result":"REMOVED_PEER_CHUNKS","selected_member_ordinals":[1],"released_charge":"4","removed_locator_count":1,"removed_claim_count":1,"owner_high_water_delta":"0","after_image":{"state":"STAGED_COMMIT","da_id":"0900000000000000000000000000000000000000000000000000000000000000","received_sequence":"2","commit_chunk_count":1,"members":[{"member_ordinal":0,"role":"COMMIT","provenance":{"source":"LOCAL"},"retained_tx_bytes":"1","incomplete_member_charge":"1"}],"retained_counters":{"staged_retained_bytes":"1","complete_retained_bytes":"0","complete_set_count":0,"complete_payload_bytes":"0","accepted_sequence":"4"},"peer_quota_accounting":[]},"surviving_members_and_claims_unchanged":true,"whole_record_removed":false}`)
 	// Independent completion values exercise the final consumer, including false observations.
 	commit.Raw, chunk.Raw = []byte{1}, []byte{2, 3}
@@ -1995,4 +2081,8 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	require(t, !daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil, [32]byte{}), "observer state projection: changed member reported as a surviving equal")
 	require(t, !daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit, changed.Owner.Generation), "observer state projection: changed member reported as matching its construction")
+	repeat, lagging := cases[5], final
+	repeat.Input.FollowUp, lagging.Owner.TokenHighWater = "REPEAT_IDENTICAL_ADMISSION", lagging.Owner.TokenHighWater-1
+	_, err = daNodeObserverStateAdmissionFollowUp(repeat, f, daNodeObserverStateAdmission{After: lagging})
+	require(t, err != nil && strings.Contains(err.Error(), "high-water continuity"), "observer state follow-up high-water continuity: repeat row skipped the owner check: %v", err)
 }
