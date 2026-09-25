@@ -17,6 +17,9 @@ type daCompleteCapacitySet struct {
 	receivedSequence uint64
 }
 
+// daCompleteSetMaxCount bounds the number of retained COMPLETE_SET records.
+const daCompleteSetMaxCount = 65536
+
 type daCompleteCapacityInput struct {
 	byteCap         uint64
 	stagedBytes     uint64
@@ -71,7 +74,7 @@ func validateDACompleteCapacity(in daCompleteCapacityInput) error {
 }
 
 func validateDACompleteTotals(in daCompleteCapacityInput) error {
-	if in.completeCount > 65536 || in.completeCount != uint64(len(in.residents)) {
+	if in.completeCount > daCompleteSetMaxCount || in.completeCount != uint64(len(in.residents)) {
 		return errDARelayImageIncompatible
 	}
 	if in.completePayload > 96000000 {
@@ -150,7 +153,7 @@ func projectDACompleteCapacity(in daCompleteCapacityInput) (daCompleteCapacityPl
 }
 
 func (plan daCompleteCapacityPlan) fits(byteCap uint64) bool {
-	return plan.sharedBytes <= byteCap && plan.completeCount <= 65536 && plan.payloadBytes <= 96000000
+	return plan.sharedBytes <= byteCap && plan.completeCount <= daCompleteSetMaxCount && plan.payloadBytes <= 96000000
 }
 
 func daCompleteResidentLess(a, b daCompleteCapacitySet) bool {

@@ -199,6 +199,7 @@ func reservePreparedDAAdmissionCommit(prepared *daPreparedAdmissionCommit) (*DAC
 	if failed {
 		if token != (PendingOutpointToken{}) {
 			g.owner.dropClaimLocked(token)
+			g.owner.candidateReleases++
 		}
 		g.owner.mu.Unlock()
 		return nil, failure, true
@@ -284,7 +285,7 @@ func TestDAPreparedCommitStructure(t *testing.T) {
 	// The complete owner helper closure is unchanged at the bound base. This
 	// includes indirect callees; map bucket growth remains allowed by Reserve.
 	source, err := os.ReadFile("pending_outpoint_owner.go")
-	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "c6b2db12cf9c8fec91003773dad2ec98b6b8ba108bf67c311a5a41d0a1965461" {
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "8ca97be4877cd200f9041b04e0a2333e646bfd8ecea7cf5a3b3a92bd8c951103" {
 		t.Fatal("owner phase rebuilds prepared scratch: owner closure changed")
 	}
 	source, err = os.ReadFile("da_admission.go")
@@ -658,6 +659,22 @@ func requireDAAdmissionStructure(t *testing.T) {
 			want["read|"+replacement.scope+"|txAdmitUnavailable"]++
 			want["read|"+replacement.scope+"|nil"]++
 		}
+		// RUB-1433: DACommit.finish and reservePreparedDAAdmissionCommit count owner operations.
+		finishOld := "\t\t\towner.byToken[g.candidate].finalized = true\n\t\t} else {\n\t\t\towner.dropClaimLocked(g.candidate)\n\t\t}\n"
+		finishNew := "\t\t\towner.byToken[g.candidate].finalized = true\n\t\t\towner.finalizations++\n\t\t} else {\n\t\t\towner.dropClaimLocked(g.candidate)\n\t\t\towner.candidateReleases++\n\t\t}\n"
+		for row, count := range maps.Clone(want) {
+			if strings.HasPrefix(row, "declaration|node/da_admission.go:finish|") {
+				delete(want, row)
+				want[strings.Replace(row, finishOld, finishNew, 1)] += count
+			}
+		}
+		for _, counter := range []string{"finalizations", "candidateReleases"} {
+			want["write|node/da_admission.go:finish|owner."+counter+"++"]++
+			want["field|node/da_admission.go:finish|owner."+counter]++
+			want["read|node/da_admission.go:finish|"+counter]++
+			want["read|node/da_admission.go:finish|owner"]++
+		}
+		want["write|node/da_admission.go:reservePreparedDAAdmissionCommit|g.owner.candidateReleases++"]++
 		for row, count := range got {
 			if !changed(row) && want[row] != count {
 				t.Fatalf("structural row %q count=%d want=%d at %s", row, count, want[row], where[row])
@@ -706,21 +723,21 @@ func requireDAAdmissionStructure(t *testing.T) {
 		exactAt, continuationAt := -1, -1
 		for i, statement := range public.Body.List {
 			if conditional, ok := statement.(*ast.IfStmt); ok {
-				if exact, ok := conditional.Cond.(*ast.Ident); ok && exact.Name == "exact" && len(conditional.Body.List) == 1 {
-					if _, ok := conditional.Body.List[0].(*ast.ReturnStmt); ok {
+				if exact, ok := conditional.Cond.(*ast.Ident); ok && exact.Name == "exact" && len(conditional.Body.List) == 2 {
+					if _, ok := conditional.Body.List[1].(*ast.ReturnStmt); ok {
 						exactAt = i
 					}
 				}
 			}
-			if returned, ok := statement.(*ast.ReturnStmt); ok && len(returned.Results) == 1 {
-				if call, ok := returned.Results[0].(*ast.CallExpr); ok {
+			if assigned, ok := statement.(*ast.AssignStmt); ok && len(assigned.Rhs) == 1 {
+				if call, ok := assigned.Rhs[0].(*ast.CallExpr); ok {
 					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "admitDANonExact" {
 						continuationAt = i
 					}
 				}
 			}
 		}
-		if exactAt < 0 || continuationAt <= exactAt {
+		if exactAt < 0 || continuationAt <= exactAt || continuationAt != len(public.Body.List)-3 {
 			t.Fatalf("exact terminal/continuation order=%d/%d", exactAt, continuationAt)
 		}
 		if got := callCounts[observe.Name.Name]; observeRanges != 0 || !reflect.DeepEqual(got, map[string]int{"Lock": 1, "Unlock": 1, "captureDAAdmissionTarget": 1, "len": 1}) {

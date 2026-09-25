@@ -336,6 +336,7 @@ func reservePreparedDAAdmissionCommit(prepared *daPreparedAdmissionCommit) (*DAC
 	if failed {
 		if token != (PendingOutpointToken{}) {
 			g.owner.dropClaimLocked(token)
+			g.owner.candidateReleases++
 		}
 		g.owner.mu.Unlock()
 		return nil, failure, true
@@ -482,8 +483,10 @@ func (g *DACommit) finish(finalize bool) {
 	if g.candidate != (PendingOutpointToken{}) {
 		if finalize {
 			owner.byToken[g.candidate].finalized = true
+			owner.finalizations++
 		} else {
 			owner.dropClaimLocked(g.candidate)
+			owner.candidateReleases++
 		}
 	}
 	if finalize {

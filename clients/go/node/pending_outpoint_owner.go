@@ -135,6 +135,10 @@ type PendingOutpointOwner struct {
 	generation     uint64
 	inTransition   bool
 	stableTip      PendingOutpointTip
+	// Operation counts for conformance observers: read and written only under
+	// mu, zero at construction, never reset; transition and restore paths leave
+	// them unchanged.
+	reserveCalls, reservationsAcquired, finalizations, candidateReleases uint64
 }
 
 func newPendingOutpointOwner(tip PendingOutpointTip) *PendingOutpointOwner {
@@ -226,6 +230,7 @@ func (o *PendingOutpointOwner) reserveDAAdmissionLocked(
 	expected PendingOutpointAdmissionContext,
 	claim *pendingOutpointClaim,
 ) (PendingOutpointToken, PendingOutpointError, bool) {
+	o.reserveCalls++
 	var zero PendingOutpointToken
 	if o.inTransition {
 		return zero, PendingOutpointError{Kind: PendingOutpointUnavailable, Msg: "pending-outpoint owner transition in progress"}, true
@@ -245,6 +250,7 @@ func (o *PendingOutpointOwner) reserveDAAdmissionLocked(
 		}
 	}
 	o.tokenHighWater++
+	o.reservationsAcquired++
 	token := PendingOutpointToken{owner: o, seq: o.tokenHighWater}
 	claim.token = token
 	claim.generation = o.generation
@@ -315,9 +321,10 @@ func (o *PendingOutpointOwner) daAdmissionVictimInputsMatchLocked(victim DAAdmis
 // mutates nothing and consumes no sequence. Availability failures — active
 // transition, expected-tip mismatch, expected-generation mismatch, sequence
 // exhaustion — and the first conflict in canonical input order likewise mutate
-// nothing: every check is a pure read that completes before the first write
-// below. On success exactly one sequence is consumed and the complete reserved
-// claim is installed.
+// no claim, index or sequence: every check is a pure read that completes before
+// the first such write below; only the reserveCalls observation count moves. On
+// success exactly one sequence is consumed and the complete reserved claim is
+// installed.
 func (o *PendingOutpointOwner) Reserve(
 	expectedContext PendingOutpointAdmissionContext,
 	domain PendingOutpointDomain,
@@ -334,6 +341,7 @@ func (o *PendingOutpointOwner) Reserve(
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.reserveCalls++
 	if err := o.checkReserveAvailableLocked(expectedContext); err != nil {
 		return zero, err
 	}
@@ -341,6 +349,7 @@ func (o *PendingOutpointOwner) Reserve(
 		return zero, err
 	}
 	o.tokenHighWater++
+	o.reservationsAcquired++
 	token := PendingOutpointToken{owner: o, seq: o.tokenHighWater}
 	o.byToken[token] = &pendingOutpointClaim{
 		token:      token,
@@ -426,6 +435,7 @@ func (o *PendingOutpointOwner) Finalize(token PendingOutpointToken) error {
 		return nil
 	}
 	claim.finalized = true
+	o.finalizations++
 	return nil
 }
 
@@ -450,6 +460,7 @@ func (o *PendingOutpointOwner) Release(token PendingOutpointToken) error {
 		}
 	}
 	o.dropClaimLocked(token)
+	o.candidateReleases++
 	return nil
 }
 
@@ -621,6 +632,7 @@ func (m *Mempool) commitStandardDeltaLocked(delta standardMempoolDelta) error {
 		m.insertEntryIndexesLocked(delta.candidate)
 		if claim := owner.byToken[delta.candidate.token]; claim != nil {
 			claim.finalized = true
+			owner.finalizations++
 		}
 	}
 	return nil
