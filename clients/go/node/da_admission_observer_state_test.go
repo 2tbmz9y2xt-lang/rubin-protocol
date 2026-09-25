@@ -1988,10 +1988,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	independent := bytes.Clone(f.Relay.sets[f.Candidate.DAID].commit.txBytes)
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	changed, err := observerImageOutsideHook(f)
-	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	if err != nil || !bytes.Equal(final.Image.Records[len(final.Image.Records)-1].Commit.TxBytes, independent) || !bytes.Equal(primary.Before.Image.Records[len(primary.Before.Image.Records)-1].Commit.TxBytes, independent) {
 		t.Fatalf("observer state alias: baseline changed: %v", err)
 	}
+	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	if daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil) || daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit) {
 		t.Fatal("observer state projection: changed member reported equal")
 	}
