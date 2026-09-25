@@ -11,6 +11,28 @@ Policy:
 
 ---
 
+## 2026-09-25 — D00-R4 DA input and observation boundaries (RUB-1436)
+
+Manual authoring (no JSON generator) updates `protocol/da_admission_expected_v1.json`
+to merged `rubin-spec@15c4721c8e30e05ea3a8ae2ac1fa888b33b46814`, preserving the
+79 ordered case IDs, 19 obligations and 30 mutation IDs. Fourteen scalar planner
+cases now expose only decisions and projected counters; their payload triplet
+has valid retained-byte bounds. Eleven completion cases use canonical signed
+input constructions and explicit target-drift, Reserve, release and sequence
+observations. Two State B cleanup cases use canonical lengths and preserve
+mixed provenance without State A peer-quota accounting. Current guard, detached
+body-copy and fresh rejection-cache preconditions are explicit.
+
+The old non-materializable allocation/preflight-unavailable witness is replaced
+by a precisely corrupt resident locator and unchanged-image refusal. Allocation
+failure is not claimed as runtime coverage. Existing client preflight tests are
+unchanged. The artifact remains inert expected authority; it does not establish
+Go/Rust observation completeness or equality.
+
+Matrix reproduction: `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`.
+Validation: `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py --check`
+and `scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py`.
+
 ## 2026-09-13 — Neutral unknown-covenant negative identifiers (RUB-1339)
 
 Renamed `CV-U-EXT-01`, `CV-U-EXT-02`, `CV-U-EXT-03`, and `CV-U-EXT-06` in `CV-UTXO-BASIC.json` to the corresponding `CV-U-UNKCOV-*` identifiers without changing inputs or expected results. Regenerated with `cd clients/go && go run ./cmd/formal-trace --fixtures-dir ../../conformance/fixtures --out ../../rubin-formal/traces/go_trace_v1.jsonl`, `python3 tools/formal/gen_lean_refinement_from_traces.py --traces rubin-formal/traces/go_trace_v1.jsonl --out rubin-formal/RubinFormal/Refinement/GoTraceV1.lean`, and `python3 tools/formal/gen_lean_conformance_vectors.py`. No consensus or specification change.
