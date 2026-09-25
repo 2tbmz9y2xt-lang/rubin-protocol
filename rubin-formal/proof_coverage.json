@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "3186811b0c45c29f10d82b13aaa1de43cbd9d0cd89d5e2749252799b255fdeba",
+  "spec_section_hashes_sha3_256": "4bed09f426489abea81167494aedf4f7f6fb5f1c016a0fa31da6f30510a8f242",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -789,6 +789,7 @@
       },
       "notes": "Universal theorem lane: block-level 6-stage live error propagation on `validateBlockBasic`, direct live tx-parse and tx-semantic stage bridges, and the retained semantic ordering/injectivity contract. The experimental `tx_parse_pipeline_deterministic` model omits DA-core and payload-read failures and is intentionally unregistered as complete live parse evidence. TARGET ambiguity is formally resolved via `target_error_disambiguated`, and `dispatchCovenantValidation` is claimed on the direct live per-input path rather than through a parallel-model helper caveat. Separate fixture lane: CV-VALIDATION-ORDER replay on pinned ordering vectors. That executable lane is complementary regression evidence only and does not replace the live stage-order theorem surface.",
       "limitations": [
+        "RUB-1453's BLOCK_ERR_PARSE selection for Section 19.2 block-level sum overflow and the Section 25 step 1 truncation mapping (a stream ending at a transaction boundary before tx_count as BLOCK_ERR_PARSE, a mid-transaction truncation as that transaction's own Section 5/7 code) are not proved by the registered error theorems or fixtures; ptfc_header_version_fail, ptfc_header_txkind_fail and ptfc_nonce_fail model mid-transaction truncation as BLOCK_ERR_PARSE.",
         "RUB-1252's BLOCK_ERR_STATE_CAP_EXCEEDED selection and post-subsidy priority are not proved by the registered error theorems or fixtures.",
         "RUB-1217's P0-S6 SpendTx total order, mixed-invalid precedence across stages, families, and input indices, and transaction-index arbitration are normative requirements not proved by the currently registered theorems or pinned fixtures."
       ],
@@ -1149,6 +1150,7 @@
       "notes": "Universal theorem lane: subsidy arithmetic and coinbase block-connection closure via `subsidy_u128_safety_proved`, `SubsidyV1.connectBlock_end_to_end_proved`, `blockSubsidy_bounded`, `blockSubsidy_in_u64`, and `subsidy_accumulation_in_u128`. The exact recurrence has A(0)=0 and A(h+1)=A(h)+blockSubsidy(h,A(h)); for h in the u64 domain its next state is bounded by h*MINEABLE_CAP, then by 2^117, and therefore by u128. `connectBlock_end_to_end_proved` separately requires the successful checked u128 post-state only after existing block, transaction, and coinbase checks. Separate fixture replay remains complementary regression evidence and does not replace this universal theorem lane. SCOPE OF THE FEE PREMISE (RUB-1127): only the separate per-block reward-plus-fees containment theorem quantifies over `fees <= RubinFormal.maxBlockSumFees`, the structural ceiling `MAX_BLOCK_WEIGHT * maxU64`. That ceiling is an ASSUMPTION restating a consensus resource limit, not a theorem of this model, which carries no block weight accounting; fees never enter the accumulated subsidy recurrence. The helper lemmas remain unregistered, so no coverage counter moves.",
       "evidence_level": "machine_checked_assumption_backed",
       "limitations": [
+        "RUB-1453's Section 19.2 arithmetic rule (exact checked arithmetic of at least 128 bits for the coinbase output sum, sum_fees, and block_subsidy(h) + sum_fees, with a block-level overflow rejected as BLOCK_ERR_PARSE) is not proved by the registered subsidy theorems; SubsidyV1 computes these sums in unbounded Nat and selects BLOCK_ERR_PARSE only in checkedSupplyAfterBlock.",
         "The u128 containment theorems quantify over `fees <= RubinFormal.maxBlockSumFees`, the structural ceiling `MAX_BLOCK_WEIGHT * maxU64`. That ceiling is an ASSUMPTION restating a consensus resource limit, not a theorem of this model, which carries no block weight accounting.",
         "Only the per-block reward-plus-fees containment above the assumed sum_fees ceiling is machine-checked; the ceiling itself is numerically restated, not machine-derived.",
         "The exact accumulated-subsidy theorem is bounded to the u64 height domain and proves the Lean Nat recurrence; transfer to Go/Rust remains human-reviewed rather than machine-checked implementation equivalence."
@@ -1434,6 +1436,7 @@
       },
       "notes": "The retained theorem establishes totality for the BlockValidationOrder model: every input produces the model acceptance witness or an error returned by `validateBlockBasic`.",
       "limitations": [
+        "RUB-1453's Section 25 genesis rule (step 4 prev_block_hash linkage not checked at h = 0) and step 1 truncation outcomes (a stream ending at a transaction boundary before tx_count as BLOCK_ERR_PARSE, a mid-transaction truncation as that transaction's own Section 5/7 code, no allocation proportional to an unverified tx_count) are not proved by section25_validation_total_proved.",
         "RUB-1252's activation-first step 13 ordering, inactive-path skip, height-zero U_parent selection and genesis S0 = 0, Section 19.2 genesis exception, active S0/S1 derivation and cap check, two-condition publication gate, NO_VALIDITY_RESULT and existing-error priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
         "This model totality theorem does not prove the normative gate order or error-precedence requirements.",
         "A full order/error-precedence re-proof is deferred under RUB-1033."
