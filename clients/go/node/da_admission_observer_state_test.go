@@ -1975,6 +1975,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		t.Fatalf("observer state follow-up high-water continuity: primary refusal not observed: %v", err)
 	}
 	saved := primary.After.Owner
+	original := f.Relay.sets[f.Candidate.DAID].commit.txBytes
+	independent := bytes.Clone(original)
+	original[0] ^= 1
+	require(t, bytes.Equal(primary.Before.Image.Records[len(primary.Before.Image.Records)-1].Commit.TxBytes, independent) && bytes.Equal(primary.After.Image.Records[len(primary.After.Image.Records)-1].Commit.TxBytes, independent), "observer state alias: primary baseline changed")
+	original[0] ^= 1
 	follow, err := daNodeObserverStateAdmissionFollowUp(cases[5], f, primary)
 	require(t, err == nil, "observer state: %v", err)
 	stateAssertJSON(t, follow["result"], `{"disposition":"COMMIT_WITH_VICTIMS","semantic_reason_id":"NONE"}`)
@@ -1985,12 +1990,9 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	if !daNodeObserverStateCandidateMatches(final.Image, f.Candidate) || !daNodeObserverStateSurvivorsEqual(final.Image, final.Image, nil, nil) {
 		t.Fatal("observer state projection: valid member comparison failed")
 	}
-	independent := bytes.Clone(f.Relay.sets[f.Candidate.DAID].commit.txBytes)
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	changed, err := observerImageOutsideHook(f)
-	if err != nil || !bytes.Equal(final.Image.Records[len(final.Image.Records)-1].Commit.TxBytes, independent) || !bytes.Equal(primary.Before.Image.Records[len(primary.Before.Image.Records)-1].Commit.TxBytes, independent) {
-		t.Fatalf("observer state alias: baseline changed: %v", err)
-	}
+	require(t, err == nil && bytes.Equal(final.Image.Records[len(final.Image.Records)-1].Commit.TxBytes, independent), "observer state alias: final baseline changed: %v", err)
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	if daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil) || daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit) {
 		t.Fatal("observer state projection: changed member reported equal")
