@@ -275,9 +275,11 @@ func TestDAObservationAdmitObserver(t *testing.T) {
 		return f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, id}, payload: payload})
 	}
 	complete := []byte("observed complete")
-	txs := []daNonReplayTx{chunk(1, []byte{1}), chunk(2, []byte{2}), chunk(3, []byte{3}), chunk(4, []byte{4}),
+	txs := []daNonReplayTx{
+		chunk(1, []byte{1}), chunk(2, []byte{2}), chunk(3, []byte{3}), chunk(4, []byte{4}),
 		f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{0x70, 9}, chunkCount: 1, commitment: sha3.Sum256(complete), commitmentOutputs: 1}), chunk(9, complete), chunk(5, []byte{5}),
-		f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, 6}, payload: make([]byte, 4096), fee: consensus.Uint128{Lo: 100}})}
+		f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0x70, 6}, payload: make([]byte, 4096), fee: consensus.Uint128{Lo: 100}}),
+	}
 	twin := daObservationTwin(t, f)
 	observed, hooked := runDAObservationScript(t, f, txs, true)
 	unobserved, _ := runDAObservationScript(t, twin, txs, false)
