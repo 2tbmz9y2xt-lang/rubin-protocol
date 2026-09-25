@@ -418,6 +418,14 @@ func TestDAObservationPlanHook(t *testing.T) {
 			if recovered != "hook panic" || calls != 0 {
 				t.Fatalf("panic=%v observer calls=%d, want the original panic and no call", recovered, calls)
 			}
+			if !f.relay.mu.TryLock() {
+				t.Fatal("relay mutex stayed locked after hook panic")
+			}
+			f.relay.mu.Unlock()
+			if !f.mp.chainState.admissionMu.TryLock() {
+				t.Fatal("admission fence stayed locked after hook panic")
+			}
+			f.mp.chainState.admissionMu.Unlock()
 		})
 	}
 	t.Run("failed preparation", func(t *testing.T) {

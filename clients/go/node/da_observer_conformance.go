@@ -76,7 +76,7 @@ func DAObserverRelayDisposition(err error) RelayAdmissionDisposition {
 // DAObserverCompleteSetMaxCount returns the COMPLETE_SET count bound.
 func DAObserverCompleteSetMaxCount() uint64 { return daCompleteSetMaxCount }
 
-// DAObserverStateImage is a deep copy of the DA relay and owner state.
+// DAObserverStateImage copies the D01-relevant DA relay and owner claim fields.
 type DAObserverStateImage struct {
 	Records      []DAObserverRecord
 	Locators     []DAObserverLocator
@@ -181,13 +181,18 @@ type DAObserverReplaceable struct {
 	Value bool
 }
 
-// DAObserverReadStateImage deep-copies the DA relay state and its owner under
-// one s.mu hold with one owner-mutex hold nested inside it. A nil relay,
+// DAObserverReadStateImage holds the admission fence across one s.mu hold and
+// one owner-mutex hold nested inside it. A nil relay,
 // mempool or owner, or nil sets or locators, returns an error and a zero image.
 func DAObserverReadStateImage(s *DARelayState) (DAObserverStateImage, error) {
 	if s == nil {
 		return DAObserverStateImage{}, errors.New("nil DA relay")
 	}
+	release, err := s.lockAdmissionFence()
+	if err != nil {
+		return DAObserverStateImage{}, err
+	}
+	defer release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.mempool == nil || s.mempool.pendingOutpoints == nil || s.sets == nil || s.locators == nil {

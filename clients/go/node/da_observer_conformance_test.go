@@ -203,6 +203,13 @@ func TestDAObserverConformanceStateImage(t *testing.T) {
 			t.Fatalf("%s: image=%+v err=%v", name, got, err)
 		}
 	}
+	s.mempool.chainState = &ChainState{}
+	s.mempool.chainState.admissionMu.Lock()
+	s.mempool.chainState.admissionMu.notifyTerminal()
+	if got, err := DAObserverReadStateImage(s); err == nil || !reflect.DeepEqual(got, DAObserverStateImage{}) {
+		t.Fatalf("terminal fence: image=%+v err=%v", got, err)
+	}
+	s.mempool.chainState.admissionMu.Unlock()
 }
 
 func TestDAObserverConformanceInjectors(t *testing.T) {
