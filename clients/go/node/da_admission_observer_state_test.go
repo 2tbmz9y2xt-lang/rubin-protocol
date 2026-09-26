@@ -2605,6 +2605,17 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			"StagedBytes",
 		},
 		{
+			"headers changed",
+			protected,
+			[3]DAObserverStateImage{
+				cleanupImage(false, true, 300),
+				cleanupImage(false, true, 100),
+				cleanupImage(false, true, 100),
+			},
+			cleanupRow("NO_SELECTION", "[]", "0", 0, 0, "STAGED_COMMIT", true, `"image_byte_identical": false,`, true),
+			"StagedBytes",
+		},
+		{
 			"unchanged",
 			protected,
 			[3]DAObserverStateImage{
