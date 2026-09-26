@@ -2163,6 +2163,10 @@ func emitDANodeObserverState(cases []daNodeObserverStateCase, profile daNodeObse
 		return nil, fmt.Errorf("observer output: %w", err)
 	}
 	encoded = append(encoded, '\n')
+	return writeDANodeObserverShard(encoded, path)
+}
+
+func writeDANodeObserverShard(encoded []byte, path string) ([]byte, error) {
 	if path != "" {
 		// A temporary sibling renamed over path never leaves a truncated or partial destination.
 		tmp, err := os.CreateTemp(filepath.Dir(path), ".rubin-da-node-state-*")
