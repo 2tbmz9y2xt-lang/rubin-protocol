@@ -22,97 +22,97 @@ import (
 var reorgRefusalIDs = []string{"REORG_TERMINAL_PERSISTENCE_NEW_NO_OWNER", "REORG_FAILED_TRANSITION_NO_OWNER"}
 
 type reorgRefusalInput struct {
-	Source string `json:"source_context"`
-	Policy string `json:"policy_context"`
-	Chain string `json:"chain_context"`
+	Source   string `json:"source_context"`
+	Policy   string `json:"policy_context"`
+	Chain    string `json:"chain_context"`
 	Prestate string `json:"prestate"`
 	Scenario string `json:"reorg_scenario"`
-	Control string `json:"transition_control"`
+	Control  string `json:"transition_control"`
 }
 
 type reorgRefusalBlock struct {
-	Ref string `json:"block_ref"`
-	Height uint64 `json:"height"`
-	Hex string `json:"block_hex"`
-	Hash string `json:"block_hash"`
-	Parent string `json:"parent_hash"`
-	Target json.RawMessage `json:"target"`
+	Ref       string          `json:"block_ref"`
+	Height    uint64          `json:"height"`
+	Hex       string          `json:"block_hex"`
+	Hash      string          `json:"block_hash"`
+	Parent    string          `json:"parent_hash"`
+	Target    json.RawMessage `json:"target"`
 	Timestamp json.RawMessage `json:"timestamp"`
-	TxOrder json.RawMessage `json:"tx_order"`
+	TxOrder   json.RawMessage `json:"tx_order"`
 }
 
 type reorgRefusalCall struct {
-	Phase string `json:"phase"`
-	Ref string `json:"block_ref"`
+	Phase string   `json:"phase"`
+	Ref   string   `json:"block_ref"`
 	Times []uint64 `json:"prev_timestamps"`
 }
 
 type reorgRefusalFixture struct {
 	Source struct {
-		Source string `json:"source"`
+		Source     string `json:"source"`
 		Entrypoint string `json:"entrypoint"`
 	}
 	Policy struct {
-		Fee uint64 `json:"current_mempool_min_fee_rate"`
-		DAFee uint64 `json:"min_da_fee_rate"`
+		Fee        uint64          `json:"current_mempool_min_fee_rate"`
+		DAFee      uint64          `json:"min_da_fee_rate"`
 		RelayValue json.RawMessage `json:"min_relay_output_value"`
-		Size uint64 `json:"effective_da_mempool_size"`
-		Count uint64 `json:"complete_set_max_count"`
-		Payload uint64 `json:"pinned_payload_max"`
-		TTL uint64 `json:"orphan_ttl_blocks"`
+		Size       uint64          `json:"effective_da_mempool_size"`
+		Count      uint64          `json:"complete_set_max_count"`
+		Payload    uint64          `json:"pinned_payload_max"`
+		TTL        uint64          `json:"orphan_ttl_blocks"`
 	}
 	Chain struct {
-		ID string `json:"chain_id"`
-		Height uint64 `json:"height"`
+		ID              string          `json:"chain_id"`
+		Height          uint64          `json:"height"`
 		AdmissionHeight json.RawMessage `json:"admission_height"`
-		Tip string `json:"tip_hash"`
-		UTXOs json.RawMessage `json:"utxos"`
-		Prefix struct {
+		Tip             string          `json:"tip_hash"`
+		UTXOs           json.RawMessage `json:"utxos"`
+		Prefix          struct {
 			Blocks []reorgRefusalBlock `json:"blocks"`
-			Index []struct {
-				Hash string `json:"block_hash"`
-				Ref string `json:"block_ref"`
+			Index  []struct {
+				Hash   string `json:"block_hash"`
+				Ref    string `json:"block_ref"`
 				Height uint64 `json:"height"`
 			} `json:"canonical_index"`
-			Height uint64 `json:"tip_height"`
-			Tip string `json:"tip_hash"`
-			Target json.RawMessage `json:"tip_target"`
-			Work json.RawMessage `json:"chain_work"`
-			Generated json.RawMessage `json:"already_generated"`
+			Height     uint64          `json:"tip_height"`
+			Tip        string          `json:"tip_hash"`
+			Target     json.RawMessage `json:"tip_target"`
+			Work       json.RawMessage `json:"chain_work"`
+			Generated  json.RawMessage `json:"already_generated"`
 			Derivation json.RawMessage `json:"required_utxo_derivation"`
-			UTXOs json.RawMessage `json:"required_utxos"`
-			Config struct {
-				ID string `json:"chain_id"`
+			UTXOs      json.RawMessage `json:"required_utxos"`
+			Config     struct {
+				ID     string `json:"chain_id"`
 				Target string `json:"expected_target"`
 			} `json:"public_engine_config"`
 		} `json:"canonical_prefix"`
 	}
 	Scenario struct {
-		Prefix string `json:"canonical_prefix_ref"`
+		Prefix  string `json:"canonical_prefix_ref"`
 		Binding struct {
-			Phase string `json:"phase"`
+			Phase  string `json:"phase"`
 			Policy string `json:"policy_context"`
 		} `json:"mempool_binding"`
-		Old []reorgRefusalBlock `json:"old_branch"`
-		Win []reorgRefusalBlock `json:"winning_branch"`
-		Calls []reorgRefusalCall `json:"public_calls"`
-		Disconnected json.RawMessage `json:"disconnected_order"`
+		Old          []reorgRefusalBlock `json:"old_branch"`
+		Win          []reorgRefusalBlock `json:"winning_branch"`
+		Calls        []reorgRefusalCall  `json:"public_calls"`
+		Disconnected json.RawMessage     `json:"disconnected_order"`
 	}
 	Prestate struct {
-		Records []any `json:"record_image"`
+		Records  []any `json:"record_image"`
 		Locators []any `json:"locator_image"`
-		Claims []any `json:"claim_image"`
-		Orphans struct {
-			Global uint64 `json:"global_bytes"`
-			IDs []any `json:"per_da_id"`
+		Claims   []any `json:"claim_image"`
+		Orphans  struct {
+			Global   uint64 `json:"global_bytes"`
+			IDs      []any  `json:"per_da_id"`
 			Overhead uint64 `json:"commit_overhead_bytes"`
-			Quotas []any `json:"per_quota"`
+			Quotas   []any  `json:"per_quota"`
 		} `json:"orphan_accounting"`
 		Counters struct {
-			Staged uint64 `json:"staged_retained_bytes"`
+			Staged   uint64 `json:"staged_retained_bytes"`
 			Complete uint64 `json:"complete_retained_bytes"`
-			Count uint64 `json:"complete_set_count"`
-			Payload uint64 `json:"complete_payload_bytes"`
+			Count    uint64 `json:"complete_set_count"`
+			Payload  uint64 `json:"complete_payload_bytes"`
 			Sequence uint64 `json:"accepted_sequence"`
 		} `json:"retained_counters"`
 	}
@@ -130,7 +130,7 @@ func reorgRefusalRows(raw []byte) ([]daNodeObserverCase, reorgRefusalFixture, er
 	}
 	for _, item := range []struct {
 		group, key string
-		dst any
+		dst        any
 	}{
 		{"source_contexts", "DETACHED_REORG", &fixture.Source},
 		{"policy_contexts", "ACCEPT_DA", &fixture.Policy},
@@ -275,20 +275,20 @@ func reorgRefusalBlocks(f reorgRefusalFixture) ([][]byte, []string, error) {
 }
 
 type reorgRefusalSnapshot struct {
-	Counts DAObserverOwnerCounts
+	Counts                 DAObserverOwnerCounts
 	StandardCalls, DACalls uint64
-	Image DAObserverStateImage
-	TxIDs [][32]byte
-	UsedBytes int
-	AdmissionSeq, Fee uint64
-	StandardMap, DAMap any // Keep both original maps alive while comparing their identities.
-	OwnerTip PendingOutpointTip
-	Generation, HighWater uint64
-	Transition bool
-	Durable, Published []string
-	Tip canonicalTipScalars
-	View chainStateView
-	Digest [32]byte
+	Image                  DAObserverStateImage
+	TxIDs                  [][32]byte
+	UsedBytes              int
+	AdmissionSeq, Fee      uint64
+	StandardMap, DAMap     any // Keep both original maps alive while comparing their identities.
+	OwnerTip               PendingOutpointTip
+	Generation, HighWater  uint64
+	Transition             bool
+	Durable, Published     []string
+	Tip                    canonicalTipScalars
+	View                   chainStateView
+	Digest                 [32]byte
 }
 
 func readReorgRefusal(e *SyncEngine, mp *Mempool, relay *DARelayState, daCalls *atomic.Uint64, post bool) (reorgRefusalSnapshot, error) {
@@ -347,11 +347,11 @@ func readReorgRefusal(e *SyncEngine, mp *Mempool, relay *DARelayState, daCalls *
 
 type reorgRefusalFault struct {
 	Path, Control string
-	Planned []string
-	Cause error
-	Saved func(string, []byte, os.FileMode) error
-	Calls int
-	Failure error
+	Planned       []string
+	Cause         error
+	Saved         func(string, []byte, os.FileMode) error
+	Calls         int
+	Failure       error
 }
 
 func (f *reorgRefusalFault) write(path string, raw []byte, mode os.FileMode) error {
@@ -377,11 +377,11 @@ func (f *reorgRefusalFault) write(path string, raw []byte, mode os.FileMode) err
 
 type reorgRefusalObservation struct {
 	Before, After reorgRefusalSnapshot
-	Old, New []string
-	Summary *ChainStateConnectSummary
-	Err, Cause error
-	IndexPath string
-	Latched bool
+	Old, New      []string
+	Summary       *ChainStateConnectSummary
+	Err, Cause    error
+	IndexPath     string
+	Latched       bool
 }
 
 func (f *reorgRefusalFault) check() error {
@@ -451,7 +451,7 @@ func observeReorgRefusal(row daNodeObserverCase, f reorgRefusalFixture, dir stri
 				return out, err
 			}
 			for _, field := range []struct {
-				name string
+				name      string
 				got, want uint64
 			}{
 				{"current_mempool_min_fee_rate", mp.CurrentMinFeeRateSnapshot(), f.Policy.Fee},
@@ -623,40 +623,40 @@ func TestDAAdmissionObserverNodeReorgRefusalReachability(t *testing.T) {
 func syntheticReorgRefusal() reorgRefusalObservation {
 	old, first, last := [32]byte{1}, [32]byte{2}, [32]byte{3}
 	o := reorgRefusalObservation{
-		Old: []string{daNodeObserverHexID(old)},
-		New: []string{daNodeObserverHexID(first), daNodeObserverHexID(last)},
+		Old:       []string{daNodeObserverHexID(old)},
+		New:       []string{daNodeObserverHexID(first), daNodeObserverHexID(last)},
 		IndexPath: "canonical-index",
-		Cause: errors.New("synthetic index fault"),
-		Latched: true,
+		Cause:     errors.New("synthetic index fault"),
+		Latched:   true,
 		Summary: &ChainStateConnectSummary{
-			BlockHeight: 102,
-			BlockHash: last,
-			UtxoCount: 17,
+			BlockHeight:            102,
+			BlockHash:              last,
+			UtxoCount:              17,
 			CanonicalAppliedBlocks: []CanonicalAppliedBlock{{Hash: first}, {Hash: last}},
 		},
 	}
 	o.Before = reorgRefusalSnapshot{
-		Counts: DAObserverOwnerCounts{ReserveCalls: 21, ReservationsAcquired: 22, Finalizations: 23, CandidateReleases: 24},
+		Counts:        DAObserverOwnerCounts{ReserveCalls: 21, ReservationsAcquired: 22, Finalizations: 23, CandidateReleases: 24},
 		StandardCalls: 31,
-		DACalls: 32,
+		DACalls:       32,
 		Image: DAObserverStateImage{
-			OrphanBytes: 41,
+			OrphanBytes:               41,
 			OrphanCommitOverheadBytes: 42,
-			StagedBytes: 43,
-			CompleteBytes: 44,
-			CompleteCount: 45,
-			PinnedPayloadBytes: 46,
-			NextReceivedTime: 47,
+			StagedBytes:               43,
+			CompleteBytes:             44,
+			CompleteCount:             45,
+			PinnedPayloadBytes:        46,
+			NextReceivedTime:          47,
 		},
 		StandardMap: map[string]int{},
-		DAMap: map[string]int{},
-		Generation: 51,
-		HighWater: 61,
-		OwnerTip: PendingOutpointTip{HasTip: true, Height: 101, Hash: old},
-		Tip: canonicalTipScalars{hasTip: true, height: 101, tipHash: old},
-		View: chainStateView{hasTip: true, height: 101, tipHash: old, utxoCount: 18},
-		Durable: o.Old,
-		Published: o.Old,
+		DAMap:       map[string]int{},
+		Generation:  51,
+		HighWater:   61,
+		OwnerTip:    PendingOutpointTip{HasTip: true, Height: 101, Hash: old},
+		Tip:         canonicalTipScalars{hasTip: true, height: 101, tipHash: old},
+		View:        chainStateView{hasTip: true, height: 101, tipHash: old, utxoCount: 18},
+		Durable:     o.Old,
+		Published:   o.Old,
 	}
 	o.After = o.Before
 	o.After.Counts = DAObserverOwnerCounts{ReserveCalls: 121, ReservationsAcquired: 222, Finalizations: 323, CandidateReleases: 424}
@@ -674,19 +674,19 @@ func reorgRefusalDistinct(o reorgRefusalObservation) error {
 	seen := map[uint64]string{}
 	for _, sample := range []reorgRefusalSnapshot{o.Before, o.After} {
 		values := map[string]uint64{
-			"ReserveCalls": sample.Counts.ReserveCalls,
-			"ReservationsAcquired": sample.Counts.ReservationsAcquired,
-			"Finalizations": sample.Counts.Finalizations,
-			"CandidateReleases": sample.Counts.CandidateReleases,
-			"StandardCalls": sample.StandardCalls,
-			"DACalls": sample.DACalls,
-			"OrphanBytes": sample.Image.OrphanBytes,
+			"ReserveCalls":              sample.Counts.ReserveCalls,
+			"ReservationsAcquired":      sample.Counts.ReservationsAcquired,
+			"Finalizations":             sample.Counts.Finalizations,
+			"CandidateReleases":         sample.Counts.CandidateReleases,
+			"StandardCalls":             sample.StandardCalls,
+			"DACalls":                   sample.DACalls,
+			"OrphanBytes":               sample.Image.OrphanBytes,
 			"OrphanCommitOverheadBytes": sample.Image.OrphanCommitOverheadBytes,
-			"StagedBytes": sample.Image.StagedBytes,
-			"CompleteBytes": sample.Image.CompleteBytes,
-			"CompleteCount": sample.Image.CompleteCount,
-			"PinnedPayloadBytes": sample.Image.PinnedPayloadBytes,
-			"NextReceivedTime": sample.Image.NextReceivedTime,
+			"StagedBytes":               sample.Image.StagedBytes,
+			"CompleteBytes":             sample.Image.CompleteBytes,
+			"CompleteCount":             sample.Image.CompleteCount,
+			"PinnedPayloadBytes":        sample.Image.PinnedPayloadBytes,
+			"NextReceivedTime":          sample.Image.NextReceivedTime,
 		}
 		for name, value := range values {
 			if previous, found := seen[value]; value != 0 && found && previous != name {
@@ -774,7 +774,7 @@ func reorgRefusalResult(o reorgRefusalObservation) (string, error) {
 
 func reorgRefusalStateImage(image DAObserverStateImage) (map[string]any, error) {
 	for _, source := range []struct {
-		name string
+		name  string
 		count int
 	}{
 		{"record_image", len(image.Records)},
@@ -789,21 +789,21 @@ func reorgRefusalStateImage(image DAObserverStateImage) (map[string]any, error) 
 		}
 	}
 	return map[string]any{
-		"record_image": []any{},
+		"record_image":  []any{},
 		"locator_image": []any{},
-		"claim_image": []any{},
+		"claim_image":   []any{},
 		"orphan_accounting": map[string]any{
-			"global_bytes": image.OrphanBytes,
-			"per_da_id": []any{},
+			"global_bytes":          image.OrphanBytes,
+			"per_da_id":             []any{},
 			"commit_overhead_bytes": image.OrphanCommitOverheadBytes,
-			"per_quota": []any{},
+			"per_quota":             []any{},
 		},
 		"retained_counters": map[string]any{
-			"staged_retained_bytes": image.StagedBytes,
+			"staged_retained_bytes":   image.StagedBytes,
 			"complete_retained_bytes": image.CompleteBytes,
-			"complete_set_count": image.CompleteCount,
-			"complete_payload_bytes": image.PinnedPayloadBytes,
-			"accepted_sequence": image.NextReceivedTime,
+			"complete_set_count":      image.CompleteCount,
+			"complete_payload_bytes":  image.PinnedPayloadBytes,
+			"accepted_sequence":       image.NextReceivedTime,
 		},
 	}, nil
 }
@@ -899,7 +899,7 @@ func projectReorgRefusal(id string, o reorgRefusalObservation) (map[string]any, 
 	}
 	counts := make(map[string]any)
 	for _, field := range []struct {
-		name string
+		name          string
 		before, after uint64
 	}{
 		{"reserve_calls", b.Counts.ReserveCalls, a.Counts.ReserveCalls},
@@ -910,17 +910,17 @@ func projectReorgRefusal(id string, o reorgRefusalObservation) (map[string]any, 
 		if field.after < field.before {
 			return nil, fmt.Errorf("reorg owner pending_outpoint negative %s", field.name)
 		}
-		counts[field.name] = field.after-field.before
+		counts[field.name] = field.after - field.before
 	}
 	out := map[string]any{
 		"transition_result": result,
-		"commit_truth": truth,
-		"requeue_rows": []any{},
-		"published_image": labels,
-		"state_image": image,
+		"commit_truth":      truth,
+		"requeue_rows":      []any{},
+		"published_image":   labels,
+		"state_image":       image,
 		"owner": map[string]any{
-			"admission_entrypoint": map[string]any{"domain": "NONE", "invocations": s+d},
-			"pending_outpoint": counts,
+			"admission_entrypoint": map[string]any{"domain": "NONE", "invocations": s + d},
+			"pending_outpoint":     counts,
 		},
 	}
 	if id == reorgRefusalIDs[0] {
@@ -1020,11 +1020,11 @@ func TestDAAdmissionObserverNodeReorgRefusalFault(t *testing.T) {
 	for _, variant := range []string{"second intercept", "nonplanned bytes", "saved write failure"} {
 		cause := errors.New("saved write failure")
 		fault := reorgRefusalFault{
-			Path: "index",
+			Path:    "index",
 			Control: "TERMINAL_PERSISTENCE_NEW",
 			Planned: []string{strings.Repeat("01", 32)},
-			Cause: errors.New("injected failure"),
-			Saved: func(string, []byte, os.FileMode) error { return nil },
+			Cause:   errors.New("injected failure"),
+			Saved:   func(string, []byte, os.FileMode) error { return nil },
 		}
 		encoded, err := encodeBlockStoreIndex(blockStoreIndexDisk{Version: blockStoreIndexVersion, Canonical: fault.Planned})
 		require(t, err == nil, "reorg seam planned index encode: %v", err)
@@ -1456,7 +1456,9 @@ func TestDAAdmissionObserverNodeReorgRefusalProjectionRefusals(t *testing.T) {
 		},
 		{
 			"summary wrong applied count",
-			func(o *reorgRefusalObservation) { o.Summary.CanonicalAppliedBlocks = o.Summary.CanonicalAppliedBlocks[:1] },
+			func(o *reorgRefusalObservation) {
+				o.Summary.CanonicalAppliedBlocks = o.Summary.CanonicalAppliedBlocks[:1]
+			},
 			"reorg result: summary planned tip",
 		},
 		{
