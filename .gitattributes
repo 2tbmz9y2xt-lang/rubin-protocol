@@ -5,3 +5,4 @@
 # byte-identical across checkouts to produce byte-reproducible
 # fixtures (Q-CONF-FIXTURE-GENERATOR-DETERMINISM-01).
 *.der binary
+/conformance/fixtures/protocol/da_admission_expected_v1.json text eol=lf
