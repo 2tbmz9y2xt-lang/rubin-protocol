@@ -1110,7 +1110,10 @@ func daNodeObserverStateFindRecord(image DAObserverStateImage, daID [32]byte) (D
 }
 
 func daNodeObserverStateFindMember(record DAObserverRecord, candidate daNodeObserverStateMember) (*DAObserverMember, []byte, bool) {
-	if candidate.Key.MemberOrdinal == 0 && record.Commit.Member != nil && record.Commit.Member.TxID == candidate.TxID {
+	if candidate.Key.MemberOrdinal == 0 {
+		if record.Commit.Member == nil || record.Commit.Member.TxID != candidate.TxID {
+			return nil, nil, false
+		}
 		return record.Commit.Member, record.Commit.TxBytes, true
 	}
 	for _, chunk := range record.Chunks {
@@ -3257,6 +3260,15 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	})
 	misplaced.Locators[len(misplaced.Locators)-1].ChunkIndex = 1
 	require(t, !daNodeObserverStateCandidateMatches(misplaced, chunk, 6, 3000), "observer state candidate locator binding")
+	misfiled := build(21, nil)
+	target := &misfiled.Records[len(misfiled.Records)-1]
+	target.Chunks = []DAObserverChunk{{
+		DAID:    commit.DAID,
+		Member:  target.Commit.Member,
+		TxBytes: target.Commit.TxBytes,
+	}}
+	target.Commit.Member = nil
+	require(t, !daNodeObserverStateCandidateMatches(misfiled, commit, 6, 4), "observer state candidate commit slot")
 	require(t, !daNodeObserverStateCandidateMatches(publishedImage, chunk, 7, 3000), "observer state candidate claim generation")
 	require(t, !daNodeObserverStateSurvivorsEqual(publishedImage, DAObserverStateImage{OutpointRows: publishedImage.OutpointRows}, [][32]byte{commit.DAID}, nil, [32]byte{}), "observer state completion: removed member outpoint row survived")
 	retained := DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}
