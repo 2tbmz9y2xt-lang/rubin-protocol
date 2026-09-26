@@ -39,6 +39,23 @@ var daNodeObserverStateIDs = []string{
 	"STATE_B_PEER_COMMIT_CLEANUP_PROTECTED",
 }
 
+// daNodeObserverStateOrdinals are the D00-R4 case_ordinal values of daNodeObserverStateIDs, index by index.
+var daNodeObserverStateOrdinals = []uint64{
+	38,
+	40,
+	41,
+	42,
+	43,
+	44,
+	45,
+	46,
+	48,
+	51,
+	52,
+	64,
+	65,
+}
+
 type daNodeObserverStateInput struct {
 	ExecutionBoundary string          `json:"execution_boundary"`
 	ConstructionRef   string          `json:"construction_ref"`
@@ -213,9 +230,10 @@ type daNodeObserverStateMixedProfile struct {
 }
 
 type daNodeObserverStateChain struct {
-	ChainID [32]byte
-	TipHash [32]byte
-	Height  uint64
+	ChainID         [32]byte
+	TipHash         [32]byte
+	Height          uint64
+	AdmissionHeight uint64
 }
 
 type daNodeObserverStateProfile struct {
@@ -278,9 +296,10 @@ func loadDANodeObserverStateProfile(raw json.RawMessage) (daNodeObserverStatePro
 		return profile, fmt.Errorf("observer input fixtures: missing CHAIN_100")
 	}
 	var chain struct {
-		ChainID string `json:"chain_id"`
-		Height  uint64 `json:"height"`
-		TipHash string `json:"tip_hash"`
+		ChainID         string `json:"chain_id"`
+		Height          uint64 `json:"height"`
+		AdmissionHeight uint64 `json:"admission_height"`
+		TipHash         string `json:"tip_hash"`
 	}
 	if err := json.Unmarshal(chainRaw, &chain); err != nil {
 		return profile, fmt.Errorf("observer input CHAIN_100: %w", err)
@@ -293,6 +312,7 @@ func loadDANodeObserverStateProfile(raw json.RawMessage) (daNodeObserverStatePro
 		return profile, err
 	}
 	profile.Chain.Height = chain.Height
+	profile.Chain.AdmissionHeight = chain.AdmissionHeight
 	return profile, validateDANodeObserverStateProfile(profile)
 }
 
@@ -307,8 +327,17 @@ func daNodeObserverStateHex32(label, value string) ([32]byte, error) {
 }
 
 func validateDANodeObserverStateProfile(profile daNodeObserverStateProfile) error {
-	if profile.Chain.Height != 100 {
-		return fmt.Errorf("observer input CHAIN_100: height must be 100")
+	// The D00-R4 authority values of input_fixtures.chain_contexts.CHAIN_100; they change only with an epoch rebind.
+	chain := profile.Chain
+	switch {
+	case hex.EncodeToString(chain.ChainID[:]) != "88f8a9acdeeb902e27aa2fdcb8c46ecf818bf68dec5273ec1bcc5084e2333103":
+		return fmt.Errorf("observer input CHAIN_100.chain_id: not the D00-R4 authority value")
+	case hex.EncodeToString(chain.TipHash[:]) != "f890dfc58a5dc831ba6129cefb843bcd6211e943e20fe4d2f8822ccb3a22ae41":
+		return fmt.Errorf("observer input CHAIN_100.tip_hash: not the D00-R4 authority value")
+	case chain.Height != 100:
+		return fmt.Errorf("observer input CHAIN_100.height: not the D00-R4 authority value")
+	case chain.AdmissionHeight != 101:
+		return fmt.Errorf("observer input CHAIN_100.admission_height: not the D00-R4 authority value")
 	}
 	return cmp.Or(
 		validateDANodeObserverStateCanonicalProfile(profile.Canonical),
@@ -777,12 +806,41 @@ func observerImageOutsideHook(f *daNodeObserverStateFixture, closed bool) (daNod
 	defer release()
 	f.Relay.mu.Lock()
 	defer f.Relay.mu.Unlock()
+	owner := f.Mempool.pendingOutpoints
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
 	if closed {
-		if err := canonicalDARetainedImageClosed(f.Relay, f.Relay.sortedRetainedDAIDsLocked()); err != nil {
+		daIDs := f.Relay.sortedRetainedDAIDsLocked()
+		if err := canonicalDARetainedImageClosed(f.Relay, daIDs); err != nil {
 			return daNodeObserverStateObservation{}, fmt.Errorf("observer state accounting closure: %w", err)
 		}
+		if err := stateOwnerBindingLocked(f.Relay, owner, daIDs); err != nil {
+			return daNodeObserverStateObservation{}, fmt.Errorf("observer state token owner binding: %w", err)
+		}
 	}
-	return observerImageInHook(f, daCompleteEffects), nil
+	return observerImageLocked(f.Relay, owner), nil
+}
+
+// stateOwnerBindingLocked applies Go's owner-ready member predicates to every retained member; the caller holds the relay and then the owner mutex.
+func stateOwnerBindingLocked(relay *DARelayState, owner *PendingOutpointOwner, daIDs [][32]byte) error {
+	seen := make(map[PendingOutpointToken]struct{})
+	for _, daID := range daIDs {
+		members, err := ownerReadyRecordMembers(relay.sets[daID], owner, seen)
+		if err != nil {
+			return err
+		}
+		for _, member := range members {
+			if !ownerReadyMemberClaimBound(owner, owner.byToken[member.token], member) {
+				return errDARelayImageIncompatible
+			}
+			for _, input := range member.inputs {
+				if owner.byOutpoint[input] != (pendingOutpointRow{token: member.token, txid: member.txid}) {
+					return errDARelayImageIncompatible
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func stateSetupBaseline(f *daNodeObserverStateFixture) error {
@@ -1786,6 +1844,9 @@ func selectDANodeObserverStateCases(corpus daNodeObserverCorpus) ([]daNodeObserv
 		if strings.HasPrefix(row.ID, "CAP_") != (input.ExecutionBoundary == "COMPLETE_COMMIT_PRECONDITION") {
 			return nil, fmt.Errorf("observer census: case %q in the wrong execution_boundary", row.ID)
 		}
+		if *input.CaseOrdinal != daNodeObserverStateOrdinals[index] {
+			return nil, fmt.Errorf("observer census: case %q case_ordinal %d, want %d", row.ID, *input.CaseOrdinal, daNodeObserverStateOrdinals[index])
+		}
 		selected = append(selected, daNodeObserverStateCase{
 			Case:  row,
 			Input: input,
@@ -2093,6 +2154,11 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	commitAsCleanup := cases[12].Case
 	cleanupAsCommit.Input = cases[12].Case.Input
 	commitAsCleanup.Input = cases[0].Case.Input
+	var ordinalInput map[string]json.RawMessage
+	_ = json.Unmarshal(cases[4].Case.Input, &ordinalInput)
+	ordinalInput["case_ordinal"] = json.RawMessage("44")
+	wrongOrdinal := cases[4].Case
+	wrongOrdinal.Input, _ = json.Marshal(ordinalInput)
 	for mode, probe := range []struct {
 		mutate func([]json.RawMessage) []json.RawMessage
 		want   string
@@ -2139,6 +2205,13 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 				return c
 			},
 			`case "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED" in the wrong execution_boundary`,
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				c[4], _ = json.Marshal(wrongOrdinal)
+				return c
+			},
+			`observer census: case "CAP_COUNTER_COHERENCE" case_ordinal 44, want 43`,
 		},
 	} {
 		bad := corpus
@@ -2322,6 +2395,22 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			func(p *daNodeObserverStateProfile) { p.Complete.CompleteSetMaxCount = 65537 },
 			"COMPLETE_COMMIT_7_SETS: unsupported bounds",
 		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Chain.ChainID[0] ^= 1 },
+			"CHAIN_100.chain_id: not the D00-R4 authority value",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Chain.TipHash[31] ^= 1 },
+			"CHAIN_100.tip_hash: not the D00-R4 authority value",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Chain.Height = 101 },
+			"CHAIN_100.height: not the D00-R4 authority value",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Chain.AdmissionHeight = 100 },
+			"CHAIN_100.admission_height: not the D00-R4 authority value",
+		},
 	} {
 		bad := profile
 		probe.mutate(&bad)
@@ -2405,6 +2494,14 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	_, open := observerImageOutsideHook(m, false)
 	_, closed := observerImageOutsideHook(m, true)
 	require(t, open == nil && closed != nil && strings.Contains(closed.Error(), "accounting closure"), "observer state accounting closure: closed=%v open=%v", closed, open)
+	// A retained member token issued by a second owner fails Go's owner-ready token predicate.
+	target := f.Relay.sets[f.TargetCommit.DAID].commit.member
+	issuer := target.token.owner
+	target.token.owner = &PendingOutpointOwner{}
+	_, open = observerImageOutsideHook(f, false)
+	_, closed = observerImageOutsideHook(f, true)
+	target.token.owner = issuer
+	require(t, open == nil && closed != nil && strings.Contains(closed.Error(), "token owner binding"), "observer state token owner binding: foreign owner accepted: closed=%v open=%v", closed, open)
 	// A collection failure on the thirteenth row, after the census passed, leaves the destination directory untouched.
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "existing.json")
