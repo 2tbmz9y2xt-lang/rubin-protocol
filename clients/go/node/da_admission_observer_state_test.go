@@ -1027,10 +1027,10 @@ func daNodeObserverStateCounters(image DAObserverStateImage) map[string]any {
 }
 
 func daNodeObserverStateOwnerDeltas(before, after daNodeObserverStateOwnerImage) (DAObserverOwnerCounts, uint64, error) {
-	if before.Identity == nil || before.Identity != after.Identity ||
+	if before.Identity == nil || before.Identity != after.Identity || before.Generation != after.Generation ||
 		after.Counts.ReserveCalls < before.Counts.ReserveCalls || after.Counts.ReservationsAcquired < before.Counts.ReservationsAcquired ||
 		after.Counts.Finalizations < before.Counts.Finalizations || after.Counts.CandidateReleases < before.Counts.CandidateReleases || after.TokenHighWater < before.TokenHighWater {
-		return DAObserverOwnerCounts{}, 0, fmt.Errorf("observer state owner image: identity or counter regression")
+		return DAObserverOwnerCounts{}, 0, fmt.Errorf("observer state owner image: identity, generation or counter regression")
 	}
 	return DAObserverOwnerCounts{
 		after.Counts.ReserveCalls - before.Counts.ReserveCalls,
@@ -1268,6 +1268,9 @@ func daNodeObserverStateAdmissionImageOutput(f *daNodeObserverStateFixture, run 
 	targetRecord, _ := daNodeObserverStateFindRecord(after, f.Candidate.DAID)
 	_, _, candidatePublished := daNodeObserverStateFindMember(targetRecord, f.Candidate)
 	candidateMatches := daNodeObserverStateCandidateMatches(after, f.Candidate, run.After.Owner.Generation, run.After.Owner.TokenHighWater)
+	if run.Call.Err == nil && (run.Call.Result.DAID != f.Candidate.DAID || run.Call.Result.SameDAIDCommitConflict) {
+		return nil, nil, fmt.Errorf("observer state result: success result names another DAID or a same-DAID commit conflict")
+	}
 	result, err := daNodeObserverStateResult(run.Call, run.Before.Image.NextReceivedTime, candidatePublished)
 	if err != nil {
 		return nil, nil, err
@@ -2454,6 +2457,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		}
 	}
 	primaryBefore := ownerAt(200, 300, 400, 500, 1000)
+	moved := primaryBefore
+	moved.Generation++
+	_, _, err = daNodeObserverStateOwnerDeltas(primaryBefore, moved)
+	require(t, err != nil, "observer state projection: owner generation change accepted")
 	commit := daNodeObserverStateMember{
 		DAID:       [32]byte{9},
 		TxID:       [32]byte{1},
@@ -2632,6 +2639,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		}
 		if err == nil {
 			run.Call.Result.Disposition = DAAdmissionRetained
+			run.Call.Result.DAID = chunk.DAID
 		}
 		for _, id := range plan {
 			run.PlanOrder = append(run.PlanOrder, [32]byte{id})
@@ -2912,6 +2920,16 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			require(t, err == nil, "observer state projection: %v", err)
 			stateAssertJSON(t, row, input.want)
 		})
+	}
+	foreign, conflict := fresh, fresh
+	foreign.Call.Result.DAID = commit.TxID
+	conflict.Call.Result.SameDAIDCommitConflict = true
+	for _, run := range []daNodeObserverStateAdmission{
+		foreign,
+		conflict,
+	} {
+		_, _, err = daNodeObserverStateAdmissionImageOutput(small, run)
+		require(t, err != nil && strings.Contains(err.Error(), "success result names"), "observer state projection: incomplete success result accepted: %v", err)
 	}
 	// Synthetic cleanup rows: LOCAL commit, PEER and DETACHED_REORG chunk survivors; members 7 and 5 are removed.
 	peer := DAObserverProvenance{
