@@ -712,7 +712,7 @@ func observerImageLocked(relay *DARelayState, owner *PendingOutpointOwner) daNod
 	return daNodeObserverStateObservation{Image: image, Owner: ownerImageLocked(owner)}
 }
 
-func observerImageInHook(f *daNodeObserverStateFixture, stage daCompleteStage) (daNodeObserverStateObservation, error) {
+func observerImageInHook(f *daNodeObserverStateFixture, stage daCompleteStage) daNodeObserverStateObservation {
 	relay, owner := f.Relay, f.Mempool.pendingOutpoints
 	if stage == daCompletePlanned {
 		relay.mu.Lock()
@@ -720,7 +720,7 @@ func observerImageInHook(f *daNodeObserverStateFixture, stage daCompleteStage) (
 	}
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
-	return observerImageLocked(relay, owner), nil
+	return observerImageLocked(relay, owner)
 }
 
 func observerImageOutsideHook(f *daNodeObserverStateFixture, closed bool) (daNodeObserverStateObservation, error) {
@@ -736,7 +736,7 @@ func observerImageOutsideHook(f *daNodeObserverStateFixture, closed bool) (daNod
 			return daNodeObserverStateObservation{}, fmt.Errorf("observer state accounting closure: %w", err)
 		}
 	}
-	return observerImageInHook(f, daCompleteEffects)
+	return observerImageInHook(f, daCompleteEffects), nil
 }
 
 func stateSetupBaseline(f *daNodeObserverStateFixture) error {
@@ -933,11 +933,9 @@ func admitDANodeObserverStateCandidate(f *daNodeObserverStateFixture, control da
 		if phase == "EFFECTS" {
 			apply = applyDANodeObserverStateEffectsControl
 		}
-		result.Restore, hookErr = apply(f, control)
-		if hookErr != nil {
-			return
+		if result.Restore, hookErr = apply(f, control); hookErr == nil {
+			result.Before = observerImageInHook(f, stage)
 		}
-		result.Before, hookErr = observerImageInHook(f, stage)
 	}
 	_, callErr := f.Relay.AdmitDA(f.Candidate.Raw, f.Candidate.Provenance)
 	f.Relay.completeHook = nil
@@ -1264,7 +1262,7 @@ func daNodeObserverStateCandidateToken(image DAObserverStateImage, candidate daN
 func daNodeObserverStateAdmissionFollowUp(row daNodeObserverStateCase, fixture *daNodeObserverStateFixture, primary daNodeObserverStateAdmission) (map[string]any, error) {
 	if row.Input.FollowUp == "RESTORE_NAMED_CORRUPTION_THEN_FRESH_ADMISSION" {
 		if primary.Restore == nil {
-			return nil, fmt.Errorf("observer input %s: named control has no restorable field", row.Case.ID)
+			return nil, fmt.Errorf("observer state restore %s: named control has no restorable field", row.Case.ID)
 		}
 		if err := primary.Restore(); err != nil {
 			return nil, err
@@ -1569,10 +1567,17 @@ func validateDANodeObserverStateInput(id string, raw json.RawMessage) (daNodeObs
 		return input, fmt.Errorf("observer input %s: unknown execution_boundary", id)
 	}
 	if input.ConstructionRef != ref {
-		return input, fmt.Errorf("observer input %s: construction_ref does not match execution_boundary", id)
+		return input, fmt.Errorf("observer input %s: construction_ref does not match its boundary", id)
 	}
-	complete, wantFollowUp := ref == "COMPLETE_COMMIT_7_SETS", "REPEAT_IDENTICAL_CLEANUP"
-	if err := stateRawFieldsChecked(id+" ", []stateRawField{{"accepted_sequence", input.AcceptedSequence, complete}, {"control", input.Control, complete}, {"member_provenance", input.MemberProvenance, !complete}, {"cleanup_selector", input.CleanupSelector, !complete}}); err != nil {
+	complete := ref == "COMPLETE_COMMIT_7_SETS"
+	wantFollowUp := "REPEAT_IDENTICAL_CLEANUP"
+	fields := []stateRawField{
+		{"accepted_sequence", input.AcceptedSequence, complete},
+		{"control", input.Control, complete},
+		{"member_provenance", input.MemberProvenance, !complete},
+		{"cleanup_selector", input.CleanupSelector, !complete},
+	}
+	if err := stateRawFieldsChecked(id+" ", fields); err != nil {
 		return input, err
 	}
 	if complete {
@@ -1937,16 +1942,14 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			continue
 		}
 		restore, err := apply(f, control)
-		require(t, err == nil && restore() == nil, "observer state restore %s: %v", row.Case.ID, err)
+		require(t, err == nil && restore != nil && restore() == nil, "observer state restore %s: no named restore: %v", row.Case.ID, err)
 		restored, err := observerImageOutsideHook(f, false)
 		require(t, err == nil && reflect.DeepEqual(initial, restored), "observer state restore %s: restored image differs from the pre-control image: %v", row.Case.ID, err)
 		err = restore()
 		require(t, err != nil && strings.Contains(err.Error(), "no longer corrupted"), "observer state restore %s: repeated restore accepted: %v", row.Case.ID, err)
 	}
 	// A repeat that actually retains the candidate reports a changed image.
-	repeat := cases[0]
-	repeat.Input.FollowUp = "REPEAT_IDENTICAL_ADMISSION"
-	follow, err := daNodeObserverStateAdmissionFollowUp(repeat, f, daNodeObserverStateAdmission{After: initial})
+	follow, err := daNodeObserverStateAdmissionFollowUp(cases[0], f, daNodeObserverStateAdmission{After: initial})
 	require(t, err == nil && follow["image_and_prior_claims_unchanged"] == false, "observer state follow-up: changed repeat image reported unchanged: %v %v", follow, err)
 	// A per-peer entry added at EFFECTS survives Go's pre-mutation owner-ready check and publication.
 	m, err := newDANodeObserverStateFixture(cases[0], profile)
@@ -1961,7 +1964,6 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	require(t, err != nil && strings.Contains(err.Error(), "accounting closure"), "observer state accounting closure: retained admission accepted stale accounting: %v", err)
 	_, open := observerImageOutsideHook(m, false)
 	_, closed := observerImageOutsideHook(m, true)
-
 	require(t, open == nil && closed != nil && strings.Contains(closed.Error(), "accounting closure"), "observer state accounting closure: closed=%v open=%v", closed, open)
 	// A collection failure on the thirteenth row, after the census passed, leaves the destination directory untouched.
 	dir := t.TempDir()
@@ -2030,13 +2032,13 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	extra.Image.Records[0].Chunks = []DAObserverChunk{{Member: &DAObserverMember{TxID: [32]byte{7}}}}
 	_, err = projectDANodeObserverStateCleanup(small, daNodeObserverStateCase{}, prior, extra)
 	require(t, err != nil && strings.Contains(err.Error(), "no constructed input"), "observer state cleanup: unconstructed surviving member dropped: %v", err)
-	// Only the surviving commit changes: the survivor and both image-equality observations must be false.
-	moved := next
-	moved.Image.OutpointRows, moved.Image.Records = nil, []DAObserverRecord{record}
+	// NO_SELECTION: every member survives and only the commit bytes change, so all three equality observations must be false.
+	moved := prior
+	moved.Image.Records = slices.Clone(prior.Image.Records)
 	moved.Image.Records[0].Commit.TxBytes = []byte{9}
 	protected := daNodeObserverStateCase{Case: daNodeObserverCase{ID: "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED"}}
 	movedOut, err := projectDANodeObserverStateCleanup(small, protected, prior, moved)
-	require(t, err == nil && movedOut["surviving_members_and_claims_unchanged"] == false && movedOut["image_byte_identical"] == false, "observer state cleanup: changed survivor reported unchanged: %v", err)
+	require(t, err == nil && movedOut["cleanup_result"] == "NO_SELECTION" && movedOut["surviving_members_and_claims_unchanged"] == false && movedOut["image_byte_identical"] == false, "observer state cleanup: changed survivor reported unchanged: %v %v", movedOut, err)
 	repeated, err := stateCleanupFollowUp(small, protected, prior, moved)
 	require(t, err == nil && repeated["image_and_claims_unchanged"] == false, "observer state cleanup follow-up: changed image reported unchanged: %v", err)
 	skewed := next
