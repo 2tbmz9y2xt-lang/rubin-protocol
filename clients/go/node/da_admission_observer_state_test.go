@@ -238,6 +238,11 @@ type daNodeObserverStateMember struct {
 	Raw         []byte
 	Provenance  DAProvenance
 	ChunkIndex  uint16
+	Commitment  [32]byte
+	ChunkCount  uint16
+	ChunkHash   [32]byte
+	// Token is the owner TokenHighWater read right after this member's setup admission.
+	Token uint64
 }
 
 type daNodeObserverStateFixture struct {
@@ -531,6 +536,8 @@ func buildDANodeObserverStateMemberOnce(f *daNodeObserverStateFixture, row daNod
 		// The closed profile pins the remaining roots and batch-signature fields to zero/empty.
 		tx.DaPayload = manifest
 		tx.DaCommitCore = &consensus.DaCommitCore{BatchNumber: 9, ChunkCount: uint16(chunkCount), DaID: out.DAID}
+		out.Commitment = commitment
+		out.ChunkCount = uint16(chunkCount)
 		tx.Outputs = append([]consensus.TxOutput{{CovenantType: consensus.COV_TYPE_DA_COMMIT, CovenantData: append([]byte(nil), commitment[:]...)}}, tx.Outputs...)
 	} else {
 		if key.MemberOrdinal == 0 {
@@ -540,6 +547,7 @@ func buildDANodeObserverStateMemberOnce(f *daNodeObserverStateFixture, row daNod
 		tx.DaPayload = append([]byte(nil), payload...)
 		tx.DaChunkCore = &consensus.DaChunkCore{DaID: out.DAID, ChunkIndex: uint16(chunkIndex), ChunkHash: chunkHash}
 		out.ChunkIndex = uint16(chunkIndex)
+		out.ChunkHash = chunkHash
 	}
 	if err := consensus.SignTransaction(tx, f.Mempool.chainState.Utxos, p.Chain.ChainID, f.Signer); err != nil {
 		return out, fmt.Errorf("observer state SignTransaction: %w", err)
@@ -635,6 +643,10 @@ func setupDANodeObserverStateSet(f *daNodeObserverStateFixture, row daNodeObserv
 			if err != nil || got.DAID != member.DAID || got.Disposition != DAAdmissionRetained || got.SameDAIDCommitConflict {
 				return nil, fmt.Errorf("observer state setup AdmitDA=(%+v,%v), want retained %x", got, err, member.DAID)
 			}
+			owner := f.Mempool.pendingOutpoints
+			owner.mu.Lock()
+			member.Token = owner.tokenHighWater
+			owner.mu.Unlock()
 			f.Members[key] = member
 		}
 		members = append(members, member)
@@ -783,7 +795,7 @@ func stateSetupBaseline(f *daNodeObserverStateFixture) error {
 	members := 0
 	for key, member := range f.Members {
 		records[member.DAID] = true
-		if !daNodeObserverStateCandidateMatches(image, member, observed.Owner.Generation) {
+		if !daNodeObserverStateCandidateMatches(image, member, observed.Owner.Generation, member.Token) {
 			return fmt.Errorf("observer state setup baseline: retained member %+v does not match its construction", key)
 		}
 	}
@@ -1109,13 +1121,27 @@ func daNodeObserverStateFindMember(record DAObserverRecord, candidate daNodeObse
 	return nil, nil, false
 }
 
-func daNodeObserverStateCandidateMatches(image DAObserverStateImage, candidate daNodeObserverStateMember, generation uint64) bool {
+func daNodeObserverStateCandidateMatches(image DAObserverStateImage, candidate daNodeObserverStateMember, generation, token uint64) bool {
 	record, ok := daNodeObserverStateFindRecord(image, candidate.DAID)
 	if !ok {
 		return false
 	}
 	member, raw, ok := daNodeObserverStateFindMember(record, candidate)
 	if !ok || member.WTxID != candidate.WTxID || member.Fee != candidate.Fee || member.Provenance != daObserverProvenance(candidate.Provenance) || !reflect.DeepEqual(member.Inputs, candidate.Inputs) || !bytes.Equal(raw, candidate.Raw) {
+		return false
+	}
+	slotMatches := record.Commit.DAID == candidate.DAID &&
+		record.Commit.PayloadCommitment == candidate.Commitment &&
+		record.Commit.ChunkCount == candidate.ChunkCount
+	if candidate.Key.MemberOrdinal != 0 {
+		chunk := record.Chunks[slices.IndexFunc(record.Chunks, func(chunk DAObserverChunk) bool {
+			return chunk.Member == member
+		})]
+		slotMatches = chunk.DAID == candidate.DAID &&
+			chunk.ChunkIndex == candidate.ChunkIndex &&
+			chunk.ChunkHash == candidate.ChunkHash
+	}
+	if !slotMatches || member.TokenSeq != token {
 		return false
 	}
 	claims := slices.DeleteFunc(slices.Clone(image.Claims), func(row DAObserverClaim) bool {
@@ -1238,7 +1264,7 @@ func daNodeObserverStateAdmissionImageOutput(f *daNodeObserverStateFixture, run 
 	}
 	targetRecord, _ := daNodeObserverStateFindRecord(after, f.Candidate.DAID)
 	_, _, candidatePublished := daNodeObserverStateFindMember(targetRecord, f.Candidate)
-	candidateMatches := daNodeObserverStateCandidateMatches(after, f.Candidate, run.After.Owner.Generation)
+	candidateMatches := daNodeObserverStateCandidateMatches(after, f.Candidate, run.After.Owner.Generation, run.After.Owner.TokenHighWater)
 	result, err := daNodeObserverStateResult(run.Call, run.Before.Image.NextReceivedTime, candidatePublished)
 	if err != nil {
 		return nil, nil, err
@@ -1257,7 +1283,7 @@ func daNodeObserverStateAdmissionImageOutput(f *daNodeObserverStateFixture, run 
 		}
 	}
 	imageUnchanged := reflect.DeepEqual(before, after)
-	targetCommitMatches := daNodeObserverStateCandidateMatches(after, f.TargetCommit, run.After.Owner.Generation)
+	targetCommitMatches := daNodeObserverStateCandidateMatches(after, f.TargetCommit, run.After.Owner.Generation, f.TargetCommit.Token)
 	// The completion value also requires the retained target commit to still match its construction.
 	survivors := daNodeObserverStateSurvivorsEqual(before, after, removedRecords, nil, f.Candidate.TxID) && targetCommitMatches
 
@@ -1857,7 +1883,8 @@ func stateAssertJSON(t *testing.T, got any, want string) {
 // outpoint rows carrying that TxID, are one source across images; owner and claim Generation are one source, since
 // no admission or cleanup call begins a transition; each coupled field may repeat its own value
 // (projection_field_closure_precision).
-func stateDistinctSources(invocations []uint64, observations []daNodeObserverStateObservation, coupled ...string) error {
+// In each after observation (odd index) the candidate TokenSeq and the minted owner TokenHighWater are one source.
+func stateDistinctSources(invocations []uint64, candidate daNodeObserverStateMember, observations []daNodeObserverStateObservation, coupled ...string) error {
 	seen := make(map[any]string)
 	errs := make([]error, 0)
 	put := func(prefix, names string, values ...any) {
@@ -1983,13 +2010,15 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 			owners = append(owners, owner)
 			put(
 				fmt.Sprintf("owner %d ", i),
-				"ReserveCalls ReservationsAcquired Finalizations CandidateReleases TokenHighWater",
+				"ReserveCalls ReservationsAcquired Finalizations CandidateReleases",
 				owner.Counts.ReserveCalls,
 				owner.Counts.ReservationsAcquired,
 				owner.Counts.Finalizations,
 				owner.Counts.CandidateReleases,
-				owner.TokenHighWater,
 			)
+			if i%2 == 0 || owner.TokenHighWater != daNodeObserverStateCandidateToken(observation.Image, candidate) {
+				put(fmt.Sprintf("owner %d ", i), "TokenHighWater", owner.TokenHighWater)
+			}
 			put("owner ", "Generation", owner.Generation)
 		}
 	}
@@ -2427,6 +2456,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		TxID:       [32]byte{1},
 		Raw:        []byte{1},
 		Provenance: LocalDAProvenance(),
+		Token:      4,
 	}
 	chunk := daNodeObserverStateMember{
 		Key:  daNodeObserverStateMemberKey{MemberOrdinal: 1},
@@ -2532,12 +2562,14 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			DAID:         commit.DAID,
 			ReceivedTime: received,
 			Commit: DAObserverCommit{
+				DAID:    commit.DAID,
 				Member:  cm,
 				TxBytes: []byte{1},
 			},
 		}
 		if candidate != nil {
 			target.Chunks = []DAObserverChunk{{
+				DAID:    chunk.DAID,
 				Member:  ch,
 				TxBytes: candidate,
 			}}
@@ -2568,6 +2600,16 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		image.Claims[1].Finalized = false
 		return image
 	}
+	// minted sets the candidate token that the run's reservation minted.
+	minted := func(image DAObserverStateImage, token uint64) DAObserverStateImage {
+		target := &image.Records[len(image.Records)-1]
+		member := *target.Chunks[0].Member
+		member.TokenSeq = token
+		target.Chunks[0].Member = &member
+		image.Claims[len(image.Claims)-1].TokenSeq = token
+		image.OutpointRows[0].TokenSeq = token
+		return image
+	}
 	mismatched := func(image DAObserverStateImage) DAObserverStateImage {
 		image.Records[len(image.Records)-1].Commit.TxBytes = []byte{7}
 		return image
@@ -2596,10 +2638,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	internal := errDARelayImageIncompatible
 	published := ownerAt(205, 306, 407, 500, 1016)
 	refused := ownerAt(205, 306, 407, 510, 1016)
-	fresh := admission(15, nil, build(61, nil, 0x41, 0x42), build(26, []byte{
+	fresh := admission(15, nil, build(61, nil, 0x41, 0x42), minted(build(26, []byte{
 		2,
 		3,
-	}), published, ownerAt(215, 317, 419, 500, 1027), 0x42, 0x41)
+	}), 1027), published, ownerAt(215, 317, 419, 500, 1027), 0x42, 0x41)
 	repeatBefore := ownerAt(600, 700, 800, 900, 2000)
 	repeated := ownerAt(611, 712, 813, 914, 2028)
 	same := admission(15, internal, build(28, []byte{
@@ -2746,10 +2788,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		},
 		{
 			"publish, survivor changed",
-			admission(8, nil, build(41, nil, 0x31, 0x32), survivorChanged(build(21, []byte{
+			admission(8, nil, build(41, nil, 0x31, 0x32), survivorChanged(minted(build(21, []byte{
 				2,
 				3,
-			})), primaryBefore, published, 0x32, 0x31, 0x33),
+			}), 1016)), primaryBefore, published, 0x32, 0x31, 0x33),
 			same,
 			"REPEAT_IDENTICAL_ADMISSION",
 			`{
@@ -2851,6 +2893,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 					input.primary.Invocations,
 					input.retry.Invocations,
 				},
+				chunk,
 				[]daNodeObserverStateObservation{
 					input.primary.Before,
 					input.primary.After,
@@ -3121,7 +3164,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			first := observe(input.steps[0], 1)
 			second := observe(input.steps[1], 106)
 			third := observe(input.steps[2], 213)
-			err := stateDistinctSources(nil, []daNodeObserverStateObservation{
+			err := stateDistinctSources(nil, daNodeObserverStateMember{}, []daNodeObserverStateObservation{
 				first,
 				second,
 				third,
@@ -3139,7 +3182,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		observe(cleanupImage(true, true, 300), 106),
 		observe(cleanupImage(false, true, 100), 213),
 	}
-	require(t, stateDistinctSources(nil, removedFollowUp) == nil, "observer state distinct sources: removed follow-up")
+	require(t, stateDistinctSources(nil, daNodeObserverStateMember{}, removedFollowUp) == nil, "observer state distinct sources: removed follow-up")
 	followUp, err := stateCleanupFollowUp(cleanupFixture, protected, removedFollowUp[0], removedFollowUp[1])
 	require(t, err == nil, "observer state cleanup: %v", err)
 	stateAssertJSON(t, followUp, `{
@@ -3206,9 +3249,9 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		3,
 	})
 	duplicated.Claims = append(duplicated.Claims, duplicated.Claims[len(duplicated.Claims)-1])
-	require(t, daNodeObserverStateCandidateMatches(publishedImage, chunk, 6), "observer state candidate: constructed claim rejected")
-	require(t, !daNodeObserverStateCandidateMatches(duplicated, chunk, 6), "observer state candidate claim multiplicity")
-	require(t, !daNodeObserverStateCandidateMatches(publishedImage, chunk, 7), "observer state candidate claim generation")
+	require(t, daNodeObserverStateCandidateMatches(publishedImage, chunk, 6, 3000), "observer state candidate: constructed claim rejected")
+	require(t, !daNodeObserverStateCandidateMatches(duplicated, chunk, 6, 3000), "observer state candidate claim multiplicity")
+	require(t, !daNodeObserverStateCandidateMatches(publishedImage, chunk, 7, 3000), "observer state candidate claim generation")
 	require(t, !daNodeObserverStateSurvivorsEqual(publishedImage, DAObserverStateImage{OutpointRows: publishedImage.OutpointRows}, [][32]byte{commit.DAID}, nil, [32]byte{}), "observer state completion: removed member outpoint row survived")
 	retained := DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}
 	retryImage := func(survivors, candidate bool) map[string]any {
@@ -3237,14 +3280,14 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	stateAssertJSON(t, follow["result"], `{"disposition":"COMMIT_WITH_VICTIMS","semantic_reason_id":"NONE"}`)
 	final, err := observerImageOutsideHook(f, false)
 	require(t, err == nil && final.Owner.Identity == saved.Identity && final.Owner.TokenHighWater == saved.TokenHighWater+1 && final.Owner.Counts.ReservationsAcquired == saved.Counts.ReservationsAcquired+1 && daNodeObserverStateCandidateToken(final.Image, f.Candidate) > saved.TokenHighWater, "observer state follow-up high-water continuity: %v", err)
-	require(t, daNodeObserverStateCandidateMatches(final.Image, f.Candidate, final.Owner.Generation), "observer state projection: retried candidate does not match its construction")
+	require(t, daNodeObserverStateCandidateMatches(final.Image, f.Candidate, final.Owner.Generation, final.Owner.TokenHighWater), "observer state projection: retried candidate does not match its construction")
 	require(t, daNodeObserverStateSurvivorsEqual(final.Image, final.Image, nil, nil, [32]byte{}), "observer state projection: identical images reported unequal")
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	changed, err := observerImageOutsideHook(f, false)
 	require(t, err == nil && bytes.Equal(final.Image.Records[len(final.Image.Records)-1].Commit.TxBytes, independent), "observer state alias: final baseline changed: %v", err)
 	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
 	require(t, !daNodeObserverStateSurvivorsEqual(final.Image, changed.Image, nil, nil, [32]byte{}), "observer state projection: changed member reported as a surviving equal")
-	require(t, !daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit, changed.Owner.Generation), "observer state projection: changed member reported as matching its construction")
+	require(t, !daNodeObserverStateCandidateMatches(changed.Image, f.TargetCommit, changed.Owner.Generation, f.TargetCommit.Token), "observer state projection: changed member reported as matching its construction")
 	repeat := cases[5]
 	repeat.Input.FollowUp = "REPEAT_IDENTICAL_ADMISSION"
 	lagging := final
