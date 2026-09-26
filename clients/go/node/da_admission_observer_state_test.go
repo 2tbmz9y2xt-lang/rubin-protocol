@@ -2729,10 +2729,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		{
 			// Publish with two committed victims out of plan order and one merely planned victim; fresh retry.
 			"publish, candidate mismatch",
-			admission(8, nil, build(41, nil, 0x31, 0x32), build(21, []byte{
+			admission(8, nil, build(41, nil, 0x31, 0x32), minted(build(21, []byte{
 				2,
 				4,
-			}), primaryBefore, published, 0x32, 0x31, 0x33),
+			}), 1016), primaryBefore, published, 0x32, 0x31, 0x33),
 			fresh,
 			"RESTORE_NAMED_CORRUPTION_THEN_FRESH_ADMISSION",
 			`{
@@ -2842,10 +2842,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		},
 		{
 			"refusal, candidate present",
-			admission(8, internal, mismatched(build(41, nil)), mismatched(build(21, []byte{
+			admission(8, internal, mismatched(build(41, nil)), mismatched(minted(build(21, []byte{
 				2,
 				4,
-			})), primaryBefore, refused, 0x33),
+			}), 1016)), primaryBefore, refused, 0x33),
 			differs,
 			"REPEAT_IDENTICAL_ADMISSION",
 			`{
@@ -3241,7 +3241,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			3,
 		})
 		broken.OutpointRows = rows
-		actual, _, err := daNodeObserverStateAdmissionImageOutput(small, admission(8, nil, base, broken, primaryBefore, primaryBefore))
+		actual, _, err := daNodeObserverStateAdmissionImageOutput(small, admission(8, nil, base, broken, primaryBefore, ownerAt(200, 300, 400, 500, 3000)))
 		require(t, err == nil && actual["state_image"].(map[string]any)["candidate_members_match_construction"] == false, "observer state candidate outpoint bindings: rows=%v error=%v", rows, err)
 	}
 	duplicated := build(21, []byte{
@@ -3251,6 +3251,12 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	duplicated.Claims = append(duplicated.Claims, duplicated.Claims[len(duplicated.Claims)-1])
 	require(t, daNodeObserverStateCandidateMatches(publishedImage, chunk, 6, 3000), "observer state candidate: constructed claim rejected")
 	require(t, !daNodeObserverStateCandidateMatches(duplicated, chunk, 6, 3000), "observer state candidate claim multiplicity")
+	misplaced := build(21, []byte{
+		2,
+		3,
+	})
+	misplaced.Locators[len(misplaced.Locators)-1].ChunkIndex = 1
+	require(t, !daNodeObserverStateCandidateMatches(misplaced, chunk, 6, 3000), "observer state candidate locator binding")
 	require(t, !daNodeObserverStateCandidateMatches(publishedImage, chunk, 7, 3000), "observer state candidate claim generation")
 	require(t, !daNodeObserverStateSurvivorsEqual(publishedImage, DAObserverStateImage{OutpointRows: publishedImage.OutpointRows}, [][32]byte{commit.DAID}, nil, [32]byte{}), "observer state completion: removed member outpoint row survived")
 	retained := DAObserverAdmitCall{Result: DAAdmissionResult{Disposition: DAAdmissionRetained}}
