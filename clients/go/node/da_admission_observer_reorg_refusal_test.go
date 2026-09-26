@@ -1073,7 +1073,7 @@ func TestDAAdmissionObserverNodeReorgRefusalIntegrity(t *testing.T) {
 		encoded, err := json.Marshal(corpus)
 		require(t, err == nil, "reorg strict corpus encode: %v", err)
 		_, _, err = reorgRefusalRows(encoded)
-		require(t, err != nil && err.Error() == "reorg fixture "+owner.key+": json: unknown field \"unexpected\"",
+		require(t, err != nil && err.Error() == "reorg fixture "+owner.key+": observer input: json: unknown field \"unexpected\"",
 			"reorg strict fixture %s: %v", owner.key, err)
 	}
 	configured := original
@@ -1144,7 +1144,7 @@ func TestDAAdmissionObserverNodeReorgRefusalIntegrity(t *testing.T) {
 				delete(input, field)
 			case "extra":
 				input[field+"_extra"] = "UNKNOWN"
-				want = "json: unknown field \"" + field + "_extra\""
+				want = "observer input: json: unknown field \"" + field + "_extra\""
 			}
 			encoded, err := json.Marshal(input)
 			require(t, err == nil, "reorg input encode: %v", err)
