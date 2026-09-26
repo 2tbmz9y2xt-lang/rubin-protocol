@@ -425,13 +425,17 @@ func validateDANodeObserverStateCanonicalProfile(p daNodeObserverStateCanonicalP
 
 const daNodeObserverZero32 = "0000000000000000000000000000000000000000000000000000000000000000"
 
-func validateDANodeObserverStateClass(class daNodeObserverStateResidentClass, ordinal, residents, chunks, length uint64, payload, commitFee, chunkFee string) bool {
-	return class.ClassOrdinal == ordinal &&
-		class.ResidentCount == residents &&
-		class.ChunkCount == chunks &&
-		class.PayloadByte == payload &&
-		class.CommitFee == commitFee &&
-		class.ChunkFee == chunkFee &&
+func validateDANodeObserverStateClass(
+	class daNodeObserverStateResidentClass,
+	ordinal,
+	residents,
+	chunks,
+	length uint64,
+	payload,
+	commitFee,
+	chunkFee string,
+) bool {
+	return class.ClassOrdinal == ordinal && class.ResidentCount == residents && class.ChunkCount == chunks && class.PayloadByte == payload && class.CommitFee == commitFee && class.ChunkFee == chunkFee &&
 		slices.Equal(class.ChunkLengths, slices.Repeat([]uint64{length}, int(chunks)))
 }
 
