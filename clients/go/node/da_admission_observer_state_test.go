@@ -1848,14 +1848,15 @@ func stateAssertJSON(t *testing.T, got any, want string) {
 	require(t, err == nil && bytes.Equal(actual, target), "observer state projection: got %s, want %s (%v)", actual, target, err)
 }
 
-// stateDistinctSources is the distinct-source guard of mechanical_projection_guards. Across the observations of
-// one synthetic input, the scalar sources the projectors read (counters, sequences, byte totals, revisions,
-// high-water values, owner counts, invocations and record ids) must not share a value within one Go type.
-// Named exceptions: zero marks an absent source; an image or owner identical to an earlier one is the true
-// side of an equality boolean and counts once; a record id and its commit or chunk member fields are one source
-// across images (one retained entity); each coupled field may repeat its own value (projection_field_closure_precision:
-// an unchanged release count, or unchanged staged bytes on a cleanup without removal). Owner generation is
-// excluded because the candidate claim must carry it (pr_3335_fix_round_1 F2).
+// stateDistinctSources is the distinct-source guard (distinct_source_guard_scope_2026_09_26). Across the observations
+// of one synthetic input, every integer, [32]byte id and string key of the image records, capacity sets, commits,
+// chunks, members, claims, outpoint rows and quota rows, and of the owner snapshots, must not share a value within
+// one Go type. Enum strings (state, provenance kind, domain) are not keys and locators are outside the domain.
+// Named exceptions: zero marks an absent source; an image or owner identical to an earlier one counts once; a record
+// DAID with its commit, chunk and chunk-member fields, and a member TxID, TokenSeq and inputs with the claim and
+// outpoint rows carrying that TxID, are one source across images; owner and claim Generation are one source, since
+// no admission or cleanup call begins a transition; each coupled field may repeat its own value
+// (projection_field_closure_precision).
 func stateDistinctSources(invocations []uint64, observations []daNodeObserverStateObservation, coupled ...string) error {
 	seen := make(map[any]string)
 	errs := make([]error, 0)
@@ -1873,6 +1874,31 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 			seen[value] = name
 		}
 	}
+	member := func(txid [32]byte) string {
+		return "member " + daNodeObserverHexID(txid) + " "
+	}
+	inputs := func(txid [32]byte, rows []consensus.Outpoint) {
+		for _, row := range rows {
+			put(member(txid), "InputTxid InputVout", row.Txid, row.Vout)
+		}
+	}
+	retained := func(m *DAObserverMember) {
+		if m == nil {
+			return
+		}
+		put(
+			member(m.TxID),
+			"TxID TokenSeq WTxID FeeLo FeeHi PeerIdentity QuotaIdentity",
+			m.TxID,
+			m.TokenSeq,
+			m.WTxID,
+			m.Fee.Lo,
+			m.Fee.Hi,
+			m.Provenance.PeerIdentity,
+			m.Provenance.QuotaIdentity,
+		)
+		inputs(m.TxID, m.Inputs)
+	}
 	for i, value := range invocations {
 		put(fmt.Sprintf("call %d ", i), "invocations", value)
 	}
@@ -1883,43 +1909,74 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 		owner := observation.Owner
 		if !slices.ContainsFunc(images, func(other DAObserverStateImage) bool { return reflect.DeepEqual(other, image) }) {
 			images = append(images, image)
+			at := fmt.Sprintf("image %d ", i)
 			put(
-				fmt.Sprintf("image %d ", i),
-				"NextReceivedTime StagedBytes CompleteBytes CompleteCount PinnedPayloadBytes RecordRevisionHighWater",
+				at,
+				"NextReceivedTime StagedBytes CompleteBytes CompleteCount OrphanBytes OrphanCommitOverheadBytes PinnedPayloadBytes RecordRevisionHighWater",
 				image.NextReceivedTime,
 				image.StagedBytes,
 				image.CompleteBytes,
 				image.CompleteCount,
+				image.OrphanBytes,
+				image.OrphanCommitOverheadBytes,
 				image.PinnedPayloadBytes,
 				image.RecordRevisionHighWater,
 			)
 			for _, account := range image.OrphanBytesByPeerQuotaKey {
-				put(fmt.Sprintf("image %d quota %s ", i, account.Key), "bytes", account.Bytes)
+				put(at+"quota "+account.Key+" ", "Key Bytes", account.Key, account.Bytes)
 			}
 			for _, record := range image.Records {
-				prefix := "record " + daNodeObserverHexID(record.DAID) + " "
+				entity := "record " + daNodeObserverHexID(record.DAID) + " "
+				set := record.CompleteIntrinsic
 				put(
-					fmt.Sprintf("image %d %s", i, prefix),
-					"Revision ReceivedTime",
+					at+entity,
+					"Revision ReceivedTime PayloadBytes WireBytes TTLBlocksRemaining SetID SetFeeLo SetFeeHi SetTotalBytes SetPayloadBytes SetReceivedSequence",
 					record.Revision,
 					record.ReceivedTime,
+					record.PayloadBytes,
+					record.WireBytes,
+					record.TTLBlocksRemaining,
+					set.ID,
+					set.Fee.Lo,
+					set.Fee.Hi,
+					set.TotalBytes,
+					set.PayloadBytes,
+					set.ReceivedSequence,
 				)
+				put(entity, "DAID DAID", record.DAID, record.Commit.DAID)
 				put(
-					prefix,
-					"DAID ChunkCount CommitTxBytes",
-					record.DAID,
+					entity+"commit ",
+					"PayloadCommitment PeerQuotaKey ChunkCount WireBytes TxBytes",
+					record.Commit.PayloadCommitment,
+					record.Commit.PeerQuotaKey,
 					record.Commit.ChunkCount,
+					record.Commit.WireBytes,
 					uint64(len(record.Commit.TxBytes)),
 				)
+				retained(record.Commit.Member)
 				for _, chunk := range record.Chunks {
+					put(entity, "DAID", chunk.DAID)
 					put(
-						prefix+"chunk "+daNodeObserverHexID(chunk.Member.TxID)+" ",
-						"ChunkIndex TxBytes Payload",
+						entity+"chunk "+daNodeObserverHexID(chunk.Member.TxID)+" ",
+						"ChunkHash PeerQuotaKey ChunkIndex WireBytes TxBytes Payload",
+						chunk.ChunkHash,
+						chunk.PeerQuotaKey,
 						chunk.ChunkIndex,
+						chunk.WireBytes,
 						uint64(len(chunk.TxBytes)),
 						uint64(len(chunk.Payload)),
 					)
+					retained(chunk.Member)
 				}
+			}
+			for _, claim := range image.Claims {
+				put(member(claim.TxID), "TxID TokenSeq", claim.TxID, claim.TokenSeq)
+				put("owner ", "Generation", claim.Generation)
+				inputs(claim.TxID, claim.Inputs)
+			}
+			for _, row := range image.OutpointRows {
+				put(member(row.TxID), "TxID TokenSeq", row.TxID, row.TokenSeq)
+				inputs(row.TxID, []consensus.Outpoint{row.Outpoint})
 			}
 		}
 		if !slices.Contains(owners, owner) {
@@ -1933,6 +1990,7 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 				owner.Counts.CandidateReleases,
 				owner.TokenHighWater,
 			)
+			put("owner ", "Generation", owner.Generation)
 		}
 	}
 	return errors.Join(errs...)
@@ -2394,7 +2452,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	}
 	cm := &DAObserverMember{
 		TxID:       commit.TxID,
-		TokenSeq:   1,
+		TokenSeq:   4,
 		Provenance: DAObserverProvenance{Kind: "LOCAL"},
 	}
 	ch := &DAObserverMember{
@@ -2431,7 +2489,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			Claims: []DAObserverClaim{
 				{
 					TxID:       commit.TxID,
-					TokenSeq:   1,
+					TokenSeq:   4,
 					Domain:     "DA",
 					Finalized:  true,
 					Generation: 6,
@@ -2454,11 +2512,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			})
 			image.Claims = append(image.Claims, DAObserverClaim{
 				TxID:     member,
-				TokenSeq: uint64(id),
+				TokenSeq: uint64(id) + 200,
 			})
 			image.Claims = append(image.Claims, DAObserverClaim{
 				TxID:     member,
-				TokenSeq: uint64(id) + 100,
+				TokenSeq: uint64(id) + 300,
 			})
 		}
 		if len(victims) != 0 {
@@ -2812,10 +2870,14 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	// Synthetic cleanup rows: LOCAL commit, PEER and DETACHED_REORG chunk survivors; members 7 and 5 are removed.
 	peer := DAObserverProvenance{
 		Kind:          "PEER",
-		PeerIdentity:  "peer-1",
-		QuotaIdentity: "quota-1",
+		PeerIdentity:  "peer-",
+		QuotaIdentity: "quota-",
 	}
 	chunkRow := func(txid byte, provenance DAObserverProvenance, index uint16, tx, payload int) DAObserverChunk {
+		if provenance.Kind == "PEER" {
+			provenance.PeerIdentity += fmt.Sprintf("%x", txid)
+			provenance.QuotaIdentity += fmt.Sprintf("%x", txid)
+		}
 		return DAObserverChunk{
 			Member: &DAObserverMember{
 				TxID:       [32]byte{txid},
@@ -2841,11 +2903,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			}},
 			OrphanBytesByPeerQuotaKey: []DAObserverKeyBytes{
 				{
-					Key:   "quota-z",
+					Key:   fmt.Sprint("quota-z", base),
 					Bytes: base + 8,
 				},
 				{
-					Key:   "quota-a",
+					Key:   fmt.Sprint("quota-a", base),
 					Bytes: base + 9,
 				},
 			},
@@ -2953,8 +3015,8 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 						"role": "CHUNK",
 						"provenance": {
 							"source": "PEER",
-							"peer_identity": "peer-1",
-							"quota_identity": "quota-1"
+							"peer_identity": "peer-61",
+							"quota_identity": "quota-61"
 						},
 						"retained_tx_bytes": "14",
 						"chunk_index": 9,
@@ -2982,11 +3044,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 				},
 				"peer_quota_accounting": [
 					{
-						"quota_identity": "quota-z",
+						"quota_identity": "quota-z100",
 						"bytes": "108"
 					},
 					{
-						"quota_identity": "quota-a",
+						"quota_identity": "quota-a100",
 						"bytes": "109"
 					}
 				]
