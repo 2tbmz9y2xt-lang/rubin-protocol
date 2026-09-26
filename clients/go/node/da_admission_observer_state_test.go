@@ -280,7 +280,8 @@ func loadDANodeObserverStateProfile(raw json.RawMessage) (daNodeObserverStatePro
 	if err := json.Unmarshal(chainRaw, &chain); err != nil {
 		return profile, fmt.Errorf("observer input CHAIN_100: %w", err)
 	}
-	var err, tipErr error
+	var err error
+	var tipErr error
 	profile.Chain.ChainID, err = daNodeObserverStateHex32("CHAIN_100.chain_id", chain.ChainID)
 	profile.Chain.TipHash, tipErr = daNodeObserverStateHex32("CHAIN_100.tip_hash", chain.TipHash)
 	if err = cmp.Or(err, tipErr); err != nil {
@@ -378,11 +379,27 @@ func validateDANodeObserverStateCompleteProfile(p daNodeObserverStateCompletePro
 func validateDANodeObserverStateMixedProfile(p daNodeObserverStateMixedProfile) error {
 	if p.MemberTemplateRef != "CANONICAL_MEMBER" || p.ClassOrdinal != 0 || p.ResidentOrdinal != 0 ||
 		p.DAID != "0x52 || seven 0x00 bytes || u64be(case_ordinal) || u64be(0) || u64be(0)" ||
-		p.ChunkCount != 3 || !slices.Equal(p.ChunkLengths, []uint64{10, 20, 1}) ||
+		p.ChunkCount != 3 || !slices.Equal(p.ChunkLengths, []uint64{
+		10,
+		20,
+		1,
+	}) ||
 		p.PayloadByte != "05" || p.CommitFee != "600000" || p.ChunkFee != "600000" || p.MemberOrdinals != "0 is commit; 1 and 2 are chunks 0 and 1. Chunk 2 is absent but its one-byte payload participates in the commit commitment." ||
 		p.AcceptedSequence != "3" || p.FirstReceivedSequence != "1" || len(p.PeerQuotaAccounting) != 0 ||
-		!slices.Equal(p.AdmissionOrder, []uint64{0, 1, 2}) || !slices.Equal(p.RetainedMemberOrdinals, []uint64{0, 1, 2}) ||
-		!slices.Equal(p.AbsentMemberOrdinals, []uint64{3}) || !slices.Equal(p.AdmissionOrdinals, []uint64{1, 2, 3}) {
+		!slices.Equal(p.AdmissionOrder, []uint64{
+			0,
+			1,
+			2,
+		}) || !slices.Equal(p.RetainedMemberOrdinals, []uint64{
+		0,
+		1,
+		2,
+	}) ||
+		!slices.Equal(p.AbsentMemberOrdinals, []uint64{3}) || !slices.Equal(p.AdmissionOrdinals, []uint64{
+		1,
+		2,
+		3,
+	}) {
 		return fmt.Errorf("observer input STATE_B_MIXED: unsupported cleanup profile")
 	}
 	return nil
@@ -414,7 +431,9 @@ func newDANodeObserverStateFixture(row daNodeObserverStateCase, profile daNodeOb
 	surcharge, _ := stateDANodeObserverUint("da_surcharge_per_byte", profile.Canonical.Policy.DASurchargePerByte)
 	maxDABytes, _ := stateDANodeObserverUint("policy_max_da_bytes_per_block", profile.Canonical.Policy.PolicyMaxDABytesPerBlock)
 	cfg := DefaultMempoolConfig()
-	cfg.MinDaFeeRate, cfg.PolicyDaSurchargePerByte, cfg.PolicyMaxDaBytesPerBlock = minFee, surcharge, maxDABytes
+	cfg.MinDaFeeRate = minFee
+	cfg.PolicyDaSurchargePerByte = surcharge
+	cfg.PolicyMaxDaBytesPerBlock = maxDABytes
 	mp, err := NewMempoolWithConfig(st, nil, profile.Chain.ChainID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("observer state mempool: %w", err)
@@ -426,12 +445,24 @@ func newDANodeObserverStateFixture(row daNodeObserverStateCase, profile daNodeOb
 	if err != nil {
 		return nil, fmt.Errorf("observer state relay: %w", err)
 	}
-	fixture = &daNodeObserverStateFixture{Relay: relay, Mempool: mp, Signer: signer, Members: make(map[daNodeObserverStateMemberKey]daNodeObserverStateMember, 320)}
+	fixture = &daNodeObserverStateFixture{
+		Relay:   relay,
+		Mempool: mp,
+		Signer:  signer,
+		Members: make(map[daNodeObserverStateMemberKey]daNodeObserverStateMember, 320),
+	}
 	if row.Input.ExecutionBoundary == "COMPLETE_COMMIT_PRECONDITION" {
 		err = setupDANodeObserverStateComplete(fixture, row, profile, address)
 	} else {
 		mixed := profile.Mixed
-		class := daNodeObserverStateResidentClass{ClassOrdinal: mixed.ClassOrdinal, ChunkCount: mixed.ChunkCount, ChunkLengths: mixed.ChunkLengths, PayloadByte: mixed.PayloadByte, CommitFee: mixed.CommitFee, ChunkFee: mixed.ChunkFee}
+		class := daNodeObserverStateResidentClass{
+			ClassOrdinal: mixed.ClassOrdinal,
+			ChunkCount:   mixed.ChunkCount,
+			ChunkLengths: mixed.ChunkLengths,
+			PayloadByte:  mixed.PayloadByte,
+			CommitFee:    mixed.CommitFee,
+			ChunkFee:     mixed.ChunkFee,
+		}
 		var members []daNodeObserverStateMember
 		members, err = setupDANodeObserverStateSet(fixture, row, profile, address, class, mixed.ResidentOrdinal, mixed.AdmissionOrdinals[0], 3, 3, row.Input.provenance, false)
 		if err == nil {
@@ -657,7 +688,10 @@ func parseDANodeObserverStateProvenance(raw json.RawMessage) ([]DAProvenance, er
 			if len(member.PeerIdentity) != 0 || len(member.QuotaIdentity) != 0 {
 				return nil, fmt.Errorf("observer input member_provenance[%d]: forbidden peer identities", i)
 			}
-			out[i] = map[string]DAProvenance{"LOCAL": LocalDAProvenance(), "DETACHED_REORG": DetachedReorgDAProvenance()}[source]
+			out[i] = map[string]DAProvenance{
+				"LOCAL":          LocalDAProvenance(),
+				"DETACHED_REORG": DetachedReorgDAProvenance(),
+			}[source]
 		case "PEER":
 			peer, err := decodeDANodeObserverStateString(member.PeerIdentity, "member_provenance.peer_identity")
 			quota, quotaErr := decodeDANodeObserverStateString(member.QuotaIdentity, "member_provenance.quota_identity")
@@ -744,7 +778,9 @@ func stateSetupBaseline(f *daNodeObserverStateFixture) error {
 	if err != nil {
 		return err
 	}
-	image, records, members := observed.Image, make(map[[32]byte]bool), 0
+	image := observed.Image
+	records := make(map[[32]byte]bool)
+	members := 0
 	for key, member := range f.Members {
 		records[member.DAID] = true
 		if !daNodeObserverStateCandidateMatches(image, member, observed.Owner.Generation) {
@@ -817,9 +853,16 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 		if !ok || locator.daID != member.DAID {
 			return nil, fmt.Errorf("observer state control: selected locator is absent")
 		}
-		corrupt := daRelayLocator{daID: control.locator, kind: locator.kind, chunkIndex: locator.chunkIndex}
+		corrupt := daRelayLocator{
+			daID:       control.locator,
+			kind:       locator.kind,
+			chunkIndex: locator.chunkIndex,
+		}
 		relay.locators[member.TxID] = corrupt
-		return lockedRestore(&relay.mu, func() bool { current, ok := relay.locators[member.TxID]; return ok && current == corrupt },
+		return lockedRestore(&relay.mu, func() bool {
+			current, ok := relay.locators[member.TxID]
+			return ok && current == corrupt
+		},
 			func() { relay.locators[member.TxID] = locator }), nil
 	case "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES":
 		old := record.completeIntrinsic.totalBytes
@@ -897,7 +940,11 @@ func applyDANodeObserverStateEffectsControl(f *daNodeObserverStateFixture, contr
 			return retained && locator.daID == member.DAID && !present
 		}, func() { owner.byToken[token] = claim })
 		// DA->owner lock order: the claim returns only while its member is still retained.
-		return func() error { f.Relay.mu.Lock(); defer f.Relay.mu.Unlock(); return restore() }, nil
+		return func() error {
+			f.Relay.mu.Lock()
+			defer f.Relay.mu.Unlock()
+			return restore()
+		}, nil
 	default:
 		return nil, fmt.Errorf("observer input control: invalid EFFECTS action %q", control.action)
 	}
@@ -924,7 +971,10 @@ func admitDANodeObserverStateCandidate(f *daNodeObserverStateFixture, control da
 		if stage == daCompleteEffects && plan != nil {
 			result.PlanOrder = append([][32]byte(nil), plan.capacity.victims...)
 		}
-		phase := map[daCompleteStage]string{daCompletePlanned: "PLANNED", daCompleteEffects: "EFFECTS"}[stage]
+		phase := map[daCompleteStage]string{
+			daCompletePlanned: "PLANNED",
+			daCompleteEffects: "EFFECTS",
+		}[stage]
 		if control.phase != phase || result.ControlReach {
 			return
 		}
@@ -1010,7 +1060,10 @@ func daNodeObserverStateResult(call DAObserverAdmitCall, acceptedSequence uint64
 	case call.Err == nil && call.Result.Disposition == DAAdmissionRetained && !candidatePublished:
 		return nil, fmt.Errorf("observer state result: retained outcome without candidate publication")
 	case call.Err == nil && call.Result.Disposition == DAAdmissionRetained:
-		return map[string]any{"disposition": "COMMIT_WITH_VICTIMS", "semantic_reason_id": "NONE"}, nil
+		return map[string]any{
+			"disposition":        "COMMIT_WITH_VICTIMS",
+			"semantic_reason_id": "NONE",
+		}, nil
 	case call.Err == nil && call.Result.Disposition == DAAdmissionDuplicate:
 		reason = "DUPLICATE_CONFLICT"
 	case call.Err == nil:
@@ -1030,7 +1083,10 @@ func daNodeObserverStateResult(call DAObserverAdmitCall, acceptedSequence uint64
 	default:
 		return nil, fmt.Errorf("observer state result: unrecognized outcome %T %v", call.Err, call.Err)
 	}
-	return map[string]any{"disposition": "REJECT_UNCHANGED", "semantic_reason_id": reason}, nil
+	return map[string]any{
+		"disposition":        "REJECT_UNCHANGED",
+		"semantic_reason_id": reason,
+	}, nil
 }
 
 func daNodeObserverStateFindRecord(image DAObserverStateImage, daID [32]byte) (DAObserverRecord, bool) {
@@ -1153,7 +1209,10 @@ func daNodeObserverStateDecimal(value uint64) string { return strconv.FormatUint
 
 func daNodeObserverStateOwnerOutput(invocations uint64, counts DAObserverOwnerCounts, highWater uint64, releaseScope string) map[string]any {
 	return map[string]any{
-		"admission_entrypoint": map[string]any{"domain": "DA", "invocations": invocations},
+		"admission_entrypoint": map[string]any{
+			"domain":      "DA",
+			"invocations": invocations,
+		},
 		"pending_outpoint": map[string]any{
 			"reserve_calls":         counts.ReserveCalls,
 			"reservations_acquired": counts.ReservationsAcquired,
@@ -1493,7 +1552,8 @@ func validateDANodeObserverStateControl(raw json.RawMessage) (daNodeObserverStat
 	if err := decodeDANodeObserverInput(raw, &c); err != nil {
 		return c, err
 	}
-	var err, actionErr error
+	var err error
+	var actionErr error
 	c.phase, err = decodeDANodeObserverStateString(c.Phase, "control.phase")
 	c.action, actionErr = decodeDANodeObserverStateString(c.Action, "control.action")
 	if err = cmp.Or(err, actionErr); err != nil {
@@ -1577,7 +1637,10 @@ func validateDANodeObserverStateInput(id string, raw json.RawMessage) (daNodeObs
 	if input.CaseOrdinal == nil {
 		return input, fmt.Errorf("observer input %s: missing case_ordinal", id)
 	}
-	ref, known := map[string]string{"COMPLETE_COMMIT_PRECONDITION": "COMPLETE_COMMIT_7_SETS", "PEER_CLEANUP_STEP_PRECONDITION": "STATE_B_MIXED"}[input.ExecutionBoundary]
+	ref, known := map[string]string{
+		"COMPLETE_COMMIT_PRECONDITION":   "COMPLETE_COMMIT_7_SETS",
+		"PEER_CLEANUP_STEP_PRECONDITION": "STATE_B_MIXED",
+	}[input.ExecutionBoundary]
 	if !known {
 		return input, fmt.Errorf("observer input %s: unknown execution_boundary", id)
 	}
@@ -1587,10 +1650,26 @@ func validateDANodeObserverStateInput(id string, raw json.RawMessage) (daNodeObs
 	complete := ref == "COMPLETE_COMMIT_7_SETS"
 	wantFollowUp := "REPEAT_IDENTICAL_CLEANUP"
 	fields := []stateRawField{
-		{"accepted_sequence", input.AcceptedSequence, complete},
-		{"control", input.Control, complete},
-		{"member_provenance", input.MemberProvenance, !complete},
-		{"cleanup_selector", input.CleanupSelector, !complete},
+		{
+			"accepted_sequence",
+			input.AcceptedSequence,
+			complete,
+		},
+		{
+			"control",
+			input.Control,
+			complete,
+		},
+		{
+			"member_provenance",
+			input.MemberProvenance,
+			!complete,
+		},
+		{
+			"cleanup_selector",
+			input.CleanupSelector,
+			!complete,
+		},
 	}
 	if err := stateRawFieldsChecked(id+" ", fields); err != nil {
 		return input, err
@@ -1606,7 +1685,10 @@ func validateDANodeObserverStateInput(id string, raw json.RawMessage) (daNodeObs
 		if err != nil {
 			return input, fmt.Errorf("observer input %s: control: %w", id, err)
 		}
-		labeled, ok := map[string]uint64{"ACCEPTED_SEQUENCE_MAX": ^uint64(0), "ACCEPTED_SEQUENCE_MAX_MINUS_ONE": ^uint64(0) - 1}[control.action]
+		labeled, ok := map[string]uint64{
+			"ACCEPTED_SEQUENCE_MAX":           ^uint64(0),
+			"ACCEPTED_SEQUENCE_MAX_MINUS_ONE": ^uint64(0) - 1,
+		}[control.action]
 		if ok != (sequence >= ^uint64(0)-1) || ok && labeled != sequence {
 			return input, fmt.Errorf("observer input %s: accepted_sequence conflicts with control", id)
 		}
@@ -1672,7 +1754,10 @@ func selectDANodeObserverStateCases(corpus daNodeObserverCorpus) ([]daNodeObserv
 		if strings.HasPrefix(row.ID, "CAP_") != (input.ExecutionBoundary == "COMPLETE_COMMIT_PRECONDITION") {
 			return nil, fmt.Errorf("observer census: case %q in the wrong execution_boundary", row.ID)
 		}
-		selected = append(selected, daNodeObserverStateCase{Case: row, Input: input})
+		selected = append(selected, daNodeObserverStateCase{
+			Case:  row,
+			Input: input,
+		})
 	}
 	if len(selected) != len(daNodeObserverStateIDs) {
 		return nil, fmt.Errorf("observer census: got %d owned cases, want %d", len(selected), len(daNodeObserverStateIDs))
@@ -1772,10 +1857,12 @@ func stateAssertJSON(t *testing.T, got any, want string) {
 // an unchanged release count, or unchanged staged bytes on a cleanup without removal). Owner generation is
 // excluded because the candidate claim must carry it (pr_3335_fix_round_1 F2).
 func stateDistinctSources(invocations []uint64, observations []daNodeObserverStateObservation, coupled ...string) error {
-	seen, errs := make(map[any]string), make([]error, 0)
+	seen := make(map[any]string)
+	errs := make([]error, 0)
 	put := func(prefix, names string, values ...any) {
 		for i, name := range strings.Fields(names) {
-			name, value := prefix+name, values[i]
+			name := prefix + name
+			value := values[i]
 			other, dup := seen[value]
 			isCoupled := slices.ContainsFunc(coupled, func(field string) bool {
 				return strings.HasSuffix(name, " "+field) && strings.HasSuffix(other, " "+field)
@@ -1789,9 +1876,11 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 	for i, value := range invocations {
 		put(fmt.Sprintf("call %d ", i), "invocations", value)
 	}
-	images, owners := make([]DAObserverStateImage, 0), make([]daNodeObserverStateOwnerImage, 0)
+	images := make([]DAObserverStateImage, 0)
+	owners := make([]daNodeObserverStateOwnerImage, 0)
 	for i, observation := range observations {
-		image, owner := observation.Image, observation.Owner
+		image := observation.Image
+		owner := observation.Owner
 		if !slices.ContainsFunc(images, func(other DAObserverStateImage) bool { return reflect.DeepEqual(other, image) }) {
 			images = append(images, image)
 			put(
@@ -1903,21 +1992,61 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	for i, row := range cases {
 		owned[i], _ = json.Marshal(row.Case)
 	}
-	unknownCommit, unknownCleanup := cases[0].Case, cases[12].Case
-	unknownCommit.ID, unknownCleanup.ID = "UNKNOWN_STATE_CASE", "UNKNOWN_STATE_CASE"
-	cleanupAsCommit, commitAsCleanup := cases[0].Case, cases[12].Case
-	cleanupAsCommit.Input, commitAsCleanup.Input = cases[12].Case.Input, cases[0].Case.Input
+	unknownCommit := cases[0].Case
+	unknownCleanup := cases[12].Case
+	unknownCommit.ID = "UNKNOWN_STATE_CASE"
+	unknownCleanup.ID = "UNKNOWN_STATE_CASE"
+	cleanupAsCommit := cases[0].Case
+	commitAsCleanup := cases[12].Case
+	cleanupAsCommit.Input = cases[12].Case.Input
+	commitAsCleanup.Input = cases[0].Case.Input
 	for mode, probe := range []struct {
 		mutate func([]json.RawMessage) []json.RawMessage
 		want   string
 	}{
-		{func(c []json.RawMessage) []json.RawMessage { return c[:len(c)-1] }, "observer census: got 12 owned cases"},
-		{func(c []json.RawMessage) []json.RawMessage { return append(c, owned[0]) }, "observer census: duplicate or out-of-order"},
-		{func(c []json.RawMessage) []json.RawMessage { c[0], c[1] = c[1], c[0]; return c }, "observer census: duplicate or out-of-order"},
-		{func(c []json.RawMessage) []json.RawMessage { c[0], _ = json.Marshal(unknownCommit); return c }, "observer census: unknown owned case"},
-		{func(c []json.RawMessage) []json.RawMessage { c[12], _ = json.Marshal(unknownCleanup); return c }, "observer census: unknown owned case"},
-		{func(c []json.RawMessage) []json.RawMessage { c[0], _ = json.Marshal(cleanupAsCommit); return c }, `case "CAP_ALL_MEMBERS_REMOVED" in the wrong execution_boundary`},
-		{func(c []json.RawMessage) []json.RawMessage { c[12], _ = json.Marshal(commitAsCleanup); return c }, `case "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED" in the wrong execution_boundary`},
+		{
+			func(c []json.RawMessage) []json.RawMessage { return c[:len(c)-1] },
+			"observer census: got 12 owned cases",
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage { return append(c, owned[0]) },
+			"observer census: duplicate or out-of-order",
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				slices.Reverse(c[:2])
+				return c
+			},
+			"observer census: duplicate or out-of-order",
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				c[0], _ = json.Marshal(unknownCommit)
+				return c
+			},
+			"observer census: unknown owned case",
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				c[12], _ = json.Marshal(unknownCleanup)
+				return c
+			},
+			"observer census: unknown owned case",
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				c[0], _ = json.Marshal(cleanupAsCommit)
+				return c
+			},
+			`case "CAP_ALL_MEMBERS_REMOVED" in the wrong execution_boundary`,
+		},
+		{
+			func(c []json.RawMessage) []json.RawMessage {
+				c[12], _ = json.Marshal(commitAsCleanup)
+				return c
+			},
+			`case "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED" in the wrong execution_boundary`,
+		},
 	} {
 		bad := corpus
 		bad.Cases = probe.mutate(slices.Clone(owned))
@@ -1929,9 +2058,41 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	for _, probe := range []struct {
 		row   daNodeObserverStateCase
 		extra string
-	}{{cases[0], `"18446744073709551615"`}, {cases[9], `"318"`}, {cases[11], `"REPEAT_IDENTICAL_ADMISSION"`}} {
-		for _, field := range []string{"execution_boundary", "construction_ref", "case_ordinal", "accepted_sequence", "control", "follow_up", "member_provenance", "cleanup_selector"} {
-			for _, value := range []string{"", "null", `"UNKNOWN"`, `"-1"`, `"317"`, `"18446744073709551616"`, `{}`, `[{"source":"LOCAL"}]`, probe.extra} {
+	}{
+		{
+			cases[0],
+			`"18446744073709551615"`,
+		},
+		{
+			cases[9],
+			`"318"`,
+		},
+		{
+			cases[11],
+			`"REPEAT_IDENTICAL_ADMISSION"`,
+		},
+	} {
+		for _, field := range []string{
+			"execution_boundary",
+			"construction_ref",
+			"case_ordinal",
+			"accepted_sequence",
+			"control",
+			"follow_up",
+			"member_provenance",
+			"cleanup_selector",
+		} {
+			for _, value := range []string{
+				"",
+				"null",
+				`"UNKNOWN"`,
+				`"-1"`,
+				`"317"`,
+				`"18446744073709551616"`,
+				`{}`,
+				`[{"source":"LOCAL"}]`,
+				probe.extra,
+			} {
 				var input map[string]json.RawMessage
 				_ = json.Unmarshal(probe.row.Case.Input, &input)
 				if _, carried := input[field]; value == "" && !carried {
@@ -1959,28 +2120,79 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		}
 	}
 	for _, probe := range [][2]string{
-		{`{"phase":"UNKNOWN","action":"NONE"}`, "control: unknown phase/action"},
-		{`{"phase":"NONE","action":"UNKNOWN"}`, "control: unknown phase/action"},
-		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":false}`, "control.preserve_other_fields: must be true"},
-		{`{"phase":"NONE","action":"NONE","member":null}`, "control.member: missing or forbidden"},
-		{`{"phase":"NONE","action":"NONE","extra":1}`, `unknown field "extra"`},
-		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":2,"resident_ordinal":2,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: absent member"},
-		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: invalid selector"},
-		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`, "control.member: invalid selector"},
-		{`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0},"preserve_other_fields":true}`, "control.member: invalid selector"},
-		{`{"phase":"PLANNED","action":"CORRUPT_RESIDENT_LOCATOR_DA_ID","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true,"locator_da_id":"zz"}`, "locator_da_id: expected 32-byte hex"},
-		{`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"18446744073709551616"}`, "intrinsic_total_bytes_delta: invalid decimal"},
-		{`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"0"}`, "control.intrinsic_total_bytes_delta: must be positive"},
-		{`{"phase":"PLANNED","action":"ADVANCE_TARGET_AND_GLOBAL_REVISION","preserve_other_fields":true,"target_revision":"global_record_revision","global_record_revision":"global_record_revision + 1"}`, "control.target_revision: unsupported expression"},
-		{`{"phase":"PLANNED","action":"ADVANCE_TARGET_AND_GLOBAL_REVISION","preserve_other_fields":true,"target_revision":"global_record_revision + 1","global_record_revision":"global_record_revision + 2"}`, "control.global_record_revision: unsupported expression"},
+		{
+			`{"phase":"UNKNOWN","action":"NONE"}`,
+			"control: unknown phase/action",
+		},
+		{
+			`{"phase":"NONE","action":"UNKNOWN"}`,
+			"control: unknown phase/action",
+		},
+		{
+			`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":false}`,
+			"control.preserve_other_fields: must be true",
+		},
+		{
+			`{"phase":"NONE","action":"NONE","member":null}`,
+			"control.member: missing or forbidden",
+		},
+		{
+			`{"phase":"NONE","action":"NONE","extra":1}`,
+			`unknown field "extra"`,
+		},
+		{
+			`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":2,"resident_ordinal":2,"member_ordinal":1},"preserve_other_fields":true}`,
+			"control.member: absent member",
+		},
+		{
+			`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`,
+			"control.member: invalid selector",
+		},
+		{
+			`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"member_ordinal":1},"preserve_other_fields":true}`,
+			"control.member: invalid selector",
+		},
+		{
+			`{"phase":"PLANNED","action":"REMOVE_RESIDENT_CHUNK","member":{"class_ordinal":0,"resident_ordinal":0},"preserve_other_fields":true}`,
+			"control.member: invalid selector",
+		},
+		{
+			`{"phase":"PLANNED","action":"CORRUPT_RESIDENT_LOCATOR_DA_ID","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":1},"preserve_other_fields":true,"locator_da_id":"zz"}`,
+			"locator_da_id: expected 32-byte hex",
+		},
+		{
+			`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"18446744073709551616"}`,
+			"intrinsic_total_bytes_delta: invalid decimal",
+		},
+		{
+			`{"phase":"PLANNED","action":"INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES","member":{"class_ordinal":0,"resident_ordinal":0,"member_ordinal":0},"preserve_other_fields":true,"intrinsic_total_bytes_delta":"0"}`,
+			"control.intrinsic_total_bytes_delta: must be positive",
+		},
+		{
+			`{"phase":"PLANNED","action":"ADVANCE_TARGET_AND_GLOBAL_REVISION","preserve_other_fields":true,"target_revision":"global_record_revision","global_record_revision":"global_record_revision + 1"}`,
+			"control.target_revision: unsupported expression",
+		},
+		{
+			`{"phase":"PLANNED","action":"ADVANCE_TARGET_AND_GLOBAL_REVISION","preserve_other_fields":true,"target_revision":"global_record_revision + 1","global_record_revision":"global_record_revision + 2"}`,
+			"control.global_record_revision: unsupported expression",
+		},
 	} {
 		_, err := validateDANodeObserverStateControl([]byte(probe[0]))
 		require(t, err != nil && strings.Contains(err.Error(), "observer input") && strings.Contains(err.Error(), probe[1]), "observer state integrity accepted control %s: %v", probe[0], err)
 	}
 	for _, probe := range [][2]string{
-		{`[{"source":"UNKNOWN"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance: unknown source"},
-		{`[{"source":"PEER"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance.peer_identity: missing string"},
-		{`[{"source":"LOCAL","peer_identity":"x"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`, "member_provenance[0]: forbidden peer identities"},
+		{
+			`[{"source":"UNKNOWN"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`,
+			"member_provenance: unknown source",
+		},
+		{
+			`[{"source":"PEER"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`,
+			"member_provenance.peer_identity: missing string",
+		},
+		{
+			`[{"source":"LOCAL","peer_identity":"x"},{"source":"LOCAL"},{"source":"DETACHED_REORG"}]`,
+			"member_provenance[0]: forbidden peer identities",
+		},
 	} {
 		_, err := parseDANodeObserverStateProvenance([]byte(probe[0]))
 		require(t, err != nil && strings.Contains(err.Error(), "observer input "+probe[1]), "observer state integrity accepted provenance %s: %v", probe[0], err)
@@ -1989,13 +2201,34 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 		mutate func(*daNodeObserverStateProfile)
 		want   string
 	}{
-		{func(p *daNodeObserverStateProfile) { p.Mixed.MemberTemplateRef = "UNKNOWN" }, "STATE_B_MIXED: unsupported cleanup profile"},
-		{func(p *daNodeObserverStateProfile) { p.Mixed.ChunkCount = 65536 }, "STATE_B_MIXED: unsupported cleanup profile"},
-		{func(p *daNodeObserverStateProfile) { p.Complete.Target.ChunkLengths = []uint64{^uint64(0)} }, "COMPLETE_COMMIT_7_SETS: invalid target"},
-		{func(p *daNodeObserverStateProfile) { p.Canonical.Input.Value = "18446744073709551616" }, "CANONICAL_MEMBER: unsupported signed-member profile"},
-		{func(p *daNodeObserverStateProfile) { p.Complete.EffectiveDAMempoolSize = "536870913" }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
-		{func(p *daNodeObserverStateProfile) { p.Complete.PinnedPayloadMax = "96000001" }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
-		{func(p *daNodeObserverStateProfile) { p.Complete.CompleteSetMaxCount = 65537 }, "COMPLETE_COMMIT_7_SETS: unsupported bounds"},
+		{
+			func(p *daNodeObserverStateProfile) { p.Mixed.MemberTemplateRef = "UNKNOWN" },
+			"STATE_B_MIXED: unsupported cleanup profile",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Mixed.ChunkCount = 65536 },
+			"STATE_B_MIXED: unsupported cleanup profile",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Complete.Target.ChunkLengths = []uint64{^uint64(0)} },
+			"COMPLETE_COMMIT_7_SETS: invalid target",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Canonical.Input.Value = "18446744073709551616" },
+			"CANONICAL_MEMBER: unsupported signed-member profile",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Complete.EffectiveDAMempoolSize = "536870913" },
+			"COMPLETE_COMMIT_7_SETS: unsupported bounds",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Complete.PinnedPayloadMax = "96000001" },
+			"COMPLETE_COMMIT_7_SETS: unsupported bounds",
+		},
+		{
+			func(p *daNodeObserverStateProfile) { p.Complete.CompleteSetMaxCount = 65537 },
+			"COMPLETE_COMMIT_7_SETS: unsupported bounds",
+		},
 	} {
 		bad := profile
 		probe.mutate(&bad)
@@ -2023,11 +2256,19 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	delete(f.Members, tampered.Key)
 	require(t, stateSetupBaseline(f) != nil, "observer state setup baseline: retained rows outside the constructed members accepted")
 	f.Members[tampered.Key] = f.TargetCommit
-	overflow := daNodeObserverStateControl{action: "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES", selected: &daNodeObserverStateMemberKey{}, delta: ^uint64(0)}
+	overflow := daNodeObserverStateControl{
+		action:   "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES",
+		selected: &daNodeObserverStateMemberKey{},
+		delta:    ^uint64(0),
+	}
 	require(t, stateControlDeltaChecked(f, overflow) != nil, "observer state integrity: intrinsic delta overflow accepted before the measured call")
 	seq := profile
-	seq.Mixed.FirstReceivedSequence, seq.Complete.AcceptedSequence = "2", "317"
-	for _, row := range []daNodeObserverStateCase{cases[11], cases[0]} {
+	seq.Mixed.FirstReceivedSequence = "2"
+	seq.Complete.AcceptedSequence = "317"
+	for _, row := range []daNodeObserverStateCase{
+		cases[11],
+		cases[0],
+	} {
 		_, err = newDANodeObserverStateFixture(row, seq)
 		require(t, err != nil && strings.Contains(err.Error(), "first received sequence"), "observer state setup: %s sequence mismatch accepted: %v", row.Case.ID, err)
 	}
@@ -2037,7 +2278,8 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	require(t, err != nil && strings.Contains(err.Error(), "rolling_fee_floor"), "observer state integrity: unbound rolling fee floor accepted: %v", err)
 	// Each named restore returns the exact pre-control image once and then refuses: its target no longer carries the corruption.
 	for _, row := range cases[1:9] {
-		control, apply := row.Input.control, applyDANodeObserverStatePlannedControl
+		control := row.Input.control
+		apply := applyDANodeObserverStatePlannedControl
 		if control.phase == "EFFECTS" {
 			apply = applyDANodeObserverStateEffectsControl
 		}
@@ -2110,8 +2352,13 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	owner := &PendingOutpointOwner{}
 	ownerAt := func(reserve, acquired, finalized, released, highWater uint64) daNodeObserverStateOwnerImage {
 		return daNodeObserverStateOwnerImage{
-			Identity:       owner,
-			Counts:         DAObserverOwnerCounts{reserve, acquired, finalized, released},
+			Identity: owner,
+			Counts: DAObserverOwnerCounts{
+				reserve,
+				acquired,
+				finalized,
+				released,
+			},
 			TokenHighWater: highWater,
 			Generation:     6,
 		}
@@ -2124,24 +2371,41 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		Provenance: LocalDAProvenance(),
 	}
 	chunk := daNodeObserverStateMember{
-		Key:        daNodeObserverStateMemberKey{MemberOrdinal: 1},
-		DAID:       [32]byte{9},
-		TxID:       [32]byte{2},
-		Raw:        []byte{2, 3},
-		Inputs:     []consensus.Outpoint{{Txid: [32]byte{42}, Vout: 7}},
-		Provenance: DAProvenance{kind: daProvenancePeer, peerIdentity: "p", quotaIdentity: "q"},
+		Key:  daNodeObserverStateMemberKey{MemberOrdinal: 1},
+		DAID: [32]byte{9},
+		TxID: [32]byte{2},
+		Raw: []byte{
+			2,
+			3,
+		},
+		Inputs: []consensus.Outpoint{{
+			Txid: [32]byte{42},
+			Vout: 7,
+		}},
+		Provenance: DAProvenance{
+			kind:          daProvenancePeer,
+			peerIdentity:  "p",
+			quotaIdentity: "q",
+		},
 	}
-	small := &daNodeObserverStateFixture{TargetCommit: commit, Candidate: chunk}
+	small := &daNodeObserverStateFixture{
+		TargetCommit: commit,
+		Candidate:    chunk,
+	}
 	cm := &DAObserverMember{
 		TxID:       commit.TxID,
 		TokenSeq:   1,
 		Provenance: DAObserverProvenance{Kind: "LOCAL"},
 	}
 	ch := &DAObserverMember{
-		TxID:       chunk.TxID,
-		TokenSeq:   3000,
-		Inputs:     slices.Clone(chunk.Inputs),
-		Provenance: DAObserverProvenance{Kind: "PEER", PeerIdentity: "p", QuotaIdentity: "q"},
+		TxID:     chunk.TxID,
+		TokenSeq: 3000,
+		Inputs:   slices.Clone(chunk.Inputs),
+		Provenance: DAObserverProvenance{
+			Kind:          "PEER",
+			PeerIdentity:  "p",
+			QuotaIdentity: "q",
+		},
 	}
 	survivor := DAObserverClaim{
 		TxID:       [32]byte{5},
@@ -2159,33 +2423,71 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			PinnedPayloadBytes: received - 2,
 			NextReceivedTime:   received - 1,
 			CompleteCount:      received - 12,
-			Locators:           []DAObserverLocator{{TxID: commit.TxID, DAID: commit.DAID, Kind: "COMMIT"}},
+			Locators: []DAObserverLocator{{
+				TxID: commit.TxID,
+				DAID: commit.DAID,
+				Kind: "COMMIT",
+			}},
 			Claims: []DAObserverClaim{
-				{TxID: commit.TxID, TokenSeq: 1, Domain: "DA", Finalized: true, Generation: 6},
+				{
+					TxID:       commit.TxID,
+					TokenSeq:   1,
+					Domain:     "DA",
+					Finalized:  true,
+					Generation: 6,
+				},
 				survivor,
 			},
 		}
 		for _, id := range victims {
-			member := [32]byte{id, 1}
+			member := [32]byte{
+				id,
+				1,
+			}
 			image.Records = append(image.Records, DAObserverRecord{
 				DAID:   [32]byte{id},
 				Commit: DAObserverCommit{Member: &DAObserverMember{TxID: member}},
 			})
-			image.Locators = append(image.Locators, DAObserverLocator{TxID: member, DAID: [32]byte{id}})
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: member, TokenSeq: uint64(id)})
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: member, TokenSeq: uint64(id) + 100})
+			image.Locators = append(image.Locators, DAObserverLocator{
+				TxID: member,
+				DAID: [32]byte{id},
+			})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     member,
+				TokenSeq: uint64(id),
+			})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     member,
+				TokenSeq: uint64(id) + 100,
+			})
 		}
 		if len(victims) != 0 {
-			image.Locators = append(image.Locators, DAObserverLocator{TxID: [32]byte{victims[0], 1}, DAID: [32]byte{victims[0]}})
+			image.Locators = append(image.Locators, DAObserverLocator{
+				TxID: [32]byte{
+					victims[0],
+					1,
+				},
+				DAID: [32]byte{victims[0]},
+			})
 		}
 		target := DAObserverRecord{
 			DAID:         commit.DAID,
 			ReceivedTime: received,
-			Commit:       DAObserverCommit{Member: cm, TxBytes: []byte{1}},
+			Commit: DAObserverCommit{
+				Member:  cm,
+				TxBytes: []byte{1},
+			},
 		}
 		if candidate != nil {
-			target.Chunks = []DAObserverChunk{{Member: ch, TxBytes: candidate}}
-			image.Locators = append(image.Locators, DAObserverLocator{TxID: chunk.TxID, DAID: chunk.DAID, Kind: "CHUNK"})
+			target.Chunks = []DAObserverChunk{{
+				Member:  ch,
+				TxBytes: candidate,
+			}}
+			image.Locators = append(image.Locators, DAObserverLocator{
+				TxID: chunk.TxID,
+				DAID: chunk.DAID,
+				Kind: "CHUNK",
+			})
 			image.Claims = append(image.Claims, DAObserverClaim{
 				TxID:       chunk.TxID,
 				TokenSeq:   3000,
@@ -2194,7 +2496,11 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 				Finalized:  true,
 				Generation: 6,
 			})
-			image.OutpointRows = []DAObserverOutpointRow{{Outpoint: chunk.Inputs[0], TokenSeq: 3000, TxID: chunk.TxID}}
+			image.OutpointRows = []DAObserverOutpointRow{{
+				Outpoint: chunk.Inputs[0],
+				TokenSeq: 3000,
+				TxID:     chunk.TxID,
+			}}
 		}
 		image.Records = append(image.Records, target)
 		return image
@@ -2212,8 +2518,14 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		run := daNodeObserverStateAdmission{
 			Invocations: invocations,
 			Call:        DAObserverAdmitCall{Err: err},
-			Before:      daNodeObserverStateObservation{Image: before, Owner: from},
-			After:       daNodeObserverStateObservation{Image: after, Owner: to},
+			Before: daNodeObserverStateObservation{
+				Image: before,
+				Owner: from,
+			},
+			After: daNodeObserverStateObservation{
+				Image: after,
+				Owner: to,
+			},
 		}
 		if err == nil {
 			run.Call.Result.Disposition = DAAdmissionRetained
@@ -2226,11 +2538,26 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	internal := errDARelayImageIncompatible
 	published := ownerAt(205, 306, 407, 500, 1016)
 	refused := ownerAt(205, 306, 407, 510, 1016)
-	fresh := admission(15, nil, build(61, nil, 0x41, 0x42), build(26, []byte{2, 3}), published, ownerAt(215, 317, 419, 500, 1027), 0x42, 0x41)
+	fresh := admission(15, nil, build(61, nil, 0x41, 0x42), build(26, []byte{
+		2,
+		3,
+	}), published, ownerAt(215, 317, 419, 500, 1027), 0x42, 0x41)
 	repeatBefore := ownerAt(600, 700, 800, 900, 2000)
 	repeated := ownerAt(611, 712, 813, 914, 2028)
-	same := admission(15, internal, build(28, []byte{2, 3}), build(28, []byte{2, 3}), repeatBefore, repeated)
-	differs := admission(15, internal, build(48, []byte{2, 3}), survivorChanged(build(28, []byte{2, 3})), repeatBefore, repeated)
+	same := admission(15, internal, build(28, []byte{
+		2,
+		3,
+	}), build(28, []byte{
+		2,
+		3,
+	}), repeatBefore, repeated)
+	differs := admission(15, internal, build(48, []byte{
+		2,
+		3,
+	}), survivorChanged(build(28, []byte{
+		2,
+		3,
+	})), repeatBefore, repeated)
 	const (
 		commitResult = `{
 			"disposition": "COMMIT_WITH_VICTIMS",
@@ -2292,14 +2619,23 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		"claim_count": 0
 	}`
 	for _, input := range []struct {
-		name           string
-		primary, retry daNodeObserverStateAdmission
-		followUp, want string
-		coupled        string
-	}{{
-		// Publish with two committed victims out of plan order and one merely planned victim; fresh retry.
-		"publish, candidate mismatch", admission(8, nil, build(41, nil, 0x31, 0x32), build(21, []byte{2, 4}), primaryBefore, published, 0x32, 0x31, 0x33),
-		fresh, "RESTORE_NAMED_CORRUPTION_THEN_FRESH_ADMISSION", `{
+		name     string
+		primary  daNodeObserverStateAdmission
+		retry    daNodeObserverStateAdmission
+		followUp string
+		want     string
+		coupled  string
+	}{
+		{
+			// Publish with two committed victims out of plan order and one merely planned victim; fresh retry.
+			"publish, candidate mismatch",
+			admission(8, nil, build(41, nil, 0x31, 0x32), build(21, []byte{
+				2,
+				4,
+			}), primaryBefore, published, 0x32, 0x31, 0x33),
+			fresh,
+			"RESTORE_NAMED_CORRUPTION_THEN_FRESH_ADMISSION",
+			`{
 		"result": ` + commitResult + `,
 		"victims": [
 			"3200000000000000000000000000000000000000000000000000000000000000",
@@ -2347,9 +2683,18 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			],
 			"target_first_received_sequence": "26"
 		}
-	}`, "CandidateReleases"}, {
-		"publish, survivor changed", admission(8, nil, build(41, nil, 0x31, 0x32), survivorChanged(build(21, []byte{2, 3})), primaryBefore, published, 0x32, 0x31, 0x33),
-		same, "REPEAT_IDENTICAL_ADMISSION", `{
+	}`,
+			"CandidateReleases",
+		},
+		{
+			"publish, survivor changed",
+			admission(8, nil, build(41, nil, 0x31, 0x32), survivorChanged(build(21, []byte{
+				2,
+				3,
+			})), primaryBefore, published, 0x32, 0x31, 0x33),
+			same,
+			"REPEAT_IDENTICAL_ADMISSION",
+			`{
 		"result": ` + commitResult + `,
 		"victims": [
 			"3200000000000000000000000000000000000000000000000000000000000000",
@@ -2369,11 +2714,17 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			"candidate_members_match_construction": true
 		},
 		"follow_up": ` + repeatFollowUp(true) + `
-	}`, "CandidateReleases"}, {
-		// Refusals with a merely planned victim; this one has an actual candidate release, an unchanged image and a
-		// mismatched target commit.
-		"refusal, image unchanged", admission(8, internal, mismatched(build(21, nil)), mismatched(build(21, nil)), primaryBefore, refused, 0x33),
-		differs, "REPEAT_IDENTICAL_ADMISSION", `{
+	}`,
+			"CandidateReleases",
+		},
+		{
+			// Refusals with a merely planned victim; this one has an actual candidate release, an unchanged image and a
+			// mismatched target commit.
+			"refusal, image unchanged",
+			admission(8, internal, mismatched(build(21, nil)), mismatched(build(21, nil)), primaryBefore, refused, 0x33),
+			differs,
+			"REPEAT_IDENTICAL_ADMISSION",
+			`{
 		"result": ` + internalResult + `,
 		"victims": [],
 		"owner": ` + primaryOwner(10, "CANDIDATE_ONLY") + `,
@@ -2386,9 +2737,18 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			"image_and_prior_claims_unchanged_from_control_baseline": true
 		},
 		"follow_up": ` + repeatFollowUp(false) + `
-	}`, ""}, {
-		"refusal, candidate present", admission(8, internal, mismatched(build(41, nil)), mismatched(build(21, []byte{2, 4})), primaryBefore, refused, 0x33),
-		differs, "REPEAT_IDENTICAL_ADMISSION", `{
+	}`,
+			"",
+		},
+		{
+			"refusal, candidate present",
+			admission(8, internal, mismatched(build(41, nil)), mismatched(build(21, []byte{
+				2,
+				4,
+			})), primaryBefore, refused, 0x33),
+			differs,
+			"REPEAT_IDENTICAL_ADMISSION",
+			`{
 		"result": ` + internalResult + `,
 		"victims": [],
 		"owner": ` + primaryOwner(10, "CANDIDATE_ONLY") + `,
@@ -2401,10 +2761,16 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			"candidate_members_match_construction": false
 		},
 		"follow_up": ` + repeatFollowUp(false) + `
-	}`, ""}, {
-		// A refusal without a candidate release.
-		"refusal, image changed", admission(8, internal, mismatched(build(41, nil)), survivorChanged(mismatched(build(21, nil))), primaryBefore, published, 0x33),
-		same, "REPEAT_IDENTICAL_ADMISSION", `{
+	}`,
+			"",
+		},
+		{
+			// A refusal without a candidate release.
+			"refusal, image changed",
+			admission(8, internal, mismatched(build(41, nil)), survivorChanged(mismatched(build(21, nil))), primaryBefore, published, 0x33),
+			same,
+			"REPEAT_IDENTICAL_ADMISSION",
+			`{
 		"result": ` + internalResult + `,
 		"victims": [],
 		"owner": ` + primaryOwner(0, "NONE") + `,
@@ -2417,11 +2783,22 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			"image_and_prior_claims_unchanged_from_control_baseline": false
 		},
 		"follow_up": ` + repeatFollowUp(true) + `
-	}`, "CandidateReleases"}} {
+	}`,
+			"CandidateReleases",
+		},
+	} {
 		t.Run(input.name, func(t *testing.T) {
 			err := stateDistinctSources(
-				[]uint64{input.primary.Invocations, input.retry.Invocations},
-				[]daNodeObserverStateObservation{input.primary.Before, input.primary.After, input.retry.Before, input.retry.After},
+				[]uint64{
+					input.primary.Invocations,
+					input.retry.Invocations,
+				},
+				[]daNodeObserverStateObservation{
+					input.primary.Before,
+					input.primary.After,
+					input.retry.Before,
+					input.retry.After,
+				},
 				strings.Fields(input.coupled)...,
 			)
 			require(t, err == nil, "observer state distinct sources %s: %v", input.name, err)
@@ -2433,10 +2810,17 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		})
 	}
 	// Synthetic cleanup rows: LOCAL commit, PEER and DETACHED_REORG chunk survivors; members 7 and 5 are removed.
-	peer := DAObserverProvenance{Kind: "PEER", PeerIdentity: "peer-1", QuotaIdentity: "quota-1"}
+	peer := DAObserverProvenance{
+		Kind:          "PEER",
+		PeerIdentity:  "peer-1",
+		QuotaIdentity: "quota-1",
+	}
 	chunkRow := func(txid byte, provenance DAObserverProvenance, index uint16, tx, payload int) DAObserverChunk {
 		return DAObserverChunk{
-			Member:     &DAObserverMember{TxID: [32]byte{txid}, Provenance: provenance},
+			Member: &DAObserverMember{
+				TxID:       [32]byte{txid},
+				Provenance: provenance,
+			},
 			ChunkIndex: index,
 			TxBytes:    make([]byte, tx),
 			Payload:    make([]byte, payload),
@@ -2450,10 +2834,20 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			CompleteCount:      base - 88,
 			PinnedPayloadBytes: base + 2,
 			NextReceivedTime:   base + 3,
-			Claims:             []DAObserverClaim{{TxID: [32]byte{0x61}, TokenSeq: 61, Finalized: final}},
+			Claims: []DAObserverClaim{{
+				TxID:      [32]byte{0x61},
+				TokenSeq:  61,
+				Finalized: final,
+			}},
 			OrphanBytesByPeerQuotaKey: []DAObserverKeyBytes{
-				{Key: "quota-z", Bytes: base + 8},
-				{Key: "quota-a", Bytes: base + 9},
+				{
+					Key:   "quota-z",
+					Bytes: base + 8,
+				},
+				{
+					Key:   "quota-a",
+					Bytes: base + 9,
+				},
 			},
 		}
 		record := DAObserverRecord{
@@ -2461,7 +2855,10 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			State:        "STAGED_COMMIT",
 			ReceivedTime: base + 4,
 			Commit: DAObserverCommit{
-				Member:     &DAObserverMember{TxID: [32]byte{0x60}, Provenance: DAObserverProvenance{Kind: "LOCAL"}},
+				Member: &DAObserverMember{
+					TxID:       [32]byte{0x60},
+					Provenance: DAObserverProvenance{Kind: "LOCAL"},
+				},
 				ChunkCount: 11,
 				TxBytes:    make([]byte, 13),
 			},
@@ -2477,23 +2874,54 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			image.Locators = []DAObserverLocator{
 				{TxID: [32]byte{0x65}},
 				{TxID: [32]byte{0x67}},
-				{TxID: [32]byte{0x67}, Kind: "CHUNK"},
+				{
+					TxID: [32]byte{0x67},
+					Kind: "CHUNK",
+				},
 			}
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: [32]byte{0x65}, TokenSeq: 65})
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: [32]byte{0x65}, TokenSeq: 66})
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: [32]byte{0x67}, TokenSeq: 67})
-			image.Claims = append(image.Claims, DAObserverClaim{TxID: [32]byte{0x67}, TokenSeq: 68})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     [32]byte{0x65},
+				TokenSeq: 65,
+			})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     [32]byte{0x65},
+				TokenSeq: 66,
+			})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     [32]byte{0x67},
+				TokenSeq: 67,
+			})
+			image.Claims = append(image.Claims, DAObserverClaim{
+				TxID:     [32]byte{0x67},
+				TokenSeq: 68,
+			})
 		}
 		image.Records = []DAObserverRecord{record}
 		return image
 	}
 	cleanupFixture := &daNodeObserverStateFixture{Members: map[daNodeObserverStateMemberKey]daNodeObserverStateMember{}}
-	for ordinal, txid := range map[uint64]byte{0: 0x60, 1: 0x61, 5: 0x65, 6: 0x66, 7: 0x67} {
+	for ordinal, txid := range map[uint64]byte{
+		0: 0x60,
+		1: 0x61,
+		5: 0x65,
+		6: 0x66,
+		7: 0x67,
+	} {
 		key := daNodeObserverStateMemberKey{MemberOrdinal: ordinal}
-		cleanupFixture.Members[key] = daNodeObserverStateMember{Key: key, DAID: [32]byte{0x70}, TxID: [32]byte{txid}}
+		cleanupFixture.Members[key] = daNodeObserverStateMember{
+			Key:  key,
+			DAID: [32]byte{0x70},
+			TxID: [32]byte{txid},
+		}
 	}
 	observe := func(image DAObserverStateImage, highWater uint64) daNodeObserverStateObservation {
-		return daNodeObserverStateObservation{Image: image, Owner: daNodeObserverStateOwnerImage{Identity: owner, TokenHighWater: highWater}}
+		return daNodeObserverStateObservation{
+			Image: image,
+			Owner: daNodeObserverStateOwnerImage{
+				Identity:       owner,
+				TokenHighWater: highWater,
+			},
+		}
 	}
 	protected := daNodeObserverStateCase{Case: daNodeObserverCase{ID: "STATE_B_PEER_COMMIT_CLEANUP_PROTECTED"}}
 	chunkCase := daNodeObserverStateCase{Case: daNodeObserverCase{ID: "STATE_B_PEER_CHUNK_CLEANUP_PRESERVES_NONPEER"}}
@@ -2628,8 +3056,14 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		},
 	} {
 		t.Run(input.name, func(t *testing.T) {
-			first, second, third := observe(input.steps[0], 1), observe(input.steps[1], 106), observe(input.steps[2], 213)
-			err := stateDistinctSources(nil, []daNodeObserverStateObservation{first, second, third}, strings.Fields(input.coupled)...)
+			first := observe(input.steps[0], 1)
+			second := observe(input.steps[1], 106)
+			third := observe(input.steps[2], 213)
+			err := stateDistinctSources(nil, []daNodeObserverStateObservation{
+				first,
+				second,
+				third,
+			}, strings.Fields(input.coupled)...)
 			require(t, err == nil, "observer state distinct sources %s: %v", input.name, err)
 			row, err := projectDANodeObserverStateCleanup(cleanupFixture, input.row, first, second)
 			require(t, err == nil, "observer state cleanup: %v", err)
@@ -2652,7 +3086,8 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		"owner_high_water_delta": "107"
 	}`)
 	// Refusals and removed-member rows that the synthetic rows above do not reach.
-	removedBefore, kept := observe(cleanupImage(true, true, 300), 1), observe(cleanupImage(false, true, 100), 106)
+	removedBefore := observe(cleanupImage(true, true, 300), 1)
+	kept := observe(cleanupImage(false, true, 100), 106)
 	stale := kept
 	stale.Image.OutpointRows = []DAObserverOutpointRow{{TxID: [32]byte{0x65}}}
 	staleRow, err := projectDANodeObserverStateCleanup(cleanupFixture, protected, removedBefore, stale)
@@ -2667,22 +3102,47 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	skewed.Image.StagedBytes++
 	_, err = projectDANodeObserverStateCleanup(cleanupFixture, protected, removedBefore, skewed)
 	require(t, err != nil && strings.Contains(err.Error(), "staged-bytes delta"), "observer state cleanup: released charge not bound to Go accounting: %v", err)
-	base, publishedImage := build(21, nil), build(21, []byte{2, 3})
+	base := build(21, nil)
+	publishedImage := build(21, []byte{
+		2,
+		3,
+	})
 	owned := publishedImage.OutpointRows[0]
 	for _, rows := range [][]DAObserverOutpointRow{
 		nil,
 		{{Outpoint: owned.Outpoint, TxID: owned.TxID, TokenSeq: 3}},
-		{{Outpoint: owned.Outpoint, TxID: [32]byte{99}, TokenSeq: 3000}},
-		{{Outpoint: consensus.Outpoint{Vout: 99}, TxID: owned.TxID, TokenSeq: 3000}},
+		{{
+			Outpoint: owned.Outpoint,
+			TxID:     [32]byte{99},
+			TokenSeq: 3000,
+		}},
+		{{
+			Outpoint: consensus.Outpoint{Vout: 99},
+			TxID:     owned.TxID,
+			TokenSeq: 3000,
+		}},
 		{owned, owned},
-		{owned, {Outpoint: consensus.Outpoint{Vout: 99}, TxID: [32]byte{99}, TokenSeq: 3000}},
+		{
+			owned,
+			{
+				Outpoint: consensus.Outpoint{Vout: 99},
+				TxID:     [32]byte{99},
+				TokenSeq: 3000,
+			},
+		},
 	} {
-		broken := build(21, []byte{2, 3})
+		broken := build(21, []byte{
+			2,
+			3,
+		})
 		broken.OutpointRows = rows
 		actual, _, err := daNodeObserverStateAdmissionImageOutput(small, admission(8, nil, base, broken, primaryBefore, primaryBefore))
 		require(t, err == nil && actual["state_image"].(map[string]any)["candidate_members_match_construction"] == false, "observer state candidate outpoint bindings: rows=%v error=%v", rows, err)
 	}
-	duplicated := build(21, []byte{2, 3})
+	duplicated := build(21, []byte{
+		2,
+		3,
+	})
 	duplicated.Claims = append(duplicated.Claims, duplicated.Claims[len(duplicated.Claims)-1])
 	require(t, daNodeObserverStateCandidateMatches(publishedImage, chunk, 6), "observer state candidate: constructed claim rejected")
 	require(t, !daNodeObserverStateCandidateMatches(duplicated, chunk, 6), "observer state candidate claim multiplicity")
