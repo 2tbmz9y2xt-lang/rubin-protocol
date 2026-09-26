@@ -522,7 +522,11 @@ func collectReorgRefusal(raw []byte, dir, path string) ([]byte, error) {
 	}
 	out := daNodeObserverOutput{FormatVersion: 1, Cases: make([]daNodeObserverOutCase, 0, 2)}
 	for i, row := range rows {
-		observed, err := observeReorgRefusal(row, fixture, filepath.Join(dir, fmt.Sprint(i)), true, false)
+		rowDir := filepath.Join(dir, fmt.Sprint(i))
+		if err := os.Mkdir(rowDir, 0o700); err != nil {
+			return nil, err
+		}
+		observed, err := observeReorgRefusal(row, fixture, rowDir, true, false)
 		if err != nil {
 			return nil, err
 		}
