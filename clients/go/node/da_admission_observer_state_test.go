@@ -1767,8 +1767,8 @@ func stateAssertJSON(t *testing.T, got any, want string) {
 // one synthetic input, the scalar sources the projectors read (counters, sequences, byte totals, revisions,
 // high-water values, owner counts, invocations and record ids) must not share a value within one Go type.
 // Named exceptions: zero marks an absent source; an image or owner identical to an earlier one is the true
-// side of an equality boolean and counts once; a record, chunk or quota field is one source across images
-// (one retained entity); each coupled field may repeat its own value (projection_field_closure_precision:
+// side of an equality boolean and counts once; a record id and its commit or chunk member fields are one source
+// across images (one retained entity); each coupled field may repeat its own value (projection_field_closure_precision:
 // an unchanged release count, or unchanged staged bytes on a cleanup without removal). Owner generation is
 // excluded because the candidate claim must carry it (pr_3335_fix_round_1 F2).
 func stateDistinctSources(invocations []uint64, observations []daNodeObserverStateObservation, coupled ...string) error {
@@ -1805,16 +1805,20 @@ func stateDistinctSources(invocations []uint64, observations []daNodeObserverSta
 				image.RecordRevisionHighWater,
 			)
 			for _, account := range image.OrphanBytesByPeerQuotaKey {
-				put("quota "+account.Key+" ", "bytes", account.Bytes)
+				put(fmt.Sprintf("image %d quota %s ", i, account.Key), "bytes", account.Bytes)
 			}
 			for _, record := range image.Records {
 				prefix := "record " + daNodeObserverHexID(record.DAID) + " "
 				put(
-					prefix,
-					"DAID Revision ReceivedTime ChunkCount CommitTxBytes",
-					record.DAID,
+					fmt.Sprintf("image %d %s", i, prefix),
+					"Revision ReceivedTime",
 					record.Revision,
 					record.ReceivedTime,
+				)
+				put(
+					prefix,
+					"DAID ChunkCount CommitTxBytes",
+					record.DAID,
 					record.Commit.ChunkCount,
 					uint64(len(record.Commit.TxBytes)),
 				)
@@ -2441,18 +2445,21 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	// cleanupImage derives every counter except staged bytes from base; staged bytes carry the removed charge.
 	cleanupImage := func(removed, final bool, base uint64) DAObserverStateImage {
 		image := DAObserverStateImage{
-			StagedBytes:               100,
-			CompleteBytes:             base + 1,
-			CompleteCount:             base - 88,
-			PinnedPayloadBytes:        base + 2,
-			NextReceivedTime:          base + 3,
-			Claims:                    []DAObserverClaim{{TxID: [32]byte{0x61}, TokenSeq: 61, Finalized: final}},
-			OrphanBytesByPeerQuotaKey: []DAObserverKeyBytes{{Key: "quota-z", Bytes: 108}, {Key: "quota-a", Bytes: 109}},
+			StagedBytes:        100,
+			CompleteBytes:      base + 1,
+			CompleteCount:      base - 88,
+			PinnedPayloadBytes: base + 2,
+			NextReceivedTime:   base + 3,
+			Claims:             []DAObserverClaim{{TxID: [32]byte{0x61}, TokenSeq: 61, Finalized: final}},
+			OrphanBytesByPeerQuotaKey: []DAObserverKeyBytes{
+				{Key: "quota-z", Bytes: base + 8},
+				{Key: "quota-a", Bytes: base + 9},
+			},
 		}
 		record := DAObserverRecord{
 			DAID:         [32]byte{0x70},
 			State:        "STAGED_COMMIT",
-			ReceivedTime: 104,
+			ReceivedTime: base + 4,
 			Commit: DAObserverCommit{
 				Member:     &DAObserverMember{TxID: [32]byte{0x60}, Provenance: DAObserverProvenance{Kind: "LOCAL"}},
 				ChunkCount: 11,
