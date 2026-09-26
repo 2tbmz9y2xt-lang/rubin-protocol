@@ -2921,7 +2921,8 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 			stateAssertJSON(t, row, input.want)
 		})
 	}
-	foreign, conflict := fresh, fresh
+	foreign := fresh
+	conflict := fresh
 	foreign.Call.Result.DAID = commit.TxID
 	conflict.Call.Result.SameDAIDCommitConflict = true
 	for _, run := range []daNodeObserverStateAdmission{
