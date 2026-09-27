@@ -5,7 +5,6 @@ package mdbx
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1308,12 +1307,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 	if len(fixture.Vectors) != 1 {
 		t.Fatal("genesis literal fixture cardinality")
 	}
-	decode := func(value string) []byte {
-		result, err := hex.DecodeString(value)
-		mustEnvironment(t, err)
-		return result
-	}
-	block, hash, txid := decode(fixture.Vectors[0].Block), decode(fixture.Vectors[0].Hash), decode(fixture.Vectors[0].Txid)
+	block, hash, txid := mustCodecHex(t, fixture.Vectors[0].Block), mustCodecHex(t, fixture.Vectors[0].Hash), mustCodecHex(t, fixture.Vectors[0].Txid)
 	dbis := readDBIsLiteral()
 	counterKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
 	utxoKey := append(append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, txid...), 0, 0, 0, 0)
@@ -1322,7 +1316,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 	manifest := make([]byte, 33)
 	manifest[0], manifest[28] = 1, 1
 	artifacts := []Mutation{{DBI: dbis[3], Key: hash, AfterKind: AfterLiteral, Literal: block[:116]}, {DBI: dbis[4], Key: hash, AfterKind: AfterLiteral, Literal: block}, {DBI: dbis[5], Key: append(append([]byte(nil), hash...), 0), AfterKind: AfterLiteral, Literal: manifest}}
-	base := []Mutation{{DBI: dbis[0], Key: counterKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: []byte{0, 0, 0, 0, 0, 0, 0, 89, 0, 0, 0, 0, 0, 0, 0, 1}}, {DBI: dbis[1], Key: utxoKey, AfterKind: AfterLiteral, Literal: decode("00407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd7279000000000000000001")}, {DBI: dbis[2], Key: []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}, AfterKind: AfterLiteral, Literal: chain}}
+	base := []Mutation{{DBI: dbis[0], Key: counterKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: []byte{0, 0, 0, 0, 0, 0, 0, 89, 0, 0, 0, 0, 0, 0, 0, 1}}, {DBI: dbis[1], Key: utxoKey, AfterKind: AfterLiteral, Literal: mustCodecHex(t, "00407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd7279000000000000000001")}, {DBI: dbis[2], Key: []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}, AfterKind: AfterLiteral, Literal: chain}}
 	for _, reuse := range []bool{false, true} {
 		for _, mode := range []string{"old", "new", "third", "unreadable", "consulted0", "consulted1", "consulted2", "consulted3", "consulted4", "consulted5"} {
 			if !reuse && (mode == "consulted3" || mode == "consulted4" || mode == "consulted5") {
@@ -1376,12 +1370,9 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 					outcome = updateNativeReadback(store.env, handles, plan, owned, reader.txn, primary)
 					return nil
 				}))
-				want := CommitTruthUnknown
-				if mode == "old" {
-					want = CommitTruthOld
-				}
-				if mode == "new" {
-					want = CommitTruthNew
+				want := map[string]CommitTruth{"old": CommitTruthOld, "new": CommitTruthNew}[mode]
+				if want == 0 {
+					want = CommitTruthUnknown
 				}
 				if outcome.truth != want || outcome.stage != 3 || outcome.primary != primary || !outcome.commitAttempted || outcome.valid() != nil || (outcome.secondary != nil) != (mode == "unreadable") { //nolint:errorlint // Readback retains the exact primary cause.
 					t.Fatalf("genesis strict readback drifted: %+v", outcome)
@@ -1398,9 +1389,16 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 			key, value []byte
 			semantic   bool
 		}{
-			{"authority-empty", 0, []byte{2}, []byte{}, true}, {"authority-09", 0, []byte{2}, []byte{9}, true}, {"authority-version", 0, []byte{2}, wrongAuthority, true},
-			{"counter-empty", 0, counterKey, []byte{}, false}, {"counter-short", 0, counterKey, make([]byte, 15), false}, {"counter-long", 0, counterKey, make([]byte, 17), false},
-			{"header-different", 3, hash, wrongHeader, true}, {"header-empty", 3, hash, []byte{}, false}, {"body-empty", 4, hash, []byte{}, false}, {"manifest-empty", 5, artifacts[2].Key, []byte{}, false},
+			{"authority-empty", 0, []byte{2}, []byte{}, true},
+			{"authority-09", 0, []byte{2}, []byte{9}, true},
+			{"authority-version", 0, []byte{2}, wrongAuthority, true},
+			{"counter-empty", 0, counterKey, []byte{}, false},
+			{"counter-short", 0, counterKey, make([]byte, 15), false},
+			{"counter-long", 0, counterKey, make([]byte, 17), false},
+			{"header-different", 3, hash, wrongHeader, true},
+			{"header-empty", 3, hash, []byte{}, false},
+			{"body-empty", 4, hash, []byte{}, false},
+			{"manifest-empty", 5, artifacts[2].Key, []byte{}, false},
 		} {
 			t.Run(row.name, func(t *testing.T) {
 				path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
@@ -1415,18 +1413,17 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 				}
 				requireEngineError(t, err, EngineInvalidInput, operationUpdate, codeEINVAL)
 				mustEnvironment(t, fixtureSeedPrefixRawRow(store, dbis[row.rank], row.key, row.value))
+				image, imageErr := updateOwnedImage(row.value)
+				mustEnvironment(t, imageErr)
+				check := func(reader *Reader, label string) {
+					equal, err := updateNativeEqual(reader.txn, store.dbis[row.rank], row.key, image)
+					if err != nil || !equal {
+						t.Fatalf("%s: %v/%v", label, equal, err)
+					}
+				}
 				var observed error
 				truth, stage, err = store.Update(func(reader *Reader) (Batch, error) {
-					image, imageErr := updateOwnedImage(row.value)
-					mustEnvironment(t, imageErr)
-					image.present = true
-					check := func() {
-						equal, err := updateNativeEqual(reader.txn, store.dbis[row.rank], row.key, image)
-						if err != nil || !equal {
-							t.Fatalf("genesis raw OLD drifted: %v/%v", equal, err)
-						}
-					}
-					check()
+					check(reader, "genesis raw OLD drifted")
 					value, present, readErr := reader.Get(dbis[row.rank], row.key)
 					if row.semantic {
 						if readErr != nil || !present || !bytes.Equal(value, row.value) {
@@ -1447,7 +1444,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 						}
 						observed = readErr
 					}
-					check()
+					check(reader, "genesis raw OLD drifted")
 					return Batch{}, observed
 				})
 				if truth != 1 || stage != 1 || err != observed { //nolint:errorlint // The callback cause must survive unchanged.
@@ -1466,12 +1463,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 				store, err = Open(path, cfg)
 				mustEnvironment(t, err)
 				mustEnvironment(t, store.View(func(reader *Reader) error {
-					image, err := updateOwnedImage(row.value)
-					mustEnvironment(t, err)
-					equal, err := updateNativeEqual(reader.txn, store.dbis[row.rank], row.key, image)
-					if err != nil || !equal {
-						t.Fatalf("genesis durable raw OLD drifted: %v/%v", equal, err)
-					}
+					check(reader, "genesis durable raw OLD drifted")
 					return nil
 				}))
 			})

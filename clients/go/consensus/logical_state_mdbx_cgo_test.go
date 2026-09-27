@@ -1040,27 +1040,25 @@ func TestGenesisMDBX(t *testing.T) {
 }
 
 func genesisMDBXTestContext(t *testing.T) {
-	for _, variant := range []string{"chain-zero", "chain-wrong", "hash-zero", "hash-wrong", "length-short", "length-long"} {
-		t.Run(variant, func(t *testing.T) {
+	block, chain, hash := genesisMDBXFixture()
+	wrongChain, wrongHash := chain, hash
+	wrongChain[0], wrongHash[0] = wrongChain[0]^1, wrongHash[0]^1
+	for _, row := range []struct {
+		name        string
+		published   []byte
+		chain, hash [32]byte
+	}{
+		{"chain-zero", block, [32]byte{}, hash},
+		{"chain-wrong", block, wrongChain, hash},
+		{"hash-zero", block, chain, [32]byte{}},
+		{"hash-wrong", block, chain, wrongHash},
+		{"length-short", block[:265], chain, hash},
+		{"length-long", append(bytes.Clone(block), 0), chain, hash},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			store, owner, _ := genesisMDBXBoot(t, 1)
-			block, chain, hash := genesisMDBXFixture()
-			published := bytes.Clone(block)
-			switch variant {
-			case "chain-zero":
-				chain = [32]byte{}
-			case "chain-wrong":
-				chain[0] ^= 1
-			case "hash-zero":
-				hash = [32]byte{}
-			case "hash-wrong":
-				hash[0] ^= 1
-			case "length-short":
-				published = published[:265]
-			case "length-long":
-				published = append(published, 0)
-			}
 			old := genesisMDBXSnapshot(t, store, 1)
-			out := ConnectPublishedGenesisMDBX(store, owner, block, published, chain, hash)
+			out := ConnectPublishedGenesisMDBX(store, owner, block, row.published, row.chain, row.hash)
 			genesisMDBXReturned(t, out, "TERMINAL_LOCAL_INVARIANT(evidence)", 1, 1, "genesis context binding drifted")
 			logicalMDBXAssert(t, reflect.DeepEqual(old, genesisMDBXSnapshot(t, store, 1)), "genesis context binding drifted: OLD changed")
 			genesisMDBXReadmission(t, owner)
@@ -1203,36 +1201,29 @@ func genesisMDBXTestReuse(t *testing.T) {
 }
 
 func genesisMDBXTestArtifacts(t *testing.T) {
-	for _, length := range []int{116, 265, 266, 267, 68_000_125} {
-		t.Run(fmt.Sprint(length), func(t *testing.T) {
+	for name, length := range map[string]int{"116": 116, "265": 265, "266": 266, "267": 267, "68000125": 68_000_125, "manifest": 33} {
+		t.Run(name, func(t *testing.T) {
 			store, owner, _ := genesisMDBXBoot(t, 1)
 			rows := genesisMDBXTestArtifactsRows()
-			bad := make([]byte, length)
-			copy(bad, rows[1].Literal)
-			if length == 266 {
-				bad[190] ^= 1
+			artifact := "undo-v1"
+			rows[2].Literal[28] = 2
+			if name != "manifest" {
+				bad := make([]byte, length)
+				copy(bad, rows[1].Literal)
+				if length == 266 {
+					bad[190] ^= 1
+				}
+				rows[1].Literal, artifact = bad, "blocks-v1"
 			}
-			rows[1].Literal, rows[2].Literal[28] = bad, 2
 			logicalMDBXSeed(t, store, rows...)
 			old := genesisMDBXSnapshot(t, store, 1)
 			out := genesisMDBXRun(store, owner)
 			genesisMDBXReturned(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", 1, 1, "genesis first artifact drifted")
-			logicalMDBXAssert(t, out.Err.Error() == "genesis blocks-v1 differs from published artifact", "genesis first artifact drifted: %v", out.Err)
+			logicalMDBXAssert(t, out.Err.Error() == "genesis "+artifact+" differs from published artifact", "genesis first artifact drifted: %v", out.Err)
 			logicalMDBXAssert(t, reflect.DeepEqual(old, genesisMDBXSnapshot(t, store, 1)), "genesis first artifact drifted: OLD changed")
 			genesisMDBXReadmission(t, owner)
 		})
 	}
-	t.Run("manifest", func(t *testing.T) {
-		store, owner, _ := genesisMDBXBoot(t, 1)
-		rows := genesisMDBXTestArtifactsRows()
-		rows[2].Literal[28] = 2
-		logicalMDBXSeed(t, store, rows...)
-		old := genesisMDBXSnapshot(t, store, 1)
-		out := genesisMDBXRun(store, owner)
-		genesisMDBXReturned(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", 1, 1, "genesis first artifact drifted")
-		logicalMDBXAssert(t, out.Err.Error() == "genesis undo-v1 differs from published artifact" && reflect.DeepEqual(old, genesisMDBXSnapshot(t, store, 1)), "genesis first artifact drifted: %v", out.Err)
-		genesisMDBXReadmission(t, owner)
-	})
 }
 
 func genesisMDBXTestBudget(t *testing.T) {
@@ -1276,8 +1267,11 @@ func genesisMDBXTestProjection(t *testing.T) {
 	store, owner, _ := genesisMDBXBoot(t, 1)
 	validated := genesisMDBXRun(store, owner)
 	genesisMDBXReturned(t, validated, "ACCEPTED", 2, 3, "genesis image handoff drifted")
-	engine := func(class string) *mdbx.EngineError { return &mdbx.EngineError{Class: mdbx.EngineClass(class), Operation: "update", Code: 28, Diagnostic: "pinned input"} }
+	engine := func(class string) *mdbx.EngineError {
+		return &mdbx.EngineError{Class: mdbx.EngineClass(class), Operation: "update", Code: 28, Diagnostic: "pinned input"}
+	}
 	capacity, invariant, integrity := engine("Capacity"), engine("LocalInvariant"), engine("Integrity")
+	committed := &mdbx.CommitError{Truth: 1, Cause: capacity}
 	invalid := txerr(BLOCK_ERR_LINKAGE_INVALID, "block does not match published genesis")
 	check := func(raw GenesisMDBXOutcome, entered, complete bool, result, label string, payload bool) {
 		t.Helper()
@@ -1294,7 +1288,17 @@ func genesisMDBXTestProjection(t *testing.T) {
 		}{{1, "LOCAL_RESOURCE_UNAVAILABLE(" + suffix + ")"}, {2, "LOCAL_PERSISTENCE_ERROR(precommit)"}, {3, "TERMINAL_PERSISTENCE(old)"}} {
 			raw := GenesisMDBXOutcome{Truth: 1, Stage: row.stage, Err: err, State: validated.State, Summary: validated.Summary}
 			check(raw, true, true, row.result, "genesis stage mapping drifted", false)
+			if class == "Capacity" {
+				check(GenesisMDBXOutcome{Truth: 1, Stage: row.stage, Err: committed, State: validated.State, Summary: validated.Summary}, true, true, row.result, "genesis stage mapping drifted", false)
+			}
 		}
+		kind := logicalStateCountersUnavailable
+		if class == "Transaction" {
+			kind = logicalStateCountersLocalInvariant
+		}
+		observed := genesisMDBXZeroCounter(logicalStateCounterRead{kind: kind, cause: err})
+		logicalMDBXAssert(t, observed == err, "genesis image handoff drifted: counter cause identity") //nolint:errorlint // The counter must retain the original required-read error.
+		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: observed, Result: "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"}, true, false, "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)", "genesis image handoff drifted", false)
 		for _, step := range []string{"state_view_read", "canonical_artifact_read"} {
 			result := "LOCAL_RESOURCE_UNAVAILABLE(" + step + ")"
 			check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: err, Result: result}, true, false, result, "genesis image handoff drifted", false)
@@ -1309,26 +1313,9 @@ func genesisMDBXTestProjection(t *testing.T) {
 			check(GenesisMDBXOutcome{Truth: 1, Stage: stage, Err: engine(class)}, true, true, result, "genesis stage mapping drifted", false)
 		}
 	}
-	committed := &mdbx.CommitError{Truth: 1, Cause: capacity}
-	for _, row := range []struct {
-		stage  mdbx.UpdateStage
-		result string
-	}{{1, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"}, {2, "LOCAL_PERSISTENCE_ERROR(precommit)"}, {3, "TERMINAL_PERSISTENCE(old)"}} {
-		check(GenesisMDBXOutcome{Truth: 1, Stage: row.stage, Err: committed, State: validated.State, Summary: validated.Summary}, true, true, row.result, "genesis stage mapping drifted", false)
-	}
 	for _, read := range []logicalStateCounterRead{{kind: 0}, {kind: 5}, {kind: 1, cause: capacity}, {kind: 2}, {kind: 3}, {kind: 4}, {kind: 4, cause: (*mdbx.EngineError)(nil)}} {
 		err := genesisMDBXZeroCounter(read)
 		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: err, Result: "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"}, true, false, "TERMINAL_LOCAL_INVARIANT(evidence)", "genesis image handoff drifted", false)
-	}
-	for _, class := range []string{"Capacity", "Concurrency", "Transaction", "IO"} {
-		err := engine(class)
-		kind := logicalStateCountersUnavailable
-		if class == "Transaction" {
-			kind = logicalStateCountersLocalInvariant
-		}
-		observed := genesisMDBXZeroCounter(logicalStateCounterRead{kind: kind, cause: err})
-		logicalMDBXAssert(t, observed == err, "genesis image handoff drifted: counter cause identity") //nolint:errorlint // The counter must retain the original required-read error.
-		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: observed, Result: "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"}, true, false, "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)", "genesis image handoff drifted", false)
 	}
 	for _, row := range []struct {
 		truth   mdbx.CommitTruth
@@ -1336,8 +1323,12 @@ func genesisMDBXTestProjection(t *testing.T) {
 		result  string
 		payload bool
 	}{
-		{2, nil, "ACCEPTED", true}, {1, capacity, "TERMINAL_PERSISTENCE(old)", false}, {2, capacity, "TERMINAL_PERSISTENCE(new)", true}, {3, capacity, "TERMINAL_PERSISTENCE(neither_or_unreadable)", false},
-		{2, &mdbx.CommitError{Truth: 2, Cause: capacity, ReadbackCause: integrity}, "TERMINAL_PERSISTENCE(new)", true}, {3, &mdbx.CommitError{Truth: 3, Cause: capacity, ReadbackCause: invariant}, "TERMINAL_PERSISTENCE(neither_or_unreadable)", false},
+		{2, nil, "ACCEPTED", true},
+		{1, capacity, "TERMINAL_PERSISTENCE(old)", false},
+		{2, capacity, "TERMINAL_PERSISTENCE(new)", true},
+		{3, capacity, "TERMINAL_PERSISTENCE(neither_or_unreadable)", false},
+		{2, &mdbx.CommitError{Truth: 2, Cause: capacity, ReadbackCause: integrity}, "TERMINAL_PERSISTENCE(new)", true},
+		{3, &mdbx.CommitError{Truth: 3, Cause: capacity, ReadbackCause: invariant}, "TERMINAL_PERSISTENCE(neither_or_unreadable)", false},
 	} {
 		check(GenesisMDBXOutcome{Truth: row.truth, Stage: 3, State: validated.State, Summary: validated.Summary, Err: row.err}, true, true, row.result, "genesis image handoff drifted", row.payload)
 	}
@@ -1345,10 +1336,14 @@ func genesisMDBXTestProjection(t *testing.T) {
 		cause        error
 		step, result string
 	}{
-		{engine("Transaction"), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"}, {engine("Transaction"), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{invariant, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {invariant, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{capacity, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {capacity, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{fmt.Errorf("outer: %w", engine("Transaction")), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {fmt.Errorf("outer: %w", engine("Transaction")), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{engine("Transaction"), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"},
+		{engine("Transaction"), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{invariant, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{invariant, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{capacity, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{capacity, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{fmt.Errorf("outer: %w", engine("Transaction")), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{fmt.Errorf("outer: %w", engine("Transaction")), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
 	} {
 		wrapped := &logicalStateFailure{kind: logicalStateFailureLocalInvariant, cause: row.cause}
 		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: wrapped, Result: row.step}, true, false, row.result, "genesis bridge read cause drifted", false)
@@ -1357,13 +1352,26 @@ func genesisMDBXTestProjection(t *testing.T) {
 		err    error
 		result string
 	}{
-		{invalid, "CONSENSUS_INVALID"}, {fmt.Errorf("outer: %w", invalid), "CONSENSUS_INVALID"}, {errors.Join(invalid, capacity), "CONSENSUS_INVALID"}, {errors.Join(invalid, integrity), "TERMINAL_STORE_INTEGRITY(canonical)"},
-		{errors.Join(capacity, invariant), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {errors.Join(integrity, invariant), "TERMINAL_STORE_INTEGRITY(canonical)"}, {errors.Join(invariant, integrity), "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{fmt.Errorf("outer: %w", capacity), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"}, {&mdbx.CommitError{Truth: 1, Cause: capacity, ReadbackCause: integrity}, "TERMINAL_STORE_INTEGRITY(canonical)"},
-		{engine("InvalidInput"), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {engine("StateMismatch"), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {engine("unknown"), "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{(*mdbx.EngineError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {(*mdbx.CommitError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {(*logicalStateFailure)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {(*TxError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{fmt.Errorf("outer: %w", (*mdbx.EngineError)(nil)), "TERMINAL_LOCAL_INVARIANT(evidence)"}, {&logicalStateFailure{kind: logicalStateFailureStoreIntegrity}, "TERMINAL_LOCAL_INVARIANT(evidence)"},
-		{&logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("schema")}, "TERMINAL_STORE_INTEGRITY(canonical)"}, {&logicalStateFailure{kind: logicalStateFailureUnavailable, cause: capacity}, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"},
+		{invalid, "CONSENSUS_INVALID"},
+		{fmt.Errorf("outer: %w", invalid), "CONSENSUS_INVALID"},
+		{errors.Join(invalid, capacity), "CONSENSUS_INVALID"},
+		{errors.Join(invalid, integrity), "TERMINAL_STORE_INTEGRITY(canonical)"},
+		{errors.Join(capacity, invariant), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{errors.Join(integrity, invariant), "TERMINAL_STORE_INTEGRITY(canonical)"},
+		{errors.Join(invariant, integrity), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{fmt.Errorf("outer: %w", capacity), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"},
+		{&mdbx.CommitError{Truth: 1, Cause: capacity, ReadbackCause: integrity}, "TERMINAL_STORE_INTEGRITY(canonical)"},
+		{engine("InvalidInput"), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{engine("StateMismatch"), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{engine("unknown"), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{(*mdbx.EngineError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{(*mdbx.CommitError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{(*logicalStateFailure)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{(*TxError)(nil), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{fmt.Errorf("outer: %w", (*mdbx.EngineError)(nil)), "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{&logicalStateFailure{kind: logicalStateFailureStoreIntegrity}, "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{&logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("schema")}, "TERMINAL_STORE_INTEGRITY(canonical)"},
+		{&logicalStateFailure{kind: logicalStateFailureUnavailable, cause: capacity}, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)"},
 	} {
 		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: row.err}, true, false, row.result, "genesis image handoff drifted", false)
 	}
@@ -1375,11 +1383,22 @@ func genesisMDBXTestProjection(t *testing.T) {
 		summary           *ConnectBlockBasicSummary
 		err               error
 	}{
-		{0, 1, true, true, validated.State, validated.Summary, capacity}, {4, 1, true, true, validated.State, validated.Summary, capacity}, {1, 0, true, true, validated.State, validated.Summary, capacity}, {1, 4, true, true, validated.State, validated.Summary, capacity},
-		{2, 2, true, true, validated.State, validated.Summary, capacity}, {2, 3, false, true, validated.State, validated.Summary, capacity}, {2, 3, true, false, validated.State, validated.Summary, capacity},
-		{2, 3, true, true, nil, validated.Summary, capacity}, {2, 3, true, true, validated.State, nil, capacity}, {2, 3, true, true, validated.State, validated.Summary, (*mdbx.EngineError)(nil)}, {1, 1, true, false, nil, nil, nil},
-		{2, 3, true, true, validated.State, validated.Summary, fmt.Errorf("outer: %w", (*mdbx.EngineError)(nil))}, {2, 3, true, true, validated.State, validated.Summary, &mdbx.CommitError{Truth: 2}},
-		{2, 1, false, false, nil, nil, nil}, {3, 1, false, false, nil, nil, nil}, {2, 1, false, false, nil, nil, (*mdbx.EngineError)(nil)},
+		{0, 1, true, true, validated.State, validated.Summary, capacity},
+		{4, 1, true, true, validated.State, validated.Summary, capacity},
+		{1, 0, true, true, validated.State, validated.Summary, capacity},
+		{1, 4, true, true, validated.State, validated.Summary, capacity},
+		{2, 2, true, true, validated.State, validated.Summary, capacity},
+		{2, 3, false, true, validated.State, validated.Summary, capacity},
+		{2, 3, true, false, validated.State, validated.Summary, capacity},
+		{2, 3, true, true, nil, validated.Summary, capacity},
+		{2, 3, true, true, validated.State, nil, capacity},
+		{2, 3, true, true, validated.State, validated.Summary, (*mdbx.EngineError)(nil)},
+		{1, 1, true, false, nil, nil, nil},
+		{2, 3, true, true, validated.State, validated.Summary, fmt.Errorf("outer: %w", (*mdbx.EngineError)(nil))},
+		{2, 3, true, true, validated.State, validated.Summary, &mdbx.CommitError{Truth: 2}},
+		{2, 1, false, false, nil, nil, nil},
+		{3, 1, false, false, nil, nil, nil},
+		{2, 1, false, false, nil, nil, (*mdbx.EngineError)(nil)},
 	} {
 		check(GenesisMDBXOutcome{Truth: row.truth, Stage: row.stage, State: row.state, Summary: row.summary, Err: row.err}, row.entered, row.complete, "TERMINAL_LOCAL_INVARIANT(evidence)", "genesis image handoff drifted", false)
 	}
@@ -1412,8 +1431,6 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "logical_state_mdbx_cgo.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "genesis source parse: %v", err)
-	validation, err := parser.ParseFile(fset, "connect_block_inmem.go", nil, 0)
-	logicalMDBXAssert(t, err == nil, "genesis validator parse: %v", err)
 	var nativeFiles []*ast.File
 	for _, name := range []string{"mdbx_cgo.go", "operation_reservation.go"} {
 		parsed, parseErr := parser.ParseFile(fset, filepath.Join("../internal/mdbx", name), nil, 0)
@@ -1428,8 +1445,8 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 		logicalMDBXAssert(t, object != nil, "genesis reservation ownership drifted: unresolved %s.%s", owner, method)
 		protected[object] = method
 	}
-	files := []*ast.File{file, validation}
-	for _, name := range []string{"block_parse.go", "block_basic.go", "hash.go", "errors.go", "logical_state.go"} {
+	files := []*ast.File{file}
+	for _, name := range []string{"connect_block_inmem.go", "block_parse.go", "block_basic.go", "hash.go", "errors.go", "logical_state.go"} {
 		parsed, parseErr := parser.ParseFile(fset, name, nil, 0)
 		logicalMDBXAssert(t, parseErr == nil, "genesis production parse: %v", parseErr)
 		files = append(files, parsed)
@@ -1496,9 +1513,8 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 	}
 	for name, fn := range functions {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if _, ok := n.(*ast.GoStmt); ok {
-				t.Fatal("genesis reservation ownership drifted: asynchronous work")
-			}
+			_, asynchronous := n.(*ast.GoStmt)
+			logicalMDBXAssert(t, !asynchronous, "genesis reservation ownership drifted: asynchronous work")
 			if id, ok := n.(*ast.Ident); ok && objects[info.Uses[id]] != "" {
 				call, direct := parents[id].(*ast.CallExpr)
 				logicalMDBXAssert(t, direct && call.Fun == id, "genesis call closure drifted: alias of %s", id.Name)
@@ -1528,9 +1544,7 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 				}
 				if object, ok := info.Uses[selector.Sel].(*types.Func); ok {
 					logicalMDBXAssert(t, object.Pkg() != pkg || dependencies[object] == name || map[string]string{"genesisMDBXCauses": "e.Unwrap", "genesisMDBXNilError": "wrapped.Unwrap", "genesisMDBXErrorResult": "e.Unwrap"}[name] == text(selector), "genesis reservation ownership drifted: unowned method")
-					if object.Pkg() == native && slices.Contains([]string{"View", "Inspect", "Put", "Delete", "BootstrapStorageV1", "Lookup"}, selector.Sel.Name) {
-						t.Fatal("genesis call closure acquired another storage route")
-					}
+					logicalMDBXAssert(t, object.Pkg() != native || !slices.Contains([]string{"View", "Inspect", "Put", "Delete", "BootstrapStorageV1", "Lookup"}, selector.Sel.Name), "genesis call closure acquired another storage route")
 				}
 			}
 			if call, ok := n.(*ast.CallExpr); ok {
@@ -1577,6 +1591,10 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 	var order []string
 	var reads int
 	ast.Inspect(artifacts.Body, func(n ast.Node) bool {
+		if guard, ok := n.(*ast.IfStmt); ok && strings.Contains(text(guard.Cond), "!bytes.Equal") {
+			_, returns := guard.Body.List[0].(*ast.ReturnStmt)
+			logicalMDBXAssert(t, returns && len(guard.Body.List) == 1, "genesis first artifact drifted: mismatching artifact continued")
+		}
 		if key, ok := n.(*ast.KeyValueExpr); ok && text(key.Key) == "DBI" {
 			order = append(order, text(key.Value))
 		}
@@ -1619,12 +1637,5 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 			logicalMDBXAssert(t, text(guard.Cond) == "err != nil" && len(guard.Body.List) == 1 && text(guard.Body.List[0]) == "return mdbx.Batch{}, err", "genesis first artifact drifted: required state read continued")
 		}
 	}
-	ast.Inspect(artifacts.Body, func(n ast.Node) bool {
-		if guard, ok := n.(*ast.IfStmt); ok && strings.Contains(text(guard.Cond), "!bytes.Equal") {
-			_, returns := guard.Body.List[0].(*ast.ReturnStmt)
-			logicalMDBXAssert(t, returns && len(guard.Body.List) == 1, "genesis first artifact drifted: mismatching artifact continued")
-		}
-		return true
-	})
 	logicalMDBXAssert(t, strings.Contains(text(artifacts), "Literal: owned[:116]") && strings.Contains(text(artifacts), "Literal: owned}"), "genesis reservation ownership drifted: independent artifact copies")
 }

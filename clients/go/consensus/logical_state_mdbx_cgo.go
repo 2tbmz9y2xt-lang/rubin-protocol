@@ -457,8 +457,7 @@ func logicalMDBXCreateOnceTarget(m mdbx.Mutation) bool {
 	return m.DBI.Rank == 3 || m.DBI.Rank == 4 || (m.DBI.Rank == 5 && len(m.Key) == 33)
 }
 
-// GenesisMDBXOutcome retains the invocation-local Update tuple and, only for a
-// complete NEW image, its independently owned validated state and summary.
+// GenesisMDBXOutcome retains the raw Update tuple and independently owned complete NEW payload.
 type GenesisMDBXOutcome struct {
 	Result  string
 	Truth   mdbx.CommitTruth
@@ -477,10 +476,8 @@ const (
 	genesisMDBXIntegrity             = "TERMINAL_STORE_INTEGRITY(canonical)"
 )
 
-// ConnectPublishedGenesisMDBX is dormant. Its published bytes and identity must
-// come from the immutable devnet configuration; both slices are synchronous
-// borrows. One reservation covers the owned copy through Update and projection.
-// The fixed 89-byte returned logical state transfers to the caller on NEW.
+// ConnectPublishedGenesisMDBX is dormant and borrows immutable devnet configuration synchronously.
+// One reservation covers the owned copy through Update/projection; NEW transfers the 89-byte state.
 func ConnectPublishedGenesisMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, candidate, published []byte, chainID, genesisHash [32]byte) GenesisMDBXOutcome {
 	out := GenesisMDBXOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	out.Result, out.Err = genesisMDBXInput(store, reservations, candidate, published, chainID, genesisHash)
@@ -492,8 +489,8 @@ func ConnectPublishedGenesisMDBX(store *mdbx.Store, reservations *mdbx.Operation
 		var preimage [282]byte
 		copy(preimage[:], "RUBIN-GENESIS-v1")
 		copy(preimage[16:], owned)
-		hash, hashErr := BlockHash(owned[:116])
-		if hashErr != nil || hash != genesisHash || sha3_256(preimage[:]) != chainID {
+		hash, _ := BlockHash(owned[:116]) // The exact 116-byte slice cannot fail BlockHash's length check.
+		if hash != genesisHash || sha3_256(preimage[:]) != chainID {
 			out.Result, out.Err = genesisMDBXInvariant, errors.New("published genesis context commitment mismatch")
 			return nil
 		}
@@ -543,10 +540,10 @@ func genesisMDBXBatch(reader *mdbx.Reader, owned []byte, chainID, hash [32]byte,
 	out.Result = "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"
 	g := binary.BigEndian.Uint64(prefix)
 	view := newLogicalMDBXStateView(reader, g, 0)
-	if err = genesisMDBXEmptyUTXO(reader, prefix); err != nil {
+	if err := genesisMDBXEmptyUTXO(reader, prefix); err != nil {
 		return mdbx.Batch{}, err
 	}
-	if err = genesisMDBXZeroCounter(view.Counters()); err != nil {
+	if err := genesisMDBXZeroCounter(view.Counters()); err != nil {
 		return mdbx.Batch{}, err
 	}
 	parsed, err := genesisMDBXValidate(owned, chainID, out)
