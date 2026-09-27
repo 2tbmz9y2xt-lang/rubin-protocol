@@ -109,6 +109,14 @@ func TestPrunedProfile(t *testing.T) {
 				a := modelBase(2, 0, row.u)
 				s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
 				before := prunedImage(t, s, rows)
+				candidate := a
+				mustEnvironment(t, s.View(func(r *Reader) error {
+					_, _ = prunedProfileReplacement(r, &candidate, tip)
+					return nil
+				}))
+				if candidate.B != row.b {
+					t.Fatalf("pruned profile promise drifted: B=%d, want %d", candidate.B, row.b)
+				}
 				out := s.SelectPrunedProfileV1(true, tip, bootstrapOwner(t))
 				if out.Err != nil || out.Truth != 2 || out.Stage != 3 || out.Authority == nil {
 					t.Fatalf("pruned profile exact span drifted: %+v", out)
