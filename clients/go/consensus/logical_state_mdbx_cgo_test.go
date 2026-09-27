@@ -1339,6 +1339,18 @@ func genesisMDBXTestProjection(t *testing.T) {
 		check(GenesisMDBXOutcome{Truth: row.truth, Stage: 3, State: validated.State, Summary: validated.Summary, Err: row.err}, true, true, row.result, "genesis image handoff drifted", row.payload)
 	}
 	for _, row := range []struct {
+		cause        error
+		step, result string
+	}{
+		{engine("Transaction"), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"}, {engine("Transaction"), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{invariant, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {invariant, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{capacity, "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {capacity, "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+		{fmt.Errorf("outer: %w", engine("Transaction")), "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "TERMINAL_LOCAL_INVARIANT(evidence)"}, {fmt.Errorf("outer: %w", engine("Transaction")), "", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+	} {
+		wrapped := &logicalStateFailure{kind: logicalStateFailureLocalInvariant, cause: row.cause}
+		check(GenesisMDBXOutcome{Truth: 1, Stage: 1, Err: wrapped, Result: row.step}, true, false, row.result, "genesis bridge read cause drifted", false)
+	}
+	for _, row := range []struct {
 		err    error
 		result string
 	}{
@@ -1414,7 +1426,7 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 		logicalMDBXAssert(t, format.Node(&b, fset, n) == nil, "genesis AST format")
 		return b.String()
 	}
-	want := strings.Fields("ConnectPublishedGenesisMDBX genesisMDBXInput genesisMDBXBatch genesisMDBXPrestate genesisMDBXEligible genesisMDBXControl genesisMDBXArtifacts genesisMDBXEmptyUTXO genesisMDBXZeroCounter genesisMDBXValidate genesisMDBXProject genesisMDBXCached genesisMDBXTupleValid genesisMDBXPlanValid genesisMDBXCrossed genesisMDBXUncrossed genesisMDBXCauses genesisMDBXNilError genesisMDBXErrorResult genesisMDBXLogicalResult genesisMDBXEngineResult")
+	want := strings.Fields("ConnectPublishedGenesisMDBX genesisMDBXInput genesisMDBXBatch genesisMDBXPrestate genesisMDBXEligible genesisMDBXControl genesisMDBXArtifacts genesisMDBXEmptyUTXO genesisMDBXZeroCounter genesisMDBXValidate genesisMDBXProject genesisMDBXCached genesisMDBXTupleValid genesisMDBXPlanValid genesisMDBXCrossed genesisMDBXUncrossed genesisMDBXCauses genesisMDBXNilError genesisMDBXErrorResult genesisMDBXLogicalResult genesisMDBXBridgeReadResult genesisMDBXEngineResult")
 	functions, objects, parents := map[string]*ast.FuncDecl{}, map[types.Object]string{}, map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(file, func(n ast.Node) bool {

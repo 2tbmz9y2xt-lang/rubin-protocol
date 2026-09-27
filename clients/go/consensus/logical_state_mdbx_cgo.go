@@ -470,8 +470,7 @@ type GenesisMDBXOutcome struct {
 
 const (
 	// The logical envelope is 68,070,495: the 282-byte identity preimage
-	// corrects the source estimate by +1; aliasing the original header/body
-	// literals to owned saves 382. The fixed charge retains 381 bytes of slack.
+	// corrects the source estimate by +1; owned header/body aliases save 382, retaining 381 bytes of slack.
 	// Authority, schema/config and control keys are excluded control metadata.
 	genesisMDBXOperationBytes uint64 = 68_070_876
 	genesisMDBXInvariant             = "TERMINAL_LOCAL_INVARIANT(evidence)"
@@ -833,11 +832,26 @@ func genesisMDBXErrorResult(err error, step string) string {
 }
 
 func genesisMDBXLogicalResult(e *logicalStateFailure, step string) string {
-	if e != nil && e.kind == logicalStateFailureUnavailable {
-		return genesisMDBXUncrossed(e.cause, step, mdbx.UpdateStagePrewrite)
+	if e == nil {
+		return genesisMDBXInvariant
 	}
-	if e != nil && e.kind == logicalStateFailureStoreIntegrity && e.cause != nil && !genesisMDBXNilError(e.cause) {
-		return genesisMDBXIntegrity
+	switch e.kind {
+	case logicalStateFailureUnavailable:
+		return genesisMDBXUncrossed(e.cause, step, mdbx.UpdateStagePrewrite)
+	case logicalStateFailureStoreIntegrity:
+		if e.cause != nil && !genesisMDBXNilError(e.cause) {
+			return genesisMDBXIntegrity
+		}
+	case logicalStateFailureLocalInvariant:
+		return genesisMDBXBridgeReadResult(e.cause, step)
+	}
+	return genesisMDBXInvariant
+}
+
+func genesisMDBXBridgeReadResult(cause error, step string) string {
+	e, _ := cause.(*mdbx.EngineError) //nolint:errorlint // Only the bridge's original direct required-read cause qualifies.
+	if e != nil && e.Class == mdbx.EngineTransaction && step == "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)" {
+		return step
 	}
 	return genesisMDBXInvariant
 }
