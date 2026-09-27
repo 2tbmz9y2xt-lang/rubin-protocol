@@ -61,7 +61,7 @@ func consultedStore(t *testing.T) (*Store, string, ConfigV1) {
 // consultedRequireCommit proves batch commits NEW and leaves the Store OPEN without terminal truth.
 func consultedRequireCommit(t *testing.T, store *Store, marker string, batch Batch) {
 	t.Helper()
-	truth, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
 	if truth != CommitTruthNew || err != nil || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}
@@ -95,7 +95,7 @@ func consultedRequireOutcome(t *testing.T, store *Store, reader *Reader, truth C
 	if !terminal {
 		return
 	}
-	again, cached := store.Update(func(*Reader) (Batch, error) { return Batch{}, fmt.Errorf("%s: callback invoked", marker) })
+	again, _, cached := store.Update(func(*Reader) (Batch, error) { return Batch{}, fmt.Errorf("%s: callback invoked", marker) })
 	viewErr := store.View(func(*Reader) error { return fmt.Errorf("%s: callback invoked", marker) })
 	if again != CommitTruthOld || !sameError(cached, err) || !sameError(viewErr, err) {
 		t.Fatalf("%s: terminal reuse %s/%v/%v", marker, again, cached, viewErr)
@@ -105,7 +105,7 @@ func consultedRequireOutcome(t *testing.T, store *Store, reader *Reader, truth C
 // consultedUpdate runs one public Update whose callback calls inside with the Reader and then returns batch.
 func consultedUpdate(store *Store, inside func(*Reader), batch Batch) (*Reader, CommitTruth, error) {
 	var reader *Reader
-	truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; inside(observed); return batch, nil })
+	truth, _, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; inside(observed); return batch, nil })
 	return reader, truth, err
 }
 
@@ -422,7 +422,7 @@ func TestUpdateConsultedNilEmpty(t *testing.T) {
 			{Consulted: consulted},
 			{Reverse: true, Mutations: []Mutation{consultedCounter(t, 2)}, Consulted: consulted},
 		} {
-			truth, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
+			truth, _, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
 			mustEnvironment(t, store.View(func(reader *Reader) error {
 				value, found, readErr := reader.Get(dbis[0], consultedCounter(t, 1).Key)
 				outcomes = append(outcomes, fmt.Sprintf("%s|%v|%s|%x|%v", truth, err, store.state, value, found))
@@ -606,7 +606,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	require(MaxPrefixPageBytes == 154611151, "prefix-page byte bound drifted")
 	require(MaxPrefixPageBytes == MaxOperationDataBytes, "prefix-page byte bound alias drifted")
 	text := string(source)
-	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) error {") && strings.Contains(text, "func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {"), "no-write route signatures drifted")
+	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
 	for _, name := range []string{"updateNativeDeletes", "updateNativePuts"} {
 		require(!strings.Contains(strings.ToLower(updateNativeBody(t, source, name)), "consulted"), "no-write route drifted: "+name)
 	}

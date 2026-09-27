@@ -35,20 +35,21 @@ const bootstrapOperationBytes uint64 = 188
 // the Store ends terminal and no partial initial image exists. The caller supplies an
 // already-open Store and one long-lived shared reservation owner; no Reader, Inspection,
 // buffer or token escapes this call.
-func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *OperationReservationOwner) (CommitTruth, error) {
+func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *OperationReservationOwner) (CommitTruth, UpdateStage, error) {
 	if s == nil {
-		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
 	}
 	if !validProfile(profile) {
-		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "invalid bootstrap profile", nil)
+		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "invalid bootstrap profile", nil)
 	}
 	truth := CommitTruthOld
+	stage := UpdateStagePrewrite
 	err := reservations.WithReservation(bootstrapOperationBytes, func() error {
 		var updateErr error
-		truth, updateErr = s.Update(func(reader *Reader) (Batch, error) { return bootstrapBatch(s, reader, profile) })
+		truth, stage, updateErr = s.Update(func(reader *Reader) (Batch, error) { return bootstrapBatch(s, reader, profile) })
 		return updateErr
 	})
-	return truth, err
+	return truth, stage, err
 }
 
 // bootstrapBatch is the whole Update callback. It observes every DBI through the caller's

@@ -548,7 +548,7 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 			if next := store.View(func(*Reader) error { t.Fatal("terminal callback invoked"); return nil }); !sameError(next, recorded) {
 				t.Fatal("PrefixPage terminal was not reusable")
 			}
-			if truth, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal callback invoked"); return Batch{}, nil }); truth != CommitTruthOld || !sameError(next, recorded) {
+			if truth, _, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal callback invoked"); return Batch{}, nil }); truth != CommitTruthOld || !sameError(next, recorded) {
 				t.Fatal("PrefixPage consumed-read token was rejected")
 			}
 		})
@@ -691,7 +691,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 				truth := CommitTruthOld
 				func() {
 					defer func() { recovered = recover() }()
-					truth, returned = store.Update(func(reader *Reader) (Batch, error) {
+					truth, _, returned = store.Update(func(reader *Reader) (Batch, error) {
 						page, pageErr := reader.PrefixPage(dbi, prefix, nil, 1, minimum)
 						if page.Rows != nil || page.Stop != 0 {
 							t.Fatalf("Update callback failure returned page: %#v", page)
@@ -741,7 +741,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 						t.Fatalf("Update PrefixPage panic disposition=%v/%v", recovered, returned)
 					}
 				}
-				if nextTruth, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, store.terminal) {
+				if nextTruth, _, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, store.terminal) {
 					t.Fatal("Update PrefixPage terminal next operation drifted")
 				}
 			})
@@ -756,7 +756,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_, _ = store.Update(func(reader *Reader) (Batch, error) {
+			_, _, _ = store.Update(func(reader *Reader) (Batch, error) {
 				_, recorded = reader.PrefixPage(dbi, prefix, nil, 1, minimum)
 				runtime.Goexit()
 				return Batch{}, nil
@@ -766,7 +766,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		if recorded == nil || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, recorded) || !validStoreShape(store) {
 			t.Fatalf("Update PrefixPage Goexit disposition=%v/%s", recorded, store.state)
 		}
-		if nextTruth, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, recorded) {
+		if nextTruth, _, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, recorded) {
 			t.Fatal("Update PrefixPage Goexit next operation drifted")
 		}
 	})
@@ -815,7 +815,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 				t.Fatal("application-only wrapped error identity changed")
 			}
 		}
-		truth, updateErr := store.Update(func(reader *Reader) (Batch, error) {
+		truth, _, updateErr := store.Update(func(reader *Reader) (Batch, error) {
 			page, pageErr := reader.PrefixPage(dbi, prefix, nil, 1, minimum)
 			if pageErr != nil || len(page.Rows) != 1 {
 				return Batch{}, fmt.Errorf("Update PrefixPage=%#v/%w", page, pageErr)
@@ -833,7 +833,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		mustEnvironment(t, err)
 		mustEnvironment(t, fixtureSeedPrefixRawRow(store, dbi, fixturePrefixKey(2, 21, 1, false), make([]byte, 103)))
 		var recorded error
-		truth, returned := store.Update(func(reader *Reader) (Batch, error) {
+		truth, _, returned := store.Update(func(reader *Reader) (Batch, error) {
 			page, pageErr := reader.PrefixPage(dbi, prefix, nil, 1, minimum)
 			if page.Rows != nil || page.Stop != 0 {
 				t.Fatalf("Update infrastructure returned page: %#v", page)
@@ -844,7 +844,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		if truth != CommitTruthOld || returned != recorded || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, recorded) || !validStoreShape(store) {
 			t.Fatalf("Update infrastructure disposition=%s/%v/%s", truth, returned, store.state)
 		}
-		if nextTruth, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, recorded) {
+		if nextTruth, _, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("closed Update callback invoked"); return Batch{}, nil }); nextTruth != CommitTruthOld || !sameError(next, recorded) {
 			t.Fatal("Update terminal operation rejected PrefixPage")
 		}
 		reopened, openErr := Open(path, environmentConfig())
@@ -866,7 +866,7 @@ func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 		key := fixturePrefixKey(2, 21, 1, false)
 		value := fixturePrefixValue(2, false, false)
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: dbi, key: key, value: value}))
-		truth, updateErr := store.Update(func(reader *Reader) (Batch, error) {
+		truth, _, updateErr := store.Update(func(reader *Reader) (Batch, error) {
 			page, pageErr := reader.PrefixPage(dbi, prefix, nil, 1, minimum)
 			if pageErr != nil || page.Stop != PrefixPageExhausted || len(page.Rows) != 1 || !bytes.Equal(page.Rows[0].Key, key) || !bytes.Equal(page.Rows[0].Value, value) {
 				return Batch{}, fmt.Errorf("successful Update PrefixPage=%#v/%w", page, pageErr)
@@ -1019,33 +1019,56 @@ func TestReaderGetMalformedDisposition(t *testing.T) {
 }
 
 func TestNativeUpdateFixtures(t *testing.T) {
-	source, err := os.ReadFile("mdbx_cgo.go")
-	mustEnvironment(t, err)
-	abort, commit := updateNativeBody(t, source, "updateNativeAbort"), updateNativeBody(t, source, "updateNativeCommit")
-	if !strings.Contains(abort, "if rc == codeThreadMismatch {") || !strings.Contains(abort, "updateNativeRetainedWrite(false") || strings.Count(abort, "updateNativeRetainedWrite") != 1 {
-		t.Fatal("abort ownership drifted")
-	}
-	if !strings.Contains(commit, "case codeThreadMismatch:") || !strings.Contains(commit, "updateNativeRetainedWrite(true") || strings.Count(commit, "updateNativeRetainedWrite") != 1 || !strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil)") {
-		t.Fatal("commit ownership drifted")
-	}
-	truth := updateNativeBody(t, source, "updateNativeReadbackTruth")
-	oldAt, newAt := strings.Index(truth, "if oldImage"), strings.Index(truth, "if newImage")
-	if oldAt < 0 || newAt < 0 || oldAt > newAt {
-		t.Fatal("readback tie-break drifted")
-	}
-	fixture, err := os.ReadFile("mdbx_fixture_cgo.go")
-	mustEnvironment(t, err)
-	post, unreadable := updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPC"), updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPCUnreadable")
-	if strings.Count(post, "updateNativeReadback") != 1 || strings.Count(unreadable, "updateNativeReadback") != 1 {
-		t.Fatal("readback truth drifted")
-	}
-	t.Run("wrong-thread retained write", func(t *testing.T) {
+	t.Run("stage_abort_retained", func(t *testing.T) {
+		for _, stage := range []UpdateStage{1, 2} {
+			store := newUpdateStore(t)
+			txn, release, err := fixtureHeldUpdate(store)
+			mustEnvironment(t, err)
+			primary := nativeError(operationUpdate, codeNotFound)
+			outcome := updateNativeAbort(txn, primary, stage)
+			mustEnvironment(t, release())
+			if outcome.stage != stage {
+				t.Fatal("abort stage forwarding drifted")
+			}
+			if outcome.truth != 1 || outcome.commitAttempted || outcome.primary != primary || outcome.retainedWrite != txn || outcome.retainedRead != nil || outcome.valid() != nil {
+				t.Fatal("abort ownership drifted")
+			}
+			requireEngineError(t, outcome.secondary, EngineLocalInvariant, operationAbort, codeThreadMismatch)
+			mustEnvironment(t, store.Close())
+		}
+	})
+	t.Run("source_ownership", func(t *testing.T) {
+		source, err := os.ReadFile("mdbx_cgo.go")
+		mustEnvironment(t, err)
+		abort, commit := updateNativeBody(t, source, "updateNativeAbort"), updateNativeBody(t, source, "updateNativeCommit")
+		if !strings.Contains(abort, "if rc == codeThreadMismatch {") || !strings.Contains(abort, "updateNativeRetainedWrite(false") || strings.Count(abort, "updateNativeRetainedWrite") != 1 {
+			t.Fatal("abort ownership drifted")
+		}
+		if !strings.Contains(commit, "case codeThreadMismatch:") || !strings.Contains(commit, "updateNativeRetainedWrite(true") || strings.Count(commit, "updateNativeRetainedWrite") != 1 || !strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)") {
+			t.Fatal("commit ownership drifted")
+		}
+		truth := updateNativeBody(t, source, "updateNativeReadbackTruth")
+		oldAt, newAt := strings.Index(truth, "if oldImage"), strings.Index(truth, "if newImage")
+		if oldAt < 0 || newAt < 0 || oldAt > newAt {
+			t.Fatal("readback tie-break drifted")
+		}
+		fixture, err := os.ReadFile("mdbx_fixture_cgo.go")
+		mustEnvironment(t, err)
+		post, unreadable := updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPC"), updateNativeBody(t, fixture, "fixtureUpdatePostCommitENOSPCUnreadable")
+		if strings.Count(post, "updateNativeReadback") != 1 || strings.Count(unreadable, "updateNativeReadback") != 1 {
+			t.Fatal("readback truth drifted")
+		}
+	})
+	t.Run("stage_wrong_thread", func(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
 		defer func() { mustEnvironment(t, store.Close()) }()
 		outcome, release, err := fixtureUpdateWrongThread(store)
 		mustEnvironment(t, err)
 		defer func() { mustEnvironment(t, release()) }()
+		if outcome.stage != 1 {
+			t.Fatal("definite OLD stage drifted")
+		}
 		engine := requireEngineError(t, outcome.primary, EngineLocalInvariant, operationUpdate, codeThreadMismatch)
 		if engine.Diagnostic != expectedNativeDiagnostic(codeThreadMismatch) || outcome.truth != CommitTruthOld || !outcome.commitAttempted || outcome.secondary != nil || outcome.retainedWrite == nil || outcome.retainedRead != nil || outcome.valid() != nil {
 			t.Fatalf("commit ownership drifted: %+v", outcome)
@@ -1097,11 +1120,14 @@ func TestNativeUpdateFixtures(t *testing.T) {
 		}
 	})
 
-	t.Run("break then real commit", func(t *testing.T) {
+	t.Run("stage_result_true", func(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
 		plan := updateNativePlan(t, updatePlanBatch(t).Mutations[8])
 		outcome := fixtureUpdateResultTrue(store, plan)
+		if outcome.stage != 1 {
+			t.Fatal("definite OLD stage drifted")
+		}
 		engine := requireEngineError(t, outcome.primary, EngineTransaction, operationUpdate, codeResultTrue)
 		if engine.Diagnostic != expectedNativeDiagnostic(codeResultTrue) {
 			t.Fatalf("RESULT_TRUE disposition drifted: %+v", engine)
@@ -1112,12 +1138,15 @@ func TestNativeUpdateFixtures(t *testing.T) {
 		mustEnvironment(t, store.Close())
 	})
 
-	t.Run("post-commit ENOSPC OLD", func(t *testing.T) {
+	t.Run("stage_readback_old", func(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
 		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: admissionNone()}
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
 		outcome, cleanup := fixtureUpdatePostCommitENOSPC(store, updateNativePlan(t, mutation))
+		if outcome.stage != 3 {
+			t.Fatal("readback stage drifted")
+		}
 		mustEnvironment(t, cleanup)
 		engine := requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
 		if engine.Diagnostic != expectedNativeDiagnostic(codeENOSPC) {
@@ -1136,6 +1165,9 @@ func TestNativeUpdateFixtures(t *testing.T) {
 		mutation := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: planAfterLiteral, Literal: admissionNone()}
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: mutation.DBI, key: mutation.Key, value: mutation.Literal}))
 		outcome, cleanup := fixtureUpdatePostCommitENOSPCUnreadable(store, updateNativePlan(t, mutation))
+		if outcome.stage != 3 {
+			t.Fatal("readback stage drifted")
+		}
 		mustEnvironment(t, cleanup)
 		if outcome.truth != CommitTruthUnknown || !outcome.commitAttempted || outcome.primary == nil || outcome.secondary == nil || outcome.retainedWrite != nil || outcome.retainedRead != nil || outcome.valid() != nil {
 			t.Fatalf("readback truth drifted: %+v", outcome)
@@ -1172,6 +1204,9 @@ func TestNativeUpdateImageFamilies(t *testing.T) {
 			}
 			mustEnvironment(t, fixtureSeedRows(store, rows...))
 			outcome, cleanup := fixtureUpdatePostCommitENOSPC(store, plan)
+			if outcome.stage != 3 {
+				t.Fatal("readback stage drifted")
+			}
 			mustEnvironment(t, cleanup)
 			_ = requireEngineError(t, outcome.primary, EngineCapacity, operationUpdate, codeENOSPC)
 			requireUpdateTruth(t, outcome, CommitTruthNew, true, outcome.primary, nil)
@@ -1216,6 +1251,9 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
 		outcome, cleanup := fixtureUpdatePostCommitENOSPCThird(store, plan)
+		if outcome.stage != 3 {
+			t.Fatal("readback stage drifted")
+		}
 		mustEnvironment(t, cleanup)
 		requireUnknown(t, outcome)
 		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, []byte{0x7f}, true)
@@ -1226,6 +1264,9 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 		store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 		mustEnvironment(t, err)
 		outcome, cleanup := fixtureUpdatePostCommitENOSPCThird(store, plan)
+		if outcome.stage != 3 {
+			t.Fatal("readback stage drifted")
+		}
 		mustEnvironment(t, cleanup)
 		requireUnknown(t, outcome)
 		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, []byte{0x7f}, true)
@@ -1239,6 +1280,9 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 		mustEnvironment(t, err)
 		mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: rows[0].DBI, key: rows[0].Key, value: []byte{0x42}}))
 		outcome, cleanup := fixtureUpdatePostCommitENOSPCMissing(store, plan)
+		if outcome.stage != 3 {
+			t.Fatal("readback stage drifted")
+		}
 		mustEnvironment(t, cleanup)
 		requireUnknown(t, outcome)
 		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, nil, false)

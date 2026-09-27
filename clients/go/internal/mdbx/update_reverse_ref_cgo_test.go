@@ -68,7 +68,7 @@ func reverseValues(t *testing.T) [][]byte {
 
 func requireUpdateCommit(t *testing.T, store *Store, marker string, mutations ...Mutation) {
 	t.Helper()
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: mutations}, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: mutations}, nil })
 	if truth != CommitTruthNew || err != nil || store.state != storeOPEN {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}
@@ -97,7 +97,7 @@ func reverseSeed(t *testing.T, store *Store, target, source, value []byte) {
 
 func requireReversePlanRejection(t *testing.T, store *Store, marker string, mutations ...Mutation) {
 	t.Helper()
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: mutations}, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: mutations}, nil })
 	engine, direct := directTestEngineError(err)
 	if truth != CommitTruthOld || !direct || engine.Class != EngineInvalidInput || engine.Operation != string(operationUpdate) ||
 		engine.Code != codeEINVAL || engine.Diagnostic != "invalid Update Batch" || engine.Cause != nil || engine.ReopenRequired ||
@@ -358,7 +358,7 @@ func TestUpdateReverseRefBounds(t *testing.T) {
 	})
 	t.Run("public capacity", func(t *testing.T) {
 		store := newUpdateStore(t)
-		truth, err := store.Update(func(*Reader) (Batch, error) { return reverseBulkBatch(int(maxUpdateInputs)+1, false), nil })
+		truth, _, err := store.Update(func(*Reader) (Batch, error) { return reverseBulkBatch(int(maxUpdateInputs)+1, false), nil })
 		engine, direct := directTestEngineError(err)
 		if truth != CommitTruthOld || !direct || engine.Class != EngineCapacity || engine.Operation != string(operationUpdate) ||
 			engine.Code != codeTooLarge || engine.Diagnostic != "Update Batch exceeds bound" || engine.Cause != nil ||
@@ -433,7 +433,7 @@ func TestUpdateReverseRefNativeMismatch(t *testing.T) {
 				mutations = append(mutations, reverseRefRow(target, source))
 			}
 			var reader *Reader
-			truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return Batch{Mutations: mutations}, nil })
+			truth, _, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return Batch{Mutations: mutations}, nil })
 			engine, direct := directTestEngineError(err)
 			if truth != CommitTruthOld || !direct || engine.Class != EngineStateMismatch || engine.Operation != string(operationUpdate) ||
 				engine.Code != row.code || engine.Diagnostic != row.diagnostic || engine.Cause != nil || engine.ReopenRequired ||
@@ -441,7 +441,7 @@ func TestUpdateReverseRefNativeMismatch(t *testing.T) {
 				!sameError(store.terminal, err) || !validStoreShape(store) {
 				t.Fatalf("reverse ref native tuple: %s/%v/%s", truth, err, store.state)
 			}
-			if again, cached := store.Update(func(*Reader) (Batch, error) {
+			if again, _, cached := store.Update(func(*Reader) (Batch, error) {
 				t.Error("reverse ref native tuple: callback invoked on a terminal Store")
 				return Batch{}, nil
 			}); again != CommitTruthOld || !sameError(cached, err) {
@@ -470,7 +470,7 @@ func TestUpdateReverseRefOrder(t *testing.T) {
 	t.Run("missing source before existing target", func(t *testing.T) {
 		store := newUpdateStore(t)
 		requireUpdateCommit(t, store, "reverse ref seed", Mutation{DBI: dbis[1], Key: target, AfterKind: AfterLiteral, Literal: values[0]})
-		truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: []Mutation{reverseRefRow(target, source)}}, nil })
+		truth, _, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: []Mutation{reverseRefRow(target, source)}}, nil })
 		engine, direct := directTestEngineError(err)
 		if truth != CommitTruthOld || !direct || engine.Code != codeProblem || engine.Diagnostic != "OLD_VALUE_REF is absent from OLD" {
 			t.Fatalf("reverse ref first failure: %s/%v", truth, err)
@@ -522,7 +522,7 @@ func TestUpdateReverseRefCallbackPrecedence(t *testing.T) {
 			reverseSeed(t, store, target, source, value)
 			var reader *Reader
 			calls := 0
-			truth, err := store.Update(func(observed *Reader) (Batch, error) {
+			truth, _, err := store.Update(func(observed *Reader) (Batch, error) {
 				calls, reader = calls+1, observed
 				return Batch{Mutations: []Mutation{reverseRefRow(target, source)}}, row.fail
 			})

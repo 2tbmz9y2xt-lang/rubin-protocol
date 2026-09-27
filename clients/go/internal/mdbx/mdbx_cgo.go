@@ -964,8 +964,18 @@ func (e *CommitError) Unwrap() error {
 	return e.Cause
 }
 
+type UpdateStage uint8
+
+const (
+	UpdateStageInvalid                         UpdateStage = 0
+	UpdateStagePrewrite                        UpdateStage = 1
+	UpdateStageWriteStartedDefinitelyPrecommit UpdateStage = 2
+	UpdateStageCommitMayHaveCrossed            UpdateStage = 3
+)
+
 type updateNativeOutcome struct {
 	truth                       CommitTruth
+	stage                       UpdateStage
 	commitAttempted             bool
 	primary, secondary          error
 	retainedWrite, retainedRead *C.MDBX_txn
@@ -976,7 +986,7 @@ func updateNativeInvariant(diagnostic string) error {
 }
 
 func (outcome updateNativeOutcome) valid() error {
-	if outcome.truth < CommitTruthOld || outcome.truth > CommitTruthUnknown {
+	if outcome.truth < CommitTruthOld || outcome.truth > CommitTruthUnknown || outcome.stage-UpdateStagePrewrite > UpdateStageCommitMayHaveCrossed-UpdateStagePrewrite {
 		return updateNativeInvariant("invalid update native outcome shape")
 	}
 	shape := outcome.validConsumed
@@ -993,27 +1003,30 @@ func (outcome updateNativeOutcome) valid() error {
 }
 
 func (outcome updateNativeOutcome) validRetainedWrite() bool {
-	return outcome.retainedRead == nil && outcome.truth == CommitTruthOld && outcome.primary != nil && (!outcome.commitAttempted || outcome.secondary == nil)
+	return outcome.stage != UpdateStageCommitMayHaveCrossed && outcome.retainedRead == nil && outcome.truth == CommitTruthOld && outcome.primary != nil && (!outcome.commitAttempted || outcome.secondary == nil)
 }
 
 func (outcome updateNativeOutcome) validRetainedRead() bool {
-	return outcome.retainedWrite == nil && outcome.truth == CommitTruthUnknown && outcome.commitAttempted && outcome.primary != nil && outcome.secondary != nil
+	return outcome.stage == UpdateStageCommitMayHaveCrossed && outcome.retainedWrite == nil && outcome.truth == CommitTruthUnknown && outcome.commitAttempted && outcome.primary != nil && outcome.secondary != nil
 }
 
 func (outcome updateNativeOutcome) validConsumed() bool {
-	return (outcome.truth == CommitTruthNew || outcome.primary != nil) && (outcome.truth == CommitTruthOld || outcome.commitAttempted) && (outcome.secondary == nil || outcome.primary != nil)
+	if outcome.stage != UpdateStageCommitMayHaveCrossed {
+		return outcome.truth == CommitTruthOld && outcome.primary != nil
+	}
+	return outcome.commitAttempted && (outcome.truth == CommitTruthNew || outcome.primary != nil) && (outcome.secondary == nil || outcome.primary != nil)
 }
 
-func updateNativeConsumed(truth CommitTruth, commitAttempted bool, primary, secondary error) updateNativeOutcome {
-	return updateNativeOutcome{truth: truth, commitAttempted: commitAttempted, primary: primary, secondary: secondary}
+func updateNativeConsumed(truth CommitTruth, commitAttempted bool, primary, secondary error, stage UpdateStage) updateNativeOutcome {
+	return updateNativeOutcome{truth: truth, stage: stage, commitAttempted: commitAttempted, primary: primary, secondary: secondary}
 }
 
-func updateNativeRetainedWrite(commitAttempted bool, primary, secondary error, txn *C.MDBX_txn) updateNativeOutcome {
-	return updateNativeOutcome{truth: CommitTruthOld, commitAttempted: commitAttempted, primary: primary, secondary: secondary, retainedWrite: txn}
+func updateNativeRetainedWrite(commitAttempted bool, primary, secondary error, txn *C.MDBX_txn, stage UpdateStage) updateNativeOutcome {
+	return updateNativeOutcome{truth: CommitTruthOld, stage: stage, commitAttempted: commitAttempted, primary: primary, secondary: secondary, retainedWrite: txn}
 }
 
 func updateNativeRetainedRead(primary, secondary error, txn *C.MDBX_txn) updateNativeOutcome {
-	return updateNativeOutcome{truth: CommitTruthUnknown, commitAttempted: true, primary: primary, secondary: secondary, retainedRead: txn}
+	return updateNativeOutcome{truth: CommitTruthUnknown, stage: UpdateStageCommitMayHaveCrossed, commitAttempted: true, primary: primary, secondary: secondary, retainedRead: txn}
 }
 
 func (outcome updateNativeOutcome) lockedOutcome() transactionOutcome {
@@ -1209,7 +1222,7 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 }
 
 // libMDBX does not retain either Go-owned literal or OLD-borrowed bytes.
-func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateImage, keep []byte) error {
+func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateImage, keep []byte, stage *UpdateStage) error {
 	if !value.present || !validUpdateImage(value) {
 		return updateNativeInvariant("invalid update value shape")
 	}
@@ -1217,6 +1230,7 @@ func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateIm
 	if err != nil {
 		return err
 	}
+	*stage = UpdateStageWriteStartedDefinitelyPrecommit
 	rc := int(C.rubin_mdbx_put_nooverwrite(txn, dbi, keyImage.bytes, keyImage.length, value.bytes, value.length))
 	runtime.KeepAlive(key)
 	runtime.KeepAlive(keep)
@@ -1229,13 +1243,14 @@ func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateIm
 	return nil
 }
 
-func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) error {
+func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {
 	for _, mutation := range plan {
 		if mutation.beforePresent {
 			keyImage, keyErr := updateOwnedImage(mutation.key)
 			if keyErr != nil {
 				return keyErr
 			}
+			*stage = UpdateStageWriteStartedDefinitelyPrecommit
 			rc := int(C.rubin_mdbx_del_exact(txn, dbis[mutation.dbi.Rank], keyImage.bytes, keyImage.length))
 			runtime.KeepAlive(mutation.key)
 			if rc == codeNotFound {
@@ -1267,7 +1282,7 @@ func updateNativeFinalImage(mutation ownedMutation, references []updateReference
 	}
 }
 
-func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {
 	refAt := 0
 	for i, mutation := range plan {
 		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
@@ -1277,7 +1292,7 @@ func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation,
 		if mutation.after == AfterAbsent {
 			continue
 		}
-		putErr := updateNativePut(txn, dbis[mutation.dbi.Rank], mutation.key, image, mutation.literal)
+		putErr := updateNativePut(txn, dbis[mutation.dbi.Rank], mutation.key, image, mutation.literal, stage)
 		if putErr != nil {
 			return putErr
 		}
@@ -1321,16 +1336,16 @@ func updateNativeVerifyReferences(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 	return nil
 }
 
-func updateNativeAbort(txn *C.MDBX_txn, primary error) updateNativeOutcome {
+func updateNativeAbort(txn *C.MDBX_txn, primary error, stage UpdateStage) updateNativeOutcome {
 	rc := int(C.mdbx_txn_abort(txn))
 	if rc == codeThreadMismatch {
-		return updateNativeRetainedWrite(false, primary, nativeError(operationAbort, rc), txn)
+		return updateNativeRetainedWrite(false, primary, nativeError(operationAbort, rc), txn, stage)
 	}
 	var secondary error
 	if rc != codeSuccess {
 		secondary = nativeError(operationAbort, rc)
 	}
-	return updateNativeConsumed(CommitTruthOld, false, primary, secondary)
+	return updateNativeConsumed(CommitTruthOld, false, primary, secondary, stage)
 }
 
 func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
@@ -1419,7 +1434,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutat
 		if begun.txn != nil {
 			return updateNativeRetainedRead(primary, beginErr, begun.txn)
 		}
-		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr)
+		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr, UpdateStageCommitMayHaveCrossed)
 	}
 	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted)
 	rc := int(C.mdbx_txn_abort(begun.txn))
@@ -1433,60 +1448,61 @@ func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutat
 	if readErr != nil {
 		truth = CommitTruthUnknown
 	}
-	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr))
+	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr), UpdateStageCommitMayHaveCrossed)
 }
 
-func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn) updateNativeOutcome {
+func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage) updateNativeOutcome {
 	rc := int(C.mdbx_txn_commit(write))
 	commitErr := nativeError(operationUpdate, rc)
 	switch rc {
 	case codeSuccess:
-		return updateNativeConsumed(CommitTruthNew, true, nil, nil)
+		return updateNativeConsumed(CommitTruthNew, true, nil, nil, UpdateStageCommitMayHaveCrossed)
 	case codeResultTrue:
-		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil)
+		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)
 	case codeThreadMismatch:
-		return updateNativeRetainedWrite(true, commitErr, nil, write)
+		return updateNativeRetainedWrite(true, commitErr, nil, write, stage)
 	case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:
-		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil)
+		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)
 	}
 	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr)
 }
 
 func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
+	stage := UpdateStagePrewrite
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_READWRITE)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
 		if begun.txn != nil {
-			return updateNativeRetainedWrite(false, beginErr, nil, begun.txn)
+			return updateNativeRetainedWrite(false, beginErr, nil, begun.txn, stage)
 		}
-		return updateNativeConsumed(CommitTruthOld, false, beginErr, nil)
+		return updateNativeConsumed(CommitTruthOld, false, beginErr, nil, stage)
 	}
 	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan, consulted)
 	if preflightErr != nil {
-		return updateNativeAbort(begun.txn, preflightErr)
+		return updateNativeAbort(begun.txn, preflightErr, stage)
 	}
-	deleteErr := updateNativeDeletes(begun.txn, dbis, plan)
+	deleteErr := updateNativeDeletes(begun.txn, dbis, plan, &stage)
 	if deleteErr != nil {
-		return updateNativeAbort(begun.txn, deleteErr)
+		return updateNativeAbort(begun.txn, deleteErr, stage)
 	}
-	putErr := updateNativePuts(begun.txn, dbis, plan, references)
+	putErr := updateNativePuts(begun.txn, dbis, plan, references, &stage)
 	if putErr != nil {
-		return updateNativeAbort(begun.txn, putErr)
+		return updateNativeAbort(begun.txn, putErr, stage)
 	}
 	verifyErr := updateNativeVerify(begun.txn, dbis, plan, references)
 	if verifyErr != nil {
-		return updateNativeAbort(begun.txn, verifyErr)
+		return updateNativeAbort(begun.txn, verifyErr, stage)
 	}
 	consultedErr := updateNativeConsultedMatch(begun.txn, dbis, consulted, "final update image mismatch")
 	if consultedErr != nil {
-		return updateNativeAbort(begun.txn, consultedErr)
+		return updateNativeAbort(begun.txn, consultedErr, stage)
 	}
-	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn)
+	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn, stage)
 }
 
 func (s *Store) updateNative(plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
 	if s == nil || s.env == nil || old == nil || len(plan) == 0 || !validRetainedDBIs(s.dbis) {
-		return updateNativeConsumed(CommitTruthOld, false, updateNativeInvariant("invalid native update input"), nil)
+		return updateNativeConsumed(CommitTruthOld, false, updateNativeInvariant("invalid native update input"), nil, UpdateStagePrewrite)
 	}
 	var outcome updateNativeOutcome
 	runLocked(func() transactionOutcome {
@@ -1542,22 +1558,22 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	return plan, consulted, nil
 }
 
-func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, error) {
+func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, UpdateStage, error) {
 	shapeErr := outcome.valid()
 	if shapeErr != nil {
-		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+		return CommitTruthOld, UpdateStageInvalid, joinErrors(shapeErr, cleanup)
 	}
 	if !outcome.commitAttempted {
-		return CommitTruthOld, joinErrors(outcome.primary, outcome.secondary, cleanup)
+		return CommitTruthOld, outcome.stage, joinErrors(outcome.primary, outcome.secondary, cleanup)
 	}
 	if outcome.primary == nil && cleanup == nil {
-		return outcome.truth, nil
+		return outcome.truth, outcome.stage, nil
 	}
 	cause, remaining := outcome.primary, joinErrors(outcome.secondary, cleanup)
 	if cause == nil {
 		cause, remaining = cleanup, nil
 	}
-	return outcome.truth, &CommitError{Cause: cause, Truth: outcome.truth, ReadbackCause: remaining}
+	return outcome.truth, outcome.stage, &CommitError{Cause: cause, Truth: outcome.truth, ReadbackCause: remaining}
 }
 
 func updateRetained(outcome updateNativeOutcome) *C.MDBX_txn {
@@ -1578,25 +1594,25 @@ func updateAbortOldResult(rc int) (error, bool) {
 	return nativeError(operationAbort, rc), rc == codeThreadMismatch
 }
 
-func (s *Store) applyUpdateOutcome(outcome updateNativeOutcome, old *C.MDBX_txn, cleanup error, oldRetained bool) (CommitTruth, error) {
+func (s *Store) applyUpdateOutcome(outcome updateNativeOutcome, old *C.MDBX_txn, cleanup error, oldRetained bool) (CommitTruth, UpdateStage, error) {
 	if shapeErr := outcome.valid(); shapeErr != nil && (outcome.retainedWrite != nil || outcome.retainedRead != nil) {
-		return CommitTruthOld, joinErrors(shapeErr, cleanup)
+		return CommitTruthOld, UpdateStageInvalid, joinErrors(shapeErr, cleanup)
 	}
-	truth, terminal := updateResult(outcome, cleanup)
+	truth, stage, terminal := updateResult(outcome, cleanup)
 	retained := updateRetained(outcome)
 	if retained == nil && oldRetained {
 		retained = old
 	}
 	if retained != nil {
 		s.terminalTruth = truth
-		return truth, s.poison(retained, terminal).err
+		return truth, stage, s.poison(retained, terminal).err
 	}
 	if terminal == nil {
-		return truth, nil
+		return truth, stage, nil
 	}
 	s.terminalTruth = truth
 	_, terminal = s.consume(terminal)
-	return truth, terminal
+	return truth, stage, terminal
 }
 
 func (s *Store) latchUpdateTerminalTruth() {
@@ -1605,15 +1621,15 @@ func (s *Store) latchUpdateTerminalTruth() {
 	}
 }
 
-func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, error) {
+func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, UpdateStage, error) {
 	if s == nil {
-		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Store", nil)
 	}
 	if callback == nil {
-		return CommitTruthOld, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
+		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "nil Update callback", nil)
 	}
 	if !s.operations.TryLock() {
-		return CommitTruthOld, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
+		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
 	defer s.operations.Unlock()
 	stateErr := s.observationStateError(operationUpdate)
@@ -1622,19 +1638,19 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, erro
 		if truth-CommitTruthOld > CommitTruthUnknown-CommitTruthOld {
 			truth = CommitTruthOld
 		}
-		return truth, stateErr
+		return truth, UpdateStagePrewrite, stateErr
 	}
 	defer s.latchUpdateTerminalTruth()
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
-		return CommitTruthOld, s.failedReadBegin(begun.txn, beginErr)
+		return CommitTruthOld, UpdateStagePrewrite, s.failedReadBegin(begun.txn, beginErr)
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.active.Store(true)
 	plan, consulted, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
-		return CommitTruthOld, planErr
+		return CommitTruthOld, UpdateStagePrewrite, planErr
 	}
 	outcome := s.updateNative(plan, consulted, begun.txn)
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
