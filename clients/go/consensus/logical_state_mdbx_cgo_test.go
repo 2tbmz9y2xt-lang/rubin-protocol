@@ -102,7 +102,7 @@ func logicalMDBXSeed(t *testing.T, store *mdbx.Store, mutations ...mdbx.Mutation
 	slices.SortFunc(mutations, func(a, b mdbx.Mutation) int {
 		return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key))
 	})
-	truth, err := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: mutations}, nil })
+	truth, _, err := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: mutations}, nil })
 	logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "seed: truth=%v err=%v", truth, err)
 }
 
@@ -409,7 +409,7 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.outcome == logicalMDBXAdapterInvalid {
 				// A cell the bridge never classifies: the adapter itself refuses it.
-				truth, updateErr := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: tc.extras}, nil })
+				truth, _, updateErr := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: tc.extras}, nil })
 				var engine *mdbx.EngineError
 				logicalMDBXAssert(t, errors.As(updateErr, &engine) && engine.Class == mdbx.EngineInvalidInput && truth == mdbx.CommitTruthOld, "%s: adapter accepted a precondition-invalid extra: truth=%v err=%v", tc.label, truth, updateErr)
 				return
@@ -461,7 +461,7 @@ func logicalMDBXCheckExtra(t *testing.T, label, cause string, outcome logicalMDB
 	logicalMDBXAssert(t, failure == nil, "%s: unexpected failure %+v", label, failure)
 	fresh := logicalMDBXSeeded(t)
 	logicalMDBXSeed(t, fresh, image...)
-	truth, err := fresh.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return batch, nil })
+	truth, _, err := fresh.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return batch, nil })
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "%s: adapter refused the bridge Batch: truth=%v err=%v", label, truth, err)
 	want := map[bool]int{false: 2 + len(extras), true: 2}[outcome == logicalMDBXOmit]
 	logicalMDBXAssert(t, len(batch.Mutations) == want, "%s: got %d mutations, want %d", label, len(batch.Mutations), want)
@@ -482,7 +482,7 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	bytesD := uint64(len(logicalStateEntryBytes(logicalMDBXOpD, entryD)))
 	// One Reader, one view, one declared height, Batch returned in-callback.
 	run := func(height uint64, touched []logicalTouchedState, extras ...mdbx.Mutation) (mdbx.CommitTruth, error) {
-		return store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+		truth, _, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 			view := newLogicalMDBXStateView(reader, logicalMDBXImage, height)
 			plan, failure := buildLogicalStatePlan(height, view, touched, newLogicalMDBXMetadata(view, extras))
 			if failure != nil {
@@ -494,6 +494,7 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 			}
 			return batch, nil
 		})
+		return truth, err
 	}
 	truth, err := run(0, []logicalTouchedState{{Outpoint: logicalMDBXOpA, FinalPresent: true, Final: entryA}}, header)
 	logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "genesis composition failed: truth=%v err=%v", truth, err)
@@ -503,7 +504,7 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	logicalMDBXWantImage(t, store, [3][]byte{{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(bytesD, 1)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(entryD)}, [3][]byte{{1}, logicalMDBXKey(logicalMDBXOpA), nil}, [3][]byte{{3}, headerKey, headerValue})
 	t.Run("converter rejection keeps the old image", func(t *testing.T) {
 		var inner *logicalStateFailure
-		truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+		truth, _, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 			view := newLogicalMDBXStateView(reader, logicalMDBXImage, 1)
 			view.Counters()
 			batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, logicalStateCounters{bytes: bytesD, entries: 1}, logicalStateCounters{bytes: bytesD, entries: 9}, nil, nil))
@@ -562,7 +563,7 @@ func TestLogicalMDBXGenesisCounterAdmission(t *testing.T) {
 				old = append(old, [3][]byte{{extra.DBI.Rank}, slices.Clone(extra.Key), nil})
 			}
 			var inner *logicalStateFailure
-			truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+			truth, _, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 				view := newLogicalMDBXStateView(reader, 7, 0)
 				read := view.Counters()
 				logicalMDBXAssert(t, read.kind == logicalStateCountersPresent && read.counters == tc.counter && read.cause == nil && view.counterPresent, "counter observation failed: %+v", read)
@@ -625,7 +626,7 @@ func TestLogicalMDBXGenesisCounterBootstrapComposition(t *testing.T) {
 			if tc.profile != 0 {
 				owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
 				logicalMDBXAssert(t, err == nil, "reservation owner: %v", err)
-				truth, err := store.BootstrapStorageV1(tc.profile, owner)
+				truth, _, err := store.BootstrapStorageV1(tc.profile, owner)
 				logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "bootstrap producer: truth=%v err=%v", truth, err)
 				authority = logicalMDBXAuthorityLiteral()
 				authority[1] = byte(tc.profile)
@@ -645,7 +646,7 @@ func TestLogicalMDBXGenesisCounterBootstrapComposition(t *testing.T) {
 				result = logicalStateCounters{bytes: 56, entries: 1}
 				touched = []logicalTouchedState{{Outpoint: logicalMDBXOpA, FinalPresent: true, Final: entry}}
 			}
-			truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+			truth, _, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 				view := newLogicalMDBXStateView(reader, tc.image, 0)
 				read := view.Counters()
 				logicalMDBXAssert(t, read.kind == logicalStateCountersPresent && read.counters == (logicalStateCounters{}) && read.cause == nil && view.counterPresent, "zero counter observation failed: %+v", read)
@@ -688,7 +689,7 @@ func TestLogicalMDBXAuthorityAdmissionBoundary(t *testing.T) {
 	old := [][3][]byte{{{0}, {2}, slices.Clone(authority)}, {{0}, logicalMDBXCounterKey(), mdbx.LogicalCounterValue(logicalMDBXBytesA, 1)}, {{1}, logicalMDBXKey(logicalMDBXOpA), logicalMDBXValue(entry)}}
 	logicalMDBXWantImage(t, store, old...)
 	run := func(value []byte) (mdbx.CommitTruth, error) {
-		return store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+		truth, _, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 			view := newLogicalMDBXStateView(reader, logicalMDBXImage, 1)
 			extra := mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: value}
 			plan, failure := buildLogicalStatePlan(1, view, []logicalTouchedState{{Outpoint: logicalMDBXOpA}}, newLogicalMDBXMetadata(view, []mdbx.Mutation{extra}))
@@ -698,6 +699,7 @@ func TestLogicalMDBXAuthorityAdmissionBoundary(t *testing.T) {
 			logicalMDBXAssert(t, reflect.DeepEqual(batch.Mutations[0], extra), "authority bridge domain narrowed: extra changed")
 			return batch, nil
 		})
+		return truth, err
 	}
 	truth, err := run([]byte{9})
 	var engine *mdbx.EngineError

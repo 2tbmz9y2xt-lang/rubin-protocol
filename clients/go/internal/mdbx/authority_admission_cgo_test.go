@@ -53,7 +53,7 @@ func TestStorageAuthorityAdmissionUpdateAccepted(t *testing.T) {
 	mustEnvironment(t, err)
 	for i, value := range [][]byte{admissionNone(), codecLiteralCases(t)[6].b, admissionMaximum()} {
 		batch := Batch{Mutations: admissionBatch(value, i != 0).Mutations[:1]}
-		truth, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
+		truth, _, err := store.Update(func(*Reader) (Batch, error) { return batch, nil })
 		if truth.String() != "NEW" || err != nil {
 			t.Fatalf("authority Update accepted bytes: size=%d truth=%s err=%v", len(value), truth, err)
 		}
@@ -71,7 +71,7 @@ func TestStorageAuthorityAdmissionUpdateRejected(t *testing.T) {
 	store, err := Create(path, cfg)
 	mustEnvironment(t, err)
 	old := admissionBatch(admissionNone(), false)
-	truth, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
 	if truth.String() != "NEW" || err != nil {
 		t.Fatalf("authority seed: %s/%v", truth, err)
 	}
@@ -79,14 +79,14 @@ func TestStorageAuthorityAdmissionUpdateRejected(t *testing.T) {
 	bad := admissionBatch([]byte{9}, true)
 	bad.Mutations[1].Literal[7] = 8
 	var escaped *Reader
-	truth, err = store.Update(func(r *Reader) (Batch, error) { escaped = r; return bad, nil })
+	truth, _, err = store.Update(func(r *Reader) (Batch, error) { escaped = r; return bad, nil })
 	admissionTuple(t, truth, err, false)
 	_, _, expired := escaped.Get(DBI{Name: "meta-v1"}, []byte{2})
 	if expired == nil || store.state != storeOPEN || store.terminal != nil || store.terminalTruth != 0 {
 		t.Fatal("authority rejection lifecycle changed")
 	}
 	admissionImages(t, store, old)
-	truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
+	truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
 	if truth.String() != "NEW" || err != nil {
 		t.Fatalf("authority original Store reuse: %s/%v", truth, err)
 	}
@@ -94,7 +94,7 @@ func TestStorageAuthorityAdmissionUpdateRejected(t *testing.T) {
 	store, err = Open(path, cfg)
 	mustEnvironment(t, err)
 	admissionImages(t, store, old)
-	truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(codecLiteralCases(t)[6].b, true), nil })
+	truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(codecLiteralCases(t)[6].b, true), nil })
 	if truth.String() != "NEW" || err != nil {
 		t.Fatalf("authority rejection reuse: %s/%v", truth, err)
 	}
@@ -117,14 +117,14 @@ func TestStorageAuthorityAdmissionCallbackPrecedence(t *testing.T) {
 			store, err := Create(path, cfg)
 			mustEnvironment(t, err)
 			old := admissionBatch(admissionNone(), false)
-			truth, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
+			truth, _, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority seed: %s/%v", truth, err)
 			}
 			bad := admissionBatch([]byte{9}, true)
 			bad.Mutations[1].Literal[7] = 8
 			var escaped *Reader
-			truth, err = store.Update(func(r *Reader) (Batch, error) { escaped = r; return bad, row.result })
+			truth, _, err = store.Update(func(r *Reader) (Batch, error) { escaped = r; return bad, row.result })
 			if row.result == nil {
 				admissionTuple(t, truth, err, false)
 			} else if truth.String() != "OLD" || !sameError(err, row.result) || !sameError(errors.Unwrap(err), row.unwrap) || !errors.Is(err, row.result) || (row.unwrap != nil && !errors.Is(err, row.unwrap)) {
@@ -144,7 +144,7 @@ func TestStorageAuthorityAdmissionCallbackPrecedence(t *testing.T) {
 				t.Fatal("authority callback lifecycle changed")
 			}
 			admissionImages(t, store, old)
-			truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
+			truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority original Store reuse: %s/%v", truth, err)
 			}
@@ -152,7 +152,7 @@ func TestStorageAuthorityAdmissionCallbackPrecedence(t *testing.T) {
 			store, err = Open(path, cfg)
 			mustEnvironment(t, err)
 			admissionImages(t, store, old)
-			truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
+			truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority callback reuse: %s/%v", truth, err)
 			}
@@ -168,7 +168,7 @@ func TestStorageAuthorityAdmissionOrder(t *testing.T) {
 			store, err := Create(path, cfg)
 			mustEnvironment(t, err)
 			old := admissionBatch(admissionNone(), false)
-			truth, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
+			truth, _, err := store.Update(func(*Reader) (Batch, error) { return old, nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority seed: %s/%v", truth, err)
 			}
@@ -177,13 +177,13 @@ func TestStorageAuthorityAdmissionOrder(t *testing.T) {
 				batch = updatePlanAuxBatch(t, 16_385)
 				batch.Mutations = append(batch.Mutations, admissionBatch([]byte{9}, true).Mutations[0])
 			}
-			truth, err = store.Update(func(*Reader) (Batch, error) { return batch, nil })
+			truth, _, err = store.Update(func(*Reader) (Batch, error) { return batch, nil })
 			admissionTuple(t, truth, err, capacity)
 			if store.state != storeOPEN || store.terminal != nil || store.terminalTruth != 0 {
 				t.Fatal("authority order lifecycle changed")
 			}
 			admissionImages(t, store, old)
-			truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
+			truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority original Store reuse: %s/%v", truth, err)
 			}
@@ -191,7 +191,7 @@ func TestStorageAuthorityAdmissionOrder(t *testing.T) {
 			store, err = Open(path, cfg)
 			mustEnvironment(t, err)
 			admissionImages(t, store, old)
-			truth, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
+			truth, _, err = store.Update(func(*Reader) (Batch, error) { return admissionBatch(admissionNone(), true), nil })
 			if truth.String() != "NEW" || err != nil {
 				t.Fatalf("authority order reuse: %s/%v", truth, err)
 			}

@@ -156,7 +156,7 @@ func bootstrapRequireTerminal(t *testing.T, store *Store, err error, marker stri
 	if store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, err) || !validStoreShape(store) {
 		t.Fatalf("%s: %s/%s/%v", marker, store.state, store.terminalTruth, store.terminal)
 	}
-	nextTruth, nextErr := store.Update(func(*Reader) (Batch, error) {
+	nextTruth, _, nextErr := store.Update(func(*Reader) (Batch, error) {
 		t.Fatalf("%s: Update callback invoked", marker)
 		return Batch{}, nil
 	})
@@ -193,7 +193,10 @@ func TestStorageBootstrapInput(t *testing.T) {
 		{"profile before zero owner", consultedTrack(t, newUpdateStore(t), nil), 3, &OperationReservationOwner{}, "invalid bootstrap profile"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			truth, err := row.store.BootstrapStorageV1(row.profile, row.owner)
+			truth, stage, err := row.store.BootstrapStorageV1(row.profile, row.owner)
+			if stage != 1 {
+				t.Fatal("bootstrap stage forwarding drifted")
+			}
 			bootstrapRefusal(t, row.name, truth, err, EngineInvalidInput, operationUpdate, codeEINVAL, row.diagnostic, nil, false)
 			if reservationLive(owner) != 0 {
 				t.Fatalf("%s: live=%d", row.name, reservationLive(owner))
@@ -208,15 +211,21 @@ func TestStorageBootstrapInput(t *testing.T) {
 	// Store.Update would return the busy tuple instead of the input refusal.
 	locked := consultedTrack(t, newUpdateStore(t), nil)
 	locked.operations.Lock()
-	truth, err := locked.BootstrapStorageV1(3, owner)
+	truth, stage, err := locked.BootstrapStorageV1(3, owner)
 	locked.operations.Unlock()
+	if stage != 1 {
+		t.Fatal("bootstrap stage forwarding drifted")
+	}
 	bootstrapRefusal(t, "profile before Store lock", truth, err, EngineInvalidInput, operationUpdate, codeEINVAL, "invalid bootstrap profile", nil, false)
 	for _, row := range []struct {
 		name  string
 		owner *OperationReservationOwner
 	}{{"nil owner", nil}, {"zero owner", &OperationReservationOwner{}}} {
 		store := consultedTrack(t, newUpdateStore(t), nil)
-		truth, err = store.BootstrapStorageV1(StorageProfilePrunedV1, row.owner)
+		truth, stage, err = store.BootstrapStorageV1(StorageProfilePrunedV1, row.owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthOld || !sameError(err, errOperationReservationInput) {
 			t.Fatalf("%s: %s/%v", row.name, truth, err)
 		}
@@ -226,37 +235,42 @@ func TestStorageBootstrapInput(t *testing.T) {
 }
 
 func TestStorageBootstrapImages(t *testing.T) {
-	for _, profile := range []struct {
-		name  string
-		value StorageProfileV1
-	}{{"pruned", StorageProfilePrunedV1}, {"archive", StorageProfileArchiveV1}} {
-		t.Run(profile.name, func(t *testing.T) {
-			store, path, cfg := consultedStore(t)
-			marker, profile := profile.name, profile.value
-			if counts := bootstrapCounts(t, store, marker); counts != bootstrapEmptyCounts {
-				t.Fatalf("%s: pre-state counts=%v", marker, counts)
-			}
-			truth, err := store.BootstrapStorageV1(profile, bootstrapOwner(t))
-			if truth != CommitTruthNew || err != nil {
-				t.Fatalf("%s: %s/%v", marker, truth, err)
-			}
-			bootstrapOpenUnchanged(t, store, marker)
-			bootstrapRequireInitialized(t, store, cfg, profile, marker+" commit")
-			mustEnvironment(t, store.Close())
-			reopened, openErr := Open(path, cfg)
-			reopened = consultedTrack(t, reopened, openErr)
-			bootstrapRequireInitialized(t, reopened, cfg, profile, marker+" reopen")
-			// PRE_GENESIS is the absence of canonical rows plus the zero counter: no
-			// genesis or index row is fabricated and no next generation is allocated.
-			bootstrapRequireRow(t, reopened, []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 2}, nil, marker+" next generation")
-			height, heightErr := HeightKey(1, 0)
-			mustEnvironment(t, heightErr)
-			consultedRequireImage(t, reopened, readDBIsLiteral()[2], height, nil, false, marker+" canonical")
-		})
-	}
-	if !bytes.Equal(bootstrapImage(1), admissionNone()) {
-		t.Fatal("pruned image literal drifted from the corpus authority literal")
-	}
+	t.Run("stage_forwarding", func(t *testing.T) {
+		for _, profile := range []struct {
+			name  string
+			value StorageProfileV1
+		}{{"pruned", StorageProfilePrunedV1}, {"archive", StorageProfileArchiveV1}} {
+			t.Run(profile.name, func(t *testing.T) {
+				store, path, cfg := consultedStore(t)
+				marker, profile := profile.name, profile.value
+				if counts := bootstrapCounts(t, store, marker); counts != bootstrapEmptyCounts {
+					t.Fatalf("%s: pre-state counts=%v", marker, counts)
+				}
+				truth, stage, err := store.BootstrapStorageV1(profile, bootstrapOwner(t))
+				if stage != 3 {
+					t.Fatal("bootstrap stage forwarding drifted")
+				}
+				if truth != CommitTruthNew || err != nil {
+					t.Fatalf("%s: %s/%v", marker, truth, err)
+				}
+				bootstrapOpenUnchanged(t, store, marker)
+				bootstrapRequireInitialized(t, store, cfg, profile, marker+" commit")
+				mustEnvironment(t, store.Close())
+				reopened, openErr := Open(path, cfg)
+				reopened = consultedTrack(t, reopened, openErr)
+				bootstrapRequireInitialized(t, reopened, cfg, profile, marker+" reopen")
+				// PRE_GENESIS is the absence of canonical rows plus the zero counter: no
+				// genesis or index row is fabricated and no next generation is allocated.
+				bootstrapRequireRow(t, reopened, []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 2}, nil, marker+" next generation")
+				height, heightErr := HeightKey(1, 0)
+				mustEnvironment(t, heightErr)
+				consultedRequireImage(t, reopened, readDBIsLiteral()[2], height, nil, false, marker+" canonical")
+			})
+		}
+		if !bytes.Equal(bootstrapImage(1), admissionNone()) {
+			t.Fatal("pruned image literal drifted from the corpus authority literal")
+		}
+	})
 }
 
 func TestStorageBootstrapReservation(t *testing.T) {
@@ -271,7 +285,10 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		store, _, cfg := consultedStore(t)
 		owner := bootstrapOwner(t)
 		reservationInjectLive(owner, enclosing)
-		truth, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 3 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthNew || err != nil {
 			t.Fatalf("admit: %s/%v", truth, err)
 		}
@@ -290,7 +307,10 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		store, _, cfg := consultedStore(t)
 		owner := bootstrapOwner(t)
 		reservationInjectLive(owner, enclosing+1)
-		truth, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthOld || !sameError(err, errOperationReservationCapacity) {
 			t.Fatalf("refuse: %s/%v", truth, err)
 		}
@@ -305,13 +325,19 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		// Capacity is decided before Store.Update runs, so a busy Store cannot take
 		// priority over it.
 		store.operations.Lock()
-		busyTruth, busyErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		busyTruth, stage, busyErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 		store.operations.Unlock()
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if busyTruth != CommitTruthOld || !sameError(busyErr, errOperationReservationCapacity) {
 			t.Fatalf("capacity over busy: %s/%v", busyTruth, busyErr)
 		}
 		reservationInjectLive(owner, 0)
-		truth, err = store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err = store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 3 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthNew || err != nil {
 			t.Fatalf("retry: %s/%v", truth, err)
 		}
@@ -362,7 +388,10 @@ func TestStorageBootstrapNonempty(t *testing.T) {
 			requireUpdateCommit(t, store, row.name+": seed", row.mutations...)
 			before := bootstrapCounts(t, store, row.name)
 			owner := bootstrapOwner(t)
-			truth, bootstrapErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+			truth, stage, bootstrapErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+			if stage != 1 {
+				t.Fatal("bootstrap stage forwarding drifted")
+			}
 			bootstrapNonemptyRefusal(t, row.name, truth, bootstrapErr)
 			bootstrapOpenUnchanged(t, store, row.name)
 			if after := bootstrapCounts(t, store, row.name); after != before {
@@ -380,12 +409,18 @@ func TestStorageBootstrapNonempty(t *testing.T) {
 	t.Run("initialized store refuses repeat", func(t *testing.T) {
 		store, path, cfg := consultedStore(t)
 		owner := bootstrapOwner(t)
-		truth, seedErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, seedErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 3 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthNew || seedErr != nil {
 			t.Fatalf("seed: %s/%v", truth, seedErr)
 		}
 		for _, profile := range []StorageProfileV1{StorageProfilePrunedV1, StorageProfileArchiveV1} {
-			repeatTruth, repeatErr := store.BootstrapStorageV1(profile, owner)
+			repeatTruth, stage, repeatErr := store.BootstrapStorageV1(profile, owner)
+			if stage != 1 {
+				t.Fatal("bootstrap stage forwarding drifted")
+			}
 			bootstrapNonemptyRefusal(t, "repeat", repeatTruth, repeatErr)
 			bootstrapOpenUnchanged(t, store, "repeat")
 			bootstrapRequireInitialized(t, store, cfg, StorageProfilePrunedV1, "repeat")
@@ -393,7 +428,10 @@ func TestStorageBootstrapNonempty(t *testing.T) {
 		mustEnvironment(t, store.Close())
 		reopened, openErr := Open(path, cfg)
 		reopened = consultedTrack(t, reopened, openErr)
-		repeatTruth, repeatErr := reopened.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		repeatTruth, stage, repeatErr := reopened.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		bootstrapNonemptyRefusal(t, "reopen repeat", repeatTruth, repeatErr)
 		bootstrapRequireInitialized(t, reopened, cfg, StorageProfilePrunedV1, "reopen repeat")
 	})
@@ -441,7 +479,10 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 			store, path, _ := consultedStore(t)
 			bootstrapForge(t, store, row.plan)
 			owner := bootstrapOwner(t)
-			truth, bootstrapErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+			truth, stage, bootstrapErr := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+			if stage != 1 {
+				t.Fatal("bootstrap stage forwarding drifted")
+			}
 			if live := reservationLive(owner); live != 0 {
 				t.Fatalf("%s: live=%d", row.name, live)
 			}
@@ -477,7 +518,10 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		row := consultedCounter(t, 3)
 		requireUpdateCommit(t, store, "A4 seed", row)
 		owner := bootstrapOwner(t)
-		truth, err := store.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		bootstrapNonemptyRefusal(t, "A4", truth, err)
 		bootstrapOpenUnchanged(t, store, "A4")
 		bootstrapRequireSeeded(t, store, row, "A4")
@@ -493,16 +537,20 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		owner := bootstrapOwner(t)
 		var wait sync.WaitGroup
 		truths, errs := make([]CommitTruth, 4), make([]error, 4)
+		stages := make([]UpdateStage, 4)
 		wait.Add(len(truths))
 		for i := range truths {
 			go func() {
 				defer wait.Done()
-				truths[i], errs[i] = store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+				truths[i], stages[i], errs[i] = store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 			}()
 		}
 		wait.Wait()
 		committed := 0
 		for i, truth := range truths {
+			if truth == 2 && stages[i] != 3 || truth != 2 && stages[i] != 1 {
+				t.Fatal("bootstrap stage forwarding drifted")
+			}
 			if truth == CommitTruthNew && errs[i] == nil {
 				committed++
 				continue
@@ -528,7 +576,10 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		requireUpdateCommit(t, store, "R6 seed", consultedCounter(t, 6))
 		store.dbis[3] = 4242 // nonzero and distinct, so validRetainedDBIs still admits the shape
 		owner := bootstrapOwner(t)
-		truth, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		engine := requireEngineError(t, err, EngineLocalInvariant, operationInspect, codeBadDBI)
 		if truth != CommitTruthOld || engine.Diagnostic != expectedNativeDiagnostic(codeBadDBI) || engine.Cause != nil || engine.ReopenRequired {
 			t.Fatalf("R6: %s/%+v", truth, engine)
@@ -544,8 +595,11 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		store, _, _ := consultedStore(t)
 		owner := bootstrapOwner(t)
 		store.operations.Lock()
-		truth, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 		store.operations.Unlock()
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		bootstrapRefusal(t, "R7 busy", truth, err, EngineConcurrency, operationUpdate, codeBusy, "store operation in progress", nil, false)
 		bootstrapOpenUnchanged(t, store, "R7 busy")
 		if live := reservationLive(owner); live != 0 {
@@ -556,7 +610,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		owner := bootstrapOwner(t)
 		recorded := nativeError(operationGet, codeEIO)
 		store := newUpdateStore(t)
-		cachedTruth, cached := store.Update(func(reader *Reader) (Batch, error) {
+		cachedTruth, _, cached := store.Update(func(reader *Reader) (Batch, error) {
 			reader.failure = recorded
 			reader.active.Store(false)
 			return updateLifecycleBatch(), nil
@@ -564,13 +618,16 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		if cachedTruth != CommitTruthOld || !sameError(cached, recorded) || store.state != storeCLOSED {
 			t.Fatalf("R7 cached OLD: %s/%v/%s", cachedTruth, cached, store.state)
 		}
-		truth, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthOld || !sameError(err, recorded) {
 			t.Fatalf("R7 cached OLD forward: %s/%v", truth, err)
 		}
 		unknown := newUpdateStore(t)
 		primary, readback := nativeError(operationUpdate, codeENOSPC), nativeError(operationUpdate, codeEIO)
-		projectedTruth, projected := unknown.applyUpdateOutcome(updateNativeConsumed(CommitTruthUnknown, true, primary, readback), nil, nil, false)
+		projectedTruth, _, projected := unknown.applyUpdateOutcome(updateNativeConsumed(CommitTruthUnknown, true, primary, readback, 3), nil, nil, false)
 		if projectedTruth != CommitTruthUnknown || unknown.terminalTruth != CommitTruthUnknown || unknown.state != storeCLOSED {
 			t.Fatalf("R7 cached UNKNOWN: %s/%s/%s", projectedTruth, unknown.terminalTruth, unknown.state)
 		}
@@ -578,7 +635,10 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		if !errors.As(projected, &commit) || !sameError(commit.Cause, primary) || commit.Truth != CommitTruthUnknown {
 			t.Fatalf("R7 cached UNKNOWN shape: %+v", projected)
 		}
-		truth, err = unknown.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		truth, stage, err = unknown.BootstrapStorageV1(StorageProfileArchiveV1, owner)
+		if stage != 1 {
+			t.Fatal("bootstrap stage forwarding drifted")
+		}
 		if truth != CommitTruthUnknown || !sameError(err, projected) {
 			t.Fatalf("R7 cached UNKNOWN forward: %s/%v", truth, err)
 		}
@@ -624,7 +684,7 @@ func TestStorageBootstrapComposition(t *testing.T) {
 	t.Run("initial encoder failure is wrapped and recorded", func(t *testing.T) {
 		store := newUpdateStore(t)
 		var recorded error
-		truth, err := store.Update(func(reader *Reader) (Batch, error) {
+		truth, _, err := store.Update(func(reader *Reader) (Batch, error) {
 			encoded, authorityErr := bootstrapAuthority(reader, 3)
 			if encoded != nil {
 				t.Fatal("encoder returned bytes for a refused struct")
@@ -666,6 +726,9 @@ func TestStorageBootstrapComposition(t *testing.T) {
 			t.Run(row.name, func(t *testing.T) {
 				witness, _, _ := consultedStore(t)
 				outcome := bootstrapReadback(t, witness, plan, row.change, primary, row.commit, row.flip)
+				if outcome.stage != 3 {
+					t.Fatal("readback stage drifted")
+				}
 				if outcome.truth != row.truth || !outcome.commitAttempted || !sameError(outcome.primary, primary) {
 					t.Fatalf("%s: %+v", row.name, outcome)
 				}
@@ -675,11 +738,17 @@ func TestStorageBootstrapComposition(t *testing.T) {
 					requireEngineError(t, outcome.secondary, EngineLocalInvariant, operationUpdate, row.secondaryCode)
 				}
 				projected := newUpdateStore(t)
-				truth, terminal := projected.applyUpdateOutcome(outcome, nil, nil, false)
+				truth, stage, terminal := projected.applyUpdateOutcome(outcome, nil, nil, false)
+				if stage != 3 {
+					t.Fatal("cleanup stage forwarding drifted")
+				}
 				if truth != outcome.truth || projected.state != storeCLOSED || projected.terminalTruth != outcome.truth {
 					t.Fatalf("%s: projection %s/%s", row.name, truth, projected.state)
 				}
-				again, forwarded := projected.BootstrapStorageV1(StorageProfilePrunedV1, bootstrapOwner(t))
+				again, stage, forwarded := projected.BootstrapStorageV1(StorageProfilePrunedV1, bootstrapOwner(t))
+				if stage != 1 {
+					t.Fatal("bootstrap stage forwarding drifted")
+				}
 				if again != outcome.truth || !sameError(forwarded, terminal) {
 					t.Fatalf("%s: forward %s/%v", row.name, again, forwarded)
 				}
@@ -716,6 +785,9 @@ func TestStorageBootstrapComposition(t *testing.T) {
 			t.Fatalf("declared owners=%v", declared)
 		}
 		text := string(source)
+		if !strings.Contains(text, "truth, stage, updateErr = s.Update(") || !strings.Contains(text, "return truth, stage, err") {
+			t.Fatal("bootstrap tuple forwarding drifted")
+		}
 		// Everything from here to the end of this subtest is a STRUCTURAL source pin, not a
 		// behavioral oracle: observing at runtime that the charge is held for the whole
 		// transaction, or that reader.getMu is held across the census, needs a scheduler seam

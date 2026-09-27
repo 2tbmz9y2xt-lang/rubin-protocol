@@ -43,7 +43,7 @@ func reverseBatchDeletes(dbi DBI, keys [][]byte) []Mutation {
 
 func reverseBatchCommit(t *testing.T, store *Store, marker string, mutations ...Mutation) {
 	t.Helper()
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: mutations}, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: mutations}, nil })
 	if truth != CommitTruthNew || err != nil || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}
@@ -57,7 +57,7 @@ func reverseBatchRequireRefusal(t *testing.T, store *Store, marker string, class
 	row := batch.Mutations[0]
 	key, literal, refKey := append([]byte(nil), row.Key...), append([]byte(nil), row.Literal...), append([]byte(nil), row.RefKey...)
 	var reader *Reader
-	truth, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return batch, nil })
+	truth, _, err := store.Update(func(observed *Reader) (Batch, error) { reader = observed; return batch, nil })
 	engine, direct := directTestEngineError(err)
 	row = batch.Mutations[0]
 	if truth != CommitTruthOld || !direct || engine.Class != class || engine.Operation != "update" || engine.Code != code ||
@@ -123,7 +123,7 @@ func reverseBatchRequireTerminal(t *testing.T, store *Store, reader *Reader, tru
 		store.terminalTruth != CommitTruthOld || !sameError(store.terminal, err) || !validStoreShape(store) {
 		t.Fatalf("%s: %s/%v/%s", marker, truth, err, store.state)
 	}
-	again, cached := store.Update(func(*Reader) (Batch, error) {
+	again, _, cached := store.Update(func(*Reader) (Batch, error) {
 		t.Error(marker + ": callback invoked on a terminal Store")
 		return Batch{}, nil
 	})
@@ -150,7 +150,7 @@ func TestUpdateReverseBatchDeletePublic(t *testing.T) {
 	deletes := reverseBatchDeletes(dbi, keys)
 	reverseBatchRequireRefusal(t, store, "default batch UTXO-delete ceiling", EngineClass("Capacity"), -30417, "Update Batch exceeds bound", Batch{Mutations: deletes})
 	reverseBatchRequireImage(t, store, dbi, keys, values, "default batch capacity keeps every row")
-	truth, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: deletes}, nil })
+	truth, _, err := store.Update(func(*Reader) (Batch, error) { return Batch{Reverse: true, Mutations: deletes}, nil })
 	if truth != CommitTruthNew || err != nil || store.state != storeOPEN || store.terminalTruth != 0 {
 		t.Fatalf("reverse batch public delete NEW: %s/%v/%s", truth, err, store.state)
 	}
@@ -217,7 +217,7 @@ func TestUpdateReverseBatchAtomicAbort(t *testing.T) {
 		reverseSeed(t, store, targetB, sourceB, values[1])
 		requireUpdateCommit(t, store, "reverse batch seed", Mutation{DBI: dbis[1], Key: targetB, AfterKind: AfterLiteral, Literal: values[1]})
 		var reader *Reader
-		truth, err := store.Update(func(observed *Reader) (Batch, error) {
+		truth, _, err := store.Update(func(observed *Reader) (Batch, error) {
 			reader = observed
 			return Batch{Reverse: true, Mutations: []Mutation{
 				{DBI: dbis[0], Key: counter, BeforePresent: true, AfterKind: AfterLiteral, Literal: after},
@@ -243,7 +243,7 @@ func TestUpdateReverseBatchAtomicAbort(t *testing.T) {
 		target, source := reverseKeys(t, 2, 3)
 		requireUpdateCommit(t, store, "reverse batch seed", Mutation{DBI: dbis[1], Key: target, AfterKind: AfterLiteral, Literal: values[2]})
 		var reader *Reader
-		truth, err := store.Update(func(observed *Reader) (Batch, error) {
+		truth, _, err := store.Update(func(observed *Reader) (Batch, error) {
 			reader = observed
 			return Batch{Reverse: true, Mutations: []Mutation{reverseRefRow(target, source)}}, nil
 		})
@@ -678,7 +678,7 @@ func TestUpdateReverseBatchCallbackPrecedence(t *testing.T) {
 			batch := []Mutation{reverseRefRow(target, source), {DBI: dbis[5], Key: entry, BeforePresent: true, AfterKind: AfterAbsent}}
 			var reader *Reader
 			calls := 0
-			truth, err := store.Update(func(observed *Reader) (Batch, error) {
+			truth, _, err := store.Update(func(observed *Reader) (Batch, error) {
 				calls, reader = calls+1, observed
 				return Batch{Reverse: true, Mutations: batch}, row.fail
 			})
