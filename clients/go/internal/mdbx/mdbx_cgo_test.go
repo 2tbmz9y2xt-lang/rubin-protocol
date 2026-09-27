@@ -3538,6 +3538,12 @@ func TestNativeUpdateImages(t *testing.T) {
 					return fmt.Errorf("concurrent update=%+v/%w", concurrent, err)
 				}
 				readbackPrimary := nativeError(operationUpdate, codeENOSPC)
+				failedBegin := updateNativeReadback(nil, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
+				if failedBegin.stage != 3 {
+					t.Fatal("readback stage drifted")
+				}
+				requireEngineError(t, failedBegin.secondary, EngineInvalidInput, operationUpdate, codeEINVAL)
+				requireUpdateTruth(t, failedBegin, CommitTruthUnknown, true, readbackPrimary, failedBegin.secondary)
 				old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
 				newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary)
 				unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary)
