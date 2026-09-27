@@ -4,6 +4,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,11 @@ func loadDANodeObserverCorpus(path string) (daNodeObserverCorpus, []byte, error)
 	if err != nil {
 		return daNodeObserverCorpus{}, nil, err
 	}
+	const expectedDigest = "0225a723acc5e1c30b302f7208aa63068bd09a69aac87579cd0ba873bce5057a"
+	actualDigest := fmt.Sprintf("%x", sha256.Sum256(raw))
+	if actualDigest != expectedDigest {
+		return daNodeObserverCorpus{}, nil, fmt.Errorf("observer input corpus: SHA-256 got %s want %s", actualDigest, expectedDigest)
+	}
 	var corpus daNodeObserverCorpus
 	if err := json.Unmarshal(raw, &corpus); err != nil {
 		return daNodeObserverCorpus{}, nil, fmt.Errorf("observer input corpus: %w", err)
@@ -89,7 +95,164 @@ func decodeDANodeObserverInput(raw json.RawMessage, dst any) error {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return fmt.Errorf("observer input: trailing JSON value")
 	}
-	return nil
+	keys := json.NewDecoder(bytes.NewReader(raw))
+	keys.UseNumber()
+	return checkDANodeObserverInputKeys(keys, reflect.TypeOf(dst))
+}
+
+// The observer's input structs have explicit JSON tags and no embedded fields.
+// The ordinary decode above owns syntax, destination types and unknown fields.
+func checkDANodeObserverInputKeys(dec *json.Decoder, typ reflect.Type) error {
+	token, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("observer input: %w", err)
+	}
+	delim, container := token.(json.Delim)
+	if !container {
+		return nil
+	}
+	for typ != nil && typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	var element reflect.Type
+	if typ != nil && (typ.Kind() == reflect.Array || typ.Kind() == reflect.Slice || typ.Kind() == reflect.Map) {
+		element = typ.Elem()
+	}
+	seen := make(map[string]bool)
+	for dec.More() {
+		child := element
+		if delim == '{' {
+			child, err = daNodeObserverInputKey(dec, typ, seen)
+			if err != nil {
+				return err
+			}
+		}
+		if err := checkDANodeObserverInputKeys(dec, child); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
+}
+
+func daNodeObserverInputKey(dec *json.Decoder, typ reflect.Type, seen map[string]bool) (reflect.Type, error) {
+	token, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("observer input: %w", err)
+	}
+	key := token.(string) // Decode already established a valid object key.
+	if seen[key] {
+		return nil, fmt.Errorf("observer input: duplicate JSON key %q", key)
+	}
+	seen[key] = true
+	if typ != nil && typ.Kind() == reflect.Map {
+		return typ.Elem(), nil
+	}
+	if typ == nil || typ.Kind() != reflect.Struct {
+		return nil, nil
+	}
+	return daNodeObserverInputField(typ, key)
+}
+
+func daNodeObserverInputField(typ reflect.Type, key string) (reflect.Type, error) {
+	folded := ""
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		tag, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if !field.IsExported() || tag == "" || tag == "-" {
+			continue
+		}
+		if key == tag {
+			return field.Type, nil
+		}
+		if strings.EqualFold(key, tag) {
+			folded = tag
+		}
+	}
+	if folded != "" {
+		return nil, fmt.Errorf("observer input: non-exact JSON key %q; want %q", key, folded)
+	}
+	return nil, nil
+}
+
+func TestDAAdmissionObserverNodeCorpusDigest(t *testing.T) {
+	corpus, raw, err := loadDANodeObserverCorpus(daNodeObserverCorpusPath())
+	if err != nil || corpus.FormatVersion != 1 || len(corpus.Cases) == 0 {
+		t.Fatalf("observer corpus pin: pinned input refused: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "corpus.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RUBIN_DA_NODE_CORPUS", path)
+	if _, _, err := loadDANodeObserverCorpus(daNodeObserverCorpusPath()); err != nil {
+		t.Fatalf("observer corpus pin: exact override refused: %v", err)
+	}
+	changed := bytes.Clone(raw)
+	changed[0] ^= 1 // Invalid JSON also proves the digest refusal precedes decoding.
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = loadDANodeObserverCorpus(daNodeObserverCorpusPath())
+	want := fmt.Sprintf(
+		"observer input corpus: SHA-256 got %x want 0225a723acc5e1c30b302f7208aa63068bd09a69aac87579cd0ba873bce5057a",
+		sha256.Sum256(changed),
+	)
+	if err == nil || err.Error() != want {
+		t.Fatalf("observer corpus pin: modified override diagnostic=%v, want %s", err, want)
+	}
+	if _, _, err := loadDANodeObserverCorpus(path + ".absent"); !os.IsNotExist(err) {
+		t.Fatalf("observer corpus pin: read error changed: %v", err)
+	}
+}
+
+func TestDAAdmissionObserverNodeInputKeys(t *testing.T) {
+	type member struct {
+		Name string `json:"name"`
+	}
+	type input struct {
+		Name   string                     `json:"name"`
+		Nested *member                    `json:"nested"`
+		List   []member                   `json:"list"`
+		Array  [1]member                  `json:"array"`
+		Values map[string]json.RawMessage `json:"values"`
+		Raw    json.RawMessage            `json:"raw"`
+	}
+	for _, row := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"duplicate_top", `{"name":"A","name":"B"}`, `observer input: duplicate JSON key "name"`},
+		{"duplicate_nested", `{"nested":{"name":"A","name":"B"}}`, `observer input: duplicate JSON key "name"`},
+		{"duplicate_map", `{"values":{"CANONICAL_MEMBER":1,"CANONICAL_MEMBER":2}}`, `observer input: duplicate JSON key "CANONICAL_MEMBER"`},
+		{"duplicate_raw", `{"raw":[{"k":1,"k":2}]}`, `observer input: duplicate JSON key "k"`},
+		{"duplicate_escaped", `{"name":"A","na\u006de":"B"}`, `observer input: duplicate JSON key "name"`},
+		{"case_top", `{"NAME":"A"}`, `observer input: non-exact JSON key "NAME"; want "name"`},
+		{"case_nested", `{"nested":{"NAME":"A"}}`, `observer input: non-exact JSON key "NAME"; want "name"`},
+		{"case_list", `{"list":[{"NAME":"A"}]}`, `observer input: non-exact JSON key "NAME"; want "name"`},
+		{"case_array", `{"array":[{"NAME":"A"}]}`, `observer input: non-exact JSON key "NAME"; want "name"`},
+		{"unknown", `{"absent":1}`, `observer input: json: unknown field "absent"`},
+		{"trailing", `{"name":"A"} {}`, `observer input: trailing JSON value`},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var dst input
+			err := decodeDANodeObserverInput(json.RawMessage(row.raw), &dst)
+			if err == nil || err.Error() != row.want {
+				t.Fatalf("observer input keys %s: diagnostic=%v, want %s", row.name, err, row.want)
+			}
+		})
+	}
+	var dst input
+	raw := json.RawMessage(`{"name":"A","nested":{"name":"B"},"list":[{"name":"C"}],"array":[{"name":"D"}],"values":{"NAME":1,"name":2,"CANONICAL_MEMBER":3},"raw":{"NAME":1e400}}`)
+	if err := decodeDANodeObserverInput(raw, &dst); err != nil {
+		t.Fatalf("observer input keys: exact struct and uppercase map keys refused: %v", err)
+	}
+	if dst.Name != "A" || dst.Nested.Name != "B" || dst.List[0].Name != "C" || dst.Array[0].Name != "D" ||
+		string(dst.Values["NAME"]) != "1" || string(dst.Values["name"]) != "2" ||
+		string(dst.Values["CANONICAL_MEMBER"]) != "3" || string(dst.Raw) != `{"NAME":1e400}` {
+		t.Fatal("observer input keys: destination values changed")
+	}
 }
 
 type daNodePlannerInput struct {
