@@ -81,7 +81,7 @@ const fallbackSectionHeadings = {
   transaction_wire: "## 5. Transaction Wire",
   transaction_identifiers: "## 8. Transaction Identifiers (TXID / WTXID)",
   weight_accounting: "## 9. Weight Accounting (Normative)",
-  witness_commitment: "### 10.4.1 Witness Commitment (Coinbase Anchor)",
+  witness_commitment: "#### 10.4.1 Witness Commitment (Coinbase Anchor)",
   sighash_v1: "## 12. Sighash v1 (Normative)",
   consensus_error_codes: "## 13. Consensus Error Codes (Normative)",
   covenant_registry: "## 14. Covenant Type Registry (Normative)",

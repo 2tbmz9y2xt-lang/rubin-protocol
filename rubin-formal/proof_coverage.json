@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "4bed09f426489abea81167494aedf4f7f6fb5f1c016a0fa31da6f30510a8f242",
+  "spec_section_hashes_sha3_256": "0b0e7c66372e224eb86b7cbf1a03aeab5104576e72400381d65f9e6168a73fcf",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -432,7 +432,7 @@
     },
     {
       "section_key": "witness_commitment",
-      "section_heading": "### 10.4.1 Witness Commitment (Coinbase Anchor)",
+      "section_heading": "#### 10.4.1 Witness Commitment (Coinbase Anchor)",
       "status": "stated",
       "proof_trust": "compiler_trusted",
       "theorems": [
