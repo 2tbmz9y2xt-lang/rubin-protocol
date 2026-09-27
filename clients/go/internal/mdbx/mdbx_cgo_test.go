@@ -3397,7 +3397,10 @@ func TestNativeUpdateImages(t *testing.T) {
 			}
 			mutation.BeforePresent = row.before
 			var outcome updateNativeOutcome
-			viewErr := store.View(func(reader *Reader) error { outcome = store.updateNative(updateNativePlan(t, mutation), nil, reader.txn); return nil })
+			viewErr := store.View(func(reader *Reader) error {
+				outcome = store.updateNative(updateNativePlan(t, mutation), nil, reader.txn)
+				return nil
+			})
 			if outcome.stage != row.stage {
 				t.Fatal(row.diagnostic)
 			}
@@ -4041,7 +4044,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 					}
 					mustEnvironment(t, store.Close())
 				} else {
-					if application == nil || application == infrastructure {
+					if application == nil || sameError(application, infrastructure) {
 						if !sameError(err, infrastructure) {
 							t.Fatal("callback precedence drifted")
 						}
@@ -4444,7 +4447,7 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 				}
 				parts := err.(interface{ Unwrap() []error }).Unwrap()
 				requireEnvironmentError(t, parts[0], EngineLocalInvariant, operationUpdate, codeProblem, "invalid update native outcome shape")
-				if len(parts) != 2 || parts[1] != cleanup {
+				if len(parts) != 2 || !sameError(parts[1], cleanup) {
 					t.Fatal("native outcome field dropped")
 				}
 			}
