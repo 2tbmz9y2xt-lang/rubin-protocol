@@ -986,7 +986,7 @@ func updateNativeInvariant(diagnostic string) error {
 }
 
 func (outcome updateNativeOutcome) valid() error {
-	if outcome.truth < CommitTruthOld || outcome.truth > CommitTruthUnknown || outcome.stage-UpdateStagePrewrite > UpdateStageCommitMayHaveCrossed-UpdateStagePrewrite {
+	if outcome.truth < CommitTruthOld || outcome.truth > CommitTruthUnknown || outcome.stage < UpdateStagePrewrite || outcome.stage > UpdateStageCommitMayHaveCrossed {
 		return updateNativeInvariant("invalid update native outcome shape")
 	}
 	shape := outcome.validConsumed
