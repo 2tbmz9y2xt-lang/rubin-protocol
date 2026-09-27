@@ -4681,7 +4681,10 @@ func TestUpdateSourceOwnership(t *testing.T) {
 	truth, stage, terminal := persistent.Update(func(*Reader) (Batch, error) {
 		return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: key, AfterKind: AfterLiteral, Literal: want}}}, nil
 	})
-	if truth != CommitTruthNew || stage != 3 || terminal != nil || persistent.state != storeOPEN || persistent.terminalTruth != 0 {
+	if stage != 3 {
+		t.Fatal("successful commit stage drifted")
+	}
+	if truth != CommitTruthNew || terminal != nil || persistent.state != storeOPEN || persistent.terminalTruth != 0 {
 		t.Fatal("reopen final image drifted")
 	}
 	mustEnvironment(t, persistent.Close())

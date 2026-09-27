@@ -22,8 +22,8 @@ const bootstrapOperationBytes uint64 = 188
 // direct EngineInvalidInput refusal with CommitTruthOld. bootstrapOperationBytes are then
 // charged to reservations for the whole operation and released before every return,
 // panic and Goexit; a refused charge returns the owner's own error and never reaches
-// Store.Update. Once Update runs, its (CommitTruth, error) pair is forwarded unchanged:
-// no class, code, operation, cause or truth is rewritten.
+// Store.Update. Once Update runs, its (CommitTruth, UpdateStage, error) tuple is forwarded
+// unchanged: no class, code, operation, cause, truth or stage is rewritten.
 //
 // A store whose seven entry counts are not the exact-empty census is refused with
 // EngineStateMismatch: nothing is reset and no image is classified as corrupt, and after a
