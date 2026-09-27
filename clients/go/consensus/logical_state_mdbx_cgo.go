@@ -19,7 +19,8 @@ import (
 // Caller preconditions this file cannot observe: the view is built from the Reader of the same mdbx.Store Update
 // callback, that Reader has not yet failed a read, the same declared height reaches the plan builder and this
 // converter, the view given to buildLogicalStatePlan is also logicalMDBXMetadata.view, the Batch is returned before the
-// callback returns, and at declared height zero the image is fresh. Extras already satisfy the complete mdbx mutation
+// callback returns, and at declared height zero the image has no UTXO rows and any existing counter was observed as zero.
+// Extras already satisfy the complete mdbx mutation
 // grammar and leave combined capacity for the counter row, every logical row and every extra; mdbx.Store.Update stays
 // the sole defensive validator of that grammar and of every aggregate bound. Read outcomes follow CAP
 // RUBIN_CONSENSUS_STATE_MACHINE.md section 2.5 through the logicalStateView contract; logicalStateFailureLocalInvariant
@@ -400,9 +401,10 @@ func logicalMDBXRowObserved(view *logicalMDBXStateView, row logicalMDBXRow) bool
 }
 
 // logicalMDBXCheckGenesis is the step-1 declared-height form: at height zero the builder reads nothing, so the view must
-// have observed nothing and the plan must start from empty parent counters and delete nothing; above zero it adds nothing.
+// have observed no rows and at most a zero counter; the plan starts from zero parent counters and deletes nothing.
+// Above zero this check adds nothing. Counter before-presence remains the actual observation.
 func logicalMDBXCheckGenesis(view *logicalMDBXStateView, parent logicalStateCounters, deletes int) *logicalStateFailure {
-	return logicalMDBXReject(view.height == 0 && (view.counterPresent || len(view.rows) != 0 || parent != (logicalStateCounters{}) || deletes != 0),
+	return logicalMDBXReject(view.height == 0 && (view.counterPresent && view.counters != (logicalStateCounters{}) || len(view.rows) != 0 || parent != (logicalStateCounters{}) || deletes != 0),
 		"genesis logical state form contradicts the view")
 }
 

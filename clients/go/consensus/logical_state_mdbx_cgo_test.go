@@ -529,6 +529,149 @@ func TestLogicalMDBXStoreUpdateComposition(t *testing.T) {
 	})
 }
 
+func TestLogicalMDBXGenesisCounterAdmission(t *testing.T) {
+	const genesisCause = "genesis logical state form contradicts the view"
+	for _, tc := range []struct {
+		name, label string
+		counter     logicalStateCounters
+		parent      logicalStateCounters
+		result      logicalStateCounters
+		deletes     []logicalStateDelete
+		lookup      *Outpoint
+		extras      []mdbx.Mutation
+	}{
+		{name: "bytes only", label: "nonzero genesis counter accepted", counter: logicalStateCounters{bytes: 1}},
+		{name: "entries only", label: "nonzero genesis counter accepted", counter: logicalStateCounters{entries: 1}},
+		{name: "both nonzero", label: "nonzero genesis counter accepted", counter: logicalStateCounters{bytes: 56, entries: 1}},
+		{name: "maximum bytes", label: "nonzero genesis counter accepted", counter: logicalStateCounters{bytes: ^uint64(0)}},
+		{name: "maximum entries", label: "nonzero genesis counter accepted", counter: logicalStateCounters{entries: ^uint64(0)}},
+		{name: "parent bytes", label: "genesis parent admitted", parent: logicalStateCounters{bytes: 1}, result: logicalStateCounters{bytes: 1}},
+		{name: "parent entries", label: "genesis parent admitted", parent: logicalStateCounters{entries: 1}, result: logicalStateCounters{entries: 1}},
+		{name: "delete", label: "genesis delete diagnostic drifted", deletes: []logicalStateDelete{{Outpoint: logicalMDBXOpA, EntryBytes: 56}}},
+		{name: "present row", label: "genesis row observation admitted", lookup: &logicalMDBXOpA},
+		{name: "absent row", label: "genesis row observation admitted", lookup: &logicalMDBXOpD},
+		{name: "arithmetic precedence", label: "genesis arithmetic precedence drifted", counter: logicalStateCounters{bytes: 56, entries: 1}, result: logicalStateCounters{entries: 1}},
+		{name: "extra precedence", label: "genesis extra precedence drifted", counter: logicalStateCounters{bytes: 56, entries: 1}, extras: []mdbx.Mutation{{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(8, 5)), AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(filled32(1), filled32(2), [40]byte{3})}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := logicalMDBXStore(t)
+			counter, row := logicalMDBXCounterRow(false, tc.counter.bytes, tc.counter.entries), logicalMDBXUTXORow(logicalMDBXOpA, logicalMDBXEntry(0, 0xa1))
+			logicalMDBXSeed(t, store, counter, row)
+			old := [][3][]byte{{{0}, slices.Clone(counter.Key), slices.Clone(counter.Literal)}, {{1}, slices.Clone(row.Key), slices.Clone(row.Literal)}, {{1}, logicalMDBXKey(logicalMDBXOpD), nil}}
+			for _, extra := range tc.extras {
+				old = append(old, [3][]byte{{extra.DBI.Rank}, slices.Clone(extra.Key), nil})
+			}
+			var inner *logicalStateFailure
+			truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+				view := newLogicalMDBXStateView(reader, 7, 0)
+				read := view.Counters()
+				logicalMDBXAssert(t, read.kind == logicalStateCountersPresent && read.counters == tc.counter && read.cause == nil && view.counterPresent, "counter observation failed: %+v", read)
+				if tc.lookup != nil {
+					got := view.Lookup(*tc.lookup)
+					want := logicalStateRowAbsent
+					if *tc.lookup == logicalMDBXOpA {
+						want = logicalStateRowPresent
+					}
+					logicalMDBXAssert(t, got.kind == want && got.cause == nil && len(view.rows) == 1, "row observation failed: %+v", got)
+				}
+				batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(view, tc.parent, tc.result, tc.deletes, nil, tc.extras...))
+				logicalMDBXWantFailure(t, tc.label, batch, failure, logicalStateFailureLocalInvariant)
+				logicalMDBXAssert(t, failure.cause.Error() == genesisCause && reflect.DeepEqual(batch, mdbx.Batch{}), "%s: cause=%v batch=%+v", tc.label, failure.cause, batch)
+				inner = failure
+				return batch, failure
+			})
+			var rejected *logicalStateFailure
+			logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.As(err, &rejected) && rejected == inner && rejected.kind == logicalStateFailureLocalInvariant && rejected.cause.Error() == genesisCause, "genesis rejection identity drifted: truth=%v err=%v", truth, err)
+			logicalMDBXWantImage(t, store, old...)
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		view *logicalMDBXStateView
+	}{{"nil view", nil}, {"zero image", newLogicalMDBXStateView(nil, 0, 0)}} {
+		t.Run(tc.name, func(t *testing.T) {
+			batch, failure := logicalMDBXPlanToBatch(logicalMDBXBuild(tc.view, logicalStateCounters{bytes: 1}, logicalStateCounters{bytes: 1}, nil, nil))
+			logicalMDBXWantFailure(t, "view precedence drifted", batch, failure, logicalStateFailureLocalInvariant)
+			logicalMDBXAssert(t, failure.cause.Error() == "nil logical MDBX metadata view or zero image identifier" && reflect.DeepEqual(batch, mdbx.Batch{}), "view precedence drifted: %v", failure)
+		})
+	}
+	for _, height := range []uint64{0, 1} {
+		t.Run(fmt.Sprintf("absent counter height %d", height), func(t *testing.T) {
+			logicalMDBXView(t, logicalMDBXStore(t), height, func(view *logicalMDBXStateView) {
+				read := view.Counters()
+				logicalMDBXAssert(t, read.kind == logicalStateCountersStoreIntegrity && read.cause != nil && read.cause.Error() == "logical counter absent above genesis" && !view.counterPresent, "absent counter accepted: %+v", read)
+				// A failed explicit read never continues to planning or conversion.
+			})
+		})
+	}
+}
+
+func TestLogicalMDBXGenesisCounterBootstrapComposition(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile mdbx.StorageProfileV1
+		image   uint64
+		put     bool
+	}{
+		{"PRUNED", mdbx.StorageProfilePrunedV1, 1, true},
+		{"ARCHIVE", mdbx.StorageProfileArchiveV1, 1, true},
+		{"generation 7 empty", 0, 7, false},
+		{"generation 7 put", 0, 7, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := logicalMDBXStore(t)
+			counterKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, byte(tc.image)}
+			var authority []byte
+			if tc.profile != 0 {
+				owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+				logicalMDBXAssert(t, err == nil, "reservation owner: %v", err)
+				truth, err := store.BootstrapStorageV1(tc.profile, owner)
+				logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "bootstrap producer: truth=%v err=%v", truth, err)
+				authority = logicalMDBXAuthorityLiteral()
+				authority[1] = byte(tc.profile)
+				logicalMDBXWantImage(t, store, [3][]byte{{0}, {2}, authority}, [3][]byte{{0}, counterKey, make([]byte, 16)})
+			} else {
+				logicalMDBXSeed(t, store, logicalMDBXCounterRow(false, 0, 0))
+			}
+			entry := logicalMDBXEntry(0, 0xa1)
+			// Independent SchemaV1 literals: BE generation, txid, BE vout; value/type/length/height/coinbase.
+			utxoKey := append([]byte{0, 0, 0, 0, 0, 0, 0, byte(tc.image)}, bytes.Repeat([]byte{0x11}, 32)...)
+			utxoKey = append(utxoKey, 0, 0, 0, 0)
+			utxoValue := []byte{0xa2, 0, 0, 0, 0, 0, 0, 0, 0xa1, 0, 0, 0xa3, 0, 0, 0, 0, 0, 0, 0, 1}
+			counterValue, result := make([]byte, 16), logicalStateCounters{}
+			var touched []logicalTouchedState
+			if tc.put {
+				counterValue[7], counterValue[15] = 56, 1
+				result = logicalStateCounters{bytes: 56, entries: 1}
+				touched = []logicalTouchedState{{Outpoint: logicalMDBXOpA, FinalPresent: true, Final: entry}}
+			}
+			truth, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+				view := newLogicalMDBXStateView(reader, tc.image, 0)
+				read := view.Counters()
+				logicalMDBXAssert(t, read.kind == logicalStateCountersPresent && read.counters == (logicalStateCounters{}) && read.cause == nil && view.counterPresent, "zero counter observation failed: %+v", read)
+				plan, failure := buildLogicalStatePlan(0, view, touched, newLogicalMDBXMetadata(view, nil))
+				logicalMDBXAssert(t, failure == nil && plan.Parent == (logicalStateCounters{}) && len(plan.Deletes) == 0 && plan.Result == result && len(view.rows) == 0, "zero-parent plan drifted: plan=%+v failure=%v", plan, failure)
+				batch, failure := logicalMDBXPlanToBatch(plan)
+				logicalMDBXAssert(t, failure == nil, "bootstrap zero counter rejected: %v", failure)
+				logicalMDBXAssert(t, len(batch.Mutations) == 1+len(touched), "genesis mutation count drifted: %+v", batch)
+				logicalMDBXAssert(t, batch.Mutations[0].BeforePresent, "counter before-presence drifted")
+				want := []mdbx.Mutation{{DBI: logicalMDBXDBIs[0], Key: counterKey, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: counterValue}}
+				if tc.put {
+					want = append(want, mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: utxoKey, AfterKind: mdbx.AfterLiteral, Literal: utxoValue})
+				}
+				logicalMDBXWantBatch(t, "genesis exact batch drifted", batch, failure, want...)
+				return batch, nil
+			})
+			logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "observed-zero composition failed: truth=%v err=%v", truth, err)
+			if !tc.put {
+				utxoValue = nil
+			}
+			// This partial adapter composition leaves P04 authority unchanged; it is not canonical genesis.
+			logicalMDBXWantImage(t, store, [3][]byte{{0}, counterKey, counterValue}, [3][]byte{{1}, utxoKey, utxoValue}, [3][]byte{{0}, {2}, authority})
+		})
+	}
+}
+
 func logicalMDBXAuthorityLiteral() []byte {
 	// Independent NONE/STABLE authority: pruned, active generation 1, next 2.
 	return []byte{1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1, 1, 0, 0, 0, 0}
