@@ -1334,7 +1334,7 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			if name == "canonical-width" {
 				diagnostic, cause = "stored value width outside SchemaV1 bound", nil
 			}
-			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, false)
+			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, true)
 			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED {
 				t.Fatal("pruned profile malformed authority drifted")
 			}

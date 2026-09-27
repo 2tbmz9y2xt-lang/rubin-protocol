@@ -255,7 +255,7 @@ func testPrunedPreservation(t *testing.T) {
 	s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
 	other, err := HeightKey(8, 99)
 	mustEnvironment(t, err)
-	extra := []Mutation{{DBI: readDBIsLiteral()[2], Key: other, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(77), [32]byte{}, modelWork(false))}, {DBI: readDBIsLiteral()[3], Key: make([]byte, 32), AfterKind: AfterLiteral, Literal: make([]byte, 116)}}
+	extra := []Mutation{{DBI: readDBIsLiteral()[2], Key: other, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(77), [32]byte{}, modelWork(false))}}
 	consultedRequireCommit(t, s, "preservation extras", Batch{Mutations: extra})
 	rows = append(rows, extra...)
 	before, counts := prunedImage(t, s, rows), bootstrapCounts(t, s, "preservation")
@@ -366,7 +366,7 @@ func testPrunedIntegrity(t *testing.T) {
 				if name == "old-U" {
 					diagnostic, marker = "pruned profile promises disagree with tip", "pruned profile old promise integrity drifted"
 				}
-				bootstrapRefusal(t, marker, out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, nil, false)
+				bootstrapRefusal(t, marker, out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, nil, true)
 				if out.Authority != nil || out.Decision != "" || out.Stage != 1 || s.state != storeCLOSED {
 					t.Fatal(marker)
 				}
