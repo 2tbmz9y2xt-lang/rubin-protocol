@@ -920,8 +920,7 @@ func genesisMDBXReturned(t *testing.T, out GenesisMDBXOutcome, result string, tr
 	}
 }
 
-// Each snapshot owns its bytes independently of the candidate and reads the
-// complete finite active image, including every undo entry and staged row.
+// Each snapshot owns independent bytes of the complete active image, including undo and staged rows.
 func genesisMDBXSnapshot(t *testing.T, store *mdbx.Store, g uint64) (rows []mdbx.PrefixRow) {
 	t.Helper()
 	_, _, hash := genesisMDBXFixture()
@@ -1093,6 +1092,8 @@ func genesisMDBXTestPrestate(t *testing.T) {
 			row := mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 			result := "TERMINAL_STORE_INTEGRITY(canonical)"
 			switch variant {
+			case "authority-absent":
+				store, row = logicalMDBXStore(t), mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}, AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 16)}
 			case "phase":
 				a := mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 3, Phase: 2, Lifecycle: 1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}}
 				row.AfterKind, row.Literal, result = mdbx.AfterLiteral, logicalMDBXMust(a.Encode()), "STALE_LOCAL_PLAN"
@@ -1145,7 +1146,6 @@ func genesisMDBXTestNondefault(t *testing.T) {
 			other := genesisMDBXSnapshot(t, store, 6)
 			genesisMDBXReturned(t, genesisMDBXRun(store, owner), "ACCEPTED", 2, 3, "genesis preserved authority drifted")
 			genesisMDBXExpected(t, store, 7, authority, "genesis preserved authority drifted")
-			// Shared hash artifacts are new; the unrelated generation's counter/index remain exact.
 			logicalMDBXWantImage(t, store, [3][]byte{{0}, {0x10, 0, 0, 0, 0, 0, 0, 0, 1}, make([]byte, 16)}, [3][]byte{{2}, other[len(other)-1].Key[1:], other[len(other)-1].Value})
 			genesisMDBXExpected(t, reopen(), 7, authority, "genesis preserved authority drifted")
 		}
