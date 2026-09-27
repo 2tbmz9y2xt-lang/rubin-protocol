@@ -4678,10 +4678,10 @@ func TestUpdateSourceOwnership(t *testing.T) {
 	key, keyErr := MetaKey(0x10, 1279)
 	mustEnvironment(t, keyErr)
 	want := LogicalCounterValue(1279, 1)
-	truth, _, terminal := persistent.Update(func(*Reader) (Batch, error) {
+	truth, stage, terminal := persistent.Update(func(*Reader) (Batch, error) {
 		return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: key, AfterKind: AfterLiteral, Literal: want}}}, nil
 	})
-	if truth != CommitTruthNew || terminal != nil {
+	if truth != CommitTruthNew || stage != 3 || terminal != nil || persistent.state != storeOPEN || persistent.terminalTruth != 0 {
 		t.Fatal("reopen final image drifted")
 	}
 	mustEnvironment(t, persistent.Close())
