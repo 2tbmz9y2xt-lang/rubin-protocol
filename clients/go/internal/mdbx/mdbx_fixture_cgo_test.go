@@ -1296,40 +1296,68 @@ func TestPrunedProfileMalformed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, path, cfg := consultedStore(t)
 			a := modelBase(2, 0, 0)
-			encoded, err := a.Encode(); mustEnvironment(t, err)
+			encoded, err := a.Encode()
+			mustEnvironment(t, err)
 			tip, key := &AuthorityPointV1{}, []byte{2}
 			dbi, value := readDBIsLiteral()[0], encoded
 			switch name {
-			case "empty": value = []byte{}
-			case "short": value = []byte{1}
-			case "tag-payload": value = append([]byte(nil), encoded...); value[34], value[36] = 9, 9
+			case "empty":
+				value = []byte{}
+			case "short":
+				value = []byte{1}
+			case "tag-payload":
+				value = append([]byte(nil), encoded...)
+				value[34], value[36] = 9, 9
 			case "canonical-width":
 				mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: dbi, key: key, value: encoded}))
-				dbi, key, value = readDBIsLiteral()[2], make([]byte, 16), make([]byte, 103); key[7] = 1
+				dbi, key, value = readDBIsLiteral()[2], make([]byte, 16), make([]byte, 103)
+				key[7] = 1
 			}
-			if name != "absent" { mustEnvironment(t, fixtureSeedPrefixRawRow(s, dbi, key, value)) }
+			if name != "absent" {
+				mustEnvironment(t, fixtureSeedPrefixRawRow(s, dbi, key, value))
+			}
 			before := updateImage{}
-			if name != "absent" { before, err = updateOwnedImage(value); mustEnvironment(t, err) }
+			if name != "absent" {
+				before, err = updateOwnedImage(value)
+				mustEnvironment(t, err)
+			}
 			mustEnvironment(t, s.View(func(reader *Reader) error {
 				equal, readErr := updateNativeEqual(reader.txn, s.dbis[dbi.Rank], key, before)
-				if readErr != nil || !equal { t.Fatalf("pruned profile malformed baseline drifted: %v", readErr) }
+				if readErr != nil || !equal {
+					t.Fatalf("pruned profile malformed baseline drifted: %v", readErr)
+				}
 				return nil
 			}))
 			owner := bootstrapOwner(t)
 			out := s.SelectPrunedProfileV1(true, tip, owner)
 			diagnostic, cause := "invalid pruned profile authority", error(errSchema)
-			if name == "canonical-width" { diagnostic, cause = "stored value width outside SchemaV1 bound", nil }
+			if name == "canonical-width" {
+				diagnostic, cause = "stored value width outside SchemaV1 bound", nil
+			}
 			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, false)
-			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED { t.Fatal("pruned profile malformed authority drifted") }
+			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED {
+				t.Fatal("pruned profile malformed authority drifted")
+			}
 			again := s.SelectPrunedProfileV1(true, tip, owner)
-			if !sameError(again.Err, out.Err) || again.Truth != 1 || again.Stage != 1 { t.Fatal("pruned profile malformed terminal drifted") }
+			if !sameError(again.Err, out.Err) || again.Truth != 1 || again.Stage != 1 {
+				t.Fatal("pruned profile malformed terminal drifted")
+			}
 			prunedReleased(t, owner)
-			reopened, openErr := Open(path, cfg); mustEnvironment(t, openErr); defer func() { _ = reopened.Close() }()
+			reopened, openErr := Open(path, cfg)
+			mustEnvironment(t, openErr)
+			defer func() { _ = reopened.Close() }()
 			mustEnvironment(t, reopened.View(func(reader *Reader) error {
 				image := updateImage{}
-				if name != "absent" { image, err = updateOwnedImage(value); if err != nil { return err } }
+				if name != "absent" {
+					image, err = updateOwnedImage(value)
+					if err != nil {
+						return err
+					}
+				}
 				equal, readErr := updateNativeEqual(reader.txn, reopened.dbis[dbi.Rank], key, image)
-				if readErr != nil || !equal { t.Fatalf("pruned profile malformed old image drifted: %v", readErr) }
+				if readErr != nil || !equal {
+					t.Fatalf("pruned profile malformed old image drifted: %v", readErr)
+				}
 				return nil
 			}))
 		})
@@ -1339,66 +1367,111 @@ func TestPrunedProfileMalformed(t *testing.T) {
 func TestPrunedProfileNativeImages(t *testing.T) {
 	for _, mode := range []string{"old", "new", "third", "unreadable", "selected", "exclusion", "progress", "tip"} {
 		t.Run(mode, func(t *testing.T) {
-			a := modelBase(2, 0, 13682); a.ActiveGenerationID, a.NextGenerationID = 7, 9
+			a := modelBase(2, 0, 13682)
+			a.ActiveGenerationID, a.NextGenerationID = 7, 9
 			a.SelectedSide = modelSide(8, 9, 11, 2, 3)
 			a.ExcludedInvalidBranch = &InvalidBranchV1{ExactConsensusError: []byte{4}}
 			tip := &AuthorityPointV1{Height: 15121, BlockHash: modelHash(61)}
 			s, _, _, _ := prunedStore(t, a, tip, modelWork(false))
 			primary := nativeError(operationUpdate, codeENOSPC)
 			var outcome updateNativeOutcome
-			runtime.LockOSThread(); defer runtime.UnlockOSThread()
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
 			mustEnvironment(t, s.View(func(reader *Reader) error {
 				decision := ""
 				batch, err := prunedProfileBatch(reader, &a, true, tip, &decision, errors.New("decision"))
-				if err != nil { return err }
-				if len(batch.Mutations) != 1 || len(batch.Consulted) != 1 { t.Fatal("pruned profile strict readback drifted") }
+				if err != nil {
+					return err
+				}
+				if len(batch.Mutations) != 1 || len(batch.Consulted) != 1 {
+					t.Fatal("pruned profile strict readback drifted")
+				}
 				plan := updateNativePlan(t, batch.Mutations...)
 				consulted := []ownedConsulted{{dbi: batch.Consulted[0].DBI, key: batch.Consulted[0].Key}}
-				if _, err := updateNativeConsultedImages(reader.txn, s.dbis, consulted); err != nil { return err }
+				if _, err := updateNativeConsultedImages(reader.txn, s.dbis, consulted); err != nil {
+					return err
+				}
 				if mode != "old" {
 					execute := append([]ownedMutation(nil), plan...)
 					changed := a
 					switch mode {
-					case "third": changed.NextGenerationID = 10
-					case "selected": side := *a.SelectedSide; side.LogicalBytes = 4; changed.SelectedSide = &side
-					case "exclusion": excluded := *a.ExcludedInvalidBranch; excluded.ExactConsensusError = []byte{5}; changed.ExcludedInvalidBranch = &excluded
-					case "progress": changed.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 2, GenerationID: 7, LastHeight: 1, NextHeight: 1}}}
+					case "third":
+						changed.NextGenerationID = 10
+					case "selected":
+						side := *a.SelectedSide
+						side.LogicalBytes = 4
+						changed.SelectedSide = &side
+					case "exclusion":
+						excluded := *a.ExcludedInvalidBranch
+						excluded.ExactConsensusError = []byte{5}
+						changed.ExcludedInvalidBranch = &excluded
+					case "progress":
+						changed.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 2, GenerationID: 7, LastHeight: 1, NextHeight: 1}}}
 					}
-					execute[0].literal, err = changed.Encode(); if err != nil { return err }
+					execute[0].literal, err = changed.Encode()
+					if err != nil {
+						return err
+					}
 					requireUpdateTruth(t, s.updateNative(execute, consulted, reader.txn), CommitTruthNew, true, nil, nil)
 				}
 				if mode == "tip" {
 					change := []ownedMutation{{dbi: consulted[0].dbi, key: consulted[0].key, beforePresent: true, after: AfterLiteral, literal: ChainValue(modelHash(62), [32]byte{}, modelWork(false))}}
 					requireUpdateTruth(t, s.updateNative(change, nil, reader.txn), CommitTruthNew, true, nil, nil)
 				}
-				handles := s.dbis; if mode == "unreadable" { handles[0] = ^handles[0] }
+				handles := s.dbis
+				if mode == "unreadable" {
+					handles[0] = ^handles[0]
+				}
 				outcome = updateNativeReadback(s.env, handles, plan, consulted, reader.txn, primary)
 				return nil
 			}))
-			want := CommitTruthUnknown; if mode == "old" { want = CommitTruthOld }; if mode == "new" { want = CommitTruthNew }
-			if outcome.truth != want || outcome.stage != 3 || !sameError(outcome.primary, primary) || !outcome.commitAttempted || outcome.valid() != nil || (outcome.secondary != nil) != (mode == "unreadable") { t.Fatalf("pruned profile strict readback drifted: %+v", outcome) }
+			want := CommitTruthUnknown
+			if mode == "old" {
+				want = CommitTruthOld
+			}
+			if mode == "new" {
+				want = CommitTruthNew
+			}
+			if outcome.truth != want || outcome.stage != 3 || !sameError(outcome.primary, primary) || !outcome.commitAttempted || outcome.valid() != nil || (outcome.secondary != nil) != (mode == "unreadable") {
+				t.Fatalf("pruned profile strict readback drifted: %+v", outcome)
+			}
 		})
 	}
 	// Native helper composition below is separate from public-operation execution.
 	for _, mode := range []string{"result-true", "new-enospc", "unknown-enospc"} {
 		t.Run(mode, func(t *testing.T) {
-			a := modelBase(2, 0, 0); s, _, _, _ := prunedStore(t, a, nil, modelWork(false))
-			a.ActiveProfile = 1; encoded, err := a.Encode(); mustEnvironment(t, err)
+			a := modelBase(2, 0, 0)
+			s, _, _, _ := prunedStore(t, a, nil, modelWork(false))
+			a.ActiveProfile = 1
+			encoded, err := a.Encode()
+			mustEnvironment(t, err)
 			plan := updateNativePlan(t, Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded})
 			var native updateNativeOutcome
 			switch mode {
-			case "result-true": native = fixtureUpdateResultTrue(s, plan)
-			case "new-enospc": native, err = fixtureUpdatePostCommitENOSPC(s, plan)
-			case "unknown-enospc": native, err = fixtureUpdatePostCommitENOSPCUnreadable(s, plan)
+			case "result-true":
+				native = fixtureUpdateResultTrue(s, plan)
+			case "new-enospc":
+				native, err = fixtureUpdatePostCommitENOSPC(s, plan)
+			case "unknown-enospc":
+				native, err = fixtureUpdatePostCommitENOSPCUnreadable(s, plan)
 			}
 			mustEnvironment(t, err)
 			truth, stage, terminal := s.applyUpdateOutcome(native, nil, nil, false)
 			out := prunedProfileOutcome(PrunedProfileOutcome{Truth: truth, Stage: stage, Err: terminal}, &a, "", errors.New("decision"))
 			wantTruth, wantStage := CommitTruthNew, UpdateStage(3)
-			if mode == "result-true" { wantTruth, wantStage = CommitTruthOld, 1 }; if mode == "unknown-enospc" { wantTruth = CommitTruthUnknown }
-			if out.Truth != wantTruth || out.Stage != wantStage || !sameError(out.Err, terminal) || (out.Authority != nil) != (wantTruth == 2) || s.state != storeCLOSED { t.Fatal("pruned profile native outcome drifted") }
+			if mode == "result-true" {
+				wantTruth, wantStage = CommitTruthOld, 1
+			}
+			if mode == "unknown-enospc" {
+				wantTruth = CommitTruthUnknown
+			}
+			if out.Truth != wantTruth || out.Stage != wantStage || !sameError(out.Err, terminal) || (out.Authority != nil) != (wantTruth == 2) || s.state != storeCLOSED {
+				t.Fatal("pruned profile native outcome drifted")
+			}
 			again := s.SelectPrunedProfileV1(true, nil, bootstrapOwner(t))
-			if again.Truth != wantTruth || again.Stage != 1 || !sameError(again.Err, terminal) || again.Authority != nil { t.Fatal("pruned profile native cached outcome drifted") }
+			if again.Truth != wantTruth || again.Stage != 1 || !sameError(again.Err, terminal) || again.Authority != nil {
+				t.Fatal("pruned profile native cached outcome drifted")
+			}
 		})
 	}
 	for _, mode := range []string{"retained-write", "retained-read", "new-cleanup"} {
@@ -1413,23 +1486,34 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 				native = updateNativeConsumed(CommitTruthNew, true, primary, nil, 3)
 			} else {
 				var err error
-				native, release, err = fixtureUpdateWrongThread(s); mustEnvironment(t, err)
+				native, release, err = fixtureUpdateWrongThread(s)
+				mustEnvironment(t, err)
 				if mode == "retained-read" {
 					// The existing retained native token witnesses projection only; no public fault injection.
 					native = updateNativeRetainedRead(primary, cleanup, native.retainedWrite)
 				}
 			}
 			var oldCleanup error
-			if mode == "new-cleanup" { oldCleanup = nativeError(operationAbort, codeEIO) }
+			if mode == "new-cleanup" {
+				oldCleanup = nativeError(operationAbort, codeEIO)
+			}
 			truth, stage, terminal := s.applyUpdateOutcome(native, nil, oldCleanup, false)
 			out := prunedProfileOutcome(PrunedProfileOutcome{Truth: truth, Stage: stage, Err: terminal}, &a, "", sentinel)
-			if !sameError(out.Err, terminal) || out.Truth != native.truth || out.Stage != native.stage || (out.Authority != nil) != (mode == "new-cleanup") { t.Fatal("pruned profile cleanup provenance drifted") }
+			if !sameError(out.Err, terminal) || out.Truth != native.truth || out.Stage != native.stage || (out.Authority != nil) != (mode == "new-cleanup") {
+				t.Fatal("pruned profile cleanup provenance drifted")
+			}
 			if mode == "new-cleanup" {
 				commit, ok := terminal.(*CommitError)
-				if !ok || !sameError(commit.Cause, primary) || !sameError(commit.ReadbackCause, oldCleanup) || s.state != storeCLOSED { t.Fatal("pruned profile cleanup provenance drifted") }
-			} else if s.state != storePOISONEDTHREAD || s.txn != updateRetained(native) || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis { t.Fatal("pruned profile retained owner drifted") }
+				if !ok || !sameError(commit.Cause, primary) || !sameError(commit.ReadbackCause, oldCleanup) || s.state != storeCLOSED {
+					t.Fatal("pruned profile cleanup provenance drifted")
+				}
+			} else if s.state != storePOISONEDTHREAD || s.txn != updateRetained(native) || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis {
+				t.Fatal("pruned profile retained owner drifted")
+			}
 			again := s.SelectPrunedProfileV1(true, nil, bootstrapOwner(t))
-			if !sameError(again.Err, terminal) || again.Truth != truth || again.Stage != 1 || again.Authority != nil { t.Fatal("pruned profile retained next call drifted") }
+			if !sameError(again.Err, terminal) || again.Truth != truth || again.Stage != 1 || again.Authority != nil {
+				t.Fatal("pruned profile retained next call drifted")
+			}
 			if release != nil {
 				mustEnvironment(t, release())
 				// Test-only restoration after the fixture owner released the actual token.
