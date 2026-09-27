@@ -3968,6 +3968,9 @@ func TestNativeUpdateSourceOwnership(t *testing.T) {
 		if !strings.Contains(puts, "updateNativePut(txn, dbis[mutation.dbi.Rank], mutation.key, image, mutation.literal, stage)") {
 			t.Fatal("native stage observation ownership drifted")
 		}
+		if !reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeCommit"), map[string]int{"int": 1, "C.mdbx_txn_commit": 1, "nativeError": 1, "updateNativeConsumed": 3, "updateNativeRetainedWrite": 1, "updateNativeReadback": 1}) {
+			t.Fatal("native stage observation ownership drifted")
+		}
 	})
 	t.Run("legacy", func(t *testing.T) {
 		source, err := os.ReadFile("mdbx_cgo.go")
@@ -3989,7 +3992,6 @@ func TestNativeUpdateSourceOwnership(t *testing.T) {
 		commitAt := strings.Index(execute, "return updateNativeCommit")
 		require(strings.Count(commit, "C.mdbx_txn_commit(write)") == 1 && strings.Contains(execute, "if verifyErr") && putAt < verifyAt && verifyAt < commitAt && strings.Count(execute, "updateNativeCommit") == 1, "verify-once-commit-once drifted")
 		require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeAbort"), map[string]int{"int": 1, "C.mdbx_txn_abort": 1, "updateNativeRetainedWrite": 1, "nativeError": 2, "updateNativeConsumed": 1}), "abort ownership drifted")
-		require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeCommit"), map[string]int{"int": 1, "C.mdbx_txn_commit": 1, "nativeError": 1, "updateNativeConsumed": 3, "updateNativeRetainedWrite": 1, "updateNativeReadback": 1}), "commit ownership drifted")
 		require(strings.Contains(abort, "if rc == codeThreadMismatch {") && strings.Contains(abort, "updateNativeRetainedWrite(false") && !strings.Contains(abort, "updateNativeReadback"), "abort ownership drifted")
 		require(strings.Contains(commit, "case codeThreadMismatch:") && strings.Count(commit, "updateNativeRetainedWrite") == 1 && strings.Contains(commit, "updateNativeRetainedWrite(true") && strings.Contains(commit, "case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:\n\t\treturn updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)") && strings.Index(commit, "updateNativeRetainedWrite") < strings.Index(commit, "updateNativeReadback"), "commit ownership drifted")
 		require(strings.Contains(commit, "case codeResultTrue:") && strings.Contains(commit, "updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)") && strings.Index(commit, "codeResultTrue") < strings.Index(commit, "updateNativeReadback"), "RESULT_TRUE disposition drifted")
