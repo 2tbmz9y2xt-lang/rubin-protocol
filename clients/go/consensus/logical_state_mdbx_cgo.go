@@ -469,8 +469,8 @@ type GenesisMDBXOutcome struct {
 }
 
 const (
-	// The logical envelope is 68,070,495: the 282-byte identity preimage
-	// corrects the source estimate by +1; owned header/body aliases save 382, retaining 381 bytes of slack.
+	// The logical envelope is 68,070,498: the validator/identity buffers total 756;
+	// owned header/body aliases save 382, retaining 378 bytes of slack within the fixed charge.
 	// Authority, schema/config and control keys are excluded control metadata.
 	genesisMDBXOperationBytes uint64 = 68_070_876
 	genesisMDBXInvariant             = "TERMINAL_LOCAL_INVARIANT(evidence)"

@@ -867,9 +867,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	}
 }
 
-type logicalMDBXStubImporter struct{}
+type logicalMDBXStubImporter struct{ native *types.Package }
 
-func (logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
+func (i logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
+	if i.native != nil && path == i.native.Path() {
+		return i.native, nil
+	}
 	pkg := types.NewPackage(path, path[strings.LastIndex(path, "/")+1:])
 	pkg.MarkComplete()
 	return pkg, nil
@@ -1411,22 +1414,53 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 	logicalMDBXAssert(t, err == nil, "genesis source parse: %v", err)
 	validation, err := parser.ParseFile(fset, "connect_block_inmem.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "genesis validator parse: %v", err)
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
-	config := &types.Config{Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
-	_, _ = config.Check("consensus", fset, []*ast.File{file, validation}, info)
-	var validatorObject types.Object
-	for _, declaration := range validation.Decls {
-		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "ConnectBlockBasicInMemoryAtHeightAndSuiteContext" {
-			validatorObject = info.Defs[fn.Name]
-		}
+	var nativeFiles []*ast.File
+	for _, name := range []string{"mdbx_cgo.go", "operation_reservation.go"} {
+		parsed, parseErr := parser.ParseFile(fset, filepath.Join("../internal/mdbx", name), nil, 0)
+		logicalMDBXAssert(t, parseErr == nil, "genesis native owner parse: %v", parseErr)
+		nativeFiles = append(nativeFiles, parsed)
 	}
-	logicalMDBXAssert(t, validatorObject != nil, "genesis full validator owner drifted: unresolved definition")
+	nativeConfig := &types.Config{IgnoreFuncBodies: true, FakeImportC: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
+	native, _ := nativeConfig.Check("github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx", fset, nativeFiles, nil)
+	protected := map[types.Object]string{}
+	for owner, method := range map[string]string{"OperationReservationOwner": "WithReservation", "Store": "Update"} {
+		object, _, _ := types.LookupFieldOrMethod(types.NewPointer(native.Scope().Lookup(owner).Type()), true, native, method)
+		logicalMDBXAssert(t, object != nil, "genesis reservation ownership drifted: unresolved %s.%s", owner, method)
+		protected[object] = method
+	}
+	files := []*ast.File{file, validation}
+	for _, name := range []string{"block_parse.go", "block_basic.go", "hash.go", "errors.go", "logical_state.go"} {
+		parsed, parseErr := parser.ParseFile(fset, name, nil, 0)
+		logicalMDBXAssert(t, parseErr == nil, "genesis production parse: %v", parseErr)
+		files = append(files, parsed)
+	}
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+	config := &types.Config{FakeImportC: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
+	pkg, _ := config.Check("consensus", fset, files, info)
+	dependencies := map[types.Object]string{}
+	for name, owners := range map[string]string{"BlockHash": "ConnectPublishedGenesisMDBX", "sha3_256": "ConnectPublishedGenesisMDBX", "txerr": "genesisMDBXInput", "newLogicalMDBXStateView": "genesisMDBXBatch", "newLogicalMDBXMetadata": "genesisMDBXBatch", "logicalMDBXPlanToBatch": "genesisMDBXBatch", "logicalMDBXBefore": "genesisMDBXBatch", "buildLogicalStatePlan": "genesisMDBXBatch", "localLogicalStateFailure": "genesisMDBXZeroCounter genesisMDBXValidate", "ConnectBlockBasicInMemoryAtHeightAndSuiteContext": "genesisMDBXValidate", "ParseBlockBytes": "genesisMDBXValidate"} {
+		object := pkg.Scope().Lookup(name)
+		logicalMDBXAssert(t, object != nil, "genesis reservation ownership drifted: unresolved dependency %s", name)
+		dependencies[object] = owners
+	}
+	counter, _, _ := types.LookupFieldOrMethod(types.NewPointer(pkg.Scope().Lookup("logicalMDBXStateView").Type()), true, pkg, "Counters")
+	logicalMDBXAssert(t, counter != nil, "genesis reservation ownership drifted: unresolved Counters")
+	dependencies[counter] = "genesisMDBXBatch"
+	validatorObject := pkg.Scope().Lookup("ConnectBlockBasicInMemoryAtHeightAndSuiteContext")
+	logicalMDBXAssert(t, validatorObject != nil && fset.Position(validatorObject.Pos()).Filename == "connect_block_inmem.go", "genesis full validator owner drifted: unresolved definition")
 	text := func(n ast.Node) string {
 		var b bytes.Buffer
 		logicalMDBXAssert(t, format.Node(&b, fset, n) == nil, "genesis AST format")
 		return b.String()
 	}
-	want := strings.Fields("ConnectPublishedGenesisMDBX genesisMDBXInput genesisMDBXBatch genesisMDBXPrestate genesisMDBXEligible genesisMDBXControl genesisMDBXArtifacts genesisMDBXEmptyUTXO genesisMDBXZeroCounter genesisMDBXValidate genesisMDBXProject genesisMDBXCached genesisMDBXTupleValid genesisMDBXPlanValid genesisMDBXCrossed genesisMDBXUncrossed genesisMDBXCauses genesisMDBXNilError genesisMDBXErrorResult genesisMDBXLogicalResult genesisMDBXBridgeReadResult genesisMDBXEngineResult")
+	want := map[string][]string{
+		"ConnectPublishedGenesisMDBX": {"genesisMDBXInput", "genesisMDBXBatch", "genesisMDBXProject"}, "genesisMDBXInput": nil,
+		"genesisMDBXBatch": {"genesisMDBXPrestate", "genesisMDBXArtifacts", "genesisMDBXEmptyUTXO", "genesisMDBXZeroCounter", "genesisMDBXValidate"}, "genesisMDBXPrestate": {"genesisMDBXEligible", "genesisMDBXControl"},
+		"genesisMDBXEligible": nil, "genesisMDBXControl": nil, "genesisMDBXArtifacts": nil, "genesisMDBXEmptyUTXO": nil, "genesisMDBXZeroCounter": nil, "genesisMDBXValidate": nil,
+		"genesisMDBXProject": {"genesisMDBXTupleValid", "genesisMDBXCached", "genesisMDBXCrossed", "genesisMDBXUncrossed"}, "genesisMDBXCached": {"genesisMDBXNilError"}, "genesisMDBXTupleValid": {"genesisMDBXPlanValid"}, "genesisMDBXPlanValid": {"genesisMDBXNilError"}, "genesisMDBXCrossed": nil,
+		"genesisMDBXUncrossed": {"genesisMDBXCauses", "genesisMDBXErrorResult"}, "genesisMDBXCauses": {"genesisMDBXCauses", "genesisMDBXCauses", "genesisMDBXCauses"}, "genesisMDBXNilError": {"genesisMDBXCauses", "genesisMDBXNilError"},
+		"genesisMDBXErrorResult": {"genesisMDBXLogicalResult", "genesisMDBXEngineResult", "genesisMDBXUncrossed"}, "genesisMDBXLogicalResult": {"genesisMDBXUncrossed", "genesisMDBXNilError", "genesisMDBXBridgeReadResult"}, "genesisMDBXBridgeReadResult": nil, "genesisMDBXEngineResult": nil,
+	}
 	functions, objects, parents := map[string]*ast.FuncDecl{}, map[types.Object]string{}, map[ast.Node]ast.Node{}
 	var stack []ast.Node
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -1446,11 +1480,20 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 		return true
 	})
 	logicalMDBXAssert(t, len(functions) == len(want), "genesis call closure drifted: %d declarations", len(functions))
-	for _, name := range want {
+	for name := range want {
 		logicalMDBXAssert(t, functions[name] != nil, "genesis call closure missing %s", name)
 	}
 	edges := map[string][]string{}
 	var reservation, update, clone, validator *ast.CallExpr
+	inside := func(n, owner ast.Node) bool {
+		for n != nil {
+			if n == owner {
+				return true
+			}
+			n = parents[n]
+		}
+		return false
+	}
 	for name, fn := range functions {
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if _, ok := n.(*ast.GoStmt); ok {
@@ -1461,43 +1504,61 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 				logicalMDBXAssert(t, direct && call.Fun == id, "genesis call closure drifted: alias of %s", id.Name)
 				edges[name] = append(edges[name], id.Name)
 			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+			if selector, ok := n.(*ast.SelectorExpr); ok {
+				method := protected[info.Uses[selector.Sel]]
+				if id, ok := selector.X.(*ast.Ident); ok {
+					if imported, ok := info.Uses[id].(*types.PkgName); ok && imported.Imported().Path() == "bytes" && selector.Sel.Name == "Clone" {
+						method = "Clone"
+					}
+				}
+				if method != "" {
+					call, direct := parents[selector].(*ast.CallExpr)
+					logicalMDBXAssert(t, direct && call.Fun == selector, "genesis reservation ownership drifted: aliased %s", method)
+					switch method {
+					case "WithReservation":
+						logicalMDBXAssert(t, reservation == nil && name == "ConnectPublishedGenesisMDBX" && text(call.Args[0]) == "genesisMDBXOperationBytes", "genesis reservation ownership drifted")
+						reservation = call
+					case "Update":
+						logicalMDBXAssert(t, update == nil && name == "ConnectPublishedGenesisMDBX", "genesis reservation ownership drifted")
+						update = call
+					case "Clone":
+						logicalMDBXAssert(t, clone == nil && name == "ConnectPublishedGenesisMDBX" && text(call.Args[0]) == "candidate", "genesis reservation ownership drifted")
+						clone = call
+					}
+				}
+				if object, ok := info.Uses[selector.Sel].(*types.Func); ok {
+					logicalMDBXAssert(t, object.Pkg() != pkg || dependencies[object] == name || map[string]string{"genesisMDBXCauses": "e.Unwrap", "genesisMDBXNilError": "wrapped.Unwrap", "genesisMDBXErrorResult": "e.Unwrap"}[name] == text(selector), "genesis reservation ownership drifted: unowned method")
+					if object.Pkg() == native && slices.Contains([]string{"View", "Inspect", "Put", "Delete", "BootstrapStorageV1", "Lookup"}, selector.Sel.Name) {
+						t.Fatal("genesis call closure acquired another storage route")
+					}
+				}
 			}
-			switch text(call.Fun) {
-			case "reservations.WithReservation":
-				logicalMDBXAssert(t, reservation == nil && name == "ConnectPublishedGenesisMDBX" && text(call.Args[0]) == "genesisMDBXOperationBytes", "genesis reservation ownership drifted")
-				reservation = call
-			case "store.Update":
-				logicalMDBXAssert(t, update == nil && name == "ConnectPublishedGenesisMDBX", "genesis reservation ownership drifted")
-				update = call
-			case "bytes.Clone":
-				logicalMDBXAssert(t, clone == nil && name == "ConnectPublishedGenesisMDBX" && text(call.Args[0]) == "candidate", "genesis reservation ownership drifted")
-				clone = call
-			case "ConnectBlockBasicInMemoryAtHeightAndSuiteContext":
-				logicalMDBXAssert(t, validator == nil && info.Uses[call.Fun.(*ast.Ident)] == validatorObject && name == "genesisMDBXValidate" && text(call) == "ConnectBlockBasicInMemoryAtHeightAndSuiteContext(owned, &previous, &target, 0, nil, out.State, chainID, nil, nil)", "genesis full validator owner drifted")
-				validator = call
-			}
-			if selector, ok := call.Fun.(*ast.SelectorExpr); ok && slices.Contains([]string{"View", "Inspect", "Put", "Delete", "BootstrapStorageV1", "Lookup"}, selector.Sel.Name) {
-				t.Fatal("genesis call closure acquired another storage route")
+			if call, ok := n.(*ast.CallExpr); ok {
+				logicalMDBXAssert(t, slices.Contains([]reflect.Type{reflect.TypeFor[*ast.Ident](), reflect.TypeFor[*ast.SelectorExpr](), reflect.TypeFor[*ast.FuncLit]()}, reflect.TypeOf(ast.Unparen(call.Fun))), "genesis reservation ownership drifted: indirect call")
+				if name == "genesisMDBXInput" {
+					logicalMDBXAssert(t, slices.Contains([]string{"len", "bytes.Equal", "errors.New", "txerr"}, text(call.Fun)), "genesis reservation ownership drifted: allocating input owner")
+				}
+				if name == "ConnectPublishedGenesisMDBX" && text(call.Fun) != "genesisMDBXInput" && text(call.Fun) != "reservations.WithReservation" {
+					logicalMDBXAssert(t, inside(call, reservation), "genesis reservation ownership drifted: entry work before acquisition")
+				}
+				if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+					object := info.Uses[id]
+					_, builtin := object.(*types.Builtin)
+					_, conversion := object.(*types.TypeName)
+					logicalMDBXAssert(t, builtin || conversion || objects[object] != "" || slices.Contains(strings.Fields(dependencies[object]), name), "genesis reservation ownership drifted: unowned call %s", id.Name)
+					if object == validatorObject {
+						logicalMDBXAssert(t, validator == nil && name == "genesisMDBXValidate" && text(call) == "ConnectBlockBasicInMemoryAtHeightAndSuiteContext(owned, &previous, &target, 0, nil, out.State, chainID, nil, nil)", "genesis full validator owner drifted")
+						validator = call
+					}
+				}
 			}
 			return true
 		})
+		logicalMDBXAssert(t, reflect.DeepEqual(edges[name], want[name]), "genesis reservation ownership drifted: helper edges %s/%v", name, edges[name])
 	}
 	logicalMDBXAssert(t, reservation != nil && update != nil && clone != nil, "genesis reservation ownership drifted")
 	logicalMDBXAssert(t, validator != nil, "genesis full validator owner drifted")
-	inside := func(n, owner ast.Node) bool {
-		for n != nil {
-			if n == owner {
-				return true
-			}
-			n = parents[n]
-		}
-		return false
-	}
 	logicalMDBXAssert(t, inside(update, reservation) && inside(clone, reservation) && clone.Pos() < update.Pos(), "genesis reservation ownership drifted")
-	logicalMDBXAssert(t, reflect.DeepEqual(edges["ConnectPublishedGenesisMDBX"], []string{"genesisMDBXInput", "genesisMDBXBatch", "genesisMDBXProject"}), "genesis reservation ownership drifted: %v", edges)
 	logicalMDBXAssert(t, reflect.DeepEqual(edges["genesisMDBXBatch"], []string{"genesisMDBXPrestate", "genesisMDBXArtifacts", "genesisMDBXEmptyUTXO", "genesisMDBXZeroCounter", "genesisMDBXValidate"}), "genesis first artifact drifted: worklist %v", edges["genesisMDBXBatch"])
 	visited := map[string]bool{}
 	var visit func(string)
@@ -1529,8 +1590,7 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 		return true
 	})
 	logicalMDBXAssert(t, reads == 1 && len(order) >= 3 && reflect.DeepEqual(order[:3], []string{"dbis[3]", "dbis[4]", "dbis[5]"}), "genesis first artifact drifted: %v", order)
-	// Every fallible worklist statement is followed immediately by its refusal;
-	// these exact owner statements compose with the native raw-byte witnesses.
+	// Immediate worklist refusals compose with the native raw-byte witnesses.
 	for _, owner := range []string{"genesisMDBXBatch", "genesisMDBXPrestate"} {
 		body := functions[owner].Body.List
 		for i, statement := range body {
@@ -1566,6 +1626,5 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 		}
 		return true
 	})
-	// A cloned literal is deliberately unnecessary: both originals remain inside the sole owned candidate.
 	logicalMDBXAssert(t, strings.Contains(text(artifacts), "Literal: owned[:116]") && strings.Contains(text(artifacts), "Literal: owned}"), "genesis reservation ownership drifted: independent artifact copies")
 }
