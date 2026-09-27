@@ -468,16 +468,13 @@ type GenesisMDBXOutcome struct {
 }
 
 const (
-	// The logical envelope is 68,070,498: the validator/identity buffers total 756;
-	// owned header/body aliases save 382, retaining 378 bytes of slack within the fixed charge.
-	// Authority, schema/config and control keys are excluded control metadata.
+	// Logical 68,070,498 (buffers 756, aliases save 382) leaves slack 378; authority/schema/config/keys are excluded control.
 	genesisMDBXOperationBytes uint64 = 68_070_876
 	genesisMDBXInvariant             = "TERMINAL_LOCAL_INVARIANT(evidence)"
 	genesisMDBXIntegrity             = "TERMINAL_STORE_INTEGRITY(canonical)"
 )
 
-// ConnectPublishedGenesisMDBX is dormant and borrows immutable devnet configuration synchronously.
-// One reservation covers the owned copy through Update/projection; NEW transfers the 89-byte state.
+// Dormant ConnectPublishedGenesisMDBX borrows immutable config synchronously; one reservation covers owned copy through projection, NEW transfers 89-byte state.
 func ConnectPublishedGenesisMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, candidate, published []byte, chainID, genesisHash [32]byte) GenesisMDBXOutcome {
 	out := GenesisMDBXOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	out.Result, out.Err = genesisMDBXInput(store, reservations, candidate, published, chainID, genesisHash)
@@ -697,8 +694,7 @@ func genesisMDBXValidate(owned []byte, chainID [32]byte, out *GenesisMDBXOutcome
 	return parsed, nil
 }
 
-// genesisMDBXProject never reconstructs a payload from a terminal Store. Error
-// traversal only selects a result; the complete raw tuple remains untouched.
+// genesisMDBXProject preserves the raw tuple and NEW payload without Store reread; causes only select a result.
 func genesisMDBXProject(out GenesisMDBXOutcome, entered, complete bool) GenesisMDBXOutcome {
 	state, summary := out.State, out.Summary
 	valid := genesisMDBXTupleValid(out, entered, complete)
@@ -771,8 +767,7 @@ func genesisMDBXUncrossed(err error, step string, stage mdbx.UpdateStage) string
 	return result
 }
 
-// Flatten only the existing error composition, in primary/secondary/cleanup
-// order; classification never uses text, errno, or CommitError as stage.
+// Flatten existing primary/secondary/cleanup causes in order; text, errno and CommitError never infer stage.
 func genesisMDBXCauses(err error) []error {
 	if err == nil || reflect.ValueOf(err).Kind() == reflect.Pointer && reflect.ValueOf(err).IsNil() {
 		return []error{nil}

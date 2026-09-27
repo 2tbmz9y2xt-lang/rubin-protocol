@@ -807,7 +807,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	logicalMDBXAssert(t, imports == 1, "bridge lost dormancy: %d non-test internal/mdbx imports, want 1", imports)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
 	_, _ = config.Check("consensus", fset, files, info)
-	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
+	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "genesisMDBXBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
 	for ident, object := range info.Defs {
 		if names[ident.Name] && object != nil && strings.HasSuffix(fset.Position(ident.Pos()).Filename, "logical_state_mdbx_cgo.go") {
 			declared[object] = true
@@ -848,13 +848,13 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 				callee = selector
 			}
 			call, direct := parents[callee].(*ast.CallExpr)
-			logicalMDBXAssert(t, owner == "genesisMDBXBatch" && !literal && ident.Name != "Lookup" && direct && call.Fun == callee, "bridge lost dormancy: non-test use of %s at %s", ident.Name, fset.Position(ident.Pos()))
+			logicalMDBXAssert(t, (owner == "genesisMDBXBatch" && !literal && ident.Name != "Lookup" || owner == "ConnectPublishedGenesisMDBX" && ident.Name == "genesisMDBXBatch") && direct && call.Fun == callee, "bridge lost dormancy: non-test use of %s at %s", ident.Name, fset.Position(ident.Pos()))
 			approved[ident.Name]++
 		}
 		logicalMDBXAssert(t, ident.Name != "ConnectPublishedGenesisMDBX", "bridge lost dormancy: genesis production consumer at %s", fset.Position(ident.Pos()))
 		resolved[fset.Position(ident.Pos()).Filename] = true
 	}
-	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 1, "Counters": 1, "newLogicalMDBXMetadata": 1, "logicalMDBXPlanToBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)
+	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 1, "Counters": 1, "newLogicalMDBXMetadata": 1, "logicalMDBXPlanToBatch": 1, "genesisMDBXBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)
 	// The checker swallows its errors, so a vacuous Uses graph would pass the loop above: every parsed file must have resolved a use, and every entrypoint-named identifier outside a declaration must carry a type object.
 	logicalMDBXAssert(t, len(resolved) == len(sources), "bridge census resolved no uses: %d of %d files resolved, unresolved %v", len(resolved), len(sources), slices.DeleteFunc(slices.Clone(sources), func(name string) bool { return resolved[name] }))
 	for _, file := range files {
@@ -1500,7 +1500,7 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 	for name := range want {
 		logicalMDBXAssert(t, functions[name] != nil, "genesis call closure missing %s", name)
 	}
-	edges := map[string][]string{}
+	edges, covered := map[string][]string{}, map[*ast.Ident]bool{}
 	var reservation, update, clone, validator *ast.CallExpr
 	inside := func(n, owner ast.Node) bool {
 		for n != nil {
@@ -1519,6 +1519,7 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 				call, direct := parents[id].(*ast.CallExpr)
 				logicalMDBXAssert(t, direct && call.Fun == id, "genesis call closure drifted: alias of %s", id.Name)
 				edges[name] = append(edges[name], id.Name)
+				covered[id] = true
 			}
 			if selector, ok := n.(*ast.SelectorExpr); ok {
 				method := protected[info.Uses[selector.Sel]]
@@ -1569,6 +1570,9 @@ func TestGenesisMDBXSourceOwnership(t *testing.T) {
 			return true
 		})
 		logicalMDBXAssert(t, reflect.DeepEqual(edges[name], want[name]), "genesis reservation ownership drifted: helper edges %s/%v", name, edges[name])
+	}
+	for ident, object := range info.Uses {
+		logicalMDBXAssert(t, objects[object] == "" || covered[ident], "genesis reservation ownership drifted: helper use outside owned closure")
 	}
 	logicalMDBXAssert(t, reservation != nil && update != nil && clone != nil, "genesis reservation ownership drifted")
 	logicalMDBXAssert(t, validator != nil, "genesis full validator owner drifted")
