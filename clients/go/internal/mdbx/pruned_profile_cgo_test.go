@@ -487,6 +487,7 @@ func prunedSourceGuard(source []byte) string {
 		delete(allowed, fn.Name.Name)
 		positions := map[string]token.Pos{}
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			if _, yes := node.(*ast.GoStmt); yes { problem = "pruned profile effect ownership drifted" }
 			if call, yes := node.(*ast.CallExpr); yes {
 				resolved := prunedResolve(call.Fun, map[*ast.Object]bool{})
 				name := updateNativeCallName(resolved)
@@ -618,6 +619,9 @@ func TestPrunedProfileSourceOwnership(t *testing.T) {
 		changed := bytes.Replace(source, []byte(row.old), []byte(row.replacement), 1)
 		if bytes.Equal(changed, source) || prunedSourceGuard(changed) != row.want { t.Fatalf("pruned profile source fixture drifted: %s", row.replacement) }
 	}
+	wrapped := bytes.Replace(source, []byte("out.Truth, out.Stage, err = s.Update("), []byte("go func() { out.Truth, out.Stage, err = s.Update("), 1)
+	async := bytes.Replace(wrapped, []byte("\n\t\treturn err\n\t})"), []byte("\n\t\t}()\n\t\treturn err\n\t})"), 1)
+	if bytes.Equal(wrapped, source) || bytes.Equal(async, wrapped) || prunedSourceGuard(async) != "pruned profile effect ownership drifted" { t.Fatal("pruned profile source fixture drifted: asynchronous Update") }
 	alias := bytes.Replace(source, []byte("batch := Batch"), []byte("data := encoded; batch := Batch"), 1)
 	alias = bytes.Replace(alias, []byte("Literal: encoded"), []byte("Literal: data"), 1)
 	if problem := prunedSourceGuard(alias); problem != "" { t.Fatal("pruned profile alias fixture drifted: " + problem) }
