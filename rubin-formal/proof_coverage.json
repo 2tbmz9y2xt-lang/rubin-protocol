@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "37c3821dc1670cd0743eae29fe3b771745b561113ef9e4d962ca8dae85d09694",
+  "spec_section_hashes_sha3_256": "f7d5503a73ed3585e63c30e829868335fc06ac4cddc9eba5a5643276df936014",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -192,7 +192,7 @@
         "RUB-1252's MAX_LOGICAL_STATE_BYTES and LOGICAL_STATE_CAP_V1_CHAIN_REGISTRY validity and activation semantics are not proved by the registered Section 4 theorems.",
         "This row does not claim the legacy/pre-rotation `validateWitnessItemLengths` branch surface. That live witness-length subset is tracked separately in `consensus_constants_witness_lengths_pre_rotation`.",
         "Other Section 4 literals that already belong to dedicated rows such as weight accounting or DA integrity remain outside this finite-constant lane and are not re-counted here.",
-        "This row does not claim the Section 4 normative cross-reference that makes the native registry tuple the native component of the chain-instance canonical binding manifest under Section 23.2.2. That pre-rotation native-binding fragment is tracked separately in `consensus_constants_native_binding_manifest_pre_rotation`."
+        "This row does not claim the Section 4 normative cross-reference that makes the native registry tuple the native component of the chain-instance canonical binding manifest (Section 4.1.1). That pre-rotation native-binding fragment is tracked separately in `consensus_constants_native_binding_manifest_pre_rotation`."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1374,7 +1374,7 @@
     },
     {
       "section_key": "fork_choice",
-      "section_heading": "## 23. Chainwork and Fork Choice (Non-Validation Procedure)",
+      "section_heading": "## 23. Chainwork, Fork Choice, and Feature Activation",
       "status": "stated",
       "proof_trust": "compiler_trusted",
       "theorems": [
