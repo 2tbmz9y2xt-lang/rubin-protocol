@@ -8,13 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
+	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// Dormant bridge from a logical-state plan to one private MDBX Update Batch. No non-test caller exists; adding one is
-// a separate authorized change.
+// Dormant bridge from a logical-state plan to one private MDBX Update Batch. Only genesisMDBXBatch may compose it;
+// the public genesis operation still has no production caller.
 //
 // Caller preconditions this file cannot observe: the view is built from the Reader of the same mdbx.Store Update
 // callback, that Reader has not yet failed a read, the same declared height reaches the plan builder and this
@@ -453,4 +455,406 @@ func logicalMDBXCreateOnceTarget(m mdbx.Mutation) bool {
 		return false
 	}
 	return m.DBI.Rank == 3 || m.DBI.Rank == 4 || (m.DBI.Rank == 5 && len(m.Key) == 33)
+}
+
+// GenesisMDBXOutcome retains the invocation-local Update tuple and, only for a
+// complete NEW image, its independently owned validated state and summary.
+type GenesisMDBXOutcome struct {
+	Result  string
+	Truth   mdbx.CommitTruth
+	Stage   mdbx.UpdateStage
+	State   *InMemoryChainState
+	Summary *ConnectBlockBasicSummary
+	Err     error
+}
+
+const (
+	// The logical envelope is 68,070,495: the 282-byte identity preimage
+	// corrects the source estimate by +1; aliasing the original header/body
+	// literals to owned saves 382. The fixed charge retains 381 bytes of slack.
+	// Authority, schema/config and control keys are excluded control metadata.
+	genesisMDBXOperationBytes uint64 = 68_070_876
+	genesisMDBXInvariant             = "TERMINAL_LOCAL_INVARIANT(evidence)"
+	genesisMDBXIntegrity             = "TERMINAL_STORE_INTEGRITY(canonical)"
+)
+
+// ConnectPublishedGenesisMDBX is dormant. Its published bytes and identity must
+// come from the immutable devnet configuration; both slices are synchronous
+// borrows. One reservation covers the owned copy through Update and projection.
+// The fixed 89-byte returned logical state transfers to the caller on NEW.
+func ConnectPublishedGenesisMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, candidate, published []byte, chainID, genesisHash [32]byte) GenesisMDBXOutcome {
+	out := GenesisMDBXOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
+	out.Result, out.Err = genesisMDBXInput(store, reservations, candidate, published, chainID, genesisHash)
+	if out.Err != nil {
+		return out
+	}
+	err := reservations.WithReservation(genesisMDBXOperationBytes, func() error {
+		owned := bytes.Clone(candidate)
+		var preimage [282]byte
+		copy(preimage[:], "RUBIN-GENESIS-v1")
+		copy(preimage[16:], owned)
+		hash, hashErr := BlockHash(owned[:116])
+		if hashErr != nil || hash != genesisHash || sha3_256(preimage[:]) != chainID {
+			out.Result, out.Err = genesisMDBXInvariant, errors.New("published genesis context commitment mismatch")
+			return nil
+		}
+		entered, complete := false, false
+		out.Truth, out.Stage, out.Err = store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
+			entered = true
+			batch, batchErr := genesisMDBXBatch(reader, owned, chainID, genesisHash, &out)
+			complete = batchErr == nil
+			return batch, batchErr
+		})
+		out = genesisMDBXProject(out, entered, complete)
+		return nil
+	})
+	if err != nil {
+		out.Result, out.Err = "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", err
+	}
+	return out
+}
+
+func genesisMDBXInput(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, candidate, published []byte, chainID, hash [32]byte) (string, error) {
+	if store == nil {
+		return genesisMDBXInvariant, errors.New("nil genesis Store")
+	}
+	if len(published) != 266 || chainID == ([32]byte{}) || hash == ([32]byte{}) {
+		return genesisMDBXInvariant, errors.New("invalid published genesis context")
+	}
+	if !bytes.Equal(candidate, published) {
+		return "CONSENSUS_INVALID", txerr(BLOCK_ERR_LINKAGE_INVALID, "block does not match published genesis")
+	}
+	if reservations == nil || *reservations == (mdbx.OperationReservationOwner{}) {
+		return genesisMDBXInvariant, errors.New("invalid genesis reservation owner")
+	}
+	return "", nil
+}
+
+// genesisMDBXBatch owns every bridge entry and the complete ordered worklist.
+func genesisMDBXBatch(reader *mdbx.Reader, owned []byte, chainID, hash [32]byte, out *GenesisMDBXOutcome) (mdbx.Batch, error) {
+	out.Result = "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"
+	prefix, consulted, err := genesisMDBXPrestate(reader, out)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	extras, reused, err := genesisMDBXArtifacts(reader, owned, hash)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	out.Result = "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"
+	g := binary.BigEndian.Uint64(prefix)
+	view := newLogicalMDBXStateView(reader, g, 0)
+	if err = genesisMDBXEmptyUTXO(reader, prefix); err != nil {
+		return mdbx.Batch{}, err
+	}
+	if err = genesisMDBXZeroCounter(view.Counters()); err != nil {
+		return mdbx.Batch{}, err
+	}
+	parsed, err := genesisMDBXValidate(owned, chainID, out)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	// Complete validation fixed the target to all FF: floor(2^256/(2^256-1))=1.
+	key, _ := mdbx.HeightKey(g, 0) // The decoded authority already proved g != 0.
+	extras = append(extras, mdbx.Mutation{DBI: mdbx.SchemaV1DBIs()[2], Key: key, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, parsed.Header.PrevBlockHash, [40]byte{39: 1})})
+	op := Outpoint{Txid: parsed.Txids[0], Vout: 0}
+	touched := []logicalTouchedState{{Outpoint: op, FinalPresent: true, Final: out.State.Utxos[op]}}
+	plan, failure := buildLogicalStatePlan(0, view, touched, newLogicalMDBXMetadata(view, extras))
+	if failure != nil {
+		return mdbx.Batch{}, failure
+	}
+	out.Result = "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"
+	batch, failure := logicalMDBXPlanToBatch(plan)
+	if failure != nil {
+		return mdbx.Batch{}, failure
+	}
+	batch.Consulted = append(consulted, reused...)
+	sort.Slice(batch.Consulted, func(i, j int) bool {
+		a, b := batch.Consulted[i], batch.Consulted[j]
+		return logicalMDBXBefore(mdbx.Mutation{DBI: a.DBI, Key: a.Key}, mdbx.Mutation{DBI: b.DBI, Key: b.Key})
+	})
+	out.Result = ""
+	return batch, nil
+}
+
+func genesisMDBXPrestate(reader *mdbx.Reader, out *GenesisMDBXOutcome) ([]byte, []mdbx.ConsultedRow, error) {
+	dbis, key := mdbx.SchemaV1DBIs(), []byte{2}
+	value, _, err := reader.Get(dbis[0], key)
+	if err != nil {
+		return nil, nil, err
+	}
+	authority, err := mdbx.DecodeStorageAuthorityV1(value)
+	if err != nil {
+		return nil, nil, &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: err}
+	}
+	if !genesisMDBXEligible(authority) {
+		out.Result = "STALE_LOCAL_PLAN"
+		return nil, nil, errors.New("genesis requires NONE/STABLE/PRE_GENESIS")
+	}
+	prefix := binary.BigEndian.AppendUint64(nil, authority.ActiveGenerationID)
+	page, err := reader.PrefixPage(dbis[2], prefix, nil, 1, 120)
+	if err != nil {
+		return nil, nil, err
+	}
+	if page.Stop != mdbx.PrefixPageExhausted || len(page.Rows) != 0 {
+		out.Result = "STALE_LOCAL_PLAN"
+		return nil, nil, errors.New("genesis active canonical generation is not empty")
+	}
+	consulted, err := genesisMDBXControl(reader)
+	return prefix, append(consulted, mdbx.ConsultedRow{DBI: dbis[0], Key: key}), err
+}
+
+func genesisMDBXEligible(a mdbx.StorageAuthorityV1) bool {
+	return a.Phase == mdbx.StoragePhaseNoneV1 && a.Lifecycle == mdbx.StorageLifecycleStableV1 && a.B == 0 && a.U == 0
+}
+
+func genesisMDBXControl(reader *mdbx.Reader) ([]mdbx.ConsultedRow, error) {
+	meta := mdbx.SchemaV1DBIs()[0]
+	rows := []mdbx.ConsultedRow{{DBI: meta, Key: []byte{0}}, {DBI: meta, Key: []byte{1}}}
+	for i, row := range rows {
+		value, _, err := reader.Get(row.DBI, row.Key)
+		if err != nil {
+			return nil, err
+		}
+		if i == 0 {
+			err = mdbx.DecodeSchemaVersionValue(value)
+		} else {
+			_, err = mdbx.DecodeConfigV1(value)
+		}
+		if err != nil {
+			return nil, &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: err}
+		}
+	}
+	return rows, nil
+}
+
+func genesisMDBXArtifacts(reader *mdbx.Reader, owned []byte, hash [32]byte) ([]mdbx.Mutation, []mdbx.ConsultedRow, error) {
+	dbis := mdbx.SchemaV1DBIs()
+	extras := []mdbx.Mutation{
+		{DBI: dbis[3], Key: hash[:], AfterKind: mdbx.AfterLiteral, Literal: owned[:116]},
+		{DBI: dbis[4], Key: hash[:], AfterKind: mdbx.AfterLiteral, Literal: owned},
+		{DBI: dbis[5], Key: mdbx.UndoManifestKey(hash), AfterKind: mdbx.AfterLiteral, Literal: mdbx.UndoManifestValue(0, [16]byte{}, 1, 0)},
+	}
+	var consulted []mdbx.ConsultedRow
+	for _, row := range extras {
+		value, present, err := reader.Get(row.DBI, row.Key)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !present {
+			continue
+		}
+		// Length is qualified before any stored-body validation or additional copy.
+		if len(value) != len(row.Literal) || !bytes.Equal(value, row.Literal) {
+			return nil, nil, &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: fmt.Errorf("genesis %s differs from published artifact", row.DBI.Name)}
+		}
+		consulted = append(consulted, mdbx.ConsultedRow{DBI: row.DBI, Key: row.Key})
+	}
+	return extras, consulted, nil
+}
+
+func genesisMDBXEmptyUTXO(reader *mdbx.Reader, prefix []byte) error {
+	page, err := reader.PrefixPage(mdbx.SchemaV1DBIs()[1], prefix, nil, 1, 65_604)
+	if err != nil {
+		return err
+	}
+	if page.Stop != mdbx.PrefixPageExhausted || len(page.Rows) != 0 {
+		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("genesis active UTXO generation is not empty")}
+	}
+	return nil
+}
+
+func genesisMDBXZeroCounter(read logicalStateCounterRead) error {
+	if read.kind < logicalStateCountersPresent || read.kind > logicalStateCountersLocalInvariant {
+		return localLogicalStateFailure("invalid genesis counter observation")
+	}
+	if (read.kind == logicalStateCountersPresent) == (read.cause != nil) {
+		return localLogicalStateFailure("invalid genesis counter cause shape")
+	}
+	if read.kind == logicalStateCountersStoreIntegrity {
+		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: read.cause}
+	}
+	if read.cause != nil {
+		return read.cause
+	}
+	if read.counters != (logicalStateCounters{}) {
+		return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("genesis requires a present zero logical counter")}
+	}
+	return nil
+}
+
+func genesisMDBXValidate(owned []byte, chainID [32]byte, out *GenesisMDBXOutcome) (*ParsedBlock, error) {
+	var previous, target [32]byte
+	for i := range target {
+		target[i] = 0xff
+	}
+	out.State = &InMemoryChainState{Utxos: make(map[Outpoint]UtxoEntry)}
+	var err error
+	out.Summary, err = ConnectBlockBasicInMemoryAtHeightAndSuiteContext(owned, &previous, &target, 0, nil, out.State, chainID, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := ParseBlockBytes(owned)
+	if err != nil {
+		return nil, localLogicalStateFailure("validated genesis metadata cannot be parsed")
+	}
+	return parsed, nil
+}
+
+// genesisMDBXProject never reconstructs a payload from a terminal Store. Error
+// traversal only selects a result; the complete raw tuple remains untouched.
+func genesisMDBXProject(out GenesisMDBXOutcome, entered, complete bool) GenesisMDBXOutcome {
+	state, summary := out.State, out.Summary
+	valid := genesisMDBXTupleValid(out, entered, complete)
+	out.State, out.Summary = nil, nil
+	if genesisMDBXCached(out, entered) {
+		out.Result = ""
+		return out
+	}
+	if !valid {
+		out.Result = genesisMDBXInvariant
+		return out
+	}
+	if out.Stage == mdbx.UpdateStageCommitMayHaveCrossed {
+		out.Result = genesisMDBXCrossed(out.Truth, out.Err)
+		if out.Truth == mdbx.CommitTruthNew {
+			out.State, out.Summary = state, summary
+		}
+		return out
+	}
+	out.Result = genesisMDBXUncrossed(out.Err, out.Result, out.Stage)
+	return out
+}
+
+func genesisMDBXCached(out GenesisMDBXOutcome, entered bool) bool {
+	return !entered && out.Stage == mdbx.UpdateStagePrewrite && (out.Truth == mdbx.CommitTruthNew || out.Truth == mdbx.CommitTruthUnknown) && out.Err != nil && !genesisMDBXNilError(out.Err)
+}
+
+func genesisMDBXTupleValid(out GenesisMDBXOutcome, entered, complete bool) bool {
+	if out.Truth < mdbx.CommitTruthOld || out.Truth > mdbx.CommitTruthUnknown || out.Stage < mdbx.UpdateStagePrewrite || out.Stage > mdbx.UpdateStageCommitMayHaveCrossed {
+		return false
+	}
+	if out.Stage != mdbx.UpdateStageCommitMayHaveCrossed {
+		return out.Truth == mdbx.CommitTruthOld && out.Err != nil
+	}
+	return genesisMDBXPlanValid(out, entered, complete)
+}
+
+func genesisMDBXPlanValid(out GenesisMDBXOutcome, entered, complete bool) bool {
+	return entered && complete && out.State != nil && out.Summary != nil && (out.Truth == mdbx.CommitTruthNew || out.Err != nil) && !genesisMDBXNilError(out.Err)
+}
+
+func genesisMDBXCrossed(truth mdbx.CommitTruth, err error) string {
+	if err == nil {
+		return "ACCEPTED"
+	}
+	switch truth {
+	case mdbx.CommitTruthOld:
+		return "TERMINAL_PERSISTENCE(old)"
+	case mdbx.CommitTruthNew:
+		return "TERMINAL_PERSISTENCE(new)"
+	default:
+		return "TERMINAL_PERSISTENCE(neither_or_unreadable)"
+	}
+}
+
+func genesisMDBXUncrossed(err error, step string, stage mdbx.UpdateStage) string {
+	result := ""
+	for _, part := range genesisMDBXCauses(err) {
+		next := genesisMDBXErrorResult(part, step)
+		if next == genesisMDBXInvariant || next == genesisMDBXIntegrity {
+			return next
+		}
+		if result == "" {
+			result = next
+		}
+	}
+	if stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit && strings.HasPrefix(result, "LOCAL_RESOURCE_UNAVAILABLE(") {
+		return "LOCAL_PERSISTENCE_ERROR(precommit)"
+	}
+	return result
+}
+
+// Flatten only the existing error composition, in primary/secondary/cleanup
+// order; classification never uses text, errno, or CommitError as stage.
+func genesisMDBXCauses(err error) []error {
+	if err == nil || reflect.ValueOf(err).Kind() == reflect.Pointer && reflect.ValueOf(err).IsNil() {
+		return []error{nil}
+	}
+	switch e := err.(type) { //nolint:errorlint // Direct composition preserves primary, readback and cleanup cause order.
+	case *mdbx.CommitError:
+		parts := genesisMDBXCauses(e.Cause)
+		if e.ReadbackCause != nil {
+			parts = append(parts, genesisMDBXCauses(e.ReadbackCause)...)
+		}
+		return parts
+	case interface{ Unwrap() []error }:
+		var parts []error
+		for _, cause := range e.Unwrap() {
+			parts = append(parts, genesisMDBXCauses(cause)...)
+		}
+		return parts
+	}
+	return []error{err}
+}
+
+func genesisMDBXNilError(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, part := range genesisMDBXCauses(err) {
+		if part == nil {
+			return true
+		}
+		if wrapped, ok := part.(interface{ Unwrap() error }); ok && genesisMDBXNilError(wrapped.Unwrap()) {
+			return true
+		}
+	}
+	return false
+}
+
+func genesisMDBXErrorResult(err error, step string) string {
+	switch e := err.(type) { //nolint:errorlint // Classify only this cause before traversing the next source-ordered cause.
+	case *logicalStateFailure:
+		return genesisMDBXLogicalResult(e, step)
+	case *TxError:
+		if e != nil {
+			return "CONSENSUS_INVALID"
+		}
+	case *mdbx.EngineError:
+		return genesisMDBXEngineResult(e, step)
+	case interface{ Unwrap() error }:
+		return genesisMDBXUncrossed(e.Unwrap(), step, mdbx.UpdateStagePrewrite)
+	}
+	if step == "STALE_LOCAL_PLAN" && err != nil {
+		return step
+	}
+	return genesisMDBXInvariant
+}
+
+func genesisMDBXLogicalResult(e *logicalStateFailure, step string) string {
+	if e != nil && e.kind == logicalStateFailureUnavailable {
+		return genesisMDBXUncrossed(e.cause, step, mdbx.UpdateStagePrewrite)
+	}
+	if e != nil && e.kind == logicalStateFailureStoreIntegrity && e.cause != nil && !genesisMDBXNilError(e.cause) {
+		return genesisMDBXIntegrity
+	}
+	return genesisMDBXInvariant
+}
+
+func genesisMDBXEngineResult(e *mdbx.EngineError, step string) string {
+	if e == nil {
+		return genesisMDBXInvariant
+	}
+	if e.Class == mdbx.EngineIntegrity {
+		return genesisMDBXIntegrity
+	}
+	resource := map[mdbx.EngineClass]string{mdbx.EngineCapacity: "storage_capacity", mdbx.EngineConcurrency: "storage_concurrency", mdbx.EngineTransaction: "storage_transaction", mdbx.EngineIO: "storage_io"}[e.Class]
+	if resource == "" {
+		return genesisMDBXInvariant
+	}
+	if step == "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)" || step == "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)" {
+		return step
+	}
+	return "LOCAL_RESOURCE_UNAVAILABLE(" + resource + ")"
 }

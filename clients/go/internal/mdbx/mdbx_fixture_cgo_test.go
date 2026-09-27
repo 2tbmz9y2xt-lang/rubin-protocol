@@ -5,6 +5,8 @@ package mdbx
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1287,5 +1289,192 @@ func TestNativeUpdateUnknownImages(t *testing.T) {
 		requireUnknown(t, outcome)
 		requireUpdateValue(t, store, rows[0].DBI, rows[0].Key, nil, false)
 		mustEnvironment(t, store.Close())
+	})
+}
+
+// This is adapter-image evidence for the exact genesis write/consulted set,
+// independent of the consensus operation's payload projection.
+func TestNativeUpdateGenesisImages(t *testing.T) {
+	data, err := os.ReadFile("../../../../conformance/fixtures/CV-DEVNET-GENESIS.json")
+	mustEnvironment(t, err)
+	var fixture struct {
+		Vectors []struct {
+			Block string `json:"block_hex"`
+			Hash  string `json:"block_hash"`
+			Txid  string `json:"coinbase_txid"`
+		} `json:"vectors"`
+	}
+	mustEnvironment(t, json.Unmarshal(data, &fixture))
+	if len(fixture.Vectors) != 1 {
+		t.Fatal("genesis literal fixture cardinality")
+	}
+	decode := func(value string) []byte {
+		result, err := hex.DecodeString(value)
+		mustEnvironment(t, err)
+		return result
+	}
+	block, hash, txid := decode(fixture.Vectors[0].Block), decode(fixture.Vectors[0].Hash), decode(fixture.Vectors[0].Txid)
+	dbis := readDBIsLiteral()
+	counterKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
+	utxoKey := append(append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, txid...), 0, 0, 0, 0)
+	chain := append(append([]byte(nil), hash...), make([]byte, 72)...)
+	chain[103] = 1
+	manifest := make([]byte, 33)
+	manifest[0], manifest[28] = 1, 1
+	artifacts := []Mutation{{DBI: dbis[3], Key: hash, AfterKind: AfterLiteral, Literal: block[:116]}, {DBI: dbis[4], Key: hash, AfterKind: AfterLiteral, Literal: block}, {DBI: dbis[5], Key: append(append([]byte(nil), hash...), 0), AfterKind: AfterLiteral, Literal: manifest}}
+	base := []Mutation{{DBI: dbis[0], Key: counterKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: []byte{0, 0, 0, 0, 0, 0, 0, 89, 0, 0, 0, 0, 0, 0, 0, 1}}, {DBI: dbis[1], Key: utxoKey, AfterKind: AfterLiteral, Literal: decode("00407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd7279000000000000000001")}, {DBI: dbis[2], Key: []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}, AfterKind: AfterLiteral, Literal: chain}}
+	for _, reuse := range []bool{false, true} {
+		for _, mode := range []string{"old", "new", "third", "unreadable", "consulted0", "consulted1", "consulted2", "consulted3", "consulted4", "consulted5"} {
+			if !reuse && (mode == "consulted3" || mode == "consulted4" || mode == "consulted5") {
+				continue
+			}
+			t.Run(fmt.Sprintf("reuse%v/%s", reuse, mode), func(t *testing.T) {
+				store := newUpdateStore(t)
+				defer func() { _ = store.Close() }()
+				mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: dbis[0], key: []byte{2}, value: admissionNone()}, fixtureRawRow{dbi: dbis[0], key: counterKey, value: make([]byte, 16)}))
+				mutations := append([]Mutation(nil), base...)
+				consulted := []ConsultedRow{{DBI: dbis[0], Key: []byte{0}}, {DBI: dbis[0], Key: []byte{1}}, {DBI: dbis[0], Key: []byte{2}}}
+				for _, row := range artifacts {
+					if reuse {
+						mustEnvironment(t, fixtureSeedRows(store, fixtureRawRow{dbi: row.DBI, key: row.Key, value: row.Literal}))
+						consulted = append(consulted, ConsultedRow{DBI: row.DBI, Key: row.Key})
+					} else {
+						mutations = append(mutations, row)
+					}
+				}
+				plan := updateNativePlan(t, mutations...)
+				var outcome updateNativeOutcome
+				primary := nativeError(operationUpdate, codeENOSPC)
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					owned := make([]ownedConsulted, len(consulted))
+					for i, row := range consulted {
+						owned[i] = ownedConsulted{dbi: row.DBI, key: row.Key}
+					}
+					_, err := updateNativeConsultedImages(reader.txn, store.dbis, owned)
+					if err != nil {
+						return err
+					}
+					if mode != "old" {
+						execute := append([]ownedMutation(nil), plan...)
+						if mode == "third" {
+							execute[1].literal = append([]byte(nil), execute[1].literal...)
+							execute[1].literal[0] ^= 1
+						}
+						requireUpdateTruth(t, store.updateNative(execute, owned, reader.txn), CommitTruthNew, true, nil, nil)
+					}
+					if strings.HasPrefix(mode, "consulted") {
+						row := consulted[int(mode[len(mode)-1]-'0')]
+						change := []ownedMutation{{dbi: row.DBI, key: row.Key, beforePresent: true, after: AfterLiteral, literal: []byte{0x7f}}}
+						requireUpdateTruth(t, store.updateNative(change, nil, reader.txn), CommitTruthNew, true, nil, nil)
+					}
+					handles := store.dbis
+					if mode == "unreadable" {
+						handles[0] = ^handles[0]
+					}
+					outcome = updateNativeReadback(store.env, handles, plan, owned, reader.txn, primary)
+					return nil
+				}))
+				want := CommitTruthUnknown
+				if mode == "old" {
+					want = CommitTruthOld
+				}
+				if mode == "new" {
+					want = CommitTruthNew
+				}
+				if outcome.truth != want || outcome.stage != 3 || outcome.primary != primary || !outcome.commitAttempted || outcome.valid() != nil || (outcome.secondary != nil) != (mode == "unreadable") { //nolint:errorlint // Readback retains the exact primary cause.
+					t.Fatalf("genesis strict readback drifted: %+v", outcome)
+				}
+			})
+		}
+	}
+	t.Run("schema_invalid", func(t *testing.T) {
+		wrongAuthority, wrongHeader := admissionNone(), append([]byte(nil), block[:116]...)
+		wrongAuthority[0], wrongHeader[0] = 2, wrongHeader[0]^1
+		for _, row := range []struct {
+			name       string
+			rank       uint8
+			key, value []byte
+			semantic   bool
+		}{
+			{"authority-empty", 0, []byte{2}, []byte{}, true}, {"authority-09", 0, []byte{2}, []byte{9}, true}, {"authority-version", 0, []byte{2}, wrongAuthority, true},
+			{"counter-empty", 0, counterKey, []byte{}, false}, {"counter-short", 0, counterKey, make([]byte, 15), false}, {"counter-long", 0, counterKey, make([]byte, 17), false},
+			{"header-different", 3, hash, wrongHeader, true}, {"header-empty", 3, hash, []byte{}, false}, {"body-empty", 4, hash, []byte{}, false}, {"manifest-empty", 5, artifacts[2].Key, []byte{}, false},
+		} {
+			t.Run(row.name, func(t *testing.T) {
+				path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+				store, createErr := Create(path, cfg)
+				mustEnvironment(t, createErr)
+				defer func() { _ = store.Close() }()
+				truth, stage, err := store.Update(func(*Reader) (Batch, error) {
+					return Batch{Mutations: []Mutation{{DBI: dbis[row.rank], Key: row.key, AfterKind: AfterLiteral, Literal: row.value}}}, nil
+				})
+				if truth != 1 || stage != 1 || err == nil {
+					t.Fatalf("genesis schema admission drifted: %v/%v/%v", truth, stage, err)
+				}
+				requireEngineError(t, err, EngineInvalidInput, operationUpdate, codeEINVAL)
+				mustEnvironment(t, fixtureSeedPrefixRawRow(store, dbis[row.rank], row.key, row.value))
+				var observed error
+				truth, stage, err = store.Update(func(reader *Reader) (Batch, error) {
+					image, imageErr := updateOwnedImage(row.value)
+					mustEnvironment(t, imageErr)
+					image.present = true
+					check := func() {
+						equal, err := updateNativeEqual(reader.txn, store.dbis[row.rank], row.key, image)
+						if err != nil || !equal {
+							t.Fatalf("genesis raw OLD drifted: %v/%v", equal, err)
+						}
+					}
+					check()
+					value, present, readErr := reader.Get(dbis[row.rank], row.key)
+					if row.semantic {
+						if readErr != nil || !present || !bytes.Equal(value, row.value) {
+							t.Fatalf("genesis semantic read drifted: %v", readErr)
+						}
+						if row.rank == 0 {
+							_, observed = DecodeStorageAuthorityV1(value)
+						} else {
+							_, observed = HashBoundValue([32]byte(hash), value, false)
+						}
+						if observed == nil {
+							t.Fatal("genesis semantic decoder accepted malformed row")
+						}
+					} else {
+						engine := requireEngineError(t, readErr, EngineIntegrity, operationGet, codeInvalid)
+						if engine.Diagnostic != "stored value width outside SchemaV1 bound" || reader.active.Load() {
+							t.Fatalf("genesis width read drifted: %+v", engine)
+						}
+						observed = readErr
+					}
+					check()
+					return Batch{}, observed
+				})
+				if truth != 1 || stage != 1 || err != observed { //nolint:errorlint // The callback cause must survive unchanged.
+					t.Fatalf("genesis raw refusal drifted: %v/%v/%v", truth, stage, err)
+				}
+				if !row.semantic {
+					if store.state != storeCLOSED || store.env != nil || store.writer != nil {
+						t.Fatal("genesis raw Reader failure retained its Store")
+					}
+					truth, stage, err = store.Update(func(*Reader) (Batch, error) { t.Fatal("genesis raw terminal callback entered"); return Batch{}, nil })
+					if truth != 1 || stage != 1 || err != observed { //nolint:errorlint // The consumed Store returns its exact cached error.
+						t.Fatal("genesis raw terminal tuple drifted")
+					}
+				}
+				_ = store.Close()
+				store, err = Open(path, cfg)
+				mustEnvironment(t, err)
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					image, err := updateOwnedImage(row.value)
+					mustEnvironment(t, err)
+					equal, err := updateNativeEqual(reader.txn, store.dbis[row.rank], row.key, image)
+					if err != nil || !equal {
+						t.Fatalf("genesis durable raw OLD drifted: %v/%v", equal, err)
+					}
+					return nil
+				}))
+			})
+		}
 	})
 }
