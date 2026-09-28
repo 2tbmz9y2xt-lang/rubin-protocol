@@ -287,7 +287,7 @@ func cleanupBUNextPage(reader *Reader, page PrefixPage) ([]byte, bool, error) {
 
 func cleanupBUPageRows(reader *Reader, dbi DBI, rows []PrefixRow, txCount, spentCount uint32, deletes []Mutation, outpoints *[][36]byte) ([]Mutation, error) {
 	for _, row := range rows {
-		if len(row.Key) != 77 || row.Key[32] != 1 || ValidateRow(dbi, row.Key, row.Value) != nil || binary.BigEndian.Uint32(row.Key[33:37]) >= txCount || len(*outpoints) >= int(spentCount) {
+		if len(row.Key) != 77 || row.Key[32] != 1 || ValidateRow(dbi, row.Key, row.Value) != nil || binary.BigEndian.Uint32(row.Key[33:37]) >= txCount || len(*outpoints) >= int(spentCount) || len(deletes) > 1 && bytes.Equal(deletes[len(deletes)-1].Key[33:41], row.Key[33:41]) {
 			return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
 		}
 		var outpoint [36]byte

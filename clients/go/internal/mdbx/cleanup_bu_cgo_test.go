@@ -587,6 +587,35 @@ func TestCleanupBUMalformed(t *testing.T) {
 			t.Fatalf("cleanup duplicate outpoint accepted: %s/%d/%v", truth, stage, err)
 		}
 	})
+	t.Run("duplicate coordinate across pages", func(t *testing.T) {
+		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
+		s, path, hash, _ := cleanupTestStore(t, a, 0, 63)
+		cfg := s.config
+		var original, extra [32]byte
+		binary.BigEndian.PutUint32(original[28:], 63)
+		binary.BigEndian.PutUint32(extra[28:], 64)
+		entry, entryErr := (UTXOValue{Value: 1}).Encode()
+		mustEnvironment(t, entryErr)
+		refKey, keyErr := UTXOKey(8, extra, 0)
+		mustEnvironment(t, keyErr)
+		consultedRequireCommit(t, s, "duplicate coordinate source seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry}}})
+		manifest := UndoManifestValue(0, [16]byte{}, 1, 64)
+		consultedRequireCommit(t, s, "duplicate coordinate manifest seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterLiteral, Literal: manifest}}})
+		extraKey := UndoEntryKey(hash, extra, 0, 62, 0)
+		consultedRequireCommit(t, s, "duplicate coordinate entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: extraKey, AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey}}})
+		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct duplicate-coordinate error.
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup owed artifact" {
+			t.Fatalf("cleanup duplicate coordinate accepted: %s/%d/%v", truth, stage, err)
+		}
+		reopened, openErr := Open(path, cfg)
+		mustEnvironment(t, openErr)
+		defer func() { mustEnvironment(t, reopened.Close()) }()
+		cleanupWantAuthority(t, reopened, a)
+		consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoManifestKey(hash), manifest, true, "cleanup duplicate coordinate changed manifest")
+		consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoEntryKey(hash, original, 0, 62, 0), entry, true, "cleanup duplicate coordinate changed original")
+		consultedRequireImage(t, reopened, readDBIsLiteral()[5], extraKey, entry, true, "cleanup duplicate coordinate changed extra entry")
+	})
 	t.Run("extra entry", func(t *testing.T) {
 		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
 		s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
