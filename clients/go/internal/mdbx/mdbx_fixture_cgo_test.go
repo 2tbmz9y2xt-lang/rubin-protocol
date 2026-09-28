@@ -626,7 +626,7 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			bad[37] = 5
 			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
 		}},
-		{"invalid body commitment", "invalid cleanup owed artifact", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
+		{"invalid hash-bound header", "invalid cleanup owed artifact", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
 			bad := make([]byte, 116)
 			bad[0] = 7
 			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[4], key: hash[:], value: bad}))
