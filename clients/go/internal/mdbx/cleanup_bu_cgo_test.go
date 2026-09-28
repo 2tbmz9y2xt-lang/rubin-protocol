@@ -568,6 +568,25 @@ func TestCleanupBUMalformed(t *testing.T) {
 				}
 			})
 		}
+		t.Run("zero transaction manifest", func(t *testing.T) {
+			a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
+			s, path, hash, _ := cleanupTestStore(t, a, 0, 0)
+			cfg := s.config
+			manifest := UndoManifestValue(0, [16]byte{}, 0, 0)
+			key := UndoManifestKey(hash)
+			consultedRequireCommit(t, s, "remove manifest for zero transaction seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: key, BeforePresent: true, AfterKind: AfterAbsent}}})
+			consultedRequireCommit(t, s, "zero transaction manifest seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: key, AfterKind: AfterLiteral, Literal: manifest}}})
+			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+			engine, ok := err.(*EngineError) //nolint:errorlint // Require direct malformed-manifest error.
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup owed artifact" {
+				t.Fatalf("cleanup zero transaction manifest accepted: %s/%d/%v", truth, stage, err)
+			}
+			reopened, openErr := Open(path, cfg)
+			mustEnvironment(t, openErr)
+			defer func() { mustEnvironment(t, reopened.Close()) }()
+			cleanupWantAuthority(t, reopened, a)
+			consultedRequireImage(t, reopened, readDBIsLiteral()[5], key, manifest, true, "cleanup zero transaction manifest changed")
+		})
 	})
 	t.Run("duplicate outpoint", func(t *testing.T) {
 		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)

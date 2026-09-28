@@ -228,7 +228,7 @@ func cleanupBUManifest(reader *Reader, hash [32]byte, height uint64) ([]byte, ui
 }
 
 func cleanupBUValidManifestCounts(txCount, spentCount uint32) bool {
-	return uint64(spentCount) <= maxUpdateInputs && uint64(txCount) <= maxUpdateOutputs && (spentCount == 0 || txCount != 0)
+	return txCount != 0 && uint64(txCount) <= maxUpdateOutputs && uint64(spentCount) <= maxUpdateInputs
 }
 
 func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCount, spentCount uint32) ([]Mutation, error) {
