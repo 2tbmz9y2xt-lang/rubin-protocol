@@ -1434,15 +1434,16 @@ func TestDACompleteTailAllocations(t *testing.T) {
 				return item
 			}
 			// Go 1.26 AllocsPerRun first calls f once without measuring. Both calls consume distinct prepared states.
+			// Since Go 1.27 a same-value write to a full small map does not grow it (runtime/maps: only grow small full maps when inserting new keys), so the preflight may allocate nothing.
 			items := []tailFixture{build(), build()}
 			calls := 0
-			preflightAllocs := testing.AllocsPerRun(1, func() {
+			testing.AllocsPerRun(1, func() {
 				item := &items[calls]
 				calls++
 				item.preflightErr = item.f.relay.preflightDACompleteCommit(item.p)
 			})
-			if calls != len(items) || preflightAllocs == 0 {
-				t.Fatalf("same-value %s preflight did not grow: calls=%d allocs=%v", shape, calls, preflightAllocs)
+			if calls != len(items) {
+				t.Fatalf("%s preflight calls=%d", shape, calls)
 			}
 			for i := range items {
 				item := &items[i]
