@@ -273,9 +273,9 @@ func TestSchemaArrayValidationStopsAtFirstInvalidItem(t *testing.T) {
 	undoPayload := func(txs string) []byte {
 		return []byte(`{"block_height":0,"previous_already_generated":"0","txs":` + txs + `}`)
 	}
-	chainShort, chainLong := chainPayload(`[0]`), chainPayload(`[0`+strings.Repeat(","+validUtxo, tailCount)+`]`)
-	undoShort, undoLong := undoPayload(`[0]`), undoPayload(`[0`+strings.Repeat(`,{"spent":[]}`, tailCount)+`]`)
-	spentShort, spentLong := undoPayload(`[{"spent":[0]}]`), undoPayload(`[{"spent":[0`+strings.Repeat(","+validSpent, tailCount)+`]}]`)
+	chainShort, chainLong := chainPayload(`[0`+strings.Repeat(","+validUtxo, tailCount)+`]`), chainPayload(`[0`+strings.Repeat(","+validUtxo, 10*tailCount)+`]`)
+	undoShort, undoLong := undoPayload(`[0`+strings.Repeat(`,{"spent":[]}`, tailCount)+`]`), undoPayload(`[0`+strings.Repeat(`,{"spent":[]}`, 10*tailCount)+`]`)
+	spentShort, spentLong := undoPayload(`[{"spent":[0`+strings.Repeat(","+validSpent, tailCount)+`]}]`), undoPayload(`[{"spent":[0`+strings.Repeat(","+validSpent, 10*tailCount)+`]}]`)
 	measure := func(input []byte, rejects func([]byte) bool) (int64, int64) {
 		result := testing.Benchmark(func(b *testing.B) {
 			for range b.N {

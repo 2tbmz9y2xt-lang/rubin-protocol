@@ -592,7 +592,7 @@ func TestLoadLiveBindingPolicyRejectsMalformedAndTrailingJSON(t *testing.T) {
 					"live_binding_name": "verify_sig_openssl_digest32_v1"
 				}]
 			}`,
-			want: `live_binding_policy: parse embedded artifact: json: cannot unmarshal string into Go struct field liveBindingPolicyEntryJSON.entries.pubkey_len of type int`,
+			want: `live_binding_policy: parse embedded artifact: json: cannot unmarshal string into Go struct field liveBindingPolicyManifestJSON.entries.0.pubkey_len of type int`,
 		},
 		{
 			name: "trailing_tokens",
