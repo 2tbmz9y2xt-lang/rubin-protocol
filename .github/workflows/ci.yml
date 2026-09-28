@@ -99,7 +99,7 @@ jobs:
       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep==1.136.0
+          python3 -m pip install semgrep==1.178.0
 
       - name: Install gosec + govulncheck
         run: |
