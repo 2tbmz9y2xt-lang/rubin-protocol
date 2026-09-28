@@ -658,7 +658,8 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			if row.name == "authority before routing" {
 				a = modelBase(1, 0, 0)
 			}
-			s, _, hash, body := cleanupTestStore(t, a, 0, 0)
+			s, path, hash, body := cleanupTestStore(t, a, 0, 0)
+			cfg := s.config
 			row.corrupt(t, s, hash)
 			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 			engine, ok := err.(*EngineError)
@@ -666,8 +667,11 @@ func TestCleanupBURawEvidence(t *testing.T) {
 				t.Fatalf("cleanup raw evidence provenance drifted: %s/%d/%v", truth, stage, err)
 			}
 			if row.name == "missing required canonical header" {
-				cleanupWantAuthority(t, s, a)
-				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], body, true, "cleanup artifact changed after canonical refusal")
+				reopened, openErr := Open(path, cfg)
+				mustEnvironment(t, openErr)
+				defer func() { mustEnvironment(t, reopened.Close()) }()
+				cleanupWantAuthority(t, reopened, a)
+				consultedRequireImage(t, reopened, readDBIsLiteral()[4], hash[:], body, true, "cleanup artifact changed after canonical refusal")
 			}
 		})
 	}
