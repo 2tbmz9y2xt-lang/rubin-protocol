@@ -32,6 +32,8 @@ jobs:
           cache-dependency-path: clients/go/go.mod
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: 1.98.1
 
       - name: Resolve Rust cache identity
         id: rust_cache_identity
@@ -67,11 +69,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cargo/bin/cargo-tarpaulin
-          key: cargo-tarpaulin-${{ runner.os }}-0.35.2
+          key: cargo-tarpaulin-${{ runner.os }}-0.37.5
 
       - name: Install cargo-tarpaulin
         env:
-          TARPAULIN_VERSION: 0.35.2
+          TARPAULIN_VERSION: 0.37.5
         run: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"

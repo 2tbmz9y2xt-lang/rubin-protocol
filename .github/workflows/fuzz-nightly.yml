@@ -153,17 +153,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust nightly
-        # NOTE: This MUST pin the `nightly` branch SHA, not `stable`.
-        # Dependabot treats all branches as one dependency—verify the SHA
-        # belongs to the nightly branch before merging Dependabot PRs.
-        # Current nightly branch: 0f1b44df7e9cbb178d781a242338dfa5e243ad7f
-        # Current stable branch:  631a55b12751854ce901bb631d5902ceb48146f7
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # nightly
+        # The toolchain input selects nightly; the pinned SHA is a stable-branch
+        # commit of the action, shared with every other dtolnay/rust-toolchain step.
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable branch SHA, pinned action
         with:
           toolchain: nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       # OpenSSL dev headers required to compile openssl-sys FFI crate.
       - name: Install OpenSSL dev headers
