@@ -76,6 +76,8 @@ func cleanupBUAuthority(reader *Reader) (StorageAuthorityV1, error) {
 	return a, nil
 }
 
+// cleanupBUSelect routes a valid authority before any artifact reads, so a
+// legal non-B/U phase cannot report damage to an artifact it does not own.
 func cleanupBUSelect(reader *Reader, a StorageAuthorityV1, noWork error) (CleanupSpanV1, error) {
 	if a.Phase != StoragePhasePruneGCV1 || a.DetachedSuffix != nil || a.Cleanup == nil {
 		return CleanupSpanV1{}, noWork
@@ -101,6 +103,8 @@ func cleanupBUPromise(reader *Reader, a StorageAuthorityV1, span CleanupSpanV1) 
 	return nil
 }
 
+// cleanupBUAdvance changes only the first span; terminal cleanup keeps the
+// lifecycle and pending profile while clearing the cleanup payload.
 func cleanupBUAdvance(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1) ([]byte, error) {
 	// Copy the span list before changing its cursor; Decode owns no caller bytes.
 	a.Cleanup.Spans = slices.Clone(a.Cleanup.Spans)
@@ -126,8 +130,8 @@ func cleanupBUAdvance(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1)
 	return encoded, nil
 }
 
-// The exact current and predecessor index rows plus the required header are
-// unchanged observations for Store.Update's strict possible-crossed readback.
+// cleanupBUCanonical records the exact current and predecessor index rows and
+// required header as unchanged observations for Store.Update's strict readback.
 func cleanupBUCanonical(reader *Reader, generation, height uint64) ([32]byte, []ConsultedRow, error) {
 	dbis := SchemaV1DBIs()
 	key, value, err := cleanupBUIndex(reader, generation, height)
@@ -190,6 +194,8 @@ func cleanupBUHeader(reader *Reader, hash, parent [32]byte, height uint64) error
 	return nil
 }
 
+// cleanupBUBlocks checks SchemaV1 framing and the hash-bound header. Full
+// transaction-body and stored-commitment validation belongs at read/use.
 func cleanupBUBlocks(reader *Reader, hash [32]byte) ([]Mutation, error) {
 	value, present, err := reader.Get(SchemaV1DBIs()[4], hash[:])
 	if err != nil {
@@ -231,6 +237,8 @@ func cleanupBUValidManifestCounts(txCount, spentCount uint32) bool {
 	return txCount != 0 && uint64(txCount) <= maxUpdateOutputs && uint64(spentCount) <= maxUpdateInputs
 }
 
+// cleanupBUUndoEntries exhausts every bounded page before returning the batch;
+// a page limit cannot commit only part of the height's UNDO family.
 func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCount, spentCount uint32) ([]Mutation, error) {
 	dbi := SchemaV1DBIs()[5]
 	deletes := make([]Mutation, 0, 1+int(spentCount))
@@ -302,10 +310,14 @@ func cleanupBUValidTxIndex(txIndex, txCount uint32) bool {
 	return txIndex != 0 && txIndex < txCount
 }
 
+// cleanupBUAdjacentCoordinate checks the preceding key because ordered UNDO
+// keys place equal transaction/input coordinates next to each other.
 func cleanupBUAdjacentCoordinate(deletes []Mutation, key []byte) bool {
 	return len(deletes) > 1 && bytes.Equal(deletes[len(deletes)-1].Key[33:41], key[33:41])
 }
 
+// cleanupBUDistinct also rejects different input coordinates that name the
+// same spent outpoint, which key ordering alone cannot detect.
 func cleanupBUDistinct(reader *Reader, outpoints [][36]byte, expected uint32) error {
 	if len(outpoints) != int(expected) {
 		return cleanupBUEvidence(reader, "invalid cleanup owed artifact")
