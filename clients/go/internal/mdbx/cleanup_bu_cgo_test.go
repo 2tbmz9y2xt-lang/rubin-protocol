@@ -442,7 +442,8 @@ func TestCleanupBU(t *testing.T) {
 		}
 		cleanupCause := errors.New("cleanup failure")
 		joinedTruth, joinedStage, joinedErr := updateResult(updateNativeConsumed(CommitTruthOld, false, err, nil, UpdateStagePrewrite), cleanupCause)
-		parts, joined := joinedErr.(interface{ Unwrap() []error }) //nolint:errorlint // Inspect the exact joined-error structure and order.
+		//nolint:errorlint // Inspect the exact joined-error structure and order.
+		parts, joined := joinedErr.(interface{ Unwrap() []error })
 		if joinedTruth != CommitTruthOld || joinedStage != UpdateStagePrewrite || !joined || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != err || parts.Unwrap()[1] != cleanupCause { //nolint:errorlint // Joined causes must retain identity and order.
 			t.Fatalf("cleanup stage or cause provenance drifted: %s/%d/%v", joinedTruth, joinedStage, joinedErr)
 		}
