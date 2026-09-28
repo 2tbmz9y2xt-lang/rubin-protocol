@@ -640,14 +640,14 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoManifestKey(hash), value: bad}))
 		}},
 		{"invalid undo value", "invalid cleanup owed artifact", CleanupSpanUndoV1, func(t *testing.T, s *Store, hash [32]byte) {
-			manifest := UndoManifestValue(0, [16]byte{}, 1, 1)
+			manifest := UndoManifestValue(0, [16]byte{}, 2, 1)
 			var spent [32]byte
 			spent[31] = 1
 			bad := make([]byte, 20)
 			bad[10] = 0xfd
 			mustEnvironment(t, fixtureSeedRows(s,
 				fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoManifestKey(hash), value: manifest},
-				fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoEntryKey(hash, spent, 0, 0, 0), value: bad}))
+				fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoEntryKey(hash, spent, 1, 0, 0), value: bad}))
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {

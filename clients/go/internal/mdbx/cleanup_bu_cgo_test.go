@@ -65,7 +65,11 @@ func cleanupTestStore(t *testing.T, a StorageAuthorityV1, height uint64, spent i
 	rows = append(rows,
 		Mutation{DBI: dbis[3], Key: otherHash[:], AfterKind: AfterLiteral, Literal: otherHeader},
 		Mutation{DBI: dbis[4], Key: otherHash[:], AfterKind: AfterLiteral, Literal: append(bytes.Clone(otherHeader), 0)})
-	manifest := UndoManifestValue(height, [16]byte{}, 1, uint32(spent))
+	txCount := uint32(1)
+	if spent > 0 {
+		txCount = 2
+	}
+	manifest := UndoManifestValue(height, [16]byte{}, txCount, uint32(spent))
 	if a.Cleanup != nil && a.Cleanup.Spans[0].Kind == CleanupSpanBlocksV1 {
 		rows = append(rows, Mutation{DBI: dbis[4], Key: hash[:], AfterKind: AfterLiteral, Literal: body})
 	} else if a.Cleanup != nil && a.Cleanup.Spans[0].Kind == CleanupSpanUndoV1 {
@@ -93,7 +97,7 @@ func cleanupTestStore(t *testing.T, a StorageAuthorityV1, height uint64, spent i
 				refKey, keyErr := UTXOKey(8, txid, 0)
 				mustEnvironment(t, keyErr)
 				sources = append(sources, Mutation{DBI: dbis[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry})
-				family = append(family, Mutation{DBI: dbis[5], Key: UndoEntryKey(hash, txid, 0, uint32(i), 0), AfterKind: AfterOldValueRef, RefDBI: dbis[1], RefKey: refKey})
+				family = append(family, Mutation{DBI: dbis[5], Key: UndoEntryKey(hash, txid, 1, uint32(i), 0), AfterKind: AfterOldValueRef, RefDBI: dbis[1], RefKey: refKey})
 			}
 			consultedRequireCommit(t, s, "cleanup undo source seed", Batch{Mutations: sources})
 			consultedRequireCommit(t, s, "cleanup undo seed", Batch{Mutations: family})
@@ -326,7 +330,7 @@ func TestCleanupBU(t *testing.T) {
 				if count > 0 {
 					var txid [32]byte
 					binary.BigEndian.PutUint32(txid[28:], uint32(count))
-					consultedRequireImage(t, s, readDBIsLiteral()[5], UndoEntryKey(hash, txid, 0, uint32(count-1), 0), nil, false, "cleanup complete undo family drifted")
+					consultedRequireImage(t, s, readDBIsLiteral()[5], UndoEntryKey(hash, txid, 1, uint32(count-1), 0), nil, false, "cleanup complete undo family drifted")
 				}
 				a.Cleanup, a.Phase = nil, StoragePhaseNoneV1
 				cleanupWantAuthority(t, s, a)
@@ -538,7 +542,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 			} else {
 				var txid [32]byte
 				binary.BigEndian.PutUint32(txid[28:], 1)
-				consultedRequireCommit(t, s, "remove owed entry", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, txid, 0, 0, 0), BeforePresent: true, AfterKind: AfterAbsent}}, Reverse: true})
+				consultedRequireCommit(t, s, "remove owed entry", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, txid, 1, 0, 0), BeforePresent: true, AfterKind: AfterAbsent}}, Reverse: true})
 			}
 			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 			engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-artifact error.
@@ -587,6 +591,31 @@ func TestCleanupBUMalformed(t *testing.T) {
 			cleanupWantAuthority(t, reopened, a)
 			consultedRequireImage(t, reopened, readDBIsLiteral()[5], key, manifest, true, "cleanup zero transaction manifest changed")
 		})
+		t.Run("coinbase spent entry", func(t *testing.T) {
+			a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
+			s, path, hash, _ := cleanupTestStore(t, a, 0, 1)
+			cfg := s.config
+			var spent [32]byte
+			spent[31] = 1
+			refKey, keyErr := UTXOKey(8, spent, 0)
+			mustEnvironment(t, keyErr)
+			key := UndoEntryKey(hash, spent, 0, 0, 0)
+			consultedRequireCommit(t, s, "remove entry for coinbase seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), BeforePresent: true, AfterKind: AfterAbsent}}, Reverse: true})
+			consultedRequireCommit(t, s, "coinbase spent entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: key, AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey}}})
+			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+			engine, ok := err.(*EngineError) //nolint:errorlint // Require direct malformed-entry error.
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup owed artifact" {
+				t.Fatalf("cleanup coinbase spent entry accepted: %s/%d/%v", truth, stage, err)
+			}
+			reopened, openErr := Open(path, cfg)
+			mustEnvironment(t, openErr)
+			defer func() { mustEnvironment(t, reopened.Close()) }()
+			cleanupWantAuthority(t, reopened, a)
+			consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoManifestKey(hash), UndoManifestValue(0, [16]byte{}, 2, 1), true, "cleanup coinbase entry changed manifest")
+			entry, entryErr := (UTXOValue{Value: 1}).Encode()
+			mustEnvironment(t, entryErr)
+			consultedRequireImage(t, reopened, readDBIsLiteral()[5], key, entry, true, "cleanup coinbase entry changed")
+		})
 	})
 	t.Run("duplicate outpoint", func(t *testing.T) {
 		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
@@ -597,8 +626,8 @@ func TestCleanupBUMalformed(t *testing.T) {
 		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "remove manifest for duplicate outpoint seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterAbsent}}})
 		consultedRequireCommit(t, s, "duplicate outpoint seed", Batch{Mutations: []Mutation{
-			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 2, 2)},
-			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey},
+			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 3, 2)},
+			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 2, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey},
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct duplicate-outpoint error.
@@ -618,10 +647,10 @@ func TestCleanupBUMalformed(t *testing.T) {
 		refKey, keyErr := UTXOKey(8, extra, 0)
 		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "duplicate coordinate source seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry}}})
-		manifest := UndoManifestValue(0, [16]byte{}, 1, 64)
+		manifest := UndoManifestValue(0, [16]byte{}, 2, 64)
 		consultedRequireCommit(t, s, "remove manifest for duplicate coordinate seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterAbsent}}})
 		consultedRequireCommit(t, s, "duplicate coordinate manifest seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: manifest}}})
-		extraKey := UndoEntryKey(hash, extra, 0, 62, 0)
+		extraKey := UndoEntryKey(hash, extra, 1, 62, 0)
 		consultedRequireCommit(t, s, "duplicate coordinate entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: extraKey, AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey}}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct duplicate-coordinate error.
@@ -633,7 +662,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		defer func() { mustEnvironment(t, reopened.Close()) }()
 		cleanupWantAuthority(t, reopened, a)
 		consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoManifestKey(hash), manifest, true, "cleanup duplicate coordinate changed manifest")
-		consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoEntryKey(hash, original, 0, 62, 0), entry, true, "cleanup duplicate coordinate changed original")
+		consultedRequireImage(t, reopened, readDBIsLiteral()[5], UndoEntryKey(hash, original, 1, 62, 0), entry, true, "cleanup duplicate coordinate changed original")
 		consultedRequireImage(t, reopened, readDBIsLiteral()[5], extraKey, entry, true, "cleanup duplicate coordinate changed extra entry")
 	})
 	t.Run("extra entry", func(t *testing.T) {
@@ -646,7 +675,11 @@ func TestCleanupBUMalformed(t *testing.T) {
 		refKey, keyErr := UTXOKey(8, spent, 0)
 		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "extra undo source seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry}}})
-		consultedRequireCommit(t, s, "extra undo entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 0, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey}}})
+		consultedRequireCommit(t, s, "remove manifest for extra entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterAbsent}}})
+		consultedRequireCommit(t, s, "extra undo entry seed", Batch{Mutations: []Mutation{
+			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 2, 0)},
+			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey},
+		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct extra-entry error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
