@@ -539,7 +539,8 @@ func TestCleanupBUMalformed(t *testing.T) {
 				a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
 				s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
 				value := UndoManifestValue(row.height, [16]byte{}, 1, row.count)
-				consultedRequireCommit(t, s, "manifest mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterLiteral, Literal: value}}})
+				consultedRequireCommit(t, s, "remove manifest for mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterAbsent}}})
+				consultedRequireCommit(t, s, "manifest mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: value}}})
 				truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 				engine, ok := err.(*EngineError) //nolint:errorlint // Require direct manifest-mismatch error.
 				if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
@@ -555,8 +556,9 @@ func TestCleanupBUMalformed(t *testing.T) {
 		binary.BigEndian.PutUint32(spent[28:], 1)
 		refKey, keyErr := UTXOKey(8, spent, 0)
 		mustEnvironment(t, keyErr)
+		consultedRequireCommit(t, s, "remove manifest for duplicate outpoint seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterAbsent}}})
 		consultedRequireCommit(t, s, "duplicate outpoint seed", Batch{Mutations: []Mutation{
-			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 2, 2)},
+			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 2, 2)},
 			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey},
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))

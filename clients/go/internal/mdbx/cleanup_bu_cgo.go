@@ -246,7 +246,8 @@ func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCoun
 		if err != nil {
 			return nil, err
 		}
-		if err := cleanupBUPageRows(reader, dbi, rows, txCount, spentCount, &deletes, &outpoints); err != nil {
+		deletes, err = cleanupBUPageRows(reader, dbi, rows, txCount, spentCount, deletes, &outpoints)
+		if err != nil {
 			return nil, err
 		}
 		var done bool
@@ -284,17 +285,17 @@ func cleanupBUNextPage(reader *Reader, page PrefixPage) ([]byte, bool, error) {
 	return page.Rows[len(page.Rows)-1].Key, false, nil
 }
 
-func cleanupBUPageRows(reader *Reader, dbi DBI, rows []PrefixRow, txCount, spentCount uint32, deletes *[]Mutation, outpoints *[][36]byte) error {
+func cleanupBUPageRows(reader *Reader, dbi DBI, rows []PrefixRow, txCount, spentCount uint32, deletes []Mutation, outpoints *[][36]byte) ([]Mutation, error) {
 	for _, row := range rows {
 		if len(row.Key) != 77 || row.Key[32] != 1 || ValidateRow(dbi, row.Key, row.Value) != nil || binary.BigEndian.Uint32(row.Key[33:37]) >= txCount || len(*outpoints) >= int(spentCount) {
-			return cleanupBUEvidence(reader, "invalid cleanup owed artifact")
+			return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
 		}
 		var outpoint [36]byte
 		copy(outpoint[:], row.Key[41:77])
 		*outpoints = append(*outpoints, outpoint)
-		*deletes = append(*deletes, Mutation{DBI: dbi, Key: row.Key, BeforePresent: true, AfterKind: AfterAbsent})
+		deletes = append(deletes, Mutation{DBI: dbi, Key: row.Key, BeforePresent: true, AfterKind: AfterAbsent})
 	}
-	return nil
+	return deletes, nil
 }
 
 func cleanupBUDistinct(reader *Reader, outpoints [][36]byte, expected uint32) error {
