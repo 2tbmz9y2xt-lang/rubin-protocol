@@ -221,10 +221,14 @@ func cleanupBUManifest(reader *Reader, hash [32]byte, height uint64) ([]byte, ui
 	}
 	txCount := binary.BigEndian.Uint32(value[25:29])
 	spentCount := binary.BigEndian.Uint32(value[29:33])
-	if spentCount > uint32(maxUpdateInputs) || txCount > uint32(maxUpdateOutputs) || (spentCount > 0 && txCount == 0) {
+	if !cleanupBUValidManifestCounts(txCount, spentCount) {
 		return nil, 0, 0, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
 	}
 	return manifest, txCount, spentCount, nil
+}
+
+func cleanupBUValidManifestCounts(txCount, spentCount uint32) bool {
+	return uint64(spentCount) <= maxUpdateInputs && uint64(txCount) <= maxUpdateOutputs && (spentCount == 0 || txCount != 0)
 }
 
 func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCount, spentCount uint32) ([]Mutation, error) {
@@ -238,28 +242,46 @@ func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCoun
 		if pageErr != nil {
 			return nil, pageErr
 		}
-		rows := page.Rows
-		if after == nil {
-			if len(rows) == 0 || !bytes.Equal(rows[0].Key, manifest) {
-				return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
-			}
-			rows = rows[1:]
+		rows, err := cleanupBUEntryPageRows(reader, page.Rows, after == nil, manifest)
+		if err != nil {
+			return nil, err
 		}
 		if err := cleanupBUPageRows(reader, dbi, rows, txCount, spentCount, &deletes, &outpoints); err != nil {
 			return nil, err
 		}
-		if page.Stop == PrefixPageExhausted {
+		var done bool
+		after, done, err = cleanupBUNextPage(reader, page)
+		if err != nil {
+			return nil, err
+		}
+		if done {
 			break
 		}
-		if len(page.Rows) == 0 || page.Stop != PrefixPageRowLimit && page.Stop != PrefixPageByteLimit {
-			return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
-		}
-		after = page.Rows[len(page.Rows)-1].Key
 	}
 	if err := cleanupBUDistinct(reader, outpoints, spentCount); err != nil {
 		return nil, err
 	}
 	return deletes, nil
+}
+
+func cleanupBUEntryPageRows(reader *Reader, rows []PrefixRow, first bool, manifest []byte) ([]PrefixRow, error) {
+	if !first {
+		return rows, nil
+	}
+	if len(rows) == 0 || !bytes.Equal(rows[0].Key, manifest) {
+		return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
+	}
+	return rows[1:], nil
+}
+
+func cleanupBUNextPage(reader *Reader, page PrefixPage) ([]byte, bool, error) {
+	if page.Stop == PrefixPageExhausted {
+		return nil, true, nil
+	}
+	if len(page.Rows) == 0 || page.Stop != PrefixPageRowLimit && page.Stop != PrefixPageByteLimit {
+		return nil, false, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
+	}
+	return page.Rows[len(page.Rows)-1].Key, false, nil
 }
 
 func cleanupBUPageRows(reader *Reader, dbi DBI, rows []PrefixRow, txCount, spentCount uint32, deletes *[]Mutation, outpoints *[][36]byte) error {

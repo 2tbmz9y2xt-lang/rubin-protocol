@@ -241,7 +241,7 @@ func TestCleanupBU(t *testing.T) {
 				candidate.Cleanup = &CleanupV1{Spans: slices.Clone(a.Cleanup.Spans)}
 				row.edit(&candidate)
 				_, err := cleanupBUSelect(&Reader{}, candidate, nil)
-				engine, ok := err.(*EngineError)
+				engine, ok := err.(*EngineError) //nolint:errorlint // Require the direct invariant error, not a wrapped error.
 				if !ok || engine.Class != EngineLocalInvariant || engine.Operation != "update" || engine.Diagnostic != "cleanup promises disagree with authority" {
 					t.Fatalf("cleanup promise recheck drifted: %s: %v", row.name, err)
 				}
@@ -278,13 +278,13 @@ func TestCleanupBU(t *testing.T) {
 		}()
 		<-entered
 		busyTruth, busyStage, busyErr := s.CleanupBUV1(bootstrapOwner(t))
-		busy, ok := busyErr.(*EngineError)
+		busy, ok := busyErr.(*EngineError) //nolint:errorlint // Require the direct concurrency error.
 		close(release)
 		heldErr := <-done
 		if busyTruth != CommitTruthOld || busyStage != UpdateStagePrewrite || !ok || busy.Class != EngineConcurrency {
 			t.Fatalf("cleanup overlapping callback admitted: %s/%d/%v", busyTruth, busyStage, busyErr)
 		}
-		if heldErr != inFlight {
+		if heldErr != inFlight { //nolint:errorlint // Update must preserve this exact callback error object.
 			t.Fatalf("held callback cause drifted: %v", heldErr)
 		}
 		before := a
@@ -353,7 +353,7 @@ func TestCleanupBU(t *testing.T) {
 	t.Run("capacity", func(t *testing.T) {
 		owner := bootstrapOwner(t)
 		truth, stage, err := (*Store)(nil).CleanupBUV1(owner)
-		nilStore, ok := err.(*EngineError)
+		nilStore, ok := err.(*EngineError) //nolint:errorlint // Require the direct nil-Store error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || nilStore.Class != EngineInvalidInput || nilStore.Operation != "update" || nilStore.Code != codeEINVAL || nilStore.Diagnostic != "nil Store" {
 			t.Fatalf("cleanup nil Store tuple drifted: %s/%d/%v", truth, stage, err)
 		}
@@ -361,7 +361,7 @@ func TestCleanupBU(t *testing.T) {
 		s, _, _, _ := cleanupTestStore(t, a, 0, 0)
 		for _, refused := range []*OperationReservationOwner{nil, {}} {
 			truth, stage, err = s.CleanupBUV1(refused)
-			if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != errOperationReservationInput {
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != errOperationReservationInput { //nolint:errorlint // Reservation refusal must return the exact sentinel.
 				t.Fatalf("cleanup reservation boundary drifted: %s/%d/%v", truth, stage, err)
 			}
 		}
@@ -369,7 +369,7 @@ func TestCleanupBU(t *testing.T) {
 		mustEnvironment(t, ownerErr)
 		mustEnvironment(t, qMinusOne.WithReservation(1, func() error {
 			truth, stage, err = s.CleanupBUV1(qMinusOne)
-			if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != errOperationReservationCapacity {
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != errOperationReservationCapacity { //nolint:errorlint // Capacity refusal must return the exact sentinel.
 				t.Fatalf("cleanup reservation boundary drifted: %s/%d/%v", truth, stage, err)
 			}
 			return nil
@@ -431,19 +431,19 @@ func TestCleanupBU(t *testing.T) {
 		consultedRequireCommit(t, s, "remove owed body", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterAbsent}}})
 		owner := bootstrapOwner(t)
 		truth, stage, err := s.CleanupBUV1(owner)
-		engine, ok := err.(*EngineError)
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct integrity provenance.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup owed artifact" {
 			t.Fatalf("cleanup stage or cause provenance drifted: %s/%d/%v", truth, stage, err)
 		}
 		prunedReleased(t, owner)
 		againTruth, againStage, againErr := s.CleanupBUV1(owner)
-		if againTruth != truth || againStage != stage || againErr != err {
+		if againTruth != truth || againStage != stage || againErr != err { //nolint:errorlint // Cached terminal result must retain the same error object.
 			t.Fatalf("cleanup cached terminal truth drifted: %s/%d/%v", againTruth, againStage, againErr)
 		}
 		cleanupCause := errors.New("cleanup failure")
 		joinedTruth, joinedStage, joinedErr := updateResult(updateNativeConsumed(CommitTruthOld, false, err, nil, UpdateStagePrewrite), cleanupCause)
-		parts, joined := joinedErr.(interface{ Unwrap() []error })
-		if joinedTruth != CommitTruthOld || joinedStage != UpdateStagePrewrite || !joined || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != err || parts.Unwrap()[1] != cleanupCause {
+		parts, joined := joinedErr.(interface{ Unwrap() []error }) //nolint:errorlint // Inspect the exact joined-error structure and order.
+		if joinedTruth != CommitTruthOld || joinedStage != UpdateStagePrewrite || !joined || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != err || parts.Unwrap()[1] != cleanupCause { //nolint:errorlint // Joined causes must retain identity and order.
 			t.Fatalf("cleanup stage or cause provenance drifted: %s/%d/%v", joinedTruth, joinedStage, joinedErr)
 		}
 	})
@@ -457,7 +457,7 @@ func TestCleanupBU(t *testing.T) {
 			{DBI: readDBIsLiteral()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterAbsent},
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-		engine, ok := err.(*EngineError)
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct canonical-evidence error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup canonical evidence" {
 			t.Fatalf("cleanup precedence drifted: %s/%d/%v", truth, stage, err)
 		}
@@ -473,7 +473,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "remove required index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: key, BeforePresent: true, AfterKind: AfterAbsent}}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-		engine, ok := err.(*EngineError)
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-index error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "invalid cleanup canonical evidence" {
 			t.Fatalf("cleanup required index provenance drifted: %s/%d/%v", truth, stage, err)
 		}
@@ -498,7 +498,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		mustEnvironment(t, mismatchKeyErr)
 		consultedRequireCommit(t, mismatchStore, "index/header mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: mismatchKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(mismatchHash, modelHash(9), [40]byte{39: 1})}}})
 		mismatchTruth, mismatchStage, mismatchErr := mismatchStore.CleanupBUV1(bootstrapOwner(t))
-		mismatchEngine, mismatchOK := mismatchErr.(*EngineError)
+		mismatchEngine, mismatchOK := mismatchErr.(*EngineError) //nolint:errorlint // Require direct index/header mismatch error.
 		if mismatchTruth != CommitTruthOld || mismatchStage != UpdateStagePrewrite || !mismatchOK || mismatchEngine.Diagnostic != "invalid cleanup canonical evidence" {
 			t.Fatalf("cleanup index/header link mismatch accepted: %s/%d/%v", mismatchTruth, mismatchStage, mismatchErr)
 		}
@@ -515,7 +515,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 				consultedRequireCommit(t, s, "remove owed entry", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, txid, 0, 0, 0), BeforePresent: true, AfterKind: AfterAbsent}}, Reverse: true})
 			}
 			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-			engine, ok := err.(*EngineError)
+			engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-artifact error.
 			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "invalid cleanup owed artifact" {
 				t.Fatalf("cleanup missing artifact provenance drifted: %s/%d/%v", truth, stage, err)
 			}
@@ -535,7 +535,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 				value := UndoManifestValue(row.height, [16]byte{}, 1, row.count)
 				consultedRequireCommit(t, s, "manifest mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterLiteral, Literal: value}}})
 				truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-				engine, ok := err.(*EngineError)
+				engine, ok := err.(*EngineError) //nolint:errorlint // Require direct manifest-mismatch error.
 				if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
 					t.Fatalf("cleanup manifest mismatch accepted: %s/%d/%v", truth, stage, err)
 				}
@@ -554,7 +554,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterLiteral, Literal: entry},
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-		engine, ok := err.(*EngineError)
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct duplicate-outpoint error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
 			t.Fatalf("cleanup duplicate outpoint accepted: %s/%d/%v", truth, stage, err)
 		}
@@ -568,7 +568,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		mustEnvironment(t, entryErr)
 		consultedRequireCommit(t, s, "extra undo entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 0, 0, 0), AfterKind: AfterLiteral, Literal: entry}}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
-		engine, ok := err.(*EngineError)
+		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct extra-entry error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
 			t.Fatalf("cleanup extra undo entry accepted: %s/%d/%v", truth, stage, err)
 		}
