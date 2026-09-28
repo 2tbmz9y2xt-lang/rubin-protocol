@@ -475,17 +475,21 @@ func TestCleanupBU(t *testing.T) {
 func TestCleanupBUMalformed(t *testing.T) {
 	t.Run("missing prior index", func(t *testing.T) {
 		a := cleanupAuthority(CleanupSpanBlocksV1, 1, false)
-		s, _, hash, body := cleanupTestStore(t, a, 1, 0)
+		s, path, hash, body := cleanupTestStore(t, a, 1, 0)
+		cfg := s.config
 		priorKey, keyErr := HeightKey(7, 0)
 		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "remove required prior index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: priorKey, BeforePresent: true, AfterKind: AfterAbsent}}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-prior-index error.
-		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "invalid cleanup canonical evidence" {
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup canonical evidence" {
 			t.Fatalf("cleanup required prior index provenance drifted: %s/%d/%v", truth, stage, err)
 		}
-		cleanupWantAuthority(t, s, a)
-		consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], body, true, "cleanup missing prior index changed artifact")
+		reopened, openErr := Open(path, cfg)
+		mustEnvironment(t, openErr)
+		defer func() { mustEnvironment(t, reopened.Close()) }()
+		cleanupWantAuthority(t, reopened, a)
+		consultedRequireImage(t, reopened, readDBIsLiteral()[4], hash[:], body, true, "cleanup missing prior index changed artifact")
 	})
 	t.Run("index", func(t *testing.T) {
 		a := cleanupAuthority(CleanupSpanBlocksV1, 0, false)
