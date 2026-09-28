@@ -749,6 +749,104 @@ func TestCleanupBUNativeImages(t *testing.T) {
 	}
 }
 
+func TestCleanupBUOutcomeMatrix(t *testing.T) {
+	a := cleanupAuthority(CleanupSpanBlocksV1, 0, true)
+	s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
+	var batch Batch
+	mustEnvironment(t, s.View(func(reader *Reader) error {
+		var err error
+		batch, err = cleanupBUBatch(reader, errors.New("unexpected no-work"))
+		return err
+	}))
+	plan, planErr := updateOwnedBatch(batch)
+	mustEnvironment(t, planErr)
+	if len(plan) != 2 || plan[0].dbi.Rank != 0 || plan[1].dbi.Rank != 4 || !bytes.Equal(plan[1].key, hash[:]) {
+		t.Fatal("cleanup outcome plan drifted")
+	}
+
+	primary := integrityError(operationGet, "cleanup owner cause", nil)
+	callback := errors.New("cleanup callback refusal")
+	abort := nativeError(operationAbort, codeEIO)
+	cleanup := nativeError(operationClose, codeEIO)
+	readback := nativeError(operationUpdate, codeENOSPC)
+	for _, row := range []struct {
+		name     string
+		outcome  updateNativeOutcome
+		cleanup  error
+		want     CommitTruth
+		ordered  []error
+		commit   bool
+		nextCall bool
+	}{
+		{"stage 1 same class", updateNativeConsumed(CommitTruthOld, false, primary, nil, UpdateStagePrewrite), nil, CommitTruthOld, []error{primary}, false, true},
+		{"stage 2 same class", updateNativeConsumed(CommitTruthOld, false, primary, nil, UpdateStageWriteStartedDefinitelyPrecommit), nil, CommitTruthOld, []error{primary}, false, true},
+		{"stage 3 same class", updateNativeConsumed(CommitTruthUnknown, true, primary, nil, UpdateStageCommitMayHaveCrossed), nil, CommitTruthUnknown, []error{primary}, true, true},
+		{"callback abort cleanup", updateNativeConsumed(CommitTruthOld, false, callback, abort, UpdateStagePrewrite), cleanup, CommitTruthOld, []error{callback, abort, cleanup}, false, true},
+		{"reader cleanup", updateNativeConsumed(CommitTruthOld, false, primary, nil, UpdateStagePrewrite), cleanup, CommitTruthOld, []error{primary, cleanup}, false, true},
+		{"invalid stage 0", updateNativeOutcome{truth: CommitTruthOld, stage: UpdateStageInvalid, primary: primary}, cleanup, CommitTruthOld, nil, false, true},
+		{"new joined cleanup", updateNativeConsumed(CommitTruthNew, true, primary, readback, UpdateStageCommitMayHaveCrossed), cleanup, CommitTruthNew, []error{primary, readback, cleanup}, true, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			truth, stage, result := updateResult(row.outcome, row.cleanup)
+			if truth != row.want || stage != row.outcome.stage || result == nil {
+				t.Fatalf("cleanup stage or cause provenance drifted: %s/%d/%v", truth, stage, result)
+			}
+			if row.name == "invalid stage 0" {
+				parts, ok := result.(interface{ Unwrap() []error })
+				if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[1] != cleanup {
+					t.Fatalf("cleanup invalid outcome order drifted: %v", result)
+				}
+				shape, ok := parts.Unwrap()[0].(*EngineError)
+				if !ok || shape.Class != EngineLocalInvariant || shape.Diagnostic != "invalid update native outcome shape" {
+					t.Fatalf("cleanup invalid outcome provenance drifted: %v", result)
+				}
+			} else if row.commit {
+				commit, ok := result.(*CommitError)
+				if !ok || commit.Truth != row.want || commit.Cause != row.ordered[0] {
+					t.Fatalf("cleanup commit cause drifted: %v", result)
+				}
+				if len(row.ordered) > 1 {
+					parts, ok := commit.ReadbackCause.(interface{ Unwrap() []error })
+					if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != row.ordered[1] || parts.Unwrap()[1] != row.ordered[2] {
+						t.Fatalf("cleanup joined cause order drifted: %v", result)
+					}
+				}
+			} else if len(row.ordered) == 1 {
+				if result != row.ordered[0] {
+					t.Fatalf("cleanup direct cause identity drifted: %v", result)
+				}
+			} else {
+				parts, ok := result.(interface{ Unwrap() []error })
+				if !ok || len(parts.Unwrap()) != len(row.ordered) {
+					t.Fatalf("cleanup joined cause shape drifted: %v", result)
+				}
+				for i, want := range row.ordered {
+					if parts.Unwrap()[i] != want {
+						t.Fatalf("cleanup joined cause order drifted: %v", result)
+					}
+				}
+			}
+			if row.name == "stage 1 same class" || row.name == "stage 2 same class" || row.name == "stage 3 same class" {
+				var engine *EngineError
+				if !errors.As(result, &engine) || engine.Class != EngineIntegrity || engine != primary {
+					t.Fatalf("cleanup stage class drifted: %v", result)
+				}
+			}
+			if row.nextCall {
+				stateStore, _, _, _ := cleanupTestStore(t, a, 0, 0)
+				appliedTruth, appliedStage, applied := stateStore.applyUpdateOutcome(row.outcome, nil, row.cleanup, false)
+				if appliedTruth != truth || appliedStage != stage || applied == nil || applied.Error() != result.Error() || stateStore.state != storeCLOSED {
+					t.Fatalf("cleanup owner terminal state drifted: %s/%d/%v", appliedTruth, appliedStage, applied)
+				}
+				nextTruth, nextStage, nextErr := stateStore.CleanupBUV1(bootstrapOwner(t))
+				if nextTruth != truth || nextStage != UpdateStagePrewrite || nextErr != applied {
+					t.Fatalf("cleanup next operation state drifted: %s/%d/%v", nextTruth, nextStage, nextErr)
+				}
+			}
+		})
+	}
+}
+
 //nolint:errorlint // Exact callback, infrastructure and panic identities are required.
 func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 	dbi := readDBIsLiteral()[2]
