@@ -28,8 +28,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      KANI_VERSION: 0.67.0
-      KANI_NIGHTLY: nightly-2025-11-21
+      KANI_VERSION: 0.68.0
+      KANI_NIGHTLY: nightly-2026-08-21
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -85,7 +85,7 @@ jobs:
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
             ~/.kani
-            ~/.rustup/toolchains/nightly-2025-11-21-x86_64-unknown-linux-gnu
+            ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu
             ~/.rustup/update-hashes
           key: kani-toolchain-${{ runner.os }}-${{ env.KANI_VERSION }}-${{ env.KANI_NIGHTLY }}
 

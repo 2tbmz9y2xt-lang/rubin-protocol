@@ -22,11 +22,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_MUTANTS_VERSION: "27.0.0"
+  CARGO_MUTANTS_VERSION: "27.1.0"
   GITLEAKS_VERSION: "v8.30.1"
-  GRYPE_VERSION: "v0.112.0"
-  RUST_NIGHTLY: "nightly-2025-11-21"
-  SYFT_VERSION: "v1.44.0"
+  GRYPE_VERSION: "v0.119.0"
+  RUST_NIGHTLY: "nightly-2026-08-21"
+  SYFT_VERSION: "v1.52.0"
 
 jobs:
   secret-scan:
@@ -282,7 +282,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
       - name: Install pinned cargo-mutants
         shell: bash
