@@ -85,12 +85,17 @@ func cleanupTestStore(t *testing.T, a StorageAuthorityV1, height uint64, spent i
 		mustEnvironment(t, entryErr)
 		for first := 0; first < spent; first += 8_000 {
 			end := min(first+8_000, spent)
+			sources := make([]Mutation, 0, end-first)
 			family := make([]Mutation, 0, end-first)
 			for i := first; i < end; i++ {
 				var txid [32]byte
 				binary.BigEndian.PutUint32(txid[28:], uint32(i+1))
-				family = append(family, Mutation{DBI: dbis[5], Key: UndoEntryKey(hash, txid, 0, uint32(i), 0), AfterKind: AfterLiteral, Literal: entry})
+				refKey, keyErr := UTXOKey(8, txid, 0)
+				mustEnvironment(t, keyErr)
+				sources = append(sources, Mutation{DBI: dbis[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry})
+				family = append(family, Mutation{DBI: dbis[5], Key: UndoEntryKey(hash, txid, 0, uint32(i), 0), AfterKind: AfterOldValueRef, RefDBI: dbis[1], RefKey: refKey})
 			}
+			consultedRequireCommit(t, s, "cleanup undo source seed", Batch{Mutations: sources})
 			consultedRequireCommit(t, s, "cleanup undo seed", Batch{Mutations: family})
 		}
 	}
@@ -548,11 +553,11 @@ func TestCleanupBUMalformed(t *testing.T) {
 		s, _, hash, _ := cleanupTestStore(t, a, 0, 1)
 		var spent [32]byte
 		binary.BigEndian.PutUint32(spent[28:], 1)
-		entry, entryErr := (UTXOValue{Value: 1}).Encode()
-		mustEnvironment(t, entryErr)
+		refKey, keyErr := UTXOKey(8, spent, 0)
+		mustEnvironment(t, keyErr)
 		consultedRequireCommit(t, s, "duplicate outpoint seed", Batch{Mutations: []Mutation{
 			{DBI: readDBIsLiteral()[5], Key: UndoManifestKey(hash), BeforePresent: true, AfterKind: AfterLiteral, Literal: UndoManifestValue(0, [16]byte{}, 2, 2)},
-			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterLiteral, Literal: entry},
+			{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 1, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey},
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct duplicate-outpoint error.
@@ -567,7 +572,10 @@ func TestCleanupBUMalformed(t *testing.T) {
 		spent[31] = 1
 		entry, entryErr := (UTXOValue{Value: 1}).Encode()
 		mustEnvironment(t, entryErr)
-		consultedRequireCommit(t, s, "extra undo entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 0, 0, 0), AfterKind: AfterLiteral, Literal: entry}}})
+		refKey, keyErr := UTXOKey(8, spent, 0)
+		mustEnvironment(t, keyErr)
+		consultedRequireCommit(t, s, "extra undo source seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[1], Key: refKey, AfterKind: AfterLiteral, Literal: entry}}})
+		consultedRequireCommit(t, s, "extra undo entry seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: UndoEntryKey(hash, spent, 0, 0, 0), AfterKind: AfterOldValueRef, RefDBI: readDBIsLiteral()[1], RefKey: refKey}}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct extra-entry error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Diagnostic != "invalid cleanup owed artifact" {
