@@ -346,7 +346,9 @@ func TestCleanupBU(t *testing.T) {
 					t.Fatalf("cleanup terminal allocation independence drifted: %s/%d/%v", truth, stage, err)
 				}
 				a.Cleanup, a.Phase = nil, StoragePhaseNoneV1
-				cleanupWantAuthority(t, s, a)
+				encoded, encodeErr := a.Encode()
+				mustEnvironment(t, encodeErr)
+				consultedRequireImage(t, s, readDBIsLiteral()[0], []byte{2}, encoded, true, "cleanup terminal pending image drifted")
 				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], nil, false, "cleanup terminal pending image drifted")
 				truth, stage, err = s.CleanupBUV1(bootstrapOwner(t))
 				if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != nil {
