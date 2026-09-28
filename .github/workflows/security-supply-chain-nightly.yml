@@ -64,7 +64,7 @@ jobs:
           mkdir -p "${report_dir}"
           cat > "${report_dir}/scan-metadata.txt" <<'META'
           scope=full-tree
-          config=default-plus-rubin-fixture-false-positive
+          config=default-plus-rubin-false-positive-allowlists
           fail_on_scan_errors=true
           META
           config_path="${RUNNER_TEMP}/rubin-gitleaks.toml"
@@ -79,6 +79,14 @@ jobs:
           regexTarget = "line"
           paths = ['''^conformance/fixtures/CV-DEVNET-(GENESIS|CHAIN|SUBSIDY)\.json$''']
           regexes = ['''"coinbase_txid"\s*:\s*"[0-9a-f]{64}"''']
+
+          [[allowlists]]
+          targetRules = ["generic-api-key"]
+          description = "Allow the Lean hypothesis hKeyMismatch in the two P2PK formal proofs only."
+          condition = "AND"
+          regexTarget = "line"
+          paths = ['''^rubin-formal/RubinFormal/(UtxoBasicV1|UtxoApplyGenesisV1)\.lean$''']
+          regexes = ['''\(hKeyMismatch : SHA3\.sha3_256 w\.pubkey != entry\.covenantData\.extract 1 33\)''']
           TOML
           set +e
           timeout --signal=TERM --kill-after=30s 600 \
