@@ -48,7 +48,7 @@ Targets live in `clients/rust/fuzz/fuzz_targets/` (one per file); the nightly-wi
 One-time setup:
 
 ```bash
-scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo install cargo-fuzz --locked'
+scripts/dev-env.sh -- bash -lc 'cd clients/rust && cargo install cargo-fuzz --version 0.13.2 --locked'
 ```
 
 Run examples:
