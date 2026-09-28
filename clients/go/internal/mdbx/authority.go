@@ -152,7 +152,8 @@ func validPhasePayload(a StorageAuthorityV1) bool {
 	pending := a.PendingTargetProfile != nil
 	switch a.Phase {
 	case StoragePhaseNoneV1:
-		return all(a.Lifecycle == StorageLifecycleStableV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary == nil, !pending)
+		return all(a.Cleanup == nil, a.Replay == nil, a.Ordinary == nil,
+			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending)))
 	case StoragePhasePruneGCV1:
 		return all(a.Cleanup != nil, a.Replay == nil, a.Ordinary == nil,
 			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanup(a.Cleanup)
