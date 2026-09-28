@@ -591,6 +591,164 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 	})
 }
 
+func TestCleanupBURawEvidence(t *testing.T) {
+	for _, row := range []struct {
+		name, diagnostic string
+		kind             CleanupSpanKindV1
+		corrupt          func(*testing.T, *Store, [32]byte)
+	}{
+		{"authority before routing", "invalid cleanup authority", CleanupSpanBlocksV1, func(t *testing.T, s *Store, _ [32]byte) {
+			bad := make([]byte, 40)
+			bad[0] = 2
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
+		}},
+		{"invalid index work", "invalid cleanup canonical evidence", CleanupSpanBlocksV1, func(t *testing.T, s *Store, _ [32]byte) {
+			key, err := HeightKey(7, 0)
+			mustEnvironment(t, err)
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[2], key: key, value: make([]byte, 104)}))
+		}},
+		{"promise bound", "invalid cleanup authority", CleanupSpanBlocksV1, func(t *testing.T, s *Store, _ [32]byte) {
+			bad, err := cleanupAuthority(CleanupSpanBlocksV1, 0, false).Encode()
+			mustEnvironment(t, err)
+			binary.BigEndian.PutUint64(bad[2:10], 0)
+			binary.BigEndian.PutUint64(bad[10:18], 13680)
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
+		}},
+		{"promise generation", "invalid cleanup authority", CleanupSpanBlocksV1, func(t *testing.T, s *Store, _ [32]byte) {
+			bad, err := cleanupAuthority(CleanupSpanBlocksV1, 0, false).Encode()
+			mustEnvironment(t, err)
+			binary.BigEndian.PutUint64(bad[18:26], 8)
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
+		}},
+		{"span tag", "invalid cleanup authority", CleanupSpanBlocksV1, func(t *testing.T, s *Store, _ [32]byte) {
+			bad, err := cleanupAuthority(CleanupSpanBlocksV1, 0, false).Encode()
+			mustEnvironment(t, err)
+			bad[37] = 5
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
+		}},
+		{"invalid body commitment", "invalid cleanup owed artifact", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
+			bad := make([]byte, 116)
+			bad[0] = 7
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[4], key: hash[:], value: bad}))
+		}},
+		{"over-bound body width", "stored value width outside SchemaV1 bound", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
+			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[4], hash[:], make([]byte, MaxBlockBytes+1)))
+		}},
+		{"invalid manifest version", "invalid cleanup owed artifact", CleanupSpanUndoV1, func(t *testing.T, s *Store, hash [32]byte) {
+			bad := UndoManifestValue(0, [16]byte{}, 1, 0)
+			bad[0] = 2
+			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoManifestKey(hash), value: bad}))
+		}},
+		{"invalid undo value", "invalid cleanup owed artifact", CleanupSpanUndoV1, func(t *testing.T, s *Store, hash [32]byte) {
+			manifest := UndoManifestValue(0, [16]byte{}, 1, 1)
+			var spent [32]byte
+			spent[31] = 1
+			bad := make([]byte, 20)
+			bad[10] = 0xfd
+			mustEnvironment(t, fixtureSeedRows(s,
+				fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoManifestKey(hash), value: manifest},
+				fixtureRawRow{dbi: readDBIsLiteral()[5], key: UndoEntryKey(hash, spent, 0, 0, 0), value: bad}))
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			a := cleanupAuthority(row.kind, 0, false)
+			if row.name == "authority before routing" {
+				a = modelBase(1, 0, 0)
+			}
+			s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
+			row.corrupt(t, s, hash)
+			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+			engine, ok := err.(*EngineError)
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != row.diagnostic {
+				t.Fatalf("cleanup raw evidence provenance drifted: %s/%d/%v", truth, stage, err)
+			}
+		})
+	}
+	for _, width := range []int{0, 103} {
+		t.Run(fmt.Sprintf("index width %d", width), func(t *testing.T) {
+			a := cleanupAuthority(CleanupSpanBlocksV1, 0, false)
+			s, _, _, _ := cleanupTestStore(t, a, 0, 0)
+			key, err := HeightKey(7, 0)
+			mustEnvironment(t, err)
+			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, make([]byte, width)))
+			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+			engine, ok := err.(*EngineError)
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "stored value width outside SchemaV1 bound" {
+				t.Fatalf("cleanup index width provenance drifted: %s/%d/%v", truth, stage, err)
+			}
+		})
+	}
+	t.Run("undo key width 76", func(t *testing.T) {
+		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
+		s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
+		key := UndoEntryKey(hash, modelHash(1), 0, 0, 0)[:76]
+		value, valueErr := (UTXOValue{Value: 1}).Encode()
+		mustEnvironment(t, valueErr)
+		mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[5], key, value))
+		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+		engine, ok := err.(*EngineError)
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV1 prefix-page domain" {
+			t.Fatalf("cleanup undo key width provenance drifted: %s/%d/%v", truth, stage, err)
+		}
+	})
+}
+
+func TestCleanupBUNativeImages(t *testing.T) {
+	for _, mode := range []string{"old", "new", "third", "unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			a := cleanupAuthority(CleanupSpanBlocksV1, 0, true)
+			s, _, hash, body := cleanupTestStore(t, a, 0, 0)
+			var batch Batch
+			mustEnvironment(t, s.View(func(reader *Reader) error {
+				var err error
+				batch, err = cleanupBUBatch(reader, errors.New("unexpected no-work"))
+				return err
+			}))
+			key, keyErr := HeightKey(7, 0)
+			mustEnvironment(t, keyErr)
+			if len(batch.Consulted) != 2 || batch.Consulted[0].DBI.Rank != 2 || !bytes.Equal(batch.Consulted[0].Key, key) || batch.Consulted[1].DBI.Rank != 3 || !bytes.Equal(batch.Consulted[1].Key, hash[:]) {
+				t.Fatal("cleanup strict readback drifted")
+			}
+			plan, planErr := updateOwnedBatch(batch)
+			mustEnvironment(t, planErr)
+			var outcome updateNativeOutcome
+			var err error
+			switch mode {
+			case "old":
+				outcome = fixtureUpdateResultTrue(s, plan)
+			case "new":
+				outcome, err = fixtureUpdatePostCommitENOSPC(s, plan)
+			case "third":
+				outcome, err = fixtureUpdatePostCommitENOSPCThird(s, plan)
+			case "unreadable":
+				outcome, err = fixtureUpdatePostCommitENOSPCUnreadable(s, plan)
+			}
+			mustEnvironment(t, err)
+			truth, stage, result := updateResult(outcome, nil)
+			if result == nil || mode != "old" && stage != UpdateStageCommitMayHaveCrossed || mode == "old" && stage != UpdateStagePrewrite {
+				t.Fatalf("cleanup native stage or cause provenance drifted: %s/%d/%v", truth, stage, result)
+			}
+			if mode == "old" {
+				if truth != CommitTruthOld {
+					t.Fatalf("cleanup native OLD drifted: %s/%v", truth, result)
+				}
+				cleanupWantAuthority(t, s, a)
+				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], body, true, "cleanup native OLD image drifted")
+			} else if mode == "new" {
+				if truth != CommitTruthNew {
+					t.Fatalf("cleanup native NEW-with-error drifted: %s/%v", truth, result)
+				}
+				a.Cleanup, a.Phase = nil, StoragePhaseNoneV1
+				cleanupWantAuthority(t, s, a)
+				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], nil, false, "cleanup complete native image drifted")
+				consultedRequireImage(t, s, readDBIsLiteral()[3], hash[:], body[:116], true, "cleanup strict readback drifted")
+			} else if truth != CommitTruthUnknown {
+				t.Fatalf("cleanup native UNKNOWN guessed image: %s/%v", truth, result)
+			}
+		})
+	}
+}
+
 //nolint:errorlint // Exact callback, infrastructure and panic identities are required.
 func TestReaderPrefixPageCallbackLifecycle(t *testing.T) {
 	dbi := readDBIsLiteral()[2]

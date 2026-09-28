@@ -211,6 +211,7 @@ func TestStorageAuthorityV1LegalStateMatrix(t *testing.T) {
 						a.PendingTargetProfile = &p
 					}
 					valid := phase == 1 && lifecycle == 1 && payload == 0 && pending == 0 ||
+						phase == 1 && lifecycle == 2 && payload == 0 && (pending == 1 || pending == 2) ||
 						phase == 2 && lifecycle == 1 && payload == 1 && pending == 0 ||
 						phase == 2 && lifecycle == 2 && payload == 1 && (pending == 1 || pending == 2) ||
 						phase == 3 && lifecycle == 2 && payload == 2 && pending == 0 ||
@@ -235,6 +236,24 @@ func TestStorageAuthorityV1LegalStateMatrix(t *testing.T) {
 	wantModel(t, "detached without cleanup", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.DetachedSuffix = modelDetached(1, 1) }), false)
 	wantModel(t, "selected and detached", edit(modelPrune(false), func(a *StorageAuthorityV1) {
 		a.NextGenerationID, a.SelectedSide, a.DetachedSuffix = 3, modelSide(2, 0, 1, 1, 1), modelDetached(1, 1)
+	}), false)
+	for _, profile := range []StorageProfileV1{StorageProfilePrunedV1, StorageProfileArchiveV1} {
+		a := modelBase(1, 0, 0)
+		a.Lifecycle, a.PendingTargetProfile = StorageLifecycleRecoveryRequiredV1, &profile
+		wantModel(t, fmt.Sprintf("pending NONE profile=%d", profile), a, true)
+		wantModel(t, fmt.Sprintf("pending NONE selected profile=%d", profile), edit(a, func(v *StorageAuthorityV1) {
+			v.NextGenerationID, v.SelectedSide = 3, modelSide(2, 0, 1, 1, 1)
+		}), false)
+		wantModel(t, fmt.Sprintf("pending NONE detached profile=%d", profile), edit(a, func(v *StorageAuthorityV1) {
+			v.DetachedSuffix = modelDetached(1, 1)
+		}), false)
+	}
+	wantModel(t, "pending NONE missing profile", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) {
+		a.Lifecycle = StorageLifecycleRecoveryRequiredV1
+	}), false)
+	wantModel(t, "pending NONE invalid profile", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) {
+		p := StorageProfileV1(3)
+		a.Lifecycle, a.PendingTargetProfile = StorageLifecycleRecoveryRequiredV1, &p
 	}), false)
 }
 
