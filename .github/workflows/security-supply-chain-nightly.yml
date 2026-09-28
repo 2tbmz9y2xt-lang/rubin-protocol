@@ -22,11 +22,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_MUTANTS_VERSION: "27.0.0"
+  CARGO_MUTANTS_VERSION: "27.1.0"
   GITLEAKS_VERSION: "v8.30.1"
-  GRYPE_VERSION: "v0.112.0"
-  RUST_NIGHTLY: "nightly-2025-11-21"
-  SYFT_VERSION: "v1.44.0"
+  GRYPE_VERSION: "v0.119.0"
+  RUST_NIGHTLY: "nightly-2026-08-21"
+  SYFT_VERSION: "v1.52.0"
 
 jobs:
   secret-scan:
@@ -64,7 +64,7 @@ jobs:
           mkdir -p "${report_dir}"
           cat > "${report_dir}/scan-metadata.txt" <<'META'
           scope=full-tree
-          config=default-plus-rubin-fixture-false-positive
+          config=default-plus-rubin-false-positive-allowlists
           fail_on_scan_errors=true
           META
           config_path="${RUNNER_TEMP}/rubin-gitleaks.toml"
@@ -79,6 +79,14 @@ jobs:
           regexTarget = "line"
           paths = ['''^conformance/fixtures/CV-DEVNET-(GENESIS|CHAIN|SUBSIDY)\.json$''']
           regexes = ['''"coinbase_txid"\s*:\s*"[0-9a-f]{64}"''']
+
+          [[allowlists]]
+          targetRules = ["generic-api-key"]
+          description = "Allow the Lean hypothesis hKeyMismatch in the two P2PK formal proofs only."
+          condition = "AND"
+          regexTarget = "line"
+          paths = ['''^rubin-formal/RubinFormal/(UtxoBasicV1|UtxoApplyGenesisV1)\.lean$''']
+          regexes = ['''\(hKeyMismatch : SHA3\.sha3_256 w\.pubkey != entry\.covenantData\.extract 1 33\)''']
           TOML
           set +e
           timeout --signal=TERM --kill-after=30s 600 \
@@ -282,7 +290,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
       - name: Install pinned cargo-mutants
         shell: bash
