@@ -88,7 +88,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.27.1'
           cache: true
           cache-dependency-path: |
             clients/go/go.mod
@@ -105,8 +105,8 @@ jobs:
 
       - name: Install gosec + govulncheck
         run: |
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.24.7
-          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo-audit binary
@@ -332,7 +332,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.test_gate.outputs.run_test == 'true'
         with:
-          go-version: '1.26.6'
+          go-version: '1.27.1'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -498,7 +498,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.27.1'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -591,7 +591,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.formal_gate.outputs.run_formal == 'true'
         with:
-          go-version: '1.26.6'
+          go-version: '1.27.1'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -656,7 +656,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.6'
+          go-version: '1.27.1'
           cache: true
           cache-dependency-path: |
             clients/go/go.sum
