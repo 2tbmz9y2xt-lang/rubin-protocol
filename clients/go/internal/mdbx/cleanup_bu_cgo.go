@@ -232,13 +232,20 @@ func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCoun
 	deletes := make([]Mutation, 0, 1+int(spentCount))
 	deletes = append(deletes, Mutation{DBI: dbi, Key: manifest, BeforePresent: true, AfterKind: AfterAbsent})
 	outpoints := make([][36]byte, 0, int(spentCount))
-	after := manifest
+	var after []byte
 	for {
 		page, pageErr := reader.PrefixPage(dbi, hash[:], after, 64, 4_200_000)
 		if pageErr != nil {
 			return nil, pageErr
 		}
-		if err := cleanupBUPageRows(reader, dbi, page.Rows, txCount, spentCount, &deletes, &outpoints); err != nil {
+		rows := page.Rows
+		if after == nil {
+			if len(rows) == 0 || !bytes.Equal(rows[0].Key, manifest) {
+				return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
+			}
+			rows = rows[1:]
+		}
+		if err := cleanupBUPageRows(reader, dbi, rows, txCount, spentCount, &deletes, &outpoints); err != nil {
 			return nil, err
 		}
 		if page.Stop == PrefixPageExhausted {

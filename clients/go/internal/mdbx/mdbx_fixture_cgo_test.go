@@ -691,6 +691,24 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			t.Fatalf("cleanup undo key width provenance drifted: %s/%d/%v", truth, stage, err)
 		}
 	})
+	t.Run("undo hash key width 32", func(t *testing.T) {
+		a := cleanupAuthority(CleanupSpanUndoV1, 0, false)
+		s, path, hash, _ := cleanupTestStore(t, a, 0, 0)
+		cfg := s.config
+		manifest := UndoManifestKey(hash)
+		manifestValue := UndoManifestValue(0, [16]byte{}, 1, 0)
+		mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[5], hash[:], []byte{1}))
+		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
+		engine, ok := err.(*EngineError)
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV1 prefix-page domain" {
+			t.Fatalf("cleanup hash-prefix artifact accepted: %s/%d/%v", truth, stage, err)
+		}
+		reopened, openErr := Open(path, cfg)
+		mustEnvironment(t, openErr)
+		defer func() { mustEnvironment(t, reopened.Close()) }()
+		cleanupWantAuthority(t, reopened, a)
+		consultedRequireImage(t, reopened, readDBIsLiteral()[5], manifest, manifestValue, true, "cleanup manifest changed after refusal")
+	})
 }
 
 func TestCleanupBUNativeImages(t *testing.T) {

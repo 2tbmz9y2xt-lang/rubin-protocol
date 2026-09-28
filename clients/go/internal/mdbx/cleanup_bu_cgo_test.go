@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -438,6 +439,12 @@ func TestCleanupBU(t *testing.T) {
 		againTruth, againStage, againErr := s.CleanupBUV1(owner)
 		if againTruth != truth || againStage != stage || againErr != err {
 			t.Fatalf("cleanup cached terminal truth drifted: %s/%d/%v", againTruth, againStage, againErr)
+		}
+		cleanupCause := errors.New("cleanup failure")
+		joinedTruth, joinedStage, joinedErr := updateResult(updateNativeConsumed(CommitTruthOld, false, err, nil, UpdateStagePrewrite), cleanupCause)
+		parts, joined := joinedErr.(interface{ Unwrap() []error })
+		if joinedTruth != CommitTruthOld || joinedStage != UpdateStagePrewrite || !joined || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != err || parts.Unwrap()[1] != cleanupCause {
+			t.Fatalf("cleanup stage or cause provenance drifted: %s/%d/%v", joinedTruth, joinedStage, joinedErr)
 		}
 	})
 	t.Run("mixed", func(t *testing.T) {
