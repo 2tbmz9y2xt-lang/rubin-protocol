@@ -626,6 +626,9 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			bad[37] = 5
 			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[0], key: []byte{2}, value: bad}))
 		}},
+		{"missing required canonical header", "invalid cleanup canonical evidence", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
+			mustEnvironment(t, fixtureDeletePrefixRow(s, readDBIsLiteral()[3], hash[:]))
+		}},
 		{"invalid hash-bound header", "invalid cleanup owed artifact", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
 			bad := make([]byte, 116)
 			bad[0] = 7
@@ -655,12 +658,16 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			if row.name == "authority before routing" {
 				a = modelBase(1, 0, 0)
 			}
-			s, _, hash, _ := cleanupTestStore(t, a, 0, 0)
+			s, _, hash, body := cleanupTestStore(t, a, 0, 0)
 			row.corrupt(t, s, hash)
 			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 			engine, ok := err.(*EngineError)
 			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != row.diagnostic {
 				t.Fatalf("cleanup raw evidence provenance drifted: %s/%d/%v", truth, stage, err)
+			}
+			if row.name == "missing required canonical header" {
+				cleanupWantAuthority(t, s, a)
+				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], body, true, "cleanup artifact changed after canonical refusal")
 			}
 		})
 	}

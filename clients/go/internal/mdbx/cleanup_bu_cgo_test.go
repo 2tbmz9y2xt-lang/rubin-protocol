@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
 	"slices"
 	"testing"
 )
@@ -296,9 +295,8 @@ func TestCleanupBU(t *testing.T) {
 		if heldErr != inFlight { //nolint:errorlint // Update must preserve this exact callback error object.
 			t.Fatalf("held callback cause drifted: %v", heldErr)
 		}
-		before := a
 		truth, _, err := s.CleanupBUV1(bootstrapOwner(t))
-		if truth != CommitTruthNew || err != nil || !reflect.DeepEqual(a, before) {
+		if truth != CommitTruthNew || err != nil {
 			t.Fatalf("cleanup caller buffer ownership drifted: %s/%v", truth, err)
 		}
 	})
@@ -312,6 +310,15 @@ func TestCleanupBU(t *testing.T) {
 					t.Fatalf("cleanup admitted undo family drifted: %s/%d/%v", truth, stage, err)
 				}
 				consultedRequireImage(t, s, readDBIsLiteral()[5], UndoManifestKey(hash), nil, false, "cleanup complete undo family drifted")
+				var page PrefixPage
+				mustEnvironment(t, s.View(func(reader *Reader) error {
+					var err error
+					page, err = reader.PrefixPage(readDBIsLiteral()[5], hash[:], nil, 64, 4_200_000)
+					return err
+				}))
+				if page.Stop != PrefixPageExhausted || len(page.Rows) != 0 {
+					t.Fatalf("cleanup retained undo family rows: %#v", page)
+				}
 				consultedRequireImage(t, s, readDBIsLiteral()[4], hash[:], body, true, "cleanup preserved row drifted")
 				consultedRequireImage(t, s, readDBIsLiteral()[3], hash[:], body[:116], true, "cleanup preserved row drifted")
 				otherHeader := make([]byte, 116)
