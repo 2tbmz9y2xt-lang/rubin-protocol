@@ -25,12 +25,15 @@ func prunedStore(t *testing.T, a StorageAuthorityV1, tip *AuthorityPointV1, work
 	rows := []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, AfterKind: AfterLiteral, Literal: encoded}, consultedCounter(t, 99)}
 	fixture := updatePlanBatch(t).Mutations
 	rows = append(rows, fixture[3]) // A live UTXO survives every profile decision.
+	var owner []Mutation
 	if tip != nil {
 		key, keyErr := HeightKey(a.ActiveGenerationID, tip.Height)
 		mustEnvironment(t, keyErr)
 		rows = append(rows, Mutation{DBI: readDBIsLiteral()[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(tip.BlockHash, [32]byte{}, work)})
+		owner = append(owner, canonicalOwnerLiteral(a.ActiveGenerationID, tip.Height, tip.BlockHash))
 	}
 	rows = append(rows, fixture[5], fixture[6], fixture[7], fixture[9])
+	rows = append(rows, owner...)
 	consultedRequireCommit(t, s, "pruned fixture", Batch{Mutations: rows})
 	return s, path, cfg, rows
 }
@@ -263,7 +266,7 @@ func testPrunedPreservation(t *testing.T) {
 	s, _, _, rows := prunedStore(t, a, tip, modelWork(false))
 	other, err := HeightKey(8, 99)
 	mustEnvironment(t, err)
-	extra := []Mutation{{DBI: readDBIsLiteral()[2], Key: other, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(77), [32]byte{}, modelWork(false))}}
+	extra := []Mutation{{DBI: readDBIsLiteral()[2], Key: other, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(77), [32]byte{}, modelWork(false))}, canonicalOwnerLiteral(8, 99, modelHash(77))}
 	consultedRequireCommit(t, s, "preservation extras", Batch{Mutations: extra})
 	rows = append(rows, extra...)
 	before, counts := prunedImage(t, s, rows), bootstrapCounts(t, s, "preservation")
@@ -308,8 +311,9 @@ func testPrunedTip(t *testing.T) {
 				key, err := HeightKey(1, 1)
 				mustEnvironment(t, err)
 				extra := Mutation{DBI: readDBIsLiteral()[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(6), actual.BlockHash, modelWork(false))}
-				consultedRequireCommit(t, s, "later tip", Batch{Mutations: []Mutation{extra}})
-				rows = append(rows, extra)
+				owner := canonicalOwnerLiteral(1, 1, modelHash(6))
+				consultedRequireCommit(t, s, "later tip", Batch{Mutations: []Mutation{extra, owner}})
+				rows = append(rows, extra, owner)
 			case "hash":
 				expected.BlockHash = modelHash(9)
 			case "zero-mismatch":
@@ -606,9 +610,9 @@ func prunedSourceGuard(source []byte) string {
 		return "pruned profile effect ownership drifted"
 	}
 	allowed := map[string]string{
-		"SelectPrunedProfileV1":    "adapterError|errors.New|reservations.WithReservation|s.Update|reader.Get|SchemaV1DBIs|DecodeStorageAuthorityV1|bootstrapFailure|integrityError|prunedProfileBatch|prunedProfileOutcome",
-		"prunedProfileBatch":       "prunedProfileTip|prunedProfileReplacement|SchemaV1DBIs",
-		"prunedProfileTip":         "binary.BigEndian.PutUint64|adapterError|HeightKey|reader.Get|SchemaV1DBIs|validWork|bootstrapFailure|integrityError|reader.PrefixPage|len",
+		"SelectPrunedProfileV1":    "adapterError|errors.New|reservations.WithReservation|s.Update|reader.Get|SchemaV2DBIs|DecodeStorageAuthorityV1|bootstrapFailure|integrityError|prunedProfileBatch|prunedProfileOutcome",
+		"prunedProfileBatch":       "prunedProfileTip|prunedProfileReplacement|SchemaV2DBIs",
+		"prunedProfileTip":         "binary.BigEndian.PutUint64|adapterError|HeightKey|reader.Get|SchemaV2DBIs|validWork|bootstrapFailure|integrityError|reader.PrefixPage|len",
 		"prunedProfileReplacement": "uint64|laggedPromise|bootstrapFailure|integrityError|ValidateStorageAuthorityV1|adapterError|authoritySize|a.Encode|updateBoundError",
 		"prunedProfileOutcome":     "",
 	}
@@ -777,7 +781,7 @@ func prunedMutationLiteral(literal *ast.CompositeLit) bool {
 	if !ok {
 		return false
 	}
-	return prunedFields(row, map[string]string{"DBI": "SchemaV1DBIs()[0]", "Key": "[]byte{2}", "BeforePresent": "true", "AfterKind": "AfterLiteral", "Literal": "encoded"})
+	return prunedFields(row, map[string]string{"DBI": "SchemaV2DBIs()[0]", "Key": "[]byte{2}", "BeforePresent": "true", "AfterKind": "AfterLiteral", "Literal": "encoded"})
 }
 
 func prunedConsultedLiteral(expr ast.Expr) bool {
@@ -786,7 +790,7 @@ func prunedConsultedLiteral(expr ast.Expr) bool {
 		return false
 	}
 	row, ok := rows.Elts[0].(*ast.CompositeLit)
-	return ok && prunedFields(row, map[string]string{"DBI": "SchemaV1DBIs()[2]", "Key": "key"})
+	return ok && prunedFields(row, map[string]string{"DBI": "SchemaV2DBIs()[2]", "Key": "key"})
 }
 
 func prunedFields(row *ast.CompositeLit, want map[string]string) bool {
@@ -859,10 +863,10 @@ func TestPrunedProfileSourceOwnership(t *testing.T) {
 	mustEnvironment(t, err)
 	// These are structural fixtures, never runtime-mutation evidence.
 	for _, row := range []struct{ old, replacement, want string }{
-		{"batch.Consulted = []ConsultedRow{{DBI: SchemaV1DBIs()[2], Key: key}}", "batch.Consulted = nil", "pruned profile consulted owner drifted"},
+		{"batch.Consulted = []ConsultedRow{{DBI: SchemaV2DBIs()[2], Key: key}}", "batch.Consulted = nil", "pruned profile consulted owner drifted"},
 		{"return batch, nil", "s := new(Store); s.Update(nil); return batch, nil", "pruned profile effect ownership drifted"},
-		{"return batch, nil", "f := reader.Get; f(SchemaV1DBIs()[0], nil); return batch, nil", "pruned profile effect ownership drifted"},
-		{"return batch, nil", "func() { reader.Get(SchemaV1DBIs()[0], nil) }(); return batch, nil", "pruned profile effect ownership drifted"},
+		{"return batch, nil", "f := reader.Get; f(SchemaV2DBIs()[0], nil); return batch, nil", "pruned profile effect ownership drifted"},
+		{"return batch, nil", "func() { reader.Get(SchemaV2DBIs()[0], nil) }(); return batch, nil", "pruned profile effect ownership drifted"},
 		{"return batch, nil", "_ = Batch{Mutations: []Mutation{{AfterKind: AfterAbsent}}}; return batch, nil", ""},
 		{"return batch, nil", "other := Batch{Mutations: []Mutation{{AfterKind: AfterAbsent}}}; return other, nil", "pruned profile effect ownership drifted"},
 		{"return batch, nil", "alias := &batch; alias.Mutations = nil; return batch, nil", "pruned profile effect ownership drifted"},

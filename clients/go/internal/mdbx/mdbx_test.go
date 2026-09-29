@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"errors"
 	"math"
 	"testing"
 )
@@ -69,13 +70,13 @@ func TestConfigV1ExactRoundTripAndRejection(t *testing.T) {
 }
 
 func TestDBIClosureAndKeys(t *testing.T) {
-	wantNames := []string{"meta-v1", "utxo-v1", "canonical-v1", "headers-v1", "blocks-v1", "undo-v1", "staged-v1"}
-	for i, d := range SchemaV1DBIs() {
+	wantNames := []string{"meta-v1", "utxo-v1", "canonical-v1", "headers-v1", "blocks-v1", "undo-v1", "staged-v1", "canonical-owner-v1"}
+	for i, d := range SchemaV2DBIs() {
 		if d.Name != wantNames[i] || d.Rank != uint8(i) || d.Flags != 0 || ValidateDBI(d) != nil {
 			t.Fatalf("DBI %d mismatch: %#v", i, d)
 		}
 	}
-	for _, d := range []DBI{{Name: "meta-v2"}, {Name: "meta-v1", Rank: 1}, {Name: "meta-v1", Flags: 1}, {Rank: 7}} {
+	for _, d := range []DBI{{Name: "meta-v2"}, {Name: "meta-v1", Rank: 1}, {Name: "meta-v1", Flags: 1}, {Rank: 7}, {Rank: 8}, {Name: "canonical-owner-v1", Rank: 8}, {Name: "canonical-owner-v1", Rank: 7, Flags: 1}} {
 		if ValidateDBI(d) == nil {
 			t.Fatalf("unknown DBI accepted: %#v", d)
 		}
@@ -98,6 +99,7 @@ func TestDBIClosureAndKeys(t *testing.T) {
 		{5, UndoManifestKey(h)},
 		{5, UndoEntryKey(h, h, 1, 2, 3)},
 		{6, mustHeightKey(t, 1, 2)},
+		{7, append(be64(1), h[:]...)},
 	} {
 		if !validKey(tc.rank, tc.key) {
 			t.Fatalf("valid key rank %d rejected", tc.rank)
@@ -119,7 +121,7 @@ func TestDBIClosureAndKeys(t *testing.T) {
 	for _, tc := range []struct {
 		rank uint8
 		key  []byte
-	}{{0, []byte{3}}, {0, append([]byte{0x10}, make([]byte, 8)...)}, {1, make([]byte, 44)}, {2, make([]byte, 16)}, {3, make([]byte, 31)}, {5, append(UndoManifestKey(h), 0)}, {5, append(h[:], 2)}, {6, make([]byte, 15)}, {7, nil}} {
+	}{{0, []byte{3}}, {0, append([]byte{0x10}, make([]byte, 8)...)}, {1, make([]byte, 44)}, {2, make([]byte, 16)}, {3, make([]byte, 31)}, {5, append(UndoManifestKey(h), 0)}, {5, append(h[:], 2)}, {6, make([]byte, 15)}, {7, nil}, {7, append(be64(1), h[:31]...)}, {7, append(append(be64(1), h[:]...), 0)}, {7, append(make([]byte, 8), h[:]...)}, {8, append(be64(1), h[:]...)}} {
 		if validKey(tc.rank, tc.key) {
 			t.Fatalf("bad key rank %d accepted", tc.rank)
 		}
@@ -131,7 +133,7 @@ func TestMetadataValuesAndOwnership(t *testing.T) {
 	config, _ := configForTest().Encode()
 	counters := LogicalCounterValue(0x0102030405060708, 0x1112131415161718)
 	bytesCount, entries, counterErr := DecodeLogicalCounterValue(counters)
-	if !bytes.Equal(version, []byte{0, 0, 0, 1}) || DecodeSchemaVersionValue(version) != nil || !bytes.Equal(counters, []byte{1, 2, 3, 4, 5, 6, 7, 8, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18}) || counterErr != nil || bytesCount != 0x0102030405060708 || entries != 0x1112131415161718 {
+	if !bytes.Equal(version, []byte{0, 0, 0, 2}) || DecodeSchemaVersionValue(version) != nil || DecodeSchemaVersionValue([]byte{0, 0, 0, 1}) == nil || !bytes.Equal(counters, []byte{1, 2, 3, 4, 5, 6, 7, 8, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18}) || counterErr != nil || bytesCount != 0x0102030405060708 || entries != 0x1112131415161718 {
 		t.Fatal("semantic metadata codecs mismatch")
 	}
 	ownedVersion, ownedCounters := SchemaVersionValue(), LogicalCounterValue(bytesCount, entries)
@@ -162,7 +164,7 @@ func TestMetadataValuesAndOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		kind  byte
 		value []byte
-	}{{0, []byte{0, 0, 0, 2}}, {0, make([]byte, 3)}, {0, []byte{0, 0, 0, 1, 0}}, {1, make([]byte, 48)}, {2, make([]byte, MaxMetadataBytes+1)}, {0x10, make([]byte, 15)}, {0x10, make([]byte, 17)}, {3, nil}} {
+	}{{0, []byte{0, 0, 0, 1}}, {0, make([]byte, 3)}, {0, []byte{0, 0, 0, 2, 0}}, {1, make([]byte, 48)}, {2, make([]byte, MaxMetadataBytes+1)}, {0x10, make([]byte, 15)}, {0x10, make([]byte, 17)}, {3, nil}} {
 		if _, err := MetaValue(tc.kind, tc.value); err == nil {
 			t.Fatalf("bad meta %x accepted", tc.kind)
 		}
@@ -306,7 +308,7 @@ func TestValidateEveryDBIRow(t *testing.T) {
 	header := make([]byte, 116)
 	hash = sha3.Sum256(header)
 	config, _ := configForTest().Encode()
-	version := []byte{0, 0, 0, 1}
+	version := []byte{0, 0, 0, 2}
 	utxo, _ := (UTXOValue{}).Encode()
 	rows := []struct {
 		d          DBI
@@ -321,6 +323,7 @@ func TestValidateEveryDBIRow(t *testing.T) {
 		{schemaDBIs[3], hash[:], header},
 		{schemaDBIs[4], hash[:], header},
 		{schemaDBIs[6], mustHeightKey(t, 1, 0), make([]byte, 104)},
+		{schemaDBIs[7], append(be64(1), hash[:]...), make([]byte, 8)},
 	}
 	for i, row := range rows {
 		if err := ValidateRow(row.d, row.key, row.value); err != nil {
@@ -337,10 +340,11 @@ func TestValidateEveryDBIRow(t *testing.T) {
 	if ValidateRow(DBI{Name: "unknown"}, nil, nil) == nil {
 		t.Fatal("unknown DBI dispatched")
 	}
-	if ValidateRow(schemaDBIs[0], []byte{0}, []byte{0, 0, 0, 2}) == nil || ValidateRow(schemaDBIs[0], append([]byte{0x10}, be64(1)...), make([]byte, 15)) == nil {
+	if ValidateRow(schemaDBIs[0], []byte{0}, []byte{0, 0, 0, 1}) == nil || ValidateRow(schemaDBIs[0], append([]byte{0x10}, be64(1)...), make([]byte, 15)) == nil {
 		t.Fatal("semantic metadata validation bypassed")
 	}
-	if ValidateRow(schemaDBIs[2], mustHeightKey(t, 1, 0), make([]byte, 103)) == nil || ValidateRow(schemaDBIs[6], mustHeightKey(t, 1, 0), make([]byte, 105)) == nil {
+	if ValidateRow(schemaDBIs[2], mustHeightKey(t, 1, 0), make([]byte, 103)) == nil || ValidateRow(schemaDBIs[6], mustHeightKey(t, 1, 0), make([]byte, 105)) == nil ||
+		ValidateRow(schemaDBIs[7], append(be64(1), hash[:]...), make([]byte, 7)) == nil || ValidateRow(schemaDBIs[7], append(be64(1), hash[:]...), make([]byte, 9)) == nil {
 		t.Fatal("chain value width mutation accepted")
 	}
 }
@@ -394,5 +398,34 @@ func TestConstructorsRejectZeroImage(t *testing.T) {
 	want, _ := UTXOKey(1, [32]byte{}, 0)
 	if bytes.Equal(key, want) {
 		t.Fatal("constructor did not own result")
+	}
+}
+
+// TestCanonicalOwnerRowDomain pins the rank-7 row domain with literal bytes, never with the constructors under test.
+func TestCanonicalOwnerRowDomain(t *testing.T) {
+	hash := [32]byte{0xde, 31: 0xad}
+	wantKey := append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, hash[:]...)
+	if key, err := CanonicalOwnerKey(1, hash); err != nil || !bytes.Equal(key, wantKey) {
+		t.Fatalf("canonical owner key drifted: %x/%v", key, err)
+	}
+	if key, err := CanonicalOwnerKey(0, hash); key != nil || !errors.Is(err, errSchema) {
+		t.Fatalf("zero-generation canonical owner key accepted: %x/%v", key, err)
+	}
+	if value := CanonicalOwnerValue(0x0102030405060708); !bytes.Equal(value, []byte{1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("canonical owner value drifted: %x", value)
+	}
+	owner, value := DBI{Name: "canonical-owner-v1", Rank: 7}, []byte{0, 0, 0, 0, 0, 0, 0, 9}
+	if ValidateRow(owner, wantKey, value) != nil || !validKey(7, wantKey) {
+		t.Fatal("valid canonical owner row rejected")
+	}
+	for _, key := range [][]byte{nil, wantKey[:39], append(append([]byte(nil), wantKey...), 0), append(make([]byte, 8), hash[:]...)} {
+		if validKey(7, key) || ValidateRow(owner, key, value) == nil {
+			t.Fatalf("canonical owner key domain widened: %x", key)
+		}
+	}
+	for _, width := range []int{0, 7, 9} {
+		if ValidateRow(owner, wantKey, make([]byte, width)) == nil {
+			t.Fatalf("canonical owner value width %d accepted", width)
+		}
 	}
 }

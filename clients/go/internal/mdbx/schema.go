@@ -13,7 +13,7 @@ const (
 	MaxBlockBytes    = 68_000_125
 )
 
-var errSchema = errors.New("invalid MDBX SchemaV1 bytes")
+var errSchema = errors.New("invalid MDBX SchemaV2 bytes")
 
 type DBI struct {
 	Name  string
@@ -21,9 +21,9 @@ type DBI struct {
 	Flags uint32
 }
 
-var schemaDBIs = [...]DBI{{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1}, {Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3}, {Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5}, {Name: "staged-v1", Rank: 6}}
+var schemaDBIs = [...]DBI{{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1}, {Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3}, {Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5}, {Name: "staged-v1", Rank: 6}, {Name: "canonical-owner-v1", Rank: 7}}
 
-func SchemaV1DBIs() [7]DBI { return schemaDBIs }
+func SchemaV2DBIs() [8]DBI { return schemaDBIs }
 
 func ValidateDBI(d DBI) error {
 	if int(d.Rank) >= len(schemaDBIs) || d != schemaDBIs[d.Rank] {
@@ -100,10 +100,10 @@ func MetaKey(kind byte, imageID uint64) ([]byte, error) {
 	return b, nil
 }
 
-func SchemaVersionValue() []byte { return []byte{0, 0, 0, 1} }
+func SchemaVersionValue() []byte { return []byte{0, 0, 0, 2} }
 
 func DecodeSchemaVersionValue(value []byte) error {
-	if len(value) != 4 || binary.BigEndian.Uint32(value) != 1 {
+	if len(value) != 4 || binary.BigEndian.Uint32(value) != 2 {
 		return errSchema
 	}
 	return nil
@@ -222,6 +222,25 @@ func ChainValue(blockHash, parentHash [32]byte, chainwork [40]byte) []byte {
 	return b
 }
 
+// CanonicalOwnerKey is the canonical-owner-v1 key: the nonzero generation as a big-endian u64, then the 32-byte block
+// hash (40 bytes). Generation zero is refused.
+func CanonicalOwnerKey(generation uint64, hash [32]byte) ([]byte, error) {
+	if generation == 0 {
+		return nil, errSchema
+	}
+	b := make([]byte, 40)
+	binary.BigEndian.PutUint64(b, generation)
+	copy(b[8:], hash[:])
+	return b, nil
+}
+
+// CanonicalOwnerValue is the canonical-owner-v1 value: the canonical-v1 height as a big-endian u64 (8 bytes).
+func CanonicalOwnerValue(height uint64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, height)
+	return b
+}
+
 func HashBoundValue(key [32]byte, value []byte, block bool) ([]byte, error) {
 	if (!block && len(value) != 116) || (block && (len(value) < 116 || len(value) > MaxBlockBytes)) || sha3.Sum256(value[:min(len(value), 116)]) != key {
 		return nil, errSchema
@@ -286,6 +305,8 @@ func validateValue(rank uint8, key, value []byte) error {
 		return err
 	case 5:
 		return validateUndoValue(key, value)
+	case 7:
+		return validateOwnerValue(value)
 	default:
 		return errSchema
 	}
@@ -293,6 +314,13 @@ func validateValue(rank uint8, key, value []byte) error {
 
 func validateChainValue(value []byte) error {
 	if len(value) != 104 {
+		return errSchema
+	}
+	return nil
+}
+
+func validateOwnerValue(value []byte) error {
+	if len(value) != 8 {
 		return errSchema
 	}
 	return nil
@@ -321,6 +349,8 @@ func validKey(rank uint8, key []byte) bool {
 		return len(key) == 32
 	case 5:
 		return validUndoKey(key)
+	case 7:
+		return validImageKey(key, 40)
 	default:
 		return false
 	}

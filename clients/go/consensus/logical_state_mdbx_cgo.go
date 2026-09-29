@@ -72,7 +72,7 @@ func (v *logicalMDBXStateView) read(dbi mdbx.DBI, key []byte, keyErr error) ([]b
 // well formed row records the decoded counters once, every other outcome records nothing, and absence is store integrity.
 func (v *logicalMDBXStateView) Counters() logicalStateCounterRead {
 	key, keyErr := mdbx.MetaKey(0x10, v.imageID)
-	value, present, err := v.read(mdbx.SchemaV1DBIs()[0], key, keyErr)
+	value, present, err := v.read(mdbx.SchemaV2DBIs()[0], key, keyErr)
 	if err != nil {
 		kind, cause := classifyLogicalMDBXReadError(err)
 		counterKind, _ := logicalMDBXReadKinds(kind)
@@ -93,7 +93,7 @@ func (v *logicalMDBXStateView) Counters() logicalStateCounterRead {
 // StateEntryBytes length; a failed read records nothing and the view never retains the stored value bytes.
 func (v *logicalMDBXStateView) Lookup(op Outpoint) logicalStateRowRead {
 	key, keyErr := mdbx.UTXOKey(v.imageID, op.Txid, op.Vout)
-	value, present, err := v.read(mdbx.SchemaV1DBIs()[1], key, keyErr)
+	value, present, err := v.read(mdbx.SchemaV2DBIs()[1], key, keyErr)
 	if err != nil {
 		kind, cause := classifyLogicalMDBXReadError(err)
 		_, rowKind := logicalMDBXReadKinds(kind)
@@ -286,7 +286,7 @@ func logicalMDBXCheckTotals(parent, result logicalStateCounters, removed, remove
 // logicalMDBXMutations builds the always-present counter row then the coalesced rows, so a Batch is never empty.
 // MetaKey and UTXOKey cannot fail here: a zero imageID was already rejected at step 1.
 func logicalMDBXMutations(view *logicalMDBXStateView, result logicalStateCounters, rows []logicalMDBXRow) []mdbx.Mutation {
-	dbis := mdbx.SchemaV1DBIs()
+	dbis := mdbx.SchemaV2DBIs()
 	counterKey, _ := mdbx.MetaKey(0x10, view.imageID)
 	mutations := make([]mdbx.Mutation, 0, len(rows)+1)
 	mutations = append(mutations, mdbx.Mutation{DBI: dbis[0], Key: counterKey, BeforePresent: view.counterPresent, AfterKind: mdbx.AfterLiteral, Literal: mdbx.LogicalCounterValue(result.bytes, result.entries)})
@@ -426,7 +426,7 @@ func logicalMDBXCreateOnce(view *logicalMDBXStateView, mutations []mdbx.Mutation
 }
 
 // logicalMDBXCreateOnceEmit decides one create-once row. Postconditions: an absent target keeps its create, an
-// identical SchemaV1-valid present row is omitted, a differing or malformed one is a store-integrity failure, and a
+// identical SchemaV2-valid present row is omitted, a differing or malformed one is a store-integrity failure, and a
 // failed read carries the classifier's kind with its exact cause.
 func logicalMDBXCreateOnceEmit(view *logicalMDBXStateView, mutation mdbx.Mutation) (bool, *logicalStateFailure) {
 	if !logicalMDBXCreateOnceTarget(mutation) {
@@ -468,7 +468,10 @@ type GenesisMDBXOutcome struct {
 }
 
 const (
-	// Logical 68,070,498 (buffers 756, aliases save 382) leaves slack 378; authority/schema/config/keys are excluded control.
+	// Logical 68,070,690 (buffers 948, aliases save 382) leaves slack 186; authority/schema/config/keys are excluded control.
+	// The canonical-owner pair adds 192 buffer bytes: its 40-byte key and 8-byte value as produced, as cloned by
+	// newLogicalMDBXMetadata, as cloned again by logicalMDBXWithExtras and as cloned by Store.Update; pairing finds both
+	// counterparts among the targets and reads or allocates nothing more.
 	genesisMDBXOperationBytes uint64 = 68_070_876
 	genesisMDBXInvariant             = "TERMINAL_LOCAL_INVARIANT(evidence)"
 	genesisMDBXIntegrity             = "TERMINAL_STORE_INTEGRITY(canonical)"
@@ -548,8 +551,11 @@ func genesisMDBXBatch(reader *mdbx.Reader, owned []byte, chainID, hash [32]byte,
 		return mdbx.Batch{}, err
 	}
 	// Complete validation fixed the target to all FF: floor(2^256/(2^256-1))=1.
-	key, _ := mdbx.HeightKey(g, 0) // The decoded authority already proved g != 0.
-	extras = append(extras, mdbx.Mutation{DBI: mdbx.SchemaV1DBIs()[2], Key: key, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, parsed.Header.PrevBlockHash, [40]byte{39: 1})})
+	key, _ := mdbx.HeightKey(g, 0)              // The decoded authority already proved g != 0.
+	owner, _ := mdbx.CanonicalOwnerKey(g, hash) // Same nonzero g: the pair is decided in this writing transaction.
+	dbis := mdbx.SchemaV2DBIs()
+	extras = append(extras, mdbx.Mutation{DBI: dbis[2], Key: key, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, parsed.Header.PrevBlockHash, [40]byte{39: 1})},
+		mdbx.Mutation{DBI: dbis[7], Key: owner, AfterKind: mdbx.AfterLiteral, Literal: mdbx.CanonicalOwnerValue(0)})
 	op := Outpoint{Txid: parsed.Txids[0], Vout: 0}
 	touched := []logicalTouchedState{{Outpoint: op, FinalPresent: true, Final: out.State.Utxos[op]}}
 	plan, failure := buildLogicalStatePlan(0, view, touched, newLogicalMDBXMetadata(view, extras))
@@ -571,7 +577,7 @@ func genesisMDBXBatch(reader *mdbx.Reader, owned []byte, chainID, hash [32]byte,
 }
 
 func genesisMDBXPrestate(reader *mdbx.Reader, out *GenesisMDBXOutcome) ([]byte, []mdbx.ConsultedRow, error) {
-	dbis, key := mdbx.SchemaV1DBIs(), []byte{2}
+	dbis, key := mdbx.SchemaV2DBIs(), []byte{2}
 	value, _, err := reader.Get(dbis[0], key)
 	if err != nil {
 		return nil, nil, err
@@ -602,7 +608,7 @@ func genesisMDBXEligible(a mdbx.StorageAuthorityV1) bool {
 }
 
 func genesisMDBXControl(reader *mdbx.Reader) ([]mdbx.ConsultedRow, error) {
-	meta := mdbx.SchemaV1DBIs()[0]
+	meta := mdbx.SchemaV2DBIs()[0]
 	rows := []mdbx.ConsultedRow{{DBI: meta, Key: []byte{0}}, {DBI: meta, Key: []byte{1}}}
 	for i, row := range rows {
 		value, _, err := reader.Get(row.DBI, row.Key)
@@ -622,7 +628,7 @@ func genesisMDBXControl(reader *mdbx.Reader) ([]mdbx.ConsultedRow, error) {
 }
 
 func genesisMDBXArtifacts(reader *mdbx.Reader, owned []byte, hash [32]byte) ([]mdbx.Mutation, []mdbx.ConsultedRow, error) {
-	dbis := mdbx.SchemaV1DBIs()
+	dbis := mdbx.SchemaV2DBIs()
 	extras := []mdbx.Mutation{
 		{DBI: dbis[3], Key: hash[:], AfterKind: mdbx.AfterLiteral, Literal: owned[:116]},
 		{DBI: dbis[4], Key: hash[:], AfterKind: mdbx.AfterLiteral, Literal: owned},
@@ -647,7 +653,7 @@ func genesisMDBXArtifacts(reader *mdbx.Reader, owned []byte, hash [32]byte) ([]m
 }
 
 func genesisMDBXEmptyUTXO(reader *mdbx.Reader, prefix []byte) error {
-	page, err := reader.PrefixPage(mdbx.SchemaV1DBIs()[1], prefix, nil, 1, 65_604)
+	page, err := reader.PrefixPage(mdbx.SchemaV2DBIs()[1], prefix, nil, 1, 65_604)
 	if err != nil {
 		return err
 	}

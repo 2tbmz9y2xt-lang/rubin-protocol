@@ -456,19 +456,27 @@ type Store struct {
 	writer        *filelock.Handle
 	txn           *C.MDBX_txn
 	config        ConfigV1
-	dbis          [7]C.MDBX_dbi
+	dbis          [8]C.MDBX_dbi
 	state         storeState
 	terminal      error
 	terminalTruth CommitTruth
+
+	// canonicalOwnerVerified is this handle's canonical-owner verification (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6):
+	// only the Create publication and bootstrapBatch after its exact-empty census set it, Open never does, and every
+	// non-OPEN state refuses before a Reader exists, so nothing clears it.
+	canonicalOwnerVerified bool
 }
 
 type Reader struct {
 	self    *Reader
 	txn     *C.MDBX_txn
-	dbis    [7]C.MDBX_dbi
+	dbis    [8]C.MDBX_dbi
 	getMu   sync.Mutex
 	active  atomic.Bool
 	failure error
+
+	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
+	ownerVerified bool
 }
 
 const (
@@ -523,7 +531,7 @@ type Inspection struct {
 	RecentTxnID       uint64
 	LatterReaderTxnID uint64
 	UnsyncBytes       uint64
-	DBIs              [7]DBIInspection
+	DBIs              [8]DBIInspection
 }
 
 type getResult uint8
@@ -569,6 +577,19 @@ type ConsultedRow struct {
 }
 
 type Batch struct {
+	// Mutations is the admitted plan. Canonical-v1 (rank 2) and canonical-owner-v1 (rank 7) targets must keep both paths
+	// bijective (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.3). N1: a forward literal (g,h)->x needs an owner literal target
+	// (g,x) holding h. N2: an owner literal (g,x)->h needs a forward literal target (g,h) naming x. O1: a forward target
+	// whose OLD value is exactly 104 bytes naming x, and whose NEW value is absent or names another hash, needs an owner
+	// target (g,x) whenever the OLD owner (g,x) is exactly 8 bytes holding h. O2: an owner target whose OLD value is
+	// exactly 8 bytes holding h, and whose NEW value is absent or holds another height, needs a forward target (g,h)
+	// whenever the OLD forward (g,h) is exactly 104 bytes naming x. An OLD value of another width or an unpaired OLD
+	// partner creates no obligation. The rules run after every OLD image is captured and before the OLD/write
+	// comparison, in the order N1, N2, O1, O2 over targets in plan order; the first violation returns the direct
+	// EngineInvalidInput refusal "unpaired canonical owner mutation" (operation update, code EINVAL, no cause), and a
+	// failed OLD read of a non-target partner returns its native error unchanged. Either result is CommitTruthOld at
+	// UpdateStagePrewrite with nothing written; the Store is consumed when the write/OLD aborts and the environment close
+	// succeed, and a retained abort or close keeps the existing POISONED_THREAD or CLOSE_BLOCKED lifecycle.
 	Mutations []Mutation
 	// Reverse selects the reverse-block admission envelope. True refuses a rank-1 literal, a rank-5 literal and a rank-5
 	// reference with the same direct InvalidInput refusal ("invalid Update Batch") as a malformed row, decided before ordering,
@@ -579,7 +600,7 @@ type Batch struct {
 	// default domain and ceilings. Only admission reads it: the owned plan and the native path carry no mode.
 	Reverse bool
 	// Consulted lists rows compared unchanged against OLD, the write snapshot, the final image and any possible-crossed readback,
-	// with no delete and no put. Admitted after every mutation: exact SchemaV1 DBI/key shape, strict (DBI.Rank, key) increase and
+	// with no delete and no put. Admitted after every mutation: exact SchemaV2 DBI/key shape, strict (DBI.Rank, key) increase and
 	// the 16,384-row count are decided per row in declared order, then disjointness from every target and OLD_VALUE_REF source
 	// over that set, so an over-cap overlapping set refuses as Capacity; at most MaxOperationDataBytes present-value bytes,
 	// captured once from OLD before any write transaction. Those refusals return the direct EngineError, truth OLD and, when the
@@ -667,7 +688,7 @@ func updateLiteralAllowed(m Mutation) bool {
 	switch m.DBI.Rank {
 	case 0:
 		return updateMutableMeta(m.Key, false)
-	case 1, 2, 6:
+	case 1, 2, 6, 7:
 		return true
 	case 3, 4:
 		return !m.BeforePresent
@@ -698,16 +719,16 @@ func updateUndoEntryKey(key []byte) bool {
 	return len(key) == 77 && key[32] == 1
 }
 
-func updateForwardRef(m Mutation, dbis [7]DBI) bool {
+func updateForwardRef(m Mutation, dbis [8]DBI) bool {
 	return m.DBI == dbis[5] && updateUndoEntryKey(m.Key) && m.RefDBI == dbis[1] && validKey(m.RefDBI.Rank, m.RefKey) && bytes.Equal(m.Key[41:77], m.RefKey[8:44])
 }
 
-func updateReverseRef(m Mutation, dbis [7]DBI) bool {
+func updateReverseRef(m Mutation, dbis [8]DBI) bool {
 	return m.DBI == dbis[1] && validKey(m.DBI.Rank, m.Key) && m.RefDBI == dbis[5] && updateUndoEntryKey(m.RefKey) && bytes.Equal(m.Key[8:44], m.RefKey[41:77])
 }
 
 func updateRefPayload(m Mutation) bool {
-	dbis := SchemaV1DBIs()
+	dbis := SchemaV2DBIs()
 	return !m.BeforePresent && m.Literal == nil && (updateForwardRef(m, dbis) || updateReverseRef(m, dbis))
 }
 
@@ -800,8 +821,8 @@ func (budget *updateBudget) addReverseFamily(m Mutation) bool {
 }
 
 // admits reports whether the budget's mode admits a common-valid mutation: false admits every one; true refuses a
-// rank-1 literal and every rank-5 row other than a deletion, admits ranks 0, 2, 3, 4 and 6 unchanged, and admits no
-// other rank.
+// rank-1 literal and every rank-5 row other than a deletion, admits ranks 0, 2, 3, 4, 6 and 7 unchanged, and admits
+// no other rank.
 func (budget *updateBudget) admits(m Mutation) bool {
 	if !budget.reverse {
 		return true
@@ -811,7 +832,7 @@ func (budget *updateBudget) admits(m Mutation) bool {
 		return m.AfterKind == AfterAbsent || m.AfterKind == AfterOldValueRef
 	case 5:
 		return m.AfterKind == AfterAbsent
-	case 0, 2, 3, 4, 6:
+	case 0, 2, 3, 4, 6, 7:
 		return true
 	default:
 		return false
@@ -1107,7 +1128,7 @@ func updateNativeEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 	return value.equal != 0, nil
 }
 
-func updateNativeImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
+func updateNativeImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
 	target := func(dbi DBI, key []byte) int {
 		index := sort.Search(len(plan), func(i int) bool {
 			if plan[i].dbi.Rank != dbi.Rank {
@@ -1163,7 +1184,7 @@ func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 // lengths against MaxOperationDataBytes (absent and present-empty charge zero and stay distinct). It returns (false, nil),
 // (false, updateBoundError()) only for its own byte charge, or (true, err) with the unchanged first updateNativeImage
 // error; the flag is never derived from err.
-func updateNativeConsultedImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted) (infrastructure bool, err error) {
+func updateNativeConsultedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted) (infrastructure bool, err error) {
 	var total uint64
 	for i, row := range consulted {
 		image, readErr := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
@@ -1183,7 +1204,7 @@ func updateNativeConsultedImages(old *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted 
 
 // updateNativeConsultedMatch returns the first comparison error, or the StateMismatch diagnostic for the first consulted
 // row whose image in txn differs from its captured OLD image.
-func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string) error {
+func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string) error {
 	for _, row := range consulted {
 		matchErr := updateNativeMatch(txn, dbis[row.dbi.Rank], row.key, row.image, diagnostic)
 		if matchErr != nil {
@@ -1193,8 +1214,8 @@ func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted [
 	return nil
 }
 
-func updateNativePreflight(old, write *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) ([]updateReference, error) {
-	targets, references, err := updateNativeImages(old, dbis, plan)
+func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) ([]updateReference, error) {
+	targets, references, err := updateNativePairedImages(old, dbis, plan)
 	if err != nil {
 		return nil, err
 	}
@@ -1243,7 +1264,7 @@ func updateNativePut(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, value updateIm
 	return nil
 }
 
-func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {
+func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {
 	for _, mutation := range plan {
 		if mutation.beforePresent {
 			keyImage, keyErr := updateOwnedImage(mutation.key)
@@ -1282,7 +1303,7 @@ func updateNativeFinalImage(mutation ownedMutation, references []updateReference
 	}
 }
 
-func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {
+func updateNativePuts(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {
 	refAt := 0
 	for i, mutation := range plan {
 		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
@@ -1303,7 +1324,7 @@ func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation,
 	return nil
 }
 
-func updateNativeVerify(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+func updateNativeVerify(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
 	refAt := 0
 	for i, mutation := range plan {
 		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
@@ -1322,7 +1343,7 @@ func updateNativeVerify(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutatio
 	return updateNativeVerifyReferences(txn, dbis, plan, references)
 }
 
-func updateNativeVerifyReferences(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+func updateNativeVerifyReferences(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
 	for _, reference := range references {
 		if reference.target >= 0 {
 			continue
@@ -1348,7 +1369,7 @@ func updateNativeAbort(txn *C.MDBX_txn, primary error, stage UpdateStage) update
 	return updateNativeConsumed(CommitTruthOld, false, primary, secondary, stage)
 }
 
-func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
+func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
 	targets, references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return CommitTruthUnknown, err
@@ -1374,7 +1395,7 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan [
 	return CommitTruthUnknown, nil
 }
 
-func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
+func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
 	oldImage, newImage, refAt := true, true, 0
 	for i, mutation := range plan {
 		oldEqual, oldErr := updateNativeEqual(read, dbis[mutation.dbi.Rank], mutation.key, targets[i])
@@ -1399,7 +1420,7 @@ func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ow
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, oldImage, newImage bool) (bool, bool, error) {
+func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, oldImage, newImage bool) (bool, bool, error) {
 	for _, reference := range references {
 		if reference.target >= 0 {
 			continue
@@ -1416,7 +1437,7 @@ func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan [
 
 // updateNativeReadbackConsulted folds each consulted row's equality with its OLD image (the updateNativeConsultedImages
 // capture from the still-live OLD transaction) into both predicates; the first comparison error returns both false.
-func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
+func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
 	for _, row := range consulted {
 		equal, compareErr := updateNativeEqual(read, dbis[row.dbi.Rank], row.key, row.image)
 		if compareErr != nil {
@@ -1427,7 +1448,7 @@ func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [7]C.MDBX_dbi, consult
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error) updateNativeOutcome {
+func updateNativeReadback(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
@@ -1451,7 +1472,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutat
 	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr), UpdateStageCommitMayHaveCrossed)
 }
 
-func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage) updateNativeOutcome {
+func updateNativeCommit(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage) updateNativeOutcome {
 	rc := int(C.mdbx_txn_commit(write))
 	commitErr := nativeError(operationUpdate, rc)
 	switch rc {
@@ -1467,7 +1488,7 @@ func updateNativeCommit(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutatio
 	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr)
 }
 
-func updateNativeExecute(env *C.MDBX_env, dbis [7]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
+func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
 	stage := UpdateStagePrewrite
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_READWRITE)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
@@ -1647,6 +1668,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 		return CommitTruthOld, UpdateStagePrewrite, s.failedReadBegin(begun.txn, beginErr)
 	}
 	reader := newReader(begun.txn, s.dbis)
+	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.active.Store(true)
 	plan, consulted, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
@@ -1678,6 +1700,7 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 		return s.failedReadBegin(begun.txn, beginErr)
 	}
 	reader := newReader(begun.txn, s.dbis)
+	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.active.Store(true)
 	defer func() {
 		reader.expire()
@@ -1693,10 +1716,10 @@ func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
 	}
 	dbiErr := ValidateDBI(dbi)
 	if dbiErr != nil {
-		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV1 DBI", dbiErr)
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV2 DBI", dbiErr)
 	}
 	if !validKey(dbi.Rank, key) {
-		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV1 key", nil)
+		return nil, false, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV2 key", nil)
 	}
 	r.getMu.Lock()
 	defer r.getMu.Unlock()
@@ -1736,7 +1759,7 @@ func prefixPageInputError(diagnostic string, cause error) *EngineError {
 
 func supportedPrefixPageDBI(dbi DBI) bool {
 	switch dbi.Rank {
-	case 1, 2, 5, 6:
+	case 1, 2, 5, 6, 7:
 		return true
 	default:
 		return false
@@ -1763,6 +1786,8 @@ func prefixPageMinimumBytes(dbi DBI) uint64 {
 		return 65_604
 	case 2, 6:
 		return 120
+	case 7:
+		return 48
 	default:
 		return 65_637
 	}
@@ -1771,7 +1796,7 @@ func prefixPageMinimumBytes(dbi DBI) uint64 {
 func validatePrefixPageRequest(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, maxBytes uint64) error {
 	dbiErr := ValidateDBI(dbi)
 	if dbiErr != nil {
-		return prefixPageInputError("invalid SchemaV1 DBI", dbiErr)
+		return prefixPageInputError("invalid SchemaV2 DBI", dbiErr)
 	}
 	if !supportedPrefixPageDBI(dbi) {
 		return prefixPageInputError("unsupported prefix-page DBI", nil)
@@ -1808,11 +1833,12 @@ func newPrefixPageScan(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, m
 }
 
 // PrefixPage returns rows after afterExclusive from the Reader's current
-// snapshot. UTXO, canonical, and staged prefixes are exact 8-byte nonzero
-// big-endian image or generation IDs; undo prefixes are any exact 32-byte hash.
-// A non-nil continuation is an exact same-prefix SchemaV1 key. Rows are limited
-// to 1..1440; bytes are limited to 65604 for UTXO, 120 for canonical/staged, or
-// 65637 for undo through 154611151. A nil continuation starts at prefix.
+// snapshot. UTXO, canonical, staged and canonical-owner prefixes are exact 8-byte
+// nonzero big-endian image or generation IDs; undo prefixes are any exact 32-byte
+// hash. A non-nil continuation is an exact same-prefix SchemaV2 key. Rows are
+// limited to 1..1440; bytes are limited to 65604 for UTXO, 120 for canonical/staged,
+// 48 for canonical-owner or 65637 for undo through 154611151. A nil continuation
+// starts at prefix.
 // Inputs are borrowed only synchronously; results are independent copies and no
 // native cursor escapes. Native or stored-row failure returns a zero page,
 // invalidates the Reader, and follows the existing View/Update disposition.
@@ -1885,11 +1911,11 @@ func prefixPageStoredRow(dbi DBI, prefix, key []byte, valueBytes unsafe.Pointer,
 		return prefixPageNative{outside: true}, nil
 	}
 	if !validKey(dbi.Rank, key) {
-		return prefixPageNative{}, integrityError(operationPrefixPage, "stored key outside SchemaV1 prefix-page domain", nil)
+		return prefixPageNative{}, integrityError(operationPrefixPage, "stored key outside SchemaV2 prefix-page domain", nil)
 	}
 	length, valid := prefixPageValueLength(dbi, key, valueLength)
 	if !valid {
-		return prefixPageNative{}, integrityError(operationPrefixPage, "stored value width outside SchemaV1 bound", nil)
+		return prefixPageNative{}, integrityError(operationPrefixPage, "stored value width outside SchemaV2 bound", nil)
 	}
 	return prefixPageNative{key: key, value: valueBytes, valueLength: length, charge: uint64(len(key)) + uint64(length)}, nil
 }
@@ -2039,7 +2065,7 @@ func (s *Store) observationStateError(operation engineOperation) error {
 	return adapterError(operation, EngineInvalidInput, codeEINVAL, "Store is closed", nil)
 }
 
-func newReader(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi) *Reader {
+func newReader(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi) *Reader {
 	reader := &Reader{txn: txn, dbis: dbis}
 	reader.self = reader
 	return reader
@@ -2069,7 +2095,7 @@ func copiedGetResult(dbi DBI, key []byte, rc int, bytes unsafe.Pointer, length C
 	case getResultInvalidShape:
 		return nil, false, adapterError(operationGet, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape", nil)
 	case getResultInvalidBound:
-		return nil, false, integrityError(operationGet, "stored value width outside SchemaV1 bound", nil)
+		return nil, false, integrityError(operationGet, "stored value width outside SchemaV2 bound", nil)
 	default:
 		return nil, false, nativeError(operationGet, rc)
 	}
@@ -2146,6 +2172,8 @@ func rankedRawValueBounds(rank uint8) (uint64, uint64) {
 		return 104, 104
 	case 3:
 		return 116, 116
+	case 7:
+		return 8, 8
 	default:
 		return 116, MaxBlockBytes
 	}
@@ -2162,7 +2190,7 @@ func (s *Store) inspectReadLocked(txn *C.MDBX_txn) (Inspection, error) {
 	}
 	inspection := Inspection{Config: s.config, MapSize: uint64(info.mi_mapsize), FileSize: uint64(info.mi_dxb_fsize), AllocatedSize: uint64(info.mi_dxb_fallocated), MaxReaders: uint32(info.mi_maxreaders), ReaderTableLength: uint32(info.mi_numreaders), RecentTxnID: uint64(info.mi_recent_txnid), LatterReaderTxnID: uint64(info.mi_latter_reader_txnid), UnsyncBytes: uint64(info.mi_unsync_volume)}
 	inspection.Config.Now = current
-	for i, dbi := range SchemaV1DBIs() {
+	for i, dbi := range SchemaV2DBIs() {
 		var stat C.MDBX_stat
 		if rc := int(C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))); rc != codeSuccess {
 			return Inspection{}, nativeError(operationInspect, rc)
@@ -2355,11 +2383,11 @@ func validPublishedStoreResources(s *Store) bool {
 }
 
 func validConstructionStoreResources(s *Store, engine *EngineError, terminalOK bool) bool {
-	return s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{}) && terminalOK && engine.Cause != nil
+	return s.config == (ConfigV1{}) && s.dbis == ([8]C.MDBX_dbi{}) && terminalOK && engine.Cause != nil
 }
 
 func validClosedStoreShape(s *Store) bool {
-	resources := s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	resources := s.env == nil && s.writer == nil && s.txn == nil && s.config == (ConfigV1{}) && s.dbis == ([8]C.MDBX_dbi{})
 	if !resources {
 		return false
 	}
@@ -2370,7 +2398,7 @@ func validClosedStoreShape(s *Store) bool {
 }
 
 func validPoisonedStoreShape(s *Store) bool {
-	resources := s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([7]C.MDBX_dbi{})
+	resources := s.env != nil && s.writer != nil && s.txn != nil && s.config == (ConfigV1{}) && s.dbis == ([8]C.MDBX_dbi{})
 	if !resources {
 		return false
 	}
@@ -2380,7 +2408,7 @@ func validPoisonedStoreShape(s *Store) bool {
 	return validPoisonTerminal(s.terminal)
 }
 
-func validRetainedDBIs(dbis [7]C.MDBX_dbi) bool {
+func validRetainedDBIs(dbis [8]C.MDBX_dbi) bool {
 	seen := make(map[C.MDBX_dbi]bool, len(dbis))
 	for _, dbi := range dbis {
 		if dbi == 0 || seen[dbi] {
@@ -2723,9 +2751,9 @@ func (s *Store) configureCreateEnvironment(path string, cfg ConfigV1) error {
 	if err != nil {
 		return err
 	}
-	maxDBs := C.MDBX_dbi(7)
+	maxDBs := C.MDBX_dbi(8)
 	if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) {
-		maxDBs = 8
+		maxDBs = 9
 	}
 	if rc := int(C.mdbx_env_set_maxdbs(s.env, maxDBs)); rc != codeSuccess {
 		return nativeError(operationCreate, rc)
@@ -2761,7 +2789,7 @@ func (s *Store) openEnvironment(path string, cfg ConfigV1) error {
 	if err != nil {
 		return err
 	}
-	if rc := int(C.mdbx_env_set_maxdbs(s.env, 7)); rc != codeSuccess {
+	if rc := int(C.mdbx_env_set_maxdbs(s.env, 8)); rc != codeSuccess {
 		return nativeError(operationOpen, rc)
 	}
 	if rc := int(C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))); rc != codeSuccess {
@@ -2946,11 +2974,11 @@ func (s *Store) initializeLocked(cfg ConfigV1, encodedConfig []byte) transaction
 	if result != nil {
 		return transactionOutcome{err: result}
 	}
-	s.state, s.config, s.dbis = storeOPEN, cfg, dbis
+	s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true
 	return transactionOutcome{}
 }
 
-func initializeSchema(txn *C.MDBX_txn, encodedConfig []byte) ([7]C.MDBX_dbi, error) {
+func initializeSchema(txn *C.MDBX_txn, encodedConfig []byte) ([8]C.MDBX_dbi, error) {
 	dbis, err := openSchemaDBIs(txn, true, operationInit)
 	if err != nil {
 		return dbis, err
@@ -2989,10 +3017,10 @@ func (s *Store) inspectOpenLocked(cfg ConfigV1) transactionOutcome {
 	return outcome
 }
 
-func inspectSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1) ([7]C.MDBX_dbi, error) {
+func inspectSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1) ([8]C.MDBX_dbi, error) {
 	err := verifyMainCardinality(txn, operationOpen)
 	if err != nil {
-		return [7]C.MDBX_dbi{}, err
+		return [8]C.MDBX_dbi{}, err
 	}
 	dbis, err := openSchemaDBIs(txn, false, operationOpen)
 	if err != nil {
@@ -3051,17 +3079,17 @@ func (s *Store) abortLocked(txn *C.MDBX_txn, primary error) transactionOutcome {
 }
 
 func (s *Store) poison(txn *C.MDBX_txn, err error) transactionOutcome {
-	s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, err
+	s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err
 	return transactionOutcome{err: err, poisoned: true}
 }
 
-func openSchemaDBIs(txn *C.MDBX_txn, create bool, operation engineOperation) ([7]C.MDBX_dbi, error) {
-	var opened [7]C.MDBX_dbi
+func openSchemaDBIs(txn *C.MDBX_txn, create bool, operation engineOperation) ([8]C.MDBX_dbi, error) {
+	var opened [8]C.MDBX_dbi
 	flags := C.MDBX_db_flags_t(C.MDBX_DB_ACCEDE)
 	if create {
 		flags = C.MDBX_DB_DEFAULTS | C.MDBX_CREATE
 	}
-	for i, dbi := range SchemaV1DBIs() {
+	for i, dbi := range SchemaV2DBIs() {
 		name := append([]byte(dbi.Name), 0)
 		rc := int(C.mdbx_dbi_open(txn, (*C.char)(unsafe.Pointer(&name[0])), flags, &opened[i]))
 		runtime.KeepAlive(name)
@@ -3076,14 +3104,14 @@ func openSchemaDBIs(txn *C.MDBX_txn, create bool, operation engineOperation) ([7
 			return opened, nativeError(operation, rc)
 		}
 		if persistent != 0 {
-			return opened, integrityError(operation, "SchemaV1 DBI flags mismatch", nil)
+			return opened, integrityError(operation, "SchemaV2 DBI flags mismatch", nil)
 		}
 	}
 	return opened, nil
 }
 
 func putRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) error {
-	for _, row := range []struct{ key, value []byte }{{[]byte{0}, []byte{0, 0, 0, 1}}, {[]byte{1}, encodedConfig}} {
+	for _, row := range []struct{ key, value []byte }{{[]byte{0}, []byte{0, 0, 0, 2}}, {[]byte{1}, encodedConfig}} {
 		rc := int(C.rubin_mdbx_put_required(txn, meta, unsafe.Pointer(&row.key[0]), C.size_t(len(row.key)), unsafe.Pointer(&row.value[0]), C.size_t(len(row.value))))
 		runtime.KeepAlive(row)
 		if rc != codeSuccess {
@@ -3102,8 +3130,8 @@ func verifyMainCardinality(txn *C.MDBX_txn, operation engineOperation) error {
 	if rc := int(C.mdbx_dbi_stat(txn, main, &stat, C.size_t(unsafe.Sizeof(stat)))); rc != codeSuccess {
 		return nativeError(operation, rc)
 	}
-	if uint64(stat.ms_entries) != 7 {
-		return integrityError(operation, "SchemaV1 main cardinality mismatch", nil)
+	if uint64(stat.ms_entries) != 8 {
+		return integrityError(operation, "SchemaV2 main cardinality mismatch", nil)
 	}
 	return nil
 }
@@ -3114,9 +3142,9 @@ func verifyCreatedMeta(txn *C.MDBX_txn, meta C.MDBX_dbi, encodedConfig []byte) e
 		return nativeError(operationInit, rc)
 	}
 	if uint64(stat.ms_entries) != 2 {
-		return integrityError(operationInit, "SchemaV1 metadata cardinality mismatch", nil)
+		return integrityError(operationInit, "SchemaV2 metadata cardinality mismatch", nil)
 	}
-	if err := verifyExactValue(txn, meta, []byte{0}, []byte{0, 0, 0, 1}, operationInit); err != nil {
+	if err := verifyExactValue(txn, meta, []byte{0}, []byte{0, 0, 0, 2}, operationInit); err != nil {
 		return err
 	}
 	return verifyExactValue(txn, meta, []byte{1}, encodedConfig, operationInit)
@@ -3128,7 +3156,7 @@ func readRequiredMeta(txn *C.MDBX_txn, meta C.MDBX_dbi) (ConfigV1, error) {
 		return ConfigV1{}, err
 	}
 	if err = DecodeSchemaVersionValue(version); err != nil {
-		return ConfigV1{}, integrityError(operationOpen, "invalid SchemaV1 version row", err)
+		return ConfigV1{}, integrityError(operationOpen, "invalid SchemaV2 version row", err)
 	}
 	encoded, err := getSizedValue(txn, meta, []byte{1}, 48, operationOpen)
 	if err != nil {
@@ -3189,7 +3217,7 @@ func (s *Store) consume(primary error) (bool, error) {
 	}
 	releaseErr := releaseError(s.writer)
 	s.writer, s.txn = nil, nil
-	s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}
+	s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}
 	s.state = storeCLOSED
 	s.terminal = joinErrors(nativeOutcome, releaseErr)
 	return false, s.terminal

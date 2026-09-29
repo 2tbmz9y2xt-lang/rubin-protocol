@@ -16,7 +16,7 @@ var (
 	reverseTxid      = [32]byte{0x22}
 )
 
-// reverseLiteralKeys lays out the utxo-v1 and undo-v1 entry keys directly from the frozen SchemaV1 offsets, so the
+// reverseLiteralKeys lays out the utxo-v1 and undo-v1 entry keys directly from the frozen SchemaV2 offsets, so the
 // expected bytes never come from the admission predicate the tests drive.
 func reverseLiteralKeys(imageID uint64, block, txid [32]byte, txIndex, inputIndex, vout uint32) ([]byte, []byte) {
 	target, source := make([]byte, 44), make([]byte, 77)
@@ -186,7 +186,7 @@ func TestUpdateReverseRefPayload(t *testing.T) {
 	t.Run("direction product", func(t *testing.T) {
 		height, keyErr := HeightKey(1, 1)
 		mustEnvironment(t, keyErr)
-		keys := [7][]byte{{2}, target, height, make([]byte, 32), make([]byte, 32), source, height}
+		keys := [8][]byte{{2}, target, height, make([]byte, 32), make([]byte, 32), source, height, append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, make([]byte, 32)...)}
 		for destination := range dbis {
 			for reference := range dbis {
 				row := Mutation{

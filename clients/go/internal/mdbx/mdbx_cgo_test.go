@@ -1366,8 +1366,8 @@ func TestEnvironmentPureMatrices(t *testing.T) {
 	}
 }
 
-func readDBIsLiteral() [7]DBI {
-	return [7]DBI{{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1}, {Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3}, {Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5}, {Name: "staged-v1", Rank: 6}}
+func readDBIsLiteral() [8]DBI {
+	return [8]DBI{{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1}, {Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3}, {Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5}, {Name: "staged-v1", Rank: 6}, {Name: "canonical-owner-v1", Rank: 7}}
 }
 
 const (
@@ -1738,6 +1738,8 @@ func prefixPageRequest(rank uint8, id byte) ([]byte, []byte, uint64) {
 		return prefix, append(append([]byte(nil), prefix...), make([]byte, 36)...), 65_604
 	case 2, 6:
 		return prefix, append(append([]byte(nil), prefix...), make([]byte, 8)...), 120
+	case 7:
+		return prefix, append(append([]byte(nil), prefix...), make([]byte, 32)...), 48
 	default:
 		prefix = make([]byte, 32)
 		prefix[0] = id
@@ -1795,11 +1797,11 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 			}
 		}
 
-		assertRejected(DBI{Name: "utxo-v1-forged", Rank: 1}, nil, nil, 0, 0, "invalid SchemaV1 DBI", errSchema)
+		assertRejected(DBI{Name: "utxo-v1-forged", Rank: 1}, nil, nil, 0, 0, "invalid SchemaV2 DBI", errSchema)
 		for _, rank := range []uint8{0, 3, 4} {
 			assertRejected(dbis[rank], nil, nil, 0, 0, "unsupported prefix-page DBI", nil)
 		}
-		for _, rank := range []uint8{1, 2, 6} {
+		for _, rank := range []uint8{1, 2, 6, 7} {
 			for _, invalid := range [][]byte{nil, make([]byte, 7), make([]byte, 9), make([]byte, 8)} {
 				assertRejected(dbis[rank], invalid, nil, 0, 0, "invalid prefix-page prefix", nil)
 			}
@@ -1825,7 +1827,7 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 		assertRejected(dbis[1], prefix, continuation, 1, minimum-1, "invalid prefix-page byte limit", nil)
 		assertRejected(dbis[1], prefix, continuation, 1, 154_611_152, "invalid prefix-page byte limit", nil)
 
-		for _, rank := range []uint8{1, 2, 5, 6} {
+		for _, rank := range []uint8{1, 2, 5, 6, 7} {
 			validPrefix, validAfter, minBytes := prefixPageRequest(rank, 7)
 			assertRejected(dbis[rank], validPrefix, validAfter, 1, minBytes-1, "invalid prefix-page byte limit", nil)
 			assertRejected(dbis[rank], validPrefix, validAfter[:len(validAfter)-1], 1, minBytes, "invalid prefix-page continuation", nil)
@@ -1849,7 +1851,7 @@ func TestReaderPrefixPageInputMatrix(t *testing.T) {
 			t.Fatalf("high-byte image prefix=%#v/%v", page, err)
 		}
 		maxGenerationPrefix := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-		for _, rank := range []uint8{2, 6} {
+		for _, rank := range []uint8{2, 6, 7} {
 			page, err := reader.PrefixPage(dbis[rank], maxGenerationPrefix, nil, 1, 120)
 			if err != nil || page.Rows != nil || page.Stop != PrefixPageStop(1) {
 				t.Fatalf("maximum generation prefix rank %d=%#v/%v", rank, page, err)
@@ -1882,6 +1884,7 @@ func TestReaderPrefixPagePublicPath(t *testing.T) {
 		return Batch{Mutations: []Mutation{
 			{DBI: dbi, Key: firstKey, AfterKind: AfterLiteral, Literal: firstValue},
 			{DBI: dbi, Key: secondKey, AfterKind: AfterLiteral, Literal: secondValue},
+			canonicalOwnerLiteral(23, 1, firstHash), canonicalOwnerLiteral(23, 2, secondHash),
 		}}, nil
 	})
 	if truth != CommitTruthNew || err != nil {
@@ -2005,6 +2008,7 @@ func TestReaderGetResultMatrix(t *testing.T) {
 		{"undo manifest", dbis[5], make([]byte, 33), 33, 33, 0},
 		{"undo entry", dbis[5], append(append(make([]byte, 32), 1), make([]byte, 44)...), 20, 65_560, 21},
 		{"staged", dbis[6], append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, make([]byte, 8)...), 104, 104, 0},
+		{"canonical owner", dbis[7], append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, make([]byte, 32)...), 8, 8, 0},
 	}
 	for _, row := range rows {
 		minimum, maximum := rawValueBounds(row.dbi, row.key)
@@ -2183,11 +2187,11 @@ func TestViewReaderLifetimeAndConcurrentGet(t *testing.T) {
 			t.Fatal("copied Reader reached native Get")
 		}
 		_, _, dbiErr := reader.Get(DBI{}, nil)
-		if engine := requireEnvironmentError(t, dbiErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV1 DBI"); !sameError(engine.Cause, errSchema) {
+		if engine := requireEnvironmentError(t, dbiErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 DBI"); !sameError(engine.Cause, errSchema) {
 			t.Fatalf("DBI precedence Cause=%v", engine.Cause)
 		}
 		_, _, keyErr := reader.Get(dbis[0], nil)
-		requireEnvironmentError(t, keyErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV1 key")
+		requireEnvironmentError(t, keyErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 key")
 		start := make(chan struct{})
 		results := make(chan error, 2)
 		var workers sync.WaitGroup
@@ -2699,7 +2703,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	if len(infoCalls) != 1 || render(infoCalls[0]) != "C.mdbx_env_info_ex(s.env, txn, &info, C.size_t(unsafe.Sizeof(info)))" || infoPointers != 1 || len(currentWrites) != 1 || render(currentWrites[0]) != "current := uint64(info.mi_geo.current)" || currentPointers != 0 || infoCalls[0].Pos() >= currentWrites[0].Pos() {
 		t.Fatal("Inspection provenance drifted: environment producer")
 	}
-	if len(ranges) != 1 || ranges[0].Tok != token.DEFINE || !ident(ranges[0].Key, "i") || !ident(ranges[0].Value, "dbi") || render(ranges[0].X) != "SchemaV1DBIs()" || len(statCalls) != 1 || render(statCalls[0]) != "C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))" || statPointers != 1 || statCalls[0].Pos() < ranges[0].Body.Pos() || statCalls[0].End() > ranges[0].Body.End() {
+	if len(ranges) != 1 || ranges[0].Tok != token.DEFINE || !ident(ranges[0].Key, "i") || !ident(ranges[0].Value, "dbi") || render(ranges[0].X) != "SchemaV2DBIs()" || len(statCalls) != 1 || render(statCalls[0]) != "C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))" || statPointers != 1 || statCalls[0].Pos() < ranges[0].Body.Pos() || statCalls[0].End() > ranges[0].Body.End() {
 		t.Fatal("Inspection provenance drifted: DBI producer")
 	}
 	if len(inspectionWrites) != 3 || invalidWrites != 0 {
@@ -2959,7 +2963,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
 		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
 		"validateCreateStatic":            {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
-		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 7)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
+		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 8)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
 		"inspectSchema":                   {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
 		"openNativeEnvironment":           {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
 		"openSchemaDBIs":                  {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
@@ -3016,7 +3020,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 		return true
 	})
-	require(strings.Join(maxDBsAssignments, "|") == "maxDBs := C.MDBX_dbi(7)|maxDBs = 8" && strings.Join(maxDBsCalls, "|") == "C.mdbx_env_set_maxdbs(s.env, maxDBs)" && strings.Join(fixtureBranches, "|") == "if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) { maxDBs = 8 }", "Create maxdbs ownership drifted: %v / %v / %v", maxDBsAssignments, fixtureBranches, maxDBsCalls)
+	require(strings.Join(maxDBsAssignments, "|") == "maxDBs := C.MDBX_dbi(8)|maxDBs = 9" && strings.Join(maxDBsCalls, "|") == "C.mdbx_env_set_maxdbs(s.env, maxDBs)" && strings.Join(fixtureBranches, "|") == "if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) { maxDBs = 9 }", "Create maxdbs ownership drifted: %v / %v / %v", maxDBsAssignments, fixtureBranches, maxDBsCalls)
 	var nativeLimitCalls, limitWrapperCalls, ordinaryMaxDBCalls, effectCalls []string
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
@@ -3048,7 +3052,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		strings.Join(limitWrapperCalls, "|") != "Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
-	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 7)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
+	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 8)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
 	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.AcquireDirectory(path)|createWriterMarker:os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
 	var packageNativeLimits, packageMaxDBs, packageEffects []string
 	packageRefs, fileRefs := map[string][]string{}, map[string]int{}
@@ -3140,7 +3144,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)},
 		{"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)}`
 	require(strings.Count(body("validateStoredConfig"), storedOrder) == 1, "stored/caller ConfigV1 comparison order drifted")
-	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
+	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
 	require(strings.Count(body("consume"), "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)") == 1 && strings.Count(body("consume"), consumeTail) == 1, "consume terminal ordering drifted")
 	errorCalls := map[string]int{}
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -3168,8 +3172,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		`writerLockError(operation, result, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, err)`: 1, `writerLockError(operation, filelock.ResultInvalidOrUnopenable, closeErr)`: 1, `ioError(operation, readDiagnostic, err)`: 1, `integrityError(operation, name+" is unsafe", nil)`: 2,
 		`ioError(operation, normalizeDiagnostic, err)`: 1, `ioError(operation, diagnostic, err)`: 1, `integrityError(operationCreate, "effective environment mismatch", err)`: 1,
 		`adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, nil)`: 2, `adapterError(operation, EngineLocalInvariant, codeProblem, diagnostic, native)`: 1,
-		`integrityError(operationOpen, "effective environment mismatch", err)`: 2, `integrityError(operation, "SchemaV1 DBI flags mismatch", nil)`: 1, `integrityError(operation, "SchemaV1 main cardinality mismatch", nil)`: 1,
-		`integrityError(operationInit, "SchemaV1 metadata cardinality mismatch", nil)`: 1, `integrityError(operationOpen, "invalid SchemaV1 version row", err)`: 1, `integrityError(operationOpen, "invalid ConfigV1 row", err)`: 1,
+		`integrityError(operationOpen, "effective environment mismatch", err)`: 2, `integrityError(operation, "SchemaV2 DBI flags mismatch", nil)`: 1, `integrityError(operation, "SchemaV2 main cardinality mismatch", nil)`: 1,
+		`integrityError(operationInit, "SchemaV2 metadata cardinality mismatch", nil)`: 1, `integrityError(operationOpen, "invalid SchemaV2 version row", err)`: 1, `integrityError(operationOpen, "invalid ConfigV1 row", err)`: 1,
 		`integrityError(operation, "required metadata value mismatch", nil)`: 1, `ioError(operationClose, "release Rubin writer lock", err)`: 1,
 	}
 	if len(errorCalls) != len(wantErrorCalls) {
@@ -3208,7 +3212,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			}
 			return true
 		})
-		want := map[string]string{"initializeLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis", "inspectOpenLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis"}[name]
+		want := map[string]string{"initializeLocked": "s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true", "inspectOpenLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis"}[name]
 		if len(writes) != 1 || markerAt == token.NoPos || writes[0] != want || writeAt[0] <= markerAt {
 			t.Errorf("%s publication writes=%v marker=%d", name, writes, markerAt)
 		}
@@ -3254,7 +3258,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				for _, lhs := range assignment.Lhs {
 					wholeObject := protectedWholePointerWrite(typeProofs, fn, lhs)
 					selector, ok := lhs.(*ast.SelectorExpr)
-					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth") {
+					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth" || selector.Sel.Name == "canonicalOwnerVerified") {
 						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
 						if filename == "mdbx_cgo.go" {
 							storeWrites = append(storeWrites, fn.Name.Name+":"+compact(assignment))
@@ -3266,8 +3270,9 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|initializeLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
+	// The canonical-owner verification has exactly two writers: the Create publication and the exact-empty bootstrap census.
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -4742,7 +4747,7 @@ func TestUpdateSourceOwnership(t *testing.T) {
 		t.Fatal("predecessor owner changed")
 	}
 	consume := updateNativeBody(t, source, "consume")
-	consumeEffects := []string{"C.mdbx_env_close_ex", "s.env = nil", "releaseError(s.writer)", "s.writer, s.txn = nil, nil", "s.config, s.dbis = ConfigV1{}, [7]C.MDBX_dbi{}", "s.state = storeCLOSED", "s.terminal = joinErrors(nativeOutcome, releaseErr)"}
+	consumeEffects := []string{"C.mdbx_env_close_ex", "s.env = nil", "releaseError(s.writer)", "s.writer, s.txn = nil, nil", "s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}", "s.state = storeCLOSED", "s.terminal = joinErrors(nativeOutcome, releaseErr)"}
 	previous = -1
 	for _, effect := range consumeEffects {
 		at := strings.Index(consume, effect)
