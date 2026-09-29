@@ -250,10 +250,30 @@ func TestCleanupBU(t *testing.T) {
 				candidate := a
 				candidate.Cleanup = &CleanupV1{Spans: slices.Clone(a.Cleanup.Spans)}
 				row.edit(&candidate)
-				_, err := cleanupBUSelect(&Reader{}, candidate, nil)
+				// The recorder only records on a live Reader, so the refusal runs inside a real Update callback.
+				store, _, _ := consultedStore(t)
+				var reader *Reader
+				var selectedErr error
+				truth, stage, updateErr := store.Update(func(observed *Reader) (Batch, error) {
+					reader = observed
+					_, selectedErr = cleanupBUSelect(observed, candidate, nil)
+					return Batch{}, selectedErr
+				})
+				err := selectedErr
 				engine, ok := err.(*EngineError) //nolint:errorlint // Require the direct invariant error, not a wrapped error.
 				if !ok || engine.Class != EngineLocalInvariant || engine.Operation != "update" || engine.Diagnostic != "cleanup promises disagree with authority" {
 					t.Fatalf("cleanup promise recheck drifted: %s: %v", row.name, err)
+				}
+				if reader.active.Load() || !sameError(reader.failure, err) || truth != CommitTruthOld || stage != UpdateStagePrewrite || !sameError(updateErr, err) ||
+					store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, err) {
+					t.Fatalf("cleanup promise recheck disposition drifted: %s: %s/%d/%v/%s", row.name, truth, stage, updateErr, store.state)
+				}
+				again, _, cached := store.Update(func(*Reader) (Batch, error) {
+					t.Fatalf("cleanup promise recheck: consumed Store entered Update: %s", row.name)
+					return Batch{}, nil
+				})
+				if again != CommitTruthOld || !sameError(cached, err) {
+					t.Fatalf("cleanup promise recheck next operation drifted: %s: %s/%v", row.name, again, cached)
 				}
 			})
 		}
