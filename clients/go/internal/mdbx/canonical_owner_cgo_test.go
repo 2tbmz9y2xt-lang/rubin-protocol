@@ -118,7 +118,10 @@ func canonicalRequireRecorded(t *testing.T, store *Store, prepare func(*Reader),
 	if truth != CommitTruthOld || stage != UpdateStagePrewrite || !sameError(err, lookupErr) || store.state != storeCLOSED || store.terminalTruth != CommitTruthOld || !sameError(store.terminal, lookupErr) {
 		t.Fatalf("%s: enclosing Update disposition drifted: %s/%d/%v/%s", marker, truth, stage, err, store.state)
 	}
-	again, againStage, cached := store.Update(func(*Reader) (Batch, error) { t.Fatalf("%s: consumed Store entered Update", marker); return Batch{}, nil })
+	again, againStage, cached := store.Update(func(*Reader) (Batch, error) {
+		t.Fatalf("%s: consumed Store entered Update", marker)
+		return Batch{}, nil
+	})
 	viewErr := store.View(func(*Reader) error { t.Fatalf("%s: consumed Store entered View", marker); return nil })
 	if again != CommitTruthOld || againStage != UpdateStagePrewrite || !sameError(cached, lookupErr) || !sameError(viewErr, lookupErr) {
 		t.Fatalf("%s: consumed Store accepted the next operation: %s/%d/%v/%v", marker, again, againStage, cached, viewErr)
@@ -571,7 +574,10 @@ func TestCanonicalOwnerFailureRecorderLifetime(t *testing.T) {
 			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !sameError(err, first) || store.state != storeCLOSED || !sameError(store.terminal, first) {
 				t.Fatalf("%s: first failure lost its disposition: %s/%d/%v/%s", row.name, truth, stage, err, store.state)
 			}
-			_, _, cached := store.Update(func(*Reader) (Batch, error) { t.Fatalf("%s: consumed Store entered Update", row.name); return Batch{}, nil })
+			_, _, cached := store.Update(func(*Reader) (Batch, error) {
+				t.Fatalf("%s: consumed Store entered Update", row.name)
+				return Batch{}, nil
+			})
 			if !sameError(cached, first) {
 				t.Fatalf("%s: next operation lost the first failure: %v", row.name, cached)
 			}

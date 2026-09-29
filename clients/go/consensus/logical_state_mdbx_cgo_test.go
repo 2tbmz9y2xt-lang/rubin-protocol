@@ -351,7 +351,9 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 	sameImage, seededImage := logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage, 5)), logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage, 4))
 	crossImage := logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage+1, 5))
 	// Owner rows pair the seeded (image, 4) forward entry naming filled32(1) and the same-image (image, 5) extra naming filled32(5).
-	ownerKey := func(hash [32]byte) []byte { return append(binary.BigEndian.AppendUint64(nil, logicalMDBXImage), hash[:]...) }
+	ownerKey := func(hash [32]byte) []byte {
+		return append(binary.BigEndian.AppendUint64(nil, logicalMDBXImage), hash[:]...)
+	}
 	sameChain := mdbx.ChainValue(filled32(5), filled32(2), [40]byte{3})
 	metaKey, counterKey := logicalMDBXMust(mdbx.MetaKey(0x02, 0)), logicalMDBXCounterKey()
 	literal := func(rank uint8, key, value []byte) mdbx.Mutation {

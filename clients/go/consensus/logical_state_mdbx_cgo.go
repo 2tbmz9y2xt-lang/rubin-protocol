@@ -551,7 +551,7 @@ func genesisMDBXBatch(reader *mdbx.Reader, owned []byte, chainID, hash [32]byte,
 		return mdbx.Batch{}, err
 	}
 	// Complete validation fixed the target to all FF: floor(2^256/(2^256-1))=1.
-	key, _ := mdbx.HeightKey(g, 0) // The decoded authority already proved g != 0.
+	key, _ := mdbx.HeightKey(g, 0)              // The decoded authority already proved g != 0.
 	owner, _ := mdbx.CanonicalOwnerKey(g, hash) // Same nonzero g: the pair is decided in this writing transaction.
 	dbis := mdbx.SchemaV2DBIs()
 	extras = append(extras, mdbx.Mutation{DBI: dbis[2], Key: key, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, parsed.Header.PrevBlockHash, [40]byte{39: 1})},
