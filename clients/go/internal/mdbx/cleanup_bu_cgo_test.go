@@ -49,6 +49,7 @@ func cleanupTestStore(t *testing.T, a StorageAuthorityV1, height uint64, spent i
 		previousKey, keyErr := HeightKey(7, height-1)
 		mustEnvironment(t, keyErr)
 		rows = append(rows, Mutation{DBI: dbis[2], Key: previousKey, AfterKind: AfterLiteral, Literal: ChainValue(previousHash, [32]byte{}, work)})
+		rows = append(rows, canonicalOwnerLiteral(7, height-1, previousHash))
 		work[39] = 2
 	}
 	hash := sha3.Sum256(header)
@@ -56,7 +57,8 @@ func cleanupTestStore(t *testing.T, a StorageAuthorityV1, height uint64, spent i
 	mustEnvironment(t, err)
 	rows = append(rows,
 		Mutation{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(hash, [32]byte(header[4:36]), work)},
-		Mutation{DBI: dbis[3], Key: hash[:], AfterKind: AfterLiteral, Literal: header})
+		Mutation{DBI: dbis[3], Key: hash[:], AfterKind: AfterLiteral, Literal: header},
+		canonicalOwnerLiteral(7, height, hash))
 	body := append(bytes.Clone(header), 0)
 	otherHeader := make([]byte, 116)
 	otherHeader[0] = 1
@@ -474,6 +476,7 @@ func TestCleanupBU(t *testing.T) {
 		consultedRequireCommit(t, s, "mixed missing rows", Batch{Mutations: []Mutation{
 			{DBI: readDBIsLiteral()[2], Key: key, BeforePresent: true, AfterKind: AfterAbsent},
 			{DBI: readDBIsLiteral()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterAbsent},
+			canonicalDelete(canonicalOwnerLiteral(7, 0, hash)),
 		}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct canonical-evidence error.
@@ -490,7 +493,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		cfg := s.config
 		priorKey, keyErr := HeightKey(7, 0)
 		mustEnvironment(t, keyErr)
-		consultedRequireCommit(t, s, "remove required prior index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: priorKey, BeforePresent: true, AfterKind: AfterAbsent}}})
+		consultedRequireCommit(t, s, "remove required prior index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: priorKey, BeforePresent: true, AfterKind: AfterAbsent}, canonicalDelete(canonicalOwnerLiteral(7, 0, sha3.Sum256(make([]byte, 116))))}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-prior-index error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Code != codeInvalid || engine.Diagnostic != "invalid cleanup canonical evidence" {
@@ -508,7 +511,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		cfg := s.config
 		key, keyErr := HeightKey(7, 0)
 		mustEnvironment(t, keyErr)
-		consultedRequireCommit(t, s, "remove required index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: key, BeforePresent: true, AfterKind: AfterAbsent}}})
+		consultedRequireCommit(t, s, "remove required index", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: key, BeforePresent: true, AfterKind: AfterAbsent}, canonicalDelete(canonicalOwnerLiteral(7, 0, hash))}})
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError) //nolint:errorlint // Require direct missing-index error.
 		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "invalid cleanup canonical evidence" {
@@ -523,7 +526,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		maxKey, maxKeyErr := HeightKey(7, 0)
 		mustEnvironment(t, maxKeyErr)
 		maxWork := [40]byte{3: 1}
-		consultedRequireCommit(t, maxStore, "maximum work seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: maxKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(maxHash, [32]byte{}, maxWork)}}})
+		consultedRequireCommit(t, maxStore, "maximum work seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: maxKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(maxHash, [32]byte{}, maxWork)}, canonicalReplace(canonicalOwnerLiteral(7, 0, maxHash))}})
 		maxTruth, maxStage, maxErr := maxStore.CleanupBUV1(bootstrapOwner(t))
 		if maxTruth != CommitTruthNew || maxStage != UpdateStageCommitMayHaveCrossed || maxErr != nil {
 			t.Fatalf("cleanup 40-byte maximum work drifted: %s/%d/%v", maxTruth, maxStage, maxErr)
@@ -533,7 +536,7 @@ func TestCleanupBUMalformed(t *testing.T) {
 		mismatchStore, _, mismatchHash, _ := cleanupTestStore(t, mismatched, 0, 0)
 		mismatchKey, mismatchKeyErr := HeightKey(7, 0)
 		mustEnvironment(t, mismatchKeyErr)
-		consultedRequireCommit(t, mismatchStore, "index/header mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: mismatchKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(mismatchHash, modelHash(9), [40]byte{39: 1})}}})
+		consultedRequireCommit(t, mismatchStore, "index/header mismatch seed", Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[2], Key: mismatchKey, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(mismatchHash, modelHash(9), [40]byte{39: 1})}, canonicalReplace(canonicalOwnerLiteral(7, 0, mismatchHash))}})
 		mismatchTruth, mismatchStage, mismatchErr := mismatchStore.CleanupBUV1(bootstrapOwner(t))
 		mismatchEngine, mismatchOK := mismatchErr.(*EngineError) //nolint:errorlint // Require direct index/header mismatch error.
 		if mismatchTruth != CommitTruthOld || mismatchStage != UpdateStagePrewrite || !mismatchOK || mismatchEngine.Diagnostic != "invalid cleanup canonical evidence" {

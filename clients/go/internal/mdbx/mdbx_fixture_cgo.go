@@ -13,7 +13,8 @@ static rubin_fixture_path_result rubin_fixture_txn_path(MDBX_txn *txn) { rubin_f
 static int rubin_fixture_named(MDBX_txn *txn) { MDBX_dbi dbi; return mdbx_dbi_open(txn, "fixture-v1", MDBX_DB_DEFAULTS | MDBX_CREATE, &dbi); }
 static int rubin_fixture_meta(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 2; MDBX_val k = {(void *)&key, 1}, v = {NULL, 0}; return mdbx_put(txn, meta, &k, &v, MDBX_NOOVERWRITE); }
 static int rubin_fixture_main_row(MDBX_txn *txn) { MDBX_dbi main; const char key[] = "fixture-main-row", value[] = "ordinary"; MDBX_val k = {(void *)key, sizeof(key) - 1}, v = {(void *)value, sizeof(value) - 1}; int rc = mdbx_dbi_open(txn, NULL, MDBX_DB_DEFAULTS, &main); return rc == MDBX_SUCCESS ? mdbx_put(txn, main, &k, &v, MDBX_UPSERT) : rc; }
-static int rubin_fixture_schema_version(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 0, value[4] = {0, 0, 0, 2}; MDBX_val k = {(void *)&key, 1}, v = {(void *)value, 4}; return mdbx_put(txn, meta, &k, &v, MDBX_UPSERT); }
+static int rubin_fixture_schema_version(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 0, value[4] = {0, 0, 0, 1}; MDBX_val k = {(void *)&key, 1}, v = {(void *)value, 4}; return mdbx_put(txn, meta, &k, &v, MDBX_UPSERT); }
+static int rubin_fixture_schema_v1(MDBX_txn *txn, MDBX_dbi meta) { MDBX_dbi dbi; int rc = mdbx_dbi_open(txn, "canonical-owner-v1", MDBX_DB_DEFAULTS, &dbi); if (rc == MDBX_SUCCESS) rc = mdbx_drop(txn, dbi, true); return rc == MDBX_SUCCESS ? rubin_fixture_schema_version(txn, meta) : rc; }
 static int rubin_fixture_reverse_utxo(MDBX_txn *txn) { MDBX_dbi dbi; int rc = mdbx_dbi_open(txn, "utxo-v1", MDBX_DB_DEFAULTS, &dbi); if (rc == MDBX_SUCCESS) rc = mdbx_drop(txn, dbi, true); return rc == MDBX_SUCCESS ? mdbx_dbi_open(txn, "utxo-v1", MDBX_REVERSEKEY | MDBX_CREATE, &dbi) : rc; }
 static int rubin_fixture_add_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { const unsigned char mk = 2, mv = 0x42, ak[16] = {1}, av[104] = {1}; MDBX_val mkey = {(void *)&mk, 1}, mval = {(void *)&mv, 1}, akey = {(void *)ak, 16}, aval = {(void *)av, 104}; int rc = mdbx_put(txn, meta, &mkey, &mval, MDBX_NOOVERWRITE); return rc == MDBX_SUCCESS ? mdbx_put(txn, canonical, &akey, &aval, MDBX_NOOVERWRITE) : rc; }
 static int rubin_fixture_check_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { const unsigned char mk = 2, mv = 0x42, ak[16] = {1}, av[104] = {1}; MDBX_val mkey = {(void *)&mk, 1}, akey = {(void *)ak, 16}, got; int rc = mdbx_get(txn, meta, &mkey, &got); if (rc == MDBX_SUCCESS && (got.iov_len != 1 || memcmp(got.iov_base, &mv, 1))) rc = MDBX_INVALID; if (rc == MDBX_SUCCESS) rc = mdbx_get(txn, canonical, &akey, &got); return rc == MDBX_SUCCESS && (got.iov_len != 104 || memcmp(got.iov_base, av, 104)) ? MDBX_INVALID : rc; }
@@ -218,11 +219,11 @@ type fixtureRawRow struct {
 func fixtureSeedRows(store *Store, rows ...fixtureRawRow) error {
 	for _, row := range rows {
 		if ValidateDBI(row.dbi) != nil || !validKey(row.dbi.Rank, row.key) {
-			return errors.New("fixture raw row is outside SchemaV1")
+			return errors.New("fixture raw row is outside SchemaV2")
 		}
 		minimum, maximum := rawValueBounds(row.dbi, row.key)
 		if uint64(len(row.value)) < minimum || uint64(len(row.value)) > maximum {
-			return errors.New("fixture raw row is outside SchemaV1")
+			return errors.New("fixture raw row is outside SchemaV2")
 		}
 	}
 	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
@@ -275,6 +276,20 @@ func fixtureDeletePrefixRow(store *Store, dbi DBI, key []byte) error {
 	})
 }
 
+// fixtureLegacySchemaEnvironment creates a store at path, rewrites it into the retired seven-DBI shape (canonical-owner-v1
+// dropped from the main DB) carrying version value 00000001, and closes it. It is test-only persisted-image injection.
+func fixtureLegacySchemaEnvironment(path string, cfg ConfigV1) error {
+	store, err := Create(path, cfg)
+	if err != nil {
+		return err
+	}
+	meta := store.dbis[0]
+	err = fixtureWrite(store, operationOpen, func(txn *C.MDBX_txn) error {
+		return fixtureResult(operationOpen, int(C.rubin_fixture_schema_v1(txn, meta)))
+	})
+	return joinErrors(err, store.Close())
+}
+
 func fixturePrefixNativeShape(dbi DBI, prefix, seek []byte, mode uint32) error {
 	result := C.rubin_fixture_prefix_shape(C.uint(mode))
 	_, err := prefixPageNativeRow(dbi, prefix, seek, int(result.rc), unsafe.Pointer(result.key_bytes), result.key_len, unsafe.Pointer(result.value_bytes), result.value_len)
@@ -310,7 +325,7 @@ func fixtureShapeRejected(store *Store, mutate, restore func()) bool {
 	return unchanged && fixtureShapeError(err)
 }
 
-func fixtureStoreSnapshotMatches(store, self *Store, env *C.MDBX_env, writer *filelock.Handle, txn *C.MDBX_txn, cfg ConfigV1, dbis [7]C.MDBX_dbi, state storeState, terminal error) bool {
+func fixtureStoreSnapshotMatches(store, self *Store, env *C.MDBX_env, writer *filelock.Handle, txn *C.MDBX_txn, cfg ConfigV1, dbis [8]C.MDBX_dbi, state storeState, terminal error) bool {
 	return store.self == self && store.env == env && store.writer == writer && store.txn == txn && store.config == cfg && store.dbis == dbis && store.state == state && store.terminal == terminal
 }
 
@@ -327,14 +342,14 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 		self, env, writer, cfg, dbis := store.self, store.env, store.writer, store.config, store.dbis
 		validOpen := fixtureShapeRejected(store, func() { store.txn = txn }, func() { store.txn = nil })
 		poison := nativeError(operationInit, codeThreadMismatch)
-		store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [7]C.MDBX_dbi{}, poison
+		store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, poison
 		validPoison := store.Close() == poison
 		poisonShapes := []struct{ mutate, restore func() }{
 			{func() { store.env = nil }, func() { store.env = env }},
 			{func() { store.writer = nil }, func() { store.writer = writer }},
 			{func() { store.txn = nil }, func() { store.txn = txn }},
 			{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-			{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }},
+			{func() { store.dbis = dbis }, func() { store.dbis = [8]C.MDBX_dbi{} }},
 			{func() { store.terminal = nil }, func() { store.terminal = poison }},
 			{func() { store.self = nil }, func() { store.self = self }},
 		}
@@ -352,7 +367,7 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				{func() { store.writer = nil }, func() { store.writer = writer }},
 				{func() { store.txn = txn }, func() { store.txn = nil }},
 				{func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
-				{func() { store.dbis = [7]C.MDBX_dbi{} }, func() { store.dbis = dbis }},
+				{func() { store.dbis = [8]C.MDBX_dbi{} }, func() { store.dbis = dbis }},
 				{func() { store.terminal = nil }, func() { store.terminal = terminal }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}
@@ -361,14 +376,14 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				validShapes = fixtureShapeRejected(store, shape.mutate, shape.restore) && validShapes
 			}
 			construction := orderedErrors(operationClose, orderResultCausesPrimary, errors.New("construction"), nativeError(operationClose, codeBusy))
-			store.config, store.dbis, store.terminal = ConfigV1{}, [7]C.MDBX_dbi{}, construction
+			store.config, store.dbis, store.terminal = ConfigV1{}, [8]C.MDBX_dbi{}, construction
 			validConstruction := store.Close() == construction
 			constructionShapes := []struct{ mutate, restore func() }{
 				{func() { store.env = nil }, func() { store.env = env }},
 				{func() { store.writer = nil }, func() { store.writer = writer }},
 				{func() { store.txn = txn }, func() { store.txn = nil }},
 				{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-				{func() { store.dbis = dbis }, func() { store.dbis = [7]C.MDBX_dbi{} }},
+				{func() { store.dbis = dbis }, func() { store.dbis = [8]C.MDBX_dbi{} }},
 				{func() { store.terminal = nativeError(operationClose, codeBusy) }, func() { store.terminal = construction }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}

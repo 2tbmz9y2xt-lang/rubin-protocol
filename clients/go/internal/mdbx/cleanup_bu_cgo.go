@@ -57,7 +57,7 @@ func cleanupBUBatch(reader *Reader, noWork error) (Batch, error) {
 	if err != nil {
 		return Batch{}, err
 	}
-	dbis := SchemaV1DBIs()
+	dbis := SchemaV2DBIs()
 	mutations := make([]Mutation, 0, 1+len(deletes))
 	mutations = append(mutations, Mutation{DBI: dbis[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded})
 	mutations = append(mutations, deletes...)
@@ -65,7 +65,7 @@ func cleanupBUBatch(reader *Reader, noWork error) (Batch, error) {
 }
 
 func cleanupBUAuthority(reader *Reader) (StorageAuthorityV1, error) {
-	value, present, err := reader.Get(SchemaV1DBIs()[0], []byte{2})
+	value, present, err := reader.Get(SchemaV2DBIs()[0], []byte{2})
 	if err != nil {
 		return StorageAuthorityV1{}, err
 	}
@@ -133,7 +133,7 @@ func cleanupBUAdvance(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1)
 // cleanupBUCanonical records the exact current and predecessor index rows and
 // required header as unchanged observations for Store.Update's strict readback.
 func cleanupBUCanonical(reader *Reader, generation, height uint64) ([32]byte, []ConsultedRow, error) {
-	dbis := SchemaV1DBIs()
+	dbis := SchemaV2DBIs()
 	key, value, err := cleanupBUIndex(reader, generation, height)
 	if err != nil {
 		return [32]byte{}, nil, err
@@ -161,7 +161,7 @@ func cleanupBUIndex(reader *Reader, generation, height uint64) ([]byte, []byte, 
 	if err != nil {
 		return nil, nil, cleanupBUEvidence(reader, "invalid cleanup canonical evidence")
 	}
-	value, present, err := reader.Get(SchemaV1DBIs()[2], key)
+	value, present, err := reader.Get(SchemaV2DBIs()[2], key)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -173,18 +173,18 @@ func cleanupBUIndex(reader *Reader, generation, height uint64) ([]byte, []byte, 
 
 func cleanupBUPrevious(reader *Reader, generation, height uint64, parent [32]byte, work []byte) (ConsultedRow, error) {
 	key, _ := HeightKey(generation, height-1)
-	previous, found, err := reader.Get(SchemaV1DBIs()[2], key)
+	previous, found, err := reader.Get(SchemaV2DBIs()[2], key)
 	if err != nil {
 		return ConsultedRow{}, err
 	}
 	if !found || len(previous) != 104 || !validWork([40]byte(previous[64:104])) || !bytes.Equal(previous[:32], parent[:]) || bytes.Compare(previous[64:104], work) >= 0 {
 		return ConsultedRow{}, cleanupBUEvidence(reader, "invalid cleanup canonical evidence")
 	}
-	return ConsultedRow{DBI: SchemaV1DBIs()[2], Key: key}, nil
+	return ConsultedRow{DBI: SchemaV2DBIs()[2], Key: key}, nil
 }
 
 func cleanupBUHeader(reader *Reader, hash, parent [32]byte, height uint64) error {
-	header, found, err := reader.Get(SchemaV1DBIs()[3], hash[:])
+	header, found, err := reader.Get(SchemaV2DBIs()[3], hash[:])
 	if err != nil {
 		return err
 	}
@@ -194,17 +194,17 @@ func cleanupBUHeader(reader *Reader, hash, parent [32]byte, height uint64) error
 	return nil
 }
 
-// cleanupBUBlocks checks SchemaV1 framing and the hash-bound header. Full
+// cleanupBUBlocks checks SchemaV2 framing and the hash-bound header. Full
 // transaction-body and stored-commitment validation belongs at read/use.
 func cleanupBUBlocks(reader *Reader, hash [32]byte) ([]Mutation, error) {
-	value, present, err := reader.Get(SchemaV1DBIs()[4], hash[:])
+	value, present, err := reader.Get(SchemaV2DBIs()[4], hash[:])
 	if err != nil {
 		return nil, err
 	}
-	if !present || ValidateRow(SchemaV1DBIs()[4], hash[:], value) != nil {
+	if !present || ValidateRow(SchemaV2DBIs()[4], hash[:], value) != nil {
 		return nil, cleanupBUEvidence(reader, "invalid cleanup owed artifact")
 	}
-	return []Mutation{{DBI: SchemaV1DBIs()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterAbsent}}, nil
+	return []Mutation{{DBI: SchemaV2DBIs()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterAbsent}}, nil
 }
 
 func cleanupBUUndo(reader *Reader, hash [32]byte, height uint64) ([]Mutation, error) {
@@ -216,7 +216,7 @@ func cleanupBUUndo(reader *Reader, hash [32]byte, height uint64) ([]Mutation, er
 }
 
 func cleanupBUManifest(reader *Reader, hash [32]byte, height uint64) ([]byte, uint32, uint32, error) {
-	dbi := SchemaV1DBIs()[5]
+	dbi := SchemaV2DBIs()[5]
 	manifest := UndoManifestKey(hash)
 	value, present, err := reader.Get(dbi, manifest)
 	if err != nil {
@@ -240,7 +240,7 @@ func cleanupBUValidManifestCounts(txCount, spentCount uint32) bool {
 // cleanupBUUndoEntries exhausts every bounded page before returning the batch;
 // a page limit cannot commit only part of the height's UNDO family.
 func cleanupBUUndoEntries(reader *Reader, hash [32]byte, manifest []byte, txCount, spentCount uint32) ([]Mutation, error) {
-	dbi := SchemaV1DBIs()[5]
+	dbi := SchemaV2DBIs()[5]
 	deletes := make([]Mutation, 0, 1+int(spentCount))
 	deletes = append(deletes, Mutation{DBI: dbi, Key: manifest, BeforePresent: true, AfterKind: AfterAbsent})
 	outpoints := make([][36]byte, 0, int(spentCount))

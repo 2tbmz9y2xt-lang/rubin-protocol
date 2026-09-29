@@ -15,9 +15,9 @@ import (
 	"testing"
 )
 
-// bootstrapEmptyCounts and bootstrapInitializedCounts are the SchemaV1 entry counts of an
+// bootstrapEmptyCounts and bootstrapInitializedCounts are the SchemaV2 entry counts of an
 // exact-empty store and of one this method has initialized.
-var bootstrapEmptyCounts, bootstrapInitializedCounts = [7]uint64{2, 0, 0, 0, 0, 0, 0}, [7]uint64{4, 0, 0, 0, 0, 0, 0}
+var bootstrapEmptyCounts, bootstrapInitializedCounts = [8]uint64{2, 0, 0, 0, 0, 0, 0, 0}, [8]uint64{4, 0, 0, 0, 0, 0, 0, 0}
 
 func bootstrapMetaDBI() DBI { return readDBIsLiteral()[0] }
 
@@ -65,13 +65,13 @@ func bootstrapOpenUnchanged(t *testing.T, store *Store, marker string) {
 	}
 }
 
-func bootstrapCounts(t *testing.T, store *Store, marker string) [7]uint64 {
+func bootstrapCounts(t *testing.T, store *Store, marker string) [8]uint64 {
 	t.Helper()
 	inspection, err := store.Inspect()
 	if err != nil {
 		t.Fatalf("%s: %v", marker, err)
 	}
-	var counts [7]uint64
+	var counts [8]uint64
 	for rank, dbi := range inspection.DBIs {
 		counts[rank] = dbi.Entries
 	}
@@ -371,13 +371,13 @@ func TestStorageBootstrapNonempty(t *testing.T) {
 		{"extra metadata", []Mutation{consultedCounter(t, 1)}},
 		{"orphan counter", []Mutation{consultedCounter(t, 9)}},
 		{"utxo row", []Mutation{{DBI: dbis[1], Key: utxoOne, AfterKind: AfterLiteral, Literal: utxoValue}}},
-		{"canonical row", []Mutation{{DBI: dbis[2], Key: key(func() ([]byte, error) { return HeightKey(1, 1) }), AfterKind: AfterLiteral, Literal: chain}}},
+		{"canonical row", []Mutation{{DBI: dbis[2], Key: key(func() ([]byte, error) { return HeightKey(1, 1) }), AfterKind: AfterLiteral, Literal: chain}, canonicalOwnerLiteral(1, 1, [32]byte{2})}},
 		{"headers row", []Mutation{{DBI: dbis[3], Key: headerKey, AfterKind: AfterLiteral, Literal: headerValue}}},
 		{"blocks row", []Mutation{{DBI: dbis[4], Key: headerKey, AfterKind: AfterLiteral, Literal: headerValue}}},
 		{"undo row", []Mutation{{DBI: dbis[5], Key: UndoManifestKey(block), AfterKind: AfterLiteral, Literal: UndoManifestValue(4, [16]byte{1}, 2, 3)}}},
 		{"staged row", []Mutation{{DBI: dbis[6], Key: key(func() ([]byte, error) { return HeightKey(1, 2) }), AfterKind: AfterLiteral, Literal: chain}}},
 		{"generation four utxo", []Mutation{{DBI: dbis[1], Key: utxoFour, AfterKind: AfterLiteral, Literal: utxoValue}}},
-		{"generation four canonical", []Mutation{{DBI: dbis[2], Key: key(func() ([]byte, error) { return HeightKey(4, 1) }), AfterKind: AfterLiteral, Literal: chain}}},
+		{"generation four canonical", []Mutation{{DBI: dbis[2], Key: key(func() ([]byte, error) { return HeightKey(4, 1) }), AfterKind: AfterLiteral, Literal: chain}, canonicalOwnerLiteral(4, 1, [32]byte{2})}},
 		{"two nonempty DBIs", []Mutation{
 			{DBI: dbis[1], Key: utxoOne, AfterKind: AfterLiteral, Literal: utxoValue},
 			{DBI: dbis[6], Key: key(func() ([]byte, error) { return HeightKey(1, 2) }), AfterKind: AfterLiteral, Literal: chain},
@@ -454,7 +454,7 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 	differing.MaxReaders++
 	differingBytes, err := differing.Encode()
 	mustEnvironment(t, err)
-	const widthRefusal = "stored value width outside SchemaV1 bound"
+	const widthRefusal = "stored value width outside SchemaV2 bound"
 	for _, row := range []struct {
 		name       string
 		plan       []ownedMutation
@@ -462,18 +462,18 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 		mismatch   bool
 	}{
 		{"absent version row", []ownedMutation{bootstrapDeleteMeta([]byte{0}), bootstrapSpareCounter()}, "invalid bootstrap metadata 00", false},
-		{"wrong version value", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 2})}, "invalid bootstrap metadata 00", false},
+		{"wrong version value", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 1})}, "invalid bootstrap metadata 00", false},
 		{"absent config row", []ownedMutation{bootstrapDeleteMeta([]byte{1}), bootstrapSpareCounter()}, "invalid bootstrap metadata 01", false},
 		{"undecodable config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 48))}, "invalid bootstrap metadata 01", false},
 		{"valid but differing config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, differingBytes)}, "invalid bootstrap metadata 01", false},
 		// A row of the wrong width never reaches a bootstrap predicate: Reader.Get refuses it on
-		// the SchemaV1 bound, and that inherited error is what the caller must see.
+		// the SchemaV2 bound, and that inherited error is what the caller must see.
 		{"short version row", []ownedMutation{bootstrapReplaceMeta([]byte{0}, make([]byte, 3))}, widthRefusal, false},
 		{"long version row", []ownedMutation{bootstrapReplaceMeta([]byte{0}, make([]byte, 5))}, widthRefusal, false},
 		{"short config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 47))}, widthRefusal, false},
 		{"long config row", []ownedMutation{bootstrapReplaceMeta([]byte{1}, make([]byte, 49))}, widthRefusal, false},
-		{"both rows invalid", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 2}), bootstrapReplaceMeta([]byte{1}, make([]byte, 48))}, "invalid bootstrap metadata 00", false},
-		{"count mismatch wins over metadata", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 2}), bootstrapSpareCounter()}, "", true},
+		{"both rows invalid", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 1}), bootstrapReplaceMeta([]byte{1}, make([]byte, 48))}, "invalid bootstrap metadata 00", false},
+		{"count mismatch wins over metadata", []ownedMutation{bootstrapReplaceMeta([]byte{0}, []byte{0, 0, 0, 1}), bootstrapSpareCounter()}, "", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			store, path, _ := consultedStore(t)
@@ -817,7 +817,7 @@ func TestStorageBootstrapComposition(t *testing.T) {
 			t.Fatal("the nesting pin counts an Update the callback only defines")
 		}
 		batchBody := updateNativeBody(t, source, "bootstrapBatch")
-		order := []string{"bootstrapInspect(", "Entries != want", "[]byte{0x00}, []byte{0x01}", "bootstrapMetadata(", "bootstrapAuthority(", "Consulted:"}
+		order := []string{"bootstrapInspect(", "Entries != want", "s.canonicalOwnerVerified = true", "[]byte{0x00}, []byte{0x01}", "bootstrapMetadata(", "bootstrapAuthority(", "Consulted:"}
 		position := -1
 		for _, step := range order {
 			next := strings.Index(batchBody, step)
@@ -826,7 +826,7 @@ func TestStorageBootstrapComposition(t *testing.T) {
 			}
 			position = next
 		}
-		for _, once := range []string{"[]byte{0x00}, []byte{0x01}", "bootstrapMetadata(", "bootstrapAuthority(", "LogicalCounterValue("} {
+		for _, once := range []string{"s.canonicalOwnerVerified = true", "[]byte{0x00}, []byte{0x01}", "bootstrapMetadata(", "bootstrapAuthority(", "LogicalCounterValue("} {
 			if strings.Count(batchBody, once) != 1 {
 				t.Fatalf("bootstrapBatch allocates %q more than once", once)
 			}

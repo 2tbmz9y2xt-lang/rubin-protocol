@@ -149,7 +149,7 @@ func consultedUnitRefusal(t *testing.T, marker string, rows []ConsultedRow, plan
 	requireEnvironmentError(t, err, EngineClass("InvalidInput"), operationUpdate, 22, "invalid Update Batch")
 }
 
-// consultedSeedEmptyMeta stores an empty value under meta-v1 key {2}, the only SchemaV1 key with raw minimum 0.
+// consultedSeedEmptyMeta stores an empty value under meta-v1 key {2}, the only SchemaV2 key with raw minimum 0.
 func consultedSeedEmptyMeta(t *testing.T, store *Store) {
 	t.Helper()
 	requireUpdateTruth(t, runNativeUpdate(t, store, []ownedMutation{{dbi: readDBIsLiteral()[0], key: []byte{2}, after: AfterLiteral, literal: []byte{}}}), CommitTruthNew, true, nil, nil)
@@ -160,7 +160,8 @@ func TestUpdateConsultedImages(t *testing.T) {
 	store, _, _ := consultedStore(t)
 	absent, present, chain := consultedRows(t, 7)[6].Key, consultedRows(t, 8)[7].Key, ChainValue([32]byte{3}, [32]byte{4}, [40]byte{5})
 	consultedSeedEmptyMeta(t, store)
-	consultedRequireCommit(t, store, "images seed", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: present, AfterKind: AfterLiteral, Literal: chain}}})
+	seed := Mutation{DBI: dbis[2], Key: present, AfterKind: AfterLiteral, Literal: chain}
+	consultedRequireCommit(t, store, "images seed", Batch{Mutations: []Mutation{seed, canonicalOwnerPairOf(seed)}})
 	t.Run("absent", func(t *testing.T) {
 		counter := consultedCounter(t, 1)
 		consultedRequireCommit(t, store, "absent consulted row", Batch{Mutations: []Mutation{counter}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: absent}}})
@@ -398,7 +399,8 @@ func TestUpdateConsultedReverse(t *testing.T) {
 	for _, mode := range []bool{false, true} {
 		store, _, _ := consultedStore(t)
 		chain := ChainValue([32]byte{5}, [32]byte{6}, [40]byte{7})
-		consultedRequireCommit(t, store, "reverse seed", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: chain}}})
+		seed := Mutation{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: chain}
+		consultedRequireCommit(t, store, "reverse seed", Batch{Mutations: []Mutation{seed, canonicalOwnerPairOf(seed)}})
 		consultedRequireCommit(t, store, fmt.Sprintf("reverse=%v consulted commit", mode), Batch{Reverse: mode, Mutations: []Mutation{consultedCounter(t, 2)}, Consulted: rows})
 		consultedRequireImage(t, store, dbis[2], key, chain, true, fmt.Sprintf("reverse=%v canonical row unchanged", mode))
 		consultedRequireImage(t, store, dbis[6], key, nil, false, fmt.Sprintf("reverse=%v staged row unchanged", mode))
@@ -444,9 +446,11 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 	before, after := ChainValue([32]byte{1}, [32]byte{2}, [40]byte{3}), ChainValue([32]byte{9}, [32]byte{10}, [40]byte{11})
 	t.Run("snapshot drift", func(t *testing.T) {
 		store, path, cfg := consultedStore(t)
-		consultedRequireCommit(t, store, "snapshot drift seed", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}}})
+		seed := Mutation{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}
+		consultedRequireCommit(t, store, "snapshot drift seed", Batch{Mutations: []Mutation{seed, canonicalOwnerPairOf(seed)}})
 		reader, truth, err := consultedUpdate(store, func(observed *Reader) {
-			drift := updateNativePlan(t, Mutation{DBI: dbis[2], Key: key, BeforePresent: true, AfterKind: AfterLiteral, Literal: after})
+			replacement := Mutation{DBI: dbis[2], Key: key, BeforePresent: true, AfterKind: AfterLiteral, Literal: after}
+			drift := updateNativePlan(t, replacement, canonicalDelete(canonicalOwnerPairOf(seed)), canonicalOwnerPairOf(replacement))
 			requireUpdateTruth(t, store.updateNative(drift, nil, observed.txn), CommitTruthNew, true, nil, nil)
 		}, Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: dbis[2], Key: key}}})
 		consultedRequireOutcome(t, store, reader, truth, err, EngineClass("StateMismatch"), -30779, "OLD/write snapshot mismatch", "snapshot drift", true)
@@ -465,7 +469,8 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 		if consulted[0].image != (updateImage{}) {
 			t.Fatalf("final drift direct: captured %+v, want absent", consulted[0].image)
 		}
-		consultedRequireCommit(t, store, "final drift direct: sibling creates the row", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}}})
+		created := Mutation{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}
+		consultedRequireCommit(t, store, "final drift direct: sibling creates the row", Batch{Mutations: []Mutation{created, canonicalOwnerPairOf(created)}})
 		var matchErr error
 		mustEnvironment(t, store.View(func(reader *Reader) error {
 			matchErr = updateNativeConsultedMatch(reader.txn, store.dbis, consulted, "final update image mismatch")
@@ -532,8 +537,10 @@ func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitne
 func TestUpdateConsultedReadback(t *testing.T) {
 	dbis := readDBIsLiteral()
 	present, absent, chain := consultedRows(t, 1)[0].Key, consultedRows(t, 2)[1].Key, ChainValue([32]byte{2}, [32]byte{3}, [40]byte{4})
+	seed := Mutation{DBI: dbis[2], Key: present, AfterKind: AfterLiteral, Literal: chain}
+	grown := Mutation{DBI: dbis[2], Key: absent, AfterKind: AfterLiteral, Literal: ChainValue([32]byte{5}, [32]byte{3}, [40]byte{4})}
 	rows := []ConsultedRow{{DBI: dbis[0], Key: []byte{2}}, {DBI: dbis[2], Key: present}, {DBI: dbis[2], Key: absent}}
-	deletePresent := updateNativePlan(t, Mutation{DBI: dbis[2], Key: present, BeforePresent: true, AfterKind: AfterAbsent})
+	deletePresent := updateNativePlan(t, canonicalDelete(seed), canonicalDelete(canonicalOwnerPairOf(seed)))
 	for _, row := range []struct {
 		name                                         string
 		metaBytes, newWitness, unreadable, malformed bool
@@ -546,13 +553,13 @@ func TestUpdateConsultedReadback(t *testing.T) {
 		{"consulted absent after old targets", false, false, false, false, deletePresent, CommitTruthUnknown, 0},
 		{"consulted absent after new targets", false, true, false, false, deletePresent, CommitTruthUnknown, 0},
 		{"present bytes became empty", true, false, false, false, []ownedMutation{{dbi: dbis[0], key: []byte{2}, beforePresent: true, after: AfterLiteral, literal: []byte{}}}, CommitTruthUnknown, 0},
-		{"absent became present", false, true, false, false, updateNativePlan(t, Mutation{DBI: dbis[2], Key: absent, AfterKind: AfterLiteral, Literal: chain}), CommitTruthUnknown, 0},
+		{"absent became present", false, true, false, false, updateNativePlan(t, grown, canonicalOwnerPairOf(grown)), CommitTruthUnknown, 0},
 		{"unreadable consulted DBI", false, false, true, false, nil, CommitTruthUnknown, -30780},
 		{"malformed consulted image", false, true, false, true, nil, CommitTruthUnknown, -30779},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			store, _, _ := consultedStore(t)
-			consultedRequireCommit(t, store, row.name+": seed", Batch{Mutations: []Mutation{{DBI: dbis[2], Key: present, AfterKind: AfterLiteral, Literal: chain}}})
+			consultedRequireCommit(t, store, row.name+": seed", Batch{Mutations: []Mutation{seed, canonicalOwnerPairOf(seed)}})
 			if row.metaBytes {
 				consultedRequireCommit(t, store, row.name+": seed", Batch{Mutations: []Mutation{{DBI: dbis[0], Key: []byte{2}, AfterKind: AfterLiteral, Literal: admissionNone()}}})
 			} else {
@@ -606,7 +613,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	require(MaxPrefixPageBytes == 154611151, "prefix-page byte bound drifted")
 	require(MaxPrefixPageBytes == MaxOperationDataBytes, "prefix-page byte bound alias drifted")
 	text := string(source)
-	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(txn *C.MDBX_txn, dbis [7]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
+	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
 	for _, name := range []string{"updateNativeDeletes", "updateNativePuts"} {
 		require(!strings.Contains(strings.ToLower(updateNativeBody(t, source, name)), "consulted"), "no-write route drifted: "+name)
 	}
@@ -614,7 +621,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	ordered(execute, "final verification order drifted", "updateNativePreflight(", "updateNativeDeletes(", "updateNativePuts(", "updateNativeVerify(", "updateNativeConsultedMatch(", "\"final update image mismatch\"", "return updateNativeCommit(")
 	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 5, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeConsultedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
 	preflight := updateNativeBody(t, source, "updateNativePreflight")
-	ordered(preflight, "snapshot comparison order drifted", "updateNativeImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeConsultedMatch(", "return references, nil")
+	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeConsultedMatch(", "return references, nil")
 	require(!strings.Contains(preflight, "updateNativeConsultedImages("), "consulted capture left the admission owner")
 	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 3, "snapshot diagnostic drifted")
 	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackConsulted(", "if oldImage", "if newImage")

@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -60,6 +62,7 @@ func TestGenesisMDBXPublishedProducer(t *testing.T) {
 	if out.Result != "ACCEPTED" || out.Truth != 2 || out.Stage != 3 || out.Err != nil || out.State == nil || out.Summary == nil || len(out.State.Utxos) != 1 || out.State.AlreadyGenerated.Sign() != 0 {
 		t.Fatalf("published operation: %+v", out)
 	}
+	genesisMDBXRequireOwner(t, store, hash)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -71,22 +74,57 @@ func TestGenesisMDBXPublishedProducer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, count := range []uint64{4, 1, 1, 1, 1, 1, 0} {
+	for i, count := range []uint64{4, 1, 1, 1, 1, 1, 0, 1} {
 		if inspection.DBIs[i].Entries != count {
 			t.Fatalf("published reopened image rank%d: %+v", i, inspection.DBIs[i])
 		}
 	}
 	if err := store.View(func(reader *mdbx.Reader) error {
-		body, present, err := reader.Get(mdbx.SchemaV1DBIs()[4], hash[:])
+		body, present, err := reader.Get(mdbx.SchemaV2DBIs()[4], hash[:])
 		if err != nil || !present || !bytes.Equal(body, block) {
 			t.Fatalf("published reopened body: %v/%v", present, err)
 		}
-		counter, present, err := reader.Get(mdbx.SchemaV1DBIs()[0], []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1})
+		counter, present, err := reader.Get(mdbx.SchemaV2DBIs()[0], []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1})
 		if err != nil || !present || !bytes.Equal(counter, []byte{0, 0, 0, 0, 0, 0, 0, 89, 0, 0, 0, 0, 0, 0, 0, 1}) {
 			t.Fatalf("published reopened counter: %x/%v", counter, err)
+		}
+		owner, present, err := reader.Get(mdbx.DBI{Name: "canonical-owner-v1", Rank: 7}, append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, hash[:]...))
+		if err != nil || !present || !bytes.Equal(owner, make([]byte, 8)) {
+			t.Fatalf("published reopened owner: %x/%v", owner, err)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// genesisMDBXRequireOwner observes the genesis pair through CanonicalOwnerV1 inside View and inside Update on the
+// Create'd, bootstrapped handle; every expected key, entry and row is a literal independent of the producer.
+func genesisMDBXRequireOwner(t *testing.T, store *mdbx.Store, hash [32]byte) {
+	t.Helper()
+	ownerDBI, forwardDBI := mdbx.DBI{Name: "canonical-owner-v1", Rank: 7}, mdbx.DBI{Name: "canonical-v1", Rank: 2}
+	other := hash
+	other[0] ^= 1
+	entry := append(append([]byte(nil), hash[:]...), make([]byte, 72)...)
+	entry[103] = 1
+	owned := []mdbx.ConsultedRow{{DBI: forwardDBI, Key: []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}}, {DBI: ownerDBI, Key: append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, hash[:]...)}}
+	none := []mdbx.ConsultedRow{{DBI: ownerDBI, Key: append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, other[:]...)}}
+	check := func(reader *mdbx.Reader, label string) {
+		got, err := reader.CanonicalOwnerV1(1, hash)
+		if err != nil || !got.Owned || got.Height != 0 || !bytes.Equal(got.Entry, entry) || !reflect.DeepEqual(got.Rows, owned) {
+			t.Fatalf("%s genesis owner: %+v/%v", label, got, err)
+		}
+		absent, err := reader.CanonicalOwnerV1(1, other)
+		if err != nil || absent.Owned || absent.Height != 0 || absent.Entry != nil || !reflect.DeepEqual(absent.Rows, none) {
+			t.Fatalf("%s absent genesis owner: %+v/%v", label, absent, err)
+		}
+	}
+	if err := store.View(func(reader *mdbx.Reader) error { check(reader, "View"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	inspected := errors.New("genesis owner inspected")
+	truth, stage, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) { check(reader, "Update"); return mdbx.Batch{}, inspected })
+	if truth != mdbx.CommitTruthOld || stage != mdbx.UpdateStagePrewrite || err != inspected { //nolint:errorlint // The callback sentinel must survive unchanged.
+		t.Fatalf("genesis owner Update: %v/%v/%v", truth, stage, err)
 	}
 }

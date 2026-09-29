@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	logicalMDBXDBIs = mdbx.SchemaV1DBIs()
+	logicalMDBXDBIs = mdbx.SchemaV2DBIs()
 	logicalMDBXOpA  = Outpoint{Txid: filled32(0x11)}
 	logicalMDBXOpB  = Outpoint{Txid: filled32(0x22), Vout: 1}
 	logicalMDBXOpC  = Outpoint{Txid: filled32(0x33), Vout: 2}
@@ -46,10 +46,10 @@ var (
 	logicalMDBXBase = logicalStateCounters{bytes: logicalMDBXTotal, entries: 3}
 )
 
-// logicalMDBXMust unwraps a SchemaV1 constructor over constant test inputs.
+// logicalMDBXMust unwraps a SchemaV2 constructor over constant test inputs.
 func logicalMDBXMust(value []byte, err error) []byte {
 	if err != nil {
-		panic("SchemaV1 test helper: " + err.Error())
+		panic("SchemaV2 test helper: " + err.Error())
 	}
 	return value
 }
@@ -350,6 +350,9 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 	chain := mdbx.ChainValue(filled32(1), filled32(2), [40]byte{3})
 	sameImage, seededImage := logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage, 5)), logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage, 4))
 	crossImage := logicalMDBXMust(mdbx.HeightKey(logicalMDBXImage+1, 5))
+	// Owner rows pair the seeded (image, 4) forward entry naming filled32(1) and the same-image (image, 5) extra naming filled32(5).
+	ownerKey := func(hash [32]byte) []byte { return append(binary.BigEndian.AppendUint64(nil, logicalMDBXImage), hash[:]...) }
+	sameChain := mdbx.ChainValue(filled32(5), filled32(2), [40]byte{3})
 	metaKey, counterKey := logicalMDBXMust(mdbx.MetaKey(0x02, 0)), logicalMDBXCounterKey()
 	literal := func(rank uint8, key, value []byte) mdbx.Mutation {
 		return mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: mdbx.AfterLiteral, Literal: value}
@@ -362,7 +365,7 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 	}
 	entryKey := ref(logicalMDBXOpB, logicalMDBXImage).Key
 	// One present row per extra family, so every deletion row targets a row the adapter can delete; an undo entry exists only through a reference.
-	image := []mdbx.Mutation{literal(3, headerKey, headerValue), literal(4, blockKey, blockValue), literal(5, manifestKey, manifestValue), literal(2, seededImage, chain), literal(6, seededImage, chain), ref(logicalMDBXOpB, logicalMDBXImage)}
+	image := []mdbx.Mutation{literal(3, headerKey, headerValue), literal(4, blockKey, blockValue), literal(5, manifestKey, manifestValue), literal(2, seededImage, chain), literal(6, seededImage, chain), ref(logicalMDBXOpB, logicalMDBXImage), literal(7, ownerKey(filled32(1)), binary.BigEndian.AppendUint64(nil, 4))}
 	logicalMDBXSeed(t, store, image...)
 	logicalMDBXAssert(t, mdbx.ValidateRow(logicalMDBXDBIs[4], blockKey, blockDiffering) == nil, "differing create-once literal is adapter-invalid")
 	for _, tc := range []struct {
@@ -378,9 +381,9 @@ func TestLogicalMDBXExtraMatrix(t *testing.T) {
 		{"rank1 literal", "extra target policy drifted", "", []mdbx.Mutation{literal(1, logicalMDBXKey(logicalMDBXOpD), logicalMDBXValue(logicalMDBXEntry(1, 0x91)))}, logicalMDBXLocal},
 		{"rank1 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(1, logicalMDBXKey(logicalMDBXOpC))}, logicalMDBXLocal},
 		{"rank1 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[1], Key: logicalMDBXKey(logicalMDBXOpD), AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXLocal},
-		{"rank2 literal same image", "extra target policy drifted", "", []mdbx.Mutation{literal(2, sameImage, chain)}, logicalMDBXEmit},
+		{"rank2 literal same image", "extra target policy drifted", "", []mdbx.Mutation{literal(2, sameImage, sameChain), literal(7, ownerKey(filled32(5)), binary.BigEndian.AppendUint64(nil, 5))}, logicalMDBXEmit},
 		{"rank2 literal cross image", "extra target policy drifted", "", []mdbx.Mutation{literal(2, crossImage, chain)}, logicalMDBXLocal},
-		{"rank2 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(2, seededImage)}, logicalMDBXEmit},
+		{"rank2 deletion", "extra target policy drifted", "", []mdbx.Mutation{absent(2, seededImage), absent(7, ownerKey(filled32(1)))}, logicalMDBXEmit},
 		{"rank2 deletion cross image", "extra target policy drifted", "", []mdbx.Mutation{absent(2, crossImage)}, logicalMDBXLocal},
 		{"rank2 reference", "extra target policy drifted", "", []mdbx.Mutation{{DBI: logicalMDBXDBIs[2], Key: sameImage, AfterKind: mdbx.AfterOldValueRef}}, logicalMDBXAdapterInvalid},
 		{"rank6 literal same image", "extra target policy drifted", "", []mdbx.Mutation{literal(6, sameImage, chain)}, logicalMDBXEmit},
@@ -638,7 +641,7 @@ func TestLogicalMDBXGenesisCounterBootstrapComposition(t *testing.T) {
 				logicalMDBXSeed(t, store, logicalMDBXCounterRow(false, 0, 0))
 			}
 			entry := logicalMDBXEntry(0, 0xa1)
-			// Independent SchemaV1 literals: BE generation, txid, BE vout; value/type/length/height/coinbase.
+			// Independent SchemaV2 literals: BE generation, txid, BE vout; value/type/length/height/coinbase.
 			utxoKey := append([]byte{0, 0, 0, 0, 0, 0, 0, byte(tc.image)}, bytes.Repeat([]byte{0x11}, 32)...)
 			utxoKey = append(utxoKey, 0, 0, 0, 0)
 			utxoValue := []byte{0xa2, 0, 0, 0, 0, 0, 0, 0, 0xa1, 0, 0, 0xa3, 0, 0, 0, 0, 0, 0, 0, 1}
@@ -970,6 +973,8 @@ func genesisMDBXExpected(t *testing.T, store *mdbx.Store, g uint64, authority []
 	rows := genesisMDBXSnapshot(t, store, g)
 	logicalMDBXAssert(t, len(rows) == 9, "%s: got %d finite rows", label, len(rows))
 	logicalMDBXWantImage(t, store, [3][]byte{{0}, {2}, authority}, [3][]byte{{0}, append([]byte{0x10}, key...), genesisMDBXHex("00000000000000590000000000000001")}, [3][]byte{{1}, utxoKey, utxo}, [3][]byte{{2}, append(bytes.Clone(key), make([]byte, 8)...), index}, [3][]byte{{3}, hash[:], block[:116]}, [3][]byte{{4}, hash[:], block}, [3][]byte{{5}, append(hash[:32:32], 0), manifest})
+	// The genesis owner row: BE64(g) || genesis hash holding height zero.
+	logicalMDBXWantImage(t, store, [3][]byte{{7}, append(bytes.Clone(key), hash[:]...), make([]byte, 8)})
 }
 
 func genesisMDBXReadmission(t *testing.T, owner *mdbx.OperationReservationOwner) {
@@ -1091,6 +1096,7 @@ func genesisMDBXTestPrestate(t *testing.T) {
 			_, _, hash := genesisMDBXFixture()
 			row := mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 			result := "TERMINAL_STORE_INTEGRITY(canonical)"
+			var pair []mdbx.Mutation
 			switch variant {
 			case "authority-absent":
 				store, row = logicalMDBXStore(t), mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}, AfterKind: mdbx.AfterLiteral, Literal: make([]byte, 16)}
@@ -1103,6 +1109,7 @@ func genesisMDBXTestPrestate(t *testing.T) {
 					height = 1
 				}
 				row = mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(1, height)), AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})}
+				pair = []mdbx.Mutation{{DBI: logicalMDBXDBIs[7], Key: append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, hash[:]...), AfterKind: mdbx.AfterLiteral, Literal: binary.BigEndian.AppendUint64(nil, height)}}
 				result = "STALE_LOCAL_PLAN"
 			case "counter-absent", "counter-bytes", "counter-entries":
 				row.Key = []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1}
@@ -1117,7 +1124,7 @@ func genesisMDBXTestPrestate(t *testing.T) {
 			case "ghost-utxo":
 				row = mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: logicalMDBXMust(mdbx.UTXOKey(1, [32]byte{1}, 2)), AfterKind: mdbx.AfterLiteral, Literal: logicalMDBXValue(UtxoEntry{Value: 1})}
 			}
-			logicalMDBXSeed(t, store, row)
+			logicalMDBXSeed(t, store, append(pair, row)...)
 			old := genesisMDBXSnapshot(t, store, 1)
 			genesisMDBXReturned(t, genesisMDBXRun(store, owner), result, 1, 1, "genesis prestate admission drifted")
 			logicalMDBXAssert(t, reflect.DeepEqual(old, genesisMDBXSnapshot(t, store, 1)), "genesis prestate admission drifted: OLD changed")
@@ -1134,7 +1141,8 @@ func genesisMDBXNondefault(t *testing.T, store *mdbx.Store, profile mdbx.Storage
 		a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 8, F: 0, TipHeight: 1, TipHash: [32]byte{3}, CumulativeChainwork: [40]byte{39: 1}, RowCount: 1, LogicalBytes: 1}
 	}
 	authority := logicalMDBXMust(a.Encode())
-	logicalMDBXSeed(t, store, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: authority}, logicalMDBXCounterRow(false, 0, 0), mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(6, 3)), AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue([32]byte{3}, [32]byte{2}, [40]byte{39: 4})})
+	logicalMDBXSeed(t, store, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: authority}, logicalMDBXCounterRow(false, 0, 0), mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(6, 3)), AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue([32]byte{3}, [32]byte{2}, [40]byte{39: 4})},
+		mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: append([]byte{0, 0, 0, 0, 0, 0, 0, 6, 3}, make([]byte, 31)...), AfterKind: mdbx.AfterLiteral, Literal: []byte{0, 0, 0, 0, 0, 0, 0, 3}})
 	return authority
 }
 
@@ -1177,7 +1185,7 @@ func genesisMDBXTestReuse(t *testing.T) {
 			old, inspected := genesisMDBXSnapshot(t, store, 1), errors.New("genesis Batch inspected")
 			truth, stage, err := store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 				batch, err := genesisMDBXBatch(reader, block, chain, hash, &out)
-				logicalMDBXAssert(t, err == nil && len(batch.Consulted) == 3+len(seeds) && len(batch.Mutations) == 6-len(seeds), "genesis consulted image incomplete: %+v/%v", batch, err)
+				logicalMDBXAssert(t, err == nil && len(batch.Consulted) == 3+len(seeds) && len(batch.Mutations) == 7-len(seeds), "genesis consulted image incomplete: %+v/%v", batch, err)
 				seen := make(map[string]bool)
 				for _, row := range batch.Mutations {
 					id := fmt.Sprintf("%d/%x", row.DBI.Rank, row.Key)
@@ -1189,7 +1197,7 @@ func genesisMDBXTestReuse(t *testing.T) {
 					logicalMDBXAssert(t, !seen[id] && (i == 0 || batch.Consulted[i-1].DBI.Rank < row.DBI.Rank || batch.Consulted[i-1].DBI == row.DBI && bytes.Compare(batch.Consulted[i-1].Key, row.Key) < 0), "genesis consulted image incomplete: duplicate/unordered consulted")
 					seen[id] = true
 				}
-				logicalMDBXAssert(t, len(seen) == 9, "genesis consulted image incomplete: union=%d", len(seen))
+				logicalMDBXAssert(t, len(seen) == 10, "genesis consulted image incomplete: union=%d", len(seen))
 				return mdbx.Batch{}, inspected
 			})
 			logicalMDBXAssert(t, truth == 1 && stage == 1 && err == inspected && reflect.DeepEqual(old, genesisMDBXSnapshot(t, store, 1)), "genesis consulted image incomplete: inspection changed OLD") //nolint:errorlint // Preserve the exact callback sentinel.

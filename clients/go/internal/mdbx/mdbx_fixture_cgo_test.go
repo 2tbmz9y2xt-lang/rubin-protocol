@@ -24,10 +24,10 @@ func TestFixtureModesAndFixedOperations(t *testing.T) {
 		mode             fixtureMode
 		operation        engineOperation
 	}{
-		{"unexpected DBI", "SchemaV1 main cardinality mismatch", fixtureUnexpectedDBI, operationInit},
-		{"third meta row", "SchemaV1 metadata cardinality mismatch", fixtureThirdMetaRow, operationInit},
-		{"unnamed main row", "SchemaV1 main cardinality mismatch", fixtureUnnamedMainRow, operationOpen},
-		{"wrong schema version", "invalid SchemaV1 version row", fixtureWrongSchemaVersion, operationOpen},
+		{"unexpected DBI", "SchemaV2 main cardinality mismatch", fixtureUnexpectedDBI, operationInit},
+		{"third meta row", "SchemaV2 metadata cardinality mismatch", fixtureThirdMetaRow, operationInit},
+		{"unnamed main row", "SchemaV2 main cardinality mismatch", fixtureUnnamedMainRow, operationOpen},
+		{"wrong schema version", "invalid SchemaV2 version row", fixtureWrongSchemaVersion, operationOpen},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "db")
@@ -81,7 +81,7 @@ func TestFixtureModesAndFixedOperations(t *testing.T) {
 		}
 	}
 	store, copied, err := fixtureOpenReverseUTXO(filepath.Join(t.TempDir(), "db"))
-	requireNoStore(t, store, err, EngineIntegrity, operationOpen, -30793, "SchemaV1 DBI flags mismatch")
+	requireNoStore(t, store, err, EngineIntegrity, operationOpen, -30793, "SchemaV2 DBI flags mismatch")
 	if string(copied) != string(configBytes(environmentConfig())) {
 		t.Fatalf("copied metadata changed: %x", copied)
 	}
@@ -468,8 +468,8 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 	stored := func(name string, rank uint8, key, value []byte, diagnostic string) malformedCase {
 		return malformedCase{name, diagnostic, EngineIntegrity, codeInvalid, true, []fixtureRawRow{{dbi: dbis[rank], key: key, value: value}}}
 	}
-	const keyDiagnostic = "stored key outside SchemaV1 prefix-page domain"
-	const valueDiagnostic = "stored value width outside SchemaV1 bound"
+	const keyDiagnostic = "stored key outside SchemaV2 prefix-page domain"
+	const valueDiagnostic = "stored value width outside SchemaV2 bound"
 	utxo, staged := fixturePrefixKey(1, 13, 1, false), fixturePrefixKey(6, 13, 1, false)
 	manifest, entry := fixturePrefixKey(5, 13, 0, false), fixturePrefixKey(5, 13, 1, true)
 	invalidManifest := append(append([]byte(nil), manifest...), 0)
@@ -634,7 +634,7 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			bad[0] = 7
 			mustEnvironment(t, fixtureSeedRows(s, fixtureRawRow{dbi: readDBIsLiteral()[4], key: hash[:], value: bad}))
 		}},
-		{"over-bound body width", "stored value width outside SchemaV1 bound", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
+		{"over-bound body width", "stored value width outside SchemaV2 bound", CleanupSpanBlocksV1, func(t *testing.T, s *Store, hash [32]byte) {
 			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[4], hash[:], make([]byte, MaxBlockBytes+1)))
 		}},
 		{"invalid manifest version", "invalid cleanup owed artifact", CleanupSpanUndoV1, func(t *testing.T, s *Store, hash [32]byte) {
@@ -684,7 +684,7 @@ func TestCleanupBURawEvidence(t *testing.T) {
 			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, make([]byte, width)))
 			truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 			engine, ok := err.(*EngineError)
-			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "stored value width outside SchemaV1 bound" {
+			if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "get" || engine.Diagnostic != "stored value width outside SchemaV2 bound" {
 				t.Fatalf("cleanup index width provenance drifted: %s/%d/%v", truth, stage, err)
 			}
 		})
@@ -698,7 +698,7 @@ func TestCleanupBURawEvidence(t *testing.T) {
 		mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[5], key, value))
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError)
-		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV1 prefix-page domain" {
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV2 prefix-page domain" {
 			t.Fatalf("cleanup undo key width provenance drifted: %s/%d/%v", truth, stage, err)
 		}
 	})
@@ -711,7 +711,7 @@ func TestCleanupBURawEvidence(t *testing.T) {
 		mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[5], hash[:], []byte{1}))
 		truth, stage, err := s.CleanupBUV1(bootstrapOwner(t))
 		engine, ok := err.(*EngineError)
-		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV1 prefix-page domain" {
+		if truth != CommitTruthOld || stage != UpdateStagePrewrite || !ok || engine.Class != EngineIntegrity || engine.Operation != "prefix-page" || engine.Diagnostic != "stored key outside SchemaV2 prefix-page domain" {
 			t.Fatalf("cleanup hash-prefix artifact accepted: %s/%d/%v", truth, stage, err)
 		}
 		reopened, openErr := Open(path, cfg)
@@ -1257,7 +1257,7 @@ func TestReaderGetMalformedDisposition(t *testing.T) {
 				defer func() { recovered = recover() }()
 				returned = store.View(func(reader *Reader) error {
 					_, _, recorded = reader.Get(dbis[0], key)
-					requireEnvironmentError(t, recorded, EngineIntegrity, operationGet, codeInvalid, "stored value width outside SchemaV1 bound")
+					requireEnvironmentError(t, recorded, EngineIntegrity, operationGet, codeInvalid, "stored value width outside SchemaV2 bound")
 					if _, _, again := reader.Get(dbis[0], key); requireEnvironmentError(t, again, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active").Cause != nil {
 						t.Fatal("failed Reader remained active")
 					}
@@ -1476,6 +1476,7 @@ func TestNativeUpdateImageFamilies(t *testing.T) {
 				batch.Mutations[8].RefKey = append([]byte(nil), batch.Mutations[3].Key...)
 				copy(batch.Mutations[8].Key[41:77], batch.Mutations[3].Key[8:44])
 			}
+			batch.Mutations = append(batch.Mutations, canonicalOwnerPairOf(batch.Mutations[4]))
 			plan := updateNativePlan(t, batch.Mutations...)
 			store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
 			mustEnvironment(t, err)
@@ -1617,7 +1618,7 @@ func TestPrunedProfileMalformed(t *testing.T) {
 			out := s.SelectPrunedProfileV1(true, tip, owner)
 			diagnostic, cause := "invalid pruned profile authority", error(errSchema)
 			if name == "canonical-width" {
-				diagnostic, cause = "stored value width outside SchemaV1 bound", nil
+				diagnostic, cause = "stored value width outside SchemaV2 bound", nil
 			}
 			bootstrapRefusal(t, "pruned profile malformed authority drifted", out.Truth, out.Err, EngineIntegrity, operationGet, codeInvalid, diagnostic, cause, true)
 			if out.Stage != 1 || out.Decision != "" || out.Authority != nil || s.state != storeCLOSED {
@@ -1700,7 +1701,8 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 					requireUpdateTruth(t, s.updateNative(execute, consulted, reader.txn), CommitTruthNew, true, nil, nil)
 				}
 				if mode == "tip" {
-					change := []ownedMutation{{dbi: consulted[0].dbi, key: consulted[0].key, beforePresent: true, after: AfterLiteral, literal: ChainValue(modelHash(62), [32]byte{}, modelWork(false))}}
+					change := updateNativePlan(t, Mutation{DBI: consulted[0].dbi, Key: consulted[0].key, BeforePresent: true, AfterKind: AfterLiteral, Literal: ChainValue(modelHash(62), [32]byte{}, modelWork(false))},
+						canonicalDelete(canonicalOwnerLiteral(7, 15121, modelHash(61))), canonicalOwnerLiteral(7, 15121, modelHash(62)))
 					requireUpdateTruth(t, s.updateNative(change, nil, reader.txn), CommitTruthNew, true, nil, nil)
 				}
 				handles := s.dbis
@@ -1854,6 +1856,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 						mutations = append(mutations, row)
 					}
 				}
+				mutations = append(mutations, Mutation{DBI: dbis[7], Key: append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, hash...), AfterKind: AfterLiteral, Literal: make([]byte, 8)})
 				plan := updateNativePlan(t, mutations...)
 				var outcome updateNativeOutcome
 				primary := nativeError(operationUpdate, codeENOSPC)
@@ -1957,7 +1960,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 						}
 					} else {
 						engine := requireEngineError(t, readErr, EngineIntegrity, operationGet, codeInvalid)
-						if engine.Diagnostic != "stored value width outside SchemaV1 bound" || reader.active.Load() {
+						if engine.Diagnostic != "stored value width outside SchemaV2 bound" || reader.active.Load() {
 							t.Fatalf("genesis width read drifted: %+v", engine)
 						}
 						observed = readErr

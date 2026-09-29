@@ -14,7 +14,7 @@ import (
 
 // reverseBatchKeys lays out count strictly ascending keys of one width over one backing: 44-byte utxo-v1 keys or
 // 77-byte undo-v1 entry keys, each ending in its row index as the outpoint vout, so key i of either width binds key i
-// of the other width through the frozen SchemaV1 offsets.
+// of the other width through the frozen SchemaV2 offsets.
 func reverseBatchKeys(count, width int) [][]byte {
 	backing, keys := make([]byte, width*count), make([][]byte, count)
 	for i := range keys {
@@ -267,6 +267,7 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 	hashKey, hashValue := updatePlanHashRow()
 	manifest, manifestValue := UndoManifestKey(reverseBlockHash), UndoManifestValue(0, [16]byte{}, 0, 0)
 	chain := ChainValue([32]byte{}, [32]byte{}, [40]byte{})
+	owner, ownerValue := append([]byte{0, 0, 0, 0, 0, 0, 0, 1}, make([]byte, 32)...), []byte{0, 0, 0, 0, 0, 0, 0, 1}
 	literal := func(dbi DBI, key, value []byte) Mutation {
 		return Mutation{DBI: dbi, Key: key, AfterKind: AfterLiteral, Literal: value}
 	}
@@ -311,6 +312,10 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 		{"staged absent", absent(dbis[6], height), true, true, ""},
 		{"staged literal", literal(dbis[6], height, chain), true, true, ""},
 		{"staged reference", ref(dbis[6], height), false, false, ""},
+		{"canonical owner absent", absent(dbis[7], owner), true, true, ""},
+		{"canonical owner literal", literal(dbis[7], owner, ownerValue), true, true, ""},
+		{"canonical owner replacement", replacement(literal(dbis[7], owner, ownerValue)), true, true, ""},
+		{"canonical owner reference", ref(dbis[7], owner), false, false, ""},
 	} {
 		var defaultPlan []ownedMutation
 		for _, reverse := range []bool{false, true} {
@@ -375,10 +380,10 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 	}
 	reverseBatchRequireInvalidRow(t, "reverse batch rejects UTXO literal: empty literal", literal(dbis[1], target, []byte{}))
 	reverseBatchRequireInvalidRow(t, "reverse batch rejects UTXO literal: schema-invalid literal", literal(dbis[1], target, make([]byte, 19)))
-	for _, rank := range []uint8{7, 255} {
+	for _, rank := range []uint8{8, 255} {
 		outside := Mutation{DBI: DBI{Name: "utxo-v1", Rank: rank}, BeforePresent: true, AfterKind: AfterAbsent}
 		if (&updateBudget{reverse: true}).admits(outside) || !(&updateBudget{}).admits(outside) {
-			t.Fatalf("reverse batch admits refuses a rank outside SchemaV1: rank %d", rank)
+			t.Fatalf("reverse batch admits refuses a rank outside SchemaV2: rank %d", rank)
 		}
 	}
 	t.Run("public", func(t *testing.T) {
@@ -395,7 +400,7 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 			replacement(literal(dbis[0], counter, counterAfter)),
 			absent(dbis[1], target), reverseRefRow(restoreTarget, restoreSource),
 			literal(dbis[2], height, chain), literal(dbis[3], hashKey, hashValue), literal(dbis[4], hashKey, hashValue),
-			absent(dbis[5], manifest), absent(dbis[5], entrySource), literal(dbis[6], height, chain))
+			absent(dbis[5], manifest), absent(dbis[5], entrySource), literal(dbis[6], height, chain), literal(dbis[7], owner, ownerValue))
 		requireReverseValue(t, store, dbis[0], counter, counterAfter, "reverse batch domain NEW: counter")
 		requireUpdateValue(t, store, dbis[1], target, nil, false)
 		requireReverseValue(t, store, dbis[1], restoreTarget, values[1], "reverse batch domain NEW: exact OLD bytes")
@@ -407,8 +412,11 @@ func TestUpdateReverseBatchDomain(t *testing.T) {
 		requireUpdateValue(t, store, dbis[5], entrySource, nil, false)
 		requireUpdateValue(t, store, dbis[1], entryTarget, nil, false)
 		requireReverseValue(t, store, dbis[6], height, chain, "reverse batch domain NEW: staged")
-		reverseBatchCommit(t, store, "reverse batch auxiliary-only NEW", literal(dbis[2], staged, chain))
-		requireReverseValue(t, store, dbis[2], staged, chain, "reverse batch auxiliary-only NEW: canonical")
+		requireReverseValue(t, store, dbis[7], owner, ownerValue, "reverse batch domain NEW: canonical owner")
+		stagedChain, stagedOwner := ChainValue([32]byte{7}, [32]byte{}, [40]byte{}), append([]byte{0, 0, 0, 0, 0, 0, 0, 1, 7}, make([]byte, 31)...)
+		reverseBatchCommit(t, store, "reverse batch auxiliary-only NEW", literal(dbis[2], staged, stagedChain), literal(dbis[7], stagedOwner, []byte{0, 0, 0, 0, 0, 0, 0, 2}))
+		requireReverseValue(t, store, dbis[2], staged, stagedChain, "reverse batch auxiliary-only NEW: canonical")
+		requireReverseValue(t, store, dbis[7], stagedOwner, []byte{0, 0, 0, 0, 0, 0, 0, 2}, "reverse batch auxiliary-only NEW: canonical owner")
 		freshTarget, freshSource := reverseKeys(t, 2, 4)
 		otherManifest := UndoManifestKey([32]byte{0x33})
 		reverseBatchRequireInvalid(t, store, "reverse batch rejects UTXO literal: public", literal(dbis[1], freshTarget, values[0]))

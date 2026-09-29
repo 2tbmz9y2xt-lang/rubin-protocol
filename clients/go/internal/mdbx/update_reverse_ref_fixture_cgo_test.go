@@ -10,7 +10,7 @@ import (
 )
 
 // requireReverseRawBytes compares the stored bytes at key with want through the raw update image comparison, because
-// Reader.Get keeps its SchemaV1 width checks and cannot observe a value outside them.
+// Reader.Get keeps its SchemaV2 width checks and cannot observe a value outside them.
 func requireReverseRawBytes(t *testing.T, store *Store, dbi DBI, key, want []byte, marker string) {
 	t.Helper()
 	mustEnvironment(t, store.View(func(reader *Reader) error {

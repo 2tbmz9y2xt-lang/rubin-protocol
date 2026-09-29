@@ -12,7 +12,7 @@ package mdbx
 // copy route, buffer size or lifetime.
 const bootstrapOperationBytes uint64 = 188
 
-// BootstrapStorageV1 initializes an exact-empty SchemaV1 store into its first authority
+// BootstrapStorageV1 initializes an exact-empty SchemaV2 store into its first authority
 // image and that generation's zero logical counter, in one Store.Update transaction. It
 // is dormant: no production caller selects it, and it decides nothing about targets,
 // genesis, replay entry or startup classification.
@@ -25,7 +25,7 @@ const bootstrapOperationBytes uint64 = 188
 // Store.Update. Once Update runs, its (CommitTruth, UpdateStage, error) tuple is forwarded
 // unchanged: no class, code, operation, cause, truth or stage is rewritten.
 //
-// A store whose seven entry counts are not the exact-empty census is refused with
+// A store whose eight entry counts are not the exact-empty census is refused with
 // EngineStateMismatch: nothing is reset and no image is classified as corrupt, and after a
 // successful OLD abort the Store stays open, reusable and byte-identical; a cleanup failure
 // keeps its own existing lifecycle instead. A store that passes that census while a required
@@ -60,16 +60,21 @@ func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *Opera
 // snapshot creation through write/readback and cleanup. The Store's lifetime directory
 // advisory lock excludes other cooperating Rubin writers, so the census cannot change
 // before this fixed two-row plan is applied.
+//
+// A passed census is also the exact-empty establishment of canonical-owner verification on
+// this Store handle (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6): the empty canonical index and
+// its empty owner path are vacuously coherent, so it is set only after every count matched.
 func bootstrapBatch(s *Store, reader *Reader, profile StorageProfileV1) (Batch, error) {
 	inspection, err := bootstrapInspect(s, reader)
 	if err != nil {
 		return Batch{}, err
 	}
-	for rank, want := range [7]uint64{2, 0, 0, 0, 0, 0, 0} {
+	for rank, want := range [8]uint64{2, 0, 0, 0, 0, 0, 0, 0} {
 		if inspection.DBIs[rank].Entries != want {
 			return Batch{}, adapterError(operationUpdate, EngineStateMismatch, codeProblem, "bootstrap requires exact-empty store", nil)
 		}
 	}
+	s.canonicalOwnerVerified = true
 	versionKey, configKey := []byte{0x00}, []byte{0x01}
 	if metadataErr := bootstrapMetadata(s, reader, versionKey, configKey); metadataErr != nil {
 		return Batch{}, metadataErr
@@ -78,7 +83,7 @@ func bootstrapBatch(s *Store, reader *Reader, profile StorageProfileV1) (Batch, 
 	if err != nil {
 		return Batch{}, err
 	}
-	meta := SchemaV1DBIs()[0]
+	meta := SchemaV2DBIs()[0]
 	return Batch{
 		Mutations: []Mutation{
 			{DBI: meta, Key: []byte{0x02}, AfterKind: AfterLiteral, Literal: authority},
@@ -90,7 +95,7 @@ func bootstrapBatch(s *Store, reader *Reader, profile StorageProfileV1) (Batch, 
 	}, nil
 }
 
-// bootstrapInspect returns the seven transaction-bound DBI entry counts of the Update's
+// bootstrapInspect returns the eight transaction-bound DBI entry counts of the Update's
 // own OLD snapshot, copying no native value bytes. A native or geometry failure is this
 // Reader's infrastructure provenance: it is recorded unchanged under the lock this
 // function already holds and returned as the same object, so readPrimary forwards that
@@ -115,7 +120,7 @@ func bootstrapInspect(s *Store, reader *Reader) (Inspection, error) {
 // the fixed integrity refusal naming that row, recorded as infrastructure. Row 00 is
 // decided first and short-circuits, because a failed Get disarms the Reader.
 func bootstrapMetadata(s *Store, reader *Reader, versionKey, configKey []byte) error {
-	meta := SchemaV1DBIs()[0]
+	meta := SchemaV2DBIs()[0]
 	value, _, err := reader.Get(meta, versionKey)
 	if err != nil {
 		return err
@@ -133,7 +138,7 @@ func bootstrapMetadata(s *Store, reader *Reader, versionKey, configKey []byte) e
 	return nil
 }
 
-// bootstrapVersionRow reports whether the required SchemaV1 version row carries exactly the
+// bootstrapVersionRow reports whether the required SchemaV2 version row carries exactly the
 // version this build writes. An absent row reaches this decode as a nil value, whose width
 // the decode already refuses, so presence carries no decision of its own.
 func bootstrapVersionRow(value []byte) bool {
@@ -169,9 +174,15 @@ func bootstrapAuthority(reader *Reader, profile StorageProfileV1) ([]byte, error
 // bootstrapFailure records err as this Reader's infrastructure failure and returns the
 // same object. It mutates no Store field, consumes nothing, aborts nothing and changes no
 // error; recording the identical object is what lets readPrimary forward it verbatim.
+// Like Reader.Get it rechecks liveness under getMu: an expired Reader (its callback has
+// returned) or one already disarmed by a first recorded failure records nothing, keeps
+// that first failure, and returns the direct InvalidInput "Reader is not active" refusal.
 func bootstrapFailure(reader *Reader, err error) error {
 	reader.getMu.Lock()
 	defer reader.getMu.Unlock()
+	if !reader.usable() {
+		return adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
 	reader.failure = err
 	reader.active.Store(false)
 	return err

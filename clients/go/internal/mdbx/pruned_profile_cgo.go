@@ -38,7 +38,7 @@ func (s *Store) SelectPrunedProfileV1(confirmed bool, expectedTip *AuthorityPoin
 		}
 		var err error
 		out.Truth, out.Stage, err = s.Update(func(reader *Reader) (Batch, error) {
-			value, _, readErr := reader.Get(SchemaV1DBIs()[0], []byte{2})
+			value, _, readErr := reader.Get(SchemaV2DBIs()[0], []byte{2})
 			if readErr != nil {
 				return Batch{}, readErr
 			}
@@ -81,9 +81,9 @@ func prunedProfileBatch(reader *Reader, a *StorageAuthorityV1, confirmed bool, t
 	if err != nil {
 		return Batch{}, err
 	}
-	batch := Batch{Mutations: []Mutation{{DBI: SchemaV1DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}}
+	batch := Batch{Mutations: []Mutation{{DBI: SchemaV2DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: AfterLiteral, Literal: encoded}}}
 	if key != nil {
-		batch.Consulted = []ConsultedRow{{DBI: SchemaV1DBIs()[2], Key: key}}
+		batch.Consulted = []ConsultedRow{{DBI: SchemaV2DBIs()[2], Key: key}}
 	}
 	return batch, nil
 }
@@ -102,7 +102,7 @@ func prunedProfileTip(reader *Reader, generation uint64, tip *AuthorityPointV1, 
 		if err != nil {
 			return err
 		}
-		value, present, err := reader.Get(SchemaV1DBIs()[2], key)
+		value, present, err := reader.Get(SchemaV2DBIs()[2], key)
 		if err != nil {
 			return err
 		}
@@ -122,7 +122,7 @@ func prunedProfileTip(reader *Reader, generation uint64, tip *AuthorityPointV1, 
 			return nil, err
 		}
 	}
-	page, err := reader.PrefixPage(SchemaV1DBIs()[2], prefix[:], key, 1, 120)
+	page, err := reader.PrefixPage(SchemaV2DBIs()[2], prefix[:], key, 1, 120)
 	if err != nil {
 		return nil, err
 	}
