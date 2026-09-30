@@ -760,11 +760,32 @@ func TestSelectedSideQualificationEvidence(t *testing.T) {
 	raw = w.child(c5, 6, nil)
 	got, err = w.run(raw)
 	ssqWantOK(t, "fresh invocation", got, err, w.want(raw, c5, 5, 5, ssqWork(6), ssqWork(7), true, append(w.canonicalIDs(5, 6), w.comparatorIDs()...)))
+	// An actual selected linking parent: the body identity is relied-on evidence (descriptor work 3 -> child work 4).
+	linked := w.child(w.side[6], 7, nil)
+	linkedGot, linkedErr := w.run(linked)
+	ssqWantOK(t, "actual linking parent", linkedGot, linkedErr, w.want(linked, w.side[6], 6, 5, ssqWork(3), ssqWork(4), true, w.selectedIDs(7)))
 	// A completed setup Update removing the selected side is recomputed by the next invocation.
 	w.spec.side = nil
 	w.apply([]mdbx.Mutation{w.authorityMutation(w.authorityValue())})
 	got, err = w.run(raw)
 	ssqWantOK(t, "after side removal", got, err, w.want(raw, c5, 5, 5, ssqWork(6), ssqWork(7), true, w.canonicalIDs(5, 6)))
+	// K+7: a canonical-parent child at h10080 (K=10080 canonical headers, authority, parent pair) against a
+	// comparison-only tip (F10078, tip10079, one row, no body) whose distinct hash is keyed-Owned at free height 10080:
+	// SideLink, inverse, forward and header add exactly four identities, 10087 in total.
+	k7 := newSSQWorld(t, ssqSpec{tip: 10_079, side: &ssqSideSpec{f: 10_078, tip: 10_079, rows: 1, noBody: true}})
+	tip, parent := k7.side[10_079], k7.canonical[10_079]
+	k7.apply([]mdbx.Mutation{
+		k7.literal(2, ssqMust(mdbx.HeightKey(1, 10_080)), mdbx.ChainValue(tip, k7.canonical[10_078], ssqWork(10_081)), false),
+		k7.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(10_080), false),
+	})
+	ids := append(k7.canonicalIDs(10_079, 10_080), ssqLinkID(10_079), ssqForwardID(10_080), ssqOwnerID(tip), ssqHeaderID(tip))
+	unique := slices.CompactFunc(ssqSorted(ids), func(a, b mdbx.ConsultedRow) bool { return a.DBI == b.DBI && bytes.Equal(a.Key, b.Key) })
+	if len(ids) != 10_087 || len(unique) != 10_087 || tip == parent {
+		t.Fatalf("K+7 expectation has %d identities", len(ids))
+	}
+	k7raw := k7.child(parent, 10_080, nil)
+	k7got, k7err := k7.run(k7raw)
+	ssqWantOK(t, "K+7 comparator evidence", k7got, k7err, k7.want(k7raw, parent, 10_079, 10_079, ssqWork(10_080), ssqWork(10_081), true, ids))
 }
 
 // ssqPrune, ssqPendingNone, ssqReplay and ssqOrdinary are the legal authority shapes of the control table cells.

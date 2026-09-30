@@ -119,6 +119,18 @@ var (
 	ssqAbortEIO = ssqNative{"abort", mdbx.EngineIO, 5}
 )
 
+// ssqWantCause inspects the qualifier's own classified wrapper, not the Store's joined tree (which also carries the
+// recorded Reader failure): its Cause/Unwrap must itself retain the get/EngineIO/5 EngineError identity.
+func ssqWantCause(t *testing.T, label string, err error) {
+	t.Helper()
+	var failure *selectedSideQualificationError
+	var engine *mdbx.EngineError
+	if !errors.As(err, &failure) || !errors.As(failure.Cause, &engine) || (ssqNative{engine.Operation, engine.Class, engine.Code}) != ssqGetEIO ||
+		!errors.Is(failure, engine) || errors.Unwrap(failure) != failure.Cause {
+		t.Fatalf("%s: classified wrapper lost its native cause: %v", label, err)
+	}
+}
+
 // ssqWantNative requires exactly the ordered distinct EngineError tuples, each still reachable by errors.Is/As.
 func ssqWantNative(t *testing.T, label string, err error, want ...ssqNative) {
 	t.Helper()
@@ -143,7 +155,7 @@ func TestSelectedSideQualificationEvidenceFixture(t *testing.T) {
 	ssqWantGets(t, "comparison-only tip", evidence, [8]uint64{1, 0, 1, 7, 0, 0, 1, 2})
 	raw = w.child(tip, 7, nil)
 	got, err, evidence = w.probe(raw)
-	ssqWantOK(t, "actual linking parent", got, err, w.want(raw, tip, 6, 5, ssqWork(7), ssqWork(8), true, w.selectedIDs(7)))
+	ssqWantOK(t, "actual linking parent", got, err, w.want(raw, tip, 6, 5, ssqWork(3), ssqWork(4), true, w.selectedIDs(7)))
 	ssqWantGets(t, "actual linking parent", evidence, [8]uint64{1, 0, 1, 7, 1, 0, 1, 2})
 	// A corrupt comparator body is unobserved.
 	w.seed(4, bytes.Clone(tip[:]), []byte{1, 2, 3})
@@ -378,6 +390,7 @@ func TestSelectedSideQualificationHistoryFixture(t *testing.T) {
 		w.own(hash, [32]byte(w.headers[hash][4:36]), 9_000)
 		got, err, _ := w.fixture(mdbx.SelectedDamageGetEIO, 3, bytes.Clone(hash[:]), raw)
 		ssqWantResult(t, "Owned header transient", got, err, ssqCanonical)
+		ssqWantCause(t, "Owned header transient", err)
 		ssqWantNative(t, "Owned header transient", err, ssqGetEIO)
 	}
 }
@@ -470,6 +483,7 @@ func TestSelectedSideQualificationNative(t *testing.T) {
 		w, raw := c.world()
 		got, err, evidence := w.fixture(c.scenario, c.rank, c.key(w), raw)
 		ssqWantResult(t, c.name, got, err, c.result)
+		ssqWantCause(t, c.name, err)
 		ssqWantNative(t, c.name, err, c.causes...)
 		if c.gets != nil {
 			ssqWantGets(t, c.name, evidence, *c.gets)

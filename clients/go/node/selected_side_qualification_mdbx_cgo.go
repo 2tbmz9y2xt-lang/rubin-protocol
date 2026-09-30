@@ -182,8 +182,9 @@ func (q *selectedSideQualifier) request(height uint64) error {
 	return &selectedSideDamageRequest{Generation: q.side.GenerationID, Tip: q.side.TipHeight, Height: height}
 }
 
-// owner preflights two slots, resolves the keyed CanonicalOwnerV1 and releases the slot a NONE result leaves unused.
-func (q *selectedSideQualifier) owner(hash [32]byte) (mdbx.CanonicalOwnerResultV1, error) {
+// canonicalOwnerOf preflights two slots, resolves the keyed CanonicalOwnerV1 and releases the slot a NONE result leaves
+// unused.
+func (q *selectedSideQualifier) canonicalOwnerOf(hash [32]byte) (mdbx.CanonicalOwnerResultV1, error) {
 	if err := q.reserve(2); err != nil {
 		return mdbx.CanonicalOwnerResultV1{}, err
 	}
@@ -259,7 +260,7 @@ func (q *selectedSideQualifier) ownedHeader(hash [32]byte, owner mdbx.CanonicalO
 
 // keyedHeader resolves the hash-keyed owner before any header diagnosis; Owned keeps the stronger canonical path.
 func (q *selectedSideQualifier) keyedHeader(hash [32]byte) (mdbx.CanonicalOwnerResultV1, []byte, error) {
-	owner, err := q.owner(hash)
+	owner, err := q.canonicalOwnerOf(hash)
 	if err != nil {
 		return mdbx.CanonicalOwnerResultV1{}, nil, err
 	}
@@ -280,7 +281,7 @@ func (q *selectedSideQualifier) parentEvidence(hash [32]byte) (selectedQualParen
 }
 
 func (q *selectedSideQualifier) canonicalParent(hash [32]byte) (selectedQualParent, error) {
-	owner, err := q.owner(hash)
+	owner, err := q.canonicalOwnerOf(hash)
 	if err != nil {
 		return selectedQualParent{}, err
 	}
@@ -452,7 +453,7 @@ func (q *selectedSideQualifier) ancestor(parent selectedQualParent, r uint64, ha
 
 // anchorHeader requires the F identity to be Owned at exactly height F; anything else is unproved F.
 func (q *selectedSideQualifier) anchorHeader(hash [32]byte) ([]byte, error) {
-	owner, err := q.owner(hash)
+	owner, err := q.canonicalOwnerOf(hash)
 	if err != nil {
 		return nil, err
 	}
