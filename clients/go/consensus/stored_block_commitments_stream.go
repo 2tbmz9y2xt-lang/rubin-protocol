@@ -1,5 +1,3 @@
-//go:build cgo && (darwin || linux) && (amd64 || arm64)
-
 package consensus
 
 // storedCommitmentFrontier folds tagged Merkle leaves left to right, keeping at most one pending node per level. root

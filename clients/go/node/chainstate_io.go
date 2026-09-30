@@ -5,6 +5,7 @@ import (
 	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -179,55 +180,63 @@ func decodeChainStateDisk(payload []byte) (chainStateDisk, error) {
 	return disk, nil
 }
 
+// collectChainStateSchemaFields reads the top-level object with the native jsontext decoder under the v1-compatible
+// options (duplicate names and invalid UTF-8 allowed, as before), validating every field's complete syntax before the
+// schema decisions, then requires end of input.
 func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, error) {
-	dec := json.NewDecoder(bytes.NewReader(payload))
-	dec.UseNumber()
-	start, err := dec.Token()
+	dec := jsontext.NewDecoder(bytes.NewBuffer(payload), json.DefaultOptionsV1())
+	start, err := dec.ReadToken()
 	if err != nil {
 		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
 	}
-	if start != json.Delim('{') {
+	if start.Kind() != jsontext.KindBeginObject {
 		return chainStateSchemaFields{}, errors.New("decode chainstate: top-level value must be an object")
 	}
 	var fields chainStateSchemaFields
-	for dec.More() {
-		key, err := readChainStateKey(dec)
+	for {
+		done, err := collectChainStateSchemaField(dec, &fields)
 		if err != nil {
 			return chainStateSchemaFields{}, err
 		}
-		if err := collectChainStateSchemaField(payload, dec, key, &fields); err != nil {
-			return chainStateSchemaFields{}, err
+		if done {
+			break
 		}
 	}
-	if _, err := dec.Token(); err != nil {
-		return chainStateSchemaFields{}, fmt.Errorf("decode chainstate: %w", err)
-	}
-	var trailing json.RawMessage
-	if err := dec.Decode(&trailing); err != io.EOF {
+	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
 		return chainStateSchemaFields{}, errors.New("decode chainstate: trailing content")
 	}
 	return fields, nil
 }
 
-func collectChainStateSchemaField(payload []byte, dec *json.Decoder, key string, fields *chainStateSchemaFields) error {
-	if key != "utxos" || !chainStateValueStartsArray(payload, int(dec.InputOffset())) {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return fmt.Errorf("decode chainstate: %w", err)
-		}
-		if key == "utxos" {
-			fields.recordUtxos(false, bytes.Equal(bytes.TrimSpace(raw), []byte("null")))
-		} else {
-			fields.record(key, raw)
-		}
-		return nil
-	}
-	valid, err := readChainStateUtxoArray(dec)
+// collectChainStateSchemaField reads one member, or the closing brace (done). The key is converted to a string and the
+// borrowed raw value is fully consumed (recorders copy what they keep) before the next decoder call.
+func collectChainStateSchemaField(dec *jsontext.Decoder, fields *chainStateSchemaFields) (bool, error) {
+	name, err := dec.ReadToken()
 	if err != nil {
-		return fmt.Errorf("decode chainstate: %w", err)
+		return false, fmt.Errorf("decode chainstate: %w", err)
+	}
+	if name.Kind() == jsontext.KindEndObject {
+		return true, nil
+	}
+	key := name.String()
+	raw, err := dec.ReadValue()
+	if err != nil {
+		return false, fmt.Errorf("decode chainstate: %w", err)
+	}
+	if key != "utxos" {
+		fields.record(key, json.RawMessage(raw))
+		return false, nil
+	}
+	if raw.Kind() != jsontext.KindBeginArray {
+		fields.recordUtxos(false, bytes.Equal(raw, []byte("null")))
+		return false, nil
+	}
+	valid, err := readChainStateUtxoArray(raw)
+	if err != nil {
+		return false, fmt.Errorf("decode chainstate: %w", err)
 	}
 	fields.recordUtxos(valid, false)
-	return nil
+	return false, nil
 }
 
 func readChainStateKey(dec *json.Decoder) (string, error) {
@@ -333,14 +342,9 @@ func chainStateRemainingSchemaComplete(fields chainStateSchemaFields) bool {
 		fields.remainingSeen == chainStateRemainingFields
 }
 
-func chainStateValueStartsArray(payload []byte, offset int) bool {
-	for offset < len(payload) && strings.ContainsRune(": \t\r\n", rune(payload[offset])) {
-		offset++
-	}
-	return offset < len(payload) && payload[offset] == '['
-}
-
-func readChainStateUtxoArray(dec *json.Decoder) (bool, error) {
+// readChainStateUtxoArray checks the items of an already syntax-validated utxos array with the classic decoder.
+func readChainStateUtxoArray(raw []byte) (bool, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	start, err := dec.Token()
 	if err != nil || start != json.Delim('[') {
 		return false, err
@@ -348,23 +352,25 @@ func readChainStateUtxoArray(dec *json.Decoder) (bool, error) {
 	return validateChainStateUtxoItems(dec)
 }
 
+// validateChainStateUtxoItems stops at the first schema-invalid item without decoding the tail; the collector has
+// already validated the whole array's syntax.
 func validateChainStateUtxoItems(dec *json.Decoder) (bool, error) {
-	valid := true
 	var item json.RawMessage
 	for dec.More() {
 		item = item[:0]
 		if err := dec.Decode(&item); err != nil {
 			return false, err
 		}
-		if valid {
-			valid = validateChainStateUtxoSchema(item) == nil
+		itemValid := validateChainStateUtxoSchema(item) == nil
+		if !itemValid {
+			return false, nil
 		}
 	}
 	end, err := dec.Token()
 	if err != nil || end != json.Delim(']') {
 		return false, err
 	}
-	return valid, nil
+	return true, nil
 }
 
 func validateChainStateUtxoSchema(raw []byte) error {

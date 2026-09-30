@@ -789,11 +789,19 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
-	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "stored_block_commitments_stream.go", "stored_block_commitments_stream_test.go"} {
+	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
 		logicalMDBXAssert(t, parseErr == nil && expression.String() == logicalMDBXConstraint, "bridge entered unsupported build: %s declares %v (%v)", name, expression, parseErr)
+	}
+	// The ordinary commitment stream is shared with the untagged steps 1-12 entry: it must be a GoFiles member and carry
+	// no build constraint of either syntax before its package clause.
+	stream, readErr := os.ReadFile("stored_block_commitments_stream.go")
+	logicalMDBXAssert(t, readErr == nil && slices.Contains(listed.GoFiles, "stored_block_commitments_stream.go"), "ordinary stream left GoFiles: %v", readErr)
+	preamble, _, _ := strings.Cut(string(stream), "package consensus")
+	for _, line := range strings.Split(preamble, "\n") {
+		logicalMDBXAssert(t, !constraint.IsGoBuild(line) && !constraint.IsPlusBuild(line), "ordinary stream declares a build constraint: %q", line)
 	}
 	// go list's non-test source set is GoFiles+CgoFiles+IgnoredGoFiles: a file ignored on this platform may still compile, and call the bridge, elsewhere.
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
