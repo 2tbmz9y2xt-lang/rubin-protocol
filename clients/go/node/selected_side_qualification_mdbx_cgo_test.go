@@ -300,7 +300,9 @@ func (w *ssqWorld) apply(groups ...[]mdbx.Mutation) {
 			return
 		}
 		rows := batch
-		slices.SortFunc(rows, func(a, b mdbx.Mutation) int { return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key)) })
+		slices.SortFunc(rows, func(a, b mdbx.Mutation) int {
+			return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key))
+		})
 		truth, _, err := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{Mutations: rows}, nil })
 		if err != nil || truth != mdbx.CommitTruthNew {
 			w.t.Fatalf("setup write: %v/%v", truth, err)
@@ -444,7 +446,9 @@ func ssqRetarget() [32]byte {
 	return target
 }
 
-func ssqID(rank uint8, key []byte) mdbx.ConsultedRow { return mdbx.ConsultedRow{DBI: ssqDBIs[rank], Key: key} }
+func ssqID(rank uint8, key []byte) mdbx.ConsultedRow {
+	return mdbx.ConsultedRow{DBI: ssqDBIs[rank], Key: key}
+}
 
 func ssqAuthorityID() mdbx.ConsultedRow { return ssqID(0, []byte{2}) }
 
@@ -497,7 +501,9 @@ func (w *ssqWorld) comparatorIDs() []mdbx.ConsultedRow {
 
 func ssqSorted(rows []mdbx.ConsultedRow) []mdbx.ConsultedRow {
 	rows = slices.Clone(rows)
-	slices.SortFunc(rows, func(a, b mdbx.ConsultedRow) int { return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key)) })
+	slices.SortFunc(rows, func(a, b mdbx.ConsultedRow) int {
+		return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key))
+	})
 	return rows
 }
 
@@ -616,12 +622,24 @@ func TestSelectedSideQualificationSelected(t *testing.T) {
 		parent, candidate string
 		mtp               uint64
 	}{
-		{"full C1", ssqSpec{tip: 5, side: &ssqSideSpec{f: 5, tip: 6, rows: 1}}, 7,
-			"7f1379efc05d781c0ca91c060f47f6d66264de449791d38bc0748c958d9c666d", "ccabc71105aa50282a4379ad0c9af87a927aaac5ab44ad07cd7c5c129957ed2c", 1_000_360},
-		{"full C1439", ssqSpec{side: &ssqSideSpec{f: 0, tip: 1_439, from: 1_429, rows: 1_439}}, 11,
-			"c642afb25a59295c7cbf5cee34f3e16286c9a659085eef7ecb0e746168fa7190", "76c91bb417f7fbdd39f551e6c2def73134000bc1210298cf3bc523bb30920a37", 1_172_073},
-		{"one-slot C1440", ssqSpec{side: &ssqSideSpec{f: 0, tip: 1_440, from: 1_430, rows: 1_439}}, 11,
-			"4d93e20bf3c4deef1bbdaeb2e58cbe3a27fac12efc21f3bbc1eba85a44ea0d6d", "9fc9de5d48e6a38ea0bc68a61863f8f75ec6da7160740d1c6916b46529f5227d", 1_172_193},
+		{
+			"full C1",
+			ssqSpec{tip: 5, side: &ssqSideSpec{f: 5, tip: 6, rows: 1}},
+			7,
+			"7f1379efc05d781c0ca91c060f47f6d66264de449791d38bc0748c958d9c666d", "ccabc71105aa50282a4379ad0c9af87a927aaac5ab44ad07cd7c5c129957ed2c", 1_000_360,
+		},
+		{
+			"full C1439",
+			ssqSpec{side: &ssqSideSpec{f: 0, tip: 1_439, from: 1_429, rows: 1_439}},
+			11,
+			"c642afb25a59295c7cbf5cee34f3e16286c9a659085eef7ecb0e746168fa7190", "76c91bb417f7fbdd39f551e6c2def73134000bc1210298cf3bc523bb30920a37", 1_172_073,
+		},
+		{
+			"one-slot C1440",
+			ssqSpec{side: &ssqSideSpec{f: 0, tip: 1_440, from: 1_430, rows: 1_439}},
+			11,
+			"4d93e20bf3c4deef1bbdaeb2e58cbe3a27fac12efc21f3bbc1eba85a44ea0d6d", "9fc9de5d48e6a38ea0bc68a61863f8f75ec6da7160740d1c6916b46529f5227d", 1_172_193,
+		},
 	} {
 		w := newSSQWorld(t, c.spec)
 		s := w.spec.side
@@ -947,7 +965,7 @@ func TestSelectedSideQualificationCapacity(t *testing.T) {
 }
 
 // ssqUpdate qualifies inside a no-write Update that stops with a private sentinel after observation.
-func (w *ssqWorld) update(raw []byte) (selectedSideQualification, error, mdbx.CommitTruth, mdbx.UpdateStage) {
+func (w *ssqWorld) update(raw []byte) (selectedSideQualification, mdbx.CommitTruth, mdbx.UpdateStage, error) {
 	w.t.Helper()
 	defer w.wantRaw(raw, bytes.Clone(raw))
 	sentinel := errors.New("qualification observed")
@@ -964,7 +982,7 @@ func (w *ssqWorld) update(raw []byte) (selectedSideQualification, error, mdbx.Co
 		err = nil
 	}
 	w.wantImage("after no-write Update")
-	return got, err, truth, stage
+	return got, truth, stage, err
 }
 
 func TestSelectedSideQualificationNoMutation(t *testing.T) {
@@ -987,9 +1005,11 @@ func TestSelectedSideQualificationNoMutation(t *testing.T) {
 		{"damage refusal", w.child(w.side[4], 5, nil), func(got selectedSideQualification, err error) {
 			ssqWantRequest(t, "missing body", got, err, selectedSideDamageRequest{Generation: 2, Tip: 4, Height: 4})
 		}},
-		{"eligibility refusal", w.child(w.side[3], 4, nil), func(got selectedSideQualification, err error) { ssqWantResult(t, "interior parent", got, err, ssqBranch) }},
+		{"eligibility refusal", w.child(w.side[3], 4, nil), func(got selectedSideQualification, err error) {
+			ssqWantResult(t, "interior parent", got, err, ssqBranch)
+		}},
 	} {
-		got, err, truth, stage := w.update(c.raw)
+		got, truth, stage, err := w.update(c.raw)
 		c.check(got, err)
 		if truth != mdbx.CommitTruthOld || stage != mdbx.UpdateStagePrewrite {
 			t.Fatalf("%s: truth/stage %v/%v", c.name, truth, stage)
@@ -998,14 +1018,14 @@ func TestSelectedSideQualificationNoMutation(t *testing.T) {
 	// A loser is a nil-error qualification with Selected false.
 	w.spec.side.work = 9
 	w.apply([]mdbx.Mutation{w.authorityMutation(w.authorityValue())}, []mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 4)), mdbx.ChainValue(w.side[4], w.side[3], ssqWork(9)), true)})
-	got, err, truth, stage := w.update(winner)
+	got, truth, stage, err := w.update(winner)
 	ssqWantOK(t, "loser", got, err, w.want(winner, c5, 5, 5, ssqWork(6), ssqWork(7), false, append(w.canonicalIDs(5, 6), w.comparatorIDs()...)))
 	if truth != mdbx.CommitTruthOld || stage != mdbx.UpdateStagePrewrite {
 		t.Fatalf("loser truth/stage %v/%v", truth, stage)
 	}
 	// Context refusal: no canonical height is Owned, so the promised F anchor is unproved.
 	w = newSSQWorld(t, ssqSpec{tip: 2, owned: 3, side: &ssqSideSpec{f: 2, tip: 4, rows: 2}})
-	got, err, truth, stage = w.update(w.child(w.side[4], 5, nil))
+	got, truth, stage, err = w.update(w.child(w.side[4], 5, nil))
 	ssqWantResult(t, "unproved F context", got, err, ssqBranch)
 	if truth != mdbx.CommitTruthOld || stage != mdbx.UpdateStagePrewrite {
 		t.Fatalf("context truth/stage %v/%v", truth, stage)

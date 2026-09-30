@@ -383,12 +383,18 @@ func TestBlockSteps1To12Boundary(t *testing.T) {
 		root, witness, commit, hash string
 		weight                      uint64
 	}{
-		{1, "02e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e29", "99cf9696fc58d571713aee26dbbb172d460f77d10f139505fe06fd802e402403",
-			"b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8", "ee416a14b5a16a5fff3486e69b9c977bb61a3354a21ecd282666b25c7381c301", 414},
-		{3, "a1580040b77ca37ea9892aebb5c420b5066b575e5450c848b146ce7aba62e0ac", "c524fdc450a5dedf2455acdbff7d7a5d8e01b8479cef55d8edc4ca94f853a654",
-			"3c9e6b805531978600f2972136bd4f8ca71921d3d459e53ab74fda8a6ecaaac0", "634cd83304788cb1ce48c852562445cc16c8f0be35a6f8c5e0005f2dcc1fab10", 922},
-		{5, "e589bd8f2c0b68a2331adb772d219090336c95064f66d3c4fb4598aeda9d50d8", "9d0fd1234a1d7abef579897ad69e19e049f13e4ffd8c8169aad551f4ee3b2cae",
-			"f93a5eb5f312edc23583a42e74a4146ac7e3e18a2f4f4be2ef474b3d8a366edc", "eb6693cd7843401d492f8fcd22ad9d43b23eff9a73ce4c9b60c37e7b3a9a2869", 1430},
+		{
+			1, "02e66000bf8ce870908df4a8689554852ccef681ee0b5df32246162a53e36e29", "99cf9696fc58d571713aee26dbbb172d460f77d10f139505fe06fd802e402403",
+			"b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34cf37071a8", "ee416a14b5a16a5fff3486e69b9c977bb61a3354a21ecd282666b25c7381c301", 414,
+		},
+		{
+			3, "a1580040b77ca37ea9892aebb5c420b5066b575e5450c848b146ce7aba62e0ac", "c524fdc450a5dedf2455acdbff7d7a5d8e01b8479cef55d8edc4ca94f853a654",
+			"3c9e6b805531978600f2972136bd4f8ca71921d3d459e53ab74fda8a6ecaaac0", "634cd83304788cb1ce48c852562445cc16c8f0be35a6f8c5e0005f2dcc1fab10", 922,
+		},
+		{
+			5, "e589bd8f2c0b68a2331adb772d219090336c95064f66d3c4fb4598aeda9d50d8", "9d0fd1234a1d7abef579897ad69e19e049f13e4ffd8c8169aad551f4ee3b2cae",
+			"f93a5eb5f312edc23583a42e74a4146ac7e3e18a2f4f4be2ef474b3d8a366edc", "eb6693cd7843401d492f8fcd22ad9d43b23eff9a73ce4c9b60c37e7b3a9a2869", 1430,
+		},
 	} {
 		raw := blockStepsStd(t, nil, blockStepsPlain(c.count-1)...)
 		summary, err := blockStepsRun(raw)
@@ -514,9 +520,13 @@ func TestBlockSteps1To12ResourceBounds(t *testing.T) {
 		name      string
 		got, want uintptr
 	}{
-		{"TxInput", unsafe.Sizeof(TxInput{}), 64}, {"TxOutput", unsafe.Sizeof(TxOutput{}), 40}, {"WitnessItem", unsafe.Sizeof(WitnessItem{}), 56},
-		{"Tx", unsafe.Sizeof(Tx{}), 136}, {"DaCommitCore", unsafe.Sizeof(DaCommitCore{}), 200},
-		{"frontier", unsafe.Sizeof(storedCommitmentFrontier{}), 2_064}, {"DA record", unsafe.Sizeof(step12DARecord{}), 56},
+		{"TxInput", unsafe.Sizeof(TxInput{}), 64},
+		{"TxOutput", unsafe.Sizeof(TxOutput{}), 40},
+		{"WitnessItem", unsafe.Sizeof(WitnessItem{}), 56},
+		{"Tx", unsafe.Sizeof(Tx{}), 136},
+		{"DaCommitCore", unsafe.Sizeof(DaCommitCore{}), 200},
+		{"frontier", unsafe.Sizeof(storedCommitmentFrontier{}), 2_064},
+		{"DA record", unsafe.Sizeof(step12DARecord{}), 56},
 	} {
 		if c.got != c.want {
 			t.Fatalf("%s ABI size %d, want %d", c.name, c.got, c.want)
@@ -705,8 +715,10 @@ func TestBlockSteps1To12DAOrder(t *testing.T) {
 	a, b := blockStepsIDs[0], blockStepsIDs[1]
 	p := []byte{0x42}
 	good := func(id [32]byte, index uint16) []byte { return blockStepsChunk(id, index, p, sha3_256(p)) }
-	commit := func(id [32]byte, count uint16) []byte { return blockStepsCommit(id, count, blockStepsDAOut(sha3_256(p))) }
-	incomplete := slices.Concat(blockStepsSets(128, nil),[][]byte{commit([32]byte{0x50}, 2), good([32]byte{0x50}, 0)})
+	commit := func(id [32]byte, count uint16) []byte {
+		return blockStepsCommit(id, count, blockStepsDAOut(sha3_256(p)))
+	}
+	incomplete := slices.Concat(blockStepsSets(128, nil), [][]byte{commit([32]byte{0x50}, 2), good([32]byte{0x50}, 0)})
 	for _, c := range []struct {
 		name string
 		txs  [][]byte
@@ -721,7 +733,7 @@ func TestBlockSteps1To12DAOrder(t *testing.T) {
 		{"count mismatch", [][]byte{commit(a, 2), good(a, 0)}, BLOCK_ERR_DA_INCOMPLETE, "DA chunk count mismatch"},
 		{"missing index zero", [][]byte{commit(a, 1), good(a, 1)}, BLOCK_ERR_DA_INCOMPLETE, "missing DA chunk index"},
 		{"incomplete before set cap", incomplete, BLOCK_ERR_DA_INCOMPLETE, "DA chunk count mismatch"},
-		{"set cap", blockStepsSets(129, nil),BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block"},
+		{"set cap", blockStepsSets(129, nil), BLOCK_ERR_DA_BATCH_EXCEEDED, "too many DA commits in block"},
 	} {
 		summary, err := blockStepsRun(blockStepsStd(t, nil, c.txs...))
 		blockStepsWantCode(t, c.name, summary, err, c.code, c.msg)

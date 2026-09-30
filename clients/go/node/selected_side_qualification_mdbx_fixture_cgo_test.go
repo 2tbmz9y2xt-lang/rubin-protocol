@@ -17,7 +17,9 @@ import (
 func newSSQFixtureWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 	t.Helper()
 	w := newSSQWorld(t, spec)
-	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) { return mdbx.FixtureRawRowEqual(w.store, rank, key, want) }
+	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+		return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+	}
 	return w
 }
 
@@ -250,7 +252,10 @@ func TestSelectedSideQualificationCanonicalEvidenceFixture(t *testing.T) {
 		{"conflicting forward", func(w *ssqWorld) {
 			w.seed(2, ssqMust(mdbx.HeightKey(1, 5)), mdbx.ChainValue([32]byte{0x31}, w.canonical[4], ssqWork(6)))
 		}},
-		{"wrong header hash", func(w *ssqWorld) { w.seed(3, bytes.Clone(w.canonical[5][:]), w.headers[w.canonical[4]]) }},
+		{"wrong header hash", func(w *ssqWorld) {
+			hash := w.canonical[5]
+			w.seed(3, bytes.Clone(hash[:]), w.headers[w.canonical[4]])
+		}},
 	} {
 		w := newSSQFixtureWorld(t, ssqSpec{tip: 5})
 		raw := w.child(w.canonical[5], 6, nil)
@@ -294,9 +299,13 @@ func TestSelectedSideQualificationSelectedEvidenceFixture(t *testing.T) {
 		name  string
 		apply func(w *ssqWorld, tip [32]byte, body []byte)
 	}{
-		{"absent", func(w *ssqWorld, tip [32]byte, _ []byte) { w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))}) }},
+		{"absent", func(w *ssqWorld, tip [32]byte, _ []byte) {
+			w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		}},
 		{"invalid width", func(w *ssqWorld, tip [32]byte, body []byte) { w.seed(4, bytes.Clone(tip[:]), body[:50]) }},
-		{"trailing bytes", func(w *ssqWorld, tip [32]byte, body []byte) { w.seed(4, bytes.Clone(tip[:]), append(bytes.Clone(body), 0)) }},
+		{"trailing bytes", func(w *ssqWorld, tip [32]byte, body []byte) {
+			w.seed(4, bytes.Clone(tip[:]), append(bytes.Clone(body), 0))
+		}},
 		{"merkle", func(w *ssqWorld, tip [32]byte, body []byte) {
 			w.seed(4, bytes.Clone(tip[:]), append(append(bytes.Clone(body[:consensus.BLOCK_HEADER_BYTES]), 1), ssqTx(true)...))
 		}},
@@ -455,6 +464,17 @@ func TestSelectedSideQualificationNative(t *testing.T) {
 		return w, w.child(w.canonical[2], 3, nil)
 	}
 	linkKey := func(*ssqWorld) []byte { return ssqMust(mdbx.HeightKey(2, 4)) }
+	// Map-held hashes are copied to an addressable local before slicing.
+	canonicalKey := func(w *ssqWorld) []byte {
+		hash := w.canonical[5]
+		return bytes.Clone(hash[:])
+	}
+	sideKey := func(height uint64) func(*ssqWorld) []byte {
+		return func(w *ssqWorld) []byte {
+			hash := w.side[height]
+			return bytes.Clone(hash[:])
+		}
+	}
 	get, getAbort := []ssqNative{ssqGetEIO}, []ssqNative{ssqGetEIO, ssqAbortEIO}
 	for _, c := range []struct {
 		name     string
@@ -468,12 +488,12 @@ func TestSelectedSideQualificationNative(t *testing.T) {
 	}{
 		{"inverse", mdbx.SelectedDamageGetEIO, canonicalWorld, 7, func(w *ssqWorld) []byte { return ssqMust(mdbx.CanonicalOwnerKey(1, w.canonical[5])) }, ssqCanonical, get, nil},
 		{"forward", mdbx.SelectedDamageGetEIO, canonicalWorld, 2, func(*ssqWorld) []byte { return ssqMust(mdbx.HeightKey(1, 5)) }, ssqCanonical, get, nil},
-		{"required header", mdbx.SelectedDamageGetEIO, canonicalWorld, 3, func(w *ssqWorld) []byte { return bytes.Clone(w.canonical[5][:]) }, ssqCanonical, get, nil},
-		{"required header get and abort", mdbx.SelectedDamageGetAbortEIO, canonicalWorld, 3, func(w *ssqWorld) []byte { return bytes.Clone(w.canonical[5][:]) }, ssqCanonical, getAbort, nil},
-		{"optional header", mdbx.SelectedDamageGetEIO, sideWorld(0, 0), 3, func(w *ssqWorld) []byte { return bytes.Clone(w.side[3][:]) }, ssqBranch, get, nil},
-		{"body NONE", mdbx.SelectedDamageGetEIO, sideWorld(0, 0), 4, func(w *ssqWorld) []byte { return bytes.Clone(w.side[4][:]) }, ssqBranch, get, nil},
-		{"body k=B-1 reference>=B", mdbx.SelectedDamageGetEIO, sideWorld(4, 3), 4, func(w *ssqWorld) []byte { return bytes.Clone(w.side[4][:]) }, ssqBranch, get, nil},
-		{"body k=B reference<B", mdbx.SelectedDamageGetEIO, sideWorld(5, 5), 4, func(w *ssqWorld) []byte { return bytes.Clone(w.side[4][:]) }, ssqCanonical, get, nil},
+		{"required header", mdbx.SelectedDamageGetEIO, canonicalWorld, 3, canonicalKey, ssqCanonical, get, nil},
+		{"required header get and abort", mdbx.SelectedDamageGetAbortEIO, canonicalWorld, 3, canonicalKey, ssqCanonical, getAbort, nil},
+		{"optional header", mdbx.SelectedDamageGetEIO, sideWorld(0, 0), 3, sideKey(3), ssqBranch, get, nil},
+		{"body NONE", mdbx.SelectedDamageGetEIO, sideWorld(0, 0), 4, sideKey(4), ssqBranch, get, nil},
+		{"body k=B-1 reference>=B", mdbx.SelectedDamageGetEIO, sideWorld(4, 3), 4, sideKey(4), ssqBranch, get, nil},
+		{"body k=B reference<B", mdbx.SelectedDamageGetEIO, sideWorld(5, 5), 4, sideKey(4), ssqCanonical, get, nil},
 		// SideLink transients stop before any owner/header/body read of the tip.
 		{"actual-parent SideLink", mdbx.SelectedDamageGetEIO, sideWorld(0, 0), 6, linkKey, ssqBranch, get, &[8]uint64{1, 0, 0, 0, 0, 0, 1, 0}},
 		{"actual-parent SideLink get and abort", mdbx.SelectedDamageGetAbortEIO, sideWorld(0, 0), 6, linkKey, ssqBranch, getAbort, &[8]uint64{1, 0, 0, 0, 0, 0, 1, 0}},
