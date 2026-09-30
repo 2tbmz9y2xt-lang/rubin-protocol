@@ -23,6 +23,8 @@ static int rubin_fixture_row_equal(MDBX_env *env, MDBX_dbi dbi, const void *key_
 }
 typedef struct { int rc; MDBX_txn *txn; } rubin_fixture_txn_result;
 static rubin_fixture_txn_result rubin_fixture_txn_begin(MDBX_env *env, MDBX_txn_flags_t flags) { rubin_fixture_txn_result result = {0, NULL}; result.rc = mdbx_txn_begin(env, NULL, flags, &result.txn); return result; }
+static int rubin_fixture_txn_abort(MDBX_txn *txn) { return mdbx_txn_abort(txn); }
+static int rubin_fixture_txn_commit(MDBX_txn *txn) { return mdbx_txn_commit(txn); }
 typedef struct { int rc; const char *path; } rubin_fixture_path_result;
 static rubin_fixture_path_result rubin_fixture_txn_path(MDBX_txn *txn) { rubin_fixture_path_result result = {MDBX_INVALID, NULL}; MDBX_env *env = mdbx_txn_env(txn); if (env) result.rc = mdbx_env_get_path(env, &result.path); return result; }
 static int rubin_fixture_named(MDBX_txn *txn) { MDBX_dbi dbi; return mdbx_dbi_open(txn, "fixture-v1", MDBX_DB_DEFAULTS | MDBX_CREATE, &dbi); }
@@ -221,10 +223,10 @@ func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_t
 		return err
 	}
 	if primary := mutate(begun.txn); primary != nil {
-		abortRC := int(C.mdbx_txn_abort(begun.txn))
+		abortRC := int(C.rubin_fixture_txn_abort(begun.txn))
 		return joinErrors(primary, fixtureResult(operationAbort, abortRC))
 	}
-	return fixtureResult(operation, int(C.mdbx_txn_commit(begun.txn)))
+	return fixtureResult(operation, int(C.rubin_fixture_txn_commit(begun.txn)))
 }
 
 type fixtureRawRow struct {
@@ -425,7 +427,7 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 
 func fixtureWriteOwnerMismatch(store *Store) (int, error) {
 	return fixtureHeldWrite(store, func(txn *C.MDBX_txn) (int, bool) {
-		rc := int(C.mdbx_txn_commit(txn))
+		rc := int(C.rubin_fixture_txn_commit(txn))
 		return rc, commitTransition(rc).consumed
 	})
 }
@@ -444,7 +446,7 @@ func fixtureHeldWrite(store *Store, attempt func(*C.MDBX_txn) (int, bool)) (int,
 		ready <- begun.txn
 		var err error
 		if !<-consumed {
-			err = fixtureResult(operationAbort, int(C.mdbx_txn_abort(begun.txn)))
+			err = fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(begun.txn)))
 		}
 		cleanup <- err
 		runtime.UnlockOSThread()
@@ -471,7 +473,7 @@ func fixtureHeldUpdate(store *Store) (*C.MDBX_txn, func() error, error) {
 		}
 		ready <- begun.txn
 		<-release
-		cleanup <- fixtureResult(operationAbort, int(C.mdbx_txn_abort(begun.txn)))
+		cleanup <- fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(begun.txn)))
 	}()
 	txn := <-ready
 	if txn == nil {
@@ -503,7 +505,7 @@ func fixtureUpdateResultTrue(store *Store, plan []ownedMutation) updateNativeOut
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(old.rc), old.txn != nil); err != nil {
 		return updateNativeConsumed(CommitTruthOld, false, err, nil, 1)
 	}
-	defer C.mdbx_txn_abort(old.txn)
+	defer C.rubin_fixture_txn_abort(old.txn)
 	begun := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil); err != nil {
 		if begun.txn != nil {
@@ -538,11 +540,11 @@ func fixtureUpdatePostCommitENOSPC(store *Store, plan []ownedMutation) (updateNa
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -557,13 +559,13 @@ func fixtureUpdatePostCommitENOSPCUnreadable(store *Store, plan []ownedMutation)
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	dbis := store.dbis
 	dbis[plan[0].dbi.Rank] = ^C.MDBX_dbi(0)
 	outcome := updateNativeReadback(store.env, dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -578,12 +580,12 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	write := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(write.rc), write.txn != nil); err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, err, nil, 3), err
 	}
 	third, mutation := []byte{0x7f}, plan[0]
@@ -591,16 +593,16 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 	runtime.KeepAlive(mutation)
 	runtime.KeepAlive(third)
 	if rc != codeSuccess {
-		_ = C.mdbx_txn_abort(write.txn)
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(write.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	if rc = int(C.mdbx_txn_commit(write.txn)); rc != codeSuccess {
-		_ = C.mdbx_txn_abort(old.txn)
+	if rc = int(C.rubin_fixture_txn_commit(write.txn)); rc != codeSuccess {
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -615,28 +617,28 @@ func fixtureUpdatePostCommitENOSPCMissing(store *Store, plan []ownedMutation) (u
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	write := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(write.rc), write.txn != nil); err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, err, nil, 3), err
 	}
 	mutation := plan[0]
 	rc := int(C.rubin_fixture_del(write.txn, store.dbis[mutation.dbi.Rank], unsafe.Pointer(&mutation.key[0]), C.size_t(len(mutation.key))))
 	runtime.KeepAlive(mutation)
 	if rc != codeSuccess {
-		_ = C.mdbx_txn_abort(write.txn)
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(write.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	if rc = int(C.mdbx_txn_commit(write.txn)); rc != codeSuccess {
-		_ = C.mdbx_txn_abort(old.txn)
+	if rc = int(C.rubin_fixture_txn_commit(write.txn)); rc != codeSuccess {
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
