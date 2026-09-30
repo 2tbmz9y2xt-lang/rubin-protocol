@@ -358,8 +358,8 @@ func (e *selectedSideEvidence) predecessor(p *selectedSideDamagePlan, height uin
 		return true, nil
 	}
 	work, err := WorkFromTarget([32]byte(header[76:108]))
-	if err != nil { //nolint:nilerr // An undecodable stored target is positive optional damage of this row, not an error.
-		return true, nil
+	if err != nil {
+		return true, nil //nolint:nilerr // An undecodable stored target is positive optional damage of this row, not an error.
 	}
 	work.Add(work, new(big.Int).SetBytes(parent[64:104]))
 	return work.Cmp(new(big.Int).SetBytes(link[64:104])) != 0, nil
