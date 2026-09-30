@@ -651,13 +651,21 @@ func TestSelectedSideDamageReservationComposition(t *testing.T) {
 		logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "invalid storage operation reservation input", "invalid owner: %v", out.Err)
 		w.wantImage("invalid owner ran no Update", w.authority, false)
 	}
+	// A valid owner with a nil Store returns Store.Update's own nil-receiver refusal (mdbx_cgo.go Update: InvalidInput,
+	// operation "update", MDBX_EINVAL 22, "nil Store") unchanged as the empty-result API refusal.
+	out := selectedSideDamageMDBX(nil, w.owner, 2, 4, 3)
+	sideWantOutcome(t, out, "", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "nil Store")
+	nilStore, direct := out.Err.(*mdbx.EngineError) //nolint:errorlint // The raw Store.Update refusal itself is the contract, not a wrapped cause.
+	logicalMDBXAssert(t, direct && nilStore != nil && nilStore.Class == mdbx.EngineInvalidInput && nilStore.Operation == "update" && nilStore.Code == 22 && nilStore.Diagnostic == "nil Store" && nilStore.Cause == nil, "nil Store: %v", out.Err)
+	sideWantReleased(t, w.owner, "nil Store")
+	w.wantImage("nil Store", w.authority, false)
 	denied := func(g uint64) selectedSideOutcome {
 		var out selectedSideOutcome
 		err := w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { out = selectedSideDamageMDBX(w.store, w.owner, g, 4, 3); return nil })
 		logicalMDBXAssert(t, err == nil, "outer charge: %v", err)
 		return out
 	}
-	out := denied(2)
+	out = denied(2)
 	sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "denied")
 	logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == selectedSideCapacityText, "denied: %v", out.Err)
 	w.wantImage("denied", w.authority, false)

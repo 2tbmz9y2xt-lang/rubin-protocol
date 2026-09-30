@@ -325,7 +325,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for _, spec := range []struct {
 			name, dir         string
 			goFiles, cgoFiles int
-		}{{"node", ".", 67, 0}, {"consensus", "../consensus", 60, 3}} {
+		}{{"node", ".", 67, 0}, {"consensus", "../consensus", 62, 3}} {
 			pkg, err := context.ImportDir(spec.dir, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -364,7 +364,11 @@ func requireDAAdmissionStructure(t *testing.T) {
 			ast.Inspect(file, func(node ast.Node) bool {
 				switch node := node.(type) {
 				case *ast.FuncDecl:
-					functions[node.Name.Name], definitions[node.Name.Pos()] = true, true
+					definitions[node.Name.Pos()] = true
+					// A private consensus declaration cannot be named from package node, so it never makes a node identifier a function value.
+					if strings.HasPrefix(key, "node/") || ast.IsExported(node.Name.Name) {
+						functions[node.Name.Name] = true
+					}
 					declarations[key+":"+node.Name.Name] = node
 					scopes[key] = append(scopes[key], sourceScope{node.Pos(), node.End(), key + ":" + node.Name.Name, node.Name.Name})
 				case *ast.ValueSpec:
