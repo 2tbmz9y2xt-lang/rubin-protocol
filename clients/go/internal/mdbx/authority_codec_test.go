@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,42 @@ func mustCodecHex(t *testing.T, s string) []byte {
 	return b
 }
 
+// codecZeros is n hexadecimal zero digits; literal records spell every field explicitly around it.
+func codecZeros(n int) string { return strings.Repeat("0", n) }
+
+// ordinaryC1Hex is the independently spelled record of modelOrdinary(1, 1, 1, 1, 1, 0, 0): pruned, B=U=0, active 1,
+// next 3, ORDINARY_APPLY/RECOVERY_REQUIRED, DISCONNECT without cursor, target (1,hash 2000), old [(1,hash 1000)],
+// new [(1,hash 2000)], captured side (g2,F0,tip1,hash 2000,work 1,rows 1,bytes 1) and no other option.
+func ordinaryC1Hex() string {
+	return "0101" + codecZeros(32) + "0000000000000001" + "0000000000000003" + "0402" + "01" + "00" +
+		"0000000000000001" + codecZeros(48) + "00000000000007d0" +
+		"0001" + "0000000000000001" + codecZeros(48) + "00000000000003e8" +
+		"0001" + "0000000000000001" + codecZeros(48) + "00000000000007d0" +
+		"01" + "0000000000000002" + codecZeros(16) + "0000000000000001" + codecZeros(48) + "00000000000007d0" + codecZeros(78) + "01" + "0001" + "0000000000000001" +
+		"00" + "00" + "00000000"
+}
+
+// TestStorageAuthorityV1SelectedLiterals round-trips the one-slot descriptor and the C1 ordinary record from spelled
+// bytes and refuses the rejected row_count=1438 sibling and the formerly legal empty-N record.
+func TestStorageAuthorityV1SelectedLiterals(t *testing.T) {
+	oneSlot := "0101" + codecZeros(32) + "0000000000000001" + "0000000000000003" + "0101" + "000001" +
+		"0000000000000002" + codecZeros(16) + "00000000000005a0" + codecZeros(48) + "00000000000005a0" + codecZeros(78) + "01"
+	a := modelBase(1, 0, 0)
+	a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1440, 1439, 1439)
+	if got := wantCodecRoundTrip(t, a); !bytes.Equal(got, mustCodecHex(t, oneSlot+"059f"+"000000000000059f"+"00")) {
+		t.Fatalf("one-slot selected record = %x", got)
+	}
+	wantCodecDecodeError(t, mustCodecHex(t, oneSlot+"059e"+"000000000000059e"+"00"))
+	if got := wantCodecRoundTrip(t, modelOrdinary(1, 1, 1, 1, 1, 0, 0)); !bytes.Equal(got, mustCodecHex(t, ordinaryC1Hex())) {
+		t.Fatalf("ordinary C1 record = %x", got)
+	}
+	wantCodecDecodeError(t, mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000020402010000000000000000000000000000000000000000000000000000000000000000000000000000000bb80001000000000000000100000000000000000000000000000000000000000000000000000000000003e8000000000000000000"))
+	union := modelOrdinary(2, 0, 1440, 0, 1, 0, 0)
+	union.Ordinary.CapturedSelectedSide.RowCount, union.Ordinary.CapturedSelectedSide.LogicalBytes = 1439, 1439
+	union.Ordinary.CarriedCleanup = &CleanupV1{[]CleanupSpanV1{{CleanupSpanSideV1, 2, 1, 1, 1}}}
+	wantCodecRoundTrip(t, union)
+}
+
 func codecLiteralCases(t *testing.T) []codecLiteralCase {
 	t.Helper()
 	none := modelBase(1, 0, 0)
@@ -33,9 +70,9 @@ func codecLiteralCases(t *testing.T) []codecLiteralCase {
 		{Kind: 1, GenerationID: 3},
 		{Kind: 2, GenerationID: 1, FirstHeight: 1, LastHeight: 3, NextHeight: 2},
 		{Kind: 3, GenerationID: 1, FirstHeight: 4, LastHeight: 6, NextHeight: 5},
-		{Kind: 4, GenerationID: 2, FirstHeight: 7, LastHeight: 9, NextHeight: 8},
+		{Kind: 4, GenerationID: 2, FirstHeight: 9, LastHeight: 9, NextHeight: 9},
 	}
-	prune.SelectedSide = modelSide(2, 9, 11, 2, 3)
+	prune.SelectedSide = modelSide(2, 8, 1448, 1439, 1439)
 	pruneRecovery := modelPrune(true)
 	pruneRecovery.DetachedSuffix = modelDetached(1, 1)
 	pruneRecovery.DetachedSuffix.Entries[0].Height = 7
@@ -52,11 +89,17 @@ func codecLiteralCases(t *testing.T) []codecLiteralCase {
 	replayPruned.Replay.TargetProfile, *pendingPruned.PendingTargetProfile = 1, 1
 	return []codecLiteralCase{
 		{"none-stable", none, mustCodecHex(t, "01010000000000000000000000000000000000000000000000010000000000000002010100000000")},
-		{"prune-stable-adjacent-SIDE", prune, mustCodecHex(t, "0101000000000000000400000000000035740000000000000001000000000000000402010401000000000000000302000000000000000100000000000000010000000000000003000000000000000203000000000000000100000000000000040000000000000006000000000000000504000000000000000200000000000000070000000000000009000000000000000800000100000000000000020000000000000009000000000000000b000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000000000000000000010002000000000000000300")},
+		{"prune-stable-one-slot-predecessor-SIDE", prune, mustCodecHex(t, "0101"+"0000000000000004"+"0000000000003574"+"0000000000000001"+"0000000000000004"+"0201"+"04"+
+			"01"+"0000000000000003"+
+			"02"+"0000000000000001"+"0000000000000001"+"0000000000000003"+"0000000000000002"+
+			"03"+"0000000000000001"+"0000000000000004"+"0000000000000006"+"0000000000000005"+
+			"04"+"0000000000000002"+"0000000000000009"+"0000000000000009"+"0000000000000009"+
+			"000001"+"0000000000000002"+"0000000000000008"+"00000000000005a8"+codecZeros(48)+"00000000000005a8"+codecZeros(78)+"01"+"059f"+"000000000000059f"+
+			"00")},
 		{"prune-recovery", pruneRecovery, mustCodecHex(t, "01010000000000000001000000000000357100000000000000010000000000000002020201020000000000000001000000000000000000000000000000000000000000000000010200000100010000000000000007000000000000000000000000000000000000000000000000000000000000000100000000000000010000000000000007000000000000000000000000000000000000000000000000000000000000000100010000000000000001")},
 		{"replay-recovery", replay, mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000030302020000000000000002000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000d000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000001020000000000000001000000000000000000000000000000000000000000000000000000000000000e0001000000000000000700000000000000000000000000000000000000000000000000000000000000480000000300ff800000")},
 		{"ordinary-recovery", ordinary, mustCodecHex(t, "01010000000000000001000000000000357100000000000000010000000000000003040203010000000000003b1000000000000000000000000000000000000000000000000000000000000007d00000000000003b1100000000000000000000000000000000000000000000000000000000000007d100010000000000003b1000000000000000000000000000000000000000000000000000000000000003e800020000000000003b1000000000000000000000000000000000000000000000000000000000000007d00000000000003b1100000000000000000000000000000000000000000000000000000000000007d10100000000000000020000000000003b0f0000000000003b1100000000000000000000000000000000000000000000000000000000000007d10000000000000000000000000000000000000000000000000000000000000000000000000000000100020000000000000002010102000000000000000100000000000000000000000000000000000000000000000001010100000000000000000000000000000000000000000000000000000000000007d1000000030031ff00000002804100000000")},
-		{"ordinary-absent-options", modelOrdinary(1, 1, 0, 1, 1, 0, 0), mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000020402010000000000000000000000000000000000000000000000000000000000000000000000000000000bb80001000000000000000100000000000000000000000000000000000000000000000000000000000003e8000000000000000000")},
+		{"ordinary-absent-options", modelOrdinary(1, 1, 1, 1, 1, 0, 0), mustCodecHex(t, ordinaryC1Hex())},
 		{"archive-none", modelBase(2, 0, 0), mustCodecHex(t, "01020000000000000000000000000000000000000000000000010000000000000002010100000000")},
 		{"replay-pre-genesis", modelReplay(1), mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000030302020000000000000002000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000d0000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000010100000000")},
 		{"replay-target-pruned", replayPruned, mustCodecHex(t, "010100000000000000000000000000000000000000000000000100000000000000030302010000000000000002000000000000000000000000000000000000000000000000000000000000000b000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000000d0000000000000002000000000000000000000000000000000000000000000000000000000000000000000000000000010100000000")},
@@ -239,7 +282,7 @@ func TestStorageAuthorityV1CodecVariants(t *testing.T) {
 		}
 	})
 	runCodecCases(t, []authorityCase{
-		{"stage DISCONNECT D1/C0", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+		{"stage DISCONNECT D1/C1 minimal", modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"stage CONNECT D0/C2", modelOrdinary(2, 0, 2, 0, 1, 0, 0)},
 		{"D1/C1", modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"D>0/C>0", modelOrdinary(2, 1, 2, 15120, 1, 1, 13681)},
@@ -253,11 +296,11 @@ func TestStorageAuthorityV1CodecVariants(t *testing.T) {
 			a.Replay.Cursor.Height, a.Replay.Cursor.BlockHash = 2, a.Replay.Target.TipHash
 		})},
 	})
-	disconnect := modelOrdinary(1, 2, 0, 2, 1, 0, 0)
+	disconnect := modelOrdinary(1, 2, 1, 2, 1, 0, 0)
 	cursor := disconnect.Ordinary.OldSuffix[0]
 	disconnect.Ordinary.Cursor = &cursor
 	t.Run("disconnect partial cursor", func(t *testing.T) { wantCodecRoundTrip(t, disconnect) })
-	disconnect = modelOrdinary(1, 2, 0, 2, 1, 0, 0)
+	disconnect = modelOrdinary(1, 2, 1, 2, 1, 0, 0)
 	cursor = disconnect.Ordinary.OldSuffix[1]
 	disconnect.Ordinary.Cursor = &cursor
 	t.Run("disconnect exhausted cursor", func(t *testing.T) { wantCodecRoundTrip(t, disconnect) })
@@ -284,7 +327,7 @@ func TestStorageAuthorityV1CodecVariants(t *testing.T) {
 		want byte
 		a    StorageAuthorityV1
 	}{
-		{"DISCONNECT", 1, modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+		{"DISCONNECT", 1, modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"CONNECT", 2, modelOrdinary(2, 0, 2, 0, 1, 0, 0)},
 		{"ROLLBACK_NEW", 3, modelOrdinary(3, 1, 2, 1, 1, 0, 0)},
 		{"RESTORE_OLD", 4, modelOrdinary(4, 2, 2, 2, 1, 0, 0)},
@@ -330,9 +373,9 @@ func TestStorageAuthorityV1CodecVariants(t *testing.T) {
 		{"ordinary failure option", ordinary, 384, []byte{2, 255}},
 		{"failure hash option", ordinary, 386, []byte{2, 255}},
 		{"ordinary cursor option absent", rows[5].b, 37, []byte{2, 255}},
-		{"ordinary captured option absent", rows[5].b, 122, []byte{2, 255}},
-		{"ordinary cleanup option absent", rows[5].b, 123, []byte{2, 255}},
-		{"ordinary failure option absent", rows[5].b, 124, []byte{2, 255}},
+		{"ordinary captured option present C1", rows[5].b, 162, []byte{2, 255}},
+		{"ordinary cleanup option absent", rows[5].b, 269, []byte{2, 255}},
+		{"ordinary failure option absent", rows[5].b, 270, []byte{2, 255}},
 		{"failure hash option absent", failureHashAbsent, 352, []byte{2, 255}},
 		{"replay target profile", replay, 36, []byte{0, 3, 255}},
 		{"replay cursor", replay, 189, []byte{0, 3, 255}},
@@ -505,7 +548,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 		a      StorageAuthorityV1
 		offset int
 	}{
-		{"old framed 1441", modelOrdinary(1, 1440, 0, 2000, 1, 0, 561), 78},
+		{"old framed 1441", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561), 78},
 		{"new framed 1441", modelOrdinary(2, 0, 1440, 0, 1, 0, 0), 80},
 		{"detached framed 1441", modelDetached1440(), 74},
 	} {
@@ -544,7 +587,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 	})
 	runCodecCases(t, []authorityCase{
 		{"detached count 1", modelDetachedAuthority()},
-		{"old suffix count 1440", modelOrdinary(1, 1440, 0, 2000, 1, 0, 561)},
+		{"old suffix count 1440", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561)},
 		{"new suffix count 1440", modelOrdinary(2, 0, 1440, 0, 1, 0, 0)},
 		{"detached count 1440", modelDetached1440()},
 		{"archive maximum U", modelBase(2, 0, 4_294_965_856)},
@@ -576,7 +619,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 		{"cleanup phase", 74, modelPrune(false)},
 		{"replay phase", 194, modelReplay(1)},
 		{"replay APPLIED phase", 234, appliedReplay},
-		{"ordinary phase", 129, modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+		{"ordinary phase", 275, modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"ordinary full options", 436, rows[4].a},
 		{"selected option", 146, selected},
 		{"detached option", 174, modelDetachedAuthority()},
@@ -742,19 +785,16 @@ func TestStorageAuthorityV1CodecOwnership(t *testing.T) {
 		}
 	}
 	for _, newEmpty := range []bool{false, true} {
-		empty := modelOrdinary(1, 1, 0, 1, 1, 0, 0)
+		// Every ordinary transition has C>=1 (RUBIN_MEMPOOL_POLICY.md 6.4.1.2): nil and empty N both refuse to encode.
+		empty := modelOrdinary(1, 1, 1, 1, 1, 0, 0)
+		empty.Ordinary.CapturedSelectedSide, empty.Ordinary.Target = nil, modelPoint(0, 3000)
 		if newEmpty {
 			empty.Ordinary.NewSuffix = []AuthorityPointV1{}
 		} else {
 			empty.Ordinary.NewSuffix = nil
 		}
-		b, err := empty.Encode()
-		if err != nil {
-			t.Fatal(err)
-		}
-		decoded, err := DecodeStorageAuthorityV1(b)
-		if err != nil || decoded.Ordinary.NewSuffix != nil {
-			t.Fatalf("zero NewSuffix normalization = %#v, %v", decoded.Ordinary.NewSuffix, err)
+		if b, err := empty.Encode(); b != nil || !exactErr(err) {
+			t.Fatalf("empty NewSuffix Encode = len %d, %v", len(b), err)
 		}
 	}
 	wantCodecDecodeError(t, input[:100])

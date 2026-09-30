@@ -262,12 +262,12 @@ func TestStorageAuthorityV1GenerationOwners(t *testing.T) {
 	wantModel(t, "next generation maximum", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.ActiveGenerationID, a.NextGenerationID = ^uint64(0)-1, ^uint64(0) }), true)
 	full := modelPrune(false)
 	full.NextGenerationID = 4
-	full.SelectedSide = modelSide(2, 1, 2, 1, 1)
+	full.SelectedSide = modelSide(2, 0, 1440, 1439, 1439)
 	full.Cleanup.Spans = []CleanupSpanV1{
 		{Kind: 1, GenerationID: 3},
 		{Kind: 2, GenerationID: 1, FirstHeight: 0, LastHeight: 0, NextHeight: 0},
 		{Kind: 3, GenerationID: 1, FirstHeight: 0, LastHeight: 0, NextHeight: 0},
-		{Kind: 4, GenerationID: 2, FirstHeight: 0, LastHeight: 0, NextHeight: 0},
+		{Kind: 4, GenerationID: 2, FirstHeight: 1, LastHeight: 1, NextHeight: 1},
 	}
 	wantModel(t, "active obsolete side three ids", full, true)
 	adjacent := full
@@ -488,32 +488,30 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	point := func(p AuthorityPointV1) *AuthorityPointV1 { return &p }
 	hash := func(h [32]byte) *[32]byte { return &h }
 	for _, row := range []authorityCase{
-		{"D1 C0 disconnect", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
 		{"D1 C2 disconnect", modelOrdinary(1, 1, 2, 1, 1, 0, 0)},
 		{"D1 C1 disconnect", modelOrdinary(1, 1, 1, 1, 1, 0, 0)},
 		{"D0 C2 connect nil cursor H0", modelOrdinary(2, 0, 2, 0, 1, 0, 0)},
 		{"D1 C2 connect", modelOrdinary(2, 1, 2, 15120, 1, 1, 13681)},
 		{"rollback new", modelOrdinary(3, 1, 2, 1, 1, 0, 0)},
 		{"restore old", modelOrdinary(4, 2, 2, 2, 1, 0, 0)},
-		{"D2 C0 restore old", modelOrdinary(4, 2, 0, 2, 1, 0, 0)},
-		{"pruned H1439", modelOrdinary(1, 1, 0, 1439, 1, 0, 0)},
-		{"pruned H1440", modelOrdinary(1, 1, 0, 1440, 1, 0, 1)},
-		{"pruned H15119", modelOrdinary(1, 1, 0, 15119, 1, 0, 13680)},
-		{"pruned H15120", modelOrdinary(1, 1, 0, 15120, 1, 1, 13681)},
-		{"pruned H max", modelOrdinary(1, 1, 0, 0xffffffff, 1, 4_294_952_176, 4_294_965_856)},
-		{"archive H15120", modelOrdinary(1, 1, 0, 15120, 2, 0, 13681)},
+		{"D2 C1 restore old", modelOrdinary(4, 2, 1, 2, 1, 0, 0)},
+		{"pruned H1439", modelOrdinary(1, 1, 1, 1439, 1, 0, 0)},
+		{"pruned H1440", modelOrdinary(1, 1, 1, 1440, 1, 0, 1)},
+		{"pruned H15119", modelOrdinary(1, 1, 1, 15119, 1, 0, 13680)},
+		{"pruned H15120", modelOrdinary(1, 1, 1, 15120, 1, 1, 13681)},
+		{"pruned H max", modelOrdinary(1, 1, 1, 0xffffffff, 1, 4_294_952_176, 4_294_965_856)},
+		{"archive H15120", modelOrdinary(1, 1, 1, 15120, 2, 0, 13681)},
 		{"D0 C2 pruned H1439", modelOrdinary(2, 0, 2, 1439, 1, 0, 0)},
 		{"D0 C2 pruned H1440", modelOrdinary(2, 0, 2, 1440, 1, 0, 1)},
 		{"D0 C2 pruned H15119", modelOrdinary(2, 0, 2, 15119, 1, 0, 13680)},
 		{"D0 C2 pruned H15120", modelOrdinary(2, 0, 2, 15120, 1, 1, 13681)},
-		{"D1440 bound", modelOrdinary(1, 1440, 0, 2000, 1, 0, 561)},
+		{"D1440 bound", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561)},
 		{"C1440 bound", modelOrdinary(2, 0, 1440, 0, 1, 0, 0)},
 	} {
 		wantModel(t, row.name, row.a, true)
 	}
-	captured := modelOrdinary(1, 1, 0, 1, 1, 0, 0)
-	captured.NextGenerationID, captured.Ordinary.CapturedSelectedSide = 3, modelSide(2, 0, 1, 1, 1)
-	wantModel(t, "C0 standalone captured side", captured, true)
+	captured := modelOrdinary(1, 1, 1, 1, 1, 0, 0)
+	wantModel(t, "C1 captured side", captured, true)
 	carried := modelOrdinary(2, 1, 2, 15120, 1, 1, 13681)
 	carried.Ordinary.CarriedCleanup = modelCleanup()
 	wantModel(t, "valid carried cleanup", carried, true)
@@ -524,10 +522,10 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		span.Kind, span.GenerationID, span.LastHeight = CleanupSpanKindV1(kind), generation, last
 		return a
 	}
-	disconnect := modelOrdinary(1, 2, 0, 2, 1, 0, 0)
+	disconnect := modelOrdinary(1, 2, 1, 2, 1, 0, 0)
 	disconnect.Ordinary.Cursor = point(disconnect.Ordinary.OldSuffix[0])
 	wantModel(t, "disconnect partial cursor", disconnect, true)
-	disconnect = modelOrdinary(1, 2, 0, 2, 1, 0, 0)
+	disconnect = modelOrdinary(1, 2, 1, 2, 1, 0, 0)
 	disconnect.Ordinary.Cursor = point(disconnect.Ordinary.OldSuffix[1])
 	wantModel(t, "disconnect exhausted cursor", disconnect, true)
 	connect := modelOrdinary(2, 1, 2, 1, 1, 0, 0)
@@ -548,16 +546,16 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		{"D0 C1 selector", modelOrdinary(2, 0, 1, 0, 1, 0, 0)},
 		{"D1441 overflow", modelOrdinary(1, 1441, 0, 2000, 1, 0, 561)},
 		{"C1441 overflow", modelOrdinary(2, 0, 1441, 0, 1, 0, 0)},
-		{"unknown stage zero", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Stage = 0 })},
-		{"unknown stage five", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Stage = 5 })},
-		{"old wrong direction", change(modelOrdinary(1, 3, 0, 3, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[1].Height = 4 })},
-		{"old gap", change(modelOrdinary(1, 3, 0, 3, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[0].Height = 4 })},
+		{"unknown stage zero", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Stage = 0 })},
+		{"unknown stage five", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Stage = 5 })},
+		{"old wrong direction", change(modelOrdinary(1, 3, 1, 3, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[1].Height = 4 })},
+		{"old gap", change(modelOrdinary(1, 3, 1, 3, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[0].Height = 4 })},
 		{"new wrong direction", change(modelOrdinary(2, 0, 3, 0, 1, 0, 0), func(o *OrdinaryApplyV1) { o.NewSuffix[1].Height = 0 })},
 		{"new gap", change(modelOrdinary(2, 0, 2, 0, 1, 0, 0), func(o *OrdinaryApplyV1) {
 			o.NewSuffix[1].Height, o.CapturedSelectedSide.TipHeight = 3, 3
 			o.Target, o.CapturedSelectedSide.RowCount, o.CapturedSelectedSide.LogicalBytes = o.NewSuffix[1], 3, 3
 		})},
-		{"old duplicate hash", change(modelOrdinary(1, 2, 0, 2, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[1].BlockHash = o.OldSuffix[0].BlockHash })},
+		{"old duplicate hash", change(modelOrdinary(1, 2, 1, 2, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[1].BlockHash = o.OldSuffix[0].BlockHash })},
 		{"new duplicate hash", change(modelOrdinary(2, 0, 2, 0, 1, 0, 0), func(o *OrdinaryApplyV1) {
 			o.NewSuffix[1].BlockHash = o.NewSuffix[0].BlockHash
 			o.Target.BlockHash, o.CapturedSelectedSide.TipHash = o.NewSuffix[1].BlockHash, o.NewSuffix[1].BlockHash
@@ -572,8 +570,10 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		})},
 		{"C positive target height", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.Height++ })},
 		{"C positive target hash", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.BlockHash = modelHash(99) })},
-		{"C zero target height", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.Height++ })},
-		{"C zero target hash in old", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.BlockHash = o.OldSuffix[0].BlockHash })},
+		{"D1 C1 target height", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.Height++ })},
+		{"D1 C1 target hash in old", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Target.BlockHash = o.OldSuffix[0].BlockHash })},
+		{"empty N formerly legal C0 disconnect", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+		{"empty N with standalone captured side", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.CapturedSelectedSide = modelSide(2, 0, 1, 1, 1) })},
 		{"missing captured side", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.CapturedSelectedSide = nil })},
 		{"captured wrong F", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.F++; o.CapturedSelectedSide.RowCount = 1 })},
 		{"captured wrong tip height", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) {
@@ -591,8 +591,8 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		{"carried SIDE reaches captured first retained height", ownerCase(4, 2, 15120)},
 		{"carried GENERATION equals captured side", ownerCase(1, 2, 0)},
 		{"invalid standalone captured", change(captured, func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.LogicalBytes = 0 })},
-		{"disconnect foreign cursor", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Cursor = point(modelPoint(9, 9)) })},
-		{"disconnect failure", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.RecordedFailure = modelFailure(1) })},
+		{"disconnect foreign cursor", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Cursor = point(modelPoint(9, 9)) })},
+		{"disconnect failure", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.RecordedFailure = modelFailure(1) })},
 		{"connect nil cursor with D", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Cursor = nil })},
 		{"connect foreign cursor", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.Cursor = point(modelPoint(9, 9)) })},
 		{"connect failure", change(modelOrdinary(2, 1, 2, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.RecordedFailure = modelFailure(1) })},
@@ -614,7 +614,7 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 			o.RecordedFailure.FailedBlockHash = hash(o.NewSuffix[0].BlockHash)
 		})},
 		{"invalid carried cleanup", change(carried, func(o *OrdinaryApplyV1) { o.CarriedCleanup = &CleanupV1{} })},
-		{"old height overflow", change(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[0].Height = 0x100000000 })},
+		{"old height overflow", change(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(o *OrdinaryApplyV1) { o.OldSuffix[0].Height = 0x100000000 })},
 		{"new height overflow", change(modelOrdinary(2, 0, 2, 0, 1, 0, 0), func(o *OrdinaryApplyV1) { o.NewSuffix[1].Height = 0x100000000 })},
 	}
 	for _, row := range bad {
@@ -622,16 +622,16 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	}
 	for _, row := range []authorityCase{
 		{"H0 wrong U", modelOrdinary(2, 0, 2, 0, 1, 0, 1)},
-		{"H1440 U below", modelOrdinary(1, 1, 0, 1440, 1, 0, 0)},
-		{"H1440 U above", modelOrdinary(1, 1, 0, 1440, 1, 0, 2)},
-		{"H15120 U below", modelOrdinary(1, 1, 0, 15120, 1, 0, 13680)},
-		{"H15120 U above", modelOrdinary(1, 1, 0, 15120, 1, 2, 13682)},
-		{"archive U mismatch", modelOrdinary(1, 1, 0, 15120, 2, 0, 13680)},
+		{"H1440 U below", modelOrdinary(1, 1, 1, 1440, 1, 0, 0)},
+		{"H1440 U above", modelOrdinary(1, 1, 1, 1440, 1, 0, 2)},
+		{"H15120 U below", modelOrdinary(1, 1, 1, 15120, 1, 0, 13680)},
+		{"H15120 U above", modelOrdinary(1, 1, 1, 15120, 1, 2, 13682)},
+		{"archive U mismatch", modelOrdinary(1, 1, 1, 15120, 2, 0, 13680)},
 	} {
 		wantModel(t, row.name, row.a, false)
 	}
-	wantModel(t, "old suffix height zero", edit(modelOrdinary(1, 1, 0, 1, 1, 0, 0), func(a *StorageAuthorityV1) {
-		a.Ordinary.OldSuffix[0].Height, a.Ordinary.Target.Height = 0, ^uint64(0)
+	wantModel(t, "old suffix height zero", edit(modelOrdinary(1, 1, 1, 1, 1, 0, 0), func(a *StorageAuthorityV1) {
+		a.Ordinary.OldSuffix[0].Height = 0
 	}), false)
 	newStartsAtZero := modelOrdinary(2, 1, 2, 1, 1, 0, 0)
 	newStartsAtZero.Ordinary.NewSuffix[0].Height, newStartsAtZero.Ordinary.NewSuffix[1].Height = 0, 1
@@ -641,6 +641,80 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 	newStartsAtZero.Ordinary.CapturedSelectedSide.TipHash = newStartsAtZero.Ordinary.Target.BlockHash
 	newStartsAtZero.Ordinary.CapturedSelectedSide.RowCount = 1
 	wantModel(t, "present new suffix starts at zero", newStartsAtZero, false)
+}
+
+// TestStorageAuthorityV1SelectedForms pins the literal RUBIN_MEMPOOL_POLICY.md 6.4.1.3 bounds: full row_count=min(C,1440)
+// and the sole one-slot C>=1440,row_count=1439; C=1439,row_count=1439 is the full form.
+func TestStorageAuthorityV1SelectedForms(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		f, tip uint64
+		rows   uint16
+		valid  bool
+	}{
+		{"full C1439 rows1439", 1, 1440, 1439, true},
+		{"full C1440 rows1440", 0, 1440, 1440, true},
+		{"full C2000 rows1440", 0, 2000, 1440, true},
+		{"one-slot C1440 rows1439", 0, 1440, 1439, true},
+		{"one-slot C2000 rows1439", 0, 2000, 1439, true},
+		{"C1440 rows1438", 0, 1440, 1438, false},
+		{"C2000 rows1438", 0, 2000, 1438, false},
+		{"C1439 rows1438", 1, 1440, 1438, false},
+		{"C1441 rows1441", 0, 1441, 1441, false},
+	} {
+		a := modelBase(1, 0, 0)
+		a.NextGenerationID, a.SelectedSide = 3, modelSide(2, row.f, row.tip, row.rows, uint64(row.rows))
+		wantModel(t, row.name, a, row.valid)
+	}
+}
+
+// TestStorageAuthorityV1LiveSelectedSide admits live selected plus pending SIDE only as the one-slot descriptor beside
+// the exact same-generation predecessor singleton; every nearest sibling keeps all other relationships legal.
+func TestStorageAuthorityV1LiveSelectedSide(t *testing.T) {
+	live := func(f, tip uint64, rows uint16, span CleanupSpanV1) StorageAuthorityV1 {
+		a := modelPrune(false)
+		a.NextGenerationID, a.SelectedSide = 3, modelSide(2, f, tip, rows, uint64(rows))
+		a.Cleanup.Spans = append(a.Cleanup.Spans, span)
+		return a
+	}
+	side := func(g, first, last, next uint64) CleanupSpanV1 { return CleanupSpanV1{CleanupSpanSideV1, g, first, last, next} }
+	wantModel(t, "one-slot C1440 with exact predecessor SIDE", live(0, 1440, 1439, side(2, 1, 1, 1)), true)
+	wantModel(t, "one-slot C2000 with exact predecessor SIDE", live(0, 2000, 1439, side(2, 561, 561, 561)), true)
+	wantModel(t, "one-slot without SIDE", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1440, 1439, 1439) }), true)
+	for _, row := range []authorityCase{
+		{"full C1440 with predecessor SIDE", live(0, 1440, 1440, side(2, 0, 0, 0))},
+		{"full C1439 with predecessor SIDE", live(1, 1440, 1439, side(2, 1, 1, 1))},
+		{"one-slot gapped SIDE", live(0, 1440, 1439, side(2, 0, 0, 0))},
+		{"one-slot wider SIDE", live(0, 1440, 1439, side(2, 0, 1, 0))},
+		{"one-slot overlapping SIDE", live(0, 1440, 1439, side(2, 2, 2, 2))},
+		{"one-slot other-generation SIDE", edit(live(0, 1440, 1439, side(3, 1, 1, 1)), func(a *StorageAuthorityV1) { a.NextGenerationID = 4 })},
+	} {
+		wantModel(t, row.name, row.a, false)
+	}
+}
+
+// TestStorageAuthorityV1CapturedUnion keeps the captured ORDINARY relation separate from the live rule: a full
+// capture of exactly N or the captured1439+frozenSIDE1 union of N1440, never the captured row count alone.
+func TestStorageAuthorityV1CapturedUnion(t *testing.T) {
+	union := func(frozen CleanupSpanV1, rows uint16) StorageAuthorityV1 {
+		a := modelOrdinary(2, 0, 1440, 0, 1, 0, 0)
+		a.Ordinary.CapturedSelectedSide.RowCount, a.Ordinary.CapturedSelectedSide.LogicalBytes = rows, uint64(rows)
+		a.Ordinary.CarriedCleanup = &CleanupV1{[]CleanupSpanV1{frozen}}
+		return a
+	}
+	frozen := CleanupSpanV1{CleanupSpanSideV1, 2, 1, 1, 1}
+	wantModel(t, "full capture N1440", modelOrdinary(2, 0, 1440, 0, 1, 0, 0), true)
+	wantModel(t, "full capture N1", modelOrdinary(1, 1, 1, 1, 1, 0, 0), true)
+	wantModel(t, "captured1439 plus frozen SIDE1 union N1440", union(frozen, 1439), true)
+	for _, row := range []authorityCase{
+		{"captured1439 without frozen SIDE", edit(union(frozen, 1439), func(a *StorageAuthorityV1) { a.Ordinary.CarriedCleanup = nil })},
+		{"captured1439 with displaced frozen SIDE", union(CleanupSpanV1{CleanupSpanSideV1, 2, 0, 0, 0}, 1439)},
+		{"captured1439 with wider frozen SIDE", union(CleanupSpanV1{CleanupSpanSideV1, 2, 0, 1, 0}, 1439)},
+		{"captured1440 plus frozen SIDE", union(frozen, 1440)},
+		{"empty N", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+	} {
+		wantModel(t, row.name, row.a, false)
+	}
 }
 
 func TestStorageAuthorityV1Boundaries(t *testing.T) {

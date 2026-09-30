@@ -46,10 +46,27 @@ func validOwners(a StorageAuthorityV1) bool {
 			}
 		}
 	}
-	if !sidesOK {
+	if !sidesOK || (a.Ordinary == nil && !validLiveSide(selected, cleanup)) {
 		return false
 	}
 	obsolete, cleanupOK := validCleanupRelations(a, cleanup, selected, side)
 	active, next := a.ActiveGenerationID, a.NextGenerationID
 	return all(cleanupOK, anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
+}
+
+// validLiveSide admits a live selected side beside a pending SIDE span only in the rolling-prepared shape: the one-slot
+// descriptor and exactly SIDE(g,first-1,first-1,first-1) (RUBIN_MEMPOOL_POLICY.md 6.4.1.3). A captured ORDINARY side
+// and its frozen SIDE keep the separate relation of validOrdinaryTarget. validSelected already proved first>=F+1>=1.
+func validLiveSide(selected *SelectedSideV1, cleanup *CleanupV1) bool {
+	if selected == nil || cleanup == nil {
+		return true
+	}
+	first := selected.TipHeight - uint64(selected.RowCount) + 1
+	for _, span := range cleanup.Spans {
+		if span.Kind == CleanupSpanSideV1 {
+			return all(selected.RowCount == 1439, selected.TipHeight-selected.F >= 1440,
+				span == CleanupSpanV1{Kind: CleanupSpanSideV1, GenerationID: selected.GenerationID, FirstHeight: first - 1, LastHeight: first - 1, NextHeight: first - 1})
+		}
+	}
+	return true
 }

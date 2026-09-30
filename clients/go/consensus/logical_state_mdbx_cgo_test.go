@@ -789,7 +789,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
-	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go"} {
+	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "stored_block_commitments_stream.go", "stored_block_commitments_stream_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -804,12 +804,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 1, "bridge lost dormancy: %d non-test internal/mdbx imports, want 1", imports)
+	logicalMDBXAssert(t, imports == 2, "bridge lost dormancy: %d non-test internal/mdbx imports, want 2", imports)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
 	_, _ = config.Check("consensus", fset, files, info)
 	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "genesisMDBXBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
@@ -857,6 +857,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			approved[ident.Name]++
 		}
 		logicalMDBXAssert(t, ident.Name != "ConnectPublishedGenesisMDBX", "bridge lost dormancy: genesis production consumer at %s", fset.Position(ident.Pos()))
+		logicalMDBXAssert(t, ident.Name != "selectedSideDamageMDBX", "selected side damage lost dormancy: production consumer at %s", fset.Position(ident.Pos()))
 		resolved[fset.Position(ident.Pos()).Filename] = true
 	}
 	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 1, "Counters": 1, "newLogicalMDBXMetadata": 1, "logicalMDBXPlanToBatch": 1, "genesisMDBXBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)

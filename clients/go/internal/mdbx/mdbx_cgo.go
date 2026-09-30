@@ -6,6 +6,166 @@ package mdbx
 #cgo CFLAGS: -std=c11
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
+#ifdef RUBIN_SELECTED_DAMAGE_FIXTURE
+// Fixture-only native boundary for the dormant selected-side operation. The fixture build defines the macro through
+// its package CFLAGS; an ordinary build preprocesses this block away. One serialized invocation binds one environment,
+// its OLD, write and readback transactions and one closed scenario; every interceptor forwards to libMDBX.
+typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
+extern void rubinSelectedDamageProbe(uintptr_t probe);
+static pthread_mutex_t rubin_sd_mu = PTHREAD_MUTEX_INITIALIZER;
+static struct { unsigned scenario; int get_fired; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbis[8], fault_dbi; unsigned char key[78]; size_t key_len; uintptr_t probe; rubin_sd_counts counts; } rubin_sd;
+int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe) {
+	int rc = 1;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 11 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
+		memset(&rubin_sd, 0, sizeof(rubin_sd));
+		rubin_sd.scenario = scenario;
+		rubin_sd.env = env;
+		rubin_sd.fault_dbi = fault_dbi;
+		rubin_sd.probe = probe;
+		memcpy(rubin_sd.dbis, dbis, sizeof(rubin_sd.dbis));
+		if (key_len != 0) memcpy(rubin_sd.key, key, key_len);
+		rubin_sd.key_len = key_len;
+		rc = 0;
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	return rc;
+}
+void rubin_sd_disarm(rubin_sd_counts *out) {
+	pthread_mutex_lock(&rubin_sd_mu);
+	*out = rubin_sd.counts;
+	memset(&rubin_sd, 0, sizeof(rubin_sd));
+	pthread_mutex_unlock(&rubin_sd_mu);
+}
+static int rubin_sd_txn_begin(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, MDBX_txn **txn) {
+	int role = -1, fail = MDBX_SUCCESS;
+	uintptr_t probe = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario != 0 && env == rubin_sd.env) {
+		role = (flags & MDBX_TXN_RDONLY) == 0 ? 1 : (rubin_sd.counts.begin_old == 0 ? 0 : 2);
+		if (role == 0) {
+			rubin_sd.counts.begin_old++;
+			fail = rubin_sd.scenario == 2 ? MDBX_TXN_FULL : (rubin_sd.scenario == 3 ? MDBX_EIO : MDBX_SUCCESS);
+			if (fail != MDBX_SUCCESS) rubin_sd.counts.faults++;
+		} else {
+			if (role == 1) rubin_sd.counts.begin_write++;
+			else rubin_sd.counts.begin_read++;
+			probe = rubin_sd.probe;
+		}
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	if (fail != MDBX_SUCCESS) {
+		*txn = NULL;
+		return fail;
+	}
+	if (probe != 0) rubinSelectedDamageProbe(probe);
+	int rc = mdbx_txn_begin(env, parent, flags, txn);
+	if (role >= 0 && rc == MDBX_SUCCESS) {
+		pthread_mutex_lock(&rubin_sd_mu);
+		if (role == 0) rubin_sd.old_txn = *txn;
+		else if (role == 1) rubin_sd.write_txn = *txn;
+		else rubin_sd.read_txn = *txn;
+		pthread_mutex_unlock(&rubin_sd_mu);
+	}
+	return rc;
+}
+static int rubin_sd_get_fault(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key) {
+	int read = rubin_sd.read_txn != NULL && txn == rubin_sd.read_txn, want_read = rubin_sd.scenario == 9;
+	int want = rubin_sd.scenario == 4 || rubin_sd.scenario == 5 || want_read;
+	if (!want || rubin_sd.get_fired || read != want_read || (!read && txn != rubin_sd.old_txn)) return 0;
+	return dbi == rubin_sd.fault_dbi && key->iov_len != 0 && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0;
+}
+static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data) {
+	int fault = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario != 0 && txn != NULL) {
+		for (int i = 0; txn == rubin_sd.old_txn && i < 8; i++) if (rubin_sd.dbis[i] == dbi) rubin_sd.counts.old_gets[i]++;
+		if (txn == rubin_sd.read_txn) rubin_sd.counts.read_gets++;
+		fault = rubin_sd_get_fault(txn, dbi, key);
+		if (fault) {
+			rubin_sd.get_fired = 1;
+			rubin_sd.counts.faults++;
+		}
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	if (fault) {
+		data->iov_base = NULL;
+		data->iov_len = 0;
+		return MDBX_EIO;
+	}
+	return mdbx_get(txn, dbi, key, data);
+}
+static int rubin_sd_del(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, const MDBX_val *data) {
+	int fault = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario != 0 && txn != NULL && txn == rubin_sd.write_txn) {
+		rubin_sd.counts.dels++;
+		fault = rubin_sd.scenario == 6 && rubin_sd.counts.faults == 0;
+		if (fault) rubin_sd.counts.faults++;
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	return fault ? MDBX_EIO : mdbx_del(txn, dbi, key, data);
+}
+// rubin_sd_third is the existing physical-mismatch technique: one raw put of 0x7f to meta-v1 key 02 after the
+// operation's writer committed, in a fixture-owned transaction that commits before readback begins.
+static int rubin_sd_third(void) {
+	MDBX_txn *txn = NULL;
+	const unsigned char key = 2, value = 0x7f;
+	MDBX_val k = {(void *)&key, 1}, v = {(void *)&value, 1};
+	int rc = mdbx_txn_begin(rubin_sd.env, NULL, MDBX_TXN_READWRITE, &txn);
+	if (rc == MDBX_SUCCESS) rc = mdbx_put(txn, rubin_sd.dbis[0], &k, &v, MDBX_UPSERT);
+	if (rc == MDBX_SUCCESS) return mdbx_txn_commit(txn);
+	if (txn != NULL) mdbx_txn_abort(txn);
+	return rc;
+}
+static int rubin_sd_txn_commit(MDBX_txn *txn) {
+	unsigned scenario = 0;
+	uintptr_t probe = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario != 0 && txn != NULL && txn == rubin_sd.write_txn) {
+		rubin_sd.counts.commits++;
+		scenario = rubin_sd.scenario;
+		probe = rubin_sd.probe;
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	if (probe != 0) rubinSelectedDamageProbe(probe);
+	if (scenario == 7) mdbx_txn_break(txn);
+	int rc = mdbx_txn_commit(txn);
+	if (scenario < 7 || scenario > 10) return rc;
+	int bridge = rc != (scenario == 7 ? MDBX_RESULT_TRUE : MDBX_SUCCESS);
+	if (!bridge && scenario == 10) bridge = rubin_sd_third() != MDBX_SUCCESS;
+	pthread_mutex_lock(&rubin_sd_mu);
+	rubin_sd.counts.faults++;
+	rubin_sd.counts.bridge_error += (unsigned long long)bridge;
+	pthread_mutex_unlock(&rubin_sd_mu);
+	return ENOSPC;
+}
+static int rubin_sd_txn_abort(MDBX_txn *txn) {
+	int fault = 0;
+	uintptr_t probe = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario != 0 && txn != NULL && txn == rubin_sd.old_txn) {
+		rubin_sd.counts.old_aborts++;
+		probe = rubin_sd.probe;
+		fault = rubin_sd.scenario == 5 || rubin_sd.scenario == 11;
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	if (probe != 0) rubinSelectedDamageProbe(probe);
+	int rc = mdbx_txn_abort(txn);
+	if (probe != 0) rubinSelectedDamageProbe(probe);
+	if (!fault) return rc;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rc == MDBX_SUCCESS) rubin_sd.counts.faults++;
+	else rubin_sd.counts.bridge_error++;
+	pthread_mutex_unlock(&rubin_sd_mu);
+	return MDBX_EIO;
+}
+#define mdbx_txn_begin rubin_sd_txn_begin
+#define mdbx_get rubin_sd_get
+#define mdbx_del rubin_sd_del
+#define mdbx_txn_commit rubin_sd_txn_commit
+#define mdbx_txn_abort rubin_sd_txn_abort
+#endif // RUBIN_SELECTED_DAMAGE_FIXTURE
 typedef struct { int first; int second; } rubin_mdbx_debug_result;
 static rubin_mdbx_debug_result rubin_mdbx_normalize_debug(void) {
 	rubin_mdbx_debug_result result = {MDBX_PROBLEM, MDBX_PROBLEM};
@@ -1734,6 +1894,100 @@ func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
 		r.active.Store(false)
 	}
 	return result, present, err
+}
+
+// OptionalSideValueV1 is one GetOptionalSide observation. Present false is verified absence. For a present row Length
+// is the actual native value length. InvalidWidth reports a proved stored width outside the SchemaV2 bound without
+// copying the value; otherwise Value is one owned Go copy of a legal-width value.
+type OptionalSideValueV1 struct {
+	Value        []byte
+	Length       uint64
+	Present      bool
+	InvalidWidth bool
+}
+
+// GetOptionalSide reads one exact headers-v1 or blocks-v1 row keyed by a 32-byte hash (RUBIN_MEMPOOL_POLICY.md
+// 6.4.1.6 positive evidence). Postconditions: another DBI or key width is a direct InvalidInput refusal that records
+// nothing; NOTFOUND is Present false and leaves the Reader usable; native SUCCESS whose width lies outside 116 (headers)
+// or 116..68000125 (blocks) is Present and InvalidWidth with its native Length, no Go copy and a usable Reader; a legal
+// width returns one owned copy. An impossible pointer/length shape or a native failure is recorded as this Reader's
+// failure, disarms it and follows the existing View/Update disposition, exactly as Get does.
+func (r *Reader) GetOptionalSide(dbi DBI, key []byte) (OptionalSideValueV1, error) {
+	if !r.usable() {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	if (dbi != schemaDBIs[3] && dbi != schemaDBIs[4]) || len(key) != 32 {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid optional-side DBI or key", nil)
+	}
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	value := C.rubin_mdbx_get(r.txn, r.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	result, err := optionalSideResult(dbi, key, int(value.rc), unsafe.Pointer(value.bytes), value.length)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return result, err
+}
+
+// optionalSideResult decides the native shape and width before any copy; both admitted DBIs have a 116-byte minimum,
+// so a zero-length SUCCESS is a proved invalid width and getResultEmpty cannot arise. C.size_t is 64-bit on every
+// supported target, so the length conversion is exact and a legal width fits C.int for C.GoBytes.
+func optionalSideResult(dbi DBI, key []byte, rc int, bytes unsafe.Pointer, length C.size_t) (OptionalSideValueV1, error) {
+	minimum, maximum := rawValueBounds(dbi, key)
+	switch getResultDecision(rc, bytes != nil, uint64(length), minimum, maximum) {
+	case getResultAbsent:
+		return OptionalSideValueV1{}, nil
+	case getResultInvalidBound:
+		return OptionalSideValueV1{Length: uint64(length), Present: true, InvalidWidth: true}, nil
+	case getResultCopy:
+		return OptionalSideValueV1{Value: C.GoBytes(bytes, C.int(length)), Length: uint64(length), Present: true}, nil
+	case getResultInvalidShape:
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape", nil)
+	default:
+		return OptionalSideValueV1{}, nativeError(operationGet, rc)
+	}
+}
+
+// ReadRequiredSideLink returns the owned 104-byte staged-v1 SideLink (generation, height): hash, parent hash and
+// chainwork. Postconditions: generation zero is a direct InvalidInput refusal that records nothing; a width, shape or
+// native failure is the error Get already recorded; a positively absent row or one whose chainwork is outside
+// 0 < work <= 2^288 is recorded as this Reader's Integrity failure and that same object is returned.
+func (r *Reader) ReadRequiredSideLink(generation, height uint64) ([]byte, error) {
+	key, err := HeightKey(generation, height)
+	if err != nil {
+		return nil, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid SchemaV2 key", nil)
+	}
+	value, present, err := r.Get(schemaDBIs[6], key)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, bootstrapFailure(r, integrityError(operationGet, "selected side link is absent", nil))
+	}
+	if !validWork([40]byte(value[64:104])) {
+		return nil, bootstrapFailure(r, integrityError(operationGet, "selected side link identity is undecodable", nil))
+	}
+	return value, nil
+}
+
+// ReadStorageAuthorityV1 reads and validates meta-v1 key 02. Postconditions: a width, shape or native failure is the
+// error Get already recorded; an absent, undecodable or structurally illegal authority is recorded as this Reader's
+// Integrity failure "invalid storage authority" and that same object is returned.
+func (r *Reader) ReadStorageAuthorityV1() (StorageAuthorityV1, error) {
+	value, present, err := r.Get(schemaDBIs[0], []byte{2})
+	if err != nil {
+		return StorageAuthorityV1{}, err
+	}
+	a, err := DecodeStorageAuthorityV1(value)
+	if !present || err != nil {
+		return StorageAuthorityV1{}, bootstrapFailure(r, integrityError(operationGet, "invalid storage authority", err))
+	}
+	return a, nil
 }
 
 type prefixPageScan struct {

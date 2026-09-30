@@ -4,11 +4,12 @@ func validSelected(s *SelectedSideV1) bool {
 	if s.F >= s.TipHeight || s.TipHeight > maxAuthorityHeight {
 		return false
 	}
-	count := min(s.TipHeight-s.F, 1440)
+	// Full form row_count=min(C,1440); the sole one-slot form is C>=1440, row_count=1439 (RUBIN_MEMPOOL_POLICY.md 6.4.1.3).
+	c := s.TipHeight - s.F
 	if s.GenerationID == 0 || !validWork(s.CumulativeChainwork) {
 		return false
 	}
-	return all(uint64(s.RowCount) == count,
+	return all(anyTrue(uint64(s.RowCount) == min(c, 1440), all(c >= 1440, s.RowCount == 1439)),
 		s.LogicalBytes >= uint64(s.RowCount),
 		s.LogicalBytes <= uint64(s.RowCount)*uint64(MaxBlockBytes))
 }
