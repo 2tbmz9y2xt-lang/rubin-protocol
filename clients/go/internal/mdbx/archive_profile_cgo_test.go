@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"testing"
 	"unsafe"
 )
@@ -34,6 +35,12 @@ func archiveSeed(t *testing.T, a StorageAuthorityV1, height int, work [40]byte) 
 			hash := modelHash(h + 71)
 			extra = append(extra, Mutation{DBI: readDBIsLiteral()[2], Key: key, AfterKind: AfterLiteral, Literal: ChainValue(hash, [32]byte{}, work)}, canonicalOwnerLiteral(a.ActiveGenerationID, h, hash))
 		}
+		sort.Slice(extra, func(i, j int) bool {
+			if extra[i].DBI.Rank != extra[j].DBI.Rank {
+				return extra[i].DBI.Rank < extra[j].DBI.Rank
+			}
+			return bytes.Compare(extra[i].Key, extra[j].Key) < 0
+		})
 		consultedRequireCommit(t, s, "archive canonical fixture", Batch{Mutations: extra})
 		rows = append(rows, extra...)
 	}
