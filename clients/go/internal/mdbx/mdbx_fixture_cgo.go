@@ -4,10 +4,27 @@ package mdbx
 
 /*
 #cgo CFLAGS: -std=c11
+#cgo CFLAGS: -DRUBIN_SELECTED_DAMAGE_FIXTURE=1
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
+typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
+int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe);
+void rubin_sd_disarm(rubin_sd_counts *out);
+static int rubin_fixture_row_equal(MDBX_env *env, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int want_present, const void *want_bytes, size_t want_len, int *equal) {
+	MDBX_txn *txn = NULL;
+	MDBX_val key = {(void *)key_bytes, key_len}, value = {NULL, 0};
+	int rc = mdbx_txn_begin(env, NULL, MDBX_TXN_RDONLY, &txn);
+	if (rc != MDBX_SUCCESS) return rc;
+	rc = mdbx_get(txn, dbi, &key, &value);
+	*equal = rc == MDBX_NOTFOUND ? !want_present : (rc == MDBX_SUCCESS && want_present && value.iov_len == want_len && (want_len == 0 || memcmp(value.iov_base, want_bytes, want_len) == 0));
+	int abort_rc = mdbx_txn_abort(txn);
+	if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) return rc;
+	return abort_rc;
+}
 typedef struct { int rc; MDBX_txn *txn; } rubin_fixture_txn_result;
 static rubin_fixture_txn_result rubin_fixture_txn_begin(MDBX_env *env, MDBX_txn_flags_t flags) { rubin_fixture_txn_result result = {0, NULL}; result.rc = mdbx_txn_begin(env, NULL, flags, &result.txn); return result; }
+static int rubin_fixture_txn_abort(MDBX_txn *txn) { return mdbx_txn_abort(txn); }
+static int rubin_fixture_txn_commit(MDBX_txn *txn) { return mdbx_txn_commit(txn); }
 typedef struct { int rc; const char *path; } rubin_fixture_path_result;
 static rubin_fixture_path_result rubin_fixture_txn_path(MDBX_txn *txn) { rubin_fixture_path_result result = {MDBX_INVALID, NULL}; MDBX_env *env = mdbx_txn_env(txn); if (env) result.rc = mdbx_env_get_path(env, &result.path); return result; }
 static int rubin_fixture_named(MDBX_txn *txn) { MDBX_dbi dbi; return mdbx_dbi_open(txn, "fixture-v1", MDBX_DB_DEFAULTS | MDBX_CREATE, &dbi); }
@@ -55,6 +72,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/cgo"
 	"strings"
 	"sync"
 	"unsafe"
@@ -205,10 +223,10 @@ func fixtureWrite(store *Store, operation engineOperation, mutate func(*C.MDBX_t
 		return err
 	}
 	if primary := mutate(begun.txn); primary != nil {
-		abortRC := int(C.mdbx_txn_abort(begun.txn))
+		abortRC := int(C.rubin_fixture_txn_abort(begun.txn))
 		return joinErrors(primary, fixtureResult(operationAbort, abortRC))
 	}
-	return fixtureResult(operation, int(C.mdbx_txn_commit(begun.txn)))
+	return fixtureResult(operation, int(C.rubin_fixture_txn_commit(begun.txn)))
 }
 
 type fixtureRawRow struct {
@@ -409,7 +427,7 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 
 func fixtureWriteOwnerMismatch(store *Store) (int, error) {
 	return fixtureHeldWrite(store, func(txn *C.MDBX_txn) (int, bool) {
-		rc := int(C.mdbx_txn_commit(txn))
+		rc := int(C.rubin_fixture_txn_commit(txn))
 		return rc, commitTransition(rc).consumed
 	})
 }
@@ -428,7 +446,7 @@ func fixtureHeldWrite(store *Store, attempt func(*C.MDBX_txn) (int, bool)) (int,
 		ready <- begun.txn
 		var err error
 		if !<-consumed {
-			err = fixtureResult(operationAbort, int(C.mdbx_txn_abort(begun.txn)))
+			err = fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(begun.txn)))
 		}
 		cleanup <- err
 		runtime.UnlockOSThread()
@@ -455,7 +473,7 @@ func fixtureHeldUpdate(store *Store) (*C.MDBX_txn, func() error, error) {
 		}
 		ready <- begun.txn
 		<-release
-		cleanup <- fixtureResult(operationAbort, int(C.mdbx_txn_abort(begun.txn)))
+		cleanup <- fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(begun.txn)))
 	}()
 	txn := <-ready
 	if txn == nil {
@@ -487,7 +505,7 @@ func fixtureUpdateResultTrue(store *Store, plan []ownedMutation) updateNativeOut
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(old.rc), old.txn != nil); err != nil {
 		return updateNativeConsumed(CommitTruthOld, false, err, nil, 1)
 	}
-	defer C.mdbx_txn_abort(old.txn)
+	defer C.rubin_fixture_txn_abort(old.txn)
 	begun := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil); err != nil {
 		if begun.txn != nil {
@@ -522,11 +540,11 @@ func fixtureUpdatePostCommitENOSPC(store *Store, plan []ownedMutation) (updateNa
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -541,13 +559,13 @@ func fixtureUpdatePostCommitENOSPCUnreadable(store *Store, plan []ownedMutation)
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	dbis := store.dbis
 	dbis[plan[0].dbi.Rank] = ^C.MDBX_dbi(0)
 	outcome := updateNativeReadback(store.env, dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc := int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -562,12 +580,12 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	write := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(write.rc), write.txn != nil); err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, err, nil, 3), err
 	}
 	third, mutation := []byte{0x7f}, plan[0]
@@ -575,16 +593,16 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 	runtime.KeepAlive(mutation)
 	runtime.KeepAlive(third)
 	if rc != codeSuccess {
-		_ = C.mdbx_txn_abort(write.txn)
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(write.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	if rc = int(C.mdbx_txn_commit(write.txn)); rc != codeSuccess {
-		_ = C.mdbx_txn_abort(old.txn)
+	if rc = int(C.rubin_fixture_txn_commit(write.txn)); rc != codeSuccess {
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -599,28 +617,28 @@ func fixtureUpdatePostCommitENOSPCMissing(store *Store, plan []ownedMutation) (u
 	}
 	committed, err := fixtureCommittedUpdate(store, plan, old.txn)
 	if err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
 	write := C.rubin_fixture_txn_begin(store.env, C.MDBX_TXN_READWRITE)
 	if err := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(write.rc), write.txn != nil); err != nil {
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, err, nil, 3), err
 	}
 	mutation := plan[0]
 	rc := int(C.rubin_fixture_del(write.txn, store.dbis[mutation.dbi.Rank], unsafe.Pointer(&mutation.key[0]), C.size_t(len(mutation.key))))
 	runtime.KeepAlive(mutation)
 	if rc != codeSuccess {
-		_ = C.mdbx_txn_abort(write.txn)
-		_ = C.mdbx_txn_abort(old.txn)
+		_ = C.rubin_fixture_txn_abort(write.txn)
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	if rc = int(C.mdbx_txn_commit(write.txn)); rc != codeSuccess {
-		_ = C.mdbx_txn_abort(old.txn)
+	if rc = int(C.rubin_fixture_txn_commit(write.txn)); rc != codeSuccess {
+		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
 	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
-	if rc = int(C.mdbx_txn_abort(old.txn)); rc != codeSuccess {
+	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
 	return outcome, nil
@@ -663,4 +681,144 @@ func fixtureOpenStoredReadersMismatch(path string) (*Store, error) {
 		return fixtureResult(operationOpen, int(C.rubin_fixture_check_and_reconfigure(txn, store.dbis[0], store.dbis[2])))
 	})
 	return reopenAfterFixture(path, cfg, store, mutationErr)
+}
+
+// FixtureSeedRawRow writes one raw row of any width into the SchemaV2 DBI of rank; consensus fixture tests use it to
+// persist damaged images (wrong width, wrong hash, unpaired owner row) that the ordinary Update grammar refuses.
+func FixtureSeedRawRow(store *Store, rank uint8, key, value []byte) error {
+	return fixtureSeedPrefixRawRow(store, schemaDBIs[rank], key, value)
+}
+
+// FixtureRawRowEqual reports whether the committed row (rank, key) is exactly want (nil means absent), reading the
+// native value in one fixture read transaction and comparing it with memcmp: no SchemaV2 width bound, no Go copy.
+func FixtureRawRowEqual(store *Store, rank uint8, key, want []byte) (bool, error) {
+	store.operations.Lock()
+	defer store.operations.Unlock()
+	var wantBytes unsafe.Pointer
+	if len(want) != 0 {
+		wantBytes = unsafe.Pointer(&want[0])
+	}
+	present, equal := C.int(0), C.int(0)
+	if want != nil {
+		present = 1
+	}
+	rc := int(C.rubin_fixture_row_equal(store.env, store.dbis[rank], unsafe.Pointer(&key[0]), C.size_t(len(key)), present, wantBytes, C.size_t(len(want)), &equal))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(want)
+	return equal != 0, fixtureResult(operationView, rc)
+}
+
+// fixtureOptionalSideShape evaluates optionalSideResult for one literal native tuple. present supplies a non-nil
+// one-byte pointer, so callers pass only tuples that the decision refuses before any copy.
+func fixtureOptionalSideShape(dbi DBI, rc int, present bool, length uint64) (OptionalSideValueV1, error) {
+	var anchor [1]byte
+	var value unsafe.Pointer
+	if present {
+		value = unsafe.Pointer(&anchor[0])
+	}
+	return optionalSideResult(dbi, make([]byte, 32), rc, value, C.size_t(length))
+}
+
+// SelectedDamageScenario is one closed native-boundary scenario of the fixture-only mdbx_cgo.go preamble block; its
+// values are that block's scenario numbers.
+type SelectedDamageScenario uint32
+
+const (
+	SelectedDamageProbeOnly SelectedDamageScenario = iota + 1
+	SelectedDamageBeginTxnFull
+	SelectedDamageBeginEIO
+	SelectedDamageGetEIO
+	SelectedDamageGetAbortEIO
+	SelectedDamageDeleteEIO
+	SelectedDamageCommitOld
+	SelectedDamageCommitNew
+	SelectedDamageCommitUnreadable
+	SelectedDamageCommitThird
+	SelectedDamageAbortEIO
+)
+
+// SelectedDamageEvidence is the bounded native evidence of one armed invocation: site counters, injected faults and
+// the full-lane probe observations at post-plan write begin, commit, readback begin and around the OLD abort.
+type SelectedDamageEvidence struct {
+	BeginOld, BeginWrite, BeginRead uint64
+	OldGets                         [8]uint64
+	ReadGets, Faults, Deletes       uint64
+	Commits, OldAborts              uint64
+	Probes, ProbeDenied, ProbeRan   uint64
+}
+
+type selectedDamageProbe struct {
+	owner               *OperationReservationOwner
+	probes, denied, ran uint64
+}
+
+var selectedDamageMu sync.Mutex
+
+// rubinSelectedDamageProbe is the fixed synchronous reservation probe: one competing full-lane WithReservation whose
+// callback only counts; it touches no Store, spawns nothing and never panics.
+//
+//export rubinSelectedDamageProbe
+func rubinSelectedDamageProbe(handle C.uintptr_t) {
+	probe := cgo.Handle(handle).Value().(*selectedDamageProbe)
+	probe.probes++
+	if probe.owner.WithReservation(MaxOperationDataBytes, func() error { probe.ran++; return nil }) == errOperationReservationCapacity { //nolint:errorlint // The owner's exact capacity refusal.
+		probe.denied++
+	}
+}
+
+// FixtureSelectedDamage arms one closed scenario on store's environment, runs run (which must invoke the actual
+// selected-side operation and keep its return), disarms even on panic and reports the native evidence. key is copied
+// into C during arming. A setup failure, a fault site not reached exactly as armed or a failed native bridge step is
+// the returned error, never a selected outcome. Invocations are serialized.
+func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner, scenario SelectedDamageScenario, rank uint8, key []byte, run func()) (evidence SelectedDamageEvidence, err error) {
+	selectedDamageMu.Lock()
+	defer selectedDamageMu.Unlock()
+	if !validSelectedDamageFixture(store, scenario, rank, run) {
+		return evidence, errors.New("invalid selected damage fixture")
+	}
+	probe := &selectedDamageProbe{owner: reservations}
+	handle := cgo.NewHandle(probe)
+	defer handle.Delete()
+	var keyBytes unsafe.Pointer
+	if len(key) != 0 {
+		keyBytes = unsafe.Pointer(&key[0])
+	}
+	armed := C.rubin_sd_arm(store.env, C.uint(scenario), &store.dbis[0], store.dbis[rank], keyBytes, C.size_t(len(key)), C.uintptr_t(handle))
+	runtime.KeepAlive(key)
+	if armed != 0 {
+		return evidence, errors.New("selected damage fixture is already armed")
+	}
+	defer func() {
+		var counts C.rubin_sd_counts
+		C.rubin_sd_disarm(&counts)
+		evidence, err = selectedDamageEvidence(scenario, counts, probe)
+	}()
+	run()
+	return evidence, nil
+}
+
+func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
+	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageAbortEIO && run != nil
+}
+
+func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {
+	evidence := SelectedDamageEvidence{
+		BeginOld: uint64(counts.begin_old), BeginWrite: uint64(counts.begin_write), BeginRead: uint64(counts.begin_read),
+		ReadGets: uint64(counts.read_gets), Faults: uint64(counts.faults), Deletes: uint64(counts.dels), Commits: uint64(counts.commits),
+		OldAborts: uint64(counts.old_aborts), Probes: probe.probes, ProbeDenied: probe.denied, ProbeRan: probe.ran,
+	}
+	for i := range evidence.OldGets {
+		evidence.OldGets[i] = uint64(counts.old_gets[i])
+	}
+	want := uint64(1)
+	switch scenario {
+	case SelectedDamageProbeOnly:
+		want = 0
+	case SelectedDamageGetAbortEIO, SelectedDamageCommitUnreadable:
+		want = 2
+	}
+	if evidence.Faults != want || counts.bridge_error != 0 {
+		return evidence, errors.New("selected damage fixture site was not reached exactly as armed")
+	}
+	return evidence, nil
 }

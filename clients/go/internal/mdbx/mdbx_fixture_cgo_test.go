@@ -1991,3 +1991,73 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 		}
 	})
 }
+
+// TestReaderGetOptionalSideRawWidth reads persisted widths at and beyond the SchemaV2 bounds: legal lower and upper
+// widths copy with their native Length; zero, below-lower and above-upper widths are Present/InvalidWidth with their
+// native Length, no copy and a usable Reader; the required SideLink width failure stays Get's record.
+func TestReaderGetOptionalSideRawWidth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db")
+	store, err := Create(path, ConfigV1{1 << 20, 2 << 20, 256 << 20, 1 << 20, 2 << 20, 4096, 492})
+	mustEnvironment(t, err)
+	defer func() { _ = store.Close() }()
+	rows := []struct {
+		rank   uint8
+		length int
+		valid  bool
+	}{{3, 0, false}, {3, 100, false}, {3, 116, true}, {3, 117, false}, {4, 115, false}, {4, 116, true}, {4, 68_000_125, true}, {4, 68_000_126, false}}
+	for i, row := range rows {
+		key := [32]byte{byte(i + 1)}
+		mustEnvironment(t, FixtureSeedRawRow(store, row.rank, key[:], make([]byte, row.length)))
+	}
+	link, _ := HeightKey(2, 9)
+	mustEnvironment(t, FixtureSeedRawRow(store, 6, link, make([]byte, 103)))
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		for i, row := range rows {
+			key := [32]byte{byte(i + 1)}
+			got, err := reader.GetOptionalSide(schemaDBIs[row.rank], key[:])
+			wantValue := len(got.Value) == row.length && !got.InvalidWidth
+			if !row.valid {
+				wantValue = got.Value == nil && got.InvalidWidth
+			}
+			if err != nil || !got.Present || got.Length != uint64(row.length) || !wantValue || reader.failure != nil || !reader.usable() {
+				t.Fatalf("rank %d width %d = present %v invalid %v length %d copied %d, %v", row.rank, row.length, got.Present, got.InvalidWidth, got.Length, len(got.Value), err)
+			}
+		}
+		return nil
+	}))
+	var recorded error
+	viewErr := store.View(func(reader *Reader) error {
+		_, err := reader.ReadRequiredSideLink(2, 9)
+		requireEnvironmentError(t, err, EngineIntegrity, operationGet, codeInvalid, "stored value width outside SchemaV2 bound")
+		if !sameError(reader.failure, err) || reader.usable() {
+			t.Fatal("SideLink width failure was not Get's recorded object")
+		}
+		recorded = err
+		return err
+	})
+	if !sameError(viewErr, recorded) {
+		t.Fatalf("SideLink width raw disposition drifted: %v", viewErr)
+	}
+}
+
+// TestReaderGetOptionalSideNativeShape pins the impossible native tuples before any copy: SUCCESS with a nil pointer
+// and positive length, NOTFOUND with a pointer or length, and a native error are the distinct existing boundary errors.
+func TestReaderGetOptionalSideNativeShape(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		rc      int
+		present bool
+		length  uint64
+	}{{"success nil pointer", codeSuccess, false, 5}, {"notfound pointer", codeNotFound, true, 0}, {"notfound length", codeNotFound, false, 3}} {
+		_, err := fixtureOptionalSideShape(schemaDBIs[4], row.rc, row.present, row.length)
+		requireEnvironmentError(t, err, EngineLocalInvariant, operationGet, codeProblem, "mdbx_get returned invalid result shape")
+	}
+	_, err := fixtureOptionalSideShape(schemaDBIs[3], codeEIO, false, 0)
+	requireEngineError(t, err, EngineIO, operationGet, codeEIO)
+	for _, length := range []uint64{0, 1} {
+		got, err := fixtureOptionalSideShape(schemaDBIs[3], codeSuccess, true, length)
+		if err != nil || got.Value != nil || got.Length != length || !got.Present || !got.InvalidWidth {
+			t.Fatalf("length %d = %+v, %v", length, got, err)
+		}
+	}
+}

@@ -34,22 +34,45 @@ func validOwners(a StorageAuthorityV1) bool {
 	if a.Ordinary != nil {
 		cleanup, selected = a.Ordinary.CarriedCleanup, a.Ordinary.CapturedSelectedSide
 	}
-	side, sidesOK := uint64(0), true
+	side, sidesOK := ownerSide(selected, cleanup)
+	if !sidesOK || (a.Ordinary == nil && !validLiveSide(selected, cleanup)) {
+		return false
+	}
+	obsolete, cleanupOK := validCleanupRelations(a, cleanup, selected, side)
+	active, next := a.ActiveGenerationID, a.NextGenerationID
+	return all(cleanupOK, anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
+}
+
+// ownerSide returns the side generation named by the selected side or, overriding it, the first SIDE span, and
+// whether the two agree when both are present.
+func ownerSide(selected *SelectedSideV1, cleanup *CleanupV1) (uint64, bool) {
+	side := uint64(0)
 	if selected != nil {
 		side = selected.GenerationID
 	}
 	if cleanup != nil {
 		for _, span := range cleanup.Spans {
 			if span.Kind == CleanupSpanSideV1 {
-				side, sidesOK = span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
-				break
+				return span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
 			}
 		}
 	}
-	if !sidesOK {
-		return false
+	return side, true
+}
+
+// validLiveSide admits a live selected side beside a pending SIDE span only in the rolling-prepared shape: the one-slot
+// descriptor and exactly SIDE(g,first-1,first-1,first-1) (RUBIN_MEMPOOL_POLICY.md 6.4.1.3). A captured ORDINARY side
+// and its frozen SIDE keep the separate relation of validOrdinaryTarget. validSelected already proved first>=F+1>=1.
+func validLiveSide(selected *SelectedSideV1, cleanup *CleanupV1) bool {
+	if selected == nil || cleanup == nil {
+		return true
 	}
-	obsolete, cleanupOK := validCleanupRelations(a, cleanup, selected, side)
-	active, next := a.ActiveGenerationID, a.NextGenerationID
-	return all(cleanupOK, anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
+	first := selected.TipHeight - uint64(selected.RowCount) + 1
+	for _, span := range cleanup.Spans {
+		if span.Kind == CleanupSpanSideV1 {
+			return all(selected.RowCount == 1439, selected.TipHeight-selected.F >= 1440,
+				span == CleanupSpanV1{Kind: CleanupSpanSideV1, GenerationID: selected.GenerationID, FirstHeight: first - 1, LastHeight: first - 1, NextHeight: first - 1})
+		}
+	}
+	return true
 }

@@ -81,23 +81,33 @@ func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 	return point.Height - 1, true
 }
 
-func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64, seen map[[32]byte]bool) bool {
-	if len(o.NewSuffix) == 0 {
-		if o.Target.Height != f || seen[o.Target.BlockHash] {
-			return false
-		}
-		return o.CapturedSelectedSide == nil || validSelected(o.CapturedSelectedSide)
-	}
-	if o.CapturedSelectedSide == nil {
+// validOrdinaryTarget requires a nonempty N whose last point is the target and a captured side describing exactly N
+// (RUBIN_MEMPOOL_POLICY.md 6.4.1.2, 6.4.1.7): a full capture whose rows are exactly N, or the one-slot capture of
+// N[1:] plus the same-generation frozen SIDE singleton at N[0] in carried_cleanup, whose union is N of 1440.
+func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64) bool {
+	side := o.CapturedSelectedSide
+	if len(o.NewSuffix) == 0 || side == nil || !validSelected(side) {
 		return false
 	}
 	target := o.NewSuffix[len(o.NewSuffix)-1]
-	side := o.CapturedSelectedSide
-	if !validSelected(side) {
+	if !all(o.Target == target, side.F == f, side.TipHeight == target.Height, side.TipHash == target.BlockHash) {
 		return false
 	}
-	return all(o.Target == target, side.F == f,
-		side.TipHeight == target.Height, side.TipHash == target.BlockHash)
+	first := side.TipHeight - uint64(side.RowCount) + 1
+	if int(side.RowCount) == len(o.NewSuffix) {
+		return first == o.NewSuffix[0].Height
+	}
+	return validCapturedUnion(o, side, first)
+}
+
+// validCapturedUnion is the captured1439+frozenSIDE1 union covering N1440; the captured row count alone never
+// stands for the union's cardinality.
+func validCapturedUnion(o *OrdinaryApplyV1, side *SelectedSideV1, first uint64) bool {
+	if o.CarriedCleanup == nil || len(o.NewSuffix) != 1440 || side.RowCount != 1439 || first != o.NewSuffix[0].Height+1 {
+		return false
+	}
+	frozen := CleanupSpanV1{Kind: CleanupSpanSideV1, GenerationID: side.GenerationID, FirstHeight: first - 1, LastHeight: first - 1, NextHeight: first - 1}
+	return slices.Contains(o.CarriedCleanup.Spans, frozen)
 }
 
 func laggedPromise(height, window uint64) uint64 {
@@ -117,9 +127,9 @@ func validOrdinaryPromises(a StorageAuthorityV1) bool {
 	return a.U == laggedPromise(height, 1440)
 }
 
-func validOrdinaryTail(a StorageAuthorityV1, f uint64, seen map[[32]byte]bool) bool {
+func validOrdinaryTail(a StorageAuthorityV1, f uint64) bool {
 	o := a.Ordinary
-	if !validOrdinaryTarget(o, f, seen) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
+	if !validOrdinaryTarget(o, f) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
 		return false
 	}
 	if o.CarriedCleanup != nil && !validCleanup(o.CarriedCleanup) {
@@ -130,7 +140,7 @@ func validOrdinaryTail(a StorageAuthorityV1, f uint64, seen map[[32]byte]bool) b
 
 func validOrdinary(a StorageAuthorityV1) bool {
 	o := a.Ordinary
-	if !all(len(o.OldSuffix) <= 1440, len(o.NewSuffix) <= 1440,
+	if !all(len(o.OldSuffix) <= 1440, len(o.NewSuffix) >= 1, len(o.NewSuffix) <= 1440,
 		anyTrue(len(o.OldSuffix) >= 1, len(o.NewSuffix) >= 2)) {
 		return false
 	}
@@ -150,5 +160,5 @@ func validOrdinary(a StorageAuthorityV1) bool {
 	if oldOK {
 		f = oldF
 	}
-	return validOrdinaryTail(a, f, seen)
+	return validOrdinaryTail(a, f)
 }

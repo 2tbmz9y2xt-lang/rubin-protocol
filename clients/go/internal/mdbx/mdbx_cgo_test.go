@@ -2482,6 +2482,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 	requireOrder("View", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked")
 	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
+	requireOrder("GetOptionalSide", "post-native optional-side failure was not recorded", "C.rubin_mdbx_get", "optionalSideResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("PrefixPage", "post-native PrefixPage failure was not recorded", "prefixPageRead", "r.failure = err", "r.active.Store(false)", "return page")
 	call := func(expr ast.Expr, path ...string) bool {
 		for i := len(path) - 1; i > 0; i-- {
@@ -2530,10 +2531,14 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		}
 	}
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
+	checkLockedRead("GetOptionalSide", "C", "rubin_mdbx_get")
 	checkLockedRead("PrefixPage", "r", "prefixPageRead")
-	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
-	if nativeCalls != 2 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
+	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("GetOptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
+	if nativeCalls != 3 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
 		t.Fatal("concurrent Get serialization drifted")
+	}
+	if strings.Count(body("ReadRequiredSideLink"), "r.Get(schemaDBIs[6], key)") != 1 || strings.Count(body("ReadStorageAuthorityV1"), "r.Get(schemaDBIs[0], []byte{2})") != 1 || strings.Count(body("ReadRequiredSideLink")+body("ReadStorageAuthorityV1"), "bootstrapFailure(r, ") != 3 || strings.Contains(body("ReadRequiredSideLink")+body("ReadStorageAuthorityV1"), "C.") {
+		t.Fatal("selected-side required reads left the recorded Get boundary")
 	}
 	requireOrder("expire", "expired Reader reached native Get", "r.active.Store(false)", "r.getMu.Lock()", "r.getMu.Unlock()")
 	production := string(source)
@@ -2571,10 +2576,11 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
 		}
 	}
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 4 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 1 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 {
+	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 5 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 1 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 {
 		t.Fatal("borrowed native bytes accepted")
 	}
 	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
+	requireOrder("optionalSideResult", "optional-side bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
 	requireOrder("prefixPageRead", "PrefixPage bound must precede copy", "prefixPageNativeResult", "prefixPageStop", "copyPrefixPageRow")
 	requireOrder("prefixPageNativeRow", "PrefixPage native envelope order drifted", "prefixPageValueShape", "prefixPageNativeKey")
 	requireOrder("prefixPageNativeKey", "PrefixPage native key defense drifted", "keyBytes == nil", "keyLength == 0", "keyLength > C.size_t(77)", "unsafe.Slice", "bytes.Compare")
@@ -2737,7 +2743,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("Get") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("View") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)
@@ -2982,7 +2988,18 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	production := string(source)
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
 	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
-	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(production[preambleStart:preambleEnd+2])))
+	// The only admitted preamble change is one contiguous fixture-only block that an ordinary build preprocesses away;
+	// without it the preamble keeps its pinned digest byte for byte.
+	preamble := production[preambleStart : preambleEnd+2]
+	const fixtureOpen, fixtureClose = "#ifdef RUBIN_SELECTED_DAMAGE_FIXTURE\n", "#endif // RUBIN_SELECTED_DAMAGE_FIXTURE\n"
+	fixtureStart, fixtureEnd := strings.Index(preamble, fixtureOpen), strings.Index(preamble, fixtureClose)
+	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 2 && fixtureStart > 0 && fixtureEnd > fixtureStart, "fixture-only preamble block framing drifted")
+	fixtureBlock := preamble[fixtureStart : fixtureEnd+len(fixtureClose)]
+	require(strings.Count(fixtureBlock, "#define ") == 5 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
+	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n"} {
+		require(strings.Count(fixtureBlock, alias) == 1 && strings.Index(fixtureBlock, alias) > strings.LastIndex(fixtureBlock, "static int rubin_sd_"), "fixture-only alias %q drifted", alias)
+	}
+	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))
 	require(preambleDigest == "897536d2a447ae5239d5477356481e292113b8077d14883557f6bdf65ea6fb56", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
@@ -4909,4 +4926,135 @@ func TestUpdateTerminalLegality(t *testing.T) {
 			t.Fatal("terminal legality drifted")
 		}
 	})
+}
+
+var selectedSideAccessorConfig = ConfigV1{1 << 20, 2 << 20, 256 << 20, 1 << 20, 2 << 20, 4096, 492}
+
+// selectedSideAccessorStore is a created (verified) store holding one legal header/body pair, one legal SideLink at
+// (2,5) and one SideLink with zero chainwork at (2,6); meta-v1 key 02 is absent because nothing bootstrapped it.
+func selectedSideAccessorStore(t *testing.T) (*Store, string, []byte, [32]byte, []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "db")
+	store, err := Create(path, selectedSideAccessorConfig)
+	mustEnvironment(t, err)
+	header := make([]byte, 116)
+	header[0] = 7
+	hash := sha3.Sum256(header)
+	link := make([]byte, 104)
+	copy(link, hash[:])
+	link[103] = 1
+	undecodable := make([]byte, 104)
+	copy(undecodable, hash[:])
+	legalKey, _ := HeightKey(2, 5)
+	zeroKey, _ := HeightKey(2, 6)
+	truth, _, err := store.Update(func(*Reader) (Batch, error) {
+		return Batch{Mutations: []Mutation{
+			{DBI: schemaDBIs[3], Key: hash[:], AfterKind: AfterLiteral, Literal: header},
+			{DBI: schemaDBIs[4], Key: hash[:], AfterKind: AfterLiteral, Literal: header},
+			{DBI: schemaDBIs[6], Key: legalKey, AfterKind: AfterLiteral, Literal: link},
+			{DBI: schemaDBIs[6], Key: zeroKey, AfterKind: AfterLiteral, Literal: undecodable},
+		}}, nil
+	})
+	if err != nil || truth != CommitTruthNew {
+		t.Fatalf("seed selected-side rows: %v/%v", truth, err)
+	}
+	return store, path, header, hash, link
+}
+
+func TestReaderSelectedSideAccessors(t *testing.T) {
+	store, path, header, hash, link := selectedSideAccessorStore(t)
+	absent := hash
+	absent[0] ^= 0xff
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		for _, rank := range []uint8{3, 4} {
+			got, err := reader.GetOptionalSide(schemaDBIs[rank], hash[:])
+			if err != nil || !got.Present || got.InvalidWidth || got.Length != 116 || !bytes.Equal(got.Value, header) {
+				t.Fatalf("rank %d legal row = %+v, %v", rank, got, err)
+			}
+			got.Value[0] ^= 0xff
+			again, err := reader.GetOptionalSide(schemaDBIs[rank], hash[:])
+			if err != nil || !bytes.Equal(again.Value, header) {
+				t.Fatalf("rank %d optional copy aliases native bytes", rank)
+			}
+			missing, err := reader.GetOptionalSide(schemaDBIs[rank], absent[:])
+			if err != nil || missing.Present || missing.InvalidWidth || missing.Length != 0 || missing.Value != nil || reader.failure != nil || !reader.usable() {
+				t.Fatalf("rank %d absence = %+v, %v", rank, missing, err)
+			}
+		}
+		for _, request := range []struct {
+			dbi DBI
+			key []byte
+		}{{schemaDBIs[2], hash[:]}, {schemaDBIs[6], hash[:]}, {schemaDBIs[3], hash[:31]}, {schemaDBIs[4], append(bytes.Clone(hash[:]), 0)}} {
+			_, err := reader.GetOptionalSide(request.dbi, request.key)
+			requireEnvironmentError(t, err, EngineInvalidInput, operationGet, codeEINVAL, "invalid optional-side DBI or key")
+			if reader.failure != nil || !reader.usable() {
+				t.Fatal("optional-side input refusal was recorded")
+			}
+		}
+		got, err := reader.ReadRequiredSideLink(2, 5)
+		if err != nil || !bytes.Equal(got, link) {
+			t.Fatalf("legal SideLink = %x, %v", got, err)
+		}
+		_, err = reader.ReadRequiredSideLink(0, 5)
+		requireEnvironmentError(t, err, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 key")
+		if reader.failure != nil || !reader.usable() {
+			t.Fatal("SideLink key refusal was recorded")
+		}
+		return nil
+	}))
+	for _, row := range []struct {
+		height     uint64
+		diagnostic string
+	}{{6, "selected side link identity is undecodable"}, {7, "selected side link is absent"}} {
+		var recorded error
+		viewErr := store.View(func(reader *Reader) error {
+			_, err := reader.ReadRequiredSideLink(2, row.height)
+			requireEnvironmentError(t, err, EngineIntegrity, operationGet, codeInvalid, row.diagnostic)
+			if !sameError(reader.failure, err) || reader.usable() {
+				t.Fatalf("SideLink %d failure was not recorded as the same object", row.height)
+			}
+			recorded = err
+			return err
+		})
+		if !sameError(viewErr, recorded) || store.View(func(*Reader) error { t.Fatal("consumed Store reran a callback"); return nil }) == nil {
+			t.Fatalf("SideLink %d raw disposition drifted: %v", row.height, viewErr)
+		}
+		_ = store.Close()
+		var err error
+		store, err = Open(path, selectedSideAccessorConfig)
+		mustEnvironment(t, err)
+	}
+	var recorded error
+	viewErr := store.View(func(reader *Reader) error {
+		_, err := reader.ReadStorageAuthorityV1()
+		requireEnvironmentError(t, err, EngineIntegrity, operationGet, codeInvalid, "invalid storage authority")
+		if !sameError(reader.failure, err) || reader.usable() {
+			t.Fatal("absent authority was not recorded as the same object")
+		}
+		recorded = err
+		return err
+	})
+	if !sameError(viewErr, recorded) {
+		t.Fatalf("absent authority raw disposition drifted: %v", viewErr)
+	}
+	_ = store.Close()
+}
+
+func TestReaderStorageAuthorityV1(t *testing.T) {
+	store, err := Create(filepath.Join(t.TempDir(), "db"), selectedSideAccessorConfig)
+	mustEnvironment(t, err)
+	defer func() { _ = store.Close() }()
+	owner, err := NewOperationReservationOwner(MaxOperationDataBytes)
+	mustEnvironment(t, err)
+	if truth, _, err := store.BootstrapStorageV1(StorageProfileArchiveV1, owner); err != nil || truth != CommitTruthNew {
+		t.Fatalf("bootstrap: %v/%v", truth, err)
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		a, err := reader.ReadStorageAuthorityV1()
+		want := StorageAuthorityV1{Version: 1, ActiveProfile: StorageProfileArchiveV1, ActiveGenerationID: 1, NextGenerationID: 2, Phase: StoragePhaseNoneV1, Lifecycle: StorageLifecycleStableV1}
+		if err != nil || !reflect.DeepEqual(a, want) || !reader.usable() {
+			t.Fatalf("authority = %+v, %v", a, err)
+		}
+		return nil
+	}))
 }
