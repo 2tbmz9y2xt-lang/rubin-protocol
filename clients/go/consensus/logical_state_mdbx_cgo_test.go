@@ -797,6 +797,10 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	}
 	// go list's non-test source set is GoFiles+CgoFiles+IgnoredGoFiles: a file ignored on this platform may still compile, and call the bridge, elsewhere.
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
+	// IgnoredGoFiles also lists this rubin_mdbx_fixture-tagged test file; it is test code, not a non-test source.
+	sources = slices.DeleteFunc(sources, func(name string) bool {
+		return name == "selected_side_damage_mdbx_fixture_cgo_test.go"
+	})
 	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
 		parsed, parseErr := parser.ParseFile(fset, name, nil, 0)

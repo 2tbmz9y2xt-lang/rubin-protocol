@@ -192,17 +192,17 @@ func TestStorageAuthorityV1CodecLiterals(t *testing.T) {
 		{"cleanup-undo-next", 1, 104, "0000000000000005"},
 		{"cleanup-side-kind", 1, 112, "04"},
 		{"cleanup-side-id", 1, 113, "0000000000000002"},
-		{"cleanup-side-first", 1, 121, "0000000000000007"},
+		{"cleanup-side-first", 1, 121, "0000000000000009"},
 		{"cleanup-side-last", 1, 129, "0000000000000009"},
-		{"cleanup-side-next", 1, 137, "0000000000000008"},
+		{"cleanup-side-next", 1, 137, "0000000000000009"},
 		{"selected-option", 1, 147, "01"},
 		{"selected-generation", 1, 148, "0000000000000002"},
-		{"selected-F", 1, 156, "0000000000000009"},
-		{"selected-tip-height", 1, 164, "000000000000000b"},
-		{"selected-tip-hash", 1, 172, "000000000000000000000000000000000000000000000000000000000000000b"},
+		{"selected-F", 1, 156, "0000000000000008"},
+		{"selected-tip-height", 1, 164, "00000000000005a8"},
+		{"selected-tip-hash", 1, 172, "00000000000000000000000000000000000000000000000000000000000005a8"},
 		{"selected-work", 1, 204, "00000000000000000000000000000000000000000000000000000000000000000000000000000001"},
-		{"selected-row-count", 1, 244, "0002"},
-		{"selected-logical-bytes", 1, 246, "0000000000000003"},
+		{"selected-row-count", 1, 244, "059f"},
+		{"selected-logical-bytes", 1, 246, "000000000000059f"},
 		{"replay-profile", 3, 36, "02"},
 		{"replay-generation", 3, 37, "0000000000000002"},
 		{"replay-chain-id", 3, 45, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"},
@@ -548,7 +548,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 		a      StorageAuthorityV1
 		offset int
 	}{
-		{"old framed 1441", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561), 78},
+		{"old framed 1441", modelOrdinaryD1440(), 78},
 		{"new framed 1441", modelOrdinary(2, 0, 1440, 0, 1, 0, 0), 80},
 		{"detached framed 1441", modelDetached1440(), 74},
 	} {
@@ -587,7 +587,7 @@ func TestStorageAuthorityV1CodecBounds(t *testing.T) {
 	})
 	runCodecCases(t, []authorityCase{
 		{"detached count 1", modelDetachedAuthority()},
-		{"old suffix count 1440", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561)},
+		{"old suffix count 1440", modelOrdinaryD1440()},
 		{"new suffix count 1440", modelOrdinary(2, 0, 1440, 0, 1, 0, 0)},
 		{"detached count 1440", modelDetached1440()},
 		{"archive maximum U", modelBase(2, 0, 4_294_965_856)},

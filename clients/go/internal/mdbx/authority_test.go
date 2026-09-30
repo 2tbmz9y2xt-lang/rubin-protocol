@@ -114,6 +114,17 @@ func modelOrdinary(stage byte, d, c int, hOld uint64, profile byte, b, u uint64)
 	return a
 }
 
+// modelOrdinaryD1440 is modelOrdinary(1, 1440, 1, 2000, 1, 0, 561) with its single new point renamed off the old
+// suffix's hash markers 1000..2439 (marker 2000 is old height 1000): O and N share one hash-uniqueness set in
+// validOrdinary, so the renamed point, target and captured tip hash keep D1440, C1 and the target relation valid.
+func modelOrdinaryD1440() StorageAuthorityV1 {
+	a := modelOrdinary(1, 1440, 1, 2000, 1, 0, 561)
+	o := a.Ordinary
+	o.NewSuffix[0] = modelPoint(o.NewSuffix[0].Height, 3000)
+	o.Target, o.CapturedSelectedSide.TipHash = o.NewSuffix[0], o.NewSuffix[0].BlockHash
+	return a
+}
+
 func modelDetached(count int, length uint64) *DetachedSuffixV1 {
 	d := &DetachedSuffixV1{make([]DetachedSuffixEntryV1, count), AuthorityPointV1{}, uint16(count), uint64(count) * length}
 	for i := range d.Entries {
@@ -505,7 +516,7 @@ func TestStorageAuthorityV1OrdinaryStageCursor(t *testing.T) {
 		{"D0 C2 pruned H1440", modelOrdinary(2, 0, 2, 1440, 1, 0, 1)},
 		{"D0 C2 pruned H15119", modelOrdinary(2, 0, 2, 15119, 1, 0, 13680)},
 		{"D0 C2 pruned H15120", modelOrdinary(2, 0, 2, 15120, 1, 1, 13681)},
-		{"D1440 bound", modelOrdinary(1, 1440, 1, 2000, 1, 0, 561)},
+		{"D1440 bound", modelOrdinaryD1440()},
 		{"C1440 bound", modelOrdinary(2, 0, 1440, 0, 1, 0, 0)},
 	} {
 		wantModel(t, row.name, row.a, true)

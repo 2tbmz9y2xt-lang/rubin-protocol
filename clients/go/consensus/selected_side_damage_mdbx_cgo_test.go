@@ -287,10 +287,13 @@ func (w *sideWorld) reblock(j uint64, headerParent, linkParent [32]byte) {
 	w.sideAt[j] = hash
 }
 
-// setEntry rewrites canonical entry k in place (same hash, so no owner pairing obligation arises).
+// setEntry rewrites canonical entry k in place; every canonical entry literal must be paired with its unchanged
+// CanonicalOwnerV1 literal at the same k, so the owner row is rewritten with identical bytes.
 func (w *sideWorld) setEntry(k uint64, parent [32]byte, work [40]byte) {
-	w.entries[k] = mdbx.ChainValue(w.canonical[k], parent, work)
-	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(1, k)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: w.entries[k]})
+	hash := w.canonical[k]
+	w.entries[k] = mdbx.ChainValue(hash, parent, work)
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(1, k)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: w.entries[k]},
+		mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: logicalMDBXMust(mdbx.CanonicalOwnerKey(1, hash)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.CanonicalOwnerValue(k)})
 }
 
 func (w *sideWorld) removeCanonical(k uint64) {
