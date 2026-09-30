@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"math/big"
 	"os"
@@ -160,7 +161,18 @@ func TestChainStateSchemaErrorsAndPrecedence(t *testing.T) {
 		name    string
 		payload string
 		want    string
+		syntax  bool // want is the wrapper prefix and the cause is the native syntax error
 	}{
+		// Complete field syntax precedes every schema decision, and a schema-invalid utxo item does not end the scan.
+		{name: "invalid_item_then_invalid_version", payload: `{"utxos":[0],"version":"2","already_generated":null}`, want: "CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32"},
+		{name: "invalid_item_then_invalid_supply", payload: `{"utxos":[0],"version":2,"already_generated":0}`, want: "CHAINSTATE_SCHEMA: v2 already_generated must be a canonical unsigned decimal string within u128"},
+		{name: "invalid_item_then_duplicate_version_null", payload: `{"utxos":[0],"version":2,"version":null,"already_generated":"0"}`, want: "CHAINSTATE_SCHEMA: missing version"},
+		{name: "invalid_item_then_duplicate_supply_null", payload: `{"utxos":[0],"version":2,"already_generated":"0","already_generated":null}`, want: "CHAINSTATE_SCHEMA: missing already_generated"},
+		{name: "malformed_array_tail_then_invalid_version", payload: `{"utxos":[0,{],"version":"2"}`, want: "decode chainstate: ", syntax: true},
+		{name: "invalid_item_then_later_malformed_field", payload: `{"utxos":[0],"version":"2","height":tru}`, want: "decode chainstate: ", syntax: true},
+		{name: "invalid_item_then_trailing_x", payload: `{"utxos":[0],"version":"2"}x`, want: "decode chainstate: trailing content"},
+		{name: "escaped_existing_key", payload: `{"\u0076ersion":"2","already_generated":null}`, want: "CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32"},
+		{name: "invalid_utf8_then_invalid_version", payload: "{\"utxos\":[0],\"tip_hash\":\"\xff\",\"version\":\"2\"}", want: "CHAINSTATE_SCHEMA: version must be a canonical unsigned JSON integer through u32"},
 		{name: "top_level_non_object", payload: `[]`, want: "decode chainstate: top-level value must be an object"},
 		{name: "top_level_non_object_trailing", payload: `[]{}`, want: "decode chainstate: top-level value must be an object"},
 		{name: "missing_version", payload: `{}`, want: "CHAINSTATE_SCHEMA: missing version"},
@@ -233,7 +245,11 @@ func TestChainStateSchemaErrorsAndPrecedence(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "chainstate.json")
 			writeChainStatePayload(t, path, []byte(tc.payload))
 			got, err := LoadChainState(path)
-			if err == nil || err.Error() != tc.want {
+			var syntaxErr *jsontext.SyntacticError
+			if tc.syntax && (err == nil || !strings.HasPrefix(err.Error(), tc.want) || !errors.As(err, &syntaxErr)) {
+				t.Fatalf("err=%v, want %q prefix with a native syntax cause", err, tc.want)
+			}
+			if !tc.syntax && (err == nil || err.Error() != tc.want) {
 				t.Fatalf("err=%v, want exactly %q", err, tc.want)
 			}
 			if got != nil {
