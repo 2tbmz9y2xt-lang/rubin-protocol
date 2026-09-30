@@ -367,6 +367,42 @@ func (s *DARelayState) classifyDAReplay(txid, wtxid [32]byte, owned []byte, owne
 	}
 }
 
+// DARetainedTxSnapshot is one retained DA member copied out of the relay; it
+// shares no memory with retained state.
+type DARetainedTxSnapshot struct {
+	TxID    [32]byte
+	WTxID   [32]byte
+	TxBytes []byte
+}
+
+// LookupRetainedTx classifies txid from ONE guarded retained observation
+// (RUBIN_COMPACT_BLOCKS.md 17.5): (snapshot, true, nil) for an integrity-valid
+// member, (zero, false, nil) for a nil receiver or an unindexed txid, and
+// (zero, false, errDARelayImageIncompatible) unwrapped for every other
+// observation, located corruption included. It never re-reads, repairs or
+// mutates DA, mempool or owner state.
+func (s *DARelayState) LookupRetainedTx(txid [32]byte) (DARetainedTxSnapshot, bool, error) {
+	if s == nil {
+		return DARetainedTxSnapshot{}, false, nil
+	}
+	observation := s.observeDAAdmission(txid)
+	switch observation.kind {
+	case daAdmissionObservationAbsent:
+		return DARetainedTxSnapshot{}, false, nil
+	case daAdmissionObservationLocated:
+	default:
+		return DARetainedTxSnapshot{}, false, errDARelayImageIncompatible
+	}
+	var owner *PendingOutpointOwner
+	if s.mempool != nil {
+		owner = s.mempool.pendingOutpoints
+	}
+	if observation.validateDAAdmissionObservation(owner) != nil {
+		return DARetainedTxSnapshot{}, false, errDARelayImageIncompatible
+	}
+	return DARetainedTxSnapshot{TxID: observation.indexedTxID, WTxID: observation.candidate.member.member.wtxid, TxBytes: observation.candidate.member.txBytes}, true, nil
+}
+
 func publicDAAdmissionResult(outcome daRelayAdmissionOutcome) (DAAdmissionResult, error) {
 	switch outcome.disposition {
 	case daRelayAdmissionRetained, daRelayAdmissionDuplicate:

@@ -679,6 +679,29 @@ func requireDAAdmissionStructure(t *testing.T) {
 			want["read|node/da_admission.go:finish|owner"]++
 		}
 		want["write|node/da_admission.go:reservePreparedDAAdmissionCommit|g.owner.candidateReleases++"]++
+		// RUB-1291: the dormant LookupRetainedTx and its snapshot type. The declaration row itself
+		// carries the observation markers and is skipped; its call map is pinned by checkCalls below.
+		want["gen|node/da_relay_owner.go:file|type DARetainedTxSnapshot struct {\n\tTxID    [32]byte\n\tWTxID   [32]byte\n\tTxBytes []byte\n}"]++
+		want["read|node/da_relay_owner.go:file|byte"] += 3
+		for _, field := range []string{"DARetainedTxSnapshot", "TxID", "WTxID", "TxBytes"} {
+			want["read|node/da_relay_owner.go:file|"+field]++
+		}
+		for row, count := range map[string]int{
+			"edge-decl|node/da_relay_owner.go:LookupRetainedTx|LookupRetainedTx":          1,
+			"gen|node/da_relay_owner.go:LookupRetainedTx|var owner *PendingOutpointOwner": 1, "gen|node/da_relay_owner.go:owner|owner *PendingOutpointOwner": 1,
+			"read|node/da_relay_owner.go:owner|owner": 1, "value|node/da_relay_owner.go:owner|PendingOutpointOwner": 1,
+			"value|node/da_relay_owner.go:LookupRetainedTx|DARelayState":                       1,
+			"write|node/da_relay_owner.go:LookupRetainedTx|owner = s.mempool.pendingOutpoints": 1,
+			"field|node/da_relay_owner.go:LookupRetainedTx|s.mempool":                          2, "field|node/da_relay_owner.go:LookupRetainedTx|s.mempool.pendingOutpoints": 1,
+			"field|node/da_relay_owner.go:LookupRetainedTx|observation.kind": 1, "field|node/da_relay_owner.go:LookupRetainedTx|observation.candidate": 2,
+			"field|node/da_relay_owner.go:LookupRetainedTx|observation.candidate.member": 2, "field|node/da_relay_owner.go:LookupRetainedTx|observation.candidate.member.member": 1,
+			"field|node/da_relay_owner.go:LookupRetainedTx|observation.candidate.member.member.wtxid": 1, "field|node/da_relay_owner.go:LookupRetainedTx|observation.candidate.member.txBytes": 1,
+		} {
+			want[row] += count
+		}
+		for name, count := range map[string]int{"DARetainedTxSnapshot": 6, "LookupRetainedTx": 1, "TxBytes": 1, "TxID": 1, "WTxID": 1, "bool": 1, "byte": 1, "candidate": 2, "errDARelayImageIncompatible": 2, "error": 1, "false": 4, "kind": 1, "member": 3, "mempool": 2, "nil": 6, "observation": 6, "owner": 2, "pendingOutpoints": 1, "s": 5, "true": 1, "txBytes": 1, "txid": 2, "wtxid": 1} {
+			want["read|node/da_relay_owner.go:LookupRetainedTx|"+name] += count
+		}
 		for row, count := range got {
 			if !changed(row) && want[row] != count {
 				t.Fatalf("structural row %q count=%d want=%d at %s", row, count, want[row], where[row])
@@ -709,6 +732,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		checkCalls("guardless prefix", callCounts[prefix.Name.Name], map[string]int{"Sprintf": 1, "append": 1, "isDAAdmissionTx": 1, "len": 3, "parseRelayMetadataTx": 1, "relayMetadataInputs": 1, "txAdmitRejected": 3})
 		checkCalls("held candidate validation", callCounts[held.Name.Name], map[string]int{"len": 1, "matchingDAChunkPayloadHash": 1, "release": 1, "selectRelayDisposition": 1, "txAdmitRejected": 1, "uint64": 1, "validateCandidate": 1})
 		checkCalls("AdmitDA", callCounts[public.Name.Name], map[string]int{"Error": 1, "acquireDAAdmissionHold": 1, "admitDANonExact": 1, "bindDAAdmission": 1, "classifyDAReplay": 1, "parseDAAdmissionCandidate": 1, "release": 1, "selectRelayDisposition": 4, "string": 1, "txAdmitRejected": 2, "validate": 1})
+		checkCalls("LookupRetainedTx", callCounts["LookupRetainedTx"], map[string]int{"observeDAAdmission": 1, "validateDAAdmissionObservation": 1})
 		checkCalls("replay classification", callCounts[replay.Name.Name], map[string]int{"Equal": 1, "Error": 2, "observeDAAdmission": 1, "selectRelayDisposition": 3, "txAdmitRejected": 2, "txAdmitUnavailable": 1, "validateDAAdmissionObservation": 1})
 		checkCalls("nonexact continuation", callCounts[continuation.Name.Name], map[string]int{"Close": 1, "admitDANonReplay": 1, "publicDAAdmissionResult": 1, "validateDACandidate": 1})
 		checkCalls("captureDAAdmissionTarget", callCounts[capture.Name.Name], map[string]int{"Clone": 1, "append": 1, "captureDAAdmissionCommit": 2, "clone": 1})
@@ -717,8 +741,8 @@ func requireDAAdmissionStructure(t *testing.T) {
 			t.Fatalf("retained validation reaches copying prefix=%v", noCopy)
 		}
 		allCalls, allReferences := relayCalls, relayReferences
-		wantCalls := map[string]int{"classifyDAReplay": 1, "observeDAAdmission": 1, "admitDANonExact": 1, "admitDANonReplay": 1, "BeginCommit": 1, "Commit": 1, "Abort": 2}
-		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 2, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 6, "locators": 3, "nextReceivedTime": 3, "records": 1}
+		wantCalls := map[string]int{"classifyDAReplay": 1, "observeDAAdmission": 2, "admitDANonExact": 1, "admitDANonReplay": 1, "BeginCommit": 1, "Commit": 1, "Abort": 2}
+		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 3, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 6, "locators": 3, "nextReceivedTime": 3, "records": 1}
 		for name := range admitTargets {
 			if allCalls[name] != wantCalls[name] || allReferences[name] != wantReferences[name] {
 				t.Fatalf("public replay reference graph calls=%v references=%v", allCalls, allReferences)
@@ -3389,9 +3413,6 @@ func TestAdmitDAPublicAPISurfaceIsClosed(t *testing.T) {
 	got, err = publicDAAdmissionResult(daRelayAdmissionOutcome{})
 	requirePublicDAFailure(t, got, err, TxAdmitRejected, errDARelayImageIncompatible.Error(), RelayAdmissionInternal)
 
-	if source, err := os.ReadFile("da_relay_owner.go"); err != nil || bytes.Contains(source, []byte("LookupRetainedTx")) || bytes.Contains(source, []byte("DARetainedTxSnapshot")) {
-		t.Fatalf("forbidden retained API source err=%v", err)
-	}
 	requireDAAdmissionStructure(t)
 	TestDAAdmissionCandidateClosedDomain(t)
 }
@@ -7290,4 +7311,205 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireRetainedLookup pins one LookupRetainedTx result and that the call left
+// relay and owner state unchanged. A nil want is ABSENT; wantErr selects INTERNAL.
+func requireRetainedLookup(t *testing.T, f *daNonReplayFixture, txid [32]byte, want *daNonReplayTx, wantErr bool) {
+	t.Helper()
+	relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+	got, owned, err := f.relay.LookupRetainedTx(txid)
+	switch {
+	case wantErr:
+		if owned || !reflect.DeepEqual(got, DARetainedTxSnapshot{}) || err != errDARelayImageIncompatible { //nolint:errorlint // The plain unwrapped sentinel is the contract.
+			t.Fatalf("INTERNAL lookup=(%+v,%v,%v)", got, owned, err)
+		}
+	case want == nil:
+		if owned || !reflect.DeepEqual(got, DARetainedTxSnapshot{}) || err != nil {
+			t.Fatalf("ABSENT lookup=(%+v,%v,%v)", got, owned, err)
+		}
+	default:
+		if !owned || err != nil || got.TxID != want.txid || got.WTxID != want.wtxid || !bytes.Equal(got.TxBytes, want.raw) {
+			t.Fatalf("OWNED lookup=(%x,%x,%v,%v,%v)", got.TxID, got.WTxID, bytes.Equal(got.TxBytes, want.raw), owned, err)
+		}
+	}
+	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+}
+
+func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testing.T) {
+	stateA := func(t *testing.T) (*daNonReplayFixture, daNonReplayTx) {
+		f := newDANonReplayFixture(t, 2)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x51}, payload: []byte("lookup-a"), inputCount: 2})
+		f.admit(tx, daNonReplayPeer("lookup"))
+		return f, tx
+	}
+	t.Run("A1 OWNED", func(t *testing.T) {
+		f, tx := stateA(t)
+		requireRetainedLookup(t, f, tx.txid, &tx, false)
+		for _, complete := range []bool{false, true} {
+			for _, kind := range []uint8{0x01, 0x02} {
+				f, tx := daCompanionRecordFixture(t, complete, kind, [32]byte{0x52, kind})
+				requireRetainedLookup(t, f, tx.txid, &tx, false)
+			}
+		}
+	})
+	t.Run("A2 ABSENT", func(t *testing.T) {
+		f, _ := stateA(t)
+		requireRetainedLookup(t, f, [32]byte{0x53}, nil, false)
+		if got, owned, err := (*DARelayState)(nil).LookupRetainedTx([32]byte{0x53}); owned || err != nil || !reflect.DeepEqual(got, DARetainedTxSnapshot{}) {
+			t.Fatalf("nil receiver=(%+v,%v,%v)", got, owned, err)
+		}
+	})
+	t.Run("R2 UNAVAILABLE", func(t *testing.T) {
+		if got, owned, err := (&DARelayState{}).LookupRetainedTx([32]byte{0x54}); owned || err != errDARelayImageIncompatible || !reflect.DeepEqual(got, DARetainedTxSnapshot{}) { //nolint:errorlint // The plain unwrapped sentinel is the contract.
+			t.Fatalf("zero-value relay=(%+v,%v,%v)", got, owned, err)
+		}
+		for _, clear := range []func(*DARelayState){func(s *DARelayState) { s.sets = nil }, func(s *DARelayState) { s.locators = nil }} {
+			f, tx := stateA(t)
+			f.mutateRelay(clear)
+			requireRetainedLookup(t, f, tx.txid, nil, true)
+		}
+	})
+	t.Run("A4 NIL_OWNER_RULE", func(t *testing.T) {
+		f, tx := stateA(t)
+		f.mutateRelay(func(s *DARelayState) { s.mempool = nil })
+		requireRetainedLookup(t, f, tx.txid, nil, true)
+		f.mutateRelay(func(s *DARelayState) {
+			r := s.sets[tx.spec.daID]
+			c := r.chunks[0]
+			c.member.token = PendingOutpointToken{}
+			r.chunks[0] = c
+		})
+		requireRetainedLookup(t, f, tx.txid, &tx, false)
+	})
+	type corruption func(*daNonReplayFixture, *DARelayState, *daNonReplayTx)
+	chunkEdit := func(edit func(*daRelaySetRecord, *daRelayChunk)) corruption {
+		return func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
+			r := s.sets[tx.spec.daID]
+			c := r.chunks[tx.spec.chunkIndex]
+			edit(&r, &c)
+			r.chunks[tx.spec.chunkIndex] = c
+			s.sets[tx.spec.daID] = r
+		}
+	}
+	for _, row := range []struct {
+		name    string
+		set     int // 0 State A chunk, 1 State B chunk, 2 State C chunk
+		corrupt corruption
+	}{
+		{"R1 dangling locator", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) { delete(s.sets, tx.spec.daID) }},
+		{"R1 locator member mismatch", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.chunkIndex++ })},
+		{"R1 invalid locator kind", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
+			l := s.locators[tx.txid]
+			l.kind = 9
+			s.locators[tx.txid] = l
+		}},
+		{"R1 invalid locator index", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
+			l := s.locators[tx.txid]
+			l.chunkIndex = 5
+			s.locators[tx.txid] = l
+		}},
+		{"R1 invalid state", 0, chunkEdit(func(r *daRelaySetRecord, _ *daRelayChunk) { r.state = daRelayStateCompleteSet + 1 })},
+		{"H1 R1 zero revision", 0, chunkEdit(func(r *daRelaySetRecord, _ *daRelayChunk) { r.revision = 0 })},
+		{"R1 zero received time", 0, chunkEdit(func(r *daRelaySetRecord, _ *daRelayChunk) { r.receivedTime = 0 })},
+		{"R1 zero token sequence", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.member.token.seq = 0 })},
+		{"R1 foreign token", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) {
+			c.member.token = PendingOutpointToken{owner: newPendingOutpointOwner(PendingOutpointTip{}), seq: 1}
+		})},
+		{"R1 missing bytes", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.txBytes = nil })},
+		{"R1 malformed bytes", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.txBytes = c.txBytes[:len(c.txBytes)-1] })},
+		{"R1 trailing bytes", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.txBytes = append(slices.Clone(c.txBytes), 0) })},
+		{"R1 tx_kind 0x00", 0, func(f *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
+			parsed, _, _, _, err := consensus.ParseTx(tx.raw)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			parsed.TxKind, parsed.DaChunkCore, parsed.DaPayload = 0x00, nil, nil
+			raw := mustMarshalTxForNodeTest(f.t, parsed)
+			_, txid, wtxid, _, err := consensus.ParseTx(raw)
+			if err != nil {
+				f.t.Fatal(err)
+			}
+			s.locators[txid] = s.locators[tx.txid]
+			delete(s.locators, tx.txid)
+			chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) {
+				c.txBytes, c.member.txid, c.member.wtxid = raw, txid, wtxid
+			})(f, s, tx)
+			tx.txid = txid
+		}},
+		{"R1 indexed txid mismatch", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.member.txid[0] ^= 1 })},
+		{"R1 wtxid mismatch", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.member.wtxid[0] ^= 1 })},
+		{"R1 input-set mismatch", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) {
+			c.member.inputs = []consensus.Outpoint{c.member.inputs[1], c.member.inputs[0]}
+		})},
+		{"R1 State B companion contradiction", 1, chunkEdit(func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.member.txid[0] ^= 1 })},
+		{"R1 State C companion contradiction", 2, chunkEdit(func(r *daRelaySetRecord, _ *daRelayChunk) { r.commit.member.wtxid[0] ^= 1 })},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f, tx := stateA(t)
+			if row.set != 0 {
+				f, tx = daCompanionRecordFixture(t, row.set == 2, 0x02, [32]byte{0x55, byte(row.set)})
+			}
+			f.mutateRelay(func(s *DARelayState) { row.corrupt(f, s, &tx) })
+			requireRetainedLookup(t, f, tx.txid, nil, true)
+		})
+	}
+}
+
+func TestLookupRetainedTxReturnsDefensiveBytes(t *testing.T) {
+	t.Run("A3 H3 aliasing", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 3)
+		chunk := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x61}, payload: []byte("defensive")})
+		f.admit(chunk, daNonReplayPeer("defensive"))
+		commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: [32]byte{0x62}, chunkCount: 2, commitment: [32]byte{0xa5}, commitmentOutputs: 1})
+		f.admit(commit, daNonReplayPeer("defensive"))
+		for _, tx := range []daNonReplayTx{chunk, commit} {
+			relayBefore, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
+			got, owned, err := f.relay.LookupRetainedTx(tx.txid)
+			if !owned || err != nil {
+				t.Fatalf("lookup=(%v,%v)", owned, err)
+			}
+			for i := range got.TxBytes {
+				got.TxBytes[i] ^= 0xff
+			}
+			got.TxID[0] ^= 1
+			got.WTxID[0] ^= 1
+			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, relayBefore, ownerBefore)
+			requireRetainedLookup(t, f, tx.txid, &tx, false)
+			requireExactDADuplicate(t, f, tx)
+		}
+	})
+	t.Run("H2 lookup races quota release", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x63}, payload: []byte("race")})
+		f.admit(tx, daNonReplayPeer("race"))
+		const lookups = 16
+		results, start := make(chan string, lookups), make(chan struct{})
+		for range lookups {
+			go func() {
+				<-start
+				got, owned, err := f.relay.LookupRetainedTx(tx.txid)
+				switch {
+				case err != nil:
+					results <- fmt.Sprintf("error %v", err)
+				case owned && (got.TxID != tx.txid || got.WTxID != tx.wtxid || !bytes.Equal(got.TxBytes, tx.raw)):
+					results <- "owned with other bytes"
+				case !owned && !reflect.DeepEqual(got, DARetainedTxSnapshot{}):
+					results <- "absent with a snapshot"
+				default:
+					results <- ""
+				}
+			}()
+		}
+		close(start)
+		if err := f.relay.ReleasePeerQuotaKey("race"); err != nil {
+			t.Fatalf("ReleasePeerQuotaKey: %v", err)
+		}
+		for range lookups {
+			if failure := <-results; failure != "" {
+				t.Fatal(failure)
+			}
+		}
+		requireRetainedLookup(t, f, tx.txid, nil, false)
+	})
 }
