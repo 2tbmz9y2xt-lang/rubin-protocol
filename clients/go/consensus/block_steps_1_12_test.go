@@ -726,6 +726,7 @@ func TestBlockSteps1To12DAOrder(t *testing.T) {
 		msg  string
 	}{
 		{"chunk hash before orphan", [][]byte{blockStepsChunk(a, 0, p, [32]byte{})}, BLOCK_ERR_DA_CHUNK_HASH_INVALID, "chunk_hash mismatch"},
+		{"chunk hash before incomplete", [][]byte{commit(a, 2), blockStepsChunk(a, 0, p, [32]byte{})}, BLOCK_ERR_DA_CHUNK_HASH_INVALID, "chunk_hash mismatch"},
 		{"orphan", [][]byte{good(a, 0)}, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
 		{"orphan before earlier duplicate", [][]byte{commit(a, 1), commit(a, 1), good(a, 0), good(b, 0)}, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
 		{"duplicate before earlier incomplete", [][]byte{commit(a, 2), good(a, 0), commit(b, 1), commit(b, 1), good(b, 0)}, BLOCK_ERR_DA_SET_INVALID, "duplicate DA commit for da_id"},
