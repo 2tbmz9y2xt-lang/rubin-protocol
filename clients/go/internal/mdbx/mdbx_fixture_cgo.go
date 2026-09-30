@@ -771,7 +771,7 @@ func rubinSelectedDamageProbe(handle C.uintptr_t) {
 func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner, scenario SelectedDamageScenario, rank uint8, key []byte, run func()) (evidence SelectedDamageEvidence, err error) {
 	selectedDamageMu.Lock()
 	defer selectedDamageMu.Unlock()
-	if store == nil || store.env == nil || int(rank) >= len(schemaDBIs) || scenario < SelectedDamageProbeOnly || scenario > SelectedDamageAbortEIO || run == nil {
+	if !validSelectedDamageFixture(store, scenario, rank, run) {
 		return evidence, errors.New("invalid selected damage fixture")
 	}
 	probe := &selectedDamageProbe{owner: reservations}
@@ -795,10 +795,16 @@ func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner
 	return evidence, nil
 }
 
+func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
+	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageAbortEIO && run != nil
+}
+
 func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {
-	evidence := SelectedDamageEvidence{BeginOld: uint64(counts.begin_old), BeginWrite: uint64(counts.begin_write), BeginRead: uint64(counts.begin_read),
+	evidence := SelectedDamageEvidence{
+		BeginOld: uint64(counts.begin_old), BeginWrite: uint64(counts.begin_write), BeginRead: uint64(counts.begin_read),
 		ReadGets: uint64(counts.read_gets), Faults: uint64(counts.faults), Deletes: uint64(counts.dels), Commits: uint64(counts.commits),
-		OldAborts: uint64(counts.old_aborts), Probes: probe.probes, ProbeDenied: probe.denied, ProbeRan: probe.ran}
+		OldAborts: uint64(counts.old_aborts), Probes: probe.probes, ProbeDenied: probe.denied, ProbeRan: probe.ran,
+	}
 	for i := range evidence.OldGets {
 		evidence.OldGets[i] = uint64(counts.old_gets[i])
 	}

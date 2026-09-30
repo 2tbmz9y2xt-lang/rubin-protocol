@@ -100,8 +100,10 @@ func sideWorldWork(n uint64) (work [40]byte) {
 
 func newSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	t.Helper()
-	w := &sideWorld{t: t, path: filepath.Join(t.TempDir(), "db"), spec: spec, first: spec.tip - uint64(spec.rows) + 1, entries: map[uint64][]byte{},
-		owners: map[[32]byte][]byte{}, links: map[uint64][]byte{}, sideAt: map[uint64][32]byte{}, headers: map[[32]byte][]byte{}, bodies: map[[32]byte][]byte{}}
+	w := &sideWorld{
+		t: t, path: filepath.Join(t.TempDir(), "db"), spec: spec, first: spec.tip - uint64(spec.rows) + 1, entries: map[uint64][]byte{},
+		owners: map[[32]byte][]byte{}, links: map[uint64][]byte{}, sideAt: map[uint64][32]byte{}, headers: map[[32]byte][]byte{}, bodies: map[[32]byte][]byte{},
+	}
 	var err error
 	w.store, err = mdbx.Create(w.path, sideWorldConfig)
 	logicalMDBXAssert(t, err == nil, "side world store: %v", err)
@@ -195,10 +197,14 @@ func (w *sideWorld) promises() (uint64, uint64) {
 
 func (w *sideWorld) authorityBytes() []byte {
 	b, u := w.promises()
-	a := mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+	a := mdbx.StorageAuthorityV1{
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
 		Phase: mdbx.StoragePhaseNoneV1, Lifecycle: mdbx.StorageLifecycleStableV1,
-		SelectedSide: &mdbx.SelectedSideV1{GenerationID: 2, F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
-			CumulativeChainwork: sideWorldWork(w.spec.tip + 1), RowCount: w.spec.rows, LogicalBytes: uint64(w.spec.rows) * 266}}
+		SelectedSide: &mdbx.SelectedSideV1{
+			GenerationID: 2, F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
+			CumulativeChainwork: sideWorldWork(w.spec.tip + 1), RowCount: w.spec.rows, LogicalBytes: uint64(w.spec.rows) * 266,
+		},
+	}
 	if w.spec.pendingSide {
 		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
 	}
@@ -224,8 +230,10 @@ func (w *sideWorld) clearedAuthority() []byte {
 	if w.spec.pendingSide {
 		span.FirstHeight, span.NextHeight = w.first-1, w.first-1
 	}
-	a := mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
-		Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span}}, ExcludedInvalidBranch: w.exclusion}
+	a := mdbx.StorageAuthorityV1{
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+		Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span}}, ExcludedInvalidBranch: w.exclusion,
+	}
 	encoded, err := a.Encode()
 	logicalMDBXAssert(w.t, err == nil, "side world cleared authority: %v", err)
 	return encoded

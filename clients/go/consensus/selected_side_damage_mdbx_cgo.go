@@ -177,9 +177,11 @@ type selectedSideEvidence struct {
 // newSelectedSideEvidence runs only after granted qualification and charges the fixed transfer terms up front.
 func newSelectedSideEvidence(reader *mdbx.Reader, a mdbx.StorageAuthorityV1) *selectedSideEvidence {
 	n := int(a.SelectedSide.RowCount)
-	e := &selectedSideEvidence{reader: reader, authority: a, side: a.SelectedSide, first: selectedSideFirst(a.SelectedSide),
-		links: make([][]byte, n), rows: make([]selectedSideCachedRow, 0, n), consulted: make([]mdbx.ConsultedRow, 0, 4*n+2)}
-	e.add(selectedSideAuthorityCharge + selectedSideFixedCharge + uint64(n)*selectedSideHeightCharge)
+	e := &selectedSideEvidence{
+		reader: reader, authority: a, side: a.SelectedSide, first: selectedSideFirst(a.SelectedSide),
+		links: make([][]byte, n), rows: make([]selectedSideCachedRow, 0, n), consulted: make([]mdbx.ConsultedRow, 0, 4*n+2),
+	}
+	e.add(selectedSideAuthorityCharge + selectedSideFixedCharge + uint64(a.SelectedSide.RowCount)*selectedSideHeightCharge)
 	return e
 }
 
@@ -356,7 +358,7 @@ func (e *selectedSideEvidence) predecessor(p *selectedSideDamagePlan, height uin
 		return true, nil
 	}
 	work, err := WorkFromTarget([32]byte(header[76:108]))
-	if err != nil {
+	if err != nil { //nolint:nilerr // An undecodable stored target is positive optional damage of this row, not an error.
 		return true, nil
 	}
 	work.Add(work, new(big.Int).SetBytes(parent[64:104]))
@@ -589,6 +591,8 @@ func selectedSideEngine(e *mdbx.EngineError, step string) string {
 		return ""
 	case mdbx.EngineCapacity:
 		return selectedSideCapacity
+	case mdbx.EngineConcurrency, mdbx.EngineTransaction, mdbx.EngineIO, mdbx.EngineStateMismatch, mdbx.EngineLocalInvariant:
+		// Classified below by resource class and in-flight step.
 	}
 	resource := selectedSideResource(e.Class)
 	if resource == "" {
@@ -608,6 +612,8 @@ func selectedSideResource(class mdbx.EngineClass) string {
 		return "storage_transaction"
 	case mdbx.EngineIO:
 		return "storage_io"
+	case mdbx.EngineInvalidInput, mdbx.EngineIntegrity, mdbx.EngineCapacity, mdbx.EngineStateMismatch, mdbx.EngineLocalInvariant:
+		return ""
 	}
 	return ""
 }

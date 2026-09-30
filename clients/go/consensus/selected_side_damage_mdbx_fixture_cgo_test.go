@@ -14,7 +14,9 @@ import (
 func rawSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	t.Helper()
 	w := newSideWorld(t, spec)
-	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) { return mdbx.FixtureRawRowEqual(w.store, rank, key, want) }
+	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+		return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+	}
 	return w
 }
 
@@ -119,16 +121,26 @@ func TestSelectedSideDamageFixtureRequiredWidth(t *testing.T) {
 		damage           bool
 		expect           func(w *sideWorld, key, value []byte) // records the seeded bytes in the independent oracle
 	}{
-		{"owner index inconsistency", "canonical owner index inconsistency", sideFullSpec, 3, 7, func(w *sideWorld) []byte { return logicalMDBXMust(mdbx.CanonicalOwnerKey(1, w.sideAt[3])) }, mdbx.CanonicalOwnerValue(9), false,
-			func(w *sideWorld, key, value []byte) { w.extra = append(w.extra, sideRawRow{7, key, value}) }},
-		{"later SideLink width", "stored value width outside SchemaV2 bound", sideFullSpec, 2, 6, func(*sideWorld) []byte { return logicalMDBXMust(mdbx.HeightKey(2, 4)) }, make([]byte, 103), true,
-			func(w *sideWorld, _, value []byte) { w.links[4] = value }},
-		{"kept header width", "stored value width outside SchemaV2 bound", kept, 2, 3, func(w *sideWorld) []byte { return w.canonical[0][:] }, make([]byte, 100), true,
-			func(w *sideWorld, _, value []byte) { w.headers[w.canonical[0]] = value }},
-		{"anchor width", "stored value width outside SchemaV2 bound", sideFullSpec, 2, 2, func(*sideWorld) []byte { return logicalMDBXMust(mdbx.HeightKey(1, 1)) }, make([]byte, 103), false,
-			func(w *sideWorld, _, value []byte) { w.entries[1] = value }},
-		{"required body width", "stored value width outside SchemaV2 bound", sameHeight, 2, 4, func(w *sideWorld) []byte { return w.canonical[2][:] }, make([]byte, 100), false,
-			func(w *sideWorld, _, value []byte) { w.bodies[w.canonical[2]] = value }},
+		{
+			"owner index inconsistency", "canonical owner index inconsistency", sideFullSpec, 3, 7, func(w *sideWorld) []byte { return logicalMDBXMust(mdbx.CanonicalOwnerKey(1, w.sideAt[3])) }, mdbx.CanonicalOwnerValue(9), false,
+			func(w *sideWorld, key, value []byte) { w.extra = append(w.extra, sideRawRow{7, key, value}) },
+		},
+		{
+			"later SideLink width", "stored value width outside SchemaV2 bound", sideFullSpec, 2, 6, func(*sideWorld) []byte { return logicalMDBXMust(mdbx.HeightKey(2, 4)) }, make([]byte, 103), true,
+			func(w *sideWorld, _, value []byte) { w.links[4] = value },
+		},
+		{
+			"kept header width", "stored value width outside SchemaV2 bound", kept, 2, 3, func(w *sideWorld) []byte { return w.canonical[0][:] }, make([]byte, 100), true,
+			func(w *sideWorld, _, value []byte) { w.headers[w.canonical[0]] = value },
+		},
+		{
+			"anchor width", "stored value width outside SchemaV2 bound", sideFullSpec, 2, 2, func(*sideWorld) []byte { return logicalMDBXMust(mdbx.HeightKey(1, 1)) }, make([]byte, 103), false,
+			func(w *sideWorld, _, value []byte) { w.entries[1] = value },
+		},
+		{
+			"required body width", "stored value width outside SchemaV2 bound", sameHeight, 2, 4, func(w *sideWorld) []byte { return w.canonical[2][:] }, make([]byte, 100), false,
+			func(w *sideWorld, _, value []byte) { w.bodies[w.canonical[2]] = value },
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := rawSideWorld(t, row.spec)
@@ -205,7 +217,9 @@ func TestSelectedSideDamageFixtureNativeBridge(t *testing.T) {
 	authorityOnly := func(e mdbx.SelectedDamageEvidence) bool {
 		return e.OldGets[0] == 1 && sideNoArtifact(e) && e.OldAborts == 1
 	}
-	written := func(e mdbx.SelectedDamageEvidence) bool { return e.BeginWrite == 1 && e.Commits == 1 && e.BeginRead == 1 }
+	written := func(e mdbx.SelectedDamageEvidence) bool {
+		return e.BeginWrite == 1 && e.Commits == 1 && e.BeginRead == 1
+	}
 	old, prewrite, crossed := mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, mdbx.UpdateStageCommitMayHaveCrossed
 	storageIO := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
 	for _, row := range []sideBridgeCase{
@@ -215,18 +229,26 @@ func TestSelectedSideDamageFixtureNativeBridge(t *testing.T) {
 		{name: "authority io", scenario: mdbx.SelectedDamageGetEIO, key: authority, result: storageIO, truth: old, stage: prewrite, causes: "get:IO", image: "old", check: authorityOnly},
 		{name: "authority io denied", scenario: mdbx.SelectedDamageGetEIO, key: authority, denied: true, result: storageIO, truth: old, stage: prewrite, causes: "get:IO", image: "old", check: authorityOnly},
 		{name: "authority io plus abort io", scenario: mdbx.SelectedDamageGetAbortEIO, key: authority, result: storageIO, truth: old, stage: prewrite, causes: "get:IO,abort:IO", image: "old", check: authorityOnly},
-		{name: "healthy plus abort io", scenario: mdbx.SelectedDamageAbortEIO, h: 3, result: storageIO, truth: old, stage: prewrite, causes: "-,abort:IO", image: "old",
-			check: func(e mdbx.SelectedDamageEvidence) bool { return e.OldAborts == 1 && e.BeginWrite == 0 }},
+		{
+			name: "healthy plus abort io", scenario: mdbx.SelectedDamageAbortEIO, h: 3, result: storageIO, truth: old, stage: prewrite, causes: "-,abort:IO", image: "old",
+			check: func(e mdbx.SelectedDamageEvidence) bool { return e.OldAborts == 1 && e.BeginWrite == 0 },
+		},
 		{name: "optional header io", scenario: mdbx.SelectedDamageGetEIO, rank: 3, key: func(w *sideWorld) []byte { hash := w.sideAt[3]; return hash[:] }, h: 3, result: "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", truth: old, stage: prewrite, causes: "get:IO", image: "old"},
 		{name: "optional later link io after damage", scenario: mdbx.SelectedDamageGetEIO, prepare: damage, rank: 6, key: func(*sideWorld) []byte { return logicalMDBXMust(mdbx.HeightKey(2, 4)) }, result: "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", truth: old, stage: prewrite, causes: "get:IO", image: "old"},
 		{name: "required owner io after damage", scenario: mdbx.SelectedDamageGetEIO, prepare: damage, rank: 7, key: func(w *sideWorld) []byte { return logicalMDBXMust(mdbx.CanonicalOwnerKey(1, w.sideAt[3])) }, result: "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", truth: old, stage: prewrite, causes: "get:IO", image: "old"},
 		{name: "required kept header io after damage", spec: sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, override: map[uint64]uint64{3: 0}}, scenario: mdbx.SelectedDamageGetEIO, prepare: damage, rank: 3, key: func(w *sideWorld) []byte { return w.canonical[0][:] }, result: "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", truth: old, stage: prewrite, causes: "get:IO", image: "old"},
-		{name: "definite precommit delete io", scenario: mdbx.SelectedDamageDeleteEIO, prepare: damage, result: "LOCAL_PERSISTENCE_ERROR(precommit)", truth: old, stage: mdbx.UpdateStageWriteStartedDefinitelyPrecommit, causes: "update:IO", image: "old",
-			check: func(e mdbx.SelectedDamageEvidence) bool { return e.BeginWrite == 1 && e.Deletes == 1 && e.Commits == 0 && e.BeginRead == 0 }},
+		{
+			name: "definite precommit delete io", scenario: mdbx.SelectedDamageDeleteEIO, prepare: damage, result: "LOCAL_PERSISTENCE_ERROR(precommit)", truth: old, stage: mdbx.UpdateStageWriteStartedDefinitelyPrecommit, causes: "update:IO", image: "old",
+			check: func(e mdbx.SelectedDamageEvidence) bool {
+				return e.BeginWrite == 1 && e.Deletes == 1 && e.Commits == 0 && e.BeginRead == 0
+			},
+		},
 		{name: "crossed coherent OLD", scenario: mdbx.SelectedDamageCommitOld, prepare: damage, result: sideCleared, truth: old, stage: crossed, causes: "update:Capacity", image: "old", check: written},
 		{name: "crossed coherent NEW", scenario: mdbx.SelectedDamageCommitNew, prepare: damage, result: sideCleared, truth: mdbx.CommitTruthNew, stage: crossed, causes: "update:Capacity", image: "cleared", check: written},
-		{name: "crossed unreadable", scenario: mdbx.SelectedDamageCommitUnreadable, prepare: damage, key: authority, result: sideCleared, truth: mdbx.CommitTruthUnknown, stage: crossed, causes: "update:Capacity,update:IO", image: "cleared",
-			check: func(e mdbx.SelectedDamageEvidence) bool { return written(e) && e.ReadGets >= 1 }},
+		{
+			name: "crossed unreadable", scenario: mdbx.SelectedDamageCommitUnreadable, prepare: damage, key: authority, result: sideCleared, truth: mdbx.CommitTruthUnknown, stage: crossed, causes: "update:Capacity,update:IO", image: "cleared",
+			check: func(e mdbx.SelectedDamageEvidence) bool { return written(e) && e.ReadGets >= 1 },
+		},
 		{name: "crossed readable third image", scenario: mdbx.SelectedDamageCommitThird, prepare: damage, result: sideCleared, truth: mdbx.CommitTruthUnknown, stage: crossed, causes: "update:Capacity", image: "third", check: written},
 	} {
 		sideRunBridge(t, row)

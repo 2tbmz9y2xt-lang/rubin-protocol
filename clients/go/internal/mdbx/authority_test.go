@@ -677,7 +677,9 @@ func TestStorageAuthorityV1LiveSelectedSide(t *testing.T) {
 		a.Cleanup.Spans = append(a.Cleanup.Spans, span)
 		return a
 	}
-	side := func(g, first, last, next uint64) CleanupSpanV1 { return CleanupSpanV1{CleanupSpanSideV1, g, first, last, next} }
+	side := func(g, first, last, next uint64) CleanupSpanV1 {
+		return CleanupSpanV1{CleanupSpanSideV1, g, first, last, next}
+	}
 	wantModel(t, "one-slot C1440 with exact predecessor SIDE", live(0, 1440, 1439, side(2, 1, 1, 1)), true)
 	wantModel(t, "one-slot C2000 with exact predecessor SIDE", live(0, 2000, 1439, side(2, 561, 561, 561)), true)
 	wantModel(t, "one-slot without SIDE", edit(modelBase(1, 0, 0), func(a *StorageAuthorityV1) { a.NextGenerationID, a.SelectedSide = 3, modelSide(2, 0, 1440, 1439, 1439) }), true)

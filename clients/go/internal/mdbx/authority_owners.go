@@ -34,24 +34,30 @@ func validOwners(a StorageAuthorityV1) bool {
 	if a.Ordinary != nil {
 		cleanup, selected = a.Ordinary.CarriedCleanup, a.Ordinary.CapturedSelectedSide
 	}
-	side, sidesOK := uint64(0), true
-	if selected != nil {
-		side = selected.GenerationID
-	}
-	if cleanup != nil {
-		for _, span := range cleanup.Spans {
-			if span.Kind == CleanupSpanSideV1 {
-				side, sidesOK = span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
-				break
-			}
-		}
-	}
+	side, sidesOK := ownerSide(selected, cleanup)
 	if !sidesOK || (a.Ordinary == nil && !validLiveSide(selected, cleanup)) {
 		return false
 	}
 	obsolete, cleanupOK := validCleanupRelations(a, cleanup, selected, side)
 	active, next := a.ActiveGenerationID, a.NextGenerationID
 	return all(cleanupOK, anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
+}
+
+// ownerSide returns the side generation named by the selected side or, overriding it, the first SIDE span, and
+// whether the two agree when both are present.
+func ownerSide(selected *SelectedSideV1, cleanup *CleanupV1) (uint64, bool) {
+	side := uint64(0)
+	if selected != nil {
+		side = selected.GenerationID
+	}
+	if cleanup != nil {
+		for _, span := range cleanup.Spans {
+			if span.Kind == CleanupSpanSideV1 {
+				return span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
+			}
+		}
+	}
+	return side, true
 }
 
 // validLiveSide admits a live selected side beside a pending SIDE span only in the rolling-prepared shape: the one-slot
