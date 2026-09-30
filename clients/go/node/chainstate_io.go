@@ -202,7 +202,7 @@ func collectChainStateSchemaFields(payload []byte) (chainStateSchemaFields, erro
 			break
 		}
 	}
-	if _, err := dec.ReadToken(); err != io.EOF {
+	if _, err := dec.ReadToken(); !errors.Is(err, io.EOF) {
 		return chainStateSchemaFields{}, errors.New("decode chainstate: trailing content")
 	}
 	return fields, nil
@@ -361,7 +361,8 @@ func validateChainStateUtxoItems(dec *json.Decoder) (bool, error) {
 		if err := dec.Decode(&item); err != nil {
 			return false, err
 		}
-		if validateChainStateUtxoSchema(item) != nil {
+		itemValid := validateChainStateUtxoSchema(item) == nil
+		if !itemValid {
 			return false, nil
 		}
 	}
