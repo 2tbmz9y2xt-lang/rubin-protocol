@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,6 +18,494 @@ import (
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
+
+// Raw fixture-owner equality deliberately avoids Reader.Get on malformed rows.
+func archiveRawEqual(t *testing.T, s *Store, rows []Mutation) {
+	t.Helper()
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		for _, row := range rows {
+			image, err := updateOwnedImage(row.Literal)
+			if err != nil {
+				return err
+			}
+			equal, err := updateNativeEqual(r.txn, s.dbis[row.DBI.Rank], row.Key, image)
+			if err != nil || !equal {
+				t.Fatalf("archive raw image %s/%x: %v", row.DBI.Name, row.Key, err)
+			}
+		}
+		return nil
+	}))
+}
+
+func TestArchiveProfileMalformed(t *testing.T) {
+	for _, name := range []string{"A7", "H2a", "H2b", "H2c", "H2d", "H2e", "H6", "H16a", "H16b", "H16c", "H16d_empty", "H16d_one", "H17a", "H17b"} {
+		t.Run(name, func(t *testing.T) {
+			a := modelBase(1, 0, 0)
+			if name == "A7" || name == "H17a" {
+				a.ActiveProfile = 2
+			}
+			s, path, cfg, rows := archiveSeed(t, a, -1, modelWork(false))
+			values := prunedImage(t, s, rows)
+			for i := range rows {
+				rows[i].Literal = values[i]
+			}
+			rows = append(rows, Mutation{DBI: readDBIsLiteral()[0], Key: []byte{0}, Literal: values[len(values)-2]}, Mutation{DBI: readDBIsLiteral()[0], Key: []byte{1}, Literal: values[len(values)-1]})
+			value := append([]byte(nil), values[0]...)
+			switch name {
+			case "H2a":
+				value = value[:39]
+			case "H2b":
+				value[0] = 2
+			case "H2c", "H17a":
+				value[36] = 2
+				value = append(value[:37], append([]byte{2}, value[37:]...)...)
+			case "H2d":
+				value[34] = 2
+				value = append(value[:36], append([]byte{0, 0}, value[36:]...)...)
+			case "H2e":
+				bad := modelBase(1, 0, 0)
+				bad.NextGenerationID, bad.Phase = 4, 2
+				bad.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+				bad.SelectedSide = modelSide(2, 0, 1, 1, 1)
+				bad.DetachedSuffix = modelDetached(1, 1)
+				value = nil
+				encodeAuthority(&value, bad)
+			}
+			if name == "H17b" {
+				value = value[:39]
+			}
+			if !bytes.Equal(value, values[0]) {
+				mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[0], []byte{2}, value))
+				rows[0].Literal = value
+			}
+			add := func(key, value []byte) {
+				mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, value))
+				rows = append(rows, Mutation{DBI: readDBIsLiteral()[2], Key: key, Literal: value})
+			}
+			g0 := []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}
+			g1 := append([]byte(nil), g0...)
+			g1[15] = 1
+			g2 := append([]byte(nil), g0...)
+			g2[15] = 2
+			switch name {
+			case "A7", "H6":
+				add(g0, make([]byte, 103))
+			case "H16a":
+				add(g0, make([]byte, 104))
+				add(g1, make([]byte, 103))
+			case "H16b":
+				add(append(g0, 0), make([]byte, 104))
+			case "H16c":
+				add(g0, ChainValue(modelHash(71), [32]byte{}, modelWork(false)))
+				add(g1, ChainValue(modelHash(72), [32]byte{}, modelWork(false)))
+				add(g2, make([]byte, 103))
+			case "H16d_one":
+				add(g0, ChainValue(modelHash(71), [32]byte{}, modelWork(false)))
+			}
+			archiveRawEqual(t, s, rows)
+			owner := bootstrapOwner(t)
+			var out ArchiveProfileOutcome
+			if name == "H17b" {
+				mustEnvironment(t, owner.WithReservation(154611151, func() error {
+					out = s.SelectArchiveProfileV1(owner)
+					if !sameError(out.Err, errOperationReservationCapacity) || out.Truth != 1 || out.Stage != 1 {
+						t.Fatal("capacity before illegal authority")
+					}
+					archiveEmptyPayload(t, out)
+					return nil
+				}))
+			} else {
+				out = s.SelectArchiveProfileV1(owner)
+			}
+			switch name {
+			case "A7":
+				prunedDecision(t, out, "PROFILE_NOOP", name)
+			case "H17b":
+			case "H16c":
+				bootstrapRefusal(t, name, out.Truth, out.Err, EngineStateMismatch, operationUpdate, codeProblem, "archive above genesis is owned by the selected-side and replay-entry leaves", nil, false)
+				archiveEmptyPayload(t, out)
+			case "H16d_empty", "H16d_one":
+				if out.Truth != 2 || out.Stage != 3 || out.Err != nil || out.Decision != "" || !reflect.DeepEqual(out.Authority, func() *StorageAuthorityV1 { b := a; b.ActiveProfile = 2; return &b }()) {
+					t.Fatalf("archive boundary: %+v", out)
+				}
+				rows[0].Literal = append([]byte(nil), rows[0].Literal...)
+				rows[0].Literal[1] = 2
+			default:
+				diagnostic, op, cause := "invalid storage authority", operationGet, error(errSchema)
+				if name == "H6" || name == "H16a" {
+					diagnostic, op, cause = "stored value width outside SchemaV2 bound", operationPrefixPage, nil
+				}
+				if name == "H16b" {
+					diagnostic, op, cause = "stored key outside SchemaV2 prefix-page domain", operationPrefixPage, nil
+				}
+				bootstrapRefusal(t, name, out.Truth, out.Err, EngineIntegrity, op, codeInvalid, diagnostic, cause, true)
+				archiveEmptyPayload(t, out)
+				if out.Stage != 1 || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil {
+					t.Fatal("malformed terminal resources")
+				}
+				archiveCached(t, s, out, owner)
+			}
+			if s.state == storeOPEN {
+				bootstrapOpenUnchanged(t, s, name)
+				archiveRawEqual(t, s, rows)
+				if name == "A7" {
+					prunedDecision(t, s.SelectArchiveProfileV1(owner), "PROFILE_NOOP", "malformed next noop")
+				} else if name == "H16c" {
+					next := s.SelectArchiveProfileV1(owner)
+					if next.Stage != 1 {
+						t.Fatal("bounded next tuple")
+					}
+					bootstrapRefusal(t, "bounded next tuple", next.Truth, next.Err, EngineStateMismatch, operationUpdate, codeProblem, "archive above genesis is owned by the selected-side and replay-entry leaves", nil, false)
+					archiveEmptyPayload(t, next)
+				}
+				mustEnvironment(t, s.Close())
+			}
+			r, err := Open(path, cfg)
+			mustEnvironment(t, err)
+			defer func() { _ = r.Close() }()
+			archiveRawEqual(t, r, rows)
+			prunedReleased(t, owner)
+		})
+	}
+}
+
+func TestArchiveProfileNativeImages(t *testing.T) {
+	for _, name := range []string{"H10_g0_write", "H10_g1_write", "H10_g0_final", "H10_g1_final", "H11a", "H11b", "H11c", "H11d", "H11e_unreadable", "H11e_g0", "H11e_g1"} {
+		t.Run(name, func(t *testing.T) {
+			a := modelBase(1, 0, 0)
+			if name == "H11b" {
+				a = archiveSide(2)
+			}
+			s, path, cfg, rows := archiveSeed(t, a, 0, modelWork(false))
+			if name == "H11a" {
+				mustEnvironment(t, s.Close())
+				s, path, cfg, rows = archiveGenesis(t)
+			}
+			before := prunedImage(t, s, rows)
+			counts := bootstrapCounts(t, s, "native before")
+			primary := nativeError(operationUpdate, codeENOSPC)
+			var native updateNativeOutcome
+			var planned *StorageAuthorityV1
+			var observed []byte
+			var finalConsulted []ownedConsulted
+			var finalValues [][]byte
+			var changedRows []Mutation
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			mustEnvironment(t, s.View(func(reader *Reader) error {
+				decision := ""
+				batch, plan, err := archiveProfileBatch(reader, &decision, errors.New("decision"))
+				if err != nil {
+					return err
+				}
+				planned = plan
+				mutations := updateNativePlan(t, batch.Mutations...)
+				consulted := make([]ownedConsulted, len(batch.Consulted))
+				for i, row := range batch.Consulted {
+					consulted[i] = ownedConsulted{dbi: row.DBI, key: row.Key}
+				}
+				if _, err = updateNativeConsultedImages(reader.txn, s.dbis, consulted); err != nil {
+					return err
+				}
+				if strings.HasSuffix(name, "_final") {
+					finalConsulted = append([]ownedConsulted(nil), consulted...)
+					for i, row := range batch.Consulted {
+						value, present, readErr := reader.Get(row.DBI, row.Key)
+						if readErr != nil {
+							return readErr
+						}
+						finalValues = append(finalValues, value)
+						finalConsulted[i].image = updateImage{}
+						if present {
+							finalConsulted[i].image, err = updateOwnedImage(value)
+							if err != nil {
+								return err
+							}
+						}
+					}
+				}
+				changeCanonical := func(genesis bool) error {
+					h := uint64(1)
+					beforePresent := false
+					if genesis {
+						h = 0
+						beforePresent = true
+					}
+					key, _ := HeightKey(1, h)
+					hash := modelHash(900 + h)
+					changes := []Mutation{{DBI: readDBIsLiteral()[2], Key: key, BeforePresent: beforePresent, AfterKind: AfterLiteral, Literal: ChainValue(hash, [32]byte{}, modelWork(false))}}
+					if genesis {
+						oldHash := modelHash(71)
+						if name == "H11a" {
+							oldHash = [32]byte(rows[3].Literal[:32])
+						}
+						changes = append(changes, canonicalDelete(canonicalOwnerLiteral(1, 0, oldHash)))
+					}
+					changes = append(changes, canonicalOwnerLiteral(1, h, hash))
+					changedRows = changes
+					requireUpdateTruth(t, s.updateNative(updateNativePlan(t, changes...), nil, reader.txn), 2, true, nil, nil)
+					return nil
+				}
+				if strings.HasPrefix(name, "H10_") {
+					mustEnvironment(t, changeCanonical(strings.Contains(name, "g0")))
+					if !strings.HasSuffix(name, "_final") {
+						native = s.updateNative(mutations, consulted, reader.txn)
+					}
+					return nil
+				}
+				if name != "H11c" {
+					execute := append([]ownedMutation(nil), mutations...)
+					if name == "H11d" {
+						third := *plan
+						third.NextGenerationID++
+						execute[0].literal, err = third.Encode()
+						if err != nil {
+							return err
+						}
+					}
+					requireUpdateTruth(t, s.updateNative(execute, consulted, reader.txn), 2, true, nil, nil)
+				}
+				if name == "H11e_g0" || name == "H11e_g1" {
+					mustEnvironment(t, changeCanonical(name == "H11e_g0"))
+				}
+				handles := s.dbis
+				if name == "H11e_unreadable" {
+					handles[0] = ^handles[0]
+				}
+				native = updateNativeReadback(s.env, handles, mutations, consulted, reader.txn, primary)
+				return nil
+			}))
+			if strings.HasSuffix(name, "_final") {
+				// Separate final-match owner composition; there is no public injection seam.
+				mustEnvironment(t, s.View(func(reader *Reader) error {
+					err := updateNativeConsultedMatch(reader.txn, s.dbis, finalConsulted, "final update image mismatch")
+					if err == nil {
+						t.Fatal("final consulted mismatch missing")
+					}
+					native = updateNativeConsumed(1, false, err, nil, 2)
+					return nil
+				}))
+				runtime.KeepAlive(finalValues)
+			}
+			// Read back the actual observed authority before applying terminal disposition.
+			observed, _ = bootstrapRow(t, s, []byte{2})
+			wantTruth, wantStage := CommitTruth(3), UpdateStage(3)
+			if strings.HasPrefix(name, "H10_") {
+				wantTruth, wantStage = 1, native.stage
+				engine := requireEngineError(t, native.primary, EngineStateMismatch, operationUpdate, codeProblem)
+				wantDiagnostic := "OLD/write snapshot mismatch"
+				if strings.HasSuffix(name, "_final") {
+					wantDiagnostic = "final update image mismatch"
+				}
+				if engine.Cause != nil || engine.Diagnostic != wantDiagnostic {
+					t.Fatal("consulted mismatch cause")
+				}
+			}
+			if name == "H11a" || name == "H11b" {
+				wantTruth = 2
+			}
+			if name == "H11c" {
+				wantTruth = 1
+			}
+			if native.truth != wantTruth || native.stage != wantStage || native.valid() != nil {
+				t.Fatalf("archive native truth/stage: %+v", native)
+			}
+			if !strings.HasPrefix(name, "H10_") && !sameError(native.primary, primary) {
+				t.Fatal("native primary identity")
+			}
+			truth, stage, terminal := s.applyUpdateOutcome(native, nil, nil, false)
+			out := archiveProfileOutcome(ArchiveProfileOutcome{Truth: truth, Stage: stage, Err: terminal}, planned, "", errors.New("decision"))
+			if out.Truth != wantTruth || out.Stage != wantStage || !sameError(out.Err, terminal) || out.Decision != "" || (out.Authority != nil) != (wantTruth == 2) {
+				t.Fatalf("native archive projection: %+v", out)
+			}
+			if wantTruth == 1 && !bytes.Equal(observed, before[0]) {
+				t.Fatal("native OLD exact authority")
+			}
+			if wantTruth == 2 {
+				want := append([]byte(nil), before[0]...)
+				want[1] = 2
+				if !bytes.Equal(observed, want) || !reflect.DeepEqual(out.Authority, planned) {
+					t.Fatal("native NEW exact authority")
+				}
+			}
+			if name == "H11d" && (bytes.Equal(observed, before[0]) || bytes.Equal(observed, func() []byte { b := append([]byte(nil), before[0]...); b[1] = 2; return b }())) {
+				t.Fatal("third image was neither")
+			}
+			if strings.HasPrefix(name, "H11") {
+				commit, ok := terminal.(*CommitError)
+				if !ok || !sameError(commit.Cause, primary) || commit.Truth != wantTruth || !sameError(commit.ReadbackCause, native.secondary) {
+					t.Fatal("commit cause/readback order")
+				}
+				if (native.secondary != nil) != (name == "H11e_unreadable") {
+					t.Fatal("readback cause presence")
+				}
+				if name == "H11e_unreadable" {
+					requireEnvironmentError(t, native.secondary, EngineLocalInvariant, operationUpdate, codeBadDBI, expectedNativeDiagnostic(codeBadDBI))
+				}
+			}
+			if s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil {
+				t.Fatal("native consumed resources")
+			}
+			archiveCached(t, s, out, bootstrapOwner(t))
+			r, err := Open(path, cfg)
+			mustEnvironment(t, err)
+			defer func() { _ = r.Close() }()
+			bootstrapRequireRow(t, r, []byte{2}, observed, "native persisted observation")
+			for i, row := range rows {
+				want := before[i]
+				if i == 0 {
+					want = observed
+				}
+				for _, change := range changedRows {
+					if change.DBI == row.DBI && bytes.Equal(change.Key, row.Key) {
+						want = change.Literal
+						if change.AfterKind == AfterAbsent {
+							want = nil
+						}
+					}
+				}
+				consultedRequireImage(t, r, row.DBI, row.Key, want, want != nil, "native unchanged/changed row")
+			}
+			for _, change := range changedRows {
+				want := change.Literal
+				if change.AfterKind == AfterAbsent {
+					want = nil
+				}
+				consultedRequireImage(t, r, change.DBI, change.Key, want, want != nil, "native sibling row")
+			}
+			if strings.Contains(name, "g1") {
+				counts[2]++
+				counts[7]++
+			}
+			if bootstrapCounts(t, r, "native reopened") != counts {
+				t.Fatal("native exact census")
+			}
+			bootstrapRequireRow(t, r, []byte{0}, before[len(before)-2], "native version")
+			bootstrapRequireRow(t, r, []byte{1}, before[len(before)-1], "native config")
+		})
+	}
+	t.Run("H15", testArchiveRetained)
+}
+
+func testArchiveRetained(t *testing.T) {
+	for _, name := range []string{"commit_write", "abort_write", "read", "old_cleanup", "uncommitted_join", "commit_join", "cleanup_only", "close_busy"} {
+		t.Run(name, func(t *testing.T) {
+			s := newUpdateStore(t)
+			cfg, dbis, env, writer := s.config, s.dbis, s.env, s.writer
+			primary := nativeError(operationUpdate, codeENOSPC)
+			secondary := errors.Join(nativeError(operationAbort, codeEIO), nativeError(operationGet, codeCorrupted))
+			cleanup := nativeError(operationAbort, codeThreadMismatch)
+			var native updateNativeOutcome
+			var release func() error
+			var err error
+			if name == "abort_write" {
+				native, release, err = fixtureUpdateAbortWrongThread(s)
+			} else {
+				native, release, err = fixtureUpdateWrongThread(s)
+			}
+			mustEnvironment(t, err)
+			defer func() {
+				if release != nil {
+					_ = release()
+				}
+			}()
+			token := updateRetained(native)
+			var oldCleanup error
+			oldRetained := false
+			switch name {
+			case "read":
+				native = updateNativeRetainedRead(primary, cleanup, token)
+			case "old_cleanup":
+				native = updateNativeConsumed(2, true, primary, nil, 3)
+				oldCleanup, oldRetained = cleanup, true
+			case "uncommitted_join":
+				native = updateNativeRetainedWrite(false, primary, secondary, token, 1)
+				oldCleanup = cleanup
+			case "commit_join":
+				native = updateNativeConsumed(2, true, primary, secondary, 3)
+				oldCleanup, oldRetained = cleanup, true
+			case "cleanup_only":
+				native = updateNativeConsumed(2, true, nil, nil, 3)
+				oldCleanup, oldRetained = cleanup, true
+			case "close_busy":
+				mustEnvironment(t, release())
+				release = nil
+				token = nil
+				native = updateNativeConsumed(1, false, primary, nil, 1)
+			}
+			if name == "close_busy" {
+				_, closeRelease, e := fixtureHeldUpdate(s)
+				mustEnvironment(t, e)
+				release = closeRelease
+			}
+			truth, stage, terminal := s.applyUpdateOutcome(native, token, oldCleanup, oldRetained)
+			a := modelBase(2, 0, 0)
+			out := archiveProfileOutcome(ArchiveProfileOutcome{Truth: truth, Stage: stage, Err: terminal}, &a, "", errors.New("decision"))
+			if out.Truth != native.truth || out.Stage != native.stage || !sameError(out.Err, terminal) || out.Decision != "" || (out.Authority != nil) != (native.truth == 2 && native.stage == 3) {
+				t.Fatal("retained raw projection")
+			}
+			if name == "close_busy" {
+				engine := requireEngineError(t, terminal, EngineConcurrency, operationClose, codeBusy)
+				if !sameError(engine.Cause, primary) || s.state != storeCLOSEBLOCKED || s.env != env || s.writer != writer {
+					t.Fatal("close busy primary/retention")
+				}
+			} else if s.state != storePOISONEDTHREAD || s.txn != token || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis {
+				t.Fatal("live retained resource shape")
+			}
+			switch name {
+			case "uncommitted_join":
+				parts := terminal.(interface{ Unwrap() []error }).Unwrap()
+				if len(parts) != 3 || !sameError(parts[0], primary) || !sameError(parts[1], secondary) || !sameError(parts[2], cleanup) {
+					t.Fatal("uncommitted nested join order")
+				}
+			case "commit_join":
+				commit := terminal.(*CommitError)
+				parts := commit.ReadbackCause.(interface{ Unwrap() []error }).Unwrap()
+				if !sameError(commit.Cause, primary) || len(parts) != 2 || !sameError(parts[0], secondary) || !sameError(parts[1], cleanup) {
+					t.Fatal("commit nested readback join")
+				}
+			case "cleanup_only":
+				commit := terminal.(*CommitError)
+				if !sameError(commit.Cause, cleanup) || commit.ReadbackCause != nil {
+					t.Fatal("cleanup-only cause")
+				}
+			case "commit_write":
+				commit := terminal.(*CommitError)
+				e := requireEngineError(t, commit.Cause, EngineLocalInvariant, operationUpdate, codeThreadMismatch)
+				if e.Cause != nil {
+					t.Fatal("commit THREAD cause")
+				}
+			case "abort_write":
+				parts := terminal.(interface{ Unwrap() []error }).Unwrap()
+				if len(parts) != 2 || !sameError(parts[0], native.primary) || !sameError(parts[1], native.secondary) {
+					t.Fatal("abort THREAD secondary")
+				}
+				e := requireEngineError(t, parts[1], EngineLocalInvariant, operationAbort, codeThreadMismatch)
+				if e.Cause != nil {
+					t.Fatal("abort THREAD is secondary")
+				}
+			case "read":
+				commit := terminal.(*CommitError)
+				if !sameError(commit.Cause, primary) || !sameError(commit.ReadbackCause, cleanup) {
+					t.Fatal("retained read cause")
+				}
+			case "old_cleanup":
+				commit := terminal.(*CommitError)
+				if !sameError(commit.Cause, primary) || !sameError(commit.ReadbackCause, cleanup) {
+					t.Fatal("old-helper cleanup cause")
+				}
+			}
+			archiveCached(t, s, out, bootstrapOwner(t))
+			if release != nil {
+				mustEnvironment(t, release())
+				release = nil
+			}
+			// Only the fixture owner releases live tokens; restoration follows release.
+			s.state, s.txn, s.config, s.dbis, s.terminal, s.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+			mustEnvironment(t, s.Close())
+		})
+	}
+}
 
 func TestFixtureModesAndFixedOperations(t *testing.T) {
 	for _, tc := range []struct {
