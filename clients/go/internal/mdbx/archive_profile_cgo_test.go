@@ -200,7 +200,8 @@ func TestArchiveProfile(t *testing.T) {
 		a    StorageAuthorityV1
 		h    int
 	}{
-		{"A8", modelBase(2, 0, 0), 5}, {"A9", func() StorageAuthorityV1 { a := archiveSide(2); a.ActiveProfile = 2; return a }(), 0},
+		{"A8", modelBase(2, 0, 0), 5},
+		{"A9", func() StorageAuthorityV1 { a := archiveSide(2); a.ActiveProfile = 2; return a }(), 0},
 		{"A10", func() StorageAuthorityV1 {
 			a := modelBase(2, 0, 18561)
 			a.Phase = 2
@@ -332,16 +333,26 @@ func testArchiveRefusals(t *testing.T) {
 		decision  string
 		integrity bool
 	}{
-		{"R1", recovery, -1, "RECOVERY_REQUIRED", false}, {"R2", pruneRecovery, 0, "RECOVERY_REQUIRED", false}, {"R3", modelReplay(1), -1, "RECOVERY_REQUIRED", false},
-		{"R4", modelOrdinary(1, 2, 2, 2, 1, 0, 0), 0, "RECOVERY_REQUIRED", false}, {"R5", archiveRecovery, 0, "RECOVERY_REQUIRED", false},
-		{"R6", busySide, 1, "LOCAL_BUSY", false}, {"R7", modelPrune(false), 15120, "LOCAL_BUSY", false}, {"R8", modelBase(1, 0, 0), 1, "", false}, {"R9", func() StorageAuthorityV1 {
+		{"R1", recovery, -1, "RECOVERY_REQUIRED", false},
+		{"R2", pruneRecovery, 0, "RECOVERY_REQUIRED", false},
+		{"R3", modelReplay(1), -1, "RECOVERY_REQUIRED", false},
+		{"R4", modelOrdinary(1, 2, 2, 2, 1, 0, 0), 0, "RECOVERY_REQUIRED", false},
+		{"R5", archiveRecovery, 0, "RECOVERY_REQUIRED", false},
+		{"R6", busySide, 1, "LOCAL_BUSY", false},
+		{"R7", modelPrune(false), 15120, "LOCAL_BUSY", false},
+		{"R8", modelBase(1, 0, 0), 1, "", false},
+		{"R9", func() StorageAuthorityV1 {
 			a := modelBase(1, 0, 0)
 			a.NextGenerationID = 3
 			a.SelectedSide = modelSide(2, 0, 3, 3, 3)
 			return a
 		}(), 1439, "", false},
-		{"R10", modelBase(1, 0, 1), 0, "", true}, {"R11", modelBase(1, 1, 13681), 0, "", true}, {"R12", modelBase(1, 0, 1), -1, "", true},
-		{"R13", func() StorageAuthorityV1 { a := archiveSide(2); a.U = 1; return a }(), 0, "", true}, {"R14", archivePruneRecovery, 0, "RECOVERY_REQUIRED", false}, {"R15", archiveSide(1), -1, "LOCAL_BUSY", false},
+		{"R10", modelBase(1, 0, 1), 0, "", true},
+		{"R11", modelBase(1, 1, 13681), 0, "", true},
+		{"R12", modelBase(1, 0, 1), -1, "", true},
+		{"R13", func() StorageAuthorityV1 { a := archiveSide(2); a.U = 1; return a }(), 0, "", true},
+		{"R14", archivePruneRecovery, 0, "RECOVERY_REQUIRED", false},
+		{"R15", archiveSide(1), -1, "LOCAL_BUSY", false},
 		{"H17d", func() StorageAuthorityV1 { a := archiveSide(2); a.U = 1; return a }(), 1, "LOCAL_BUSY", false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -524,10 +535,18 @@ func testArchiveProjection(t *testing.T) {
 		decision  string
 		authority *StorageAuthorityV1
 	}{
-		{"new_crossed_ok", 2, 3, &a, nil, "", &a}, {"new_crossed_commit_error", 2, 3, &a, caused, "", &a}, {"new_crossed_no_plan", 2, 3, nil, primary, "", nil},
-		{"unknown_crossed", 3, 3, &a, fmt.Errorf("wrapped: %w", primary), "", nil}, {"old_write_started", 1, 2, &a, nil, "", nil}, {"invalid_typed_nil", 1, 0, &a, typedNil, "", nil},
-		{"sentinel_new_prewrite", 2, 1, &a, sentinel, "", nil}, {"sentinel_old_prewrite", 1, 1, &a, sentinel, "PROFILE_NOOP", nil}, {"sentinel_old_crossed", 1, 3, &a, sentinel, "", nil},
-		{"sentinel_wrapped", 1, 1, &a, fmt.Errorf("wrapped: %w", sentinel), "", nil}, {"sentinel_join_first", 1, 1, &a, errors.Join(sentinel, cleanup), "", nil}, {"sentinel_join_last", 1, 1, &a, errors.Join(cleanup, sentinel), "", nil},
+		{"new_crossed_ok", 2, 3, &a, nil, "", &a},
+		{"new_crossed_commit_error", 2, 3, &a, caused, "", &a},
+		{"new_crossed_no_plan", 2, 3, nil, primary, "", nil},
+		{"unknown_crossed", 3, 3, &a, fmt.Errorf("wrapped: %w", primary), "", nil},
+		{"old_write_started", 1, 2, &a, nil, "", nil},
+		{"invalid_typed_nil", 1, 0, &a, typedNil, "", nil},
+		{"sentinel_new_prewrite", 2, 1, &a, sentinel, "", nil},
+		{"sentinel_old_prewrite", 1, 1, &a, sentinel, "PROFILE_NOOP", nil},
+		{"sentinel_old_crossed", 1, 3, &a, sentinel, "", nil},
+		{"sentinel_wrapped", 1, 1, &a, fmt.Errorf("wrapped: %w", sentinel), "", nil},
+		{"sentinel_join_first", 1, 1, &a, errors.Join(sentinel, cleanup), "", nil},
+		{"sentinel_join_last", 1, 1, &a, errors.Join(cleanup, sentinel), "", nil},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			raw := ArchiveProfileOutcome{Truth: row.truth, Stage: row.stage, Err: row.err}
@@ -607,12 +626,13 @@ func testArchiveReadComposition(t *testing.T) {
 	}{{"EIO", codeEIO, 0, EngineIO, codeEIO, expectedNativeDiagnostic(codeEIO)}, {"pointer", codeSuccess, 1, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape"}, {"length", codeNotFound, 1, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape"}, {"width", codeSuccess, 1048577, EngineIntegrity, codeInvalid, "stored value width outside SchemaV2 bound"}} {
 		t.Run(row.name, func(t *testing.T) {
 			var err error
-			if row.length == 1 {
+			switch row.length {
+			case 1:
 				_, _, err = copiedGetResult(readDBIsLiteral()[0], []byte{2}, row.rc, unsafe.Pointer(nil), 1)
-			} else if row.length == 1048577 {
+			case 1048577:
 				buffer := [1]byte{0}
 				_, _, err = copiedGetResult(readDBIsLiteral()[0], []byte{2}, row.rc, unsafe.Pointer(&buffer[0]), 1048577)
-			} else {
+			default:
 				_, _, err = copiedGetResult(readDBIsLiteral()[0], []byte{2}, row.rc, nil, 0)
 			}
 			requireEnvironmentError(t, err, row.class, operationGet, row.code, row.diagnostic)
