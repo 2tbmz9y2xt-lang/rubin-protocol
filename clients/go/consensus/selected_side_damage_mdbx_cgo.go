@@ -144,10 +144,16 @@ func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) 
 	}
 	p := &selectedSideDamagePlan{}
 	batch, err := newSelectedSideEvidence(reader, authority).transfer(p)
-	if err != nil {
+	var engine *mdbx.EngineError
+	switch {
+	case err == nil:
+		return SelectedSidePlanV1{Batch: batch}, nil
+	case errors.As(err, &engine) && selectedSideResource(engine.Class) != "":
+		// Only an actual transient read failure keeps the in-flight read class; a positive absence, a validation
+		// defect or a capacity/encoding exit carries none.
 		return SelectedSidePlanV1{ReadResource: p.step}, err
 	}
-	return SelectedSidePlanV1{Batch: batch}, nil
+	return SelectedSidePlanV1{}, err
 }
 
 // ClassifySelectedSideFailureMDBX classifies one dormant node attempt's uncrossed raw error with the existing ordered

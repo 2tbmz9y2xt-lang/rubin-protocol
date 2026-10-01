@@ -817,12 +817,13 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
 		w.wantImage("required commitment-invalid linking body kept")
 	})
-	// N3 native outcomes on the healthy clear of side 11..15 (F10) by a winning canonical-10 child: each scenario runs the
-	// public Replace once; its tuple is asserted before the fixture's own site bookkeeping.
+	// N3 native outcomes on the healthy clear of the mined side 11..15 (F10, tip work 16) by a winning canonical-17 child
+	// (work 19 below the canonical tip's 21): each scenario runs the public Replace once; its tuple is asserted before the
+	// fixture's own site bookkeeping.
 	n3 := func(t *testing.T) (*ssqWorld, []byte) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 20})
-		w.retainSide(10, 15, 5, 11, false)
-		return w, w.child(w.canonical[10], 11, nil)
+		w.retainSide(10, 15, 5, 16, false)
+		return w, w.child(w.canonical[17], 18, nil)
 	}
 	n3Replace := func(w *ssqWorld, raw []byte, scen mdbx.SelectedDamageScenario, rank uint8, key []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence, error) {
 		var out SelectedSideMutationOutcome
