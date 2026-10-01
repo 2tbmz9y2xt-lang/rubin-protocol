@@ -37,7 +37,6 @@ func rollFixtureWorld(t *testing.T) (*ssqWorld, []byte) {
 	return w, raw
 }
 
-
 // rollLocatorWorld is rollFixtureWorld whose tip 1440 is a hash-bound block naming an absent unowned parent Z (its
 // SideLink and descriptor are rewritten to it): qualification of the exact-tip child asks row 1439 by Z, a clean damage
 // locator (2,1440,1439); the recheck of 1439 finds that row healthy and the single retry repeats the same locator.
@@ -106,6 +105,18 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 			t.Fatalf("R-n evidence %+v", evidence)
 		}
 		w.wantImage("oldest transient read keeps OLD")
+	})
+	t.Run("R-n-owner", func(t *testing.T) {
+		// The oldest row's required CanonicalOwnerV1 read (rank 7, active generation 1) faults transiently: it keeps
+		// canonical_artifact_read at its fixed position, with no plan, write or commit and the grant released (operate).
+		w, raw := rollFixtureWorld(t)
+		out, evidence := w.armedPrepare(mdbx.SelectedDamageGetEIO, 7, ssqMust(mdbx.CanonicalOwnerKey(1, w.side[1])), raw)
+		retainWant(t, "required owner transient read canonical_artifact_read", out, ssqCanonical, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		ssqWantNative(t, "oldest owner GetEIO", out.Err, ssqGetEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("R-n-owner evidence %+v", evidence)
+		}
+		w.wantImage("required owner transient read keeps OLD")
 	})
 	t.Run("H6b-NEW", func(t *testing.T) {
 		w, raw := rollFixtureWorld(t)

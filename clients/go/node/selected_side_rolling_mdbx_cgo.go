@@ -9,8 +9,9 @@ import (
 
 // Dormant selected-side rolling preparation RP (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.3, 6.4.1.5 and 6.4.1.9,
 // RUBIN_COMPACT_BLOCKS.md Section 10.2). PrepareSelectedSideRollingMDBX has no production caller. It shares Retain's
-// attempts, grant, Update, recheck/retry and raw tuple rules; its only write moves the oldest row of a full 1440-row side
-// into SIDE(g,first,first,first) through the consensus rolling planner, and the incoming candidate is never stored.
+// attempts, grant, Update, recheck/retry and raw tuple rules; through the consensus rolling planner it writes either the
+// move of a healthy oldest row of a full 1440-row side into SIDE(g,first,first,first) or, on positive oldest damage,
+// the complete side clear. The incoming candidate is never stored.
 
 const (
 	// selectedRetainRoll is Proll, the rolling planner's whole charge: Pclear plus the oldest body's Go copy and native

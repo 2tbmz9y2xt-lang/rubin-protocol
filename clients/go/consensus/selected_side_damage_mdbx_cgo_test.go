@@ -527,6 +527,12 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		// errors.Is plus a nil Unwrap keeps the exact unwrapped request sentinel identity.
 		logicalMDBXAssert(t, viewErr == nil && errors.Is(err, errSelectedSideRequest) && errors.Unwrap(err) == nil && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan %+v (%v, %v)", plan, err, viewErr)
 		w.wantImage("non-full rolling plan writes nothing", w.authority, false)
+		// M29: a legal Cleaned one-slot descriptor (F1, C1441, count 1439) is the same exact planner-domain refusal.
+		w = newSideWorld(t, sideWorldSpec{f: 1, tip: 1_441, rows: 1_439, canonicalTip: 1})
+		plan, err = SelectedSidePlanV1{}, nil
+		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && errors.Is(err, errSelectedSideRequest) && errors.Unwrap(err) == nil && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan one-slot %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("one-slot rolling plan writes nothing", w.authority, false)
 	})
 	// Full side 2..1441/F1 (count 1440, 266 logical bytes per row, mined rows unowned): the planner's own fields.
 	rollSpec := sideWorldSpec{f: 1, tip: 1_441, rows: 1_440, canonicalTip: 1}
