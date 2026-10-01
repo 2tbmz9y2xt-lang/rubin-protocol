@@ -486,10 +486,11 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cgo-only dormant selected-side qualifier is the one default file a no-cgo build does not select.
+	// The cgo-only dormant selected-side qualifier and retention files are the two default files a no-cgo build does
+	// not select.
 	wantGoFiles := 67
 	if build.Default.CgoEnabled {
-		wantGoFiles = 68
+		wantGoFiles = 69
 	}
 	if len(defaultPkg.GoFiles) != wantGoFiles || slices.Contains(defaultPkg.GoFiles, tagged) || !slices.Contains(defaultPkg.IgnoredGoFiles, tagged) {
 		t.Fatalf("default build selects %d files, tagged file selected=%v", len(defaultPkg.GoFiles), slices.Contains(defaultPkg.GoFiles, tagged))
@@ -498,6 +499,69 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	context.BuildTags = []string{"rubin_da_observer"}
 	if taggedPkg, err := context.ImportDir(".", 0); err != nil || !slices.Contains(taggedPkg.GoFiles, tagged) {
 		t.Fatalf("tagged build omits %s (err=%v)", tagged, err)
+	}
+	// No-cgo selection is read from a clone of build.Default; the global context is never changed. With and without the
+	// fixture tag, the cgo-only selected-side owners and their ordinary and fixture tests stay unselected and ignored,
+	// and no selected no-cgo source declares an owned package-level API name (a finite name-absence observation only).
+	cgoEnabled := build.Default.CgoEnabled
+	owned := map[string][]string{
+		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go"},
+		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go"},
+		"../internal/mdbx": {"mdbx_cgo.go", "mdbx_fixture_cgo.go", "mdbx_cgo_test.go", "mdbx_fixture_cgo_test.go"},
+	}
+	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true}
+	for _, tags := range [][]string{nil, {"rubin_mdbx_fixture"}} {
+		noCgo := build.Default
+		noCgo.CgoEnabled, noCgo.BuildTags = false, tags
+		for dir, names := range owned {
+			pkg, err := noCgo.ImportDir(dir, 0)
+			if err != nil {
+				t.Fatalf("no-cgo %s tags=%v: %v", dir, tags, err)
+			}
+			selected := slices.Concat(pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles)
+			for _, name := range names {
+				if slices.Contains(selected, name) || !slices.Contains(pkg.IgnoredGoFiles, name) {
+					t.Fatalf("no-cgo %s tags=%v selects cgo-only %s", dir, tags, name)
+				}
+			}
+			for _, name := range slices.Concat(pkg.GoFiles, pkg.CgoFiles) {
+				file, err := parser.ParseFile(token.NewFileSet(), dir+"/"+name, nil, parser.SkipObjectResolution)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var declared []string
+				for _, decl := range file.Decls {
+					switch decl := decl.(type) {
+					case *ast.FuncDecl:
+						if decl.Recv == nil {
+							declared = append(declared, decl.Name.Name)
+						}
+					case *ast.GenDecl:
+						for _, spec := range decl.Specs {
+							switch spec := spec.(type) {
+							case *ast.TypeSpec:
+								declared = append(declared, spec.Name.Name)
+							case *ast.ValueSpec:
+								for _, id := range spec.Names {
+									declared = append(declared, id.Name)
+								}
+							}
+						}
+					}
+				}
+				for _, id := range declared {
+					if ownedAPI[id] {
+						t.Fatalf("no-cgo %s tags=%v %s declares cgo-only API %s", dir, tags, name, id)
+					}
+				}
+			}
+			if dir == "." && tags == nil && (len(pkg.GoFiles) != 67 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
+				t.Fatalf("no-cgo node selects Go:%d Cgo:%d, observer selected=%v", len(pkg.GoFiles), len(pkg.CgoFiles), slices.Contains(pkg.GoFiles, tagged))
+			}
+		}
+	}
+	if build.Default.CgoEnabled != cgoEnabled || len(build.Default.BuildTags) != 0 {
+		t.Fatalf("no-cgo observation changed build.Default (cgo=%v tags=%v)", build.Default.CgoEnabled, build.Default.BuildTags)
 	}
 	for _, name := range defaultPkg.GoFiles {
 		file, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.SkipObjectResolution)

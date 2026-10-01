@@ -17,7 +17,7 @@ static struct { unsigned scenario; int get_fired; MDBX_env *env; MDBX_txn *old_t
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe) {
 	int rc = 1;
 	pthread_mutex_lock(&rubin_sd_mu);
-	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 11 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
+	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 12 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
 		memset(&rubin_sd, 0, sizeof(rubin_sd));
 		rubin_sd.scenario = scenario;
 		rubin_sd.env = env;
@@ -160,11 +160,23 @@ static int rubin_sd_txn_abort(MDBX_txn *txn) {
 	pthread_mutex_unlock(&rubin_sd_mu);
 	return MDBX_EIO;
 }
+// rubin_sd_put fails exactly one armed write-transaction put of the armed DBI and key with EIO before libMDBX sees it.
+static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
+	int fault = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario == 12 && txn != NULL && txn == rubin_sd.write_txn && rubin_sd.counts.faults == 0 && dbi == rubin_sd.fault_dbi && key->iov_len != 0 && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0) {
+		fault = 1;
+		rubin_sd.counts.faults++;
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	return fault ? MDBX_EIO : mdbx_put(txn, dbi, key, data, flags);
+}
 #define mdbx_txn_begin rubin_sd_txn_begin
 #define mdbx_get rubin_sd_get
 #define mdbx_del rubin_sd_del
 #define mdbx_txn_commit rubin_sd_txn_commit
 #define mdbx_txn_abort rubin_sd_txn_abort
+#define mdbx_put rubin_sd_put
 #endif // RUBIN_SELECTED_DAMAGE_FIXTURE
 typedef struct { int first; int second; } rubin_mdbx_debug_result;
 static rubin_mdbx_debug_result rubin_mdbx_normalize_debug(void) {

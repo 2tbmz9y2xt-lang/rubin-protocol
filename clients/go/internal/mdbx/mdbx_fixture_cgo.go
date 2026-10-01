@@ -735,6 +735,7 @@ const (
 	SelectedDamageCommitUnreadable
 	SelectedDamageCommitThird
 	SelectedDamageAbortEIO
+	SelectedDamagePutEIO
 )
 
 // SelectedDamageEvidence is the bounded native evidence of one armed invocation: site counters, injected faults and
@@ -798,7 +799,7 @@ func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner
 }
 
 func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
-	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageAbortEIO && run != nil
+	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamagePutEIO && run != nil
 }
 
 func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {

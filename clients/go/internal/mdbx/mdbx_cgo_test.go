@@ -2995,8 +2995,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	fixtureStart, fixtureEnd := strings.Index(preamble, fixtureOpen), strings.Index(preamble, fixtureClose)
 	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 2 && fixtureStart > 0 && fixtureEnd > fixtureStart, "fixture-only preamble block framing drifted")
 	fixtureBlock := preamble[fixtureStart : fixtureEnd+len(fixtureClose)]
-	require(strings.Count(fixtureBlock, "#define ") == 5 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
-	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n"} {
+	require(strings.Count(fixtureBlock, "#define ") == 6 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
+	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n"} {
 		require(strings.Count(fixtureBlock, alias) == 1 && strings.Index(fixtureBlock, alias) > strings.LastIndex(fixtureBlock, "static int rubin_sd_"), "fixture-only alias %q drifted", alias)
 	}
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))

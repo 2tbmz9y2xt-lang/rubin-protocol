@@ -427,6 +427,125 @@ func sideWantCleared(t *testing.T, w *sideWorld, out selectedSideOutcome, label 
 	w.wantImage(label+" after reopen", cleared, true)
 }
 
+// setDescriptor rewrites only the committed selected descriptor and tracks the exact new authority bytes.
+func (w *sideWorld) setDescriptor(edit func(*mdbx.SelectedSideV1)) {
+	w.t.Helper()
+	a, err := mdbx.DecodeStorageAuthorityV1(w.authority)
+	logicalMDBXAssert(w.t, err == nil, "side world authority decode: %v", err)
+	edit(a.SelectedSide)
+	encoded, err := a.Encode()
+	logicalMDBXAssert(w.t, err == nil, "side world authority encode: %v", err)
+	w.authority = encoded
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
+}
+
+// TestSelectedSideDamageAdapterFixture compares admissible committed images through the Reader: a current-tip SideLink
+// naming another hash than the descriptor is canonical integrity with no clear, while a lower height keeps its health.
+func TestSelectedSideDamageAdapterFixture(t *testing.T) {
+	t.Run("H10-hash", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.TipHash = w.sideAt[3] })
+		below := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 3)
+		sideWantOutcome(t, below, "", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "below-tip health unchanged")
+		logicalMDBXAssert(t, below.Err == nil, "below-tip health kept an error: %v", below.Err)
+		sideWantCause(t, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "selected side tip link does not name the descriptor tip", "canonical integrity/no clear")
+		w.wantImage("tip hash mismatch", w.authority, false)
+	})
+	t.Run("H10-owner-height", func(t *testing.T) {
+		// Side F2 rows 3..4 name canonical k-1 and k (bodies absent); tip link hash/work, owned header and predecessor
+		// work agree, so the keyed owner height alone decides: k=2<B=3<=h optional clears; h=4<B=5<=k required defect.
+		spec := func(b, k uint64) sideWorldSpec {
+			return sideWorldSpec{f: 2, tip: 4, rows: 2, b: b, canonicalTip: 5, override: map[uint64]uint64{3: k - 1, 4: k}}
+		}
+		w := newSideWorld(t, spec(3, 2))
+		sideWantCleared(t, w, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "owner k below B at tip h at or above B clears")
+		w = newSideWorld(t, spec(5, 5))
+		sideWantCause(t, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "required canonical row is absent or does not hash to its key", "owner k at or above B at tip h below B integrity")
+		w.wantImage("owner k at or above B at tip h below B integrity", w.authority, false)
+		w.wantOpen("owner k at or above B at tip h below B integrity")
+		sideWantReleased(t, w.owner, "owner k at or above B at tip h below B integrity")
+	})
+}
+
+// TestSelectedSideDamageAdapter owns the node recheck adapter's bounded current-tip predicates beside the unchanged
+// existing health: a tip work disagreement after the owner/header/keep checks is a complete positive-damage clear.
+func TestSelectedSideDamageAdapter(t *testing.T) {
+	old, pre := mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite
+	t.Run("H10-work", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.CumulativeChainwork = sideWorldWork(9) })
+		below := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 3)
+		sideWantOutcome(t, below, "", "OLD", old, pre, "below-tip health unchanged")
+		logicalMDBXAssert(t, below.Err == nil, "below-tip health kept an error: %v", below.Err)
+		sideWantCleared(t, w, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "persistent tip work mismatch complete damage clear/no healthy retry")
+	})
+	t.Run("H10-link", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		w.removeLink(4)
+		out := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4)
+		sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", old, pre, "missing tip link")
+		sideWantEngine(t, out.Err, mdbx.EngineIntegrity, "selected side link is absent", "missing tip link")
+	})
+	t.Run("plan-clear", func(t *testing.T) {
+		// The healthy clear plan: one authority write and three unkept leaving header deletes, no positive damage, no
+		// failed read class. A missing required link fails ReadRequiredSideLink itself (recorded Integrity), so the zero plan
+		// keeps that failed invocation's branch_data class.
+		w := newSideWorld(t, sideFullSpec)
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(plan.Batch.Mutations) == 4, "healthy clear plan %+v (%v)", plan, err)
+		w.removeLink(3)
+		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed plan %+v (%v)", plan, err)
+		// Leaving row 3 names the canonical-owned block 0 whose required header is gone: the required Get succeeds and the
+		// owned defect follows, so the zero plan carries no read class.
+		w = newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, override: map[uint64]uint64{3: 0}})
+		w.removeHeader(w.canonical[0])
+		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		var failure *selectedSideFailure
+		logicalMDBXAssert(t, errors.As(err, &failure) && failure.result == selectedSideIntegrity && failure.cause.Error() == "required canonical row is absent or does not hash to its key" &&
+			plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "owned defect plan %+v (%v)", plan, err)
+		w.wantImage("owned defect plan writes nothing", w.authority, false)
+		// A legal authority without a selected side is the exact request refusal before any artifact read.
+		w = newSideWorld(t, sideFullSpec)
+		a, aerr := mdbx.DecodeStorageAuthorityV1(w.authority)
+		a.SelectedSide = nil
+		encoded, eerr := a.Encode()
+		logicalMDBXAssert(t, aerr == nil && eerr == nil, "side-less authority: %v %v", aerr, eerr)
+		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
+		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "side-less plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
+	})
+	t.Run("classify", func(t *testing.T) {
+		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own
+		// occurrence; a mismatched code binds nothing; definitely-precommit maps a non-terminal cause to precommit.
+		ioErr, tx, leaf := &mdbx.EngineError{Class: mdbx.EngineIO, Operation: "get", Code: 5}, &TxError{Code: BLOCK_ERR_MERKLE_INVALID}, errors.New("bound")
+		for _, c := range []struct {
+			err, leaf          error
+			stage              mdbx.UpdateStage
+			step, result, want string
+		}{
+			{ioErr, nil, pre, "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", "", "LOCAL_RESOURCE_UNAVAILABLE(branch_data)"},
+			{tx, tx, pre, "", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)"},
+			{tx, tx, pre, "", "CONSENSUS_INVALID(BLOCK_ERR_PARSE)", "TERMINAL_LOCAL_INVARIANT(evidence)"},
+			{leaf, leaf, pre, "", "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", "LOCAL_RESOURCE_UNAVAILABLE(branch_data)"},
+			{ioErr, nil, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, "", "", "LOCAL_PERSISTENCE_ERROR(precommit)"},
+		} {
+			got := ClassifySelectedSideFailureMDBX(c.err, c.stage, c.step, c.leaf, c.result)
+			logicalMDBXAssert(t, got == c.want, "classify %v/%q bound %q: %q, want %q", c.err, c.step, c.result, got, c.want)
+		}
+	})
+	t.Run("H10-stale", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		out := RecheckSelectedSideMDBX(w.store, w.owner, 2, 5, 4)
+		sideWantOutcome(t, out, "", "OLD", old, pre, "stale tip recheck")
+		logicalMDBXAssert(t, out.Err == errSelectedSideRequest, "stale tip recheck error %v", out.Err) //nolint:errorlint // The exact direct request refusal.
+		w.wantImage("stale tip recheck", w.authority, false)
+	})
+}
+
 func TestSelectedSideDamageHealthyNoOp(t *testing.T) {
 	w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, custom: map[uint64]string{3: "valid"}})
 	for _, h := range []uint64{2, 3, 4} {
@@ -457,6 +576,11 @@ func TestSelectedSideDamageFullClear(t *testing.T) {
 					w.reblock(h, [32]byte{0xee}, [32]byte{0xee})
 				case "work mismatch":
 					w.relink(h, [32]byte(w.links[h][32:64]), sideWorldWork(h+7))
+				}
+				if h == w.spec.tip && (damage == "header parent mismatch" || damage == "link parent mismatch") {
+					// The reblocked tip row has a new hash: the descriptor names it so the current-tip identity predicate
+					// passes and the seeded parent relation stays the diagnosed damage.
+					w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.TipHash = w.sideAt[h] })
 				}
 				sideWantCleared(t, w, w.run(h), damage)
 			})

@@ -1,0 +1,909 @@
+//go:build rubin_mdbx_fixture && cgo && (darwin || linux) && (amd64 || arm64)
+
+package node
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"math"
+	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
+)
+
+// newRetainFixtureWorld compares committed rows natively, so a consumed or seeded image is observed without Reader.Get.
+func newRetainFixtureWorld(t *testing.T, spec ssqSpec) *ssqWorld {
+	t.Helper()
+	w := newRetainWorld(t, spec)
+	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+		return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+	}
+	return w
+}
+
+// armed invokes the real entrypoint exactly once, through retain, under one armed native scenario; a site not reached as
+// armed fails. retain's input and lane checks are Go-only reservation and byte checks, so they add no native Get.
+func (w *ssqWorld) armed(scenario mdbx.SelectedDamageScenario, rank uint8, key, raw []byte, tip *mdbx.AuthorityPointV1) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
+	w.t.Helper()
+	var out SelectedSideMutationOutcome
+	calls := 0
+	evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() {
+		calls++
+		out = w.retain(raw, tip)
+	})
+	if err != nil || calls != 1 {
+		w.t.Fatalf("scenario %d: %v (%+v)", scenario, err, evidence)
+	}
+	return out, evidence
+}
+
+// exhaust commits next_generation_id=maxuint64 over the tracked authority, leaving every other byte unchanged.
+func (w *ssqWorld) exhaust() {
+	w.t.Helper()
+	a, err := mdbx.DecodeStorageAuthorityV1(w.rows[string([]byte{0, 2})].value)
+	if err != nil {
+		w.t.Fatalf("authority decode: %v", err)
+	}
+	a.NextGenerationID = math.MaxUint64
+	w.apply([]mdbx.Mutation{w.authorityMutation(a)})
+}
+
+// retainWantCommit requires the CommitError: truth = raw truth, primary commit ENOSPC (update/Capacity/28), readback
+// cause exactly Get EIO (update/IO/5) when readback faulted, else absent (updateNativeReadback/updateResult).
+func retainWantCommit(t *testing.T, label string, out SelectedSideMutationOutcome, readback bool) {
+	t.Helper()
+	var commit *mdbx.CommitError
+	if !errors.As(out.Err, &commit) || commit.Truth != out.Truth || (commit.ReadbackCause != nil) != readback {
+		t.Fatalf("%s: raw commit error %v", label, out.Err)
+	}
+	ssqWantNative(t, label+": primary commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
+	if readback {
+		ssqWantNative(t, label+": readback get EIO", commit.ReadbackCause, ssqNative{"update", mdbx.EngineIO, 5})
+	}
+}
+
+func TestSelectedSideRetentionFixture(t *testing.T) {
+	old, pre, crossed := mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, mdbx.UpdateStageCommitMayHaveCrossed
+	n1 := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10, authority: func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID = 2 }})
+		return w, w.child(w.canonical[5], 6, nil), w.authorityValue()
+	}
+	// n2 is the count-1 side (g2, F5, tip 6, work 7, planted bytes 1000) and its exact-tip child at 7 (work 8, below the
+	// canonical tip's 11) with the literal appended side.
+	n2 := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1, mdbx.SelectedSideV1) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		raw := w.child(w.side[6], 7, nil)
+		return w, raw, w.tracked(), mdbx.SelectedSideV1{GenerationID: 2, F: 5, TipHeight: 7, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(8), RowCount: 2, LogicalBytes: 1_000 + uint64(len(raw))}
+	}
+	u64 := func(n uint64) []byte { return binary.BigEndian.AppendUint64(nil, n) }
+	at := func(base []byte, offset int, value []byte) []byte {
+		out := bytes.Clone(base)
+		copy(out[offset:], value)
+		return out
+	}
+	t.Run("H1", func(t *testing.T) {
+		// One-slot side 2..1440 (F0, C1440, count 1439) with its header-only history row 1. NONE encoding: selected
+		// generation 39, F 47, tip 55, work 95, count 135; PRUNE_GC one-span encoding: span generation 38, first 46,
+		// last 54, next 62, selected count 169 (authority_encode.go field order).
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+		w.retainSide(0, 1_440, 1_439, 1_441, true)
+		legal := w.rows[string([]byte{0, 2})].value
+		prepared, err := mdbx.DecodeStorageAuthorityV1(legal)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		prepared.Phase = mdbx.StoragePhasePruneGCV1
+		prepared.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 1, LastHeight: 1, NextHeight: 1}}}
+		withSpan, err := prepared.Encode()
+		if err != nil {
+			t.Fatalf("prepared encode: %v", err)
+		}
+		raws := [][]byte{w.child(w.side[1_440], 1_441, nil), make([]byte, mdbx.MaxBlockBytes+1)}
+		for _, c := range []struct {
+			name  string
+			value []byte
+		}{
+			{"C>=1440 count 1438", at(legal, 135, []byte{0x05, 0x9e})},
+			{"tip <= F", at(legal, 47, u64(1_440))},
+			{"tip height outside domain", at(legal, 55, u64(1<<32))},
+			{"work outside domain", at(legal, 98, []byte{2})},
+			{"illegal full+SIDE", at(withSpan, 169, []byte{0x05, 0xa0})},
+			{"SIDE gap", at(at(at(withSpan, 46, u64(0)), 54, u64(0)), 62, u64(0))},
+			{"SIDE overlapping selected rows", at(withSpan, 54, u64(2))},
+			{"SIDE different generation", at(withSpan, 38, u64(3))},
+			{"SIDE wider span", at(at(withSpan, 46, u64(0)), 62, u64(0))},
+			{"SIDE displaced", at(at(at(withSpan, 46, u64(3)), 54, u64(3)), 62, u64(3))},
+		} {
+			w.seed(0, []byte{2}, c.value)
+			for _, raw := range raws {
+				out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, nil)
+				retainWantIntegrity(t, c.name+": recorded malformed authority before optional read", out, "invalid storage authority")
+				ssqWantGets(t, c.name, evidence, [8]uint64{1})
+				w.reopen()
+			}
+		}
+	})
+	t.Run("H5", func(t *testing.T) {
+		// M46: the candidate-owner absence (and absent tip boundary) must be in the final union. A readback-only Get EIO on
+		// that key (scenario 9) turns the committed image UNKNOWN; an omitted row leaves NEW. The tuple is asserted inside
+		// the callback, before fault bookkeeping and before the baseline Get counts below, which an omission also changes.
+		for _, c := range []struct {
+			name string
+			rank uint8
+		}{{"candidate owner absence", 7}, {"absent next-height tip boundary", 2}} {
+			w, raw, prior := n1(t)
+			key := ssqMust(mdbx.HeightKey(1, 11))
+			if c.rank == 7 {
+				key = ssqMust(mdbx.CanonicalOwnerKey(1, ssqHash(raw)))
+			}
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageCommitUnreadable, c.rank, key, func() {
+				out := w.retain(raw, w.tipAt(10))
+				var commit *mdbx.CommitError
+				if out.Result != retainCleared || out.Decision != "" || out.CanonicalTruth != retainNA || out.Truth != mdbx.CommitTruthUnknown || out.Stage != crossed ||
+					!errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthUnknown {
+					t.Fatalf("required native OLD/Consulted observation captured and equality rejected: %s %+v", c.name, out)
+				}
+				ssqWantNative(t, c.name+": primary commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
+				ssqWantNative(t, c.name+": readback get EIO", commit.ReadbackCause, ssqNative{"update", mdbx.EngineIO, 5})
+			})
+			if err != nil || evidence.Faults != 2 || evidence.Commits != 1 || evidence.BeginWrite != 1 || evidence.BeginRead != 1 {
+				t.Fatalf("%s: fixture site %v (%+v)", c.name, err, evidence)
+			}
+			// The fixture commits before the failed readback; UNKNOWN itself proves no image, so NEW is checked independently.
+			w.expectN1(raw, prior, 2, 5, ssqWork(7))
+			w.wantN1Image(c.name+": independently checked committed NEW image", raw)
+		}
+		w, raw, prior := n1(t)
+		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "equality NEW with commit error", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted 0/0/3/6/0/0/0/2, targets+recapture 2x 1/0/0/1/1/0/1/0. Readback:
+		// 4 targets twice plus 11 relied-on rows (forward 5, 10, 11; headers 0..5; owners of 5 and candidate NONE).
+		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
+			t.Fatalf("required native OLD/Consulted observation captured: %+v", evidence)
+		}
+		w.expectN1(raw, prior, 2, 5, ssqWork(7))
+		w.wantN1Image("equality NEW image", raw)
+	})
+	t.Run("H5-tip", func(t *testing.T) {
+		w, raw, prior := n1(t)
+		tip := [32]byte{0x58}
+		w.apply([]mdbx.Mutation{
+			w.literal(2, ssqMust(mdbx.HeightKey(1, 0xffffffff)), mdbx.ChainValue(tip, w.canonical[10], ssqWork(1<<40)), false),
+			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(0xffffffff), false),
+		})
+		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, &mdbx.AuthorityPointV1{Height: 0xffffffff, BlockHash: tip})
+		retainWant(t, "tip 0xffffffff equality NEW", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
+			t.Fatalf("tip boundary image present/equality protection: %+v", evidence)
+		}
+		w.expectN1(raw, prior, 2, 5, ssqWork(7))
+		w.wantN1Image("tip boundary N1 image", raw)
+	})
+	t.Run("R-tip-suffix", func(t *testing.T) {
+		// Healthy tip (1,10) but a 103-byte suffix row (1,11): prefix-page Integrity (MDBX_INVALID -30793), recorded on the
+		// Reader, wins before any stale decision; a healthy suffix row would be STALE_LOCAL_PLAN (R-tip-stale-height).
+		w, raw, _ := n1(t)
+		w.seed(2, ssqMust(mdbx.HeightKey(1, 11)), mdbx.ChainValue([32]byte{0x11}, w.canonical[10], ssqWork(12))[:103])
+		out := w.retain(raw, w.tipAt(10))
+		retainWantRefusal(t, "suffix page integrity before stale", out, ssqIntegrity, "")
+		var failure *selectedSideQualificationError
+		errors.As(out.Err, &failure)
+		engine, ok := failure.Cause.(*mdbx.EngineError) //nolint:errorlint // The classified wrapper's own direct cause.
+		if !ok || engine.Class != mdbx.EngineIntegrity || engine.Operation != "prefix-page" || engine.Code != -30_793 || engine.Diagnostic != "stored value width outside SchemaV2 bound" {
+			t.Fatalf("suffix page cause %v", failure.Cause)
+		}
+		// The qualifier's cause and the Reader's recorded failure are one EngineError: exactly one distinct native cause.
+		ssqWantNative(t, "suffix page integrity", out.Err, ssqNative{"prefix-page", mdbx.EngineIntegrity, -30_793})
+		// The recorded Reader failure consumed the Store: the next invocation is the cached tuple with empty fields.
+		next := w.retain(raw, w.tipAt(10))
+		retainWant(t, "consumed Store cached tuple", next, "", "", "", old, pre, false)
+		if next.Err != out.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+			t.Fatalf("cached error %v, want %v", next.Err, out.Err)
+		}
+		w.wantImage("seeded suffix row and image unchanged")
+	})
+	t.Run("R-kc5", func(t *testing.T) {
+		// A byte-identical expected row is consulted, not a target: from NF[H5]'s counts each reused row moves one Get from
+		// the two target passes to the capture. Readback: header 3 targets twice+12 rows, body 3x2+12, both 2x2+13.
+		for _, c := range []struct {
+			name  string
+			ranks []uint8
+			gets  [8]uint64
+			reads uint64
+		}{
+			{"header", []uint8{3}, [8]uint64{3, 0, 5, 14, 3, 0, 2, 4}, 18},
+			{"body", []uint8{4}, [8]uint64{3, 0, 5, 15, 2, 0, 2, 4}, 18},
+			{"header+body", []uint8{3, 4}, [8]uint64{3, 0, 5, 14, 2, 0, 2, 4}, 17},
+		} {
+			w, raw, prior := n1(t)
+			hash := ssqHash(raw)
+			present := map[uint8][]byte{3: raw[:consensus.BLOCK_HEADER_BYTES], 4: raw}
+			var reused []mdbx.Mutation
+			for _, rank := range c.ranks {
+				reused = append(reused, w.literal(rank, bytes.Clone(hash[:]), bytes.Clone(present[rank]), false))
+			}
+			w.apply(reused)
+			out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
+			retainWant(t, c.name+" reused equality NEW", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+			if evidence.OldGets != c.gets || evidence.ReadGets != c.reads {
+				t.Fatalf("candidate owner absence captured/exact image comparison: %s %+v", c.name, evidence)
+			}
+			w.expectN1(raw, prior, 2, 5, ssqWork(7))
+			w.wantN1Image(c.name+" reused N1 image", raw)
+		}
+	})
+	t.Run("H11-third", func(t *testing.T) {
+		// One n=46988528 block (3n+7223040+6422528 = G+1): only the third image refuses step 10, before expected rows.
+		// H4d: a step-5 merkle failure of the same length/header and an exhausted sequence both win before that capacity.
+		w, _, _ := n1(t)
+		raw := retainLarge(t, w.canonical[5], w.ts(w.canonical[5])+120, 46_988_528)
+		w.absent = append(w.absent, ssqHash(raw))
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "charged third image bound/refusal", out, retainCapacity, "", "OLD", old, pre, true)
+		if evidence.BeginOld != 1 || evidence.OldAborts != 1 || evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.BeginRead != 0 {
+			t.Fatalf("charged third image bound/refusal: no write %+v", evidence)
+		}
+		w.wantImage("step-10 refusal before any expected-row read")
+		merkle := retainMerkle(raw)
+		if len(merkle) != len(raw) || !bytes.Equal(merkle[:consensus.BLOCK_HEADER_BYTES], raw[:consensus.BLOCK_HEADER_BYTES]) || bytes.Equal(merkle, raw) {
+			t.Fatal("merkle variant must keep the length and header and change only the body")
+		}
+		retainWantConsensus(t, "established candidate error before execution capacity", w.retain(merkle, w.tipAt(10)), consensus.BLOCK_ERR_MERKLE_INVALID)
+		w.wantImage("merkle variant writes nothing")
+		w.exhaust()
+		retainWant(t, "exhausted sequence before step-10 capacity", w.retain(raw, w.tipAt(10)), retainInvariant, "", "OLD", old, pre, false)
+		w.wantImage("exhausted sequence allocates nothing")
+	})
+	t.Run("H8-lifetime", func(t *testing.T) {
+		w, raw, prior := n1(t)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "probed N1", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		// Probes at write begin, commit and twice around the OLD abort: all inside the grant.
+		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
+			evidence.OldGets != [8]uint64{2, 0, 5, 14, 2, 0, 1, 4} {
+			t.Fatalf("every native full-lane probe denied; grant released after return: %+v", evidence)
+		}
+		w.expectN1(raw, prior, 2, 5, ssqWork(7))
+		w.wantN1Image("probed N1 image", raw)
+	})
+	for _, c := range []struct {
+		name string
+		code int
+		kind mdbx.EngineClass
+		scen mdbx.SelectedDamageScenario
+	}{{"H8a-begin-txnfull", -30_788, mdbx.EngineTransaction, mdbx.SelectedDamageBeginTxnFull}, {"H8a-begin-eio", 5, mdbx.EngineIO, mdbx.SelectedDamageBeginEIO}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _ := n1(t)
+			out, evidence := w.armed(c.scen, 0, nil, raw, w.tipAt(10))
+			retainWant(t, "no-callback native begin keeps empty fields", out, "", "", "", old, pre, false)
+			ssqWantNative(t, c.name, out.Err, ssqNative{"update", c.kind, c.code})
+			if evidence.BeginOld != 1 || evidence.OldGets != [8]uint64{} {
+				t.Fatalf("begin evidence %+v", evidence)
+			}
+			w.wantImage("begin failure")
+		})
+	}
+	t.Run("H8a-get-tip", func(t *testing.T) {
+		w, raw, _ := n1(t)
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 2, ssqMust(mdbx.HeightKey(1, 10)), raw, w.tipAt(10))
+		retainWantRefusal(t, "tip read canonical_artifact_read", out, ssqCanonical, "")
+		ssqWantNative(t, "tip GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("tip read fault")
+	})
+	t.Run("H8a-getabort-tip", func(t *testing.T) {
+		w, raw, _ := n1(t)
+		out, _ := w.armed(mdbx.SelectedDamageGetAbortEIO, 2, ssqMust(mdbx.HeightKey(1, 10)), raw, w.tipAt(10))
+		retainWantRefusal(t, "first typed result kept over abort IO", out, ssqCanonical, "")
+		ssqWantNative(t, "tip Get+abort EIO", out.Err, ssqGetEIO, ssqAbortEIO)
+		w.wantImage("tip read and abort fault")
+	})
+	t.Run("H8a-delete", func(t *testing.T) {
+		// N1 has no delete; Retain's definite delete is the fresh positive-damage Recheck: its clear deletes only the
+		// unkept side header 6 (after the first attempt locates absent body 6), and DeleteEIO fails it before commit.
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		out, evidence := w.armed(mdbx.SelectedDamageDeleteEIO, 0, nil, w.child(tip, 7, nil), w.tipAt(10))
+		retainWant(t, "definite precommit write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "H8a-delete", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		// First attempt: OLD read and abort. Recheck: one read-only begin, one write begin, one faulted delete, no commit
+		// or readback. A reused first-OLD address may also count the recheck's abort: A is 1..2, each counted abort adds
+		// two probes to the recheck's read-begin and write-begin probes.
+		if evidence.BeginOld != 1 || evidence.BeginRead != 1 || evidence.BeginWrite != 1 || evidence.Deletes != 1 || evidence.Commits != 0 || evidence.Faults != 1 ||
+			evidence.OldAborts < 1 || evidence.OldAborts > 2 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
+			t.Fatalf("H8a-delete evidence %+v", evidence)
+		}
+		w.wantImage("precommit keeps OLD")
+	})
+	t.Run("H8a-put", func(t *testing.T) {
+		w, raw, _ := n1(t)
+		out, evidence := w.armed(mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 6)), raw, w.tipAt(10))
+		retainWant(t, "definite precommit write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "H8a-put", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginWrite != 1 || evidence.Commits != 0 || evidence.BeginRead != 0 {
+			t.Fatalf("H8a-put evidence %+v", evidence)
+		}
+		w.wantImage("precommit keeps OLD")
+	})
+	t.Run("H6b-NEW", func(t *testing.T) {
+		w, raw, prior := n1(t)
+		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "proved NEW/raw causes retained/NOT_APPLICABLE empty Result", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		var commit *mdbx.CommitError
+		if !errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthNew || evidence.Commits != 1 {
+			t.Fatalf("equality NEW error %v (%+v)", out.Err, evidence)
+		}
+		ssqWantNative(t, "commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
+		w.expectN1(raw, prior, 2, 5, ssqWork(7))
+		w.wantN1Image("equality NEW image", raw)
+	})
+	t.Run("H6b-OLD", func(t *testing.T) {
+		w, raw, _ := n1(t)
+		out, _ := w.armed(mdbx.SelectedDamageCommitOld, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "equality OLD empty Result", out, "", "", retainNA, old, crossed, false)
+		retainWantCommit(t, "equality OLD", out, false)
+		w.wantImage("equality OLD image")
+	})
+	for _, c := range []struct {
+		name string
+		scen mdbx.SelectedDamageScenario
+		key  []byte
+	}{{"H6a-N1", mdbx.SelectedDamageCommitUnreadable, []byte{2}}, {"H6a-third", mdbx.SelectedDamageCommitThird, nil}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _ := n1(t)
+			out, _ := w.armed(c.scen, 0, c.key, raw, w.tipAt(10))
+			retainWant(t, "noncanonical/NOT_APPLICABLE with exact raw UNKNOWN", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
+		})
+	}
+	t.Run("H12-sentinel", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		raw := w.child(w.canonical[10], 11, nil)
+		out, evidence := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, raw, w.tipAt(10))
+		// The clean decision here would be ORDINARY with a nil Err; the joined abort cause must keep it unemitted.
+		if out.Err == nil || out.Decision != "" || out.Result == "" {
+			t.Fatalf("cleanup error retained/no clean Result or Decision: %+v", out)
+		}
+		retainWant(t, "joined abort IO storage_io/raw ordered join/CLOSED", out, retainStorageIO, "", "OLD", old, pre, false)
+		ssqWantNative(t, "sentinel abort", out.Err, ssqAbortEIO)
+		if evidence.OldAborts != 1 || evidence.BeginWrite != 0 {
+			t.Fatalf("sentinel abort evidence %+v", evidence)
+		}
+		w.wantImage("sentinel abort")
+	})
+	t.Run("H8-cache", func(t *testing.T) {
+		// The sentinel plus abort EIO consumes the Store (CLOSED). The next invocation is answered from the cached terminal
+		// tuple before any callback: empty invocation fields, the first raw error itself, OLD/Prewrite, the grant released.
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		raw := w.child(w.canonical[10], 11, nil)
+		first, _ := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "consuming first tuple", first, retainStorageIO, "", "OLD", old, pre, false)
+		next := w.retain(raw, w.tipAt(10))
+		retainWant(t, "empty invocation fields/raw cached tuple", next, "", "", "", old, pre, false)
+		if next.Err != first.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+			t.Fatalf("empty invocation fields/raw cached tuple: error %v, want %v", next.Err, first.Err)
+		}
+		w.wantImage("cached next call persisted image")
+	})
+	t.Run("H12-terminal", func(t *testing.T) {
+		// Producer composition, not native: a bound typed branch_data result then a stronger cleanup cause in one raw join;
+		// terminal integrity and the outer THREAD invariant override it, keeping the join's identity and cause order.
+		for _, c := range []struct {
+			name, want string
+			cleanup    error
+		}{
+			{"stronger canonical exact result", ssqIntegrity, &mdbx.EngineError{Class: mdbx.EngineIntegrity, Operation: "abort", Code: -30_796}},
+			{"outer invariant wins", retainInvariant, &mdbx.EngineError{Class: mdbx.EngineLocalInvariant, Operation: "abort", Code: -30_416}},
+		} {
+			leaf := &selectedSideQualificationError{Result: ssqBranch, Cause: errors.New("bound")}
+			a := &selectedRetainAttempt{ran: true, sentinel: errors.New("decision")}
+			joined := errors.Join(a.bind(leaf), c.cleanup)
+			out, request := a.project(SelectedSideMutationOutcome{Truth: old, Stage: pre, Err: joined})
+			parts := joined.(interface{ Unwrap() []error }).Unwrap()                                                                                                       //nolint:errorlint // The exact raw join.
+			if out.Result != c.want || out.Decision != "" || out.CanonicalTruth != "OLD" || out.Truth != old || out.Stage != pre || out.Err != joined || request != nil || //nolint:errorlint // Raw identity.
+				len(parts) != 2 || parts[0] != error(leaf) || parts[1] != c.cleanup { //nolint:errorlint // Exact cause order.
+				t.Fatalf("stronger canonical/invariant exact result/raw joined causes: %s projected %+v", c.name, out)
+			}
+		}
+	})
+	t.Run("R-kc4-io", func(t *testing.T) {
+		w, raw, _ := n1(t)
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 7, ssqMust(mdbx.CanonicalOwnerKey(1, ssqHash(raw))), raw, w.tipAt(10))
+		retainWantRefusal(t, "canonical_artifact_read/exact raw error/no write", out, ssqCanonical, "")
+		ssqWantNative(t, "candidate owner GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("candidate owner read fault")
+	})
+	t.Run("R-kc4-malformed", func(t *testing.T) {
+		const inconsistent = "canonical owner index inconsistency"
+		var zeroWork [40]byte
+		for _, c := range []struct {
+			name, diagnostic string
+			seed             func(w *ssqWorld, cand [32]byte)
+		}{
+			{"inverse width", "", func(w *ssqWorld, cand [32]byte) { w.seed(7, ssqMust(mdbx.CanonicalOwnerKey(1, cand)), make([]byte, 7)) }},
+			{"missing forward", inconsistent, func(w *ssqWorld, cand [32]byte) {
+				w.seed(7, ssqMust(mdbx.CanonicalOwnerKey(1, cand)), mdbx.CanonicalOwnerValue(99))
+			}},
+			{"conflicting forward", inconsistent, func(w *ssqWorld, cand [32]byte) {
+				w.seed(7, ssqMust(mdbx.CanonicalOwnerKey(1, cand)), mdbx.CanonicalOwnerValue(6))
+			}},
+			{"forward work outside domain", inconsistent, func(w *ssqWorld, cand [32]byte) {
+				w.seed(2, ssqMust(mdbx.HeightKey(1, 50)), mdbx.ChainValue(cand, w.canonical[5], zeroWork))
+				w.seed(7, ssqMust(mdbx.CanonicalOwnerKey(1, cand)), mdbx.CanonicalOwnerValue(50))
+			}},
+			{"forward width", "", func(w *ssqWorld, cand [32]byte) {
+				w.seed(2, ssqMust(mdbx.HeightKey(1, 50)), mdbx.ChainValue(cand, w.canonical[5], ssqWork(7))[:103])
+				w.seed(7, ssqMust(mdbx.CanonicalOwnerKey(1, cand)), mdbx.CanonicalOwnerValue(50))
+			}},
+		} {
+			w, raw, _ := n1(t)
+			c.seed(w, ssqHash(raw))
+			retainWantIntegrity(t, c.name+": never NONE or damage", w.retain(raw, w.tipAt(10)), c.diagnostic)
+			w.wantImage(c.name)
+		}
+	})
+	for _, c := range []struct {
+		name      string
+		tip, work uint64
+		rows      uint16
+		gets      [8]uint64
+	}{{"R-k-first-one", 6, 7, 1, [8]uint64{1, 0, 2, 7, 1, 0, 1, 3}}, {"R-k-first-many", 8, 9, 3, [8]uint64{1, 0, 2, 8, 1, 0, 2, 3}}} {
+		t.Run(c.name, func(t *testing.T) {
+			// Count 1: no Get beyond the qualification's tip link; count > 1: one extra Get(g,F+1) and its header. One
+			// body either way, no second validator/context walk, no Batch and so no native OLD capture.
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+			blocks := w.retainSide(5, c.tip, c.rows, c.work, false)
+			out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, blocks[6], w.tipAt(10))
+			retainWant(t, "first-row stored-known", out, retainDuplicate, "", retainNA, old, pre, true)
+			ssqWantGets(t, c.name+" exact reads", evidence, c.gets)
+			if evidence.BeginWrite != 0 || evidence.OldAborts != 1 {
+				t.Fatalf("%s: wrote or leaked OLD: %+v", c.name, evidence)
+			}
+			w.wantImage("first-row duplicate")
+		})
+	}
+	t.Run("R-k-first-order", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		hash := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, retainMerkle(blocks[6]), w.tipAt(10))
+		retainWantConsensus(t, "supplied failure prevents probe/body read", out, consensus.BLOCK_ERR_MERKLE_INVALID)
+		ssqWantGets(t, "steps stop before selection and probe", evidence, [8]uint64{1, 0, 1, 6, 0, 0, 0, 1})
+		w.wantImage("unobserved damaged body")
+	})
+	t.Run("R-k-first-link", func(t *testing.T) {
+		linkKey := ssqMust(mdbx.HeightKey(2, 6))
+		for _, c := range []string{"missing", "malformed"} {
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+			blocks := w.retainSide(5, 8, 3, 9, false)
+			if c == "missing" {
+				w.apply([]mdbx.Mutation{w.absentRow(6, linkKey)})
+			} else {
+				w.seed(6, linkKey, w.rows[string(append([]byte{6}, linkKey...))].value[:103])
+			}
+			retainWantIntegrity(t, c+" first required link integrity", w.retain(blocks[6], w.tipAt(10)), "")
+			w.wantImage(c + " first link")
+		}
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 8, 3, 9, false)
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 6, linkKey, blocks[6], w.tipAt(10))
+		retainWantRefusal(t, "transient first link branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "first link GetEIO", out.Err, ssqGetEIO)
+	})
+	t.Run("R-k-first-body-transient", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 8, 3, 9, false)
+		hash := w.side[6]
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 4, bytes.Clone(hash[:]), blocks[6], w.tipAt(10))
+		retainWantRefusal(t, "transient matched optional body branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "first body GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("first body transient")
+	})
+	t.Run("R-k-first-abortIO", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		hash := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+		out, evidence := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, blocks[6], w.tipAt(10))
+		retainWant(t, "locator+abortIO storage_io after cleared resource", out, retainStorageIO, "", "OLD", old, pre, false)
+		var request *selectedSideDamageRequest
+		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 6, Height: 6}) || evidence.BeginRead != 0 {
+			t.Fatalf("first-row locator abort %+v (%+v)", out, evidence)
+		}
+		w.wantImage("first row kept without recheck")
+	})
+	t.Run("R-k-link-transient", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(3, 8, 5, 9, false)
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 6, ssqMust(mdbx.HeightKey(2, 4)), blocks[8], w.tipAt(10))
+		retainWantRefusal(t, "transient fallback link branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "fallback link GetEIO", out.Err, ssqGetEIO)
+	})
+	t.Run("R-k-owner", func(t *testing.T) {
+		// The matched last row is canonically Owned at k=12: B<=k makes its body required, B>k optional.
+		for _, b := range []uint64{0, 13} {
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 10, b: b})
+			blocks := w.retainSide(3, 8, 5, 9, false)
+			tip := w.side[8]
+			w.own(tip, w.side[7], 12)
+			w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+			out := w.retain(blocks[8], w.tipAt(10))
+			if b == 0 {
+				retainWantRefusal(t, "required owner-height body terminal", out, ssqIntegrity, "required canonical row is absent")
+				w.wantImage("required body defect")
+				continue
+			}
+			retainWant(t, "optional owner-height body locator then clear", out, retainCleared, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+			w.wantCleared("owned kept header", 4, 8, 8)
+		}
+	})
+	t.Run("H7b-selected", func(t *testing.T) {
+		// Link 6 names child X (parent 5, work 7); X's header or body differs: locator, recheck clear, no incoming write.
+		for _, bodyDiffers := range []bool{false, true} {
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 30})
+			w.retainSide(5, 25, 20, 26, false)
+			raw := w.child(w.side[25], 26, nil)
+			x := ssqHash(raw)
+			w.absent = nil // Only X was listed; its hash-global rows are tracked, not asserted absent.
+			rows := []mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 6)), mdbx.ChainValue(x, w.canonical[5], ssqWork(7)), true)}
+			if bodyDiffers {
+				rows = append(rows, w.literal(3, bytes.Clone(x[:]), raw[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(x[:]), retainMerkle(raw), false))
+			} else {
+				w.seed(3, bytes.Clone(x[:]), w.headers[w.side[6]]) // A header not hashing to X is seeded raw.
+				w.rows[string(append([]byte{4}, x[:]...))] = ssqRow{rank: 4, key: bytes.Clone(x[:])}
+			}
+			w.apply(rows)
+			w.side[6] = x
+			link26 := ssqMust(mdbx.HeightKey(2, 26))
+			retainWant(t, "selected-member locator then complete recheck clear", w.retain(raw, w.tipAt(30)), retainCleared, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+			w.wantAbsent("incoming SideLink(2,26) absent", 6, link26)
+			w.wantCleared("selected-member clear", 6, 25)
+			w.rows[string(append([]byte{3}, x[:]...))] = ssqRow{rank: 3, key: bytes.Clone(x[:])} // Header X stays absent.
+			w.reopen()
+			w.wantAbsent("incoming SideLink(2,26) absent after reopen", 6, link26)
+			w.wantImage("selected-member clear after reopen")
+		}
+	})
+	t.Run("R-l", func(t *testing.T) {
+		// H4d: a denied full-lane charge ends in the control-only Update before any candidate read, so the capacity refusal
+		// precedes an undiscovered step-5 merkle failure and an exhausted sequence alike (independent sequential pre-states).
+		w, raw, _ := n1(t)
+		for _, c := range []struct {
+			name  string
+			raw   []byte
+			setup func()
+		}{{"valid candidate", raw, nil}, {"undiscovered merkle failure", retainMerkle(raw), nil}, {"exhausted sequence", raw, w.exhaust}} {
+			if c.setup != nil {
+				c.setup()
+			}
+			var out SelectedSideMutationOutcome
+			var evidence mdbx.SelectedDamageEvidence
+			before, tip := bytes.Clone(c.raw), w.tipAt(10)
+			locator := *tip
+			held := w.owner.WithReservation(1, func() error {
+				var err error
+				evidence, err = mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+					out = RetainSelectedSideMDBX(w.store, w.owner, c.raw, tip)
+				})
+				return err
+			})
+			if held != nil {
+				t.Fatalf("%s: aggregate hold: %v", c.name, held)
+			}
+			w.wantRaw(c.raw, before)
+			if *tip != locator {
+				t.Fatalf("%s: retention changed the caller's tip locator", c.name)
+			}
+			retainWant(t, "storage_capacity/OLD and no copy", out, retainCapacity, "", "OLD", old, pre, true)
+			ssqWantGets(t, c.name+": control-only Update", evidence, [8]uint64{1})
+			retainWantReleased(t, w.owner)
+			w.wantImage(c.name + ": capacity denial")
+		}
+	})
+	t.Run("H10-abortIO", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		out, evidence := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, w.child(tip, 7, nil), w.tipAt(10))
+		retainWant(t, "storage_io/raw join/CLOSED/no recheck", out, retainStorageIO, "", "OLD", old, pre, false)
+		var request *selectedSideDamageRequest
+		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 6, Height: 6}) || evidence.BeginOld != 1 || evidence.BeginRead != 0 {
+			t.Fatalf("locator abort %+v (%+v)", out, evidence)
+		}
+		w.wantImage("side kept without recheck")
+	})
+	t.Run("H10-second", func(t *testing.T) {
+		// Rows 6, 7 healthy; tip 8 is a hash-bound block naming absent unowned Z (descriptor = its link). Ancestry asks
+		// for row 7 by Z (locator 7); the recheck of 7 follows its healthy link; the one retry finds the same image and
+		// its second locator is typed branch_data. No write happens anywhere.
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 8, 3, 9, false)
+		z := [32]byte{0x5a}
+		w.headers[z] = w.headers[w.side[7]]
+		tip := w.mined(z, 113)
+		hash := ssqHash(tip)
+		w.side[8] = hash
+		a := w.authorityValue()
+		a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 2, F: 5, TipHeight: 8, TipHash: hash, CumulativeChainwork: ssqWork(9), RowCount: 3, LogicalBytes: 3_000}
+		w.apply([]mdbx.Mutation{
+			w.literal(3, bytes.Clone(hash[:]), tip[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), tip, false),
+			w.literal(6, ssqMust(mdbx.HeightKey(2, 8)), mdbx.ChainValue(hash, z, ssqWork(9)), true), w.authorityMutation(a),
+		})
+		delete(w.headers, z)
+		raw := w.childAt(hash, w.ts(hash)+120, consensus.POW_LIMIT, nil)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
+		retainWantRefusal(t, "one retry/branch_data/operation counts", out, ssqBranch, "")
+		var request *selectedSideDamageRequest
+		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 8, Height: 7}) {
+			t.Fatalf("second locator cause %v", out.Err)
+		}
+		// Three read-only Updates (first OLD, recheck, retry), each probe inside one of three released grants. A reused
+		// first-OLD address may also count a later abort: A is 1..3, each counted abort adds two probes to the two
+		// read-begin probes, all denied.
+		if evidence.BeginOld != 1 || evidence.BeginRead != 2 || evidence.BeginWrite != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 ||
+			evidence.OldAborts < 1 || evidence.OldAborts > 3 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
+			t.Fatalf("recheck between released grants/no nested operation: %+v", evidence)
+		}
+		w.wantImage("bounded retry left the image unchanged")
+	})
+	for _, c := range []struct {
+		name  string
+		scen  mdbx.SelectedDamageScenario
+		truth mdbx.CommitTruth
+	}{{"H10-positive-OLD", mdbx.SelectedDamageCommitOld, mdbx.CommitTruthOld}, {"H10-positive-NEW", mdbx.SelectedDamageCommitNew, mdbx.CommitTruthNew}, {"H10-positive-UNKNOWN", mdbx.SelectedDamageCommitThird, mdbx.CommitTruthUnknown}} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+			w.retainSide(5, 6, 1, 7, false)
+			tip := w.side[6]
+			w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+			out, evidence := w.armed(c.scen, 0, nil, w.child(tip, 7, nil), w.tipAt(10))
+			retainWant(t, "positive-damage clear keeps its all-outcome exception", out, retainCleared, "", retainNA, c.truth, crossed, false)
+			if evidence.BeginWrite != 1 || evidence.Commits != 1 {
+				t.Fatalf("recheck write evidence %+v", evidence)
+			}
+			switch c.truth {
+			case mdbx.CommitTruthOld:
+				w.wantImage("crossed OLD recheck image")
+			case mdbx.CommitTruthNew:
+				w.wantCleared("crossed NEW recheck image", 6, 6)
+			}
+		})
+	}
+	t.Run("owner-input-oversize", func(t *testing.T) {
+		// Nil/zero owner + oversize raw on an open Store: the owner's exact input sentinel before any grant, Update or native
+		// operation (STABLE and recovery); the same Store then serves the next valid owner control-only, before images.
+		want := (*mdbx.OperationReservationOwner)(nil).WithReservation(1, nil)
+		for _, c := range []struct {
+			name, next string
+			spec       ssqSpec
+		}{{"open STABLE", ssqBranch, ssqSpec{tip: 10}}, {"recovery", ssqRequired, ssqSpec{tip: 10, authority: ssqPendingNone}}} {
+			w := newRetainFixtureWorld(t, c.spec)
+			raw := make([]byte, mdbx.MaxBlockBytes+1)
+			before := bytes.Clone(raw)
+			for _, owner := range []*mdbx.OperationReservationOwner{nil, {}} {
+				tip := w.tipAt(10)
+				var out SelectedSideMutationOutcome
+				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+					out = RetainSelectedSideMDBX(w.store, owner, raw, tip)
+				})
+				if err != nil || evidence != (mdbx.SelectedDamageEvidence{}) {
+					t.Fatalf("%s: owner input reached native operations: %v %+v", c.name, err, evidence)
+				}
+				retainWant(t, c.name+": owner input before raw bound", out, "", "", "", old, pre, false)
+				if out.Err != want || out.Err.Error() != "invalid storage operation reservation input" { //nolint:errorlint // The owner's exact sentinel.
+					t.Fatalf("%s: owner input error %v", c.name, out.Err)
+				}
+				w.wantRaw(raw, before)
+				if *tip != *w.tipAt(10) {
+					t.Fatalf("%s: owner input changed the caller's tip locator", c.name)
+				}
+				retainWantReleased(t, w.owner)
+				retainWantRefusal(t, c.name+": next valid-owner control-only order", w.retain(raw, w.tipAt(10)), c.next, "")
+				w.wantImage(c.name + ": owner input refusal and next valid-owner refusal")
+			}
+		}
+	})
+	t.Run("N2-lifetime", func(t *testing.T) {
+		w, raw, prior, side := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "probed N2", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Rank-4 OLD Gets: one linking-body read,
+		// the candidate expected-body read, the linking body's Consulted capture and the candidate body target image.
+		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
+			evidence.OldGets[4] != 4 {
+			t.Fatalf("one linking body read; every native full-lane probe denied: %+v", evidence)
+		}
+		w.expectN2(raw, prior, side, w.side[6])
+		w.wantN1Image("probed N2 image", raw)
+	})
+	for _, c := range []struct {
+		name  string
+		scen  mdbx.SelectedDamageScenario
+		key   []byte
+		truth mdbx.CommitTruth
+	}{
+		{"N2-H6b-OLD", mdbx.SelectedDamageCommitOld, nil, mdbx.CommitTruthOld},
+		{"N2-H6b-NEW", mdbx.SelectedDamageCommitNew, nil, mdbx.CommitTruthNew},
+		{"N2-H6a-third", mdbx.SelectedDamageCommitThird, nil, mdbx.CommitTruthUnknown},
+		{"N2-H6a-unreadable", mdbx.SelectedDamageCommitUnreadable, []byte{2}, mdbx.CommitTruthUnknown},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, prior, side := n2(t)
+			out, _ := w.armed(c.scen, 0, c.key, raw, w.tipAt(10))
+			result := ""
+			if c.truth == mdbx.CommitTruthUnknown {
+				result = retainCleared
+			}
+			retainWant(t, "crossed N2 projection with exact raw truth", out, result, "", retainNA, c.truth, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
+			switch c.truth {
+			case mdbx.CommitTruthOld:
+				w.wantImage("equality OLD N2 image")
+			case mdbx.CommitTruthNew:
+				w.expectN2(raw, prior, side, w.side[6])
+				w.wantN1Image("equality NEW N2 image", raw)
+			default:
+				// The consumed Store answers the next call with its cached terminal truth and error at Prewrite.
+				next := w.retain(raw, w.tipAt(10))
+				retainWant(t, "cached next call empty fields", next, "", "", "", mdbx.CommitTruthUnknown, pre, false)
+				if next.Err != out.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+					t.Fatalf("cached error %v, want %v", next.Err, out.Err)
+				}
+			}
+		})
+	}
+	t.Run("N2-begin-eio", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamageBeginEIO, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "no-callback native begin keeps empty fields", out, "", "", "", old, pre, false)
+		ssqWantNative(t, "N2 begin EIO", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginOld != 1 || evidence.OldGets != [8]uint64{} {
+			t.Fatalf("begin evidence %+v", evidence)
+		}
+		w.wantImage("N2 begin failure")
+	})
+	t.Run("N2-get-linking", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		hash := w.side[6]
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 4, bytes.Clone(hash[:]), raw, w.tipAt(10))
+		retainWantRefusal(t, "transient optional linking body branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "linking GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("linking read fault")
+	})
+	t.Run("N2-getabort-linking", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		hash := w.side[6]
+		out, _ := w.armed(mdbx.SelectedDamageGetAbortEIO, 4, bytes.Clone(hash[:]), raw, w.tipAt(10))
+		retainWantRefusal(t, "first typed linking result kept over abort IO", out, ssqBranch, "")
+		ssqWantNative(t, "linking Get+abort EIO", out.Err, ssqGetEIO, ssqAbortEIO)
+		w.wantImage("linking read and abort fault")
+	})
+	t.Run("N2-put", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 7)), raw, w.tipAt(10))
+		retainWant(t, "definite precommit N2 link write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "N2 put", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginWrite != 1 || evidence.Commits != 0 || evidence.BeginRead != 0 {
+			t.Fatalf("N2 put evidence %+v", evidence)
+		}
+		w.wantImage("N2 precommit keeps OLD")
+	})
+	// N3 native outcomes on the healthy clear of side 11..15 (F10, work 16) by a canonical-17 child (19 < tip 21): one
+	// public Replace per scenario, tuple asserted before the fixture's site bookkeeping.
+	n3 := func(t *testing.T) (*ssqWorld, []byte) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 16, false)
+		return w, w.child(w.canonical[17], 18, nil)
+	}
+	n3Replace := func(w *ssqWorld, raw []byte, scen mdbx.SelectedDamageScenario, rank uint8, key []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence, error) {
+		var out SelectedSideMutationOutcome
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scen, rank, key, func() { out = w.replaceSide(raw, w.tipAt(20)) })
+		return out, evidence, err
+	}
+	t.Run("N3-preflight-order", func(t *testing.T) {
+		// n=67860328 is the first refused size (N[H11-clear]). The refusal precedes every planner read: the only SideLink
+		// Get is the qualifier's comparison-only selectedTip read of (2,15), and nothing is written, committed or reread.
+		w, _ := n3(t)
+		raw := retainLarge(t, w.canonical[17], w.ts(w.canonical[17])+120, 67_860_328)
+		w.absent = append(w.absent, ssqHash(raw))
+		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
+		retainWant(t, "N3 clear preflight refusal", out, retainCapacity, "", "OLD", old, pre, true)
+		if evidence.OldGets[6] != 1 || evidence.BeginWrite != 0 || evidence.BeginRead != 0 || evidence.Commits != 0 {
+			t.Fatalf("N3 preflight before any planner read: %+v", evidence)
+		}
+		if err != nil {
+			t.Fatalf("N3 preflight fixture site: %v", err)
+		}
+		w.wantImage("N3 preflight refusal unchanged")
+	})
+	t.Run("N3-union", func(t *testing.T) {
+		// The node-only candidate-owner NONE observation must be in the final union beside the planner's rows: a readback
+		// Get EIO armed on exactly that key (scenario 9, after the injected commit ENOSPC) makes the committed clear
+		// UNKNOWN; without the merge readback never reads the key and the tuple stays NEW. Asserted inside the callback.
+		w, raw := n3(t)
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageCommitUnreadable, 7, ssqMust(mdbx.CanonicalOwnerKey(1, ssqHash(raw))), func() {
+			out := w.replaceSide(raw, w.tipAt(20))
+			retainWant(t, "candidate owner absence in the N3 union", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, "candidate owner absence in the N3 union", out, true)
+		})
+		if err != nil || evidence.Faults != 2 || evidence.Commits != 1 || evidence.BeginWrite != 1 || evidence.BeginRead != 1 {
+			t.Fatalf("N3 union fixture site: %v (%+v)", err, evidence)
+		}
+		// The fixture commits before the failed readback; the clear is observed on disk, not inferred from UNKNOWN.
+		w.wantCleared("committed N3 clear observed on disk", 11, 15)
+	})
+	t.Run("N3-lifetime", func(t *testing.T) {
+		w, raw := n3(t)
+		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
+		retainWant(t, "probed healthy N3 clear", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Native deletes: one authority overwrite
+		// deletion plus five unkept header deletions.
+		if err != nil || evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.Deletes != 6 {
+			t.Fatalf("N3 grant lifetime: %v %+v", err, evidence)
+		}
+		w.wantCleared("probed N3 clear", 11, 15)
+	})
+	link11 := ssqMust(mdbx.HeightKey(2, 11))
+	precommit := mdbx.UpdateStageWriteStartedDefinitelyPrecommit
+	updateIO := ssqNative{"update", mdbx.EngineIO, 5}
+	for _, c := range []struct {
+		name, result, canonical string
+		scen                    mdbx.SelectedDamageScenario
+		rank                    uint8
+		key                     []byte
+		truth                   mdbx.CommitTruth
+		stage                   mdbx.UpdateStage
+		causes                  []ssqNative
+		after                   string
+	}{
+		{"N3-begin-eio", "", "", mdbx.SelectedDamageBeginEIO, 0, nil, old, pre, []ssqNative{updateIO}, "kept"},
+		{"N3-get-link", ssqBranch, "OLD", mdbx.SelectedDamageGetEIO, 6, link11, old, pre, []ssqNative{ssqGetEIO}, "kept"},
+		{"N3-getabort-link", ssqBranch, "OLD", mdbx.SelectedDamageGetAbortEIO, 6, link11, old, pre, []ssqNative{ssqGetEIO, ssqAbortEIO}, "kept"},
+		{"N3-put", retainPrecommit, "OLD", mdbx.SelectedDamagePutEIO, 0, []byte{2}, old, precommit, []ssqNative{updateIO}, "kept"},
+		{"N3-delete", retainPrecommit, "OLD", mdbx.SelectedDamageDeleteEIO, 0, nil, old, precommit, []ssqNative{updateIO}, "kept"},
+		{"N3-H6b-OLD", "", retainNA, mdbx.SelectedDamageCommitOld, 0, nil, old, crossed, nil, "kept"},
+		{"N3-H6b-NEW", "", retainNA, mdbx.SelectedDamageCommitNew, 0, nil, mdbx.CommitTruthNew, crossed, nil, "cleared"},
+		{"N3-H6a-third", retainCleared, retainNA, mdbx.SelectedDamageCommitThird, 0, nil, mdbx.CommitTruthUnknown, crossed, nil, "cached"},
+		{"N3-H6a-unreadable", retainCleared, retainNA, mdbx.SelectedDamageCommitUnreadable, 0, []byte{2}, mdbx.CommitTruthUnknown, crossed, nil, "cached"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := n3(t)
+			out, evidence, err := n3Replace(w, raw, c.scen, c.rank, c.key)
+			retainWant(t, "N3 exact raw tuple and projection", out, c.result, "", c.canonical, c.truth, c.stage, false)
+			if c.causes != nil {
+				ssqWantNative(t, c.name, out.Err, c.causes...)
+			} else {
+				retainWantCommit(t, c.name, out, c.key != nil)
+			}
+			if err != nil {
+				t.Fatalf("%s: fixture site %v (%+v)", c.name, err, evidence)
+			}
+			switch c.after {
+			case "kept":
+				w.wantImage(c.name + " keeps the side")
+			case "cleared":
+				w.wantCleared(c.name+" proved NEW clear", 11, 15)
+			default:
+				next := w.replaceSide(raw, w.tipAt(20))
+				retainWant(t, "cached next call empty fields", next, "", "", "", mdbx.CommitTruthUnknown, pre, false)
+				if next.Err != out.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+					t.Fatalf("cached error %v, want %v", next.Err, out.Err)
+				}
+			}
+		})
+	}
+	t.Run("A9-reopen-abortIO", func(t *testing.T) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.reopen()
+		out, _ := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, w.child(w.canonical[5], 6, nil), w.tipAt(10))
+		retainWant(t, "empty API Result/OLD with raw joined abort/CLOSED", out, "", "", "OLD", old, pre, false)
+		ssqWantNative(t, "unverified owner abort", out.Err, ssqNative{"get", mdbx.EngineInvalidInput, 22}, ssqAbortEIO)
+		w.wantImage("unverified owner abort")
+	})
+}

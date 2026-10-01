@@ -13,7 +13,10 @@ import (
 )
 
 // Dormant one-height selected-side damage handling (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.3, 6.4.1.5, 6.4.1.6 and
-// 6.4.1.9). selectedSideDamageMDBX has no production caller. Each valid-owner invocation performs one outer full-lane
+// 6.4.1.9). selectedSideDamageMDBX has no active or public caller; its sole non-test caller is the dormant recheck
+// adapter RecheckSelectedSideMDBX, and its direct tests remain. The non-damage PlanSelectedSideClearMDBX reuses the same
+// evidence/transfer owner inside the caller's Reader for the node's N3 ReplaceSelectedSideMDBX, which owns that grant,
+// Update and projection. Each valid-owner damage invocation performs one outer full-lane
 // reservation attempt and exactly one Store.Update, and reports its logical classification beside the unmodified raw
 // tuple. No ChainState latch, publication or wakeup is performed here; those consumers belong to later runtime owners.
 
@@ -54,6 +57,10 @@ const _ = mdbx.MaxOperationDataBytes - (selectedSideBodyCharge + selectedSideTra
 
 var errSelectedSideRequest = errors.New("selected side damage request does not match committed authority")
 
+// selectedSideBindings is the finite nonempty producer result set a node callback leaf may bind
+// (ClassifySelectedSideFailureMDBX); a TxError binds only its own CONSENSUS_INVALID(code).
+var selectedSideBindings = []string{selectedSideIntegrity, selectedSideBranch, selectedSideCanonical, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "RECOVERY_REQUIRED", "STALE_LOCAL_PLAN"}
+
 // selectedSideOutcome is the logical result beside the raw Update tuple. Result "" with nil Err is the healthy no-op;
 // Result "" with a non-nil Err is an API refusal that carries no damage/clear classification.
 type selectedSideOutcome struct {
@@ -78,12 +85,13 @@ func selectedSideDefect(message string) error {
 }
 
 // selectedSideDamagePlan is one invocation's private callback state. step names the resource class of the artifact read in
-// flight; it is unset during authority/metadata qualification and cleared once the callback returns a Batch or the
-// healthy sentinel, so infrastructure errors outside an artifact read keep their native storage class.
+// flight: set before each artifact method and cleared as soon as that method returns successfully, so it remains only
+// after a failed artifact invocation and infrastructure errors outside a read keep their native storage class.
+// bound/boundResult are set only by the node classifier: one exact callback leaf and its finite result ("" skips it).
 type selectedSideDamagePlan struct {
 	generation, tip, height uint64
-	healthy, denied         error
-	step                    string
+	healthy, denied, bound  error
+	step, boundResult       string
 }
 
 func selectedSideDamageMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, generation, tip, height uint64) selectedSideOutcome {
@@ -105,6 +113,67 @@ func selectedSideDamageMDBX(store *mdbx.Store, reservations *mdbx.OperationReser
 	plan.denied = err
 	out.Truth, out.Stage, out.Err = store.Update(plan.batch)
 	return selectedSideDamageProject(out, plan)
+}
+
+// SelectedSideDamageOutcome is the damage operation's logical result beside its unmodified raw Update tuple.
+type SelectedSideDamageOutcome = selectedSideOutcome
+
+// RecheckSelectedSideMDBX is the node's fresh recheck of one damage locator after that node attempt released its
+// grant: exactly the existing damage operation with its own reservation, Update and fresh evidence.
+func RecheckSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, generation, tip, height uint64) SelectedSideDamageOutcome {
+	return selectedSideDamageMDBX(store, reservations, generation, tip, height)
+}
+
+// SelectedSidePlanV1 is one side-only plan built in the caller's Reader for that caller's sole Update: the complete
+// Batch (mutations and relied-on Consulted rows), whether it is an actual complete positive-damage clear, and the
+// artifact read class that failed (empty on a complete plan). An error carries no Batch and no positive flag.
+type SelectedSidePlanV1 struct {
+	Batch               mdbx.Batch
+	PositiveDamageClear bool
+	ReadResource        string
+}
+
+// PlanSelectedSideClearMDBX plans the healthy complete clear of the committed selected side with the existing transfer
+// owner: strict authority first, then every leaving identity and header keep/delete decision, SIDE(g,first,tip,first)
+// or the extended prepared singleton, and PRUNE_GC. It owns no grant or Update and claims no damage.
+func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) {
+	authority, err := reader.ReadStorageAuthorityV1()
+	if err != nil {
+		return SelectedSidePlanV1{}, err
+	}
+	if authority.SelectedSide == nil {
+		return SelectedSidePlanV1{}, errSelectedSideRequest
+	}
+	p := &selectedSideDamagePlan{}
+	batch, err := newSelectedSideEvidence(reader, authority).transfer(p)
+	if err != nil {
+		// Each artifact read clears its class once its method returns, so only a failed artifact invocation leaves it set.
+		return SelectedSidePlanV1{ReadResource: p.step}, err
+	}
+	return SelectedSidePlanV1{Batch: batch}, nil
+}
+
+// ClassifySelectedSideFailureMDBX classifies one dormant node attempt's uncrossed raw error with the existing ordered
+// cause walk; it never projects a crossed stage and owns no effects. The node producer owns the concrete direct type
+// and current-invocation ownership of callbackErr and its result. This consumer only refuses a binding whose leaf has
+// a nil descendant or whose result is outside the finite domain (a TxError binds only its own CONSENSUS_INVALID(code)),
+// and then substitutes exactly that occurrence ("" skips it). readResource is the attempt's in-flight read class.
+func ClassifySelectedSideFailureMDBX(err error, stage mdbx.UpdateStage, readResource string, callbackErr error, callbackResult string) string {
+	p := &selectedSideDamagePlan{step: readResource}
+	if callbackErr != nil && !genesisMDBXNilError(callbackErr) && selectedSideFiniteResult(callbackErr, callbackResult) {
+		p.bound, p.boundResult = callbackErr, callbackResult
+	}
+	if stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit {
+		return selectedSidePrecommitResult(err, p)
+	}
+	return selectedSideResult(err, p)
+}
+
+func selectedSideFiniteResult(err error, result string) bool {
+	if tx, ok := err.(*TxError); ok { //nolint:errorlint // The bound leaf itself; nil was refused above.
+		return result == "CONSENSUS_INVALID("+string(tx.Code)+")"
+	}
+	return result == "" || slices.Contains(selectedSideBindings, result)
 }
 
 func (p *selectedSideDamagePlan) batch(reader *mdbx.Reader) (mdbx.Batch, error) {
@@ -220,6 +289,7 @@ func (e *selectedSideEvidence) link(p *selectedSideDamagePlan, height uint64) ([
 	if err != nil {
 		return nil, err
 	}
+	p.step = ""
 	key, _ := mdbx.HeightKey(e.side.GenerationID, height) // Legal authority proved the generation nonzero.
 	e.links[height-e.first] = value
 	e.consult(6, key)
@@ -238,6 +308,7 @@ func (e *selectedSideEvidence) owner(p *selectedSideDamagePlan, hash [32]byte) (
 	if err != nil {
 		return mdbx.CanonicalOwnerResultV1{}, err
 	}
+	p.step = ""
 	r.owner, r.ownerRead = result, true
 	for _, row := range result.Rows {
 		e.consult(row.DBI.Rank, row.Key)
@@ -252,10 +323,16 @@ func (e *selectedSideEvidence) readNamed(p *selectedSideDamagePlan, rank uint8, 
 	if required {
 		p.step = selectedSideCanonical
 		value, present, err := e.reader.Get(dbi, hash[:])
+		if err == nil {
+			p.step = ""
+		}
 		return value, present, uint64(len(value)), err
 	}
 	p.step = selectedSideBranch
 	row, err := e.reader.GetOptionalSide(dbi, hash[:])
+	if err == nil {
+		p.step = ""
+	}
 	return row.Value, row.Present, row.Length, err
 }
 
@@ -296,12 +373,16 @@ func (e *selectedSideEvidence) observe(rank uint8, hash [32]byte, present bool, 
 }
 
 // health checks the one required height in the fixed order SideLink, CanonicalOwnerV1, header/link, BlockBytes.
+// At the descriptor tip it adds the bounded current-tip predicates tipLink and tipWork.
 func (e *selectedSideEvidence) health(p *selectedSideDamagePlan) (bool, error) {
 	link, err := e.link(p, p.height)
 	if err != nil {
 		return false, err
 	}
 	hash := [32]byte(link[:32])
+	if err := e.tipLink(p.height, hash); err != nil {
+		return false, err
+	}
 	owner, err := e.owner(p, hash)
 	if err != nil {
 		return false, err
@@ -310,7 +391,25 @@ func (e *selectedSideEvidence) health(p *selectedSideDamagePlan) (bool, error) {
 	if err != nil || damaged {
 		return damaged, err
 	}
+	if e.tipWork(p.height, link) {
+		return true, nil
+	}
 	return e.bodyHealth(p, hash, owner.Owned && owner.Height >= e.authority.B)
+}
+
+// tipLink is the current-tip identity predicate: after the required SideLink, a tip link naming another hash than the
+// descriptor is canonical integrity, never optional damage.
+func (e *selectedSideEvidence) tipLink(height uint64, hash [32]byte) error {
+	if height == e.side.TipHeight && hash != e.side.TipHash {
+		return selectedSideDefect("selected side tip link does not name the descriptor tip")
+	}
+	return nil
+}
+
+// tipWork is the current-tip work predicate: after the owner, header and keep checks, a tip link whose cumulative work
+// differs from the descriptor is positive optional damage.
+func (e *selectedSideEvidence) tipWork(height uint64, link []byte) bool {
+	return height == e.side.TipHeight && [40]byte(link[64:104]) != e.side.CumulativeChainwork
 }
 
 // headerHealth reads the named header as required when CanonicalOwnerV1 owns its hash, and for an owned hash first
@@ -384,6 +483,7 @@ func (e *selectedSideEvidence) anchor(p *selectedSideDamagePlan) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	p.step = ""
 	if !present {
 		return nil, selectedSideDefect("canonical anchor entry is absent")
 	}
@@ -548,7 +648,7 @@ func selectedSidePrecommitResult(err error, p *selectedSideDamagePlan) string {
 func selectedSideResult(err error, p *selectedSideDamagePlan) string {
 	result, found := "", false
 	for _, part := range genesisMDBXCauses(err) {
-		if part == p.healthy { //nolint:errorlint // Only the direct invocation-local sentinel is skipped.
+		if p.skip(part) {
 			continue
 		}
 		next := selectedSidePart(part, p)
@@ -562,9 +662,25 @@ func selectedSideResult(err error, p *selectedSideDamagePlan) string {
 	return result
 }
 
+// skip reports an exact empty-result leaf: this invocation's healthy sentinel or a bound callback leaf of empty result.
+func (p *selectedSideDamagePlan) skip(part error) bool {
+	return p.healthy != nil && part == p.healthy || p.bound != nil && part == p.bound && p.boundResult == "" //nolint:errorlint // Exact leaf identities only.
+}
+
+// identity classifies an exact owned leaf: the owner's returned capacity refusal or the bound callback leaf.
+func (p *selectedSideDamagePlan) identity(part error) (string, bool) {
+	switch {
+	case p.denied != nil && part == p.denied: //nolint:errorlint // The owner's exact returned capacity refusal.
+		return selectedSideCapacity, true
+	case p.bound != nil && part == p.bound: //nolint:errorlint // The exact bound callback leaf.
+		return p.boundResult, true
+	}
+	return "", false
+}
+
 func selectedSidePart(part error, p *selectedSideDamagePlan) string {
-	if p.denied != nil && part == p.denied { //nolint:errorlint // The owner's exact returned capacity refusal.
-		return selectedSideCapacity
+	if result, ok := p.identity(part); ok {
+		return result
 	}
 	switch e := part.(type) { //nolint:errorlint // Classify only this direct cause.
 	case *selectedSideFailure:
