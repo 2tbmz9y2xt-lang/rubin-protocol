@@ -830,6 +830,38 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scen, rank, key, func() { out = w.replaceSide(raw, w.tipAt(20)) })
 		return out, evidence, err
 	}
+	t.Run("N3-preflight-order", func(t *testing.T) {
+		// n=67860328 is the first refused size (N[H11-clear]). The refusal precedes every planner read: the only SideLink
+		// Get is the qualifier's comparison-only selectedTip read of (2,15), and nothing is written, committed or reread.
+		w, _ := n3(t)
+		raw := retainLarge(t, w.canonical[17], w.ts(w.canonical[17])+120, 67_860_328)
+		w.absent = append(w.absent, ssqHash(raw))
+		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
+		retainWant(t, "N3 clear preflight refusal", out, retainCapacity, "", "OLD", old, pre, true)
+		if evidence.OldGets[6] != 1 || evidence.BeginWrite != 0 || evidence.BeginRead != 0 || evidence.Commits != 0 {
+			t.Fatalf("N3 preflight before any planner read: %+v", evidence)
+		}
+		if err != nil {
+			t.Fatalf("N3 preflight fixture site: %v", err)
+		}
+		w.wantImage("N3 preflight refusal unchanged")
+	})
+	t.Run("N3-union", func(t *testing.T) {
+		// The node-only candidate-owner NONE observation must be in the final union beside the planner's rows: a readback
+		// Get EIO armed on exactly that key (scenario 9, after the injected commit ENOSPC) makes the committed clear
+		// UNKNOWN; without the merge readback never reads the key and the tuple stays NEW. Asserted inside the callback.
+		w, raw := n3(t)
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageCommitUnreadable, 7, ssqMust(mdbx.CanonicalOwnerKey(1, ssqHash(raw))), func() {
+			out := w.replaceSide(raw, w.tipAt(20))
+			retainWant(t, "candidate owner absence in the N3 union", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, "candidate owner absence in the N3 union", out, true)
+		})
+		if err != nil || evidence.Faults != 2 || evidence.Commits != 1 || evidence.BeginWrite != 1 || evidence.BeginRead != 1 {
+			t.Fatalf("N3 union fixture site: %v (%+v)", err, evidence)
+		}
+		// The fixture commits before the failed readback; the clear is observed on disk, not inferred from UNKNOWN.
+		w.wantCleared("committed N3 clear observed on disk", 11, 15)
+	})
 	t.Run("N3-lifetime", func(t *testing.T) {
 		w, raw := n3(t)
 		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
