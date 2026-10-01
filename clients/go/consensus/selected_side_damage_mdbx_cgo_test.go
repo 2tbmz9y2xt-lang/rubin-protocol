@@ -458,6 +458,18 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", old, pre, "missing tip link")
 		sideWantEngine(t, out.Err, mdbx.EngineIntegrity, "selected side link is absent", "missing tip link")
 	})
+	t.Run("plan-clear", func(t *testing.T) {
+		// The healthy clear plan: one authority write and three unkept leaving header deletes, no positive damage, no
+		// failed read class. A failed leaving read returns no Batch, no flag and that read's resource class.
+		w := newSideWorld(t, sideFullSpec)
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(plan.Batch.Mutations) == 4, "healthy clear plan %+v (%v)", plan, err)
+		w.removeLink(3)
+		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		logicalMDBXAssert(t, err != nil && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed plan %+v (%v)", plan, err)
+	})
 	t.Run("H10-stale", func(t *testing.T) {
 		w := newSideWorld(t, sideFullSpec)
 		out := RecheckSelectedSideMDBX(w.store, w.owner, 2, 5, 4)

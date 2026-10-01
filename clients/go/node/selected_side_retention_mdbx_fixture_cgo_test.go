@@ -817,6 +817,77 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
 		w.wantImage("required commitment-invalid linking body kept")
 	})
+	// N3 native outcomes on the healthy clear of side 11..15 (F10) by a winning canonical-10 child: each scenario runs the
+	// public Replace once; its tuple is asserted before the fixture's own site bookkeeping.
+	n3 := func(t *testing.T) (*ssqWorld, []byte) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 11, false)
+		return w, w.child(w.canonical[10], 11, nil)
+	}
+	n3Replace := func(w *ssqWorld, raw []byte, scen mdbx.SelectedDamageScenario, rank uint8, key []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence, error) {
+		var out SelectedSideMutationOutcome
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scen, rank, key, func() { out = w.replaceSide(raw, w.tipAt(20)) })
+		return out, evidence, err
+	}
+	t.Run("N3-lifetime", func(t *testing.T) {
+		w, raw := n3(t)
+		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
+		retainWant(t, "probed healthy N3 clear", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		// Probes at write begin, commit and twice around the OLD abort, all denied; the five unkept headers are deleted.
+		if err != nil || evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.Deletes != 5 {
+			t.Fatalf("N3 grant lifetime: %v %+v", err, evidence)
+		}
+		w.wantCleared("probed N3 clear", 11, 15)
+	})
+	link11 := ssqMust(mdbx.HeightKey(2, 11))
+	precommit := mdbx.UpdateStageWriteStartedDefinitelyPrecommit
+	updateIO := ssqNative{"update", mdbx.EngineIO, 5}
+	for _, c := range []struct {
+		name, result, canonical string
+		scen                    mdbx.SelectedDamageScenario
+		rank                    uint8
+		key                     []byte
+		truth                   mdbx.CommitTruth
+		stage                   mdbx.UpdateStage
+		causes                  []ssqNative
+		after                   string
+	}{
+		{"N3-begin-eio", "", "", mdbx.SelectedDamageBeginEIO, 0, nil, old, pre, []ssqNative{updateIO}, "kept"},
+		{"N3-get-link", ssqBranch, "OLD", mdbx.SelectedDamageGetEIO, 6, link11, old, pre, []ssqNative{ssqGetEIO}, "kept"},
+		{"N3-getabort-link", ssqBranch, "OLD", mdbx.SelectedDamageGetAbortEIO, 6, link11, old, pre, []ssqNative{ssqGetEIO, ssqAbortEIO}, "kept"},
+		{"N3-put", retainPrecommit, "OLD", mdbx.SelectedDamagePutEIO, 0, []byte{2}, old, precommit, []ssqNative{updateIO}, "kept"},
+		{"N3-delete", retainPrecommit, "OLD", mdbx.SelectedDamageDeleteEIO, 0, nil, old, precommit, []ssqNative{updateIO}, "kept"},
+		{"N3-H6b-OLD", "", retainNA, mdbx.SelectedDamageCommitOld, 0, nil, old, crossed, nil, "kept"},
+		{"N3-H6b-NEW", "", retainNA, mdbx.SelectedDamageCommitNew, 0, nil, mdbx.CommitTruthNew, crossed, nil, "cleared"},
+		{"N3-H6a-third", retainCleared, retainNA, mdbx.SelectedDamageCommitThird, 0, nil, mdbx.CommitTruthUnknown, crossed, nil, "cached"},
+		{"N3-H6a-unreadable", retainCleared, retainNA, mdbx.SelectedDamageCommitUnreadable, 0, []byte{2}, mdbx.CommitTruthUnknown, crossed, nil, "cached"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := n3(t)
+			out, evidence, err := n3Replace(w, raw, c.scen, c.rank, c.key)
+			retainWant(t, "N3 exact raw tuple and projection", out, c.result, "", c.canonical, c.truth, c.stage, false)
+			if c.causes != nil {
+				ssqWantNative(t, c.name, out.Err, c.causes...)
+			} else {
+				retainWantCommit(t, c.name, out, c.key != nil)
+			}
+			if err != nil {
+				t.Fatalf("%s: fixture site %v (%+v)", c.name, err, evidence)
+			}
+			switch c.after {
+			case "kept":
+				w.wantImage(c.name + " keeps the side")
+			case "cleared":
+				w.wantCleared(c.name+" proved NEW clear", 11, 15)
+			default:
+				next := w.replaceSide(raw, w.tipAt(20))
+				retainWant(t, "cached next call empty fields", next, "", "", "", mdbx.CommitTruthUnknown, pre, false)
+				if next.Err != out.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+					t.Fatalf("cached error %v, want %v", next.Err, out.Err)
+				}
+			}
+		})
+	}
 	t.Run("A9-reopen-abortIO", func(t *testing.T) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
 		w.reopen()

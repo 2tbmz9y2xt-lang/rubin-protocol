@@ -278,12 +278,23 @@ func retainLarge(t *testing.T, parent [32]byte, timestamp uint64, n int) []byte 
 // retain invokes the real entrypoint once and proves the caller's raw bytes and locator unchanged and the lane released.
 func (w *ssqWorld) retain(raw []byte, tip *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
 	w.t.Helper()
+	return w.operate(RetainSelectedSideMDBX, raw, tip)
+}
+
+// replaceSide invokes the separate N3 entrypoint with retain's input and lane proofs.
+func (w *ssqWorld) replaceSide(raw []byte, tip *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
+	w.t.Helper()
+	return w.operate(ReplaceSelectedSideMDBX, raw, tip)
+}
+
+func (w *ssqWorld) operate(op func(*mdbx.Store, *mdbx.OperationReservationOwner, []byte, *mdbx.AuthorityPointV1) SelectedSideMutationOutcome, raw []byte, tip *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
+	w.t.Helper()
 	before := bytes.Clone(raw)
 	var locator mdbx.AuthorityPointV1
 	if tip != nil {
 		locator = *tip
 	}
-	out := RetainSelectedSideMDBX(w.store, w.owner, raw, tip)
+	out := op(w.store, w.owner, raw, tip)
 	w.wantRaw(raw, before)
 	if tip != nil && *tip != locator {
 		w.t.Fatal("retention changed the caller's tip locator")
@@ -930,6 +941,148 @@ func TestSelectedSideRetention(t *testing.T) {
 		w.retainSide(4, 6, 2, 6, false)
 		retainWant(t, "initiating side byte-identical/REPLACE", w.retain(w.child(w.canonical[5], 6, nil), w.tipAt(10)), ssqBranch, "REPLACE", "OLD", old, pre, true)
 		w.wantImage("replacement routed")
+	})
+	// N3 worlds: canonical tip 20 (work 21), full side 11..15 over F10; a canonical-10 child (work 12) wins the side but
+	// not K23. replaced checks the healthy clear tuple and persisted authority; reopenNext re-reads the bytes and proves the
+	// reopened handle refuses the next owner lookup.
+	replaced := func(t *testing.T, w *ssqWorld, raw []byte, tip *mdbx.AuthorityPointV1) {
+		t.Helper()
+		retainWant(t, "healthy N3 clean NEW empty Result/NOT_APPLICABLE", w.replaceSide(raw, tip), "", "", retainNA, newT, crossed, true)
+		if a := w.persisted(); a.Phase != mdbx.StoragePhasePruneGCV1 || a.Lifecycle != mdbx.StorageLifecycleStableV1 || a.SelectedSide != nil {
+			t.Fatalf("PRUNE_GC/STABLE exact authority: %+v", a)
+		}
+	}
+	reopenNext := func(t *testing.T, w *ssqWorld, label string) {
+		t.Helper()
+		w.reopen()
+		w.wantImage(label + " after reopen")
+		out := w.retain(w.child(w.canonical[0], 1, nil), nil)
+		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+		retainWantEngine(t, label+": unverified owner", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+		w.wantImage(label + ": unverified owner refusal")
+	}
+	t.Run("A4a", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 11, false)
+		raw := w.child(w.canonical[10], 11, nil)
+		replaced(t, w, raw, w.tipAt(20))
+		hash := w.side[15]
+		w.wantAbsent("unkept leaving header absent", 3, bytes.Clone(hash[:]))
+		w.wantCleared("candidate absent and exact old-row disposition", 11, 15)
+		reopenNext(t, w, "A4a")
+	})
+	t.Run("A4a-kept", func(t *testing.T) {
+		// Side row 15 is canonically Owned at 21 (the current tip locator): its header is kept by hash, the others go.
+		w := newRetainWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 11, false)
+		hash := w.side[15]
+		w.apply([]mdbx.Mutation{
+			w.literal(2, ssqMust(mdbx.HeightKey(1, 21)), mdbx.ChainValue(hash, w.side[14], ssqWork(22)), false),
+			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(21), false),
+		})
+		replaced(t, w, w.child(w.canonical[10], 11, nil), &mdbx.AuthorityPointV1{Height: 21, BlockHash: hash})
+		w.wantCleared("canonical header preserved at exact owner", 11, 15, 15)
+		reopenNext(t, w, "A4a-kept")
+	})
+	t.Run("A4b", func(t *testing.T) {
+		blocks := func(a *mdbx.StorageAuthorityV1) {
+			a.B, a.U, a.Phase = 100, 13_780, mdbx.StoragePhasePruneGCV1
+			a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanBlocksV1, GenerationID: 1, FirstHeight: 0, LastHeight: 99, NextHeight: 40}}}
+		}
+		w := newRetainWorld(t, ssqSpec{tip: 20, authority: blocks})
+		w.retainSide(10, 15, 5, 11, false)
+		replaced(t, w, w.child(w.canonical[10], 11, nil), w.tipAt(20))
+		a := w.authorityValue()
+		a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 11, LastHeight: 15, NextHeight: 11})
+		w.authorityMutation(a)
+		for j := uint64(11); j <= 15; j++ {
+			hash := w.side[j]
+			w.absentRow(3, bytes.Clone(hash[:]))
+		}
+		w.wantImage("ordered spans/progress40")
+		reopenNext(t, w, "A4b")
+	})
+	t.Run("A4c", func(t *testing.T) {
+		// Prepared one-slot side 2..1440 (F0, history header 1) with SIDE(2,1,1,1); a canonical-1 child (work 5001) wins
+		// the side (1441) under the heavy canonical tip 2.
+		work := func(k uint64) [40]byte {
+			if k == 1 {
+				return ssqWork(5_000)
+			}
+			return retainHeavy(2)(k)
+		}
+		w := newRetainWorld(t, ssqSpec{tip: 2, work: work})
+		w.retainSide(0, 1_440, 1_439, 1_441, true)
+		a := w.tracked()
+		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 1, LastHeight: 1, NextHeight: 1}}}
+		w.apply([]mdbx.Mutation{w.authorityMutation(a)})
+		replaced(t, w, w.child(w.canonical[1], 2, nil), w.tipAt(2))
+		a.SelectedSide, a.Cleanup.Spans[0].LastHeight = nil, 1_440
+		w.authorityMutation(a)
+		for j := uint64(2); j <= 1_440; j++ {
+			hash := w.side[j]
+			w.absentRow(3, bytes.Clone(hash[:]))
+		}
+		w.wantImage("single SIDE(g,1,1440,1)")
+		reopenNext(t, w, "A4c")
+	})
+	t.Run("A4d", func(t *testing.T) {
+		for _, smaller := range []bool{true, false} {
+			w := newRetainWorld(t, ssqSpec{tip: 20})
+			w.retainSide(10, 15, 5, 12, false)
+			tip := w.side[15]
+			raw := w.child(w.canonical[10], 11, func(h [32]byte) bool { return (bytes.Compare(h[:], tip[:]) < 0) == smaller })
+			if !smaller {
+				retainWant(t, "larger-hash tie NOT_SELECTED/no write", w.replaceSide(raw, w.tipAt(20)), "", "NOT_SELECTED", "OLD", old, pre, true)
+				w.wantImage("losing tie unchanged")
+				continue
+			}
+			retainWant(t, "smaller-tip tie exact clear", w.replaceSide(raw, w.tipAt(20)), "", "", retainNA, newT, crossed, true)
+			w.wantCleared("smaller-tip tie exact clear", 11, 15)
+			reopenNext(t, w, "A4d")
+		}
+	})
+	t.Run("A4e", func(t *testing.T) {
+		// After the A4a clear, the fixture applies the SIDE completion predecessor image (NONE, no span, next 3); a fresh
+		// N1 then allocates generation 3 and next 4, never the cleared generation 2.
+		w := newRetainWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 11, false)
+		raw := w.child(w.canonical[10], 11, nil)
+		replaced(t, w, raw, w.tipAt(20))
+		w.wantCleared("A4a clear", 11, 15)
+		a := w.authorityValue()
+		w.apply([]mdbx.Mutation{w.authorityMutation(a)})
+		retainWant(t, "fresh N1 after SIDE completion", w.retain(raw, w.tipAt(20)), retainStored, "", retainNA, newT, crossed, true)
+		w.expectN1(raw, a, 3, 10, ssqWork(12))
+		w.wantN1Image("fresh N1 allocates next, never the old generation", raw)
+		reopenNext(t, w, "A4e")
+	})
+	t.Run("R-domain-node", func(t *testing.T) {
+		const wrong = "selected side replacement needs a winning canonical-parent child"
+		w := newRetainWorld(t, ssqSpec{tip: 20})
+		retainWantRefusal(t, "Replace without a side", w.replaceSide(w.child(w.canonical[10], 11, nil), w.tipAt(20)), ssqBranch, wrong)
+		w.wantImage("no-side Replace unchanged")
+		w.retainSide(10, 15, 5, 11, false)
+		retainWantRefusal(t, "Replace of an exact-tip child", w.replaceSide(w.child(w.side[15], 16, nil), w.tipAt(20)), ssqBranch, wrong)
+		retainWantRefusal(t, "Replace has no duplicate scan", w.replaceSide(w.child(w.side[13], 14, nil), w.tipAt(20)), ssqBranch, "candidate parent is neither an active canonical block nor the selected tip")
+		retainWantRefusal(t, "Replace control precedes the raw bound", w.replaceSide(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqBranch, "candidate block exceeds MaxBlockBytes")
+		w.wantImage("wrong-leaf Replace unchanged")
+	})
+	// N3 preflight 2n+7223040+(1048576+2097152+131072)+8388608 <= 154611151: n=67861351 clears, 67861352 refuses.
+	t.Run("H11-clear", func(t *testing.T) {
+		for _, n := range []int{67_861_352, 67_861_351} {
+			w := newRetainWorld(t, ssqSpec{tip: 20})
+			w.retainSide(10, 15, 5, 11, false)
+			raw := retainLarge(t, w.canonical[10], w.ts(w.canonical[10])+120, n)
+			w.absent = append(w.absent, ssqHash(raw))
+			if n == 67_861_352 {
+				retainWant(t, "N3 clear preflight refusal", w.replaceSide(raw, w.tipAt(20)), retainCapacity, "", "OLD", old, pre, true)
+				w.wantImage("preflight refusal before planner reads")
+				continue
+			}
+			replaced(t, w, raw, w.tipAt(20))
+			w.wantCleared("largest fitting N3 candidate clears", 11, 15)
+		}
 	})
 	t.Run("H3", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10})

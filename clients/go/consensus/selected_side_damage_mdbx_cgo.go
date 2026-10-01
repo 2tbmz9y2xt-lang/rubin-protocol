@@ -122,6 +122,34 @@ func RecheckSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationRese
 	return selectedSideDamageMDBX(store, reservations, generation, tip, height)
 }
 
+// SelectedSidePlanV1 is one side-only plan built in the caller's Reader for that caller's sole Update: the complete
+// Batch (mutations and relied-on Consulted rows), whether it is an actual complete positive-damage clear, and the
+// artifact read class that failed (empty on a complete plan). An error carries no Batch and no positive flag.
+type SelectedSidePlanV1 struct {
+	Batch               mdbx.Batch
+	PositiveDamageClear bool
+	ReadResource        string
+}
+
+// PlanSelectedSideClearMDBX plans the healthy complete clear of the committed selected side with the existing transfer
+// owner: strict authority first, then every leaving identity and header keep/delete decision, SIDE(g,first,tip,first)
+// or the extended prepared singleton, and PRUNE_GC. It owns no grant or Update and claims no damage.
+func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) {
+	authority, err := reader.ReadStorageAuthorityV1()
+	if err != nil {
+		return SelectedSidePlanV1{}, err
+	}
+	if authority.SelectedSide == nil {
+		return SelectedSidePlanV1{}, errSelectedSideRequest
+	}
+	p := &selectedSideDamagePlan{}
+	batch, err := newSelectedSideEvidence(reader, authority).transfer(p)
+	if err != nil {
+		return SelectedSidePlanV1{ReadResource: p.step}, err
+	}
+	return SelectedSidePlanV1{Batch: batch}, nil
+}
+
 // ClassifySelectedSideFailureMDBX classifies one dormant node attempt's uncrossed raw error with the existing ordered
 // cause walk; it never projects a crossed stage and owns no effects. The node producer owns the concrete direct type
 // and current-invocation ownership of callbackErr and its result. This consumer only refuses a binding whose leaf has
