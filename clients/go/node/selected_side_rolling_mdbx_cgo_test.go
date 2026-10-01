@@ -65,11 +65,6 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.wantAbsent("unkept header1 deleted", 3, bytes.Clone(w.side[1][:]))
 		w.wantIncomingAbsent("A5", raw)
 		w.wantAbsent("no compact undo", 5, mdbx.UndoManifestKey(ssqHash(raw)))
-		// R-e: the Prepared side plus its pending SIDE row and the incoming child exceed the aggregate; Retain refuses
-		// with typed branch_data and the preparation stays committed (on the verified handle, before reopen).
-		retainWantRefusal(t, "R-e Prepared preserved/no body1441", w.retain(raw, w.tipAt(2)), ssqBranch, "")
-		w.wantImage("R-e Prepared preserved")
-		w.wantIncomingAbsent("R-e", raw)
 		w.reopen()
 		w.wantImage("A5 persisted image after reopen")
 	})
@@ -85,12 +80,30 @@ func TestSelectedSideRolling(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			w, raw := rollWorld(t)
 			want := bytes.Clone(w.rows[string(append([]byte{c.rank}, c.key(w)...))].value)
+			prior := w.tracked()
 			retainWant(t, c.name+" RP", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
 			if equal, err := w.viewEqual(c.rank, c.key(w), want); want == nil || err != nil || !equal {
 				t.Fatalf("oldest physical image unchanged: rank %d (%v)", c.rank, err)
 			}
+			w.expectPrepared(prior)
+			w.wantImage(c.name + " complete Prepared image")
+			w.wantIncomingAbsent(c.name, raw)
+			w.reopen()
+			w.wantImage(c.name + " persisted image after reopen")
 		})
 	}
+	t.Run("R-e", func(t *testing.T) {
+		// Prepared side (count 1439) with its pending SIDE row: a Retain of child 1441 is typed branch_data and the
+		// preparation stays committed. Stage note: the aggregate owner is RA; this Retain refusal comes from the existing
+		// one-slot route, so this case does not claim M12.
+		w, raw := rollWorld(t)
+		prior := w.tracked()
+		retainWant(t, "R-e preparation", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+		w.expectPrepared(prior)
+		retainWantRefusal(t, "Prepared preserved/no body1441", w.retain(raw, w.tipAt(2)), ssqBranch, "")
+		w.wantImage("R-e Prepared preserved")
+		w.wantIncomingAbsent("R-e", raw)
+	})
 	t.Run("A5-generation", func(t *testing.T) {
 		// An unrelated pending GENERATION span (obsolete g3) is preserved; the SIDE span is appended after it.
 		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2), authority: func(a *mdbx.StorageAuthorityV1) {
@@ -114,6 +127,8 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.absentRow(3, bytes.Clone(oldest[:]))
 		w.wantImage("GENERATION span/progress preserved")
 		w.wantIncomingAbsent("A5-generation", raw)
+		w.reopen()
+		w.wantImage("A5-generation persisted image after reopen")
 	})
 	t.Run("R-p", func(t *testing.T) {
 		w, raw := rollWorld(t)
@@ -153,6 +168,11 @@ func TestSelectedSideRolling(t *testing.T) {
 		out = w.prepareSide(w.child(w.side[15], 16, nil), w.tipAt(20))
 		retainWantRefusal(t, "Prepare full<1440", out, ssqBranch, "selected side rolling preparation needs an exact-tip child of a full side")
 		w.wantImage("Prepare full<1440 unchanged")
+		w = newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+		w.retainSide(0, 1_441, 1_439, 1_442, true)
+		out = w.prepareSide(w.child(w.side[1_441], 1_442, nil), w.tipAt(2))
+		retainWantRefusal(t, "Prepare one-slot", out, ssqBranch, "selected side rolling preparation needs an exact-tip child of a full side")
+		w.wantImage("Prepare one-slot unchanged")
 	})
 	t.Run("A9-reopen", func(t *testing.T) {
 		w, raw := rollWorld(t)
@@ -193,6 +213,8 @@ func TestSelectedSideRolling(t *testing.T) {
 			w.expectPrepared(prior)
 			w.wantImage("large RP Prepared image")
 			w.wantIncomingAbsent("H11-link-length", raw)
+			w.reopen()
+			w.wantImage("large RP persisted image after reopen")
 		}
 	})
 	t.Run("H11-planner", func(t *testing.T) {

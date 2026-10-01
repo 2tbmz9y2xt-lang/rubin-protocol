@@ -524,8 +524,56 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		var plan SelectedSidePlanV1
 		var err error
 		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
-		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
+		// errors.Is plus a nil Unwrap keeps the exact unwrapped request sentinel identity.
+		logicalMDBXAssert(t, viewErr == nil && errors.Is(err, errSelectedSideRequest) && errors.Unwrap(err) == nil && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan %+v (%v, %v)", plan, err, viewErr)
 		w.wantImage("non-full rolling plan writes nothing", w.authority, false)
+	})
+	// Full side 2..1441/F1 (count 1440, 266 logical bytes per row, mined rows unowned): the planner's own fields.
+	rollSpec := sideWorldSpec{f: 1, tip: 1_441, rows: 1_440, canonicalTip: 1}
+	rollPlan := func(w *sideWorld) (SelectedSidePlanV1, error) {
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil, "rolling plan view: %v", viewErr)
+		return plan, err
+	}
+	t.Run("plan-rolling-healthy", func(t *testing.T) {
+		w := newSideWorld(t, rollSpec)
+		plan, err := rollPlan(w)
+		oldest := w.sideAt[2]
+		a, derr := mdbx.DecodeStorageAuthorityV1(w.authority)
+		logicalMDBXAssert(t, derr == nil, "decode: %v", derr)
+		side := *a.SelectedSide
+		side.RowCount, side.LogicalBytes = 1_439, 1_440*266-uint64(len(w.bodies[oldest]))
+		a.SelectedSide, a.Phase = &side, mdbx.StoragePhasePruneGCV1
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 2, LastHeight: 2, NextHeight: 2}}}
+		want, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil, "encode: %v", eerr)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 2 && bytes.Equal(m[0].Literal, want) &&
+			m[1].DBI.Rank == 3 && bytes.Equal(m[1].Key, oldest[:]) && m[1].AfterKind == mdbx.AfterAbsent && len(plan.Batch.Consulted) > 0, "healthy rolling plan %+v (%v)", plan, err)
+		w.wantImage("healthy rolling plan writes nothing", w.authority, false)
+	})
+	t.Run("plan-rolling-positive", func(t *testing.T) {
+		w := newSideWorld(t, rollSpec)
+		w.removeBody(2)
+		plan, err := rollPlan(w)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, err == nil && plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 1+1_440 && bytes.Equal(m[0].Literal, w.clearedAuthority()), "positive rolling plan flag/clear %+v (%v)", plan.PositiveDamageClear, err)
+	})
+	t.Run("plan-rolling-error", func(t *testing.T) {
+		// A missing oldest required link: zero plan, no positive flag, the failed read keeps its branch_data class.
+		w := newSideWorld(t, rollSpec)
+		w.removeLink(2)
+		plan, err := rollPlan(w)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
+		// Positive oldest damage with an incomplete clear (later link absent): stronger integrity, zero plan, no flag.
+		w = newSideWorld(t, rollSpec)
+		w.removeBody(2)
+		w.removeLink(700)
+		plan, err = rollPlan(w)
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && !plan.PositiveDamageClear && plan.Batch.Mutations == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
 	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own
