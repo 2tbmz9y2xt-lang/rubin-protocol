@@ -439,8 +439,8 @@ func (w *sideWorld) setDescriptor(edit func(*mdbx.SelectedSideV1)) {
 	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
 }
 
-// TestSelectedSideDamageAdapterFixture compares natively: a current-tip SideLink naming another hash than the
-// descriptor is canonical integrity with no clear, while a lower height keeps its existing health.
+// TestSelectedSideDamageAdapterFixture compares admissible committed images through the Reader: a current-tip SideLink
+// naming another hash than the descriptor is canonical integrity with no clear, while a lower height keeps its health.
 func TestSelectedSideDamageAdapterFixture(t *testing.T) {
 	t.Run("H10-hash", func(t *testing.T) {
 		w := newSideWorld(t, sideFullSpec)
@@ -515,8 +515,8 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		encoded, eerr := a.Encode()
 		logicalMDBXAssert(t, aerr == nil && eerr == nil, "side-less authority: %v %v", aerr, eerr)
 		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
-		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
-		logicalMDBXAssert(t, err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil, "side-less plan %+v (%v)", plan, err) //nolint:errorlint // The exact request refusal.
+		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "side-less plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
 	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own

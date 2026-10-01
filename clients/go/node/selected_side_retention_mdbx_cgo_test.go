@@ -173,8 +173,7 @@ func (w *ssqWorld) setSide(edit func(*mdbx.SelectedSideV1)) {
 	w.apply([]mdbx.Mutation{w.authorityMutation(a)})
 }
 
-// canonicalChild mines a valid child of canonical 5 and commits it as canonical 6 (header, paired index and, when body,
-// its body) under a mined canonical 7, so the candidate is a canonical block below the tip.
+// canonicalChild commits a mined child of canonical 5 as canonical 6 (header, paired index, optional body) under canonical 7.
 func (w *ssqWorld) canonicalChild(body bool) []byte {
 	w.t.Helper()
 	raw := w.child(w.canonical[5], 6, nil)
@@ -213,8 +212,7 @@ func retainMerkle(raw []byte) []byte {
 	return out
 }
 
-// retainWitness adds one empty sentinel witness item to the single coinbase: its wtxid commits as zero and its txid
-// excludes the witness, so header, Merkle root and witness commitment stay valid while the body bytes differ.
+// retainWitness adds an empty coinbase witness item: wtxid commits as zero, txid excludes it, so only body bytes differ.
 func retainWitness(raw []byte) []byte {
 	return append(bytes.Clone(raw[:len(raw)-2]), 1, consensus.SUITE_ID_SENTINEL, 0, 0, 0)
 }
@@ -302,8 +300,7 @@ func (w *ssqWorld) operate(op func(*mdbx.Store, *mdbx.OperationReservationOwner,
 	return out
 }
 
-// expectN1 records the literal N1 effect from the pre-state authority: side(g,F,F+1,hash,work,1,n), next g+1 and the
-// inserted header, body and SideLink(g,F+1).
+// expectN1 records N1 over the pre-state: side(g,F,F+1,hash,work,1,n), next g+1, header, body and SideLink(g,F+1).
 func (w *ssqWorld) expectN1(raw []byte, a mdbx.StorageAuthorityV1, g, f uint64, work [40]byte) {
 	w.t.Helper()
 	hash := ssqHash(raw)
@@ -316,8 +313,7 @@ func (w *ssqWorld) expectN1(raw []byte, a mdbx.StorageAuthorityV1, g, f uint64, 
 	w.literal(6, ssqMust(mdbx.HeightKey(g, f+1)), mdbx.ChainValue(hash, w.canonical[f], work), false)
 }
 
-// expectN2 records the literal N2 effect over the tracked pre-state authority a: the caller's literal side (g, F and
-// next unchanged) and the inserted candidate header, body and SideLink(g, side tip) naming parent.
+// expectN2 records N2 over pre-state a: literal side (g, F, next kept), candidate header, body, SideLink(g, tip)->parent.
 func (w *ssqWorld) expectN2(raw []byte, a mdbx.StorageAuthorityV1, side mdbx.SelectedSideV1, parent [32]byte) {
 	w.t.Helper()
 	hash := ssqHash(raw)
@@ -557,8 +553,12 @@ func TestSelectedSideRetention(t *testing.T) {
 			}
 			// An oversize candidate with that owner on a live Store is the same exact input refusal, no Update.
 			big := make([]byte, mdbx.MaxBlockBytes+1)
-			if out := RetainSelectedSideMDBX(w.store, owner, big, nil); out.Err == nil || out.Err.Error() != "invalid storage operation reservation input" || out.Result != "" || out.Truth != old || out.Stage != pre {
-				t.Fatalf("oversize owner input %+v", out)
+			beforeBig := bytes.Clone(big)
+			out = RetainSelectedSideMDBX(w.store, owner, big, nil)
+			w.wantRaw(big, beforeBig)
+			retainWant(t, "oversize owner input", out, "", "", "", old, pre, false)
+			if out.Err.Error() != "invalid storage operation reservation input" {
+				t.Fatalf("oversize owner input error %v", out.Err)
 			}
 		}
 		w.wantImage("owner input refusal")
