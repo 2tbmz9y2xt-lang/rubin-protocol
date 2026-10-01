@@ -99,7 +99,7 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 	t.Run("R-n", func(t *testing.T) {
 		// The optional oldest body read faults transiently: branch_data/OLD with the exact native cause, no plan or write.
 		w, raw := rollFixtureWorld(t)
-		out, evidence := w.armedPrepare(mdbx.SelectedDamageGetEIO, 4, bytes.Clone(w.side[1][:]), raw)
+		out, evidence := w.armedPrepare(mdbx.SelectedDamageGetEIO, 4, w.sideKey(1), raw)
 		retainWant(t, "oldest transient read branch_data", out, ssqBranch, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
 		ssqWantNative(t, "oldest body GetEIO", out.Err, ssqGetEIO)
 		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
@@ -239,7 +239,7 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		// An actual failed optional oldest-body read keeps its branch_data class through projection; a Get+abort EIO
 		// keeps that first typed class with the raw ordered join.
 		w, raw := rollFixtureWorld(t)
-		out, _ := w.armedPrepare(mdbx.SelectedDamageGetAbortEIO, 4, bytes.Clone(w.side[1][:]), raw)
+		out, _ := w.armedPrepare(mdbx.SelectedDamageGetAbortEIO, 4, w.sideKey(1), raw)
 		retainWant(t, "failed-read resource retained", out, ssqBranch, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
 		ssqWantNative(t, "oldest body Get+abort EIO", out.Err, ssqGetEIO, ssqAbortEIO)
 		w.wantImage("RP failed read keeps OLD")
@@ -256,7 +256,7 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 			{"absent next-height tip boundary", 2, func(*ssqWorld, []byte) []byte { return ssqMust(mdbx.HeightKey(1, 3)) }},
 			{"oldest SideLink", 6, func(*ssqWorld, []byte) []byte { return ssqMust(mdbx.HeightKey(2, 1)) }},
 			{"oldest owner NONE", 7, func(w *ssqWorld, _ []byte) []byte { return ssqMust(mdbx.CanonicalOwnerKey(1, w.side[1])) }},
-			{"oldest body", 4, func(w *ssqWorld, _ []byte) []byte { return bytes.Clone(w.side[1][:]) }},
+			{"oldest body", 4, func(w *ssqWorld, _ []byte) []byte { return w.sideKey(1) }},
 		} {
 			w, raw := rollFixtureWorld(t)
 			prior := w.tracked()

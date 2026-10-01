@@ -16,6 +16,12 @@ func (w *ssqWorld) prepareSide(raw []byte, tip *mdbx.AuthorityPointV1) SelectedS
 	return w.operate(PrepareSelectedSideRollingMDBX, raw, tip)
 }
 
+// sideKey is an owned copy of the tracked side hash at j (a map value is not addressable).
+func (w *ssqWorld) sideKey(j uint64) []byte {
+	hash := w.side[j]
+	return bytes.Clone(hash[:])
+}
+
 // rollWorld is canonical 0..2 (tip work 2^40) beside a mined full side 1..1440/F0, g2, tip work 1441, 1000 logical
 // bytes per row; its exact-tip child at 1441 is selected and does not win K23.
 func rollWorld(t *testing.T) (*ssqWorld, []byte) {
@@ -62,7 +68,7 @@ func TestSelectedSideRolling(t *testing.T) {
 		}
 		w.expectPrepared(prior)
 		w.wantImage("exact Prepared F0 image: oldest body and link kept, other bodies/links 2..1440 kept")
-		w.wantAbsent("unkept header1 deleted", 3, bytes.Clone(w.side[1][:]))
+		w.wantAbsent("unkept header1 deleted", 3, w.sideKey(1))
 		w.wantIncomingAbsent("A5", raw)
 		w.wantAbsent("no compact undo", 5, mdbx.UndoManifestKey(ssqHash(raw)))
 		w.reopen()
@@ -74,7 +80,7 @@ func TestSelectedSideRolling(t *testing.T) {
 		rank uint8
 		key  func(w *ssqWorld) []byte
 	}{
-		{"A5-body", 4, func(w *ssqWorld) []byte { return bytes.Clone(w.side[1][:]) }},
+		{"A5-body", 4, func(w *ssqWorld) []byte { return w.sideKey(1) }},
 		{"A5-link", 6, func(w *ssqWorld) []byte { return ssqMust(mdbx.HeightKey(2, 1)) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
