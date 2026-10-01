@@ -78,8 +78,7 @@ func newRetainWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 	w.literal(5, mdbx.UndoManifestKey(hash), mdbx.UndoManifestValue(0, [16]byte{}, 1, 0), false)
 	w.preserve(1, ssqMust(mdbx.UTXOKey(1, txid, 0)))
 	w.preserve(0, ssqMust(mdbx.MetaKey(0x10, 1)))
-	// One whole header/body/forward/owner group per block, so apply's bounded batches keep each pair together; the
-	// authority is the last group and is written once, in the final batch.
+	// One whole header/body/forward/owner group per block keeps pairs in one bounded apply batch; authority: last group, once.
 	var groups [][]mdbx.Mutation
 	for k := uint64(1); k <= w.spec.tip; k++ {
 		prev := w.canonical[k-1]
@@ -563,6 +562,7 @@ func TestSelectedSideRetention(t *testing.T) {
 		}
 		w.wantImage("owner input refusal")
 		retainWantConsensus(t, "short raw header parse", w.retain(raw[:10], w.tipAt(10)), consensus.BLOCK_ERR_PARSE)
+		w.wantImage("short raw header refusal leaves the image unchanged")
 	})
 	t.Run("R-a", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10, authority: detached})
