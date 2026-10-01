@@ -79,17 +79,19 @@ func newRetainWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 	w.literal(5, mdbx.UndoManifestKey(hash), mdbx.UndoManifestValue(0, [16]byte{}, 1, 0), false)
 	w.preserve(1, ssqMust(mdbx.UTXOKey(1, txid, 0)))
 	w.preserve(0, ssqMust(mdbx.MetaKey(0x10, 1)))
-	var rows []mdbx.Mutation
+	// One whole header/body/forward/owner group per block, so apply's bounded batches keep each pair together; the
+	// authority is the last group and is written once, in the final batch.
+	var groups [][]mdbx.Mutation
 	for k := uint64(1); k <= w.spec.tip; k++ {
 		prev := w.canonical[k-1]
 		block := w.mined(prev, 120)
 		h := ssqHash(block)
 		w.canonical[k] = h
-		rows = append(rows, w.literal(3, bytes.Clone(h[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(h[:]), block, false),
+		groups = append(groups, []mdbx.Mutation{w.literal(3, bytes.Clone(h[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(h[:]), block, false),
 			w.literal(2, ssqMust(mdbx.HeightKey(1, k)), mdbx.ChainValue(h, prev, w.spec.work(k)), false),
-			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, h)), mdbx.CanonicalOwnerValue(k), false))
+			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, h)), mdbx.CanonicalOwnerValue(k), false)})
 	}
-	w.apply(append(rows, w.authorityMutation(w.authorityValue())))
+	w.apply(append(groups, []mdbx.Mutation{w.authorityMutation(w.authorityValue())})...)
 	return w
 }
 
@@ -1002,9 +1004,10 @@ func TestSelectedSideRetention(t *testing.T) {
 			a.B, a.U, a.Phase = 100, 13_780, mdbx.StoragePhasePruneGCV1
 			a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanBlocksV1, GenerationID: 1, FirstHeight: 0, LastHeight: 99, NextHeight: 40}}}
 		}
-		w := newRetainWorld(t, ssqSpec{tip: 20, authority: blocks})
+		// B=100, U=13780 promise a canonical tip of at least 15219 (P12); the side and candidate are the A4a witnesses.
+		w := newRetainWorld(t, ssqSpec{tip: 15_219, authority: blocks})
 		w.retainSide(10, 15, 5, 16, false)
-		replaced(t, w, w.child(w.canonical[17], 18, nil), w.tipAt(20))
+		replaced(t, w, w.child(w.canonical[17], 18, nil), w.tipAt(15_219))
 		a := w.authorityValue()
 		a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 11, LastHeight: 15, NextHeight: 11})
 		w.authorityMutation(a)

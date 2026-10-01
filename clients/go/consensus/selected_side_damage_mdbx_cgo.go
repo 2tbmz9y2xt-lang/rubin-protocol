@@ -83,8 +83,8 @@ func selectedSideDefect(message string) error {
 }
 
 // selectedSideDamagePlan is one invocation's private callback state. step names the resource class of the artifact read in
-// flight; it is unset during authority/metadata qualification and cleared once the callback returns a Batch or the
-// healthy sentinel, so infrastructure errors outside an artifact read keep their native storage class.
+// flight: set before each artifact method and cleared as soon as that method returns successfully, so it remains only
+// after a failed artifact invocation and infrastructure errors outside a read keep their native storage class.
 // bound/boundResult are set only by the node classifier: one exact callback leaf and its finite result ("" skips it).
 type selectedSideDamagePlan struct {
 	generation, tip, height uint64
@@ -144,16 +144,11 @@ func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) 
 	}
 	p := &selectedSideDamagePlan{}
 	batch, err := newSelectedSideEvidence(reader, authority).transfer(p)
-	var engine *mdbx.EngineError
-	switch {
-	case err == nil:
-		return SelectedSidePlanV1{Batch: batch}, nil
-	case errors.As(err, &engine) && selectedSideResource(engine.Class) != "":
-		// Only an actual transient read failure keeps the in-flight read class; a positive absence, a validation
-		// defect or a capacity/encoding exit carries none.
+	if err != nil {
+		// Each artifact read clears its class once its method returns, so only a failed artifact invocation leaves it set.
 		return SelectedSidePlanV1{ReadResource: p.step}, err
 	}
-	return SelectedSidePlanV1{}, err
+	return SelectedSidePlanV1{Batch: batch}, nil
 }
 
 // ClassifySelectedSideFailureMDBX classifies one dormant node attempt's uncrossed raw error with the existing ordered
@@ -292,6 +287,7 @@ func (e *selectedSideEvidence) link(p *selectedSideDamagePlan, height uint64) ([
 	if err != nil {
 		return nil, err
 	}
+	p.step = ""
 	key, _ := mdbx.HeightKey(e.side.GenerationID, height) // Legal authority proved the generation nonzero.
 	e.links[height-e.first] = value
 	e.consult(6, key)
@@ -310,6 +306,7 @@ func (e *selectedSideEvidence) owner(p *selectedSideDamagePlan, hash [32]byte) (
 	if err != nil {
 		return mdbx.CanonicalOwnerResultV1{}, err
 	}
+	p.step = ""
 	r.owner, r.ownerRead = result, true
 	for _, row := range result.Rows {
 		e.consult(row.DBI.Rank, row.Key)
@@ -324,10 +321,16 @@ func (e *selectedSideEvidence) readNamed(p *selectedSideDamagePlan, rank uint8, 
 	if required {
 		p.step = selectedSideCanonical
 		value, present, err := e.reader.Get(dbi, hash[:])
+		if err == nil {
+			p.step = ""
+		}
 		return value, present, uint64(len(value)), err
 	}
 	p.step = selectedSideBranch
 	row, err := e.reader.GetOptionalSide(dbi, hash[:])
+	if err == nil {
+		p.step = ""
+	}
 	return row.Value, row.Present, row.Length, err
 }
 
@@ -478,6 +481,7 @@ func (e *selectedSideEvidence) anchor(p *selectedSideDamagePlan) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	p.step = ""
 	if !present {
 		return nil, selectedSideDefect("canonical anchor entry is absent")
 	}
