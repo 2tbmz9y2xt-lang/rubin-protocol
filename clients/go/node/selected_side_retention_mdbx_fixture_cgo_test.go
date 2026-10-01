@@ -50,10 +50,8 @@ func (w *ssqWorld) exhaust() {
 	w.apply([]mdbx.Mutation{w.authorityMutation(a)})
 }
 
-// retainWantCommit requires the raw CommitError of an armed commit-site scenario: its own truth is the raw truth, its
-// primary cause is the injected commit ENOSPC (update/EngineCapacity/28), and its readback cause is exactly the
-// readback Get EIO (update/EngineIO/5) when readback faulted, otherwise absent: an OLD, NEW or third-image readback
-// compares without error and the OLD abort succeeds (mdbx updateNativeReadback/updateResult).
+// retainWantCommit requires the CommitError: truth = raw truth, primary commit ENOSPC (update/Capacity/28), readback
+// cause exactly Get EIO (update/IO/5) when readback faulted, else absent (updateNativeReadback/updateResult).
 func retainWantCommit(t *testing.T, label string, out SelectedSideMutationOutcome, readback bool) {
 	t.Helper()
 	var commit *mdbx.CommitError
@@ -129,11 +127,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		}
 	})
 	t.Run("H5", func(t *testing.T) {
-		// M46: the relied-on candidate-owner absence (and the absent next-height tip boundary) must be in the final
-		// Consulted union. A Get EIO armed on exactly that key fires only in the readback transaction (scenario 9) after
-		// the commit's injected ENOSPC, so a compared row turns the committed image UNKNOWN; an omitted row leaves raw NEW.
-		// The tuple is asserted inside the callback, before the fixture's fault-count bookkeeping, and before the
-		// baseline Get counts below, which an omitted row would also change.
+		// M46: the candidate-owner absence (and absent tip boundary) must be in the final union. A readback-only Get EIO on
+		// that key (scenario 9) turns the committed image UNKNOWN; an omitted row leaves NEW. The tuple is asserted inside
+		// the callback, before fault bookkeeping and before the baseline Get counts below, which an omission also changes.
 		for _, c := range []struct {
 			name string
 			rank uint8
@@ -163,9 +159,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, prior := n1(t)
 		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "equality NEW with commit error", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
-		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted capture 0/0/3/6/0/0/0/2, target images and readback recapture
-		// 2x 1/0/0/1/1/0/1/0. Readback: 4 targets twice plus the 11 relied-on rows (forward 5, 10, 11; headers 0..5;
-		// owners of 5 and of the candidate NONE) once.
+		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted 0/0/3/6/0/0/0/2, targets+recapture 2x 1/0/0/1/1/0/1/0. Readback:
+		// 4 targets twice plus 11 relied-on rows (forward 5, 10, 11; headers 0..5; owners of 5 and candidate NONE).
 		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
 			t.Fatalf("required native OLD/Consulted observation captured: %+v", evidence)
 		}
@@ -188,9 +183,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantN1Image("tip boundary N1 image", raw)
 	})
 	t.Run("R-tip-suffix", func(t *testing.T) {
-		// The tip entry (1,10) is healthy, but the stored suffix row (1,11) is 103 bytes: the suffix page's own stored-row
-		// check fails with prefix-page Integrity (codeInvalid = MDBX_INVALID -30793 in the pinned mdbx.h), recorded on the
-		// Reader, before any stale decision. A healthy suffix row would instead be STALE_LOCAL_PLAN (R-tip-stale-height).
+		// Healthy tip (1,10) but a 103-byte suffix row (1,11): prefix-page Integrity (MDBX_INVALID -30793), recorded on the
+		// Reader, wins before any stale decision; a healthy suffix row would be STALE_LOCAL_PLAN (R-tip-stale-height).
 		w, raw, _ := n1(t)
 		w.seed(2, ssqMust(mdbx.HeightKey(1, 11)), mdbx.ChainValue([32]byte{0x11}, w.canonical[10], ssqWork(12))[:103])
 		out := w.retain(raw, w.tipAt(10))
@@ -212,9 +206,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("seeded suffix row and image unchanged")
 	})
 	t.Run("R-kc5", func(t *testing.T) {
-		// A byte-identical expected row is consulted, not a target. NF[H5] OLD Gets are callback 1/0/2/7/1/0/0/2, Consulted
-		// capture 0/0/3/6/0/0/0/2 and target image plus readback recapture 2x 1/0/0/1/1/0/1/0; each reused row moves one
-		// Get from the two target passes to the capture. Readback: header 3 targets twice+12 rows, body 3x2+12, both 2x2+13.
+		// A byte-identical expected row is consulted, not a target: from NF[H5]'s counts each reused row moves one Get from
+		// the two target passes to the capture. Readback: header 3 targets twice+12 rows, body 3x2+12, both 2x2+13.
 		for _, c := range []struct {
 			name  string
 			ranks []uint8
@@ -243,10 +236,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		}
 	})
 	t.Run("H11-third", func(t *testing.T) {
-		// One n=46988528 construction over sequential valid pre-states. 3n+7223040+6422528 = 154611152 = G+1, so only the
-		// charged third candidate image refuses step 10, after the full qualification and before any expected-row read.
-		// H4d: the same length/header with a step-5 merkle failure wins before that execution capacity, and an exhausted
-		// sequence wins before it too.
+		// One n=46988528 block (3n+7223040+6422528 = G+1): only the third image refuses step 10, before expected rows.
+		// H4d: a step-5 merkle failure of the same length/header and an exhausted sequence both win before that capacity.
 		w, _, _ := n1(t)
 		raw := retainLarge(t, w.canonical[5], w.ts(w.canonical[5])+120, 46_988_528)
 		w.absent = append(w.absent, ssqHash(raw))
@@ -310,9 +301,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("tip read and abort fault")
 	})
 	t.Run("H8a-delete", func(t *testing.T) {
-		// N1's Batch has no delete; the Retain invocation's definite delete is the fresh positive-damage Recheck. The first
-		// attempt locates the absent optional body 6 and releases; the recheck's complete clear deletes only the unkept
-		// side header 6, and DeleteEIO fails that delete before commit.
+		// N1 has no delete; Retain's definite delete is the fresh positive-damage Recheck: its clear deletes only the
+		// unkept side header 6 (after the first attempt locates absent body 6), and DeleteEIO fails it before commit.
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
 		w.retainSide(5, 6, 1, 7, false)
 		tip := w.side[6]
@@ -320,10 +310,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		out, evidence := w.armed(mdbx.SelectedDamageDeleteEIO, 0, nil, w.child(tip, 7, nil), w.tipAt(10))
 		retainWant(t, "definite precommit write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
 		ssqWantNative(t, "H8a-delete", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
-		// First attempt: the OLD read and its abort. Recheck: one later read-only begin, one write begin, one faulted
-		// delete, no commit and so no readback. The fixture keeps the first OLD transaction pointer until disarm, so the
-		// recheck's separate read-only transaction may reuse that address and count its abort as an OLD abort too:
-		// A is 1..2, and each counted abort adds two probes to the recheck's read-begin and write-begin probes.
+		// First attempt: OLD read and abort. Recheck: one read-only begin, one write begin, one faulted delete, no commit
+		// or readback. A reused first-OLD address may also count the recheck's abort: A is 1..2, each counted abort adds
+		// two probes to the recheck's read-begin and write-begin probes.
 		if evidence.BeginOld != 1 || evidence.BeginRead != 1 || evidence.BeginWrite != 1 || evidence.Deletes != 1 || evidence.Commits != 0 || evidence.Faults != 1 ||
 			evidence.OldAborts < 1 || evidence.OldAborts > 2 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
 			t.Fatalf("H8a-delete evidence %+v", evidence)
@@ -401,9 +390,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("cached next call persisted image")
 	})
 	t.Run("H12-terminal", func(t *testing.T) {
-		// Producer composition, not native machinery: this attempt binds its own typed branch_data result, then a stronger
-		// cleanup cause follows in the same raw join. Terminal integrity and the outer THREAD invariant override the first
-		// typed result; projection keeps the raw join's identity and its cause order.
+		// Producer composition, not native: a bound typed branch_data result then a stronger cleanup cause in one raw join;
+		// terminal integrity and the outer THREAD invariant override it, keeping the join's identity and cause order.
 		for _, c := range []struct {
 			name, want string
 			cleanup    error
@@ -581,22 +569,6 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			w.wantImage("selected-member clear after reopen")
 		}
 	})
-	t.Run("H7b-unowned", func(t *testing.T) {
-		for _, selected := range []bool{false, true} {
-			w, raw, _ := n1(t)
-			if selected {
-				w = newRetainFixtureWorld(t, ssqSpec{tip: 10}) // N2 count 2: healthy link 6 and tip 7 both name other hashes.
-				w.retainSide(5, 7, 2, 8, false)
-				raw = w.child(w.side[7], 8, nil)
-			}
-			hash := ssqHash(raw)
-			w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(raw), false)})
-			w.absent = nil
-			retainWantRefusal(t, "terminal/no differing overwrite", w.retain(raw, w.tipAt(10)), ssqIntegrity, "unowned expected selected side row differs from the candidate")
-			w.wantImage("differing body kept")
-			w.wantAbsent("candidate header not written", 3, bytes.Clone(hash[:]))
-		}
-	})
 	t.Run("R-l", func(t *testing.T) {
 		// H4d: a denied full-lane charge ends in the control-only Update before any candidate read, so the capacity refusal
 		// precedes an undiscovered step-5 merkle failure and an exhausted sequence alike (independent sequential pre-states).
@@ -647,10 +619,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("side kept without recheck")
 	})
 	t.Run("H10-second", func(t *testing.T) {
-		// Rows 6 and 7 stay healthy; tip 8 is replaced by a hash-bound block whose header, body and link name an
-		// absent unowned Z, with descriptor hash and work equal to its link. The exact-tip child's ancestry asks for
-		// row 7 by Z (locator 7); the fresh recheck of row 7 follows its physical healthy link; the one retry finds
-		// the same unchanged image and its second locator is typed branch_data. No write happens anywhere.
+		// Rows 6, 7 healthy; tip 8 is a hash-bound block naming absent unowned Z (descriptor = its link). Ancestry asks
+		// for row 7 by Z (locator 7); the recheck of 7 follows its healthy link; the one retry finds the same image and
+		// its second locator is typed branch_data. No write happens anywhere.
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
 		w.retainSide(5, 8, 3, 9, false)
 		z := [32]byte{0x5a}
@@ -672,10 +643,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 8, Height: 7}) {
 			t.Fatalf("second locator cause %v", out.Err)
 		}
-		// Three read-only Updates: the first attempt's OLD, then the recheck and the retry (counted as later read-only
-		// begins); every probe is inside one of the three separately released grants. The fixture keeps the first OLD
-		// transaction pointer until disarm, so a later read-only transaction reusing that address also counts its abort:
-		// A is 1..3 and each counted abort adds two probes to the two read-begin probes, all denied.
+		// Three read-only Updates (first OLD, recheck, retry), each probe inside one of three released grants. A reused
+		// first-OLD address may also count a later abort: A is 1..3, each counted abort adds two probes to the two
+		// read-begin probes, all denied.
 		if evidence.BeginOld != 1 || evidence.BeginRead != 2 || evidence.BeginWrite != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 ||
 			evidence.OldAborts < 1 || evidence.OldAborts > 3 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
 			t.Fatalf("recheck between released grants/no nested operation: %+v", evidence)
@@ -706,9 +676,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		})
 	}
 	t.Run("owner-input-oversize", func(t *testing.T) {
-		// A nil or zero owner with an oversized candidate on an open Store returns the owner's own exact input sentinel
-		// before any grant, Update or native operation, on a STABLE and on a recovery pre-state alike. The same Store
-		// instance then serves the next valid-owner invocation in its control-only order before any image check.
+		// Nil/zero owner + oversize raw on an open Store: the owner's exact input sentinel before any grant, Update or native
+		// operation (STABLE and recovery); the same Store then serves the next valid owner control-only, before images.
 		want := (*mdbx.OperationReservationOwner)(nil).WithReservation(1, nil)
 		for _, c := range []struct {
 			name, next string
@@ -744,9 +713,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, prior, side := n2(t)
 		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "probed N2", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
-		// Probes at write begin, commit and twice around the OLD abort, all denied inside the grant. Rank-4 OLD Gets: the
-		// one callback linking-body read and the candidate expected-body read, the linking body's Consulted capture and
-		// the candidate body target image.
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Rank-4 OLD Gets: one linking-body read,
+		// the candidate expected-body read, the linking body's Consulted capture and the candidate body target image.
 		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
 			evidence.OldGets[4] != 4 {
 			t.Fatalf("one linking body read; every native full-lane probe denied: %+v", evidence)
@@ -826,34 +794,8 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		}
 		w.wantImage("N2 precommit keeps OLD")
 	})
-	t.Run("N2-linking-required", func(t *testing.T) {
-		// The side tip is canonically Owned at k=12 >= B=0, so its absent linking body is required canonical integrity,
-		// stronger than the optional recheck route and never a clear.
-		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
-		w.retainSide(5, 6, 1, 7, false)
-		tip := w.side[6]
-		w.own(tip, w.canonical[5], 12)
-		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
-		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
-		retainWantRefusal(t, "required linking body terminal/no clear", out, ssqIntegrity, "required canonical row is absent")
-		w.wantImage("required linking body defect")
-	})
-	t.Run("N2-linking-required-commitments", func(t *testing.T) {
-		// Owned at k=12 >= B=0, the present hash-bound linking body with invalid commitments is the initial typed canonical
-		// integrity refusal itself, at OLD/Prewrite with no recheck and no clear.
-		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
-		blocks := w.retainSide(5, 6, 1, 7, false)
-		tip := w.side[6]
-		w.own(tip, w.canonical[5], 12)
-		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
-		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainMerkle(blocks[6]), false)})
-		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
-		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
-		w.wantImage("required commitment-invalid linking body kept")
-	})
-	// N3 native outcomes on the healthy clear of the mined side 11..15 (F10, tip work 16) by a winning canonical-17 child
-	// (work 19 below the canonical tip's 21): each scenario runs the public Replace once; its tuple is asserted before the
-	// fixture's own site bookkeeping.
+	// N3 native outcomes on the healthy clear of side 11..15 (F10, work 16) by a canonical-17 child (19 < tip 21): one
+	// public Replace per scenario, tuple asserted before the fixture's site bookkeeping.
 	n3 := func(t *testing.T) (*ssqWorld, []byte) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 20})
 		w.retainSide(10, 15, 5, 16, false)

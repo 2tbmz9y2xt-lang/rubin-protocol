@@ -57,9 +57,8 @@ func newRetainStore(t *testing.T, spec ssqSpec) *ssqWorld {
 	return w
 }
 
-// newRetainWorld commits the real published devnet genesis through its existing MDBX owner (header, body, paired
-// index, undo, UTXO and counter), extends generation 1 with mined canonical blocks 1..tip (header, body and paired
-// forward/owner rows) and writes the spec authority; every committed row is tracked for exact image proofs.
+// newRetainWorld commits the published devnet genesis via its MDBX owner, mined canonical blocks 1..tip (header, body,
+// forward/owner pairs) and the spec authority; every committed row is tracked for exact image proofs.
 func newRetainWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 	t.Helper()
 	w := newRetainStore(t, spec)
@@ -138,9 +137,8 @@ func retainHeavy(tip uint64) func(uint64) [40]byte {
 	}
 }
 
-// retainSide mines a side branch F+1..tip from canonical F and commits side g=2 over its last rows: each retained row
-// is header, body and SideLink with cumulative work work-(tip-j); with history an earlier mined row keeps only its
-// unowned header. The descriptor carries tip, work and the row count.
+// retainSide mines side F+1..tip from canonical F and commits g=2 over its last rows (header, body, SideLink with work
+// work-(tip-j)); with history earlier rows keep only their unowned header. The descriptor carries tip, work, count.
 func (w *ssqWorld) retainSide(f, tip uint64, rows uint16, work uint64, history bool) map[uint64][]byte {
 	w.t.Helper()
 	blocks, prev, first := map[uint64][]byte{}, w.canonical[f], tip-uint64(rows)+1
@@ -215,9 +213,8 @@ func retainMerkle(raw []byte) []byte {
 	return out
 }
 
-// retainWitness gives the single coinbase one canonical empty sentinel witness item. Steps 1-12 commit the coinbase
-// wtxid as zero and its txid excludes the witness, so the header, Merkle root and witness commitment stay valid while
-// the body bytes differ.
+// retainWitness adds one empty sentinel witness item to the single coinbase: its wtxid commits as zero and its txid
+// excludes the witness, so header, Merkle root and witness commitment stay valid while the body bytes differ.
 func retainWitness(raw []byte) []byte {
 	return append(bytes.Clone(raw[:len(raw)-2]), 1, consensus.SUITE_ID_SENTINEL, 0, 0, 0)
 }
@@ -232,10 +229,8 @@ func retainCoinbase(commitment [32]byte) []byte {
 	return consensus.AppendCompactSize(consensus.AppendCompactSize(consensus.AppendU32le(b, 0), 0), 0)
 }
 
-// retainLarge builds a steps-1-12-valid block of exactly n bytes over parent: after the 116-byte header, the 3-byte
-// count and the 105-byte coinbase, the rest is split over input-free transactions of 65565..100020 bytes, each one
-// unknown-suite witness item (pubkey 65536..99991 bytes, one-byte signature), so every witness stays within
-// MAX_WITNESS_BYTES_PER_TX and each transaction weighs its size plus 121.
+// retainLarge builds a valid n-byte block over parent: header, 3-byte count, 105-byte coinbase, then input-free
+// 65565..100020-byte txs with one unknown-suite witness each (within MAX_WITNESS_BYTES_PER_TX, weight size+121).
 func retainLarge(t *testing.T, parent [32]byte, timestamp uint64, n int) []byte {
 	t.Helper()
 	rem := n - consensus.BLOCK_HEADER_BYTES - 3 - 105
@@ -379,9 +374,8 @@ func (w *ssqWorld) wantAbsent(label string, rank uint8, key []byte) {
 	}
 }
 
-// wantCleared proves the literal complete clear of side(2,first..tip), healthy (N3) or positive-damage, from the pre-side
-// authority: no selected side, PRUNE_GC and SIDE(2,first,tip,first); every leaving header except kept is absent, bodies
-// and links stay.
+// wantCleared proves the complete clear of side(2,first..tip), healthy (N3) or positive-damage: no selected side,
+// PRUNE_GC, SIDE(2,first,tip,first); every leaving header except kept is absent, bodies and links stay.
 func (w *ssqWorld) wantCleared(label string, first, tip uint64, kept ...uint64) {
 	w.t.Helper()
 	a := w.authorityValue()
@@ -561,8 +555,14 @@ func TestSelectedSideRetention(t *testing.T) {
 			if out.Err.Error() != "invalid storage operation reservation input" {
 				t.Fatalf("owner input error %v", out.Err)
 			}
+			// An oversize candidate with that owner on a live Store is the same exact input refusal, no Update.
+			big := make([]byte, mdbx.MaxBlockBytes+1)
+			if out := RetainSelectedSideMDBX(w.store, owner, big, nil); out.Err == nil || out.Err.Error() != "invalid storage operation reservation input" || out.Result != "" || out.Truth != old || out.Stage != pre {
+				t.Fatalf("oversize owner input %+v", out)
+			}
 		}
 		w.wantImage("owner input refusal")
+		retainWantConsensus(t, "short raw header parse", w.retain(raw[:10], w.tipAt(10)), consensus.BLOCK_ERR_PARSE)
 	})
 	t.Run("R-a", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10, authority: detached})
@@ -809,8 +809,7 @@ func TestSelectedSideRetention(t *testing.T) {
 		out := w.retain(retainWitness(blocks[8]), w.tipAt(10))
 		retainWantRefusal(t, "valid differing bytes branch_data/no overwrite", out, ssqBranch, "stored selected row differs from the supplied block")
 		w.wantImage("stored row kept")
-		// An exact match whose stored work (99) outranks the canonical tip (11) is the K23 ORDINARY winner, not an
-		// unconditional duplicate.
+		// An exact match whose stored work (99) outranks the canonical tip (11) is the K23 ORDINARY winner, not a duplicate.
 		w = newRetainWorld(t, ssqSpec{tip: 10})
 		blocks = w.retainSide(3, 8, 5, 99, false)
 		retainWant(t, "exact match winning K23 ORDINARY", w.retain(blocks[8], w.tipAt(10)), "", "ORDINARY", "OLD", old, pre, true)
@@ -947,9 +946,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWant(t, "initiating side byte-identical/REPLACE", w.retain(w.child(w.canonical[5], 6, nil), w.tipAt(10)), ssqBranch, "REPLACE", "OLD", old, pre, true)
 		w.wantImage("replacement routed")
 	})
-	// N3 worlds: canonical tip 20 (work 21) and the mined full side 11..15 over F10 (five work-1 blocks, tip work 16); a
-	// canonical-17 child (work 19) wins the side but not K23. replaced checks the healthy clear tuple and persisted
-	// authority; reopenNext re-reads the bytes and proves the reopened handle refuses the next owner lookup.
+	// N3 worlds: canonical tip 20 (work 21), mined side 11..15/F10 (tip work 16), a canonical-17 child (work 19) wins
+	// the side not K23. replaced checks the clean tuple and authority; reopenNext reopened bytes and unverified owner.
 	// incomingAbsent tracks the incoming child's SideLink (gen 2, its height) as absent unless an old link holds that key.
 	incomingAbsent := func(w *ssqWorld, raw []byte) {
 		for k, hash := range w.canonical {
@@ -985,9 +983,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		reopenNext(t, w, "A4a")
 	})
 	t.Run("A4a-kept", func(t *testing.T) {
-		// Side 11..15 over F10 whose rows 11..13 are the verified canonical blocks themselves (owner rows at their own
-		// heights) and rows 14..15 are mined over canonical 13, tip work 16. The headers 11..13 are kept by hash at those
-		// owner heights with every canonical row unchanged; the side headers 14 and 15 are deleted.
+		// Side 11..15/F10: rows 11..13 are the verified canonical blocks, 14..15 mined over canonical 13 (tip work 16).
+		// Headers 11..13 are kept at their owner heights with every canonical row unchanged; headers 14, 15 are deleted.
 		w := newRetainWorld(t, ssqSpec{tip: 20})
 		var rows []mdbx.Mutation
 		var total uint64
@@ -1031,9 +1028,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		reopenNext(t, w, "A4b")
 	})
 	t.Run("A4c", func(t *testing.T) {
-		// The full side 1..1440 over F0 (bodies and links 1..1440 physical, tip work 1441) is rewritten to the Prepared
-		// predecessor 2..1440/count1439 with SIDE(2,1,1,1) and its actual body total; a canonical-1441 child (work 1443)
-		// wins it below the canonical tip 1443 (work 1444). Every body and link, row 1 included, stays.
+		// Full side 1..1440/F0 (work 1441) rewritten to Prepared 2..1440 + SIDE(2,1,1,1) with its real byte total; a
+		// canonical-1441 child (work 1443 < tip 1444) wins. Every body and link, row 1 included, stays.
 		w := newRetainWorld(t, ssqSpec{tip: 1_443})
 		blocks := w.retainSide(0, 1_440, 1_440, 1_441, false)
 		a := w.tracked()
@@ -1102,6 +1098,49 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWantRefusal(t, "Replace has no duplicate scan", w.replaceSide(blocks[14], w.tipAt(20)), ssqBranch, "candidate parent is neither an active canonical block nor the selected tip")
 		retainWantRefusal(t, "Replace control precedes the raw bound", w.replaceSide(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqBranch, "candidate block exceeds MaxBlockBytes")
 		w.wantImage("wrong-leaf Replace unchanged")
+		w.apply([]mdbx.Mutation{w.absentRow(6, ssqMust(mdbx.HeightKey(2, 12)))})
+		retainWantIntegrity(t, "Replace planner required link integrity", w.replaceSide(w.child(w.canonical[17], 18, nil), w.tipAt(20)), "selected side link is absent")
+		w.wantImage("planner failure writes nothing")
+	})
+	t.Run("H7b-unowned", func(t *testing.T) {
+		for _, selected := range []bool{false, true} {
+			w := newRetainWorld(t, ssqSpec{tip: 10, authority: nextTwo})
+			raw := w.child(w.canonical[5], 6, nil)
+			if selected {
+				w = newRetainWorld(t, ssqSpec{tip: 10}) // N2 count 2: healthy link 6 and tip 7 both name other hashes.
+				w.retainSide(5, 7, 2, 8, false)
+				raw = w.child(w.side[7], 8, nil)
+			}
+			hash := ssqHash(raw)
+			w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(raw), false)})
+			w.absent = nil
+			retainWantRefusal(t, "terminal/no differing overwrite", w.retain(raw, w.tipAt(10)), ssqIntegrity, "unowned expected selected side row differs from the candidate")
+			w.wantImage("differing body kept")
+			w.wantAbsent("candidate header not written", 3, bytes.Clone(hash[:]))
+		}
+	})
+	t.Run("N2-linking-required", func(t *testing.T) {
+		// Side tip Owned at k=12 >= B=0 (paired forward/owner rows): an absent linking body is required integrity, no clear.
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(tip, w.canonical[5], ssqWork(13)), false), w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(12), false)})
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
+		retainWantRefusal(t, "required linking body terminal/no clear", out, ssqIntegrity, "required canonical row is absent")
+		w.wantImage("required linking body defect")
+	})
+	t.Run("N2-linking-required-commitments", func(t *testing.T) {
+		// Owned at k=12 >= B=0, a present linking body with invalid commitments is the initial typed integrity, no clear.
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(tip, w.canonical[5], ssqWork(13)), false), w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(12), false)})
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainMerkle(blocks[6]), false)})
+		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
+		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
+		w.wantImage("required commitment-invalid linking body kept")
 	})
 	t.Run("R-k-first-replace", func(t *testing.T) {
 		// Replace has no admitted first-row probe: the exact stored first row of a count-1 and a count-3 side is a clean
@@ -1155,15 +1194,13 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWantRefusal(t, "control precedes the raw bound", w.retain(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqRequired, "")
 	})
 	t.Run("H3-M", func(t *testing.T) {
-		// Exactly M bytes passes the raw bound and is fully qualified: its weight, about M plus 121 per transaction,
-		// exceeds MAX_BLOCK_WEIGHT at step 8.
+		// Exactly M bytes passes the raw bound; its weight (about M + 121 per tx) exceeds MAX_BLOCK_WEIGHT at step 8.
 		w := newRetainWorld(t, ssqSpec{tip: 10})
 		raw := retainLarge(t, w.canonical[5], w.ts(w.canonical[5])+120, mdbx.MaxBlockBytes)
 		retainWantConsensus(t, "raw=M reaches steps 1-12", w.retain(raw, w.tipAt(10)), consensus.BLOCK_ERR_WEIGHT_EXCEEDED)
 		w.wantImage("raw=M unchanged")
 	})
-	// 3n+7223040+6422528 <= 154611151 holds up to n=46988527 (154611149) and fails at n=46988528 (154611152, G+1); the
-	// G+1 refusal is NF[H11-third].
+	// 3n+7223040+6422528 <= 154611151 holds up to n=46988527 and fails at 46988528 (G+1, NF[H11-third]).
 	t.Run("H11-G", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10, authority: nextTwo})
 		prior := w.authorityValue()
@@ -1172,11 +1209,9 @@ func TestSelectedSideRetention(t *testing.T) {
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
 		w.wantN1Image("large N1 image", raw)
 	})
-	// N2 charges the exact checked linking body L: 3n+L+7223040+6422528 <= 154611151, so 3n+L <= 140965583. n=46988527
-	// (3n=140965581) fits N1 but refuses here for the side tip body L >= 3; nFit=floor((140965583-L)/3) commits and
-	// nFit+1 refuses. With r=(140965583-L) mod 3, 3(nFit+1)+L = 140965583+3-r, so nFit+1 commits under any charge below
-	// L by at least 3-r (a header-length 116 charge included, as L > 119) and nFit refuses under any over-charge above
-	// r; a smaller residue-bound deviation is not claimed.
+	// N2 charges linking L: 3n+L <= 140965583. n=46988527 fits N1 but refuses for L >= 3; nFit=floor((140965583-L)/3)
+	// commits, nFit+1 refuses. With r=(140965583-L) mod 3 this kills any undercharge >= 3-r (header length 116 included,
+	// L > 119) and any overcharge > r; smaller residue-bound deviations are not claimed.
 	t.Run("H11-L", func(t *testing.T) {
 		for _, step := range []int{0, 1, 2} {
 			w := newRetainWorld(t, ssqSpec{tip: 10})
@@ -1224,9 +1259,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		w.wantCleared("positive recheck clear", 6, 6)
 	})
 	t.Run("H10-linking-commitments", func(t *testing.T) {
-		// The optional side tip body is present and hash-bound (header unchanged) but fails its commitments: the
-		// exact-tip child's linking check is a locator, never an append, and the fresh recheck completes the clear of
-		// side 6..6 with the bad body and its link kept and the unkept header removed.
+		// The optional hash-bound side tip body fails its commitments: a locator, never an append; the fresh recheck
+		// clears side 6..6 keeping the bad body and its link and removing the unkept header.
 		w := newRetainWorld(t, ssqSpec{tip: 10})
 		blocks := w.retainSide(5, 6, 1, 7, false)
 		tip := w.side[6]
@@ -1256,8 +1290,7 @@ func TestSelectedSideRetention(t *testing.T) {
 		abort := &mdbx.EngineError{Class: mdbx.EngineIO, Operation: "abort", Code: 5}
 		leaf := &selectedSideQualificationError{Result: ssqBranch, Cause: errors.New("bound")}
 		var typed *selectedSideQualificationError
-		// The producer owner: every value goes through this attempt's bind, then its own projection with a joined
-		// nonterminal abort cause.
+		// Producer owner: every value goes through bind, then projection with a joined nonterminal abort cause.
 		for _, c := range []struct {
 			name, want string
 			leaf       error
