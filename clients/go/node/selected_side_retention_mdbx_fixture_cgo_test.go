@@ -558,7 +558,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		for _, selected := range []bool{false, true} {
 			w, raw, _ := n1(t)
 			if selected {
-				w, raw, _, _ = n2(t) // N2: count-1 side, no earlier link and a tip hash other than the candidate's.
+				w = newRetainFixtureWorld(t, ssqSpec{tip: 10}) // N2 count 2: healthy link 6 and tip 7 both name other hashes.
+				w.retainSide(5, 7, 2, 8, false)
+				raw = w.child(w.side[7], 8, nil)
 			}
 			hash := ssqHash(raw)
 			w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(raw), false)})

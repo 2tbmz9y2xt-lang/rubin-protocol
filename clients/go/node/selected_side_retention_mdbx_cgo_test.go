@@ -950,8 +950,7 @@ func TestSelectedSideRetention(t *testing.T) {
 	// N3 worlds: canonical tip 20 (work 21) and the mined full side 11..15 over F10 (five work-1 blocks, tip work 16); a
 	// canonical-17 child (work 19) wins the side but not K23. replaced checks the healthy clear tuple and persisted
 	// authority; reopenNext re-reads the bytes and proves the reopened handle refuses the next owner lookup.
-	// incomingAbsent tracks the incoming child's SideLink at the old generation 2 and its height as absent (nil row) for
-	// every later image check, immediate and reopened, unless that key already holds a tracked old-side link.
+	// incomingAbsent tracks the incoming child's SideLink (gen 2, its height) as absent unless an old link holds that key.
 	incomingAbsent := func(w *ssqWorld, raw []byte) {
 		for k, hash := range w.canonical {
 			if key := ssqMust(mdbx.HeightKey(2, k+1)); hash == [32]byte(raw[4:36]) && w.rows[string(append([]byte{6}, key...))].key == nil {
@@ -1105,9 +1104,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		w.wantImage("wrong-leaf Replace unchanged")
 	})
 	t.Run("H7b-selected", func(t *testing.T) {
-		// A differing expected row of a live selected hash is that row's locator: side link 6 is replaced to name the
-		// exact-tip child X (parent canonical 5, work 7); X's header differs, or its header matches and its body differs.
-		// The fresh recheck of row 6 finds optional damage and completes the clear; no incoming row is written.
+		// Link 6 names exact-tip child X (parent canonical 5, work 7); X's header differs, or its body does: row 6 is the
+		// locator, the fresh recheck finds optional damage and completes the clear, and no incoming row is written.
 		for _, bodyDiffers := range []bool{false, true} {
 			w := newRetainWorld(t, ssqSpec{tip: 30})
 			w.retainSide(5, 25, 20, 26, false)
