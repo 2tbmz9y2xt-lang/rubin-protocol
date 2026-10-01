@@ -1103,33 +1103,6 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWantRefusal(t, "Replace control precedes the raw bound", w.replaceSide(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqBranch, "candidate block exceeds MaxBlockBytes")
 		w.wantImage("wrong-leaf Replace unchanged")
 	})
-	t.Run("H7b-selected", func(t *testing.T) {
-		// Link 6 names exact-tip child X (parent canonical 5, work 7); X's header differs, or its body does: row 6 is the
-		// locator, the fresh recheck finds optional damage and completes the clear, and no incoming row is written.
-		for _, bodyDiffers := range []bool{false, true} {
-			w := newRetainWorld(t, ssqSpec{tip: 30})
-			w.retainSide(5, 25, 20, 26, false)
-			raw := w.child(w.side[25], 26, nil)
-			x := ssqHash(raw)
-			w.absent = slices.DeleteFunc(w.absent, func(h [32]byte) bool { return h == x })
-			rows := []mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 6)), mdbx.ChainValue(x, w.canonical[5], ssqWork(7)), true)}
-			if bodyDiffers {
-				rows = append(rows, w.literal(3, bytes.Clone(x[:]), raw[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(x[:]), retainMerkle(raw), false))
-			} else {
-				rows = append(rows, w.literal(3, bytes.Clone(x[:]), w.headers[w.side[6]], false))
-			}
-			w.apply(rows)
-			w.side[6] = x
-			link26 := ssqMust(mdbx.HeightKey(2, 26))
-			retainWant(t, "selected-member locator then complete recheck clear", w.retain(raw, w.tipAt(30)), retainCleared, "", retainNA, newT, crossed, true)
-			w.wantAbsent("incoming SideLink(2,26) absent", 6, link26)
-			w.wantCleared("selected-member clear", 6, 25)
-			w.rows[string(append([]byte{3}, x[:]...))] = ssqRow{rank: 3, key: bytes.Clone(x[:])} // Header X stays absent.
-			w.reopen()
-			w.wantAbsent("incoming SideLink(2,26) absent after reopen", 6, link26)
-			w.wantImage("selected-member clear after reopen")
-		}
-	})
 	t.Run("R-k-first-replace", func(t *testing.T) {
 		// Replace has no admitted first-row probe: the exact stored first row of a count-1 and a count-3 side is a clean
 		// NOT_SELECTED with no write (Retain's known-stored result is R-k-first-one/R-k-first-many).

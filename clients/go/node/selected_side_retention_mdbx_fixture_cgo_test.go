@@ -554,6 +554,33 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			w.wantCleared("owned kept header", 4, 8, 8)
 		}
 	})
+	t.Run("H7b-selected", func(t *testing.T) {
+		// Link 6 names exact-tip child X (parent canonical 5, work 7); X's header differs, or its body does: row 6 is the
+		// locator, the fresh recheck finds optional damage and completes the clear, and no incoming row is written.
+		for _, bodyDiffers := range []bool{false, true} {
+			w := newRetainFixtureWorld(t, ssqSpec{tip: 30})
+			w.retainSide(5, 25, 20, 26, false)
+			raw := w.child(w.side[25], 26, nil)
+			x := ssqHash(raw)
+			w.absent = nil // Only X was listed; its hash-global rows are tracked, not asserted absent.
+			rows := []mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 6)), mdbx.ChainValue(x, w.canonical[5], ssqWork(7)), true)}
+			if bodyDiffers {
+				rows = append(rows, w.literal(3, bytes.Clone(x[:]), raw[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(x[:]), retainMerkle(raw), false))
+			} else {
+				w.seed(3, bytes.Clone(x[:]), w.headers[w.side[6]]) // A header not hashing to X is seeded raw.
+			}
+			w.apply(rows)
+			w.side[6] = x
+			link26 := ssqMust(mdbx.HeightKey(2, 26))
+			retainWant(t, "selected-member locator then complete recheck clear", w.retain(raw, w.tipAt(30)), retainCleared, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+			w.wantAbsent("incoming SideLink(2,26) absent", 6, link26)
+			w.wantCleared("selected-member clear", 6, 25)
+			w.rows[string(append([]byte{3}, x[:]...))] = ssqRow{rank: 3, key: bytes.Clone(x[:])} // Header X stays absent.
+			w.reopen()
+			w.wantAbsent("incoming SideLink(2,26) absent after reopen", 6, link26)
+			w.wantImage("selected-member clear after reopen")
+		}
+	})
 	t.Run("H7b-unowned", func(t *testing.T) {
 		for _, selected := range []bool{false, true} {
 			w, raw, _ := n1(t)
