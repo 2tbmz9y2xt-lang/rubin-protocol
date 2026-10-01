@@ -567,7 +567,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 				rows = append(rows, w.literal(3, bytes.Clone(x[:]), raw[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(x[:]), retainMerkle(raw), false))
 			} else {
 				w.seed(3, bytes.Clone(x[:]), w.headers[w.side[6]]) // A header not hashing to X is seeded raw.
-				w.rows[string(append([]byte{4}, x[:]...))] = ssqRow{rank: 4, key: bytes.Clone(x[:])} // Body X stays absent.
+				w.rows[string(append([]byte{4}, x[:]...))] = ssqRow{rank: 4, key: bytes.Clone(x[:])}
 			}
 			w.apply(rows)
 			w.side[6] = x
