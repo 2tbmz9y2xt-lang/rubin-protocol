@@ -15,11 +15,17 @@ import (
 // armed fails.
 func (w *ssqWorld) armedPrepare(scenario mdbx.SelectedDamageScenario, rank uint8, key, raw []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
 	w.t.Helper()
+	return w.armedPrepareAt(scenario, rank, key, raw, w.tipAt(2))
+}
+
+// armedPrepareAt is armedPrepare under an explicit literal expected-tip locator.
+func (w *ssqWorld) armedPrepareAt(scenario mdbx.SelectedDamageScenario, rank uint8, key, raw []byte, tip *mdbx.AuthorityPointV1) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
+	w.t.Helper()
 	var out SelectedSideMutationOutcome
 	calls := 0
 	evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() {
 		calls++
-		out = w.prepareSide(raw, w.tipAt(2))
+		out = w.prepareSide(raw, tip)
 	})
 	if err != nil || calls != 1 {
 		w.t.Fatalf("scenario %d: %v (%+v)", scenario, err, evidence)
@@ -35,6 +41,45 @@ func rollFixtureWorld(t *testing.T) (*ssqWorld, []byte) {
 		return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
 	}
 	return w, raw
+}
+
+// rollUnionWorld is the live contract's LF[H11-union] pre-state (RP_composed_union_source_correction): published
+// genesis and mined canonical 1..30000 with B14881/U28561; a full 1440-row side 8640..10079 (g2) whose SideLinks name
+// the canonical rows with their canonical works, header-only history F+1..8639 being the owned canonical headers; the
+// oldest body 8640 (owner height below B, optional) positively absent. wide=false: F7651/C2428 with every leaving row
+// canonical-owned, so only the authority is a target. wide=true: F7650/C2429 and the tip 10079 an unowned block mined
+// over canonical 10078, whose leaving header is a second target. It returns the exact-tip child at retarget height
+// 10080. The 16384/16385 identity totals are the contract's source-derived premises, unexecuted here.
+func rollUnionWorld(t *testing.T, wide bool) (*ssqWorld, []byte) {
+	t.Helper()
+	w := newRetainWorld(t, ssqSpec{tip: 30_000, b: 14_881})
+	w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+		return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+	}
+	f, tip := uint64(7_651), w.canonical[10_079]
+	var rows []mdbx.Mutation
+	if wide {
+		block := w.mined(w.canonical[10_078], 113)
+		f, tip = 7_650, ssqHash(block)
+		rows = append(rows, w.literal(3, bytes.Clone(tip[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(tip[:]), block, false))
+	}
+	var total uint64
+	prev := w.canonical[8_639]
+	for j := uint64(8_640); j <= 10_079; j++ {
+		hash := w.canonical[j]
+		if j == 10_079 {
+			hash = tip
+		}
+		w.side[j] = hash
+		total += uint64(len(w.rows[string(append([]byte{4}, hash[:]...))].value))
+		rows = append(rows, w.literal(6, ssqMust(mdbx.HeightKey(2, j)), mdbx.ChainValue(hash, prev, ssqWork(j+1)), false))
+		prev = hash
+	}
+	a := w.authorityValue()
+	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 2, F: f, TipHeight: 10_079, TipHash: tip, CumulativeChainwork: ssqWork(10_080), RowCount: 1_440, LogicalBytes: total}
+	w.apply(append(rows, w.authorityMutation(a)))
+	w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(8_640))})
+	return w, w.child(tip, 10_080, nil)
 }
 
 // rollLocatorWorld is rollFixtureWorld whose tip 1440 is a hash-bound block naming an absent unowned parent Z (its
@@ -370,5 +415,34 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		w.wantImage("incomplete plan keeps the damaged OLD image")
 		w.wantAbsent("oldest body still absent", 4, bodyKey)
 		w.wantAbsent("first+1 link still absent", 6, linkKey)
+	})
+	// LF[H11-union]: the exact composed identity union of the real Prepare is admitted at 16384 (authority the only
+	// target) and refused at 16385 (authority plus the unowned tip header) before any callback Batch or native OLD.
+	t.Run("H11-union-16384", func(t *testing.T) {
+		w, raw := rollUnionWorld(t, false)
+		out, evidence := w.armedPrepareAt(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(30_000))
+		retainWant(t, "accepted 16384 exact positive clear", out, retainCleared, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		if evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.ProbeRan != 0 || evidence.ProbeDenied != evidence.Probes {
+			t.Fatalf("16384 union commit evidence %+v", evidence)
+		}
+		kept := make([]uint64, 0, 1_440)
+		for j := uint64(8_640); j <= 10_079; j++ {
+			kept = append(kept, j)
+		}
+		w.wantCleared("16384 complete clear keeps every owned header", 8_640, 10_079, kept...)
+		w.reopen()
+		w.wantImage("16384 persisted image after reopen")
+	})
+	t.Run("H11-union-16385", func(t *testing.T) {
+		w, raw := rollUnionWorld(t, true)
+		out, evidence := w.armedPrepareAt(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(30_000))
+		retainWantRefusal(t, "branch_data before callback Batch/native OLD", out, ssqBranch, "selected side rolling union exceeds its identity bound")
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.Deletes != 0 || evidence.BeginOld != 1 || evidence.ProbeRan != 0 {
+			t.Fatalf("16385 union refusal evidence %+v", evidence)
+		}
+		w.wantImage("16385 refusal keeps the damaged OLD image")
+		w.wantAbsent("16385 oldest body still absent", 4, w.sideKey(8_640))
+		w.reopen()
+		w.wantImage("16385 persisted image after reopen")
 	})
 }

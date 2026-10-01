@@ -51,11 +51,16 @@ func (r *selectedRetention) prepare(parent selectedQualParent) (mdbx.Batch, erro
 		r.attempt.resource = plan.ReadResource
 		return mdbx.Batch{}, err
 	}
-	// Normalize both owned lists in place, then admit the exact final identity union (distinct Consulted rows plus
-	// every captured target, authority included) before any combined append, callback Batch or native OLD.
-	r.consulted = selectedRetainUnion(r.consulted, nil)
-	planned := selectedRetainUnion(plan.Batch.Consulted, nil)
-	if selectedRetainRollIdentities(r.consulted, planned, plan.Batch.Mutations) > selectedQualIdentities {
+	// The planner's Consulted is already sorted, unique and target-disjoint. Drop the qualifier's target overlaps, then
+	// only the qualifier's identities from the planner's list, and admit the exact final union (Consulted plus every
+	// unique target, authority included) before any append, callback Batch or native OLD. This refusal reads nothing.
+	r.consulted = selectedRetainUnion(r.consulted, plan.Batch.Mutations)
+	planned := slices.DeleteFunc(plan.Batch.Consulted, func(row mdbx.ConsultedRow) bool {
+		_, found := slices.BinarySearchFunc(r.consulted, row, selectedRetainOrder)
+		return found
+	})
+	if len(r.consulted)+len(planned)+len(plan.Batch.Mutations) > selectedQualIdentities {
+		r.attempt.resource = ""
 		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side rolling union exceeds its identity bound")
 	}
 	r.attempt.positive = plan.PositiveDamageClear
@@ -63,42 +68,9 @@ func (r *selectedRetention) prepare(parent selectedQualParent) (mdbx.Batch, erro
 	return plan.Batch, nil
 }
 
-// selectedRetainRollIdentities counts the distinct identities of two sorted, compacted Consulted lists plus every
-// target neither list holds; each identity counts once.
-func selectedRetainRollIdentities(own, planned []mdbx.ConsultedRow, targets []mdbx.Mutation) int {
-	n := selectedRetainMerged(own, planned)
-	for _, m := range targets {
-		if !selectedRetainHolds(own, m) && !selectedRetainHolds(planned, m) {
-			n++
-		}
-	}
-	return n
-}
-
-// selectedRetainMerged is the distinct count of two sorted, compacted lists.
-func selectedRetainMerged(a, b []mdbx.ConsultedRow) int {
-	i, j, n := 0, 0, 0
-	for i < len(a) && j < len(b) {
-		c := selectedRetainOrder(a[i], b[j].DBI, b[j].Key)
-		if c <= 0 {
-			i++
-		}
-		if c >= 0 {
-			j++
-		}
-		n++
-	}
-	return n + len(a) - i + len(b) - j
-}
-
-func selectedRetainHolds(rows []mdbx.ConsultedRow, m mdbx.Mutation) bool {
-	_, found := slices.BinarySearchFunc(rows, m, func(row mdbx.ConsultedRow, m mdbx.Mutation) int { return selectedRetainOrder(row, m.DBI, m.Key) })
-	return found
-}
-
-// selectedRetainOrder is selectedRetainUnion's (DBI.Rank, key) order.
-func selectedRetainOrder(row mdbx.ConsultedRow, dbi mdbx.DBI, key []byte) int {
-	return cmp.Or(cmp.Compare(row.DBI.Rank, dbi.Rank), bytes.Compare(row.Key, key))
+// selectedRetainOrder is selectedRetainUnion's exact (DBI.Rank, key) order.
+func selectedRetainOrder(a, b mdbx.ConsultedRow) int {
+	return cmp.Or(cmp.Compare(a.DBI.Rank, b.DBI.Rank), bytes.Compare(a.Key, b.Key))
 }
 
 // selectedRetainRollFits is the checked RP preflight; n <= M and L <= M, so the sum cannot wrap.
