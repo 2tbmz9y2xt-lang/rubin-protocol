@@ -847,6 +847,15 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		})
 	}
 	approved := map[string]int{}
+	recheck := 0
+	enclosing := func(n ast.Node) string {
+		for n = parents[n]; n != nil; n = parents[n] {
+			if fn, ok := n.(*ast.FuncDecl); ok {
+				return fn.Name.Name
+			}
+		}
+		return ""
+	}
 	for ident, object := range info.Uses {
 		if declared[object] {
 			var owner string
@@ -869,9 +878,15 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			approved[ident.Name]++
 		}
 		logicalMDBXAssert(t, ident.Name != "ConnectPublishedGenesisMDBX", "bridge lost dormancy: genesis production consumer at %s", fset.Position(ident.Pos()))
-		logicalMDBXAssert(t, ident.Name != "selectedSideDamageMDBX", "selected side damage lost dormancy: production consumer at %s", fset.Position(ident.Pos()))
+		if ident.Name == "selectedSideDamageMDBX" {
+			// The sole non-test reference is the direct same-file call inside the exported recheck adapter.
+			call, direct := parents[ident].(*ast.CallExpr)
+			recheck++
+			logicalMDBXAssert(t, direct && call.Fun == ident && enclosing(ident) == "RecheckSelectedSideMDBX" && strings.HasSuffix(fset.Position(ident.Pos()).Filename, "selected_side_damage_mdbx_cgo.go"), "selected side damage lost dormancy: production consumer at %s", fset.Position(ident.Pos()))
+		}
 		resolved[fset.Position(ident.Pos()).Filename] = true
 	}
+	logicalMDBXAssert(t, recheck == 1, "selected side damage lost dormancy: %d recheck adapter references, want 1", recheck)
 	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 1, "Counters": 1, "newLogicalMDBXMetadata": 1, "logicalMDBXPlanToBatch": 1, "genesisMDBXBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)
 	// The checker swallows its errors, so a vacuous Uses graph would pass the loop above: every parsed file must have resolved a use, and every entrypoint-named identifier outside a declaration must carry a type object.
 	logicalMDBXAssert(t, len(resolved) == len(sources), "bridge census resolved no uses: %d of %d files resolved, unresolved %v", len(resolved), len(sources), slices.DeleteFunc(slices.Clone(sources), func(name string) bool { return resolved[name] }))

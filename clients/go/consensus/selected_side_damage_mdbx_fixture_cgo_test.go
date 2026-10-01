@@ -20,6 +20,37 @@ func rawSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	return w
 }
 
+// TestSelectedSideDamageAdapterFixture compares natively: a current-tip SideLink naming another hash than the
+// descriptor is canonical integrity with no clear, while a lower height keeps its existing health.
+func TestSelectedSideDamageAdapterFixture(t *testing.T) {
+	t.Run("H10-hash", func(t *testing.T) {
+		w := rawSideWorld(t, sideFullSpec)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.TipHash = w.sideAt[3] })
+		below := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 3)
+		sideWantOutcome(t, below, "", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "below-tip health unchanged")
+		logicalMDBXAssert(t, below.Err == nil, "below-tip health kept an error: %v", below.Err)
+		sideWantCause(t, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "selected side tip link does not name the descriptor tip", "canonical integrity/no clear")
+		w.wantImage("tip hash mismatch", w.authority, false)
+	})
+	t.Run("H10-owner-height", func(t *testing.T) {
+		// Side F2, rows 3..4: row 3 names canonical k-1 and the tip row 4 names canonical k, both bodies absent. Tip link
+		// hash/work equal the descriptor (work 5); the owned header's parent is its entry parent and the link parent; the
+		// predecessor link 3 names that parent with work 4 = 5 - header work 1. So every earlier predicate passes and only
+		// the actual keyed owner height decides the body: k=2<B=3<=h optional damage clears; h=4<B=5<=k is the required
+		// canonical row's exact defect with an open Store and no clear.
+		spec := func(b, k uint64) sideWorldSpec {
+			return sideWorldSpec{f: 2, tip: 4, rows: 2, b: b, canonicalTip: 5, override: map[uint64]uint64{3: k - 1, 4: k}}
+		}
+		w := rawSideWorld(t, spec(3, 2))
+		sideWantCleared(t, w, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "owner k below B at tip h at or above B clears")
+		w = rawSideWorld(t, spec(5, 5))
+		sideWantCause(t, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "required canonical row is absent or does not hash to its key", "owner k at or above B at tip h below B integrity")
+		w.wantImage("owner k at or above B at tip h below B integrity", w.authority, false)
+		w.wantOpen("owner k at or above B at tip h below B integrity")
+		sideWantReleased(t, w.owner, "owner k at or above B at tip h below B integrity")
+	})
+}
+
 func TestSelectedSideDamageFixtureMalformedAuthority(t *testing.T) {
 	for _, denied := range []bool{false, true} {
 		w := rawSideWorld(t, sideFullSpec)

@@ -427,6 +427,46 @@ func sideWantCleared(t *testing.T, w *sideWorld, out selectedSideOutcome, label 
 	w.wantImage(label+" after reopen", cleared, true)
 }
 
+// setDescriptor rewrites only the committed selected descriptor and tracks the exact new authority bytes.
+func (w *sideWorld) setDescriptor(edit func(*mdbx.SelectedSideV1)) {
+	w.t.Helper()
+	a, err := mdbx.DecodeStorageAuthorityV1(w.authority)
+	logicalMDBXAssert(w.t, err == nil, "side world authority decode: %v", err)
+	edit(a.SelectedSide)
+	encoded, err := a.Encode()
+	logicalMDBXAssert(w.t, err == nil, "side world authority encode: %v", err)
+	w.authority = encoded
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
+}
+
+// TestSelectedSideDamageAdapter owns the node recheck adapter's bounded current-tip predicates beside the unchanged
+// existing health: a tip work disagreement after the owner/header/keep checks is a complete positive-damage clear.
+func TestSelectedSideDamageAdapter(t *testing.T) {
+	old, pre := mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite
+	t.Run("H10-work", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.CumulativeChainwork = sideWorldWork(9) })
+		below := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 3)
+		sideWantOutcome(t, below, "", "OLD", old, pre, "below-tip health unchanged")
+		logicalMDBXAssert(t, below.Err == nil, "below-tip health kept an error: %v", below.Err)
+		sideWantCleared(t, w, RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4), "persistent tip work mismatch complete damage clear/no healthy retry")
+	})
+	t.Run("H10-link", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		w.removeLink(4)
+		out := RecheckSelectedSideMDBX(w.store, w.owner, 2, 4, 4)
+		sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", old, pre, "missing tip link")
+		sideWantEngine(t, out.Err, mdbx.EngineIntegrity, "selected side link is absent", "missing tip link")
+	})
+	t.Run("H10-stale", func(t *testing.T) {
+		w := newSideWorld(t, sideFullSpec)
+		out := RecheckSelectedSideMDBX(w.store, w.owner, 2, 5, 4)
+		sideWantOutcome(t, out, "", "OLD", old, pre, "stale tip recheck")
+		logicalMDBXAssert(t, out.Err == errSelectedSideRequest, "stale tip recheck error %v", out.Err) //nolint:errorlint // The exact direct request refusal.
+		w.wantImage("stale tip recheck", w.authority, false)
+	})
+}
+
 func TestSelectedSideDamageHealthyNoOp(t *testing.T) {
 	w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, custom: map[uint64]string{3: "valid"}})
 	for _, h := range []uint64{2, 3, 4} {
