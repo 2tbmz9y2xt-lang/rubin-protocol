@@ -1022,6 +1022,25 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWant(t, "complete recheck NEW/raw/error image tuple", out, retainCleared, "", retainNA, newT, crossed, true)
 		w.wantCleared("positive recheck clear", 6, 6)
 	})
+	t.Run("H10-linking-commitments", func(t *testing.T) {
+		// The optional side tip body is present and hash-bound (header unchanged) but fails its commitments: the
+		// exact-tip child's linking check is a locator, never an append, and the fresh recheck completes the clear of
+		// side 6..6 with the bad body and its link kept and the unkept header removed.
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainMerkle(blocks[6]), false)})
+		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
+		retainWant(t, "commitment-invalid linking body: locator then complete recheck clear", out, retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("commitment-invalid linking body clear", 6, 6)
+		w.reopen()
+		w.wantImage("commitment-invalid linking body clear after reopen")
+		out = w.retain(w.child(w.canonical[4], 5, nil), w.tipAt(10))
+		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+		retainWantEngine(t, "unverified owner after clear", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+		w.wantImage("unverified owner refusal after clear")
+	})
 	t.Run("H12-typednil", func(t *testing.T) {
 		var typed *selectedSideQualificationError
 		var tx *consensus.TxError

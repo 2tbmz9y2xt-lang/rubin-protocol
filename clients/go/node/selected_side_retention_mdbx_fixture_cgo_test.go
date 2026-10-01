@@ -804,6 +804,19 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		retainWantRefusal(t, "required linking body terminal/no clear", out, ssqIntegrity, "required canonical row is absent")
 		w.wantImage("required linking body defect")
 	})
+	t.Run("N2-linking-required-commitments", func(t *testing.T) {
+		// Owned at k=12 >= B=0, the present hash-bound linking body with invalid commitments is the initial typed canonical
+		// integrity refusal itself, at OLD/Prewrite with no recheck and no clear.
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.own(tip, w.canonical[5], 12)
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainMerkle(blocks[6]), false)})
+		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
+		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
+		w.wantImage("required commitment-invalid linking body kept")
+	})
 	t.Run("A9-reopen-abortIO", func(t *testing.T) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
 		w.reopen()
