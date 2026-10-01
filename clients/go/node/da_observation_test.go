@@ -506,7 +506,7 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	cgoEnabled := build.Default.CgoEnabled
 	owned := map[string][]string{
 		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go"},
-		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go"},
+		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go"},
 		"../internal/mdbx": {"mdbx_cgo.go", "mdbx_fixture_cgo.go", "mdbx_cgo_test.go", "mdbx_fixture_cgo_test.go"},
 	}
 	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true}
@@ -517,9 +517,6 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 			pkg, err := noCgo.ImportDir(dir, 0)
 			if err != nil {
 				t.Fatalf("no-cgo %s tags=%v: %v", dir, tags, err)
-			}
-			if dir == "." && tags == nil && (len(pkg.GoFiles) != 67 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
-				t.Fatalf("no-cgo node selects Go:%d Cgo:%d, observer selected=%v", len(pkg.GoFiles), len(pkg.CgoFiles), slices.Contains(pkg.GoFiles, tagged))
 			}
 			selected := slices.Concat(pkg.GoFiles, pkg.CgoFiles, pkg.TestGoFiles, pkg.XTestGoFiles)
 			for _, name := range names {
@@ -557,6 +554,9 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 						t.Fatalf("no-cgo %s tags=%v %s declares cgo-only API %s", dir, tags, name, id)
 					}
 				}
+			}
+			if dir == "." && tags == nil && (len(pkg.GoFiles) != 67 || len(pkg.CgoFiles) != 0 || slices.Contains(pkg.GoFiles, tagged) || !slices.Contains(pkg.IgnoredGoFiles, tagged)) {
+				t.Fatalf("no-cgo node selects Go:%d Cgo:%d, observer selected=%v", len(pkg.GoFiles), len(pkg.CgoFiles), slices.Contains(pkg.GoFiles, tagged))
 			}
 		}
 	}
