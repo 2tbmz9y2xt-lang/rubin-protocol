@@ -105,21 +105,11 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		}
 	})
 	t.Run("H5", func(t *testing.T) {
-		w, raw, prior := n1(t)
-		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
-		retainWant(t, "equality NEW with commit error", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
-		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted capture 0/0/3/6/0/0/0/2, target images and readback recapture
-		// 2x 1/0/0/1/1/0/1/0. Readback: 4 targets twice plus the 11 relied-on rows (forward 5, 10, 11; headers 0..5;
-		// owners of 5 and of the candidate NONE) once.
-		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
-			t.Fatalf("required native OLD/Consulted observation captured: %+v", evidence)
-		}
-		w.expectN1(raw, prior, 2, 5, ssqWork(7))
-		w.wantN1Image("equality NEW image", raw)
 		// M46: the relied-on candidate-owner absence (and the absent next-height tip boundary) must be in the final
 		// Consulted union. A Get EIO armed on exactly that key fires only in the readback transaction (scenario 9) after
 		// the commit's injected ENOSPC, so a compared row turns the committed image UNKNOWN; an omitted row leaves raw NEW.
-		// The tuple is asserted inside the callback, before the fixture's fault-count bookkeeping.
+		// The tuple is asserted inside the callback, before the fixture's fault-count bookkeeping, and before the
+		// baseline Get counts below, which an omitted row would also change.
 		for _, c := range []struct {
 			name string
 			rank uint8
@@ -146,6 +136,17 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			w.expectN1(raw, prior, 2, 5, ssqWork(7))
 			w.wantN1Image(c.name+": independently checked committed NEW image", raw)
 		}
+		w, raw, prior := n1(t)
+		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "equality NEW with commit error", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted capture 0/0/3/6/0/0/0/2, target images and readback recapture
+		// 2x 1/0/0/1/1/0/1/0. Readback: 4 targets twice plus the 11 relied-on rows (forward 5, 10, 11; headers 0..5;
+		// owners of 5 and of the candidate NONE) once.
+		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
+			t.Fatalf("required native OLD/Consulted observation captured: %+v", evidence)
+		}
+		w.expectN1(raw, prior, 2, 5, ssqWork(7))
+		w.wantN1Image("equality NEW image", raw)
 	})
 	t.Run("H5-tip", func(t *testing.T) {
 		w, raw, prior := n1(t)
