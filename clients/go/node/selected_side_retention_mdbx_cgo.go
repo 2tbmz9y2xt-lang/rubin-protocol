@@ -489,8 +489,8 @@ func (r *selectedRetention) write(qual selectedSideQualification, next uint64, s
 	return mdbx.Batch{Mutations: mutations, Consulted: selectedRetainUnion(r.consulted, mutations)}, nil
 }
 
-// expected observes one hash-global expected row: absent is inserted, byte-identical is reused unwritten, and any
-// other present image (unowned here) is a terminal conflict that is never overwritten.
+// expected observes one hash-global expected row: absent is inserted, byte-identical is reused unwritten, a differing
+// row of a live selected hash is that row's recheck locator, and any other differing image is a terminal conflict.
 func (r *selectedRetention) expected(rank uint8, hash [32]byte, want []byte) ([]mdbx.Mutation, error) {
 	if err := r.reserve(1); err != nil {
 		return nil, err
@@ -506,8 +506,26 @@ func (r *selectedRetention) expected(rank uint8, hash [32]byte, want []byte) ([]
 		return []mdbx.Mutation{{DBI: mdbx.SchemaV2DBIs()[rank], Key: bytes.Clone(hash[:]), AfterKind: mdbx.AfterLiteral, Literal: bytes.Clone(want)}}, nil
 	case row.Value != nil && bytes.Equal(row.Value, want):
 		return nil, nil
+	case r.side != nil:
+		if err := r.member(hash); err != nil {
+			return nil, err
+		}
 	}
 	return nil, selectedQualFailure(selectedQualIntegrity, "unowned expected selected side row differs from the candidate")
+}
+
+// member locates the live selected row named by hash (links ascending, then the tip proved in this Reader) for recheck.
+func (r *selectedRetention) member(hash [32]byte) error {
+	for h := r.side.TipHeight - uint64(r.side.RowCount) + 1; h < r.side.TipHeight; h++ {
+		link, err := r.link(h)
+		if err != nil || [32]byte(link[:32]) == hash {
+			return cmp.Or(err, r.request(h))
+		}
+	}
+	if r.side.TipHash == hash {
+		return r.request(r.side.TipHeight)
+	}
+	return nil
 }
 
 // selectedRetainUnion orders the relied-on rows by (DBI.Rank, key), keeps each identity once and drops every identity

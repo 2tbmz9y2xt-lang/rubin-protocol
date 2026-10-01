@@ -950,8 +950,18 @@ func TestSelectedSideRetention(t *testing.T) {
 	// N3 worlds: canonical tip 20 (work 21) and the mined full side 11..15 over F10 (five work-1 blocks, tip work 16); a
 	// canonical-17 child (work 19) wins the side but not K23. replaced checks the healthy clear tuple and persisted
 	// authority; reopenNext re-reads the bytes and proves the reopened handle refuses the next owner lookup.
+	// incomingAbsent tracks the incoming child's SideLink at the old generation 2 and its height as absent (nil row) for
+	// every later image check, immediate and reopened, unless that key already holds a tracked old-side link.
+	incomingAbsent := func(w *ssqWorld, raw []byte) {
+		for k, hash := range w.canonical {
+			if key := ssqMust(mdbx.HeightKey(2, k+1)); hash == [32]byte(raw[4:36]) && w.rows[string(append([]byte{6}, key...))].key == nil {
+				w.rows[string(append([]byte{6}, key...))] = ssqRow{rank: 6, key: key}
+			}
+		}
+	}
 	replaced := func(t *testing.T, w *ssqWorld, raw []byte, tip *mdbx.AuthorityPointV1) {
 		t.Helper()
+		incomingAbsent(w, raw)
 		retainWant(t, "healthy N3 clean NEW empty Result/NOT_APPLICABLE", w.replaceSide(raw, tip), "", "", retainNA, newT, crossed, true)
 		if a := w.persisted(); a.Phase != mdbx.StoragePhasePruneGCV1 || a.Lifecycle != mdbx.StorageLifecycleStableV1 || a.SelectedSide != nil {
 			t.Fatalf("PRUNE_GC/STABLE exact authority: %+v", a)
@@ -1057,6 +1067,7 @@ func TestSelectedSideRetention(t *testing.T) {
 				w.wantImage("losing tie unchanged")
 				continue
 			}
+			incomingAbsent(w, raw)
 			retainWant(t, "smaller-tip tie exact clear", w.replaceSide(raw, w.tipAt(20)), "", "", retainNA, newT, crossed, true)
 			w.wantCleared("smaller-tip tie exact clear", 11, 15)
 			reopenNext(t, w, "A4d")
@@ -1092,6 +1103,33 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWantRefusal(t, "Replace has no duplicate scan", w.replaceSide(blocks[14], w.tipAt(20)), ssqBranch, "candidate parent is neither an active canonical block nor the selected tip")
 		retainWantRefusal(t, "Replace control precedes the raw bound", w.replaceSide(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqBranch, "candidate block exceeds MaxBlockBytes")
 		w.wantImage("wrong-leaf Replace unchanged")
+	})
+	t.Run("H7b-selected", func(t *testing.T) {
+		// A differing expected row of a live selected hash is that row's locator: side link 6 is replaced to name the
+		// exact-tip child X (parent canonical 5, work 7); X's header differs, or its header matches and its body differs.
+		// The fresh recheck of row 6 finds optional damage and completes the clear; no incoming row is written.
+		for _, bodyDiffers := range []bool{false, true} {
+			w := newRetainWorld(t, ssqSpec{tip: 30})
+			w.retainSide(5, 25, 20, 26, false)
+			raw := w.child(w.side[25], 26, nil)
+			x := ssqHash(raw)
+			w.absent = slices.DeleteFunc(w.absent, func(h [32]byte) bool { return h == x })
+			rows := []mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 6)), mdbx.ChainValue(x, w.canonical[5], ssqWork(7)), true)}
+			if bodyDiffers {
+				rows = append(rows, w.literal(3, bytes.Clone(x[:]), raw[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(x[:]), retainMerkle(raw), false))
+			} else {
+				rows = append(rows, w.literal(3, bytes.Clone(x[:]), w.headers[w.side[6]], false))
+			}
+			w.apply(rows)
+			w.side[6] = x
+			link26 := ssqMust(mdbx.HeightKey(2, 26))
+			retainWant(t, "selected-member locator then complete recheck clear", w.retain(raw, w.tipAt(30)), retainCleared, "", retainNA, newT, crossed, true)
+			w.wantAbsent("incoming SideLink(2,26) absent", 6, link26)
+			w.wantCleared("selected-member clear", 6, 25)
+			w.reopen()
+			w.wantAbsent("incoming SideLink(2,26) absent after reopen", 6, link26)
+			w.wantImage("selected-member clear after reopen")
+		}
 	})
 	t.Run("R-k-first-replace", func(t *testing.T) {
 		// Replace has no admitted first-row probe: the exact stored first row of a count-1 and a count-3 side is a clean
