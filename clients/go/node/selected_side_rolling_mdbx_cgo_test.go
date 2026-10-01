@@ -190,6 +190,33 @@ func TestSelectedSideRolling(t *testing.T) {
 		retainWantEngine(t, "unverified owner after RA", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
 		w.wantN1Image("unverified owner refusal after RA", raw)
 	})
+	// H11 RA resource instance: RA charges the same 3n+L <= 140965583 as N2, with L the cleaned tip 1441 body read once.
+	// nFit=floor((140965583-L)/3) appends through Retain; nFit+1 is storage_capacity/OLD before any expected-row read.
+	t.Run("H11-RA-L", func(t *testing.T) {
+		for _, fits := range []bool{false, true} {
+			w, _ := raWorld(t)
+			l := len(w.rows[string(append([]byte{4}, w.sideKey(1_441)...))].value)
+			if l <= 119 {
+				t.Fatalf("cleaned tip body %d bytes does not exceed the header bound", l)
+			}
+			n := (140_965_583-l)/3 + 1
+			if fits {
+				n--
+			}
+			raw := retainLarge(t, w.side[1_441], w.ts(w.side[1_441])+120, n)
+			if !fits {
+				w.absent = append(w.absent, ssqHash(raw))
+				retainWant(t, "RA linking length L charged/refusal", w.retain(raw, w.tipAt(2)), retainCapacity, "", "OLD", old, pre, true)
+				w.wantImage("RA L refusal before any expected-row read")
+				continue
+			}
+			prior := w.tracked()
+			retainWant(t, "largest fitting RA candidate with L commits", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+			side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(n)}
+			w.expectN2(raw, prior, side, w.side[1_441])
+			w.wantN1Image("large RA image", raw)
+		}
+	})
 	t.Run("R-s", func(t *testing.T) {
 		// The cleaned tip 1441's optional linking body changed to invalid commitments before a fresh RA: the fresh
 		// qualification's current linking check yields the damage locator, its recheck is the complete positive clear

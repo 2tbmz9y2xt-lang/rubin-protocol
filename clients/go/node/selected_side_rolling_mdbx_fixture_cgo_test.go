@@ -456,6 +456,68 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		retainWantCommit(t, "RA equality OLD", out, false)
 		w.wantImage("RA equality OLD image")
 	})
+	for _, c := range []struct {
+		name string
+		code int
+		kind mdbx.EngineClass
+		scen mdbx.SelectedDamageScenario
+	}{{"H8a-RA-begin-txnfull", -30_788, mdbx.EngineTransaction, mdbx.SelectedDamageBeginTxnFull}, {"H8a-RA-begin-eio", 5, mdbx.EngineIO, mdbx.SelectedDamageBeginEIO}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _, _ := raFixture(t)
+			out, evidence := w.armed(c.scen, 0, nil, raw, w.tipAt(2))
+			retainWant(t, "no-callback native begin keeps empty fields", out, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+			ssqWantNative(t, c.name, out.Err, ssqNative{"update", c.kind, c.code})
+			if evidence.BeginOld != 1 || evidence.OldGets != [8]uint64{} || evidence.BeginWrite != 0 {
+				t.Fatalf("RA begin evidence %+v", evidence)
+			}
+			w.wantImage("RA begin failure")
+		})
+	}
+	t.Run("H8a-RA-get-tip", func(t *testing.T) {
+		w, raw, _, _ := raFixture(t)
+		out, evidence := w.armed(mdbx.SelectedDamageGetEIO, 2, ssqMust(mdbx.HeightKey(1, 2)), raw, w.tipAt(2))
+		retainWantRefusal(t, "RA tip read canonical_artifact_read", out, ssqCanonical, "")
+		ssqWantNative(t, "RA tip GetEIO", out.Err, ssqGetEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("RA tip read wrote: %+v", evidence)
+		}
+		w.wantImage("RA tip read fault")
+	})
+	t.Run("H8a-RA-getabort-tip", func(t *testing.T) {
+		// Get+abort EIO keeps the first typed result with the ordered raw join and consumes the Store: the next RA call
+		// returns that cached raw error with empty invocation fields; the image is read after the helper's reopen.
+		w, raw, _, _ := raFixture(t)
+		first, evidence := w.armed(mdbx.SelectedDamageGetAbortEIO, 2, ssqMust(mdbx.HeightKey(1, 2)), raw, w.tipAt(2))
+		retainWantRefusal(t, "RA first typed result kept over abort IO", first, ssqCanonical, "")
+		ssqWantNative(t, "RA tip Get+abort EIO", first.Err, ssqGetEIO, ssqAbortEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("RA tip read and abort wrote: %+v", evidence)
+		}
+		next := w.retain(raw, w.tipAt(2))
+		retainWant(t, "RA cached next call empty fields", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+		// Mutual errors.Is over an acyclic error tree holds only for the identical error value.
+		if !errors.Is(next.Err, first.Err) || !errors.Is(first.Err, next.Err) {
+			t.Fatalf("RA cached raw error %v, want %v", next.Err, first.Err)
+		}
+		w.wantImage("RA tip read and abort fault")
+	})
+	t.Run("H12-RA-capacity-abortIO", func(t *testing.T) {
+		// RA's 3n+L capacity refusal is a non-read sentinel exit: abort EIO maps storage_io with the raw abort cause, no
+		// clean Result or Decision; the consumed Store answers the next call from its cached raw error.
+		w, _, _, _ := raFixture(t)
+		l := len(w.rows[string(append([]byte{4}, w.sideKey(1_441)...))].value)
+		raw := retainLarge(t, w.side[1_441], w.ts(w.side[1_441])+120, (140_965_583-l)/3+1)
+		w.absent = append(w.absent, ssqHash(raw))
+		first, _ := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, raw, w.tipAt(2))
+		retainWant(t, "RA capacity sentinel abort storage_io", first, retainStorageIO, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		ssqWantNative(t, "RA capacity sentinel abort", first.Err, ssqAbortEIO)
+		next := w.retain(raw, w.tipAt(2))
+		retainWant(t, "RA cached next call empty fields", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+		if !errors.Is(next.Err, first.Err) || !errors.Is(first.Err, next.Err) {
+			t.Fatalf("RA cached raw error %v, want %v", next.Err, first.Err)
+		}
+		w.wantImage("RA capacity abort keeps OLD")
+	})
 	t.Run("H8a-RA-put", func(t *testing.T) {
 		w, raw, _, _ := raFixture(t)
 		out, evidence := w.armed(mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 1_442)), raw, w.tipAt(2))
