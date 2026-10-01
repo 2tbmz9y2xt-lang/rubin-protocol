@@ -281,6 +281,50 @@ func adjustDAPreparedCommitRows(t *testing.T, want map[string]int, functions map
 	}
 }
 
+// daLexicalIdentifierRows folds each ordinary read|scope|identifier and value|scope|identifier row that changed does
+// not exempt into one ident|scope|identifier key with the exact signed sum, keeping a diagnostic location. The
+// read/value split is a name heuristic (an identifier spelled like any declared function or method name), so the
+// folded rows claim a lexical identifier inventory only, not type-resolved function identity. Every other row,
+// including edge-decl, edge-call and edge-value, keeps its key and count.
+func daLexicalIdentifierRows(rows map[string]int, where map[string]string, changed func(string) bool) (map[string]int, map[string]string) {
+	folded, locations := map[string]int{}, map[string]string{}
+	for row, count := range rows {
+		key := row
+		if rest, ok := strings.CutPrefix(row, "read|"); ok && !changed(row) {
+			key = "ident|" + rest
+		} else if rest, ok := strings.CutPrefix(row, "value|"); ok && !changed(row) {
+			key = "ident|" + rest
+		}
+		folded[key] += count
+		if location := where[row]; location != "" {
+			locations[key] = location
+		}
+	}
+	return folded, locations
+}
+
+func TestDALexicalIdentifierRows(t *testing.T) {
+	changed := func(row string) bool { return row == "read|f.go:file|DAID" }
+	for _, c := range []struct {
+		name             string
+		rows, want       map[string]int
+		where, wantWhere map[string]string
+	}{
+		{"receiver-name homonym keeps the lexical count and location", map[string]int{"read|f.go:plan|batch": 1, "value|f.go:plan|batch": 2}, map[string]int{"ident|f.go:plan|batch": 3}, map[string]string{"value|f.go:plan|batch": "f.go:7:2"}, map[string]string{"ident|f.go:plan|batch": "f.go:7:2"}},
+		{"signed historical arithmetic", map[string]int{"value|f.go:plan|batch": 6, "read|f.go:plan|batch": -3}, map[string]int{"ident|f.go:plan|batch": 3}, nil, map[string]string{}},
+		{"edge and exempt rows stay distinct", map[string]int{"edge-call|f.go:plan|batch": 1, "edge-value|f.go:plan|batch": 1, "read|f.go:file|DAID": 1, "value|f.go:file|DAID": 1}, map[string]int{"edge-call|f.go:plan|batch": 1, "edge-value|f.go:plan|batch": 1, "read|f.go:file|DAID": 1, "ident|f.go:file|DAID": 1}, nil, map[string]string{}},
+	} {
+		got, where := daLexicalIdentifierRows(c.rows, c.where, changed)
+		if !reflect.DeepEqual(got, c.want) || !reflect.DeepEqual(where, c.wantWhere) {
+			t.Fatalf("%s: rows=%v where=%v", c.name, got, where)
+		}
+	}
+	// A changed identifier multiplicity is rejected against the same independent literal inventory.
+	if more, _ := daLexicalIdentifierRows(map[string]int{"read|f.go:plan|batch": 4}, nil, changed); reflect.DeepEqual(more, map[string]int{"ident|f.go:plan|batch": 3}) {
+		t.Fatalf("changed multiplicity accepted: %v", more)
+	}
+}
+
 func TestDAPreparedCommitStructure(t *testing.T) {
 	// The complete owner helper closure is unchanged at the bound base. This
 	// includes indirect callees; map bucket growth remains allowed by Reserve.
@@ -702,6 +746,10 @@ func requireDAAdmissionStructure(t *testing.T) {
 		for name, count := range map[string]int{"DARetainedTxSnapshot": 6, "LookupRetainedTx": 1, "TxBytes": 1, "TxID": 1, "WTxID": 1, "bool": 1, "byte": 1, "candidate": 2, "errDARelayImageIncompatible": 2, "error": 1, "false": 4, "kind": 1, "member": 3, "mempool": 2, "nil": 6, "observation": 6, "owner": 2, "pendingOutpoints": 1, "s": 5, "true": 1, "txBytes": 1, "txid": 2, "wtxid": 1} {
 			want["read|node/da_relay_owner.go:LookupRetainedTx|"+name] += count
 		}
+		// Ordinary read/value rows are a name heuristic, not type-resolved function identity, so both maps are compared
+		// folded into lexical identifier rows after all current and historical signed arithmetic above.
+		got, where = daLexicalIdentifierRows(got, where, changed)
+		want, _ = daLexicalIdentifierRows(want, nil, changed)
 		for row, count := range got {
 			if !changed(row) && want[row] != count {
 				t.Fatalf("structural row %q count=%d want=%d at %s", row, count, want[row], where[row])
