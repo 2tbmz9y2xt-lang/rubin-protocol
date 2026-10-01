@@ -1126,6 +1126,7 @@ func TestSelectedSideRetention(t *testing.T) {
 			retainWant(t, "selected-member locator then complete recheck clear", w.retain(raw, w.tipAt(30)), retainCleared, "", retainNA, newT, crossed, true)
 			w.wantAbsent("incoming SideLink(2,26) absent", 6, link26)
 			w.wantCleared("selected-member clear", 6, 25)
+			w.rows[string(append([]byte{3}, x[:]...))] = ssqRow{rank: 3, key: bytes.Clone(x[:])} // Header X stays absent.
 			w.reopen()
 			w.wantAbsent("incoming SideLink(2,26) absent after reopen", 6, link26)
 			w.wantImage("selected-member clear after reopen")
