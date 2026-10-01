@@ -62,6 +62,7 @@ const (
 	selectedRetainMode selectedSideMode = iota
 	selectedReplaceMode
 	selectedPrepareMode
+	selectedRefillMode
 )
 
 // selectedRetainResults is the finite set of qualifier refusal results one attempt may bind for classification.
@@ -192,6 +193,9 @@ func (a *selectedRetainAttempt) batch(reader *mdbx.Reader) (mdbx.Batch, error) {
 // plan composes the qualifier's own order (authority/control/raw, header, parent evidence, context, steps 1-12,
 // selection and domain) so a NONE canonical parent beside a live side stays an explicit owner outcome.
 func (a *selectedRetainAttempt) plan(reader *mdbx.Reader) (mdbx.Batch, error) {
+	if a.mode == selectedRefillMode { // RF has its own qualification (selected_side_rolling_mdbx_cgo.go).
+		return a.refill(reader)
+	}
 	authority, err := selectedQualAuthority(reader, len(a.raw))
 	if err != nil {
 		return mdbx.Batch{}, err
@@ -275,7 +279,7 @@ func (a *selectedRetainAttempt) project(out SelectedSideMutationOutcome) (Select
 	case !a.ran:
 		return out, nil
 	case out.Stage == mdbx.UpdateStageCommitMayHaveCrossed:
-		return selectedRetainCrossed(out, a.mode == selectedRetainMode, a.positive), nil
+		return selectedRetainCrossed(out, a.mode == selectedRetainMode || a.mode == selectedRefillMode, a.positive), nil
 	case out.Truth != mdbx.CommitTruthOld || out.Stage != mdbx.UpdateStagePrewrite:
 	case out.Err == a.sentinel: //nolint:errorlint // Only the exact sentinel with no cleanup cause is clean.
 		out.Result, out.Decision, out.CanonicalTruth, out.Err = a.result, a.decision, a.canonical, nil

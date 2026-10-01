@@ -558,6 +558,163 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		}
 		w.wantImage("RA side kept without recheck")
 	})
+	// RF native outcomes on the A7b world (side 3..1441/F0, candidate row 2 over unowned history row 1): one public
+	// Refill per scenario, tuple asserted first; the expected image is the literal of L[A7b].
+	rfFixture := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+			return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+		}
+		return w, raw, w.tracked()
+	}
+	armedRefill := func(w *ssqWorld, scen mdbx.SelectedDamageScenario, rank uint8, key, raw []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
+		w.t.Helper()
+		var out SelectedSideMutationOutcome
+		calls := 0
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scen, rank, key, func() { calls++; out = w.refill(raw) })
+		if err != nil || calls != 1 {
+			w.t.Fatalf("RF scenario %d: %v (%+v)", scen, err, evidence)
+		}
+		return out, evidence
+	}
+	for _, c := range []struct {
+		name string
+		scen mdbx.SelectedDamageScenario
+		key  []byte
+	}{{"H6a-RF", mdbx.SelectedDamageCommitUnreadable, []byte{2}}, {"H6a-RF-third", mdbx.SelectedDamageCommitThird, nil}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _ := rfFixture(t)
+			out, _ := armedRefill(w, c.scen, 0, c.key, raw)
+			retainWant(t, "noncanonical/NOT_APPLICABLE with exact raw UNKNOWN", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
+		})
+	}
+	t.Run("H6b-RF-NEW", func(t *testing.T) {
+		w, raw, prior := rfFixture(t)
+		out, evidence := armedRefill(w, mdbx.SelectedDamageCommitNew, 0, nil, raw)
+		retainWant(t, "proved NEW/raw causes retained/NOT_APPLICABLE empty Result", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		var commit *mdbx.CommitError
+		if !errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthNew || evidence.Commits != 1 {
+			t.Fatalf("RF equality NEW error %v (%+v)", out.Err, evidence)
+		}
+		w.expectRefilled(raw, prior, 3, w.side[1], ssqWork(3))
+		w.wantN1Image("RF equality NEW image", raw)
+	})
+	t.Run("H6b-RF-OLD", func(t *testing.T) {
+		w, raw, _ := rfFixture(t)
+		out, _ := armedRefill(w, mdbx.SelectedDamageCommitOld, 0, nil, raw)
+		retainWant(t, "equality OLD empty Result", out, "", "", retainNA, old, crossed, false)
+		retainWantCommit(t, "RF equality OLD", out, false)
+		w.wantImage("RF equality OLD image")
+	})
+	t.Run("H5-tip-RF", func(t *testing.T) {
+		// The proved-absent SideLink(2,2) is the RF link target whose OLD image Update captures: a readback fault on it
+		// turns the committed image UNKNOWN; the tuple is asserted inside the callback before fixture bookkeeping.
+		w, raw, prior := rfFixture(t)
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageCommitUnreadable, 6, ssqMust(mdbx.HeightKey(2, 2)), func() {
+			out := w.refill(raw)
+			retainWant(t, "RF missing-link absence captured/equality rejected", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+		})
+		if err != nil || evidence.Commits != 1 || evidence.BeginWrite != 1 {
+			t.Fatalf("H5-tip-RF fixture site %v (%+v)", err, evidence)
+		}
+		w.expectRefilled(raw, prior, 3, w.side[1], ssqWork(3))
+		w.wantN1Image("RF independently checked committed image", raw)
+	})
+	for _, c := range []struct {
+		name string
+		code int
+		kind mdbx.EngineClass
+		scen mdbx.SelectedDamageScenario
+	}{{"H8a-RF-begin-txnfull", -30_788, mdbx.EngineTransaction, mdbx.SelectedDamageBeginTxnFull}, {"H8a-RF-begin-eio", 5, mdbx.EngineIO, mdbx.SelectedDamageBeginEIO}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _ := rfFixture(t)
+			out, evidence := armedRefill(w, c.scen, 0, nil, raw)
+			retainWant(t, "no-callback native begin keeps empty fields", out, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+			ssqWantNative(t, c.name, out.Err, ssqNative{"update", c.kind, c.code})
+			if evidence.BeginOld != 1 || evidence.OldGets != [8]uint64{} {
+				t.Fatalf("RF begin evidence %+v", evidence)
+			}
+			w.wantImage("RF begin failure")
+		})
+	}
+	t.Run("H8a-RF-get-link", func(t *testing.T) {
+		// The missing-height SideLink Get faults transiently: branch_data, exact native cause, no write.
+		w, raw, _ := rfFixture(t)
+		out, evidence := armedRefill(w, mdbx.SelectedDamageGetEIO, 6, ssqMust(mdbx.HeightKey(2, 2)), raw)
+		retainWantRefusal(t, "RF missing-link transient branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "RF link GetEIO", out.Err, ssqGetEIO)
+		if evidence.BeginWrite != 0 {
+			t.Fatalf("RF link read wrote: %+v", evidence)
+		}
+		w.wantImage("RF link read fault")
+	})
+	t.Run("H8a-RF-getabort-link", func(t *testing.T) {
+		w, raw, _ := rfFixture(t)
+		first, _ := armedRefill(w, mdbx.SelectedDamageGetAbortEIO, 6, ssqMust(mdbx.HeightKey(2, 2)), raw)
+		retainWantRefusal(t, "RF first typed result kept over abort IO", first, ssqBranch, "")
+		ssqWantNative(t, "RF link Get+abort EIO", first.Err, ssqGetEIO, ssqAbortEIO)
+		next := w.refill(raw)
+		retainWant(t, "RF cached next call empty fields", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+		if !errors.Is(next.Err, first.Err) || !errors.Is(first.Err, next.Err) {
+			t.Fatalf("RF cached raw error %v, want %v", next.Err, first.Err)
+		}
+		w.wantImage("RF link read and abort fault")
+	})
+	t.Run("H8a-RF-put", func(t *testing.T) {
+		w, raw, _ := rfFixture(t)
+		out, evidence := armedRefill(w, mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 2)), raw)
+		retainWant(t, "definite precommit RF link write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "RF put", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginWrite != 1 || evidence.Commits != 0 {
+			t.Fatalf("RF put evidence %+v", evidence)
+		}
+		w.wantImage("RF precommit keeps OLD")
+	})
+	t.Run("H8-RF-lifetime", func(t *testing.T) {
+		w, raw, prior := rfFixture(t)
+		out, evidence := armedRefill(w, mdbx.SelectedDamageProbeOnly, 0, nil, raw)
+		retainWant(t, "probed RF", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		if evidence.Probes == 0 || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 {
+			t.Fatalf("every native full-lane probe denied; grant released after return: %+v", evidence)
+		}
+		w.expectRefilled(raw, prior, 3, w.side[1], ssqWork(3))
+		w.wantN1Image("probed RF image", raw)
+	})
+	t.Run("H10-RF-abortIO", func(t *testing.T) {
+		// The first retained body positively absent: RF's locator (2,1441,3) with abort EIO is storage_io, no recheck.
+		w, raw, _ := rfFixture(t)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		out, evidence := armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, raw)
+		retainWant(t, "storage_io/raw join/CLOSED/no recheck", out, retainStorageIO, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		var request *selectedSideDamageRequest
+		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 1_441, Height: 3}) || evidence.BeginOld != 1 || evidence.BeginRead != 0 {
+			t.Fatalf("RF locator abort %+v (%+v)", out, evidence)
+		}
+		w.wantImage("RF side kept without recheck")
+	})
+	t.Run("H10-RF-positive", func(t *testing.T) {
+		// The same locator rechecked: the complete positive clear terminates with its whole tuple.
+		w, raw, _ := rfFixture(t)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		out, evidence := armedRefill(w, mdbx.SelectedDamageProbeOnly, 0, nil, raw)
+		retainWant(t, "complete recheck NEW/raw/error image tuple", out, retainCleared, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		if evidence.BeginOld != 1 || evidence.BeginWrite != 1 || evidence.Commits != 1 {
+			t.Fatalf("RF recheck write evidence %+v", evidence)
+		}
+		w.wantCleared("RF positive recheck clear", 3, 1_441)
+	})
+	t.Run("H12-RF-capacity-abortIO", func(t *testing.T) {
+		// RF's 3n+L capacity refusal is a non-read sentinel exit: abort EIO maps storage_io, no clean Result/Decision.
+		probe, _, _ := rfFixture(t)
+		l := len(probe.rows[string(append([]byte{4}, probe.sideKey(3)...))].value)
+		n := (140_965_583-l)/3 + 1
+		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte { return retainLarge(t, prev, w.ts(prev)+120, n) })
+		out, _ := armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, raw)
+		retainWant(t, "RF capacity sentinel abort storage_io", out, retainStorageIO, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		ssqWantNative(t, "RF capacity sentinel abort", out.Err, ssqAbortEIO)
+		w.wantImage("RF capacity abort keeps OLD")
+	})
 	// LF[H11-union]: the exact composed identity union of the real Prepare is admitted at 16384 (authority the only
 	// target) and refused at 16385 (authority plus the unowned tip header) before any callback Batch or native OLD.
 	t.Run("H11-union-16384", func(t *testing.T) {

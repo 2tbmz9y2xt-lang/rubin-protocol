@@ -4,6 +4,8 @@ package node
 
 import (
 	"bytes"
+	"encoding/binary"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -38,6 +40,71 @@ func raWorld(t *testing.T) (*ssqWorld, []byte) {
 	w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
 	w.retainSide(0, 1_441, 1_439, 1_442, true)
 	return w, w.child(w.side[1_441], 1_442, nil)
+}
+
+// rfWorld is canonical 0..tip (tip >= f) beside a cleaned one-slot side over canonical f: heights f+1..first-1 are
+// header-only history, first..first+1438 carry header/body/SideLink(2,j) with work j+1 (each block works 1 under the
+// all-FF target, canonical k works k+1), descriptor g2/F f/count 1439/actual body bytes. History below first-1 is mined
+// gap seconds apart (gap 0: the expected median-plus-one child); the RF candidate at first-1 is cand(prev, ts) when
+// given, else the expected child, so its context (target, MTP) is the one RF must re-derive. It returns the candidate.
+func rfWorld(t *testing.T, tip, f, first, gap uint64, cand func(w *ssqWorld, prev [32]byte) []byte) (*ssqWorld, []byte) {
+	t.Helper()
+	w := newRetainWorld(t, ssqSpec{tip: tip})
+	var rows []mdbx.Mutation
+	var raw []byte
+	var total uint64
+	prev, last := w.canonical[f], first+1_438
+	for j := f + 1; j <= last; j++ {
+		var block []byte
+		switch {
+		case j == first-1 && cand != nil:
+			block = cand(w, prev)
+			w.headers[ssqHash(block)] = block[:consensus.BLOCK_HEADER_BYTES]
+		case j < first && (gap == 0 || j == first-1):
+			block = w.child(prev, j, nil)
+		case j < first:
+			block = w.mined(prev, gap)
+		default:
+			block = w.mined(prev, 113)
+		}
+		hash := ssqHash(block)
+		w.side[j] = hash
+		rows = append(rows, w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false))
+		switch {
+		case j == first-1:
+			raw = block
+		case j >= first:
+			total += uint64(len(block))
+			rows = append(rows, w.literal(4, bytes.Clone(hash[:]), block, false), w.literal(6, ssqMust(mdbx.HeightKey(2, j)), mdbx.ChainValue(hash, prev, ssqWork(j+1)), false))
+		}
+		prev = hash
+	}
+	a := w.authorityValue()
+	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 2, F: f, TipHeight: last, TipHash: prev, CumulativeChainwork: ssqWork(last + 1), RowCount: 1_439, LogicalBytes: total}
+	w.apply(append(rows, w.authorityMutation(a)))
+	return w, raw
+}
+
+// refill invokes the separate RF entrypoint with retain's input and lane proofs (no locator).
+func (w *ssqWorld) refill(raw []byte) SelectedSideMutationOutcome {
+	w.t.Helper()
+	return w.operate(func(s *mdbx.Store, o *mdbx.OperationReservationOwner, raw []byte, _ *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
+		return RefillSelectedSideMDBX(s, o, raw)
+	}, raw, nil)
+}
+
+// expectRefilled records RF at first-1 over pre-state prior: count 1440, bytes+n, every other descriptor field, the
+// incumbent tip and authority unchanged; the candidate header (already present history) stays, its body is inserted
+// and SideLink(2,first-1) names parent with the literal restored work.
+func (w *ssqWorld) expectRefilled(raw []byte, prior mdbx.StorageAuthorityV1, first uint64, parent [32]byte, work [40]byte) {
+	w.t.Helper()
+	hash := ssqHash(raw)
+	side := *prior.SelectedSide
+	side.RowCount, side.LogicalBytes = 1_440, side.LogicalBytes+uint64(len(raw))
+	prior.SelectedSide = &side
+	w.authorityMutation(prior)
+	w.literal(4, bytes.Clone(hash[:]), bytes.Clone(raw), false)
+	w.literal(6, ssqMust(mdbx.HeightKey(2, first-1)), mdbx.ChainValue(hash, parent, work), false)
 }
 
 // wantIncomingAbsent proves the incoming child's header, body and SideLink(2,1441) were never written.
@@ -231,6 +298,128 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.absent = append(w.absent, ssqHash(raw))
 		retainWant(t, "current damaged linking row cannot authorize append/exact image", w.retain(raw, w.tipAt(2)), retainCleared, "", retainNA, newT, crossed, true)
 		w.wantCleared("RA damaged linking body complete clear", 3, 1_441)
+	})
+	// RF accepted rows: the stored tuple, the literal restored image, the unchanged incumbent descriptor tip/hash/work.
+	refilled := func(t *testing.T, w *ssqWorld, raw []byte, first uint64, parent [32]byte, work [40]byte, label string) {
+		t.Helper()
+		prior := w.tracked()
+		retainWant(t, label+": clean RF STORED_NONCANONICAL/not-applicable", w.refill(raw), retainStored, "", retainNA, newT, crossed, true)
+		got := w.persisted().SelectedSide
+		if got == nil || got.TipHeight != prior.SelectedSide.TipHeight || got.TipHash != prior.SelectedSide.TipHash || got.CumulativeChainwork != prior.SelectedSide.CumulativeChainwork || got.RowCount != 1_440 {
+			t.Fatalf("%s: valid refill unchanged incumbent: %+v", label, got)
+		}
+		w.expectRefilled(raw, prior, first, parent, work)
+		w.wantN1Image(label+": restored link literal work/forward recurrence", raw)
+	}
+	t.Run("A7a", func(t *testing.T) {
+		// Canonical-parent refill: side 2..1440/F0, candidate row 1 over canonical 0 (work 1); restored link work is
+		// first-link work 3 minus first-header work 1 = 2 = canonical-0 work 1 plus the candidate's 1.
+		w, raw := rfWorld(t, 2, 0, 2, 113, nil)
+		refilled(t, w, raw, 2, w.canonical[0], ssqWork(2), "A7a")
+		w.reopen()
+		w.wantN1Image("A7a persisted image after reopen", raw)
+		out := w.refill(raw)
+		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+		retainWantEngine(t, "unverified owner after RF", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+	})
+	t.Run("A7b", func(t *testing.T) {
+		// Later refill: side 3..1441/F0, candidate row 2 over the unowned planted history header of row 1 (neither
+		// canonical nor the tip); its context is that header and the canonical anchor 0. Restored work 4-1 = 3.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		refilled(t, w, raw, 3, w.side[1], ssqWork(3), "A7b")
+	})
+	t.Run("A7c-mtp", func(t *testing.T) {
+		// History 1..12 are median-plus-one children, so the candidate at 12 sits exactly one second above its
+		// 11-header median; an omitted or shortened MTP window changes that result.
+		w, raw := rfWorld(t, 2, 0, 13, 0, nil)
+		times := w.timestamps(w.side[11], 11)
+		slices.Sort(times)
+		if binary.LittleEndian.Uint64(raw[68:76]) != times[5]+1 {
+			t.Fatal("A7c-mtp fixture: candidate is not at its median boundary")
+		}
+		refilled(t, w, raw, 13, w.side[11], ssqWork(13), "exact timestamp boundary/result")
+	})
+	t.Run("A7c-retarget", func(t *testing.T) {
+		// Canonical 0..9000 (120 s), history 9001..10079 mined 60 s apart: the candidate at retarget height 10080 is
+		// mined under the window's retargeted target, which differs from the inherited all-FF target.
+		w, raw := rfWorld(t, 9_000, 9_000, 10_081, 60, nil)
+		if [32]byte(raw[76:108]) == consensus.POW_LIMIT {
+			t.Fatal("A7c-retarget fixture: retarget did not move the target")
+		}
+		refilled(t, w, raw, 10_081, w.side[10_079], ssqWork(10_081), "exact target/steps1-12 result and refill image")
+	})
+	t.Run("R-g", func(t *testing.T) {
+		w, _ := rfWorld(t, 2, 0, 3, 113, nil)
+		other := w.mined(w.side[1], 200)
+		w.absent = append(w.absent, ssqHash(other))
+		retainWantRefusal(t, "branch_data/no refill", w.refill(other), ssqBranch, "refill candidate is not the first retained row's parent")
+		w.wantImage("R-g unchanged")
+	})
+	t.Run("R-r", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.apply([]mdbx.Mutation{w.absentRow(3, w.sideKey(1))})
+		retainWantRefusal(t, "missing context branch_data/no write", w.refill(raw), ssqBranch, "selected side refill parent history is unavailable")
+		w.wantImage("R-r unchanged")
+		w.wantAbsent("R-r no refill link", 6, ssqMust(mdbx.HeightKey(2, 2)))
+	})
+	t.Run("R-h-link", func(t *testing.T) {
+		// A valid, identical SideLink(2,1) already present: branch_data, no overwrite or adoption.
+		w, raw := rfWorld(t, 2, 0, 2, 113, nil)
+		hash := ssqHash(raw)
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 1)), mdbx.ChainValue(hash, w.canonical[0], ssqWork(2)), false)})
+		retainWantRefusal(t, "branch_data/no overwrite or adoption", w.refill(raw), ssqBranch, "selected side refill height already has a SideLink")
+		w.wantImage("R-h-link unchanged")
+		w.wantAbsent("R-h-link no candidate body", 4, bytes.Clone(hash[:]))
+	})
+	t.Run("R-h", func(t *testing.T) {
+		// Prepared side with its exact pending SIDE: RF refuses on its domain; the SIDE and the oldest body stay.
+		w, raw := rollWorld(t)
+		prior := w.tracked()
+		retainWant(t, "R-h preparation", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+		w.expectPrepared(prior)
+		retainWantRefusal(t, "Prepared exact SIDE remains", w.refill(raw), ssqBranch, "selected side refill needs a cleaned one-slot side without a pending SIDE")
+		w.wantImage("R-h Prepared preserved")
+	})
+	t.Run("R-domain-node-refill", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		retainWantRefusal(t, "Refill absent side", w.refill(w.child(w.canonical[5], 6, nil)), ssqBranch, "selected side refill needs a cleaned one-slot side without a pending SIDE")
+		w.wantImage("Refill absent side unchanged")
+		w, raw := rollWorld(t)
+		retainWantRefusal(t, "Refill full side", w.refill(raw), ssqBranch, "selected side refill needs a cleaned one-slot side without a pending SIDE")
+		w.wantImage("Refill full side unchanged")
+	})
+	t.Run("R-s-RF", func(t *testing.T) {
+		// The first retained row 3's optional body changed to invalid commitments before a fresh RF: its locator, then
+		// the recheck's complete positive clear SIDE(2,3,1441,3); nothing is refilled.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		bad := retainMerkle(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		w.apply([]mdbx.Mutation{w.literal(4, w.sideKey(3), bad, false)})
+		w.absent = append(w.absent, ssqHash(raw))
+		retainWant(t, "current damaged first row cannot authorize refill", w.refill(raw), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("RF damaged first row complete clear", 3, 1_441)
+	})
+	// H11 RF resource instance: 3n+L <= 140965583 with L the first retained row's body (read once).
+	t.Run("H11-RF-L", func(t *testing.T) {
+		probe, _ := rfWorld(t, 2, 0, 3, 113, nil)
+		l := len(probe.rows[string(append([]byte{4}, probe.sideKey(3)...))].value)
+		for _, fits := range []bool{false, true} {
+			n := (140_965_583-l)/3 + 1
+			if fits {
+				n--
+			}
+			w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte { return retainLarge(t, prev, w.ts(prev)+120, n) })
+			if got := len(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value); got != l {
+				t.Fatalf("H11-RF-L fixture: first body %d bytes, probe %d", got, l)
+			}
+			if !fits {
+				retainWant(t, "RF L charged/refusal", w.refill(raw), retainCapacity, "", "OLD", old, pre, true)
+				w.wantImage("RF L refusal")
+				w.wantAbsent("RF L refusal no candidate body", 4, w.sideKey(2))
+				continue
+			}
+			refilled(t, w, raw, 3, w.side[1], ssqWork(3), "largest fitting RF candidate")
+		}
 	})
 	t.Run("R-f", func(t *testing.T) {
 		// Cleaned one-slot F0/C1441/count1439: Prepare refuses with no second SIDE or automatic RA.
