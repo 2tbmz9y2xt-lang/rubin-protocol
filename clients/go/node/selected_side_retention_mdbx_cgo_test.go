@@ -109,7 +109,9 @@ func (w *ssqWorld) preserve(rank uint8, key []byte) {
 	w.rows[string(append([]byte{rank}, key...))] = ssqRow{rank: rank, key: key, value: value}
 }
 
-func (w *ssqWorld) ts(hash [32]byte) uint64 { return binary.LittleEndian.Uint64(w.headers[hash][68:76]) }
+func (w *ssqWorld) ts(hash [32]byte) uint64 {
+	return binary.LittleEndian.Uint64(w.headers[hash][68:76])
+}
 
 // mined is one coinbase child of prev, gap seconds after it, under the inherited all-FF target.
 func (w *ssqWorld) mined(prev [32]byte, gap uint64) []byte {
@@ -477,6 +479,18 @@ func TestSelectedSideRetention(t *testing.T) {
 		out := RetainSelectedSideMDBX(nil, nil, nil, nil)
 		retainWant(t, "nil Store", out, "", "", "", old, pre, false)
 		retainWantEngine(t, "nil Store", out.Err, "update", mdbx.EngineInvalidInput, 22, "nil Store")
+		// A nil Store keeps precedence over an invalid owner and an oversized candidate, which stays unchanged.
+		for _, owner := range []*mdbx.OperationReservationOwner{nil, {}} {
+			oversize := make([]byte, mdbx.MaxBlockBytes+1)
+			oversize[0] = 0x5a
+			before := bytes.Clone(oversize)
+			out := RetainSelectedSideMDBX(nil, owner, oversize, nil)
+			if !bytes.Equal(oversize, before) {
+				t.Fatal("nil Store refusal changed the caller's raw bytes")
+			}
+			retainWant(t, "nil Store before invalid owner and raw bound", out, "", "", "", old, pre, false)
+			retainWantEngine(t, "nil Store before invalid owner and raw bound", out.Err, "update", mdbx.EngineInvalidInput, 22, "nil Store")
+		}
 		w := newRetainWorld(t, ssqSpec{tip: 10})
 		raw := w.child(w.canonical[5], 6, nil)
 		before := bytes.Clone(raw)
@@ -773,12 +787,16 @@ func TestSelectedSideRetention(t *testing.T) {
 			name   string
 			damage func(w *ssqWorld, hash [32]byte, block []byte)
 		}{
-			{"stored body absent", func(w *ssqWorld, hash [32]byte, _ []byte) { w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))}) }},
+			{"stored body absent", func(w *ssqWorld, hash [32]byte, _ []byte) {
+				w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+			}},
 			{"stored body commitments", func(w *ssqWorld, hash [32]byte, block []byte) {
 				w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
 				w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(block), false)})
 			}},
-			{"stored header absent", func(w *ssqWorld, hash [32]byte, _ []byte) { w.apply([]mdbx.Mutation{w.absentRow(3, bytes.Clone(hash[:]))}) }},
+			{"stored header absent", func(w *ssqWorld, hash [32]byte, _ []byte) {
+				w.apply([]mdbx.Mutation{w.absentRow(3, bytes.Clone(hash[:]))})
+			}},
 		} {
 			w := newRetainWorld(t, ssqSpec{tip: 10})
 			blocks := w.retainSide(5, 8, 3, 9, false)

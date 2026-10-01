@@ -100,13 +100,19 @@ func RetainSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReser
 	return out
 }
 
-// selectedRetainOnce runs one attempt. A nil Store or an oversize candidate takes a grant-free control-only Update; a
-// refused full-lane charge takes the same control-only Update ending in storage_capacity; any other owner refusal is
-// returned unchanged with no Update.
+// selectedRetainOnce runs one attempt. A nil Store or an oversize candidate takes a grant-free control-only Update, except
+// that a non-nil Store with a nil or zero owner returns that owner's own exact input refusal with no Update; a refused
+// full-lane charge takes the same control-only Update ending in storage_capacity; any other owner refusal is returned
+// unchanged with no Update.
 func selectedRetainOnce(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1, retry bool) (SelectedSideMutationOutcome, *selectedSideDamageRequest) {
 	a := &selectedRetainAttempt{raw: raw, retry: retry, sentinel: errors.New("selected side retention decision")}
 	out := SelectedSideMutationOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if store == nil || len(raw) > mdbx.MaxBlockBytes {
+		// cmp.Or maps a nil owner to the zero owner, so one comparison covers both invalid owners.
+		if store != nil && *cmp.Or(reservations, &mdbx.OperationReservationOwner{}) == (mdbx.OperationReservationOwner{}) {
+			out.Err = reservations.WithReservation(mdbx.MaxOperationDataBytes, nil) // The owner's exact input sentinel.
+			return out, nil
+		}
 		out.Truth, out.Stage, out.Err = store.Update(a.control)
 		return a.project(out)
 	}
@@ -191,7 +197,7 @@ func (a *selectedRetainAttempt) bind(err error) error {
 	if request, ok := err.(*selectedSideDamageRequest); ok && request != nil && a.retry { //nolint:errorlint // Direct leaf only.
 		return a.bind(&selectedSideQualificationError{Result: selectedQualBranch, Cause: request})
 	}
-	a.bound, a.boundResult = selectedRetainLeaf(err, a.sentinel)
+	a.boundResult, a.bound = selectedRetainLeaf(err, a.sentinel)
 	if request, ok := a.bound.(*selectedSideDamageRequest); ok { //nolint:errorlint // The bound leaf itself.
 		a.request = request
 	}
@@ -204,25 +210,25 @@ func (a *selectedRetainAttempt) bind(err error) error {
 // selectedRetainLeaf proves one returned value is this attempt's own direct leaf: a non-nil damage locator or the
 // exact sentinel (empty skip), a non-nil qualifier refusal with a cause and a finite result, or a non-nil TxError
 // (its own code). Wrapped, foreign or arbitrary EngineError values bind nothing.
-func selectedRetainLeaf(err, sentinel error) (error, string) {
+func selectedRetainLeaf(err, sentinel error) (string, error) {
 	switch e := err.(type) { //nolint:errorlint // Only the direct returned leaf binds.
 	case *selectedSideDamageRequest:
 		if e != nil {
-			return e, ""
+			return "", e
 		}
 	case *selectedSideQualificationError:
 		if selectedRetainQualLeaf(e) {
-			return e, e.Result
+			return e.Result, e
 		}
 	case *consensus.TxError:
 		if e != nil {
-			return e, "CONSENSUS_INVALID(" + string(e.Code) + ")"
+			return "CONSENSUS_INVALID(" + string(e.Code) + ")", e
 		}
 	}
 	if err == sentinel { //nolint:errorlint // The exact invocation-local sentinel.
-		return err, ""
+		return "", err
 	}
-	return nil, ""
+	return "", nil
 }
 
 func selectedRetainQualLeaf(e *selectedSideQualificationError) bool {
@@ -340,8 +346,9 @@ func (r *selectedRetention) create(qual selectedSideQualification) (mdbx.Batch, 
 }
 
 // selectedRetainFits is the checked N1 write preflight max(Qqual(n)+2048, 3n+L+7223040+E) <= G: L is 0 for the
-// canonical parent, and 3n is the Batch body copy, its Update clone and one present-body comparison copy. The Qqual
-// term always fits (see the compile-time bound above).
+// canonical parent, and 3n is the caller's raw candidate, the Batch body literal clone and its Update-owned clone on the
+// absent-body insert path; a byte-identical present body is compared and reused with no body mutation or further copy,
+// so 3n covers it conservatively. The Qqual term always fits (see the compile-time bound above).
 func selectedRetainFits(n uint64) bool {
 	return 3*n+selectedRetainWorkspace+selectedRetainExtra <= mdbx.MaxOperationDataBytes
 }

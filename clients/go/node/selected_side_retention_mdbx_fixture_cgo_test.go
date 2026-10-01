@@ -385,7 +385,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			a := &selectedRetainAttempt{ran: true, sentinel: errors.New("decision")}
 			joined := errors.Join(a.bind(leaf), c.cleanup)
 			out, request := a.project(SelectedSideMutationOutcome{Truth: old, Stage: pre, Err: joined})
-			parts := joined.(interface{ Unwrap() []error }).Unwrap() //nolint:errorlint // The exact raw join.
+			parts := joined.(interface{ Unwrap() []error }).Unwrap()                                                                                                       //nolint:errorlint // The exact raw join.
 			if out.Result != c.want || out.Decision != "" || out.CanonicalTruth != "OLD" || out.Truth != old || out.Stage != pre || out.Err != joined || request != nil || //nolint:errorlint // Raw identity.
 				len(parts) != 2 || parts[0] != error(leaf) || parts[1] != c.cleanup { //nolint:errorlint // Exact cause order.
 				t.Fatalf("stronger canonical/invariant exact result/raw joined causes: %s projected %+v", c.name, out)
@@ -639,6 +639,41 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			}
 		})
 	}
+	t.Run("owner-input-oversize", func(t *testing.T) {
+		// A nil or zero owner with an oversized candidate on an open Store returns the owner's own exact input sentinel
+		// before any grant, Update or native operation, on a STABLE and on a recovery pre-state alike. The same Store
+		// instance then serves the next valid-owner invocation in its control-only order before any image check.
+		want := (*mdbx.OperationReservationOwner)(nil).WithReservation(1, nil)
+		for _, c := range []struct {
+			name, next string
+			spec       ssqSpec
+		}{{"open STABLE", ssqBranch, ssqSpec{tip: 10}}, {"recovery", ssqRequired, ssqSpec{tip: 10, authority: ssqPendingNone}}} {
+			w := newRetainFixtureWorld(t, c.spec)
+			raw := make([]byte, mdbx.MaxBlockBytes+1)
+			before := bytes.Clone(raw)
+			for _, owner := range []*mdbx.OperationReservationOwner{nil, {}} {
+				tip := w.tipAt(10)
+				var out SelectedSideMutationOutcome
+				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+					out = RetainSelectedSideMDBX(w.store, owner, raw, tip)
+				})
+				if err != nil || evidence != (mdbx.SelectedDamageEvidence{}) {
+					t.Fatalf("%s: owner input reached native operations: %v %+v", c.name, err, evidence)
+				}
+				retainWant(t, c.name+": owner input before raw bound", out, "", "", "", old, pre, false)
+				if out.Err != want || out.Err.Error() != "invalid storage operation reservation input" { //nolint:errorlint // The owner's exact sentinel.
+					t.Fatalf("%s: owner input error %v", c.name, out.Err)
+				}
+				w.wantRaw(raw, before)
+				if *tip != *w.tipAt(10) {
+					t.Fatalf("%s: owner input changed the caller's tip locator", c.name)
+				}
+				retainWantReleased(t, w.owner)
+				retainWantRefusal(t, c.name+": next valid-owner control-only order", w.retain(raw, w.tipAt(10)), c.next, "")
+				w.wantImage(c.name + ": owner input refusal and next valid-owner refusal")
+			}
+		}
+	})
 	t.Run("A9-reopen-abortIO", func(t *testing.T) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
 		w.reopen()
