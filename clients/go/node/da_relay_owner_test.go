@@ -312,6 +312,7 @@ func TestDALexicalIdentifierRows(t *testing.T) {
 	}{
 		{"receiver-name homonym keeps the lexical count and location", map[string]int{"read|f.go:plan|batch": 1, "value|f.go:plan|batch": 2}, map[string]int{"ident|f.go:plan|batch": 3}, map[string]string{"value|f.go:plan|batch": "f.go:7:2"}, map[string]string{"ident|f.go:plan|batch": "f.go:7:2"}},
 		{"signed historical arithmetic", map[string]int{"value|f.go:plan|batch": 6, "read|f.go:plan|batch": -3}, map[string]int{"ident|f.go:plan|batch": 3}, nil, map[string]string{}},
+		{"unclamped positive sum", map[string]int{"read|f.go:plan|batch": 5, "value|f.go:plan|batch": 2}, map[string]int{"ident|f.go:plan|batch": 7}, nil, map[string]string{}},
 		{"edge and exempt rows stay distinct", map[string]int{"edge-call|f.go:plan|batch": 1, "edge-value|f.go:plan|batch": 1, "read|f.go:file|DAID": 1, "value|f.go:file|DAID": 1}, map[string]int{"edge-call|f.go:plan|batch": 1, "edge-value|f.go:plan|batch": 1, "read|f.go:file|DAID": 1, "ident|f.go:file|DAID": 1}, nil, map[string]string{}},
 	} {
 		got, where := daLexicalIdentifierRows(c.rows, c.where, changed)
