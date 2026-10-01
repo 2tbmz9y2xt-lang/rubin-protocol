@@ -60,6 +60,17 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		}
 		w.wantImage("precommit keeps OLD")
 	})
+	t.Run("R-n", func(t *testing.T) {
+		// The optional oldest body read faults transiently: branch_data/OLD with the exact native cause, no plan or write.
+		w, raw := rollFixtureWorld(t)
+		out, evidence := w.armedPrepare(mdbx.SelectedDamageGetEIO, 4, bytes.Clone(w.side[1][:]), raw)
+		retainWant(t, "oldest transient read branch_data", out, ssqBranch, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		ssqWantNative(t, "oldest body GetEIO", out.Err, ssqGetEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("R-n evidence %+v", evidence)
+		}
+		w.wantImage("oldest transient read keeps OLD")
+	})
 	t.Run("H6b-NEW", func(t *testing.T) {
 		w, raw := rollFixtureWorld(t)
 		prior := w.tracked()

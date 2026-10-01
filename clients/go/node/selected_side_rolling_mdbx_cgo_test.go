@@ -73,6 +73,24 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.reopen()
 		w.wantImage("A5 persisted image after reopen")
 	})
+	// A5-body and A5-link each own one oldest physical row: its exact pre-state bytes survive the preparation.
+	for _, c := range []struct {
+		name string
+		rank uint8
+		key  func(w *ssqWorld) []byte
+	}{
+		{"A5-body", 4, func(w *ssqWorld) []byte { return bytes.Clone(w.side[1][:]) }},
+		{"A5-link", 6, func(w *ssqWorld) []byte { return ssqMust(mdbx.HeightKey(2, 1)) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := rollWorld(t)
+			want := bytes.Clone(w.rows[string(append([]byte{c.rank}, c.key(w)...))].value)
+			retainWant(t, c.name+" RP", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+			if equal, err := w.viewEqual(c.rank, c.key(w), want); want == nil || err != nil || !equal {
+				t.Fatalf("oldest physical image unchanged: rank %d (%v)", c.rank, err)
+			}
+		})
+	}
 	t.Run("A5-generation", func(t *testing.T) {
 		// An unrelated pending GENERATION span (obsolete g3) is preserved; the SIDE span is appended after it.
 		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2), authority: func(a *mdbx.StorageAuthorityV1) {
