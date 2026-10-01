@@ -50,6 +50,22 @@ func (w *ssqWorld) exhaust() {
 	w.apply([]mdbx.Mutation{w.authorityMutation(a)})
 }
 
+// retainWantCommit requires the raw CommitError of an armed commit-site scenario: its own truth is the raw truth, its
+// primary cause is the injected commit ENOSPC (update/EngineCapacity/28), and its readback cause is exactly the
+// readback Get EIO (update/EngineIO/5) when readback faulted, otherwise absent: an OLD, NEW or third-image readback
+// compares without error and the OLD abort succeeds (mdbx updateNativeReadback/updateResult).
+func retainWantCommit(t *testing.T, label string, out SelectedSideMutationOutcome, readback bool) {
+	t.Helper()
+	var commit *mdbx.CommitError
+	if !errors.As(out.Err, &commit) || commit.Truth != out.Truth || (commit.ReadbackCause != nil) != readback {
+		t.Fatalf("%s: raw commit error %v", label, out.Err)
+	}
+	ssqWantNative(t, label+": primary commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
+	if readback {
+		ssqWantNative(t, label+": readback get EIO", commit.ReadbackCause, ssqNative{"update", mdbx.EngineIO, 5})
+	}
+}
+
 func TestSelectedSideRetentionFixture(t *testing.T) {
 	old, pre, crossed := mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, mdbx.UpdateStageCommitMayHaveCrossed
 	n1 := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1) {
@@ -340,6 +356,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, _ := n1(t)
 		out, _ := w.armed(mdbx.SelectedDamageCommitOld, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "equality OLD empty Result", out, "", "", retainNA, old, crossed, false)
+		retainWantCommit(t, "equality OLD", out, false)
 		w.wantImage("equality OLD image")
 	})
 	for _, c := range []struct {
@@ -351,6 +368,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			w, raw, _ := n1(t)
 			out, _ := w.armed(c.scen, 0, c.key, raw, w.tipAt(10))
 			retainWant(t, "noncanonical/NOT_APPLICABLE with exact raw UNKNOWN", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
 		})
 	}
 	t.Run("H12-sentinel", func(t *testing.T) {
@@ -721,15 +739,11 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 				result = retainCleared
 			}
 			retainWant(t, "crossed N2 projection with exact raw truth", out, result, "", retainNA, c.truth, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
 			switch c.truth {
 			case mdbx.CommitTruthOld:
 				w.wantImage("equality OLD N2 image")
 			case mdbx.CommitTruthNew:
-				var commit *mdbx.CommitError
-				if !errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthNew {
-					t.Fatalf("equality NEW error %v", out.Err)
-				}
-				ssqWantNative(t, "commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
 				w.expectN2(raw, prior, side, w.side[6])
 				w.wantN1Image("equality NEW N2 image", raw)
 			default:

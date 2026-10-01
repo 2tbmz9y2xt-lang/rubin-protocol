@@ -37,9 +37,9 @@ const (
 	// and expected-tip allowance of two identities and 1024 bytes each.
 	selectedRetainWorkspace uint64 = 7_223_040
 	selectedRetainOwnerTip  uint64 = 2_048
-	// selectedRetainExtra is E of the N1 write: four authority images (decoded, Batch literal, Update clone, native
-	// OLD), the sorted and Update-cloned 16384-identity union (64 bytes per descriptor and key, twice) and 131072 bytes
-	// of fixed keys, header/link literals, mutation arrays and control structs.
+	// selectedRetainExtra is E of the shared N1/N2 write: four authority images (decoded, Batch literal, Update clone,
+	// native OLD), the sorted and Update-cloned 16384-identity union (64 bytes per descriptor and key, twice) and 131072
+	// bytes of fixed keys, header/link literals, mutation arrays and control structs.
 	selectedRetainExtra uint64 = 4*mdbx.MaxMetadataBytes + 2*selectedQualIdentities*64 + 131_072
 )
 
@@ -258,8 +258,8 @@ func (a *selectedRetainAttempt) project(out SelectedSideMutationOutcome) (Select
 	return out, nil
 }
 
-// selectedRetainCrossed is the optional-cache projection of a crossed N1 attempt: clean NEW is stored noncanonical,
-// UNKNOWN is a noncanonical store error, and OLD or NEW with an error keeps an empty Result.
+// selectedRetainCrossed is the optional-cache projection of a crossed N1 or N2 attempt: clean NEW is stored
+// noncanonical, UNKNOWN is a noncanonical store error, and OLD or NEW with an error keeps an empty Result.
 func selectedRetainCrossed(out SelectedSideMutationOutcome) SelectedSideMutationOutcome {
 	out.CanonicalTruth = "NOT_APPLICABLE"
 	switch {
@@ -314,7 +314,7 @@ func (r *selectedRetention) tipParent() (selectedQualParent, error) {
 		return selectedQualParent{}, err
 	}
 	r.attempt.resource = ""
-	if body == nil || !bytes.Equal(body[:consensus.BLOCK_HEADER_BYTES], tip.header) || consensus.ValidateBlockBodyCommitments(body) != nil {
+	if !selectedRetainLinkingHealthy(body, tip.header) {
 		if required {
 			return selectedQualParent{}, selectedQualFailure(selectedQualIntegrity, "required canonical body does not match its header or commitments")
 		}
@@ -323,6 +323,12 @@ func (r *selectedRetention) tipParent() (selectedQualParent, error) {
 	r.attempt.linking = uint64(len(body))
 	header, _ := consensus.ParseBlockHeaderBytes(tip.header) // A 116-byte header always decodes.
 	return selectedQualParent{hash: r.side.TipHash, height: r.side.TipHeight, f: r.side.F, work: [40]byte(tip.link[64:104]), header: header, selected: true}, nil
+}
+
+// selectedRetainLinkingHealthy is linkingBody's body predicate: a present body whose header bytes equal the verified
+// tip header and whose commitments verify; it short-circuits on an absent body before any slice or validation.
+func selectedRetainLinkingHealthy(body, header []byte) bool {
+	return body != nil && bytes.Equal(body[:consensus.BLOCK_HEADER_BYTES], header) && consensus.ValidateBlockBodyCommitments(body) == nil
 }
 
 // admitted orders the fresh qualification's consumers: candidate owner, the re-proved expected tip, K23 against the

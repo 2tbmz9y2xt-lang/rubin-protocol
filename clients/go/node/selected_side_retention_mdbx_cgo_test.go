@@ -594,8 +594,13 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWantRefusal(t, "one-slot append stays a later transition", out, ssqBranch, "selected side append belongs to a later transition")
 		w.wantImage("one-slot side unchanged")
 	})
-	for _, next := range []uint64{7, math.MaxUint64} {
-		t.Run(fmt.Sprintf("A3a-next%d", next), func(t *testing.T) {
+	// A3a is the contract case g5/F5/next7; A3a-exhausted keeps next=maxuint64, where N2 still allocates nothing.
+	for _, c := range []struct {
+		name string
+		next uint64
+	}{{"A3a", 7}, {"A3a-exhausted", math.MaxUint64}} {
+		next := c.next
+		t.Run(c.name, func(t *testing.T) {
 			// count1, F5, g5, next: a mined side tip at 6 planted with g5 link keys; the exact-tip child (work 8) neither
 			// wins K23 (canonical tip work 11) nor loses selection (side 7). No identity is allocated, even when exhausted.
 			w := newRetainWorld(t, ssqSpec{tip: 10, authority: func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID = next }})
@@ -640,6 +645,12 @@ func TestSelectedSideRetention(t *testing.T) {
 		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_440, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_441), RowCount: 1_440, LogicalBytes: total + uint64(len(raw))}
 		w.expectN2(raw, prior, side, w.side[1_439])
 		w.wantN1Image("ordinary 1439 append image", raw)
+		w.reopen()
+		w.wantN1Image("ordinary 1439 append persisted image after reopen", raw)
+		out := w.retain(w.child(w.canonical[1], 2, nil), w.tipAt(2))
+		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+		retainWantEngine(t, "unverified owner after C1439 append", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+		w.wantImage("unverified owner refusal after C1439 append")
 	})
 	t.Run("R-i", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10})
@@ -960,16 +971,22 @@ func TestSelectedSideRetention(t *testing.T) {
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
 		w.wantN1Image("large N1 image", raw)
 	})
-	// N2 charges the exact checked linking body L: 3n+L+7223040+6422528 <= 154611151. n=46988527 (3n=140965581) fits
-	// N1 but refuses here for the side tip body L >= 3; n=floor((140965583-L)/3) commits.
+	// N2 charges the exact checked linking body L: 3n+L+7223040+6422528 <= 154611151, so 3n+L <= 140965583. n=46988527
+	// (3n=140965581) fits N1 but refuses here for the side tip body L >= 3; nFit=floor((140965583-L)/3) commits and
+	// nFit+1 refuses. With r=(140965583-L) mod 3, 3(nFit+1)+L = 140965583+3-r, so nFit+1 commits under any charge below
+	// L by at least 3-r (a header-length 116 charge included, as L > 119) and nFit refuses under any over-charge above
+	// r; a smaller residue-bound deviation is not claimed.
 	t.Run("H11-L", func(t *testing.T) {
-		for _, fits := range []bool{false, true} {
+		for _, step := range []int{0, 1, 2} {
 			w := newRetainWorld(t, ssqSpec{tip: 10})
 			blocks := w.retainSide(5, 6, 1, 7, false)
 			l := len(blocks[6])
-			n := 46_988_527
-			if fits {
-				n = (140_965_583 - l) / 3
+			if l <= 119 {
+				t.Fatalf("side tip body %d bytes does not exceed the header bound", l)
+			}
+			fits, n := step == 1, 46_988_527
+			if step > 0 {
+				n = (140_965_583-l)/3 + step - 1
 			}
 			raw := retainLarge(t, w.side[6], w.ts(w.side[6])+120, n)
 			if !fits {
