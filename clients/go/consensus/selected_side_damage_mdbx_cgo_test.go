@@ -585,6 +585,10 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
 			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
 		rollRecorded(t, viewErr, engine, "missing oldest link")
+		// The recorded required-read failure consumed the Store: the next View returns that exact terminal error; the
+		// unchanged persistent image is read after reopen.
+		w.wantConsumed("missing oldest link", viewErr)
+		w.reopen()
 		w.wantImage("missing oldest link plan writes nothing", w.authority, false)
 		// Positively absent optional oldest body, then an absent required SideLink(2,first+1) in the complete transfer:
 		// the required read's integrity error, zero Mutations and Consulted, no flag, its failed-read branch_data class.
@@ -596,6 +600,8 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
 			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
 		rollRecorded(t, viewErr, engine, "incomplete plan")
+		w.wantConsumed("incomplete plan", viewErr)
+		w.reopen()
 		w.wantImage("incomplete plan writes nothing", w.authority, false)
 	})
 	t.Run("classify", func(t *testing.T) {
