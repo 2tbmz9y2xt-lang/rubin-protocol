@@ -22,7 +22,8 @@ import (
 // production caller. Each attempt holds one full-lane grant around its own same-Reader qualification, every live
 // buffer, its sole Store.Update and that Update's cleanup. A clean damage locator is rechecked by the existing damage
 // operation after that grant is released and permits exactly one fresh attempt. Only N1, N2, the separate N3
-// replacement and the separate RP preparation (selected_side_rolling_mdbx_cgo.go) write here; every other selected-side
+// replacement, RA (the fresh append to a cleaned one-slot side) and the separate RP preparation
+// (selected_side_rolling_mdbx_cgo.go) write here; every other selected-side
 // transition is routed or refused without a write.
 
 const (
@@ -389,8 +390,8 @@ func (r *selectedRetention) admitted(qual selectedSideQualification, parent sele
 
 // route sends a selected candidate to its transition: N1 without a side, the separate replacement for a winning
 // canonical-parent child, the separate rolling preparation for a count-1440 side, N2 for an exact-tip child of a full
-// side below 1440 rows (F+count = tip, C1439 included). The cleaned one-slot append is not owned here yet. The separate
-// Replace and Prepare invocations go only to their own transition.
+// side below 1440 rows (F+count = tip, C1439 included), and RA for an exact-tip child of the cleaned one-slot side. The
+// separate Replace and Prepare invocations go only to their own transition.
 func (r *selectedRetention) route(qual selectedSideQualification, parent selectedQualParent) (mdbx.Batch, error) {
 	switch {
 	case r.attempt.mode == selectedReplaceMode:
@@ -404,7 +405,26 @@ func (r *selectedRetention) route(qual selectedSideQualification, parent selecte
 	case r.side.RowCount == 1440:
 		return mdbx.Batch{}, r.attempt.decide(selectedQualBranch, "PREPARE_ROLLING", "OLD")
 	case r.side.TipHeight-uint64(r.side.RowCount) != r.side.F:
-		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append belongs to a later transition")
+		return r.ra(qual)
+	}
+	return r.n2(qual)
+}
+
+// ra is the fresh append to a cleaned one-slot side (C >= 1440, count 1439; legal authority admits no other shape with
+// first > F+1 and no detached suffix beside a side). The aggregate counts the live rows, every row still owed by a
+// pending SIDE span from its next_height, and the incoming row; above 1440 (a Prepared side) it is typed branch_data.
+// Otherwise the N2 effect: tip/hash/work advance, count 1440, bytes+n, first, g, F and next unchanged, no SIDE or delete.
+func (r *selectedRetention) ra(qual selectedSideQualification) (mdbx.Batch, error) {
+	owed := uint64(0)
+	if c := r.authority.Cleanup; c != nil {
+		for _, span := range c.Spans {
+			if span.Kind == mdbx.CleanupSpanSideV1 {
+				owed += span.LastHeight - span.NextHeight + 1
+			}
+		}
+	}
+	if uint64(r.side.RowCount)+owed+1 > 1440 {
+		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append exceeds the retention aggregate")
 	}
 	return r.n2(qual)
 }

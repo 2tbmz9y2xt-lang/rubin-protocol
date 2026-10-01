@@ -31,6 +31,15 @@ func rollWorld(t *testing.T) (*ssqWorld, []byte) {
 	return w, w.child(w.side[1_440], 1_441, nil)
 }
 
+// raWorld is canonical 0..2 (tip work 2^40) beside the cleaned one-slot side 3..1441/F0 (g2, C1441, count 1439,
+// header-only history 1..2, tip work 1442); its exact-tip child at 1442 is selected and does not win K23.
+func raWorld(t *testing.T) (*ssqWorld, []byte) {
+	t.Helper()
+	w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+	w.retainSide(0, 1_441, 1_439, 1_442, true)
+	return w, w.child(w.side[1_441], 1_442, nil)
+}
+
 // wantIncomingAbsent proves the incoming child's header, body and SideLink(2,1441) were never written.
 func (w *ssqWorld) wantIncomingAbsent(label string, raw []byte) {
 	w.t.Helper()
@@ -99,14 +108,13 @@ func TestSelectedSideRolling(t *testing.T) {
 		})
 	}
 	t.Run("R-e", func(t *testing.T) {
-		// Prepared side (count 1439) with its pending SIDE row: a Retain of child 1441 is typed branch_data and the
-		// preparation stays committed. Stage note: the aggregate owner is RA; this Retain refusal comes from the existing
-		// one-slot route, so this case does not claim M12.
+		// Prepared side (count 1439) with its pending SIDE(2,1,1,1) row owed from next_height: 1439+1+incoming 1 = 1441
+		// exceeds the aggregate, so Retain's RA is typed branch_data and the preparation stays committed (M12).
 		w, raw := rollWorld(t)
 		prior := w.tracked()
 		retainWant(t, "R-e preparation", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
 		w.expectPrepared(prior)
-		retainWantRefusal(t, "Prepared preserved/no body1441", w.retain(raw, w.tipAt(2)), ssqBranch, "")
+		retainWantRefusal(t, "Prepared preserved/no body1441", w.retain(raw, w.tipAt(2)), ssqBranch, "selected side append exceeds the retention aggregate")
 		w.wantImage("R-e Prepared preserved")
 		w.wantIncomingAbsent("R-e", raw)
 	})
@@ -162,6 +170,38 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.wantAbsent("oldest link still absent", 6, link)
 		w.wantIncomingAbsent("R-planner-error", raw)
 	})
+	// A6: cleaned one-slot side 3..1441/F0 (C1441, count 1439, history 1..2 header-only, 1000 logical bytes per row);
+	// a fresh exact-tip child 1442 (work 1443, below canonical 2^40) is RA: count 1440, bytes+n, tip/hash/work advance,
+	// first 3, g2, F0 and next 3 unchanged, exact header/body/link, no SIDE, no delete, no second preparation.
+	t.Run("A6", func(t *testing.T) {
+		w, raw := raWorld(t)
+		prior := w.tracked()
+		retainWant(t, "clean RA STORED_NONCANONICAL/not-applicable", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(len(raw))}
+		w.expectN2(raw, prior, side, w.side[1_441])
+		w.wantN1Image("RA exact append image", raw)
+		if a := w.persisted(); a.Cleanup != nil || a.Phase != prior.Phase || a.NextGenerationID != prior.NextGenerationID {
+			t.Fatalf("RA no SIDE/phase/next preserved: %+v", a)
+		}
+		w.reopen()
+		w.wantN1Image("RA persisted image after reopen", raw)
+		out := w.retain(raw, w.tipAt(2))
+		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+		retainWantEngine(t, "unverified owner after RA", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+		w.wantN1Image("unverified owner refusal after RA", raw)
+	})
+	t.Run("R-s", func(t *testing.T) {
+		// The cleaned tip 1441's optional linking body changed to invalid commitments before a fresh RA: the fresh
+		// qualification's current linking check yields the damage locator, its recheck is the complete positive clear
+		// SIDE(2,3,1441,3); no append ever reuses an earlier observation (M31).
+		w, raw := raWorld(t)
+		tip := w.side[1_441]
+		bad := retainMerkle(w.rows[string(append([]byte{4}, tip[:]...))].value)
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), bad, true)})
+		w.absent = append(w.absent, ssqHash(raw))
+		retainWant(t, "current damaged linking row cannot authorize append/exact image", w.retain(raw, w.tipAt(2)), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("RA damaged linking body complete clear", 3, 1_441)
+	})
 	t.Run("R-f", func(t *testing.T) {
 		// Cleaned one-slot F0/C1441/count1439: Prepare refuses with no second SIDE or automatic RA.
 		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
@@ -169,6 +209,11 @@ func TestSelectedSideRolling(t *testing.T) {
 		out := w.prepareSide(w.child(w.side[1_441], 1_442, nil), w.tipAt(2))
 		retainWantRefusal(t, "no second SIDE/shrink", out, ssqBranch, "selected side rolling preparation needs an exact-tip child of a full side")
 		w.wantImage("one-slot side unchanged")
+		// A separate fresh Retain of the same child chooses RA (count 1440, no SIDE).
+		retainWant(t, "separate fresh Retain chooses RA", w.retain(w.child(w.side[1_441], 1_442, nil), w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+		if a := w.persisted(); a.SelectedSide == nil || a.SelectedSide.RowCount != 1_440 || a.Cleanup != nil {
+			t.Fatalf("R-f separate RA: %+v", a.SelectedSide)
+		}
 	})
 	t.Run("R-domain-node", func(t *testing.T) {
 		// Prepare with no side, and with a winning canonical-parent child beside a non-full side, is typed branch_data.

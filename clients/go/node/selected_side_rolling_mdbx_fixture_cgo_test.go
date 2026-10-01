@@ -416,6 +416,86 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		w.wantAbsent("oldest body still absent", 4, bodyKey)
 		w.wantAbsent("first+1 link still absent", 6, linkKey)
 	})
+	// RA native outcomes on raWorld (cleaned one-slot 3..1441/F0, child 1442): one public Retain per scenario through the
+	// existing armed helper, tuple asserted first; the expected appended side is the literal of L[A6].
+	raFixture := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1, mdbx.SelectedSideV1) {
+		w, raw := raWorld(t)
+		w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+			return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+		}
+		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(len(raw))}
+		return w, raw, w.tracked(), side
+	}
+	for _, c := range []struct {
+		name string
+		scen mdbx.SelectedDamageScenario
+		key  []byte
+	}{{"H6a-RA", mdbx.SelectedDamageCommitUnreadable, []byte{2}}, {"H6a-RA-third", mdbx.SelectedDamageCommitThird, nil}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, _, _ := raFixture(t)
+			out, _ := w.armed(c.scen, 0, c.key, raw, w.tipAt(2))
+			retainWant(t, "noncanonical/NOT_APPLICABLE with exact raw UNKNOWN", out, retainCleared, "", retainNA, mdbx.CommitTruthUnknown, crossed, false)
+			retainWantCommit(t, c.name, out, c.key != nil)
+		})
+	}
+	t.Run("H6b-RA-NEW", func(t *testing.T) {
+		w, raw, prior, side := raFixture(t)
+		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(2))
+		retainWant(t, "proved NEW/raw causes retained/NOT_APPLICABLE empty Result", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
+		var commit *mdbx.CommitError
+		if !errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthNew || evidence.Commits != 1 {
+			t.Fatalf("RA equality NEW error %v (%+v)", out.Err, evidence)
+		}
+		w.expectN2(raw, prior, side, w.side[1_441])
+		w.wantN1Image("RA equality NEW image", raw)
+	})
+	t.Run("H6b-RA-OLD", func(t *testing.T) {
+		w, raw, _, _ := raFixture(t)
+		out, _ := w.armed(mdbx.SelectedDamageCommitOld, 0, nil, raw, w.tipAt(2))
+		retainWant(t, "equality OLD empty Result", out, "", "", retainNA, old, crossed, false)
+		retainWantCommit(t, "RA equality OLD", out, false)
+		w.wantImage("RA equality OLD image")
+	})
+	t.Run("H8a-RA-put", func(t *testing.T) {
+		w, raw, _, _ := raFixture(t)
+		out, evidence := w.armed(mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 1_442)), raw, w.tipAt(2))
+		retainWant(t, "definite precommit RA link write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "RA put", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginWrite != 1 || evidence.Commits != 0 || evidence.BeginRead != 0 {
+			t.Fatalf("RA put evidence %+v", evidence)
+		}
+		w.wantImage("RA precommit keeps OLD")
+	})
+	t.Run("H8a-RA-get-linking", func(t *testing.T) {
+		w, raw, _, _ := raFixture(t)
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 4, w.sideKey(1_441), raw, w.tipAt(2))
+		retainWantRefusal(t, "transient optional linking body branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "RA linking GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("RA linking read fault")
+	})
+	t.Run("H8-RA-lifetime", func(t *testing.T) {
+		w, raw, prior, side := raFixture(t)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(2))
+		retainWant(t, "probed RA", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		if evidence.Probes == 0 || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 {
+			t.Fatalf("every native full-lane probe denied; grant released after return: %+v", evidence)
+		}
+		w.expectN2(raw, prior, side, w.side[1_441])
+		w.wantN1Image("probed RA image", raw)
+	})
+	t.Run("H10-RA-abortIO", func(t *testing.T) {
+		// The cleaned tip body positively absent: the fresh RA qualification's locator (2,1441,1441) with abort EIO is
+		// storage_io/CLOSED with no recheck.
+		w, raw, _, _ := raFixture(t)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(1_441))})
+		out, evidence := w.armed(mdbx.SelectedDamageAbortEIO, 0, nil, raw, w.tipAt(2))
+		retainWant(t, "storage_io/raw join/CLOSED/no recheck", out, retainStorageIO, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		var request *selectedSideDamageRequest
+		if !errors.As(out.Err, &request) || *request != (selectedSideDamageRequest{Generation: 2, Tip: 1_441, Height: 1_441}) || evidence.BeginOld != 1 || evidence.BeginRead != 0 {
+			t.Fatalf("RA locator abort %+v (%+v)", out, evidence)
+		}
+		w.wantImage("RA side kept without recheck")
+	})
 	// LF[H11-union]: the exact composed identity union of the real Prepare is admitted at 16384 (authority the only
 	// target) and refused at 16385 (authority plus the unowned tip header) before any callback Batch or native OLD.
 	t.Run("H11-union-16384", func(t *testing.T) {

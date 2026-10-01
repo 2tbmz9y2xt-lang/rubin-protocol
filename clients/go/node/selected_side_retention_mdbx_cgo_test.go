@@ -609,13 +609,15 @@ func TestSelectedSideRetention(t *testing.T) {
 		out := w.retain(w.child(w.side[1_440], 1_441, nil), w.tipAt(2))
 		retainWant(t, "no early append/PREPARE_ROLLING", out, ssqBranch, "PREPARE_ROLLING", "OLD", old, pre, true)
 		w.wantImage("full side unchanged")
-		// The cleaned one-slot shape (F0, C1441 >= 1440, count 1439, history rows 1..2 header-only) is the later RA
-		// append: its selected exact-tip child is refused as typed branch_data, never appended as N2.
+		// The cleaned one-slot shape (F0, C1441 >= 1440, count 1439, history rows 1..2 header-only) is RA, not N2 and
+		// not RP: its exact-tip child appends to count 1440 with first 3 unchanged (exact image owned by L[A6]).
 		w = newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
 		w.retainSide(0, 1_441, 1_439, 1_442, true)
 		out = w.retain(w.child(w.side[1_441], 1_442, nil), w.tipAt(2))
-		retainWantRefusal(t, "one-slot append stays a later transition", out, ssqBranch, "selected side append belongs to a later transition")
-		w.wantImage("one-slot side unchanged")
+		retainWant(t, "one-slot child takes RA", out, retainStored, "", retainNA, mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, true)
+		if a := w.persisted(); a.SelectedSide == nil || a.SelectedSide.RowCount != 1_440 || a.SelectedSide.TipHeight != 1_442 || a.SelectedSide.F != 0 || a.Cleanup != nil {
+			t.Fatalf("RA count 1440/tip 1442/F0/no SIDE: %+v", a.SelectedSide)
+		}
 	})
 	// A3a is the contract case g5/F5/next7; A3a-exhausted keeps next=maxuint64, where N2 still allocates nothing.
 	for _, c := range []struct {
