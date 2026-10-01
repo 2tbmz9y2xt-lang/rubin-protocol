@@ -56,6 +56,14 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10, authority: func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID = 2 }})
 		return w, w.child(w.canonical[5], 6, nil), w.authorityValue()
 	}
+	// n2 is the count-1 side (g2, F5, tip 6, work 7, planted bytes 1000) and its exact-tip child at 7 (work 8, below the
+	// canonical tip's 11) with the literal appended side.
+	n2 := func(t *testing.T) (*ssqWorld, []byte, mdbx.StorageAuthorityV1, mdbx.SelectedSideV1) {
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		raw := w.child(w.side[6], 7, nil)
+		return w, raw, w.tracked(), mdbx.SelectedSideV1{GenerationID: 2, F: 5, TipHeight: 7, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(8), RowCount: 2, LogicalBytes: 1_000 + uint64(len(raw))}
+	}
 	u64 := func(n uint64) []byte { return binary.BigEndian.AppendUint64(nil, n) }
 	at := func(base []byte, offset int, value []byte) []byte {
 		out := bytes.Clone(base)
@@ -679,6 +687,108 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 				w.wantImage(c.name + ": owner input refusal and next valid-owner refusal")
 			}
 		}
+	})
+	t.Run("N2-lifetime", func(t *testing.T) {
+		w, raw, prior, side := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "probed N2", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
+		// Probes at write begin, commit and twice around the OLD abort, all denied inside the grant. Rank-4 OLD Gets: the
+		// one callback linking-body read and the candidate expected-body read, the linking body's Consulted capture and
+		// the candidate body target image.
+		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
+			evidence.OldGets[4] != 4 {
+			t.Fatalf("one linking body read; every native full-lane probe denied: %+v", evidence)
+		}
+		w.expectN2(raw, prior, side, w.side[6])
+		w.wantN1Image("probed N2 image", raw)
+	})
+	for _, c := range []struct {
+		name  string
+		scen  mdbx.SelectedDamageScenario
+		key   []byte
+		truth mdbx.CommitTruth
+	}{
+		{"N2-H6b-OLD", mdbx.SelectedDamageCommitOld, nil, mdbx.CommitTruthOld},
+		{"N2-H6b-NEW", mdbx.SelectedDamageCommitNew, nil, mdbx.CommitTruthNew},
+		{"N2-H6a-third", mdbx.SelectedDamageCommitThird, nil, mdbx.CommitTruthUnknown},
+		{"N2-H6a-unreadable", mdbx.SelectedDamageCommitUnreadable, []byte{2}, mdbx.CommitTruthUnknown},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw, prior, side := n2(t)
+			out, _ := w.armed(c.scen, 0, c.key, raw, w.tipAt(10))
+			result := ""
+			if c.truth == mdbx.CommitTruthUnknown {
+				result = retainCleared
+			}
+			retainWant(t, "crossed N2 projection with exact raw truth", out, result, "", retainNA, c.truth, crossed, false)
+			switch c.truth {
+			case mdbx.CommitTruthOld:
+				w.wantImage("equality OLD N2 image")
+			case mdbx.CommitTruthNew:
+				var commit *mdbx.CommitError
+				if !errors.As(out.Err, &commit) || commit.Truth != mdbx.CommitTruthNew {
+					t.Fatalf("equality NEW error %v", out.Err)
+				}
+				ssqWantNative(t, "commit ENOSPC", commit.Cause, ssqNative{"update", mdbx.EngineCapacity, 28})
+				w.expectN2(raw, prior, side, w.side[6])
+				w.wantN1Image("equality NEW N2 image", raw)
+			default:
+				// The consumed Store answers the next call with its cached terminal truth and error at Prewrite.
+				next := w.retain(raw, w.tipAt(10))
+				retainWant(t, "cached next call empty fields", next, "", "", "", mdbx.CommitTruthUnknown, pre, false)
+				if next.Err != out.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+					t.Fatalf("cached error %v, want %v", next.Err, out.Err)
+				}
+			}
+		})
+	}
+	t.Run("N2-begin-eio", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamageBeginEIO, 0, nil, raw, w.tipAt(10))
+		retainWant(t, "no-callback native begin keeps empty fields", out, "", "", "", old, pre, false)
+		ssqWantNative(t, "N2 begin EIO", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginOld != 1 || evidence.OldGets != [8]uint64{} {
+			t.Fatalf("begin evidence %+v", evidence)
+		}
+		w.wantImage("N2 begin failure")
+	})
+	t.Run("N2-get-linking", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		hash := w.side[6]
+		out, _ := w.armed(mdbx.SelectedDamageGetEIO, 4, bytes.Clone(hash[:]), raw, w.tipAt(10))
+		retainWantRefusal(t, "transient optional linking body branch_data", out, ssqBranch, "")
+		ssqWantNative(t, "linking GetEIO", out.Err, ssqGetEIO)
+		w.wantImage("linking read fault")
+	})
+	t.Run("N2-getabort-linking", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		hash := w.side[6]
+		out, _ := w.armed(mdbx.SelectedDamageGetAbortEIO, 4, bytes.Clone(hash[:]), raw, w.tipAt(10))
+		retainWantRefusal(t, "first typed linking result kept over abort IO", out, ssqBranch, "")
+		ssqWantNative(t, "linking Get+abort EIO", out.Err, ssqGetEIO, ssqAbortEIO)
+		w.wantImage("linking read and abort fault")
+	})
+	t.Run("N2-put", func(t *testing.T) {
+		w, raw, _, _ := n2(t)
+		out, evidence := w.armed(mdbx.SelectedDamagePutEIO, 6, ssqMust(mdbx.HeightKey(2, 7)), raw, w.tipAt(10))
+		retainWant(t, "definite precommit N2 link write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
+		ssqWantNative(t, "N2 put", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
+		if evidence.BeginWrite != 1 || evidence.Commits != 0 || evidence.BeginRead != 0 {
+			t.Fatalf("N2 put evidence %+v", evidence)
+		}
+		w.wantImage("N2 precommit keeps OLD")
+	})
+	t.Run("N2-linking-required", func(t *testing.T) {
+		// The side tip is canonically Owned at k=12 >= B=0, so its absent linking body is required canonical integrity,
+		// stronger than the optional recheck route and never a clear.
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.own(tip, w.canonical[5], 12)
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
+		retainWantRefusal(t, "required linking body terminal/no clear", out, ssqIntegrity, "required canonical row is absent")
+		w.wantImage("required linking body defect")
 	})
 	t.Run("A9-reopen-abortIO", func(t *testing.T) {
 		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})

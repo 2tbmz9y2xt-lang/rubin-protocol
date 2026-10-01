@@ -21,7 +21,7 @@ import (
 // RUBIN_COMPACT_BLOCKS.md Sections 10-10.2, RUBIN_L1_CANONICAL.md Sections 23 and 25). RetainSelectedSideMDBX has no
 // production caller. Each attempt holds one full-lane grant around its own same-Reader qualification, every live
 // buffer, its sole Store.Update and that Update's cleanup. A clean damage locator is rechecked by the existing damage
-// operation after that grant is released and permits exactly one fresh attempt. Only N1 writes here; every other
+// operation after that grant is released and permits exactly one fresh attempt. Only N1 and N2 write here; every other
 // selected-side transition is routed or refused without a write.
 
 const (
@@ -69,6 +69,8 @@ type selectedRetainAttempt struct {
 	result, decision, canonical string
 	boundResult, resource       string
 	retry, ran                  bool
+	// linking is L, the exact length of the one successfully checked exact-tip linking body; 0 for a canonical parent.
+	linking uint64
 }
 
 // selectedRetention plans one attempt over that attempt's own qualifier state.
@@ -272,8 +274,11 @@ func selectedRetainCrossed(out SelectedSideMutationOutcome) SelectedSideMutation
 // parent keeps the qualifier's parent order; a NONE canonical parent beside a live side enters the explicit duplicate
 // fallback instead of the qualifier's branch_data refusal.
 func (r *selectedRetention) parent(hash [32]byte) (selectedQualParent, error) {
-	if r.side == nil || hash == r.side.TipHash {
-		return r.parentEvidence(hash)
+	switch {
+	case r.side == nil:
+		return r.canonicalParent(hash)
+	case hash == r.side.TipHash:
+		return r.tipParent()
 	}
 	owner, err := r.canonicalOwnerOf(hash)
 	if err != nil {
@@ -288,6 +293,36 @@ func (r *selectedRetention) parent(hash [32]byte) (selectedQualParent, error) {
 	}
 	parsed, _ := consensus.ParseBlockHeaderBytes(header) // A 116-byte header always decodes.
 	return selectedQualParent{hash: hash, height: owner.Height, f: owner.Height, work: [40]byte(owner.Entry[64:104]), header: parsed}, nil
+}
+
+// tipParent is the qualifier's exact-tip parent (selectedTip, then linkingBody's one keyed-owner body read and checks)
+// composed here so the checked body's exact length L is kept for the append preflight; the body itself is not kept.
+// The read's own resource class stays set only while it is in flight.
+func (r *selectedRetention) tipParent() (selectedQualParent, error) {
+	tip, err := r.selectedTip()
+	if err != nil {
+		return selectedQualParent{}, err
+	}
+	required := tip.owner.Owned && tip.owner.Height >= r.authority.B
+	read, resource := r.optionalRow, selectedQualBranch
+	if required {
+		read, resource = r.requiredRow, selectedQualCanonical
+	}
+	r.attempt.resource = resource
+	body, err := read(4, r.side.TipHash)
+	if err != nil {
+		return selectedQualParent{}, err
+	}
+	r.attempt.resource = ""
+	if body == nil || !bytes.Equal(body[:consensus.BLOCK_HEADER_BYTES], tip.header) || consensus.ValidateBlockBodyCommitments(body) != nil {
+		if required {
+			return selectedQualParent{}, selectedQualFailure(selectedQualIntegrity, "required canonical body does not match its header or commitments")
+		}
+		return selectedQualParent{}, r.request(r.side.TipHeight)
+	}
+	r.attempt.linking = uint64(len(body))
+	header, _ := consensus.ParseBlockHeaderBytes(tip.header) // A 116-byte header always decodes.
+	return selectedQualParent{hash: r.side.TipHash, height: r.side.TipHeight, f: r.side.F, work: [40]byte(tip.link[64:104]), header: header, selected: true}, nil
 }
 
 // admitted orders the fresh qualification's consumers: candidate owner, the re-proved expected tip, K23 against the
@@ -314,7 +349,8 @@ func (r *selectedRetention) admitted(qual selectedSideQualification, parent sele
 }
 
 // route sends a selected candidate to its transition: N1 without a side, the separate replacement for a winning
-// canonical-parent child, the separate rolling preparation for a full side. Other appends are not owned here yet.
+// canonical-parent child, the separate rolling preparation for a count-1440 side, N2 for an exact-tip child of a full
+// side below 1440 rows (F+count = tip, C1439 included). The cleaned one-slot append is not owned here yet.
 func (r *selectedRetention) route(qual selectedSideQualification, parent selectedQualParent) (mdbx.Batch, error) {
 	switch {
 	case r.side == nil:
@@ -323,8 +359,10 @@ func (r *selectedRetention) route(qual selectedSideQualification, parent selecte
 		return mdbx.Batch{}, r.attempt.decide(selectedQualBranch, "REPLACE", "OLD")
 	case r.side.RowCount == 1440:
 		return mdbx.Batch{}, r.attempt.decide(selectedQualBranch, "PREPARE_ROLLING", "OLD")
+	case r.side.TipHeight-uint64(r.side.RowCount) != r.side.F:
+		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append belongs to a later transition")
 	}
-	return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append belongs to a later transition")
+	return r.n2(qual)
 }
 
 // create is N1's admission tail in the fixed order: descriptor busy, the SIDE wait, the checked generation sequence
@@ -339,24 +377,45 @@ func (r *selectedRetention) create(qual selectedSideQualification) (mdbx.Batch, 
 		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side creation waits for its SIDE cleanup")
 	case a.NextGenerationID == math.MaxUint64:
 		return mdbx.Batch{}, errors.New("selected side generation sequence is exhausted")
-	case !selectedRetainFits(uint64(len(r.attempt.raw))):
+	case !selectedRetainFits(uint64(len(r.attempt.raw)), 0):
 		return mdbx.Batch{}, r.attempt.decide(selectedRetainCapacity, "", "OLD")
 	}
-	return r.n1(qual)
+	g := r.authority.NextGenerationID
+	return r.write(qual, g+1, mdbx.SelectedSideV1{
+		GenerationID: g, F: qual.ParentHeight, TipHeight: qual.Height, TipHash: qual.Summary.BlockHash, CumulativeChainwork: qual.Work, RowCount: 1,
+		LogicalBytes: uint64(len(r.attempt.raw)),
+	})
 }
 
-// selectedRetainFits is the checked N1 write preflight max(Qqual(n)+2048, 3n+L+7223040+E) <= G: L is 0 for the
-// canonical parent, and 3n covers both body paths. An absent body holds the caller's raw candidate, the Batch body
+// n2 appends the exact-tip child to a full side below 1440 rows: g, F and next stay (no identity is allocated, so an
+// exhausted sequence still appends), the tip advances and count and logical bytes grow by one row and n. A legal full
+// side excludes a detached suffix and a pending SIDE, so its admission tail is the step-10 preflight alone. The legal
+// descriptor bounds LogicalBytes by 1439*M, so adding n<=M cannot wrap; the written authority is still validated.
+func (r *selectedRetention) n2(qual selectedSideQualification) (mdbx.Batch, error) {
+	n := uint64(len(r.attempt.raw))
+	if !selectedRetainFits(n, r.attempt.linking) {
+		return mdbx.Batch{}, r.attempt.decide(selectedRetainCapacity, "", "OLD")
+	}
+	side := *r.side
+	side.TipHeight, side.TipHash, side.CumulativeChainwork = qual.Height, qual.Summary.BlockHash, qual.Work
+	side.RowCount, side.LogicalBytes = side.RowCount+1, side.LogicalBytes+n
+	return r.write(qual, r.authority.NextGenerationID, side)
+}
+
+// selectedRetainFits is the checked write preflight max(Qqual(n)+2048, 3n+L+7223040+E) <= G: L is 0 for the canonical
+// parent and the successfully checked linking body length (still live as Update's native consulted OLD image) for an
+// exact-tip parent, and 3n covers both body paths. An absent body holds the caller's raw candidate, the Batch body
 // literal clone and its Update-owned clone. A byte-identical present body holds the caller's raw candidate, the
 // GetOptionalSide Go body copy and Update's native consulted OLD body image, and is reused with no body mutation. The
 // Qqual term always fits (see the compile-time bound above).
-func selectedRetainFits(n uint64) bool {
-	return 3*n+selectedRetainWorkspace+selectedRetainExtra <= mdbx.MaxOperationDataBytes
+func selectedRetainFits(n, l uint64) bool {
+	return 3*n+l+selectedRetainWorkspace+selectedRetainExtra <= mdbx.MaxOperationDataBytes
 }
 
-// n1 writes the one-row side g=next at F+1 with next checked-incremented once; the expected header and body are
-// inserted when absent and reused when byte-identical. Every other authority field and every span stay unchanged.
-func (r *selectedRetention) n1(qual selectedSideQualification) (mdbx.Batch, error) {
+// write is the shared N1/N2 effect: the expected header and body are inserted when absent and reused when
+// byte-identical, the authority takes next and side and every other field and span stay unchanged, and SideLink
+// (side g, new tip) is inserted.
+func (r *selectedRetention) write(qual selectedSideQualification, next uint64, side mdbx.SelectedSideV1) (mdbx.Batch, error) {
 	raw, hash := r.attempt.raw, qual.Summary.BlockHash
 	header, err := r.expected(3, hash, raw[:consensus.BLOCK_HEADER_BYTES])
 	if err != nil {
@@ -366,19 +425,16 @@ func (r *selectedRetention) n1(qual selectedSideQualification) (mdbx.Batch, erro
 	if err != nil {
 		return mdbx.Batch{}, err
 	}
-	a, g := r.authority, r.authority.NextGenerationID
-	a.NextGenerationID = g + 1
-	a.SelectedSide = &mdbx.SelectedSideV1{
-		GenerationID: g, F: qual.ParentHeight, TipHeight: qual.Height, TipHash: hash, CumulativeChainwork: qual.Work, RowCount: 1, LogicalBytes: uint64(len(raw)),
-	}
+	a := r.authority
+	a.NextGenerationID, a.SelectedSide = next, &side
 	if err := mdbx.ValidateStorageAuthorityV1(a); err != nil {
-		return mdbx.Batch{}, fmt.Errorf("selected side creation produced illegal authority: %w", err)
+		return mdbx.Batch{}, fmt.Errorf("selected side write produced illegal authority: %w", err)
 	}
 	encoded, err := a.Encode()
 	if err != nil {
 		return mdbx.Batch{}, r.attempt.decide(selectedRetainCapacity, "", "OLD")
 	}
-	key, _ := mdbx.HeightKey(g, qual.Height) // g > active >= 1.
+	key, _ := mdbx.HeightKey(side.GenerationID, qual.Height) // A legal selected generation is nonzero.
 	dbis := mdbx.SchemaV2DBIs()
 	mutations := []mdbx.Mutation{{DBI: dbis[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded}}
 	mutations = append(append(mutations, header...), body...)

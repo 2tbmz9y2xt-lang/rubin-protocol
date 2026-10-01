@@ -306,6 +306,46 @@ func (w *ssqWorld) expectN1(raw []byte, a mdbx.StorageAuthorityV1, g, f uint64, 
 	w.literal(6, ssqMust(mdbx.HeightKey(g, f+1)), mdbx.ChainValue(hash, w.canonical[f], work), false)
 }
 
+// expectN2 records the literal N2 effect over the tracked pre-state authority a: the caller's literal side (g, F and
+// next unchanged) and the inserted candidate header, body and SideLink(g, side tip) naming parent.
+func (w *ssqWorld) expectN2(raw []byte, a mdbx.StorageAuthorityV1, side mdbx.SelectedSideV1, parent [32]byte) {
+	w.t.Helper()
+	hash := ssqHash(raw)
+	w.absent = slices.DeleteFunc(w.absent, func(h [32]byte) bool { return h == hash })
+	a.SelectedSide = &side
+	w.authorityMutation(a)
+	w.literal(3, bytes.Clone(hash[:]), raw[:consensus.BLOCK_HEADER_BYTES], false)
+	w.literal(4, bytes.Clone(hash[:]), bytes.Clone(raw), false)
+	w.literal(6, ssqMust(mdbx.HeightKey(side.GenerationID, side.TipHeight)), mdbx.ChainValue(hash, parent, side.CumulativeChainwork), false)
+}
+
+// tracked decodes the tracked (committed) authority row, the independent pre-state snapshot of an effect.
+func (w *ssqWorld) tracked() mdbx.StorageAuthorityV1 {
+	w.t.Helper()
+	a, err := mdbx.DecodeStorageAuthorityV1(w.rows[string([]byte{0, 2})].value)
+	if err != nil {
+		w.t.Fatalf("authority decode: %v", err)
+	}
+	return a
+}
+
+// persisted decodes the authority actually committed in the Store.
+func (w *ssqWorld) persisted() mdbx.StorageAuthorityV1 {
+	w.t.Helper()
+	var a mdbx.StorageAuthorityV1
+	err := w.store.View(func(r *mdbx.Reader) error {
+		value, _, err := r.Get(ssqDBIs[0], []byte{2})
+		if err == nil {
+			a, err = mdbx.DecodeStorageAuthorityV1(value)
+		}
+		return err
+	})
+	if err != nil {
+		w.t.Fatalf("persisted authority: %v", err)
+	}
+	return a
+}
+
 // wantN1Image proves the tracked image and that the candidate's compact undo manifest stayed absent.
 func (w *ssqWorld) wantN1Image(label string, raw []byte) {
 	w.t.Helper()
@@ -546,13 +586,60 @@ func TestSelectedSideRetention(t *testing.T) {
 		out := w.retain(w.child(w.side[1_440], 1_441, nil), w.tipAt(2))
 		retainWant(t, "no early append/PREPARE_ROLLING", out, ssqBranch, "PREPARE_ROLLING", "OLD", old, pre, true)
 		w.wantImage("full side unchanged")
-		// Below full (count 1), the selected exact-tip child (work 8 over side 7) that does not win K23 (canonical tip
-		// work 11) is the N2 append owned by a later commit; at this commit it is refused as typed branch_data, unwritten.
-		w = newRetainWorld(t, ssqSpec{tip: 10})
-		w.retainSide(5, 6, 1, 7, false)
-		out = w.retain(w.child(w.side[6], 7, nil), w.tipAt(10))
-		retainWantRefusal(t, "pending N2 append refused unwritten", out, ssqBranch, "selected side append belongs to a later transition")
-		w.wantImage("side below full unchanged")
+		// The cleaned one-slot shape (F0, C1441 >= 1440, count 1439, history rows 1..2 header-only) is the later RA
+		// append: its selected exact-tip child is refused as typed branch_data, never appended as N2.
+		w = newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+		w.retainSide(0, 1_441, 1_439, 1_442, true)
+		out = w.retain(w.child(w.side[1_441], 1_442, nil), w.tipAt(2))
+		retainWantRefusal(t, "one-slot append stays a later transition", out, ssqBranch, "selected side append belongs to a later transition")
+		w.wantImage("one-slot side unchanged")
+	})
+	for _, next := range []uint64{7, math.MaxUint64} {
+		t.Run(fmt.Sprintf("A3a-next%d", next), func(t *testing.T) {
+			// count1, F5, g5, next: a mined side tip at 6 planted with g5 link keys; the exact-tip child (work 8) neither
+			// wins K23 (canonical tip work 11) nor loses selection (side 7). No identity is allocated, even when exhausted.
+			w := newRetainWorld(t, ssqSpec{tip: 10, authority: func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID = next }})
+			tip := w.mined(w.canonical[5], 113)
+			hash := ssqHash(tip)
+			a := w.authorityValue()
+			a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 5, F: 5, TipHeight: 6, TipHash: hash, CumulativeChainwork: ssqWork(7), RowCount: 1, LogicalBytes: uint64(len(tip))}
+			w.apply([]mdbx.Mutation{
+				w.literal(3, bytes.Clone(hash[:]), tip[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), tip, false),
+				w.literal(6, ssqMust(mdbx.HeightKey(5, 6)), mdbx.ChainValue(hash, w.canonical[5], ssqWork(7)), false), w.authorityMutation(a),
+			})
+			prior := w.tracked()
+			raw := w.child(hash, 7, nil)
+			retainWant(t, "clean N2 STORED_NONCANONICAL/not-applicable", w.retain(raw, w.tipAt(10)), retainStored, "", retainNA, newT, crossed, true)
+			if got := w.persisted(); got.NextGenerationID != next || got.SelectedSide == nil || got.SelectedSide.GenerationID != 5 || got.SelectedSide.F != 5 {
+				t.Fatalf("append generation/next preserved: %+v", got)
+			}
+			side := mdbx.SelectedSideV1{GenerationID: 5, F: 5, TipHeight: 7, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(8), RowCount: 2, LogicalBytes: uint64(len(tip) + len(raw))}
+			w.expectN2(raw, prior, side, hash)
+			w.wantN1Image("N2 exact append image", raw)
+			w.reopen()
+			w.wantN1Image("N2 persisted image after reopen", raw)
+			out := w.retain(w.child(w.canonical[4], 5, nil), w.tipAt(10))
+			retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+			retainWantEngine(t, "unverified owner after N2", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+			w.wantImage("unverified owner refusal after N2")
+		})
+	}
+	t.Run("A3b", func(t *testing.T) {
+		// F0/C1439/count1439 is the full form: its exact-tip child at 1440 appends to physical 1..1440, count 1440, with
+		// NONE/STABLE and no SIDE. The planted logical bytes are the actual retained body total.
+		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+		blocks := w.retainSide(0, 1_439, 1_439, 1_440, false)
+		var total uint64
+		for j := uint64(1); j <= 1_439; j++ {
+			total += uint64(len(blocks[j]))
+		}
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = total })
+		prior := w.tracked()
+		raw := w.child(w.side[1_439], 1_440, nil)
+		retainWant(t, "clean C1439 append", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_440, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_441), RowCount: 1_440, LogicalBytes: total + uint64(len(raw))}
+		w.expectN2(raw, prior, side, w.side[1_439])
+		w.wantN1Image("ordinary 1439 append image", raw)
 	})
 	t.Run("R-i", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10})
@@ -872,6 +959,31 @@ func TestSelectedSideRetention(t *testing.T) {
 		retainWant(t, "largest fitting candidate commits N1", w.retain(raw, w.tipAt(10)), retainStored, "", retainNA, newT, crossed, true)
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
 		w.wantN1Image("large N1 image", raw)
+	})
+	// N2 charges the exact checked linking body L: 3n+L+7223040+6422528 <= 154611151. n=46988527 (3n=140965581) fits
+	// N1 but refuses here for the side tip body L >= 3; n=floor((140965583-L)/3) commits.
+	t.Run("H11-L", func(t *testing.T) {
+		for _, fits := range []bool{false, true} {
+			w := newRetainWorld(t, ssqSpec{tip: 10})
+			blocks := w.retainSide(5, 6, 1, 7, false)
+			l := len(blocks[6])
+			n := 46_988_527
+			if fits {
+				n = (140_965_583 - l) / 3
+			}
+			raw := retainLarge(t, w.side[6], w.ts(w.side[6])+120, n)
+			if !fits {
+				w.absent = append(w.absent, ssqHash(raw))
+				retainWant(t, "linking length L charged/refusal", w.retain(raw, w.tipAt(10)), retainCapacity, "", "OLD", old, pre, true)
+				w.wantImage("L refusal before any expected-row read")
+				continue
+			}
+			prior := w.tracked()
+			retainWant(t, "largest fitting N2 candidate with L commits", w.retain(raw, w.tipAt(10)), retainStored, "", retainNA, newT, crossed, true)
+			side := mdbx.SelectedSideV1{GenerationID: 2, F: 5, TipHeight: 7, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(8), RowCount: 2, LogicalBytes: 1_000 + uint64(n)}
+			w.expectN2(raw, prior, side, w.side[6])
+			w.wantN1Image("large N2 image", raw)
+		}
 	})
 	for _, c := range []struct {
 		name, result string
