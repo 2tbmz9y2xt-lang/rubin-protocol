@@ -518,6 +518,15 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
 		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "side-less plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
 	})
+	t.Run("plan-rolling-request", func(t *testing.T) {
+		// A legal side below 1440 rows is the exact request refusal before any artifact read: zero plan, no read class.
+		w := newSideWorld(t, sideFullSpec)
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
+		w.wantImage("non-full rolling plan writes nothing", w.authority, false)
+	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own
 		// occurrence; a mismatched code binds nothing; definitely-precommit maps a non-terminal cause to precommit.

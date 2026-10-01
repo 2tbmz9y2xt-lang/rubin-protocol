@@ -486,11 +486,11 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cgo-only dormant selected-side qualifier and retention files are the two default files a no-cgo build does
-	// not select.
+	// The cgo-only dormant selected-side qualifier, retention and rolling files are the three default files a no-cgo
+	// build does not select.
 	wantGoFiles := 67
 	if build.Default.CgoEnabled {
-		wantGoFiles = 69
+		wantGoFiles = 70
 	}
 	if len(defaultPkg.GoFiles) != wantGoFiles || slices.Contains(defaultPkg.GoFiles, tagged) || !slices.Contains(defaultPkg.IgnoredGoFiles, tagged) {
 		t.Fatalf("default build selects %d files, tagged file selected=%v", len(defaultPkg.GoFiles), slices.Contains(defaultPkg.GoFiles, tagged))
@@ -505,11 +505,11 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	// and no selected no-cgo source declares an owned package-level API name (a finite name-absence observation only).
 	cgoEnabled := build.Default.CgoEnabled
 	owned := map[string][]string{
-		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go"},
+		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go", "selected_side_rolling_mdbx_cgo.go", "selected_side_rolling_mdbx_cgo_test.go", "selected_side_rolling_mdbx_fixture_cgo_test.go"},
 		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go"},
 		"../internal/mdbx": {"mdbx_cgo.go", "mdbx_fixture_cgo.go", "mdbx_cgo_test.go", "mdbx_fixture_cgo_test.go"},
 	}
-	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true}
+	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true, "PrepareSelectedSideRollingMDBX": true, "PlanSelectedSideRollingMDBX": true}
 	for _, tags := range [][]string{nil, {"rubin_mdbx_fixture"}} {
 		noCgo := build.Default
 		noCgo.CgoEnabled, noCgo.BuildTags = false, tags
