@@ -568,12 +568,14 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		plan, err := rollPlan(w)
 		var engine *mdbx.EngineError
 		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
-		// Positive oldest damage with an incomplete clear (later link absent): stronger integrity, zero plan, no flag.
+		// Positively absent optional oldest body, then an absent required SideLink(2,first+1) in the complete transfer:
+		// the required read's integrity error, zero Mutations and Consulted, no flag, its failed-read branch_data class.
 		w = newSideWorld(t, rollSpec)
 		w.removeBody(2)
-		w.removeLink(700)
+		w.removeLink(3)
 		plan, err = rollPlan(w)
-		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && !plan.PositiveDamageClear && plan.Batch.Mutations == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
+			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
 	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own

@@ -217,7 +217,8 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		ssqWantNative(t, "sentinel abort", first.Err, ssqAbortEIO)
 		next := w.prepareSide(raw, w.tipAt(10))
 		retainWant(t, "empty invocation fields/raw cached tuple", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
-		if next.Err != first.Err { //nolint:errorlint // A consumed Store returns its exact terminal error.
+		// Mutual errors.Is over an acyclic error tree holds only for the identical error value.
+		if next.Err == nil || !errors.Is(next.Err, first.Err) || !errors.Is(first.Err, next.Err) {
 			t.Fatalf("empty invocation fields/raw cached tuple: error %v, want %v", next.Err, first.Err)
 		}
 		w.wantImage("cached next call persisted image")
@@ -343,16 +344,20 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		})
 	}
 	t.Run("H6a-RP-incomplete", func(t *testing.T) {
-		// Positive oldest damage whose complete clear cannot be planned (a later leaving SideLink is absent: required
-		// integrity) is not a positive clear: zero plan, the stronger integrity result, OLD and no write.
+		// Positively absent optional oldest body, then the complete transfer meets an absent required SideLink(2,first+1):
+		// canonical integrity from that required read, OLD/Prewrite, no native write or commit, the damaged pre-state
+		// unchanged and the grant released (operate). A flag-only change on this error path is not observable here.
 		w, raw := rollFixtureWorld(t)
-		oldest := w.side[1]
-		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(oldest[:])), w.absentRow(6, ssqMust(mdbx.HeightKey(2, 700)))})
+		bodyKey, linkKey := w.sideKey(1), ssqMust(mdbx.HeightKey(2, 2))
+		w.apply([]mdbx.Mutation{w.absentRow(4, bodyKey), w.absentRow(6, linkKey)})
 		out, evidence := w.armedPrepare(mdbx.SelectedDamageProbeOnly, 0, nil, raw)
-		retainWant(t, "incomplete plan/stronger error is not positive clear", out, ssqIntegrity, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
-		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+		retainWantIntegrity(t, "incomplete plan/stronger error is not positive clear", out, "selected side link is absent")
+		ssqWantNative(t, "incomplete plan raw cause", out.Err, ssqNative{"get", mdbx.EngineIntegrity, -30_793})
+		if evidence.BeginOld != 1 || evidence.BeginWrite != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
 			t.Fatalf("incomplete plan wrote: %+v", evidence)
 		}
-		w.wantImage("incomplete plan keeps OLD")
+		w.wantImage("incomplete plan keeps the damaged OLD image")
+		w.wantAbsent("oldest body still absent", 4, bodyKey)
+		w.wantAbsent("first+1 link still absent", 6, linkKey)
 	})
 }
