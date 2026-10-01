@@ -568,6 +568,42 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 			m[1].DBI.Rank == 3 && bytes.Equal(m[1].Key, oldest[:]) && m[1].AfterKind == mdbx.AfterAbsent && len(plan.Batch.Consulted) > 0, "healthy rolling plan %+v (%v)", plan, err)
 		w.wantImage("healthy rolling plan writes nothing", w.authority, false)
 	})
+	t.Run("plan-rolling-invariant", func(t *testing.T) {
+		// Legal descriptor LogicalBytes 1440 (validator: RowCount <= bytes <= RowCount*M) with a healthy oldest body of
+		// its actual length: the rolled count 1439 would hold 1440-len(body) < 1439 bytes, an illegal authority, so the
+		// plan is the local invariant with no Batch, no flag and no read class.
+		w := newSideWorld(t, rollSpec)
+		body := uint64(len(w.bodies[w.sideAt[2]]))
+		logicalMDBXAssert(t, body > 1 && body <= 1_440, "oldest body length %d outside the planted domain", body)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = 1_440 })
+		plan, err, viewErr := rollPlan(w)
+		var failure *selectedSideFailure
+		logicalMDBXAssert(t, viewErr == nil && errors.As(err, &failure) && failure.result == selectedSideInvariant && failure.cause.Error() == "selected side plan produced illegal authority" &&
+			plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "illegal rolled authority plan %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("illegal rolled authority plan writes nothing", w.authority, false)
+	})
+	t.Run("plan-rolling-other-span", func(t *testing.T) {
+		// An unrelated pending GENERATION span (obsolete g3, next 4, PRUNE_GC) stays first; SIDE(2,2,2,2) follows it.
+		w := newSideWorld(t, rollSpec)
+		a, derr := mdbx.DecodeStorageAuthorityV1(w.authority)
+		logicalMDBXAssert(t, derr == nil, "decode: %v", derr)
+		a.NextGenerationID, a.Phase = 4, mdbx.StoragePhasePruneGCV1
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}}}
+		pre, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil && mdbx.ValidateStorageAuthorityV1(a) == nil, "GENERATION pre-state: %v", eerr)
+		w.authority = pre
+		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: pre})
+		plan, err, viewErr := rollPlan(w)
+		side := *a.SelectedSide
+		side.RowCount, side.LogicalBytes = 1_439, 1_440*266-uint64(len(w.bodies[w.sideAt[2]]))
+		a.SelectedSide = &side
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 2, LastHeight: 2, NextHeight: 2}}}
+		want, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil, "encode: %v", eerr)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, viewErr == nil && err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 2 && bytes.Equal(m[0].Literal, want), "other-span rolling plan %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("other-span rolling plan writes nothing", w.authority, false)
+	})
 	t.Run("plan-rolling-positive", func(t *testing.T) {
 		w := newSideWorld(t, rollSpec)
 		w.removeBody(2)

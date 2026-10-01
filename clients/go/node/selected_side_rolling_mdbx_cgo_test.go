@@ -150,6 +150,18 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.wantCleared("positive oldest damage clear", 1, 1_440)
 		w.wantIncomingAbsent("R-m", raw)
 	})
+	t.Run("R-planner-error", func(t *testing.T) {
+		// The oldest required SideLink(2,1) is absent: the qualifier (tip link, linking body, context) does not read it,
+		// the planner's required read fails, and Prepare keeps that recorded canonical integrity with OLD/Prewrite, no
+		// write and the grant released (operate); the image is unchanged except that link stays absent.
+		w, raw := rollWorld(t)
+		link := ssqMust(mdbx.HeightKey(2, 1))
+		w.apply([]mdbx.Mutation{w.absentRow(6, link)})
+		retainWantIntegrity(t, "planner required link integrity", w.prepareSide(raw, w.tipAt(2)), "selected side link is absent")
+		w.wantImage("planner error keeps OLD")
+		w.wantAbsent("oldest link still absent", 6, link)
+		w.wantIncomingAbsent("R-planner-error", raw)
+	})
 	t.Run("R-f", func(t *testing.T) {
 		// Cleaned one-slot F0/C1441/count1439: Prepare refuses with no second SIDE or automatic RA.
 		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
