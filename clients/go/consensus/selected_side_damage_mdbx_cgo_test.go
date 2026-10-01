@@ -536,16 +536,24 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 	})
 	// Full side 2..1441/F1 (count 1440, 266 logical bytes per row, mined rows unowned): the planner's own fields.
 	rollSpec := sideWorldSpec{f: 1, tip: 1_441, rows: 1_440, canonicalTip: 1}
-	rollPlan := func(w *sideWorld) (SelectedSidePlanV1, error) {
+	// rollPlan runs the planner in one View and returns the View's own error too: Store.View returns the Reader's
+	// recorded required-read failure even when the callback returns nil (readPrimary in internal/mdbx/mdbx_cgo.go).
+	rollPlan := func(w *sideWorld) (SelectedSidePlanV1, error, error) {
 		var plan SelectedSidePlanV1
 		var err error
 		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
-		logicalMDBXAssert(t, viewErr == nil, "rolling plan view: %v", viewErr)
-		return plan, err
+		return plan, err, viewErr
+	}
+	// rollRecorded requires the View error to carry the identical recorded EngineError the planner returned.
+	rollRecorded := func(t *testing.T, viewErr error, engine *mdbx.EngineError, label string) {
+		t.Helper()
+		var recorded *mdbx.EngineError
+		logicalMDBXAssert(t, engine != nil && errors.As(viewErr, &recorded) && recorded == engine, "%s: View lost the recorded failure: %v", label, viewErr)
 	}
 	t.Run("plan-rolling-healthy", func(t *testing.T) {
 		w := newSideWorld(t, rollSpec)
-		plan, err := rollPlan(w)
+		plan, err, viewErr := rollPlan(w)
+		logicalMDBXAssert(t, viewErr == nil, "healthy rolling plan view: %v", viewErr)
 		oldest := w.sideAt[2]
 		a, derr := mdbx.DecodeStorageAuthorityV1(w.authority)
 		logicalMDBXAssert(t, derr == nil, "decode: %v", derr)
@@ -563,7 +571,8 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 	t.Run("plan-rolling-positive", func(t *testing.T) {
 		w := newSideWorld(t, rollSpec)
 		w.removeBody(2)
-		plan, err := rollPlan(w)
+		plan, err, viewErr := rollPlan(w)
+		logicalMDBXAssert(t, viewErr == nil, "positive rolling plan view: %v", viewErr)
 		m := plan.Batch.Mutations
 		logicalMDBXAssert(t, err == nil && plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 1+1_440 && bytes.Equal(m[0].Literal, w.clearedAuthority()), "positive rolling plan flag/clear %+v (%v)", plan.PositiveDamageClear, err)
 	})
@@ -571,17 +580,23 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		// A missing oldest required link: zero plan, no positive flag, the failed read keeps its branch_data class.
 		w := newSideWorld(t, rollSpec)
 		w.removeLink(2)
-		plan, err := rollPlan(w)
+		plan, err, viewErr := rollPlan(w)
 		var engine *mdbx.EngineError
-		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
+			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
+		rollRecorded(t, viewErr, engine, "missing oldest link")
+		w.wantImage("missing oldest link plan writes nothing", w.authority, false)
 		// Positively absent optional oldest body, then an absent required SideLink(2,first+1) in the complete transfer:
 		// the required read's integrity error, zero Mutations and Consulted, no flag, its failed-read branch_data class.
 		w = newSideWorld(t, rollSpec)
 		w.removeBody(2)
 		w.removeLink(3)
-		plan, err = rollPlan(w)
+		plan, err, viewErr = rollPlan(w)
+		engine = nil
 		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
 			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
+		rollRecorded(t, viewErr, engine, "incomplete plan")
+		w.wantImage("incomplete plan writes nothing", w.authority, false)
 	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own

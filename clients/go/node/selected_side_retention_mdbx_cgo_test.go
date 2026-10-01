@@ -226,12 +226,15 @@ func retainCoinbase(commitment [32]byte) []byte {
 	return consensus.AppendCompactSize(consensus.AppendCompactSize(consensus.AppendU32le(b, 0), 0), 0)
 }
 
-// retainLarge builds a valid n-byte block over parent: header, 3-byte count, 105-byte coinbase, then input-free
-// 65565..100020-byte txs with one unknown-suite witness each (within MAX_WITNESS_BYTES_PER_TX, weight size+121).
+// retainLarge builds a valid n-byte block over parent: header, the minimal CompactSize tx count (1 byte while
+// count+1 <= 0xfc, else 3 bytes), 105-byte coinbase, then input-free 65565..100020-byte txs with one unknown-suite
+// witness each (within MAX_WITNESS_BYTES_PER_TX, weight size+121).
 func retainLarge(t *testing.T, parent [32]byte, timestamp uint64, n int) []byte {
 	t.Helper()
-	rem := n - consensus.BLOCK_HEADER_BYTES - 3 - 105
-	count := (rem + 100_019) / 100_020
+	rem, count := retainLargeSplit(n, 1)
+	if count+1 > 0xfc {
+		rem, count = retainLargeSplit(n, 3)
+	}
 	txs, txids, wtxids := make([][]byte, 0, count), make([][32]byte, 1, count+1), make([][32]byte, 1, count+1)
 	for i := 0; i < count; i++ {
 		size := rem / count
@@ -261,7 +264,7 @@ func retainLarge(t *testing.T, parent [32]byte, timestamp uint64, n int) []byte 
 		t.Fatalf("merkle root: %v", err)
 	}
 	block := append(make([]byte, 0, n), ssqHeader(parent, root, timestamp, consensus.POW_LIMIT, 0)...)
-	block = append(consensus.AppendCompactSize(block, uint64(count+1)), coinbase...) //nolint:gosec // count+1 > 252.
+	block = append(consensus.AppendCompactSize(block, uint64(count+1)), coinbase...) //nolint:gosec // count+1 > 0.
 	for _, tx := range txs {
 		block = append(block, tx...)
 	}
@@ -269,6 +272,13 @@ func retainLarge(t *testing.T, parent [32]byte, timestamp uint64, n int) []byte 
 		t.Fatalf("large block is %d bytes, want %d", len(block), n)
 	}
 	return block
+}
+
+// retainLargeSplit is the tx byte remainder and tx count of an n-byte retainLarge block whose count field is width
+// bytes; each tx then holds at most 100020 bytes.
+func retainLargeSplit(n, width int) (int, int) {
+	rem := n - consensus.BLOCK_HEADER_BYTES - width - 105
+	return rem, (rem + 100_019) / 100_020
 }
 
 // retain invokes the real entrypoint once and proves the caller's raw bytes and locator unchanged and the lane released.
