@@ -555,13 +555,18 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		}
 	})
 	t.Run("H7b-unowned", func(t *testing.T) {
-		w, raw, _ := n1(t)
-		hash := ssqHash(raw)
-		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(raw), false)})
-		w.absent = nil
-		retainWantRefusal(t, "terminal/no differing overwrite", w.retain(raw, w.tipAt(10)), ssqIntegrity, "unowned expected selected side row differs from the candidate")
-		w.wantImage("differing body kept")
-		w.wantAbsent("candidate header not written", 3, bytes.Clone(hash[:]))
+		for _, selected := range []bool{false, true} {
+			w, raw, _ := n1(t)
+			if selected {
+				w, raw, _, _ = n2(t) // N2: count-1 side, no earlier link and a tip hash other than the candidate's.
+			}
+			hash := ssqHash(raw)
+			w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(raw), false)})
+			w.absent = nil
+			retainWantRefusal(t, "terminal/no differing overwrite", w.retain(raw, w.tipAt(10)), ssqIntegrity, "unowned expected selected side row differs from the candidate")
+			w.wantImage("differing body kept")
+			w.wantAbsent("candidate header not written", 3, bytes.Clone(hash[:]))
+		}
 	})
 	t.Run("R-l", func(t *testing.T) {
 		// H4d: a denied full-lane charge ends in the control-only Update before any candidate read, so the capacity refusal
