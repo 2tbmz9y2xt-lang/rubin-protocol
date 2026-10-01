@@ -224,7 +224,10 @@ func TestSelectedSideRolling(t *testing.T) {
 		w, raw := raWorld(t)
 		tip := w.side[1_441]
 		bad := retainMerkle(w.rows[string(append([]byte{4}, tip[:]...))].value)
-		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), bad, true)})
+		// Update admits a rank-4 literal only with BeforePresent false: delete the healthy body, then insert the bad one,
+		// as the retention linking-commitment setups do.
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), bad, false)})
 		w.absent = append(w.absent, ssqHash(raw))
 		retainWant(t, "current damaged linking row cannot authorize append/exact image", w.retain(raw, w.tipAt(2)), retainCleared, "", retainNA, newT, crossed, true)
 		w.wantCleared("RA damaged linking body complete clear", 3, 1_441)
