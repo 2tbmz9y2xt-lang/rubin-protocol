@@ -87,9 +87,11 @@ func newRetainWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 		block := w.mined(prev, 120)
 		h := ssqHash(block)
 		w.canonical[k] = h
-		groups = append(groups, []mdbx.Mutation{w.literal(3, bytes.Clone(h[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(h[:]), block, false),
+		groups = append(groups, []mdbx.Mutation{
+			w.literal(3, bytes.Clone(h[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(h[:]), block, false),
 			w.literal(2, ssqMust(mdbx.HeightKey(1, k)), mdbx.ChainValue(h, prev, w.spec.work(k)), false),
-			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, h)), mdbx.CanonicalOwnerValue(k), false)})
+			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, h)), mdbx.CanonicalOwnerValue(k), false),
+		})
 	}
 	w.apply(append(groups, []mdbx.Mutation{w.authorityMutation(w.authorityValue())})...)
 	return w
