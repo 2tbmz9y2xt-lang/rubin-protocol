@@ -377,8 +377,9 @@ func (w *ssqWorld) wantAbsent(label string, rank uint8, key []byte) {
 	}
 }
 
-// wantCleared proves the literal complete positive-damage clear of side(2,first..tip) from the pre-side authority: no
-// selected side, PRUNE_GC and SIDE(2,first,tip,first); every leaving header except kept is absent, bodies and links stay.
+// wantCleared proves the literal complete clear of side(2,first..tip), healthy (N3) or positive-damage, from the pre-side
+// authority: no selected side, PRUNE_GC and SIDE(2,first,tip,first); every leaving header except kept is absent, bodies
+// and links stay.
 func (w *ssqWorld) wantCleared(label string, first, tip uint64, kept ...uint64) {
 	w.t.Helper()
 	a := w.authorityValue()
@@ -1084,9 +1085,9 @@ func TestSelectedSideRetention(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 20})
 		retainWantRefusal(t, "Replace without a side", w.replaceSide(w.child(w.canonical[17], 18, nil), w.tipAt(20)), ssqBranch, wrong)
 		w.wantImage("no-side Replace unchanged")
-		w.retainSide(10, 15, 5, 16, false)
+		blocks := w.retainSide(10, 15, 5, 16, false)
 		retainWantRefusal(t, "Replace of an exact-tip child", w.replaceSide(w.child(w.side[15], 16, nil), w.tipAt(20)), ssqBranch, wrong)
-		retainWantRefusal(t, "Replace has no duplicate scan", w.replaceSide(w.child(w.side[13], 14, nil), w.tipAt(20)), ssqBranch, "candidate parent is neither an active canonical block nor the selected tip")
+		retainWantRefusal(t, "Replace has no duplicate scan", w.replaceSide(blocks[14], w.tipAt(20)), ssqBranch, "candidate parent is neither an active canonical block nor the selected tip")
 		retainWantRefusal(t, "Replace control precedes the raw bound", w.replaceSide(make([]byte, mdbx.MaxBlockBytes+1), nil), ssqBranch, "candidate block exceeds MaxBlockBytes")
 		w.wantImage("wrong-leaf Replace unchanged")
 	})
@@ -1103,14 +1104,14 @@ func TestSelectedSideRetention(t *testing.T) {
 			w.wantImage("Replace first row unchanged")
 		}
 	})
-	// N3 preflight 2n+7223040+(1048576+2097152+131072)+8388608 <= 154611151: n=67861351 clears, 67861352 refuses.
+	// N3 preflight 2n+7223040+(1048576+2097152+2048+131072)+8388608 <= 154611151: n=67860327 clears, 67860328 refuses.
 	t.Run("H11-clear", func(t *testing.T) {
-		for _, n := range []int{67_861_352, 67_861_351} {
+		for _, n := range []int{67_860_328, 67_860_327} {
 			w := newRetainWorld(t, ssqSpec{tip: 20})
 			w.retainSide(10, 15, 5, 16, false)
 			raw := retainLarge(t, w.canonical[17], w.ts(w.canonical[17])+120, n)
 			w.absent = append(w.absent, ssqHash(raw))
-			if n == 67_861_352 {
+			if n == 67_860_328 {
 				retainWant(t, "N3 clear preflight refusal", w.replaceSide(raw, w.tipAt(20)), retainCapacity, "", "OLD", old, pre, true)
 				w.wantImage("preflight refusal before planner reads")
 				continue

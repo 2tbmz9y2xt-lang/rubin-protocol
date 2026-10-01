@@ -42,9 +42,10 @@ const (
 	// bytes of fixed keys, header/link literals, mutation arrays and control structs.
 	selectedRetainExtra uint64 = 4*mdbx.MaxMetadataBytes + 2*selectedQualIdentities*64 + 131_072
 	// selectedRetainClear is Pclear, the planner's whole charge (transfer arrays, keys, headers, owners, authority images,
-	// Batch and native OLD); selectedRetainOutside is N3's Eoutside, charged beside it once.
+	// Batch and native OLD); selectedRetainOutside is N3's Eoutside, charged beside it once: this attempt's decoded
+	// authority, the Update-cloned union, the candidate-owner and expected-tip allowance and fixed bookkeeping.
 	selectedRetainClear   uint64 = 8_388_608
-	selectedRetainOutside uint64 = mdbx.MaxMetadataBytes + 2*selectedQualIdentities*64 + 131_072
+	selectedRetainOutside uint64 = mdbx.MaxMetadataBytes + 2*selectedQualIdentities*64 + selectedRetainOwnerTip + 131_072
 )
 
 // Qqual(n)+2048 and the matched-duplicate envelope n+M+7223040+262144 fit G for every admitted n<=M, so neither is a
@@ -393,7 +394,8 @@ func (r *selectedRetention) route(qual selectedSideQualification, parent selecte
 // replace is N3: a winning canonical-parent child beside a live side clears that side, in this Reader, through the
 // consensus clear planner; the candidate is never stored and no generation is allocated. No side or an exact-tip child is
 // typed branch_data. The conservative preflight 2n+W+Eoutside+Pclear <= G (L is 0 for a canonical parent) precedes every
-// planner read and allocation; Eoutside is this attempt's decoded authority, the Update-cloned union and fixed state.
+// planner read and allocation; Eoutside is this attempt's decoded authority, the Update-cloned union, the owner/tip
+// allowance and fixed state.
 func (r *selectedRetention) replace(parent selectedQualParent) (mdbx.Batch, error) {
 	switch {
 	case r.side == nil || parent.selected:

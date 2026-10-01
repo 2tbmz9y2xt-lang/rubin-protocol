@@ -14,7 +14,9 @@ import (
 
 // Dormant one-height selected-side damage handling (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.3, 6.4.1.5, 6.4.1.6 and
 // 6.4.1.9). selectedSideDamageMDBX has no active or public caller; its sole non-test caller is the dormant recheck
-// adapter RecheckSelectedSideMDBX, and its direct tests remain. Each valid-owner invocation performs one outer full-lane
+// adapter RecheckSelectedSideMDBX, and its direct tests remain. The non-damage PlanSelectedSideClearMDBX reuses the same
+// evidence/transfer owner inside the caller's Reader for the node's N3 ReplaceSelectedSideMDBX, which owns that grant,
+// Update and projection. Each valid-owner damage invocation performs one outer full-lane
 // reservation attempt and exactly one Store.Update, and reports its logical classification beside the unmodified raw
 // tuple. No ChainState latch, publication or wakeup is performed here; those consumers belong to later runtime owners.
 
