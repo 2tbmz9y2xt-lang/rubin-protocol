@@ -834,8 +834,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw := n3(t)
 		out, evidence, err := n3Replace(w, raw, mdbx.SelectedDamageProbeOnly, 0, nil)
 		retainWant(t, "probed healthy N3 clear", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, true)
-		// Probes at write begin, commit and twice around the OLD abort, all denied; the five unkept headers are deleted.
-		if err != nil || evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.Deletes != 5 {
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Native deletes: one authority overwrite
+		// deletion plus five unkept header deletions.
+		if err != nil || evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.Deletes != 6 {
 			t.Fatalf("N3 grant lifetime: %v %+v", err, evidence)
 		}
 		w.wantCleared("probed N3 clear", 11, 15)
