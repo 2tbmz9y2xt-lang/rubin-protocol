@@ -346,9 +346,10 @@ func (r *selectedRetention) create(qual selectedSideQualification) (mdbx.Batch, 
 }
 
 // selectedRetainFits is the checked N1 write preflight max(Qqual(n)+2048, 3n+L+7223040+E) <= G: L is 0 for the
-// canonical parent, and 3n is the caller's raw candidate, the Batch body literal clone and its Update-owned clone on the
-// absent-body insert path; a byte-identical present body is compared and reused with no body mutation or further copy,
-// so 3n covers it conservatively. The Qqual term always fits (see the compile-time bound above).
+// canonical parent, and 3n covers both body paths. An absent body holds the caller's raw candidate, the Batch body
+// literal clone and its Update-owned clone. A byte-identical present body holds the caller's raw candidate, the
+// GetOptionalSide Go body copy and Update's native consulted OLD body image, and is reused with no body mutation. The
+// Qqual term always fits (see the compile-time bound above).
 func selectedRetainFits(n uint64) bool {
 	return 3*n+selectedRetainWorkspace+selectedRetainExtra <= mdbx.MaxOperationDataBytes
 }
