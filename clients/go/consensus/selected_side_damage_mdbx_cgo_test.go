@@ -498,6 +498,11 @@ func TestSelectedSideDamageFullClear(t *testing.T) {
 				case "work mismatch":
 					w.relink(h, [32]byte(w.links[h][32:64]), sideWorldWork(h+7))
 				}
+				if h == w.spec.tip && (damage == "header parent mismatch" || damage == "link parent mismatch") {
+					// The reblocked tip row has a new hash: the descriptor names it so the current-tip identity predicate
+					// passes and the seeded parent relation stays the diagnosed damage.
+					w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.TipHash = w.sideAt[h] })
+				}
 				sideWantCleared(t, w, w.run(h), damage)
 			})
 		}

@@ -486,10 +486,11 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The cgo-only dormant selected-side qualifier is the one default file a no-cgo build does not select.
+	// The cgo-only dormant selected-side qualifier and retention files are the two default files a no-cgo build does
+	// not select.
 	wantGoFiles := 67
 	if build.Default.CgoEnabled {
-		wantGoFiles = 68
+		wantGoFiles = 69
 	}
 	if len(defaultPkg.GoFiles) != wantGoFiles || slices.Contains(defaultPkg.GoFiles, tagged) || !slices.Contains(defaultPkg.IgnoredGoFiles, tagged) {
 		t.Fatalf("default build selects %d files, tagged file selected=%v", len(defaultPkg.GoFiles), slices.Contains(defaultPkg.GoFiles, tagged))

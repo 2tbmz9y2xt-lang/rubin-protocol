@@ -296,8 +296,11 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		retainWant(t, "definite precommit write", out, retainPrecommit, "", "OLD", old, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, false)
 		ssqWantNative(t, "H8a-delete", out.Err, ssqNative{"update", mdbx.EngineIO, 5})
 		// First attempt: the OLD read and its abort. Recheck: one later read-only begin, one write begin, one faulted
-		// delete, no commit and so no readback.
-		if evidence.BeginOld != 1 || evidence.OldAborts != 1 || evidence.BeginRead != 1 || evidence.BeginWrite != 1 || evidence.Deletes != 1 || evidence.Commits != 0 || evidence.Faults != 1 {
+		// delete, no commit and so no readback. The fixture keeps the first OLD transaction pointer until disarm, so the
+		// recheck's separate read-only transaction may reuse that address and count its abort as an OLD abort too:
+		// A is 1..2, and each counted abort adds two probes to the recheck's read-begin and write-begin probes.
+		if evidence.BeginOld != 1 || evidence.BeginRead != 1 || evidence.BeginWrite != 1 || evidence.Deletes != 1 || evidence.Commits != 0 || evidence.Faults != 1 ||
+			evidence.OldAborts < 1 || evidence.OldAborts > 2 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
 			t.Fatalf("H8a-delete evidence %+v", evidence)
 		}
 		w.wantImage("precommit keeps OLD")
@@ -609,9 +612,11 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 			t.Fatalf("second locator cause %v", out.Err)
 		}
 		// Three read-only Updates: the first attempt's OLD, then the recheck and the retry (counted as later read-only
-		// begins); every probe is inside one of the three separately released grants.
-		if evidence.BeginOld != 1 || evidence.BeginRead != 2 || evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.OldAborts != 1 ||
-			evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 {
+		// begins); every probe is inside one of the three separately released grants. The fixture keeps the first OLD
+		// transaction pointer until disarm, so a later read-only transaction reusing that address also counts its abort:
+		// A is 1..3 and each counted abort adds two probes to the two read-begin probes, all denied.
+		if evidence.BeginOld != 1 || evidence.BeginRead != 2 || evidence.BeginWrite != 0 || evidence.Deletes != 0 || evidence.Commits != 0 || evidence.Faults != 0 ||
+			evidence.OldAborts < 1 || evidence.OldAborts > 3 || evidence.Probes != 2+2*evidence.OldAborts || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
 			t.Fatalf("recheck between released grants/no nested operation: %+v", evidence)
 		}
 		w.wantImage("bounded retry left the image unchanged")
