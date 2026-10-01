@@ -471,6 +471,15 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
 		var engine *mdbx.EngineError
 		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed plan %+v (%v)", plan, err)
+		// Leaving row 3 names the canonical-owned block 0 whose required header is gone: the required Get succeeds and the
+		// owned defect follows, so the zero plan carries no read class.
+		w = newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, override: map[uint64]uint64{3: 0}})
+		w.removeHeader(w.canonical[0])
+		_ = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
+		var failure *selectedSideFailure
+		logicalMDBXAssert(t, errors.As(err, &failure) && failure.result == selectedSideIntegrity && failure.cause.Error() == "required canonical row is absent or does not hash to its key" &&
+			plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "owned defect plan %+v (%v)", plan, err)
+		w.wantImage("owned defect plan writes nothing", w.authority, false)
 	})
 	t.Run("H10-stale", func(t *testing.T) {
 		w := newSideWorld(t, sideFullSpec)
