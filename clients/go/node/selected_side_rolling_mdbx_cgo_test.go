@@ -76,7 +76,10 @@ func rfWorld(t *testing.T, tip, f, first, gap uint64, cand func(w *ssqWorld, pre
 		}
 		hash := ssqHash(block)
 		w.side[j] = hash
-		rows = append(rows, w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false))
+		// An already committed identical header (a canonical candidate) is reused, never reinserted (NOOVERWRITE).
+		if _, tracked := w.rows[string(append([]byte{3}, hash[:]...))]; !tracked {
+			rows = append(rows, w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false))
+		}
 		switch {
 		case j == first-1:
 			raw = block
@@ -85,6 +88,15 @@ func rfWorld(t *testing.T, tip, f, first, gap uint64, cand func(w *ssqWorld, pre
 			rows = append(rows, w.literal(4, bytes.Clone(hash[:]), block, false), w.literal(6, ssqMust(mdbx.HeightKey(2, j)), mdbx.ChainValue(hash, prev, rfWork(cumulative)), false))
 		}
 		prev = hash
+	}
+	// History rows f+1..first-1 (the candidate included) are header-present/body-absent: child()/childAt() listed their
+	// hashes in the combined header+body absence domain, so they leave it and the body absence becomes a tracked row.
+	for j := f + 1; j < first; j++ {
+		hash := w.side[j]
+		w.absent = slices.DeleteFunc(w.absent, func(h [32]byte) bool { return h == hash })
+		if _, tracked := w.rows[string(append([]byte{4}, hash[:]...))]; !tracked {
+			w.rows[string(append([]byte{4}, hash[:]...))] = ssqRow{rank: 4, key: bytes.Clone(hash[:])}
+		}
 	}
 	a := w.authorityValue()
 	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 2, F: f, TipHeight: last, TipHash: prev, CumulativeChainwork: rfWork(cumulative), RowCount: 1_439, LogicalBytes: total}
@@ -361,6 +373,51 @@ func TestSelectedSideRolling(t *testing.T) {
 		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
 		refilled(t, w, raw, 3, w.side[1], ssqWork(3), "A7b")
 	})
+	// RF owner corrections on the A7b shape (X1 = unowned sibling of canonical 1 over canonical 0, candidate B2, first
+	// B3 naming B2, SideLink(2,2) absent). Each refusal is typed branch_data/OLD/Prewrite, empty Decision, no write,
+	// image unchanged and the grant released (operate); the accepted A7b is the control pair.
+	rfRefused := func(t *testing.T, w *ssqWorld, raw []byte, cause, label string) {
+		t.Helper()
+		retainWantRefusal(t, label, w.refill(raw), ssqBranch, cause)
+		w.wantImage(label + ": image unchanged")
+		w.wantAbsent(label+": no refill link", 6, ssqMust(mdbx.HeightKey(2, 2)))
+	}
+	t.Run("RF-anchor-F", func(t *testing.T) {
+		// Same physical history with the descriptor F moved 0 -> 1 (legal one-slot: C 1440, count 1439): the candidate's
+		// parent X1 sits at F but is unowned, so it is not the canonical anchor; refused before context and steps.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.F = 1 })
+		rfRefused(t, w, raw, "selected side anchor is not the canonical block at F", "unowned parent at F is not the anchor")
+	})
+	for _, c := range []struct {
+		name  string
+		first uint64
+	}{{"RF-implied-parent-zero", 2}, {"RF-first-work-zero", 1}} {
+		t.Run(c.name, func(t *testing.T) {
+			// First link work literal 2: the restored candidate work 2-1 = 1 passes the first subtraction, context and
+			// steps 1-12 pass, and the unowned parent's implied work 1-1 = 0 is refused. Literal 1 is refused earlier
+			// by the first subtraction (restored work 0).
+			w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+			w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 3)), mdbx.ChainValue(w.side[3], w.side[2], ssqWork(c.first)), true)})
+			rfRefused(t, w, raw, "selected side refill work underflows", c.name)
+		})
+	}
+	t.Run("RF-candidate-canonical", func(t *testing.T) {
+		// The candidate is the complete canonical block 1 over canonical 0 (its header and body already committed and
+		// reused, not reinserted); the cleaned side 2..1440/F0 starts with a row naming it. Qualification restores work
+		// 2 and passes; the same-Reader candidate owner is Owned, so RF is the clean canonical no-op with no mutation:
+		// canonical header/body/index/undo, the descriptor, every link and the absent SideLink(2,1) stay.
+		w, raw := rfWorld(t, 2, 0, 2, 113, func(w *ssqWorld, prev [32]byte) []byte {
+			hash := w.canonical[1]
+			return w.rows[string(append([]byte{4}, hash[:]...))].value
+		})
+		if ssqHash(raw) != w.canonical[1] || [32]byte(w.headers[w.side[2]][4:36]) != w.canonical[1] {
+			t.Fatal("RF-candidate-canonical fixture: candidate is not the canonical block 1 named by the first row")
+		}
+		retainWant(t, "candidate Owned clean KNOWN_BLOCK_NOOP(CANONICAL)", w.refill(raw), retainKnown, "", retainNA, old, pre, true)
+		w.wantImage("canonical-known refill leaves every row")
+		w.wantAbsent("canonical-known no refill link", 6, ssqMust(mdbx.HeightKey(2, 1)))
+	})
 	// A7c-mtp: history 1..11 are expected children; the candidate at 12 is built at an explicit timestamp against the
 	// median of its 11 ancestors read straight from their header bytes (rfTimes, not the child() path). median+1 is
 	// accepted; the exact median is BLOCK_ERR_TIMESTAMP_OLD at steps 1-12 with OLD and no effect, although the first
@@ -381,7 +438,6 @@ func TestSelectedSideRolling(t *testing.T) {
 		if [32]byte(w.headers[w.side[13]][4:36]) != ssqHash(raw) {
 			t.Fatal("A7c-mtp-median fixture: first retained header does not name the candidate")
 		}
-		w.absent = append(w.absent, ssqHash(raw))
 		retainWantConsensus(t, "exact median timestamp refused", w.refill(raw), consensus.BLOCK_ERR_TIMESTAMP_OLD)
 		w.wantImage("A7c-mtp-median unchanged")
 		w.wantAbsent("A7c-mtp-median no refill link", 6, ssqMust(mdbx.HeightKey(2, 12)))
@@ -413,7 +469,6 @@ func TestSelectedSideRolling(t *testing.T) {
 		if [32]byte(w.headers[w.side[10_081]][4:36]) != ssqHash(raw) {
 			t.Fatal("A7c-retarget-wrong fixture: first retained header does not name the candidate")
 		}
-		w.absent = append(w.absent, ssqHash(raw))
 		retainWantConsensus(t, "default target instead of current retarget refused", w.refill(raw), consensus.BLOCK_ERR_TARGET_INVALID)
 		w.wantImage("A7c-retarget-wrong unchanged")
 	})
@@ -469,7 +524,6 @@ func TestSelectedSideRolling(t *testing.T) {
 		bad := retainMerkle(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value)
 		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
 		w.apply([]mdbx.Mutation{w.literal(4, w.sideKey(3), bad, false)})
-		w.absent = append(w.absent, ssqHash(raw))
 		retainWant(t, "current damaged first row cannot authorize refill", w.refill(raw), retainCleared, "", retainNA, newT, crossed, true)
 		w.wantCleared("RF damaged first row complete clear", 3, 1_441)
 	})

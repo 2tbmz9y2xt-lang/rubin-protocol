@@ -252,6 +252,9 @@ func (q *selectedSideQualifier) refillParent(hash [32]byte, height uint64) (sele
 		return selectedQualParent{}, selectedQualFailure(selectedQualBranch, "refill parent is canonical at another height")
 	case raw == nil:
 		return selectedQualParent{}, selectedQualFailure(selectedQualBranch, "selected side refill parent history is unavailable")
+	case height == q.side.F && !owner.Owned:
+		// The parent occupies the ancestry's slot 0, which never reaches anchorHeader: at F it must be the Owned anchor.
+		return selectedQualParent{}, selectedQualFailure(selectedQualBranch, "selected side anchor is not the canonical block at F")
 	}
 	header, _ := consensus.ParseBlockHeaderBytes(raw) // A 116-byte header always decodes.
 	parent := selectedQualParent{hash: hash, height: height, f: q.side.F, header: header}
@@ -288,10 +291,13 @@ func (q *selectedSideQualifier) refillChild(raw []byte, header consensus.BlockHe
 }
 
 // selectedRefillRecurrence requires an Owned parent's verified work plus the candidate's block work to equal the
-// restored link work; an unowned historical parent carries no verified work (anchor recurrence only).
+// restored link work. An unowned historical parent has no independently verified cumulative work: the restored work is
+// anchored only on the retained first link, so the parent's implied work (restored minus the candidate's block work)
+// must merely stay positive, as every real chainwork is; no full historical work equality is claimed.
 func selectedRefillRecurrence(parent selectedQualParent, target [32]byte, work [40]byte) error {
 	if parent.work == ([40]byte{}) {
-		return nil
+		_, err := selectedRefillWork(work, target)
+		return err
 	}
 	block, err := consensus.WorkFromTarget(target)
 	if err != nil {
