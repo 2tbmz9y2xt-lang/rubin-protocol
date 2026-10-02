@@ -54,15 +54,18 @@ const (
 // runtime refusal; a violation does not compile.
 const _ = mdbx.MaxOperationDataBytes - (2*mdbx.MaxBlockBytes + selectedRetainWorkspace + 262_144 + selectedRetainOwnerTip)
 
-// selectedSideMode is the invocation's fixed transition owner: Retain, the separate N3 Replace or the separate RP
-// preparation. Only Retain owns the duplicate fallback, the admitted first-row probe and the stored N1/N2 result.
+// selectedSideMode is the invocation's fixed transition owner: Retain (N1/N2/RA and routing), the separate RF refill,
+// the separate N3 Replace or the separate RP preparation. Only Retain owns the duplicate fallback and the admitted
+// first-row probe. The modes whose clean crossed NEW is a stored noncanonical row (Retain, Refill) come first, so
+// that projection is the single ordered test mode <= selectedRefillMode; the zero mode is Retain. Every other use
+// compares for equality.
 type selectedSideMode uint8
 
 const (
 	selectedRetainMode selectedSideMode = iota
+	selectedRefillMode
 	selectedReplaceMode
 	selectedPrepareMode
-	selectedRefillMode
 )
 
 // selectedRetainResults is the finite set of qualifier refusal results one attempt may bind for classification.
@@ -279,7 +282,7 @@ func (a *selectedRetainAttempt) project(out SelectedSideMutationOutcome) (Select
 	case !a.ran:
 		return out, nil
 	case out.Stage == mdbx.UpdateStageCommitMayHaveCrossed:
-		return selectedRetainCrossed(out, a.mode == selectedRetainMode || a.mode == selectedRefillMode, a.positive), nil
+		return selectedRetainCrossed(out, a.mode <= selectedRefillMode, a.positive), nil
 	case out.Truth != mdbx.CommitTruthOld || out.Stage != mdbx.UpdateStagePrewrite:
 	case out.Err == a.sentinel: //nolint:errorlint // Only the exact sentinel with no cleanup cause is clean.
 		out.Result, out.Decision, out.CanonicalTruth, out.Err = a.result, a.decision, a.canonical, nil
