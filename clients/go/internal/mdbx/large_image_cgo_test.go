@@ -154,18 +154,92 @@ func largeTestCounts(t *testing.T) {
 
 func largeTestOverlay(t *testing.T) {
 	store, _, _ := consultedStore(t)
-	hash, body := largeBodyLiteral(8, 116)
+	hash, body := largeBodyLiteral(8, 131_073)
+	wantBody := bytes.Clone(body)
 	selector := LargeImageSelectorV1{Kind: 1, Hash: hash}
 	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[4], Key: hash[:], AfterKind: AfterKind(2), Literal: body}}, LargeConsulted: []LargeImageSelectorV1{selector}})
-	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterKind(1)}}, LargeConsulted: []LargeImageSelectorV1{selector}})
 	largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{selector}})
+	consultedRequireImage(t, store, readDBIsLiteral()[4], hash[:], wantBody, true, "selected body retained through counter update")
+	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[4], Key: hash[:], BeforePresent: true, AfterKind: AfterKind(1)}}, LargeConsulted: []LargeImageSelectorV1{selector}})
+	largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 2)}, LargeConsulted: []LargeImageSelectorV1{selector}})
 	consultedRequireImage(t, store, readDBIsLiteral()[4], hash[:], nil, false, "selected body deletion")
+	dbis := readDBIsLiteral()
 	manifestKey := append(make([]byte, 32), 0)
 	manifest := make([]byte, 33)
-	manifest[0] = 1
+	manifest[0], manifest[28], manifest[32] = 1, 2, 2
 	family := LargeImageSelectorV1{Kind: 2}
-	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: manifestKey, AfterKind: AfterKind(2), Literal: manifest}}, LargeConsulted: []LargeImageSelectorV1{family}})
-	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[5], Key: manifestKey, BeforePresent: true, AfterKind: AfterKind(1)}}, LargeConsulted: []LargeImageSelectorV1{family}})
+	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: dbis[5], Key: manifestKey, AfterKind: AfterKind(2), Literal: bytes.Clone(manifest)}}, LargeConsulted: []LargeImageSelectorV1{family}})
+	sourceA, entryA := reverseLiteralKeys(1, [32]byte{}, [32]byte{0xff}, 0, 0, 0)
+	sourceB, entryB := reverseLiteralKeys(1, [32]byte{}, [32]byte{0x80}, 1, 0, 0)
+	valueA, valueB := [20]byte{0x31}, [20]byte{0x72}
+	largeCommit(t, store, Batch{Mutations: []Mutation{
+		{DBI: dbis[1], Key: sourceB, AfterKind: AfterKind(2), Literal: bytes.Clone(valueB[:])},
+		{DBI: dbis[1], Key: sourceA, AfterKind: AfterKind(2), Literal: bytes.Clone(valueA[:])},
+	}})
+	laterKey := make([]byte, 33)
+	laterKey[0] = 1
+	laterManifest := bytes.Clone(manifest)
+	laterManifest[8] = 9
+	largeCommit(t, store, Batch{Mutations: []Mutation{
+		{DBI: dbis[1], Key: sourceB, BeforePresent: true, AfterKind: AfterKind(1)},
+		{DBI: dbis[1], Key: sourceA, BeforePresent: true, AfterKind: AfterKind(1)},
+		{DBI: dbis[5], Key: entryA, AfterKind: AfterKind(3), RefDBI: dbis[1], RefKey: sourceA},
+		{DBI: dbis[5], Key: entryB, AfterKind: AfterKind(3), RefDBI: dbis[1], RefKey: sourceB},
+		{DBI: dbis[5], Key: laterKey, AfterKind: AfterKind(2), Literal: bytes.Clone(laterManifest)},
+	}, LargeConsulted: []LargeImageSelectorV1{family}})
+	for _, phase := range []struct {
+		name      string
+		reverse   bool
+		mutations []Mutation
+		keys      [][]byte
+		values    [][]byte
+	}{
+		{"retained family", false, []Mutation{consultedCounter(t, 3)}, [][]byte{manifestKey, entryA, entryB}, [][]byte{manifest, valueA[:], valueB[:]}},
+		{"manifest deletion", false, []Mutation{{DBI: dbis[5], Key: manifestKey, BeforePresent: true, AfterKind: AfterKind(1)}}, [][]byte{entryA, entryB}, [][]byte{valueA[:], valueB[:]}},
+		{"targeted reference source", true, []Mutation{
+			{DBI: dbis[1], Key: sourceA, AfterKind: AfterKind(3), RefDBI: dbis[5], RefKey: entryA},
+			{DBI: dbis[5], Key: entryA, BeforePresent: true, AfterKind: AfterKind(1)},
+		}, [][]byte{entryB}, [][]byte{valueB[:]}},
+	} {
+		largeCommit(t, store, Batch{Reverse: phase.reverse, Mutations: phase.mutations, LargeConsulted: []LargeImageSelectorV1{family}})
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			for _, application := range []error{errors.New("large family application"), nil} {
+				seen := 0
+				var previous LargeImageRowV1
+				err := reader.VisitLargeImageV1(family, func(row LargeImageRowV1) error {
+					if seen >= len(phase.keys) || !bytes.Equal(row.Key(), phase.keys[seen]) {
+						t.Fatalf("%s physical order at %d: %x", phase.name, seen, row.Key())
+					}
+					if seen != 0 {
+						n, expired := previous.ReadAt(nil, 0)
+						if n != 0 {
+							t.Fatal("prior family row copied bytes")
+						}
+						largeRequireError(t, expired, "InvalidInput", 22, "large image row is not active")
+					}
+					largeWindow(t, row, phase.values[seen], true)
+					previous = row
+					seen++
+					return application
+				})
+				wantCount := len(phase.keys)
+				if application != nil {
+					wantCount = 1
+				}
+				if !sameError(err, application) || seen != wantCount {
+					t.Fatalf("%s visitor outcome: %d/%v want %d/%v", phase.name, seen, err, wantCount, application)
+				}
+				n, expired := previous.ReadAt(nil, 0)
+				if n != 0 {
+					t.Fatal("completed family row copied bytes")
+				}
+				largeRequireError(t, expired, "InvalidInput", 22, "large image row is not active")
+			}
+			return nil
+		}))
+		consultedRequireImage(t, store, dbis[5], laterKey, laterManifest, true, "later prefix preserved outside selected family")
+	}
+	consultedRequireImage(t, store, dbis[1], sourceA, valueA[:], true, "selected targeted source restored exact OLD bytes")
 }
 
 func largeTestWindows(t *testing.T) {
