@@ -457,8 +457,10 @@ func TestSelectedSideRolling(t *testing.T) {
 		}
 		if owned {
 			first := w.side[3]
-			groups = append(groups, []mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(first, cand, ssqWork(13)), false),
-				w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, first)), mdbx.CanonicalOwnerValue(12), false)})
+			groups = append(groups, []mdbx.Mutation{
+				w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(first, cand, ssqWork(13)), false),
+				w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, first)), mdbx.CanonicalOwnerValue(12), false),
+			})
 		}
 		w.apply(groups...)
 		w.setSide(func(s *mdbx.SelectedSideV1) { s.TipHash, s.LogicalBytes = prev, total })
