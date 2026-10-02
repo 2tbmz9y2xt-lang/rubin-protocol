@@ -352,11 +352,13 @@ func TestSelectedSideRolling(t *testing.T) {
 		}
 		w.expectRefilled(raw, prior, first, parent, work)
 		w.wantN1Image(label+": restored link literal work/forward recurrence", raw)
-		// A9: reopen proves the byte-identical persisted image only; the next RF reaching CanonicalOwner on the
-		// unverified handle is the direct get EINVAL with empty fields, no effect and a released grant (operate).
+		// A9: reopen proves the byte-identical persisted image only. A second RF would stop at its full-side domain
+		// before any owner read, so the next operation is Retain of the same raw under the literal canonical tip: its
+		// parent evidence reads the keyed CanonicalOwner first, the direct get EINVAL on the unverified handle, with
+		// empty fields, no effect and a released grant (operate).
 		w.reopen()
 		w.wantN1Image(label+": persisted image after reopen", raw)
-		out := w.refill(raw)
+		out := w.retain(raw, w.tipAt(uint64(len(w.canonical)-1)))
 		retainWant(t, label+": unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
 		retainWantEngine(t, label+": unverified owner after RF", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
 		w.wantN1Image(label+": unverified owner refusal leaves the image", raw)
