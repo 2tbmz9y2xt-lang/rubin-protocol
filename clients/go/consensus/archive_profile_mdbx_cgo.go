@@ -26,7 +26,20 @@ const (
 	archiveSelectedSideWrongLeaf = "archive selected side wrong leaf"
 	// archiveSelectedSideProblem is MDBX_PROBLEM (third_party/libmdbx/mdbx.h), the existing wrong-leaf update API code.
 	archiveSelectedSideProblem = -30779
+	// archiveSelectedSideIdentity is the 512-byte identity envelope: the one-row page with its lookahead (two 16-byte
+	// keys and two 104-byte entries, their Go copies and row descriptors), the 8-byte prefix and the two 16-byte g0/g1
+	// keys with their ConsultedRow descriptors.
+	archiveSelectedSideIdentityBytes uint64 = 512
+	// archiveSelectedSideCharge is PROFILE's whole preflighted charge inside its one full-lane grant: the identity
+	// envelope, the finite outer bookkeeping (decoded authority, sentinel, decision, outcome, the appended g0/g1 union
+	// capacity: selectedSideFixedCharge) and Pclear, the clear planner's checked transfer sublimit that already covers
+	// its arrays, keys, headers, owners, authority images and Batch. No qualifier, candidate or body is read.
+	archiveSelectedSideCharge = archiveSelectedSideIdentityBytes + selectedSideFixedCharge + selectedSideTransferBytes
 )
+
+// The whole PROFILE charge fits the full lane held before any page, evidence or planner allocation; a violation does
+// not compile.
+const _ = mdbx.MaxOperationDataBytes - archiveSelectedSideCharge
 
 // SelectArchiveSelectedSideMDBX is the PROFILE-origin selected-side ARCHIVE selection. Clean NEW has an empty Result
 // and CanonicalTruth NEW; a crossed error is TERMINAL_PERSISTENCE(old|new|neither_or_unreadable) with that logical

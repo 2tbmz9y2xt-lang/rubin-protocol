@@ -87,13 +87,24 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		scen mdbx.SelectedDamageScenario
 		rank uint8
 		key  []byte
-	}{{"put", mdbx.SelectedDamagePutEIO, 0, []byte{2}}, {"delete", mdbx.SelectedDamageDeleteEIO, 0, nil}} {
+	}{{"put", mdbx.SelectedDamagePutEIO, 0, []byte{2}}, {"delete", mdbx.SelectedDamageDeleteEIO, 3, nil}} {
 		t.Run(c.name, func(t *testing.T) {
+			// Exact targets: the authority literal put, or the first unkept leaving header delete; reached once, faulted
+			// once, no commit or readback; raw update/IO/5; OLD image and released grant.
 			w := rawSideWorld(t, sideFullSpec)
-			out, evidence := w.armedProfile(t, c.scen, c.rank, c.key)
+			key := c.key
+			if key == nil {
+				hash := w.sideAt[2]
+				key = hash[:]
+			}
+			out, evidence := w.armedProfile(t, c.scen, c.rank, key)
 			sideWantOutcome(t, out, "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, c.name)
+			var engine *mdbx.EngineError
+			logicalMDBXAssert(t, errors.As(out.Err, &engine) && engine.Operation == "update" && engine.Class == mdbx.EngineIO && engine.Code == 5, "%s: raw %v", c.name, out.Err)
 			profileWantNative(t, out.Err, c.name, mdbx.EngineIO)
-			logicalMDBXAssert(t, evidence.BeginWrite == 1 && evidence.Commits == 0, "%s evidence %+v", c.name, evidence)
+			logicalMDBXAssert(t, evidence.BeginWrite == 1 && evidence.Faults == 1 && evidence.Commits == 0 && evidence.BeginRead == 0 && (c.scen != mdbx.SelectedDamageDeleteEIO || evidence.Deletes == 1),
+				"%s exact site evidence %+v", c.name, evidence)
+			sideWantReleased(t, w.owner, c.name)
 			w.wantImage(c.name+": precommit keeps OLD", w.authority, false)
 		})
 	}
@@ -123,6 +134,83 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		w.reopen()
 		w.wantImage("wrong leaf abort keeps OLD", w.authority, false)
 	})
+	// seed writes one malformed-width canonical index row at height h through the existing native seed; a tracked
+	// canonical entry takes the seeded bytes, an untracked height becomes an exact extra row.
+	seed := func(t *testing.T, w *sideWorld, h uint64, value []byte) {
+		t.Helper()
+		key := logicalMDBXMust(mdbx.HeightKey(1, h))
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, key, value) == nil, "seed index height %d", h)
+		if _, tracked := w.entries[h]; tracked {
+			w.entries[h] = value
+			return
+		}
+		w.extra = append(w.extra, sideRawRow{rank: 2, key: key, value: value})
+	}
+	t.Run("R-o2-malformed-index", func(t *testing.T) {
+		// Active ARCHIVE with a selected side and a malformed canonical index row 1: PROFILE_NOOP before any identity read.
+		w := rawSideWorld(t, sideFullSpec)
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.ActiveProfile = mdbx.StorageProfileArchiveV1 })
+		seed(t, w, 1, []byte{1, 2, 3})
+		out := w.profile()
+		sideWantOutcome(t, out, "PROFILE_NOOP", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "noop before malformed index")
+		logicalMDBXAssert(t, out.Err == nil, "noop kept an error: %v", out.Err)
+		w.wantImage("noop image", w.authority, false)
+	})
+	for _, c := range []struct {
+		name   string
+		height uint64
+	}{{"page-first-width", 0}, {"page-lookahead-width", 1}} {
+		t.Run(c.name, func(t *testing.T) {
+			// A malformed first row or lookahead row of the identity page is the Reader's recorded integrity failure.
+			w := rawSideWorld(t, sideFullSpec)
+			seed(t, w, c.height, []byte{1, 2, 3})
+			out := w.profile()
+			sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, c.name)
+			profileWantNative(t, out.Err, c.name, mdbx.EngineIntegrity)
+			w.reopen()
+			w.wantImage(c.name+": image after reopen", w.authority, false)
+		})
+	}
+	t.Run("page-no-third-row", func(t *testing.T) {
+		// A malformed third index row (height 2) is never observed by the one-row page: H>0 PROFILE still commits.
+		w := rawSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1})
+		seed(t, w, 2, []byte{1, 2, 3})
+		out := w.profile()
+		sideWantOutcome(t, out, "", "NEW", mdbx.CommitTruthNew, crossed, "third row unobserved")
+		w.wantImage("third row unobserved image", w.profileAuthority(), true)
+	})
+	t.Run("get-authority-eio", func(t *testing.T) {
+		// The strict authority Get faults: storage_io with the exact get EIO; the recorded failure consumes the Store and
+		// the next call is its cached raw error with empty fields.
+		w := rawSideWorld(t, sideFullSpec)
+		first, evidence := w.armedProfile(t, mdbx.SelectedDamageGetEIO, 0, []byte{2})
+		sideWantOutcome(t, first, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "authority get EIO")
+		profileWantNative(t, first.Err, "authority get EIO", mdbx.EngineIO)
+		logicalMDBXAssert(t, evidence.BeginWrite == 0 && evidence.Commits == 0, "authority get evidence %+v", evidence)
+		next := w.profile()
+		sideWantOutcome(t, next, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "cached after recorded read failure")
+		logicalMDBXAssert(t, errors.Is(next.Err, first.Err) && errors.Is(first.Err, next.Err), "cached raw error %v, want %v", next.Err, first.Err)
+		sideWantReleased(t, w.owner, "cached after read failure")
+		w.reopen()
+		w.wantImage("authority get image", w.authority, false)
+	})
+	for _, c := range []struct {
+		name  string
+		scen  mdbx.SelectedDamageScenario
+		kinds []mdbx.EngineClass
+	}{{"get-link-eio", mdbx.SelectedDamageGetEIO, []mdbx.EngineClass{mdbx.EngineIO}}, {"getabort-link-eio", mdbx.SelectedDamageGetAbortEIO, []mdbx.EngineClass{mdbx.EngineIO, mdbx.EngineIO}}} {
+		t.Run(c.name, func(t *testing.T) {
+			// The clear planner's leaving SideLink(2,2) Get faults: its read class branch_data survives (and the first
+			// typed result survives a following abort EIO); no write.
+			w := rawSideWorld(t, sideFullSpec)
+			out, evidence := w.armedProfile(t, c.scen, 6, logicalMDBXMust(mdbx.HeightKey(2, 2)))
+			sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, c.name)
+			profileWantNative(t, out.Err, c.name, c.kinds...)
+			logicalMDBXAssert(t, evidence.BeginWrite == 0 && evidence.Commits == 0, "%s evidence %+v", c.name, evidence)
+			w.reopen()
+			w.wantImage(c.name+": image after reopen", w.authority, false)
+		})
+	}
 	t.Run("lifetime", func(t *testing.T) {
 		w := rawSideWorld(t, sideFullSpec)
 		out, evidence := w.armedProfile(t, mdbx.SelectedDamageProbeOnly, 0, nil)

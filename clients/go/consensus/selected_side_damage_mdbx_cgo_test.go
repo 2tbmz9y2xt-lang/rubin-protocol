@@ -29,6 +29,25 @@ type sideWorldSpec struct {
 	custom        map[uint64]string
 	canonicalBody map[uint64]string
 	maxExclusion  bool // authority carries an exclusion slot sized so the encoded authority is exactly MaxMetadataBytes
+	// generation and next override the selected generation (default 2) and next identity (default 3); published
+	// commits canonical 0 through the published-genesis owner (header, body, paired index, undo manifest, UTXO, counters).
+	generation, next uint64
+	published        bool
+}
+
+// gen and nextID are the spec's selected generation and next identity with their defaults 2 and 3.
+func (w *sideWorld) gen() uint64 {
+	if w.spec.generation == 0 {
+		return 2
+	}
+	return w.spec.generation
+}
+
+func (w *sideWorld) nextID() uint64 {
+	if w.spec.next == 0 {
+		return 3
+	}
+	return w.spec.next
 }
 
 // sideWorld keeps the independently derived expected bytes of every row the operation may read or write; a nil value
@@ -112,6 +131,9 @@ func newSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	logicalMDBXAssert(t, err == nil, "side world owner: %v", err)
 	truth, _, err := w.store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, w.owner)
 	logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "side world bootstrap: %v/%v", truth, err)
+	if spec.published {
+		genesisMDBXReturned(t, genesisMDBXRun(w.store, w.owner), "ACCEPTED", 2, 3, "side world published genesis")
+	}
 	rows := w.canonicalRows()
 	rows = append(rows, w.sideRows()...)
 	rows = append(rows, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: w.authorityBytes()})
@@ -133,6 +155,11 @@ func (w *sideWorld) canonicalRows() []mdbx.Mutation {
 	var rows []mdbx.Mutation
 	for k := uint64(0); k <= w.spec.canonicalTip; k++ {
 		header, body, hash := w.block(sideWorldBlock(parent, k))
+		if k == 0 && w.spec.published {
+			w.publishedGenesis(hash)
+			parent = hash
+			continue
+		}
 		switch w.spec.canonicalBody[k] {
 		case "valid":
 			rows = append(rows, body)
@@ -151,6 +178,26 @@ func (w *sideWorld) canonicalRows() []mdbx.Mutation {
 		parent = hash
 	}
 	return rows
+}
+
+// publishedGenesis tracks the rows the published-genesis owner committed for canonical 0 (sideWorldBlock(0, 0) is that
+// published block): header, body, paired index and owner, plus its undo manifest, UTXO and counters as exact extra rows
+// (literals of genesisMDBXExpected for generation 1).
+func (w *sideWorld) publishedGenesis(hash [32]byte) {
+	block, _, published := genesisMDBXFixture()
+	logicalMDBXAssert(w.t, hash == published, "side world genesis is not the published block")
+	w.bodies[hash] = block
+	w.entries[0], w.owners[hash] = mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1)), mdbx.CanonicalOwnerValue(0)
+	w.canonical = append(w.canonical, hash)
+	key := binary.BigEndian.AppendUint64(nil, 1)
+	utxoKey := append(append(bytes.Clone(key), genesisMDBXHex("f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f")...), 0, 0, 0, 0)
+	manifest := make([]byte, 33)
+	manifest[0], manifest[28] = 1, 1
+	w.extra = append(w.extra,
+		sideRawRow{rank: 1, key: utxoKey, value: genesisMDBXHex("00407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd7279000000000000000001")},
+		sideRawRow{rank: 0, key: append([]byte{0x10}, key...), value: genesisMDBXHex("00000000000000590000000000000001")},
+		sideRawRow{rank: 5, key: append(hash[:32:32], 0), value: manifest},
+	)
 }
 
 func (w *sideWorld) sideRows() []mdbx.Mutation {
@@ -185,7 +232,7 @@ func (w *sideWorld) sideRows() []mdbx.Mutation {
 func (w *sideWorld) link(j uint64, hash, parent [32]byte, work [40]byte) mdbx.Mutation {
 	value := mdbx.ChainValue(hash, parent, work)
 	w.links[j] = value
-	return mdbx.Mutation{DBI: logicalMDBXDBIs[6], Key: logicalMDBXMust(mdbx.HeightKey(2, j)), AfterKind: mdbx.AfterLiteral, Literal: value}
+	return mdbx.Mutation{DBI: logicalMDBXDBIs[6], Key: logicalMDBXMust(mdbx.HeightKey(w.gen(), j)), AfterKind: mdbx.AfterLiteral, Literal: value}
 }
 
 func (w *sideWorld) promises() (uint64, uint64) {
@@ -198,15 +245,15 @@ func (w *sideWorld) promises() (uint64, uint64) {
 func (w *sideWorld) authorityBytes() []byte {
 	b, u := w.promises()
 	a := mdbx.StorageAuthorityV1{
-		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: w.nextID(),
 		Phase: mdbx.StoragePhaseNoneV1, Lifecycle: mdbx.StorageLifecycleStableV1,
 		SelectedSide: &mdbx.SelectedSideV1{
-			GenerationID: 2, F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
+			GenerationID: w.gen(), F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
 			CumulativeChainwork: sideWorldWork(w.spec.tip + 1), RowCount: w.spec.rows, LogicalBytes: uint64(w.spec.rows) * 266,
 		},
 	}
 	if w.spec.pendingSide {
-		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
+		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: w.gen(), FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
 	}
 	if w.spec.maxExclusion {
 		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte{1}}
@@ -226,12 +273,12 @@ func (w *sideWorld) authorityBytes() []byte {
 // or the extended predecessor singleton keeping its progress first-1.
 func (w *sideWorld) clearedAuthority() []byte {
 	b, u := w.promises()
-	span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: w.first, LastHeight: w.spec.tip, NextHeight: w.first}
+	span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: w.gen(), FirstHeight: w.first, LastHeight: w.spec.tip, NextHeight: w.first}
 	if w.spec.pendingSide {
 		span.FirstHeight, span.NextHeight = w.first-1, w.first-1
 	}
 	a := mdbx.StorageAuthorityV1{
-		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: w.nextID(),
 		Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span}}, ExcludedInvalidBranch: w.exclusion,
 	}
 	encoded, err := a.Encode()
@@ -267,7 +314,7 @@ func (w *sideWorld) removeHeader(hash [32]byte) {
 }
 
 func (w *sideWorld) removeLink(j uint64) {
-	w.remove(6, logicalMDBXMust(mdbx.HeightKey(2, j)))
+	w.remove(6, logicalMDBXMust(mdbx.HeightKey(w.gen(), j)))
 	w.links[j] = nil
 }
 
@@ -338,7 +385,7 @@ func (w *sideWorld) wantImage(label string, authority []byte, cleared bool) {
 	w.t.Helper()
 	w.wantRow(label, 0, []byte{2}, authority)
 	for j, link := range w.links {
-		w.wantRow(label, 6, logicalMDBXMust(mdbx.HeightKey(2, j)), link)
+		w.wantRow(label, 6, logicalMDBXMust(mdbx.HeightKey(w.gen(), j)), link)
 	}
 	for j, hash := range w.sideAt {
 		header := w.headers[hash]

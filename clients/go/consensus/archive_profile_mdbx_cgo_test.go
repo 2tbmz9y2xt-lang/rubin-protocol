@@ -71,16 +71,28 @@ func TestArchiveSelectedSide(t *testing.T) {
 		want := w.profileAuthority()
 		w.wantImage(label+": pending ARCHIVE exact image", want, true)
 		a, err := mdbx.DecodeStorageAuthorityV1(want)
-		logicalMDBXAssert(t, err == nil && a.ActiveProfile == mdbx.StorageProfilePrunedV1 && a.NextGenerationID == 3 && a.Replay == nil && a.ActiveGenerationID == 1,
+		logicalMDBXAssert(t, err == nil && a.ActiveProfile == mdbx.StorageProfilePrunedV1 && a.NextGenerationID == w.nextID() && a.Replay == nil && a.ActiveGenerationID == 1,
 			"%s: no target/id/next preserved: %+v (%v)", label, a, err)
 		sideWantReleased(t, w.owner, label)
 		w.reopen()
 		w.wantImage(label+": persisted image after reopen", want, true)
+		// A9: the next PROFILE on the reopened handle stops at RECOVERY_REQUIRED before any identity or owner read.
+		next := w.profile()
+		sideWantOutcome(t, next, "RECOVERY_REQUIRED", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, label+": next operation after reopen")
+		logicalMDBXAssert(t, next.Err == nil, "%s: next operation kept an error: %v", label, next.Err)
+		w.wantImage(label+": next operation leaves the image", want, true)
+		sideWantReleased(t, w.owner, label+": next operation")
 	}
 	t.Run("A8a", func(t *testing.T) {
-		// NONE/STABLE PRUNED H500 with side 491..495 (F490): SIDE(2,491,495,491), pending ARCHIVE, PRUNE_GC/RECOVERY_REQUIRED;
-		// unkept side headers deleted, bodies/links and every canonical row kept.
-		selected(t, newSideWorld(t, sideWorldSpec{f: 490, tip: 495, rows: 5, canonicalTip: 500}), "A8a")
+		// Published genesis plus canonical 1..500 (H500), side generation 4 rows 491..495 over F490, next 6:
+		// SIDE(4,491,495,491), pending ARCHIVE, PRUNE_GC/RECOVERY_REQUIRED, PRUNED active, next 6, no replay; unkept side
+		// headers deleted, side bodies/links and every canonical row (genesis undo/UTXO/counters included) kept.
+		w := newSideWorld(t, sideWorldSpec{f: 490, tip: 495, rows: 5, canonicalTip: 500, generation: 4, next: 6, published: true})
+		selected(t, w, "A8a")
+		a, err := mdbx.DecodeStorageAuthorityV1(w.profileAuthority())
+		span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 4, FirstHeight: 491, LastHeight: 495, NextHeight: 491}
+		logicalMDBXAssert(t, err == nil && a.NextGenerationID == 6 && a.SelectedSide == nil && len(a.Cleanup.Spans) == 1 && a.Cleanup.Spans[0] == span && *a.PendingTargetProfile == mdbx.StorageProfileArchiveV1,
+			"pending ARCHIVE exact image: %+v (%v)", a, err)
 	})
 	t.Run("A8a-kept", func(t *testing.T) {
 		// Side row 2 names the canonical block at 2 (override): its header is canonically kept, the others deleted.
@@ -159,6 +171,23 @@ func TestArchiveSelectedSide(t *testing.T) {
 		out := w.profile()
 		sideWantCause(t, out, "invalid archive profile genesis work", "first-work integrity")
 		w.wantImage("first-work integrity image", w.authority, false)
+	})
+	t.Run("R-domain-profile-height", func(t *testing.T) {
+		// The genesis index entry removed: the page's first row is height 1, canonical integrity.
+		w := newSideWorld(t, sideFullSpec)
+		w.remove(2, logicalMDBXMust(mdbx.HeightKey(1, 0)))
+		w.entries[0] = nil
+		sideWantCause(t, w.profile(), "archive canonical index does not start at genesis", "first-height integrity")
+		w.wantImage("first-height integrity image", w.authority, false)
+	})
+	t.Run("R-domain-profile-upper-work", func(t *testing.T) {
+		// Genesis work 2^288+2^256-ish (byte 3 = 2) is above the 2^288 domain: canonical integrity.
+		w := newSideWorld(t, sideFullSpec)
+		var work [40]byte
+		work[3] = 2
+		w.setEntry(0, [32]byte{}, work)
+		sideWantCause(t, w.profile(), "invalid archive profile genesis work", "upper-work integrity")
+		w.wantImage("upper-work integrity image", w.authority, false)
 	})
 	t.Run("inputs", func(t *testing.T) {
 		owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
