@@ -114,13 +114,17 @@ func TestArchiveSelectedSide(t *testing.T) {
 		profileWantDecision(t, w, "PROFILE_NOOP", "active ARCHIVE PROFILE_NOOP")
 	})
 	t.Run("R-o3", func(t *testing.T) {
-		// PRUNE_GC/RECOVERY_REQUIRED with a pending ARCHIVE target: RECOVERY_REQUIRED precedes any noop.
-		w := newSideWorld(t, sideWorldSpec{f: 0, tip: 1_440, rows: 1_439, canonicalTip: 1, pendingSide: true})
-		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-			archive := mdbx.StorageProfileArchiveV1
-			a.Lifecycle, a.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &archive
-		})
-		profileWantDecision(t, w, "RECOVERY_REQUIRED", "RECOVERY_REQUIRED precedes noop")
+		// Prepared PRUNE_GC/RECOVERY_REQUIRED with a pending ARCHIVE target, active PRUNED and active ARCHIVE (B/U 0): in
+		// the ARCHIVE prestate both the non-STABLE and the active-ARCHIVE predicates hold, so RECOVERY_REQUIRED must be
+		// checked before the PROFILE_NOOP.
+		for _, active := range []mdbx.StorageProfileV1{mdbx.StorageProfilePrunedV1, mdbx.StorageProfileArchiveV1} {
+			w := newSideWorld(t, sideWorldSpec{f: 0, tip: 1_440, rows: 1_439, canonicalTip: 1, pendingSide: true})
+			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+				archive := mdbx.StorageProfileArchiveV1
+				a.ActiveProfile, a.Lifecycle, a.PendingTargetProfile = active, mdbx.StorageLifecycleRecoveryRequiredV1, &archive
+			})
+			profileWantDecision(t, w, "RECOVERY_REQUIRED", "RECOVERY_REQUIRED precedes noop")
+		}
 	})
 	t.Run("R-o4", func(t *testing.T) {
 		// ORDINARY_APPLY/RECOVERY_REQUIRED: RECOVERY_REQUIRED, never recovery_artifact.
