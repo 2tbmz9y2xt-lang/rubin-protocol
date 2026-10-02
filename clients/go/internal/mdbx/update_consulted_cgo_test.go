@@ -618,15 +618,21 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		require(!strings.Contains(strings.ToLower(updateNativeBody(t, source, name)), "consulted"), "no-write route drifted: "+name)
 	}
 	execute := updateNativeBody(t, source, "updateNativeExecute")
-	ordered(execute, "final verification order drifted", "updateNativePreflight(", "updateNativeDeletes(", "updateNativePuts(", "updateNativeVerify(", "updateNativeConsultedMatch(", "\"final update image mismatch\"", "return updateNativeCommit(")
-	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 6, "updateNativeLargeMatch": 1, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeConsultedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
+	ordered(execute, "final verification order drifted", "updateNativePreflight(", "updateNativeDeletes(", "updateNativePuts(", "updateNativeVerify(", "updateNativeScopedMatch(", "\"final update image mismatch\"", "return updateNativeCommit(")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 5, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeScopedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
+	scoped := updateNativeBody(t, source, "updateNativeScopedMatch")
+	ordered(scoped, "consulted domain comparison order drifted", "updateNativeConsultedMatch(", "if err != nil", "return err", "return updateNativeLargeMatch(")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeScopedMatch"), map[string]int{"updateNativeConsultedMatch": 1, "updateNativeLargeMatch": 1}), "consulted domain call set drifted")
 	preflight := updateNativeBody(t, source, "updateNativePreflight")
-	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeConsultedMatch(", "return references, nil")
+	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeScopedMatch(", "return references, nil")
 	require(!strings.Contains(preflight, "updateNativeConsultedImages("), "consulted capture left the admission owner")
-	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 4, "snapshot diagnostic drifted")
-	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackConsulted(", "if oldImage", "if newImage")
+	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 3 && strings.Contains(scoped, "consulted, diagnostic)") && strings.Contains(scoped, "plan, diagnostic, scopes...)"), "snapshot diagnostic drifted")
+	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackScoped(", "if oldImage", "if newImage")
+	readbackScoped := updateNativeBody(t, source, "updateNativeReadbackScoped")
+	ordered(readbackScoped, "readback consulted domain fold order drifted", "updateNativeReadbackConsulted(", "updateNativeLargeEqual(", "if !residual", "return false, false, nil", "return oldImage, newImage, nil")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeReadbackScoped"), map[string]int{"updateNativeReadbackConsulted": 1, "updateNativeLargeEqual": 1}), "readback consulted domain call set drifted")
 	require(strings.Contains(updateNativeBody(t, source, "updateNativeReadbackConsulted"), "oldImage, newImage = oldImage && equal, newImage && equal"), "readback fold drifted")
-	for _, name := range []string{"updateNativeConsultedImages", "updateNativeConsultedMatch", "updateNativeReadbackConsulted"} {
+	for _, name := range []string{"updateNativeConsultedImages", "updateNativeConsultedMatch", "updateNativeReadbackConsulted", "updateNativeScopedMatch", "updateNativeReadbackScoped"} {
 		body := updateNativeBody(t, source, name)
 		require(!strings.Contains(body, "C.GoBytes") && !strings.Contains(body, "make([]byte") && !strings.Contains(body, "append("), "borrowed consulted bytes were copied: "+name)
 	}

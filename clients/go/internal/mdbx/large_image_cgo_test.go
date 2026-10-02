@@ -15,8 +15,8 @@ import (
 
 func largeRequireError(t *testing.T, err error, class string, code int, diagnostic string) {
 	t.Helper()
-	engine, ok := err.(*EngineError)
-	if !ok || engine == nil || string(engine.Class) != class || engine.Operation != "get" || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
+	var engine *EngineError
+	if !errors.As(err, &engine) || !sameError(err, engine) || engine == nil || string(engine.Class) != class || engine.Operation != "get" || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
 		t.Fatalf("large-image exact error: %#v; want get/%s/%d/%q/nil", err, class, code, diagnostic)
 	}
 }
@@ -48,7 +48,7 @@ func largeWindow(t *testing.T, row LargeImageRowV1, want []byte, present bool) {
 		if count < len(buffer) {
 			wantErr = io.EOF
 		}
-		if n != count || err != wantErr || !bytes.Equal(buffer[:n], want[int(offset):int(offset)+n]) {
+		if n != count || !sameError(err, wantErr) || !bytes.Equal(buffer[:n], want[int(offset):int(offset)+n]) {
 			t.Fatalf("bytes at %d: %d/%v want %d/%v", offset, n, err, count, wantErr)
 		}
 		offset += uint64(n)
@@ -58,7 +58,7 @@ func largeWindow(t *testing.T, row LargeImageRowV1, want []byte, present bool) {
 func TestLargeImageV1(t *testing.T) {
 	for _, row := range []struct {
 		name string
-		run func(*testing.T)
+		run  func(*testing.T)
 	}{
 		{"A1 physical bodies and empty family", largeTestBodies},
 		{"A2 sequential visits and admission bounds", largeTestCounts},
@@ -147,7 +147,7 @@ func largeTestCounts(t *testing.T) {
 				t.Fatalf("count refusal lifecycle: %s/%d/%v/%s", truth, stage, err, store.state)
 			}
 			consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 2).Key, nil, false, "scalar count refusal preserved absent target")
-			consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 1).Key, []byte{0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1}, true, "scalar count refusal preserved existing image")
+			consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 1).Key, []byte{0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1}, true, "scalar count refusal preserved existing image")
 		}
 	}
 }
@@ -181,13 +181,18 @@ func largeTestWindows(t *testing.T) {
 			if !bytes.Equal(row.Key(), hash[:]) {
 				t.Fatal("Key aliases native metadata")
 			}
-			for _, span := range []struct { size int; offset uint64; n int; err error }{
+			for _, span := range []struct {
+				size   int
+				offset uint64
+				n      int
+				err    error
+			}{
 				{0, 0, 0, nil}, {0, math.MaxUint64, 0, nil}, {1, 131_073, 0, io.EOF}, {1, math.MaxUint64, 0, io.EOF},
 				{65_536, 65_536, 65_536, nil}, {2, 131_072, 1, io.EOF},
 			} {
 				dst := make([]byte, span.size)
 				n, err := row.ReadAt(dst, span.offset)
-				if n != span.n || err != span.err || n > 0 && !bytes.Equal(dst[:n], body[int(span.offset):int(span.offset)+n]) {
+				if n != span.n || !sameError(err, span.err) || n > 0 && !bytes.Equal(dst[:n], body[int(span.offset):int(span.offset)+n]) {
 					t.Fatalf("window %d/%d: %d/%v", span.size, span.offset, n, err)
 				}
 			}
@@ -202,7 +207,9 @@ func largeTestWindows(t *testing.T) {
 		}
 		for _, dst := range [][]byte{nil, make([]byte, 65_537)} {
 			n, err := saved.ReadAt(dst, 0)
-			if n != 0 { t.Fatal("expired span copied bytes") }
+			if n != 0 {
+				t.Fatal("expired span copied bytes")
+			}
 			largeRequireError(t, err, "InvalidInput", 22, "large image row is not active")
 		}
 		return nil
@@ -212,13 +219,22 @@ func largeTestWindows(t *testing.T) {
 	} else {
 		largeRequireError(t, err, "InvalidInput", 22, "Reader is not active")
 	}
-	if !saved.Present() || saved.Length() != 131_073 || !bytes.Equal(saved.Key(), hash[:]) { t.Fatal("expiry changed metadata") }
-	expiredKey := saved.Key(); expiredKey[0] ^= 255
-	if !bytes.Equal(saved.Key(), hash[:]) { t.Fatal("Key after expiry aliases immutable metadata") }
+	if !saved.Present() || saved.Length() != 131_073 || !bytes.Equal(saved.Key(), hash[:]) {
+		t.Fatal("expiry changed metadata")
+	}
+	expiredKey := saved.Key()
+	expiredKey[0] ^= 255
+	if !bytes.Equal(saved.Key(), hash[:]) {
+		t.Fatal("Key after expiry aliases immutable metadata")
+	}
 	zero := LargeImageRowV1{}
-	if zero.Key() != nil || zero.Present() || zero.Length() != 0 { t.Fatal("zero metadata") }
+	if zero.Key() != nil || zero.Present() || zero.Length() != 0 {
+		t.Fatal("zero metadata")
+	}
 	n, err := zero.ReadAt(make([]byte, 65_537), math.MaxUint64)
-	if n != 0 { t.Fatal("zero row copied bytes") }
+	if n != 0 {
+		t.Fatal("zero row copied bytes")
+	}
 	largeRequireError(t, err, "InvalidInput", 22, "invalid large image row")
 }
 
@@ -228,30 +244,44 @@ func largeTestAdmission(t *testing.T) {
 		return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}}}, LargeConsulted: make([]LargeImageSelectorV1, 2881)}, nil
 	})
 	requireEnvironmentError(t, err, EngineClass("InvalidInput"), operationUpdate, 22, "invalid Update Batch")
-	if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" { t.Fatal("legacy admission lost priority over large count") }
+	if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" {
+		t.Fatal("legacy admission lost priority over large count")
+	}
 	for _, selectors := range [][]LargeImageSelectorV1{{{Kind: 0}}, {{Kind: 3}}, {{Kind: 2}, {Kind: 1}}, {{Kind: 1}, {Kind: 1}}, {{Kind: 1, Hash: [32]byte{1}}, {Kind: 1}}} {
 		truth, stage, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: selectors}, nil })
 		engine := requireEnvironmentError(t, err, EngineClass("InvalidInput"), operationUpdate, 22, "invalid Update Batch")
-		if truth.String() != "OLD" || int(stage) != 1 || engine.Cause != nil || string(store.state) != "OPEN" { t.Fatal("selector admission disposition") }
+		if truth.String() != "OLD" || int(stage) != 1 || engine.Cause != nil || string(store.state) != "OPEN" {
+			t.Fatal("selector admission disposition")
+		}
 		consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 1).Key, nil, false, "invalid selector refusal preserved absent target")
 	}
 	for _, kind := range []LargeImageKindV1{1, 2} {
 		key := make([]byte, 32)
 		rank := 4
-		if kind == 2 { key = append(key, 0); rank = 5 }
+		if kind == 2 {
+			key = make([]byte, 33)
+			rank = 5
+		}
 		truth, stage, err := store.Update(func(*Reader) (Batch, error) {
 			return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, Consulted: []ConsultedRow{{DBI: readDBIsLiteral()[rank], Key: key}}, LargeConsulted: []LargeImageSelectorV1{{Kind: kind}}}, nil
 		})
 		requireEnvironmentError(t, err, EngineClass("InvalidInput"), operationUpdate, 22, "invalid Update Batch")
-		if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" { t.Fatal("legacy overlap disposition") }
+		if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" {
+			t.Fatal("legacy overlap disposition")
+		}
 		consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 1).Key, nil, false, "legacy overlap refusal preserved absent target")
 	}
 	var expired *Reader
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		expired = reader
 		largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, nil), "InvalidInput", 22, "nil large image visitor")
-		largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, func(LargeImageRowV1) error { t.Fatal("bad kind callback"); return nil }), "InvalidInput", 22, "invalid large image selector")
-		if !reader.usable() || reader.failure != nil { t.Fatal("input refusal disarmed Reader") }
+		largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, func(LargeImageRowV1) error {
+			t.Fatal("bad kind callback")
+			return nil
+		}), "InvalidInput", 22, "invalid large image selector")
+		if !reader.usable() || reader.failure != nil {
+			t.Fatal("input refusal disarmed Reader")
+		}
 		return nil
 	}))
 	largeRequireError(t, expired.VisitLargeImageV1(LargeImageSelectorV1{}, nil), "InvalidInput", 22, "Reader is not active")
@@ -266,15 +296,30 @@ func largeTestConcurrency(t *testing.T) {
 	store, _, _ := consultedStore(t)
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		return reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(row LargeImageRowV1) error {
-			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error { t.Fatal("nested visitor ran"); return nil }), "Concurrency", 16, "large image visit in progress")
+			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error {
+				t.Fatal("nested visitor ran")
+				return nil
+			}), "Concurrency", 16, "large image visit in progress")
 			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, nil), "InvalidInput", 22, "nil large image visitor")
-			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, func(LargeImageRowV1) error { t.Fatal("invalid nested kind callback"); return nil }), "InvalidInput", 22, "invalid large image selector")
+			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, func(LargeImageRowV1) error {
+				t.Fatal("invalid nested kind callback")
+				return nil
+			}), "InvalidInput", 22, "invalid large image selector")
 			concurrent := make(chan error)
-			go func() { concurrent <- reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 2}, func(LargeImageRowV1) error { return errors.New("concurrent visitor ran") }) }()
+			go func() {
+				concurrent <- reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 2}, func(LargeImageRowV1) error { return errors.New("concurrent visitor ran") })
+			}()
 			largeRequireError(t, <-concurrent, "Concurrency", 16, "large image visit in progress")
-			if _, _, err := reader.Get(readDBIsLiteral()[0], []byte{0}); err != nil { return err }
-			if n, err := row.ReadAt(nil, math.MaxUint64); n != 0 || err != nil { t.Fatalf("in-visitor read: %d/%v", n, err) }
-			busy := store.View(func(*Reader) error { t.Fatal("busy Store callback ran"); return nil })
+			if _, _, err := reader.Get(readDBIsLiteral()[0], []byte{0}); err != nil {
+				return err
+			}
+			if n, err := row.ReadAt(nil, math.MaxUint64); n != 0 || err != nil {
+				t.Fatalf("in-visitor read: %d/%v", n, err)
+			}
+			busy := store.View(func(*Reader) error {
+				t.Fatal("busy Store callback ran")
+				return nil
+			})
 			requireEnvironmentError(t, busy, EngineClass("Concurrency"), operationView, 16, "store operation in progress")
 			return nil
 		})
@@ -282,7 +327,11 @@ func largeTestConcurrency(t *testing.T) {
 	hash, body := largeBodyLiteral(19, 131_073)
 	largeCommit(t, store, Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[4], Key: hash[:], AfterKind: AfterKind(2), Literal: body}}})
 	mustEnvironment(t, store.View(func(reader *Reader) error {
-		type result struct { n int; err error; bytes []byte }
+		type result struct {
+			n     int
+			err   error
+			bytes []byte
+		}
 		results, started := make(chan result, 8), make(chan struct{}, 8)
 		err := reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1, Hash: hash}, func(row LargeImageRowV1) error {
 			for range 8 {
@@ -293,16 +342,22 @@ func largeTestConcurrency(t *testing.T) {
 					results <- result{n, readErr, buffer}
 				}(row)
 			}
-			for range 8 { <-started }
+			for range 8 {
+				<-started
+			}
 			return nil
 		})
 		for range 8 {
 			outcome := <-results
 			if outcome.n == 0 {
 				largeRequireError(t, outcome.err, "InvalidInput", 22, "large image row is not active")
-			} else if outcome.n != 65_536 || outcome.err != nil || !bytes.Equal(outcome.bytes, body[:65_536]) { t.Fatalf("concurrent row copy across expiry: %d/%v", outcome.n, outcome.err) }
+			} else if outcome.n != 65_536 || outcome.err != nil || !bytes.Equal(outcome.bytes, body[:65_536]) {
+				t.Fatalf("concurrent row copy across expiry: %d/%v", outcome.n, outcome.err)
+			}
 		}
-		if !reader.usable() || reader.failure != nil { t.Fatal("expiry/input race became infrastructure failure") }
+		if !reader.usable() || reader.failure != nil {
+			t.Fatal("expiry/input race became infrastructure failure")
+		}
 		return err
 	}))
 	drainStore, _, _ := consultedStore(t)
@@ -315,20 +370,27 @@ func largeTestConcurrency(t *testing.T) {
 			ready := make(chan struct{})
 			go func() {
 				close(ready)
-				for row.span.active.Load() { runtime.Gosched() }
+				for row.span.active.Load() {
+					runtime.Gosched()
+				}
 				reader.largeFailure(inFlight)
 				reader.getMu.Unlock()
 			}()
 			<-ready
 			return nil
 		})
-		if visitResult != inFlight { t.Fatalf("row expiry failed to drain its recorded native failure: %v", visitResult) }
+		if !sameError(visitResult, inFlight) {
+			t.Fatalf("row expiry failed to drain its recorded native failure: %v", visitResult)
+		}
 		return Batch{Mutations: []Mutation{consultedCounter(t, 1)}}, nil
 	})
-	if truth.String() != "OLD" || int(stage) != 1 || result != inFlight || string(drainStore.state) != "CLOSED" || drainStore.env != nil || drainStore.writer != nil || drainStore.txn != nil { t.Fatal("drained row failure did not prevent writes and consume resources") }
+	if truth.String() != "OLD" || int(stage) != 1 || !sameError(result, inFlight) || string(drainStore.state) != "CLOSED" || drainStore.env != nil || drainStore.writer != nil || drainStore.txn != nil {
+		t.Fatal("drained row failure did not prevent writes and consume resources")
+	}
 }
 
 type largeTypedNil struct{}
+
 func (*largeTypedNil) Error() string { return "typed-nil large application" }
 
 func largeTestApplications(t *testing.T) {
@@ -336,7 +398,9 @@ func largeTestApplications(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			store, _, _ := consultedStore(t)
 			application := error(errors.New("large application"))
-			if mode == "typed-nil" { application = (*largeTypedNil)(nil) }
+			if mode == "typed-nil" {
+				application = (*largeTypedNil)(nil)
+			}
 			panicValue := &struct{ literal string }{"large panic"}
 			var saved LargeImageRowV1
 			var recovered any
@@ -348,27 +412,45 @@ func largeTestApplications(t *testing.T) {
 				truth, stage, returned = store.Update(func(reader *Reader) (Batch, error) {
 					err := reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(row LargeImageRowV1) error {
 						saved = row
-						if mode == "panic" { panic(panicValue) }
-						if mode == "nil" { return nil }
+						if mode == "panic" {
+							panic(panicValue)
+						}
+						if mode == "nil" {
+							return nil
+						}
 						return application
 					})
 					if err != nil {
-						if !reader.usable() || reader.failure != nil { t.Fatal("application error disarmed Reader") }
-						if next := reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error { return nil }); next != nil { t.Fatalf("application error left active visit: %v", next) }
+						if !reader.usable() || reader.failure != nil {
+							t.Fatal("application error disarmed Reader")
+						}
+						if next := reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error { return nil }); next != nil {
+							t.Fatalf("application error left active visit: %v", next)
+						}
 						return Batch{}, err
 					}
-					if err = reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error { return nil }); err != nil { return Batch{}, err }
+					if err = reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error { return nil }); err != nil {
+						return Batch{}, err
+					}
 					return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{{Kind: 1}}}, nil
 				})
 			}()
-			if string(store.state) != "OPEN" || store.env == nil || store.writer == nil || store.txn != nil { t.Fatal("application result resource shape") }
+			if string(store.state) != "OPEN" || store.env == nil || store.writer == nil || store.txn != nil {
+				t.Fatal("application result resource shape")
+			}
 			switch mode {
 			case "nil":
-				if truth.String() != "NEW" || int(stage) != 3 || returned != nil { t.Fatalf("nil outcome: %s/%d/%v", truth, stage, returned) }
+				if truth.String() != "NEW" || int(stage) != 3 || returned != nil {
+					t.Fatalf("nil outcome: %s/%d/%v", truth, stage, returned)
+				}
 			case "panic":
-				if recovered != panicValue || returned != nil { t.Fatalf("panic identity: %v/%v", recovered, returned) }
+				if recovered != panicValue || returned != nil {
+					t.Fatalf("panic identity: %v/%v", recovered, returned)
+				}
 			default:
-				if truth.String() != "OLD" || int(stage) != 1 || returned != application { t.Fatalf("application identity: %s/%d/%v", truth, stage, returned) }
+				if truth.String() != "OLD" || int(stage) != 1 || !sameError(returned, application) {
+					t.Fatalf("application identity: %s/%d/%v", truth, stage, returned)
+				}
 			}
 			_, err := saved.ReadAt(nil, 0)
 			largeRequireError(t, err, "InvalidInput", 22, "Reader is not active")

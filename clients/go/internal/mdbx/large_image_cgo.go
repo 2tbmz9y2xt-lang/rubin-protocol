@@ -2,6 +2,19 @@
 
 package mdbx
 
+/*
+#include <string.h>
+// Callers validate the complete borrowed span before passing a bounded window.
+// No pointer is retained; the owning transactions remain live for the call.
+static void rubin_large_image_copy(void *dst, const void *value, size_t offset, size_t length) {
+	memcpy(dst, (const unsigned char *)value + offset, length);
+}
+static int rubin_large_image_equal(const void *left, const void *right, size_t offset, size_t length) {
+	return memcmp((const unsigned char *)left + offset, (const unsigned char *)right + offset, length) == 0;
+}
+*/
+import "C"
+
 import (
 	"bytes"
 	"io"
@@ -32,21 +45,21 @@ type LargeImageRowV1 struct {
 
 type largeImageSpan struct {
 	reader *Reader
-	key []byte
-	image updateImage
-	rank uint8
+	key    []byte
+	image  updateImage
+	rank   uint8
 	active atomic.Bool
 }
 
 type largeNativeRow struct {
-	key []byte
+	key   []byte
 	image updateImage
-	done bool
+	done  bool
 }
 
 type largeImageScope struct {
 	selectors []LargeImageSelectorV1
-	maxKey uint64
+	maxKey    uint64
 }
 
 func largeImageInput(diagnostic string) error {
@@ -103,9 +116,6 @@ func (row LargeImageRowV1) ReadAt(dst []byte, offset uint64) (int, error) {
 		return 0, largeImageInput("invalid large image row")
 	}
 	r := row.span.reader
-	if !r.usable() {
-		return 0, largeImageInput("Reader is not active")
-	}
 	r.getMu.Lock()
 	defer r.getMu.Unlock()
 	if err := row.readInput(dst); err != nil {
@@ -134,8 +144,8 @@ func largeImageCopy(dst []byte, pointer unsafe.Pointer, remaining, offset uint64
 	if n > remaining {
 		n, err = remaining, io.EOF
 	}
-	copy(dst, unsafe.Slice((*byte)(unsafe.Add(pointer, uintptr(offset))), int(n)))
-	return int(n), err
+	C.rubin_large_image_copy(unsafe.Pointer(&dst[0]), pointer, C.size_t(offset), C.size_t(n))
+	return len(dst[:n]), err
 }
 
 func (r *Reader) largeFailure(err error) error {
@@ -175,7 +185,7 @@ func (r *Reader) VisitLargeImageV1(selector LargeImageSelectorV1, visitor func(L
 		if err != nil || row.done {
 			return err
 		}
-		if err = r.largeVisitRow(selector, row, visitor); err != nil {
+		if err := r.largeVisitRow(selector, row, visitor); err != nil {
 			return err
 		}
 		if selector.Kind == LargeImageBlockBodyV1 {
@@ -220,7 +230,7 @@ func largeImageAdvance(key []byte, maxKey uint64) []byte {
 		return append(bytes.Clone(key), 0)
 	}
 	next := bytes.Clone(key)
-	for i := len(next)-1; i >= 0; i-- {
+	for i := len(next) - 1; i >= 0; i-- {
 		if next[i] != 255 {
 			next[i]++
 			return next[:i+1]
@@ -238,11 +248,12 @@ func largeNativeKey(pointer unsafe.Pointer, length, maximum uint64, seek []byte)
 	if pointer == nil || length == 0 || length > maximum || !largeNativeShape(pointer, length) {
 		return nil, largeImageShapeError()
 	}
-	key := unsafe.Slice((*byte)(pointer), int(length))
+	key := make([]byte, length)
+	C.memcpy(unsafe.Pointer(&key[0]), pointer, C.size_t(length))
 	if bytes.Compare(key, seek) < 0 {
 		return nil, largeImageShapeError()
 	}
-	return bytes.Clone(key), nil
+	return key, nil
 }
 
 func largeSelectorCounts(selectors []LargeImageSelectorV1) error {
@@ -275,10 +286,10 @@ func largeSelectorContains(selectors []LargeImageSelectorV1, row ownedConsulted)
 	// Both lists are bounded; selectors are located by binary search, never by member scans.
 	lo, hi := 0, len(selectors)
 	for lo < hi {
-		mid := lo+(hi-lo)/2
+		mid := lo + (hi-lo)/2
 		selector := selectors[mid]
 		if largeSelectorBeforeRow(selector, row) {
-			lo = mid+1
+			lo = mid + 1
 		} else {
 			hi = mid
 		}
@@ -330,12 +341,12 @@ func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (l
 }
 
 type largeResidualStream struct {
-	reader *Reader
+	reader   *Reader
 	selector LargeImageSelectorV1
-	seek []byte
-	plan []ownedMutation
-	target int
-	done bool
+	seek     []byte
+	plan     []ownedMutation
+	target   int
+	done     bool
 }
 
 func (stream *largeResidualStream) excluded(key []byte) bool {
@@ -365,16 +376,18 @@ func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	return largeNativeRow{done: true}, nil
 }
 
-func largeImagesEqual(a, b updateImage) bool {
-	if a.present != b.present || a.length != b.length {
+// Complete row equality owns keyset, presence, length and borrowed byte windows.
+func largeRowsEqual(a, b largeNativeRow) bool {
+	if a.done != b.done || !bytes.Equal(a.key, b.key) {
 		return false
 	}
-	length := uint64(a.length)
+	if a.image.present != b.image.present || a.image.length != b.image.length {
+		return false
+	}
+	length := uint64(a.image.length)
 	for offset := uint64(0); offset < length; {
 		window := min(uint64(65_536), length-offset)
-		left := unsafe.Slice((*byte)(unsafe.Add(a.bytes, uintptr(offset))), int(window))
-		right := unsafe.Slice((*byte)(unsafe.Add(b.bytes, uintptr(offset))), int(window))
-		if !bytes.Equal(left, right) {
+		if C.rubin_large_image_equal(a.image.bytes, b.image.bytes, C.size_t(offset), C.size_t(window)) == 0 {
 			return false
 		}
 		offset += window
@@ -401,7 +414,7 @@ func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, pla
 		if a.done && b.done {
 			return equal, nil
 		}
-		if a.done != b.done || !bytes.Equal(a.key, b.key) || !largeImagesEqual(a.image, b.image) {
+		if !largeRowsEqual(a, b) {
 			equal = false
 		}
 	}

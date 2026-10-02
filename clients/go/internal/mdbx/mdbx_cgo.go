@@ -755,14 +755,14 @@ type Store struct {
 }
 
 type Reader struct {
-	self    *Reader
-	txn     *C.MDBX_txn
-	dbis    [8]C.MDBX_dbi
-	getMu   sync.Mutex
-	active  atomic.Bool
-	failure error
+	self       *Reader
+	txn        *C.MDBX_txn
+	dbis       [8]C.MDBX_dbi
+	getMu      sync.Mutex
+	active     atomic.Bool
+	failure    error
 	largeVisit atomic.Bool
-	maxKey uint64
+	maxKey     uint64
 
 	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
 	ownerVerified bool
@@ -1566,6 +1566,15 @@ func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted [
 	return nil
 }
 
+// Legacy and large consulted domains are checked in order against the same OLD.
+func updateNativeScopedMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, diagnostic string, scopes ...largeImageScope) error {
+	err := updateNativeConsultedMatch(candidate, dbis, consulted, diagnostic)
+	if err != nil {
+		return err
+	}
+	return updateNativeLargeMatch(old, candidate, dbis, plan, diagnostic, scopes...)
+}
+
 func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) ([]updateReference, error) {
 	targets, references, err := updateNativePairedImages(old, dbis, plan)
 	if err != nil {
@@ -1587,11 +1596,7 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ow
 			return nil, err
 		}
 	}
-	err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch")
-	if err != nil {
-		return nil, err
-	}
-	err = updateNativeLargeMatch(old, write, dbis, plan, "OLD/write snapshot mismatch", scopes...)
+	err = updateNativeScopedMatch(old, write, dbis, plan, consulted, "OLD/write snapshot mismatch", scopes...)
 	if err != nil {
 		return nil, err
 	}
@@ -1738,15 +1743,10 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage, err = updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
+	oldImage, newImage, err = updateNativeReadbackScoped(old, read, dbis, plan, consulted, oldImage, newImage, scopes...)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	residual, err := updateNativeLargeEqual(old, read, dbis, plan, scopes...)
-	if err != nil {
-		return CommitTruthUnknown, err
-	}
-	oldImage, newImage = oldImage && residual, newImage && residual
 	if oldImage {
 		return CommitTruthOld, nil
 	}
@@ -1754,6 +1754,22 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 		return CommitTruthNew, nil
 	}
 	return CommitTruthUnknown, nil
+}
+
+// Finish every consulted domain before selecting OLD first or planned NEW.
+func updateNativeReadbackScoped(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool, scopes ...largeImageScope) (bool, bool, error) {
+	oldImage, newImage, err := updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
+	if err != nil {
+		return false, false, err
+	}
+	residual, err := updateNativeLargeEqual(old, read, dbis, plan, scopes...)
+	if err != nil {
+		return false, false, err
+	}
+	if !residual {
+		return false, false, nil
+	}
+	return oldImage, newImage, nil
 }
 
 func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
@@ -1877,13 +1893,9 @@ func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutati
 	if verifyErr != nil {
 		return updateNativeAbort(begun.txn, verifyErr, stage)
 	}
-	consultedErr := updateNativeConsultedMatch(begun.txn, dbis, consulted, "final update image mismatch")
+	consultedErr := updateNativeScopedMatch(old, begun.txn, dbis, plan, consulted, "final update image mismatch", scopes...)
 	if consultedErr != nil {
 		return updateNativeAbort(begun.txn, consultedErr, stage)
-	}
-	largeErr := updateNativeLargeMatch(old, begun.txn, dbis, plan, "final update image mismatch", scopes...)
-	if largeErr != nil {
-		return updateNativeAbort(begun.txn, largeErr, stage)
 	}
 	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn, stage, scopes...)
 }
