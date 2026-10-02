@@ -15,8 +15,8 @@ import (
 // Dormant PROFILE-origin selected-side ARCHIVE transition P06-2a (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.4, 6.4.1.5,
 // 6.4.1.8 and 6.4.1.9, RUBIN_COMPACT_BLOCKS.md Section 1.2). SelectArchiveSelectedSideMDBX has no production caller.
 // One full-lane grant encloses its sole Store.Update; on the owner's exact capacity refusal one grant-free control-only
-// Update instead reads authority alone (RECOVERY_REQUIRED, PROFILE_NOOP or storage_capacity). In the granted Reader: strict authority, the control table (non-STABLE is
-// RECOVERY_REQUIRED, active ARCHIVE is PROFILE_NOOP), then the finite canonical identity PRE_GENESIS/H0/H>0 from one
+// Update instead reads authority alone (RECOVERY_REQUIRED, PROFILE_NOOP or storage_capacity). In the granted
+// Reader: strict authority, the control table (non-STABLE is RECOVERY_REQUIRED, active ARCHIVE is PROFILE_NOOP), then the finite canonical identity PRE_GENESIS/H0/H>0 from one
 // bounded prefix page. PRE_GENESIS/H0 and H>0 without a selected side are other leaves' exact API refusals; H>0 under any
 // cleanup phase is LOCAL_BUSY; only H>0 NONE/STABLE PRUNED with a selected side clears that side into its SIDE span
 // (unkept leaving headers deleted, bodies and links kept) with PRUNE_GC/RECOVERY_REQUIRED and pending ARCHIVE. B, U,
@@ -79,15 +79,16 @@ func SelectArchiveSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.Operati
 		out.Truth, out.Stage, out.Err = store.Update(update)
 		return out.Err
 	})
-	if !ran && err != nil && err.Error() == selectedSideCapacityText {
-		// The owner's exact capacity refusal (its callback never ran, no grant): one grant-free control-only Update.
+	if !ran { // The owner never ran its callback, so err is its own non-nil refusal.
+		if err.Error() != selectedSideCapacityText { // An unrelated owner input refusal: raw error, empty fields.
+			out.Err, out.CanonicalTruth = err, ""
+			return out
+		}
+		// The owner's exact capacity refusal (no grant): one grant-free control-only Update.
 		denied = true
 		out.Truth, out.Stage, out.Err = store.Update(update)
 	}
-	if !called { // An owner input refusal or no-callback/cached native outcome: raw tuple, empty fields.
-		if !ran && !denied {
-			out.Err = err
-		}
+	if !called { // A no-callback/cached native outcome: its raw tuple, empty fields.
 		out.CanonicalTruth = ""
 		return out
 	}
@@ -234,8 +235,6 @@ func archiveSelectedSideProject(out selectedSideOutcome, decision string, sentin
 	return out
 }
 
-// archiveSelectedSideCrossed maps the raw truth: clean NEW is an empty Result with logical NEW; an error is
-// TERMINAL_PERSISTENCE(old|new|neither_or_unreadable) with logical OLD, NEW or UNKNOWN.
 // archiveSelectedSideStep is the in-flight artifact read class for classification: a read-resource decision, but never
 // a sentinel decision (the capacity control exit reads no artifact), so a joined abort maps by its own class.
 func archiveSelectedSideStep(decision string, err, sentinel error) string {
@@ -245,6 +244,8 @@ func archiveSelectedSideStep(decision string, err, sentinel error) string {
 	return decision
 }
 
+// archiveSelectedSideCrossed maps the raw truth: clean NEW is an empty Result with logical NEW; an error is
+// TERMINAL_PERSISTENCE(old|new|neither_or_unreadable) with logical OLD, NEW or UNKNOWN.
 func archiveSelectedSideCrossed(out selectedSideOutcome) selectedSideOutcome {
 	switch out.Truth {
 	case mdbx.CommitTruthOld:

@@ -84,7 +84,7 @@ func TestArchiveSelectedSide(t *testing.T) {
 		// The stored authority, read back: PRUNED active, no replay target, active generation 1 and next preserved.
 		a := w.committedAuthority()
 		logicalMDBXAssert(t, a.ActiveProfile == mdbx.StorageProfilePrunedV1 && a.NextGenerationID == w.nextID() && a.Replay == nil && a.ActiveGenerationID == 1,
-			"%s: no target/id/next preserved: %+v", label, a)
+			"%s: no target/id/next%d preserved: %+v", label, w.nextID(), a)
 		want := w.profileAuthority()
 		w.wantImage(label+": pending ARCHIVE exact image", want, true)
 		sideWantReleased(t, w.owner, label)
@@ -253,8 +253,8 @@ func TestArchiveSelectedSide(t *testing.T) {
 		held := owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { nilStore(owner, "nil Store, held owner"); return nil })
 		logicalMDBXAssert(t, held == nil, "held full lane: %v", held)
 		sideWantReleased(t, owner, "nil Store")
-		// A valid Store with a nil or zero owner returns that owner's own input refusal, and with the full lane already held
-		// the owner's exact capacity refusal; no Update, empty fields, image unchanged.
+		// A valid Store with a nil or zero owner returns that owner's own input refusal: no Update, empty fields, image
+		// unchanged. (A held full lane is the separate control-only refusal path, owned by R-l-control.)
 		w := newSideWorld(t, sideFullSpec)
 		for _, o := range []*mdbx.OperationReservationOwner{nil, {}} {
 			want := o.WithReservation(mdbx.MaxOperationDataBytes, func() error { return nil })
