@@ -15,8 +15,9 @@ import (
 // Dormant one-height selected-side damage handling (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.3, 6.4.1.5, 6.4.1.6 and
 // 6.4.1.9). selectedSideDamageMDBX has no active or public caller; its sole non-test caller is the dormant recheck
 // adapter RecheckSelectedSideMDBX, and its direct tests remain. The non-damage PlanSelectedSideClearMDBX reuses the same
-// evidence/transfer owner inside the caller's Reader for the node's N3 ReplaceSelectedSideMDBX, which owns that grant,
-// Update and projection. Each valid-owner damage invocation performs one outer full-lane
+// evidence/transfer owner inside the caller's Reader for the node's N3 ReplaceSelectedSideMDBX, and the RP
+// PlanSelectedSideRollingMDBX reuses its oldest-row health and leaving decision for PrepareSelectedSideRollingMDBX; the
+// node owns each grant, Update and projection. Each valid-owner damage invocation performs one outer full-lane
 // reservation attempt and exactly one Store.Update, and reports its logical classification beside the unmodified raw
 // tuple. No ChainState latch, publication or wakeup is performed here; those consumers belong to later runtime owners.
 
@@ -153,6 +154,28 @@ func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) 
 	return SelectedSidePlanV1{Batch: batch}, nil
 }
 
+// PlanSelectedSideRollingMDBX plans RP in the caller's Reader: strict authority, a full 1440-row side, then the
+// existing health of its oldest row. A healthy oldest row leaves into SIDE(g,first,first,first): count 1439 and logical
+// bytes minus that row's actual body length, its header deleted unless CanonicalOwnerV1 or a hash in the remaining
+// selected interval first+1..tip keeps it, its body and link kept; tip, work, g, F, next and every other field and
+// span stay. Positive oldest damage plans the complete clear instead, the only PositiveDamageClear plan. It owns no grant or Update; an error carries no Batch, no positive flag
+// and the failed artifact read class.
+func PlanSelectedSideRollingMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) {
+	authority, err := reader.ReadStorageAuthorityV1()
+	if err != nil {
+		return SelectedSidePlanV1{}, err
+	}
+	if authority.SelectedSide == nil || authority.SelectedSide.RowCount != 1440 {
+		return SelectedSidePlanV1{}, errSelectedSideRequest
+	}
+	p := &selectedSideDamagePlan{height: selectedSideFirst(authority.SelectedSide)}
+	batch, positive, err := newSelectedSideEvidence(reader, authority).roll(p)
+	if err != nil {
+		return SelectedSidePlanV1{ReadResource: p.step}, err
+	}
+	return SelectedSidePlanV1{Batch: batch, PositiveDamageClear: positive}, nil
+}
+
 // ClassifySelectedSideFailureMDBX classifies one dormant node attempt's uncrossed raw error with the existing ordered
 // cause walk; it never projects a crossed stage and owns no effects. The node producer owns the concrete direct type
 // and current-invocation ownership of callbackErr and its result. This consumer only refuses a binding whose leaf has
@@ -229,7 +252,8 @@ type selectedSideCachedRow struct {
 }
 
 // selectedSideEvidence holds the observations of one committed pre-state; every relied-on row enters consulted. All
-// collections are preallocated to their proved bounds for n leaving rows: n link slots (nil is an unread slot; a link is
+// collections are preallocated to their proved bounds for the n pre-state selected rows (all leaving in a clear, the
+// RP remaining-keep scan reading the other n-1): n link slots (nil is an unread slot; a link is
 // cached only once read and valid), at most n distinct hash records, and at most 4n+2 consulted rows.
 type selectedSideEvidence struct {
 	reader     *mdbx.Reader
@@ -426,10 +450,29 @@ func (e *selectedSideEvidence) headerHealth(p *selectedSideDamagePlan, height ui
 			return false, err
 		}
 	}
+	if damaged, err := e.firstTarget(height, header, owner.Owned); damaged || err != nil {
+		return damaged, err
+	}
 	if !bytes.Equal(header[4:36], link[32:64]) {
 		return true, nil
 	}
 	return e.predecessor(p, height, link, header)
+}
+
+// firstTarget checks only the first row without an available predecessor, in either legal selected form, for
+// a stored-header target inside the work domain, reusing the already read header: outside it, an Owned header is
+// canonical integrity and an unowned header is positive optional damage.
+func (e *selectedSideEvidence) firstTarget(height uint64, header []byte, owned bool) (bool, error) {
+	if height != e.first || e.first <= e.side.F+1 {
+		return false, nil
+	}
+	if _, err := WorkFromTarget([32]byte(header[76:108])); err == nil {
+		return false, nil
+	}
+	if owned {
+		return false, selectedSideDefect("required canonical header target is outside its domain")
+	}
+	return true, nil
 }
 
 func (e *selectedSideEvidence) bodyHealth(p *selectedSideDamagePlan, hash [32]byte, required bool) (bool, error) {
@@ -447,7 +490,7 @@ func (e *selectedSideEvidence) bodyHealth(p *selectedSideDamagePlan, hash [32]by
 }
 
 // predecessor checks parent linkage and cumulative work against the preceding selected link, or against canonical F
-// when first=F+1; the first row of a one-slot descriptor has no in-descriptor predecessor.
+// when first=F+1; the first row above F+1 has no available predecessor in either legal selected form.
 func (e *selectedSideEvidence) predecessor(p *selectedSideDamagePlan, height uint64, link, header []byte) (bool, error) {
 	parent, err := e.parentEntry(p, height)
 	if err != nil || parent == nil {
@@ -559,13 +602,67 @@ func (e *selectedSideEvidence) headerPresent(p *selectedSideDamagePlan, hash [32
 	return e.row(hash).headerPresent, nil
 }
 
-// clearBatch refuses with storage_capacity before any Batch exists when the relied-on body's borrowed Consulted OLD
-// image exceeds its named MaxBlockBytes share, or when Consulted or the transfer sublimit would be exceeded.
+// roll diagnoses the oldest row with the existing health; positive damage is the complete clear (positive only once
+// that plan is complete), otherwise only the oldest row leaves.
+func (e *selectedSideEvidence) roll(p *selectedSideDamagePlan) (mdbx.Batch, bool, error) {
+	damaged, err := e.health(p)
+	if err != nil {
+		return mdbx.Batch{}, false, err
+	}
+	if damaged {
+		batch, err := e.transfer(p)
+		return batch, err == nil, err
+	}
+	target, err := e.shrinking(p)
+	if err != nil {
+		return mdbx.Batch{}, false, err
+	}
+	encoded, err := e.rolled()
+	if err != nil {
+		return mdbx.Batch{}, false, err
+	}
+	var deletes []mdbx.Mutation
+	if target != nil {
+		deletes = append(deletes, *target)
+	}
+	batch, err := e.authorityBatch(encoded, deletes)
+	return batch, false, err
+}
+
+// shrinking returns RP's header deletion for the healthy leaving oldest row. A CanonicalOwnerV1 keep is sufficient and
+// reads no remaining link. Otherwise every remaining selected SideLink first+1..tip is read ascending through link (its
+// cache, charge and Consulted), even after a hash match, so a later absent, undecodable or transient identity still
+// refuses before any Batch; a match anywhere in that interval keeps the header.
+func (e *selectedSideEvidence) shrinking(p *selectedSideDamagePlan) (*mdbx.Mutation, error) {
+	target, err := e.leaving(p, p.height)
+	if err != nil || target == nil {
+		return target, err
+	}
+	kept := false
+	for height := e.first + 1; height <= e.side.TipHeight; height++ {
+		link, err := e.link(p, height)
+		if err != nil {
+			return nil, err
+		}
+		kept = kept || bytes.Equal(link[:32], target.Key)
+	}
+	if kept {
+		target = nil
+	}
+	return target, nil
+}
+
 func (e *selectedSideEvidence) clearBatch(deletes []mdbx.Mutation) (mdbx.Batch, error) {
 	encoded, err := e.cleared()
 	if err != nil {
 		return mdbx.Batch{}, err
 	}
+	return e.authorityBatch(encoded, deletes)
+}
+
+// authorityBatch refuses with storage_capacity before any Batch exists when the relied-on body's borrowed Consulted
+// OLD image exceeds its named MaxBlockBytes share, or when Consulted or the transfer sublimit would be exceeded.
+func (e *selectedSideEvidence) authorityBatch(encoded []byte, deletes []mdbx.Mutation) (mdbx.Batch, error) {
 	slices.SortFunc(deletes, func(a, b mdbx.Mutation) int { return bytes.Compare(a.Key, b.Key) })
 	mutations := make([]mdbx.Mutation, 1+len(deletes))
 	mutations[0] = mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded}
@@ -591,8 +688,35 @@ func (e *selectedSideEvidence) cleared() ([]byte, error) {
 		spans = append(spans, mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: e.side.GenerationID, FirstHeight: e.first, LastHeight: e.side.TipHeight, NextHeight: e.first})
 	}
 	a.SelectedSide, a.Cleanup, a.Phase = nil, &mdbx.CleanupV1{Spans: spans}, mdbx.StoragePhasePruneGCV1
+	return selectedSideEncode(a)
+}
+
+// rolled shrinks the side to count 1439 and logical bytes minus the oldest body's actual length (bodyNative, read by
+// the healthy oldest health) and appends SIDE(g,first,first,first) after every existing span under PRUNE_GC; every other
+// authority field is unchanged. A descriptor holding fewer bytes than that body is an illegal plan, never a wrap.
+func (e *selectedSideEvidence) rolled() ([]byte, error) {
+	a, side := e.authority, *e.side
+	if e.bodyNative > side.LogicalBytes {
+		return nil, selectedSideIllegal()
+	}
+	var spans []mdbx.CleanupSpanV1
+	if a.Cleanup != nil {
+		spans = slices.Clone(a.Cleanup.Spans)
+	}
+	spans = append(spans, mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: side.GenerationID, FirstHeight: e.first, LastHeight: e.first, NextHeight: e.first})
+	side.RowCount, side.LogicalBytes = side.RowCount-1, side.LogicalBytes-e.bodyNative
+	a.SelectedSide, a.Cleanup, a.Phase = &side, &mdbx.CleanupV1{Spans: spans}, mdbx.StoragePhasePruneGCV1
+	return selectedSideEncode(a)
+}
+
+func selectedSideIllegal() error {
+	return &selectedSideFailure{result: selectedSideInvariant, cause: errors.New("selected side plan produced illegal authority")}
+}
+
+// selectedSideEncode validates and encodes a planned authority: illegal is a local invariant, unencodable capacity.
+func selectedSideEncode(a mdbx.StorageAuthorityV1) ([]byte, error) {
 	if mdbx.ValidateStorageAuthorityV1(a) != nil {
-		return nil, &selectedSideFailure{result: selectedSideInvariant, cause: errors.New("selected side clear produced illegal authority")}
+		return nil, selectedSideIllegal()
 	}
 	encoded, err := a.Encode()
 	if err != nil {

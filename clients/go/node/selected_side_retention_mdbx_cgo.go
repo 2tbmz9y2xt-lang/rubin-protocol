@@ -21,8 +21,10 @@ import (
 // RUBIN_COMPACT_BLOCKS.md Sections 10-10.2, RUBIN_L1_CANONICAL.md Sections 23 and 25). RetainSelectedSideMDBX has no
 // production caller. Each attempt holds one full-lane grant around its own same-Reader qualification, every live
 // buffer, its sole Store.Update and that Update's cleanup. A clean damage locator is rechecked by the existing damage
-// operation after that grant is released and permits exactly one fresh attempt. Only N1, N2 and the separate N3
-// replacement write here; every other selected-side transition is routed or refused without a write.
+// operation after that grant is released and permits exactly one fresh attempt. Only N1, N2, the separate N3
+// replacement, RA (the fresh append to a cleaned one-slot side) and the separate RP preparation
+// (selected_side_rolling_mdbx_cgo.go) write here; every other selected-side
+// transition is routed or refused without a write.
 
 const (
 	selectedRetainBusy         = "LOCAL_BUSY"
@@ -52,6 +54,20 @@ const (
 // runtime refusal; a violation does not compile.
 const _ = mdbx.MaxOperationDataBytes - (2*mdbx.MaxBlockBytes + selectedRetainWorkspace + 262_144 + selectedRetainOwnerTip)
 
+// selectedSideMode is the invocation's fixed transition owner: Retain (N1/N2/RA and routing), the separate RF refill,
+// the separate N3 Replace or the separate RP preparation. Only Retain owns the duplicate fallback and the admitted
+// first-row probe. The modes whose clean crossed NEW is a stored noncanonical row (Retain, Refill) come first, so
+// that projection is the single ordered test mode <= selectedRefillMode; the zero mode is Retain. Every other use
+// compares for equality.
+type selectedSideMode uint8
+
+const (
+	selectedRetainMode selectedSideMode = iota
+	selectedRefillMode
+	selectedReplaceMode
+	selectedPrepareMode
+)
+
 // selectedRetainResults is the finite set of qualifier refusal results one attempt may bind for classification.
 var selectedRetainResults = []string{selectedQualIntegrity, selectedQualBranch, selectedQualCanonical, selectedQualRecovery, selectedQualRecoveryRequired, selectedRetainStale}
 
@@ -73,7 +89,10 @@ type selectedRetainAttempt struct {
 	sentinel, bound             error
 	result, decision, canonical string
 	boundResult, resource       string
-	retry, ran, replace         bool
+	retry, ran                  bool
+	mode                        selectedSideMode
+	// positive is the consumed plan's PositiveDamageClear: an actual complete positive-damage clear.
+	positive bool
 	// linking is L, the exact length of the one successfully checked exact-tip linking body; 0 for a canonical parent.
 	linking uint64
 }
@@ -95,17 +114,17 @@ type selectedRetainTip struct {
 // terminating attempt's whole tuple: the first attempt, a non-healthy recheck of its clean damage locator, or the
 // single fresh attempt a healthy recheck permits.
 func RetainSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
-	return selectedRetainRun(store, reservations, raw, expectedTip, false)
+	return selectedRetainRun(store, reservations, raw, expectedTip, selectedRetainMode)
 }
 
 // ReplaceSelectedSideMDBX is the separate N3 replacement: a freshly qualified winning canonical-parent child clears the
 // live selected side into its SIDE span without storing the candidate. It shares Retain's attempts and tuple rules.
 func ReplaceSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1) SelectedSideMutationOutcome {
-	return selectedRetainRun(store, reservations, raw, expectedTip, true)
+	return selectedRetainRun(store, reservations, raw, expectedTip, selectedReplaceMode)
 }
 
-func selectedRetainRun(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1, replace bool) SelectedSideMutationOutcome {
-	out, request := selectedRetainOnce(store, reservations, raw, expectedTip, false, replace)
+func selectedRetainRun(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1, mode selectedSideMode) SelectedSideMutationOutcome {
+	out, request := selectedRetainOnce(store, reservations, raw, expectedTip, false, mode)
 	if request == nil {
 		return out
 	}
@@ -113,7 +132,7 @@ func selectedRetainRun(store *mdbx.Store, reservations *mdbx.OperationReservatio
 	if recheck.Result != "" || recheck.Err != nil || recheck.Truth != mdbx.CommitTruthOld || recheck.Stage != mdbx.UpdateStagePrewrite {
 		return SelectedSideMutationOutcome{Result: recheck.Result, CanonicalTruth: recheck.CanonicalTruth, Truth: recheck.Truth, Stage: recheck.Stage, Err: recheck.Err}
 	}
-	out, _ = selectedRetainOnce(store, reservations, raw, expectedTip, true, replace)
+	out, _ = selectedRetainOnce(store, reservations, raw, expectedTip, true, mode)
 	return out
 }
 
@@ -121,8 +140,8 @@ func selectedRetainRun(store *mdbx.Store, reservations *mdbx.OperationReservatio
 // that a non-nil Store with a nil or zero owner returns that owner's own exact input refusal with no Update; a refused
 // full-lane charge takes the same control-only Update ending in storage_capacity; any other owner refusal is returned
 // unchanged with no Update.
-func selectedRetainOnce(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1, retry, replace bool) (SelectedSideMutationOutcome, *selectedSideDamageRequest) {
-	a := &selectedRetainAttempt{raw: raw, retry: retry, replace: replace, sentinel: errors.New("selected side retention decision")}
+func selectedRetainOnce(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, raw []byte, expectedTip *mdbx.AuthorityPointV1, retry bool, mode selectedSideMode) (SelectedSideMutationOutcome, *selectedSideDamageRequest) {
+	a := &selectedRetainAttempt{raw: raw, retry: retry, mode: mode, sentinel: errors.New("selected side retention decision")}
 	out := SelectedSideMutationOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if store == nil || len(raw) > mdbx.MaxBlockBytes {
 		// cmp.Or maps a nil owner to the zero owner, so one comparison covers both invalid owners.
@@ -177,6 +196,9 @@ func (a *selectedRetainAttempt) batch(reader *mdbx.Reader) (mdbx.Batch, error) {
 // plan composes the qualifier's own order (authority/control/raw, header, parent evidence, context, steps 1-12,
 // selection and domain) so a NONE canonical parent beside a live side stays an explicit owner outcome.
 func (a *selectedRetainAttempt) plan(reader *mdbx.Reader) (mdbx.Batch, error) {
+	if a.mode == selectedRefillMode { // RF has its own qualification (selected_side_rolling_mdbx_cgo.go).
+		return a.refill(reader)
+	}
 	authority, err := selectedQualAuthority(reader, len(a.raw))
 	if err != nil {
 		return mdbx.Batch{}, err
@@ -260,7 +282,7 @@ func (a *selectedRetainAttempt) project(out SelectedSideMutationOutcome) (Select
 	case !a.ran:
 		return out, nil
 	case out.Stage == mdbx.UpdateStageCommitMayHaveCrossed:
-		return selectedRetainCrossed(out, a.replace), nil
+		return selectedRetainCrossed(out, a.mode <= selectedRefillMode, a.positive), nil
 	case out.Truth != mdbx.CommitTruthOld || out.Stage != mdbx.UpdateStagePrewrite:
 	case out.Err == a.sentinel: //nolint:errorlint // Only the exact sentinel with no cleanup cause is clean.
 		out.Result, out.Decision, out.CanonicalTruth, out.Err = a.result, a.decision, a.canonical, nil
@@ -273,15 +295,16 @@ func (a *selectedRetainAttempt) project(out SelectedSideMutationOutcome) (Select
 	return out, nil
 }
 
-// selectedRetainCrossed is the optional-cache projection of a crossed N1, N2 or N3 attempt: clean NEW is stored
-// noncanonical for N1/N2 and an empty Result for the healthy N3 clear, UNKNOWN is a noncanonical store error, and OLD or
+// selectedRetainCrossed is the optional-cache projection of a crossed N1, N2, N3 or RP attempt: an actual complete
+// positive-damage clear is a noncanonical store error for every truth; otherwise clean NEW is stored noncanonical for
+// N1/N2 (stored) and an empty Result for the healthy N3 clear or RP, UNKNOWN is a noncanonical store error, and OLD or
 // NEW with an error keeps an empty Result.
-func selectedRetainCrossed(out SelectedSideMutationOutcome, replace bool) SelectedSideMutationOutcome {
+func selectedRetainCrossed(out SelectedSideMutationOutcome, stored, positive bool) SelectedSideMutationOutcome {
 	out.CanonicalTruth = "NOT_APPLICABLE"
 	switch {
-	case out.Truth == mdbx.CommitTruthUnknown:
+	case positive || out.Truth == mdbx.CommitTruthUnknown:
 		out.Result = selectedRetainCleared
-	case out.Truth == mdbx.CommitTruthNew && out.Err == nil && !replace:
+	case out.Truth == mdbx.CommitTruthNew && out.Err == nil && stored:
 		out.Result = selectedRetainStored
 	}
 	return out
@@ -291,7 +314,7 @@ func selectedRetainCrossed(out SelectedSideMutationOutcome, replace bool) Select
 // fallback instead of the qualifier's branch_data refusal.
 func (r *selectedRetention) parent(hash [32]byte) (selectedQualParent, error) {
 	switch {
-	case r.side == nil || r.attempt.replace && hash != r.side.TipHash: // Replace has no duplicate fallback.
+	case r.side == nil || r.attempt.mode != selectedRetainMode && hash != r.side.TipHash: // Only Retain has the duplicate fallback.
 		return r.canonicalParent(hash)
 	case hash == r.side.TipHash:
 		return r.tipParent()
@@ -364,7 +387,7 @@ func (r *selectedRetention) admitted(qual selectedSideQualification, parent sele
 	switch {
 	case tip.outranked(qual.Work, qual.Summary.BlockHash):
 		return mdbx.Batch{}, r.attempt.decide("", "ORDINARY", "OLD")
-	case !qual.Selected && r.attempt.replace: // Replace has no admitted first-row probe.
+	case !qual.Selected && r.attempt.mode != selectedRetainMode: // Only Retain has the admitted first-row probe.
 		return mdbx.Batch{}, r.attempt.decide("", "NOT_SELECTED", "OLD")
 	case !qual.Selected:
 		return mdbx.Batch{}, r.notSelected(qual)
@@ -374,11 +397,14 @@ func (r *selectedRetention) admitted(qual selectedSideQualification, parent sele
 
 // route sends a selected candidate to its transition: N1 without a side, the separate replacement for a winning
 // canonical-parent child, the separate rolling preparation for a count-1440 side, N2 for an exact-tip child of a full
-// side below 1440 rows (F+count = tip, C1439 included). The cleaned one-slot append is not owned here yet.
+// side below 1440 rows (F+count = tip, C1439 included), and RA for an exact-tip child of the cleaned one-slot side. The
+// separate Replace and Prepare invocations go only to their own transition.
 func (r *selectedRetention) route(qual selectedSideQualification, parent selectedQualParent) (mdbx.Batch, error) {
 	switch {
-	case r.attempt.replace:
+	case r.attempt.mode == selectedReplaceMode:
 		return r.replace(parent)
+	case r.attempt.mode == selectedPrepareMode:
+		return r.prepare(parent)
 	case r.side == nil:
 		return r.create(qual)
 	case !parent.selected:
@@ -386,7 +412,26 @@ func (r *selectedRetention) route(qual selectedSideQualification, parent selecte
 	case r.side.RowCount == 1440:
 		return mdbx.Batch{}, r.attempt.decide(selectedQualBranch, "PREPARE_ROLLING", "OLD")
 	case r.side.TipHeight-uint64(r.side.RowCount) != r.side.F:
-		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append belongs to a later transition")
+		return r.ra(qual)
+	}
+	return r.n2(qual)
+}
+
+// ra is the fresh append to a cleaned one-slot side (C >= 1440, count 1439; legal authority admits no other shape with
+// first > F+1 and no detached suffix beside a side). The aggregate counts the live rows, every row still owed by a
+// pending SIDE span from its next_height, and the incoming row; above 1440 (a Prepared side) it is typed branch_data.
+// Otherwise the N2 effect: tip/hash/work advance, count 1440, bytes+n, first, g, F and next unchanged, no SIDE or delete.
+func (r *selectedRetention) ra(qual selectedSideQualification) (mdbx.Batch, error) {
+	owed := uint64(0)
+	if c := r.authority.Cleanup; c != nil {
+		for _, span := range c.Spans {
+			if span.Kind == mdbx.CleanupSpanSideV1 {
+				owed += span.LastHeight - span.NextHeight + 1
+			}
+		}
+	}
+	if uint64(r.side.RowCount)+owed+1 > 1440 {
+		return mdbx.Batch{}, selectedQualFailure(selectedQualBranch, "selected side append exceeds the retention aggregate")
 	}
 	return r.n2(qual)
 }

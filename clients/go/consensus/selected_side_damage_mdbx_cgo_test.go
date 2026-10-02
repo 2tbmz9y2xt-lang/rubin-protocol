@@ -29,6 +29,25 @@ type sideWorldSpec struct {
 	custom        map[uint64]string
 	canonicalBody map[uint64]string
 	maxExclusion  bool // authority carries an exclusion slot sized so the encoded authority is exactly MaxMetadataBytes
+	// generation and next override the selected generation (default 2) and next identity (default 3); published
+	// commits canonical 0 through the published-genesis owner (header, body, paired index, undo manifest, UTXO, counters).
+	generation, next uint64
+	published        bool
+}
+
+// gen and nextID are the spec's selected generation and next identity with their defaults 2 and 3.
+func (w *sideWorld) gen() uint64 {
+	if w.spec.generation == 0 {
+		return 2
+	}
+	return w.spec.generation
+}
+
+func (w *sideWorld) nextID() uint64 {
+	if w.spec.next == 0 {
+		return 3
+	}
+	return w.spec.next
 }
 
 // sideWorld keeps the independently derived expected bytes of every row the operation may read or write; a nil value
@@ -112,6 +131,9 @@ func newSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	logicalMDBXAssert(t, err == nil, "side world owner: %v", err)
 	truth, _, err := w.store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, w.owner)
 	logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "side world bootstrap: %v/%v", truth, err)
+	if spec.published {
+		genesisMDBXReturned(t, genesisMDBXRun(w.store, w.owner), "ACCEPTED", 2, 3, "side world published genesis")
+	}
 	rows := w.canonicalRows()
 	rows = append(rows, w.sideRows()...)
 	rows = append(rows, mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: w.authorityBytes()})
@@ -133,6 +155,11 @@ func (w *sideWorld) canonicalRows() []mdbx.Mutation {
 	var rows []mdbx.Mutation
 	for k := uint64(0); k <= w.spec.canonicalTip; k++ {
 		header, body, hash := w.block(sideWorldBlock(parent, k))
+		if k == 0 && w.spec.published {
+			w.publishedGenesis(hash)
+			parent = hash
+			continue
+		}
 		switch w.spec.canonicalBody[k] {
 		case "valid":
 			rows = append(rows, body)
@@ -151,6 +178,26 @@ func (w *sideWorld) canonicalRows() []mdbx.Mutation {
 		parent = hash
 	}
 	return rows
+}
+
+// publishedGenesis tracks the rows the published-genesis owner committed for canonical 0 (sideWorldBlock(0, 0) is that
+// published block): header, body, paired index and owner, plus its undo manifest, UTXO and counters as exact extra rows
+// (literals of genesisMDBXExpected for generation 1).
+func (w *sideWorld) publishedGenesis(hash [32]byte) {
+	block, _, published := genesisMDBXFixture()
+	logicalMDBXAssert(w.t, hash == published, "side world genesis is not the published block")
+	w.bodies[hash] = block
+	w.entries[0], w.owners[hash] = mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1)), mdbx.CanonicalOwnerValue(0)
+	w.canonical = append(w.canonical, hash)
+	key := binary.BigEndian.AppendUint64(nil, 1)
+	utxoKey := append(append(bytes.Clone(key), genesisMDBXHex("f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f")...), 0, 0, 0, 0)
+	manifest := make([]byte, 33)
+	manifest[0], manifest[28] = 1, 1
+	w.extra = append(w.extra,
+		sideRawRow{rank: 1, key: utxoKey, value: genesisMDBXHex("00407a10f35a0000000021018448b91b88d1a6fbb65e872b72c381b2a9f3ce286a232f56309667f639dd7279000000000000000001")},
+		sideRawRow{rank: 0, key: append([]byte{0x10}, key...), value: genesisMDBXHex("00000000000000590000000000000001")},
+		sideRawRow{rank: 5, key: append(hash[:32:32], 0), value: manifest},
+	)
 }
 
 func (w *sideWorld) sideRows() []mdbx.Mutation {
@@ -185,7 +232,7 @@ func (w *sideWorld) sideRows() []mdbx.Mutation {
 func (w *sideWorld) link(j uint64, hash, parent [32]byte, work [40]byte) mdbx.Mutation {
 	value := mdbx.ChainValue(hash, parent, work)
 	w.links[j] = value
-	return mdbx.Mutation{DBI: logicalMDBXDBIs[6], Key: logicalMDBXMust(mdbx.HeightKey(2, j)), AfterKind: mdbx.AfterLiteral, Literal: value}
+	return mdbx.Mutation{DBI: logicalMDBXDBIs[6], Key: logicalMDBXMust(mdbx.HeightKey(w.gen(), j)), AfterKind: mdbx.AfterLiteral, Literal: value}
 }
 
 func (w *sideWorld) promises() (uint64, uint64) {
@@ -198,15 +245,15 @@ func (w *sideWorld) promises() (uint64, uint64) {
 func (w *sideWorld) authorityBytes() []byte {
 	b, u := w.promises()
 	a := mdbx.StorageAuthorityV1{
-		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: w.nextID(),
 		Phase: mdbx.StoragePhaseNoneV1, Lifecycle: mdbx.StorageLifecycleStableV1,
 		SelectedSide: &mdbx.SelectedSideV1{
-			GenerationID: 2, F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
+			GenerationID: w.gen(), F: w.spec.f, TipHeight: w.spec.tip, TipHash: [32]byte(w.links[w.spec.tip][:32]),
 			CumulativeChainwork: sideWorldWork(w.spec.tip + 1), RowCount: w.spec.rows, LogicalBytes: uint64(w.spec.rows) * 266,
 		},
 	}
 	if w.spec.pendingSide {
-		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
+		a.Phase, a.Cleanup = mdbx.StoragePhasePruneGCV1, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: w.gen(), FirstHeight: w.first - 1, LastHeight: w.first - 1, NextHeight: w.first - 1}}}
 	}
 	if w.spec.maxExclusion {
 		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte{1}}
@@ -226,12 +273,12 @@ func (w *sideWorld) authorityBytes() []byte {
 // or the extended predecessor singleton keeping its progress first-1.
 func (w *sideWorld) clearedAuthority() []byte {
 	b, u := w.promises()
-	span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: w.first, LastHeight: w.spec.tip, NextHeight: w.first}
+	span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: w.gen(), FirstHeight: w.first, LastHeight: w.spec.tip, NextHeight: w.first}
 	if w.spec.pendingSide {
 		span.FirstHeight, span.NextHeight = w.first-1, w.first-1
 	}
 	a := mdbx.StorageAuthorityV1{
-		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: 3,
+		Version: 1, ActiveProfile: mdbx.StorageProfilePrunedV1, B: b, U: u, ActiveGenerationID: 1, NextGenerationID: w.nextID(),
 		Phase: mdbx.StoragePhasePruneGCV1, Lifecycle: mdbx.StorageLifecycleStableV1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{span}}, ExcludedInvalidBranch: w.exclusion,
 	}
 	encoded, err := a.Encode()
@@ -267,7 +314,7 @@ func (w *sideWorld) removeHeader(hash [32]byte) {
 }
 
 func (w *sideWorld) removeLink(j uint64) {
-	w.remove(6, logicalMDBXMust(mdbx.HeightKey(2, j)))
+	w.remove(6, logicalMDBXMust(mdbx.HeightKey(w.gen(), j)))
 	w.links[j] = nil
 }
 
@@ -338,7 +385,7 @@ func (w *sideWorld) wantImage(label string, authority []byte, cleared bool) {
 	w.t.Helper()
 	w.wantRow(label, 0, []byte{2}, authority)
 	for j, link := range w.links {
-		w.wantRow(label, 6, logicalMDBXMust(mdbx.HeightKey(2, j)), link)
+		w.wantRow(label, 6, logicalMDBXMust(mdbx.HeightKey(w.gen(), j)), link)
 	}
 	for j, hash := range w.sideAt {
 		header := w.headers[hash]
@@ -517,6 +564,128 @@ func TestSelectedSideDamageAdapter(t *testing.T) {
 		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
 		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideClearMDBX(reader); return nil })
 		logicalMDBXAssert(t, viewErr == nil && err == errSelectedSideRequest && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "side-less plan %+v (%v, %v)", plan, err, viewErr) //nolint:errorlint // The exact request refusal.
+	})
+	t.Run("plan-rolling-request", func(t *testing.T) {
+		// A legal side below 1440 rows is the exact request refusal before any artifact read: zero plan, no read class.
+		w := newSideWorld(t, sideFullSpec)
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		// errors.Is plus a nil Unwrap keeps the exact unwrapped request sentinel identity.
+		logicalMDBXAssert(t, viewErr == nil && errors.Is(err, errSelectedSideRequest) && errors.Unwrap(err) == nil && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("non-full rolling plan writes nothing", w.authority, false)
+		// M29: a legal Cleaned one-slot descriptor (F1, C1441, count 1439) is the same exact planner-domain refusal.
+		w = newSideWorld(t, sideWorldSpec{f: 1, tip: 1_441, rows: 1_439, canonicalTip: 1})
+		plan, err = SelectedSidePlanV1{}, nil
+		viewErr = w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		logicalMDBXAssert(t, viewErr == nil && errors.Is(err, errSelectedSideRequest) && errors.Unwrap(err) == nil && plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "non-full rolling plan one-slot %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("one-slot rolling plan writes nothing", w.authority, false)
+	})
+	// Full side 2..1441/F1 (count 1440, 266 logical bytes per row, mined rows unowned): the planner's own fields.
+	rollSpec := sideWorldSpec{f: 1, tip: 1_441, rows: 1_440, canonicalTip: 1}
+	// rollPlan runs the planner in one View and returns the View's own error too: Store.View returns the Reader's
+	// recorded required-read failure even when the callback returns nil (readPrimary in internal/mdbx/mdbx_cgo.go).
+	rollPlan := func(w *sideWorld) (SelectedSidePlanV1, error, error) {
+		var plan SelectedSidePlanV1
+		var err error
+		viewErr := w.store.View(func(reader *mdbx.Reader) error { plan, err = PlanSelectedSideRollingMDBX(reader); return nil })
+		return plan, err, viewErr
+	}
+	// rollRecorded requires the View error to carry the identical recorded EngineError the planner returned.
+	rollRecorded := func(t *testing.T, viewErr error, engine *mdbx.EngineError, label string) {
+		t.Helper()
+		var recorded *mdbx.EngineError
+		logicalMDBXAssert(t, engine != nil && errors.As(viewErr, &recorded) && recorded == engine, "%s: View lost the recorded failure: %v", label, viewErr)
+	}
+	t.Run("plan-rolling-healthy", func(t *testing.T) {
+		w := newSideWorld(t, rollSpec)
+		plan, err, viewErr := rollPlan(w)
+		logicalMDBXAssert(t, viewErr == nil, "healthy rolling plan view: %v", viewErr)
+		oldest := w.sideAt[2]
+		a, derr := mdbx.DecodeStorageAuthorityV1(w.authority)
+		logicalMDBXAssert(t, derr == nil, "decode: %v", derr)
+		side := *a.SelectedSide
+		side.RowCount, side.LogicalBytes = 1_439, 1_440*266-uint64(len(w.bodies[oldest]))
+		a.SelectedSide, a.Phase = &side, mdbx.StoragePhasePruneGCV1
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 2, LastHeight: 2, NextHeight: 2}}}
+		want, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil, "encode: %v", eerr)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 2 && bytes.Equal(m[0].Literal, want) &&
+			m[1].DBI.Rank == 3 && bytes.Equal(m[1].Key, oldest[:]) && m[1].AfterKind == mdbx.AfterAbsent && len(plan.Batch.Consulted) > 0, "healthy rolling plan %+v (%v)", plan, err)
+		w.wantImage("healthy rolling plan writes nothing", w.authority, false)
+	})
+	t.Run("plan-rolling-invariant", func(t *testing.T) {
+		// Legal descriptor LogicalBytes 1440 (validator: RowCount <= bytes <= RowCount*M) with a healthy oldest body of
+		// its actual length: the rolled count 1439 would hold 1440-len(body) < 1439 bytes, an illegal authority, so the
+		// plan is the local invariant with no Batch, no flag and no read class.
+		w := newSideWorld(t, rollSpec)
+		body := uint64(len(w.bodies[w.sideAt[2]]))
+		logicalMDBXAssert(t, body > 1 && body <= 1_440, "oldest body length %d outside the planted domain", body)
+		w.setDescriptor(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = 1_440 })
+		plan, err, viewErr := rollPlan(w)
+		var failure *selectedSideFailure
+		logicalMDBXAssert(t, viewErr == nil && errors.As(err, &failure) && failure.result == selectedSideInvariant && failure.cause.Error() == "selected side plan produced illegal authority" &&
+			plan.ReadResource == "" && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "illegal rolled authority plan %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("illegal rolled authority plan writes nothing", w.authority, false)
+	})
+	t.Run("plan-rolling-other-span", func(t *testing.T) {
+		// An unrelated pending GENERATION span (obsolete g3, next 4, PRUNE_GC) stays first; SIDE(2,2,2,2) follows it.
+		w := newSideWorld(t, rollSpec)
+		a, derr := mdbx.DecodeStorageAuthorityV1(w.authority)
+		logicalMDBXAssert(t, derr == nil, "decode: %v", derr)
+		a.NextGenerationID, a.Phase = 4, mdbx.StoragePhasePruneGCV1
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}}}
+		pre, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil && mdbx.ValidateStorageAuthorityV1(a) == nil, "GENERATION pre-state: %v", eerr)
+		w.authority = pre
+		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: pre})
+		plan, err, viewErr := rollPlan(w)
+		side := *a.SelectedSide
+		side.RowCount, side.LogicalBytes = 1_439, 1_440*266-uint64(len(w.bodies[w.sideAt[2]]))
+		a.SelectedSide = &side
+		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}, {Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 2, LastHeight: 2, NextHeight: 2}}}
+		want, eerr := a.Encode()
+		logicalMDBXAssert(t, eerr == nil, "encode: %v", eerr)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, viewErr == nil && err == nil && !plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 2 && bytes.Equal(m[0].Literal, want), "other-span rolling plan %+v (%v, %v)", plan, err, viewErr)
+		w.wantImage("other-span rolling plan writes nothing", w.authority, false)
+	})
+	t.Run("plan-rolling-positive", func(t *testing.T) {
+		w := newSideWorld(t, rollSpec)
+		w.removeBody(2)
+		plan, err, viewErr := rollPlan(w)
+		logicalMDBXAssert(t, viewErr == nil, "positive rolling plan view: %v", viewErr)
+		m := plan.Batch.Mutations
+		logicalMDBXAssert(t, err == nil && plan.PositiveDamageClear && plan.ReadResource == "" && len(m) == 1+1_440 && bytes.Equal(m[0].Literal, w.clearedAuthority()), "positive rolling plan flag/clear %+v (%v)", plan.PositiveDamageClear, err)
+	})
+	t.Run("plan-rolling-error", func(t *testing.T) {
+		// A missing oldest required link: zero plan, no positive flag, the failed read keeps its branch_data class.
+		w := newSideWorld(t, rollSpec)
+		w.removeLink(2)
+		plan, err, viewErr := rollPlan(w)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
+			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "failed rolling plan %+v (%v)", plan, err)
+		rollRecorded(t, viewErr, engine, "missing oldest link")
+		// The recorded required-read failure consumed the Store: the next View returns that exact terminal error; the
+		// unchanged persistent image is read after reopen.
+		w.wantConsumed("missing oldest link", viewErr)
+		w.reopen()
+		w.wantImage("missing oldest link plan writes nothing", w.authority, false)
+		// Positively absent optional oldest body, then an absent required SideLink(2,first+1) in the complete transfer:
+		// the required read's integrity error, zero Mutations and Consulted, no flag, its failed-read branch_data class.
+		w = newSideWorld(t, rollSpec)
+		w.removeBody(2)
+		w.removeLink(3)
+		plan, err, viewErr = rollPlan(w)
+		engine = nil
+		logicalMDBXAssert(t, errors.As(err, &engine) && engine.Class == mdbx.EngineIntegrity && engine.Operation == "get" && engine.Code == -30_793 && engine.Diagnostic == "selected side link is absent" &&
+			plan.ReadResource == selectedSideBranch && !plan.PositiveDamageClear && plan.Batch.Mutations == nil && plan.Batch.Consulted == nil, "incomplete plan/stronger error is not positive clear %+v (%v)", plan, err)
+		rollRecorded(t, viewErr, engine, "incomplete plan")
+		w.wantConsumed("incomplete plan", viewErr)
+		w.reopen()
+		w.wantImage("incomplete plan writes nothing", w.authority, false)
 	})
 	t.Run("classify", func(t *testing.T) {
 		// The exported classifier: a bound finite leaf (qualifier result, or a TxError with its own code) replaces its own
