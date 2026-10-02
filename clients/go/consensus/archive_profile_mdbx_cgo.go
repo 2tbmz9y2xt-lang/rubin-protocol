@@ -52,6 +52,11 @@ const _ = mdbx.MaxOperationDataBytes - archiveSelectedSideCharge
 // wrong-leaf API refusal keeps its raw error with an empty Result; anything else uncrossed is classified.
 func SelectArchiveSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner) selectedSideOutcome {
 	out := selectedSideOutcome{CanonicalTruth: "OLD", Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
+	if store == nil { // Before any grant: the Store's own direct nil-Store API refusal, whatever the owner.
+		out.Truth, out.Stage, out.Err = store.Update(nil)
+		out.CanonicalTruth = ""
+		return out
+	}
 	sentinel := errors.New("archive selected side decision")
 	var decision string
 	var leaf error

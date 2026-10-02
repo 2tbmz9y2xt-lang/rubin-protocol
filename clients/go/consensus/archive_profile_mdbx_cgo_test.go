@@ -207,12 +207,48 @@ func TestArchiveSelectedSide(t *testing.T) {
 		w.wantImage("unverified owner leaves the original image", w.authority, false)
 		sideWantReleased(t, w.owner, "unverified owner")
 	})
+	t.Run("R-domain-profile-max-work", func(t *testing.T) {
+		// H0 whose genesis work is exactly 2^288 (byte 3 = 1), the inclusive domain maximum: the identity is legal H0 and
+		// stops at the wrong-leaf refusal, not canonical integrity.
+		w := newSideWorld(t, sideWorldSpec{f: 0, tip: 1, rows: 1, canonicalTip: 0})
+		var work [40]byte
+		work[3] = 1
+		w.setEntry(0, [32]byte{}, work)
+		profileWantLeaf(t, w, w.profile(), "archive at or before genesis belongs to SelectArchiveProfileV1", "max-work H0 wrong leaf")
+		w.wantImage("max-work H0 image", w.authority, false)
+	})
 	t.Run("inputs", func(t *testing.T) {
+		// A nil Store is the Store's direct nil-Store refusal before any grant with every owner: valid, nil, zero and a
+		// valid owner whose full lane is already held.
 		owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
 		logicalMDBXAssert(t, err == nil, "owner: %v", err)
-		out := SelectArchiveSelectedSideMDBX(nil, owner)
-		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "nil Store")
-		sideWantEngine(t, out.Err, mdbx.EngineInvalidInput, "nil Store", "nil Store")
+		nilStore := func(o *mdbx.OperationReservationOwner, label string) {
+			t.Helper()
+			out := SelectArchiveSelectedSideMDBX(nil, o)
+			sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, label)
+			sideWantEngine(t, out.Err, mdbx.EngineInvalidInput, "nil Store", label)
+		}
+		nilStore(owner, "nil Store, valid owner")
+		nilStore(nil, "nil Store, nil owner")
+		nilStore(&mdbx.OperationReservationOwner{}, "nil Store, zero owner")
+		held := owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { nilStore(owner, "nil Store, held owner"); return nil })
+		logicalMDBXAssert(t, held == nil, "held full lane: %v", held)
 		sideWantReleased(t, owner, "nil Store")
+		// A valid Store with a nil or zero owner returns that owner's own input refusal, and with the full lane already held
+		// the owner's exact capacity refusal; no Update, empty fields, image unchanged.
+		w := newSideWorld(t, sideFullSpec)
+		for _, o := range []*mdbx.OperationReservationOwner{nil, {}} {
+			want := o.WithReservation(mdbx.MaxOperationDataBytes, func() error { return nil })
+			out := SelectArchiveSelectedSideMDBX(w.store, o)
+			sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "owner input refusal")
+			logicalMDBXAssert(t, want != nil && out.Err != nil && out.Err.Error() == want.Error() && errors.Is(out.Err, want), "owner input refusal %v, want %v", out.Err, want)
+		}
+		var out selectedSideOutcome
+		held = w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { out = w.profile(); return nil })
+		logicalMDBXAssert(t, held == nil, "held full lane: %v", held)
+		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "capacity refusal")
+		logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == selectedSideCapacityText, "capacity refusal %v", out.Err)
+		w.wantImage("owner refusals leave the image", w.authority, false)
+		sideWantReleased(t, w.owner, "owner refusals")
 	})
 }
