@@ -193,10 +193,9 @@ func TestArchiveSelectedSide(t *testing.T) {
 		w.wantImage("first-work integrity image", w.authority, false)
 	})
 	t.Run("R-domain-profile-height", func(t *testing.T) {
-		// The genesis index entry removed: the page's first row is height 1, canonical integrity.
+		// The genesis index entry and its paired owner removed: the page's first row is height 1, canonical integrity.
 		w := newSideWorld(t, sideFullSpec)
-		w.remove(2, logicalMDBXMust(mdbx.HeightKey(1, 0)))
-		w.entries[0] = nil
+		w.removeCanonical(0)
 		sideWantCause(t, w.profile(), "archive canonical index does not start at genesis", "first-height integrity")
 		w.wantImage("first-height integrity image", w.authority, false)
 	})

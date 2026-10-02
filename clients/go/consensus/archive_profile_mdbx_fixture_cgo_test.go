@@ -56,8 +56,12 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 			logicalMDBXAssert(t, errors.As(out.Err, &commit) && commit.Truth == c.truth && evidence.Commits == 1, "%s: raw commit error %v (%+v)", c.name, out.Err, evidence)
 			switch c.truth {
 			case mdbx.CommitTruthOld:
+				w.wantConsumed(c.name, out.Err)
+				w.reopen()
 				w.wantImage(c.name+": exact old image", w.authority, false)
 			case mdbx.CommitTruthNew:
+				w.wantConsumed(c.name, out.Err)
+				w.reopen()
 				w.wantImage(c.name+": exact pending-ARCHIVE authority, still RECOVERY_REQUIRED", w.profileAuthority(), true)
 			}
 			sideWantReleased(t, w.owner, c.name)
@@ -71,6 +75,8 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 			out, evidence := w.armedProfile(t, mdbx.SelectedDamageCommitUnreadable, 2, logicalMDBXMust(mdbx.HeightKey(1, height)))
 			sideWantOutcome(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", mdbx.CommitTruthUnknown, crossed, "identity row captured")
 			logicalMDBXAssert(t, evidence.Commits == 1, "identity row commit evidence %+v", evidence)
+			w.wantConsumed("identity row captured", out.Err)
+			w.reopen()
 			w.wantImage("identity row committed NEW image", w.profileAuthority(), true)
 		})
 	}
@@ -80,6 +86,8 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "no-callback begin keeps empty fields")
 		profileWantNative(t, out.Err, "PROFILE begin", mdbx.EngineIO)
 		logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.OldGets == [8]uint64{}, "begin evidence %+v", evidence)
+		w.wantConsumed("PROFILE begin", out.Err)
+		w.reopen()
 		w.wantImage("begin failure image", w.authority, false)
 	})
 	for _, c := range []struct {
@@ -102,6 +110,8 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 			logicalMDBXAssert(t, evidence.BeginWrite == 1 && evidence.Faults == 1 && evidence.Commits == 0 && evidence.BeginRead == 0 && (c.scen != mdbx.SelectedDamageDeleteEIO || evidence.Deletes == 1),
 				"%s exact site evidence %+v", c.name, evidence)
 			sideWantReleased(t, w.owner, c.name)
+			w.wantConsumed(c.name, out.Err)
+			w.reopen()
 			w.wantImage(c.name+": precommit keeps OLD", w.authority, false)
 		})
 	}
@@ -251,6 +261,8 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		out, _ := armedHeld(t, w, mdbx.SelectedDamageBeginEIO, 0, nil)
 		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "control begin failure empty fields")
 		profileWantNative(t, out.Err, "control begin", mdbx.EngineIO)
+		w.wantConsumed("control begin", out.Err)
+		w.reopen()
 		w.wantImage("control begin image", w.authority, false)
 	})
 	t.Run("R-l-control-authority-eio", func(t *testing.T) {
