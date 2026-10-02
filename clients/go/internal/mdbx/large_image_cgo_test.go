@@ -308,7 +308,6 @@ func largeTestConcurrency(t *testing.T) {
 	drainStore, _, _ := consultedStore(t)
 	inFlight := nativeError(operationGet, codeEIO)
 	var visitResult error
-	expirySeen := make(chan bool, 1)
 	truth, stage, result := drainStore.Update(func(reader *Reader) (Batch, error) {
 		visitResult = reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(row LargeImageRowV1) error {
 			// Model the same getMu ownership as an in-flight native ReadAt.
@@ -316,15 +315,13 @@ func largeTestConcurrency(t *testing.T) {
 			ready := make(chan struct{})
 			go func() {
 				close(ready)
-				for attempts := 0; attempts < 1_000_000 && row.span.active.Load(); attempts++ { runtime.Gosched() }
-				expirySeen <- !row.span.active.Load()
+				for row.span.active.Load() { runtime.Gosched() }
 				reader.largeFailure(inFlight)
 				reader.getMu.Unlock()
 			}()
 			<-ready
 			return nil
 		})
-		if !<-expirySeen { t.Fatal("row expiry did not deactivate the shared span") }
 		if visitResult != inFlight { t.Fatalf("row expiry failed to drain its recorded native failure: %v", visitResult) }
 		return Batch{Mutations: []Mutation{consultedCounter(t, 1)}}, nil
 	})
