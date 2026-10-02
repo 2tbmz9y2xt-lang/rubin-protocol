@@ -543,7 +543,7 @@ func largeNativeCallbacks(t *testing.T) {
 func largeCallbackCauses(t *testing.T, result, application, recorded error, fault uint32) {
 	t.Helper()
 	if fault == 24 {
-		engine := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, 16, expectedNativeDiagnostic(16))
+		engine := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, expectedNativeDiagnostic(-30778))
 		if engine.Cause == nil || engine.ReopenRequired {
 			t.Fatal("retained close cause/reopen")
 		}
@@ -615,7 +615,7 @@ func largeNativeCleanup(t *testing.T) {
 			t.Fatalf("cleanup CommitError: %v", err)
 		}
 		if mode == 11 {
-			closeError := requireEnvironmentError(t, err, EngineClass("Concurrency"), operationClose, 16, expectedNativeDiagnostic(16))
+			closeError := requireEnvironmentError(t, err, EngineClass("Concurrency"), operationClose, -30778, expectedNativeDiagnostic(-30778))
 			if closeError.Cause != commit {
 				t.Fatal("close failure lost exact CommitError cause")
 			}

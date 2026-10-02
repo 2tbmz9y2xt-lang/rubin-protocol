@@ -305,7 +305,7 @@ func largeTestConcurrency(t *testing.T) {
 			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 1}, func(LargeImageRowV1) error {
 				t.Fatal("nested visitor ran")
 				return nil
-			}), "Concurrency", 16, "large image visit in progress")
+			}), "Concurrency", -30778, "large image visit in progress")
 			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, nil), "InvalidInput", 22, "nil large image visitor")
 			largeRequireError(t, reader.VisitLargeImageV1(LargeImageSelectorV1{}, func(LargeImageRowV1) error {
 				t.Fatal("invalid nested kind callback")
@@ -315,7 +315,7 @@ func largeTestConcurrency(t *testing.T) {
 			go func() {
 				concurrent <- reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: 2}, func(LargeImageRowV1) error { return errors.New("concurrent visitor ran") })
 			}()
-			largeRequireError(t, <-concurrent, "Concurrency", 16, "large image visit in progress")
+			largeRequireError(t, <-concurrent, "Concurrency", -30778, "large image visit in progress")
 			if _, _, err := reader.Get(readDBIsLiteral()[0], []byte{0}); err != nil {
 				return err
 			}
@@ -326,7 +326,7 @@ func largeTestConcurrency(t *testing.T) {
 				t.Fatal("busy Store callback ran")
 				return nil
 			})
-			requireEnvironmentError(t, busy, EngineClass("Concurrency"), operationView, 16, "store operation in progress")
+			requireEnvironmentError(t, busy, EngineClass("Concurrency"), operationView, -30778, "store operation in progress")
 			return nil
 		})
 	}))
