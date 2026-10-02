@@ -72,9 +72,14 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 			// The identity rows g0/g1 are relied-on Consulted rows: a readback fault on either turns the committed image
 			// UNKNOWN; the tuple is checked before fixture bookkeeping, NEW image independently.
 			w := rawSideWorld(t, sideFullSpec)
-			out, evidence := w.armedProfile(t, mdbx.SelectedDamageCommitUnreadable, 2, logicalMDBXMust(mdbx.HeightKey(1, height)))
-			sideWantOutcome(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", mdbx.CommitTruthUnknown, crossed, "identity row captured")
-			logicalMDBXAssert(t, evidence.Commits == 1, "identity row commit evidence %+v", evidence)
+			var out selectedSideOutcome
+			calls := 0
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageCommitUnreadable, 2, logicalMDBXMust(mdbx.HeightKey(1, height)), func() {
+				calls++
+				out = w.profile()
+				sideWantOutcome(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", mdbx.CommitTruthUnknown, crossed, "identity row captured")
+			})
+			logicalMDBXAssert(t, err == nil && calls == 1 && evidence.Commits == 1, "identity row fixture site %v calls %d (%+v)", err, calls, evidence)
 			w.wantConsumed("identity row captured", out.Err)
 			w.reopen()
 			w.wantImage("identity row committed NEW image", w.profileAuthority(), true)
