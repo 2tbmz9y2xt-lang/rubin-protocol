@@ -713,7 +713,57 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		out, _ := armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, raw)
 		retainWant(t, "RF capacity sentinel abort storage_io", out, retainStorageIO, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
 		ssqWantNative(t, "RF capacity sentinel abort", out.Err, ssqAbortEIO)
+		// The abort consumed the Store: the next RF is answered from its cached raw error with empty invocation fields,
+		// no callback, retry or write; the image is read after the helper's reopen.
+		next := w.refill(raw)
+		retainWant(t, "RF cached next call empty fields", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+		if !errors.Is(next.Err, out.Err) || !errors.Is(out.Err, next.Err) {
+			t.Fatalf("RF cached raw error %v, want %v", next.Err, out.Err)
+		}
 		w.wantImage("RF capacity abort keeps OLD")
+	})
+	// H12 RF typed refusals + abort EIO at the real Refill: the first typed result (domain branch_data on a full side;
+	// steps-1-12 CONSENSUS_INVALID for a wrong-merkle candidate whose physical first header names it) survives the
+	// nonterminal abort with the ordered raw join; no clean decision, no write.
+	t.Run("H12-RF-typed-abortIO", func(t *testing.T) {
+		w, full := rollFixtureWorld(t)
+		out, evidence := armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, full)
+		retainWantRefusal(t, "RF domain typed result kept over abort IO", out, ssqBranch, "selected side refill needs a cleaned one-slot side without a pending SIDE")
+		ssqWantNative(t, "RF domain abort", out.Err, ssqAbortEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("RF domain abort wrote: %+v", evidence)
+		}
+		w.wantImage("RF domain abort keeps OLD")
+		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte { return retainMerkle(w.childAt(prev, w.ts(prev)+120, consensus.POW_LIMIT, nil)) })
+		w.absent = append(w.absent, ssqHash(raw))
+		out, evidence = armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, raw)
+		retainWant(t, "RF steps typed result kept over abort IO", out, "CONSENSUS_INVALID("+string(consensus.BLOCK_ERR_MERKLE_INVALID)+")", "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+		ssqWantNative(t, "RF steps abort", out.Err, ssqAbortEIO)
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("RF steps abort wrote: %+v", evidence)
+		}
+		w.wantImage("RF steps abort keeps OLD")
+	})
+	t.Run("R-h-link-width", func(t *testing.T) {
+		// A malformed-width SideLink(2,2) (ordinary Update grammar cannot write it; FixtureSeedRawRow seeds the exact
+		// bytes): Reader.Get records the width integrity failure, so RF is canonical integrity with that exact raw cause,
+		// no write/commit, and the recorded failure consumes the Store (applyReadAbort with infrastructure): the next RF
+		// returns the cached error with empty fields; the damaged image is read after reopen.
+		w, raw, _ := rfFixture(t)
+		key := ssqMust(mdbx.HeightKey(2, 2))
+		w.seed(6, key, []byte{0x01, 0x02, 0x03})
+		out, evidence := armedRefill(w, mdbx.SelectedDamageProbeOnly, 0, nil, raw)
+		retainWantIntegrity(t, "malformed missing-height link canonical integrity", out, "stored value width outside SchemaV2 bound")
+		if evidence.BeginWrite != 0 || evidence.Commits != 0 {
+			t.Fatalf("malformed link wrote: %+v", evidence)
+		}
+		next := w.refill(raw)
+		retainWant(t, "RF cached next call after recorded integrity", next, "", "", "", old, mdbx.UpdateStagePrewrite, false)
+		if !errors.Is(next.Err, out.Err) || !errors.Is(out.Err, next.Err) {
+			t.Fatalf("RF cached raw error %v, want %v", next.Err, out.Err)
+		}
+		w.wantImage("malformed link image after reopen")
+		w.wantAbsent("no candidate body", 4, w.sideKey(2))
 	})
 	// LF[H11-union]: the exact composed identity union of the real Prepare is admitted at 16384 (authority the only
 	// target) and refused at 16385 (authority plus the unowned tip header) before any callback Batch or native OLD.
