@@ -63,7 +63,6 @@ func rfWorld(t *testing.T, tip, f, first, gap uint64, cand func(w *ssqWorld, pre
 		switch {
 		case j == first-1 && cand != nil:
 			block = cand(w, prev)
-			w.headers[ssqHash(block)] = block[:consensus.BLOCK_HEADER_BYTES]
 		case j < first && (gap == 0 || j == first-1):
 			block = w.child(prev, j, nil)
 		case j < first:
@@ -71,10 +70,12 @@ func rfWorld(t *testing.T, tip, f, first, gap uint64, cand func(w *ssqWorld, pre
 		default:
 			inherited := [32]byte(w.headers[prev][76:108])
 			block = ssqMine(t, prev, w.ts(prev)+113, inherited, nil)
-			w.headers[ssqHash(block)] = block[:consensus.BLOCK_HEADER_BYTES]
 			cumulative.Add(cumulative, rfBlockWork(inherited))
 		}
+		// Every produced block's real header is tracked here, before the next iteration reads its target, timestamp
+		// or child context (child()/childAt() and ssqMine do not track it; mined() already did, identically).
 		hash := ssqHash(block)
+		w.headers[hash] = block[:consensus.BLOCK_HEADER_BYTES]
 		w.side[j] = hash
 		// An already committed identical header (a canonical candidate) is reused, never reinserted (NOOVERWRITE).
 		if _, tracked := w.rows[string(append([]byte{3}, hash[:]...))]; !tracked {
