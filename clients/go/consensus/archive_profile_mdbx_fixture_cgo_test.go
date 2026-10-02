@@ -211,6 +211,22 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 			w.wantImage(c.name+": image after reopen", w.authority, false)
 		})
 	}
+	t.Run("A9-original-reopen-abortIO", func(t *testing.T) {
+		// Same unverified original prestate plus abort EIO: the empty first API classification survives (not storage_io)
+		// with the raw ordered InvalidInput then IO causes; the Store is consumed and the next call is the cached raw
+		// error with empty fields; the untouched image is read after reopen; the grant is released.
+		w := rawSideWorld(t, sideFullSpec)
+		w.reopen()
+		first, _ := w.armedProfile(t, mdbx.SelectedDamageAbortEIO, 0, nil)
+		sideWantOutcome(t, first, "", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "unverified owner kept over abort IO")
+		profileWantNative(t, first.Err, "unverified owner abort", mdbx.EngineInvalidInput, mdbx.EngineIO)
+		next := w.profile()
+		sideWantOutcome(t, next, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "cached next call empty fields")
+		logicalMDBXAssert(t, errors.Is(next.Err, first.Err) && errors.Is(first.Err, next.Err), "cached raw error %v, want %v", next.Err, first.Err)
+		sideWantReleased(t, w.owner, "unverified owner abort")
+		w.reopen()
+		w.wantImage("untouched original image after reopen", w.authority, false)
+	})
 	t.Run("lifetime", func(t *testing.T) {
 		w := rawSideWorld(t, sideFullSpec)
 		out, evidence := w.armedProfile(t, mdbx.SelectedDamageProbeOnly, 0, nil)

@@ -22,7 +22,7 @@ func (w *sideWorld) setAuthority(edit func(*mdbx.StorageAuthorityV1)) {
 	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: encoded})
 }
 
-// profileAuthority is the spec's cleared authority (no selected side, PRUNE_GC, SIDE(2,first,tip,first)) with the
+// profileAuthority is the spec's cleared authority (no selected side, PRUNE_GC, SIDE(g,first,tip,first)) with the
 // PROFILE effect: RECOVERY_REQUIRED and a pending ARCHIVE target; PRUNED stays active, B/U/generations/next unchanged.
 func (w *sideWorld) profileAuthority() []byte {
 	w.t.Helper()
@@ -181,13 +181,27 @@ func TestArchiveSelectedSide(t *testing.T) {
 		w.wantImage("first-height integrity image", w.authority, false)
 	})
 	t.Run("R-domain-profile-upper-work", func(t *testing.T) {
-		// Genesis work 2^288+2^256-ish (byte 3 = 2) is above the 2^288 domain: canonical integrity.
+		// Genesis work with byte 3 = 2 (40-byte big-endian) is exactly 2^289, above the 2^288 domain: canonical integrity.
 		w := newSideWorld(t, sideFullSpec)
 		var work [40]byte
 		work[3] = 2
 		w.setEntry(0, [32]byte{}, work)
 		sideWantCause(t, w.profile(), "invalid archive profile genesis work", "upper-work integrity")
 		w.wantImage("upper-work integrity image", w.authority, false)
+	})
+	t.Run("A9-original-reopen", func(t *testing.T) {
+		// The eligible NONE/STABLE PRUNED H>0 prestate reopened before the first public PROFILE (no verification): the
+		// clear planner's leaving-row CanonicalOwner is the direct unclassified get EINVAL, empty Result, OLD/Prewrite,
+		// no effect and a released grant.
+		w := newSideWorld(t, sideFullSpec)
+		w.reopen()
+		out := w.profile()
+		sideWantOutcome(t, out, "", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "unverified owner on the original prestate")
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, errors.As(out.Err, &engine) && errors.Is(out.Err, engine) && errors.Is(engine, out.Err) && engine.Class == mdbx.EngineInvalidInput &&
+			engine.Operation == "get" && engine.Code == 22 && engine.Diagnostic == "canonical owner index is not verified", "unverified owner raw error %v", out.Err)
+		w.wantImage("unverified owner leaves the original image", w.authority, false)
+		sideWantReleased(t, w.owner, "unverified owner")
 	})
 	t.Run("inputs", func(t *testing.T) {
 		owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)

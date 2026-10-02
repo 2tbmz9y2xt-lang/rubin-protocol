@@ -30,11 +30,16 @@ const (
 	// keys and two 104-byte entries, their Go copies and row descriptors), the 8-byte prefix and the two 16-byte g0/g1
 	// keys with their ConsultedRow descriptors.
 	archiveSelectedSideIdentityBytes uint64 = 512
-	// archiveSelectedSideCharge is PROFILE's whole preflighted charge inside its one full-lane grant: the identity
-	// envelope, the finite outer bookkeeping (decoded authority, sentinel, decision, outcome, the appended g0/g1 union
-	// capacity: selectedSideFixedCharge) and Pclear, the clear planner's checked transfer sublimit that already covers
-	// its arrays, keys, headers, owners, authority images and Batch. No qualifier, candidate or body is read.
-	archiveSelectedSideCharge = archiveSelectedSideIdentityBytes + selectedSideFixedCharge + selectedSideTransferBytes
+	// archiveSelectedSideOutside is Eoutside over its logical lifetime: three MaxMetadataBytes authority buffers held
+	// beside Pclear (the outer decoded authority with its exclusion, this consumer's second Decode of the planner literal
+	// and its new Encode literal; the earlier outer Get/Decode peak does not overlap them), the two exact-length outside
+	// union arrays (the g0/g1 copy and selectedSideReadback's output, each < 16384 descriptors of 64 bytes) and 131072
+	// of fixed bookkeeping (sentinel, decision, outcome, keys, control structs and rounding).
+	archiveSelectedSideOutside uint64 = 3*mdbx.MaxMetadataBytes + 2*16_384*64 + 131_072
+	// archiveSelectedSideCharge is PROFILE's whole charge inside its one full-lane grant: the identity envelope,
+	// Eoutside and Pclear (the clear planner's checked transfer sublimit, which already covers its own arrays, keys,
+	// headers, owners, original literal and native OLD images): 13763072. No qualifier, candidate or body is read.
+	archiveSelectedSideCharge = archiveSelectedSideIdentityBytes + archiveSelectedSideOutside + selectedSideTransferBytes
 )
 
 // The whole PROFILE charge fits the full lane held before any page, evidence or planner allocation; a violation does
@@ -171,7 +176,10 @@ func archiveSelectedSideClear(reader *mdbx.Reader, a mdbx.StorageAuthorityV1, de
 	g0, _ := mdbx.HeightKey(a.ActiveGenerationID, 0) // Legal authority proved the generation nonzero.
 	g1, _ := mdbx.HeightKey(a.ActiveGenerationID, 1)
 	dbi := mdbx.SchemaV2DBIs()[2]
-	consulted := append(plan.Batch.Consulted, mdbx.ConsultedRow{DBI: dbi, Key: g0}, mdbx.ConsultedRow{DBI: dbi, Key: g1})
+	// Exact-length allocation (never append growth): planner rows plus g0/g1, at most 4*1440+2+2 < 16384 descriptors.
+	consulted := make([]mdbx.ConsultedRow, len(plan.Batch.Consulted)+2)
+	copy(consulted, plan.Batch.Consulted)
+	consulted[len(consulted)-2], consulted[len(consulted)-1] = mdbx.ConsultedRow{DBI: dbi, Key: g0}, mdbx.ConsultedRow{DBI: dbi, Key: g1}
 	plan.Batch.Consulted = selectedSideReadback(consulted, plan.Batch.Mutations)
 	return plan.Batch, &cleared, nil
 }
