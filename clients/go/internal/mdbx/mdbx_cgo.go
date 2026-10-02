@@ -1922,7 +1922,7 @@ func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch 
 	return batch, panicValue, panicked, err
 }
 
-func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn, large *largeImageScope) ([]ownedMutation, []ownedConsulted, error) {
+func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	returned := false
 	defer func() {
 		if returned {
@@ -1941,26 +1941,25 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
 	}
 	if primary != nil {
-		return nil, nil, s.abortReadLocked(old, primary, infrastructure)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, primary, infrastructure)
 	}
 	plan, planErr := updateOwnedBatch(batch)
 	if planErr != nil {
-		return nil, nil, s.abortReadLocked(old, planErr, false)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
-		return nil, nil, s.abortReadLocked(old, consultedErr, false)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, consultedErr, false)
 	}
 	infrastructure, captureErr := updateNativeConsultedImages(old, s.dbis, consulted)
 	if captureErr != nil {
-		return nil, nil, s.abortReadLocked(old, captureErr, infrastructure)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, captureErr, infrastructure)
 	}
-	var largeErr error
-	*large, largeErr = updateOwnedLarge(batch, consulted, reader.maxKey)
+	large, largeErr := updateOwnedLarge(batch, consulted, reader.maxKey)
 	if largeErr != nil {
-		return nil, nil, s.abortReadLocked(old, largeErr, false)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, largeErr, false)
 	}
-	return plan, consulted, nil
+	return plan, consulted, large, nil
 }
 
 func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, UpdateStage, error) {
@@ -2055,8 +2054,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)
-	var large largeImageScope
-	plan, consulted, planErr := s.updatePlan(callback, reader, begun.txn, &large)
+	plan, consulted, large, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, planErr
 	}

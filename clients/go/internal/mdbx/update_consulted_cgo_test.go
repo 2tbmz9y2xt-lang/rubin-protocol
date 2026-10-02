@@ -647,5 +647,5 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	// The three production comparisons: updateKeyOrdered, the updateNativeImages target closure and the prefix-page seek.
 	require(strings.Count(text, "bytes.Compare(") == 3, "bytes.Compare census drifted")
 	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)")
-	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn, large)", "updateAbortOld(begun.txn)")
+	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, large, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn, large)", "updateAbortOld(begun.txn)")
 }
