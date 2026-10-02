@@ -51,7 +51,11 @@ const _ = mdbx.MaxOperationDataBytes - archiveSelectedSideCharge
 // SelectArchiveSelectedSideMDBX is the PROFILE-origin selected-side ARCHIVE selection. Clean NEW has an empty Result
 // and CanonicalTruth NEW; a crossed error is TERMINAL_PERSISTENCE(old|new|neither_or_unreadable) with that logical
 // truth; the exact no-write decisions RECOVERY_REQUIRED, PROFILE_NOOP and LOCAL_BUSY are OLD/Prewrite with nil Err; a
-// wrong-leaf API refusal keeps its raw error with an empty Result; anything else uncrossed is classified.
+// wrong-leaf API refusal keeps its raw error with an empty Result; anything else uncrossed is classified. On the
+// owner's exact capacity refusal the control-only Update yields RECOVERY_REQUIRED, PROFILE_NOOP or
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity), each OLD/Prewrite with nil Err. A nil Store returns the Store's direct
+// nil-Store update error, a nil or zero owner its own input error, and a native outcome whose Reader callback never ran
+// (begin failure, cached terminal) its raw tuple; each of these has an empty Result and CanonicalTruth.
 func SelectArchiveSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner) selectedSideOutcome {
 	out := selectedSideOutcome{CanonicalTruth: "OLD", Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if store == nil { // Before any grant: the Store's own direct nil-Store API refusal, whatever the owner.
