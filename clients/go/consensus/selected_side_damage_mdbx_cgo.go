@@ -157,8 +157,8 @@ func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) 
 // PlanSelectedSideRollingMDBX plans RP in the caller's Reader: strict authority, a full 1440-row side, then the
 // existing health of its oldest row. A healthy oldest row leaves into SIDE(g,first,first,first): count 1439 and logical
 // bytes minus that row's actual body length, its header deleted unless CanonicalOwnerV1 or a hash in the remaining
-// selected interval first+1..tip keeps it, its body and link kept; tip, work, g, F, next and every other field and span stay. Positive oldest damage plans the complete clear
-// instead, the only PositiveDamageClear plan. It owns no grant or Update; an error carries no Batch, no positive flag
+// selected interval first+1..tip keeps it, its body and link kept; tip, work, g, F, next and every other field and
+// span stay. Positive oldest damage plans the complete clear instead, the only PositiveDamageClear plan. It owns no grant or Update; an error carries no Batch, no positive flag
 // and the failed artifact read class.
 func PlanSelectedSideRollingMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) {
 	authority, err := reader.ReadStorageAuthorityV1()

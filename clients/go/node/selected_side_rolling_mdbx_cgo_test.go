@@ -778,7 +778,7 @@ func TestSelectedSideRolling(t *testing.T) {
 	t.Run("R-f", func(t *testing.T) {
 		// Cleaned one-slot F0/C1441/count1439: Prepare refuses with no second SIDE or automatic RA.
 		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
-		w.retainSide(0, 1_441, 1_439, 1_442, true)
+		w.exactSide(w.retainSide(0, 1_441, 1_439, 1_442, true), 3, 1_441)
 		out := w.prepareSide(w.child(w.side[1_441], 1_442, nil), w.tipAt(2))
 		retainWantRefusal(t, "no second SIDE/shrink", out, ssqBranch, "selected side rolling preparation needs an exact-tip child of a full side")
 		w.wantImage("one-slot side unchanged")
@@ -833,6 +833,7 @@ func TestSelectedSideRolling(t *testing.T) {
 		for _, fits := range []bool{false, true} {
 			w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
 			blocks := w.retainSide(0, 1_440, 1_440, 1_441, false)
+			w.exactSide(blocks, 1, 1_440)
 			n := (437_205-len(blocks[1_440]))/2 + 1
 			if fits {
 				n--
