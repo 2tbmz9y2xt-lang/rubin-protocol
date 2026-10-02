@@ -156,8 +156,8 @@ func PlanSelectedSideClearMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) 
 
 // PlanSelectedSideRollingMDBX plans RP in the caller's Reader: strict authority, a full 1440-row side, then the
 // existing health of its oldest row. A healthy oldest row leaves into SIDE(g,first,first,first): count 1439 and logical
-// bytes minus that row's actual body length, its header deleted unless CanonicalOwnerV1 keeps it, its body and link
-// kept; tip, work, g, F, next and every other field and span stay. Positive oldest damage plans the complete clear
+// bytes minus that row's actual body length, its header deleted unless CanonicalOwnerV1 or a hash in the remaining
+// selected interval first+1..tip keeps it, its body and link kept; tip, work, g, F, next and every other field and span stay. Positive oldest damage plans the complete clear
 // instead, the only PositiveDamageClear plan. It owns no grant or Update; an error carries no Batch, no positive flag
 // and the failed artifact read class.
 func PlanSelectedSideRollingMDBX(reader *mdbx.Reader) (SelectedSidePlanV1, error) {
@@ -252,7 +252,8 @@ type selectedSideCachedRow struct {
 }
 
 // selectedSideEvidence holds the observations of one committed pre-state; every relied-on row enters consulted. All
-// collections are preallocated to their proved bounds for n leaving rows: n link slots (nil is an unread slot; a link is
+// collections are preallocated to their proved bounds for the n pre-state selected rows (all leaving in a clear, the
+// RP remaining-keep scan reading the other n-1): n link slots (nil is an unread slot; a link is
 // cached only once read and valid), at most n distinct hash records, and at most 4n+2 consulted rows.
 type selectedSideEvidence struct {
 	reader     *mdbx.Reader
@@ -612,7 +613,7 @@ func (e *selectedSideEvidence) roll(p *selectedSideDamagePlan) (mdbx.Batch, bool
 		batch, err := e.transfer(p)
 		return batch, err == nil, err
 	}
-	target, err := e.leaving(p, p.height)
+	target, err := e.shrinking(p)
 	if err != nil {
 		return mdbx.Batch{}, false, err
 	}
@@ -626,6 +627,29 @@ func (e *selectedSideEvidence) roll(p *selectedSideDamagePlan) (mdbx.Batch, bool
 	}
 	batch, err := e.authorityBatch(encoded, deletes)
 	return batch, false, err
+}
+
+// shrinking returns RP's header deletion for the healthy leaving oldest row. A CanonicalOwnerV1 keep is sufficient and
+// reads no remaining link. Otherwise every remaining selected SideLink first+1..tip is read ascending through link (its
+// cache, charge and Consulted), even after a hash match, so a later absent, undecodable or transient identity still
+// refuses before any Batch; a match anywhere in that interval keeps the header.
+func (e *selectedSideEvidence) shrinking(p *selectedSideDamagePlan) (*mdbx.Mutation, error) {
+	target, err := e.leaving(p, p.height)
+	if err != nil || target == nil {
+		return target, err
+	}
+	kept := false
+	for height := e.first + 1; height <= e.side.TipHeight; height++ {
+		link, err := e.link(p, height)
+		if err != nil {
+			return nil, err
+		}
+		kept = kept || bytes.Equal(link[:32], target.Key)
+	}
+	if kept {
+		target = nil
+	}
+	return target, nil
 }
 
 func (e *selectedSideEvidence) clearBatch(deletes []mdbx.Mutation) (mdbx.Batch, error) {

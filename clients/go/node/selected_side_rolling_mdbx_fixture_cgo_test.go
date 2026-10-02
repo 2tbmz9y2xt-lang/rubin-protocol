@@ -301,6 +301,44 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		ssqWantNative(t, "oldest body Get+abort EIO", out.Err, ssqGetEIO, ssqAbortEIO)
 		w.wantImage("RP failed read keeps OLD")
 	})
+	// Remaining-link failures at an otherwise valid middle SideLink(2,700), outside the qualification context: seeded
+	// malformed width or zero-work identity is recorded canonical integrity/OLD; a Get EIO or Get+abort EIO is
+	// branch_data/OLD with the raw ordered native causes and no write; OLD image.
+	for _, c := range []struct {
+		name, diagnostic string
+		width            bool
+	}{{"remaining-width", "stored value width outside SchemaV2 bound", true}, {"remaining-zero-work", "selected side link identity is undecodable", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := rollFixtureWorld(t)
+			key := ssqMust(mdbx.HeightKey(2, 700))
+			value := mdbx.ChainValue(w.side[700], w.side[699], [40]byte{})
+			if c.width {
+				value = make([]byte, 103)
+			}
+			if err := mdbx.FixtureSeedRawRow(w.store, 6, key, value); err != nil {
+				t.Fatalf("%s seed: %v", c.name, err)
+			}
+			w.rows[string(append([]byte{6}, key...))] = ssqRow{rank: 6, key: key, value: value}
+			retainWantIntegrity(t, c.name, w.prepareSide(raw, w.tipAt(2)), c.diagnostic)
+			w.wantImage(c.name + " keeps the damaged OLD image")
+		})
+	}
+	for _, c := range []struct {
+		name   string
+		scen   mdbx.SelectedDamageScenario
+		causes []ssqNative
+	}{{"remaining-get-eio", mdbx.SelectedDamageGetEIO, []ssqNative{ssqGetEIO}}, {"remaining-getabort-eio", mdbx.SelectedDamageGetAbortEIO, []ssqNative{ssqGetEIO, ssqAbortEIO}}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := rollFixtureWorld(t)
+			out, evidence := w.armedPrepare(c.scen, 6, ssqMust(mdbx.HeightKey(2, 700)), raw)
+			retainWant(t, c.name+" branch_data", out, ssqBranch, "", "OLD", old, mdbx.UpdateStagePrewrite, false)
+			ssqWantNative(t, c.name, out.Err, c.causes...)
+			if evidence.BeginWrite != 0 {
+				t.Fatalf("%s: remaining link read wrote: %+v", c.name, evidence)
+			}
+			w.wantImage(c.name + " keeps OLD")
+		})
+	}
 	t.Run("H5", func(t *testing.T) {
 		// Each relied-on RP observation is in the final union: a readback-only Get EIO on it turns the committed image
 		// UNKNOWN. The tuple is asserted inside the callback before fixture bookkeeping.
@@ -314,6 +352,7 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 			{"oldest SideLink", 6, func(*ssqWorld, []byte) []byte { return ssqMust(mdbx.HeightKey(2, 1)) }},
 			{"oldest owner NONE", 7, func(w *ssqWorld, _ []byte) []byte { return ssqMust(mdbx.CanonicalOwnerKey(1, w.side[1])) }},
 			{"oldest body", 4, func(w *ssqWorld, _ []byte) []byte { return w.sideKey(1) }},
+			{"remaining SideLink700", 6, func(*ssqWorld, []byte) []byte { return ssqMust(mdbx.HeightKey(2, 700)) }},
 		} {
 			w, raw := rollFixtureWorld(t)
 			prior := w.tracked()
@@ -423,8 +462,9 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
 			return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
 		}
-		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(len(raw))}
-		return w, raw, w.tracked(), side
+		prior := w.tracked()
+		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(len(raw))}
+		return w, raw, prior, side
 	}
 	for _, c := range []struct {
 		name string

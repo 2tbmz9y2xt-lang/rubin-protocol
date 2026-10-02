@@ -26,21 +26,36 @@ func (w *ssqWorld) sideKey(j uint64) []byte {
 	return bytes.Clone(hash[:])
 }
 
-// rollWorld is canonical 0..2 (tip work 2^40) beside a mined full side 1..1440/F0, g2, tip work 1441, 1000 logical
-// bytes per row; its exact-tip child at 1441 is selected and does not win K23.
+// rollWorld is canonical 0..2 (tip work 2^40) beside a mined full side 1..1440/F0, g2, tip work 1441, logical bytes
+// the actual retained body sum; its exact-tip child at 1441 is selected and does not win K23.
 func rollWorld(t *testing.T) (*ssqWorld, []byte) {
 	t.Helper()
 	w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
-	w.retainSide(0, 1_440, 1_440, 1_441, false)
+	w.exactSide(w.retainSide(0, 1_440, 1_440, 1_441, false), 1, 1_440)
 	return w, w.child(w.side[1_440], 1_441, nil)
 }
 
+// exactSide replaces retainSide's synthetic rows*1000 descriptor bytes with the independent sum of the retained
+// BlockBytes lengths first..tip and requires the committed descriptor to carry exactly that sum.
+func (w *ssqWorld) exactSide(blocks map[uint64][]byte, first, tip uint64) {
+	w.t.Helper()
+	var sum uint64
+	for j := first; j <= tip; j++ {
+		sum += uint64(len(blocks[j]))
+	}
+	w.setSide(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = sum })
+	if got := w.persisted().SelectedSide; got == nil || got.LogicalBytes != sum || sum == uint64(got.RowCount)*1_000 {
+		w.t.Fatalf("admitted selected sum %d: %+v", sum, got)
+	}
+}
+
 // raWorld is canonical 0..2 (tip work 2^40) beside the cleaned one-slot side 3..1441/F0 (g2, C1441, count 1439,
-// header-only history 1..2, tip work 1442); its exact-tip child at 1442 is selected and does not win K23.
+// header-only history 1..2, tip work 1442, actual retained body sum); its exact-tip child at 1442 is selected and does
+// not win K23.
 func raWorld(t *testing.T) (*ssqWorld, []byte) {
 	t.Helper()
 	w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
-	w.retainSide(0, 1_441, 1_439, 1_442, true)
+	w.exactSide(w.retainSide(0, 1_441, 1_439, 1_442, true), 3, 1_441)
 	return w, w.child(w.side[1_441], 1_442, nil)
 }
 
@@ -160,14 +175,14 @@ func (w *ssqWorld) wantIncomingAbsent(label string, raw []byte) {
 	w.wantAbsent(label+": incoming link", 6, ssqMust(mdbx.HeightKey(2, 1_441)))
 }
 
-// expectPrepared records RP over the full pre-state: count 1439, logical bytes 1440000 minus the literal oldest body
-// length, tip/hash/work/g/F/next unchanged, PRUNE_GC/STABLE with SIDE(2,1,1,1); the unkept oldest header is deleted.
+// expectPrepared records RP over the full pre-state: count 1439, the pre-state actual sum minus the literal oldest
+// body length, tip/hash/work/g/F/next unchanged, PRUNE_GC/STABLE with SIDE(2,1,1,1); the unkept oldest header is deleted.
 func (w *ssqWorld) expectPrepared(prior mdbx.StorageAuthorityV1) {
 	w.t.Helper()
 	oldest := w.side[1]
 	body := w.rows[string(append([]byte{4}, oldest[:]...))].value
 	side := *prior.SelectedSide
-	side.RowCount, side.LogicalBytes = 1_439, 1_440_000-uint64(len(body))
+	side.RowCount, side.LogicalBytes = 1_439, prior.SelectedSide.LogicalBytes-uint64(len(body))
 	a := prior
 	a.SelectedSide, a.Phase = &side, mdbx.StoragePhasePruneGCV1
 	a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 1, LastHeight: 1, NextHeight: 1}}}
@@ -235,13 +250,13 @@ func TestSelectedSideRolling(t *testing.T) {
 			a.NextGenerationID, a.Phase = 4, mdbx.StoragePhasePruneGCV1
 			a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: 3}}}
 		}})
-		w.retainSide(0, 1_440, 1_440, 1_441, false)
+		w.exactSide(w.retainSide(0, 1_440, 1_440, 1_441, false), 1, 1_440)
 		raw := w.child(w.side[1_440], 1_441, nil)
 		prior := w.tracked()
 		retainWant(t, "healthy RP with GENERATION span", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
 		oldest := w.side[1]
 		side := *prior.SelectedSide
-		side.RowCount, side.LogicalBytes = 1_439, 1_440_000-uint64(len(w.rows[string(append([]byte{4}, oldest[:]...))].value))
+		side.RowCount, side.LogicalBytes = 1_439, prior.SelectedSide.LogicalBytes-uint64(len(w.rows[string(append([]byte{4}, oldest[:]...))].value))
 		a := prior
 		a.SelectedSide = &side
 		a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{
@@ -281,14 +296,75 @@ func TestSelectedSideRolling(t *testing.T) {
 		w.wantAbsent("oldest link still absent", 6, link)
 		w.wantIncomingAbsent("R-planner-error", raw)
 	})
-	// A6: cleaned one-slot side 3..1441/F0 (C1441, count 1439, history 1..2 header-only, 1000 logical bytes per row);
+	// Remaining-selected keep (RUBIN_MEMPOOL_POLICY 6.4.1.3): keep700 rewrites the valid SideLink(2,700), outside the
+	// exact-tip child's recent qualification context, to name the oldest hash with its own legal parent and work.
+	keep700 := func(w *ssqWorld) {
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 700)), mdbx.ChainValue(w.side[1], w.side[699], ssqWork(701)), true)})
+	}
+	t.Run("A5-remaining-keep", func(t *testing.T) {
+		// The unowned oldest header is kept by the remaining hash at 700; count, bytes, SIDE, bodies and links as A5.
+		w, raw := rollWorld(t)
+		keep700(w)
+		prior := w.tracked()
+		header := w.headers[w.side[1]]
+		retainWant(t, "remaining keep Prepared", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+		w.expectPrepared(prior)
+		w.literal(3, w.sideKey(1), header, false)
+		w.wantImage("remaining hash keeps the oldest header")
+		w.wantIncomingAbsent("A5-remaining-keep", raw)
+		w.reopen()
+		w.wantImage("remaining keep persisted image after reopen")
+	})
+	// An absent remaining SideLink is the unknown identity, canonical integrity/OLD with no write: alone at 700, and at
+	// 701 after the match at 700 (the traversal completes after a match).
+	for _, c := range []struct {
+		name   string
+		keep   bool
+		height uint64
+	}{{"A5-remaining-absent", false, 700}, {"A5-remaining-keep-later-absent", true, 701}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, raw := rollWorld(t)
+			if c.keep {
+				keep700(w)
+			}
+			link := ssqMust(mdbx.HeightKey(2, c.height))
+			w.apply([]mdbx.Mutation{w.absentRow(6, link)})
+			retainWantIntegrity(t, c.name, w.prepareSide(raw, w.tipAt(2)), "selected side link is absent")
+			w.wantImage(c.name + " keeps OLD")
+			w.wantAbsent(c.name+": link still absent", 6, link)
+			w.wantIncomingAbsent(c.name, raw)
+		})
+	}
+	t.Run("A5-canonical-keep", func(t *testing.T) {
+		// The oldest row is canonical 1 (owner height 1, its header, body, parent genesis and canonical work 2) under F0,
+		// side 2..1440 mined over it: CanonicalOwnerV1 keeps the header, so the absent SideLink(2,700) is never read.
+		w := newRetainWorld(t, ssqSpec{tip: 2, work: retainHeavy(2)})
+		blocks := w.retainSide(1, 1_440, 1_439, 1_441, false)
+		w.side[1] = w.canonical[1]
+		blocks[1] = w.rows[string(append([]byte{4}, w.sideKey(1)...))].value
+		link := ssqMust(mdbx.HeightKey(2, 700))
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 1)), mdbx.ChainValue(w.side[1], w.canonical[0], ssqWork(2)), false), w.absentRow(6, link)})
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.F, s.RowCount = 0, 1_440 })
+		w.exactSide(blocks, 1, 1_440)
+		raw := w.child(w.side[1_440], 1_441, nil)
+		prior := w.tracked()
+		retainWant(t, "canonical keep Prepared", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+		w.expectPrepared(prior)
+		w.literal(3, w.sideKey(1), w.headers[w.side[1]], false)
+		w.wantImage("canonical keep: owned header kept, no remaining scan")
+		w.wantAbsent("link700 still absent", 6, link)
+		w.wantIncomingAbsent("A5-canonical-keep", raw)
+		w.reopen()
+		w.wantImage("canonical keep persisted image after reopen")
+	})
+	// A6: cleaned one-slot side 3..1441/F0 (C1441, count 1439, history 1..2 header-only, actual retained body sum);
 	// a fresh exact-tip child 1442 (work 1443, below canonical 2^40) is RA: count 1440, bytes+n, tip/hash/work advance,
 	// first 3, g2, F0 and next 3 unchanged, exact header/body/link, no SIDE, no delete, no second preparation.
 	t.Run("A6", func(t *testing.T) {
 		w, raw := raWorld(t)
 		prior := w.tracked()
 		retainWant(t, "clean RA STORED_NONCANONICAL/not-applicable", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
-		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(len(raw))}
+		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(len(raw))}
 		w.expectN2(raw, prior, side, w.side[1_441])
 		w.wantN1Image("RA exact append image", raw)
 		if a := w.persisted(); a.Cleanup != nil || a.Phase != prior.Phase || a.NextGenerationID != prior.NextGenerationID {
@@ -323,7 +399,7 @@ func TestSelectedSideRolling(t *testing.T) {
 			}
 			prior := w.tracked()
 			retainWant(t, "largest fitting RA candidate with L commits", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
-			side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: 1_439_000 + uint64(n)}
+			side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(n)}
 			w.expectN2(raw, prior, side, w.side[1_441])
 			w.wantN1Image("large RA image", raw)
 		}
