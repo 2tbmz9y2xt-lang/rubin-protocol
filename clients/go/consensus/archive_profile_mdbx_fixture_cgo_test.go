@@ -87,17 +87,14 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		scen mdbx.SelectedDamageScenario
 		rank uint8
 		key  []byte
-	}{{"put", mdbx.SelectedDamagePutEIO, 0, []byte{2}}, {"delete", mdbx.SelectedDamageDeleteEIO, 3, nil}} {
+	}{{"put", mdbx.SelectedDamagePutEIO, 0, []byte{2}}, {"delete", mdbx.SelectedDamageDeleteEIO, 0, []byte{2}}} {
 		t.Run(c.name, func(t *testing.T) {
-			// Exact targets: the authority literal put, or the first unkept leaving header delete; reached once, faulted
-			// once, no commit or readback; raw update/IO/5; OLD image and released grant.
+			// put is the targeted authority literal put. delete is the existing fixture's untargeted fault at the first
+			// BeforePresent native delete, which in the sorted plan is the authority (rank 0, key 02) overwrite delete,
+			// before any leaving header; the armed rank/key name that same first site. Reached once, faulted once, no
+			// commit or readback; raw update/IO/5; OLD image and released grant.
 			w := rawSideWorld(t, sideFullSpec)
-			key := c.key
-			if key == nil {
-				hash := w.sideAt[2]
-				key = hash[:]
-			}
-			out, evidence := w.armedProfile(t, c.scen, c.rank, key)
+			out, evidence := w.armedProfile(t, c.scen, c.rank, c.key)
 			sideWantOutcome(t, out, "LOCAL_PERSISTENCE_ERROR(precommit)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStageWriteStartedDefinitelyPrecommit, c.name)
 			var engine *mdbx.EngineError
 			logicalMDBXAssert(t, errors.As(out.Err, &engine) && engine.Operation == "update" && engine.Class == mdbx.EngineIO && engine.Code == 5, "%s: raw %v", c.name, out.Err)
