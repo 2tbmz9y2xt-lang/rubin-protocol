@@ -449,10 +449,29 @@ func (e *selectedSideEvidence) headerHealth(p *selectedSideDamagePlan, height ui
 			return false, err
 		}
 	}
+	if damaged, err := e.firstTarget(height, header, owner.Owned); damaged || err != nil {
+		return damaged, err
+	}
 	if !bytes.Equal(header[4:36], link[32:64]) {
 		return true, nil
 	}
 	return e.predecessor(p, height, link, header)
+}
+
+// firstTarget checks only the first row of a legal cleaned one-slot side, whose predecessor check has no parent, for
+// a stored-header target inside the work domain, reusing the already read header: outside it, an Owned header is
+// canonical integrity and an unowned header is positive optional damage.
+func (e *selectedSideEvidence) firstTarget(height uint64, header []byte, owned bool) (bool, error) {
+	if height != e.first || e.side.RowCount != 1439 || e.first <= e.side.F+1 {
+		return false, nil
+	}
+	if _, err := WorkFromTarget([32]byte(header[76:108])); err == nil {
+		return false, nil
+	}
+	if owned {
+		return false, selectedSideDefect("required canonical header target is outside its domain")
+	}
+	return true, nil
 }
 
 func (e *selectedSideEvidence) bodyHealth(p *selectedSideDamagePlan, hash [32]byte, required bool) (bool, error) {

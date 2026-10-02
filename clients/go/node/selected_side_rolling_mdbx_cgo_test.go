@@ -5,6 +5,7 @@ package node
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math/big"
 	"slices"
 	"testing"
@@ -420,6 +421,126 @@ func TestSelectedSideRolling(t *testing.T) {
 		retainWant(t, "candidate Owned clean KNOWN_BLOCK_NOOP(CANONICAL)", w.refill(raw), retainKnown, "", retainNA, old, pre, true)
 		w.wantImage("canonical-known refill leaves every row")
 		w.wantAbsent("canonical-known no refill link", 6, ssqMust(mdbx.HeightKey(2, 1)))
+	})
+	// rfZeroFirst replaces the A7b first retained row 3 by a coherent hash-bound block over the candidate whose stored
+	// target is zero (ssqBlock, no PoW is possible under it) with valid body commitments; SideLink(2,3) keeps the legal
+	// positive work 4 and names linkPrev; owned pairs it with a canonical forward/owner at free height 12 (B 0, so its
+	// header and body are required). Old header/body are deleted before the new ones are inserted (NOOVERWRITE).
+	rfZeroFirst := func(t *testing.T, w *ssqWorld, linkPrev [32]byte, owned bool) {
+		t.Helper()
+		cand, oldHash := w.side[2], w.side[3]
+		old := w.rows[string(append([]byte{4}, oldHash[:]...))].value
+		block := ssqBlock(t, cand, w.ts(cand)+113, [32]byte{}, 0, true)
+		hash := ssqHash(block)
+		w.apply([]mdbx.Mutation{w.absentRow(3, bytes.Clone(oldHash[:])), w.absentRow(4, bytes.Clone(oldHash[:]))})
+		rows := []mdbx.Mutation{
+			w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), block, false),
+			w.literal(6, ssqMust(mdbx.HeightKey(2, 3)), mdbx.ChainValue(hash, linkPrev, ssqWork(4)), true),
+		}
+		if owned {
+			rows = append(rows, w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(hash, cand, ssqWork(13)), false),
+				w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(12), false))
+		}
+		w.apply(rows)
+		w.headers[hash], w.side[3] = block[:consensus.BLOCK_HEADER_BYTES], hash
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = s.LogicalBytes - uint64(len(old)) + uint64(len(block)) })
+	}
+	t.Run("R-s-target-optional", func(t *testing.T) {
+		// NONE first row with a zero stored target: RF's work step is that row's locator (never the supplied
+		// candidate's CONSENSUS_INVALID); the released-grant recheck sees positive optional damage at the first one-slot
+		// row and completes the selected clear SIDE(2,3,1441,3): no refill, bodies/links kept, headers 3..1441 deleted.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		rfZeroFirst(t, w, w.side[2], false)
+		retainWant(t, "stored target optional clear/no supplied validity", w.refill(raw), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("stored target optional clear image", 3, 1_441)
+		w.reopen()
+		w.wantImage("stored target optional clear persisted after reopen")
+		out := w.retain(raw, w.tipAt(2))
+		retainWantEngine(t, "next owner use after reopen", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+	})
+	t.Run("R-s-target-required", func(t *testing.T) {
+		// The same zero-target first row is canonically Owned (paired forward/owner) and its SideLink also names another
+		// parent: RF's link-parent check yields the locator, and the recheck's required target check wins over the
+		// optional link-parent diagnosis: canonical integrity with the literal cause, no clear, image unchanged.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		rfZeroFirst(t, w, [32]byte{0x77}, true)
+		out := w.refill(raw)
+		retainWant(t, "stored target canonical integrity/no clear", out, ssqIntegrity, "", "OLD", old, pre, false)
+		if cause := errors.Unwrap(out.Err); cause == nil || cause.Error() != "required canonical header target is outside its domain" {
+			t.Fatalf("stored target canonical integrity/no clear: cause %v", out.Err)
+		}
+		w.wantImage("stored target required image unchanged")
+	})
+	// rfOwnFirst pairs the healthy A7b first row 3 with a canonical forward/owner at free height 12 (B 0: required).
+	rfOwnFirst := func(w *ssqWorld) {
+		hash := w.side[3]
+		w.apply([]mdbx.Mutation{
+			w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(hash, w.side[2], ssqWork(13)), false),
+			w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(12), false),
+		})
+	}
+	t.Run("RF-cleaned-full", func(t *testing.T) {
+		// Legal cleaned full side (count 1440 with first 2 > F+1, no SIDE): RF's domain refuses on the count clause.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.RowCount = 1_440 })
+		rfRefused(t, w, raw, "selected side refill needs a cleaned one-slot side without a pending SIDE", "cleaned full domain refusal")
+	})
+	t.Run("RF-parent-other-height", func(t *testing.T) {
+		// The candidate at 2 names canonical block 2 (Owned at height 2, not first-2 = 1) and the first row names it.
+		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, _ [32]byte) []byte {
+			parent := w.canonical[2]
+			return w.childAt(parent, w.ts(parent)+120, consensus.POW_LIMIT, nil)
+		})
+		rfRefused(t, w, raw, "refill parent is canonical at another height", "parent Owned at another height")
+	})
+	t.Run("RF-first-body-required", func(t *testing.T) {
+		// First row Owned at k 12 >= B 0 with commitment-invalid body: required canonical body integrity, no locator.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		rfOwnFirst(w)
+		bad := retainMerkle(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		w.apply([]mdbx.Mutation{w.literal(4, w.sideKey(3), bad, false)})
+		retainWantRefusal(t, "required first body integrity", w.refill(raw), ssqIntegrity, "required canonical body does not match its header or commitments")
+		w.wantImage("required first body defect image unchanged")
+	})
+	t.Run("RF-first-header-required", func(t *testing.T) {
+		// First row Owned with its required header deleted: keyed owner/header owner integrity before any later step.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		rfOwnFirst(w)
+		w.apply([]mdbx.Mutation{w.absentRow(3, w.sideKey(3))})
+		retainWantRefusal(t, "required first header integrity", w.refill(raw), ssqIntegrity, "required canonical row is absent")
+		w.wantImage("required first header defect image unchanged")
+	})
+	t.Run("RF-first-link-parent", func(t *testing.T) {
+		// Healthy first header/body, SideLink(2,3) naming another parent: RF's locator, recheck positive clear.
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 3)), mdbx.ChainValue(w.side[3], [32]byte{0x77}, ssqWork(4)), true)})
+		retainWant(t, "first link parent mismatch locator/clear", w.refill(raw), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("first link parent mismatch clear", 3, 1_441)
+	})
+	t.Run("RF-first-link-missing", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		w.apply([]mdbx.Mutation{w.absentRow(6, ssqMust(mdbx.HeightKey(2, 3)))})
+		retainWantIntegrity(t, "missing required first SideLink", w.refill(raw), "selected side link is absent")
+		w.wantImage("missing first link image unchanged")
+	})
+	t.Run("RF-owned-recurrence", func(t *testing.T) {
+		// A7a shape with SideLink(2,2) work 4: restored work 3 passes the first subtraction, but canonical parent 0's
+		// work 1 plus the candidate's 1 is 2, so the Owned recurrence refuses.
+		w, raw := rfWorld(t, 2, 0, 2, 113, nil)
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 2)), mdbx.ChainValue(w.side[2], ssqHash(raw), ssqWork(4)), true)})
+		retainWantRefusal(t, "owned parent work recurrence", w.refill(raw), ssqBranch, "refill work does not extend its canonical parent")
+		w.wantImage("owned recurrence image unchanged")
+		w.wantAbsent("owned recurrence no refill link", 6, ssqMust(mdbx.HeightKey(2, 1)))
+	})
+	t.Run("RF-control-and-parse", func(t *testing.T) {
+		// Non-STABLE authority refuses before any RF read; a truncated candidate header is BLOCK_ERR_PARSE.
+		w := newRetainWorld(t, ssqSpec{tip: 10, authority: ssqPendingNone})
+		retainWantRefusal(t, "RF control precedes everything", w.refill(w.child(w.canonical[5], 6, nil)), ssqRequired, "")
+		w.wantImage("RF control refusal unchanged")
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		retainWantConsensus(t, "RF truncated candidate header", w.refill(raw[:10]), consensus.BLOCK_ERR_PARSE)
+		w.wantImage("RF parse refusal unchanged")
 	})
 	// A7c-mtp: history 1..11 are expected children; the candidate at 12 is built at an explicit timestamp against the
 	// median of its 11 ancestors read straight from their header bytes (rfTimes, not the child() path). median+1 is
