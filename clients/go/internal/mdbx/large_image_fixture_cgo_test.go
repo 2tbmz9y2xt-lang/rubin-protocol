@@ -303,10 +303,15 @@ func largeNativeTruth(t *testing.T) {
 		target bool
 		want   string
 	}{
-		{"extra residual", 3, false, "UNKNOWN"}, {"missing residual", 4, false, "UNKNOWN"},
+		{"extra residual", 3, false, "UNKNOWN"},
+		{"missing residual", 4, false, "UNKNOWN"},
 		{"manifest target plus extra residual", 3, true, "UNKNOWN"},
-		{"same-length residual byte", 5, false, "UNKNOWN"}, {"neither target", 6, true, "UNKNOWN"},
-		{"OLD", 7, false, "OLD"}, {"NEW", 12, false, "NEW"}, {"readback error", 8, false, "UNKNOWN"}, {"readback begin error", 23, false, "UNKNOWN"},
+		{"same-length residual byte", 5, false, "UNKNOWN"},
+		{"neither target", 6, true, "UNKNOWN"},
+		{"OLD", 7, false, "OLD"},
+		{"NEW", 12, false, "NEW"},
+		{"readback error", 8, false, "UNKNOWN"},
+		{"readback begin error", 23, false, "UNKNOWN"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			store, path, cfg := consultedStore(t)

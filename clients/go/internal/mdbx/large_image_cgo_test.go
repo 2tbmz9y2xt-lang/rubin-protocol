@@ -187,8 +187,12 @@ func largeTestWindows(t *testing.T) {
 				n      int
 				err    error
 			}{
-				{0, 0, 0, nil}, {0, math.MaxUint64, 0, nil}, {1, 131_073, 0, io.EOF}, {1, math.MaxUint64, 0, io.EOF},
-				{65_536, 65_536, 65_536, nil}, {2, 131_072, 1, io.EOF},
+				{0, 0, 0, nil},
+				{0, math.MaxUint64, 0, nil},
+				{1, 131_073, 0, io.EOF},
+				{1, math.MaxUint64, 0, io.EOF},
+				{65_536, 65_536, 65_536, nil},
+				{2, 131_072, 1, io.EOF},
 			} {
 				dst := make([]byte, span.size)
 				n, err := row.ReadAt(dst, span.offset)
@@ -248,7 +252,9 @@ func largeTestAdmission(t *testing.T) {
 		t.Fatal("legacy admission lost priority over large count")
 	}
 	for _, selectors := range [][]LargeImageSelectorV1{{{Kind: 0}}, {{Kind: 3}}, {{Kind: 2}, {Kind: 1}}, {{Kind: 1}, {Kind: 1}}, {{Kind: 1, Hash: [32]byte{1}}, {Kind: 1}}} {
-		truth, stage, err := store.Update(func(*Reader) (Batch, error) { return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: selectors}, nil })
+		truth, stage, err := store.Update(func(*Reader) (Batch, error) {
+			return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: selectors}, nil
+		})
 		engine := requireEnvironmentError(t, err, EngineClass("InvalidInput"), operationUpdate, 22, "invalid Update Batch")
 		if truth.String() != "OLD" || int(stage) != 1 || engine.Cause != nil || string(store.state) != "OPEN" {
 			t.Fatal("selector admission disposition")

@@ -27,7 +27,7 @@ import (
 type LargeImageKindV1 uint8
 
 const (
-	LargeImageBlockBodyV1 LargeImageKindV1 = 1
+	LargeImageBlockBodyV1  LargeImageKindV1 = 1
 	LargeImageUndoFamilyV1 LargeImageKindV1 = 2
 )
 
@@ -118,8 +118,9 @@ func (row LargeImageRowV1) ReadAt(dst []byte, offset uint64) (int, error) {
 	r := row.span.reader
 	r.getMu.Lock()
 	defer r.getMu.Unlock()
-	if err := row.readInput(dst); err != nil {
-		return 0, err
+	inputErr := row.readInput(dst)
+	if inputErr != nil {
+		return 0, inputErr
 	}
 	if len(dst) == 0 {
 		return 0, nil
@@ -175,8 +176,9 @@ func (r *Reader) largeVisitInput(selector LargeImageSelectorV1, visitor func(Lar
 // VisitLargeImageV1 traverses one complete physical domain. The visitor runs
 // without getMu, permitting ordinary reads and reads of the current row.
 func (r *Reader) VisitLargeImageV1(selector LargeImageSelectorV1, visitor func(LargeImageRowV1) error) error {
-	if err := r.largeVisitInput(selector, visitor); err != nil {
-		return err
+	inputErr := r.largeVisitInput(selector, visitor)
+	if inputErr != nil {
+		return inputErr
 	}
 	defer r.largeVisit.Store(false)
 	seek := bytes.Clone(selector.Hash[:])
@@ -185,8 +187,9 @@ func (r *Reader) VisitLargeImageV1(selector LargeImageSelectorV1, visitor func(L
 		if err != nil || row.done {
 			return err
 		}
-		if err := r.largeVisitRow(selector, row, visitor); err != nil {
-			return err
+		visitErr := r.largeVisitRow(selector, row, visitor)
+		if visitErr != nil {
+			return visitErr
 		}
 		if selector.Kind == LargeImageBlockBodyV1 {
 			return nil
@@ -321,8 +324,9 @@ func largeSelectorBeforeRow(selector LargeImageSelectorV1, row ownedConsulted) b
 
 func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (largeImageScope, error) {
 	selectors := batch.LargeConsulted
-	if err := largeSelectorCounts(selectors); err != nil {
-		return largeImageScope{}, err
+	countErr := largeSelectorCounts(selectors)
+	if countErr != nil {
+		return largeImageScope{}, countErr
 	}
 	for i, selector := range selectors {
 		if largeImageRank(selector.Kind) == 0 {
