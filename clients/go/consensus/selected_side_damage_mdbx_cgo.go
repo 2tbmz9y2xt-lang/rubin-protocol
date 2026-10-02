@@ -459,11 +459,11 @@ func (e *selectedSideEvidence) headerHealth(p *selectedSideDamagePlan, height ui
 	return e.predecessor(p, height, link, header)
 }
 
-// firstTarget checks only the first row of a legal cleaned one-slot side, whose predecessor check has no parent, for
+// firstTarget checks only the first row without an available predecessor, in either legal selected form, for
 // a stored-header target inside the work domain, reusing the already read header: outside it, an Owned header is
 // canonical integrity and an unowned header is positive optional damage.
 func (e *selectedSideEvidence) firstTarget(height uint64, header []byte, owned bool) (bool, error) {
-	if height != e.first || e.side.RowCount != 1439 || e.first <= e.side.F+1 {
+	if height != e.first || e.first <= e.side.F+1 {
 		return false, nil
 	}
 	if _, err := WorkFromTarget([32]byte(header[76:108])); err == nil {
@@ -490,7 +490,7 @@ func (e *selectedSideEvidence) bodyHealth(p *selectedSideDamagePlan, hash [32]by
 }
 
 // predecessor checks parent linkage and cumulative work against the preceding selected link, or against canonical F
-// when first=F+1; the first row of a one-slot descriptor has no in-descriptor predecessor.
+// when first=F+1; the first row above F+1 has no available predecessor in either legal selected form.
 func (e *selectedSideEvidence) predecessor(p *selectedSideDamagePlan, height uint64, link, header []byte) (bool, error) {
 	parent, err := e.parentEntry(p, height)
 	if err != nil || parent == nil {

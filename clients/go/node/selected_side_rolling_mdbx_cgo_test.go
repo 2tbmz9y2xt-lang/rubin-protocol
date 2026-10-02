@@ -360,23 +360,44 @@ func TestSelectedSideRolling(t *testing.T) {
 	// A6: cleaned one-slot side 3..1441/F0 (C1441, count 1439, history 1..2 header-only, actual retained body sum);
 	// a fresh exact-tip child 1442 (work 1443, below canonical 2^40) is RA: count 1440, bytes+n, tip/hash/work advance,
 	// first 3, g2, F0 and next 3 unchanged, exact header/body/link, no SIDE, no delete, no second preparation.
-	t.Run("A6", func(t *testing.T) {
-		w, raw := raWorld(t)
-		prior := w.tracked()
-		retainWant(t, "clean RA STORED_NONCANONICAL/not-applicable", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
-		side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(len(raw))}
-		w.expectN2(raw, prior, side, w.side[1_441])
-		w.wantN1Image("RA exact append image", raw)
-		if a := w.persisted(); a.Cleanup != nil || a.Phase != prior.Phase || a.NextGenerationID != prior.NextGenerationID {
-			t.Fatalf("RA no SIDE/phase/next preserved: %+v", a)
-		}
-		w.reopen()
-		w.wantN1Image("RA persisted image after reopen", raw)
-		out := w.retain(raw, w.tipAt(2))
-		retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
-		retainWantEngine(t, "unverified owner after RA", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
-		w.wantN1Image("unverified owner refusal after RA", raw)
-	})
+	for _, name := range []string{"A6", "A6-RP-full-healthy"} {
+		t.Run(name, func(t *testing.T) {
+			w, raw := raWorld(t)
+			prior := w.tracked()
+			retainWant(t, "clean RA STORED_NONCANONICAL/not-applicable", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+			side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: ssqHash(raw), CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(len(raw))}
+			w.expectN2(raw, prior, side, w.side[1_441])
+			w.wantN1Image("RA exact append image", raw)
+			if a := w.persisted(); a.Cleanup != nil || a.Phase != prior.Phase || a.NextGenerationID != prior.NextGenerationID {
+				t.Fatalf("RA no SIDE/phase/next preserved: %+v", a)
+			}
+			if name == "A6-RP-full-healthy" {
+				// A real RA produced full 3..1442/F0. Healthy oldest row 3 still prepares only one row.
+				hash := ssqHash(raw)
+				w.side[1_442], w.headers[hash] = hash, raw[:consensus.BLOCK_HEADER_BYTES]
+				incoming := w.child(hash, 1_443, nil)
+				prior = w.tracked()
+				retainWant(t, "healthy full-tail RP one-row preparation", w.prepareSide(incoming, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+				side.RowCount, side.LogicalBytes = 1_439, side.LogicalBytes-uint64(len(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value))
+				prior.SelectedSide, prior.Phase = &side, mdbx.StoragePhasePruneGCV1
+				prior.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanSideV1, GenerationID: 2, FirstHeight: 3, LastHeight: 3, NextHeight: 3}}}
+				w.authorityMutation(prior)
+				w.absentRow(3, w.sideKey(3))
+				w.wantN1Image("healthy full-tail one-row image", incoming)
+				w.wantAbsent("healthy full-tail incoming link absent", 6, ssqMust(mdbx.HeightKey(2, 1_443)))
+			}
+			w.reopen()
+			w.wantN1Image("RA persisted image after reopen", raw)
+			if name == "A6-RP-full-healthy" {
+				w.wantAbsent("healthy full-tail leaving header absent after reopen", 3, w.sideKey(3))
+				w.wantAbsent("healthy full-tail incoming link absent after reopen", 6, ssqMust(mdbx.HeightKey(2, 1_443)))
+			}
+			out := w.retain(raw, w.tipAt(2))
+			retainWant(t, "unclassified exact get EINVAL/not verified/no effect", out, "", "", "OLD", old, pre, false)
+			retainWantEngine(t, "unverified owner after RA", out.Err, "get", mdbx.EngineInvalidInput, 22, "canonical owner index is not verified")
+			w.wantN1Image("unverified owner refusal after RA", raw)
+		})
+	}
 	// H11 RA resource instance: RA charges the same 3n+L <= 140965583 as N2, with L the cleaned tip 1441 body read once.
 	// nFit=floor((140965583-L)/3) appends through Retain; nFit+1 is storage_capacity/OLD before any expected-row read.
 	t.Run("H11-RA-L", func(t *testing.T) {
@@ -540,6 +561,68 @@ func TestSelectedSideRolling(t *testing.T) {
 		}
 		w.apply(groups...)
 		w.setSide(func(s *mdbx.SelectedSideV1) { s.TipHash, s.LogicalBytes = prev, total })
+	}
+	for _, c := range []struct {
+		name  string
+		owned bool
+	}{{"RP-full-target-optional", false}, {"RP-full-target-required", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, _ := raWorld(t)
+			parent, linkParent := w.side[2], w.side[2]
+			if c.owned {
+				// The damaged header can replace canonical tip 2 coherently: its actual parent is canonical 1.
+				w.side[2], linkParent = w.canonical[1], [32]byte{0x77}
+			}
+			rfZeroFirst(t, w, linkParent, false)
+			w.side[2] = parent // Historical row 2 is unchanged; only the parentless oldest row names canonical 1.
+			if c.owned {
+				// Pair the damaged oldest hash at the existing tip, preserving its heavy work and canonical parent;
+				// unlike the RF-only owner at height 12, this leaves no forward row beyond expected tip 2.
+				oldOwner, first := ssqMust(mdbx.CanonicalOwnerKey(1, w.canonical[2])), w.side[3]
+				w.apply([]mdbx.Mutation{
+					w.absentRow(7, oldOwner),
+					w.literal(2, ssqMust(mdbx.HeightKey(1, 2)), mdbx.ChainValue(first, w.canonical[1], ssqWork(1<<40)), true),
+					w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, first)), mdbx.CanonicalOwnerValue(2), false),
+				})
+				w.rows[string(append([]byte{7}, oldOwner...))] = ssqRow{rank: 7, key: oldOwner}
+				w.canonical[2] = first
+			}
+			raw := w.child(w.side[1_441], 1_442, nil)
+			prior := w.tracked()
+			retainWant(t, "actual RA before full-tail target observation", w.retain(raw, w.tipAt(2)), retainStored, "", retainNA, newT, crossed, true)
+			hash := ssqHash(raw)
+			side := mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 1_442, TipHash: hash, CumulativeChainwork: ssqWork(1_443), RowCount: 1_440, LogicalBytes: prior.SelectedSide.LogicalBytes + uint64(len(raw))}
+			w.expectN2(raw, prior, side, w.side[1_441])
+			w.side[1_442], w.headers[hash] = hash, raw[:consensus.BLOCK_HEADER_BYTES]
+			w.wantN1Image("full-tail actual RA exact image", raw)
+			var total uint64
+			for j := uint64(3); j <= 1_442; j++ {
+				total += uint64(len(w.rows[string(append([]byte{4}, w.sideKey(j)...))].value))
+			}
+			if a := w.persisted(); a.SelectedSide == nil || a.SelectedSide.RowCount != 1_440 || a.SelectedSide.TipHeight-uint64(a.SelectedSide.RowCount)+1 != 3 || a.SelectedSide.LogicalBytes != total || a.Cleanup != nil {
+				t.Fatalf("full-tail actual RA count/first/actual sum/no SIDE: %+v, sum %d", a, total)
+			}
+			incoming := w.child(hash, 1_443, nil)
+			out := w.prepareSide(incoming, w.tipAt(2))
+			if c.owned {
+				retainWant(t, "full-tail stored target canonical integrity/no clear", out, ssqIntegrity, "", "OLD", old, pre, false)
+				if cause := errors.Unwrap(out.Err); cause == nil || cause.Error() != "required canonical header target is outside its domain" {
+					t.Fatalf("full-tail required target beats optional parent mismatch: %v", out.Err)
+				}
+				w.wantN1Image("full-tail required target entire image unchanged", incoming)
+			} else {
+				retainWant(t, "full-tail stored target complete clear, not Prepared", out, retainCleared, "", retainNA, newT, crossed, true)
+				w.wantCleared("full-tail target complete SIDE(2,3,1442,3) image", 3, 1_442)
+				w.wantN1Image("full-tail target incoming absent and no undo", incoming)
+			}
+			w.wantAbsent("full-tail incoming link absent", 6, ssqMust(mdbx.HeightKey(2, 1_443)))
+			w.reopen()
+			if !c.owned {
+				w.wantCleared("full-tail complete clear persisted after reopen", 3, 1_442)
+			}
+			w.wantN1Image("full-tail target persisted image after reopen", incoming)
+			w.wantAbsent("full-tail incoming link absent after reopen", 6, ssqMust(mdbx.HeightKey(2, 1_443)))
+		})
 	}
 	t.Run("R-s-target-optional", func(t *testing.T) {
 		// NONE first row with a zero stored target: RF's work step is that row's locator (never the supplied
