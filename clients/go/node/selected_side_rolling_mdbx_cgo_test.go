@@ -426,24 +426,42 @@ func TestSelectedSideRolling(t *testing.T) {
 	// target is zero (ssqBlock, no PoW is possible under it) with valid body commitments; SideLink(2,3) keeps the legal
 	// positive work 4 and names linkPrev; owned pairs it with a canonical forward/owner at free height 12 (B 0, so its
 	// header and body are required). Old header/body are deleted before the new ones are inserted (NOOVERWRITE).
+	// The whole retained path 3..1441 is rebuilt in place so every non-target relation holds: row 3 keeps its own
+	// timestamp with a zero target over the candidate; rows 4..1441 keep their own timestamps and all-FF targets and are
+	// re-mined over the new parent; every SideLink keeps its literal work and names the new parent (row 3's names
+	// linkPrev). Each height deletes the old header/body and inserts the new ones (NOOVERWRITE) in one apply group; the
+	// descriptor takes the new tip hash and the new body total; g, F, count and tip height stay.
 	rfZeroFirst := func(t *testing.T, w *ssqWorld, linkPrev [32]byte, owned bool) {
 		t.Helper()
-		cand, oldHash := w.side[2], w.side[3]
-		old := w.rows[string(append([]byte{4}, oldHash[:]...))].value
-		block := ssqBlock(t, cand, w.ts(cand)+113, [32]byte{}, 0, true)
-		hash := ssqHash(block)
-		w.apply([]mdbx.Mutation{w.absentRow(3, bytes.Clone(oldHash[:])), w.absentRow(4, bytes.Clone(oldHash[:]))})
-		rows := []mdbx.Mutation{
-			w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), block, false),
-			w.literal(6, ssqMust(mdbx.HeightKey(2, 3)), mdbx.ChainValue(hash, linkPrev, ssqWork(4)), true),
+		cand, prev := w.side[2], w.side[2]
+		var groups [][]mdbx.Mutation
+		var total uint64
+		for j := uint64(3); j <= 1_441; j++ {
+			oldHash := w.side[j]
+			oldHeader, key := w.headers[oldHash], ssqMust(mdbx.HeightKey(2, j))
+			oldWork := [40]byte(w.rows[string(append([]byte{6}, key...))].value[64:104])
+			timestamp := binary.LittleEndian.Uint64(oldHeader[68:76])
+			block, parent := ssqMine(t, prev, timestamp, [32]byte(oldHeader[76:108]), nil), prev
+			if j == 3 {
+				block, parent = ssqBlock(t, prev, timestamp, [32]byte{}, 0, true), linkPrev
+			}
+			hash := ssqHash(block)
+			groups = append(groups, []mdbx.Mutation{
+				w.absentRow(3, bytes.Clone(oldHash[:])), w.absentRow(4, bytes.Clone(oldHash[:])),
+				w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), block, false),
+				w.literal(6, key, mdbx.ChainValue(hash, parent, oldWork), true),
+			})
+			w.headers[hash], w.side[j] = block[:consensus.BLOCK_HEADER_BYTES], hash
+			total += uint64(len(block))
+			prev = hash
 		}
 		if owned {
-			rows = append(rows, w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(hash, cand, ssqWork(13)), false),
-				w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(12), false))
+			first := w.side[3]
+			groups = append(groups, []mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(first, cand, ssqWork(13)), false),
+				w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, first)), mdbx.CanonicalOwnerValue(12), false)})
 		}
-		w.apply(rows)
-		w.headers[hash], w.side[3] = block[:consensus.BLOCK_HEADER_BYTES], hash
-		w.setSide(func(s *mdbx.SelectedSideV1) { s.LogicalBytes = s.LogicalBytes - uint64(len(old)) + uint64(len(block)) })
+		w.apply(groups...)
+		w.setSide(func(s *mdbx.SelectedSideV1) { s.TipHash, s.LogicalBytes = prev, total })
 	}
 	t.Run("R-s-target-optional", func(t *testing.T) {
 		// NONE first row with a zero stored target: RF's work step is that row's locator (never the supplied
@@ -480,10 +498,16 @@ func TestSelectedSideRolling(t *testing.T) {
 		})
 	}
 	t.Run("RF-cleaned-full", func(t *testing.T) {
-		// Legal cleaned full side (count 1440 with first 2 > F+1, no SIDE): RF's domain refuses on the count clause.
+		// The actual completed full state: a successful A7b RF yields 2..1441, count 1440 (first 2 > F+1, no SIDE). A
+		// second RF of the same raw refuses on the domain's count clause before any artifact read; without that clause it
+		// would reach the now-present SideLink(2,2) refusal instead. The refilled image is preserved.
 		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
-		w.setSide(func(s *mdbx.SelectedSideV1) { s.RowCount = 1_440 })
-		rfRefused(t, w, raw, "selected side refill needs a cleaned one-slot side without a pending SIDE", "cleaned full domain refusal")
+		prior := w.tracked()
+		retainWant(t, "full-state RF", w.refill(raw), retainStored, "", retainNA, newT, crossed, true)
+		w.expectRefilled(raw, prior, 3, w.side[1], ssqWork(3))
+		w.wantN1Image("full-state refilled image", raw)
+		retainWantRefusal(t, "cleaned full domain refusal", w.refill(raw), ssqBranch, "selected side refill needs a cleaned one-slot side without a pending SIDE")
+		w.wantN1Image("cleaned full refusal keeps the refilled image", raw)
 	})
 	t.Run("RF-parent-other-height", func(t *testing.T) {
 		// The candidate at 2 names canonical block 2 (Owned at height 2, not first-2 = 1) and the first row names it.

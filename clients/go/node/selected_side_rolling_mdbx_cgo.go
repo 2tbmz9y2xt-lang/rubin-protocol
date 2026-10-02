@@ -151,9 +151,8 @@ func (q *selectedSideQualifier) refill(raw []byte, header consensus.BlockHeader)
 		return selectedSideRefillQualification{}, err
 	}
 	work, err := selectedRefillWork([40]byte(row.link[64:104]), row.header.Target)
-	var stored *consensus.TxError
-	if errors.As(err, &stored) { // The first stored header's target is outside its domain: that row's locator.
-		return selectedSideRefillQualification{}, q.request(first)
+	if _, stored := err.(*consensus.TxError); stored { //nolint:errorlint // The helper's direct WorkFromTarget leaf only.
+		return selectedSideRefillQualification{}, q.request(first) // The first stored header's target is outside its domain.
 	}
 	if err != nil {
 		return selectedSideRefillQualification{}, err
