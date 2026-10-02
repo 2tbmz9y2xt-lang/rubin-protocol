@@ -227,6 +227,9 @@ func TestArchiveSelectedSide(t *testing.T) {
 			out := SelectArchiveSelectedSideMDBX(nil, o)
 			sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, label)
 			sideWantEngine(t, out.Err, mdbx.EngineInvalidInput, "nil Store", label)
+			var engine *mdbx.EngineError
+			logicalMDBXAssert(t, errors.As(out.Err, &engine) && errors.Is(out.Err, engine) && errors.Is(engine, out.Err) && engine.Operation == "update" && engine.Code == 22,
+				"%s: direct update/EINVAL nil Store refusal %v", label, out.Err)
 		}
 		nilStore(owner, "nil Store, valid owner")
 		nilStore(nil, "nil Store, nil owner")
@@ -241,7 +244,8 @@ func TestArchiveSelectedSide(t *testing.T) {
 			want := o.WithReservation(mdbx.MaxOperationDataBytes, func() error { return nil })
 			out := SelectArchiveSelectedSideMDBX(w.store, o)
 			sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "owner input refusal")
-			logicalMDBXAssert(t, want != nil && out.Err != nil && out.Err.Error() == want.Error() && errors.Is(out.Err, want), "owner input refusal %v, want %v", out.Err, want)
+			logicalMDBXAssert(t, want != nil && out.Err != nil && out.Err.Error() == want.Error() && errors.Is(out.Err, want) && errors.Is(want, out.Err), "owner input refusal %v, want %v", out.Err, want)
+			w.wantImage("owner input refusal leaves the image", w.authority, false)
 		}
 		var out selectedSideOutcome
 		held = w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { out = w.profile(); return nil })
