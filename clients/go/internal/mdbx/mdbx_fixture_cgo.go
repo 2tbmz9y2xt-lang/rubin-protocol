@@ -373,19 +373,19 @@ func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run fu
 
 // Test teardown disposes a real retained handle after its terminal projection was observed.
 func fixtureLargeRelease(store *Store) error {
-	if store.state == storePOISONEDTHREAD {
+	var err error
+	switch store.state {
+	case storePOISONEDTHREAD:
 		if err := fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(store.txn))); err != nil {
 			return err
 		}
 		store.txn = nil
-		_, err := store.consume(store.terminal)
-		if store.state != storeCLOSED {
-			return err
-		}
-		return nil
+		_, err = store.consume(store.terminal)
+	case storeCLOSEBLOCKED:
+		err = store.Close()
 	}
-	if store.state == storeCLOSEBLOCKED {
-		return store.Close()
+	if store.state != storeCLOSED {
+		return err
 	}
 	return nil
 }
