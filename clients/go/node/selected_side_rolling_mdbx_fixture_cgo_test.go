@@ -734,7 +734,9 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 			t.Fatalf("RF domain abort wrote: %+v", evidence)
 		}
 		w.wantImage("RF domain abort keeps OLD")
-		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte { return retainMerkle(w.childAt(prev, w.ts(prev)+120, consensus.POW_LIMIT, nil)) })
+		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte {
+			return retainMerkle(w.childAt(prev, w.ts(prev)+120, consensus.POW_LIMIT, nil))
+		})
 		out, evidence = armedRefill(w, mdbx.SelectedDamageAbortEIO, 0, nil, raw)
 		retainWant(t, "RF steps typed result kept over abort IO", out, "CONSENSUS_INVALID("+string(consensus.BLOCK_ERR_MERKLE_INVALID)+")", "", "OLD", old, mdbx.UpdateStagePrewrite, false)
 		ssqWantNative(t, "RF steps abort", out.Err, ssqAbortEIO)
