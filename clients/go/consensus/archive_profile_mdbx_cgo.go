@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"strings"
@@ -13,7 +14,8 @@ import (
 
 // Dormant PROFILE-origin selected-side ARCHIVE transition P06-2a (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.4, 6.4.1.5,
 // 6.4.1.8 and 6.4.1.9, RUBIN_COMPACT_BLOCKS.md Section 1.2). SelectArchiveSelectedSideMDBX has no production caller.
-// One full-lane grant encloses its sole Store.Update. In that Reader: strict authority, the control table (non-STABLE is
+// One full-lane grant encloses its sole Store.Update; on the owner's exact capacity refusal one grant-free control-only
+// Update instead reads authority alone (RECOVERY_REQUIRED, PROFILE_NOOP or storage_capacity). In the granted Reader: strict authority, the control table (non-STABLE is
 // RECOVERY_REQUIRED, active ARCHIVE is PROFILE_NOOP), then the finite canonical identity PRE_GENESIS/H0/H>0 from one
 // bounded prefix page. PRE_GENESIS/H0 and H>0 without a selected side are other leaves' exact API refusals; H>0 under any
 // cleanup phase is LOCAL_BUSY; only H>0 NONE/STABLE PRUNED with a selected side clears that side into its SIDE span
@@ -60,27 +62,50 @@ func SelectArchiveSelectedSideMDBX(store *mdbx.Store, reservations *mdbx.Operati
 	sentinel := errors.New("archive selected side decision")
 	var decision string
 	var leaf error
-	ran, called := false, false
+	ran, called, denied := false, false, false
+	update := func(reader *mdbx.Reader) (mdbx.Batch, error) {
+		called = true
+		if denied {
+			return mdbx.Batch{}, archiveSelectedSideCapacity(reader, &decision, sentinel)
+		}
+		batch, _, planErr := archiveSelectedSideBatch(reader, &decision, sentinel)
+		if decision == archiveSelectedSideWrongLeaf {
+			leaf = planErr
+		}
+		return batch, planErr
+	}
 	err := reservations.WithReservation(mdbx.MaxOperationDataBytes, func() error {
 		ran = true
-		out.Truth, out.Stage, out.Err = store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
-			called = true
-			batch, _, planErr := archiveSelectedSideBatch(reader, &decision, sentinel)
-			if decision == archiveSelectedSideWrongLeaf {
-				leaf = planErr
-			}
-			return batch, planErr
-		})
+		out.Truth, out.Stage, out.Err = store.Update(update)
 		return out.Err
 	})
-	if !called { // An owner input refusal, nil Store or no-callback/cached native outcome: raw tuple, empty fields.
-		if !ran {
+	if !ran && err != nil && err.Error() == selectedSideCapacityText {
+		// The owner's exact capacity refusal (its callback never ran, no grant): one grant-free control-only Update.
+		denied = true
+		out.Truth, out.Stage, out.Err = store.Update(update)
+	}
+	if !called { // An owner input refusal or no-callback/cached native outcome: raw tuple, empty fields.
+		if !ran && !denied {
 			out.Err = err
 		}
 		out.CanonicalTruth = ""
 		return out
 	}
 	return archiveSelectedSideProject(out, decision, sentinel, leaf)
+}
+
+// archiveSelectedSideCapacity is the grant-free control read after the owner's exact capacity refusal: strict
+// authority (its error unchanged), then RECOVERY_REQUIRED, then PROFILE_NOOP, otherwise storage_capacity, always with
+// the sentinel and no Batch. Only authority/control metadata is read (outside R): no identity page, planner, Batch,
+// union or write. Its finite payload is the one bounded authority value, its Go copy and one Decode of that same input
+// plus fixed bookkeeping (3*MaxMetadataBytes + 131072 at most), separate from the granted PROFILE charge.
+func archiveSelectedSideCapacity(reader *mdbx.Reader, decision *string, sentinel error) error {
+	a, err := reader.ReadStorageAuthorityV1()
+	if err != nil {
+		return err
+	}
+	*decision = cmp.Or(archiveSelectedSideControl(a), selectedSideCapacity)
+	return sentinel
 }
 
 // archiveSelectedSideBatch borrows only the caller's Reader. decision is invocation-local: a no-write decision with
@@ -200,10 +225,7 @@ func archiveSelectedSideProject(out selectedSideOutcome, decision string, sentin
 		out.Result, out.Err = decision, nil
 		return out
 	}
-	p := &selectedSideDamagePlan{healthy: sentinel, bound: leaf}
-	if strings.HasPrefix(decision, "LOCAL_RESOURCE_UNAVAILABLE(") {
-		p.step = decision
-	}
+	p := &selectedSideDamagePlan{healthy: sentinel, bound: leaf, step: archiveSelectedSideStep(decision, out.Err, sentinel)}
 	if out.Stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit {
 		out.Result = selectedSidePrecommitResult(out.Err, p)
 		return out
@@ -214,6 +236,15 @@ func archiveSelectedSideProject(out selectedSideOutcome, decision string, sentin
 
 // archiveSelectedSideCrossed maps the raw truth: clean NEW is an empty Result with logical NEW; an error is
 // TERMINAL_PERSISTENCE(old|new|neither_or_unreadable) with logical OLD, NEW or UNKNOWN.
+// archiveSelectedSideStep is the in-flight artifact read class for classification: a read-resource decision, but never
+// a sentinel decision (the capacity control exit reads no artifact), so a joined abort maps by its own class.
+func archiveSelectedSideStep(decision string, err, sentinel error) string {
+	if !strings.HasPrefix(decision, "LOCAL_RESOURCE_UNAVAILABLE(") || errors.Is(err, sentinel) {
+		return ""
+	}
+	return decision
+}
+
 func archiveSelectedSideCrossed(out selectedSideOutcome) selectedSideOutcome {
 	switch out.Truth {
 	case mdbx.CommitTruthOld:

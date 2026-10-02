@@ -62,17 +62,31 @@ func profileWantLeaf(t *testing.T, w *sideWorld, out selectedSideOutcome, diagno
 	sideWantReleased(t, w.owner, label)
 }
 
+// committedAuthority decodes the authority actually stored in the Store (rank 0, key 02).
+func (w *sideWorld) committedAuthority() mdbx.StorageAuthorityV1 {
+	w.t.Helper()
+	var a mdbx.StorageAuthorityV1
+	err := w.store.View(func(reader *mdbx.Reader) error {
+		var err error
+		a, err = reader.ReadStorageAuthorityV1()
+		return err
+	})
+	logicalMDBXAssert(w.t, err == nil, "committed authority: %v", err)
+	return a
+}
+
 func TestArchiveSelectedSide(t *testing.T) {
 	selected := func(t *testing.T, w *sideWorld, label string) {
 		t.Helper()
 		out := w.profile()
 		sideWantOutcome(t, out, "", "NEW", mdbx.CommitTruthNew, mdbx.UpdateStageCommitMayHaveCrossed, label+": clean PROFILE NEW")
 		logicalMDBXAssert(t, out.Err == nil, "%s: clean PROFILE kept an error: %v", label, out.Err)
+		// The stored authority, read back: PRUNED active, no replay target, active generation 1 and next preserved.
+		a := w.committedAuthority()
+		logicalMDBXAssert(t, a.ActiveProfile == mdbx.StorageProfilePrunedV1 && a.NextGenerationID == w.nextID() && a.Replay == nil && a.ActiveGenerationID == 1,
+			"%s: no target/id/next preserved: %+v", label, a)
 		want := w.profileAuthority()
 		w.wantImage(label+": pending ARCHIVE exact image", want, true)
-		a, err := mdbx.DecodeStorageAuthorityV1(want)
-		logicalMDBXAssert(t, err == nil && a.ActiveProfile == mdbx.StorageProfilePrunedV1 && a.NextGenerationID == w.nextID() && a.Replay == nil && a.ActiveGenerationID == 1,
-			"%s: no target/id/next preserved: %+v (%v)", label, a, err)
 		sideWantReleased(t, w.owner, label)
 		w.reopen()
 		w.wantImage(label+": persisted image after reopen", want, true)
@@ -89,10 +103,12 @@ func TestArchiveSelectedSide(t *testing.T) {
 		// headers deleted, side bodies/links and every canonical row (genesis undo/UTXO/counters included) kept.
 		w := newSideWorld(t, sideWorldSpec{f: 490, tip: 495, rows: 5, canonicalTip: 500, generation: 4, next: 6, published: true})
 		selected(t, w, "A8a")
-		a, err := mdbx.DecodeStorageAuthorityV1(w.profileAuthority())
+		// The stored literal: next 6, SIDE(4,491,495,491), pending ARCHIVE, RECOVERY_REQUIRED, no selected side.
+		a := w.committedAuthority()
 		span := mdbx.CleanupSpanV1{Kind: mdbx.CleanupSpanSideV1, GenerationID: 4, FirstHeight: 491, LastHeight: 495, NextHeight: 491}
-		logicalMDBXAssert(t, err == nil && a.NextGenerationID == 6 && a.SelectedSide == nil && len(a.Cleanup.Spans) == 1 && a.Cleanup.Spans[0] == span && *a.PendingTargetProfile == mdbx.StorageProfileArchiveV1,
-			"pending ARCHIVE exact image: %+v (%v)", a, err)
+		logicalMDBXAssert(t, a.NextGenerationID == 6 && a.SelectedSide == nil && a.Cleanup != nil && len(a.Cleanup.Spans) == 1 && a.Cleanup.Spans[0] == span &&
+			a.PendingTargetProfile != nil && *a.PendingTargetProfile == mdbx.StorageProfileArchiveV1 && a.Lifecycle == mdbx.StorageLifecycleRecoveryRequiredV1,
+			"pending ARCHIVE exact image: %+v", a)
 	})
 	t.Run("A8a-kept", func(t *testing.T) {
 		// Side row 2 names the canonical block at 2 (override): its header is canonically kept, the others deleted.
@@ -114,14 +130,14 @@ func TestArchiveSelectedSide(t *testing.T) {
 		profileWantDecision(t, w, "PROFILE_NOOP", "active ARCHIVE PROFILE_NOOP")
 	})
 	t.Run("R-o3", func(t *testing.T) {
-		// Prepared PRUNE_GC/RECOVERY_REQUIRED with a pending ARCHIVE target, active PRUNED and active ARCHIVE (B/U 0): in
-		// the ARCHIVE prestate both the non-STABLE and the active-ARCHIVE predicates hold, so RECOVERY_REQUIRED must be
-		// checked before the PROFILE_NOOP.
+		// PRUNE_GC/RECOVERY_REQUIRED with its nonempty SIDE cleanup and a pending ARCHIVE target (the selected side
+		// cleared, as validTop requires off STABLE), active PRUNED and active ARCHIVE (B/U 0): in the ARCHIVE prestate both
+		// the non-STABLE and the active-ARCHIVE predicates hold, so RECOVERY_REQUIRED must be checked before the noop.
 		for _, active := range []mdbx.StorageProfileV1{mdbx.StorageProfilePrunedV1, mdbx.StorageProfileArchiveV1} {
 			w := newSideWorld(t, sideWorldSpec{f: 0, tip: 1_440, rows: 1_439, canonicalTip: 1, pendingSide: true})
 			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
 				archive := mdbx.StorageProfileArchiveV1
-				a.ActiveProfile, a.Lifecycle, a.PendingTargetProfile = active, mdbx.StorageLifecycleRecoveryRequiredV1, &archive
+				a.ActiveProfile, a.Lifecycle, a.PendingTargetProfile, a.SelectedSide = active, mdbx.StorageLifecycleRecoveryRequiredV1, &archive, nil
 			})
 			profileWantDecision(t, w, "RECOVERY_REQUIRED", "RECOVERY_REQUIRED precedes noop")
 		}
@@ -247,12 +263,42 @@ func TestArchiveSelectedSide(t *testing.T) {
 			logicalMDBXAssert(t, want != nil && out.Err != nil && out.Err.Error() == want.Error() && errors.Is(out.Err, want) && errors.Is(want, out.Err), "owner input refusal %v, want %v", out.Err, want)
 			w.wantImage("owner input refusal leaves the image", w.authority, false)
 		}
-		var out selectedSideOutcome
-		held = w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { out = w.profile(); return nil })
-		logicalMDBXAssert(t, held == nil, "held full lane: %v", held)
-		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "capacity refusal")
-		logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == selectedSideCapacityText, "capacity refusal %v", out.Err)
 		w.wantImage("owner refusals leave the image", w.authority, false)
 		sideWantReleased(t, w.owner, "owner refusals")
+	})
+	t.Run("R-l-control", func(t *testing.T) {
+		// With the full lane already held, the owner's capacity refusal takes one grant-free control-only Update: eligible
+		// PRUNED STABLE H>0 with a side is storage_capacity; legal RECOVERY_REQUIRED and active ARCHIVE STABLE keep their
+		// control decisions first. OLD/Prewrite, nil Err, image unchanged, outer grant intact, released afterwards.
+		recovery := func(a *mdbx.StorageAuthorityV1) {
+			archive := mdbx.StorageProfileArchiveV1
+			a.Lifecycle, a.PendingTargetProfile, a.SelectedSide = mdbx.StorageLifecycleRecoveryRequiredV1, &archive, nil
+		}
+		for _, c := range []struct {
+			name, result string
+			spec         sideWorldSpec
+			edit         func(*mdbx.StorageAuthorityV1)
+		}{
+			{"eligible", "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", sideFullSpec, nil},
+			{"recovery", "RECOVERY_REQUIRED", sideWorldSpec{f: 0, tip: 1_440, rows: 1_439, canonicalTip: 1, pendingSide: true}, recovery},
+			{"archive", "PROFILE_NOOP", sideFullSpec, func(a *mdbx.StorageAuthorityV1) { a.ActiveProfile = mdbx.StorageProfileArchiveV1 }},
+		} {
+			w := newSideWorld(t, c.spec)
+			if c.edit != nil {
+				w.setAuthority(c.edit)
+			}
+			var out selectedSideOutcome
+			held := w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error {
+				out = w.profile()
+				nested := w.owner.WithReservation(1, func() error { return nil })
+				logicalMDBXAssert(t, nested != nil && nested.Error() == selectedSideCapacityText, "%s: outer grant no longer held: %v", c.name, nested)
+				return nil
+			})
+			logicalMDBXAssert(t, held == nil, "%s: held full lane: %v", c.name, held)
+			sideWantOutcome(t, out, c.result, "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, c.name+": control before capacity")
+			logicalMDBXAssert(t, out.Err == nil, "%s: control decision kept an error: %v", c.name, out.Err)
+			w.wantImage(c.name+": capacity control leaves the image", w.authority, false)
+			sideWantReleased(t, w.owner, c.name)
+		}
 	})
 }

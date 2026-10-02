@@ -224,6 +224,62 @@ func TestArchiveSelectedSideFixture(t *testing.T) {
 		w.reopen()
 		w.wantImage("untouched original image after reopen", w.authority, false)
 	})
+	// armedHeld invokes the real PROFILE once, under one armed scenario, while the full lane is already held, so the
+	// capacity refusal takes the grant-free control-only Update.
+	armedHeld := func(t *testing.T, w *sideWorld, scenario mdbx.SelectedDamageScenario, rank uint8, key []byte) (selectedSideOutcome, mdbx.SelectedDamageEvidence) {
+		t.Helper()
+		var out selectedSideOutcome
+		calls := 0
+		evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() {
+			held := w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error { calls++; out = w.profile(); return nil })
+			logicalMDBXAssert(t, held == nil, "held full lane: %v", held)
+		})
+		logicalMDBXAssert(t, err == nil && calls == 1, "held PROFILE scenario %d: %v (%+v)", scenario, err, evidence)
+		return out, evidence
+	}
+	t.Run("R-l-control-reads", func(t *testing.T) {
+		// The control-only Update reads the authority alone (one rank-0 Get), no index/side evidence, no write.
+		w := rawSideWorld(t, sideFullSpec)
+		out, evidence := armedHeld(t, w, mdbx.SelectedDamageProbeOnly, 0, nil)
+		sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "control-only capacity")
+		logicalMDBXAssert(t, out.Err == nil && evidence.OldGets == [8]uint64{1} && evidence.BeginWrite == 0 && evidence.Commits == 0, "control-only reads %+v (%v)", evidence, out.Err)
+		w.wantImage("control-only image", w.authority, false)
+		sideWantReleased(t, w.owner, "control-only")
+	})
+	t.Run("R-l-control-begin-eio", func(t *testing.T) {
+		w := rawSideWorld(t, sideFullSpec)
+		out, _ := armedHeld(t, w, mdbx.SelectedDamageBeginEIO, 0, nil)
+		sideWantOutcome(t, out, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "control begin failure empty fields")
+		profileWantNative(t, out.Err, "control begin", mdbx.EngineIO)
+		w.wantImage("control begin image", w.authority, false)
+	})
+	t.Run("R-l-control-authority-eio", func(t *testing.T) {
+		// The control read's authority Get faults: its own storage_io classification (no capacity, no in-flight
+		// artifact class), consumed Store, cached next call with empty fields.
+		w := rawSideWorld(t, sideFullSpec)
+		first, _ := armedHeld(t, w, mdbx.SelectedDamageGetEIO, 0, []byte{2})
+		sideWantOutcome(t, first, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "control authority get EIO")
+		profileWantNative(t, first.Err, "control authority get EIO", mdbx.EngineIO)
+		next := w.profile()
+		sideWantOutcome(t, next, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "control cached next call")
+		logicalMDBXAssert(t, errors.Is(next.Err, first.Err) && errors.Is(first.Err, next.Err), "cached raw error %v, want %v", next.Err, first.Err)
+		w.reopen()
+		w.wantImage("control authority get image", w.authority, false)
+	})
+	t.Run("R-l-control-abortIO", func(t *testing.T) {
+		// The capacity sentinel plus abort EIO: storage_io (never storage_capacity) with the raw join, consumed Store,
+		// cached next call with empty fields, OLD image after reopen, grant released.
+		w := rawSideWorld(t, sideFullSpec)
+		first, _ := armedHeld(t, w, mdbx.SelectedDamageAbortEIO, 0, nil)
+		sideWantOutcome(t, first, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "OLD", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "capacity sentinel abort storage_io")
+		profileWantNative(t, first.Err, "capacity sentinel abort", mdbx.EngineIO)
+		next := w.profile()
+		sideWantOutcome(t, next, "", "", mdbx.CommitTruthOld, mdbx.UpdateStagePrewrite, "capacity abort cached next call")
+		logicalMDBXAssert(t, errors.Is(next.Err, first.Err) && errors.Is(first.Err, next.Err), "cached raw error %v, want %v", next.Err, first.Err)
+		sideWantReleased(t, w.owner, "capacity abort")
+		w.reopen()
+		w.wantImage("capacity abort image after reopen", w.authority, false)
+	})
 	t.Run("lifetime", func(t *testing.T) {
 		w := rawSideWorld(t, sideFullSpec)
 		out, evidence := w.armedProfile(t, mdbx.SelectedDamageProbeOnly, 0, nil)
