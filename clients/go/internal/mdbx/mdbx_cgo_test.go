@@ -3066,7 +3066,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
-		strings.Join(limitWrapperCalls, "|") != "Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
+		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|View:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 8)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
@@ -3108,7 +3108,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:View:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
 		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
@@ -3748,7 +3748,7 @@ func TestNativeUpdateOutcomeShapes(t *testing.T) {
 										case "write":
 											want = stage < 3 && truth == 1 && p != nil && (!attempted || secondary == nil)
 										case "read":
-											want = stage == 3 && attempted && truth == 3 && p != nil && secondary != nil
+											want = stage == 3 && attempted && p != nil && secondary != nil
 										}
 										want = want && stage >= 1 && stage <= 3 && truth >= 1 && truth <= 3
 										if (outcome.valid() == nil) != want {

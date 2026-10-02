@@ -7,6 +7,34 @@ package mdbx
 #cgo CFLAGS: -DRUBIN_SELECTED_DAMAGE_FIXTURE=1
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
+typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
+extern int rubin_li_arm(MDBX_env *, MDBX_dbi, unsigned, const void *, size_t);
+extern void rubin_li_disarm(rubin_li_state *);
+extern unsigned rubin_li_calls(void);
+static int rubin_fixture_large_bulk(MDBX_txn *txn, MDBX_dbi dbi, unsigned kind, unsigned count, size_t width, const unsigned char *hashes) {
+	unsigned char key_bytes[77] = {0};
+	size_t key_len = kind == 1 ? 32 : 77;
+	for (unsigned i = 0; i < count; i++) {
+		unsigned offset = kind == 1 ? 28 : 33;
+		key_bytes[offset] = (unsigned char)(i >> 24); key_bytes[offset+1] = (unsigned char)(i >> 16);
+		key_bytes[offset+2] = (unsigned char)(i >> 8); key_bytes[offset+3] = (unsigned char)i;
+		if (kind == 1) memcpy(key_bytes, hashes + (size_t)i * 32, 32);
+		else key_bytes[32] = 1;
+		MDBX_val key = {key_bytes, key_len}, value = {NULL, width};
+		int rc = mdbx_put(txn, dbi, &key, &value, MDBX_RESERVE | MDBX_NOOVERWRITE);
+		if (rc != MDBX_SUCCESS) return rc;
+		if (kind == 1) {
+			memset(value.iov_base, 0x5a, width);
+			unsigned char *bytes = value.iov_base;
+			bytes[0] = (unsigned char)(i >> 24); bytes[1] = (unsigned char)(i >> 16);
+			bytes[2] = (unsigned char)(i >> 8); bytes[3] = (unsigned char)i;
+		} else {
+			memset(value.iov_base, 0, width);
+			((unsigned char *)value.iov_base)[0] = 0x5a;
+		}
+	}
+	return MDBX_SUCCESS;
+}
 typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe);
 void rubin_sd_disarm(rubin_sd_counts *out);
@@ -68,6 +96,9 @@ static rubin_fixture_prefix_result rubin_fixture_prefix_address(const MDBX_txn *
 import "C"
 
 import (
+	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -284,6 +315,79 @@ func fixtureSeedPrefixRawRow(store *Store, dbi DBI, key, value []byte) error {
 		runtime.KeepAlive(value)
 		return fixtureResult(operationInit, rc)
 	})
+}
+
+func fixtureLargeBulk(store *Store, kind, count, width uint32) error {
+	rank := 4
+	var hashes []byte
+	if kind == 1 {
+		hashes = make([]byte, int(count)*32)
+		header := bytes.Repeat([]byte{0x5a}, 116)
+		for i := uint32(0); i < count; i++ {
+			binary.BigEndian.PutUint32(header, i)
+			hash := sha3.Sum256(header)
+			copy(hashes[int(i)*32:], hash[:])
+		}
+	}
+	if kind == 2 {
+		rank = 5
+	}
+	var pointer *C.uchar
+	if len(hashes) > 0 {
+		pointer = (*C.uchar)(unsafe.Pointer(&hashes[0]))
+	}
+	return fixtureWrite(store, operationInit, func(txn *C.MDBX_txn) error {
+		rc := int(C.rubin_fixture_large_bulk(txn, store.dbis[rank], C.uint(kind), C.uint(count), C.size_t(width), pointer))
+		runtime.KeepAlive(hashes)
+		return fixtureResult(operationInit, rc)
+	})
+}
+
+type fixtureLargeEvidence struct {
+	gets, commits, aborts, closes, drift uint32
+}
+
+var fixtureLargeMu sync.Mutex
+
+func fixtureLargeNativeCalls() uint32 { return uint32(C.rubin_li_calls()) }
+
+func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run func()) (evidence fixtureLargeEvidence, err error) {
+	fixtureLargeMu.Lock()
+	defer fixtureLargeMu.Unlock()
+	if store == nil || len(key) == 0 || rank >= 8 || run == nil {
+		return evidence, errors.New("invalid large-image fixture")
+	}
+	rc := int(C.rubin_li_arm(store.env, store.dbis[rank], C.uint(mode), unsafe.Pointer(&key[0]), C.size_t(len(key))))
+	runtime.KeepAlive(key)
+	if rc != codeSuccess {
+		return evidence, fixtureResult(operationInit, rc)
+	}
+	defer func() {
+		var native C.rubin_li_state
+		C.rubin_li_disarm(&native)
+		evidence = fixtureLargeEvidence{uint32(native.gets), uint32(native.commits), uint32(native.aborts), uint32(native.closes), uint32(native.drift)}
+	}()
+	run()
+	return evidence, nil
+}
+
+// Test teardown disposes a real retained handle after its terminal projection was observed.
+func fixtureLargeRelease(store *Store) error {
+	if store.state == storePOISONEDTHREAD {
+		if err := fixtureResult(operationAbort, int(C.rubin_fixture_txn_abort(store.txn))); err != nil {
+			return err
+		}
+		store.txn = nil
+		_, err := store.consume(store.terminal)
+		if store.state != storeCLOSED {
+			return err
+		}
+		return nil
+	}
+	if store.state == storeCLOSEBLOCKED {
+		return store.Close()
+	}
+	return nil
 }
 
 func fixtureDeletePrefixRow(store *Store, dbi DBI, key []byte) error {

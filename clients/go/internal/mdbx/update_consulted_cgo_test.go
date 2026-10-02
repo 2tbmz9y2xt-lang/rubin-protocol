@@ -619,11 +619,11 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	}
 	execute := updateNativeBody(t, source, "updateNativeExecute")
 	ordered(execute, "final verification order drifted", "updateNativePreflight(", "updateNativeDeletes(", "updateNativePuts(", "updateNativeVerify(", "updateNativeConsultedMatch(", "\"final update image mismatch\"", "return updateNativeCommit(")
-	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 5, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeConsultedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
+	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeExecute"), map[string]int{"C.rubin_mdbx_txn_begin": 1, "nativePointerResultError": 1, "int": 1, "updateNativeRetainedWrite": 1, "updateNativeConsumed": 1, "updateNativePreflight": 1, "updateNativeAbort": 6, "updateNativeLargeMatch": 1, "updateNativeDeletes": 1, "updateNativePuts": 1, "updateNativeVerify": 1, "updateNativeConsultedMatch": 1, "updateNativeCommit": 1}), "execute call set drifted")
 	preflight := updateNativeBody(t, source, "updateNativePreflight")
 	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeConsultedMatch(", "return references, nil")
 	require(!strings.Contains(preflight, "updateNativeConsultedImages("), "consulted capture left the admission owner")
-	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 3, "snapshot diagnostic drifted")
+	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 4, "snapshot diagnostic drifted")
 	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackConsulted(", "if oldImage", "if newImage")
 	require(strings.Contains(updateNativeBody(t, source, "updateNativeReadbackConsulted"), "oldImage, newImage = oldImage && equal, newImage && equal"), "readback fold drifted")
 	for _, name := range []string{"updateNativeConsultedImages", "updateNativeConsultedMatch", "updateNativeReadbackConsulted"} {
@@ -641,5 +641,5 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	// The three production comparisons: updateKeyOrdered, the updateNativeImages target closure and the prefix-page seek.
 	require(strings.Count(text, "bytes.Compare(") == 3, "bytes.Compare census drifted")
 	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)")
-	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn)", "updateAbortOld(begun.txn)")
+	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn, large)", "updateAbortOld(begun.txn)")
 }
