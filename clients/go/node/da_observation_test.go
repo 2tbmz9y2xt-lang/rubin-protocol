@@ -506,10 +506,10 @@ func TestDAObservationBuildSeparation(t *testing.T) {
 	cgoEnabled := build.Default.CgoEnabled
 	owned := map[string][]string{
 		".":                {"selected_side_qualification_mdbx_cgo.go", "selected_side_retention_mdbx_cgo.go", "selected_side_retention_mdbx_cgo_test.go", "selected_side_retention_mdbx_fixture_cgo_test.go", "selected_side_rolling_mdbx_cgo.go", "selected_side_rolling_mdbx_cgo_test.go", "selected_side_rolling_mdbx_fixture_cgo_test.go"},
-		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go"},
+		"../consensus":     {"selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "selected_side_damage_mdbx_fixture_cgo_test.go", "logical_state_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "archive_profile_mdbx_fixture_cgo_test.go"},
 		"../internal/mdbx": {"mdbx_cgo.go", "mdbx_fixture_cgo.go", "mdbx_cgo_test.go", "mdbx_fixture_cgo_test.go"},
 	}
-	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true, "PrepareSelectedSideRollingMDBX": true, "PlanSelectedSideRollingMDBX": true, "RefillSelectedSideMDBX": true}
+	ownedAPI := map[string]bool{"RetainSelectedSideMDBX": true, "SelectedSideMutationOutcome": true, "RecheckSelectedSideMDBX": true, "SelectedSideDamageOutcome": true, "ClassifySelectedSideFailureMDBX": true, "ReplaceSelectedSideMDBX": true, "SelectedSidePlanV1": true, "PlanSelectedSideClearMDBX": true, "PrepareSelectedSideRollingMDBX": true, "PlanSelectedSideRollingMDBX": true, "RefillSelectedSideMDBX": true, "SelectArchiveSelectedSideMDBX": true}
 	for _, tags := range [][]string{nil, {"rubin_mdbx_fixture"}} {
 		noCgo := build.Default
 		noCgo.CgoEnabled, noCgo.BuildTags = false, tags
