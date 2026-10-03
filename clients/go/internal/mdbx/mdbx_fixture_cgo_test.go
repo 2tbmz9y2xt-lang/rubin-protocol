@@ -1393,6 +1393,18 @@ func sideNativeCause(t *testing.T, err error, stage UpdateStage, truth CommitTru
 func TestCleanupSideV1Native(t *testing.T) {
 	t.Run("authority", sideNativeRejections)
 	t.Run("R18b", sideNativeIdentity)
+	t.Run("P09-A7", func(t *testing.T) {
+		a, rows := sideSelected(t, 2, 1440)
+		x, _, _ := sideRows(2, 1)
+		rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
+		s, path := sideStore(t, a, rows...)
+		rows[0].Literal = []byte{0x7f}
+		mustEnvironment(t, FixtureSeedRawRow(s, 4, x[:], rows[0].Literal))
+		sideRun(t, s, CommitTruth(2))
+		a.Cleanup, a.Phase = nil, 1
+		rows[1].Literal = nil
+		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+	})
 	t.Run("P09-A8", sideNativeBodies)
 	t.Run("X2", sideNativeFaults)
 	t.Run("X2-invalid-stage", func(t *testing.T) {

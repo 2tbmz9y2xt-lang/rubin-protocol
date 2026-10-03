@@ -216,18 +216,29 @@ func TestCleanupSideV1(t *testing.T) {
 		cleanupWantAuthority(t, s, a)
 	})
 	t.Run("P09-A7", func(t *testing.T) {
-		a, rows := sideSelected(t, 2, 1440)
-		x, body, _ := sideRows(2, 1)
-		rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
-		s, _ := sideStore(t, a, rows...)
-		sideRun(t, s, CommitTruth(2))
-		consultedRequireImage(t, s, readDBIsLiteral()[4], x[:], body, true, "selected j!=h keep")
-		consultedRequireImage(t, s, readDBIsLiteral()[6], rows[1].Key, nil, false, "owed link remained")
-		for _, row := range rows[2:] {
-			consultedRequireImage(t, s, row.DBI, row.Key, row.Literal, true, "selected image changed")
+		for _, variant := range []struct {
+			name    string
+			present bool
+		}{{"healthy", true}, {"absent", false}} {
+			t.Run(variant.name, func(t *testing.T) {
+				a, rows := sideSelected(t, 2, 1440)
+				x, body, _ := sideRows(2, 1)
+				rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
+				seed := rows
+				if !variant.present {
+					seed, body = rows[1:], nil
+				}
+				s, _ := sideStore(t, a, seed...)
+				sideRun(t, s, CommitTruth(2))
+				consultedRequireImage(t, s, readDBIsLiteral()[4], x[:], body, variant.present, "selected j!=h keep")
+				consultedRequireImage(t, s, readDBIsLiteral()[6], rows[1].Key, nil, false, "owed link remained")
+				for _, row := range rows[2:] {
+					consultedRequireImage(t, s, row.DBI, row.Key, row.Literal, true, "selected image changed")
+				}
+				a.Phase, a.Cleanup = 1, nil
+				cleanupWantAuthority(t, s, a)
+			})
 		}
-		a.Phase, a.Cleanup = 1, nil
-		cleanupWantAuthority(t, s, a)
 	})
 	t.Run("P09-A8", func(t *testing.T) {
 		a := sideAuthority(5, 5)

@@ -59,11 +59,13 @@ func cleanupSideBatch(reader *Reader, noWork error) (Batch, error) {
 	consulted := owner.Rows
 	if !keep {
 		keep, consulted, err = cleanupSideMembership(reader, a.SelectedSide, hash, consulted)
-		if err != nil {
-			return Batch{}, err
-		}
 	}
-	return cleanupSideFinish(reader, &a, span, hash, required, keep, consulted)
+	var body OptionalSideValueV1
+	// Optional keep uses link membership; LargeConsulted owns raw body evidence.
+	if all(err == nil, anyTrue(required, !keep)) {
+		body, err = reader.GetOptionalSide(SchemaV2DBIs()[4], hash[:])
+	}
+	return cleanupSideFinish(reader, &a, span, hash, required, keep, consulted, body, err)
 }
 
 func cleanupSideAuthority(reader *Reader) (StorageAuthorityV1, error) {
@@ -122,9 +124,8 @@ func cleanupSideMembership(reader *Reader, selected *SelectedSideV1, hash [32]by
 	return keep, consulted, nil
 }
 
-func cleanupSideFinish(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1, hash [32]byte, required, keep bool, consulted []ConsultedRow) (Batch, error) {
+func cleanupSideFinish(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1, hash [32]byte, required, keep bool, consulted []ConsultedRow, body OptionalSideValueV1, err error) (Batch, error) {
 	dbis := SchemaV2DBIs()
-	body, err := reader.GetOptionalSide(dbis[4], hash[:])
 	if err != nil {
 		return Batch{}, err
 	}
