@@ -1106,7 +1106,7 @@ func sideAuthorityRow(a StorageAuthorityV1) Mutation {
 }
 
 func sideNativeRejections(t *testing.T) {
-	for _, name := range []string{"R1a/version", "R1a/phase", "R1a/lifecycle", "R1a/pending", "H1", "H2", "H3/active", "H3/selected", "H4/two-SIDE", "H4/order", "R18c/BLOCKS", "R18c/UNDO", "R18c/carried-BLOCKS", "R18c/carried-UNDO"} {
+	for _, name := range []string{"R1a/version", "R1a/phase", "R1a/lifecycle", "R1a/pending", "H1", "H2", "H3/active", "H3/selected", "H3/replay-target", "H4/two-SIDE", "H4/order", "R18c/BLOCKS", "R18c/UNDO", "R18c/carried-BLOCKS", "R18c/carried-UNDO"} {
 		t.Run(name, func(t *testing.T) {
 			a := sideAuthority(5, 5)
 			_, _, rows := sideRows(2, 5)
@@ -1131,6 +1131,11 @@ func sideNativeRejections(t *testing.T) {
 			case "H3/selected":
 				bad.Cleanup.Spans = []CleanupSpanV1{{Kind: 1, GenerationID: 2}}
 				bad.SelectedSide = modelSide(2, 0, 5, 5, 585)
+			case "H3/replay-target":
+				bad = modelReplay(1)
+				// The inherited phase validator rejects simultaneous Replay and Cleanup;
+				// this does not isolate a reachable generation-target predicate.
+				bad.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 1, GenerationID: bad.Replay.TargetGenerationID}}}
 			case "H4/two-SIDE":
 				bad.Cleanup.Spans = append(bad.Cleanup.Spans, bad.Cleanup.Spans[0])
 			case "H4/order":
@@ -1401,10 +1406,12 @@ func TestCleanupSideV1Native(t *testing.T) {
 			t.Fatalf("invalid native stage tuple: %s/%d/%v", truth, stage, err)
 		}
 		requireEnvironmentError(t, joined.Unwrap()[0], EngineClass("LocalInvariant"), operationUpdate, -30779, "invalid update native outcome shape")
-		again, nextStage, got := s.CleanupSideV1(bootstrapOwner(t))
+		owner := bootstrapOwner(t)
+		again, nextStage, got := s.CleanupSideV1(owner)
 		if again != truth || nextStage != 1 || !sameError(got, err) {
 			t.Fatalf("SIDE invalid-stage cached tuple: %s/%d/%v", again, nextStage, got)
 		}
+		prunedReleased(t, owner)
 		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
 	})
 	t.Run("H10", func(t *testing.T) {
