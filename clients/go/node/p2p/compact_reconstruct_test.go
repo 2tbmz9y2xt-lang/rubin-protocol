@@ -431,7 +431,7 @@ func compactCandidateArithmetic(t *testing.T) {
 	if got, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: raw}}, 72_000_000); err != nil || got != 72_000_000 {
 		t.Fatalf("exact baseline=(%d,%v)", got, err)
 	}
-	if _, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: append(raw, 0)}}, 72_000_000); !errors.Is(err, errCompactCandidateResource) {
+	if _, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: make([]byte, 71_999_884)}}, 72_000_000); !errors.Is(err, errCompactCandidateResource) {
 		t.Fatal("baseline+1 accepted")
 	}
 }
