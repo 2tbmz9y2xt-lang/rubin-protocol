@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -435,8 +436,45 @@ func requireDAAdmissionStructure(t *testing.T) {
 				return true
 			})
 		}
+		compactHashes := map[string]string{
+			"CompactDAIdentities":              "cd2a0afeea6c37344e31ae5124c85519ca4cbcfa91d97e2ab681a471d3751d61",
+			"compactDARecordIdentitiesLocked":  "181613c01e61dcb87e518271486998721c21ea68af233234c4771dc2bc98da6e",
+			"compactDARecordValid":             "6d01c058ad0b38c6f10bd5b4fbb67f9e76e7918878e88bea50f0068248a00f73",
+			"compactDACommitValid":             "cc3cbe55856e5dcd2f0f5e79746712ea98008c506a2d7ae86f5efb52a18a6fc9",
+			"compactDAChunkValid":              "344df93b44878aae164b09d5eb2149d555f97e01d76bd2e76ac1d5c45c6ed26a",
+			"compactDATargetLocked":            "5afce8398afd2f1ecc37649494fa71dbaebb5b9d9d16ce134e5ec54f6bc53208",
+			"compactDAAssociationExistsLocked": "9cd845ac330ec315eecfb52658a9d77ed126b9391756377021d11f3e3ba5cb50",
+			"compactDASelectMemberLocked":      "a594de1216249aa79d4c0465232cdc99e1152f4e9879451ab60834316ce98d19",
+			"compactDARoleValid":               "5530520ff7a31652eaa876348f9cb17311032c42c1c14a1b0336d5907051f11b",
+			"ReadCompactDA":                    "4865d5a06d6fc763ee8c9997646fbc77ade72e8f321fd2d5cc249b66a79675fe",
+		}
+		var compactScopes []sourceScope
+		for name, digest := range compactHashes {
+			decl := declarations["node/da_relay_owner.go:"+name]
+			if decl == nil {
+				t.Fatalf("missing compact declaration %s", name)
+			}
+			body := string(sources["node/da_relay_owner.go"][fset.Position(decl.Pos()).Offset:fset.Position(decl.End()).Offset])
+			// These bodies have no nonempty string literals. Whitespace and optional
+			// semicolons are formatting; every other declaration/body byte is pinned.
+			canonical := strings.NewReplacer(" ", "", "\n", "", "\t", "", "\r", "", ";", "").Replace(body)
+			if fmt.Sprintf("%x", sha256.Sum256([]byte(canonical))) != digest {
+				t.Fatalf("compact declaration/body drift: %s", name)
+			}
+			compactScopes = append(compactScopes, sourceScope{start: decl.Pos(), end: decl.End()})
+		}
+		compactRows := map[string]int{}
 		got, where, edges, allowed, callCounts, scopeReferences, relayCalls, relayReferences := map[string]int{}, map[string]string{}, map[string]map[string]bool{}, map[string]bool{}, map[string]map[string]int{}, map[string]map[string]int{}, map[string]int{}, map[string]int{}
-		add := func(row string, pos token.Pos) { got[row]++; where[row] = fset.Position(pos).String() }
+		add := func(row string, pos token.Pos) {
+			got[row]++
+			where[row] = fset.Position(pos).String()
+			for _, scope := range compactScopes {
+				if scope.start <= pos && pos <= scope.end {
+					compactRows[row]++
+					break
+				}
+			}
+		}
 		targets := map[string]bool{"ParseTx": true, "parseDAAdmission": true, "parseDAAdmissionCandidate": true, "parseRelayMetadataTx": true, "parseRetainedDAMember": true, "renderDARelayAdmissionCandidate": true, "admitDANonReplay": true, "AdmitDA": true, "Lookup" + "RetainedTx": true}
 		admitTargets := map[string]bool{"AdmitDA": true, "NewPeerDAProvenance": true, "LocalDAProvenance": true, "DetachedReorgDAProvenance": true, "classifyDAReplay": true, "observeDAAdmission": true, "admitDANonExact": true, "admitDANonReplay": true, "BeginDAAdmission": true, "AdmissionContext": true, "claimForToken": true, "claimForTokenLocked": true, "validateEntryClaim": true, "validateEntryClaimLocked": true, "checkNoClaimsLocked": true, "byToken": true, "byOutpoint": true, "Reserve": true, "reserveDAAdmissionLocked": true, "Finalize": true, "Release": true, "validateDAAdmissionVictimsLocked": true, "validateDAAdmissionVictimShape": true, "prepareDAAdmissionVictims": true, "dropClaimLocked": true, "BeginCommit": true, "Commit": true, "Abort": true, "sets": true, "locators": true, "orphanBytesByPeerQuotaKey": true, "orphanBytesByDAID": true, "nextReceivedTime": true, "records": true}
 		observeRanges := 0
@@ -557,7 +595,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			}
 		}
 		sort.Strings(capable)
-		if strings.Join(capable, ",") != "AdmitDA,BeginDAAdmission,parseDAAdmission,parseDAAdmissionCandidate,validateCompanionCommit,validateDAAdmissionObservation" {
+		if strings.Join(capable, ",") != "AdmitDA,BeginDAAdmission,ReadCompactDA,parseDAAdmission,parseDAAdmissionCandidate,validateCompanionCommit,validateDAAdmissionObservation" {
 			t.Fatalf("parse-capable allowed declarations=%v", capable)
 		}
 		legacyRows, err := base64.StdEncoding.DecodeString(daAdmissionStructuralRowsBase64)
@@ -578,6 +616,10 @@ func requireDAAdmissionStructure(t *testing.T) {
 			return strings.Contains(row, "node/da_relay_owner.go:rendered|") || strings.Contains(row, "gen|node/da_relay_owner.go:file|const (\n\tdaRelayAdmissionRetained") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionRetained|") || strings.Contains(row, "node/da_relay_owner.go:DAAdmissionDuplicate|")
 		}
 		want := map[string]int{}
+		want["edge-call|node/mempool.go:ReadCompactStandard|ParseTx"] = 1
+		for row, count := range compactRows {
+			want[row] += count
+		}
 		want["edge-call|node/da_complete_snapshot.go:parseDACompleteMember|parseRetainedDAMember"] = 1
 		for _, row := range strings.Split(string(legacyRows), "\x1e") {
 			if row != "" && !changed(row) {
@@ -791,7 +833,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		}
 		allCalls, allReferences := relayCalls, relayReferences
 		wantCalls := map[string]int{"classifyDAReplay": 1, "observeDAAdmission": 2, "admitDANonExact": 1, "admitDANonReplay": 1, "BeginCommit": 1, "Commit": 1, "Abort": 2}
-		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 3, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 6, "locators": 3, "nextReceivedTime": 3, "records": 1}
+		wantReferences := map[string]int{"AdmitDA": 1, "NewPeerDAProvenance": 1, "LocalDAProvenance": 1, "DetachedReorgDAProvenance": 1, "classifyDAReplay": 2, "observeDAAdmission": 3, "admitDANonExact": 2, "admitDANonReplay": 2, "BeginCommit": 1, "Commit": 1, "Abort": 2, "sets": 11, "locators": 10, "nextReceivedTime": 3, "records": 1}
 		for name := range admitTargets {
 			if allCalls[name] != wantCalls[name] || allReferences[name] != wantReferences[name] {
 				t.Fatalf("public replay reference graph calls=%v references=%v", allCalls, allReferences)
@@ -7503,6 +7545,357 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 			requireRetainedLookup(t, f, tx.txid, nil, true)
 		})
 	}
+}
+
+func compactDAFixture(t *testing.T, state uint8) (*daNonReplayFixture, []daNonReplayTx) {
+	t.Helper()
+	f := newDANonReplayFixture(t, 3)
+	daID, payload := [32]byte{0xc8, state}, []byte("compact retained member")
+	chunk := f.signed(daNonReplayTxSpec{kind: 2, daID: daID, payload: payload})
+	f.admit(chunk, daNonReplayPeer("compact"))
+	txs := []daNonReplayTx{chunk}
+	if state != 0 {
+		count := uint16(1)
+		if state == 1 {
+			count = 2
+		}
+		commit := f.signed(daNonReplayTxSpec{kind: 1, daID: daID, chunkCount: count, commitment: sha3.Sum256(payload), commitmentOutputs: 1})
+		f.admit(commit, daNonReplayPeer("compact"))
+		txs = append(txs, commit)
+	}
+	return f, txs
+}
+
+func TestCompactCandidateDA(t *testing.T) {
+	t.Run("state_membership", func(t *testing.T) {
+		for _, state := range []uint8{0, 1, 2} {
+			f, txs := compactDAFixture(t, state)
+			before := daObservationImage(f)
+			ids, ok := f.relay.CompactDAIdentities(f.mp)
+			if !ok || len(ids) != len(txs) {
+				t.Fatalf("state%d identities=(%v,%v)", state, ids, ok)
+			}
+			want := map[CompactCandidateIdentity]bool{}
+			for _, tx := range txs {
+				want[CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}] = true
+			}
+			for _, id := range ids {
+				if !want[id] {
+					t.Fatalf("unexpected member=%+v", id)
+				}
+				delete(want, id)
+			}
+			if len(want) != 0 {
+				t.Fatalf("missing members=%v", want)
+			}
+			ids[0] = CompactCandidateIdentity{}
+			for _, tx := range txs {
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}, uint64(len(tx.raw))), 1, tx.raw)
+			}
+			if !reflect.DeepEqual(before, daObservationImage(f)) {
+				t.Fatal("snapshot/read mutated state/provenance/claims/accounting")
+			}
+			fresh, ok := f.relay.CompactDAIdentities(f.mp)
+			if !ok || len(fresh) != len(txs) {
+				t.Fatal("caller metadata edits reached next snapshot")
+			}
+		}
+	})
+	t.Run("unavailable_and_empty", func(t *testing.T) {
+		f := newDANonReplayFixture(t, 1)
+		if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != 0 {
+			t.Fatal("initialized empty refused")
+		}
+		for _, relay := range []*DARelayState{nil, {}, {mempool: f.mp, sets: map[[32]byte]daRelaySetRecord{}}, {sets: map[[32]byte]daRelaySetRecord{}, locators: map[[32]byte]daRelayLocator{}}} {
+			if ids, ok := relay.CompactDAIdentities(f.mp); ok || ids != nil {
+				t.Fatal("unavailable became empty")
+			}
+			requireCompactCandidateRead(t, relay.ReadCompactDA(CompactCandidateIdentity{}, 0), 3, nil)
+		}
+	})
+	t.Run("missing_selected_locator", func(t *testing.T) {
+		for _, state := range []uint8{0, 1, 2} {
+			f, txs := compactDAFixture(t, state)
+			for _, tx := range txs {
+				id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+				f.relay.mu.Lock()
+				locator := f.relay.locators[tx.txid]
+				delete(f.relay.locators, tx.txid)
+				f.relay.mu.Unlock()
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 3, nil)
+				f.relay.mu.Lock()
+				f.relay.locators[tx.txid] = locator
+				f.relay.mu.Unlock()
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 1, tx.raw)
+			}
+			if err := f.relay.ReleasePeerQuotaKey("compact"); err != nil {
+				t.Fatal(err)
+			}
+			for _, tx := range txs {
+				id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+				if state == 2 {
+					requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 1, tx.raw)
+				} else {
+					requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 2, nil)
+				}
+			}
+		}
+	})
+	t.Run("canonical_binding", func(t *testing.T) {
+		f, _ := compactDAFixture(t, 0)
+		for _, wrong := range []*Mempool{nil, newCompactStandardFixture(t, 1).mp} {
+			if ids, ok := f.relay.CompactDAIdentities(wrong); ok || ids != nil {
+				t.Fatal("wrong canonical owner accepted")
+			}
+		}
+		if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != 1 {
+			t.Fatal("valid binding refused on next operation")
+		}
+	})
+	t.Run("coherent_replacement", func(t *testing.T) {
+		f, txs := compactDAFixture(t, 0)
+		original := txs[0]
+		tx, _, _, _, err := consensus.ParseTx(original.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
+			t.Fatal(err)
+		}
+		raw := mustMarshalTxForNodeTest(t, tx)
+		_, txid, wtxid, consumed, err := consensus.ParseTx(raw)
+		if err != nil || consumed != len(raw) || txid != original.txid || wtxid == original.wtxid {
+			t.Fatal("canonical witness replacement fixture is not distinct")
+		}
+		f.mutateRelay(func(s *DARelayState) {
+			record := s.sets[original.spec.daID]
+			chunk := record.chunks[0]
+			chunk.txBytes, chunk.member.wtxid = slices.Clone(raw), wtxid
+			record.chunks[0] = chunk
+			s.sets[original.spec.daID] = record
+		})
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: original.txid, WTxID: original.wtxid}, 0), 2, nil)
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txid, WTxID: wtxid}, uint64(len(raw))), 1, raw)
+	})
+	t.Run("immutable_bytes", func(t *testing.T) {
+		f, txs := compactDAFixture(t, 1)
+		tx := txs[0]
+		id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+		before := daObservationImage(f)
+		read := f.relay.ReadCompactDA(id, uint64(len(tx.raw)))
+		requireCompactCandidateRead(t, read, 1, tx.raw)
+		read.Raw[0] ^= 1
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, uint64(len(tx.raw))), 1, tx.raw)
+		if !reflect.DeepEqual(before, daObservationImage(f)) {
+			t.Fatal("caller edit changed retained buffers")
+		}
+		if err := f.relay.ReleasePeerQuotaKey("compact"); err != nil {
+			t.Fatal(err)
+		}
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 2, nil)
+		if read.Raw[0] != tx.raw[0]^1 {
+			t.Fatal("removal changed returned copy")
+		}
+	})
+	t.Run("target_only_copy", func(t *testing.T) {
+		f, txs := compactDAFixture(t, 1)
+		tx := txs[0]
+		id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+		f.mutateRelay(func(s *DARelayState) {
+			r := s.sets[tx.spec.daID]
+			chunk := r.chunks[0]
+			chunk.payload = bytes.Repeat([]byte{0x65}, 16<<20)
+			r.commit.txBytes = bytes.Repeat([]byte{0x89}, 16<<20)
+			r.chunks[0] = chunk
+			s.sets[tx.spec.daID] = r
+		})
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		read := f.relay.ReadCompactDA(id, uint64(len(tx.raw)))
+		runtime.ReadMemStats(&after)
+		requireCompactCandidateRead(t, read, 1, tx.raw)
+		if after.TotalAlloc-before.TotalAlloc >= 2<<20 {
+			t.Fatalf("companion/payload copy=%d", after.TotalAlloc-before.TotalAlloc)
+		}
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, uint64(len(tx.raw))-1), 4, nil)
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, uint64(len(tx.raw))), 1, tx.raw)
+	})
+	t.Run("canonical_role_and_ids", compactDACanonical)
+	t.Run("snapshot_faults", compactDASnapshotFaults)
+	t.Run("coherent_concurrency", compactDAConcurrency)
+}
+
+func compactDASnapshotFaults(t *testing.T) {
+	for _, state := range []uint8{0, 1, 2} {
+		for _, mutation := range []string{"nil_sets", "nil_locators", "nil_chunks", "nil_member", "invalid_state", "reverse_index", "missing_commit", "incomplete_C", "nil_payload", "empty_payload", "nonempty_payload"} {
+			if (mutation == "missing_commit" && state == 0) || (mutation == "incomplete_C" && state != 2) {
+				continue
+			}
+			if (mutation == "nil_payload" && state == 2) || (mutation == "nonempty_payload" && state != 2) {
+				continue
+			}
+			f, txs := compactDAFixture(t, state)
+			original := daRelayStateSnapshot(f.relay)
+			f.mutateRelay(func(s *DARelayState) {
+				r := s.sets[txs[0].spec.daID]
+				switch mutation {
+				case "nil_sets":
+					s.sets = nil
+				case "nil_locators":
+					s.locators = nil
+				case "nil_chunks":
+					r.chunks = nil
+				case "nil_member":
+					chunk := r.chunks[0]
+					chunk.member = nil
+					r.chunks[0] = chunk
+				case "invalid_state":
+					r.state = 3
+				case "reverse_index":
+					delete(s.locators, txs[0].txid)
+				case "missing_commit":
+					r.commit.member = nil
+				case "incomplete_C":
+					delete(r.chunks, 0)
+				case "nil_payload":
+					chunk := r.chunks[0]
+					chunk.payload = nil
+					r.chunks[0] = chunk
+				case "empty_payload":
+					chunk := r.chunks[0]
+					chunk.payload = []byte{}
+					r.chunks[0] = chunk
+				case "nonempty_payload":
+					chunk := r.chunks[0]
+					chunk.payload = []byte("retained payload residue")
+					r.chunks[0] = chunk
+				}
+				if s.sets != nil {
+					s.sets[txs[0].spec.daID] = r
+				}
+			})
+			if ids, ok := f.relay.CompactDAIdentities(f.mp); ok || ids != nil {
+				t.Fatalf("state%d %s returned prefix=%v", state, mutation, ids)
+			}
+			if strings.HasSuffix(mutation, "payload") {
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txs[0].txid, WTxID: txs[0].wtxid}, ^uint64(0)), 3, nil)
+			}
+			f.mutateRelay(func(s *DARelayState) { s.sets, s.locators = original.sets, original.locators })
+			if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != len(txs) {
+				t.Fatalf("state%d %s next snapshot failed", state, mutation)
+			}
+			if strings.HasSuffix(mutation, "payload") {
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txs[0].txid, WTxID: txs[0].wtxid}, ^uint64(0)), 1, txs[0].raw)
+			}
+		}
+	}
+}
+
+func compactDACanonical(t *testing.T) {
+	for _, mutation := range []string{"trailing", "truncated", "txid", "wtxid", "daID", "index", "parsed_daID", "parsed_index", "role", "association_before_replacement"} {
+		f, txs := compactDAFixture(t, 1)
+		tx := txs[0]
+		id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+		var alternate daNonReplayTx
+		if mutation == "parsed_daID" || mutation == "parsed_index" {
+			spec := tx.spec
+			if mutation == "parsed_daID" {
+				spec.daID[0] ^= 1
+			} else {
+				spec.chunkIndex = 1
+			}
+			alternate = f.signed(spec)
+		}
+		f.mutateRelay(func(s *DARelayState) {
+			r := s.sets[tx.spec.daID]
+			chunk := r.chunks[0]
+			switch mutation {
+			case "trailing":
+				chunk.txBytes = append(slices.Clone(chunk.txBytes), 0)
+			case "truncated":
+				chunk.txBytes = slices.Clone(chunk.txBytes[:len(chunk.txBytes)-1])
+			case "txid":
+				chunk.member.txid[0] ^= 1
+				delete(s.locators, tx.txid)
+				s.locators[chunk.member.txid] = daRelayLocator{daID: r.daID, kind: 2}
+				id.TxID = chunk.member.txid
+			case "wtxid":
+				chunk.member.wtxid[0] ^= 1
+				id.WTxID = chunk.member.wtxid
+			case "daID":
+				chunk.daID[0] ^= 1
+			case "index":
+				chunk.chunkIndex++
+			case "parsed_daID", "parsed_index":
+				chunk.txBytes = slices.Clone(alternate.raw)
+				chunk.member.txid, chunk.member.wtxid = alternate.txid, alternate.wtxid
+				delete(s.locators, tx.txid)
+				s.locators[alternate.txid] = daRelayLocator{daID: r.daID, kind: 2}
+				id = CompactCandidateIdentity{TxID: alternate.txid, WTxID: alternate.wtxid}
+			case "role":
+				chunk.txBytes = slices.Clone(txs[1].raw)
+				chunk.member.txid, chunk.member.wtxid = txs[1].txid, txs[1].wtxid
+				delete(s.locators, tx.txid)
+				s.locators[txs[1].txid] = daRelayLocator{daID: r.daID, kind: 2}
+				id = CompactCandidateIdentity{TxID: txs[1].txid, WTxID: txs[1].wtxid}
+			case "association_before_replacement":
+				chunk.chunkIndex++
+				id.WTxID[0] ^= 1
+			}
+			r.chunks[0] = chunk
+			s.sets[tx.spec.daID] = r
+		})
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 3, nil)
+		if mutation != "role" {
+			requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txs[1].txid, WTxID: txs[1].wtxid}, ^uint64(0)), 1, txs[1].raw)
+		}
+	}
+}
+
+func compactDAConcurrency(t *testing.T) {
+	f, txs := compactDAFixture(t, 0)
+	tx := txs[0]
+	id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+	for i := 0; i < 10; i++ {
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 1, tx.raw)
+		if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != 1 || ids[0] != id {
+			t.Fatal("next phase did not observe admitted pair")
+		}
+		started := make(chan struct{}, 3)
+		reads, snapshots, removed := make(chan CompactCandidateRead, 1), make(chan []CompactCandidateIdentity, 1), make(chan error, 1)
+		f.relay.mu.Lock()
+		go func() {
+			started <- struct{}{}
+			ids, ok := f.relay.CompactDAIdentities(f.mp)
+			if !ok {
+				t.Error("torn DA snapshot")
+			}
+			snapshots <- ids
+		}()
+		go func() { started <- struct{}{}; reads <- f.relay.ReadCompactDA(id, ^uint64(0)) }()
+		go func() { started <- struct{}{}; removed <- f.relay.ReleasePeerQuotaKey("compact") }()
+		for range 3 {
+			<-started
+		}
+		f.relay.mu.Unlock()
+		ids, read, err := <-snapshots, <-reads, <-removed
+		if err != nil || len(ids) > 1 || (len(ids) == 1 && ids[0] != id) {
+			t.Fatal("DA snapshot/removal is incoherent")
+		}
+		if read.Disposition != 1 && read.Disposition != 2 {
+			t.Errorf("torn DA read=%+v", read)
+		}
+		if read.Disposition == 1 && !bytes.Equal(read.Raw, tx.raw) {
+			t.Error("mixed DA bytes")
+		}
+		requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 2, nil)
+		f.admit(tx, daNonReplayPeer("compact"))
+	}
+	if err := f.relay.ReleasePeerQuotaKey("compact"); err != nil {
+		t.Fatal(err)
+	}
+	requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 2, nil)
 }
 
 func TestLookupRetainedTxReturnsDefensiveBytes(t *testing.T) {
