@@ -469,6 +469,51 @@ func largeTestConcurrency(t *testing.T) {
 	}
 }
 
+func TestLargeImageV1ObsoleteAdmission(t *testing.T) {
+	for _, variant := range []string{"valid", "kind0", "kind3", "kind255", "count2881", "ordinary-overlap"} {
+		t.Run(variant, func(t *testing.T) {
+			store, _, _ := consultedStore(t)
+			seed := consultedCounter(t, 9)
+			largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
+			truth, stage, result := store.Update(func(reader *Reader) (Batch, error) {
+				page, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
+				mustEnvironment(t, err)
+				batch := obsoleteBatch(page)
+				batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 1}, {Kind: 2}}
+				switch variant {
+				case "kind0":
+					batch.LargeConsulted[0].Kind = 0
+				case "kind3":
+					batch.LargeConsulted[0].Kind = 3
+				case "kind255":
+					batch.LargeConsulted[0].Kind = 255
+				case "count2881":
+					batch.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+				case "ordinary-overlap":
+					batch.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+					batch.Consulted = []ConsultedRow{{DBI: seed.DBI, Key: seed.Key}}
+				}
+				return batch, nil
+			})
+			if variant == "valid" {
+				if truth.String() != "NEW" || int(stage) != 3 || result != nil {
+					t.Fatal("joint raw/large admission", truth, stage, result)
+				}
+			} else {
+				class, code, diagnostic := "InvalidInput", 22, "invalid Update Batch"
+				if variant == "count2881" {
+					class, code, diagnostic = "Capacity", -30417, "Update Batch exceeds bound"
+				}
+				obsoleteRequireError(t, result, "update", class, code, diagnostic)
+				if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" {
+					t.Fatal("joint raw/large refusal state", truth, stage, store.state)
+				}
+				consultedRequireImage(t, store, seed.DBI, seed.Key, seed.Literal, true, variant)
+			}
+		})
+	}
+}
+
 type largeTypedNil struct{}
 
 func (*largeTypedNil) Error() string { return "typed-nil large application" }

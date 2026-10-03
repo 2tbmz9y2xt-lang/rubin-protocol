@@ -112,7 +112,7 @@ func canonicalOldPaired(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutatio
 // canonicalOldField returns the leading OLD field of a target of this side whose OLD value has the side's exact width,
 // and reports whether the planned NEW value is absent or names another partner. The width is checked before slicing.
 func canonicalOldField(m ownedMutation, image updateImage, side canonicalSide) ([]byte, bool) {
-	if m.dbi.Rank != side.rank || !image.present || image.length != side.width {
+	if m.dbi.Rank != side.rank || len(m.key) != 48-side.field || !image.present || image.length != side.width {
 		return nil, false
 	}
 	field := unsafe.Slice((*byte)(image.bytes), side.field)

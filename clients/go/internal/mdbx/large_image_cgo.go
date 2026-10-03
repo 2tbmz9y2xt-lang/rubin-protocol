@@ -60,6 +60,9 @@ type largeNativeRow struct {
 type largeImageScope struct {
 	selectors []LargeImageSelectorV1
 	maxKey    uint64
+	domains   []obsoleteDomain
+	points    []obsoletePoint
+	consulted []ownedConsulted
 }
 
 func largeImageInput(diagnostic string) error {
@@ -341,7 +344,7 @@ func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (l
 			return largeImageScope{}, updateInvalidBatch()
 		}
 	}
-	return largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey}, nil
+	return updateObsoleteScope(batch, largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey, consulted: consulted})
 }
 
 type largeResidualStream struct {
@@ -351,10 +354,14 @@ type largeResidualStream struct {
 	plan     []ownedMutation
 	target   int
 	done     bool
+	domain   *obsoleteDomain
 }
 
 func (stream *largeResidualStream) excluded(key []byte) bool {
 	rank := largeImageRank(stream.selector.Kind)
+	if stream.domain != nil {
+		rank = stream.domain.rank
+	}
 	for stream.target < len(stream.plan) {
 		mutation := stream.plan[stream.target]
 		if !updateKeyOrdered(mutation.dbi.Rank, mutation.key, rank, key) {
@@ -367,7 +374,7 @@ func (stream *largeResidualStream) excluded(key []byte) bool {
 
 func (stream *largeResidualStream) next() (largeNativeRow, error) {
 	for !stream.done {
-		row, err := stream.reader.largeNext(stream.selector, stream.seek)
+		row, err := stream.fetch()
 		if err != nil || row.done {
 			return row, err
 		}
@@ -378,6 +385,17 @@ func (stream *largeResidualStream) next() (largeNativeRow, error) {
 		}
 	}
 	return largeNativeRow{done: true}, nil
+}
+
+func (stream *largeResidualStream) fetch() (largeNativeRow, error) {
+	if stream.domain == nil {
+		return stream.reader.largeNext(stream.selector, stream.seek)
+	}
+	row, err := stream.reader.obsoleteFetch(*stream.domain, stream.seek, operationUpdate)
+	if err == nil && !row.done && !stream.domain.end && bytes.Compare(row.key, stream.domain.last) > 0 {
+		return largeNativeRow{done: true}, nil
+	}
+	return row, err
 }
 
 // Complete row equality owns keyset, presence, length and borrowed byte windows.
@@ -428,6 +446,24 @@ func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ow
 	equal := true
 	for _, selector := range scope.selectors {
 		match, err := largeDomainEqual(old, candidate, selector, plan)
+		if err != nil {
+			return false, err
+		}
+		equal = equal && match
+	}
+	return obsoleteResidualEqual(old, candidate, scope, plan, equal)
+}
+
+func obsoleteResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
+	for _, domain := range scope.domains {
+		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope.consulted)
+		if err != nil {
+			return false, err
+		}
+		equal = equal && match
+	}
+	for _, point := range scope.points {
+		match, err := obsoletePointEqual(old, candidate, point, plan, scope.consulted)
 		if err != nil {
 			return false, err
 		}
