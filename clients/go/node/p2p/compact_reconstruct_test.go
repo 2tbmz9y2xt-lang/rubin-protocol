@@ -254,6 +254,11 @@ func compactCandidateInputCases(t *testing.T) {
 	valid := cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: prefill}}}
 	reject := func(t *testing.T, block cmpctBlockPayload, profile, budget uint64) {
 		t.Helper()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				t.Fatalf("input rejection panicked: %v; want errCompactCandidateInput with zero Result and no D4 observation", recovered)
+			}
+		}()
 		got, err := reconstructCompactCandidates(block, profile, budget, nil, nil)
 		requireCompactCandidateZero(t, got, err, errCompactCandidateInput)
 		if got.D4Complete || got.DistinctCollisionCount != 0 {
