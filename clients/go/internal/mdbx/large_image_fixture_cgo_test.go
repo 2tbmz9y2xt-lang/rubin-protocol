@@ -790,7 +790,7 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 						mustEnvironment(t, err)
 						obsoleteRequirePage(t, page, 1, 1)
 						batch.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
-						batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 1, Hash: hash}, {Kind: 2, Hash: hash}}
+						batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 1, Hash: hash}}
 						batch.Mutations = []Mutation{consultedCounter(t, 1)}
 						return batch, nil
 					}
@@ -878,6 +878,10 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 				obsoleteRawImage(t, reopened, 3, hash[:], header)
 			} else {
 				obsoleteRawImage(t, reopened, rank, faultKey, []byte{0x7f})
+			}
+			if variant == "later-failure" {
+				counter := consultedCounter(t, 1)
+				obsoleteRawImage(t, reopened, 0, counter.Key, counter.Literal)
 			}
 		})
 	}

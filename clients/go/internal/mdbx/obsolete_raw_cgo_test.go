@@ -10,7 +10,9 @@ import (
 	"io"
 	"math"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func obsoleteRequireError(t *testing.T, err error, operation, class string, code int, diagnostic string) {
@@ -172,15 +174,16 @@ func TestObsoleteGenerationV1CounterLifetime(t *testing.T) {
 }
 
 func TestObsoleteGenerationV1Admission(t *testing.T) {
-	for _, variant := range []string{"zero-row", "zero-witness", "missing-witness", "wrong-scope", "duplicate-row", "duplicate-witness", "legacy-collision", "ordinary-target", "Reverse", "witness-only", "View", "previous-Update", "foreign-Store"} {
+	for _, variant := range []string{"zero-row", "zero-witness", "missing-witness", "wrong-scope", "duplicate-row", "duplicate-witness", "legacy-collision", "ordinary-target", "Reverse", "witness-only", "View", "previous-Update", "foreign-Store", "View/foreign-row", "View/foreign-witness", "previous-Update/foreign-row", "previous-Update/foreign-witness", "foreign-Store/foreign-row", "foreign-Store/foreign-witness"} {
 		t.Run(variant, func(t *testing.T) {
 			store, _, _ := consultedStore(t)
 			seed := consultedCounter(t, 9)
 			largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
+			origin, replacement, _ := strings.Cut(variant, "/")
 			var foreign ObsoletePageV1
-			if variant == "View" || variant == "foreign-Store" {
+			if origin == "View" || origin == "foreign-Store" {
 				owner := store
-				if variant == "foreign-Store" {
+				if origin == "foreign-Store" {
 					owner, _, _ = consultedStore(t)
 					largeCommit(t, owner, Batch{Mutations: []Mutation{seed}})
 				}
@@ -190,7 +193,7 @@ func TestObsoleteGenerationV1Admission(t *testing.T) {
 					return err
 				}))
 			}
-			if variant == "previous-Update" {
+			if origin == "previous-Update" {
 				truth, _, err := store.Update(func(reader *Reader) (Batch, error) {
 					var err error
 					foreign, err = reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
@@ -200,9 +203,13 @@ func TestObsoleteGenerationV1Admission(t *testing.T) {
 					t.Fatal("previous Update seed", truth, err)
 				}
 			}
+			if foreign.Witness != (ObsoletePageWitnessV1{}) {
+				obsoleteRequirePage(t, foreign, 1, 1, seed.Key)
+			}
 			truth, stage, err := store.Update(func(reader *Reader) (Batch, error) {
 				page, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
 				mustEnvironment(t, err)
+				obsoleteRequirePage(t, page, 1, 1, seed.Key)
 				batch := obsoleteBatch(page)
 				switch variant {
 				case "zero-row":
@@ -228,7 +235,14 @@ func TestObsoleteGenerationV1Admission(t *testing.T) {
 				case "witness-only":
 					batch.ObsoleteDeletes = nil
 				default:
-					batch = obsoleteBatch(foreign)
+					switch replacement {
+					case "foreign-row":
+						batch.ObsoleteDeletes = foreign.Rows
+					case "foreign-witness":
+						batch.ObsoleteConsulted = []ObsoletePageWitnessV1{foreign.Witness}
+					default:
+						batch = obsoleteBatch(foreign)
+					}
 				}
 				return batch, nil
 			})
@@ -312,39 +326,95 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 	}
 }
 
-func TestObsoleteGenerationV1ConcurrentExpiry(t *testing.T) {
-	store, _, _ := consultedStore(t)
-	seed := consultedCounter(t, 9)
-	largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
-	started, done := make(chan struct{}), make(chan error, 1)
-	truth, stage, err := store.Update(func(reader *Reader) (Batch, error) {
-		page, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
-		mustEnvironment(t, err)
-		row := page.Rows[0]
-		go func() {
-			close(started)
-			for {
-				buffer := make([]byte, 16)
-				n, err := row.ReadAt(buffer, 0)
-				if err != nil {
-					done <- err
-					return
-				}
-				if n != 16 || !bytes.Equal(buffer, seed.Literal) {
-					done <- fmt.Errorf("concurrent row bytes %d/%x", n, buffer)
-					return
-				}
-				runtime.Gosched()
+func obsoleteWaitForMutex(frame string, finished <-chan struct{}) error {
+	stack := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := runtime.Stack(stack, true)
+		for _, trace := range strings.Split(string(stack[:n]), "\n\n") {
+			if strings.Contains(trace, "sync.(*Mutex).Lock") && strings.Contains(trace, frame) {
+				return nil
 			}
-		}()
-		<-started
-		return obsoleteBatch(page), nil
-	})
-	if truth.String() != "NEW" || int(stage) != 3 || err != nil {
-		t.Fatal("expiry Update", truth, stage, err)
+		}
+		select {
+		case <-finished:
+			return fmt.Errorf("%s completed before Reader.getMu wait", frame)
+		default:
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not reach Reader.getMu wait", frame)
+		}
+		runtime.Gosched()
 	}
-	obsoleteRequireError(t, <-done, "get", "InvalidInput", 22, "Reader is not active")
-	consultedRequireImage(t, store, seed.DBI, seed.Key, nil, false, "expiry committed delete")
+}
+
+func TestObsoleteGenerationV1ConcurrentExpiry(t *testing.T) {
+	for _, variant := range []string{"expiry", "in-flight-failure"} {
+		t.Run(variant, func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			seed := consultedCounter(t, 9)
+			largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
+			inFlight := nativeError(operationGet, 5)
+			readDone, released := make(chan error, 1), make(chan error, 1)
+			readFinished, updateFinished := make(chan struct{}), make(chan struct{})
+			truth, stage, result := store.Update(func(reader *Reader) (Batch, error) {
+				page, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
+				mustEnvironment(t, err)
+				row := page.Rows[0]
+				go func() {
+					buffer := make([]byte, 16)
+					n, err := row.ReadAt(buffer, 0)
+					if n != 16 || err != nil || !bytes.Equal(buffer, seed.Literal) {
+						err = fmt.Errorf("concurrent row bytes %d/%x: %w", n, buffer, err)
+					}
+					readDone <- err
+				}()
+				mustEnvironment(t, <-readDone)
+				reader.getMu.Lock()
+				go func() {
+					n, err := row.ReadAt(make([]byte, 16), 0)
+					if n != 0 {
+						err = fmt.Errorf("expired concurrent row copied %d bytes", n)
+					}
+					readDone <- err
+					close(readFinished)
+				}()
+				if err := obsoleteWaitForMutex("ObsoleteRowV1.ReadAt", readFinished); err != nil {
+					reader.getMu.Unlock()
+					released <- err
+					return Batch{}, err
+				}
+				go func() {
+					err := obsoleteWaitForMutex("(*Reader).expire", updateFinished)
+					if variant == "in-flight-failure" {
+						reader.largeFailure(inFlight)
+					}
+					reader.getMu.Unlock()
+					released <- err
+				}()
+				return obsoleteBatch(page), nil
+			})
+			close(updateFinished)
+			mustEnvironment(t, <-released)
+			obsoleteRequireError(t, <-readDone, "get", "InvalidInput", 22, "Reader is not active")
+			if variant == "expiry" {
+				if truth.String() != "NEW" || int(stage) != 3 || result != nil || string(store.state) != "OPEN" {
+					t.Fatal("expiry Update", truth, stage, result, store.state)
+				}
+				consultedRequireImage(t, store, seed.DBI, seed.Key, nil, false, "expiry committed delete")
+				largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 11)}})
+				return
+			}
+			obsoleteRequireError(t, result, "get", "IO", 5, expectedNativeDiagnostic(5))
+			if result != inFlight || truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "CLOSED" || store.env != nil || store.writer != nil || store.txn != nil || store.terminal != inFlight || store.terminalTruth.String() != "OLD" {
+				t.Fatal("raw read drain lost failure or allowed writes", truth, stage, result, store.state)
+			}
+			reopened, err := Open(path, cfg)
+			consultedTrack(t, reopened, err)
+			consultedRequireImage(t, reopened, seed.DBI, seed.Key, seed.Literal, true, "drained failure OLD")
+			largeCommit(t, reopened, Batch{Mutations: []Mutation{consultedCounter(t, 11)}})
+		})
+	}
 }
 
 func TestObsoleteGenerationV1JointBounds(t *testing.T) {
