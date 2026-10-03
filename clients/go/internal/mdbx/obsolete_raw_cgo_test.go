@@ -249,6 +249,7 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 			seed := consultedCounter(t, 9)
 			largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
 			application := error(errors.New("obsolete application"))
+			originalCause := errors.New("existing cause")
 			if variant == "typed-nil" {
 				application = (*largeTypedNil)(nil)
 			}
@@ -259,7 +260,7 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 				}
 			}
 			if variant == "cause-bearing" {
-				application = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "application cause", Cause: errors.New("existing cause")}
+				application = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "application cause", Cause: originalCause}
 			}
 			payload := &struct{ value string }{"obsolete panic"}
 			var recovered any
@@ -292,6 +293,9 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 				}
 			} else if truth.String() != "OLD" || int(stage) != 1 || result != application {
 				t.Fatal("application identity", truth, stage, result)
+			}
+			if variant == "cause-bearing" && application.(*EngineError).Cause != originalCause {
+				t.Fatal("original application Cause changed")
 			}
 			if string(store.state) != "OPEN" || store.terminal != nil {
 				t.Fatal("application outcome changed owner state")

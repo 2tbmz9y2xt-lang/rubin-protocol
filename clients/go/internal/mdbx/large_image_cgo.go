@@ -62,6 +62,7 @@ type largeImageScope struct {
 	maxKey    uint64
 	domains   []obsoleteDomain
 	points    []obsoletePoint
+	consulted []ownedConsulted
 }
 
 func largeImageInput(diagnostic string) error {
@@ -343,7 +344,7 @@ func updateOwnedLarge(batch Batch, consulted []ownedConsulted, maxKey uint64) (l
 			return largeImageScope{}, updateInvalidBatch()
 		}
 	}
-	return updateObsoleteScope(batch, largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey})
+	return updateObsoleteScope(batch, largeImageScope{selectors: append([]LargeImageSelectorV1(nil), selectors...), maxKey: maxKey, consulted: consulted})
 }
 
 type largeResidualStream struct {
@@ -455,14 +456,14 @@ func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ow
 
 func obsoleteResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation, equal bool) (bool, error) {
 	for _, domain := range scope.domains {
-		match, err := obsoleteDomainEqual(old, candidate, domain, plan)
+		match, err := obsoleteDomainEqual(old, candidate, domain, plan, scope.consulted)
 		if err != nil {
 			return false, err
 		}
 		equal = equal && match
 	}
 	for _, point := range scope.points {
-		match, err := obsoletePointEqual(old, candidate, point, plan)
+		match, err := obsoletePointEqual(old, candidate, point, plan, scope.consulted)
 		if err != nil {
 			return false, err
 		}

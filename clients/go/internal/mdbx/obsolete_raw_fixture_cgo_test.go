@@ -353,7 +353,7 @@ func TestObsoleteGenerationV1ProofOrder(t *testing.T) {
 						if err != recorded || reader.usable() {
 							t.Fatal("first proof backend error was masked")
 						}
-						requireEnvironmentError(t, err, EngineClass("IO"), engineOperation("prefix-page"), 5, expectedNativeDiagnostic(5))
+						obsoleteRequireError(t, err, "prefix-page", "IO", 5, expectedNativeDiagnostic(5))
 					} else if variant == "proven-valid" {
 						mustEnvironment(t, err)
 						obsoleteRequirePage(t, page, 1, 3, undoKey)
@@ -482,7 +482,7 @@ func TestObsoleteGenerationV1CanonicalPair(t *testing.T) {
 					t.Fatal("canonical refusal resource/result", truth, stage, result, evidence, store.state)
 				}
 				if variant == "partner-error" {
-					requireEnvironmentError(t, result, EngineClass("IO"), engineOperation("update"), 5, expectedNativeDiagnostic(5))
+					obsoleteRequireError(t, result, "update", "IO", 5, expectedNativeDiagnostic(5))
 				} else {
 					obsoleteRequireError(t, result, "update", "InvalidInput", 22, "unpaired canonical owner mutation")
 				}
@@ -514,6 +514,7 @@ func TestObsoleteGenerationV1Callbacks(t *testing.T) {
 				seed := consultedCounter(t, 9)
 				largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
 				var recorded, application, result error
+				originalCause := errors.New("retained application cause")
 				var saved ObsoleteRowV1
 				var recovered any
 				var truth CommitTruth
@@ -555,7 +556,7 @@ func TestObsoleteGenerationV1Callbacks(t *testing.T) {
 							if n != 0 || reader.failure != recorded || reader.usable() {
 								t.Fatal("native read failure not recorded")
 							}
-							requireEnvironmentError(t, recorded, EngineClass("IO"), engineOperation("get"), 5, expectedNativeDiagnostic(5))
+							obsoleteRequireError(t, recorded, "get", "IO", 5, expectedNativeDiagnostic(5))
 							switch variant {
 							case "exact":
 								application = recorded
@@ -566,7 +567,7 @@ func TestObsoleteGenerationV1Callbacks(t *testing.T) {
 							case "typed-nil":
 								application = (*largeTypedNil)(nil)
 							case "cause-bearing":
-								application = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "existing application", Cause: errors.New("retained application cause")}
+								application = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "existing application", Cause: originalCause}
 							case "panic":
 								panic(payload)
 							}
@@ -589,6 +590,9 @@ func TestObsoleteGenerationV1Callbacks(t *testing.T) {
 						t.Fatal("native callback stage", truth, stage, evidence)
 					}
 					largeCallbackCauses(t, result, application, recorded, fault)
+				}
+				if variant == "cause-bearing" && application.(*EngineError).Cause != originalCause {
+					t.Fatal("original application Cause changed with infrastructure", fault)
 				}
 				wantState := map[uint32]string{1: "CLOSED", 2: "POISONED_THREAD", 24: "CLOSE_BLOCKED"}[fault]
 				if string(store.state) != wantState || !validStoreShape(store) {
@@ -633,7 +637,7 @@ func TestObsoleteGenerationV1NativeShapes(t *testing.T) {
 			largeNativeCached(t, store)
 		})
 		mustEnvironment(t, err)
-		requireEnvironmentError(t, result, EngineClass("LocalInvariant"), engineOperation("prefix-page"), -30779, "invalid native obsolete generation result")
+		obsoleteRequireError(t, result, "prefix-page", "LocalInvariant", -30779, "invalid native obsolete generation result")
 		if evidence.gets != 1 || evidence.aborts != 1 || string(store.state) != "CLOSED" {
 			t.Fatal("native page shape lifecycle", evidence, store.state)
 		}
@@ -655,7 +659,7 @@ func TestObsoleteGenerationV1NativeShapes(t *testing.T) {
 			})
 		})
 		mustEnvironment(t, err)
-		requireEnvironmentError(t, result, EngineClass("LocalInvariant"), engineOperation("get"), -30779, "invalid native obsolete generation result")
+		obsoleteRequireError(t, result, "get", "LocalInvariant", -30779, "invalid native obsolete generation result")
 		if evidence.gets != 1 || evidence.aborts != 1 || string(store.state) != "CLOSED" {
 			t.Fatal("native ReadAt shape disposition", evidence, store.state)
 		}
@@ -825,7 +829,7 @@ func TestObsoleteGenerationV1Images(t *testing.T) {
 				if variant == "final" {
 					diagnostic = "final update image mismatch"
 				}
-				requireEnvironmentError(t, result, EngineClass("StateMismatch"), engineOperation("update"), -30779, diagnostic)
+				obsoleteRequireError(t, result, "update", "StateMismatch", -30779, diagnostic)
 				if evidence.commits != 0 {
 					t.Fatal("scoped precommit mismatch reached commit")
 				}
@@ -834,7 +838,7 @@ func TestObsoleteGenerationV1Images(t *testing.T) {
 				if !ok || commit.Truth.String() != want || commit.ReadbackCause != nil || evidence.commits != 1 {
 					t.Fatal("scoped crossed CommitError", result, evidence)
 				}
-				requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), engineOperation("update"), 28, expectedNativeDiagnostic(28))
+				obsoleteRequireError(t, commit.Cause, "update", "Capacity", 28, expectedNativeDiagnostic(28))
 			}
 			reopened, err := Open(path, cfg)
 			consultedTrack(t, reopened, err)
@@ -891,7 +895,7 @@ func TestObsoleteGenerationV1Cleanup(t *testing.T) {
 		}
 		if mode == 11 {
 			closeErr := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, expectedNativeDiagnostic(-30778))
-			if closeErr.Cause != commit {
+			if closeErr.Cause != commit || closeErr.ReopenRequired {
 				t.Fatal("retained close lost original commit")
 			}
 		} else {
@@ -899,8 +903,12 @@ func TestObsoleteGenerationV1Cleanup(t *testing.T) {
 			if mode == 10 || mode == 15 || mode == 19 {
 				class, code = "LocalInvariant", -30416
 			}
-			requireEnvironmentError(t, commit.ReadbackCause, EngineClass(class), operationAbort, code, expectedNativeDiagnostic(code))
+			abortErr := requireEnvironmentError(t, commit.ReadbackCause, EngineClass(class), operationAbort, code, expectedNativeDiagnostic(code))
+			if commit.ReadbackCause != abortErr || abortErr.Cause != nil || abortErr.ReopenRequired != (code == -30416) {
+				t.Fatal("cleanup native Cause/Reopen", mode, abortErr)
+			}
 		}
+		obsoleteRequireError(t, commit.Cause, "update", "Capacity", 28, expectedNativeDiagnostic(28))
 		mustEnvironment(t, fixtureLargeRelease(store))
 		reopened, err := Open(path, cfg)
 		consultedTrack(t, reopened, err)
@@ -937,6 +945,130 @@ func TestObsoleteGenerationV1Roles(t *testing.T) {
 		}
 		obsoleteRawImage(t, store, 0, []byte{2}, encoded)
 		obsoleteRawImage(t, store, 1, key, nil)
+	}
+}
+
+func TestObsoleteGenerationV1ConsultedOverlap(t *testing.T) {
+	for _, variant := range []string{"point", "interval-match", "interval-changed", "interval-missing", "interval-extra", "interval-preflight", "interval-final"} {
+		t.Run(variant, func(t *testing.T) {
+			var pointCalls uint32
+			for _, shared := range []bool{false, true} {
+				if shared && variant != "point" {
+					continue
+				}
+				store, path, cfg := consultedStore(t)
+				counter := consultedCounter(t, 9)
+				largeCommit(t, store, Batch{Mutations: []Mutation{counter}})
+				target := append(obsoleteGenerationLiteral(9), 1)
+				index := canonicalForwardKeyLiteral(9, 1)
+				extra := canonicalForwardKeyLiteral(9, 2)
+				obsoleteSeed(t, store, 1, target, []byte{0x41})
+				obsoleteSeed(t, store, 2, index, []byte{0x51})
+				mode, rank, faultKey := uint32(12), uint8(2), index
+				switch variant {
+				case "interval-changed":
+					mode = 5
+				case "interval-missing":
+					mode = 4
+				case "interval-extra":
+					mode, faultKey = 3, extra
+				case "interval-preflight":
+					mode = 14
+				case "interval-final":
+					mode = 13
+				}
+				var truth CommitTruth
+				var stage UpdateStage
+				var result error
+				var nativeCalls uint32
+				evidence, fixtureErr := fixtureLargeFault(store, mode, rank, faultKey, func() {
+					truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
+						page, err := reader.ObsoleteGenerationPageV1(9, 1, nil, 1)
+						mustEnvironment(t, err)
+						batch := obsoleteBatch(page)
+						batch.Mutations = []Mutation{consultedCounter(t, 1)}
+						if variant == "point" {
+							point, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
+							mustEnvironment(t, err)
+							batch.Consulted = []ConsultedRow{{DBI: counter.DBI, Key: counter.Key}}
+							if shared {
+								batch.ObsoleteConsulted = append(batch.ObsoleteConsulted, point.Witness)
+							}
+						} else {
+							interval, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 7)
+							mustEnvironment(t, err)
+							obsoleteRequirePage(t, interval, 1, 1, index)
+							batch.ObsoleteConsulted = append(batch.ObsoleteConsulted, interval.Witness)
+							batch.Consulted = []ConsultedRow{{DBI: readDBIsLiteral()[2], Key: index}}
+						}
+						return batch, nil
+					})
+					largeNativeCached(t, store)
+					nativeCalls = fixtureLargeNativeCalls()
+				})
+				mustEnvironment(t, fixtureErr)
+				wantTruth, wantStage := "UNKNOWN", 3
+				if mode == 12 {
+					wantTruth = "NEW"
+				}
+				if mode == 14 || mode == 13 {
+					wantTruth, wantStage = "OLD", 1
+					if mode == 13 {
+						wantStage = 2
+					}
+					diagnostic := "OLD/write snapshot mismatch"
+					if mode == 13 {
+						diagnostic = "final update image mismatch"
+					}
+					obsoleteRequireError(t, result, "update", "StateMismatch", -30779, diagnostic)
+					if evidence.commits != 0 {
+						t.Fatal("ordinary mismatch lost precommit priority")
+					}
+				} else {
+					commit, ok := result.(*CommitError)
+					if !ok || commit.Truth.String() != wantTruth || commit.ReadbackCause != nil || evidence.commits != 1 {
+						t.Fatal("ordinary/raw crossed predicates", result, evidence)
+					}
+					obsoleteRequireError(t, commit.Cause, "update", "Capacity", 28, expectedNativeDiagnostic(28))
+				}
+				if truth.String() != wantTruth || int(stage) != wantStage || string(store.state) != "CLOSED" {
+					t.Fatal("ordinary/raw result", truth, stage, result, evidence, store.state)
+				}
+				if variant == "point" && !shared {
+					pointCalls = nativeCalls
+				}
+				if shared && (pointCalls == 0 || nativeCalls != pointCalls) {
+					t.Fatal("shared exact point repeated native work", nativeCalls, pointCalls)
+				}
+				reopened, err := Open(path, cfg)
+				consultedTrack(t, reopened, err)
+				wantTarget := []byte(nil)
+				if wantTruth == "OLD" {
+					wantTarget = []byte{0x41}
+				}
+				obsoleteRawImage(t, reopened, 1, target, wantTarget)
+				wantIndex := []byte{0x51}
+				if mode == 4 {
+					wantIndex = nil
+				}
+				if mode == 5 || mode == 14 {
+					wantIndex = []byte{0x7f}
+				}
+				obsoleteRawImage(t, reopened, 2, index, wantIndex)
+				wantExtra := []byte(nil)
+				if variant == "interval-extra" {
+					wantExtra = []byte{0x7f}
+				}
+				obsoleteRawImage(t, reopened, 2, extra, wantExtra)
+				obsoleteRawImage(t, reopened, 0, counter.Key, counter.Literal)
+				written := consultedCounter(t, 1)
+				wantWritten := written.Literal
+				if wantTruth == "OLD" {
+					wantWritten = nil
+				}
+				obsoleteRawImage(t, reopened, 0, written.Key, wantWritten)
+			}
+		})
 	}
 }
 

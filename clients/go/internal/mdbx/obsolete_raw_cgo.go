@@ -575,8 +575,16 @@ func updateObsoleteScope(batch Batch, scope largeImageScope) (largeImageScope, e
 	return scope, nil
 }
 
-func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []ownedMutation) (bool, error) {
-	if canonicalTargetIndex(plan, point.rank, point.key) >= 0 {
+// Ordinary Consulted has already folded its physical equality at each stage.
+func obsoleteConsultedContains(consulted []ownedConsulted, rank uint8, key []byte) bool {
+	i := sort.Search(len(consulted), func(i int) bool {
+		return !updateKeyOrdered(consulted[i].dbi.Rank, consulted[i].key, rank, key)
+	})
+	return i < len(consulted) && consulted[i].dbi.Rank == rank && bytes.Equal(consulted[i].key, key)
+}
+
+func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []ownedMutation, consulted []ownedConsulted) (bool, error) {
+	if canonicalTargetIndex(plan, point.rank, point.key) >= 0 || obsoleteConsultedContains(consulted, point.rank, point.key) {
 		return true, nil
 	}
 	a, err := old.obsoletePoint(point.rank, point.key, operationUpdate)
@@ -590,9 +598,9 @@ func obsoletePointEqual(old, candidate *Reader, point obsoletePoint, plan []owne
 	return largeRowsEqual(largeNativeRow{key: point.key, image: a}, largeNativeRow{key: point.key, image: b}), nil
 }
 
-func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []ownedMutation) (bool, error) {
+func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []ownedMutation, consulted []ownedConsulted) (bool, error) {
 	if domain.point {
-		return obsoletePointEqual(old, candidate, obsoletePoint{rank: domain.rank, key: domain.prefix}, plan)
+		return obsoletePointEqual(old, candidate, obsoletePoint{rank: domain.rank, key: domain.prefix}, plan, consulted)
 	}
 	seek := domain.prefix
 	if domain.after != nil {
@@ -614,6 +622,17 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 		if a.done && b.done {
 			return equal, nil
 		}
-		equal = largeRowsEqual(a, b) && equal
+		equal = obsoleteRowsEqual(a, b, domain.rank, consulted) && equal
 	}
+}
+
+func obsoleteRowsEqual(a, b largeNativeRow, rank uint8, consulted []ownedConsulted) bool {
+	// Keep both streams complete: only a same-key value predicate is shared.
+	if a.done != b.done || !bytes.Equal(a.key, b.key) {
+		return false
+	}
+	if obsoleteConsultedContains(consulted, rank, a.key) {
+		return true
+	}
+	return largeRowsEqual(a, b)
 }

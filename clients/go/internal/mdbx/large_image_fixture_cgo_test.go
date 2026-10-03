@@ -12,6 +12,7 @@ import (
 	"math"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -709,10 +710,10 @@ func largeNativeLegacyPriority(t *testing.T) {
 // Joint cases distinguish shared physical scopes from independent target,
 // reference, proof and body predicates on the actual Store.Update path.
 func TestLargeImageV1ObsoleteJoint(t *testing.T) {
-	for _, variant := range []string{"overlay", "proof-target", "proof-target-third", "shared-family-sibling", "shared-proof-drift", "later-failure"} {
+	for _, variant := range []string{"overlay", "proof-target", "proof-target-third", "shared-family-sibling", "shared-proof-drift", "shared-index-drift", "later-failure", "retained-match", "retained-residual", "retained-body", "retained-family", "retained-reference", "retained-third-target"} {
 		t.Run(variant, func(t *testing.T) {
 			store, path, cfg := consultedStore(t)
-			_, _, hash, header := obsoleteProjectionSeed(t, store, 9, 1)
+			indexKey, indexValue, hash, header := obsoleteProjectionSeed(t, store, 9, 1)
 			first, second := append(bytes.Clone(hash[:]), 1, 1), append(bytes.Clone(hash[:]), 2, 2)
 			obsoleteSeed(t, store, 5, first, []byte{0x41})
 			obsoleteSeed(t, store, 5, second, []byte{0x51})
@@ -723,14 +724,25 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 			if variant == "shared-family-sibling" {
 				rank, faultKey = 5, second
 			}
+			if variant == "shared-index-drift" {
+				rank, faultKey = 2, indexKey
+			}
 			if variant == "later-failure" {
 				mode, rank = 29, 4
 				obsoleteSeed(t, store, 4, hash[:], []byte{0x61})
 			}
-			var source, destination, sourceValue []byte
-			if variant == "overlay" {
+			retained := strings.HasPrefix(variant, "retained-")
+			var source, destination, sourceValue, rawTarget, rawResidual []byte
+			if variant == "overlay" || retained {
 				source = make([]byte, 44)
 				source[7], source[8] = 9, 0x31
+				if retained {
+					source[7] = 10
+					rawTarget, rawResidual = append(obsoleteGenerationLiteral(9), 1), append(obsoleteGenerationLiteral(9), 2)
+					obsoleteSeed(t, store, 1, rawTarget, []byte{0x21})
+					obsoleteSeed(t, store, 1, rawResidual, []byte{0x31})
+					obsoleteSeed(t, store, 4, hash[:], []byte{0x61})
+				}
 				destination = make([]byte, 77)
 				copy(destination, hash[:])
 				destination[32] = 1
@@ -738,17 +750,39 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 				sourceValue = append([]byte{0x71}, make([]byte, 19)...)
 				obsoleteSeed(t, store, 1, source, sourceValue)
 			}
+			if retained {
+				switch variant {
+				case "retained-residual":
+					rank, faultKey = 1, rawResidual
+				case "retained-body":
+					rank, faultKey = 4, hash[:]
+				case "retained-family":
+					rank, faultKey = 5, second
+				case "retained-reference":
+					rank, faultKey = 1, source
+				case "retained-third-target":
+					rank, faultKey = 5, destination
+				}
+			}
 			var truth CommitTruth
 			var stage UpdateStage
 			var result error
 			run := func() {
 				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
 					batch := Batch{LargeConsulted: []LargeImageSelectorV1{{Kind: 2, Hash: hash}}}
-					if variant == "overlay" {
+					if variant == "overlay" || retained {
 						page, err := reader.ObsoleteGenerationPageV1(9, 1, nil, 1)
 						mustEnvironment(t, err)
 						batch.ObsoleteDeletes, batch.ObsoleteConsulted = page.Rows, []ObsoletePageWitnessV1{page.Witness}
 						batch.Mutations = []Mutation{{DBI: readDBIsLiteral()[5], Key: destination, AfterKind: AfterKind(3), RefDBI: readDBIsLiteral()[1], RefKey: source}}
+						if retained {
+							obsoleteRequirePage(t, page, 2, 1, rawTarget)
+							residual, err := reader.ObsoleteGenerationPageV1(9, 1, page.Next, 7)
+							mustEnvironment(t, err)
+							obsoleteRequirePage(t, residual, 1, 1, rawResidual)
+							batch.ObsoleteConsulted = append(batch.ObsoleteConsulted, residual.Witness)
+							batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 1, Hash: hash}, {Kind: 2, Hash: hash}}
+						}
 						return batch, nil
 					}
 					if variant == "later-failure" {
@@ -779,18 +813,26 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 				}
 			}
 			evidence := fixtureLargeEvidence{}
-			if variant == "overlay" || variant == "proof-target" {
+			if variant == "overlay" || variant == "proof-target" || variant == "retained-match" {
 				run()
 			} else {
 				var fixtureErr error
 				evidence, fixtureErr = fixtureLargeFault(store, mode, rank, faultKey, run)
 				mustEnvironment(t, fixtureErr)
 			}
-			if variant == "overlay" || variant == "proof-target" {
+			if variant == "overlay" || variant == "proof-target" || variant == "retained-match" {
 				if truth.String() != "NEW" || int(stage) != 3 || result != nil || string(store.state) != "OPEN" {
 					t.Fatal("joint overlay lost a predicate", variant, truth, stage, result, store.state)
 				}
-				if variant == "overlay" {
+				if variant == "retained-match" {
+					obsoleteRawImage(t, store, 1, rawTarget, nil)
+					obsoleteRawImage(t, store, 1, rawResidual, []byte{0x31})
+					obsoleteRawImage(t, store, 1, source, sourceValue)
+					obsoleteRawImage(t, store, 5, destination, sourceValue)
+					obsoleteRawImage(t, store, 4, hash[:], []byte{0x61})
+					obsoleteRawImage(t, store, 5, first, []byte{0x41})
+					obsoleteRawImage(t, store, 5, second, []byte{0x51})
+				} else if variant == "overlay" {
 					obsoleteRawImage(t, store, 1, source, nil)
 					obsoleteRawImage(t, store, 5, destination, sourceValue)
 				} else {
@@ -804,9 +846,9 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 			if !ok || truth.String() != "UNKNOWN" || int(stage) != 3 || commit.Truth.String() != "UNKNOWN" || string(store.state) != "CLOSED" || evidence.commits != 1 {
 				t.Fatal("joint mismatch hidden", variant, truth, stage, result, evidence)
 			}
-			requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28, expectedNativeDiagnostic(28))
+			obsoleteRequireError(t, commit.Cause, "update", "Capacity", 28, expectedNativeDiagnostic(28))
 			if variant == "later-failure" {
-				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
+				obsoleteRequireError(t, commit.ReadbackCause, "update", "IO", 5, expectedNativeDiagnostic(5))
 				if evidence.gets != 1 || evidence.drift != 1 {
 					t.Fatal("later admitted failure not reached", evidence)
 				}
@@ -815,7 +857,23 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 			}
 			reopened, err := Open(path, cfg)
 			consultedTrack(t, reopened, err)
-			if variant == "shared-family-sibling" {
+			if retained {
+				for _, image := range []struct {
+					rank       uint8
+					key, value []byte
+				}{{1, rawTarget, nil}, {1, rawResidual, []byte{0x31}}, {1, source, sourceValue}, {4, hash[:], []byte{0x61}}, {5, first, []byte{0x41}}, {5, second, []byte{0x51}}, {5, destination, sourceValue}, {2, indexKey, indexValue}, {3, hash[:], header}} {
+					want := image.value
+					if image.rank == rank && bytes.Equal(image.key, faultKey) {
+						want = []byte{0x7f}
+					}
+					obsoleteRawImage(t, reopened, image.rank, image.key, want)
+				}
+			} else if variant == "shared-index-drift" {
+				obsoleteRawImage(t, reopened, 2, indexKey, []byte{0x7f})
+				obsoleteRawImage(t, reopened, 3, hash[:], header)
+				obsoleteRawImage(t, reopened, 5, first, nil)
+				obsoleteRawImage(t, reopened, 5, second, []byte{0x51})
+			} else if variant == "shared-family-sibling" {
 				obsoleteRawImage(t, reopened, 5, second, []byte{0x7f})
 				obsoleteRawImage(t, reopened, 3, hash[:], header)
 			} else {
