@@ -7,6 +7,53 @@ package mdbx
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
 #ifdef RUBIN_SELECTED_DAMAGE_FIXTURE
+// Large-image fixture state is isolated from the selected-side fixture. Faults
+// retain or consume actual handles; physical drift is committed before readback.
+typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
+static rubin_li_state rubin_li;
+int rubin_li_arm(MDBX_env *env, MDBX_dbi dbi, unsigned mode, const void *key, size_t length) {
+	if (rubin_li.mode || !env || mode < 1 || mode > 28 || mode == 27 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
+	memset(&rubin_li, 0, sizeof(rubin_li));
+	rubin_li.mode = mode; rubin_li.env = env; rubin_li.dbi = dbi; rubin_li.key_len = length;
+	memcpy(rubin_li.key, key, length);
+	return MDBX_SUCCESS;
+}
+void rubin_li_disarm(rubin_li_state *out) { *out = rubin_li; memset(&rubin_li, 0, sizeof(rubin_li)); }
+unsigned rubin_li_calls(void) { return rubin_li.calls; }
+static int rubin_li_drift(void) {
+	MDBX_txn *txn = NULL;
+	MDBX_val key = {rubin_li.key, rubin_li.key_len}, value = {NULL, 0};
+	const unsigned char replacement = 0x7f;
+	int rc = mdbx_txn_begin(rubin_li.env, NULL, MDBX_TXN_READWRITE, &txn);
+	if (rc != MDBX_SUCCESS) return rc;
+	if (rubin_li.mode == 4) rc = mdbx_del(txn, rubin_li.dbi, &key, NULL);
+	else {
+		value.iov_base = (void *)&replacement; value.iov_len = 1;
+		rc = mdbx_put(txn, rubin_li.dbi, &key, &value, MDBX_UPSERT);
+	}
+	if (rc == MDBX_SUCCESS) return mdbx_txn_commit(txn);
+	mdbx_txn_abort(txn);
+	return rc;
+}
+static int rubin_li_env_close(MDBX_env *env, bool dont_sync) {
+	if (rubin_li.mode) rubin_li.calls++;
+	if ((rubin_li.mode == 11 || rubin_li.mode == 24) && env == rubin_li.env) { rubin_li.closes++; return MDBX_BUSY; }
+	return mdbx_env_close_ex(env, dont_sync);
+}
+static int rubin_li_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *value) {
+	if (rubin_li.mode) rubin_li.calls++;
+	int rc = mdbx_get_equal_or_great(txn, dbi, key, value);
+	int shape_mode = (rubin_li.mode >= 20 && rubin_li.mode <= 22) || rubin_li.mode == 25 || rubin_li.mode == 26;
+	if (shape_mode && txn == rubin_li.old_txn && dbi == rubin_li.dbi && (rc == MDBX_SUCCESS || rc == MDBX_RESULT_TRUE)) {
+		rubin_li.gets++;
+		if (rubin_li.mode == 20) key->iov_base = NULL;
+		else if (rubin_li.mode == 21) key->iov_len = SIZE_MAX;
+		else if (rubin_li.mode == 25) key->iov_len = 0;
+		else if (rubin_li.mode == 26) key->iov_len = 31;
+		else { value->iov_base = NULL; value->iov_len = 1; }
+	}
+	return rc;
+}
 // Fixture-only native boundary for the dormant selected-side operation. The fixture build defines the macro through
 // its package CFLAGS; an ordinary build preprocesses this block away. One serialized invocation binds one environment,
 // its OLD, write and readback transactions and one closed scenario; every interceptor forwards to libMDBX.
@@ -38,6 +85,7 @@ void rubin_sd_disarm(rubin_sd_counts *out) {
 	pthread_mutex_unlock(&rubin_sd_mu);
 }
 static int rubin_sd_txn_begin(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t flags, MDBX_txn **txn) {
+	if (rubin_li.mode) rubin_li.calls++;
 	int role = -1, fail = MDBX_SUCCESS;
 	uintptr_t probe = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -58,8 +106,22 @@ static int rubin_sd_txn_begin(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t 
 		*txn = NULL;
 		return fail;
 	}
+	if (rubin_li.mode == 23 && env == rubin_li.env && (flags & MDBX_TXN_RDONLY) != 0 && rubin_li.old_txn) {
+		*txn = NULL;
+		return MDBX_EIO;
+	}
 	if (probe != 0) rubinSelectedDamageProbe(probe);
+	if (rubin_li.mode == 14 && env == rubin_li.env && (flags & MDBX_TXN_RDONLY) == 0 && !rubin_li.write_txn) {
+		int drift_rc = rubin_li_drift();
+		if (drift_rc != MDBX_SUCCESS) { *txn = NULL; return drift_rc; }
+		rubin_li.drift++;
+	}
 	int rc = mdbx_txn_begin(env, parent, flags, txn);
+	if (rubin_li.mode && env == rubin_li.env && rc == MDBX_SUCCESS) {
+		if ((flags & MDBX_TXN_RDONLY) == 0) rubin_li.write_txn = *txn;
+		else if (!rubin_li.old_txn) rubin_li.old_txn = *txn;
+		else rubin_li.read_txn = *txn;
+	}
 	if (role >= 0 && rc == MDBX_SUCCESS) {
 		pthread_mutex_lock(&rubin_sd_mu);
 		if (role == 0) rubin_sd.old_txn = *txn;
@@ -76,6 +138,23 @@ static int rubin_sd_get_fault(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val 
 	return dbi == rubin_sd.fault_dbi && key->iov_len != 0 && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0;
 }
 static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data) {
+	if (rubin_li.mode) rubin_li.calls++;
+	int li_old_fault = (rubin_li.mode == 1 || rubin_li.mode == 2 || rubin_li.mode == 24 || rubin_li.mode == 28) && txn == rubin_li.old_txn;
+	int li_read_fault = rubin_li.mode == 8 && txn == rubin_li.read_txn;
+	if ((li_old_fault || li_read_fault) && dbi == rubin_li.dbi && key->iov_len == rubin_li.key_len && memcmp(key->iov_base, rubin_li.key, key->iov_len) == 0) {
+		rubin_li.gets++;
+		if (li_old_fault && rubin_li.mode != 28 && rubin_li.gets == 1) return mdbx_get(txn, dbi, key, data);
+		data->iov_base = NULL; data->iov_len = 0; return MDBX_EIO;
+	}
+	if ((rubin_li.mode == 17 || rubin_li.mode == 18) && txn == rubin_li.old_txn && dbi == rubin_li.dbi) {
+		int rc = mdbx_get(txn, dbi, key, data);
+		if (rc == MDBX_SUCCESS) {
+			rubin_li.gets++;
+			if (rubin_li.mode == 17) { data->iov_base = NULL; data->iov_len = 1; }
+			else data->iov_len = SIZE_MAX;
+		}
+		return rc;
+	}
 	int fault = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
 	if (rubin_sd.scenario != 0 && txn != NULL) {
@@ -96,6 +175,7 @@ static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, 
 	return mdbx_get(txn, dbi, key, data);
 }
 static int rubin_sd_del(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, const MDBX_val *data) {
+	if (rubin_li.mode) rubin_li.calls++;
 	int fault = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
 	if (rubin_sd.scenario != 0 && txn != NULL && txn == rubin_sd.write_txn) {
@@ -119,6 +199,19 @@ static int rubin_sd_third(void) {
 	return rc;
 }
 static int rubin_sd_txn_commit(MDBX_txn *txn) {
+	if (rubin_li.mode) rubin_li.calls++;
+	if (rubin_li.mode >= 3 && txn == rubin_li.write_txn) {
+		rubin_li.commits++;
+		if (rubin_li.mode == 7 || rubin_li.mode == 19) mdbx_txn_break(txn);
+		int rc = mdbx_txn_commit(txn);
+		if (rc != ((rubin_li.mode == 7 || rubin_li.mode == 19) ? MDBX_RESULT_TRUE : MDBX_SUCCESS)) return rc;
+		if (rubin_li.mode >= 3 && rubin_li.mode <= 6) {
+			rc = rubin_li_drift();
+			if (rc != MDBX_SUCCESS) return rc;
+			rubin_li.drift++;
+		}
+		return ENOSPC;
+	}
 	unsigned scenario = 0;
 	uintptr_t probe = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -141,6 +234,18 @@ static int rubin_sd_txn_commit(MDBX_txn *txn) {
 	return ENOSPC;
 }
 static int rubin_sd_txn_abort(MDBX_txn *txn) {
+	if (rubin_li.mode) rubin_li.calls++;
+	if ((rubin_li.mode == 15 || rubin_li.mode == 16 || rubin_li.mode == 19) && txn == rubin_li.read_txn) {
+		if (rubin_li.mode != 16) return MDBX_THREAD_MISMATCH;
+		int rc = mdbx_txn_abort(txn);
+		return rc == MDBX_SUCCESS ? MDBX_EIO : rc;
+	}
+	if (rubin_li.mode && txn == rubin_li.old_txn) {
+		rubin_li.aborts++;
+		if (rubin_li.mode == 2 || rubin_li.mode == 10) return MDBX_THREAD_MISMATCH;
+		int rc = mdbx_txn_abort(txn);
+		return rubin_li.mode == 9 && rc == MDBX_SUCCESS ? MDBX_EIO : rc;
+	}
 	int fault = 0;
 	uintptr_t probe = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
@@ -162,6 +267,7 @@ static int rubin_sd_txn_abort(MDBX_txn *txn) {
 }
 // rubin_sd_put fails exactly one armed write-transaction put of the armed DBI and key with EIO before libMDBX sees it.
 static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
+	if (rubin_li.mode) rubin_li.calls++;
 	int fault = 0;
 	pthread_mutex_lock(&rubin_sd_mu);
 	if (rubin_sd.scenario == 12 && txn != NULL && txn == rubin_sd.write_txn && rubin_sd.counts.faults == 0 && dbi == rubin_sd.fault_dbi && key->iov_len != 0 && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0) {
@@ -169,7 +275,14 @@ static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_v
 		rubin_sd.counts.faults++;
 	}
 	pthread_mutex_unlock(&rubin_sd_mu);
-	return fault ? MDBX_EIO : mdbx_put(txn, dbi, key, data, flags);
+	int rc = fault ? MDBX_EIO : mdbx_put(txn, dbi, key, data, flags);
+	if (rc == MDBX_SUCCESS && rubin_li.mode == 13 && txn == rubin_li.write_txn && rubin_li.drift == 0) {
+		const unsigned char byte = 0x7f;
+		MDBX_val extra_key = {rubin_li.key, rubin_li.key_len}, extra_value = {(void *)&byte, 1};
+		rc = mdbx_put(txn, rubin_li.dbi, &extra_key, &extra_value, MDBX_UPSERT);
+		if (rc == MDBX_SUCCESS) rubin_li.drift++;
+	}
+	return rc;
 }
 #define mdbx_txn_begin rubin_sd_txn_begin
 #define mdbx_get rubin_sd_get
@@ -177,6 +290,8 @@ static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_v
 #define mdbx_txn_commit rubin_sd_txn_commit
 #define mdbx_txn_abort rubin_sd_txn_abort
 #define mdbx_put rubin_sd_put
+#define mdbx_env_close_ex rubin_li_env_close
+#define mdbx_get_equal_or_great rubin_li_prefix
 #endif // RUBIN_SELECTED_DAMAGE_FIXTURE
 typedef struct { int first; int second; } rubin_mdbx_debug_result;
 static rubin_mdbx_debug_result rubin_mdbx_normalize_debug(void) {
@@ -640,12 +755,14 @@ type Store struct {
 }
 
 type Reader struct {
-	self    *Reader
-	txn     *C.MDBX_txn
-	dbis    [8]C.MDBX_dbi
-	getMu   sync.Mutex
-	active  atomic.Bool
-	failure error
+	self       *Reader
+	txn        *C.MDBX_txn
+	dbis       [8]C.MDBX_dbi
+	getMu      sync.Mutex
+	active     atomic.Bool
+	failure    error
+	largeVisit atomic.Bool
+	maxKey     uint64
 
 	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
 	ownerVerified bool
@@ -782,6 +899,8 @@ type Batch struct {
 	// readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original CommitError. Nil and empty
 	// behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
+	// LargeConsulted proves complete physical body/family residuals alongside the exact mutation and reference predicates.
+	LargeConsulted []LargeImageSelectorV1
 }
 
 const (
@@ -1200,7 +1319,7 @@ func (outcome updateNativeOutcome) validRetainedWrite() bool {
 }
 
 func (outcome updateNativeOutcome) validRetainedRead() bool {
-	return outcome.stage == UpdateStageCommitMayHaveCrossed && outcome.retainedWrite == nil && outcome.truth == CommitTruthUnknown && outcome.commitAttempted && outcome.primary != nil && outcome.secondary != nil
+	return outcome.stage == UpdateStageCommitMayHaveCrossed && outcome.retainedWrite == nil && outcome.commitAttempted && outcome.primary != nil && outcome.secondary != nil
 }
 
 func (outcome updateNativeOutcome) validConsumed() bool {
@@ -1300,6 +1419,67 @@ func updateNativeEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 	return value.equal != 0, nil
 }
 
+// largePoint borrows a checked physical value; callers hold getMu and keep txn alive.
+func (r *Reader) largePoint(rank uint8, key []byte) (updateImage, error) {
+	value := C.rubin_mdbx_get(r.txn, r.dbis[rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	if rc := int(value.rc); rc != codeSuccess && rc != codeNotFound {
+		return updateImage{}, nativeError(operationGet, rc)
+	}
+	image := updateImage{present: int(value.rc) == codeSuccess, bytes: unsafe.Pointer(value.bytes), length: value.length}
+	if !validUpdateImage(image) || !largeNativeShape(image.bytes, uint64(image.length)) {
+		return updateImage{}, largeImageShapeError()
+	}
+	return image, nil
+}
+
+func (r *Reader) largeFetch(selector LargeImageSelectorV1, seek []byte) (largeNativeRow, error) {
+	if selector.Kind == LargeImageBlockBodyV1 {
+		image, err := r.largePoint(4, selector.Hash[:])
+		return largeNativeRow{key: bytes.Clone(selector.Hash[:]), image: image}, err
+	}
+	value := C.rubin_mdbx_get_equal_or_great(r.txn, r.dbis[5], unsafe.Pointer(&seek[0]), C.size_t(len(seek)))
+	runtime.KeepAlive(seek)
+	if int(value.rc) == codeNotFound {
+		return largeNativeRow{done: true}, nil
+	}
+	if !prefixPageFoundCode(int(value.rc)) {
+		return largeNativeRow{}, nativeError(operationGet, int(value.rc))
+	}
+	if !largeNativeShape(unsafe.Pointer(value.value_bytes), uint64(value.value_len)) {
+		return largeNativeRow{}, largeImageShapeError()
+	}
+	key, err := largeNativeKey(unsafe.Pointer(value.key_bytes), uint64(value.key_len), r.maxKey, seek)
+	if err != nil {
+		return largeNativeRow{}, err
+	}
+	if !bytes.HasPrefix(key, selector.Hash[:]) {
+		return largeNativeRow{done: true}, nil
+	}
+	return largeNativeRow{key: key, image: updateImage{present: true, bytes: unsafe.Pointer(value.value_bytes), length: value.value_len}}, nil
+}
+
+func updateNativeLargeEqual(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, scopes ...largeImageScope) (bool, error) {
+	if len(scopes) == 0 {
+		return true, nil
+	}
+	before, after := newReader(old, dbis), newReader(candidate, dbis)
+	before.maxKey, after.maxKey = scopes[0].maxKey, scopes[0].maxKey
+	before.active.Store(true)
+	after.active.Store(true)
+	defer before.expire()
+	defer after.expire()
+	return largeResidualEqual(before, after, scopes[0], plan)
+}
+
+func updateNativeLargeMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, diagnostic string, scopes ...largeImageScope) error {
+	equal, err := updateNativeLargeEqual(old, candidate, dbis, plan, scopes...)
+	if err == nil && !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return err
+}
+
 func updateNativeImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
 	target := func(dbi DBI, key []byte) int {
 		index := sort.Search(len(plan), func(i int) bool {
@@ -1386,7 +1566,16 @@ func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted [
 	return nil
 }
 
-func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) ([]updateReference, error) {
+// Legacy and large consulted domains are checked in order against the same OLD.
+func updateNativeScopedMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, diagnostic string, scopes ...largeImageScope) error {
+	err := updateNativeConsultedMatch(candidate, dbis, consulted, diagnostic)
+	if err != nil {
+		return err
+	}
+	return updateNativeLargeMatch(old, candidate, dbis, plan, diagnostic, scopes...)
+}
+
+func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) ([]updateReference, error) {
 	targets, references, err := updateNativePairedImages(old, dbis, plan)
 	if err != nil {
 		return nil, err
@@ -1407,7 +1596,7 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ow
 			return nil, err
 		}
 	}
-	err = updateNativeConsultedMatch(write, dbis, consulted, "OLD/write snapshot mismatch")
+	err = updateNativeScopedMatch(old, write, dbis, plan, consulted, "OLD/write snapshot mismatch", scopes...)
 	if err != nil {
 		return nil, err
 	}
@@ -1541,7 +1730,7 @@ func updateNativeAbort(txn *C.MDBX_txn, primary error, stage UpdateStage) update
 	return updateNativeConsumed(CommitTruthOld, false, primary, secondary, stage)
 }
 
-func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted) (CommitTruth, error) {
+func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) (CommitTruth, error) {
 	targets, references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return CommitTruthUnknown, err
@@ -1554,7 +1743,7 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage, err = updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
+	oldImage, newImage, err = updateNativeReadbackScoped(old, read, dbis, plan, consulted, oldImage, newImage, scopes...)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
@@ -1565,6 +1754,22 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 		return CommitTruthNew, nil
 	}
 	return CommitTruthUnknown, nil
+}
+
+// Finish every consulted domain before selecting OLD first or planned NEW.
+func updateNativeReadbackScoped(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool, scopes ...largeImageScope) (bool, bool, error) {
+	oldImage, newImage, err := updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
+	if err != nil {
+		return false, false, err
+	}
+	residual, err := updateNativeLargeEqual(old, read, dbis, plan, scopes...)
+	if err != nil {
+		return false, false, err
+	}
+	if !residual {
+		return false, false, nil
+	}
+	return oldImage, newImage, nil
 }
 
 func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
@@ -1620,7 +1825,7 @@ func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, consult
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadback(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error) updateNativeOutcome {
+func updateNativeReadback(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error, scopes ...largeImageScope) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
@@ -1629,10 +1834,12 @@ func updateNativeReadback(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutat
 		}
 		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr, UpdateStageCommitMayHaveCrossed)
 	}
-	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted)
+	truth, readErr := updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted, scopes...)
 	rc := int(C.mdbx_txn_abort(begun.txn))
 	if rc == codeThreadMismatch {
-		return updateNativeRetainedRead(primary, joinErrors(readErr, nativeError(operationAbort, rc)), begun.txn)
+		retained := updateNativeRetainedRead(primary, joinErrors(readErr, nativeError(operationAbort, rc)), begun.txn)
+		retained.truth = truth
+		return retained
 	}
 	var abortErr error
 	if rc != codeSuccess {
@@ -1644,7 +1851,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutat
 	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr), UpdateStageCommitMayHaveCrossed)
 }
 
-func updateNativeCommit(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage) updateNativeOutcome {
+func updateNativeCommit(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage, scopes ...largeImageScope) updateNativeOutcome {
 	rc := int(C.mdbx_txn_commit(write))
 	commitErr := nativeError(operationUpdate, rc)
 	switch rc {
@@ -1657,10 +1864,10 @@ func updateNativeCommit(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutatio
 	case codePanic, codeEPerm, codeBadSignature, codeEINVAL, codeBadTxn, codeProblem:
 		return updateNativeConsumed(CommitTruthOld, true, commitErr, nil, stage)
 	}
-	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr)
+	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr, scopes...)
 }
 
-func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
+func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, scopes ...largeImageScope) updateNativeOutcome {
 	stage := UpdateStagePrewrite
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_READWRITE)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
@@ -1670,7 +1877,7 @@ func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutati
 		}
 		return updateNativeConsumed(CommitTruthOld, false, beginErr, nil, stage)
 	}
-	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan, consulted)
+	references, preflightErr := updateNativePreflight(old, begun.txn, dbis, plan, consulted, scopes...)
 	if preflightErr != nil {
 		return updateNativeAbort(begun.txn, preflightErr, stage)
 	}
@@ -1686,20 +1893,20 @@ func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutati
 	if verifyErr != nil {
 		return updateNativeAbort(begun.txn, verifyErr, stage)
 	}
-	consultedErr := updateNativeConsultedMatch(begun.txn, dbis, consulted, "final update image mismatch")
+	consultedErr := updateNativeScopedMatch(old, begun.txn, dbis, plan, consulted, "final update image mismatch", scopes...)
 	if consultedErr != nil {
 		return updateNativeAbort(begun.txn, consultedErr, stage)
 	}
-	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn, stage)
+	return updateNativeCommit(env, dbis, plan, consulted, old, begun.txn, stage, scopes...)
 }
 
-func (s *Store) updateNative(plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn) updateNativeOutcome {
+func (s *Store) updateNative(plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, scopes ...largeImageScope) updateNativeOutcome {
 	if s == nil || s.env == nil || old == nil || len(plan) == 0 || !validRetainedDBIs(s.dbis) {
 		return updateNativeConsumed(CommitTruthOld, false, updateNativeInvariant("invalid native update input"), nil, UpdateStagePrewrite)
 	}
 	var outcome updateNativeOutcome
 	runLocked(func() transactionOutcome {
-		outcome = updateNativeExecute(s.env, s.dbis, plan, consulted, old)
+		outcome = updateNativeExecute(s.env, s.dbis, plan, consulted, old, scopes...)
 		return outcome.lockedOutcome()
 	})
 	return outcome
@@ -1715,7 +1922,7 @@ func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch 
 	return batch, panicValue, panicked, err
 }
 
-func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, error) {
+func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	returned := false
 	defer func() {
 		if returned {
@@ -1734,21 +1941,25 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
 	}
 	if primary != nil {
-		return nil, nil, s.abortReadLocked(old, primary, infrastructure)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, primary, infrastructure)
 	}
 	plan, planErr := updateOwnedBatch(batch)
 	if planErr != nil {
-		return nil, nil, s.abortReadLocked(old, planErr, false)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
-		return nil, nil, s.abortReadLocked(old, consultedErr, false)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, consultedErr, false)
 	}
 	infrastructure, captureErr := updateNativeConsultedImages(old, s.dbis, consulted)
 	if captureErr != nil {
-		return nil, nil, s.abortReadLocked(old, captureErr, infrastructure)
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, captureErr, infrastructure)
 	}
-	return plan, consulted, nil
+	large, largeErr := updateOwnedLarge(batch, consulted, reader.maxKey)
+	if largeErr != nil {
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, largeErr, false)
+	}
+	return plan, consulted, large, nil
 }
 
 func updateResult(outcome updateNativeOutcome, cleanup error) (CommitTruth, UpdateStage, error) {
@@ -1841,12 +2052,13 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.ownerVerified = s.canonicalOwnerVerified
+	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)
-	plan, consulted, planErr := s.updatePlan(callback, reader, begun.txn)
+	plan, consulted, large, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, planErr
 	}
-	outcome := s.updateNative(plan, consulted, begun.txn)
+	outcome := s.updateNative(plan, consulted, begun.txn, large)
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
 }
@@ -1873,6 +2085,7 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.ownerVerified = s.canonicalOwnerVerified
+	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)
 	defer func() {
 		reader.expire()
