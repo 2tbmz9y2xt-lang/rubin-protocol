@@ -17,8 +17,12 @@ import (
 
 func obsoleteRequireError(t *testing.T, err error, operation, class string, code int, diagnostic string) {
 	t.Helper()
-	engine, direct := err.(*EngineError)
-	if !direct || engine == nil || string(engine.Operation) != operation || string(engine.Class) != class || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
+	var engine *EngineError
+	switch direct := err.(type) {
+	case *EngineError:
+		engine = direct
+	}
+	if engine == nil || string(engine.Operation) != operation || string(engine.Class) != class || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
 		t.Fatalf("obsolete exact error: %#v want %s/%s/%d/%q/nil/false", err, operation, class, code, diagnostic)
 	}
 }
@@ -138,7 +142,7 @@ func TestObsoleteGenerationV1CounterLifetime(t *testing.T) {
 			if query.eof {
 				wantErr = io.EOF
 			}
-			if n != query.n || readErr != wantErr {
+			if n != query.n || !sameError(readErr, wantErr) {
 				t.Fatalf("ReadAt(%d,%d)=%d/%v want %d/%v", query.size, query.offset, n, readErr, query.n, wantErr)
 			}
 			if n != 0 && !bytes.Equal(buffer[:n], seed.Literal[int(query.offset):int(query.offset)+n]) {
@@ -264,6 +268,7 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 			largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
 			application := error(errors.New("obsolete application"))
 			originalCause := errors.New("existing cause")
+			var causeBearing *EngineError
 			if variant == "typed-nil" {
 				application = (*largeTypedNil)(nil)
 			}
@@ -274,7 +279,8 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 				}
 			}
 			if variant == "cause-bearing" {
-				application = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "application cause", Cause: originalCause}
+				causeBearing = &EngineError{Operation: "get", Class: EngineIO, Code: 5, Diagnostic: "application cause", Cause: originalCause}
+				application = causeBearing
 			}
 			payload := &struct{ value string }{"obsolete panic"}
 			var recovered any
@@ -305,10 +311,10 @@ func TestObsoleteGenerationV1Applications(t *testing.T) {
 				if truth.String() != "NEW" || int(stage) != 3 || result != nil {
 					t.Fatal("nil callback result", truth, stage, result)
 				}
-			} else if truth.String() != "OLD" || int(stage) != 1 || result != application {
+			} else if truth.String() != "OLD" || int(stage) != 1 || !sameError(result, application) {
 				t.Fatal("application identity", truth, stage, result)
 			}
-			if variant == "cause-bearing" && application.(*EngineError).Cause != originalCause {
+			if variant == "cause-bearing" && !sameError(causeBearing.Cause, originalCause) {
 				t.Fatal("original application Cause changed")
 			}
 			if string(store.state) != "OPEN" || store.terminal != nil {
@@ -406,7 +412,7 @@ func TestObsoleteGenerationV1ConcurrentExpiry(t *testing.T) {
 				return
 			}
 			obsoleteRequireError(t, result, "get", "IO", 5, expectedNativeDiagnostic(5))
-			if result != inFlight || truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "CLOSED" || store.env != nil || store.writer != nil || store.txn != nil || store.terminal != inFlight || store.terminalTruth.String() != "OLD" {
+			if !sameError(result, inFlight) || truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "CLOSED" || store.env != nil || store.writer != nil || store.txn != nil || !sameError(store.terminal, inFlight) || store.terminalTruth.String() != "OLD" {
 				t.Fatal("raw read drain lost failure or allowed writes", truth, stage, result, store.state)
 			}
 			reopened, err := Open(path, cfg)

@@ -80,7 +80,7 @@ func TestObsoleteGenerationV1Physical(t *testing.T) {
 				foreign := [][]byte{bytes.Clone(prefix[:7]), make([]byte, 8), obsoleteGenerationLiteral(6)}
 				if class == 3 {
 					keys = [][]byte{append([]byte{0x10}, prefix...)}
-					foreign = [][]byte{append(bytes.Clone(keys[0]), 0), append([]byte{0x11}, prefix...), append([]byte{0x10}, make([]byte, 8)...), []byte{0x10, 1}}
+					foreign = [][]byte{append(bytes.Clone(keys[0]), 0), append([]byte{0x11}, prefix...), append([]byte{0x10}, make([]byte, 8)...), {0x10, 1}}
 				}
 				for i, key := range keys {
 					value := bytes.Repeat([]byte{byte(0x31 + i)}, i)

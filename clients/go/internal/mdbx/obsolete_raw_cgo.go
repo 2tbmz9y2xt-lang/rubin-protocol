@@ -61,6 +61,13 @@ type obsoleteDomain struct {
 	end, point  bool
 }
 
+func (domain obsoleteDomain) seek(maxKey uint64) []byte {
+	if domain.after == nil {
+		return domain.prefix
+	}
+	return largeImageAdvance(domain.after, maxKey)
+}
+
 // ObsoletePageV1 contains present rows and independently copied continuation keys.
 // Every error returns its zero value. Successful exhaustion has nil Next.
 type ObsoletePageV1 struct {
@@ -189,13 +196,20 @@ func (r *Reader) obsoleteUndoInput(index ObsoleteRowV1, after []byte, maxRows ui
 	if index.span == nil || index.span.reader != r || index.span.rank != 2 {
 		return obsoleteInput(operationPrefixPage, "invalid or foreign obsolete generation index")
 	}
-	if maxRows == 0 || maxRows > 1440 {
-		return obsoleteBounds()
-	}
-	if after != nil && (len(after) < 32 || uint64(len(after)) > r.maxKey) {
+	if !obsoleteUndoBounds(after, r.maxKey, maxRows) {
 		return obsoleteBounds()
 	}
 	return nil
+}
+
+func obsoleteUndoBounds(after []byte, maxKey uint64, maxRows uint32) bool {
+	if maxRows == 0 || maxRows > 1440 {
+		return false
+	}
+	if after == nil {
+		return true
+	}
+	return len(after) >= 32 && uint64(len(after)) <= maxKey
 }
 
 // ObsoleteUndoPageV1 proves the index's own projection before dependent bounds or traversal.
@@ -270,10 +284,7 @@ func (r *Reader) obsoletePage(domain obsoleteDomain, maxRows uint32, projection 
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "Reader is not active")
 	}
 	page := ObsoletePageV1{Projection: projection}
-	seek := domain.prefix
-	if domain.after != nil {
-		seek = largeImageAdvance(domain.after, r.maxKey)
-	}
+	seek := domain.seek(r.maxKey)
 	if domain.point {
 		return r.obsoleteCounterPage(domain, projection)
 	}
@@ -309,7 +320,7 @@ func (r *Reader) obsoleteScanPage(domain obsoleteDomain, maxRows uint32, page Ob
 }
 
 func obsoletePageStop(rows int, maxRows uint32, copied, next uint64) PrefixPageStop {
-	if uint32(rows) == maxRows {
+	if rows == int(maxRows) {
 		return PrefixPageRowLimit
 	}
 	if next > 65_596-copied {
@@ -377,7 +388,7 @@ func obsoleteCharge(budget *updateBudget, span *obsoleteSpan) bool {
 	switch {
 	case span.rank == 1:
 		budget.utxoDeletes, ok = updateAdd(budget.utxoDeletes, 1, maxUpdateInputs)
-	case span.rank == 5 && !(len(span.key) == 33 && span.key[32] == 0):
+	case span.rank == 5 && (len(span.key) != 33 || span.key[32] != 0):
 		budget.undoEntryDeletes, ok = updateAdd(budget.undoEntryDeletes, 1, maxUpdateInputs)
 	default:
 		budget.aux, ok = updateAdd(budget.aux, 1, maxUpdateAux)
@@ -420,7 +431,9 @@ func obsoleteCompileRows(batch Batch, rows []ObsoleteRowV1, plan []ownedMutation
 		span := row.span
 		plan = append(plan, ownedMutation{dbi: schemaDBIs[span.rank], key: bytes.Clone(span.key), beforePresent: true, after: AfterAbsent})
 	}
-	sort.Slice(plan, func(i, j int) bool { return updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, plan[j].dbi.Rank, plan[j].key) })
+	sort.Slice(plan, func(i, j int) bool {
+		return updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, plan[j].dbi.Rank, plan[j].key)
+	})
 	return plan, nil
 }
 
@@ -436,7 +449,9 @@ func obsoleteAdmitRows(batch Batch, reader *Reader, plan []ownedMutation) ([]Obs
 			return nil, updateInvalidBatch()
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return updateKeyOrdered(rows[i].span.rank, rows[i].span.key, rows[j].span.rank, rows[j].span.key) })
+	sort.Slice(rows, func(i, j int) bool {
+		return updateKeyOrdered(rows[i].span.rank, rows[i].span.key, rows[j].span.rank, rows[j].span.key)
+	})
 	for i, row := range rows {
 		span := row.span
 		if canonicalTargetIndex(plan, span.rank, span.key) >= 0 {
@@ -488,7 +503,9 @@ func obsoleteMergeable(a, b obsoleteDomain) bool {
 }
 
 func obsoleteCoalescePoints(points []obsoletePoint, domains []obsoleteDomain) []obsoletePoint {
-	sort.Slice(points, func(i, j int) bool { return updateKeyOrdered(points[i].rank, points[i].key, points[j].rank, points[j].key) })
+	sort.Slice(points, func(i, j int) bool {
+		return updateKeyOrdered(points[i].rank, points[i].key, points[j].rank, points[j].key)
+	})
 	merged := points[:0]
 	for _, point := range points {
 		if len(merged) != 0 && !updateKeyOrdered(merged[len(merged)-1].rank, merged[len(merged)-1].key, point.rank, point.key) {
@@ -602,11 +619,10 @@ func obsoleteDomainEqual(old, candidate *Reader, domain obsoleteDomain, plan []o
 	if domain.point {
 		return obsoletePointEqual(old, candidate, obsoletePoint{rank: domain.rank, key: domain.prefix}, plan, consulted)
 	}
-	seek := domain.prefix
-	if domain.after != nil {
-		seek = largeImageAdvance(domain.after, old.maxKey)
-	}
-	start := sort.Search(len(plan), func(i int) bool { return !updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, domain.rank, seek) })
+	seek := domain.seek(old.maxKey)
+	start := sort.Search(len(plan), func(i int) bool {
+		return !updateKeyOrdered(plan[i].dbi.Rank, plan[i].key, domain.rank, seek)
+	})
 	left := largeResidualStream{reader: old, domain: &domain, seek: seek, plan: plan[start:]}
 	right := largeResidualStream{reader: candidate, domain: &domain, seek: seek, plan: plan[start:]}
 	equal := true
