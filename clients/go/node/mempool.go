@@ -54,6 +54,108 @@ type mempoolEntry struct {
 	source       mempoolTxSource
 }
 
+// CompactCandidateIdentity is admitted metadata, never a raw-byte integrity verdict.
+type CompactCandidateIdentity struct {
+	TxID  [32]byte
+	WTxID [32]byte
+}
+
+// CompactCandidateDisposition is the closed result of a bounded compact read.
+type CompactCandidateDisposition uint8
+
+const (
+	CompactCandidatePresent CompactCandidateDisposition = iota + 1
+	CompactCandidateAbsent
+	CompactCandidateFault
+	CompactCandidateOverBudget
+)
+
+// CompactCandidateRead owns Raw only for PRESENT; every other disposition has nil Raw.
+type CompactCandidateRead struct {
+	Disposition CompactCandidateDisposition
+	Raw         []byte
+}
+
+// CompactStandardIdentities snapshots every admitted standard identity under one lock.
+// It parses and copies no raw bytes and returns no prefix on an inconsistent image.
+func (m *Mempool) CompactStandardIdentities() ([]CompactCandidateIdentity, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.txs == nil || m.wtxids == nil || len(m.txs) != len(m.wtxids) {
+		return nil, false
+	}
+	identities := make([]CompactCandidateIdentity, 0, len(m.txs))
+	for txid, entry := range m.txs {
+		if !m.compactStandardEntryValid(txid, entry) {
+			return nil, false
+		}
+		identities = append(identities, CompactCandidateIdentity{TxID: txid, WTxID: entry.wtxid})
+	}
+	return identities, true
+}
+
+func (m *Mempool) compactStandardEntryValid(txid [32]byte, entry *mempoolEntry) bool {
+	if entry == nil {
+		return false
+	}
+	indexed, found := m.wtxids[entry.wtxid]
+	return found && indexed == txid && entry.txid == txid && entry.size == len(entry.raw)
+}
+
+// ReadCompactStandard verifies one observed incarnation after a size-before-copy read.
+// A coherent replacement is ABSENT; contradictory indexing is FAULT even on replacement.
+func (m *Mempool) ReadCompactStandard(identity CompactCandidateIdentity, maxBytes uint64) CompactCandidateRead {
+	if m == nil {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	m.mu.RLock()
+	read := m.compactStandardReadLocked(identity, maxBytes)
+	m.mu.RUnlock()
+	if read.Disposition != CompactCandidatePresent {
+		return read
+	}
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(read.Raw)
+	if err != nil || consumed != len(read.Raw) {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	if tx.TxKind != 0 || txid != identity.TxID || wtxid != identity.WTxID {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	return read
+}
+
+func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, maxBytes uint64) CompactCandidateRead {
+	if m.txs == nil || m.wtxids == nil {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	entry, found := m.txs[identity.TxID]
+	if !found {
+		return m.compactStandardAbsentLocked(identity.TxID)
+	}
+	if !m.compactStandardEntryValid(identity.TxID, entry) {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	if entry.wtxid != identity.WTxID {
+		return CompactCandidateRead{Disposition: CompactCandidateAbsent}
+	}
+	if uint64(len(entry.raw)) > maxBytes {
+		return CompactCandidateRead{Disposition: CompactCandidateOverBudget}
+	}
+	return CompactCandidateRead{Disposition: CompactCandidatePresent, Raw: append([]byte(nil), entry.raw...)}
+}
+
+func (m *Mempool) compactStandardAbsentLocked(txid [32]byte) CompactCandidateRead {
+	for _, indexed := range m.wtxids {
+		if indexed == txid {
+			return CompactCandidateRead{Disposition: CompactCandidateFault}
+		}
+	}
+	return CompactCandidateRead{Disposition: CompactCandidateAbsent}
+}
+
 type Mempool struct {
 	mu                sync.RWMutex
 	chainState        *ChainState

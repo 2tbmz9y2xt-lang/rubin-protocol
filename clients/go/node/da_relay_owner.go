@@ -375,6 +375,226 @@ type DARetainedTxSnapshot struct {
 	TxBytes []byte
 }
 
+// CompactDAIdentities captures the actual A/B/C retained members, without raw
+// parsing or copying. The expected pointer proves the immutable canonical binding.
+func (s *DARelayState) CompactDAIdentities(expected *Mempool) ([]CompactCandidateIdentity, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	type binding struct { pool *Mempool; setsAvailable, locatorsAvailable bool }
+	if expected == nil || (binding{expected, s.sets != nil, s.locators != nil}) != (binding{s.mempool, true, true}) {
+		return nil, false
+	}
+	identities := make([]CompactCandidateIdentity, 0, len(s.locators))
+	for daID, record := range s.sets {
+		members, valid := s.compactDARecordIdentitiesLocked(record, daID)
+		if !valid {
+			return nil, false
+		}
+		identities = append(identities, members...)
+	}
+	if len(identities) != len(s.locators) {
+		return nil, false
+	}
+	return identities, true
+}
+
+func (s *DARelayState) compactDARecordIdentitiesLocked(record daRelaySetRecord, daID [32]byte) ([]CompactCandidateIdentity, bool) {
+	if !compactDARecordValid(record, daID) {
+		return nil, false
+	}
+	identities := make([]CompactCandidateIdentity, 0, len(record.chunks)+1)
+	if record.state != daRelayStateOrphanChunks {
+		if !s.compactDACommitValid(record) {
+			return nil, false
+		}
+		identities = append(identities, CompactCandidateIdentity{TxID: record.commit.member.txid, WTxID: record.commit.member.wtxid})
+	}
+	for index, chunk := range record.chunks {
+		if !s.compactDAChunkValid(record, index) {
+			return nil, false
+		}
+		identities = append(identities, CompactCandidateIdentity{TxID: chunk.member.txid, WTxID: chunk.member.wtxid})
+	}
+	return identities, true
+}
+
+func compactDARecordValid(record daRelaySetRecord, daID [32]byte) bool {
+	if record.daID != daID || record.chunks == nil {
+		return false
+	}
+	observation := daAdmissionObservation{
+		kind: daAdmissionObservationLocated,
+		indexedLocator: daRelayLocator{daID: daID}, recordDAID: record.daID,
+		recordState: record.state, recordRevision: record.revision,
+		recordReceivedTime: record.receivedTime, recordTTLBlocksLeft: record.ttlBlocksRemaining,
+		recordPayloadBytes: record.payloadBytes, recordWireBytes: record.wireBytes,
+		recordHasReplaceableChunks: record.replaceableChunks != nil,
+		stagedCommitPresent: record.commit.member != nil, stagedCommitDAID: record.commit.daID,
+		stagedCommitPayloadCommitment: record.commit.payloadCommitment,
+		stagedCommitChunkCount: record.commit.chunkCount, stagedCommitWireBytes: record.commit.wireBytes,
+		stagedCommitPeerQuotaKey: record.commit.peerQuotaKey, stagedCommitRaw: len(record.commit.txBytes) != 0,
+	}
+	observation.candidate.member.locator = observation.indexedLocator
+	if observation.validateHeader() != nil || observation.validateStagedCommit() != nil {
+		return false
+	}
+	return record.state != daRelayStateCompleteSet || len(record.chunks) == int(record.commit.chunkCount)
+}
+
+func (s *DARelayState) compactDACommitValid(record daRelaySetRecord) bool {
+	commit := record.commit
+	if commit.member == nil {
+		return false
+	}
+	locator, found := s.locators[commit.member.txid]
+	if !found || locator != (daRelayLocator{daID: record.daID, kind: daRelayLocatorCommit}) {
+		return false
+	}
+	return len(commit.txBytes) != 0
+}
+
+func (s *DARelayState) compactDAChunkValid(record daRelaySetRecord, index uint16) bool {
+	chunk := record.chunks[index]
+	if chunk.member == nil {
+		return false
+	}
+	locator := s.locators[chunk.member.txid]
+	if locator != (daRelayLocator{daID: record.daID, kind: daRelayLocatorChunk, chunkIndex: index}) {
+		return false
+	}
+	if record.state != daRelayStateOrphanChunks && index >= record.commit.chunkCount {
+		return false
+	}
+	type placement struct {
+		daID [32]byte
+		index uint16
+		wire uint64
+		quota string
+		hashChecked bool
+	}
+	if (placement{chunk.daID, chunk.chunkIndex, chunk.wireBytes, chunk.peerQuotaKey, chunk.hashChecked}) != (placement{daID: record.daID, index: index}) {
+		return false
+	}
+	if checkOwnerReadyChunkIndex(index) != nil {
+		return false
+	}
+	return len(chunk.txBytes) != 0 && len(chunk.payload) != 0
+}
+
+// compactDATargetLocked selects only the target and constant verification scalars.
+// The raw reference is consumed by ReadCompactDA before the lock is released.
+func (s *DARelayState) compactDATargetLocked(identity CompactCandidateIdentity, maxBytes uint64) (daRelayAdmissionCandidate, CompactCandidateDisposition) {
+	if s.mempool == nil || s.sets == nil || s.locators == nil {
+		return daRelayAdmissionCandidate{}, CompactCandidateFault
+	}
+	locator, found := s.locators[identity.TxID]
+	if !found {
+		if s.compactDAAssociationExistsLocked(identity.TxID) {
+			return daRelayAdmissionCandidate{}, CompactCandidateFault
+		}
+		return daRelayAdmissionCandidate{}, CompactCandidateAbsent
+	}
+	record, found := s.sets[locator.daID]
+	if !found || !compactDARecordValid(record, locator.daID) {
+		return daRelayAdmissionCandidate{}, CompactCandidateFault
+	}
+	return s.compactDASelectMemberLocked(record, locator, identity, maxBytes)
+}
+
+func (s *DARelayState) compactDAAssociationExistsLocked(txid [32]byte) bool {
+	for _, record := range s.sets {
+		if record.commit.member != nil && record.commit.member.txid == txid {
+			return true
+		}
+		for _, chunk := range record.chunks {
+			if chunk.member != nil && chunk.member.txid == txid {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *DARelayState) compactDASelectMemberLocked(record daRelaySetRecord, locator daRelayLocator, identity CompactCandidateIdentity, maxBytes uint64) (daRelayAdmissionCandidate, CompactCandidateDisposition) {
+	target := daRelayAdmissionCandidate{member: daRelayOwnerReadyMember{locator: locator}}
+	var member *daRelayMemberIdentity
+	switch locator.kind {
+	case daRelayLocatorCommit:
+		if !s.compactDACommitValid(record) {
+			return target, CompactCandidateFault
+		}
+		member, target.member.txBytes = record.commit.member, record.commit.txBytes
+		target.chunkCount, target.payloadCommitment = record.commit.chunkCount, record.commit.payloadCommitment
+	case daRelayLocatorChunk:
+		if !s.compactDAChunkValid(record, locator.chunkIndex) {
+			return target, CompactCandidateFault
+		}
+		chunk := record.chunks[locator.chunkIndex]
+		member, target.member.txBytes, target.chunkHash = chunk.member, chunk.txBytes, chunk.chunkHash
+	default:
+		return target, CompactCandidateFault
+	}
+	if member.txid != identity.TxID {
+		return daRelayAdmissionCandidate{}, CompactCandidateFault
+	}
+	if member.wtxid != identity.WTxID {
+		return daRelayAdmissionCandidate{}, CompactCandidateAbsent
+	}
+	if uint64(len(target.member.txBytes)) > maxBytes {
+		return daRelayAdmissionCandidate{}, CompactCandidateOverBudget
+	}
+	target.member.txBytes = append([]byte(nil), target.member.txBytes...)
+	target.member.member = daRelayMemberIdentity{txid: member.txid, wtxid: member.wtxid}
+	return target, CompactCandidatePresent
+}
+
+func compactDARoleValid(target daRelayAdmissionCandidate, tx *consensus.Tx) bool {
+	locator := target.member.locator
+	switch locator.kind {
+	case daRelayLocatorCommit:
+		if tx.TxKind != 1 || tx.DaCommitCore == nil {
+			return false
+		}
+		commitment, err := daAdmissionPayloadCommitment(tx)
+		type commitRole struct { daID, commitment [32]byte; count uint16 }
+		return err == nil && (commitRole{tx.DaCommitCore.DaID, commitment, tx.DaCommitCore.ChunkCount}) == (commitRole{locator.daID, target.payloadCommitment, target.chunkCount})
+	case daRelayLocatorChunk:
+		if tx.TxKind != 2 || tx.DaChunkCore == nil {
+			return false
+		}
+		type chunkRole struct { daID, hash [32]byte; index uint16 }
+		return (chunkRole{tx.DaChunkCore.DaID, tx.DaChunkCore.ChunkHash, tx.DaChunkCore.ChunkIndex}) == (chunkRole{locator.daID, target.chunkHash, locator.chunkIndex})
+	default:
+		return false
+	}
+}
+
+// ReadCompactDA copies only a matching target within maxBytes, then canonically
+// parses it once off-lock. It neither clones companions nor validates admission.
+func (s *DARelayState) ReadCompactDA(identity CompactCandidateIdentity, maxBytes uint64) CompactCandidateRead {
+	if s == nil {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	s.mu.Lock()
+	target, disposition := s.compactDATargetLocked(identity, maxBytes)
+	s.mu.Unlock()
+	if disposition != CompactCandidatePresent {
+		return CompactCandidateRead{Disposition: disposition}
+	}
+	raw := target.member.txBytes
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(raw)
+	if err != nil || consumed != len(raw) {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	if !compactDARoleValid(target, tx) || (CompactCandidateIdentity{TxID: txid, WTxID: wtxid}) != identity {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	return CompactCandidateRead{Disposition: CompactCandidatePresent, Raw: raw}
+}
+
 // LookupRetainedTx classifies txid from ONE guarded retained observation
 // (RUBIN_COMPACT_BLOCKS.md 17.5): (snapshot, true, nil) for an integrity-valid
 // member, (zero, false, nil) for a nil receiver or an unindexed txid, and
