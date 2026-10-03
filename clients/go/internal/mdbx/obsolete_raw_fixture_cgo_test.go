@@ -1074,7 +1074,7 @@ func TestObsoleteGenerationV1ConsultedOverlap(t *testing.T) {
 
 func TestObsoleteGenerationV1ControlBound(t *testing.T) {
 	path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
-	cfg.Upper = 1 << 30
+	cfg.Upper = 4 << 30
 	store, err := Create(path, cfg)
 	consultedTrack(t, store, err)
 	mustEnvironment(t, fixtureLargeBulk(store, 4, 2*67_821, 20))

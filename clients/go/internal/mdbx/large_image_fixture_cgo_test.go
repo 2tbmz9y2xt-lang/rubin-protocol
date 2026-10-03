@@ -279,11 +279,15 @@ func largeNativeCached(t *testing.T, store *Store) {
 	t.Helper()
 	before := fixtureLargeNativeCalls()
 	terminal := store.terminal
+	wantTruth := CommitTruth(1)
+	if store.terminalTruth != 0 {
+		wantTruth = store.terminalTruth
+	}
 	truth, stage, result := store.Update(func(*Reader) (Batch, error) {
 		t.Fatal("cached terminal callback ran")
 		return Batch{}, nil
 	})
-	if truth != store.terminalTruth || int(stage) != 1 || result != terminal {
+	if truth != wantTruth || int(stage) != 1 || result != terminal {
 		t.Fatal("cached terminal update changed result")
 	}
 	if result = store.View(func(*Reader) error {
