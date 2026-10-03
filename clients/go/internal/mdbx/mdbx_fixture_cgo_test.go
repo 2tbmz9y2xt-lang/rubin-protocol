@@ -1112,6 +1112,7 @@ func sideNativeRejections(t *testing.T) {
 			s, path := sideStore(t, a, rows...)
 			cfg := s.config
 			bad := sideAuthority(5, 5)
+			var replayBytes []byte
 			switch name {
 			case "R1a/version":
 				bad.Version = 2
@@ -1133,9 +1134,22 @@ func sideNativeRejections(t *testing.T) {
 				bad.SelectedSide = modelSide(2, 0, 5, 5, 585)
 			case "H3/replay-target":
 				bad = modelReplay(1)
-				// The inherited phase validator rejects simultaneous Replay and Cleanup;
-				// this does not isolate a reachable generation-target predicate.
+				var encodeErr error
+				replayBytes, encodeErr = bad.Encode()
+				mustEnvironment(t, encodeErr)
+				decoded, decodeErr := DecodeStorageAuthorityV1(replayBytes)
+				mustEnvironment(t, decodeErr)
+				if !reflect.DeepEqual(decoded, bad) {
+					t.Fatal("legal REPLAY authority did not round-trip")
+				}
+				// The phase codec cannot persist Replay and Cleanup together.
 				bad.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 1, GenerationID: bad.Replay.TargetGenerationID}}}
+				if got := ValidateStorageAuthorityV1(bad); got != errSchema {
+					t.Fatalf("REPLAY with target cleanup validated: %v", got)
+				}
+				if encoded, got := bad.Encode(); encoded != nil || got != errSchema {
+					t.Fatalf("REPLAY with target cleanup encoded: %x/%v", encoded, got)
+				}
 			case "H4/two-SIDE":
 				bad.Cleanup.Spans = append(bad.Cleanup.Spans, bad.Cleanup.Spans[0])
 			case "H4/order":
@@ -1156,7 +1170,10 @@ func sideNativeRejections(t *testing.T) {
 				}
 				bad.Ordinary.CarriedCleanup = &CleanupV1{Spans: []CleanupSpanV1{span}}
 			}
-			authority := sideAuthorityRow(bad)
+			authority := Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, Literal: replayBytes}
+			if replayBytes == nil {
+				authority = sideAuthorityRow(bad)
+			}
 			mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, authority.Literal))
 			owner := bootstrapOwner(t)
 			var truth CommitTruth
@@ -1166,7 +1183,11 @@ func sideNativeRejections(t *testing.T) {
 			if truth != CommitTruth(1) || stage != 1 {
 				t.Fatalf("SIDE authority tuple: %s/%d/%v", truth, stage, result)
 			}
-			requireEnvironmentError(t, result, EngineClass("Integrity"), operationGet, -30793, "invalid storage authority")
+			if name == "H3/replay-target" {
+				mustEnvironment(t, result)
+			} else {
+				requireEnvironmentError(t, result, EngineClass("Integrity"), operationGet, -30793, "invalid storage authority")
+			}
 			mustEnvironment(t, err)
 			if evidence.BeginWrite != 0 || evidence.OldGets != ([8]uint64{1}) {
 				t.Fatalf("SIDE authority read before routing: %+v", evidence)
