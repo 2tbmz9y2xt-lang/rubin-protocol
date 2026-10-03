@@ -12,7 +12,7 @@ package mdbx
 typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
 static rubin_li_state rubin_li;
 int rubin_li_arm(MDBX_env *env, MDBX_dbi dbi, unsigned mode, const void *key, size_t length) {
-	if (rubin_li.mode || !env || mode < 1 || mode > 28 || mode == 27 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
+	if (rubin_li.mode || !env || mode < 1 || mode > 29 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
 	memset(&rubin_li, 0, sizeof(rubin_li));
 	rubin_li.mode = mode; rubin_li.env = env; rubin_li.dbi = dbi; rubin_li.key_len = length;
 	memcpy(rubin_li.key, key, length);
@@ -42,14 +42,18 @@ static int rubin_li_env_close(MDBX_env *env, bool dont_sync) {
 }
 static int rubin_li_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *value) {
 	if (rubin_li.mode) rubin_li.calls++;
+	if (rubin_li.mode == 29 && txn == rubin_li.read_txn && dbi != rubin_li.dbi) {
+		rubin_li.gets++; key->iov_base = NULL; key->iov_len = 0; value->iov_base = NULL; value->iov_len = 0; return MDBX_EIO;
+	}
 	int rc = mdbx_get_equal_or_great(txn, dbi, key, value);
-	int shape_mode = (rubin_li.mode >= 20 && rubin_li.mode <= 22) || rubin_li.mode == 25 || rubin_li.mode == 26;
+	int shape_mode = (rubin_li.mode >= 20 && rubin_li.mode <= 22) || rubin_li.mode == 25 || rubin_li.mode == 26 || rubin_li.mode == 27;
 	if (shape_mode && txn == rubin_li.old_txn && dbi == rubin_li.dbi && (rc == MDBX_SUCCESS || rc == MDBX_RESULT_TRUE)) {
 		rubin_li.gets++;
 		if (rubin_li.mode == 20) key->iov_base = NULL;
 		else if (rubin_li.mode == 21) key->iov_len = SIZE_MAX;
 		else if (rubin_li.mode == 25) key->iov_len = 0;
 		else if (rubin_li.mode == 26) key->iov_len = 31;
+		else if (rubin_li.mode == 27) key->iov_len = 2023;
 		else { value->iov_base = NULL; value->iov_len = 1; }
 	}
 	return rc;
@@ -205,7 +209,7 @@ static int rubin_sd_txn_commit(MDBX_txn *txn) {
 		if (rubin_li.mode == 7 || rubin_li.mode == 19) mdbx_txn_break(txn);
 		int rc = mdbx_txn_commit(txn);
 		if (rc != ((rubin_li.mode == 7 || rubin_li.mode == 19) ? MDBX_RESULT_TRUE : MDBX_SUCCESS)) return rc;
-		if (rubin_li.mode >= 3 && rubin_li.mode <= 6) {
+		if ((rubin_li.mode >= 3 && rubin_li.mode <= 6) || rubin_li.mode == 29) {
 			rc = rubin_li_drift();
 			if (rc != MDBX_SUCCESS) return rc;
 			rubin_li.drift++;
@@ -763,6 +767,7 @@ type Reader struct {
 	failure    error
 	largeVisit atomic.Bool
 	maxKey     uint64
+	updateOld  bool
 
 	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
 	ownerVerified bool
@@ -901,6 +906,10 @@ type Batch struct {
 	Consulted []ConsultedRow
 	// LargeConsulted proves complete physical body/family residuals alongside the exact mutation and reference predicates.
 	LargeConsulted []LargeImageSelectorV1
+	// ObsoleteDeletes removes same-OLD observed present rows; every row needs a covering witness.
+	ObsoleteDeletes []ObsoleteRowV1
+	// ObsoleteConsulted retains observed physical intervals and own-projection proof points.
+	ObsoleteConsulted []ObsoletePageWitnessV1
 }
 
 const (
@@ -1149,8 +1158,8 @@ func updateScanMutation(first bool, previous, mutation Mutation, budget *updateB
 	return nil
 }
 
-func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
-	if len(batch.Mutations) == 0 {
+func updateOwnedBatch(batch Batch, readers ...*Reader) ([]ownedMutation, error) {
+	if len(batch.Mutations) == 0 && len(batch.ObsoleteDeletes) == 0 {
 		return nil, updateInvalidBatch()
 	}
 	budget, previous := updateBudget{reverse: batch.Reverse}, Mutation{}
@@ -1165,7 +1174,10 @@ func updateOwnedBatch(batch Batch) ([]ownedMutation, error) {
 	for i, mutation := range batch.Mutations {
 		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, updateClone(mutation.RefKey)}
 	}
-	return owned, nil
+	if len(readers) == 0 {
+		return owned, nil
+	}
+	return updateOwnedObsolete(batch, readers[0], owned)
 }
 
 // ownedConsulted is one admitted consulted row: its validated DBI, a key cloned after complete Go admission and the
@@ -1454,6 +1466,45 @@ func (r *Reader) largeFetch(selector LargeImageSelectorV1, seek []byte) (largeNa
 		return largeNativeRow{}, err
 	}
 	if !bytes.HasPrefix(key, selector.Hash[:]) {
+		return largeNativeRow{done: true}, nil
+	}
+	return largeNativeRow{key: key, image: updateImage{present: true, bytes: unsafe.Pointer(value.value_bytes), length: value.value_len}}, nil
+}
+
+// obsoletePoint retains no pointer beyond the already owned Reader transaction.
+func (r *Reader) obsoletePoint(rank uint8, key []byte, op engineOperation) (updateImage, error) {
+	value := C.rubin_mdbx_get(r.txn, r.dbis[rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	if rc := int(value.rc); rc != codeSuccess && rc != codeNotFound {
+		return updateImage{}, nativeError(op, rc)
+	}
+	image := updateImage{present: int(value.rc) == codeSuccess, bytes: unsafe.Pointer(value.bytes), length: value.length}
+	if !validUpdateImage(image) || !largeNativeShape(image.bytes, uint64(image.length)) {
+		return updateImage{}, obsoleteShape(op)
+	}
+	return image, nil
+}
+
+func (r *Reader) obsoleteFetch(domain obsoleteDomain, seek []byte, op engineOperation) (largeNativeRow, error) {
+	if seek == nil {
+		return largeNativeRow{done: true}, nil
+	}
+	value := C.rubin_mdbx_get_equal_or_great(r.txn, r.dbis[domain.rank], unsafe.Pointer(&seek[0]), C.size_t(len(seek)))
+	runtime.KeepAlive(seek)
+	if int(value.rc) == codeNotFound {
+		return largeNativeRow{done: true}, nil
+	}
+	if !prefixPageFoundCode(int(value.rc)) {
+		return largeNativeRow{}, nativeError(op, int(value.rc))
+	}
+	if !largeNativeShape(unsafe.Pointer(value.value_bytes), uint64(value.value_len)) {
+		return largeNativeRow{}, obsoleteShape(op)
+	}
+	key, err := largeNativeKey(unsafe.Pointer(value.key_bytes), uint64(value.key_len), r.maxKey, seek)
+	if err != nil {
+		return largeNativeRow{}, obsoleteShape(op)
+	}
+	if !bytes.HasPrefix(key, domain.prefix) {
 		return largeNativeRow{done: true}, nil
 	}
 	return largeNativeRow{key: key, image: updateImage{present: true, bytes: unsafe.Pointer(value.value_bytes), length: value.value_len}}, nil
@@ -1943,7 +1994,7 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	if primary != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, primary, infrastructure)
 	}
-	plan, planErr := updateOwnedBatch(batch)
+	plan, planErr := updateOwnedBatch(batch, reader)
 	if planErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
@@ -2051,6 +2102,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 		return CommitTruthOld, UpdateStagePrewrite, s.failedReadBegin(begun.txn, beginErr)
 	}
 	reader := newReader(begun.txn, s.dbis)
+	reader.updateOld = true
 	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)

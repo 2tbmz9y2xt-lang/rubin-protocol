@@ -12,14 +12,20 @@ extern int rubin_li_arm(MDBX_env *, MDBX_dbi, unsigned, const void *, size_t);
 extern void rubin_li_disarm(rubin_li_state *);
 extern unsigned rubin_li_calls(void);
 static int rubin_fixture_large_bulk(MDBX_txn *txn, MDBX_dbi dbi, unsigned kind, unsigned count, size_t width, const unsigned char *hashes) {
-	unsigned char key_bytes[77] = {0};
-	size_t key_len = kind == 1 ? 32 : 77;
+	unsigned char key_bytes[2022] = {0};
+	size_t key_len = kind == 1 ? 32 : (kind == 3 ? 333 : (kind == 4 ? 2022 : (kind == 5 ? 44 : (kind == 6 ? 37 : 77))));
 	for (unsigned i = 0; i < count; i++) {
-		unsigned offset = kind == 1 ? 28 : 33;
+		unsigned offset = kind == 1 ? 28 : (kind == 5 ? 8 : 33);
 		key_bytes[offset] = (unsigned char)(i >> 24); key_bytes[offset+1] = (unsigned char)(i >> 16);
 		key_bytes[offset+2] = (unsigned char)(i >> 8); key_bytes[offset+3] = (unsigned char)i;
 		if (kind == 1) memcpy(key_bytes, hashes + (size_t)i * 32, 32);
-		else key_bytes[32] = 1;
+		else if (kind == 5) key_bytes[7] = 9;
+		else if (kind == 4) {
+			unsigned long long generation = (unsigned long long)(i / 2) + 1;
+			memset(key_bytes, 0, sizeof(key_bytes));
+			for (unsigned j = 0; j < 8; j++) key_bytes[7-j] = (unsigned char)(generation >> (j * 8));
+			key_bytes[2021] = (unsigned char)(1 + i % 2);
+		} else { if (hashes != NULL) memcpy(key_bytes, hashes, 32); key_bytes[32] = 1; }
 		MDBX_val key = {key_bytes, key_len}, value = {NULL, width};
 		int rc = mdbx_put(txn, dbi, &key, &value, MDBX_RESERVE | MDBX_NOOVERWRITE);
 		if (rc != MDBX_SUCCESS) return rc;
@@ -317,7 +323,7 @@ func fixtureSeedPrefixRawRow(store *Store, dbi DBI, key, value []byte) error {
 	})
 }
 
-func fixtureLargeBulk(store *Store, kind, count, width uint32) error {
+func fixtureLargeBulk(store *Store, kind, count, width uint32, prefix ...[32]byte) error {
 	rank := 4
 	var hashes []byte
 	if kind == 1 {
@@ -329,8 +335,14 @@ func fixtureLargeBulk(store *Store, kind, count, width uint32) error {
 			copy(hashes[int(i)*32:], hash[:])
 		}
 	}
-	if kind == 2 {
+	if kind != 1 {
 		rank = 5
+		if kind == 4 || kind == 5 {
+			rank = 1
+		}
+		if len(prefix) == 1 {
+			hashes = prefix[0][:]
+		}
 	}
 	var pointer *C.uchar
 	if len(hashes) > 0 {

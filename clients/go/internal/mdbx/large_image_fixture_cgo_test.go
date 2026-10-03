@@ -705,3 +705,167 @@ func largeNativeLegacyPriority(t *testing.T) {
 		t.Fatal("legacy native capture priority before scalar selector count")
 	}
 }
+
+// Joint cases distinguish shared physical scopes from independent target,
+// reference, proof and body predicates on the actual Store.Update path.
+func TestLargeImageV1ObsoleteJoint(t *testing.T) {
+	for _, variant := range []string{"overlay", "proof-target", "proof-target-third", "shared-family-sibling", "shared-proof-drift", "later-failure"} {
+		t.Run(variant, func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			_, _, hash, header := obsoleteProjectionSeed(t, store, 9, 1)
+			first, second := append(bytes.Clone(hash[:]), 1, 1), append(bytes.Clone(hash[:]), 2, 2)
+			obsoleteSeed(t, store, 5, first, []byte{0x41})
+			obsoleteSeed(t, store, 5, second, []byte{0x51})
+			mode, rank, faultKey := uint32(5), uint8(3), hash[:]
+			if variant == "proof-target-third" {
+				mode = 6
+			}
+			if variant == "shared-family-sibling" {
+				rank, faultKey = 5, second
+			}
+			if variant == "later-failure" {
+				mode, rank = 29, 4
+				obsoleteSeed(t, store, 4, hash[:], []byte{0x61})
+			}
+			var source, destination, sourceValue []byte
+			if variant == "overlay" {
+				source = make([]byte, 44)
+				source[7], source[8] = 9, 0x31
+				destination = make([]byte, 77)
+				copy(destination, hash[:])
+				destination[32] = 1
+				copy(destination[41:], source[8:])
+				sourceValue = append([]byte{0x71}, make([]byte, 19)...)
+				obsoleteSeed(t, store, 1, source, sourceValue)
+			}
+			var truth CommitTruth
+			var stage UpdateStage
+			var result error
+			run := func() {
+				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
+					batch := Batch{LargeConsulted: []LargeImageSelectorV1{{Kind: 2, Hash: hash}}}
+					if variant == "overlay" {
+						page, err := reader.ObsoleteGenerationPageV1(9, 1, nil, 1)
+						mustEnvironment(t, err)
+						batch.ObsoleteDeletes, batch.ObsoleteConsulted = page.Rows, []ObsoletePageWitnessV1{page.Witness}
+						batch.Mutations = []Mutation{{DBI: readDBIsLiteral()[5], Key: destination, AfterKind: AfterKind(3), RefDBI: readDBIsLiteral()[1], RefKey: source}}
+						return batch, nil
+					}
+					if variant == "later-failure" {
+						page, err := reader.ObsoleteGenerationPageV1(9, 1, nil, 1)
+						mustEnvironment(t, err)
+						obsoleteRequirePage(t, page, 1, 1)
+						batch.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
+						batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 1, Hash: hash}, {Kind: 2, Hash: hash}}
+						batch.Mutations = []Mutation{consultedCounter(t, 1)}
+						return batch, nil
+					}
+					index := obsoleteIndexPage(t, reader, 9)
+					page, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+					mustEnvironment(t, err)
+					obsoleteRequirePage(t, page, 2, 3, first)
+					// Same OLD proof points and intervals from distinct observations coalesce.
+					repeated, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 7)
+					mustEnvironment(t, err)
+					batch.ObsoleteDeletes = page.Rows
+					batch.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness, repeated.Witness}
+					if variant == "proof-target" || variant == "proof-target-third" {
+						batch.Mutations = []Mutation{{DBI: readDBIsLiteral()[3], Key: hash[:], BeforePresent: true, AfterKind: AfterKind(1)}}
+					}
+					return batch, nil
+				})
+				if result != nil {
+					largeNativeCached(t, store)
+				}
+			}
+			evidence := fixtureLargeEvidence{}
+			if variant == "overlay" || variant == "proof-target" {
+				run()
+			} else {
+				var fixtureErr error
+				evidence, fixtureErr = fixtureLargeFault(store, mode, rank, faultKey, run)
+				mustEnvironment(t, fixtureErr)
+			}
+			if variant == "overlay" || variant == "proof-target" {
+				if truth.String() != "NEW" || int(stage) != 3 || result != nil || string(store.state) != "OPEN" {
+					t.Fatal("joint overlay lost a predicate", variant, truth, stage, result, store.state)
+				}
+				if variant == "overlay" {
+					obsoleteRawImage(t, store, 1, source, nil)
+					obsoleteRawImage(t, store, 5, destination, sourceValue)
+				} else {
+					obsoleteRawImage(t, store, 3, hash[:], nil)
+					obsoleteRawImage(t, store, 5, first, nil)
+					obsoleteRawImage(t, store, 5, second, []byte{0x51})
+				}
+				return
+			}
+			commit, ok := result.(*CommitError)
+			if !ok || truth.String() != "UNKNOWN" || int(stage) != 3 || commit.Truth.String() != "UNKNOWN" || string(store.state) != "CLOSED" || evidence.commits != 1 {
+				t.Fatal("joint mismatch hidden", variant, truth, stage, result, evidence)
+			}
+			requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28, expectedNativeDiagnostic(28))
+			if variant == "later-failure" {
+				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
+				if evidence.gets != 1 || evidence.drift != 1 {
+					t.Fatal("later admitted failure not reached", evidence)
+				}
+			} else if commit.ReadbackCause != nil {
+				t.Fatal("unexpected joint readback cause", commit.ReadbackCause)
+			}
+			reopened, err := Open(path, cfg)
+			consultedTrack(t, reopened, err)
+			if variant == "shared-family-sibling" {
+				obsoleteRawImage(t, reopened, 5, second, []byte{0x7f})
+				obsoleteRawImage(t, reopened, 3, hash[:], header)
+			} else {
+				obsoleteRawImage(t, reopened, rank, faultKey, []byte{0x7f})
+			}
+		})
+	}
+}
+
+func TestLargeImageV1ObsoleteLegacyPriority(t *testing.T) {
+	path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+	cfg.Upper = 512 << 20
+	store, err := Create(path, cfg)
+	consultedTrack(t, store, err)
+	seed := consultedCounter(t, 9)
+	largeCommit(t, store, Batch{Mutations: []Mutation{seed}})
+	mustEnvironment(t, fixtureLargeBulk(store, 1, 3, 68_000_125))
+	header := bytes.Repeat([]byte{0x5a}, 116)
+	rows := make([]ConsultedRow, 3)
+	for i := range rows {
+		binary.BigEndian.PutUint32(header, uint32(i))
+		hash := sha3.Sum256(header)
+		rows[i] = ConsultedRow{DBI: readDBIsLiteral()[4], Key: bytes.Clone(hash[:])}
+	}
+	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].Key, rows[j].Key) < 0 })
+	batch := Batch{Consulted: rows, LargeConsulted: []LargeImageSelectorV1{{Kind: 9}}}
+	callback := func(reader *Reader) (Batch, error) {
+		page, err := reader.ObsoleteGenerationPageV1(9, 3, nil, 1)
+		mustEnvironment(t, err)
+		batch.ObsoleteDeletes = page.Rows
+		batch.ObsoleteConsulted = []ObsoletePageWitnessV1{page.Witness}
+		return batch, nil
+	}
+	truth, stage, result := store.Update(callback)
+	obsoleteRequireError(t, result, "update", "Capacity", -30417, "Update Batch exceeds bound")
+	if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "OPEN" {
+		t.Fatal("raw merged plan changed captured-value priority", truth, stage, result, store.state)
+	}
+	obsoleteRawImage(t, store, 0, seed.Key, seed.Literal)
+	batch.LargeConsulted = make([]LargeImageSelectorV1, 2881)
+	evidence, fixtureErr := fixtureLargeFault(store, 28, 4, rows[0].Key, func() {
+		truth, stage, result = store.Update(callback)
+		largeNativeCached(t, store)
+	})
+	mustEnvironment(t, fixtureErr)
+	obsoleteRequireError(t, result, "update", "IO", 5, expectedNativeDiagnostic(5))
+	if truth.String() != "OLD" || int(stage) != 1 || string(store.state) != "CLOSED" || evidence.gets != 1 || evidence.aborts != 1 {
+		t.Fatal("raw merged plan hid capture error behind large count", truth, stage, result, evidence, store.state)
+	}
+	reopened, err := Open(path, cfg)
+	consultedTrack(t, reopened, err)
+	obsoleteRawImage(t, reopened, 0, seed.Key, seed.Literal)
+}

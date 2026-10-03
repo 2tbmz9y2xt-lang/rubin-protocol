@@ -1710,6 +1710,39 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 			t.Fatalf("prepared-plan function reached C: %s", function.Name.Name)
 		}
 	}
+	// The raw extension remains Go-only admission; inspect its complete reachable
+	// control closure without excluding the new ordinary source from package inventory.
+	raw, err := os.ReadFile("obsolete_raw_cgo.go")
+	mustEnvironment(t, err)
+	rawFile, err := parser.ParseFile(fset, "obsolete_raw_cgo.go", raw, 0)
+	mustEnvironment(t, err)
+	owners := map[string]bool{}
+	for _, name := range []string{"updateOwnedObsolete", "obsoleteWitnesses", "obsoleteAdmitRows", "obsoleteRowCurrent", "obsoleteCovered", "obsoleteCharge", "obsoleteCompileRows", "updateObsoleteScope", "obsoleteDomainOrdered", "obsoleteCoalesce", "obsoleteMergeable", "obsoleteCoalescePoints", "obsoleteRetainControls", "obsoleteControlKeys", "obsoleteControlKey", "obsoleteContains"} {
+		owners[name] = false
+	}
+	for _, declaration := range rawFile.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if _, owned := owners[function.Name.Name]; !owned {
+			continue
+		}
+		owners[function.Name.Name] = true
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				if base, ok := selector.X.(*ast.Ident); ok && base.Name == "C" {
+					t.Fatalf("raw plan admission reached C: %s", function.Name.Name)
+				}
+			}
+			return true
+		})
+	}
+	for name, present := range owners {
+		if !present {
+			t.Fatalf("raw admission closure missing owner: %s", name)
+		}
+	}
 }
 
 func TestReadOperationDomain(t *testing.T) {
@@ -2862,6 +2895,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		ordinarySource.Write(source)
 	}
 	typeProofs := packageTypeProofs(files)
+	require(files["obsolete_raw_cgo.go"] != nil, "ordinary build omitted obsolete raw source")
 	file, source := files["mdbx_cgo.go"], sources["mdbx_cgo.go"]
 	require(file != nil, "ordinary build omitted mdbx_cgo.go")
 	allowed := map[token.Pos]bool{}
