@@ -1082,9 +1082,8 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 
 // SIDE images are checked on the same database after real Close/Open; Open is
 // used only for raw inspection and never restores verified cleanup authority.
-func sideRawImages(t *testing.T, s *Store, path string, rows []Mutation) {
+func sideRawImages(t *testing.T, s *Store, path string, cfg ConfigV1, rows []Mutation) {
 	t.Helper()
-	cfg := s.config
 	if s.state == storeOPEN {
 		mustEnvironment(t, s.Close())
 	}
@@ -1111,6 +1110,7 @@ func sideNativeRejections(t *testing.T) {
 			a := sideAuthority(5, 5)
 			_, _, rows := sideRows(2, 5)
 			s, path := sideStore(t, a, rows...)
+			cfg := s.config
 			bad := sideAuthority(5, 5)
 			switch name {
 			case "R1a/version":
@@ -1172,7 +1172,7 @@ func sideNativeRejections(t *testing.T) {
 				t.Fatalf("SIDE authority read before routing: %+v", evidence)
 			}
 			prunedReleased(t, owner)
-			sideRawImages(t, s, path, append(rows, authority))
+			sideRawImages(t, s, path, cfg, append(rows, authority))
 		})
 	}
 }
@@ -1209,6 +1209,7 @@ func sideNativeIdentity(t *testing.T) {
 				target.Literal = nil
 			}
 			s, path := sideStore(t, a, rows...)
+			cfg := s.config
 			if target.Literal == nil {
 				mustEnvironment(t, fixtureDeletePrefixRow(s, target.DBI, target.Key))
 			} else {
@@ -1226,7 +1227,7 @@ func sideNativeIdentity(t *testing.T) {
 			}
 			requireEnvironmentError(t, err, EngineClass("Integrity"), operationGet, -30793, diagnostic)
 			prunedReleased(t, owner)
-			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+			sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 		})
 	}
 }
@@ -1237,11 +1238,12 @@ func sideNativeBodies(t *testing.T) {
 			a := sideAuthority(5, 5)
 			hash, _, rows := sideRows(2, 5)
 			s, path := sideStore(t, a, rows...)
+			cfg := s.config
 			mustEnvironment(t, FixtureSeedRawRow(s, 4, hash[:], make([]byte, size)))
 			sideRun(t, s, CommitTruth(2))
 			a.Cleanup, a.Phase = nil, 1
 			rows[0].Literal, rows[1].Literal = nil, nil
-			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+			sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 		})
 	}
 	t.Run("canonical", func(t *testing.T) {
@@ -1253,6 +1255,7 @@ func sideNativeBodies(t *testing.T) {
 				key, _ := HeightKey(1, 11)
 				rows = append(rows, Mutation{DBI: readDBIsLiteral()[2], Key: key, AfterKind: 2, Literal: ChainValue(hash, [32]byte{}, [40]byte{39: 1})}, canonicalOwnerLiteral(1, 11, hash))
 				s, path := sideStore(t, a, rows...)
+				cfg := s.config
 				rows[0].Literal = nil
 				if size < 0 {
 					mustEnvironment(t, fixtureDeletePrefixRow(s, readDBIsLiteral()[4], hash[:]))
@@ -1267,7 +1270,7 @@ func sideNativeBodies(t *testing.T) {
 				}
 				requireEnvironmentError(t, err, EngineClass("Integrity"), operationGet, -30793, "invalid cleanup owed artifact")
 				prunedReleased(t, owner)
-				sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+				sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 			})
 		}
 	})
@@ -1323,6 +1326,7 @@ func sideNativeFaults(t *testing.T) {
 				a = modelBase(1, 0, 0)
 			}
 			s, path := sideStore(t, a, rows...)
+			cfg := s.config
 			owner := bootstrapOwner(t)
 			var truth CommitTruth
 			var stage UpdateStage
@@ -1350,7 +1354,7 @@ func sideNativeFaults(t *testing.T) {
 			if row.scenario == 10 {
 				authority.Literal = []byte{0x7f}
 			}
-			sideRawImages(t, s, path, append(rows, authority))
+			sideRawImages(t, s, path, cfg, append(rows, authority))
 		})
 	}
 }
@@ -1398,12 +1402,13 @@ func TestCleanupSideV1Native(t *testing.T) {
 		x, _, _ := sideRows(2, 1)
 		rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
 		s, path := sideStore(t, a, rows...)
+		cfg := s.config
 		rows[0].Literal = []byte{0x7f}
 		mustEnvironment(t, FixtureSeedRawRow(s, 4, x[:], rows[0].Literal))
 		sideRun(t, s, CommitTruth(2))
 		a.Cleanup, a.Phase = nil, 1
 		rows[1].Literal = nil
-		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 	})
 	t.Run("P09-A8", sideNativeBodies)
 	t.Run("X2", sideNativeFaults)
@@ -1411,6 +1416,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 		a := sideAuthority(5, 5)
 		_, _, rows := sideRows(2, 5)
 		s, path := sideStore(t, a, rows...)
+		cfg := s.config
 		cleanup := errors.New("cleanup")
 		truth, stage, err := s.applyUpdateOutcome(updateNativeOutcome{truth: CommitTruth(1)}, nil, cleanup, false)
 		joined, ok := err.(interface{ Unwrap() []error })
@@ -1424,12 +1430,13 @@ func TestCleanupSideV1Native(t *testing.T) {
 			t.Fatalf("SIDE invalid-stage cached tuple: %s/%d/%v", again, nextStage, got)
 		}
 		prunedReleased(t, owner)
-		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 	})
 	t.Run("H10", func(t *testing.T) {
 		a := sideAuthority(5, 5)
 		hash, _, rows := sideRows(2, 5)
 		s, path := sideStore(t, a, rows...)
+		cfg := s.config
 		owner := bootstrapOwner(t)
 		var recorded, result error
 		var truth CommitTruth
@@ -1453,7 +1460,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 			t.Fatalf("SIDE first read cause lost: %s/%d/%v", again, nextStage, cached)
 		}
 		prunedReleased(t, owner)
-		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 	})
 	t.Run("X3", func(t *testing.T) {
 		for _, a := range append([]authorityCase{{"SIDE", sideAuthority(5, 5)}}, sideRouteCases()...) {
@@ -1504,6 +1511,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 			a := sideAuthority(5, 5)
 			_, _, rows := sideRows(2, 5)
 			s, path := sideStore(t, a, rows...)
+			cfg := s.config
 			owner := bootstrapOwner(t)
 			marker := &struct{}{}
 			var recovered any
@@ -1524,7 +1532,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 				t.Fatal("SIDE panic identity or synchronous release changed")
 			}
 			prunedReleased(t, owner)
-			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+			sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
 		})
 	})
 }
