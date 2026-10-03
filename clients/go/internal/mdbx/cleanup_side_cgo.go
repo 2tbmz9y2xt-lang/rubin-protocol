@@ -25,8 +25,8 @@ func (s *Store) CleanupSideV1(reservations *OperationReservationOwner) (CommitTr
 		return updateErr
 	})
 	if truth == CommitTruthOld && stage == UpdateStagePrewrite {
-		switch err {
-		case noWork:
+		// Compare the complete error identity; wrapped or joined causes are not no-work.
+		if any(err) == any(noWork) {
 			err = nil
 		}
 	}
