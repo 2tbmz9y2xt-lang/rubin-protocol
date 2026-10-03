@@ -18,11 +18,7 @@ import (
 func obsoleteRequireError(t *testing.T, err error, operation, class string, code int, diagnostic string) {
 	t.Helper()
 	var engine *EngineError
-	switch direct := err.(type) {
-	case *EngineError:
-		engine = direct
-	}
-	if engine == nil || string(engine.Operation) != operation || string(engine.Class) != class || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
+	if !errors.As(err, &engine) || engine == nil || !sameError(err, engine) || string(engine.Operation) != operation || string(engine.Class) != class || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != nil || engine.ReopenRequired {
 		t.Fatalf("obsolete exact error: %#v want %s/%s/%d/%q/nil/false", err, operation, class, code, diagnostic)
 	}
 }
