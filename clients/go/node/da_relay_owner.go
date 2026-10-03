@@ -474,14 +474,15 @@ func (s *DARelayState) compactDAChunkValid(record daRelaySetRecord, index uint16
 		wire uint64
 		quota string
 		hashChecked bool
+		payloadNil, payloadPresent bool
 	}
-	if (placement{chunk.daID, chunk.chunkIndex, chunk.wireBytes, chunk.peerQuotaKey, chunk.hashChecked}) != (placement{daID: record.daID, index: index}) {
+	if (placement{chunk.daID, chunk.chunkIndex, chunk.wireBytes, chunk.peerQuotaKey, chunk.hashChecked, chunk.payload == nil, len(chunk.payload) != 0}) != (placement{daID: record.daID, index: index, payloadNil: record.state == daRelayStateCompleteSet, payloadPresent: record.state != daRelayStateCompleteSet}) {
 		return false
 	}
 	if checkOwnerReadyChunkIndex(index) != nil {
 		return false
 	}
-	return len(chunk.txBytes) != 0 && len(chunk.payload) != 0
+	return len(chunk.txBytes) != 0
 }
 
 // compactDATargetLocked selects only the target and constant verification scalars.

@@ -441,7 +441,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 			"compactDARecordIdentitiesLocked": "181613c01e61dcb87e518271486998721c21ea68af233234c4771dc2bc98da6e",
 			"compactDARecordValid": "6d01c058ad0b38c6f10bd5b4fbb67f9e76e7918878e88bea50f0068248a00f73",
 			"compactDACommitValid": "cc3cbe55856e5dcd2f0f5e79746712ea98008c506a2d7ae86f5efb52a18a6fc9",
-			"compactDAChunkValid": "aeb26f4419592ad3bcaf9c4bb0a526c515256128ef2e9c2724da56c68882949e",
+			"compactDAChunkValid": "344df93b44878aae164b09d5eb2149d555f97e01d76bd2e76ac1d5c45c6ed26a",
 			"compactDATargetLocked": "5afce8398afd2f1ecc37649494fa71dbaebb5b9d9d16ce134e5ec54f6bc53208",
 			"compactDAAssociationExistsLocked": "9cd845ac330ec315eecfb52658a9d77ed126b9391756377021d11f3e3ba5cb50",
 			"compactDASelectMemberLocked": "a594de1216249aa79d4c0465232cdc99e1152f4e9879451ab60834316ce98d19",
@@ -7661,8 +7661,9 @@ func TestCompactCandidateDA(t *testing.T) {
 
 func compactDASnapshotFaults(t *testing.T) {
 	for _, state := range []uint8{0, 1, 2} {
-		for _, mutation := range []string{"nil_sets", "nil_locators", "nil_chunks", "nil_member", "invalid_state", "reverse_index", "missing_commit", "incomplete_C"} {
+		for _, mutation := range []string{"nil_sets", "nil_locators", "nil_chunks", "nil_member", "invalid_state", "reverse_index", "missing_commit", "incomplete_C", "nil_payload", "empty_payload", "nonempty_payload"} {
 			if (mutation == "missing_commit" && state == 0) || (mutation == "incomplete_C" && state != 2) { continue }
+			if (mutation == "nil_payload" && state == 2) || (mutation == "nonempty_payload" && state != 2) { continue }
 			f, txs := compactDAFixture(t, state)
 			original := daRelayStateSnapshot(f.relay)
 			f.mutateRelay(func(s *DARelayState) {
@@ -7676,12 +7677,21 @@ func compactDASnapshotFaults(t *testing.T) {
 				case "reverse_index": delete(s.locators, txs[0].txid)
 				case "missing_commit": r.commit.member = nil
 				case "incomplete_C": delete(r.chunks, 0)
+				case "nil_payload": chunk := r.chunks[0]; chunk.payload = nil; r.chunks[0] = chunk
+				case "empty_payload": chunk := r.chunks[0]; chunk.payload = []byte{}; r.chunks[0] = chunk
+				case "nonempty_payload": chunk := r.chunks[0]; chunk.payload = []byte("retained payload residue"); r.chunks[0] = chunk
 				}
 				if s.sets != nil { s.sets[txs[0].spec.daID] = r }
 			})
 			if ids, ok := f.relay.CompactDAIdentities(f.mp); ok || ids != nil { t.Fatalf("state%d %s returned prefix=%v", state, mutation, ids) }
+			if strings.HasSuffix(mutation, "payload") {
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txs[0].txid, WTxID: txs[0].wtxid}, ^uint64(0)), 3, nil)
+			}
 			f.mutateRelay(func(s *DARelayState) { s.sets, s.locators = original.sets, original.locators })
 			if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != len(txs) { t.Fatalf("state%d %s next snapshot failed", state, mutation) }
+			if strings.HasSuffix(mutation, "payload") {
+				requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: txs[0].txid, WTxID: txs[0].wtxid}, ^uint64(0)), 1, txs[0].raw)
+			}
 		}
 	}
 }
