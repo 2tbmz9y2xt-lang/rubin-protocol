@@ -7592,7 +7592,10 @@ func TestCompactCandidateDA(t *testing.T) {
 				requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 1, tx.raw)
 			}
 			if err := f.relay.ReleasePeerQuotaKey("compact"); err != nil { t.Fatal(err) }
-			for _, tx := range txs { requireCompactCandidateRead(t, f.relay.ReadCompactDA(CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}, ^uint64(0)), 2, nil) }
+			for _, tx := range txs {
+				id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+				if state == 2 { requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 1, tx.raw) } else { requireCompactCandidateRead(t, f.relay.ReadCompactDA(id, ^uint64(0)), 2, nil) }
+			}
 		}
 	})
 	t.Run("canonical_binding", func(t *testing.T) {
