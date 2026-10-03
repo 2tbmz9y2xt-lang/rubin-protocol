@@ -16,12 +16,18 @@ run_go_coverage() {
   # added in the devnet RPC track. Unrelated cmd/* tools stay out of scope.
   pkgs="$(
     {
-      go list ./... | grep -v '/cmd/'
+      go list -tags=rubin_mdbx_fixture ./... | grep -v '/cmd/'
       printf '%s\n' ./cmd/rubin-node ./cmd/rubin-txgen
     } | sort -u
   )"
   # shellcheck disable=SC2086
-  go test -coverprofile="$go_cover_out" $pkgs
+  go test -tags=rubin_mdbx_fixture -timeout=30m -coverprofile="$go_cover_out" $pkgs
+  go_filtered="$(mktemp "$go_cover_out.production.XXXXXX")"
+  trap 'rm -f -- "$go_filtered"' EXIT
+  # Exclude only tagged support source; keep production records and counts intact.
+  sed '/^github[.]com\/2tbmz9y2xt-lang\/rubin-protocol\/clients\/go\/internal\/mdbx\/mdbx_fixture_cgo[.]go:/d' \
+    "$go_cover_out" > "$go_filtered"
+  mv -- "$go_filtered" "$go_cover_out"
 }
 
 run_rust_coverage() {
