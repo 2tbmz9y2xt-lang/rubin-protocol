@@ -1427,7 +1427,10 @@ struct PeerGuard {
 impl Drop for PeerGuard {
     fn drop(&mut self) {
         let peer_quota_lock = PeerQuotaLockHandle::acquire(&self.peer_quota_locks, &self.addr);
-        let _peer_quota_guard = peer_quota_lock.lock();
+        let peer_quota_mutex = Arc::clone(&peer_quota_lock.lock);
+        let _peer_quota_guard = peer_quota_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let removed = {
             let _peer_lifecycle_guard = lock_peer_lifecycle(&self.peer_lifecycle);
             self.peer_manager.remove_peer(&self.addr)
@@ -1439,6 +1442,7 @@ impl Drop for PeerGuard {
                 &self.da_relay,
             );
         }
+        drop(peer_quota_lock);
     }
 }
 
@@ -1489,10 +1493,8 @@ impl PeerQuotaLockHandle {
 }
 
 struct PendingPeerRegistration {
-    peer_quota_locks: PeerQuotaLocks,
     peer_manager: Arc<PeerManager>,
     da_relay: Arc<Mutex<DaRelayState>>,
-    addr: String,
     peer_quota_lock: Option<PeerQuotaLockHandle>,
 }
 
@@ -1504,10 +1506,8 @@ impl PendingPeerRegistration {
         addr: &str,
     ) -> Self {
         Self {
-            peer_quota_locks: Arc::clone(peer_quota_locks),
             peer_manager,
             da_relay,
-            addr: addr.to_string(),
             peer_quota_lock: Some(PeerQuotaLockHandle::acquire(peer_quota_locks, addr)),
         }
     }
@@ -1527,14 +1527,16 @@ impl PendingPeerRegistration {
 impl Drop for PendingPeerRegistration {
     fn drop(&mut self) {
         if let Some(peer_quota_lock) = self.peer_quota_lock.take() {
-            drop(peer_quota_lock);
-            let cleanup_lock = PeerQuotaLockHandle::acquire(&self.peer_quota_locks, &self.addr);
-            let _cleanup_guard = cleanup_lock.lock();
+            let peer_quota_mutex = Arc::clone(&peer_quota_lock.lock);
+            let _cleanup_guard = peer_quota_mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             release_da_quota_if_inactive_and_unqueued(
-                &cleanup_lock,
+                &peer_quota_lock,
                 &self.peer_manager,
                 &self.da_relay,
             );
+            drop(peer_quota_lock);
         }
     }
 }
