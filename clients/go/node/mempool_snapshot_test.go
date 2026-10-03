@@ -104,17 +104,22 @@ func TestCompactCandidateStandard(t *testing.T) {
 	t.Run("observed_pair_integrity", func(t *testing.T) {
 		for _, mutate := range []func(*Mempool, CompactCandidateIdentity){
 			func(m *Mempool, id CompactCandidateIdentity) { m.txs[id.TxID] = nil },
+			func(m *Mempool, id CompactCandidateIdentity) { delete(m.txs, id.TxID) },
 			func(m *Mempool, id CompactCandidateIdentity) { m.txs[id.TxID].txid[0] ^= 1 },
 			func(m *Mempool, id CompactCandidateIdentity) { m.txs[id.TxID].size++ },
 			func(m *Mempool, id CompactCandidateIdentity) { delete(m.wtxids, id.WTxID) },
 		} {
 			f := newCompactStandardFixture(t, 1)
 			mutate(f.mp, f.ids[0])
+			before := canonicalMOImageFingerprint(t, f.mp, 0)
 			observed := f.ids[0]
 			observed.WTxID[0] ^= 1
 			requireCompactCandidateRead(t, f.mp.ReadCompactStandard(observed, ^uint64(0)), 3, nil)
 			if ids, ok := f.mp.CompactStandardIdentities(); ok || ids != nil {
 				t.Fatal("inconsistent snapshot returned prefix")
+			}
+			if after := canonicalMOImageFingerprint(t, f.mp, 0); after != before {
+				t.Fatal("inconsistent read mutated owner")
 			}
 		}
 	})
@@ -132,6 +137,7 @@ func TestCompactCandidateStandard(t *testing.T) {
 			t.Fatalf("overlength copied bytes=%d", after.TotalAlloc-before.TotalAlloc)
 		}
 		f.mp.txs[f.ids[0].TxID].raw, f.mp.txs[f.ids[0].TxID].size = slices.Clone(f.raw[0]), len(f.raw[0])
+		requireCompactCandidateRead(t, f.mp.ReadCompactStandard(f.ids[0], 0), 4, nil)
 		requireCompactCandidateRead(t, f.mp.ReadCompactStandard(f.ids[0], uint64(len(f.raw[0]))), 1, f.raw[0])
 	})
 	t.Run("canonical_and_domain", compactStandardCanonical)
@@ -141,32 +147,48 @@ func TestCompactCandidateStandard(t *testing.T) {
 func compactStandardReplacement(t *testing.T) {
 	f := newCompactStandardFixture(t, 1)
 	tx, _, _, _, err := consensus.ParseTx(f.raw[0])
-	if err != nil {
-		t.Fatal(err)
-	}
+	require(t, err == nil, "parse original witness: %v", err)
 	if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
 		t.Fatal(err)
 	}
 	raw := mustMarshalTxForNodeTest(t, tx)
 	_, txid, wtxid, _, err := consensus.ParseTx(raw)
-	if err != nil || txid != f.ids[0].TxID || wtxid == f.ids[0].WTxID {
-		t.Fatal("alternate genuine witness not established")
-	}
+	require(t, err == nil && txid == f.ids[0].TxID && wtxid != f.ids[0].WTxID, "alternate genuine witness not established: %v", err)
 	other, err := NewMempool(f.state, nil, devnetGenesisChainID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require(t, err == nil, "replacement mempool: %v", err)
 	if err := other.AddTx(raw); err != nil {
 		t.Fatal(err)
 	}
 	f.mp.mu.Lock()
 	entry := f.mp.txs[txid]
-	delete(f.mp.wtxids, entry.wtxid)
 	entry.raw, entry.wtxid, entry.size = slices.Clone(raw), wtxid, len(raw)
 	f.mp.wtxids[wtxid] = txid
 	f.mp.mu.Unlock()
+	otherTxID := txid
+	otherTxID[0] ^= 1
+	for _, stale := range []struct {
+		name string
+		txid [32]byte
+	}{
+		{"stale_selected_txid", txid},
+		{"stale_other_txid", otherTxID},
+	} {
+		t.Run(stale.name, func(t *testing.T) {
+			f.mp.wtxids[f.ids[0].WTxID] = stale.txid
+			before := canonicalMOImageFingerprint(t, f.mp, 0)
+			requireCompactCandidateRead(t, f.mp.ReadCompactStandard(f.ids[0], ^uint64(0)), 3, nil)
+			if after := canonicalMOImageFingerprint(t, f.mp, 0); after != before {
+				t.Fatal("stale reverse read mutated owner")
+			}
+		})
+	}
+	delete(f.mp.wtxids, f.ids[0].WTxID)
+	before := canonicalMOImageFingerprint(t, f.mp, 0)
 	requireCompactCandidateRead(t, f.mp.ReadCompactStandard(f.ids[0], ^uint64(0)), 2, nil)
 	requireCompactCandidateRead(t, f.mp.ReadCompactStandard(CompactCandidateIdentity{TxID: txid, WTxID: wtxid}, ^uint64(0)), 1, raw)
+	if after := canonicalMOImageFingerprint(t, f.mp, 0); after != before {
+		t.Fatal("coherent replacement read mutated owner")
+	}
 }
 
 func compactStandardCanonical(t *testing.T) {
@@ -217,7 +239,7 @@ func compactStandardCanonical(t *testing.T) {
 		requireCompactCandidateRead(t, f.mp.ReadCompactStandard(id, ^uint64(0)), 3, nil)
 		requireCompactCandidateRead(t, f.mp.ReadCompactStandard(f.ids[1], ^uint64(0)), 1, f.raw[1])
 	}
-	for _, mp := range []*Mempool{nil, {}, {txs: map[[32]byte]*mempoolEntry{}}} {
+	for _, mp := range []*Mempool{nil, {}, {txs: map[[32]byte]*mempoolEntry{}}, {wtxids: map[[32]byte][32]byte{}}} {
 		if ids, ok := mp.CompactStandardIdentities(); ok || ids != nil {
 			t.Fatal("unavailable snapshot accepted")
 		}

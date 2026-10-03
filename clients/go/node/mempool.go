@@ -139,6 +139,9 @@ func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, m
 		return CompactCandidateRead{Disposition: CompactCandidateFault}
 	}
 	if entry.wtxid != identity.WTxID {
+		if _, found := m.wtxids[identity.WTxID]; found {
+			return CompactCandidateRead{Disposition: CompactCandidateFault}
+		}
 		return CompactCandidateRead{Disposition: CompactCandidateAbsent}
 	}
 	if uint64(len(entry.raw)) > maxBytes {
