@@ -34,26 +34,26 @@ type compactReconstructionResult struct {
 }
 
 var (
-	errCompactCandidateInput = errors.New("invalid compact candidate input")
-	errCompactCandidateFault = errors.New("compact candidate local fault")
+	errCompactCandidateInput    = errors.New("invalid compact candidate input")
+	errCompactCandidateFault    = errors.New("compact candidate local fault")
 	errCompactCandidateResource = errors.New("compact candidate resource bound")
 )
 
 type compactCandidateOutcome struct {
-	Result compactReconstructionResult
-	D4Complete bool
+	Result                 compactReconstructionResult
+	D4Complete             bool
 	DistinctCollisionCount uint64
 }
 
 type compactCandidateObservation struct {
 	Identity node.CompactCandidateIdentity
-	ShortID compactShortID
-	Sources uint8
+	ShortID  compactShortID
+	Sources  uint8
 }
 
 type compactCandidateCatalog struct {
 	Observed []compactCandidateObservation
-	Index map[compactShortID]int
+	Index    map[compactShortID]int
 }
 
 // reconstructCompactCandidates is dormant: qualified ingress and publication
@@ -166,7 +166,10 @@ func compactCandidateOwners(standard TxPool, da *node.DARelayState, nonce1, nonc
 		return nil, compactCandidateCatalog{}, errCompactCandidateFault
 	}
 	observed := make([]compactCandidateObservation, 0, len(daIDs)+len(standardIDs))
-	for _, source := range []struct { mask uint8; identities []node.CompactCandidateIdentity }{{1, daIDs}, {2, standardIDs}} {
+	for _, source := range []struct {
+		mask       uint8
+		identities []node.CompactCandidateIdentity
+	}{{1, daIDs}, {2, standardIDs}} {
 		for _, identity := range source.identities {
 			observed = append(observed, compactCandidateObservation{Identity: identity, ShortID: compactShortID(consensus.CompactShortID(identity.WTxID, nonce1, nonce2)), Sources: source.mask})
 		}

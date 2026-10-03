@@ -383,7 +383,10 @@ func (s *DARelayState) CompactDAIdentities(expected *Mempool) ([]CompactCandidat
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	type binding struct { pool *Mempool; setsAvailable, locatorsAvailable bool }
+	type binding struct {
+		pool                             *Mempool
+		setsAvailable, locatorsAvailable bool
+	}
 	if expected == nil || (binding{expected, s.sets != nil, s.locators != nil}) != (binding{s.mempool, true, true}) {
 		return nil, false
 	}
@@ -426,15 +429,15 @@ func compactDARecordValid(record daRelaySetRecord, daID [32]byte) bool {
 		return false
 	}
 	observation := daAdmissionObservation{
-		kind: daAdmissionObservationLocated,
+		kind:           daAdmissionObservationLocated,
 		indexedLocator: daRelayLocator{daID: daID}, recordDAID: record.daID,
 		recordState: record.state, recordRevision: record.revision,
 		recordReceivedTime: record.receivedTime, recordTTLBlocksLeft: record.ttlBlocksRemaining,
 		recordPayloadBytes: record.payloadBytes, recordWireBytes: record.wireBytes,
 		recordHasReplaceableChunks: record.replaceableChunks != nil,
-		stagedCommitPresent: record.commit.member != nil, stagedCommitDAID: record.commit.daID,
+		stagedCommitPresent:        record.commit.member != nil, stagedCommitDAID: record.commit.daID,
 		stagedCommitPayloadCommitment: record.commit.payloadCommitment,
-		stagedCommitChunkCount: record.commit.chunkCount, stagedCommitWireBytes: record.commit.wireBytes,
+		stagedCommitChunkCount:        record.commit.chunkCount, stagedCommitWireBytes: record.commit.wireBytes,
 		stagedCommitPeerQuotaKey: record.commit.peerQuotaKey, stagedCommitRaw: len(record.commit.txBytes) != 0,
 	}
 	observation.candidate.member.locator = observation.indexedLocator
@@ -469,11 +472,11 @@ func (s *DARelayState) compactDAChunkValid(record daRelaySetRecord, index uint16
 		return false
 	}
 	type placement struct {
-		daID [32]byte
-		index uint16
-		wire uint64
-		quota string
-		hashChecked bool
+		daID                       [32]byte
+		index                      uint16
+		wire                       uint64
+		quota                      string
+		hashChecked                bool
 		payloadNil, payloadPresent bool
 	}
 	if (placement{chunk.daID, chunk.chunkIndex, chunk.wireBytes, chunk.peerQuotaKey, chunk.hashChecked, chunk.payload == nil, len(chunk.payload) != 0}) != (placement{daID: record.daID, index: index, payloadNil: record.state == daRelayStateCompleteSet, payloadPresent: record.state != daRelayStateCompleteSet}) {
@@ -560,13 +563,19 @@ func compactDARoleValid(target daRelayAdmissionCandidate, tx *consensus.Tx) bool
 			return false
 		}
 		commitment, err := daAdmissionPayloadCommitment(tx)
-		type commitRole struct { daID, commitment [32]byte; count uint16 }
+		type commitRole struct {
+			daID, commitment [32]byte
+			count            uint16
+		}
 		return err == nil && (commitRole{tx.DaCommitCore.DaID, commitment, tx.DaCommitCore.ChunkCount}) == (commitRole{locator.daID, target.payloadCommitment, target.chunkCount})
 	case daRelayLocatorChunk:
 		if tx.TxKind != 2 || tx.DaChunkCore == nil {
 			return false
 		}
-		type chunkRole struct { daID, hash [32]byte; index uint16 }
+		type chunkRole struct {
+			daID, hash [32]byte
+			index      uint16
+		}
 		return (chunkRole{tx.DaChunkCore.DaID, tx.DaChunkCore.ChunkHash, tx.DaChunkCore.ChunkIndex}) == (chunkRole{locator.daID, target.chunkHash, locator.chunkIndex})
 	default:
 		return false
