@@ -1080,6 +1080,436 @@ func TestReaderPrefixPageMalformedDisposition(t *testing.T) {
 	})
 }
 
+// SIDE images are checked on the same database after real Close/Open; Open is
+// used only for raw inspection and never restores verified cleanup authority.
+func sideRawImages(t *testing.T, s *Store, path string, rows []Mutation) {
+	t.Helper()
+	cfg := s.config
+	if s.state == storeOPEN {
+		mustEnvironment(t, s.Close())
+	}
+	reopened, err := Open(path, cfg)
+	mustEnvironment(t, err)
+	defer func() { mustEnvironment(t, reopened.Close()) }()
+	for _, row := range rows {
+		equal, readErr := FixtureRawRowEqual(reopened, row.DBI.Rank, row.Key, row.Literal)
+		if readErr != nil || !equal {
+			t.Fatalf("SIDE raw image %d/%x changed: %v", row.DBI.Rank, row.Key, readErr)
+		}
+	}
+}
+
+func sideAuthorityRow(a StorageAuthorityV1) Mutation {
+	var value []byte
+	encodeAuthority(&value, a)
+	return Mutation{DBI: readDBIsLiteral()[0], Key: []byte{2}, Literal: value}
+}
+
+func sideNativeRejections(t *testing.T) {
+	for _, name := range []string{"R1a/version", "R1a/phase", "R1a/lifecycle", "R1a/pending", "H1", "H2", "H3/active", "H3/selected", "H4/two-SIDE", "H4/order", "R18c/BLOCKS", "R18c/UNDO", "R18c/carried-BLOCKS", "R18c/carried-UNDO"} {
+		t.Run(name, func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			_, _, rows := sideRows(2, 5)
+			s, path := sideStore(t, a, rows...)
+			bad := sideAuthority(5, 5)
+			switch name {
+			case "R1a/version":
+				bad.Version = 2
+			case "R1a/phase":
+				bad.Phase = 5
+			case "R1a/lifecycle":
+				bad.Lifecycle = 3
+			case "R1a/pending":
+				pending := StorageProfileV1(3)
+				bad.Lifecycle, bad.PendingTargetProfile = 2, &pending
+			case "H1":
+				bad.Cleanup.Spans[0].GenerationID = 1
+			case "H2":
+				bad.SelectedSide = modelSide(2, 0, 5, 5, 585)
+			case "H3/active":
+				bad.Cleanup.Spans = []CleanupSpanV1{{Kind: 1, GenerationID: 1}}
+			case "H3/selected":
+				bad.Cleanup.Spans = []CleanupSpanV1{{Kind: 1, GenerationID: 2}}
+				bad.SelectedSide = modelSide(2, 0, 5, 5, 585)
+			case "H4/two-SIDE":
+				bad.Cleanup.Spans = append(bad.Cleanup.Spans, bad.Cleanup.Spans[0])
+			case "H4/order":
+				bad.NextGenerationID = 4
+				bad.Cleanup.Spans = append(bad.Cleanup.Spans, CleanupSpanV1{Kind: 1, GenerationID: 3})
+			case "R18c/BLOCKS", "R18c/UNDO":
+				bad.B, bad.U = 10, 13690
+				span := CleanupSpanV1{Kind: 2, GenerationID: 1, LastHeight: 8}
+				if name == "R18c/UNDO" {
+					span.Kind, span.LastHeight = 3, 13688
+				}
+				bad.Cleanup.Spans = append([]CleanupSpanV1{span}, bad.Cleanup.Spans...)
+			case "R18c/carried-BLOCKS", "R18c/carried-UNDO":
+				bad = modelOrdinary(2, 1, 2, 15129, 1, 10, 13690)
+				span := CleanupSpanV1{Kind: 2, GenerationID: 1, LastHeight: 8}
+				if name == "R18c/carried-UNDO" {
+					span.Kind, span.LastHeight = 3, 13688
+				}
+				bad.Ordinary.CarriedCleanup = &CleanupV1{Spans: []CleanupSpanV1{span}}
+			}
+			authority := sideAuthorityRow(bad)
+			mustEnvironment(t, FixtureSeedRawRow(s, 0, []byte{2}, authority.Literal))
+			owner := bootstrapOwner(t)
+			var truth CommitTruth
+			var stage UpdateStage
+			var result error
+			evidence, err := FixtureSelectedDamage(s, owner, SelectedDamageProbeOnly, 0, nil, func() { truth, stage, result = s.CleanupSideV1(owner) })
+			if truth != CommitTruth(1) || stage != 1 {
+				t.Fatalf("SIDE authority tuple: %s/%d/%v", truth, stage, result)
+			}
+			requireEnvironmentError(t, result, EngineClass("Integrity"), operationGet, -30793, "invalid storage authority")
+			mustEnvironment(t, err)
+			if evidence.BeginWrite != 0 || evidence.OldGets != ([8]uint64{1}) {
+				t.Fatalf("SIDE authority read before routing: %+v", evidence)
+			}
+			prunedReleased(t, owner)
+			sideRawImages(t, s, path, append(rows, authority))
+		})
+	}
+}
+
+func sideNativeIdentity(t *testing.T) {
+	for _, name := range []string{"R18a/absent", "R18a/width", "R18a/work", "R10", "R18b/absent", "R18b/width", "R18b/work"} {
+		t.Run(name, func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			hash, _, rows := sideRows(2, 5)
+			var target Mutation
+			diagnostic := "selected side link is absent"
+			if strings.HasPrefix(name, "R18b/") {
+				a, rows = sideSelected(t, 2, 1440)
+				x, _, _ := sideRows(2, 1)
+				rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
+				target = rows[5] // after the early x match at height 2
+			} else {
+				target = rows[1]
+			}
+			if name == "R10" {
+				a.B, a.U = 10, 13690
+				key, _ := HeightKey(1, 11)
+				target = Mutation{DBI: readDBIsLiteral()[2], Key: key, Literal: make([]byte, 103)}
+				rows = append(rows, Mutation{DBI: target.DBI, Key: key, AfterKind: 2, Literal: ChainValue(hash, [32]byte{}, [40]byte{39: 1})}, canonicalOwnerLiteral(1, 11, hash))
+				diagnostic = "stored value width outside SchemaV2 bound"
+			} else if strings.HasSuffix(name, "/width") {
+				target.Literal = make([]byte, 103)
+				diagnostic = "stored value width outside SchemaV2 bound"
+			} else if strings.HasSuffix(name, "/work") {
+				target.Literal = bytes.Clone(target.Literal)
+				clear(target.Literal[64:104])
+				diagnostic = "selected side link identity is undecodable"
+			} else {
+				target.Literal = nil
+			}
+			s, path := sideStore(t, a, rows...)
+			if target.Literal == nil {
+				mustEnvironment(t, fixtureDeletePrefixRow(s, target.DBI, target.Key))
+			} else {
+				mustEnvironment(t, FixtureSeedRawRow(s, target.DBI.Rank, target.Key, target.Literal))
+			}
+			for i := range rows {
+				if rows[i].DBI == target.DBI && bytes.Equal(rows[i].Key, target.Key) {
+					rows[i].Literal = target.Literal
+				}
+			}
+			owner := bootstrapOwner(t)
+			truth, stage, err := s.CleanupSideV1(owner)
+			if truth != CommitTruth(1) || stage != 1 {
+				t.Fatalf("SIDE identity tuple: %s/%d/%v", truth, stage, err)
+			}
+			requireEnvironmentError(t, err, EngineClass("Integrity"), operationGet, -30793, diagnostic)
+			prunedReleased(t, owner)
+			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		})
+	}
+}
+
+func sideNativeBodies(t *testing.T) {
+	for _, size := range []int{0, 1, 115, 116, 68000126} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			hash, _, rows := sideRows(2, 5)
+			s, path := sideStore(t, a, rows...)
+			mustEnvironment(t, FixtureSeedRawRow(s, 4, hash[:], make([]byte, size)))
+			sideRun(t, s, CommitTruth(2))
+			a.Cleanup, a.Phase = nil, 1
+			rows[0].Literal, rows[1].Literal = nil, nil
+			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		})
+	}
+	t.Run("canonical", func(t *testing.T) {
+		for _, size := range []int{-1, 1, 116, 68000126} {
+			t.Run(fmt.Sprint(size), func(t *testing.T) {
+				a := sideAuthority(5, 5)
+				a.B, a.U = 10, 13690
+				hash, _, rows := sideRows(2, 5)
+				key, _ := HeightKey(1, 11)
+				rows = append(rows, Mutation{DBI: readDBIsLiteral()[2], Key: key, AfterKind: 2, Literal: ChainValue(hash, [32]byte{}, [40]byte{39: 1})}, canonicalOwnerLiteral(1, 11, hash))
+				s, path := sideStore(t, a, rows...)
+				rows[0].Literal = nil
+				if size < 0 {
+					mustEnvironment(t, fixtureDeletePrefixRow(s, readDBIsLiteral()[4], hash[:]))
+				} else {
+					rows[0].Literal = make([]byte, size)
+					mustEnvironment(t, FixtureSeedRawRow(s, 4, hash[:], rows[0].Literal))
+				}
+				owner := bootstrapOwner(t)
+				truth, stage, err := s.CleanupSideV1(owner)
+				if truth != CommitTruth(1) || stage != 1 {
+					t.Fatalf("canonical body tuple: %s/%d/%v", truth, stage, err)
+				}
+				requireEnvironmentError(t, err, EngineClass("Integrity"), operationGet, -30793, "invalid cleanup owed artifact")
+				prunedReleased(t, owner)
+				sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+			})
+		}
+	})
+}
+
+func sideNativeFaults(t *testing.T) {
+	for _, row := range []struct {
+		name      string
+		scenario  SelectedDamageScenario
+		truth     CommitTruth
+		stage     UpdateStage
+		op        engineOperation
+		class     EngineClass
+		code      int
+		secondary bool
+	}{
+		{"stage1-begin", 3, 1, 1, "update", "IO", 5, false},
+		{"stage1-reader", 4, 1, 1, "get", "IO", 5, false},
+		{"R18a-read", 4, 1, 1, "get", "IO", 5, false},
+		{"R18b-read", 4, 1, 1, "get", "IO", 5, false},
+		{"canonical-body-IO", 4, 1, 1, "get", "IO", 5, false},
+		{"reader-cleanup-H10", 5, 1, 1, "get", "IO", 5, true},
+		{"stage2", 6, 1, 2, "update", "IO", 5, false},
+		{"crossed-OLD", 7, 1, 3, "update", "Capacity", 28, false},
+		{"crossed-NEW", 8, 2, 3, "update", "Capacity", 28, false},
+		{"crossed-unreadable", 9, 3, 3, "update", "Capacity", 28, true},
+		{"R16a", 10, 3, 3, "update", "Capacity", 28, false},
+		{"R15a", 11, 1, 1, "abort", "IO", 5, false},
+		{"stage2-put", 12, 1, 2, "update", "IO", 5, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			hash, _, rows := sideRows(2, 5)
+			rank, key := uint8(4), hash[:]
+			if row.name == "R18a-read" {
+				rank, key = 6, rows[1].Key
+			}
+			if row.name == "R18b-read" {
+				a, rows = sideSelected(t, 2, 1440)
+				x, _, _ := sideRows(2, 1)
+				rows[3].Literal = ChainValue(x, [32]byte{}, [40]byte{39: 1})
+				rank, key = 6, rows[5].Key
+			}
+			if row.name == "canonical-body-IO" {
+				a.B, a.U = 10, 13690
+				forward, _ := HeightKey(1, 11)
+				rows = append(rows, Mutation{DBI: readDBIsLiteral()[2], Key: forward, AfterKind: 2, Literal: ChainValue(hash, [32]byte{}, [40]byte{39: 1})}, canonicalOwnerLiteral(1, 11, hash))
+			}
+			if row.scenario == 9 || row.scenario == 10 || row.scenario == 12 {
+				rank, key = 0, []byte{2}
+			}
+			if row.name == "R15a" {
+				a = modelBase(1, 0, 0)
+			}
+			s, path := sideStore(t, a, rows...)
+			owner := bootstrapOwner(t)
+			var truth CommitTruth
+			var stage UpdateStage
+			var result error
+			evidence, fixtureErr := FixtureSelectedDamage(s, owner, row.scenario, rank, key, func() { truth, stage, result = s.CleanupSideV1(owner) })
+			if truth != row.truth || stage != row.stage || result == nil {
+				t.Fatalf("SIDE native tuple: %s/%d/%v", truth, stage, result)
+			}
+			sideNativeCause(t, result, row.stage, row.truth, row.op, row.class, row.code, row.secondary, row.name == "R15a")
+			mustEnvironment(t, fixtureErr)
+			prunedReleased(t, owner)
+			again, nextStage, cached := s.CleanupSideV1(owner)
+			if again != truth || nextStage != 1 || !sameError(cached, result) {
+				t.Fatalf("SIDE native cached tuple: %s/%d/%v", again, nextStage, cached)
+			}
+			prunedReleased(t, owner)
+			if row.scenario != 3 && evidence.Probes == 0 || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
+				t.Fatalf("SIDE grant ended before native completion: %+v", evidence)
+			}
+			if row.truth == 2 || row.scenario == 9 || row.scenario == 10 {
+				a.Cleanup, a.Phase = nil, 1
+				rows[0].Literal, rows[1].Literal = nil, nil
+			}
+			authority := sideAuthorityRow(a)
+			if row.scenario == 10 {
+				authority.Literal = []byte{0x7f}
+			}
+			sideRawImages(t, s, path, append(rows, authority))
+		})
+	}
+}
+
+func sideNativeCause(t *testing.T, err error, stage UpdateStage, truth CommitTruth, op engineOperation, class EngineClass, code int, secondary, noWork bool) {
+	t.Helper()
+	primary := err
+	var cleanup error
+	if stage == 3 {
+		var commit *CommitError
+		if reflect.TypeOf(err) != reflect.TypeFor[*CommitError]() || !errors.As(err, &commit) || commit.Truth != truth {
+			t.Fatalf("SIDE direct crossed result: %v", err)
+		}
+		primary, cleanup = commit.Cause, commit.ReadbackCause
+	} else if secondary || noWork {
+		joined, ok := err.(interface{ Unwrap() []error })
+		if !ok || len(joined.Unwrap()) != 2 {
+			t.Fatalf("SIDE ordered causes: %v", err)
+		}
+		primary, cleanup = joined.Unwrap()[0], joined.Unwrap()[1]
+	}
+	if noWork {
+		if primary.Error() != "cleanup SIDE has no selected work" {
+			t.Fatalf("SIDE no-work cause lost: %v", err)
+		}
+		primary, cleanup = cleanup, nil
+	}
+	requireEngineError(t, primary, class, op, code)
+	if secondary {
+		cleanupOp := operationAbort
+		if stage == 3 {
+			cleanupOp = operationUpdate
+		}
+		requireEngineError(t, cleanup, EngineClass("IO"), cleanupOp, 5)
+	} else if cleanup != nil {
+		t.Fatalf("unexpected SIDE secondary: %v", cleanup)
+	}
+}
+
+func TestCleanupSideV1Native(t *testing.T) {
+	t.Run("authority", sideNativeRejections)
+	t.Run("R18b", sideNativeIdentity)
+	t.Run("P09-A8", sideNativeBodies)
+	t.Run("X2", sideNativeFaults)
+	t.Run("X2-invalid-stage", func(t *testing.T) {
+		a := sideAuthority(5, 5)
+		_, _, rows := sideRows(2, 5)
+		s, path := sideStore(t, a, rows...)
+		cleanup := errors.New("cleanup")
+		truth, stage, err := s.applyUpdateOutcome(updateNativeOutcome{truth: CommitTruth(1)}, nil, cleanup, false)
+		joined, ok := err.(interface{ Unwrap() []error })
+		if truth != CommitTruth(1) || stage != 0 || !ok || len(joined.Unwrap()) != 2 || !sameError(joined.Unwrap()[1], cleanup) {
+			t.Fatalf("invalid native stage tuple: %s/%d/%v", truth, stage, err)
+		}
+		requireEnvironmentError(t, joined.Unwrap()[0], EngineClass("LocalInvariant"), operationUpdate, -30779, "invalid update native outcome shape")
+		again, nextStage, got := s.CleanupSideV1(bootstrapOwner(t))
+		if again != truth || nextStage != 1 || !sameError(got, err) {
+			t.Fatalf("SIDE invalid-stage cached tuple: %s/%d/%v", again, nextStage, got)
+		}
+		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+	})
+	t.Run("H10", func(t *testing.T) {
+		a := sideAuthority(5, 5)
+		hash, _, rows := sideRows(2, 5)
+		s, path := sideStore(t, a, rows...)
+		owner := bootstrapOwner(t)
+		var recorded, result error
+		var truth CommitTruth
+		var stage UpdateStage
+		_, err := FixtureSelectedDamage(s, owner, SelectedDamageGetEIO, 4, hash[:], func() {
+			mustEnvironment(t, owner.WithReservation(154611151, func() error {
+				truth, stage, result = s.Update(func(r *Reader) (Batch, error) {
+					_, recorded = r.GetOptionalSide(readDBIsLiteral()[4], hash[:])
+					return Batch{Mutations: []Mutation{{DBI: readDBIsLiteral()[0], Key: []byte{2}, BeforePresent: true, AfterKind: 1}}}, nil
+				})
+				return nil
+			}))
+		})
+		if truth != CommitTruth(1) || stage != 1 || !sameError(result, recorded) {
+			t.Fatalf("SIDE ignored Reader failure replaced: %s/%d/%v/%v", truth, stage, result, recorded)
+		}
+		requireEngineError(t, result, EngineClass("IO"), operationGet, 5)
+		mustEnvironment(t, err)
+		again, nextStage, cached := s.CleanupSideV1(owner)
+		if again != truth || nextStage != stage || !sameError(cached, recorded) {
+			t.Fatalf("SIDE first read cause lost: %s/%d/%v", again, nextStage, cached)
+		}
+		prunedReleased(t, owner)
+		sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+	})
+	t.Run("X3", func(t *testing.T) {
+		for _, a := range append([]authorityCase{{"SIDE", sideAuthority(5, 5)}}, sideRouteCases()...) {
+			t.Run(a.name, func(t *testing.T) {
+				_, _, rows := sideRows(2, 5)
+				s, _ := sideStore(t, a.a, rows...)
+				owner := bootstrapOwner(t)
+				var truth CommitTruth
+				var stage UpdateStage
+				var result error
+				evidence, err := FixtureSelectedDamage(s, owner, SelectedDamageProbeOnly, 0, nil, func() { truth, stage, result = s.CleanupSideV1(owner) })
+				want := CommitTruth(1)
+				if a.name == "SIDE" {
+					want = 2
+				}
+				sideTuple(t, truth, stage, result, want)
+				mustEnvironment(t, err)
+				if evidence.Probes == 0 || evidence.ProbeDenied != evidence.Probes || evidence.ProbeRan != 0 {
+					t.Fatalf("SIDE uncharged native boundary: %+v", evidence)
+				}
+				prunedReleased(t, owner)
+			})
+		}
+		t.Run("capacity", func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			_, _, rows := sideRows(2, 5)
+			s, _ := sideStore(t, a, rows...)
+			owner := bootstrapOwner(t)
+			mustEnvironment(t, owner.WithReservation(1, func() error {
+				var truth CommitTruth
+				var stage UpdateStage
+				var result error
+				evidence, err := FixtureSelectedDamage(s, owner, SelectedDamageProbeOnly, 0, nil, func() { truth, stage, result = s.CleanupSideV1(owner) })
+				if truth != CommitTruth(1) || stage != 1 || !sameError(result, errOperationReservationCapacity) {
+					t.Fatalf("SIDE capacity native tuple: %s/%d/%v", truth, stage, result)
+				}
+				mustEnvironment(t, err)
+				if evidence != (SelectedDamageEvidence{}) || owner.shared.live != 1 {
+					t.Fatalf("SIDE capacity opened native Reader or changed charge: %+v", evidence)
+				}
+				return nil
+			}))
+			prunedReleased(t, owner)
+			cleanupWantAuthority(t, s, a)
+			sideImage(t, s, 2, 5, true, true)
+		})
+		t.Run("panic", func(t *testing.T) {
+			a := sideAuthority(5, 5)
+			_, _, rows := sideRows(2, 5)
+			s, path := sideStore(t, a, rows...)
+			owner := bootstrapOwner(t)
+			marker := &struct{}{}
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				_, _ = FixtureSelectedDamage(s, owner, SelectedDamageProbeOnly, 0, nil, func() {
+					_ = owner.WithReservation(154611151, func() error {
+						_, _, _ = s.Update(func(r *Reader) (Batch, error) {
+							_, err := cleanupSideBatch(r, errors.New("unexpected no work"))
+							mustEnvironment(t, err)
+							panic(marker)
+						})
+						return nil
+					})
+				})
+			}()
+			if recovered != marker || owner.shared.live != 0 {
+				t.Fatal("SIDE panic identity or synchronous release changed")
+			}
+			prunedReleased(t, owner)
+			sideRawImages(t, s, path, append(rows, sideAuthorityRow(a)))
+		})
+	})
+}
+
 func TestCleanupBURawEvidence(t *testing.T) {
 	for _, row := range []struct {
 		name, diagnostic string
