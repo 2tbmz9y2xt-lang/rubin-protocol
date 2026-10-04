@@ -804,6 +804,7 @@ func generationUndoSemantics(t *testing.T) {
 				spent = 2
 			}
 			rows[4].Literal = mdbx.UndoManifestValue(height, [16]byte{}, txs, spent)
+			baseCount := len(rows)
 			value, _ := (mdbx.UTXOValue{Value: 1}).Encode()
 			entry := mdbx.UndoEntryKey(hash, [32]byte{1}, txIndex, 0, 0)
 			rows = append(rows, generationRow(5, entry, value))
@@ -814,7 +815,10 @@ func generationUndoSemantics(t *testing.T) {
 				}
 				rows = append(rows, generationRow(5, mdbx.UndoEntryKey(hash, other, 1, input, 0), value))
 			}
-			w := generationNew(t, a, rows...)
+			w := generationNew(t, a, rows[:baseCount]...)
+			for _, row := range rows[baseCount:] {
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, row.Key, row.Literal) == nil, "semantic undo entry seed")
+			}
 			if name == "missing-manifest" {
 				logicalMDBXSeed(t, w.s, mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: rows[4].Key, BeforePresent: true, AfterKind: 1})
 				rows[4].Literal = nil

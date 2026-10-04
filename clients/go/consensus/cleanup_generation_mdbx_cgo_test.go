@@ -194,6 +194,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 		_, obsolete := generationProjection(2, 5, 55)
 		_, active := generationProjection(1, 5, 66)
 		active = append(active, generationData(1, 3)...)
+		active[len(active)-1].BeforePresent = true // Bootstrap already created the active counter.
 		obsolete = append(obsolete, generationData(2, 4)...)
 		w := generationNew(t, a, append(slices.Clone(obsolete), active...)...)
 		for _, class := range []uint8{4, 1, 3} {
@@ -241,7 +242,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 			var tx [32]byte
 			binary.BigEndian.PutUint32(tx[28:], 414634)
 			extra := generationRow(5, mdbx.UndoEntryKey(hash, tx, 405, 938, 0), family[1].Literal)
-			logicalMDBXSeed(t, w.s, extra)
+			generationSeedUndo(t, w, []mdbx.Mutation{extra})
 			out := w.run(2, 1)
 			sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", 1, 1, "bounded raw over-count")
 			logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity): cleanup undo family exceeds native row bound", "raw family capacity refusal: %v", out.Err)
@@ -378,9 +379,28 @@ func generationFamily(t *testing.T, kind string) (*generationWorld, [32]byte, []
 		family = append(family, generationRow(5, mdbx.UndoEntryKey(hash, tx, 1+i/1024, i%1024, 0), value))
 	}
 	for start := 1; start < len(family); start += 4096 {
-		logicalMDBXSeed(t, w.s, slices.Clone(family[start:min(start+4096, len(family))])...)
+		generationSeedUndo(t, w, family[start:min(start+4096, len(family))])
 	}
 	return w, hash, family
+}
+
+// Entry literals remain the independent expected image; only the write plan
+// references temporary generation-4 sources, deleted in the same admitted batch.
+func generationSeedUndo(t *testing.T, w *generationWorld, entries []mdbx.Mutation) {
+	t.Helper()
+	sources := make([]mdbx.Mutation, 0, len(entries))
+	writes := make([]mdbx.Mutation, 0, 2*len(entries))
+	for _, entry := range entries {
+		key, err := mdbx.UTXOKey(4, [32]byte(entry.Key[41:73]), binary.BigEndian.Uint32(entry.Key[73:]))
+		logicalMDBXAssert(t, err == nil, "temporary undo source key: %v", err)
+		sources = append(sources, generationRow(1, key, entry.Literal))
+		writes = append(writes,
+			mdbx.Mutation{DBI: logicalMDBXDBIs[1], Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent},
+			mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: entry.Key, AfterKind: mdbx.AfterOldValueRef, RefDBI: logicalMDBXDBIs[1], RefKey: key})
+	}
+	logicalMDBXSeed(t, w.s, sources...)
+	logicalMDBXSeed(t, w.s, writes...)
+	w.image(w.a, generationGone(sources)...)
 }
 
 // Eligible selected membership keeps by hash at j=6, independently of h=5.
