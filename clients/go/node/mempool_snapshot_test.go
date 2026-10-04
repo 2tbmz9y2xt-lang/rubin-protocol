@@ -305,12 +305,8 @@ func compactStandardCanonical(t *testing.T) {
 		name string
 		bad  func([]byte) []byte
 	}{
-		{"nil", func([]byte) []byte { return nil }},
-		{"empty", func([]byte) []byte { return []byte{} }},
-		{"trailing", func(raw []byte) []byte { return append(raw, 0) }},
-		{"truncated", func(raw []byte) []byte { return raw[:len(raw)-1] }},
-		{"noncanonical", func(raw []byte) []byte { raw[0] ^= 0xff; return raw }},
-		{"nonminimal", func(raw []byte) []byte { return append(append(slices.Clone(raw[:13]), 0xfd, 1, 0), raw[14:]...) }},
+		{"nil", func([]byte) []byte { return nil }}, {"empty", func([]byte) []byte { return []byte{} }}, {"trailing", func(raw []byte) []byte { return append(raw, 0) }},
+		{"truncated", func(raw []byte) []byte { return raw[:len(raw)-1] }}, {"noncanonical", func(raw []byte) []byte { raw[0] ^= 0xff; return raw }}, {"nonminimal", func(raw []byte) []byte { return append(append(slices.Clone(raw[:13]), 0xfd, 1, 0), raw[14:]...) }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f := newCompactStandardFixture(t, 2)

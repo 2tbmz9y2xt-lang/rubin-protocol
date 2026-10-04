@@ -765,14 +765,9 @@ func compactCandidateObserverCases(t *testing.T) {
 		read node.CompactCandidateRead
 		want error
 	}{
-		{"ABSENT_nil", absent, nil}, {"PRESENT_fit", present, nil},
-		{"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault},
-		{"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
+		{"ABSENT_nil", absent, nil}, {"PRESENT_fit", present, nil}, {"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault}, {"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
 		{"PRESENT_over", node.CompactCandidateRead{Disposition: 1, Raw: append(slices.Clone(raw), 0)}, errCompactCandidateResource},
-		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource},
-		{"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault},
-		{"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault},
-		{"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
+		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource}, {"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault}, {"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault}, {"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
 	} {
 		for _, prior := range [][]byte{nil, slices.Clone(raw)} {
 			t.Run(fmt.Sprintf("%s/prior%v", row.name, prior != nil), func(t *testing.T) {
@@ -802,12 +797,8 @@ func compactCandidateObserverCases(t *testing.T) {
 		want          error
 		filled        bool
 	}{
-		{"A/A", absent, absent, nil, false}, {"A/P", absent, present, nil, true},
-		{"P/A", present, absent, nil, true}, {"agreeing_P/P", present, node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}, nil, true},
-		{"differing_P/P", present, different, errCompactCandidateFault, false},
-		{"P/F", present, fault, errCompactCandidateFault, false}, {"P/O", present, over, errCompactCandidateResource, false},
-		{"A/F", absent, fault, errCompactCandidateFault, false}, {"A/O", absent, over, errCompactCandidateResource, false},
-		{"F/O", fault, over, errCompactCandidateFault, false}, {"O/F", over, fault, errCompactCandidateResource, false},
+		{"A/A", absent, absent, nil, false}, {"A/P", absent, present, nil, true}, {"P/A", present, absent, nil, true}, {"agreeing_P/P", present, node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}, nil, true}, {"differing_P/P", present, different, errCompactCandidateFault, false},
+		{"P/F", present, fault, errCompactCandidateFault, false}, {"P/O", present, over, errCompactCandidateResource, false}, {"A/F", absent, fault, errCompactCandidateFault, false}, {"A/O", absent, over, errCompactCandidateResource, false}, {"F/O", fault, over, errCompactCandidateFault, false}, {"O/F", over, fault, errCompactCandidateResource, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var selected []byte
