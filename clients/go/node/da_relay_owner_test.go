@@ -327,10 +327,10 @@ func TestDALexicalIdentifierRows(t *testing.T) {
 }
 
 func TestDAPreparedCommitStructure(t *testing.T) {
-	// The complete owner helper closure is unchanged at the bound base. This
-	// includes indirect callees; map bucket growth remains allowed by Reserve.
+	// Pin the exact reviewed pending-outpoint owner file with its typed resident
+	// lookup. Reserve still permits map bucket growth.
 	source, err := os.ReadFile("pending_outpoint_owner.go")
-	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "8ca97be4877cd200f9041b04e0a2333e646bfd8ecea7cf5a3b3a92bd8c951103" {
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != "ad8897ab63f26e04245e028f659b6a49ad4e2c2464da932049b06b9bc4291fef" {
 		t.Fatal("owner phase rebuilds prepared scratch: owner closure changed")
 	}
 	source, err = os.ReadFile("da_admission.go")
