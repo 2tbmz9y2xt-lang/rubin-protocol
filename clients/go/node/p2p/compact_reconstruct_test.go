@@ -150,7 +150,7 @@ func TestCompactCandidateReconstruct(t *testing.T) {
 			prefill := minimalBlockTxnTestTxBytes(99)
 			block := cmpctBlockPayload{Nonce1: 4, Nonce2: 5, Prefilled: []prefilledTxn{{Index: 0, Tx: prefill}}, ShortIDs: []compactShortID{compactShortIDForTx(t, f.raw[1000], 4, 5)}}
 			got, err := reconstructCompactCandidates(block, 1, 72_000_000, f.pool, f.da)
-			if err != nil || !reflect.DeepEqual(got.Result.Transactions, [][]byte{prefill, f.raw[1000]}) || got.Result.PartialTransactions != nil || got.Result.MissingIndexes != nil || got.Result.MissingShortIDs != nil {
+			if err != nil || !reflect.DeepEqual(got.Result.Transactions, [][]byte{prefill, f.raw[1000]}) || got.Result.PartialTransactions != nil || got.Result.MissingIndexes != nil || got.Result.MissingShortIDs != nil || !got.D4Complete || got.DistinctCollisionCount != 0 {
 				t.Fatalf("complete population reverse%v outcome=%+v err=%v", reverse, got, err)
 			}
 			if f.mp.Len() != 1001 {
@@ -424,8 +424,8 @@ func compactCandidateInputCases(t *testing.T) {
 		}
 		for _, profile := range []uint64{1, 2} {
 			got, err := reconstructCompactCandidates(valid, profile, 72_000_000, nil, nil)
-			if err != nil || len(got.Result.Transactions) != 1 {
-				t.Fatal("valid profile rejected")
+			if err != nil || !reflect.DeepEqual(got, compactCandidateOutcome{Result: compactReconstructionResult{Transactions: [][]byte{prefill}}}) {
+				t.Fatalf("valid profile%d outcome=%+v err=%v", profile, got, err)
 			}
 		}
 	})
@@ -435,8 +435,8 @@ func compactCandidateInputCases(t *testing.T) {
 		}
 		for _, budget := range []uint64{72_000_000, 80_000_000} {
 			got, err := reconstructCompactCandidates(valid, 1, budget, nil, nil)
-			if err != nil || len(got.Result.Transactions) != 1 {
-				t.Fatal("valid budget rejected")
+			if err != nil || !reflect.DeepEqual(got, compactCandidateOutcome{Result: compactReconstructionResult{Transactions: [][]byte{prefill}}}) {
+				t.Fatalf("valid budget%d outcome=%+v err=%v", budget, got, err)
 			}
 		}
 	})
@@ -520,13 +520,23 @@ func compactCandidateZeroSID(t *testing.T) {
 	raw := slices.Clone(f.raw[0])
 	prefilled := compactCandidateLargePrefills(raw)
 	count := len(prefilled)
-	got, err := reconstructCompactCandidates(cmpctBlockPayload{Prefilled: prefilled}, 1, 72_000_000, nil, nil)
-	if err != nil || len(got.Result.Transactions) != count || got.D4Complete || got.DistinctCollisionCount != 0 || got.Result.PartialTransactions != nil || got.Result.MissingIndexes != nil || got.Result.MissingShortIDs != nil {
-		t.Fatalf("zero SID=%+v err=%v", got, err)
-	}
-	raw[0] ^= 1
-	if got.Result.Transactions[0][0] == raw[0] || got.Result.Transactions[count-1][0] == raw[0] {
-		t.Fatal("zero-SID input alias")
+	for _, profile := range []uint64{1, 2} {
+		got, err := reconstructCompactCandidates(cmpctBlockPayload{Prefilled: prefilled}, profile, 72_000_000, nil, nil)
+		if err != nil || len(got.Result.Transactions) != count || got.D4Complete || got.DistinctCollisionCount != 0 || got.Result.PartialTransactions != nil || got.Result.MissingIndexes != nil || got.Result.MissingShortIDs != nil {
+			t.Fatalf("zero SID profile%d outcome=%+v err=%v", profile, got, err)
+		}
+		for i, tx := range got.Result.Transactions {
+			if !bytes.Equal(tx, prefilled[i].Tx) {
+				t.Fatalf("zero SID profile%d transaction%d differs from canonical input", profile, i)
+			}
+		}
+		raw[0] ^= 1
+		for i, tx := range got.Result.Transactions {
+			if !bytes.Equal(tx, f.raw[0]) {
+				t.Fatalf("zero SID profile%d transaction%d changed after input mutation", profile, i)
+			}
+		}
+		raw[0] ^= 1
 	}
 }
 
@@ -596,7 +606,7 @@ func compactCandidateArithmetic(t *testing.T) {
 		{^uint64(0) - 1, 1, ^uint64(0), ^uint64(0), true},
 	} {
 		got, err := compactCandidateAdd(row.current, row.extra, row.budget)
-		if got != row.want || (row.accepted && err != nil) || (!row.accepted && !errors.Is(err, errCompactCandidateResource)) {
+		if got != row.want || (row.accepted && err != nil) || (!row.accepted && !errors.Is(errCompactCandidateResource, err)) {
 			t.Fatalf("arithmetic%+v=(%d,%v)", row, got, err)
 		}
 	}
@@ -610,8 +620,8 @@ func compactCandidateArithmetic(t *testing.T) {
 	if got, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: raw}}, 72_000_000); err != nil || got != 72_000_000 {
 		t.Fatalf("exact baseline=(%d,%v)", got, err)
 	}
-	if _, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: make([]byte, 71_999_884)}}, 72_000_000); !errors.Is(err, errCompactCandidateResource) {
-		t.Fatal("baseline+1 accepted")
+	if got, err := compactCandidateBaseline(1, []prefilledTxn{{Tx: make([]byte, 71_999_884)}}, 72_000_000); got != 0 || !errors.Is(errCompactCandidateResource, err) {
+		t.Fatalf("baseline+1=(%d,%v); want zero and exact resource error", got, err)
 	}
 }
 
