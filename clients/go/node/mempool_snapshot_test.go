@@ -463,8 +463,9 @@ func compactStandardAssociations(t *testing.T, f compactStandardFixture, observe
 			case "nil_member":
 				f.mp.relations.putEntry(key, nil)
 			case "unrelated_member":
-				member.txid, member.wtxid, member.raw, member.size = [32]byte{0xe6}, [32]byte{0xe7}, nil, -1
+				member.txid, member.wtxid = [32]byte{0xe6}, [32]byte{0xe7}
 				f.mp.relations.putEntry(key, &member)
+				f.mp.relations.putReverse(member.wtxid, key)
 			case "txid", "wtxid", "both", "current_pair", "same_count_forward", "same_count_forward_wtxid", "many":
 				if row.name == "txid" {
 					member.wtxid = [32]byte{0xe7}
