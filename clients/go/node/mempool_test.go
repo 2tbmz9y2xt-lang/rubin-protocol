@@ -5267,9 +5267,9 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		mp.mu.Lock()
 		entry := mempoolTestEntry(mp, id)
 		mp.relations.deleteReverse(entry.wtxid) // R6: the secondary binding goes missing.
-		entry.wtxid = wantWTxID        // R4: the stored wtxid no longer matches Raw.
-		entry.txid = [32]byte{0x99}    // R5: the entry field disagrees with the index.
-		entry.raw = wantRaw            // R7: retained bytes are no longer canonical.
+		entry.wtxid = wantWTxID                 // R4: the stored wtxid no longer matches Raw.
+		entry.txid = [32]byte{0x99}             // R5: the entry field disagrees with the index.
+		entry.raw = wantRaw                     // R7: retained bytes are no longer canonical.
 		mp.mu.Unlock()
 		got, ok := mp.RetainedTxByID(id)
 		if !ok || got.IndexedTxID != id || got.AdmissionWTxID != wantWTxID || !bytes.Equal(got.Raw, wantRaw) {

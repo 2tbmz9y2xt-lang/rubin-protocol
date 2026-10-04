@@ -864,7 +864,9 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		}},
 		{"wtxid_map_value", true, func(m *Mempool, s mempoolSnapshot, i int) { m.relations.putReverse(s.entries[i].wtxid, [32]byte{}) }},
 		{"wtxid_map_missing", true, func(m *Mempool, s mempoolSnapshot, i int) { m.relations.deleteReverse(s.entries[i].wtxid) }},
-		{"wtxid_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) { m.relations.putReverse([32]byte{0xfb, byte(i)}, [32]byte{}) }},
+		{"wtxid_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) {
+			m.relations.putReverse([32]byte{0xfb, byte(i)}, [32]byte{})
+		}},
 		{"token", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).token.seq++ }},
 		{"fee_lo", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).fee.Lo++ }},
 		{"fee_hi", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).fee.Hi++ }},
@@ -872,7 +874,9 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		{"weight", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).weight++ }},
 		{"size_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).size = 0 }},
 		{"size", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).size-- }},
-		{"size_over_cap", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).size = m.maxBytes + 1 }},
+		{"size_over_cap", true, func(m *Mempool, s mempoolSnapshot, i int) {
+			mempoolTestEntry(m, s.entries[i].txid).size = m.maxBytes + 1
+		}},
 		{"admission_seq_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).admissionSeq = 0 }},
 		{"admission_seq_mismatch", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).admissionSeq += 10 }},
 		{"input_count", true, func(m *Mempool, s mempoolSnapshot, i int) {

@@ -438,11 +438,21 @@ func compactStandardAssociations(t *testing.T, f compactStandardFixture, observe
 		name  string
 		fault bool
 	}{
-		{"clean", false}, {"nil_member", false}, {"unrelated_member", false},
-		{"txid", true}, {"wtxid", true}, {"both", true}, {"pointer", true},
-		{"current_pair", true}, {"reverse_alias", true}, {"many", true},
-		{"same_count_forward", true}, {"same_count_reverse", true}, {"unrelated_reverse", false},
-		{"same_count_forward_wtxid", true}, {"same_count_reverse_replace", true},
+		{"clean", false},
+		{"nil_member", false},
+		{"unrelated_member", false},
+		{"txid", true},
+		{"wtxid", true},
+		{"both", true},
+		{"pointer", true},
+		{"current_pair", true},
+		{"reverse_alias", true},
+		{"many", true},
+		{"same_count_forward", true},
+		{"same_count_reverse", true},
+		{"unrelated_reverse", false},
+		{"same_count_forward_wtxid", true},
+		{"same_count_reverse_replace", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			f.mp.relations = buildMempoolRelations(maps.Clone(txs), maps.Clone(wtxids))
