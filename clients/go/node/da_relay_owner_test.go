@@ -7805,15 +7805,53 @@ func compactDASnapshotFaults(t *testing.T) {
 			name   string
 			states []uint8
 		}{
-			{"nil_sets", []uint8{0, 1, 2}}, {"nil_locators", []uint8{0, 1, 2}}, {"record_daID", []uint8{0, 1, 2}}, {"nil_chunks", []uint8{0, 1, 2}},
-			{"revision0", []uint8{0, 1, 2}}, {"received0", []uint8{0, 1, 2}}, {"invalid_state", []uint8{0, 1, 2}}, {"ttl", []uint8{0, 1, 2}},
-			{"payload_bytes", []uint8{0, 1, 2}}, {"record_wire", []uint8{0, 1, 2}}, {"replaceable", []uint8{0, 1, 2}}, {"incomplete_C", []uint8{2}},
-			{"commit_member", []uint8{0}}, {"commit_daID", []uint8{0, 1, 2}}, {"commit_commitment", []uint8{0}}, {"commit_count", []uint8{0}}, {"commit_wire", []uint8{0, 1, 2}}, {"commit_quota", []uint8{0, 1, 2}},
-			{"commit_raw", []uint8{0}}, {"missing_commit", []uint8{1, 2}}, {"commit_nil_raw", []uint8{1, 2}}, {"commit_empty_raw", []uint8{1, 2}}, {"commit_count0", []uint8{1, 2}}, {"commit_count62", []uint8{1, 2}},
-			{"nil_member", []uint8{0, 1, 2}}, {"reverse_index", []uint8{0, 1, 2}}, {"reverse_daID", []uint8{0, 1, 2}}, {"reverse_kind0", []uint8{0, 1, 2}}, {"reverse_kind1", []uint8{0, 1, 2}}, {"reverse_kind3", []uint8{0, 1, 2}},
-			{"reverse_coordinate", []uint8{0, 1, 2}}, {"chunk_daID", []uint8{0, 1, 2}}, {"chunk_index", []uint8{0, 1, 2}}, {"chunk_wire", []uint8{0, 1, 2}}, {"chunk_quota", []uint8{0, 1, 2}},
-			{"hash_checked", []uint8{0, 1, 2}}, {"chunk_nil_raw", []uint8{0, 1, 2}}, {"chunk_empty_raw", []uint8{0, 1, 2}}, {"nil_payload", []uint8{0, 1}}, {"empty_payload", []uint8{0, 1, 2}}, {"nonempty_payload", []uint8{2}},
-			{"missing_record", []uint8{0, 1, 2}}, {"commit_index1", []uint8{1, 2}}, {"member_mismatch", []uint8{0, 1, 2}}, {"chunk_index61", []uint8{0}}, {"chunk_at_count", []uint8{1, 2}}, {"extra_locator", []uint8{0, 1, 2}},
+			{"nil_sets", []uint8{0, 1, 2}},
+			{"nil_locators", []uint8{0, 1, 2}},
+			{"record_daID", []uint8{0, 1, 2}},
+			{"nil_chunks", []uint8{0, 1, 2}},
+			{"revision0", []uint8{0, 1, 2}},
+			{"received0", []uint8{0, 1, 2}},
+			{"invalid_state", []uint8{0, 1, 2}},
+			{"ttl", []uint8{0, 1, 2}},
+			{"payload_bytes", []uint8{0, 1, 2}},
+			{"record_wire", []uint8{0, 1, 2}},
+			{"replaceable", []uint8{0, 1, 2}},
+			{"incomplete_C", []uint8{2}},
+			{"commit_member", []uint8{0}},
+			{"commit_daID", []uint8{0, 1, 2}},
+			{"commit_commitment", []uint8{0}},
+			{"commit_count", []uint8{0}},
+			{"commit_wire", []uint8{0, 1, 2}},
+			{"commit_quota", []uint8{0, 1, 2}},
+			{"commit_raw", []uint8{0}},
+			{"missing_commit", []uint8{1, 2}},
+			{"commit_nil_raw", []uint8{1, 2}},
+			{"commit_empty_raw", []uint8{1, 2}},
+			{"commit_count0", []uint8{1, 2}},
+			{"commit_count62", []uint8{1, 2}},
+			{"nil_member", []uint8{0, 1, 2}},
+			{"reverse_index", []uint8{0, 1, 2}},
+			{"reverse_daID", []uint8{0, 1, 2}},
+			{"reverse_kind0", []uint8{0, 1, 2}},
+			{"reverse_kind1", []uint8{0, 1, 2}},
+			{"reverse_kind3", []uint8{0, 1, 2}},
+			{"reverse_coordinate", []uint8{0, 1, 2}},
+			{"chunk_daID", []uint8{0, 1, 2}},
+			{"chunk_index", []uint8{0, 1, 2}},
+			{"chunk_wire", []uint8{0, 1, 2}},
+			{"chunk_quota", []uint8{0, 1, 2}},
+			{"hash_checked", []uint8{0, 1, 2}},
+			{"chunk_nil_raw", []uint8{0, 1, 2}},
+			{"chunk_empty_raw", []uint8{0, 1, 2}},
+			{"nil_payload", []uint8{0, 1}},
+			{"empty_payload", []uint8{0, 1, 2}},
+			{"nonempty_payload", []uint8{2}},
+			{"missing_record", []uint8{0, 1, 2}},
+			{"commit_index1", []uint8{1, 2}},
+			{"member_mismatch", []uint8{0, 1, 2}},
+			{"chunk_index61", []uint8{0}},
+			{"chunk_at_count", []uint8{1, 2}},
+			{"extra_locator", []uint8{0, 1, 2}},
 		} {
 			if !slices.Contains(row.states, state) {
 				continue
@@ -7974,7 +8012,7 @@ func compactDASnapshotFaults(t *testing.T) {
 							id := CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}
 							if different {
 								id.WTxID[0] ^= 1
-								}
+							}
 							for _, maxBytes := range []uint64{0, uint64(len(target.raw))} {
 								requireCompactDAPreservedRead(t, f, id, maxBytes, 3, nil)
 							}

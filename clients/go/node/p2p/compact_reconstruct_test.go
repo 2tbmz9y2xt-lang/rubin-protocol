@@ -136,7 +136,7 @@ func compactCandidateAdmitDA(tb testing.TB, f compactCandidateFixture) ([]byte, 
 
 func requireCompactCandidateZero(t *testing.T, got compactCandidateOutcome, err, want error) {
 	t.Helper()
-	if err != want || !reflect.DeepEqual(got.Result, compactReconstructionResult{}) {
+	if err != want || !reflect.DeepEqual(got.Result, compactReconstructionResult{}) { //nolint:errorlint // Contract requires exact sentinel identity.
 		t.Fatalf("outcome=%+v err=%v want=%v with zero Result", got, err, want)
 	}
 }
@@ -324,7 +324,7 @@ func compactCandidateLaterRefusal(t *testing.T) {
 		}
 		txs := make([][]byte, 2)
 		got, err := compactCandidateFill([]compactShortID{daSID, standardSID}, txs, eligible, catalog, mp, f.da, 117, budget)
-		if err != want || !reflect.DeepEqual(got, compactReconstructionResult{}) || !bytes.Equal(txs[0], daRaw) {
+		if err != want || !reflect.DeepEqual(got, compactReconstructionResult{}) || !bytes.Equal(txs[0], daRaw) { //nolint:errorlint // Contract requires exact sentinel identity.
 			t.Fatalf("later refusal=(%+v,%v), first genuine fill=%x", got, err, txs[0])
 		}
 		next, err := compactCandidateFill([]compactShortID{daSID, standardSID}, make([][]byte, 2), eligible, catalog, f.mp, f.da, 117, 72_000_000)
@@ -383,7 +383,7 @@ func compactCandidateLaterRefusal(t *testing.T) {
 	lateEligible, _ := compactCandidateEligibility(late, nil, lateCatalog)
 	staged := make([][]byte, len(late.ShortIDs))
 	result, err := compactCandidateFill(late.ShortIDs, staged, lateEligible, lateCatalog, f.mp, nil, 119, 72_000_000)
-	if err != errCompactCandidateFault || !reflect.DeepEqual(result, compactReconstructionResult{}) || !bytes.Equal(staged[0], f.raw[0]) {
+	if err != errCompactCandidateFault || !reflect.DeepEqual(result, compactReconstructionResult{}) || !bytes.Equal(staged[0], f.raw[0]) { //nolint:errorlint // Contract requires exact sentinel identity.
 		t.Fatal("4097 stage misses hid later actual unavailable DA fault")
 	}
 	got, err = reconstructCompactCandidates(block, 1, 72_000_000, f.pool, nil)
@@ -444,13 +444,21 @@ func compactCandidateInputCases(t *testing.T) {
 			profile, short, prefilled, want uint64
 			accepted                        bool
 		}{
-			{1, 0, 0, 0, false}, {2, 0, 0, 0, false}, {1, 72_000_000, 0, 72_000_000, true},
-			{1, 72_000_001, 0, 0, false}, {2, 280_991, 0, 280_991, true}, {2, 280_992, 0, 0, false},
-			{1, ^uint64(0), 2, 0, false}, {2, ^uint64(0), 2, 0, false}, {1, 2, ^uint64(0), 0, false},
-			{2, 2, ^uint64(0), 0, false}, {0, 1, 0, 0, false}, {3, 1, 0, 0, false},
+			{1, 0, 0, 0, false},
+			{2, 0, 0, 0, false},
+			{1, 72_000_000, 0, 72_000_000, true},
+			{1, 72_000_001, 0, 0, false},
+			{2, 280_991, 0, 280_991, true},
+			{2, 280_992, 0, 0, false},
+			{1, ^uint64(0), 2, 0, false},
+			{2, ^uint64(0), 2, 0, false},
+			{1, 2, ^uint64(0), 0, false},
+			{2, 2, ^uint64(0), 0, false},
+			{0, 1, 0, 0, false},
+			{3, 1, 0, 0, false},
 		} {
 			got, err := compactCandidateEntryCount(row.profile, row.short, row.prefilled)
-			if got != row.want || (row.accepted && err != nil) || (!row.accepted && err != errCompactCandidateInput) {
+			if got != row.want || (row.accepted && err != nil) || (!row.accepted && err != errCompactCandidateInput) { //nolint:errorlint // Contract requires exact sentinel identity.
 				t.Fatalf("count%+v=(%d,%v)", row, got, err)
 			}
 		}
@@ -737,7 +745,7 @@ func compactCandidateMetadataFault(t *testing.T) {
 	third := compactCandidateObservation{Identity: node.CompactCandidateIdentity{TxID: [32]byte{4}, WTxID: [32]byte{5}}, ShortID: compactShortID{2}, Sources: 1}
 	for _, observed := range [][]compactCandidateObservation{{first, conflict}, {conflict, first}, {third, first, conflict}} {
 		got, err := compactCandidateScan(observed)
-		if err != errCompactCandidateFault || !reflect.DeepEqual(got, compactCandidateCatalog{}) {
+		if err != errCompactCandidateFault || !reflect.DeepEqual(got, compactCandidateCatalog{}) { //nolint:errorlint // Contract requires exact sentinel identity.
 			t.Fatal("metadata contradiction returned prefix")
 		}
 		if got, err := compactCandidateScan([]compactCandidateObservation{first}); err != nil || len(got.Observed) != 1 {
@@ -757,9 +765,17 @@ func compactCandidateObserverCases(t *testing.T) {
 		read node.CompactCandidateRead
 		want error
 	}{
-		{"ABSENT_nil", absent, nil}, {"PRESENT_fit", present, nil}, {"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault}, {"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
+		{"ABSENT_nil", absent, nil},
+		{"PRESENT_fit", present, nil},
+		{"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault},
+		{"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
 		{"PRESENT_over", node.CompactCandidateRead{Disposition: 1, Raw: append(slices.Clone(raw), 0)}, errCompactCandidateResource},
-		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource}, {"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault}, {"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault}, {"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault}, {"ABSENT_empty", node.CompactCandidateRead{Disposition: 2, Raw: []byte{}}, errCompactCandidateFault},
+		{"FAULT", fault, errCompactCandidateFault},
+		{"OVER_BUDGET", over, errCompactCandidateResource},
+		{"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault},
+		{"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault},
+		{"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
+		{"ABSENT_empty", node.CompactCandidateRead{Disposition: 2, Raw: []byte{}}, errCompactCandidateFault},
 	} {
 		for _, prior := range [][]byte{nil, slices.Clone(raw)} {
 			t.Run(fmt.Sprintf("%s/prior%v", row.name, prior != nil), func(t *testing.T) {
@@ -770,7 +786,7 @@ func compactCandidateObserverCases(t *testing.T) {
 				} else if row.read.Disposition == 1 && prior == nil {
 					want = raw
 				}
-				if err != row.want || !bytes.Equal(got, want) || (want == nil && got != nil) {
+				if err != row.want || !bytes.Equal(got, want) || (want == nil && got != nil) { //nolint:errorlint // Contract requires exact sentinel identity.
 					t.Fatalf("compose=(%x,%v) want(%x,%v)", got, err, want, row.want)
 				}
 				if err == nil && prior != nil && &got[0] != &prior[0] {
@@ -789,8 +805,17 @@ func compactCandidateObserverCases(t *testing.T) {
 		want          error
 		filled        bool
 	}{
-		{"A/A", absent, absent, nil, false}, {"A/P", absent, present, nil, true}, {"P/A", present, absent, nil, true}, {"agreeing_P/P", present, node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}, nil, true}, {"differing_P/P", present, different, errCompactCandidateFault, false},
-		{"P/F", present, fault, errCompactCandidateFault, false}, {"P/O", present, over, errCompactCandidateResource, false}, {"A/F", absent, fault, errCompactCandidateFault, false}, {"A/O", absent, over, errCompactCandidateResource, false}, {"F/O", fault, over, errCompactCandidateFault, false}, {"O/F", over, fault, errCompactCandidateResource, false},
+		{"A/A", absent, absent, nil, false},
+		{"A/P", absent, present, nil, true},
+		{"P/A", present, absent, nil, true},
+		{"agreeing_P/P", present, node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}, nil, true},
+		{"differing_P/P", present, different, errCompactCandidateFault, false},
+		{"P/F", present, fault, errCompactCandidateFault, false},
+		{"P/O", present, over, errCompactCandidateResource, false},
+		{"A/F", absent, fault, errCompactCandidateFault, false},
+		{"A/O", absent, over, errCompactCandidateResource, false},
+		{"F/O", fault, over, errCompactCandidateFault, false},
+		{"O/F", over, fault, errCompactCandidateResource, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			var selected []byte
@@ -801,7 +826,7 @@ func compactCandidateObserverCases(t *testing.T) {
 					break
 				}
 			}
-			if err != row.want || (row.filled && !bytes.Equal(selected, raw)) || (!row.filled && selected != nil) {
+			if err != row.want || (row.filled && !bytes.Equal(selected, raw)) || (!row.filled && selected != nil) { //nolint:errorlint // Contract requires exact sentinel identity.
 				t.Fatalf("ordered composition=(%x,%v), want filled%v/%v", selected, err, row.filled, row.want)
 			}
 			if row.name == "agreeing_P/P" && &selected[0] != &row.first.Raw[0] {
@@ -818,7 +843,7 @@ func compactCandidateObserverCases(t *testing.T) {
 	// An actual DA PRESENT precedes a real unavailable standard owner. Returning
 	// on PRESENT would hide the second observer's FAULT and retain the first copy.
 	got, err := compactCandidateHydrate(observation, &node.Mempool{}, f.da, uint64(len(daRaw)))
-	if got != nil || err != errCompactCandidateFault {
+	if got != nil || err != errCompactCandidateFault { //nolint:errorlint // Contract requires exact sentinel identity.
 		t.Fatal("first actual PRESENT hid later observer fault")
 	}
 	got, err = compactCandidateHydrate(observation, f.mp, f.da, uint64(len(daRaw)))
