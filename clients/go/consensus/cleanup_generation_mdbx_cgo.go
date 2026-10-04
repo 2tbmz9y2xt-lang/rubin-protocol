@@ -205,26 +205,27 @@ func (p *cleanupGenerationPlan) dispose(r *mdbx.Reader, a mdbx.StorageAuthorityV
 	}
 }
 
-// exactRow observes an opaque partner with a bounded raw page, without Get's
-// semantic width requirements. A malformed/orphan partner creates no obligation.
-func (p *cleanupGenerationPlan) exactRow(r *mdbx.Reader, g uint64, class mdbx.ObsoleteClassV1, key []byte) (mdbx.ObsoleteRowV1, error) {
-	after := cleanupDrainPredecessor(key)
-	for {
-		page, err := r.ObsoleteGenerationPageV1(g, class, after, 1)
-		if err != nil {
-			return mdbx.ObsoleteRowV1{}, err
-		}
-		if len(page.Rows) == 0 || bytes.Compare(page.Rows[0].Key(), key) >= 0 || page.Stop == mdbx.PrefixPageExhausted {
-			p.batchImage.ObsoleteConsulted = append(p.batchImage.ObsoleteConsulted, page.Witness)
-			if len(page.Rows) == 1 && bytes.Equal(page.Rows[0].Key(), key) {
-				return page.Rows[0], nil
-			}
-			return mdbx.ObsoleteRowV1{}, nil
-		}
-		// Intermediate predecessors are neither targets nor owner evidence.
-		// Reader stores no page registry: only the continuation survives.
-		after = page.Next
+// exactRow observes one raw partner page. An extended predecessor is disposed
+// alone; the selected pair and its dependents remain for the next invocation.
+func (p *cleanupGenerationPlan) exactRow(r *mdbx.Reader, g uint64, class mdbx.ObsoleteClassV1, key []byte) (mdbx.ObsoleteRowV1, bool, error) {
+	page, err := r.ObsoleteGenerationPageV1(g, class, cleanupDrainPredecessor(key), 1)
+	if err != nil {
+		return mdbx.ObsoleteRowV1{}, false, err
 	}
+	p.batchImage.ObsoleteConsulted = append(p.batchImage.ObsoleteConsulted, page.Witness)
+	if len(page.Rows) == 0 {
+		return mdbx.ObsoleteRowV1{}, false, nil
+	}
+	row := page.Rows[0]
+	if bytes.Compare(row.Key(), key) < 0 {
+		p.batchImage.ObsoleteDeletes = append(p.batchImage.ObsoleteDeletes, row)
+		p.rawClass = class
+		return mdbx.ObsoleteRowV1{}, true, nil
+	}
+	if bytes.Equal(row.Key(), key) {
+		return row, false, nil
+	}
+	return mdbx.ObsoleteRowV1{}, false, nil
 }
 
 func cleanupDrainPredecessor(key []byte) []byte {
@@ -246,23 +247,30 @@ func (p *cleanupGenerationPlan) derived(r *mdbx.Reader, a mdbx.StorageAuthorityV
 			return err
 		}
 		indexKey, _ := mdbx.HeightKey(a.Cleanup.Spans[0].GenerationID, binary.BigEndian.Uint64(value[:]))
-		index, err := p.exactRow(r, a.Cleanup.Spans[0].GenerationID, mdbx.ObsoleteIndexV1, indexKey)
+		index, prepared, err := p.exactRow(r, a.Cleanup.Spans[0].GenerationID, mdbx.ObsoleteIndexV1, indexKey)
+		if err != nil || prepared {
+			return err
+		}
+		names, err := cleanupDrainIndexNames(index, key[8:])
 		if err != nil {
 			return err
 		}
-		if index.Length() == 104 {
-			var entry [104]byte
-			if _, err := index.ReadAt(entry[:], 0); err != nil {
-				return err
-			}
-			if bytes.Equal(entry[:32], key[8:]) {
-				return p.index(r, a, index)
-			}
+		if names {
+			return p.index(r, a, index)
 		}
 	}
 	p.batchImage.ObsoleteDeletes = append(p.batchImage.ObsoleteDeletes, row)
 	p.rawClass = mdbx.ObsoleteDerivedV1
 	return nil
+}
+
+func cleanupDrainIndexNames(index mdbx.ObsoleteRowV1, hash []byte) (bool, error) {
+	if index.Length() != 104 {
+		return false, nil
+	}
+	var entry [104]byte
+	_, err := index.ReadAt(entry[:], 0)
+	return bytes.Equal(entry[:32], hash), err
 }
 
 type cleanupGenerationOwners struct {
@@ -282,32 +290,62 @@ func (p *cleanupGenerationPlan) index(r *mdbx.Reader, a mdbx.StorageAuthorityV1,
 		return err
 	}
 	hash := [32]byte(entry[:32])
-	return p.indexKnown(r, a, key, index, hash)
+	partner, prepared, err := p.partner(r, a.Cleanup.Spans[0].GenerationID, key, hash)
+	if err != nil || prepared {
+		return err
+	}
+	if binary.BigEndian.Uint64(key[8:]) > 0xffffffff || !archiveSelectedSideWork(entry[64:104]) {
+		p.pair(index, partner)
+		return nil
+	}
+	return p.indexKnown(r, a, index, hash, partner)
 }
 
-func (p *cleanupGenerationPlan) indexKnown(r *mdbx.Reader, a mdbx.StorageAuthorityV1, key []byte, index mdbx.ObsoleteRowV1, hash [32]byte) error {
+func (p *cleanupGenerationPlan) indexKnown(r *mdbx.Reader, a mdbx.StorageAuthorityV1, index mdbx.ObsoleteRowV1, hash [32]byte, partner mdbx.ObsoleteRowV1) error {
 	owners, err := p.owners(r, a, hash)
 	if err != nil {
 		return err
 	}
-	if owners.canonical.Owned {
-		p.step = selectedSideCanonical
-	}
+	p.step = selectedSideBranch
 	proof, err := r.ObsoleteUndoPageV1(index, nil, 1)
 	if err != nil {
+		p.obsoleteFailure(err, owners.canonical.Owned)
 		return err
 	}
-	p.step = selectedSideBranch
 	p.batchImage.ObsoleteConsulted = append(p.batchImage.ObsoleteConsulted, proof.Witness)
 	if err := p.health(r, a, hash, owners); err != nil || p.positive {
 		return err
 	}
+	p.keepImages(a, hash, owners)
 	if proof.Projection == mdbx.ObsoleteProjectionProvenV1 {
+		// Ordinary proven work has complete target/health/family evidence.
+		// Invalid projections and the detecting selected clear retain this proof.
+		p.batchImage.ObsoleteConsulted = p.batchImage.ObsoleteConsulted[:len(p.batchImage.ObsoleteConsulted)-1]
 		if err := p.dependents(r, a, index, hash, owners); err != nil {
 			return err
 		}
 	}
-	return p.pair(r, a.Cleanup.Spans[0].GenerationID, key, hash)
+	p.pair(index, partner)
+	return nil
+}
+
+// Only the named-header get can be required; source and raw-family pages are disposable.
+func (p *cleanupGenerationPlan) obsoleteFailure(err error, canonicalHeader bool) {
+	p.step = selectedSideBranch
+	var engine *mdbx.EngineError
+	if canonicalHeader && errors.As(err, &engine) && engine != nil && engine.Operation == "get" {
+		p.step = selectedSideCanonical
+	}
+}
+
+func (p *cleanupGenerationPlan) keepImages(a mdbx.StorageAuthorityV1, hash [32]byte, o cleanupGenerationOwners) {
+	_, _, body, undo := o.keeps(a)
+	if body || o.bodyDefer {
+		p.batchImage.LargeConsulted = append(p.batchImage.LargeConsulted, mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageBlockBodyV1, Hash: hash})
+	}
+	if undo || o.undoDefer {
+		p.batchImage.LargeConsulted = append(p.batchImage.LargeConsulted, mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageUndoFamilyV1, Hash: hash})
+	}
 }
 
 func (p *cleanupGenerationPlan) owners(r *mdbx.Reader, a mdbx.StorageAuthorityV1, hash [32]byte) (cleanupGenerationOwners, error) {
@@ -537,7 +575,6 @@ func (p *cleanupGenerationPlan) dependents(r *mdbx.Reader, a mdbx.StorageAuthori
 	}
 	p.batchImage.LargeConsulted = append(p.batchImage.LargeConsulted, mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageBlockBodyV1, Hash: hash})
 	if o.undoDefer || undoKeep {
-		p.batchImage.LargeConsulted = append(p.batchImage.LargeConsulted, mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageUndoFamilyV1, Hash: hash})
 		return nil
 	}
 	return p.undoDeletes(r, index, o.canonical.Owned)
@@ -553,19 +590,18 @@ func (p *cleanupGenerationPlan) bodyDelete(r *mdbx.Reader, hash [32]byte) error 
 	return err
 }
 
-func (p *cleanupGenerationPlan) undoDeletes(r *mdbx.Reader, index mdbx.ObsoleteRowV1, requiredProjection bool) error {
+func (p *cleanupGenerationPlan) undoDeletes(r *mdbx.Reader, index mdbx.ObsoleteRowV1, canonicalHeader bool) error {
 	// Exactly one full-family allocation, after body health has returned.
 	p.batchImage.ObsoleteDeletes = make([]mdbx.ObsoleteRowV1, 0, 414635)
+	p.rawClass = 0 // Rank-5 family handles cannot exhaust any generation class.
 	var after []byte
 	for {
-		if requiredProjection {
-			p.step = selectedSideCanonical
-		}
+		p.step = selectedSideBranch
 		page, err := r.ObsoleteUndoPageV1(index, after, 1440)
 		if err != nil {
+			p.obsoleteFailure(err, canonicalHeader)
 			return err
 		}
-		p.step = selectedSideBranch
 		if len(page.Rows) > cap(p.batchImage.ObsoleteDeletes)-len(p.batchImage.ObsoleteDeletes) {
 			return &selectedSideFailure{result: selectedSideCapacity, cause: errors.New("cleanup undo family exceeds native row bound")}
 		}
@@ -578,23 +614,29 @@ func (p *cleanupGenerationPlan) undoDeletes(r *mdbx.Reader, index mdbx.ObsoleteR
 	}
 }
 
-func (p *cleanupGenerationPlan) pair(r *mdbx.Reader, g uint64, indexKey []byte, hash [32]byte) error {
-	p.batchImage.Mutations = append(p.batchImage.Mutations, mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[2], Key: indexKey, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+func (p *cleanupGenerationPlan) partner(r *mdbx.Reader, g uint64, indexKey []byte, hash [32]byte) (mdbx.ObsoleteRowV1, bool, error) {
 	key, _ := mdbx.CanonicalOwnerKey(g, hash)
-	partner, err := p.exactRow(r, g, mdbx.ObsoleteDerivedV1, key)
-	if err != nil {
-		return err
+	partner, prepared, err := p.exactRow(r, g, mdbx.ObsoleteDerivedV1, key)
+	if err != nil || prepared {
+		return mdbx.ObsoleteRowV1{}, prepared, err
 	}
 	if partner.Length() == 8 {
 		var value [8]byte
 		if _, err := partner.ReadAt(value[:], 0); err != nil {
-			return err
+			return mdbx.ObsoleteRowV1{}, false, err
 		}
 		if bytes.Equal(value[:], indexKey[8:]) {
-			p.batchImage.Mutations = append(p.batchImage.Mutations, mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[7], Key: key, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+			return partner, false, nil
 		}
 	}
-	return nil
+	return mdbx.ObsoleteRowV1{}, false, nil
+}
+
+func (p *cleanupGenerationPlan) pair(index, partner mdbx.ObsoleteRowV1) {
+	p.batchImage.Mutations = append(p.batchImage.Mutations, mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[2], Key: index.Key(), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	if partner.Length() == 8 {
+		p.batchImage.Mutations = append(p.batchImage.Mutations, mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[7], Key: partner.Key(), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	}
 }
 
 func (p *cleanupGenerationPlan) exhausted(r *mdbx.Reader, g uint64) (bool, error) {

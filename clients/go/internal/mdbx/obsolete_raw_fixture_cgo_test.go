@@ -353,7 +353,7 @@ func TestObsoleteGenerationV1ProofOrder(t *testing.T) {
 						if err != recorded || reader.usable() {
 							t.Fatal("first proof backend error was masked")
 						}
-						obsoleteRequireError(t, err, "prefix-page", "IO", 5, expectedNativeDiagnostic(5))
+						obsoleteRequireError(t, err, "get", "IO", 5, expectedNativeDiagnostic(5))
 					} else if variant == "proven-valid" {
 						mustEnvironment(t, err)
 						obsoleteRequirePage(t, page, 1, 3, undoKey)

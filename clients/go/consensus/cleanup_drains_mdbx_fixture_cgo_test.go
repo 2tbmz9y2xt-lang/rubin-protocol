@@ -57,7 +57,10 @@ func generationSelected(a *mdbx.StorageAuthorityV1, hash [32]byte, body []byte) 
 func TestCleanupGenerationMDBXNative(t *testing.T) {
 	t.Run("R1b", generationAuthorityRejections)
 	t.Run("R18b", generationOptionalIdentity)
-	t.Run("P10-A12", generationMalformedRows)
+	t.Run("P10-A12", func(t *testing.T) {
+		generationMalformedRows(t)
+		t.Run("identity", generationMalformedIdentity)
+	})
 	t.Run("P10-A11-pair-gap", generationPairGap)
 	t.Run("H12", func(t *testing.T) { generationDamage(t, 3) })
 	t.Run("P10-A13", func(t *testing.T) {
@@ -65,6 +68,7 @@ func TestCleanupGenerationMDBXNative(t *testing.T) {
 			t.Run(fmt.Sprint(rank), func(t *testing.T) { generationDamage(t, rank) })
 		}
 		t.Run("canonical-family", generationUndoSemantics)
+		t.Run("rank-key-collision", generationRankCollision)
 	})
 	t.Run("X2", generationNativeFaults)
 	t.Run("X3", generationNativeReservations)
@@ -265,26 +269,117 @@ func generationPairGap(t *testing.T) {
 			if class == 4 {
 				partner, rank = rows[0].Key, 2
 			}
-			// A malformed longer key sorts after the decremented last byte,
-			// before the genuine exact pair. It supplies no pair obligation.
-			between := bytes.Clone(partner)
-			between[len(between)-1]--
-			between = append(between, 0)
 			w := generationNew(t, a, rows...)
-			logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, between, []byte{0x7f}) == nil, "seed intervening malformed key")
-			generationClean(t, w.run(class, 1), 2)
-			want := append(generationGone(rows), generationRow(rank, between, []byte{0x7f}))
-			w.image(a) // Another physical generation row retains GENERATION.
-			// Raw equality avoids semantic Get on the intervening malformed key.
-			for _, row := range want {
-				equal, err := mdbx.FixtureRawRowEqual(w.s, row.DBI.Rank, row.Key, row.Literal)
-				logicalMDBXAssert(t, equal && err == nil, "exact pair lookup image: %d/%x/%v", row.DBI.Rank, row.Key, err)
+			want := slices.Clone(rows)
+			for suffix := byte(0); suffix < 3; suffix++ {
+				between := bytes.Clone(partner)
+				between[len(between)-1]--
+				between = append(between, suffix)
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, between, []byte{0x7f}) == nil, "seed blocking extended key")
+				want = append(want, generationRow(rank, between, []byte{0x7f}))
 			}
-			generationClean(t, w.run(5-class, 1), 2)
-			want[len(want)-1].Literal = nil
-			generationRaw(t, w, generationEncoded(t, generationTerminal(a)), want)
+			for page := 0; page < 3; page++ {
+				var out selectedSideOutcome
+				e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { out = CleanupGenerationMDBX(w.s, w.owner, mdbx.ObsoleteClassV1(class), 1) })
+				generationClean(t, out, 2)
+				logicalMDBXAssert(t, err == nil && e.OldGets[3] == 0 && e.OldGets[4] == 0 && e.OldGets[5] == 0 && e.OldGets[6] == 0, "preparation reached artifact/optional health: %+v/%v", e, err)
+				sideWantReleased(t, w.owner, "pair preparation")
+				want[len(rows)+page].Literal = nil
+				w.image(a, rows...) // Selected pair and every dependent still have their independent input bytes.
+				for _, row := range want {
+					equal, err := mdbx.FixtureRawRowEqual(w.s, row.DBI.Rank, row.Key, row.Literal)
+					logicalMDBXAssert(t, equal && err == nil, "one strictly decreasing preparation page: %d/%x/%v", row.DBI.Rank, row.Key, err)
+				}
+			}
+			generationClean(t, w.run(class, 1), 2)
+			generationRaw(t, w, generationEncoded(t, generationTerminal(a)), generationGone(want))
 		})
 	}
+}
+
+func generationMalformedIdentity(t *testing.T) {
+	for _, class := range []uint8{2, 4} {
+		for _, name := range []string{"zero-work", "above-work", "above-height", "nondefault-work", "upper-work", "upper-height"} {
+			t.Run(fmt.Sprintf("class%d/%s", class, name), func(t *testing.T) {
+				a := generationAuthority()
+				a.B, a.U = 10, 13690
+				h := uint64(5)
+				if name == "above-height" {
+					h = 0x100000000
+				}
+				if name == "upper-height" {
+					h = 0xffffffff
+				}
+				hash, rows := generationProjection(2, h, 55)
+				rows = append(rows, generationCanonical(hash, 11)...)
+				w := generationNew(t, a, rows...)
+				entry := bytes.Clone(rows[0].Literal)
+				var work [40]byte
+				switch name {
+				case "above-work":
+					work[3], work[39] = 1, 1
+				case "upper-work":
+					work[3] = 1
+				case "nondefault-work":
+					work[39] = 11
+				case "above-height", "upper-height":
+					work[39] = 1
+				}
+				copy(entry[64:104], work[:])
+				rows[0].Literal, rows[3].Literal = entry, []byte{0x7f}
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 2, rows[0].Key, entry) == nil, "seed structural identity")
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], rows[3].Literal) == nil, "independent required body damage")
+				var out selectedSideOutcome
+				e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { out = CleanupGenerationMDBX(w.s, w.owner, mdbx.ObsoleteClassV1(class), 1) })
+				invalid := name == "zero-work" || name == "above-work" || name == "above-height"
+				expected := a
+				if invalid {
+					generationClean(t, out, 2)
+					logicalMDBXAssert(t, e.OldGets[3] == 0 && e.OldGets[4] == 0 && e.OldGets[5] == 0 && e.OldGets[6] == 0, "invalid identity reached hash-global health: %+v", e)
+					rows[0].Literal, rows[1].Literal = nil, nil
+					expected = generationTerminal(a)
+				} else {
+					sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, name)
+					logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical body", "valid identity did not reach required body: %v", out.Err)
+				}
+				logicalMDBXAssert(t, err == nil, "identity native fixture: %v", err)
+				sideWantReleased(t, w.owner, name)
+				generationRaw(t, w, generationEncoded(t, expected), rows)
+			})
+		}
+	}
+}
+
+func generationRankCollision(t *testing.T) {
+	var hash, orphan [32]byte
+	var rows []mdbx.Mutation
+	var g uint64
+	for nonce := uint64(55); nonce < 311; nonce++ {
+		hash, rows = generationProjection(2, 5, nonce)
+		g = binary.BigEndian.Uint64(hash[:8])
+		copy(orphan[:24], hash[8:])
+		orphan[31] = 7
+		if g > 1 && g < ^uint64(0) && bytes.Compare(hash[:], orphan[:]) < 0 {
+			hash, rows = generationProjection(g, 5, nonce)
+			break
+		}
+	}
+	logicalMDBXAssert(t, g > 1 && g < ^uint64(0) && bytes.Compare(hash[:], orphan[:]) < 0, "qualify ordered collision fixture")
+	a := generationAuthority()
+	a.Cleanup.Spans[0].GenerationID, a.NextGenerationID = g, g+1
+	key := append(bytes.Clone(hash[:]), []byte{0, 0, 0, 0, 0, 0, 0, 7}...)
+	orphanKey, _ := mdbx.CanonicalOwnerKey(g, orphan)
+	logicalMDBXAssert(t, bytes.Equal(key, orphanKey), "literal physical key collision across ranks")
+	derived := generationRow(7, orphanKey, binary.BigEndian.AppendUint64(nil, 6))
+	w := generationNew(t, a, append(slices.Clone(rows), derived)...)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, key, []byte{0x7f}) == nil, "seed malformed undo with derived key")
+	generationClean(t, w.run(4, 1), 2)
+	w.image(a, append(generationGone(rows), derived)...)
+	equal, err := mdbx.FixtureRawRowEqual(w.s, 5, key, nil)
+	logicalMDBXAssert(t, equal && err == nil, "undo deleted while equal-key generation row remains: %v", err)
+	generationClean(t, w.run(4, 1), 2)
+	want := append(generationGone(rows), generationRow(7, key, nil), generationRow(5, key, nil))
+	generationRaw(t, w, generationEncoded(t, generationTerminal(a)), want)
 }
 
 func generationDamage(t *testing.T, rank uint8) {
@@ -495,13 +590,13 @@ func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generat
 }
 
 func generationReadProvenance(t *testing.T) {
-	for _, name := range []string{"obsolete-index", "canonical-inverse", "canonical-forward", "optional-link", "optional-header", "optional-body", "canonical-header", "canonical-body", "canonical-undo"} {
+	for _, name := range []string{"obsolete-index", "canonical-obsolete-index", "canonical-inverse", "canonical-forward", "optional-link", "optional-header", "optional-body", "canonical-header", "canonical-body", "canonical-undo"} {
 		t.Run(name, func(t *testing.T) {
 			a := generationAuthority()
 			hash, rows := generationProjection(2, 5, 55)
 			rank, key := uint8(2), rows[0].Key
 			required := name == "canonical-inverse" || name == "canonical-forward" || name == "canonical-header" || name == "canonical-body" || name == "canonical-undo"
-			if required {
+			if required || name == "canonical-obsolete-index" {
 				a.B, a.U = 10, 13690
 				k := uint64(11)
 				if name == "canonical-undo" {
@@ -537,12 +632,16 @@ func generationReadProvenance(t *testing.T) {
 				result = "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)"
 			}
 			sideWantOutcome(t, out, result, "OLD", 1, 1, name)
-			op := "get"
+			generationEngine(t, out.Err, "IO", "get", 5, "error 5")
+			engine, direct := out.Err.(*mdbx.EngineError)
+			logicalMDBXAssert(t, direct && engine != nil && engine.Cause == nil && !engine.ReopenRequired, "original direct native read error: %v", out.Err)
+			logicalMDBXAssert(t, err == nil && e.Faults == 1 && e.OldAborts == 1 && e.BeginWrite == 0 && e.Deletes == 0 && e.Commits == 0 && e.Probes != 0 && e.ProbeRan == 0 && e.ProbeDenied == e.Probes, "first read failure committed: %+v/%v", e, err)
 			if name == "optional-header" || name == "canonical-header" {
-				op = "prefix_page" // ObsoleteUndoPage's own projection fails first.
+				logicalMDBXAssert(t, e.OldGets[3] == 1 && e.OldGets[4] == 0 && e.OldGets[5] == 0, "header failure continued health: %+v", e)
 			}
-			generationEngine(t, out.Err, "IO", op, 5, "")
-			logicalMDBXAssert(t, err == nil && e.BeginWrite == 0 && e.ProbeRan == 0 && e.ProbeDenied == e.Probes, "first read failure committed: %+v/%v", e, err)
+			if name == "obsolete-index" || name == "canonical-obsolete-index" {
+				logicalMDBXAssert(t, e.OldGets[3]+e.OldGets[4]+e.OldGets[5]+e.OldGets[6]+e.OldGets[7] == 0, "obsolete source failure consulted owners/artifacts: %+v", e)
+			}
 			sideWantReleased(t, w.owner, name)
 			generationRaw(t, w, generationEncoded(t, a), rows)
 		})
@@ -573,22 +672,61 @@ func TestCleanupGenerationMDBXReadbackDrift(t *testing.T) {
 			}
 		}
 	})
+	t.Run("H12", func(t *testing.T) {
+		for _, kind := range []string{"invalid-body", "invalid-BLOCKS", "invalid-SIDE"} {
+			t.Run(kind, func(t *testing.T) { generationDrift(t, kind, 4, false) })
+		}
+		for _, kind := range []string{"invalid-keep", "invalid-defer"} {
+			for _, entry := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s-entry%t", kind, entry), func(t *testing.T) { generationDrift(t, kind, 5, entry) })
+			}
+		}
+	})
 }
 
-func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
+func generationDriftWorld(t *testing.T, kind string, rank uint8) (*generationWorld, [32]byte, []mdbx.Mutation) {
 	var w *generationWorld
 	var hash [32]byte
 	var family []mdbx.Mutation
 	if rank == 5 {
-		w, hash, family = generationFamily(t, kind)
+		familyKind := "keep"
+		if kind == "defer" || kind == "invalid-defer" {
+			familyKind = "defer"
+		}
+		w, hash, family = generationFamily(t, familyKind)
 	} else {
 		a := generationAuthority()
 		a.B, a.U = 10, 13690
 		var rows []mdbx.Mutation
 		hash, rows = generationProjection(2, 5, 55)
-		rows = append(rows, generationCanonical(hash, 11)...)
+		k := uint64(11)
+		if kind == "invalid-BLOCKS" {
+			k = 8
+			a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 2, GenerationID: 1, LastHeight: 9, NextHeight: 8})
+		}
+		if kind == "invalid-SIDE" {
+			a.B, a.U = 0, 0
+			a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 9, LastHeight: 9, NextHeight: 9})
+			key, _ := mdbx.HeightKey(3, 9)
+			rows = append(rows, generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
+		} else {
+			rows = append(rows, generationCanonical(hash, k)...)
+		}
 		w = generationNew(t, a, rows...)
 	}
+	if bytes.HasPrefix([]byte(kind), []byte("invalid-")) {
+		// Only the obsolete parent differs. The independently named active
+		// header/body, canonical proof, and deferred identity remain valid.
+		bad := bytes.Clone(w.rows[0].Literal)
+		bad[32] = 1
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 2, w.rows[0].Key, bad) == nil, "invalid own header parent")
+		w.rows[0].Literal = bad
+	}
+	return w, hash, family
+}
+
+func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
+	w, hash, family := generationDriftWorld(t, kind, rank)
 	key := bytes.Clone(hash[:])
 	if rank == 5 {
 		key = mdbx.UndoManifestKey(hash)
@@ -611,12 +749,15 @@ func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
 	want := slices.Clone(w.rows)
 	want[0].Literal, want[1].Literal = nil, nil
 	if rank == 4 {
-		want[3].Literal, want[4].Literal = []byte{0x7f}, nil
+		want[3].Literal = []byte{0x7f}
+		if kind == "body" {
+			want[4].Literal = nil
+		}
 	} else if !entry {
 		want[4].Literal = []byte{0x7f}
 	}
 	expected := generationTerminal(w.a)
-	if kind == "defer" {
+	if len(w.a.Cleanup.Spans) > 1 {
 		expected = w.a
 		expected.Cleanup = &mdbx.CleanupV1{Spans: slices.Clone(w.a.Cleanup.Spans[1:])}
 	}
