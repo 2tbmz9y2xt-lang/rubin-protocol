@@ -444,18 +444,10 @@ func compactCandidateInputCases(t *testing.T) {
 			profile, short, prefilled, want uint64
 			accepted                        bool
 		}{
-			{1, 0, 0, 0, false},
-			{2, 0, 0, 0, false},
-			{1, 72_000_000, 0, 72_000_000, true},
-			{1, 72_000_001, 0, 0, false},
-			{2, 280_991, 0, 280_991, true},
-			{2, 280_992, 0, 0, false},
-			{1, ^uint64(0), 2, 0, false},
-			{2, ^uint64(0), 2, 0, false},
-			{1, 2, ^uint64(0), 0, false},
-			{2, 2, ^uint64(0), 0, false},
-			{0, 1, 0, 0, false},
-			{3, 1, 0, 0, false},
+			{1, 0, 0, 0, false}, {2, 0, 0, 0, false}, {1, 72_000_000, 0, 72_000_000, true},
+			{1, 72_000_001, 0, 0, false}, {2, 280_991, 0, 280_991, true}, {2, 280_992, 0, 0, false},
+			{1, ^uint64(0), 2, 0, false}, {2, ^uint64(0), 2, 0, false}, {1, 2, ^uint64(0), 0, false},
+			{2, 2, ^uint64(0), 0, false}, {0, 1, 0, 0, false}, {3, 1, 0, 0, false},
 		} {
 			got, err := compactCandidateEntryCount(row.profile, row.short, row.prefilled)
 			if got != row.want || (row.accepted && err != nil) || (!row.accepted && err != errCompactCandidateInput) {
@@ -767,7 +759,7 @@ func compactCandidateObserverCases(t *testing.T) {
 	}{
 		{"ABSENT_nil", absent, nil}, {"PRESENT_fit", present, nil}, {"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault}, {"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
 		{"PRESENT_over", node.CompactCandidateRead{Disposition: 1, Raw: append(slices.Clone(raw), 0)}, errCompactCandidateResource},
-		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource}, {"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault}, {"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault}, {"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
+		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource}, {"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault}, {"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault}, {"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault}, {"ABSENT_empty", node.CompactCandidateRead{Disposition: 2, Raw: []byte{}}, errCompactCandidateFault},
 	} {
 		for _, prior := range [][]byte{nil, slices.Clone(raw)} {
 			t.Run(fmt.Sprintf("%s/prior%v", row.name, prior != nil), func(t *testing.T) {

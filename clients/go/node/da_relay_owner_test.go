@@ -7964,14 +7964,20 @@ func compactDASnapshotFaults(t *testing.T) {
 				if slices.Contains([]string{"incomplete_C", "commit_index1", "commit_count0"}, row.name) {
 					target = txs[1]
 				}
+				targets := []daNonReplayTx{target}
+				if state == 1 && row.name == "nil_chunks" {
+					targets = append(targets, txs[1])
+				}
 				if row.name != "extra_locator" {
-					for _, different := range []bool{false, true} {
-						id := CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}
-						if different {
-							id.WTxID[0] ^= 1
-						}
-						for _, maxBytes := range []uint64{0, uint64(len(target.raw))} {
-							requireCompactDAPreservedRead(t, f, id, maxBytes, 3, nil)
+					for _, target := range targets {
+						for _, different := range []bool{false, true} {
+							id := CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}
+							if different {
+								id.WTxID[0] ^= 1
+								}
+							for _, maxBytes := range []uint64{0, uint64(len(target.raw))} {
+								requireCompactDAPreservedRead(t, f, id, maxBytes, 3, nil)
+							}
 						}
 					}
 				}
@@ -7982,7 +7988,9 @@ func compactDASnapshotFaults(t *testing.T) {
 				if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != len(txs)+1 {
 					t.Fatalf("state%d %s next snapshot failed", state, row.name)
 				}
-				requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}, uint64(len(target.raw)), 1, target.raw)
+				for _, target := range targets {
+					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}, uint64(len(target.raw)), 1, target.raw)
+				}
 			})
 		}
 	}
