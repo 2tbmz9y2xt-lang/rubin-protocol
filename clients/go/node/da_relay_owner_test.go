@@ -8219,6 +8219,45 @@ func compactDAPopulation(t *testing.T) {
 			}
 		})
 	}
+	if err := f.relay.ReleasePeerQuotaKey("population"); err != nil {
+		t.Fatal(err)
+	}
+	cID := [32]byte{0xc1}
+	if record := f.relay.sets[cID]; len(f.relay.sets) != 1 || record.state != 2 || len(record.chunks) != 2 || record.commit.member == nil {
+		t.Fatal("quota release did not leave exactly the complete C record")
+	}
+	afterRelease := compactDAImage(t, f)
+	want = map[CompactCandidateIdentity]bool{}
+	for _, tx := range txs {
+		id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+		if tx.spec.daID == cID {
+			want[id] = true
+			requireCompactDAPreservedRead(t, f, id, uint64(len(tx.raw)), 1, tx.raw)
+			continue
+		}
+		for _, different := range []bool{false, true} {
+			observed := id
+			if different {
+				observed.WTxID[0] ^= 1
+			}
+			for _, maxBytes := range []uint64{0, uint64(len(tx.raw))} {
+				requireCompactDAPreservedRead(t, f, observed, maxBytes, 2, nil)
+			}
+		}
+	}
+	ids, ok = f.relay.CompactDAIdentities(f.mp)
+	if !ok || len(ids) != 3 {
+		t.Fatalf("post-release C snapshot=(%v,%v), want3", ids, ok)
+	}
+	for _, id := range ids {
+		if !want[id] {
+			t.Fatalf("post-release C snapshot unexpected/duplicate member=%+v", id)
+		}
+		delete(want, id)
+	}
+	if len(want) != 0 || !reflect.DeepEqual(afterRelease, compactDAImage(t, f)) {
+		t.Fatal("post-release C snapshot/read incomplete or changed owner")
+	}
 }
 
 func compactDACanonical(t *testing.T) {
