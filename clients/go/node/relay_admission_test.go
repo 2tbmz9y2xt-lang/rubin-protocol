@@ -514,7 +514,7 @@ func TestRelayAdmissionDispositionTypedProducerMappings(t *testing.T) {
 // exact candidate is the retained-identity-mismatch invariant, i.e. INTERNAL.
 func TestRelayAdmissionDispositionRetainedProvesResidency(t *testing.T) {
 	entry := &mempoolEntry{txid: [32]byte{0x01}, wtxid: [32]byte{0x02}, weight: 1, size: 1}
-	mp := &Mempool{txs: map[[32]byte]*mempoolEntry{entry.txid: entry}}
+	mp := &Mempool{relations: buildMempoolRelations(map[[32]byte]*mempoolEntry{entry.txid: entry}, nil)}
 
 	probe := &relayAdmissionProbe{}
 	mp.noteRetainedLocked(entry, probe)
@@ -567,7 +567,7 @@ func TestRelayAdmissionDispositionDuplicateWtxidBranch(t *testing.T) {
 		t.Fatalf("ParseTx(tx2): %v", err)
 	}
 	h.mp.mu.Lock()
-	h.mp.wtxids[tx2Wtxid] = txID(t, tx1)
+	h.mp.relations.putReverse(tx2Wtxid, txID(t, tx1))
 	h.mp.mu.Unlock()
 
 	got := h.mp.AddRemoteTxForRelay(tx2, h.context())
@@ -1469,7 +1469,7 @@ func admissionCounters(mp *Mempool) [7]uint64 {
 		mp.admitRejected.Load(),
 		mp.admitUnavailable.Load(),
 		mp.evictedResidentTotal.Load(),
-		uint64(len(mp.txs)),
+		uint64(len(mp.relations.forward)),
 		uint64(mp.usedBytes),
 	}
 }

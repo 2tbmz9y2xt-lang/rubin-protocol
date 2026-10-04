@@ -253,7 +253,7 @@ func TestDisconnectTipPendingOutpointAdvancesOneGenerationWithoutRequeue(t *test
 		t.Fatalf("AddTx(spend): %v", err)
 	}
 	f.mempool.mu.Lock()
-	residentToken := f.mempool.txs[spendID].token
+	residentToken := mempoolTestEntry(f.mempool, spendID).token
 	f.mempool.mu.Unlock()
 	beforeDisconnect := mustAdmissionContext(t, f.owner, "before the standalone disconnect")
 

@@ -142,6 +142,7 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 	}
 	cfg = normalizeMempoolConfig(cfg)
 	return &Mempool{
+		relations:         buildMempoolRelations(make(map[[32]byte]*mempoolEntry), make(map[[32]byte][32]byte)),
 		chainState:        chainState,
 		blockStore:        blockStore,
 		chainID:           chainID,
@@ -150,8 +151,6 @@ func NewMempoolWithConfig(chainState *ChainState, blockStore *BlockStore, chainI
 		maxBytes:          cfg.MaxBytes,
 		lowWaterBytes:     defaultMempoolLowWaterBytes(cfg.MaxBytes),
 		currentMinFeeRate: DefaultMempoolMinFeeRate,
-		txs:               make(map[[32]byte]*mempoolEntry),
-		wtxids:            make(map[[32]byte][32]byte),
 		// Exactly one owner per mempool, initialized from the bound
 		// ChainState stable tip. Nothing else constructs one.
 		pendingOutpoints: newPendingOutpointOwner(pendingOutpointTipOf(chainState)),
@@ -183,7 +182,7 @@ func (m *Mempool) Len() int {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.txs)
+	return len(m.relations.forward)
 }
 
 // BytesUsed returns the total raw byte size of transactions currently
@@ -252,7 +251,7 @@ func (m *Mempool) Stats() MempoolStats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return MempoolStats{
-		TxCount:              len(m.txs),
+		TxCount:              len(m.relations.forward),
 		BytesUsed:            m.usedBytes,
 		MaxBytes:             m.maxBytes,
 		LowWaterBytes:        m.effectiveLowWaterBytesLocked(),

@@ -87,7 +87,7 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 	if candidateSize > maxBytes {
 		return mempoolCapacityState{}, selectRelayDisposition(txAdmitUnavailable(fmt.Sprintf("mempool byte limit exceeded: current=%d tx=%d max=%d", m.usedBytes, candidate.size, m.maxBytes)), RelayAdmissionCapacity)
 	}
-	countPressure := len(m.txs) >= m.maxTxs
+	countPressure := len(m.relations.forward) >= m.maxTxs
 	bytePressure := usedBytes > maxBytes-candidateSize
 	targetBytes := maxBytes
 	if bytePressure {
@@ -99,7 +99,7 @@ func (m *Mempool) capacityStateLocked(candidate *mempoolEntry) (mempoolCapacityS
 		usedBytes:     usedBytes,
 		targetBytes:   targetBytes,
 		totalBytes:    usedBytes + candidateSize,
-		totalCount:    len(m.txs) + 1,
+		totalCount:    len(m.relations.forward) + 1,
 		countPressure: countPressure,
 		bytePressure:  bytePressure,
 	}, nil
@@ -117,9 +117,10 @@ func (state mempoolCapacityState) underPressure() bool {
 }
 
 func (m *Mempool) evictionPlanPoolLocked(candidate *mempoolEntry) ([]mempoolEvictionPlanEntry, error) {
-	planPool := make([]mempoolEvictionPlanEntry, 0, len(m.txs)+1)
-	admissionSeqs := make(map[uint64][32]byte, len(m.txs))
-	for _, entry := range m.txs {
+	planPool := make([]mempoolEvictionPlanEntry, 0, len(m.relations.forward)+1)
+	admissionSeqs := make(map[uint64][32]byte, len(m.relations.forward))
+	for _, row := range m.relations.forward {
+		entry := row.entry
 		if err := validateEvictionMetadata(entry); err != nil {
 			return nil, err
 		}

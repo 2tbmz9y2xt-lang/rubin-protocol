@@ -336,7 +336,7 @@ func readReorgRefusal(e *SyncEngine, mp *Mempool, relay *DARelayState, daCalls *
 	owner.mu.Unlock()
 	relay.mu.Unlock()
 	mp.mu.RLock()
-	out.StandardMap, out.UsedBytes, out.AdmissionSeq, out.Fee = mp.txs, mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate
+	out.StandardMap, out.UsedBytes, out.AdmissionSeq, out.Fee = mp.relations.forward, mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate
 	mp.mu.RUnlock()
 	relay.mu.Lock()
 	out.DAMap = relay.sets

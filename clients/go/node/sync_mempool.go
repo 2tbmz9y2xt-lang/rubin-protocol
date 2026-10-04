@@ -29,8 +29,9 @@ func snapshotMempool(m *Mempool) (mempoolSnapshot, error) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entries := make([]mempoolEntry, 0, len(m.txs))
-	for _, entry := range m.txs {
+	entries := make([]mempoolEntry, 0, len(m.relations.forward))
+	for _, row := range m.relations.forward {
+		entry := row.entry
 		entries = append(entries, cloneMempoolEntry(entry))
 	}
 	sort.Slice(entries, func(i, j int) bool {
@@ -262,8 +263,7 @@ type canonicalMempoolPlan struct {
 	owner             *PendingOutpointOwner
 	snapshot          mempoolSnapshot
 	snapshotUsedBytes int
-	txs               map[[32]byte]*mempoolEntry
-	wtxids            map[[32]byte][32]byte
+	relations         mempoolRelations
 	usedBytes         int
 	lastAdmissionSeq  uint64
 	currentMinFeeRate uint64
@@ -786,15 +786,15 @@ func canonicalMempoolLiveScalarsMatch(m *Mempool, snapshot mempoolSnapshot) bool
 }
 
 func canonicalMempoolLiveIndexCardinalityMatches(m *Mempool, snapshot mempoolSnapshot, owner *PendingOutpointOwner) bool {
-	return m.pendingOutpoints == owner && len(m.txs) == len(snapshot.entries) && len(m.wtxids) == len(snapshot.entries)
+	return m.pendingOutpoints == owner && len(m.relations.forward) == len(snapshot.entries) && len(m.relations.reverse) == len(snapshot.entries)
 }
 
 func validateCanonicalMempoolLiveEntryLocked(m *Mempool, entry mempoolEntry) error {
-	live, ok := m.txs[entry.txid]
+	live, ok := m.relations.entry(entry.txid)
 	if !ok || !sameMempoolEntry(live, entry) {
 		return fmt.Errorf("mempool txid index mismatch for %x", entry.txid)
 	}
-	if txid, ok := m.wtxids[entry.wtxid]; !ok || txid != entry.txid {
+	if txid, ok := m.relations.reverseTarget(entry.wtxid); !ok || txid != entry.txid {
 		return fmt.Errorf("mempool wtxid index mismatch for %x", entry.txid)
 	}
 	return nil
@@ -1080,8 +1080,7 @@ func buildCanonicalMempoolPlan(
 		owner:             ctx.owner,
 		snapshot:          snapshot,
 		snapshotUsedBytes: snapshotUsedBytes,
-		txs:               txs,
-		wtxids:            wtxids,
+		relations:         buildMempoolRelations(txs, wtxids),
 		usedBytes:         usedBytes,
 		lastAdmissionSeq:  snapshot.lastAdmissionSeq,
 		currentMinFeeRate: canonicalMempoolFeeFloor(snapshot.currentMinFeeRate, usedBytes, ctx.lowWater, decayRows),
@@ -1135,8 +1134,7 @@ func (m *Mempool) publishCanonicalMempoolPlan(plan canonicalMempoolPlan, clearTr
 
 func (m *Mempool) publishCanonicalMempoolPlanLocked(plan canonicalMempoolPlan, owner *PendingOutpointOwner) {
 	owner.publishRestoreLocked(plan.pending, plan.ownerIndex)
-	m.txs = plan.txs
-	m.wtxids = plan.wtxids
+	m.relations = plan.relations
 	m.usedBytes = plan.usedBytes
 	m.lastAdmissionSeq = plan.lastAdmissionSeq
 	m.currentMinFeeRate = plan.currentMinFeeRate
