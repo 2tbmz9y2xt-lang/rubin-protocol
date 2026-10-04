@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"path/filepath"
@@ -1637,7 +1640,7 @@ func (f *pendingOutpointSyncFixture) breakResidentClaim(t *testing.T, txid [32]b
 	}
 	f.mempool.mu.Lock()
 	defer f.mempool.mu.Unlock()
-	f.mempool.txs[txid].token = token
+	mempoolTestEntry(f.mempool, txid).token = token
 }
 
 func ownerClaimCount(owner *PendingOutpointOwner) (outpoints int, claims int, highWater uint64) {
@@ -2084,14 +2087,14 @@ func fingerprintPool(pool *Mempool) poolFingerprint {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	return poolFingerprint{
-		len:               len(pool.txs),
+		len:               len(pool.relations.forward),
 		bytesUsed:         pool.usedBytes,
-		wtxids:            len(pool.wtxids),
+		wtxids:            len(pool.relations.reverse),
 		lastAdmissionSeq:  pool.lastAdmissionSeq,
 		currentMinFeeRate: pool.currentMinFeeRate,
 		admission:         pool.AdmissionCounts(),
 		stats: MempoolStats{
-			TxCount: len(pool.txs), BytesUsed: pool.usedBytes, MaxBytes: pool.maxBytes,
+			TxCount: len(pool.relations.forward), BytesUsed: pool.usedBytes, MaxBytes: pool.maxBytes,
 			LowWaterBytes: pool.effectiveLowWaterBytesLocked(), MinFeeRate: pool.currentMinFeeRateLocked(),
 			EvictedResidentTotal: pool.evictedResidentTotal.Load(),
 		},
@@ -3133,10 +3136,11 @@ func TestCanonicalCutoverPersistenceTruthTable(t *testing.T) {
 }
 
 // TestCanonicalCutoverNoFalliblePostNewPublication proves the publication step
-// cannot fail: none of its three functions can return an error at all, and once
+// cannot fail: its standard owner closure only publishes prebuilt state, and once
 // the canonical index write returns, no further durable write and no provider
 // callback runs before the transition returns.
 func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
+	requireCanonicalStandardPublicationStructure(t)
 	for _, fn := range []any{
 		(*canonicalTransition).publishCanonicalTransition,
 		(*preparedCanonicalDAImage).publish,
@@ -3208,6 +3212,360 @@ func TestCanonicalCutoverNoFalliblePostNewPublication(t *testing.T) {
 	ctx, ok := owner.AdmissionContext()
 	if !ok || ctx.StableTip.Hash != f.engine.chainState.view().tipHash {
 		t.Fatalf("owner=%+v ok=%v, want the transition closed with stable tip C1", ctx, ok)
+	}
+}
+
+// This bounded source guard owns the no-preparation architecture contract:
+// runtime fixtures cannot detect a void allocator that is inert on a full store.
+// Every non-lock call in the standard publication closure is itself inspected.
+func requireCanonicalStandardPublicationStructure(t *testing.T) {
+	t.Helper()
+	functions, types := canonicalStandardPublicationSources(t)
+	for _, row := range []struct {
+		name  string
+		roles []string
+		want  []string
+	}{
+		{"publishCanonicalMempoolPlan", []string{"pool", "plan", "clearTransition"}, []string{"call:pool.mu.Lock()", "call:owner.mu.Lock()", "call:pool.publishCanonicalMempoolPlanLocked(plan,owner)", "if:clearTransition", "owner.inTransition=false", "end-if", "call:owner.mu.Unlock()", "call:pool.mu.Unlock()"}},
+		{"publishCanonicalMempoolPlanLocked", []string{"pool", "plan", "owner"}, []string{"call:owner.publishRestoreLocked(plan.pending,plan.ownerIndex)", "pool.relations=plan.relations", "pool.usedBytes=plan.usedBytes", "pool.lastAdmissionSeq=plan.lastAdmissionSeq", "pool.currentMinFeeRate=plan.currentMinFeeRate"}},
+		{"publishRestoreLocked", []string{"owner", "snap", "candidate"}, []string{"owner.byOutpoint=candidate.byOutpoint", "owner.byToken=candidate.byToken", "if:snap.tokenHighWater>owner.tokenHighWater", "owner.tokenHighWater=snap.tokenHighWater", "end-if", "if:snap.generationHighWater>owner.generation", "owner.generation=snap.generationHighWater", "end-if", "owner.stableTip=snap.stableTip"}},
+	} {
+		receiver := "Mempool"
+		if row.name == "publishRestoreLocked" {
+			receiver = "PendingOutpointOwner"
+		}
+		fn := functions[receiver+"."+row.name]
+		if fn == nil || fn.Recv == nil {
+			t.Fatalf("postcommit standard publication: missing %s", row.name)
+		}
+		allowed := canonicalStandardPublicationCalls(row.want)
+		aliases := canonicalStandardPublicationAliases(fn, row.roles)
+		if aliases == nil {
+			t.Fatalf("postcommit standard publication: changed %s inputs", row.name)
+		}
+		got, valid := canonicalStandardPublicationEvents(fn.Body, aliases, types, allowed)
+		if !valid || !slices.Equal(got, row.want) {
+			t.Fatalf("postcommit standard publication: %s constructs/prepares state or changes prebuilt publication order: %v", row.name, got)
+		}
+	}
+	requireCanonicalStandardPublicationProbes(t, types)
+}
+
+func canonicalStandardPublicationSources(t *testing.T) (map[string]*ast.FuncDecl, map[string]ast.Expr) {
+	t.Helper()
+	functions, types := map[string]*ast.FuncDecl{}, map[string]ast.Expr{}
+	for _, path := range []string{"sync_mempool.go", "pending_outpoint_owner_transition.go", "mempool.go", "pending_outpoint_owner.go"} {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !canonicalStandardPublicationDeclarations(file, functions, types) {
+			t.Fatal("postcommit standard publication: ambiguous receiver declaration")
+		}
+	}
+	return functions, types
+}
+
+func canonicalStandardPublicationDeclarations(file *ast.File, functions map[string]*ast.FuncDecl, types map[string]ast.Expr) bool {
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			key := canonicalStandardPublicationMethod(decl)
+			if key == "" {
+				continue
+			}
+			if functions[key] != nil {
+				return false
+			}
+			functions[key] = decl
+		case *ast.GenDecl:
+			for _, spec := range decl.Specs {
+				if spec, ok := spec.(*ast.TypeSpec); ok {
+					types[spec.Name.Name] = spec.Type
+				}
+			}
+		}
+	}
+	return true
+}
+
+func canonicalStandardPublicationMethod(fn *ast.FuncDecl) string {
+	if fn.Recv == nil {
+		return ""
+	}
+	receiver, pointer := fn.Recv.List[0].Type.(*ast.StarExpr)
+	if !pointer {
+		return ""
+	}
+	name, named := receiver.X.(*ast.Ident)
+	if !named {
+		return ""
+	}
+	return name.Name + "." + fn.Name.Name
+}
+
+func canonicalStandardPublicationAliases(fn *ast.FuncDecl, roles []string) map[string]string {
+	aliases := map[string]string{"plan.owner": "owner"}
+	fields := append(slices.Clone(fn.Recv.List), fn.Type.Params.List...)
+	index := 0
+	for _, field := range fields {
+		for _, name := range field.Names {
+			if index >= len(roles) {
+				return nil
+			}
+			aliases[name.Name] = roles[index]
+			index++
+		}
+	}
+	if index != len(roles) {
+		return nil
+	}
+	return aliases
+}
+
+func canonicalStandardPublicationPath(expr ast.Expr, aliases map[string]string) string {
+	switch expr := ast.Unparen(expr).(type) {
+	case *ast.Ident:
+		if path, ok := aliases[expr.Name]; ok {
+			return path
+		}
+		return expr.Name
+	case *ast.SelectorExpr:
+		path := canonicalStandardPublicationPath(expr.X, aliases) + "." + expr.Sel.Name
+		if resolved, ok := aliases[path]; ok {
+			return resolved
+		}
+		return path
+	case *ast.BasicLit:
+		return expr.Value
+	case *ast.BinaryExpr:
+		return canonicalStandardPublicationPath(expr.X, aliases) + expr.Op.String() + canonicalStandardPublicationPath(expr.Y, aliases)
+	}
+	return ""
+}
+
+func canonicalStandardPublicationScalarType(expr ast.Expr, types map[string]ast.Expr, seen map[string]bool) bool {
+	switch expr := ast.Unparen(expr).(type) {
+	case *ast.StructType:
+		return true
+	case *ast.Ident:
+		if seen[expr.Name] || types[expr.Name] == nil {
+			return false
+		}
+		seen[expr.Name] = true
+		return canonicalStandardPublicationScalarType(types[expr.Name], types, seen)
+	case *ast.ArrayType:
+		return expr.Len != nil
+	}
+	return false
+}
+
+func canonicalStandardPublicationAssignments(node *ast.AssignStmt, aliases map[string]string) ([]string, bool) {
+	if len(node.Lhs) != 1 || len(node.Rhs) != 1 {
+		return nil, false
+	}
+	var events []string
+	for i, lhs := range node.Lhs {
+		path := canonicalStandardPublicationPath(node.Rhs[i], aliases)
+		if id, local := ast.Unparen(lhs).(*ast.Ident); local {
+			if node.Tok == token.ASSIGN || node.Tok == token.DEFINE {
+				aliases[id.Name] = path
+			} else {
+				delete(aliases, id.Name)
+			}
+			continue
+		}
+		if node.Tok != token.ASSIGN {
+			return nil, false
+		}
+		events = append(events, canonicalStandardPublicationPath(lhs, aliases)+"="+path)
+	}
+	return events, true
+}
+
+func canonicalStandardPublicationCalls(events []string) map[string]bool {
+	allowed := map[string]bool{}
+	for _, event := range events {
+		if call, ok := strings.CutPrefix(event, "call:"); ok {
+			path, _, _ := strings.Cut(call, "(")
+			allowed[path] = true
+		}
+	}
+	return allowed
+}
+
+func canonicalStandardPublicationCall(node *ast.CallExpr, aliases map[string]string) string {
+	var arguments []string
+	for _, arg := range node.Args {
+		arguments = append(arguments, canonicalStandardPublicationPath(arg, aliases))
+	}
+	return "call:" + canonicalStandardPublicationPath(node.Fun, aliases) + "(" + strings.Join(arguments, ",") + ")"
+}
+
+// Only the statement forms used by these three publication bodies are allowed.
+// This is a bounded source profile, not a general Go binding/equivalence checker.
+func canonicalStandardPublicationNodeValid(node ast.Node, aliases map[string]string, types map[string]ast.Expr, allowed map[string]bool) bool {
+	switch node := node.(type) {
+	case *ast.CallExpr:
+		return allowed[canonicalStandardPublicationPath(node.Fun, aliases)]
+	case *ast.CompositeLit:
+		return len(node.Elts) == 0 && canonicalStandardPublicationScalarType(node.Type, types, map[string]bool{})
+	case *ast.Ident:
+		_, local := aliases[node.Name]
+		return local || canonicalStandardPublicationPreparedPath(node.Name, allowed)
+	case *ast.SelectorExpr:
+		return canonicalStandardPublicationPreparedPath(canonicalStandardPublicationPath(node, aliases), allowed)
+	case *ast.BinaryExpr:
+		path := canonicalStandardPublicationPath(node, aliases)
+		return path == "snap.tokenHighWater>owner.tokenHighWater" || path == "snap.generationHighWater>owner.generation"
+	case *ast.BasicLit, *ast.ParenExpr:
+		return true
+	case *ast.BlockStmt, *ast.ExprStmt, *ast.AssignStmt, *ast.IfStmt, *ast.IncDecStmt:
+		return true
+	case ast.Stmt, ast.Expr:
+		return false
+	}
+	return true
+}
+
+func canonicalStandardPublicationPreparedPath(path string, allowed map[string]bool) bool {
+	switch path {
+	case "pool", "plan", "owner", "snap", "candidate", "clearTransition", "false", "true", "_",
+		"pool.mu", "owner.mu", "pool.relations", "plan.relations", "pool.usedBytes", "plan.usedBytes",
+		"pool.lastAdmissionSeq", "plan.lastAdmissionSeq", "pool.currentMinFeeRate", "plan.currentMinFeeRate",
+		"plan.pending", "plan.ownerIndex", "owner.byOutpoint", "candidate.byOutpoint", "owner.byToken", "candidate.byToken",
+		"snap.tokenHighWater", "owner.tokenHighWater", "snap.generationHighWater", "owner.generation", "snap.stableTip", "owner.stableTip", "owner.inTransition":
+		return true
+	}
+	return allowed[path]
+}
+
+func canonicalStandardPublicationConditionalWrites(body *ast.BlockStmt) bool {
+	for _, statement := range body.List {
+		assignment, ok := statement.(*ast.AssignStmt)
+		if !ok || len(assignment.Lhs) != 1 {
+			return false
+		}
+		if _, selector := ast.Unparen(assignment.Lhs[0]).(*ast.SelectorExpr); !selector {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalStandardPublicationEvents(body *ast.BlockStmt, aliases map[string]string, types map[string]ast.Expr, allowed map[string]bool) ([]string, bool) {
+	var events []string
+	valid := true
+	ast.Inspect(body, func(node ast.Node) bool {
+		if block, ok := node.(*ast.BlockStmt); ok && block != body {
+			valid = false
+			return false
+		}
+		if !canonicalStandardPublicationNodeValid(node, aliases, types, allowed) {
+			valid = false
+			return false
+		}
+		switch node := node.(type) {
+		case *ast.AssignStmt:
+			assignments, assignmentsValid := canonicalStandardPublicationAssignments(node, aliases)
+			events = append(events, assignments...)
+			valid = assignmentsValid && valid
+		case *ast.IncDecStmt:
+			if id, local := ast.Unparen(node.X).(*ast.Ident); local {
+				aliases[id.Name] = "inert"
+			} else {
+				valid = false
+			}
+		case *ast.IfStmt:
+			if node.Init != nil || node.Else != nil || !canonicalStandardPublicationConditionalWrites(node.Body) || !canonicalStandardPublicationNodeValid(ast.Unparen(node.Cond), aliases, types, allowed) {
+				valid = false
+				return false
+			}
+			events = append(events, "if:"+canonicalStandardPublicationPath(node.Cond, aliases))
+			branch, branchValid := canonicalStandardPublicationEvents(node.Body, aliases, types, allowed)
+			events = append(events, branch...)
+			events = append(events, "end-if")
+			valid = branchValid && valid
+			return false
+		case *ast.CallExpr:
+			events = append(events, canonicalStandardPublicationCall(node, aliases))
+		case *ast.SelectorExpr, *ast.CompositeLit:
+			return false
+		}
+		return true
+	})
+	return events, valid
+}
+
+func requireCanonicalStandardPublicationProbes(t *testing.T, types map[string]ast.Expr) {
+	t.Helper()
+	declarations, err := parser.ParseFile(token.NewFileSet(), "declarations.go", "package node\ntype PendingOutpointToken struct{}\nfunc (m *Mempool) publishCanonicalMempoolPlanLocked(){ _ = 1 / plan.usedBytes }\nfunc (m *canonicalMempoolPlan) publishCanonicalMempoolPlanLocked(){ type PendingOutpointToken []byte }", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, declaredTypes := map[string]*ast.FuncDecl{}, map[string]ast.Expr{}
+	if !canonicalStandardPublicationDeclarations(declarations, selected, declaredTypes) || selected["Mempool.publishCanonicalMempoolPlanLocked"] != declarations.Decls[1] || declaredTypes["PendingOutpointToken"] != declarations.Decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec).Type {
+		t.Fatal("postcommit standard publication: declaration collision redirected owner or package type")
+	}
+	restore := []string{"call:owner.publishRestoreLocked(plan.pending,plan.ownerIndex)"}
+	locked := []string{"call:pool.publishCanonicalMempoolPlanLocked(plan,owner)"}
+	for _, probe := range []struct {
+		body  string
+		valid bool
+		want  []string
+	}{
+		{"pool.relations.ensureBuckets()", false, nil},
+		{"_ = buildMempoolRelations(nil, nil)", false, nil},
+		{"_ = alwaysNil()", false, nil},
+		{"alias := buildMempoolRelations; _ = alias(nil, nil)", false, nil},
+		{"alias := pool.relations.ensureBuckets; (alias)()", false, nil},
+		{"(pool.relations.ensureBuckets)()", false, nil},
+		{"x := make(map[int]int); _ = x", false, nil},
+		{"x := []byte{1}; _ = x", false, nil},
+		{"x := &mempoolRelations{}; _ = x", false, nil},
+		{"x := &(mempoolRelations{}); _ = x", false, nil},
+		{"func() { pool.relations.ensureBuckets() }()", false, nil},
+		{"x := PendingOutpointToken{}; _ = x", true, nil},
+		{"x := mempoolRelations{}; _ = x", true, nil},
+		{"p := plan.relations; pool.relations = (p)", true, []string{"pool.relations=plan.relations"}},
+		{"pool.usedBytes += plan.usedBytes", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"pool.usedBytes++", false, nil},
+		{"owner.generation--", false, nil},
+		{"n := plan.usedBytes; n++; pool.usedBytes = n", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"n := plan.usedBytes; n--; pool.usedBytes = n", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"write: pool.usedBytes++", false, nil},
+		{"n := plan.usedBytes; n++; n--; _ = n", true, nil},
+		{"if clearTransition { var owner *PendingOutpointOwner; owner.inTransition = false }", false, []string{"if:clearTransition", "owner.inTransition=false", "end-if"}},
+		{"owner.publishRestoreLocked(other, plan.ownerIndex)", false, restore},
+		{"owner.publishRestoreLocked(plan.pending, other)", false, restore},
+		{"pool.publishCanonicalMempoolPlanLocked(other, owner)", false, locked},
+		{"pool.publishCanonicalMempoolPlanLocked(plan, other)", false, locked},
+		{"p := plan.pending; i := plan.ownerIndex; (owner.publishRestoreLocked)((p), (i))", true, restore},
+		{"p := plan; o := owner; (pool.publishCanonicalMempoolPlanLocked)((p), (o))", true, locked},
+		{"empty := mempoolRelations{}; prepared := plan.relations; empty, prepared = prepared, empty; pool.relations = prepared", false, []string{"pool.relations=plan.relations"}},
+		{"prepared := mempoolRelations{}; { prepared := plan.relations; _ = prepared }; pool.relations = prepared", false, []string{"pool.relations=plan.relations"}},
+		{"tip := PendingOutpointTip{}; if snap.tokenHighWater > owner.tokenHighWater { tip = snap.stableTip }; owner.stableTip = tip", false, []string{"if:snap.tokenHighWater>owner.tokenHighWater", "end-if", "owner.stableTip=snap.stableTip"}},
+		{"a, b := pool.relations.ensureBuckets, pool.mu.Unlock; a, b = b, a; b()", false, []string{"call:pool.mu.Unlock()"}},
+		{"next := pool.relations.ensureBuckets; if clearTransition { next := pool.mu.Unlock; _ = next }; next()", false, []string{"if:clearTransition", "end-if", "call:pool.mu.Unlock()"}},
+		{"_ = 1 / plan.usedBytes", false, nil},
+		{"_ = raw[0]", false, nil},
+		{"_ = raw[:]", false, nil},
+		{"_ = *plan.owner", false, nil},
+		{"_ = <-ready", false, nil},
+		{"if snap.tokenHighWater > owner.tokenHighWater { owner.tokenHighWater = snap.tokenHighWater }", true, []string{"if:snap.tokenHighWater>owner.tokenHighWater", "owner.tokenHighWater=snap.tokenHighWater", "end-if"}},
+		{"if snap.generationHighWater > owner.generation { owner.generation = snap.generationHighWater }", true, []string{"if:snap.generationHighWater>owner.generation", "owner.generation=snap.generationHighWater", "end-if"}},
+		{"if clearTransition { owner.inTransition = false }", true, []string{"if:clearTransition", "owner.inTransition=false", "end-if"}},
+		{"x := 1; _ = x", true, nil},
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "probe.go", "package node\nfunc probe(){"+probe.body+"}", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, valid := canonicalStandardPublicationEvents(file.Decls[0].(*ast.FuncDecl).Body, map[string]string{}, types, canonicalStandardPublicationCalls(probe.want))
+		valid = valid && slices.Equal(got, probe.want)
+		if valid != probe.valid {
+			t.Fatalf("postcommit standard publication: alias/parenthesis/inert probe: %s", probe.body)
+		}
 	}
 }
 

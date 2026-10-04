@@ -54,6 +54,366 @@ type mempoolEntry struct {
 	source       mempoolTxSource
 }
 
+// CompactCandidateIdentity is an admitted standard transaction identity.
+type CompactCandidateIdentity struct {
+	TxID  [32]byte
+	WTxID [32]byte
+}
+
+// CompactCandidateDisposition separates absence, integrity and resource limits.
+type CompactCandidateDisposition uint8
+
+const (
+	CompactCandidatePresent    CompactCandidateDisposition = 1
+	CompactCandidateAbsent     CompactCandidateDisposition = 2
+	CompactCandidateFault      CompactCandidateDisposition = 3
+	CompactCandidateOverBudget CompactCandidateDisposition = 4
+)
+
+// CompactCandidateRead owns Raw exactly when Disposition is PRESENT.
+type CompactCandidateRead struct {
+	Disposition CompactCandidateDisposition
+	Raw         []byte
+}
+
+// Rows own identity values; entry is the stable retained payload/claim pointer.
+// Nil tables, missing keys and present nil payloads remain distinct.
+type mempoolForwardRow struct {
+	key   [32]byte
+	txid  [32]byte
+	wtxid [32]byte
+	entry *mempoolEntry
+	nodes [3]mempoolRelationNode
+}
+
+type mempoolReverseRow struct {
+	key   [32]byte
+	txid  [32]byte
+	nodes [2]mempoolRelationNode
+}
+
+type mempoolRelationNode struct {
+	previous, next *mempoolRelationNode
+	bucket         *mempoolRelationBucket
+	buckets        map[[32]byte]*mempoolRelationBucket
+	key            [32]byte
+	forward        *mempoolForwardRow
+	reverse        *mempoolReverseRow
+}
+
+type mempoolRelationBucket struct {
+	count int
+	head  *mempoolRelationNode
+}
+
+// Each fixed dimension has exact incidence count and a sole-head witness.
+// Mutations unlink through row handles; queries never traverse bucket degree.
+type mempoolRelations struct {
+	forward map[[32]byte]*mempoolForwardRow
+	reverse map[[32]byte]*mempoolReverseRow
+	indexed map[[32]byte]*mempoolRelationBucket
+	txids   map[[32]byte]*mempoolRelationBucket
+	wtxids  map[[32]byte]*mempoolRelationBucket
+	rkeys   map[[32]byte]*mempoolRelationBucket
+	targets map[[32]byte]*mempoolRelationBucket
+}
+
+func (r *mempoolRelations) ensure() {
+	if r.forward == nil {
+		r.forward = make(map[[32]byte]*mempoolForwardRow)
+	}
+	if r.reverse == nil {
+		r.reverse = make(map[[32]byte]*mempoolReverseRow)
+	}
+	r.ensureBuckets()
+}
+
+func (r *mempoolRelations) ensureBuckets() {
+	if r.indexed != nil {
+		return
+	}
+	r.indexed = make(map[[32]byte]*mempoolRelationBucket)
+	r.txids = make(map[[32]byte]*mempoolRelationBucket)
+	r.wtxids = make(map[[32]byte]*mempoolRelationBucket)
+	r.rkeys = make(map[[32]byte]*mempoolRelationBucket)
+	r.targets = make(map[[32]byte]*mempoolRelationBucket)
+}
+
+func linkMempoolRelation(buckets map[[32]byte]*mempoolRelationBucket, key [32]byte, node *mempoolRelationNode) {
+	bucket := buckets[key]
+	if bucket == nil {
+		bucket = &mempoolRelationBucket{}
+		buckets[key] = bucket
+	}
+	node.bucket, node.next, node.buckets, node.key = bucket, bucket.head, buckets, key
+	if bucket.head != nil {
+		bucket.head.previous = node
+	}
+	bucket.head = node
+	bucket.count++
+}
+
+func unlinkMempoolRelation(node *mempoolRelationNode) {
+	bucket := node.bucket
+	if bucket == nil {
+		return
+	}
+	if node.previous == nil {
+		bucket.head = node.next
+	} else {
+		node.previous.next = node.next
+	}
+	if node.next != nil {
+		node.next.previous = node.previous
+	}
+	bucket.count--
+	if bucket.count == 0 {
+		delete(node.buckets, node.key)
+	}
+	node.previous, node.next, node.bucket = nil, nil, nil
+	node.buckets = nil
+}
+
+func (r *mempoolRelations) putEntry(key [32]byte, entry *mempoolEntry) {
+	row := mempoolForwardRow{key: key, entry: entry}
+	if entry != nil {
+		row.txid, row.wtxid = entry.txid, entry.wtxid
+	}
+	r.putForward(row)
+}
+
+func (r *mempoolRelations) putForward(input mempoolForwardRow) {
+	r.ensureBuckets()
+	if r.forward == nil {
+		r.forward = make(map[[32]byte]*mempoolForwardRow)
+	}
+	r.deleteForward(input.key)
+	row := &mempoolForwardRow{key: input.key, txid: input.txid, wtxid: input.wtxid, entry: input.entry}
+	r.forward[row.key] = row
+	for i := range row.nodes {
+		row.nodes[i].forward = row
+	}
+	linkMempoolRelation(r.indexed, row.key, &row.nodes[0])
+	if row.entry != nil {
+		linkMempoolRelation(r.txids, row.txid, &row.nodes[1])
+		linkMempoolRelation(r.wtxids, row.wtxid, &row.nodes[2])
+	}
+}
+
+func (r *mempoolRelations) deleteForward(key [32]byte) {
+	row := r.forward[key]
+	if row == nil {
+		return
+	}
+	for i := range row.nodes {
+		unlinkMempoolRelation(&row.nodes[i])
+	}
+	delete(r.forward, key)
+}
+
+func (r *mempoolRelations) putReverse(key, txid [32]byte) {
+	r.ensureBuckets()
+	if r.reverse == nil {
+		r.reverse = make(map[[32]byte]*mempoolReverseRow)
+	}
+	r.deleteReverse(key)
+	row := &mempoolReverseRow{key: key, txid: txid}
+	r.reverse[key] = row
+	for i := range row.nodes {
+		row.nodes[i].reverse = row
+	}
+	linkMempoolRelation(r.rkeys, key, &row.nodes[0])
+	linkMempoolRelation(r.targets, txid, &row.nodes[1])
+}
+
+func (r *mempoolRelations) deleteReverse(key [32]byte) {
+	row := r.reverse[key]
+	if row == nil {
+		return
+	}
+	for i := range row.nodes {
+		unlinkMempoolRelation(&row.nodes[i])
+	}
+	delete(r.reverse, key)
+}
+
+func (r *mempoolRelations) entry(key [32]byte) (*mempoolEntry, bool) {
+	row, ok := r.forward[key]
+	if !ok {
+		return nil, false
+	}
+	return row.entry, true
+}
+
+func (r *mempoolRelations) reverseTarget(key [32]byte) ([32]byte, bool) {
+	row, ok := r.reverse[key]
+	if !ok {
+		return [32]byte{}, false
+	}
+	return row.txid, true
+}
+
+// buildMempoolRelations copies detached identities into independent row/nodes.
+// Payload pointers are deliberately retained for resident/claim identity.
+func buildMempoolRelations(txs map[[32]byte]*mempoolEntry, wtxids map[[32]byte][32]byte) mempoolRelations {
+	var relations mempoolRelations
+	if txs != nil {
+		relations.forward = make(map[[32]byte]*mempoolForwardRow, len(txs))
+	}
+	if wtxids != nil {
+		relations.reverse = make(map[[32]byte]*mempoolReverseRow, len(wtxids))
+	}
+	for key, entry := range txs {
+		relations.putEntry(key, entry)
+	}
+	for key, txid := range wtxids {
+		relations.putReverse(key, txid)
+	}
+	return relations
+}
+
+func soleMempoolForward(bucket *mempoolRelationBucket, row *mempoolForwardRow) bool {
+	if row == nil {
+		return bucket == nil || bucket.count == 0
+	}
+	return bucket != nil && bucket.count == 1 && bucket.head.forward == row
+}
+
+func soleMempoolReverse(bucket *mempoolRelationBucket, row *mempoolReverseRow) bool {
+	if row == nil {
+		return bucket == nil || bucket.count == 0
+	}
+	return bucket != nil && bucket.count == 1 && bucket.head.reverse == row
+}
+
+func (r *mempoolRelations) compactRowValid(row *mempoolForwardRow) bool {
+	return compactMempoolRowMetadataValid(row) && r.compactForwardValid(row) && r.compactReverseValid(row)
+}
+
+func compactMempoolRowMetadataValid(row *mempoolForwardRow) bool {
+	if row.entry == nil {
+		return false
+	}
+	return row.key == row.txid && row.entry.txid == row.txid && row.entry.wtxid == row.wtxid && row.entry.size == len(row.entry.raw)
+}
+
+func (r *mempoolRelations) compactForwardValid(row *mempoolForwardRow) bool {
+	return soleMempoolForward(r.indexed[row.key], row) && soleMempoolForward(r.txids[row.txid], row) && soleMempoolForward(r.wtxids[row.wtxid], row)
+}
+
+func (r *mempoolRelations) compactReverseValid(row *mempoolForwardRow) bool {
+	reverse := r.reverse[row.wtxid]
+	if reverse == nil || reverse.txid != row.key {
+		return false
+	}
+	return soleMempoolReverse(r.rkeys[row.wtxid], reverse) && soleMempoolReverse(r.targets[row.key], reverse)
+}
+
+// CompactStandardIdentities captures all coherent admitted metadata, without
+// copying or parsing raw bytes. An unavailable/incoherent image returns nil,false.
+func (m *Mempool) CompactStandardIdentities() ([]CompactCandidateIdentity, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r := &m.relations
+	if r.forward == nil || r.reverse == nil || len(r.forward) != len(r.reverse) {
+		return nil, false
+	}
+	identities := make([]CompactCandidateIdentity, 0, len(r.forward))
+	for _, row := range r.forward {
+		if !r.compactRowValid(row) {
+			return nil, false
+		}
+		identities = append(identities, CompactCandidateIdentity{TxID: row.txid, WTxID: row.wtxid})
+	}
+	return identities, true
+}
+
+// ReadCompactStandard validates current selected associations before witness
+// absence and budget decisions. Only its owned bounded target is parsed off-lock.
+func (m *Mempool) ReadCompactStandard(identity CompactCandidateIdentity, maxBytes uint64) CompactCandidateRead {
+	if m == nil {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	m.mu.RLock()
+	read := m.compactStandardReadLocked(identity, maxBytes)
+	m.mu.RUnlock()
+	if read.Disposition != CompactCandidatePresent {
+		return read
+	}
+	tx, txid, wtxid, consumed, err := consensus.ParseTx(read.Raw)
+	if err != nil || consumed != len(read.Raw) {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	if tx.TxKind != 0 || txid != identity.TxID || wtxid != identity.WTxID {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
+	return read
+}
+
+func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, maxBytes uint64) CompactCandidateRead {
+	if disposition := m.relations.compactDisposition(identity); disposition != CompactCandidatePresent {
+		return CompactCandidateRead{Disposition: disposition}
+	}
+	raw := m.relations.forward[identity.TxID].entry.raw
+	if uint64(len(raw)) > maxBytes {
+		return CompactCandidateRead{Disposition: CompactCandidateOverBudget}
+	}
+	return CompactCandidateRead{Disposition: CompactCandidatePresent, Raw: append([]byte(nil), raw...)}
+}
+
+func (r *mempoolRelations) compactDisposition(identity CompactCandidateIdentity) CompactCandidateDisposition {
+	if r.forward == nil || r.reverse == nil {
+		return CompactCandidateFault
+	}
+	row := r.forward[identity.TxID]
+	if row != nil && !r.compactRowValid(row) {
+		return CompactCandidateFault
+	}
+	if !r.compactObservedValid(identity, row) {
+		return CompactCandidateFault
+	}
+	if row == nil || row.wtxid != identity.WTxID {
+		return CompactCandidateAbsent
+	}
+	return CompactCandidatePresent
+}
+
+func (r *mempoolRelations) compactObservedValid(identity CompactCandidateIdentity, current *mempoolForwardRow) bool {
+	if !soleMempoolForward(r.txids[identity.TxID], current) {
+		return false
+	}
+	witnessRow := current
+	if current != nil && current.wtxid != identity.WTxID {
+		witnessRow = nil
+	}
+	if !soleMempoolForward(r.wtxids[identity.WTxID], witnessRow) {
+		return false
+	}
+	return r.compactObservedReverseValid(identity, current, witnessRow)
+}
+
+func (r *mempoolRelations) compactObservedReverseValid(identity CompactCandidateIdentity, current, witnessRow *mempoolForwardRow) bool {
+	reverse := r.reverse[identity.WTxID]
+	if witnessRow == nil {
+		if reverse != nil {
+			return false
+		}
+	} else if reverse == nil || reverse.txid != identity.TxID {
+		return false
+	}
+	return soleMempoolReverse(r.targets[identity.TxID], r.reverseTargetRow(current))
+}
+
+func (r *mempoolRelations) reverseTargetRow(current *mempoolForwardRow) *mempoolReverseRow {
+	if current == nil {
+		return nil
+	}
+	return r.reverse[current.wtxid]
+}
+
 type Mempool struct {
 	mu                sync.RWMutex
 	chainState        *ChainState
@@ -66,8 +426,7 @@ type Mempool struct {
 	usedBytes         int
 	lastAdmissionSeq  uint64
 	currentMinFeeRate uint64
-	txs               map[[32]byte]*mempoolEntry
-	wtxids            map[[32]byte][32]byte
+	relations         mempoolRelations
 	// pendingOutpoints is the sole conflict-admission authority. It replaces
 	// the former spenders index: outpoint ownership now lives with the claim
 	// and its token, so no second spender map can drift from the records.
@@ -135,8 +494,8 @@ func (m *Mempool) PendingOutpointOwner() *PendingOutpointOwner {
 // choice, not evidence of past admission, so a custom-configured fresh pool
 // still binds. The caller holds m.mu.
 func (m *Mempool) checkNeverUsedForBindingLocked() error {
-	if len(m.txs) != 0 || len(m.wtxids) != 0 || m.usedBytes != 0 {
-		return fmt.Errorf("mempool candidate is not empty: entries=%d wtxids=%d used_bytes=%d", len(m.txs), len(m.wtxids), m.usedBytes)
+	if len(m.relations.forward) != 0 || len(m.relations.reverse) != 0 || m.usedBytes != 0 {
+		return fmt.Errorf("mempool candidate is not empty: entries=%d wtxids=%d used_bytes=%d", len(m.relations.forward), len(m.relations.reverse), m.usedBytes)
 	}
 	if m.lastAdmissionSeq != 0 {
 		return fmt.Errorf("mempool candidate already admitted: last_admission_seq=%d", m.lastAdmissionSeq)
@@ -180,12 +539,12 @@ func (m *Mempool) txIDsLimit(limit int) [][32]byte {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	capHint := len(m.txs)
+	capHint := len(m.relations.forward)
 	if limit > 0 && limit < capHint {
 		capHint = limit
 	}
 	ids := make([][32]byte, 0, capHint)
-	for txid := range m.txs {
+	for txid := range m.relations.forward {
 		ids = append(ids, txid)
 		if limit > 0 && len(ids) >= limit {
 			break
@@ -203,7 +562,7 @@ func (m *Mempool) TxByID(txid [32]byte) ([]byte, bool) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entry, ok := m.txs[txid]
+	entry, ok := m.relations.entry(txid)
 	if !ok {
 		return nil, false
 	}
@@ -240,7 +599,7 @@ func (m *Mempool) RetainedTxByID(txid [32]byte) (RetainedTxSnapshot, bool) {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entry, ok := m.txs[txid]
+	entry, ok := m.relations.entry(txid)
 	if !ok {
 		return RetainedTxSnapshot{}, false
 	}
@@ -263,7 +622,7 @@ func (m *Mempool) Contains(txid [32]byte) bool {
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.txs[txid]
+	_, ok := m.relations.entry(txid)
 	return ok
 }
 

@@ -342,7 +342,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		relay := f.engine.DARelayState()
 		daID := daRelayTestID(0x51)
 		f.daSet(t, relay, daID, f.ops[:3], 800)
-		if len(f.mp.txs) != 0 {
+		if len(f.mp.relations.forward) != 0 {
 			t.Fatal("the standard mempool must hold no record for these members")
 		}
 		image := mustPrepareCanonicalDAImage(t, relay, nil, f.canonicalDATestChain(t))
@@ -822,7 +822,7 @@ func TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal(t *testing.T) {
 
 	txid := f.add(t, f.ops[0], 1)
 	f.mp.mu.Lock()
-	f.mp.txs[txid].raw[0] ^= 1 // the entry no longer matches its own identity
+	mempoolTestEntry(f.mp, txid).raw[0] ^= 1 // the entry no longer matches its own identity
 	f.mp.mu.Unlock()
 	index, err := f.store.CanonicalIndexSnapshot()
 	mustCanonicalMO(t, "CanonicalIndexSnapshot", err)

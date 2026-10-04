@@ -1018,7 +1018,7 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 		{name: "low", tx: txLow, seq: seqBeforeRequeue + 3},
 	} {
 		txid := txID(t, tc.tx)
-		entry := mempool.txs[txid]
+		entry := mempoolTestEntry(mempool, txid)
 		if entry == nil {
 			t.Fatalf("%s requeued tx %x missing", tc.name, txid)
 		}
@@ -1029,7 +1029,7 @@ func TestRequeueDisconnectedTransactionsUsesTipDownOrderAndContinuesAfterReject(
 			t.Fatalf("%s admissionSeq=%d, want %d", tc.name, entry.admissionSeq, tc.seq)
 		}
 	}
-	duplicateEntry := mempool.txs[txID(t, txRejectedDuplicate)]
+	duplicateEntry := mempoolTestEntry(mempool, txID(t, txRejectedDuplicate))
 	if duplicateEntry == nil {
 		t.Fatalf("duplicate setup tx missing after requeue")
 	}
@@ -3524,7 +3524,7 @@ func TestApplyBlockWithReorgPendingOutpointRestoresExactTokensOnFailure(t *testi
 	}
 	spendID := txID(t, spend)
 	f.mempool.mu.Lock()
-	residentToken := f.mempool.txs[spendID].token
+	residentToken := mempoolTestEntry(f.mempool, spendID).token
 	f.mempool.mu.Unlock()
 
 	subsidyA101 := consensus.BlockSubsidy(forkHeight+1, forkGenerated)
@@ -4377,8 +4377,8 @@ func TestRequeueSelectsOneOwnerFromTheRowsOwnTxKind(t *testing.T) {
 		t.Fatalf("parse standard row: %v", err)
 	}
 	f.mp.mu.RLock()
-	admitted := make([][32]byte, 0, len(f.mp.txs))
-	for txid := range f.mp.txs {
+	admitted := make([][32]byte, 0, len(f.mp.relations.forward))
+	for txid := range mempoolTestEntries(f.mp) {
 		admitted = append(admitted, txid)
 	}
 	f.mp.mu.RUnlock()

@@ -20,8 +20,9 @@ func (m *Mempool) SelectTransactions(maxCount int, maxBytes int) [][]byte {
 func (m *Mempool) snapshotEntries() []*mempoolEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entries := make([]*mempoolEntry, 0, len(m.txs))
-	for _, entry := range m.txs {
+	entries := make([]*mempoolEntry, 0, len(m.relations.forward))
+	for _, row := range m.relations.forward {
+		entry := row.entry
 		entries = append(entries, entry)
 	}
 	return entries

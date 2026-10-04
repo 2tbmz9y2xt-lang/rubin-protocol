@@ -79,7 +79,7 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
-	entry, ok := mp.txs[txid]
+	entry, ok := mp.relations.entry(txid)
 	if !ok {
 		t.Fatalf("entry for txid %x missing", txid)
 	}
@@ -107,7 +107,7 @@ func TestMempoolAcceptedEntryMetadataAndIndexes(t *testing.T) {
 	if entry.source != mempoolTxSourceRemote {
 		t.Fatalf("entry source=%q, want %q", entry.source, mempoolTxSourceRemote)
 	}
-	if got, ok := mp.wtxids[wtxid]; !ok || got != txid {
+	if got, ok := mp.relations.reverseTarget(wtxid); !ok || got != txid {
 		t.Fatalf("wtxid index got %x ok=%v, want txid %x", got, ok, txid)
 	}
 	if got, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); !ok || got != txid {
@@ -164,7 +164,7 @@ func TestMempoolAdmissionSourceWrappersRecordOrigin(t *testing.T) {
 		}
 		txid := txID(t, txBytes)
 		mp.mu.RLock()
-		entry := mp.txs[txid]
+		entry := mempoolTestEntry(mp, txid)
 		mp.mu.RUnlock()
 		if entry == nil {
 			t.Fatalf("%s entry for txid %x missing", tc.name, txid)
@@ -224,13 +224,13 @@ func TestMempoolAddEntryLockedInitializesMetadataIndexes(t *testing.T) {
 		t.Fatalf("addEntryLocked: %v", err)
 	}
 
-	if mp.txs == nil || mp.wtxids == nil {
-		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v", mp.txs != nil, mp.wtxids != nil)
+	if mp.relations.forward == nil || mp.relations.reverse == nil {
+		t.Fatalf("indexes were not initialized: txs=%v wtxids=%v", mp.relations.forward != nil, mp.relations.reverse != nil)
 	}
-	if got := mp.txs[entry.txid]; got != entry {
+	if got := mempoolTestEntry(mp, entry.txid); got != entry {
 		t.Fatalf("tx index got %p, want entry %p", got, entry)
 	}
-	if got := mp.wtxids[entry.wtxid]; got != entry.txid {
+	if got := mempoolTestTarget(mp, entry.wtxid); got != entry.txid {
 		t.Fatalf("wtxid index got %x, want txid %x", got, entry.txid)
 	}
 	if got, ok := mp.pendingOutpoints.txidForOutpoint(op); !ok || got != entry.txid {
@@ -263,10 +263,10 @@ func TestMempoolAddEntryLockedDefaultsUnsetWtxid(t *testing.T) {
 	if entry.wtxid != entry.txid {
 		t.Fatalf("entry wtxid=%x, want txid %x", entry.wtxid, entry.txid)
 	}
-	if got, ok := mp.wtxids[entry.txid]; !ok || got != entry.txid {
+	if got, ok := mp.relations.reverseTarget(entry.txid); !ok || got != entry.txid {
 		t.Fatalf("wtxid index got %x ok=%v, want txid %x", got, ok, entry.txid)
 	}
-	if got, ok := mp.wtxids[[32]byte{}]; ok {
+	if got, ok := mp.relations.reverseTarget([32]byte{}); ok {
 		t.Fatalf("zero wtxid key unexpectedly indexed txid %x", got)
 	}
 	err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0x0b}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1})
@@ -282,8 +282,8 @@ func TestMempoolAddEntryLockedRejectsZeroTxidWithoutMutation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry txid") {
 		t.Fatalf("expected invalid txid rejection, got %v", err)
 	}
-	if mp.txs != nil || mp.wtxids != nil {
-		t.Fatalf("indexes initialized after zero txid reject: txs=%v wtxids=%v", mp.txs != nil, mp.wtxids != nil)
+	if mp.relations.forward != nil || mp.relations.reverse != nil {
+		t.Fatalf("indexes initialized after zero txid reject: txs=%v wtxids=%v", mp.relations.forward != nil, mp.relations.reverse != nil)
 	}
 	if mp.usedBytes != 0 {
 		t.Fatalf("usedBytes=%d, want 0 after zero txid reject", mp.usedBytes)
@@ -545,10 +545,10 @@ func TestMempoolCapacityPlanRejectsInvalidExistingMetadata(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mp := &Mempool{
+				relations: buildMempoolRelations(tc.entries, nil),
 				maxTxs:    1,
 				maxBytes:  100,
 				usedBytes: len(tc.entries),
-				txs:       tc.entries,
 			}
 			_, _, err := mp.capacityEvictionPlanLocked(validCandidate)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -665,10 +665,10 @@ func TestMempoolPolicyAboveU64FeesAdmitOrderAndEvictExactly(t *testing.T) {
 	// Capacity victim: the competing resident fees straddle u64, so the plan
 	// must remove the below-u64 entry and keep the above-u64 one.
 	full := &Mempool{
+		relations: buildMempoolRelations(map[[32]byte]*mempoolEntry{wide.txid: wide, narrow.txid: narrow}, nil),
 		maxTxs:    2,
 		maxBytes:  100,
 		usedBytes: 2,
-		txs:       map[[32]byte]*mempoolEntry{wide.txid: wide, narrow.txid: narrow},
 	}
 	evicted, candidateEvicted, err := full.capacityEvictionPlanLocked(&mempoolEntry{
 		txid: [32]byte{0x94}, fee: consensus.Uint128{Hi: 2}, weight: 1, size: 1,
@@ -767,17 +767,17 @@ func TestMempoolSortAndEvictionUseWeightFeeRate(t *testing.T) {
 func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 	badResidentID := [32]byte{0x30}
 	mp := &Mempool{
-		maxTxs:    1,
-		maxBytes:  100,
-		usedBytes: 1,
-		txs: map[[32]byte]*mempoolEntry{
+		relations: buildMempoolRelations(map[[32]byte]*mempoolEntry{
 			badResidentID: {
 				txid:         badResidentID,
 				fee:          consensus.Uint128FromU64(10),
 				size:         1,
 				admissionSeq: 1,
 			},
-		},
+		}, nil),
+		maxTxs:    1,
+		maxBytes:  100,
+		usedBytes: 1,
 	}
 	err := mp.addEntryLocked(&mempoolEntry{
 		txid:   [32]byte{0x31},
@@ -788,8 +788,8 @@ func TestMempoolAddEntryLockedCapacityPlanRejectsWithoutMutation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid mempool entry weight") {
 		t.Fatalf("expected capacity plan metadata rejection, got %v", err)
 	}
-	if len(mp.txs) != 1 || mp.txs[badResidentID] == nil || mp.wtxids != nil || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 0 || mp.usedBytes != 1 {
-		t.Fatalf("capacity-plan error mutated mempool: len=%d wtxids=%v seq=%d floor=%d used=%d", len(mp.txs), mp.wtxids != nil, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.usedBytes)
+	if len(mp.relations.forward) != 1 || mempoolTestEntry(mp, badResidentID) == nil || mp.relations.reverse != nil || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 0 || mp.usedBytes != 1 {
+		t.Fatalf("capacity-plan error mutated mempool: len=%d wtxids=%v seq=%d floor=%d used=%d", len(mp.relations.forward), mp.relations.reverse != nil, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.usedBytes)
 	}
 }
 
@@ -862,10 +862,10 @@ func TestMempoolEntryIndexesRemovedWithEntry(t *testing.T) {
 	if err := mp.removeTxLocked(txid); err != nil {
 		t.Fatalf("removeTxLocked: %v", err)
 	}
-	if _, ok := mp.txs[txid]; ok {
+	if _, ok := mp.relations.entry(txid); ok {
 		t.Fatalf("removed txid %x still present", txid)
 	}
-	if _, ok := mp.wtxids[wtxid]; ok {
+	if _, ok := mp.relations.reverseTarget(wtxid); ok {
 		t.Fatalf("removed wtxid %x still indexed", wtxid)
 	}
 	if _, ok := mp.pendingOutpoints.txidForOutpoint(outpoints[0]); ok {
@@ -897,7 +897,7 @@ func TestMempoolAdmissionSeqOnlyAcceptedTxs(t *testing.T) {
 	if err := mp.AddTx(tx1); err != nil {
 		t.Fatalf("AddTx(tx1): %v", err)
 	}
-	if got := mp.txs[txID(t, tx1)].admissionSeq; got != 1 {
+	if got := mempoolTestEntry(mp, txID(t, tx1)).admissionSeq; got != 1 {
 		t.Fatalf("tx1 admission_seq=%d, want 1", got)
 	}
 	if err := mp.AddTx(tx1); err == nil {
@@ -909,7 +909,7 @@ func TestMempoolAdmissionSeqOnlyAcceptedTxs(t *testing.T) {
 	if err := mp.AddTx(tx2); err != nil {
 		t.Fatalf("AddTx(tx2): %v", err)
 	}
-	if got := mp.txs[txID(t, tx2)].admissionSeq; got != 2 {
+	if got := mempoolTestEntry(mp, txID(t, tx2)).admissionSeq; got != 2 {
 		t.Fatalf("tx2 admission_seq=%d, want 2", got)
 	}
 }
@@ -970,7 +970,7 @@ func TestMempoolRejectsDuplicateWtxidIndexWithoutMutation(t *testing.T) {
 	}
 
 	mp.mu.Lock()
-	mp.wtxids[tx2Wtxid] = tx1ID
+	mp.relations.putReverse(tx2Wtxid, tx1ID)
 	usedBytes := mp.usedBytes
 	lastAdmissionSeq := mp.lastAdmissionSeq
 	mp.mu.Unlock()
@@ -998,7 +998,7 @@ func TestMempoolRejectsDuplicateWtxidIndexWithoutMutation(t *testing.T) {
 	if mp.lastAdmissionSeq != lastAdmissionSeq {
 		t.Fatalf("lastAdmissionSeq=%d, want %d after wtxid conflict", mp.lastAdmissionSeq, lastAdmissionSeq)
 	}
-	if got := mp.wtxids[tx2Wtxid]; got != tx1ID {
+	if got := mempoolTestTarget(mp, tx2Wtxid); got != tx1ID {
 		t.Fatalf("wtxid index overwritten with %x, want existing %x", got, tx1ID)
 	}
 }
@@ -3018,7 +3018,7 @@ func TestMempoolFullEvictsWorstByFeeWeight(t *testing.T) {
 	if got := mp.lastAdmissionSeq; got != 3 {
 		t.Fatalf("lastAdmissionSeq=%d, want 3", got)
 	}
-	if got := mp.txs[txID(t, txBest)].admissionSeq; got != 3 {
+	if got := mempoolTestEntry(mp, txID(t, txBest)).admissionSeq; got != 3 {
 		t.Fatalf("best admission_seq=%d, want 3", got)
 	}
 	if mp.currentMinFeeRate <= DefaultMempoolMinFeeRate {
@@ -3173,8 +3173,8 @@ func TestMempoolAddEntryLockedRejectsBelowFloor(t *testing.T) {
 	if !errors.As(err, &txErr) || txErr.Kind != TxAdmitUnavailable {
 		t.Fatalf("addEntryLocked floor err=%v, want TxAdmitUnavailable", err)
 	}
-	if len(mp.txs) != 0 || mp.usedBytes != 0 || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 8 {
-		t.Fatalf("addEntryLocked floor reject mutated mempool: len=%d used=%d seq=%d floor=%d", len(mp.txs), mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate)
+	if len(mp.relations.forward) != 0 || mp.usedBytes != 0 || mp.lastAdmissionSeq != 0 || mp.currentMinFeeRate != 8 {
+		t.Fatalf("addEntryLocked floor reject mutated mempool: len=%d used=%d seq=%d floor=%d", len(mp.relations.forward), mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate)
 	}
 }
 
@@ -3205,7 +3205,7 @@ func TestMempoolRollingFloorAcceptsExactFloorBelowCapacity(t *testing.T) {
 	if err := mp.AddTx(txExactFloor); err != nil {
 		t.Fatalf("AddTx(exact floor): %v", err)
 	}
-	entry := mp.txs[txID(t, txExactFloor)]
+	entry := mempoolTestEntry(mp, txID(t, txExactFloor))
 	if entry == nil {
 		t.Fatal("exact-floor tx missing from mempool")
 	}
@@ -3564,7 +3564,7 @@ func TestMempoolAddReorgTxUsesNormalCapacityAdmission(t *testing.T) {
 	if mp.Contains(txID(t, resident)) {
 		t.Fatalf("normal capacity admission kept lower-priority resident")
 	}
-	betterEntry := mp.txs[txID(t, betterReorg)]
+	betterEntry := mempoolTestEntry(mp, txID(t, betterReorg))
 	if betterEntry == nil {
 		t.Fatalf("better reorg candidate missing after normal admission")
 	}
@@ -3720,7 +3720,7 @@ func TestRestoreMempoolSnapshotRecomputesByteAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTx(tx1): %v", err)
 	}
-	restored := mp.txs[tx1ID]
+	restored := mempoolTestEntry(mp, tx1ID)
 	if restored == nil {
 		t.Fatalf("restored entry for tx1 missing")
 	}
@@ -3805,7 +3805,7 @@ func TestRestoreMempoolSnapshotPreservesAdmissionSeqHighWatermark(t *testing.T) 
 		t.Fatalf("AddTx(tx3): %v", err)
 	}
 	tx3ID := txID(t, tx3)
-	if got := mp.txs[tx3ID].admissionSeq; got != 3 {
+	if got := mempoolTestEntry(mp, tx3ID).admissionSeq; got != 3 {
 		t.Fatalf("tx3 admissionSeq=%d, want 3", got)
 	}
 }
@@ -4144,7 +4144,7 @@ func residentClaim(t *testing.T, mp *Mempool, txid [32]byte) (*mempoolEntry, *pe
 	t.Helper()
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
-	entry, ok := mp.txs[txid]
+	entry, ok := mp.relations.entry(txid)
 	if !ok {
 		t.Fatalf("no resident entry for %x", txid)
 	}
@@ -4270,8 +4270,8 @@ func TestMempoolPendingOutpointInputlessEntryHoldsZeroTokenAndNoClaim(t *testing
 	if err := mp.removeTxLocked(spending.txid); err != nil {
 		t.Fatalf("removeTxLocked(spending): %v", err)
 	}
-	if len(mp.txs) != 0 || len(owner.byToken) != 0 || len(owner.byOutpoint) != 0 {
-		t.Fatalf("after removal records=%d claims=%d outpoints=%d, want all empty", len(mp.txs), len(owner.byToken), len(owner.byOutpoint))
+	if len(mp.relations.forward) != 0 || len(owner.byToken) != 0 || len(owner.byOutpoint) != 0 {
+		t.Fatalf("after removal records=%d claims=%d outpoints=%d, want all empty", len(mp.relations.forward), len(owner.byToken), len(owner.byOutpoint))
 	}
 	if owner.tokenHighWater != 1 {
 		t.Fatalf("token high-water=%d after removal, want the consumed sequence retained", owner.tokenHighWater)
@@ -4506,7 +4506,7 @@ func TestMempoolSnapshotPendingOutpointRejectsBrokenClaimBinding(t *testing.T) {
 			mp, snapshot, txid := base(t)
 			beforeLen := mp.Len()
 			mp.mu.RLock()
-			claimedOutpoint := mp.txs[txid].inputs[0]
+			claimedOutpoint := mempoolTestEntry(mp, txid).inputs[0]
 			mp.mu.RUnlock()
 			beforeOutpoints, beforeClaims, beforeHighWater := ownerCounts(mp)
 			corrupt(&snapshot)
@@ -5247,7 +5247,7 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 
 	t.Run("R3 present nil row is corruption, not absence", func(t *testing.T) {
 		key := [32]byte{0x5A}
-		mp := &Mempool{txs: map[[32]byte]*mempoolEntry{key: nil}}
+		mp := &Mempool{relations: buildMempoolRelations(map[[32]byte]*mempoolEntry{key: nil}, nil)}
 		got, ok := mp.RetainedTxByID(key)
 		if !ok || got.IndexedTxID != key || got.AdmissionWTxID != ([32]byte{}) || got.Raw != nil {
 			t.Fatalf("present nil row=(%x,%x,%x,%v), want (%x, zero, nil, true)", got.IndexedTxID, got.AdmissionWTxID, got.Raw, ok, key)
@@ -5265,11 +5265,11 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		wantWTxID := [32]byte{0xC0, 0xDE}
 		wantRaw := append(append([]byte(nil), raw...), 0xFF)
 		mp.mu.Lock()
-		entry := mp.txs[id]
-		delete(mp.wtxids, entry.wtxid) // R6: the secondary binding goes missing.
-		entry.wtxid = wantWTxID        // R4: the stored wtxid no longer matches Raw.
-		entry.txid = [32]byte{0x99}    // R5: the entry field disagrees with the index.
-		entry.raw = wantRaw            // R7: retained bytes are no longer canonical.
+		entry := mempoolTestEntry(mp, id)
+		mp.relations.deleteReverse(entry.wtxid) // R6: the secondary binding goes missing.
+		entry.wtxid = wantWTxID                 // R4: the stored wtxid no longer matches Raw.
+		entry.txid = [32]byte{0x99}             // R5: the entry field disagrees with the index.
+		entry.raw = wantRaw                     // R7: retained bytes are no longer canonical.
 		mp.mu.Unlock()
 		got, ok := mp.RetainedTxByID(id)
 		if !ok || got.IndexedTxID != id || got.AdmissionWTxID != wantWTxID || !bytes.Equal(got.Raw, wantRaw) {
@@ -5277,8 +5277,8 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		}
 		mp.mu.RLock()
 		defer mp.mu.RUnlock()
-		if len(mp.wtxids) != 0 {
-			t.Fatalf("the read repaired the secondary wtxid index: %d bindings", len(mp.wtxids))
+		if len(mp.relations.reverse) != 0 {
+			t.Fatalf("the read repaired the secondary wtxid index: %d bindings", len(mp.relations.reverse))
 		}
 	})
 
@@ -5337,7 +5337,7 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		_, id, wtxid, _, err := consensus.ParseTx(raw)
 		mustOK(t, "ParseTx", err)
 		mp.mu.RLock()
-		entryA := mp.txs[id]
+		entryA := mempoolTestEntry(mp, id)
 		mp.mu.RUnlock()
 		wtxidB := wtxid
 		wtxidB[0] ^= 0xFF
@@ -5372,7 +5372,7 @@ func TestMempoolRetainedTxByID(t *testing.T) {
 		incarnations := [2]*mempoolEntry{entryA, entryB}
 		for i := 0; i < 200; i++ {
 			mp.mu.Lock()
-			mp.txs[id] = incarnations[i%2]
+			mp.relations.putEntry(id, incarnations[i%2])
 			mp.mu.Unlock()
 		}
 	})
@@ -6089,7 +6089,7 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		if want := fmt.Sprintf("mempool double-spend conflict with %x", txidA); txErr.Message != want {
 			t.Fatalf("conflict message %q, want %q", txErr.Message, want)
 		}
-		if mp.Len() != 1 || mp.txs[txidA] == nil || mp.txs[txidB] != nil {
+		if mp.Len() != 1 || mempoolTestEntry(mp, txidA) == nil || mempoolTestEntry(mp, txidB) != nil {
 			t.Fatalf("conflicting tx changed the resident set: len=%d", mp.Len())
 		}
 		if got := mp.AdmissionCounts(); got != (MempoolAdmissionCounts{Accepted: 1, Conflict: 1}) {
@@ -6121,7 +6121,7 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		if err := mp.AddTx(txBytes); err != nil {
 			t.Fatalf("saturated cache must never reject admission: %v", err)
 		}
-		if mp.Len() != 1 || mp.txs[txID(t, txBytes)] == nil {
+		if mp.Len() != 1 || mempoolTestEntry(mp, txID(t, txBytes)) == nil {
 			t.Fatalf("tx not resident after admission: len=%d", mp.Len())
 		}
 		// FIFO evicted exactly one older entry, and the newest entry survived:
@@ -6186,7 +6186,7 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		// (and released) a token for the candidate, exactly like the cold
 		// candidate-worst row in TestMempoolCandidateWorstRejectsWithoutMutation.
 		assertPostSlotRejectionSnapshot(t, before, after)
-		if mp.Len() != 1 || mp.txs[txID(t, tx1)] == nil || mp.txs[txID(t, tx2)] != nil {
+		if mp.Len() != 1 || mempoolTestEntry(mp, txID(t, tx1)) == nil || mempoolTestEntry(mp, txID(t, tx2)) != nil {
 			t.Fatalf("warm-capacity candidate changed resident set: len=%d", mp.Len())
 		}
 		if mp.usedBytes != usedBytes {
@@ -6267,7 +6267,7 @@ func TestMempoolSigCacheWarmCacheNeverBuysAdmission(t *testing.T) {
 		// The locked floor check runs after reserveEntryInputsLocked already
 		// reserved (and released) a token for the two-input candidate.
 		assertPostSlotRejectionSnapshot(t, before, after)
-		if mp.Len() != 0 || mp.txs[txID(t, txBelowFloor)] != nil {
+		if mp.Len() != 0 || mempoolTestEntry(mp, txID(t, txBelowFloor)) != nil {
 			t.Fatalf("warm-floor candidate entered resident set: len=%d", mp.Len())
 		}
 		// Both of the candidate's witness items were answered from cache
@@ -6352,7 +6352,7 @@ func daGuardImage(t *testing.T, mp *Mempool, raw []byte) string {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
 	return fmt.Sprintf("%s txsNil=%v wtxidsNil=%v ownerNil=%v low=%d evicted=%d caller=%x",
-		fingerprint, mp.txs == nil, mp.wtxids == nil, mp.pendingOutpoints == nil,
+		fingerprint, mp.relations.forward == nil, mp.relations.reverse == nil, mp.pendingOutpoints == nil,
 		mp.lowWaterBytes, mp.evictedResidentTotal.Load(), raw)
 }
 
@@ -6395,7 +6395,7 @@ func TestMempoolRejectsDAKindAcrossAllEntryPoints(t *testing.T) {
 				t.Fatalf("ordinary tx_kind=0x00 admission: %v", err)
 			}
 			h.mp.mu.RLock()
-			entry, seq, used := h.mp.txs[txID(t, raw)], h.mp.lastAdmissionSeq, h.mp.usedBytes
+			entry, seq, used := mempoolTestEntry(h.mp, txID(t, raw)), h.mp.lastAdmissionSeq, h.mp.usedBytes
 			h.mp.mu.RUnlock()
 			if entry == nil || entry.source != wrapper.source || entry.token == (PendingOutpointToken{}) || seq != 1 || used != len(raw) {
 				t.Fatalf("entry=%+v seq=%d used=%d, want one retained entry under source %q holding an owner token", entry, seq, used, wrapper.source)
@@ -6427,11 +6427,11 @@ func TestMempoolDAKindGuardPreservesIdentityPrecedence(t *testing.T) {
 		arrange func(mp *Mempool, txid, wtxid [32]byte)
 		wantMsg string
 	}{
-		{"arranged_txid_present", func(mp *Mempool, txid, _ [32]byte) { mp.txs[txid] = &mempoolEntry{txid: txid} }, "tx already in mempool"},
-		{"arranged_wtxid_only", func(mp *Mempool, _, wtxid [32]byte) { mp.wtxids[wtxid] = resident }, fmt.Sprintf("mempool wtxid conflict with %x", resident)},
+		{"arranged_txid_present", func(mp *Mempool, txid, _ [32]byte) { mp.relations.putEntry(txid, &mempoolEntry{txid: txid}) }, "tx already in mempool"},
+		{"arranged_wtxid_only", func(mp *Mempool, _, wtxid [32]byte) { mp.relations.putReverse(wtxid, resident) }, fmt.Sprintf("mempool wtxid conflict with %x", resident)},
 		{"arranged_both_txid_wins", func(mp *Mempool, txid, wtxid [32]byte) {
-			mp.txs[txid] = &mempoolEntry{txid: txid}
-			mp.wtxids[wtxid] = resident
+			mp.relations.putEntry(txid, &mempoolEntry{txid: txid})
+			mp.relations.putReverse(wtxid, resident)
 		}, "tx already in mempool"},
 	}
 	for _, row := range rows {
@@ -6489,13 +6489,13 @@ func TestMempoolDAKindGuardDoesNotReservePendingOutpoints(t *testing.T) {
 	t.Run("never_initialized_owner_and_indexes_stay_nil", func(t *testing.T) {
 		mp, candidates := daGuardCandidates(t)
 		mp.mu.Lock()
-		mp.pendingOutpoints, mp.txs, mp.wtxids = nil, nil, nil
+		mp.pendingOutpoints, mp.relations = nil, mempoolRelations{}
 		mp.mu.Unlock()
 		raw := candidates[1].raw
 		requireDAGuardPreservedImage(t, mp, raw, func() error { return mp.AddTx(raw) }, MempoolAdmissionCounts{Rejected: 1})
 		mp.mu.RLock()
 		defer mp.mu.RUnlock()
-		if mp.pendingOutpoints != nil || mp.txs != nil || mp.wtxids != nil {
+		if mp.pendingOutpoints != nil || mp.relations.forward != nil || mp.relations.reverse != nil {
 			t.Fatal("the refusal lazily created an owner or an index")
 		}
 	})

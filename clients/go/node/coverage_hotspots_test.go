@@ -138,14 +138,14 @@ func TestCoverage_MempoolHelpers(t *testing.T) {
 		t.Fatalf("AddTx(tx2): %v", err)
 	}
 	var existingTxID [32]byte
-	for txid := range mp.txs {
+	for txid := range mempoolTestEntries(mp) {
 		existingTxID = txid
 		break
 	}
 	if err := mp.validateNonCapacityAdmissionLocked(&mempoolEntry{txid: existingTxID, weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected duplicate tx rejection")
 	}
-	mp.maxTxs = len(mp.txs)
+	mp.maxTxs = len(mp.relations.forward)
 	if err := mp.addEntryLocked(&mempoolEntry{txid: [32]byte{0xaa}, fee: consensus.Uint128FromU64(1), weight: 1, size: 1}); err == nil {
 		t.Fatalf("expected mempool full")
 	}

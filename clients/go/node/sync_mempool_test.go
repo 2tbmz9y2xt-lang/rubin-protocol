@@ -56,9 +56,9 @@ func installMempoolImageForTest(m *Mempool, snapshot mempoolSnapshot) error {
 	if err := validateRestoredClaimBinding(txs, candidate); err != nil {
 		return err
 	}
+	relations := buildMempoolRelations(txs, wtxids)
 	owner.publishRestoreLocked(snapshot.pending, candidate)
-	m.txs = txs
-	m.wtxids = wtxids
+	m.relations = relations
 	m.usedBytes = usedBytes
 	m.lastAdmissionSeq = snapshot.lastAdmissionSeq
 	m.currentMinFeeRate = snapshot.currentMinFeeRate
@@ -199,7 +199,8 @@ func (f *canonicalMOFixture) installRaw(t *testing.T, raw []byte) [32]byte {
 	f.mp.mu.Lock()
 	f.mp.lastAdmissionSeq++
 	entry := &mempoolEntry{raw: append([]byte(nil), raw...), txid: txid, wtxid: wtxid, inputs: relayMetadataInputs(tx), token: token, fee: consensus.Uint128FromU64(100_000), weight: weight, size: len(raw), admissionSeq: f.mp.lastAdmissionSeq, source: mempoolTxSourceLocal}
-	f.mp.txs[txid], f.mp.wtxids[wtxid] = entry, txid
+	f.mp.relations.putEntry(txid, entry)
+	f.mp.relations.putReverse(wtxid, txid)
 	f.mp.usedBytes += entry.size
 	f.mp.mu.Unlock()
 	return txid
@@ -452,9 +453,9 @@ func TestCanonicalMOPlanFinalChainValidity(t *testing.T) {
 		t.Fatalf("final-height locktime err=%v boundary=%v over=%v", err, lock.mp.Contains(boundary), lock.mp.Contains(locked))
 	}
 	lock.mp.mu.RLock()
-	gotBoundary, keptBoundary := lock.mp.wtxids[boundaryWTxID]
-	_, keptLocked := lock.mp.wtxids[lockedWTxID]
-	wtxidCount, usedBytes := len(lock.mp.wtxids), lock.mp.usedBytes
+	gotBoundary, keptBoundary := lock.mp.relations.reverseTarget(boundaryWTxID)
+	_, keptLocked := lock.mp.relations.reverseTarget(lockedWTxID)
+	wtxidCount, usedBytes := len(lock.mp.relations.reverse), lock.mp.usedBytes
 	lock.mp.mu.RUnlock()
 	if !keptBoundary || gotBoundary != boundary || keptLocked || wtxidCount != 1 || usedBytes != len(boundaryRaw) {
 		t.Fatalf("publisher wtxids retained=%x/%v excluded=%v count=%d used=%d", gotBoundary, keptBoundary, keptLocked, wtxidCount, usedBytes)
@@ -512,7 +513,7 @@ func TestCanonicalMOPlanPreservesPoolLocalPolicyAndHighWater(t *testing.T) {
 	beforeEntry, beforeClaim := residentClaim(t, f.mp, txid)
 	f.mp.mu.Lock()
 	f.mp.currentMinFeeRate = 1 << 40
-	f.mp.txs[txid].source = mempoolTxSourceRemote
+	mempoolTestEntry(f.mp, txid).source = mempoolTxSourceRemote
 	beforeSeq := f.mp.lastAdmissionSeq
 	f.mp.mu.Unlock()
 	mustCanonicalMO(t, "ApplyBlock", f.applyCoinbase(t))
@@ -751,7 +752,7 @@ func TestCanonicalMOPlanProviderSnapshotAndFirstErrorOrder(t *testing.T) {
 	i := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: early})
 	i.install(t, i.ops[0], 1, true)
 	i.mp.mu.Lock()
-	for _, entry := range i.mp.txs {
+	for _, entry := range mempoolTestEntries(i.mp) {
 		entry.raw[0] ^= 0xff
 	}
 	i.mp.mu.Unlock()
@@ -821,7 +822,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 	feeFixture := newCanonicalMOFixture(t, 1, MempoolConfig{RotationProvider: feeProvider})
 	feeTxID := feeFixture.install(t, feeFixture.ops[0], 1, false)
 	feeFixture.mp.mu.Lock()
-	feeFixture.mp.txs[feeTxID].fee.Lo++
+	mempoolTestEntry(feeFixture.mp, feeTxID).fee.Lo++
 	feeFixture.mp.mu.Unlock()
 	feeState := feeFixture.engine.chainState.view()
 	feeErr := feeFixture.applySpend(t, feeFixture.ops[0], 2)
@@ -842,46 +843,50 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		positional bool
 		mutate     func(*Mempool, mempoolSnapshot, int)
 	}{
-		{"raw", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].raw[0] ^= 0xff }},
+		{"raw", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).raw[0] ^= 0xff }},
 		{"tx_map_key", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
-			delete(m.txs, s.entries[i].txid)
+			e := mempoolTestEntry(m, s.entries[i].txid)
+			m.relations.deleteForward(s.entries[i].txid)
 			key := s.entries[i].txid
 			key[1] ^= 1
-			m.txs[key] = e
+			m.relations.putEntry(key, e)
 		}},
-		{"tx_map_missing", true, func(m *Mempool, s mempoolSnapshot, i int) { delete(m.txs, s.entries[i].txid) }},
-		{"tx_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) { m.txs[[32]byte{0xfa, byte(i)}] = nil }},
-		{"txid", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].txid[0] ^= 1 }},
-		{"wtxid", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].wtxid[0] ^= 1 }},
+		{"tx_map_missing", true, func(m *Mempool, s mempoolSnapshot, i int) { m.relations.deleteForward(s.entries[i].txid) }},
+		{"tx_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) { m.relations.putEntry([32]byte{0xfa, byte(i)}, nil) }},
+		{"txid", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).txid[0] ^= 1 }},
+		{"wtxid", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).wtxid[0] ^= 1 }},
 		{"wtxid_map_key", true, func(m *Mempool, s mempoolSnapshot, i int) {
 			key := s.entries[i].wtxid
-			value := m.wtxids[key]
-			delete(m.wtxids, key)
+			value := mempoolTestTarget(m, key)
+			m.relations.deleteReverse(key)
 			key[1] ^= 1
-			m.wtxids[key] = value
+			m.relations.putReverse(key, value)
 		}},
-		{"wtxid_map_value", true, func(m *Mempool, s mempoolSnapshot, i int) { m.wtxids[s.entries[i].wtxid] = [32]byte{} }},
-		{"wtxid_map_missing", true, func(m *Mempool, s mempoolSnapshot, i int) { delete(m.wtxids, s.entries[i].wtxid) }},
-		{"wtxid_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) { m.wtxids[[32]byte{0xfb, byte(i)}] = [32]byte{} }},
-		{"token", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].token.seq++ }},
-		{"fee_lo", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].fee.Lo++ }},
-		{"fee_hi", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].fee.Hi++ }},
-		{"weight_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].weight = 0 }},
-		{"weight", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].weight++ }},
-		{"size_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].size = 0 }},
-		{"size", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].size-- }},
-		{"size_over_cap", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].size = m.maxBytes + 1 }},
-		{"admission_seq_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].admissionSeq = 0 }},
-		{"admission_seq_mismatch", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].admissionSeq += 10 }},
+		{"wtxid_map_value", true, func(m *Mempool, s mempoolSnapshot, i int) { m.relations.putReverse(s.entries[i].wtxid, [32]byte{}) }},
+		{"wtxid_map_missing", true, func(m *Mempool, s mempoolSnapshot, i int) { m.relations.deleteReverse(s.entries[i].wtxid) }},
+		{"wtxid_map_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) {
+			m.relations.putReverse([32]byte{0xfb, byte(i)}, [32]byte{})
+		}},
+		{"token", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).token.seq++ }},
+		{"fee_lo", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).fee.Lo++ }},
+		{"fee_hi", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).fee.Hi++ }},
+		{"weight_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).weight = 0 }},
+		{"weight", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).weight++ }},
+		{"size_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).size = 0 }},
+		{"size", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).size-- }},
+		{"size_over_cap", true, func(m *Mempool, s mempoolSnapshot, i int) {
+			mempoolTestEntry(m, s.entries[i].txid).size = m.maxBytes + 1
+		}},
+		{"admission_seq_zero", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).admissionSeq = 0 }},
+		{"admission_seq_mismatch", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).admissionSeq += 10 }},
 		{"input_count", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			e.inputs = append(e.inputs, e.inputs[0])
 		}},
-		{"input_value", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].inputs[0].Vout++ }},
-		{"source", true, func(m *Mempool, s mempoolSnapshot, i int) { m.txs[s.entries[i].txid].source = "bad" }},
+		{"input_value", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).inputs[0].Vout++ }},
+		{"source", true, func(m *Mempool, s mempoolSnapshot, i int) { mempoolTestEntry(m, s.entries[i].txid).source = "bad" }},
 		{"duplicate_sequence", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			m.txs[s.entries[i].txid].admissionSeq = m.txs[s.entries[(i+1)%len(s.entries)].txid].admissionSeq
+			mempoolTestEntry(m, s.entries[i].txid).admissionSeq = mempoolTestEntry(m, s.entries[(i+1)%len(s.entries)].txid).admissionSeq
 		}},
 		{"chain_id", false, func(m *Mempool, _ mempoolSnapshot, _ int) { m.chainID[0] ^= 1 }},
 		{"last_sequence_high_water", false, func(m *Mempool, _ mempoolSnapshot, _ int) { m.lastAdmissionSeq = 0 }},
@@ -905,11 +910,11 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			withOwner(m, func(o *PendingOutpointOwner) { o.generation++ })
 		}},
 		{"claim_generation_above_high_water", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].generation = ^uint64(0) })
 		}},
 		{"claim_txid", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].txid[0] ^= 1 })
 		}},
 		{"by_token_missing", true, func(m *Mempool, s mempoolSnapshot, i int) {
@@ -922,11 +927,11 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			})
 		}},
 		{"claim_token_field", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].token = PendingOutpointToken{} })
 		}},
 		{"claim_token_key", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) {
 				claim := o.byToken[e.token]
 				delete(o.byToken, e.token)
@@ -934,40 +939,40 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			})
 		}},
 		{"claim_owner", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) {
 				o.byToken[e.token].token.owner = newPendingOutpointOwner(PendingOutpointTip{})
 			})
 		}},
 		{"claim_sequence", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].token.seq = o.tokenHighWater + uint64(i) + 100 })
 		}},
 		{"claim_domain", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].domain = PendingOutpointDA })
 		}},
 		{"claim_generation", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].generation++ })
 		}},
 		{"claim_finalized", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].finalized = false })
 		}},
 		{"claim_input_count", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) {
 				claim := o.byToken[e.token]
 				claim.inputs = append(claim.inputs, claim.inputs[0])
 			})
 		}},
 		{"claim_input_value", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].inputs[0].Vout++ })
 		}},
 		{"by_outpoint_missing", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { delete(o.byOutpoint, e.inputs[0]) })
 		}},
 		{"by_outpoint_extra_cardinality", true, func(m *Mempool, _ mempoolSnapshot, i int) {
@@ -976,7 +981,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			})
 		}},
 		{"by_outpoint_row_token", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) {
 				row := o.byOutpoint[e.inputs[0]]
 				row.token.seq++
@@ -984,7 +989,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			})
 		}},
 		{"by_outpoint_row_txid", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) {
 				row := o.byOutpoint[e.inputs[0]]
 				row.txid[0] ^= 1
@@ -992,7 +997,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 			})
 		}},
 		{"record_claim_bijection", true, func(m *Mempool, s mempoolSnapshot, i int) {
-			e := m.txs[s.entries[i].txid]
+			e := mempoolTestEntry(m, s.entries[i].txid)
 			withOwner(m, func(o *PendingOutpointOwner) { o.byToken[e.token].txid = [32]byte{} })
 		}},
 	}
@@ -1088,26 +1093,26 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 	}
 	t.Run("middle_duplicate_admission_before_later_claim", func(t *testing.T) {
 		runMiddleStructural(t, "middle_duplicate_admission_before_later_claim", "duplicate mempool snapshot admission_seq", true, func(m *Mempool, o *PendingOutpointOwner, first, middle, last mempoolEntry) {
-			m.txs[middle.txid].admissionSeq = m.txs[first.txid].admissionSeq
+			mempoolTestEntry(m, middle.txid).admissionSeq = mempoolTestEntry(m, first.txid).admissionSeq
 			o.byToken[last.token].finalized = false
 		})
 	})
 	t.Run("middle_duplicate_wtxid_before_later_claim", func(t *testing.T) {
 		runMiddleStructural(t, "middle_duplicate_wtxid_before_later_claim", "duplicate mempool snapshot wtxid", true, func(m *Mempool, o *PendingOutpointOwner, first, middle, last mempoolEntry) {
-			m.txs[middle.txid].wtxid = m.txs[first.txid].wtxid
+			mempoolTestEntry(m, middle.txid).wtxid = mempoolTestEntry(m, first.txid).wtxid
 			o.byToken[last.token].finalized = false
 		})
 	})
 	t.Run("middle_byte_cap_before_later_claim", func(t *testing.T) {
 		runMiddleStructural(t, "middle_byte_cap_before_later_claim", "mempool snapshot exceeds byte cap", false, func(m *Mempool, o *PendingOutpointOwner, first, middle, last mempoolEntry) {
-			m.maxBytes = m.txs[first.txid].size + m.txs[middle.txid].size - 1
+			m.maxBytes = mempoolTestEntry(m, first.txid).size + mempoolTestEntry(m, middle.txid).size - 1
 			o.byToken[last.token].finalized = false
 		})
 	})
 	t.Run("low_claim_before_higher_raw", func(t *testing.T) {
 		runMixed(t, "low_claim_before_higher_raw", func(m *Mempool, o *PendingOutpointOwner, low, high mempoolEntry) {
 			o.byToken[low.token].txid[0] ^= 1
-			m.txs[high.txid].raw[0] ^= 1
+			mempoolTestEntry(m, high.txid).raw[0] ^= 1
 		})
 	})
 	t.Run("bound_standard_domain_before_higher_standard", func(t *testing.T) {
@@ -1242,7 +1247,9 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 		token := PendingOutpointToken{owner: o, seq: o.tokenHighWater - 1}
 		entry := &mempoolEntry{raw: append([]byte(nil), raw...), txid: txid, wtxid: wtxid, inputs: append([]consensus.Outpoint(nil), inputs...), token: token, fee: consensus.Uint128FromU64(100_000), weight: weight, size: len(raw), admissionSeq: 1, source: mempoolTxSourceLocal}
 		claim := &pendingOutpointClaim{token: token, domain: PendingOutpointStandardMempool, txid: txid, inputs: append([]consensus.Outpoint(nil), inputs...), generation: o.generation, finalized: true}
-		f.mp.txs[txid], f.mp.wtxids[wtxid], f.mp.usedBytes, f.mp.lastAdmissionSeq = entry, txid, entry.size, entry.admissionSeq
+		f.mp.relations.putEntry(txid, entry)
+		f.mp.relations.putReverse(wtxid, txid)
+		f.mp.usedBytes, f.mp.lastAdmissionSeq = entry.size, entry.admissionSeq
 		o.byToken[token], o.byOutpoint[inputs[0]] = claim, pendingOutpointRow{token: token, txid: txid}
 		laterToken := PendingOutpointToken{owner: o, seq: o.tokenHighWater}
 		o.byToken[laterToken] = &pendingOutpointClaim{token: laterToken, domain: PendingOutpointDA, txid: laterID, generation: o.generation, finalized: true}
@@ -1273,7 +1280,7 @@ func TestCanonicalMOPlanFailureBeforeFirstWrite(t *testing.T) {
 						mustCanonicalMO(t, "beginTransition", beginErr)
 						snapshot := mustCanonicalMOSnapshot(t, f.mp)
 						f.mp.mu.Lock()
-						e := f.mp.txs[snapshot.entries[index].txid]
+						e := mempoolTestEntry(f.mp, snapshot.entries[index].txid)
 						if row.claim {
 							o.mu.Lock()
 							claim := o.byToken[e.token]
@@ -1425,14 +1432,14 @@ func TestCanonicalMOPlanConcurrentAdmission(t *testing.T) {
 				defer f.mp.mu.RUnlock()
 				owner.mu.Lock()
 				defer owner.mu.Unlock()
-				if f.mp.pendingOutpoints != owner || f.mp.usedBytes != used || f.mp.lastAdmissionSeq != seq || f.mp.currentMinFeeRate != floor || f.mp.maxTxs != maxTxs || f.mp.maxBytes != maxBytes || len(f.mp.txs) != len(entries) || len(f.mp.wtxids) != len(entries) || owner.inTransition || owner.tokenHighWater != high || owner.generation != generation || owner.stableTip != tip || len(owner.byToken) != len(claims) {
+				if f.mp.pendingOutpoints != owner || f.mp.usedBytes != used || f.mp.lastAdmissionSeq != seq || f.mp.currentMinFeeRate != floor || f.mp.maxTxs != maxTxs || f.mp.maxBytes != maxBytes || len(f.mp.relations.forward) != len(entries) || len(f.mp.relations.reverse) != len(entries) || owner.inTransition || owner.tokenHighWater != high || owner.generation != generation || owner.stableTip != tip || len(owner.byToken) != len(claims) {
 					t.Fatal("unexpected M/O header")
 				}
 				outpoints := 0
 				for i := range entries {
 					entry := entries[i]
-					live, ok := f.mp.txs[entry.txid]
-					if !ok || !reflect.DeepEqual(*live, entry) || f.mp.wtxids[entry.wtxid] != entry.txid {
+					live, ok := f.mp.relations.entry(entry.txid)
+					if !ok || !reflect.DeepEqual(*live, entry) || mempoolTestTarget(f.mp, entry.wtxid) != entry.txid {
 						t.Fatal("unexpected record image")
 					}
 				}
@@ -1560,13 +1567,13 @@ func canonicalMOImageFingerprint(t *testing.T, mp *Mempool, generationAdvance ui
 	defer mp.mu.RUnlock()
 	owner := mp.pendingOutpoints
 	fmt.Fprintf(&out, "m=%p owner=%p used=%d seq=%d floor=%d limits=%d/%d", mp, owner, mp.usedBytes, mp.lastAdmissionSeq, mp.currentMinFeeRate, mp.maxTxs, mp.maxBytes)
-	txids := make([][32]byte, 0, len(mp.txs))
-	for txid := range mp.txs {
+	txids := make([][32]byte, 0, len(mp.relations.forward))
+	for txid := range mempoolTestEntries(mp) {
 		txids = append(txids, txid)
 	}
 	sort.Slice(txids, func(i, j int) bool { return string(txids[i][:]) < string(txids[j][:]) })
 	for _, txid := range txids {
-		entry := mp.txs[txid]
+		entry := mempoolTestEntry(mp, txid)
 		fmt.Fprintf(&out, " txkey=%x", txid)
 		if entry == nil {
 			out.WriteString(" nil")
@@ -1577,13 +1584,13 @@ func canonicalMOImageFingerprint(t *testing.T, mp *Mempool, generationAdvance ui
 			fmt.Fprintf(&out, " in=%x/%d", input.Txid, input.Vout)
 		}
 	}
-	wtxids := make([][32]byte, 0, len(mp.wtxids))
-	for wtxid := range mp.wtxids {
+	wtxids := make([][32]byte, 0, len(mp.relations.reverse))
+	for wtxid := range mempoolTestReverse(mp) {
 		wtxids = append(wtxids, wtxid)
 	}
 	sort.Slice(wtxids, func(i, j int) bool { return string(wtxids[i][:]) < string(wtxids[j][:]) })
 	for _, wtxid := range wtxids {
-		fmt.Fprintf(&out, " wkey=%x->%x", wtxid, mp.wtxids[wtxid])
+		fmt.Fprintf(&out, " wkey=%x->%x", wtxid, mempoolTestTarget(mp, wtxid))
 	}
 	if owner == nil {
 		return out.String() + " owner=nil"

@@ -658,7 +658,7 @@ func (m *Mempool) validateStandardRemovalsLocked(
 			return txAdmitUnavailable(fmt.Sprintf("duplicate standard mempool terminal entry %x", entry.txid))
 		}
 		removed[entry.txid] = struct{}{}
-		if resident, ok := m.txs[entry.txid]; !ok || resident != entry {
+		if resident, ok := m.relations.entry(entry.txid); !ok || resident != entry {
 			return txAdmitUnavailable(fmt.Sprintf("standard mempool terminal entry %x is not resident", entry.txid))
 		}
 		if err := owner.validateEntryClaimLocked(entry.txid, entry.inputs, entry.token, true); err != nil {

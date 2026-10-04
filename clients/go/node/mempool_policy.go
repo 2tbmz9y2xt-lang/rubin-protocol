@@ -160,7 +160,7 @@ func policyInputSnapshot(tx *consensus.Tx, utxos map[consensus.Outpoint]consensu
 // multi-entry delta directly. It survives as the single-entry form the package's
 // own tests drive, and routes through the delta so they exercise the real rule.
 func (m *Mempool) removeTxLocked(txid [32]byte) error {
-	entry, ok := m.txs[txid]
+	entry, ok := m.relations.entry(txid)
 	if !ok {
 		return nil
 	}
@@ -222,14 +222,14 @@ func (m *Mempool) validateEntryIdentityLocked(entry *mempoolEntry) error {
 	if txid == ([32]byte{}) {
 		return selectRelayDisposition(txAdmitRejected("invalid mempool entry txid"), RelayAdmissionInternal)
 	}
-	if _, exists := m.txs[txid]; exists {
+	if _, exists := m.relations.entry(txid); exists {
 		return selectRelayDisposition(txAdmitConflict("tx already in mempool"), RelayAdmissionDuplicate)
 	}
 	wtxid := entry.wtxid
 	if wtxid == ([32]byte{}) {
 		wtxid = entry.txid
 	}
-	if existing, exists := m.wtxids[wtxid]; exists {
+	if existing, exists := m.relations.reverseTarget(wtxid); exists {
 		return selectRelayDisposition(txAdmitConflict(fmt.Sprintf("mempool wtxid conflict with %x", existing)), RelayAdmissionDuplicate)
 	}
 	return nil
@@ -333,7 +333,8 @@ func (m *Mempool) validateAdmissionSeqLocked(entry *mempoolEntry) error {
 		// in evictionPlanPoolLocked reports, and classified the same INTERNAL way
 		// — not the candidate's own admission-sequence outcome. The error, its
 		// message and its kind are unchanged.
-		for existingTxid, existing := range m.txs {
+		for existingTxid, row := range m.relations.forward {
+			existing := row.entry
 			if existing != nil && existing.admissionSeq == entry.admissionSeq {
 				return selectRelayDisposition(txAdmitRejected(fmt.Sprintf("mempool admission sequence conflict with %x", existingTxid)), RelayAdmissionInternal)
 			}
@@ -435,12 +436,7 @@ func (m *Mempool) addEntryLockedProbed(entry *mempoolEntry, snappedFloor uint64,
 }
 
 func (m *Mempool) ensureIndexesLocked() {
-	if m.txs == nil {
-		m.txs = make(map[[32]byte]*mempoolEntry)
-	}
-	if m.wtxids == nil {
-		m.wtxids = make(map[[32]byte][32]byte)
-	}
+	m.relations.ensure()
 }
 
 // pendingOutpointOwnerLocked returns the single owner, creating it on first use
@@ -466,8 +462,8 @@ func (m *Mempool) assignAdmissionSeqLocked(entry *mempoolEntry) {
 }
 
 func (m *Mempool) insertEntryIndexesLocked(entry *mempoolEntry) {
-	m.txs[entry.txid] = entry
-	m.wtxids[entry.wtxid] = entry.txid
+	m.relations.putEntry(entry.txid, entry)
+	m.relations.putReverse(entry.wtxid, entry.txid)
 	m.usedBytes += entry.size
 }
 
@@ -505,7 +501,7 @@ func (m *Mempool) appendResidentEntryLocked(out []*mempoolEntry, seen map[[32]by
 	if _, done := seen[txid]; done {
 		return out
 	}
-	entry, ok := m.txs[txid]
+	entry, ok := m.relations.entry(txid)
 	if !ok {
 		return out
 	}
@@ -518,7 +514,7 @@ func outpointFromInput(in consensus.TxInput) consensus.Outpoint {
 }
 
 func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
-	delete(m.txs, txid)
+	m.relations.deleteForward(txid)
 	if entry == nil {
 		return
 	}
@@ -529,7 +525,7 @@ func (m *Mempool) deleteEntryLocked(txid [32]byte, entry *mempoolEntry) {
 			m.usedBytes = 0
 		}
 	}
-	if existing, ok := m.wtxids[entry.wtxid]; ok && existing == txid {
-		delete(m.wtxids, entry.wtxid)
+	if existing, ok := m.relations.reverseTarget(entry.wtxid); ok && existing == txid {
+		m.relations.deleteReverse(entry.wtxid)
 	}
 }
