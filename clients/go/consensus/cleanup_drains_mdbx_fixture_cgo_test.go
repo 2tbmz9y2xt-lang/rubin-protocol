@@ -787,11 +787,9 @@ func generationUndoSemantics(t *testing.T) {
 			case "height":
 				height--
 			case "zero-tx":
-				txs = 0
+				txs, spent = 0, 0
 			case "tx-bound":
 				txs = 1545455
-			case "spent-bound":
-				spent = 414635
 			case "missing-entry":
 				spent = 2
 			case "excess-entry":
@@ -807,7 +805,9 @@ func generationUndoSemantics(t *testing.T) {
 			baseCount := len(rows)
 			value, _ := (mdbx.UTXOValue{Value: 1}).Encode()
 			entry := mdbx.UndoEntryKey(hash, [32]byte{1}, txIndex, 0, 0)
-			rows = append(rows, generationRow(5, entry, value))
+			if name != "zero-tx" {
+				rows = append(rows, generationRow(5, entry, value))
+			}
 			if name == "coordinate" || name == "outpoint" {
 				other, input := [32]byte{2}, uint32(0)
 				if name == "outpoint" {
@@ -815,18 +815,39 @@ func generationUndoSemantics(t *testing.T) {
 				}
 				rows = append(rows, generationRow(5, mdbx.UndoEntryKey(hash, other, 1, input, 0), value))
 			}
-			w := generationNew(t, a, rows[:baseCount]...)
-			for _, row := range rows[baseCount:] {
-				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, row.Key, row.Literal) == nil, "semantic undo entry seed")
+			var w *generationWorld
+			var families [][]mdbx.Mutation
+			if name == "spent-bound" {
+				var family []mdbx.Mutation
+				w, hash, family = generationFamily(t, "keep")
+				var tx [32]byte
+				binary.BigEndian.PutUint32(tx[28:], 414634)
+				extra := generationRow(5, mdbx.UndoEntryKey(hash, tx, 405, 938, 0), family[1].Literal)
+				generationSeedUndo(t, w, []mdbx.Mutation{extra})
+				rows = w.rows
+				rows[4].Literal = mdbx.UndoManifestValue(13691, [16]byte{}, 406, 414635)
+				family[0].Literal = rows[4].Literal
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, rows[4].Key, rows[4].Literal) == nil, "semantic undo manifest seed")
+				families = [][]mdbx.Mutation{append(family, extra)}
+			} else {
+				w = generationNew(t, a, rows[:baseCount]...)
+				for _, row := range rows[baseCount:] {
+					logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, row.Key, row.Literal) == nil, "semantic undo entry seed")
+				}
 			}
 			if name == "missing-manifest" {
 				logicalMDBXSeed(t, w.s, mdbx.Mutation{DBI: logicalMDBXDBIs[5], Key: rows[4].Key, BeforePresent: true, AfterKind: 1})
 				rows[4].Literal = nil
 			}
-			out := w.run(2, 1)
+			w.image(a, rows...)
+			if len(families) != 0 {
+				generationFamilyImage(t, w.s, hash, families[0])
+			}
+			out := CleanupGenerationMDBX(w.s, w.owner, 2, 1)
 			sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, name)
 			logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical undo", "complete family semantic refusal: %v", out.Err)
-			generationRaw(t, w, generationEncoded(t, a), rows)
+			sideWantReleased(t, w.owner, name)
+			generationRaw(t, w, generationEncoded(t, a), rows, families...)
 		})
 	}
 }
