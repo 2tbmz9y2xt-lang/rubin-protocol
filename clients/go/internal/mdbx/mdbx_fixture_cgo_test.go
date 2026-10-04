@@ -1558,6 +1558,86 @@ func TestCleanupSideV1Native(t *testing.T) {
 	})
 }
 
+func TestCleanupReadbackFixtureShape(t *testing.T) {
+	t.Run("X2", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		for rank := uint16(0); rank <= 255; rank++ {
+			for _, length := range []int{0, 1, 31, 32, 33, 76, 77, 78, 65537} {
+				if rank == 4 && length == 32 || rank == 5 && (length == 33 || length == 77) {
+					continue
+				}
+				before, calls := fixtureLargeNativeCalls(), 0
+				drift, err := FixtureCleanupReadbackDrift(store, uint8(rank), make([]byte, length), func() { calls++ })
+				if drift != 0 || err == nil || err.Error() != "invalid cleanup readback fixture" || calls != 0 || fixtureLargeNativeCalls() != before {
+					t.Fatalf("invalid fixture rank%d/len%d: %d/%v/calls%d", rank, length, drift, err, calls)
+				}
+			}
+		}
+		for _, flags := range []int{0, 1, 2} {
+			before, calls := fixtureLargeNativeCalls(), 0
+			s, run := store, func() { calls++ }
+			if flags != 0 {
+				s = nil
+			}
+			if flags != 1 {
+				run = nil
+			}
+			drift, err := FixtureCleanupReadbackDrift(s, 4, make([]byte, 32), run)
+			if drift != 0 || err == nil || err.Error() != "invalid cleanup readback fixture" || calls != 0 || fixtureLargeNativeCalls() != before {
+				t.Fatalf("nil fixture argument: %d/%v/calls%d", drift, err, calls)
+			}
+		}
+		for _, shape := range []struct {
+			rank   uint8
+			length int
+		}{{4, 32}, {5, 33}, {5, 77}} {
+			t.Run(fmt.Sprintf("valid-%d-%d", shape.rank, shape.length), func(t *testing.T) {
+				s, path, cfg := consultedStore(t)
+				cfg = s.config
+				key := make([]byte, shape.length)
+				selector := LargeImageSelectorV1{Kind: 1}
+				if shape.rank == 5 {
+					selector.Kind = 2
+				}
+				marker := &struct{}{}
+				func() {
+					defer func() {
+						if recover() != marker {
+							t.Fatal("fixture panic identity changed")
+						}
+					}()
+					_, _ = FixtureCleanupReadbackDrift(s, shape.rank, key, func() { panic(marker) })
+				}()
+				// The next real mode3 invocation also proves serialized disarm/unwind.
+				calls := 0
+				var truth CommitTruth
+				var stage UpdateStage
+				var result error
+				drift, err := FixtureCleanupReadbackDrift(s, shape.rank, key, func() {
+					calls++
+					truth, stage, result = s.Update(func(*Reader) (Batch, error) {
+						return Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{selector}}, nil
+					})
+				})
+				commit, ok := result.(*CommitError)
+				if !ok || truth != CommitTruth(3) || stage != 3 || commit.Truth != CommitTruth(3) || commit.ReadbackCause != nil {
+					t.Fatalf("fixed-mode3 tuple: %s/%d/%v", truth, stage, result)
+				}
+				requireEngineError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28)
+				if err != nil || drift != 1 || calls != 1 || s.state != storeCLOSED || s.env != nil {
+					t.Fatalf("fixed-mode3 delegate: %d/%v/calls%d/%s", drift, err, calls, s.state)
+				}
+				reopened, openErr := Open(path, cfg)
+				consultedTrack(t, reopened, openErr)
+				equal, rawErr := FixtureRawRowEqual(reopened, shape.rank, key, []byte{0x7f})
+				if rawErr != nil || !equal {
+					t.Fatalf("fixed-mode3 actual drift: %v/%v", equal, rawErr)
+				}
+			})
+		}
+	})
+}
+
 func TestCleanupBURawEvidence(t *testing.T) {
 	for _, row := range []struct {
 		name, diagnostic string

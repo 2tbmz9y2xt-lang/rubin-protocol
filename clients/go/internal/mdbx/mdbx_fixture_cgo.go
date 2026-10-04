@@ -383,6 +383,17 @@ func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run fu
 	return evidence, nil
 }
 
+// FixtureCleanupReadbackDrift changes one retained cleanup artifact after commit.
+// Only the three frozen physical shapes reach the existing fixed-mode owner.
+func FixtureCleanupReadbackDrift(store *Store, rank uint8, key []byte, run func()) (uint32, error) {
+	valid := rank == 4 && len(key) == 32 || rank == 5 && (len(key) == 33 || len(key) == 77)
+	if store == nil || run == nil || !valid {
+		return 0, errors.New("invalid cleanup readback fixture")
+	}
+	evidence, err := fixtureLargeFault(store, 3, rank, key, run)
+	return evidence.drift, err
+}
+
 // Test teardown disposes a real retained handle after its terminal projection was observed.
 func fixtureLargeRelease(store *Store) error {
 	var err error
