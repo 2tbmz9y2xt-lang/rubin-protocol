@@ -8172,8 +8172,52 @@ func compactDAPopulation(t *testing.T) {
 	if len(want) != 0 || !reflect.DeepEqual(before, compactDAImage(t, f)) {
 		t.Fatal("mixed snapshot incomplete or changed owner")
 	}
-	for _, tx := range txs {
+	for i, tx := range txs {
 		requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}, uint64(len(tx.raw)), 1, tx.raw)
+		if tx.spec.kind != 2 || tx.spec.chunkIndex == 0 {
+			continue
+		}
+		t.Run(fmt.Sprintf("missing_selected_locator/state%d/index%d", f.relay.sets[tx.spec.daID].state, tx.spec.chunkIndex), func(t *testing.T) {
+			validImage := compactDAImage(t, f)
+			locator := f.relay.locators[tx.txid]
+			f.mutateRelay(func(s *DARelayState) { delete(s.locators, tx.txid) })
+			for _, different := range []bool{false, true} {
+				id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+				if different {
+					id.WTxID[0] ^= 1
+				}
+				for _, maxBytes := range []uint64{0, uint64(len(tx.raw))} {
+					requireCompactDAPreservedRead(t, f, id, maxBytes, 3, nil)
+				}
+			}
+			sibling := txs[i-1]
+			if sibling.spec.daID != tx.spec.daID || sibling.spec.kind != 2 || sibling.spec.chunkIndex != 0 {
+				t.Fatal("nonzero chunk lacks its independently admitted chunk0 control")
+			}
+			requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
+			f.mutateRelay(func(s *DARelayState) { s.locators[tx.txid] = locator })
+			if !reflect.DeepEqual(validImage, compactDAImage(t, f)) {
+				t.Fatal("locator restoration changed original image")
+			}
+			requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}, uint64(len(tx.raw)), 1, tx.raw)
+			ids, ok := f.relay.CompactDAIdentities(f.mp)
+			want := map[CompactCandidateIdentity]bool{}
+			for _, member := range txs {
+				want[CompactCandidateIdentity{TxID: member.txid, WTxID: member.wtxid}] = true
+			}
+			if !ok || len(ids) != 9 {
+				t.Fatalf("restored mixed snapshot=(%v,%v), want9", ids, ok)
+			}
+			for _, id := range ids {
+				if !want[id] {
+					t.Fatalf("restored mixed snapshot unexpected/duplicate member=%+v", id)
+				}
+				delete(want, id)
+			}
+			if len(want) != 0 || !reflect.DeepEqual(validImage, compactDAImage(t, f)) {
+				t.Fatal("restored mixed snapshot incomplete or changed owner")
+			}
+		})
 	}
 }
 
