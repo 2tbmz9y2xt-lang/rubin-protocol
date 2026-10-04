@@ -1637,7 +1637,7 @@ func (f *pendingOutpointSyncFixture) breakResidentClaim(t *testing.T, txid [32]b
 	}
 	f.mempool.mu.Lock()
 	defer f.mempool.mu.Unlock()
-	f.mempool.txs[txid].token = token
+	mempoolTestEntry(f.mempool, txid).token = token
 }
 
 func ownerClaimCount(owner *PendingOutpointOwner) (outpoints int, claims int, highWater uint64) {
@@ -2084,14 +2084,14 @@ func fingerprintPool(pool *Mempool) poolFingerprint {
 	owner.mu.Lock()
 	defer owner.mu.Unlock()
 	return poolFingerprint{
-		len:               len(pool.txs),
+		len:               len(pool.relations.forward),
 		bytesUsed:         pool.usedBytes,
-		wtxids:            len(pool.wtxids),
+		wtxids:            len(pool.relations.reverse),
 		lastAdmissionSeq:  pool.lastAdmissionSeq,
 		currentMinFeeRate: pool.currentMinFeeRate,
 		admission:         pool.AdmissionCounts(),
 		stats: MempoolStats{
-			TxCount: len(pool.txs), BytesUsed: pool.usedBytes, MaxBytes: pool.maxBytes,
+			TxCount: len(pool.relations.forward), BytesUsed: pool.usedBytes, MaxBytes: pool.maxBytes,
 			LowWaterBytes: pool.effectiveLowWaterBytesLocked(), MinFeeRate: pool.currentMinFeeRateLocked(),
 			EvictedResidentTotal: pool.evictedResidentTotal.Load(),
 		},

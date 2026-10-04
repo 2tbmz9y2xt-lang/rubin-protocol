@@ -682,8 +682,8 @@ func assertCandidateExactlyReleased(t *testing.T, mp *Mempool, entry *mempoolEnt
 	if entry.token != zero {
 		t.Errorf("rejected candidate token=%+v, want the zero token after exact release", entry.token)
 	}
-	if len(mp.txs) != 0 {
-		t.Errorf("rejected candidate published %d record(s), want none", len(mp.txs))
+	if len(mp.relations.forward) != 0 {
+		t.Errorf("rejected candidate published %d record(s), want none", len(mp.relations.forward))
 	}
 	owner := mp.pendingOutpoints
 	owner.mu.Lock()

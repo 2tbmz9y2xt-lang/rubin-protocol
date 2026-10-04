@@ -394,7 +394,7 @@ func (m *Mempool) noteRetainedLocked(entry *mempoolEntry, probe *relayAdmissionP
 		return
 	}
 	probe.noteIdentity(entry.txid, entry.wtxid)
-	if resident, ok := m.txs[entry.txid]; ok && resident == entry {
+	if resident, ok := m.relations.entry(entry.txid); ok && resident == entry {
 		probe.success = RelayAdmissionRetained
 		return
 	}

@@ -579,6 +579,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		}
 		want := map[string]int{}
 		want["edge-call|node/da_complete_snapshot.go:parseDACompleteMember|parseRetainedDAMember"] = 1
+		want["edge-call|node/mempool.go:ReadCompactStandard|ParseTx"] = 1
 		for _, row := range strings.Split(string(legacyRows), "\x1e") {
 			if row != "" && !changed(row) {
 				want[row]++
