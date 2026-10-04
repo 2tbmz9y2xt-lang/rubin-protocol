@@ -111,7 +111,7 @@ func (w *generationWorld) image(a mdbx.StorageAuthorityV1, rows ...mdbx.Mutation
 		for _, row := range rows {
 			value, found, err := r.Get(row.DBI, row.Key)
 			if err != nil || found != (row.Literal != nil) || !bytes.Equal(value, row.Literal) {
-				return fmt.Errorf("generation image rank%d/%x: %v/%v", row.DBI.Rank, row.Key, found, err)
+				return errors.Join(fmt.Errorf("generation image rank%d/%x: found=%t", row.DBI.Rank, row.Key, found), err)
 			}
 		}
 		return nil

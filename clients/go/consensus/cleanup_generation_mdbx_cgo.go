@@ -274,7 +274,7 @@ func cleanupDrainIndexNames(index mdbx.ObsoleteRowV1, hash []byte) (bool, error)
 }
 
 type cleanupGenerationOwners struct {
-	canonical                    mdbx.CanonicalOwnerResultV1
+	canonical                      mdbx.CanonicalOwnerResultV1
 	selected, bodyDefer, undoDefer bool
 }
 
@@ -524,7 +524,7 @@ func (u *cleanupUndoHealth) visit(row mdbx.LargeImageRowV1) error {
 	if row.Length() > 65560 {
 		return selectedSideDefect("invalid cleanup canonical undo")
 	}
-	value := make([]byte, int(row.Length()))
+	value := make([]byte, row.Length())
 	if _, err := row.ReadAt(value[:min(len(value), 65536)], 0); err != nil {
 		return err
 	}
