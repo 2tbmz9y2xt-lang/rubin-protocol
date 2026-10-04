@@ -371,7 +371,8 @@ func generationRankCollision(t *testing.T) {
 	orphanKey, _ := mdbx.CanonicalOwnerKey(g, orphan)
 	logicalMDBXAssert(t, bytes.Equal(key, orphanKey), "literal physical key collision across ranks")
 	derived := generationRow(7, orphanKey, binary.BigEndian.AppendUint64(nil, 6))
-	w := generationNew(t, a, append(slices.Clone(rows), derived)...)
+	w := generationNew(t, a, rows...)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 7, derived.Key, derived.Literal) == nil, "seed orphan derived row")
 	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, key, []byte{0x7f}) == nil, "seed malformed undo with derived key")
 	generationClean(t, w.run(4, 1), 2)
 	w.image(a, append(generationGone(rows), derived)...)
@@ -516,8 +517,8 @@ func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generat
 		causes   string
 		image    string
 	}{
-		{"no-work", 1, 1, 1, "", "", "old"},
-		{"work", 1, 2, 3, "", "", "new"},
+		{"no-work", 1, 1, 1, "", "-", "old"},
+		{"work", 1, 2, 3, "", "-", "new"},
 		{"begin-full", 2, 1, 1, "", "update:Transaction", "old"},
 		{"begin-IO", 3, 1, 1, "", "update:IO", "old"},
 		{"authority-IO", 4, 1, 1, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "get:IO", "old"},
