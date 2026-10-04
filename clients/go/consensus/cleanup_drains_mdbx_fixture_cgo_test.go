@@ -56,7 +56,12 @@ func generationSelected(a *mdbx.StorageAuthorityV1, hash [32]byte, body []byte) 
 
 func TestCleanupGenerationMDBXNative(t *testing.T) {
 	t.Run("R1b", generationAuthorityRejections)
-	t.Run("R18b", generationOptionalIdentity)
+	t.Run("R18b", func(t *testing.T) { generationOptionalIdentity(t, "") })
+	t.Run("P10-A6-optional-keep", func(t *testing.T) {
+		for _, keep := range []string{"canonical-selected", "canonical-SIDE", "selected-SIDE"} {
+			t.Run(keep, func(t *testing.T) { generationOptionalIdentity(t, keep) })
+		}
+	})
 	t.Run("P10-A12", func(t *testing.T) {
 		generationMalformedRows(t)
 		t.Run("identity", generationMalformedIdentity)
@@ -185,7 +190,7 @@ func generationAuthorityRejections(t *testing.T) {
 	})
 }
 
-func generationOptionalIdentity(t *testing.T) {
+func generationOptionalIdentity(t *testing.T, keep string) {
 	for _, variant := range []string{"absent", "width", "work", "later-IO"} {
 		t.Run(variant, func(t *testing.T) {
 			a := generationAuthority()
@@ -193,6 +198,21 @@ func generationOptionalIdentity(t *testing.T) {
 			a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 7, TipHash: [32]byte{7}, CumulativeChainwork: sideWorldWork(2), RowCount: 2, LogicalBytes: 532}
 			first, _ := mdbx.HeightKey(3, 6)
 			last, _ := mdbx.HeightKey(3, 7)
+			if keep != "" && keep != "selected-SIDE" {
+				a.B, a.U = 10, 13690
+				rows = append(rows, generationCanonical(hash, 11)...)
+				a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 3, GenerationID: 1, LastHeight: 13689, NextHeight: 11})
+			}
+			if keep == "canonical-SIDE" {
+				a.SelectedSide = nil
+				a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 6, LastHeight: 7, NextHeight: 6})
+			}
+			if keep == "selected-SIDE" {
+				a.NextGenerationID = 5
+				generationSelected(&a, hash, rows[3].Literal)
+				last, _ = mdbx.HeightKey(4, 7)
+				a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 4, FirstHeight: 7, LastHeight: 7, NextHeight: 7})
+			}
 			rows = append(rows, generationRow(6, first, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
 			if variant != "absent" {
 				rows = append(rows, generationRow(6, last, mdbx.ChainValue([32]byte{7}, hash, sideWorldWork(2))))
@@ -214,8 +234,17 @@ func generationOptionalIdentity(t *testing.T) {
 				scenario = mdbx.SelectedDamageGetEIO
 			}
 			var out selectedSideOutcome
-			_, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 6, last, func() { out = CleanupGenerationMDBX(w.s, w.owner, 2, 1) })
-			if variant == "later-IO" {
+			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 6, last, func() { out = CleanupGenerationMDBX(w.s, w.owner, 2, 1) })
+			expected := a
+			if keep != "" {
+				generationClean(t, out, 2)
+				logicalMDBXAssert(t, e.Faults == 0, "settled keep read unnecessary link: %+v", e)
+				rows[0].Literal, rows[1].Literal = nil, nil
+				if keep == "selected-SIDE" {
+					rows[4].Literal = nil
+				}
+				expected.Cleanup = &mdbx.CleanupV1{Spans: slices.Clone(a.Cleanup.Spans[1:])}
+			} else if variant == "later-IO" {
 				sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(branch_data)", "OLD", 1, 1, variant)
 				generationEngine(t, out.Err, "IO", "get", 5, "")
 			} else {
@@ -227,7 +256,7 @@ func generationOptionalIdentity(t *testing.T) {
 			if variant == "absent" {
 				rows = append(rows, generationRow(6, last, nil))
 			}
-			generationRaw(t, w, generationEncoded(t, a), rows)
+			generationRaw(t, w, generationEncoded(t, expected), rows)
 		})
 	}
 }
@@ -384,20 +413,41 @@ func generationRankCollision(t *testing.T) {
 }
 
 func generationDamage(t *testing.T, rank uint8) {
-	for _, kind := range []string{"none", "canonical", "selected", "defer"} {
+	kinds := []string{"none", "canonical", "selected", "defer"}
+	if rank == 3 {
+		kinds = append(kinds, "selected-parent", "selected-parent-repeat", "canonical-parent", "canonical-parent-priority")
+	}
+	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
 			a := generationAuthority()
 			hash, rows := generationProjection(2, 5, 55)
-			if kind == "canonical" || kind == "defer" && rank == 5 {
+			canonicalParent := kind == "canonical-parent" || kind == "canonical-parent-priority"
+			if kind == "canonical" || canonicalParent || kind == "defer" && rank == 5 {
 				k := uint64(11)
 				a.B, a.U = 10, 13690
 				if kind == "canonical" && rank == 5 {
 					k = 13691
 				}
+				if canonicalParent {
+					k = 8 // Canonical header keep alone leaves selected body membership necessary.
+				}
 				rows = append(rows, generationCanonical(hash, k)...)
+				if kind == "canonical-parent-priority" {
+					rows[5].Literal = mdbx.ChainValue(hash, [32]byte{1}, sideWorldWork(1))
+				}
 			}
-			if kind == "selected" {
+			parentDamage := kind == "selected-parent" || kind == "selected-parent-repeat" || canonicalParent
+			if kind == "selected" || parentDamage {
 				rows = append(rows, generationSelected(&a, hash, rows[3].Literal)...)
+			}
+			if parentDamage {
+				rows[len(rows)-1].Literal = mdbx.ChainValue(hash, [32]byte{1}, sideWorldWork(1))
+				if kind == "selected-parent-repeat" {
+					a.SelectedSide.TipHeight, a.SelectedSide.RowCount = 7, 2
+					a.SelectedSide.CumulativeChainwork, a.SelectedSide.LogicalBytes = sideWorldWork(2), 2*uint64(len(rows[3].Literal))
+					key, _ := mdbx.HeightKey(3, 7)
+					rows = append(rows, generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(2))))
+				}
 			}
 			if kind == "defer" {
 				if rank == 5 {
@@ -420,7 +470,9 @@ func generationDamage(t *testing.T, rank uint8) {
 			bad := []byte{0x7f}
 			if rank == 3 {
 				bad = bytes.Clone(rows[2].Literal)
-				bad[115] ^= 1
+				if !parentDamage {
+					bad[115] ^= 1
+				}
 			}
 			logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, key, bad) == nil, "seed damage")
 			rows[index].Literal = bad
@@ -428,10 +480,13 @@ func generationDamage(t *testing.T, rank uint8) {
 			expected := a
 			want := slices.Clone(rows)
 			switch kind {
-			case "canonical":
+			case "canonical", "canonical-parent-priority":
 				sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, kind)
 				logicalMDBXAssert(t, out.Err != nil, "canonical damage accepted")
-			case "selected":
+				if kind == "canonical-parent-priority" {
+					logicalMDBXAssert(t, out.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical header", "canonical parent priority: %v", out.Err)
+				}
+			case "selected", "selected-parent", "selected-parent-repeat", "canonical-parent":
 				if rank == 5 {
 					// Selected membership owns header/body, never compact undo.
 					generationClean(t, out, 2)
@@ -441,8 +496,10 @@ func generationDamage(t *testing.T, rank uint8) {
 					sideWantOutcome(t, out, "LOCAL_STORE_ERROR(noncanonical)", "NOT_APPLICABLE", 2, 3, kind)
 					logicalMDBXAssert(t, out.Err == nil, "complete clear failed: %v", out.Err)
 					expected.SelectedSide = nil
-					expected.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}, {Kind: 4, GenerationID: 3, FirstHeight: 6, LastHeight: 6, NextHeight: 6}}}
-					want[2].Literal = nil
+					expected.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}, {Kind: 4, GenerationID: 3, FirstHeight: 6, LastHeight: a.SelectedSide.TipHeight, NextHeight: 6}}}
+					if kind != "canonical-parent" {
+						want[2].Literal = nil
+					}
 				}
 			default:
 				generationClean(t, out, 2)

@@ -274,8 +274,21 @@ func cleanupDrainIndexNames(index mdbx.ObsoleteRowV1, hash []byte) (bool, error)
 }
 
 type cleanupGenerationOwners struct {
-	canonical                      mdbx.CanonicalOwnerResultV1
-	selected, bodyDefer, undoDefer bool
+	canonical            mdbx.CanonicalOwnerResultV1
+	selected             cleanupGenerationMembership
+	bodyDefer, undoDefer bool
+}
+
+type cleanupGenerationMembership struct {
+	found, conflict bool
+	parent          [32]byte
+}
+
+func (m cleanupGenerationMembership) headerDamage(header []byte) bool {
+	if !m.found {
+		return false
+	}
+	return m.conflict || len(header) != 116 || !bytes.Equal(header[4:36], m.parent[:])
 }
 
 func (p *cleanupGenerationPlan) index(r *mdbx.Reader, a mdbx.StorageAuthorityV1, index mdbx.ObsoleteRowV1) error {
@@ -357,40 +370,46 @@ func (p *cleanupGenerationPlan) owners(r *mdbx.Reader, a mdbx.StorageAuthorityV1
 	p.step = selectedSideBranch
 	p.batchImage.Consulted = append(p.batchImage.Consulted, owner.Rows...)
 	o := cleanupGenerationOwners{canonical: owner}
-	o.selected, err = p.membership(r, a.SelectedSide, hash)
+	_, bodyRequired, _, _ := o.keeps(a)
+	o.selected, err = p.membership(r, a.SelectedSide, hash, bodyRequired)
 	if err != nil {
 		return o, err
 	}
 	for _, span := range a.Cleanup.Spans[1:] {
-		if span.Kind == mdbx.CleanupSpanSideV1 {
+		_, _, bodyKeep, _ := o.keeps(a)
+		if span.Kind == mdbx.CleanupSpanSideV1 && !bodyKeep {
 			deferBody, readErr := p.sideMembership(r, span.GenerationID, span.NextHeight, span.LastHeight, hash)
 			if readErr != nil {
 				return o, readErr
 			}
-			o.bodyDefer = o.bodyDefer || deferBody
+			o.bodyDefer = o.bodyDefer || deferBody.found
 		}
 		o.promise(span)
 	}
 	return o, nil
 }
 
-func (p *cleanupGenerationPlan) membership(r *mdbx.Reader, side *mdbx.SelectedSideV1, hash [32]byte) (bool, error) {
-	if side == nil {
-		return false, nil
+func (p *cleanupGenerationPlan) membership(r *mdbx.Reader, side *mdbx.SelectedSideV1, hash [32]byte, bodyKept bool) (cleanupGenerationMembership, error) {
+	if side == nil || bodyKept {
+		return cleanupGenerationMembership{}, nil
 	}
 	return p.sideMembership(r, side.GenerationID, selectedSideFirst(side), side.TipHeight, hash)
 }
 
-func (p *cleanupGenerationPlan) sideMembership(r *mdbx.Reader, g, first, last uint64, hash [32]byte) (bool, error) {
-	keep := false
+func (p *cleanupGenerationPlan) sideMembership(r *mdbx.Reader, g, first, last uint64, hash [32]byte) (cleanupGenerationMembership, error) {
+	var keep cleanupGenerationMembership
 	for h := first; h <= last; h++ {
 		link, err := r.ReadRequiredSideLink(g, h)
 		if err != nil {
-			return false, err
+			return keep, err
 		}
 		key, _ := mdbx.HeightKey(g, h)
 		p.batchImage.Consulted = append(p.batchImage.Consulted, mdbx.ConsultedRow{DBI: mdbx.SchemaV2DBIs()[6], Key: key})
-		keep = keep || bytes.Equal(link[:32], hash[:])
+		if bytes.Equal(link[:32], hash[:]) {
+			parent := [32]byte(link[32:64])
+			keep.conflict = keep.conflict || keep.found && keep.parent != parent
+			keep.found, keep.parent = true, parent
+		}
 	}
 	return keep, nil
 }
@@ -404,9 +423,9 @@ func (o *cleanupGenerationOwners) promise(span mdbx.CleanupSpanV1) {
 }
 
 func (o cleanupGenerationOwners) keeps(a mdbx.StorageAuthorityV1) (header, bodyRequired, body, undo bool) {
-	header = o.canonical.Owned || o.selected
+	header = o.canonical.Owned || o.selected.found
 	bodyRequired = o.canonical.Owned && o.canonical.Height >= a.B
-	body = bodyRequired || o.selected
+	body = bodyRequired || o.selected.found
 	undo = o.canonical.Owned && o.canonical.Height >= a.U
 	return
 }
@@ -414,7 +433,7 @@ func (o cleanupGenerationOwners) keeps(a mdbx.StorageAuthorityV1) (header, bodyR
 func (p *cleanupGenerationPlan) health(r *mdbx.Reader, a mdbx.StorageAuthorityV1, hash [32]byte, o cleanupGenerationOwners) error {
 	header, required, body, undo := o.keeps(a)
 	if header {
-		bad, err := p.headerHealth(r, hash, o.canonical.Entry)
+		bad, err := p.headerHealth(r, hash, o)
 		if err != nil {
 			return err
 		}
@@ -437,7 +456,8 @@ func (p *cleanupGenerationPlan) health(r *mdbx.Reader, a mdbx.StorageAuthorityV1
 	return nil
 }
 
-func (p *cleanupGenerationPlan) headerHealth(r *mdbx.Reader, hash [32]byte, canonicalEntry []byte) (bool, error) {
+func (p *cleanupGenerationPlan) headerHealth(r *mdbx.Reader, hash [32]byte, o cleanupGenerationOwners) (bool, error) {
+	canonicalEntry := o.canonical.Entry
 	required := len(canonicalEntry) != 0
 	if required {
 		p.step = selectedSideCanonical
@@ -447,12 +467,12 @@ func (p *cleanupGenerationPlan) headerHealth(r *mdbx.Reader, hash [32]byte, cano
 		return false, err
 	}
 	p.step = selectedSideBranch
-	bad := !row.Present || row.InvalidWidth || sha3.Sum256(row.Value) != hash
+	bad := len(row.Value) != 116 || sha3.Sum256(row.Value) != hash
 	if required && (bad || !bytes.Equal(row.Value[4:36], canonicalEntry[32:64])) {
 		return false, selectedSideDefect("invalid cleanup canonical header")
 	}
 	p.batchImage.Consulted = append(p.batchImage.Consulted, mdbx.ConsultedRow{DBI: mdbx.SchemaV2DBIs()[3], Key: bytes.Clone(hash[:])})
-	return bad, nil
+	return bad || o.selected.headerDamage(row.Value), nil
 }
 
 // This frame owns the body and parser. It returns before undo raw collection.
