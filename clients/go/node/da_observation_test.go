@@ -347,7 +347,7 @@ func TestDAObservationPlanHook(t *testing.T) {
 		{"duplicate exit after PLANNED", func(f *daNonReplayFixture, chunk daNonReplayTx, stage daCompleteStage) {
 			if stage == daCompletePlanned {
 				f.mutateRelay(func(s *DARelayState) {
-					s.locators[chunk.txid] = daRelayLocator{daID: [32]byte{0x51}, kind: daRelayLocatorChunk}
+					s.relations.putLocator(chunk.txid, daRelayLocator{daID: [32]byte{0x51}, kind: daRelayLocatorChunk})
 				})
 			}
 		}, "", []daObservationStage{planned}},
@@ -363,7 +363,7 @@ func TestDAObservationPlanHook(t *testing.T) {
 		}, errDARelayImageIncompatible.Error(), []daObservationStage{planned, effects}},
 		{"extra locator at EFFECTS", func(f *daNonReplayFixture, chunk daNonReplayTx, stage daCompleteStage) {
 			if stage == daCompleteEffects {
-				f.relay.locators[chunk.txid] = daRelayLocator{daID: [32]byte{0x51}, kind: daRelayLocatorChunk}
+				f.relay.relations.putLocator(chunk.txid, daRelayLocator{daID: [32]byte{0x51}, kind: daRelayLocatorChunk})
 			}
 		}, errDARelayImageIncompatible.Error(), []daObservationStage{planned, effects}},
 	} {
@@ -389,7 +389,7 @@ func TestDAObservationPlanHook(t *testing.T) {
 		hookDAObservation(f, func(stage daCompleteStage, _ *daCompleteCommitPlan) {
 			if stage == daCompleteEffects {
 				o.mu.Lock()
-				o.dropClaimLocked(f.relay.sets[[32]byte{0x51}].commit.member.token)
+				o.dropClaimLocked(f.relay.relations.recordValue([32]byte{0x51}).commit.member.token)
 				o.mu.Unlock()
 			}
 		})

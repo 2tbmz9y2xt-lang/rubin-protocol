@@ -235,7 +235,7 @@ func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingO
 	// ...Locked: the caller-owned snapshot's own invariant (see prepareCanonicalDAImage).
 	daIDs := retained.sortedRetainedDAIDsLocked()
 	for _, daID := range daIDs {
-		record := retained.sets[daID]
+		record := retained.relations.recordValue(daID)
 		var err error
 		if record.state == daRelayStateCompleteSet {
 			err = checkOwnerReadyRetainedRecordLocked(record)
@@ -250,7 +250,7 @@ func validateCanonicalDARetainedSnapshot(retained *DARelayState, owner *PendingO
 		}
 	}
 	for _, daID := range daIDs {
-		if err := image.bindRetainedRecord(retained.sets[daID]); err != nil {
+		if err := image.bindRetainedRecord(retained.relations.recordValue(daID)); err != nil {
 			return canonicalDARetainedImage{}, err
 		}
 	}
@@ -356,10 +356,10 @@ func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 	if err := canonicalDARetainedImageRequiredMaps(s); err != nil {
 		return err
 	}
-	indexed := make(map[[32]byte]bool, len(s.locators))
+	indexed := make(map[[32]byte]bool, s.relations.locatorCount)
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
 	for _, daID := range daIDs {
-		record := s.sets[daID]
+		record := s.relations.recordValue(daID)
 		if record.daID != daID {
 			return terminalCanonicalDAError(fmt.Errorf("retained DA record stored under da_id %x carries da_id %x", daID, record.daID))
 		}
@@ -370,8 +370,8 @@ func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 			return err
 		}
 	}
-	if len(indexed) != len(s.locators) {
-		return terminalCanonicalDAError(fmt.Errorf("retained DA locator index holds %d rows against %d retained members", len(s.locators), len(indexed)))
+	if len(indexed) != s.relations.locatorCount {
+		return terminalCanonicalDAError(fmt.Errorf("retained DA locator index holds %d rows against %d retained members", s.relations.locatorCount, len(indexed)))
 	}
 	if err := totals.checkAgainstLocked(s); err != nil {
 		return terminalCanonicalDAError(err)
@@ -385,9 +385,9 @@ func canonicalDARetainedImageClosed(s *DARelayState, daIDs [][32]byte) error {
 // prefetch maps stay optional — the constructor leaves them nil and releaseSet only deletes.
 func canonicalDARetainedImageRequiredMaps(s *DARelayState) error {
 	switch {
-	case s.sets == nil:
+	case s.relations.sets == nil:
 		return terminalCanonicalDAError(errors.New("retained DA image carries no record map"))
-	case s.locators == nil:
+	case s.relations.locators == nil:
 		return terminalCanonicalDAError(errors.New("retained DA image carries no locator index"))
 	case s.orphanBytesByDAID == nil:
 		return terminalCanonicalDAError(errors.New("retained DA image carries no per-da_id orphan byte index"))
@@ -402,7 +402,7 @@ func canonicalDARetainedImageRequiredMaps(s *DARelayState) error {
 // row count then catches a locator no record implies, absent da_id included.
 func canonicalDARecordLocatorsIndexed(s *DARelayState, record daRelaySetRecord, indexed map[[32]byte]bool) error {
 	for _, row := range record.locatorRows() {
-		if s.locators[row.txid] != row.locator || indexed[row.txid] {
+		if s.relations.locatorValue(row.txid) != row.locator || indexed[row.txid] {
 			return terminalCanonicalDAError(fmt.Errorf("retained DA record %x is not the sole locator of txid %x", record.daID, row.txid))
 		}
 		indexed[row.txid] = true

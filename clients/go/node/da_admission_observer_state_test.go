@@ -588,7 +588,7 @@ func stateControlDeltaChecked(f *daNodeObserverStateFixture, control daNodeObser
 	}
 	f.Relay.mu.Lock()
 	defer f.Relay.mu.Unlock()
-	if control.action == "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES" && ^uint64(0)-f.Relay.sets[member.DAID].completeIntrinsic.totalBytes < control.delta {
+	if control.action == "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES" && ^uint64(0)-f.Relay.relations.recordValue(member.DAID).completeIntrinsic.totalBytes < control.delta {
 		return fmt.Errorf("observer input control.intrinsic_total_bytes_delta: overflow")
 	}
 	return nil
@@ -600,8 +600,8 @@ func stateSequencesChecked(f *daNodeObserverStateFixture, daID [32]byte, first, 
 	wantNext, _ := stateDANodeObserverUint("accepted_sequence", next)
 	f.Relay.mu.Lock()
 	defer f.Relay.mu.Unlock()
-	if f.Relay.nextReceivedTime != wantNext || f.Relay.sets[daID].receivedTime != wantFirst {
-		return fmt.Errorf("observer state setup: first received sequence %d next %d, want %d/%d", f.Relay.sets[daID].receivedTime, f.Relay.nextReceivedTime, wantFirst, wantNext)
+	if f.Relay.nextReceivedTime != wantNext || f.Relay.relations.recordValue(daID).receivedTime != wantFirst {
+		return fmt.Errorf("observer state setup: first received sequence %d next %d, want %d/%d", f.Relay.relations.recordValue(daID).receivedTime, f.Relay.nextReceivedTime, wantFirst, wantNext)
 	}
 	return nil
 }
@@ -921,7 +921,7 @@ func stateBindingsLocked(relay *DARelayState, owner *PendingOutpointOwner) map[d
 			Observed: row.token.owner == owner,
 		}]++
 	}
-	for _, record := range relay.sets {
+	for _, record := range relay.relations.records() {
 		members := []*daRelayMemberIdentity{record.commit.member}
 		for _, chunk := range record.chunks {
 			members = append(members, chunk.member)
@@ -1008,7 +1008,7 @@ func observerImageOutsideHook(f *daNodeObserverStateFixture, closed bool) (daNod
 func stateOwnerBindingLocked(relay *DARelayState, owner *PendingOutpointOwner, daIDs [][32]byte) error {
 	seen := make(map[PendingOutpointToken]struct{})
 	for _, daID := range daIDs {
-		members, err := ownerReadyRecordMembers(relay.sets[daID], owner, seen)
+		members, err := ownerReadyRecordMembers(relay.relations.recordValue(daID), owner, seen)
 		if err != nil {
 			return err
 		}
@@ -1081,13 +1081,13 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 		relay.mu.Lock()
 		defer relay.mu.Unlock()
 		id := f.Candidate.DAID
-		record, ok := relay.sets[id]
+		record, ok := relay.relations.record(id)
 		if !ok || relay.records == ^uint64(0) {
 			return nil, fmt.Errorf("observer state control: target revision is unavailable")
 		}
 		revision := relay.records + 1
 		record.revision, relay.records = revision, revision
-		relay.sets[id] = record
+		relay.relations.putRecord(id, record)
 		return nil, nil
 	}
 	member, err := stateSelectedMember(f, control)
@@ -1096,13 +1096,13 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 	}
 	relay.mu.Lock()
 	defer relay.mu.Unlock()
-	record, ok := relay.sets[member.DAID]
+	record, ok := relay.relations.record(member.DAID)
 	if !ok {
 		return nil, fmt.Errorf("observer state control: selected record is absent")
 	}
 	switch control.action {
 	case "CORRUPT_RESIDENT_LOCATOR_DA_ID":
-		locator, ok := relay.locators[member.TxID]
+		locator, ok := relay.relations.locator(member.TxID)
 		if !ok || locator.daID != member.DAID {
 			return nil, fmt.Errorf("observer state control: selected locator is absent")
 		}
@@ -1111,23 +1111,23 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 			kind:       locator.kind,
 			chunkIndex: locator.chunkIndex,
 		}
-		relay.locators[member.TxID] = corrupt
+		relay.relations.putLocator(member.TxID, corrupt)
 		return lockedRestore(&relay.mu, func() bool {
-			current, ok := relay.locators[member.TxID]
+			current, ok := relay.relations.locator(member.TxID)
 			return ok && current == corrupt
 		},
-			func() { relay.locators[member.TxID] = locator }), nil
+			func() { relay.relations.putLocator(member.TxID, locator)}), nil
 	case "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES":
 		old := record.completeIntrinsic.totalBytes
 		record.completeIntrinsic.totalBytes += control.delta
-		relay.sets[member.DAID] = record
+		relay.relations.putRecord(member.DAID, record)
 		return lockedRestore(&relay.mu, func() bool {
-			current, ok := relay.sets[member.DAID]
+			current, ok := relay.relations.record(member.DAID)
 			return ok && current.completeIntrinsic.totalBytes == record.completeIntrinsic.totalBytes
 		}, func() {
-			current := relay.sets[member.DAID]
+			current := relay.relations.recordValue(member.DAID)
 			current.completeIntrinsic.totalBytes = old
-			relay.sets[member.DAID] = current
+			relay.relations.putRecord(member.DAID, current)
 		}), nil
 	case "REMOVE_RESIDENT_CHUNK":
 		if member.Key.MemberOrdinal == 0 || member.Key.MemberOrdinal > uint64(^uint16(0)) {
@@ -1139,12 +1139,16 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 			return nil, fmt.Errorf("observer state control: selected chunk is absent")
 		}
 		delete(record.chunks, index)
-		relay.sets[member.DAID] = record
+		relay.relations.putRecord(member.DAID, record)
 		return lockedRestore(&relay.mu, func() bool {
-			current, ok := relay.sets[member.DAID]
+			current, ok := relay.relations.record(member.DAID)
 			_, present := current.chunks[index]
 			return ok && current.chunks != nil && !present
-		}, func() { relay.sets[member.DAID].chunks[index] = chunk }), nil
+		}, func() {
+			current := relay.relations.recordValue(member.DAID)
+			current.chunks[index] = chunk
+			relay.relations.putRecord(member.DAID, current)
+		}), nil
 	default:
 		return nil, fmt.Errorf("observer input control: invalid PLANNED action %q", control.action)
 	}
@@ -1188,7 +1192,7 @@ func applyDANodeObserverStateEffectsControl(f *daNodeObserverStateFixture, contr
 	case "REMOVE_PRIOR_CLAIM":
 		delete(owner.byToken, token)
 		restore := lockedRestore(&owner.mu, func() bool {
-			locator, retained := f.Relay.locators[member.TxID]
+			locator, retained := f.Relay.relations.locator(member.TxID)
 			_, present := owner.byToken[token]
 			return retained && locator.daID == member.DAID && !present
 		}, func() { owner.byToken[token] = claim })
@@ -2777,7 +2781,7 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 	_, closed := observerImageOutsideHook(m, true)
 	require(t, open == nil && closed != nil && strings.Contains(closed.Error(), "accounting closure"), "observer state accounting closure: closed=%v open=%v", closed, open)
 	// A retained member token issued by a second owner fails Go's owner-ready token predicate.
-	target := f.Relay.sets[f.TargetCommit.DAID].commit.member
+	target := f.Relay.relations.recordValue(f.TargetCommit.DAID).commit.member
 	issuer := target.token.owner
 	target.token.owner = &PendingOutpointOwner{}
 	_, open = observerImageOutsideHook(f, false)
@@ -2838,12 +2842,12 @@ func TestDAAdmissionObserverNodeStateIntegrity(t *testing.T) {
 			"",
 		},
 	} {
-		_, retained := probe.f.Relay.sets[probe.id]
+		_, retained := probe.f.Relay.relations.record(probe.id)
 		require(t, retained, "observer state retained snapshot validator %s: record is absent", probe.name)
 		toggle := func(undo bool) {
-			record := probe.f.Relay.sets[probe.id]
+			record := probe.f.Relay.relations.recordValue(probe.id)
 			probe.mutate(&record, undo)
-			probe.f.Relay.sets[probe.id] = record
+			probe.f.Relay.relations.putRecord(probe.id, record)
 		}
 		toggle(false)
 		_, open = observerImageOutsideHook(probe.f, false)
@@ -3803,7 +3807,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		err,
 	)
 	saved := primary.After.Owner
-	original := f.Relay.sets[f.Candidate.DAID].commit.txBytes
+	original := f.Relay.relations.recordValue(f.Candidate.DAID).commit.txBytes
 	independent := bytes.Clone(original)
 	original[0] ^= 1
 	require(
@@ -3829,7 +3833,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 	)
 	require(t, daNodeObserverStateCandidateMatches(final.Image, f.Candidate, final.Owner.Generation, final.Owner.TokenHighWater), "observer state projection: retried candidate does not match its construction")
 	require(t, daNodeObserverStateSurvivorsEqual(final.Image, final.Image, nil, nil, [32]byte{}, [32]byte{}), "observer state projection: identical images reported unequal")
-	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
+	f.Relay.relations.recordValue(f.Candidate.DAID).commit.txBytes[0] ^= 1
 	changed, err := observerImageOutsideHook(f, false)
 	require(
 		t,
@@ -3838,7 +3842,7 @@ func TestDAAdmissionObserverNodeStateProjection(t *testing.T) {
 		"observer state alias: final baseline changed: %v",
 		err,
 	)
-	f.Relay.sets[f.Candidate.DAID].commit.txBytes[0] ^= 1
+	f.Relay.relations.recordValue(f.Candidate.DAID).commit.txBytes[0] ^= 1
 	headers := final.Image
 	headers.Records = slices.Clone(final.Image.Records)
 	headers.Records[0].TTLBlocksRemaining++

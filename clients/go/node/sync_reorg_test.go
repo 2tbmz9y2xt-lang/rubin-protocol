@@ -2573,7 +2573,7 @@ func stageCanonicalStateCFromBlock(t *testing.T, f *canonicalDATestFixture, bloc
 	}
 	relay := f.engine.DARelayState()
 	admitOwnerReady(t, relay, commit)
-	record := relay.sets[daID]
+	record := relay.relations.recordValue(daID)
 	if record.state != daRelayStateCompleteSet || relay.completeCount != 1 || relay.completeBytes == 0 || relay.pinnedPayloadBytes == 0 {
 		t.Fatalf("staged State C record=%+v accounting=(%d,%d,%d)", record, relay.completeBytes, relay.completeCount, relay.pinnedPayloadBytes)
 	}
@@ -2582,7 +2582,7 @@ func stageCanonicalStateCFromBlock(t *testing.T, f *canonicalDATestFixture, bloc
 
 func requireCanonicalStateCRemoved(t *testing.T, relay *DARelayState, owner *PendingOutpointOwner, record daRelaySetRecord) {
 	t.Helper()
-	if _, present := relay.sets[record.daID]; present || relay.completeBytes != 0 || relay.completeCount != 0 || relay.pinnedPayloadBytes != 0 {
+	if _, present := relay.relations.record(record.daID); present || relay.completeBytes != 0 || relay.completeCount != 0 || relay.pinnedPayloadBytes != 0 {
 		t.Fatalf("published State C image retains record=%v complete=(%d,%d) pinned=%d", present, relay.completeBytes, relay.completeCount, relay.pinnedPayloadBytes)
 	}
 	members := []*daRelayMemberIdentity{record.commit.member}
@@ -2590,7 +2590,7 @@ func requireCanonicalStateCRemoved(t *testing.T, relay *DARelayState, owner *Pen
 		members = append(members, record.chunks[index].member)
 	}
 	for _, member := range members {
-		if _, present := relay.locators[member.txid]; present || owner.byToken[member.token] != nil {
+		if _, present := relay.relations.locator(member.txid); present || owner.byToken[member.token] != nil {
 			t.Fatalf("removed State C member txid=%x retains locator=%v claim=%v", member.txid, present, owner.byToken[member.token] != nil)
 		}
 		for _, input := range member.inputs {
@@ -3862,9 +3862,9 @@ func TestCanonicalCompleteSetD1O1AbortPreservesOld(t *testing.T) {
 		block := canonicalStateCTestBlock(t, f)
 		record := stageCanonicalStateCFromBlock(t, f, block)
 		relay := f.engine.DARelayState()
-		corrupt := relay.sets[record.daID]
+		corrupt := relay.relations.recordValue(record.daID)
 		corrupt.wireBytes = 1
-		relay.sets[record.daID] = corrupt
+		relay.relations.putRecord(record.daID, corrupt)
 		before, ownerBefore := daRelayStateSnapshot(relay), cloneDAAdmissionOwner(mp.pendingOutpoints)
 		ownerBefore.generation++
 		ownerBefore.inTransition = true

@@ -111,7 +111,7 @@ type retainedDAAccountingTotals struct {
 func (s *DARelayState) recomputeRetainedDAAccountingLocked() (retainedDAAccountingTotals, error) {
 	totals := retainedDAAccountingTotals{peerBytes: map[string]uint64{}}
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
-		record := s.sets[daID]
+		record := s.relations.recordValue(daID)
 		if record.daID != daID {
 			return totals, fmt.Errorf("retained DA record stored under da_id %x carries da_id %x", daID, record.daID)
 		}
@@ -243,7 +243,7 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 	}
 	var removals []daRelaySetRecord
 	for _, daID := range s.sortedRetainedDAIDsLocked() {
-		record := s.sets[daID]
+		record := s.relations.recordValue(daID)
 		identity, members, err := canonicalRetainedDASetIdentity(record)
 		if err != nil {
 			return nil, err
@@ -263,8 +263,8 @@ func (s *DARelayState) canonicalDARemovalsLocked(included []canonicalDASetIdenti
 // sortedRetainedDAIDsLocked orders EVERY retained record by ascending raw da_id,
 // so no scan, error selection or removal ordering depends on map iteration order.
 func (s *DARelayState) sortedRetainedDAIDsLocked() [][32]byte {
-	daIDs := make([][32]byte, 0, len(s.sets))
-	for daID := range s.sets {
+	daIDs := make([][32]byte, 0, s.relations.setCount)
+	for daID := range s.relations.records() {
 		daIDs = append(daIDs, daID)
 	}
 	sort.Slice(daIDs, func(i, j int) bool {
@@ -480,10 +480,10 @@ func buildCanonicalDAOwnerCandidates(
 	for i := range image.identities {
 		daID := image.identities[i].daID
 		if !removed[daID] {
-			projected.sets[daID] = retained.sets[daID].cloneOwnerReady()
+			projected.relations.putRecord(daID, retained.relations.recordValue(daID).cloneOwnerReady())
 			continue
 		}
-		record := projected.sets[daID]
+		record := projected.relations.recordValue(daID)
 		if record.state == daRelayStateCompleteSet {
 			accounting, accountingErr := record.ownerReadyAccounting()
 			completeBytes, bytesErr := checkedApplyUint64Delta(projected.completeBytes, accounting.completeBytes, 0)
@@ -494,9 +494,9 @@ func buildCanonicalDAOwnerCandidates(
 			}
 			projected.completeBytes, projected.completeCount, projected.pinnedPayloadBytes = completeBytes, completeCount, pinnedPayloadBytes
 			for _, row := range record.locatorRows() {
-				delete(projected.locators, row.txid)
+				projected.relations.removeLocator(row.txid)
 			}
-			delete(projected.sets, daID)
+			projected.relations.removeRecord(daID)
 			projected.prefetch.releaseSet(daID)
 			continue
 		}
