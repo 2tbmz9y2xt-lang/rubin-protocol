@@ -425,7 +425,7 @@ func (s *DARelayState) compactDARecordIdentitiesLocked(record daRelaySetRecord, 
 }
 
 func compactDARecordValid(record daRelaySetRecord, daID [32]byte) bool {
-	if record.daID != daID {
+	if record.daID != daID || record.emptyIncomplete() {
 		return false
 	}
 	observation := daAdmissionObservation{

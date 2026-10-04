@@ -439,7 +439,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		compactHashes := map[string]string{
 			"CompactDAIdentities":              "cd2a0afeea6c37344e31ae5124c85519ca4cbcfa91d97e2ab681a471d3751d61",
 			"compactDARecordIdentitiesLocked":  "181613c01e61dcb87e518271486998721c21ea68af233234c4771dc2bc98da6e",
-			"compactDARecordValid":             "29b8b95e56b7d5947c1002cbb27a956a76cb8e2936d371600f18761fb368ae47",
+			"compactDARecordValid":             "412e6113771bf7e47c83ab432dc796dafd1e90ff5b8f3ae4c68b9f531d9b5ca9",
 			"compactDACommitValid":             "cc3cbe55856e5dcd2f0f5e79746712ea98008c506a2d7ae86f5efb52a18a6fc9",
 			"compactDAChunkValid":              "344df93b44878aae164b09d5eb2149d555f97e01d76bd2e76ac1d5c45c6ed26a",
 			"compactDATargetLocked":            "5afce8398afd2f1ecc37649494fa71dbaebb5b9d9d16ce134e5ec54f6bc53208",
@@ -7633,6 +7633,29 @@ func TestCompactCandidateDA(t *testing.T) {
 				t.Fatal("caller metadata edits reached next snapshot")
 			}
 		}
+		for _, nilChunks := range []bool{true, false} {
+			t.Run(fmt.Sprintf("commit_only_B/nil_chunks=%t", nilChunks), func(t *testing.T) {
+				x, daID := newCommitOnlyStateBFixture(t)
+				f, tx := x.f, x.txs["c"]
+				f.mutateRelay(func(s *DARelayState) {
+					r := s.sets[daID]
+					r.chunks = map[uint16]daRelayChunk{}
+					if nilChunks {
+						r.chunks = nil
+					}
+					s.sets[daID] = r
+				})
+				before := compactDAImage(t, f)
+				id := CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}
+				if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || !slices.Equal(ids, []CompactCandidateIdentity{id}) {
+					t.Fatalf("commit-only B identities=(%v,%v)", ids, ok)
+				}
+				requireCompactDAPreservedRead(t, f, id, uint64(len(tx.raw)), 1, tx.raw)
+				if !reflect.DeepEqual(before, compactDAImage(t, f)) {
+					t.Fatal("commit-only B snapshot/read changed image")
+				}
+			})
+		}
 	})
 	t.Run("unavailable_and_empty", func(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
@@ -7809,6 +7832,8 @@ func compactDASnapshotFaults(t *testing.T) {
 			{"nil_locators", []uint8{0, 1, 2}},
 			{"record_daID", []uint8{0, 1, 2}},
 			{"nil_chunks", []uint8{0, 1, 2}},
+			{"empty_record_nil_chunks", []uint8{0, 2}},
+			{"empty_record_empty_chunks", []uint8{0}},
 			{"revision0", []uint8{0, 1, 2}},
 			{"received0", []uint8{0, 1, 2}},
 			{"invalid_state", []uint8{0, 1, 2}},
@@ -7861,6 +7886,7 @@ func compactDASnapshotFaults(t *testing.T) {
 				sibling := f.signed(daNonReplayTxSpec{kind: 2, daID: [32]byte{0xda, state}, payload: []byte("independent member")})
 				f.admit(sibling, daNonReplayPeer("sibling"))
 				original := daRelayStateSnapshot(f.relay)
+				originalImage := compactDAImage(t, f)
 				f.mutateRelay(func(s *DARelayState) {
 					r := s.sets[txs[0].spec.daID]
 					chunk := r.chunks[0]
@@ -7874,6 +7900,12 @@ func compactDASnapshotFaults(t *testing.T) {
 						r.daID[0] ^= 1
 					case "nil_chunks":
 						r.chunks = nil
+					case "empty_record_nil_chunks", "empty_record_empty_chunks":
+						r.chunks = nil
+						if row.name == "empty_record_empty_chunks" {
+							r.chunks = map[uint16]daRelayChunk{}
+						}
+						delete(s.locators, txs[0].txid)
 					case "revision0":
 						r.revision = 0
 					case "received0":
@@ -7984,7 +8016,7 @@ func compactDASnapshotFaults(t *testing.T) {
 					case "nonempty_payload":
 						chunk.payload = []byte("retained payload residue")
 					}
-					if r.chunks != nil && !slices.Contains([]string{"incomplete_C", "commit_count0", "chunk_index61", "chunk_at_count"}, row.name) {
+					if r.chunks != nil && !slices.Contains([]string{"incomplete_C", "empty_record_empty_chunks", "commit_count0", "chunk_index61", "chunk_at_count"}, row.name) {
 						r.chunks[0] = chunk
 					}
 					if s.sets != nil {
@@ -7999,7 +8031,7 @@ func compactDASnapshotFaults(t *testing.T) {
 					t.Fatal("snapshot refusal changed image")
 				}
 				target := txs[0]
-				if slices.Contains([]string{"incomplete_C", "commit_index1", "commit_count0"}, row.name) {
+				if slices.Contains([]string{"incomplete_C", "commit_index1", "commit_count0"}, row.name) || (state == 2 && row.name == "empty_record_nil_chunks") {
 					target = txs[1]
 				}
 				targets := []daNonReplayTx{target}
@@ -8015,6 +8047,9 @@ func compactDASnapshotFaults(t *testing.T) {
 							}
 							for _, maxBytes := range []uint64{0, uint64(len(target.raw))} {
 								disposition, raw := uint8(3), []byte(nil)
+								if state == 0 && slices.Contains([]string{"empty_record_nil_chunks", "empty_record_empty_chunks"}, row.name) {
+									disposition = 2
+								}
 								if state == 1 && row.name == "nil_chunks" && target.spec.kind == 1 {
 									switch {
 									case different:
@@ -8034,10 +8069,24 @@ func compactDASnapshotFaults(t *testing.T) {
 					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
 				}
 				f.mutateRelay(func(s *DARelayState) { s.sets, s.locators = original.sets, original.locators })
-				if ids, ok := f.relay.CompactDAIdentities(f.mp); !ok || len(ids) != len(txs)+1 {
+				if !reflect.DeepEqual(originalImage, compactDAImage(t, f)) {
+					t.Fatal("restored image differs from valid original")
+				}
+				ids, ok := f.relay.CompactDAIdentities(f.mp)
+				if !ok || len(ids) != len(txs)+1 {
 					t.Fatalf("state%d %s next snapshot failed", state, row.name)
 				}
-				for _, target := range targets {
+				want := map[CompactCandidateIdentity]bool{{TxID: sibling.txid, WTxID: sibling.wtxid}: true}
+				for _, tx := range txs {
+					want[CompactCandidateIdentity{TxID: tx.txid, WTxID: tx.wtxid}] = true
+				}
+				for _, id := range ids {
+					if !want[id] {
+						t.Fatalf("restored snapshot unexpected identity=%+v", id)
+					}
+					delete(want, id)
+				}
+				for _, target := range txs {
 					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}, uint64(len(target.raw)), 1, target.raw)
 				}
 			})
