@@ -439,7 +439,7 @@ func requireDAAdmissionStructure(t *testing.T) {
 		compactHashes := map[string]string{
 			"CompactDAIdentities":              "cd2a0afeea6c37344e31ae5124c85519ca4cbcfa91d97e2ab681a471d3751d61",
 			"compactDARecordIdentitiesLocked":  "181613c01e61dcb87e518271486998721c21ea68af233234c4771dc2bc98da6e",
-			"compactDARecordValid":             "6d01c058ad0b38c6f10bd5b4fbb67f9e76e7918878e88bea50f0068248a00f73",
+			"compactDARecordValid":             "29b8b95e56b7d5947c1002cbb27a956a76cb8e2936d371600f18761fb368ae47",
 			"compactDACommitValid":             "cc3cbe55856e5dcd2f0f5e79746712ea98008c506a2d7ae86f5efb52a18a6fc9",
 			"compactDAChunkValid":              "344df93b44878aae164b09d5eb2149d555f97e01d76bd2e76ac1d5c45c6ed26a",
 			"compactDATargetLocked":            "5afce8398afd2f1ecc37649494fa71dbaebb5b9d9d16ce134e5ec54f6bc53208",
@@ -8014,7 +8014,18 @@ func compactDASnapshotFaults(t *testing.T) {
 								id.WTxID[0] ^= 1
 							}
 							for _, maxBytes := range []uint64{0, uint64(len(target.raw))} {
-								requireCompactDAPreservedRead(t, f, id, maxBytes, 3, nil)
+								disposition, raw := uint8(3), []byte(nil)
+								if state == 1 && row.name == "nil_chunks" && target.spec.kind == 1 {
+									switch {
+									case different:
+										disposition = 2
+									case maxBytes == 0:
+										disposition = 4
+									default:
+										disposition, raw = 1, target.raw
+									}
+								}
+								requireCompactDAPreservedRead(t, f, id, maxBytes, disposition, raw)
 							}
 						}
 					}
