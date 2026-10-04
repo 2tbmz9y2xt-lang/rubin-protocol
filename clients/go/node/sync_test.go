@@ -3366,6 +3366,8 @@ func canonicalStandardPublicationCall(node *ast.CallExpr, aliases map[string]str
 	return "call:" + canonicalStandardPublicationPath(node.Fun, aliases) + "(" + strings.Join(arguments, ",") + ")"
 }
 
+// Only the statement forms used by these three publication bodies are allowed.
+// This is a bounded source profile, not a general Go binding/equivalence checker.
 func canonicalStandardPublicationNodeValid(node ast.Node, aliases map[string]string, types map[string]ast.Expr, allowed map[string]bool) bool {
 	switch node := node.(type) {
 	case *ast.CallExpr:
@@ -3374,7 +3376,9 @@ func canonicalStandardPublicationNodeValid(node ast.Node, aliases map[string]str
 		return canonicalStandardPublicationScalarType(node.Type, types, map[string]bool{})
 	case *ast.UnaryExpr:
 		return node.Op != token.AND
-	case *ast.FuncLit, *ast.GoStmt, *ast.DeferStmt, *ast.SendStmt, *ast.SelectStmt, *ast.ForStmt, *ast.RangeStmt, *ast.ReturnStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.BranchStmt:
+	case *ast.BlockStmt, *ast.ExprStmt, *ast.AssignStmt, *ast.IfStmt, *ast.IncDecStmt:
+		return true
+	case ast.Stmt, *ast.FuncLit:
 		return false
 	}
 	return true
@@ -3448,6 +3452,7 @@ func requireCanonicalStandardPublicationProbes(t *testing.T, types map[string]as
 		{"n := plan.usedBytes; n--; pool.usedBytes = n", false, []string{"pool.usedBytes=plan.usedBytes"}},
 		{"write: pool.usedBytes++", false, nil},
 		{"n := plan.usedBytes; n++; n--; _ = n", true, nil},
+		{"if clearTransition { var owner *PendingOutpointOwner; owner.inTransition = false }", false, []string{"if:clearTransition", "owner.inTransition=false", "end-if"}},
 		{"owner.publishRestoreLocked(other, plan.ownerIndex)", false, restore},
 		{"owner.publishRestoreLocked(plan.pending, other)", false, restore},
 		{"pool.publishCanonicalMempoolPlanLocked(other, owner)", false, locked},
