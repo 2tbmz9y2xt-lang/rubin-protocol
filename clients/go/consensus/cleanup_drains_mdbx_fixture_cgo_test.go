@@ -16,7 +16,9 @@ import (
 
 func generationRaw(t *testing.T, w *generationWorld, authority []byte, rows []mdbx.Mutation, family ...[]mdbx.Mutation) {
 	t.Helper()
-	_ = w.s.Close()
+	if reflect.ValueOf(w.s).Elem().FieldByName("state").String() != "CLOSED" {
+		_ = w.s.Close()
+	}
 	reopened, err := mdbx.Open(w.path, w.cfg)
 	logicalMDBXAssert(t, err == nil, "same creation path/config Open: %v", err)
 	defer func() { _ = reopened.Close() }()
@@ -577,8 +579,6 @@ func generationNativeFaults(t *testing.T) {
 	})
 }
 
-// The finite transport matrix shares one actual consumer invocation and literal
-// OLD/NEW images across X2 faults and X3 full-lane native probes.
 func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generationWorld) selectedSideOutcome) {
 	for _, row := range []struct {
 		name                  string
@@ -820,7 +820,7 @@ func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
 	// The actual tuple is asserted before drift/counters or any Store query.
 	generationCrossed(t, out, "update:Capacity", true)
 	value := reflect.ValueOf(w.s).Elem()
-	logicalMDBXAssert(t, value.FieldByName("state").String() == "CLOSED" && value.FieldByName("env").IsNil(), "consumed Store must be CLOSED/envnil")
+	logicalMDBXAssert(t, value.FieldByName("state").String() == "CLOSED" && value.FieldByName("env").IsNil() && value.FieldByName("writer").IsNil() && value.FieldByName("txn").IsNil() && value.FieldByName("terminalTruth").Uint() == 3, "consumed Store must be CLOSED/envnil/writernil/txnnil/UNKNOWN")
 	logicalMDBXAssert(t, err == nil && drift == 1 && calls == 1, "fixed mode3 actual invocation: %d/%d/%v", calls, drift, err)
 	sideWantReleased(t, w.owner, "readback drift")
 	want := slices.Clone(w.rows)
