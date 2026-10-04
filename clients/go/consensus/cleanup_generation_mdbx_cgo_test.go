@@ -132,6 +132,18 @@ func generationTerminal(a mdbx.StorageAuthorityV1) mdbx.StorageAuthorityV1 {
 }
 
 func TestCleanupGenerationMDBX(t *testing.T) {
+	t.Run("X2-invalid-stage-projection", func(t *testing.T) {
+		for _, positive := range []bool{false, true} {
+			t.Run(fmt.Sprintf("positive%t", positive), func(t *testing.T) {
+				// The native producer owns malformed tuples; this is the P10 consumer boundary.
+				raw := &mdbx.EngineError{Class: "LocalInvariant", Operation: "update", Code: -30779, Diagnostic: "invalid update native outcome shape"}
+				p := &cleanupGenerationPlan{positive: positive}
+				out := p.project(selectedSideOutcome{Truth: 1, Stage: 0, Err: raw})
+				sideWantOutcome(t, out, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", 1, 0, "malformed native tuple")
+				logicalMDBXAssert(t, any(out.Err) == any(raw), "malformed native error changed: %v", out.Err)
+			})
+		}
+	})
 	t.Run("P10-A1", func(t *testing.T) {
 		a := generationAuthority()
 		rows := append(generationData(2, 1), generationData(2, 2)[0])

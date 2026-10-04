@@ -578,6 +578,12 @@ func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generat
 				logicalMDBXAssert(t, e.Faults == 1 && e.Deletes == 0 && e.Commits == 0, "postcallback target capture before effects: %+v", e)
 			}
 			sideWantReleased(t, w.owner, row.name)
+			if row.scenario != 1 {
+				cached := invoke(w)
+				sideWantOutcome(t, cached, "", "", row.truth, 1, row.name+" cached no-callback")
+				logicalMDBXAssert(t, any(cached.Err) == any(out.Err), "cached original native error changed: %v/%v", cached.Err, out.Err)
+				sideWantReleased(t, w.owner, row.name+" cached")
+			}
 			expected, want := oldAuthority, oldRows
 			if row.image != "old" {
 				expected, want = newAuthority, newRows // Counter still prevents exhaustion.
