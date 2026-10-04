@@ -65,7 +65,7 @@ func cleanupSideBatch(reader *Reader, noWork error) (Batch, error) {
 	if all(err == nil, anyTrue(required, !keep)) {
 		body, err = reader.GetOptionalSide(SchemaV2DBIs()[4], hash[:])
 	}
-	return cleanupSideFinish(reader, &a, span, hash, required, keep, consulted, body, err)
+	return cleanupSideFinish(reader, &a, hash, required, keep, consulted, body, err)
 }
 
 func cleanupSideAuthority(reader *Reader) (StorageAuthorityV1, error) {
@@ -124,11 +124,12 @@ func cleanupSideMembership(reader *Reader, selected *SelectedSideV1, hash [32]by
 	return keep, consulted, nil
 }
 
-func cleanupSideFinish(reader *Reader, a *StorageAuthorityV1, span CleanupSpanV1, hash [32]byte, required, keep bool, consulted []ConsultedRow, body OptionalSideValueV1, err error) (Batch, error) {
+func cleanupSideFinish(reader *Reader, a *StorageAuthorityV1, hash [32]byte, required, keep bool, consulted []ConsultedRow, body OptionalSideValueV1, err error) (Batch, error) {
 	dbis := SchemaV2DBIs()
 	if err != nil {
 		return Batch{}, err
 	}
+	span := a.Cleanup.Spans[0]
 	if required {
 		if !all(body.Present, !body.InvalidWidth) {
 			return Batch{}, cleanupBUEvidence(reader, "invalid cleanup owed artifact")

@@ -446,7 +446,6 @@ func generationSelectedKeep(t *testing.T, deferSide bool) {
 	w.image(expected, want...)
 }
 
-// The active owner is deliberately at k different from obsolete height 5.
 func generationDisposition(t *testing.T, kind string) {
 	a := generationAuthority()
 	h := uint64(5)
@@ -551,7 +550,6 @@ func generationConfluence(t *testing.T) {
 			w.image(a, want...)
 		})
 	}
-	// Actual unverified Open refusal on a retained projection, not a fresh copy.
 	a := generationAuthority()
 	_, rows := generationProjection(2, 5, 55)
 	w := generationNew(t, a, rows...)
