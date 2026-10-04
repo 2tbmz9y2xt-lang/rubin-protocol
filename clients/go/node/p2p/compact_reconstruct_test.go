@@ -136,7 +136,7 @@ func compactCandidateAdmitDA(tb testing.TB, f compactCandidateFixture) ([]byte, 
 
 func requireCompactCandidateZero(t *testing.T, got compactCandidateOutcome, err, want error) {
 	t.Helper()
-	if !errors.Is(err, want) || !reflect.DeepEqual(got.Result, compactReconstructionResult{}) {
+	if err != want || !reflect.DeepEqual(got.Result, compactReconstructionResult{}) {
 		t.Fatalf("outcome=%+v err=%v want=%v with zero Result", got, err, want)
 	}
 }
@@ -157,6 +157,8 @@ func TestCompactCandidateReconstruct(t *testing.T) {
 			}
 		}
 	})
+	t.Run("retained_da_fills", compactCandidateRetainedFills)
+	t.Run("later_read_refusal", compactCandidateLaterRefusal)
 	t.Run("zero_sid_bypass", compactCandidateZeroSID)
 	t.Run("immutable_bytes", func(t *testing.T) {
 		f := newCompactCandidateFixture(t, 1)
@@ -249,6 +251,152 @@ func TestCompactCandidateReconstruct(t *testing.T) {
 	})
 }
 
+func compactCandidateRetainedFills(t *testing.T) {
+	for _, standardCount := range []int{0, 1} {
+		f := newCompactCandidateFixture(t, standardCount)
+		daRaw, daID := compactCandidateAdmitDA(t, f)
+		for _, nonce := range [][2]uint64{{4, 5}, {7, 9}} {
+			for _, partial := range []bool{false, true} {
+				prefill := minimalBlockTxnTestTxBytes(777)
+				block := cmpctBlockPayload{Nonce1: nonce[0], Nonce2: nonce[1], Prefilled: []prefilledTxn{{Index: 1, Tx: prefill}}, ShortIDs: []compactShortID{compactShortIDForTx(t, daRaw, nonce[0], nonce[1])}}
+				want := [][]byte{daRaw, slices.Clone(prefill)}
+				missingIndex := uint64(2)
+				if standardCount == 1 {
+					block.ShortIDs = append(block.ShortIDs, compactShortIDForTx(t, f.raw[0], nonce[0], nonce[1]))
+					want, missingIndex = append(want, f.raw[0]), 3
+				}
+				missing := compactShortID{0xab}
+				for slices.Contains(block.ShortIDs, missing) || missing == compactShortIDForTx(t, prefill, nonce[0], nonce[1]) {
+					missing[0]++
+				}
+				if partial {
+					block.ShortIDs, want = append(block.ShortIDs, missing), append(want, nil)
+				}
+				counts, used := f.mp.AdmissionCounts(), f.mp.BytesUsed()
+				for invocation := 0; invocation < 2; invocation++ {
+					got, err := reconstructCompactCandidates(block, 1, 72_000_000, f.pool, f.da)
+					expected := compactReconstructionResult{Transactions: want}
+					if partial {
+						expected = compactReconstructionResult{PartialTransactions: want, MissingIndexes: []uint64{missingIndex}, MissingShortIDs: []compactShortID{missing}}
+					}
+					if err != nil || !reflect.DeepEqual(got.Result, expected) || !got.D4Complete || got.DistinctCollisionCount != 0 || !bytes.Equal(block.Prefilled[0].Tx, want[1]) || f.mp.AdmissionCounts() != counts || f.mp.BytesUsed() != used {
+						t.Fatalf("DA/mixed%d partial%v nonce%v invocation%d=%+v err=%v", standardCount, partial, nonce, invocation, got, err)
+					}
+					result := got.Result.Transactions
+					if partial {
+						result = got.Result.PartialTransactions
+						got.Result.MissingIndexes[0], got.Result.MissingShortIDs[0] = 77, compactShortID{0xee}
+						result[missingIndex] = []byte{0xee}
+					}
+					block.Prefilled[0].Tx[0] ^= 1
+					if !bytes.Equal(result[1], want[1]) {
+						t.Fatal("input edit reached result bytes")
+					}
+					result[0][0] ^= 1
+					read := f.da.ReadCompactDA(daID, uint64(len(daRaw)))
+					if read.Disposition != 1 || !bytes.Equal(read.Raw, daRaw) {
+						t.Fatal("result edit reached real retained DA")
+					}
+					block.Prefilled[0].Tx = slices.Clone(want[1])
+				}
+			}
+		}
+	}
+}
+
+func compactCandidateLaterRefusal(t *testing.T) {
+	f := newCompactCandidateFixture(t, 2)
+	daRaw, daID := compactCandidateAdmitDA(t, f)
+	daSID, standardSID := compactShortIDForTx(t, daRaw, 0, 0), compactShortIDForTx(t, f.raw[0], 0, 0)
+	observed := []compactCandidateObservation{{Identity: daID, ShortID: daSID, Sources: 1}, {Identity: f.ids[0], ShortID: standardSID, Sources: 2}}
+	catalog, err := compactCandidateScan(observed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligible := map[compactShortID]int{daSID: 0, standardSID: 1}
+	counts, used := f.mp.AdmissionCounts(), f.mp.BytesUsed()
+	for _, fault := range []bool{true, false} {
+		mp, budget, want := f.mp, uint64(72_000_000), errCompactCandidateFault
+		if fault {
+			mp = &node.Mempool{}
+		} else {
+			budget, want = 117+uint64(len(daRaw)), errCompactCandidateResource
+		}
+		txs := make([][]byte, 2)
+		got, err := compactCandidateFill([]compactShortID{daSID, standardSID}, txs, eligible, catalog, mp, f.da, 117, budget)
+		if err != want || !reflect.DeepEqual(got, compactReconstructionResult{}) || !bytes.Equal(txs[0], daRaw) {
+			t.Fatalf("later refusal=(%+v,%v), first genuine fill=%x", got, err, txs[0])
+		}
+		next, err := compactCandidateFill([]compactShortID{daSID, standardSID}, make([][]byte, 2), eligible, catalog, f.mp, f.da, 117, 72_000_000)
+		if err != nil || !reflect.DeepEqual(next, compactReconstructionResult{Transactions: [][]byte{daRaw, f.raw[0]}}) || f.mp.AdmissionCounts() != counts || f.mp.BytesUsed() != used {
+			t.Fatal("stage refusal retained prefix/changed owner/contaminated next invocation")
+		}
+	}
+	prefilled := compactCandidateLargePrefills(f.raw[1])
+	for i := range prefilled {
+		prefilled[i].Index = uint64(i + 2)
+	}
+	x, y := compactShortID{1}, compactShortID{2}
+	reserved := []compactShortID{daSID, standardSID, compactShortIDForTx(t, f.raw[1], 0, 0)}
+	for slices.Contains(reserved, x) {
+		x[0]++
+	}
+	for slices.Contains(reserved, y) || x == y {
+		y[0]++
+	}
+	block := cmpctBlockPayload{Prefilled: prefilled, ShortIDs: []compactShortID{daSID, standardSID, x, x, y, y}}
+	if len(prefilled)+6 < 253 || len(prefilled)+4099 > 65535 {
+		t.Fatal("fixture does not have literal three-byte CompactSize count")
+	}
+	baseline := uint64(119 + len(prefilled)*len(f.raw[1]))
+	budget := baseline + uint64(len(daRaw))
+	if budget < 72_000_000 {
+		t.Fatal("fixture budget violates minimum")
+	}
+	for _, byteBudget := range []uint64{budget, baseline} {
+		got, err := reconstructCompactCandidates(block, 1, byteBudget, f.pool, f.da)
+		requireCompactCandidateZero(t, got, err, errCompactCandidateResource)
+		if !got.D4Complete || got.DistinctCollisionCount != 2 || f.mp.AdmissionCounts() != counts || f.mp.BytesUsed() != used {
+			t.Fatal("hydration refusal lost completed D4 or changed owner")
+		}
+	}
+	late := block
+	late.ShortIDs = []compactShortID{daSID}
+	for i := 0; i < 4097; i++ {
+		if i%2 == 0 {
+			late.ShortIDs = append(late.ShortIDs, x)
+		} else {
+			late.ShortIDs = append(late.ShortIDs, y)
+		}
+	}
+	late.ShortIDs = append(late.ShortIDs, standardSID)
+	got, err := reconstructCompactCandidates(late, 1, budget, f.pool, f.da)
+	requireCompactCandidateZero(t, got, err, errCompactCandidateResource)
+	if !got.D4Complete || got.DistinctCollisionCount != 2 {
+		t.Fatal("4097 earlier misses hid later resource error or lost D4")
+	}
+	lateCatalog, err := compactCandidateScan([]compactCandidateObservation{{Identity: f.ids[0], ShortID: standardSID, Sources: 2}, {Identity: daID, ShortID: daSID, Sources: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late.ShortIDs[0], late.ShortIDs[len(late.ShortIDs)-1] = standardSID, daSID
+	lateEligible, _ := compactCandidateEligibility(late, nil, lateCatalog)
+	staged := make([][]byte, len(late.ShortIDs))
+	result, err := compactCandidateFill(late.ShortIDs, staged, lateEligible, lateCatalog, f.mp, nil, 119, 72_000_000)
+	if err != errCompactCandidateFault || !reflect.DeepEqual(result, compactReconstructionResult{}) || !bytes.Equal(staged[0], f.raw[0]) {
+		t.Fatal("4097 stage misses hid later actual unavailable DA fault")
+	}
+	got, err = reconstructCompactCandidates(block, 1, 72_000_000, f.pool, nil)
+	requireCompactCandidateZero(t, got, err, errCompactCandidateFault)
+	if got.D4Complete || got.DistinctCollisionCount != 0 {
+		t.Fatal("unavailable owner lost priority over oversized canonical baseline")
+	}
+	got, err = reconstructCompactCandidates(block, 1, budget+uint64(len(f.raw[0])), f.pool, f.da)
+	if err != nil || !got.D4Complete || got.DistinctCollisionCount != 2 || got.Result.Transactions != nil || len(got.Result.PartialTransactions) != len(prefilled)+6 || !bytes.Equal(got.Result.PartialTransactions[0], daRaw) || !bytes.Equal(got.Result.PartialTransactions[1], f.raw[0]) || !reflect.DeepEqual(got.Result.MissingIndexes, []uint64{uint64(len(prefilled) + 2), uint64(len(prefilled) + 3), uint64(len(prefilled) + 4), uint64(len(prefilled) + 5)}) || !reflect.DeepEqual(got.Result.MissingShortIDs, []compactShortID{x, x, y, y}) {
+		t.Fatalf("next exact-bound kernel=%+v err=%v", got, err)
+	}
+}
+
 func compactCandidateInputCases(t *testing.T) {
 	prefill := minimalBlockTxnTestTxBytes(1)
 	valid := cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: prefill}}}
@@ -263,6 +411,10 @@ func compactCandidateInputCases(t *testing.T) {
 		requireCompactCandidateZero(t, got, err, errCompactCandidateInput)
 		if got.D4Complete || got.DistinctCollisionCount != 0 {
 			t.Fatal("input fault has D4 observation")
+		}
+		next, nextErr := reconstructCompactCandidates(valid, 1, 72_000_000, nil, nil)
+		if nextErr != nil || !reflect.DeepEqual(next, compactCandidateOutcome{Result: compactReconstructionResult{Transactions: [][]byte{prefill}}}) {
+			t.Fatal("input refusal changed the next independent invocation")
 		}
 	}
 	t.Run("profile", func(t *testing.T) {
@@ -300,9 +452,13 @@ func compactCandidateInputCases(t *testing.T) {
 			{2, 280_992, 0, 0, false},
 			{1, ^uint64(0), 2, 0, false},
 			{2, ^uint64(0), 2, 0, false},
+			{1, 2, ^uint64(0), 0, false},
+			{2, 2, ^uint64(0), 0, false},
+			{0, 1, 0, 0, false},
+			{3, 1, 0, 0, false},
 		} {
 			got, err := compactCandidateEntryCount(row.profile, row.short, row.prefilled)
-			if got != row.want || (row.accepted && err != nil) || (!row.accepted && !errors.Is(err, errCompactCandidateInput)) {
+			if got != row.want || (row.accepted && err != nil) || (!row.accepted && err != errCompactCandidateInput) {
 				t.Fatalf("count%+v=(%d,%v)", row, got, err)
 			}
 		}
@@ -323,17 +479,34 @@ func compactCandidateInputCases(t *testing.T) {
 		if _, err := encodeCmpctBlockPayload(block); err == nil {
 			t.Fatal("legacy wire unexpectedly accepted decreasing prefills")
 		}
+		block.Prefilled[0], block.Prefilled[1] = block.Prefilled[1], block.Prefilled[0]
+		got, err = reconstructCompactCandidates(block, 2, 72_000_000, f.pool, f.da)
+		if err != nil || !reflect.DeepEqual(got.Result.Transactions, [][]byte{prefill, f.raw[0], f.raw[1], prefill}) || !got.D4Complete || got.DistinctCollisionCount != 0 {
+			t.Fatal("profile2 increasing multi-prefill placement failed")
+		}
 	})
 	t.Run("prefilled_canonical", func(t *testing.T) {
 		nonminimal := append(slices.Clone(prefill[:13]), 0xfd, 0, 0)
 		nonminimal = append(nonminimal, prefill[14:]...)
 		for _, raw := range [][]byte{nil, {0}, prefill[:len(prefill)-1], append(slices.Clone(prefill), 0), nonminimal} {
-			for _, withSID := range []bool{false, true} {
-				block := cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: raw}}}
-				if withSID {
-					block.ShortIDs = []compactShortID{{1}}
+			for _, profile := range []uint64{1, 2} {
+				for _, badAt := range []int{0, 1} {
+					for _, withSID := range []bool{false, true} {
+						block := cmpctBlockPayload{Prefilled: []prefilledTxn{{Index: 0, Tx: slices.Clone(raw)}}}
+						before := []prefilledTxn{{Index: 0, Tx: slices.Clone(raw)}}
+						if badAt == 1 {
+							block.Prefilled = []prefilledTxn{{Index: 0, Tx: slices.Clone(prefill)}, {Index: 1, Tx: slices.Clone(raw)}}
+							before = []prefilledTxn{{Index: 0, Tx: slices.Clone(prefill)}, {Index: 1, Tx: slices.Clone(raw)}}
+						}
+						if withSID {
+							block.ShortIDs = []compactShortID{{1}}
+						}
+						reject(t, block, profile, 72_000_000)
+						if !reflect.DeepEqual(block.Prefilled, before) {
+							t.Fatal("later malformed prefill changed input prefix")
+						}
+					}
 				}
-				reject(t, block, 1, 72_000_000)
 			}
 		}
 	})
@@ -491,62 +664,170 @@ func compactCandidateCollisionCases(t *testing.T) {
 			t.Fatal("independent ineligible identity was hydrated")
 		}
 	}
+	f := newCompactCandidateFixture(t, 2)
+	x, y = compactShortIDForTx(t, f.raw[0], 0, 0), compactShortIDForTx(t, f.raw[1], 0, 0)
+	a = compactCandidateObservation{Identity: f.ids[0], ShortID: x, Sources: 2}
+	b = a
+	b.Identity.WTxID[0] ^= 1
+	// The matching stage takes fixed observations; only eligible real identities
+	// reach the actual owner. No alternate short-id function or provider is used.
+	for _, row := range []struct {
+		d, p, a bool
+		count   uint64
+	}{{false, false, false, 0}, {false, false, true, 1}, {false, true, false, 1}, {false, true, true, 1}, {true, false, false, 1}, {true, false, true, 1}, {true, true, false, 1}, {true, true, true, 1}} {
+		for _, resident := range []bool{true, false} {
+			if !resident && (row.d || row.p || row.a) {
+				continue
+			}
+			t.Run(fmt.Sprintf("D%v/P%v/A%v/resident%v", row.d, row.p, row.a, resident), func(t *testing.T) {
+				prefill := minimalBlockTxnTestTxBytes(88)
+				if row.p {
+					prefill = f.raw[0]
+				}
+				prefillID := compactWTxIDForTx(t, prefill)
+				observed := []compactCandidateObservation{{Identity: f.ids[1], ShortID: y, Sources: 2}}
+				if resident {
+					observed = append(observed, a)
+				}
+				if row.a {
+					observed = append(observed, b)
+				}
+				z := compactShortID{0xe1}
+				for z == x || z == y || z == compactShortID(consensus.CompactShortID(prefillID, 0, 0)) {
+					z[0]++
+				}
+				z1, z2 := a, a
+				z1.Identity.WTxID[0], z2.Identity.WTxID[0] = z1.Identity.WTxID[0]^2, z2.Identity.WTxID[0]^4
+				z1.ShortID, z2.ShortID = z, z
+				observed = append(observed, z1, z2)
+				catalog, err := compactCandidateScan(observed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				block := cmpctBlockPayload{ShortIDs: []compactShortID{x, y}, Prefilled: []prefilledTxn{{Index: 1, Tx: prefill}}}
+				want := [][]byte{f.raw[0], prefill, f.raw[1]}
+				var missing []uint64
+				var missingSIDs []compactShortID
+				if row.count == 1 || !resident {
+					want[0], missing, missingSIDs = nil, []uint64{0}, []compactShortID{x}
+				}
+				if row.d {
+					block.ShortIDs, want = append(block.ShortIDs, x), append(want, nil)
+					missing, missingSIDs = append(missing, 3), append(missingSIDs, x)
+				}
+				eligible, count := compactCandidateEligibility(block, [][32]byte{prefillID}, catalog)
+				if count != row.count || eligible[y] < 0 || (eligible[x] < 0) != (row.count == 1 || !resident) {
+					t.Fatalf("collision union=%d eligibility=%v", count, eligible)
+				}
+				txs := make([][]byte, len(want))
+				txs[1] = slices.Clone(prefill)
+				got, err := compactCandidateFill(block.ShortIDs, txs, eligible, catalog, f.mp, f.da, 117+uint64(len(prefill)), 72_000_000)
+				expected := compactReconstructionResult{Transactions: want}
+				if missing != nil {
+					expected = compactReconstructionResult{PartialTransactions: want, MissingIndexes: missing, MissingShortIDs: missingSIDs}
+				}
+				if err != nil || !reflect.DeepEqual(got, expected) {
+					t.Fatalf("collision fill=%+v err=%v", got, err)
+				}
+			})
+		}
+	}
+	b.ShortID = y
+	if catalog, err := compactCandidateScan([]compactCandidateObservation{a, b}); err != nil || len(catalog.Observed) != 2 || catalog.Index[x] != 0 || catalog.Index[y] != 1 {
+		t.Fatal("equal TXID with different WTXID/SID collapsed")
+	}
 }
 
 func compactCandidateMetadataFault(t *testing.T) {
 	first := compactCandidateObservation{Identity: node.CompactCandidateIdentity{TxID: [32]byte{1}, WTxID: [32]byte{2}}, ShortID: compactShortID{1}, Sources: 2}
 	conflict := first
 	conflict.Identity.TxID[0] = 3
-	for _, observed := range [][]compactCandidateObservation{{first, conflict}, {conflict, first}} {
+	third := compactCandidateObservation{Identity: node.CompactCandidateIdentity{TxID: [32]byte{4}, WTxID: [32]byte{5}}, ShortID: compactShortID{2}, Sources: 1}
+	for _, observed := range [][]compactCandidateObservation{{first, conflict}, {conflict, first}, {third, first, conflict}} {
 		got, err := compactCandidateScan(observed)
-		if !errors.Is(err, errCompactCandidateFault) || !reflect.DeepEqual(got, compactCandidateCatalog{}) {
+		if err != errCompactCandidateFault || !reflect.DeepEqual(got, compactCandidateCatalog{}) {
 			t.Fatal("metadata contradiction returned prefix")
 		}
-	}
-	if got, err := compactCandidateScan([]compactCandidateObservation{first}); err != nil || len(got.Observed) != 1 {
-		t.Fatal("next independent scan failed")
+		if got, err := compactCandidateScan([]compactCandidateObservation{first}); err != nil || len(got.Observed) != 1 {
+			t.Fatal("next independent scan failed")
+		}
 	}
 }
 
 func compactCandidateObserverCases(t *testing.T) {
 	raw := minimalBlockTxnTestTxBytes(88)
 	present := node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}
-	for _, reads := range [][]node.CompactCandidateRead{{{Disposition: 2}, present}, {present, {Disposition: 2}}, {present, {Disposition: 1, Raw: slices.Clone(raw)}}} {
-		var selected []byte
-		for _, read := range reads {
-			var err error
-			selected, err = compactCandidateCompose(selected, read, uint64(len(raw)))
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		if !bytes.Equal(selected, raw) {
-			t.Fatal("agreeing observers lost fill")
-		}
-	}
+	absent := node.CompactCandidateRead{Disposition: 2}
+	fault := node.CompactCandidateRead{Disposition: 3}
+	over := node.CompactCandidateRead{Disposition: 4}
 	for _, row := range []struct {
+		name string
 		read node.CompactCandidateRead
 		want error
 	}{
-		{node.CompactCandidateRead{Disposition: 3}, errCompactCandidateFault},
-		{node.CompactCandidateRead{Disposition: 4}, errCompactCandidateResource},
-		{node.CompactCandidateRead{Disposition: 1, Raw: minimalBlockTxnTestTxBytes(89)}, errCompactCandidateFault},
-		{node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault},
-		{node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault},
-		{node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault},
-		{node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
+		{"ABSENT_nil", absent, nil}, {"PRESENT_fit", present, nil},
+		{"PRESENT_nil", node.CompactCandidateRead{Disposition: 1}, errCompactCandidateFault},
+		{"PRESENT_empty", node.CompactCandidateRead{Disposition: 1, Raw: []byte{}}, errCompactCandidateFault},
+		{"PRESENT_over", node.CompactCandidateRead{Disposition: 1, Raw: append(slices.Clone(raw), 0)}, errCompactCandidateResource},
+		{"FAULT", fault, errCompactCandidateFault}, {"OVER_BUDGET", over, errCompactCandidateResource},
+		{"enum0", node.CompactCandidateRead{Disposition: 0}, errCompactCandidateFault},
+		{"enum5", node.CompactCandidateRead{Disposition: 5}, errCompactCandidateFault},
+		{"ABSENT_raw", node.CompactCandidateRead{Disposition: 2, Raw: raw}, errCompactCandidateFault},
 	} {
-		selected, err := compactCandidateCompose(nil, present, uint64(len(raw)))
-		if err != nil {
-			t.Fatal(err)
+		for _, prior := range [][]byte{nil, slices.Clone(raw)} {
+			t.Run(fmt.Sprintf("%s/prior%v", row.name, prior != nil), func(t *testing.T) {
+				got, err := compactCandidateCompose(prior, row.read, uint64(len(raw)))
+				want := prior
+				if row.want != nil {
+					want = nil
+				} else if row.read.Disposition == 1 && prior == nil {
+					want = raw
+				}
+				if err != row.want || !bytes.Equal(got, want) || (want == nil && got != nil) {
+					t.Fatalf("compose=(%x,%v) want(%x,%v)", got, err, want, row.want)
+				}
+				if err == nil && prior != nil && &got[0] != &prior[0] {
+					t.Fatal("agreeing source replaced the already selected byte slice")
+				}
+				if next, err := compactCandidateCompose(nil, present, uint64(len(raw))); err != nil || !bytes.Equal(next, raw) {
+					t.Fatal("failed invocation leaked staged fill")
+				}
+			})
 		}
-		selected, err = compactCandidateCompose(selected, row.read, uint64(len(raw)))
-		if selected != nil || !errors.Is(err, row.want) {
-			t.Fatalf("later source=(%x,%v) want nil,%v", selected, err, row.want)
-		}
-		if next, err := compactCandidateCompose(nil, present, uint64(len(raw))); err != nil || !bytes.Equal(next, raw) {
-			t.Fatal("failed invocation leaked staged fill")
-		}
+	}
+	different := node.CompactCandidateRead{Disposition: 1, Raw: minimalBlockTxnTestTxBytes(89)}
+	for _, row := range []struct {
+		name          string
+		first, second node.CompactCandidateRead
+		want          error
+		filled        bool
+	}{
+		{"A/A", absent, absent, nil, false}, {"A/P", absent, present, nil, true},
+		{"P/A", present, absent, nil, true}, {"agreeing_P/P", present, node.CompactCandidateRead{Disposition: 1, Raw: slices.Clone(raw)}, nil, true},
+		{"differing_P/P", present, different, errCompactCandidateFault, false},
+		{"P/F", present, fault, errCompactCandidateFault, false}, {"P/O", present, over, errCompactCandidateResource, false},
+		{"A/F", absent, fault, errCompactCandidateFault, false}, {"A/O", absent, over, errCompactCandidateResource, false},
+		{"F/O", fault, over, errCompactCandidateFault, false}, {"O/F", over, fault, errCompactCandidateResource, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			var selected []byte
+			var err error
+			for _, read := range []node.CompactCandidateRead{row.first, row.second} {
+				selected, err = compactCandidateCompose(selected, read, uint64(len(raw)))
+				if err != nil {
+					break
+				}
+			}
+			if err != row.want || (row.filled && !bytes.Equal(selected, raw)) || (!row.filled && selected != nil) {
+				t.Fatalf("ordered composition=(%x,%v), want filled%v/%v", selected, err, row.filled, row.want)
+			}
+			if row.name == "agreeing_P/P" && &selected[0] != &row.first.Raw[0] {
+				t.Fatal("agreeing second PRESENT retained a second selection")
+			}
+			if next, err := compactCandidateCompose(nil, present, uint64(len(raw))); err != nil || !bytes.Equal(next, raw) {
+				t.Fatal("ordered refusal contaminated next invocation")
+			}
+		})
 	}
 	f := newCompactCandidateFixture(t, 0)
 	daRaw, identity := compactCandidateAdmitDA(t, f)
@@ -554,12 +835,41 @@ func compactCandidateObserverCases(t *testing.T) {
 	// An actual DA PRESENT precedes a real unavailable standard owner. Returning
 	// on PRESENT would hide the second observer's FAULT and retain the first copy.
 	got, err := compactCandidateHydrate(observation, &node.Mempool{}, f.da, uint64(len(daRaw)))
-	if got != nil || !errors.Is(err, errCompactCandidateFault) {
+	if got != nil || err != errCompactCandidateFault {
 		t.Fatal("first actual PRESENT hid later observer fault")
 	}
 	got, err = compactCandidateHydrate(observation, f.mp, f.da, uint64(len(daRaw)))
 	if err != nil || !bytes.Equal(got, daRaw) {
 		t.Fatal("actual PRESENT plus ABSENT failed next invocation")
+	}
+	standard := newCompactCandidateFixture(t, 1)
+	sid := compactShortIDForTx(t, standard.raw[0], 0, 0)
+	// Sources3 is a fixed matching-stage observation for the real consumers.
+	// The empty DA owner never originally held this standard canonical pair.
+	observation = compactCandidateObservation{Identity: standard.ids[0], ShortID: sid, Sources: 3}
+	got, err = compactCandidateHydrate(observation, standard.mp, standard.da, uint64(len(standard.raw[0])))
+	if err != nil || !bytes.Equal(got, standard.raw[0]) {
+		t.Fatal("actual DA ABSENT plus standard PRESENT lost the selection")
+	}
+	catalog, err := compactCandidateScan([]compactCandidateObservation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligible := map[compactShortID]int{sid: 0}
+	result, err := compactCandidateFill([]compactShortID{sid}, make([][]byte, 1), eligible, catalog, standard.mp, standard.da, 117, 117+uint64(len(standard.raw[0])))
+	if err != nil || !reflect.DeepEqual(result, compactReconstructionResult{Transactions: [][]byte{standard.raw[0]}}) {
+		t.Fatal("two actual observers charged more than one logical fill")
+	}
+	if err := standard.mp.EvictConfirmedParsed(&consensus.ParsedBlock{Txids: [][32]byte{standard.ids[0].TxID}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = compactCandidateHydrate(observation, standard.mp, standard.da, 0)
+	if err != nil || got != nil {
+		t.Fatal("actual DA/standard ABSENT returned bytes or an error")
+	}
+	result, err = compactCandidateFill([]compactShortID{sid}, make([][]byte, 1), eligible, catalog, standard.mp, standard.da, 117, 117)
+	if err != nil || !reflect.DeepEqual(result, compactReconstructionResult{PartialTransactions: [][]byte{nil}, MissingIndexes: []uint64{0}, MissingShortIDs: []compactShortID{sid}}) {
+		t.Fatal("actual two-owner absence did not produce one ordinary miss")
 	}
 }
 

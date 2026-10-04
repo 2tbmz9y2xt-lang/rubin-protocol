@@ -133,7 +133,7 @@ func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, m
 	}
 	entry, found := m.txs[identity.TxID]
 	if !found {
-		return m.compactStandardAbsentLocked(identity.TxID)
+		return m.compactStandardAbsentLocked(identity)
 	}
 	if !m.compactStandardEntryValid(identity.TxID, entry) {
 		return CompactCandidateRead{Disposition: CompactCandidateFault}
@@ -150,9 +150,12 @@ func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, m
 	return CompactCandidateRead{Disposition: CompactCandidatePresent, Raw: append([]byte(nil), entry.raw...)}
 }
 
-func (m *Mempool) compactStandardAbsentLocked(txid [32]byte) CompactCandidateRead {
+func (m *Mempool) compactStandardAbsentLocked(identity CompactCandidateIdentity) CompactCandidateRead {
+	if _, found := m.wtxids[identity.WTxID]; found {
+		return CompactCandidateRead{Disposition: CompactCandidateFault}
+	}
 	for _, indexed := range m.wtxids {
-		if indexed == txid {
+		if indexed == identity.TxID {
 			return CompactCandidateRead{Disposition: CompactCandidateFault}
 		}
 	}
