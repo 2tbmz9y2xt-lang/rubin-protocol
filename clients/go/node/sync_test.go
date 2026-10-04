@@ -3393,6 +3393,12 @@ func canonicalStandardPublicationEvents(body *ast.BlockStmt, aliases map[string]
 			assignments, assignmentsValid := canonicalStandardPublicationAssignments(node, aliases)
 			events = append(events, assignments...)
 			valid = assignmentsValid && valid
+		case *ast.IncDecStmt:
+			if id, local := ast.Unparen(node.X).(*ast.Ident); local {
+				delete(aliases, id.Name)
+			} else {
+				valid = false
+			}
 		case *ast.IfStmt:
 			if node.Init != nil || node.Else != nil {
 				valid = false
@@ -3436,6 +3442,12 @@ func requireCanonicalStandardPublicationProbes(t *testing.T, types map[string]as
 		{"x := mempoolRelations{}; _ = x", true, nil},
 		{"p := plan.relations; pool.relations = (p)", true, []string{"pool.relations=plan.relations"}},
 		{"pool.usedBytes += plan.usedBytes", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"pool.usedBytes++", false, nil},
+		{"owner.generation--", false, nil},
+		{"n := plan.usedBytes; n++; pool.usedBytes = n", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"n := plan.usedBytes; n--; pool.usedBytes = n", false, []string{"pool.usedBytes=plan.usedBytes"}},
+		{"write: pool.usedBytes++", false, nil},
+		{"n := plan.usedBytes; n++; n--; _ = n", true, nil},
 		{"owner.publishRestoreLocked(other, plan.ownerIndex)", false, restore},
 		{"owner.publishRestoreLocked(plan.pending, other)", false, restore},
 		{"pool.publishCanonicalMempoolPlanLocked(other, owner)", false, locked},
