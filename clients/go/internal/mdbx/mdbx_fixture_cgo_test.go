@@ -1439,19 +1439,26 @@ func TestCleanupSideV1Native(t *testing.T) {
 		s, path := sideStore(t, a, rows...)
 		cfg := s.config
 		cleanup := errors.New("cleanup")
-		truth, stage, err := s.applyUpdateOutcome(updateNativeOutcome{truth: CommitTruth(1)}, nil, cleanup, false)
+		truth, stage, err := FixtureCleanupInvalidStage0(s, cleanup)
 		joined, ok := err.(interface{ Unwrap() []error })
 		if truth != CommitTruth(1) || stage != 0 || !ok || len(joined.Unwrap()) != 2 || !sameError(joined.Unwrap()[1], cleanup) {
 			t.Fatalf("invalid native stage tuple: %s/%d/%v", truth, stage, err)
 		}
 		requireEnvironmentError(t, joined.Unwrap()[0], EngineClass("LocalInvariant"), operationUpdate, -30779, "invalid update native outcome shape")
+		if s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.terminalTruth != CommitTruth(1) || !sameError(s.terminal, err) {
+			t.Fatal("invalid-stage producer did not consume the real owner")
+		}
+		cleanupOutcomeRefused(t, s, cleanup)
 		owner := bootstrapOwner(t)
 		again, nextStage, got := s.CleanupSideV1(owner)
 		if again != truth || nextStage != 1 || !sameError(got, err) {
 			t.Fatalf("SIDE invalid-stage cached tuple: %s/%d/%v", again, nextStage, got)
 		}
 		prunedReleased(t, owner)
-		sideRawImages(t, s, path, cfg, append(rows, sideAuthorityRow(a)))
+		reopened, openErr := Open(path, cfg)
+		mustEnvironment(t, openErr)
+		defer func() { mustEnvironment(t, reopened.Close()) }()
+		archiveRawEqual(t, reopened, append(rows, sideAuthorityRow(a)))
 	})
 	t.Run("H10", func(t *testing.T) {
 		a := sideAuthority(5, 5)
@@ -1561,6 +1568,17 @@ func TestCleanupSideV1Native(t *testing.T) {
 func TestCleanupReadbackFixtureShape(t *testing.T) {
 	t.Run("X2", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
+		cleanup := errors.New("cleanup")
+		cleanupOutcomeRefused(t, nil, cleanup)
+		cleanupOutcomeRefused(t, store, nil)
+		cleanupOutcomeRefused(t, &Store{}, cleanup)
+		writer := store.writer
+		store.writer = nil
+		cleanupOutcomeRefused(t, store, cleanup)
+		store.writer = writer
+		store.operations.Lock()
+		cleanupOutcomeRefused(t, store, cleanup)
+		store.operations.Unlock()
 		for rank := uint16(0); rank <= 255; rank++ {
 			for _, length := range []int{0, 1, 31, 32, 33, 76, 77, 78, 65537} {
 				if rank == 4 && length == 32 || rank == 5 && (length == 33 || length == 77) {
@@ -1636,6 +1654,23 @@ func TestCleanupReadbackFixtureShape(t *testing.T) {
 			})
 		}
 	})
+}
+
+func cleanupOutcomeRefused(t *testing.T, store *Store, cleanup error) {
+	t.Helper()
+	s := store
+	if s == nil {
+		s = &Store{}
+	}
+	before := [10]any{s.self, s.env, s.writer, s.txn, s.config, s.dbis, s.state, s.terminal, s.terminalTruth, s.canonicalOwnerVerified}
+	truth, stage, err := FixtureCleanupInvalidStage0(store, cleanup)
+	if truth != CommitTruth(1) || stage != 1 || err == nil || err.Error() != "invalid cleanup outcome fixture" {
+		t.Fatalf("invalid cleanup outcome refusal: %s/%d/%v", truth, stage, err)
+	}
+	after := [10]any{s.self, s.env, s.writer, s.txn, s.config, s.dbis, s.state, s.terminal, s.terminalTruth, s.canonicalOwnerVerified}
+	if after != before {
+		t.Fatal("cleanup outcome refusal changed the owner")
+	}
 }
 
 func TestCleanupBURawEvidence(t *testing.T) {

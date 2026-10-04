@@ -527,6 +527,27 @@ func generationDamage(t *testing.T, rank uint8) {
 }
 
 func generationNativeFaults(t *testing.T) {
+	t.Run("invalid-stage", func(t *testing.T) {
+		w := generationNew(t, generationAuthority(), generationData(2, 1)...)
+		cleanup := errors.New("cleanup")
+		truth, stage, raw := mdbx.FixtureCleanupInvalidStage0(w.s, cleanup)
+		for _, positive := range []bool{false, true} {
+			out := (&cleanupGenerationPlan{positive: positive}).project(selectedSideOutcome{Truth: truth, Stage: stage, Err: raw})
+			sideWantOutcome(t, out, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", 1, 0, fmt.Sprint(positive))
+			logicalMDBXAssert(t, any(out.Err) == any(raw), "invalid-stage projected error changed")
+		}
+		cached := CleanupGenerationMDBX(w.s, w.owner, 1, 1)
+		sideWantOutcome(t, cached, "", "", 1, 1, "invalid-stage cached public call")
+		logicalMDBXAssert(t, any(cached.Err) == any(raw), "invalid-stage cached error changed")
+		sideWantReleased(t, w.owner, "invalid-stage")
+		reopened, err := mdbx.Open(w.path, w.cfg)
+		logicalMDBXAssert(t, err == nil, "consumed owner retained resources: %v", err)
+		defer func() { _ = reopened.Close() }()
+		for _, row := range append(slices.Clone(w.rows), generationRow(0, []byte{2}, generationEncoded(t, w.a))) {
+			equal, readErr := mdbx.FixtureRawRowEqual(reopened, row.DBI.Rank, row.Key, row.Literal)
+			logicalMDBXAssert(t, equal && readErr == nil, "invalid-stage OLD raw image: %v", readErr)
+		}
+	})
 	generationNativeMatrix(t, false, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) })
 	for _, rank := range []uint8{6, 7} {
 		t.Run(fmt.Sprintf("consulted%d", rank), func(t *testing.T) {
@@ -566,13 +587,11 @@ func generationNativeFaults(t *testing.T) {
 // OLD/NEW images across X2 faults and X3 full-lane native probes.
 func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generationWorld) selectedSideOutcome) {
 	for _, row := range []struct {
-		name     string
-		scenario mdbx.SelectedDamageScenario
-		truth    mdbx.CommitTruth
-		stage    mdbx.UpdateStage
-		result   string
-		causes   string
-		image    string
+		name                  string
+		scenario              mdbx.SelectedDamageScenario
+		truth                 mdbx.CommitTruth
+		stage                 mdbx.UpdateStage
+		result, causes, image string
 	}{
 		{"no-work", 1, 1, 1, "", "-", "old"},
 		{"work", 1, 2, 3, "", "-", "new"},

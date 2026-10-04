@@ -132,18 +132,6 @@ func generationTerminal(a mdbx.StorageAuthorityV1) mdbx.StorageAuthorityV1 {
 }
 
 func TestCleanupGenerationMDBX(t *testing.T) {
-	t.Run("X2-invalid-stage-projection", func(t *testing.T) {
-		for _, positive := range []bool{false, true} {
-			t.Run(fmt.Sprintf("positive%t", positive), func(t *testing.T) {
-				// The native producer owns malformed tuples; this is the P10 consumer boundary.
-				raw := &mdbx.EngineError{Class: "LocalInvariant", Operation: "update", Code: -30779, Diagnostic: "invalid update native outcome shape"}
-				p := &cleanupGenerationPlan{positive: positive}
-				out := p.project(selectedSideOutcome{Truth: 1, Stage: 0, Err: raw})
-				sideWantOutcome(t, out, "TERMINAL_LOCAL_INVARIANT(evidence)", "OLD", 1, 0, "malformed native tuple")
-				logicalMDBXAssert(t, any(out.Err) == any(raw), "malformed native error changed: %v", out.Err)
-			})
-		}
-	})
 	t.Run("P10-A1", func(t *testing.T) {
 		a := generationAuthority()
 		rows := append(generationData(2, 1), generationData(2, 2)[0])
@@ -572,14 +560,13 @@ func generationConfluence(t *testing.T) {
 	w.image(a, rows...)
 }
 
-func generationRouteAuthorities() []struct {
+type generationRoute struct {
 	name string
 	a    mdbx.StorageAuthorityV1
-} {
-	var out []struct {
-		name string
-		a    mdbx.StorageAuthorityV1
-	}
+}
+
+func generationRouteAuthorities() []generationRoute {
+	var out []generationRoute
 	for _, name := range []string{"NONE-STABLE", "NONE-RECOVERY-PRUNED", "NONE-RECOVERY-ARCHIVE", "BLOCKS", "UNDO", "SIDE", "descriptor", "REPLAY", "R17b"} {
 		a := generationAuthority()
 		switch name {
@@ -608,10 +595,7 @@ func generationRouteAuthorities() []struct {
 			points := []mdbx.AuthorityPointV1{{Height: 1, BlockHash: [32]byte{1}}, {Height: 2, BlockHash: [32]byte{2}}}
 			a.Ordinary = &mdbx.OrdinaryApplyV1{Stage: 2, Target: points[1], NewSuffix: points, CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 3, TipHeight: 2, TipHash: [32]byte{2}, RowCount: 2, LogicalBytes: 232, CumulativeChainwork: sideWorldWork(1)}, CarriedCleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}}
 		}
-		out = append(out, struct {
-			name string
-			a    mdbx.StorageAuthorityV1
-		}{name, a})
+		out = append(out, generationRoute{name, a})
 	}
 	return out
 }

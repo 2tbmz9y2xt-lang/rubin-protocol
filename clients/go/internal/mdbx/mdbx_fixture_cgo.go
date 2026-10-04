@@ -394,6 +394,18 @@ func FixtureCleanupReadbackDrift(store *Store, rank uint8, key []byte, run func(
 	return evidence.drift, err
 }
 
+// FixtureCleanupInvalidStage0 delegates one malformed outcome to the real owner.
+func FixtureCleanupInvalidStage0(store *Store, cleanup error) (CommitTruth, UpdateStage, error) {
+	if store == nil || cleanup == nil || !store.operations.TryLock() {
+		return CommitTruthOld, UpdateStagePrewrite, errors.New("invalid cleanup outcome fixture")
+	}
+	defer store.operations.Unlock()
+	if store.state != storeOPEN || !validStoreShape(store) {
+		return CommitTruthOld, UpdateStagePrewrite, errors.New("invalid cleanup outcome fixture")
+	}
+	return store.applyUpdateOutcome(updateNativeOutcome{truth: CommitTruthOld}, nil, cleanup, false)
+}
+
 // Test teardown disposes a real retained handle after its terminal projection was observed.
 func fixtureLargeRelease(store *Store) error {
 	var err error
