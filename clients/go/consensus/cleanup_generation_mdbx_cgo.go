@@ -94,7 +94,7 @@ func cleanupDrainRetention(a mdbx.StorageAuthorityV1, cleanup *mdbx.CleanupV1) b
 	if cleanup != nil {
 		for _, span := range cleanup.Spans {
 			if span.Kind == mdbx.CleanupSpanSideV1 {
-				rows += span.LastHeight-span.NextHeight+1
+				rows += span.LastHeight - span.NextHeight + 1
 			}
 		}
 	}
