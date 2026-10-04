@@ -403,31 +403,37 @@ func generationSeedUndo(t *testing.T, w *generationWorld, entries []mdbx.Mutatio
 	w.image(w.a, generationGone(sources)...)
 }
 
+func generationSelected(a *mdbx.StorageAuthorityV1, hash [32]byte, body []byte) []mdbx.Mutation {
+	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 6, TipHash: hash, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: uint64(len(body))}
+	key, _ := mdbx.HeightKey(3, 6)
+	return []mdbx.Mutation{generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1)))}
+}
+
+func generationRollingSelected(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation) []mdbx.Mutation {
+	// The tip hash is the independently pinned big-endian height marker 1440.
+	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: [32]byte{30: 5, 31: 160}, CumulativeChainwork: sideWorldWork(1440), RowCount: 1439, LogicalBytes: 1439 * uint64(len(rows[3].Literal))}
+	a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 1, LastHeight: 1, NextHeight: 1})
+	for h := uint64(2); h <= 1440; h++ {
+		if h == 6 {
+			continue // The selected x link at j=6 was already seeded.
+		}
+		other := [32]byte{}
+		binary.BigEndian.PutUint64(other[24:], h)
+		key, _ := mdbx.HeightKey(3, h)
+		rows = append(rows, generationRow(6, key, mdbx.ChainValue(other, [32]byte{}, sideWorldWork(h))))
+	}
+	return rows
+}
+
 // Eligible selected membership keeps by hash at j=6, independently of h=5.
 func generationSelectedKeep(t *testing.T, deferSide bool) {
 	a := generationAuthority()
 	hash, rows := generationProjection(2, 5, 55)
-	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 6, TipHash: hash, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: uint64(len(rows[3].Literal))}
-	key, _ := mdbx.HeightKey(3, 6)
-	rows = append(rows, generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
+	rows = append(rows, generationSelected(&a, hash, rows[3].Literal)...)
 	if deferSide {
-		a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, CumulativeChainwork: sideWorldWork(1440), RowCount: 1439, LogicalBytes: 1439 * uint64(len(rows[3].Literal))}
-		a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 1, LastHeight: 1, NextHeight: 1})
-		for h := uint64(1); h <= 1440; h++ {
-			if h == 6 {
-				continue // The selected x link at j=6 was already seeded.
-			}
-			other := [32]byte{}
-			binary.BigEndian.PutUint64(other[24:], h)
-			if h == 1 {
-				other = hash // The pending SIDE also owes x; selected keep wins.
-			}
-			if h == 1440 {
-				a.SelectedSide.TipHash = other
-			}
-			key, _ = mdbx.HeightKey(3, h)
-			rows = append(rows, generationRow(6, key, mdbx.ChainValue(other, [32]byte{}, sideWorldWork(h))))
-		}
+		rows = generationRollingSelected(&a, rows)
+		key, _ := mdbx.HeightKey(3, 1)
+		rows = append(rows, generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
 	}
 	w := generationNew(t, a, rows...)
 	generationClean(t, w.run(2, 1), 2)

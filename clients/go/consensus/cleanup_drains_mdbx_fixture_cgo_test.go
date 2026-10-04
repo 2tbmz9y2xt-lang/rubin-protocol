@@ -48,12 +48,6 @@ func generationEngine(t *testing.T, err error, class, op string, code int, diagn
 	}
 }
 
-func generationSelected(a *mdbx.StorageAuthorityV1, hash [32]byte, body []byte) []mdbx.Mutation {
-	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 6, TipHash: hash, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: uint64(len(body))}
-	key, _ := mdbx.HeightKey(3, 6)
-	return []mdbx.Mutation{generationRow(6, key, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1)))}
-}
-
 func TestCleanupGenerationMDBXNative(t *testing.T) {
 	t.Run("R1b", generationAuthorityRejections)
 	t.Run("R18b", func(t *testing.T) { generationOptionalIdentity(t, "") })
@@ -198,6 +192,8 @@ func generationOptionalIdentity(t *testing.T, keep string) {
 			a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 7, TipHash: [32]byte{7}, CumulativeChainwork: sideWorldWork(2), RowCount: 2, LogicalBytes: 532}
 			first, _ := mdbx.HeightKey(3, 6)
 			last, _ := mdbx.HeightKey(3, 7)
+			rows = append(rows, generationRow(6, first, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
+			link := mdbx.ChainValue([32]byte{7}, hash, sideWorldWork(2))
 			if keep != "" && keep != "selected-SIDE" {
 				a.B, a.U = 10, 13690
 				rows = append(rows, generationCanonical(hash, 11)...)
@@ -208,14 +204,12 @@ func generationOptionalIdentity(t *testing.T, keep string) {
 				a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 6, LastHeight: 7, NextHeight: 6})
 			}
 			if keep == "selected-SIDE" {
-				a.NextGenerationID = 5
-				generationSelected(&a, hash, rows[3].Literal)
-				last, _ = mdbx.HeightKey(4, 7)
-				a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 4, FirstHeight: 7, LastHeight: 7, NextHeight: 7})
+				rows = generationRollingSelected(&a, rows)
+				last, _ = mdbx.HeightKey(3, 1)
+				link = mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))
 			}
-			rows = append(rows, generationRow(6, first, mdbx.ChainValue(hash, [32]byte{}, sideWorldWork(1))))
 			if variant != "absent" {
-				rows = append(rows, generationRow(6, last, mdbx.ChainValue([32]byte{7}, hash, sideWorldWork(2))))
+				rows = append(rows, generationRow(6, last, link))
 			}
 			w := generationNew(t, a, rows...)
 			var raw []byte
