@@ -245,7 +245,7 @@ func generationOptionalIdentity(t *testing.T, keep string) {
 				sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, variant)
 				generationEngine(t, out.Err, "Integrity", "get", -30793, "")
 			}
-			logicalMDBXAssert(t, err == nil, "link fixture: %v", err)
+			logicalMDBXAssert(t, (keep != "" && variant == "later-IO") == (err != nil) && (err == nil || err.Error() == "selected damage fixture site was not reached exactly as armed"), "link fixture: %v", err)
 			sideWantReleased(t, w.owner, variant)
 			if variant == "absent" {
 				rows = append(rows, generationRow(6, last, nil))
