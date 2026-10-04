@@ -213,8 +213,8 @@ func compactStandardIntegrity(t *testing.T) {
 
 func compactStandardRemoved(t *testing.T) {
 	for reverse := 0; reverse < 4; reverse++ {
-		for _, extra := range []bool{false, true} {
-			t.Run(fmt.Sprintf("reverse%d/extra%v", reverse, extra), func(t *testing.T) {
+		for extra, name := range []string{"extrafalse", "extratrue", "extraunrelated"} {
+			t.Run(fmt.Sprintf("reverse%d/%s", reverse, name), func(t *testing.T) {
 				f := newCompactStandardFixture(t, 2)
 				id := f.ids[0]
 				delete(f.mp.txs, id.TxID)
@@ -223,14 +223,16 @@ func compactStandardRemoved(t *testing.T) {
 				if reverse != 0 {
 					f.mp.wtxids[id.WTxID] = values[reverse]
 				}
-				if extra {
-					f.mp.wtxids[[32]byte{0xe8}] = id.TxID
+				if extra != 0 {
+					f.mp.wtxids[[32]byte{0xe8}] = values[extra]
 				}
 				want := uint8(3)
-				if reverse == 0 && !extra {
+				if reverse == 0 && extra != 1 {
 					want = 2
 				}
-				requireCompactStandardPreservedRead(t, f.mp, id, 0, want, nil)
+				for _, maxBytes := range []uint64{0, uint64(len(f.raw[0]))} {
+					requireCompactStandardPreservedRead(t, f.mp, id, maxBytes, want, nil)
+				}
 				delete(f.mp.wtxids, id.WTxID)
 				delete(f.mp.wtxids, [32]byte{0xe8})
 				requireCompactStandardPreservedRead(t, f.mp, id, 0, 2, nil)
@@ -241,7 +243,7 @@ func compactStandardRemoved(t *testing.T) {
 }
 
 func compactStandardReplacement(t *testing.T) {
-	f := newCompactStandardFixture(t, 1)
+	f := newCompactStandardFixture(t, 2)
 	tx, _, _, _, err := consensus.ParseTx(f.raw[0])
 	require(t, err == nil, "parse original witness: %v", err)
 	if err := consensus.SignTransaction(tx, f.state.Utxos, devnetGenesisChainID, f.signer); err != nil {
@@ -260,28 +262,40 @@ func compactStandardReplacement(t *testing.T) {
 	entry.raw, entry.wtxid, entry.size = slices.Clone(raw), wtxid, len(raw)
 	f.mp.wtxids[wtxid] = txid
 	f.mp.mu.Unlock()
-	otherTxID := txid
-	otherTxID[0] ^= 1
 	for _, stale := range []struct {
 		name string
 		txid [32]byte
 	}{
 		{"clean", [32]byte{}},
 		{"stale_selected_txid", txid},
-		{"stale_other_txid", otherTxID},
+		{"stale_other_txid", f.ids[1].TxID},
+		{"stale_missing_txid", [32]byte{0xe7}},
 	} {
-		t.Run(stale.name, func(t *testing.T) {
-			delete(f.mp.wtxids, f.ids[0].WTxID)
-			want := uint8(2)
-			if stale.name != "clean" {
-				f.mp.wtxids[f.ids[0].WTxID] = stale.txid
-				want = 3
-			}
-			for _, maxBytes := range []uint64{0, uint64(len(raw))} {
-				requireCompactStandardPreservedRead(t, f.mp, f.ids[0], maxBytes, want, nil)
-			}
-			requireCompactStandardPreservedRead(t, f.mp, CompactCandidateIdentity{TxID: txid, WTxID: wtxid}, uint64(len(raw)), 1, raw)
-		})
+		for extra, name := range []string{"extrafalse", "extratrue", "extraunrelated"} {
+			t.Run(stale.name+"/"+name, func(t *testing.T) {
+				delete(f.mp.wtxids, f.ids[0].WTxID)
+				if stale.name != "clean" {
+					f.mp.wtxids[f.ids[0].WTxID] = stale.txid
+				}
+				if extra != 0 {
+					indexed := txid
+					if extra == 2 {
+						indexed = f.ids[1].TxID
+					}
+					f.mp.wtxids[[32]byte{0xe8}] = indexed
+				}
+				want := uint8(2)
+				if stale.name != "clean" || extra == 1 {
+					want = 3
+				}
+				for _, maxBytes := range []uint64{0, uint64(len(raw))} {
+					requireCompactStandardPreservedRead(t, f.mp, f.ids[0], maxBytes, want, nil)
+				}
+				delete(f.mp.wtxids, [32]byte{0xe8})
+				requireCompactStandardPreservedRead(t, f.mp, CompactCandidateIdentity{TxID: txid, WTxID: wtxid}, uint64(len(raw)), 1, raw)
+				requireCompactStandardPreservedRead(t, f.mp, f.ids[1], uint64(len(f.raw[1])), 1, f.raw[1])
+			})
+		}
 	}
 	delete(f.mp.wtxids, f.ids[0].WTxID)
 	requireCompactStandardPreservedRead(t, f.mp, f.ids[0], 0, 2, nil)

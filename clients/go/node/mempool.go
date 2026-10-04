@@ -133,16 +133,13 @@ func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, m
 	}
 	entry, found := m.txs[identity.TxID]
 	if !found {
-		return m.compactStandardAbsentLocked(identity)
+		return m.compactStandardAbsentLocked(identity, nil)
 	}
 	if !m.compactStandardEntryValid(identity.TxID, entry) {
 		return CompactCandidateRead{Disposition: CompactCandidateFault}
 	}
 	if entry.wtxid != identity.WTxID {
-		if _, found := m.wtxids[identity.WTxID]; found {
-			return CompactCandidateRead{Disposition: CompactCandidateFault}
-		}
-		return CompactCandidateRead{Disposition: CompactCandidateAbsent}
+		return m.compactStandardAbsentLocked(identity, entry)
 	}
 	if uint64(len(entry.raw)) > maxBytes {
 		return CompactCandidateRead{Disposition: CompactCandidateOverBudget}
@@ -150,12 +147,16 @@ func (m *Mempool) compactStandardReadLocked(identity CompactCandidateIdentity, m
 	return CompactCandidateRead{Disposition: CompactCandidatePresent, Raw: append([]byte(nil), entry.raw...)}
 }
 
-func (m *Mempool) compactStandardAbsentLocked(identity CompactCandidateIdentity) CompactCandidateRead {
+// entry is nil after removal, or the already validated replacement.
+func (m *Mempool) compactStandardAbsentLocked(identity CompactCandidateIdentity, entry *mempoolEntry) CompactCandidateRead {
 	if _, found := m.wtxids[identity.WTxID]; found {
 		return CompactCandidateRead{Disposition: CompactCandidateFault}
 	}
-	for _, indexed := range m.wtxids {
-		if indexed == identity.TxID {
+	for wtxid, indexed := range m.wtxids {
+		if indexed != identity.TxID {
+			continue
+		}
+		if entry == nil || wtxid != entry.wtxid {
 			return CompactCandidateRead{Disposition: CompactCandidateFault}
 		}
 	}
