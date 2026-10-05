@@ -366,7 +366,7 @@ func (p *cleanupGenerationPlan) owners(r *mdbx.Reader, a mdbx.StorageAuthorityV1
 	if err != nil {
 		return o, err
 	}
-	for _, span := range a.Cleanup.Spans[1:] {
+	for _, span := range a.Cleanup.Spans {
 		_, _, bodyKeep, _ := o.keeps(a)
 		if span.Kind == mdbx.CleanupSpanSideV1 && !bodyKeep {
 			deferBody, readErr := p.sideMembership(r, span.GenerationID, span.NextHeight, span.LastHeight, hash)
