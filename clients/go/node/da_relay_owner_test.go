@@ -8064,10 +8064,19 @@ func compactDAAssociations(t *testing.T, f *daNonReplayFixture, observed daNonRe
 					name  string
 					fault bool
 				}{
-					{"clean", false}, {"nil_member", false}, {"unrelated_member", false},
-					{"txid", true}, {"wtxid", true}, {"both", true}, {"current_pair", true},
-					{"pointer", true}, {"many", true}, {"locator_alias", true}, {"locator_same_count", true},
-					{"locator_commit_index", true}, {"locator_wrong_role", false},
+					{"clean", false},
+					{"nil_member", false},
+					{"unrelated_member", false},
+					{"txid", true},
+					{"wtxid", true},
+					{"both", true},
+					{"current_pair", true},
+					{"pointer", true},
+					{"many", true},
+					{"locator_alias", true},
+					{"locator_same_count", true},
+					{"locator_commit_index", true},
+					{"locator_wrong_role", false},
 				} {
 					t.Run(fmt.Sprintf("%s/role%d/same%t/%s", path, role, same, row.name), func(t *testing.T) {
 						f.relay.relations = daRelayRelationsForTest(maps.Clone(sets), maps.Clone(locators))
