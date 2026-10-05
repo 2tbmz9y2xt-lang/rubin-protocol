@@ -196,7 +196,7 @@ func DAObserverReadStateImage(s *DARelayState) (DAObserverStateImage, error) {
 	defer release()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.mempool == nil || s.mempool.pendingOutpoints == nil || s.sets == nil || s.locators == nil {
+	if s.mempool == nil || s.mempool.pendingOutpoints == nil || s.relations.sets == nil || s.relations.locators == nil {
 		return DAObserverStateImage{}, errors.New("DA relay state unavailable")
 	}
 	o := s.mempool.pendingOutpoints
@@ -216,14 +216,14 @@ func (s *DARelayState) daObserverRelayImageLocked() DAObserverStateImage {
 		CompleteCount: s.completeCount, OrphanBytes: s.orphanBytes, OrphanCommitOverheadBytes: s.orphanCommitOverheadBytes,
 		PinnedPayloadBytes: s.pinnedPayloadBytes, RecordRevisionHighWater: s.records,
 	}
-	for _, id := range slices.SortedFunc(maps.Keys(s.sets), compareDAObserverID) {
-		image.Records = append(image.Records, daObserverRecord(s.sets[id]))
+	for _, id := range s.sortedRetainedDAIDsLocked() {
+		image.Records = append(image.Records, daObserverRecord(s.relations.recordValue(id)))
 	}
 	slices.SortStableFunc(image.Records, func(a, b DAObserverRecord) int { return compareDAObserverID(a.DAID, b.DAID) })
-	for _, txid := range slices.SortedFunc(maps.Keys(s.locators), compareDAObserverID) {
-		l := s.locators[txid]
+	for txid, l := range s.relations.locatorRows() {
 		image.Locators = append(image.Locators, DAObserverLocator{TxID: txid, DAID: l.daID, Kind: cmp.Or(daObserverLocatorKinds[l.kind], "INVALID"), ChunkIndex: l.chunkIndex})
 	}
+	slices.SortFunc(image.Locators, func(a, b DAObserverLocator) int { return compareDAObserverID(a.TxID, b.TxID) })
 	for _, key := range slices.Sorted(maps.Keys(s.orphanBytesByPeerQuotaKey)) {
 		image.OrphanBytesByPeerQuotaKey = append(image.OrphanBytesByPeerQuotaKey, DAObserverKeyBytes{Key: key, Bytes: s.orphanBytesByPeerQuotaKey[key]})
 	}
@@ -317,19 +317,19 @@ func DAObserverInjectRetainedFault(s *DARelayState, txid [32]byte, fault DAObser
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	locator, located := s.locators[txid]
+	locator, located := s.relations.locator(txid)
 	if !located {
 		return errors.New("txid is not located")
 	}
 	switch fault {
 	case DAObserverFaultOwnerUnavailable:
-		s.sets, s.locators = nil, nil
+		s.relations = daRelayRelations{}
 		return nil
 	case DAObserverFaultLocatorDangling:
-		if _, present := s.sets[locator.daID]; !present {
+		if _, present := s.relations.record(locator.daID); !present {
 			return errors.New("located record is absent")
 		}
-		delete(s.sets, locator.daID)
+		s.relations.removeRecord(locator.daID)
 		return nil
 	case DAObserverFaultRetainedRawMalformed, DAObserverFaultAdmissionWTxIDMismatch:
 		return s.injectDAObserverMemberFaultLocked(locator, fault == DAObserverFaultAdmissionWTxIDMismatch)
@@ -340,7 +340,8 @@ func DAObserverInjectRetainedFault(s *DARelayState, txid [32]byte, fault DAObser
 // injectDAObserverMemberFaultLocked flips the located member's wtxid, or
 // appends one byte to its retained raw bytes; the caller holds s.mu.
 func (s *DARelayState) injectDAObserverMemberFaultLocked(locator daRelayLocator, wtxid bool) error {
-	record, present := s.sets[locator.daID]
+	record, present := s.relations.record(locator.daID)
+	record = record.cloneOwnerReady()
 	member, raw := record.commit.member, &record.commit.txBytes
 	chunk := record.chunks[locator.chunkIndex]
 	if locator.kind == daRelayLocatorChunk {
@@ -351,13 +352,13 @@ func (s *DARelayState) injectDAObserverMemberFaultLocked(locator daRelayLocator,
 	}
 	if wtxid {
 		member.wtxid[0] ^= 1
-		return nil
+	} else {
+		*raw = append(slices.Clip(*raw), 0)
 	}
-	*raw = append(slices.Clip(*raw), 0)
 	if locator.kind == daRelayLocatorChunk {
 		record.chunks[locator.chunkIndex] = chunk
 	}
-	s.sets[locator.daID] = record
+	s.relations.putRecord(locator.daID, record)
 	return nil
 }
 

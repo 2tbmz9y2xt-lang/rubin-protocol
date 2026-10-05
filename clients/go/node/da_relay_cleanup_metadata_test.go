@@ -48,16 +48,20 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 				f.completeReplayPinned(id)
 				clean, ownerClean := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				f.mutateRelay(func(s *DARelayState) {
-					record := s.sets[id]
+					record := s.relations.recordValue(id)
 					row.mutate(&record)
-					s.sets[id], s.pinnedPayloadBytes = record, record.payloadBytes
+					s.relations.putRecord(id, record)
+					s.pinnedPayloadBytes = record.payloadBytes
 				})
 				before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 				if err := selector.run(f.relay); !errors.Is(err, errDARelayImageIncompatible) {
 					t.Fatalf("cleanup accepted inconsistent C metadata: err=%v, want %v", err, errDARelayImageIncompatible)
 				}
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
-				f.mutateRelay(func(s *DARelayState) { s.sets[id], s.pinnedPayloadBytes = clean.sets[id], clean.pinnedPayloadBytes })
+				f.mutateRelay(func(s *DARelayState) {
+					s.relations.putRecord(id, clean.sets[id])
+					s.pinnedPayloadBytes = clean.pinnedPayloadBytes
+				})
 				if err := selector.run(f.relay); err != nil {
 					t.Fatalf("State C cleanup ceased to be a successful no-op: corrected cleanup: %v", err)
 				}
@@ -75,7 +79,7 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 		commit := f.signed(daNonReplayTxSpec{kind: 0x01, daID: id, chunkCount: count, commitment: sha3.Sum256(payloads), commitmentOutputs: 1})
 		_, token := mustFinalizeDAAdmission(t, f.mp, commit.raw)
 		f.mutateRelay(func(s *DARelayState) {
-			record := s.sets[id]
+			record := s.relations.recordValue(id)
 			record.commit = daRelayCommit{daID: id, payloadCommitment: commit.spec.commitment, member: &daRelayMemberIdentity{txid: commit.txid, wtxid: commit.wtxid, fee: commit.spec.fee, inputs: commit.inputs, token: token, provenance: LocalDAProvenance()}, chunkCount: count, txBytes: commit.raw}
 			record.markComplete(uint64(count))
 			set, matches, err := parseDACompleteRecord(record)
@@ -84,7 +88,8 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 			charge := s.orphanBytesByDAID[id]
 			delete(s.orphanBytesByDAID, id)
 			s.orphanBytes, s.completeBytes, s.completeCount, s.pinnedPayloadBytes = s.orphanBytes-charge, s.completeBytes+set.totalBytes, s.completeCount+1, s.pinnedPayloadBytes+set.payloadBytes
-			s.locators[commit.txid], s.sets[id] = daRelayLocator{daID: id, kind: daRelayLocatorCommit}, record
+			s.relations.putLocator(commit.txid, daRelayLocator{daID: id, kind: daRelayLocatorCommit})
+			s.relations.putRecord(id, record)
 		})
 		clean, ownerClean := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		return f, id, clean, ownerClean
@@ -98,18 +103,22 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 			_, extraToken := mustFinalizeDAAdmission(t, f.mp, extra.raw)
 			// The over-MAX image uses signed/claimed bytes; only their R5 byte role differs from cached slot MAX.
 			f.mutateRelay(func(s *DARelayState) {
-				record, index := s.sets[id], uint16(consensus.MAX_DA_CHUNK_COUNT)
+				record, index := s.relations.recordValue(id), uint16(consensus.MAX_DA_CHUNK_COUNT)
 				member := &daRelayMemberIdentity{txid: extra.txid, wtxid: extra.wtxid, fee: extra.spec.fee, inputs: extra.inputs, token: extraToken, provenance: LocalDAProvenance()}
 				record.commit.chunkCount, record.chunks[index] = index+1, daRelayChunk{daID: id, chunkHash: sha3.Sum256(extra.spec.payload), member: member, chunkIndex: index, txBytes: extra.raw}
 				record.payloadBytes, record.completeIntrinsic.payloadBytes = record.payloadBytes+uint64(len(extra.spec.payload)), record.completeIntrinsic.payloadBytes+uint64(len(extra.spec.payload))
 				record.completeIntrinsic.fee.Lo, record.completeIntrinsic.totalBytes = record.completeIntrinsic.fee.Lo+extra.spec.fee.Lo, record.completeIntrinsic.totalBytes+uint64(len(extra.raw))
-				s.sets[id], s.completeBytes, s.pinnedPayloadBytes, s.locators[extra.txid] = record, s.completeBytes+uint64(len(extra.raw)), s.pinnedPayloadBytes+uint64(len(extra.spec.payload)), daRelayLocator{daID: id, kind: daRelayLocatorChunk, chunkIndex: index}
+				s.relations.putRecord(id, record)
+				s.completeBytes += uint64(len(extra.raw))
+				s.pinnedPayloadBytes += uint64(len(extra.spec.payload))
+				s.relations.putLocator(extra.txid, daRelayLocator{daID: id, kind: daRelayLocatorChunk, chunkIndex: index})
 			})
 			before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 			require(t, errors.Is(selector.run(f.relay), errDARelayImageIncompatible), "cleanup accepted excessive C chunk count")
 			requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 			f.mutateRelay(func(s *DARelayState) {
-				s.sets, s.locators, s.completeBytes, s.pinnedPayloadBytes = maps.Clone(clean.sets), maps.Clone(clean.locators), clean.completeBytes, clean.pinnedPayloadBytes
+				s.relations = daRelayRelationsForTest(maps.Clone(clean.sets), maps.Clone(clean.locators))
+				s.completeBytes, s.pinnedPayloadBytes = clean.completeBytes, clean.pinnedPayloadBytes
 			})
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
 				o.byToken, o.byOutpoint, o.tokenHighWater = maps.Clone(ownerClean.byToken), maps.Clone(ownerClean.byOutpoint), ownerClean.tokenHighWater
@@ -124,10 +133,10 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 		f.completeReplayPinned(completeID)
 		var descriptor daCompleteCapacitySet
 		f.mutateRelay(func(s *DARelayState) {
-			record := s.sets[completeID]
+			record := s.relations.recordValue(completeID)
 			descriptor = record.completeIntrinsic
 			record.completeIntrinsic.fee.Lo++
-			s.sets[completeID] = record
+			s.relations.putRecord(completeID, record)
 			s.prefetch.indexes = map[[32]byte]map[uint16]string{incompleteID: {1: "peer"}}
 		})
 		before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
@@ -136,9 +145,9 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 		f.mutateRelay(func(s *DARelayState) {
-			record := s.sets[completeID]
+			record := s.relations.recordValue(completeID)
 			record.completeIntrinsic = descriptor
-			s.sets[completeID] = record
+			s.relations.putRecord(completeID, record)
 		})
 		if err := f.relay.ReleasePeerQuotaKey("drop"); err != nil {
 			t.Fatalf("corrected mixed cleanup: %v", err)
@@ -158,12 +167,12 @@ func TestDACleanupCanonicalIsolation(t *testing.T) {
 	f.completeReplayPinned(earlier)
 	f.completeReplayPinned(later)
 	f.mutateRelay(func(s *DARelayState) {
-		record := s.sets[earlier]
+		record := s.relations.recordValue(earlier)
 		chunk := record.chunks[0]
 		chunk.txBytes = append([]byte(nil), chunk.txBytes...)
 		chunk.txBytes[len(chunk.txBytes)-1] ^= 0xff
 		record.chunks[0] = chunk
-		s.sets[earlier] = record
+		s.relations.putRecord(earlier, record)
 	})
 	before, ownerBefore := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 	if err := f.relay.ReleasePeerQuotaKey("unrelated"); err != nil {
@@ -171,9 +180,9 @@ func TestDACleanupCanonicalIsolation(t *testing.T) {
 	}
 	requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
 	f.mutateRelay(func(s *DARelayState) {
-		record := s.sets[later]
+		record := s.relations.recordValue(later)
 		record.commit.member = nil
-		s.sets[later] = record
+		s.relations.putRecord(later, record)
 	})
 	var terminal *canonicalDATerminalError
 	if _, err := validateCanonicalDARetainedSnapshot(f.relay, f.mp.pendingOutpoints); !errors.As(err, &terminal) || !strings.Contains(err.Error(), errDARelayImageIncompatible.Error()) || !strings.Contains(err.Error(), fmt.Sprintf("retained DA record %x", earlier)) || strings.Contains(err.Error(), fmt.Sprintf("retained DA record %x", later)) {

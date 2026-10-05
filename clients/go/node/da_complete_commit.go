@@ -26,6 +26,7 @@ type daCompleteCommitPlan struct {
 	capacityRejected bool
 	mismatch         bool
 	sharedBytes      uint64
+	relations        *daRelayRelationPublication
 }
 
 func (s *DARelayState) prepareDACompleteCommit(admission *DAAdmission, result daCompletePreparation) (*daCompleteCommitPlan, error) {
@@ -198,7 +199,7 @@ func (p *daCompleteCommitPlan) prepareOriginalClaims(s *DARelayState) {
 	if p.mismatch {
 		return
 	}
-	for _, record := range s.sets {
+	for _, record := range s.relations.records() {
 		if record.state == daRelayStateCompleteSet {
 			p.original = append(p.original, daCompleteRecordClaims(record)...)
 		}
@@ -207,7 +208,7 @@ func (p *daCompleteCommitPlan) prepareOriginalClaims(s *DARelayState) {
 
 func (p *daCompleteCommitPlan) prepareRetire(s *DARelayState, victims *[]DAAdmissionVictim) {
 	for _, resident := range p.capacity.victims {
-		record := s.sets[resident]
+		record := s.relations.recordValue(resident)
 		*victims = append(*victims, daCompleteRecordClaims(record)...)
 		p.retire = append(p.retire, record.locatorRows()...)
 	}
@@ -303,16 +304,16 @@ func (s *DARelayState) sameDACompleteTarget(source *daCompleteSnapshot) bool {
 	if (binding{s.mempool, s.mempool.pendingOutpoints}) != (binding{source.mempool, source.owner}) {
 		return false
 	}
-	if !sameDACompleteRecord(s.sets[source.prior.daID], source.prior) {
+	if !sameDACompleteRecord(s.relations.recordValue(source.prior.daID), source.prior) {
 		return false
 	}
 	for txid, locator := range source.locators {
-		if s.locators[txid] != locator {
+		if s.relations.locatorValue(txid) != locator {
 			return false
 		}
 	}
 	count := 0
-	for _, locator := range s.locators {
+	for _, locator := range s.relations.locatorRows() {
 		if locator.daID == source.prior.daID {
 			count++
 		}
@@ -385,11 +386,9 @@ func (s *DARelayState) checkDACompleteFinalTarget(p *daCompleteCommitPlan) error
 }
 
 func (s *DARelayState) preflightDACompleteCommit(p *daCompleteCommitPlan) error {
-	if ([4]bool{s.sets != nil, s.locators != nil, s.orphanBytesByDAID != nil, s.orphanBytesByPeerQuotaKey != nil}) != ([4]bool{true, true, true, true}) {
+	if ([4]bool{s.relations.sets != nil, s.relations.locators != nil, s.orphanBytesByDAID != nil, s.orphanBytesByPeerQuotaKey != nil}) != ([4]bool{true, true, true, true}) {
 		return errDARelayImageIncompatible
 	}
-	value := s.sets[p.source.prior.daID]
-	s.sets[p.source.prior.daID] = value
 	if value, ok := s.orphanBytesByDAID[p.source.prior.daID]; ok {
 		s.orphanBytesByDAID[p.source.prior.daID] = value
 	}
@@ -399,15 +398,28 @@ func (s *DARelayState) preflightDACompleteCommit(p *daCompleteCommitPlan) error 
 		}
 	}
 	txid := p.source.candidate.member.member.txid
-	if _, present := s.locators[txid]; present {
+	if _, present := s.relations.locator(txid); present {
 		return errDARelayImageIncompatible
 	}
-	s.locators[txid] = p.source.candidate.member.locator
+	p.relations = s.prepareDACompleteRelationsLocked(p)
 	return nil
 }
 
+func (s *DARelayState) prepareDACompleteRelationsLocked(p *daCompleteCommitPlan) *daRelayRelationPublication {
+	prepared := &daRelayRelationPublication{}
+	s.relations.prepareRecord(prepared, p.source.prior.daID, p.next, true)
+	for _, id := range p.capacity.victims {
+		s.relations.prepareRecord(prepared, id, daRelaySetRecord{}, false)
+	}
+	for _, row := range p.retire {
+		s.relations.prepareLocator(prepared, row, false)
+	}
+	s.relations.prepareLocator(prepared, daRelayLocatorRow{txid: p.source.candidate.member.member.txid, locator: p.source.candidate.member.locator}, true)
+	return prepared
+}
+
 func (s *DARelayState) discardDACompleteProvisional(p *daCompleteCommitPlan) {
-	delete(s.locators, p.source.candidate.member.member.txid)
+	s.relations.discard(p.relations)
 }
 
 func (s *DARelayState) reserveDACompleteCommit(admission *DAAdmission, p *daCompleteCommitPlan) (daRelayAdmissionOutcome, bool, error) {
@@ -469,14 +481,10 @@ func (s *DARelayState) finishDACompleteCommit(p *daCompleteCommitPlan, commit *D
 }
 
 func (s *DARelayState) publishDACompleteLocked(p *daCompleteCommitPlan) {
-	for _, row := range p.retire {
-		delete(s.locators, row.txid)
-	}
+	s.relations.publish(p.relations)
 	for _, id := range p.capacity.victims {
-		delete(s.sets, id)
 		s.prefetch.releaseSet(id)
 	}
-	s.sets[p.source.prior.daID] = p.next
 	s.nextReceivedTime = p.sequence
 	s.records = p.next.revision
 	s.stagedBytes = p.placement.stagedBytes

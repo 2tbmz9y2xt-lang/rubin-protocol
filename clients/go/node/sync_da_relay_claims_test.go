@@ -11,6 +11,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"maps"
 	"math/rand"
 	"os"
 	"reflect"
@@ -93,8 +94,8 @@ func newCanonicalDAOwnerStateCFixture(t *testing.T, mixed ...bool) *canonicalDAO
 		x.retained.prefetch.expires[x.stateA], x.retained.prefetch.expires[x.stateB] = time.Unix(3, 0), time.Unix(4, 0)
 		wantClaims = 8
 	}
-	if x.retained.sets[x.stateC].state != daRelayStateCompleteSet || x.retained.sets[x.stateCKeep].state != daRelayStateCompleteSet || mixedImage && (x.retained.sets[x.stateA].state != daRelayStateOrphanChunks || x.retained.sets[x.stateB].state != daRelayStateStagedCommit) {
-		t.Fatalf("State C fixture states=%v", x.retained.sets)
+	if x.retained.relations.recordValue(x.stateC).state != daRelayStateCompleteSet || x.retained.relations.recordValue(x.stateCKeep).state != daRelayStateCompleteSet || mixedImage && (x.retained.relations.recordValue(x.stateA).state != daRelayStateOrphanChunks || x.retained.relations.recordValue(x.stateB).state != daRelayStateStagedCommit) {
+		t.Fatalf("State C fixture states=%v", maps.Collect(x.retained.relations.records()))
 	}
 	if x.retained.completeCount != 2 || x.retained.completeBytes == 0 || x.retained.pinnedPayloadBytes == 0 || canonicalDAOwnerDomainClaims(x.pending) != wantClaims {
 		t.Fatalf("State C fixture accounting/claims: complete=(%d,%d) pinned=%d claims=%d", x.retained.completeCount, x.retained.completeBytes, x.retained.pinnedPayloadBytes, canonicalDAOwnerDomainClaims(x.pending))
@@ -104,7 +105,7 @@ func newCanonicalDAOwnerStateCFixture(t *testing.T, mixed ...bool) *canonicalDAO
 
 func (x *canonicalDAOwnerFixture) rememberCompleteRecord(prefix string, daID [32]byte) {
 	x.t.Helper()
-	record := x.f.relay.sets[daID]
+	record := x.f.relay.relations.recordValue(daID)
 	x.txs[prefix+"commit"] = daNonReplayTx{
 		spec: daNonReplayTxSpec{kind: 0x01, daID: daID}, raw: slices.Clone(record.commit.txBytes),
 		txid: record.commit.member.txid, wtxid: record.commit.member.wtxid, inputs: slices.Clone(record.commit.member.inputs),
@@ -191,8 +192,8 @@ func newCommitOnlyStateBFixture(t *testing.T) (*canonicalDAOwnerFixture, [32]byt
 	// The lone record is not a default fixture id, so the canned prefetch rows
 	// would name absent records; drop them.
 	x.retained.prefetch = daRelayPrefetchState{}
-	if record := x.retained.sets[daID]; len(x.retained.sets) != 1 || record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || record.commit.member == nil {
-		t.Fatalf("commit-only fixture=%+v", x.retained.sets)
+	if record := x.retained.relations.recordValue(daID); x.retained.relations.setCount != 1 || record.state != daRelayStateStagedCommit || len(record.chunks) != 0 || record.commit.member == nil {
+		t.Fatalf("commit-only fixture=%+v", maps.Collect(x.retained.relations.records()))
 	}
 	return x, daID
 }
@@ -227,8 +228,8 @@ func (x *canonicalDAOwnerFixture) capture() {
 	x.f.relay.mu.Lock()
 	snapshot := x.f.relay.cloneForAtomicBatchLocked()
 	x.f.relay.mu.Unlock()
-	for daID, record := range snapshot.sets {
-		snapshot.sets[daID] = record.cloneOwnerReady()
+	for daID, record := range snapshot.relations.records() {
+		snapshot.relations.putRecord(daID, record.cloneOwnerReady())
 	}
 	// Reservations no phase reads, so a released set and a preserved one are
 	// both observable in D1.
@@ -243,7 +244,7 @@ func (x *canonicalDAOwnerFixture) capture() {
 // empty containers, zero recomputable counters, no reservation — and both
 // high-waters untouched.
 func (x *canonicalDAOwnerFixture) emptyRetained() {
-	x.retained.sets, x.retained.locators = map[[32]byte]daRelaySetRecord{}, map[[32]byte]daRelayLocator{}
+	x.retained.relations = newDARelayRelations()
 	x.retained.orphanBytesByDAID, x.retained.orphanBytesByPeerQuotaKey = map[[32]byte]uint64{}, map[string]uint64{}
 	x.retained.orphanBytes, x.retained.orphanCommitOverheadBytes, x.retained.prefetch = 0, 0, daRelayPrefetchState{}
 	x.retained.stagedBytes = 0
@@ -255,10 +256,10 @@ func (x *canonicalDAOwnerFixture) emptyRetained() {
 // that never reads that field.
 func (x *canonicalDAOwnerFixture) requireFixturePremises() {
 	x.t.Helper()
-	if len(x.retained.sets) != 2 || x.retained.sets[x.stateA].state != daRelayStateOrphanChunks || x.retained.sets[x.stateB].state != daRelayStateStagedCommit {
-		x.t.Fatalf("fixture states=%v", x.retained.sets)
+	if x.retained.relations.setCount != 2 || x.retained.relations.recordValue(x.stateA).state != daRelayStateOrphanChunks || x.retained.relations.recordValue(x.stateB).state != daRelayStateStagedCommit {
+		x.t.Fatalf("fixture states=%v", maps.Collect(x.retained.relations.records()))
 	}
-	for _, record := range x.retained.sets {
+	for _, record := range x.retained.relations.records() {
 		if record.revision == 0 || record.receivedTime == 0 || record.ttlBlocksRemaining == 0 {
 			x.t.Fatalf("admitted record %x carries revision=%d receivedTime=%d ttl=%d", record.daID, record.revision, record.receivedTime, record.ttlBlocksRemaining)
 		}
@@ -266,8 +267,8 @@ func (x *canonicalDAOwnerFixture) requireFixturePremises() {
 	if x.retained.orphanBytes == 0 || x.retained.orphanCommitOverheadBytes == 0 || x.retained.pinnedPayloadBytes != 0 {
 		x.t.Fatalf("fixture aggregates orphan=%d commit=%d pinned=%d", x.retained.orphanBytes, x.retained.orphanCommitOverheadBytes, x.retained.pinnedPayloadBytes)
 	}
-	if x.retained.stagedBytes != x.memberCharge("commit")+x.memberCharge("b0") || len(x.retained.orphanBytesByPeerQuotaKey) != 1 || len(x.retained.orphanBytesByDAID) != 1 || len(x.retained.locators) != 4 {
-		x.t.Fatalf("fixture peers=%v da_ids=%v locators=%d", x.retained.orphanBytesByPeerQuotaKey, x.retained.orphanBytesByDAID, len(x.retained.locators))
+	if x.retained.stagedBytes != x.memberCharge("commit")+x.memberCharge("b0") || len(x.retained.orphanBytesByPeerQuotaKey) != 1 || len(x.retained.orphanBytesByDAID) != 1 || x.retained.relations.locatorCount != 4 {
+		x.t.Fatalf("fixture peers=%v da_ids=%v locators=%d", x.retained.orphanBytesByPeerQuotaKey, x.retained.orphanBytesByDAID, x.retained.relations.locatorCount)
 	}
 	standard := slices.IndexFunc(x.pending.claims, func(c pendingOutpointClaim) bool {
 		return c.token == x.standard && c.domain == PendingOutpointStandardMempool
@@ -386,9 +387,9 @@ func (x *canonicalDAOwnerFixture) requireStableTerminal(want string, rounds int)
 // corrupt replaces one snapshot record with a deep copy the row mutated, so a
 // row changes exactly the field it names.
 func (x *canonicalDAOwnerFixture) corrupt(daID [32]byte, mutate func(*daRelaySetRecord)) {
-	record := x.retained.sets[daID].cloneOwnerReady()
+	record := x.retained.relations.recordValue(daID).cloneOwnerReady()
 	mutate(&record)
-	x.retained.sets[daID] = record
+	x.retained.relations.putRecord(daID, record)
 }
 
 // corruptChunk replaces one chunk of one snapshot record with a copy the row mutated.
@@ -516,7 +517,7 @@ func (x *canonicalDAOwnerFixture) requireExactImage(candidates preparedCanonical
 	want := daRelayStateSnapshot(x.retained)
 	dropped := map[PendingOutpointToken]bool{}
 	for _, daID := range removed {
-		record := x.retained.sets[daID]
+		record := x.retained.relations.recordValue(daID)
 		delete(want.sets, daID)
 		delete(want.daIDBytes, daID)
 		delete(want.prefetchIndexes, daID)
@@ -602,19 +603,20 @@ func (x *canonicalDAOwnerFixture) requireExactOwnerHalf(candidates preparedCanon
 // reinsert rebuilds the snapshot's keyed containers in the opposite insertion
 // order, so a walk that depended on map order would change its result.
 func (x *canonicalDAOwnerFixture) reinsert() {
-	sets := make(map[[32]byte]daRelaySetRecord, len(x.retained.sets))
+	sets := make(map[[32]byte]daRelaySetRecord, x.retained.relations.setCount)
 	daIDBytes := make(map[[32]byte]uint64, len(x.retained.orphanBytesByDAID))
 	for _, daID := range [][32]byte{x.stateB, x.stateA} {
-		sets[daID] = x.retained.sets[daID]
+		sets[daID] = x.retained.relations.recordValue(daID)
 		if value, present := x.retained.orphanBytesByDAID[daID]; present {
 			daIDBytes[daID] = value
 		}
 	}
-	locators := make(map[[32]byte]daRelayLocator, len(x.retained.locators))
+	locators := make(map[[32]byte]daRelayLocator, x.retained.relations.locatorCount)
 	for _, name := range []string{"b0", "commit", "a1", "a0"} {
-		locators[x.txs[name].txid] = x.retained.locators[x.txs[name].txid]
+		locators[x.txs[name].txid] = x.retained.relations.locatorValue(x.txs[name].txid)
 	}
-	x.retained.sets, x.retained.orphanBytesByDAID, x.retained.locators = sets, daIDBytes, locators
+	x.retained.relations = daRelayRelationsForTest(sets, locators)
+	x.retained.orphanBytesByDAID = daIDBytes
 }
 
 // TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly is the accepted half:
@@ -722,7 +724,7 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 		locked := daRelayTestID(0x33)
 		x.admitLocktimeChunk(locked, 4242)
 		x.capture()
-		if _, retained := x.retained.sets[locked]; !retained {
+		if _, retained := x.retained.relations.record(locked); !retained {
 			t.Fatal("the locktime record was not retained")
 		}
 		x.requireExactImage(x.requirePair(), locked)
@@ -742,8 +744,9 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 		x.pending.claims = slices.DeleteFunc(x.pending.claims, func(c pendingOutpointClaim) bool { return c.domain == PendingOutpointDA })
 		candidates := x.requirePair()
 		x.requireExactImage(candidates)
-		candidates.retained.sets[x.stateA], candidates.retained.locators[x.txs["a0"].txid] = daRelaySetRecord{}, daRelayLocator{}
-		if len(x.retained.sets) != 0 || len(x.retained.locators) != 0 {
+		candidates.retained.relations.putRecord(x.stateA, daRelaySetRecord{})
+		candidates.retained.relations.putLocator(x.txs["a0"].txid, daRelayLocator{})
+		if x.retained.relations.setCount != 0 || x.retained.relations.locatorCount != 0 {
 			t.Fatal("the D1 half shares a container with the emptied input")
 		}
 	})
@@ -778,7 +781,7 @@ func TestCanonicalDAOwnerCandidatesValidateAndRemoveExactly(t *testing.T) {
 
 func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
 	x := newCanonicalDAOwnerStateCFixture(t, false)
-	source := x.retained.sets[x.stateC]
+	source := x.retained.relations.recordValue(x.stateC)
 	wantCommit := slices.Clone(source.commit.txBytes)
 	wantCommitInputs := slices.Clone(source.commit.member.inputs)
 	var wantChunks [2][]byte
@@ -789,7 +792,7 @@ func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
 	}
 	wantIntrinsic := intrinsicFromRetainedOracle(t, source, x.stateC, [][]byte{[]byte("state-c chunk zero"), []byte("state-c chunk one")}, 1)
 	candidates := x.requirePair()
-	survivor := candidates.retained.sets[x.stateC]
+	survivor := candidates.retained.relations.recordValue(x.stateC)
 	if source.completeIntrinsic != wantIntrinsic || survivor.completeIntrinsic != wantIntrinsic || survivor.commit.member.token != source.commit.member.token {
 		t.Fatal("canonical survivor descriptor or owner tokens changed")
 	}
@@ -804,7 +807,7 @@ func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
 		chunk.member.inputs[0].Vout++
 		survivor.chunks[uint16(i)] = chunk
 	}
-	candidates.retained.sets[x.stateC] = survivor
+	candidates.retained.relations.putRecord(x.stateC, survivor)
 	if !slices.Equal(source.commit.txBytes, wantCommit) || !slices.Equal(source.commit.member.inputs, wantCommitInputs) {
 		t.Fatal("canonical survivor aliases source mutable containers")
 	}
@@ -814,8 +817,8 @@ func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
 		}
 	}
 
-	fresh := x.requirePair().retained.sets[x.stateC]
-	live := x.retained.sets[x.stateC]
+	fresh := x.requirePair().retained.relations.recordValue(x.stateC)
+	live := x.retained.relations.recordValue(x.stateC)
 	live.commit.txBytes[0] ^= 1
 	live.commit.member.inputs[0].Vout++
 	for i := range wantChunks {
@@ -824,7 +827,7 @@ func TestDAStateCIntrinsicCanonicalSurvivor(t *testing.T) {
 		liveChunk.member.inputs[0].Vout++
 		live.chunks[uint16(i)] = liveChunk
 	}
-	x.retained.sets[x.stateC] = live
+	x.retained.relations.putRecord(x.stateC, live)
 	if !slices.Equal(fresh.commit.txBytes, wantCommit) || !slices.Equal(fresh.commit.member.inputs, wantCommitInputs) {
 		t.Fatal("canonical source aliases survivor mutable containers")
 	}
@@ -914,7 +917,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 	})
 	t.Run("S14 the member walk itself refuses a memberless chunk slot instead of dereferencing it", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
-		record := x.retained.sets[x.stateA].cloneOwnerReady()
+		record := x.retained.relations.recordValue(x.stateA).cloneOwnerReady()
 		corruptDAChunk(&record, 1, func(c *daRelayChunk) { c.member = nil })
 		_, err := canonicalDARetainedMemberIdentities(record)
 		var terminal *canonicalDATerminalError
@@ -924,9 +927,9 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 	})
 	t.Run("S8b the D1 closure itself refuses a record stored under another da_id", func(t *testing.T) {
 		x := newCanonicalDAOwnerFixture(t)
-		record := x.retained.sets[x.stateA]
-		delete(x.retained.sets, x.stateA)
-		x.retained.sets[daRelayTestID(0x05)] = record
+		record := x.retained.relations.recordValue(x.stateA)
+		x.retained.relations.removeRecord(x.stateA)
+		x.retained.relations.putRecord(daRelayTestID(0x05), record)
 		err := canonicalDARetainedImageClosed(x.retained, x.retained.sortedRetainedDAIDsLocked())
 		var terminal *canonicalDATerminalError
 		if !errors.As(err, &terminal) || !strings.Contains(err.Error(), "carries da_id") {
@@ -957,9 +960,9 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			x.corruptChunk(x.stateA, 0, func(c *daRelayChunk) { c.hashChecked = true })
 		}},
 		{"S8 a record stored under another da_id", "is not owner-ready", func(x *canonicalDAOwnerFixture) {
-			record := x.retained.sets[x.stateA]
-			delete(x.retained.sets, x.stateA)
-			x.retained.sets[daRelayTestID(0x05)] = record
+			record := x.retained.relations.recordValue(x.stateA)
+			x.retained.relations.removeRecord(x.stateA)
+			x.retained.relations.putRecord(daRelayTestID(0x05), record)
 		}},
 		{"S13 a record retaining no member at all", "retains no member", func(x *canonicalDAOwnerFixture) {
 			x.corrupt(x.stateA, func(r *daRelaySetRecord) { r.chunks = map[uint16]daRelayChunk{} })
@@ -1052,31 +1055,31 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			})
 		}},
 		{"P13 a chunk retaining a payload its own bytes do not carry", "retains a payload its bytes do not carry", func(x *canonicalDAOwnerFixture) {
-			other := x.f.signed(daNonReplayTxSpec{kind: 0x02, daID: x.stateA, chunkIndex: 0, payload: []byte("another payload!!!"), literalChunkHash: true, chunkHash: x.retained.sets[x.stateA].chunks[0].chunkHash})
+			other := x.f.signed(daNonReplayTxSpec{kind: 0x02, daID: x.stateA, chunkIndex: 0, payload: []byte("another payload!!!"), literalChunkHash: true, chunkHash: x.retained.relations.recordValue(x.stateA).chunks[0].chunkHash})
 			x.corruptChunk(x.stateA, 0, func(c *daRelayChunk) {
 				c.txBytes, c.member.txid, c.member.wtxid, c.member.inputs = slices.Clone(other.raw), other.txid, other.wtxid, slices.Clone(other.inputs)
 			})
-			x.retained.locators[other.txid] = x.retained.locators[x.txs["a0"].txid]
-			delete(x.retained.locators, x.txs["a0"].txid)
+			x.retained.relations.putLocator(other.txid, x.retained.relations.locatorValue(x.txs["a0"].txid))
+			x.retained.relations.removeLocator(x.txs["a0"].txid)
 			x.corruptClaim(x.tokenOf("a0"), func(c *pendingOutpointClaim) { c.txid, c.inputs = other.txid, slices.Clone(other.inputs) })
 		}},
-		{"L1 a retained member with no locator row", "is not the sole locator of txid", func(x *canonicalDAOwnerFixture) { delete(x.retained.locators, x.txs["a0"].txid) }},
+		{"L1 a retained member with no locator row", "is not the sole locator of txid", func(x *canonicalDAOwnerFixture) { x.retained.relations.removeLocator(x.txs["a0"].txid) }},
 		{"L2 a locator row naming another slot", "is not the sole locator of txid", func(x *canonicalDAOwnerFixture) {
-			x.retained.locators[x.txs["a0"].txid] = daRelayLocator{daID: x.stateA, kind: daRelayLocatorChunk, chunkIndex: 9}
+			x.retained.relations.putLocator(x.txs["a0"].txid, daRelayLocator{daID: x.stateA, kind: daRelayLocatorChunk, chunkIndex: 9})
 		}},
 		{"L3 a locator row no retained member implies", "locator index holds 5 rows against 4 retained members", func(x *canonicalDAOwnerFixture) {
-			x.retained.locators[daRelayTestID(0xfe)] = daRelayLocator{daID: daRelayTestID(0xfd), kind: daRelayLocatorCommit}
+			x.retained.relations.putLocator(daRelayTestID(0xfe), daRelayLocator{daID: daRelayTestID(0xfd), kind: daRelayLocatorCommit})
 		}},
-		{"L4 no locator index at all", "carries no locator index", func(x *canonicalDAOwnerFixture) { x.retained.locators = nil }},
+		{"L4 no locator index at all", "carries no locator index", func(x *canonicalDAOwnerFixture) { x.retained.relations.locators = nil }},
 		{"L5 no record map at all, on the empty snapshot that would otherwise pair", "carries no record map", func(x *canonicalDAOwnerFixture) {
 			x.emptyRetained()
-			x.pending.claims, x.retained.sets = nil, nil
+			x.pending.claims, x.retained.relations.sets = nil, nil
 		}},
-		{"L6 a nil record map is refused before the walk, not as a locator-count mismatch", "carries no record map", func(x *canonicalDAOwnerFixture) { x.retained.sets = nil }},
+		{"L6 a nil record map is refused before the walk, not as a locator-count mismatch", "carries no record map", func(x *canonicalDAOwnerFixture) { x.retained.relations.sets = nil }},
 		{"L7 both the record map and the locator index nil returns the record-map defect, pinning H1 structure-over-locator precedence for combined map corruption", "carries no record map", func(x *canonicalDAOwnerFixture) {
 			x.emptyRetained()
 			x.pending.claims = nil
-			x.retained.sets, x.retained.locators = nil, nil
+			x.retained.relations = daRelayRelations{}
 		}},
 		{"AC1 global orphan bytes", "orphan pool bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanBytes++ }},
 		{"AC2 commit overhead bytes", "orphan commit overhead bytes", func(x *canonicalDAOwnerFixture) { x.retained.orphanCommitOverheadBytes++ }},
@@ -1164,7 +1167,7 @@ func TestCanonicalDAOwnerCandidatesAreTerminalByPhase(t *testing.T) {
 			x.corrupt(x.stateB, func(r *daRelaySetRecord) { r.state = daRelayStateCompleteSet })
 		}},
 		{"Q2 a later parse defect outranks an earlier locator defect", "has trailing bytes", "sole locator", func(x *canonicalDAOwnerFixture) {
-			delete(x.retained.locators, x.txs["a0"].txid)
+			x.retained.relations.removeLocator(x.txs["a0"].txid)
 			x.corrupt(x.stateB, func(r *daRelaySetRecord) { r.commit.txBytes = append(r.commit.txBytes, 0x00) })
 		}},
 		{"Q3 an accounting defect outranks an earlier fee defect", "orphan pool bytes", "stores fee", func(x *canonicalDAOwnerFixture) {
@@ -1265,9 +1268,9 @@ func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
 		indexBefore := clonePendingOutpointClaims(candidates.ownerIndex.byToken)
 		// In place, through the input's own live containers: a D1 that shared the
 		// record's chunk map or payload backing would move with it.
-		x.retained.sets[x.stateA].chunks[0].payload[0] ^= 1
-		delete(x.retained.sets[x.stateA].chunks, 1)
-		delete(x.retained.locators, x.txs["a0"].txid)
+		x.retained.relations.recordValue(x.stateA).chunks[0].payload[0] ^= 1
+		delete(x.retained.relations.recordValue(x.stateA).chunks, 1)
+		x.retained.relations.removeLocator(x.txs["a0"].txid)
 		x.retained.orphanBytes++
 		x.retained.stagedBytes++
 		x.pending.claims[0].inputs[0].Vout ^= 1
@@ -1287,9 +1290,9 @@ func TestCanonicalDAOwnerCandidatesPreserveSurvivorsAndInputs(t *testing.T) {
 		pendingBefore := clonePendingOutpointSnapshot(candidates.pending)
 		indexBefore := clonePendingOutpointClaims(candidates.ownerIndex.byToken)
 		// N1 record and payload, N2 locators, N4 claims and their inputs, N5 index rows.
-		candidates.retained.sets[x.stateA].chunks[0].payload[0] ^= 1
-		delete(candidates.retained.sets[x.stateA].chunks, 1)
-		delete(candidates.retained.locators, x.txs["a0"].txid)
+		candidates.retained.relations.recordValue(x.stateA).chunks[0].payload[0] ^= 1
+		delete(candidates.retained.relations.recordValue(x.stateA).chunks, 1)
+		candidates.retained.relations.removeLocator(x.txs["a0"].txid)
 		candidates.retained.orphanBytesByPeerQuotaKey["peer-a"] = 0
 		candidates.retained.stagedBytes++
 		candidates.pending.claims[0].inputs[0].Vout ^= 1
@@ -1385,11 +1388,11 @@ func TestCanonicalDAOwnerCandidatesCloseTheClaimBijection(t *testing.T) {
 			x.corruptClaim(x.tokenOf("a0"), func(c *pendingOutpointClaim) { c.finalized = false })
 		}},
 		{"H4 two members sharing one token", "shares its token with an earlier retained member", func(x *canonicalDAOwnerFixture) {
-			shared := x.retained.sets[x.stateA].chunks[0].member.token
+			shared := x.retained.relations.recordValue(x.stateA).chunks[0].member.token
 			x.corruptChunk(x.stateA, 1, func(c *daRelayChunk) { c.member.token = shared })
 		}},
 		{"H4d a member of another record carrying this chunk's token", "shares its token with an earlier retained member", func(x *canonicalDAOwnerFixture) {
-			shared := x.retained.sets[x.stateA].chunks[0].member.token
+			shared := x.retained.relations.recordValue(x.stateA).chunks[0].member.token
 			x.corruptChunk(x.stateB, 0, func(c *daRelayChunk) { c.member.token = shared })
 		}},
 	} {

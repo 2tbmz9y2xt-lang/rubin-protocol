@@ -109,8 +109,7 @@ func daObserverSyntheticImage() (*DARelayState, DAObserverStateImage) {
 		mempool: &Mempool{pendingOutpoints: o}, nextReceivedTime: 101, stagedBytes: 102, completeBytes: 103, completeCount: 104,
 		orphanBytes: 105, orphanCommitOverheadBytes: 106, pinnedPayloadBytes: 107, records: 108,
 		orphanBytesByPeerQuotaKey: map[string]uint64{"k2": 112, "k1": 111}, orphanBytesByDAID: map[[32]byte]uint64{id(0x52): 114, id(0x51): 113},
-		locators: map[[32]byte]daRelayLocator{id(0x81): {id(0x61), daRelayLocatorCommit, 0}, id(0x82): {id(0x61), daRelayLocatorChunk, 5}, id(0x83): {id(0x60), 7, 9}},
-		sets: map[[32]byte]daRelaySetRecord{
+		relations: daRelayRelationsForTest(map[[32]byte]daRelaySetRecord{
 			id(0x5E): {daID: id(0x5E)}, id(0x5F): {daID: id(0x5F), state: daRelayStateStagedCommit}, id(0x60): {daID: id(0x60), state: 9},
 			id(0x61): {
 				daID: id(0x61), state: daRelayStateCompleteSet, revision: 121, receivedTime: 122, payloadBytes: 123, wireBytes: 124, ttlBlocksRemaining: 125,
@@ -122,7 +121,7 @@ func daObserverSyntheticImage() (*DARelayState, DAObserverStateImage) {
 				},
 				replaceableChunks: map[uint16]bool{7: true, 3: false},
 			},
-		},
+		}, map[[32]byte]daRelayLocator{id(0x81): {id(0x61), daRelayLocatorCommit, 0}, id(0x82): {id(0x61), daRelayLocatorChunk, 5}, id(0x83): {id(0x60), 7, 9}}),
 	}
 	return s, DAObserverStateImage{
 		Records: []DAObserverRecord{{DAID: id(0x5E), State: "ORPHAN_CHUNKS"}, {DAID: id(0x5F), State: "STAGED_COMMIT"}, {DAID: id(0x60), State: "INVALID"}, {
@@ -196,8 +195,8 @@ func TestDAObserverConformanceStateImage(t *testing.T) {
 	}
 
 	for name, relay := range map[string]*DARelayState{
-		"nil relay": nil, "nil mempool": {sets: s.sets, locators: s.locators}, "nil owner": {mempool: &Mempool{}, sets: s.sets, locators: s.locators},
-		"nil sets": {mempool: f.mp, locators: s.locators}, "nil locators": {mempool: f.mp, sets: s.sets},
+		"nil relay": nil, "nil mempool": {relations: s.relations}, "nil owner": {mempool: &Mempool{}, relations: s.relations},
+		"nil sets": {mempool: f.mp, relations: daRelayRelations{locators: s.relations.locators}}, "nil locators": {mempool: f.mp, relations: daRelayRelations{sets: s.relations.sets}},
 	} {
 		if got, err := DAObserverReadStateImage(relay); err == nil || !reflect.DeepEqual(got, DAObserverStateImage{}) {
 			t.Fatalf("%s: image=%+v err=%v", name, got, err)
@@ -342,5 +341,69 @@ func TestDAObserverConformanceConcurrentAndReentrant(t *testing.T) {
 	}
 	if len(seen) != admissions || slices.ContainsFunc(slices.Collect(maps.Values(seen)), func(n int) bool { return n != 1 }) {
 		t.Fatalf("observations=%v, want each of %d admissions exactly once", seen, admissions)
+	}
+}
+
+func TestDAObserverRelationPublication(t *testing.T) {
+	t.Run("prepared_capacity_is_absent", func(t *testing.T) {
+		f, a, c := daCompleteTestCandidate(t, false, 0, 0)
+		p, _ := daCompleteCommitTestPlan(t, f, a, c)
+		f.relay.mu.Lock()
+		before := f.relay.daObserverRelayImageLocked()
+		if err := p.prepareEffects(f.relay, a); err != nil {
+			f.relay.mu.Unlock()
+			t.Fatal(err)
+		}
+		if err := f.relay.preflightDACompleteCommit(p); err != nil {
+			f.relay.mu.Unlock()
+			t.Fatal(err)
+		}
+		prepared := f.relay.daObserverRelayImageLocked()
+		f.relay.discardDACompleteProvisional(p)
+		restored := f.relay.daObserverRelayImageLocked()
+		f.relay.mu.Unlock()
+		if !reflect.DeepEqual(before, prepared) || !reflect.DeepEqual(before, restored) {
+			t.Fatal("prepared capacity appeared in tagged logical image")
+		}
+	})
+	for _, fault := range []DAObserverRetainedFault{DAObserverFaultAdmissionWTxIDMismatch, DAObserverFaultRetainedRawMalformed} {
+		for _, state := range []uint8{0, 1, 2} {
+			f, txs := compactDAFixture(t, state)
+			for _, target := range txs {
+				original := daRelayStateSnapshot(f.relay)
+				before, err := DAObserverReadStateImage(f.relay)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := DAObserverInjectRetainedFault(f.relay, target.txid, fault); err != nil {
+					t.Fatal(err)
+				}
+				after, err := DAObserverReadStateImage(f.relay)
+				if err != nil || reflect.DeepEqual(before, after) {
+					t.Fatal("tagged injector failed to publish changed retained view", err)
+				}
+				if _, _, err := f.relay.LookupRetainedTx(target.txid); err != errDARelayImageIncompatible { //nolint:errorlint // Existing exact sentinel remains the observation contract.
+					t.Fatal("legacy lookup accepted injected canonical fault", err)
+				}
+				f.relay.mu.Lock()
+				locator := f.relay.relations.locatorValue(target.txid)
+				member := f.relay.relations.member(locator)
+				if !f.relay.relations.memberBound(member) {
+					f.relay.mu.Unlock()
+					t.Fatal("injector changed a borrowed view without typed publication")
+				}
+				id := CompactCandidateIdentity{TxID: member.txid, WTxID: member.wtxid}
+				f.relay.mu.Unlock()
+				requireCompactDAPreservedRead(t, f, id, ^uint64(0), 3, nil)
+				f.mutateRelay(func(s *DARelayState) { s.relations = daRelayRelationsForTest(original.sets, original.locators) })
+				restored, err := DAObserverReadStateImage(f.relay)
+				if err != nil || !reflect.DeepEqual(before, restored) {
+					t.Fatal("tagged publication restore changed image", err)
+				}
+				for _, sibling := range txs {
+					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
+				}
+			}
+		}
 	}
 }
