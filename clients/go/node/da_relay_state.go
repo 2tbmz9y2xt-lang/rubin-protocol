@@ -455,13 +455,17 @@ func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
 		}
 	}
 	for _, row := range p.newRecords {
-		r.sets[row.key] = row
-		if row.present {
-			r.setCount++
-			for _, member := range row.members {
-				for i := range member.links {
-					member.links[i].attach()
-				}
+		r.publishRecord(row)
+	}
+}
+
+func (r *daRelayRelations) publishRecord(row *daRelayRecordRow) {
+	r.sets[row.key] = row
+	if row.present {
+		r.setCount++
+		for _, member := range row.members {
+			for i := range member.links {
+				member.links[i].attach()
 			}
 		}
 	}
@@ -702,10 +706,10 @@ type DARelayState struct {
 	completeBytes             uint64
 	completeCount             uint64
 	orphanBytes               uint64
-	orphanBytesByPeerQuotaKey  map[string]uint64
-	orphanBytesByDAID          map[[32]byte]uint64
-	orphanCommitOverheadBytes  uint64
-	pinnedPayloadBytes         uint64
+	orphanBytesByPeerQuotaKey map[string]uint64
+	orphanBytesByDAID         map[[32]byte]uint64
+	orphanCommitOverheadBytes uint64
+	pinnedPayloadBytes        uint64
 	relations                 daRelayRelations
 	// records is the process-local high-water of all issued revisions, including
 	// deleted records. Single-use placement under one uninterrupted lock preserves it.

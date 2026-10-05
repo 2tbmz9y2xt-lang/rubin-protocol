@@ -384,7 +384,7 @@ func (s *DARelayState) CompactDAIdentities(expected *Mempool) ([]CompactCandidat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	type binding struct {
-		pool                            *Mempool
+		pool                             *Mempool
 		setsAvailable, locatorsAvailable bool
 	}
 	if expected == nil || (binding{expected, s.relations.sets != nil, s.relations.locators != nil}) != (binding{s.mempool, true, true}) {

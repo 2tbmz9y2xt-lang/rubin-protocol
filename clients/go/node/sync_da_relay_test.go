@@ -694,7 +694,7 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 		if _, ok := relay.relations.record(racing); !ok {
 			t.Fatalf("racing writer %d never landed after the guard was released", i)
 		}
-		if _, ok := prepared.relations.record(racing); ok {
+		if _, ok := prepared.sets[racing]; ok {
 			t.Fatalf("racing writer %d landed inside the prepared image", i)
 		}
 	}

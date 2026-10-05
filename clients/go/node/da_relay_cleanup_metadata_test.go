@@ -58,7 +58,10 @@ func TestDACleanupIntrinsicMetadata(t *testing.T) {
 					t.Fatalf("cleanup accepted inconsistent C metadata: err=%v, want %v", err, errDARelayImageIncompatible)
 				}
 				requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, ownerBefore)
-				f.mutateRelay(func(s *DARelayState) { s.relations.putRecord(id, clean.sets[id]); s.pinnedPayloadBytes = clean.pinnedPayloadBytes })
+				f.mutateRelay(func(s *DARelayState) {
+					s.relations.putRecord(id, clean.sets[id])
+					s.pinnedPayloadBytes = clean.pinnedPayloadBytes
+				})
 				if err := selector.run(f.relay); err != nil {
 					t.Fatalf("State C cleanup ceased to be a successful no-op: corrected cleanup: %v", err)
 				}

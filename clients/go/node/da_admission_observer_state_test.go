@@ -1116,7 +1116,7 @@ func applyDANodeObserverStatePlannedControl(f *daNodeObserverStateFixture, contr
 			current, ok := relay.relations.locator(member.TxID)
 			return ok && current == corrupt
 		},
-			func() { relay.relations.putLocator(member.TxID, locator)}), nil
+			func() { relay.relations.putLocator(member.TxID, locator) }), nil
 	case "INCREMENT_RESIDENT_INTRINSIC_TOTAL_BYTES":
 		old := record.completeIntrinsic.totalBytes
 		record.completeIntrinsic.totalBytes += control.delta
