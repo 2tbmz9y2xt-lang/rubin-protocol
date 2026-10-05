@@ -358,15 +358,15 @@ func TestDAPreparedCommitStructure(t *testing.T) {
 
 func requireDAAdmissionStructure(t *testing.T) {
 	for path, want := range map[string]string{
-		"da_relay_state.go": "dce84bda475d4b0a09d9ab60d531900c5967c90ed5b506e7eaf0e15e6a054e38",
-		"da_relay_record.go": "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
-		"da_relay_mutation.go": "ec140c17b2c9d1c6aaf59aeb2bf14d7881fc27d6bfcb650e05733b3ec7c45644",
-		"da_complete_commit.go": "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
-		"da_complete_snapshot.go": "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
-		"sync_da_relay.go": "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
-		"sync_da_relay_validate.go": "6a2c6d3a303b232ab11fa7bf3aa86a05629fce1c0968f6fa5e8d5414f43b1365",
+		"da_relay_state.go":          "4dc57e3ae7ba5d0d6f89cff9414bc3758f7df9046871534c609077eed6b0f857",
+		"da_relay_record.go":         "2706ab0b65ee400056f6d29e6807d509e937d8d778de5aae5ee36d2a05c8eb11",
+		"da_relay_mutation.go":       "ec140c17b2c9d1c6aaf59aeb2bf14d7881fc27d6bfcb650e05733b3ec7c45644",
+		"da_complete_commit.go":      "3fb456f5668dff7bc089b0472ccc61c2c263d5c7d3917cd512a20182e45709f5",
+		"da_complete_snapshot.go":    "e1592f7f08d04c2423184a54ed404a86fdaab1057a725fa8acffc7a37f1eb1cc",
+		"sync_da_relay.go":           "54d3cbb55e38cf420724a0da2e353ee240acad3e5a60e191491eb862d04bca8a",
+		"sync_da_relay_validate.go":  "6a2c6d3a303b232ab11fa7bf3aa86a05629fce1c0968f6fa5e8d5414f43b1365",
 		"da_observer_conformance.go": "e9a91c8857467de557bd0ad7739576ac42a5310af82613eb0e69450b59a1c9a5",
-		"da_relay_owner.go": "a91ac0e5b365c7aec33d78017d8b4afa8370ff85b342054994625d50a81554ee",
+		"da_relay_owner.go":          "a91ac0e5b365c7aec33d78017d8b4afa8370ff85b342054994625d50a81554ee",
 	} {
 		source, err := os.ReadFile(path)
 		if err != nil || fmt.Sprintf("%x", sha256.Sum256(source)) != want {
@@ -2176,7 +2176,10 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		f := newDANonReplayFixture(t, 1)
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x35}, payload: []byte("cap")})
 		p := f.planned(tx, daNonReplayPeer("cap"))
-		f.mutateRelay(func(r *DARelayState) { r.caps.orphanPoolBytes = 1; r.relations.putLocator(tx.txid, p.candidate.member.locator) })
+		f.mutateRelay(func(r *DARelayState) {
+			r.caps.orphanPoolBytes = 1
+			r.relations.putLocator(tx.txid, p.candidate.member.locator)
+		})
 		requireDANonReplayPlanResult(t, f, p, daRelayAdmissionOutcome{daID: tx.spec.daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
 	})
 	t.Run("stale beats carried completion", func(t *testing.T) {
@@ -2259,7 +2262,10 @@ func TestAdmitDANonReplayFinalRecheckOrder(t *testing.T) {
 		f.admit(f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, payload: []byte("seed")}), daNonReplayPeer("seed"))
 		tx := f.signed(daNonReplayTxSpec{kind: 0x02, daID: daID, chunkIndex: 1, payload: []byte("duplicate")})
 		p := f.planned(tx, daNonReplayPeer("duplicate"))
-		f.mutateRelay(func(r *DARelayState) { r.nextReceivedTime = 0; r.relations.putLocator(tx.txid, p.candidate.member.locator) })
+		f.mutateRelay(func(r *DARelayState) {
+			r.nextReceivedTime = 0
+			r.relations.putLocator(tx.txid, p.candidate.member.locator)
+		})
 		requireDANonReplayPlanResult(t, f, p, daRelayAdmissionOutcome{daID: daID, disposition: daRelayAdmissionDisposition(2)}, nil, "")
 	})
 	t.Run("stale beats carried stage error", func(t *testing.T) {
@@ -4842,7 +4848,9 @@ func TestRemoteD00InternalObservationCorrespondence(t *testing.T) {
 	source, err := os.ReadFile("da_relay_owner_test.go")
 	require(t, err == nil, "read carrier source: %v", err)
 	producer := map[RelayAdmissionDisposition]string{RelayAdmissionUnavailable: "UNAVAILABLE", RelayAdmissionInternal: "INTERNAL"}
-	relayMaps := func(f *daNonReplayFixture, _ daNonReplayTx) { f.mutateRelay(func(s *DARelayState) { s.relations.sets = nil }) }
+	relayMaps := func(f *daNonReplayFixture, _ daNonReplayTx) {
+		f.mutateRelay(func(s *DARelayState) { s.relations.sets = nil })
+	}
 	chunk := func(edit func(*daRelayChunk)) func(*daNonReplayFixture, daNonReplayTx) {
 		return func(f *daNonReplayFixture, tx daNonReplayTx) {
 			f.mutateRelay(func(s *DARelayState) {
@@ -5322,8 +5330,12 @@ func TestOwnerReadyRemovalPeerAndTTLSelectors(t *testing.T) {
 			record.state = daRelayStateCompleteSet + 1 // outside the two owner-ready states, and not State C
 			s.relations.putRecord(daID, record)
 		}},
-		{"member provenance", func(s *DARelayState, daID [32]byte) { s.relations.recordValue(daID).chunks[0].member.provenance = DAProvenance{} }},
-		{"member identity", func(s *DARelayState, daID [32]byte) { s.relations.recordValue(daID).chunks[0].member.wtxid = [32]byte{} }},
+		{"member provenance", func(s *DARelayState, daID [32]byte) {
+			s.relations.recordValue(daID).chunks[0].member.provenance = DAProvenance{}
+		}},
+		{"member identity", func(s *DARelayState, daID [32]byte) {
+			s.relations.recordValue(daID).chunks[0].member.wtxid = [32]byte{}
+		}},
 	} {
 		for _, selector := range ownerReadyRemovalSelectors {
 			t.Run("a malformed unselected "+row.name+" is terminal before selection on the "+selector.name, func(t *testing.T) {
@@ -5503,7 +5515,9 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		{"pinned payload", "pinned payload bytes", func(s *DARelayState, _ [32]byte) { s.pinnedPayloadBytes++ }},
 		{"C per-da_id charge", "per-da_id orphan bytes for", func(s *DARelayState, id [32]byte) { s.orphanBytesByDAID[id] = 1 }},
 		{"C peer charge", "per-peer orphan bytes", func(s *DARelayState, _ [32]byte) { s.orphanBytesByPeerQuotaKey["ghost"] = 1 }},
-		{"missing locator", "is not the sole locator", func(s *DARelayState, id [32]byte) { s.relations.removeLocator(s.relations.recordValue(id).commit.member.txid) }},
+		{"missing locator", "is not the sole locator", func(s *DARelayState, id [32]byte) {
+			s.relations.removeLocator(s.relations.recordValue(id).commit.member.txid)
+		}},
 		{"extra locator", "locator index holds", func(s *DARelayState, _ [32]byte) {
 			s.relations.putLocator([32]byte{0xee}, daRelayLocator{daID: [32]byte{0xef}, kind: daRelayLocatorCommit})
 		}},
@@ -5748,7 +5762,9 @@ func TestOwnerReadyRemovalPreservesCompleteSets(t *testing.T) {
 		f.ownerReadyChunk(aID, 0, "keep", LocalDAProvenance())
 		f.completeReplayPinned(cID)
 		if defect == "token" {
-			f.mutateRelay(func(s *DARelayState) { s.relations.recordValue(cID).chunks[0].member.token = s.relations.recordValue(aID).chunks[0].member.token })
+			f.mutateRelay(func(s *DARelayState) {
+				s.relations.recordValue(cID).chunks[0].member.token = s.relations.recordValue(aID).chunks[0].member.token
+			})
 		} else {
 			aInput, cMember := daRelayStateSnapshot(f.relay).sets[aID].chunks[0].member.inputs[0], daRelayStateSnapshot(f.relay).sets[cID].chunks[0].member
 			ownerReadyEditOwner(f, func(o *PendingOutpointOwner) {
@@ -6369,9 +6385,9 @@ func TestOwnerReadyRemovalFailurePreservesWholeImage(t *testing.T) {
 			f.ownerReadyChunk(accounted, 0, "acct", daNonReplayPeer("keep"))
 			indexedTx := f.ownerReadyChunk(indexed, 0, "loc", daNonReplayPeer("keep"))
 			f.mutateRelay(func(s *DARelayState) {
-				delete(s.orphanBytesByDAID, accounted) // lower da_id: accounting defect
-				row := s.relations.locatorValue(indexedTx.txid)      // higher da_id: locator defect
-				row.chunkIndex++                       // still one row, no longer the one the record implies
+				delete(s.orphanBytesByDAID, accounted)          // lower da_id: accounting defect
+				row := s.relations.locatorValue(indexedTx.txid) // higher da_id: locator defect
+				row.chunkIndex++                                // still one row, no longer the one the record implies
 				s.relations.putLocator(indexedTx.txid, row)
 			})
 			requireOwnerReadyTerminal(t, f, selector.run, fmt.Sprintf("per-da_id orphan bytes for %x", accounted),
@@ -7392,7 +7408,9 @@ func TestAdmitDAZeroInputOrderAndEffects(t *testing.T) {
 	}{
 		{"wrong own-chunk hash", nil, hashMismatch, false},
 		{"wrong own-chunk hash, no seeded row", nil, hashMismatch, true},
-		{"unavailable owner", func(f *daNonReplayFixture, _ daNonReplayTx) { f.mutateRelay(func(s *DARelayState) { s.relations.sets = nil }) }, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
+		{"unavailable owner", func(f *daNonReplayFixture, _ daNonReplayTx) {
+			f.mutateRelay(func(s *DARelayState) { s.relations.sets = nil })
+		}, func(t *testing.T, _ *daNonReplayFixture, got DAAdmissionResult, err error) {
 			requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "DA relay owner maps unavailable", RelayAdmissionUnavailable)
 		}, false},
 		{"terminal guard", func(f *daNonReplayFixture, _ daNonReplayTx) {
@@ -7583,7 +7601,9 @@ func TestLookupRetainedTxIsTriStateAndNeverReportsAbsenceForCorruption(t *testin
 		set     int // 0 State A chunk, 1 State B chunk, 2 State C chunk
 		corrupt corruption
 	}{
-		{"R1 dangling locator", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) { s.relations.removeRecord(tx.spec.daID) }},
+		{"R1 dangling locator", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
+			s.relations.removeRecord(tx.spec.daID)
+		}},
 		{"R1 locator member mismatch", 0, chunkEdit(func(_ *daRelaySetRecord, c *daRelayChunk) { c.chunkIndex++ })},
 		{"R1 invalid locator kind", 0, func(_ *daNonReplayFixture, s *DARelayState, tx *daNonReplayTx) {
 			l := s.relations.locatorValue(tx.txid)

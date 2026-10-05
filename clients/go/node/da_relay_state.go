@@ -268,8 +268,8 @@ type daRelayRelations struct {
 type daRelayRelationPublication struct {
 	oldRecords, newRecords   []*daRelayRecordRow
 	oldLocators, newLocators []*daRelayLocatorRow
-	keys                    []daRelayRelationKey
-	locatorIndexes          map[[32]byte]int
+	keys                     []daRelayRelationKey
+	locatorIndexes           map[[32]byte]int
 }
 
 func newDARelayRelations() daRelayRelations {
