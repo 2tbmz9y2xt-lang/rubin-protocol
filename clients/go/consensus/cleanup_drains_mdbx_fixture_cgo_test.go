@@ -435,7 +435,9 @@ func detachedAuthorityRejection(t *testing.T, name string) {
 			}
 			if denied {
 				original := invoke
-				invoke = func() { logicalMDBXAssert(t, w.owner.WithReservation(1, func() error { original(); return nil }) == nil, "hold denied lane") }
+				invoke = func() {
+					logicalMDBXAssert(t, w.owner.WithReservation(1, func() error { original(); return nil }) == nil, "hold denied lane")
+				}
 			}
 			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, invoke)
 			sideWantOutcome(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, name)

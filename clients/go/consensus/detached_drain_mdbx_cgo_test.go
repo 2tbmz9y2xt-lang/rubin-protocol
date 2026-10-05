@@ -25,7 +25,7 @@ func detachedFixture(t *testing.T, count int) (mdbx.StorageAuthorityV1, []mdbx.M
 		body := sideWorldBlock(parent, uint64(100+i))
 		logicalMDBXAssert(t, len(body) == 266, "published fixture body width: %d", len(body))
 		hash := sha3_256(body[:116])
-		entries[count-1-i] = mdbx.DetachedSuffixEntryV1{Height: uint64(10+i), Hash: hash, BlockBytesLen: 266}
+		entries[count-1-i] = mdbx.DetachedSuffixEntryV1{Height: uint64(10 + i), Hash: hash, BlockBytesLen: 266}
 		rows = append(rows, generationRow(3, bytes.Clone(hash[:]), bytes.Clone(body[:116])), generationRow(4, bytes.Clone(hash[:]), body))
 		parent = hash
 	}

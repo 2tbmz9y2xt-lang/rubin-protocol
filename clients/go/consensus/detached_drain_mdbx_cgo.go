@@ -60,6 +60,7 @@ func (p *detachedDrainPlan) project(out selectedSideOutcome) selectedSideOutcome
 		return out
 	case mdbx.UpdateStagePrewrite:
 		return p.prewrite(out)
+	case mdbx.UpdateStageInvalid, mdbx.UpdateStageWriteStartedDefinitelyPrecommit:
 	}
 	out.CanonicalTruth = "OLD"
 	classification := &selectedSideDamagePlan{healthy: p.noWork, denied: p.denied, step: p.step}
@@ -73,13 +74,8 @@ func (p *detachedDrainPlan) project(out selectedSideOutcome) selectedSideOutcome
 
 func (p *detachedDrainPlan) prewrite(out selectedSideOutcome) selectedSideOutcome {
 	out.CanonicalTruth = "OLD"
-	if out.Truth == mdbx.CommitTruthOld && out.Err == p.noWork {
-		out.Err = nil
-		return out
-	}
 	classification := &selectedSideDamagePlan{healthy: p.noWork, denied: p.denied, step: p.step}
-	out.Result = selectedSideResult(out.Err, classification)
-	return out
+	return selectedSideDamageProject(out, classification)
 }
 
 func (p *detachedDrainPlan) batch(r *mdbx.Reader) (mdbx.Batch, error) {
