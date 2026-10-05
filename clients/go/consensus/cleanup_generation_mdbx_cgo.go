@@ -13,7 +13,6 @@ import (
 )
 
 // CleanupGenerationMDBX drains one finite page of the first GENERATION span.
-// It is dormant; the full-lane grant encloses its sole Update and native cleanup.
 func CleanupGenerationMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner, firstClass mdbx.ObsoleteClassV1, maxRows uint32) SelectedSideDamageOutcome {
 	out := selectedSideOutcome{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if store == nil {
@@ -60,7 +59,6 @@ func (p *cleanupGenerationPlan) project(out selectedSideOutcome) selectedSideOut
 	return archiveSelectedSideProject(out, p.step, p.noWork, nil)
 }
 
-// cleanupDrainAuthority qualifies promises even for a no-work routing branch.
 func cleanupDrainAuthority(r *mdbx.Reader) (mdbx.StorageAuthorityV1, error) {
 	a, err := r.ReadStorageAuthorityV1()
 	if err != nil {
@@ -193,8 +191,6 @@ func (p *cleanupGenerationPlan) dispose(r *mdbx.Reader, a mdbx.StorageAuthorityV
 	default:
 		var charged uint64
 		for _, row := range page.Rows {
-			// Raw values need no copy or decode. A maximum-width UTXO ends
-			// this finite work page; even an over-bound malformed first row progresses.
 			if charged != 0 && row.Length() > 65560-min(charged, 65560) {
 				break
 			}
@@ -205,8 +201,6 @@ func (p *cleanupGenerationPlan) dispose(r *mdbx.Reader, a mdbx.StorageAuthorityV
 	}
 }
 
-// exactRow observes one raw partner page. An extended predecessor is disposed
-// alone; the selected pair and its dependents remain for the next invocation.
 func (p *cleanupGenerationPlan) exactRow(r *mdbx.Reader, g uint64, class mdbx.ObsoleteClassV1, key []byte) (mdbx.ObsoleteRowV1, bool, error) {
 	page, err := r.ObsoleteGenerationPageV1(g, class, cleanupDrainPredecessor(key), 1)
 	if err != nil {
@@ -331,8 +325,6 @@ func (p *cleanupGenerationPlan) indexKnown(r *mdbx.Reader, a mdbx.StorageAuthori
 	}
 	p.keepImages(a, hash, owners)
 	if proof.Projection == mdbx.ObsoleteProjectionProvenV1 {
-		// Ordinary proven work has complete target/health/family evidence.
-		// Invalid projections and the detecting selected clear retain this proof.
 		p.batchImage.ObsoleteConsulted = p.batchImage.ObsoleteConsulted[:len(p.batchImage.ObsoleteConsulted)-1]
 		if err := p.dependents(r, a, index, hash, owners); err != nil {
 			return err
@@ -342,7 +334,6 @@ func (p *cleanupGenerationPlan) indexKnown(r *mdbx.Reader, a mdbx.StorageAuthori
 	return nil
 }
 
-// Only the named-header get can be required; source and raw-family pages are disposable.
 func (p *cleanupGenerationPlan) obsoleteFailure(err error, canonicalHeader bool) {
 	p.step = selectedSideBranch
 	var engine *mdbx.EngineError
@@ -530,8 +521,7 @@ func (p *cleanupGenerationPlan) undoHealth(r *mdbx.Reader, hash [32]byte, height
 	return nil
 }
 
-// This health frame holds only spent outpoints and one bounded value window;
-// it ends before any full raw-family handle allocation.
+// This spent-outpoint/window health frame ends before any full raw-family handle allocation.
 type cleanupUndoHealth struct {
 	height    uint64
 	txCount   uint32
@@ -613,9 +603,15 @@ func (p *cleanupGenerationPlan) bodyDelete(r *mdbx.Reader, hash [32]byte) error 
 func (p *cleanupGenerationPlan) undoDeletes(r *mdbx.Reader, index mdbx.ObsoleteRowV1, canonicalHeader bool) error {
 	// Exactly one full-family allocation, after body health has returned.
 	p.batchImage.ObsoleteDeletes = make([]mdbx.ObsoleteRowV1, 0, 414635)
+	const maxPages = 527
+	const _ = mdbx.MaxOperationDataBytes - 154586596
+	p.batchImage.ObsoleteConsulted = append(make([]mdbx.ObsoletePageWitnessV1, 0, maxPages+16), p.batchImage.ObsoleteConsulted...)
 	p.rawClass = 0 // Rank-5 family handles cannot exhaust any generation class.
 	var after []byte
-	for {
+	for pages := 0; ; pages++ {
+		if pages == maxPages {
+			return &selectedSideFailure{result: selectedSideCapacity, cause: errors.New("cleanup undo family exceeds admitted representation capacity")}
+		}
 		p.step = selectedSideBranch
 		page, err := r.ObsoleteUndoPageV1(index, after, 1440)
 		if err != nil {

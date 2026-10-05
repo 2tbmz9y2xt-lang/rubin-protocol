@@ -28,7 +28,7 @@ func generationRaw(t *testing.T, w *generationWorld, authority []byte, rows []md
 		logicalMDBXAssert(t, err == nil && equal, "raw image rank%d/%x: %v", row.DBI.Rank, row.Key, err)
 	}
 	if len(family) != 0 {
-		generationFamilyImage(t, reopened, [32]byte(family[0][0].Key[:32]), family[0])
+		generationFamilyImage(t, reopened, [32]byte(rows[2].Key), family[0])
 	}
 }
 
@@ -70,6 +70,37 @@ func TestCleanupGenerationMDBXNative(t *testing.T) {
 		}
 		t.Run("canonical-family", generationUndoSemantics)
 		t.Run("rank-key-collision", generationRankCollision)
+		t.Run("wide-raw-capacity", func(t *testing.T) {
+			for _, count := range []int{1054, 1055} {
+				t.Run(fmt.Sprint(count), func(t *testing.T) {
+					cfg := sideWorldConfig
+					cfg.PageSize = 65536
+					a, hash, rows := generationBaseProjection()
+					w := generationNewConfig(t, cfg, a, rows...)
+					family := []mdbx.Mutation{rows[4]}
+					for i := 0; i < count; i++ {
+						key := make([]byte, 32700)
+						copy(key, hash[:])
+						key[32] = 1
+						binary.BigEndian.PutUint32(key[33:37], uint32(i))
+						family = append(family, generationRow(5, key, []byte{0x7f}))
+						logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 5, key, []byte{0x7f}) == nil, "seed wide raw undo")
+					}
+					out := w.run(2, 1)
+					expected, want := generationTerminal(a), generationGone(rows)
+					if count == 1055 {
+						sideWantOutcome(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "OLD", 1, 1, "wide raw capacity")
+						logicalMDBXAssert(t, out.Err != nil && out.Err.Error() == "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity): cleanup undo family exceeds admitted representation capacity", "wide raw capacity error: %v", out.Err)
+						expected, want = a, rows
+					} else {
+						generationClean(t, out, 2)
+						family = nil
+					}
+					w.image(expected, want...)
+					generationRaw(t, w, generationEncoded(t, expected), want, family)
+				})
+			}
+		})
 	})
 	t.Run("X2", generationNativeFaults)
 	t.Run("X3", generationNativeReservations)
@@ -100,8 +131,7 @@ func TestCleanupGenerationMDBXNative(t *testing.T) {
 func generationAuthorityRejections(t *testing.T) {
 	for _, name := range []string{"version", "phase", "lifecycle", "pending", "H3-active", "H3-selected", "BLOCKS", "UNDO", "carried-BLOCKS", "carried-UNDO", "wide1441"} {
 		t.Run(name, func(t *testing.T) {
-			a := generationAuthority()
-			_, rows := generationProjection(2, 5, 55)
+			a, _, rows := generationBaseProjection()
 			if name == "pending" {
 				pending := mdbx.StorageProfileV1(1)
 				a.Lifecycle, a.PendingTargetProfile = 2, &pending
@@ -122,25 +152,17 @@ func generationAuthorityRejections(t *testing.T) {
 			}
 			if name == "carried-BLOCKS" || name == "carried-UNDO" {
 				a = generationRouteAuthorities()[8].a
-				// Preserve the old-tip promise U=10 with old H=1449 and a
-				// two-row captured target at 1449..1450 (F=1448).
-				a.Ordinary.OldSuffix = []mdbx.AuthorityPointV1{{Height: 1449, BlockHash: [32]byte{9}}}
-				a.Ordinary.NewSuffix[0].Height, a.Ordinary.NewSuffix[1].Height = 1449, 1450
-				a.Ordinary.Target = a.Ordinary.NewSuffix[1]
-				a.Ordinary.Cursor = &a.Ordinary.NewSuffix[0]
-				a.Ordinary.CapturedSelectedSide.F, a.Ordinary.CapturedSelectedSide.TipHeight = 1448, 1450
-				a.U = 10
-				span := mdbx.CleanupSpanV1{Kind: 3, GenerationID: 1, LastHeight: 8}
+				tip, u := uint64(1449), uint64(10)
+				kind := mdbx.CleanupSpanUndoV1
 				if name == "carried-BLOCKS" {
-					// B>0 forces U=B+13680; use the matching old tip.
-					a.B, a.U = 10, 13690
-					a.Ordinary.OldSuffix[0].Height = 15129
-					a.Ordinary.NewSuffix[0].Height, a.Ordinary.NewSuffix[1].Height = 15129, 15130
-					a.Ordinary.Target, a.Ordinary.Cursor = a.Ordinary.NewSuffix[1], &a.Ordinary.NewSuffix[0]
-					a.Ordinary.CapturedSelectedSide.F, a.Ordinary.CapturedSelectedSide.TipHeight = 15128, 15130
-					span.Kind = 2
+					a.B, tip, u, kind = 10, 15129, 13690, mdbx.CleanupSpanBlocksV1
 				}
-				a.Ordinary.CarriedCleanup.Spans = append(a.Ordinary.CarriedCleanup.Spans, span)
+				a.U = u
+				a.Ordinary.OldSuffix = []mdbx.AuthorityPointV1{{Height: tip, BlockHash: [32]byte{9}}}
+				a.Ordinary.NewSuffix[0].Height, a.Ordinary.NewSuffix[1].Height = tip, tip+1
+				a.Ordinary.Target, a.Ordinary.Cursor = a.Ordinary.NewSuffix[1], &a.Ordinary.NewSuffix[0]
+				a.Ordinary.CapturedSelectedSide.F, a.Ordinary.CapturedSelectedSide.TipHeight = tip-1, tip+1
+				a.Ordinary.CarriedCleanup.Spans = append(a.Ordinary.CarriedCleanup.Spans, mdbx.CleanupSpanV1{Kind: kind, GenerationID: 1, LastHeight: 8})
 			}
 			w := generationNew(t, a, rows...)
 			bad := generationEncoded(t, a)
@@ -189,8 +211,7 @@ func generationAuthorityRejections(t *testing.T) {
 func generationOptionalIdentity(t *testing.T, keep string) {
 	for _, variant := range []string{"absent", "width", "work", "later-IO"} {
 		t.Run(variant, func(t *testing.T) {
-			a := generationAuthority()
-			hash, rows := generationProjection(2, 5, 55)
+			a, hash, rows := generationBaseProjection()
 			a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 5, TipHeight: 7, TipHash: [32]byte{7}, CumulativeChainwork: sideWorldWork(2), RowCount: 2, LogicalBytes: 532}
 			first, _ := mdbx.HeightKey(3, 6)
 			last, _ := mdbx.HeightKey(3, 7)
@@ -284,8 +305,7 @@ func generationMalformedRows(t *testing.T) {
 func generationPairGap(t *testing.T) {
 	for _, class := range []uint8{2, 4} {
 		t.Run(fmt.Sprint(class), func(t *testing.T) {
-			a := generationAuthority()
-			_, rows := generationProjection(2, 5, 55)
+			a, _, rows := generationBaseProjection()
 			partner, rank := rows[1].Key, uint8(7)
 			for nonce := uint64(56); partner[len(partner)-1] == 0; nonce++ {
 				_, rows = generationProjection(2, 5, nonce)
@@ -415,8 +435,7 @@ func generationDamage(t *testing.T, rank uint8) {
 	}
 	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
-			a := generationAuthority()
-			hash, rows := generationProjection(2, 5, 55)
+			a, hash, rows := generationBaseProjection()
 			canonicalParent := kind == "canonical-parent" || kind == "canonical-parent-priority"
 			if kind == "canonical" || canonicalParent || kind == "defer" && rank == 5 {
 				k := uint64(11)
@@ -484,7 +503,6 @@ func generationDamage(t *testing.T, rank uint8) {
 				}
 			case "selected", "selected-parent", "selected-parent-repeat", "canonical-parent":
 				if rank == 5 {
-					// Selected membership owns header/body, never compact undo.
 					generationClean(t, out, 2)
 					expected.Cleanup, expected.Phase = nil, 1
 					want[0].Literal, want[1].Literal, want[4].Literal = nil, nil, nil
@@ -507,13 +525,10 @@ func generationDamage(t *testing.T, rank uint8) {
 				want[0].Literal, want[1].Literal = nil, nil
 				if rank != 3 {
 					if kind != "defer" || rank != 5 {
-						want[2].Literal = nil
+						want[2].Literal, want[4].Literal = nil, nil
 					}
 					if kind != "defer" {
 						want[3].Literal = nil
-					}
-					if kind != "defer" || rank != 5 {
-						want[4].Literal = nil
 					}
 				}
 			}
@@ -547,8 +562,7 @@ func generationNativeFaults(t *testing.T) {
 	generationNativeMatrix(t, false, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) })
 	for _, rank := range []uint8{6, 7} {
 		t.Run(fmt.Sprintf("consulted%d", rank), func(t *testing.T) {
-			a := generationAuthority()
-			hash, rows := generationProjection(2, 5, 55)
+			a, hash, rows := generationBaseProjection()
 			rows = append(rows, generationSelected(&a, hash, rows[3].Literal)...)
 			w := generationNew(t, a, rows...)
 			key, _ := mdbx.CanonicalOwnerKey(1, hash)
@@ -669,8 +683,7 @@ func generationNativeMatrix(t *testing.T, reservation bool, invoke func(*generat
 func generationReadProvenance(t *testing.T) {
 	for _, name := range []string{"obsolete-index", "canonical-obsolete-index", "canonical-inverse", "canonical-forward", "optional-link", "optional-header", "optional-body", "canonical-header", "canonical-body", "canonical-undo"} {
 		t.Run(name, func(t *testing.T) {
-			a := generationAuthority()
-			hash, rows := generationProjection(2, 5, 55)
+			a, hash, rows := generationBaseProjection()
 			rank, key := uint8(2), rows[0].Key
 			required := name == "canonical-inverse" || name == "canonical-forward" || name == "canonical-header" || name == "canonical-body" || name == "canonical-undo"
 			if required || name == "canonical-obsolete-index" {
@@ -736,9 +749,7 @@ func generationCrossed(t *testing.T, out selectedSideOutcome, causes string, dri
 	}
 }
 
-func generationNativeReservations(t *testing.T) {
-	generationNativeMatrix(t, true, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) })
-}
+func generationNativeReservations(t *testing.T) { generationNativeMatrix(t, true, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) }) }
 
 func TestCleanupGenerationMDBXReadbackDrift(t *testing.T) {
 	t.Run("R16b", func(t *testing.T) { generationDrift(t, "body", 4, false) })
@@ -772,10 +783,9 @@ func generationDriftWorld(t *testing.T, kind string, rank uint8) (*generationWor
 		}
 		w, hash, family = generationFamily(t, familyKind)
 	} else {
-		a := generationAuthority()
+		a, blockHash, rows := generationBaseProjection()
 		a.B, a.U = 10, 13690
-		var rows []mdbx.Mutation
-		hash, rows = generationProjection(2, 5, 55)
+		hash = blockHash
 		k := uint64(11)
 		if kind == "invalid-BLOCKS" {
 			k = 8
@@ -792,8 +802,7 @@ func generationDriftWorld(t *testing.T, kind string, rank uint8) (*generationWor
 		w = generationNew(t, a, rows...)
 	}
 	if bytes.HasPrefix([]byte(kind), []byte("invalid-")) {
-		// Only the obsolete parent differs. The independently named active
-		// header/body, canonical proof, and deferred identity remain valid.
+		// Only the obsolete parent differs; active header/body, canonical proof and deferred identity remain valid.
 		bad := bytes.Clone(w.rows[0].Literal)
 		bad[32] = 1
 		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 2, w.rows[0].Key, bad) == nil, "invalid own header parent")
@@ -817,7 +826,6 @@ func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
 		calls++
 		out = CleanupGenerationMDBX(w.s, w.owner, 2, 1)
 	})
-	// The actual tuple is asserted before drift/counters or any Store query.
 	generationCrossed(t, out, "update:Capacity", true)
 	value := reflect.ValueOf(w.s).Elem()
 	logicalMDBXAssert(t, value.FieldByName("state").String() == "CLOSED" && value.FieldByName("env").IsNil() && value.FieldByName("writer").IsNil() && value.FieldByName("txn").IsNil() && value.FieldByName("terminalTruth").Uint() == 3, "consumed Store must be CLOSED/envnil/writernil/txnnil/UNKNOWN")
@@ -854,9 +862,8 @@ func generationDrift(t *testing.T, kind string, rank uint8, entry bool) {
 func generationUndoSemantics(t *testing.T) {
 	for _, name := range []string{"height", "zero-tx", "tx-bound", "spent-bound", "missing-entry", "excess-entry", "zero-index", "index-bound", "coordinate", "outpoint", "missing-manifest"} {
 		t.Run(name, func(t *testing.T) {
-			a := generationAuthority()
+			a, hash, rows := generationBaseProjection()
 			a.B, a.U = 10, 13690
-			hash, rows := generationProjection(2, 5, 55)
 			rows = append(rows, generationCanonical(hash, 13691)...)
 			height, txs, spent := uint64(13691), uint32(3), uint32(1)
 			txIndex := uint32(1)
@@ -932,8 +939,7 @@ func generationUndoSemantics(t *testing.T) {
 func generationSelectedCrossed(t *testing.T) {
 	for _, scenario := range []mdbx.SelectedDamageScenario{7, 8, 9, 10} {
 		t.Run(fmt.Sprint(scenario), func(t *testing.T) {
-			a := generationAuthority()
-			hash, rows := generationProjection(2, 5, 55)
+			a, hash, rows := generationBaseProjection()
 			rows = append(rows, generationSelected(&a, hash, rows[3].Literal)...)
 			w := generationNew(t, a, rows...)
 			bad := bytes.Clone(rows[3].Literal)
@@ -968,7 +974,6 @@ func generationSelectedCrossed(t *testing.T) {
 			if scenario == 10 {
 				expected = []byte{0x7f}
 			}
-			// Own generation projection/body/undo stay unchanged on every clear.
 			generationRaw(t, w, expected, rows)
 		})
 	}

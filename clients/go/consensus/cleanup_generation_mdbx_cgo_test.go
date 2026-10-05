@@ -24,13 +24,16 @@ type generationWorld struct {
 	rows  []mdbx.Mutation
 }
 
-func generationAuthority() mdbx.StorageAuthorityV1 {
-	return mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 4, Phase: 2, Lifecycle: 1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}}
-}
+func generationAuthority() mdbx.StorageAuthorityV1 { return mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 4, Phase: 2, Lifecycle: 1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}} }
 
 func generationNew(t *testing.T, a mdbx.StorageAuthorityV1, rows ...mdbx.Mutation) *generationWorld {
 	t.Helper()
-	w := &generationWorld{t: t, path: filepath.Join(t.TempDir(), "db"), cfg: sideWorldConfig, a: a, rows: slices.Clone(rows)}
+	return generationNewConfig(t, sideWorldConfig, a, rows...)
+}
+
+func generationNewConfig(t *testing.T, cfg mdbx.ConfigV1, a mdbx.StorageAuthorityV1, rows ...mdbx.Mutation) *generationWorld {
+	t.Helper()
+	w := &generationWorld{t: t, path: filepath.Join(t.TempDir(), "db"), cfg: cfg, a: a, rows: slices.Clone(rows)}
 	var err error
 	w.s, err = mdbx.Create(w.path, w.cfg)
 	logicalMDBXAssert(t, err == nil, "generation create: %v", err)
@@ -49,8 +52,11 @@ func generationNew(t *testing.T, a mdbx.StorageAuthorityV1, rows ...mdbx.Mutatio
 	return w
 }
 
-func generationRow(rank uint8, key, value []byte) mdbx.Mutation {
-	return mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: 2, Literal: value}
+func generationRow(rank uint8, key, value []byte) mdbx.Mutation { return mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: 2, Literal: value} }
+
+func generationBaseProjection() (mdbx.StorageAuthorityV1, [32]byte, []mdbx.Mutation) {
+	hash, rows := generationProjection(2, 5, 55)
+	return generationAuthority(), hash, rows
 }
 
 func generationData(g uint64, marker byte) []mdbx.Mutation {
@@ -190,8 +196,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 		}
 	})
 	t.Run("P10-A11", func(t *testing.T) {
-		a := generationAuthority()
-		_, obsolete := generationProjection(2, 5, 55)
+		a, _, obsolete := generationBaseProjection()
 		_, active := generationProjection(1, 5, 66)
 		active = append(active, generationData(1, 3)...)
 		active[len(active)-1].BeforePresent = true // Bootstrap already created the active counter.
@@ -203,8 +208,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 		w.image(generationTerminal(a), append(generationGone(obsolete), active...)...)
 	})
 	t.Run("P10-A7", func(t *testing.T) {
-		a := generationAuthority()
-		hash, rows := generationProjection(2, 5, 55)
+		a, hash, rows := generationBaseProjection()
 		var staged []mdbx.Mutation
 		for _, g := range []uint64{2, 3} {
 			key, _ := mdbx.HeightKey(g, 5)
@@ -215,8 +219,7 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 		w.image(generationTerminal(a), append(generationGone(rows), staged...)...)
 	})
 	t.Run("H11", func(t *testing.T) {
-		a := generationAuthority()
-		_, rows := generationProjection(2, 5, 55)
+		a, _, rows := generationBaseProjection()
 		_, other := generationProjection(3, 5, 66)
 		other = other[2:4]
 		w := generationNew(t, a, append(slices.Clone(rows), other...)...)
@@ -296,9 +299,8 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 		w.image(want)
 	})
 	t.Run("remaining-width-defer", func(t *testing.T) {
-		a := generationAuthority()
+		a, hash, rows := generationBaseProjection()
 		a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 1, LastHeight: 1441, NextHeight: 2})
-		hash, rows := generationProjection(2, 5, 55)
 		for h := uint64(2); h <= 1441; h++ {
 			other := [32]byte{}
 			binary.BigEndian.PutUint64(other[24:], h)
@@ -318,8 +320,6 @@ func TestCleanupGenerationMDBX(t *testing.T) {
 	})
 }
 
-// One bounded window checks the complete ordered physical family, including
-// every literal byte; tail supplies an excess row without copying the family.
 func generationFamilyImage(t *testing.T, store *mdbx.Store, hash [32]byte, family []mdbx.Mutation, tail ...mdbx.Mutation) {
 	t.Helper()
 	count, expected := 0, len(family)+len(tail)
@@ -352,11 +352,8 @@ func generationFamilyImage(t *testing.T, store *mdbx.Store, hash [32]byte, famil
 	logicalMDBXAssert(t, err == nil && count == expected, "full family %d/%d: %v", count, expected, err)
 }
 
-// The full family has 414634 distinct coordinates and spent outpoints plus its
-// manifest. Setup is split only into admitted writes; cleanup is one transaction.
 func generationFamily(t *testing.T, kind string) (*generationWorld, [32]byte, []mdbx.Mutation) {
-	a := generationAuthority()
-	hash, rows := generationProjection(2, 5, 55)
+	a, hash, rows := generationBaseProjection()
 	k := uint64(13691)
 	if kind == "defer" {
 		k = 11
@@ -384,8 +381,6 @@ func generationFamily(t *testing.T, kind string) (*generationWorld, [32]byte, []
 	return w, hash, family
 }
 
-// Entry literals remain the independent expected image; only the write plan
-// references temporary generation-4 sources, deleted in the same admitted batch.
 func generationSeedUndo(t *testing.T, w *generationWorld, entries []mdbx.Mutation) {
 	t.Helper()
 	sources := make([]mdbx.Mutation, 0, len(entries))
@@ -410,7 +405,6 @@ func generationSelected(a *mdbx.StorageAuthorityV1, hash [32]byte, body []byte) 
 }
 
 func generationRollingSelected(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation) []mdbx.Mutation {
-	// The tip hash is the independently pinned big-endian height marker 1440.
 	a.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1440, TipHash: [32]byte{30: 5, 31: 160}, CumulativeChainwork: sideWorldWork(1440), RowCount: 1439, LogicalBytes: 1439 * uint64(len(rows[3].Literal))}
 	a.Cleanup.Spans = append(a.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 3, FirstHeight: 1, LastHeight: 1, NextHeight: 1})
 	for h := uint64(2); h <= 1440; h++ {
@@ -425,10 +419,8 @@ func generationRollingSelected(a *mdbx.StorageAuthorityV1, rows []mdbx.Mutation)
 	return rows
 }
 
-// Eligible selected membership keeps by hash at j=6, independently of h=5.
 func generationSelectedKeep(t *testing.T, deferSide bool) {
-	a := generationAuthority()
-	hash, rows := generationProjection(2, 5, 55)
+	a, hash, rows := generationBaseProjection()
 	rows = append(rows, generationSelected(&a, hash, rows[3].Literal)...)
 	if deferSide {
 		rows = generationRollingSelected(&a, rows)
@@ -550,8 +542,7 @@ func generationConfluence(t *testing.T) {
 			w.image(a, want...)
 		})
 	}
-	a := generationAuthority()
-	_, rows := generationProjection(2, 5, 55)
+	a, _, rows := generationBaseProjection()
 	w := generationNew(t, a, rows...)
 	logicalMDBXAssert(t, w.s.Close() == nil, "close before unfinished reopen")
 	var err error
