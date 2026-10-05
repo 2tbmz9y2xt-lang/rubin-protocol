@@ -30,7 +30,7 @@ func (s *DARelayState) releasePeerQuotaKey(key string) error {
 
 func (s *DARelayState) releasePeerQuotaKeyLocked(key string) error {
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
-		if err := s.releasePeerQuotaKeyRecordLocked(key, s.sets[daID]); err != nil {
+		if err := s.releasePeerQuotaKeyRecordLocked(key, s.relations.recordValue(daID)); err != nil {
 			return err
 		}
 	}
@@ -54,7 +54,7 @@ func (s *DARelayState) releasePeerQuotaKeyRecordLocked(key string, record daRela
 func (s *DARelayState) sortedIncompleteDAIDsLocked() [][32]byte {
 	var daIDs [][32]byte
 	for daID := range s.orphanBytesByDAID {
-		record, ok := s.sets[daID]
+		record, ok := s.relations.record(daID)
 		if !ok || record.state == daRelayStateCompleteSet {
 			continue
 		}
@@ -217,7 +217,7 @@ func (s *DARelayState) prepareDAChunk(chunk daRelayChunk) ([]byte, error) {
 func (s *DARelayState) validateDAChunkInsert(chunk daRelayChunk) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sets[chunk.daID].validateChunkInsert(chunk.chunkIndex)
+	return s.relations.recordValue(chunk.daID).validateChunkInsert(chunk.chunkIndex)
 }
 
 func (s *DARelayState) addDAChunkAttempt(peerQuotaKey string, chunk *daRelayChunk, payload []byte, txBytesOwned *bool) (daRelaySetRecord, bool, error) {
@@ -317,7 +317,7 @@ func (s *DARelayState) stageDACommitRecordLocked(peerQuotaKey string, commit daR
 }
 
 func (s *DARelayState) stageDACommitMetadataLocked(peerQuotaKey string, commit daRelayCommit) (daRelaySetRecord, daRelayCommit, error) {
-	record := s.sets[commit.daID].cloneForStateMutation()
+	record := s.relations.recordValue(commit.daID).cloneForStateMutation()
 	record.ensureMaps()
 	if record.commit.chunkCount != 0 {
 		return daRelaySetRecord{}, daRelayCommit{}, errDARelayDuplicateCommit
@@ -362,7 +362,7 @@ func (s *DARelayState) stageDAChunkRecordLocked(peerQuotaKey string, chunk daRel
 }
 
 func (s *DARelayState) stageDAChunkMetadataLocked(peerQuotaKey string, chunk daRelayChunk, payload []byte) (daRelaySetRecord, daRelayChunk, error) {
-	record := s.sets[chunk.daID].cloneForStateMutation()
+	record := s.relations.recordValue(chunk.daID).cloneForStateMutation()
 	record.ensureMaps()
 	if err := record.validateChunkInsert(chunk.chunkIndex); err != nil {
 		return daRelaySetRecord{}, daRelayChunk{}, err
@@ -415,7 +415,7 @@ func validateDAChunk(chunk daRelayChunk) error {
 }
 
 func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
-	oldRecord := s.sets[record.daID]
+	oldRecord := s.relations.recordValue(record.daID)
 	orphanBytes, peerBytes, daBytes, commitBytes, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record)
 	if err != nil {
 		return err
@@ -424,7 +424,7 @@ func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 	if err != nil {
 		return err
 	}
-	s.sets[record.daID] = record
+	s.relations.putRecord(record.daID, record)
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -437,7 +437,7 @@ func (s *DARelayState) applyDASetRecordLocked(record daRelaySetRecord) error {
 }
 
 func (s *DARelayState) checkDASetRecordCapsLocked(record daRelaySetRecord) error {
-	oldRecord := s.sets[record.daID]
+	oldRecord := s.relations.recordValue(record.daID)
 	if _, _, _, _, err := s.projectOrphanAccountingDeltaLocked(oldRecord, record); err != nil {
 		return err
 	}
@@ -455,7 +455,7 @@ func (s *DARelayState) removeDASetRecordLocked(record daRelaySetRecord) error {
 	if err != nil {
 		return err
 	}
-	delete(s.sets, record.daID)
+	s.relations.removeRecord(record.daID)
 	s.orphanBytes = orphanBytes
 	s.applyProjectedPeerBytes(peerBytes)
 	s.applyProjectedDAIDBytes(record.daID, daBytes)
@@ -552,6 +552,7 @@ func (s *DARelayState) applyProjectedDAIDBytes(daID [32]byte, bytes uint64) {
 
 // daRelayRecordPlacement holds ABSOLUTE counter values, not deltas.
 type daRelayRecordPlacement struct {
+	relations   *daRelayRelationPublication
 	stagedBytes uint64
 	daID        [32]byte
 	record      daRelaySetRecord
@@ -599,10 +600,10 @@ func (s *DARelayState) projectDARecordImageLiveLocked(image daRelayRecordImage, 
 	return placement, nil
 }
 
-// checkDARecordImageBaselineLocked takes residency from the s.sets lookup alone, never
+// checkDARecordImageBaselineLocked takes residency from the s.relations.sets lookup alone, never
 // from the record. Absent means revision 0 and baseline 0, so one comparison does both.
 func (s *DARelayState) checkDARecordImageBaselineLocked(image daRelayRecordImage) (daRelaySetRecord, error) {
-	live, resident := s.sets[image.daID]
+	live, resident := s.relations.record(image.daID)
 	if resident && (live.revision == 0 || len(live.locatorRows()) == 0 || live.checkOwnerReadyRecord() != nil) {
 		return daRelaySetRecord{}, errDARelayImageIncompatible
 	}
@@ -816,7 +817,7 @@ func checkStagedCandidateSlot(next daRelaySetRecord, rows []daRelayLocatorRow, c
 // the image carries, so the six complete the record. checkOwnerReadyRecord admits BOTH
 // OrphanChunks and StagedCommit, so only the state equality stops a resident image
 // switching between them; the other five move no counter at INSTALL, but the installed
-// record LIVES in s.sets, where missingChunkIndexes and validateChunkInsert read
+// record LIVES in s.relations.sets, where missingChunkIndexes and validateChunkInsert read
 // replaceableChunks and the TTL sweep decrements ttlBlocksRemaining. Staging copies all six.
 func checkPreservedOwnerReadySlots(live, next daRelaySetRecord, target daRelayLocator) error {
 	if !samePreservedRecordFields(live, next) {
@@ -912,7 +913,7 @@ func sameOwnerReadyMember(a, b *daRelayMemberIdentity) bool {
 // checkDARecordImageLocatorsLocked proves the txid index and the retained image are one
 // bijection (Section 18.3). A nil index is refused: the installer does not construct missing state.
 func (s *DARelayState) checkDARecordImageLocatorsLocked(image daRelayRecordImage, live daRelaySetRecord) ([]daRelayLocatorRow, []daRelayLocatorRow, error) {
-	if s.locators == nil {
+	if s.relations.locators == nil {
 		return nil, nil, errDARelayImageIncompatible
 	}
 	retire := live.locatorRows()
@@ -943,12 +944,12 @@ func checkOwnerReadySlotFree(live daRelaySetRecord, locator daRelayLocator) erro
 func (s *DARelayState) checkRetiredLocatorRowsLocked(daID [32]byte, retire []daRelayLocatorRow) error {
 	retired := make(map[[32]byte]bool, len(retire))
 	for _, row := range retire {
-		if s.locators[row.txid] != row.locator {
+		if s.relations.locatorValue(row.txid) != row.locator {
 			return errDARelayLocatorMismatch
 		}
 		retired[row.txid] = true
 	}
-	for txid, locator := range s.locators {
+	for txid, locator := range s.relations.locatorRows() {
 		if locator.daID == daID && !retired[txid] {
 			return errDARelayLocatorMismatch
 		}
@@ -967,7 +968,7 @@ func (s *DARelayState) checkDAInstallLocatorRowsLocked(daID [32]byte, install []
 		if claimed[row.txid] {
 			return errDARelayLocatorMismatch
 		}
-		if other, indexed := s.locators[row.txid]; indexed && other.daID != daID {
+		if other, indexed := s.relations.locator(row.txid); indexed && other.daID != daID {
 			return errDARelayLocatorMismatch
 		}
 		claimed[row.txid] = true
@@ -1013,23 +1014,31 @@ func (s *DARelayState) projectDARecordImageCountersLocked(image daRelayRecordIma
 // sequence and revision high-water; and every remove: true caller releases the removed record's
 // prefetch reservation itself.
 func (s *DARelayState) installDASetRecordLocked(placement daRelayRecordPlacement) {
-	for _, row := range placement.retire {
-		delete(s.locators, row.txid)
+	if placement.relations == nil {
+		placement.relations = s.prepareDARecordRelationsLocked(placement)
 	}
-	if placement.remove {
-		delete(s.sets, placement.daID)
-	} else {
-		s.sets[placement.daID] = placement.record
+	placement.relations.newRecords[0].value = placement.record
+	s.relations.publish(placement.relations)
+	if !placement.remove {
 		s.records = placement.record.revision
-	}
-	for _, row := range placement.install {
-		s.locators[row.txid] = row.locator
 	}
 	s.orphanBytes = placement.orphanBytes
 	s.stagedBytes = placement.stagedBytes
 	s.applyProjectedPeerBytes(placement.peerBytes)
 	s.applyProjectedDAIDBytes(placement.daID, placement.daBytes)
 	s.orphanCommitOverheadBytes = placement.commitBytes
+}
+
+func (s *DARelayState) prepareDARecordRelationsLocked(placement daRelayRecordPlacement) *daRelayRelationPublication {
+	p := &daRelayRelationPublication{}
+	s.relations.prepareRecord(p, placement.daID, placement.record, !placement.remove)
+	for _, row := range placement.retire {
+		s.relations.prepareLocator(p, row, false)
+	}
+	for _, row := range placement.install {
+		s.relations.prepareLocator(p, row, true)
+	}
+	return p
 }
 
 // releaseOwnerReadyPeerQuota is the owner-aware PEER quota cleanup selector
@@ -1069,7 +1078,7 @@ func (s *DARelayState) advanceOwnerReadyTTL() error {
 // and *TxAdmitError (nil chainstate, nil owner, victim refusal).
 // STATICALLY PRESENT AND DEAD: errDARelayLocatorMismatch — the preflight's bijection already pins
 // every row of every candidate; errDARelayRecordStale — the whole-record arm mints its image from
-// the same s.sets read checkDARecordImageBaselineLocked repeats; the four orphan cap sentinels —
+// the same s.relations.sets read checkDARecordImageBaselineLocked repeats; the four orphan cap sentinels —
 // ownerReadyRemovalCaps lifts every cap they guard to the uint64 maximum; and
 // checkOwnerReadyRecord's own family (errDARelayMemberIncomplete, errDARelayChunkIndexOutOfRange,
 // errDARelayChunkPayloadSizeInvalid, errDAProvenanceInvalid) — only checkOwnerReadyRemovalSurvivor
@@ -1158,9 +1167,9 @@ func (s *DARelayState) commitOwnerReadyRemovalClaimsLocked(owner *PendingOutpoin
 }
 
 func ownerReadyRetainedBindingMembers(clone *DARelayState, owner *PendingOutpointOwner, batch []DAAdmissionVictim) ([]*daRelayMemberIdentity, map[PendingOutpointToken]struct{}, map[consensus.Outpoint]pendingOutpointRow, error) {
-	image, tracked, expected := make([]*daRelayMemberIdentity, 0, len(clone.locators)), make(map[PendingOutpointToken]struct{}, len(clone.locators)+len(batch)), make(map[consensus.Outpoint]pendingOutpointRow, len(clone.locators)+len(batch))
+	image, tracked, expected := make([]*daRelayMemberIdentity, 0, clone.relations.locatorCount), make(map[PendingOutpointToken]struct{}, clone.relations.locatorCount+len(batch)), make(map[consensus.Outpoint]pendingOutpointRow, clone.relations.locatorCount+len(batch))
 	for _, daID := range clone.sortedRetainedDAIDsLocked() {
-		members, err := ownerReadyRecordMembers(clone.sets[daID], owner, tracked)
+		members, err := ownerReadyRecordMembers(clone.relations.recordValue(daID), owner, tracked)
 		image = append(image, members...)
 		if err != nil {
 			return image, tracked, expected, err
@@ -1274,7 +1283,7 @@ func ownerReadyClaimIndexBound(key PendingOutpointToken, claim *pendingOutpointC
 func (s *DARelayState) ownerReadyRemovalCandidatesLocked() ([][32]byte, error) {
 	candidates := s.sortedRetainedDAIDsLocked()
 	for _, daID := range candidates {
-		record := s.sets[daID]
+		record := s.relations.recordValue(daID)
 		var err error
 		if record.state == daRelayStateCompleteSet {
 			err = checkOwnerReadyCleanupCompleteRecord(record)
@@ -1457,7 +1466,7 @@ func ownerReadyTTLTickVictims(clone *DARelayState) ([]DAAdmissionVictim, error) 
 // Legacy dropCommitForPeerQuotaKey (da_relay_record.go) drops a matching commit ALONE and lets
 // the record fall back to OrphanChunks; that arm cannot reach an owner-ready record at all.
 func (s *DARelayState) releaseOwnerReadyPeerRecordLocked(daID [32]byte, quotaIdentity string) ([]DAAdmissionVictim, error) {
-	record := s.sets[daID]
+	record := s.relations.recordValue(daID)
 	if record.state == daRelayStateCompleteSet {
 		return nil, nil
 	}
@@ -1503,7 +1512,7 @@ func ownerReadyPeerMatches(record daRelaySetRecord, quotaIdentity string) (match
 // tickOwnerReadyTTLRecordLocked expires a ttl-one record whole; otherwise it copies the record
 // VALUE only (same chunks container and backing), decrements once and mints one checked revision.
 func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissionVictim, error) {
-	record := s.sets[daID]
+	record := s.relations.recordValue(daID)
 	if record.state == daRelayStateCompleteSet {
 		return nil, nil
 	}
@@ -1520,7 +1529,8 @@ func (s *DARelayState) tickOwnerReadyTTLRecordLocked(daID [32]byte) ([]DAAdmissi
 		return nil, err
 	}
 	survivor.revision = revision
-	s.sets[daID], s.records = survivor, revision
+	s.relations.scalarRecord(daID, survivor)
+	s.records = revision
 	return nil, nil
 }
 
@@ -1575,7 +1585,7 @@ func (s *DARelayState) removeOwnerReadyWholeRecordLocked(record daRelaySetRecord
 // or transition by the preflight (canonicalDARetainedImageClosed), never per arm.
 func (s *DARelayState) projectOwnerReadyRetirementLocked(image daRelayRecordImage, live daRelaySetRecord, retire []daRelayLocatorRow) (daRelayRecordPlacement, error) {
 	for _, row := range retire {
-		if s.locators[row.txid] != row.locator {
+		if s.relations.locatorValue(row.txid) != row.locator {
 			return daRelayRecordPlacement{}, errDARelayLocatorMismatch
 		}
 	}
@@ -1631,7 +1641,7 @@ func (s *DARelayState) dropOwnerReadyChunksLocked(record daRelaySetRecord, dropI
 // the candidate gate already refuses all three disjuncts before either selector runs — and then
 // proves next a byte-identical submultiset of it, so no member, token, provenance, commit slot or
 // locator can change unseen. It does not test the caller's baseline: the caller reads live out of
-// s.sets and mints image.baseline from that same record, unlike checkDARecordImageBaselineLocked,
+// s.relations.sets and mints image.baseline from that same record, unlike checkDARecordImageBaselineLocked,
 // which establishes residency from its own lookup.
 func checkOwnerReadyRemovalBaseline(live, next daRelaySetRecord) error {
 	if live.revision == 0 || live.checkOwnerReadyRecord() != nil || len(live.locatorRows()) == 0 {

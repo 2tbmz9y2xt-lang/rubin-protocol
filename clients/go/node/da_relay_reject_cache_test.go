@@ -216,7 +216,7 @@ func TestDARejectCachePrecedence(t *testing.T) {
 			t.Fatal("own-chunk rejection refreshed cache")
 		}
 
-		fixture.mutateRelay(func(relay *DARelayState) { relay.sets = nil })
+		fixture.mutateRelay(func(relay *DARelayState) { relay.relations.sets = nil })
 		got, err = fixture.relay.AdmitDA(badChunk.raw, publicPeer(t, "owner-unavailable"))
 		requirePublicDAFailure(t, got, err, TxAdmitUnavailable, "DA relay owner maps unavailable", RelayAdmissionUnavailable)
 		if !reflect.DeepEqual(snapshotDARejectCache(&fixture.relay.rejectCache), seeded) {
@@ -239,7 +239,7 @@ func TestDARejectCachePrecedence(t *testing.T) {
 
 		corrupt := fixture.signed(daNonReplayTxSpec{kind: 0x02, daID: [32]byte{0x23}, payload: []byte("corrupt")})
 		fixture.mutateRelay(func(relay *DARelayState) {
-			relay.locators[corrupt.txid] = daRelayLocator{daID: [32]byte{0xee}, kind: daRelayLocatorChunk}
+			relay.relations.putLocator(corrupt.txid, daRelayLocator{daID: [32]byte{0xee}, kind: daRelayLocatorChunk})
 		})
 		fixture.relay.rejectCache.insert(daRejectContext(t, fixture), corrupt.wtxid)
 		seeded = snapshotDARejectCache(&fixture.relay.rejectCache)

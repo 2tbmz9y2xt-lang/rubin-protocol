@@ -284,12 +284,12 @@ func TestCanonicalDAImageExactInclusionSelection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			image := mustPrepareCanonicalDAImage(t, relay, tc.included, chain)
-			_, present := image.projected.sets[daID]
+			_, present := image.projected.relations.record(daID)
 			if present == tc.removed {
 				t.Fatalf("resident present=%v, want removed=%v", present, tc.removed)
 			}
 			// The live image is untouched until publication, whatever the plan says.
-			if _, live := relay.sets[daID]; !live {
+			if _, live := relay.relations.record(daID); !live {
 				t.Fatal("preparation mutated the live retained-DA image")
 			}
 		})
@@ -316,8 +316,8 @@ func TestCanonicalDAImageRemovesEveryIncludedIdentity(t *testing.T) {
 		t.Fatalf("block identities=%d, want the three distinct included sets", len(included))
 	}
 	image := mustPrepareCanonicalDAImage(t, relay, included, f.canonicalDATestChain(t))
-	if _, kept := image.projected.sets[ids[3]]; !kept || len(image.projected.sets) != 1 {
-		t.Fatalf("projected residents=%d uncarried set kept=%v, want the three included ones gone and only it left", len(image.projected.sets), kept)
+	if _, kept := image.projected.relations.record(ids[3]); !kept || image.projected.relations.setCount != 1 {
+		t.Fatalf("projected residents=%d uncarried set kept=%v, want the three included ones gone and only it left", image.projected.relations.setCount, kept)
 	}
 }
 
@@ -346,7 +346,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			t.Fatal("the standard mempool must hold no record for these members")
 		}
 		image := mustPrepareCanonicalDAImage(t, relay, nil, f.canonicalDATestChain(t))
-		if _, present := image.projected.sets[daID]; !present {
+		if _, present := image.projected.relations.record(daID); !present {
 			t.Fatal("a fully chain-valid record was removed while absent from M1")
 		}
 	})
@@ -359,17 +359,17 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		relay, daID, payload := f.engine.DARelayState(), daRelayTestID(0x55), []byte{0x55}
 		chunkTx := f.daChunkTx(t, f.ops[1], daID, 0, 870, payload)
 		mustCanonicalMO(t, "addDAChunk", relay.addDAChunk("peer-orphan", daRelayChunk{daID: daID, chunkHash: sha3.Sum256(payload), payload: payload, wireBytes: uint64(len(chunkTx)), txBytes: chunkTx}))
-		if got := relay.sets[daID].state; got != daRelayStateOrphanChunks {
+		if got := relay.relations.recordValue(daID).state; got != daRelayStateOrphanChunks {
 			t.Fatalf("fixture record state=%v, want an INCOMPLETE record", got)
 		}
 		chain := f.canonicalDATestChain(t)
-		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.sets[daID]; !present {
+		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.relations.record(daID); !present {
 			t.Fatal("an incomplete chain-valid record was dropped")
 		}
 		chain.final.mu.Lock()
 		delete(chain.final.Utxos, f.ops[1])
 		chain.final.mu.Unlock()
-		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.sets[daID]; present {
+		if _, present := mustPrepareCanonicalDAImage(t, relay, nil, chain).projected.relations.record(daID); present {
 			t.Fatal("an incomplete final-invalid record survived: the scan skips incomplete records")
 		}
 	})
@@ -383,9 +383,9 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		f.daSet(t, relay, low, f.ops[:2], 880)
 		f.daSet(t, relay, high, f.ops[1:3], 890)
 		for _, daID := range [][32]byte{low, high} {
-			record := relay.sets[daID].cloneForStateMutation()
+			record := relay.relations.recordValue(daID).cloneForStateMutation()
 			record.commit.chunkCount = 9 // contradicts the retained commit tx
-			relay.sets[daID] = record
+			relay.relations.putRecord(daID, record)
 		}
 		_, err := prepareCanonicalDAImage(relay, nil, f.canonicalDATestChain(t))
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%x", low)) {
@@ -407,7 +407,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 		delete(chain.final.Utxos, f.ops[2])
 		chain.final.mu.Unlock()
 		image := mustPrepareCanonicalDAImage(t, relay, nil, chain)
-		if _, present := image.projected.sets[daID]; present {
+		if _, present := image.projected.relations.record(daID); present {
 			t.Fatal("a record with a final-invalid member survived")
 		}
 	})
@@ -454,9 +454,9 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 			}
 			chain.final.mu.Unlock()
 			before := daRelayStateSnapshot(relay)
-			record := relay.sets[daID].cloneForStateMutation()
+			record := relay.relations.recordValue(daID).cloneForStateMutation()
 			tc.corrupt(&record)
-			relay.sets[daID] = record
+			relay.relations.putRecord(daID, record)
 
 			_, err := prepareCanonicalDAImage(relay, nil, chain)
 			var terminal *canonicalDATerminalError
@@ -473,7 +473,7 @@ func TestCanonicalDAImageFinalChainValidity(t *testing.T) {
 				t.Fatalf("terminal invariant was reported as a resource or stale-plan class: %v", err)
 			}
 			// Nothing but the deliberate corruption moved.
-			relay.sets[daID] = before.sets[daID]
+			relay.relations.putRecord(daID, before.sets[daID])
 			if got := daRelayStateSnapshot(relay); !reflect.DeepEqual(got, before) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
 				t.Fatal("a terminal preparation mutated the live retained-DA image")
 			}
@@ -521,10 +521,10 @@ func TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes(t *testing.T) {
 	if !reflect.DeepEqual(daRelayStateSnapshot(first.projected), daRelayStateSnapshot(second.projected)) { //nolint:govet // deepequalerrors: the snapshot must match byte-for-byte, error values included — identity is the assertion
 		t.Fatal("two preparations of the same state produced different images")
 	}
-	if _, present := first.projected.sets[dropped]; present {
+	if _, present := first.projected.relations.record(dropped); present {
 		t.Fatal("the invalid record survived preparation")
 	}
-	live, projected := relay.sets[kept], first.projected.sets[kept]
+	live, projected := relay.relations.recordValue(kept), first.projected.relations.recordValue(kept)
 	if len(live.commit.txBytes) == 0 || len(projected.commit.txBytes) == 0 {
 		t.Fatal("the surviving record lost its retained commit bytes: sharing cannot be observed")
 	}
@@ -534,7 +534,7 @@ func TestCanonicalDAImageIsDeterministicAndSharesRetainedBytes(t *testing.T) {
 	if reflect.ValueOf(live.chunks).Pointer() != reflect.ValueOf(projected.chunks).Pointer() {
 		t.Fatal("the prepared image copied a surviving record's chunk map")
 	}
-	if reflect.ValueOf(relay.sets).Pointer() == reflect.ValueOf(first.projected.sets).Pointer() {
+	if reflect.ValueOf(relay.relations.sets).Pointer() == reflect.ValueOf(first.projected.relations.sets).Pointer() {
 		t.Fatal("the prepared image shares the live set map instead of cloning it")
 	}
 }
@@ -572,7 +572,7 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 				t.Fatal("the transition captured a different retained-DA pointer than the engine's")
 			}
 			image := mustPrepareCanonicalDAImage(t, tr.daRelay, nil, chain)
-			if _, present := image.projected.sets[daID]; present {
+			if _, present := image.projected.relations.record(daID); present {
 				t.Fatal("the prepared image kept a record it could not validate")
 			}
 			var fault *storagePersistenceFault
@@ -582,7 +582,7 @@ func TestCanonicalDAImagePublishesOnlyForNew(t *testing.T) {
 			plan := &canonicalTransitionPlan{final: cloneChainState(f.engine.chainState)}
 			tr.publishCanonicalTransition(plan, canonicalFenceImage{da: image}, tc.truth, fault, "")
 
-			_, live := relay.sets[daID]
+			_, live := relay.relations.record(daID)
 			if live == tc.published {
 				t.Fatalf("record still retained=%v, want published=%v", live, tc.published)
 			}
@@ -691,7 +691,7 @@ func TestCanonicalDAWritersObserveTheCompletePublishedImage(t *testing.T) {
 	// the live image and none of them was in the prepared one.
 	for i := 0; i < 6; i++ {
 		racing := daRelayTestID(0xa0 + byte(i))
-		if _, ok := relay.sets[racing]; !ok {
+		if _, ok := relay.relations.record(racing); !ok {
 			t.Fatalf("racing writer %d never landed after the guard was released", i)
 		}
 		if _, ok := prepared.sets[racing]; ok {
@@ -750,9 +750,9 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		if depth := f.engine.LastReorgDepth(); depth != 1 {
 			t.Fatalf("LastReorgDepth()=%d, want the one disconnected block A1", depth)
 		}
-		_, b1Held := relay.sets[[32]byte{0xb1}]
-		_, b2Held := relay.sets[[32]byte{0xb2}]
-		_, survivorHeld := relay.sets[[32]byte{0xb3}]
+		_, b1Held := relay.relations.record([32]byte{0xb1})
+		_, b2Held := relay.relations.record([32]byte{0xb2})
+		_, survivorHeld := relay.relations.record([32]byte{0xb3})
 		if b1Held || b2Held || !survivorHeld {
 			t.Fatalf("reorg D disposition: B1 retained=%v B2 retained=%v survivor removed=%v", b1Held, b2Held, !survivorHeld)
 		}
@@ -767,8 +767,8 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		f.ownerReadyIncompleteSet(t, relay, kept, f.ops[2:4], 1210)
 		_, err := f.engine.DisconnectTip()
 		mustCanonicalMO(t, "DisconnectTip", err)
-		_, invalidHeld := relay.sets[dropped]
-		_, validHeld := relay.sets[kept]
+		_, invalidHeld := relay.relations.record(dropped)
+		_, validHeld := relay.relations.record(kept)
 		if invalidHeld || !validHeld {
 			t.Fatalf("disconnect D disposition: final-invalid retained=%v final-valid removed=%v", invalidHeld, !validHeld)
 		}
@@ -786,7 +786,7 @@ func TestCanonicalDAImageIsPreparedOnEveryTransitionPath(t *testing.T) {
 		admitOwnerReady(t, relay, f.ownerReadyCommitTx(t, f.ops[0], daID, 1, 1220))
 		delete(engine.chainState.Utxos, f.ops[0])
 		mustCanonicalMO(t, "BootstrapCanonicalGenesisIfEmpty", engine.BootstrapCanonicalGenesisIfEmpty())
-		if _, present := relay.sets[daID]; present {
+		if _, present := relay.relations.record(daID); present {
 			t.Fatal("the bootstrap transition retained a record it never validated against C1")
 		}
 	})
@@ -812,9 +812,9 @@ func TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal(t *testing.T) {
 	f := newCanonicalMOFixture(t, 3, MempoolConfig{})
 	relay, daID := f.engine.DARelayState(), daRelayTestID(0x57)
 	f.daSet(t, relay, daID, f.ops[1:3], 840)
-	record := relay.sets[daID].cloneForStateMutation()
+	record := relay.relations.recordValue(daID).cloneForStateMutation()
 	record.commit.chunkCount = 7 // contradicts the retained commit transaction
-	relay.sets[daID] = record
+	relay.relations.putRecord(daID, record)
 	var da *canonicalDATerminalError
 	if _, err := prepareCanonicalDAImage(relay, nil, f.canonicalDATestChain(t)); !errors.As(err, &da) {
 		t.Fatalf("control: the D defect is not terminal on its own: %v", err)
@@ -830,7 +830,7 @@ func TestCanonicalFenceImageReportsTheMOTerminalOverTheDTerminal(t *testing.T) {
 	mustCanonicalMO(t, "beginCanonicalTransition", err)
 	defer tr.abort()
 	_, err = f.engine.prepareCanonicalFenceImage(tr, &canonicalTransitionPlan{oldSequence: index, priorTip: chainTipScalarsOf(f.engine.chainState), final: f.engine.chainState})
-	_, live := relay.sets[daID]
+	_, live := relay.relations.record(daID)
 	if !isCanonicalTransitionTerminalError(err) || canonicalTerminalReason(err) != "canonical mempool invariant" || errors.As(err, &da) || !live {
 		t.Fatalf("dual violation err=%v live record retained=%v, want the standard/owner terminal", err, live)
 	}
@@ -859,7 +859,7 @@ func TestCanonicalDAImagePlanAbortPrecedence(t *testing.T) {
 	if !errors.As(err, &plan) || image != nil || isCanonicalTransitionTerminalError(err) {
 		t.Fatalf("plan-aborting member err=%v image=%v, want the shared plan error", err, image)
 	}
-	if _, live := relay.sets[daID]; !live {
+	if _, live := relay.relations.record(daID); !live {
 		t.Fatal("a plan abort removed the live record")
 	}
 
@@ -877,10 +877,10 @@ func TestCanonicalDAImagePlanAbortPrecedence(t *testing.T) {
 	}
 
 	// One unparseable LAST member: phase 1 returns for the whole record first.
-	record, corrupt := relay.sets[daID].cloneForStateMutation(), relay.sets[daID].chunks[1]
+	record, corrupt := relay.relations.recordValue(daID).cloneForStateMutation(), relay.relations.recordValue(daID).chunks[1]
 	corrupt.txBytes = []byte{0xff, 0xfe}
 	record.chunks[1] = corrupt
-	relay.sets[daID] = record
+	relay.relations.putRecord(daID, record)
 	var terminal *canonicalDATerminalError
 	if _, err := prepareCanonicalDAImage(relay, nil, chain); !errors.As(err, &terminal) {
 		t.Fatalf("err=%v, want the parse-phase terminal to outrank the plan abort", err)
@@ -901,10 +901,10 @@ func TestCanonicalDAImageCrossRecordPrecedenceIsRecordMajor(t *testing.T) {
 	low, high := daRelayTestID(0x01), daRelayTestID(0xfe)
 	f.daSet(t, relay, low, f.ops[:2], 900)
 	f.daSet(t, relay, high, f.ops[2:4], 910)
-	record, corrupt := relay.sets[high].cloneForStateMutation(), relay.sets[high].chunks[0]
+	record, corrupt := relay.relations.recordValue(high).cloneForStateMutation(), relay.relations.recordValue(high).chunks[0]
 	corrupt.txBytes = []byte{0xff, 0xfe}
 	record.chunks[0] = corrupt
-	relay.sets[high] = record
+	relay.relations.putRecord(high, record)
 	chain := f.canonicalDATestChain(t)
 	chain.policy.SuiteRegistry = unboundAlgSuiteRegistry()
 
@@ -914,7 +914,7 @@ func TestCanonicalDAImageCrossRecordPrecedenceIsRecordMajor(t *testing.T) {
 	if !errors.As(err, &plan) || errors.As(err, &terminal) || image != nil {
 		t.Fatalf("err=%v image=%v, want the low-da_id record's plan abort", err, image)
 	}
-	if _, live := relay.sets[low]; !live {
+	if _, live := relay.relations.record(low); !live {
 		t.Fatal("a plan abort removed the live record")
 	}
 }
@@ -970,8 +970,8 @@ func (a *daAccountingFixture) requireEveryAggregateIsExercised(t *testing.T) {
 	if len(a.relay.orphanBytesByPeerQuotaKey) != 2 || len(a.relay.orphanBytesByDAID) != 1 {
 		t.Fatalf("fixture peer entries=%d da_id entries=%d, want 2 and 1", len(a.relay.orphanBytesByPeerQuotaKey), len(a.relay.orphanBytesByDAID))
 	}
-	if a.relay.sets[a.complete].state != daRelayStateCompleteSet || a.relay.sets[a.incomplete].state == daRelayStateCompleteSet {
-		t.Fatalf("fixture states complete=%v incomplete=%v", a.relay.sets[a.complete].state, a.relay.sets[a.incomplete].state)
+	if a.relay.relations.recordValue(a.complete).state != daRelayStateCompleteSet || a.relay.relations.recordValue(a.incomplete).state == daRelayStateCompleteSet {
+		t.Fatalf("fixture states complete=%v incomplete=%v", a.relay.relations.recordValue(a.complete).state, a.relay.relations.recordValue(a.incomplete).state)
 	}
 }
 
@@ -1008,7 +1008,7 @@ func TestCanonicalDAImageSweepsSurvivingRecordAccounting(t *testing.T) {
 		// only the sweep's key check can report it; the copy sorts first, so the
 		// key check is the deterministic winner.
 		{"map key disagrees with the record da_id", "stored under da_id 0100000000", func(a *daAccountingFixture) {
-			a.relay.sets[daRelayTestID(0x01)] = a.relay.sets[a.complete]
+			a.relay.relations.putRecord(daRelayTestID(0x01), a.relay.relations.recordValue(a.complete))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1042,7 +1042,7 @@ func TestCanonicalDAImageSweepsSurvivingRecordAccounting(t *testing.T) {
 // holds across a real removal, not only over an untouched image.
 func TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage(t *testing.T) {
 	a := newDAAccountingFixture(t)
-	set := a.relay.sets[a.complete]
+	set := a.relay.relations.recordValue(a.complete)
 	if len(set.chunks) != 1 {
 		t.Fatalf("fixture complete set holds %d chunks, want the single-chunk shape this row builds", len(set.chunks))
 	}
@@ -1051,16 +1051,16 @@ func TestCanonicalDAImageSweepAcceptsAndPublishesAConsistentImage(t *testing.T) 
 		t.Fatalf("block identities=%d, want the one complete staged set", len(included))
 	}
 	image := mustPrepareCanonicalDAImage(t, a.relay, included, a.chain)
-	if _, present := image.projected.sets[a.complete]; present {
+	if _, present := image.projected.relations.record(a.complete); present {
 		t.Fatal("the included complete set survived the projection")
 	}
-	if _, present := image.projected.sets[a.incomplete]; !present {
+	if _, present := image.projected.relations.record(a.incomplete); !present {
 		t.Fatal("the sweep removed the uninvolved incomplete record")
 	}
 	image.publish()
 	a.relay.mu.Lock()
 	defer a.relay.mu.Unlock()
-	if _, present := a.relay.sets[a.complete]; present {
+	if _, present := a.relay.relations.record(a.complete); present {
 		t.Fatal("publication did not remove the included complete set")
 	}
 	if err := a.relay.checkRetainedDAAccountingLocked(); err != nil {
@@ -1090,7 +1090,7 @@ func TestCanonicalDAImageScansEveryMemberAfterAnOrdinaryInvalidOne(t *testing.T)
 	// the row below cannot pass on a commit that was itself aborting.
 	control := f.canonicalDATestChain(t)
 	invalidateCommitInput(control)
-	if _, present := mustPrepareCanonicalDAImage(t, relay, nil, control).projected.sets[daID]; present {
+	if _, present := mustPrepareCanonicalDAImage(t, relay, nil, control).projected.relations.record(daID); present {
 		t.Fatal("control: the first member is not ordinary-invalid — the record survived")
 	}
 
@@ -1131,7 +1131,7 @@ func TestCanonicalDAImageAccountingFailureIsTerminal(t *testing.T) {
 	if !errors.As(err, &terminal) {
 		t.Fatalf("err=%v, want the retained-DA terminal class", err)
 	}
-	if _, live := relay.sets[daID]; !live {
+	if _, live := relay.relations.record(daID); !live {
 		t.Fatal("a terminal accounting failure removed the live record")
 	}
 }

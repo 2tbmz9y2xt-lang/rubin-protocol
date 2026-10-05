@@ -34,8 +34,8 @@ func (s *DARelayState) completeSetCandidateRecordsSnapshot() []daRelaySetRecord 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	daIDs := make([][32]byte, 0, len(s.sets))
-	for daID, record := range s.sets {
+	daIDs := make([][32]byte, 0, s.relations.setCount)
+	for daID, record := range s.relations.records() {
 		if record.state == daRelayStateCompleteSet {
 			daIDs = append(daIDs, daID)
 		}
@@ -46,7 +46,7 @@ func (s *DARelayState) completeSetCandidateRecordsSnapshot() []daRelaySetRecord 
 
 	records := make([]daRelaySetRecord, 0, len(daIDs))
 	for _, daID := range daIDs {
-		records = append(records, s.sets[daID].cloneForStateMutation())
+		records = append(records, s.relations.recordValue(daID).cloneForStateMutation())
 	}
 	return records
 }
@@ -318,7 +318,7 @@ func (s *DARelayState) markMatchingCompletionChunksReplaceable(snapshot daRelayC
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	record := s.sets[snapshot.daID].cloneForStateMutation()
+	record := s.relations.recordValue(snapshot.daID).cloneForStateMutation()
 	if record.state == daRelayStateCompleteSet || record.commit.chunkCount != snapshot.chunkCount || record.commit.payloadCommitment != snapshot.payloadCommitmentExpected {
 		return true, nil
 	}

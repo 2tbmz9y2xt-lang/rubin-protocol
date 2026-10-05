@@ -62,14 +62,14 @@ func daCompleteCommitFillCountLimit(f *daNonReplayFixture, count int, fee uint64
 			m := &daRelayMemberIdentity{txid: txid, wtxid: txid, fee: consensus.Uint128{Lo: fee}, token: token, inputs: []consensus.Outpoint{input}, provenance: LocalDAProvenance()}
 			if j == 0 {
 				r.commit = daRelayCommit{daID: id, member: m, chunkCount: 1, txBytes: []byte{1}}
-				s.locators[txid] = daRelayLocator{daID: id, kind: daRelayLocatorCommit}
+				s.relations.putLocator(txid, daRelayLocator{daID: id, kind: daRelayLocatorCommit})
 			} else {
 				r.chunks[0] = daRelayChunk{daID: id, member: m, txBytes: []byte{2}}
-				s.locators[txid] = daRelayLocator{daID: id, kind: daRelayLocatorChunk}
+				s.relations.putLocator(txid, daRelayLocator{daID: id, kind: daRelayLocatorChunk})
 			}
 		}
 		r.completeIntrinsic = daCompleteCapacitySet{id: id, fee: consensus.Uint128{Lo: 2 * fee}, totalBytes: 2, payloadBytes: 1, receivedSequence: 1}
-		s.sets[id] = r
+		s.relations.putRecord(id, r)
 	}
 	s.completeBytes += uint64(2 * count)
 	s.completeCount += uint64(count)
@@ -78,11 +78,11 @@ func daCompleteCommitFillCountLimit(f *daNonReplayFixture, count int, fee uint64
 
 func daCompleteCommitLocatorHistory(s *DARelayState, tombstone bool) {
 	for i := byte(40); i < 72; i++ {
-		s.locators[[32]byte{i}] = daRelayLocator{daID: [32]byte{i}, kind: daRelayLocatorChunk}
+		s.relations.putLocator([32]byte{i}, daRelayLocator{daID: [32]byte{i}, kind: daRelayLocatorChunk})
 	}
 	if tombstone {
 		for i := byte(40); i < 56; i++ {
-			delete(s.locators, [32]byte{i})
+			s.relations.removeLocator([32]byte{i})
 		}
 	}
 }
@@ -217,11 +217,11 @@ func TestDACompleteCommitMatching(t *testing.T) {
 		if _, present := f.relay.prefetch.expires[record.daID]; present {
 			t.Fatal("exact victim prefetch expiry deletion")
 		}
-		if _, present := f.relay.sets[record.daID]; present {
+		if _, present := f.relay.relations.record(record.daID); present {
 			t.Fatal("victim record deletion")
 		}
 		for _, member := range []*daRelayMemberIdentity{record.commit.member, record.chunks[0].member} {
-			if _, present := f.relay.locators[member.txid]; present {
+			if _, present := f.relay.relations.locator(member.txid); present {
 				t.Fatal("victim locator deletion")
 			}
 			if f.mp.pendingOutpoints.byToken[member.token] != nil {
@@ -238,7 +238,7 @@ func TestDACompleteCommitMatching(t *testing.T) {
 	f, a, c, victims = daCompleteCommitPhysicalVictims(t, 2)
 	p, _ = daCompleteCommitTestPlan(t, f, a, c)
 	pressureID, survivorID := [32]byte{2}, [32]byte{2, 1}
-	pressure := f.relay.sets[pressureID]
+	pressure := f.relay.relations.recordValue(pressureID)
 	largePayload := uint64(96_000_000) - (f.relay.pinnedPayloadBytes - 1)
 	largeChunk := pressure.chunks[0]
 	largeChunk.txBytes = make([]byte, int(largePayload))
@@ -249,16 +249,16 @@ func TestDACompleteCommitMatching(t *testing.T) {
 	pressure.completeIntrinsic.payloadBytes = largePayload
 	pressure.completeIntrinsic.totalBytes = largePayload + 1
 	pressure.completeIntrinsic.fee = consensus.Uint128{Hi: 2}
-	f.relay.sets[pressureID] = pressure
+	f.relay.relations.putRecord(pressureID, pressure)
 	f.relay.completeBytes += largePayload - 1
 	f.relay.pinnedPayloadBytes += largePayload - 1
 	f.relay.prefetch.indexes = map[[32]byte]map[uint16]string{{11}: {0: "victim"}, {12}: {0: "victim"}, survivorID: {0: "survivor"}}
 	f.relay.prefetch.expires = map[[32]byte]time.Time{{11}: time.Unix(3, 0), {12}: time.Unix(4, 0), survivorID: time.Unix(5, 0)}
 	beforeBytes, beforeCount, beforePayload := f.relay.completeBytes, f.relay.completeCount, f.relay.pinnedPayloadBytes
 	beforeRecords, beforeSequence := f.relay.records, f.relay.nextReceivedTime
-	beforeLocators, beforeHigh := len(f.relay.locators), f.mp.pendingOutpoints.tokenHighWater
-	survivor := f.relay.sets[survivorID]
-	pressure = f.relay.sets[pressureID]
+	beforeLocators, beforeHigh := f.relay.relations.locatorCount, f.mp.pendingOutpoints.tokenHighWater
+	survivor := f.relay.relations.recordValue(survivorID)
+	pressure = f.relay.relations.recordValue(pressureID)
 	survivingClaims := make(map[PendingOutpointToken]pendingOutpointClaim)
 	for _, record := range []daRelaySetRecord{survivor, pressure} {
 		for _, member := range []*daRelayMemberIdentity{record.commit.member, record.chunks[0].member} {
@@ -278,7 +278,7 @@ func TestDACompleteCommitMatching(t *testing.T) {
 	if f.relay.completeBytes != beforeBytes-removedBytes+p.result.prepared.set.totalBytes || f.relay.completeCount != beforeCount-1 || f.relay.pinnedPayloadBytes != beforePayload || f.relay.records != beforeRecords+1 || f.relay.nextReceivedTime != beforeSequence+1 {
 		t.Fatal("exact two-victim C counters and accepted sequence")
 	}
-	if len(f.relay.sets) != 65535 || len(f.relay.locators) != beforeLocators-3 || f.relay.locators[c.member.member.txid] != c.member.locator || !reflect.DeepEqual(f.relay.sets[survivorID], survivor) || !reflect.DeepEqual(f.relay.sets[pressureID], pressure) {
+	if f.relay.relations.setCount != 65535 || f.relay.relations.locatorCount != beforeLocators-3 || f.relay.relations.locatorValue(c.member.member.txid) != c.member.locator || !reflect.DeepEqual(f.relay.relations.recordValue(survivorID), survivor) || !reflect.DeepEqual(f.relay.relations.recordValue(pressureID), pressure) {
 		t.Fatal("sparse two-victim records and locators")
 	}
 	o := f.mp.pendingOutpoints
@@ -292,7 +292,7 @@ func TestDACompleteCommitMatching(t *testing.T) {
 		}
 	}
 	for _, record := range victims {
-		if _, present := f.relay.sets[record.daID]; present {
+		if _, present := f.relay.relations.record(record.daID); present {
 			t.Fatal("selected C victim survived")
 		}
 		if _, present := f.relay.prefetch.indexes[record.daID]; present {
@@ -302,7 +302,7 @@ func TestDACompleteCommitMatching(t *testing.T) {
 			t.Fatal("selected C prefetch expiry survived")
 		}
 		for _, member := range []*daRelayMemberIdentity{record.commit.member, record.chunks[0].member} {
-			if _, present := f.relay.locators[member.txid]; present || o.byToken[member.token] != nil {
+			if _, present := f.relay.relations.locator(member.txid); present || o.byToken[member.token] != nil {
 				t.Fatal("selected C locator or claim survived")
 			}
 			for _, input := range member.inputs {
@@ -343,7 +343,7 @@ func TestDAStateCIntrinsicOwnership(t *testing.T) {
 			} else {
 				f.admit(commit, DetachedReorgDAProvenance())
 			}
-			prior := f.relay.sets[id]
+			prior := f.relay.relations.recordValue(id)
 			if prior.completeIntrinsic != (daCompleteCapacitySet{}) {
 				t.Fatal("State A/B carried a complete intrinsic descriptor")
 			}
@@ -373,7 +373,7 @@ func TestDAStateCIntrinsicOwnership(t *testing.T) {
 			result.prepared.image.next.chunks[0] = imageChunk
 			daCompleteCommitTestApply(t, f, a, plan)
 
-			record := f.relay.sets[id]
+			record := f.relay.relations.recordValue(id)
 			wantIntrinsic := intrinsicFromRetainedOracle(t, record, id, [][]byte{payload}, 1)
 			if record.completeIntrinsic != wantIntrinsic {
 				t.Fatalf("published State C intrinsic=%+v, want %+v", record.completeIntrinsic, wantIntrinsic)
@@ -394,7 +394,7 @@ func TestDAStateCIntrinsicOwnership(t *testing.T) {
 			provided[0].Chunks[0].Tx[0] ^= 1
 			provided[0].Chunks = nil
 			again := f.relay.CompleteSetCandidates(math.MaxUint64)
-			if len(again) != 1 || len(again[0].Chunks) != 1 || !bytes.Equal(again[0].CommitTx, wantCommitRaw) || !bytes.Equal(again[0].Chunks[0].Tx, wantChunkRaw) || f.relay.sets[id].completeIntrinsic != wantIntrinsic {
+			if len(again) != 1 || len(again[0].Chunks) != 1 || !bytes.Equal(again[0].CommitTx, wantCommitRaw) || !bytes.Equal(again[0].Chunks[0].Tx, wantChunkRaw) || f.relay.relations.recordValue(id).completeIntrinsic != wantIntrinsic {
 				t.Fatal("provider snapshot aliases retained State C")
 			}
 			a.Close()
@@ -432,21 +432,21 @@ func TestDACompleteCommitCapacity(t *testing.T) {
 	f.relay.records = math.MaxUint64
 	o := f.mp.pendingOutpoints
 	beforeSequence, beforeHigh, beforeRecords := f.relay.nextReceivedTime, o.tokenHighWater, f.relay.records
-	beforeTarget := f.relay.sets[[32]byte{1}].cloneOwnerReady()
-	firstC := f.relay.sets[[32]byte{2}]
+	beforeTarget := f.relay.relations.recordValue([32]byte{1}).cloneOwnerReady()
+	firstC := f.relay.relations.recordValue([32]byte{2})
 	invalidC := firstC
 	invalidC.completeIntrinsic.totalBytes++
-	f.relay.sets[invalidC.daID] = invalidC
+	f.relay.relations.putRecord(invalidC.daID, invalidC)
 	requireDACompleteImageRefusal(t, f, a, p.result)
-	f.relay.sets[firstC.daID] = firstC
+	f.relay.relations.putRecord(firstC.daID, firstC)
 	out, rejected, err := f.relay.applyDACompleteCommit(a, p)
 	if out != (daRelayAdmissionOutcome{}) || !rejected || err != nil {
 		t.Fatal("capacity rejection after Reserve", out, rejected, err)
 	}
-	if o.tokenHighWater != beforeHigh+1 || o.byToken[PendingOutpointToken{owner: o, seq: beforeHigh + 1}] != nil || f.relay.nextReceivedTime != beforeSequence || f.relay.records != beforeRecords || f.relay.completeCount != 65536 || f.relay.completeBytes != 131072 || f.relay.pinnedPayloadBytes != 65536 || !reflect.DeepEqual(f.relay.sets[[32]byte{1}], beforeTarget) || !reflect.DeepEqual(f.relay.sets[[32]byte{2}], firstC) || len(f.relay.sets) != 65537 {
+	if o.tokenHighWater != beforeHigh+1 || o.byToken[PendingOutpointToken{owner: o, seq: beforeHigh + 1}] != nil || f.relay.nextReceivedTime != beforeSequence || f.relay.records != beforeRecords || f.relay.completeCount != 65536 || f.relay.completeBytes != 131072 || f.relay.pinnedPayloadBytes != 65536 || !reflect.DeepEqual(f.relay.relations.recordValue([32]byte{1}), beforeTarget) || !reflect.DeepEqual(f.relay.relations.recordValue([32]byte{2}), firstC) || f.relay.relations.setCount != 65537 {
 		t.Fatal("capacity refusal changed DA image, old claims, or sequence")
 	}
-	if _, found := f.relay.locators[c.member.member.txid]; found || len(p.owner.commit.victims) != 0 || a.guard.state.Load() != daAdmissionResolved {
+	if _, found := f.relay.relations.locator(c.member.member.txid); found || len(p.owner.commit.victims) != 0 || a.guard.state.Load() != daAdmissionResolved {
 		t.Fatal("capacity refusal leaked candidate locator or token")
 	}
 }
@@ -489,12 +489,12 @@ func TestDACompleteCommitOwnerOrder(t *testing.T) {
 				}
 				daCompleteCommitFillCountLimit(f, 65536, fee)
 				if name == "capacity conflict" {
-					low := f.relay.sets[[32]byte{2}]
+					low := f.relay.relations.recordValue([32]byte{2})
 					low.commit.member.fee = consensus.Uint128{Lo: 1}
 					low.chunks[0].member.fee = consensus.Uint128{Lo: 1}
 					low.completeIntrinsic.fee = consensus.Uint128{Lo: 2}
-					f.relay.sets[low.daID] = low
-					pressure := f.relay.sets[[32]byte{2, 1}]
+					f.relay.relations.putRecord(low.daID, low)
+					pressure := f.relay.relations.recordValue([32]byte{2, 1})
 					const size = 96_000_000 - 65_535
 					// Scalar-only State C pressure isolates owner order; it is not a canonical raw-byte or resource fixture.
 					chunk := pressure.chunks[0]
@@ -504,7 +504,7 @@ func TestDACompleteCommitOwnerOrder(t *testing.T) {
 					pressure.commit.member.fee = chunk.member.fee
 					pressure.payloadBytes, pressure.completeIntrinsic.payloadBytes = size, size
 					pressure.completeIntrinsic.totalBytes, pressure.completeIntrinsic.fee = 1+size, consensus.Uint128{Lo: 2_000_000_000_000}
-					f.relay.sets[pressure.daID] = pressure
+					f.relay.relations.putRecord(pressure.daID, pressure)
 					f.relay.completeBytes += size - 1
 					f.relay.pinnedPayloadBytes += size - 1
 					candidate := p.result.prepared.set
@@ -519,7 +519,7 @@ func TestDACompleteCommitOwnerOrder(t *testing.T) {
 						t.Fatal("low C prefix still cannot fit payload", err, planErr)
 					}
 				}
-				victim := f.relay.sets[[32]byte{2}].commit.member
+				victim := f.relay.relations.recordValue([32]byte{2}).commit.member
 				claim := o.byToken[victim.token]
 				delete(o.byOutpoint, claim.inputs[0])
 				claim.inputs[0] = a.snapshot.Inputs[0]
@@ -546,7 +546,7 @@ func TestDACompleteCommitOwnerOrder(t *testing.T) {
 				o.tokenHighWater = math.MaxUint64
 				want = "pending-outpoint token sequence exhausted"
 			case "selected victim", "capacity conflict":
-				want, kind = fmt.Sprintf("mempool double-spend conflict with %x", f.relay.sets[[32]byte{2}].commit.member.txid), "conflict"
+				want, kind = fmt.Sprintf("mempool double-spend conflict with %x", f.relay.relations.recordValue([32]byte{2}).commit.member.txid), "conflict"
 			default:
 				mustReserve(t, o, [32]byte{81}, a.snapshot.Inputs[1])
 				mustReserve(t, o, [32]byte{80}, a.snapshot.Inputs[0])
@@ -597,9 +597,9 @@ func TestDACompleteCommitStale(t *testing.T) {
 		f, a, c := daCompleteTestCandidate(t, true, 0, 1)
 		p, _ := daCompleteCommitTestPlan(t, f, a, c)
 		f.relay.nextReceivedTime = math.MaxUint64
-		resident := f.relay.sets[[32]byte{11}]
+		resident := f.relay.relations.recordValue([32]byte{11})
 		resident.completeIntrinsic.totalBytes++
-		f.relay.sets[resident.daID] = resident
+		f.relay.relations.putRecord(resident.daID, resident)
 		before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
 		out, rejected, err := f.relay.applyDACompleteCommit(a, p)
 		if out != (daRelayAdmissionOutcome{}) || rejected || !daCompleteTestError(err, errDARelayArithmeticOverflow) || a.guard.state.Load() != daAdmissionOpen {
@@ -613,7 +613,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 		f.relay.nextReceivedTime = math.MaxUint64 - 1
 		beforeRecords, beforeHigh := f.relay.records, f.mp.pendingOutpoints.tokenHighWater
 		daCompleteCommitTestApply(t, f, a, p)
-		if f.relay.nextReceivedTime != math.MaxUint64 || f.relay.records != beforeRecords+1 || f.relay.sets[[32]byte{1}].receivedTime != 1 || f.mp.pendingOutpoints.tokenHighWater != beforeHigh+1 {
+		if f.relay.nextReceivedTime != math.MaxUint64 || f.relay.records != beforeRecords+1 || f.relay.relations.recordValue([32]byte{1}).receivedTime != 1 || f.mp.pendingOutpoints.tokenHighWater != beforeHigh+1 {
 			t.Fatal("last accepted value or first received sequence")
 		}
 	})
@@ -621,7 +621,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 		t.Run("target "+field, func(t *testing.T) {
 			f, a, c := daCompleteTestCandidate(t, true, 0, 0)
 			p, _ := daCompleteCommitTestPlan(t, f, a, c)
-			r := f.relay.sets[[32]byte{1}].cloneOwnerReady()
+			r := f.relay.relations.recordValue([32]byte{1}).cloneOwnerReady()
 			switch field {
 			case "daID":
 				r.daID[0]++
@@ -656,11 +656,11 @@ func TestDACompleteCommitStale(t *testing.T) {
 			case "owner":
 				f.mp.pendingOutpoints = &PendingOutpointOwner{}
 			case "locator":
-				delete(f.relay.locators, r.chunks[0].member.txid)
+				f.relay.relations.removeLocator(r.chunks[0].member.txid)
 			case "extra locator":
-				f.relay.locators[[32]byte{99}] = daRelayLocator{daID: [32]byte{1}, kind: daRelayLocatorChunk}
+				f.relay.relations.putLocator([32]byte{99}, daRelayLocator{daID: [32]byte{1}, kind: daRelayLocatorChunk})
 			}
-			f.relay.sets[[32]byte{1}] = r
+			f.relay.relations.putRecord([32]byte{1}, r)
 			o := a.guard.owner
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(o)
 			out, rejected, err := f.relay.applyDACompleteCommit(a, p)
@@ -694,14 +694,14 @@ func TestDACompleteCommitStale(t *testing.T) {
 			f, a, c := daCompleteTestCandidate(t, true, 1, 0)
 			p, _ := daCompleteCommitTestPlan(t, f, a, c)
 			o := f.mp.pendingOutpoints
-			member := f.relay.sets[[32]byte{1}].chunks[0].member
+			member := f.relay.relations.recordValue([32]byte{1}).chunks[0].member
 			want := "DA victim claim mismatch"
 			switch field {
 			case "survivor input", "baseline before survivor":
 				delete(o.byOutpoint, member.inputs[0])
 				want = "DA victim input mismatch"
 			case "victim before baseline":
-				member = f.relay.sets[[32]byte{1}].chunks[3].member
+				member = f.relay.relations.recordValue([32]byte{1}).chunks[3].member
 				o.byToken[member.token].finalized = false
 			case "survivor token":
 				o.byToken[member.token].finalized = false
@@ -726,7 +726,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 			}
 			p, _ := daCompleteCommitTestPlan(t, f, a, c)
 			id := [32]byte{11}
-			r := f.relay.sets[id].cloneOwnerReady()
+			r := f.relay.relations.recordValue(id).cloneOwnerReady()
 			o := f.mp.pendingOutpoints
 			switch field {
 			case "C survivor intrinsic":
@@ -743,7 +743,7 @@ func TestDACompleteCommitStale(t *testing.T) {
 			if field == "C victim claim before baseline" {
 				f.relay.records++
 			}
-			f.relay.sets[id] = r
+			f.relay.relations.putRecord(id, r)
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(o)
 			out, rejected, err := f.relay.applyDACompleteCommit(a, p)
 			if field == "C survivor intrinsic" || field == "C survivor payload nilness" {
@@ -789,9 +789,9 @@ func daCompleteCommitPhysicalVictims(t *testing.T, count int) (*daNonReplayFixtu
 	for i := 0; i < count; i++ {
 		id := [32]byte{byte(11 + i)}
 		f.completeReplayPinned(id)
-		r := f.relay.sets[id]
+		r := f.relay.relations.recordValue(id)
 		r.wireBytes = 0
-		f.relay.sets[id] = r
+		f.relay.relations.putRecord(id, r)
 		residents = append(residents, r)
 		total += uint64(len(r.commit.txBytes) + len(r.chunks[0].txBytes))
 	}
@@ -900,7 +900,7 @@ func TestDACompleteCommitMismatch(t *testing.T) {
 			t.Fatal("chunk-last rejection before sequence and Reserve", err)
 		}
 		requireDANonReplayUnchanged(t, f.relay, f.mp.pendingOutpoints, before, owner)
-		if !reflect.DeepEqual(f.relay.sets[id], before.sets[id]) || f.relay.locators[first.txid] != before.locators[first.txid] {
+		if !reflect.DeepEqual(f.relay.relations.recordValue(id), before.sets[id]) || f.relay.relations.locatorValue(first.txid) != before.locators[first.txid] {
 			t.Fatal("retained B sibling changed on chunk-last mismatch")
 		}
 	})
@@ -947,9 +947,9 @@ func TestDACompleteCommitMismatchOrder(t *testing.T) {
 			kind := TxAdmitErrorKind("unavailable")
 			switch name {
 			case "stale A":
-				r := f.relay.sets[[32]byte{1}]
+				r := f.relay.relations.recordValue([32]byte{1})
 				r.ttlBlocksRemaining--
-				f.relay.sets[r.daID] = r
+				f.relay.relations.putRecord(r.daID, r)
 				o.inTransition = true
 				want, reserve = "retained DA record moved while this admission was planned", false
 			case "owner":
@@ -959,7 +959,7 @@ func TestDACompleteCommitMismatchOrder(t *testing.T) {
 				mustReserve(t, o, [32]byte{80}, a.snapshot.Inputs[0])
 				want, reserve, kind = fmt.Sprintf("mempool double-spend conflict with %x", [32]byte{80}), false, "conflict"
 			case "post reserve":
-				member := f.relay.sets[[32]byte{1}].chunks[0].member
+				member := f.relay.relations.recordValue([32]byte{1}).chunks[0].member
 				o.byToken[member.token].finalized = false
 				want = "DA victim claim mismatch"
 			}
@@ -995,11 +995,11 @@ func TestDACompleteCommitLifecycle(t *testing.T) {
 		var p *daCompleteCommitPlan
 		if final {
 			p, _ = daCompleteCommitTestPlan(t, f, a, c)
-			target := f.relay.sets[[32]byte{1}]
+			target := f.relay.relations.recordValue([32]byte{1})
 			target.revision++
-			f.relay.sets[target.daID] = target
+			f.relay.relations.putRecord(target.daID, target)
 		}
-		f.relay.locators[c.member.member.txid] = c.member.locator
+		f.relay.relations.putLocator(c.member.member.txid, c.member.locator)
 		if !final {
 			source, duplicate, err := f.relay.captureDACompleteSnapshot(c)
 			if err != nil {
@@ -1132,7 +1132,7 @@ func TestDACompleteCommitPreparation(t *testing.T) {
 	result.prepared.image.next.commit.member.inputs[0].Vout++
 	wantRaw, wantInputs := slices.Clone(a.snapshot.TxBytes), slices.Clone(a.snapshot.Inputs)
 	daCompleteCommitTestApply(t, f, a, p)
-	record := f.relay.sets[[32]byte{1}]
+	record := f.relay.relations.recordValue([32]byte{1})
 	if !bytes.Equal(record.commit.txBytes, wantRaw) || !slices.Equal(record.commit.member.inputs, wantInputs) {
 		t.Fatal("prepared candidate aliased caller result")
 	}
@@ -1208,7 +1208,7 @@ func TestDACompleteCommitUnrelatedState(t *testing.T) {
 			case operation == "insert B":
 				f.admit(f.signed(daNonReplayTxSpec{kind: 1, daID: [32]byte{43}, chunkCount: 2, commitment: [32]byte{9}, commitmentOutputs: 1}), LocalDAProvenance())
 			case strings.HasPrefix(operation, "delete"):
-				r := f.relay.sets[id]
+				r := f.relay.relations.recordValue(id)
 				f.relay.mu.Lock()
 				victims, err := f.relay.removeOwnerReadyWholeRecordLocked(r)
 				f.relay.mu.Unlock()
@@ -1222,22 +1222,22 @@ func TestDACompleteCommitUnrelatedState(t *testing.T) {
 				}
 				o.mu.Unlock()
 			case strings.HasPrefix(operation, "replace"):
-				r := f.relay.sets[id].cloneOwnerReady()
+				r := f.relay.relations.recordValue(id).cloneOwnerReady()
 				f.relay.records++
 				r.revision = f.relay.records
-				f.relay.sets[id] = r
+				f.relay.relations.putRecord(id, r)
 			case strings.HasPrefix(operation, "TTL"):
-				r := f.relay.sets[id]
+				r := f.relay.relations.recordValue(id)
 				r.ttlBlocksRemaining--
-				f.relay.sets[id] = r
+				f.relay.relations.putRecord(id, r)
 			case operation == "locator":
-				delete(f.relay.locators, x.txid)
+				f.relay.relations.removeLocator(x.txid)
 			}
 			f.relay.prefetch.indexes = map[[32]byte]map[uint16]string{{1}: {0: "candidate"}, {40}: {0: "live"}}
 			f.relay.prefetch.expires = map[[32]byte]time.Time{{1}: time.Unix(3, 0), {40}: time.Unix(4, 0)}
 			f.relay.rejectCache.entries = map[[32]byte]struct{}{{99}: {}}
 			before, owner := daRelayStateSnapshot(f.relay), cloneDAAdmissionOwner(f.mp.pendingOutpoints)
-			oldCharge, err := f.relay.sets[[32]byte{1}].ownerReadyAccounting()
+			oldCharge, err := f.relay.relations.recordValue([32]byte{1}).ownerReadyAccounting()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1274,16 +1274,16 @@ func TestDACompleteLiveCapacity(t *testing.T) {
 		id := [32]byte{11}
 		f.completeReplayPinned(id)
 		p, _ := daCompleteCommitTestPlan(t, f, a, c)
-		r := f.relay.sets[id]
+		r := f.relay.relations.recordValue(id)
 		for _, row := range r.locatorRows() {
 			member := r.commit.member
 			if row.locator.kind == daRelayLocatorChunk {
 				member = r.chunks[row.locator.chunkIndex].member
 			}
 			f.mp.pendingOutpoints.dropClaimLocked(member.token)
-			delete(f.relay.locators, row.txid)
+			f.relay.relations.removeLocator(row.txid)
 		}
-		delete(f.relay.sets, id)
+		f.relay.relations.removeRecord(id)
 		f.relay.completeBytes -= r.completeIntrinsic.totalBytes
 		f.relay.completeCount--
 		f.relay.pinnedPayloadBytes -= r.completeIntrinsic.payloadBytes
@@ -1337,22 +1337,23 @@ func TestDACompleteSparsePublication(t *testing.T) {
 				daCompleteCommitLocatorHistory(s, shape == "tombstone")
 				for i := byte(60); i < 67; i++ {
 					id := [32]byte{i}
-					s.sets[id] = daRelaySetRecord{daID: id, state: daRelayStateOrphanChunks}
+					s.relations.putRecord(id, daRelaySetRecord{daID: id, state: daRelayStateOrphanChunks})
 					s.orphanBytesByDAID[id] = 1
 					s.orphanBytesByPeerQuotaKey[fmt.Sprint(i)] = 1
 				}
-				beforeLocators := maps.Clone(s.locators)
-				beforeSets, beforeDAID, beforePeer := maps.Clone(s.sets), maps.Clone(s.orphanBytesByDAID), maps.Clone(s.orphanBytesByPeerQuotaKey)
-				beforeRecord := s.sets[[32]byte{1}].cloneOwnerReady()
+				beforeLocators := maps.Collect(s.relations.locatorRows())
+				beforeSets, beforeDAID, beforePeer := maps.Collect(s.relations.records()), maps.Clone(s.orphanBytesByDAID), maps.Clone(s.orphanBytesByPeerQuotaKey)
+				beforeRecord := s.relations.recordValue([32]byte{1}).cloneOwnerReady()
 				beforeSequence, beforeRevision, beforeHigh := s.nextReceivedTime, s.records, o.tokenHighWater
 				beforeCounters := [6]uint64{s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes, s.completeBytes, s.completeCount, s.pinnedPayloadBytes}
 				if err := s.preflightDACompleteCommit(p); err != nil {
 					s.mu.Unlock()
 					t.Fatal(err)
 				}
-				if s.locators[c.member.member.txid] != c.member.locator {
+				capacity := s.relations.locators[c.member.member.txid]
+				if capacity == nil || capacity.present || !maps.Equal(maps.Collect(s.relations.locatorRows()), beforeLocators) || !reflect.DeepEqual(maps.Collect(s.relations.records()), beforeSets) {
 					s.mu.Unlock()
-					t.Fatal("missing provisional locator")
+					t.Fatal("preflight capacity changed logical DA image")
 				}
 				switch refusal {
 				case "owner":
@@ -1360,7 +1361,7 @@ func TestDACompleteSparsePublication(t *testing.T) {
 				case "guard CAS":
 					a.guard.state.Store(daAdmissionResolved)
 				default:
-					member := s.sets[[32]byte{1}].chunks[0].member
+					member := s.relations.recordValue([32]byte{1}).chunks[0].member
 					o.byToken[member.token].finalized = false
 				}
 				beforeOwner := cloneDAAdmissionOwner(o)
@@ -1374,7 +1375,7 @@ func TestDACompleteSparsePublication(t *testing.T) {
 				if out != (daRelayAdmissionOutcome{}) || rejected || !exactError || o.tokenHighWater != high || s.nextReceivedTime != beforeSequence || s.records != beforeRevision || a.guard.state.Load() != daAdmissionResolved {
 					t.Fatal("post-provisional refusal tuple and high-water", shape, refusal, err)
 				}
-				if !maps.Equal(s.locators, beforeLocators) || !reflect.DeepEqual(s.sets, beforeSets) || !maps.Equal(s.orphanBytesByDAID, beforeDAID) || !maps.Equal(s.orphanBytesByPeerQuotaKey, beforePeer) || !reflect.DeepEqual(s.sets[[32]byte{1}], beforeRecord) || ([6]uint64{s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes, s.completeBytes, s.completeCount, s.pinnedPayloadBytes}) != beforeCounters || !reflect.DeepEqual(o.byToken, beforeOwner.byToken) || !reflect.DeepEqual(o.byOutpoint, beforeOwner.byOutpoint) || o.byToken[PendingOutpointToken{owner: o, seq: beforeHigh + 1}] != nil {
+				if !maps.Equal(maps.Collect(s.relations.locatorRows()), beforeLocators) || !reflect.DeepEqual(maps.Collect(s.relations.records()), beforeSets) || !maps.Equal(s.orphanBytesByDAID, beforeDAID) || !maps.Equal(s.orphanBytesByPeerQuotaKey, beforePeer) || !reflect.DeepEqual(s.relations.recordValue([32]byte{1}), beforeRecord) || ([6]uint64{s.stagedBytes, s.orphanBytes, s.orphanCommitOverheadBytes, s.completeBytes, s.completeCount, s.pinnedPayloadBytes}) != beforeCounters || !reflect.DeepEqual(o.byToken, beforeOwner.byToken) || !reflect.DeepEqual(o.byOutpoint, beforeOwner.byOutpoint) || o.byToken[PendingOutpointToken{owner: o, seq: beforeHigh + 1}] != nil {
 					t.Fatal("post-provisional refusal leaked locator, record or candidate claim")
 				}
 			})
@@ -1411,7 +1412,7 @@ func TestDACompleteTailAllocations(t *testing.T) {
 					id := [32]byte{i}
 					switch shape {
 					case "small":
-						s.sets[id] = daRelaySetRecord{daID: id, state: daRelayStateOrphanChunks}
+						s.relations.putRecord(id, daRelaySetRecord{daID: id, state: daRelayStateOrphanChunks})
 					case "full":
 						s.orphanBytesByDAID[id] = 1
 					case "tombstone":
@@ -1423,14 +1424,14 @@ func TestDACompleteTailAllocations(t *testing.T) {
 				}
 				// Counter keys are deleted in normal acceptance, so measure their preflight writes directly.
 				_, affected := p.placement.peerBytes["retained"]
-				shapeOK := (shape == "small" && len(s.sets) == 8 && len(s.locators) == 1) ||
-					(shape == "full" && len(s.orphanBytesByDAID) == 8 && len(s.locators) == 33) ||
-					(shape == "tombstone" && len(s.orphanBytesByPeerQuotaKey) == 8 && len(s.locators) == 17 && affected)
+				shapeOK := (shape == "small" && s.relations.setCount == 8 && s.relations.locatorCount == 1) ||
+					(shape == "full" && len(s.orphanBytesByDAID) == 8 && s.relations.locatorCount == 33) ||
+					(shape == "tombstone" && len(s.orphanBytesByPeerQuotaKey) == 8 && s.relations.locatorCount == 17 && affected)
 				if !shapeOK {
 					s.mu.Unlock()
 					t.Fatal("small/full/tombstone preflight shape", shape)
 				}
-				item := tailFixture{f: f, a: a, p: p, locators: maps.Clone(s.locators), records: s.records, sequence: s.nextReceivedTime, high: o.tokenHighWater}
+				item := tailFixture{f: f, a: a, p: p, locators: maps.Collect(s.relations.locatorRows()), records: s.records, sequence: s.nextReceivedTime, high: o.tokenHighWater}
 				return item
 			}
 			// Go 1.26 AllocsPerRun first calls f once without measuring. Both calls consume distinct prepared states.
@@ -1448,7 +1449,8 @@ func TestDACompleteTailAllocations(t *testing.T) {
 			for i := range items {
 				item := &items[i]
 				s, o := item.f.relay, item.f.mp.pendingOutpoints
-				if item.preflightErr != nil || s.locators[item.p.source.candidate.member.member.txid] != item.p.source.candidate.member.locator {
+				capacity := s.relations.locators[item.p.source.candidate.member.member.txid]
+				if item.preflightErr != nil || capacity == nil || capacity.present || !maps.Equal(maps.Collect(s.relations.locatorRows()), item.locators) {
 					t.Fatal("candidate locator not preflighted", item.preflightErr)
 				}
 				if !item.a.guard.state.CompareAndSwap(daAdmissionOpen, daAdmissionAttempting) {
@@ -1480,11 +1482,11 @@ func TestDACompleteTailAllocations(t *testing.T) {
 				if item.err != nil || item.rejected || item.out != (daRelayAdmissionOutcome{daID: [32]byte{1}, disposition: daRelayAdmissionRetained}) || item.a.guard.state.Load() != daAdmissionResolved || o.tokenHighWater != token.seq || o.byToken[token] == nil || !o.byToken[token].finalized {
 					t.Fatal("first successful tail did not finalize candidate", item.err)
 				}
-				if s.records != item.records+1 || s.nextReceivedTime != item.sequence+1 || s.completeCount != 1 || s.completeBytes != item.p.result.prepared.set.totalBytes || s.pinnedPayloadBytes != 16 || s.sets[[32]byte{1}].commit.member.token != token || s.locators[item.p.source.candidate.member.member.txid] != item.p.source.candidate.member.locator || len(s.locators) != len(item.locators)+1 {
+				if s.records != item.records+1 || s.nextReceivedTime != item.sequence+1 || s.completeCount != 1 || s.completeBytes != item.p.result.prepared.set.totalBytes || s.pinnedPayloadBytes != 16 || s.relations.recordValue([32]byte{1}).commit.member.token != token || s.relations.locatorValue(item.p.source.candidate.member.member.txid) != item.p.source.candidate.member.locator || s.relations.locatorCount != len(item.locators)+1 {
 					t.Fatal("first successful tail did not publish exact DA delta")
 				}
 				for txid, locator := range item.locators {
-					if s.locators[txid] != locator {
+					if s.relations.locatorValue(txid) != locator {
 						t.Fatal("preexisting locator changed")
 					}
 				}
@@ -1555,7 +1557,7 @@ func TestDACompleteCommitAtomicity(t *testing.T) {
 		close(readDA)
 		f.relay.mu.Lock()
 		defer f.relay.mu.Unlock()
-		if f.relay.sets[[32]byte{1}].state != 2 || f.relay.nextReceivedTime != beforeSequence+1 || len(f.relay.locators) != 2 {
+		if f.relay.relations.recordValue([32]byte{1}).state != 2 || f.relay.nextReceivedTime != beforeSequence+1 || f.relay.relations.locatorCount != 2 {
 			t.Error("DA-only reader observed partial publication")
 		}
 	}()
@@ -1633,17 +1635,17 @@ func TestDACompleteCommitStructure(t *testing.T) {
 			switch n := n.(type) {
 			case *ast.AssignStmt:
 				for _, lhs := range n.Lhs {
-					if star, ok := ast.Unparen(lhs).(*ast.StarExpr); ok {
-						if id, ok := ast.Unparen(star.X).(*ast.Ident); ok && id.Name == "s" {
-							valid = false
-						}
+					if _, ok := ast.Unparen(lhs).(*ast.StarExpr); ok {
+						valid = false
 					}
 					if index, ok := ast.Unparen(lhs).(*ast.IndexExpr); ok {
-						if sel, ok := ast.Unparen(index.X).(*ast.SelectorExpr); ok && sel.Sel.Name == "locators" {
-							valid = false
+						if sel, ok := ast.Unparen(index.X).(*ast.SelectorExpr); ok && slices.Contains([]string{"sets", "locators"}, sel.Sel.Name) {
+							owner, ownerOK := ast.Unparen(sel.X).(*ast.Ident)
+							key, keyOK := ast.Unparen(index.Index).(*ast.SelectorExpr)
+							valid = ownerOK && owner.Name == "r" && keyOK && ((sel.Sel.Name == "sets" && key.Sel.Name == "key") || (sel.Sel.Name == "locators" && key.Sel.Name == "txid")) && valid
 						}
 					}
-					if sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr); ok && slices.Contains([]string{"sets", "locators", "orphanBytesByPeerQuotaKey", "orphanBytesByDAID", "prefetch"}, sel.Sel.Name) {
+					if sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr); ok && slices.Contains([]string{"relations", "sets", "locators", "orphanBytesByPeerQuotaKey", "orphanBytesByDAID", "prefetch"}, sel.Sel.Name) {
 						valid = false
 					}
 				}
@@ -1708,6 +1710,9 @@ func TestDACompleteCommitStructure(t *testing.T) {
 		{"x := append([]byte(nil), source...); _ = x", false},
 		{"alias := prepareDAAdmissionCommit; alias(a, victims)", false},
 		{"func() { make([]byte, 1) }()", false},
+		{"p := projected; s.relations = (p.relations)", false},
+		{"p := projected; (s.relations) = p.relations", false},
+		{"alias := &s.relations; *alias = projected.relations", false},
 		{"p := projected; s.sets = (p.sets)", false},
 		{"x := PendingOutpointToken{}; _ = x", true},
 		{"p := projected; *s = (*p)", false},
