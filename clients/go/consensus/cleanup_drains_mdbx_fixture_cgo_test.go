@@ -749,7 +749,9 @@ func generationCrossed(t *testing.T, out selectedSideOutcome, causes string, dri
 	}
 }
 
-func generationNativeReservations(t *testing.T) { generationNativeMatrix(t, true, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) }) }
+func generationNativeReservations(t *testing.T) {
+	generationNativeMatrix(t, true, func(w *generationWorld) selectedSideOutcome { return CleanupGenerationMDBX(w.s, w.owner, 1, 1) })
+}
 
 func TestCleanupGenerationMDBXReadbackDrift(t *testing.T) {
 	t.Run("R16b", func(t *testing.T) { generationDrift(t, "body", 4, false) })

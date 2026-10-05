@@ -24,7 +24,9 @@ type generationWorld struct {
 	rows  []mdbx.Mutation
 }
 
-func generationAuthority() mdbx.StorageAuthorityV1 { return mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 4, Phase: 2, Lifecycle: 1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}} }
+func generationAuthority() mdbx.StorageAuthorityV1 {
+	return mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 4, Phase: 2, Lifecycle: 1, Cleanup: &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}}
+}
 
 func generationNew(t *testing.T, a mdbx.StorageAuthorityV1, rows ...mdbx.Mutation) *generationWorld {
 	t.Helper()
@@ -52,7 +54,9 @@ func generationNewConfig(t *testing.T, cfg mdbx.ConfigV1, a mdbx.StorageAuthorit
 	return w
 }
 
-func generationRow(rank uint8, key, value []byte) mdbx.Mutation { return mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: 2, Literal: value} }
+func generationRow(rank uint8, key, value []byte) mdbx.Mutation {
+	return mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: 2, Literal: value}
+}
 
 func generationBaseProjection() (mdbx.StorageAuthorityV1, [32]byte, []mdbx.Mutation) {
 	hash, rows := generationProjection(2, 5, 55)
