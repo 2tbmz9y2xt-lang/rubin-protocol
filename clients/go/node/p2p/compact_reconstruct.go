@@ -76,11 +76,15 @@ func reconstructCompactCandidates(block cmpctBlockPayload, profile uint64, byteB
 	if err != nil {
 		return outcome, err
 	}
-	result, err := compactCandidateFill(block.ShortIDs, txs, eligible, catalog, mp, da, current, byteBudget)
+	missingLimit := len(block.ShortIDs)
+	if profile == 1 {
+		missingLimit = 4096
+	}
+	result, err := compactCandidateFill(block.ShortIDs, txs, eligible, catalog, mp, da, current, byteBudget, missingLimit)
 	if err != nil {
 		return outcome, err
 	}
-	if profile == 1 && len(result.MissingIndexes) > 4096 {
+	if len(result.MissingIndexes) > missingLimit {
 		return outcome, errCompactRelayMissingRequestTooLarge
 	}
 	outcome.Result = result
@@ -313,7 +317,7 @@ func compactCandidateHydrate(observed compactCandidateObservation, mp *node.Memp
 	return selected, nil
 }
 
-func compactCandidateFill(shortIDs []compactShortID, txs [][]byte, eligible map[compactShortID]int, catalog compactCandidateCatalog, mp *node.Mempool, da *node.DARelayState, current, budget uint64) (compactReconstructionResult, error) {
+func compactCandidateFill(shortIDs []compactShortID, txs [][]byte, eligible map[compactShortID]int, catalog compactCandidateCatalog, mp *node.Mempool, da *node.DARelayState, current, budget uint64, missingLimit int) (compactReconstructionResult, error) {
 	result := compactReconstructionResult{}
 	shortPosition := 0
 	for absolute, prefilled := range txs {
@@ -334,8 +338,10 @@ func compactCandidateFill(shortIDs []compactShortID, txs [][]byte, eligible map[
 			txs[absolute] = raw
 		}
 		if txs[absolute] == nil {
-			result.MissingIndexes = append(result.MissingIndexes, uint64(absolute))
-			result.MissingShortIDs = append(result.MissingShortIDs, sid)
+			// Retain one overflow marker; later source/resource errors precede count refusal.
+			retained := min(len(result.MissingIndexes), missingLimit)
+			result.MissingIndexes = append(result.MissingIndexes[:retained], uint64(absolute))
+			result.MissingShortIDs = append(result.MissingShortIDs[:retained], sid)
 		}
 	}
 	if len(result.MissingIndexes) == 0 {
