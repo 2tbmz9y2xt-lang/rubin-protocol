@@ -339,7 +339,9 @@ func detachedRawDamage(t *testing.T, name string) {
 	case "P11-A3b":
 		rank, index, value = 3, len(rows)-2, []byte{0x03}
 	case "P11-A3c":
-		rank, index, value = 3, len(rows)-2, make([]byte, 116)
+		rank, index = 3, len(rows)-2
+		value = bytes.Clone(rows[index].Literal)
+		value[108] ^= 1
 	case "P11-A3h":
 		value = bytes.Clone(rows[index].Literal)
 		value[108] ^= 1
