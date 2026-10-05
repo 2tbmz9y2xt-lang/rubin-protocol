@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"bytes"
 	"errors"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -30,6 +31,319 @@ type compactReconstructionResult struct {
 	PartialTransactions [][]byte
 	MissingIndexes      []uint64
 	MissingShortIDs     []compactShortID
+}
+
+var (
+	errCompactCandidateInput    = errors.New("invalid compact candidate input")
+	errCompactCandidateFault    = errors.New("compact candidate local fault")
+	errCompactCandidateResource = errors.New("compact candidate resource bound")
+)
+
+type compactCandidateOutcome struct {
+	Result                 compactReconstructionResult
+	D4Complete             bool
+	DistinctCollisionCount uint64
+}
+
+type compactCandidateObservation struct {
+	Identity node.CompactCandidateIdentity
+	ShortID  compactShortID
+	Sources  uint8
+}
+
+type compactCandidateCatalog struct {
+	Observed []compactCandidateObservation
+	Index    map[compactShortID]int
+}
+
+// reconstructCompactCandidates is dormant: qualified ingress and publication
+// belong to a future consumer. It observes owners but changes no live relay state.
+func reconstructCompactCandidates(block cmpctBlockPayload, profile uint64, byteBudget uint64, standard TxPool, da *node.DARelayState) (compactCandidateOutcome, error) {
+	total, txs, prefilledIDs, err := compactCandidateInput(block, profile, byteBudget)
+	if err != nil {
+		return compactCandidateOutcome{}, err
+	}
+	if len(block.ShortIDs) == 0 {
+		return compactCandidateOutcome{Result: compactReconstructionResult{Transactions: txs}}, nil
+	}
+	mp, catalog, err := compactCandidateOwners(standard, da, block.Nonce1, block.Nonce2)
+	if err != nil {
+		return compactCandidateOutcome{}, err
+	}
+	eligible, collisions := compactCandidateEligibility(block, prefilledIDs, catalog)
+	outcome := compactCandidateOutcome{D4Complete: true, DistinctCollisionCount: collisions}
+	current, err := compactCandidateBaseline(total, block.Prefilled, byteBudget)
+	if err != nil {
+		return outcome, err
+	}
+	result, err := compactCandidateFill(block.ShortIDs, txs, eligible, catalog, mp, da, current, byteBudget)
+	if err != nil {
+		return outcome, err
+	}
+	if profile == 1 && len(result.MissingIndexes) > 4096 {
+		return outcome, errCompactRelayMissingRequestTooLarge
+	}
+	outcome.Result = result
+	return outcome, nil
+}
+
+func compactCandidateInput(block cmpctBlockPayload, profile, byteBudget uint64) (uint64, [][]byte, [][32]byte, error) {
+	if profile != 1 && profile != 2 {
+		return 0, nil, nil, errCompactCandidateInput
+	}
+	if byteBudget < 72_000_000 {
+		return 0, nil, nil, errCompactCandidateInput
+	}
+	total, err := compactCandidateEntryCount(profile, uint64(len(block.ShortIDs)), uint64(len(block.Prefilled)))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	txs, ids, err := compactCandidatePrefills(block.Prefilled, profile, total)
+	return total, txs, ids, err
+}
+
+func compactCandidateEntryCount(profile, shortIDCount, prefilledCount uint64) (uint64, error) {
+	var limit uint64
+	switch profile {
+	case 1:
+		limit = 72_000_000
+	case 2:
+		limit = 280_991
+	default:
+		return 0, errCompactCandidateInput
+	}
+	if shortIDCount > ^uint64(0)-prefilledCount {
+		return 0, errCompactCandidateInput
+	}
+	total := shortIDCount + prefilledCount
+	if total == 0 || total > limit {
+		return 0, errCompactCandidateInput
+	}
+	return total, nil
+}
+
+func compactCandidatePrefills(prefilled []prefilledTxn, profile, total uint64) ([][]byte, [][32]byte, error) {
+	seen := make(map[uint64]bool, len(prefilled))
+	ids := make([][32]byte, len(prefilled))
+	var previous uint64
+	for i, entry := range prefilled {
+		if entry.Index >= total || seen[entry.Index] {
+			return nil, nil, errCompactCandidateInput
+		}
+		if profile == 2 && i != 0 && entry.Index <= previous {
+			return nil, nil, errCompactCandidateInput
+		}
+		wtxid, err := compactCandidatePrefillIdentity(entry.Tx)
+		if err != nil {
+			return nil, nil, err
+		}
+		seen[entry.Index], ids[i], previous = true, wtxid, entry.Index
+	}
+	txs := make([][]byte, total)
+	compactFillPrefilledTransactions(txs, prefilled)
+	return txs, ids, nil
+}
+
+func compactCandidatePrefillIdentity(raw []byte) ([32]byte, error) {
+	_, _, wtxid, consumed, err := consensus.ParseTx(raw)
+	if err != nil || consumed != len(raw) {
+		return [32]byte{}, errCompactCandidateInput
+	}
+	return wtxid, nil
+}
+
+func compactCandidateOwners(standard TxPool, da *node.DARelayState, nonce1, nonce2 uint64) (*node.Mempool, compactCandidateCatalog, error) {
+	pool, ok := standard.(*CanonicalMempoolTxPool)
+	if !ok || pool == nil || pool.mempool == nil {
+		return nil, compactCandidateCatalog{}, errCompactCandidateFault
+	}
+	daIDs, ok := da.CompactDAIdentities(pool.mempool)
+	if !ok {
+		return nil, compactCandidateCatalog{}, errCompactCandidateFault
+	}
+	standardIDs, ok := pool.mempool.CompactStandardIdentities()
+	if !ok {
+		return nil, compactCandidateCatalog{}, errCompactCandidateFault
+	}
+	observed := make([]compactCandidateObservation, 0, len(daIDs)+len(standardIDs))
+	for _, source := range []struct {
+		mask       uint8
+		identities []node.CompactCandidateIdentity
+	}{{1, daIDs}, {2, standardIDs}} {
+		for _, identity := range source.identities {
+			observed = append(observed, compactCandidateObservation{Identity: identity, ShortID: compactShortID(consensus.CompactShortID(identity.WTxID, nonce1, nonce2)), Sources: source.mask})
+		}
+	}
+	catalog, err := compactCandidateScan(observed)
+	return pool.mempool, catalog, err
+}
+
+// compactCandidateScan consumes already computed identity/SID observations.
+// Its full scan retains every observer and rejects conflicting TXID metadata.
+func compactCandidateScan(observed []compactCandidateObservation) (compactCandidateCatalog, error) {
+	catalog := compactCandidateCatalog{Observed: make([]compactCandidateObservation, 0, len(observed)), Index: make(map[compactShortID]int, len(observed))}
+	pairs := make(map[[32]byte]int, len(observed))
+	for _, observation := range observed {
+		if at, found := pairs[observation.Identity.WTxID]; found {
+			prior := &catalog.Observed[at]
+			if prior.Identity != observation.Identity || prior.ShortID != observation.ShortID {
+				return compactCandidateCatalog{}, errCompactCandidateFault
+			}
+			prior.Sources |= observation.Sources
+			continue
+		}
+		at := len(catalog.Observed)
+		pairs[observation.Identity.WTxID] = at
+		catalog.Observed = append(catalog.Observed, observation)
+		if _, found := catalog.Index[observation.ShortID]; found {
+			catalog.Index[observation.ShortID] = -1
+			continue
+		}
+		catalog.Index[observation.ShortID] = at
+	}
+	return catalog, nil
+}
+
+func compactCandidateEligibility(block cmpctBlockPayload, prefilledIDs [][32]byte, catalog compactCandidateCatalog) (map[compactShortID]int, uint64) {
+	counts := make(map[compactShortID]uint64, len(block.ShortIDs))
+	for _, sid := range block.ShortIDs {
+		counts[sid]++
+	}
+	blocked := make(map[compactShortID]bool, len(prefilledIDs))
+	for _, wtxid := range prefilledIDs {
+		blocked[compactShortID(consensus.CompactShortID(wtxid, block.Nonce1, block.Nonce2))] = true
+	}
+	eligible := make(map[compactShortID]int, len(counts))
+	var collisions uint64
+	for sid, count := range counts {
+		at, found := catalog.Index[sid]
+		if compactCandidateCollision(count, blocked[sid], at, found) {
+			collisions++
+			eligible[sid] = -1
+			continue
+		}
+		if !found {
+			at = -1
+		}
+		eligible[sid] = at
+	}
+	return eligible, collisions
+}
+
+func compactCandidateCollision(count uint64, prefilled bool, at int, found bool) bool {
+	return count > 1 || prefilled || (found && at < 0)
+}
+
+func compactCandidateAdd(current, extra, budget uint64) (uint64, error) {
+	if extra > ^uint64(0)-current {
+		return 0, errCompactCandidateResource
+	}
+	next := current + extra
+	if next > budget {
+		return 0, errCompactCandidateResource
+	}
+	return next, nil
+}
+
+func compactCandidateBaseline(total uint64, prefilled []prefilledTxn, budget uint64) (uint64, error) {
+	current, err := compactCandidateAdd(116, uint64(len(consensus.EncodeCompactSize(total))), budget)
+	if err != nil {
+		return 0, err
+	}
+	for _, entry := range prefilled {
+		current, err = compactCandidateAdd(current, uint64(len(entry.Tx)), budget)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return current, nil
+}
+
+func compactCandidateCompose(selected []byte, read node.CompactCandidateRead, maxBytes uint64) ([]byte, error) {
+	switch read.Disposition {
+	case node.CompactCandidateAbsent:
+		if read.Raw != nil {
+			return nil, errCompactCandidateFault
+		}
+		return selected, nil
+	case node.CompactCandidatePresent:
+		return compactCandidatePresent(selected, read.Raw, maxBytes)
+	case node.CompactCandidateOverBudget:
+		return nil, errCompactCandidateResource
+	default:
+		return nil, errCompactCandidateFault
+	}
+}
+
+func compactCandidatePresent(selected, raw []byte, maxBytes uint64) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, errCompactCandidateFault
+	}
+	if uint64(len(raw)) > maxBytes {
+		return nil, errCompactCandidateResource
+	}
+	if selected != nil && !bytes.Equal(selected, raw) {
+		return nil, errCompactCandidateFault
+	}
+	if selected != nil {
+		return selected, nil
+	}
+	return raw, nil
+}
+
+func compactCandidateHydrate(observed compactCandidateObservation, mp *node.Mempool, da *node.DARelayState, remaining uint64) ([]byte, error) {
+	var selected []byte
+	for source := uint8(1); source <= 2; source <<= 1 {
+		if observed.Sources&source == 0 {
+			continue
+		}
+		var read node.CompactCandidateRead
+		switch source {
+		case 1:
+			read = da.ReadCompactDA(observed.Identity, remaining)
+		case 2:
+			read = mp.ReadCompactStandard(observed.Identity, remaining)
+		}
+		var err error
+		selected, err = compactCandidateCompose(selected, read, remaining)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return selected, nil
+}
+
+func compactCandidateFill(shortIDs []compactShortID, txs [][]byte, eligible map[compactShortID]int, catalog compactCandidateCatalog, mp *node.Mempool, da *node.DARelayState, current, budget uint64) (compactReconstructionResult, error) {
+	result := compactReconstructionResult{}
+	shortPosition := 0
+	for absolute, prefilled := range txs {
+		if prefilled != nil {
+			continue
+		}
+		sid := shortIDs[shortPosition]
+		shortPosition++
+		if at := eligible[sid]; at >= 0 {
+			raw, err := compactCandidateHydrate(catalog.Observed[at], mp, da, budget-current)
+			if err != nil {
+				return compactReconstructionResult{}, err
+			}
+			current, err = compactCandidateAdd(current, uint64(len(raw)), budget)
+			if err != nil {
+				return compactReconstructionResult{}, err
+			}
+			txs[absolute] = raw
+		}
+		if txs[absolute] == nil {
+			result.MissingIndexes = append(result.MissingIndexes, uint64(absolute))
+			result.MissingShortIDs = append(result.MissingShortIDs, sid)
+		}
+	}
+	if len(result.MissingIndexes) == 0 {
+		result.Transactions = txs
+		return result, nil
+	}
+	result.PartialTransactions = txs
+	return result, nil
 }
 
 func reconstructCompactBlock(p cmpctBlockPayload, localTxs [][]byte) (compactReconstructionResult, error) {
