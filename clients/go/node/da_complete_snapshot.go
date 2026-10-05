@@ -46,7 +46,7 @@ func (s *DARelayState) captureDACompleteSnapshot(candidate daRelayAdmissionCandi
 	if duplicate, ok := s.duplicateDANonReplayLocked(candidate); ok {
 		return nil, duplicate, nil
 	}
-	if s.sets == nil || s.locators == nil || s.mempool == nil || s.mempool.pendingOutpoints == nil {
+	if s.relations.sets == nil || s.relations.locators == nil || s.mempool == nil || s.mempool.pendingOutpoints == nil {
 		return nil, daRelayAdmissionOutcome{}, errDARelayImageIncompatible
 	}
 	snapshot, err := s.copyDACompleteSnapshotLocked(candidate)
@@ -54,7 +54,7 @@ func (s *DARelayState) captureDACompleteSnapshot(candidate daRelayAdmissionCandi
 }
 
 func (s *DARelayState) copyDACompleteSnapshotLocked(candidate daRelayAdmissionCandidate) (*daCompleteSnapshot, error) {
-	prior, present := s.sets[candidate.member.locator.daID]
+	prior, present := s.relations.record(candidate.member.locator.daID)
 	if !present || prior.daID != candidate.member.locator.daID {
 		return nil, errDARelayImageIncompatible
 	}
@@ -66,7 +66,7 @@ func (s *DARelayState) copyDACompleteSnapshotLocked(candidate daRelayAdmissionCa
 	out.candidate.member.txBytes = cloneBytes(candidate.member.txBytes)
 	out.candidate.member.payload = cloneBytes(candidate.member.payload)
 	for _, row := range prior.locatorRows() {
-		if _, duplicate := out.locators[row.txid]; duplicate || s.locators[row.txid] != row.locator {
+		if _, duplicate := out.locators[row.txid]; duplicate || s.relations.locatorValue(row.txid) != row.locator {
 			return nil, errDARelayImageIncompatible
 		}
 		out.locators[row.txid] = row.locator
@@ -329,7 +329,7 @@ func (s *DARelayState) capacityInput(source *daCompleteSnapshot, candidate daCom
 }
 
 func (s *DARelayState) scanDACompleteLive(in *daCompleteCapacityInput, owner *PendingOutpointOwner, txids map[[32]byte]bool, tokens map[PendingOutpointToken]bool, totals *daCompleteLiveTotals) error {
-	for id, record := range s.sets {
+	for id, record := range s.relations.records() {
 		if id != record.daID {
 			return errDARelayImageIncompatible
 		}
@@ -385,8 +385,8 @@ func (s *DARelayState) addLiveC(in *daCompleteCapacityInput, record daRelaySetRe
 }
 
 func (s *DARelayState) checkLiveCompleteLocators(source *daCompleteSnapshot, txids map[[32]byte]bool) error {
-	for txid, locator := range s.locators {
-		record, present := s.sets[locator.daID]
+	for txid, locator := range s.relations.locatorRows() {
+		record, present := s.relations.record(locator.daID)
 		if !present {
 			return errDARelayImageIncompatible
 		}
@@ -437,7 +437,7 @@ func (s *DARelayState) checkDACompleteLiveMember(row daRelayLocatorRow, member *
 		nonzero, freshTx, freshToken, raw bool
 		locator                           daRelayLocator
 	}
-	if (binding{member.token.owner, member.token.seq != 0, !txids[row.txid], !tokens[member.token], len(raw) != 0, s.locators[row.txid]}) != (binding{owner, true, true, true, true, row.locator}) {
+	if (binding{member.token.owner, member.token.seq != 0, !txids[row.txid], !tokens[member.token], len(raw) != 0, s.relations.locatorValue(row.txid)}) != (binding{owner, true, true, true, true, row.locator}) {
 		return errDARelayImageIncompatible
 	}
 	return nil

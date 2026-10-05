@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha3"
 	"errors"
+	"iter"
 	"maps"
 	"sync"
 	"sync/atomic"
@@ -212,6 +213,434 @@ type daRelayLocator struct {
 type daRelayLocatorRow struct {
 	txid    [32]byte
 	locator daRelayLocator
+	present bool
+	links   [2]daRelayRelationLink
+	keys    [2]daRelayRelationKey
+}
+
+// Literal rows own admitted identities; legacy record values retain immutable
+// byte/member backing but cannot change the identity copied into a member row.
+type daRelayMemberRow struct {
+	slot        daRelayLocator
+	txid, wtxid [32]byte
+	member      *daRelayMemberIdentity
+	commit      daRelayCommit
+	chunk       daRelayChunk
+	links       [3]daRelayRelationLink
+	keys        [3]daRelayRelationKey
+}
+
+type daRelayRecordRow struct {
+	key     [32]byte
+	value   daRelaySetRecord
+	present bool
+	members []*daRelayMemberRow
+}
+
+type daRelayRelationKey struct {
+	dimension uint8
+	id        [32]byte
+	slot      daRelayLocator
+}
+
+type daRelayRelationBucket struct {
+	count uint64
+	head  *daRelayRelationLink
+}
+
+type daRelayRelationLink struct {
+	previous, next *daRelayRelationLink
+	bucket         *daRelayRelationBucket
+	member         *daRelayMemberRow
+	locator        *daRelayLocatorRow
+}
+
+type daRelayRelations struct {
+	sets         map[[32]byte]*daRelayRecordRow
+	locators     map[[32]byte]*daRelayLocatorRow
+	buckets      map[daRelayRelationKey]*daRelayRelationBucket
+	setCount     int
+	locatorCount int
+}
+
+// Preparation reserves physical capacity, never logical membership. Publication
+// only changes existing pointer slots and fixed incidence links under s.mu.
+type daRelayRelationPublication struct {
+	oldRecords, newRecords   []*daRelayRecordRow
+	oldLocators, newLocators []*daRelayLocatorRow
+	keys                     []daRelayRelationKey
+	locatorIndexes           map[[32]byte]int
+}
+
+func newDARelayRelations() daRelayRelations {
+	return daRelayRelations{
+		sets:     make(map[[32]byte]*daRelayRecordRow),
+		locators: make(map[[32]byte]*daRelayLocatorRow),
+		buckets:  make(map[daRelayRelationKey]*daRelayRelationBucket),
+	}
+}
+
+func (r *daRelayRelations) record(key [32]byte) (daRelaySetRecord, bool) {
+	row := r.sets[key]
+	if row == nil || !row.present {
+		return daRelaySetRecord{}, false
+	}
+	return row.value, true
+}
+
+func (r *daRelayRelations) recordValue(key [32]byte) daRelaySetRecord {
+	value, _ := r.record(key)
+	return value
+}
+
+func (r *daRelayRelations) locator(key [32]byte) (daRelayLocator, bool) {
+	row := r.locators[key]
+	if row == nil || !row.present {
+		return daRelayLocator{}, false
+	}
+	return row.locator, true
+}
+
+func (r *daRelayRelations) locatorValue(key [32]byte) daRelayLocator {
+	value, _ := r.locator(key)
+	return value
+}
+
+func (r *daRelayRelations) records() iter.Seq2[[32]byte, daRelaySetRecord] {
+	return func(yield func([32]byte, daRelaySetRecord) bool) {
+		for key, row := range r.sets {
+			if row.present && !yield(key, row.value) {
+				return
+			}
+		}
+	}
+}
+
+func (r *daRelayRelations) locatorRows() iter.Seq2[[32]byte, daRelayLocator] {
+	return func(yield func([32]byte, daRelayLocator) bool) {
+		for key, row := range r.locators {
+			if row.present && !yield(key, row.locator) {
+				return
+			}
+		}
+	}
+}
+
+func (r *daRelayRelations) prepareBucket(p *daRelayRelationPublication, key daRelayRelationKey) *daRelayRelationBucket {
+	bucket := r.buckets[key]
+	if bucket == nil {
+		bucket = &daRelayRelationBucket{}
+		r.buckets[key] = bucket
+	}
+	p.keys = append(p.keys, key)
+	return bucket
+}
+
+func (r *daRelayRelations) prepareMember(p *daRelayRelationPublication, row *daRelayMemberRow) {
+	if row.member == nil {
+		return
+	}
+	row.keys = [3]daRelayRelationKey{{dimension: 1, id: row.txid}, {dimension: 2, id: row.wtxid}, {dimension: 3, slot: row.slot}}
+	for i, key := range row.keys {
+		row.links[i] = daRelayRelationLink{bucket: r.prepareBucket(p, key), member: row}
+	}
+}
+
+func (r *daRelayRelations) prepareRecord(p *daRelayRelationPublication, key [32]byte, value daRelaySetRecord, present bool) {
+	old := r.sets[key]
+	if old == nil {
+		old = &daRelayRecordRow{key: key}
+		r.sets[key] = old
+	}
+	row := &daRelayRecordRow{key: key, value: value, present: present}
+	for _, member := range old.members {
+		p.keys = append(p.keys, member.keys[:]...)
+	}
+	if present {
+		row.members = r.prepareRecordMembers(p, key, value)
+	}
+	p.oldRecords = append(p.oldRecords, old)
+	p.newRecords = append(p.newRecords, row)
+}
+
+func (r *daRelayRelations) prepareRecordMembers(p *daRelayRelationPublication, key [32]byte, value daRelaySetRecord) []*daRelayMemberRow {
+	rows := make([]*daRelayMemberRow, 0, len(value.chunks)+1)
+	if value.commit.member != nil {
+		row := &daRelayMemberRow{slot: daRelayLocator{daID: key, kind: daRelayLocatorCommit}, member: value.commit.member, commit: value.commit}
+		row.txid, row.wtxid = row.member.txid, row.member.wtxid
+		r.prepareMember(p, row)
+		rows = append(rows, row)
+	}
+	for index, chunk := range value.chunks {
+		row := &daRelayMemberRow{slot: daRelayLocator{daID: key, kind: daRelayLocatorChunk, chunkIndex: index}, member: chunk.member, chunk: chunk}
+		if row.member != nil {
+			row.txid, row.wtxid = row.member.txid, row.member.wtxid
+		}
+		r.prepareMember(p, row)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func daRelayAliasSlot(slot daRelayLocator) daRelayLocator {
+	if slot.kind == daRelayLocatorCommit {
+		slot.chunkIndex = 0
+	}
+	return slot
+}
+
+func (r *daRelayRelations) prepareLocator(p *daRelayRelationPublication, value daRelayLocatorRow, present bool) {
+	old := r.locators[value.txid]
+	if old == nil {
+		old = &daRelayLocatorRow{txid: value.txid}
+		r.locators[value.txid] = old
+	}
+	row := &daRelayLocatorRow{txid: value.txid, locator: value.locator, present: present}
+	if present {
+		row.keys = [2]daRelayRelationKey{{dimension: 4, id: row.txid}, {dimension: 5, slot: daRelayAliasSlot(row.locator)}}
+		for i, key := range row.keys {
+			row.links[i] = daRelayRelationLink{bucket: r.prepareBucket(p, key), locator: row}
+		}
+	}
+	if p.locatorIndexes == nil {
+		p.locatorIndexes = make(map[[32]byte]int)
+	}
+	if index, found := p.locatorIndexes[row.txid]; found {
+		p.newLocators[index] = row
+		return
+	}
+	p.locatorIndexes[row.txid] = len(p.newLocators)
+	p.keys = append(p.keys, old.keys[:]...)
+	p.oldLocators = append(p.oldLocators, old)
+	p.newLocators = append(p.newLocators, row)
+}
+
+func (link *daRelayRelationLink) attach() {
+	if link.bucket == nil {
+		return
+	}
+	link.next = link.bucket.head
+	if link.next != nil {
+		link.next.previous = link
+	}
+	link.bucket.head = link
+	link.bucket.count++
+}
+
+func (link *daRelayRelationLink) detach() {
+	if link.bucket == nil {
+		return
+	}
+	if link.previous != nil {
+		link.previous.next = link.next
+	} else {
+		link.bucket.head = link.next
+	}
+	if link.next != nil {
+		link.next.previous = link.previous
+	}
+	link.bucket.count--
+	link.previous, link.next = nil, nil
+}
+
+func (r *daRelayRelations) publishRecords(p *daRelayRelationPublication) {
+	for _, row := range p.oldRecords {
+		if row.present {
+			r.setCount--
+			for _, member := range row.members {
+				for i := range member.links {
+					member.links[i].detach()
+				}
+			}
+		}
+	}
+	for _, row := range p.newRecords {
+		r.publishRecord(row)
+	}
+}
+
+func (r *daRelayRelations) publishRecord(row *daRelayRecordRow) {
+	r.sets[row.key] = row
+	if row.present {
+		r.setCount++
+		for _, member := range row.members {
+			for i := range member.links {
+				member.links[i].attach()
+			}
+		}
+	}
+}
+
+func (r *daRelayRelations) publishLocators(p *daRelayRelationPublication) {
+	for _, row := range p.oldLocators {
+		if row.present {
+			r.locatorCount--
+			for i := range row.links {
+				row.links[i].detach()
+			}
+		}
+	}
+	for _, row := range p.newLocators {
+		r.locators[row.txid] = row
+		if row.present {
+			r.locatorCount++
+			for i := range row.links {
+				row.links[i].attach()
+			}
+		}
+	}
+}
+
+func (r *daRelayRelations) publish(p *daRelayRelationPublication) {
+	r.publishRecords(p)
+	r.publishLocators(p)
+	r.discard(p)
+}
+
+func (r *daRelayRelations) discard(p *daRelayRelationPublication) {
+	for _, row := range p.newRecords {
+		if !r.sets[row.key].present {
+			delete(r.sets, row.key)
+		}
+	}
+	for _, row := range p.newLocators {
+		if !r.locators[row.txid].present {
+			delete(r.locators, row.txid)
+		}
+	}
+	for _, key := range p.keys {
+		if bucket := r.buckets[key]; bucket != nil && bucket.count == 0 {
+			delete(r.buckets, key)
+		}
+	}
+}
+
+func (r *daRelayRelations) putRecord(key [32]byte, value daRelaySetRecord) {
+	p := &daRelayRelationPublication{}
+	r.prepareRecord(p, key, value, true)
+	r.publish(p)
+}
+
+func (r *daRelayRelations) removeRecord(key [32]byte) {
+	p := &daRelayRelationPublication{}
+	r.prepareRecord(p, key, daRelaySetRecord{}, false)
+	r.publish(p)
+}
+
+func (r *daRelayRelations) putLocator(key [32]byte, value daRelayLocator) {
+	p := &daRelayRelationPublication{}
+	r.prepareLocator(p, daRelayLocatorRow{txid: key, locator: value}, true)
+	r.publish(p)
+}
+
+func (r *daRelayRelations) removeLocator(key [32]byte) {
+	p := &daRelayRelationPublication{}
+	r.prepareLocator(p, daRelayLocatorRow{txid: key}, false)
+	r.publish(p)
+}
+
+func (r *daRelayRelations) scalarRecord(key [32]byte, value daRelaySetRecord) {
+	r.sets[key].value = value
+}
+
+func (r *daRelayRelations) clone() daRelayRelations {
+	out := newDARelayRelations()
+	for key, row := range r.sets {
+		if row.present {
+			out.cloneRecord(key, row)
+		}
+	}
+	for key, value := range r.locatorRows() {
+		out.putLocator(key, value)
+	}
+	if r.sets == nil {
+		out.sets = nil
+	}
+	if r.locators == nil {
+		out.locators = nil
+	}
+	return out
+}
+
+func (r *daRelayRelations) cloneRecord(key [32]byte, source *daRelayRecordRow) {
+	p := &daRelayRelationPublication{}
+	row := &daRelayRecordRow{key: key, value: source.value, present: true}
+	row.members = make([]*daRelayMemberRow, 0, len(source.members))
+	for _, member := range source.members {
+		copy := *member
+		copy.links = [3]daRelayRelationLink{}
+		r.prepareMember(p, &copy)
+		row.members = append(row.members, &copy)
+	}
+	r.sets[key] = row
+	p.newRecords = append(p.newRecords, row)
+	r.publish(p)
+}
+
+func (r *daRelayRelations) member(slot daRelayLocator) *daRelayMemberRow {
+	bucket := r.buckets[daRelayRelationKey{dimension: 3, slot: slot}]
+	if bucket == nil || bucket.count != 1 || bucket.head == nil {
+		return nil
+	}
+	return bucket.head.member
+}
+
+func (r *daRelayRelations) soleMember(key daRelayRelationKey, member *daRelayMemberRow) bool {
+	bucket := r.buckets[key]
+	if member == nil {
+		return bucket == nil || bucket.count == 0
+	}
+	return bucket != nil && bucket.count == 1 && bucket.head != nil && bucket.head.member == member
+}
+
+func (r *daRelayRelations) soleLocator(key daRelayRelationKey, locator *daRelayLocatorRow) bool {
+	bucket := r.buckets[key]
+	return bucket != nil && bucket.count == 1 && bucket.head != nil && bucket.head.locator == locator
+}
+
+func (r *daRelayRelations) memberBound(row *daRelayMemberRow) bool {
+	if !compactDAMemberIdentityValid(row) || !r.memberIncidencesBound(row) {
+		return false
+	}
+	return r.memberLocatorBound(row)
+}
+
+func compactDAMemberIdentityValid(row *daRelayMemberRow) bool {
+	if row == nil || row.member == nil {
+		return false
+	}
+	return row.txid != ([32]byte{}) && row.wtxid != ([32]byte{}) && row.txid == row.member.txid && row.wtxid == row.member.wtxid
+}
+
+func (r *daRelayRelations) memberIncidencesBound(row *daRelayMemberRow) bool {
+	for _, key := range row.keys {
+		if !r.soleMember(key, row) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *daRelayRelations) memberLocatorBound(row *daRelayMemberRow) bool {
+	locator := r.locators[row.txid]
+	if locator == nil || !locator.present || locator.locator != row.slot {
+		return false
+	}
+	return r.soleLocator(daRelayRelationKey{dimension: 4, id: row.txid}, locator) && r.soleLocator(daRelayRelationKey{dimension: 5, slot: row.slot}, locator)
+}
+
+func (r *daRelayRelations) observedBound(identity CompactCandidateIdentity, row *daRelayMemberRow) bool {
+	if row == nil {
+		return r.soleMember(daRelayRelationKey{dimension: 1, id: identity.TxID}, nil) && r.soleMember(daRelayRelationKey{dimension: 2, id: identity.WTxID}, nil)
+	}
+	if !r.memberBound(row) || row.txid != identity.TxID {
+		return false
+	}
+	witness := row
+	if row.wtxid != identity.WTxID {
+		witness = nil
+	}
+	return r.soleMember(daRelayRelationKey{dimension: 2, id: identity.WTxID}, witness)
 }
 
 type daRelayCompletionSnapshot struct {
@@ -281,11 +710,7 @@ type DARelayState struct {
 	orphanBytesByDAID         map[[32]byte]uint64
 	orphanCommitOverheadBytes uint64
 	pinnedPayloadBytes        uint64
-	sets                      map[[32]byte]daRelaySetRecord
-	// locators is the txid index of every retained member. The owner-aware
-	// admission and removal paths install and retire its rows; the legacy
-	// staging and removal bodies kept for unit tests never maintain it.
-	locators map[[32]byte]daRelayLocator
+	relations                 daRelayRelations
 	// records is the process-local high-water of all issued revisions, including
 	// deleted records. Single-use placement under one uninterrupted lock preserves it.
 	records uint64
@@ -327,8 +752,7 @@ func newDARelayState(mempool *Mempool, caps daRelayCaps) (*DARelayState, error) 
 		caps:                      caps,
 		orphanBytesByPeerQuotaKey: map[string]uint64{},
 		orphanBytesByDAID:         map[[32]byte]uint64{},
-		sets:                      make(map[[32]byte]daRelaySetRecord),
-		locators:                  make(map[[32]byte]daRelayLocator),
+		relations:                 newDARelayRelations(),
 	}, nil
 }
 
@@ -493,10 +917,10 @@ func (s *DARelayState) advanceOrphanTTL() ([]daRelayExpiredSet, error) {
 func (s *DARelayState) advanceOrphanTTLLocked() ([]daRelayExpiredSet, error) {
 	var expired []daRelayExpiredSet
 	for _, daID := range s.sortedIncompleteDAIDsLocked() {
-		record := s.sets[daID]
+		record := s.relations.recordValue(daID)
 		if record.ttlBlocksRemaining > 1 {
 			record.ttlBlocksRemaining--
-			s.sets[daID] = record
+			s.relations.scalarRecord(daID, record)
 			continue
 		}
 		if err := s.removeDASetRecordLocked(record); err != nil {
@@ -530,8 +954,7 @@ func (s *DARelayState) cloneForAtomicBatchLocked() *DARelayState {
 		orphanBytesByDAID:         maps.Clone(s.orphanBytesByDAID),
 		orphanCommitOverheadBytes: s.orphanCommitOverheadBytes,
 		pinnedPayloadBytes:        s.pinnedPayloadBytes,
-		sets:                      maps.Clone(s.sets),
-		locators:                  maps.Clone(s.locators),
+		relations:                 s.relations.clone(),
 		records:                   s.records,
 	}
 }
@@ -547,8 +970,7 @@ func (s *DARelayState) publishAtomicBatchLocked(projected *DARelayState) {
 	s.orphanBytesByDAID = projected.orphanBytesByDAID
 	s.orphanCommitOverheadBytes = projected.orphanCommitOverheadBytes
 	s.pinnedPayloadBytes = projected.pinnedPayloadBytes
-	s.sets = projected.sets
-	s.locators = projected.locators
+	s.relations = projected.relations
 	// Zero on any legacy state, so this pair is the identity. Only the canonical
 	// transition releases s.mu before this assignment; its admission WRITE fence
 	// closes that window. The legacy callers hold s.mu through clone and publish.
@@ -560,7 +982,7 @@ func (s *DARelayState) planDAPrefetch(record daRelaySetRecord, peerKeys []string
 	defer s.mu.Unlock()
 	s.prefetch.ensureMaps()
 	s.prefetch.releaseExpired(now)
-	current, ok := s.sets[record.daID]
+	current, ok := s.relations.record(record.daID)
 	if !ok {
 		s.prefetch.releaseSet(record.daID)
 		return nil, ""
