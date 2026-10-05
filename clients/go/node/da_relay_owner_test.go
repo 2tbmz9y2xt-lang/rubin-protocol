@@ -8426,7 +8426,11 @@ func compactDASnapshotFaults(t *testing.T) {
 					}
 				}
 				if row.name != "nil_sets" && row.name != "nil_locators" {
-					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
+					disposition, raw := uint8(1), sibling.raw
+					if row.name == "reverse_daID" {
+						disposition, raw = 3, nil
+					}
+					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), disposition, raw)
 				}
 				f.mutateRelay(func(s *DARelayState) { s.relations = daRelayRelationsForTest(original.sets, original.locators) })
 				if !reflect.DeepEqual(originalImage, compactDAImage(t, f)) {
