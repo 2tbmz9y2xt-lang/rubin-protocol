@@ -8411,6 +8411,7 @@ func compactDASnapshotFaults(t *testing.T) {
 				for _, target := range txs {
 					requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: target.txid, WTxID: target.wtxid}, uint64(len(target.raw)), 1, target.raw)
 				}
+				requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
 			})
 		}
 	}
@@ -8517,7 +8518,7 @@ func compactDAPopulation(t *testing.T) {
 				t.Fatal("nonzero chunk lacks its independently admitted chunk0 control")
 			}
 			requireCompactDAPreservedRead(t, f, CompactCandidateIdentity{TxID: sibling.txid, WTxID: sibling.wtxid}, uint64(len(sibling.raw)), 1, sibling.raw)
-			f.mutateRelay(func(s *DARelayState) { s.relations.putLocator(tx.txid, locator)})
+			f.mutateRelay(func(s *DARelayState) { s.relations.putLocator(tx.txid, locator) })
 			if !reflect.DeepEqual(validImage, compactDAImage(t, f)) {
 				t.Fatal("locator restoration changed original image")
 			}
