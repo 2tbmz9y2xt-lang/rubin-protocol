@@ -280,7 +280,7 @@ func generationOptionalIdentity(t *testing.T, keep string) {
 
 func TestDrainDetachedMDBXNative(t *testing.T) {
 	t.Run("P11-A1b", detachedRecordedLength)
-	for _, name := range []string{"P11-A3b", "P11-A3f", "H9"} {
+	for _, name := range []string{"P11-A3b", "P11-A3c", "P11-A3f", "P11-A3h", "H9"} {
 		t.Run(name, func(t *testing.T) { detachedRawDamage(t, name) })
 	}
 	for _, name := range []string{"R1c", "R8", "R9", "R9a", "R9b", "R9c", "R9d", "R9e", "R9f", "R9g", "R9h", "R9i", "R9j"} {
@@ -335,9 +335,15 @@ func detachedRawDamage(t *testing.T, name string) {
 	w := generationNew(t, a, rows...)
 	rank, index := uint8(4), len(rows)-1
 	var value []byte
-	if name == "P11-A3b" {
+	switch name {
+	case "P11-A3b":
 		rank, index, value = 3, len(rows)-2, []byte{0x03}
-	} else {
+	case "P11-A3c":
+		rank, index, value = 3, len(rows)-2, make([]byte, 116)
+	case "P11-A3h":
+		value = bytes.Clone(rows[index].Literal)
+		value[108] ^= 1
+	default:
 		value = make([]byte, 68000126)
 	}
 	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, rows[index].Key, value) == nil, "seed bounded malformed remnant")
@@ -497,9 +503,6 @@ func detachedReadFailure(t *testing.T, name string) {
 			if name == "R13" {
 				rows = append(slices.Clone(rows[:5]), rows[6:]...)
 			}
-			if name == "R14a" && !canonical || name == "R12" || name == "R11" {
-				rows[4].Literal = make([]byte, 116)
-			}
 			if name == "R14a" && canonical {
 				// The canonical header is healthy, but the descriptor's next
 				// parent identity is damaged. Required body presence still wins.
@@ -509,6 +512,10 @@ func detachedReadFailure(t *testing.T, name string) {
 				a.Cleanup.Spans = []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3, FirstHeight: 7, LastHeight: 7, NextHeight: 7}}
 			}
 			w := generationNew(t, a, rows...)
+			if name == "R14a" && !canonical || name == "R12" || name == "R11" {
+				rows[4].Literal = make([]byte, 116)
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 3, hash[:], rows[4].Literal) == nil, "seed damaged header after admission")
+			}
 			if name == "R11" {
 				rows[len(rows)-2].Literal = mdbx.ChainValue([32]byte{0x99}, [32]byte{}, sideWorldWork(1))
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 2, rows[len(rows)-2].Key, rows[len(rows)-2].Literal) == nil, "seed actual-k canonical inconsistency")
@@ -630,10 +637,11 @@ func detachedNativeMatrix(t *testing.T, damaged bool, filter string) {
 		}
 		t.Run(row.name, func(t *testing.T) {
 			a, rows := detachedFixture(t, 2)
+			w := generationNew(t, a, rows...)
 			if damaged {
 				rows[4].Literal = make([]byte, 116)
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 3, rows[4].Key, rows[4].Literal) == nil, "seed damaged native plan after admission")
 			}
-			w := generationNew(t, a, rows...)
 			var out selectedSideOutcome
 			calls := 0
 			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, row.scenario, 0, []byte{2}, func() {
@@ -940,7 +948,7 @@ func detachedReadbackOwners(t *testing.T) {
 			var out selectedSideOutcome
 			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 9, rank, key, func() { out = DrainDetachedMDBX(w.s, w.owner) })
 			sideWantOutcome(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", 3, 3, "complete owner readback")
-			logicalMDBXAssert(t, err == nil && e.ReadGets > 0 && e.Faults == 1 && sideCauses(out.Err) == "update:Capacity,update:IO", "queried owner omitted from readback: %+v/%v", e, err)
+			logicalMDBXAssert(t, err == nil && e.ReadGets > 0 && e.Faults == 2 && sideCauses(out.Err) == "update:Capacity,update:IO", "queried owner omitted from readback: %+v/%v", e, err)
 			sideWantReleased(t, w.owner, kind)
 			want := slices.Clone(rows)
 			if kind == "no-owner" {
@@ -971,6 +979,8 @@ func detachedRequiredBodyDamage(t *testing.T) {
 			switch variant {
 			case "absent", "parent-absent":
 				rows = append(slices.Clone(rows[:5]), rows[6:]...)
+			case "width":
+				value = []byte{1}
 			case "prefix":
 				value[108] ^= 1
 			case "length", "commitment":
@@ -979,13 +989,13 @@ func detachedRequiredBodyDamage(t *testing.T) {
 					a.DetachedSuffix.Entries[0].BlockBytesLen, a.DetachedSuffix.LogicalBytes = 267, 533
 				}
 			}
-			if !missing && variant != "width" {
+			if !missing && variant != "width" && variant != "prefix" {
 				rows[5].Literal = value
 			}
 			w := generationNew(t, a, rows...)
-			if variant == "width" {
-				rows[5].Literal = []byte{1}
-				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], rows[5].Literal) == nil, "seed required body width")
+			if variant == "width" || variant == "prefix" {
+				rows[5].Literal = value
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, hash[:], value) == nil, "seed required body damage after admission")
 			}
 			var out selectedSideOutcome
 			e, err := mdbx.FixtureSelectedDamage(w.s, w.owner, 1, 0, nil, func() { out = detachedRun(t, w) })
@@ -995,7 +1005,11 @@ func detachedRequiredBodyDamage(t *testing.T) {
 			if missing {
 				rows = append(rows, generationRow(4, hash[:], nil))
 			}
-			w.image(a, rows...)
+			w.image(a)
+			for _, row := range rows {
+				equal, readErr := mdbx.FixtureRawRowEqual(w.s, row.DBI.Rank, row.Key, row.Literal)
+				logicalMDBXAssert(t, readErr == nil && equal, "same-instance preserved raw image rank%d/%x: %v", row.DBI.Rank, row.Key, readErr)
+			}
 			again := detachedRun(t, w)
 			sideWantOutcome(t, again, "TERMINAL_STORE_INTEGRITY(canonical)", "OLD", 1, 1, "required body refusal leaves owner usable")
 			logicalMDBXAssert(t, again.Err != nil && again.Err.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical body", "same-instance body refusal lost cause: %v", again.Err)

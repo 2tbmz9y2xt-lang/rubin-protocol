@@ -99,7 +99,7 @@ func TestDrainDetachedMDBX(t *testing.T) {
 			w.image(want, detachedGone(rows)...)
 		})
 	}
-	for _, name := range []string{"P11-A3a", "P11-A3c", "P11-A3d", "P11-A3j", "P11-A3e", "P11-A3g", "P11-A3h", "P11-A3i"} {
+	for _, name := range []string{"P11-A3a", "P11-A3d", "P11-A3j", "P11-A3e", "P11-A3g", "P11-A3i"} {
 		t.Run(name, func(t *testing.T) { detachedDamage(t, name) })
 	}
 	t.Run("P11-A4", func(t *testing.T) { detachedSide(t, true) })
@@ -137,8 +137,6 @@ func detachedDamage(t *testing.T, name string) {
 		remnant := rows[body]
 		rows = rows[:header+1]
 		rows[header] = remnant
-	case "P11-A3c":
-		rows[header].Literal = make([]byte, 116)
 	case "P11-A3d", "P11-A3j":
 		value := sideWorldBlock([32]byte{0xb0}, 999)
 		hash := sha3_256(value[:116])
@@ -149,9 +147,6 @@ func detachedDamage(t *testing.T, name string) {
 	case "P11-A3g":
 		a.DetachedSuffix.Entries[0].BlockBytesLen = 267
 		a.DetachedSuffix.LogicalBytes++
-	case "P11-A3h":
-		rows[body].Literal = bytes.Clone(rows[body].Literal)
-		rows[body].Literal[108] ^= 1
 	case "P11-A3i":
 		rows[body].Literal = append(bytes.Clone(rows[body].Literal), 0)
 		a.DetachedSuffix.Entries[0].BlockBytesLen = 267
