@@ -347,7 +347,6 @@ func TestDAObserverConformanceConcurrentAndReentrant(t *testing.T) {
 func TestDAObserverRelationPublication(t *testing.T) {
 	t.Run("prepared_capacity_is_absent", func(t *testing.T) {
 		f, a, c := daCompleteTestCandidate(t, false, 0, 0)
-		defer a.Close()
 		p, _ := daCompleteCommitTestPlan(t, f, a, c)
 		f.relay.mu.Lock()
 		before := f.relay.daObserverRelayImageLocked()
