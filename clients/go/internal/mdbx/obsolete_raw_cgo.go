@@ -261,7 +261,7 @@ func (r *Reader) obsoleteProjection(index ObsoleteRowV1) ([32]byte, []obsoletePo
 	}
 	hash := [32]byte(entry[:32])
 	points = append(points, obsoletePoint{rank: 3, key: bytes.Clone(hash[:])})
-	header, err := r.obsoletePoint(3, hash[:], operationPrefixPage)
+	header, err := r.obsoletePoint(3, hash[:], operationGet)
 	if err != nil {
 		return hash, points, false, err
 	}

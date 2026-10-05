@@ -383,6 +383,29 @@ func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run fu
 	return evidence, nil
 }
 
+// FixtureCleanupReadbackDrift changes one retained cleanup artifact after commit.
+// Only the three frozen physical shapes reach the existing fixed-mode owner.
+func FixtureCleanupReadbackDrift(store *Store, rank uint8, key []byte, run func()) (uint32, error) {
+	valid := rank == 4 && len(key) == 32 || rank == 5 && (len(key) == 33 || len(key) == 77)
+	if store == nil || run == nil || !valid {
+		return 0, errors.New("invalid cleanup readback fixture")
+	}
+	evidence, err := fixtureLargeFault(store, 3, rank, key, run)
+	return evidence.drift, err
+}
+
+// FixtureCleanupInvalidStage0 delegates one malformed outcome to the real owner.
+func FixtureCleanupInvalidStage0(store *Store, cleanup error) (CommitTruth, UpdateStage, error) {
+	if store == nil || cleanup == nil || !store.operations.TryLock() {
+		return CommitTruthOld, UpdateStagePrewrite, errors.New("invalid cleanup outcome fixture")
+	}
+	defer store.operations.Unlock()
+	if store.state != storeOPEN || !validStoreShape(store) {
+		return CommitTruthOld, UpdateStagePrewrite, errors.New("invalid cleanup outcome fixture")
+	}
+	return store.applyUpdateOutcome(updateNativeOutcome{truth: CommitTruthOld}, nil, cleanup, false)
+}
+
 // Test teardown disposes a real retained handle after its terminal projection was observed.
 func fixtureLargeRelease(store *Store) error {
 	var err error
