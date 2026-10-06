@@ -7,7 +7,7 @@ applyTo: '**'
 ## Project Context
 
 This is a blockchain protocol repository containing:
-- Go and Rust reference consensus implementations (`clients/go/`, `clients/rust/`)
+- Go reference consensus implementation (`clients/go/`) and Rust parity implementation (`clients/rust/`), frozen on the current line
 - Lean4 formal verification proofs (`rubin-formal/`)
 - Cross-client conformance runner with parity gates (`conformance/`)
 - Post-quantum cryptography (ML-DSA-87)
@@ -18,7 +18,7 @@ This is a blockchain protocol repository containing:
 ### P0 — Block merge
 - **Consensus-breaking changes**: any modification to serialization, TXID/WTXID computation, signature verification, or block validation MUST have a corresponding conformance test update
 - **Cryptographic correctness**: ML-DSA-87 parameter changes, key derivation, signature scheme modifications require formal proof or explicit justification
-- **Go↔Rust parity**: changes to one client without equivalent change in the other client MUST be flagged
+- **Go↔Rust parity**: P0 only for an unpaired change (consensus implementation paths of one client without a change to the other client's consensus implementation paths, or consensus CLI paths of one client without a change to the other client's consensus CLI paths, each category paired separately as the gate does; `clients/go/consensus/`, `clients/go/cmd/rubin-consensus-cli/`, `clients/rust/crates/rubin-consensus/` and `clients/rust/crates/rubin-consensus-cli/`, excluding test-only files: names ending in `_test.go`, `_test.rs` or `_tests.rs` and any path with a `benches`, `testdata` or `tests` directory) that lacks the `parity-exempt` label or the "### Parity exemption justification" body block required by `.github/workflows/parity-gate.yml` (for either pair), or for an unpaired change of those consensus paths that contradicts a PR contract requiring both clients. A missing counterpart outside those consensus paths that the contract requires is a P1 contract finding
 - **Unsafe code**: new `unsafe` blocks in Rust require safety comments and justification
 - **Formal proof breakage**: changes that invalidate existing Lean4 proofs in `rubin-formal/`
 - **Wire format changes**: any change to transaction/block serialization, hash computation, or encoding MUST update conformance vectors in `conformance/fixtures/`
@@ -29,7 +29,7 @@ This is a blockchain protocol repository containing:
 - New dependencies without security review justification
 - Test coverage gaps for modified consensus logic
 - UTXO state transitions without validation proof coverage
-- Cross-language parity drift: logic change in Go or Rust without matching change in the other client
+- Cross-language parity drift: a change under `clients/rust/` that the PR's Linear contract does not authorize
 
 ### P2 — Comment (non-blocking)
 - Code style, naming, documentation improvements
@@ -39,7 +39,7 @@ This is a blockchain protocol repository containing:
 
 ## Review Checklist
 
-1. Does the PR maintain Go↔Rust conformance parity?
+1. Does the PR match its Linear contract (RUB-NNN), and keep Go↔Rust parity where that contract or the parity gate requires it?
 2. Are all serialization changes covered by conformance fixtures?
 3. Do Lean4 proofs still compile and pass?
 4. Is ML-DSA-87 usage correct (parameter sets, context strings)?
