@@ -1,6 +1,6 @@
 # Copilot Instructions for rubin-protocol
 
-## Task Contract (required)
+## Task contract (required)
 
 Every pull-request title carries a Linear issue key of the form RUB-NNN.
 
