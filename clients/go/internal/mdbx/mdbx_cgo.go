@@ -68,7 +68,7 @@ static struct { unsigned scenario; int get_fired; MDBX_env *env; MDBX_txn *old_t
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe) {
 	int rc = 1;
 	pthread_mutex_lock(&rubin_sd_mu);
-	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 12 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
+	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 13 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
 		memset(&rubin_sd, 0, sizeof(rubin_sd));
 		rubin_sd.scenario = scenario;
 		rubin_sd.env = env;
@@ -102,6 +102,7 @@ static int rubin_sd_txn_begin(MDBX_env *env, MDBX_txn *parent, MDBX_txn_flags_t 
 		} else {
 			if (role == 1) rubin_sd.counts.begin_write++;
 			else rubin_sd.counts.begin_read++;
+			if (role == 1 && rubin_sd.scenario == 13) { fail = MDBX_TXN_FULL; rubin_sd.counts.faults++; }
 			probe = rubin_sd.probe;
 		}
 	}
