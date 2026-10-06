@@ -394,6 +394,16 @@ func FixtureCleanupReadbackDrift(store *Store, rank uint8, key []byte, run func(
 	return evidence.drift, err
 }
 
+// FixtureWriteSnapshotDrift drifts one armed row to 0x7f before the write-transaction begin (large-image mode 14)
+// while run executes, and returns the drift count.
+func FixtureWriteSnapshotDrift(store *Store, rank uint8, key []byte, run func()) (uint32, error) {
+	if store == nil || run == nil || rank >= 8 || len(key) == 0 {
+		return 0, errors.New("invalid write snapshot drift fixture")
+	}
+	evidence, err := fixtureLargeFault(store, 14, rank, key, run)
+	return evidence.drift, err
+}
+
 // FixtureCleanupInvalidStage0 delegates one malformed outcome to the real owner.
 func FixtureCleanupInvalidStage0(store *Store, cleanup error) (CommitTruth, UpdateStage, error) {
 	if store == nil || cleanup == nil || !store.operations.TryLock() {
@@ -875,6 +885,7 @@ const (
 	SelectedDamageCommitThird
 	SelectedDamageAbortEIO
 	SelectedDamagePutEIO
+	SelectedDamageWriteBeginTxnFull
 )
 
 // SelectedDamageEvidence is the bounded native evidence of one armed invocation: site counters, injected faults and
@@ -938,7 +949,7 @@ func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner
 }
 
 func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
-	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamagePutEIO && run != nil
+	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageWriteBeginTxnFull && run != nil
 }
 
 func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {
