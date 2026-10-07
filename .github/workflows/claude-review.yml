@@ -1,0 +1,113 @@
+name: "Claude Code Review"
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    paths:
+      - '**/*.go'
+      - '**/*.rs'
+      - '**/*.lean'
+      - 'conformance/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude:
+    name: claude
+    # Advisory review: skip drafts and fork PRs (forks get no secrets).
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch Linear contract
+        id: contract
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/contract.md"
+          issue="$(printf '%s\n%s\n' "${PR_TITLE}" "${PR_BRANCH}" | grep -oiE 'rub-[0-9]+' | head -n1 | tr '[:lower:]' '[:upper:]' || true)"
+          if [[ -z "${issue}" ]]; then
+            echo "No RUB-NNN in PR title or branch; reviewing without a contract." > "${out}"
+          else
+            body="$(jq -nc --arg id "${issue}" '{query: "query($id: String!) { issue(id: $id) { identifier title state { name } description } }", variables: {id: $id}}')"
+            resp="$(curl -fsS https://api.linear.app/graphql -H "Authorization: ${LINEAR_API_KEY}" -H 'Content-Type: application/json' -d "${body}" || true)"
+            if [[ -n "$(jq -r '.data.issue.identifier // empty' <<<"${resp}")" ]]; then
+              jq -r '.data.issue | "# \(.identifier): \(.title)\nstate: \(.state.name)\n\n\(.description // "")"' <<<"${resp}" > "${out}"
+            else
+              echo "Linear issue ${issue} could not be fetched; reviewing without a contract." > "${out}"
+            fi
+          fi
+          echo "issue=${issue:-none}" >> "${GITHUB_OUTPUT}"
+          echo "path=${out}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run Claude Code Review
+        id: review
+        continue-on-error: true
+        uses: anthropics/claude-code-action@6fed3ca145920b639991cb756090506e1bcaf515 # v1.0.245
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model claude-opus-5-5
+            --effort high
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            CONTRACT FILE: ${{ steps.contract.outputs.path }}
+
+            Review this RUBIN pull request diff. Read CONTRACT FILE first: it is the Linear task
+            contract and the only task authority. Check that every contract case and done_when
+            item has code and a test, and that nothing changes outside its scope.
+
+            Find every real bug you can, not only contract gaps: in the changed code and in
+            any code it calls or that calls it. Mark a bug that already existed before this PR
+            as PRE-EXISTING. Look for correctness bugs: validate-before-mutate order, exact accept/reject and
+            error-code priority, determinism, bounded allocation on untrusted peer input,
+            panics reachable from network data, UTXO/reorg/mempool state errors, and Go/Rust
+            divergence when clients/rust or shared conformance fixtures change.
+
+            Facts: Go (clients/go) is the reference, Rust (clients/rust) is frozen unless the
+            contract says otherwise. Signatures are ML-DSA-87 only. Covenants are the native
+            families plus CORE_SIMPLICITY; CORE_EXT (0x0102) is retired and must stay rejected.
+            The mempool is reject-only. The spec is not available here - do not cite it.
+
+            Rules: invent nothing; every finding cites file:line; no finding is better than a
+            weak one. The repository may be public: never quote the contract, refer to its
+            row IDs. Tests and coverage run in CI - do not ask for them except for a contract
+            row with no test. No style, naming or praise.
+
+            Output: one top-level `gh pr comment` per run (on a re-run, review only new commits
+            and say which earlier findings are fixed); inline comments allowed. Sections:
+            Contract coverage (covered / missing / out of scope, or "not available");
+            Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
+            fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
+            CRITICAL - fix before merge). Advisory only: never approve, merge, push or edit.
+
+      - name: Record advisory Claude failure
+        if: ${{ always() && steps.review.outcome != 'success' }}
+        run: |
+          {
+            echo "### Advisory Claude review unavailable"
+            echo
+            echo "- The Claude review step failed and did not publish a review."
+            echo "- This workflow is advisory and must not block merge."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::Claude review failed; treating this workflow as advisory."
