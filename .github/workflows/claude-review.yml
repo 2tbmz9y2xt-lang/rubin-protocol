@@ -71,56 +71,62 @@ jobs:
           echo "issue=${issue:-none}" >> "${GITHUB_OUTPUT}"
           echo "path=${out}" >> "${GITHUB_OUTPUT}"
 
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.293
+
       - name: Run Claude Code Review
         id: review
         continue-on-error: true
-        uses: anthropics/claude-code-action@6fed3ca145920b639991cb756090506e1bcaf515 # v1.0.245
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # Use the read-only workflow token; without it the action mints a
-          # Claude App token with contents: write.
-          github_token: ${{ github.token }}
-          # The only bot that opens PRs here (PR author census at delivery).
-          allowed_bots: 'dependabot'
-          claude_args: |
-            --model claude-opus-5-5
-            --effort high
-            --max-turns 60
-            --add-dir ${{ runner.temp }}
-            --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit"
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-            CONTRACT FILE: ${{ steps.contract.outputs.path }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_PROMPT: |
+              REPO: ${{ github.repository }}
+              PR NUMBER: ${{ github.event.pull_request.number }}
+              CONTRACT FILE: ${{ steps.contract.outputs.path }}
 
-            Review this RUBIN pull request diff. Read CONTRACT FILE first: it is the Linear task
-            contract and the only task authority. Check that every contract case and done_when
-            item has code and a test, and that nothing changes outside its scope.
+              Review this RUBIN pull request diff. Read CONTRACT FILE first: it is the Linear task
+              contract and the only task authority. Check that every contract case and done_when
+              item has code and a test, and that nothing changes outside its scope.
 
-            Find every real bug you can, not only contract gaps: in the changed code and in
-            any code it calls or that calls it. Mark a bug that already existed before this PR
-            as PRE-EXISTING. Look for correctness bugs: validate-before-mutate order, exact accept/reject and
-            error-code priority, determinism, bounded allocation on untrusted peer input,
-            panics reachable from network data, UTXO/reorg/mempool state errors, and Go/Rust
-            divergence when clients/rust or shared conformance fixtures change.
+              Find every real bug you can, not only contract gaps: in the changed code and in
+              any code it calls or that calls it. Mark a bug that already existed before this PR
+              as PRE-EXISTING. Look for correctness bugs: validate-before-mutate order, exact accept/reject and
+              error-code priority, determinism, bounded allocation on untrusted peer input,
+              panics reachable from network data, UTXO/reorg/mempool state errors, and Go/Rust
+              divergence when clients/rust or shared conformance fixtures change.
 
-            Facts: Go (clients/go) is the reference, Rust (clients/rust) is frozen unless the
-            contract says otherwise. Signatures are ML-DSA-87 only. Covenants are the native
-            families plus CORE_SIMPLICITY; CORE_EXT (0x0102) is retired and must stay rejected.
-            The mempool is reject-only. The spec is not available here - do not cite it.
+              Facts: Go (clients/go) is the reference, Rust (clients/rust) is frozen unless the
+              contract says otherwise. Signatures are ML-DSA-87 only. Covenants are the native
+              families plus CORE_SIMPLICITY; CORE_EXT (0x0102) is retired and must stay rejected.
+              The mempool is reject-only. The spec is not available here - do not cite it.
 
-            Rules: invent nothing; every finding cites file:line; no finding is better than a
-            weak one. The repository may be public: never quote the contract, refer to its
-            row IDs. Tests and coverage run in CI - do not ask for them except for a contract
-            row with no test. No style, naming or praise.
+              Rules: invent nothing; every finding cites file:line; no finding is better than a
+              weak one. The repository may be public: never quote the contract, refer to its
+              row IDs. Tests and coverage run in CI - do not ask for them except for a contract
+              row with no test. No style, naming or praise.
 
-            Output: one top-level `gh pr comment` per run (every run reviews the full base-to-head
-            diff and says which earlier findings are fixed); inline comments allowed. Sections:
-            Contract coverage (covered / missing / out of scope, or "not available");
-            Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
-            fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
-            CRITICAL - fix before merge). Advisory only: never approve, merge, push or edit.
+              Output: one top-level `gh pr comment` per run (every run reviews the full base-to-head
+              diff and says which earlier findings are fixed). Sections:
+              Contract coverage (covered / missing / out of scope, or "not available");
+              Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
+              fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
+              CRITICAL - fix before merge). Advisory only: never approve, merge, push or edit.
+        run: |
+          result="${RUNNER_TEMP}/claude-result.json"
+          claude -p "${REVIEW_PROMPT}" \
+            --model claude-opus-5-5 \
+            --effort high \
+            --max-turns 60 \
+            --add-dir "${RUNNER_TEMP}" \
+            --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)" \
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit" \
+            --output-format json < /dev/null > "${result}" || true
+          jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd)"' "${result}" || true
+          if ! jq -e '.is_error == false' "${result}" > /dev/null; then
+            jq -r '"Claude error: \(.result // "no result")"' "${result}" || true
+            exit 1
+          fi
 
       - name: Verify the review comment
         if: ${{ always() && steps.review.outcome == 'success' }}
