@@ -2,7 +2,10 @@ name: "Claude Code Review"
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # edited: re-review only when the title (and so the RUB key) changes.
+    # converted_to_draft/closed: start a run whose job is skipped, so the
+    # concurrency group cancels a review still running on that PR.
+    types: [opened, synchronize, ready_for_review, reopened, edited, converted_to_draft, closed]
     paths:
       - '**/*.go'
       - '**/*.rs'
@@ -14,14 +17,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  # A body-only edit runs in its own group so it cannot cancel a review in progress.
+  group: claude-review-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.title == null && format('-noop-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   claude:
     name: claude
-    # Advisory review: skip drafts and fork PRs (forks get no secrets).
-    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    # Advisory review: open non-draft same-repository PRs only (forks get no secrets).
+    if: >-
+      ${{ github.event.pull_request.state == 'open'
+      && !github.event.pull_request.draft
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (github.event.action != 'edited' || github.event.changes.title != null) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Advisory: no step failure (checkout, Linear, review) may fail the workflow.
@@ -49,7 +57,7 @@ jobs:
             echo "No RUB-NNN in PR title or branch; reviewing without a contract." > "${out}"
           else
             body="$(jq -nc --arg id "${issue}" '{query: "query($id: String!) { issue(id: $id) { identifier title state { name } description } }", variables: {id: $id}}')"
-            resp="$(curl -fsS https://api.linear.app/graphql -H "Authorization: ${LINEAR_API_KEY}" -H 'Content-Type: application/json' -d "${body}" || true)"
+            resp="$(curl -fsS --connect-timeout 10 --max-time 30 https://api.linear.app/graphql -H "Authorization: ${LINEAR_API_KEY}" -H 'Content-Type: application/json' -d "${body}" || true)"
             if [[ -n "$(jq -r '.data.issue.identifier // empty' <<<"${resp}")" ]]; then
               jq -r '.data.issue | "# \(.identifier): \(.title)\nstate: \(.state.name)\n\n\(.description // "")"' <<<"${resp}" > "${out}"
             else
@@ -75,6 +83,7 @@ jobs:
             --effort high
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -101,8 +110,8 @@ jobs:
             row IDs. Tests and coverage run in CI - do not ask for them except for a contract
             row with no test. No style, naming or praise.
 
-            Output: one top-level `gh pr comment` per run (on a re-run, review only new commits
-            and say which earlier findings are fixed); inline comments allowed. Sections:
+            Output: one top-level `gh pr comment` per run (every run reviews the full base-to-head
+            diff and says which earlier findings are fixed); inline comments allowed. Sections:
             Contract coverage (covered / missing / out of scope, or "not available");
             Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
             fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
