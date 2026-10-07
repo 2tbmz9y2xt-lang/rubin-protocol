@@ -718,7 +718,7 @@ func (q *replayQualifier) canonicalLink(h uint64, header BlockHeader, hash, pare
 // advance records canonical height h: D10 and exclusion ineligibility, E3 copies, canonical-hash tips and the window.
 func (q *replayQualifier) advance(h uint64, hash [32]byte, raw []byte, header BlockHeader, work *big.Int) {
 	if !q.canonicalOK(h, raw, header) || q.isExcluded(hash) {
-		q.badFrom = min(q.badFrom, h)
+		q.markBad(h)
 	}
 	q.hash, q.target, q.count = hash, header.Target, h+1
 	q.work.Set(work)
@@ -731,6 +731,15 @@ func (q *replayQualifier) advance(h uint64, hash [32]byte, raw []byte, header Bl
 	if q.countIdentityTip(hash) {
 		q.consider(hash, h, encoded, q.badFrom <= h)
 	}
+}
+
+// markBad records disqualified or excluded canonical height h before advance overwrites q.hash and q.work: the first
+// such height (the walk ascends) makes the identity at h-1 the published prefix tip candidate (MP 2544-2561).
+func (q *replayQualifier) markBad(h uint64) {
+	if q.badFrom == math.MaxUint64 && h > 0 {
+		q.consider(q.hash, h-1, replayEntryWork(&q.work), false)
+	}
+	q.badFrom = min(q.badFrom, h)
 }
 
 // countIdentityTip reports whether hash, a canonical or Fork F anchor identity, is a listed tip, and counts it when no
