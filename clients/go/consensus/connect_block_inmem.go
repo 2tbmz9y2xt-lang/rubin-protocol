@@ -40,9 +40,63 @@ type connectBlockBasicInMemorySuiteContext struct {
 }
 
 type connectBlockInMemoryValidationContext struct {
-	chainID  [32]byte
-	rotation RotationProvider
-	registry *SuiteRegistry
+	chainID   [32]byte
+	rotation  RotationProvider
+	registry  *SuiteRegistry
+	inputView *blockInputViewState
+}
+
+type connectBlockInputViewResult struct {
+	sumFees            Uint128
+	alreadyGenerated   Uint128
+	alreadyGeneratedN1 Uint128
+	spentInputs        []blockSpentInput
+	createdUtxos       map[Outpoint]UtxoEntry
+}
+
+// connectBlockBasicWithInputView is a dormant continuation for storage callers.
+// The caller owns the supplied subsidy counter and the charge for retained rows.
+// input.State is unused: only the caller's view provides the pre-block UTXOs.
+func connectBlockBasicWithInputView(
+	input connectBlockBasicInMemorySuiteContext,
+	view logicalStateView,
+	alreadyGenerated Uint128,
+) (*connectBlockInputViewResult, error) {
+	if view == nil {
+		return nil, localLogicalStateFailure("nil logical state view")
+	}
+	pb, err := parseInMemoryConnectBlock(input)
+	if err != nil {
+		return nil, err
+	}
+	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, pb.Header.Timestamp)
+	if err != nil {
+		return nil, err
+	}
+	inputView := &blockInputViewState{
+		view: view, height: input.BlockHeight, spent: make(map[Outpoint]struct{}),
+	}
+	validation := connectBlockInMemoryValidationContext{
+		chainID: input.ChainID, rotation: input.Rotation, registry: input.Registry, inputView: inputView,
+	}
+	work, sumFees, err := applyInMemorySequentialConnect(
+		pb, make(map[Outpoint]UtxoEntry), input.BlockHeight, blockMTP, validation,
+	)
+	if err != nil {
+		return nil, err
+	}
+	alreadyGeneratedBig := alreadyGenerated.Big()
+	if err := validateCoinbaseValueBound(pb, input.BlockHeight, alreadyGeneratedBig, sumFees); err != nil {
+		return nil, err
+	}
+	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(input.BlockHeight, alreadyGenerated, alreadyGeneratedBig)
+	if err != nil {
+		return nil, err
+	}
+	return &connectBlockInputViewResult{
+		sumFees: sumFees, alreadyGenerated: alreadyGenerated, alreadyGeneratedN1: alreadyGeneratedN1,
+		spentInputs: inputView.spentInputs, createdUtxos: work,
+	}, nil
 }
 
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an
@@ -235,15 +289,19 @@ func applyInMemoryNonCoinbaseTxs(
 		if err := validateNonCoinbaseBlockTx(pb.Txs[i], seenNonces); err != nil {
 			return nil, Uint128{}, err
 		}
+		if validation.inputView != nil {
+			validation.inputView.txIndex = i
+		}
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
-			tx:       pb.Txs[i],
-			txid:     pb.Txids[i],
-			utxoSet:  workUtxos,
-			height:   blockHeight,
-			blockMTP: blockMTP,
-			chainID:  validation.chainID,
-			rotation: validation.rotation,
-			registry: validation.registry,
+			tx:        pb.Txs[i],
+			txid:      pb.Txids[i],
+			utxoSet:   workUtxos,
+			height:    blockHeight,
+			blockMTP:  blockMTP,
+			chainID:   validation.chainID,
+			rotation:  validation.rotation,
+			registry:  validation.registry,
+			inputView: validation.inputView,
 		})
 		if err != nil {
 			return nil, Uint128{}, err

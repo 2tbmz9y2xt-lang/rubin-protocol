@@ -12,20 +12,22 @@ type nonCoinbaseApplyWorkInput struct {
 	// sigCache is the optional caller-owned positive signature cache. Block
 	// validation leaves it nil and keeps exact uncached behavior; only the live
 	// Mempool owner passes one, through SuiteValidationContext.
-	sigCache *SigCache
+	sigCache  *SigCache
+	inputView *blockInputViewState
 }
 
 func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, Uint128, error) {
 	return (&nonCoinbaseApplyContext{
-		tx:       input.tx,
-		txid:     input.txid,
-		work:     input.utxoSet,
-		height:   input.height,
-		blockMTP: input.blockMTP,
-		chainID:  input.chainID,
-		rotation: input.rotation,
-		registry: input.registry,
-		sigCache: input.sigCache,
+		tx:        input.tx,
+		txid:      input.txid,
+		work:      input.utxoSet,
+		height:    input.height,
+		blockMTP:  input.blockMTP,
+		chainID:   input.chainID,
+		rotation:  input.rotation,
+		registry:  input.registry,
+		sigCache:  input.sigCache,
+		inputView: input.inputView,
 	}).apply()
 }
 
@@ -174,6 +176,14 @@ func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput, seenInputs map[
 	}
 	seenInputs[op] = struct{}{}
 	entry, ok := ctx.work[op]
+	if !ok && ctx.inputView != nil {
+		var err error
+		entry, err = ctx.inputView.lookup(op, len(ctx.resolved))
+		if err != nil {
+			return UtxoEntry{}, Outpoint{}, err
+		}
+		return entry, op, nil
+	}
 	if !ok {
 		return UtxoEntry{}, Outpoint{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 	}
@@ -251,6 +261,9 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
 			}
 		}
 		delete(ctx.work, input.outpoint)
+		if ctx.inputView != nil {
+			ctx.inputView.spent[input.outpoint] = struct{}{}
+		}
 	}
 	return nil
 }

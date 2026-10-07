@@ -158,6 +158,51 @@ type nonCoinbaseResolvedInput struct {
 	outpoint Outpoint
 }
 
+type blockSpentInput struct {
+	outpoint   Outpoint
+	entry      UtxoEntry
+	txIndex    int
+	inputIndex int
+}
+
+// blockInputViewState belongs to one private block candidate. Entries read from
+// the view retain their original payload; created outputs live only in work.
+type blockInputViewState struct {
+	view        logicalStateView
+	height      uint64
+	txIndex     int
+	spent       map[Outpoint]struct{}
+	spentInputs []blockSpentInput
+}
+
+type blockInputViewReadError struct {
+	outpoint   Outpoint
+	txIndex    int
+	inputIndex int
+	failure    *logicalStateFailure
+}
+
+func (e *blockInputViewReadError) Error() string { return e.failure.Error() }
+
+func (state *blockInputViewState) lookup(op Outpoint, inputIndex int) (UtxoEntry, error) {
+	if _, spent := state.spent[op]; spent {
+		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	entry, present, failure := readLogicalStateRow(state.height, state.view, op)
+	if failure != nil {
+		return UtxoEntry{}, &blockInputViewReadError{
+			outpoint: op, txIndex: state.txIndex, inputIndex: inputIndex, failure: failure,
+		}
+	}
+	if !present {
+		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	state.spentInputs = append(state.spentInputs, blockSpentInput{
+		outpoint: op, entry: entry, txIndex: state.txIndex, inputIndex: inputIndex,
+	})
+	return entry, nil
+}
+
 type nonCoinbaseSpendState struct {
 	sumIn              u128
 	sumInVault         u128
@@ -203,6 +248,7 @@ type nonCoinbaseApplyContext struct {
 	registry      *SuiteRegistry
 	sighashCache  *SighashV1PrehashCache
 	sigCache      *SigCache
+	inputView     *blockInputViewState
 	resolved      []nonCoinbaseResolvedInput
 	simplicityCtx *SimplicityTxContext
 	spend         nonCoinbaseSpendState
