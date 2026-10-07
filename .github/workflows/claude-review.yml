@@ -17,8 +17,8 @@ permissions:
   contents: read
 
 concurrency:
-  # A body-only edit runs in its own group so it cannot cancel a review in progress.
-  group: claude-review-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.title == null && format('-noop-{0}', github.run_id) || '' }}
+  # A body-only edit (no title or base change) runs in its own group so it cannot cancel a review in progress.
+  group: claude-review-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && format('-noop-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
       ${{ github.event.pull_request.state == 'open'
       && !github.event.pull_request.draft
       && github.event.pull_request.head.repo.full_name == github.repository
-      && (github.event.action != 'edited' || github.event.changes.title != null) }}
+      && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Advisory: no step failure (checkout, Linear, review) may fail the workflow.
@@ -39,6 +39,10 @@ jobs:
       pull-requests: write
       issues: read
     steps:
+      - name: Record review start
+        id: start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -76,12 +80,13 @@ jobs:
           # Use the read-only workflow token; without it the action mints a
           # Claude App token with contents: write.
           github_token: ${{ github.token }}
-          # Same-repository PRs only (job condition), so bot actors can push here anyway.
-          allowed_bots: '*'
+          # The only bot that opens PRs here (PR author census at delivery).
+          allowed_bots: 'dependabot'
           claude_args: |
             --model claude-opus-5-5
             --effort high
             --max-turns 60
+            --add-dir ${{ runner.temp }}
             --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit"
           prompt: |
@@ -116,6 +121,19 @@ jobs:
             Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
             fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
             CRITICAL - fix before merge). Advisory only: never approve, merge, push or edit.
+
+      - name: Verify the review comment
+        if: ${{ always() && steps.review.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINCE: ${{ steps.start.outputs.at }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq '[.[] | select(.user.login == "github-actions[bot]")] | length')"
+          if [[ "${n}" -lt 1 ]]; then
+            echo "::warning::Claude finished without posting a review comment."
+            echo "- Claude finished without posting a review comment." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Record advisory Claude failure
         if: ${{ always() && steps.review.outcome != 'success' }}
