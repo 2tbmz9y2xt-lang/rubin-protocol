@@ -79,7 +79,7 @@ class FormalRelevanceTests(unittest.TestCase):
         refinement = {path for path in paths if subject.is_refinement_input(path)}
         self.assertEqual(
             (len(formal), len(refinement), len(formal & refinement), len(formal | refinement)),
-            (425, 347, 332, 440),
+            (426, 348, 333, 441),
         )
 
     def test_every_exact_input_uses_its_job_profile(self):

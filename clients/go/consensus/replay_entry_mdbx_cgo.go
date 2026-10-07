@@ -50,7 +50,8 @@ const (
 // HeaderCandidateInventoryV1 is one finite inventory. Complete: Tips holds every admitted received candidate tip hash
 // and Headers every received header on each tip's path down to the lowest received ancestor, as raw 116-byte headers
 // in no relied-on order, with Bytes = 32*len(Tips) + 116*len(Headers) <= limit. A path's lowest header attaches to a
-// durable canonical parent of the active generation (empty active index: the Fork F anchor); otherwise the evidence is
+// durable canonical parent of the active generation (empty active index: the Fork F anchor) or, for the pre-activation
+// recomputation, to an accepted target-generation entry at a height at or below the cursor; otherwise the evidence is
 // incomplete. An inventory above limit is CapacityRefused, never a truncated Complete. Incomplete and CapacityRefused
 // carry empty Tips and Headers and Bytes 0. Version identifies the admitted-candidate set: it advances on every
 // admitted-membership change and producer update, never on derived cache eviction, and is opaque to the consumer.
@@ -147,6 +148,7 @@ type replayEntryCall struct {
 	planned      bool
 	census       bool // The third leaf's BS census read is in flight (dormant in this leaf).
 	denied       bool
+	lane         uint64 // A Reader-scoped planner's lane share; zero is the full lane (replayEntryInventoryLimit).
 	replay       *mdbx.ReplayV1
 	release      func()
 }
@@ -279,7 +281,7 @@ func replayEntryIdentity(reader *mdbx.Reader, generation uint64) (uint8, string,
 
 // qualifyAndPlan runs inventory, walk, selection, protection, sequence and plan in that order (MP L2976-2993).
 func (c *replayEntryCall) qualifyAndPlan(reader *mdbx.Reader, a mdbx.StorageAuthorityV1, source byte) (mdbx.Batch, error) {
-	inv, result := replayEntryInventory(c.owner.view)
+	inv, result := replayEntryInventory(c.owner.view, replayInvLimit(c.lane))
 	if result != "" {
 		return c.decide(result, "")
 	}
@@ -306,13 +308,13 @@ func (c *replayEntryCall) qualifyAndPlan(reader *mdbx.Reader, a mdbx.StorageAuth
 	return c.entryBatch(a, source, target, tipHeight)
 }
 
-// replayEntryInventory is view_contract with CC-7; Bytes is zero exactly when Tips and Headers are empty.
-func replayEntryInventory(view HeaderCandidateViewV1) (HeaderCandidateInventoryV1, string) {
+// replayEntryInventory is view_contract with CC-7 at limit; Bytes is zero exactly when Tips and Headers are empty.
+func replayEntryInventory(view HeaderCandidateViewV1, limit uint64) (HeaderCandidateInventoryV1, string) {
 	if view == nil {
 		return HeaderCandidateInventoryV1{}, replayEntryRecovery
 	}
-	inv := view.InventoryV1(replayEntryInventoryLimit)
-	if inv.Bytes != 32*uint64(len(inv.Tips))+116*uint64(len(inv.Headers)) || inv.Bytes > replayEntryInventoryLimit {
+	inv := view.InventoryV1(limit)
+	if inv.Bytes != 32*uint64(len(inv.Tips))+116*uint64(len(inv.Headers)) || inv.Bytes > limit {
 		return inv, selectedSideInvariant
 	}
 	switch {
@@ -539,7 +541,11 @@ type replayQualifier struct {
 	canonTips  int
 	best       replayCandidate
 	indexEmpty bool
-	workKey    [32]byte // blockWork's one-entry cache: the exact target and its never-mutated work
+	atC        uint64 // the recomputation's cursor height c (MaxUint64 for the entry) and the active hash recorded there
+	hashAtC    [32]byte
+	hasAtC     bool
+	comparand  replayCandidate // the published prefix tip markBad considers (the recomputation's published OLD comparand)
+	workKey    [32]byte        // blockWork's one-entry cache: the exact target and its never-mutated work
 	workVal    *big.Int
 }
 
@@ -563,7 +569,7 @@ type replayCandidate struct {
 }
 
 func newReplayQualifier(g PublishedGenesisContextV1, inv HeaderCandidateInventoryV1, excluded *mdbx.InvalidBranchV1) *replayQualifier {
-	q := &replayQualifier{genesis: g, headers: inv.Headers, badFrom: math.MaxUint64}
+	q := &replayQualifier{genesis: g, headers: inv.Headers, badFrom: math.MaxUint64, atC: math.MaxUint64}
 	if excluded != nil {
 		q.excluded = &excluded.FirstInvalidBlockHash
 	}
@@ -720,6 +726,9 @@ func (q *replayQualifier) advance(h uint64, hash [32]byte, raw []byte, header Bl
 	if !q.canonicalOK(h, raw, header) || q.isExcluded(hash) {
 		q.markBad(h)
 	}
+	if h == q.atC {
+		q.hashAtC, q.hasAtC = hash, true
+	}
 	q.hash, q.target, q.count = hash, header.Target, h+1
 	q.work.Set(work)
 	q.ring[h%WINDOW_SIZE] = header.Timestamp
@@ -734,10 +743,12 @@ func (q *replayQualifier) advance(h uint64, hash [32]byte, raw []byte, header Bl
 }
 
 // markBad records disqualified or excluded canonical height h before advance overwrites q.hash and q.work: the first
-// such height (the walk ascends) makes the identity at h-1 the published prefix tip candidate (MP 2544-2561).
+// such height (the walk ascends) makes the identity at h-1 the published prefix tip candidate (MP 2544-2561) and
+// records it as the recomputation's published OLD comparand.
 func (q *replayQualifier) markBad(h uint64) {
 	if q.badFrom == math.MaxUint64 && h > 0 {
-		q.consider(q.hash, h-1, replayEntryWork(&q.work), false)
+		q.comparand = replayCandidate{ok: true, hash: q.hash, height: h - 1, work: replayEntryWork(&q.work)}
+		q.consider(q.hash, h-1, q.comparand.work, false)
 	}
 	q.badFrom = min(q.badFrom, h)
 }

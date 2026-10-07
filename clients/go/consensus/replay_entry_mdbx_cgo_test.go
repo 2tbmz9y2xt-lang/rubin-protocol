@@ -36,6 +36,8 @@ type replayView struct {
 	early       int                             // releases run while the entry's full-lane grant was held (before its WithReservation returned)
 	lane        *mdbx.OperationReservationOwner // when set, each release probes the full lane
 	afterInvent func()
+	distinct    bool     // each InventoryV1 call returns its own Version (100 + call number), recorded in issued
+	issued      []uint64 // the Version each InventoryV1 call returned, in call order (distinct mode)
 }
 
 func (v *replayView) InventoryV1(limit uint64) HeaderCandidateInventoryV1 {
@@ -43,6 +45,12 @@ func (v *replayView) InventoryV1(limit uint64) HeaderCandidateInventoryV1 {
 	v.limits = append(v.limits, limit)
 	if v.afterInvent != nil {
 		v.afterInvent()
+	}
+	if v.distinct {
+		inv := v.inv
+		inv.Version = 100 + uint64(v.calls)
+		v.issued = append(v.issued, inv.Version)
+		return inv
 	}
 	return v.inv
 }
@@ -1914,7 +1922,7 @@ func TestReplayEntryStoreConsulted(t *testing.T) {
 // at owner construction, so a later change of the caller's Published bytes does not reach the owner.
 func TestReplayEntryExportedSignatures(t *testing.T) {
 	owner := reflect.TypeFor[*ReplayEntryOwnerV1]()
-	logicalMDBXAssert(t, owner.NumMethod() == 1 && owner.Method(0).Name == "EnterReplayTargetMDBX" &&
+	logicalMDBXAssert(t, owner.NumMethod() == 3 && owner.Method(0).Name == "EnterReplayTargetMDBX" && owner.Method(1).Name == "PlanDirectReplayEntryMDBX" && owner.Method(2).Name == "RecomputeReplayTargetMDBX" &&
 		owner.Method(0).Type == reflect.TypeOf(func(*ReplayEntryOwnerV1, *mdbx.Store, *mdbx.OperationReservationOwner) ReplayEntryOutcomeV1 {
 			return ReplayEntryOutcomeV1{}
 		}),
