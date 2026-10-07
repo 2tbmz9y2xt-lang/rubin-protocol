@@ -550,3 +550,17 @@ func TestReplayEntryFixtureHeaderTransient(t *testing.T) {
 	w.store = w.reopen()
 	replaySameImage(t, image, w.image(), "R52 transient")
 }
+
+// RUB-1571 X2 resource half: in the D10 world (published prefix tip at height 5) the height-8 header is transiently
+// unreadable; the end of the prefix is then undetermined and the R35 tuple stands, never a commit of height 5.
+func TestReplayEntryFixturePrefixTipTransient(t *testing.T) {
+	w := defectWorld(t, replayD10Headers(t), replayKeep)
+	image := w.image()
+	out, evidence := replayArmed(t, w, &replayView{inv: replayComplete(nil, nil)}, mdbx.SelectedDamageGetEIO, 3, w.hashes[8][:])
+	logicalMDBXAssert(t, out.Result == replayEntryRecovery && out.Decision == "" && out.CanonicalTruth == "OLD" && out.Truth == mdbx.CommitTruthOld &&
+		out.Stage == mdbx.UpdateStagePrewrite && out.Replay == nil && evidence.Faults == 1 && evidence.BeginWrite == 0, "X2 transient: %+v %+v", out, evidence)
+	replayEngineClass(t, out.Err, mdbx.EngineIO, "X2 transient")
+	replayConsumed(t, w.store, out.Err, "X2 transient")
+	w.store = w.reopen()
+	replaySameImage(t, image, w.image(), "X2 transient")
+}

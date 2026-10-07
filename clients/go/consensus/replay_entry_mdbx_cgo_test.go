@@ -627,7 +627,9 @@ func TestReplayEntryTieSmallerHash(t *testing.T) {
 	logicalMDBXAssert(t, seen[1] && seen[2], "A5: the smaller tip lay on one fork only: %v", seen)
 }
 
-// A6 and R4: a path containing the excluded hash is skipped; when every path contains it, no target.
+// A6 and R4: a path containing the excluded hash is skipped; when every received path contains it, the N1 published
+// prefix tip below the excluded canonical height is the target (RUB-1571: world w2 was recovery_artifact "all excluded"
+// before MP 2544-2561 and now commits hashes[1], height 1, work 2); an excluded height 0 leaves no target.
 func TestReplayEntryExclusion(t *testing.T) {
 	w := pendingWorld(t, 5)
 	long, longTips := w.fork(5, 4, 1)
@@ -644,8 +646,9 @@ func TestReplayEntryExclusion(t *testing.T) {
 	logicalMDBXAssert(t, w.authority().ExcludedInvalidBranch != nil, "exclusion dropped")
 	w2 := pendingWorld(t, 5)
 	exclude(w2, w2.hashes[2])
+	before = w2.snapshot()
 	view = &replayView{inv: replayComplete([][32]byte{longTips[3]}, long)}
-	replayRefused(t, w2, view, w2.genesis, replayEntryRecovery, "all excluded")
+	replayCommitted(t, w2, w2.enter(view, w2.genesis), before, mdbx.StorageProfilePrunedV1, w2.hashes[1], 1, 2)
 	// R4 at a non-empty index: the excluded genesis hash at height 0 makes every path ineligible.
 	w3 := pendingWorld(t, 5)
 	logicalMDBXAssert(t, w3.hashes[0] == w3.genesis.GenesisHash, "R4 premise: canonical height 0 is the genesis hash")
@@ -941,13 +944,7 @@ func TestReplayEntryForeignCanonicalGenesis(t *testing.T) {
 // A36 D10: canonical height 6 fails CAN22 while passing D1-D9; the canonical tip is ineligible, the walk continues,
 // and a received tip at 7 forking at 4 is bound with computed(4) plus its own work.
 func TestReplayEntryD10(t *testing.T) {
-	w0 := newReplayWorld(t, 0)
-	headers, _ := replayChain(t, w0.genesis.GenesisHash, w0.lastTime, 10)
-	// Height 6 repeats an old timestamp (not above the median), then 7..10 rebuilt on it.
-	ts := binary.LittleEndian.Uint64(headers[0][68:76])
-	headers[5], _ = replayHeader(t, mustHash(headers[4]), POW_LIMIT, ts)
-	rest, _ := replayChain(t, mustHash(headers[5]), binary.LittleEndian.Uint64(headers[4][68:76]), 4)
-	copy(headers[6:], rest)
+	headers := replayD10Headers(t)
 	w := defectWorld(t, headers, replayKeep)
 	before := w.snapshot()
 	forked, tips := w.fork(4, 3, 7)
@@ -966,6 +963,109 @@ func TestReplayEntryD10(t *testing.T) {
 	logicalMDBXAssert(t, slices.EqualFunc(got, want, bytes.Equal), "A36 consulted: %x", got)
 	// The walk continues D1-D9 past the D10 height: a stored-work mismatch at height 8 is an integrity result.
 	replayIntegrity(t, defectWorld(t, headers, replayValueAt(8, nil, sideWorldWork(10))), "A36 D9 at 8 past the D10 height")
+}
+
+// replayD10Headers is canonical 1..10 whose height 6 repeats an old timestamp (not above the median, CAN22 fails while
+// D1-D9 pass), with 7..10 rebuilt on it.
+func replayD10Headers(t *testing.T) [][116]byte {
+	w0 := newReplayWorld(t, 0)
+	headers, _ := replayChain(t, w0.genesis.GenesisHash, w0.lastTime, 10)
+	ts := binary.LittleEndian.Uint64(headers[0][68:76])
+	headers[5], _ = replayHeader(t, mustHash(headers[4]), POW_LIMIT, ts)
+	rest, _ := replayChain(t, mustHash(headers[5]), binary.LittleEndian.Uint64(headers[4][68:76]), 4)
+	copy(headers[6:], rest)
+	return headers
+}
+
+// replayExclude seeds the exclusion slot with canonical height h of w.
+func replayExclude(w *replayWorld, h uint64) {
+	w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: h, FirstInvalidBlockHash: w.hashes[h], ExactConsensusError: []byte("BLOCK_ERR_POW_INVALID")}
+	})
+}
+
+// replayPrefixCommits enters w over view and asserts the commit of canonical height h (work h+1 under POW_LIMIT).
+func replayPrefixCommits(t *testing.T, w *replayWorld, view *replayView, h uint64) {
+	t.Helper()
+	before := w.snapshot()
+	replayCommitted(t, w, w.enter(view, w.genesis), before, mdbx.StorageProfilePrunedV1, w.hashes[h], h, h+1)
+}
+
+// RUB-1571 E1, E2, E3, K2, X1 (MP 2544-2561): the D10 world's published tip 10 is ineligible from height 6, so the
+// published prefix tip is canonical height 5 with work 6, a candidate whether or not it is inventoried.
+func TestReplayEntryPrefixTipD10(t *testing.T) {
+	headers := replayD10Headers(t)
+	t.Run("E1 no received candidate", func(t *testing.T) {
+		replayPrefixCommits(t, defectWorld(t, headers, replayKeep), &replayView{inv: replayComplete(nil, nil)}, 5)
+	})
+	t.Run("E1 every received candidate worse", func(t *testing.T) {
+		w := defectWorld(t, headers, replayKeep)
+		forked, tips := w.fork(2, 1, 7) // height 3, work 4 < 6
+		replayPrefixCommits(t, w, &replayView{inv: replayComplete([][32]byte{tips[0]}, forked)}, 5)
+	})
+	// E2 (a received candidate with more chainwork is committed) is TestReplayEntryD10's first row, unchanged.
+	t.Run("E3 equal chainwork", func(t *testing.T) {
+		seen := map[bool]bool{}
+		for skew := uint64(1); skew <= 200 && (!seen[true] || !seen[false]); skew++ {
+			w := defectWorld(t, headers, replayKeep)
+			forked, tips := w.fork(4, 1, skew) // height 5, work 6 == the prefix tip's
+			want := w.hashes[5]
+			received := bytes.Compare(tips[0][:], want[:]) < 0
+			if received {
+				want = tips[0]
+			}
+			seen[received] = true
+			before := w.snapshot()
+			out := w.enter(&replayView{inv: replayComplete([][32]byte{tips[0]}, forked)}, w.genesis)
+			replayCommitted(t, w, out, before, mdbx.StorageProfilePrunedV1, want, 5, 6)
+		}
+		logicalMDBXAssert(t, seen[true] && seen[false], "E3: the smaller hash lay on one side only: %v", seen)
+	})
+	t.Run("K2 heavier ineligible branch", func(t *testing.T) {
+		w := defectWorld(t, headers, replayKeep)
+		quarter := [32]byte(new(big.Int).Rsh(new(big.Int).SetBytes(POW_LIMIT[:]), 2).FillBytes(make([]byte, 32)))
+		bad, badHash := replayHeader(t, w.hashes[4], quarter, binary.LittleEndian.Uint64(w.headers[4][68:76])+2*TARGET_BLOCK_INTERVAL)
+		child, childHash := replayHeader(t, badHash, quarter, binary.LittleEndian.Uint64(bad[68:76])+2*TARGET_BLOCK_INTERVAL)
+		// Height 6 carries 4+4 work over computed(4) = 5: 13 > 6, but CAN15 expects POW_LIMIT at height 5.
+		replayPrefixCommits(t, w, &replayView{inv: replayComplete([][32]byte{childHash}, [][116]byte{bad, child})}, 5)
+	})
+	t.Run("X1 exclusion above the D10 height", func(t *testing.T) {
+		w := defectWorld(t, headers, replayKeep)
+		replayExclude(w, 8)
+		replayPrefixCommits(t, w, &replayView{inv: replayComplete(nil, nil)}, 5)
+	})
+	t.Run("X1 exclusion below the D10 height", func(t *testing.T) {
+		w := defectWorld(t, headers, replayKeep)
+		replayExclude(w, 3)
+		replayPrefixCommits(t, w, &replayView{inv: replayComplete(nil, nil)}, 2)
+	})
+}
+
+// RUB-1571 E5, E6, K1, X3 (MP 2544-2561): an excluded canonical hash ends the published prefix below it.
+func TestReplayEntryPrefixTipExcluded(t *testing.T) {
+	t.Run("E5 no other candidate", func(t *testing.T) {
+		w := pendingWorld(t, 5)
+		replayExclude(w, 3)
+		replayPrefixCommits(t, w, &replayView{inv: replayComplete(nil, nil)}, 2)
+	})
+	for _, c := range []struct {
+		label string
+		tips  int
+	}{{"E6 inventoried prefix tip", 1}, {"K1 prefix tip listed twice without a header", 2}} {
+		t.Run(c.label, func(t *testing.T) {
+			w := pendingWorld(t, 5)
+			replayExclude(w, 3)
+			tips := slices.Repeat([][32]byte{w.hashes[2]}, c.tips)
+			replayPrefixCommits(t, w, &replayView{inv: replayComplete(tips, nil)}, 2)
+		})
+	}
+	t.Run("X3 prefix ends at height 0", func(t *testing.T) {
+		w := pendingWorld(t, 5)
+		replayExclude(w, 1)
+		// The fork from 5 is ineligible through its canonical ancestry (badFrom), not through its own hashes.
+		forked, tips := w.fork(5, 2, 1)
+		replayRefused(t, w, &replayView{inv: replayComplete([][32]byte{tips[1]}, forked)}, w.genesis, replayEntryRecovery, "X3")
+	})
 }
 
 func mustHash(header [116]byte) [32]byte {
@@ -1846,13 +1946,14 @@ func TestReplayEntryExportedSignatures(t *testing.T) {
 
 // BenchmarkReplayEntryWalk measures the per-header walk (canonical rows with their D10 predicates, received-header
 // qualify/attach); this pending (source d) world never reads the step-1 identity page: an R4-shaped entry over canonical 0..100 and a 50-header received
-// branch, with canonical height 2 excluded so every path is ineligible; it ends recovery_artifact with zero mutation and the Store is unchanged
-// across iterations. A measurement with no threshold (coder-go section 3); the contract sets none.
+// branch, with canonical height 1 excluded so every path is ineligible and the published prefix tip is height 0 (no
+// positive-height target); it ends recovery_artifact with zero mutation and the Store is unchanged across iterations.
+// RUB-1571: the exclusion was height 2, which now commits the height-1 prefix tip (MP 2544-2561). A measurement with no threshold (coder-go section 3); the contract sets none.
 func BenchmarkReplayEntryWalk(b *testing.B) {
 	w := pendingWorld(b, 100)
 	headers, hashes := w.fork(100, 50, 1)
 	w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 2, FirstInvalidBlockHash: w.hashes[2], ExactConsensusError: []byte("BLOCK_ERR_POW_INVALID")}
+		a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: w.hashes[1], ExactConsensusError: []byte("BLOCK_ERR_POW_INVALID")}
 	})
 	view := &replayView{inv: replayComplete([][32]byte{hashes[49]}, headers)}
 	owner := NewReplayEntryOwnerV1(view, w.genesis)
