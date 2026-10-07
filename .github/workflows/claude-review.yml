@@ -8,6 +8,7 @@ on:
       - '**/*.rs'
       - '**/*.lean'
       - 'conformance/**'
+      - '.github/workflows/claude-review.yml'
 
 permissions:
   contents: read
@@ -23,11 +24,12 @@ jobs:
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # Advisory: no step failure (checkout, Linear, review) may fail the workflow.
+    continue-on-error: true
     permissions:
       contents: read
       pull-requests: write
       issues: read
-      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +65,11 @@ jobs:
         uses: anthropics/claude-code-action@6fed3ca145920b639991cb756090506e1bcaf515 # v1.0.245
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Use the read-only workflow token; without it the action mints a
+          # Claude App token with contents: write.
+          github_token: ${{ github.token }}
+          # Same-repository PRs only (job condition), so bot actors can push here anyway.
+          allowed_bots: '*'
           claude_args: |
             --model claude-opus-5-5
             --effort high
