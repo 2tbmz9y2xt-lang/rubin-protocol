@@ -231,6 +231,13 @@ func tipNativeDrift(t *testing.T) {
 }
 
 func tipNativeTruth(t *testing.T) {
+	t.Run("T20 endpoint drift rejects otherwise complete OLD",func(t *testing.T){
+		store,path,cfg:=consultedStore(t);row:=tipRow(7,37,[32]byte{0x44},[40]byte{39:1});tipSeed(t,store,row);grown:=tipRow(7,39,[32]byte{0x55},[40]byte{39:1});counter:=consultedCounter(t,900)
+		var truth CommitTruth;var stage UpdateStage;var result error
+		evidence,err:=fixtureTipCursor(store,1,1,1,0,func(){mustEnvironment(t,fixtureTipDrift(grown.Key,grown.Literal,true));_,fixtureErr:=fixtureLargeFault(store,7,0,counter.Key,func(){truth,stage,result=store.Update(func(r *Reader)(Batch,error){_,failure:=r.CanonicalTipV1(7);return Batch{Mutations:[]Mutation{counter}},failure})});mustEnvironment(t,fixtureErr)})
+		mustEnvironment(t,err);tipCensus(t,evidence,4,8,4,0);tipCommit(t,result,3,nil);tipOutcome(t,store,truth,stage,result,3,3,"CLOSED")
+		reopened,openErr:=Open(path,cfg);consultedTrack(t,reopened,openErr);obsoleteRawImage(t,reopened,0,counter.Key,nil);obsoleteRawImage(t,reopened,2,grown.Key,grown.Literal);obsoleteRawImage(t,reopened,2,row.Key,row.Literal)
+	})
 	for _,mode:=range []uint32{7,12,5}{
 		store,_,_:=consultedStore(t);row:=tipRow(7,37,[32]byte{0x44},[40]byte{39:1});tipSeed(t,store,row)
 		counter:=consultedCounter(t,900);key:=counter.Key

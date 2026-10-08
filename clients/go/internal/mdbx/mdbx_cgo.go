@@ -286,7 +286,7 @@ static int rubin_sd_txn_commit(MDBX_txn *txn) {
 		if (rubin_li.mode == 7 || rubin_li.mode == 19) mdbx_txn_break(txn);
 		int rc = mdbx_txn_commit(txn);
 		if (rc != ((rubin_li.mode == 7 || rubin_li.mode == 19) ? MDBX_RESULT_TRUE : MDBX_SUCCESS)) return rc;
-		if ((rubin_li.mode >= 3 && rubin_li.mode <= 6) || rubin_li.mode == 29) {
+		if ((rubin_li.mode >= 3 && rubin_li.mode <= 6) || rubin_li.mode == 29 || (rubin_li.mode == 7 && rubin_tip.drift_active)) {
 			rc = rubin_li_drift();
 			if (rc != MDBX_SUCCESS) return rc;
 			rubin_li.drift++;
