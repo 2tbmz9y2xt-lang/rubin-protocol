@@ -197,7 +197,7 @@ func testReplayPathFixtureRetainedReuse(t *testing.T) {
 	own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 	w.pathOK(t, own, err, 4, replayPathStored, "retry on the retained slot")
 	pathGets(t, evidence, base, 0, 1, "retry on the retained slot")
-	logicalMDBXAssert(t, p.slot == slot, "retry replaced the slot")
+	logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.lo == 3, "retry replaced the slot")
 }
 
 // OwnAtAttachment counts: h = 1 < a = 2 reads entries 6..2 and headers 7..3 in the walk, then entry 1 and header 1;
@@ -236,6 +236,7 @@ func testReplayPathFixtureWalkFaultRetry(t *testing.T) {
 		own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 		w.pathOK(t, own, err, 3, replayPathStored, "retry")
 		pathGets(t, evidence, base, 0, 4, "retry")
+		logicalMDBXAssert(t, p.slot != nil && !p.slot.attached && p.slot.lo == 3 && len(p.slot.hashes) == 4, "retry at %d slot %+v", k, p.slot)
 	}
 	// A native fault below an acquired point: the held guard is released exactly once by finishLocked.
 	w := newPathWorld(t, 2, 2, 4, 5)

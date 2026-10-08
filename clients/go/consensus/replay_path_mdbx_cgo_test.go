@@ -445,6 +445,7 @@ func testReplayPathMultiAcquisition(t *testing.T) {
 	}
 	own, err := w.call(t, p, nil, func(own replayPathOwn, err error) { w.pathOK(t, own, err, 4, replayPathPoint, "acquired") })
 	logicalMDBXAssert(t, err == nil && own.h == 4 && p.slot != nil && view.releases == 3 && view.protects == 3, "acquired walk %+v", view)
+	logicalMDBXAssert(t, p.slot.lo == 4 && len(p.slot.hashes) == 3 && !p.slot.attached, "acquired slot %+v", p.slot)
 	replaySameImage(t, image, w.image(), "multi acquisition")
 }
 
@@ -513,7 +514,7 @@ func testReplayPathRetainedReuse(t *testing.T) {
 	p := newReplayPathOwner(nil, pathLimit)
 	_, err := w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil, "establish: %v", err)
-	slot, first := p.slot, &p.slot.hashes[0]
+	slot, first, hashes := p.slot, &p.slot.hashes[0], slices.Clone(p.slot.hashes)
 	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: bytes.Clone(w.hashes[6][:]), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: bytes.Clone(w.hashes[5][:]), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 3)
@@ -523,9 +524,10 @@ func testReplayPathRetainedReuse(t *testing.T) {
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 4)
 	own, err = w.call(t, p, nil, nil)
 	pathWant(t, err, replayEntryRecovery, "retained refusal")
-	logicalMDBXAssert(t, own.missing && own.missingHeight == 5 && p.slot == slot, "refusal cleared the slot")
+	logicalMDBXAssert(t, own.missing && own.missingHeight == 5 && p.slot == slot && slices.Equal(slot.hashes, hashes), "refusal cleared the slot")
 	own, err = w.call(t, p, w.headers[5][:], nil)
 	w.pathOK(t, own, err, 5, replayPathSupplied, "retry on the retained slot")
+	logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.lo == 3, "retry changed the slot")
 }
 
 // RC7: locked discard is true once; concurrent unlocked discards serialize to exactly one true.
@@ -612,6 +614,7 @@ func testReplayPathForeignSlot(t *testing.T) {
 	_, err := w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil, "establish")
 	slot, calls := p.slot, view.headerCalls
+	key, hashes, lo, attached, a := slot.key, slices.Clone(slot.hashes), slot.lo, slot.attached, slot.a
 	edits := map[string]func(*mdbx.StorageAuthorityV1){
 		"generation": func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID, a.Replay.TargetGenerationID = 4, 3 },
 		"chainID":    func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.ChainID[0] ^= 1 },
@@ -622,10 +625,13 @@ func testReplayPathForeignSlot(t *testing.T) {
 	}
 	for _, name := range []string{"generation", "chainID", "genesis", "tipHash", "tipHeight", "chainwork"} {
 		w.setReplayEdit(mdbx.ReplayCursorAppliedV1, 2, edits[name])
+		image := w.image()
 		own, err := w.call(t, p, nil, nil)
 		pathWant(t, err, selectedSideCapacity, name)
 		pathZero(t, own, name)
 		logicalMDBXAssert(t, p.slot == slot && view.headerCalls == calls, "%s: slot or source touched", name)
+		logicalMDBXAssert(t, slot.key == key && slices.Equal(slot.hashes, hashes) && slot.lo == lo && slot.attached == attached && slot.a == a, "%s: slot contents changed", name)
+		replaySameImage(t, image, w.image(), name)
 	}
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
 	_, err = w.call(t, p, nil, nil)
@@ -898,7 +904,7 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	// Foreign target: a completed slot and a precondition-violating authority naming another target: invariant, not capacity.
 	_, err = w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil, "foreign establish: %v", err)
-	slot := p.slot
+	slot, hashes := p.slot, slices.Clone(p.slot.hashes)
 	a.Replay.Target.TipHash[0] ^= 1
 	_, err = pathDirect(t, p, a, w.genesis, "foreign target")
 	pathWant(t, err, selectedSideInvariant, "foreign target")
@@ -907,7 +913,7 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	w.setReplayEdit(mdbx.ReplayCursorAppliedV1, 3, func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor.BlockHash[0] ^= 1 })
 	_, err = w.call(t, p, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "cursor reuse")
-	logicalMDBXAssert(t, p.slot == slot, "cursor reuse slot")
+	logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.lo == 3, "cursor reuse slot")
 	// Cursor proof when attached: a = 2, cursor 1 with a foreign hash, own h = 2 <= a.
 	g := newPathWorld(t, 6, 2, 5)
 	g.setReplay(mdbx.ReplayCursorAppliedV1, 0)
@@ -918,6 +924,21 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	_, err = g.call(t, q, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "cursor attached")
 	logicalMDBXAssert(t, q.slot != nil, "cursor attached slot")
+	// Cursor below the establishment: established at cursor 1 (lo = a = 2), then cursor 0 (h = 1 < lo, h <= a).
+	g.setReplay(mdbx.ReplayCursorAppliedV1, 1)
+	lv := &pathView{}
+	l := newReplayPathOwner(lv, pathLimit)
+	_, err = g.call(t, l, nil, nil)
+	logicalMDBXAssert(t, err == nil && l.slot.lo == 2 && l.slot.attached && l.slot.a == 2, "below establishment setup %v %+v", err, l.slot)
+	lslot, lhashes := l.slot, slices.Clone(l.slot.hashes)
+	g.setReplay(mdbx.ReplayCursorAppliedV1, 0)
+	gimage := g.image()
+	own, err = g.call(t, l, nil, nil)
+	pathWant(t, err, selectedSideInvariant, "cursor below establishment")
+	pathZero(t, own, "cursor below establishment")
+	logicalMDBXAssert(t, l.slot == lslot && slices.Equal(lslot.hashes, lhashes) && lslot.lo == 2 && lslot.attached && lslot.a == 2, "below establishment slot %+v", lslot)
+	logicalMDBXAssert(t, lv.versions+lv.protects+lv.headerCalls == 0, "below establishment view %+v", lv)
+	replaySameImage(t, gimage, g.image(), "cursor below establishment")
 	// Unbound point: the provider returns 116 bytes that do not bind x; they are discarded.
 	m := newPathWorld(t, 2, 2, 3, 3)
 	m.setReplay(mdbx.ReplayCursorAppliedV1, 2)
