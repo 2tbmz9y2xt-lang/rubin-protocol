@@ -287,10 +287,10 @@ func testReplayPathPrecondition(t *testing.T) {
 	pathWant(t, err, selectedSideInvariant, "nil Replay")
 	pathZero(t, own, "nil Replay")
 	w.setReplay(mdbx.ReplayCursorAppliedV1, w.tip())
-	own, err = w.call(t, p, nil, nil)
+	a := w.authority()
+	own, err = pathDirect(t, p, a, w.genesis, "cursor at tip")
 	pathWant(t, err, selectedSideInvariant, "cursor at tip")
 	pathZero(t, own, "cursor at tip")
-	a := w.authority()
 	a.Replay.Cursor.Height = a.Replay.Target.TipHeight + 1
 	logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(a) != nil, "hand-built authority validates")
 	_, err = p.newCall(nil, a, nil, w.genesis, nil)
