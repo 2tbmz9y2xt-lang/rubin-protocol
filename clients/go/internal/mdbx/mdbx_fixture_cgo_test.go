@@ -189,6 +189,7 @@ func TestArchiveProfileNativeImages(t *testing.T) {
 			var observed []byte
 			var finalConsulted []ownedConsulted
 			var finalValues [][]byte
+			var finalImages []updateImage
 			var changedRows []Mutation
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
@@ -209,19 +210,20 @@ func TestArchiveProfileNativeImages(t *testing.T) {
 				}
 				if strings.HasSuffix(name, "_final") {
 					finalConsulted = append([]ownedConsulted(nil), consulted...)
-					for i, row := range batch.Consulted {
+					for _, row := range batch.Consulted {
 						value, present, readErr := reader.Get(row.DBI, row.Key)
 						if readErr != nil {
 							return readErr
 						}
 						finalValues = append(finalValues, value)
-						finalConsulted[i].image = updateImage{}
+						image := updateImage{}
 						if present {
-							finalConsulted[i].image, err = updateOwnedImage(value)
+							image, err = updateOwnedImage(value)
 							if err != nil {
 								return err
 							}
 						}
+						finalImages = append(finalImages, image)
 					}
 				}
 				changeCanonical := func(genesis bool) error {
@@ -278,7 +280,13 @@ func TestArchiveProfileNativeImages(t *testing.T) {
 			if strings.HasSuffix(name, "_final") {
 				// Separate final-match owner composition; there is no public injection seam.
 				mustEnvironment(t, s.View(func(reader *Reader) error {
-					err := updateNativeConsultedMatch(reader.txn, s.dbis, finalConsulted, "final update image mismatch")
+					var err error
+					for i, row := range finalConsulted {
+						err = updateNativeMatch(reader.txn, s.dbis[row.dbi.Rank], row.key, finalImages[i], "final update image mismatch")
+						if err != nil {
+							break
+						}
+					}
 					if err == nil {
 						t.Fatal("final consulted mismatch missing")
 					}

@@ -159,9 +159,9 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, prior := n1(t)
 		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "equality NEW with commit error", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
-		// OLD Gets: callback 1/0/2/7/1/0/0/2, Consulted 0/0/3/6/0/0/0/2, targets+recapture 2x 1/0/0/1/1/0/1/0. Readback:
+		// OLD Gets: callback 1/0/2/7/1/0/0/2, four Consulted passes 0/0/3/6/0/0/0/2, four target passes 1/0/0/1/1/0/1/0. Readback:
 		// 4 targets twice plus 11 relied-on rows (forward 5, 10, 11; headers 0..5; owners of 5 and candidate NONE).
-		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
+		if evidence.OldGets != [8]uint64{5, 0, 14, 35, 5, 0, 4, 10} || evidence.ReadGets != 19 {
 			t.Fatalf("required native OLD/Consulted observation captured: %+v", evidence)
 		}
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
@@ -176,7 +176,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		})
 		out, evidence := w.armed(mdbx.SelectedDamageCommitNew, 0, nil, raw, &mdbx.AuthorityPointV1{Height: 0xffffffff, BlockHash: tip})
 		retainWant(t, "tip 0xffffffff equality NEW", out, "", "", retainNA, mdbx.CommitTruthNew, crossed, false)
-		if evidence.OldGets != [8]uint64{3, 0, 5, 15, 3, 0, 2, 4} || evidence.ReadGets != 19 {
+		if evidence.OldGets != [8]uint64{5, 0, 14, 35, 5, 0, 4, 10} || evidence.ReadGets != 19 {
 			t.Fatalf("tip boundary image present/equality protection: %+v", evidence)
 		}
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
@@ -206,17 +206,17 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("seeded suffix row and image unchanged")
 	})
 	t.Run("R-kc5", func(t *testing.T) {
-		// A byte-identical expected row is consulted, not a target: from NF[H5]'s counts each reused row moves one Get from
-		// the two target passes to the capture. Readback: header 3 targets twice+12 rows, body 3x2+12, both 2x2+13.
+		// A byte-identical expected row is consulted: four OLD passes replace four target passes, so OLD counts stay exact.
+		// Readback: header 3 targets twice+12 rows, body 3x2+12, both 2x2+13.
 		for _, c := range []struct {
 			name  string
 			ranks []uint8
 			gets  [8]uint64
 			reads uint64
 		}{
-			{"header", []uint8{3}, [8]uint64{3, 0, 5, 14, 3, 0, 2, 4}, 18},
-			{"body", []uint8{4}, [8]uint64{3, 0, 5, 15, 2, 0, 2, 4}, 18},
-			{"header+body", []uint8{3, 4}, [8]uint64{3, 0, 5, 14, 2, 0, 2, 4}, 17},
+			{"header", []uint8{3}, [8]uint64{5, 0, 14, 35, 5, 0, 4, 10}, 18},
+			{"body", []uint8{4}, [8]uint64{5, 0, 14, 35, 5, 0, 4, 10}, 18},
+			{"header+body", []uint8{3, 4}, [8]uint64{5, 0, 14, 35, 5, 0, 4, 10}, 17},
 		} {
 			w, raw, prior := n1(t)
 			hash := ssqHash(raw)
@@ -263,7 +263,7 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		retainWant(t, "probed N1", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
 		// Probes at write begin, commit and twice around the OLD abort: all inside the grant.
 		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
-			evidence.OldGets != [8]uint64{2, 0, 5, 14, 2, 0, 1, 4} {
+			evidence.OldGets != [8]uint64{3, 0, 11, 27, 3, 0, 2, 8} {
 			t.Fatalf("every native full-lane probe denied; grant released after return: %+v", evidence)
 		}
 		w.expectN1(raw, prior, 2, 5, ssqWork(7))
@@ -713,10 +713,12 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, prior, side := n2(t)
 		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "probed N2", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
-		// Probes at write begin, commit and twice around the OLD abort, all denied. Rank-4 OLD Gets: one linking-body read,
-		// the candidate expected-body read, the linking body's Consulted capture and the candidate body target image.
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Seven rank-4 OLD Gets:
+		// one linking-body and one candidate expected-body callback read; linking Consulted and candidate target qualification;
+		// linking Consulted and candidate target OLD/write proof; linking Consulted final proof.
+		// Candidate final literal comparison adds no OLD query.
 		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
-			evidence.OldGets[4] != 4 {
+			evidence.OldGets[4] != 7 {
 			t.Fatalf("one linking body read; every native full-lane probe denied: %+v", evidence)
 		}
 		w.expectN2(raw, prior, side, w.side[6])

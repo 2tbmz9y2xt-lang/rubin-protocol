@@ -31,18 +31,17 @@ func canonicalPairingError() error {
 	return adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "unpaired canonical owner mutation", nil)
 }
 
-// updateNativePairedImages captures every target's OLD image and every OLD_VALUE_REF source exactly as
-// updateNativeImages does, then applies updateNativePairing before any OLD/write snapshot comparison runs.
-func updateNativePairedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
-	targets, references, err := updateNativeImages(old, dbis, plan)
+// Qualify every target and source before pairing or any OLD/write comparison.
+func updateNativePairedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
+	references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	err = updateNativePairing(old, dbis, plan, targets)
+	err = updateNativePairing(old, dbis, plan)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return targets, references, nil
+	return references, nil
 }
 
 // updateNativePairing keeps canonical-v1 and canonical-owner-v1 bijective across one admitted plan. N1: a forward literal
@@ -56,14 +55,14 @@ func updateNativePairedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedM
 // N2, O1, O2, each over targets in plan order; the first violation returns the direct InvalidInput refusal and a
 // failed partner read returns its unchanged native error. A plan without a rank-2 or rank-7 target reads nothing and
 // allocates nothing; a partner read allocates one 40- or 16-byte key. Borrowed OLD bytes are read only while old is live.
-func updateNativePairing(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage) error {
+func updateNativePairing(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) error {
 	for _, side := range canonicalSides {
 		if !canonicalNewPaired(plan, side) {
 			return canonicalPairingError()
 		}
 	}
 	for _, side := range canonicalSides {
-		err := canonicalOldPaired(old, dbis, plan, targets, side)
+		err := canonicalOldPaired(old, dbis, plan, side)
 		if err != nil {
 			return err
 		}
@@ -87,14 +86,20 @@ func canonicalNewPaired(plan []ownedMutation, side canonicalSide) bool {
 }
 
 // canonicalOldPaired is O1 for the forward side and O2 for the owner side.
-func canonicalOldPaired(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, side canonicalSide) error {
+func canonicalOldPaired(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, side canonicalSide) error {
 	var partner [40]byte
-	for i, m := range plan {
-		field, obligated := canonicalOldField(m, targets[i], side)
+	for _, m := range plan {
+		if m.dbi.Rank != side.rank {
+			continue
+		}
+		field, obligated, err := canonicalOldTargetField(old, dbis[side.rank], m, side)
+		if err != nil {
+			return err
+		}
 		if !obligated {
 			continue
 		}
-		key := canonicalPartnerKey(&partner, m.key, field)
+		key := canonicalPartnerKey(&partner, m.key, field[:side.field])
 		if canonicalTargetIndex(plan, side.partner, key) >= 0 {
 			continue
 		}
@@ -107,6 +112,18 @@ func canonicalOldPaired(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutatio
 		}
 	}
 	return nil
+}
+
+// Only the fixed leading field outlives the current OLD target query.
+func canonicalOldTargetField(old *C.MDBX_txn, dbi C.MDBX_dbi, m ownedMutation, side canonicalSide) ([32]byte, bool, error) {
+	var field [32]byte
+	image, err := updateNativeImage(old, dbi, m.key)
+	if err != nil {
+		return field, false, err
+	}
+	borrowed, obligated := canonicalOldField(m, image, side)
+	copy(field[:], borrowed)
+	return field, obligated, nil
 }
 
 // canonicalOldField returns the leading OLD field of a target of this side whose OLD value has the side's exact width,

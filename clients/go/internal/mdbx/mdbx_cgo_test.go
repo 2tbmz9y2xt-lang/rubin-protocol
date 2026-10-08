@@ -1434,19 +1434,27 @@ func updatePlanBatch(t *testing.T) Batch {
 
 func requirePlanInvalid(t *testing.T, batch Batch, marker string) {
 	t.Helper()
+	before := fmt.Sprintf("%#v", batch)
 	if _, err := updateOwnedBatch(batch); err == nil {
 		t.Fatal(marker)
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("update"), int(syscall.EINVAL), "invalid Update Batch")
 	}
+	if fmt.Sprintf("%#v", batch) != before {
+		t.Fatal("invalid admission changed caller input: " + marker)
+	}
 }
 
 func requirePlanCapacity(t *testing.T, batch Batch) {
 	t.Helper()
+	before := fmt.Sprintf("%#v", batch)
 	if _, err := updateOwnedBatch(batch); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+	if fmt.Sprintf("%#v", batch) != before {
+		t.Fatal("capacity admission changed caller input")
 	}
 }
 
@@ -1468,7 +1476,7 @@ func TestUpdatePlanPayloadMatrix(t *testing.T) {
 			t.Fatalf("allowed action rejected: %+v / %v", mutation, err)
 		}
 	}
-	for _, kind := range []AfterKind{0, 4} {
+	for _, kind := range []AfterKind{0, 4, 255} {
 		candidate := updatePlanBatch(t)
 		candidate.Mutations[0].AfterKind = kind
 		requirePlanInvalid(t, candidate, "plan closed domain drifted")
@@ -1480,14 +1488,20 @@ func TestUpdatePlanPayloadMatrix(t *testing.T) {
 		func(batch *Batch) { batch.Mutations[0].DBI = DBI{} },
 		func(batch *Batch) { batch.Mutations[0].Key = nil },
 		func(batch *Batch) { batch.Mutations[2].Literal = []byte{0} },
+		func(batch *Batch) { batch.Mutations[2].Literal = []byte{} },
 		func(batch *Batch) { batch.Mutations[2].RefDBI = batch.Mutations[1].DBI },
 		func(batch *Batch) { batch.Mutations[2].RefKey = []byte{} },
+		func(batch *Batch) { batch.Mutations[2].RefKey = []byte{0} },
 		func(batch *Batch) { batch.Mutations[3].Literal = nil },
 		func(batch *Batch) { batch.Mutations[3].Literal = []byte{} },
 		func(batch *Batch) { batch.Mutations[3].RefDBI = batch.Mutations[1].DBI },
 		func(batch *Batch) { batch.Mutations[3].RefKey = []byte{} },
+		func(batch *Batch) { batch.Mutations[3].RefKey = []byte{0} },
 		func(batch *Batch) { batch.Mutations[8].Literal = []byte{} },
+		func(batch *Batch) { batch.Mutations[8].Literal = []byte{0} },
 		func(batch *Batch) { batch.Mutations[8].RefKey = nil },
+		func(batch *Batch) { batch.Mutations[8].RefKey = []byte{} },
+		func(batch *Batch) { batch.Mutations[8].RefDBI = DBI{} },
 		func(batch *Batch) { batch.Mutations[8].RefDBI = batch.Mutations[4].DBI },
 		func(batch *Batch) { batch.Mutations[8].RefKey[8] ^= 1 },
 		func(batch *Batch) { batch.Mutations[8].BeforePresent = true },
@@ -1562,6 +1576,7 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		{batch.Mutations[4], 16_384, func(b *updateBudget, n uint64) { b.aux = n }},
 	}
 	for _, row := range rows {
+		before := fmt.Sprintf("%#v", row.row)
 		budget := updateBudget{}
 		row.set(&budget, row.limit-1)
 		if err := updateScanMutation(true, Mutation{}, row.row, &budget); err != nil {
@@ -1571,6 +1586,9 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 			t.Fatal("plan bound row accepted")
 		} else {
 			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+		}
+		if fmt.Sprintf("%#v", row.row) != before {
+			t.Fatal("family capacity admission changed caller mutation")
 		}
 	}
 	for _, row := range []struct {
@@ -1583,6 +1601,7 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		{batch.Mutations[8], 137_676_154 - uint64(len(batch.Mutations[8].Key)) - uint64(len(batch.Mutations[8].RefKey)), func(b *updateBudget, n uint64) { b.keyBytes = n }},
 		{batch.Mutations[3], 155_659_727 - uint64(len(batch.Mutations[3].Literal)), func(b *updateBudget, n uint64) { b.literals = n }},
 	} {
+		before := fmt.Sprintf("%#v", row.mutation)
 		budget := updateBudget{}
 		row.set(&budget, row.used)
 		if err := updateScanMutation(true, Mutation{}, row.mutation, &budget); err != nil {
@@ -1593,19 +1612,30 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		} else {
 			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
 		}
+		if fmt.Sprintf("%#v", row.mutation) != before {
+			t.Fatal("aggregate capacity admission changed caller mutation")
+		}
 	}
 	refCharge := uint64(len(batch.Mutations[8].Key) + len(batch.Mutations[8].RefKey))
 	budget := updateBudget{keyBytes: 137_676_154 - refCharge + 1}
+	before := fmt.Sprintf("%#v", batch.Mutations[8])
 	if err := updateScanMutation(true, Mutation{}, batch.Mutations[8], &budget); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
 	}
+	if fmt.Sprintf("%#v", batch.Mutations[8]) != before {
+		t.Fatal("reference-key capacity admission changed caller mutation")
+	}
 	budget = updateBudget{keyBytes: ^uint64(0)}
+	before = fmt.Sprintf("%#v", batch.Mutations[2])
 	if err := updateScanMutation(true, Mutation{}, batch.Mutations[2], &budget); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+	if fmt.Sprintf("%#v", batch.Mutations[2]) != before {
+		t.Fatal("key-byte overflow admission changed caller mutation")
 	}
 }
 
@@ -1657,6 +1687,55 @@ func TestUpdatePlanCopyIsolation(t *testing.T) {
 	if owned[0].key[7] != 1 || owned[0].literal[0] != 0 || owned[1].literal[0] != 0 {
 		t.Fatal("prepared plan alias drifted")
 	}
+	for _, reverse := range []bool{false, true} {
+		for _, sharedBacking := range []bool{false, true} {
+			t.Run(fmt.Sprintf("target-ref clone reverse=%v shared=%v", reverse, sharedBacking), func(t *testing.T) {
+				destination, source := reverseKeys(t, 3, 7)
+				ref := forwardRefRow(source, destination)
+				if reverse {
+					ref = reverseRefRow(destination, source)
+				}
+				key := append([]byte(nil), ref.RefKey...)
+				if sharedBacking {
+					ref.RefKey = key
+				}
+				target := Mutation{DBI: ref.RefDBI, Key: key, BeforePresent: true, AfterKind: AfterKind(1)}
+				rows := []Mutation{target, ref}
+				if reverse {
+					rows = []Mutation{ref, target}
+				}
+				owned, err := updateOwnedBatch(Batch{Mutations: rows, Reverse: reverse})
+				mustEnvironment(t, err)
+				refAt, targetAt := 1, 0
+				if reverse {
+					refAt, targetAt = 0, 1
+				}
+				if &owned[refAt].refKey[0] != &owned[targetAt].key[0] || &owned[refAt].refKey[0] == &ref.RefKey[0] {
+					t.Fatal("target reference did not share the owned target clone")
+				}
+				wantRef, wantDestination := append([]byte(nil), key...), append([]byte(nil), ref.Key...)
+				key[0], ref.RefKey[len(ref.RefKey)-1], ref.Key[0] = 0xff, 0xff, 0xff
+				if !bytes.Equal(owned[refAt].refKey, wantRef) || !bytes.Equal(owned[targetAt].key, wantRef) || !bytes.Equal(owned[refAt].key, wantDestination) {
+					t.Fatal("caller mutation changed target-reference identity")
+				}
+			})
+		}
+	}
+	t.Run("non-target and prefix references own independent clones", func(t *testing.T) {
+		destination, source := reverseKeys(t, 1, 3)
+		ref := forwardRefRow(source, destination)
+		// A raw obsolete target can be a proper prefix; full binary equality must still refuse sharing.
+		plan := []ownedMutation{{dbi: ref.RefDBI, key: updateClone(ref.RefKey[:len(ref.RefKey)-1]), beforePresent: true, after: AfterKind(1)}, {dbi: ref.DBI, key: updateClone(ref.Key), after: AfterKind(3), refDBI: ref.RefDBI, refKey: ref.RefKey}}
+		updateOwnReferences(plan)
+		want := append([]byte(nil), ref.RefKey...)
+		if &plan[1].refKey[0] == &ref.RefKey[0] || &plan[1].refKey[0] == &plan[0].key[0] {
+			t.Fatal("non-target reference borrowed caller or prefix target")
+		}
+		ref.RefKey[0] = 0xff
+		if !bytes.Equal(plan[1].refKey, want) {
+			t.Fatal("non-target reference lost independent key copy")
+		}
+	})
 }
 
 func TestUpdatePlanSurfaceOwnership(t *testing.T) {
@@ -1675,7 +1754,7 @@ func TestUpdatePlanSurfaceOwnership(t *testing.T) {
 	}
 	var planEnd token.Pos
 	for _, declaration := range file.Decls {
-		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == "updateOwnedBatch" {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Name.Name == "updateOwnReferences" {
 			planEnd = function.End()
 		}
 	}
@@ -3430,6 +3509,101 @@ func requireUpdateTruth(t *testing.T, outcome updateNativeOutcome, truth CommitT
 }
 
 func TestNativeUpdateImages(t *testing.T) {
+	t.Run("complete point bytes and OLD-first both", func(t *testing.T) {
+		for _, row := range []struct {
+			name                    string
+			old, candidate, planned []byte
+			oldPresent              bool
+			truth                   CommitTruth
+		}{
+			{"absent both", nil, nil, nil, false, 1},
+			{"absent versus present-empty", nil, []byte{}, nil, false, 3},
+			{"present-empty both", []byte{}, []byte{}, []byte{}, true, 1},
+			{"empty versus absent", []byte{}, nil, []byte{}, true, 3},
+			{"length one both", []byte{0x31}, []byte{0x31}, []byte{0x31}, true, 1},
+			{"different length neither", []byte{0x31}, []byte{0x31, 0x32}, []byte{0x31}, true, 3},
+			{"equal length first byte", []byte{1, 2, 3}, []byte{9, 2, 3}, []byte{1, 2, 3}, true, 3},
+			{"equal length middle byte", []byte{1, 2, 3}, []byte{1, 9, 3}, []byte{1, 2, 3}, true, 3},
+			{"equal length last byte", []byte{1, 2, 3}, []byte{1, 2, 9}, []byte{1, 2, 3}, true, 3},
+			{"planned NEW", []byte{1, 2, 3}, []byte{1, 2, 9}, []byte{1, 2, 9}, true, 2},
+		} {
+			t.Run(row.name, func(t *testing.T) {
+				store := newUpdateStore(t)
+				defer func() { mustEnvironment(t, store.Close()) }()
+				dbi, key := readDBIsLiteral()[0], []byte{2}
+				if row.oldPresent {
+					requireUpdateTruth(t, runNativeUpdate(t, store, []ownedMutation{{dbi: dbi, key: key, after: AfterKind(2), literal: row.old}}), 2, true, nil, nil)
+				}
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					change := ownedMutation{dbi: dbi, key: key, beforePresent: row.oldPresent, after: AfterKind(2), literal: row.candidate}
+					if row.candidate == nil {
+						change.after = AfterKind(1)
+					}
+					if row.oldPresent || row.candidate != nil {
+						requireUpdateTruth(t, store.updateNative([]ownedMutation{change}, nil, reader.txn), 2, true, nil, nil)
+					}
+					plan := []ownedMutation{{dbi: dbi, key: key, after: AfterKind(2), literal: row.planned}}
+					if row.planned == nil {
+						plan[0].after = AfterKind(1)
+					}
+					primary := nativeError(operationUpdate, 28)
+					outcome := updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, primary)
+					requireUpdateTruth(t, outcome, row.truth, true, primary, nil)
+					if outcome.stage != 3 {
+						t.Fatal("point readback stage drifted")
+					}
+					return nil
+				}))
+				requireUpdateValue(t, store, dbi, key, row.candidate, row.candidate != nil)
+			})
+		}
+	})
+	t.Run("full unchanged reference and consulted bytes", func(t *testing.T) {
+		for _, domain := range []string{"reference", "consulted"} {
+			for _, position := range []int{0, 10, 19} {
+				t.Run(fmt.Sprintf("%s byte%d", domain, position), func(t *testing.T) {
+					store := newUpdateStore(t)
+					defer func() { mustEnvironment(t, store.Close()) }()
+					dbi, key := readDBIsLiteral()[0], []byte{2}
+					plan := updateNativePlan(t, consultedCounter(t, 1))
+					consulted := []ownedConsulted{{dbi: dbi, key: key}}
+					if domain == "reference" {
+						target, source := reverseKeys(t, 9, 1)
+						ref := forwardRefRow(source, target)
+						dbi, key = ref.RefDBI, ref.RefKey
+						plan, consulted = updateNativePlan(t, ref), nil
+					}
+					before := make([]byte, 20)
+					before[0], before[10], before[19] = 0x31, 0x41, 0x51
+					changed := append([]byte(nil), before...)
+					changed[position] ^= 0x7f
+					requireUpdateTruth(t, runNativeUpdate(t, store, []ownedMutation{{dbi: dbi, key: key, after: AfterKind(2), literal: before}}), 2, true, nil, nil)
+					runtime.LockOSThread()
+					defer runtime.UnlockOSThread()
+					mustEnvironment(t, store.View(func(reader *Reader) error {
+						requireUpdateTruth(t, store.updateNative(plan, consulted, reader.txn), 2, true, nil, nil)
+						change := []ownedMutation{{dbi: dbi, key: key, beforePresent: true, after: AfterKind(2), literal: changed}}
+						requireUpdateTruth(t, store.updateNative(change, nil, reader.txn), 2, true, nil, nil)
+						primary := nativeError(operationUpdate, 28)
+						outcome := updateNativeReadback(store.env, store.dbis, plan, consulted, reader.txn, primary)
+						requireUpdateTruth(t, outcome, 3, true, primary, nil)
+						if outcome.stage != 3 {
+							t.Fatal("unchanged-domain readback stage drifted")
+						}
+						return nil
+					}))
+					requireUpdateValue(t, store, dbi, key, changed, true)
+					wantTarget := plan[0].literal
+					if domain == "reference" {
+						wantTarget = before
+					}
+					requireUpdateValue(t, store, plan[0].dbi, plan[0].key, wantTarget, true)
+				})
+			}
+		}
+	})
 	for _, row := range []struct {
 		name, diagnostic string
 		before, seed     bool
@@ -3494,9 +3668,9 @@ func TestNativeUpdateImages(t *testing.T) {
 			stage := initial
 			for _, err := range []error{
 				updateNativePut(nil, 0, nil, updateImage{}, nil, &stage),
-				updateNativePuts(nil, (Store{}).dbis, []ownedMutation{{after: AfterKind(4)}}, nil, &stage),
-				updateNativePuts(nil, (Store{}).dbis, []ownedMutation{{after: AfterOldValueRef}}, nil, &stage),
-				updateNativePuts(nil, (Store{}).dbis, nil, []updateReference{{}}, &stage),
+				updateNativePuts(nil, nil, (Store{}).dbis, []ownedMutation{{after: AfterKind(4)}}, nil, &stage),
+				updateNativePuts(nil, nil, (Store{}).dbis, []ownedMutation{{after: AfterOldValueRef}}, nil, &stage),
+				updateNativePuts(nil, nil, (Store{}).dbis, nil, []updateReference{{}}, &stage),
 			} {
 				if stage != initial {
 					t.Fatal("prewrite stage drifted")
@@ -3505,7 +3679,7 @@ func TestNativeUpdateImages(t *testing.T) {
 					t.Fatal("invalid native update guard accepted")
 				}
 			}
-			for _, err := range []error{updateNativeDeletes(nil, (Store{}).dbis, nil, &stage), updateNativeDeletes(nil, (Store{}).dbis, []ownedMutation{{}}, &stage), updateNativePuts(nil, (Store{}).dbis, []ownedMutation{{after: AfterAbsent}}, nil, &stage)} {
+			for _, err := range []error{updateNativeDeletes(nil, (Store{}).dbis, nil, &stage), updateNativeDeletes(nil, (Store{}).dbis, []ownedMutation{{}}, &stage), updateNativePuts(nil, nil, (Store{}).dbis, []ownedMutation{{after: AfterAbsent}}, nil, &stage)} {
 				if stage != initial {
 					t.Fatal("prewrite stage drifted")
 				}
@@ -3620,16 +3794,16 @@ func TestNativeUpdateImages(t *testing.T) {
 					return errors.New("invalid update value accepted")
 				}
 				malformed := ownedMutation{after: AfterOldValueRef}
-				if _, err := updateNativeFinalImage(malformed, nil, new(int), 0); err == nil {
+				if _, err := updateNativeFinalImage(reader.txn, store.dbis, malformed, nil, new(int), 0); err == nil {
 					return errors.New("invalid update reference accepted")
 				}
-				if _, err := updateNativeFinalImage(ownedMutation{after: AfterKind(4)}, nil, new(int), 0); err == nil {
+				if _, err := updateNativeFinalImage(reader.txn, store.dbis, ownedMutation{after: AfterKind(4)}, nil, new(int), 0); err == nil {
 					return errors.New("invalid update final image accepted")
 				}
-				if err := updateNativePuts(reader.txn, store.dbis, []ownedMutation{{after: AfterAbsent}}, []updateReference{{}}, new(UpdateStage)); err == nil {
+				if err := updateNativePuts(reader.txn, reader.txn, store.dbis, []ownedMutation{{after: AfterAbsent}}, []updateReference{{}}, new(UpdateStage)); err == nil {
 					return errors.New("invalid update reference count accepted")
 				}
-				if err := updateNativeVerify(reader.txn, store.dbis, []ownedMutation{malformed}, nil); err == nil {
+				if err := updateNativeVerify(reader.txn, reader.txn, store.dbis, []ownedMutation{malformed}, nil); err == nil {
 					return errors.New("invalid update verify reference accepted")
 				}
 				invalidDBIs := store.dbis
@@ -3644,23 +3818,21 @@ func TestNativeUpdateImages(t *testing.T) {
 				if badReadback.truth != CommitTruthUnknown || !sameError(badReadback.primary, readbackPrimary) || badReadback.secondary == nil || badReadback.valid() != nil {
 					return fmt.Errorf("invalid update readback=%+v", badReadback)
 				}
-				if err := updateNativeVerifyReferences(reader.txn, invalidDBIs, []ownedMutation{{refDBI: dbi, refKey: key}}, []updateReference{{index: 0, target: -1}}); err == nil {
+				if err := updateNativeVerifyReferences(reader.txn, reader.txn, invalidDBIs, []ownedMutation{{refDBI: dbi, refKey: key}}, []updateReference{{index: 0, target: -1}}); err == nil {
 					return errors.New("invalid update reference DBI accepted")
 				}
-				invalidImage := updateImage{present: true, length: 1}
 				badPlan := []ownedMutation{{dbi: dbi, key: key, after: AfterOldValueRef}}
-				badReferences := []updateReference{{index: 0, target: -1, image: invalidImage}}
+				badReferences := []updateReference{{index: 0, target: -1}}
 				badFinal := []ownedMutation{{dbi: dbi, key: key, after: AfterKind(4)}}
-				targets := []updateImage{{}}
-				_, _, targetOldErr := updateNativeReadbackTargets(reader.txn, invalidDBIs, createPlan, targets, nil)
-				_, _, targetFinalErr := updateNativeReadbackTargets(reader.txn, store.dbis, badFinal, targets, nil)
-				_, _, targetNewErr := updateNativeReadbackTargets(reader.txn, store.dbis, badPlan, targets, badReferences)
-				_, _, targetCountErr := updateNativeReadbackTargets(reader.txn, store.dbis, []ownedMutation{{dbi: dbi, key: key, after: AfterAbsent}}, targets, []updateReference{{}})
+				_, _, targetOldErr := updateNativeReadbackTargets(reader.txn, reader.txn, invalidDBIs, createPlan, nil)
+				_, _, targetFinalErr := updateNativeReadbackTargets(reader.txn, reader.txn, store.dbis, badFinal, nil)
+				_, _, targetNewErr := updateNativeReadbackTargets(reader.txn, reader.txn, store.dbis, badPlan, badReferences)
+				_, _, targetCountErr := updateNativeReadbackTargets(reader.txn, reader.txn, store.dbis, []ownedMutation{{dbi: dbi, key: key, after: AfterAbsent}}, []updateReference{{}})
 				_, truthErr := updateNativeReadbackTruth(reader.txn, reader.txn, store.dbis, badFinal, nil)
 				guardErrors := []error{
-					updateNativePuts(reader.txn, store.dbis, badPlan, badReferences, new(UpdateStage)),
-					updateNativeVerify(reader.txn, store.dbis, badPlan, badReferences),
-					updateNativeVerify(reader.txn, store.dbis, nil, []updateReference{{}}),
+					updateNativePuts(reader.txn, reader.txn, store.dbis, badPlan, badReferences, new(UpdateStage)),
+					updateNativeVerify(reader.txn, reader.txn, store.dbis, badPlan, badReferences),
+					updateNativeVerify(reader.txn, reader.txn, store.dbis, nil, []updateReference{{}}),
 					targetOldErr, targetFinalErr, targetNewErr, targetCountErr, truthErr,
 				}
 				for _, guardErr := range guardErrors {
@@ -4022,7 +4194,7 @@ func TestNativeUpdateSourceOwnership(t *testing.T) {
 			}
 		}
 		execute, puts := updateNativeBody(t, source, "updateNativeExecute"), updateNativeBody(t, source, "updateNativePuts")
-		for _, token := range []string{"stage := UpdateStagePrewrite", "updateNativeDeletes(begun.txn, dbis, plan, &stage)", "updateNativePuts(begun.txn, dbis, plan, references, &stage)"} {
+		for _, token := range []string{"stage := UpdateStagePrewrite", "updateNativeDeletes(begun.txn, dbis, plan, &stage)", "updateNativePuts(old, begun.txn, dbis, plan, references, &stage)"} {
 			if !strings.Contains(execute, token) {
 				t.Fatal("native stage observation ownership drifted")
 			}
@@ -4060,7 +4232,7 @@ func TestNativeUpdateSourceOwnership(t *testing.T) {
 		readback := updateNativeBody(t, source, "updateNativeReadback")
 		require(strings.Count(readback, "C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)") == 1 && strings.Count(readback, "updateNativeReadbackTruth") == 1, "readback truth drifted")
 		alias := updateNativeBody(t, source, "updateNativeImages") + updateNativeBody(t, source, "updateNativePreflight") + updateNativeBody(t, source, "updateNativeVerifyReferences")
-		require(strings.Count(alias, "if reference.target >= 0") == 3 && strings.Contains(alias, "reference.image"), "reference alias cache drifted")
+		require(strings.Count(alias, "if reference.target >= 0") == 2 && !strings.Contains(alias, "reference.image") && strings.Contains(alias, "canonicalTargetIndex(plan, mutation.refDBI.Rank, mutation.refKey)"), "payload-free reference ownership drifted")
 		native := string(source[strings.Index(string(source), "type CommitTruth"):strings.Index(string(source), "func invokeUpdate")])
 		for _, forbidden := range []string{"Store.Update", "commitTransition", "abortTransition", "consume(", "s.state = ", "s.terminal = ", "s.config = ", "s.dbis = ", "s.env = ", "s.writer = ", "s.operations"} {
 			require(!strings.Contains(native, forbidden), "native owner boundary drifted")

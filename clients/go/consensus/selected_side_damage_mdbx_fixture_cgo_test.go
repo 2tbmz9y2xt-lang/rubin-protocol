@@ -312,8 +312,8 @@ func sideRunBridge(t *testing.T, row sideBridgeCase) {
 // abort. Every probe must be denied with its callback never run; after return the lane is granted once, a nested full
 // lane inside it is denied, and a later grant shows no residual charge. The exact OLD-snapshot Get counts per DBI rank
 // (meta, utxo, canonical, headers, blocks, undo, staged, owner) pin every relied-on read: callback reads, Update's
-// Consulted OLD capture (links, owner rows including absences, anchor, body) and preflight target images (authority,
-// three leaving headers); a plan that drops any consulted observation changes its rank's count.
+// Consulted qualification/preflight/final (links, owner rows including absences, anchor, body) and target qualification/
+// preflight (authority, three leaving headers); a plan that drops any consulted observation changes its rank's count.
 func TestSelectedSideDamageFixtureLaneLifetime(t *testing.T) {
 	for _, row := range []struct {
 		name          string
@@ -323,10 +323,10 @@ func TestSelectedSideDamageFixtureLaneLifetime(t *testing.T) {
 		gets          [8]uint64
 		override      map[uint64]uint64
 	}{
-		{"committed clear", true, 4, 1, 1, [8]uint64{2, 0, 2, 6, 2, 0, 6, 6}, nil},
+		{"committed clear", true, 4, 1, 1, [8]uint64{3, 0, 4, 9, 4, 0, 12, 12}, nil},
 		{"healthy no-op", false, 2, 0, 0, [8]uint64{1, 0, 1, 1, 1, 0, 1, 1}, nil},
 		// Heights 3 and 4 both name canonical 0: one owner resolution (owner and forward rows) and one kept-header read.
-		{"duplicate kept hash", true, 4, 1, 1, [8]uint64{2, 0, 4, 4, 2, 0, 6, 4}, map[uint64]uint64{3: 0, 4: 0}},
+		{"duplicate kept hash", true, 4, 1, 1, [8]uint64{3, 0, 8, 7, 4, 0, 12, 8}, map[uint64]uint64{3: 0, 4: 0}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, override: row.override})
