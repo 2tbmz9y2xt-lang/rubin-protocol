@@ -109,7 +109,7 @@ func inputViewConnect(t *testing.T, input connectBlockBasicInMemorySuiteContext,
 	}
 	for op, row := range view.rows {
 		before, ok := rowsBefore[op]
-		if !ok || row.kind != before.kind || row.cause != before.cause || !reflect.DeepEqual(row.entry, before.entry) {
+		if !ok || row.kind != before.kind || !reflect.ValueOf(row.cause).Equal(reflect.ValueOf(before.cause)) || !reflect.DeepEqual(row.entry, before.entry) {
 			t.Fatalf("connect modified view-owned row %v", op)
 		}
 	}
@@ -145,22 +145,22 @@ func assertInputViewReads(t *testing.T, view *inputViewTestView, want ...Outpoin
 
 func assertInputViewTxError(t *testing.T, err error, code, message string) {
 	t.Helper()
-	got, ok := err.(*TxError)
-	if !ok || got.Code != ErrorCode(code) || got.Msg != message {
+	var got *TxError
+	if reflect.TypeOf(err) != reflect.TypeFor[*TxError]() || !errors.As(err, &got) || got.Code != ErrorCode(code) || got.Msg != message {
 		t.Fatalf("error=%v, want %s: %s", err, code, message)
 	}
 }
 
 func assertInputViewFailure(t *testing.T, err error, op Outpoint, txIndex, inputIndex int, kind logicalStateFailureKind, cause error, message string) {
 	t.Helper()
-	got, ok := err.(*blockInputViewReadError)
-	if !ok {
+	var got *blockInputViewReadError
+	if reflect.TypeOf(err) != reflect.TypeFor[*blockInputViewReadError]() || !errors.As(err, &got) {
 		t.Fatalf("error type=%T, want *blockInputViewReadError", err)
 	}
 	if got.outpoint != op || got.txIndex != txIndex || got.inputIndex != inputIndex || got.failure.kind != kind {
 		t.Fatalf("failure tuple=%#v/%#v, want %v (%d,%d) kind %d", got, got.failure, op, txIndex, inputIndex, kind)
 	}
-	if cause != nil && got.failure.cause != cause {
+	if cause != nil && !reflect.ValueOf(got.failure.cause).Equal(reflect.ValueOf(cause)) {
 		t.Fatal("read failure replaced the original cause")
 	}
 	if got.Error() != message || got.failure.Error() != message {
@@ -364,8 +364,9 @@ func inputViewCheckVector(t *testing.T, v connectBlockTestVector, expectOK bool,
 		input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, input.BlockHeight,
 		input.PrevTimestamps, state, input.ChainID, input.Rotation, input.Registry,
 	)
-	mapTxErr, mapOK := mapErr.(*TxError)
-	viewTxErr, viewOK := err.(*TxError)
+	var mapTxErr, viewTxErr *TxError
+	mapOK := reflect.TypeOf(mapErr) == reflect.TypeFor[*TxError]() && errors.As(mapErr, &mapTxErr)
+	viewOK := reflect.TypeOf(err) == reflect.TypeFor[*TxError]() && errors.As(err, &viewTxErr)
 	if !mapOK || !viewOK || viewTxErr.Code != mapTxErr.Code || viewTxErr.Msg != mapTxErr.Msg || string(viewTxErr.Code) != expectErr {
 		t.Fatalf("invalid corpus errors: view=%v map=%v expected=%s", err, mapErr, expectErr)
 	}
@@ -685,8 +686,8 @@ func (*inputViewPanicView) Lookup(Outpoint) logicalStateRowRead { panic("view lo
 
 func TestConnectBlockInputViewNilAndPanic(t *testing.T) {
 	result, err := connectBlockBasicWithInputView(connectBlockBasicInMemorySuiteContext{BlockBytes: []byte{0}}, nil, Uint128{})
-	failure, ok := err.(*logicalStateFailure)
-	if !ok || failure.kind != 3 || failure.Error() != "nil logical state view" || result != nil {
+	var failure *logicalStateFailure
+	if reflect.TypeOf(err) != reflect.TypeFor[*logicalStateFailure]() || !errors.As(err, &failure) || failure.kind != 3 || failure.Error() != "nil logical state view" || result != nil {
 		t.Fatalf("nil view preflight=%#v/%v", result, err)
 	}
 	op := Outpoint{Txid: hashWithPrefix(0x91)}
@@ -713,7 +714,7 @@ func TestConnectBlockInputViewHeightZero(t *testing.T) {
 	view := inputViewNew(nil)
 	view.rows[op] = logicalStateRowRead{kind: logicalStateRowUnavailable, cause: errors.New("pre-genesis read forbidden")}
 	_, err := inputViewConnect(t, input, view, Uint128{})
-	if err != ErrBlockSteps1To12Context {
+	if !reflect.ValueOf(err).Equal(reflect.ValueOf(ErrBlockSteps1To12Context)) {
 		t.Fatalf("height-zero Q refusal=%v, want context refusal", err)
 	}
 	assertInputViewReads(t, view)
@@ -930,10 +931,10 @@ func TestConnectBlockInputViewPlacementBeforeApplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name         string
-		ordinary     func(*Tx)
-		coinbase     func(*Tx)
-		unavailable  bool
+		name        string
+		ordinary    func(*Tx)
+		coinbase    func(*Tx)
+		unavailable bool
 	}{
 		{name: "missing"},
 		{name: "unavailable", unavailable: true},
@@ -1009,7 +1010,7 @@ func TestConnectBlockInputViewQualificationRefusals(t *testing.T) {
 			tc.change(&input)
 			view := inputViewNew(nil)
 			_, err := inputViewConnect(t, input, view, Uint128{})
-			if err != tc.want {
+			if !reflect.ValueOf(err).Equal(reflect.ValueOf(tc.want)) {
 				t.Fatalf("Q refusal=%v, want unchanged %v", err, tc.want)
 			}
 			assertInputViewReads(t, view)

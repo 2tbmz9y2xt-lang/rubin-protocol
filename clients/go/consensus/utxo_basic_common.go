@@ -197,8 +197,9 @@ func (state *blockInputViewState) lookup(op Outpoint, inputIndex int) (UtxoEntry
 		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 	}
 	// readLogicalStateRow has checked the complete row's width. Its exact
-	// StateEntryBytes length is 56..65,596, so this conversion cannot narrow.
-	state.spent[op] = uint32(logicalStateEntryLength(entry))
+	// StateEntryBytes length is 56..65,596, so the explicit u32-width mask
+	// preserves the exact length before conversion.
+	state.spent[op] = uint32(logicalStateEntryLength(entry) & 0xffffffff)
 	return entry, nil
 }
 

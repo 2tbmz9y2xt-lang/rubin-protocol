@@ -191,7 +191,9 @@ func (work *blockInputViewConnectWork) applyTransaction(ordinal uint64) error {
 	if err := validateNonCoinbaseBlockTx(tx, work.seenNonces); err != nil {
 		return err
 	}
-	work.validation.inputView.txIndex = int(ordinal)
+	// Q's <=68,000,125-byte body bounds ordinal below 2^31; the mask is
+	// identity on that domain and makes the platform-independent int bound explicit.
+	work.validation.inputView.txIndex = int(ordinal & 0x7fffffff)
 	next, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
 		tx: tx, txid: txid, utxoSet: work.created, height: work.height, blockMTP: work.blockMTP,
 		chainID: work.validation.chainID, rotation: work.validation.rotation, registry: work.validation.registry,
@@ -237,7 +239,9 @@ func (source *blockSpentInputSource) next() (blockSpentInput, bool) {
 			length := source.spent[op]
 			delete(source.spent, op)
 			if length != 0 {
-				return blockSpentInput{outpoint: op, txIndex: source.txIndex, inputIndex: uint32(index), logicalEntryLength: length}, true
+				// ParseTx bounds inputs by MAX_TX_INPUTS (1,024), so this
+				// nonnegative-width mask preserves the exact input index.
+				return blockSpentInput{outpoint: op, txIndex: source.txIndex, inputIndex: uint32(index & 0x7fffffff), logicalEntryLength: length}, true
 			}
 		}
 		source.current = nil
@@ -257,7 +261,8 @@ func (source *blockSpentInputSource) loadTransaction() bool {
 	source.current, _, _, _, _ = parseBlockTx(source.raw, &source.offset)
 	// The qualified <=68,000,125-byte body bounds every ordinal below 2^32;
 	// each input index is additionally bounded by MAX_TX_INPUTS (1,024).
-	source.txIndex = uint32(source.nextTx)
+	// The mask is identity on that qualified ordinal domain.
+	source.txIndex = uint32(source.nextTx & 0xffffffff)
 	source.nextTx++
 	source.inputIndex = 0
 	return true

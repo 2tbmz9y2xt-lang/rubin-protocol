@@ -22,7 +22,7 @@ func validateCoinbaseTxStructure(coinbase *Tx, blockHeight uint64) error {
 	if blockHeight > uint64(^uint32(0)) {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
 	}
-	if coinbase.Locktime != uint32(blockHeight) {
+	if uint64(coinbase.Locktime) != blockHeight {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
 	}
 	return nil
