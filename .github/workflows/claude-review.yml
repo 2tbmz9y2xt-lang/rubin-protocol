@@ -14,9 +14,10 @@ permissions:
 
 concurrency:
   # A body-only edit (no title or base change) runs in its own group so it cannot cancel a review in progress.
-  # So does a run started by a PR author without write access (the scope step skips it), so a retitle or
-  # reopen by that author cannot cancel a review that a writer's push started.
-  group: claude-review-${{ github.event.pull_request.number }}${{ ((github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null) || (github.actor == github.event.pull_request.user.login && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))) && format('-own-{0}', github.run_id) || '' }}
+  # So does an edited or reopened run started by a PR author without write access (the scope step skips
+  # it), so that author cannot cancel a review a writer's push started; converted_to_draft and closed
+  # stay in the shared group and still cancel it.
+  group: claude-review-${{ github.event.pull_request.number }}${{ ((github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null) || (contains(fromJSON('["edited", "reopened"]'), github.event.action) && github.actor == github.event.pull_request.user.login && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))) && format('-own-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
