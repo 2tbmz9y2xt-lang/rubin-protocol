@@ -56,7 +56,7 @@ func inputViewBlock(t *testing.T, height, coinbaseValue uint64, txs ...*Tx) conn
 	}
 	prev, target := hashWithPrefix(0xd1), filledHash(0xff)
 	return connectBlockBasicInMemorySuiteContext{
-		BlockBytes: buildBlockBytes(t, prev, root, target, 1, encoded),
+		BlockBytes:       buildBlockBytes(t, prev, root, target, 1, encoded),
 		ExpectedPrevHash: &prev, ExpectedTarget: &target, BlockHeight: height,
 		PrevTimestamps: make([]uint64, min(height, 11)),
 	}
@@ -1030,7 +1030,9 @@ func TestConnectBlockInputViewQualificationBeforePlacement(t *testing.T) {
 	}{
 		{"bad_merkle", "BLOCK_ERR_MERKLE_INVALID", "merkle_root mismatch", func(input *connectBlockBasicInMemorySuiteContext) { input.BlockBytes[36] ^= 1 }},
 		{"trailing_P0", "BLOCK_ERR_PARSE", "trailing bytes after tx list", func(input *connectBlockBasicInMemorySuiteContext) { input.BlockBytes = append(input.BlockBytes, 1) }},
-		{"complete_P0", "TX_ERR_PARSE", "unexpected EOF (u8)", func(input *connectBlockBasicInMemorySuiteContext) { input.BlockBytes = input.BlockBytes[:len(input.BlockBytes)-1] }},
+		{"complete_P0", "TX_ERR_PARSE", "unexpected EOF (u8)", func(input *connectBlockBasicInMemorySuiteContext) {
+			input.BlockBytes = input.BlockBytes[:len(input.BlockBytes)-1]
+		}},
 		{"parent", "BLOCK_ERR_LINKAGE_INVALID", "prev_block_hash mismatch", func(input *connectBlockBasicInMemorySuiteContext) { input.ExpectedPrevHash = &[32]byte{3} }},
 		{"timestamp", "BLOCK_ERR_TIMESTAMP_OLD", "timestamp <= MTP median", func(input *connectBlockBasicInMemorySuiteContext) { input.PrevTimestamps = []uint64{1} }},
 	} {
@@ -1418,7 +1420,9 @@ func inputViewAssertDescriptorAccess(t *testing.T, ctx *SimplicityTxContext, inp
 	var intrinsicMeter SimplicityTxContextMeter
 	result, err := program.Evaluate(simplicity.EvalOptions{
 		Host: testSimplicityEvalHost{ctx: ctx, meter: &intrinsicMeter}, ContextIndex: 0,
-		ContextEvaluator: func(in simplicity.ContextIntrinsic, value simplicity.IntrinsicResult) bool { return in.ID == 0x0122 && value.Value.Bytes32 == sha3_256(inputDescriptor) },
+		ContextEvaluator: func(in simplicity.ContextIntrinsic, value simplicity.IntrinsicResult) bool {
+			return in.ID == 0x0122 && value.Value.Bytes32 == sha3_256(inputDescriptor)
+		},
 	})
 	if err != nil || !result.Accepted || result.Cost != 65_607 || intrinsicMeter.Cost() != 65_607 {
 		t.Fatalf("private intrinsic hash/cost=%#v/%v/%d", result, err, intrinsicMeter.Cost())
