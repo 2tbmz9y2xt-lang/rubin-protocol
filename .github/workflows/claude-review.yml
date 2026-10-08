@@ -255,6 +255,14 @@ jobs:
               exit 1
             fi
           done
+          # Publish only for the current head of an open, non-draft PR. A newer push, a draft
+          # conversion or a close normally cancels this run, but not when that push removed or
+          # renamed this workflow, since no new run then starts in the concurrency group.
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '"\(.head.sha) \(.state) \(.draft)"')"
+          if [[ "${current}" != "${HEAD_SHA} open false" ]]; then
+            echo "The PR is now at ${current}; the review of ${HEAD_SHA} is not published."
+            exit 0
+          fi
           # The event is fixed here: the model cannot approve or request changes.
           jq --arg sha "${HEAD_SHA}" '{commit_id: $sha, event: "COMMENT",
             body: ("<!-- claude-review -->\n**Verdict: \(.verdict)**\n\n" + .body),
