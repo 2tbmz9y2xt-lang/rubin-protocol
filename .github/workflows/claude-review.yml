@@ -75,7 +75,7 @@ jobs:
           INPUT_DIR="${RUNNER_TEMP}/review-input"
           mkdir -p "${INPUT_DIR}"
           out="${INPUT_DIR}/contract.md"
-          issue="$(printf '%s\n%s\n' "${PR_TITLE}" "${PR_BRANCH}" | grep -oiE '(^|[^[:alnum:]])rub-[0-9]+' | head -n1 | grep -oiE 'rub-[0-9]+' | tr '[:lower:]' '[:upper:]' || true)"
+          issue="$(printf '%s\n%s\n' "${PR_TITLE}" "${PR_BRANCH}" | grep -oiE '(^|[^[:alnum:]])rub-[0-9]+([^[:alnum:]]|$)' | head -n1 | grep -oiE 'rub-[0-9]+' | tr '[:lower:]' '[:upper:]' || true)"
           if [[ -z "${issue}" ]]; then
             echo "No RUB-NNN in PR title or branch; reviewing without a contract." > "${out}"
           else
@@ -170,7 +170,8 @@ jobs:
                 fixed in the body; never open a new comment for it.
               - A thread a repository member answered (fixed, not a bug, won't fix, out of scope),
                 or a resolved thread: do not report it again unless the current code regressed.
-              - Never report a defect again that already has a thread or an earlier review entry.
+              - Never report a defect again that already has a thread or an earlier review entry,
+                unless the current code regressed (then cite the earlier thread or review).
 
               Output (the structured result): comments = one entry per finding on a line of
               diff.patch, with path, side and line (side RIGHT with the new-file line for an
