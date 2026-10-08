@@ -364,6 +364,9 @@ func (c *replayPathCall) ownCanonical() (replayPathOwn, error) {
 	if entry == nil {
 		var err error
 		if entry, err = c.activeEntry(c.h); err != nil {
+			if len(c.out.activeEntry) == 104 {
+				c.out.x = [32]byte(c.out.activeEntry[:32])
+			}
 			return c.out, err
 		}
 	}
