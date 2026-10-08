@@ -540,11 +540,11 @@ func TestUpdateConsultedReadback(t *testing.T) {
 	rows := []ConsultedRow{{DBI: dbis[0], Key: []byte{2}}, {DBI: dbis[2], Key: present}, {DBI: dbis[2], Key: absent}}
 	deletePresent := updateNativePlan(t, canonicalDelete(seed), canonicalDelete(canonicalOwnerPairOf(seed)))
 	for _, row := range []struct {
-		name                                         string
+		name                              string
 		metaBytes, newWitness, unreadable bool
-		change                                       []ownedMutation
-		truth                                        CommitTruth
-		secondaryCode                                int
+		change                            []ownedMutation
+		truth                             CommitTruth
+		secondaryCode                     int
 	}{
 		{"old witness", false, false, false, nil, CommitTruthOld, 0},
 		{"new witness", false, true, false, nil, CommitTruthNew, 0},
