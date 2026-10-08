@@ -337,11 +337,11 @@ func (p *replayPathOwner) guard() error {
 // own reads the own height h from the completed slot, reusing the walk's same-attempt reads.
 func (c *replayPathCall) own() (replayPathOwn, error) {
 	s := c.p.slot
-	if c.h < s.lo {
-		return replayPathOwn{}, replayRecoveryRefusal(selectedSideInvariant, "replay path cursor below its establishment")
-	}
 	if s.attached && c.h <= s.a {
 		return c.ownCanonical()
+	}
+	if c.h < s.lo {
+		return replayPathOwn{}, replayRecoveryRefusal(selectedSideInvariant, "replay path cursor below its establishment")
 	}
 	x := s.hashes[c.h-s.lo]
 	c.out = replayPathOwn{h: c.h, x: x}

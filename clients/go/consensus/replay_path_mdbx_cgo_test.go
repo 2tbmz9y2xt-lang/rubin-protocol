@@ -924,7 +924,7 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	_, err = g.call(t, q, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "cursor attached")
 	logicalMDBXAssert(t, q.slot != nil, "cursor attached slot")
-	// Cursor below the establishment: established at cursor 1 (lo = a = 2), then cursor 0 (h = 1 < lo, h <= a).
+	// Attached slot below its establishment: established at cursor 1 (lo = a = 2), then cursor 0 (h = 1 < lo, h <= a) reads entry(1) then its header.
 	g.setReplay(mdbx.ReplayCursorAppliedV1, 1)
 	lv := &pathView{}
 	l := newReplayPathOwner(lv, pathLimit)
@@ -932,13 +932,25 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	logicalMDBXAssert(t, err == nil && l.slot.lo == 2 && l.slot.attached && l.slot.a == 2, "below establishment setup %v %+v", err, l.slot)
 	lslot, lhashes := l.slot, slices.Clone(l.slot.hashes)
 	g.setReplay(mdbx.ReplayCursorAppliedV1, 0)
-	gimage := g.image()
 	own, err = g.call(t, l, nil, nil)
-	pathWant(t, err, selectedSideInvariant, "cursor below establishment")
-	pathZero(t, own, "cursor below establishment")
-	logicalMDBXAssert(t, l.slot == lslot && slices.Equal(lslot.hashes, lhashes) && lslot.lo == 2 && lslot.attached && lslot.a == 2, "below establishment slot %+v", lslot)
-	logicalMDBXAssert(t, lv.versions+lv.protects+lv.headerCalls == 0, "below establishment view %+v", lv)
-	replaySameImage(t, gimage, g.image(), "cursor below establishment")
+	g.pathOK(t, own, err, 1, replayPathStored, "attached below establishment")
+	logicalMDBXAssert(t, len(own.activeEntry) == 104 && [32]byte(own.activeEntry[:32]) == g.hashes[1], "attached below establishment entry %x", own.activeEntry)
+	logicalMDBXAssert(t, l.slot == lslot && slices.Equal(lslot.hashes, lhashes) && lslot.lo == 2 && lslot.attached && lslot.a == 2, "attached below establishment slot %+v", lslot)
+	// Non-attached slot below its establishment: established at cursor 3 above the fork (lo = 4), then cursor 2 (h = 3 < lo): structural-only refusal.
+	g.setReplay(mdbx.ReplayCursorAppliedV1, 3)
+	nv := &pathView{}
+	n := newReplayPathOwner(nv, pathLimit)
+	_, err = g.call(t, n, nil, nil)
+	logicalMDBXAssert(t, err == nil && n.slot.lo == 4 && !n.slot.attached, "non-attached setup %v %+v", err, n.slot)
+	nslot, nkey, nhashes, na := n.slot, n.slot.key, slices.Clone(n.slot.hashes), n.slot.a
+	g.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	gimage, nview := g.image(), *nv
+	own, err = g.call(t, n, nil, nil)
+	pathWant(t, err, selectedSideInvariant, "non-attached below establishment")
+	pathZero(t, own, "non-attached below establishment")
+	logicalMDBXAssert(t, n.slot == nslot && nslot.key == nkey && slices.Equal(nslot.hashes, nhashes) && nslot.lo == 4 && !nslot.attached && nslot.a == na, "non-attached below establishment slot %+v", nslot)
+	logicalMDBXAssert(t, nv.versions == nview.versions && nv.protects == nview.protects && nv.headerCalls == nview.headerCalls, "non-attached below establishment view %+v", nv)
+	replaySameImage(t, gimage, g.image(), "non-attached below establishment")
 	// Unbound point: the provider returns 116 bytes that do not bind x; they are discarded.
 	m := newPathWorld(t, 2, 2, 3, 3)
 	m.setReplay(mdbx.ReplayCursorAppliedV1, 2)
