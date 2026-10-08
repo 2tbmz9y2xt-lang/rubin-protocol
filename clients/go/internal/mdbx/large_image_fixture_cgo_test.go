@@ -26,6 +26,8 @@ func TestLargeImageV1Native(t *testing.T) {
 		{"A3 family targets and reference overlays", largeNativeOverlay},
 		{"A5 A6 A7 A8 residual and target truth", largeNativeTruth},
 		{"A8 independent legacy and reference predicates", largeNativeJointPredicates},
+		{"A2 A5 H4 ORIGINAL OLD reference effects and readback", largeNativeOriginalReferences},
+		{"R7 current OLD proof native failures and resources", largeNativeProofReadErrors},
 		{"H2 native callback lifecycle", largeNativeCallbacks},
 		{"H3 final and preflight residual drift", largeNativePrecommit},
 		{"H4 cleanup after proven NEW", largeNativeCleanup},
@@ -33,6 +35,166 @@ func TestLargeImageV1Native(t *testing.T) {
 		{"R1 legacy value/native admission before large controls", largeNativeLegacyPriority},
 	} {
 		t.Run(row.name, row.run)
+	}
+}
+
+func largeNativeProofReadErrors(t *testing.T) {
+	for _, site := range []string{"target", "target-reference", "reference", "consulted"} {
+		for _, mode := range []uint32{1, 2, 24} {
+			t.Run(fmt.Sprintf("%s/mode%d", site, mode), func(t *testing.T) {
+				store, path, cfg := consultedStore(t)
+				counter := consultedCounter(t, 1)
+				batch := Batch{Mutations: []Mutation{counter}}
+				rank, key, before := uint8(0), counter.Key, []byte(nil)
+				if site == "consulted" {
+					rank, key = 2, canonicalForwardKeyLiteral(9, 1)
+					before = canonicalForwardValueLiteral([32]byte{0x31}, [40]byte{39: 1})
+					batch.Consulted = []ConsultedRow{{DBI: readDBIsLiteral()[2], Key: key}}
+				}
+				if site == "reference" || site == "target-reference" {
+					target, source := reverseKeys(t, 9, 1)
+					ref := forwardRefRow(source, target)
+					rank, key, before = 1, target, []byte{0x31}
+					batch.Mutations = []Mutation{ref}
+					if site == "target-reference" {
+						batch.Mutations = []Mutation{{DBI: ref.RefDBI, Key: target, BeforePresent: true, AfterKind: AfterKind(1)}, ref}
+					}
+				}
+				if before != nil {
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[rank], key, before))
+				}
+				truth, stage, result, evidence := largeFaultCommit(t, store, mode, rank, key, batch)
+				primary, wantState := result, "CLOSED"
+				if mode == 2 {
+					primary = requireEnvironmentError(t, result, EngineClass("LocalInvariant"), operationAbort, -30416, expectedNativeDiagnostic(-30416)).Cause
+					wantState = "POISONED_THREAD"
+				}
+				if mode == 24 {
+					primary = requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, expectedNativeDiagnostic(-30778)).Cause
+					wantState = "CLOSE_BLOCKED"
+				}
+				engine := requireEnvironmentError(t, primary, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
+				if engine.Cause != nil || truth != 1 || stage != 1 || evidence.gets != 2 || evidence.commits != 0 || evidence.aborts != 1 || string(store.state) != wantState {
+					t.Fatalf("current OLD fault ownership %d/%d/%v/%+v/%s", truth, stage, result, evidence, store.state)
+				}
+				if mode == 2 && store.txn == nil || mode == 24 && (store.env == nil || store.txn != nil) || mode == 1 && (store.env != nil || store.txn != nil) {
+					t.Fatal("current OLD fault lost retained/consumed owner")
+				}
+				mustEnvironment(t, fixtureLargeRelease(store))
+				reopened, openErr := Open(path, cfg)
+				consultedTrack(t, reopened, openErr)
+				obsoleteRawImage(t, reopened, rank, key, before)
+				for _, mutation := range batch.Mutations {
+					if mutation.DBI.Rank != rank || !bytes.Equal(mutation.Key, key) {
+						obsoleteRawImage(t, reopened, mutation.DBI.Rank, mutation.Key, nil)
+					}
+				}
+			})
+		}
+	}
+}
+
+// These public plans distinguish source identity from both the write and readback candidates.
+func largeNativeOriginalReferences(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		for _, sourceEffect := range []string{"untouched", "deleted", "replaced"} {
+			if reverse && sourceEffect == "replaced" {
+				continue // Reverse's admitted transport grammar forbids an undo literal.
+			}
+			for _, mode := range []uint32{0, 7, 12, 5, 6} {
+				t.Run(fmt.Sprintf("reverse=%v source=%s mode=%d", reverse, sourceEffect, mode), func(t *testing.T) {
+					store, path, cfg := consultedStore(t)
+					utxo, undo := reverseKeys(t, 9, 1)
+					ref := forwardRefRow(undo, utxo)
+					if reverse {
+						ref = reverseRefRow(utxo, undo)
+					}
+					old := []byte{0x71} // Opaque legacy source bytes are transported without a new width refusal.
+					replacement := append([]byte{0x51}, make([]byte, 19)...)
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, ref.RefDBI, ref.RefKey, old))
+					second := ref
+					second.Key = bytes.Clone(ref.Key)
+					if reverse {
+						second.Key[7] = 10
+					} else {
+						second.Key[36] = 1 // distinct undo transaction index, same original source
+					}
+					batch := Batch{Reverse: reverse, Mutations: []Mutation{ref, second}}
+					wantSource := old
+					if sourceEffect != "untouched" {
+						source := Mutation{DBI: ref.RefDBI, Key: ref.RefKey, BeforePresent: true, AfterKind: AfterKind(1)}
+						wantSource = nil
+						if sourceEffect == "replaced" {
+							source.AfterKind, source.Literal, wantSource = AfterKind(2), replacement, replacement
+						}
+						batch.Mutations = append(batch.Mutations, source)
+						sort.Slice(batch.Mutations, func(i, j int) bool {
+							a, b := batch.Mutations[i], batch.Mutations[j]
+							return a.DBI.Rank < b.DBI.Rank || a.DBI.Rank == b.DBI.Rank && bytes.Compare(a.Key, b.Key) < 0
+						})
+					}
+					faultRank, faultKey := ref.DBI.Rank, ref.Key
+					if mode == 5 {
+						faultRank, faultKey = ref.RefDBI.Rank, ref.RefKey
+					}
+					var truth CommitTruth
+					var stage UpdateStage
+					var result error
+					var saved *Reader
+					run := func() {
+						truth, stage, result = store.Update(func(reader *Reader) (Batch, error) { saved = reader; return batch, nil })
+						if result != nil {
+							largeNativeCached(t, store)
+						}
+					}
+					evidence := fixtureLargeEvidence{}
+					if mode == 0 {
+						run()
+					} else {
+						var fixtureErr error
+						evidence, fixtureErr = fixtureLargeFault(store, mode, faultRank, faultKey, run)
+						mustEnvironment(t, fixtureErr)
+					}
+					wantTruth := CommitTruth(2)
+					if mode == 7 {
+						wantTruth, wantSource = 1, old
+					}
+					if mode == 5 || mode == 6 {
+						wantTruth = 3
+					}
+					if truth != wantTruth || stage != 3 || saved == nil || saved.usable() {
+						t.Fatalf("ORIGINAL OLD proof tuple %d/%d/%v, want %d/3 expired Reader", truth, stage, result, wantTruth)
+					}
+					if mode == 0 {
+						if result != nil || string(store.state) != "OPEN" {
+							t.Fatalf("reference success resources %s/%v", store.state, result)
+						}
+						mustEnvironment(t, store.Close())
+					} else {
+						commit, ok := result.(*CommitError)
+						if !ok || commit.Truth != wantTruth || commit.ReadbackCause != nil || evidence.commits != 1 || string(store.state) != "CLOSED" {
+							t.Fatalf("reference crossed cause/resources %v/%+v/%s", result, evidence, store.state)
+						}
+						requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28, expectedNativeDiagnostic(28))
+					}
+					reopened, openErr := Open(path, cfg)
+					consultedTrack(t, reopened, openErr)
+					if mode == 5 {
+						wantSource = []byte{0x7f}
+					}
+					obsoleteRawImage(t, reopened, ref.RefDBI.Rank, ref.RefKey, wantSource)
+					wantFirst, wantSecond := old, old
+					if mode == 7 {
+						wantFirst, wantSecond = nil, nil
+					}
+					if mode == 6 {
+						wantFirst = []byte{0x7f}
+					}
+					obsoleteRawImage(t, reopened, ref.DBI.Rank, ref.Key, wantFirst)
+					obsoleteRawImage(t, reopened, second.DBI.Rank, second.Key, wantSecond)
+				})
+			}
+		}
 	}
 }
 
@@ -395,16 +557,16 @@ func largeNativeBoth(t *testing.T) {
 }
 
 func largeNativeJointPredicates(t *testing.T) {
-	for _, which := range []string{"legacy", "reference"} {
+	for _, which := range []string{"legacy", "reference", "point-later-Large", "legacy-later-Large"} {
 		t.Run(which, func(t *testing.T) {
-			store, _, _ := consultedStore(t)
+			store, path, cfg := consultedStore(t)
 			dbis := readDBIsLiteral()
 			batch := Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{{Kind: 2}}}
 			key, rank := consultedCounter(t, 33).Key, uint8(0)
 			before := []byte{0, 0, 0, 0, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0, 33}
-			if which == "legacy" {
+			if which == "legacy" || which == "legacy-later-Large" {
 				batch.Consulted = []ConsultedRow{{DBI: dbis[0], Key: key}}
-			} else {
+			} else if which == "reference" {
 				rank = 1
 				key = make([]byte, 44)
 				key[7] = 1
@@ -416,20 +578,44 @@ func largeNativeJointPredicates(t *testing.T) {
 				entry[41] = 1
 				batch.Mutations = []Mutation{{DBI: dbis[5], Key: entry, AfterKind: AfterKind(3), RefDBI: dbis[1], RefKey: key}}
 			}
-			mustEnvironment(t, fixtureSeedPrefixRawRow(store, dbis[rank], key, before))
-			truth, stage, err, evidence := largeFaultCommit(t, store, 5, rank, key, batch)
+			if which == "point-later-Large" {
+				key, before = consultedCounter(t, 1).Key, nil
+			} else {
+				mustEnvironment(t, fixtureSeedPrefixRawRow(store, dbis[rank], key, before))
+			}
+			mode := uint32(5)
+			laterFault := strings.HasSuffix(which, "-later-Large")
+			if laterFault {
+				mode = 29
+			}
+			truth, stage, err, evidence := largeFaultCommit(t, store, mode, rank, key, batch)
 			commit, ok := err.(*CommitError)
-			if !ok || truth.String() != "UNKNOWN" || commit.Truth.String() != "UNKNOWN" || int(stage) != 3 || commit.ReadbackCause != nil || evidence.drift != 1 {
+			if !ok || truth.String() != "UNKNOWN" || commit.Truth.String() != "UNKNOWN" || int(stage) != 3 || evidence.drift != 1 || evidence.commits != 1 || string(store.state) != "CLOSED" {
 				t.Fatalf("%s predicate omitted: %s/%d/%v/%+v", which, truth, stage, err, evidence)
 			}
 			requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28, expectedNativeDiagnostic(28))
+			if laterFault {
+				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
+				if evidence.gets != 1 {
+					t.Fatal("later Large native failure was not reached exactly once")
+				}
+			} else if commit.ReadbackCause != nil {
+				t.Fatal("predicate-only mismatch manufactured a readback cause")
+			}
+			reopened, openErr := Open(path, cfg)
+			consultedTrack(t, reopened, openErr)
+			obsoleteRawImage(t, reopened, rank, key, []byte{0x7f})
+			if which == "legacy-later-Large" {
+				counter := consultedCounter(t, 1)
+				obsoleteRawImage(t, reopened, 0, counter.Key, counter.Literal)
+			}
 		})
 	}
 }
 
 func largeNativeCallbacks(t *testing.T) {
 	for _, fault := range []uint32{1, 2, 24} {
-		for _, mode := range []string{"nil", "ignored", "exact", "wrapped", "distinct", "typed-nil", "panic"} {
+		for _, mode := range []string{"nil", "ignored", "exact", "wrapped", "joined", "distinct", "typed-nil", "panic"} {
 			t.Run(fmt.Sprintf("%d/%s", fault, mode), func(t *testing.T) {
 				store, _, _ := consultedStore(t)
 				key := make([]byte, 32)
@@ -485,6 +671,9 @@ func largeNativeCallbacks(t *testing.T) {
 									return recorded
 								case "wrapped":
 									application = fmt.Errorf("large wrapped: %w", recorded)
+									return application
+								case "joined":
+									application = errors.Join(errors.New("large application first"), recorded)
 									return application
 								case "panic":
 									panic(panicValue)
@@ -574,29 +763,58 @@ func largeCallbackCauses(t *testing.T, result, application, recorded error, faul
 }
 
 func largeNativePrecommit(t *testing.T) {
-	for _, mode := range []uint32{13, 14} {
-		store, path, cfg := consultedStore(t)
-		key := append(make([]byte, 32), 2)
-		batch := Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{{Kind: 2}}}
-		truth, stage, err, evidence := largeFaultCommit(t, store, mode, 5, key, batch)
-		diagnostic, wantStage := "final update image mismatch", 2
-		if mode == 14 {
-			diagnostic, wantStage = "OLD/write snapshot mismatch", 1
-		}
-		requireEnvironmentError(t, err, EngineClass("StateMismatch"), operationUpdate, -30779, diagnostic)
-		if truth.String() != "OLD" || int(stage) != wantStage || string(store.state) != "CLOSED" || evidence.commits != 0 || evidence.drift != 1 {
-			t.Fatalf("precommit residual %d: %s/%d/%v/%+v", mode, truth, stage, err, evidence)
-		}
-		reopened, openErr := Open(path, cfg)
-		consultedTrack(t, reopened, openErr)
-		consultedRequireImage(t, reopened, readDBIsLiteral()[0], consultedCounter(t, 1).Key, nil, false, "no target survived aborted residual check")
-		want := []byte(nil)
-		if mode == 14 {
-			want = []byte{0x7f}
-		}
-		equal, readErr := FixtureRawRowEqual(reopened, 5, key, want)
-		if readErr != nil || !equal {
-			t.Fatal("precommit physical residual disposition")
+	for _, domain := range []string{"target", "residual", "consulted", "reference"} {
+		for _, mode := range []uint32{13, 14} {
+			t.Run(fmt.Sprintf("%s/mode%d", domain, mode), func(t *testing.T) {
+				store, path, cfg := consultedStore(t)
+				key := append(make([]byte, 32), 2)
+				batch := Batch{Mutations: []Mutation{consultedCounter(t, 1)}, LargeConsulted: []LargeImageSelectorV1{{Kind: 2}}}
+				rank, before := uint8(5), []byte(nil)
+				if domain == "target" {
+					rank, key = 0, consultedCounter(t, 1).Key
+					batch.LargeConsulted = nil
+				}
+				if domain == "consulted" {
+					rank, key = 2, canonicalForwardKeyLiteral(9, 1)
+					before = canonicalForwardValueLiteral([32]byte{0x51}, [40]byte{39: 1})
+					batch.LargeConsulted = nil
+					batch.Consulted = []ConsultedRow{{DBI: readDBIsLiteral()[2], Key: key}}
+				}
+				if domain == "reference" {
+					target, source := reverseKeys(t, 9, 1)
+					ref := forwardRefRow(source, target)
+					rank, key, before = 1, ref.RefKey, []byte{0x31}
+					batch.Mutations, batch.LargeConsulted = []Mutation{ref}, nil
+				}
+				if before != nil {
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[rank], key, before))
+				}
+				truth, stage, err, evidence := largeFaultCommit(t, store, mode, rank, key, batch)
+				diagnostic, wantStage := "final update image mismatch", 2
+				if mode == 14 {
+					diagnostic, wantStage = "OLD/write snapshot mismatch", 1
+				}
+				requireEnvironmentError(t, err, EngineClass("StateMismatch"), operationUpdate, -30779, diagnostic)
+				if truth.String() != "OLD" || int(stage) != wantStage || string(store.state) != "CLOSED" || evidence.commits != 0 || evidence.drift != 1 {
+					t.Fatalf("precommit residual %d: %s/%d/%v/%+v", mode, truth, stage, err, evidence)
+				}
+				reopened, openErr := Open(path, cfg)
+				consultedTrack(t, reopened, openErr)
+				target := batch.Mutations[0]
+				wantTarget := []byte(nil)
+				if domain == "target" && mode == 14 {
+					wantTarget = []byte{0x7f}
+				}
+				obsoleteRawImage(t, reopened, target.DBI.Rank, target.Key, wantTarget)
+				want := before
+				if mode == 14 {
+					want = []byte{0x7f}
+				}
+				equal, readErr := FixtureRawRowEqual(reopened, rank, key, want)
+				if readErr != nil || !equal {
+					t.Fatal("precommit physical residual disposition")
+				}
+			})
 		}
 	}
 }
@@ -779,6 +997,13 @@ func TestLargeImageV1ObsoleteJoint(t *testing.T) {
 						mustEnvironment(t, err)
 						batch.ObsoleteDeletes, batch.ObsoleteConsulted = page.Rows, []ObsoletePageWitnessV1{page.Witness}
 						batch.Mutations = []Mutation{{DBI: readDBIsLiteral()[5], Key: destination, AfterKind: AfterKind(3), RefDBI: readDBIsLiteral()[1], RefKey: source}}
+						if variant == "overlay" {
+							owned, err := updateOwnedBatch(batch, reader)
+							mustEnvironment(t, err)
+							if len(owned) != 2 || !bytes.Equal(owned[0].key, source) || &owned[1].refKey[0] != &owned[0].key[0] || &owned[1].refKey[0] == &source[0] {
+								t.Fatal("reference did not share the obsolete-added owned target")
+							}
+						}
 						if retained {
 							obsoleteRequirePage(t, page, 2, 1, rawTarget)
 							residual, err := reader.ObsoleteGenerationPageV1(9, 1, page.Next, 7)

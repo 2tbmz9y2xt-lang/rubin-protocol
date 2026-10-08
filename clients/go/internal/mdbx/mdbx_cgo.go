@@ -1173,20 +1173,38 @@ func updateOwnedBatch(batch Batch, readers ...*Reader) ([]ownedMutation, error) 
 	}
 	owned := make([]ownedMutation, len(batch.Mutations))
 	for i, mutation := range batch.Mutations {
-		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, updateClone(mutation.RefKey)}
+		owned[i] = ownedMutation{mutation.DBI, updateClone(mutation.Key), mutation.BeforePresent, mutation.AfterKind, updateClone(mutation.Literal), mutation.RefDBI, mutation.RefKey}
 	}
-	if len(readers) == 0 {
-		return owned, nil
+	if len(readers) != 0 {
+		var err error
+		owned, err = updateOwnedObsolete(batch, readers[0], owned)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return updateOwnedObsolete(batch, readers[0], owned)
+	updateOwnReferences(owned)
+	return owned, nil
 }
 
-// ownedConsulted is one admitted consulted row: its validated DBI, a key cloned after complete Go admission and the
-// OLD image captured by updateNativeConsultedImages, whose present bytes stay borrowed from the live OLD transaction.
+// Resolve references only after all targets, including obsolete additions, own their keys.
+func updateOwnReferences(plan []ownedMutation) {
+	for i, mutation := range plan {
+		if mutation.after != AfterOldValueRef {
+			continue
+		}
+		target := canonicalTargetIndex(plan, mutation.refDBI.Rank, mutation.refKey)
+		if target >= 0 {
+			plan[i].refKey = plan[target].key
+			continue
+		}
+		plan[i].refKey = updateClone(mutation.refKey)
+	}
+}
+
+// ownedConsulted retains only the admitted identity; every proof queries the protected OLD again.
 type ownedConsulted struct {
-	dbi   DBI
-	key   []byte
-	image updateImage
+	dbi DBI
+	key []byte
 }
 
 // updateScanConsulted admits one row: exact DBI/key shape and strict order before its charge against maxUpdateConsulted.
@@ -1370,7 +1388,6 @@ func validUpdateImage(image updateImage) bool {
 
 type updateReference struct {
 	index, target int
-	image         updateImage
 }
 
 func updateOwnedImage(value []byte) (updateImage, error) {
@@ -1532,48 +1549,52 @@ func updateNativeLargeMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan
 	return err
 }
 
-func updateNativeImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateImage, []updateReference, error) {
-	target := func(dbi DBI, key []byte) int {
-		index := sort.Search(len(plan), func(i int) bool {
-			if plan[i].dbi.Rank != dbi.Rank {
-				return plan[i].dbi.Rank >= dbi.Rank
-			}
-			return bytes.Compare(plan[i].key, key) >= 0
-		})
-		if index < len(plan) && plan[index].dbi == dbi && bytes.Equal(plan[index].key, key) {
-			return index
-		}
-		return -1
-	}
-	targets := make([]updateImage, len(plan))
-	for i, mutation := range plan {
-		image, err := updateNativeImage(old, dbis[mutation.dbi.Rank], mutation.key)
+// Qualify all targets before any reference, without retaining a queried value.
+func updateNativeImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
+	for _, mutation := range plan {
+		_, err := updateNativeImage(old, dbis[mutation.dbi.Rank], mutation.key)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		targets[i] = image
 	}
 	references := make([]updateReference, 0)
 	for i, mutation := range plan {
 		if mutation.after != AfterOldValueRef {
 			continue
 		}
-		reference := updateReference{index: i, target: target(mutation.refDBI, mutation.refKey)}
-		if reference.target >= 0 {
-			reference.image = targets[reference.target]
-		} else {
-			image, err := updateNativeImage(old, dbis[mutation.refDBI.Rank], mutation.refKey)
-			if err != nil {
-				return nil, nil, err
-			}
-			reference.image = image
+		_, err := updateNativeReferenceImage(old, dbis, mutation)
+		if err != nil {
+			return nil, err
 		}
-		if !reference.image.present {
-			return nil, nil, adapterError(operationUpdate, EngineStateMismatch, codeProblem, "OLD_VALUE_REF is absent from OLD", nil)
-		}
-		references = append(references, reference)
+		references = append(references, updateReference{index: i, target: canonicalTargetIndex(plan, mutation.refDBI.Rank, mutation.refKey)})
 	}
-	return targets, references, nil
+	return references, nil
+}
+
+// The source is always ORIGINAL OLD, even when its write target was deleted or replaced.
+func updateNativeReferenceImage(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, mutation ownedMutation) (updateImage, error) {
+	image, err := updateNativeImage(old, dbis[mutation.refDBI.Rank], mutation.refKey)
+	if err == nil && !image.present {
+		return updateImage{}, adapterError(operationUpdate, EngineStateMismatch, codeProblem, "OLD_VALUE_REF is absent from OLD", nil)
+	}
+	return image, err
+}
+
+// Consume one OLD span synchronously; no image escapes this point comparison.
+func updateNativeOldEqual(old, candidate *C.MDBX_txn, dbi C.MDBX_dbi, key []byte) (bool, error) {
+	image, err := updateNativeImage(old, dbi, key)
+	if err != nil {
+		return false, err
+	}
+	return updateNativeEqual(candidate, dbi, key, image)
+}
+
+func updateNativeOldMatch(old, candidate *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, diagnostic string) error {
+	equal, err := updateNativeOldEqual(old, candidate, dbi, key)
+	if err == nil && !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return err
 }
 
 func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected updateImage, diagnostic string) error {
@@ -1584,13 +1605,13 @@ func updateNativeMatch(txn *C.MDBX_txn, dbi C.MDBX_dbi, key []byte, expected upd
 	return err
 }
 
-// updateNativeConsultedImages captures each consulted row's OLD image in declared order, charging only present value
+// updateNativeConsultedImages qualifies each consulted row's OLD image in declared order, charging only present value
 // lengths against MaxOperationDataBytes (absent and present-empty charge zero and stay distinct). It returns (false, nil),
 // (false, updateBoundError()) only for its own byte charge, or (true, err) with the unchanged first updateNativeImage
 // error; the flag is never derived from err.
 func updateNativeConsultedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted) (infrastructure bool, err error) {
 	var total uint64
-	for i, row := range consulted {
+	for _, row := range consulted {
 		image, readErr := updateNativeImage(old, dbis[row.dbi.Rank], row.key)
 		if readErr != nil {
 			return true, readErr
@@ -1601,16 +1622,15 @@ func updateNativeConsultedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted 
 				return false, updateBoundError()
 			}
 		}
-		consulted[i].image = image
 	}
 	return false, nil
 }
 
 // updateNativeConsultedMatch returns the first comparison error, or the StateMismatch diagnostic for the first consulted
-// row whose image in txn differs from its captured OLD image.
-func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string) error {
+// row whose candidate image differs from its current ORIGINAL OLD image.
+func updateNativeConsultedMatch(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, diagnostic string) error {
 	for _, row := range consulted {
-		matchErr := updateNativeMatch(txn, dbis[row.dbi.Rank], row.key, row.image, diagnostic)
+		matchErr := updateNativeOldMatch(old, txn, dbis[row.dbi.Rank], row.key, diagnostic)
 		if matchErr != nil {
 			return matchErr
 		}
@@ -1620,7 +1640,7 @@ func updateNativeConsultedMatch(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted [
 
 // Legacy and large consulted domains are checked in order against the same OLD.
 func updateNativeScopedMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, diagnostic string, scopes ...largeImageScope) error {
-	err := updateNativeConsultedMatch(candidate, dbis, consulted, diagnostic)
+	err := updateNativeConsultedMatch(old, candidate, dbis, consulted, diagnostic)
 	if err != nil {
 		return err
 	}
@@ -1628,12 +1648,12 @@ func updateNativeScopedMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, pla
 }
 
 func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) ([]updateReference, error) {
-	targets, references, err := updateNativePairedImages(old, dbis, plan)
+	references, err := updateNativePairedImages(old, dbis, plan)
 	if err != nil {
 		return nil, err
 	}
-	for i, mutation := range plan {
-		err = updateNativeMatch(write, dbis[mutation.dbi.Rank], mutation.key, targets[i], "OLD/write snapshot mismatch")
+	for _, mutation := range plan {
+		err = updateNativeOldMatch(old, write, dbis[mutation.dbi.Rank], mutation.key, "OLD/write snapshot mismatch")
 		if err != nil {
 			return nil, err
 		}
@@ -1643,7 +1663,7 @@ func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ow
 			continue
 		}
 		mutation := plan[reference.index]
-		err = updateNativeMatch(write, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image, "OLD/write snapshot mismatch")
+		err = updateNativeOldMatch(old, write, dbis[mutation.refDBI.Rank], mutation.refKey, "OLD/write snapshot mismatch")
 		if err != nil {
 			return nil, err
 		}
@@ -1698,7 +1718,7 @@ func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutati
 	return nil
 }
 
-func updateNativeFinalImage(mutation ownedMutation, references []updateReference, at *int, index int) (updateImage, error) {
+func updateNativeFinalImage(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, mutation ownedMutation, references []updateReference, at *int, index int) (updateImage, error) {
 	switch mutation.after {
 	case AfterAbsent:
 		return updateImage{}, nil
@@ -1708,18 +1728,17 @@ func updateNativeFinalImage(mutation ownedMutation, references []updateReference
 		if *at >= len(references) || references[*at].index != index {
 			return updateImage{}, updateNativeInvariant("invalid update reference shape")
 		}
-		image := references[*at].image
 		*at++
-		return image, nil
+		return updateNativeReferenceImage(old, dbis, mutation)
 	default:
 		return updateImage{}, updateNativeInvariant("invalid update final image")
 	}
 }
 
-func updateNativePuts(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {
+func updateNativePuts(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {
 	refAt := 0
 	for i, mutation := range plan {
-		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
+		image, err := updateNativeFinalImage(old, dbis, mutation, references, &refAt, i)
 		if err != nil {
 			return err
 		}
@@ -1737,10 +1756,10 @@ func updateNativePuts(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation,
 	return nil
 }
 
-func updateNativeVerify(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+func updateNativeVerify(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
 	refAt := 0
 	for i, mutation := range plan {
-		image, err := updateNativeFinalImage(mutation, references, &refAt, i)
+		image, err := updateNativeFinalImage(old, dbis, mutation, references, &refAt, i)
 		if err != nil {
 			return err
 		}
@@ -1753,16 +1772,16 @@ func updateNativeVerify(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutatio
 	if refAt != len(references) {
 		return updateNativeInvariant("invalid update reference shape")
 	}
-	return updateNativeVerifyReferences(txn, dbis, plan, references)
+	return updateNativeVerifyReferences(old, txn, dbis, plan, references)
 }
 
-func updateNativeVerifyReferences(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
+func updateNativeVerifyReferences(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) error {
 	for _, reference := range references {
 		if reference.target >= 0 {
 			continue
 		}
 		mutation := plan[reference.index]
-		matchErr := updateNativeMatch(txn, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image, "final update image mismatch")
+		matchErr := updateNativeOldMatch(old, txn, dbis[mutation.refDBI.Rank], mutation.refKey, "final update image mismatch")
 		if matchErr != nil {
 			return matchErr
 		}
@@ -1783,15 +1802,15 @@ func updateNativeAbort(txn *C.MDBX_txn, primary error, stage UpdateStage) update
 }
 
 func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) (CommitTruth, error) {
-	targets, references, err := updateNativeImages(old, dbis, plan)
+	references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage, err := updateNativeReadbackTargets(read, dbis, plan, targets, references)
+	oldImage, newImage, err := updateNativeReadbackTargets(old, read, dbis, plan, references)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	oldImage, newImage, err = updateNativeReadbackReferences(read, dbis, plan, references, oldImage, newImage)
+	oldImage, newImage, err = updateNativeReadbackReferences(old, read, dbis, plan, references, oldImage, newImage)
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
@@ -1810,7 +1829,7 @@ func updateNativeReadbackTruth(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 
 // Finish every consulted domain before selecting OLD first or planned NEW.
 func updateNativeReadbackScoped(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, oldImage, newImage bool, scopes ...largeImageScope) (bool, bool, error) {
-	oldImage, newImage, err := updateNativeReadbackConsulted(read, dbis, consulted, oldImage, newImage)
+	oldImage, newImage, err := updateNativeReadbackConsulted(old, read, dbis, consulted, oldImage, newImage)
 	if err != nil {
 		return false, false, err
 	}
@@ -1824,15 +1843,15 @@ func updateNativeReadbackScoped(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan 
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, targets []updateImage, references []updateReference) (bool, bool, error) {
+func updateNativeReadbackTargets(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) (bool, bool, error) {
 	oldImage, newImage, refAt := true, true, 0
 	for i, mutation := range plan {
-		oldEqual, oldErr := updateNativeEqual(read, dbis[mutation.dbi.Rank], mutation.key, targets[i])
+		oldEqual, oldErr := updateNativeOldEqual(old, read, dbis[mutation.dbi.Rank], mutation.key)
 		if oldErr != nil {
 			return false, false, oldErr
 		}
 		oldImage = oldImage && oldEqual
-		final, finalErr := updateNativeFinalImage(mutation, references, &refAt, i)
+		final, finalErr := updateNativeFinalImage(old, dbis, mutation, references, &refAt, i)
 		if finalErr != nil {
 			return false, false, finalErr
 		}
@@ -1849,13 +1868,13 @@ func updateNativeReadbackTargets(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ow
 	return oldImage, newImage, nil
 }
 
-func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, oldImage, newImage bool) (bool, bool, error) {
+func updateNativeReadbackReferences(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, oldImage, newImage bool) (bool, bool, error) {
 	for _, reference := range references {
 		if reference.target >= 0 {
 			continue
 		}
 		mutation := plan[reference.index]
-		equal, compareErr := updateNativeEqual(read, dbis[mutation.refDBI.Rank], mutation.refKey, reference.image)
+		equal, compareErr := updateNativeOldEqual(old, read, dbis[mutation.refDBI.Rank], mutation.refKey)
 		if compareErr != nil {
 			return false, false, compareErr
 		}
@@ -1864,11 +1883,10 @@ func updateNativeReadbackReferences(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan [
 	return oldImage, newImage, nil
 }
 
-// updateNativeReadbackConsulted folds each consulted row's equality with its OLD image (the updateNativeConsultedImages
-// capture from the still-live OLD transaction) into both predicates; the first comparison error returns both false.
-func updateNativeReadbackConsulted(read *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
+// Requery and fold every consulted identity into both predicates, even after both are false.
+func updateNativeReadbackConsulted(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, consulted []ownedConsulted, oldImage, newImage bool) (bool, bool, error) {
 	for _, row := range consulted {
-		equal, compareErr := updateNativeEqual(read, dbis[row.dbi.Rank], row.key, row.image)
+		equal, compareErr := updateNativeOldEqual(old, read, dbis[row.dbi.Rank], row.key)
 		if compareErr != nil {
 			return false, false, compareErr
 		}
@@ -1937,11 +1955,11 @@ func updateNativeExecute(env *C.MDBX_env, dbis [8]C.MDBX_dbi, plan []ownedMutati
 	if deleteErr != nil {
 		return updateNativeAbort(begun.txn, deleteErr, stage)
 	}
-	putErr := updateNativePuts(begun.txn, dbis, plan, references, &stage)
+	putErr := updateNativePuts(old, begun.txn, dbis, plan, references, &stage)
 	if putErr != nil {
 		return updateNativeAbort(begun.txn, putErr, stage)
 	}
-	verifyErr := updateNativeVerify(begun.txn, dbis, plan, references)
+	verifyErr := updateNativeVerify(old, begun.txn, dbis, plan, references)
 	if verifyErr != nil {
 		return updateNativeAbort(begun.txn, verifyErr, stage)
 	}
