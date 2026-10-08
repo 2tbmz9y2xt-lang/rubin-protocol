@@ -72,6 +72,7 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("FirstFaultSelectivity", testReplayPathFixtureFirstFaultSelectivity)
 	t.Run("StoredPositive", testReplayPathFixtureStoredPositive)
 	t.Run("CanonicalHeaderDamage", testReplayPathFixtureCanonicalHeaderDamage)
+	t.Run("CanonicalHeaderEIO", testReplayPathFixtureCanonicalHeaderEIO)
 	t.Run("PositiveErrorBacking", testReplayPathFixturePositiveErrorBacking)
 }
 
@@ -109,6 +110,14 @@ func testReplayPathFixtureGreatestAttachment(t *testing.T) {
 	pathNative(t, own, err, selectedSideCanonical, "entry 6 fault")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 6 && own.header == nil && p.slot == nil, "entry fault %+v", own)
 	pathGets(t, evidence, base, 1, 1, "entry fault")
+	// RC5 active read: the retry readmits the same walk, repeats the full subvisit and reaches the fault-free a.
+	logicalMDBXAssert(t, !p.discard(), "entry fault left a slot to discard")
+	w.store = w.reopen()
+	base = w.pathBaseline(t)
+	own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	w.pathOK(t, own, err, 2, replayPathStored, "entry fault retry")
+	pathGets(t, evidence, base, 5, 6, "entry fault retry")
+	logicalMDBXAssert(t, p.slot.attached && p.slot.a == 2 && p.slot.lo == 2 && len(p.slot.hashes) == 6, "entry fault retry slot %+v", p.slot)
 	// Mixed visit: the non-matching active entry at 6 succeeds, then its header Get fails; the entry stays borrowed.
 	m := newPathWorld(t, 6, 2, 5)
 	m.setReplay(mdbx.ReplayCursorAppliedV1, 1)
@@ -286,6 +295,25 @@ func testReplayPathFixtureCanonicalHeaderDamage(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "canonical wrong hash")
 	logicalMDBXAssert(t, own.h == 1 && own.x == w.hashes[1] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && !own.missing && own.resource == "", "wrong hash own %+v", own)
 	logicalMDBXAssert(t, view.headerCalls+view.protects == 0 && p.slot != nil && p.slot.a == 2, "wrong hash provider/slot")
+}
+
+// C11/C12/C25 native: an EIO on the h = a canonical header Get keeps its canonical_artifact_read resource with no
+// missing identity and no later source; the completed slot stays.
+func testReplayPathFixtureCanonicalHeaderEIO(t *testing.T) {
+	w := newPathWorld(t, 6, 2, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 1)
+	base := w.pathBaseline(t)
+	image := w.image()
+	view := &pathView{}
+	view.admit(w.headers[2])
+	p := newReplayPathOwner(view, pathLimit)
+	own, err, evidence := w.pathArmed(t, p, w.headers[2][:], mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[2][:]))
+	pathNative(t, own, err, selectedSideCanonical, "canonical header EIO")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 2 && own.x == w.hashes[2] && own.header == nil && own.headerSource == replayPathUnavailable && len(own.activeEntry) == 104, "canonical EIO own %+v", own)
+	logicalMDBXAssert(t, view.versions+view.protects+view.headerCalls == 0 && p.slot != nil && p.slot.a == 2, "canonical EIO provider/slot %+v", view)
+	pathGets(t, evidence, base, 5, 6, "canonical header EIO")
+	w.store = w.reopen()
+	replaySameImage(t, image, w.image(), "canonical header EIO image")
 }
 
 // C14/C26 boundary: a positive error in a failing establishment returns the original stored backing with the visit

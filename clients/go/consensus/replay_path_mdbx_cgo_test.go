@@ -413,6 +413,14 @@ func testReplayPathStoredPointSupplied(t *testing.T) {
 	})
 	logicalMDBXAssert(t, err == nil && view.headerCalls == 1 && view.protects == 1 && view.releases == 1, "point calls %+v", view)
 	p.discard()
+	// Definitive stored absence queries the point before an exact supplied artifact that also binds x.
+	sup, calls := bytes.Clone(w.headers[5][:]), view.headerCalls
+	_, err = w.call(t, p, sup, func(own replayPathOwn, err error) {
+		w.pathOK(t, own, err, 5, replayPathPoint, "point before binding supplied")
+		logicalMDBXAssert(t, bytes.Equal(own.header, w.headers[5][:]) && &own.header[0] != &sup[0], "point bytes %x", own.header)
+	})
+	logicalMDBXAssert(t, err == nil && view.headerCalls == calls+1, "point before supplied calls %+v", view)
+	p.discard()
 	delete(view.headers, w.hashes[5])
 	block := append(bytes.Clone(w.headers[5][:]), 0xAA)
 	own, err = w.call(t, p, block, nil)
