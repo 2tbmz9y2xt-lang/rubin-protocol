@@ -2164,7 +2164,8 @@ func (s *Store) updateImagePlan(batch Batch, plan []ownedMutation, reader *Reade
 		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, contextErr, infrastructure)
 	}
-	if tipErr := canonicalTipAdmit(plan, tip); tipErr != nil {
+	tipErr := canonicalTipAdmit(plan, tip)
+	if tipErr != nil {
 		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, tipErr, false)
 	}
@@ -2385,7 +2386,7 @@ func canonicalTipLast(cursor *C.MDBX_cursor, generation uint64, op engineOperati
 	}
 	var seek [8]byte
 	binary.BigEndian.PutUint64(seek[:], generation+1)
-	result := C.rubin_mdbx_cursor_get(cursor, unsafe.Pointer(&seek[0]), 8, C.MDBX_SET_RANGE)
+	result := C.rubin_mdbx_cursor_get(cursor, unsafe.Pointer(&seek), 8, C.MDBX_SET_RANGE)
 	runtime.KeepAlive(seek)
 	row, err := canonicalTipFound(result, seek[:], 1, op)
 	if err != nil {
@@ -2402,7 +2403,8 @@ func canonicalTipEndpoint(txn *C.MDBX_txn, dbi C.MDBX_dbi, generation uint64, op
 	if opened.cursor != nil {
 		defer C.mdbx_cursor_close(opened.cursor)
 	}
-	if err := nativePointerResultError(op, "mdbx_cursor_open returned invalid result shape", int(opened.rc), opened.cursor != nil); err != nil {
+	err := nativePointerResultError(op, "mdbx_cursor_open returned invalid result shape", int(opened.rc), opened.cursor != nil)
+	if err != nil {
 		return canonicalTipRow{}, err
 	}
 	row, err := canonicalTipLast(opened.cursor, generation, op)
@@ -2416,9 +2418,6 @@ func canonicalTipEndpoint(txn *C.MDBX_txn, dbi C.MDBX_dbi, generation uint64, op
 }
 
 func canonicalTipPoint(row canonicalTipRow) (*AuthorityPointV1, error) {
-	if row.key == nil {
-		return nil, nil
-	}
 	if len(row.key) != 16 {
 		return nil, integrityError(operationPrefixPage, "stored key outside SchemaV2 prefix-page domain", nil)
 	}
@@ -2465,7 +2464,7 @@ func (r *Reader) CanonicalTipV1(generation uint64) (*AuthorityPointV1, error) {
 func (r *Reader) canonicalTipAcquire(generation uint64) (*AuthorityPointV1, error) {
 	row, err := canonicalTipEndpoint(r.txn, r.dbis[2], generation, operationPrefixPage)
 	var point *AuthorityPointV1
-	if err == nil {
+	if err == nil && row.key != nil {
 		point, err = canonicalTipPoint(row)
 	}
 	if err != nil {
