@@ -106,7 +106,7 @@ jobs:
               row IDs. Tests and coverage run in CI - do not ask for them except for a contract
               row with no test. No style, naming or praise.
 
-              Output: one top-level `gh pr comment` per run (every run reviews the full base-to-head
+              Output: one top-level `gh pr comment` per run whose first line is <!-- claude-review --> (every run reviews the full base-to-head
               diff and says which earlier findings are fixed). Sections:
               Contract coverage (covered / missing / out of scope, or "not available");
               Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
@@ -135,7 +135,7 @@ jobs:
           SINCE: ${{ steps.start.outputs.at }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq '[.[] | select(.user.login == "github-actions[bot]")] | length')"
+          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- claude-review -->")))] | length')"
           if [[ "${n}" -lt 1 ]]; then
             echo "::warning::Claude finished without posting a review comment."
             echo "- Claude finished without posting a review comment." >> "$GITHUB_STEP_SUMMARY"
