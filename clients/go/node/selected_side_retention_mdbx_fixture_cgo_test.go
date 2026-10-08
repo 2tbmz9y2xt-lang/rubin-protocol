@@ -713,10 +713,12 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w, raw, prior, side := n2(t)
 		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, raw, w.tipAt(10))
 		retainWant(t, "probed N2", out, retainStored, "", retainNA, mdbx.CommitTruthNew, crossed, true)
-		// Probes at write begin, commit and twice around the OLD abort, all denied. Rank-4 OLD Gets: one linking-body read,
-		// the candidate expected-body read, the linking body's Consulted capture and the candidate body target image.
+		// Probes at write begin, commit and twice around the OLD abort, all denied. Seven rank-4 OLD Gets:
+		// one linking-body and one candidate expected-body callback read; linking Consulted and candidate target qualification;
+		// linking Consulted and candidate target OLD/write proof; linking Consulted final proof.
+		// Candidate final literal comparison adds no OLD query.
 		if evidence.Probes != 4 || evidence.ProbeDenied != 4 || evidence.ProbeRan != 0 || evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.BeginRead != 0 ||
-			evidence.OldGets[4] != 4 {
+			evidence.OldGets[4] != 7 {
 			t.Fatalf("one linking body read; every native full-lane probe denied: %+v", evidence)
 		}
 		w.expectN2(raw, prior, side, w.side[6])
