@@ -1434,23 +1434,27 @@ func updatePlanBatch(t *testing.T) Batch {
 
 func requirePlanInvalid(t *testing.T, batch Batch, marker string) {
 	t.Helper()
-	before := fmt.Sprint(batch)
+	before := fmt.Sprintf("%#v", batch)
 	if _, err := updateOwnedBatch(batch); err == nil {
 		t.Fatal(marker)
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("update"), int(syscall.EINVAL), "invalid Update Batch")
 	}
-	if fmt.Sprint(batch) != before {
+	if fmt.Sprintf("%#v", batch) != before {
 		t.Fatal("invalid admission changed caller input: " + marker)
 	}
 }
 
 func requirePlanCapacity(t *testing.T, batch Batch) {
 	t.Helper()
+	before := fmt.Sprintf("%#v", batch)
 	if _, err := updateOwnedBatch(batch); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+	if fmt.Sprintf("%#v", batch) != before {
+		t.Fatal("capacity admission changed caller input")
 	}
 }
 
@@ -1572,6 +1576,7 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		{batch.Mutations[4], 16_384, func(b *updateBudget, n uint64) { b.aux = n }},
 	}
 	for _, row := range rows {
+		before := fmt.Sprintf("%#v", row.row)
 		budget := updateBudget{}
 		row.set(&budget, row.limit-1)
 		if err := updateScanMutation(true, Mutation{}, row.row, &budget); err != nil {
@@ -1581,6 +1586,9 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 			t.Fatal("plan bound row accepted")
 		} else {
 			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+		}
+		if fmt.Sprintf("%#v", row.row) != before {
+			t.Fatal("family capacity admission changed caller mutation")
 		}
 	}
 	for _, row := range []struct {
@@ -1593,6 +1601,7 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		{batch.Mutations[8], 137_676_154 - uint64(len(batch.Mutations[8].Key)) - uint64(len(batch.Mutations[8].RefKey)), func(b *updateBudget, n uint64) { b.keyBytes = n }},
 		{batch.Mutations[3], 155_659_727 - uint64(len(batch.Mutations[3].Literal)), func(b *updateBudget, n uint64) { b.literals = n }},
 	} {
+		before := fmt.Sprintf("%#v", row.mutation)
 		budget := updateBudget{}
 		row.set(&budget, row.used)
 		if err := updateScanMutation(true, Mutation{}, row.mutation, &budget); err != nil {
@@ -1603,19 +1612,30 @@ func TestUpdatePlanOrderAndBounds(t *testing.T) {
 		} else {
 			_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
 		}
+		if fmt.Sprintf("%#v", row.mutation) != before {
+			t.Fatal("aggregate capacity admission changed caller mutation")
+		}
 	}
 	refCharge := uint64(len(batch.Mutations[8].Key) + len(batch.Mutations[8].RefKey))
 	budget := updateBudget{keyBytes: 137_676_154 - refCharge + 1}
+	before := fmt.Sprintf("%#v", batch.Mutations[8])
 	if err := updateScanMutation(true, Mutation{}, batch.Mutations[8], &budget); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
 	}
+	if fmt.Sprintf("%#v", batch.Mutations[8]) != before {
+		t.Fatal("reference-key capacity admission changed caller mutation")
+	}
 	budget = updateBudget{keyBytes: ^uint64(0)}
+	before = fmt.Sprintf("%#v", batch.Mutations[2])
 	if err := updateScanMutation(true, Mutation{}, batch.Mutations[2], &budget); err == nil {
 		t.Fatal("plan bound row accepted")
 	} else {
 		_ = requireEnvironmentError(t, err, EngineClass("Capacity"), engineOperation("update"), -30417, "Update Batch exceeds bound")
+	}
+	if fmt.Sprintf("%#v", batch.Mutations[2]) != before {
+		t.Fatal("key-byte overflow admission changed caller mutation")
 	}
 }
 

@@ -109,14 +109,14 @@ func consultedUpdate(store *Store, inside func(*Reader), batch Batch) (*Reader, 
 	return reader, truth, err
 }
 
-// consultedRequireRefusal proves Go admission refuses batch with an OPEN Store and unchanged caller-owned consulted rows.
+// consultedRequireRefusal proves Go admission refuses batch with an OPEN Store and unchanged caller-owned input.
 func consultedRequireRefusal(t *testing.T, store *Store, marker string, class EngineClass, code int, diagnostic string, batch Batch) {
 	t.Helper()
-	before := fmt.Sprint(batch.Consulted)
+	before := fmt.Sprintf("%#v", batch)
 	reader, truth, err := consultedUpdate(store, func(*Reader) {}, batch)
 	consultedRequireOutcome(t, store, reader, truth, err, class, code, diagnostic, marker, false)
-	if fmt.Sprint(batch.Consulted) != before {
-		t.Fatalf("%s: caller-owned consulted rows changed", marker)
+	if fmt.Sprintf("%#v", batch) != before {
+		t.Fatalf("%s: caller-owned batch changed", marker)
 	}
 }
 
@@ -138,7 +138,11 @@ func consultedUnit(t *testing.T, marker string, rows []ConsultedRow, plan []owne
 // consultedUnitRefusal proves the admission owner refuses rows with the exact Capacity or InvalidInput tuple.
 func consultedUnitRefusal(t *testing.T, marker string, rows []ConsultedRow, plan []ownedMutation, capacity bool) {
 	t.Helper()
+	beforeRows, beforePlan := fmt.Sprintf("%#v", rows), fmt.Sprintf("%#v", plan)
 	owned, err := updateOwnedConsulted(Batch{Consulted: rows}, plan)
+	if fmt.Sprintf("%#v", rows) != beforeRows || fmt.Sprintf("%#v", plan) != beforePlan {
+		t.Fatalf("%s: caller-owned rows or plan changed", marker)
+	}
 	if owned != nil || err == nil {
 		t.Fatalf("%s: owned=%d err=%v", marker, len(owned), err)
 	}
