@@ -47,7 +47,9 @@ jobs:
           set -euo pipefail
           # Read the whole list first: an API error fails the step instead of skipping the review.
           files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename')"
-          if grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$' <<<"${files}"; then
+          # The endpoint returns at most 3000 files; a list at the cap may omit a reviewed path.
+          if [[ "$(grep -c . <<<"${files}")" -ge 3000 ]] \
+            || grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$' <<<"${files}"; then
             echo "review=true" >> "${GITHUB_OUTPUT}"
           else
             echo "review=false" >> "${GITHUB_OUTPUT}"
@@ -168,8 +170,9 @@ jobs:
               - Never report a defect again that already has a thread or an earlier review entry.
 
               Output (the structured result): comments = one entry per finding on a line of
-              diff.patch, with path, the new-file line, and body "**SEVERITY** - failure mode.
-              Fix: ..."; body = markdown with these sections: Contract coverage (covered /
+              diff.patch, with path, side and line (side RIGHT with the new-file line for an
+              added or unchanged line, side LEFT with the old-file line for a deleted line), and
+              body "**SEVERITY** - failure mode. Fix: ..."; body = markdown with these sections: Contract coverage (covered /
               missing / out of scope, or "not available"); findings on lines outside the diff
               with file:line; earlier findings now fixed or still open; verdict = NO FINDINGS |
               FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or CRITICAL - fix before merge).
@@ -180,8 +183,8 @@ jobs:
                "verdict": {"enum": ["NO FINDINGS", "FINDINGS (LOW/MEDIUM only)", "FINDINGS (HIGH or CRITICAL - fix before merge)"]},
                "body": {"type": "string"},
                "comments": {"type": "array", "items": {"type": "object", "additionalProperties": false,
-                 "required": ["path", "line", "body"],
-                 "properties": {"path": {"type": "string"}, "line": {"type": "integer", "minimum": 1}, "body": {"type": "string"}}}}}}
+                 "required": ["path", "side", "line", "body"],
+                 "properties": {"path": {"type": "string"}, "side": {"enum": ["LEFT", "RIGHT"]}, "line": {"type": "integer", "minimum": 1}, "body": {"type": "string"}}}}}}
         run: |
           INPUT_DIR="${RUNNER_TEMP}/review-input"
           result="${RUNNER_TEMP}/claude-result.json"
@@ -241,12 +244,12 @@ jobs:
           # The event is fixed here: the model cannot approve or request changes.
           jq --arg sha "${HEAD_SHA}" '{commit_id: $sha, event: "COMMENT",
             body: ("<!-- claude-review -->\n**Verdict: \(.verdict)**\n\n" + .body),
-            comments: [.comments[] | {path, line, side: "RIGHT", body}]}' "${so}" > "${RUNNER_TEMP}/payload.json"
+            comments: [.comments[] | {path, line, side, body}]}' "${so}" > "${RUNNER_TEMP}/payload.json"
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews"
           if ! gh api "${api}" --method POST --input "${RUNNER_TEMP}/payload.json" --jq '"review \(.id)"'; then
             # A line outside the diff is rejected: move every inline finding into the body.
             echo "::warning::Inline comments were rejected; posting them in the review body."
-            jq '.body += "\n\n### Inline findings\n" + ([.comments[] | "- `\(.path):\(.line)` \(.body)"] | join("\n")) | .comments = []' \
+            jq '.body += "\n\n### Inline findings\n" + ([.comments[] | "- `\(.path):\(.line)` (\(.side)) \(.body)"] | join("\n")) | .comments = []' \
               "${RUNNER_TEMP}/payload.json" | gh api "${api}" --method POST --input - --jq '"review \(.id)"'
           fi
 
