@@ -71,6 +71,22 @@ jobs:
           echo "issue=${issue:-none}" >> "${GITHUB_OUTPUT}"
           echo "path=${out}" >> "${GITHUB_OUTPUT}"
 
+      - name: Collect earlier review threads
+        id: threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          out="${RUNNER_TEMP}/review-threads.json"
+          # GraphQL variables, not shell expansions.
+          # shellcheck disable=SC2016
+          query='query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line comments(first: 50) { nodes { databaseId author { login } body createdAt } } } } } } }'
+          if ! gh api graphql -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F number="${PR_NUMBER}" -f query="${query}" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == "github-actions")]' > "${out}"; then
+            echo '[]' > "${out}"
+          fi
+          echo "path=${out}" >> "${GITHUB_OUTPUT}"
+
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code@2.1.293
 
@@ -80,10 +96,13 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
+          # Hide ANTHROPIC_API_KEY from the tool subprocesses (GH_TOKEN, the job token, stays).
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1"
           REVIEW_PROMPT: |
               REPO: ${{ github.repository }}
               PR NUMBER: ${{ github.event.pull_request.number }}
               CONTRACT FILE: ${{ steps.contract.outputs.path }}
+              EARLIER THREADS FILE: ${{ steps.threads.outputs.path }}
 
               Review this RUBIN pull request diff. Read CONTRACT FILE first: it is the Linear task
               contract and the only task authority. Check that every contract case and done_when
@@ -106,12 +125,31 @@ jobs:
               row IDs. Tests and coverage run in CI - do not ask for them except for a contract
               row with no test. No style, naming or praise.
 
-              Output: one top-level `gh pr comment` per run whose first line is <!-- claude-review --> (every run reviews the full base-to-head
-              diff and says which earlier findings are fixed). Sections:
+              Output: exactly one pull-request review per run, posted with
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --method POST --input - <<'JSON'
+              and a JSON body {"commit_id": "<head SHA>", "event": "COMMENT", "body": ..., "comments": [...]}.
+              "event" is always COMMENT: never APPROVE or REQUEST_CHANGES.
+              Each finding on a line in the diff is one entry of "comments":
+              {"path": ..., "line": <new-file line>, "side": "RIGHT", "body": "**SEVERITY** - failure mode. Fix: ..."}.
+              A finding on a line outside the diff goes into "body" with file:line.
+              "body" starts with the line <!-- claude-review --> and has these sections:
               Contract coverage (covered / missing / out of scope, or "not available");
-              Findings by severity (CRITICAL/HIGH/MEDIUM/LOW) with file:line, failure mode and
-              fix; Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or
-              CRITICAL - fix before merge). Advisory only: never approve, merge, push or edit.
+              findings outside the diff; earlier Claude findings now fixed (every run reviews
+              the full base-to-head diff); Verdict: NO FINDINGS | FINDINGS (LOW/MEDIUM only) |
+              FINDINGS (HIGH or CRITICAL - fix before merge). If the API rejects an inline
+              comment line, move that finding into "body" and post again.
+              Earlier threads: EARLIER THREADS FILE lists your earlier inline threads (thread
+              id, resolved, outdated, path, line, and every comment with its author). Read it
+              before reviewing. For each thread check the current code:
+              - fixed and not resolved: reply "Fixed in <short head SHA>" with
+                gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments/<first comment databaseId>/replies --method POST -f body=...
+                then resolve it with gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<id>"}) { thread { isResolved } } }';
+              - a human replied with a reason (not a bug, won't fix, out of scope): do not
+                report it again; reply in that thread only if you have new evidence;
+              - resolved: do not report it again unless the code regressed (then cite it).
+              Never open a new inline comment for a defect that already has a thread.
+              Use graphql only for resolveReviewThread on your own threads.
+              Advisory only: never approve, merge, push or edit.
         run: |
           result="${RUNNER_TEMP}/claude-result.json"
           claude -p "${REVIEW_PROMPT}" \
@@ -119,7 +157,7 @@ jobs:
             --effort high \
             --max-turns 60 \
             --add-dir "${RUNNER_TEMP}" \
-            --allowedTools "Read,Grep,Glob,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)" \
+            --allowedTools "Read,Grep,Glob,Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(gh api graphql:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git show:*)" \
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit" \
             --output-format json < /dev/null > "${result}" || true
           jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd)"' "${result}" || true
@@ -128,17 +166,17 @@ jobs:
             exit 1
           fi
 
-      - name: Verify the review comment
+      - name: Verify the review
         if: ${{ always() && steps.review.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           SINCE: ${{ steps.start.outputs.at }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq "[.[] | select(.user.login == \"github-actions[bot]\" and .created_at >= \"${SINCE}\" and (.body | contains(\"<!-- claude-review -->\")))] | length")"
+          n="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq "[.[] | select(.user.login == \"github-actions[bot]\" and .submitted_at >= \"${SINCE}\" and (.body | contains(\"<!-- claude-review -->\")))] | length")"
           if [[ "${n}" -lt 1 ]]; then
-            echo "::warning::Claude finished without posting a review comment."
-            echo "- Claude finished without posting a review comment." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Claude finished without posting a marked review."
+            echo "- Claude finished without posting a marked review." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Record advisory Claude failure
