@@ -504,6 +504,17 @@ func testReplayPathExactCapacity(t *testing.T) {
 	p := newReplayPathOwner(view, 32*4)
 	own, err := w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil && own.h == 3 && len(p.slot.hashes) == 4 && cap(p.slot.hashes) == 4, "exact limit: %v", err)
+	// Malformed authority: a tip above the validated maximum fails the authority encoder's validation, so it cannot be
+	// persisted through Store.Update and runs on the in-memory authority; the caller precondition refuses it first.
+	bad := w.authority()
+	bad.Replay.Target.TipHeight = 0xffffffff + 1
+	logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(bad) != nil, "tip above maximum validates")
+	mv := &pathView{}
+	mp := newReplayPathOwner(mv, pathLimit)
+	own, err = pathDirect(t, mp, bad, w.genesis, "tip above maximum")
+	pathWant(t, err, selectedSideInvariant, "tip above maximum")
+	pathZero(t, own, "tip above maximum")
+	logicalMDBXAssert(t, mp.slot == nil && mv.versions+mv.protects+mv.headerCalls == 0, "tip above maximum slot/provider")
 	n, ok := replayPathAdmit(0xffffffff, 0, 137438953471)
 	logicalMDBXAssert(t, n == 1<<32 && !ok, "max refusal")
 	n, ok = replayPathAdmit(0xffffffff, 0, 137438953472)
@@ -616,7 +627,7 @@ func testReplayPathForeignSlot(t *testing.T) {
 	p := newReplayPathOwner(view, pathLimit)
 	_, err := w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil, "establish")
-	slot, calls := p.slot, view.headerCalls
+	slot, calls, versions, protects := p.slot, view.headerCalls, view.versions, view.protects
 	key, hashes, lo, attached, a := slot.key, slices.Clone(slot.hashes), slot.lo, slot.attached, slot.a
 	edits := map[string]func(*mdbx.StorageAuthorityV1){
 		"generation": func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID, a.Replay.TargetGenerationID = 4, 3 },
@@ -633,6 +644,7 @@ func testReplayPathForeignSlot(t *testing.T) {
 		pathWant(t, err, selectedSideCapacity, name)
 		pathZero(t, own, name)
 		logicalMDBXAssert(t, p.slot == slot && view.headerCalls == calls, "%s: slot or source touched", name)
+		logicalMDBXAssert(t, view.versions == versions && view.protects == protects, "%s: provider version or guard touched", name)
 		logicalMDBXAssert(t, slot.key == key && slices.Equal(slot.hashes, hashes) && slot.lo == lo && slot.attached == attached && slot.a == a, "%s: slot contents changed", name)
 		replaySameImage(t, image, w.image(), name)
 	}

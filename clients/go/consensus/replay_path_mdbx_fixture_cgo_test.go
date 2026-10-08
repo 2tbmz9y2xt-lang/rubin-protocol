@@ -88,6 +88,26 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("CanonicalHeaderEIO", testReplayPathFixtureCanonicalHeaderEIO)
 	t.Run("PositiveErrorBacking", testReplayPathFixturePositiveErrorBacking)
 	t.Run("ActiveEntryWidth", testReplayPathFixtureActiveEntryWidth)
+	t.Run("ForeignSlot", testReplayPathFixtureForeignSlot)
+}
+
+// RC9: a foreign completed slot refuses with storage_capacity before any PATH Get, Version, Protect or Header call.
+func testReplayPathFixtureForeignSlot(t *testing.T) {
+	w := newPathWorld(t, 2, 2, 3, 3)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	view := &pathView{}
+	view.admit(w.headers[3])
+	p := newReplayPathOwner(view, pathLimit)
+	_, err := w.call(t, p, nil, nil)
+	logicalMDBXAssert(t, err == nil, "establish: %v", err)
+	slot, versions, protects, headerCalls := p.slot, view.versions, view.protects, view.headerCalls
+	w.setReplayEdit(mdbx.ReplayCursorAppliedV1, 2, func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHash[0] ^= 1 })
+	base := w.pathBaseline(t)
+	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	pathWant(t, err, selectedSideCapacity, "foreign slot")
+	pathZero(t, own, "foreign slot")
+	pathGets(t, evidence, base, 0, 0, "foreign slot")
+	logicalMDBXAssert(t, p.slot == slot && view.versions == versions && view.protects == protects && view.headerCalls == headerCalls, "foreign slot source %+v", view)
 }
 
 // RC1: limit 32N-1 performs zero PATH Gets and no provider call; limit 32N reads the whole walk.
@@ -139,7 +159,7 @@ func testReplayPathFixtureGreatestAttachment(t *testing.T) {
 	p = newReplayPathOwner(nil, pathLimit)
 	own, err, evidence = m.pathArmed(t, p, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(m.hashes[6][:]))
 	pathNative(t, own, err, replayEntryRecovery, "header fault after entry")
-	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 6 && own.x == m.hashes[6] && own.header == nil && len(own.activeEntry) == 104 && [32]byte(own.activeEntry[:32]) == m.replayWorld.hashes[6] && p.slot == nil, "mixed own %+v", own)
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 6 && own.x == m.hashes[6] && own.header == nil && len(own.activeEntry) == 104 && [32]byte(own.activeEntry[:32]) == m.replayWorld.hashes[6] && p.slot == nil && !p.discard(), "mixed own %+v", own)
 	pathGets(t, evidence, base, 1, 2, "header fault after entry")
 }
 
@@ -170,9 +190,11 @@ func testReplayPathFixtureSameAttemptReuse(t *testing.T) {
 	own, err, evidence := w.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 	w.pathOK(t, own, err, 5, replayPathStored, "same attempt")
 	pathGets(t, evidence, base, 0, 3, "same attempt")
-	own, err, evidence = w.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[5][:]))
+	hp := newReplayPathOwner(nil, pathLimit)
+	own, err, evidence = w.pathArmed(t, hp, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[5][:]))
 	pathNative(t, own, err, replayEntryRecovery, "own-height header key")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && own.x == w.hashes[5], "own-height key %+v", own)
+	logicalMDBXAssert(t, hp.slot == nil && !hp.discard(), "own-height header fault left a slot")
 	pathGets(t, evidence, base, 0, 3, "own-height header key")
 	g := newPathWorld(t, 6, 2, 5)
 	g.setReplay(mdbx.ReplayCursorAppliedV1, 1)
@@ -180,10 +202,20 @@ func testReplayPathFixtureSameAttemptReuse(t *testing.T) {
 	own, err, evidence = g.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 	g.pathOK(t, own, err, 2, replayPathStored, "attachment entry reuse")
 	pathGets(t, evidence, base, 5, 6, "attachment entry reuse")
-	own, err, evidence = g.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageGetEIO, 2, logicalMDBXMust(mdbx.HeightKey(1, 2)))
+	q := newReplayPathOwner(nil, pathLimit)
+	own, err, evidence = g.pathArmed(t, q, nil, mdbx.SelectedDamageGetEIO, 2, logicalMDBXMust(mdbx.HeightKey(1, 2)))
 	pathNative(t, own, err, selectedSideCanonical, "attachment entry key")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 2 && own.activeEntry == nil, "attachment entry key %+v", own)
 	pathGets(t, evidence, base, 5, 5, "attachment entry key")
+	// RC5 own/final active read: no slot, nothing to discard; the retry readmits the same N and repeats the full subvisit.
+	logicalMDBXAssert(t, q.slot == nil, "own entry fault published a slot %+v", q.slot)
+	logicalMDBXAssert(t, !q.discard(), "own entry fault left a slot to discard")
+	g.store = g.reopen()
+	base = g.pathBaseline(t)
+	own, err, evidence = g.pathArmed(t, q, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	g.pathOK(t, own, err, 2, replayPathStored, "own entry fault retry")
+	pathGets(t, evidence, base, 5, 6, "own entry fault retry")
+	logicalMDBXAssert(t, q.slot.attached && q.slot.a == 2 && q.slot.lo == 2 && len(q.slot.hashes) == 6, "own entry fault retry slot %+v", q.slot)
 }
 
 // RC4: the second call reads only the own header: no descent, no index Get.
@@ -260,7 +292,7 @@ func testReplayPathFixtureWalkFaultRetry(t *testing.T) {
 	p := newReplayPathOwner(view, pathLimit)
 	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[4][:]))
 	pathNative(t, own, err, replayEntryRecovery, "fault after point")
-	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 4 && view.headerCalls == 1 && p.slot == nil, "fault after point %+v", view)
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 4 && view.headerCalls == 1 && p.slot == nil && !p.discard(), "fault after point %+v", view)
 	logicalMDBXAssert(t, view.releases == 1 && view.protects == 1 && p.release == nil, "fault after point release %+v", view)
 }
 
@@ -275,8 +307,17 @@ func testReplayPathFixtureFirstFaultSelectivity(t *testing.T) {
 	own, err, evidence := w.pathArmed(t, p, w.headers[5][:], mdbx.SelectedDamageGetEIO, 2, logicalMDBXMust(mdbx.HeightKey(1, 5)))
 	pathNative(t, own, err, selectedSideCanonical, "entry fault before unavailable header")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && view.headerCalls+view.protects == 0, "entry fault %+v", view)
+	// RC5 middle active read: no slot, nothing to discard; the retry readmits the same N and repeats the full subvisit.
+	logicalMDBXAssert(t, p.slot == nil, "middle entry fault published a slot %+v", p.slot)
+	logicalMDBXAssert(t, !p.discard(), "middle entry fault left a slot to discard")
 	w.store = w.reopen()
 	replaySameImage(t, image, w.image(), "entry fault image")
+	base := w.pathBaseline(t)
+	own, err, evidence = w.pathArmed(t, p, w.headers[5][:], mdbx.SelectedDamageProbeOnly, 0, nil)
+	w.pathOK(t, own, err, 2, replayPathStored, "middle entry fault retry")
+	// Entries 6..2; headers 7, 6, the absent 5 (then its point), 4, 3 and the own canonical header 2.
+	pathGets(t, evidence, base, 5, 6, "middle entry fault retry")
+	logicalMDBXAssert(t, p.slot.attached && p.slot.a == 2 && p.slot.lo == 2 && len(p.slot.hashes) == 6 && view.protects == 1 && view.headerCalls == 1, "middle entry fault retry slot %+v view %+v", p.slot, view)
 	s := newPathWorld(t, 2, 2, 4)
 	s.setReplay(mdbx.ReplayCursorAppliedV1, 2)
 	view = &pathView{}
@@ -285,7 +326,7 @@ func testReplayPathFixtureFirstFaultSelectivity(t *testing.T) {
 	image = s.image()
 	own, err, evidence = s.pathArmed(t, p, s.headers[5][:], mdbx.SelectedDamageGetEIO, 3, bytes.Clone(s.hashes[5][:]))
 	pathNative(t, own, err, replayEntryRecovery, "stored ancestry fault")
-	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && own.header == nil && view.headerCalls+view.protects == 0 && p.slot == nil, "ancestry fault %+v", own)
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && own.header == nil && view.headerCalls+view.protects == 0 && p.slot == nil && !p.discard(), "ancestry fault %+v", own)
 	s.store = s.reopen()
 	replaySameImage(t, image, s.image(), "stored ancestry fault image")
 }
