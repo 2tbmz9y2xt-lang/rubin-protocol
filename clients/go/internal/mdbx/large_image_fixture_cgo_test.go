@@ -1273,7 +1273,7 @@ func contextNativeOrder(t *testing.T) {
 						refusal, wantIndex, wantHeader = true, 1, 0
 						// The one index query belongs to legacy qualification, never context.
 					case "obsolete index":
-						page, err := reader.ObsoleteIndexPageV1(9, nil, 1)
+						page, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1)
 						mustEnvironment(t, err)
 						batch.ObsoleteDeletes, batch.ObsoleteConsulted = page.Rows, []ObsoletePageWitnessV1{page.Witness}
 						refusal, wantIndex, wantHeader = true, 0, 0
