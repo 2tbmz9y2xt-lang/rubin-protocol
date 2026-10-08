@@ -609,7 +609,11 @@ func tipNativeDrift(t *testing.T) {
 				reopened, openErr := Open(path, cfg)
 				consultedTrack(t, reopened, openErr)
 				if phase == 13 {
-					obsoleteRawImage(t, reopened, 2, row.Key, row.Literal)
+					oldValue := row.Literal
+					if kind == "empty-to-present" {
+						oldValue = nil
+					}
+					obsoleteRawImage(t, reopened, 2, row.Key, oldValue)
 					if !bytes.Equal(key, row.Key) {
 						obsoleteRawImage(t, reopened, 2, key, nil)
 					}
