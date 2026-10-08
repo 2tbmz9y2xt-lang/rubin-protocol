@@ -279,6 +279,45 @@ func tipNativeFoldOrder(t *testing.T) {
 }
 
 func tipNativeCallbacks(t *testing.T) {
+	t.Run("T18 source EIO precedes invalid Batch", func(t *testing.T) {
+		store, path, cfg := consultedStore(t)
+		target := consultedCounter(t, 900)
+		consultedRequireImage(t, store, target.DBI, target.Key, nil, false, "independent OLD image")
+		target.AfterKind = AfterKind(99)
+		reservations, reservationErr := NewOperationReservationOwner(154611151)
+		mustEnvironment(t, reservationErr)
+		var reader *Reader
+		var source, result error
+		var truth CommitTruth
+		var stage UpdateStage
+		var selected SelectedDamageEvidence
+		evidence, err := fixtureTipCursor(store, 11, 1, 1, 0, func() {
+			var fixtureErr error
+			selected, fixtureErr = FixtureSelectedDamage(store, reservations, SelectedDamageProbeOnly, 0, target.Key, func() {
+				truth, stage, result = store.Update(func(r *Reader) (Batch, error) {
+					reader = r
+					point, failure := r.CanonicalTipV1(7)
+					source = failure
+					if point != nil { t.Fatal("source fault exposed a scalar") }
+					return Batch{Mutations: []Mutation{target}}, nil
+				})
+			})
+			mustEnvironment(t, fixtureErr)
+		})
+		mustEnvironment(t, err)
+		tipCensus(t, evidence, 1, 1, 1, 1)
+		if tipError(t, source, "prefix-page", "IO", 5, "error 5", false).Cause != nil || !sameError(result, source) || !sameError(reader.failure, source) {
+			t.Fatal("invalid returned Batch replaced the recorded source failure")
+		}
+		if selected.BeginOld != 1 || selected.BeginWrite != 0 || selected.BeginRead != 0 || selected.OldAborts != 1 || selected.Deletes != 0 || selected.Commits != 0 || selected.Faults != 0 {
+			t.Fatalf("source failure reached native write effects: %+v", selected)
+		}
+		tipRetired(t, reader, nil)
+		tipOutcome(t, store, truth, stage, result, 1, 1, "CLOSED")
+		reopened, openErr := Open(path, cfg)
+		consultedTrack(t, reopened, openErr)
+		obsoleteRawImage(t, reopened, 0, target.Key, nil)
+	})
 	for _,mode:=range []string{"ignored","direct","wrapped","joined","distinct","cause","typed-nil","panic"}{
 		t.Run(mode,func(t *testing.T){
 			store,_,_:=consultedStore(t);var reader *Reader;var source,application,result error;var truth CommitTruth;var stage UpdateStage;var recovered any
