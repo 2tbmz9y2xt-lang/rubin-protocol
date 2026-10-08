@@ -66,7 +66,16 @@ func largeNativeProofReadErrors(t *testing.T) {
 				truth, stage, result, evidence := largeFaultCommit(t, store, mode, rank, key, batch)
 				primary, wantState := result, "CLOSED"
 				if mode == 2 {
-					primary = requireEnvironmentError(t, result, EngineClass("LocalInvariant"), operationAbort, -30416, expectedNativeDiagnostic(-30416)).Cause
+					joined, ok := result.(interface{ Unwrap() []error })
+					if !ok || len(joined.Unwrap()) != 2 {
+						t.Fatalf("current OLD fault lost ordered primary and cleanup: %v", result)
+					}
+					parts := joined.Unwrap()
+					primary = parts[0]
+					cleanup := requireEnvironmentError(t, parts[1], EngineClass("LocalInvariant"), operationAbort, -30416, expectedNativeDiagnostic(-30416))
+					if cleanup.Cause != nil {
+						t.Fatal("current OLD cleanup manufactured a cause", cleanup)
+					}
 					wantState = "POISONED_THREAD"
 				}
 				if mode == 24 {
@@ -74,7 +83,7 @@ func largeNativeProofReadErrors(t *testing.T) {
 					wantState = "CLOSE_BLOCKED"
 				}
 				engine := requireEnvironmentError(t, primary, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
-				if engine.Cause != nil || truth != 1 || stage != 1 || evidence.gets != 2 || evidence.commits != 0 || evidence.aborts != 1 || string(store.state) != wantState {
+				if engine.Cause != nil || result != store.terminal || truth != 1 || stage != 1 || evidence.gets != 2 || evidence.commits != 0 || evidence.aborts != 1 || string(store.state) != wantState {
 					t.Fatalf("current OLD fault ownership %d/%d/%v/%+v/%s", truth, stage, result, evidence, store.state)
 				}
 				if mode == 2 && store.txn == nil || mode == 24 && (store.env == nil || store.txn != nil) || mode == 1 && (store.env != nil || store.txn != nil) {
@@ -595,7 +604,10 @@ func largeNativeJointPredicates(t *testing.T) {
 			}
 			requireEnvironmentError(t, commit.Cause, EngineClass("Capacity"), operationUpdate, 28, expectedNativeDiagnostic(28))
 			if laterFault {
-				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationUpdate, 5, expectedNativeDiagnostic(5))
+				later := requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationGet, 5, expectedNativeDiagnostic(5))
+				if later.Cause != nil {
+					t.Fatal("later Large native failure manufactured a cause", later)
+				}
 				if evidence.gets != 1 {
 					t.Fatal("later Large native failure was not reached exactly once")
 				}
