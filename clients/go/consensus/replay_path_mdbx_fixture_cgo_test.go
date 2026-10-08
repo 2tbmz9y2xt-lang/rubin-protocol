@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"slices"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -66,6 +67,7 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("PreGenesis", testReplayPathFixturePreGenesis)
 	t.Run("SameAttemptReuse", testReplayPathFixtureSameAttemptReuse)
 	t.Run("RetainedReuse", testReplayPathFixtureRetainedReuse)
+	t.Run("OwnAtAttachment", testReplayPathFixtureOwnAtAttachment)
 	t.Run("WalkFaultRetry", testReplayPathFixtureWalkFaultRetry)
 	t.Run("FirstFaultSelectivity", testReplayPathFixtureFirstFaultSelectivity)
 	t.Run("StoredPositive", testReplayPathFixtureStoredPositive)
@@ -175,6 +177,36 @@ func testReplayPathFixtureRetainedReuse(t *testing.T) {
 	w.pathOK(t, own, err, 4, replayPathStored, "retained")
 	pathGets(t, evidence, base, 0, 1, "retained")
 	logicalMDBXAssert(t, p.slot == slot, "slot replaced")
+	// A native fault on the own header of the completed slot keeps the slot; the retry reuses it without a walk.
+	hashes := append([][32]byte(nil), slot.hashes...)
+	own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[4][:]))
+	pathNative(t, own, err, replayEntryRecovery, "retained native fault")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 4 && own.header == nil, "retained fault own %+v", own)
+	logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.lo == 3, "native fault cleared the completed slot")
+	w.store = w.reopen()
+	base = w.pathBaseline(t)
+	own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	w.pathOK(t, own, err, 4, replayPathStored, "retry on the retained slot")
+	pathGets(t, evidence, base, 0, 1, "retry on the retained slot")
+	logicalMDBXAssert(t, p.slot == slot, "retry replaced the slot")
+}
+
+// OwnAtAttachment counts: h = 1 < a = 2 reads entries 6..2 and headers 7..3 in the walk, then entry 1 and header 1;
+// h = 3 > a reads only the retained hash's header.
+func testReplayPathFixtureOwnAtAttachment(t *testing.T) {
+	w := newPathWorld(t, 6, 2, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 0)
+	base := w.pathBaseline(t)
+	p := newReplayPathOwner(nil, pathLimit)
+	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	w.pathOK(t, own, err, 1, replayPathStored, "own below attachment")
+	logicalMDBXAssert(t, p.slot.a == 2 && [32]byte(own.activeEntry[:32]) == w.hashes[1], "own entry")
+	pathGets(t, evidence, base, 6, 6, "own below attachment")
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	base = w.pathBaseline(t)
+	own, err, evidence = w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	w.pathOK(t, own, err, 3, replayPathStored, "own above attachment")
+	pathGets(t, evidence, base, 0, 1, "own above attachment")
 }
 
 // RC5: a native fault at the first, a middle and the own walk header publishes nothing; the retry repeats the walk.
@@ -216,9 +248,12 @@ func testReplayPathFixtureFirstFaultSelectivity(t *testing.T) {
 	view = &pathView{}
 	view.admit(s.headers[5])
 	p = newReplayPathOwner(view, pathLimit)
+	image = s.image()
 	own, err, evidence = s.pathArmed(t, p, s.headers[5][:], mdbx.SelectedDamageGetEIO, 3, bytes.Clone(s.hashes[5][:]))
 	pathNative(t, own, err, replayEntryRecovery, "stored ancestry fault")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && own.header == nil && view.headerCalls+view.protects == 0 && p.slot == nil, "ancestry fault %+v", own)
+	s.store = s.reopen()
+	replaySameImage(t, image, s.image(), "stored ancestry fault image")
 }
 
 // K1-K6 header subset: a present stored misnamed header is positive damage that good point and supplied bytes never hide.

@@ -29,6 +29,8 @@ type pathView struct {
 	releases    int
 	inUpdate    *bool // set by pathWorld.call: true while Store.Update has not returned
 	inside      int   // releases run before Store.Update returned (before its OLD abort)
+	owner       *replayPathOwner
+	unclear     int // releases run while owner.release was still set
 }
 
 func (v *pathView) InventoryV1(uint64) HeaderCandidateInventoryV1 {
@@ -49,6 +51,9 @@ func (v *pathView) ProtectV1(version uint64) (bool, func()) {
 		v.releases++
 		if v.inUpdate != nil && *v.inUpdate {
 			v.inside++
+		}
+		if v.owner != nil && v.owner.release != nil {
+			v.unclear++
 		}
 	}
 }
@@ -461,18 +466,13 @@ func testReplayPathNilFacet(t *testing.T) {
 	logicalMDBXAssert(t, own.missing && own.missingHeight == 3, "nil facet identity")
 	var typed *pathView
 	p = newReplayPathOwner(typed, pathLimit)
-	defer func() {
-		_, isRuntime := recover().(interface{ RuntimeError() })
-		logicalMDBXAssert(t, isRuntime, "typed nil did not reach its method")
+	func() {
+		defer func() {
+			_, isRuntime := recover().(interface{ RuntimeError() })
+			logicalMDBXAssert(t, isRuntime, "typed nil did not reach its method")
+		}()
+		_, _ = w.call(t, p, nil, nil)
 	}()
-	_ = w.store.View(func(r *mdbx.Reader) error {
-		a, _ := r.ReadStorageAuthorityV1()
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		_, _ = p.ownLocked(r, a, pathOldActive(t, r, 1, 2), w.genesis, nil)
-		return nil
-	})
-	t.Fatal("typed nil provider was skipped")
 }
 
 // RC1/RC2: limit 32N-1 refuses before any source, 32N succeeds with exactly N elements, zero refuses.
@@ -575,6 +575,7 @@ func testReplayPathGuardFinish(t *testing.T) {
 	view := &pathView{}
 	view.admit(w.headers[3])
 	p := newReplayPathOwner(view, pathLimit)
+	view.owner = p
 	observed := false
 	w.observe = func() {
 		observed = true
@@ -584,6 +585,7 @@ func testReplayPathGuardFinish(t *testing.T) {
 		logicalMDBXAssert(t, err == nil && view.releases == 0 && p.release != nil && bytes.Equal(own.header, w.headers[3][:]), "held source")
 	})
 	w.observe = nil
+	logicalMDBXAssert(t, view.releases == 1 && view.unclear == 0, "release ran before finishLocked cleared it: %+v", view)
 	logicalMDBXAssert(t, observed && err == nil && view.releases == 1 && view.inside == 0 && p.release == nil && p.slot != nil, "finish %+v", view)
 	p.mu.Lock()
 	p.finishLocked()

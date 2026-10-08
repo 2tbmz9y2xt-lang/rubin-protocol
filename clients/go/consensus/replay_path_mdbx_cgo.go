@@ -14,7 +14,9 @@ import (
 // ReplayHeaderCandidateViewV1 is the header-candidate view with the replay point facet. VersionV1 is a race-safe scalar
 // read with no enumeration, copy or allocation. HeaderV1 writes exactly the 116 raw admitted bytes named by hash into
 // dst and returns true when present; it does not retain dst or write it after returning, gives no validity result, and
-// dst content is meaningless on false. Both methods are callable while the caller holds the ProtectV1 guard.
+// dst content is meaningless on false. Both methods are callable while the caller holds the ProtectV1 guard. A nil
+// optional interface is normal absence and calls no method; a nonnil interface holding a typed-nil provider follows its
+// actual method, error and panic behavior, without reflection filtering.
 type ReplayHeaderCandidateViewV1 interface {
 	HeaderCandidateViewV1
 	VersionV1() uint64
