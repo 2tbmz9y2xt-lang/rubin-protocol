@@ -2386,7 +2386,8 @@ func canonicalTipLast(cursor *C.MDBX_cursor, generation uint64, op engineOperati
 	}
 	var seek [8]byte
 	binary.BigEndian.PutUint64(seek[:], generation+1)
-	result := C.rubin_mdbx_cursor_get(cursor, unsafe.Pointer(&seek), 8, C.MDBX_SET_RANGE)
+	seekPointer := unsafe.Pointer(&seek)
+	result := C.rubin_mdbx_cursor_get(cursor, seekPointer, 8, C.MDBX_SET_RANGE)
 	runtime.KeepAlive(seek)
 	row, err := canonicalTipFound(result, seek[:], 1, op)
 	if err != nil {
