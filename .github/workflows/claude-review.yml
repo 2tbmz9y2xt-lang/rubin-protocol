@@ -2,9 +2,9 @@ name: "Claude Code Review"
 
 on:
   pull_request:
-    # No paths filter: the scope step decides inside the job.
-    # A review starts when the PR is opened, pushed to, marked ready for review or reopened;
-    # an edit of the PR starts no run.
+    # No paths filter: the scope step decides inside the job. A review starts when the PR is
+    # opened, becomes ready for review or is reopened, and on every push; no other event
+    # starts a run.
     # converted_to_draft/closed: start a run whose job is skipped, so the
     # concurrency group cancels a review still running on that PR.
     types: [opened, synchronize, ready_for_review, reopened, converted_to_draft, closed]
