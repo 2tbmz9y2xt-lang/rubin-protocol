@@ -65,9 +65,11 @@ jobs:
           fi
           # Read the whole list first: an API error fails the step instead of skipping the review.
           # A rename lists its old name too, so moving a reviewed file out of scope is reviewed.
-          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)')"
-          # The endpoint returns at most 3000 files; a list at the cap may omit a reviewed path.
-          if [[ "$(grep -c . <<<"${files}")" -ge 3000 ]] \
+          pages="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '[.[] | [.filename, (.previous_filename // empty)]]')"
+          files="$(jq -r -s '.[][][]' <<<"${pages}")"
+          # The endpoint returns at most 3000 file objects (a rename is one object with two names);
+          # a list at the cap may omit a reviewed path.
+          if [[ "$(jq -s 'map(length) | add // 0' <<<"${pages}")" -ge 3000 ]] \
             || grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$' <<<"${files}"; then
             echo "review=true" >> "${GITHUB_OUTPUT}"
           else
