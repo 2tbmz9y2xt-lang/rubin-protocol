@@ -237,6 +237,16 @@ func testReplayPathFixtureWalkFaultRetry(t *testing.T) {
 		w.pathOK(t, own, err, 3, replayPathStored, "retry")
 		pathGets(t, evidence, base, 0, 4, "retry")
 	}
+	// A native fault below an acquired point: the held guard is released exactly once by finishLocked.
+	w := newPathWorld(t, 2, 2, 4, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	view := &pathView{}
+	view.admit(w.headers[5])
+	p := newReplayPathOwner(view, pathLimit)
+	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[4][:]))
+	pathNative(t, own, err, replayEntryRecovery, "fault after point")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 4 && view.headerCalls == 1 && p.slot == nil, "fault after point %+v", view)
+	logicalMDBXAssert(t, view.releases == 1 && view.protects == 1 && p.release == nil, "fault after point release %+v", view)
 }
 
 // K8/K11: one armed fault ends the visit with its original native cause; no provider call, supply or missing identity.

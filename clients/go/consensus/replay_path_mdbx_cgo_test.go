@@ -435,15 +435,16 @@ func testReplayPathMultiAcquisition(t *testing.T) {
 	view := &pathView{}
 	p := newReplayPathOwner(view, pathLimit)
 	image := w.image()
-	for _, k := range []uint64{5, 4} {
+	for i, k := range []uint64{5, 4} {
 		own, err := w.call(t, p, nil, nil)
 		pathWant(t, err, replayEntryRecovery, "missing")
+		logicalMDBXAssert(t, view.releases == i+1 && view.protects == i+1 && p.release == nil, "missing %d: releases %+v", k, view)
 		logicalMDBXAssert(t, own.missing && own.missingHeight == k && own.missingHash == w.hashes[k] && own.resource == "", "missing %d: %+v", k, own)
 		logicalMDBXAssert(t, p.slot == nil && !p.discard(), "partial slot after %d", k)
 		view.admit(w.headers[k])
 	}
 	own, err := w.call(t, p, nil, func(own replayPathOwn, err error) { w.pathOK(t, own, err, 4, replayPathPoint, "acquired") })
-	logicalMDBXAssert(t, err == nil && own.h == 4 && p.slot != nil, "acquired walk")
+	logicalMDBXAssert(t, err == nil && own.h == 4 && p.slot != nil && view.releases == 3 && view.protects == 3, "acquired walk %+v", view)
 	replaySameImage(t, image, w.image(), "multi acquisition")
 }
 
@@ -650,14 +651,16 @@ func testReplayPathActiveEntryDamage(t *testing.T) {
 				return rows
 			}
 		}
-		w := newPathWorldWith(t, pathSeed{active: 6, forkAt: 2, forkLen: 5, canonical: edit})
+		w := newPathWorldWith(t, pathSeed{active: 6, forkAt: 2, forkLen: 5, skip: []int{5}, canonical: edit})
 		w.setReplay(mdbx.ReplayCursorAppliedV1, 1)
 		view := &pathView{}
+		view.admit(w.headers[5]) // the point at 5 acquires the guard before the damaged entry at 4
 		p := newReplayPathOwner(view, pathLimit)
 		own, err := w.call(t, p, nil, nil)
 		pathWant(t, err, selectedSideIntegrity, tc.name)
 		logicalMDBXAssert(t, own.h == 4 && own.x == w.hashes[4] && own.header == nil && own.resource == "" && !own.missing, "%s: own %+v", tc.name, own)
-		logicalMDBXAssert(t, (own.activeEntry == nil) == tc.absent && p.slot == nil && view.headerCalls == 0, "%s: entry/slot", tc.name)
+		logicalMDBXAssert(t, (own.activeEntry == nil) == tc.absent && p.slot == nil && view.headerCalls == 1, "%s: entry/slot", tc.name)
+		logicalMDBXAssert(t, view.releases == 1 && p.release == nil, "%s: release %+v", tc.name, view)
 	}
 }
 
@@ -669,14 +672,16 @@ func testReplayPathCanonicalHeaderDamage(t *testing.T) {
 		}
 		return rows
 	}
-	w := newPathWorldWith(t, pathSeed{active: 6, forkAt: 2, forkLen: 5, canonical: absent})
+	w := newPathWorldWith(t, pathSeed{active: 6, forkAt: 2, forkLen: 5, skip: []int{4}, canonical: absent})
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 0)
 	view := &pathView{}
 	view.admit(w.headers[1])
+	view.admit(w.headers[4]) // the walk's point at 4 holds the guard when the own canonical header is absent
 	p := newReplayPathOwner(view, pathLimit)
 	own, err := w.call(t, p, w.headers[1][:], nil)
 	pathWant(t, err, selectedSideIntegrity, "canonical header absent")
-	logicalMDBXAssert(t, own.h == 1 && own.header == nil && !own.missing && view.headerCalls == 0 && p.slot != nil, "absent own %+v", own)
+	logicalMDBXAssert(t, own.h == 1 && own.header == nil && !own.missing && view.headerCalls == 1 && p.slot != nil, "absent own %+v", own)
+	logicalMDBXAssert(t, view.releases == 1 && p.release == nil, "absent own release %+v", view)
 	var wrong [32]byte
 	wrong[0] = 1
 	w = newPathWorldWith(t, pathSeed{active: 6, forkAt: 2, forkLen: 5, canonical: replayValueAt(1, &wrong, sideWorldWork(2))})
@@ -699,21 +704,25 @@ func testReplayPathAncestryMissing(t *testing.T) {
 	pathWant(t, err, replayEntryRecovery, "ancestry missing")
 	logicalMDBXAssert(t, own.missing && own.missingHeight == 5 && own.missingHash == w.hashes[5] && own.h == 5 && own.header == nil, "missing %+v", own)
 	logicalMDBXAssert(t, p.slot == nil && !p.discard() && view.headerCalls == 1, "missing slot")
+	logicalMDBXAssert(t, view.releases == 1 && view.unclear == 0 && p.release == nil, "missing header release %+v", view)
 	replaySameImage(t, image, w.image(), "ancestry missing")
 }
 
 // C21/C23/C24: a cursor element or target genesis contradiction is integrity before any slot.
 func testReplayPathCursorGenesisTarget(t *testing.T) {
-	w := newPathWorld(t, 2, 2, 4)
+	w := newPathWorld(t, 2, 2, 4, 4)
 	w.setReplayEdit(mdbx.ReplayCursorAppliedV1, 3, func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor.BlockHash[0] ^= 1 })
-	p := newReplayPathOwner(nil, pathLimit)
+	view := &pathView{}
+	view.admit(w.headers[4]) // the cursor element is derived from the point-sourced header at 4
+	p := newReplayPathOwner(view, pathLimit)
 	own, err := w.call(t, p, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "cursor")
-	logicalMDBXAssert(t, !own.missing && p.slot == nil, "cursor own %+v", own)
+	logicalMDBXAssert(t, !own.missing && p.slot == nil && view.headerCalls == 1, "cursor own %+v", own)
+	logicalMDBXAssert(t, view.releases == 1 && p.release == nil, "cursor release %+v", view)
 	g := newPathWorld(t, -1, 0, 3)
 	g.setReplay(mdbx.ReplayCursorPreGenesisV1, 0)
 	g.genesis.GenesisHash[0] ^= 1
-	view := &pathView{}
+	view = &pathView{}
 	p = newReplayPathOwner(view, pathLimit)
 	own, err = g.call(t, p, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "genesis context")
@@ -917,10 +926,12 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	own, err = m.call(t, r, nil, nil)
 	pathWant(t, err, replayEntryRecovery, "unbound point")
 	logicalMDBXAssert(t, own.missing && own.missingHeight == 3 && own.header == nil && bad.headerCalls == 1, "unbound own %+v", own)
+	logicalMDBXAssert(t, bad.releases == 1 && r.release == nil, "unbound release %+v", bad)
 	// Unbound point bytes end the visit: a valid supplied artifact is not consulted after them (MP8F, step 4).
 	own, err = m.call(t, r, m.headers[3][:], nil)
 	pathWant(t, err, replayEntryRecovery, "unbound point with supplied")
 	logicalMDBXAssert(t, own.missing && own.missingHeight == 3 && own.missingHash == m.hashes[3] && own.header == nil && own.headerSource == replayPathUnavailable && r.slot == nil, "supplied after unbound point %+v", own)
+	logicalMDBXAssert(t, bad.releases == 2 && bad.protects == 2 && r.release == nil, "unbound second release %+v", bad)
 	// Genesis proof below the cursor: PRE_GENESIS target whose height-0 ancestry is a foreign genesis header.
 	f := newPathWorld(t, -1, 0, 0)
 	fake, fakeHash := replayHeader(t, [32]byte{}, POW_LIMIT, 5)
@@ -937,11 +948,14 @@ func testReplayPathBoundaryCases(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "genesis below")
 	logicalMDBXAssert(t, fp.slot == nil, "genesis below slot")
 	// Genesis proof on the own header: attached PRE_GENESIS replay whose target genesis differs from the active height-0 entry.
-	o := newPathWorld(t, 6, 2, 5)
+	o := newPathWorld(t, 6, 2, 5, 4)
 	o.genesis.GenesisHash[0] ^= 1
 	o.setReplay(mdbx.ReplayCursorPreGenesisV1, 0)
-	op := newReplayPathOwner(nil, pathLimit)
+	ov := &pathView{}
+	ov.admit(o.headers[4]) // the walk's point at 4 holds the guard when the own genesis check fails
+	op := newReplayPathOwner(ov, pathLimit)
 	_, err = o.call(t, op, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "own genesis")
-	logicalMDBXAssert(t, op.slot != nil && op.slot.a == 2, "own genesis slot")
+	logicalMDBXAssert(t, op.slot != nil && op.slot.a == 2 && ov.headerCalls == 1, "own genesis slot")
+	logicalMDBXAssert(t, ov.releases == 1 && op.release == nil, "own genesis release %+v", ov)
 }
