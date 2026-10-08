@@ -46,7 +46,8 @@ jobs:
         run: |
           set -euo pipefail
           # Read the whole list first: an API error fails the step instead of skipping the review.
-          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename')"
+          # A rename lists its old name too, so moving a reviewed file out of scope is reviewed.
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)')"
           # The endpoint returns at most 3000 files; a list at the cap may omit a reviewed path.
           if [[ "$(grep -c . <<<"${files}")" -ge 3000 ]] \
             || grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$' <<<"${files}"; then
@@ -207,7 +208,8 @@ jobs:
             --output-format json < /dev/null > "${result}" || true
           # Log metadata only: the model's text may echo the private contract.
           jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd) is_error=\(.is_error) subtype=\(.subtype)"' "${result}" || true
-          jq -c '[.permission_denials[]? | {tool: .tool_name, path: (.tool_input.file_path // .tool_input.path // "")}] | "denied=\(.)"' "${result}" || true
+          # Denied calls: tool names only; their arguments are model-written text.
+          jq -r '[.permission_denials[]? | .tool_name] | "denied=\(length) tools=\(unique | join(","))"' "${result}" || true
           jq -e '.is_error == false and (.structured_output | type) == "object"' "${result}" > /dev/null
 
       - name: Publish the review
