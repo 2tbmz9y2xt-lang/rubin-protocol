@@ -135,7 +135,7 @@ jobs:
           SINCE: ${{ steps.start.outputs.at }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- claude-review -->")))] | length')"
+          n="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?since=${SINCE}&per_page=100" --jq "[.[] | select(.user.login == \"github-actions[bot]\" and .created_at >= \"${SINCE}\" and (.body | contains(\"<!-- claude-review -->\")))] | length")"
           if [[ "${n}" -lt 1 ]]; then
             echo "::warning::Claude finished without posting a review comment."
             echo "- Claude finished without posting a review comment." >> "$GITHUB_STEP_SUMMARY"
