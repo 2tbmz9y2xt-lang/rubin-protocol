@@ -240,7 +240,13 @@ jobs:
           jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd) is_error=\(.is_error) subtype=\(.subtype)"' "${result}" || true
           # Denied calls: tool names only; their arguments are model-written text.
           jq -r '[.permission_denials[]? | .tool_name] | "denied=\(length) tools=\(unique | join(","))"' "${result}" || true
-          jq -e '.is_error == false and (.structured_output | type) == "object"' "${result}" > /dev/null
+          # The result must have the schema's top-level shape and its verdict must match the findings
+          # (NO FINDINGS exactly when no inline comment and a blank body); otherwise nothing is published.
+          jq -e '.is_error == false and (.structured_output | type) == "object"
+            and (.structured_output.verdict | IN("NO FINDINGS", "FINDINGS (LOW/MEDIUM only)", "FINDINGS (HIGH or CRITICAL - fix before merge)"))
+            and (.structured_output.comments | type) == "array" and (.structured_output.body | type) == "string"
+            and ((.structured_output.verdict == "NO FINDINGS")
+              == ((.structured_output.comments | length) == 0 and (.structured_output.body | test("\\S") | not)))' "${result}" > /dev/null
 
       - name: Publish the review
         id: publish
