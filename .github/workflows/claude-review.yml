@@ -90,10 +90,10 @@ jobs:
       - name: Install Claude Code
         run: |
           npm install -g @anthropic-ai/claude-code@2.1.293
-          # bubblewrap backs CLAUDE_CODE_SUBPROCESS_ENV_SCRUB on Linux; Ubuntu 24.04 also
+          # bubblewrap and socat back CLAUDE_CODE_SUBPROCESS_ENV_SCRUB on Linux; Ubuntu 24.04 also
           # restricts unprivileged user namespaces (same setup as claude-code-action).
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
           if [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
@@ -175,7 +175,7 @@ jobs:
             --output-format json < /dev/null > "${result}" || true
           jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd)"' "${result}" || true
           jq -c '[.permission_denials[]? | {tool: .tool_name, cmd: ((.tool_input.command // "") | .[0:160])}] | "denied=\(.)"' "${result}" || true
-          jq -r '"final: \((.result // "") | .[0:600])"' "${result}" || true
+          jq -r '"final: \((.result // "") | .[0:1500])"' "${result}" || true
           if ! jq -e '.is_error == false' "${result}" > /dev/null; then
             jq -r '"Claude error: \(.result // "no result")"' "${result}" || true
             exit 1
