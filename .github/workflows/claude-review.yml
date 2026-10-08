@@ -2,22 +2,20 @@ name: "Claude Code Review"
 
 on:
   pull_request:
-    # No paths filter: the scope step decides inside the job, so a base change that drops
-    # every reviewed file still starts a run that cancels the review in progress.
-    # edited: re-review only when the title (and so the RUB key) or the base changes.
+    # No paths filter: the scope step decides inside the job. A review starts when an open
+    # non-draft PR is opened, marked ready for review or reopened, and on every push to it.
     # converted_to_draft/closed: start a run whose job is skipped, so the
     # concurrency group cancels a review still running on that PR.
-    types: [opened, synchronize, ready_for_review, reopened, edited, converted_to_draft, closed]
+    types: [opened, synchronize, ready_for_review, reopened, converted_to_draft, closed]
 
 permissions:
   contents: read
 
 concurrency:
-  # A body-only edit (no title or base change) runs in its own group so it cannot cancel a review in progress.
-  # So does an edited or reopened run started by a PR author without write access (the scope step skips
-  # it), so that author cannot cancel a review a writer's push started; converted_to_draft and closed
-  # stay in the shared group and still cancel it.
-  group: claude-review-${{ github.event.pull_request.number }}${{ ((github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null) || (contains(fromJSON('["edited", "reopened"]'), github.event.action) && github.actor == github.event.pull_request.user.login && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))) && format('-own-{0}', github.run_id) || '' }}
+  # A reopened run started by a PR author without write access (the scope step skips it) runs in
+  # its own group, so that author cannot cancel a review a writer's push started;
+  # converted_to_draft and closed stay in the shared group and still cancel it.
+  group: claude-review-${{ github.event.pull_request.number }}${{ (github.event.action == 'reopened' && github.actor == github.event.pull_request.user.login && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) && format('-own-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -27,8 +25,7 @@ jobs:
     if: >-
       ${{ github.event.pull_request.state == 'open'
       && !github.event.pull_request.draft
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && (github.event.action != 'edited' || github.event.changes.title != null || github.event.changes.base != null) }}
+      && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Advisory: no step failure (checkout, Linear, review) may fail the workflow.
@@ -100,6 +97,7 @@ jobs:
           printf '%s\n' "${issue}" > "${RUNNER_TEMP}/contract-key"
           if [[ -z "${issue}" ]]; then
             echo "No RUB-NNN in PR title or branch; reviewing without a contract." > "${out}"
+            echo "contract: none (no RUB key in PR title or branch)"
           else
             body="$(jq -nc --arg id "${issue}" '{query: "query($id: String!) { issue(id: $id) { identifier title state { name } description } }", variables: {id: $id}}')"
             resp="$(curl -fsS --connect-timeout 10 --max-time 30 https://api.linear.app/graphql -H "Authorization: ${LINEAR_API_KEY}" -H 'Content-Type: application/json' -d "${body}" || true)"
@@ -107,8 +105,10 @@ jobs:
             # takes the fallback instead of failing the step.
             if contract="$(jq -er '.data.issue | select(.identifier != null) | "# \(.identifier): \(.title)\nstate: \(.state.name)\n\n\(.description // "")"' <<<"${resp}" 2>/dev/null)"; then
               printf '%s\n' "${contract}" > "${out}"
+              echo "contract: ${issue}, $(( $(wc -c < "${out}") )) bytes"
             else
               echo "Linear issue ${issue} could not be fetched; reviewing without a contract." > "${out}"
+              echo "contract: none (${issue} could not be fetched)"
             fi
           fi
 
@@ -286,7 +286,7 @@ jobs:
             echo "The merge base is now ${merge_base}; the reviewed diff is stale and is not published."
             exit 0
           fi
-          # A new RUB key in the title (an edit whose run cannot cancel this one) means another contract.
+          # A new RUB key in the title since this run started means another contract.
           key="$(jq -r '.title, .head.ref' <<<"${pr}" | grep -oiE '(^|[^[:alnum:]])rub-[0-9]+([^[:alnum:]]|$)' | head -n1 | grep -oiE 'rub-[0-9]+' | tr '[:lower:]' '[:upper:]' || true)"
           if [[ "${key}" != "$(cat "${RUNNER_TEMP}/contract-key")" ]]; then
             echo "The PR now names contract '${key}'; the review against the earlier contract is not published."
