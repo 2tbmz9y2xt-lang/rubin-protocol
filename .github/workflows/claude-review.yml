@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/contract.md"
-          issue="$(printf '%s\n%s\n' "${PR_TITLE}" "${PR_BRANCH}" | grep -oiE 'rub-[0-9]+' | head -n1 | tr '[:lower:]' '[:upper:]' || true)"
+          issue="$(printf '%s\n%s\n' "${PR_TITLE}" "${PR_BRANCH}" | grep -oiE '(^|[^[:alnum:]])rub-[0-9]+' | head -n1 | grep -oiE 'rub-[0-9]+' | tr '[:lower:]' '[:upper:]' || true)"
           if [[ -z "${issue}" ]]; then
             echo "No RUB-NNN in PR title or branch; reviewing without a contract." > "${out}"
           else
@@ -93,6 +93,7 @@ jobs:
       - name: Run Claude Code Review
         id: review
         continue-on-error: true
+        timeout-minutes: 30
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
@@ -116,9 +117,11 @@ jobs:
               divergence when clients/rust or shared conformance fixtures change.
 
               Facts: Go (clients/go) is the reference, Rust (clients/rust) is frozen unless the
-              contract says otherwise. Signatures are ML-DSA-87 only. Covenants are the native
-              families plus CORE_SIMPLICITY; CORE_EXT (0x0102) is retired and must stay rejected.
-              The mempool is reject-only. The spec is not available here - do not cite it.
+              contract says otherwise. ML-DSA-87 is the sole genesis signature suite; a successor
+              enters only through the native suite registry and a rotation descriptor. Covenants
+              are the native families plus CORE_SIMPLICITY; CORE_EXT (0x0102) is retired and must
+              stay rejected. The standard transaction pool is reject-only (no RBF, CPFP or
+              package relay); orphan and DA pools have their own eviction rules. The spec is not available here - do not cite it.
 
               Rules: invent nothing; every finding cites file:line; no finding is better than a
               weak one. The repository may be public: never quote the contract, refer to its
@@ -157,8 +160,10 @@ jobs:
             --effort high \
             --max-turns 60 \
             --add-dir "${RUNNER_TEMP}" \
-            --allowedTools "Read,Grep,Glob,Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(gh api graphql:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git show:*)" \
+            --allowedTools "Read,Grep,Glob,Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(gh api graphql:*),Bash(gh pr diff:*),Bash(gh pr view:*)" \
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit" \
+            --setting-sources user \
+            --strict-mcp-config \
             --output-format json < /dev/null > "${result}" || true
           jq -r '"turns=\(.num_turns) cost_usd=\(.total_cost_usd)"' "${result}" || true
           if ! jq -e '.is_error == false' "${result}" > /dev/null; then
