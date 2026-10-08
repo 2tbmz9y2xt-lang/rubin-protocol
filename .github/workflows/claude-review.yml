@@ -43,8 +43,18 @@ jobs:
         id: scope
         env:
           GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
+          # Only an actor with write or admin permission starts a paid review (the rule of
+          # checkActorWritePermissions in claude-code-action v1.0.245, without its bot bypass):
+          # a user with read access can open a PR from an existing branch of this repository.
+          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission')"
+          if [[ "${perm}" != "admin" && "${perm}" != "write" ]]; then
+            echo "review=false" >> "${GITHUB_OUTPUT}"
+            echo "The actor has ${perm} permission; the Claude review needs write or admin."
+            exit 0
+          fi
           # Read the whole list first: an API error fails the step instead of skipping the review.
           # A rename lists its old name too, so moving a reviewed file out of scope is reviewed.
           files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)')"
