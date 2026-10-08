@@ -316,10 +316,13 @@ func testReplayPathPrecondition(t *testing.T) {
 	pathWant(t, err, selectedSideInvariant, "nil Replay")
 	pathZero(t, own, "nil Replay")
 	w.setReplay(mdbx.ReplayCursorAppliedV1, w.tip())
-	a := w.authority()
-	own, err = pathDirect(t, p, a, w.genesis, "cursor at tip")
+	image := w.image()
+	own, err = pathCallNoPanic(t, w, p, "cursor at tip")
 	pathWant(t, err, selectedSideInvariant, "cursor at tip")
 	pathZero(t, own, "cursor at tip")
+	replaySameImage(t, image, w.image(), "cursor at tip")
+	// A cursor above the tip cannot be persisted, so it runs on the in-memory authority.
+	a := w.authority()
 	a.Replay.Cursor.Height = a.Replay.Target.TipHeight + 1
 	logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(a) != nil, "hand-built authority validates")
 	own, err = pathDirect(t, p, a, w.genesis, "cursor above tip")
@@ -883,24 +886,39 @@ func pathDirect(t *testing.T, p *replayPathOwner, a mdbx.StorageAuthorityV1, g P
 	return p.ownLocked(nil, a, nil, g, nil)
 }
 
+// pathCallNoPanic is w.call with a producer panic reported as this assertion's failure.
+func pathCallNoPanic(t *testing.T, w *pathWorld, p *replayPathOwner, label string) (replayPathOwn, error) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s: producer panicked: %v", label, r)
+		}
+	}()
+	return w.call(t, p, nil, nil)
+}
+
 // Precondition refusal, foreign-target invariant, cursor/genesis proof on reuse and attachment, unbound point discarded.
 func testReplayPathBoundaryCases(t *testing.T) {
 	w := newPathWorld(t, 2, 2, 4)
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
 	view := &pathView{}
 	p := newReplayPathOwner(view, pathLimit)
-	// Precondition: below the tip, but invalid for another reason (STABLE lifecycle in REPLAY phase).
+	// Precondition: below the tip, but invalid for another reason (STABLE lifecycle in REPLAY phase); it cannot be
+	// persisted, so it and the foreign target below run on the in-memory authority.
 	a := w.authority()
 	a.Lifecycle = mdbx.StorageLifecycleStableV1
 	logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(a) != nil && a.Replay.Cursor.Height < a.Replay.Target.TipHeight, "invalid setup")
 	own, err := pathDirect(t, p, a, w.genesis, "invalid authority")
 	pathWant(t, err, selectedSideInvariant, "invalid authority")
 	pathZero(t, own, "invalid authority")
-	tip := w.authority()
-	tip.Replay.Cursor.Height, tip.Replay.Cursor.BlockHash = tip.Replay.Target.TipHeight, tip.Replay.Target.TipHash
-	_, err = pathDirect(t, p, tip, w.genesis, "cursor at tip")
+	w.setReplay(mdbx.ReplayCursorAppliedV1, w.tip())
+	image := w.image()
+	own, err = pathCallNoPanic(t, w, p, "cursor at tip")
 	pathWant(t, err, selectedSideInvariant, "cursor at tip")
+	pathZero(t, own, "cursor at tip")
+	replaySameImage(t, image, w.image(), "cursor at tip")
 	logicalMDBXAssert(t, p.slot == nil && view.versions+view.protects+view.headerCalls == 0, "precondition slot/view")
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
 	// Foreign target: a completed slot and a precondition-violating authority naming another target: invariant, not capacity.
 	_, err = w.call(t, p, nil, nil)
 	logicalMDBXAssert(t, err == nil, "foreign establish: %v", err)

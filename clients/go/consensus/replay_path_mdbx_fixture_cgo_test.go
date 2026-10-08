@@ -87,6 +87,7 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("CanonicalHeaderDamage", testReplayPathFixtureCanonicalHeaderDamage)
 	t.Run("CanonicalHeaderEIO", testReplayPathFixtureCanonicalHeaderEIO)
 	t.Run("PositiveErrorBacking", testReplayPathFixturePositiveErrorBacking)
+	t.Run("ActiveEntryWidth", testReplayPathFixtureActiveEntryWidth)
 }
 
 // RC1: limit 32N-1 performs zero PATH Gets and no provider call; limit 32N reads the whole walk.
@@ -371,4 +372,38 @@ func testReplayPathFixturePositiveErrorBacking(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "positive establishment")
 	logicalMDBXAssert(t, own.h == 4 && own.x == w.hashes[4] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && own.activeEntry == nil && !own.missing && own.resource == "", "establishment own %+v", own)
 	logicalMDBXAssert(t, p.slot == nil && !p.discard(), "failed establishment slot")
+}
+
+// ActiveEntryDamage, intake (iii): a wrong-width stored active entry is the Reader's own EngineIntegrity, returned
+// unchanged with the canonical_artifact_read token, no entry, no header and no provider call. The endpoint row at 6
+// that pathOldActive reads stays healthy.
+func testReplayPathFixtureActiveEntryWidth(t *testing.T) {
+	t.Run("descent", func(t *testing.T) {
+		w := newPathWorld(t, 6, 2, 5)
+		w.setReplay(mdbx.ReplayCursorAppliedV1, 1)
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, logicalMDBXMust(mdbx.HeightKey(1, 4)), make([]byte, 103)) == nil, "seed 103-byte entry 4")
+		base, view := w.pathBaseline(t), &pathView{}
+		p := newReplayPathOwner(view, pathLimit)
+		own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+		pathWidth(t, w.store, own, err, 4, w.hashes[4], selectedSideCanonical, "103-byte descent entry")
+		logicalMDBXAssert(t, own.activeEntry == nil && evidence.Faults == 0 && view.versions+view.protects+view.headerCalls == 0 && p.slot == nil, "descent entry/provider/slot %+v", own)
+		pathGets(t, evidence, base, 3, 3, "103-byte descent entry")
+	})
+	t.Run("own", func(t *testing.T) {
+		w := newPathWorld(t, 6, 2, 5)
+		w.setReplay(mdbx.ReplayCursorAppliedV1, 0)
+		view := &pathView{}
+		p := newReplayPathOwner(view, pathLimit)
+		_, err := w.call(t, p, nil, nil)
+		logicalMDBXAssert(t, err == nil && p.slot.attached && p.slot.a == 2, "own establish %v", err)
+		slot, hashes := p.slot, slices.Clone(p.slot.hashes)
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, logicalMDBXMust(mdbx.HeightKey(1, 1)), make([]byte, 105)) == nil, "seed 105-byte entry 1")
+		base := w.pathBaseline(t)
+		own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+		// h = 1 <= a: x comes only from the entry, so the failed entry Get leaves x zero.
+		pathWidth(t, w.store, own, err, 1, [32]byte{}, selectedSideCanonical, "105-byte own entry")
+		logicalMDBXAssert(t, own.activeEntry == nil && evidence.Faults == 0 && view.versions+view.protects+view.headerCalls == 0, "own entry/provider %+v", own)
+		logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.attached && slot.a == 2 && slot.lo == 1, "own slot %+v", p.slot)
+		pathGets(t, evidence, base, 1, 0, "105-byte own entry")
+	})
 }
