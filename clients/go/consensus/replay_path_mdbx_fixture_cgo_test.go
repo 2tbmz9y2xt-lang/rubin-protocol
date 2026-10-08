@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"errors"
 	"slices"
 	"testing"
 
@@ -59,6 +60,18 @@ func pathNative(t *testing.T, own replayPathOwn, err error, resource, label stri
 	t.Helper()
 	replayEngineClass(t, err, mdbx.EngineIO, label)
 	logicalMDBXAssert(t, own.resource == resource && !own.missing, "%s: own %+v", label, own)
+}
+
+// pathWidth asserts the Reader's own refusal of a wrong-width stored header is returned unchanged: the raw
+// EngineIntegrity object that the consumed Store latched (joined with the test abort), the visit identity, no header
+// and no missing identity.
+func pathWidth(t *testing.T, store *mdbx.Store, own replayPathOwn, err error, k uint64, x [32]byte, resource, label string) {
+	t.Helper()
+	replayEngineClass(t, err, mdbx.EngineIntegrity, label)
+	ran := false
+	_, stage, latched := store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { ran = true; return mdbx.Batch{}, nil })
+	logicalMDBXAssert(t, !ran && stage == mdbx.UpdateStagePrewrite && errors.Is(latched, err) && errors.Is(latched, errPathAbort), "%s: latched %v", label, latched)
+	logicalMDBXAssert(t, own.h == k && own.x == x && own.header == nil && own.headerSource == replayPathUnavailable && own.resource == resource && !own.missing, "%s: own %+v", label, own)
 }
 
 func TestReplayPathMDBX(t *testing.T) {
@@ -290,6 +303,15 @@ func testReplayPathFixtureStoredPositive(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "stored positive")
 	logicalMDBXAssert(t, own.h == 4 && own.x == w.hashes[4] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && !own.missing, "positive own %+v", own)
 	logicalMDBXAssert(t, view.headerCalls+view.protects == 0 && p.slot == nil, "positive slot/provider")
+	w = newPathWorld(t, 2, 2, 3)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[4][:], make([]byte, 117)) == nil, "seed 117-byte header")
+	view = &pathView{}
+	view.admit(w.headers[4])
+	p = newReplayPathOwner(view, pathLimit)
+	own, err, evidence := w.pathArmed(t, p, w.headers[4][:], mdbx.SelectedDamageProbeOnly, 0, nil)
+	pathWidth(t, w.store, own, err, 4, w.hashes[4], replayEntryRecovery, "117-byte ancestry header")
+	logicalMDBXAssert(t, evidence.Faults == 0 && view.versions+view.protects+view.headerCalls == 0 && p.slot == nil, "117-byte provider/slot %+v", view)
 }
 
 // C11/C12/C25: the h <= a stored canonical header whose bytes hash to another name is integrity, never acquisition.
@@ -306,6 +328,15 @@ func testReplayPathFixtureCanonicalHeaderDamage(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "canonical wrong hash")
 	logicalMDBXAssert(t, own.h == 1 && own.x == w.hashes[1] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && !own.missing && own.resource == "", "wrong hash own %+v", own)
 	logicalMDBXAssert(t, view.headerCalls+view.protects == 0 && p.slot != nil && p.slot.a == 2, "wrong hash provider/slot")
+	w = newPathWorld(t, 6, 2, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 0)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[1][:], make([]byte, 115)) == nil, "seed 115-byte canonical header")
+	view = &pathView{}
+	view.admit(w.headers[1])
+	p = newReplayPathOwner(view, pathLimit)
+	own, err, evidence := w.pathArmed(t, p, w.headers[1][:], mdbx.SelectedDamageProbeOnly, 0, nil)
+	pathWidth(t, w.store, own, err, 1, w.hashes[1], selectedSideCanonical, "115-byte canonical header")
+	logicalMDBXAssert(t, evidence.Faults == 0 && len(own.activeEntry) == 104 && view.versions+view.protects+view.headerCalls == 0 && p.slot != nil && p.slot.a == 2, "115-byte provider/slot %+v", view)
 }
 
 // C11/C12/C25 native: an EIO on the h = a canonical header Get keeps its canonical_artifact_read resource with no
