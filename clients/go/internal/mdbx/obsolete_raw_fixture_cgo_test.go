@@ -446,10 +446,6 @@ func TestObsoleteGenerationV1CanonicalPair(t *testing.T) {
 			if variant != "partner-error" {
 				faultRank, faultKey = 6, []byte{0xaa}
 			}
-			if variant == "paired" {
-				mode = 1
-				faultRank, faultKey = 7, derived
-			}
 			run := func() {
 				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
 					page, err := reader.ObsoleteGenerationPageV1(9, deleteClass, nil, 1)
@@ -467,9 +463,15 @@ func TestObsoleteGenerationV1CanonicalPair(t *testing.T) {
 					largeNativeCached(t, store)
 				}
 			}
-			// Arm only failure or paired-fast-path cases. Accepted disposal remains a normal commit.
+			// Count paired-target reads without faulting the required O1/O2 own-target reads.
 			evidence := fixtureLargeEvidence{}
-			if variant == "lone-forward" || variant == "lone-derived" || variant == "partner-error" || variant == "paired" {
+			pairedEvidence := SelectedDamageEvidence{}
+			if variant == "paired" {
+				owner, err := NewOperationReservationOwner(MaxOperationDataBytes)
+				mustEnvironment(t, err)
+				pairedEvidence, err = FixtureSelectedDamage(store, owner, SelectedDamageProbeOnly, 0, nil, run)
+				mustEnvironment(t, err)
+			} else if variant == "lone-forward" || variant == "lone-derived" || variant == "partner-error" {
 				var fixtureErr error
 				evidence, fixtureErr = fixtureLargeFault(store, mode, faultRank, faultKey, run)
 				mustEnvironment(t, fixtureErr)
@@ -495,8 +497,8 @@ func TestObsoleteGenerationV1CanonicalPair(t *testing.T) {
 			if truth.String() != "NEW" || int(stage) != 3 || result != nil || string(store.state) != "OPEN" {
 				t.Fatal("canonical shape/exemption commit", truth, stage, result, evidence, store.state)
 			}
-			if variant == "paired" && evidence.gets != 1 {
-				t.Fatal("paired target performed extra partner lookup", evidence)
+			if variant == "paired" && (pairedEvidence.OldGets != ([8]uint64{0, 0, 3, 0, 0, 0, 0, 3}) || pairedEvidence.Commits != 1) {
+				t.Fatal("paired target read/commit census or extra partner lookup", pairedEvidence)
 			}
 			obsoleteRawImage(t, store, deleteRank, deleteKey, nil)
 			if variant == "paired" {

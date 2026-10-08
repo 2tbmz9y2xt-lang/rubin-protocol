@@ -109,14 +109,14 @@ func consultedUpdate(store *Store, inside func(*Reader), batch Batch) (*Reader, 
 	return reader, truth, err
 }
 
-// consultedRequireRefusal proves Go admission refuses batch with an OPEN Store and unchanged caller-owned consulted rows.
+// consultedRequireRefusal proves Go admission refuses batch with an OPEN Store and unchanged caller-owned input.
 func consultedRequireRefusal(t *testing.T, store *Store, marker string, class EngineClass, code int, diagnostic string, batch Batch) {
 	t.Helper()
-	before := fmt.Sprint(batch.Consulted)
+	before := fmt.Sprintf("%#v", batch)
 	reader, truth, err := consultedUpdate(store, func(*Reader) {}, batch)
 	consultedRequireOutcome(t, store, reader, truth, err, class, code, diagnostic, marker, false)
-	if fmt.Sprint(batch.Consulted) != before {
-		t.Fatalf("%s: caller-owned consulted rows changed", marker)
+	if fmt.Sprintf("%#v", batch) != before {
+		t.Fatalf("%s: caller-owned batch changed", marker)
 	}
 }
 
@@ -128,7 +128,7 @@ func consultedUnit(t *testing.T, marker string, rows []ConsultedRow, plan []owne
 		t.Fatalf("%s: owned=%d err=%v", marker, len(owned), err)
 	}
 	for i, row := range rows {
-		if owned[i].dbi != row.DBI || !bytes.Equal(owned[i].key, row.Key) || owned[i].image != (updateImage{}) {
+		if owned[i].dbi != row.DBI || !bytes.Equal(owned[i].key, row.Key) {
 			t.Fatalf("%s: owned row %d drifted: %+v", marker, i, owned[i])
 		}
 	}
@@ -138,7 +138,11 @@ func consultedUnit(t *testing.T, marker string, rows []ConsultedRow, plan []owne
 // consultedUnitRefusal proves the admission owner refuses rows with the exact Capacity or InvalidInput tuple.
 func consultedUnitRefusal(t *testing.T, marker string, rows []ConsultedRow, plan []ownedMutation, capacity bool) {
 	t.Helper()
+	beforeRows, beforePlan := fmt.Sprintf("%#v", rows), fmt.Sprintf("%#v", plan)
 	owned, err := updateOwnedConsulted(Batch{Consulted: rows}, plan)
+	if fmt.Sprintf("%#v", rows) != beforeRows || fmt.Sprintf("%#v", plan) != beforePlan {
+		t.Fatalf("%s: caller-owned rows or plan changed", marker)
+	}
 	if owned != nil || err == nil {
 		t.Fatalf("%s: owned=%d err=%v", marker, len(owned), err)
 	}
@@ -466,14 +470,11 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 			_, err := updateNativeConsultedImages(reader.txn, store.dbis, consulted)
 			return err
 		}))
-		if consulted[0].image != (updateImage{}) {
-			t.Fatalf("final drift direct: captured %+v, want absent", consulted[0].image)
-		}
 		created := Mutation{DBI: dbis[2], Key: key, AfterKind: AfterLiteral, Literal: before}
 		consultedRequireCommit(t, store, "final drift direct: sibling creates the row", Batch{Mutations: []Mutation{created, canonicalOwnerPairOf(created)}})
 		var matchErr error
 		mustEnvironment(t, store.View(func(reader *Reader) error {
-			matchErr = updateNativeConsultedMatch(reader.txn, store.dbis, consulted, "final update image mismatch")
+			matchErr = updateNativeMatch(reader.txn, store.dbis[dbis[2].Rank], key, updateImage{}, "final update image mismatch")
 			return nil
 		}))
 		requireEnvironmentError(t, matchErr, EngineStateMismatch, operationUpdate, -30779, "final update image mismatch")
@@ -498,8 +499,8 @@ func TestUpdateConsultedNativeMismatch(t *testing.T) {
 	})
 }
 
-// consultedReadback captures rows' OLD images, commits the NEW-witness target and change, then reads back one plan.
-func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitness, unreadable, malformed bool, change []ownedMutation) (updateNativeOutcome, error) {
+// consultedReadback qualifies OLD identities, commits the NEW-witness target and change, then reads back one plan.
+func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitness, unreadable bool, change []ownedMutation) (updateNativeOutcome, error) {
 	t.Helper()
 	untouched, created := updateNativePlan(t, consultedCounter(t, 31)), updateNativePlan(t, consultedCounter(t, 32))
 	primary := nativeError(operationUpdate, codeENOSPC)
@@ -525,9 +526,6 @@ func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitne
 		if unreadable {
 			handles[2] = ^handles[2]
 		}
-		if malformed {
-			consulted[0].image = updateImage{present: true, length: 1}
-		}
 		outcome = updateNativeReadback(store.env, handles, plan, consulted, reader.txn, primary)
 		return nil
 	}))
@@ -542,20 +540,19 @@ func TestUpdateConsultedReadback(t *testing.T) {
 	rows := []ConsultedRow{{DBI: dbis[0], Key: []byte{2}}, {DBI: dbis[2], Key: present}, {DBI: dbis[2], Key: absent}}
 	deletePresent := updateNativePlan(t, canonicalDelete(seed), canonicalDelete(canonicalOwnerPairOf(seed)))
 	for _, row := range []struct {
-		name                                         string
-		metaBytes, newWitness, unreadable, malformed bool
-		change                                       []ownedMutation
-		truth                                        CommitTruth
-		secondaryCode                                int
+		name                              string
+		metaBytes, newWitness, unreadable bool
+		change                            []ownedMutation
+		truth                             CommitTruth
+		secondaryCode                     int
 	}{
-		{"old witness", false, false, false, false, nil, CommitTruthOld, 0},
-		{"new witness", false, true, false, false, nil, CommitTruthNew, 0},
-		{"consulted absent after old targets", false, false, false, false, deletePresent, CommitTruthUnknown, 0},
-		{"consulted absent after new targets", false, true, false, false, deletePresent, CommitTruthUnknown, 0},
-		{"present bytes became empty", true, false, false, false, []ownedMutation{{dbi: dbis[0], key: []byte{2}, beforePresent: true, after: AfterLiteral, literal: []byte{}}}, CommitTruthUnknown, 0},
-		{"absent became present", false, true, false, false, updateNativePlan(t, grown, canonicalOwnerPairOf(grown)), CommitTruthUnknown, 0},
-		{"unreadable consulted DBI", false, false, true, false, nil, CommitTruthUnknown, -30780},
-		{"malformed consulted image", false, true, false, true, nil, CommitTruthUnknown, -30779},
+		{"old witness", false, false, false, nil, CommitTruthOld, 0},
+		{"new witness", false, true, false, nil, CommitTruthNew, 0},
+		{"consulted absent after old targets", false, false, false, deletePresent, CommitTruthUnknown, 0},
+		{"consulted absent after new targets", false, true, false, deletePresent, CommitTruthUnknown, 0},
+		{"present bytes became empty", true, false, false, []ownedMutation{{dbi: dbis[0], key: []byte{2}, beforePresent: true, after: AfterLiteral, literal: []byte{}}}, CommitTruthUnknown, 0},
+		{"absent became present", false, true, false, updateNativePlan(t, grown, canonicalOwnerPairOf(grown)), CommitTruthUnknown, 0},
+		{"unreadable consulted DBI", false, false, true, nil, CommitTruthUnknown, -30780},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			store, _, _ := consultedStore(t)
@@ -566,10 +563,10 @@ func TestUpdateConsultedReadback(t *testing.T) {
 				consultedSeedEmptyMeta(t, store)
 			}
 			consulted := rows
-			if row.unreadable || row.malformed {
+			if row.unreadable {
 				consulted = rows[1:2]
 			}
-			outcome, primary := consultedReadback(t, store, consulted, row.newWitness, row.unreadable, row.malformed, row.change)
+			outcome, primary := consultedReadback(t, store, consulted, row.newWitness, row.unreadable, row.change)
 			if row.secondaryCode == 0 {
 				requireUpdateTruth(t, outcome, row.truth, true, primary, nil)
 				return
@@ -577,18 +574,26 @@ func TestUpdateConsultedReadback(t *testing.T) {
 			if outcome.valid() != nil || outcome.truth != row.truth || !outcome.commitAttempted || !sameError(outcome.primary, primary) {
 				t.Fatalf("%s: %+v", row.name, outcome)
 			}
-			secondary := requireEngineError(t, outcome.secondary, EngineLocalInvariant, operationUpdate, row.secondaryCode)
-			if row.malformed && secondary.Diagnostic != "invalid update image shape" {
-				t.Fatalf("%s: secondary %+v", row.name, secondary)
-			}
+			requireEngineError(t, outcome.secondary, EngineLocalInvariant, operationUpdate, row.secondaryCode)
 		})
 	}
+	t.Run("invalid expected image at point owner", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			equal, err := updateNativeEqual(reader.txn, store.dbis[2], present, updateImage{present: true, length: 1})
+			engine := requireEnvironmentError(t, err, EngineClass("LocalInvariant"), operationUpdate, -30779, "invalid update image shape")
+			if equal || engine.Cause != nil {
+				t.Fatal("invalid expected image reached comparison or changed cause")
+			}
+			return nil
+		}))
+	})
 }
 
 func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	rowType, ownedType, bytesType := reflect.TypeFor[ConsultedRow](), reflect.TypeFor[ownedConsulted](), reflect.TypeFor[[]byte]()
 	if rowType.NumField() != 2 || rowType.Field(0).Name != "DBI" || rowType.Field(0).Type != reflect.TypeFor[DBI]() || rowType.Field(1).Name != "Key" || rowType.Field(1).Type != bytesType ||
-		ownedType.NumField() != 3 || ownedType.Field(0).Type != reflect.TypeFor[DBI]() || ownedType.Field(1).Type != bytesType || ownedType.Field(2).Type != reflect.TypeFor[updateImage]() {
+		ownedType.NumField() != 2 || ownedType.Field(0).Name != "dbi" || ownedType.Field(0).Type != reflect.TypeFor[DBI]() || ownedType.Field(1).Name != "key" || ownedType.Field(1).Type != bytesType {
 		t.Fatal("consulted representation drifted")
 	}
 	source, err := os.ReadFile("mdbx_cgo.go")
@@ -613,7 +618,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	require(MaxPrefixPageBytes == 154611151, "prefix-page byte bound drifted")
 	require(MaxPrefixPageBytes == MaxOperationDataBytes, "prefix-page byte bound alias drifted")
 	text := string(source)
-	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
+	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
 	for _, name := range []string{"updateNativeDeletes", "updateNativePuts"} {
 		require(!strings.Contains(strings.ToLower(updateNativeBody(t, source, name)), "consulted"), "no-write route drifted: "+name)
 	}
@@ -624,7 +629,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	ordered(scoped, "consulted domain comparison order drifted", "updateNativeConsultedMatch(", "if err != nil", "return err", "return updateNativeLargeMatch(")
 	require(reflect.DeepEqual(updateNativeCalls(t, source, "updateNativeScopedMatch"), map[string]int{"updateNativeConsultedMatch": 1, "updateNativeLargeMatch": 1}), "consulted domain call set drifted")
 	preflight := updateNativeBody(t, source, "updateNativePreflight")
-	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeMatch(", "if reference.target >= 0", "updateNativeScopedMatch(", "return references, nil")
+	ordered(preflight, "snapshot comparison order drifted", "updateNativePairedImages(", "updateNativeOldMatch(", "if reference.target >= 0", "updateNativeScopedMatch(", "return references, nil")
 	require(!strings.Contains(preflight, "updateNativeConsultedImages("), "consulted capture left the admission owner")
 	require(strings.Count(preflight, "\"OLD/write snapshot mismatch\"") == 3 && strings.Contains(scoped, "consulted, diagnostic)") && strings.Contains(scoped, "plan, diagnostic, scopes...)"), "snapshot diagnostic drifted")
 	ordered(updateNativeBody(t, source, "updateNativeReadbackTruth"), "readback fold order drifted", "updateNativeImages(", "updateNativeReadbackTargets(", "updateNativeReadbackReferences(", "updateNativeReadbackScoped(", "if oldImage", "if newImage")
@@ -636,7 +641,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		body := updateNativeBody(t, source, name)
 		require(!strings.Contains(body, "C.GoBytes") && !strings.Contains(body, "make([]byte") && !strings.Contains(body, "append("), "borrowed consulted bytes were copied: "+name)
 	}
-	ordered(updateNativeBody(t, source, "updateNativeConsultedImages"), "capture charge drifted", "updateNativeImage(", "if image.present", "updateAdd(total, uint64(image.length), MaxOperationDataBytes)", "updateBoundError()", "consulted[i].image = image")
+	ordered(updateNativeBody(t, source, "updateNativeConsultedImages"), "capture charge drifted", "updateNativeImage(", "if image.present", "updateAdd(total, uint64(image.length), MaxOperationDataBytes)", "updateBoundError()", "return false, nil")
 	ordered(updateNativeBody(t, source, "updateScanConsulted"), "admission order drifted", "ValidateDBI(", "validKey(", "updateKeyOrdered(", "updateAdd(*count, 1, maxUpdateConsulted)")
 	ordered(updateNativeBody(t, source, "updateOwnedConsulted"), "clone order drifted", "updateScanConsulted(", "updateConsultedDisjoint(", "updateClone(")
 	for _, name := range []string{"updateScanConsulted", "updateConsultedContains", "updateConsultedDisjoint", "updateOwnedConsulted"} {
@@ -644,9 +649,9 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		require(!strings.Contains(body, "C.") && !strings.Contains(body, "len(row.Key)") && !strings.Contains(body, "KeyBytes"), "admission owner drifted: "+name)
 	}
 	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "updateKeyOrdered body drifted")
-	// The three production comparisons: updateKeyOrdered, the updateNativeImages target closure and the prefix-page seek.
-	require(strings.Count(text, "bytes.Compare(") == 3, "bytes.Compare census drifted")
+	// Target lookup now uses the existing canonicalTargetIndex; only ordering and prefix-page seek compare here.
+	require(strings.Count(text, "bytes.Compare(") == 2, "bytes.Compare census drifted")
 	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(batch, reader)", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)", "updateOwnedLarge(")
-	ordered(updateNativeBody(t, source, "updateOwnedBatch"), "merged plan ownership drifted", "updateScanMutation(", "owned := make([]ownedMutation", "return updateOwnedObsolete(batch, readers[0], owned)")
+	ordered(updateNativeBody(t, source, "updateOwnedBatch"), "merged plan ownership drifted", "updateScanMutation(", "owned := make([]ownedMutation", "updateOwnedObsolete(batch, readers[0], owned)", "updateOwnReferences(owned)", "return owned, nil")
 	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, large, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn, large)", "updateAbortOld(begun.txn)")
 }

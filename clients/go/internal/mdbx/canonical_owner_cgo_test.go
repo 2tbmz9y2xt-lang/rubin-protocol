@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -309,6 +310,33 @@ func TestCanonicalOwnerPairingRefusals(t *testing.T) {
 
 func TestCanonicalOwnerPairingOrder(t *testing.T) {
 	x, y, work := [32]byte{0x61}, [32]byte{0x62}, [40]byte{39: 1}
+	for _, missingRef := range []bool{false, true} {
+		t.Run(fmt.Sprintf("late target fault precedes pairing and reference=%v", missingRef), func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			forward, owner := canonicalForwardLiteral(5, 1, x, work), canonicalOwnerLiteral(5, 2, y)
+			seed := []Mutation{canonicalForwardLiteral(5, 2, y, work), owner}
+			requireUpdateCommit(t, store, "late target fault seed", seed...)
+			batch := Batch{Mutations: []Mutation{forward}}
+			if missingRef {
+				target, source := reverseKeys(t, 1, 3)
+				batch.Mutations = append(batch.Mutations, forwardRefRow(source, target))
+			}
+			batch.Mutations = append(batch.Mutations, canonicalDelete(owner))
+			var reader *Reader
+			truth, stage, err := store.Update(func(observed *Reader) (Batch, error) {
+				reader = observed
+				store.dbis[7] = ^store.dbis[7]
+				return batch, nil
+			})
+			if stage != 1 {
+				t.Fatal("target qualification fault advanced stage")
+			}
+			consultedRequireOutcome(t, store, reader, truth, err, EngineClass("LocalInvariant"), -30780, expectedNativeDiagnostic(-30780), "complete target qualification first", true)
+			reopened, openErr := Open(path, cfg)
+			consultedTrack(t, reopened, openErr)
+			canonicalRequireImage(t, reopened, seed, batch.Mutations)
+		})
+	}
 	t.Run("capture precedes pairing", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
 		target, source := reverseKeys(t, 1, 3)
@@ -337,6 +365,32 @@ func TestCanonicalOwnerPairingOrder(t *testing.T) {
 
 func TestCanonicalOwnerPairingPartnerRead(t *testing.T) {
 	x, work := [32]byte{0x81}, [40]byte{39: 1}
+	for _, rank := range []uint8{2, 7} {
+		t.Run(fmt.Sprintf("O%d target partner performs no partner query", rank/7+1), func(t *testing.T) {
+			store, _, _ := consultedStore(t)
+			forward, owner := canonicalForwardLiteral(3, 7, x, work), canonicalOwnerLiteral(3, 7, x)
+			requireUpdateCommit(t, store, "target partner seed", forward, owner)
+			plan := updateNativePlan(t, canonicalDelete(forward), canonicalDelete(owner))
+			side := canonicalSide{rank: 2, partner: 7, width: 104, partnerWidth: 8, field: 32}
+			if rank == 7 {
+				side = canonicalSide{rank: 7, partner: 2, width: 8, partnerWidth: 104, field: 8}
+			}
+			handles := store.dbis
+			handles[side.partner] = ^handles[side.partner]
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				return canonicalOldPaired(reader.txn, handles, plan, side)
+			}))
+			requireUpdateCommit(t, store, "target partner paired deletion", canonicalDelete(forward), canonicalDelete(owner))
+			canonicalRequireImage(t, store, nil, []Mutation{forward, owner})
+		})
+	}
+	t.Run("O2 partner read keeps its native error", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		owner := canonicalOwnerLiteral(3, 7, x)
+		requireUpdateCommit(t, store, "O2 partner read seed", canonicalForwardLiteral(3, 7, x, work), owner)
+		reader, truth, err := consultedUpdate(store, func(*Reader) { store.dbis[2] = ^store.dbis[2] }, Batch{Mutations: []Mutation{canonicalDelete(owner)}})
+		consultedRequireOutcome(t, store, reader, truth, err, EngineLocalInvariant, -30780, expectedNativeDiagnostic(-30780), "O2 partner read", true)
+	})
 	t.Run("O1 partner read keeps its native error", func(t *testing.T) {
 		store, _, _ := consultedStore(t)
 		forward := canonicalForwardLiteral(3, 7, x, work)
