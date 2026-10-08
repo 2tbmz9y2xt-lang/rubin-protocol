@@ -239,7 +239,17 @@ jobs:
           words = lambda s: re.findall(r"\w+", s.lower())
           contract = words(open(sys.argv[1], encoding="utf-8").read())
           review = json.load(open(sys.argv[2], encoding="utf-8"))
-          text = words(review["body"] + "\n" + "\n".join(c["body"] for c in review["comments"]))
+          # Every model-written string (body, paths, comment bodies) can reach the published review.
+          def strings(v):
+              if isinstance(v, str):
+                  yield v
+              elif isinstance(v, dict):
+                  for x in v.values():
+                      yield from strings(x)
+              elif isinstance(v, list):
+                  for x in v:
+                      yield from strings(x)
+          text = words("\n".join(strings(review)))
           n = 12
           grams = {tuple(contract[i:i + n]) for i in range(len(contract) - n + 1)}
           if any(tuple(text[i:i + n]) in grams for i in range(len(text) - n + 1)):
