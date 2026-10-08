@@ -2270,8 +2270,10 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	if planErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, planErr
 	}
+	// Idempotently clear the Go cell on this goroutine's unwinding after registration.
 	defer large.tip.retire()
 	outcome := s.updateNative(plan, consulted, begun.txn, large)
+	// Clear the borrowed source cell before OLD cleanup.
 	large.tip.retire()
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)

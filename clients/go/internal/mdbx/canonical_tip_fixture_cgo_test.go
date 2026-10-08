@@ -1096,9 +1096,14 @@ func tipNativeCleanup(t *testing.T) {
 }
 
 func tipNativeConcurrency(t *testing.T) {
+	type tipResult struct {
+		point *AuthorityPointV1
+		err   error
+	}
 	store, _, _ := consultedStore(t)
 	row := tipRow(7, 37, [32]byte{0x44}, [40]byte{39: 1})
 	tipSeed(t, store, row)
+	mutation := consultedCounter(t, 900)
 	var saved *Reader
 	var cell *canonicalTipCell
 	evidence, err := fixtureTipCursor(store, 13, 1, 2, 0, func() {
@@ -1106,7 +1111,7 @@ func tipNativeConcurrency(t *testing.T) {
 		var truth CommitTruth
 		var stage UpdateStage
 		var result error
-		first := make(chan error, 1)
+		first := make(chan tipResult, 1)
 		queued := make(chan error, 1)
 		go func() {
 			defer close(finished)
@@ -1114,10 +1119,7 @@ func tipNativeConcurrency(t *testing.T) {
 				saved = r
 				go func() {
 					point, getErr := r.CanonicalTipV1(7)
-					if getErr == nil && (point == nil || point.Height != 37) {
-						getErr = errors.New("in-flight scalar drift")
-					}
-					first <- getErr
+					first <- tipResult{point, getErr}
 				}()
 				fixtureTipWait()
 				go func() { _, getErr := r.CanonicalTipV1(7); queued <- getErr }()
@@ -1127,11 +1129,13 @@ func tipNativeConcurrency(t *testing.T) {
 					}
 					fixtureTipRelease()
 				}()
-				return Batch{Mutations: []Mutation{consultedCounter(t, 900)}}, nil
+				return Batch{Mutations: []Mutation{mutation}}, nil
 			})
 		}()
 		<-finished
-		mustEnvironment(t, <-first)
+		observed := <-first
+		mustEnvironment(t, observed.err)
+		tipRequirePoint(t, observed.point, 37, [32]byte{0x44})
 		tipError(t, <-queued, "prefix-page", "InvalidInput", 22, "Reader is not active", false)
 		mustEnvironment(t, result)
 		tipOutcome(t, store, truth, stage, result, 2, 3, "OPEN")
@@ -1142,42 +1146,43 @@ func tipNativeConcurrency(t *testing.T) {
 	tipRetired(t, saved, cell)
 	evidence, err = fixtureTipCursor(store, 1, 1, 1, 0, func() {
 		mustEnvironment(t, store.View(func(r *Reader) error {
-			results := make(chan error, 2)
+			results := make(chan tipResult, 2)
 			for range 2 {
 				go func() {
 					point, getErr := r.CanonicalTipV1(7)
-					if getErr == nil {
-						tipRequirePoint(t, point, 37, [32]byte{0x44})
-					}
-					results <- getErr
+					results <- tipResult{point, getErr}
 				}()
 			}
 			a, b := <-results, <-results
-			if a == nil && b == nil || a != nil && b != nil {
+			if a.err == nil && b.err == nil || a.err != nil && b.err != nil {
 				t.Fatal("same Reader did not serialize one success")
 			}
-			if a == nil {
-				a = b
+			if a.err != nil {
+				a, b = b, a
 			}
-			tipError(t, a, "prefix-page", "InvalidInput", 22, "canonical tip already acquired", false)
+			tipRequirePoint(t, a.point, 37, [32]byte{0x44})
+			if b.point != nil || tipError(t, b.err, "prefix-page", "InvalidInput", 22, "canonical tip already acquired", false).Cause != nil {
+				t.Fatal("repeat acquisition returned a point or cause")
+			}
 			return nil
 		}))
 	})
 	mustEnvironment(t, err)
 	tipCensus(t, evidence, 1, 2, 1, 0)
 	finished := make(chan struct{})
+	var getErr error
 	go func() {
 		defer close(finished)
 		_, _, _ = store.Update(func(r *Reader) (Batch, error) {
 			saved = r
-			_, getErr := r.CanonicalTipV1(7)
-			mustEnvironment(t, getErr)
+			_, getErr = r.CanonicalTipV1(7)
 			cell = r.tip
 			runtime.Goexit()
 			return Batch{}, nil
 		})
 	}()
 	<-finished
+	mustEnvironment(t, getErr)
 	tipRetired(t, saved, cell)
 	largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 901)}})
 }

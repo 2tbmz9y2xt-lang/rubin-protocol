@@ -428,6 +428,9 @@ func fixtureTipWriterReleaseFault(store *Store) error {
 		return errors.New("missing endpoint fixture writer")
 	}
 	field := reflect.ValueOf(store.writer).Elem().FieldByName("fd")
+	if field.Kind() != reflect.Int || !field.CanAddr() {
+		return errors.New("invalid endpoint fixture writer descriptor")
+	}
 	if err := syscall.Close(int(field.Int())); err != nil {
 		return err
 	}
