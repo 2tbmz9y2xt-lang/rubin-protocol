@@ -111,8 +111,12 @@ type SimplicityTxContext struct {
 }
 
 func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight uint64, chainID [32]byte) (*SimplicityTxContext, error) {
+	return buildSimplicityTxContext(tx, resolvedInputs, blockHeight, chainID, false)
+}
+
+func validateSimplicityTxContextShape(tx *Tx, resolvedInputs []UtxoEntry) error {
 	if tx == nil {
-		return nil, txerr(TX_ERR_PARSE, "nil tx")
+		return txerr(TX_ERR_PARSE, "nil tx")
 	}
 	for _, check := range []struct {
 		invalid bool
@@ -123,8 +127,17 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 		{len(tx.Outputs) > MAX_TX_OUTPUTS, "simplicity txcontext output_count overflow"},
 	} {
 		if check.invalid {
-			return nil, txerr(TX_ERR_PARSE, check.message)
+			return txerr(TX_ERR_PARSE, check.message)
 		}
+	}
+	return nil
+}
+
+// Frozen descriptors share complete immutable current-transaction sources.
+// Scalar, CMR and prefix-stripped state copies retain the public contract.
+func buildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight uint64, chainID [32]byte, frozenDescriptors bool) (*SimplicityTxContext, error) {
+	if err := validateSimplicityTxContextShape(tx, resolvedInputs); err != nil {
+		return nil, err
 	}
 	if !slices.ContainsFunc(resolvedInputs, func(entry UtxoEntry) bool {
 		return entry.CovenantType == COV_TYPE_CORE_SIMPLICITY
@@ -160,19 +173,19 @@ func BuildSimplicityTxContext(tx *Tx, resolvedInputs []UtxoEntry, blockHeight ui
 		selfSources:       make([]simplicityTxContextSelfSource, len(resolvedInputs)),
 	}
 
-	if err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs); err != nil {
+	if err := populateSimplicityTxContextViews(ctx, tx, resolvedInputs, frozenDescriptors); err != nil {
 		return nil, err
 	}
 	return ctx, nil
 }
 
-func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry) error {
+func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolvedInputs []UtxoEntry, frozenDescriptors bool) error {
 	ctx.groupInputs, ctx.groupOutputs = make(map[[32]byte][]SimplicityTxContextGroupEntry), make(map[[32]byte][]SimplicityTxContextGroupEntry)
 
-	if err := populateSimplicityTxContextInputViews(ctx, resolvedInputs); err != nil {
+	if err := populateSimplicityTxContextInputViews(ctx, resolvedInputs, frozenDescriptors); err != nil {
 		return err
 	}
-	if err := populateSimplicityTxContextOutputViews(ctx, tx.Outputs); err != nil {
+	if err := populateSimplicityTxContextOutputViews(ctx, tx.Outputs, frozenDescriptors); err != nil {
 		return err
 	}
 	var err error
@@ -180,7 +193,7 @@ func populateSimplicityTxContextViews(ctx *SimplicityTxContext, tx *Tx, resolved
 	return err
 }
 
-func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInputs []UtxoEntry) error {
+func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInputs []UtxoEntry, frozenDescriptors bool) error {
 	for i, entry := range resolvedInputs {
 		ctx.inputViews[i] = SimplicityTxContextIOView{
 			Value:        entry.Value,
@@ -188,7 +201,7 @@ func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInp
 		}
 		ctx.inputDescriptors[i] = simplicityTxContextDescriptorSource{
 			covenantType: entry.CovenantType,
-			covenantData: append([]byte{}, entry.CovenantData...),
+			covenantData: simplicityDescriptorBacking(entry.CovenantData, frozenDescriptors),
 		}
 		if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
@@ -215,7 +228,7 @@ func populateSimplicityTxContextInputViews(ctx *SimplicityTxContext, resolvedInp
 	return nil
 }
 
-func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []TxOutput) error {
+func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []TxOutput, frozenDescriptors bool) error {
 	for i, out := range outputs {
 		ctx.outputViews[i] = SimplicityTxContextIOView{
 			Value:        out.Value,
@@ -223,7 +236,7 @@ func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []
 		}
 		ctx.outputDescriptors[i] = simplicityTxContextDescriptorSource{
 			covenantType: out.CovenantType,
-			covenantData: append([]byte{}, out.CovenantData...),
+			covenantData: simplicityDescriptorBacking(out.CovenantData, frozenDescriptors),
 		}
 		if out.CovenantType != COV_TYPE_CORE_SIMPLICITY {
 			continue
@@ -238,6 +251,13 @@ func populateSimplicityTxContextOutputViews(ctx *SimplicityTxContext, outputs []
 		})
 	}
 	return nil
+}
+
+func simplicityDescriptorBacking(data []byte, frozen bool) []byte {
+	if frozen {
+		return data
+	}
+	return append([]byte{}, data...)
 }
 
 // splitCoreSimplicityCovenantData performs the §2.4 step-3d byte-copy split of a
