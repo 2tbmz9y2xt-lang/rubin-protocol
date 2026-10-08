@@ -11,6 +11,13 @@ typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDB
 extern int rubin_li_arm(MDBX_env *, MDBX_dbi, unsigned, const void *, size_t);
 extern void rubin_li_disarm(rubin_li_state *);
 extern unsigned rubin_li_calls(void);
+typedef struct { unsigned opens, gets, closes, queries, faults; } rubin_tip_counts;
+extern int rubin_tip_arm(MDBX_env *, MDBX_dbi, unsigned, unsigned, unsigned, int);
+extern void rubin_tip_disarm(rubin_tip_counts *);
+extern void rubin_tip_wait(void);
+extern void rubin_tip_release(void);
+extern int rubin_tip_drift_arm(const void *, size_t, const void *, size_t, int);
+extern int rubin_tip_close_fault(int);
 static int rubin_fixture_large_bulk(MDBX_txn *txn, MDBX_dbi dbi, unsigned kind, unsigned count, size_t width, const unsigned char *hashes) {
 	unsigned char key_bytes[2022] = {0};
 	size_t key_len = kind == 1 ? 32 : (kind == 3 ? 333 : (kind == 4 ? 2022 : (kind == 5 ? 44 : (kind == 6 ? 37 : 77))));
@@ -108,10 +115,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"runtime/cgo"
 	"strings"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
@@ -360,6 +369,66 @@ type fixtureLargeEvidence struct {
 }
 
 var fixtureLargeMu sync.Mutex
+
+type fixtureTipEvidence struct {
+	opens, gets, closes, queries, faults uint32
+}
+
+var fixtureTipMu sync.Mutex
+
+func fixtureTipCursor(store *Store, mode, query, get uint32, code int, run func()) (evidence fixtureTipEvidence, err error) {
+	fixtureTipMu.Lock()
+	defer fixtureTipMu.Unlock()
+	if store == nil || store.env == nil || run == nil {
+		return evidence, errors.New("invalid endpoint cursor fixture")
+	}
+	if rc := int(C.rubin_tip_arm(store.env, store.dbis[2], C.uint(mode), C.uint(query), C.uint(get), C.int(code))); rc != codeSuccess {
+		return evidence, fixtureResult(operationInit, rc)
+	}
+	defer func() {
+		var counts C.rubin_tip_counts
+		C.rubin_tip_disarm(&counts)
+		evidence = fixtureTipEvidence{uint32(counts.opens), uint32(counts.gets), uint32(counts.closes), uint32(counts.queries), uint32(counts.faults)}
+	}()
+	run()
+	return evidence, nil
+}
+
+func fixtureTipWait() { C.rubin_tip_wait() }
+
+func fixtureTipRelease() { C.rubin_tip_release() }
+
+func fixtureTipDrift(key, value []byte, present bool) error {
+	var keyBytes, valueBytes unsafe.Pointer
+	if len(key) != 0 {
+		keyBytes = unsafe.Pointer(&key[0])
+	}
+	if len(value) != 0 {
+		valueBytes = unsafe.Pointer(&value[0])
+	}
+	flag := C.int(0)
+	if present {
+		flag = 1
+	}
+	rc := int(C.rubin_tip_drift_arm(keyBytes, C.size_t(len(key)), valueBytes, C.size_t(len(value)), flag))
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	return fixtureResult(operationInit, rc)
+}
+
+func fixtureTipCloseFault() error {
+	return fixtureResult(operationInit, int(C.rubin_tip_close_fault(C.MDBX_EIO)))
+}
+
+// Close this invocation's actual lock descriptor so its real Release observes
+// EBADF. The Handle remains owned by Store and the normal consumer clears it.
+func fixtureTipWriterReleaseFault(store *Store) error {
+	if store == nil || store.writer == nil {
+		return errors.New("missing endpoint fixture writer")
+	}
+	fd := reflect.ValueOf(store.writer).Elem().FieldByName("fd").Int()
+	return syscall.Close(int(fd))
+}
 
 func fixtureLargeNativeCalls() uint32 { return uint32(C.rubin_li_calls()) }
 
