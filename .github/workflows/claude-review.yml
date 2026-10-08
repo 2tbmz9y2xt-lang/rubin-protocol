@@ -115,7 +115,9 @@ jobs:
           INPUT_DIR="${RUNNER_TEMP}/review-input"
           mkdir -p "${INPUT_DIR}"
           # --text: a diff attribute set by the PR in .gitattributes cannot hide a change as binary.
-          git diff --text "$(git merge-base "origin/${BASE_REF}" HEAD)" HEAD > "${INPUT_DIR}/diff.patch"
+          # The publish step checks that this merge base still holds.
+          git merge-base "origin/${BASE_REF}" HEAD > "${RUNNER_TEMP}/merge-base"
+          git diff --text "$(cat "${RUNNER_TEMP}/merge-base")" HEAD > "${INPUT_DIR}/diff.patch"
           # Every thread and inline comment, all pages; only comments of review bots and
           # repository members are kept, so third-party text never reaches the model. The raw
           # lists live in temp files removed on exit, outside the directory the model reads.
@@ -255,12 +257,20 @@ jobs:
               exit 1
             fi
           done
-          # Publish only for the current head of an open, non-draft PR. A newer push, a draft
-          # conversion or a close normally cancels this run, but not when that push removed or
-          # renamed this workflow, since no new run then starts in the concurrency group.
-          current="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '"\(.head.sha) \(.state) \(.draft)"')"
-          if [[ "${current}" != "${HEAD_SHA} open false" ]]; then
+          # Publish only for the reviewed diff of an open, non-draft PR: same head, same base
+          # branch and same merge base. A newer push, a draft conversion or a close normally
+          # cancels this run, but not when that push removed or renamed this workflow, and a
+          # rewrite of the base branch starts no run at all.
+          current="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '"\(.head.sha) \(.state) \(.draft) \(.base.ref)"')"
+          if [[ "${current}" != "${HEAD_SHA} open false ${BASE_REF}" ]]; then
             echo "The PR is now at ${current}; the review of ${HEAD_SHA} is not published."
+            exit 0
+          fi
+          # The live tip of the base branch: the PR's base.sha is a snapshot that pushes to the base do not refresh.
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BASE_REF}" --jq '.object.sha')"
+          merge_base="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tip}...${HEAD_SHA}?per_page=1" --jq '.merge_base_commit.sha')"
+          if [[ "${merge_base}" != "$(cat "${RUNNER_TEMP}/merge-base")" ]]; then
+            echo "The merge base is now ${merge_base}; the reviewed diff is stale and is not published."
             exit 0
           fi
           # The event is fixed here: the model cannot approve or request changes.
