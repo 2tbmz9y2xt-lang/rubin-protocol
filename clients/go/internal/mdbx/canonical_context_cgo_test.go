@@ -293,7 +293,7 @@ func contextPhases(t *testing.T) {
 			contextPhaseOutcome(t, store, outcome, row.phase)
 			if row.phase == "final" || row.phase == "prewrite" {
 				truth, stage, result := store.applyUpdateOutcome(outcome, nil, nil, false)
-				if truth != 1 || stage != outcome.stage || result != store.terminal || string(store.state) != "CLOSED" || store.env != nil || store.writer != nil || store.txn != nil {
+				if truth != 1 || stage != outcome.stage || reflect.ValueOf(result) != reflect.ValueOf(store.terminal) || string(store.state) != "CLOSED" || store.env != nil || store.writer != nil || store.txn != nil {
 					t.Fatal("direct phase terminal resource projection")
 				}
 				reopened, openErr := Open(path, cfg)

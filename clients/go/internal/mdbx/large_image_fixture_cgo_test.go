@@ -1331,7 +1331,7 @@ func contextNativeWidths(t *testing.T) {
 		if rank == 3 {
 			width = 116
 		}
-		for _, size := range []int{-1, 0, width-1, width+1} {
+		for _, size := range []int{-1, 0, width - 1, width + 1} {
 			t.Run(fmt.Sprintf("rank%d/size%d", rank, size), func(t *testing.T) {
 				store, _, _ := consultedStore(t)
 				window := CanonicalContextWindowV1{9, 0, 1}

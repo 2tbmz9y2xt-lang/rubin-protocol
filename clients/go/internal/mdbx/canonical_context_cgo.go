@@ -2,10 +2,7 @@
 
 package mdbx
 
-import (
-	"encoding/binary"
-	"unsafe"
-)
+import "encoding/binary"
 
 // CanonicalContextWindowV1 names ascending canonical-v1 indices and their
 // ORIGINAL OLD-selected headers. It is nonpersistent physical image evidence,
@@ -85,7 +82,7 @@ func contextQualifyPair(old *Reader, key []byte, plan []ownedMutation, consulted
 		return infrastructure, err
 	}
 	var headerKey [32]byte
-	copy(headerKey[:], unsafe.Slice((*byte)(index.bytes), 32))
+	_, _ = largeImageCopy(headerKey[:], index.bytes, 104, 0)
 	if contextOverlap(plan, consulted, 3, headerKey[:]) {
 		return false, updateInvalidBatch()
 	}
@@ -119,7 +116,7 @@ func contextPairEqual(old, candidate *Reader, key []byte) (bool, error) {
 		return false, err
 	}
 	var headerKey [32]byte
-	copy(headerKey[:], unsafe.Slice((*byte)(index.bytes), 32))
+	_, _ = largeImageCopy(headerKey[:], index.bytes, 104, 0)
 	header, _, err := contextImage(old, 3, headerKey[:], 116)
 	if err != nil {
 		return false, err
