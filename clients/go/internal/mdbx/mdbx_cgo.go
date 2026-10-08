@@ -910,6 +910,9 @@ type Batch struct {
 	// readback mismatch fails both predicates: Update returns CommitTruthUnknown with the original CommitError. Nil and empty
 	// behave alike; the caller leaves rows and key bytes unchanged until Update returns.
 	Consulted []ConsultedRow
+	// ContextConsulted names one finite unchanged OLD canonical index/header window; nil adds no domain.
+	// The descriptor is copied by value; the caller leaves Batch unchanged until Update returns.
+	ContextConsulted *CanonicalContextWindowV1
 	// LargeConsulted proves complete physical body/family residuals alongside the exact mutation and reference predicates.
 	LargeConsulted []LargeImageSelectorV1
 	// ObsoleteDeletes removes same-OLD observed present rows; every row needs a covering witness.
@@ -2022,6 +2025,11 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	if planErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
+	return s.updateImagePlan(batch, plan, reader, old)
+}
+
+// Post-callback image admission preserves the legacy, Large/Obsolete, context order.
+func (s *Store) updateImagePlan(batch Batch, plan []ownedMutation, reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, consultedErr, false)
@@ -2033,6 +2041,14 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	large, largeErr := updateOwnedLarge(batch, consulted, reader.maxKey)
 	if largeErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, largeErr, false)
+	}
+	large, contextErr := updateOwnedContext(batch.ContextConsulted, plan, large)
+	if contextErr != nil {
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, contextErr, false)
+	}
+	infrastructure, contextErr = contextQualify(reader, plan, large)
+	if contextErr != nil {
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, contextErr, infrastructure)
 	}
 	return plan, consulted, large, nil
 }

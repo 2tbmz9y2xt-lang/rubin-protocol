@@ -651,7 +651,8 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "updateKeyOrdered body drifted")
 	// Target lookup now uses the existing canonicalTargetIndex; only ordering and prefix-page seek compare here.
 	require(strings.Count(text, "bytes.Compare(") == 2, "bytes.Compare census drifted")
-	ordered(updateNativeBody(t, source, "updatePlan"), "admission owner order drifted", "updateOwnedBatch(batch, reader)", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)", "updateOwnedLarge(")
+	ordered(updateNativeBody(t, source, "updatePlan"), "callback precedence before image admission", "reader.expire()", "readPrimary(callbackErr, reader.failure)", "if primary != nil", "updateOwnedBatch(batch, reader)", "s.abortReadLocked(old, planErr, false)", "return s.updateImagePlan(batch, plan, reader, old)")
+	ordered(updateNativeBody(t, source, "updateImagePlan"), "admission owner order drifted", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)", "updateOwnedLarge(", "updateOwnedContext(", "contextQualify(", "s.abortReadLocked(old, contextErr, infrastructure)")
 	ordered(updateNativeBody(t, source, "updateOwnedBatch"), "merged plan ownership drifted", "updateScanMutation(", "owned := make([]ownedMutation", "updateOwnedObsolete(batch, readers[0], owned)", "updateOwnReferences(owned)", "return owned, nil")
 	ordered(updateNativeBody(t, source, "Update"), "consulted transport drifted", "plan, consulted, large, planErr := s.updatePlan(", "s.updateNative(plan, consulted, begun.txn, large)", "updateAbortOld(begun.txn)")
 }
