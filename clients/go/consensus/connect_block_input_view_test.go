@@ -1044,8 +1044,15 @@ func TestConnectBlockInputViewQualificationBeforePlacement(t *testing.T) {
 	}
 	t.Run("dual_merkle_weight", func(t *testing.T) {
 		tx := inputViewTx(1, op)
-		tx.Witness[0] = WitnessItem{SuiteID: 0x7e, Signature: make([]byte, 67_999_600)}
+		tx.Outputs = make([]TxOutput, 260)
+		data := make([]byte, 65_536)
+		for i := range tx.Outputs {
+			tx.Outputs[i] = TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: data}
+		}
 		input := inputViewBlock(t, 1, 1, tx, later)
+		if len(input.BlockBytes) > 68_000_125 {
+			t.Fatalf("weight fixture exceeds qualified body capacity: %d bytes", len(input.BlockBytes))
+		}
 		// First establish the single resource result, then add only the Merkle
 		// violation so the dual case cannot fail merely on capacity or setup.
 		view := inputViewNew(nil)
