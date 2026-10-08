@@ -14,7 +14,9 @@ permissions:
 
 concurrency:
   # A body-only edit (no title or base change) runs in its own group so it cannot cancel a review in progress.
-  group: claude-review-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null && format('-noop-{0}', github.run_id) || '' }}
+  # So does a run started by a PR author without write access (the scope step skips it), so a retitle or
+  # reopen by that author cannot cancel a review that a writer's push started.
+  group: claude-review-${{ github.event.pull_request.number }}${{ ((github.event.action == 'edited' && github.event.changes.title == null && github.event.changes.base == null) || (github.actor == github.event.pull_request.user.login && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))) && format('-own-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -47,9 +49,14 @@ jobs:
         run: |
           set -euo pipefail
           # Only an actor with write or admin permission starts a paid review (the rule of
-          # checkActorWritePermissions in claude-code-action v1.0.245, without its bot bypass):
-          # a user with read access can open a PR from an existing branch of this repository.
-          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission')"
+          # checkActorWritePermissions in claude-code-action v1.0.245, without its exceptions for
+          # [bot] actors and listed users): a user with read access can open a PR from an
+          # existing branch of this repository. An app account such as Copilot is not a user
+          # and is denied, as upstream does; any other API error fails the step.
+          if ! perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission' 2>"${RUNNER_TEMP}/permission.err")"; then
+            grep -q 'is not a user' "${RUNNER_TEMP}/permission.err" || { cat "${RUNNER_TEMP}/permission.err" >&2; exit 1; }
+            perm="none"
+          fi
           if [[ "${perm}" != "admin" && "${perm}" != "write" ]]; then
             echo "review=false" >> "${GITHUB_OUTPUT}"
             echo "The actor has ${perm} permission; the Claude review needs write or admin."
