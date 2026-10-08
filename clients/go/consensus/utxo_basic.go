@@ -57,7 +57,9 @@ func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
 	}
 	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
 	// the spend loop.
-	simplicityCtx, err := buildSimplicityStep3dContext(ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID, ctx.rotation)
+	simplicityCtx, err := buildSimplicityStep3dContextWithDescriptors(
+		ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID, ctx.rotation, ctx.inputView != nil,
+	)
 	if err != nil {
 		return err
 	}
@@ -262,7 +264,9 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
 		}
 		delete(ctx.work, input.outpoint)
 		if ctx.inputView != nil {
-			ctx.inputView.spent[input.outpoint] = struct{}{}
+			if _, preBlock := ctx.inputView.spent[input.outpoint]; !preBlock {
+				ctx.inputView.spent[input.outpoint] = 0
+			}
 		}
 	}
 	return nil

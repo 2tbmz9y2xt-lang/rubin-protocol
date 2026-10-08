@@ -159,20 +159,19 @@ type nonCoinbaseResolvedInput struct {
 }
 
 type blockSpentInput struct {
-	outpoint   Outpoint
-	entry      UtxoEntry
-	txIndex    int
-	inputIndex int
+	outpoint           Outpoint
+	txIndex            uint32
+	inputIndex         uint32
+	logicalEntryLength uint32
 }
 
-// blockInputViewState belongs to one private block candidate. Entries read from
-// the view retain their original payload; created outputs live only in work.
+// blockInputViewState owns only compact pre-block lengths and created-spent
+// tombstones. Complete current inputs belong to nonCoinbaseApplyContext.
 type blockInputViewState struct {
-	view        logicalStateView
-	height      uint64
-	txIndex     int
-	spent       map[Outpoint]struct{}
-	spentInputs []blockSpentInput
+	view    logicalStateView
+	spent   map[Outpoint]uint32
+	height  uint64
+	txIndex int
 }
 
 type blockInputViewReadError struct {
@@ -197,9 +196,9 @@ func (state *blockInputViewState) lookup(op Outpoint, inputIndex int) (UtxoEntry
 	if !present {
 		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
 	}
-	state.spentInputs = append(state.spentInputs, blockSpentInput{
-		outpoint: op, entry: entry, txIndex: state.txIndex, inputIndex: inputIndex,
-	})
+	// readLogicalStateRow has checked the complete row's width. Its exact
+	// StateEntryBytes length is 56..65,596, so this conversion cannot narrow.
+	state.spent[op] = uint32(logicalStateEntryLength(entry))
 	return entry, nil
 }
 

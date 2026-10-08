@@ -50,13 +50,15 @@ type connectBlockInputViewResult struct {
 	sumFees            Uint128
 	alreadyGenerated   Uint128
 	alreadyGeneratedN1 Uint128
-	spentInputs        []blockSpentInput
+	spentInputs        *blockSpentInputSource
 	createdUtxos       map[Outpoint]UtxoEntry
 }
 
 // connectBlockBasicWithInputView is a dormant continuation for storage callers.
-// The caller owns the supplied subsidy counter and the charge for retained rows.
-// input.State is unused: only the caller's view provides the pre-block UTXOs.
+// The caller has completed ValidateBlockSteps1To12 on these identical frozen
+// bytes and positive-height parent/target/timestamp context. ChainID, Registry,
+// Rotation and the view remain frozen through consuming or discarding the result.
+// input.State is unused. This continuation adds no qualification or publication.
 func connectBlockBasicWithInputView(
 	input connectBlockBasicInMemorySuiteContext,
 	view logicalStateView,
@@ -65,38 +67,206 @@ func connectBlockBasicWithInputView(
 	if view == nil {
 		return nil, localLogicalStateFailure("nil logical state view")
 	}
-	pb, err := parseInMemoryConnectBlock(input)
+	header, off, count, err := storedCommitmentFrame(input.BlockBytes)
 	if err != nil {
 		return nil, err
 	}
-	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, pb.Header.Timestamp)
+	if err := validateInputViewPlacement(input.BlockBytes, off, count); err != nil {
+		return nil, err
+	}
+	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, header.Timestamp)
 	if err != nil {
 		return nil, err
 	}
-	inputView := &blockInputViewState{
-		view: view, height: input.BlockHeight, spent: make(map[Outpoint]struct{}),
+	work := blockInputViewConnectWork{
+		raw: input.BlockBytes, offset: off, count: count, height: input.BlockHeight, blockMTP: blockMTP,
+		created: make(map[Outpoint]UtxoEntry), seenNonces: make(map[uint64]struct{}),
+		validation: connectBlockInMemoryValidationContext{
+			chainID: input.ChainID, rotation: input.Rotation, registry: input.Registry,
+			inputView: &blockInputViewState{view: view, height: input.BlockHeight, spent: make(map[Outpoint]uint32)},
+		},
 	}
-	validation := connectBlockInMemoryValidationContext{
-		chainID: input.ChainID, rotation: input.Rotation, registry: input.Registry, inputView: inputView,
-	}
-	work, sumFees, err := applyInMemorySequentialConnect(
-		pb, make(map[Outpoint]UtxoEntry), input.BlockHeight, blockMTP, validation,
-	)
-	if err != nil {
+	if err := work.applyCoinbase(); err != nil {
 		return nil, err
 	}
+	suffixStart := work.offset
+	if err := work.applySuffix(); err != nil {
+		return nil, err
+	}
+	return work.finish(alreadyGenerated, suffixStart)
+}
+
+func (work *blockInputViewConnectWork) finish(alreadyGenerated Uint128, suffixStart int) (*connectBlockInputViewResult, error) {
 	alreadyGeneratedBig := alreadyGenerated.Big()
-	if err := validateCoinbaseValueBound(pb, input.BlockHeight, alreadyGeneratedBig, sumFees); err != nil {
+	if err := validateCoinbaseValueTotal(work.coinbaseTotal, work.coinbaseError, work.height, alreadyGeneratedBig, work.sumFees); err != nil {
 		return nil, err
 	}
-	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(input.BlockHeight, alreadyGenerated, alreadyGeneratedBig)
+	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(work.height, alreadyGenerated, alreadyGeneratedBig)
 	if err != nil {
 		return nil, err
 	}
+	spent := work.validation.inputView.spent
+	work.seenNonces, work.validation = nil, connectBlockInMemoryValidationContext{}
 	return &connectBlockInputViewResult{
-		sumFees: sumFees, alreadyGenerated: alreadyGenerated, alreadyGeneratedN1: alreadyGeneratedN1,
-		spentInputs: inputView.spentInputs, createdUtxos: work,
+		sumFees: work.sumFees, alreadyGenerated: alreadyGenerated, alreadyGeneratedN1: alreadyGeneratedN1,
+		spentInputs:  &blockSpentInputSource{raw: work.raw, spent: spent, offset: suffixStart, count: work.count, nextTx: 1},
+		createdUtxos: work.created,
 	}, nil
+}
+
+// validateInputViewPlacement is a pure one-current-Tx prepass. Q has already
+// parsed all P0, including trailing bytes, before this first-result decision.
+func validateInputViewPlacement(raw []byte, off int, count uint64) error {
+	for ordinal := uint64(0); ordinal < count; ordinal++ {
+		tx, _, _, _, err := parseBlockTx(raw, &off)
+		if err != nil {
+			return err
+		}
+		if err := validateInputViewPlacementTx(tx, ordinal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateInputViewPlacementTx(tx *Tx, ordinal uint64) error {
+	if ordinal == 0 {
+		if !isCoinbaseTx(tx) {
+			return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+		}
+		if len(tx.Outputs) == 0 {
+			return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
+		}
+		return nil
+	}
+	if isCoinbaseTx(tx) && len(tx.Outputs) > 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase-like tx is only allowed at index 0")
+	}
+	return nil
+}
+
+type blockInputViewConnectWork struct {
+	raw           []byte
+	created       map[Outpoint]UtxoEntry
+	seenNonces    map[uint64]struct{}
+	validation    connectBlockInMemoryValidationContext
+	sumFees       Uint128
+	coinbaseTotal u128
+	coinbaseError error
+	height        uint64
+	blockMTP      uint64
+	count         uint64
+	offset        int
+}
+
+func (work *blockInputViewConnectWork) applyCoinbase() error {
+	coinbase, txid, _, _, err := parseBlockTx(work.raw, &work.offset)
+	if err != nil {
+		return err
+	}
+	if err := validateCoinbaseTxStructure(coinbase, work.height); err != nil {
+		return err
+	}
+	if err := applyInMemoryCoinbaseTxOutputs(coinbase, txid, work.created, work.height, work.validation.chainID, work.validation.rotation); err != nil {
+		return err
+	}
+	work.coinbaseTotal, work.coinbaseError = sumCoinbaseOutputValues(coinbase.Outputs)
+	return nil
+}
+
+func (work *blockInputViewConnectWork) applySuffix() error {
+	for ordinal := uint64(1); ordinal < work.count; ordinal++ {
+		if err := work.applyTransaction(ordinal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (work *blockInputViewConnectWork) applyTransaction(ordinal uint64) error {
+	tx, txid, _, _, err := parseBlockTx(work.raw, &work.offset)
+	if err != nil {
+		return err
+	}
+	if err := validateNonCoinbaseBlockTx(tx, work.seenNonces); err != nil {
+		return err
+	}
+	work.validation.inputView.txIndex = int(ordinal)
+	next, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
+		tx: tx, txid: txid, utxoSet: work.created, height: work.height, blockMTP: work.blockMTP,
+		chainID: work.validation.chainID, rotation: work.validation.rotation, registry: work.validation.registry,
+		inputView: work.validation.inputView,
+	})
+	if err != nil {
+		return err
+	}
+	work.created = next
+	sum, ok := work.sumFees.CheckedAdd(fee)
+	if !ok {
+		return txerr(BLOCK_ERR_PARSE, "sum_fees overflow")
+	}
+	work.sumFees = sum
+	return nil
+}
+
+// blockSpentInputSource owns the same compact map after successful connect.
+// It performs metadata parsing only: no view, consensus result or full OLD row.
+// Each returned tuple is a value (48 logical bytes) consumed before advancing.
+type blockSpentInputSource struct {
+	raw        []byte
+	spent      map[Outpoint]uint32
+	current    *Tx
+	count      uint64
+	nextTx     uint64
+	offset     int
+	inputIndex int
+	txIndex    uint32
+}
+
+func (source *blockSpentInputSource) next() (blockSpentInput, bool) {
+	for source.raw != nil {
+		if !source.loadTransaction() {
+			source.discard()
+			return blockSpentInput{}, false
+		}
+		for source.inputIndex < len(source.current.Inputs) {
+			index := source.inputIndex
+			in := source.current.Inputs[index]
+			source.inputIndex++
+			op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+			length := source.spent[op]
+			delete(source.spent, op)
+			if length != 0 {
+				return blockSpentInput{outpoint: op, txIndex: source.txIndex, inputIndex: uint32(index), logicalEntryLength: length}, true
+			}
+		}
+		source.current = nil
+	}
+	return blockSpentInput{}, false
+}
+
+func (source *blockSpentInputSource) loadTransaction() bool {
+	if source.current != nil {
+		return true
+	}
+	if source.nextTx >= source.count {
+		return false
+	}
+	// Identical frozen Q-qualified bytes and the same pinned parser make success
+	// a preserved precondition, not a second consensus decision or new error.
+	source.current, _, _, _, _ = parseBlockTx(source.raw, &source.offset)
+	// The qualified <=68,000,125-byte body bounds every ordinal below 2^32;
+	// each input index is additionally bounded by MAX_TX_INPUTS (1,024).
+	source.txIndex = uint32(source.nextTx)
+	source.nextTx++
+	source.inputIndex = 0
+	return true
+}
+
+// discard is the same terminal release for exhaustion, unused handoff and
+// caller rollback. A retry must obtain a fresh result from a fresh connect.
+func (source *blockSpentInputSource) discard() {
+	*source = blockSpentInputSource{}
 }
 
 // ConnectBlockBasicInMemoryAtHeight connects a block against an in-memory UTXO snapshot and an
@@ -289,19 +459,15 @@ func applyInMemoryNonCoinbaseTxs(
 		if err := validateNonCoinbaseBlockTx(pb.Txs[i], seenNonces); err != nil {
 			return nil, Uint128{}, err
 		}
-		if validation.inputView != nil {
-			validation.inputView.txIndex = i
-		}
 		nextUtxos, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
-			tx:        pb.Txs[i],
-			txid:      pb.Txids[i],
-			utxoSet:   workUtxos,
-			height:    blockHeight,
-			blockMTP:  blockMTP,
-			chainID:   validation.chainID,
-			rotation:  validation.rotation,
-			registry:  validation.registry,
-			inputView: validation.inputView,
+			tx:       pb.Txs[i],
+			txid:     pb.Txids[i],
+			utxoSet:  workUtxos,
+			height:   blockHeight,
+			blockMTP: blockMTP,
+			chainID:  validation.chainID,
+			rotation: validation.rotation,
+			registry: validation.registry,
 		})
 		if err != nil {
 			return nil, Uint128{}, err
@@ -327,8 +493,17 @@ func applyInMemoryCoinbaseOutputs(
 	chainID [32]byte,
 	rotation RotationProvider,
 ) error {
-	coinbase := pb.Txs[0]
-	coinbaseTxid := pb.Txids[0]
+	return applyInMemoryCoinbaseTxOutputs(pb.Txs[0], pb.Txids[0], workUtxos, blockHeight, chainID, rotation)
+}
+
+func applyInMemoryCoinbaseTxOutputs(
+	coinbase *Tx,
+	coinbaseTxid [32]byte,
+	workUtxos map[Outpoint]UtxoEntry,
+	blockHeight uint64,
+	chainID [32]byte,
+	rotation RotationProvider,
+) error {
 	if rotation == nil {
 		rotation = DefaultRotationProvider{}
 	}

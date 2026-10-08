@@ -48,6 +48,12 @@ func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error 
 // the group cap — so an inactive deployment rejects ahead of the cap and every §14.3/lower-wire-index
 // spend error. Lazy per-program construction is forbidden ("NOT a conforming implementation of the error order").
 func buildSimplicityStep3dContext(tx *Tx, resolvedInputs []UtxoEntry, height uint64, chainID [32]byte, rotation RotationProvider) (*SimplicityTxContext, error) {
+	return buildSimplicityStep3dContextWithDescriptors(tx, resolvedInputs, height, chainID, rotation, false)
+}
+
+// frozenDescriptors is selected only by the storage-private input-view route;
+// all other dispatch paths preserve independent descriptor backing.
+func buildSimplicityStep3dContextWithDescriptors(tx *Tx, resolvedInputs []UtxoEntry, height uint64, chainID [32]byte, rotation RotationProvider, frozenDescriptors bool) (*SimplicityTxContext, error) {
 	hasSimplicity := false
 	for _, e := range resolvedInputs {
 		if e.CovenantType == COV_TYPE_CORE_SIMPLICITY {
@@ -61,7 +67,7 @@ func buildSimplicityStep3dContext(tx *Tx, resolvedInputs []UtxoEntry, height uin
 	if err := validateCoreSimplicityDeploymentActive(chainID, height, simplicityDeploymentFromRotation(rotation)); err != nil {
 		return nil, err
 	}
-	return BuildSimplicityTxContext(tx, resolvedInputs, height, chainID)
+	return buildSimplicityTxContext(tx, resolvedInputs, height, chainID, frozenDescriptors)
 }
 
 // simplicitySpendDigest computes the eager §12.2 sighash digest for a CORE_SIMPLICITY input, using the

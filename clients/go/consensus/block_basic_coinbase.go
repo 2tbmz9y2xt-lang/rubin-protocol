@@ -6,16 +6,23 @@ import (
 )
 
 func validateCoinbaseStructure(pb *ParsedBlock, blockHeight uint64) error {
-	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
+	if len(pb.Txs) == 0 {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
-	if len(pb.Txs[0].Outputs) == 0 {
+	return validateCoinbaseTxStructure(pb.Txs[0], blockHeight)
+}
+
+func validateCoinbaseTxStructure(coinbase *Tx, blockHeight uint64) error {
+	if !isCoinbaseTx(coinbase) {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
+	if len(coinbase.Outputs) == 0 {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase must have at least one output")
 	}
 	if blockHeight > uint64(^uint32(0)) {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "block height exceeds coinbase locktime range")
 	}
-	if pb.Txs[0].Locktime != uint32(blockHeight) {
+	if coinbase.Locktime != uint32(blockHeight) {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "coinbase locktime must equal block height")
 	}
 	return nil
@@ -38,8 +45,14 @@ func validateCoinbaseValueBound(pb *ParsedBlock, blockHeight uint64, alreadyGene
 	}
 
 	sumCoinbase, err := sumCoinbaseOutputValues(coinbase.Outputs)
-	if err != nil {
-		return err
+	return validateCoinbaseValueTotal(sumCoinbase, err, blockHeight, alreadyGenerated, sumFees)
+}
+
+// validateCoinbaseValueTotal accepts a saved total and its original error so
+// the private streamed connector can release the coinbase before the suffix.
+func validateCoinbaseValueTotal(sumCoinbase u128, sumError error, blockHeight uint64, alreadyGenerated *big.Int, sumFees Uint128) error {
+	if sumError != nil {
+		return sumError
 	}
 	subsidy := BlockSubsidyBig(blockHeight, alreadyGenerated)
 	limit, ok := Uint128FromU64(subsidy).CheckedAdd(sumFees)
