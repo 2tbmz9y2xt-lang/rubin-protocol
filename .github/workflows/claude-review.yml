@@ -121,6 +121,8 @@ jobs:
 
       - name: Install Claude Code
         if: ${{ steps.scope.outputs.review == 'true' }}
+        # Outside the PR checkout, so a .npmrc in the PR cannot pick the registry.
+        working-directory: ${{ runner.temp }}
         run: npm install -g @anthropic-ai/claude-code@2.1.293
 
       - name: Run Claude Code Review
@@ -211,6 +213,8 @@ jobs:
       - name: Publish the review
         id: publish
         if: ${{ steps.review.outcome == 'success' }}
+        # Outside the PR checkout: this step holds the secrets and runs python.
+        working-directory: ${{ runner.temp }}
         env:
           GH_TOKEN: ${{ github.token }}
           # Values the review must never contain.
@@ -229,7 +233,8 @@ jobs:
           done
           # The repository is public and the contract is private: withhold a review that repeats
           # 12 or more consecutive words of the contract.
-          python3 - "${RUNNER_TEMP}/review-input/contract.md" "${so}" <<'PY'
+          # -I: isolated mode, no current directory or PYTHON* variables on the import path.
+          python3 -I - "${RUNNER_TEMP}/review-input/contract.md" "${so}" <<'PY'
           import json, re, sys
           words = lambda s: re.findall(r"\w+", s.lower())
           contract = words(open(sys.argv[1], encoding="utf-8").read())
