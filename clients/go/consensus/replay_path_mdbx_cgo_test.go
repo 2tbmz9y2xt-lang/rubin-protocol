@@ -329,6 +329,25 @@ func testReplayPathPrecondition(t *testing.T) {
 	pathWant(t, err, selectedSideInvariant, "cursor above tip")
 	pathZero(t, own, "cursor above tip")
 	logicalMDBXAssert(t, p.slot == nil && view.versions+view.protects+view.headerCalls == 0, "precondition touched the slot or view")
+	// A completed slot: a legal APPLIED cursor at the tip refuses before the slot-key compare, matching or foreign key.
+	q := newReplayPathOwner(view, pathLimit)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	_, err = w.call(t, q, nil, nil)
+	logicalMDBXAssert(t, err == nil && q.slot != nil, "completed slot: %v", err)
+	slot, key, hashes, lo, attached, at, counts := q.slot, q.slot.key, slices.Clone(q.slot.hashes), q.slot.lo, q.slot.attached, q.slot.a, *view
+	for _, tc := range []struct {
+		name string
+		edit func(*mdbx.StorageAuthorityV1)
+	}{{"matching key at tip", nil}, {"foreign key at tip", func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.CumulativeChainwork[39]++ }}} {
+		w.setReplayEdit(mdbx.ReplayCursorAppliedV1, w.tip(), tc.edit)
+		image := w.image()
+		own, err := pathCallNoPanic(t, w, q, tc.name)
+		pathWant(t, err, selectedSideInvariant, tc.name)
+		pathZero(t, own, tc.name)
+		logicalMDBXAssert(t, q.slot == slot && slot.key == key && slices.Equal(slot.hashes, hashes) && slot.lo == lo && slot.attached == attached && slot.a == at, "%s: slot changed", tc.name)
+		logicalMDBXAssert(t, view.versions == counts.versions && view.protects == counts.protects && view.headerCalls == counts.headerCalls && view.releases == counts.releases, "%s: view touched", tc.name)
+		replaySameImage(t, image, w.image(), tc.name)
+	}
 }
 
 // B27: target forks from active height 2; descending from tip 7 the first active match is 2 (heights 0..2 all match).
