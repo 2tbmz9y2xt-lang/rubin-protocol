@@ -2021,15 +2021,15 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 	if primary != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, primary, infrastructure)
 	}
-	return s.updateImagePlan(batch, reader, old)
-}
-
-// Post-callback image admission preserves the legacy, Large/Obsolete, context order.
-func (s *Store) updateImagePlan(batch Batch, reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	plan, planErr := updateOwnedBatch(batch, reader)
 	if planErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
+	return s.updateImagePlan(batch, plan, reader, old)
+}
+
+// Post-callback image admission preserves the legacy, Large/Obsolete, context order.
+func (s *Store) updateImagePlan(batch Batch, plan []ownedMutation, reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, consultedErr, false)
