@@ -1364,6 +1364,15 @@ func contextNativeWidths(t *testing.T) {
 					handles[4] = ^handles[4]
 					_, err := updateNativeLargeEqual(reader.txn, reader.txn, handles, nil, scope)
 					contextError(t, err, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+					// An Obsolete point has its own later native error, without a Large selector masking order.
+					obsoleteScope := largeImageScope{context: window, contextPresent: true, maxKey: 2022, points: []obsoletePoint{{rank: 1, key: append(obsoleteGenerationLiteral(9), 1)}}}
+					handles = store.dbis
+					handles[1] = ^handles[1]
+					_, err = updateNativeLargeEqual(reader.txn, reader.txn, handles, nil, obsoleteScope)
+					contextError(t, err, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+					obsoleteScope.contextPresent = false
+					_, err = updateNativeLargeEqual(reader.txn, reader.txn, handles, nil, obsoleteScope)
+					contextError(t, err, "LocalInvariant", -30780, "MDBX_BAD_DBI: The specified DBI-handle is invalid or changed by another thread/transaction")
 					outcome := store.updateNative(updateNativePlan(t, consultedCounter(t, 900)), nil, reader.txn, scope)
 					contextError(t, outcome.primary, "StateMismatch", -30779, "canonical context OLD image is incomplete")
 					requireUpdateTruth(t, outcome, 1, false, outcome.primary, nil)
@@ -1429,7 +1438,7 @@ func contextNativeSource(t *testing.T) {
 				rank, key = 3, rows[7].Key
 			}
 			if variant == "early Q" {
-				window.Generation = 10
+				mustEnvironment(t, fixtureSeedPrefixRawRow(store, rows[0].DBI, rows[0].Key, rows[0].Literal[:103]))
 			}
 			if variant == "shape pointer" {
 				mode = 17
@@ -1518,12 +1527,18 @@ func contextNativeSource(t *testing.T) {
 				t.Fatal("source refusal stage/resource/no-write", truth, stage, result, store.state, probe)
 			}
 			if state == "OPEN" {
-				if evidence.gets != 0 {
+				if evidence.gets != 0 || probe.OldGets[2] != 1 || probe.OldGets[3] != 0 {
 					t.Fatal("earlier Q lost first-error order", evidence)
 				}
-				contextImages(t, store, rows)
-				window.Generation = 9
+				if store.env == nil || store.writer == nil || store.txn != nil || store.terminal != nil {
+					t.Fatal("earlier Q reusable resource tuple")
+				}
+				obsoleteRawImage(t, store, 2, rows[0].Key, rows[0].Literal[:103])
+				contextImages(t, store, rows[1:])
+				consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 900).Key, nil, false, "earlier Q durable target")
+				mustEnvironment(t, fixtureSeedPrefixRawRow(store, rows[0].DBI, rows[0].Key, rows[0].Literal))
 				largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window})
+				contextImages(t, store, rows)
 				return
 			}
 			if result != store.terminal {
@@ -1745,7 +1760,18 @@ func contextNativeJoint(t *testing.T) {
 			var result error
 			run := func() {
 				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
-					page := obsoleteIndexPage(t, reader, 9)
+					page, err := reader.ObsoleteGenerationPageV1(9, 2, nil, 1440)
+					mustEnvironment(t, err)
+					wantRows := 1
+					if variant == "repeat header" {
+						wantRows = 2
+					}
+					if len(page.Rows) != wantRows || !bytes.Equal(page.Rows[0].Key(), canonicalForwardKeyLiteral(9, 1)) {
+						t.Fatal("joint physical index count/first key", len(page.Rows))
+					}
+					if wantRows == 2 && !bytes.Equal(page.Rows[1].Key(), canonicalForwardKeyLiteral(9, 2)) {
+						t.Fatal("joint repeated-header second index key")
+					}
 					undo, err := reader.ObsoleteUndoPageV1(page.Rows[0], nil, 7)
 					mustEnvironment(t, err)
 					return Batch{Mutations: []Mutation{consultedCounter(t, 900)}, Consulted: []ConsultedRow{{DBI: legacy.DBI, Key: legacy.Key}}, ContextConsulted: &window, LargeConsulted: []LargeImageSelectorV1{{Kind: 1, Hash: hash}}, ObsoleteConsulted: []ObsoletePageWitnessV1{undo.Witness}}, nil
@@ -1776,6 +1802,9 @@ func contextNativeJoint(t *testing.T) {
 				}
 				obsoleteRawImage(t, store, 2, indexKey, indexValue)
 				obsoleteRawImage(t, store, 3, hash[:], header)
+				if variant == "repeat header" {
+					obsoleteRawImage(t, store, 2, canonicalForwardKeyLiteral(9, 2), indexValue)
+				}
 				return
 			}
 			commit, ok := result.(*CommitError)
