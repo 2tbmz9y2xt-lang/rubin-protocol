@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -1171,4 +1172,779 @@ func TestLargeImageV1ObsoleteLegacyPriority(t *testing.T) {
 	reopened, err := Open(path, cfg)
 	consultedTrack(t, reopened, err)
 	obsoleteRawImage(t, reopened, 0, seed.Key, seed.Literal)
+}
+
+func TestCanonicalContextWindowV1Native(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{"B01 B04 B05 B09-B15 admission and query order", contextNativeOrder},
+		{"B14 exact incomplete source and native proofs", contextNativeWidths},
+		{"B16 B25 source cause and cleanup", contextNativeSource},
+		{"B17 B20 B21 B24 crossed and write drift", contextNativeTruth},
+		{"B19 B23 original header and late faults", contextNativeOriginal},
+		{"B06 B23 B27 joint scopes", contextNativeJoint},
+		{"B26 callback arbitration", contextNativeCallbacks},
+		{"B15 legacy source precedence", contextNativeLegacyPriority},
+		{"B25 Q and close busy at existing projection owner", contextNativeQClose},
+	} {
+		t.Run(row.name, row.run)
+	}
+}
+
+func contextProbe(t *testing.T, store *Store, run func()) SelectedDamageEvidence {
+	t.Helper()
+	owner, err := NewOperationReservationOwner(154_611_151)
+	mustEnvironment(t, err)
+	evidence, err := FixtureSelectedDamage(store, owner, SelectedDamageScenario(1), 0, nil, run)
+	mustEnvironment(t, err)
+	return evidence
+}
+
+func contextNativeOrder(t *testing.T) {
+	for _, variant := range []string{"nil", "nil reverse", "one", "eleven", "retarget", "clone", "scalar", "zero count", "bad height", "generation before capacity", "height before capacity", "over count", "maximum count", "capacity before overflow", "overflow", "legacy", "Large", "Obsolete", "static later index", "obsolete index", "derived header", "early missing"} {
+		t.Run(variant, func(t *testing.T) {
+			store, _, _ := consultedStore(t)
+			window := CanonicalContextWindowV1{9, 0, 3}
+			if variant == "one" {
+				window.Count = 1
+			}
+			if variant == "eleven" {
+				window.FirstHeight, window.Count = 1, 11
+			}
+			if variant == "retarget" {
+				window.Count = 10_080
+			}
+			rows := contextSeed(t, store, window)
+			batch := Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window}
+			wantIndex, wantHeader := uint64(window.Count), uint64(window.Count)
+			refusal := false
+			evidence := contextProbe(t, store, func() {
+				truth, stage, err := store.Update(func(reader *Reader) (Batch, error) {
+					switch variant {
+					case "nil", "nil reverse":
+						batch.ContextConsulted, batch.Reverse = nil, variant == "nil reverse"
+						wantIndex, wantHeader = 0, 0
+					case "clone":
+						plan, err := updateOwnedBatch(batch, reader)
+						mustEnvironment(t, err)
+						before := fixtureLargeNativeCalls()
+						_, err = updateOwnedContext(&window, plan, largeImageScope{})
+						mustEnvironment(t, err)
+						if fixtureLargeNativeCalls() != before {
+							t.Fatal("descriptor clone queried data")
+						}
+					case "scalar":
+						window.Generation = 0
+						refusal, wantIndex, wantHeader = true, 0, 0
+					case "zero count", "bad height", "generation before capacity", "height before capacity", "over count", "maximum count", "capacity before overflow", "overflow":
+						refusal, wantIndex, wantHeader = true, 0, 0
+						switch variant {
+						case "zero count":
+							window.Count = 0
+						case "bad height":
+							window.FirstHeight = 0x100000000
+						case "generation before capacity":
+							window.Generation, window.Count = 0, 10_081
+						case "height before capacity":
+							window.FirstHeight, window.Count = 0x100000000, 10_081
+						case "over count":
+							window.Count = 10_081
+						case "maximum count":
+							window.Count = 0xffffffff
+						case "capacity before overflow":
+							window.FirstHeight, window.Count = 0xffffffff, 10_081
+						case "overflow":
+							window.FirstHeight, window.Count = 0xffffffff, 2
+						}
+					case "legacy":
+						batch.Consulted = []ConsultedRow{{}}
+						refusal, wantIndex, wantHeader = true, 0, 0
+					case "Large":
+						batch.LargeConsulted = []LargeImageSelectorV1{{Kind: 99}}
+						refusal, wantIndex, wantHeader = true, 0, 0
+					case "Obsolete":
+						batch.ObsoleteConsulted = []ObsoletePageWitnessV1{{}}
+						refusal, wantIndex, wantHeader = true, 0, 0
+					case "static later index":
+						window.Generation = 10
+						batch.Consulted = []ConsultedRow{{DBI: rows[6].DBI, Key: canonicalForwardKeyLiteral(10, 2)}}
+						refusal, wantIndex, wantHeader = true, 1, 0
+						// The one index query belongs to legacy qualification, never context.
+					case "obsolete index":
+						page, err := reader.ObsoleteIndexPageV1(9, nil, 1)
+						mustEnvironment(t, err)
+						batch.ObsoleteDeletes, batch.ObsoleteConsulted = page.Rows, []ObsoletePageWitnessV1{page.Witness}
+						refusal, wantIndex, wantHeader = true, 0, 0
+					case "derived header":
+						batch.Mutations = append(batch.Mutations, canonicalDelete(rows[1]))
+						refusal, wantIndex, wantHeader = true, 1, 0
+					case "early missing":
+						window.Generation = 10
+						batch.Consulted = []ConsultedRow{{DBI: rows[7].DBI, Key: rows[7].Key}}
+						refusal, wantIndex, wantHeader = true, 1, 1
+					}
+					contextSort(batch.Mutations)
+					return batch, nil
+				})
+				if refusal {
+					diagnostic, class, code := "invalid Update Batch", "InvalidInput", 22
+					if variant == "early missing" {
+						diagnostic, class, code = "canonical context OLD image is incomplete", "StateMismatch", -30779
+					}
+					if variant == "over count" || variant == "maximum count" || variant == "capacity before overflow" {
+						diagnostic, class, code = "Update Batch exceeds bound", "Capacity", -30417
+					}
+					contextError(t, err, class, code, diagnostic)
+					if truth != 1 || stage != 1 || string(store.state) != "OPEN" {
+						t.Fatal("admission tuple", truth, stage, err)
+					}
+				} else if truth != 2 || stage != 3 || err != nil || string(store.state) != "OPEN" {
+					t.Fatal("context success tuple", truth, stage, err)
+				}
+			})
+			if refusal {
+				if evidence.BeginWrite != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
+					t.Fatal("refusal reached write", evidence)
+				}
+				if variant != "obsolete index" && (evidence.OldGets[2] != wantIndex || evidence.OldGets[3] != wantHeader) {
+					t.Fatal("admission exact source query order", variant, evidence)
+				}
+				consultedRequireImage(t, store, readDBIsLiteral()[0], consultedCounter(t, 900).Key, nil, false, "query refusal target absent")
+				valid := CanonicalContextWindowV1{9, 0, 3}
+				largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &valid})
+			} else {
+				// Qualification, prewrite, final: one ascending pair walk apiece.
+				if evidence.OldGets[2] != 3*wantIndex || evidence.OldGets[3] != 3*wantHeader || evidence.BeginWrite != 1 || evidence.Commits != 1 {
+					t.Fatal("complete pair visits", evidence)
+				}
+			}
+			contextImages(t, store, rows)
+		})
+	}
+}
+
+func contextNativeWidths(t *testing.T) {
+	for _, rank := range []uint8{2, 3} {
+		width := 104
+		if rank == 3 {
+			width = 116
+		}
+		for _, size := range []int{-1, 0, width-1, width+1} {
+			t.Run(fmt.Sprintf("rank%d/size%d", rank, size), func(t *testing.T) {
+				store, _, _ := consultedStore(t)
+				window := CanonicalContextWindowV1{9, 0, 1}
+				rows := contextRows(window)
+				for i, row := range rows[:2] {
+					value := row.Literal
+					if uint8(i+2) == rank {
+						if size == -1 {
+							continue
+						}
+						value = make([]byte, size)
+						copy(value, row.Literal)
+					}
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, row.DBI, row.Key, value))
+				}
+				batch := Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window}
+				if rank == 2 {
+					batch.Mutations = append(batch.Mutations, canonicalDelete(rows[1]))
+				}
+				evidence := contextProbe(t, store, func() {
+					contextRefusal(t, store, batch, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+				})
+				if evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.Deletes != 0 {
+					t.Fatal("Q reached write", evidence)
+				}
+				// Direct proof must report Q, rather than derive an unsafe header or call inequality equal.
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					scope := largeImageScope{context: window, contextPresent: true, maxKey: 2022, selectors: []LargeImageSelectorV1{{Kind: 1}}}
+					handles := store.dbis
+					handles[4] = ^handles[4]
+					_, err := updateNativeLargeEqual(reader.txn, reader.txn, handles, nil, scope)
+					contextError(t, err, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+					outcome := store.updateNative(updateNativePlan(t, consultedCounter(t, 900)), nil, reader.txn, scope)
+					contextError(t, outcome.primary, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+					requireUpdateTruth(t, outcome, 1, false, outcome.primary, nil)
+					if outcome.stage != 1 {
+						t.Fatal("unqualified prewrite Q stage")
+					}
+					outcome = updateNativeReadback(store.env, store.dbis, nil, nil, reader.txn, nativeError(operationUpdate, 28), scope)
+					contextError(t, outcome.secondary, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+					requireUpdateTruth(t, outcome, 3, true, outcome.primary, outcome.secondary)
+					return nil
+				}))
+				want := []byte(nil)
+				if size >= 0 {
+					want = make([]byte, size)
+					copy(want, rows[int(rank)-2].Literal)
+				}
+				obsoleteRawImage(t, store, rank, rows[int(rank)-2].Key, want)
+				other := rows[3-int(rank)]
+				obsoleteRawImage(t, store, other.DBI.Rank, other.Key, other.Literal)
+				for _, row := range rows[:2] {
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, row.DBI, row.Key, row.Literal))
+				}
+				batch.Mutations = batch.Mutations[:1]
+				largeCommit(t, store, batch)
+				contextImages(t, store, rows[:2])
+			})
+		}
+	}
+	t.Run("zero hash and repeated header physical observations", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		window := CanonicalContextWindowV1{9, 0, 2}
+		index, header, hash := make([]byte, 104), make([]byte, 116), make([]byte, 32)
+		for _, height := range []uint64{0, 1} {
+			mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[2], canonicalForwardKeyLiteral(9, height), index))
+		}
+		mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[3], hash, header))
+		evidence := contextProbe(t, store, func() {
+			largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window})
+		})
+		if evidence.OldGets[2] != 6 || evidence.OldGets[3] != 6 {
+			t.Fatal("repeated OLD header was omitted", evidence)
+		}
+		obsoleteRawImage(t, store, 2, canonicalForwardKeyLiteral(9, 0), index)
+		obsoleteRawImage(t, store, 2, canonicalForwardKeyLiteral(9, 1), index)
+		obsoleteRawImage(t, store, 3, hash, header)
+	})
+}
+
+func contextNativeSource(t *testing.T) {
+	for _, variant := range []string{"index first", "header first", "last index", "last header", "early Q", "early fault", "shape pointer", "shape length", "EIO consumed abort", "EIO retained", "EIO close", "Q consumed abort", "Q retained"} {
+		t.Run(variant, func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			window := CanonicalContextWindowV1{9, 0, 3}
+			rows := contextSeed(t, store, window)
+			rank, key, mode := uint8(2), rows[0].Key, uint32(28)
+			if variant == "header first" {
+				rank, key = 3, rows[1].Key
+			}
+			if variant == "last index" {
+				key = rows[6].Key
+			}
+			if variant == "last header" || variant == "early Q" {
+				rank, key = 3, rows[7].Key
+			}
+			if variant == "early Q" {
+				window.Generation = 10
+			}
+			if variant == "shape pointer" {
+				mode = 17
+			}
+			if variant == "shape length" {
+				mode = 18
+			}
+			if variant == "EIO retained" || variant == "Q retained" {
+				mode = 2
+			}
+			if variant == "EIO close" {
+				mode = 24
+			}
+			if variant == "Q consumed abort" {
+				mode = 9
+			}
+			if strings.HasPrefix(variant, "Q ") {
+				window.Generation = 10
+			}
+			batch := Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window}
+			if variant == "early fault" {
+				batch.Mutations = append(batch.Mutations, canonicalDelete(rows[7]))
+			}
+			var truth CommitTruth
+			var stage UpdateStage
+			var result error
+			var saved *Reader
+			var evidence fixtureLargeEvidence
+			run := func() {
+				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
+					saved = reader
+					if variant == "EIO retained" || variant == "EIO close" {
+						_, _, err := reader.Get(rows[0].DBI, rows[0].Key)
+						mustEnvironment(t, err)
+					}
+					return batch, nil
+				})
+			}
+			var probe SelectedDamageEvidence
+			if variant == "EIO consumed abort" {
+				owner, err := NewOperationReservationOwner(154_611_151)
+				mustEnvironment(t, err)
+				probe, err = FixtureSelectedDamage(store, owner, SelectedDamageScenario(5), rank, key, run)
+				mustEnvironment(t, err)
+			} else {
+				probe = contextProbe(t, store, func() {
+					var err error
+					evidence, err = fixtureLargeFault(store, mode, rank, key, run)
+					mustEnvironment(t, err)
+				})
+			}
+			primary, state := result, "CLOSED"
+			if variant == "EIO consumed abort" || variant == "Q consumed abort" {
+				parts, ok := result.(interface{ Unwrap() []error })
+				if !ok || len(parts.Unwrap()) != 2 {
+					t.Fatal("source/abort ordered causes", result)
+				}
+				primary = parts.Unwrap()[0]
+				engine := requireEnvironmentError(t, parts.Unwrap()[1], EngineClass("IO"), operationAbort, 5, "error 5")
+				if engine.Cause != nil {
+					t.Fatal("abort cause identity")
+				}
+			}
+			if variant == "EIO retained" || variant == "Q retained" {
+				engine := requireEnvironmentError(t, result, EngineClass("LocalInvariant"), operationAbort, -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
+				if engine.Cause == nil || !engine.ReopenRequired {
+					t.Fatal("retained abort lost source cause/reopen")
+				}
+				primary, state = engine.Cause, "POISONED_THREAD"
+			}
+			if variant == "EIO close" {
+				engine := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, "MDBX_BUSY: Another write transaction is running, or environment is already used while opening with MDBX_EXCLUSIVE flag")
+				primary, state = engine.Cause, "CLOSE_BLOCKED"
+			}
+			if variant == "early Q" || strings.HasPrefix(variant, "Q ") {
+				contextError(t, primary, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+			} else if strings.HasPrefix(variant, "shape") {
+				contextError(t, primary, "LocalInvariant", -30779, "mdbx_get returned invalid result shape")
+			} else {
+				contextError(t, primary, "IO", 5, "error 5")
+			}
+			if variant == "early Q" {
+				state = "OPEN"
+			}
+			if truth != 1 || stage != 1 || string(store.state) != state || saved == nil || saved.usable() || probe.BeginWrite != 0 || probe.Commits != 0 || probe.Deletes != 0 {
+				t.Fatal("source refusal stage/resource/no-write", truth, stage, result, store.state, probe)
+			}
+			if state == "OPEN" {
+				if evidence.gets != 0 {
+					t.Fatal("earlier Q lost first-error order", evidence)
+				}
+				contextImages(t, store, rows)
+				window.Generation = 9
+				largeCommit(t, store, Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window})
+				return
+			}
+			if result != store.terminal {
+				t.Fatal("source terminal identity")
+			}
+			contextNativeResources(t, store, state)
+			largeNativeCached(t, store)
+			mustEnvironment(t, fixtureLargeRelease(store))
+			reopened, err := Open(path, cfg)
+			consultedTrack(t, reopened, err)
+			contextImages(t, reopened, rows)
+			consultedRequireImage(t, reopened, readDBIsLiteral()[0], consultedCounter(t, 900).Key, nil, false, "source refusal durable target")
+			window.Generation = 9
+			largeCommit(t, reopened, Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window})
+		})
+	}
+}
+
+func contextNativeTruth(t *testing.T) {
+	t.Run("unchanged context and third target", func(t *testing.T) {
+		store, path, cfg := consultedStore(t)
+		window := CanonicalContextWindowV1{9, 0, 3}
+		rows := contextSeed(t, store, window)
+		target := consultedCounter(t, 900)
+		truth, stage, result, evidence := largeFaultCommit(t, store, 6, 0, target.Key, Batch{Mutations: []Mutation{target}, ContextConsulted: &window})
+		commit, ok := result.(*CommitError)
+		if !ok || truth != 3 || stage != 3 || commit.Truth != 3 || commit.ReadbackCause != nil || store.terminalTruth != 3 || evidence.commits != 1 {
+			t.Fatal("unchanged context third target complete tuple", truth, stage, result, evidence)
+		}
+		contextError(t, commit.Cause, "Capacity", 28, "error 28")
+		contextNativeResources(t, store, "CLOSED")
+		reopened, err := Open(path, cfg)
+		consultedTrack(t, reopened, err)
+		contextImages(t, reopened, rows)
+		obsoleteRawImage(t, reopened, 0, target.Key, []byte{0x7f})
+	})
+	for _, rank := range []uint8{2, 3} {
+		for _, mode := range []uint32{4, 5, 7, 12, 23, 6, 13, 14, 9, 10, 11, 15, 16} {
+			t.Run(fmt.Sprintf("rank%d/mode%d", rank, mode), func(t *testing.T) {
+				store, path, cfg := consultedStore(t)
+				window := CanonicalContextWindowV1{9, 0, 3}
+				rows := contextSeed(t, store, window)
+				selected := rows[6+int(rank)-2]
+				batch := Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window}
+				truth, stage, result, evidence := largeFaultCommit(t, store, mode, rank, selected.Key, batch)
+				if mode == 13 || mode == 14 {
+					diagnostic, wantStage := "final update image mismatch", UpdateStage(2)
+					if mode == 14 {
+						diagnostic, wantStage = "OLD/write snapshot mismatch", 1
+					}
+					contextError(t, result, "StateMismatch", -30779, diagnostic)
+					if truth != 1 || stage != wantStage || evidence.commits != 0 || string(store.state) != "CLOSED" {
+						t.Fatal("public drift phase", truth, stage, result, evidence)
+					}
+				} else {
+					want := CommitTruth(3)
+					if mode == 7 {
+						want = 1
+					}
+					if mode == 12 || mode >= 9 && mode <= 11 || mode == 15 || mode == 16 {
+						want = 2
+					}
+					var commit *CommitError
+					if !errors.As(result, &commit) || truth != want || stage != 3 || commit.Truth != want || store.terminalTruth != want || evidence.commits != 1 {
+						t.Fatal("crossed context complete tuple", truth, stage, result, evidence)
+					}
+					contextError(t, commit.Cause, "Capacity", 28, "error 28")
+					if mode == 23 {
+						contextError(t, commit.ReadbackCause, "IO", 5, "error 5")
+					} else if mode == 9 || mode == 16 {
+						requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationAbort, 5, "error 5")
+					} else if mode == 10 || mode == 15 {
+						requireEnvironmentError(t, commit.ReadbackCause, EngineClass("LocalInvariant"), operationAbort, -30416, "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread")
+					} else if mode != 11 && commit.ReadbackCause != nil {
+						t.Fatal("mismatch invented readback cause", commit.ReadbackCause)
+					}
+				}
+				state := "CLOSED"
+				if mode == 10 || mode == 15 {
+					state = "POISONED_THREAD"
+				}
+				if mode == 11 {
+					state = "CLOSE_BLOCKED"
+					closeErr := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, "MDBX_BUSY: Another write transaction is running, or environment is already used while opening with MDBX_EXCLUSIVE flag")
+					commit, ok := closeErr.Cause.(*CommitError)
+					if !ok || commit.Truth != truth || commit.ReadbackCause != nil {
+						t.Fatal("close lost exact commit cause", closeErr.Cause)
+					}
+				}
+				if string(store.state) != state {
+					t.Fatal("crossed resource state", store.state)
+				}
+				contextNativeResources(t, store, state)
+				mustEnvironment(t, fixtureLargeRelease(store))
+				reopened, err := Open(path, cfg)
+				consultedTrack(t, reopened, err)
+				wantRow := selected.Literal
+				if mode == 4 {
+					wantRow = nil
+				}
+				if mode == 5 || mode == 6 || mode == 14 {
+					wantRow = []byte{0x7f}
+				}
+				obsoleteRawImage(t, reopened, rank, selected.Key, wantRow)
+				counter := batch.Mutations[0]
+				wantCounter := counter.Literal
+				if mode == 7 || mode == 13 || mode == 14 {
+					wantCounter = nil
+				}
+				obsoleteRawImage(t, reopened, 0, counter.Key, wantCounter)
+			})
+		}
+	}
+}
+
+func contextNativeOriginal(t *testing.T) {
+	for _, variant := range []string{"candidate hash", "both false", "later context", "following Large", "following Obsolete"} {
+		t.Run(variant, func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			window := CanonicalContextWindowV1{9, 0, 3}
+			rows := contextSeed(t, store, window)
+			alternate := contextRows(CanonicalContextWindowV1{10, 0, 1})[1]
+			largeCommit(t, store, Batch{Mutations: []Mutation{alternate}})
+			plan := updateNativePlan(t, consultedCounter(t, 900))
+			scope, err := updateOwnedContext(&window, plan, largeImageScope{maxKey: 2022})
+			mustEnvironment(t, err)
+			wantTarget := plan[0].literal
+			if variant == "both false" {
+				wantTarget = bytes.Repeat([]byte{0x31}, 16)
+			}
+			mode, faultRank, faultKey := uint32(8), uint8(3), rows[7].Key
+			if variant == "candidate hash" {
+				faultKey = rows[1].Key
+			}
+			if variant == "following Large" {
+				faultRank, faultKey = 4, rows[1].Key
+				scope.selectors = []LargeImageSelectorV1{{Kind: 1}}
+				copy(scope.selectors[0].Hash[:], faultKey)
+			}
+			if variant == "following Obsolete" {
+				faultRank, faultKey = 1, append(obsoleteGenerationLiteral(9), 1)
+				scope.points = []obsoletePoint{{rank: 1, key: faultKey}}
+			}
+			var outcome updateNativeOutcome
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			_, fixtureErr := fixtureLargeFault(store, mode, faultRank, faultKey, func() {
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					if infrastructure, err := contextQualify(reader, plan, scope); infrastructure || err != nil {
+						t.Fatal("original source qualification", infrastructure, err)
+					}
+					change := contextChange(rows, 0, 2)
+					if variant == "candidate hash" {
+						change[0].literal = bytes.Clone(rows[0].Literal)
+						copy(change[0].literal[:32], alternate.Key)
+						change = append(change, ownedMutation{dbi: readDBIsLiteral()[7], key: canonicalOwnerKeyLiteral(9, sha3.Sum256(alternate.Literal)), after: AfterKind(2), literal: rows[0].Key[8:]})
+						change[1].after, change[1].literal = AfterKind(1), nil
+					}
+					sort.Slice(change, func(i, j int) bool {
+						return updateKeyOrdered(change[i].dbi.Rank, change[i].key, change[j].dbi.Rank, change[j].key)
+					})
+					if variant != "both false" {
+						changed := store.updateNative(change, nil, reader.txn)
+						requireUpdateTruth(t, changed, 2, true, changed.primary, nil)
+						contextError(t, changed.primary, "Capacity", 28, "error 28")
+					}
+					third := append([]ownedMutation(nil), plan...)
+					third[0].literal = wantTarget
+					changed := store.updateNative(third, nil, reader.txn)
+					requireUpdateTruth(t, changed, 2, true, changed.primary, nil)
+					contextError(t, changed.primary, "Capacity", 28, "error 28")
+					outcome = updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, nativeError(operationUpdate, 28), scope)
+					return nil
+				}))
+			})
+			mustEnvironment(t, fixtureErr)
+			if outcome.truth != 3 || outcome.stage != 3 || !outcome.commitAttempted {
+				t.Fatal("late context fault truth", outcome)
+			}
+			contextError(t, outcome.primary, "Capacity", 28, "error 28")
+			if variant == "following Large" {
+				requireEnvironmentError(t, outcome.secondary, EngineClass("IO"), operationGet, 5, "error 5")
+			} else {
+				contextError(t, outcome.secondary, "IO", 5, "error 5")
+			}
+			truth, stage, result := store.applyUpdateOutcome(outcome, nil, nil, false)
+			commit, ok := result.(*CommitError)
+			if !ok || truth != 3 || stage != 3 || commit.Truth != 3 || commit.Cause != outcome.primary || commit.ReadbackCause != outcome.secondary || store.terminalTruth != 3 {
+				t.Fatal("original-header/late-fault CommitError tuple", truth, stage, result)
+			}
+			contextNativeResources(t, store, "CLOSED")
+			largeNativeCached(t, store)
+			reopened, err := Open(path, cfg)
+			consultedTrack(t, reopened, err)
+			obsoleteRawImage(t, reopened, 3, rows[1].Key, rows[1].Literal)
+			obsoleteRawImage(t, reopened, 3, alternate.Key, alternate.Literal)
+			obsoleteRawImage(t, reopened, 0, plan[0].key, wantTarget)
+		})
+	}
+}
+
+func contextNativeJoint(t *testing.T) {
+	for _, variant := range []string{"unchanged", "repeat header", "legacy", "context", "Large", "Obsolete", "later fault"} {
+		t.Run(variant, func(t *testing.T) {
+			store, path, cfg := consultedStore(t)
+			indexKey, indexValue, hash, header := obsoleteProjectionSeed(t, store, 9, 1)
+			window := CanonicalContextWindowV1{9, 1, 1}
+			if variant == "repeat header" {
+				window.Count = 2
+				mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[2], canonicalForwardKeyLiteral(9, 2), indexValue))
+			}
+			legacy := consultedCounter(t, 901)
+			largeCommit(t, store, Batch{Mutations: []Mutation{legacy}})
+			familyKey := append(bytes.Clone(hash[:]), 2)
+			obsoleteSeed(t, store, 4, hash[:], []byte{0x61})
+			obsoleteSeed(t, store, 5, familyKey, []byte{0x51})
+			var truth CommitTruth
+			var stage UpdateStage
+			var result error
+			run := func() {
+				truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
+					page := obsoleteIndexPage(t, reader, 9)
+					undo, err := reader.ObsoleteUndoPageV1(page.Rows[0], nil, 7)
+					mustEnvironment(t, err)
+					return Batch{Mutations: []Mutation{consultedCounter(t, 900)}, Consulted: []ConsultedRow{{DBI: legacy.DBI, Key: legacy.Key}}, ContextConsulted: &window, LargeConsulted: []LargeImageSelectorV1{{Kind: 1, Hash: hash}}, ObsoleteConsulted: []ObsoletePageWitnessV1{undo.Witness}}, nil
+				})
+			}
+			rank, key, mode := uint8(0), legacy.Key, uint32(5)
+			switch variant {
+			case "context":
+				rank, key = 2, indexKey
+			case "Large":
+				rank, key = 4, hash[:]
+			case "Obsolete":
+				rank, key = 5, familyKey
+			case "later fault":
+				rank, key, mode = 2, indexKey, 29
+			}
+			var evidence fixtureLargeEvidence
+			if variant == "unchanged" || variant == "repeat header" {
+				run()
+			} else {
+				var err error
+				evidence, err = fixtureLargeFault(store, mode, rank, key, run)
+				mustEnvironment(t, err)
+			}
+			if variant == "unchanged" || variant == "repeat header" {
+				if truth != 2 || stage != 3 || result != nil || string(store.state) != "OPEN" {
+					t.Fatal("joint unchanged/repeated header", truth, stage, result)
+				}
+				obsoleteRawImage(t, store, 2, indexKey, indexValue)
+				obsoleteRawImage(t, store, 3, hash[:], header)
+				return
+			}
+			commit, ok := result.(*CommitError)
+			if !ok || truth != 3 || stage != 3 || commit.Truth != 3 || store.terminalTruth != 3 || string(store.state) != "CLOSED" || evidence.commits != 1 {
+				t.Fatal("joint predicate independently failed", variant, truth, stage, result)
+			}
+			contextError(t, commit.Cause, "Capacity", 28, "error 28")
+			if variant == "later fault" {
+				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationGet, 5, "error 5")
+			} else if commit.ReadbackCause != nil {
+				t.Fatal("joint mismatch cause", commit.ReadbackCause)
+			}
+			reopened, err := Open(path, cfg)
+			consultedTrack(t, reopened, err)
+			obsoleteRawImage(t, reopened, rank, key, []byte{0x7f})
+		})
+	}
+}
+
+func contextNativeCallbacks(t *testing.T) {
+	for _, variant := range []string{"nil", "exact", "wrapped", "distinct", "typed-nil", "panic"} {
+		t.Run(variant, func(t *testing.T) {
+			store, _, _ := consultedStore(t)
+			window := CanonicalContextWindowV1{0, 0, 10_081}
+			key := consultedCounter(t, 901).Key
+			var saved *Reader
+			var recorded, application, result error
+			var truth CommitTruth
+			var stage UpdateStage
+			panicValue := &struct{ value string }{"context callback"}
+			var recovered any
+			evidence := contextProbe(t, store, func() {
+				func() {
+					defer func() { recovered = recover() }()
+					_, err := fixtureLargeFault(store, 28, 0, key, func() {
+						truth, stage, result = store.Update(func(reader *Reader) (Batch, error) {
+							saved = reader
+							_, _, recorded = reader.Get(readDBIsLiteral()[0], key)
+							switch variant {
+							case "exact":
+								application = recorded
+							case "wrapped":
+								application = fmt.Errorf("context wrapped: %w", recorded)
+							case "distinct":
+								application = errors.New("context distinct")
+							case "typed-nil":
+								application = (*largeTypedNil)(nil)
+							case "panic":
+								panic(panicValue)
+							}
+							return Batch{Mutations: []Mutation{consultedCounter(t, 900)}, ContextConsulted: &window}, application
+						})
+					})
+					mustEnvironment(t, err)
+				}()
+			})
+			if saved == nil || saved.usable() || string(store.state) != "CLOSED" || evidence.BeginWrite != 0 || evidence.OldGets[2] != 0 || evidence.OldGets[3] != 0 || store.env != nil || store.writer != nil || store.txn != nil {
+				t.Fatal("callback arbitration queried context or lost cleanup", evidence)
+			}
+			if variant == "panic" {
+				if recovered != panicValue {
+					t.Fatal("original callback panic")
+				}
+				result = store.terminal
+			} else if truth != 1 || stage != 1 {
+				t.Fatal("callback phase")
+			}
+			largeCallbackCauses(t, result, application, recorded, 1)
+			largeNativeCached(t, store)
+		})
+	}
+}
+
+func contextNativeResources(t *testing.T, store *Store, state string) {
+	t.Helper()
+	if string(store.state) != state || store.terminal == nil {
+		t.Fatal("native terminal state/error", store.state)
+	}
+	switch state {
+	case "CLOSED":
+		if store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || store.dbis != (Store{}).dbis {
+			t.Fatal("consumed native resource tuple")
+		}
+	case "POISONED_THREAD":
+		if store.env == nil || store.writer == nil || store.txn == nil || store.config != (ConfigV1{}) || store.dbis != (Store{}).dbis {
+			t.Fatal("retained transaction native resource tuple")
+		}
+	case "CLOSE_BLOCKED":
+		if store.env == nil || store.writer == nil || store.txn != nil || store.config == (ConfigV1{}) || store.dbis == (Store{}).dbis {
+			t.Fatal("retained environment native resource tuple")
+		}
+	}
+}
+
+func contextNativeLegacyPriority(t *testing.T) {
+	path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+	cfg.Upper = 512 << 20
+	store, err := Create(path, cfg)
+	consultedTrack(t, store, err)
+	mustEnvironment(t, fixtureLargeBulk(store, 1, 3, 68_000_125))
+	header := bytes.Repeat([]byte{0x5a}, 116)
+	rows := make([]ConsultedRow, 3)
+	for i := range rows {
+		binary.BigEndian.PutUint32(header, uint32(i))
+		hash := sha3.Sum256(header)
+		rows[i] = ConsultedRow{DBI: readDBIsLiteral()[4], Key: bytes.Clone(hash[:])}
+	}
+	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].Key, rows[j].Key) < 0 })
+	window := CanonicalContextWindowV1{0, 0, 10_081}
+	batch := Batch{Mutations: []Mutation{consultedCounter(t, 900)}, Consulted: rows, ContextConsulted: &window}
+	evidence := contextProbe(t, store, func() {
+		contextRefusal(t, store, batch, "Capacity", -30417, "Update Batch exceeds bound")
+	})
+	if evidence.OldGets[2] != 0 || evidence.OldGets[3] != 0 || evidence.BeginWrite != 0 || evidence.Commits != 0 {
+		t.Fatal("legacy present-length cap lost context precedence", evidence)
+	}
+	var truth CommitTruth
+	var stage UpdateStage
+	var result error
+	evidence = contextProbe(t, store, func() {
+		_, fixtureErr := fixtureLargeFault(store, 28, 4, rows[0].Key, func() {
+			truth, stage, result = store.Update(func(*Reader) (Batch, error) { return batch, nil })
+		})
+		mustEnvironment(t, fixtureErr)
+	})
+	contextError(t, result, "IO", 5, "error 5")
+	if truth != 1 || stage != 1 || evidence.OldGets[2] != 0 || evidence.OldGets[3] != 0 || evidence.BeginWrite != 0 || evidence.Commits != 0 {
+		t.Fatal("legacy source fault lost context precedence", evidence)
+	}
+	contextNativeResources(t, store, "CLOSED")
+	largeNativeCached(t, store)
+	reopened, openErr := Open(path, cfg)
+	consultedTrack(t, reopened, openErr)
+	consultedRequireImage(t, reopened, readDBIsLiteral()[0], batch.Mutations[0].Key, nil, false, "legacy source refusal preserved target")
+}
+
+// Fixed fixture interceptors cannot simultaneously inject consumed OLD abort
+// and close BUSY: the Large owner intercepts OLD abort before the Selected owner.
+// The real public Q and consumed-abort cases are above; this composes their
+// literal disposition at the existing applyReadAbort consumer, without a seam.
+func contextNativeQClose(t *testing.T) {
+	store, path, cfg := consultedStore(t)
+	window := CanonicalContextWindowV1{10, 0, 1}
+	target := consultedCounter(t, 900)
+	truth, stage, source := store.Update(func(*Reader) (Batch, error) {
+		return Batch{Mutations: []Mutation{target}, ContextConsulted: &window}, nil
+	})
+	contextError(t, source, "StateMismatch", -30779, "canonical context OLD image is incomplete")
+	if truth != 1 || stage != 1 || string(store.state) != "OPEN" {
+		t.Fatal("public Q before direct projection")
+	}
+	var result error
+	_, err := fixtureLargeFault(store, 11, 0, target.Key, func() {
+		result = store.applyReadAbort(nil, source, false, 5)
+	})
+	mustEnvironment(t, err)
+	closeErr := requireEnvironmentError(t, result, EngineClass("Concurrency"), operationClose, -30778, "MDBX_BUSY: Another write transaction is running, or environment is already used while opening with MDBX_EXCLUSIVE flag")
+	parts, ok := closeErr.Cause.(interface{ Unwrap() []error })
+	if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != source {
+		t.Fatal("close lost exact Q then consumed abort cause", result)
+	}
+	abortErr := requireEnvironmentError(t, parts.Unwrap()[1], EngineClass("IO"), operationAbort, 5, "error 5")
+	if abortErr.Cause != nil || abortErr.ReopenRequired || result != store.terminal {
+		t.Fatal("Q/abort/close cause tuple")
+	}
+	contextNativeResources(t, store, "CLOSE_BLOCKED")
+	largeNativeCached(t, store)
+	mustEnvironment(t, fixtureLargeRelease(store))
+	reopened, openErr := Open(path, cfg)
+	consultedTrack(t, reopened, openErr)
+	consultedRequireImage(t, reopened, target.DBI, target.Key, nil, false, "Q/abort/close no effects")
 }

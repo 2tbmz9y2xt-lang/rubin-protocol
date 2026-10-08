@@ -58,11 +58,13 @@ type largeNativeRow struct {
 }
 
 type largeImageScope struct {
-	selectors []LargeImageSelectorV1
-	maxKey    uint64
-	domains   []obsoleteDomain
-	points    []obsoletePoint
-	consulted []ownedConsulted
+	context        CanonicalContextWindowV1
+	contextPresent bool
+	selectors      []LargeImageSelectorV1
+	maxKey         uint64
+	domains        []obsoleteDomain
+	points         []obsoletePoint
+	consulted      []ownedConsulted
 }
 
 func largeImageInput(diagnostic string) error {
@@ -443,7 +445,10 @@ func largeDomainEqual(old, candidate *Reader, selector LargeImageSelectorV1, pla
 }
 
 func largeResidualEqual(old, candidate *Reader, scope largeImageScope, plan []ownedMutation) (bool, error) {
-	equal := true
+	equal, err := contextEqual(old, candidate, scope)
+	if err != nil {
+		return false, err
+	}
 	for _, selector := range scope.selectors {
 		match, err := largeDomainEqual(old, candidate, selector, plan)
 		if err != nil {
