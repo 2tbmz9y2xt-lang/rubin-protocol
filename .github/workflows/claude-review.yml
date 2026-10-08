@@ -126,17 +126,19 @@ jobs:
             | jq -s '[.[] | {id, in_reply_to_id, login: .user.login, type: .user.type, assoc: .author_association, path, line, body, created_at}]' > "${raw}"
           # GraphQL variables, not shell expansions.
           # shellcheck disable=SC2016
-          query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated comments(first: 1) { nodes { databaseId author { login } } } } } } } }'
+          query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated comments(first: 1) { nodes { fullDatabaseId } } } } } } }'
           gh api graphql --paginate -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F number="${PR_NUMBER}" -f query="${query}" \
             --jq '.data.repository.pullRequest.reviewThreads.nodes[]' \
             | jq -s '.' > "${threads}"
-          jq --slurpfile c "${raw}" '[.[] | .comments.nodes[0].databaseId as $root
+          # fullDatabaseId: databaseId is deprecated (no 64-bit ids). A thread without a root id
+          # matches no comment instead of every top-level one (whose in_reply_to_id is null).
+          jq --slurpfile c "${raw}" '[.[] | (.comments.nodes[0].fullDatabaseId | if . == null then null else tonumber end) as $root
             | {thread_id: .id, resolved: .isResolved, outdated: .isOutdated,
-               comments: [$c[0][] | select((.id == $root or .in_reply_to_id == $root)
+               comments: [$c[0][] | select($root != null and (.id == $root or .in_reply_to_id == $root)
                  and (.type == "Bot" or (.assoc | IN("OWNER", "MEMBER", "COLLABORATOR"))))
                  | {author: .login, path, line, body}]}]' "${threads}" > "${INPUT_DIR}/earlier-threads.json"
           gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '.[]' \
-            | jq -s '[.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- claude-review -->")))
+            | jq -s '[.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | contains("<!-- claude-review -->")))
                 | {commit: .commit_id[0:8], submitted_at, body}]' > "${INPUT_DIR}/earlier-reviews.json"
 
       - name: Install Claude Code
