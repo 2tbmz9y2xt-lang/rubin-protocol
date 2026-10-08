@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -25,6 +27,8 @@ type pathView struct {
 	protects    int
 	headerCalls int
 	releases    int
+	inUpdate    *bool // set by pathWorld.call: true while Store.Update has not returned
+	inside      int   // releases run before Store.Update returned (before its OLD abort)
 }
 
 func (v *pathView) InventoryV1(uint64) HeaderCandidateInventoryV1 {
@@ -41,7 +45,12 @@ func (v *pathView) ProtectV1(version uint64) (bool, func()) {
 	if v.nilRelease {
 		return version == v.version, nil
 	}
-	return version == v.version, func() { v.releases++ }
+	return version == v.version, func() {
+		v.releases++
+		if v.inUpdate != nil && *v.inUpdate {
+			v.inside++
+		}
+	}
 }
 
 func (v *pathView) HeaderV1(hash [32]byte, dst *[116]byte) bool {
@@ -72,9 +81,11 @@ func (v *pathView) admit(header [116]byte) {
 // as header rows except at the heights in skip.
 type pathWorld struct {
 	*replayWorld
-	active  int
-	hashes  [][32]byte
-	headers [][116]byte
+	active   int
+	hashes   [][32]byte
+	headers  [][116]byte
+	inUpdate bool
+	observe  func() // runs after Store.Update returned, before finishLocked
 }
 
 func newPathWorld(t *testing.T, active, forkAt, forkLen int, skip ...int) *pathWorld {
@@ -82,13 +93,11 @@ func newPathWorld(t *testing.T, active, forkAt, forkLen int, skip ...int) *pathW
 	return newPathWorldWith(t, pathSeed{active: active, forkAt: forkAt, forkLen: forkLen, skip: skip})
 }
 
-// pathSeed edits the seeded rows: canonical edits each active height's rows (defectWorld form) and stored replaces the
-// stored bytes of a target header row above the active chain.
+// pathSeed edits the seeded rows: canonical edits each active height's rows (defectWorld form).
 type pathSeed struct {
 	active, forkAt, forkLen int
 	skip                    []int
 	canonical               func(h uint64, rows []mdbx.Mutation) []mdbx.Mutation
-	stored                  map[int][]byte
 }
 
 func newPathWorldWith(t *testing.T, seed pathSeed) *pathWorld {
@@ -115,22 +124,14 @@ func newPathWorldWith(t *testing.T, seed pathSeed) *pathWorld {
 		from = 0
 	}
 	for h := from; h < len(w.hashes); h++ {
-		value := cmpOrBytes(seed.stored[h], w.headers[h][:])
 		if !containsInt(seed.skip, h) {
-			rows = append(rows, mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: bytes.Clone(w.hashes[h][:]), AfterKind: mdbx.AfterLiteral, Literal: bytes.Clone(value)})
+			rows = append(rows, mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: bytes.Clone(w.hashes[h][:]), AfterKind: mdbx.AfterLiteral, Literal: bytes.Clone(w.headers[h][:])})
 		}
 	}
 	if len(rows) > 0 {
 		w.apply(rows...)
 	}
 	return w
-}
-
-func cmpOrBytes(a, b []byte) []byte {
-	if a != nil {
-		return a
-	}
-	return b
 }
 
 // replayChainHeaders is the canonical chain 1..n over the published genesis as newReplayWorld seeds it.
@@ -198,27 +199,50 @@ func pathOldActive(t testing.TB, r *mdbx.Reader, generation uint64, tip int) *md
 
 var errPathAbort = errors.New("replay path test abort")
 
-// call composes the real producer inside one aborted Store.Update: authority and endpoint from the same Reader, the
-// owner mutex held through finishLocked, and inspect observing the borrowed facts before finish.
+// call composes the real producer as its caller does: p.mu held over the whole invocation, the owner's full grant,
+// one aborted Store.Update with authority and endpoint from the same Reader, inspect observing the borrowed facts in
+// the callback, observe after Update returned (after its OLD abort), then finishLocked and the unlock.
 func (w *pathWorld) call(t *testing.T, p *replayPathOwner, supplied []byte, inspect func(replayPathOwn, error)) (replayPathOwn, error) {
 	t.Helper()
 	var own replayPathOwn
 	var err error
+	if v, ok := p.view.(*pathView); ok && v != nil {
+		v.inUpdate = &w.inUpdate
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	defer p.finishLocked()
+	gerr := w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error {
+		truth, uerr := w.update(t, func(r *mdbx.Reader) {
+			a, rerr := r.ReadStorageAuthorityV1()
+			logicalMDBXAssert(t, rerr == nil, "setup authority: %v", rerr)
+			old := pathOldActive(t, r, uint64(a.ActiveGenerationID), w.active)
+			own, err = p.ownLocked(r, a, old, w.genesis, supplied)
+			if inspect != nil {
+				inspect(own, err)
+			}
+		})
+		logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.Is(uerr, errPathAbort), "update tuple %v %v", truth, uerr)
+		return nil
+	})
+	logicalMDBXAssert(t, gerr == nil, "full grant: %v", gerr)
+	if w.observe != nil {
+		w.observe()
+	}
+	return own, err
+}
+
+// update runs one Store.Update whose callback aborts with errPathAbort; inUpdate is cleared only when Update's frame
+// has exited, on return or on a re-raised panic.
+func (w *pathWorld) update(t *testing.T, body func(*mdbx.Reader)) (mdbx.CommitTruth, error) {
+	t.Helper()
+	w.inUpdate = true
+	defer func() { w.inUpdate = false }()
 	truth, _, uerr := w.store.Update(func(r *mdbx.Reader) (mdbx.Batch, error) {
-		a, rerr := r.ReadStorageAuthorityV1()
-		logicalMDBXAssert(t, rerr == nil, "setup authority: %v", rerr)
-		old := pathOldActive(t, r, uint64(a.ActiveGenerationID), w.active)
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		defer p.finishLocked()
-		own, err = p.ownLocked(r, a, old, w.genesis, supplied)
-		if inspect != nil {
-			inspect(own, err)
-		}
+		body(r)
 		return mdbx.Batch{}, errPathAbort
 	})
-	logicalMDBXAssert(t, truth == mdbx.CommitTruthOld && errors.Is(uerr, errPathAbort), "update tuple %v %v", truth, uerr)
-	return own, err
+	return truth, uerr
 }
 
 func pathResult(err error) string {
@@ -293,8 +317,9 @@ func testReplayPathPrecondition(t *testing.T) {
 	pathZero(t, own, "cursor at tip")
 	a.Replay.Cursor.Height = a.Replay.Target.TipHeight + 1
 	logicalMDBXAssert(t, mdbx.ValidateStorageAuthorityV1(a) != nil, "hand-built authority validates")
-	_, err = p.newCall(nil, a, nil, w.genesis, nil)
+	own, err = pathDirect(t, p, a, w.genesis, "cursor above tip")
 	pathWant(t, err, selectedSideInvariant, "cursor above tip")
+	pathZero(t, own, "cursor above tip")
 	logicalMDBXAssert(t, p.slot == nil && view.versions+view.protects+view.headerCalls == 0, "precondition touched the slot or view")
 }
 
@@ -550,10 +575,16 @@ func testReplayPathGuardFinish(t *testing.T) {
 	view := &pathView{}
 	view.admit(w.headers[3])
 	p := newReplayPathOwner(view, pathLimit)
+	observed := false
+	w.observe = func() {
+		observed = true
+		logicalMDBXAssert(t, !w.inUpdate && view.releases == 0 && p.release != nil, "guard released before Update returned and the final observation")
+	}
 	_, err := w.call(t, p, nil, func(own replayPathOwn, err error) {
 		logicalMDBXAssert(t, err == nil && view.releases == 0 && p.release != nil && bytes.Equal(own.header, w.headers[3][:]), "held source")
 	})
-	logicalMDBXAssert(t, err == nil && view.releases == 1 && p.release == nil && p.slot != nil, "finish")
+	w.observe = nil
+	logicalMDBXAssert(t, observed && err == nil && view.releases == 1 && view.inside == 0 && p.release == nil && p.slot != nil, "finish %+v", view)
 	p.mu.Lock()
 	p.finishLocked()
 	p.mu.Unlock()
@@ -677,6 +708,19 @@ func testReplayPathCursorGenesisTarget(t *testing.T) {
 	own, err = g.call(t, p, nil, nil)
 	pathWant(t, err, selectedSideIntegrity, "genesis context")
 	logicalMDBXAssert(t, own.header == nil && p.slot == nil && view.versions == 0, "genesis own %+v", own)
+	// A completed slot does not bypass the target/genesis contradiction.
+	c := newPathWorld(t, 2, 2, 4)
+	c.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	p = newReplayPathOwner(nil, pathLimit)
+	_, err = c.call(t, p, nil, nil)
+	logicalMDBXAssert(t, err == nil && p.slot != nil, "genesis reuse establish: %v", err)
+	slot, hashes := p.slot, append([][32]byte(nil), p.slot.hashes...)
+	c.setReplay(mdbx.ReplayCursorAppliedV1, 3)
+	c.genesis.ChainID[0] ^= 1
+	own, err = c.call(t, p, nil, nil)
+	pathWant(t, err, selectedSideIntegrity, "genesis context on slot reuse")
+	pathZero(t, own, "genesis context on slot reuse")
+	logicalMDBXAssert(t, p.slot == slot && slices.Equal(slot.hashes, hashes) && slot.lo == 3 && !slot.attached, "genesis reuse changed the slot")
 }
 
 // B40: a nil release is the evidence invariant; no HeaderV1 call follows.
@@ -722,7 +766,7 @@ func testReplayPathProtectedPanic(t *testing.T) {
 		}()
 		_, _ = w.call(t, p, nil, nil)
 	}()
-	logicalMDBXAssert(t, view.releases == 1 && p.release == nil && p.slot == nil, "panic cleanup %+v", view)
+	logicalMDBXAssert(t, view.releases == 1 && view.inside == 0 && p.release == nil && p.slot == nil, "panic cleanup: release before the OLD abort %+v", view)
 	replaySameImage(t, image, w.image(), "panic")
 }
 
@@ -738,18 +782,40 @@ func testReplayPathConcurrentFinishDiscard(t *testing.T) {
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 3)
 	view.releases = 0
 	view.entered, view.block = make(chan struct{}), make(chan struct{})
-	got := make(chan [2]int, 1)
+	done := make(chan [2]int, 1) // discard result and the releases it observed after acquiring p.mu
+	early := make(chan string, 1)
 	go func() {
-		<-view.entered
-		done := make(chan bool)
-		go func() { done <- p.discard() }()
-		close(view.block)
-		ok := <-done
-		got <- [2]int{map[bool]int{true: 1}[ok], view.releases}
+		defer close(view.block)
+		select {
+		case <-view.entered:
+		case <-time.After(10 * time.Second):
+			early <- "HeaderV1 not reached"
+			return
+		}
+		go func() { ok := p.discard(); done <- [2]int{map[bool]int{true: 1}[ok], view.releases} }()
+		select {
+		case r := <-done:
+			early <- "discard returned while the guard was held"
+			done <- r
+		case <-time.After(50 * time.Millisecond):
+			early <- ""
+		}
 	}()
-	_, err = w.call(t, p, nil, nil)
-	r := <-got
-	logicalMDBXAssert(t, err == nil && r == [2]int{1, 1}, "discard %v err %v", r, err)
+	_, err = w.call(t, p, nil, func(replayPathOwn, error) {
+		select {
+		case <-done:
+			t.Error("discard returned before the last consumer")
+		default:
+		}
+	})
+	logicalMDBXAssert(t, <-early == "" && err == nil, "held discard: err %v", err)
+	var r [2]int
+	select {
+	case r = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("discard did not return after finish and unlock")
+	}
+	logicalMDBXAssert(t, r == [2]int{1, 1}, "discard %v", r)
 	logicalMDBXAssert(t, !p.discard() && view.releases == 1, "double release or discard")
 }
 
@@ -831,8 +897,10 @@ func testReplayPathAcceptanceRound1(t *testing.T) {
 	own, err = m.call(t, r, nil, nil)
 	pathWant(t, err, replayEntryRecovery, "F5 unbound point")
 	logicalMDBXAssert(t, own.missing && own.missingHeight == 3 && own.header == nil && bad.headerCalls == 1, "F5 own %+v", own)
+	// Unbound point bytes end the visit: a valid supplied artifact is not consulted after them (MP8F, step 4).
 	own, err = m.call(t, r, m.headers[3][:], nil)
-	m.pathOK(t, own, err, 3, replayPathSupplied, "F5 supplied after unbound point")
+	pathWant(t, err, replayEntryRecovery, "F5 unbound point with supplied")
+	logicalMDBXAssert(t, own.missing && own.missingHeight == 3 && own.missingHash == m.hashes[3] && own.header == nil && own.headerSource == replayPathUnavailable && r.slot == nil, "F5 supplied after unbound point %+v", own)
 	// F3 below(): PRE_GENESIS target whose height-0 ancestry is a foreign genesis header.
 	f := newPathWorld(t, -1, 0, 0)
 	fake, fakeHash := replayHeader(t, [32]byte{}, POW_LIMIT, 5)

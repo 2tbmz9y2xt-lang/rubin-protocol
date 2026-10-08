@@ -134,24 +134,32 @@ func replayPathAdmit(tip, lo, limit uint64) (uint64, bool) {
 	return n, n <= math.MaxInt && n <= limit/32
 }
 
-// establish admits and allocates N hashes, walks from the target tip, and publishes the slot only on success.
+// establish admits and allocates N hashes, walks from the target tip, and publishes the slot only on success. The
+// target/genesis contradiction is checked on every invocation, before a completed slot is reused.
 func (c *replayPathCall) establish() error {
 	if c.p.slot != nil {
-		return nil
+		return c.genesisBound()
 	}
 	target := c.rp.Target
 	n, ok := replayPathAdmit(target.TipHeight, c.h, c.p.limit)
 	if !ok {
 		return replayRecoveryRefusal(selectedSideCapacity, "replay path retention exceeds its limit")
 	}
-	if target.ChainID != c.genesis.ChainID || target.GenesisHash != c.genesis.GenesisHash {
-		return selectedSideDefect("replay target contradicts the genesis context")
+	if err := c.genesisBound(); err != nil {
+		return err
 	}
 	s := &replayPathSlot{key: replayPathKey{c.rp.TargetGenerationID, target}, lo: c.h, hashes: make([][32]byte, n)}
 	if err := c.walk(s); err != nil {
 		return err
 	}
 	c.p.slot = s
+	return nil
+}
+
+func (c *replayPathCall) genesisBound() error {
+	if c.rp.Target.ChainID != c.genesis.ChainID || c.rp.Target.GenesisHash != c.genesis.GenesisHash {
+		return selectedSideDefect("replay target contradicts the genesis context")
+	}
 	return nil
 }
 
@@ -273,7 +281,7 @@ func (c *replayPathCall) ancestryHeader(k uint64, x [32]byte) ([]byte, error) {
 	if err != nil || present {
 		return raw, err
 	}
-	raw, err = c.point(x)
+	raw, err = c.point(k, x)
 	if err != nil || raw != nil {
 		return raw, err
 	}
@@ -281,12 +289,17 @@ func (c *replayPathCall) ancestryHeader(k uint64, x [32]byte) ([]byte, error) {
 		c.out.header, c.out.headerSource = c.supplied[:BLOCK_HEADER_BYTES:BLOCK_HEADER_BYTES], replayPathSupplied
 		return c.out.header, nil
 	}
-	c.out.missing, c.out.missingHeight, c.out.missingHash = true, k, x
-	return nil, replayRecoveryRefusal(replayEntryRecovery, "replay path ancestry header unavailable")
+	return nil, c.missingHeader(k, x)
 }
 
-// point reads the guarded point into the owner's one reserved destination; unbound bytes are discarded.
-func (c *replayPathCall) point(x [32]byte) ([]byte, error) {
+func (c *replayPathCall) missingHeader(k uint64, x [32]byte) error {
+	c.out.missing, c.out.missingHeight, c.out.missingHash = true, k, x
+	return replayRecoveryRefusal(replayEntryRecovery, "replay path ancestry header unavailable")
+}
+
+// point reads the guarded point into the owner's one reserved destination. Present bytes that do not bind x are
+// discarded and end the visit as the missing header; only an absent point falls through to the supplied artifact.
+func (c *replayPathCall) point(k uint64, x [32]byte) ([]byte, error) {
 	p := c.p
 	if p.view == nil {
 		return nil, nil
@@ -294,8 +307,11 @@ func (c *replayPathCall) point(x [32]byte) ([]byte, error) {
 	if err := p.guard(); err != nil {
 		return nil, err
 	}
-	if !p.view.HeaderV1(x, &p.dst) || !replayPathBinds(p.dst[:], x) {
+	if !p.view.HeaderV1(x, &p.dst) {
 		return nil, nil
+	}
+	if !replayPathBinds(p.dst[:], x) {
+		return nil, c.missingHeader(k, x)
 	}
 	c.out.header, c.out.headerSource = p.dst[:], replayPathPoint
 	return c.out.header, nil

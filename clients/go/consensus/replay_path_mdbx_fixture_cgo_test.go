@@ -9,26 +9,31 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// pathArmed runs one real producer invocation (pathWorld.call form) under an armed native scenario. A native fault
-// consumes the Store, so the Update tuple is returned rather than asserted; the setup reads are counted in the evidence.
+// pathArmed runs one real producer invocation (pathWorld.call form: p.mu, the full grant, one aborted Update, then
+// finishLocked) under an armed native scenario. A native fault consumes the Store, so the Update tuple is not asserted;
+// the setup reads are counted in the evidence. p == nil runs the same Update with no producer call.
 func (w *pathWorld) pathArmed(t *testing.T, p *replayPathOwner, supplied []byte, scenario mdbx.SelectedDamageScenario, rank uint8, key []byte) (replayPathOwn, error, mdbx.SelectedDamageEvidence) {
 	t.Helper()
 	var own replayPathOwn
 	var err error
 	evidence, ferr := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() {
-		_, _, _ = w.store.Update(func(r *mdbx.Reader) (mdbx.Batch, error) {
-			a, rerr := r.ReadStorageAuthorityV1()
-			logicalMDBXAssert(t, rerr == nil, "setup authority: %v", rerr)
-			old := pathOldActive(t, r, uint64(a.ActiveGenerationID), w.active)
-			if p == nil {
-				return mdbx.Batch{}, errPathAbort
-			}
+		if p != nil {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			defer p.finishLocked()
-			own, err = p.ownLocked(r, a, old, w.genesis, supplied)
-			return mdbx.Batch{}, errPathAbort
+		}
+		gerr := w.owner.WithReservation(mdbx.MaxOperationDataBytes, func() error {
+			_, _ = w.update(t, func(r *mdbx.Reader) {
+				a, rerr := r.ReadStorageAuthorityV1()
+				logicalMDBXAssert(t, rerr == nil, "setup authority: %v", rerr)
+				old := pathOldActive(t, r, uint64(a.ActiveGenerationID), w.active)
+				if p != nil {
+					own, err = p.ownLocked(r, a, old, w.genesis, supplied)
+				}
+			})
+			return nil
 		})
+		logicalMDBXAssert(t, gerr == nil, "full grant: %v", gerr)
 	})
 	logicalMDBXAssert(t, ferr == nil, "fixture %d: %v", scenario, ferr)
 	logicalMDBXAssert(t, evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0, "write evidence %+v", evidence)
@@ -64,6 +69,8 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("WalkFaultRetry", testReplayPathFixtureWalkFaultRetry)
 	t.Run("FirstFaultSelectivity", testReplayPathFixtureFirstFaultSelectivity)
 	t.Run("StoredPositive", testReplayPathFixtureStoredPositive)
+	t.Run("CanonicalHeaderDamage", testReplayPathFixtureCanonicalHeaderDamage)
+	t.Run("PositiveErrorBacking", testReplayPathFixturePositiveErrorBacking)
 }
 
 // RC1: limit 32N-1 performs zero PATH Gets and no provider call; limit 32N reads the whole walk.
@@ -100,6 +107,15 @@ func testReplayPathFixtureGreatestAttachment(t *testing.T) {
 	pathNative(t, own, err, selectedSideCanonical, "entry 6 fault")
 	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 6 && own.header == nil && p.slot == nil, "entry fault %+v", own)
 	pathGets(t, evidence, base, 1, 1, "entry fault")
+	// Mixed visit: the non-matching active entry at 6 succeeds, then its header Get fails; the entry stays borrowed.
+	m := newPathWorld(t, 6, 2, 5)
+	m.setReplay(mdbx.ReplayCursorAppliedV1, 1)
+	base = m.pathBaseline(t)
+	p = newReplayPathOwner(nil, pathLimit)
+	own, err, evidence = m.pathArmed(t, p, nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(m.hashes[6][:]))
+	pathNative(t, own, err, replayEntryRecovery, "header fault after entry")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 6 && own.x == m.hashes[6] && own.header == nil && len(own.activeEntry) == 104 && [32]byte(own.activeEntry[:32]) == m.replayWorld.hashes[6] && p.slot == nil, "mixed own %+v", own)
+	pathGets(t, evidence, base, 1, 2, "header fault after entry")
 }
 
 // B28: PRE_GENESIS performs zero index Gets and reads each header once (h0 reused).
@@ -118,7 +134,10 @@ func testReplayPathFixturePreGenesis(t *testing.T) {
 	pathGets(t, evidence, base, 0, 3, "above active tip")
 }
 
-// B27/RC4: the walk's own-height header is the own source; the armed own-height key is reached exactly once.
+// B27/RC4: the walk's own-height read is the own source. The keyed control arms the own-height key: its fault fires
+// at the descent's visit of that key, at the expected count, so the descent reads it; the unarmed total then equals the
+// descent alone, so no second own-height read follows. The fixture fault fires once per arming, so it cannot observe a
+// second read directly; the totals are the second-read evidence.
 func testReplayPathFixtureSameAttemptReuse(t *testing.T) {
 	w := newPathWorld(t, 3, 3, 4)
 	w.setReplay(mdbx.ReplayCursorAppliedV1, 4)
@@ -126,12 +145,20 @@ func testReplayPathFixtureSameAttemptReuse(t *testing.T) {
 	own, err, evidence := w.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 	w.pathOK(t, own, err, 5, replayPathStored, "same attempt")
 	pathGets(t, evidence, base, 0, 3, "same attempt")
+	own, err, evidence = w.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(w.hashes[5][:]))
+	pathNative(t, own, err, replayEntryRecovery, "own-height header key")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 5 && own.x == w.hashes[5], "own-height key %+v", own)
+	pathGets(t, evidence, base, 0, 3, "own-height header key")
 	g := newPathWorld(t, 6, 2, 5)
 	g.setReplay(mdbx.ReplayCursorAppliedV1, 1)
 	base = g.pathBaseline(t)
 	own, err, evidence = g.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageProbeOnly, 0, nil)
 	g.pathOK(t, own, err, 2, replayPathStored, "attachment entry reuse")
 	pathGets(t, evidence, base, 5, 6, "attachment entry reuse")
+	own, err, evidence = g.pathArmed(t, newReplayPathOwner(nil, pathLimit), nil, mdbx.SelectedDamageGetEIO, 2, logicalMDBXMust(mdbx.HeightKey(1, 2)))
+	pathNative(t, own, err, selectedSideCanonical, "attachment entry key")
+	logicalMDBXAssert(t, evidence.Faults == 1 && own.h == 2 && own.activeEntry == nil, "attachment entry key %+v", own)
+	pathGets(t, evidence, base, 5, 5, "attachment entry key")
 }
 
 // RC4: the second call reads only the own header: no descent, no index Get.
@@ -208,4 +235,35 @@ func testReplayPathFixtureStoredPositive(t *testing.T) {
 	pathWant(t, err, selectedSideIntegrity, "stored positive")
 	logicalMDBXAssert(t, own.h == 4 && own.x == w.hashes[4] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && !own.missing, "positive own %+v", own)
 	logicalMDBXAssert(t, view.headerCalls+view.protects == 0 && p.slot == nil, "positive slot/provider")
+}
+
+// C11/C12/C25: the h <= a stored canonical header whose bytes hash to another name is integrity, never acquisition.
+func testReplayPathFixtureCanonicalHeaderDamage(t *testing.T) {
+	w := newPathWorld(t, 6, 2, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 0)
+	bad := bytes.Clone(w.headers[1][:])
+	bad[115] ^= 1
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[1][:], bad) == nil, "seed misnamed canonical header")
+	view := &pathView{}
+	view.admit(w.headers[1])
+	p := newReplayPathOwner(view, pathLimit)
+	own, err := w.call(t, p, w.headers[1][:], nil)
+	pathWant(t, err, selectedSideIntegrity, "canonical wrong hash")
+	logicalMDBXAssert(t, own.h == 1 && own.x == w.hashes[1] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && !own.missing && own.resource == "", "wrong hash own %+v", own)
+	logicalMDBXAssert(t, view.headerCalls+view.protects == 0 && p.slot != nil && p.slot.a == 2, "wrong hash provider/slot")
+}
+
+// C14/C26 boundary: a positive error in a failing establishment returns the original stored backing with the visit
+// identity; the building slot stays empty and Discard is false.
+func testReplayPathFixturePositiveErrorBacking(t *testing.T) {
+	w := newPathWorld(t, 2, 2, 3)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	bad := bytes.Clone(w.headers[4][:])
+	bad[115] ^= 1
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[4][:], bad) == nil, "seed misnamed ancestry header")
+	p := newReplayPathOwner(nil, pathLimit)
+	own, err := w.call(t, p, nil, nil)
+	pathWant(t, err, selectedSideIntegrity, "positive establishment")
+	logicalMDBXAssert(t, own.h == 4 && own.x == w.hashes[4] && bytes.Equal(own.header, bad) && own.headerSource == replayPathStored && own.activeEntry == nil && !own.missing && own.resource == "", "establishment own %+v", own)
+	logicalMDBXAssert(t, p.slot == nil && !p.discard(), "failed establishment slot")
 }
