@@ -420,14 +420,19 @@ func fixtureTipCloseFault() error {
 	return fixtureResult(operationInit, int(C.rubin_tip_close_fault(C.MDBX_EIO)))
 }
 
-// Close this invocation's actual lock descriptor so its real Release observes
-// EBADF. The Handle remains owned by Store and the normal consumer clears it.
+// Dispose the real descriptor once, then install a positive Go sentinel whose
+// low 32 bits cannot name a native signed-int descriptor. Release reaches the
+// real close syscall with an invalid argument, never a reused original fd.
 func fixtureTipWriterReleaseFault(store *Store) error {
 	if store == nil || store.writer == nil {
 		return errors.New("missing endpoint fixture writer")
 	}
-	fd := reflect.ValueOf(store.writer).Elem().FieldByName("fd").Int()
-	return syscall.Close(int(fd))
+	field := reflect.ValueOf(store.writer).Elem().FieldByName("fd")
+	if err := syscall.Close(int(field.Int())); err != nil {
+		return err
+	}
+	*(*int)(unsafe.Pointer(field.UnsafeAddr())) = int(^uint32(0))
+	return nil
 }
 
 func fixtureLargeNativeCalls() uint32 { return uint32(C.rubin_li_calls()) }
