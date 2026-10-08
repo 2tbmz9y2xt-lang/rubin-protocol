@@ -158,6 +158,51 @@ type nonCoinbaseResolvedInput struct {
 	outpoint Outpoint
 }
 
+type blockSpentInput struct {
+	outpoint           Outpoint
+	txIndex            uint32
+	inputIndex         uint32
+	logicalEntryLength uint32
+}
+
+// blockInputViewState owns only compact pre-block lengths and created-spent
+// tombstones. Complete current inputs belong to nonCoinbaseApplyContext.
+type blockInputViewState struct {
+	view    logicalStateView
+	spent   map[Outpoint]uint32
+	height  uint64
+	txIndex int
+}
+
+type blockInputViewReadError struct {
+	outpoint   Outpoint
+	txIndex    int
+	inputIndex int
+	failure    *logicalStateFailure
+}
+
+func (e *blockInputViewReadError) Error() string { return e.failure.Error() }
+
+func (state *blockInputViewState) lookup(op Outpoint, inputIndex int) (UtxoEntry, error) {
+	if _, spent := state.spent[op]; spent {
+		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	entry, present, failure := readLogicalStateRow(state.height, state.view, op)
+	if failure != nil {
+		return UtxoEntry{}, &blockInputViewReadError{
+			outpoint: op, txIndex: state.txIndex, inputIndex: inputIndex, failure: failure,
+		}
+	}
+	if !present {
+		return UtxoEntry{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
+	}
+	// readLogicalStateRow has checked the complete row's width. Its exact
+	// StateEntryBytes length is 56..65,596, so the explicit u32-width mask
+	// preserves the exact length before conversion.
+	state.spent[op] = uint32(logicalStateEntryLength(entry) & 0xffffffff)
+	return entry, nil
+}
+
 type nonCoinbaseSpendState struct {
 	sumIn              u128
 	sumInVault         u128
@@ -203,6 +248,7 @@ type nonCoinbaseApplyContext struct {
 	registry      *SuiteRegistry
 	sighashCache  *SighashV1PrehashCache
 	sigCache      *SigCache
+	inputView     *blockInputViewState
 	resolved      []nonCoinbaseResolvedInput
 	simplicityCtx *SimplicityTxContext
 	spend         nonCoinbaseSpendState
