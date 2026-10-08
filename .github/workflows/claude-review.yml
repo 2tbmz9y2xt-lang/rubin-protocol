@@ -96,7 +96,8 @@ jobs:
           set -euo pipefail
           INPUT_DIR="${RUNNER_TEMP}/review-input"
           mkdir -p "${INPUT_DIR}"
-          git diff "$(git merge-base "origin/${BASE_REF}" HEAD)" HEAD > "${INPUT_DIR}/diff.patch"
+          # --text: a diff attribute set by the PR in .gitattributes cannot hide a change as binary.
+          git diff --text "$(git merge-base "origin/${BASE_REF}" HEAD)" HEAD > "${INPUT_DIR}/diff.patch"
           # Every thread and inline comment, all pages; only comments of review bots and
           # repository members are kept, so third-party text never reaches the model. The raw
           # lists live in temp files removed on exit, outside the directory the model reads.
