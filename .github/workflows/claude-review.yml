@@ -103,8 +103,10 @@ jobs:
           else
             body="$(jq -nc --arg id "${issue}" '{query: "query($id: String!) { issue(id: $id) { identifier title state { name } description } }", variables: {id: $id}}')"
             resp="$(curl -fsS --connect-timeout 10 --max-time 30 https://api.linear.app/graphql -H "Authorization: ${LINEAR_API_KEY}" -H 'Content-Type: application/json' -d "${body}" || true)"
-            if [[ -n "$(jq -r '.data.issue.identifier // empty' <<<"${resp}")" ]]; then
-              jq -r '.data.issue | "# \(.identifier): \(.title)\nstate: \(.state.name)\n\n\(.description // "")"' <<<"${resp}" > "${out}"
+            # One jq in the if test: an empty, non-JSON or truncated response, or one without an issue,
+            # takes the fallback instead of failing the step.
+            if contract="$(jq -er '.data.issue | select(.identifier != null) | "# \(.identifier): \(.title)\nstate: \(.state.name)\n\n\(.description // "")"' <<<"${resp}" 2>/dev/null)"; then
+              printf '%s\n' "${contract}" > "${out}"
             else
               echo "Linear issue ${issue} could not be fetched; reviewing without a contract." > "${out}"
             fi
@@ -205,8 +207,10 @@ jobs:
               added or unchanged line, side LEFT with the old-file line for a deleted line), and
               body "**SEVERITY** - failure mode. Fix: ..."; body = markdown with these sections: Contract coverage (covered /
               missing / out of scope, or "not available"); findings on lines outside the diff
-              with file:line; earlier findings now fixed or still open; verdict = NO FINDINGS |
-              FINDINGS (LOW/MEDIUM only) | FINDINGS (HIGH or CRITICAL - fix before merge).
+              with file:line; earlier findings now fixed or still open; verdict = NO FINDINGS only
+              when there is no new finding and no earlier finding is still open, else FINDINGS
+              (LOW/MEDIUM only) | FINDINGS (HIGH or CRITICAL - fix before merge).
+              With NO FINDINGS and no comments the body is not published: keep it to one line.
           REVIEW_SCHEMA: >-
             {"type": "object", "additionalProperties": false,
              "required": ["verdict", "body", "comments"],
@@ -286,11 +290,18 @@ jobs:
           fi
           # The event is fixed here: the model cannot approve or request changes.
           jq --arg sha "${HEAD_SHA}" '{commit_id: $sha, event: "COMMENT",
-            body: ("<!-- claude-review -->\n**Verdict: \(.verdict)**\n\n" + .body),
+            # A clean review is one line; a review with findings keeps the full body.
+            body: ("<!-- claude-review -->\n" + (if .verdict == "NO FINDINGS" and (.comments | length) == 0
+              then "**Claude review: no findings.**" else "**Verdict: \(.verdict)**\n\n" + .body end)),
             comments: [.comments[] | {path, line, side, body}]}' "${so}" > "${RUNNER_TEMP}/payload.json"
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews"
-          if ! gh api "${api}" --method POST --input "${RUNNER_TEMP}/payload.json" --jq '"review \(.id)"'; then
-            # A line outside the diff is rejected: move every inline finding into the body.
+          if ! gh api "${api}" --method POST --input "${RUNNER_TEMP}/payload.json" --jq '"review \(.id)"' 2>"${RUNNER_TEMP}/post.err"; then
+            cat "${RUNNER_TEMP}/post.err" >&2
+            # A refusal gh reports as HTTP 422 (a validation error, such as a line outside the diff) of a
+            # review with inline comments is retried once with them in the body. Any other failure may
+            # follow a review GitHub created, so it fails the step instead of posting a second review.
+            grep -qE 'HTTP 422([^0-9]|$)' "${RUNNER_TEMP}/post.err" \
+              && jq -e '.comments | length > 0' "${RUNNER_TEMP}/payload.json" > /dev/null || exit 1
             echo "::warning::Inline comments were rejected; posting them in the review body."
             jq '.body += "\n\n### Inline findings\n" + ([.comments[] | "- `\(.path):\(.line)` (\(.side)) \(.body)"] | join("\n")) | .comments = []' \
               "${RUNNER_TEMP}/payload.json" | gh api "${api}" --method POST --input - --jq '"review \(.id)"'
