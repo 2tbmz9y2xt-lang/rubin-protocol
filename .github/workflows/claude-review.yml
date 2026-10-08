@@ -45,8 +45,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' \
-            | grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$'; then
+          # Read the whole list first: an API error fails the step instead of skipping the review.
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename')"
+          if grep -qE '\.(go|rs|lean)$|^conformance/|^\.github/workflows/claude-review\.yml$' <<<"${files}"; then
             echo "review=true" >> "${GITHUB_OUTPUT}"
           else
             echo "review=false" >> "${GITHUB_OUTPUT}"
@@ -95,15 +96,19 @@ jobs:
           git diff "$(git merge-base "origin/${BASE_REF}" HEAD)" HEAD > "${INPUT_DIR}/diff.patch"
           # Every inline comment, all pages; replies are kept only from the bot and from
           # repository members, so a third-party reply never reaches the model.
+          # Raw comments include non-member replies: keep them in a temp file removed on exit,
+          # outside the runner temp directory the model can browse.
+          raw="$(mktemp)"
+          trap 'rm -f "${raw}"' EXIT
           gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments?per_page=100" --jq '.[]' \
-            | jq -s '[.[] | {id, in_reply_to_id, login: .user.login, assoc: .author_association, path, line, body, created_at}]' > "${RUNNER_TEMP}/comments.json"
+            | jq -s '[.[] | {id, in_reply_to_id, login: .user.login, assoc: .author_association, path, line, body, created_at}]' > "${raw}"
           # GraphQL variables, not shell expansions.
           # shellcheck disable=SC2016
           query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { id isResolved isOutdated comments(first: 1) { nodes { databaseId author { login } } } } } } } }'
           gh api graphql --paginate -F owner="${GITHUB_REPOSITORY%/*}" -F name="${GITHUB_REPOSITORY#*/}" -F number="${PR_NUMBER}" -f query="${query}" \
             --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].author.login == "github-actions")' \
             | jq -s '.' > "${RUNNER_TEMP}/threads.json"
-          jq --slurpfile c "${RUNNER_TEMP}/comments.json" '[.[] | .comments.nodes[0].databaseId as $root
+          jq --slurpfile c "${raw}" '[.[] | .comments.nodes[0].databaseId as $root
             | {thread_id: .id, resolved: .isResolved, outdated: .isOutdated,
                comments: [$c[0][] | select((.id == $root or .in_reply_to_id == $root)
                  and (.login == "github-actions[bot]" or (.assoc | IN("OWNER", "MEMBER", "COLLABORATOR"))))
@@ -156,7 +161,9 @@ jobs:
 
               Earlier findings: read earlier-threads.json and earlier-reviews.json before reviewing.
               - An unresolved thread whose defect the current code fixes: list it in fixed_threads
-                with its thread_id and one sentence naming the change that fixed it.
+                with its thread_id and one sentence naming the change that fixed it; the workflow
+                replies "Fixed in" in that thread and a person resolves it. Skip a thread that
+                already has a "Fixed in" reply from github-actions[bot].
               - A finding a repository member answered with a reason (not a bug, won't fix, out of
                 scope), or a resolved thread: do not report it again unless the code regressed.
               - Never report a defect again that already has a thread or an earlier review entry.
@@ -231,7 +238,7 @@ jobs:
             jq '.body += "\n\n### Inline findings\n" + ([.comments[] | "- `\(.path):\(.line)` \(.body)"] | join("\n")) | .comments = []' \
               "${RUNNER_TEMP}/payload.json" | gh api "${api}" --method POST --input - --jq '"review \(.id)"'
           fi
-          # Reply and resolve only unresolved threads this bot opened, with the stated fix.
+          # Reply only in unresolved threads this bot opened, with the stated fix; a person resolves them.
           short="${HEAD_SHA:0:8}"
           jq -c --slurpfile t "${RUNNER_TEMP}/threads.json" '.fixed_threads[] as $f
             | $t[0][] | select(.id == $f.thread_id and .isResolved == false)
@@ -240,23 +247,18 @@ jobs:
             id="$(jq -r '.id' <<<"${row}")"
             root="$(jq -r '.root' <<<"${row}")"
             fix="$(jq -r '.fix' <<<"${row}")"
-            if gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments/${root}/replies" --method POST \
-                 -f body="Fixed in ${short}: ${fix}" --silent; then
-              # shellcheck disable=SC2016
-              gh api graphql -f id="${id}" -f query='mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { isResolved } } }' --silent \
-                || echo "::warning::Could not resolve thread ${id}."
-            else
-              echo "::warning::Could not reply in thread ${id}."
-            fi
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/comments/${root}/replies" --method POST \
+              -f body="Fixed in ${short}: ${fix}" --silent \
+              || echo "::warning::Could not reply in thread ${id}."
           done
 
       - name: Record advisory Claude failure
-        if: ${{ always() && steps.scope.outputs.review == 'true' && (steps.review.outcome != 'success' || steps.publish.outcome != 'success') }}
+        if: ${{ always() && (steps.scope.outcome != 'success' || (steps.scope.outputs.review == 'true' && (steps.review.outcome != 'success' || steps.publish.outcome != 'success'))) }}
         run: |
           {
             echo "### Advisory Claude review unavailable"
             echo
-            echo "- The Claude review or its publication failed; no complete review was published."
+            echo "- The scope check, the Claude review or its publication failed; no complete review was published."
             echo "- This workflow is advisory and must not block merge."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::warning::Claude review failed; treating this workflow as advisory."
