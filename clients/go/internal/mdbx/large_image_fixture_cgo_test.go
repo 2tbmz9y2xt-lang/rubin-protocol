@@ -1813,7 +1813,7 @@ func contextNativeJoint(t *testing.T) {
 			}
 			contextError(t, commit.Cause, "Capacity", 28, "error 28")
 			if variant == "later fault" {
-				requireEnvironmentError(t, commit.ReadbackCause, EngineClass("IO"), operationGet, 5, "error 5")
+				contextError(t, commit.ReadbackCause, "IO", 5, "error 5")
 			} else if commit.ReadbackCause != nil {
 				t.Fatal("joint mismatch cause", commit.ReadbackCause)
 			}
