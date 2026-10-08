@@ -89,6 +89,45 @@ func TestReplayPathMDBX(t *testing.T) {
 	t.Run("PositiveErrorBacking", testReplayPathFixturePositiveErrorBacking)
 	t.Run("ActiveEntryWidth", testReplayPathFixtureActiveEntryWidth)
 	t.Run("ForeignSlot", testReplayPathFixtureForeignSlot)
+	t.Run("BelowEstablishment", testReplayPathFixtureBelowEstablishment)
+	t.Run("CursorAtTip", testReplayPathFixtureCursorAtTip)
+}
+
+// Step 1: a persisted legal APPLIED cursor at the target tip has no next height: invariant before any PATH Get or
+// provider call, zero output, no slot.
+func testReplayPathFixtureCursorAtTip(t *testing.T) {
+	w := newPathWorld(t, 2, 2, 4)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, w.tip())
+	view := &pathView{}
+	p := newReplayPathOwner(view, pathLimit)
+	base := w.pathBaseline(t)
+	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	pathWant(t, err, selectedSideInvariant, "cursor at tip")
+	pathZero(t, own, "cursor at tip")
+	pathGets(t, evidence, base, 0, 0, "cursor at tip")
+	logicalMDBXAssert(t, p.slot == nil && view.versions+view.protects+view.headerCalls == 0, "cursor at tip slot/view")
+}
+
+// Step 7: on a non-attached slot, h below the establishment height is structural-only: invariant before any PATH Get,
+// Version, Protect or Header call, zero output, slot unchanged.
+func testReplayPathFixtureBelowEstablishment(t *testing.T) {
+	w := newPathWorld(t, 6, 2, 5)
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 3)
+	view := &pathView{}
+	p := newReplayPathOwner(view, pathLimit)
+	_, err := w.call(t, p, nil, nil)
+	logicalMDBXAssert(t, err == nil && p.slot.lo == 4 && !p.slot.attached, "non-attached setup %v %+v", err, p.slot)
+	slot, key, hashes, a, before := p.slot, p.slot.key, slices.Clone(p.slot.hashes), p.slot.a, *view
+	w.setReplay(mdbx.ReplayCursorAppliedV1, 2)
+	image := w.image()
+	base := w.pathBaseline(t)
+	own, err, evidence := w.pathArmed(t, p, nil, mdbx.SelectedDamageProbeOnly, 0, nil)
+	pathWant(t, err, selectedSideInvariant, "below establishment")
+	pathZero(t, own, "below establishment")
+	pathGets(t, evidence, base, 0, 0, "below establishment")
+	logicalMDBXAssert(t, p.slot == slot && slot.key == key && slices.Equal(slot.hashes, hashes) && slot.lo == 4 && !slot.attached && slot.a == a, "below establishment slot %+v", slot)
+	logicalMDBXAssert(t, view.versions == before.versions && view.protects == before.protects && view.headerCalls == before.headerCalls && view.releases == before.releases, "below establishment view %+v", view)
+	replaySameImage(t, image, w.image(), "below establishment")
 }
 
 // RC9: a foreign completed slot refuses with storage_capacity before any PATH Get, Version, Protect or Header call.
