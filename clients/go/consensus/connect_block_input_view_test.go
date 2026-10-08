@@ -1176,6 +1176,58 @@ func TestConnectBlockInputViewQualificationDA(t *testing.T) {
 	}
 }
 
+func TestConnectBlockInputViewContextShapeGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		nilTx                     bool
+		inputs, resolved, outputs int
+		message                   string
+	}{
+		{"nil", true, 0, 0, 0, "nil tx"},
+		{"missing_resolved", false, 1, 0, 1, "simplicity txcontext resolved input count mismatch"},
+		{"extra_resolved", false, 0, 1, 1, "simplicity txcontext resolved input count mismatch"},
+		{"input_overflow", false, 1025, 1025, 1, "simplicity txcontext input_count overflow"},
+		{"output_overflow", false, 1, 1, 1025, "simplicity txcontext output_count overflow"},
+		{"both_overflow", false, 1025, 1025, 1025, "simplicity txcontext input_count overflow"},
+		{"mismatch_before_overflow", false, 1025, 1024, 1025, "simplicity txcontext resolved input count mismatch"},
+		{"max_inputs", false, 1024, 1024, 1, ""},
+		{"max_outputs", false, 1, 1, 1024, ""},
+		{"max_both", false, 1024, 1024, 1024, ""},
+		{"empty", false, 0, 0, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{Inputs: make([]TxInput, tc.inputs), Outputs: make([]TxOutput, tc.outputs)}
+			for i := range tx.Inputs {
+				tx.Inputs[i] = TxInput{PrevTxid: hashWithPrefix(0xf5), PrevVout: uint32(i), Sequence: 17}
+			}
+			inputsBefore := append([]TxInput{}, tx.Inputs...)
+			resolved, resolvedBefore := make([]UtxoEntry, tc.resolved), make([]UtxoEntry, tc.resolved)
+			for i := range resolved {
+				resolved[i] = UtxoEntry{Value: 19, CovenantType: COV_TYPE_P2PK, CovenantData: []byte{0x51}, CreationHeight: 7, CreatedByCoinbase: true}
+				resolvedBefore[i] = resolved[i]
+				resolvedBefore[i].CovenantData = append([]byte{}, resolved[i].CovenantData...)
+			}
+			if tc.nilTx {
+				tx = nil
+			}
+			ctx, err := BuildSimplicityTxContext(tx, resolved, 7, [32]byte{0x42})
+			if ctx != nil {
+				t.Fatal("shape/no-Simplicity result published a context")
+			}
+			if tc.message == "" {
+				if err != nil {
+					t.Fatalf("width-valid no-Simplicity shape: %v", err)
+				}
+			} else {
+				assertInputViewTxError(t, err, "TX_ERR_PARSE", tc.message)
+			}
+			if (tx != nil && !reflect.DeepEqual(tx.Inputs, inputsBefore)) || !reflect.DeepEqual(resolved, resolvedBefore) {
+				t.Fatal("shape guard mutated its input snapshot")
+			}
+		})
+	}
+}
+
 func inputViewMixedContext(t *testing.T, private, generic bool) (*nonCoinbaseApplyContext, *inputViewTestView) {
 	t.Helper()
 	kp := mustMLDSA87Keypair(t)
