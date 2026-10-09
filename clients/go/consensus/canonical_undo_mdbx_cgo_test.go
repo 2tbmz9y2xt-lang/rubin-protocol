@@ -61,7 +61,7 @@ func undoDefect(t *testing.T, equal bool, err error, diagnostic string) {
 	t.Helper()
 	var failure *selectedSideFailure
 	logicalMDBXAssert(t, reflect.TypeOf(err) == reflect.TypeFor[*selectedSideFailure]() && errors.As(err, &failure), "defect type: %T %v", err, err)
-	logicalMDBXAssert(t, !equal && failure.result == "TERMINAL_STORE_INTEGRITY(canonical)" && failure.cause != nil && failure.cause.Error() == diagnostic && errors.Unwrap(failure) == failure.cause, "defect tuple: equal=%t failure=%+v want=%q", equal, failure, diagnostic)
+	logicalMDBXAssert(t, !equal && failure.result == "TERMINAL_STORE_INTEGRITY(canonical)" && failure.cause != nil && failure.cause.Error() == diagnostic && reflect.ValueOf(errors.Unwrap(failure)).Equal(reflect.ValueOf(failure.cause)), "defect tuple: equal=%t failure=%+v want=%q", equal, failure, diagnostic)
 }
 
 func undoWantRows(t *testing.T, got, want []mdbx.Mutation, logical []mdbx.Mutation) {
