@@ -650,8 +650,8 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 		require(!strings.Contains(body, "C.") && !strings.Contains(body, "len(row.Key)") && !strings.Contains(body, "KeyBytes"), "admission owner drifted: "+name)
 	}
 	require(strings.Count(updateNativeBody(t, source, "updateOrdered"), "updateKeyOrdered(") == 1 && strings.Count(text, "bytes.Compare(previousKey, key) < 0") == 1, "updateKeyOrdered body drifted")
-	// Ordering, prefix-page seek and the bounded endpoint positioning each compare here.
-	require(strings.Count(text, "bytes.Compare(") == 3 && strings.Count(updateNativeBody(t, source, "canonicalTipFound"), "bytes.Compare(") == 1, "bytes.Compare census drifted")
+	// Ordering, prefix-page seek, endpoint positioning and the short-key lower bound each compare here.
+	require(strings.Count(text, "bytes.Compare(") == 4 && strings.Count(updateNativeBody(t, source, "canonicalTipFound"), "bytes.Compare(") == 1, "bytes.Compare census drifted")
 	ordered(updateNativeBody(t, source, "updatePlan"), "callback precedence before image admission", "reader.expire()", "readPrimary(callbackErr, reader.failure)", "if primary != nil", "updateOwnedBatch(batch, reader)", "s.abortReadLocked(old, planErr, false)", "return s.updateImagePlan(batch, plan, reader, old, tip)")
 	ordered(updateNativeBody(t, source, "updateImagePlan"), "admission owner order drifted", "updateOwnedConsulted(", "updateNativeConsultedImages(old, s.dbis, consulted)", "s.abortReadLocked(old, captureErr, infrastructure)", "updateOwnedLarge(", "updateOwnedContext(", "contextQualify(", "s.abortReadLocked(old, contextErr, infrastructure)", "canonicalTipAdmit(plan, tip)", "large.tip = tip")
 	ordered(updateNativeBody(t, source, "updateOwnedBatch"), "merged plan ownership drifted", "updateScanMutation(", "owned := make([]ownedMutation", "updateOwnedObsolete(batch, readers[0], owned)", "updateOwnReferences(owned)", "return owned, nil")
