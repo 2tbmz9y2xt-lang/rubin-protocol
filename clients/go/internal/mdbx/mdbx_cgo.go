@@ -2414,7 +2414,15 @@ func canonicalTipEndpoint(txn *C.MDBX_txn, dbi C.MDBX_dbi, generation uint64, op
 	if err != nil {
 		return canonicalTipRow{}, err
 	}
-	if len(row.key) < 8 || binary.BigEndian.Uint64(row.key[:8]) != generation {
+	if len(row.key) < 8 {
+		var lower [8]byte
+		binary.BigEndian.PutUint64(lower[:], generation)
+		if bytes.Compare(row.key, lower[:]) < 0 {
+			return canonicalTipRow{}, nil
+		}
+		return row, nil
+	}
+	if binary.BigEndian.Uint64(row.key[:8]) != generation {
 		return canonicalTipRow{}, nil
 	}
 	return row, nil

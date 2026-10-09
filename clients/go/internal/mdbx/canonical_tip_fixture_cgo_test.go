@@ -253,6 +253,85 @@ func tipNativeSource(t *testing.T) {
 			tipOutcome(t, store, truth, stage, result, 1, 1, "CLOSED")
 		})
 	}
+	for _, row := range []struct {
+		name       string
+		generation uint64
+		key        []byte
+		invalid    bool
+	}{
+		{"short in window", 255, []byte{0, 0, 0, 0, 0, 0, 1}, true},
+		{"short below window", 255, []byte{0, 0, 0, 0, 0, 0, 0}, false},
+		{"short width1 carry", 0x00ffffffffffffff, []byte{1}, true},
+		{"short max generation", ^uint64(0), []byte{0xff}, false},
+	} {
+		successors := []bool{false, true}
+		if row.generation == ^uint64(0) {
+			successors = []bool{false}
+		}
+		for _, selected := range []bool{false, true} {
+			for _, successor := range successors {
+				t.Run(fmt.Sprintf("%s/selected%v/successor%v", row.name, selected, successor), func(t *testing.T) {
+					store, _, _ := consultedStore(t)
+					if selected {
+						tipSeed(t, store, tipRow(row.generation, 37, [32]byte{0x44}, [40]byte{39: 1}))
+					}
+					if successor {
+						mustEnvironment(t, fixtureSeedPrefixRawRow(store, canonicalForwardDBILiteral, canonicalForwardKeyLiteral(row.generation+1, 99), []byte{0xff}))
+					}
+					mustEnvironment(t, fixtureSeedPrefixRawRow(store, canonicalForwardDBILiteral, row.key, []byte{0xff}))
+					application := errors.New("short foreign endpoint control")
+					var reader *Reader
+					var cell *canonicalTipCell
+					var source error
+					var truth CommitTruth
+					var stage UpdateStage
+					var result error
+					evidence, err := fixtureTipCursor(store, 1, 1, 1, 0, func() {
+						truth, stage, result = store.Update(func(r *Reader) (Batch, error) {
+							reader = r
+							point, failure := r.CanonicalTipV1(row.generation)
+							source, cell = failure, r.tip
+							if row.invalid {
+								if point != nil || tipError(t, source, "prefix-page", "Integrity", -30793, "stored key outside SchemaV2 prefix-page domain", true).Cause != nil {
+									t.Fatal("short source did not return exact key error")
+								}
+								if r.usable() || cell != nil || !sameError(r.failure, source) {
+									t.Fatal("short source failure did not disarm without a cell")
+								}
+								tipRequest(t, r, 0, "Reader is not active")
+								return Batch{}, nil
+							}
+							mustEnvironment(t, source)
+							if selected {
+								tipRequirePoint(t, point, 37, [32]byte{0x44})
+							} else if point != nil {
+								t.Fatal("short foreign key supplied a selected endpoint")
+							}
+							return Batch{}, application
+						})
+					})
+					mustEnvironment(t, err)
+					if row.invalid {
+						if !sameError(result, source) {
+							t.Fatal("short source error changed at Update boundary")
+						}
+						tipOutcome(t, store, truth, stage, result, 1, 1, "CLOSED")
+					} else {
+						if !sameError(result, application) || reader.failure != nil {
+							t.Fatal("short foreign key changed application result")
+						}
+						tipOutcome(t, store, truth, stage, result, 1, 1, "OPEN")
+					}
+					gets := uint32(2)
+					if row.generation == ^uint64(0) {
+						gets = 1
+					}
+					tipCensus(t, evidence, 1, gets, 1, 0)
+					tipRetired(t, reader, cell)
+				})
+			}
+		}
+	}
 }
 
 func tipNativeForeign(t *testing.T) {
@@ -532,15 +611,23 @@ func tipCommit(t *testing.T, result error, truth uint8, secondary error) *Commit
 
 func tipNativeDrift(t *testing.T) {
 	for _, phase := range []uint32{14, 13, 3} {
-		for _, kind := range []string{"empty-to-present", "present-to-empty", "tip-plus-two", "key15", "key17", "width0", "width103", "width105", "work0", "32", "63", "103"} {
+		for _, kind := range []string{"empty-to-present", "present-to-empty", "tip-plus-two", "key15", "key17", "width0", "width103", "width105", "work0", "32", "63", "103", "short-empty", "short-present"} {
 			t.Run(fmt.Sprintf("phase%d/%s", phase, kind), func(t *testing.T) {
 				store, path, cfg := consultedStore(t)
-				row := tipRow(7, 37, [32]byte{0x44}, [40]byte{39: 2})
-				if kind != "empty-to-present" {
+				generation := uint64(7)
+				short := kind == "short-empty" || kind == "short-present"
+				if short {
+					generation = 255
+				}
+				sourceEmpty := kind == "empty-to-present" || kind == "short-empty"
+				row := tipRow(generation, 37, [32]byte{0x44}, [40]byte{39: 2})
+				if !sourceEmpty {
 					tipSeed(t, store, row)
 				}
 				key, value, present := bytes.Clone(row.Key), bytes.Clone(row.Literal), true
 				switch kind {
+				case "short-empty", "short-present":
+					key, value = []byte{0, 0, 0, 0, 0, 0, 1}, []byte{0xff}
 				case "present-to-empty":
 					present = false
 					value = nil
@@ -578,7 +665,15 @@ func tipNativeDrift(t *testing.T) {
 					native, fixtureErr = fixtureLargeFault(store, phase, 2, key, func() {
 						truth, stage, result = store.Update(func(r *Reader) (Batch, error) {
 							reader = r
-							_, failure := r.CanonicalTipV1(7)
+							point, failure := r.CanonicalTipV1(generation)
+							mustEnvironment(t, failure)
+							if sourceEmpty {
+								if point != nil {
+									t.Fatal("empty original source supplied a point")
+								}
+							} else {
+								tipRequirePoint(t, point, 37, [32]byte{0x44})
+							}
 							cell = r.tip
 							return Batch{Mutations: []Mutation{consultedCounter(t, 900)}}, failure
 						})
@@ -594,15 +689,17 @@ func tipNativeDrift(t *testing.T) {
 				if phase == 3 {
 					queries, wantStage = 4, 3
 				}
-				tipCensus(t, evidence, queries, queries*2, queries, 0)
-				tipRetired(t, reader, cell)
 				if phase == 3 {
 					tipCommit(t, result, 3, nil)
 					tipOutcome(t, store, truth, stage, result, 3, 3, "CLOSED")
 				} else {
-					tipError(t, result, "update", "StateMismatch", -30779, diagnostic, false)
+					if tipError(t, result, "update", "StateMismatch", -30779, diagnostic, false).Cause != nil {
+						t.Fatal("candidate inequality acquired a source cause")
+					}
 					tipOutcome(t, store, truth, stage, result, 1, wantStage, "CLOSED")
 				}
+				tipCensus(t, evidence, queries, queries*2, queries, 0)
+				tipRetired(t, reader, cell)
 				if native.drift != 1 || native.commits != uint32(boolByte(phase == 3)) {
 					t.Fatalf("actual phase drift site %+v", native)
 				}
@@ -610,7 +707,7 @@ func tipNativeDrift(t *testing.T) {
 				consultedTrack(t, reopened, openErr)
 				if phase == 13 {
 					oldValue := row.Literal
-					if kind == "empty-to-present" {
+					if sourceEmpty {
 						oldValue = nil
 					}
 					obsoleteRawImage(t, reopened, 2, row.Key, oldValue)
@@ -619,6 +716,13 @@ func tipNativeDrift(t *testing.T) {
 					}
 				} else {
 					obsoleteRawImage(t, reopened, 2, key, value)
+					if short {
+						oldValue := row.Literal
+						if sourceEmpty {
+							oldValue = nil
+						}
+						obsoleteRawImage(t, reopened, 2, row.Key, oldValue)
+					}
 				}
 				counter := consultedCounter(t, 900)
 				want := []byte(nil)
