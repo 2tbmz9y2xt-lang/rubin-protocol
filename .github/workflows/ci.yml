@@ -41,7 +41,7 @@ jobs:
       # Self-contained: do not rely on jsonschema being installed by another step.
       - name: Legacy exposure report v1 contract (policy)
         run: |
-          python3 -m pip install --quiet 'jsonschema==4.19.2'
+          python3 -m pip install --quiet 'jsonschema==4.26.0'
           python3 tools/check_legacy_exposure_report_contract.py
 
       - name: OpenSSL CVE response policy
@@ -88,7 +88,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: true
           cache-dependency-path: |
             clients/go/go.mod
@@ -96,16 +96,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
 
       - name: Install Semgrep
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep==1.178.0
+          python3 -m pip install semgrep==1.180.0
 
       - name: Install gosec + govulncheck
         run: |
-          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          GOTOOLCHAIN=auto go install github.com/securego/gosec/v2/cmd/gosec@d2b649ec01825c20bd101ec584e559adb287e578
           GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
@@ -332,7 +332,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.test_gate.outputs.run_test == 'true'
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -367,7 +367,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         if: steps.test_gate.outputs.run_test == 'true'
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Resolve Rust cache identity
@@ -498,7 +498,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -591,7 +591,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.formal_gate.outputs.run_formal == 'true'
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: true
           cache-dependency-path: clients/go/go.mod
 
@@ -656,7 +656,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.27.1'
+          go-version: '1.27.2'
           cache: true
           cache-dependency-path: |
             clients/go/go.sum

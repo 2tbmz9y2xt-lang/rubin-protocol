@@ -58,6 +58,9 @@ type largeNativeRow struct {
 }
 
 type largeImageScope struct {
+	// tip is the sole endpoint cell transferred from the drained original Reader.
+	// Its borrowed OLD spans are retired before that transaction's cleanup.
+	tip            *canonicalTipCell
 	context        CanonicalContextWindowV1
 	contextPresent bool
 	selectors      []LargeImageSelectorV1

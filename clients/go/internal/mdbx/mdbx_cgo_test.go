@@ -2645,6 +2645,8 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
 	checkLockedRead("GetOptionalSide", "C", "rubin_mdbx_get")
 	checkLockedRead("PrefixPage", "r", "prefixPageRead")
+	checkLockedRead("CanonicalTipV1", "r", "canonicalTipAcquire")
+	requireOrder("canonicalTipAcquire", "post-native endpoint failure was not recorded", "canonicalTipEndpoint", "canonicalTipPoint", "r.failure = err", "r.active.Store(false)", "return nil, err")
 	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("GetOptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
 	if nativeCalls != 3 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
 		t.Fatal("concurrent Get serialization drifted")
@@ -2688,9 +2690,12 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
 		}
 	}
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 5 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 1 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 {
+	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 5 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 6 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipFound"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipPoint"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipEqual"), "unsafe.Slice(") != 3 {
 		t.Fatal("borrowed native bytes accepted")
 	}
+	requireOrder("canonicalTipFound", "endpoint native envelope order drifted", "int(result.rc)", "canonicalTipResultShape", "unsafe.Slice", "bytes.Compare")
+	requireOrder("canonicalTipPoint", "endpoint source qualification order drifted", "len(row.key) != 16", "height > 0xffffffff", "row.image.length != 104", "unsafe.Slice", "validWork", "copy(point.BlockHash")
+	requireOrder("canonicalTipEqual", "endpoint candidate envelope order drifted", "canonicalTipEndpoint", "len(row.key) != 16", "row.image.length != 104", "unsafe.Slice")
 	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
 	requireOrder("optionalSideResult", "optional-side bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
 	requireOrder("prefixPageRead", "PrefixPage bound must precede copy", "prefixPageNativeResult", "prefixPageStop", "copyPrefixPageRow")
@@ -3101,19 +3106,19 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	production := string(source)
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
 	require(preambleStart >= 0 && preambleEnd > preambleStart, "cgo preamble framing drifted")
-	// The only admitted preamble change is one contiguous fixture-only block that an ordinary build preprocesses away;
-	// without it the preamble keeps its pinned digest byte for byte.
+	// The ordinary cursor wrappers are pinned together with the existing preamble.
+	// The one contiguous fixture block still preprocesses away in ordinary builds.
 	preamble := production[preambleStart : preambleEnd+2]
 	const fixtureOpen, fixtureClose = "#ifdef RUBIN_SELECTED_DAMAGE_FIXTURE\n", "#endif // RUBIN_SELECTED_DAMAGE_FIXTURE\n"
 	fixtureStart, fixtureEnd := strings.Index(preamble, fixtureOpen), strings.Index(preamble, fixtureClose)
 	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 2 && fixtureStart > 0 && fixtureEnd > fixtureStart, "fixture-only preamble block framing drifted")
 	fixtureBlock := preamble[fixtureStart : fixtureEnd+len(fixtureClose)]
-	require(strings.Count(fixtureBlock, "#define ") == 8 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
-	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n", "#define mdbx_env_close_ex rubin_li_env_close\n", "#define mdbx_get_equal_or_great rubin_li_prefix\n"} {
+	require(strings.Count(fixtureBlock, "#define ") == 11 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
+	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n", "#define mdbx_env_close_ex rubin_li_env_close\n", "#define mdbx_get_equal_or_great rubin_li_prefix\n", "#define mdbx_cursor_open rubin_tip_open\n", "#define mdbx_cursor_get rubin_tip_get\n", "#define mdbx_cursor_close rubin_tip_close\n"} {
 		require(strings.Count(fixtureBlock, alias) == 1 && strings.Index(fixtureBlock, alias) > strings.LastIndex(fixtureBlock, "static int rubin_sd_"), "fixture-only alias %q drifted", alias)
 	}
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))
-	require(preambleDigest == "897536d2a447ae5239d5477356481e292113b8077d14883557f6bdf65ea6fb56", "cgo preamble digest=%s", preambleDigest)
+	require(preambleDigest == "eea0cf9602e561fb177673db1088139f3f043d9bfd75dd46a6b35733f1413b43", "cgo preamble digest=%s", preambleDigest)
 	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
 	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
@@ -3400,9 +3405,9 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
 	// The canonical-owner verification has exactly two writers: the Create publication and the exact-empty bootstrap census.
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -4304,7 +4309,7 @@ func TestUpdateCallbackLifecycle(t *testing.T) {
 		if strings.LastIndex(plan, "readPrimary(") > strings.Index(plan, "if panicked") || strings.Index(plan, "if panicked") > strings.LastIndex(plan, "abortReadLocked") {
 			t.Fatal("callback precedence drifted")
 		}
-		goexitCleanup := "defer func() {\n\t\tif returned {\n\t\t\treturn\n\t\t}\n\t\treader.expire()\n\t\tprimary, infrastructure := readPrimary(nil, reader.failure)\n\t\t_ = s.abortReadLocked(old, primary, infrastructure)\n\t}()"
+		goexitCleanup := "defer func() {\n\t\tif returned {\n\t\t\treturn\n\t\t}\n\t\treader.expire().retire()\n\t\tprimary, infrastructure := readPrimary(nil, reader.failure)\n\t\t_ = s.abortReadLocked(old, primary, infrastructure)\n\t}()"
 		if strings.Count(plan, "reader.expire()") != 2 || !strings.Contains(plan, goexitCleanup) || strings.Index(plan, "returned = true") < strings.Index(plan, "invokeUpdate(") {
 			t.Fatal("callback precedence drifted")
 		}
@@ -4536,7 +4541,7 @@ func TestUpdateReaderLifetime(t *testing.T) {
 	if strings.Count(plan, "reader.expire()") != 2 || invokedAt < 0 || invokedAt >= returnedAt || returnedAt >= expiredAt || expiredAt >= readAt || readAt >= preparedAt || strings.Contains(update, "reader.expire()") || strings.Index(update, "s.updatePlan(") >= strings.Index(update, "s.updateNative(") {
 		t.Fatal("Reader lifetime drifted")
 	}
-	const expireBody = "{\n\tr.active.Store(false)\n\tr.getMu.Lock()\n\t//nolint:staticcheck // Lock acquisition drains every in-flight Get and PrefixPage before abort.\n\tr.getMu.Unlock()\n"
+	const expireBody = "{\n\tr.active.Store(false)\n\tr.getMu.Lock()\n\ttip := r.tip\n\tr.tip = nil\n\tr.getMu.Unlock()\n\treturn tip\n"
 	if expire != expireBody {
 		t.Fatal("Reader lifetime drifted")
 	}

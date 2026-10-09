@@ -7,6 +7,80 @@ package mdbx
 #include "../../../../third_party/libmdbx/mdbx.h"
 #include <string.h>
 #ifdef RUBIN_SELECTED_DAMAGE_FIXTURE
+// Endpoint-only fixture: counts and faults bind real cursor sites in one env.
+typedef struct { unsigned opens, gets, closes, queries, faults; } rubin_tip_counts;
+static pthread_mutex_t rubin_tip_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rubin_tip_cond = PTHREAD_COND_INITIALIZER;
+static struct { MDBX_env *env; MDBX_dbi dbi; MDBX_cursor *cursor; unsigned mode, query, get, current_get, blocked, released, drift_active, drift_present; int code, close_code; unsigned char drift_key[78], drift_value[105]; size_t drift_key_len, drift_value_len; rubin_tip_counts counts; } rubin_tip;
+int rubin_tip_arm(MDBX_env *env, MDBX_dbi dbi, unsigned mode, unsigned query, unsigned get, int code) {
+	pthread_mutex_lock(&rubin_tip_mu);
+	int invalid = rubin_tip.env != NULL || !env || mode < 1 || mode > 14 || query == 0 || get > 2;
+	if (!invalid) { memset(&rubin_tip, 0, sizeof(rubin_tip)); rubin_tip.env = env; rubin_tip.dbi = dbi; rubin_tip.mode = mode; rubin_tip.query = query; rubin_tip.get = get; rubin_tip.code = code; }
+	pthread_mutex_unlock(&rubin_tip_mu);
+	return invalid ? MDBX_EINVAL : MDBX_SUCCESS;
+}
+void rubin_tip_disarm(rubin_tip_counts *out) {
+	pthread_mutex_lock(&rubin_tip_mu); *out = rubin_tip.counts; memset(&rubin_tip, 0, sizeof(rubin_tip)); pthread_mutex_unlock(&rubin_tip_mu);
+}
+void rubin_tip_wait(void) {
+	pthread_mutex_lock(&rubin_tip_mu); while (!rubin_tip.blocked) pthread_cond_wait(&rubin_tip_cond, &rubin_tip_mu); pthread_mutex_unlock(&rubin_tip_mu);
+}
+void rubin_tip_release(void) {
+	pthread_mutex_lock(&rubin_tip_mu); rubin_tip.released = 1; pthread_cond_broadcast(&rubin_tip_cond); pthread_mutex_unlock(&rubin_tip_mu);
+}
+int rubin_tip_drift_arm(const void *key, size_t key_len, const void *value, size_t value_len, int present) {
+	if (!rubin_tip.env || !key || key_len == 0 || key_len > 78 || value_len > 105 || (value_len && !value) || (present != 0 && present != 1)) return MDBX_EINVAL;
+	memcpy(rubin_tip.drift_key, key, key_len); if (value_len) memcpy(rubin_tip.drift_value, value, value_len);
+	rubin_tip.drift_key_len = key_len; rubin_tip.drift_value_len = value_len; rubin_tip.drift_present = (unsigned)present; rubin_tip.drift_active = 1;
+	return MDBX_SUCCESS;
+}
+static int rubin_tip_drift(MDBX_txn *txn) {
+	MDBX_val key = {rubin_tip.drift_key, rubin_tip.drift_key_len}, value = {rubin_tip.drift_value, rubin_tip.drift_value_len};
+	return rubin_tip.drift_present ? mdbx_put(txn, rubin_tip.dbi, &key, &value, MDBX_UPSERT) : mdbx_del(txn, rubin_tip.dbi, &key, NULL);
+}
+int rubin_tip_close_fault(int code) {
+	if (!rubin_tip.env || (code != 0 && code != MDBX_EIO)) return MDBX_EINVAL;
+	rubin_tip.close_code = code;
+	return MDBX_SUCCESS;
+}
+static int rubin_tip_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **cursor) {
+	pthread_mutex_lock(&rubin_tip_mu);
+	int owned = rubin_tip.env && mdbx_txn_env(txn) == rubin_tip.env && dbi == rubin_tip.dbi;
+	unsigned mode = 0;
+	if (owned) { rubin_tip.counts.opens++; rubin_tip.counts.queries++; rubin_tip.current_get = 0; if (rubin_tip.counts.queries == rubin_tip.query) mode = rubin_tip.mode; }
+	if (mode >= 2 && mode <= 4) rubin_tip.counts.faults++;
+	pthread_mutex_unlock(&rubin_tip_mu);
+	if (mode == 2 || mode == 3) { *cursor = NULL; return mode == 2 ? MDBX_SUCCESS : MDBX_EIO; }
+	int rc = mdbx_cursor_open(txn, dbi, cursor);
+	if (owned && rc == MDBX_SUCCESS) { pthread_mutex_lock(&rubin_tip_mu); rubin_tip.cursor = *cursor; pthread_mutex_unlock(&rubin_tip_mu); }
+	return mode == 4 && rc == MDBX_SUCCESS ? MDBX_EIO : rc;
+}
+static int rubin_tip_get(MDBX_cursor *cursor, MDBX_val *key, MDBX_val *value, MDBX_cursor_op op) {
+	unsigned mode = 0; int code = MDBX_SUCCESS;
+	pthread_mutex_lock(&rubin_tip_mu);
+	if (rubin_tip.env && cursor == rubin_tip.cursor) {
+		rubin_tip.counts.gets++; rubin_tip.current_get++;
+		if (rubin_tip.counts.queries == rubin_tip.query && rubin_tip.current_get == rubin_tip.get) { mode = rubin_tip.mode; code = rubin_tip.code; if (mode >= 5 && mode != 13) rubin_tip.counts.faults++; }
+	}
+	if (mode == 13) { rubin_tip.blocked = 1; pthread_cond_broadcast(&rubin_tip_cond); while (!rubin_tip.released) pthread_cond_wait(&rubin_tip_cond, &rubin_tip_mu); }
+	pthread_mutex_unlock(&rubin_tip_mu);
+	if (mode == 11 || mode == 12 || mode == 14) return mode == 11 ? MDBX_EIO : (mode == 12 ? MDBX_RESULT_TRUE : code);
+	int rc = mdbx_cursor_get(cursor, key, value, op);
+	if (rc == MDBX_SUCCESS) {
+		static unsigned char malformed[78];
+		if (mode == 5) key->iov_base = NULL;
+		else if (mode == 6) key->iov_len = 0;
+		else if (mode == 7 || mode == 8 || mode == 9) { memset(malformed, mode == 9 && op == MDBX_SET_RANGE ? 0 : 0xff, sizeof(malformed)); key->iov_base = malformed; key->iov_len = mode == 7 ? 77 : (mode == 8 ? 78 : 16); }
+		else if (mode == 10) { value->iov_base = NULL; if (value->iov_len == 0) value->iov_len = 1; }
+	}
+	return rc;
+}
+static void rubin_tip_close(MDBX_cursor *cursor) {
+	pthread_mutex_lock(&rubin_tip_mu);
+	if (rubin_tip.env && cursor == rubin_tip.cursor) { rubin_tip.counts.closes++; rubin_tip.cursor = NULL; }
+	pthread_mutex_unlock(&rubin_tip_mu);
+	mdbx_cursor_close(cursor);
+}
 // Large-image fixture state is isolated from the selected-side fixture. Faults
 // retain or consume actual handles; physical drift is committed before readback.
 typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
@@ -26,7 +100,8 @@ static int rubin_li_drift(void) {
 	const unsigned char replacement = 0x7f;
 	int rc = mdbx_txn_begin(rubin_li.env, NULL, MDBX_TXN_READWRITE, &txn);
 	if (rc != MDBX_SUCCESS) return rc;
-	if (rubin_li.mode == 4) rc = mdbx_del(txn, rubin_li.dbi, &key, NULL);
+	if (rubin_tip.drift_active) rc = rubin_tip_drift(txn);
+	else if (rubin_li.mode == 4) rc = mdbx_del(txn, rubin_li.dbi, &key, NULL);
 	else {
 		value.iov_base = (void *)&replacement; value.iov_len = 1;
 		rc = mdbx_put(txn, rubin_li.dbi, &key, &value, MDBX_UPSERT);
@@ -38,7 +113,8 @@ static int rubin_li_drift(void) {
 static int rubin_li_env_close(MDBX_env *env, bool dont_sync) {
 	if (rubin_li.mode) rubin_li.calls++;
 	if ((rubin_li.mode == 11 || rubin_li.mode == 24) && env == rubin_li.env) { rubin_li.closes++; return MDBX_BUSY; }
-	return mdbx_env_close_ex(env, dont_sync);
+	int rc = mdbx_env_close_ex(env, dont_sync);
+	return rc == MDBX_SUCCESS && env == rubin_tip.env && rubin_tip.close_code ? rubin_tip.close_code : rc;
 }
 static int rubin_li_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *value) {
 	if (rubin_li.mode) rubin_li.calls++;
@@ -210,7 +286,7 @@ static int rubin_sd_txn_commit(MDBX_txn *txn) {
 		if (rubin_li.mode == 7 || rubin_li.mode == 19) mdbx_txn_break(txn);
 		int rc = mdbx_txn_commit(txn);
 		if (rc != ((rubin_li.mode == 7 || rubin_li.mode == 19) ? MDBX_RESULT_TRUE : MDBX_SUCCESS)) return rc;
-		if ((rubin_li.mode >= 3 && rubin_li.mode <= 6) || rubin_li.mode == 29) {
+		if ((rubin_li.mode >= 3 && rubin_li.mode <= 6) || rubin_li.mode == 29 || (rubin_li.mode == 7 && rubin_tip.drift_active)) {
 			rc = rubin_li_drift();
 			if (rc != MDBX_SUCCESS) return rc;
 			rubin_li.drift++;
@@ -284,7 +360,7 @@ static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_v
 	if (rc == MDBX_SUCCESS && rubin_li.mode == 13 && txn == rubin_li.write_txn && rubin_li.drift == 0) {
 		const unsigned char byte = 0x7f;
 		MDBX_val extra_key = {rubin_li.key, rubin_li.key_len}, extra_value = {(void *)&byte, 1};
-		rc = mdbx_put(txn, rubin_li.dbi, &extra_key, &extra_value, MDBX_UPSERT);
+		rc = rubin_tip.drift_active ? rubin_tip_drift(txn) : mdbx_put(txn, rubin_li.dbi, &extra_key, &extra_value, MDBX_UPSERT);
 		if (rc == MDBX_SUCCESS) rubin_li.drift++;
 	}
 	return rc;
@@ -297,6 +373,9 @@ static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_v
 #define mdbx_put rubin_sd_put
 #define mdbx_env_close_ex rubin_li_env_close
 #define mdbx_get_equal_or_great rubin_li_prefix
+#define mdbx_cursor_open rubin_tip_open
+#define mdbx_cursor_get rubin_tip_get
+#define mdbx_cursor_close rubin_tip_close
 #endif // RUBIN_SELECTED_DAMAGE_FIXTURE
 typedef struct { int first; int second; } rubin_mdbx_debug_result;
 static rubin_mdbx_debug_result rubin_mdbx_normalize_debug(void) {
@@ -325,6 +404,22 @@ static rubin_mdbx_prefix_result rubin_mdbx_get_equal_or_great(const MDBX_txn *tx
 	}
 	return result;
 }
+typedef struct { int rc; MDBX_cursor *cursor; } rubin_mdbx_cursor_result;
+static rubin_mdbx_cursor_result rubin_mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi) {
+	rubin_mdbx_cursor_result result = {MDBX_EINVAL, NULL};
+	result.rc = mdbx_cursor_open(txn, dbi, &result.cursor);
+	return result;
+}
+static rubin_mdbx_prefix_result rubin_mdbx_cursor_get(MDBX_cursor *cursor, const void *seek, size_t length, MDBX_cursor_op op) {
+	MDBX_val key = {(void *)seek, length}, value = {NULL, 0};
+	rubin_mdbx_prefix_result result = {MDBX_EINVAL, NULL, 0, NULL, 0};
+	result.rc = mdbx_cursor_get(cursor, &key, &value, op);
+	if (result.rc == MDBX_SUCCESS) {
+		result.key_bytes = key.iov_base; result.key_len = key.iov_len;
+		result.value_bytes = value.iov_base; result.value_len = value.iov_len;
+	}
+	return result;
+}
 typedef struct { int rc; int equal; int valid; } rubin_mdbx_equal_result;
 static rubin_mdbx_equal_result rubin_mdbx_get_equal(const MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int expected_present, const void *expected_bytes, size_t expected_len) { MDBX_val key = {(void *)key_bytes, key_len}, value = {0, 0}; rubin_mdbx_equal_result result = {MDBX_EINVAL, 0, 0}; if ((expected_present != 0 && expected_present != 1) || (expected_len != 0 && expected_bytes == NULL)) return result; result.rc = mdbx_get(txn, dbi, &key, &value); if (result.rc == MDBX_SUCCESS) { result.valid = value.iov_len == 0 || value.iov_base != NULL; if (expected_present && result.valid && value.iov_len == expected_len && (expected_len == 0 || memcmp(value.iov_base, expected_bytes, expected_len) == 0)) result.equal = 1; } else if (result.rc == MDBX_NOTFOUND) { result.valid = value.iov_base == NULL && value.iov_len == 0; if (!expected_present && result.valid) result.equal = 1; } return result; }
 static int rubin_mdbx_del_exact(MDBX_txn *txn, MDBX_dbi dbi, const void *key_bytes, size_t key_len) { MDBX_val key = {(void *)key_bytes, key_len}; return mdbx_del(txn, dbi, &key, NULL); }
@@ -334,6 +429,7 @@ import "C"
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -769,6 +865,7 @@ type Reader struct {
 	largeVisit atomic.Bool
 	maxKey     uint64
 	updateOld  bool
+	tip        *canonicalTipCell
 
 	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
 	ownerVerified bool
@@ -1652,7 +1749,15 @@ func updateNativeScopedMatch(old, candidate *C.MDBX_txn, dbis [8]C.MDBX_dbi, pla
 	if err != nil {
 		return err
 	}
-	return updateNativeLargeMatch(old, candidate, dbis, plan, diagnostic, scopes...)
+	err = updateNativeLargeMatch(old, candidate, dbis, plan, diagnostic, scopes...)
+	if err != nil {
+		return err
+	}
+	equal, err := canonicalTipEqual(candidate, dbis[2], scopes...)
+	if err == nil && !equal {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, diagnostic, nil)
+	}
+	return err
 }
 
 func updateNativePreflight(old, write *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, scopes ...largeImageScope) ([]updateReference, error) {
@@ -1845,10 +1950,11 @@ func updateNativeReadbackScoped(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan 
 	if err != nil {
 		return false, false, err
 	}
-	if !residual {
-		return false, false, nil
+	endpoint, err := canonicalTipEqual(read, dbis[2], scopes...)
+	if err != nil {
+		return false, false, err
 	}
-	return oldImage, newImage, nil
+	return oldImage && residual && endpoint, newImage && residual && endpoint, nil
 }
 
 func updateNativeReadbackTargets(old, read *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference) (bool, bool, error) {
@@ -2006,50 +2112,64 @@ func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader
 		if returned {
 			return
 		}
-		reader.expire()
+		reader.expire().retire()
 		primary, infrastructure := readPrimary(nil, reader.failure)
 		_ = s.abortReadLocked(old, primary, infrastructure)
 	}()
 	batch, panicValue, panicked, callbackErr := invokeUpdate(callback, reader)
 	returned = true
-	reader.expire()
+	tip := reader.expire()
 	primary, infrastructure := readPrimary(callbackErr, reader.failure)
 	if panicked {
+		tip.retire()
 		_ = s.abortReadLocked(old, primary, infrastructure)
 		panic(panicValue) //nolint:forbidigo // OLD cleanup and Store projection complete before resuming the original callback panic.
 	}
 	if primary != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, primary, infrastructure)
 	}
 	plan, planErr := updateOwnedBatch(batch, reader)
 	if planErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, planErr, false)
 	}
-	return s.updateImagePlan(batch, plan, reader, old)
+	return s.updateImagePlan(batch, plan, reader, old, tip)
 }
 
 // Post-callback image admission preserves the legacy, Large/Obsolete, context order.
-func (s *Store) updateImagePlan(batch Batch, plan []ownedMutation, reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
+func (s *Store) updateImagePlan(batch Batch, plan []ownedMutation, reader *Reader, old *C.MDBX_txn, tip *canonicalTipCell) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
 	consulted, consultedErr := updateOwnedConsulted(batch, plan)
 	if consultedErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, consultedErr, false)
 	}
 	infrastructure, captureErr := updateNativeConsultedImages(old, s.dbis, consulted)
 	if captureErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, captureErr, infrastructure)
 	}
 	large, largeErr := updateOwnedLarge(batch, consulted, reader.maxKey)
 	if largeErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, largeErr, false)
 	}
 	large, contextErr := updateOwnedContext(batch.ContextConsulted, plan, large)
 	if contextErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, contextErr, false)
 	}
 	infrastructure, contextErr = contextQualify(reader, plan, large)
 	if contextErr != nil {
+		tip.retire()
 		return nil, nil, largeImageScope{}, s.abortReadLocked(old, contextErr, infrastructure)
 	}
+	tipErr := canonicalTipAdmit(plan, tip)
+	if tipErr != nil {
+		tip.retire()
+		return nil, nil, largeImageScope{}, s.abortReadLocked(old, tipErr, false)
+	}
+	large.tip = tip
 	return plan, consulted, large, nil
 }
 
@@ -2150,7 +2270,11 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	if planErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, planErr
 	}
+	// Idempotently clear the Go cell on this goroutine's unwinding after registration.
+	defer large.tip.retire()
 	outcome := s.updateNative(plan, consulted, begun.txn, large)
+	// Clear the borrowed source cell before OLD cleanup.
+	large.tip.retire()
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
 }
@@ -2180,7 +2304,7 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)
 	defer func() {
-		reader.expire()
+		reader.expire().retire()
 		primary, infrastructure := readPrimary(err, reader.failure)
 		err = s.abortReadLocked(begun.txn, primary, infrastructure)
 	}()
@@ -2211,6 +2335,193 @@ func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
 		r.active.Store(false)
 	}
 	return result, present, err
+}
+
+// canonicalTipCell owns no copied source or scalar. The two spans remain
+// database-owned under the original OLD transaction, including after cursor close.
+type canonicalTipCell struct {
+	generation uint64
+	key, value unsafe.Pointer
+}
+
+func (tip *canonicalTipCell) retire() {
+	if tip != nil {
+		*tip = canonicalTipCell{}
+	}
+}
+
+type canonicalTipRow struct {
+	key   []byte
+	image updateImage
+}
+
+func canonicalTipShape(op engineOperation) error {
+	return adapterError(op, EngineLocalInvariant, codeProblem, "mdbx_cursor_get returned invalid result shape", nil)
+}
+
+func canonicalTipResultShape(result C.rubin_mdbx_prefix_result) bool {
+	return result.key_bytes != nil && result.key_len != 0 && result.key_len <= 77 && (result.value_len == 0 || result.value_bytes != nil)
+}
+
+// Check every found boundary, including the successor, before reading key bytes.
+// The foreign value's payload is never dereferenced.
+func canonicalTipFound(result C.rubin_mdbx_prefix_result, seek []byte, direction int, op engineOperation) (canonicalTipRow, error) {
+	if rc := int(result.rc); rc != codeSuccess {
+		if rc == codeNotFound {
+			return canonicalTipRow{}, nil
+		}
+		return canonicalTipRow{}, nativeError(op, rc)
+	}
+	if !canonicalTipResultShape(result) {
+		return canonicalTipRow{}, canonicalTipShape(op)
+	}
+	key := unsafe.Slice((*byte)(unsafe.Pointer(result.key_bytes)), int(result.key_len))
+	if len(seek) != 0 && (bytes.Compare(key, seek) >= 0) != (direction > 0) {
+		return canonicalTipRow{}, canonicalTipShape(op)
+	}
+	return canonicalTipRow{key: key, image: updateImage{present: true, bytes: unsafe.Pointer(result.value_bytes), length: result.value_len}}, nil
+}
+
+func canonicalTipLast(cursor *C.MDBX_cursor, generation uint64, op engineOperation) (canonicalTipRow, error) {
+	if generation == ^uint64(0) {
+		return canonicalTipFound(C.rubin_mdbx_cursor_get(cursor, nil, 0, C.MDBX_LAST), nil, 0, op)
+	}
+	var seek [8]byte
+	binary.BigEndian.PutUint64(seek[:], generation+1)
+	seekPointer := unsafe.Pointer(&seek)
+	result := C.rubin_mdbx_cursor_get(cursor, seekPointer, 8, C.MDBX_SET_RANGE)
+	runtime.KeepAlive(seek)
+	row, err := canonicalTipFound(result, seek[:], 1, op)
+	if err != nil {
+		return canonicalTipRow{}, err
+	}
+	if row.key == nil {
+		return canonicalTipFound(C.rubin_mdbx_cursor_get(cursor, nil, 0, C.MDBX_LAST), nil, 0, op)
+	}
+	return canonicalTipFound(C.rubin_mdbx_cursor_get(cursor, nil, 0, C.MDBX_PREV), seek[:], -1, op)
+}
+
+func canonicalTipEndpoint(txn *C.MDBX_txn, dbi C.MDBX_dbi, generation uint64, op engineOperation) (canonicalTipRow, error) {
+	opened := C.rubin_mdbx_cursor_open(txn, dbi)
+	if opened.cursor != nil {
+		defer C.mdbx_cursor_close(opened.cursor)
+	}
+	err := nativePointerResultError(op, "mdbx_cursor_open returned invalid result shape", int(opened.rc), opened.cursor != nil)
+	if err != nil {
+		return canonicalTipRow{}, err
+	}
+	row, err := canonicalTipLast(opened.cursor, generation, op)
+	if err != nil {
+		return canonicalTipRow{}, err
+	}
+	if len(row.key) < 8 {
+		var lower [8]byte
+		binary.BigEndian.PutUint64(lower[:], generation)
+		if bytes.Compare(row.key, lower[:]) < 0 {
+			return canonicalTipRow{}, nil
+		}
+		return row, nil
+	}
+	if binary.BigEndian.Uint64(row.key[:8]) != generation {
+		return canonicalTipRow{}, nil
+	}
+	return row, nil
+}
+
+func canonicalTipPoint(row canonicalTipRow) (*AuthorityPointV1, error) {
+	if len(row.key) != 16 {
+		return nil, integrityError(operationPrefixPage, "stored key outside SchemaV2 prefix-page domain", nil)
+	}
+	height := binary.BigEndian.Uint64(row.key[8:])
+	if height > 0xffffffff {
+		return nil, integrityError(operationPrefixPage, "canonical tip height outside domain", nil)
+	}
+	if row.image.length != 104 {
+		return nil, integrityError(operationPrefixPage, "stored value width outside SchemaV2 bound", nil)
+	}
+	value := unsafe.Slice((*byte)(row.image.bytes), 104)
+	if !validWork([40]byte(value[64:104])) {
+		return nil, integrityError(operationPrefixPage, "canonical tip work outside domain", nil)
+	}
+	point := &AuthorityPointV1{Height: height}
+	copy(point.BlockHash[:], value[:32])
+	return point, nil
+}
+
+// CanonicalTipV1 acquires once the greatest physical canonical-v1 key in a
+// nonzero generation of this Reader. A nil point with nil error proves empty;
+// a source failure returns nil and disarms the Reader. This does not certify
+// history, headers, linkage or the authority's choice of generation.
+// The returned scalar is independent and remains safe after the callback ends.
+func (r *Reader) CanonicalTipV1(generation uint64) (*AuthorityPointV1, error) {
+	if !r.usable() {
+		return nil, prefixPageInputError("Reader is not active", nil)
+	}
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return nil, prefixPageInputError("Reader is not active", nil)
+	}
+	if generation == 0 {
+		return nil, prefixPageInputError("invalid prefix-page prefix", nil)
+	}
+	if r.tip != nil {
+		return nil, prefixPageInputError("canonical tip already acquired", nil)
+	}
+	point, err := r.canonicalTipAcquire(generation)
+	return point, err
+}
+
+func (r *Reader) canonicalTipAcquire(generation uint64) (*AuthorityPointV1, error) {
+	row, err := canonicalTipEndpoint(r.txn, r.dbis[2], generation, operationPrefixPage)
+	var point *AuthorityPointV1
+	if err == nil && row.key != nil {
+		point, err = canonicalTipPoint(row)
+	}
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+		return nil, err
+	}
+	r.tip = &canonicalTipCell{generation: generation}
+	if row.key != nil {
+		r.tip.key, r.tip.value = unsafe.Pointer(&row.key[0]), row.image.bytes
+	}
+	return point, nil
+}
+
+func canonicalTipAdmit(plan []ownedMutation, tip *canonicalTipCell) error {
+	if tip == nil {
+		return nil
+	}
+	for _, target := range plan {
+		if target.dbi.Rank == 2 && binary.BigEndian.Uint64(target.key[:8]) == tip.generation {
+			return updateInvalidBatch()
+		}
+	}
+	return nil
+}
+
+// Candidate bytes are compared with the qualified original source, never
+// requalified as source. Unequal readable widths require no payload access.
+func canonicalTipEqual(txn *C.MDBX_txn, dbi C.MDBX_dbi, scopes ...largeImageScope) (bool, error) {
+	if len(scopes) == 0 || scopes[0].tip == nil {
+		return true, nil
+	}
+	tip := scopes[0].tip
+	row, err := canonicalTipEndpoint(txn, dbi, tip.generation, operationUpdate)
+	if err != nil {
+		return false, err
+	}
+	if tip.key == nil {
+		return row.key == nil, nil
+	}
+	if len(row.key) != 16 || row.image.length != 104 {
+		return false, nil
+	}
+	key := unsafe.Slice((*byte)(tip.key), 16)
+	value := unsafe.Slice((*byte)(tip.value), 104)
+	return bytes.Equal(key, row.key) && bytes.Equal(value, unsafe.Slice((*byte)(row.image.bytes), 104)), nil
 }
 
 // OptionalSideValueV1 is one GetOptionalSide observation. Present false is verified absence. For a present row Length
@@ -2646,11 +2957,13 @@ func (r *Reader) usable() bool {
 	return r != nil && r.self == r && r.txn != nil && validRetainedDBIs(r.dbis) && r.active.Load()
 }
 
-func (r *Reader) expire() {
+func (r *Reader) expire() *canonicalTipCell {
 	r.active.Store(false)
 	r.getMu.Lock()
-	//nolint:staticcheck // Lock acquisition drains every in-flight Get and PrefixPage before abort.
+	tip := r.tip
+	r.tip = nil
 	r.getMu.Unlock()
+	return tip
 }
 
 func copiedGetResult(dbi DBI, key []byte, rc int, bytes unsafe.Pointer, length C.size_t) ([]byte, bool, error) {

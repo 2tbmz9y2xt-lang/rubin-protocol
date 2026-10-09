@@ -37,7 +37,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
 
       - name: Run FIPS-only smoke and conformance lane
         run: |

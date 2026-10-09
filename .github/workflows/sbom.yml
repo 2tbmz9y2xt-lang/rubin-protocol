@@ -23,4 +23,4 @@ jobs:
         with:
           format: spdx-json
           artifact-name: rubin-protocol-sbom.spdx.json
-          syft-version: v1.52.0
+          syft-version: v1.54.1
