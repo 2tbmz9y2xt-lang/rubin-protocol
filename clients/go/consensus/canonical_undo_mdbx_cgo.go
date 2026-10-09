@@ -121,12 +121,13 @@ func canonicalUndoTarget(logical []mdbx.Mutation, key []byte) *mdbx.Mutation {
 // canonical immutable expected family. Physical OLD spans have their actual
 // native widths, independently of expected/ref widths, through visitor expiry.
 func canonicalUndoFamilyEqualV1(reader *mdbx.Reader, hash *[32]byte, expected []mdbx.Mutation) (bool, error) {
+	var scratch [65536]byte
 	count := 0
 	err := reader.VisitLargeImageV1(mdbx.LargeImageSelectorV1{Kind: mdbx.LargeImageUndoFamilyV1, Hash: *hash}, func(row mdbx.LargeImageRowV1) error {
 		if count == len(expected) || !bytes.Equal(row.Key(), expected[count].Key) {
 			return selectedSideDefect("undo family has an unexpected member")
 		}
-		if err := canonicalUndoRowEqual(reader, row, &expected[count]); err != nil {
+		if err := canonicalUndoRowEqual(reader, row, &expected[count], scratch[:]); err != nil {
 			return err
 		}
 		count++
@@ -144,7 +145,7 @@ func canonicalUndoFamilyEqualV1(reader *mdbx.Reader, hash *[32]byte, expected []
 	return true, nil
 }
 
-func canonicalUndoRowEqual(reader *mdbx.Reader, row mdbx.LargeImageRowV1, expected *mdbx.Mutation) error {
+func canonicalUndoRowEqual(reader *mdbx.Reader, row mdbx.LargeImageRowV1, expected *mdbx.Mutation, scratch []byte) error {
 	value := expected.Literal
 	if expected.AfterKind == mdbx.AfterOldValueRef {
 		var present bool
@@ -160,11 +161,10 @@ func canonicalUndoRowEqual(reader *mdbx.Reader, row mdbx.LargeImageRowV1, expect
 	if !row.Present() || row.Length() != uint64(len(value)) {
 		return selectedSideDefect("undo value length differs")
 	}
-	return canonicalUndoBytesEqual(row, value)
+	return canonicalUndoBytesEqual(row, value, scratch)
 }
 
-func canonicalUndoBytesEqual(row mdbx.LargeImageRowV1, value []byte) error {
-	var scratch [65536]byte
+func canonicalUndoBytesEqual(row mdbx.LargeImageRowV1, value, scratch []byte) error {
 	for offset := 0; offset < len(value); {
 		window := min(len(scratch), len(value)-offset)
 		n, err := row.ReadAt(scratch[:window], uint64(offset))
