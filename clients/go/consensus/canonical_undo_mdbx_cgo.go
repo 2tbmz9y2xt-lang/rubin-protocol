@@ -25,8 +25,8 @@ func canonicalUndoFamilyV1(generation, height, txCount uint64, hash *[32]byte, g
 	binary.BigEndian.PutUint64(supply[:8], generated.Hi)
 	binary.BigEndian.PutUint64(supply[8:], generated.Lo)
 	rows := make([]mdbx.Mutation, 1, count+1)
-	// The mask is identity after the original scalar domain validation.
-	rows[0] = mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[5], Key: mdbx.UndoManifestKey(*hash), AfterKind: mdbx.AfterLiteral, Literal: mdbx.UndoManifestValue(height, supply, uint32(txCount & 0xffffffff), uint32(count))}
+	// The masks are identity on the original scalar and qualified compact-source domains.
+	rows[0] = mdbx.Mutation{DBI: mdbx.SchemaV2DBIs()[5], Key: mdbx.UndoManifestKey(*hash), AfterKind: mdbx.AfterLiteral, Literal: mdbx.UndoManifestValue(height, supply, uint32(txCount&0xffffffff), uint32(count&0xffffffff))}
 	if spent != nil {
 		for tuple, ok := spent.next(); ok; tuple, ok = spent.next() {
 			row, err := canonicalUndoEntry(generation, hash, tuple, logical, observed)
