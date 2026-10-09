@@ -164,7 +164,7 @@ func canonicalUndoRowEqual(reader *mdbx.Reader, row mdbx.LargeImageRowV1, expect
 }
 
 func canonicalUndoBytesEqual(row mdbx.LargeImageRowV1, value []byte) error {
-	var scratch [32]byte
+	var scratch [65536]byte
 	for offset := 0; offset < len(value); {
 		window := min(len(scratch), len(value)-offset)
 		n, err := row.ReadAt(scratch[:window], uint64(offset))

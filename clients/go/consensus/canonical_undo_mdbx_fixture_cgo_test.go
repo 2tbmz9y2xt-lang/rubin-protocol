@@ -13,7 +13,7 @@ import (
 )
 
 func TestCanonicalUndoFamilyNativeIO(t *testing.T) {
-	for _, name := range []string{"E01KeyBeforeSource", "E02RefGetIO", "E03ManifestReadAtIO", "E04EntryReadAtIO", "E05ReadAndAbortIO", "H07RawWidth"} {
+	for _, name := range []string{"E01KeyBeforeSource", "E02RefGetIO", "E03ManifestReadAtIO", "E04EntryReadAtIO", "E05ReadAndAbortIO", "H07RawWidth", "A10MaxPhysical", "H06LastByte"} {
 		t.Run(name, func(t *testing.T) { undoNativeCell(t, name) })
 	}
 }
@@ -22,15 +22,18 @@ func TestCanonicalUndoFamilyNativeIO(t *testing.T) {
 // full-image readback happens outside it; faults come from actual native sites.
 func undoNativeCell(t *testing.T, name string) {
 	t.Helper()
-	width := 20
-	if name == "H07RawWidth" {
+	width, count := 20, 2
+	if name == "H07RawWidth" || name == "A10MaxPhysical" || name == "H06LastByte" {
 		width = 65560
+	}
+	if name == "A10MaxPhysical" {
+		count = 1
 	}
 	path := filepath.Join(t.TempDir(), "db")
 	store, err := mdbx.Create(path, sideWorldConfig)
 	logicalMDBXAssert(t, err == nil, "create native store: %v", err)
 	t.Cleanup(func() { _ = store.Close() })
-	hash, expected, physical, source := undoPhysicalRows(2, width)
+	hash, expected, physical, source := undoPhysicalRows(count, width)
 	neighbor := undoLiteralManifest(hashWithPrefix(0x62), 9, Uint128{Lo: 91}, 1, 0)
 	physical = append(physical, neighbor)
 	scenario, rank, key, gets, faults := undoNativeDamage(name, expected, physical, source)
@@ -55,11 +58,15 @@ func undoNativeCell(t *testing.T, name string) {
 	var original *mdbx.Reader
 	before := logicalMDBXSnapshot(expected)
 	originalHash := hash
+	acceptedAbort := errors.New("canonical undo native observation rollback")
 	evidence, fixtureErr := mdbx.FixtureSelectedDamage(store, owner, scenario, rank, key, func() {
 		grantErr := owner.WithReservation(mdbx.MaxOperationDataBytes, func() error {
 			truth, stage, outer = store.Update(func(reader *mdbx.Reader) (mdbx.Batch, error) {
 				original = reader
 				equal, direct = canonicalUndoFamilyEqualV1(reader, &hash, expected)
+				if name == "A10MaxPhysical" && equal && direct == nil {
+					return mdbx.Batch{}, acceptedAbort
+				}
 				return mdbx.Batch{}, direct
 			})
 			return nil
@@ -68,12 +75,12 @@ func undoNativeCell(t *testing.T, name string) {
 	})
 	logicalMDBXAssert(t, fixtureErr == nil, "armed site not reached: %v %+v", fixtureErr, evidence)
 	logicalMDBXAssert(t, hash == originalHash && reflect.DeepEqual(before, logicalMDBXSnapshot(expected)), "native comparison mutated original expected owners")
-	logicalMDBXAssert(t, !equal && truth == mdbx.CommitTruthOld && stage == mdbx.UpdateStagePrewrite, "raw Update tuple: %t %v %v %v", equal, truth, stage, outer)
+	logicalMDBXAssert(t, equal == (name == "A10MaxPhysical") && truth == mdbx.CommitTruthOld && stage == mdbx.UpdateStagePrewrite, "raw Update tuple: %t %v %v %v", equal, truth, stage, outer)
 	undoNativeCounts(t, evidence, gets, faults)
-	undoNativeResult(t, name, direct, outer)
+	undoNativeResult(t, name, direct, outer, acceptedAbort)
 	_, _, expired := original.Get(logicalMDBXDBIs[1], expected[1].RefKey)
 	undoNativeEngine(t, expired, "get", mdbx.EngineInvalidInput, 22, "Reader is not active")
-	if name != "E01KeyBeforeSource" && name != "H07RawWidth" {
+	if scenario != mdbx.SelectedDamageProbeOnly {
 		undoNativeConsumed(t, store, outer)
 		_ = store.Close()
 		store, err = mdbx.Open(path, sideWorldConfig)
@@ -90,10 +97,10 @@ func undoNativeCell(t *testing.T, name string) {
 
 func undoNativeDamage(name string, expected, physical, source []mdbx.Mutation) (mdbx.SelectedDamageScenario, uint8, []byte, [8]uint64, uint64) {
 	scenario, rank, key := mdbx.SelectedDamageGetEIO, uint8(1), expected[1].RefKey
-	gets, faults := [8]uint64{1: 1, 5: 2}, uint64(1)
+	gets, faults := [8]uint64{1: 1, 5: 1}, uint64(1)
 	switch name {
 	case "E01KeyBeforeSource":
-		scenario, rank, key, gets, faults = mdbx.SelectedDamageProbeOnly, 0, nil, [8]uint64{5: 2}, 0
+		scenario, rank, key, gets, faults = mdbx.SelectedDamageProbeOnly, 0, nil, [8]uint64{5: 1}, 0
 		physical[1].Key[36] = 2
 		// A real absent source accompanies the key defect, which must win.
 		source[0].AfterKind, source[0].Literal = mdbx.AfterAbsent, nil
@@ -103,11 +110,16 @@ func undoNativeDamage(name string, expected, physical, source []mdbx.Mutation) (
 	case "E03ManifestReadAtIO":
 		rank, key, gets = 5, expected[0].Key, [8]uint64{5: 1}
 	case "E04EntryReadAtIO":
-		rank, key, gets = 5, expected[1].Key, [8]uint64{1: 1, 5: 3}
+		rank, key, gets = 5, expected[1].Key, [8]uint64{1: 1, 5: 2}
 	case "E05ReadAndAbortIO":
 		scenario, faults = mdbx.SelectedDamageGetAbortEIO, 2
 	case "H07RawWidth":
 		scenario, rank, key, faults = mdbx.SelectedDamageProbeOnly, 0, nil, 0
+	case "A10MaxPhysical", "H06LastByte":
+		scenario, rank, key, gets, faults = mdbx.SelectedDamageProbeOnly, 0, nil, [8]uint64{1: 1, 5: 3}, 0
+		if name == "H06LastByte" {
+			physical[1].Literal[65559] ^= 1
+		}
 	}
 	return scenario, rank, key, gets, faults
 }
@@ -126,7 +138,7 @@ func undoNativeEngine(t *testing.T, err error, operation string, class mdbx.Engi
 	return engine
 }
 
-func undoNativeResult(t *testing.T, name string, direct, outer error) {
+func undoNativeResult(t *testing.T, name string, direct, outer, acceptedAbort error) {
 	t.Helper()
 	switch name {
 	case "E01KeyBeforeSource":
@@ -135,6 +147,11 @@ func undoNativeResult(t *testing.T, name string, direct, outer error) {
 	case "H07RawWidth":
 		undoDefect(t, false, direct, "undo value length differs")
 		logicalMDBXAssert(t, reflect.ValueOf(outer).Equal(reflect.ValueOf(direct)), "width defect interface replaced")
+	case "A10MaxPhysical":
+		logicalMDBXAssert(t, direct == nil && outer == acceptedAbort, "accepted comparator or application sentinel changed: direct=%v outer=%v", direct, outer)
+	case "H06LastByte":
+		undoDefect(t, false, direct, "undo value differs")
+		logicalMDBXAssert(t, reflect.ValueOf(outer).Equal(reflect.ValueOf(direct)), "tail defect interface replaced")
 	case "E05ReadAndAbortIO":
 		undoNativeEngine(t, direct, "get", mdbx.EngineIO, 5, "error 5")
 		parts := genesisMDBXCauses(outer)
