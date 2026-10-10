@@ -648,7 +648,7 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 						for _, child := range owned {
 							if reflect.TypeOf(child) == reflect.TypeOf(errors.Join(plain)) {
 								ownedParents = append(ownedParents, child)
-								}
+							}
 						}
 					}
 					var ownedBackings, ownedBefore [][]error
@@ -774,7 +774,10 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 		_, expired := saved.ReadAt(make([]byte, 1), 0)
 		logicalMDBXAssert(t, expired.(*mdbx.EngineError).Diagnostic == "Reader is not active", "early row/span lifetime")
 		logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("early cached View callback"); return nil }) == cached, "early cached View identity")
-		_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("early cached Update callback"); return mdbx.Batch{}, nil })
+		_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) {
+			t.Fatal("early cached Update callback")
+			return mdbx.Batch{}, nil
+		})
 		logicalMDBXAssert(t, next == cached, "early cached Update identity")
 		w.store = w.reopen()
 		startupRawImageEqual(t, w)

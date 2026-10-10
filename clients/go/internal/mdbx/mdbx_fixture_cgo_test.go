@@ -117,7 +117,10 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 			if s.View(func(*Reader) error { t.Fatal("consumed close callback"); return nil }) != raw {
 				t.Fatal("consumed close cached identity")
 			}
-			next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("consumed close cached checker"); return 1, nil })
+			next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) {
+				t.Fatal("consumed close cached checker")
+				return 1, nil
+			})
 			if !admitted || next != raw || s.terminal != raw {
 				t.Fatal("consumed close cached admission flag/identity")
 			}
@@ -367,7 +370,10 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 							}
 						}
 						for _, invalid := range []*Store{{state: storeState("invalid"), terminal: raw}, {state: s.state, terminal: raw}} {
-							next, admitted := invalid.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("invalid prestate checker"); return 1, nil })
+							next, admitted := invalid.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) {
+								t.Fatal("invalid prestate checker")
+								return 1, nil
+							})
 							diagnostic := "invalid Store resource shape"
 							if invalid.state == storeState("invalid") {
 								diagnostic = "invalid Store state"
