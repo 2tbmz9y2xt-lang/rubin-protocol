@@ -289,25 +289,31 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 
 func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 	for _, row := range []struct {
-		name    string
-		profile mdbx.StorageProfileV1
+		name           string
+		profile        mdbx.StorageProfileV1
+		active, cursor int
+		b, u, pulls    uint64
 	}{
-		{"B-U pair", 1},
-		{"U", 2},
+		{"R09 mixed profiles active15120 wrong B-U pair", 1, 15120, 0, 0, 13680, 15122},
+		{"R09 mixed profiles active15120 wrong U", 2, 15120, 0, 0, 13680, 15122},
+		{"R09 empty active wrong B-U pair", 1, -1, -1, 1, 13681, 1},
+		{"R09 empty active wrong U", 2, -1, -1, 0, 1, 1},
+		{"R09 H0 active wrong B-U pair", 1, 0, 0, 1, 13681, 2},
+		{"R09 H0 active wrong U", 2, 0, 0, 0, 1, 2},
 	} {
-		t.Run("R09 mixed profiles active15120 wrong "+row.name, func(t *testing.T) {
-			w := startupWorld(t, 15120, 0)
+		t.Run(row.name, func(t *testing.T) {
+			w := startupWorld(t, row.active, row.cursor)
 			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-				a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = row.profile, 3-row.profile, 0, 13680
+				a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = row.profile, 3-row.profile, row.b, row.u
 			})
 			before := w.image()
 			w.store = w.reopen()
 			var out ReplayStartupOutcomeV1
 			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = startupRun(w) })
 			startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-			// 15121 active rows plus the active EOF, in each index. A
-			// first target pull would add one to the exact rank2 count.
-			logicalMDBXAssert(t, err == nil && out.Err.Error() == "startup active bounds mismatch" && evidence.OldPulls[2] == 15122 && evidence.OldPulls[7] == 15122, "bounds before target: %+v/%v/%v", evidence, out.Err, err)
+			// Each active index includes its EOF pull: empty=1, H0=2,
+			// H15120=15122. Any target pull changes the exact rank2 count.
+			logicalMDBXAssert(t, err == nil && out.Err.Error() == "startup active bounds mismatch" && evidence.OldPulls[2] == row.pulls && evidence.OldPulls[7] == row.pulls, "bounds before target: %+v/%v/%v", evidence, out.Err, err)
 			replaySameImage(t, before, w.image(), "boundary bounds image")
 			startupFreshGuard(t, w, false)
 		})
