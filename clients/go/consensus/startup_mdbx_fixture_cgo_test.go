@@ -606,6 +606,7 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 					integrity := &mdbx.EngineError{Class: "Integrity", Operation: "get", Code: -30796, Diagnostic: "application-shaped native"}
 					busy := &mdbx.EngineError{Class: "Concurrency", Operation: "close", Code: -30778, Cause: plain}
 					custom := &startupCustomJoin{children: []error{integrity, busy}}
+					customBacking := &custom.children[0]
 					payload := startupCacheBytes{0x31, 0x72}
 					var typedNil *startupCustomJoin
 					var application error = plain
@@ -678,6 +679,18 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 								out := startupRun(w)
 								startupTuple(t, out, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
 								logicalMDBXAssert(t, out.Err == cached && custom.calls == 0, "cached identity/custom traversal changed")
+								logicalMDBXAssert(t, len(custom.children) == 2 && &custom.children[0] == customBacking, "cached custom children backing changed")
+								first, firstOK := custom.children[0].(*mdbx.EngineError)
+								second, secondOK := custom.children[1].(*mdbx.EngineError)
+								logicalMDBXAssert(t, firstOK && secondOK && first == integrity && second == busy, "cached custom children identity/order changed")
+								if shape == "CommitError" {
+									cause, ok := application.(*mdbx.CommitError).Cause.(*startupCustomJoin)
+									logicalMDBXAssert(t, ok && cause == custom && application.(*mdbx.CommitError).Truth == 1, "cached CommitError Cause changed")
+								}
+								if shape == "single wrapper" {
+									cause, ok := application.(interface{ Unwrap() error }).Unwrap().(*startupCustomJoin)
+									logicalMDBXAssert(t, ok && cause == custom && custom.calls == 0, "cached single wrapper Cause changed")
+								}
 								children := cached.(interface{ Unwrap() []error }).Unwrap()
 								logicalMDBXAssert(t, len(children) == 2 && &children[0] == parentBacking && reflect.TypeOf(children[0]) == applicationType && reflect.ValueOf(children[0]).Pointer() == applicationPointer && children[1].(*mdbx.EngineError) == abort, "cached raw tree/backing changed")
 								logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("cached View callback"); return nil }) == cached, "cached View identity")

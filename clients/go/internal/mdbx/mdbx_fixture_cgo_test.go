@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -122,6 +123,50 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 			}
 		})
 	}
+	t.Run("H03 actual writer release cache admission", func(t *testing.T) {
+		s := startupOpened(t)
+		called := 0
+		_, err := fixtureLargeFault(s, 9, 0, []byte{0}, func() {
+			raw, cached := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) {
+				called++
+				mustEnvironment(t, fixtureTipWriterReleaseFault(s))
+				return 1, nil
+			})
+			if cached || called != 1 || s.canonicalOwnerVerified || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.config != (ConfigV1{}) || !reflect.ValueOf(s.dbis).IsZero() || s.terminal != raw {
+				t.Fatal("first fresh writer release flag/callback/resources/cache")
+			}
+			parts := raw.(interface{ Unwrap() []error }).Unwrap()
+			if len(parts) != 2 {
+				t.Fatal("actual abort then writer release order")
+			}
+			abort := requireEnvironmentError(t, parts[0], EngineIO, operationAbort, 5, "error 5")
+			release := requireEnvironmentError(t, parts[1], EngineIO, operationClose, 9, "release Rubin writer lock")
+			if abort.Cause != nil || !errors.Is(release.Cause, syscall.EBADF) || abort.ReopenRequired || release.ReopenRequired {
+				t.Fatal("actual writer release Cause/consumption")
+			}
+			backing, abortBefore, releaseBefore := &parts[0], *abort, *release
+			before := fixtureLargeNativeCalls()
+			for attempt := 0; attempt < 2; attempt++ {
+				next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { called++; return 1, nil })
+				if !admitted || next != raw || called != 1 || s.terminal != raw || s.state != storeCLOSED || s.canonicalOwnerVerified || s.env != nil || s.writer != nil || s.txn != nil || s.config != (ConfigV1{}) || !reflect.ValueOf(s.dbis).IsZero() {
+					t.Fatal("writer release cached flag/identity/resources")
+				}
+				children := next.(interface{ Unwrap() []error }).Unwrap()
+				if len(children) != 2 || &children[0] != backing || children[0].(*EngineError) != abort || children[1].(*EngineError) != release || *abort != abortBefore || *release != releaseBefore {
+					t.Fatal("writer release cached parent/children/backing changed")
+				}
+				if s.View(func(*Reader) error { t.Fatal("writer release cached View callback"); return nil }) != raw {
+					t.Fatal("writer release cached View identity")
+				}
+				truth, stage, next := s.Update(func(*Reader) (Batch, error) { t.Fatal("writer release cached Update callback"); return Batch{}, nil })
+				_, inspectionErr := s.Inspect()
+				if truth != 1 || stage != 1 || next != raw || inspectionErr != raw || fixtureLargeNativeCalls() != before {
+					t.Fatal("writer release next operation suppression/truth/stage")
+				}
+			}
+		})
+		mustEnvironment(t, err)
+	})
 	for _, completion := range []StartupCanonicalCompletionV1{0, 2, 255} {
 		for _, application := range []string{"nil", "same", "different", "typed nil"} {
 			for _, mode := range []uint32{0, 9, 10} {
