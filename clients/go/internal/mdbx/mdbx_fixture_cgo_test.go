@@ -39,15 +39,46 @@ func archiveRawEqual(t *testing.T, s *Store, rows []Mutation) {
 }
 
 func TestStartupCanonicalNativeFixtures(t *testing.T) {
+	for _, begin := range []struct {
+		scenario SelectedDamageScenario
+		class    EngineClass
+		code     int
+	}{
+		{SelectedDamageBeginTxnFull, EngineTransaction, -30788},
+		{SelectedDamageBeginEIO, EngineIO, 5},
+	} {
+		t.Run(fmt.Sprintf("fresh begin %d before cached admission", begin.code), func(t *testing.T) {
+			s := startupOpened(t)
+			var raw error
+			var cached bool
+			called := 0
+			evidence, err := FixtureSelectedDamage(s, bootstrapOwner(t), begin.scenario, 0, []byte{0}, func() {
+				raw, cached = s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { called++; return 1, nil })
+				if cached || called != 0 || s.state != storeCLOSED || s.terminal != raw || s.env != nil || s.writer != nil || s.txn != nil || s.canonicalOwnerVerified {
+					t.Fatal("first fresh begin failure flag/callback/state")
+				}
+				next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { called++; return 1, nil })
+				if !admitted || next != raw || called != 0 {
+					t.Fatal("begin failure cached repeat flag/identity/callback")
+				}
+			})
+			mustEnvironment(t, err)
+			requireEngineError(t, raw, begin.class, operationView, begin.code)
+			if evidence.BeginOld != 1 || evidence.BeginRead != 0 || evidence.BeginWrite != 0 || evidence.Faults != 1 || evidence.OldAborts != 0 || evidence.OldGets != ([8]uint64{}) || evidence.OldPulls != ([8]uint64{}) {
+				t.Fatalf("no-checker fresh begin native census: %+v", evidence)
+			}
+		})
+	}
 	for _, abort := range []uint32{0, 9} {
 		t.Run(fmt.Sprintf("H03 consumed close EIO abort%d", abort), func(t *testing.T) {
 			s := startupOpened(t)
 			var read, raw error
+			var cached bool
 			_, err := fixtureTipCursor(s, 1, 1, 1, 5, func() {
 				mustEnvironment(t, fixtureTipCloseFault())
 				run := func() {
 					_, armErr := FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, []byte{0}, func() {
-						raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+						raw, cached = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 							_, _, read = r.Get(readDBIsLiteral()[0], []byte{0})
 							return 1, read
 						})
@@ -79,11 +110,15 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					t.Fatal("read/abort/close order")
 				}
 			}
-			if s.canonicalOwnerVerified || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.terminal != raw {
+			if cached || s.canonicalOwnerVerified || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.terminal != raw {
 				t.Fatal("consumed close native resources")
 			}
 			if s.View(func(*Reader) error { t.Fatal("consumed close callback"); return nil }) != raw {
 				t.Fatal("consumed close cached identity")
+			}
+			next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("consumed close cached checker"); return 1, nil })
+			if !admitted || next != raw || s.terminal != raw {
+				t.Fatal("consumed close cached admission flag/identity")
 			}
 		})
 	}
@@ -94,6 +129,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					s := startupOpened(t)
 					var reader *Reader
 					var app, read, raw error
+					var cached bool
 					if application == "different" {
 						app = errors.New("distinct application")
 					}
@@ -103,7 +139,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					}
 					run := func() {
 						_, err := FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, []byte{0}, func() {
-							raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+							raw, cached = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 								reader = r
 								_, _, read = r.Get(readDBIsLiteral()[0], []byte{0})
 								if application == "same" {
@@ -120,7 +156,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 						_, err := fixtureLargeFault(s, mode, 0, []byte{0}, run)
 						mustEnvironment(t, err)
 					}
-					if reader == nil || read == nil || reader.failure != read || reader.usable() || s.canonicalOwnerVerified || s.terminal != raw {
+					if cached || reader == nil || read == nil || reader.failure != read || reader.usable() || s.canonicalOwnerVerified || s.terminal != raw {
 						t.Fatal("completion/read failure ownership")
 					}
 					primary := raw
@@ -176,6 +212,8 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					key := []byte{0}
 					var reader *Reader
 					var readErr, appErr, raw error
+					var cached bool
+					var nativeCounts SelectedDamageEvidence
 					if application == "different" {
 						appErr = errors.New("application")
 					}
@@ -185,7 +223,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					}
 					liMode := mode
 					run := func() {
-						raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+						raw, cached = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 							reader = r
 							if recorded {
 								_, _, readErr = r.Get(readDBIsLiteral()[0], key)
@@ -201,10 +239,23 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 							}
 							return 1, appErr
 						})
+						if cached {
+							t.Fatal("first fresh cleanup was labeled cached admission")
+						}
+						if s.state != storeOPEN {
+							calls := fixtureLargeNativeCalls()
+							for attempt := 0; attempt < 2; attempt++ {
+								next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("armed cached checker"); return 1, nil })
+								if !admitted || next != raw || fixtureLargeNativeCalls() != calls {
+									t.Fatal("armed cached admission flag/identity/native suppression")
+								}
+							}
+						}
 					}
 					if recorded && mode != 24 {
 						armedRead := func() {
-							_, err := FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, key, run)
+							var err error
+							nativeCounts, err = FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, key, run)
 							mustEnvironment(t, err)
 						}
 						if mode == 0 {
@@ -219,7 +270,10 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					} else {
 						run()
 					}
-					if reader.usable() || s.canonicalOwnerVerified && (recorded || appErr != nil || mode != 0) {
+					if recorded && mode != 24 && (nativeCounts.BeginOld != 1 || nativeCounts.BeginRead != 0 || nativeCounts.BeginWrite != 0 || nativeCounts.Faults != 1) {
+						t.Fatalf("cached repeat armed begin/read census: %+v", nativeCounts)
+					}
+					if cached || reader.usable() || s.canonicalOwnerVerified && (recorded || appErr != nil || mode != 0) {
 						t.Fatal("failed startup published permission or retained Reader")
 					}
 					if mode == 10 {
@@ -255,6 +309,29 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 						if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite {
 							t.Fatal("terminal Update identity/truth/stage")
 						}
+						inspection, inspected := s.Inspect()
+						if inspected != raw || inspection != (Inspection{}) {
+							t.Fatal("terminal Inspect identity/zero result")
+						}
+						calls := fixtureLargeNativeCalls()
+						state, txn, retainedConfig, retainedDBIs := s.state, s.txn, s.config, s.dbis
+						for attempt := 0; attempt < 2; attempt++ {
+							next, admitted := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("cached checker"); return 1, nil })
+							if !admitted || next != raw || fixtureLargeNativeCalls() != calls || s.terminal != raw || s.canonicalOwnerVerified || s.state != state || s.txn != txn || s.config != retainedConfig || s.dbis != retainedDBIs {
+								t.Fatal("cached admission flag/identity/native suppression")
+							}
+						}
+						for _, invalid := range []*Store{{state: storeState("invalid"), terminal: raw}, {state: s.state, terminal: raw}} {
+							next, admitted := invalid.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("invalid prestate checker"); return 1, nil })
+							diagnostic := "invalid Store resource shape"
+							if invalid.state == storeState("invalid") {
+								diagnostic = "invalid Store state"
+							}
+							requireEnvironmentError(t, next, EngineLocalInvariant, operationView, -30779, diagnostic)
+							if admitted || fixtureLargeNativeCalls() != calls || invalid.terminal != raw {
+								t.Fatal("invalid prestate was labeled cached admission")
+							}
+						}
 						mustEnvironment(t, fixtureLargeRelease(s))
 					}
 				})
@@ -267,8 +344,9 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 		var old *Reader
 		first := make(chan error, 1)
 		var raw error
+		var cached bool
 		evidence, err := fixtureTipCursor(s, 13, 1, 2, 0, func() {
-			raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+			raw, cached = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				old = r
 				go func() {
 					point, getErr := r.CanonicalTipV1(7)
@@ -294,7 +372,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 		mustEnvironment(t, err)
 		mustEnvironment(t, raw)
 		tipCensus(t, evidence, 1, 2, 1, 0)
-		if old.usable() || old.ownerVerified || old.tip != nil {
+		if cached || old.usable() || old.ownerVerified || old.tip != nil {
 			t.Fatal("drained checker Reader remained usable or retained tip")
 		}
 		startupPermission(t, s, true)
@@ -307,12 +385,13 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 		var old *Reader
 		var point *AuthorityPointV1
 		var raw, getErr, largeErr error
+		var cached bool
 		var large fixtureLargeEvidence
 		early := false
 		evidence, err := fixtureTipCursor(s, 13, 1, 2, 0, func() {
 			large, largeErr = fixtureLargeFault(s, 10, 0, []byte{0}, func() {
 				go func() {
-					raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+					raw, cached = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 						go func() { point, getErr = r.CanonicalTipV1(7); close(got) }()
 						fixtureTipWait()
 						ready <- r
@@ -354,7 +433,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 			t.Fatal("held native endpoint changed")
 		}
 		e := requireEnvironmentError(t, raw, EngineLocalInvariant, operationAbort, -30416, pinnedNegativeDiagnostics[-30416])
-		if e.Cause != nil || !e.ReopenRequired || s.terminal != raw || s.canonicalOwnerVerified {
+		if cached || e.Cause != nil || !e.ReopenRequired || s.terminal != raw || s.canonicalOwnerVerified {
 			t.Fatal("retained drain raw/cache/permission")
 		}
 		if s.state != storePOISONEDTHREAD || s.txn != old.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis {
@@ -391,7 +470,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 						}()
 						run := func() {
 							_ = owner.WithReservation(4096, func() error {
-								return s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+								raw, _ := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 									old = r
 									if recorded && mode != 24 {
 										_, _, _ = r.Get(readDBIsLiteral()[0], []byte{0})
@@ -406,6 +485,7 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 									runtime.Goexit()
 									return 1, nil
 								})
+								return raw
 							})
 						}
 						armed := run
@@ -459,7 +539,7 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 			}
 			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, make([]byte, 104)))
 			var recorded error
-			err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+			err, cached := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[2], 1, nil)
 				e, native := failure.(*EngineError)
 				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30793 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() {
@@ -468,7 +548,7 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 				recorded = failure
 				return 1, nil
 			})
-			if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED {
+			if cached || err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED {
 				t.Fatal("recorded key width failure disappeared")
 			}
 			if s.View(func(*Reader) error { t.Fatal("key width cached callback"); return nil }) != err {
@@ -495,7 +575,7 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 					mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[rank], key, raw))
 				}
 				var recorded error
-				err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+				err, cached := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 					row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[rank], 1, nil)
 					if width == -1 {
 						if failure != nil || found || !reflect.DeepEqual(row, PrefixRow{}) {
@@ -509,6 +589,9 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 					recorded = failure
 					return 1, nil
 				})
+				if cached {
+					t.Fatal("fresh pull was labeled cached admission")
+				}
 				if width == -1 {
 					mustEnvironment(t, err)
 					startupPermission(t, s, true)

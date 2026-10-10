@@ -868,8 +868,8 @@ type Store struct {
 	terminalTruth CommitTruth
 
 	// canonicalOwnerVerified is this handle's canonical-owner verification (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.6):
-	// only the Create publication and bootstrapBatch after its exact-empty census set it, Open never does, and every
-	// non-OPEN state refuses before a Reader exists, so nothing clears it.
+	// Create publication, bootstrapBatch after its exact-empty census and finalized StartupVerifyCanonicalV1 set it.
+	// Open never does; every non-OPEN state refuses before a Reader exists, so nothing clears it.
 	canonicalOwnerVerified bool
 }
 
@@ -2265,7 +2265,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
 	defer s.operations.Unlock()
-	stateErr := s.observationStateError(operationUpdate)
+	stateErr, _ := s.observationStateError(operationUpdate)
 	if stateErr != nil {
 		truth := s.terminalTruth
 		if truth-CommitTruthOld > CommitTruthUnknown-CommitTruthOld {
@@ -2304,9 +2304,10 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	if callback == nil {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)
 	}
-	return s.viewWithStartupCompletion(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+	err, _ = s.viewWithStartupCompletion(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 		return StartupCanonicalNotCompleteV1, callback(r)
 	}, false)
+	return err
 }
 
 // StartupCanonicalCompletionV1 is the fixed startup checker's completion domain.
@@ -2319,32 +2320,32 @@ const (
 
 // StartupVerifyCanonicalV1 establishes permission on a newly Opened Store only
 // after the repository-owned checker and the shared readonly lifecycle complete.
-func (s *Store) StartupVerifyCanonicalV1(check func(*Reader) (StartupCanonicalCompletionV1, error)) error {
+func (s *Store) StartupVerifyCanonicalV1(check func(*Reader) (StartupCanonicalCompletionV1, error)) (err error, cachedTerminal bool) {
 	if s == nil {
-		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil), false
 	}
 	if check == nil {
-		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil)
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil), false
 	}
 	return s.viewWithStartupCompletion(check, true)
 }
 
-func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonicalCompletionV1, error), startup bool) (err error) {
+func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonicalCompletionV1, error), startup bool) (err error, cachedTerminal bool) {
 	if !s.operations.TryLock() {
-		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)
+		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil), false
 	}
 	defer s.operations.Unlock()
-	stateErr := s.observationStateError(operationView)
+	stateErr, cached := s.observationStateError(operationView)
 	if stateErr != nil {
-		return stateErr
+		return stateErr, cached
 	}
 	if startup && s.canonicalOwnerVerified {
-		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil)
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil), false
 	}
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
-		return s.failedReadBegin(begun.txn, beginErr)
+		return s.failedReadBegin(begun.txn, beginErr), false
 	}
 	reader := newReader(begun.txn, s.dbis)
 	reader.ownerVerified = s.canonicalOwnerVerified
@@ -2362,7 +2363,7 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 	}()
 	completion, err = callback(reader)
 	returned = true
-	return startupCompletionResult(startup, completion, err)
+	return startupCompletionResult(startup, completion, err), false
 }
 
 func startupCompletionResult(startup bool, completion StartupCanonicalCompletionV1, err error) error {
@@ -2994,7 +2995,7 @@ func (s *Store) Inspect() (Inspection, error) {
 		return Inspection{}, adapterError(operationInspect, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
 	defer s.operations.Unlock()
-	stateErr := s.observationStateError(operationInspect)
+	stateErr, _ := s.observationStateError(operationInspect)
 	if stateErr != nil {
 		return Inspection{}, stateErr
 	}
@@ -3053,20 +3054,20 @@ func (s *Store) applyReadAbort(txn *C.MDBX_txn, primary error, infrastructure bo
 	return result
 }
 
-func (s *Store) observationStateError(operation engineOperation) error {
+func (s *Store) observationStateError(operation engineOperation) (error, bool) {
 	if !validStoreState(s.state) {
-		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store state", nil)
+		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store state", nil), false
 	}
 	if !validStoreShape(s) {
-		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)
+		return adapterError(operation, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil), false
 	}
 	if s.state == storeOPEN {
-		return nil
+		return nil, false
 	}
 	if s.terminal != nil {
-		return s.terminal
+		return s.terminal, true
 	}
-	return adapterError(operation, EngineInvalidInput, codeEINVAL, "Store is closed", nil)
+	return adapterError(operation, EngineInvalidInput, codeEINVAL, "Store is closed", nil), false
 }
 
 func newReader(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi) *Reader {

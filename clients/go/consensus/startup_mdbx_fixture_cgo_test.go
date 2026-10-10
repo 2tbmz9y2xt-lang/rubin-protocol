@@ -5,7 +5,9 @@ package consensus
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -552,6 +554,10 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 	}
 }
 
+type startupCacheBytes []byte
+
+func (startupCacheBytes) Error() string { return "noncomparable cached application" }
+
 func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 	for _, mode := range []uint32{0, 9} {
 		t.Run(fmt.Sprintf("H10 completed positive close BUSY abort%d", mode), func(t *testing.T) {
@@ -559,7 +565,16 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 			startupRaw(t, w, 2, logicalMDBXMust(mdbx.HeightKey(1, 0)), mdbx.ChainValue(w.hashes[0], [32]byte{}, sideWorldWork(2)))
 			w.store = w.reopen()
 			var out ReplayStartupOutcomeV1
-			state, verified, err := mdbx.FixtureStartupCleanup(w.store, mode, true, func() { out = startupRun(w) })
+			state, verified, err := mdbx.FixtureStartupCleanup(w.store, mode, true, func() {
+				out = startupRun(w)
+				if mode == 9 {
+					for attempt := 0; attempt < 2; attempt++ {
+						repeated := startupRun(w)
+						startupTuple(t, repeated, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
+						logicalMDBXAssert(t, repeated.Err == out.Err, "positive BUSY cached raw identity")
+					}
+				}
+			})
 			startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
 			// A private application positive plus successful abort stays OPEN,
 			// so only abort9 consumes and actually reaches the foreign writer.
@@ -577,38 +592,181 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 			logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "positive cleanup grant release")
 		})
 	}
-	for _, shape := range []string{"application", "CommitError", "custom multi-Unwrap"} {
-		t.Run("H10 cached foreign "+shape, func(t *testing.T) {
-			w := startupWorld(t, 0, 0)
-			w.store = w.reopen()
-			before := w.image()
-			custom := &startupCustomJoin{children: []error{&mdbx.EngineError{Class: "Integrity"}}}
-			var application error = fmt.Errorf("foreign cached application")
-			if shape == "CommitError" {
-				application = &mdbx.CommitError{Truth: 1, Cause: custom}
+	for _, origin := range []string{"View", "Update"} {
+		for _, prior := range []bool{false, true} {
+			for _, shape := range []string{"application", "EngineError Integrity", "EngineError BUSY", "EngineError unknown", "CommitError", "single wrapper", "custom multi-Unwrap", "Join one", "Join two", "Join nested", "Join mixed", "Join four", "typed nil", "noncomparable"} {
+				t.Run(fmt.Sprintf("H10 cached %s prior%v %s", origin, prior, shape), func(t *testing.T) {
+					w := startupWorld(t, 0, 0)
+					w.store = w.reopen()
+					if prior {
+						startupTuple(t, startupRun(w), true, 1, "")
+					}
+					before := w.image()
+					plain := errors.New("foreign cached application")
+					integrity := &mdbx.EngineError{Class: "Integrity", Operation: "get", Code: -30796, Diagnostic: "application-shaped native"}
+					busy := &mdbx.EngineError{Class: "Concurrency", Operation: "close", Code: -30778, Cause: plain}
+					custom := &startupCustomJoin{children: []error{integrity, busy}}
+					payload := startupCacheBytes{0x31, 0x72}
+					var typedNil *startupCustomJoin
+					var application error = plain
+					switch shape {
+					case "EngineError Integrity":
+						application = integrity
+					case "EngineError BUSY":
+						application = busy
+					case "EngineError unknown":
+						application = &mdbx.EngineError{Class: "unknown", Operation: "get", Code: 781}
+					case "CommitError":
+						application = &mdbx.CommitError{Truth: 1, Cause: custom}
+					case "single wrapper":
+						application = fmt.Errorf("application wrapper: %w", custom)
+					case "custom multi-Unwrap":
+						application = custom
+					case "Join one":
+						application = errors.Join(integrity)
+					case "Join two":
+						application = errors.Join(integrity, busy)
+					case "Join nested":
+						application = errors.Join(errors.Join(integrity, busy), errors.Join(plain))
+					case "Join mixed":
+						application = errors.Join(busy, plain, integrity)
+					case "Join four":
+						application = errors.Join(busy, integrity, plain, custom)
+					case "typed nil":
+						application = typedNil
+					case "noncomparable":
+						application = payload
+					}
+					applicationPointer, applicationType := reflect.ValueOf(application).Pointer(), reflect.TypeOf(application)
+					integrityBefore, busyBefore := *integrity, *busy
+					var owned []error
+					var ownedParents []error
+					if reflect.TypeOf(application) == reflect.TypeOf(errors.Join(plain)) {
+						owned = application.(interface{ Unwrap() []error }).Unwrap()
+						ownedParents = append(ownedParents, application)
+						for _, child := range owned {
+							if reflect.TypeOf(child) == reflect.TypeOf(errors.Join(plain)) {
+								ownedParents = append(ownedParents, child)
+								}
+						}
+					}
+					var ownedBackings, ownedBefore [][]error
+					for _, parent := range ownedParents {
+						children := parent.(interface{ Unwrap() []error }).Unwrap()
+						ownedBackings = append(ownedBackings, children)
+						ownedBefore = append(ownedBefore, append([]error(nil), children...))
+					}
+					var cached error
+					var state string
+					var verified bool
+					var cleanupErr error
+					counts, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, []byte{0}, func() {
+						state, verified, cleanupErr = mdbx.FixtureStartupCleanup(w.store, 9, false, func() {
+							if origin == "View" {
+								cached = w.store.View(func(*mdbx.Reader) error { return application })
+							} else {
+								truth, stage, raw := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{}, application })
+								logicalMDBXAssert(t, truth == 1 && stage == 1, "cached Update origin truth/stage")
+								cached = raw
+							}
+							parent := cached.(interface{ Unwrap() []error }).Unwrap()
+							logicalMDBXAssert(t, len(parent) == 2 && reflect.TypeOf(parent[0]) == applicationType && reflect.ValueOf(parent[0]).Pointer() == applicationPointer, "cache origin application identity")
+							abort := parent[1].(*mdbx.EngineError)
+							logicalMDBXAssert(t, abort.Class == "IO" && abort.Operation == "abort" && abort.Code == 5 && abort.Cause == nil, "cache origin genuine abort sibling")
+							parentBacking := &parent[0]
+							for attempt := 0; attempt < 2; attempt++ {
+								out := startupRun(w)
+								startupTuple(t, out, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
+								logicalMDBXAssert(t, out.Err == cached && custom.calls == 0, "cached identity/custom traversal changed")
+								children := cached.(interface{ Unwrap() []error }).Unwrap()
+								logicalMDBXAssert(t, len(children) == 2 && &children[0] == parentBacking && reflect.TypeOf(children[0]) == applicationType && reflect.ValueOf(children[0]).Pointer() == applicationPointer && children[1].(*mdbx.EngineError) == abort, "cached raw tree/backing changed")
+								logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("cached View callback"); return nil }) == cached, "cached View identity")
+								truth, stage, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("cached Update callback"); return mdbx.Batch{}, nil })
+								logicalMDBXAssert(t, next == cached && truth == 1 && stage == 1, "cached Update identity/truth/stage")
+								logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "cached grant release")
+							}
+						})
+					})
+					logicalMDBXAssert(t, err == nil && cleanupErr == nil && state == "CLOSED" && verified == prior && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.OldGets == ([8]uint64{}) && counts.OldPulls == ([8]uint64{}) && counts.Faults == 0, "cached suppression/state/permission census: %+v/%s/%v/%v/%v", counts, state, verified, err, cleanupErr)
+					logicalMDBXAssert(t, *integrity == integrityBefore && *busy == busyBefore && bytes.Equal(payload, []byte{0x31, 0x72}) && custom.calls == 0, "cached constituent fields/payload changed")
+					for i, parent := range ownedParents {
+						children := parent.(interface{ Unwrap() []error }).Unwrap()
+						logicalMDBXAssert(t, len(children) == len(ownedBefore[i]) && &children[0] == &ownedBackings[i][0], "application join backing changed")
+						for j, child := range children {
+							logicalMDBXAssert(t, reflect.TypeOf(child) == reflect.TypeOf(ownedBefore[i][j]) && reflect.ValueOf(child).Pointer() == reflect.ValueOf(ownedBefore[i][j]).Pointer(), "application join child identity/order")
+						}
+					}
+					w.store = w.reopen()
+					replaySameImage(t, before, w.image(), "cached foreign readonly image")
+					startupFreshGuard(t, w, false)
+				})
 			}
-			if shape == "custom multi-Unwrap" {
-				application = custom
-			}
-			var cached error
-			state, verified, err := mdbx.FixtureStartupCleanup(w.store, 9, false, func() {
-				cached = w.store.View(func(*mdbx.Reader) error { return application })
-			})
-			logicalMDBXAssert(t, err == nil && state == "CLOSED" && !verified && cached != nil, "cached setup native state: %s/%v/%v", state, verified, err)
-			for attempt := 0; attempt < 2; attempt++ {
-				out := startupRun(w)
-				startupTuple(t, out, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
-				logicalMDBXAssert(t, out.Err == cached && custom.calls == 0, "cached identity/custom traversal changed")
-				logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("cached View callback"); return nil }) == cached, "cached View identity")
-				_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("cached Update callback"); return mdbx.Batch{}, nil })
-				logicalMDBXAssert(t, next == cached, "cached Update identity")
-			}
-			logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "cached grant release")
-			w.store = w.reopen()
-			replaySameImage(t, before, w.image(), "cached foreign readonly image")
-			startupFreshGuard(t, w, false)
-		})
+		}
 	}
+	t.Run("H10 early body visitor composition before outer View", func(t *testing.T) {
+		w := startupWorld(t, 0, 0)
+		startupRaw(t, w, 3, w.hashes[0][:], make([]byte, 117))
+		var body []byte
+		for _, row := range w.pre[1:] {
+			if row.Key[0] == 4 && bytes.Equal(row.Key[1:], w.hashes[0][:]) {
+				body = bytes.Clone(row.Value)
+			}
+		}
+		logicalMDBXAssert(t, len(body) > 0, "prepared genesis body rank4 is present")
+		w.store = w.reopen()
+		var p, r, visited, cached error
+		var saved mdbx.LargeImageRowV1
+		var callbacks int
+		var state string
+		var verified bool
+		var cleanupErr error
+		counts, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, []byte{0}, func() {
+			state, verified, cleanupErr = mdbx.FixtureStartupCleanup(w.store, 9, false, func() {
+				cached = w.store.View(func(reader *mdbx.Reader) error {
+					visited = reader.VisitLargeImageV1(mdbx.LargeImageSelectorV1{Kind: 1, Hash: w.hashes[0]}, func(row mdbx.LargeImageRowV1) error {
+						saved = row
+						callbacks++
+						logicalMDBXAssert(t, row.Present() && row.Length() == uint64(len(body)) && bytes.Equal(row.Key(), w.hashes[0][:]), "Kind1 body visitor route/presence/key/width")
+						first := make([]byte, 1)
+						n, readErr := row.ReadAt(first, 0)
+						logicalMDBXAssert(t, readErr == nil && n == 1 && first[0] == body[0], "body rank4 bytes independent of malformed rank3 header")
+						p = reader.VisitLargeImageV1(mdbx.LargeImageSelectorV1{}, nil)
+						_, _, r = reader.Get(logicalMDBXDBIs[3], w.hashes[0][:])
+						return p
+					})
+					return visited
+				})
+				inner := visited.(interface{ Unwrap() []error }).Unwrap()
+				parent := cached.(interface{ Unwrap() []error }).Unwrap()
+				outer := parent[0].(interface{ Unwrap() []error }).Unwrap()
+				logicalMDBXAssert(t, len(inner) == 2 && inner[0] == p && inner[1] == r && len(outer) == 2 && outer[0] == visited && outer[1] == r, "early P/R and outer recorded-R order")
+				abort := parent[1].(*mdbx.EngineError)
+				logicalMDBXAssert(t, len(parent) == 2 && abort.Class == "IO" && abort.Operation == "abort" && abort.Code == 5 && abort.Cause == nil, "early actual consuming abort sibling")
+				parentBacking, outerBacking, innerBacking := &parent[0], &outer[0], &inner[0]
+				application := p.(*mdbx.EngineError)
+				recorded := r.(*mdbx.EngineError)
+				logicalMDBXAssert(t, application.Class == "InvalidInput" && application.Operation == "get" && application.Code == 22 && application.Diagnostic == "nil large image visitor" && recorded.Class == "Integrity" && recorded.Operation == "get" && recorded.Code == -30793 && recorded.Diagnostic == "stored value width outside SchemaV2 bound", "early distinct unrecorded/recorded native refusals")
+				for attempt := 0; attempt < 2; attempt++ {
+					out := startupRun(w)
+					startupTuple(t, out, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
+					now := cached.(interface{ Unwrap() []error }).Unwrap()
+					nowOuter := now[0].(interface{ Unwrap() []error }).Unwrap()
+					nowInner := nowOuter[0].(interface{ Unwrap() []error }).Unwrap()
+					logicalMDBXAssert(t, out.Err == cached && len(now) == 2 && &now[0] == parentBacking && now[1].(*mdbx.EngineError) == abort && len(nowOuter) == 2 && &nowOuter[0] == outerBacking && len(nowInner) == 2 && &nowInner[0] == innerBacking && nowInner[0] == p && nowInner[1] == r && nowOuter[0] == visited && nowOuter[1] == r, "early cached identity/tree/backings")
+					logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "early cached grant release")
+				}
+			})
+		})
+		logicalMDBXAssert(t, err == nil && cleanupErr == nil && state == "CLOSED" && !verified && callbacks == 1 && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.OldPulls == ([8]uint64{}) && counts.OldGets[3] == 1 && counts.Faults == 0, "early visitor cleanup/state/permission/call census: %+v", counts)
+		_, expired := saved.ReadAt(make([]byte, 1), 0)
+		logicalMDBXAssert(t, expired.(*mdbx.EngineError).Diagnostic == "Reader is not active", "early row/span lifetime")
+		logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("early cached View callback"); return nil }) == cached, "early cached View identity")
+		_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("early cached Update callback"); return mdbx.Batch{}, nil })
+		logicalMDBXAssert(t, next == cached, "early cached Update identity")
+		w.store = w.reopen()
+		startupRawImageEqual(t, w)
+		startupFreshGuard(t, w, false)
+	})
 	for _, positive := range []bool{false, true} {
 		for _, mode := range []uint32{9, 10} {
 			t.Run(fmt.Sprintf("H10 positive%v mode%d", positive, mode), func(t *testing.T) {
@@ -620,7 +778,14 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 				w.store = w.reopen()
 				t.Cleanup(func() { _ = mdbx.FixtureStartupRelease(w.store) })
 				var out ReplayStartupOutcomeV1
-				state, verified, err := mdbx.FixtureStartupCleanup(w.store, mode, false, func() { out = startupRun(w) })
+				state, verified, err := mdbx.FixtureStartupCleanup(w.store, mode, false, func() {
+					out = startupRun(w)
+					for attempt := 0; attempt < 2; attempt++ {
+						repeated := startupRun(w)
+						startupTuple(t, repeated, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
+						logicalMDBXAssert(t, repeated.Err == out.Err, "native abort cached raw identity")
+					}
+				})
 				logicalMDBXAssert(t, err == nil && !verified, "cleanup transport: %s/%v/%v", state, verified, err)
 				result, decision := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", uint8(2)
 				if mode == 10 {
@@ -666,8 +831,16 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 				before := w.image()
 				var out ReplayStartupOutcomeV1
 				state, verified, err := mdbx.FixtureStartupCleanup(w.store, mode, true, func() {
-					_, armedErr := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageGetEIO, 3, w.hashes[0][:], func() { out = startupRun(w) })
-					logicalMDBXAssert(t, armedErr == nil, "BUSY source transport: %v", armedErr)
+					counts, armedErr := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageGetEIO, 3, w.hashes[0][:], func() {
+						out = startupRun(w)
+						for attempt := 0; attempt < 2; attempt++ {
+							repeated := startupRun(w)
+							startupTuple(t, repeated, false, 0, "TERMINAL_LOCAL_INVARIANT(evidence)")
+							logicalMDBXAssert(t, repeated.Err == out.Err, "source BUSY cached raw identity")
+							logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "source BUSY repeat grant release")
+						}
+					})
+					logicalMDBXAssert(t, armedErr == nil && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.Faults == 1, "BUSY source transport/repeat suppression: %+v/%v", counts, armedErr)
 				})
 				logicalMDBXAssert(t, err == nil && state == "CLOSE_BLOCKED" && !verified, "actual BUSY state: %s/%v/%v", state, verified, err)
 				startupTuple(t, out, false, 2, "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)")

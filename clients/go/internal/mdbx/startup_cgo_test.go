@@ -65,13 +65,16 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			s := startupOpened(t)
 			var old *Reader
-			err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+			err, cached := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				old = r
 				if r.ownerVerified || r.RequireCanonicalOwnerVerificationV1() == nil {
 					t.Fatal("checker saw future permission")
 				}
 				return row.completion, row.app
 			})
+			if cached {
+				t.Fatal("fresh completion was labeled cached admission")
+			}
 			if row.invariant {
 				e := requireEnvironmentError(t, err, EngineLocalInvariant, operationView, -30779, "startup canonical verification did not complete")
 				if any(e.Cause) != any(row.app) {
@@ -88,17 +91,33 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 	}
 	t.Run("entry refusal", func(t *testing.T) {
 		var nilStore *Store
-		requireEnvironmentError(t, nilStore.StartupVerifyCanonicalV1(nil), EngineInvalidInput, operationView, 22, "nil Store")
+		err, cached := nilStore.StartupVerifyCanonicalV1(nil)
+		requireEnvironmentError(t, err, EngineInvalidInput, operationView, 22, "nil Store")
+		if cached {
+			t.Fatal("nil Store was labeled cached admission")
+		}
 		s := startupOpened(t)
-		requireEnvironmentError(t, s.StartupVerifyCanonicalV1(nil), EngineInvalidInput, operationView, 22, "nil startup canonical callback")
+		err, cached = s.StartupVerifyCanonicalV1(nil)
+		requireEnvironmentError(t, err, EngineInvalidInput, operationView, 22, "nil startup canonical callback")
+		if cached {
+			t.Fatal("nil check was labeled cached admission")
+		}
 		startupPermission(t, s, false)
 		s = newUpdateStore(t)
 		called := false
-		requireEnvironmentError(t, s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { called = true; return 1, nil }), EngineInvalidInput, operationView, 22, "canonical owner index is already verified")
-		if called {
+		err, cached = s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { called = true; return 1, nil })
+		requireEnvironmentError(t, err, EngineInvalidInput, operationView, 22, "canonical owner index is already verified")
+		if called || cached {
 			t.Fatal("already verified ran checker")
 		}
 		startupPermission(t, s, true)
+		s = startupOpened(t)
+		mustEnvironment(t, s.Close())
+		err, cached = s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("closed checker"); return 1, nil })
+		requireEnvironmentError(t, err, EngineInvalidInput, operationView, 22, "Store is closed")
+		if cached {
+			t.Fatal("clean closed was labeled cached admission")
+		}
 	})
 	t.Run("ordinary View", func(t *testing.T) {
 		s := startupOpened(t)
@@ -109,13 +128,22 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 		s := startupOpened(t)
 		entered, finish, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 		go func() {
-			done <- s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { close(entered); <-finish; return 1, nil })
+			err, cached := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { close(entered); <-finish; return 1, nil })
+			if cached {
+				t.Error("fresh lock owner was labeled cached admission")
+			}
+			done <- err
 		}()
 		<-entered
 		if s.canonicalOwnerVerified {
 			t.Fatal("publication before checker completes")
 		}
 		requireEnvironmentError(t, s.View(func(*Reader) error { t.Fatal("busy View callback"); return nil }), EngineConcurrency, operationView, -30778, "store operation in progress")
+		busy, cached := s.StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1, error) { t.Fatal("busy startup checker"); return 1, nil })
+		requireEnvironmentError(t, busy, EngineConcurrency, operationView, -30778, "store operation in progress")
+		if cached {
+			t.Fatal("contention was labeled cached admission")
+		}
 		_, _, err := s.Update(func(*Reader) (Batch, error) { t.Fatal("busy Update callback"); return Batch{}, nil })
 		requireEnvironmentError(t, err, EngineConcurrency, operationUpdate, -30778, "store operation in progress")
 		requireEnvironmentError(t, s.Close(), EngineConcurrency, operationClose, -30778, "store operation in progress")
@@ -153,7 +181,7 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 						t.Errorf("panic identity=%v", p)
 					}
 				}()
-				_ = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+				_, _ = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 					old = r
 					completion := StartupCanonicalCompletionV1(1)
 					built = completion

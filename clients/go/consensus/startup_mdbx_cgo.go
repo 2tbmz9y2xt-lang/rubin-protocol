@@ -69,7 +69,11 @@ func VerifyPersistedReplayStartupMDBX(store *mdbx.Store, reservations *mdbx.Oper
 	ran := false
 	out.Err = reservations.WithReservation(4096, func() error {
 		ran = true
-		raw := store.StartupVerifyCanonicalV1(c.verify)
+		raw, cachedTerminal := store.StartupVerifyCanonicalV1(c.verify)
+		if cachedTerminal {
+			out = startupOutcome(raw, "TERMINAL_LOCAL_INVARIANT(evidence)")
+			return raw
+		}
 		out = startupOutcome(raw, c.projectResult(raw))
 		return raw
 	})
@@ -397,8 +401,8 @@ func (c *replayStartupCheck) projectResult(raw error) string {
 // A bound application leaf and native diagnostic Cause remain opaque. Only the
 // native close/BUSY PRIMARY-composition edge enters the finite pending stack.
 func (c *replayStartupCheck) projectLeaf(part error) (string, []error) {
-	// Identity and direct dynamic type are this producer's closed provenance
-	// boundary; generic errors.Is/As traversal would admit foreign applications.
+	// Identity and dynamic type describe this fresh fixed producer's finite tree.
+	// Cached admission skips projection; these shapes cannot prove prior issuance.
 	if any(part) == any(c.observedErr) {
 		return c.observedResult, nil
 	}

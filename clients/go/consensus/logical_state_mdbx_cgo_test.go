@@ -956,7 +956,7 @@ type OperationReservationOwner struct{}
 type StartupCanonicalCompletionV1 uint8
 const StartupCanonicalNotCompleteV1 StartupCanonicalCompletionV1 = 0
 const StartupCanonicalActiveAndReplayCompleteV1 StartupCanonicalCompletionV1 = 1
-func (*Store) StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1,error)) error { return nil }
+func (*Store) StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1,error)) (error,bool) { return nil,false }
 `, 0)
 	logicalMDBXAssert(t, err == nil, "startup type evidence: %v", err)
 	pkg, err := (&types.Config{}).Check("github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx", fset, []*ast.File{file}, nil)
