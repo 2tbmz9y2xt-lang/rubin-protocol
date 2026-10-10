@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
@@ -216,6 +217,60 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 			t.Fatal("drained checker Reader remained usable or retained tip")
 		}
 		startupPermission(t, s, true)
+	})
+	t.Run("H04 retained abort while native Get held", func(t *testing.T) {
+		s := startupOpened(t)
+		tipSeed(t, s, tipRow(7, 37, [32]byte{0x44}, [40]byte{39: 1}))
+		env, writer := s.env, s.writer
+		ready, done, got := make(chan *Reader, 1), make(chan struct{}), make(chan struct{})
+		var old *Reader
+		var point *AuthorityPointV1
+		var raw, getErr, largeErr error
+		var large fixtureLargeEvidence
+		early := false
+		evidence, err := fixtureTipCursor(s, 13, 1, 2, 0, func() {
+			large, largeErr = fixtureLargeFault(s, 10, 0, []byte{0}, func() {
+				go func() {
+					raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+						go func() { point, getErr = r.CanonicalTipV1(7); close(got) }()
+						fixtureTipWait()
+						ready <- r
+						return 1, nil
+					})
+					close(done)
+				}()
+				old = <-ready
+				for old.active.Load() { runtime.Gosched() }
+				deadline := time.NewTimer(time.Second)
+				select {
+				case <-done:
+					early = true
+				case <-deadline.C:
+					// Expiration only releases the held native call; no latency assertion.
+				}
+				deadline.Stop()
+				// Mode10 retains txn/env/writer even when a no-drain candidate
+				// returns early. Join both calls before fixture disarm or cleanup.
+				fixtureTipRelease()
+				<-got
+				<-done
+			})
+		})
+		t.Cleanup(func() { mustEnvironment(t, fixtureLargeRelease(s)) })
+		if early { t.Fatal("Startup returned while native Get was still held") }
+		mustEnvironment(t, err)
+		mustEnvironment(t, largeErr)
+		mustEnvironment(t, getErr)
+		tipCensus(t, evidence, 1, 2, 1, 0)
+		if large != (fixtureLargeEvidence{aborts: 1}) { t.Fatalf("retained drain native census: %+v", large) }
+		if point == nil || point.Height != 37 || point.BlockHash != ([32]byte{0x44}) { t.Fatal("held native endpoint changed") }
+		e := requireEnvironmentError(t, raw, EngineLocalInvariant, operationAbort, -30416, pinnedNegativeDiagnostics[-30416])
+		if e.Cause != nil || !e.ReopenRequired || s.terminal != raw || s.canonicalOwnerVerified { t.Fatal("retained drain raw/cache/permission") }
+		if s.state != storePOISONEDTHREAD || s.txn != old.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis { t.Fatal("retained drain native resources") }
+		if old.usable() || old.ownerVerified || old.tip != nil { t.Fatal("retained drain Reader lifetime") }
+		if s.View(func(*Reader) error { t.Fatal("retained drain View callback"); return nil }) != raw { t.Fatal("retained drain View cache") }
+		truth, stage, next := s.Update(func(*Reader) (Batch, error) { t.Fatal("retained drain Update callback"); return Batch{}, nil })
+		if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite { t.Fatal("retained drain Update cache/truth/stage") }
 	})
 	for _, recorded := range []bool{false, true} {
 	for _, mode := range []uint32{0, 9, 10, 24} {
