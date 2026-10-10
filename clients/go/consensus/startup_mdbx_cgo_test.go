@@ -280,7 +280,10 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 					a.ActiveProfile, a.U = 2, 1
 				}
 			})
-			startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
+			out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
+			if part == "U" {
+				logicalMDBXAssert(t, out.Err.Error() == "startup active bounds mismatch", "U-only boundary owner: %v", out.Err)
+			}
 		})
 	}
 	t.Run("A09 H09 admission and exact release", func(t *testing.T) {

@@ -209,7 +209,7 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 			startupRawPreserved(t, w, rank, key, value)
 		})
 	}
-	for _, shape := range []string{"missing", "truncated", "trailing", "version", "phase", "lifecycle", "pending profile", "selected", "detached", "cleanup payload", "ordinary payload", "unsupported malformed", "empty exclusion", "same generation", "zero active", "zero target generation", "next zero", "target equals next", "cursor zero", "cursor unknown", "cursor beyond tip", "cursor genesis hash", "target height zero", "target height overflow", "target work zero", "target work overflow", "profile zero", "profile unknown"} {
+	for _, shape := range []string{"missing", "truncated", "trailing", "version", "phase", "lifecycle", "pending profile", "selected", "detached", "cleanup payload", "ordinary payload", "unsupported malformed", "empty exclusion", "same generation", "zero active", "zero target generation", "next zero", "target equals next", "cursor zero", "cursor unknown", "cursor beyond tip", "cursor genesis hash", "target height zero", "target height overflow", "target work zero", "target work overflow", "profile zero", "profile unknown", "pruned B0 U13681", "pruned B1 U13680", "archive B1 U0"} {
 		t.Run("R02 authority "+shape, func(t *testing.T) {
 			w := startupWorld(t, 0, 0)
 			a := w.authority()
@@ -273,6 +273,18 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 				raw[36] = 0
 			case "profile unknown":
 				raw[36] = 255
+			case "pruned B0 U13681":
+				raw[1] = 1
+				binary.BigEndian.PutUint64(raw[2:10], 0)
+				binary.BigEndian.PutUint64(raw[10:18], 13681)
+			case "pruned B1 U13680":
+				raw[1] = 1
+				binary.BigEndian.PutUint64(raw[2:10], 1)
+				binary.BigEndian.PutUint64(raw[10:18], 13680)
+			case "archive B1 U0":
+				raw[1] = 2
+				binary.BigEndian.PutUint64(raw[2:10], 1)
+				binary.BigEndian.PutUint64(raw[10:18], 0)
 			case "empty exclusion":
 				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("x")}
 				raw, _ = a.Encode()
