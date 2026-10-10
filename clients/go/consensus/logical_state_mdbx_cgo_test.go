@@ -789,7 +789,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
-	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go"} {
+	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "replay_step_mdbx_cgo.go", "replay_step_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -807,7 +807,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
 	// IgnoredGoFiles also lists these exact rubin_mdbx_fixture-tagged test files; they are test code, not non-test sources.
 	sources = slices.DeleteFunc(sources, func(name string) bool {
-		return name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go"
+		return name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "replay_step_mdbx_fixture_cgo_test.go"
 	})
 	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
@@ -816,12 +816,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 9, "bridge lost dormancy: %d non-test internal/mdbx imports, want 9", imports)
+	logicalMDBXAssert(t, imports == 10, "bridge lost dormancy: %d non-test internal/mdbx imports, want 10", imports)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
 	_, _ = config.Check("consensus", fset, files, info)
 	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "genesisMDBXBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
@@ -874,7 +874,8 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 				callee = selector
 			}
 			call, direct := parents[callee].(*ast.CallExpr)
-			logicalMDBXAssert(t, (owner == "genesisMDBXBatch" && !literal && ident.Name != "Lookup" || owner == "ConnectPublishedGenesisMDBX" && ident.Name == "genesisMDBXBatch") && direct && call.Fun == callee, "bridge lost dormancy: non-test use of %s at %s", ident.Name, fset.Position(ident.Pos()))
+			step := strings.HasSuffix(fset.Position(ident.Pos()).Filename, "replay_step_mdbx_cgo.go") && !literal && (owner == "stateBatch" || owner == "Counters" && ident.Name == "Counters" || owner == "Lookup" && ident.Name == "Lookup")
+			logicalMDBXAssert(t, (owner == "genesisMDBXBatch" && !literal && ident.Name != "Lookup" || owner == "ConnectPublishedGenesisMDBX" && ident.Name == "genesisMDBXBatch" || step) && direct && call.Fun == callee, "bridge lost dormancy: non-test use of %s at %s", ident.Name, fset.Position(ident.Pos()))
 			approved[ident.Name]++
 		}
 		logicalMDBXAssert(t, ident.Name != "ConnectPublishedGenesisMDBX", "bridge lost dormancy: genesis production consumer at %s", fset.Position(ident.Pos()))
@@ -887,7 +888,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		resolved[fset.Position(ident.Pos()).Filename] = true
 	}
 	logicalMDBXAssert(t, recheck == 1, "selected side damage lost dormancy: %d recheck adapter references, want 1", recheck)
-	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 1, "Counters": 1, "newLogicalMDBXMetadata": 1, "logicalMDBXPlanToBatch": 1, "genesisMDBXBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)
+	logicalMDBXAssert(t, reflect.DeepEqual(approved, map[string]int{"newLogicalMDBXStateView": 2, "Counters": 2, "Lookup": 1, "newLogicalMDBXMetadata": 2, "logicalMDBXPlanToBatch": 2, "genesisMDBXBatch": 1}), "bridge lost dormancy: exact owner census %v", approved)
 	// The checker swallows its errors, so a vacuous Uses graph would pass the loop above: every parsed file must have resolved a use, and every entrypoint-named identifier outside a declaration must carry a type object.
 	logicalMDBXAssert(t, len(resolved) == len(sources), "bridge census resolved no uses: %d of %d files resolved, unresolved %v", len(resolved), len(sources), slices.DeleteFunc(slices.Clone(sources), func(name string) bool { return resolved[name] }))
 	for _, file := range files {

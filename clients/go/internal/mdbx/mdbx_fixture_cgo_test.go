@@ -19,6 +19,75 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
 
+// The new adaptor's rejected inputs must not enter either native arming interval or run the operation.
+func TestCanonicalTipStepFixtureInput(t *testing.T) {
+	store, _, _ := consultedStore(t)
+	key := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), 0)
+	for _, row := range []struct {
+		name       string
+		scenario   uint8
+		key, value []byte
+		present    bool
+		nilInput   uint8
+	}{
+		{"zero", 0, nil, nil, false, 0},
+		{"unknown", 7, nil, nil, false, 0},
+		{"max", 255, nil, nil, false, 0},
+		{"census_key", 1, key, nil, false, 0},
+		{"census_empty_key", 1, []byte{}, nil, false, 0},
+		{"source_value", 2, nil, []byte{}, false, 0},
+		{"source_present", 3, nil, nil, true, 0},
+		{"drift_missing_key", 4, nil, nil, false, 0},
+		{"drift_short_key", 4, key[:15], nil, false, 0},
+		{"drift_long_key", 5, append(bytes.Clone(key), 0), nil, false, 0},
+		{"drift_zero_generation", 6, make([]byte, 16), nil, false, 0},
+		{"drift_height_overflow", 4, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), 0x100000000), nil, false, 0},
+		{"present_short", 4, key, make([]byte, 103), true, 0},
+		{"present_long", 5, key, make([]byte, 105), true, 0},
+		{"present_nil", 6, key, nil, true, 0},
+		{"absent_value", 4, key, make([]byte, 104), false, 0},
+		{"absent_empty", 5, key, []byte{}, false, 0},
+		{"nil_store", 1, nil, nil, false, 1},
+		{"zero_store", 1, nil, nil, false, 2},
+		{"nil_run", 1, nil, nil, false, 3},
+		{"unknown_and_payload", 255, key, make([]byte, 104), true, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, calls := store, 0
+			run := func() { calls++ }
+			if row.nilInput == 1 {
+				s = nil
+			}
+			if row.nilInput == 2 {
+				s = &Store{}
+			}
+			if row.nilInput == 3 {
+				run = nil
+			}
+			before := fixtureLargeNativeCalls()
+			evidence, err := FixtureCanonicalTipStep(s, row.scenario, row.key, row.value, row.present, run)
+			if evidence != (CanonicalTipStepFixtureEvidence{}) || err == nil || err.Error() != "invalid canonical-tip step fixture" || calls != 0 || fixtureLargeNativeCalls() != before {
+				t.Fatalf("rejected adaptor ran/armed: %+v %v calls=%d", evidence, err, calls)
+			}
+		})
+	}
+	calls := 0
+	var sourceErr error
+	evidence, err := FixtureCanonicalTipStep(store, 1, nil, nil, false, func() {
+		calls++
+		_, _, sourceErr = store.Update(func(r *Reader) (Batch, error) {
+			_, err := r.CanonicalTipV1(1)
+			if err != nil {
+				return Batch{}, err
+			}
+			return Batch{}, errors.New("ordinary native invocation")
+		})
+	})
+	if err != nil || calls != 1 || sourceErr == nil || sourceErr.Error() != "ordinary native invocation" || evidence.Opens != 1 || evidence.Closes != 1 || evidence.Queries != 1 || evidence.Faults != 0 {
+		t.Fatalf("rejected adaptor leaked arming: %+v %v calls=%d cause=%v", evidence, err, calls, sourceErr)
+	}
+}
+
 // Raw fixture-owner equality deliberately avoids Reader.Get on malformed rows.
 func archiveRawEqual(t *testing.T, s *Store, rows []Mutation) {
 	t.Helper()
