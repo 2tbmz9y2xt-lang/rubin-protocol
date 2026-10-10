@@ -15,45 +15,45 @@ import (
 
 // ReplayStepContextV1 is the immutable historical consensus context of a dormant replay owner.
 type ReplayStepContextV1 struct {
-	Genesis PublishedGenesisContextV1
+	Genesis  PublishedGenesisContextV1
 	Rotation RotationProvider
 	Registry *SuiteRegistry
 }
 
 // ReplayStepOwnerV1 shares one PATH owner and mathematical supply memo across handle copies.
 type ReplayStepOwnerV1 struct {
-	path *replayPathOwner
+	path  *replayPathOwner
 	state *replayStepState
 }
 
 type replayStepState struct {
-	context ReplayStepContextV1
+	context   ReplayStepContextV1
 	preflight error
-	height uint64
+	height    uint64
 	generated Uint128
-	memo bool
+	memo      bool
 }
 
 type ReplayStepNeedKindV1 uint8
 
 const (
-	ReplayStepNeedHeaderV1 ReplayStepNeedKindV1 = 1
+	ReplayStepNeedHeaderV1     ReplayStepNeedKindV1 = 1
 	ReplayStepNeedBlockBytesV1 ReplayStepNeedKindV1 = 2
 )
 
 type ReplayStepNeedV1 struct {
-	Kind ReplayStepNeedKindV1
+	Kind   ReplayStepNeedKindV1
 	Height uint64
-	Hash [32]byte
+	Hash   [32]byte
 }
 
 // ReplayStepOutcomeV1 exposes the native tuple and this invocation's logical result; it publishes no state.
 type ReplayStepOutcomeV1 struct {
 	Result, Decision, CanonicalTruth string
-	Truth mdbx.CommitTruth
-	Stage mdbx.UpdateStage
-	Err error
-	Needed *ReplayStepNeedV1
+	Truth                            mdbx.CommitTruth
+	Stage                            mdbx.UpdateStage
+	Err                              error
+	Needed                           *ReplayStepNeedV1
 }
 
 func NewReplayStepOwnerV1(context ReplayStepContextV1, view ReplayHeaderCandidateViewV1, retentionLimit uint64) *ReplayStepOwnerV1 {
@@ -76,23 +76,23 @@ func (o *ReplayStepOwnerV1) StepReplayMDBX(store *mdbx.Store, reservations *mdbx
 }
 
 type replayStepObservation struct {
-	decision string
-	h uint64
-	x [32]byte
-	incoming error
-	failure *logicalStateFailure
-	cause error
+	decision        string
+	h               uint64
+	x               [32]byte
+	incoming, cause error
+	failure         *logicalStateFailure
 }
 
 // Only finalized scalars and original error references survive the native operation.
 type replayStepInvocation struct {
-	out ReplayStepOutcomeV1
+	out         ReplayStepOutcomeV1
 	observation replayStepObservation
 }
 
 func replayStepRun(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *mdbx.OperationReservationOwner, supplied []byte) *replayStepInvocation {
 	i := &replayStepInvocation{out: ReplayStepOutcomeV1{CanonicalTruth: "OLD", Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}}
-	if o == nil || o.path == nil || o.state == nil {
+	switch {
+	case o == nil, o.path == nil, o.state == nil:
 		i.out.Result, i.out.Err = selectedSideInvariant, errors.New("invalid replay step owner")
 		return i
 	}
@@ -108,8 +108,7 @@ func replayStepRun(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *mdbx.O
 		i.out.CanonicalTruth = ""
 		return i
 	}
-	c := &replayStepCall{owner: o, invocation: i, sentinel: errors.New("replay step decision")}
-	c.entry.sentinel = c.sentinel
+	c := &replayStepCall{owner: o, invocation: i, entry: replayEntryCall{sentinel: errors.New("replay step decision")}}
 	ran := false
 	err := reservations.WithReservation(mdbx.MaxOperationDataBytes, func() error {
 		ran = true
@@ -136,34 +135,29 @@ func replayStepRun(o *ReplayStepOwnerV1, store *mdbx.Store, reservations *mdbx.O
 }
 
 type replayStepCall struct {
-	owner *ReplayStepOwnerV1
-	invocation *replayStepInvocation
-	sentinel error
-	entry replayEntryCall
-	entered, denied bool
-	carrierInvalid bool
-	reader *mdbx.Reader
-	a mdbx.StorageAuthorityV1
-	old *mdbx.AuthorityPointV1
-	own replayPathOwn
-	body []byte
-	stored bool
-	headerMismatch bool
-	h uint64
-	x, parent, target [32]byte
-	work [40]byte
-	timestamps []uint64
-	context *mdbx.CanonicalContextWindowV1
-	consulted []mdbx.ConsultedRow
-	view *replayStepView
-	count uint64
-	generated Uint128
-	needed *ReplayStepNeedV1
+	owner                           *ReplayStepOwnerV1
+	invocation                      *replayStepInvocation
+	entry                           replayEntryCall
+	entered, denied, carrierInvalid bool
+	reader                          *mdbx.Reader
+	a                               mdbx.StorageAuthorityV1
+	old                             *mdbx.AuthorityPointV1
+	own                             replayPathOwn
+	body                            []byte
+	stored, headerMismatch          bool
+	x, parent, target               [32]byte
+	work                            [40]byte
+	timestamps                      []uint64
+	context                         *mdbx.CanonicalContextWindowV1
+	consulted                       []mdbx.ConsultedRow
+	view                            *replayStepView
+	h, count                        uint64
+	needed                          *ReplayStepNeedV1
 }
 
 func (c *replayStepCall) decide(result, decision string) (mdbx.Batch, error) {
 	c.entry.result, c.entry.decision = result, decision
-	return mdbx.Batch{}, c.sentinel
+	return mdbx.Batch{}, c.entry.sentinel
 }
 
 func (c *replayStepCall) plan(r *mdbx.Reader, supplied []byte) (mdbx.Batch, error) {
@@ -182,7 +176,6 @@ func (c *replayStepCall) plan(r *mdbx.Reader, supplied []byte) (mdbx.Batch, erro
 	if err := c.sources(supplied); err != nil {
 		return mdbx.Batch{}, err
 	}
-	supplied = nil
 	if err := c.qualify(); err != nil {
 		return mdbx.Batch{}, err
 	}
@@ -221,12 +214,10 @@ func (c *replayStepCall) sources(supplied []byte) error {
 }
 
 func (c *replayStepCall) bodySource(supplied []byte) error {
-	c.entry.step = replayEntryRecovery
-	raw, present, err := c.reader.Get(mdbx.SchemaV2DBIs()[4], c.x[:])
+	raw, present, err := c.source(mdbx.SchemaV2DBIs()[4], c.x[:], replayEntryRecovery)
 	if err != nil {
 		return err
 	}
-	c.entry.step = ""
 	c.body, c.stored = raw, present
 	if !present {
 		c.body = supplied
@@ -262,12 +253,11 @@ func (c *replayStepCall) targetContext() error {
 	if c.h%WINDOW_SIZE == 0 {
 		count = WINDOW_SIZE
 	}
-	g := uint64(c.a.Replay.TargetGenerationID)
-	c.context = &mdbx.CanonicalContextWindowV1{Generation: g, FirstHeight: c.h-count, Count: uint32(count)}
+	c.context = &mdbx.CanonicalContextWindowV1{Generation: uint64(c.a.Replay.TargetGenerationID), FirstHeight: c.h - count, Count: uint32(count)}
 	c.timestamps = make([]uint64, 0, count)
 	var previous []byte
-	for h := c.h-count; h < c.h; h++ {
-		entry, header, err := c.contextPair(g, h, previous)
+	for h := c.h - count; h < c.h; h++ {
+		entry, header, err := c.contextPair(c.context.Generation, h, previous)
 		if err != nil {
 			return err
 		}
@@ -306,29 +296,22 @@ func (c *replayStepCall) contextTarget(previous []byte) error {
 
 func (c *replayStepCall) contextPair(g, h uint64, previous []byte) ([]byte, BlockHeader, error) {
 	key, _ := mdbx.HeightKey(g, h)
-	c.entry.step = replayEntryRecovery
-	entry, present, err := c.reader.Get(mdbx.SchemaV2DBIs()[2], key)
+	entry, present, err := c.source(mdbx.SchemaV2DBIs()[2], key, replayEntryRecovery)
 	if err != nil {
 		return nil, BlockHeader{}, err
 	}
-	c.entry.step = ""
 	if !present || len(entry) != 104 || !archiveSelectedSideWork(entry[64:104]) {
 		return nil, BlockHeader{}, selectedSideDefect("target context entry missing or invalid")
 	}
-	c.entry.step = replayEntryRecovery
-	raw, present, err := c.reader.Get(mdbx.SchemaV2DBIs()[3], entry[:32])
+	raw, present, err := c.source(mdbx.SchemaV2DBIs()[3], entry[:32], replayEntryRecovery)
 	if err != nil {
 		return nil, BlockHeader{}, err
 	}
-	c.entry.step = ""
 	if !present || !replayPathBinds(raw, [32]byte(entry[:32])) {
 		return nil, BlockHeader{}, selectedSideDefect("target context named header absent or misnamed")
 	}
 	header, _ := ParseBlockHeaderBytes(raw)
-	if err := c.contextLink(h, entry, header, previous); err != nil {
-		return nil, BlockHeader{}, err
-	}
-	return entry, header, nil
+	return entry, header, c.contextLink(h, entry, header, previous)
 }
 
 func (c *replayStepCall) contextLink(h uint64, entry []byte, header BlockHeader, previous []byte) error {
@@ -338,12 +321,17 @@ func (c *replayStepCall) contextLink(h uint64, entry []byte, header BlockHeader,
 	}
 	bad := header.PrevBlockHash != [32]byte(entry[32:64])
 	if previous != nil {
-		bad = bad || header.PrevBlockHash != [32]byte(previous[:32])
 		work.Add(work, new(big.Int).SetBytes(previous[64:104]))
-		bad = bad || work.Cmp(new(big.Int).SetBytes(entry[64:104])) != 0
+		switch {
+		case bad, header.PrevBlockHash != [32]byte(previous[:32]), work.Cmp(new(big.Int).SetBytes(entry[64:104])) != 0:
+			bad = true
+		}
 	}
 	if h == 0 {
-		bad = bad || [32]byte(entry[:32]) != c.owner.state.context.Genesis.GenesisHash || work.Cmp(new(big.Int).SetBytes(entry[64:104])) != 0
+		switch {
+		case bad, [32]byte(entry[:32]) != c.owner.state.context.Genesis.GenesisHash, work.Cmp(new(big.Int).SetBytes(entry[64:104])) != 0:
+			bad = true
+		}
 	}
 	if bad {
 		failure := &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("target context parent or work contradiction")}
@@ -364,7 +352,8 @@ func (c *replayStepCall) qualify() error {
 		c.count = summary.TxCount
 		return nil
 	}
-	if err == ErrBlockSteps1To12Capacity || err == ErrBlockSteps1To12Context {
+	switch any(err) {
+	case ErrBlockSteps1To12Capacity, ErrBlockSteps1To12Context:
 		return replayRecoveryRefusal(selectedSideInvariant, "replay qualification context or capacity invariant")
 	}
 	if binding := ValidateBlockBodyCommitments(c.body); binding != nil {
@@ -374,7 +363,7 @@ func (c *replayStepCall) qualify() error {
 }
 
 func (c *replayStepCall) consensus(err error) error {
-	e, ok := err.(*TxError)
+	e, ok := any(err).(*TxError)
 	if !ok || e == nil {
 		return err
 	}
@@ -387,8 +376,8 @@ func (c *replayStepCall) observe(decision string, incoming error, failure *logic
 		o.cause = failure.cause
 	}
 	c.invocation.observation = o
-	_, err := c.decide("", decision)
-	return err
+	c.entry.result, c.entry.decision = "", decision
+	return c.entry.sentinel
 }
 
 func (s *replayStepState) supply(h uint64) Uint128 {
@@ -406,7 +395,7 @@ func (s *replayStepState) supply(h uint64) Uint128 {
 
 func (c *replayStepCall) stateBatch() (mdbx.Batch, error) {
 	c.view = &replayStepView{base: newLogicalMDBXStateView(c.reader, uint64(c.a.Replay.TargetGenerationID), c.h)}
-	c.generated = c.owner.state.supply(c.h)
+	c.owner.state.supply(c.h)
 	result, err := c.connect()
 	if err != nil {
 		return mdbx.Batch{}, err
@@ -419,12 +408,10 @@ func (c *replayStepCall) stateBatch() (mdbx.Batch, error) {
 	result.createdUtxos = nil
 	c.view.epoch, c.view.witness = true, false
 	plan, failure := buildLogicalStatePlan(c.h, c.view, touched, newLogicalMDBXMetadata(c.view.base, nil))
-	touched = nil
 	if failure != nil {
 		return mdbx.Batch{}, c.logicalFailureWithOuter(failure, failure)
 	}
 	batch, failure := logicalMDBXPlanToBatch(plan)
-	plan = logicalStatePlan[logicalMDBXMetadata]{}
 	if failure != nil {
 		return mdbx.Batch{}, c.logicalFailureWithOuter(failure, failure)
 	}
@@ -438,11 +425,11 @@ func (c *replayStepCall) connect() (*connectBlockInputViewResult, error) {
 	c.entry.step = "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"
 	context := c.owner.state.context
 	input := connectBlockBasicInMemorySuiteContext{BlockBytes: c.body, ExpectedPrevHash: &c.parent, ExpectedTarget: &c.target, BlockHeight: c.h, PrevTimestamps: c.timestamps, ChainID: context.Genesis.ChainID, Rotation: context.Rotation, Registry: context.Registry}
-	result, err := connectBlockBasicWithInputView(input, c.view, c.generated)
+	result, err := connectBlockBasicWithInputView(input, c.view, c.owner.state.generated)
 	if err == nil {
 		return result, nil
 	}
-	if carrier, ok := err.(*blockInputViewReadError); ok {
+	if carrier, ok := any(err).(*blockInputViewReadError); ok {
 		if !c.carrierMatches(carrier) {
 			c.carrierInvalid = true
 			return nil, err
@@ -490,12 +477,12 @@ func replayStepTouched(result *connectBlockInputViewResult) []logicalTouchedStat
 }
 
 type replayStepView struct {
-	base *logicalMDBXStateView
+	base           *logicalMDBXStateView
 	epoch, witness bool
-	parent logicalStatePlanWork
-	failedOp Outpoint
-	failedKind logicalStateRowReadKind
-	failedCause error
+	parent         logicalStatePlanWork
+	failedOp       Outpoint
+	failedKind     logicalStateRowReadKind
+	failedCause    error
 }
 
 func (v *replayStepView) Counters() logicalStateCounterRead {
@@ -505,7 +492,7 @@ func (v *replayStepView) Counters() logicalStateCounterRead {
 		v.parent = logicalStatePlanWork{parent: read.counters}
 	}
 	if v.epoch && read.kind == logicalStateCountersStoreIntegrity {
-		v.witness = read.cause == errLogicalMDBXAbsentCounter
+		v.witness = any(read.cause) == any(errLogicalMDBXAbsentCounter)
 	}
 	return read
 }
@@ -529,37 +516,40 @@ func (v *replayStepView) Lookup(op Outpoint) logicalStateRowRead {
 }
 
 func replayStepPositiveCause(cause error) bool {
-	_, native := cause.(*mdbx.EngineError)
+	_, native := any(cause).(*mdbx.EngineError)
 	return !native && !genesisMDBXNilError(cause)
 }
 
 func replayStepCarrierShape(e *blockInputViewReadError) bool {
-	if e == nil || e.failure == nil {
+	switch {
+	case e == nil, e.failure == nil:
+		return false
+	case e.failure.cause == nil, genesisMDBXNilError(e.failure.cause), e.txIndex < 1, e.inputIndex < 0, e.inputIndex >= 1024, e.failure.kind < logicalStateFailureUnavailable, e.failure.kind > logicalStateFailureLocalInvariant:
 		return false
 	}
-	return e.failure.cause != nil && !genesisMDBXNilError(e.failure.cause) && e.txIndex >= 1 && e.inputIndex >= 0 && e.inputIndex < 1024 && e.failure.kind >= logicalStateFailureUnavailable && e.failure.kind <= logicalStateFailureLocalInvariant
+	return true
 }
 
 func (c *replayStepCall) carrierMatches(e *blockInputViewReadError) bool {
-	if !replayStepCarrierShape(e) || uint64(e.txIndex) >= c.count {
+	if !replayStepCarrierShape(e) {
 		return false
 	}
-	v := c.view
-	return e.outpoint == v.failedOp && e.failure.cause == v.failedCause && v.failedKind == logicalStateRowReadKind(e.failure.kind)+logicalStateRowUnavailable-1
+	if e.txIndex < 0 {
+		return false
+	}
+	return uint64(e.txIndex) < c.count && e.outpoint == c.view.failedOp && any(e.failure.cause) == any(c.view.failedCause) && c.view.failedKind == logicalStateRowReadKind(e.failure.kind)+logicalStateRowUnavailable-1
 }
 
 func (c *replayStepCall) logicalFailureWithOuter(failure *logicalStateFailure, outer error) error {
-	if failure == nil || failure.kind != logicalStateFailureStoreIntegrity || failure.cause == nil {
-		return outer
-	}
-	if c.a.Replay.Cursor.Kind == mdbx.ReplayCursorAppliedV1 && c.view.witness && replayStepPositiveCause(failure.cause) {
+	targetLocal := failure != nil && failure.kind == logicalStateFailureStoreIntegrity && failure.cause != nil && c.a.Replay.Cursor.Kind == mdbx.ReplayCursorAppliedV1 && c.view.witness && replayStepPositiveCause(failure.cause)
+	if targetLocal {
 		return c.observe("target local", outer, failure)
 	}
 	return outer
 }
 
 func (c *replayStepCall) completeBatch(batch mdbx.Batch, result *connectBlockInputViewResult) (mdbx.Batch, error) {
-	undo, err := canonicalUndoFamilyV1(uint64(c.a.Replay.TargetGenerationID), c.h, c.count, &c.x, &c.generated, batch.Mutations, c.view.base.rows, result.spentInputs)
+	undo, err := canonicalUndoFamilyV1(uint64(c.a.Replay.TargetGenerationID), c.h, c.count, &c.x, &c.owner.state.generated, batch.Mutations, c.view.base.rows, result.spentInputs)
 	// The shared owner terminally discarded the original compact source before returning.
 	result.spentInputs = nil
 	if err != nil {
@@ -594,7 +584,6 @@ func (c *replayStepCall) artifacts(undo []mdbx.Mutation) ([]mdbx.Mutation, error
 	if c.headerMismatch {
 		return nil, selectedSideDefect("replay body and header differ")
 	}
-	bodyOld := c.stored
 	c.entry.step = replayEntryRecovery
 	undoOld, err := canonicalUndoFamilyEqualV1(c.reader, &c.x, undo)
 	if err != nil {
@@ -602,7 +591,8 @@ func (c *replayStepCall) artifacts(undo []mdbx.Mutation) ([]mdbx.Mutation, error
 	}
 	c.entry.step = ""
 	deleteOld := false
-	if bodyOld && c.h < b || undoOld && c.h < u {
+	switch {
+	case c.stored && c.h < b, undoOld && c.h < u:
 		deleteOld, err = c.oldActive()
 		if err != nil {
 			return nil, err
@@ -612,15 +602,19 @@ func (c *replayStepCall) artifacts(undo []mdbx.Mutation) ([]mdbx.Mutation, error
 	if err != nil {
 		return nil, err
 	}
-	if !undoOld && c.h >= u {
-		extras = append(extras, undo...)
-	}
-	if undoOld && c.h < u && deleteOld {
+	return replayStepUndoEffects(extras, undo, undoOld, c.h < u, deleteOld), nil
+}
+
+func replayStepUndoEffects(extras, undo []mdbx.Mutation, present, below, deleteOld bool) []mdbx.Mutation {
+	switch {
+	case !present && !below:
+		return append(extras, undo...)
+	case present && below && deleteOld:
 		for _, row := range undo {
 			extras = append(extras, mdbx.Mutation{DBI: row.DBI, Key: row.Key, BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 		}
 	}
-	return extras, nil
+	return extras
 }
 
 func (c *replayStepCall) headerExtra() []mdbx.Mutation {
@@ -657,13 +651,12 @@ func (c *replayStepCall) bodyEffects(extras []mdbx.Mutation, b uint64, deleteOld
 }
 
 func replayStepPromises(rp *mdbx.ReplayV1) (uint64, uint64) {
-	tip := rp.Target.TipHeight
-	var b, u uint64
+	tip, b, u := rp.Target.TipHeight, uint64(0), uint64(0)
 	if rp.TargetProfile == mdbx.StorageProfilePrunedV1 && tip >= 15120 {
-		b = tip-15119
+		b = tip - 15119
 	}
 	if tip >= 1440 {
-		u = tip-1439
+		u = tip - 1439
 	}
 	return b, u
 }
@@ -672,22 +665,18 @@ func (c *replayStepCall) indexExtras(extras []mdbx.Mutation) ([]mdbx.Mutation, e
 	dbis, g := mdbx.SchemaV2DBIs(), uint64(c.a.Replay.TargetGenerationID)
 	key, _ := mdbx.HeightKey(g, c.h)
 	entry := mdbx.ChainValue(c.x, c.parent, c.work)
-	c.entry.step = replayEntryRecovery
-	old, present, err := c.read(dbis[2], key)
+	old, present, err := c.read(dbis[2], key, replayEntryRecovery)
 	if err != nil {
 		return nil, err
 	}
-	c.entry.step = ""
 	if present && !bytes.Equal(old, entry) {
 		return nil, selectedSideDefect("replay target staging entry differs")
 	}
 	owner, _ := mdbx.CanonicalOwnerKey(g, c.x)
-	c.entry.step = replayEntryRecovery
-	oldOwner, ownerPresent, err := c.read(dbis[7], owner)
+	oldOwner, ownerPresent, err := c.read(dbis[7], owner, replayEntryRecovery)
 	if err != nil {
 		return nil, err
 	}
-	c.entry.step = ""
 	if ownerPresent && !bytes.Equal(oldOwner, mdbx.CanonicalOwnerValue(c.h)) {
 		return nil, selectedSideDefect("replay target staging owner differs")
 	}
@@ -700,8 +689,17 @@ func (c *replayStepCall) indexExtras(extras []mdbx.Mutation) ([]mdbx.Mutation, e
 	return append(extras, mdbx.Mutation{DBI: dbis[0], Key: []byte{2}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: value}), nil
 }
 
-func (c *replayStepCall) read(dbi mdbx.DBI, key []byte) ([]byte, bool, error) {
+func (c *replayStepCall) source(dbi mdbx.DBI, key []byte, step string) ([]byte, bool, error) {
+	c.entry.step = step
 	value, present, err := c.reader.Get(dbi, key)
+	if err == nil {
+		c.entry.step = ""
+	}
+	return value, present, err
+}
+
+func (c *replayStepCall) read(dbi mdbx.DBI, key []byte, step string) ([]byte, bool, error) {
+	value, present, err := c.source(dbi, key, step)
 	if err == nil {
 		c.consulted = append(c.consulted, mdbx.ConsultedRow{DBI: dbi, Key: key})
 	}
@@ -720,12 +718,13 @@ func (c *replayStepCall) oldActive() (bool, error) {
 	}
 	c.consulted = append(c.consulted, owner.Rows...)
 	entry := owner.Entry
-	if !owner.Owned || owner.Height != c.h {
+	switch {
+	case !owner.Owned, owner.Height != c.h:
 		key, _ := mdbx.HeightKey(g, c.h)
 		if c.own.activeEntry != nil {
 			entry = c.own.activeEntry
 		} else {
-			entry, _, err = c.read(dbisRank(2), key)
+			entry, _, err = c.read(mdbx.SchemaV2DBIs()[2], key, selectedSideCanonical)
 			if err != nil {
 				return false, err
 			}
@@ -737,8 +736,6 @@ func (c *replayStepCall) oldActive() (bool, error) {
 	c.entry.step = ""
 	return [32]byte(entry[:32]) != c.x, nil
 }
-
-func dbisRank(rank uint8) mdbx.DBI { return mdbx.SchemaV2DBIs()[rank] }
 
 func (c *replayStepCall) oldActiveHealth(g uint64, entry []byte) error {
 	if len(entry) != 104 || !archiveSelectedSideWork(entry[64:104]) {
@@ -766,7 +763,7 @@ func (c *replayStepCall) oldActiveHeader(entry []byte) ([]byte, error) {
 	raw := c.own.header
 	if x != c.x || c.own.headerSource != replayPathStored {
 		var err error
-		raw, _, err = c.read(dbisRank(3), entry[:32])
+		raw, _, err = c.read(mdbx.SchemaV2DBIs()[3], entry[:32], selectedSideCanonical)
 		if err != nil {
 			return nil, err
 		}
@@ -779,7 +776,7 @@ func (c *replayStepCall) oldActiveHeader(entry []byte) ([]byte, error) {
 
 func (c *replayStepCall) oldActiveWork(g uint64, entry []byte, work *big.Int) error {
 	key, _ := mdbx.HeightKey(g, c.h-1)
-	previous, _, err := c.read(dbisRank(2), key)
+	previous, _, err := c.read(mdbx.SchemaV2DBIs()[2], key, selectedSideCanonical)
 	if err != nil {
 		return err
 	}
@@ -827,15 +824,17 @@ func (c *replayStepCall) remainder(mutations []mdbx.Mutation) ([]mdbx.ConsultedR
 	if carry != 0 || total > 16384 || knownBytes > mdbx.MaxOperationDataBytes {
 		return nil, replayRecoveryRefusal(selectedSideCapacity, "replay consulted remainder exceeds bound")
 	}
-	rows := make([]mdbx.ConsultedRow, len(finite), int(count)+len(finite))
+	rows := make([]mdbx.ConsultedRow, len(finite), int(total))
 	copy(rows, finite)
 	for op := range c.view.base.rows {
 		key, _ := mdbx.UTXOKey(c.view.base.imageID, op.Txid, op.Vout)
-		if replayStepTarget(mutations, dbisRank(1), key) < 0 {
-			rows = append(rows, mdbx.ConsultedRow{DBI: dbisRank(1), Key: key})
+		if replayStepTarget(mutations, mdbx.SchemaV2DBIs()[1], key) < 0 {
+			rows = append(rows, mdbx.ConsultedRow{DBI: mdbx.SchemaV2DBIs()[1], Key: key})
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return logicalMDBXBefore(mdbx.Mutation{DBI: rows[i].DBI, Key: rows[i].Key}, mdbx.Mutation{DBI: rows[j].DBI, Key: rows[j].Key}) })
+	sort.Slice(rows, func(i, j int) bool {
+		return logicalMDBXBefore(mdbx.Mutation{DBI: rows[i].DBI, Key: rows[i].Key}, mdbx.Mutation{DBI: rows[j].DBI, Key: rows[j].Key})
+	})
 	return rows, nil
 }
 
@@ -847,7 +846,7 @@ func (c *replayStepCall) stateRemainder(mutations []mdbx.Mutation) (uint64, uint
 		copy(scratch[8:40], op.Txid[:])
 		binary.BigEndian.PutUint32(scratch[40:], op.Vout)
 		key := scratch[:]
-		if replayStepTarget(mutations, dbisRank(1), key) < 0 {
+		if replayStepTarget(mutations, mdbx.SchemaV2DBIs()[1], key) < 0 {
 			var carry uint64
 			count, carry = bits.Add64(count, 1, 0)
 			if carry != 0 {
@@ -868,7 +867,9 @@ func (c *replayStepCall) stateRemainder(mutations []mdbx.Mutation) (uint64, uint
 }
 
 func (c *replayStepCall) finiteRemainder(mutations []mdbx.Mutation) []mdbx.ConsultedRow {
-	sort.Slice(c.consulted, func(i, j int) bool { return logicalMDBXBefore(mdbx.Mutation{DBI: c.consulted[i].DBI, Key: c.consulted[i].Key}, mdbx.Mutation{DBI: c.consulted[j].DBI, Key: c.consulted[j].Key}) })
+	sort.Slice(c.consulted, func(i, j int) bool {
+		return logicalMDBXBefore(mdbx.Mutation{DBI: c.consulted[i].DBI, Key: c.consulted[i].Key}, mdbx.Mutation{DBI: c.consulted[j].DBI, Key: c.consulted[j].Key})
+	})
 	finite := c.consulted[:0]
 	for _, row := range c.consulted {
 		if replayStepTarget(mutations, row.DBI, row.Key) < 0 && (len(finite) == 0 || finite[len(finite)-1].DBI != row.DBI || !bytes.Equal(finite[len(finite)-1].Key, row.Key)) {
@@ -885,21 +886,24 @@ func (c *replayStepCall) project() {
 		out.Result = replayStepCauses(out.Err, &replayEntryCall{})
 		return
 	}
-	if out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.Err == c.sentinel {
-		out.Result, out.Decision, out.Err = c.entry.result, c.entry.decision, nil
-	} else if out.Stage == mdbx.UpdateStageCommitMayHaveCrossed {
+	if out.Stage == mdbx.UpdateStageCommitMayHaveCrossed {
 		entry := replayEntryCrossed(ReplayEntryOutcomeV1{Truth: out.Truth, Stage: out.Stage, Err: out.Err}, &c.entry)
 		out.CanonicalTruth, out.Result = entry.CanonicalTruth, entry.Result
 	} else {
-		out.Result = replayStepCauses(out.Err, &c.entry)
-		if c.carrierInvalid {
-			out.Result = selectedSideInvariant
-		}
-		if out.Stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit {
-			out.Result = replayEntryPrecommit(out.Result)
+		switch {
+		case out.Truth != mdbx.CommitTruthOld, out.Stage != mdbx.UpdateStagePrewrite, any(out.Err) != any(c.entry.sentinel):
+			out.Result = replayStepCauses(out.Err, &c.entry)
+			if c.carrierInvalid {
+				out.Result = selectedSideInvariant
+			}
+			if out.Stage == mdbx.UpdateStageWriteStartedDefinitelyPrecommit {
+				out.Result = replayEntryPrecommit(out.Result)
+			}
+		default:
+			out.Result, out.Decision, out.Err = c.entry.result, c.entry.decision, nil
 		}
 	}
-	if out.Result == replayEntryRecovery && c.needed != nil {
+	if out.Result == replayEntryRecovery {
 		out.Needed = c.needed
 	}
 }
@@ -919,7 +923,7 @@ func replayStepCauses(err error, call *replayEntryCall) string {
 }
 
 func replayStepPart(part error, call *replayEntryCall) string {
-	switch e := part.(type) {
+	switch e := any(part).(type) {
 	case *selectedSideFailure, *mdbx.EngineError:
 		return replayEntryPart(part, call)
 	case *blockInputViewReadError:

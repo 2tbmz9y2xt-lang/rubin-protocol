@@ -31,13 +31,13 @@ func stepCached(t *testing.T, w *stepWorld, h uint64, previous ReplayStepOutcome
 
 func TestReplayStepMDBXFixtureBeginAndPrecommit(t *testing.T) {
 	for _, row := range []struct {
-		name string
+		name     string
 		scenario mdbx.SelectedDamageScenario
-		rank uint8
-		class mdbx.EngineClass
-		result string
-		stage uint8
-		write uint64
+		rank     uint8
+		class    mdbx.EngineClass
+		result   string
+		stage    uint8
+		write    uint64
 	}{
 		{"begin_io", mdbx.SelectedDamageBeginEIO, 0, mdbx.EngineIO, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", 1, 0},
 		{"begin_full", mdbx.SelectedDamageBeginTxnFull, 0, mdbx.EngineTransaction, "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)", 1, 0},
@@ -52,7 +52,9 @@ func TestReplayStepMDBXFixtureBeginAndPrecommit(t *testing.T) {
 			replayEngineClass(t, out.Err, row.class, row.name)
 			logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.BeginWrite == row.write && evidence.Commits == 0 && evidence.Faults == 1 && out.Needed == nil, "actual site: %+v", evidence)
 			cached := row.result
-			if row.stage == 2 { cached = "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" }
+			if row.stage == 2 {
+				cached = "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
+			}
 			stepCached(t, w, 0, out, cached)
 			w.store = w.reopen()
 			replaySameImage(t, before, w.image(), row.name)
@@ -63,11 +65,11 @@ func TestReplayStepMDBXFixtureBeginAndPrecommit(t *testing.T) {
 
 func TestReplayStepMDBXFixtureCrossed(t *testing.T) {
 	for _, row := range []struct {
-		name string
-		scenario mdbx.SelectedDamageScenario
-		truth uint8
+		name              string
+		scenario          mdbx.SelectedDamageScenario
+		truth             uint8
 		result, canonical string
-		faults uint64
+		faults            uint64
 	}{
 		{"OLD", mdbx.SelectedDamageCommitOld, 1, "TERMINAL_PERSISTENCE(old)", "OLD", 1},
 		{"NEW", mdbx.SelectedDamageCommitNew, 2, "TERMINAL_PERSISTENCE(new)", "NEW", 1},
@@ -105,7 +107,13 @@ func TestReplayStepMDBXFixtureCrossed(t *testing.T) {
 
 // All source-site faults are reached by the actual planner; transient absence never becomes a Need.
 func TestReplayStepMDBXFixtureSourceReads(t *testing.T) {
-	for _, row := range []struct { name string; h uint64; rank uint8; key string; result string }{
+	for _, row := range []struct {
+		name   string
+		h      uint64
+		rank   uint8
+		key    string
+		result string
+	}{
 		{"authority", 0, 0, "authority", "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"},
 		{"path_header", 0, 3, "tip", replayEntryRecovery},
 		{"body", 0, 4, "current", replayEntryRecovery},
@@ -117,7 +125,9 @@ func TestReplayStepMDBXFixtureSourceReads(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := newStepWorld(t, 1, false)
-			if row.h > 0 { w.prefix(t, row.h) }
+			if row.h > 0 {
+				w.prefix(t, row.h)
+			}
 			key := stepFixtureKey(w, row.key, row.h)
 			before := w.image()
 			out, evidence := stepArmed(t, w, row.h, mdbx.SelectedDamageGetEIO, row.rank, key)
@@ -130,7 +140,9 @@ func TestReplayStepMDBXFixtureSourceReads(t *testing.T) {
 				logicalMDBXAssert(t, ok && failure.kind == logicalStateFailureUnavailable && failure.cause != nil, "C32d original failure: %T %v", out.Err, out.Err)
 				logicalMDBXAssert(t, stepSameError(failure.cause, parts[1]), "C32d nested cause is not the original recorded native object")
 				replayEngineClass(t, parts[1], mdbx.EngineIO, row.name)
-			} else { replayEngineClass(t, out.Err, mdbx.EngineIO, row.name) }
+			} else {
+				replayEngineClass(t, out.Err, mdbx.EngineIO, row.name)
+			}
 			logicalMDBXAssert(t, out.Needed == nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.OldGets[row.rank] > 0 && evidence.Faults == 1, "fault site/projection: %+v %+v", out, evidence)
 			cached := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
 			stepCached(t, w, row.h, out, cached)
@@ -143,14 +155,22 @@ func TestReplayStepMDBXFixtureSourceReads(t *testing.T) {
 
 func stepFixtureKey(w *stepWorld, name string, h uint64) []byte {
 	switch name {
-	case "authority": return []byte{2}
-	case "tip": return w.hashes[len(w.hashes)-1][:]
-	case "current": return w.hashes[h][:]
-	case "genesis": return w.hashes[0][:]
-	case "context": return stepKey(2, h-1)
-	case "counter": return binary.BigEndian.AppendUint64([]byte{0x10}, 2)
-	case "target": return stepKey(2, h)
-	case "owner": return append(binary.BigEndian.AppendUint64(nil, 2), w.hashes[h][:]...)
+	case "authority":
+		return []byte{2}
+	case "tip":
+		return w.hashes[len(w.hashes)-1][:]
+	case "current":
+		return w.hashes[h][:]
+	case "genesis":
+		return w.hashes[0][:]
+	case "context":
+		return stepKey(2, h-1)
+	case "counter":
+		return binary.BigEndian.AppendUint64([]byte{0x10}, 2)
+	case "target":
+		return stepKey(2, h)
+	case "owner":
+		return append(binary.BigEndian.AppendUint64(nil, 2), w.hashes[h][:]...)
 	}
 	panic("unknown fixed test site")
 }
@@ -170,7 +190,9 @@ func TestReplayStepMDBXFixtureEndpoint(t *testing.T) {
 				stepExactImage(t, w, 1, before, false)
 			} else {
 				result, class := selectedSideCanonical, mdbx.EngineIO
-				if scenario == 3 { result, class = selectedSideInvariant, mdbx.EngineLocalInvariant }
+				if scenario == 3 {
+					result, class = selectedSideInvariant, mdbx.EngineLocalInvariant
+				}
 				stepTuple(t, out, result, "", "OLD", 1, 1, false)
 				e, ok := out.Err.(*mdbx.EngineError)
 				logicalMDBXAssert(t, ok && e.Class == class && e.Operation == "prefix-page" && out.Needed == nil && evidence.Queries == 1 && evidence.Opens == 1 && evidence.Gets == 1 && evidence.Closes == 1 && evidence.Faults == 1, "C31 endpoint fault: %+v %+v", e, evidence)
@@ -200,15 +222,25 @@ func TestReplayStepMDBXFixtureEndpointAndContextDrift(t *testing.T) {
 					logicalMDBXAssert(t, err == nil && evidence.Drift == 1, "full 104-byte drift: %v %+v", err, evidence)
 					stage, queries, commits := uint8(1), uint32(2), uint32(0)
 					result, canon, truth := replayEntryStale, "OLD", uint8(1)
-					if scenario == 5 { stage, queries, result = 2, 3, selectedSidePrecommit }
-					if scenario == 6 { stage, queries, commits, result, canon, truth = 3, 4, 1, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", 3 }
+					if scenario == 5 {
+						stage, queries, result = 2, 3, selectedSidePrecommit
+					}
+					if scenario == 6 {
+						stage, queries, commits, result, canon, truth = 3, 4, 1, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", 3
+					}
 					stepTuple(t, out, result, "", canon, truth, stage, false)
 					logicalMDBXAssert(t, evidence.Queries == queries && evidence.Opens == queries && evidence.Closes == queries && evidence.Gets == queries*2 && evidence.Commits == commits && out.Needed == nil, "K10/K12 exact query/commit path: %+v", evidence)
 					stepReleased(t, w)
 					w.store = w.reopen()
-					if scenario == 5 { replaySameImage(t, before, w.image(), "final proof aborted drift") }
+					if scenario == 5 {
+						replaySameImage(t, before, w.image(), "final proof aborted drift")
+					}
 					if scenario == 4 {
-						for i := range before { if bytes.Equal(before[i].Key, append([]byte{2}, key...)) { before[i].Value = value } }
+						for i := range before {
+							if bytes.Equal(before[i].Key, append([]byte{2}, key...)) {
+								before[i].Value = value
+							}
+						}
 						replaySameImage(t, before, w.image(), "prewrite only fixture drift")
 					}
 					if scenario == 6 {
@@ -231,7 +263,9 @@ func TestReplayStepMDBXFixtureJoinedOriginalOrder(t *testing.T) {
 			w := newStepWorld(t, 1, false)
 			before := w.image()
 			scenario := mdbx.SelectedDamageGetEIO
-			if abort { scenario = mdbx.SelectedDamageGetAbortEIO }
+			if abort {
+				scenario = mdbx.SelectedDamageGetAbortEIO
+			}
 			out, evidence := stepArmed(t, w, 0, scenario, 3, w.hashes[1][:])
 			stepTuple(t, out, replayEntryRecovery, "", "OLD", 1, 1, false)
 			if abort {
@@ -241,7 +275,9 @@ func TestReplayStepMDBXFixtureJoinedOriginalOrder(t *testing.T) {
 				logicalMDBXAssert(t, len(causes) == 2 && causes[0] != nil && causes[1] != nil, "original cause cardinality")
 				first, second := causes[0].(*mdbx.EngineError), causes[1].(*mdbx.EngineError)
 				logicalMDBXAssert(t, first.Operation == "get" && first.Class == mdbx.EngineIO && second.Operation == "abort" && second.Class == mdbx.EngineIO && evidence.Faults == 2, "original cause order: %+v %+v %+v", first, second, evidence)
-			} else { replayEngineClass(t, out.Err, mdbx.EngineIO, "direct original cause") }
+			} else {
+				replayEngineClass(t, out.Err, mdbx.EngineIO, "direct original cause")
+			}
 			stepCached(t, w, 0, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)")
 			w.store = w.reopen()
 			replaySameImage(t, before, w.image(), "joined source/abort")
@@ -265,7 +301,12 @@ func TestReplayStepMDBXFixtureSentinelAbort(t *testing.T) {
 
 // This read reaches the connector's original R1 carrier. It has no Unwrap method; its nested cause stays intact.
 func TestReplayStepMDBXFixtureInputCarrier(t *testing.T) {
-	for _, row := range []struct { name string; value []byte; fault bool; decision, result string }{
+	for _, row := range []struct {
+		name             string
+		value            []byte
+		fault            bool
+		decision, result string
+	}{
 		{"native_io", nil, true, "", "LOCAL_RESOURCE_UNAVAILABLE(state_view_read)"},
 		{"positive_decode", append(make([]byte, 19), 2), false, "target local", ""},
 		{"native_width", make([]byte, 19), false, "", selectedSideIntegrity},
@@ -286,16 +327,22 @@ func TestReplayStepMDBXFixtureInputCarrier(t *testing.T) {
 			if !row.fault {
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 1, key, row.value) == nil, "positive native row setup")
 			}
-			if before == nil { before = w.image() }
+			if before == nil {
+				before = w.image()
+			}
 			var invocation *replayStepInvocation
 			if row.fault {
 				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageGetEIO, 1, key, func() { invocation = replayStepRun(w.step, w.store, w.owner, w.bodies[1]) })
 				logicalMDBXAssert(t, err == nil && evidence.Faults == 1 && evidence.OldGets[1] == 1 && evidence.Commits == 0, "R1 exact native site: %v %+v", err, evidence)
-			} else { invocation = replayStepRun(w.step, w.store, w.owner, w.bodies[1]) }
+			} else {
+				invocation = replayStepRun(w.step, w.store, w.owner, w.bodies[1])
+			}
 			stepTuple(t, invocation.out, row.result, row.decision, "OLD", 1, 1, row.decision != "")
 			incoming := invocation.out.Err
 			var recorded error
-			if row.decision != "" { incoming = invocation.observation.incoming }
+			if row.decision != "" {
+				incoming = invocation.observation.incoming
+			}
 			if row.decision == "" {
 				joined, ok := incoming.(interface{ Unwrap() []error })
 				logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2, "R1 application/native cause order: %T %v", incoming, incoming)
@@ -311,7 +358,9 @@ func TestReplayStepMDBXFixtureInputCarrier(t *testing.T) {
 				replaySameImage(t, before, w.image(), "positive decode clean OLD")
 			} else {
 				kind, class := logicalStateFailureStoreIntegrity, mdbx.EngineIntegrity
-				if row.fault { kind, class = logicalStateFailureUnavailable, mdbx.EngineIO }
+				if row.fault {
+					kind, class = logicalStateFailureUnavailable, mdbx.EngineIO
+				}
 				logicalMDBXAssert(t, carrier.failure.kind == kind && stepSameError(carrier.failure.cause, recorded), "C31 original nested/recorded native cause identity")
 				replayEngineClass(t, recorded, class, row.name)
 				cached := row.result
@@ -358,8 +407,12 @@ func TestReplayStepMDBXFixtureNoArtifactRewrite(t *testing.T) {
 	for _, rank := range []uint8{3, 4, 5} {
 		t.Run(fmt.Sprint(rank), func(t *testing.T) {
 			w := newStepWorld(t, 1, false)
-			if rank == 4 { stepSeedArtifact(w, 4, 0, w.bodies[0]) }
-			if rank == 5 { stepSeedArtifact(w, 5, 0, stepManifest(0, 0, 1, 0)) }
+			if rank == 4 {
+				stepSeedArtifact(w, 4, 0, w.bodies[0])
+			}
+			if rank == 5 {
+				stepSeedArtifact(w, 5, 0, stepManifest(0, 0, 1, 0))
+			}
 			before := w.image()
 			var out ReplayStepOutcomeV1
 			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamagePutEIO, rank, nil, func() { out = w.call(0) })
@@ -381,24 +434,32 @@ func TestReplayStepMDBXFixtureUndoFamily(t *testing.T) {
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 5, entryKey, oldValue) == nil, "seed complete family")
 			}
 			var before []mdbx.PrefixRow
-			if kind == "width" { before = w.image() }
+			if kind == "width" {
+				before = w.image()
+			}
 			switch kind {
 			case "extra":
-				key := bytes.Clone(entryKey); key[76] ^= 1
+				key := bytes.Clone(entryKey)
+				key[76] ^= 1
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 5, key, oldValue) == nil, "seed extra member")
 			case "version":
-				value := stepManifest(1, 0, 3, 1); value[0] = 2
+				value := stepManifest(1, 0, 3, 1)
+				value[0] = 2
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 5, manifestKey, value) == nil, "seed malformed manifest")
 			case "width":
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 5, manifestKey, make([]byte, 32)) == nil, "seed malformed width")
 			case "wrong_entry":
-				value := bytes.Clone(oldValue); value[0] ^= 1
+				value := bytes.Clone(oldValue)
+				value[0] ^= 1
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 5, entryKey, value) == nil, "seed differing complete row")
 			case "body_header":
-				value := bytes.Clone(w.bodies[1]); value[108] ^= 1
+				value := bytes.Clone(w.bodies[1])
+				value[108] ^= 1
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 4, w.hashes[1][:], value) == nil, "seed positively misbound body")
 			}
-			if before == nil { before = w.image() }
+			if before == nil {
+				before = w.image()
+			}
 			out := w.call(1)
 			stepTuple(t, out, selectedSideIntegrity, "", "OLD", 1, 1, false)
 			logicalMDBXAssert(t, out.Needed == nil && w.step.path.slot != nil, "K7 comparison lost completed hold or fabricated Need")
@@ -423,13 +484,19 @@ func TestReplayStepMDBXFixtureOldActive(t *testing.T) {
 			stepSeedArtifact(w, 4, 1, w.bodies[1])
 			stepSeedArtifact(w, 5, 1, stepManifest(1, 0, 1, 0))
 			switch kind {
-			case "absent_header": stepDrop(w, 3, y[:])
+			case "absent_header":
+				stepDrop(w, 3, y[:])
 			case "parent", "work":
 				value, _ := stepRead(t, w.store, 2, stepKey(1, 1))
-				if kind == "parent" { value[32] ^= 1 } else { value[103] ^= 1 }
+				if kind == "parent" {
+					value[32] ^= 1
+				} else {
+					value[103] ^= 1
+				}
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, stepKey(1, 1), value) == nil, "seed old health contradiction")
 			case "predecessor":
-				value, _ := stepRead(t, w.store, 2, stepKey(1, 0)); value[0] ^= 1
+				value, _ := stepRead(t, w.store, 2, stepKey(1, 0))
+				value[0] ^= 1
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, stepKey(1, 0), value) == nil, "seed predecessor contradiction")
 			}
 			before := w.image()
@@ -458,14 +525,18 @@ func TestReplayStepMDBXFixtureCardinality(t *testing.T) {
 			later, _, _, _, err := ParseTx(coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1))
 			logicalMDBXAssert(t, err == nil, "extra exact coinbase")
 			ordinary := inputViewTx(1, Outpoint{Txid: hashWithPrefix(0xb1)})
-			if variant == "nonce" { ordinary.TxNonce = 0 }
+			if variant == "nonce" {
+				ordinary.TxNonce = 0
+			}
 			w := newStepWorld(t, 1, false, ordinary, later)
 			w.prefix(t, 1)
 			if variant == "creation" {
 				input := inputViewRewriteFirst(t, inputViewBlock(t, 1, 1, ordinary, later), func(tx *Tx) { tx.Outputs[0].CovenantType = COV_TYPE_VAULT })
 				stepReplaceRaw(t, w, stepFixHeader(t, w, input.BlockBytes, w.lastTime+240))
 			}
-			if variant == "earlier_qualification" { stepReplaceRaw(t, w, stepFixHeader(t, w, bytes.Clone(w.bodies[1]), w.lastTime)) }
+			if variant == "earlier_qualification" {
+				stepReplaceRaw(t, w, stepFixHeader(t, w, bytes.Clone(w.bodies[1]), w.lastTime))
+			}
 			before := w.image()
 			var invocation *replayStepInvocation
 			scenario, rank := mdbx.SelectedDamageProbeOnly, uint8(0)
@@ -481,7 +552,9 @@ func TestReplayStepMDBXFixtureCardinality(t *testing.T) {
 			logicalMDBXAssert(t, (err == nil || unreached) && evidence.Faults == 0 && evidence.OldGets[1] == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0, "C30 first cardinality/qualification before inputs: %v %+v", err, evidence)
 			stepTuple(t, invocation.out, "", "consensus invalid", "OLD", 1, 1, true)
 			code := ErrorCode("BLOCK_ERR_COINBASE_INVALID")
-			if variant == "earlier_qualification" { code = "BLOCK_ERR_TIMESTAMP_OLD" }
+			if variant == "earlier_qualification" {
+				code = "BLOCK_ERR_TIMESTAMP_OLD"
+			}
 			original, ok := invocation.observation.incoming.(*TxError)
 			logicalMDBXAssert(t, ok && original.Code == code && invocation.observation.h == 1 && invocation.observation.x == w.hashes[1], "literal original cardinality code/h/x: %+v", invocation.observation)
 			replaySameImage(t, before, w.image(), variant)
@@ -496,7 +569,9 @@ func stepFixHeader(t *testing.T, w *stepWorld, raw []byte, timestamp uint64) []b
 	binary.LittleEndian.PutUint64(raw[68:76], timestamp)
 	for nonce := uint64(0); ; nonce++ {
 		binary.LittleEndian.PutUint64(raw[108:116], nonce)
-		if PowCheck(raw[:116], filledHash(0xff)) == nil { return raw }
+		if PowCheck(raw[:116], filledHash(0xff)) == nil {
+			return raw
+		}
 	}
 }
 
@@ -517,8 +592,12 @@ func TestReplayStepMDBXFixtureQualifierBindingPriority(t *testing.T) {
 			w.prefix(t, 1)
 			raw := stepFixHeader(t, w, bytes.Clone(w.bodies[1]), w.lastTime)
 			stepReplaceRaw(t, w, raw)
-			if source != "bound_control" { raw[len(raw)-1] ^= 1 }
-			if source == "stored" { stepSeedArtifact(w, 4, 1, raw) }
+			if source != "bound_control" {
+				raw[len(raw)-1] ^= 1
+			}
+			if source == "stored" {
+				stepSeedArtifact(w, 4, 1, raw)
+			}
 			before := w.image()
 			var invocation *replayStepInvocation
 			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { invocation = replayStepRun(w.step, w.store, w.owner, raw) })
@@ -545,8 +624,10 @@ func TestReplayStepMDBXFixtureQualifierBindingPriority(t *testing.T) {
 func TestReplayStepMDBXFixtureFullContextWindow(t *testing.T) {
 	for _, h := range []uint64{12, 10080} {
 		first := uint64(1)
-		if h == 10080 { first = 0 }
-		for _, changed := range []uint64{first, h-1} {
+		if h == 10080 {
+			first = 0
+		}
+		for _, changed := range []uint64{first, h - 1} {
 			for _, scenario := range []uint8{4, 5, 6} {
 				t.Run(fmt.Sprintf("h%d_k%d_s%d", h, changed, scenario), func(t *testing.T) {
 					w := newStepWorld(t, int(h), true)
@@ -561,13 +642,21 @@ func TestReplayStepMDBXFixtureFullContextWindow(t *testing.T) {
 					logicalMDBXAssert(t, err == nil && evidence.Drift == 1 && out.Needed == nil, "B38 complete target descriptor: %v %+v", err, evidence)
 					if scenario == 4 {
 						stepTuple(t, out, replayEntryStale, "", "OLD", 1, 1, false)
-						for i := range before { if bytes.Equal(before[i].Key, append([]byte{2}, key...)) { before[i].Value = value } }
+						for i := range before {
+							if bytes.Equal(before[i].Key, append([]byte{2}, key...)) {
+								before[i].Value = value
+							}
+						}
 					} else if scenario == 5 {
 						stepTuple(t, out, selectedSidePrecommit, "", "OLD", 1, 2, false)
-					} else { stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false) }
+					} else {
+						stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false)
+					}
 					stepReleased(t, w)
 					w.store = w.reopen()
-					if scenario != 6 { replaySameImage(t, before, w.image(), "full target window equality") }
+					if scenario != 6 {
+						replaySameImage(t, before, w.image(), "full target window equality")
+					}
 					if scenario == 6 {
 						replayCrossedErr(t, out.Err, mdbx.CommitTruthUnknown, false)
 						logicalMDBXAssert(t, evidence.Commits == 1, "full target window STEP commit count: %+v", evidence)
@@ -585,7 +674,8 @@ func TestReplayStepMDBXFixtureFullContextWindow(t *testing.T) {
 	w.prefix(t, 12)
 	stepDrop(w, 3, w.hashes[1][:])
 	key := stepKey(2, 11)
-	value, _ := stepRead(t, w.store, 2, key); value[32] ^= 1
+	value, _ := stepRead(t, w.store, 2, key)
+	value[32] ^= 1
 	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, key, value) == nil, "later positive context contradiction")
 	before := w.image()
 	out := w.call(12)
@@ -602,14 +692,20 @@ func TestReplayStepMDBXFixtureOneBelowClassification(t *testing.T) {
 			w := newStepWorld(t, 15120, true)
 			y := stepActiveOther(t, w)
 			w.prefix(t, 1)
-			if presence == "both" || presence == "body_only" { stepSeedArtifact(w, 4, 1, w.bodies[1]) }
-			if presence == "both" || presence == "undo_only" { stepSeedArtifact(w, 5, 1, stepManifest(1, 0, 1, 0)) }
+			if presence == "both" || presence == "body_only" {
+				stepSeedArtifact(w, 4, 1, w.bodies[1])
+			}
+			if presence == "both" || presence == "undo_only" {
+				stepSeedArtifact(w, 5, 1, stepManifest(1, 0, 1, 0))
+			}
 			before := w.image()
 			out, evidence := stepArmed(t, w, 1, mdbx.SelectedDamageProbeOnly, 0, nil)
 			stepTuple(t, out, "", "", "NEW", 2, 3, true)
 			// The retained PATH proof was established by genesis. Only below-promise classification names Y.
 			want := uint64(1)
-			if presence == "neither" { want = 0 }
+			if presence == "neither" {
+				want = 0
+			}
 			logicalMDBXAssert(t, evidence.OldGets[3] == 2+want && evidence.Commits == 1 && evidence.ProbeRan == 0 && evidence.Probes == evidence.ProbeDenied, "B13/B14/B21 one or zero OLD health classification: %+v y=%x", evidence, y)
 			stepExactImage(t, w, 1, before, presence != "neither")
 			stepReleased(t, w)
@@ -683,12 +779,15 @@ func TestReplayStepMDBXFixtureGrantPriority(t *testing.T) {
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 0, []byte{2}, []byte{0x7f}) == nil, "malformed authority")
 			}
 			if mode == "differing_header" {
-				value := bytes.Clone(w.headers[0][:]); value[68] ^= 1
+				value := bytes.Clone(w.headers[0][:])
+				value[68] ^= 1
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[0][:], value) == nil, "later differing header")
 				before = w.image()
 			}
 			protects, calls := w.view.protects, w.view.headerCalls
-			if mode != "at_tip" { logicalMDBXAssert(t, protects == 0 && calls == 0, "authority-only setup reached provider") }
+			if mode != "at_tip" {
+				logicalMDBXAssert(t, protects == 0 && calls == 0, "authority-only setup reached provider")
+			}
 			var out ReplayStepOutcomeV1
 			var evidence mdbx.SelectedDamageEvidence
 			err := w.owner.WithReservation(1, func() error {
@@ -698,8 +797,12 @@ func TestReplayStepMDBXFixtureGrantPriority(t *testing.T) {
 			})
 			logicalMDBXAssert(t, err == nil, "authority-only fixture")
 			result, decision, clean := selectedSideCapacity, "", true
-			if mode == "malformed" { result, clean = selectedSideIntegrity, false }
-			if mode == "none" || mode == "at_tip" { result, decision = "", "not applicable" }
+			if mode == "malformed" {
+				result, clean = selectedSideIntegrity, false
+			}
+			if mode == "none" || mode == "at_tip" {
+				result, decision = "", "not applicable"
+			}
 			stepTuple(t, out, result, decision, "OLD", 1, 1, clean)
 			logicalMDBXAssert(t, out.Needed == nil && evidence.OldGets == ([8]uint64{1}) && evidence.BeginWrite == 0 && evidence.Commits == 0 && w.view.protects == protects && w.view.headerCalls == calls && w.step.path.slot == nil, "C1/C17/C19 first authority result: %+v", evidence)
 			stepReleased(t, w)
@@ -727,9 +830,15 @@ func TestReplayStepMDBXFixtureDescriptorPresence(t *testing.T) {
 				var out ReplayStepOutcomeV1
 				evidence, err := mdbx.FixtureCanonicalTipStep(w.store, scenario, key, nil, false, func() { out = w.call(1) })
 				logicalMDBXAssert(t, err == nil && evidence.Drift == 1 && out.Needed == nil, "presence drift: %v %+v", err, evidence)
-				if scenario == 4 { stepTuple(t, out, replayEntryStale, "", "OLD", 1, 1, false) }
-				if scenario == 5 { stepTuple(t, out, selectedSidePrecommit, "", "OLD", 1, 2, false) }
-				if scenario == 6 { stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false) }
+				if scenario == 4 {
+					stepTuple(t, out, replayEntryStale, "", "OLD", 1, 1, false)
+				}
+				if scenario == 5 {
+					stepTuple(t, out, selectedSidePrecommit, "", "OLD", 1, 2, false)
+				}
+				if scenario == 6 {
+					stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false)
+				}
 				stepReleased(t, w)
 				w.store = w.reopen()
 				if scenario != 5 {
@@ -737,7 +846,11 @@ func TestReplayStepMDBXFixtureDescriptorPresence(t *testing.T) {
 					logicalMDBXAssert(t, err == nil && equal, "exact physical descriptor absence")
 					logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, key, value) == nil, "restore descriptor census control")
 				}
-				if scenario == 6 { stepExactImage(t, w, 1, before, false) } else { replaySameImage(t, before, w.image(), "complete OLD with fixture restored") }
+				if scenario == 6 {
+					stepExactImage(t, w, 1, before, false)
+				} else {
+					replaySameImage(t, before, w.image(), "complete OLD with fixture restored")
+				}
 			})
 		}
 	}
@@ -755,9 +868,15 @@ func TestReplayStepMDBXFixtureEndpointKey(t *testing.T) {
 			var out ReplayStepOutcomeV1
 			evidence, err := mdbx.FixtureCanonicalTipStep(w.store, scenario, key, value, true, func() { out = w.call(1) })
 			logicalMDBXAssert(t, err == nil && evidence.Drift == 1 && out.Needed == nil, "actual maximal endpoint key change: %v %+v", err, evidence)
-			if scenario == 4 { stepTuple(t, out, replayEntryStale, "", "OLD", 1, 1, false) }
-			if scenario == 5 { stepTuple(t, out, selectedSidePrecommit, "", "OLD", 1, 2, false) }
-			if scenario == 6 { stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false) }
+			if scenario == 4 {
+				stepTuple(t, out, replayEntryStale, "", "OLD", 1, 1, false)
+			}
+			if scenario == 5 {
+				stepTuple(t, out, selectedSidePrecommit, "", "OLD", 1, 2, false)
+			}
+			if scenario == 6 {
+				stepTuple(t, out, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "", "UNKNOWN", 3, 3, false)
+			}
 			stepReleased(t, w)
 			w.store = w.reopen()
 			if scenario != 5 {
@@ -765,7 +884,11 @@ func TestReplayStepMDBXFixtureEndpointKey(t *testing.T) {
 				logicalMDBXAssert(t, err == nil && equal, "fixture alone added the endpoint")
 				stepDrop(w, 2, key)
 			}
-			if scenario == 6 { stepExactImage(t, w, 1, before, false) } else { replaySameImage(t, before, w.image(), "endpoint maximality proof preserved OLD") }
+			if scenario == 6 {
+				stepExactImage(t, w, 1, before, false)
+			} else {
+				replaySameImage(t, before, w.image(), "endpoint maximality proof preserved OLD")
+			}
 		})
 	}
 }
@@ -775,7 +898,8 @@ func TestReplayStepMDBXFixtureStagingMismatch(t *testing.T) {
 		t.Run(fmt.Sprint(rank), func(t *testing.T) {
 			w := newStepWorld(t, 1, false)
 			key, value := stepKey(2, 0), append(bytes.Clone(w.hashes[0][:]), make([]byte, 72)...)
-			value[0] ^= 1; value[103] = 1
+			value[0] ^= 1
+			value[103] = 1
 			cause := "replay target staging entry differs"
 			if rank == 7 {
 				key = append(binary.BigEndian.AppendUint64(nil, 2), w.hashes[0][:]...)
