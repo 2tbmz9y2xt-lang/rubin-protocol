@@ -430,10 +430,8 @@ func startupNilError(err error) bool {
 	}
 	v := reflect.ValueOf(err)
 	kind := v.Kind()
-	switch {
-	case kind == reflect.Chan, kind == reflect.Func, kind == reflect.Interface, kind == reflect.Map, kind == reflect.Pointer, kind == reflect.Slice:
+	if kind == reflect.Chan || kind == reflect.Func || kind == reflect.Interface || kind == reflect.Map || kind == reflect.Pointer || kind == reflect.Slice {
 		return v.IsNil()
-	default:
-		return false
 	}
+	return false
 }
