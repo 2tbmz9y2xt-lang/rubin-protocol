@@ -2597,7 +2597,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		t.Fatal("shared readonly lifecycle caller ownership drifted")
 	}
 	requireOrder("viewWithStartupCompletion", "startup normal completion drifted", "completion, err = callback(reader)", "returned = true")
-	if !strings.Contains(body("startupPublicationAllowed"), "startup && returned && completion == StartupCanonicalActiveAndReplayCompleteV1 && final == nil && recorded == nil && state == storeOPEN") || !strings.Contains(body("viewWithStartupCompletion"), "startupPublicationAllowed(startup, returned, completion, err, reader.failure, s.state)") {
+	if !strings.Contains(body("startupPublicationAllowed"), "startup && returned && completion == StartupCanonicalActiveAndReplayCompleteV1 && final == nil && recorded == nil && state == storeOPEN") || !strings.Contains(body("viewWithStartupCompletion"), "startupPublicationAllowed(startup, returned, completion, err, reader.failure, s.state)") || strings.Count(body("viewWithStartupCompletion"), "s.canonicalOwnerVerified =") != 1 {
 		t.Fatal("startup finalized publication admission drifted")
 	}
 	for name, wanted := range map[string]map[string]int{
