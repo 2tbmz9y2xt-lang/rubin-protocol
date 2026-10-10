@@ -118,6 +118,13 @@ func stepTuple(t *testing.T, out ReplayStepOutcomeV1, result, decision, canonica
 	logicalMDBXAssert(t, out.Result == result && out.Decision == decision && out.CanonicalTruth == canonical && uint8(out.Truth) == truth && uint8(out.Stage) == stage && (out.Err == nil) == clean, "STEP tuple: %+v want %s/%s/%s/%d/%d/clean%v", out, result, decision, canonical, truth, stage, clean)
 }
 
+func stepRefusal(t *testing.T, out ReplayStepOutcomeV1, result, cause string) {
+	t.Helper()
+	stepTuple(t, out, result, "", "OLD", 1, 1, false)
+	failure, ok := any(out.Err).(*selectedSideFailure)
+	logicalMDBXAssert(t, ok && failure.result == result && failure.cause != nil && failure.cause.Error() == cause, "exact STEP refusal: %+v", out)
+}
+
 func stepReleased(t *testing.T, w *stepWorld) {
 	t.Helper()
 	logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "full lane retained")
@@ -264,7 +271,7 @@ func testStepRetention(t *testing.T) {
 			before := w.image()
 			out := w.call(0)
 			if limit < 64 {
-				stepTuple(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "", "OLD", 1, 1, true)
+				stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "replay path retention exceeds its limit")
 				logicalMDBXAssert(t, out.Needed == nil && !w.step.DiscardV1(), "RC1: refused hold")
 				replaySameImage(t, before, w.image(), "RC1 refused")
 			} else {
@@ -281,7 +288,7 @@ func testStepRetention(t *testing.T) {
 	})
 	w.step.path.limit = 137438953471
 	before := w.image()
-	stepTuple(t, w.call(0), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "", "OLD", 1, 1, true)
+	stepRefusal(t, w.call(0), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "replay path retention exceeds its limit")
 	replaySameImage(t, before, w.image(), "RC2 checked max")
 	logicalMDBXAssert(t, w.step.path.slot == nil, "RC2 allocated path")
 	stepReleased(t, w)
@@ -331,7 +338,7 @@ func testStepNeed(t *testing.T) {
 			stepDrop(w, 3, w.hashes[missing][:])
 			before := w.image()
 			out := w.step.StepReplayMDBX(w.store, w.owner, nil)
-			stepTuple(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "", "OLD", 1, 1, true)
+			stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay path ancestry header unavailable")
 			logicalMDBXAssert(t, out.Needed != nil && *out.Needed == (ReplayStepNeedV1{Kind: 1, Height: missing, Hash: w.hashes[missing]}), "HEADER Need: %+v", out.Needed)
 			replaySameImage(t, before, w.image(), "B35 HEADER")
 			logicalMDBXAssert(t, !w.step.DiscardV1(), "failed establishment published path")
@@ -344,7 +351,7 @@ func testStepNeed(t *testing.T) {
 	w := newStepWorld(t, 1, false)
 	before := w.image()
 	out := w.step.StepReplayMDBX(w.store, w.owner, nil)
-	stepTuple(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "", "OLD", 1, 1, true)
+	stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay block bytes unavailable or unbound")
 	logicalMDBXAssert(t, out.Needed != nil && *out.Needed == (ReplayStepNeedV1{Kind: 2, Hash: w.hashes[0]}), "BLOCK_BYTES Need")
 	replaySameImage(t, before, w.image(), "missing body")
 	logicalMDBXAssert(t, w.step.path.slot != nil, "RC6: completed path lost")
@@ -490,7 +497,7 @@ func testStepSupplied(t *testing.T) {
 			input := row.edit(bytes.Clone(w.bodies[0]))
 			snapshot := bytes.Clone(input)
 			out := w.step.StepReplayMDBX(w.store, w.owner, input)
-			stepTuple(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "", "OLD", 1, 1, true)
+			stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay block bytes unavailable or unbound")
 			logicalMDBXAssert(t, out.Needed != nil && out.Needed.Kind == 2 && out.Needed.Height == 0 && out.Needed.Hash == w.hashes[0] && bytes.Equal(input, snapshot), "K1-K6 acquisition/ownership")
 			replaySameImage(t, before, w.image(), row.name)
 			stepReleased(t, w)
@@ -706,8 +713,17 @@ func stepSeedArtifact(w *stepWorld, rank uint8, h uint64, value []byte) {
 	if rank == 5 {
 		key = append(key, 0)
 	}
-	_, present := stepRead(w.t.(*testing.T), w.store, rank, key)
-	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, BeforePresent: present, AfterKind: mdbx.AfterLiteral, Literal: value})
+	t := w.t.(*testing.T)
+	old, present := stepRead(t, w.store, rank, key)
+	if present && bytes.Equal(old, value) {
+		return
+	}
+	if present {
+		stepDrop(w, rank, key)
+	}
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[rank], Key: key, AfterKind: mdbx.AfterLiteral, Literal: value})
+	stored, present := stepRead(t, w.store, rank, key)
+	logicalMDBXAssert(t, present && bytes.Equal(stored, value), "artifact seed differs: %d/%x", rank, key)
 }
 
 func testStepArtifacts(t *testing.T) {
@@ -730,7 +746,6 @@ func testStepArtifacts(t *testing.T) {
 		rank  uint8
 		value func(*stepWorld) []byte
 	}{
-		{"header_misnamed", 3, func(w *stepWorld) []byte { b := bytes.Clone(w.headers[0][:]); b[68] ^= 1; return b }},
 		{"body_merkle", 4, func(w *stepWorld) []byte { b := bytes.Clone(w.bodies[0]); b[117] ^= 1; return b }},
 		{"body_trailing", 4, func(w *stepWorld) []byte { return append(bytes.Clone(w.bodies[0]), 0) }},
 		{"undo_height", 5, func(*stepWorld) []byte { return stepManifest(1, 0, 1, 0) }},
@@ -779,11 +794,15 @@ func testStepArtifacts(t *testing.T) {
 			before := w.image()
 			stepProgress(t, w, row.h, w.authority(), w.call(row.h))
 			keep := row.name == "exact_old"
+			keepBody := keep || row.h == 1 // tip15120 promises body from h1, independently of undo.
 			body, undo := []byte(nil), []byte(nil)
-			if keep {
-				body, undo = w.bodies[row.h], stepManifest(row.h, 0, 1, 0)
+			if keepBody {
+				body = w.bodies[row.h]
 			}
-			stepArtifact(t, w, 4, row.h, body, keep)
+			if keep {
+				undo = stepManifest(row.h, 0, 1, 0)
+			}
+			stepArtifact(t, w, 4, row.h, body, keepBody)
 			stepArtifact(t, w, 5, row.h, undo, keep)
 			stepExactImage(t, w, row.h, before, !keep)
 		})
@@ -835,7 +854,7 @@ func testStepRetry(t *testing.T) {
 	before := w.image()
 	for _, h := range []uint64{3, 2} {
 		out := w.step.StepReplayMDBX(w.store, w.owner, nil)
-		stepTuple(t, out, replayEntryRecovery, "", "OLD", 1, 1, true)
+		stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay path ancestry header unavailable")
 		logicalMDBXAssert(t, out.Needed != nil && *out.Needed == (ReplayStepNeedV1{Kind: 1, Height: h, Hash: w.hashes[h]}) && w.step.path.slot == nil && !w.step.DiscardV1(), "B35 two acquisitions: %+v", out)
 		replaySameImage(t, before, w.image(), "retry no partial hold")
 		w.view.admit(w.headers[h])
@@ -852,7 +871,7 @@ func testStepRetry(t *testing.T) {
 	})
 	before = w.image()
 	oldSlot := w.step.path.slot
-	stepTuple(t, w.call(2), selectedSideCapacity, "", "OLD", 1, 1, true)
+	stepRefusal(t, w.call(2), "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "replay path slot holds another target")
 	logicalMDBXAssert(t, w.step.path.slot == oldSlot, "foreign slot was changed")
 	replaySameImage(t, before, w.image(), "RC9 foreign target")
 	logicalMDBXAssert(t, w.step.DiscardV1() && !w.step.DiscardV1(), "foreign discard")
@@ -886,7 +905,10 @@ func testStepSourceGuard(t *testing.T) {
 				if mode == "nil_release" {
 					result = selectedSideInvariant
 				}
-				stepTuple(t, out, result, "", "OLD", 1, 1, mode == "nil_source")
+				stepTuple(t, out, result, "", "OLD", 1, 1, false)
+				if mode == "nil_source" {
+					stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay path ancestry header unavailable")
+				}
 				replaySameImage(t, before, w.image(), mode)
 				logicalMDBXAssert(t, w.step.path.slot == nil, "failed provider published slot")
 			}
@@ -947,19 +969,19 @@ func stepRemainderWorld(t *testing.T, outputs int) (*stepWorld, []mdbx.PrefixRow
 	for remaining := outputs; remaining > 0; {
 		ordinal := uint32(len(txs))
 		op := Outpoint{Txid: hashWithPrefix(0xa5), Vout: ordinal}
-		entries[op] = UtxoEntry{Value: 2000, CovenantType: 1, CovenantData: data}
+		entries[op] = UtxoEntry{Value: 2000, CovenantType: COV_TYPE_P2PK, CovenantData: data}
 		tx := inputViewTx(uint64(ordinal)+1, op)
 		n := min(1000, remaining)
 		tx.Outputs = make([]TxOutput, n)
 		for j := range tx.Outputs {
-			tx.Outputs[j] = TxOutput{Value: 1, CovenantType: 1, CovenantData: bytes.Clone(data)}
+			tx.Outputs[j] = TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: bytes.Clone(data)}
 		}
 		tx.Witness[0] = signP2PKInputWitness(t, tx, 0, 2000, w.genesis.ChainID, kp)
 		raw, err := MarshalTx(tx)
 		logicalMDBXAssert(t, err == nil, "actual remainder tx")
 		txid := testTxID(t, raw)
 		for j := 0; j < n; j++ {
-			entries[Outpoint{Txid: txid, Vout: uint32(j)}] = UtxoEntry{Value: 1, CovenantType: 1, CovenantData: bytes.Clone(data), CreationHeight: 1}
+			entries[Outpoint{Txid: txid, Vout: uint32(j)}] = UtxoEntry{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: bytes.Clone(data), CreationHeight: 1}
 		}
 		if ordinal == 0 {
 			firstKey = binary.BigEndian.AppendUint32(append(binary.BigEndian.AppendUint64(nil, 2), txid[:]...), 0)
@@ -1014,13 +1036,13 @@ func stepSpentWorld(t *testing.T) (*stepWorld, Outpoint, []byte, []byte) {
 	w.prefix(t, 1)
 	kp := mustMLDSA87Keypair(t)
 	op := Outpoint{Txid: hashWithPrefix(0x91), Vout: 3}
-	entries := map[Outpoint]UtxoEntry{op: {Value: 1000, CovenantType: 1, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}}
+	entries := map[Outpoint]UtxoEntry{op: {Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}}
 	oldValues := stepSeedInputs(t, w, entries)
 	first := stepSigned(t, w, kp, 1, entries, op)
 	raw, err := MarshalTx(first)
 	logicalMDBXAssert(t, err == nil, "first transaction")
 	created := Outpoint{Txid: testTxID(t, raw)}
-	entries[created] = UtxoEntry{Value: 990, CovenantType: 1, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}
+	entries[created] = UtxoEntry{Value: 990, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}
 	second := stepSigned(t, w, kp, 2, entries, created)
 	stepReplaceSuffix(t, w, first, second)
 	key := append(bytes.Clone(w.hashes[1][:]), 1)
@@ -1064,10 +1086,14 @@ func testStepParentWitness(t *testing.T) {
 			w.prefix(t, 1)
 			kp := mustMLDSA87Keypair(t)
 			op1, op2 := Outpoint{Txid: hashWithPrefix(0x92)}, Outpoint{Txid: hashWithPrefix(0x93)}
-			entry := UtxoEntry{Value: 1000, CovenantType: 1, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}
-			entries := map[Outpoint]UtxoEntry{op1: entry, op2: entry}
+			entry := UtxoEntry{Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}
+			entries := map[Outpoint]UtxoEntry{op1: entry}
+			ops := []Outpoint{op1}
+			if !residual {
+				entries[op2], ops = entry, append(ops, op2)
+			}
 			values := stepSeedInputs(t, w, entries)
-			tx := stepSigned(t, w, kp, 1, entries, op1, op2)
+			tx := stepSigned(t, w, kp, 1, entries, ops...)
 			stepReplaceSuffix(t, w, tx)
 			length := uint64(len(values[op1])) + 36
 			cause := "parent counters are insufficient for present rows"

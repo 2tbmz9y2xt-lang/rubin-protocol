@@ -424,6 +424,24 @@ func TestReplayStepMDBXFixtureNoArtifactRewrite(t *testing.T) {
 	}
 }
 
+func TestReplayStepMDBXFixtureMisnamedHeader(t *testing.T) {
+	w := newStepWorld(t, 1, false)
+	value := bytes.Clone(w.headers[0][:])
+	value[68] ^= 1
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 3, w.hashes[0][:], value) == nil, "seed misnamed header")
+	equal, err := mdbx.FixtureRawRowEqual(w.store, 3, w.hashes[0][:], value)
+	logicalMDBXAssert(t, err == nil && equal, "misnamed header raw seed readback: %v", err)
+	before := w.image()
+	out, evidence := stepArmed(t, w, 0, mdbx.SelectedDamageProbeOnly, 0, nil)
+	stepTuple(t, out, selectedSideIntegrity, "", "OLD", 1, 1, false)
+	logicalMDBXAssert(t, out.Needed == nil && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.OldGets[1] == 0 && evidence.OldGets[4] == 0 && evidence.OldGets[5] == 0, "C2 misnamed header precedes body/state/undo: %+v %+v", out, evidence)
+	stepReleased(t, w)
+	w.store = w.reopen()
+	equal, err = mdbx.FixtureRawRowEqual(w.store, 3, w.hashes[0][:], value)
+	logicalMDBXAssert(t, err == nil && equal, "misnamed header exact preimage changed: %v", err)
+	replaySameImage(t, before, w.image(), "header_misnamed")
+}
+
 func TestReplayStepMDBXFixtureUndoFamily(t *testing.T) {
 	for _, kind := range []string{"missing", "extra", "version", "width", "wrong_entry", "body_header"} {
 		t.Run(kind, func(t *testing.T) {
@@ -604,7 +622,7 @@ func TestReplayStepMDBXFixtureQualifierBindingPriority(t *testing.T) {
 			logicalMDBXAssert(t, err == nil && evidence.OldGets[1] == 0 && evidence.Commits == 0 && evidence.BeginWrite == 0, "C34 binding-only recheck order: %v %+v", err, evidence)
 			switch source {
 			case "supplied":
-				stepTuple(t, invocation.out, replayEntryRecovery, "", "OLD", 1, 1, true)
+				stepRefusal(t, invocation.out, "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)", "replay block bytes unavailable or unbound")
 				logicalMDBXAssert(t, invocation.out.Needed != nil && *invocation.out.Needed == (ReplayStepNeedV1{Kind: 2, Height: 1, Hash: w.hashes[1]}) && invocation.observation.incoming == nil, "unbound supplied did not erase invalidity observation")
 			case "stored":
 				stepTuple(t, invocation.out, selectedSideIntegrity, "", "OLD", 1, 1, false)
@@ -701,9 +719,9 @@ func TestReplayStepMDBXFixtureOneBelowClassification(t *testing.T) {
 			before := w.image()
 			out, evidence := stepArmed(t, w, 1, mdbx.SelectedDamageProbeOnly, 0, nil)
 			stepTuple(t, out, "", "", "NEW", 2, 3, true)
-			// The retained PATH proof was established by genesis. Only below-promise classification names Y.
+			// At h1, tip15120 promises body (B=1) but not undo (U=13681). Only present undo classifies Y.
 			want := uint64(1)
-			if presence == "neither" {
+			if presence == "neither" || presence == "body_only" {
 				want = 0
 			}
 			logicalMDBXAssert(t, evidence.OldGets[3] == 2+want && evidence.Commits == 1 && evidence.ProbeRan == 0 && evidence.Probes == evidence.ProbeDenied, "B13/B14/B21 one or zero OLD health classification: %+v y=%x", evidence, y)
