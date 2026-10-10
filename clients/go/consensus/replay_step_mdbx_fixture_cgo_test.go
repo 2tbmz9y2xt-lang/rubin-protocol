@@ -189,6 +189,7 @@ func TestReplayStepMDBXFixtureEndpoint(t *testing.T) {
 			w := newStepWorld(t, 1, true)
 			w.prefix(t, 1)
 			before := w.image()
+			versions, protects, calls := w.view.versions, w.view.protects, w.view.headerCalls
 			var out ReplayStepOutcomeV1
 			evidence, err := mdbx.FixtureCanonicalTipStep(w.store, scenario, nil, nil, false, func() { out = w.call(1) })
 			logicalMDBXAssert(t, err == nil, "endpoint adapter: %v", err)
@@ -198,12 +199,21 @@ func TestReplayStepMDBXFixtureEndpoint(t *testing.T) {
 				stepExactImage(t, w, 1, before, false)
 			} else {
 				result, class := selectedSideCanonical, mdbx.EngineIO
+				code, diagnostic := 5, "error 5"
 				if scenario == 3 {
 					result, class = selectedSideInvariant, mdbx.EngineLocalInvariant
+					code, diagnostic = -30779, "mdbx_cursor_get returned invalid result shape"
 				}
 				stepTuple(t, out, result, "", "OLD", 1, 1, false)
 				e, ok := out.Err.(*mdbx.EngineError)
 				logicalMDBXAssert(t, ok && e.Class == class && e.Operation == "prefix-page" && out.Needed == nil && evidence.Queries == 1 && evidence.Opens == 1 && evidence.Gets == 1 && evidence.Closes == 1 && evidence.Faults == 1, "C31 endpoint fault: %+v %+v", e, evidence)
+				logicalMDBXAssert(t, e.Code == code && e.Diagnostic == diagnostic && e.Cause == nil && !e.ReopenRequired, "C31 exact endpoint error: %+v", e)
+				logicalMDBXAssert(t, versions == w.view.versions && protects == w.view.protects && calls == w.view.headerCalls, "C31 endpoint failure reached PATH")
+				cached := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
+				if scenario == 3 {
+					cached = selectedSideInvariant
+				}
+				stepCached(t, w, 1, out, cached)
 				stepReleased(t, w)
 				w.store = w.reopen()
 				replaySameImage(t, before, w.image(), "endpoint fault")
@@ -241,6 +251,19 @@ func TestReplayStepMDBXFixtureEndpointAndContextDrift(t *testing.T) {
 						queries--
 					}
 					stepTuple(t, out, result, "", canon, truth, stage, false)
+					if scenario == 6 {
+						commit, ok := out.Err.(*mdbx.CommitError)
+						logicalMDBXAssert(t, ok && commit.Truth == 3 && commit.ReadbackCause == nil, "K12 exact crossed error: %T %+v", out.Err, out.Err)
+						e, ok := commit.Cause.(*mdbx.EngineError)
+						logicalMDBXAssert(t, ok && e.Class == "Capacity" && e.Operation == "update" && e.Code == 28 && e.Diagnostic == "error 28" && e.Cause == nil && !e.ReopenRequired, "K12 original commit cause: %+v", e)
+					} else {
+						diagnostic := "OLD/write snapshot mismatch"
+						if scenario == 5 {
+							diagnostic = "final update image mismatch"
+						}
+						e, ok := out.Err.(*mdbx.EngineError)
+						logicalMDBXAssert(t, ok && e.Class == "StateMismatch" && e.Operation == "update" && e.Code == -30779 && e.Diagnostic == diagnostic && e.Cause == nil && !e.ReopenRequired, "K10 exact proof mismatch: %+v", e)
+					}
 					logicalMDBXAssert(t, evidence.Queries == queries && evidence.Opens == queries && evidence.Closes == queries && evidence.Gets == queries*2 && evidence.Commits == commits && out.Needed == nil, "K10/K12 exact query/commit path: %+v", evidence)
 					stepReleased(t, w)
 					w.store = w.reopen()
@@ -395,18 +418,62 @@ func TestReplayStepMDBXFixtureInputCarrier(t *testing.T) {
 	}
 }
 
+func TestReplayStepMDBXFixtureRetentionEndpoint(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		active bool
+		h      uint64
+		limit  uint64
+	}{
+		{"empty", false, 0, 63},
+		{"present", true, 1, 31},
+		{"maximum", false, 0, 137438953471},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			w := newStepWorld(t, 1, row.active)
+			if row.h != 0 {
+				w.prefix(t, row.h)
+			}
+			if row.name == "maximum" {
+				w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+					a.Replay.Target.TipHeight = 0xffffffff
+					a.Replay.Target.CumulativeChainwork = sideWorldWork(0x100000000)
+				})
+			}
+			w.step = NewReplayStepOwnerV1(ReplayStepContextV1{Genesis: w.genesis}, w.view, row.limit)
+			w.view.owner = w.step.path
+			before := w.image()
+			versions, protects, calls := w.view.versions, w.view.protects, w.view.headerCalls
+			var out ReplayStepOutcomeV1
+			evidence, err := mdbx.FixtureCanonicalTipStep(w.store, 1, nil, nil, false, func() { out = w.call(row.h) })
+			logicalMDBXAssert(t, err == nil, "retention endpoint adapter: %v", err)
+			stepRefusal(t, out, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)", "replay path retention exceeds its limit")
+			logicalMDBXAssert(t, evidence == (mdbx.CanonicalTipStepFixtureEvidence{Opens: 1, Gets: 2, Closes: 1, Queries: 1}), "RC1/RC2 one source, no committing proof: %+v", evidence)
+			logicalMDBXAssert(t, out.Needed == nil && w.step.path.slot == nil && !w.step.DiscardV1() && versions == w.view.versions && protects == w.view.protects && calls == w.view.headerCalls, "RC1/RC2 refusal reached PATH or retained a hold: %+v", out)
+			replaySameImage(t, before, w.image(), "retention refusal has no STEP effects")
+			stepReleased(t, w)
+		})
+	}
+}
+
 func TestReplayStepMDBXFixtureGrantAndCardinality(t *testing.T) {
 	w := newStepWorld(t, 1, false)
 	before := w.image()
 	var out ReplayStepOutcomeV1
 	var evidence mdbx.SelectedDamageEvidence
+	var endpoint mdbx.CanonicalTipStepFixtureEvidence
 	err := w.owner.WithReservation(1, func() error {
 		var fixtureErr error
-		evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.call(0) })
+		evidence, fixtureErr = mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+			var endpointErr error
+			endpoint, endpointErr = mdbx.FixtureCanonicalTipStep(w.store, 1, nil, nil, false, func() { out = w.call(0) })
+			logicalMDBXAssert(t, endpointErr == nil, "denied grant endpoint adapter: %v", endpointErr)
+		})
 		return fixtureErr
 	})
 	logicalMDBXAssert(t, err == nil, "aggregate grant fixture: %v", err)
 	stepTuple(t, out, selectedSideCapacity, "", "OLD", 1, 1, true)
+	logicalMDBXAssert(t, endpoint == (mdbx.CanonicalTipStepFixtureEvidence{}) && out.Needed == nil, "RC3 grant denial queried endpoint: %+v", endpoint)
 	logicalMDBXAssert(t, evidence.OldGets[0] == 1 && evidence.OldGets[1] == 0 && evidence.OldGets[2] == 0 && evidence.OldGets[3] == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0 && w.view.protects == 0 && w.step.path.slot == nil, "RC3 authority-only denial: %+v", evidence)
 	replaySameImage(t, before, w.image(), "aggregate grant denial")
 	stepProgress(t, w, 0, w.authority(), w.call(0))
