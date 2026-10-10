@@ -3287,7 +3287,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
 		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||

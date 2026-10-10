@@ -93,7 +93,7 @@ func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []
 	if rank == 0 {
 		evidence, probeErr := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = startupRun(w) })
 		e, native := out.Err.(*mdbx.EngineError)
-		logicalMDBXAssert(t, probeErr == nil && evidence.OldPulls == ([8]uint64{}) && native && e.Class == "Integrity" && e.Operation == "get" && e.Code == -30796 && e.Diagnostic == "invalid storage authority" && e.Cause != nil, "authority full decoder before traversal: %+v/%v/%v", evidence, out.Err, probeErr)
+		logicalMDBXAssert(t, probeErr == nil && evidence.OldPulls == ([8]uint64{}) && native && e.Class == "Integrity" && e.Operation == "get" && e.Code == -30793 && e.Diagnostic == "invalid storage authority" && e.Cause != nil, "authority full decoder before traversal: %+v/%v/%v", evidence, out.Err, probeErr)
 	} else {
 		out = startupRun(w)
 	}
@@ -472,7 +472,7 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 				if scenario == mdbx.SelectedDamageStartupPullEIO {
 					operation = "prefix-page"
 				}
-				logicalMDBXAssert(t, e.Class == "IO" && e.Code == 5 && e.Operation == operation && e.Cause == nil && e.ReopenRequired, "source raw tuple: %+v", e)
+				logicalMDBXAssert(t, e.Class == "IO" && e.Code == 5 && e.Operation == operation && e.Cause == nil && !e.ReopenRequired, "source raw tuple: %+v", e)
 				logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("consumed View callback"); return nil }) == out.Err, "cached source identity")
 				_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("consumed Update callback"); return mdbx.Batch{}, nil })
 				logicalMDBXAssert(t, next == out.Err, "cached Update identity")

@@ -462,7 +462,7 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 			err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[2], 1, nil)
 				e, native := failure.(*EngineError)
-				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30796 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() {
+				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30793 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() {
 					t.Fatal("forward key width result/record/disarm")
 				}
 				recorded = failure
