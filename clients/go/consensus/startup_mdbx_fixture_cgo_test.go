@@ -719,13 +719,10 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 	t.Run("H10 early body visitor composition before outer View", func(t *testing.T) {
 		w := startupWorld(t, 0, 0)
 		startupRaw(t, w, 3, w.hashes[0][:], make([]byte, 117))
-		var body []byte
-		for _, row := range w.pre[1:] {
-			if row.Key[0] == 4 && bytes.Equal(row.Key[1:], w.hashes[0][:]) {
-				body = bytes.Clone(row.Value)
-			}
-		}
-		logicalMDBXAssert(t, len(body) > 0, "prepared genesis body rank4 is present")
+		body := bytes.Clone(w.genesis.Published)
+		equal, bodyErr := mdbx.FixtureRawRowEqual(w.store, 4, w.hashes[0][:], body)
+		logicalMDBXAssert(t, bodyErr == nil && equal && len(body) == 266, "prepared published genesis body rank4 is present: %v/%v", equal, bodyErr)
+		w.pre = append(w.pre, mdbx.PrefixRow{Key: append([]byte{4}, w.hashes[0][:]...), Value: bytes.Clone(body)})
 		w.store = w.reopen()
 		var p, r, visited, cached error
 		var saved mdbx.LargeImageRowV1
@@ -770,7 +767,7 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 				}
 			})
 		})
-		logicalMDBXAssert(t, err == nil && cleanupErr == nil && state == "CLOSED" && !verified && callbacks == 1 && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.OldPulls == ([8]uint64{}) && counts.OldGets[3] == 1 && counts.Faults == 0, "early visitor cleanup/state/permission/call census: %+v", counts)
+		logicalMDBXAssert(t, err == nil && cleanupErr == nil && state == "CLOSED" && !verified && callbacks == 1 && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.OldPulls == ([8]uint64{}) && counts.OldGets == ([8]uint64{3: 1, 4: 2}) && counts.Faults == 0, "early visitor cleanup/state/permission/call census: %+v", counts)
 		_, expired := saved.ReadAt(make([]byte, 1), 0)
 		logicalMDBXAssert(t, expired.(*mdbx.EngineError).Diagnostic == "Reader is not active", "early row/span lifetime")
 		logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("early cached View callback"); return nil }) == cached, "early cached View identity")
