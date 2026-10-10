@@ -107,14 +107,22 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 			s := startupOpened(t)
 			finished := make(chan struct{})
 			var old *Reader
+			var built StartupCanonicalCompletionV1
 			go func() {
 				defer close(finished)
 				defer func() { if p := recover(); mode == "panic" && p != "startup panic" { t.Errorf("panic identity=%v", p) } }()
-				_ = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) { old = r; if mode == "panic" { panic("startup panic") }; runtime.Goexit(); return 1, nil })
+				_ = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+					old = r
+					completion := StartupCanonicalCompletionV1(1)
+					built = completion
+					if mode == "panic" { panic("startup panic") }
+					runtime.Goexit()
+					return completion, nil
+				})
 				t.Error("interrupted startup returned normally")
 			}()
 			<-finished
-			if old.usable() || s.state != storeOPEN { t.Fatal("interrupted cleanup/lifetime drifted") }
+			if built != 1 || old.usable() || s.state != storeOPEN { t.Fatal("locally completed interruption cleanup/lifetime drifted") }
 			startupPermission(t, s, false)
 		})
 	}

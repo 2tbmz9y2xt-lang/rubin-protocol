@@ -260,6 +260,24 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 }
 
 func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
+	for _, width := range []int{8, 17} {
+		t.Run(fmt.Sprintf("forward key width%d", width), func(t *testing.T) {
+			s := startupOpened(t)
+			key := canonicalForwardKeyLiteral(1, 0)
+			if width == 8 { key = key[:8] } else { key = append(key, 0) }
+			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, make([]byte, 104)))
+			var recorded error
+			err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+				row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[2], 1, nil)
+				e, native := failure.(*EngineError)
+				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30796 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() { t.Fatal("forward key width result/record/disarm") }
+				recorded = failure
+				return 1, nil
+			})
+			if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED { t.Fatal("recorded key width failure disappeared") }
+			if s.View(func(*Reader) error { t.Fatal("key width cached callback"); return nil }) != err { t.Fatal("key width cached identity") }
+		})
+	}
 	for _, rank := range []uint8{2, 7} {
 		for _, width := range []int{-1, 0, 7, 9, 103, 105} {
 			if rank == 2 && (width == 7 || width == 9) || rank == 7 && (width == 103 || width == 105) { continue }
