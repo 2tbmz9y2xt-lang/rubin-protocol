@@ -123,8 +123,17 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 					return nil
 				}
 				logicalMDBXAssert(t, w.store.View(check) == nil, "fresh View owner")
-				truth, stage, err := w.store.Update(func(r *mdbx.Reader) (mdbx.Batch, error) { return mdbx.Batch{}, check(r) })
-				logicalMDBXAssert(t, err == nil && truth == 1 && stage == 1, "fresh Update owner: %v/%v/%v", truth, stage, err)
+				before := w.image()
+				application := errors.New("fresh Update owner readonly abort")
+				truth, stage, err := w.store.Update(func(r *mdbx.Reader) (mdbx.Batch, error) {
+					if err := check(r); err != nil {
+						return mdbx.Batch{}, err
+					}
+					return mdbx.Batch{}, application
+				})
+				logicalMDBXAssert(t, any(err) == any(application) && truth == 1 && stage == 1, "fresh Update owner: %v/%v/%v", truth, stage, err)
+				replaySameImage(t, before, w.image(), "fresh Update readonly image")
+				startupFreshGuard(t, w, true)
 			}
 			out := startupRun(w)
 			startupTuple(t, out, false, 0, "")
@@ -150,10 +159,10 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		}
 		w := startupWorld(t, 15120, 0)
 		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-			a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = 1, 2, 0, 13681
+			a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = 1, 2, 0, 13680
 		})
 		out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-		logicalMDBXAssert(t, out.Err.Error() == "startup active bounds mismatch", "B-only boundary owner: %v", out.Err)
+		logicalMDBXAssert(t, out.Err.Error() == "startup active bounds mismatch", "B/U-pair boundary owner: %v", out.Err)
 	})
 	t.Run("A05 bounds literals", func(t *testing.T) {
 		for _, row := range []struct {
@@ -381,10 +390,11 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 }
 
 // Every edit preserves width and native pairing so the named semantic owner is
-// reached. Width/invalid authority rows use the real raw transport tagged corpus.
+// reached. Width/invalid authority and misbound-header rows use the tagged raw
+// transport because the public Update validates header hash binding at setup.
 func startupSemanticDefects(t *testing.T) {
 	for _, generation := range []uint64{1, 2} {
-		for _, defect := range []string{"missing genesis", "gap", "height too large", "wrong genesis", "misbound header", "genesis parent", "row parent", "later parent", "zero target", "work genesis", "work later", "zero work genesis", "zero work later", "overflow work genesis", "overflow work later", "cursor short", "cursor hash", "cursor work", "beyond cursor", "PRE_GENESIS forward"} {
+		for _, defect := range []string{"missing genesis", "gap", "height too large", "wrong genesis", "genesis parent", "row parent", "later parent", "zero target", "work genesis", "work later", "zero work genesis", "zero work later", "overflow work genesis", "overflow work later", "cursor short", "cursor hash", "cursor work", "beyond cursor", "PRE_GENESIS forward"} {
 			if generation == 1 && (strings.HasPrefix(defect, "cursor") || defect == "beyond cursor" || defect == "PRE_GENESIS forward") {
 				continue
 			}
@@ -463,14 +473,10 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 		f.Literal[0] ^= 0x73
 		i.Key = append(binary.BigEndian.AppendUint64(nil, generation), f.Literal[:32]...)
 		i.Literal = binary.BigEndian.AppendUint64(nil, 0x100000000)
-	case "wrong genesis", "misbound header":
+	case "wrong genesis":
 		header := bytes.Clone(w.headers[0][:])
 		header[115] ^= 1
 		newHash, _ := BlockHash(header)
-		if defect == "misbound header" {
-			w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: hash[:], BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: header})
-			return
-		}
 		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: newHash[:], AfterKind: mdbx.AfterLiteral, Literal: header})
 		w.hashes, w.headers = append(w.hashes, newHash), append(w.headers, [116]byte(header))
 		copy(f.Literal[:32], newHash[:])

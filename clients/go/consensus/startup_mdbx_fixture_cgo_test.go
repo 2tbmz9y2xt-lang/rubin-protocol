@@ -86,7 +86,7 @@ func startupTargetHeader(t *testing.T, w *replayWorld) []byte {
 	return bytes.Clone(hash[:])
 }
 
-func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []byte) {
+func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []byte) ReplayStartupOutcomeV1 {
 	t.Helper()
 	w.store = w.reopen()
 	var out ReplayStartupOutcomeV1
@@ -114,6 +114,7 @@ func startupRawPreserved(t *testing.T, w *replayWorld, rank uint8, key, value []
 	logicalMDBXAssert(t, err == nil && equal, "raw preimage changed: %v/%v", equal, err)
 	startupRawImageEqual(t, w)
 	startupFreshGuard(t, w, false)
+	return out
 }
 
 func TestReplayStartupMDBXNativeRows(t *testing.T) {
@@ -165,6 +166,11 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 			{"header absent", 3, func(w *replayWorld) []byte { return w.hashes[0][:] }, func(w *replayWorld) []byte { return nil }},
 			{"header short", 3, func(w *replayWorld) []byte { return w.hashes[0][:] }, func(w *replayWorld) []byte { return make([]byte, 115) }},
 			{"header long", 3, func(w *replayWorld) []byte { return w.hashes[0][:] }, func(w *replayWorld) []byte { return make([]byte, 117) }},
+			{"header misbound", 3, func(w *replayWorld) []byte { return w.hashes[0][:] }, func(w *replayWorld) []byte {
+				header := bytes.Clone(w.headers[0][:])
+				header[115] ^= 1
+				return header
+			}},
 		} {
 			t.Run(fmt.Sprintf("R03-R05 g%d %s", g, row.name), func(t *testing.T) {
 				w := startupWorld(t, 2, 2)
@@ -172,9 +178,16 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 				if g == 2 && row.rank == 3 {
 					// Shared genesis belongs to active first. A distinct later target header reaches the target owner.
 					key = startupTargetHeader(t, w)
+					if row.name == "header misbound" {
+						value = bytes.Clone(w.headers[len(w.headers)-1][:])
+						value[115] ^= 1
+					}
 				}
 				startupRaw(t, w, row.rank, key, value)
-				startupRawPreserved(t, w, row.rank, key, value)
+				out := startupRawPreserved(t, w, row.rank, key, value)
+				if row.name == "header misbound" {
+					logicalMDBXAssert(t, out.Err.Error() == "startup header identity mismatch", "header binding owner was not reached: %v", out.Err)
+				}
 			})
 		}
 	}
@@ -275,16 +288,17 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 }
 
 func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
-	for _, bound := range []string{"B", "U"} {
-		t.Run("R09 mixed profiles active15120 wrong "+bound, func(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		profile mdbx.StorageProfileV1
+	}{
+		{"B-U pair", 1},
+		{"U", 2},
+	} {
+		t.Run("R09 mixed profiles active15120 wrong "+row.name, func(t *testing.T) {
 			w := startupWorld(t, 15120, 0)
 			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-				a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = 1, 2, 1, 13681
-				if bound == "B" {
-					a.B = 0
-				} else {
-					a.U = 13680
-				}
+				a.ActiveProfile, a.Replay.TargetProfile, a.B, a.U = row.profile, 3-row.profile, 0, 13680
 			})
 			before := w.image()
 			w.store = w.reopen()

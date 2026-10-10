@@ -121,9 +121,23 @@ func TestStartupCanonicalNativeV1(t *testing.T) {
 		requireEnvironmentError(t, s.Close(), EngineConcurrency, operationClose, -30778, "store operation in progress")
 		close(finish)
 		mustEnvironment(t, <-done)
-		truth, stage, err := s.Update(func(r *Reader) (Batch, error) { return Batch{}, r.RequireCanonicalOwnerVerificationV1() })
-		if err != nil || truth != CommitTruthOld || stage != UpdateStagePrewrite {
+		before, inspectErr := s.Inspect()
+		mustEnvironment(t, inspectErr)
+		application := errors.New("fresh Update permission readonly abort")
+		truth, stage, err := s.Update(func(r *Reader) (Batch, error) {
+			if err := r.RequireCanonicalOwnerVerificationV1(); err != nil {
+				return Batch{}, err
+			}
+			return Batch{}, application
+		})
+		if any(err) != any(application) || truth != CommitTruthOld || stage != UpdateStagePrewrite || s.state != storeOPEN {
 			t.Fatalf("fresh Update=%v/%v/%v", truth, stage, err)
+		}
+		startupPermission(t, s, true)
+		after, inspectErr := s.Inspect()
+		mustEnvironment(t, inspectErr)
+		if after.RecentTxnID != before.RecentTxnID || after.DBIs != before.DBIs {
+			t.Fatal("fresh Update readonly image changed")
 		}
 	})
 	for _, mode := range []string{"panic", "Goexit"} {
