@@ -190,15 +190,14 @@ type CanonicalOwnerResultV1 struct {
 // 0 < work <= 2^288 records Integrity "canonical owner index inconsistency" as this Reader's failure and returns that
 // same object, never Owned false; if the Reader expired or was disarmed by another failure meanwhile, nothing is recorded
 // and "Reader is not active" is returned. Verification exists on a Store handle only after the successful Create
-// publication or BootstrapStorageV1's exact-empty census; Open never establishes it. Each call allocates at most a
+// publication, BootstrapStorageV1's exact-empty census, or complete persisted-REPLAY startup; Open starts false.
+// The permission covers paths selected by current legal authority, not arbitrary obsolete generations. Each call allocates at most a
 // 40-byte owner key, a 16-byte forward key, Get copies of 8 and 104 bytes and one Rows array of two rows; consumers
 // charge those buffers to their reservation.
 func (r *Reader) CanonicalOwnerV1(generation uint64, hash [32]byte) (CanonicalOwnerResultV1, error) {
-	if !r.usable() {
-		return CanonicalOwnerResultV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
-	}
-	if !r.ownerVerified {
-		return CanonicalOwnerResultV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "canonical owner index is not verified", nil)
+	verificationErr := r.RequireCanonicalOwnerVerificationV1()
+	if verificationErr != nil {
+		return CanonicalOwnerResultV1{}, verificationErr
 	}
 	owner := ConsultedRow{DBI: schemaDBIs[7], Key: make([]byte, 40)}
 	binary.BigEndian.PutUint64(owner.Key, generation)
@@ -211,6 +210,18 @@ func (r *Reader) CanonicalOwnerV1(generation uint64, hash [32]byte) (CanonicalOw
 		return CanonicalOwnerResultV1{Rows: []ConsultedRow{owner}}, nil
 	}
 	return r.canonicalOwnerEntry(owner, generation, binary.BigEndian.Uint64(value), hash)
+}
+
+// RequireCanonicalOwnerVerificationV1 checks the permission captured by this
+// active Reader without reading data or changing its failure/lifetime state.
+func (r *Reader) RequireCanonicalOwnerVerificationV1() error {
+	if !r.usable() {
+		return adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	if !r.ownerVerified {
+		return adapterError(operationGet, EngineInvalidInput, codeEINVAL, "canonical owner index is not verified", nil)
+	}
+	return nil
 }
 
 // canonicalOwnerEntry reads the forward entry a present owner row selects and decides Owned or the recorded inconsistency.

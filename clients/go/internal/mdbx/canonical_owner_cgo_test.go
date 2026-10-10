@@ -503,10 +503,30 @@ func TestCanonicalOwnerLookupUnverifiedAfterOpen(t *testing.T) {
 	}
 	requireUpdateValue(t, store, counter.DBI, counter.Key, counter.Literal, true)
 	mustEnvironment(t, store.View(func(reader *Reader) error {
+		guard := reader.RequireCanonicalOwnerVerificationV1()
+		requireEnvironmentError(t, guard, EngineInvalidInput, operationGet, 22, "canonical owner index is not verified")
+		if reader.failure != nil || !reader.usable() {
+			t.Fatal("zero-read guard changed Reader state")
+		}
 		result, lookupErr := reader.CanonicalOwnerV1(1, [32]byte{7})
 		canonicalRequireUnverified(t, reader, result, lookupErr, "unverified in View")
 		return nil
 	}))
+}
+
+func TestCanonicalOwnerVerificationGuardLifetime(t *testing.T) {
+	var nilReader *Reader
+	requireEnvironmentError(t, nilReader.RequireCanonicalOwnerVerificationV1(), EngineInvalidInput, operationGet, 22, "Reader is not active")
+	store := newUpdateStore(t)
+	var escaped *Reader
+	mustEnvironment(t, store.View(func(r *Reader) error {
+		escaped = r
+		if err := r.RequireCanonicalOwnerVerificationV1(); err != nil || r.failure != nil {
+			t.Fatalf("Create captured verification: %v/%v", err, r.failure)
+		}
+		return nil
+	}))
+	requireEnvironmentError(t, escaped.RequireCanonicalOwnerVerificationV1(), EngineInvalidInput, operationGet, 22, "Reader is not active")
 }
 
 func TestCanonicalOwnerLookupBootstrapEstablishes(t *testing.T) {
