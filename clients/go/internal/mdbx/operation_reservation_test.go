@@ -550,7 +550,7 @@ func TestOperationReservationOwnerSurface(t *testing.T) {
 	if !slices.Equal(own.imports, []string{`"errors"`, `"sync"`}) {
 		t.Fatalf("surface imports: %v", own.imports)
 	}
-	if !slices.Equal(own.exports, []string{"MaxOperationDataBytes", "NewOperationReservationOwner", "OperationReservationOwner", "WithReservation"}) {
+	if !slices.Equal(own.exports, []string{"IsOperationReservationCapacity", "MaxOperationDataBytes", "NewOperationReservationOwner", "OperationReservationOwner", "WithReservation"}) {
 		t.Fatalf("surface exports: %v", own.exports)
 	}
 	if len(own.fields) != 0 {

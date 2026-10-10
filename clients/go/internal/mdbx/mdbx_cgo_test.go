@@ -2921,7 +2921,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)
@@ -5150,7 +5150,7 @@ func TestUpdateTerminalLegality(t *testing.T) {
 
 		source, sourceErr := os.ReadFile("mdbx_cgo.go")
 		mustEnvironment(t, sourceErr)
-		for _, method := range []string{"Update", "View", "Inspect"} {
+		for _, method := range []string{"Update", "viewWithStartupCompletion", "Inspect"} {
 			body := updateNativeBody(t, source, method)
 			if stateAt, nativeAt := strings.Index(body, "observationStateError"), strings.Index(body, "C."); stateAt < 0 || nativeAt < 0 || stateAt > nativeAt {
 				t.Fatal("terminal legality drifted")
