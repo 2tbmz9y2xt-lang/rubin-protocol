@@ -47,7 +47,15 @@ func TestReplayStepMDBXFixtureBeginAndPrecommit(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			w := newStepWorld(t, 1, false)
 			before := w.image()
-			out, evidence := stepArmed(t, w, 0, row.scenario, row.rank, nil)
+			var key []byte
+			if row.scenario == mdbx.SelectedDamagePutEIO {
+				parsed, err := ParseBlockBytes(w.bodies[0])
+				logicalMDBXAssert(t, err == nil && len(parsed.Txs) == 1 && len(parsed.Txids) == 1 && len(parsed.Txs[0].Outputs) > 0, "genesis PUT source: %v", err)
+				logicalMDBXAssert(t, parsed.Txs[0].Outputs[0].CovenantType != 2 && parsed.Txs[0].Outputs[0].CovenantType != 0x103, "genesis PUT output is prunable")
+				key = append(binary.BigEndian.AppendUint64(nil, 2), parsed.Txids[0][:]...)
+				key = binary.BigEndian.AppendUint32(key, 0)
+			}
+			out, evidence := stepArmed(t, w, 0, row.scenario, row.rank, key)
 			stepTuple(t, out, row.result, "", "OLD", 1, row.stage, false)
 			replayEngineClass(t, out.Err, row.class, row.name)
 			logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.BeginWrite == row.write && evidence.Commits == 0 && evidence.Faults == 1 && out.Needed == nil, "actual site: %+v", evidence)
@@ -228,6 +236,10 @@ func TestReplayStepMDBXFixtureEndpointAndContextDrift(t *testing.T) {
 					if scenario == 6 {
 						stage, queries, commits, result, canon, truth = 3, 4, 1, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN", 3
 					}
+					// Context inequality stops scoped proof before its later endpoint query; crossed proof still visits it.
+					if generation == 2 && scenario != 6 {
+						queries--
+					}
 					stepTuple(t, out, result, "", canon, truth, stage, false)
 					logicalMDBXAssert(t, evidence.Queries == queries && evidence.Opens == queries && evidence.Closes == queries && evidence.Gets == queries*2 && evidence.Commits == commits && out.Needed == nil, "K10/K12 exact query/commit path: %+v", evidence)
 					stepReleased(t, w)
@@ -293,7 +305,12 @@ func TestReplayStepMDBXFixtureSentinelAbort(t *testing.T) {
 	stepTuple(t, out, replayEntryRecovery, "", "OLD", 1, 1, false)
 	logicalMDBXAssert(t, evidence.Faults == 1 && evidence.Commits == 0 && out.Needed != nil && out.Needed.Kind == 1 && out.Needed.Hash == w.hashes[1], "original missing observation plus abort: %+v %+v", out, evidence)
 	joined, ok := out.Err.(interface{ Unwrap() []error })
-	logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2 && joined.Unwrap()[0].Error() == "replay path ancestry header unavailable" && joined.Unwrap()[1].(*mdbx.EngineError).Operation == "abort" && w.step.path.slot == nil, "original refusal/abort order and partial hold")
+	logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2, "original refusal/abort cardinality: %T %v", out.Err, out.Err)
+	parts := joined.Unwrap()
+	failure, ok := parts[0].(*selectedSideFailure)
+	logicalMDBXAssert(t, ok && failure.result == "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)" && failure.cause != nil && failure.cause.Error() == "replay path ancestry header unavailable", "original refusal wrapper/cause: %T %v", parts[0], parts[0])
+	abort, ok := parts[1].(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && abort.Operation == "abort" && abort.Class == mdbx.EngineIO && abort.Code == 5 && abort.Diagnostic == "error 5" && abort.Cause == nil && !abort.ReopenRequired && w.step.path.slot == nil, "original native abort order and partial hold: %+v", abort)
 	stepCached(t, w, 0, out, replayEntryRecovery)
 	w.store = w.reopen()
 	replaySameImage(t, before, w.image(), "sentinel refusal joined abort")
@@ -398,7 +415,8 @@ func TestReplayStepMDBXFixtureGrantAndCardinality(t *testing.T) {
 	before = w.image()
 	out, evidence = stepArmed(t, w, 1, mdbx.SelectedDamageProbeOnly, 0, nil)
 	stepTuple(t, out, "", "consensus invalid", "OLD", 1, 1, true)
-	logicalMDBXAssert(t, evidence.OldGets[1] == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Probes == 1 && evidence.ProbeDenied == 1 && evidence.ProbeRan == 0, "C27/C30/B37 first validation before UTXO reads, full lane: %+v", evidence)
+	// No writer starts; the OLD abort probes the held grant once before and once after native cleanup.
+	logicalMDBXAssert(t, evidence.OldGets[1] == 0 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.OldAborts == 1 && evidence.Probes == 2 && evidence.ProbeDenied == 2 && evidence.ProbeRan == 0, "C27/C30/B37 first validation before UTXO reads, full lane: %+v", evidence)
 	replaySameImage(t, before, w.image(), "first consensus observation")
 	stepReleased(t, w)
 }
@@ -415,7 +433,11 @@ func TestReplayStepMDBXFixtureNoArtifactRewrite(t *testing.T) {
 			}
 			before := w.image()
 			var out ReplayStepOutcomeV1
-			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamagePutEIO, rank, nil, func() { out = w.call(0) })
+			key := w.hashes[0][:]
+			if rank == 5 {
+				key = append(bytes.Clone(key), 0)
+			}
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamagePutEIO, rank, key, func() { out = w.call(0) })
 			logicalMDBXAssert(t, err != nil && err.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && evidence.BeginWrite == 1 && evidence.Commits == 1, "B2/B3/B4 actual unchanged-row PUT site must remain unreachable: %v %+v", err, evidence)
 			stepTuple(t, out, "", "", "NEW", 2, 3, true)
 			stepExactImage(t, w, 0, before, false)
@@ -697,8 +719,8 @@ func TestReplayStepMDBXFixtureFullContextWindow(t *testing.T) {
 	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.store, 2, key, value) == nil, "later positive context contradiction")
 	before := w.image()
 	out := w.call(12)
-	stepTuple(t, out, selectedSideIntegrity, "", "OLD", 1, 1, false)
-	logicalMDBXAssert(t, out.Err.Error() == "target context named header absent or misnamed" && out.Needed == nil, "B30 ascending context first observation: %v", out.Err)
+	stepRefusal(t, out, "TERMINAL_STORE_INTEGRITY(canonical)", "target context named header absent or misnamed")
+	logicalMDBXAssert(t, out.Needed == nil, "B30 ascending context first observation invented Need")
 	w.store = w.reopen()
 	replaySameImage(t, before, w.image(), "ascending complete target context")
 	stepReleased(t, w)
@@ -724,7 +746,9 @@ func TestReplayStepMDBXFixtureOneBelowClassification(t *testing.T) {
 			if presence == "neither" || presence == "body_only" {
 				want = 0
 			}
-			logicalMDBXAssert(t, evidence.OldGets[3] == 2+want && evidence.Commits == 1 && evidence.ProbeRan == 0 && evidence.Probes == evidence.ProbeDenied, "B13/B14/B21 one or zero OLD health classification: %+v y=%x", evidence, y)
+			// Own/context source headers plus admission/preflight/final rereads total eight OLD Gets.
+			// One classification adds Y's header at source and the same three consulted-proof phases.
+			logicalMDBXAssert(t, evidence.OldGets[3] == 8+4*want && evidence.Commits == 1 && evidence.ProbeRan == 0 && evidence.Probes == evidence.ProbeDenied, "B13/B14/B21 one or zero OLD health classification: %+v y=%x", evidence, y)
 			stepExactImage(t, w, 1, before, presence != "neither")
 			stepReleased(t, w)
 		})
