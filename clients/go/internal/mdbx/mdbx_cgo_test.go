@@ -2582,9 +2582,9 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			position = start + relative
 		}
 	}
-	for _, name := range []string{"View", "Inspect"} {
+	for _, name := range []string{"viewWithStartupCompletion", "Inspect"} {
 		text := body(name)
-		if strings.Count(text, "s.operations.TryLock()") != 1 || strings.Count(text, "defer s.operations.Unlock()") != 1 || strings.Contains(text, ".RLock(") || strings.Contains(text, ".TryRLock(") || strings.Contains(text, "go func") {
+		if strings.Count(text, "s.operations.TryLock()") != 1 || strings.Count(text, "defer s.operations.Unlock()") != 1 || strings.Count(text, "s.operations.Unlock()") != 1 || strings.Contains(text, ".RLock(") || strings.Contains(text, ".TryRLock(") || strings.Contains(text, "go func") {
 			t.Fatalf("exclusive observation ownership drifted: %s", name)
 		}
 		requireOrder(name, "exclusive observation ownership drifted", "s.operations.TryLock()", "defer s.operations.Unlock()", "s.observationStateError", "C.rubin_mdbx_txn_begin")
@@ -2592,7 +2592,45 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("ambiguous txn ownership drifted: %s", name)
 		}
 	}
-	requireOrder("View", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked")
+	requireOrder("viewWithStartupCompletion", "panic cleanup/order drifted", "reader.active.Store(true)", "reader.expire()", "readPrimary", "s.abortReadLocked", "s.canonicalOwnerVerified = true")
+	if strings.Count(body("View"), "s.viewWithStartupCompletion(") != 1 || strings.Count(body("StartupVerifyCanonicalV1"), "s.viewWithStartupCompletion(") != 1 || strings.Count(string(source), "s.viewWithStartupCompletion(") != 2 {
+		t.Fatal("shared readonly lifecycle caller ownership drifted")
+	}
+	requireOrder("viewWithStartupCompletion", "startup normal completion drifted", "completion, err = callback(reader)", "returned = true")
+	if !strings.Contains(body("startupPublicationAllowed"), "startup && returned && completion == StartupCanonicalActiveAndReplayCompleteV1 && final == nil && recorded == nil && state == storeOPEN") || !strings.Contains(body("viewWithStartupCompletion"), "startupPublicationAllowed(startup, returned, completion, err, reader.failure, s.state)") {
+		t.Fatal("startup finalized publication admission drifted")
+	}
+	for name, wanted := range map[string]map[string]int{
+		"viewWithStartupCompletion": {
+			"s.operations.TryLock": 1, "adapterError": 2, "s.operations.Unlock": 1,
+			"s.observationStateError": 1, "C.rubin_mdbx_txn_begin": 1,
+			"nativePointerResultError": 1, "int": 1, "s.failedReadBegin": 1,
+			"newReader": 1, "uint64": 1, "limitsForPage": 1, "reader.active.Store": 1,
+			"<closure>": 1, "reader.expire().retire": 1, "reader.expire": 1,
+			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
+			"callback": 1, "startupCompletionResult": 1,
+		},
+		"startupCanonicalRead": {
+			"C.rubin_mdbx_get_equal_or_great": 1, "unsafe.Pointer": 3,
+			"C.size_t": 1, "len": 1, "runtime.KeepAlive": 1,
+			"prefixPageNativeResult": 1, "int": 1, "copyPrefixPageRow": 1,
+		},
+	} {
+		observed := map[string]int{}
+		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				label := "<closure>"
+				if _, closure := call.Fun.(*ast.FuncLit); !closure {
+					var text strings.Builder
+					mustEnvironment(t, format.Node(&text, fset, call.Fun))
+					label = text.String()
+				}
+				observed[label]++
+			}
+			return true
+		})
+		if !reflect.DeepEqual(observed, wanted) { t.Fatalf("startup helper closure ownership drifted: %s %v", name, observed) }
+	}
 	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("GetOptionalSide", "post-native optional-side failure was not recorded", "C.rubin_mdbx_get", "optionalSideResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("PrefixPage", "post-native PrefixPage failure was not recorded", "prefixPageRead", "r.failure = err", "r.active.Store(false)", "return page")
@@ -2645,6 +2683,12 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
 	checkLockedRead("GetOptionalSide", "C", "rubin_mdbx_get")
 	checkLockedRead("PrefixPage", "r", "prefixPageRead")
+	checkLockedRead("StartupCanonicalNextV1", "r", "startupCanonicalRead")
+	requireOrder("StartupCanonicalNextV1", "startup pull native failure was not recorded", "startupCanonicalRead", "r.failure = err", "r.active.Store(false)", "return row")
+	requireOrder("startupCanonicalRead", "startup pull bound/copy order drifted", "C.rubin_mdbx_get_equal_or_great", "prefixPageNativeResult", "exhausted || row.outside", "copyPrefixPageRow")
+	if strings.Count(body("startupCanonicalRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Contains(body("startupCanonicalRead"), "advancePrefixPageSeek") || strings.Contains(body("startupCanonicalRead"), "for ") {
+		t.Fatal("startup pull gained successor lookahead")
+	}
 	checkLockedRead("CanonicalTipV1", "r", "canonicalTipAcquire")
 	requireOrder("canonicalTipAcquire", "post-native endpoint failure was not recorded", "canonicalTipEndpoint", "canonicalTipPoint", "r.failure = err", "r.active.Store(false)", "return nil, err")
 	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("GetOptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
@@ -2666,6 +2710,21 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		t.Fatal("prefix-page native wrapper framing drifted")
 	}
 	prefixWrapper := production[prefixWrapperStart : prefixWrapperStart+prefixWrapperEnd+2]
+	const expectedPrefixWrapper = `static rubin_mdbx_prefix_result rubin_mdbx_get_equal_or_great(const MDBX_txn *txn, MDBX_dbi dbi, const void *seek_bytes, size_t seek_len) {
+	MDBX_val key = {(void *)seek_bytes, seek_len}, value = {NULL, 0};
+	rubin_mdbx_prefix_result result = {MDBX_EINVAL, NULL, 0, NULL, 0};
+	result.rc = mdbx_get_equal_or_great(txn, dbi, &key, &value);
+	if (result.rc == MDBX_SUCCESS || result.rc == MDBX_RESULT_TRUE) {
+		result.key_bytes = key.iov_base;
+		result.key_len = key.iov_len;
+		result.value_bytes = value.iov_base;
+		result.value_len = value.iov_len;
+	}
+	return result;
+}`
+	if prefixWrapper != expectedPrefixWrapper {
+		t.Fatal("prefix-page native lower-bound closure drifted")
+	}
 	if strings.Count(prefixWrapper, "result.rc = mdbx_get_equal_or_great(") != 1 {
 		t.Fatal("prefix-page native lower-bound call drifted")
 	}
@@ -3114,7 +3173,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require(strings.Count(production, "RUBIN_SELECTED_DAMAGE_FIXTURE") == 2 && fixtureStart > 0 && fixtureEnd > fixtureStart, "fixture-only preamble block framing drifted")
 	fixtureBlock := preamble[fixtureStart : fixtureEnd+len(fixtureClose)]
 	require(strings.Count(fixtureBlock, "#define ") == 11 && strings.Count(fixtureBlock, "#if") == 1 && !strings.Contains(fixtureBlock, "#include") && strings.Count(production, "rubinSelectedDamageProbe(") == 5, "fixture-only preamble block content drifted")
-	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n", "#define mdbx_env_close_ex rubin_li_env_close\n", "#define mdbx_get_equal_or_great rubin_li_prefix\n", "#define mdbx_cursor_open rubin_tip_open\n", "#define mdbx_cursor_get rubin_tip_get\n", "#define mdbx_cursor_close rubin_tip_close\n"} {
+	for _, alias := range []string{"#define mdbx_txn_begin rubin_sd_txn_begin\n", "#define mdbx_get rubin_sd_get\n", "#define mdbx_del rubin_sd_del\n", "#define mdbx_txn_commit rubin_sd_txn_commit\n", "#define mdbx_txn_abort rubin_sd_txn_abort\n", "#define mdbx_put rubin_sd_put\n", "#define mdbx_env_close_ex rubin_li_env_close\n", "#define mdbx_get_equal_or_great rubin_sd_prefix\n", "#define mdbx_cursor_open rubin_tip_open\n", "#define mdbx_cursor_get rubin_tip_get\n", "#define mdbx_cursor_close rubin_tip_close\n"} {
 		require(strings.Count(fixtureBlock, alias) == 1 && strings.Index(fixtureBlock, alias) > strings.LastIndex(fixtureBlock, "static int rubin_sd_"), "fixture-only alias %q drifted", alias)
 	}
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))
@@ -3184,7 +3243,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
-		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|View:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
+		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|viewWithStartupCompletion:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 8)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
@@ -3226,7 +3285,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:View:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
 		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
@@ -3283,7 +3342,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require(strings.Count(body("consume"), "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)") == 1 && strings.Count(body("consume"), consumeTail) == 1, "consume terminal ordering drifted")
 	errorCalls := map[string]int{}
 	ast.Inspect(file, func(node ast.Node) bool {
-		if call, ok := node.(*ast.CallExpr); ok && call.Pos() >= functions["Create"].Pos() {
+		if call, ok := node.(*ast.CallExpr); ok && (call.Pos() >= functions["Create"].Pos() || call.Pos() >= functions["View"].Pos() && call.Pos() < functions["Get"].Pos()) {
 			name := callName(call)
 			if name == "adapterError" || name == "integrityError" || name == "ioError" || name == "writerLockError" {
 				errorCalls[compact(call)]++
@@ -3296,6 +3355,12 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
 		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil)`: 1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil)`: 1,
+		`adapterError(operationView, EngineLocalInvariant, codeProblem, "startup canonical verification did not complete", err)`: 1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)`: 2,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)`: 1,
+		`adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
 		`adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)`: 1, `adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)`: 1,
 		`adapterError(operation, EngineInvalidInput, codeEINVAL, "path must be nonempty, NUL-free, absolute and clean", nil)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeEExist, "Create path already exists", nil)`: 1,
 		`ioError(operationCreate, "inspect Create path", err)`: 1, `ioError(operationCreate, "create environment directory", err)`: 1, `ioError(operationCreate, "read back environment directory", err)`: 2,
@@ -3380,12 +3445,47 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	var storeWrites, packageStoreWriteOwners []string
 	for _, filename := range names {
+		ast.Inspect(files[filename], func(node ast.Node) bool {
+			if address, ok := node.(*ast.UnaryExpr); ok && address.Op == token.AND {
+				if field, selected := ast.Unparen(address.X).(*ast.SelectorExpr); selected && field.Sel.Name == "canonicalOwnerVerified" {
+					packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":permission-address")
+				}
+			}
+			literal, ok := node.(*ast.CompositeLit)
+			if !ok || len(literal.Elts) == 0 {
+				return true
+			}
+			name, named := ast.Unparen(literal.Type).(*ast.Ident)
+			seen := map[*ast.TypeSpec]bool{}
+			for named && name.Name != "Store" {
+				spec := typeProofs[name.Name]
+				if spec == nil || seen[spec] {
+					break
+				}
+				seen[spec] = true
+				name, named = ast.Unparen(spec.Type).(*ast.Ident)
+			}
+			if named && name.Name == "Store" {
+				packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":Store-composite")
+			}
+			return true
+		})
 		for _, declaration := range files[filename].Decls {
 			fn, ok := declaration.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				// A whole Store pointer must not escape to an unsafe/C wrapper
+				// where an otherwise invisible permission write could occur.
+				if call, called := node.(*ast.CallExpr); called && callName(call) == "unsafe.Pointer" && len(call.Args) == 1 {
+					if id, named := ast.Unparen(call.Args[0]).(*ast.Ident); named {
+						declared, found := directFunctionBinding(fn, id)
+						if pointer, indirect := ast.Unparen(declared).(*ast.StarExpr); !found || indirect && !provenScalarOrSequence(typeProofs, pointer.X, map[*ast.TypeSpec]bool{}) {
+							packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":Store-unsafe-escape")
+						}
+					}
+				}
 				assignment, ok := node.(*ast.AssignStmt)
 				if !ok {
 					return true
@@ -3405,9 +3505,10 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
-	// The canonical-owner verification has exactly two writers: the Create publication and the exact-empty bootstrap census.
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
+	// The canonical-owner verification has exactly three writers: Create,
+	// exact-empty bootstrap, and the shared finalized startup publication.
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}

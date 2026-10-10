@@ -789,7 +789,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
-	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go"} {
+	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "startup_mdbx_cgo.go", "startup_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -807,7 +807,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
 	// IgnoredGoFiles also lists these exact rubin_mdbx_fixture-tagged test files; they are test code, not non-test sources.
 	sources = slices.DeleteFunc(sources, func(name string) bool {
-		return name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go"
+		return name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "startup_mdbx_fixture_cgo_test.go"
 	})
 	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
@@ -816,14 +816,15 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 9, "bridge lost dormancy: %d non-test internal/mdbx imports, want 9", imports)
-	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{}}
-	_, _ = config.Check("consensus", fset, files, info)
+	logicalMDBXAssert(t, imports == 10, "bridge lost dormancy: %d non-test internal/mdbx imports, want 10", imports)
+	native := startupCensusNative(t)
+	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
+	consensusPackage, _ := config.Check("consensus", fset, files, info)
 	names, declared, resolved := map[string]bool{"newLogicalMDBXStateView": true, "newLogicalMDBXMetadata": true, "logicalMDBXPlanToBatch": true, "genesisMDBXBatch": true, "Counters": true, "Lookup": true}, map[types.Object]bool{}, map[string]bool{}
 	for ident, object := range info.Defs {
 		if names[ident.Name] && object != nil && strings.HasSuffix(fset.Position(ident.Pos()).Filename, "logical_state_mdbx_cgo.go") {
@@ -898,11 +899,132 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			return true
 		})
 	}
+	startupCensusUses(t, fset, files, info, parents, native)
+	// Resolve dormant public uses in the actual node and command packages too.
+	// The existing incomplete-import checker remains deliberately tolerant of
+	// unrelated types, while every protected spelling must resolve nonvacuously.
+	commandDirs, err := filepath.Glob("../cmd/*")
+	logicalMDBXAssert(t, err == nil && consensusPackage != nil, "startup consumer census source")
+	for _, dir := range append([]string{"../node"}, commandDirs...) {
+		entries, readErr := os.ReadDir(dir)
+		logicalMDBXAssert(t, readErr == nil, "startup consumer census read %s: %v", dir, readErr)
+		packages := map[string][]*ast.File{}
+		for _, entry := range entries {
+			if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") { continue }
+			file, parseErr := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, 0)
+			logicalMDBXAssert(t, parseErr == nil, "startup consumer census parse %s: %v", entry.Name(), parseErr)
+			packages[file.Name.Name] = append(packages[file.Name.Name], file)
+		}
+		for name, parsed := range packages {
+			uses := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+			checker := &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native, consensus: consensusPackage}}
+			_, _ = checker.Check(name, fset, parsed, uses)
+			public := consensusPackage.Scope().Lookup("VerifyPersistedReplayStartupMDBX")
+			nativeMethod := types.NewMethodSet(types.NewPointer(native.Scope().Lookup("Store").Type())).Lookup(native, "StartupVerifyCanonicalV1").Obj()
+			logicalMDBXAssert(t, public != nil, "startup consumer census unresolved producer")
+			for _, file := range parsed {
+				ast.Inspect(file, func(node ast.Node) bool {
+					id, ok := node.(*ast.Ident)
+					if !ok { return true }
+					if uses.Uses[id] == public { t.Fatalf("startup lost dormancy: node/cmd public consumer at %s", fset.Position(id.Pos())) }
+					logicalMDBXAssert(t, uses.Uses[id] != nativeMethod && uses.Uses[id] != native.Scope().Lookup("StartupCanonicalActiveAndReplayCompleteV1"), "unapproved external startup owner at %s", fset.Position(id.Pos()))
+					if id.Name == "VerifyPersistedReplayStartupMDBX" || id.Name == "StartupVerifyCanonicalV1" || id.Name == "StartupCanonicalActiveAndReplayCompleteV1" {
+						logicalMDBXAssert(t, uses.Defs[id] != nil || uses.Uses[id] != nil, "startup census resolved no uses: external %s at %s", id.Name, fset.Position(id.Pos()))
+					}
+					return true
+				})
+			}
+		}
+	}
 }
 
-type logicalMDBXStubImporter struct{ native *types.Package }
+// The exact declarations supply object identity despite the existing deliberate
+// incomplete-import checker. They are type evidence only, never an executable seam.
+func startupCensusNative(t *testing.T) *types.Package {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "native-startup-type-evidence.go", `package mdbx
+type Reader struct{}
+type Store struct{}
+type OperationReservationOwner struct{}
+type StartupCanonicalCompletionV1 uint8
+const StartupCanonicalNotCompleteV1 StartupCanonicalCompletionV1 = 0
+const StartupCanonicalActiveAndReplayCompleteV1 StartupCanonicalCompletionV1 = 1
+func (*Store) StartupVerifyCanonicalV1(func(*Reader) (StartupCanonicalCompletionV1,error)) error { return nil }
+`, 0)
+	logicalMDBXAssert(t, err == nil, "startup type evidence: %v", err)
+	pkg, err := (&types.Config{}).Check("github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx", fset, []*ast.File{file}, nil)
+	logicalMDBXAssert(t, err == nil, "startup type evidence check: %v", err)
+	return pkg
+}
+
+func startupCensusUses(t *testing.T, fset *token.FileSet, files []*ast.File, info *types.Info, parents map[ast.Node]ast.Node, native *types.Package) {
+	t.Helper()
+	storeType := native.Scope().Lookup("Store").Type()
+	nativeMethod := types.NewMethodSet(types.NewPointer(storeType)).Lookup(native, "StartupVerifyCanonicalV1").Obj()
+	completionType := native.Scope().Lookup("StartupCanonicalCompletionV1").Type()
+	completion := native.Scope().Lookup("StartupCanonicalActiveAndReplayCompleteV1")
+	var verify, public types.Object
+	var finalVerifyReturn *ast.ReturnStmt
+	for _, file := range files {
+		if !strings.HasSuffix(fset.Position(file.Pos()).Filename, "startup_mdbx_cgo.go") { continue }
+		for _, declaration := range file.Decls {
+			if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "verify" && len(fn.Body.List) != 0 {
+				finalVerifyReturn, _ = fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
+			}
+		}
+	}
+	for id, object := range info.Defs {
+		if !strings.HasSuffix(fset.Position(id.Pos()).Filename, "startup_mdbx_cgo.go") { continue }
+		if id.Name == "verify" { verify = object }
+		if id.Name == "VerifyPersistedReplayStartupMDBX" { public = object }
+	}
+	logicalMDBXAssert(t, verify != nil && public != nil && finalVerifyReturn != nil, "startup census resolved no uses: producer definitions")
+	owner := func(node ast.Node) string {
+		for node = parents[node]; node != nil; node = parents[node] {
+			if fn, ok := node.(*ast.FuncDecl); ok { return fn.Name.Name }
+		}
+		return ""
+	}
+	uses, producers := 0, 0
+	for id, object := range info.Uses {
+		if object == public { t.Fatalf("startup lost dormancy: public consumer at %s", fset.Position(id.Pos())) }
+		if object == nativeMethod {
+			selector, selected := parents[id].(*ast.SelectorExpr)
+			call, direct := parents[selector].(*ast.CallExpr)
+			logicalMDBXAssert(t, selected && direct && call.Fun == selector && len(call.Args) == 1 && owner(id) == "VerifyPersistedReplayStartupMDBX", "unapproved startup caller at %s", fset.Position(id.Pos()))
+			callback, ok := call.Args[0].(*ast.SelectorExpr)
+			logicalMDBXAssert(t, ok && info.Uses[callback.Sel] == verify, "unapproved startup checker at %s", fset.Position(id.Pos()))
+			uses++
+		}
+		if object == completion { producers++ }
+	}
+	logicalMDBXAssert(t, uses == 1 && producers == 1, "startup census resolved no uses: callers%d/completion%d", uses, producers)
+	for _, file := range files {
+		ast.Inspect(file, func(node ast.Node) bool {
+			if id, ok := node.(*ast.Ident); ok && (id.Name == "StartupVerifyCanonicalV1" || id.Name == "StartupCanonicalActiveAndReplayCompleteV1" || id.Name == "VerifyPersistedReplayStartupMDBX") && info.Defs[id] == nil {
+				logicalMDBXAssert(t, info.Uses[id] != nil, "startup census resolved no uses: %s at %s", id.Name, fset.Position(id.Pos()))
+			}
+			if expr, ok := node.(ast.Expr); ok {
+				value := info.Types[expr]
+				// A helper/conversion with a nonconstant typed outcome must not
+				// bypass the sole final producer by hiding its numeric literal.
+				if value.IsValue() && types.Identical(value.Type, completionType) && (value.Value == nil || value.Value.ExactString() != "0") {
+					ret, returning := parents[expr].(*ast.ReturnStmt)
+					logicalMDBXAssert(t, returning && ret == finalVerifyReturn && len(ret.Results) == 2 && ret.Results[0] == expr && owner(expr) == "verify", "unapproved completion producer at %s", fset.Position(expr.Pos()))
+				}
+			}
+			return true
+		})
+	}
+}
+
+type logicalMDBXStubImporter struct{ native, consensus *types.Package }
 
 func (i logicalMDBXStubImporter) Import(path string) (*types.Package, error) {
+	if i.consensus != nil && path == "github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus" {
+		return i.consensus, nil
+	}
 	if i.native != nil && path == i.native.Path() {
 		return i.native, nil
 	}

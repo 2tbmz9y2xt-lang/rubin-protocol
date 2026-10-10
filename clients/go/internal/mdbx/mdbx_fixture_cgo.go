@@ -48,7 +48,7 @@ static int rubin_fixture_large_bulk(MDBX_txn *txn, MDBX_dbi dbi, unsigned kind, 
 	}
 	return MDBX_SUCCESS;
 }
-typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
+typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], old_pulls[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe);
 void rubin_sd_disarm(rubin_sd_counts *out);
 static int rubin_fixture_row_equal(MDBX_env *env, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int want_present, const void *want_bytes, size_t want_len, int *equal) {
@@ -458,6 +458,35 @@ func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run fu
 	}()
 	run()
 	return evidence, nil
+}
+
+// FixtureStartupCleanup binds the actual startup invocation to the existing
+// readonly abort transports (9: consumed EIO, 10: retained THREAD_MISMATCH),
+// optionally holding a real foreign-thread writer until that invocation exits.
+// It supplies no checker result, canonical bytes or permission assignment.
+func FixtureStartupCleanup(store *Store, mode uint32, busy bool, run func()) (state string, verified bool, err error) {
+	if store == nil || store.env == nil || run == nil || mode != 0 && mode != 9 && mode != 10 {
+		return "", false, errors.New("invalid startup cleanup fixture")
+	}
+	if busy {
+		_, release, beginErr := fixtureHeldUpdate(store)
+		if beginErr != nil {
+			return "", false, beginErr
+		}
+		defer func() { err = errors.Join(err, release()) }()
+	}
+	if mode == 0 {
+		run()
+	} else {
+		_, err = fixtureLargeFault(store, mode, 0, []byte{2}, run)
+	}
+	return string(store.state), store.canonicalOwnerVerified, err
+}
+
+// FixtureStartupRelease disposes a retained test handle only after its native
+// state, error, permission and next-operation assertions have been observed.
+func FixtureStartupRelease(store *Store) error {
+	return fixtureLargeRelease(store)
 }
 
 // FixtureCleanupReadbackDrift changes one retained cleanup artifact after commit.
@@ -915,6 +944,15 @@ func FixtureSeedRawRow(store *Store, rank uint8, key, value []byte) error {
 	return fixtureSeedPrefixRawRow(store, schemaDBIs[rank], key, value)
 }
 
+// FixtureStartupDeleteRow creates a definitive absence through the existing raw
+// writer, rather than confusing a zero-width stored value with NOTFOUND.
+func FixtureStartupDeleteRow(store *Store, rank uint8, key []byte) error {
+	if int(rank) >= len(schemaDBIs) {
+		return errors.New("invalid startup deletion fixture")
+	}
+	return fixtureDeletePrefixRow(store, schemaDBIs[rank], key)
+}
+
 // FixtureRawRowEqual reports whether the committed row (rank, key) is exactly want (nil means absent), reading the
 // native value in one fixture read transaction and comparing it with memcmp: no SchemaV2 width bound, no Go copy.
 func FixtureRawRowEqual(store *Store, rank uint8, key, want []byte) (bool, error) {
@@ -963,6 +1001,7 @@ const (
 	SelectedDamageAbortEIO
 	SelectedDamagePutEIO
 	SelectedDamageWriteBeginTxnFull
+	SelectedDamageStartupPullEIO
 )
 
 // SelectedDamageEvidence is the bounded native evidence of one armed invocation: site counters, injected faults and
@@ -970,9 +1009,10 @@ const (
 type SelectedDamageEvidence struct {
 	BeginOld, BeginWrite, BeginRead uint64
 	OldGets                         [8]uint64
-	ReadGets, Faults, Deletes       uint64
-	Commits, OldAborts              uint64
-	Probes, ProbeDenied, ProbeRan   uint64
+	OldPulls                        [8]uint64
+	ReadGets, Faults, Deletes        uint64
+	Commits, OldAborts               uint64
+	Probes, ProbeDenied, ProbeRan    uint64
 }
 
 type selectedDamageProbe struct {
@@ -995,7 +1035,7 @@ func rubinSelectedDamageProbe(handle C.uintptr_t) {
 }
 
 // FixtureSelectedDamage arms one closed scenario on store's environment, runs run (which must invoke the actual
-// selected-side operation and keep its return), disarms even on panic and reports the native evidence. key is copied
+// selected-side operation or VerifyPersistedReplayStartupMDBX and keep its return), disarms even on panic and reports the native evidence. key is copied
 // into C during arming. A setup failure, a fault site not reached exactly as armed or a failed native bridge step is
 // the returned error, never a selected outcome. Invocations are serialized.
 func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner, scenario SelectedDamageScenario, rank uint8, key []byte, run func()) (evidence SelectedDamageEvidence, err error) {
@@ -1026,7 +1066,7 @@ func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner
 }
 
 func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
-	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageWriteBeginTxnFull && run != nil
+	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageStartupPullEIO && run != nil
 }
 
 func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {
@@ -1037,6 +1077,7 @@ func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_c
 	}
 	for i := range evidence.OldGets {
 		evidence.OldGets[i] = uint64(counts.old_gets[i])
+		evidence.OldPulls[i] = uint64(counts.old_pulls[i])
 	}
 	want := uint64(1)
 	switch scenario {

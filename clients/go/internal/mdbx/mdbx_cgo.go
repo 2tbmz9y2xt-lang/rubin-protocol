@@ -137,14 +137,14 @@ static int rubin_li_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDB
 // Fixture-only native boundary for the dormant selected-side operation. The fixture build defines the macro through
 // its package CFLAGS; an ordinary build preprocesses this block away. One serialized invocation binds one environment,
 // its OLD, write and readback transactions and one closed scenario; every interceptor forwards to libMDBX.
-typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
+typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], old_pulls[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
 extern void rubinSelectedDamageProbe(uintptr_t probe);
 static pthread_mutex_t rubin_sd_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct { unsigned scenario; int get_fired; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbis[8], fault_dbi; unsigned char key[78]; size_t key_len; uintptr_t probe; rubin_sd_counts counts; } rubin_sd;
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe) {
 	int rc = 1;
 	pthread_mutex_lock(&rubin_sd_mu);
-	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 13 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
+	if (rubin_sd.scenario == 0 && env != NULL && dbis != NULL && scenario >= 1 && scenario <= 14 && key_len <= sizeof(rubin_sd.key) && (key_len == 0 || key != NULL)) {
 		memset(&rubin_sd, 0, sizeof(rubin_sd));
 		rubin_sd.scenario = scenario;
 		rubin_sd.env = env;
@@ -346,6 +346,24 @@ static int rubin_sd_txn_abort(MDBX_txn *txn) {
 	pthread_mutex_unlock(&rubin_sd_mu);
 	return MDBX_EIO;
 }
+// The startup pull fixture counts the existing OLD transaction's lower-bound
+// calls and substitutes one armed EIO before forwarding every other call.
+static int rubin_sd_startup_pull_fault(MDBX_dbi dbi, const MDBX_val *key) {
+	return rubin_sd.scenario == 14 && !rubin_sd.get_fired && dbi == rubin_sd.fault_dbi && key->iov_len == rubin_sd.key_len && memcmp(key->iov_base, rubin_sd.key, key->iov_len) == 0;
+}
+static int rubin_sd_prefix(const MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *value) {
+	int fault = 0;
+	pthread_mutex_lock(&rubin_sd_mu);
+	if (rubin_sd.scenario && txn == rubin_sd.old_txn) {
+		for (unsigned rank = 0; rank < 8; rank++) if (dbi == rubin_sd.dbis[rank]) rubin_sd.counts.old_pulls[rank]++;
+		if (rubin_sd_startup_pull_fault(dbi, key)) {
+			rubin_sd.get_fired = 1; rubin_sd.counts.faults++; fault = 1;
+		}
+	}
+	pthread_mutex_unlock(&rubin_sd_mu);
+	if (fault) { value->iov_base = NULL; value->iov_len = 0; return MDBX_EIO; }
+	return rubin_li_prefix(txn, dbi, key, value);
+}
 // rubin_sd_put fails exactly one armed write-transaction put of the armed DBI and key with EIO before libMDBX sees it.
 static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data, MDBX_put_flags_t flags) {
 	if (rubin_li.mode) rubin_li.calls++;
@@ -372,7 +390,7 @@ static int rubin_sd_put(MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_v
 #define mdbx_txn_abort rubin_sd_txn_abort
 #define mdbx_put rubin_sd_put
 #define mdbx_env_close_ex rubin_li_env_close
-#define mdbx_get_equal_or_great rubin_li_prefix
+#define mdbx_get_equal_or_great rubin_sd_prefix
 #define mdbx_cursor_open rubin_tip_open
 #define mdbx_cursor_get rubin_tip_get
 #define mdbx_cursor_close rubin_tip_close
@@ -2286,6 +2304,32 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	if callback == nil {
 		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)
 	}
+	return s.viewWithStartupCompletion(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+		return StartupCanonicalNotCompleteV1, callback(r)
+	}, false)
+}
+
+// StartupCanonicalCompletionV1 is the fixed startup checker's completion domain.
+type StartupCanonicalCompletionV1 uint8
+
+const (
+	StartupCanonicalNotCompleteV1                   StartupCanonicalCompletionV1 = 0
+	StartupCanonicalActiveAndReplayCompleteV1 StartupCanonicalCompletionV1 = 1
+)
+
+// StartupVerifyCanonicalV1 establishes permission on a newly Opened Store only
+// after the repository-owned checker and the shared readonly lifecycle complete.
+func (s *Store) StartupVerifyCanonicalV1(check func(*Reader) (StartupCanonicalCompletionV1, error)) error {
+	if s == nil {
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)
+	}
+	if check == nil {
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil)
+	}
+	return s.viewWithStartupCompletion(check, true)
+}
+
+func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonicalCompletionV1, error), startup bool) (err error) {
 	if !s.operations.TryLock() {
 		return adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)
 	}
@@ -2293,6 +2337,9 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	stateErr := s.observationStateError(operationView)
 	if stateErr != nil {
 		return stateErr
+	}
+	if startup && s.canonicalOwnerVerified {
+		return adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil)
 	}
 	begun := C.rubin_mdbx_txn_begin(s.env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
@@ -2303,12 +2350,30 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
 	reader.active.Store(true)
+	var completion StartupCanonicalCompletionV1
+	returned := false
 	defer func() {
 		reader.expire().retire()
 		primary, infrastructure := readPrimary(err, reader.failure)
 		err = s.abortReadLocked(begun.txn, primary, infrastructure)
+		if startupPublicationAllowed(startup, returned, completion, err, reader.failure, s.state) {
+			s.canonicalOwnerVerified = true
+		}
 	}()
-	return callback(reader)
+	completion, err = callback(reader)
+	returned = true
+	return startupCompletionResult(startup, completion, err)
+}
+
+func startupCompletionResult(startup bool, completion StartupCanonicalCompletionV1, err error) error {
+	if startup && (completion > StartupCanonicalActiveAndReplayCompleteV1 || completion == StartupCanonicalNotCompleteV1 && err == nil) {
+		return adapterError(operationView, EngineLocalInvariant, codeProblem, "startup canonical verification did not complete", err)
+	}
+	return err
+}
+
+func startupPublicationAllowed(startup, returned bool, completion StartupCanonicalCompletionV1, final, recorded error, state storeState) bool {
+	return startup && returned && completion == StartupCanonicalActiveAndReplayCompleteV1 && final == nil && recorded == nil && state == storeOPEN
 }
 
 func (r *Reader) Get(dbi DBI, key []byte) ([]byte, bool, error) {
@@ -2744,6 +2809,61 @@ func (r *Reader) PrefixPage(dbi DBI, prefix, afterExclusive []byte, maxRows uint
 		r.active.Store(false)
 	}
 	return page, err
+}
+
+// StartupCanonicalNextV1 copies exactly one current canonical or inverse row.
+// It performs no successor read; inputs are borrowed for this call only.
+func (r *Reader) StartupCanonicalNextV1(dbi DBI, generation uint64, afterExclusive []byte) (PrefixRow, bool, error) {
+	if !r.usable() {
+		return PrefixRow{}, false, prefixPageInputError("Reader is not active", nil)
+	}
+	var prefix [8]byte
+	binary.BigEndian.PutUint64(prefix[:], generation)
+	if err := validateStartupCanonicalRequest(dbi, prefix[:], afterExclusive); err != nil {
+		return PrefixRow{}, false, err
+	}
+	scan := newPrefixPageScan(dbi, prefix[:], afterExclusive, 0, 0)
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return PrefixRow{}, false, prefixPageInputError("Reader is not active", nil)
+	}
+	row, found, err := r.startupCanonicalRead(scan)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return row, found, err
+}
+
+func validateStartupCanonicalRequest(dbi DBI, prefix, afterExclusive []byte) error {
+	if err := ValidateDBI(dbi); err != nil {
+		return prefixPageInputError("invalid SchemaV2 DBI", err)
+	}
+	if dbi.Rank != 2 && dbi.Rank != 7 {
+		return prefixPageInputError("unsupported startup canonical DBI", nil)
+	}
+	if !validPrefixPagePrefix(dbi, prefix) {
+		return prefixPageInputError("invalid prefix-page prefix", nil)
+	}
+	if !validPrefixPageContinuation(dbi, prefix, afterExclusive) {
+		return prefixPageInputError("invalid prefix-page continuation", nil)
+	}
+	return nil
+}
+
+func (r *Reader) startupCanonicalRead(scan prefixPageScan) (PrefixRow, bool, error) {
+	seek := scan.seek[:scan.seekLength]
+	result := C.rubin_mdbx_get_equal_or_great(r.txn, r.dbis[scan.dbi.Rank], unsafe.Pointer(&seek[0]), C.size_t(len(seek)))
+	runtime.KeepAlive(scan)
+	row, exhausted, err := prefixPageNativeResult(scan.dbi, scan.prefix, seek, int(result.rc), unsafe.Pointer(result.key_bytes), result.key_len, unsafe.Pointer(result.value_bytes), result.value_len)
+	if err != nil {
+		return PrefixRow{}, false, err
+	}
+	if exhausted || row.outside {
+		return PrefixRow{}, false, nil
+	}
+	return copyPrefixPageRow(row), true, nil
 }
 
 func prefixPageShapeError() *EngineError {

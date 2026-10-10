@@ -24,6 +24,28 @@ type reservationRow struct {
 	run   func(t *testing.T, label string)
 }
 
+func TestOperationReservationCapacityIdentity(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		err error
+		want bool
+	}{
+		{"direct", errOperationReservationCapacity, true},
+		{"nil", nil, false},
+		{"input", errOperationReservationInput, false},
+		{"limit", errOperationReservationLimit, false},
+		{"wrapped", fmt.Errorf("wrapped: %w", errOperationReservationCapacity), false},
+		{"joined", errors.Join(errOperationReservationCapacity), false},
+		{"same text", errors.New("storage operation reservation capacity unavailable"), false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := IsOperationReservationCapacity(row.err); got != row.want {
+				t.Fatalf("capacity identity=%v, want %v", got, row.want)
+			}
+		})
+	}
+}
+
 func reservationRows(t *testing.T, rows []reservationRow) {
 	t.Helper()
 	for _, row := range rows {
