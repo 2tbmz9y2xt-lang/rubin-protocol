@@ -2610,6 +2610,12 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
 			"callback": 1, "startupCompletionResult": 1,
 		},
+		"StartupCanonicalNextV1": {
+			"r.usable": 2, "prefixPageInputError": 2, "binary.BigEndian.PutUint64": 1,
+			"validateStartupCanonicalRequest": 1, "newPrefixPageScan": 1,
+			"r.getMu.Lock": 1, "r.getMu.Unlock": 1, "r.startupCanonicalRead": 1,
+			"r.active.Store": 1,
+		},
 		"startupCanonicalRead": {
 			"C.rubin_mdbx_get_equal_or_great": 1, "unsafe.Pointer": 3,
 			"C.size_t": 1, "len": 1, "runtime.KeepAlive": 1,
