@@ -32,8 +32,10 @@ type ReplayStartupOutcomeV1 struct {
 	Err            error
 }
 
-var errInvalidStartupNetworkContext = errors.New("invalid startup network context")
-var startupJoinType = reflect.TypeOf(errors.Join(errInvalidStartupNetworkContext))
+var (
+	errInvalidStartupNetworkContext = errors.New("invalid startup network context")
+	startupJoinType                 = reflect.TypeOf(errors.Join(errInvalidStartupNetworkContext))
+)
 
 type replayStartupCheck struct {
 	chainID, genesisHash       [32]byte
@@ -200,7 +202,6 @@ func (c *replayStartupCheck) index(r *mdbx.Reader, generation uint64, replay *md
 		}
 		after = row.Key
 	}
-	after = nil
 	if err := c.inverse(r, generation, resource); err != nil {
 		return startupIndexTipV1{}, err
 	}
@@ -343,7 +344,11 @@ func (c *replayStartupCheck) cursor(tip *startupIndexTipV1, replay *mdbx.ReplayV
 	if !tip.Present || tip.Height != replay.Cursor.Height || tip.Hash != replay.Cursor.BlockHash {
 		return c.positive("startup replay cursor mismatch")
 	}
-	if tip.Height == replay.Target.TipHeight && (tip.Hash != replay.Target.TipHash || tip.Work != replay.Target.CumulativeChainwork) {
+	return c.targetTip(tip, &replay.Target)
+}
+
+func (c *replayStartupCheck) targetTip(tip *startupIndexTipV1, target *mdbx.RecoveryTargetV1) error {
+	if tip.Height == target.TipHeight && (tip.Hash != target.TipHash || tip.Work != target.CumulativeChainwork) {
 		return c.positive("startup replay target tip mismatch")
 	}
 	return nil
@@ -394,11 +399,15 @@ func (c *replayStartupCheck) projectResult(raw error) string {
 func (c *replayStartupCheck) projectLeaf(part error) (string, []error) {
 	// Identity and direct dynamic type are this producer's closed provenance
 	// boundary; generic errors.Is/As traversal would admit foreign applications.
-	if c.observedErr != nil && any(part) == any(c.observedErr) {
+	if any(part) == any(c.observedErr) {
 		return c.observedResult, nil
 	}
 	if reflect.TypeOf(part) == startupJoinType {
-		return "", part.(interface{ Unwrap() []error }).Unwrap()
+		join, ok := any(part).(interface{ Unwrap() []error })
+		if !ok {
+			return "TERMINAL_LOCAL_INVARIANT(evidence)", nil
+		}
+		return "", join.Unwrap()
 	}
 	e, ok := any(part).(*mdbx.EngineError)
 	if !ok {
@@ -420,9 +429,11 @@ func startupNilError(err error) bool {
 		return true
 	}
 	v := reflect.ValueOf(err)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+	kind := v.Kind()
+	switch {
+	case kind == reflect.Chan, kind == reflect.Func, kind == reflect.Interface, kind == reflect.Map, kind == reflect.Pointer, kind == reflect.Slice:
 		return v.IsNil()
+	default:
+		return false
 	}
-	return false
 }

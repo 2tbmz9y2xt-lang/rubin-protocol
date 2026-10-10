@@ -30,7 +30,9 @@ func startupWorld(t *testing.T, active, cursor int) *replayWorld {
 		var rows []mdbx.Mutation
 		for h := from; h <= min(from+999, cursor); h++ {
 			var parent [32]byte
-			if h > 0 { parent = w.hashes[h-1] }
+			if h > 0 {
+				parent = w.hashes[h-1]
+			}
 			if h > active {
 				rows = append(rows, mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: bytes.Clone(w.hashes[h][:]), AfterKind: mdbx.AfterLiteral, Literal: bytes.Clone(w.headers[h][:])})
 			}
@@ -41,7 +43,9 @@ func startupWorld(t *testing.T, active, cursor int) *replayWorld {
 		w.apply(rows...)
 	}
 	if cursor >= 0 {
-		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: uint64(cursor), BlockHash: w.hashes[cursor]} })
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+			a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: uint64(cursor), BlockHash: w.hashes[cursor]}
+		})
 	}
 	return w
 }
@@ -64,7 +68,7 @@ func startupFreshGuard(t testing.TB, w *replayWorld, verified bool) {
 		if verified {
 			logicalMDBXAssert(t, guard == nil, "fresh verified guard: %v", guard)
 		} else {
-			e, ok := guard.(*mdbx.EngineError)
+			e, ok := any(guard).(*mdbx.EngineError)
 			logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "get" && e.Code == 22 && e.Diagnostic == "canonical owner index is not verified" && e.Cause == nil && !e.ReopenRequired, "fresh false guard: %v", guard)
 		}
 		return nil
@@ -88,9 +92,20 @@ func startupPreserved(t *testing.T, w *replayWorld, wantDecision uint8, wantResu
 }
 
 func TestReplayStartupMDBXV1(t *testing.T) {
-	for _, row := range []struct { active, cursor int; profile mdbx.StorageProfileV1 }{
-		{-1, -1, 1}, {-1, -1, 2}, {0, -1, 1}, {0, -1, 2}, {3, 0, 1}, {3, 2, 2},
-		{0, 0, 1}, {0, 1438, 1}, {0, 1439, 1}, {0, 1440, 2},
+	for _, row := range []struct {
+		active, cursor int
+		profile        mdbx.StorageProfileV1
+	}{
+		{-1, -1, 1},
+		{-1, -1, 2},
+		{0, -1, 1},
+		{0, -1, 2},
+		{3, 0, 1},
+		{3, 2, 2},
+		{0, 0, 1},
+		{0, 1438, 1},
+		{0, 1439, 1},
+		{0, 1440, 2},
 	} {
 		t.Run(fmt.Sprintf("A01-A04 active%d cursor%d profile%d", row.active, row.cursor, row.profile), func(t *testing.T) {
 			w := startupWorld(t, row.active, row.cursor)
@@ -113,7 +128,7 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 			}
 			out := startupRun(w)
 			startupTuple(t, out, false, 0, "")
-			e := out.Err.(*mdbx.EngineError)
+			e := any(out.Err).(*mdbx.EngineError)
 			logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified", "already true refusal: %v", e)
 			startupFreshGuard(t, w, true)
 			w.store = w.reopen()
@@ -141,20 +156,33 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		logicalMDBXAssert(t, out.Err.Error() == "startup active bounds mismatch", "B-only boundary owner: %v", out.Err)
 	})
 	t.Run("A05 bounds literals", func(t *testing.T) {
-		for _, row := range []struct { present bool; h, b, u uint64 }{
-			{false, 0, 0, 0}, {true, 0, 0, 0}, {true, 1439, 0, 0}, {true, 1440, 0, 1},
-			{true, 15119, 0, 13680}, {true, 15120, 1, 13681}, {true, 0xffffffff, 4294952176, 4294965856},
+		for _, row := range []struct {
+			present bool
+			h, b, u uint64
+		}{
+			{false, 0, 0, 0},
+			{true, 0, 0, 0},
+			{true, 1439, 0, 0},
+			{true, 1440, 0, 1},
+			{true, 15119, 0, 13680},
+			{true, 15120, 1, 13681},
+			{true, 0xffffffff, 4294952176, 4294965856},
 		} {
 			for _, profile := range []mdbx.StorageProfileV1{1, 2} {
 				b, u := startupBounds(&startupIndexTipV1{Present: row.present, Height: row.h}, profile)
 				wantB := row.b
-				if profile == 2 { wantB = 0 }
+				if profile == 2 {
+					wantB = 0
+				}
 				logicalMDBXAssert(t, b == wantB && u == row.u, "bounds present%v/h%d/profile%d=%d/%d, want%d/%d", row.present, row.h, profile, b, u, wantB, row.u)
 			}
 		}
 	})
 	t.Run("A05 independent work bytes", func(t *testing.T) {
-		for _, row := range []struct { target [32]byte; expected [40]byte }{
+		for _, row := range []struct {
+			target   [32]byte
+			expected [40]byte
+		}{
 			{[32]byte{31: 1}, [40]byte{7: 1}},
 			{[32]byte{31: 2}, [40]byte{8: 0x80}},
 			{[32]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, [40]byte{39: 1}},
@@ -168,7 +196,9 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		for _, code := range strings.Fields(`TX_ERR_PARSE TX_ERR_VALUE_CONSERVATION TX_ERR_TX_NONCE_INVALID TX_ERR_SEQUENCE_INVALID TX_ERR_NONCE_REPLAY TX_ERR_SIG_INVALID TX_ERR_SIG_ALG_INVALID TX_ERR_SIGHASH_TYPE_INVALID TX_ERR_SIG_NONCANONICAL TX_ERR_TIMELOCK_NOT_MET TX_ERR_WITNESS_OVERFLOW TX_ERR_COVENANT_TYPE_INVALID TX_ERR_VAULT_MALFORMED TX_ERR_VAULT_PARAMS_INVALID TX_ERR_VAULT_KEYS_NOT_CANONICAL TX_ERR_VAULT_WHITELIST_NOT_CANONICAL TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN TX_ERR_VAULT_OWNER_AUTH_REQUIRED TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE TX_ERR_SIMPLICITY_CMR_MISMATCH TX_ERR_SIMPLICITY_DECODE TX_ERR_SIMPLICITY_JET_DISALLOWED TX_ERR_SIMPLICITY_BUDGET_EXCEEDED TX_ERR_SIMPLICITY_REJECTED TX_ERR_MISSING_UTXO TX_ERR_COINBASE_IMMATURE BLOCK_ERR_LINKAGE_INVALID BLOCK_ERR_MERKLE_INVALID BLOCK_ERR_WITNESS_COMMITMENT BLOCK_ERR_POW_INVALID BLOCK_ERR_TARGET_INVALID BLOCK_ERR_TIMESTAMP_OLD BLOCK_ERR_TIMESTAMP_FUTURE BLOCK_ERR_COINBASE_INVALID BLOCK_ERR_SUBSIDY_EXCEEDED BLOCK_ERR_STATE_CAP_EXCEEDED BLOCK_ERR_WEIGHT_EXCEEDED BLOCK_ERR_ANCHOR_BYTES_EXCEEDED BLOCK_ERR_DA_INCOMPLETE BLOCK_ERR_DA_CHUNK_HASH_INVALID BLOCK_ERR_DA_SET_INVALID BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID BLOCK_ERR_DA_BATCH_EXCEEDED BLOCK_ERR_PARSE`) {
 			t.Run(code, func(t *testing.T) {
 				w := startupWorld(t, 0, 0)
-				w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte("CONSENSUS_INVALID("+code+")")} })
+				w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+					a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte("CONSENSUS_INVALID(" + code + ")")}
+				})
 				startupPreserved(t, w, 1, "")
 			})
 		}
@@ -176,7 +206,9 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 	for _, token := range []string{"CONSENSUS_INVALID(TX_ERR_PARSE)x", "CONSENSUS_INVALID(TX_ERR_SIG_HASH_INVALID)", "TX_ERR_PARSE", "CONSENSUS_INVALID(", "consensus_invalid(TX_ERR_PARSE)", " CONSENSUS_INVALID(TX_ERR_PARSE)", "CONSENSUS_INVALID(TX_ERR_PARSE)\n", "CONSENSUS_INVALID(TX_ERR_PARSE)\x00", "x", strings.Repeat("x", 512)} {
 		t.Run("R02 token "+token, func(t *testing.T) {
 			w := startupWorld(t, 0, 0)
-			w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte(token)} })
+			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+				a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, FirstInvalidBlockHash: [32]byte{0x91}, ExactConsensusError: []byte(token)}
+			})
 			for _, g := range []uint64{1, 2} {
 				w.apply(
 					mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(g, 0)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(w.hashes[0], [32]byte{}, sideWorldWork(2))},
@@ -187,33 +219,41 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		})
 	}
 	t.Run("A07 legal other phases", func(t *testing.T) {
-		for _, row := range []struct { phase, lifecycle uint8 }{{1, 1}, {1, 2}, {2, 1}, {2, 2}, {4, 2}} {
+		for _, row := range []struct{ phase, lifecycle uint8 }{{1, 1}, {1, 2}, {2, 1}, {2, 2}, {4, 2}} {
 			for _, badToken := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%v invalid-token%v", row, badToken), func(t *testing.T) {
-				w := newReplayWorld(t, 0)
-				w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-					a.Phase, a.Lifecycle = mdbx.StoragePhaseV1(row.phase), mdbx.StorageLifecycleV1(row.lifecycle)
-					if row.lifecycle == 2 && row.phase != 4 { p := mdbx.StorageProfilePrunedV1; a.PendingTargetProfile = &p }
-					if row.phase == 2 { a.NextGenerationID = 3; a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}} }
-					if row.phase == 4 {
-						a.NextGenerationID = 3
-						a.Ordinary = &mdbx.OrdinaryApplyV1{
-							Stage: 2, Target: mdbx.AuthorityPointV1{Height: 2, BlockHash: [32]byte{2}},
-							NewSuffix: []mdbx.AuthorityPointV1{{Height: 1, BlockHash: [32]byte{1}}, {Height: 2, BlockHash: [32]byte{2}}},
-							CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 2, TipHash: [32]byte{2}, CumulativeChainwork: sideWorldWork(3), RowCount: 2, LogicalBytes: 240},
+				t.Run(fmt.Sprintf("%v invalid-token%v", row, badToken), func(t *testing.T) {
+					w := newReplayWorld(t, 0)
+					w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+						a.Phase, a.Lifecycle = mdbx.StoragePhaseV1(row.phase), mdbx.StorageLifecycleV1(row.lifecycle)
+						if row.lifecycle == 2 && row.phase != 4 {
+							p := mdbx.StorageProfilePrunedV1
+							a.PendingTargetProfile = &p
 						}
+						if row.phase == 2 {
+							a.NextGenerationID = 3
+							a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 2}}}
+						}
+						if row.phase == 4 {
+							a.NextGenerationID = 3
+							a.Ordinary = &mdbx.OrdinaryApplyV1{
+								Stage: 2, Target: mdbx.AuthorityPointV1{Height: 2, BlockHash: [32]byte{2}},
+								NewSuffix:            []mdbx.AuthorityPointV1{{Height: 1, BlockHash: [32]byte{1}}, {Height: 2, BlockHash: [32]byte{2}}},
+								CapturedSelectedSide: &mdbx.SelectedSideV1{GenerationID: 2, F: 0, TipHeight: 2, TipHash: [32]byte{2}, CumulativeChainwork: sideWorldWork(3), RowCount: 2, LogicalBytes: 240},
+							}
+						}
+						if badToken {
+							a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("CONSENSUS_INVALID(TX_ERR_PARSE)x")}
+						}
+					})
+					if badToken {
+						out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
+						logicalMDBXAssert(t, out.Err.Error() == "invalid startup exclusion token", "token did not precede legal phase refusal: %v", out.Err)
+						return
 					}
-					if badToken { a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 1, ExactConsensusError: []byte("CONSENSUS_INVALID(TX_ERR_PARSE)x")} }
+					out := startupPreserved(t, w, 0, "")
+					e := any(out.Err).(*mdbx.EngineError)
+					logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "persisted authority is not REPLAY" && e.Cause == nil, "other phase refusal: %v", e)
 				})
-				if badToken {
-					out := startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-					logicalMDBXAssert(t, out.Err.Error() == "invalid startup exclusion token", "token did not precede legal phase refusal: %v", out.Err)
-					return
-				}
-				out := startupPreserved(t, w, 0, "")
-				e := out.Err.(*mdbx.EngineError)
-				logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "persisted authority is not REPLAY" && e.Cause == nil, "other phase refusal: %v", e)
-			})
 			}
 		}
 	})
@@ -221,7 +261,15 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		t.Run("R02-R09 "+part, func(t *testing.T) {
 			w := startupWorld(t, 0, 0)
 			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
-				switch part { case "chainID": a.Replay.Target.ChainID[0] ^= 1; case "genesisHash": a.Replay.Target.GenesisHash[0] ^= 1; a.Replay.Cursor.BlockHash = a.Replay.Target.GenesisHash; case "U": a.ActiveProfile, a.U = 2, 1 }
+				switch part {
+				case "chainID":
+					a.Replay.Target.ChainID[0] ^= 1
+				case "genesisHash":
+					a.Replay.Target.GenesisHash[0] ^= 1
+					a.Replay.Cursor.BlockHash = a.Replay.Target.GenesisHash
+				case "U":
+					a.ActiveProfile, a.U = 2, 1
+				}
 			})
 			startupPreserved(t, w, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
 		})
@@ -233,7 +281,9 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 			before := w.image()
 			err := w.owner.WithReservation(154611151-free, func() error {
 				out := startupRun(w)
-				if free == 4096 { startupTuple(t, out, true, 1, "") } else {
+				if free == 4096 {
+					startupTuple(t, out, true, 1, "")
+				} else {
 					startupTuple(t, out, false, 2, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)")
 					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(out.Err), "direct capacity identity: %v", out.Err)
 					startupFreshGuard(t, w, false)
@@ -252,17 +302,17 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		for _, context := range [][2][32]byte{{{}, w.genesis.GenesisHash}, {w.genesis.ChainID, {}}} {
 			out := VerifyPersistedReplayStartupMDBX(nil, nil, context[0], context[1])
 			startupTuple(t, out, false, 0, "")
-			logicalMDBXAssert(t, out.Err == errInvalidStartupNetworkContext && out.Err.Error() == "invalid startup network context", "context precedence")
+			logicalMDBXAssert(t, any(out.Err) == any(errInvalidStartupNetworkContext) && out.Err.Error() == "invalid startup network context", "context precedence")
 			before := w.image()
 			out = VerifyPersistedReplayStartupMDBX(w.store, w.owner, context[0], context[1])
 			startupTuple(t, out, false, 0, "")
-			logicalMDBXAssert(t, out.Err == errInvalidStartupNetworkContext, "valid Store changed context precedence")
+			logicalMDBXAssert(t, any(out.Err) == any(errInvalidStartupNetworkContext), "valid Store changed context precedence")
 			replaySameImage(t, before, w.image(), "invalid context image")
 		}
 		for _, owner := range []*mdbx.OperationReservationOwner{nil, {}} {
 			out := VerifyPersistedReplayStartupMDBX(nil, owner, w.genesis.ChainID, w.genesis.GenesisHash)
 			startupTuple(t, out, false, 0, "")
-			e := out.Err.(*mdbx.EngineError)
+			e := any(out.Err).(*mdbx.EngineError)
 			logicalMDBXAssert(t, e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "nil Store", "nil Store precedence")
 		}
 	})
@@ -363,33 +413,49 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 		// Move a complete legal row, not just its key: bypassing the height
 		// decision leaves header/hash/parent/work/inverse/cursor all coherent.
 		from, destination := 0, uint64(1)
-		if defect == "gap" { from, destination = 1, 2 }
+		if defect == "gap" {
+			from, destination = 1, 2
+		}
 		var parent [32]byte
-		if from > 0 { parent = w.hashes[from-1] }
+		if from > 0 {
+			parent = w.hashes[from-1]
+		}
 		var rows []mdbx.Mutation
 		for h := from; h <= 2; h++ {
 			f := mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(generation, uint64(h))), BeforePresent: true, AfterKind: mdbx.AfterAbsent}
 			i := mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[h])), BeforePresent: true, AfterKind: mdbx.AfterAbsent}
-			if uint64(h) == destination { f.AfterKind, f.Literal = mdbx.AfterLiteral, mdbx.ChainValue(w.hashes[from], parent, sideWorldWork(uint64(from)+1)) }
-			if h == from { i.AfterKind, i.Literal = mdbx.AfterLiteral, mdbx.CanonicalOwnerValue(destination) }
+			if uint64(h) == destination {
+				f.AfterKind, f.Literal = mdbx.AfterLiteral, mdbx.ChainValue(w.hashes[from], parent, sideWorldWork(uint64(from)+1))
+			}
+			if h == from {
+				i.AfterKind, i.Literal = mdbx.AfterLiteral, mdbx.CanonicalOwnerValue(destination)
+			}
 			rows = append(rows, f, i)
 		}
 		w.apply(rows...)
 		if generation == 2 {
-			w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: destination, BlockHash: w.hashes[from]} })
+			w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+				a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: destination, BlockHash: w.hashes[from]}
+			})
 		}
 		return
 	}
 	height := uint64(0)
-	if defect == "gap" || defect == "row parent" || defect == "later parent" || defect == "zero target" || strings.HasSuffix(defect, "later") || defect == "inverse height" { height = 1 }
+	if defect == "gap" || defect == "row parent" || defect == "later parent" || defect == "zero target" || strings.HasSuffix(defect, "later") || defect == "inverse height" {
+		height = 1
+	}
 	hash := w.hashes[height]
 	var parent [32]byte
-	if height > 0 { parent = w.hashes[height-1] }
+	if height > 0 {
+		parent = w.hashes[height-1]
+	}
 	f := mdbx.Mutation{DBI: logicalMDBXDBIs[2], Key: logicalMDBXMust(mdbx.HeightKey(generation, height)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.ChainValue(hash, parent, sideWorldWork(height+1))}
 	i := mdbx.Mutation{DBI: logicalMDBXDBIs[7], Key: logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, hash)), BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: mdbx.CanonicalOwnerValue(height)}
 	switch defect {
 	case "cursor short":
-		if defect == "cursor short" { f.Key, i.Key = logicalMDBXMust(mdbx.HeightKey(generation, 2)), logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[2])) }
+		if defect == "cursor short" {
+			f.Key, i.Key = logicalMDBXMust(mdbx.HeightKey(generation, 2)), logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[2]))
+		}
 		f.AfterKind, i.AfterKind, f.Literal, i.Literal = mdbx.AfterAbsent, mdbx.AfterAbsent, nil, nil
 	case "height too large":
 		f.BeforePresent, i.BeforePresent = false, false
@@ -413,12 +479,18 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 		f.Literal[32] ^= 1
 	case "later parent", "zero target":
 		header := bytes.Clone(w.headers[height][:])
-		if defect == "later parent" { header[4] ^= 1 } else { clear(header[76:108]) }
+		if defect == "later parent" {
+			header[4] ^= 1
+		} else {
+			clear(header[76:108])
+		}
 		newHash, _ := BlockHash(header)
 		w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: newHash[:], AfterKind: mdbx.AfterLiteral, Literal: header})
 		w.hashes, w.headers = append(w.hashes, newHash), append(w.headers, [116]byte(header))
 		copy(f.Literal[:32], newHash[:])
-		if defect == "later parent" { copy(f.Literal[32:64], header[4:36]) }
+		if defect == "later parent" {
+			copy(f.Literal[32:64], header[4:36])
+		}
 		i.Key, i.BeforePresent = logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, newHash)), false
 	case "work genesis", "work later":
 		f.Literal[103]++
@@ -433,10 +505,14 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor.BlockHash[0] ^= 1 })
 		return
 	case "cursor work":
-		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHeight, a.Replay.Target.TipHash, a.Replay.Target.CumulativeChainwork = 2, w.hashes[2], sideWorldWork(4) })
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+			a.Replay.Target.TipHeight, a.Replay.Target.TipHash, a.Replay.Target.CumulativeChainwork = 2, w.hashes[2], sideWorldWork(4)
+		})
 		return
 	case "beyond cursor":
-		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: 1, BlockHash: w.hashes[1]} })
+		w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+			a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 2, Height: 1, BlockHash: w.hashes[1]}
+		})
 		return
 	case "PRE_GENESIS forward":
 		w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Cursor = mdbx.ReplayCursorV1{Kind: 1} })
@@ -449,16 +525,26 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 	w.apply(append(rows, f, i)...)
 }
 
-type startupCustomJoin struct { calls int; children []error }
-func (*startupCustomJoin) Error() string { return "custom application" }
+type startupCustomJoin struct {
+	calls    int
+	children []error
+}
+
+func (*startupCustomJoin) Error() string     { return "custom application" }
 func (e *startupCustomJoin) Unwrap() []error { e.calls++; return e.children }
 
 func startupProjectionCases(t *testing.T) {
 	t.Run("H10 exact native projection", func(t *testing.T) {
 		for _, resource := range []string{"LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"} {
-			for _, abort := range []struct { class mdbx.EngineClass; code int; terminal string }{
-				{"IO", 5, resource}, {"LocalInvariant", -30782, "TERMINAL_LOCAL_INVARIANT(evidence)"},
-				{"LocalInvariant", -30779, "TERMINAL_LOCAL_INVARIANT(evidence)"}, {"Integrity", -30796, "TERMINAL_STORE_INTEGRITY(canonical)"},
+			for _, abort := range []struct {
+				class    mdbx.EngineClass
+				code     int
+				terminal string
+			}{
+				{"IO", 5, resource},
+				{"LocalInvariant", -30782, "TERMINAL_LOCAL_INVARIANT(evidence)"},
+				{"LocalInvariant", -30779, "TERMINAL_LOCAL_INVARIANT(evidence)"},
+				{"Integrity", -30796, "TERMINAL_STORE_INTEGRITY(canonical)"},
 			} {
 				read := &mdbx.EngineError{Class: "IO", Operation: "get", Code: 5, Diagnostic: "read", ReopenRequired: true}
 				a := &mdbx.EngineError{Class: abort.class, Operation: "abort", Code: abort.code, Diagnostic: "abort", ReopenRequired: true}
@@ -467,13 +553,19 @@ func startupProjectionCases(t *testing.T) {
 				for _, raw := range []error{join, busy} {
 					c := replayStartupCheck{observedErr: read, observedResult: resource, readResource: resource}
 					want := abort.terminal
-					if raw == busy && abort.class == "IO" { want = "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)" }
+					if any(raw) == any(busy) && abort.class == "IO" {
+						want = "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)"
+					}
 					out := startupOutcome(raw, c.projectResult(raw))
 					decision := uint8(0)
-					if want == "TERMINAL_STORE_INTEGRITY(canonical)" { decision = 3 } else if strings.HasPrefix(want, "LOCAL_RESOURCE") { decision = 2 }
+					if want == "TERMINAL_STORE_INTEGRITY(canonical)" {
+						decision = 3
+					} else if strings.HasPrefix(want, "LOCAL_RESOURCE") {
+						decision = 2
+					}
 					startupTuple(t, out, false, decision, want)
 					children := join.(interface{ Unwrap() []error }).Unwrap()
-					logicalMDBXAssert(t, out.Err == raw && busy.Cause == join && busy.Class == "Concurrency" && busy.Operation == "close" && busy.Code == -30778 && len(children) == 2 && children[0] == read && children[1] == a, "raw tree identity/order changed")
+					logicalMDBXAssert(t, any(out.Err) == any(raw) && any(busy.Cause) == any(join) && busy.Class == "Concurrency" && busy.Operation == "close" && busy.Code == -30778 && len(children) == 2 && any(children[0]) == any(read) && any(children[1]) == any(a), "raw tree identity/order changed")
 					c.completedCanonicalPositive = true
 					logicalMDBXAssert(t, c.projectResult(raw) == "TERMINAL_STORE_INTEGRITY(canonical)", "completed positive lost after cleanup")
 				}
@@ -482,18 +574,22 @@ func startupProjectionCases(t *testing.T) {
 		read := &mdbx.EngineError{Class: "IO", Operation: "get", Code: 5}
 		for _, class := range []mdbx.EngineClass{"IO", "Concurrency", "Transaction"} {
 			for _, operation := range []string{"get", "prefix-page"} {
-			for _, resource := range []string{"LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"} {
-				bound := &mdbx.EngineError{Class: class, Operation: operation, Code: 5}
-				lookalike := &mdbx.EngineError{Class: class, Operation: operation, Code: 5}
-				c := replayStartupCheck{readResource: resource}
-				logicalMDBXAssert(t, c.observed(bound) == bound && c.observedErr == bound && c.observedResult == resource && c.projectResult(bound) == resource, "exact reached object lost binding")
-				want := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
-				if class == "Concurrency" { want = "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)" }
-				if class == "Transaction" { want = "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)" }
-				logicalMDBXAssert(t, bound != lookalike && c.projectResult(lookalike) == want, "lookalike inherited current read suffix")
-				fresh := replayStartupCheck{}
-				logicalMDBXAssert(t, fresh.projectResult(bound) == want, "prior invocation binding leaked")
-			}
+				for _, resource := range []string{"LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"} {
+					bound := &mdbx.EngineError{Class: class, Operation: operation, Code: 5}
+					lookalike := &mdbx.EngineError{Class: class, Operation: operation, Code: 5}
+					c := replayStartupCheck{readResource: resource}
+					logicalMDBXAssert(t, any(c.observed(bound)) == any(bound) && any(c.observedErr) == any(bound) && c.observedResult == resource && c.projectResult(bound) == resource, "exact reached object lost binding")
+					want := "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"
+					if class == "Concurrency" {
+						want = "LOCAL_RESOURCE_UNAVAILABLE(storage_concurrency)"
+					}
+					if class == "Transaction" {
+						want = "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)"
+					}
+					logicalMDBXAssert(t, bound != lookalike && c.projectResult(lookalike) == want, "lookalike inherited current read suffix")
+					fresh := replayStartupCheck{}
+					logicalMDBXAssert(t, fresh.projectResult(bound) == want, "prior invocation binding leaked")
+				}
 			}
 		}
 		foreign := &startupCustomJoin{children: []error{read, &mdbx.EngineError{Class: "Integrity"}}}
@@ -516,12 +612,12 @@ func startupProjectionCases(t *testing.T) {
 			&mdbx.EngineError{Class: "Integrity", Operation: "prefix-page", Code: -30796},
 		}
 		c = replayStartupCheck{readResource: "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"}
-		logicalMDBXAssert(t, c.observed(read) == read, "four-child reached read binding")
+		logicalMDBXAssert(t, any(c.observed(read)) == any(read), "four-child reached read binding")
 		joined := errors.Join(four...)
 		out := startupOutcome(joined, c.projectResult(joined))
 		startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
 		children := joined.(interface{ Unwrap() []error }).Unwrap()
-		logicalMDBXAssert(t, out.Err == joined && len(children) == 4 && children[0] == four[0] && children[1] == four[1] && children[2] == four[2] && children[3] == four[3], "accepted four-child identity/order changed")
+		logicalMDBXAssert(t, any(out.Err) == any(joined) && len(children) == 4 && any(children[0]) == any(four[0]) && any(children[1]) == any(four[1]) && any(children[2]) == any(four[2]) && any(children[3]) == any(four[3]), "accepted four-child identity/order changed")
 		logicalMDBXAssert(t, c.projectResult(errors.Join(append(four, &mdbx.EngineError{Class: "IO", Operation: "get", Code: 5})...)) == "TERMINAL_LOCAL_INVARIANT(evidence)", "native pending shape overflow accepted")
 	})
 }

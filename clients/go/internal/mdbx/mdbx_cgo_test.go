@@ -2629,7 +2629,9 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			}
 			return true
 		})
-		if !reflect.DeepEqual(observed, wanted) { t.Fatalf("startup helper closure ownership drifted: %s %v", name, observed) }
+		if !reflect.DeepEqual(observed, wanted) {
+			t.Fatalf("startup helper closure ownership drifted: %s %v", name, observed)
+		}
 	}
 	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("GetOptionalSide", "post-native optional-side failure was not recorded", "C.rubin_mdbx_get", "optionalSideResult", "r.failure = err", "r.active.Store(false)", "return result")
@@ -3355,13 +3357,13 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
 		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
-		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil)`: 1,
-		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil)`: 1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil startup canonical callback", nil)`:                     1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "canonical owner index is already verified", nil)`:          1,
 		`adapterError(operationView, EngineLocalInvariant, codeProblem, "startup canonical verification did not complete", err)`: 1,
-		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)`: 2,
-		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)`: 1,
-		`adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
-		`adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)`: 1, `adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)`: 1,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                          2,
+		`adapterError(operationView, EngineInvalidInput, codeEINVAL, "nil View callback", nil)`:                                  1,
+		`adapterError(operationView, EngineConcurrency, codeBusy, "store operation in progress", nil)`:                           1,
+		`adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store state", nil)`:                            1, `adapterError(operationClose, EngineLocalInvariant, codeProblem, "invalid Store resource shape", nil)`: 1,
 		`adapterError(operation, EngineInvalidInput, codeEINVAL, "path must be nonempty, NUL-free, absolute and clean", nil)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeEExist, "Create path already exists", nil)`: 1,
 		`ioError(operationCreate, "inspect Create path", err)`: 1, `ioError(operationCreate, "create environment directory", err)`: 1, `ioError(operationCreate, "read back environment directory", err)`: 2,
 		`integrityError(operationCreate, "environment directory is unsafe", nil)`: 2, `ioError(operationCreate, "normalize environment directory mode", err)`: 1,

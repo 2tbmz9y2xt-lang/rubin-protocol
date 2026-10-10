@@ -27,7 +27,7 @@ type reservationRow struct {
 func TestOperationReservationCapacityIdentity(t *testing.T) {
 	for _, row := range []struct {
 		name string
-		err error
+		err  error
 		want bool
 	}{
 		{"direct", errOperationReservationCapacity, true},

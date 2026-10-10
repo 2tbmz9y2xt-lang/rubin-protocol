@@ -465,7 +465,7 @@ func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run fu
 // optionally holding a real foreign-thread writer until that invocation exits.
 // It supplies no checker result, canonical bytes or permission assignment.
 func FixtureStartupCleanup(store *Store, mode uint32, busy bool, run func()) (state string, verified bool, err error) {
-	if store == nil || store.env == nil || run == nil || mode != 0 && mode != 9 && mode != 10 {
+	if store == nil || store.env == nil || run == nil || !validStartupCleanupMode(mode) {
 		return "", false, errors.New("invalid startup cleanup fixture")
 	}
 	if busy {
@@ -481,6 +481,15 @@ func FixtureStartupCleanup(store *Store, mode uint32, busy bool, run func()) (st
 		_, err = fixtureLargeFault(store, mode, 0, []byte{2}, run)
 	}
 	return string(store.state), store.canonicalOwnerVerified, err
+}
+
+func validStartupCleanupMode(mode uint32) bool {
+	switch mode {
+	case 0, 9, 10:
+		return true
+	default:
+		return false
+	}
 }
 
 // FixtureStartupRelease disposes a retained test handle only after its native
@@ -1010,9 +1019,9 @@ type SelectedDamageEvidence struct {
 	BeginOld, BeginWrite, BeginRead uint64
 	OldGets                         [8]uint64
 	OldPulls                        [8]uint64
-	ReadGets, Faults, Deletes        uint64
-	Commits, OldAborts               uint64
-	Probes, ProbeDenied, ProbeRan    uint64
+	ReadGets, Faults, Deletes       uint64
+	Commits, OldAborts              uint64
+	Probes, ProbeDenied, ProbeRan   uint64
 }
 
 type selectedDamageProbe struct {

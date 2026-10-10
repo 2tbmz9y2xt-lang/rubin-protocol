@@ -54,20 +54,37 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					})
 					mustEnvironment(t, armErr)
 				}
-				if abort == 0 { run() } else { _, armErr := fixtureLargeFault(s, abort, 0, []byte{0}, run); mustEnvironment(t, armErr) }
+				if abort == 0 {
+					run()
+				} else {
+					_, armErr := fixtureLargeFault(s, abort, 0, []byte{0}, run)
+					mustEnvironment(t, armErr)
+				}
 			})
 			mustEnvironment(t, err)
 			parts := raw.(interface{ Unwrap() []error }).Unwrap()
-			if len(parts) != 2 { t.Fatal("consumed close join shape") }
+			if len(parts) != 2 {
+				t.Fatal("consumed close join shape")
+			}
 			closeErr := requireEnvironmentError(t, parts[1], EngineIO, operationClose, 5, "error 5")
-			if closeErr.Cause != nil { t.Fatal("consumed close diagnostic gained PRIMARY cause") }
-			if abort == 0 && parts[0] != read { t.Fatal("consumed close lost original read") }
+			if closeErr.Cause != nil {
+				t.Fatal("consumed close diagnostic gained PRIMARY cause")
+			}
+			if abort == 0 && parts[0] != read {
+				t.Fatal("consumed close lost original read")
+			}
 			if abort == 9 {
 				primary := parts[0].(interface{ Unwrap() []error }).Unwrap()
-				if len(primary) != 2 || primary[0] != read { t.Fatal("read/abort/close order") }
+				if len(primary) != 2 || primary[0] != read {
+					t.Fatal("read/abort/close order")
+				}
 			}
-			if s.canonicalOwnerVerified || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.terminal != raw { t.Fatal("consumed close native resources") }
-			if s.View(func(*Reader) error { t.Fatal("consumed close callback"); return nil }) != raw { t.Fatal("consumed close cached identity") }
+			if s.canonicalOwnerVerified || s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil || s.terminal != raw {
+				t.Fatal("consumed close native resources")
+			}
+			if s.View(func(*Reader) error { t.Fatal("consumed close callback"); return nil }) != raw {
+				t.Fatal("consumed close cached identity")
+			}
 		})
 	}
 	for _, completion := range []StartupCanonicalCompletionV1{0, 2, 255} {
@@ -77,43 +94,71 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					s := startupOpened(t)
 					var reader *Reader
 					var app, read, raw error
-					if application == "different" { app = errors.New("distinct application") }
-					if application == "typed nil" { var typed *nilPointerError; app = typed }
+					if application == "different" {
+						app = errors.New("distinct application")
+					}
+					if application == "typed nil" {
+						var typed *nilPointerError
+						app = typed
+					}
 					run := func() {
 						_, err := FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, []byte{0}, func() {
 							raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 								reader = r
 								_, _, read = r.Get(readDBIsLiteral()[0], []byte{0})
-									if application == "same" { app = read }
-									return completion, app
-								})
+								if application == "same" {
+									app = read
+								}
+								return completion, app
 							})
+						})
 						mustEnvironment(t, err)
 					}
-					if mode == 0 { run() } else { _, err := fixtureLargeFault(s, mode, 0, []byte{0}, run); mustEnvironment(t, err) }
-					if reader == nil || read == nil || reader.failure != read || reader.usable() || s.canonicalOwnerVerified || s.terminal != raw { t.Fatal("completion/read failure ownership") }
+					if mode == 0 {
+						run()
+					} else {
+						_, err := fixtureLargeFault(s, mode, 0, []byte{0}, run)
+						mustEnvironment(t, err)
+					}
+					if reader == nil || read == nil || reader.failure != read || reader.usable() || s.canonicalOwnerVerified || s.terminal != raw {
+						t.Fatal("completion/read failure ownership")
+					}
 					primary := raw
 					if mode == 10 {
 						e := requireEnvironmentError(t, raw, EngineLocalInvariant, operationAbort, -30416, pinnedNegativeDiagnostics[-30416])
 						primary = e.Cause
 					} else if mode == 9 {
 						parts := raw.(interface{ Unwrap() []error }).Unwrap()
-						if len(parts) != 2 { t.Fatal("abort join shape") }
+						if len(parts) != 2 {
+							t.Fatal("abort join shape")
+						}
 						primary = parts[0]
 					}
 					if completion == 0 && application == "same" {
-						if primary != read { t.Fatal("exact same recorded leaf duplicated") }
+						if primary != read {
+							t.Fatal("exact same recorded leaf duplicated")
+						}
 					} else {
 						parts := primary.(interface{ Unwrap() []error }).Unwrap()
-						if len(parts) != 2 || parts[1] != read { t.Fatal("completion/read join order") }
+						if len(parts) != 2 || parts[1] != read {
+							t.Fatal("completion/read join order")
+						}
 						if completion > 1 || app == nil {
 							e := requireEnvironmentError(t, parts[0], EngineLocalInvariant, operationView, -30779, "startup canonical verification did not complete")
-							if e.Cause != app { t.Fatal("completion original callback Cause") }
-						} else if parts[0] != app { t.Fatal("callback leaf identity") }
+							if e.Cause != app {
+								t.Fatal("completion original callback Cause")
+							}
+						} else if parts[0] != app {
+							t.Fatal("callback leaf identity")
+						}
 					}
 					want := storeCLOSED
-					if mode == 10 { want = storePOISONEDTHREAD }
-					if s.state != want || s.View(func(*Reader) error { t.Fatal("completion terminal callback"); return nil }) != raw { t.Fatal("completion terminal cache/state") }
+					if mode == 10 {
+						want = storePOISONEDTHREAD
+					}
+					if s.state != want || s.View(func(*Reader) error { t.Fatal("completion terminal callback"); return nil }) != raw {
+						t.Fatal("completion terminal cache/state")
+					}
 					mustEnvironment(t, fixtureLargeRelease(s))
 				})
 			}
@@ -131,18 +176,29 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					key := []byte{0}
 					var reader *Reader
 					var readErr, appErr, raw error
-					if application == "different" { appErr = errors.New("application") }
-					if application == "typed nil" { var typed *nilPointerError; appErr = typed }
+					if application == "different" {
+						appErr = errors.New("application")
+					}
+					if application == "typed nil" {
+						var typed *nilPointerError
+						appErr = typed
+					}
 					liMode := mode
 					run := func() {
 						raw = s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 							reader = r
 							if recorded {
 								_, _, readErr = r.Get(readDBIsLiteral()[0], key)
-								if readErr == nil && mode == 24 { _, _, readErr = r.Get(readDBIsLiteral()[0], key) }
-								if readErr == nil { t.Fatal("recorded witness did not reach native failure") }
+								if readErr == nil && mode == 24 {
+									_, _, readErr = r.Get(readDBIsLiteral()[0], key)
+								}
+								if readErr == nil {
+									t.Fatal("recorded witness did not reach native failure")
+								}
 							}
-							if application == "same" { appErr = readErr }
+							if application == "same" {
+								appErr = readErr
+							}
 							return 1, appErr
 						})
 					}
@@ -151,29 +207,54 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 							_, err := FixtureSelectedDamage(s, bootstrapOwner(t), SelectedDamageGetEIO, 0, key, run)
 							mustEnvironment(t, err)
 						}
-						if mode == 0 { armedRead() } else { _, fixtureErr := fixtureLargeFault(s, liMode, 0, key, armedRead); mustEnvironment(t, fixtureErr) }
+						if mode == 0 {
+							armedRead()
+						} else {
+							_, fixtureErr := fixtureLargeFault(s, liMode, 0, key, armedRead)
+							mustEnvironment(t, fixtureErr)
+						}
 					} else if mode != 0 {
 						_, err := fixtureLargeFault(s, liMode, 0, key, run)
 						mustEnvironment(t, err)
-					} else { run() }
-					if reader.usable() || s.canonicalOwnerVerified && (recorded || appErr != nil || mode != 0) { t.Fatal("failed startup published permission or retained Reader") }
+					} else {
+						run()
+					}
+					if reader.usable() || s.canonicalOwnerVerified && (recorded || appErr != nil || mode != 0) {
+						t.Fatal("failed startup published permission or retained Reader")
+					}
 					if mode == 10 {
-						if s.state != storePOISONEDTHREAD || s.txn != reader.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis { t.Fatal("retained abort native ownership") }
+						if s.state != storePOISONEDTHREAD || s.txn != reader.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis {
+							t.Fatal("retained abort native ownership")
+						}
 						e := requireEnvironmentError(t, raw, EngineLocalInvariant, operationAbort, -30416, pinnedNegativeDiagnostics[-30416])
-						if recorded && e.Cause == nil || !recorded && appErr != nil && e.Cause != appErr { t.Fatal("retained abort primary identity") }
+						if recorded && e.Cause == nil || !recorded && appErr != nil && e.Cause != appErr {
+							t.Fatal("retained abort primary identity")
+						}
 					} else if mode == 24 {
-						if s.state != storeCLOSEBLOCKED || s.env != env || s.writer != writer || s.config != cfg || s.dbis != dbis || s.txn != nil { t.Fatal("retained close native ownership") }
+						if s.state != storeCLOSEBLOCKED || s.env != env || s.writer != writer || s.config != cfg || s.dbis != dbis || s.txn != nil {
+							t.Fatal("retained close native ownership")
+						}
 						requireEngineError(t, raw, EngineConcurrency, operationClose, -30778)
 					} else if mode == 9 || recorded {
-						if s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil { t.Fatal("consumed native resources retained") }
-						if mode == 0 && (application == "nil" || application == "same") && raw != readErr { t.Fatal("readPrimary direct identity changed") }
+						if s.state != storeCLOSED || s.env != nil || s.writer != nil || s.txn != nil {
+							t.Fatal("consumed native resources retained")
+						}
+						if mode == 0 && (application == "nil" || application == "same") && raw != readErr {
+							t.Fatal("readPrimary direct identity changed")
+						}
 					} else {
-						if s.state != storeOPEN || s.env != env || s.writer != writer || s.config != cfg || s.dbis != dbis || raw != appErr { t.Fatal("application result changed native ownership") }
+						if s.state != storeOPEN || s.env != env || s.writer != writer || s.config != cfg || s.dbis != dbis || raw != appErr {
+							t.Fatal("application result changed native ownership")
+						}
 					}
 					if s.state != storeOPEN {
-						if s.terminal != raw || s.View(func(*Reader) error { t.Fatal("terminal View callback"); return nil }) != raw { t.Fatal("terminal View identity") }
+						if s.terminal != raw || s.View(func(*Reader) error { t.Fatal("terminal View callback"); return nil }) != raw {
+							t.Fatal("terminal View identity")
+						}
 						truth, stage, next := s.Update(func(*Reader) (Batch, error) { t.Fatal("terminal Update callback"); return Batch{}, nil })
-						if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite { t.Fatal("terminal Update identity/truth/stage") }
+						if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite {
+							t.Fatal("terminal Update identity/truth/stage")
+						}
 						mustEnvironment(t, fixtureLargeRelease(s))
 					}
 				})
@@ -240,7 +321,9 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 					close(done)
 				}()
 				old = <-ready
-				for old.active.Load() { runtime.Gosched() }
+				for old.active.Load() {
+					runtime.Gosched()
+				}
 				deadline := time.NewTimer(time.Second)
 				select {
 				case <-done:
@@ -257,60 +340,110 @@ func TestStartupCanonicalNativeFixtures(t *testing.T) {
 			})
 		})
 		t.Cleanup(func() { mustEnvironment(t, fixtureLargeRelease(s)) })
-		if early { t.Fatal("Startup returned while native Get was still held") }
+		if early {
+			t.Fatal("Startup returned while native Get was still held")
+		}
 		mustEnvironment(t, err)
 		mustEnvironment(t, largeErr)
 		mustEnvironment(t, getErr)
 		tipCensus(t, evidence, 1, 2, 1, 0)
-		if large != (fixtureLargeEvidence{aborts: 1}) { t.Fatalf("retained drain native census: %+v", large) }
-		if point == nil || point.Height != 37 || point.BlockHash != ([32]byte{0x44}) { t.Fatal("held native endpoint changed") }
+		if large != (fixtureLargeEvidence{aborts: 1}) {
+			t.Fatalf("retained drain native census: %+v", large)
+		}
+		if point == nil || point.Height != 37 || point.BlockHash != ([32]byte{0x44}) {
+			t.Fatal("held native endpoint changed")
+		}
 		e := requireEnvironmentError(t, raw, EngineLocalInvariant, operationAbort, -30416, pinnedNegativeDiagnostics[-30416])
-		if e.Cause != nil || !e.ReopenRequired || s.terminal != raw || s.canonicalOwnerVerified { t.Fatal("retained drain raw/cache/permission") }
-		if s.state != storePOISONEDTHREAD || s.txn != old.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis { t.Fatal("retained drain native resources") }
-		if old.usable() || old.ownerVerified || old.tip != nil { t.Fatal("retained drain Reader lifetime") }
-		if s.View(func(*Reader) error { t.Fatal("retained drain View callback"); return nil }) != raw { t.Fatal("retained drain View cache") }
+		if e.Cause != nil || !e.ReopenRequired || s.terminal != raw || s.canonicalOwnerVerified {
+			t.Fatal("retained drain raw/cache/permission")
+		}
+		if s.state != storePOISONEDTHREAD || s.txn != old.txn || s.env != env || s.writer != writer || s.config != (ConfigV1{}) || s.dbis != (Store{}).dbis {
+			t.Fatal("retained drain native resources")
+		}
+		if old.usable() || old.ownerVerified || old.tip != nil {
+			t.Fatal("retained drain Reader lifetime")
+		}
+		if s.View(func(*Reader) error { t.Fatal("retained drain View callback"); return nil }) != raw {
+			t.Fatal("retained drain View cache")
+		}
 		truth, stage, next := s.Update(func(*Reader) (Batch, error) { t.Fatal("retained drain Update callback"); return Batch{}, nil })
-		if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite { t.Fatal("retained drain Update cache/truth/stage") }
+		if next != raw || truth != CommitTruthOld || stage != UpdateStagePrewrite {
+			t.Fatal("retained drain Update cache/truth/stage")
+		}
 	})
 	for _, recorded := range []bool{false, true} {
-	for _, mode := range []uint32{0, 9, 10, 24} {
-		if mode == 24 && !recorded { continue }
-		for _, interrupt := range []string{"panic", "Goexit"} {
-			t.Run(fmt.Sprintf("H05 read%v %s mode%d", recorded, interrupt, mode), func(t *testing.T) {
-				s := startupOpened(t)
-				owner := bootstrapOwner(t)
-				done := make(chan struct{})
-				var old *Reader
-				go func() {
-					defer close(done)
-					defer func() { if p := recover(); interrupt == "panic" && p != "startup interruption" { t.Errorf("original panic=%v", p) } }()
-					run := func() {
-						_ = owner.WithReservation(4096, func() error {
-							return s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
-								old = r
-								if recorded && mode != 24 { _, _, _ = r.Get(readDBIsLiteral()[0], []byte{0}) }
-								if mode == 24 { _, _, _ = r.Get(readDBIsLiteral()[0], []byte{0}); _, _, _ = r.Get(readDBIsLiteral()[0], []byte{0}) }
-								if interrupt == "panic" { panic("startup interruption") }
-								runtime.Goexit()
-								return 1, nil
+		for _, mode := range []uint32{0, 9, 10, 24} {
+			if mode == 24 && !recorded {
+				continue
+			}
+			for _, interrupt := range []string{"panic", "Goexit"} {
+				t.Run(fmt.Sprintf("H05 read%v %s mode%d", recorded, interrupt, mode), func(t *testing.T) {
+					s := startupOpened(t)
+					owner := bootstrapOwner(t)
+					done := make(chan struct{})
+					var old *Reader
+					go func() {
+						defer close(done)
+						defer func() {
+							if p := recover(); interrupt == "panic" && p != "startup interruption" {
+								t.Errorf("original panic=%v", p)
+							}
+						}()
+						run := func() {
+							_ = owner.WithReservation(4096, func() error {
+								return s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+									old = r
+									if recorded && mode != 24 {
+										_, _, _ = r.Get(readDBIsLiteral()[0], []byte{0})
+									}
+									if mode == 24 {
+										_, _, _ = r.Get(readDBIsLiteral()[0], []byte{0})
+										_, _, _ = r.Get(readDBIsLiteral()[0], []byte{0})
+									}
+									if interrupt == "panic" {
+										panic("startup interruption")
+									}
+									runtime.Goexit()
+									return 1, nil
+								})
 							})
-						})
+						}
+						armed := run
+						if recorded && mode != 24 {
+							armed = func() { _, _ = FixtureSelectedDamage(s, owner, SelectedDamageGetEIO, 0, []byte{0}, run) }
+						}
+						if mode == 0 {
+							armed()
+						} else {
+							_, _ = fixtureLargeFault(s, mode, 0, []byte{0}, armed)
+						}
+						t.Error("interrupted startup returned")
+					}()
+					<-done
+					if s.canonicalOwnerVerified || old.usable() || owner.WithReservation(154611151, func() error { return nil }) != nil {
+						t.Fatal("interrupted publication/lifetime/grant")
 					}
-					armed := run
-					if recorded && mode != 24 {
-						armed = func() { _, _ = FixtureSelectedDamage(s, owner, SelectedDamageGetEIO, 0, []byte{0}, run) }
+					want := storeOPEN
+					if recorded || mode == 9 {
+						want = storeCLOSED
 					}
-					if mode == 0 { armed() } else { _, _ = fixtureLargeFault(s, mode, 0, []byte{0}, armed) }
-					t.Error("interrupted startup returned")
-				}()
-				<-done
-				if s.canonicalOwnerVerified || old.usable() || owner.WithReservation(154611151, func() error { return nil }) != nil { t.Fatal("interrupted publication/lifetime/grant") }
-				want := storeOPEN; if recorded || mode == 9 { want = storeCLOSED }; if mode == 10 { want = storePOISONEDTHREAD }; if mode == 24 { want = storeCLOSEBLOCKED }
-				if s.state != want { t.Fatalf("interrupted state=%s, want%s", s.state, want) }
-				if s.state != storeOPEN { mustEnvironment(t, fixtureLargeRelease(s)) } else { startupPermission(t, s, false) }
-			})
+					if mode == 10 {
+						want = storePOISONEDTHREAD
+					}
+					if mode == 24 {
+						want = storeCLOSEBLOCKED
+					}
+					if s.state != want {
+						t.Fatalf("interrupted state=%s, want%s", s.state, want)
+					}
+					if s.state != storeOPEN {
+						mustEnvironment(t, fixtureLargeRelease(s))
+					} else {
+						startupPermission(t, s, false)
+					}
+				})
+			}
 		}
-	}
 	}
 }
 
@@ -319,48 +452,83 @@ func TestStartupCanonicalNextNativeFixtures(t *testing.T) {
 		t.Run(fmt.Sprintf("forward key width%d", width), func(t *testing.T) {
 			s := startupOpened(t)
 			key := canonicalForwardKeyLiteral(1, 0)
-			if width == 8 { key = key[:8] } else { key = append(key, 0) }
+			if width == 8 {
+				key = key[:8]
+			} else {
+				key = append(key, 0)
+			}
 			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[2], key, make([]byte, 104)))
 			var recorded error
 			err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 				row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[2], 1, nil)
 				e, native := failure.(*EngineError)
-				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30796 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() { t.Fatal("forward key width result/record/disarm") }
+				if !native || e.Class != EngineIntegrity || e.Operation != "prefix-page" || e.Code != -30796 || e.Diagnostic != "stored key outside SchemaV2 prefix-page domain" || e.Cause != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() {
+					t.Fatal("forward key width result/record/disarm")
+				}
 				recorded = failure
 				return 1, nil
 			})
-			if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED { t.Fatal("recorded key width failure disappeared") }
-			if s.View(func(*Reader) error { t.Fatal("key width cached callback"); return nil }) != err { t.Fatal("key width cached identity") }
+			if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED {
+				t.Fatal("recorded key width failure disappeared")
+			}
+			if s.View(func(*Reader) error { t.Fatal("key width cached callback"); return nil }) != err {
+				t.Fatal("key width cached identity")
+			}
 		})
 	}
 	for _, rank := range []uint8{2, 7} {
 		for _, width := range []int{-1, 0, 7, 9, 103, 105} {
-			if rank == 2 && (width == 7 || width == 9) || rank == 7 && (width == 103 || width == 105) { continue }
+			if rank == 2 && (width == 7 || width == 9) || rank == 7 && (width == 103 || width == 105) {
+				continue
+			}
 			t.Run(fmt.Sprintf("current rank%d width%d", rank, width), func(t *testing.T) {
 				s := startupOpened(t)
 				key := canonicalForwardKeyLiteral(1, 0)
-				if rank == 7 { key = canonicalOwnerKeyLiteral(1, [32]byte{7}) }
+				if rank == 7 {
+					key = canonicalOwnerKeyLiteral(1, [32]byte{7})
+				}
 				var raw []byte
-				if width >= 0 { raw = make([]byte, width) }
-				if width >= 0 { mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[rank], key, raw)) }
+				if width >= 0 {
+					raw = make([]byte, width)
+				}
+				if width >= 0 {
+					mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[rank], key, raw))
+				}
 				var recorded error
 				err := s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 					row, found, failure := r.StartupCanonicalNextV1(readDBIsLiteral()[rank], 1, nil)
-					if width == -1 { if failure != nil || found || !reflect.DeepEqual(row, PrefixRow{}) { t.Fatal("NOTFOUND result") }; return 1, nil }
-					if failure == nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() { t.Fatal("current-width failure/record/disarm") }
+					if width == -1 {
+						if failure != nil || found || !reflect.DeepEqual(row, PrefixRow{}) {
+							t.Fatal("NOTFOUND result")
+						}
+						return 1, nil
+					}
+					if failure == nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != failure || r.usable() {
+						t.Fatal("current-width failure/record/disarm")
+					}
 					recorded = failure
 					return 1, nil
 				})
-				if width == -1 { mustEnvironment(t, err); startupPermission(t, s, true) } else if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED { t.Fatal("ignored recorded pull failure disappeared") }
+				if width == -1 {
+					mustEnvironment(t, err)
+					startupPermission(t, s, true)
+				} else if err != recorded || s.canonicalOwnerVerified || s.state != storeCLOSED {
+					t.Fatal("ignored recorded pull failure disappeared")
+				}
 			})
 		}
 		t.Run(fmt.Sprintf("outside generation rank%d", rank), func(t *testing.T) {
 			s := startupOpened(t)
-			key := canonicalForwardKeyLiteral(2, 0); if rank == 7 { key = canonicalOwnerKeyLiteral(2, [32]byte{7}) }
+			key := canonicalForwardKeyLiteral(2, 0)
+			if rank == 7 {
+				key = canonicalOwnerKeyLiteral(2, [32]byte{7})
+			}
 			mustEnvironment(t, fixtureSeedPrefixRawRow(s, readDBIsLiteral()[rank], key, []byte{0xff}))
 			mustEnvironment(t, s.View(func(r *Reader) error {
 				row, found, err := r.StartupCanonicalNextV1(readDBIsLiteral()[rank], 1, nil)
-				if err != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != nil || !r.usable() { t.Fatal("outside generation parsed foreign value") }
+				if err != nil || found || !reflect.DeepEqual(row, PrefixRow{}) || r.failure != nil || !r.usable() {
+					t.Fatal("outside generation parsed foreign value")
+				}
 				return nil
 			}))
 		})

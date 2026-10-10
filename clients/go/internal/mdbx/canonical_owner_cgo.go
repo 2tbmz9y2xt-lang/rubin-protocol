@@ -195,8 +195,9 @@ type CanonicalOwnerResultV1 struct {
 // 40-byte owner key, a 16-byte forward key, Get copies of 8 and 104 bytes and one Rows array of two rows; consumers
 // charge those buffers to their reservation.
 func (r *Reader) CanonicalOwnerV1(generation uint64, hash [32]byte) (CanonicalOwnerResultV1, error) {
-	if err := r.RequireCanonicalOwnerVerificationV1(); err != nil {
-		return CanonicalOwnerResultV1{}, err
+	verificationErr := r.RequireCanonicalOwnerVerificationV1()
+	if verificationErr != nil {
+		return CanonicalOwnerResultV1{}, verificationErr
 	}
 	owner := ConsultedRow{DBI: schemaDBIs[7], Key: make([]byte, 40)}
 	binary.BigEndian.PutUint64(owner.Key, generation)

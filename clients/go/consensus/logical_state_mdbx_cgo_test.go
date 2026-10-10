@@ -910,7 +910,9 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		logicalMDBXAssert(t, readErr == nil, "startup consumer census read %s: %v", dir, readErr)
 		packages := map[string][]*ast.File{}
 		for _, entry := range entries {
-			if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") { continue }
+			if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
 			file, parseErr := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, 0)
 			logicalMDBXAssert(t, parseErr == nil, "startup consumer census parse %s: %v", entry.Name(), parseErr)
 			packages[file.Name.Name] = append(packages[file.Name.Name], file)
@@ -925,8 +927,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 			for _, file := range parsed {
 				ast.Inspect(file, func(node ast.Node) bool {
 					id, ok := node.(*ast.Ident)
-					if !ok { return true }
-					if uses.Uses[id] == public { t.Fatalf("startup lost dormancy: node/cmd public consumer at %s", fset.Position(id.Pos())) }
+					if !ok {
+						return true
+					}
+					if uses.Uses[id] == public {
+						t.Fatalf("startup lost dormancy: node/cmd public consumer at %s", fset.Position(id.Pos()))
+					}
 					logicalMDBXAssert(t, uses.Uses[id] != nativeMethod && uses.Uses[id] != native.Scope().Lookup("StartupCanonicalActiveAndReplayCompleteV1"), "unapproved external startup owner at %s", fset.Position(id.Pos()))
 					if id.Name == "VerifyPersistedReplayStartupMDBX" || id.Name == "StartupVerifyCanonicalV1" || id.Name == "StartupCanonicalActiveAndReplayCompleteV1" {
 						logicalMDBXAssert(t, uses.Defs[id] != nil || uses.Uses[id] != nil, "startup census resolved no uses: external %s at %s", id.Name, fset.Position(id.Pos()))
@@ -967,7 +973,9 @@ func startupCensusUses(t *testing.T, fset *token.FileSet, files []*ast.File, inf
 	var verify, public types.Object
 	var finalVerifyReturn *ast.ReturnStmt
 	for _, file := range files {
-		if !strings.HasSuffix(fset.Position(file.Pos()).Filename, "startup_mdbx_cgo.go") { continue }
+		if !strings.HasSuffix(fset.Position(file.Pos()).Filename, "startup_mdbx_cgo.go") {
+			continue
+		}
 		for _, declaration := range file.Decls {
 			if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Name.Name == "verify" && len(fn.Body.List) != 0 {
 				finalVerifyReturn, _ = fn.Body.List[len(fn.Body.List)-1].(*ast.ReturnStmt)
@@ -975,20 +983,30 @@ func startupCensusUses(t *testing.T, fset *token.FileSet, files []*ast.File, inf
 		}
 	}
 	for id, object := range info.Defs {
-		if !strings.HasSuffix(fset.Position(id.Pos()).Filename, "startup_mdbx_cgo.go") { continue }
-		if id.Name == "verify" { verify = object }
-		if id.Name == "VerifyPersistedReplayStartupMDBX" { public = object }
+		if !strings.HasSuffix(fset.Position(id.Pos()).Filename, "startup_mdbx_cgo.go") {
+			continue
+		}
+		if id.Name == "verify" {
+			verify = object
+		}
+		if id.Name == "VerifyPersistedReplayStartupMDBX" {
+			public = object
+		}
 	}
 	logicalMDBXAssert(t, verify != nil && public != nil && finalVerifyReturn != nil, "startup census resolved no uses: producer definitions")
 	owner := func(node ast.Node) string {
 		for node = parents[node]; node != nil; node = parents[node] {
-			if fn, ok := node.(*ast.FuncDecl); ok { return fn.Name.Name }
+			if fn, ok := node.(*ast.FuncDecl); ok {
+				return fn.Name.Name
+			}
 		}
 		return ""
 	}
 	uses, producers := 0, 0
 	for id, object := range info.Uses {
-		if object == public { t.Fatalf("startup lost dormancy: public consumer at %s", fset.Position(id.Pos())) }
+		if object == public {
+			t.Fatalf("startup lost dormancy: public consumer at %s", fset.Position(id.Pos()))
+		}
 		if object == nativeMethod {
 			selector, selected := parents[id].(*ast.SelectorExpr)
 			call, direct := parents[selector].(*ast.CallExpr)
@@ -997,7 +1015,9 @@ func startupCensusUses(t *testing.T, fset *token.FileSet, files []*ast.File, inf
 			logicalMDBXAssert(t, ok && info.Uses[callback.Sel] == verify, "unapproved startup checker at %s", fset.Position(id.Pos()))
 			uses++
 		}
-		if object == completion { producers++ }
+		if object == completion {
+			producers++
+		}
 	}
 	logicalMDBXAssert(t, uses == 1 && producers == 1, "startup census resolved no uses: callers%d/completion%d", uses, producers)
 	for _, file := range files {

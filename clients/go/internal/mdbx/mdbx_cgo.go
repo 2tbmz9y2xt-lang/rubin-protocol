@@ -2313,7 +2313,7 @@ func (s *Store) View(callback func(*Reader) error) (err error) {
 type StartupCanonicalCompletionV1 uint8
 
 const (
-	StartupCanonicalNotCompleteV1                   StartupCanonicalCompletionV1 = 0
+	StartupCanonicalNotCompleteV1             StartupCanonicalCompletionV1 = 0
 	StartupCanonicalActiveAndReplayCompleteV1 StartupCanonicalCompletionV1 = 1
 )
 
@@ -2819,8 +2819,9 @@ func (r *Reader) StartupCanonicalNextV1(dbi DBI, generation uint64, afterExclusi
 	}
 	var prefix [8]byte
 	binary.BigEndian.PutUint64(prefix[:], generation)
-	if err := validateStartupCanonicalRequest(dbi, prefix[:], afterExclusive); err != nil {
-		return PrefixRow{}, false, err
+	requestErr := validateStartupCanonicalRequest(dbi, prefix[:], afterExclusive)
+	if requestErr != nil {
+		return PrefixRow{}, false, requestErr
 	}
 	scan := newPrefixPageScan(dbi, prefix[:], afterExclusive, 0, 0)
 	r.getMu.Lock()
@@ -2837,8 +2838,9 @@ func (r *Reader) StartupCanonicalNextV1(dbi DBI, generation uint64, afterExclusi
 }
 
 func validateStartupCanonicalRequest(dbi DBI, prefix, afterExclusive []byte) error {
-	if err := ValidateDBI(dbi); err != nil {
-		return prefixPageInputError("invalid SchemaV2 DBI", err)
+	dbiErr := ValidateDBI(dbi)
+	if dbiErr != nil {
+		return prefixPageInputError("invalid SchemaV2 DBI", dbiErr)
 	}
 	if dbi.Rank != 2 && dbi.Rank != 7 {
 		return prefixPageInputError("unsupported startup canonical DBI", nil)
