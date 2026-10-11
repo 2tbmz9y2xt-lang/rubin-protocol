@@ -16,6 +16,11 @@ var (
 	errOperationReservationCapacity = errors.New("storage operation reservation capacity unavailable")
 )
 
+// IsOperationReservationCapacity reports only the owner's direct capacity refusal.
+func IsOperationReservationCapacity(err error) bool {
+	return any(err) == any(errOperationReservationCapacity)
+}
+
 // operationReservationState is the one aggregate every copy of an owner shares.
 type operationReservationState struct {
 	mu    sync.Mutex
