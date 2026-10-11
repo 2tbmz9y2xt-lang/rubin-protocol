@@ -43,6 +43,10 @@ type replayStartupCheck struct {
 	observedErr                error
 	observedResult             string
 	completedCanonicalPositive bool
+	// Only decoded fixed metadata and scalar prefix facts are retained.
+	replay *mdbx.ReplayV1
+	excluded *[32]byte
+	activeExcluded, activeCursorMismatch bool
 }
 
 type startupIndexTipV1 struct {
@@ -144,8 +148,11 @@ func (c *replayStartupCheck) authority(r *mdbx.Reader) (mdbx.StorageAuthorityV1,
 	if err != nil {
 		return mdbx.StorageAuthorityV1{}, c.observed(err)
 	}
-	if a.ExcludedInvalidBranch != nil && !startupExclusionToken(a.ExcludedInvalidBranch.ExactConsensusError) {
-		return mdbx.StorageAuthorityV1{}, c.positive("invalid startup exclusion token")
+	if a.ExcludedInvalidBranch != nil {
+		c.excluded = &a.ExcludedInvalidBranch.FirstInvalidBlockHash
+		if !startupExclusionToken(a.ExcludedInvalidBranch.ExactConsensusError) {
+			return mdbx.StorageAuthorityV1{}, c.positive("invalid startup exclusion token")
+		}
 	}
 	if a.Phase != mdbx.StoragePhaseReplayV1 {
 		err = &mdbx.EngineError{Class: mdbx.EngineInvalidInput, Operation: "view", Code: 22, Diagnostic: "persisted authority is not REPLAY"}
@@ -154,7 +161,37 @@ func (c *replayStartupCheck) authority(r *mdbx.Reader) (mdbx.StorageAuthorityV1,
 	if a.Replay.Target.ChainID != c.chainID || a.Replay.Target.GenesisHash != c.genesisHash {
 		return mdbx.StorageAuthorityV1{}, c.positive("startup replay network identity mismatch")
 	}
+	c.replay = a.Replay
+	return c.authorityRelations(a)
+}
+
+// Full authority admission precedes generic work, scalar identity, and exclusion.
+func (c *replayStartupCheck) authorityRelations(a mdbx.StorageAuthorityV1) (mdbx.StorageAuthorityV1, error) {
+	t, cursor := &a.Replay.Target, a.Replay.Cursor
+	if cursor.Kind == mdbx.ReplayCursorPreGenesisV1 {
+		if err := c.targetTip(&startupIndexTipV1{}, t); err != nil {
+			return mdbx.StorageAuthorityV1{}, err
+		}
+	}
+	if startupKnownHashRepetition(t, &cursor) {
+		return mdbx.StorageAuthorityV1{}, c.positive("startup replay target repeats a known hash")
+	}
+	if c.declaredExcluded() {
+		return mdbx.StorageAuthorityV1{}, c.positive("startup replay target contains excluded hash")
+	}
 	return a, nil
+}
+
+func startupKnownHashRepetition(t *mdbx.RecoveryTargetV1, cursor *mdbx.ReplayCursorV1) bool {
+	return t.TipHash == t.GenesisHash || cursor.Kind == mdbx.ReplayCursorAppliedV1 && (cursor.Height < t.TipHeight && cursor.BlockHash == t.TipHash || cursor.Height > 0 && cursor.BlockHash == t.GenesisHash)
+}
+
+func (c *replayStartupCheck) declaredExcluded() bool {
+	if c.excluded == nil {
+		return false
+	}
+	t, cursor := &c.replay.Target, c.replay.Cursor
+	return *c.excluded == t.GenesisHash || *c.excluded == t.TipHash || cursor.Kind == mdbx.ReplayCursorAppliedV1 && *c.excluded == cursor.BlockHash
 }
 
 func startupBounds(tip *startupIndexTipV1, profile mdbx.StorageProfileV1) (b, u uint64) {
@@ -232,8 +269,22 @@ func (c *replayStartupCheck) forward(r *mdbx.Reader, row mdbx.PrefixRow, previou
 	if err != nil {
 		return err
 	}
+	if err := c.inversePoint(r, row.Key[:8], hash, height, resource); err != nil {
+		return err
+	}
+	point := startupIndexTipV1{Present: true, Height: height, Hash: hash, Work: work}
+	if err := c.verifiedPoint(&point, replay == nil); err != nil {
+		return err
+	}
+	// Old rolling facts have reached their last consumer. Replace them only
+	// after this row's header/work and exact inverse probe have completed.
+	*previous = point
+	return nil
+}
+
+func (c *replayStartupCheck) inversePoint(r *mdbx.Reader, generationKey []byte, hash [32]byte, height uint64, resource string) error {
 	var key [40]byte
-	copy(key[:8], row.Key[:8])
+	copy(key[:8], generationKey)
 	copy(key[8:], hash[:])
 	inverse, present, err := c.get(r, 7, key[:], resource)
 	if err != nil {
@@ -242,10 +293,66 @@ func (c *replayStartupCheck) forward(r *mdbx.Reader, row mdbx.PrefixRow, previou
 	if !present || binary.BigEndian.Uint64(inverse) != height {
 		return c.positive("startup inverse height mismatch")
 	}
-	// Old rolling facts have reached their last consumer. Replace them only
-	// after this row's header/work and exact inverse probe have completed.
-	*previous = startupIndexTipV1{Present: true, Height: height, Hash: hash, Work: work}
 	return nil
+}
+
+// The caller has completed this row's header/work and exact inverse checks.
+func (c *replayStartupCheck) verifiedPoint(point *startupIndexTipV1, active bool) error {
+	cursor := c.replay.Cursor
+	sameCursor := cursor.Kind == mdbx.ReplayCursorAppliedV1 && point.Hash == cursor.BlockHash
+	sameTip := point.Hash == c.replay.Target.TipHash
+	if err := c.pointIdentity(point, active, sameCursor, sameTip); err != nil {
+		return err
+	}
+	excluded := c.excluded != nil && point.Hash == *c.excluded
+	if active {
+		if err := c.activePoint(point, sameCursor, sameTip, excluded); err != nil {
+			return err
+		}
+	} else if excluded {
+		return c.positive("startup replay target contains excluded hash")
+	}
+	return c.knownPointWork(point, active, sameCursor, sameTip)
+}
+
+func (c *replayStartupCheck) pointIdentity(point *startupIndexTipV1, active, sameCursor, sameTip bool) error {
+	if active && sameTip && !startupTargetPointMatches(point, &c.replay.Target) {
+		return c.positive("startup known target tip mismatch")
+	}
+	if sameCursor && point.Height != c.replay.Cursor.Height || sameTip && point.Height != c.replay.Target.TipHeight {
+		return c.positive("startup replay target repeats a known hash")
+	}
+	return nil
+}
+
+func startupTargetPointMatches(tip *startupIndexTipV1, target *mdbx.RecoveryTargetV1) bool {
+	return tip.Height == target.TipHeight && tip.Hash == target.TipHash && tip.Work == target.CumulativeChainwork
+}
+
+func (c *replayStartupCheck) knownPointWork(point *startupIndexTipV1, active, sameCursor, sameTip bool) error {
+	if point.Height == 0 || active && sameCursor && !sameTip {
+		return c.targetTip(point, &c.replay.Target)
+	}
+	return nil
+}
+
+func (c *replayStartupCheck) activePoint(point *startupIndexTipV1, sameCursor, sameTip, excluded bool) error {
+	c.recordActivePoint(point, excluded)
+	if sameTip && c.activeCursorMismatch {
+		return c.positive("startup known target cursor ancestry mismatch")
+	}
+	if (sameTip || sameCursor) && c.activeExcluded {
+		return c.positive("startup replay target contains excluded hash")
+	}
+	return nil
+}
+
+func (c *replayStartupCheck) recordActivePoint(point *startupIndexTipV1, excluded bool) {
+	c.activeExcluded = c.activeExcluded || excluded
+	cursor := c.replay.Cursor
+	if cursor.Kind == mdbx.ReplayCursorAppliedV1 && point.Height == cursor.Height && point.Hash != cursor.BlockHash {
+		c.activeCursorMismatch = true
+	}
 }
 
 func (c *replayStartupCheck) height(height uint64, previous *startupIndexTipV1, replay *mdbx.ReplayV1) error {
@@ -352,16 +459,34 @@ func (c *replayStartupCheck) cursor(tip *startupIndexTipV1, replay *mdbx.ReplayV
 }
 
 func (c *replayStartupCheck) targetTip(tip *startupIndexTipV1, target *mdbx.RecoveryTargetV1) error {
-	if tip.Height == target.TipHeight && (tip.Hash != target.TipHash || tip.Work != target.CumulativeChainwork) {
-		return c.positive("startup replay target tip mismatch")
+	if tip.Present && tip.Height == target.TipHeight {
+		if !startupTargetPointMatches(tip, target) {
+			return c.positive("startup replay target tip mismatch")
+		}
+		return nil
+	}
+	count := target.TipHeight + 1
+	prefix := new(big.Int)
+	if tip.Present {
+		count = target.TipHeight - tip.Height
+		prefix.SetBytes(tip.Work[:])
+	}
+	declared := new(big.Int).SetBytes(target.CumulativeChainwork[:])
+	bound := new(big.Int).SetUint64(count)
+	if declared.Cmp(bound.Add(bound, prefix)) < 0 {
+		return c.positive("startup replay target work outside consistency bounds")
+	}
+	bound.SetUint64(count).Lsh(bound, 256).Add(bound, prefix)
+	if declared.Cmp(bound) > 0 {
+		return c.positive("startup replay target work outside consistency bounds")
 	}
 	return nil
 }
 
 func startupExclusionToken(token []byte) bool {
 	switch string(token) {
-	case "CONSENSUS_INVALID(TX_ERR_PARSE)", "CONSENSUS_INVALID(TX_ERR_VALUE_CONSERVATION)", "CONSENSUS_INVALID(TX_ERR_TX_NONCE_INVALID)", "CONSENSUS_INVALID(TX_ERR_SEQUENCE_INVALID)", "CONSENSUS_INVALID(TX_ERR_NONCE_REPLAY)", "CONSENSUS_INVALID(TX_ERR_SIG_INVALID)", "CONSENSUS_INVALID(TX_ERR_SIG_ALG_INVALID)", "CONSENSUS_INVALID(TX_ERR_SIGHASH_TYPE_INVALID)", "CONSENSUS_INVALID(TX_ERR_SIG_NONCANONICAL)", "CONSENSUS_INVALID(TX_ERR_TIMELOCK_NOT_MET)", "CONSENSUS_INVALID(TX_ERR_WITNESS_OVERFLOW)", "CONSENSUS_INVALID(TX_ERR_COVENANT_TYPE_INVALID)", "CONSENSUS_INVALID(TX_ERR_VAULT_MALFORMED)", "CONSENSUS_INVALID(TX_ERR_VAULT_PARAMS_INVALID)", "CONSENSUS_INVALID(TX_ERR_VAULT_KEYS_NOT_CANONICAL)", "CONSENSUS_INVALID(TX_ERR_VAULT_WHITELIST_NOT_CANONICAL)", "CONSENSUS_INVALID(TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN)", "CONSENSUS_INVALID(TX_ERR_VAULT_OWNER_AUTH_REQUIRED)", "CONSENSUS_INVALID(TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN)", "CONSENSUS_INVALID(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN)", "CONSENSUS_INVALID(TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_CMR_MISMATCH)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_DECODE)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_JET_DISALLOWED)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_BUDGET_EXCEEDED)", "CONSENSUS_INVALID(TX_ERR_SIMPLICITY_REJECTED)", "CONSENSUS_INVALID(TX_ERR_MISSING_UTXO)", "CONSENSUS_INVALID(TX_ERR_COINBASE_IMMATURE)",
-		"CONSENSUS_INVALID(BLOCK_ERR_LINKAGE_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_MERKLE_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_WITNESS_COMMITMENT)", "CONSENSUS_INVALID(BLOCK_ERR_POW_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_TARGET_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_TIMESTAMP_OLD)", "CONSENSUS_INVALID(BLOCK_ERR_TIMESTAMP_FUTURE)", "CONSENSUS_INVALID(BLOCK_ERR_COINBASE_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_SUBSIDY_EXCEEDED)", "CONSENSUS_INVALID(BLOCK_ERR_STATE_CAP_EXCEEDED)", "CONSENSUS_INVALID(BLOCK_ERR_WEIGHT_EXCEEDED)", "CONSENSUS_INVALID(BLOCK_ERR_ANCHOR_BYTES_EXCEEDED)", "CONSENSUS_INVALID(BLOCK_ERR_DA_INCOMPLETE)", "CONSENSUS_INVALID(BLOCK_ERR_DA_CHUNK_HASH_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_DA_SET_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID)", "CONSENSUS_INVALID(BLOCK_ERR_DA_BATCH_EXCEEDED)", "CONSENSUS_INVALID(BLOCK_ERR_PARSE)":
+	case "TX_ERR_PARSE", "TX_ERR_VALUE_CONSERVATION", "TX_ERR_TX_NONCE_INVALID", "TX_ERR_SEQUENCE_INVALID", "TX_ERR_NONCE_REPLAY", "TX_ERR_SIG_INVALID", "TX_ERR_SIG_ALG_INVALID", "TX_ERR_SIGHASH_TYPE_INVALID", "TX_ERR_SIG_NONCANONICAL", "TX_ERR_TIMELOCK_NOT_MET", "TX_ERR_WITNESS_OVERFLOW", "TX_ERR_COVENANT_TYPE_INVALID", "TX_ERR_VAULT_MALFORMED", "TX_ERR_VAULT_PARAMS_INVALID", "TX_ERR_VAULT_KEYS_NOT_CANONICAL", "TX_ERR_VAULT_WHITELIST_NOT_CANONICAL", "TX_ERR_VAULT_OWNER_DESTINATION_FORBIDDEN", "TX_ERR_VAULT_OWNER_AUTH_REQUIRED", "TX_ERR_VAULT_FEE_SPONSOR_FORBIDDEN", "TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN", "TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED", "TX_ERR_SIMPLICITY_PROGRAM_TOO_LARGE", "TX_ERR_SIMPLICITY_ENVELOPE_TOO_LARGE", "TX_ERR_SIMPLICITY_CMR_MISMATCH", "TX_ERR_SIMPLICITY_DECODE", "TX_ERR_SIMPLICITY_JET_DISALLOWED", "TX_ERR_SIMPLICITY_BUDGET_EXCEEDED", "TX_ERR_SIMPLICITY_REJECTED", "TX_ERR_MISSING_UTXO", "TX_ERR_COINBASE_IMMATURE",
+		"BLOCK_ERR_LINKAGE_INVALID", "BLOCK_ERR_MERKLE_INVALID", "BLOCK_ERR_WITNESS_COMMITMENT", "BLOCK_ERR_POW_INVALID", "BLOCK_ERR_TARGET_INVALID", "BLOCK_ERR_TIMESTAMP_OLD", "BLOCK_ERR_TIMESTAMP_FUTURE", "BLOCK_ERR_COINBASE_INVALID", "BLOCK_ERR_SUBSIDY_EXCEEDED", "BLOCK_ERR_STATE_CAP_EXCEEDED", "BLOCK_ERR_WEIGHT_EXCEEDED", "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", "BLOCK_ERR_DA_INCOMPLETE", "BLOCK_ERR_DA_CHUNK_HASH_INVALID", "BLOCK_ERR_DA_SET_INVALID", "BLOCK_ERR_DA_PAYLOAD_COMMIT_INVALID", "BLOCK_ERR_DA_BATCH_EXCEEDED", "BLOCK_ERR_PARSE":
 		return true
 	}
 	return false
