@@ -818,7 +818,9 @@ func TestReplayStepMDBXFixtureOneBelowClassification(t *testing.T) {
 			w := newStepWorld(t, 15120, presence != "pre_genesis")
 			y := w.hashes[1]
 			if presence == "exact_old" {
-				w.apply(w.canonicalRows(1, 1)...)
+				// newStepWorld already admitted X's immutable header; seed only the active index/owner pair.
+				rows := w.canonicalRows(1, 1)
+				w.apply(rows[1:]...)
 			} else if presence != "pre_genesis" {
 				y = stepActiveOther(t, w)
 			}
