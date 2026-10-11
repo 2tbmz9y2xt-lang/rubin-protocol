@@ -79,7 +79,7 @@ func startupFreshGuard(t testing.TB, w *replayWorld, verified bool) {
 		check(r)
 		return mdbx.Batch{}, application
 	})
-	logicalMDBXAssert(t, truth == 1 && stage == 1 && err == application, "fresh Update truth/stage/raw identity")
+	logicalMDBXAssert(t, truth == 1 && stage == 1 && any(err) == any(application), "fresh Update truth/stage/raw identity")
 }
 
 func startupPreserved(t *testing.T, w *replayWorld, wantDecision uint8, wantResult string) ReplayStartupOutcomeV1 {
@@ -93,14 +93,15 @@ func startupPreserved(t *testing.T, w *replayWorld, wantDecision uint8, wantResu
 	replaySameImage(t, before, w.image(), "startup readonly image")
 	startupFreshGuard(t, w, out.Verified)
 	replaySameImage(t, before, w.image(), "startup fresh Update image")
-	if wantDecision == 3 {
+	switch wantDecision {
+	case 3:
 		repeated := startupRun(w)
 		startupTuple(t, repeated, false, 3, wantResult)
-		logicalMDBXAssert(t, repeated.Err != out.Err && repeated.Err.Error() == out.Err.Error(), "clean semantic repeat must be a fresh observation")
-	} else if wantDecision == 1 {
+		logicalMDBXAssert(t, any(repeated.Err) != any(out.Err) && repeated.Err.Error() == out.Err.Error(), "clean semantic repeat must be a fresh observation")
+	case 1:
 		repeated := startupRun(w)
 		startupTuple(t, repeated, false, 0, "")
-		e, ok := repeated.Err.(*mdbx.EngineError)
+		e, ok := any(repeated.Err).(*mdbx.EngineError)
 		logicalMDBXAssert(t, ok && e.Class == "InvalidInput" && e.Operation == "view" && e.Code == 22 && e.Diagnostic == "canonical owner index is already verified", "accepted observation preserves already verified refusal")
 		startupFreshGuard(t, w, true)
 	}
@@ -277,71 +278,71 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 		}
 	})
 	for _, row := range []struct {
-		name string
+		name           string
 		active, cursor int
-		tip uint64
-		work [40]byte
-		prepare, edit string
-		excluded int
-		want string
+		tip            uint64
+		work           [40]byte
+		prepare, edit  string
+		excluded       int
+		want           string
 	}{
-		{"R02-R09 chainID", 0, 0, 1, [40]byte{39:2}, "", "chainID", -1, "network"},
-		{"R02-R09 genesisHash", 0, 0, 1, [40]byte{39:2}, "", "genesisHash", -1, "network"},
-		{"R02-R09 U", 0, 0, 1, [40]byte{39:2}, "", "U", -1, "bounds"},
-		{"R11 PRE lower", -1, -1, 1, [40]byte{39:1}, "", "", -1, "work"},
-		{"A11 PRE lower", -1, -1, 1, [40]byte{39:2}, "", "", -1, ""},
-		{"A11 PRE upper", -1, -1, 1, [40]byte{7:2}, "", "", -1, ""},
-		{"R11 PRE upper", -1, -1, 1, [40]byte{7:2,39:1}, "", "", -1, "work"},
-		{"A11 PRE max lower", -1, -1, 0xffffffff, [40]byte{35:1}, "", "", -1, ""},
-		{"A11 PRE max upper", -1, -1, 0xffffffff, [40]byte{3:1}, "", "", -1, ""},
-		{"R17 G1 upper", 0, -1, 1, [40]byte{7:2}, "", "", -1, "work"},
-		{"A11 G1 lower", 0, -1, 1, [40]byte{39:2}, "", "", -1, ""},
-		{"A11 G1 upper", 0, -1, 1, [40]byte{7:1,39:1}, "", "", -1, ""},
-		{"A11 unknown unattainable sum", 0, -1, 1, [40]byte{7:1}, "", "", -1, ""},
-		{"A11 known G max lower", 0, -1, 0xffffffff, [40]byte{35:1}, "", "", -1, ""},
-		{"A11 known G max upper", 0, -1, 0xffffffff, [40]byte{4:255,5:255,6:255,7:255,39:1}, "", "", -1, ""},
-		{"R17 Gmax lower", 0, -1, 1, [40]byte{39:2}, "target1 genesis", "", -1, "work"},
-		{"A11 Gmax lower", 0, -1, 1, [40]byte{7:1,39:1}, "target1 genesis", "", -1, ""},
-		{"A11 Gmax upper", 0, -1, 1, [40]byte{7:2}, "target1 genesis", "", -1, ""},
-		{"A12 max lower", 0, 0, 0xffffffff, [40]byte{35:1}, "", "", -1, ""},
-		{"A12 max upper", 0, 0, 0xffffffff, [40]byte{4:255,5:255,6:255,7:255,39:1}, "", "", -1, ""},
-		{"R12 max earlier G", 0, 0, 0xffffffff, [40]byte{3:1}, "", "", -1, "work"},
-		{"R12 partial no remainder", 0, 1, 3, [40]byte{7:1,39:1}, "target1 later", "", -1, "work"},
-		{"R12 partial insufficient", 0, 1, 3, [40]byte{7:1,39:2}, "target1 later", "", -1, "work"},
-		{"A12 partial lower", 0, 1, 3, [40]byte{7:1,39:3}, "target1 later", "", -1, ""},
-		{"A12 partial half lower", 0, 1, 3, [40]byte{8:128,39:3}, "target2 later", "", -1, ""},
-		{"A12 partial upper", 0, 1, 3, [40]byte{7:2,8:128,39:1}, "target2 later", "", -1, ""},
-		{"R12 partial upper", 0, 1, 3, [40]byte{7:2,8:128,39:2}, "target2 later", "", -1, "work"},
-		{"R13 tip genesis", 0, -1, 1, [40]byte{39:2}, "", "tip genesis", -1, "repeat"},
-		{"R13 tip cursor", 0, 1, 3, [40]byte{39:4}, "", "tip cursor", -1, "repeat"},
-		{"R13 cursor genesis", 0, 1, 3, [40]byte{39:4}, "", "cursor genesis", -1, "repeat"},
-		{"H11 generic before repeat exclusion", -1, -1, 1, [40]byte{39:1}, "", "tip genesis", 0, "work"},
-		{"H11 repeat before exclusion", 0, -1, 1, [40]byte{39:2}, "", "tip genesis", 0, "repeat"},
-		{"H11 network before work", 0, -1, 1, [40]byte{39:1}, "", "chainID", -1, "network"},
-		{"H11 token before work", 0, -1, 1, [40]byte{39:1}, "", "token", 5, "token"},
-		{"R14 excluded genesis", 0, 1, 3, [40]byte{39:4}, "", "", 0, "excluded"},
-		{"R14 excluded tip", 0, 1, 3, [40]byte{39:4}, "", "", 1, "excluded"},
-		{"R14 excluded cursor", 0, 1, 3, [40]byte{39:4}, "", "", 2, "excluded"},
-		{"A13 unrelated recorded heights", 2, 2, 3, [40]byte{39:4}, "", "", 5, ""},
-		{"R15 interior target exclusion", 0, 2, 3, [40]byte{39:4}, "", "", 3, "excluded"},
-		{"R16 active cursor prefix exclusion", 2, 2, 3, [40]byte{39:4}, "", "", 3, "excluded"},
-		{"R16 active tip prefix exclusion", 3, -1, 3, [40]byte{39:4}, "", "active tip", 3, "excluded"},
-		{"R16 active known tip work", 3, -1, 3, [40]byte{39:5}, "", "active tip", -1, "known tip"},
-		{"R16 active known tip height", 2, -1, 3, [40]byte{39:4}, "", "tip interior", -1, "known tip"},
-		{"R13 target tip height", 0, 2, 3, [40]byte{39:4}, "", "tip interior", -1, "repeat"},
-		{"R13 active cursor height", 2, 2, 3, [40]byte{39:4}, "", "cursor interior", -1, "repeat"},
-		{"R13 target cursor height", 0, 2, 3, [40]byte{39:4}, "", "cursor interior", -1, "repeat"},
-		{"A14 unrelated OLD exclusion", 3, 0, 4, [40]byte{39:5}, "", "", 3, ""},
-		{"A14 exclusion above known shorter cursor", 3, 1, 4, [40]byte{39:5}, "", "", 4, ""},
-		{"A14 exclusion above known shorter tip", 3, -1, 1, [40]byte{39:2}, "", "tip interior", 4, ""},
-		{"A14 unknown tip cursor fork", 3, 1, 4, [40]byte{39:5}, "fork cursor", "", -1, ""},
-		{"R16 fixed tip cursor fork", 3, 1, 3, [40]byte{39:4}, "fork cursor", "active tip", -1, "ancestry"},
-		{"H12 known tip work before ancestry exclusion", 3, 1, 3, [40]byte{39:5}, "fork cursor", "active tip", 3, "known tip"},
-		{"H12 known ancestry before exclusion", 3, 1, 3, [40]byte{39:4}, "fork cursor", "active tip", 3, "ancestry"},
+		{"R02-R09 chainID", 0, 0, 1, [40]byte{39: 2}, "", "chainID", -1, "network"},
+		{"R02-R09 genesisHash", 0, 0, 1, [40]byte{39: 2}, "", "genesisHash", -1, "network"},
+		{"R02-R09 U", 0, 0, 1, [40]byte{39: 2}, "", "U", -1, "bounds"},
+		{"R11 PRE lower", -1, -1, 1, [40]byte{39: 1}, "", "", -1, "work"},
+		{"A11 PRE lower", -1, -1, 1, [40]byte{39: 2}, "", "", -1, ""},
+		{"A11 PRE upper", -1, -1, 1, [40]byte{7: 2}, "", "", -1, ""},
+		{"R11 PRE upper", -1, -1, 1, [40]byte{7: 2, 39: 1}, "", "", -1, "work"},
+		{"A11 PRE max lower", -1, -1, 0xffffffff, [40]byte{35: 1}, "", "", -1, ""},
+		{"A11 PRE max upper", -1, -1, 0xffffffff, [40]byte{3: 1}, "", "", -1, ""},
+		{"R17 G1 upper", 0, -1, 1, [40]byte{7: 2}, "", "", -1, "work"},
+		{"A11 G1 lower", 0, -1, 1, [40]byte{39: 2}, "", "", -1, ""},
+		{"A11 G1 upper", 0, -1, 1, [40]byte{7: 1, 39: 1}, "", "", -1, ""},
+		{"A11 unknown unattainable sum", 0, -1, 1, [40]byte{7: 1}, "", "", -1, ""},
+		{"A11 known G max lower", 0, -1, 0xffffffff, [40]byte{35: 1}, "", "", -1, ""},
+		{"A11 known G max upper", 0, -1, 0xffffffff, [40]byte{4: 255, 5: 255, 6: 255, 7: 255, 39: 1}, "", "", -1, ""},
+		{"R17 Gmax lower", 0, -1, 1, [40]byte{39: 2}, "target1 genesis", "", -1, "work"},
+		{"A11 Gmax lower", 0, -1, 1, [40]byte{7: 1, 39: 1}, "target1 genesis", "", -1, ""},
+		{"A11 Gmax upper", 0, -1, 1, [40]byte{7: 2}, "target1 genesis", "", -1, ""},
+		{"A12 max lower", 0, 0, 0xffffffff, [40]byte{35: 1}, "", "", -1, ""},
+		{"A12 max upper", 0, 0, 0xffffffff, [40]byte{4: 255, 5: 255, 6: 255, 7: 255, 39: 1}, "", "", -1, ""},
+		{"R12 max earlier G", 0, 0, 0xffffffff, [40]byte{3: 1}, "", "", -1, "work"},
+		{"R12 partial no remainder", 0, 1, 3, [40]byte{7: 1, 39: 1}, "target1 later", "", -1, "work"},
+		{"R12 partial insufficient", 0, 1, 3, [40]byte{7: 1, 39: 2}, "target1 later", "", -1, "work"},
+		{"A12 partial lower", 0, 1, 3, [40]byte{7: 1, 39: 3}, "target1 later", "", -1, ""},
+		{"A12 partial half lower", 0, 1, 3, [40]byte{8: 128, 39: 3}, "target2 later", "", -1, ""},
+		{"A12 partial upper", 0, 1, 3, [40]byte{7: 2, 8: 128, 39: 1}, "target2 later", "", -1, ""},
+		{"R12 partial upper", 0, 1, 3, [40]byte{7: 2, 8: 128, 39: 2}, "target2 later", "", -1, "work"},
+		{"R13 tip genesis", 0, -1, 1, [40]byte{39: 2}, "", "tip genesis", -1, "repeat"},
+		{"R13 tip cursor", 0, 1, 3, [40]byte{39: 4}, "", "tip cursor", -1, "repeat"},
+		{"R13 cursor genesis", 0, 1, 3, [40]byte{39: 4}, "", "cursor genesis", -1, "repeat"},
+		{"H11 generic before repeat exclusion", -1, -1, 1, [40]byte{39: 1}, "", "tip genesis", 0, "work"},
+		{"H11 repeat before exclusion", 0, -1, 1, [40]byte{39: 2}, "", "tip genesis", 0, "repeat"},
+		{"H11 network before work", 0, -1, 1, [40]byte{39: 1}, "", "chainID", -1, "network"},
+		{"H11 token before work", 0, -1, 1, [40]byte{39: 1}, "", "token", 5, "token"},
+		{"R14 excluded genesis", 0, 1, 3, [40]byte{39: 4}, "", "", 0, "excluded"},
+		{"R14 excluded tip", 0, 1, 3, [40]byte{39: 4}, "", "", 1, "excluded"},
+		{"R14 excluded cursor", 0, 1, 3, [40]byte{39: 4}, "", "", 2, "excluded"},
+		{"A13 unrelated recorded heights", 2, 2, 3, [40]byte{39: 4}, "", "", 5, ""},
+		{"R15 interior target exclusion", 0, 2, 3, [40]byte{39: 4}, "", "", 3, "excluded"},
+		{"R16 active cursor prefix exclusion", 2, 2, 3, [40]byte{39: 4}, "", "", 3, "excluded"},
+		{"R16 active tip prefix exclusion", 3, -1, 3, [40]byte{39: 4}, "", "active tip", 3, "excluded"},
+		{"R16 active known tip work", 3, -1, 3, [40]byte{39: 5}, "", "active tip", -1, "known tip"},
+		{"R16 active known tip height", 2, -1, 3, [40]byte{39: 4}, "", "tip interior", -1, "known tip"},
+		{"R13 target tip height", 0, 2, 3, [40]byte{39: 4}, "", "tip interior", -1, "repeat"},
+		{"R13 active cursor height", 2, 2, 3, [40]byte{39: 4}, "", "cursor interior", -1, "repeat"},
+		{"R13 target cursor height", 0, 2, 3, [40]byte{39: 4}, "", "cursor interior", -1, "repeat"},
+		{"A14 unrelated OLD exclusion", 3, 0, 4, [40]byte{39: 5}, "", "", 3, ""},
+		{"A14 exclusion above known shorter cursor", 3, 1, 4, [40]byte{39: 5}, "", "", 4, ""},
+		{"A14 exclusion above known shorter tip", 3, -1, 1, [40]byte{39: 2}, "", "tip interior", 4, ""},
+		{"A14 unknown tip cursor fork", 3, 1, 4, [40]byte{39: 5}, "fork cursor", "", -1, ""},
+		{"R16 fixed tip cursor fork", 3, 1, 3, [40]byte{39: 4}, "fork cursor", "active tip", -1, "ancestry"},
+		{"H12 known tip work before ancestry exclusion", 3, 1, 3, [40]byte{39: 5}, "fork cursor", "active tip", 3, "known tip"},
+		{"H12 known ancestry before exclusion", 3, 1, 3, [40]byte{39: 4}, "fork cursor", "active tip", 3, "ancestry"},
 	} {
 		heights := []uint64{0}
 		if row.excluded >= 0 {
-			heights = []uint64{0,1,3,4,0xffffffff}
+			heights = []uint64{0, 1, 3, 4, 0xffffffff}
 		}
 		for _, recordedHeight := range heights {
 			name := row.name
@@ -390,10 +391,10 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 							hash = target.TipHash
 						case 2:
 							hash = a.Replay.Cursor.BlockHash
-						case 3,4:
+						case 3, 4:
 							hash = w.hashes[row.excluded-2]
 						}
-						a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight:recordedHeight, FirstInvalidBlockHash:hash, ExactConsensusError:[]byte("BLOCK_ERR_PARSE")}
+						a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: recordedHeight, FirstInvalidBlockHash: hash, ExactConsensusError: []byte("BLOCK_ERR_PARSE")}
 						if row.edit == "token" {
 							a.ExcludedInvalidBranch.ExactConsensusError = []byte("CONSENSUS_INVALID(BLOCK_ERR_PARSE)")
 						}
@@ -405,7 +406,7 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 				}
 				out := startupPreserved(t, w, decision, result)
 				if row.want != "" {
-					want := map[string]string{"network":"startup replay network identity mismatch", "bounds":"startup active bounds mismatch", "work":"startup replay target work outside consistency bounds", "repeat":"startup replay target repeats a known hash", "excluded":"startup replay target contains excluded hash", "known tip":"startup known target tip mismatch", "ancestry":"startup known target cursor ancestry mismatch", "token":"invalid startup exclusion token"}[row.want]
+					want := map[string]string{"network": "startup replay network identity mismatch", "bounds": "startup active bounds mismatch", "work": "startup replay target work outside consistency bounds", "repeat": "startup replay target repeats a known hash", "excluded": "startup replay target contains excluded hash", "known tip": "startup known target tip mismatch", "ancestry": "startup known target cursor ancestry mismatch", "token": "invalid startup exclusion token"}[row.want]
 					logicalMDBXAssert(t, out.Err.Error() == want, "observed point owner/order: %v, want%s", out.Err, want)
 				}
 			})
@@ -516,7 +517,7 @@ func startupSemanticDefects(t *testing.T) {
 				continue
 			}
 			t.Run(fmt.Sprintf("R03-R07 g%d %s", generation, defect), func(t *testing.T) {
-				active, cursor := map[uint64]int{1:2, 2:0}[generation], 2
+				active, cursor := map[uint64]int{1: 2, 2: 0}[generation], 2
 				if defect == "wrong genesis" {
 					active, cursor = 0, 0
 				}
@@ -595,8 +596,8 @@ func startupSemanticEdit(t *testing.T, w *replayWorld, generation uint64, defect
 			clear(header[76:108])
 		case "target1 genesis", "target1 later", "target2 later":
 			clear(header[76:108])
-			header[107] = map[string]byte{"target1 genesis":1, "target1 later":1, "target2 later":2}[defect]
-			work := map[string][40]byte{"target1 genesis":{7:1}, "target1 later":{7:1,39:1}, "target2 later":{8:128,39:1}}[defect]
+			header[107] = map[string]byte{"target1 genesis": 1, "target1 later": 1, "target2 later": 2}[defect]
+			work := map[string][40]byte{"target1 genesis": {7: 1}, "target1 later": {7: 1, 39: 1}, "target2 later": {8: 128, 39: 1}}[defect]
 			copy(f.Literal[64:], work[:])
 		default:
 			header[4] ^= 1

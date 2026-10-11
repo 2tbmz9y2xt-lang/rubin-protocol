@@ -44,8 +44,8 @@ type replayStartupCheck struct {
 	observedResult             string
 	completedCanonicalPositive bool
 	// Only decoded fixed metadata and scalar prefix facts are retained.
-	replay *mdbx.ReplayV1
-	excluded *[32]byte
+	replay                               *mdbx.ReplayV1
+	excluded                             *[32]byte
 	activeExcluded, activeCursorMismatch bool
 }
 

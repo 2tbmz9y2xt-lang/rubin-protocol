@@ -218,12 +218,12 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 			a := w.authority()
 			raw, _ := a.Encode()
 			map[string]func(){
-				"missing": func() { raw = nil },
-				"truncated": func() { raw = raw[:39] },
-				"trailing": func() { raw = append(raw, 0) },
-				"version": func() { raw[0] = 2 },
-				"phase": func() { raw[34] = 255 },
-				"lifecycle": func() { raw[35] = 1 },
+				"missing":         func() { raw = nil },
+				"truncated":       func() { raw = raw[:39] },
+				"trailing":        func() { raw = append(raw, 0) },
+				"version":         func() { raw[0] = 2 },
+				"phase":           func() { raw[34] = 255 },
+				"lifecycle":       func() { raw[35] = 1 },
 				"pending profile": func() { raw = replayIllegalTail(t, raw, []byte{1, 2, 0, 0, 0}) },
 				"selected": func() {
 					work := sideWorldWork(1)
@@ -234,26 +234,28 @@ func TestReplayStartupMDBXNativeRows(t *testing.T) {
 					detached := bytes.Join([][]byte{{0, 1}, binary.BigEndian.AppendUint64(nil, 1), bytes.Repeat([]byte{1}, 32), binary.BigEndian.AppendUint64(nil, 1), binary.BigEndian.AppendUint64(nil, 1), bytes.Repeat([]byte{1}, 32), {0, 1}, binary.BigEndian.AppendUint64(nil, 1)}, nil)
 					raw = replayIllegalTail(t, raw, []byte{0, 0, 0, 1}, detached)
 				},
-				"cleanup payload": func() { raw = replayIllegalTail(t, raw, []byte{1, 1}, binary.BigEndian.AppendUint64(nil, 3), []byte{0, 0, 0, 0}) },
-				"ordinary payload": func() { raw = replayIllegalTail(t, raw, []byte{2, 0, 0, 0, 0}) },
-				"unsupported malformed": func() { raw[34], raw[36] = 1, 255 },
-				"same generation": func() { binary.BigEndian.PutUint64(raw[37:45], 1) },
-				"zero active": func() { clear(raw[18:26]) },
+				"cleanup payload": func() {
+					raw = replayIllegalTail(t, raw, []byte{1, 1}, binary.BigEndian.AppendUint64(nil, 3), []byte{0, 0, 0, 0})
+				},
+				"ordinary payload":       func() { raw = replayIllegalTail(t, raw, []byte{2, 0, 0, 0, 0}) },
+				"unsupported malformed":  func() { raw[34], raw[36] = 1, 255 },
+				"same generation":        func() { binary.BigEndian.PutUint64(raw[37:45], 1) },
+				"zero active":            func() { clear(raw[18:26]) },
 				"zero target generation": func() { clear(raw[37:45]) },
-				"next zero": func() { clear(raw[26:34]) },
-				"target equals next": func() { binary.BigEndian.PutUint64(raw[26:34], 2) },
-				"cursor zero": func() { raw[189] = 0 },
-				"cursor unknown": func() { raw[189] = 255 },
-				"cursor beyond tip": func() { binary.BigEndian.PutUint64(raw[190:198], 2) },
-				"cursor genesis hash": func() { raw[198] ^= 1 },
-				"target height zero": func() { clear(raw[141:149]) },
+				"next zero":              func() { clear(raw[26:34]) },
+				"target equals next":     func() { binary.BigEndian.PutUint64(raw[26:34], 2) },
+				"cursor zero":            func() { raw[189] = 0 },
+				"cursor unknown":         func() { raw[189] = 255 },
+				"cursor beyond tip":      func() { binary.BigEndian.PutUint64(raw[190:198], 2) },
+				"cursor genesis hash":    func() { raw[198] ^= 1 },
+				"target height zero":     func() { clear(raw[141:149]) },
 				"target height overflow": func() { binary.BigEndian.PutUint64(raw[141:149], 0x100000000) },
-				"target work zero": func() { clear(raw[149:189]) },
+				"target work zero":       func() { clear(raw[149:189]) },
 				"target work overflow": func() {
 					clear(raw[149:189])
 					raw[152], raw[188] = 1, 1
 				},
-				"profile zero": func() { raw[36] = 0 },
+				"profile zero":    func() { raw[36] = 0 },
 				"profile unknown": func() { raw[36] = 255 },
 				"pruned B0 U13681": func() {
 					raw[1] = 1
@@ -395,7 +397,7 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 			w.store = w.reopen()
 			before := w.image()
 			store := map[string]*mdbx.Store{"zero chainID": w.store, "zero genesis": w.store, "nil Store zero owner": nil}[shape]
-			owner := map[string]*mdbx.OperationReservationOwner{"zero chainID": w.owner, "zero genesis": w.owner, "nil Store zero owner": &mdbx.OperationReservationOwner{}}[shape]
+			owner := map[string]*mdbx.OperationReservationOwner{"zero chainID": w.owner, "zero genesis": w.owner, "nil Store zero owner": {}}[shape]
 			chain := map[string][32]byte{"zero chainID": {}, "zero genesis": w.genesis.ChainID, "nil Store zero owner": w.genesis.ChainID}[shape]
 			genesis := map[string][32]byte{"zero chainID": w.genesis.GenesisHash, "zero genesis": {}, "nil Store zero owner": w.genesis.GenesisHash}[shape]
 			var out ReplayStartupOutcomeV1
@@ -414,18 +416,18 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 	})
 	for _, row := range []struct {
 		name, edit, want string
-		cursor int
-		tip uint64
-		work [40]byte
-		heights []uint64
+		cursor           int
+		tip              uint64
+		work             [40]byte
+		heights          []uint64
 	}{
-		{"generic PRE invalid work", "", "startup replay target work outside consistency bounds", -1, 1, [40]byte{39:1}, []uint64{0}},
-		{"tip equals genesis", "tip genesis", "startup replay target repeats a known hash", -1, 1, [40]byte{39:2}, []uint64{0}},
-		{"tip equals cursor", "tip cursor", "startup replay target repeats a known hash", 1, 3, [40]byte{39:4}, []uint64{0}},
-		{"cursor equals genesis", "cursor genesis", "startup replay target repeats a known hash", 1, 3, [40]byte{39:4}, []uint64{0}},
-		{"excluded genesis", "excluded genesis", "startup replay target contains excluded hash", -1, 1, [40]byte{39:2}, []uint64{0,0xffffffff}},
-		{"excluded tip", "excluded tip", "startup replay target contains excluded hash", -1, 1, [40]byte{39:2}, []uint64{0,0xffffffff}},
-		{"excluded cursor", "excluded cursor", "startup replay target contains excluded hash", 1, 3, [40]byte{39:4}, []uint64{0,0xffffffff}},
+		{"generic PRE invalid work", "", "startup replay target work outside consistency bounds", -1, 1, [40]byte{39: 1}, []uint64{0}},
+		{"tip equals genesis", "tip genesis", "startup replay target repeats a known hash", -1, 1, [40]byte{39: 2}, []uint64{0}},
+		{"tip equals cursor", "tip cursor", "startup replay target repeats a known hash", 1, 3, [40]byte{39: 4}, []uint64{0}},
+		{"cursor equals genesis", "cursor genesis", "startup replay target repeats a known hash", 1, 3, [40]byte{39: 4}, []uint64{0}},
+		{"excluded genesis", "excluded genesis", "startup replay target contains excluded hash", -1, 1, [40]byte{39: 2}, []uint64{0, 0xffffffff}},
+		{"excluded tip", "excluded tip", "startup replay target contains excluded hash", -1, 1, [40]byte{39: 2}, []uint64{0, 0xffffffff}},
+		{"excluded cursor", "excluded cursor", "startup replay target contains excluded hash", 1, 3, [40]byte{39: 4}, []uint64{0, 0xffffffff}},
 	} {
 		for _, recordedHeight := range row.heights {
 			t.Run(fmt.Sprintf("H11 %s height%d before first pull", row.name, recordedHeight), func(t *testing.T) {
@@ -441,8 +443,8 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 					case "cursor genesis":
 						a.Replay.Cursor.BlockHash = target.GenesisHash
 					}
-					if hash, excluded := map[string][32]byte{"excluded genesis":target.GenesisHash,"excluded tip":target.TipHash,"excluded cursor":a.Replay.Cursor.BlockHash}[row.edit]; excluded {
-						a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight:recordedHeight,FirstInvalidBlockHash:hash,ExactConsensusError:[]byte("BLOCK_ERR_PARSE")}
+					if hash, excluded := map[string][32]byte{"excluded genesis": target.GenesisHash, "excluded tip": target.TipHash, "excluded cursor": a.Replay.Cursor.BlockHash}[row.edit]; excluded {
+						a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: recordedHeight, FirstInvalidBlockHash: hash, ExactConsensusError: []byte("BLOCK_ERR_PARSE")}
 					}
 				})
 				before := w.image()
@@ -450,7 +452,7 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 				var out ReplayStartupOutcomeV1
 				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageStartupPullEIO, 2, binary.BigEndian.AppendUint64(nil, 1), func() { out = startupRun(w) })
 				startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
-				logicalMDBXAssert(t, out.Err.Error() == row.want && evidence.BeginOld == 1 && evidence.OldAborts == 1 && evidence.Faults == 0 && evidence.OldGets == ([8]uint64{0:1}) && evidence.OldPulls == ([8]uint64{}) && err != nil && err.Error() == "selected damage fixture site was not reached exactly as armed", "metadata before canonical native read: %+v/%v/%v", evidence, out.Err, err)
+				logicalMDBXAssert(t, out.Err.Error() == row.want && evidence.BeginOld == 1 && evidence.OldAborts == 1 && evidence.Faults == 0 && evidence.OldGets == ([8]uint64{0: 1}) && evidence.OldPulls == ([8]uint64{}) && err != nil && err.Error() == "selected damage fixture site was not reached exactly as armed", "metadata before canonical native read: %+v/%v/%v", evidence, out.Err, err)
 				replaySameImage(t, before, w.image(), "metadata readonly image")
 				startupFreshGuard(t, w, false)
 				logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "metadata grant release")
@@ -459,67 +461,69 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 	}
 	for _, generation := range []uint64{1, 2} {
 		for _, relation := range []string{"", "partial lower", "partial upper"} {
-		for _, fault := range []string{"pull", "header", "inverse probe", "inverse pass", "forward probe"} {
-			name := fmt.Sprintf("R08 g%d %s", generation, fault)
-			if relation != "" {
-				name = fmt.Sprintf("H13 g%d %s %s", generation, fault, relation)
-			}
-			t.Run(name, func(t *testing.T) {
-				w := startupWorld(t, map[uint64]int{1:1, 2:0}[generation], 1)
-				var targetHeader []byte
+			for _, fault := range []string{"pull", "header", "inverse probe", "inverse pass", "forward probe"} {
+				name := fmt.Sprintf("R08 g%d %s", generation, fault)
 				if relation != "" {
-					work, target := [40]byte{7:1,39:1}, byte(1)
-					declared := [40]byte{7:1,39:2}
-					if relation == "partial upper" {
-						work, target, declared = [40]byte{8:128,39:1}, 2, [40]byte{7:2,8:128,39:2}
+					name = fmt.Sprintf("H13 g%d %s %s", generation, fault, relation)
+				}
+				t.Run(name, func(t *testing.T) {
+					w := startupWorld(t, map[uint64]int{1: 1, 2: 0}[generation], 1)
+					var targetHeader []byte
+					if relation != "" {
+						work, target := [40]byte{7: 1, 39: 1}, byte(1)
+						declared := [40]byte{7: 1, 39: 2}
+						if relation == "partial upper" {
+							work, target, declared = [40]byte{8: 128, 39: 1}, 2, [40]byte{7: 2, 8: 128, 39: 2}
+						}
+						targetHeader = startupTargetHeader(t, w, work, target)
+						w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+							a.Replay.Target.TipHeight, a.Replay.Target.CumulativeChainwork = 3, declared
+						})
+						w.pre = w.image()
 					}
-					targetHeader = startupTargetHeader(t, w, work, target)
-					w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHeight, a.Replay.Target.CumulativeChainwork = 3, declared })
-					w.pre = w.image()
-				}
-				w.store = w.reopen()
-				before := w.image()
-				rank, scenario := uint8(2), mdbx.SelectedDamageStartupPullEIO
-				key := binary.BigEndian.AppendUint64(nil, generation)
-				switch fault {
-				case "header":
-					rank, scenario, key = 3, mdbx.SelectedDamageGetEIO, w.hashes[0][:]
-				case "inverse probe":
-					rank, scenario, key = 7, mdbx.SelectedDamageGetEIO, logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[0]))
-				case "inverse pass":
-					rank = 7
-				case "forward probe":
-					scenario, key = mdbx.SelectedDamageGetEIO, logicalMDBXMust(mdbx.HeightKey(generation, 0))
-				}
-				if generation == 2 && fault == "header" {
-					if relation == "" {
-						targetHeader = startupTargetHeader(t, w, sideWorldWork(2), 0)
+					w.store = w.reopen()
+					before := w.image()
+					rank, scenario := uint8(2), mdbx.SelectedDamageStartupPullEIO
+					key := binary.BigEndian.AppendUint64(nil, generation)
+					switch fault {
+					case "header":
+						rank, scenario, key = 3, mdbx.SelectedDamageGetEIO, w.hashes[0][:]
+					case "inverse probe":
+						rank, scenario, key = 7, mdbx.SelectedDamageGetEIO, logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[0]))
+					case "inverse pass":
+						rank = 7
+					case "forward probe":
+						scenario, key = mdbx.SelectedDamageGetEIO, logicalMDBXMust(mdbx.HeightKey(generation, 0))
 					}
-					key, before = targetHeader, w.image()
-				}
-				var out ReplayStartupOutcomeV1
-				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() { out = startupRun(w) })
-				logicalMDBXAssert(t, err == nil && evidence.BeginOld == 1 && evidence.BeginWrite == 0 && evidence.BeginRead == 0 && evidence.Faults == 1 && evidence.OldAborts == 1 && evidence.Commits == 0, "actual startup transport: %+v/%v", evidence, err)
-				resource := [3]string{"", "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"}[generation]
-				startupTuple(t, out, false, 2, resource)
-				e := out.Err.(*mdbx.EngineError)
-				operation := map[mdbx.SelectedDamageScenario]string{mdbx.SelectedDamageStartupPullEIO: "prefix-page", mdbx.SelectedDamageGetEIO: "get"}[scenario]
-				logicalMDBXAssert(t, e.Class == "IO" && e.Code == 5 && e.Operation == operation && e.Cause == nil && !e.ReopenRequired, "source raw tuple: %+v", e)
-				logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("consumed View callback"); return nil }) == out.Err, "cached source identity")
-				_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("consumed Update callback"); return mdbx.Batch{}, nil })
-				logicalMDBXAssert(t, next == out.Err, "cached Update identity")
-				w.store = w.reopen()
-				replaySameImage(t, before, w.image(), "read EIO image")
-				if w.pre != nil {
-					startupRawImageEqual(t, w)
-				}
-				startupFreshGuard(t, w, false)
-				if generation == 2 && fault == "header" && relation == "" {
-					startupTuple(t, startupRun(w), true, 1, "")
-					startupRawImageEqual(t, w)
-				}
-			})
-		}
+					if generation == 2 && fault == "header" {
+						if relation == "" {
+							targetHeader = startupTargetHeader(t, w, sideWorldWork(2), 0)
+						}
+						key, before = targetHeader, w.image()
+					}
+					var out ReplayStartupOutcomeV1
+					evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, rank, key, func() { out = startupRun(w) })
+					logicalMDBXAssert(t, err == nil && evidence.BeginOld == 1 && evidence.BeginWrite == 0 && evidence.BeginRead == 0 && evidence.Faults == 1 && evidence.OldAborts == 1 && evidence.Commits == 0, "actual startup transport: %+v/%v", evidence, err)
+					resource := [3]string{"", "LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)", "LOCAL_RESOURCE_UNAVAILABLE(recovery_artifact)"}[generation]
+					startupTuple(t, out, false, 2, resource)
+					e := out.Err.(*mdbx.EngineError)
+					operation := map[mdbx.SelectedDamageScenario]string{mdbx.SelectedDamageStartupPullEIO: "prefix-page", mdbx.SelectedDamageGetEIO: "get"}[scenario]
+					logicalMDBXAssert(t, e.Class == "IO" && e.Code == 5 && e.Operation == operation && e.Cause == nil && !e.ReopenRequired, "source raw tuple: %+v", e)
+					logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { t.Fatal("consumed View callback"); return nil }) == out.Err, "cached source identity")
+					_, _, next := w.store.Update(func(*mdbx.Reader) (mdbx.Batch, error) { t.Fatal("consumed Update callback"); return mdbx.Batch{}, nil })
+					logicalMDBXAssert(t, next == out.Err, "cached Update identity")
+					w.store = w.reopen()
+					replaySameImage(t, before, w.image(), "read EIO image")
+					if w.pre != nil {
+						startupRawImageEqual(t, w)
+					}
+					startupFreshGuard(t, w, false)
+					if generation == 2 && fault == "header" && relation == "" {
+						startupTuple(t, startupRun(w), true, 1, "")
+						startupRawImageEqual(t, w)
+					}
+				})
+			}
 		}
 	}
 	for _, generation := range []uint64{1, 2} {
@@ -539,10 +543,10 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 					t.Run(name, func(t *testing.T) {
 						active, cursor, height := 1, 1, uint64(0)
 						if fact != "" {
-							active, cursor, height = map[uint64]int{1:2, 2:0}[generation], 2, 1
+							active, cursor, height = map[uint64]int{1: 2, 2: 0}[generation], 2, 1
 						}
 						if fact == "known G" {
-							active, cursor, height = map[uint64]int{1:0, 2:-1}[generation], 0, 0
+							active, cursor, height = map[uint64]int{1: 0, 2: -1}[generation], 0, 0
 						}
 						w := startupWorld(t, active, cursor)
 						w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
@@ -552,9 +556,9 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 							case "cursor":
 								a.Replay.Cursor.BlockHash = w.hashes[1]
 							case "excluded":
-								a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight:0xffffffff, FirstInvalidBlockHash:w.hashes[1], ExactConsensusError:[]byte("BLOCK_ERR_PARSE")}
+								a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 0xffffffff, FirstInvalidBlockHash: w.hashes[1], ExactConsensusError: []byte("BLOCK_ERR_PARSE")}
 							case "known G":
-								a.Replay.Target.CumulativeChainwork = [40]byte{7:2}
+								a.Replay.Target.CumulativeChainwork = [40]byte{7: 2}
 							}
 						})
 						switch current {
@@ -563,7 +567,7 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 							if height != 0 {
 								parent = w.hashes[height-1]
 							}
-							startupRaw(t, w, 2, logicalMDBXMust(mdbx.HeightKey(generation,height)), mdbx.ChainValue(w.hashes[height],parent,sideWorldWork(height+2)))
+							startupRaw(t, w, 2, logicalMDBXMust(mdbx.HeightKey(generation, height)), mdbx.ChainValue(w.hashes[height], parent, sideWorldWork(height+2)))
 						case "header":
 							key := w.hashes[height][:]
 							if fact == "" && generation == 2 {
@@ -571,51 +575,51 @@ func TestReplayStartupMDBXReachedReadOrder(t *testing.T) {
 							}
 							startupRaw(t, w, 3, key, nil)
 						case "inverse":
-							startupRaw(t, w, 7, logicalMDBXMust(mdbx.CanonicalOwnerKey(generation,w.hashes[height])), binary.BigEndian.AppendUint64(nil,height+1))
+							startupRaw(t, w, 7, logicalMDBXMust(mdbx.CanonicalOwnerKey(generation, w.hashes[height])), binary.BigEndian.AppendUint64(nil, height+1))
 						}
 						if current == "clean" && generation == 1 && fact == "excluded" {
 							height = 2
 						}
 						if tail == "malformed width" {
-							startupRaw(t, w, 2, logicalMDBXMust(mdbx.HeightKey(generation,height+1)), make([]byte,103))
+							startupRaw(t, w, 2, logicalMDBXMust(mdbx.HeightKey(generation, height+1)), make([]byte, 103))
 						}
 						before := w.pre
 						if before == nil {
 							before = w.image()
 						}
 						w.store = w.reopen()
-						seek, scenario := append(logicalMDBXMust(mdbx.HeightKey(generation,height)),0), mdbx.SelectedDamageStartupPullEIO
+						seek, scenario := append(logicalMDBXMust(mdbx.HeightKey(generation, height)), 0), mdbx.SelectedDamageStartupPullEIO
 						if tail == "malformed width" {
 							seek, scenario = nil, mdbx.SelectedDamageProbeOnly
 						}
 						var out ReplayStartupOutcomeV1
-						evidence, err := mdbx.FixtureSelectedDamage(w.store,w.owner,scenario,2,seek,func(){out=startupRun(w)})
-						startupTuple(t,out,false,3,"TERMINAL_STORE_INTEGRITY(canonical)")
-						want := map[string]string{"work":"startup cumulative work mismatch", "header":"startup required header is absent", "inverse":"startup inverse height mismatch"}[current]
+						evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, 2, seek, func() { out = startupRun(w) })
+						startupTuple(t, out, false, 3, "TERMINAL_STORE_INTEGRITY(canonical)")
+						want := map[string]string{"work": "startup cumulative work mismatch", "header": "startup required header is absent", "inverse": "startup inverse height mismatch"}[current]
 						if current == "clean" {
-							want = map[string]string{"tip":map[uint64]string{1:"startup known target tip mismatch",2:"startup replay target repeats a known hash"}[generation],"cursor":"startup replay target repeats a known hash","excluded":"startup replay target contains excluded hash","known G":"startup replay target work outside consistency bounds"}[fact]
+							want = map[string]string{"tip": map[uint64]string{1: "startup known target tip mismatch", 2: "startup replay target repeats a known hash"}[generation], "cursor": "startup replay target repeats a known hash", "excluded": "startup replay target contains excluded hash", "known G": "startup replay target work outside consistency bounds"}[fact]
 						}
-						pulls := map[uint64]uint64{1:height+1,2:height+3}[generation]
+						pulls := map[uint64]uint64{1: height + 1, 2: height + 3}[generation]
 						if fact == "" && generation == 2 {
-							pulls = height+4
+							pulls = height + 4
 						}
 						if fact == "known G" && generation == 2 {
 							pulls = 2
 						}
 						if tail == "armed EIO" {
-							logicalMDBXAssert(t, err!=nil && err.Error()=="selected damage fixture site was not reached exactly as armed", "successor EIO reachability: %v",err)
+							logicalMDBXAssert(t, err != nil && err.Error() == "selected damage fixture site was not reached exactly as armed", "successor EIO reachability: %v", err)
 						} else {
-							logicalMDBXAssert(t, err==nil,"malformed successor probe: %v",err)
+							logicalMDBXAssert(t, err == nil, "malformed successor probe: %v", err)
 						}
-						logicalMDBXAssert(t, out.Err.Error()==want && evidence.Faults==0 && evidence.OldPulls[2]==pulls && evidence.OldAborts==1, "current complete owner before successor: %+v/%v",evidence,out.Err)
-						logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader)error{return nil})==nil,"current application positive consumed original Store")
+						logicalMDBXAssert(t, out.Err.Error() == want && evidence.Faults == 0 && evidence.OldPulls[2] == pulls && evidence.OldAborts == 1, "current complete owner before successor: %+v/%v", evidence, out.Err)
+						logicalMDBXAssert(t, w.store.View(func(*mdbx.Reader) error { return nil }) == nil, "current application positive consumed original Store")
 						if w.pre != nil {
-							startupRawImageEqual(t,w)
+							startupRawImageEqual(t, w)
 						} else {
-							replaySameImage(t,before,w.image(),"observed point readonly image")
+							replaySameImage(t, before, w.image(), "observed point readonly image")
 						}
-						startupFreshGuard(t,w,false)
-						logicalMDBXAssert(t,w.owner.WithReservation(154611151,func()error{return nil})==nil,"observed point grant release")
+						startupFreshGuard(t, w, false)
+						logicalMDBXAssert(t, w.owner.WithReservation(154611151, func() error { return nil }) == nil, "observed point grant release")
 					})
 				}
 			}
@@ -630,13 +634,13 @@ func (startupCacheBytes) Error() string { return "noncomparable cached applicati
 func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 	for _, row := range []struct {
 		name, positive, state, result string
-		active int
-		mode uint32
-		busy, source bool
-		decision uint8
-		prepare string
-		accepted bool
-		diagnostic string
+		active                        int
+		mode                          uint32
+		busy, source                  bool
+		decision                      uint8
+		prepare                       string
+		accepted                      bool
+		diagnostic                    string
 	}{
 		{"H10 completed positive close BUSY abort0", "work", "OPEN", "TERMINAL_STORE_INTEGRITY(canonical)", 0, 0, true, false, 3, "", false, ""},
 		{"H10 completed positive close BUSY abort9", "work", "CLOSE_BLOCKED", "TERMINAL_STORE_INTEGRITY(canonical)", 0, 9, true, false, 3, "", false, ""},
@@ -653,12 +657,14 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 		{"A14 unknown tip cursor fork", "", "OPEN", "", 3, 0, false, false, 1, "fork unknown", true, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			cursor := map[string]int{"":0, "fork":1, "fork unknown":1}[row.prepare]
+			cursor := map[string]int{"": 0, "fork": 1, "fork unknown": 1}[row.prepare]
 			w := startupWorld(t, row.active, cursor)
 			if row.prepare != "" {
 				startupSemanticEdit(t, w, 2, "fork cursor")
 				if row.prepare == "fork" {
-					w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHeight, a.Replay.Target.TipHash, a.Replay.Target.CumulativeChainwork = 3, w.hashes[3], [40]byte{39:4} })
+					w.setAuthority(func(a *mdbx.StorageAuthorityV1) {
+						a.Replay.Target.TipHeight, a.Replay.Target.TipHash, a.Replay.Target.CumulativeChainwork = 3, w.hashes[3], [40]byte{39: 4}
+					})
 				}
 			}
 			if row.positive == "work" {
@@ -680,9 +686,9 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 				}
 			}
 			state, verified, err := mdbx.FixtureStartupCleanup(w.store, row.mode, row.busy, func() {
-				scenario := map[bool]mdbx.SelectedDamageScenario{false:mdbx.SelectedDamageProbeOnly,true:mdbx.SelectedDamageGetEIO}[row.source]
+				scenario := map[bool]mdbx.SelectedDamageScenario{false: mdbx.SelectedDamageProbeOnly, true: mdbx.SelectedDamageGetEIO}[row.source]
 				counts, armedErr := mdbx.FixtureSelectedDamage(w.store, w.owner, scenario, 3, w.hashes[0][:], run)
-				logicalMDBXAssert(t, armedErr == nil && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.Faults == map[bool]uint64{false:0,true:1}[row.source], "cleanup source transport/repeat suppression: %+v/%v", counts, armedErr)
+				logicalMDBXAssert(t, armedErr == nil && counts.BeginOld == 1 && counts.BeginRead == 0 && counts.BeginWrite == 0 && counts.Faults == map[bool]uint64{false: 0, true: 1}[row.source], "cleanup source transport/repeat suppression: %+v/%v", counts, armedErr)
 			})
 			startupTuple(t, out, row.accepted, row.decision, row.result)
 			logicalMDBXAssert(t, err == nil && state == row.state && verified == row.accepted, "actual cleanup state: %s/%v/%v", state, verified, err)
@@ -702,7 +708,7 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 				if row.mode == 10 {
 					logicalMDBXAssert(t, e != nil && e.Class == "LocalInvariant" && e.Operation == "abort" && e.Code == -30416 && (e.Cause != nil) == (row.positive != ""), "THREAD_MISMATCH raw head/PRIMARY cause")
 					if row.prepare == "fork" {
-						logicalMDBXAssert(t,e.Cause.Error()=="startup known target cursor ancestry mismatch","new positive retained under THREAD cleanup")
+						logicalMDBXAssert(t, e.Cause.Error() == "startup known target cursor ancestry mismatch", "new positive retained under THREAD cleanup")
 					}
 				}
 				if row.source {
@@ -750,20 +756,20 @@ func TestReplayStartupMDBXCleanupProjection(t *testing.T) {
 					payload := startupCacheBytes{0x31, 0x72}
 					var typedNil *startupCustomJoin
 					application := map[string]error{
-						"application": plain,
+						"application":           plain,
 						"EngineError Integrity": integrity,
-						"EngineError BUSY": busy,
-						"EngineError unknown": &mdbx.EngineError{Class: "unknown", Operation: "get", Code: 781},
-						"CommitError": &mdbx.CommitError{Truth: 1, Cause: custom},
-						"single wrapper": fmt.Errorf("application wrapper: %w", custom),
-						"custom multi-Unwrap": custom,
-						"Join one": errors.Join(integrity),
-						"Join two": errors.Join(integrity, busy),
-						"Join nested": errors.Join(errors.Join(integrity, busy), errors.Join(plain)),
-						"Join mixed": errors.Join(busy, plain, integrity),
-						"Join four": errors.Join(busy, integrity, plain, custom),
-						"typed nil": typedNil,
-						"noncomparable": payload,
+						"EngineError BUSY":      busy,
+						"EngineError unknown":   &mdbx.EngineError{Class: "unknown", Operation: "get", Code: 781},
+						"CommitError":           &mdbx.CommitError{Truth: 1, Cause: custom},
+						"single wrapper":        fmt.Errorf("application wrapper: %w", custom),
+						"custom multi-Unwrap":   custom,
+						"Join one":              errors.Join(integrity),
+						"Join two":              errors.Join(integrity, busy),
+						"Join nested":           errors.Join(errors.Join(integrity, busy), errors.Join(plain)),
+						"Join mixed":            errors.Join(busy, plain, integrity),
+						"Join four":             errors.Join(busy, integrity, plain, custom),
+						"typed nil":             typedNil,
+						"noncomparable":         payload,
 					}[shape]
 					applicationPointer, applicationType := reflect.ValueOf(application).Pointer(), reflect.TypeOf(application)
 					integrityBefore, busyBefore := *integrity, *busy
