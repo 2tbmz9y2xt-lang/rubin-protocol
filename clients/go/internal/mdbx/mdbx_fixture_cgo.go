@@ -376,6 +376,54 @@ type fixtureTipEvidence struct {
 
 var fixtureTipMu sync.Mutex
 
+// CanonicalTipStepFixtureEvidence keeps endpoint cursor counts separate from ordinary keyed reads.
+type CanonicalTipStepFixtureEvidence struct {
+	Opens, Gets, Closes, Queries, Faults uint32
+	Drift, Commits, Aborts, TxnCloses    uint32
+}
+
+// FixtureCanonicalTipStep delegates one closed STEP scenario to the existing serialized fixture owners.
+func FixtureCanonicalTipStep(store *Store, scenario uint8, key, value []byte, present bool, run func()) (evidence CanonicalTipStepFixtureEvidence, err error) {
+	if store == nil || store.env == nil || run == nil || !canonicalTipStepFixtureShape(scenario, key, value, present) {
+		return evidence, errors.New("invalid canonical-tip step fixture")
+	}
+	mode := [6]uint32{1, 11, 5, 1, 1, 1}[scenario-1]
+	var large fixtureLargeEvidence
+	var nested error
+	tip, err := fixtureTipCursor(store, mode, 1, 1, 0, func() {
+		if scenario <= 3 {
+			run()
+			return
+		}
+		nested = fixtureTipDrift(key, value, present)
+		if nested != nil {
+			return
+		}
+		largeMode := [3]uint32{14, 13, 3}[scenario-4]
+		large, nested = fixtureLargeFault(store, largeMode, 2, key, run)
+	})
+	if err == nil {
+		err = nested
+	}
+	evidence = CanonicalTipStepFixtureEvidence{tip.opens, tip.gets, tip.closes, tip.queries, tip.faults, large.drift, large.commits, large.aborts, large.closes}
+	return evidence, err
+}
+
+func canonicalTipStepFixtureShape(scenario uint8, key, value []byte, present bool) bool {
+	switch {
+	case scenario >= 1 && scenario <= 3:
+		return key == nil && value == nil && !present
+	case scenario < 4, scenario > 6, len(key) != 16:
+		return false
+	case binary.BigEndian.Uint64(key[:8]) == 0, binary.BigEndian.Uint64(key[8:]) > 0xffffffff:
+		return false
+	case present:
+		return len(value) == 104
+	default:
+		return value == nil
+	}
+}
+
 func fixtureTipCursor(store *Store, mode, query, get uint32, code int, run func()) (evidence fixtureTipEvidence, err error) {
 	fixtureTipMu.Lock()
 	defer fixtureTipMu.Unlock()
