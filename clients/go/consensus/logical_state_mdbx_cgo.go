@@ -15,8 +15,8 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// Dormant bridge from a logical-state plan to one private MDBX Update Batch. Only genesisMDBXBatch may compose it;
-// the public genesis operation still has no production caller.
+// Dormant bridge from a logical-state plan to one private MDBX Update Batch, composed by genesisMDBXBatch and replay STEP.
+// The public genesis and replay STEP operations still have no production caller.
 //
 // Caller preconditions this file cannot observe: the view is built from the Reader of the same mdbx.Store Update
 // callback, that Reader has not yet failed a read, the same declared height reaches the plan builder and this
