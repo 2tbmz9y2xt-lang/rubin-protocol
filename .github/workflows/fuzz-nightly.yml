@@ -124,7 +124,7 @@ jobs:
 
       - name: Upload fuzz artifacts (crashes/regressions)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           # -a<attempt>: v4+ artifacts are immutable, so a re-run of a failed
           # leg would otherwise collide with attempt 1's upload.
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload Rust fuzz artifacts
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-rust-${{ github.run_id }}-c${{ strategy.job-index }}-a${{ github.run_attempt }}
           path: |
