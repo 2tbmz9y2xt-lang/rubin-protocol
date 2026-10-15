@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "4187a6554a0ee5b3b499fa3ca01ca8a4d411dc8b0b9aa75c4742f0cb18af4d50",
+  "spec_section_hashes_sha3_256": "76a647e54dc77bbafada964aeadc5c89630f7f40016a18eb14c33d6917db8a72",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
