@@ -131,6 +131,75 @@ func TestLogicalStatePlanFailuresAndPriority(t *testing.T) {
 	op1, op2 := Outpoint{Txid: filled32(1)}, Outpoint{Txid: filled32(2)}
 	cause := errors.New("source cause")
 	for _, tc := range []struct {
+		name     string
+		height   uint64
+		counters logicalStateCounters
+	}{
+		{"count_equality_h10", 10, logicalStateCounters{entries: 15454540, bytes: 865454240}},
+		{"count_equality_h1", 1, logicalStateCounters{entries: 1545454, bytes: 86545424}},
+		{"height_scaling_h11", 11, logicalStateCounters{entries: 16999994, bytes: 951999664}},
+		{"below_count_ceiling", 10, logicalStateCounters{entries: 15454539, bytes: 865454184}},
+		{"entry_lower_equality", 1, logicalStateCounters{entries: 1, bytes: 56}},
+		{"entry_upper_equality", 1, logicalStateCounters{entries: 1, bytes: 65596}},
+		{"positive_height_empty", 1, logicalStateCounters{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := &Outpoint{Txid: filled32(3), Vout: 7}
+			view := &logicalStateTestView{counter: logicalStateCounterRead{kind: logicalStateCountersPresent, counters: tc.counters}}
+			plan, failure := buildLogicalStatePlan(tc.height, view, nil, metadata)
+			if failure != nil {
+				t.Fatalf("%s: valid parent count equality rejected: %v", tc.name, failure)
+			}
+			want := logicalStatePlan[*Outpoint]{Parent: tc.counters, Result: tc.counters, Metadata: metadata}
+			if !reflect.DeepEqual(plan, want) || plan.Metadata != metadata || view.counterCalls != 1 || len(view.lookups) != 0 {
+				t.Fatalf("%s: parent envelope plan/read mismatch: %#v", tc.name, plan)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name    string
+		touched []logicalTouchedState
+	}{
+		{"count_only", nil},
+		{"count_before_duplicate", []logicalTouchedState{{Outpoint: op1}, {Outpoint: op1}}},
+		{"count_before_unavailable", []logicalTouchedState{{Outpoint: op1, FinalPresent: true, Final: UtxoEntry{Value: 1}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{entries: 15454541, bytes: 865454296}}
+			row := logicalStateRowRead{kind: logicalStateRowUnavailable, cause: cause}
+			view := &logicalStateTestView{counter: counter, rows: map[Outpoint]logicalStateRowRead{op1: row}}
+			touchedBefore := append([]logicalTouchedState(nil), tc.touched...)
+			metadata := &Outpoint{Txid: filled32(3), Vout: 7}
+			metadataBefore := *metadata
+			plan, failure := buildLogicalStatePlan(10, view, tc.touched, metadata)
+			if failure == nil || failure.kind != logicalStateFailureStoreIntegrity || failure.cause == nil || failure.cause.Error() != "invalid logical state counters" {
+				t.Fatalf("%s: count-only parent did not return STORE_INTEGRITY/invalid logical state counters: %v", tc.name, failure)
+			}
+			var txFailure *TxError
+			if errors.As(failure, &txFailure) || !reflect.DeepEqual(plan, logicalStatePlan[*Outpoint]{}) || view.counterCalls != 1 || len(view.lookups) != 0 {
+				t.Fatalf("%s: count refusal plan/read/result mismatch: %#v", tc.name, plan)
+			}
+			observedRow, rowPresent := view.rows[op1]
+			if view.counter.kind != counter.kind || view.counter.counters != counter.counters || view.counter.cause != nil || len(view.rows) != 1 || !rowPresent || observedRow.kind != row.kind || observedRow.cause == nil || !logicalStateSameErrorPointer(observedRow.cause, cause) || !reflect.DeepEqual(observedRow.entry, UtxoEntry{}) || !reflect.DeepEqual(tc.touched, touchedBefore) || *metadata != metadataBefore {
+				t.Fatalf("%s: count refusal changed source data", tc.name)
+			}
+			if tc.name != "count_only" {
+				return
+			}
+			view.counter = logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{entries: 15454540, bytes: 865454240}}
+			view.rows[op1] = logicalStateRowRead{kind: logicalStateRowAbsent}
+			final := UtxoEntry{Value: 1}
+			plan, failure = buildLogicalStatePlan(10, view, []logicalTouchedState{{Outpoint: op1, FinalPresent: true, Final: final}}, metadata)
+			want := logicalStatePlan[*Outpoint]{
+				Parent: logicalStateCounters{entries: 15454540, bytes: 865454240}, Result: logicalStateCounters{entries: 15454541, bytes: 865454296},
+				Puts: []logicalStatePut{{Outpoint: op1, Entry: UtxoEntry{Value: 1}}}, Metadata: metadata,
+			}
+			if failure != nil || !reflect.DeepEqual(plan, want) || plan.Metadata != metadata || *metadata != metadataBefore || view.counterCalls != 2 || !reflect.DeepEqual(view.lookups, []Outpoint{op1}) {
+				t.Fatalf("next call after count refusal lost valid PUT/metadata/counter reread: %#v %v", plan, failure)
+			}
+		})
+	}
+	for _, tc := range []struct {
 		read logicalStateCounterRead
 		want logicalStateFailureKind
 		same bool

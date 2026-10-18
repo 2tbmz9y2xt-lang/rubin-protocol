@@ -211,6 +211,9 @@ func validLogicalStateCounterEnvelope(c logicalStateCounters, height uint64) boo
 	if c.entries == 0 {
 		return c.bytes == 0
 	}
+	if c.entries > height*1_545_454 {
+		return false
+	}
 	if c.entries > ^uint64(0)/maxLogicalStateEntryBytes {
 		return false
 	}
