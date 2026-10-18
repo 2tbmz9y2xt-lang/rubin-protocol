@@ -159,13 +159,15 @@ func TestCanonicalUTXORootEncodingBoundaries(t *testing.T) {
 		n       int
 		compact string
 	}{{"S01", 0, "00"}, {"S02", 252, "fc"}, {"S03", 253, "fdfd00"}, {"S04", 65535, "fdffff"}, {"S05", 65536, "fe00000100"}} {
-		entry := e
-		entry.CovenantData = bytes.Repeat([]byte{0x33}, tc.n)
-		preimage := canonicalRootTestHex(t, leaf+strings.Repeat("00", 36)+"0100000000000000"+"0000"+tc.compact)
-		preimage = append(preimage, bytes.Repeat([]byte{0x33}, tc.n)...)
-		preimage = append(preimage, make([]byte, 9)...)
-		want := sha3.Sum256(preimage)
-		canonicalRootTestAssert(t, tc.name, map[Outpoint]UtxoEntry{ops[0]: entry}, want[:])
+		t.Run(tc.name, func(t *testing.T) {
+			entry := e
+			entry.CovenantData = bytes.Repeat([]byte{0x33}, tc.n)
+			preimage := canonicalRootTestHex(t, leaf+strings.Repeat("00", 36)+"0100000000000000"+"0000"+tc.compact)
+			preimage = append(preimage, bytes.Repeat([]byte{0x33}, tc.n)...)
+			preimage = append(preimage, make([]byte, 9)...)
+			want := sha3.Sum256(preimage)
+			canonicalRootTestAssert(t, tc.name, map[Outpoint]UtxoEntry{ops[0]: entry}, want[:])
+		})
 	}
 	for _, tc := range []struct {
 		name              string
@@ -180,11 +182,13 @@ func TestCanonicalUTXORootEncodingBoundaries(t *testing.T) {
 		{"TYPE_MAX", 1, 0, 0xffff, "0100000000000000", "ffff", "0000000000000000"},
 		{"HEIGHT_MAX", 1, 0xffffffffffffffff, 0, "0100000000000000", "0000", "ffffffffffffffff"},
 	} {
-		entry := e
-		entry.Value, entry.CreationHeight, entry.CovenantType = tc.value, tc.height, tc.kind
-		preimage := canonicalRootTestHex(t, leaf+strings.Repeat("00", 36)+tc.valueHex+tc.typeHex+"2101"+strings.Repeat("11", 32)+tc.heightHex+"00")
-		want := sha3.Sum256(preimage)
-		canonicalRootTestAssert(t, tc.name, map[Outpoint]UtxoEntry{ops[0]: entry}, want[:])
+		t.Run(tc.name, func(t *testing.T) {
+			entry := e
+			entry.Value, entry.CreationHeight, entry.CovenantType = tc.value, tc.height, tc.kind
+			preimage := canonicalRootTestHex(t, leaf+strings.Repeat("00", 36)+tc.valueHex+tc.typeHex+"2101"+strings.Repeat("11", 32)+tc.heightHex+"00")
+			want := sha3.Sum256(preimage)
+			canonicalRootTestAssert(t, tc.name, map[Outpoint]UtxoEntry{ops[0]: entry}, want[:])
+		})
 	}
 }
 
