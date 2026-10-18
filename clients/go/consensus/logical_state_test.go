@@ -180,7 +180,7 @@ func TestLogicalStatePlanFailuresAndPriority(t *testing.T) {
 				t.Fatalf("%s: count refusal plan/read/result mismatch: %#v", tc.name, plan)
 			}
 			observedRow, rowPresent := view.rows[op1]
-			if view.counter.kind != counter.kind || view.counter.counters != counter.counters || view.counter.cause != nil || len(view.rows) != 1 || !rowPresent || observedRow.kind != row.kind || observedRow.cause != cause || !reflect.DeepEqual(observedRow.entry, UtxoEntry{}) || !reflect.DeepEqual(tc.touched, touchedBefore) || *metadata != metadataBefore {
+			if view.counter.kind != counter.kind || view.counter.counters != counter.counters || view.counter.cause != nil || len(view.rows) != 1 || !rowPresent || observedRow.kind != row.kind || observedRow.cause == nil || !logicalStateSameErrorPointer(observedRow.cause, cause) || !reflect.DeepEqual(observedRow.entry, UtxoEntry{}) || !reflect.DeepEqual(tc.touched, touchedBefore) || *metadata != metadataBefore {
 				t.Fatalf("%s: count refusal changed source data", tc.name)
 			}
 			if tc.name != "count_only" {
