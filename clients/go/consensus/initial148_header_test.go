@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"testing"
 )
 
@@ -220,8 +222,8 @@ func initial148RawDomains(t *testing.T, base []byte, want Initial148Header) {
 
 func initial148Error(t *testing.T, err error, code, msg, diagnostic string) {
 	t.Helper()
-	te, ok := err.(*TxError)
-	if !ok || te == nil {
+	var te *TxError
+	if !errors.As(err, &te) || te == nil || reflect.TypeOf(err) != reflect.TypeOf(te) {
 		t.Fatalf("%s: concrete error=%T %v want=*TxError", diagnostic, err, err)
 	}
 	if string(te.Code) != code || te.Msg != msg || te.Cause() != TxErrorCause(0) {
