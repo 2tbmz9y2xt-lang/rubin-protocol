@@ -230,7 +230,7 @@ func utxoImageScanEdges(payload []byte, off *int) string {
 		return "image_count"
 	}
 	for range n {
-		if binary.BigEndian.Uint16(payload[*off : *off+2]) >= 288 {
+		if binary.BigEndian.Uint16(payload[*off:*off+2]) >= 288 {
 			return "image_encoding"
 		}
 		*off += 34

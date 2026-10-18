@@ -215,8 +215,10 @@ func TestUTXOImageWireEntryDomains(t *testing.T) {
 		n       int
 		compact string
 	}{
-		{"C2_DATA0", 0, "00"}, {"C2_DATA252", 252, "fc"},
-		{"C2_DATA253", 253, "fdfd00"}, {"C2_DATA65535", 65535, "fdffff"},
+		{"C2_DATA0", 0, "00"},
+		{"C2_DATA252", 252, "fc"},
+		{"C2_DATA253", 253, "fdfd00"},
+		{"C2_DATA65535", 65535, "fdffff"},
 		{"C2_DATA65536", 65536, "fe00000100"},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
