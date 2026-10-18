@@ -174,33 +174,45 @@ func utxoImageScanEntries(payload []byte, off *int) string {
 		return "image_count"
 	}
 	for range n {
-		if !utxoImageReadEntry(payload, off) {
+		if _, ok := utxoImageReadEntry(payload, off); !ok {
 			return "image_encoding"
 		}
 	}
 	return ""
 }
 
-// utxoImageReadEntry scans a complete entry without exposing typed fields.
+// utxoImageReadEntry borrows complete fields during scalar/proof work only.
 // The existing CompactSize reader owns minimality; no TX_ERR escapes this core.
-func utxoImageReadEntry(payload []byte, off *int) bool {
+func utxoImageReadEntry(payload []byte, off *int) (UTXOImageEntry, bool) {
 	if len(payload)-*off < 46 {
-		return false
+		return UTXOImageEntry{}, false
 	}
+	fixed := payload[*off : *off+46]
 	*off += 46
 	n, _, err := readCompactSize(payload, off)
 	if err != nil || n > 65536 {
-		return false
+		return UTXOImageEntry{}, false
 	}
 	if n > uint64(len(payload)-*off) { // #nosec G115 -- successful CompactSize read leaves 0 <= *off <= len(payload).
-		return false
+		return UTXOImageEntry{}, false
 	}
+	data := payload[*off : *off+int(n)]
 	*off += int(n)
 	if len(payload)-*off < 9 || payload[*off+8] > 1 {
-		return false
+		return UTXOImageEntry{}, false
+	}
+	var entry UTXOImageEntry
+	copy(entry.Outpoint.Txid[:], fixed[:32])
+	entry.Outpoint.Vout = binary.LittleEndian.Uint32(fixed[32:36])
+	entry.Entry = UtxoEntry{
+		Value:             binary.LittleEndian.Uint64(fixed[36:44]),
+		CovenantType:      binary.LittleEndian.Uint16(fixed[44:46]),
+		CovenantData:      data,
+		CreationHeight:    binary.LittleEndian.Uint64(payload[*off : *off+8]),
+		CreatedByCoinbase: payload[*off+8] == 1,
 	}
 	*off += 9
-	return true
+	return entry, true
 }
 
 func utxoImageScanPredecessor(payload []byte, off *int) string {
@@ -213,7 +225,7 @@ func utxoImageScanPredecessor(payload []byte, off *int) string {
 	case 0:
 		return ""
 	case 1:
-		if utxoImageReadEntry(payload, off) {
+		if _, ok := utxoImageReadEntry(payload, off); ok {
 			return ""
 		}
 	}

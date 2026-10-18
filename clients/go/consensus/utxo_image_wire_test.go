@@ -450,6 +450,28 @@ func TestUTXOImagePhaseOrder(t *testing.T) {
 	imageTestDecoded(t, "C7_MINIMUM185", command, minimum, q)
 	started := append(imageTestHex(t, "01000000"+strings.Repeat("00", 46)+"0f"), make([]byte, 14)...)
 	imageTestRejected(t, "C7_STARTED_DATA15_REMAIN14", command, imageTestChunk(raw, started), "image_encoding")
+	// These source-domain witnesses stay in G-WIRE: proof precedes the later
+	// original-height/type semantic owner, and never grants import admission.
+	f := imageProofLeaves(t)
+	a, b := f[0], f[1]
+	future := a.entry
+	future.Entry.CreationHeight = 1
+	futureS := imageTestS[:160] + "0100000000000000" + "00"
+	imageProofAccept(t, "C7_FUTURE_HEIGHT", imageProofPayload(t, imageTestC13, a.k, "01000000"+futureS+"00"+"0000"+"0000"), UTXOImageRange{Entries: []UTXOImageEntry{future}, Terminal: true})
+	imageProofReject(t, "C7_FUTURE_WRONG_ROOT", imageProofPayload(t, imageTestC02, a.k, "01000000"+futureS+"00"+"0000"+"0000"))
+	unknown := a.entry
+	unknown.Entry.CovenantType = 0xffff
+	unknownS := imageTestS[:88] + "ffff" + imageTestS[92:]
+	unknownRoot := imageProofHash(t, imageTestLeafPreimage+unknownS)
+	imageProofAccept(t, "C7_UNKNOWN_TYPE", imageProofPayload(t, unknownRoot, a.k, "01000000"+unknownS+"00"+"0000"+"0000"), UTXOImageRange{Entries: []UTXOImageEntry{unknown}, Terminal: true})
+	badCoinbase := imageProofPayload(t, imageTestC03, b.k, "01000000"+imageTestS[:176]+"02"+"00"+"0000"+"0000")
+	imageTestRejected(t, "C7_COINBASE_BEFORE_K_ROOT", command, badCoinbase, "image_encoding")
+	badDepth := imageProofPayload(t, imageTestC03, b.k, "01000000"+a.s+"00"+"0000"+"0100"+"0120"+imageTestC03)
+	imageTestRejected(t, "C7_DEPTH_BEFORE_K_ROOT", command, badDepth, "image_encoding")
+	nonincreasing := imageProofPayload(t, imageTestC05, b.k, "01000000"+b.s+"00"+"0200"+"011f"+imageTestC02+"011f"+imageTestC02+"0000")
+	imageProofReject(t, "C7_IN_DOMAIN_DEPTH_RANGE", nonincreasing)
+	badKRoot := imageProofPayload(t, imageTestC03, a.k, "02000000"+b.s+a.s+"00"+"0000"+"0000")
+	imageProofReject(t, "C7_K_BEFORE_ROOT", badKRoot)
 }
 
 func TestUTXOImageWireEncoderRejections(t *testing.T) {
