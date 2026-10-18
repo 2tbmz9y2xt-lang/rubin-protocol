@@ -361,7 +361,8 @@ func TestInitial148BlockFrameErrors(t *testing.T) {
 		initial148BlockParserRefusal(t, "initial148 frame error tuple", c.raw, c.code, c.msg)
 		initial148BlockQRefusal(t, "initial148 frame error tuple", c.raw, blockStepsOther, [32]byte{0x7f}, blockStepsHeight, blockStepsTimes, c.code, c.msg)
 	}
-	// The complete parse always owns the first error, even with a bad header target and parent.
+	// The complete parse always owns the first error; this counter call still
+	// supplies a bad parent.
 	counter := append(slices.Clone(header), 0xfd, 0x01, 0x00)
 	summary, err := ValidateInitial148BlockSteps1To12(counter, blockStepsOther, POW_LIMIT, blockStepsHeight, blockStepsTimes)
 	blockStepsWantCode(t, "initial148 trailing before validity", summary, err, BLOCK_ERR_PARSE, "invalid tx_count")
@@ -424,6 +425,20 @@ func initial148BlockSetTarget(t *testing.T, raw []byte, target [32]byte) []byte 
 	return out
 }
 
+func initial148BlockSetParent(t *testing.T, raw []byte, parent [32]byte) []byte {
+	t.Helper()
+	out := slices.Clone(raw)
+	copy(out[4:36], parent[:])
+	return out
+}
+
+func initial148BlockSetMerkle(t *testing.T, raw []byte, merkle [32]byte) []byte {
+	t.Helper()
+	out := slices.Clone(raw)
+	copy(out[36:68], merkle[:])
+	return out
+}
+
 func TestInitial148BlockParseBeforePow(t *testing.T) {
 	txs := initial148BlockFillerTxs(t)
 	// A complete parsing frame with target zero is a target-range refusal, not a
@@ -436,8 +451,8 @@ func TestInitial148BlockParseBeforePow(t *testing.T) {
 	initial148BlockQRefusal(t, "initial148 framing before pow", targetZero, blockStepsParent, POW_LIMIT, blockStepsHeight, blockStepsTimes, BLOCK_ERR_TARGET_INVALID, "target out of range")
 	trailing := append(slices.Clone(targetZero), 0x00)
 	initial148BlockQRefusal(t, "initial148 framing before pow", trailing, blockStepsOther, POW_LIMIT, blockStepsHeight, blockStepsTimes, BLOCK_ERR_PARSE, "trailing bytes after tx list")
-	// A frame refusal wins even with an invalid expected target and parent once
-	// the supplied context itself is valid.
+	// A frame refusal wins even with an invalid parent once the supplied context
+	// itself is valid.
 	frame := append(slices.Clone(targetZero[:Initial148HeaderBytes]), 0x00)
 	initial148BlockQRefusal(t, "initial148 framing before pow", frame, blockStepsOther, POW_LIMIT, blockStepsHeight, blockStepsTimes, BLOCK_ERR_COINBASE_INVALID, "empty block tx list")
 }
@@ -558,6 +573,23 @@ func TestInitial148BlockFullFramePreimage(t *testing.T) {
 	if err != nil || summary.TxCount != 1 || summary.BlockHash != rootHash {
 		t.Fatalf("initial148 full frame preimage: root-only summary=%+v/%v", summary, err)
 	}
+	// A literal target and nonce for which the full148 preimage passes and the
+	// first116 preimage fails under that same serialized target. A 116-only PoW
+	// call therefore returns POW_INVALID while the returned summary hash is
+	// unchanged.
+	target := initial148Array(t, "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+	discriminator := initial148BlockSetTarget(t, initial148BlockGenesis(t), target)
+	binary.LittleEndian.PutUint64(discriminator[140:148], 1)
+	fullPreimage := sha3.Sum256(discriminator[:Initial148HeaderBytes])
+	shortPreimage := sha3.Sum256(discriminator[:BLOCK_HEADER_BYTES])
+	if bytes.Compare(fullPreimage[:], target[:]) >= 0 || bytes.Compare(shortPreimage[:], target[:]) < 0 {
+		t.Fatalf("initial148 full frame preimage: literal target discriminator full=%x short=%x", fullPreimage, shortPreimage)
+	}
+	summary, err = ValidateInitial148BlockSteps1To12(discriminator, [32]byte{}, target, 1, []uint64{1_772_020_799})
+	wantDiscriminator := BlockBasicSummary{TxCount: 1, SumWeight: 590, SumDa: 0, BlockHash: fullPreimage}
+	if err != nil || summary != wantDiscriminator {
+		t.Fatalf("initial148 full frame preimage: discriminator summary=%+v/%v want=%+v", summary, err, wantDiscriminator)
+	}
 	initial148Unchanged(t, raw, before)
 	initial148Next(t)
 }
@@ -573,6 +605,24 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 	summary, err := ValidateInitial148BlockSteps1To12(canonical, blockStepsParent, POW_LIMIT, blockStepsHeight, blockStepsTimes)
 	if err != nil || summary.TxCount != 2 || summary.BlockHash != sha3.Sum256(canonical[:Initial148HeaderBytes]) {
 		t.Fatalf("initial148 Q excludes step13: summary=%+v/%v", summary, err)
+	}
+	// CANONICAL Section 10.5 requires output_count >= 1. This literal coinbase
+	// parses with zero outputs, so the body entry must reject it as non-canonical
+	// before either the Merkle-root or missing-witness competitors.
+	zeroOutputs := initial148Hex(t, "01000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff00000000000000")
+	zeroParsed, _, _, _, err := ParseTx(zeroOutputs)
+	if err != nil || zeroParsed.TxKind != 0 || len(zeroParsed.Outputs) != 0 {
+		t.Fatalf("initial148 Q excludes step13: zero-output literal parse=%+v/%v", zeroParsed, err)
+	}
+	for _, c := range []struct {
+		name string
+		edit func(*initial148BlockHead)
+	}{
+		{"zero outputs correct root", nil},
+		{"zero outputs bad merkle", func(h *initial148BlockHead) { h.merkle = [32]byte{1} }},
+	} {
+		body := initial148BlockFrame(t, [][]byte{zeroOutputs}, c.edit)
+		initial148BlockBodyRefusal(t, "initial148 Q excludes step13", body, BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
 	// A non-canonical first transaction is still steps1-12-valid; only the
 	// commitment-only entry owns the first-coinbase structure check.
@@ -690,21 +740,27 @@ func TestInitial148BlockDAFrame(t *testing.T) {
 func TestInitial148BlockHostileFirstError(t *testing.T) {
 	raw := initial148BlockGenesis(t)
 	header, tx := raw[:Initial148HeaderBytes], initial148BlockGenesisTx(t)
-	for _, c := range []struct {
+	zeroTarget := initial148BlockSetTarget(t, header, [32]byte{})
+	wrongMerkle := [32]byte{1}
+	noWitnessTxs := append([][]byte{coinbaseTxWithOutputs(0, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}})}, blockStepsPlain(1)...)
+	noWitness := initial148BlockFrame(t, noWitnessTxs, func(h *initial148BlockHead) { h.merkle = wrongMerkle })
+	rows := []struct {
 		name string
 		raw  []byte
 		code ErrorCode
 		msg  string
 	}{
-		{"bad count dominates target", append(append(slices.Clone(header), 0xfd, 0x01, 0x00), tx...), BLOCK_ERR_PARSE, "invalid tx_count"},
-		{"zero count dominates pow", append(slices.Clone(header), 0x00, 0x01, 0x02), BLOCK_ERR_COINBASE_INVALID, "empty block tx list"},
-		{"u64max dominates target", append(slices.Clone(header), 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff), BLOCK_ERR_PARSE, "unexpected EOF in tx list"},
-		{"boundary eof dominates parent", append(append(slices.Clone(header), 0x02), tx...), BLOCK_ERR_PARSE, "unexpected EOF in tx list"},
-		{"truncated tx dominates target", raw[:len(raw)-1], TX_ERR_PARSE, "unexpected EOF (u8)"},
-		{"trailing dominates merkle", append(slices.Clone(raw), 0x00), BLOCK_ERR_PARSE, "trailing bytes after tx list"},
-	} {
+		{"bad count before target and merkle", append(append(initial148BlockSetMerkle(t, zeroTarget, wrongMerkle), 0xfd, 0x01, 0x00), tx...), BLOCK_ERR_PARSE, "invalid tx_count"},
+		{"zero count before bad pow", append(initial148BlockSetTarget(t, header, [32]byte{31: 1}), 0x00, 0x01, 0x02), BLOCK_ERR_COINBASE_INVALID, "empty block tx list"},
+		{"u64max before target and parent", append(initial148BlockSetTarget(t, initial148BlockSetParent(t, header, blockStepsOther), [32]byte{}), 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff), BLOCK_ERR_PARSE, "unexpected EOF in tx list"},
+		{"boundary eof before merkle and parent", append(append(initial148BlockSetParent(t, initial148BlockSetMerkle(t, header, wrongMerkle), blockStepsOther), 0x02), tx...), BLOCK_ERR_PARSE, "unexpected EOF in tx list"},
+		{"truncated tx before target", initial148BlockSetTarget(t, raw[:len(raw)-1], [32]byte{}), TX_ERR_PARSE, "unexpected EOF (u8)"},
+		{"truncated tx before merkle and witness", noWitness[:len(noWitness)-1], TX_ERR_PARSE, "unexpected EOF (u8)"},
+		{"trailing before merkle and witness", append(slices.Clone(noWitness), 0x00), BLOCK_ERR_PARSE, "trailing bytes after tx list"},
+	}
+	for _, c := range rows {
 		initial148BlockParserRefusal(t, "initial148 hostile first error", c.raw, c.code, c.msg)
-		initial148BlockQRefusal(t, "initial148 hostile first error", c.raw, blockStepsOther, POW_LIMIT, 7, []uint64{1, 2, 3, 4, 5, 6, 7}, c.code, c.msg)
+		initial148BlockQRefusal(t, "initial148 hostile first error", c.raw, blockStepsParent, POW_LIMIT, 7, []uint64{1, 2, 3, 4, 5, 6, 7}, c.code, c.msg)
 		initial148BlockBodyRefusal(t, "initial148 hostile first error", c.raw, c.code, c.msg)
 	}
 }

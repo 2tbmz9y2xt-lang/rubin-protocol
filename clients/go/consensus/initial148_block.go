@@ -73,6 +73,12 @@ func ValidateInitial148BlockBodyCommitments(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	// CANONICAL Section 10.5 requires output_count >= 1. The inherited
+	// isCoinbaseTx omits that predicate, so this entry rejects the missing
+	// outputs locally before reusing the unchanged commitment checks.
+	if len(first.Outputs) == 0 {
+		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+	}
 	return storedCommitmentChecks(first, header.MerkleRoot, txRoot, witnessRoot)
 }
 
