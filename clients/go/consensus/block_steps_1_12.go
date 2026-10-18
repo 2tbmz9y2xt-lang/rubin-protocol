@@ -119,6 +119,11 @@ func blockStepsFirstPass(raw []byte) (blockStepsPass, error) {
 	if err != nil {
 		return blockStepsPass{}, err
 	}
+	return blockStepsTransactions(raw, header, off, count)
+}
+
+// blockStepsTransactions is the shared after-frame pass: every entry supplies its own parsed frame and count.
+func blockStepsTransactions(raw []byte, header BlockHeader, off int, count uint64) (blockStepsPass, error) {
 	p := blockStepsPass{header: header, start: off, count: count}
 	txids := storedCommitmentFrontier{leafTag: 0x00, nodeTag: 0x01}
 	wtxids := storedCommitmentFrontier{leafTag: 0x02, nodeTag: 0x03}
