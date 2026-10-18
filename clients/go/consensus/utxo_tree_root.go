@@ -3,7 +3,6 @@ package consensus
 import (
 	"crypto/sha3"
 	"encoding/binary"
-	"math/bits"
 	"sort"
 )
 
@@ -41,11 +40,15 @@ func canonicalUTXORootRange(utxos map[Outpoint]UtxoEntry, ordered []Outpoint) [3
 	}
 	first := canonicalUTXORoutingKey(ordered[0])
 	last := canonicalUTXORoutingKey(ordered[len(ordered)-1])
-	d := 0
+	d := uint16(0)
 	for first[d/8] == last[d/8] {
 		d += 8
 	}
-	d += bits.LeadingZeros8(first[d/8] ^ last[d/8])
+	difference := first[d/8] ^ last[d/8]
+	for difference&0x80 == 0 {
+		d++
+		difference <<= 1
+	}
 	mask := byte(0x80 >> uint(d%8))
 	split := sort.Search(len(ordered), func(i int) bool {
 		key := canonicalUTXORoutingKey(ordered[i])
@@ -55,7 +58,7 @@ func canonicalUTXORootRange(utxos map[Outpoint]UtxoEntry, ordered []Outpoint) [3
 	right := canonicalUTXORootRange(utxos, ordered[split:])
 	var preimage [121]byte
 	copy(preimage[:19], canonicalUTXOBranchDomain)
-	binary.BigEndian.PutUint16(preimage[19:21], uint16(d))
+	binary.BigEndian.PutUint16(preimage[19:21], d)
 	q, r := d/8, d%8
 	copy(preimage[21:21+q], first[:q])
 	if r != 0 {
