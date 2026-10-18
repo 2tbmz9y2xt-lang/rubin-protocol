@@ -140,7 +140,7 @@ func DecodeUTXOImageReply(command [12]byte, payload []byte) (UTXOImageReply, boo
 		valid:         true,
 		query:         utxoImageReadQuery(payload),
 		command:       command,
-		payloadLength: uint32(len(payload)),
+		payloadLength: uint32(len(payload)), // #nosec G115 -- len(payload) <= command cap <= 2097152.
 		payload:       append([]byte(nil), payload...),
 	}, true, ""
 }
@@ -170,49 +170,37 @@ func utxoImageScanEntries(payload []byte, off *int) string {
 	}
 	n := binary.LittleEndian.Uint32(payload[*off : *off+4])
 	*off += 4
-	if n > utxoImageMaxEntries || 56*uint64(n)+5 > uint64(len(payload)-*off) {
+	if n > utxoImageMaxEntries || 56*uint64(n)+5 > uint64(len(payload)-*off) { // #nosec G115 -- the preceding four-byte span check leaves 0 <= *off <= len(payload).
 		return "image_count"
 	}
 	for range n {
-		if _, ok := utxoImageReadEntry(payload, off); !ok {
+		if !utxoImageReadEntry(payload, off) {
 			return "image_encoding"
 		}
 	}
 	return ""
 }
 
-// utxoImageReadEntry borrows only during the synchronous scalar/proof pass.
+// utxoImageReadEntry scans a complete entry without exposing typed fields.
 // The existing CompactSize reader owns minimality; no TX_ERR escapes this core.
-func utxoImageReadEntry(payload []byte, off *int) (UTXOImageEntry, bool) {
+func utxoImageReadEntry(payload []byte, off *int) bool {
 	if len(payload)-*off < 46 {
-		return UTXOImageEntry{}, false
+		return false
 	}
-	fixed := payload[*off : *off+46]
 	*off += 46
 	n, _, err := readCompactSize(payload, off)
 	if err != nil || n > 65536 {
-		return UTXOImageEntry{}, false
+		return false
 	}
-	if n > uint64(len(payload)-*off) {
-		return UTXOImageEntry{}, false
+	if n > uint64(len(payload)-*off) { // #nosec G115 -- successful CompactSize read leaves 0 <= *off <= len(payload).
+		return false
 	}
-	data := payload[*off : *off+int(n)]
 	*off += int(n)
 	if len(payload)-*off < 9 || payload[*off+8] > 1 {
-		return UTXOImageEntry{}, false
-	}
-	var entry UTXOImageEntry
-	copy(entry.Outpoint.Txid[:], fixed[:32])
-	entry.Outpoint.Vout = binary.LittleEndian.Uint32(fixed[32:36])
-	entry.Entry = UtxoEntry{
-		Value:             binary.LittleEndian.Uint64(fixed[36:44]),
-		CovenantType:      binary.LittleEndian.Uint16(fixed[44:46]),
-		CovenantData:      data,
-		CreationHeight:    binary.LittleEndian.Uint64(payload[*off : *off+8]),
-		CreatedByCoinbase: payload[*off+8] == 1,
+		return false
 	}
 	*off += 9
-	return entry, true
+	return true
 }
 
 func utxoImageScanPredecessor(payload []byte, off *int) string {
@@ -225,7 +213,7 @@ func utxoImageScanPredecessor(payload []byte, off *int) string {
 	case 0:
 		return ""
 	case 1:
-		if _, ok := utxoImageReadEntry(payload, off); ok {
+		if utxoImageReadEntry(payload, off) {
 			return ""
 		}
 	}
@@ -309,10 +297,10 @@ func EncodeUTXOImageChunk(q UTXOImageQuery, entries []UTXOImageEntry, predecesso
 		return nil, false, reason
 	}
 	// The cap proves both int conversion and complete output capacity safe.
-	payload := make([]byte, 124, int(total))
+	payload := make([]byte, 124, int(total)) // #nosec G115 -- utxoImageChunkSize admitted total <= 2097152, which fits int.
 	rawQ := EncodeUTXOImageNotAvailable(q)
 	copy(payload[:120], rawQ[:])
-	binary.LittleEndian.PutUint32(payload[120:124], uint32(len(entries)))
+	binary.LittleEndian.PutUint32(payload[120:124], uint32(len(entries))) // #nosec G115 -- utxoImageChunkSize admitted len(entries) <= 37446.
 	for _, entry := range entries {
 		payload = append(payload, logicalStateEntryBytes(entry.Outpoint, entry.Entry)...)
 	}
@@ -327,7 +315,7 @@ func EncodeUTXOImageChunk(q UTXOImageQuery, entries []UTXOImageEntry, predecesso
 }
 
 func utxoImageAppendEdges(payload []byte, edges []UTXOImageEdge) []byte {
-	payload = AppendU16le(payload, uint16(len(edges)))
+	payload = AppendU16le(payload, uint16(len(edges))) // #nosec G115 -- utxoImageChunkSize admitted each list length <= 288.
 	for _, edge := range edges {
 		payload = binary.BigEndian.AppendUint16(payload, edge.Depth)
 		payload = append(payload, edge.Hash[:]...)

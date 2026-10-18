@@ -413,14 +413,14 @@ func TestUTXOImageCountSpans(t *testing.T) {
 		id   string
 		body []byte
 	}{
-		{"C6_COUNT37447", imageTestHex(t, "47920000" + "00" + "0000" + "0000")},
-		{"C6_COUNT_U32MAX", imageTestHex(t, "ffffffff" + "00" + "0000" + "0000")},
+		{"C6_COUNT37447", imageTestHex(t, "47920000"+"00"+"0000"+"0000")},
+		{"C6_COUNT_U32MAX", imageTestHex(t, "ffffffff"+"00"+"0000"+"0000")},
 		{"C6_COUNT_MIN", append(imageTestHex(t, "01000000"), make([]byte, 60)...)},
 		{"C6_COUNT37446_SUFFIX", append(imageTestHex(t, "46920000"), make([]byte, 56*37446+4)...)},
-		{"C6_LEFT289", append(append(imageTestHex(t, "00000000" + "00" + "2101"), make([]byte, 34*289)...), 0, 0)},
-		{"C6_RIGHT289", append(imageTestHex(t, "00000000" + "00" + "0000" + "2101"), make([]byte, 34*289)...)},
-		{"C6_LEFT_SPAN33", append(imageTestHex(t, "00000000" + "00" + "0100"), make([]byte, 33)...)},
-		{"C6_RIGHT_SPAN33", append(imageTestHex(t, "00000000" + "00" + "0000" + "0100"), make([]byte, 33)...)},
+		{"C6_LEFT289", append(append(imageTestHex(t, "00000000"+"00"+"2101"), make([]byte, 34*289)...), 0, 0)},
+		{"C6_RIGHT289", append(imageTestHex(t, "00000000"+"00"+"0000"+"2101"), make([]byte, 34*289)...)},
+		{"C6_LEFT_SPAN33", append(imageTestHex(t, "00000000"+"00"+"0100"), make([]byte, 33)...)},
+		{"C6_RIGHT_SPAN33", append(imageTestHex(t, "00000000"+"00"+"0000"+"0100"), make([]byte, 33)...)},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			payload := imageTestChunk(raw, tc.body)
