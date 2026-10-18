@@ -33,6 +33,8 @@ GO_ALLOWLIST = {
     "connect_block_parallel_precompute.go:PrecomputeTxContexts",
     # collect items → sort by key → deterministic hash
     "state_digest.go:UtxoSetHash",
+    # collect Outpoints → sort by routing key before deterministic tree hashing
+    "utxo_tree_root.go:canonicalUTXORoot",
     # deep-copy map→map, order-neutral
     "utxo_basic.go:cloneUtxoSet",
     # shallow-copy map→map, order-neutral
