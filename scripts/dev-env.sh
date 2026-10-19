@@ -239,9 +239,6 @@ print_versions() {
   if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
     echo "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH}"
   fi
-  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-    echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
-  fi
   echo
 
   echo "git: $(git --version 2>/dev/null || echo 'missing')"

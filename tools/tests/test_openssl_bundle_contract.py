@@ -264,13 +264,17 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                     modules: bool = True, lib64: bool = False, modules64: bool = False) -> Path:
         """openssl: exec (built), plain (regular, not executable), dir (directory), None (absent)."""
         prefix = self.home / ".cache" / "rubin-openssl" / name
-        subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules else [])
+        subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules is True else [])
         subs += ["lib64/pkgconfig"] if lib64 else []
         subs += ["lib64/ossl-modules"] if modules64 else []
         for sub in subs:
             (prefix / sub).mkdir(parents=True)
-        if cnf:
+        if cnf == "dir":
+            (prefix / "ssl" / "openssl-fips.cnf").mkdir()
+        elif cnf:
             (prefix / "ssl" / "openssl-fips.cnf").write_text("", encoding="utf-8")
+        if modules == "file":
+            (prefix / "lib" / "ossl-modules").write_text("", encoding="utf-8")
         if openssl == "dir":
             (prefix / "bin" / "openssl").mkdir(parents=True)
         elif openssl is not None:
@@ -327,6 +331,11 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                     self.assertNotIn("RUBIN_OPENSSL_PREFIX", default_env)
                     self.assert_bundle_env(default_env, prefix, lib64, tail)
                     self.assert_bundle_env(self.env_of(explicit), prefix, lib64, tail)
+                    explicit_env = self.env_of(explicit)
+                    self.assertNotIn("OPENSSL_CONF", default_env)
+                    self.assertNotIn("OPENSSL_CONF", explicit_env)
+                    self.assertEqual(explicit_env.pop("RUBIN_OPENSSL_PREFIX"), str(prefix))
+                    self.assertEqual(default_env, explicit_env)
 
     def test_modules_only_under_lib64_is_built_and_exported(self):
         prefix = self.make_bundle("bundle-9.9.9", modules=False, modules64=True)
@@ -334,12 +343,21 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(env["OPENSSL_DIR"], str(prefix))
         self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
 
-    def test_summary_mode_prints_ld_library_path(self):
-        prefix = self.make_bundle("bundle-9.9.9")
-        self.version_file.write_bytes(b"9.9.9\n")
-        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
-        proc = subprocess.run(["bash", str(self.script)], capture_output=True, text=True, env=env, check=False)
-        self.assertIn(f"\nLD_LIBRARY_PATH: {prefix}/lib\n", proc.stdout)
+    def test_empty_pkg_config_path_leaves_no_trailing_colon(self):
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", PKG_CONFIG_PATH=""))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig:{prefix}/lib/pkgconfig")
+
+    def test_modules_prefer_lib_when_both_exist(self):
+        prefix = self.make_bundle("bundle-9.9.9", modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib/ossl-modules")
+
+    def test_explicit_prefix_needs_only_executable_openssl(self):
+        prefix = self.make_bundle("bundle-other", cnf=False, modules=False)
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix))
+        self.assertEqual(self.env_of(proc)["OPENSSL_DIR"], str(prefix))
+        self.assertEqual(proc.stderr, "")
 
     def test_preset_pkg_config_path_is_kept_after_bundle_paths(self):
         prefix = self.make_bundle("bundle-9.9.9", lib64=True)
@@ -359,6 +377,8 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
             ("non-executable regular file", {"openssl": "plain"}),
             ("no fips config", {"cnf": False}),
             ("no modules directory", {"modules": False}),
+            ("directory as fips config", {"cnf": "dir"}),
+            ("regular file as modules", {"modules": "file"}),
         ):
             with self.subTest(name):
                 shutil.rmtree(self.home / ".cache", ignore_errors=True)
