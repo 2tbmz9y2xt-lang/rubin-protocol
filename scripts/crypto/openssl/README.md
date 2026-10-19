@@ -19,6 +19,20 @@ Default install prefix:
 
 `$HOME/.cache/rubin-openssl/bundle-<version>`
 
+`scripts/dev-env.sh` uses the bundle selected by `scripts/crypto/openssl/VERSION` by
+default when it is built at that prefix, without `RUBIN_OPENSSL_PREFIX`. If the bundle is
+not built (`bin/openssl` is not a regular executable file, `ssl/openssl-fips.cnf` is not a
+file, or neither `lib/ossl-modules` nor `lib64/ossl-modules` is a directory), it
+falls back to the Homebrew `openssl@3` selection and prints one warning on stderr naming the
+bundle path and `bash scripts/crypto/openssl/build-openssl-bundle.sh`. If `VERSION` is not
+one canonical `MAJOR.MINOR.PATCH` line, the fallback warning names `VERSION` as unusable
+and not the build command. A non-empty `RUBIN_OPENSSL_PREFIX` selects that prefix with the
+same exports as the bundle default, including `LD_LIBRARY_PATH`, if `<prefix>/bin/openssl` is
+executable, and otherwise makes `scripts/dev-env.sh` exit 1 with an error. If
+`RUBIN_OPENSSL_PREFIX` is unset or empty and either `RUBIN_OPENSSL_PREFIX` or `OPENSSL_DIR` is
+present in the environment, even empty, the bundle default is off: a non-empty `OPENSSL_DIR`
+is kept, and otherwise the Homebrew `openssl@3` selection applies.
+
 FIPS artifacts produced by the bundle script:
 
 - `lib/ossl-modules/fips.*` (installed by `make install_fips`)

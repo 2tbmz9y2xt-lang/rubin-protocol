@@ -24,13 +24,34 @@ CALLERS = (
     ("ci.yml", "go_race_node", None, None, {}),
     ("ci.yml", "formal_refinement", "steps.formal_gate.outputs.run_formal == 'true'", "openssl", {}),
     ("ci.yml", "conformance_fixtures_drift", None, None, {}),
+    ("ci.yml", "security_ai", None, None, {}),
+    ("codeql.yml", "analyze", "matrix.language == 'go' || matrix.language == 'rust'", None, {}),
     ("codacy-coverage.yml", "coverage", None, None, {}),
     ("combined-load-nightly.yml", "combined-load", None, "openssl", {}),
     ("fips-only-nightly.yml", "fips-only-smoke", None, "openssl", {}),
     ("fuzz-nightly.yml", "fuzz-stage2", None, None,
      {"cache-key-prefix": "openssl-bundle-mldsa-verified", "cache-revision": "v1"}),
+    ("fuzz-nightly.yml", "fuzz-rust", None, None, {}),
+    ("kani.yml", "kani", "steps.scope.outputs.run == 'true'", None, {}),
     ("runtime-perf-guardrails.yml", "runtime-perf", None, "openssl", {}),
+    ("security-supply-chain-nightly.yml", "rust-miri", None, None, {}),
+    ("security-supply-chain-nightly.yml", "cargo-mutants", None, None, {}),
 )
+# (workflow, job, step the action follows, step it precedes); "run:X" names the step whose run has X.
+PLACEMENTS = (
+    ("kani.yml", "kani", "Install cached-or-pinned Kani toolchain", "Run Kani proofs"),
+    ("fuzz-nightly.yml", "fuzz-rust", None, "run:cargo fuzz"),
+    ("security-supply-chain-nightly.yml", "rust-miri", "Install Rust nightly with miri", "Run bounded miri target"),
+    ("security-supply-chain-nightly.yml", "cargo-mutants", "Install pinned cargo-mutants", "Run bounded cargo-mutants target"),
+    ("ci.yml", "security_ai", "Install cargo-audit", "Security precheck gate"),
+    ("codeql.yml", "analyze", "Checkout", "Initialize CodeQL"),
+)
+
+
+def step_index(steps: list, key: str) -> int:
+    if key.startswith("run:"):
+        return next(i for i, step in enumerate(steps) if key[4:] in str(step.get("run", "")))
+    return next(i for i, step in enumerate(steps) if step.get("name") == key)
 
 
 def workflow_files() -> list[Path]:
@@ -172,6 +193,26 @@ class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
             self.assertEqual(call.get("if"), expected_if, f"{path_name}:{job_id}: condition changed")
             self.assertEqual(call.get("id"), expected_id, f"{path_name}:{job_id}: output id changed")
             self.assertEqual(call.get("with") or {}, expected_with, f"{path_name}:{job_id}: cache identity changed")
+
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
+    def test_action_call_sits_between_its_named_steps(self):
+        yaml = m.load_yaml_module()
+        for path_name, job_id, after, before in PLACEMENTS:
+            with self.subTest(workflow=path_name, job=job_id):
+                steps = yaml.safe_load((WORKFLOWS_DIR / path_name).read_text(encoding="utf-8"))["jobs"][job_id]["steps"]
+                call = next(i for i, step in enumerate(steps) if step.get("uses") == ACTION_REF)
+                if after is not None:
+                    self.assertGreater(call, step_index(steps, after), "action runs before its install step")
+                self.assertLess(call, step_index(steps, before), "action runs after the step that needs it")
+
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
+    def test_no_workflow_step_installs_the_distribution_openssl_package(self):
+        yaml = m.load_yaml_module()
+        for path in workflow_files():
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_id, steps in job_steps(document):
+                for step in (item for item in steps if isinstance(item, dict)):
+                    self.assertNotIn("libssl-dev", str(step.get("run", "")), f"{path.name}:{job_id}: distribution OpenSSL package bypasses the bundle")
 
 
 if __name__ == "__main__":
