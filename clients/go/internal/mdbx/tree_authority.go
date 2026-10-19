@@ -316,18 +316,15 @@ func treeExcludedOwners(a StorageAuthorityV1, roles []uint64) bool {
 		if selected != nil && selected.GenerationID == role {
 			return false
 		}
-		if cleanup != nil && !treeCleanupExcludes(cleanup, role, a.NextGenerationID) {
+		if cleanup != nil && !treeCleanupExcludes(cleanup, role) {
 			return false
 		}
 	}
 	return true
 }
 
-func treeCleanupExcludes(cleanup *CleanupV1, role, next uint64) bool {
+func treeCleanupExcludes(cleanup *CleanupV1, role uint64) bool {
 	for _, span := range cleanup.Spans {
-		if span.Kind == CleanupSpanGenerationV1 && span.GenerationID >= next {
-			return false
-		}
 		if (span.Kind == CleanupSpanGenerationV1 || span.Kind == CleanupSpanSideV1) && span.GenerationID == role {
 			return false
 		}
