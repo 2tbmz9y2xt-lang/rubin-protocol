@@ -109,12 +109,14 @@ func authorityBlockMaximum(tree bool) uint64 {
 	}
 	return MaxBlockBytes
 }
+
 func cleanupSpanMaximum(tree bool) int {
 	if tree {
 		return 5
 	}
 	return 4
 }
+
 func validSpanOrder(span CleanupSpanV1, previous CleanupSpanKindV1, generation uint64, tree bool) bool {
 	if tree && span.Kind == CleanupSpanGenerationV1 && previous == span.Kind {
 		return generation != 0 && generation < span.GenerationID

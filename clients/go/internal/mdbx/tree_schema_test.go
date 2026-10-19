@@ -36,9 +36,15 @@ func treeKeyLiteral(t *testing.T, upper, code string) []byte {
 
 func TestTreeFamilies(t *testing.T) {
 	want := [9]DBI{
-		{"meta-v1", 0, 0}, {"utxo-v1", 1, 0}, {"canonical-v1", 2, 0},
-		{"headers-v1", 3, 0}, {"blocks-v1", 4, 0}, {"undo-v1", 5, 0},
-		{"staged-v1", 6, 0}, {"canonical-owner-v1", 7, 0}, {"tree-node-v1", 8, 0},
+		{"meta-v1", 0, 0},
+		{"utxo-v1", 1, 0},
+		{"canonical-v1", 2, 0},
+		{"headers-v1", 3, 0},
+		{"blocks-v1", 4, 0},
+		{"undo-v1", 5, 0},
+		{"staged-v1", 6, 0},
+		{"canonical-owner-v1", 7, 0},
+		{"tree-node-v1", 8, 0},
 	}
 	if got := TreeSchemaV1DBIs(); got != want {
 		t.Fatalf("tree families = %#v", got)
@@ -76,7 +82,7 @@ func TestTreeFamilies(t *testing.T) {
 
 func TestTreeNodeCanonicalKey(t *testing.T) {
 	for _, row := range []struct {
-		depth uint16
+		depth               uint16
 		prefix, upper, code string
 	}{
 		{0, strings.Repeat("00", 36), strings.Repeat("ff", 36), "0120"},
@@ -130,10 +136,15 @@ func wantTreeKeyError(t *testing.T, input []byte) {
 
 func TestTreeNodeIDRefusal(t *testing.T) {
 	for _, id := range []TreeNodeIDV1{
-		{}, {Kind: 3}, {Kind: 255}, {Kind: 1, Depth: 287},
+		{},
+		{Kind: 3},
+		{Kind: 255},
+		{Kind: 1, Depth: 287},
 		{Kind: 1, Depth: 288, Prefix: [36]byte{1}},
-		{Kind: 2, Depth: 288}, {Kind: 2, Depth: 65535},
-		{Kind: 2, RoutingKey: [36]byte{1}}, {Kind: 2, Depth: 7, Prefix: [36]byte{1}},
+		{Kind: 2, Depth: 288},
+		{Kind: 2, Depth: 65535},
+		{Kind: 2, RoutingKey: [36]byte{1}},
+		{Kind: 2, Depth: 7, Prefix: [36]byte{1}},
 	} {
 		before := id
 		if got, err := TreeNodeKey(1, id); got != nil || !exactErr(err) || id != before {
@@ -303,7 +314,7 @@ func TestTreeChildRelation(t *testing.T) {
 		wantTreeNodeError(t, parent, bad)
 	}
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
 		suffix []byte
 	}{
@@ -385,12 +396,13 @@ func TestTreeMetaRows(t *testing.T) {
 	entryKey := make([]byte, 77)
 	entryKey[32] = 1
 	rows := []struct {
-		name string
-		dbi DBI
+		name       string
+		dbi        DBI
 		key, value []byte
 	}{
 		{"version", meta, []byte{0}, []byte{0, 0, 0, 3}},
-		{"config", meta, []byte{1}, config}, {"authority", meta, []byte{2}, authority},
+		{"config", meta, []byte{1}, config},
+		{"authority", meta, []byte{2}, authority},
 		{"database", meta, []byte{3}, append(make([]byte, 31), 1)},
 		{"counter", meta, mustCodecHex(t, "100102030405060708"), make([]byte, 16)},
 		{"root", meta, mustCodecHex(t, "110102030405060708"), treeRootLiteral(t, false)},
@@ -460,4 +472,3 @@ func TestTreeMetaRows(t *testing.T) {
 		t.Fatalf("tree node invalid value = %v", err)
 	}
 }
-

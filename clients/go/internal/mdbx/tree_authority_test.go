@@ -161,7 +161,10 @@ func TestTreeEndpointShape(t *testing.T) {
 	for _, row := range []mutationCase[RootBindingV1]{
 		{"height overflow", func(r *RootBindingV1) { r.Endpoint.Height = 0x100000000 }},
 		{"zero work", func(r *RootBindingV1) { r.Endpoint.CumulativeChainwork = [40]byte{} }},
-		{"work 2^288+1", func(r *RootBindingV1) { r.Endpoint.CumulativeChainwork = modelWork(true); r.Endpoint.CumulativeChainwork[39] = 1 }},
+		{"work 2^288+1", func(r *RootBindingV1) {
+			r.Endpoint.CumulativeChainwork = modelWork(true)
+			r.Endpoint.CumulativeChainwork[39] = 1
+		}},
 		{"work upper bytes", func(r *RootBindingV1) { r.Endpoint.CumulativeChainwork[0] = 1 }},
 		{"work upper digit", func(r *RootBindingV1) { r.Endpoint.CumulativeChainwork[3] = 2 }},
 	} {
@@ -182,13 +185,19 @@ func TestTreeEndpointShape(t *testing.T) {
 		t.Fatalf("endpoint upper decode = %#v, %v", decoded.Endpoint, err)
 	}
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
-		value byte
+		value  byte
 	}{
-		{"format zero", 0, 0}, {"format unknown", 0, 2}, {"database zero", 32, 0},
-		{"commitment zero", 33, 0}, {"commitment unknown", 33, 2},
-		{"endpoint unknown", 98, 2}, {"top unknown", 207, 3}, {"assurance zero", 208, 0}, {"assurance unknown", 208, 3},
+		{"format zero", 0, 0},
+		{"format unknown", 0, 2},
+		{"database zero", 32, 0},
+		{"commitment zero", 33, 0},
+		{"commitment unknown", 33, 2},
+		{"endpoint unknown", 98, 2},
+		{"top unknown", 207, 3},
+		{"assurance zero", 208, 0},
+		{"assurance unknown", 208, 3},
 		{"work overflow", 138, 2},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -266,12 +275,16 @@ func TestTreeTopAssuranceShape(t *testing.T) {
 	imported := append(bytes.Clone(base[:208]), 2)
 	imported = append(imported, treeImportLiteral(t, 1)...)
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
-		value byte
+		value  byte
 	}{
-		{"database", 240, 0}, {"CURRENT", 248, 0}, {"LAG", 256, 0},
-		{"same pair", 256, 7}, {"role zero", 257, 0}, {"role unknown", 257, 3},
+		{"database", 240, 0},
+		{"CURRENT", 248, 0},
+		{"LAG", 256, 0},
+		{"same pair", 256, 7},
+		{"role zero", 257, 0},
+		{"role unknown", 257, 3},
 	} {
 		t.Run("import decode "+row.name, func(t *testing.T) {
 			bad := bytes.Clone(imported)
@@ -328,13 +341,20 @@ func TestTreeEvidenceLiteralIsolation(t *testing.T) {
 	}
 	wantTreeEvidenceError(t, append(bytes.Clone(encoded), 0))
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
-		value byte
+		value  byte
 	}{
-		{"format zero", 0, 0}, {"format unknown", 0, 2}, {"database zero", 32, 0},
-		{"CURRENT zero", 40, 0}, {"LAG zero", 48, 0}, {"pair equal", 48, 7},
-		{"length zero", 52, 0}, {"length short", 52, 2}, {"length long", 52, 4}, {"length overflow", 49, 255},
+		{"format zero", 0, 0},
+		{"format unknown", 0, 2},
+		{"database zero", 32, 0},
+		{"CURRENT zero", 40, 0},
+		{"LAG zero", 48, 0},
+		{"pair equal", 48, 7},
+		{"length zero", 52, 0},
+		{"length short", 52, 2},
+		{"length long", 52, 4},
+		{"length overflow", 49, 255},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bad := bytes.Clone(encoded)
@@ -475,8 +495,11 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 		row := codecLiteralCases(t)[4]
 		tree := treeAuthorityFixture(row.a)
 		tree.Authority.Ordinary.CarriedCleanup = &CleanupV1{Spans: []CleanupSpanV1{
-			{Kind: 1, GenerationID: 3}, {Kind: 1, GenerationID: 4},
-			{Kind: 2, GenerationID: 1}, {Kind: 3, GenerationID: 1}, {Kind: 4, GenerationID: 2},
+			{Kind: 1, GenerationID: 3},
+			{Kind: 1, GenerationID: 4},
+			{Kind: 2, GenerationID: 1},
+			{Kind: 3, GenerationID: 1},
+			{Kind: 4, GenerationID: 2},
 		}}
 		// The existing ordinary literal has captured side bytes243..348. Replace
 		// only its carried cleanup (option349, count350, original span351..383).
@@ -522,13 +545,18 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 	}
 	for _, row := range []struct {
 		name string
-		ids []uint64
+		ids  []uint64
 	}{
-		{"two ascending", []uint64{3, 4}}, {"one obsolete", []uint64{3}},
-		{"duplicate", []uint64{3, 3}}, {"descending", []uint64{4, 3}},
-		{"three obsolete", []uint64{3, 4, 5}}, {"zero", []uint64{0}},
-		{"equal next", []uint64{20}}, {"above next", []uint64{21}},
-		{"current", []uint64{1}}, {"live LAG", []uint64{10}},
+		{"two ascending", []uint64{3, 4}},
+		{"one obsolete", []uint64{3}},
+		{"duplicate", []uint64{3, 3}},
+		{"descending", []uint64{4, 3}},
+		{"three obsolete", []uint64{3, 4, 5}},
+		{"zero", []uint64{0}},
+		{"equal next", []uint64{20}},
+		{"above next", []uint64{21}},
+		{"current", []uint64{1}},
+		{"live LAG", []uint64{10}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			a := modelPrune(false)
@@ -584,7 +612,7 @@ func TestTreeAuthorityRoles(t *testing.T) {
 	}
 	base := wantTreeAuthority(t, treeAuthorityFixture(modelReplay(1)))
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
 		values []uint64
 	}{
@@ -706,13 +734,19 @@ func TestTreeProgressShape(t *testing.T) {
 	image.Authority.Replay.Cursor = ReplayCursorV1{}
 	b := wantTreeAuthority(t, image)
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
-		value byte
+		value  byte
 	}{
-		{"format unknown", 0, 2}, {"source unknown", 1, 3}, {"source NONE in replay", 1, 0},
-		{"GENESIS with checkpoint", 1, 1}, {"IMAGE legacy PRE", 211, 1}, {"IMAGE legacy APPLIED", 211, 2}, {"cursor unknown", 211, 3},
-		{"status NONE", 216, 0}, {"status unknown", 216, 3},
+		{"format unknown", 0, 2},
+		{"source unknown", 1, 3},
+		{"source NONE in replay", 1, 0},
+		{"GENESIS with checkpoint", 1, 1},
+		{"IMAGE legacy PRE", 211, 1},
+		{"IMAGE legacy APPLIED", 211, 2},
+		{"cursor unknown", 211, 3},
+		{"status NONE", 216, 0},
+		{"status unknown", 216, 3},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bad := bytes.Clone(b)
@@ -828,14 +862,18 @@ func TestTreeAuthorityBoundsIsolation(t *testing.T) {
 	wantTreeAuthorityEncodeError(t, image)
 	wantTreeAuthorityDecodeError(t, append(bytes.Clone(maximum), 0))
 	for _, row := range []struct {
-		name string
+		name   string
 		offset int
-		value uint32
+		value  uint32
 	}{
-		{"authority zero", 18, 0}, {"authority short", 18, 39},
-		{"authority overflow", 18, 0xffffffff}, {"authority overlaps progress", 18, 195},
-		{"progress missing", 217, 0}, {"progress short", 217, 1048354},
-		{"progress long", 217, 1048356}, {"progress overflow", 217, 0xffffffff},
+		{"authority zero", 18, 0},
+		{"authority short", 18, 39},
+		{"authority overflow", 18, 0xffffffff},
+		{"authority overlaps progress", 18, 195},
+		{"progress missing", 217, 0},
+		{"progress short", 217, 1048354},
+		{"progress long", 217, 1048356},
+		{"progress overflow", 217, 0xffffffff},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			bad := bytes.Clone(maximum)

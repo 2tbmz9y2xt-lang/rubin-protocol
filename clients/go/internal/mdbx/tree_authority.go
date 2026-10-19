@@ -47,10 +47,10 @@ const (
 )
 
 type TreeImportReferenceV1 struct {
-	OriginalDatabaseID              [32]byte
+	OriginalDatabaseID               [32]byte
 	OriginalCurrentID, OriginalLagID uint64
-	OriginalRole                    TreeOriginalRoleV1
-	EvidenceID                      [32]byte
+	OriginalRole                     TreeOriginalRoleV1
+	EvidenceID                       [32]byte
 }
 
 type TreeAssuranceV1 struct {
@@ -69,9 +69,9 @@ type RootBindingV1 struct {
 }
 
 type TreeEvidenceV1 struct {
-	OriginalDatabaseID              [32]byte
+	OriginalDatabaseID               [32]byte
 	OriginalCurrentID, OriginalLagID uint64
-	Payload                         []byte
+	Payload                          []byte
 }
 
 type TreeSourceKindV1 uint8
@@ -96,10 +96,10 @@ type TreeProgressV1 struct {
 }
 
 type TreeAuthorityV1 struct {
-	Authority                             StorageAuthorityV1
+	Authority                              StorageAuthorityV1
 	LagGenerationID, TargetLagGenerationID uint64
-	SourceKind                            TreeSourceKindV1
-	Progress                              TreeProgressV1
+	SourceKind                             TreeSourceKindV1
+	Progress                               TreeProgressV1
 }
 
 func validTreeOrigin(database [32]byte, current, lag uint64) bool {
@@ -164,7 +164,9 @@ func (root RootBindingV1) Encode() ([]byte, error) {
 	out = append(out, root.GenesisHash[:]...)
 	out = append(out, byte(root.Endpoint.Kind))
 	if root.Endpoint.Kind == TreeEndpointAppliedV1 {
-		out = binary.BigEndian.AppendUint32(out, uint32(root.Endpoint.Height))
+		var height [8]byte
+		binary.BigEndian.PutUint64(height[:], root.Endpoint.Height)
+		out = append(out, height[4:]...)
 		out = append(out, root.Endpoint.BlockHash[:]...)
 		out = append(out, root.Endpoint.CumulativeChainwork[:]...)
 	}
@@ -260,11 +262,11 @@ func DecodeTreeEvidenceV1(b []byte) (TreeEvidenceV1, error) {
 	}
 	r := authorityReader{b: b[1:], ok: true}
 	evidence := TreeEvidenceV1{OriginalDatabaseID: r.hash32(), OriginalCurrentID: r.u64(), OriginalLagID: r.u64()}
-	n := uint64(r.u32())
-	if n == 0 || n != uint64(r.remaining()) || !validTreeOrigin(evidence.OriginalDatabaseID, evidence.OriginalCurrentID, evidence.OriginalLagID) {
+	n := int64(r.u32())
+	if n == 0 || n != int64(r.remaining()) || !validTreeOrigin(evidence.OriginalDatabaseID, evidence.OriginalCurrentID, evidence.OriginalLagID) {
 		return TreeEvidenceV1{}, errSchema
 	}
-	evidence.Payload = append([]byte(nil), r.take(int(n))...)
+	evidence.Payload = append([]byte(nil), r.take(r.remaining())...)
 	return evidence, nil
 }
 
@@ -343,7 +345,7 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 		return nil, errSchema
 	}
 	n, ok := authoritySize(tree.Authority)
-	if !ok || len(tree.Progress.Payload) > MaxMetadataBytes-27-n {
+	if !ok || n < 40 || n > MaxMetadataBytes-27 || len(tree.Progress.Payload) > MaxMetadataBytes-27-n {
 		return nil, errSchema
 	}
 	out := []byte{1, byte(tree.SourceKind)}
@@ -368,8 +370,8 @@ func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
 	if tree.SourceKind > 2 {
 		return TreeAuthorityV1{}, errSchema
 	}
-	n := uint64(r.u32())
-	if !all(n >= 40, n <= uint64(r.remaining())) {
+	n := int64(r.u32())
+	if !all(n >= 40, n <= int64(r.remaining())) {
 		return TreeAuthorityV1{}, errSchema
 	}
 	authorityBytes := r.take(int(n))
@@ -377,13 +379,13 @@ func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
 	if tree.Progress.Kind > 2 {
 		return TreeAuthorityV1{}, errSchema
 	}
-	payloadLength := uint64(r.u32())
-	if !all(r.ok, payloadLength == uint64(r.remaining())) {
+	payloadLength := int64(r.u32())
+	if !all(r.ok, payloadLength == int64(r.remaining())) {
 		return TreeAuthorityV1{}, errSchema
 	}
 	inner := authorityReader{b: authorityBytes, ok: true, tree: true}
 	tree.Authority = decodeAuthority(&inner)
-	tree.Progress.Payload = r.take(int(payloadLength))
+	tree.Progress.Payload = r.take(r.remaining())
 	if !all(inner.ok, inner.remaining() == 0, validTreeAuthority(tree)) {
 		return TreeAuthorityV1{}, errSchema
 	}
