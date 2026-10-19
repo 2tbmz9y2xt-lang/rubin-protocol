@@ -305,9 +305,39 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                 return root
         return None
 
-    def assert_fallback_env(self, proc, prefix: Path):
+    def baseline_fallback_env(self, given: dict) -> dict:
+        """Expected values from the baseline dev-env.sh rules (literal Homebrew paths, host-conditional)."""
+        path = given.get("PATH", f"{self.stubs}:/usr/bin:/bin")
+
+        def prepend(directory: str) -> None:
+            nonlocal path
+            if os.path.isdir(directory) and f":{path}:".count(f":{directory}:") == 0:
+                path = f"{directory}:{path}"
+
+        prepend("/opt/homebrew/bin")
+        prepend("/usr/local/bin")
+        out = {name: given.get(name) for name in ("OPENSSL_DIR", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH")}
+        out.update(OPENSSL_MODULES=None, OPENSSL_CONF=None)
+        if not given.get("OPENSSL_DIR"):
+            for root in ("/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"):
+                if os.access(f"{root}/bin/openssl", os.X_OK):
+                    prepend(f"{root}/bin")
+                    out["OPENSSL_DIR"] = root
+                    tail = given.get("PKG_CONFIG_PATH")
+                    out["PKG_CONFIG_PATH"] = f"{root}/lib/pkgconfig" + (f":{tail}" if tail else "")
+                    if os.path.isdir(f"{root}/lib/ossl-modules"):
+                        out["OPENSSL_MODULES"] = f"{root}/lib/ossl-modules"
+                    break
+        out["PATH"] = path
+        return out
+
+    def assert_baseline_env(self, env: dict, given: dict):
+        for name, expected in self.baseline_fallback_env(given).items():
+            self.assertEqual(env.get(name), expected, name)
+
+    def assert_fallback_env(self, proc, prefix: Path, given: dict | None = None):
         env = self.env_of(proc)
-        self.assertEqual(env.get("OPENSSL_DIR"), self.homebrew_dir())
+        self.assert_baseline_env(env, given or {})
         for name in SELECTED_VARS:
             self.assertNotIn(str(prefix), env.get(name, ""), name)
 
@@ -372,6 +402,14 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig")
         self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
 
+    def test_regular_file_as_lib64_pkgconfig_is_not_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        (prefix / "lib64").mkdir()
+        (prefix / "lib64" / "pkgconfig").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib/pkgconfig")
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib64:{prefix}/lib")
+
     def test_explicit_prefix_with_modules_only_under_lib64(self):
         prefix = self.make_bundle("bundle-other", modules=False, modules64=True)
         env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix)))
@@ -385,6 +423,9 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
             {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": ""},
             {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl"},
             {"OPENSSL_DIR": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
+            {"OPENSSL_DIR": "", "PKG_CONFIG_PATH": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
         )
         for given in cases:
             with self.subTest(given=given):
@@ -392,13 +433,8 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                 env = self.env_of(proc)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(proc.stderr, "")
-                caller = given.get("OPENSSL_DIR")
-                expected = caller if caller else (brew or caller)
-                self.assertEqual(env.get("OPENSSL_DIR"), expected)
-                self.assertNotIn(str(pinned), env.get("LD_LIBRARY_PATH", ""))
-                self.assertNotIn(str(pinned), env["PATH"])
-                if not caller and brew:
-                    self.assertEqual(env["PKG_CONFIG_PATH"], f"{brew}/lib/pkgconfig")
+                self.assert_baseline_env(env, given)
+                self.assertNotIn(str(pinned), proc.stdout)
 
     def test_non_empty_explicit_prefix_wins_over_empty_or_set_openssl_dir(self):
         self.make_bundle("bundle-9.9.9")
@@ -467,7 +503,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
 
     def test_unusable_version_warns_without_echoing_its_bytes(self):
         self.make_bundle("bundle-9.9.9")
-        for raw in (b"9.9.9 \n", b"9.9.9\r\n", b"9.9.9", b"9.9.9\n\n", b"9.9.9\n\x00junk", b"9.9\n", b"v9.9.9\n", b"9.9.9.9\n", b""):
+        for raw in (b"9.9.9 \n", b"9.9.9\r\n", b"9.9.9", b"9.9.9\n\n", b"9.9.9\n\x00junk", b"9.9\n", b".9.9\n", b"9..9\n", b"9x9x9\n", b"v9.9.9\n", b"9.9.9.9\n", b""):
             with self.subTest(raw=raw):
                 proc = self.run_dev_env(raw)
                 self.assertEqual(proc.returncode, 0)

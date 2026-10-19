@@ -25,8 +25,9 @@ not built (no executable `bin/openssl`, `ssl/openssl-fips.cnf` or `lib*/ossl-mod
 falls back to the Homebrew `openssl@3` selection and prints one warning on stderr naming the
 bundle path and `bash scripts/crypto/openssl/build-openssl-bundle.sh`. If `VERSION` is not
 one canonical `MAJOR.MINOR.PATCH` line, the fallback warning names `VERSION` as unusable
-and not the build command. An explicit `RUBIN_OPENSSL_PREFIX` or an already
-exported `OPENSSL_DIR` takes precedence.
+and not the build command. A non-empty `RUBIN_OPENSSL_PREFIX` takes precedence. If either
+`RUBIN_OPENSSL_PREFIX` or `OPENSSL_DIR` is present in the environment, even empty, the
+pinned default is off and `scripts/dev-env.sh` behaves as it did before this default.
 
 FIPS artifacts produced by the bundle script:
 
