@@ -298,13 +298,6 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
     def env_of(proc) -> dict:
         return dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
 
-    @staticmethod
-    def homebrew_dir():
-        for root in ("/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"):
-            if os.access(f"{root}/bin/openssl", os.X_OK):
-                return root
-        return None
-
     def baseline_fallback_env(self, given: dict) -> dict:
         """Expected values from the baseline dev-env.sh rules (literal Homebrew paths, host-conditional)."""
         path = given.get("PATH", f"{self.stubs}:/usr/bin:/bin")
@@ -410,6 +403,25 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib/pkgconfig")
         self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib64:{prefix}/lib")
 
+    def test_explicit_prefix_without_library_directories_exports_no_empty_entries(self):
+        prefix = self.home / "bare"
+        (prefix / "bin").mkdir(parents=True)
+        write_stub(prefix / "bin" / "openssl", "#!/bin/sh\nexit 0\n")
+        for given, expected in (({}, None), ({"PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"}, ("/p", "/l"))):
+            with self.subTest(given=given):
+                proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix), **given)
+                env = self.env_of(proc)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+                self.assertEqual((env.get("PKG_CONFIG_PATH"), env.get("LD_LIBRARY_PATH")),
+                                 expected or (None, None))
+
+    def test_explicit_prefix_without_executable_openssl_is_refused(self):
+        prefix = self.make_bundle("bundle-other", openssl="plain")
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stderr, f"ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: {prefix}\n")
+
     def test_explicit_prefix_with_modules_only_under_lib64(self):
         prefix = self.make_bundle("bundle-other", modules=False, modules64=True)
         env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix)))
@@ -417,7 +429,6 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
 
     def test_empty_or_unset_variables_follow_the_baseline_rules(self):
         pinned = self.make_bundle("bundle-9.9.9")
-        brew = self.homebrew_dir()
         cases = (
             {"RUBIN_OPENSSL_PREFIX": ""},
             {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": ""},
@@ -426,6 +437,8 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
             {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
             {"OPENSSL_DIR": "", "PKG_CONFIG_PATH": ""},
             {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
+            {"OPENSSL_DIR": "/caller/openssl"},
+            {"OPENSSL_DIR": "/caller/openssl", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
         )
         for given in cases:
             with self.subTest(given=given):

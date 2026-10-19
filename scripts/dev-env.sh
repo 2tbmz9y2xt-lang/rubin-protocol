@@ -124,7 +124,7 @@ warn_pinned_openssl() {
   echo "WARNING: $1; falling back to the default OpenSSL selection$2" >&2 || true
 }
 
-# Built per contract A6: the action's check (-x bin/openssl, fips cnf, ossl-modules) plus a regular bin/openssl.
+# Built: bin/openssl is a regular executable file, ssl/openssl-fips.cnf a file, and lib or lib64 holds an ossl-modules directory.
 pinned_bundle_built() {
   local prefix="$1"
   [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" && -f "${prefix}/ssl/openssl-fips.cnf" ]] || return 1
