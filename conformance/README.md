@@ -34,6 +34,33 @@ scripts/dev-env.sh -- python3 conformance/runner/run_cv_bundle.py --only-gates C
 
 ## Coverage matrix
 
+`fixtures/protocol/utxo_commitment_expected_v1.json` is manual, inert
+`FROZEN_EXPECTED` authority from the exact specification revision in its source
+registry. Its 350 finite cases carry separate immutable input and expected
+cells. `SERIALIZATION_DOMAIN` examples do not establish valid transactions or
+reachable chain states. `BLOCK_VALIDITY` cells describe complete validity
+inputs/results. `SYMBOLIC_OWNER_TRANSITION` cells specify logical prestates,
+reached observations and complete expected effects; they are not native receipts
+or executable schedules.
+
+RUB-1681 owns realizing these inputs through actual public Go/Rust owners and
+comparing independently observed bytes, results and state. Supplying an expected
+receipt to the operation, comparing clients only with each other, or treating
+the existing flat diagnostic digest as `Root(U)` cannot establish conformance.
+The artifact claims no skipped-history validity, physical fit, formal proof,
+availability, activation or chain launch. Its manual JSON has no generator.
+The existing matrix generator inventories it without interpreting its law.
+
+Bounded producer checks (all through the sanctioned environment):
+
+```bash
+scripts/dev-env.sh -- python3 -m unittest discover -s tools/tests -p 'test_gen_conformance_matrix.py'
+scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_policy.py
+scripts/dev-env.sh -- python3 tools/check_conformance_edge_pack.py
+scripts/dev-env.sh -- python3 -m unittest discover -s tools/tests -p 'test_*.py'
+scripts/dev-env.sh -- python3 tools/check_conformance_fixtures_drift.py
+```
+
 `conformance/MATRIX.md` is a generated coverage overview (gates/vectors/ops; local-only vs executable).
 
 Regenerate:
