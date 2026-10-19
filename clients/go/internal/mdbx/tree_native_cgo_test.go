@@ -188,6 +188,36 @@ func TestTreeNativeFactoryStaticAndHistorical(t *testing.T) {
 
 func TestTreeNativeTypedStaticLifetime(t *testing.T) {
 	store, _, _ := treeNativeStore(t)
+	for _, returnRefusal := range []bool{false, true} {
+		var refusal error
+		viewErr := store.View(func(reader *Reader) error {
+			authority, err := reader.ReadStorageAuthorityV1()
+			if !reflect.DeepEqual(authority, StorageAuthorityV1{}) {
+				t.Fatal("tree legacy authority refusal leaked authority")
+			}
+			treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "tree Reader requires tree authority accessor", nil)
+			if reader.failure != nil || !reader.usable() {
+				t.Fatal("tree legacy authority static refusal disarmed Reader")
+			}
+			if returnRefusal {
+				refusal = err
+			}
+			got, present, err := reader.ReadTreeAuthorityV1()
+			if err != nil || present || !reflect.DeepEqual(got, TreeAuthorityV1{}) {
+				t.Fatalf("tree authority after legacy refusal: %+v/%v/%v", got, present, err)
+			}
+			return refusal
+		})
+		if viewErr != refusal {
+			t.Fatalf("tree legacy authority callback disposition: %v, want %v", viewErr, refusal)
+		}
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			_, _, err := reader.ReadTreeAuthorityV1()
+			return err
+		}))
+		_, err := store.Inspect()
+		mustEnvironment(t, err)
+	}
 	var escaped *Reader
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		escaped = reader
@@ -230,6 +260,11 @@ func TestTreeNativeTypedStaticLifetime(t *testing.T) {
 		copyReader.active.Store(true)
 		_, _, err = copyReader.ReadTreeRootBindingV1(0)
 		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+		authority, err := copyReader.ReadStorageAuthorityV1()
+		if !reflect.DeepEqual(authority, StorageAuthorityV1{}) || copyReader.failure != nil {
+			t.Fatal("copied legacy authority refusal leaked authority or recorded failure")
+		}
+		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
 		var group sync.WaitGroup
 		for range 8 {
 			group.Go(func() {
@@ -242,12 +277,17 @@ func TestTreeNativeTypedStaticLifetime(t *testing.T) {
 		group.Wait()
 		return nil
 	}))
-	for _, reader := range []*Reader{nil, escaped} {
+	for _, reader := range []*Reader{nil, {format: 3}, escaped} {
 		_, _, err := reader.ReadTreeRootBindingV1(0)
 		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
 		_, err = reader.ReadTreeEvidenceV1(TreeImportReferenceV1{})
 		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
 		_, _, err = reader.ReadTreeAuthorityV1()
+		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+		authority, err := reader.ReadStorageAuthorityV1()
+		if !reflect.DeepEqual(authority, StorageAuthorityV1{}) || (reader != nil && reader.failure != nil) {
+			t.Fatal("inactive legacy authority refusal leaked authority or recorded failure")
+		}
 		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
 	}
 	historical, err := Create(filepath.Join(t.TempDir(), "old"), environmentConfig())

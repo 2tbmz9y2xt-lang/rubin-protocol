@@ -4357,7 +4357,9 @@ func TestTreeNativeAbsentAuthorityCensus(t *testing.T) {
 
 func TestTreeNativeTypedPointsAndProvenance(t *testing.T) {
 	store, path, identity := treeNativeStore(t)
-	authority := treeNativeAuthorityBytes(t, 0, 0)
+	authority := mustCodecHex(t, "01000000000000000002000000000000000000000028"+
+		"01010000000000000000000000000000000000000000000000010000000000000005010100000000"+
+		"0000000000")
 	treeNativeSeed(t, store, 0, []byte{2}, authority)
 	for i, applied := range []bool{false, true} {
 		root := treeRootFixture(t, applied)
@@ -4396,6 +4398,11 @@ func TestTreeNativeTypedPointsAndProvenance(t *testing.T) {
 			Authority:       StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
 			LagGenerationID: 2,
 		}
+		legacy, err := reader.ReadStorageAuthorityV1()
+		if !reflect.DeepEqual(legacy, StorageAuthorityV1{}) || reader.failure != nil || !reader.usable() {
+			t.Fatal("populated tree legacy authority refusal changed Reader or leaked authority")
+		}
+		treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "tree Reader requires tree authority accessor", nil)
 		got, present, err := reader.ReadTreeAuthorityV1()
 		if err != nil || !present || !reflect.DeepEqual(got, wantAuthority) || reader.ownerVerified {
 			t.Fatalf("tree authority envelope native point: %+v/%v/%v", got, present, err)

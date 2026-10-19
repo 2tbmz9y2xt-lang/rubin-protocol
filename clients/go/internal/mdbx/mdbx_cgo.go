@@ -2741,10 +2741,17 @@ func (r *Reader) ReadRequiredSideLink(generation, height uint64) ([]byte, error)
 	return value, nil
 }
 
-// ReadStorageAuthorityV1 reads and validates meta-v1 key 02. Postconditions: a width, shape or native failure is the
+// ReadStorageAuthorityV1 reads and validates schema2 meta-v1 key 02; tree Readers require ReadTreeAuthorityV1.
+// Postconditions: a width, shape or native failure is the
 // error Get already recorded; an absent, undecodable or structurally illegal authority is recorded as this Reader's
 // Integrity failure "invalid storage authority" and that same object is returned.
 func (r *Reader) ReadStorageAuthorityV1() (StorageAuthorityV1, error) {
+	if !r.usable() {
+		return StorageAuthorityV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	if r.format == 3 {
+		return StorageAuthorityV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "tree Reader requires tree authority accessor", nil)
+	}
 	value, present, err := r.Get(schemaDBIs[0], []byte{2})
 	if err != nil {
 		return StorageAuthorityV1{}, err
