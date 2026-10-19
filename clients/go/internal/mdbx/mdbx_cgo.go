@@ -615,10 +615,14 @@ func reopenRequired(code int) bool {
 }
 
 func validEngineClass(operation engineOperation, class EngineClass) bool {
-	if class == EngineStateMismatch {
+	switch class {
+	case EngineStateMismatch:
 		return operation == operationUpdate || operation == operationOpen
+	case EngineInvalidInput, EngineIntegrity, EngineCapacity, EngineConcurrency, EngineTransaction, EngineIO, EngineLocalInvariant:
+		return true
+	default:
+		return false
 	}
-	return class == EngineInvalidInput || class == EngineIntegrity || class == EngineCapacity || class == EngineConcurrency || class == EngineTransaction || class == EngineIO || class == EngineLocalInvariant
 }
 
 func engineError(operation engineOperation, class EngineClass, code int, diagnostic string, cause error) *EngineError {
@@ -3602,12 +3606,8 @@ func validTreeIntegrityTerminal(engine *EngineError) bool {
 	if !valid || engine.Diagnostic != "invalid tree native representation" || engine.ReopenRequired {
 		return false
 	}
-	switch engine.Cause {
-	case nil, errSchema:
-		return true
-	default:
-		return false
-	}
+	// Only the exact schema error is terminal; wrapped errors are rejected.
+	return engine.Cause == nil || any(engine.Cause) == any(errSchema)
 }
 
 func validConsumedCleanupTerminal(err error) bool {
@@ -4474,7 +4474,7 @@ func CreateTreeV1(path string, cfg ConfigV1, databaseID [32]byte) (*Store, error
 	if err != nil {
 		return nil, err
 	}
-	if err = normalizeMDBXModule(); err != nil {
+	if err := normalizeMDBXModule(); err != nil {
 		return nil, err
 	}
 	if err = validateLimits(cfg, limitsForPage(cfg.PageSize)); err != nil {
@@ -4629,7 +4629,7 @@ func initializeTreeSchema(txn *C.MDBX_txn, encoded []byte, id [32]byte) ([9]C.MD
 	if err != nil {
 		return dbis, treeIntegrity(operationInit, err)
 	}
-	if err = treeMainCount(txn, 9, operationInit); err != nil {
+	if err := treeMainCount(txn, 9, operationInit); err != nil {
 		return dbis, err
 	}
 	return dbis, treeEmptyCensus(txn, dbis, cfg, id, operationInit)
@@ -4712,14 +4712,14 @@ func inspectTreeSchema(env *C.MDBX_env, txn *C.MDBX_txn, cfg ConfigV1, id [32]by
 	if err != nil {
 		return [9]C.MDBX_dbi{}, err
 	}
-	if err = treeMainCount(txn, uint64(len(formatDBIs(format))), operationOpen); err != nil {
+	if err := treeMainCount(txn, uint64(len(formatDBIs(format))), operationOpen); err != nil {
 		return [9]C.MDBX_dbi{}, err
 	}
 	dbis, err := treeOpenFamilies(txn, false, format, meta, operationOpen)
 	if err != nil {
 		return dbis, err
 	}
-	if err = treeOpenConfig(env, txn, meta, cfg); err != nil {
+	if err := treeOpenConfig(env, txn, meta, cfg); err != nil {
 		return dbis, err
 	}
 	if format == 2 {

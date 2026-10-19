@@ -28,7 +28,7 @@ func treeNativeStore(t *testing.T) (*Store, string, [32]byte) {
 func treeNativeError(t *testing.T, err error, op engineOperation, class EngineClass, code int, diagnostic string, cause error) {
 	t.Helper()
 	engine, direct := directTestEngineError(err)
-	if !direct || engine.Operation != string(op) || engine.Class != class || engine.Code != code || engine.Diagnostic != diagnostic || engine.Cause != cause || engine.ReopenRequired {
+	if !direct || engine.Operation != string(op) || engine.Class != class || engine.Code != code || engine.Diagnostic != diagnostic || !sameError(engine.Cause, cause) || engine.ReopenRequired {
 		t.Fatalf("tree exact error tuple: %+v, want %s/%s/%d/%s/%v", err, op, class, code, diagnostic, cause)
 	}
 }
@@ -291,7 +291,7 @@ func TestTreeNativeViewApplicationOutcomes(t *testing.T) {
 			} else {
 				invoke()
 			}
-			if (mode == "error") != (returned == application) || mode != "error" && returned != nil || mode == "panic" && panicked != marker || mode != "panic" && panicked != nil || escaped.usable() || escaped.failure != nil || store.state != storeOPEN || !validStoreShape(store) {
+			if (mode == "error") != sameError(returned, application) || mode != "error" && returned != nil || mode == "panic" && panicked != marker || mode != "panic" && panicked != nil || escaped.usable() || escaped.failure != nil || store.state != storeOPEN || !validStoreShape(store) {
 				t.Fatalf("tree application/resource outcome: %s/%v/%v", store.state, returned, panicked)
 			}
 			mustEnvironment(t, store.View(func(reader *Reader) error { _, _, err := reader.ReadTreeAuthorityV1(); return err }))
