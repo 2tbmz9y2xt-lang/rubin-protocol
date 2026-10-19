@@ -148,7 +148,9 @@ func validProfilePromises(a StorageAuthorityV1) bool {
 	return false
 }
 
-func validPhasePayload(a StorageAuthorityV1) bool {
+func validPhasePayload(a StorageAuthorityV1) bool { return validPhasePayloadFor(a, false) }
+
+func validPhasePayloadFor(a StorageAuthorityV1, tree bool) bool {
 	pending := a.PendingTargetProfile != nil
 	switch a.Phase {
 	case StoragePhaseNoneV1:
@@ -156,11 +158,11 @@ func validPhasePayload(a StorageAuthorityV1) bool {
 			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending)))
 	case StoragePhasePruneGCV1:
 		return all(a.Cleanup != nil, a.Replay == nil, a.Ordinary == nil,
-			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanup(a.Cleanup)
+			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanupFor(a.Cleanup, tree)
 	case StoragePhaseReplayV1:
-		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay != nil, a.Ordinary == nil, !pending) && validReplay(a.Replay)
+		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay != nil, a.Ordinary == nil, !pending) && validReplayFor(a.Replay, tree)
 	case StoragePhaseOrdinaryApplyV1:
-		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary != nil, !pending) && validOrdinary(a)
+		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay == nil, a.Ordinary != nil, !pending) && validOrdinaryFor(a, tree)
 	}
 	return false
 }

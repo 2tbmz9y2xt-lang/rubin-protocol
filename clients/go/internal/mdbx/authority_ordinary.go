@@ -84,9 +84,11 @@ func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 // validOrdinaryTarget requires a nonempty N whose last point is the target and a captured side describing exactly N
 // (RUBIN_MEMPOOL_POLICY.md 6.4.1.2, 6.4.1.7): a full capture whose rows are exactly N, or the one-slot capture of
 // N[1:] plus the same-generation frozen SIDE singleton at N[0] in carried_cleanup, whose union is N of 1440.
-func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64) bool {
+func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64) bool { return validOrdinaryTargetFor(o, f, false) }
+
+func validOrdinaryTargetFor(o *OrdinaryApplyV1, f uint64, tree bool) bool {
 	side := o.CapturedSelectedSide
-	if len(o.NewSuffix) == 0 || side == nil || !validSelected(side) {
+	if len(o.NewSuffix) == 0 || side == nil || !validSelectedFor(side, tree) {
 		return false
 	}
 	target := o.NewSuffix[len(o.NewSuffix)-1]
@@ -127,18 +129,22 @@ func validOrdinaryPromises(a StorageAuthorityV1) bool {
 	return a.U == laggedPromise(height, 1440)
 }
 
-func validOrdinaryTail(a StorageAuthorityV1, f uint64) bool {
+func validOrdinaryTail(a StorageAuthorityV1, f uint64) bool { return validOrdinaryTailFor(a, f, false) }
+
+func validOrdinaryTailFor(a StorageAuthorityV1, f uint64, tree bool) bool {
 	o := a.Ordinary
-	if !validOrdinaryTarget(o, f) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
+	if !validOrdinaryTargetFor(o, f, tree) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
 		return false
 	}
-	if o.CarriedCleanup != nil && !validCleanup(o.CarriedCleanup) {
+	if o.CarriedCleanup != nil && !validCleanupFor(o.CarriedCleanup, tree) {
 		return false
 	}
 	return validOrdinaryPromises(a)
 }
 
-func validOrdinary(a StorageAuthorityV1) bool {
+func validOrdinary(a StorageAuthorityV1) bool { return validOrdinaryFor(a, false) }
+
+func validOrdinaryFor(a StorageAuthorityV1, tree bool) bool {
 	o := a.Ordinary
 	if !all(len(o.OldSuffix) <= 1440, len(o.NewSuffix) >= 1, len(o.NewSuffix) <= 1440,
 		anyTrue(len(o.OldSuffix) >= 1, len(o.NewSuffix) >= 2)) {
@@ -160,5 +166,5 @@ func validOrdinary(a StorageAuthorityV1) bool {
 	if oldOK {
 		f = oldF
 	}
-	return validOrdinaryTail(a, f)
+	return validOrdinaryTailFor(a, f, tree)
 }
