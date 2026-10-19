@@ -261,11 +261,12 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         shutil.copy(DEV_ENV_PATH, self.script)
 
     def make_bundle(self, name: str, openssl: str | None = "exec", cnf: bool = True,
-                    modules: bool = True, lib64: bool = False) -> Path:
+                    modules: bool = True, lib64: bool = False, modules64: bool = False) -> Path:
         """openssl: exec (built), plain (regular, not executable), dir (directory), None (absent)."""
         prefix = self.home / ".cache" / "rubin-openssl" / name
         subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules else [])
         subs += ["lib64/pkgconfig"] if lib64 else []
+        subs += ["lib64/ossl-modules"] if modules64 else []
         for sub in subs:
             (prefix / sub).mkdir(parents=True)
         if cnf:
@@ -290,8 +291,16 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
     def env_of(proc) -> dict:
         return dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
 
+    @staticmethod
+    def homebrew_dir():
+        for root in ("/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"):
+            if os.access(f"{root}/bin/openssl", os.X_OK) and Path(f"{root}/bin/openssl").is_file():
+                return root
+        return None
+
     def assert_fallback_env(self, proc, prefix: Path):
         env = self.env_of(proc)
+        self.assertEqual(env.get("OPENSSL_DIR"), self.homebrew_dir())
         for name in SELECTED_VARS:
             self.assertNotIn(str(prefix), env.get(name, ""), name)
 
@@ -318,6 +327,17 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                     self.assertNotIn("RUBIN_OPENSSL_PREFIX", default_env)
                     self.assert_bundle_env(default_env, prefix, lib64, tail)
                     self.assert_bundle_env(self.env_of(explicit), prefix, lib64, tail)
+
+    def test_modules_only_under_lib64_is_built_and_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9", modules=False, modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_preset_pkg_config_path_is_kept_after_bundle_paths(self):
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", PKG_CONFIG_PATH="/pre"))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig:{prefix}/lib/pkgconfig:/pre")
 
     def test_fips_only_wires_config_for_pinned_bundle(self):
         prefix = self.make_bundle("bundle-9.9.9")

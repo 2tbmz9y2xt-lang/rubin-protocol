@@ -124,7 +124,7 @@ warn_pinned_openssl() {
   echo "WARNING: $1; falling back to the default OpenSSL selection$2" >&2 || true
 }
 
-# The definition .github/actions/openssl-bundle/action.yml uses before it skips the build.
+# Built per contract A6: the action's check (-x bin/openssl, fips cnf, ossl-modules) plus a regular bin/openssl.
 pinned_bundle_built() {
   local prefix="$1"
   [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" && -f "${prefix}/ssl/openssl-fips.cnf" ]] || return 1
@@ -238,6 +238,9 @@ print_versions() {
   fi
   if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
     echo "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH}"
+  fi
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH}"
   fi
   echo
 
