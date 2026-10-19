@@ -266,7 +266,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         prefix = self.home / ".cache" / "rubin-openssl" / name
         subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules is True else [])
         subs += ["lib64/pkgconfig"] if lib64 else []
-        subs += ["lib64/ossl-modules"] if modules64 else []
+        subs += ["lib64/ossl-modules"] if modules64 is True else []
         for sub in subs:
             (prefix / sub).mkdir(parents=True)
         if cnf == "dir":
@@ -275,6 +275,9 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
             (prefix / "ssl" / "openssl-fips.cnf").write_text("", encoding="utf-8")
         if modules == "file":
             (prefix / "lib" / "ossl-modules").write_text("", encoding="utf-8")
+        if modules64 == "file":
+            (prefix / "lib64").mkdir()
+            (prefix / "lib64" / "ossl-modules").write_text("", encoding="utf-8")
         if openssl == "dir":
             (prefix / "bin" / "openssl").mkdir(parents=True)
         elif openssl is not None:
@@ -308,9 +311,18 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         for name in SELECTED_VARS:
             self.assertNotIn(str(prefix), env.get(name, ""), name)
 
-    def assert_bundle_env(self, env: dict, prefix: Path, lib64: bool = False, ld_tail: str = ""):
+    def expected_path(self, prefix: Path, caller: str | None = None) -> str:
+        """Baseline rules: prepend each existing helper dir unless already present, bundle bin last."""
+        path = caller if caller is not None else f"{self.stubs}:/usr/bin:/bin"
+        for directory in ("/opt/homebrew/bin", "/usr/local/bin", f"{prefix}/bin"):
+            if os.path.isdir(directory) and f":{path}:".count(f":{directory}:") == 0:
+                path = f"{directory}:{path}"
+        return path
+
+    def assert_bundle_env(self, env: dict, prefix: Path, lib64: bool = False, ld_tail: str = "",
+                          caller_path: str | None = None):
         self.assertEqual(env["OPENSSL_DIR"], str(prefix))
-        self.assertTrue(env["PATH"].startswith(f"{prefix}/bin:"), env["PATH"])
+        self.assertEqual(env["PATH"], self.expected_path(prefix, caller_path))
         pkg = f"{prefix}/lib64/pkgconfig:" if lib64 else ""
         self.assertEqual(env["PKG_CONFIG_PATH"], f"{pkg}{prefix}/lib/pkgconfig")
         self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib/ossl-modules")
@@ -336,6 +348,65 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                     self.assertNotIn("OPENSSL_CONF", explicit_env)
                     self.assertEqual(explicit_env.pop("RUBIN_OPENSSL_PREFIX"), str(prefix))
                     self.assertEqual(default_env, explicit_env)
+
+    def test_bundle_bin_already_in_caller_path_is_not_moved(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        caller = f"{self.stubs}:{prefix}/bin:/usr/bin:/bin"
+        default = self.env_of(self.run_dev_env(b"9.9.9\n", PATH=caller))
+        explicit = self.env_of(self.run_dev_env(b"9.9.9\n", PATH=caller, RUBIN_OPENSSL_PREFIX=str(prefix)))
+        for env in (default, explicit):
+            self.assert_bundle_env(env, prefix, caller_path=caller)
+
+    def test_non_directory_lib_entries_are_not_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        (prefix / "lib64").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib")
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib/pkgconfig")
+        shutil.rmtree(self.home / ".cache")
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True, modules=False, modules64=True)
+        shutil.rmtree(prefix / "lib")
+        (prefix / "lib").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib64")
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig")
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_explicit_prefix_with_modules_only_under_lib64(self):
+        prefix = self.make_bundle("bundle-other", modules=False, modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix)))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_empty_or_unset_variables_follow_the_baseline_rules(self):
+        pinned = self.make_bundle("bundle-9.9.9")
+        brew = self.homebrew_dir()
+        cases = (
+            {"RUBIN_OPENSSL_PREFIX": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl"},
+            {"OPENSSL_DIR": ""},
+        )
+        for given in cases:
+            with self.subTest(given=given):
+                proc = self.run_dev_env(b"9.9.9\n", **given)
+                env = self.env_of(proc)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stderr, "")
+                caller = given.get("OPENSSL_DIR")
+                expected = caller if caller else (brew or caller)
+                self.assertEqual(env.get("OPENSSL_DIR"), expected)
+                self.assertNotIn(str(pinned), env.get("LD_LIBRARY_PATH", ""))
+                self.assertNotIn(str(pinned), env["PATH"])
+                if not caller and brew:
+                    self.assertEqual(env["PKG_CONFIG_PATH"], f"{brew}/lib/pkgconfig")
+
+    def test_non_empty_explicit_prefix_wins_over_empty_or_set_openssl_dir(self):
+        self.make_bundle("bundle-9.9.9")
+        other = self.make_bundle("bundle-other")
+        for caller in ("", "/caller/openssl"):
+            with self.subTest(openssl_dir=caller):
+                env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(other), OPENSSL_DIR=caller))
+                self.assert_bundle_env(env, other)
 
     def test_modules_only_under_lib64_is_built_and_exported(self):
         prefix = self.make_bundle("bundle-9.9.9", modules=False, modules64=True)
@@ -379,6 +450,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
             ("no modules directory", {"modules": False}),
             ("directory as fips config", {"cnf": "dir"}),
             ("regular file as modules", {"modules": "file"}),
+            ("regular file as lib64 modules", {"modules": False, "modules64": "file"}),
         ):
             with self.subTest(name):
                 shutil.rmtree(self.home / ".cache", ignore_errors=True)

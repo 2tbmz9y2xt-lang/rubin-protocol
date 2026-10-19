@@ -159,7 +159,7 @@ select_openssl() {
   fi
 
   # Default: the bundle selected by scripts/crypto/openssl/VERSION, when it is built.
-  if [[ -z "${RUBIN_OPENSSL_PREFIX:-}" && -z "${OPENSSL_DIR:-}" ]]; then
+  if [[ -z "${RUBIN_OPENSSL_PREFIX+set}" && -z "${OPENSSL_DIR+set}" ]]; then
     select_pinned_openssl
   fi
 
