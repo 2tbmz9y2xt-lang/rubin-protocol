@@ -626,6 +626,22 @@ func TestInitial148BlockStep13Exclusion(t *testing.T) {
 		body := initial148BlockFrame(t, [][]byte{zeroOutputs}, c.edit)
 		initial148BlockBodyRefusal(t, "initial148 Q excludes step13", body, BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
+	// Body commitment order: the header Merkle root precedes the witness commitment.
+	witnessTxs := [][]byte{coinbaseTxWithOutputs(0, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}})}
+	for _, c := range []struct {
+		name string
+		txs  [][]byte
+		edit func(*initial148BlockHead)
+		code ErrorCode
+		msg  string
+	}{
+		{"wrong merkle with witness", [][]byte{initial148BlockCoinbase(t)}, func(h *initial148BlockHead) { h.merkle = [32]byte{1} }, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch"},
+		{"missing witness correct merkle", witnessTxs, nil, BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated"},
+		{"missing witness wrong merkle", witnessTxs, func(h *initial148BlockHead) { h.merkle = [32]byte{1} }, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch"},
+	} {
+		body := initial148BlockFrame(t, c.txs, c.edit)
+		initial148BlockBodyRefusal(t, "initial148 body commitment order", body, c.code, c.msg)
+	}
 	// A non-canonical first transaction is still steps1-12-valid; only the
 	// commitment-only entry owns the first-coinbase structure check.
 	others := blockStepsPlain(1)
