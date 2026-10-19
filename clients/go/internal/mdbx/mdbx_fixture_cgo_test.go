@@ -4709,7 +4709,7 @@ func treeNativeNodeWidth(t *testing.T, width int, raw bool) {
 			got, readErr := treeNativeNodeWidthRead(t, reader, key, raw, valid)
 			if !valid {
 				recorded = readErr
-				if reader.failure != recorded || reader.active.Load() || reader.usable() {
+				if !sameError(reader.failure, recorded) || reader.active.Load() || reader.usable() {
 					t.Fatal("tree native node width first failure/disarm")
 				}
 				return recorded
@@ -4725,11 +4725,11 @@ func treeNativeNodeWidth(t *testing.T, width int, raw bool) {
 		mustEnvironment(t, err)
 		return
 	}
-	if err != recorded || store.terminal != recorded || store.state != storeCLOSED {
+	if !sameError(err, recorded) || !sameError(store.terminal, recorded) || store.state != storeCLOSED {
 		t.Fatal("tree native node width enclosing owner")
 	}
 	treeNativeZeroResources(t, store)
-	if next := store.View(func(*Reader) error { t.Fatal("terminal node callback"); return nil }); next != recorded {
+	if next := store.View(func(*Reader) error { t.Fatal("terminal node callback"); return nil }); !sameError(next, recorded) {
 		t.Fatal("tree native node width next View")
 	}
 }
