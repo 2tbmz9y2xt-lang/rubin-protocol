@@ -4749,7 +4749,10 @@ func treeNativeNodeWidthRead(t *testing.T, reader *Reader, key []byte, raw, vali
 	}
 	page, err := reader.PrefixPage(dbi, key[:8], nil, 1, 186)
 	if !valid {
-		treeNativeError(t, err, operationPrefixPage, EngineClass("Integrity"), -30793, "stored value width outside SchemaV2 bound", nil)
+		engine := requireEnvironmentError(t, err, EngineClass("Integrity"), operationPrefixPage, -30793, "stored value width outside SchemaV2 bound")
+		if engine.Cause != nil || !engine.ReopenRequired {
+			t.Fatal("tree native node page inherited Cause/ReopenRequired")
+		}
 		if page.Rows != nil || page.Stop != 0 {
 			t.Fatal("tree native node page width refusal")
 		}
