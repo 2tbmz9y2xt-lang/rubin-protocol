@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -21,10 +22,26 @@ CASES = [
     ("changed head", {"second": "main"}, 1, "changed during metadata parity check"),
     ("changed head fallback", {"second": "main", "curl_fail": True}, 1, "changed during metadata parity check"),
     ("malformed json", {"malformed": "json"}, 1, "malformed Codacy PR metadata"),
-    ("malformed shape", {"malformed": "shape"}, 1, "malformed Codacy PR metadata"),
+    ("ancestor not object", {"malformed": "ancestor_object"}, 1, "malformed Codacy PR metadata"),
+    ("head not object", {"malformed": "head_object"}, 1, "malformed Codacy PR metadata"),
+    ("ancestor reports not list", {"malformed": "ancestor_reports"}, 1, "malformed Codacy PR metadata"),
+    ("head reports not list", {"malformed": "head_reports"}, 1, "malformed Codacy PR metadata"),
+    ("ancestor report not object", {"malformed": "shape"}, 1, "malformed Codacy PR metadata"),
+    ("head report not object", {"malformed": "head_shape"}, 1, "malformed Codacy PR metadata"),
+    ("5001 digit integer", {"malformed": "huge_int"}, 1, "malformed Codacy PR metadata"),
+    ("surrogate head", {"codacy_head": "\ud800"}, 1, "differs from published PR head"),
+    ("surrogate ancestor", {"codacy_ancestor": "\ud800"}, 1, "differs from published-head merge-base"),
     ("no open PR", {"pr": False}, 0, "PASS: no open PR"),
     ("metadata unavailable", {"curl_fail": True}, 0, "PASS: Codacy metadata unavailable"),
 ]
+MALFORMED = {
+    "ancestor_object": ("commonAncestorCommit", "bad"),
+    "head_object": ("headCommit", "bad"),
+    "ancestor_reports": ("commonAncestorCommit", {"reports": "bad"}),
+    "head_reports": ("headCommit", {"reports": 7}),
+    "shape": ("commonAncestorCommit", {"reports": [{"status": "Processed"}, "bad"]}),
+    "head_shape": ("headCommit", {"reports": ["bad"]}),
+}
 
 
 class Fixture:
@@ -48,6 +65,8 @@ class Fixture:
                 "GIT_COMMITTER_NAME": "Test",
                 "GIT_COMMITTER_EMAIL": "test@example.com",
                 "GIT_TERMINAL_PROMPT": "0",
+                "PYTHONINTMAXSTRDIGITS": "4300",
+                "PYTHONIOENCODING": "utf-8:strict",
             }
         )
         self.g("init", "--quiet", "--initial-branch=main", str(self.repo))
@@ -80,6 +99,10 @@ class Fixture:
             args.extend(["-p", parent])
         return self.g(*args, cwd=self.repo)
 
+    def ref(self, name: object) -> str:
+        value = str(name)
+        return getattr(self, value) if value in {"base", "main", "published", "candidate", "unrelated"} else value
+
     def _stubs(self) -> None:
         (self.bin / "gh").write_text(
             """#!/usr/bin/env bash
@@ -90,6 +113,7 @@ if [[ "${1:-}" == repo && "${2:-}" == view ]]; then
 fi
 if [[ "${1:-}" == pr && "${2:-}" == view ]]; then
   if [[ " $* " == *' --json number '* ]]; then
+    printf 'called\\n' >> "$STUB_DIR/number_calls"
     [[ "${STUB_PR_EXISTS:-1}" == 1 ]] && { printf '%s\\n' 7; exit 0; }
     exit 1
   fi
@@ -117,22 +141,37 @@ cat "$STUB_DIR/codacy.json"
         for name in ("gh", "curl"):
             (self.bin / name).chmod(0o755)
 
-    def run(self, opts: dict[str, object]) -> subprocess.CompletedProcess[str]:
-        self.g("checkout", "--quiet", "--detach", getattr(self, str(opts.get("checkout", "candidate"))), cwd=self.repo)
-        head_name = opts.get("head", "published")
-        first = getattr(self, str(head_name)) if head_name else ""
-        second = getattr(self, str(opts["second"])) if "second" in opts else first
+    def payload(self, opts: dict[str, object]) -> str:
+        ancestor = self.ref(opts.get("codacy_ancestor", "base"))
+        head = self.ref(opts.get("codacy_head", "published"))
         malformed = opts.get("malformed")
-        if malformed == "json":
-            payload = "{not json"
-        elif malformed == "shape":
-            payload = '{"data":{"commonAncestorCommit":{"commitSha":"%s","reports":[{"status":"Processed"},"bad"]},"headCommit":{"commitSha":"%s","reports":[{"status":"Processed"}]}}}' % (self.base, self.published)
-        else:
-            ancestor = getattr(self, str(opts.get("codacy_ancestor", "base")))
-            head = getattr(self, str(opts.get("codacy_head", "published")))
-            payload = '{"data":{"commonAncestorCommit":{"commitSha":"%s","reports":[{"status":"Processed"}]},"headCommit":{"commitSha":"%s","reports":[{"status":"Processed"}]}}}' % (ancestor, head)
-        (self.stub / "codacy.json").write_text(payload, encoding="utf-8")
+        data = {
+            "data": {
+                "commonAncestorCommit": {"commitSha": ancestor, "reports": [{"status": "Processed"}]},
+                "headCommit": {"commitSha": head, "reports": [{"status": "Processed"}]},
+            }
+        }
+        holder = data["data"]
+        mutation = MALFORMED.get(malformed)
+        if mutation:
+            key, patch = mutation
+            if isinstance(patch, dict):
+                holder[key].update(patch)
+            else:
+                holder[key] = patch
+        payload = "{not json" if malformed == "json" else json.dumps(data, ensure_ascii=True)
+        if malformed == "huge_int":
+            payload = payload[:-1] + ',"padding":' + "1" * 5001 + "}"
+        return payload
+
+    def run(self, branch: str, opts: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        self.g("checkout", "--quiet", "-B", branch, self.ref(opts.get("checkout", "candidate")), cwd=self.repo)
+        head_name = opts.get("head", "published")
+        first = self.ref(head_name) if head_name else ""
+        second = self.ref(opts["second"]) if "second" in opts else first
+        (self.stub / "codacy.json").write_text(self.payload(opts), encoding="utf-8")
         (self.stub / "head_calls").unlink(missing_ok=True)
+        (self.stub / "number_calls").unlink(missing_ok=True)
         env = self.env.copy()
         env.update(
             {
@@ -143,13 +182,10 @@ cat "$STUB_DIR/codacy.json"
                 "STUB_PR_EXISTS": "1" if opts.get("pr", True) else "0",
             }
         )
+        env.pop("CODACY_PR_NUMBER", None)
         env.pop("STUB_CURL_FAIL", None)
         if opts.get("curl_fail"):
             env["STUB_CURL_FAIL"] = "1"
-        if opts.get("pr", True):
-            env["CODACY_PR_NUMBER"] = "7"
-        else:
-            env.pop("CODACY_PR_NUMBER", None)
         for name in ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH"):
             env.pop(name, None)
         return subprocess.run(
@@ -162,9 +198,10 @@ class LocalCodacyVariationParityTests(unittest.TestCase):
     def test_local_metadata_cases(self) -> None:
         with tempfile.TemporaryDirectory(prefix="codacy parity ") as tmp:
             fixture = Fixture(Path(tmp))
-            for name, opts, expected_exit, marker in CASES:
+            for index, (name, opts, expected_exit, marker) in enumerate(CASES):
                 with self.subTest(case=name):
-                    result = fixture.run(opts)
+                    result = fixture.run(f"case-{index}", opts)
+                    self.assertTrue((fixture.stub / "number_calls").is_file(), "gh number discovery not called")
                     self.assertEqual(result.returncode, expected_exit, result.stderr)
                     if expected_exit == 0:
                         self.assertIn(marker, result.stdout)

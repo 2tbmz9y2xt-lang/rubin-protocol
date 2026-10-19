@@ -278,7 +278,7 @@ try:
     data = json.loads(sys.argv[1])
     ancestor = data["data"]["commonAncestorCommit"]
     head = data["data"]["headCommit"]
-except (json.JSONDecodeError, RecursionError, KeyError, TypeError) as exc:
+except (ValueError, RecursionError, KeyError, TypeError) as exc:
     fail(f"malformed Codacy PR metadata: {exc}")
 
 if not isinstance(ancestor, dict) or not isinstance(head, dict):
@@ -298,19 +298,19 @@ for reports in (ancestor_reports, head_reports):
     if not all(isinstance(report, dict) for report in reports):
         fail("malformed Codacy PR metadata")
 
-print(f"  codacy ancestor: {ancestor_sha or 'missing'}")
-print(f"  github PR head:  {published_head}")
-print(f"  codacy PR head:  {head_sha or 'missing'}")
-print(f"  ancestor reports processed: {sum(1 for report in ancestor_reports if report.get('status') == 'Processed')}")
-print(f"  head reports processed:     {sum(1 for report in head_reports if report.get('status') == 'Processed')}")
-
 if not head_sha or head_sha != published_head:
-    fail(f"Codacy PR head {head_sha or 'missing'} differs from published PR head {published_head}")
+    fail(f"Codacy PR head {head_sha!a} differs from published PR head {published_head!a}")
 if not ancestor_sha or ancestor_sha != expected_ancestor:
     fail(
-        f"Codacy common ancestor {ancestor_sha or 'missing'} differs from "
-        f"published-head merge-base {expected_ancestor}"
+        f"Codacy common ancestor {ancestor_sha!a} differs from "
+        f"published-head merge-base {expected_ancestor!a}"
     )
+
+print(f"  codacy ancestor: {ancestor_sha}")
+print(f"  github PR head:  {published_head}")
+print(f"  codacy PR head:  {head_sha}")
+print(f"  ancestor reports processed: {sum(1 for report in ancestor_reports if report.get('status') == 'Processed')}")
+print(f"  head reports processed:     {sum(1 for report in head_reports if report.get('status') == 'Processed')}")
 PY
 
   remote_pr_head_after="$(github_pr_head_sha "$repo" "$pr_number" || true)"
