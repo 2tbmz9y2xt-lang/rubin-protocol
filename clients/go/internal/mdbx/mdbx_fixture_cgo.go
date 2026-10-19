@@ -48,7 +48,7 @@ static int rubin_fixture_large_bulk(MDBX_txn *txn, MDBX_dbi dbi, unsigned kind, 
 	}
 	return MDBX_SUCCESS;
 }
-typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[8], old_pulls[8], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
+typedef struct { unsigned long long begin_old, begin_write, begin_read, old_gets[9], old_pulls[9], read_gets, faults, dels, commits, old_aborts, bridge_error; } rubin_sd_counts;
 int rubin_sd_arm(MDBX_env *env, unsigned scenario, const MDBX_dbi *dbis, MDBX_dbi fault_dbi, const void *key, size_t key_len, uintptr_t probe);
 void rubin_sd_disarm(rubin_sd_counts *out);
 static int rubin_fixture_row_equal(MDBX_env *env, MDBX_dbi dbi, const void *key_bytes, size_t key_len, int want_present, const void *want_bytes, size_t want_len, int *equal) {
@@ -73,7 +73,16 @@ static int rubin_fixture_meta(MDBX_txn *txn, MDBX_dbi meta) { const unsigned cha
 static int rubin_fixture_main_row(MDBX_txn *txn) { MDBX_dbi main; const char key[] = "fixture-main-row", value[] = "ordinary"; MDBX_val k = {(void *)key, sizeof(key) - 1}, v = {(void *)value, sizeof(value) - 1}; int rc = mdbx_dbi_open(txn, NULL, MDBX_DB_DEFAULTS, &main); return rc == MDBX_SUCCESS ? mdbx_put(txn, main, &k, &v, MDBX_UPSERT) : rc; }
 static int rubin_fixture_schema_version(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 0, value[4] = {0, 0, 0, 1}; MDBX_val k = {(void *)&key, 1}, v = {(void *)value, 4}; return mdbx_put(txn, meta, &k, &v, MDBX_UPSERT); }
 static int rubin_fixture_schema_v1(MDBX_txn *txn, MDBX_dbi meta) { MDBX_dbi dbi; int rc = mdbx_dbi_open(txn, "canonical-owner-v1", MDBX_DB_DEFAULTS, &dbi); if (rc == MDBX_SUCCESS) rc = mdbx_drop(txn, dbi, true); return rc == MDBX_SUCCESS ? rubin_fixture_schema_version(txn, meta) : rc; }
-static int rubin_fixture_reverse_utxo(MDBX_txn *txn) { MDBX_dbi dbi; int rc = mdbx_dbi_open(txn, "utxo-v1", MDBX_DB_DEFAULTS, &dbi); if (rc == MDBX_SUCCESS) rc = mdbx_drop(txn, dbi, true); return rc == MDBX_SUCCESS ? mdbx_dbi_open(txn, "utxo-v1", MDBX_REVERSEKEY | MDBX_CREATE, &dbi) : rc; }
+static int rubin_fixture_reverse_utxo(MDBX_txn *txn, unsigned mode) {
+	const char *name = mode == 0 ? "utxo-v1" : (mode == 1 ? "meta-v1" : "tree-node-v1");
+	MDBX_dbi dbi;
+	int rc = mdbx_dbi_open(txn, name, MDBX_DB_DEFAULTS, &dbi);
+	if (rc == MDBX_SUCCESS) rc = mdbx_drop(txn, dbi, true);
+	if (rc != MDBX_SUCCESS || mode == 2) return rc;
+	rc = mdbx_dbi_open(txn, name, MDBX_REVERSEKEY | MDBX_CREATE, &dbi);
+	// For the dual-invalid meta image, write through the newly acquired handle.
+	return rc == MDBX_SUCCESS && mode == 1 ? rubin_fixture_schema_version(txn, dbi) : rc;
+}
 static int rubin_fixture_add_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { const unsigned char mk = 2, mv = 0x42, ak[16] = {1}, av[104] = {1}; MDBX_val mkey = {(void *)&mk, 1}, mval = {(void *)&mv, 1}, akey = {(void *)ak, 16}, aval = {(void *)av, 104}; int rc = mdbx_put(txn, meta, &mkey, &mval, MDBX_NOOVERWRITE); return rc == MDBX_SUCCESS ? mdbx_put(txn, canonical, &akey, &aval, MDBX_NOOVERWRITE) : rc; }
 static int rubin_fixture_check_rows(MDBX_txn *txn, MDBX_dbi meta, MDBX_dbi canonical) { const unsigned char mk = 2, mv = 0x42, ak[16] = {1}, av[104] = {1}; MDBX_val mkey = {(void *)&mk, 1}, akey = {(void *)ak, 16}, got; int rc = mdbx_get(txn, meta, &mkey, &got); if (rc == MDBX_SUCCESS && (got.iov_len != 1 || memcmp(got.iov_base, &mv, 1))) rc = MDBX_INVALID; if (rc == MDBX_SUCCESS) rc = mdbx_get(txn, canonical, &akey, &got); return rc == MDBX_SUCCESS && (got.iov_len != 104 || memcmp(got.iov_base, av, 104)) ? MDBX_INVALID : rc; }
 static int rubin_fixture_readers_493(MDBX_txn *txn, MDBX_dbi meta) { const unsigned char key = 1, value[48] = {0,0,0,0,0,0x10,0,0, 0,0,0,0,0,0x20,0,0, 0,0,0,0,0x10,0,0,0, 0,0,0,0,0,0x10,0,0, 0,0,0,0,0,0x20,0,0, 0,0,0x10,0, 0,0,1,0xed}; MDBX_val k = {(void *)&key, 1}, v = {(void *)value, 48}; return mdbx_put(txn, meta, &k, &v, MDBX_UPSERT); }
@@ -649,13 +658,14 @@ func reopenAfterFixture(path string, cfg ConfigV1, store *Store, primary error) 
 func fixtureShapeRejected(store *Store, mutate, restore func()) bool {
 	mutate()
 	self, env, writer, txn, cfg, dbis, state, terminal := store.self, store.env, store.writer, store.txn, store.config, store.dbis, store.state, store.terminal
+	format, identity := store.format.Load(), store.databaseID
 	err := store.Close()
-	unchanged := fixtureStoreSnapshotMatches(store, self, env, writer, txn, cfg, dbis, state, terminal)
+	unchanged := fixtureStoreSnapshotMatches(store, self, env, writer, txn, cfg, dbis, state, terminal) && store.format.Load() == format && store.databaseID == identity
 	restore()
 	return unchanged && fixtureShapeError(err)
 }
 
-func fixtureStoreSnapshotMatches(store, self *Store, env *C.MDBX_env, writer *filelock.Handle, txn *C.MDBX_txn, cfg ConfigV1, dbis [8]C.MDBX_dbi, state storeState, terminal error) bool {
+func fixtureStoreSnapshotMatches(store, self *Store, env *C.MDBX_env, writer *filelock.Handle, txn *C.MDBX_txn, cfg ConfigV1, dbis [9]C.MDBX_dbi, state storeState, terminal error) bool {
 	return store.self == self && store.env == env && store.writer == writer && store.txn == txn && store.config == cfg && store.dbis == dbis && store.state == state && store.terminal == terminal
 }
 
@@ -670,16 +680,19 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 	_, abortErr := fixtureHeldWrite(store, func(txn *C.MDBX_txn) (int, bool) {
 		held = txn
 		self, env, writer, cfg, dbis := store.self, store.env, store.writer, store.config, store.dbis
+		format, identity := store.format.Load(), store.databaseID
 		validOpen := fixtureShapeRejected(store, func() { store.txn = txn }, func() { store.txn = nil })
 		poison := nativeError(operationInit, codeThreadMismatch)
-		store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, poison
+		store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, poison
+		store.format.Store(0)
+		store.databaseID = [32]byte{}
 		validPoison := store.Close() == poison
 		poisonShapes := []struct{ mutate, restore func() }{
 			{func() { store.env = nil }, func() { store.env = env }},
 			{func() { store.writer = nil }, func() { store.writer = writer }},
 			{func() { store.txn = nil }, func() { store.txn = txn }},
 			{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-			{func() { store.dbis = dbis }, func() { store.dbis = [8]C.MDBX_dbi{} }},
+			{func() { store.dbis = dbis }, func() { store.dbis = [9]C.MDBX_dbi{} }},
 			{func() { store.terminal = nil }, func() { store.terminal = poison }},
 			{func() { store.self = nil }, func() { store.self = self }},
 		}
@@ -687,6 +700,8 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 			validPoison = fixtureShapeRejected(store, shape.mutate, shape.restore) && validPoison
 		}
 		store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+		store.format.Store(format)
+		store.databaseID = identity
 		first = store.Close()
 		again := store.Close()
 		engine, ok := first.(*EngineError)
@@ -697,7 +712,7 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				{func() { store.writer = nil }, func() { store.writer = writer }},
 				{func() { store.txn = txn }, func() { store.txn = nil }},
 				{func() { store.config = ConfigV1{} }, func() { store.config = cfg }},
-				{func() { store.dbis = [8]C.MDBX_dbi{} }, func() { store.dbis = dbis }},
+				{func() { store.dbis = [9]C.MDBX_dbi{} }, func() { store.dbis = dbis }},
 				{func() { store.terminal = nil }, func() { store.terminal = terminal }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}
@@ -706,14 +721,16 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				validShapes = fixtureShapeRejected(store, shape.mutate, shape.restore) && validShapes
 			}
 			construction := orderedErrors(operationClose, orderResultCausesPrimary, errors.New("construction"), nativeError(operationClose, codeBusy))
-			store.config, store.dbis, store.terminal = ConfigV1{}, [8]C.MDBX_dbi{}, construction
+			store.config, store.dbis, store.terminal = ConfigV1{}, [9]C.MDBX_dbi{}, construction
+			store.format.Store(0)
+			store.databaseID = [32]byte{}
 			validConstruction := store.Close() == construction
 			constructionShapes := []struct{ mutate, restore func() }{
 				{func() { store.env = nil }, func() { store.env = env }},
 				{func() { store.writer = nil }, func() { store.writer = writer }},
 				{func() { store.txn = txn }, func() { store.txn = nil }},
 				{func() { store.config = cfg }, func() { store.config = ConfigV1{} }},
-				{func() { store.dbis = dbis }, func() { store.dbis = [8]C.MDBX_dbi{} }},
+				{func() { store.dbis = dbis }, func() { store.dbis = [9]C.MDBX_dbi{} }},
 				{func() { store.terminal = nativeError(operationClose, codeBusy) }, func() { store.terminal = construction }},
 				{func() { store.self = nil }, func() { store.self = self }},
 			}
@@ -721,6 +738,8 @@ func fixtureCloseBusy(path string, store *Store) (error, error, error) {
 				validConstruction = fixtureShapeRejected(store, shape.mutate, shape.restore) && validConstruction
 			}
 			store.config, store.dbis, store.terminal = cfg, dbis, terminal
+			store.format.Store(format)
+			store.databaseID = identity
 			handle, result, lockErr := filelock.AcquireDirectory(path)
 			_ = releaseError(handle)
 			if store.state != storeCLOSEBLOCKED || store.env == nil || store.writer == nil || store.terminal != first || again != first || !validOpen || !validPoison || !validShapes || !validConstruction || result != filelock.ResultContended || lockErr == nil || handle != nil {
@@ -956,9 +975,22 @@ func fixtureUpdatePostCommitENOSPCMissing(store *Store, plan []ownedMutation) (u
 	return outcome, nil
 }
 
-func fixtureOpenReverseUTXO(path string) (*Store, []byte, error) {
+func fixtureOpenReverseUTXO(path string, modes ...uint32) (*Store, []byte, error) {
+	mode := uint32(0)
+	if len(modes) != 0 {
+		mode = modes[0]
+	}
+	if mode > 2 {
+		return nil, nil, errors.New("invalid family fixture mode")
+	}
 	cfg := ConfigV1{1 << 20, 2 << 20, 256 << 20, 1 << 20, 2 << 20, 4096, 492}
-	store, err := Create(path, cfg)
+	var store *Store
+	var err error
+	if mode == 0 {
+		store, err = Create(path, cfg)
+	} else {
+		store, err = CreateTreeV1(path, cfg, [32]byte{7})
+	}
 	if err != nil {
 		return store, nil, err
 	}
@@ -971,8 +1003,15 @@ func fixtureOpenReverseUTXO(path string) (*Store, []byte, error) {
 	}
 	copyTxnErr := fixtureWrite(store, operationOpen, read)
 	mutationErr := fixtureWrite(store, operationOpen, func(txn *C.MDBX_txn) error {
-		return fixtureResult(operationOpen, int(C.rubin_fixture_reverse_utxo(txn)))
+		return fixtureResult(operationOpen, int(C.rubin_fixture_reverse_utxo(txn, C.uint(mode))))
 	})
+	if mode != 0 {
+		if err := joinErrors(copyTxnErr, mutationErr, store.Close()); err != nil {
+			return nil, copied, err
+		}
+		opened, err := OpenTreeV1(path, cfg, [32]byte{7})
+		return opened, copied, err
+	}
 	opened, err := reopenAfterFixture(path, cfg, store, joinErrors(copyTxnErr, mutationErr))
 	return opened, copied, err
 }
@@ -1078,6 +1117,7 @@ type SelectedDamageEvidence struct {
 	BeginOld, BeginWrite, BeginRead uint64
 	OldGets                         [8]uint64
 	OldPulls                        [8]uint64
+	NodeGets, NodePulls              uint64
 	ReadGets, Faults, Deletes       uint64
 	Commits, OldAborts              uint64
 	Probes, ProbeDenied, ProbeRan   uint64
@@ -1134,13 +1174,14 @@ func FixtureSelectedDamage(store *Store, reservations *OperationReservationOwner
 }
 
 func validSelectedDamageFixture(store *Store, scenario SelectedDamageScenario, rank uint8, run func()) bool {
-	return store != nil && store.env != nil && int(rank) < len(schemaDBIs) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageStartupPullEIO && run != nil
+	return store != nil && store.env != nil && int(rank) < len(formatDBIs(uint8(store.format.Load()))) && scenario >= SelectedDamageProbeOnly && scenario <= SelectedDamageStartupPullEIO && run != nil
 }
 
 func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_counts, probe *selectedDamageProbe) (SelectedDamageEvidence, error) {
 	evidence := SelectedDamageEvidence{
 		BeginOld: uint64(counts.begin_old), BeginWrite: uint64(counts.begin_write), BeginRead: uint64(counts.begin_read),
 		ReadGets: uint64(counts.read_gets), Faults: uint64(counts.faults), Deletes: uint64(counts.dels), Commits: uint64(counts.commits),
+		NodeGets: uint64(counts.old_gets[8]), NodePulls: uint64(counts.old_pulls[8]),
 		OldAborts: uint64(counts.old_aborts), Probes: probe.probes, ProbeDenied: probe.denied, ProbeRan: probe.ran,
 	}
 	for i := range evidence.OldGets {

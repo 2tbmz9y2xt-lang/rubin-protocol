@@ -72,7 +72,10 @@ func bootstrapCounts(t *testing.T, store *Store, marker string) [8]uint64 {
 		t.Fatalf("%s: %v", marker, err)
 	}
 	var counts [8]uint64
-	for rank, dbi := range inspection.DBIs {
+	if inspection.DBIs[8] != (DBIInspection{}) {
+		t.Fatal("historical unused slot is not zero")
+	}
+	for rank, dbi := range inspection.DBIs[:8] {
 		counts[rank] = dbi.Entries
 	}
 	return counts
@@ -923,4 +926,35 @@ func bootstrapReadback(t *testing.T, store *Store, plan, change []ownedMutation,
 		return nil
 	}))
 	return outcome
+}
+
+func TestBootstrapTreeReservationBoundary(t *testing.T) {
+	store, _, _ := treeNativeStore(t)
+	before, err := store.Inspect()
+	mustEnvironment(t, err)
+	for _, owner := range []*OperationReservationOwner{nil, reservationOwner(t, 1)} {
+		truth, stage, err := store.BootstrapStorageV1(1, owner)
+		bootstrapRefusal(t, "tree before reservation", truth, err, EngineStateMismatch, operationUpdate, -30779, "tree store requires typed tree operation", nil, false)
+		if stage != UpdateStage(1) {
+			t.Fatal("tree bootstrap prewrite stage")
+		}
+		store.operations.Lock()
+		truth, stage, err = store.BootstrapStorageV1(1, owner)
+		store.operations.Unlock()
+		bootstrapRefusal(t, "tree busy before reservation", truth, err, EngineConcurrency, operationUpdate, -30778, "store operation in progress", nil, false)
+		if stage != UpdateStage(1) {
+			t.Fatal("busy tree bootstrap stage")
+		}
+	}
+	truth, stage, err := store.BootstrapStorageV1(0, nil)
+	bootstrapRefusal(t, "profile before format", truth, err, EngineInvalidInput, operationUpdate, 22, "invalid bootstrap profile", nil, false)
+	if stage != UpdateStage(1) {
+		t.Fatal("invalid profile stage")
+	}
+	after, err := store.Inspect()
+	mustEnvironment(t, err)
+	if before.DBIs != after.DBIs || before.RecentTxnID != after.RecentTxnID || store.canonicalOwnerVerified {
+		t.Fatal("tree bootstrap changed image/permission")
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error { _, _, err := reader.ReadTreeAuthorityV1(); return err }))
 }

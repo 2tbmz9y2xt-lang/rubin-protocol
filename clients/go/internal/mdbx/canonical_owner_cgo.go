@@ -32,7 +32,7 @@ func canonicalPairingError() error {
 }
 
 // Qualify every target and source before pairing or any OLD/write comparison.
-func updateNativePairedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
+func updateNativePairedImages(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation) ([]updateReference, error) {
 	references, err := updateNativeImages(old, dbis, plan)
 	if err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func updateNativePairedImages(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedM
 // N2, O1, O2, each over targets in plan order; the first violation returns the direct InvalidInput refusal and a
 // failed partner read returns its unchanged native error. A plan without a rank-2 or rank-7 target reads nothing and
 // allocates nothing; a partner read allocates one 40- or 16-byte key. Borrowed OLD bytes are read only while old is live.
-func updateNativePairing(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation) error {
+func updateNativePairing(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation) error {
 	for _, side := range canonicalSides {
 		if !canonicalNewPaired(plan, side) {
 			return canonicalPairingError()
@@ -86,7 +86,7 @@ func canonicalNewPaired(plan []ownedMutation, side canonicalSide) bool {
 }
 
 // canonicalOldPaired is O1 for the forward side and O2 for the owner side.
-func canonicalOldPaired(old *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, side canonicalSide) error {
+func canonicalOldPaired(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, side canonicalSide) error {
 	var partner [40]byte
 	for _, m := range plan {
 		if m.dbi.Rank != side.rank {

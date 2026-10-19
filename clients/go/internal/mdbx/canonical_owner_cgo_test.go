@@ -159,7 +159,10 @@ func canonicalFormat(t *testing.T, store *Store, marker string) [8]DBIInspection
 	inspection, err := store.Inspect()
 	mustEnvironment(t, err)
 	var projection [8]DBIInspection
-	for i, row := range inspection.DBIs {
+	if inspection.DBIs[8] != (DBIInspection{}) {
+		t.Fatal("historical inspection slot 8 is not zero")
+	}
+	for i, row := range inspection.DBIs[:8] {
 		entries := uint64(0)
 		if i == 0 {
 			entries = 2

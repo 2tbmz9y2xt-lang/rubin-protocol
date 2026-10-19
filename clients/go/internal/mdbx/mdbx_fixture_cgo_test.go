@@ -4,6 +4,7 @@ package mdbx
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -4066,11 +4067,19 @@ func TestInitial148NativeCallbackLifetime(t *testing.T) {
 }
 
 func TestInitial148NativeFailureRecording(t *testing.T) {
-	for _, update := range []bool{false, true} {
-		for _, completion := range []string{"ignored", "returned", "wrapped", "application", "panic"} {
-			for _, abort := range []uint32{0, 9, 10} {
-				t.Run(fmt.Sprintf("update%v/%s/abort%d", update, completion, abort), func(t *testing.T) {
-					store, key := initial148NativeStore(t), [32]byte{1}
+	for _, route := range []struct{ update, tree bool }{{false, false}, {true, false}, {false, true}} {
+		update := route.update
+		for _, completion := range []string{"ignored", "returned", "wrapped", "application", "panic", "Goexit"} {
+			for _, abort := range []uint32{0, 9, 10, 11} {
+				t.Run(fmt.Sprintf("tree%v/update%v/%s/abort%d", route.tree, update, completion, abort), func(t *testing.T) {
+					store, key := initial148NativeStore(t), []byte{1}
+					key = append(key, make([]byte, 31)...)
+					rank := uint8(4)
+					if route.tree {
+						mustEnvironment(t, store.Close())
+						store, _, _ = treeNativeStore(t)
+						key, rank = []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, 0
+					}
 					env, writer := store.env, store.writer
 					var escaped *Reader
 					var recorded, returned, application error
@@ -4078,12 +4087,19 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 					marker := &struct{}{}
 					callback := func(reader *Reader) error {
 						escaped = reader
-						initial148NativeRefusal(t, reader, readDBIsLiteral()[2], key[:], "invalid optional-side DBI or key")
-						initial148NativeRefusal(t, reader, readDBIsLiteral()[4], key[:31], "invalid optional-side DBI or key")
+						initial148NativeRefusal(t, reader, readDBIsLiteral()[2], key, "invalid optional-side DBI or key")
+						initial148NativeRefusal(t, reader, readDBIsLiteral()[4], key[:len(key)-1], "invalid optional-side DBI or key")
 						if reader.failure != nil || !reader.usable() {
 							t.Fatal("initial148 direct refusal reached native/recording")
 						}
-						got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[4], key[:])
+						got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[4], key)
+						if route.tree {
+							root, present, rootErr := reader.ReadTreeRootBindingV1(1)
+							if root != (RootBindingV1{}) || present {
+								t.Fatal("tree native error leaked root")
+							}
+							err = rootErr
+						}
 						initial148NativeTuple(t, got, OptionalSideValueV1{}, nil, "initial148 native failure zero tuple")
 						engine := requireEnvironmentError(t, err, EngineClass("IO"), engineOperation("get"), 5, "error 5")
 						if engine.Cause != nil || engine.ReopenRequired || !sameError(reader.failure, err) || reader.active.Load() || reader.usable() {
@@ -4091,7 +4107,7 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 						}
 						recorded = err
 						for _, dbi := range []DBI{readDBIsLiteral()[4], {}} {
-							for _, input := range [][]byte{key[:], nil} {
+							for _, input := range [][]byte{key, nil} {
 								initial148NativeRefusal(t, reader, dbi, input, "Reader is not active")
 							}
 						}
@@ -4104,6 +4120,8 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 							application = errors.New("initial148 distinct application")
 						case "panic":
 							panic(marker)
+						case "Goexit":
+							runtime.Goexit()
 						}
 						return application
 					}
@@ -4120,33 +4138,50 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 						}
 					}
 					arm := func() {
-						evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageGetEIO, 4, key[:], invoke)
+						evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageGetEIO, rank, key, invoke)
 						mustEnvironment(t, err)
-						if evidence.BeginOld != 1 || evidence.BeginRead != 0 || evidence.BeginWrite != 0 || evidence.OldGets != ([8]uint64{4: 1}) || evidence.ReadGets != 0 || evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 {
+						wantGets := [8]uint64{}
+						wantGets[rank] = 1
+						if evidence.BeginOld != 1 || evidence.BeginRead != 0 || evidence.BeginWrite != 0 || evidence.OldGets != wantGets || evidence.ReadGets != 0 || evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 {
 							t.Fatalf("initial148 native failure recording census: %+v", evidence)
 						}
 					}
-					if abort == 0 {
-						arm()
+					run := func() {
+						if abort == 0 {
+							arm()
+						} else {
+							_, err := fixtureLargeFault(store, abort, rank, key, arm)
+							mustEnvironment(t, err)
+						}
+					}
+					if completion == "Goexit" {
+						done := make(chan struct{})
+						go func() { defer close(done); run() }()
+						<-done
 					} else {
-						_, err := fixtureLargeFault(store, abort, 4, key[:], arm)
-						mustEnvironment(t, err)
+						run()
 					}
 					if completion == "panic" && panicked != marker || completion != "panic" && panicked != nil || !sameError(escaped.failure, recorded) || escaped.active.Load() || !validStoreShape(store) {
 						t.Fatal("initial148 native failure recording: enclosing outcome/Reader")
 					}
 					terminal, primary := store.terminal, store.terminal
-					if completion != "panic" && !sameError(returned, terminal) {
+					if completion != "panic" && completion != "Goexit" && !sameError(returned, terminal) {
 						t.Fatal("initial148 enclosing error object replaced")
 					}
-					if abort == 10 {
+					if abort == 11 {
+						engine := requireEnvironmentError(t, terminal, EngineClass("Concurrency"), operationClose, -30778, expectedNativeDiagnostic(-30778))
+						primary = engine.Cause
+						if store.state != storeCLOSEBLOCKED || store.env != env || store.writer != writer || store.txn != nil || store.format.Load() == 0 || !store.config.valid() || !validStoreShape(store) {
+							t.Fatal("initial148 close-BUSY retained published resource shape")
+						}
+					} else if abort == 10 {
 						engine := requireEnvironmentError(t, terminal, EngineClass("LocalInvariant"), engineOperation("abort"), -30416, pinnedNegativeDiagnostics[-30416])
 						primary = engine.Cause
-						if store.state != storePOISONEDTHREAD || store.txn != escaped.txn || store.env != env || store.writer != writer || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() {
+						if store.state != storePOISONEDTHREAD || store.txn != escaped.txn || store.env != env || store.writer != writer || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() || store.format.Load() != 0 || store.databaseID != ([32]byte{}) {
 							t.Fatal("initial148 retained cleanup resource shape")
 						}
 					} else {
-						if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() {
+						if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() || store.format.Load() != 0 || store.databaseID != ([32]byte{}) {
 							t.Fatal("initial148 consumed cleanup resource shape")
 						}
 						if abort == 9 {
@@ -4175,8 +4210,789 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 						t.Fatal("initial148 next legal operation terminal Update")
 					}
 					mustEnvironment(t, FixtureStartupRelease(store))
+					if route.tree {
+						treeNativeZeroResources(t, store)
+					}
 				})
 			}
+		}
+	}
+}
+
+func treeNativeKeyLiteral(t *testing.T, upper, code string) []byte {
+	t.Helper()
+	return mustCodecHex(t, "0000000000000001"+upper+code)
+}
+
+func treeNativeSeed(t *testing.T, store *Store, rank uint8, key, value []byte) {
+	t.Helper()
+	mustEnvironment(t, fixtureSeedPrefixRawRow(store, TreeSchemaV1DBIs()[rank], key, value))
+}
+
+func treeNativeAuthorityBytes(t *testing.T, source TreeSourceKindV1, progress TreeProgressKindV1) []byte {
+	t.Helper()
+	authority := TreeAuthorityV1{
+		Authority: StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
+		LagGenerationID: 2,
+	}
+	if source != 0 {
+		authority.Authority = modelReplay(1)
+		authority.Authority.NextGenerationID = 5
+		authority.Authority.Replay.TargetGenerationID = 3
+		authority.TargetLagGenerationID = 4
+		authority.SourceKind = source
+		if source == 1 {
+			authority.Authority.Replay.Cursor.Kind = 1
+		} else {
+			authority.Authority.Replay.Cursor = ReplayCursorV1{}
+			authority.Progress = TreeProgressV1{Kind: progress, Payload: []byte{0xde, 0xad}}
+		}
+	}
+	encoded, err := authority.Encode()
+	mustEnvironment(t, err)
+	return encoded
+}
+
+func TestTreeNativeAbsentAuthorityCensus(t *testing.T) {
+	for _, opening := range []bool{false, true} {
+		for rank := range 9 {
+			t.Run(fmt.Sprintf("open%v/extra rank%d", opening, rank), func(t *testing.T) {
+				store, path, identity := treeNativeStore(t)
+				key := []byte{0xfe}
+				treeNativeSeed(t, store, uint8(rank), key, []byte{1})
+				if opening {
+					mustEnvironment(t, store.Close())
+					got, err := OpenTreeV1(path, environmentConfig(), identity)
+					if got != nil {
+						t.Fatal("stray row published tree store")
+					}
+					treeNativeIntegrity(t, err, operationOpen, nil)
+					return
+				}
+				var recorded error
+				returned := store.View(func(reader *Reader) error {
+					got, present, err := reader.ReadTreeAuthorityV1()
+					if !reflect.DeepEqual(got, TreeAuthorityV1{}) || present {
+						t.Fatal("tree absent authority census returned partial/absence success")
+					}
+					treeNativeIntegrity(t, err, operationGet, nil)
+					recorded = err
+					if reader.failure != err || reader.usable() {
+						t.Fatal("tree census did not record exact failure")
+					}
+					_, _, next := reader.ReadTreeAuthorityV1()
+					treeNativeError(t, next, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+					if reader.failure != recorded {
+						t.Fatal("later census failure replaced first")
+					}
+					return nil
+				})
+				if returned != recorded || store.terminal != recorded || store.state != storeCLOSED {
+					t.Fatal("tree absent census enclosing owner")
+				}
+				treeNativeZeroResources(t, store)
+			})
+		}
+		for _, control := range []byte{0, 1, 3} {
+			for _, defect := range []string{"missing", "width", "different"} {
+				t.Run(fmt.Sprintf("open%v/control%02x/%s", opening, control, defect), func(t *testing.T) {
+					store, path, identity := treeNativeStore(t)
+					var cause error
+					if defect == "missing" {
+						mustEnvironment(t, fixtureDeletePrefixRow(store, readDBIsLiteral()[0], []byte{control}))
+						// Keep count three, so the required-point read owns the refusal.
+						treeNativeSeed(t, store, 0, []byte{0xfe}, []byte{1})
+					} else {
+						value := []byte{0, 0, 0, 4}
+						switch control {
+						case 0:
+							cause = errSchema
+						case 1:
+							cfg := environmentConfig()
+							cfg.MaxReaders++
+							value = mustConfigBytes(t, cfg)
+						case 3:
+							value = bytes.Repeat([]byte{8}, 32)
+						}
+						if defect == "width" {
+							value = value[:len(value)-1]
+							cause = errSchema
+						}
+						treeNativeSeed(t, store, 0, []byte{control}, value)
+					}
+					if opening {
+						mustEnvironment(t, store.Close())
+						got, err := OpenTreeV1(path, environmentConfig(), identity)
+						if got != nil {
+							t.Fatal("invalid control published Store")
+						}
+						treeNativeIntegrity(t, err, operationOpen, cause)
+						return
+					}
+					err := store.View(func(reader *Reader) error {
+						got, present, err := reader.ReadTreeAuthorityV1()
+						if present || !reflect.DeepEqual(got, TreeAuthorityV1{}) || reader.failure != err || reader.usable() {
+							t.Fatal("tree control census error effects")
+						}
+						return err
+					})
+					treeNativeIntegrity(t, err, operationGet, cause)
+				})
+			}
+		}
+	}
+}
+
+func TestTreeNativeTypedPointsAndProvenance(t *testing.T) {
+	store, path, identity := treeNativeStore(t)
+	authority := treeNativeAuthorityBytes(t, 0, 0)
+	treeNativeSeed(t, store, 0, []byte{2}, authority)
+	for i, applied := range []bool{false, true} {
+		root := treeRootFixture(t, applied)
+		root.DatabaseID = identity
+		encoded, err := root.Encode()
+		mustEnvironment(t, err)
+		key := binary.BigEndian.AppendUint64([]byte{0x11}, uint64(i+1))
+		treeNativeSeed(t, store, 0, key, encoded)
+	}
+	capsule := treeEvidenceFixture()
+	encoded, err := capsule.Encode()
+	mustEnvironment(t, err)
+	id := sha3.Sum256(encoded)
+	reference := TreeImportReferenceV1{OriginalDatabaseID: capsule.OriginalDatabaseID, OriginalCurrentID: capsule.OriginalCurrentID, OriginalLagID: capsule.OriginalLagID, OriginalRole: 1, EvidenceID: id}
+	for i, role := range []TreeOriginalRoleV1{1, 2} {
+		root := treeRootFixture(t, true)
+		root.DatabaseID = identity
+		original := reference
+		original.OriginalRole = role
+		root.Assurance = TreeAssuranceV1{Kind: 2, Import: &original}
+		if role == 2 {
+			top := treeBranch(0, [36]byte{})
+			root.Top = TreeTopV1{Kind: 2, Node: &top}
+		}
+		value, err := root.Encode()
+		mustEnvironment(t, err)
+		treeNativeSeed(t, store, 0, binary.BigEndian.AppendUint64([]byte{0x11}, uint64(i+3)), value)
+	}
+	treeNativeSeed(t, store, 0, append([]byte{0x12}, id[:]...), encoded)
+	mustEnvironment(t, store.Close())
+	store, err = OpenTreeV1(path, environmentConfig(), identity)
+	mustEnvironment(t, err)
+	defer func() { _ = store.Close() }()
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		got, present, err := reader.ReadTreeAuthorityV1()
+		if err != nil || !present || got.Authority.ActiveGenerationID != 1 || got.LagGenerationID != 2 || reader.ownerVerified {
+			t.Fatal("tree authority envelope native point")
+		}
+		for i, applied := range []bool{false, true} {
+			want := treeRootFixture(t, applied)
+			want.DatabaseID = identity
+			root, present, err := reader.ReadTreeRootBindingV1(uint64(i + 1))
+			if err != nil || !present || !reflect.DeepEqual(root, want) {
+				t.Fatalf("tree root PRE versus APPLIED0: %+v/%v/%v", root, present, err)
+			}
+			root.DatabaseID[0] ^= 1
+		}
+		for i, role := range []TreeOriginalRoleV1{1, 2} {
+			root, present, err := reader.ReadTreeRootBindingV1(uint64(i + 3))
+			want := reference
+			want.OriginalRole = role
+			if err != nil || !present || root.Assurance.Kind != 2 || root.Assurance.Import == nil || *root.Assurance.Import != want {
+				t.Fatal("tree imported root retained original reference")
+			}
+			if role == 2 && (root.Top.Kind != 2 || root.Top.Node == nil || *root.Top.Node != treeBranch(0, [36]byte{})) {
+				t.Fatal("tree maximum328 root point")
+			}
+			root.Assurance.Import.OriginalDatabaseID[0] ^= 1
+			again, _, err := reader.ReadTreeRootBindingV1(uint64(i + 3))
+			if err != nil || *again.Assurance.Import != want {
+				t.Fatal("tree imported reference aliases native/another read")
+			}
+		}
+		for _, role := range []TreeOriginalRoleV1{1, 2} {
+			reference.OriginalRole = role
+			evidence, err := reader.ReadTreeEvidenceV1(reference)
+			if err != nil || !reflect.DeepEqual(evidence, capsule) || reference.OriginalDatabaseID == identity {
+				t.Fatalf("tree original evidence role%d: %+v/%v", role, evidence, err)
+			}
+			evidence.Payload[0] ^= 1
+		}
+		evidence, err := reader.ReadTreeEvidenceV1(reference)
+		if err != nil || !reflect.DeepEqual(evidence, capsule) {
+			t.Fatal("tree evidence owned payload retention")
+		}
+		return nil
+	}))
+}
+
+func TestTreeNativeTypedCorruption(t *testing.T) {
+	for _, defect := range []string{"root foreign", "root version", "root width132", "root width329", "authority shape", "authority empty", "evidence missing", "evidence empty", "evidence malformed", "evidence hash", "evidence database", "evidence current", "evidence lag"} {
+		t.Run(defect, func(t *testing.T) {
+			store, _, identity := treeNativeStore(t)
+			root := treeRootFixture(t, false)
+			root.DatabaseID = identity
+			if defect == "root foreign" {
+				root.DatabaseID = [32]byte{9}
+			}
+			value, err := root.Encode()
+			mustEnvironment(t, err)
+			capsule := treeEvidenceFixture()
+			encoded, err := capsule.Encode()
+			mustEnvironment(t, err)
+			id := sha3.Sum256(encoded)
+			reference := TreeImportReferenceV1{OriginalDatabaseID: capsule.OriginalDatabaseID, OriginalCurrentID: capsule.OriginalCurrentID, OriginalLagID: capsule.OriginalLagID, OriginalRole: 1, EvidenceID: id}
+			cause := error(nil)
+			switch defect {
+			case "root version":
+				value[33] = 2
+				cause = errSchema
+			case "root width132":
+				value = value[:132]
+				cause = errSchema
+			case "root width329":
+				value = append(value, make([]byte, 329-len(value))...)
+				cause = errSchema
+			case "authority shape", "authority empty":
+				container := []byte{0}
+				if defect == "authority empty" {
+					container = nil
+				}
+				treeNativeSeed(t, store, 0, []byte{2}, container)
+				cause = errSchema
+			case "evidence empty":
+				encoded = nil
+				cause = errSchema
+			case "evidence malformed":
+				encoded[0] = 0
+				cause = errSchema
+			case "evidence hash":
+				encoded[len(encoded)-1] ^= 1
+				cause = errSchema
+			case "evidence database":
+				reference.OriginalDatabaseID[0] ^= 1
+			case "evidence current":
+				reference.OriginalCurrentID = 9
+			case "evidence lag":
+				reference.OriginalLagID++
+			}
+			treeNativeSeed(t, store, 0, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, value)
+			if defect != "evidence missing" {
+				treeNativeSeed(t, store, 0, append([]byte{0x12}, id[:]...), encoded)
+			}
+			var recorded error
+			returned := store.View(func(reader *Reader) error {
+				switch {
+				case strings.HasPrefix(defect, "root"):
+					got, present, err := reader.ReadTreeRootBindingV1(1)
+					if got != (RootBindingV1{}) || present {
+						t.Fatal("tree destination identity partial output")
+					}
+					recorded = err
+				case strings.HasPrefix(defect, "evidence"):
+					got, err := reader.ReadTreeEvidenceV1(reference)
+					if !reflect.DeepEqual(got, TreeEvidenceV1{}) {
+						t.Fatal("tree evidence resolution partial output")
+					}
+					recorded = err
+				default:
+					got, present, err := reader.ReadTreeAuthorityV1()
+					if !reflect.DeepEqual(got, TreeAuthorityV1{}) || present {
+						t.Fatal("tree authority partial output")
+					}
+					recorded = err
+				}
+				treeNativeIntegrity(t, recorded, operationGet, cause)
+				if reader.failure != recorded || reader.usable() {
+					t.Fatal("tree typed first-failure identity/disarm")
+				}
+				return recorded
+			})
+			if returned != recorded || store.terminal != recorded || store.state != storeCLOSED {
+				t.Fatal("tree typed enclosing effect")
+			}
+			treeNativeZeroResources(t, store)
+		})
+	}
+}
+
+func TestTreeNativePostorder(t *testing.T) {
+	store, _, _ := treeNativeStore(t)
+	allOnes := [36]byte{}
+	for i := range allOnes {
+		allOnes[i] = 0xff
+	}
+	identities := []TreeNodeIDV1{treeLeaf([36]byte{}), treeBranch(287, [36]byte{}), treeBranch(256, [36]byte{}), treeBranch(255, [36]byte{}), treeBranch(9, [36]byte{}), treeBranch(8, [36]byte{}), treeBranch(7, [36]byte{}), treeLeaf(allOnes), treeBranch(0, [36]byte{})}
+	// Upper/code literals remain independent of the key producer transformed by M02.N.
+	uppers := []string{strings.Repeat("00", 36), strings.Repeat("00", 35) + "01", strings.Repeat("00", 32) + strings.Repeat("ff", 4), strings.Repeat("00", 31) + "01" + strings.Repeat("ff", 4), "007f" + strings.Repeat("ff", 34), "00" + strings.Repeat("ff", 35), "01" + strings.Repeat("ff", 35), strings.Repeat("ff", 36), strings.Repeat("ff", 36)}
+	codes := []string{"0000", "0001", "0020", "0021", "0117", "0118", "0119", "0000", "0120"}
+	keys, values := make([][]byte, len(identities)), make([][]byte, len(identities))
+	for i := len(identities) - 1; i >= 0; i-- {
+		key, err := TreeNodeKey(1, identities[i])
+		mustEnvironment(t, err)
+		keys[i] = treeNativeKeyLiteral(t, uppers[i], codes[i])
+		width := 140
+		if identities[i].Kind == 1 {
+			width = 32
+		}
+		values[i] = bytes.Repeat([]byte{byte(i + 1)}, width)
+		// Raw insertion must reach native paging even under M02.N; no codec admission here.
+		treeNativeSeed(t, store, 8, key, values[i])
+	}
+	for _, remnant := range []bool{false, true} {
+		if remnant {
+			for _, index := range []int{1, 3, 7} {
+				key, err := TreeNodeKey(1, identities[index])
+				mustEnvironment(t, err)
+				mustEnvironment(t, fixtureDeletePrefixRow(store, DBI{Name: "tree-node-v1", Rank: 8}, key))
+			}
+		}
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, []byte{0, 0, 0, 0, 0, 0, 0, 1}, nil, 1440, 154611151)
+			var expected []PrefixRow
+			for i, key := range keys {
+				if remnant && (i == 1 || i == 3 || i == 7) {
+					continue
+				}
+				expected = append(expected, PrefixRow{Key: key, Value: values[i]})
+			}
+			if err != nil || page.Stop != PrefixPageExhausted || !reflect.DeepEqual(page.Rows, expected) {
+				t.Fatalf("tree postorder complete/remnant native observation: remnant%v page%+v error%v", remnant, page, err)
+			}
+			page.Rows[0].Key[0] ^= 1
+			page.Rows[0].Value[0] ^= 1
+			return nil
+		}))
+	}
+}
+
+func TestTreeNativePagingBounds(t *testing.T) {
+	for _, width := range []int{31, 32, 33, 139, 140, 141} {
+		t.Run(fmt.Sprintf("node width%d", width), func(t *testing.T) {
+			store, _, _ := treeNativeStore(t)
+			id := treeLeaf([36]byte{})
+			valid := width == 32
+			if width >= 139 {
+				id, valid = treeBranch(0, [36]byte{}), width == 140
+			}
+			key, err := TreeNodeKey(1, id)
+			mustEnvironment(t, err)
+			treeNativeSeed(t, store, 8, key, make([]byte, width))
+			err = store.View(func(reader *Reader) error {
+				page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, key[:8], nil, 1, 186)
+				if valid {
+					if err != nil || len(page.Rows) != 1 || len(page.Rows[0].Value) != width {
+						t.Fatalf("tree native node page: %+v/%v", page, err)
+					}
+				} else if err == nil || page.Rows != nil || page.Stop != 0 || reader.failure != err || reader.usable() {
+					t.Fatal("tree native node page width refusal")
+				}
+				return err
+			})
+			if !valid {
+				requireEnvironmentError(t, err, EngineIntegrity, operationPrefixPage, -30793, "stored value width outside SchemaV2 bound")
+			}
+		})
+	}
+	store, _, _ := treeNativeStore(t)
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		dbi, prefix := DBI{Name: "tree-node-v1", Rank: 8}, []byte{0, 0, 0, 0, 0, 0, 0, 1}
+		key, err := TreeNodeKey(1, treeLeaf([36]byte{}))
+		mustEnvironment(t, err)
+		page, err := reader.PrefixPage(dbi, prefix, key, 1, 186)
+		if err != nil || page.Stop != PrefixPageExhausted || len(page.Rows) != 0 {
+			t.Fatal("tree native same-prefix continuation46")
+		}
+		for _, row := range []struct {
+			prefix, after []byte
+			rows uint32
+			bytes uint64
+			diagnostic string
+		}{
+			{prefix[:7], nil, 1, 186, "invalid prefix-page prefix"},
+			{append(bytes.Clone(prefix), 0), nil, 1, 186, "invalid prefix-page prefix"},
+			{make([]byte, 8), nil, 1, 186, "invalid prefix-page prefix"},
+			{prefix, key[:45], 1, 186, "invalid prefix-page continuation"},
+			{prefix, append(bytes.Clone(key), 0), 1, 186, "invalid prefix-page continuation"},
+			{prefix, append([]byte{1}, key[1:]...), 1, 186, "invalid prefix-page continuation"},
+			{prefix, nil, 0, 186, "invalid prefix-page row limit"},
+			{prefix, nil, 1441, 186, "invalid prefix-page row limit"},
+			{prefix, nil, 1, 185, "invalid prefix-page byte limit"},
+			{prefix, nil, 1, 154611152, "invalid prefix-page byte limit"},
+		} {
+			page, err := reader.PrefixPage(dbi, row.prefix, row.after, row.rows, row.bytes)
+			requirePrefixPageError(t, page, err, row.diagnostic, nil)
+			if !reader.usable() || reader.failure != nil {
+				t.Fatal("tree page static refusal disarmed")
+			}
+		}
+		return nil
+	}))
+}
+
+func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
+	for _, row := range []struct{ source, progress byte }{{0, 0}, {1, 0}, {2, 1}, {2, 2}} {
+		t.Run(fmt.Sprintf("source%d/status%d", row.source, row.progress), func(t *testing.T) {
+			store, path, identity := treeNativeStore(t)
+			treeNativeSeed(t, store, 0, []byte{2}, treeNativeAuthorityBytes(t, TreeSourceKindV1(row.source), TreeProgressKindV1(row.progress)))
+			// The authority is valid; unrequested rows are deliberately malformed or absent.
+			for _, key := range [][]byte{
+				{0x10, 0, 0, 0, 0, 0, 0, 0, 1},
+				{0x11, 0, 0, 0, 0, 0, 0, 0, 1},
+				{0x12, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			} {
+				treeNativeSeed(t, store, 0, key, []byte{0})
+			}
+			mustEnvironment(t, store.Close())
+			opened, err := OpenTreeV1(path, environmentConfig(), identity)
+			if err != nil || opened == nil {
+				t.Fatalf("tree open has no role prefetch: %v", err)
+			}
+			if opened.canonicalOwnerVerified {
+				t.Fatal("tree open granted canonical service")
+			}
+			err = opened.View(func(reader *Reader) error {
+				got, present, err := reader.ReadTreeAuthorityV1()
+				if err != nil || !present || byte(got.SourceKind) != row.source || byte(got.Progress.Kind) != row.progress {
+					t.Fatal("tree authority inferred role qualification")
+				}
+				root, present, err := reader.ReadTreeRootBindingV1(2)
+				if root != (RootBindingV1{}) || present || err != nil {
+					t.Fatal("missing unrequested LAG became qualified")
+				}
+				root, present, err = reader.ReadTreeRootBindingV1(1)
+				if root != (RootBindingV1{}) || present {
+					t.Fatal("reached malformed root returned value")
+				}
+				return err
+			})
+			treeNativeIntegrity(t, err, operationGet, errSchema)
+		})
+	}
+}
+
+func TestTreeNativeRaw148Widths(t *testing.T) {
+	for _, rank := range []uint8{3, 4} {
+		for _, width := range []int{147, 148, 149, 68000157, 68000158} {
+			t.Run(fmt.Sprintf("rank%d/width%d", rank, width), func(t *testing.T) {
+				store, _, _ := treeNativeStore(t)
+				key, value := [32]byte{0x77}, make([]byte, width)
+				for i := range min(width, 148) {
+					value[i] = byte(i)
+				}
+				treeNativeSeed(t, store, rank, key[:], value)
+				valid := width == 148 || rank == 4 && width > 148 && width <= 68000157
+				err := store.View(func(reader *Reader) error {
+					optional, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[rank], key[:])
+					if err != nil || !optional.Present || optional.Length != uint64(width) || optional.InvalidWidth == valid || !valid && optional.Value != nil || valid && !bytes.Equal(optional.Value, value) || !reader.usable() || reader.failure != nil {
+						t.Fatalf("tree initial148 raw status: %+v/%v", optional, err)
+					}
+					got, present, err := reader.Get(readDBIsLiteral()[rank], key[:])
+					if valid {
+						if err != nil || !present || !bytes.Equal(got, value) {
+							t.Fatal("tree raw legal-width wrong-key rejected or changed")
+						}
+						got[0] ^= 1
+						if optional.Value[0] != value[0] {
+							t.Fatal("tree raw copies alias sibling observation")
+						}
+					} else if got != nil || present || reader.failure != err || reader.usable() {
+						t.Fatal("tree raw invalid-width effects")
+					}
+					return err
+				})
+				if valid {
+					mustEnvironment(t, err)
+				} else {
+					treeNativeIntegrity(t, err, operationGet, errSchema)
+				}
+			})
+		}
+	}
+}
+
+func TestTreeNativeLinkedShapes(t *testing.T) {
+	for _, kinds := range [][2]byte{{1, 1}, {1, 2}, {2, 1}, {2, 2}} {
+		t.Run(fmt.Sprintf("children%d/%d", kinds[0], kinds[1]), func(t *testing.T) {
+			store, _, _ := treeNativeStore(t)
+			parent := treeBranch(0, [36]byte{})
+			children := [2]*TreeChildV1{}
+			var expected []PrefixRow
+			var deleteKey []byte
+			for side, kind := range kinds {
+				prefix := [36]byte{byte(side << 7)}
+				id := treeLeaf(prefix)
+				if kind == 2 {
+					id = treeBranch(1, prefix)
+					grandchildren := [2]*TreeChildV1{}
+					for childSide := range 2 {
+						key := prefix
+						key[0] |= byte(childSide << 6)
+						leaf := treeLeaf(key)
+						value := bytes.Repeat([]byte{byte(1 + side*2 + childSide)}, 32)
+						encodedKey, err := TreeNodeKey(1, leaf)
+						mustEnvironment(t, err)
+						treeNativeSeed(t, store, 8, encodedKey, value)
+						literal := treeNativeKeyLiteral(t, fmt.Sprintf("%02x", key[0])+strings.Repeat("00", 35), "0000")
+						expected = append(expected, PrefixRow{Key: literal, Value: value})
+						grandchildren[childSide] = &TreeChildV1{ID: leaf, Digest: [32]byte{byte(childSide + 1)}}
+					}
+					value, err := (TreeNodeV1{Zero: grandchildren[0], One: grandchildren[1]}).Encode(id)
+					mustEnvironment(t, err)
+					encodedKey, err := TreeNodeKey(1, id)
+					mustEnvironment(t, err)
+					treeNativeSeed(t, store, 8, encodedKey, value)
+					upper := "7f" + strings.Repeat("ff", 35)
+					if side == 1 {
+						upper = strings.Repeat("ff", 36)
+					}
+					literal := treeNativeKeyLiteral(t, upper, "011f")
+					expected = append(expected, PrefixRow{Key: literal, Value: value})
+					deleteKey = encodedKey
+				} else {
+					encodedKey, err := TreeNodeKey(1, id)
+					mustEnvironment(t, err)
+					value := bytes.Repeat([]byte{byte(side + 5)}, 32)
+					treeNativeSeed(t, store, 8, encodedKey, value)
+					literal := treeNativeKeyLiteral(t, fmt.Sprintf("%02x", prefix[0])+strings.Repeat("00", 35), "0000")
+					expected = append(expected, PrefixRow{Key: literal, Value: value})
+					deleteKey = encodedKey
+				}
+				children[side] = &TreeChildV1{ID: id, Digest: [32]byte{byte(side + 9)}}
+			}
+			value, err := (TreeNodeV1{Zero: children[0], One: children[1]}).Encode(parent)
+			mustEnvironment(t, err)
+			key, err := TreeNodeKey(1, parent)
+			mustEnvironment(t, err)
+			treeNativeSeed(t, store, 8, key, value)
+			expected = append(expected, PrefixRow{Key: treeNativeKeyLiteral(t, strings.Repeat("ff", 36), "0120"), Value: value})
+			for _, remnant := range []bool{false, true} {
+				if remnant {
+					mustEnvironment(t, fixtureDeletePrefixRow(store, DBI{Name: "tree-node-v1", Rank: 8}, deleteKey))
+				}
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, []byte{0, 0, 0, 0, 0, 0, 0, 1}, nil, 1440, 154611151)
+					want := expected
+					if remnant {
+						want = append(append([]PrefixRow{}, expected[:len(expected)-2]...), expected[len(expected)-1])
+					}
+					if err != nil || page.Stop != PrefixPageExhausted || !reflect.DeepEqual(page.Rows, want) {
+						t.Fatalf("tree postorder linked complete/remnant: %+v/%v", page, err)
+					}
+					return nil
+				}))
+			}
+		})
+	}
+}
+
+func TestTreeNativeReachedMalformedKey(t *testing.T) {
+	for _, badCode := range []uint16{289, 65535} {
+		store, _, _ := treeNativeStore(t)
+		first := mustCodecHex(t, "0000000000000001"+strings.Repeat("00", 38))
+		bad := mustCodecHex(t, "0000000000000001"+strings.Repeat("00", 35)+"01"+"0000")
+		binary.BigEndian.PutUint16(bad[44:], badCode)
+		treeNativeSeed(t, store, 8, first, make([]byte, 32))
+		treeNativeSeed(t, store, 8, bad, make([]byte, 140))
+		// A later malformed row cannot preempt an earlier point read.
+		err := store.View(func(reader *Reader) error {
+			got, present, err := reader.Get(DBI{Name: "tree-node-v1", Rank: 8}, first)
+			if err != nil || !present || len(got) != 32 {
+				t.Fatal("tree malformed complete key prepass")
+			}
+			page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, first[:8], first, 1, 186)
+			if err == nil || page.Rows != nil || page.Stop != 0 || reader.failure != err || reader.usable() {
+				t.Fatal("tree malformed complete key did not stop at reached position")
+			}
+			return err
+		})
+		requireEnvironmentError(t, err, EngineIntegrity, operationPrefixPage, -30793, "stored key outside SchemaV2 prefix-page domain")
+	}
+}
+
+func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
+	for _, version := range [][]byte{nil, {0}, {0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 4}, {0, 0, 0, 3, 0}} {
+		t.Run(fmt.Sprintf("version%x", version), func(t *testing.T) {
+			store, path, identity := treeNativeStore(t)
+			treeNativeSeed(t, store, 0, []byte{0}, version)
+			mustEnvironment(t, store.Close())
+			got, err := OpenTreeV1(path, environmentConfig(), identity)
+			if got != nil {
+				t.Fatal("tree version damage published Store")
+			}
+			treeNativeIntegrity(t, err, operationOpen, errSchema)
+		})
+	}
+	store, path, identity := treeNativeStore(t)
+	treeNativeSeed(t, store, 0, []byte{0}, []byte{0, 0, 0, 2})
+	mustEnvironment(t, store.Close())
+	got, err := OpenTreeV1(path, environmentConfig(), identity)
+	if got != nil {
+		t.Fatal("mixed schema2/nine families published")
+	}
+	treeNativeIntegrity(t, err, operationOpen, nil)
+	oldPath := filepath.Join(t.TempDir(), "historical")
+	historical, err := Create(oldPath, environmentConfig())
+	mustEnvironment(t, err)
+	// A recognized schema2 image is not authority/index qualification.
+	mustEnvironment(t, fixtureSeedPrefixRawRow(historical, readDBIsLiteral()[0], []byte{2}, []byte{0xff}))
+	mustEnvironment(t, fixtureSeedPrefixRawRow(historical, readDBIsLiteral()[2], []byte{0xff}, []byte{0xff}))
+	mustEnvironment(t, historical.Close())
+	got, err = OpenTreeV1(oldPath, environmentConfig(), identity)
+	if got != nil {
+		t.Fatal("recognized schema2 exposed tree Store")
+	}
+	treeNativeError(t, err, operationOpen, EngineClass("StateMismatch"), -30779, "tree schema unavailable: recognized SchemaV2", nil)
+	historical, err = Open(oldPath, environmentConfig())
+	mustEnvironment(t, err)
+	mustEnvironment(t, historical.Close())
+}
+
+func TestTreeNativeRecognitionFamilies(t *testing.T) {
+	for _, mode := range []uint32{1, 2} {
+		t.Run(fmt.Sprintf("family mode%d", mode), func(t *testing.T) {
+			store, copied, err := fixtureOpenReverseUTXO(filepath.Join(t.TempDir(), "db"), mode)
+			if store != nil || len(copied) != 48 {
+				t.Fatal("tree family fixture setup/Store publication")
+			}
+			// Mode1 has both reverse meta flags and malformed version1. Flags
+			// must win with nil Cause; decoding version first yields errSchema.
+			treeNativeIntegrity(t, err, operationOpen, nil)
+		})
+	}
+}
+
+func TestTreeNativeRecognitionSourceOrder(t *testing.T) {
+	for _, historical := range []bool{false, true} {
+		store, _, identity := treeNativeStore(t)
+		if historical {
+			mustEnvironment(t, store.Close())
+			var err error
+			store, err = Create(filepath.Join(t.TempDir(), "old"), environmentConfig())
+			mustEnvironment(t, err)
+		}
+		// Version bytes would be positive damage if reached. The real native
+		// version read is failed first on the same recognition helper Open uses.
+		mustEnvironment(t, fixtureSeedPrefixRawRow(store, readDBIsLiteral()[0], []byte{0}, []byte{0, 0, 0, 4}))
+		var reached, returned error
+		evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageGetEIO, 0, []byte{0}, func() {
+			returned = store.View(func(reader *Reader) error {
+				_, reached = inspectTreeSchema(store.env, reader.txn, environmentConfig(), identity)
+				return reached
+			})
+		})
+		mustEnvironment(t, err)
+		treeNativeError(t, reached, operationOpen, EngineClass("IO"), 5, "error 5", nil)
+		if returned != reached || evidence.BeginOld != 1 || evidence.OldGets != ([8]uint64{1}) || evidence.Faults != 1 {
+			t.Fatal("tree recognition source precedence/identity")
+		}
+		mustEnvironment(t, store.Close())
+	}
+}
+
+func TestTreeNativeCensusControlSource(t *testing.T) {
+	for position, control := range []byte{0, 1, 3} {
+		store, _, _ := treeNativeStore(t)
+		// The reached source error must precede damaged bytes from that read.
+		value := []byte{0xff}
+		treeNativeSeed(t, store, 0, []byte{control}, value)
+		var recorded, returned error
+		evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageGetEIO, 0, []byte{control}, func() {
+			returned = store.View(func(reader *Reader) error {
+				got, present, err := reader.ReadTreeAuthorityV1()
+				if present || !reflect.DeepEqual(got, TreeAuthorityV1{}) || reader.failure != err || reader.usable() {
+					t.Fatal("tree census control source zero/first failure")
+				}
+				recorded = err
+				return nil
+			})
+		})
+		mustEnvironment(t, err)
+		treeNativeError(t, recorded, operationGet, EngineClass("IO"), 5, "error 5", nil)
+		if evidence.OldGets != ([8]uint64{uint64(position + 2)}) || returned != recorded || store.terminal != recorded || evidence.Faults != 1 {
+			t.Fatal("tree census controls 00/01/03 source order")
+		}
+		treeNativeZeroResources(t, store)
+	}
+}
+
+func TestTreeNativeCensusStatSource(t *testing.T) {
+	for rank := 1; rank < 9; rank++ {
+		store, _, _ := treeNativeStore(t)
+		var recorded error
+		returned := store.View(func(reader *Reader) error {
+			// An invalid native handle reaches the existing MDBX stat source.
+			// All other handles/context remain valid and distinct.
+			reader.dbis[rank] = ^reader.dbis[rank] & 0xffffffff
+			got, present, err := reader.ReadTreeAuthorityV1()
+			if present || !reflect.DeepEqual(got, TreeAuthorityV1{}) || reader.failure != err || reader.usable() {
+				t.Fatal("tree stat source zero/first failure")
+			}
+			recorded = err
+			return nil
+		})
+		treeNativeError(t, recorded, operationGet, EngineClass("LocalInvariant"), -30780, expectedNativeDiagnostic(-30780), nil)
+		if returned != recorded || store.terminal != recorded {
+			t.Fatal("tree stat failure object wrapped")
+		}
+		treeNativeZeroResources(t, store)
+	}
+}
+
+func TestTreeNativeRootDoesNotResolveEvidence(t *testing.T) {
+	store, _, identity := treeNativeStore(t)
+	root := treeRootFixture(t, true)
+	root.DatabaseID = identity
+	reference := *treeImportFixture()
+	root.Assurance = TreeAssuranceV1{Kind: 2, Import: &reference}
+	encoded, err := root.Encode()
+	mustEnvironment(t, err)
+	treeNativeSeed(t, store, 0, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, encoded)
+	err = store.View(func(reader *Reader) error {
+		got, present, err := reader.ReadTreeRootBindingV1(1)
+		if err != nil || !present || !reflect.DeepEqual(got, root) || !reader.usable() {
+			t.Fatal("tree root eagerly resolved absent evidence")
+		}
+		evidence, err := reader.ReadTreeEvidenceV1(reference)
+		if !reflect.DeepEqual(evidence, TreeEvidenceV1{}) {
+			t.Fatal("missing original evidence returned payload")
+		}
+		return err
+	})
+	treeNativeIntegrity(t, err, operationGet, nil)
+}
+
+func TestTreeNativePointerAndLengthProjection(t *testing.T) {
+	for _, mode := range []uint32{17, 18} {
+		store, _, identity := treeNativeStore(t)
+		root := treeRootFixture(t, false)
+		root.DatabaseID = identity
+		encoded, err := root.Encode()
+		mustEnvironment(t, err)
+		key := []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}
+		treeNativeSeed(t, store, 0, key, encoded)
+		var recorded, returned error
+		evidence, err := fixtureLargeFault(store, mode, 0, key, func() {
+			returned = store.View(func(reader *Reader) error {
+				got, present, err := reader.ReadTreeRootBindingV1(1)
+				if got != (RootBindingV1{}) || present || reader.failure != err || reader.usable() {
+					t.Fatal("tree pointer/length projection partial state")
+				}
+				recorded = err
+				return nil
+			})
+		})
+		mustEnvironment(t, err)
+		if mode == 17 {
+			treeNativeError(t, recorded, operationGet, EngineClass("LocalInvariant"), -30779, "mdbx_get returned invalid result shape", nil)
+		} else {
+			treeNativeIntegrity(t, recorded, operationGet, errSchema)
+		}
+		if evidence.gets != 1 || returned != recorded || store.terminal != recorded || store.state != storeCLOSED {
+			t.Fatal("tree pointer/length source/resource effects")
+		}
+		treeNativeZeroResources(t, store)
+		if next := store.View(func(*Reader) error { t.Fatal("terminal callback"); return nil }); next != recorded {
+			t.Fatal("tree pointer/length next operation")
 		}
 	}
 }
