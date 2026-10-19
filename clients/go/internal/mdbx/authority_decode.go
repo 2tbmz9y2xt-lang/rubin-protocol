@@ -45,7 +45,7 @@ func decodePoint(r *authorityReader) AuthorityPointV1 {
 
 func decodeCleanup(r *authorityReader) *CleanupV1 {
 	n := int(r.u8())
-	if n < 1 || n > 4 || n*9 > r.remaining() {
+	if n < 1 || n > cleanupSpanMaximum(r.tree) || n*9 > r.remaining() {
 		r.ok = false
 		return nil
 	}
@@ -71,7 +71,10 @@ func decodeSpan(r *authorityReader, span *CleanupSpanV1) {
 func decodeReplay(r *authorityReader) *ReplayV1 {
 	v := &ReplayV1{TargetProfile: StorageProfileV1(r.tag(2)), TargetGenerationID: r.u64()}
 	v.Target = decodeRecoveryTarget(r)
-	v.Cursor.Kind = ReplayCursorKindV1(r.tag(2))
+	v.Cursor.Kind = ReplayCursorKindV1(r.u8())
+	if v.Cursor.Kind > 2 || (!r.tree && v.Cursor.Kind == 0) {
+		r.ok = false
+	}
 	if v.Cursor.Kind == ReplayCursorAppliedV1 {
 		p := decodePoint(r)
 		v.Cursor.Height, v.Cursor.BlockHash = p.Height, p.BlockHash

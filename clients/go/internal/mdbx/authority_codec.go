@@ -111,9 +111,10 @@ func DecodeStorageAuthorityV1(b []byte) (StorageAuthorityV1, error) {
 }
 
 type authorityReader struct {
-	b   []byte
-	off int
-	ok  bool
+	b    []byte
+	off  int
+	ok   bool
+	tree bool
 }
 
 func (r *authorityReader) take(n int) []byte {
