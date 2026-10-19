@@ -10,6 +10,7 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
@@ -31,6 +32,30 @@ const (
 	retainNA        = "NOT_APPLICABLE"
 )
 
+// retainReservationRemaining returns an owner of limit R_MIN=805306368 that holds 805306368-remaining filler bytes, in legacy charges of
+// at most LANE_MAX=154611183 from goroutines released at t's cleanup, so its free remainder is exactly remaining for
+// t's lifetime. The error is always nil, matching NewOperationReservationOwner's signature.
+func retainReservationRemaining(t testing.TB, remaining uint64) (*mdbx.OperationReservationOwner, error) {
+	t.Helper()
+	owner, _ := mdbx.NewOperationReservationOwner(805306368)
+	hold, entered := make(chan struct{}), make(chan error)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { close(hold); wg.Wait() })
+	for fill := 805306368 - remaining; fill > 0; {
+		chunk := min(fill, 154611183)
+		fill -= chunk
+		wg.Go(func() {
+			if err := owner.WithReservation(chunk, func() error { entered <- nil; <-hold; return nil }); err != nil {
+				entered <- err
+			}
+		})
+		if err := <-entered; err != nil {
+			t.Fatalf("%s: reservation filler %d: %v", t.Name(), chunk, err)
+		}
+	}
+	return owner, nil
+}
+
 // newRetainStore is an exact-empty bootstrapped PRE_GENESIS store (PRUNED, active 1, next 2) tracked as an ssqWorld.
 func newRetainStore(t *testing.T, spec ssqSpec) *ssqWorld {
 	t.Helper()
@@ -46,7 +71,7 @@ func newRetainStore(t *testing.T, spec ssqSpec) *ssqWorld {
 		t.Fatalf("Create: %v", err)
 	}
 	t.Cleanup(func() { _ = w.store.Close() })
-	if w.owner, err = mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes); err != nil {
+	if w.owner, err = retainReservationRemaining(t, mdbx.MaxOperationDataBytes); err != nil {
 		t.Fatalf("reservation owner: %v", err)
 	}
 	if truth, _, err := w.store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, w.owner); err != nil || truth != mdbx.CommitTruthNew {

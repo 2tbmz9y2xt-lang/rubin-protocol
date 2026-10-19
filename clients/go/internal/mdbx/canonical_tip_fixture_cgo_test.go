@@ -140,8 +140,7 @@ func tipNativeCounts(t *testing.T) {
 					tipSeed(t, store, tipRow(8, 99, [32]byte{0x55}, [40]byte{39: 1}))
 				}
 				var selected SelectedDamageEvidence
-				reservations, reservationErr := NewOperationReservationOwner(154611151)
-				mustEnvironment(t, reservationErr)
+				reservations := reservationFilled(t, 154611151)
 				evidence, err := fixtureTipCursor(store, 1, 1, 1, 0, func() {
 					var fixtureErr error
 					selected, fixtureErr = FixtureSelectedDamage(store, reservations, SelectedDamageProbeOnly, 2, rows[count-1].Key, func() {
@@ -901,8 +900,7 @@ func tipNativeCallbacks(t *testing.T) {
 		target := consultedCounter(t, 900)
 		consultedRequireImage(t, store, target.DBI, target.Key, nil, false, "independent OLD image")
 		target.AfterKind = AfterKind(99)
-		reservations, reservationErr := NewOperationReservationOwner(154611151)
-		mustEnvironment(t, reservationErr)
+		reservations := reservationFilled(t, 154611151)
 		var reader *Reader
 		var source, result error
 		var truth CommitTruth

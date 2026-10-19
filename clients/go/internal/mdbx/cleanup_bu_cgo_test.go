@@ -405,8 +405,7 @@ func TestCleanupBU(t *testing.T) {
 				t.Fatalf("cleanup reservation boundary drifted: %s/%d/%v", truth, stage, err)
 			}
 		}
-		qMinusOne, ownerErr := NewOperationReservationOwner(MaxOperationDataBytes)
-		mustEnvironment(t, ownerErr)
+		qMinusOne := reservationFilled(t, MaxOperationDataBytes)
 		mustEnvironment(t, qMinusOne.WithReservation(1, func() error {
 			truth, stage, err = s.CleanupBUV1(qMinusOne)
 			if truth != CommitTruthOld || stage != UpdateStagePrewrite || err != errOperationReservationCapacity { //nolint:errorlint // Capacity refusal must return the exact sentinel.

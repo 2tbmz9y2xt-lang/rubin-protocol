@@ -175,7 +175,7 @@ func newSSQWorld(t *testing.T, spec ssqSpec) *ssqWorld {
 		t.Fatalf("Create: %v", err)
 	}
 	t.Cleanup(func() { _ = w.store.Close() })
-	w.owner, err = mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+	w.owner, err = retainReservationRemaining(t, mdbx.MaxOperationDataBytes)
 	if err != nil {
 		t.Fatalf("reservation owner: %v", err)
 	}

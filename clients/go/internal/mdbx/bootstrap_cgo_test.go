@@ -21,9 +21,13 @@ var bootstrapEmptyCounts, bootstrapInitializedCounts = [8]uint64{2, 0, 0, 0, 0, 
 
 func bootstrapMetaDBI() DBI { return readDBIsLiteral()[0] }
 
+// bootstrapFiller is the R_MIN-minus-legacy-grant filler every bootstrapOwner holds, so its free remainder
+// stays one legacy grant; absolute live values on such an owner are shifted by it.
+const bootstrapFiller uint64 = 650695217
+
 func bootstrapOwner(t *testing.T) *OperationReservationOwner {
 	t.Helper()
-	return reservationOwner(t, MaxOperationDataBytes)
+	return reservationFilled(t, MaxOperationDataBytes)
 }
 
 // bootstrapCounterKey is meta 0x10 || big-endian generation 1, written out independently
@@ -201,7 +205,7 @@ func TestStorageBootstrapInput(t *testing.T) {
 				t.Fatal("bootstrap stage forwarding drifted")
 			}
 			bootstrapRefusal(t, row.name, truth, err, EngineInvalidInput, operationUpdate, codeEINVAL, row.diagnostic, nil, false)
-			if reservationLive(owner) != 0 {
+			if reservationLive(owner) != bootstrapFiller {
 				t.Fatalf("%s: live=%d", row.name, reservationLive(owner))
 			}
 			if row.store != nil {
@@ -287,7 +291,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 	t.Run("exactly 188 available", func(t *testing.T) {
 		store, _, cfg := consultedStore(t)
 		owner := bootstrapOwner(t)
-		reservationInjectLive(owner, enclosing)
+		reservationInjectLive(owner, bootstrapFiller+enclosing)
 		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 		if stage != 3 {
 			t.Fatal("bootstrap stage forwarding drifted")
@@ -295,21 +299,21 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		if truth != CommitTruthNew || err != nil {
 			t.Fatalf("admit: %s/%v", truth, err)
 		}
-		if live := reservationLive(owner); live != enclosing {
+		if live := reservationLive(owner); live != bootstrapFiller+enclosing {
 			t.Fatalf("enclosing live=%d, want %d", live, enclosing)
 		}
 		bootstrapRequireInitialized(t, store, cfg, StorageProfilePrunedV1, "admit")
 		if again := owner.WithReservation(charge, func() error { return nil }); again != nil {
 			t.Fatalf("second reservation: %v", again)
 		}
-		if live := reservationLive(owner); live != enclosing {
+		if live := reservationLive(owner); live != bootstrapFiller+enclosing {
 			t.Fatalf("live after second reservation=%d", live)
 		}
 	})
 	t.Run("only 187 available", func(t *testing.T) {
 		store, _, cfg := consultedStore(t)
 		owner := bootstrapOwner(t)
-		reservationInjectLive(owner, enclosing+1)
+		reservationInjectLive(owner, bootstrapFiller+enclosing+1)
 		truth, stage, err := store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 		if stage != 1 {
 			t.Fatal("bootstrap stage forwarding drifted")
@@ -317,7 +321,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		if truth != CommitTruthOld || !sameError(err, errOperationReservationCapacity) {
 			t.Fatalf("refuse: %s/%v", truth, err)
 		}
-		if live := reservationLive(owner); live != enclosing+1 {
+		if live := reservationLive(owner); live != bootstrapFiller+enclosing+1 {
 			t.Fatalf("live=%d, want %d", live, enclosing+1)
 		}
 		bootstrapOpenUnchanged(t, store, "refuse")
@@ -336,7 +340,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 		if busyTruth != CommitTruthOld || !sameError(busyErr, errOperationReservationCapacity) {
 			t.Fatalf("capacity over busy: %s/%v", busyTruth, busyErr)
 		}
-		reservationInjectLive(owner, 0)
+		reservationInjectLive(owner, bootstrapFiller)
 		truth, stage, err = store.BootstrapStorageV1(StorageProfilePrunedV1, owner)
 		if stage != 3 {
 			t.Fatal("bootstrap stage forwarding drifted")
@@ -345,7 +349,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 			t.Fatalf("retry: %s/%v", truth, err)
 		}
 		bootstrapRequireInitialized(t, store, cfg, StorageProfilePrunedV1, "retry")
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("live after retry=%d", live)
 		}
 	})
@@ -404,7 +408,7 @@ func TestStorageBootstrapNonempty(t *testing.T) {
 			for _, mutation := range row.mutations {
 				bootstrapRequireSeeded(t, store, mutation, row.name)
 			}
-			if live := reservationLive(owner); live != 0 {
+			if live := reservationLive(owner); live != bootstrapFiller {
 				t.Fatalf("%s: live=%d", row.name, live)
 			}
 		})
@@ -486,7 +490,7 @@ func TestStorageBootstrapMetadata(t *testing.T) {
 			if stage != 1 {
 				t.Fatal("bootstrap stage forwarding drifted")
 			}
-			if live := reservationLive(owner); live != 0 {
+			if live := reservationLive(owner); live != bootstrapFiller {
 				t.Fatalf("%s: live=%d", row.name, live)
 			}
 			if row.mismatch {
@@ -531,7 +535,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		mustEnvironment(t, store.View(func(*Reader) error { return nil }))
 		requireUpdateCommit(t, store, "A4 unrelated update", consultedCounter(t, 4))
 		bootstrapRequireRow(t, store, []byte{2}, nil, "A4")
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("A4: live=%d", live)
 		}
 	})
@@ -570,7 +574,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		}
 		bootstrapOpenUnchanged(t, store, "A5")
 		bootstrapRequireInitialized(t, store, cfg, StorageProfilePrunedV1, "A5")
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("A5: live=%d", live)
 		}
 	})
@@ -590,7 +594,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		// The census failure wins before the cardinality predicate: the seeded store is
 		// also nonempty, yet the native error is what surfaces.
 		bootstrapRequireTerminal(t, store, err, "R6")
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("R6: live=%d", live)
 		}
 	})
@@ -605,7 +609,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		}
 		bootstrapRefusal(t, "R7 busy", truth, err, EngineConcurrency, operationUpdate, codeBusy, "store operation in progress", nil, false)
 		bootstrapOpenUnchanged(t, store, "R7 busy")
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("R7 busy: live=%d", live)
 		}
 	})
@@ -645,7 +649,7 @@ func TestStorageBootstrapLifecycle(t *testing.T) {
 		if truth != CommitTruthUnknown || !sameError(err, projected) {
 			t.Fatalf("R7 cached UNKNOWN forward: %s/%v", truth, err)
 		}
-		if live := reservationLive(owner); live != 0 {
+		if live := reservationLive(owner); live != bootstrapFiller {
 			t.Fatalf("R7: live=%d", live)
 		}
 	})

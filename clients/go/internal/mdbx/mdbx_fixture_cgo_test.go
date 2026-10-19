@@ -2239,7 +2239,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 					t.Fatalf("SIDE capacity native tuple: %s/%d/%v", truth, stage, result)
 				}
 				mustEnvironment(t, err)
-				if evidence != (SelectedDamageEvidence{}) || owner.shared.live != 1 {
+				if evidence != (SelectedDamageEvidence{}) || owner.shared.live != bootstrapFiller+1 {
 					t.Fatalf("SIDE capacity opened native Reader or changed charge: %+v", evidence)
 				}
 				return nil
@@ -2269,7 +2269,7 @@ func TestCleanupSideV1Native(t *testing.T) {
 					})
 				})
 			}()
-			if recovered != marker || owner.shared.live != 0 {
+			if recovered != marker || owner.shared.live != bootstrapFiller {
 				t.Fatal("SIDE panic identity or synchronous release changed")
 			}
 			prunedReleased(t, owner)
