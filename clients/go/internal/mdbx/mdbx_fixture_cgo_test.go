@@ -5006,11 +5006,16 @@ func TestTreeNativeReachedMalformedKey(t *testing.T) {
 			}
 			return err
 		})
-		requireEnvironmentError(t, err, EngineIntegrity, operationPrefixPage, -30793, "stored key outside SchemaV2 prefix-page domain")
+		engine := requireEnvironmentError(t, err, EngineIntegrity, operationPrefixPage, -30793, "stored key outside SchemaV2 prefix-page domain")
+		_, direct := directTestEngineError(err)
+		if !direct || engine.Cause != nil || !engine.ReopenRequired {
+			t.Fatal("tree malformed complete key Cause/reopen tuple")
+		}
 	}
 }
 
 func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
+	t.Run("authority envelope version", treeNativeRecognitionAuthorityVersion)
 	for _, version := range [][]byte{nil, {0}, {0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 1}, {0, 0, 0, 4}, {0, 0, 0, 3, 0}} {
 		t.Run(fmt.Sprintf("version%x", version), func(t *testing.T) {
 			store, path, identity := treeNativeStore(t)
@@ -5038,7 +5043,14 @@ func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
 	mustEnvironment(t, fixtureSeedPrefixRawRow(historical, readDBIsLiteral()[0], []byte{2}, []byte{0xff}))
 	mustEnvironment(t, fixtureSeedPrefixRawRow(historical, readDBIsLiteral()[2], []byte{0xff}, []byte{0xff}))
 	mustEnvironment(t, historical.Close())
+	before, err := os.ReadFile(filepath.Join(oldPath, "mdbx.dat"))
+	mustEnvironment(t, err)
 	got, err = OpenTreeV1(oldPath, environmentConfig(), identity)
+	after, snapshotErr := os.ReadFile(filepath.Join(oldPath, "mdbx.dat"))
+	mustEnvironment(t, snapshotErr)
+	if !bytes.Equal(before, after) {
+		t.Fatal("recognized schema2 refusal changed durable bytes")
+	}
 	if got != nil {
 		t.Fatal("recognized schema2 exposed tree Store")
 	}
@@ -5046,6 +5058,34 @@ func TestTreeNativeRecognitionVersionAndOldBoundary(t *testing.T) {
 	historical, err = Open(oldPath, environmentConfig())
 	mustEnvironment(t, err)
 	mustEnvironment(t, historical.Close())
+}
+
+func treeNativeRecognitionAuthorityVersion(t *testing.T) {
+	t.Helper()
+	store, path, identity := treeNativeStore(t)
+	value := treeNativeAuthorityBytes(t, 0, 0)
+	// Keep a legal raw width and every control valid; only the envelope
+	// version is invalid, so the factory's authority decoder owns refusal.
+	value[0] = 2
+	treeNativeSeed(t, store, 0, []byte{2}, value)
+	mustEnvironment(t, store.Close())
+	before, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	opened, err := OpenTreeV1(path, environmentConfig(), identity)
+	if opened != nil {
+		t.Fatal("invalid tree authority envelope published Store")
+	}
+	treeNativeIntegrity(t, err, operationOpen, errSchema)
+	after, err := os.ReadFile(filepath.Join(path, "mdbx.dat"))
+	mustEnvironment(t, err)
+	if !bytes.Equal(before, after) {
+		t.Fatal("tree authority envelope refusal changed durable bytes")
+	}
+	writer, result, err := filelock.AcquireDirectory(path)
+	if err != nil || result != "" || writer == nil {
+		t.Fatalf("tree authority envelope refusal retained writer: %s/%v", result, err)
+	}
+	mustEnvironment(t, writer.Release())
 }
 
 func TestTreeNativeRecognitionFamilies(t *testing.T) {
@@ -5145,6 +5185,7 @@ func TestTreeNativeCensusControlSource(t *testing.T) {
 }
 
 func TestTreeNativeCensusStatSource(t *testing.T) {
+	t.Run("meta count precedes rank2 stat", treeNativeCensusCountBeforeStat)
 	for rank := 1; rank < 9; rank++ {
 		store, _, _ := treeNativeStore(t)
 		var recorded error
@@ -5165,6 +5206,94 @@ func TestTreeNativeCensusStatSource(t *testing.T) {
 		}
 		treeNativeZeroResources(t, store)
 	}
+}
+
+func treeNativeCensusCountBeforeStat(t *testing.T) {
+	t.Helper()
+	store, _, _ := treeNativeStore(t)
+	// Absent02 and valid controls remain; this fourth meta row must be
+	// reached before the independent invalid native rank2 stat handle.
+	treeNativeSeed(t, store, 0, []byte{0xfe}, []byte{1})
+	var recorded error
+	returned := store.View(func(reader *Reader) error {
+		reader.dbis[2] = ^reader.dbis[2] & 0xffffffff
+		got, present, err := reader.ReadTreeAuthorityV1()
+		treeNativeIntegrity(t, err, operationGet, nil)
+		if present || !reflect.DeepEqual(got, TreeAuthorityV1{}) || reader.failure != err || reader.usable() {
+			t.Fatal("tree count before stat zero/first failure")
+		}
+		recorded = err
+		_, _, next := reader.ReadTreeAuthorityV1()
+		treeNativeError(t, next, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+		if reader.failure != recorded {
+			t.Fatal("tree count before stat replaced first failure")
+		}
+		return nil
+	})
+	if returned != recorded || store.terminal != recorded || store.state != storeCLOSED {
+		t.Fatal("tree count before stat enclosing owner")
+	}
+	treeNativeZeroResources(t, store)
+	if next := store.View(func(*Reader) error { t.Fatal("terminal callback"); return nil }); next != recorded {
+		t.Fatal("tree count before stat next operation")
+	}
+}
+
+func TestTreeNativeTypedStaticNoIO(t *testing.T) {
+	for _, row := range []struct {
+		name      string
+		reference *TreeImportReferenceV1
+	}{
+		{"root generation zero", nil},
+		{"database zero", &TreeImportReferenceV1{OriginalCurrentID: 3, OriginalLagID: 4, OriginalRole: 1}},
+		{"current zero", &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalLagID: 4, OriginalRole: 1}},
+		{"lag zero", &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalCurrentID: 3, OriginalRole: 1}},
+		{"equal pair", &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalCurrentID: 3, OriginalLagID: 3, OriginalRole: 1}},
+		{"role zero", &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalCurrentID: 3, OriginalLagID: 4}},
+		{"role three", &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalCurrentID: 3, OriginalLagID: 4, OriginalRole: 3}},
+	} {
+		t.Run(row.name, func(t *testing.T) { treeNativeTypedStaticNoIO(t, row.reference) })
+	}
+}
+
+func treeNativeTypedStaticNoIO(t *testing.T, reference *TreeImportReferenceV1) {
+	t.Helper()
+	store, _, _ := treeNativeStore(t)
+	evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageProbeOnly, 0, nil, func() {
+		mustEnvironment(t, store.View(func(reader *Reader) error {
+			if reference == nil {
+				got, present, err := reader.ReadTreeRootBindingV1(0)
+				if got != (RootBindingV1{}) || present {
+					t.Fatal("static root refusal leaked result")
+				}
+				treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "invalid tree generation", nil)
+			} else {
+				got, err := reader.ReadTreeEvidenceV1(*reference)
+				if !reflect.DeepEqual(got, TreeEvidenceV1{}) {
+					t.Fatal("static evidence refusal leaked result")
+				}
+				treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "invalid tree evidence reference", nil)
+			}
+			if reader.failure != nil || !reader.usable() {
+				t.Fatal("static typed refusal recorded failure/disarmed Reader")
+			}
+			got, present, err := reader.ReadTreeRootBindingV1(1)
+			if got != (RootBindingV1{}) || present || err != nil || reader.failure != nil || !reader.usable() {
+				t.Fatal("static typed refusal prevented next legal root read")
+			}
+			return nil
+		}))
+	})
+	mustEnvironment(t, err)
+	// The legal absent generation1 root accounts for the only meta Get.
+	// Normal View cleanup probes the unreserved owner twice around abort.
+	want := SelectedDamageEvidence{BeginOld: 1, OldGets: [8]uint64{1}, OldAborts: 1, Probes: 2, ProbeRan: 2}
+	if evidence != want {
+		t.Fatalf("static typed refusal added native work: %+v, want %+v", evidence, want)
+	}
+	mustEnvironment(t, store.View(func(*Reader) error { return nil }))
+	_, err = store.Inspect()
+	mustEnvironment(t, err)
 }
 
 func TestTreeNativeRootDoesNotResolveEvidence(t *testing.T) {
