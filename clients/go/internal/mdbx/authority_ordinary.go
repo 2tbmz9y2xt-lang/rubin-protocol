@@ -81,11 +81,9 @@ func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 	return point.Height - 1, true
 }
 
-// validOrdinaryTarget requires a nonempty N whose last point is the target and a captured side describing exactly N
+// validOrdinaryTargetFor requires a nonempty N whose last point is the target and a captured side describing exactly N
 // (RUBIN_MEMPOOL_POLICY.md 6.4.1.2, 6.4.1.7): a full capture whose rows are exactly N, or the one-slot capture of
 // N[1:] plus the same-generation frozen SIDE singleton at N[0] in carried_cleanup, whose union is N of 1440.
-func validOrdinaryTarget(o *OrdinaryApplyV1, f uint64) bool { return validOrdinaryTargetFor(o, f, false) }
-
 func validOrdinaryTargetFor(o *OrdinaryApplyV1, f uint64, tree bool) bool {
 	side := o.CapturedSelectedSide
 	if len(o.NewSuffix) == 0 || side == nil || !validSelectedFor(side, tree) {
@@ -129,8 +127,6 @@ func validOrdinaryPromises(a StorageAuthorityV1) bool {
 	return a.U == laggedPromise(height, 1440)
 }
 
-func validOrdinaryTail(a StorageAuthorityV1, f uint64) bool { return validOrdinaryTailFor(a, f, false) }
-
 func validOrdinaryTailFor(a StorageAuthorityV1, f uint64, tree bool) bool {
 	o := a.Ordinary
 	if !validOrdinaryTargetFor(o, f, tree) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
@@ -141,8 +137,6 @@ func validOrdinaryTailFor(a StorageAuthorityV1, f uint64, tree bool) bool {
 	}
 	return validOrdinaryPromises(a)
 }
-
-func validOrdinary(a StorageAuthorityV1) bool { return validOrdinaryFor(a, false) }
 
 func validOrdinaryFor(a StorageAuthorityV1, tree bool) bool {
 	o := a.Ordinary

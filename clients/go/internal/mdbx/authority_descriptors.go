@@ -1,7 +1,5 @@
 package mdbx
 
-func validSelected(s *SelectedSideV1) bool { return validSelectedFor(s, false) }
-
 func validSelectedFor(s *SelectedSideV1, tree bool) bool {
 	if s.F >= s.TipHeight || s.TipHeight > maxAuthorityHeight {
 		return false
@@ -29,8 +27,6 @@ func validSpan(s CleanupSpanV1) bool {
 	return false
 }
 
-func validCleanup(c *CleanupV1) bool { return validCleanupFor(c, false) }
-
 func validCleanupFor(c *CleanupV1, tree bool) bool {
 	if len(c.Spans) < 1 {
 		return false
@@ -54,8 +50,6 @@ func validCleanupFor(c *CleanupV1, tree bool) bool {
 	return true
 }
 
-func validReplay(v *ReplayV1) bool { return validReplayFor(v, false) }
-
 func validReplayFor(v *ReplayV1, tree bool) bool {
 	if !validProfile(v.TargetProfile) || !validWork(v.Target.CumulativeChainwork) {
 		return false
@@ -76,8 +70,6 @@ func validReplayFor(v *ReplayV1, tree bool) bool {
 	}
 	return false
 }
-
-func validDetached(d *DetachedSuffixV1) bool { return validDetachedFor(d, false) }
 
 func validDetachedFor(d *DetachedSuffixV1, tree bool) bool {
 	if !all(len(d.Entries) >= 1, len(d.Entries) <= 1440, int(d.EntryCount) == len(d.Entries)) {

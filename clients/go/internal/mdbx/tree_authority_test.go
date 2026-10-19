@@ -471,6 +471,37 @@ func TestTreeAuthorityLiterals(t *testing.T) {
 }
 
 func TestTreeAuthorityFiveSpans(t *testing.T) {
+	t.Run("ordinary carried", func(t *testing.T) {
+		row := codecLiteralCases(t)[4]
+		tree := treeAuthorityFixture(row.a)
+		tree.Authority.Ordinary.CarriedCleanup = &CleanupV1{Spans: []CleanupSpanV1{
+			{Kind: 1, GenerationID: 3}, {Kind: 1, GenerationID: 4},
+			{Kind: 2, GenerationID: 1}, {Kind: 3, GenerationID: 1}, {Kind: 4, GenerationID: 2},
+		}}
+		// The existing ordinary literal has captured side bytes243..348. Replace
+		// only its carried cleanup (option349, count350, original span351..383).
+		inner := bytes.Clone(row.b[:350])
+		binary.BigEndian.PutUint64(inner[26:], 20)
+		inner = append(inner, mustCodecHex(t, "05"+
+			"010000000000000003"+"010000000000000004"+
+			"020000000000000001"+codecZeros(48)+
+			"030000000000000001"+codecZeros(48)+
+			"040000000000000002"+codecZeros(48))...)
+		inner = append(inner, row.b[384:]...)
+		literal := treeEnvelopeLiteral(inner, 0, 0, nil)
+		if got, err := tree.Encode(); err != nil || !bytes.Equal(got, literal) {
+			t.Fatalf("ordinary carried five-span literal = %x, %v; want %x", got, err, literal)
+		}
+		if got, err := DecodeTreeAuthorityV1(literal); err != nil || !reflect.DeepEqual(got, tree) {
+			t.Fatalf("ordinary carried five-span decode = %#v, %v; want %#v", got, err, tree)
+		}
+		if got, err := tree.Authority.Encode(); got != nil || !exactErr(err) {
+			t.Fatalf("historical carried five-span encode = %x, %v", got, err)
+		}
+		if got, err := DecodeStorageAuthorityV1(inner); !reflect.DeepEqual(got, StorageAuthorityV1{}) || !exactErr(err) {
+			t.Fatalf("historical carried five-span decode = %#v, %v", got, err)
+		}
+	})
 	row := codecLiteralCases(t)[1]
 	tree := treeAuthorityFixture(row.a)
 	spans := tree.Authority.Cleanup.Spans
