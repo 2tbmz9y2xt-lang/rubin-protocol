@@ -380,15 +380,23 @@ func TestTreeNativeRawInputDomain(t *testing.T) {
 	store, _, _ := treeNativeStore(t)
 	mustEnvironment(t, store.View(func(reader *Reader) error {
 		for _, dbi := range []DBI{{Name: "tree-node-v1", Rank: 7}, {Name: "other", Rank: 8}, {Name: "tree-node-v1", Rank: 8, Flags: 1}, {Rank: 9}} {
-			_, present, err := reader.Get(dbi, nil)
+			value, present, err := reader.Get(dbi, nil)
 			treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 DBI", errSchema)
-			if present {
+			if value != nil || present {
 				t.Fatal("forged descriptor present")
 			}
+			page, err := reader.PrefixPage(dbi, nil, nil, 0, 0)
+			requirePrefixPageError(t, page, err, "invalid SchemaV2 DBI", errSchema)
 		}
-		for _, key := range [][]byte{nil, make([]byte, 45), make([]byte, 47), make([]byte, 46)} {
-			_, _, err := reader.Get(DBI{Name: "tree-node-v1", Rank: 8}, key)
+		badCode, badSuffix := make([]byte, 46), make([]byte, 46)
+		badCode[7], badCode[44], badCode[45] = 1, 1, 33
+		badSuffix[7], badSuffix[45] = 1, 1
+		for _, key := range [][]byte{nil, make([]byte, 45), make([]byte, 47), make([]byte, 46), badCode, badSuffix} {
+			value, present, err := reader.Get(DBI{Name: "tree-node-v1", Rank: 8}, key)
 			treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 key", nil)
+			if value != nil || present {
+				t.Fatal("malformed node key partial result")
+			}
 		}
 		for _, rank := range []uint8{3, 4} {
 			got, err := reader.GetOptionalSide(readDBIsLiteral()[rank], make([]byte, 32))
@@ -402,7 +410,13 @@ func TestTreeNativeRawInputDomain(t *testing.T) {
 		if !reader.usable() || reader.failure != nil {
 			t.Fatal("tree raw static refusal disarmed Reader")
 		}
-		return nil
+		key := make([]byte, 46)
+		key[7] = 1
+		value, present, err := reader.Get(DBI{Name: "tree-node-v1", Rank: 8}, key)
+		if err != nil || value != nil || present {
+			t.Fatal("tree raw static refusal prevented next valid read")
+		}
+		return err
 	}))
 }
 
