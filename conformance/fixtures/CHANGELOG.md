@@ -11,6 +11,22 @@ Policy:
 
 ---
 
+## 2026-10-19 — Independent UTXO commitment expected authority (RUB-1680)
+
+Manual authoring adds `protocol/utxo_commitment_expected_v1.json`, bound to
+`rubin-spec@2a30f15bbc4868f46fb7ccba9c776c80624159ad`. Its 350 finite cases
+separate serialization, block validity and symbolic owner transitions, with
+independent immutable inputs, complete applicable expected cells and 28 source
+aliases. It includes the published initial148 genesis and preserves the distinct
+flat diagnostic digest. It supplies no generated expected values or client,
+native-storage, historical-validity, formal, activation or network-launch proof.
+RUB-1681 owns realization and independent public-client comparison.
+
+The JSON has no regeneration command. Only the inventory is generated, with
+`scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`.
+Required format/inventory/policy commands are documented in `conformance/README.md`;
+this entry does not assert that those commands have been executed.
+
 ## 2026-09-25 — D00-R4 DA input and observation boundaries (RUB-1436)
 
 Manual authoring (no JSON generator) updates `protocol/da_admission_expected_v1.json`
