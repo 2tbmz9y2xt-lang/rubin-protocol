@@ -34,7 +34,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prepare OpenSSL bundle
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' || matrix.language == 'rust'
         uses: ./.github/actions/openssl-bundle
 
       - name: Initialize CodeQL

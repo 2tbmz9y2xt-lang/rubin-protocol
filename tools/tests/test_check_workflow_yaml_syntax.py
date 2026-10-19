@@ -25,7 +25,7 @@ CALLERS = (
     ("ci.yml", "formal_refinement", "steps.formal_gate.outputs.run_formal == 'true'", "openssl", {}),
     ("ci.yml", "conformance_fixtures_drift", None, None, {}),
     ("ci.yml", "security_ai", None, None, {}),
-    ("codeql.yml", "analyze", "matrix.language == 'go'", None, {}),
+    ("codeql.yml", "analyze", "matrix.language == 'go' || matrix.language == 'rust'", None, {}),
     ("codacy-coverage.yml", "coverage", None, None, {}),
     ("combined-load-nightly.yml", "combined-load", None, "openssl", {}),
     ("fips-only-nightly.yml", "fips-only-smoke", None, "openssl", {}),

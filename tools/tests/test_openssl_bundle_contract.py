@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -280,6 +281,11 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
     def env_of(proc) -> dict:
         return dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
 
+    def assert_fallback_env(self, proc, prefix: Path):
+        env = self.env_of(proc)
+        for name in SELECTED_VARS:
+            self.assertNotIn(str(prefix), env.get(name, ""), name)
+
     def test_default_uses_pinned_bundle_like_explicit_prefix(self):
         prefix = self.make_bundle("bundle-9.9.9")
         default = self.run_dev_env(b"9.9.9\n")
@@ -298,21 +304,24 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(self.env_of(proc)["OPENSSL_CONF"], f"{prefix}/ssl/openssl-fips.cnf")
 
     def test_unbuilt_bundle_warns_once_and_keeps_fallback(self):
-        for name, build in (("no directory", None), ("directory without executable", False)):
+        for name, build in (("no directory", None), ("directory without executable", False), ("directory as executable", "dir")):
             with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
                 if build is not None:
-                    self.make_bundle("bundle-9.9.9", executable=build)
+                    prefix = self.make_bundle("bundle-9.9.9", executable=False)
+                    if build == "dir":
+                        (prefix / "bin" / "openssl").mkdir(parents=True)
                 proc = self.run_dev_env(b"9.9.9\n")
                 prefix = self.home / ".cache" / "rubin-openssl" / "bundle-9.9.9"
                 self.assertEqual(proc.returncode, 0)
                 self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
                 self.assertIn(str(prefix), proc.stderr)
                 self.assertIn(BUILD_COMMAND, proc.stderr)
-                self.assertNotEqual(self.env_of(proc).get("OPENSSL_DIR"), str(prefix))
+                self.assert_fallback_env(proc, prefix)
 
     def test_unusable_version_warns_without_echoing_its_bytes(self):
         self.make_bundle("bundle-9.9.9")
-        for raw in (b"9.9.9 \n", b"9.9.9\r\n", b"9.9.9", b"9.9.9\n\n", b"9.9.9\n\x00junk", b"9.9\n", b""):
+        for raw in (b"9.9.9 \n", b"9.9.9\r\n", b"9.9.9", b"9.9.9\n\n", b"9.9.9\n\x00junk", b"9.9\n", b"v9.9.9\n", b"9.9.9.9\n", b""):
             with self.subTest(raw=raw):
                 proc = self.run_dev_env(raw)
                 self.assertEqual(proc.returncode, 0)
@@ -320,7 +329,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                 self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
                 self.assertIn(BUILD_COMMAND, proc.stderr)
                 self.assertNotIn("9.9.9", proc.stderr)
-                self.assertNotEqual(self.env_of(proc).get("OPENSSL_DIR"), str(self.home / ".cache/rubin-openssl/bundle-9.9.9"))
+                self.assert_fallback_env(proc, self.home / ".cache/rubin-openssl/bundle-9.9.9")
 
     def test_unreadable_version_warns_instead_of_failing(self):
         self.version_file.unlink(missing_ok=True)
@@ -333,6 +342,25 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
+    def test_unreadable_version_file_warns_instead_of_failing(self):
+        self.make_bundle("bundle-9.9.9")
+        self.version_file.write_bytes(b"9.9.9\n")
+        self.version_file.chmod(0)
+        self.addCleanup(self.version_file.chmod, 0o600)
+        proc = self.run_dev_env(None)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+        self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
+        self.assert_fallback_env(proc, self.home / ".cache/rubin-openssl/bundle-9.9.9")
+
+    def test_warning_with_closed_stderr_keeps_exit_status(self):
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
+        self.version_file.write_bytes(b"9.9.9\n")
+        proc = subprocess.run(["bash", "-c", 'exec 2>&-; exec bash "$1" -- true', "x", str(self.script)],
+                              capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(proc.returncode, 0)
+
     def test_explicit_prefix_wins_over_pinned_default(self):
         self.make_bundle("bundle-9.9.9")
         other = self.make_bundle("bundle-other")
@@ -341,6 +369,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(proc.stderr, "")
 
     def test_caller_exported_openssl_dir_is_kept_without_warning(self):
+        self.make_bundle("bundle-9.9.9")
         proc = self.run_dev_env(b"9.9.9\n", OPENSSL_DIR="/caller/openssl")
         self.assertEqual(self.env_of(proc)["OPENSSL_DIR"], "/caller/openssl")
         self.assertEqual(proc.stderr, "")

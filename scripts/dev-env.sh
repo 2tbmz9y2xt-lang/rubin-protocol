@@ -109,17 +109,22 @@ pinned_openssl_version() {
   printf '%s' "${line}"
 }
 
+# A warning must never change the exit status, even when stderr is closed.
+warn_pinned_openssl() {
+  echo "WARNING: $1; falling back to the default OpenSSL selection. Run: bash scripts/crypto/openssl/build-openssl-bundle.sh" >&2 || true
+}
+
 select_pinned_openssl() {
   local version prefix
   if ! version="$(pinned_openssl_version)"; then
-    echo "WARNING: scripts/crypto/openssl/VERSION is unusable; falling back to Homebrew OpenSSL. Run: bash scripts/crypto/openssl/build-openssl-bundle.sh" >&2
+    warn_pinned_openssl "scripts/crypto/openssl/VERSION is unusable"
     return 0
   fi
   prefix="${HOME}/.cache/rubin-openssl/bundle-${version}"
-  if [[ -x "${prefix}/bin/openssl" ]]; then
+  if [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" ]]; then
     use_openssl_prefix "${prefix}"
   else
-    echo "WARNING: pinned OpenSSL bundle not built: ${prefix}; falling back to Homebrew OpenSSL. Run: bash scripts/crypto/openssl/build-openssl-bundle.sh" >&2
+    warn_pinned_openssl "pinned OpenSSL bundle not built: ${prefix}"
   fi
 }
 
