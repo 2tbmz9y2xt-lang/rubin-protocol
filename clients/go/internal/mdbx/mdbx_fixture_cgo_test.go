@@ -4392,9 +4392,13 @@ func TestTreeNativeTypedPointsAndProvenance(t *testing.T) {
 	mustEnvironment(t, err)
 	defer func() { _ = store.Close() }()
 	mustEnvironment(t, store.View(func(reader *Reader) error {
+		wantAuthority := TreeAuthorityV1{
+			Authority:       StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
+			LagGenerationID: 2,
+		}
 		got, present, err := reader.ReadTreeAuthorityV1()
-		if err != nil || !present || got.Authority.ActiveGenerationID != 1 || got.LagGenerationID != 2 || reader.ownerVerified {
-			t.Fatal("tree authority envelope native point")
+		if err != nil || !present || !reflect.DeepEqual(got, wantAuthority) || reader.ownerVerified {
+			t.Fatalf("tree authority envelope native point: %+v/%v/%v", got, present, err)
 		}
 		for i, applied := range []bool{false, true} {
 			want := treeRootFixture(t, applied)
@@ -4716,11 +4720,32 @@ func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
 			if opened.canonicalOwnerVerified {
 				t.Fatal("tree open granted canonical service")
 			}
+			wantAuthority := TreeAuthorityV1{
+				Authority:       StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
+				LagGenerationID: 2,
+			}
+			if row.source != 0 {
+				wantAuthority.Authority.Phase, wantAuthority.Authority.Lifecycle = 3, 2
+				wantAuthority.Authority.Replay = &ReplayV1{
+					TargetProfile: 2, TargetGenerationID: 3,
+					Target: RecoveryTargetV1{
+						ChainID: [32]byte{31: 11}, GenesisHash: [32]byte{31: 12}, TipHash: [32]byte{31: 13},
+						TipHeight: 2, CumulativeChainwork: [40]byte{39: 1},
+					},
+				}
+				wantAuthority.TargetLagGenerationID = 4
+				wantAuthority.SourceKind = TreeSourceKindV1(row.source)
+				if row.source == 1 {
+					wantAuthority.Authority.Replay.Cursor = ReplayCursorV1{Kind: 1}
+				} else {
+					wantAuthority.Progress = TreeProgressV1{Kind: TreeProgressKindV1(row.progress), Payload: []byte{0xde, 0xad}}
+				}
+			}
 			var recorded error
 			err = opened.View(func(reader *Reader) error {
 				got, present, err := reader.ReadTreeAuthorityV1()
-				if err != nil || !present || byte(got.SourceKind) != row.source || byte(got.Progress.Kind) != row.progress {
-					t.Fatal("tree authority inferred role qualification")
+				if err != nil || !present || !reflect.DeepEqual(got, wantAuthority) {
+					t.Fatalf("tree authority inferred role qualification: %+v/%v/%v", got, present, err)
 				}
 				if row.currentFirst {
 					root, present, err := reader.ReadTreeRootBindingV1(1)

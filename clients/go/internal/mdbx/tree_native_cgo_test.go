@@ -141,6 +141,41 @@ func TestTreeNativeFactoryStaticAndHistorical(t *testing.T) {
 	treeNativeError(t, err, operationOpen, EngineClass("InvalidInput"), 22, "invalid tree database identity", nil)
 	store, treePath, id := treeNativeStore(t)
 	mustEnvironment(t, store.Close())
+	absent := filepath.Join(t.TempDir(), "invalid-config")
+	before, err := os.ReadFile(filepath.Join(treePath, "mdbx.dat"))
+	mustEnvironment(t, err)
+	for _, row := range []struct {
+		name, path string
+		factory    func(string, ConfigV1, [32]byte) (*Store, error)
+		cfg        ConfigV1
+		op         engineOperation
+		diagnostic string
+		cause      error
+	}{
+		{"create path before identity", "", CreateTreeV1, cfg, operationCreate, "path must be nonempty, NUL-free, absolute and clean", nil},
+		{"create config before identity", absent, CreateTreeV1, ConfigV1{}, operationCreate, "invalid ConfigV1", errSchema},
+		{"open path before identity", "", OpenTreeV1, cfg, operationOpen, "path must be nonempty, NUL-free, absolute and clean", nil},
+		{"open config before identity", treePath, OpenTreeV1, ConfigV1{}, operationOpen, "invalid ConfigV1", errSchema},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, err := row.factory(row.path, row.cfg, [32]byte{})
+			if got != nil {
+				t.Fatal("mixed static refusal published Store")
+			}
+			treeNativeError(t, err, row.op, EngineClass("InvalidInput"), 22, row.diagnostic, row.cause)
+			if _, err := os.Lstat(absent); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("mixed static refusal allocated destination: %v", err)
+			}
+			after, err := os.ReadFile(filepath.Join(treePath, "mdbx.dat"))
+			mustEnvironment(t, err)
+			if !bytes.Equal(before, after) {
+				t.Fatal("mixed static refusal changed durable tree bytes")
+			}
+		})
+	}
+	created, err := CreateTreeV1(absent, cfg, id)
+	mustEnvironment(t, err)
+	mustEnvironment(t, created.Close())
 	unavailable, err = OpenTreeV1(treePath, cfg, identity)
 	if unavailable != nil {
 		t.Fatal("wrong identity published Store")

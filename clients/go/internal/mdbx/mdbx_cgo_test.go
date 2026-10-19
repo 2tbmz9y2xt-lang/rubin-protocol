@@ -2391,89 +2391,124 @@ func TestReadDispositionEffects(t *testing.T) {
 }
 
 func TestViewReaderLifetimeAndConcurrentGet(t *testing.T) {
-	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
-	mustEnvironment(t, err)
-	defer func() { mustEnvironment(t, store.Close()) }()
-	dbis := readDBIsLiteral()
-	var nilReader *Reader
-	_, _, nilErr := nilReader.Get(DBI{}, nil)
-	requireEnvironmentError(t, nilErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
-	malformed := &Reader{}
-	malformed.self = malformed
-	malformed.active.Store(true)
-	_, _, malformedErr := malformed.Get(dbis[0], []byte{0})
-	requireEnvironmentError(t, malformedErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
-	var escaped *Reader
-	var copied *Reader
-	err = store.View(func(reader *Reader) error {
-		escaped = reader
-		copied = &Reader{self: reader.self, txn: reader.txn, dbis: reader.dbis}
-		copied.active.Store(true)
-		if _, _, copyErr := copied.Get(dbis[0], []byte{0}); copyErr == nil {
-			t.Fatal("copied Reader reached native Get")
-		}
-		_, _, dbiErr := reader.Get(DBI{}, nil)
-		if engine := requireEnvironmentError(t, dbiErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 DBI"); !sameError(engine.Cause, errSchema) {
-			t.Fatalf("DBI precedence Cause=%v", engine.Cause)
-		}
-		_, _, keyErr := reader.Get(dbis[0], nil)
-		requireEnvironmentError(t, keyErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 key")
-		start := make(chan struct{})
-		results := make(chan error, 2)
-		var workers sync.WaitGroup
-		workers.Add(2)
-		for range 2 {
-			go func() {
-				defer workers.Done()
-				<-start
-				value, present, getErr := reader.Get(dbis[0], []byte{1})
-				if getErr == nil && (!present || len(value) != 48) {
-					getErr = errors.New("concurrent Get serialization drifted")
+	for _, format := range []uint8{2, 3} {
+		t.Run(fmt.Sprintf("format%d", format), func(t *testing.T) {
+			path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+			var store *Store
+			var err error
+			if format == 2 {
+				store, err = Create(path, cfg)
+			} else {
+				store, err = CreateTreeV1(path, cfg, [32]byte{7})
+			}
+			mustEnvironment(t, err)
+			defer func() { mustEnvironment(t, store.Close()) }()
+			dbis := readDBIsLiteral()
+			requireInactive := func(reader *Reader, dbi DBI, key []byte) {
+				t.Helper()
+				value, present, getErr := reader.Get(dbi, key)
+				treeNativeError(t, getErr, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+				if value != nil || present {
+					t.Fatal("inactive Reader returned value")
 				}
-				results <- getErr
-			}()
-		}
-		close(start)
-		workers.Wait()
-		for range 2 {
-			if getErr := <-results; getErr != nil {
-				t.Fatal(getErr)
+				if reader != nil && reader.failure != nil {
+					t.Fatal("inactive Reader recorded static refusal")
+				}
 			}
-		}
-		return nil
-	})
-	mustEnvironment(t, err)
-	for name, reader := range map[string]*Reader{"escaped": escaped, "copied": copied} {
-		_, _, getErr := reader.Get(dbis[0], []byte{0})
-		if engine := requireEnvironmentError(t, getErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active"); engine.Cause != nil {
-			t.Fatalf("%s Reader Cause=%v", name, engine.Cause)
-		}
+			var nilReader *Reader
+			requireInactive(nilReader, DBI{}, nil)
+			malformed := &Reader{}
+			malformed.self = malformed
+			malformed.active.Store(true)
+			requireInactive(malformed, dbis[0], []byte{0})
+			var escaped *Reader
+			var copied *Reader
+			err = store.View(func(reader *Reader) error {
+				escaped = reader
+				copied = &Reader{self: reader.self, txn: reader.txn, dbis: reader.dbis, format: reader.format, databaseID: reader.databaseID, treeConfig: reader.treeConfig}
+				copied.active.Store(true)
+				requireInactive(copied, dbis[0], []byte{0})
+				value, present, dbiErr := reader.Get(DBI{}, nil)
+				treeNativeError(t, dbiErr, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 DBI", errSchema)
+				if value != nil || present || reader.failure != nil || !reader.usable() {
+					t.Fatal("invalid descriptor changed active Reader")
+				}
+				value, present, keyErr := reader.Get(dbis[0], nil)
+				treeNativeError(t, keyErr, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 key", nil)
+				if value != nil || present || reader.failure != nil || !reader.usable() {
+					t.Fatal("invalid key changed active Reader")
+				}
+				value, present, getErr := reader.Get(dbis[0], []byte{0})
+				if getErr != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, format}) {
+					t.Fatalf("raw Get after static refusals: %x/%v/%v", value, present, getErr)
+				}
+				start := make(chan struct{})
+				results := make(chan error, 2)
+				var workers sync.WaitGroup
+				workers.Add(2)
+				for range 2 {
+					go func() {
+						defer workers.Done()
+						<-start
+						value, present, getErr := reader.Get(dbis[0], []byte{1})
+						if getErr == nil && (!present || len(value) != 48) {
+							getErr = errors.New("concurrent Get serialization drifted")
+						}
+						results <- getErr
+					}()
+				}
+				close(start)
+				workers.Wait()
+				for range 2 {
+					if getErr := <-results; getErr != nil {
+						t.Fatal(getErr)
+					}
+				}
+				return nil
+			})
+			mustEnvironment(t, err)
+			requireInactive(escaped, dbis[0], []byte{0})
+			requireInactive(copied, dbis[0], []byte{0})
+			waiterReady, waiter := make(chan struct{}), make(chan error, 1)
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				reader.getMu.Lock()
+				go func() {
+					if !reader.usable() {
+						waiter <- errors.New("waiter did not pass initial lifetime check")
+						return
+					}
+					close(waiterReady)
+					value, present, getErr := reader.Get(dbis[0], []byte{0})
+					if value != nil || present {
+						waiter <- errors.New("expired waiter returned value")
+						return
+					}
+					waiter <- getErr
+				}()
+				<-waiterReady
+				for range 100 {
+					runtime.Gosched()
+				}
+				go func() {
+					for reader.active.Load() {
+						runtime.Gosched()
+					}
+					reader.getMu.Unlock()
+				}()
+				return nil
+			}))
+			treeNativeError(t, <-waiter, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				value, present, err := reader.Get(dbis[0], []byte{0})
+				if err != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, format}) {
+					t.Fatal("next View after expired waiter failed")
+				}
+				return nil
+			}))
+			_, err = store.Inspect()
+			mustEnvironment(t, err)
+		})
 	}
-	waiterReady, waiter := make(chan struct{}), make(chan error, 1)
-	mustEnvironment(t, store.View(func(reader *Reader) error {
-		reader.getMu.Lock()
-		go func() {
-			if !reader.usable() {
-				waiter <- errors.New("waiter did not pass initial lifetime check")
-				return
-			}
-			close(waiterReady)
-			_, _, getErr := reader.Get(dbis[0], []byte{0})
-			waiter <- getErr
-		}()
-		<-waiterReady
-		for range 100 {
-			runtime.Gosched()
-		}
-		go func() {
-			for reader.active.Load() {
-				runtime.Gosched()
-			}
-			reader.getMu.Unlock()
-		}()
-		return nil
-	}))
-	requireEnvironmentError(t, <-waiter, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
 }
 
 func panicNilViewCallback(*Reader) error {
