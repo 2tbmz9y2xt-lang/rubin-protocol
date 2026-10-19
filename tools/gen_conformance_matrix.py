@@ -32,6 +32,7 @@ EXPECTED_PROTOCOL_ARTIFACTS = frozenset(
         "simplicity_program_encoding_corpus_v1.json",
         "undo_integrity_v1.json",
         "undo_integrity_v2.json",
+        "utxo_commitment_expected_v1.json",
     }
 )
 EXPECTED_GATES = frozenset(
@@ -166,6 +167,10 @@ PROTOCOL_ARTIFACT_META: dict[str, tuple[str, str]] = {
     "undo_integrity_v2.json": (
         "Shared undo_envelope_v2 block-bound exact-u128 record vector",
         "Go/Rust envelope byte, base64, SHA3-256 checksum, and v1/v2 reader parity tests",
+    ),
+    "utxo_commitment_expected_v1.json": (
+        "Manual FROZEN_EXPECTED UTXO commitment authority (RUB-1680)",
+        "350 inert source-bound byte/result/state cases; public Go/Rust observations and comparison await RUB-1681; no executed client or model claim",
     ),
 }
 
