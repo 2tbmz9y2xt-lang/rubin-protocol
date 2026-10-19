@@ -1117,7 +1117,7 @@ type SelectedDamageEvidence struct {
 	BeginOld, BeginWrite, BeginRead uint64
 	OldGets                         [8]uint64
 	OldPulls                        [8]uint64
-	NodeGets, NodePulls              uint64
+	NodeGets, NodePulls             uint64
 	ReadGets, Faults, Deletes       uint64
 	Commits, OldAborts              uint64
 	Probes, ProbeDenied, ProbeRan   uint64

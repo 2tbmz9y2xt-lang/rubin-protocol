@@ -48,10 +48,14 @@ func treeNativeZeroResources(t *testing.T, store *Store) {
 func TestTreeNativeFactories(t *testing.T) {
 	store, path, identity := treeNativeStore(t)
 	want := [9]DBI{
-		{Name: "meta-v1", Rank: 0}, {Name: "utxo-v1", Rank: 1},
-		{Name: "canonical-v1", Rank: 2}, {Name: "headers-v1", Rank: 3},
-		{Name: "blocks-v1", Rank: 4}, {Name: "undo-v1", Rank: 5},
-		{Name: "staged-v1", Rank: 6}, {Name: "canonical-owner-v1", Rank: 7},
+		{Name: "meta-v1", Rank: 0},
+		{Name: "utxo-v1", Rank: 1},
+		{Name: "canonical-v1", Rank: 2},
+		{Name: "headers-v1", Rank: 3},
+		{Name: "blocks-v1", Rank: 4},
+		{Name: "undo-v1", Rank: 5},
+		{Name: "staged-v1", Rank: 6},
+		{Name: "canonical-owner-v1", Rank: 7},
 		{Name: "tree-node-v1", Rank: 8},
 	}
 	for _, phase := range []string{"create", "open"} {
@@ -166,11 +170,11 @@ func TestTreeNativeTypedStaticLifetime(t *testing.T) {
 		valid := TreeImportReferenceV1{OriginalDatabaseID: [32]byte{1}, OriginalCurrentID: 3, OriginalLagID: 4, OriginalRole: 1}
 		for name, change := range map[string]func(*TreeImportReferenceV1){
 			"database zero": func(r *TreeImportReferenceV1) { r.OriginalDatabaseID = [32]byte{} },
-			"current zero": func(r *TreeImportReferenceV1) { r.OriginalCurrentID = 0 },
-			"lag zero": func(r *TreeImportReferenceV1) { r.OriginalLagID = 0 },
-			"equal pair": func(r *TreeImportReferenceV1) { r.OriginalLagID = r.OriginalCurrentID },
-			"role zero": func(r *TreeImportReferenceV1) { r.OriginalRole = 0 },
-			"role three": func(r *TreeImportReferenceV1) { r.OriginalRole = 3 },
+			"current zero":  func(r *TreeImportReferenceV1) { r.OriginalCurrentID = 0 },
+			"lag zero":      func(r *TreeImportReferenceV1) { r.OriginalLagID = 0 },
+			"equal pair":    func(r *TreeImportReferenceV1) { r.OriginalLagID = r.OriginalCurrentID },
+			"role zero":     func(r *TreeImportReferenceV1) { r.OriginalRole = 0 },
+			"role three":    func(r *TreeImportReferenceV1) { r.OriginalRole = 3 },
 		} {
 			reference := valid
 			change(&reference)
@@ -369,13 +373,13 @@ func TestTreeNativeIntegrityErrorDomain(t *testing.T) {
 		t.Fatal("native MDBX_CORRUPTED reopen projection changed")
 	}
 	for name, change := range map[string]func(*EngineError){
-		"operation": func(e *EngineError) { e.Operation = "open" },
-		"class": func(e *EngineError) { e.Class = EngineIO },
-		"code": func(e *EngineError) { e.Code = -30793 },
-		"diagnostic": func(e *EngineError) { e.Diagnostic = "other" },
-		"cause": func(e *EngineError) { e.Cause = errors.New("other") },
+		"operation":     func(e *EngineError) { e.Operation = "open" },
+		"class":         func(e *EngineError) { e.Class = EngineIO },
+		"code":          func(e *EngineError) { e.Code = -30793 },
+		"diagnostic":    func(e *EngineError) { e.Diagnostic = "other" },
+		"cause":         func(e *EngineError) { e.Cause = errors.New("other") },
 		"wrapped cause": func(e *EngineError) { e.Cause = fmt.Errorf("wrapped: %w", errSchema) },
-		"reopen": func(e *EngineError) { e.ReopenRequired = true },
+		"reopen":        func(e *EngineError) { e.ReopenRequired = true },
 	} {
 		engine, direct := directTestEngineError(treeIntegrity(operationGet, nil))
 		if !direct {

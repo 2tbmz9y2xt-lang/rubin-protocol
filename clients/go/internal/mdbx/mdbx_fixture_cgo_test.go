@@ -4232,7 +4232,7 @@ func treeNativeSeed(t *testing.T, store *Store, rank uint8, key, value []byte) {
 func treeNativeAuthorityBytes(t *testing.T, source TreeSourceKindV1, progress TreeProgressKindV1) []byte {
 	t.Helper()
 	authority := TreeAuthorityV1{
-		Authority: StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
+		Authority:       StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1},
 		LagGenerationID: 2,
 	}
 	if source != 0 {
@@ -4638,9 +4638,9 @@ func TestTreeNativePagingBounds(t *testing.T) {
 		}
 		for _, row := range []struct {
 			prefix, after []byte
-			rows uint32
-			bytes uint64
-			diagnostic string
+			rows          uint32
+			bytes         uint64
+			diagnostic    string
 		}{
 			{prefix[:7], nil, 1, 186, "invalid prefix-page prefix"},
 			{append(bytes.Clone(prefix), 0), nil, 1, 186, "invalid prefix-page prefix"},
@@ -4668,8 +4668,14 @@ func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
 		source, progress byte
 		currentFirst     bool
 	}{
-		{0, 0, false}, {1, 0, false}, {2, 1, false}, {2, 2, false},
-		{0, 0, true}, {1, 0, true}, {2, 1, true}, {2, 2, true},
+		{0, 0, false},
+		{1, 0, false},
+		{2, 1, false},
+		{2, 2, false},
+		{0, 0, true},
+		{1, 0, true},
+		{2, 1, true},
+		{2, 2, true},
 	} {
 		t.Run(fmt.Sprintf("source%d/status%d/currentFirst%v", row.source, row.progress, row.currentFirst), func(t *testing.T) {
 			store, path, identity := treeNativeStore(t)

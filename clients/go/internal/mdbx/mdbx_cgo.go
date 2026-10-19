@@ -4137,7 +4137,6 @@ func (s *Store) inspectOpenLocked(cfg ConfigV1) transactionOutcome {
 	outcome := s.abortLocked(begun.txn, primary)
 	if outcome.err == nil && !outcome.poisoned {
 		s.state, s.config, s.dbis = storeOPEN, cfg, dbis
-		
 	}
 	return outcome
 }

@@ -1184,7 +1184,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	if initOutcome.poisoned || openOutcome.poisoned {
 		t.Fatal("nil environment produced a poison owner")
 	}
-	_, initSchemaErr := initializeSchema(empty.txn, encoded)
+	_, initSchemaErr := initializeSchema(empty.txn, encoded, 2, [32]byte{})
 	requireEnvironmentError(t, initSchemaErr, EngineInvalidInput, operationInit, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	for _, create := range []bool{false, true} {
 		_, schemaErr := openSchemaDBIs(empty.txn, create, map[bool]engineOperation{false: operationOpen, true: operationInit}[create])
@@ -3325,17 +3325,17 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	// Pin the complete new recognition read closure, including helpers: a
 	// dormant Open may not gain an ignored role/evidence read through indirection.
 	for name, want := range map[string]string{
-		"treeNativeGet": "C.rubin_mdbx_get|unsafe.Pointer|C.size_t|len|runtime.KeepAlive|copiedGetResultFor|int|unsafe.Pointer",
-		"treeRequired": "treeNativeGet|treeIntegrity",
-		"treeControlRows": "treeRequired|bytes.Equal|TreeSchemaVersionValue|treeIntegrity|treeRequired|DecodeConfigV1|treeIntegrity|treeIntegrity|treeRequired|bytes.Equal|treeIntegrity",
-		"treeEmptyCensus": "int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|uint64|treeIntegrity|treeControlRows",
-		"treeOpenFamily": "append|[]byte|C.MDBX_db_flags_t|int|C.mdbx_dbi_open|(*C.char)|unsafe.Pointer|runtime.KeepAlive|treeIntegrity|nativeError|int|C.mdbx_dbi_flags_ex|nativeError|treeIntegrity",
-		"treeOpenFamilies": "formatDBIs|treeOpenFamily",
-		"treeMainCount": "int|C.mdbx_dbi_open|nativeError|int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|treeIntegrity",
+		"treeNativeGet":        "C.rubin_mdbx_get|unsafe.Pointer|C.size_t|len|runtime.KeepAlive|copiedGetResultFor|int|unsafe.Pointer",
+		"treeRequired":         "treeNativeGet|treeIntegrity",
+		"treeControlRows":      "treeRequired|bytes.Equal|TreeSchemaVersionValue|treeIntegrity|treeRequired|DecodeConfigV1|treeIntegrity|treeIntegrity|treeRequired|bytes.Equal|treeIntegrity",
+		"treeEmptyCensus":      "int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|uint64|treeIntegrity|treeControlRows",
+		"treeOpenFamily":       "append|[]byte|C.MDBX_db_flags_t|int|C.mdbx_dbi_open|(*C.char)|unsafe.Pointer|runtime.KeepAlive|treeIntegrity|nativeError|int|C.mdbx_dbi_flags_ex|nativeError|treeIntegrity",
+		"treeOpenFamilies":     "formatDBIs|treeOpenFamily",
+		"treeMainCount":        "int|C.mdbx_dbi_open|nativeError|int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|treeIntegrity",
 		"treeRecognizedFormat": "treeOpenFamily|treeRequired|len|bytes.Equal|treeIntegrity",
-		"inspectTreeSchema": "treeRecognizedFormat|treeMainCount|uint64|len|formatDBIs|treeOpenFamilies|treeOpenConfig|adapterError|treeOpenAuthority",
-		"treeOpenAuthority": "treeRequired|bytes.Equal|treeIntegrity|treeNativeGet|treeEmptyCensus|DecodeTreeAuthorityV1|treeIntegrity",
-		"treeOpenConfig": "treeRequired|DecodeConfigV1|treeIntegrity|validateStoredConfig|treeIntegrity|readEffective|validateEffective|treeIntegrity",
+		"inspectTreeSchema":    "treeRecognizedFormat|treeMainCount|uint64|len|formatDBIs|treeOpenFamilies|treeOpenConfig|adapterError|treeOpenAuthority",
+		"treeOpenAuthority":    "treeRequired|bytes.Equal|treeIntegrity|treeNativeGet|treeEmptyCensus|DecodeTreeAuthorityV1|treeIntegrity",
+		"treeOpenConfig":       "treeRequired|DecodeConfigV1|treeIntegrity|validateStoredConfig|treeIntegrity|readEffective|validateEffective|treeIntegrity",
 	} {
 		var observed []string
 		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
@@ -3535,16 +3535,16 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		return true
 	})
 	wantErrorCalls := map[string]int{
-		`adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree store requires typed tree operation", nil)`: 1,
-		`adapterError(op, EngineIntegrity, codeCorrupted, "invalid tree native representation", cause)`: 1,
-		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`: 1,
-		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`: 1,
+		`adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree store requires typed tree operation", nil)`:   1,
+		`adapterError(op, EngineIntegrity, codeCorrupted, "invalid tree native representation", cause)`:                      1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:               1,
+		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:                 1,
 		`adapterError(operationOpen, EngineStateMismatch, codeProblem, "tree schema unavailable: recognized SchemaV2", nil)`: 1,
-		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)`: 1,
-		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "tree Reader required", nil)`: 1,
-		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree generation", nil)`: 1,
-		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree evidence reference", nil)`: 1,
-		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 2,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)`:                            1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "tree Reader required", nil)`:                            1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree generation", nil)`:                         1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree evidence reference", nil)`:                 1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`:                             1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 2,
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
 		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
