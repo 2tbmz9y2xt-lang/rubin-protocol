@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -15,8 +17,7 @@ import (
 // spec/DEVNET_GENESIS_BYTES.json (genesis_block_bytes_hex). It is an independent
 // source fixture, not an encoder output.
 const (
-	initial148GenesisBlockHex =
-		"0100000000000000000000000000000000000000000000000000000000000000" +
+	initial148GenesisBlockHex = "0100000000000000000000000000000000000000000000000000000000000000" +
 		"000000006f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd40" +
 		"6f2df91340e49e6900000000ffffffffffffffffffffffffffffffffffffffff" +
 		"ffffffffffffffffffffffffc53b167dd819e13c2442bde23729bfe6c09d8996" +
@@ -26,9 +27,9 @@ const (
 		"fbb65e872b72c381b2a9f3ce286a232f56309667f639dd727900000000000000" +
 		"00020020b716a4b7f4c0fab665298ab9b8199b601ab9fa7e0a27f0713383f34c" +
 		"f37071a8000000000000"
-	initial148GenesisHashHex  = "f063746adc88e7f7b63edc754fc76ccc9db96f9e08f3a09697e125b453421f30"
-	initial148GenesisTxidHex  = "f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f"
-	initial148GenesisWtxidHex = "87ff6b7be293dd45447f082405fb2a1f23c4262a03362e7ac46a0982e5c09aac"
+	initial148GenesisHashHex   = "f063746adc88e7f7b63edc754fc76ccc9db96f9e08f3a09697e125b453421f30"
+	initial148GenesisTxidHex   = "f726016007c9e0c47c2ed35f66dcace4e5a2b6fd39a97bec14e8e1967850854f"
+	initial148GenesisWtxidHex  = "87ff6b7be293dd45447f082405fb2a1f23c4262a03362e7ac46a0982e5c09aac"
 	initial148GenesisMerkleHex = "6f732e615e2f43337a53e9884adba7da32257d5bb5701adc7ed0bd406f2df913"
 	initial148GenesisRootHex   = "c53b167dd819e13c2442bde23729bfe6c09d899624ebaf7e98e0bb44466c694b"
 	initial148DAHashHex        = "521ec18851e17bbba961bc46c70baf03ee67ebdea11a8306de39c15a90e9d2e5"
@@ -39,13 +40,13 @@ const initial148GenesisTimestamp = 1_772_020_800
 // initial148BlockHead is a fixture header assembled byte-for-byte, never through
 // the production initial148 encoder.
 type initial148BlockHead struct {
-	version       uint32
-	parent        [32]byte
-	merkle        [32]byte
-	target        [32]byte
-	root          [32]byte
-	timestamp     uint64
-	nonce         uint64
+	version   uint32
+	parent    [32]byte
+	merkle    [32]byte
+	target    [32]byte
+	root      [32]byte
+	timestamp uint64
+	nonce     uint64
 }
 
 func initial148BlockHeaderBytes(h initial148BlockHead) []byte {
@@ -184,8 +185,8 @@ func initial148BlockGenesisTx(t *testing.T) []byte {
 
 func initial148BlockWantError(t *testing.T, label string, err error, code ErrorCode, msg string) {
 	t.Helper()
-	te, direct := err.(*TxError)
-	if !direct || te == nil || te.Code != code || te.Msg != msg || te.Cause() != TxErrorCause(0) || te.Error() != string(code)+": "+msg {
+	var te *TxError
+	if !errors.As(err, &te) || te == nil || reflect.TypeOf(err) != reflect.TypeOf(te) || te.Code != code || te.Msg != msg || te.Cause() != TxErrorCause(0) || te.Error() != string(code)+": "+msg {
 		t.Fatalf("%s: got %T %v, want direct (%s,%q,0)", label, err, err, code, msg)
 	}
 }
@@ -379,7 +380,7 @@ func TestInitial148BlockHeaderDomains(t *testing.T) {
 	fixtures := []fixture{{"L", literal, fields}}
 	for _, f := range initial148Fixtures(t) {
 		if f.name != "L" {
-			fixtures = append(fixtures, fixture{f.name, f.raw, f.want})
+			fixtures = append(fixtures, fixture(f))
 		}
 	}
 	versions := []struct {
@@ -495,7 +496,8 @@ func initial148BlockContextRefusal(t *testing.T, label string, raw []byte, paren
 	t.Helper()
 	before := bytes.Clone(raw)
 	summary, err := ValidateInitial148BlockSteps1To12(raw, parent, expected, height, times)
-	if err != ErrBlockSteps1To12Context || summary != (BlockBasicSummary{}) || err.Error() != "block steps 1-12: invalid supplied context" {
+	// Raw interface identity distinguishes the exact sentinel from a wrapped error.
+	if any(err) != any(ErrBlockSteps1To12Context) || summary != (BlockBasicSummary{}) || err.Error() != "block steps 1-12: invalid supplied context" {
 		t.Fatalf("%s: got=%+v/%v want existing context sentinel", label, summary, err)
 	}
 	initial148Unchanged(t, raw, before)
@@ -657,12 +659,13 @@ func TestInitial148BlockCapacity(t *testing.T) {
 	// At M+1 the local capacity sentinel wins before context and parse, for both
 	// bounded entries; the pure parser still owns its count-zero result.
 	overBefore := bytes.Clone(over)
+	// Raw interface identity distinguishes the exact sentinel from a wrapped error.
 	summary, err := ValidateInitial148BlockSteps1To12(over, [32]byte{}, [32]byte{}, 0, nil)
-	if err != ErrInitial148BlockCapacity || summary != (BlockBasicSummary{}) || err.Error() != "initial148 block: raw block exceeds 68000157 bytes" {
+	if any(err) != any(ErrInitial148BlockCapacity) || summary != (BlockBasicSummary{}) || err.Error() != "initial148 block: raw block exceeds 68000157 bytes" {
 		t.Fatalf("initial148 local M boundary: capacity=%+v/%v", summary, err)
 	}
 	initial148Unchanged(t, over, overBefore)
-	if err := ValidateInitial148BlockBodyCommitments(over); err != ErrInitial148BlockCapacity || err.Error() != "initial148 block: raw block exceeds 68000157 bytes" {
+	if err := ValidateInitial148BlockBodyCommitments(over); any(err) != any(ErrInitial148BlockCapacity) || err.Error() != "initial148 block: raw block exceeds 68000157 bytes" {
 		t.Fatalf("initial148 local M boundary: body capacity=%v", err)
 	}
 	initial148Unchanged(t, over, overBefore)
