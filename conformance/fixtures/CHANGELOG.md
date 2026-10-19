@@ -22,6 +22,10 @@ flat diagnostic digest. It supplies no generated expected values or client,
 native-storage, historical-validity, formal, activation or network-launch proof.
 RUB-1681 owns realization and independent public-client comparison.
 
+In `utxo_commitment_expected_v1.json`, the `IMAGE-19-Fbase` and
+`IMAGE-19-no_result_tip` `normative_refs` match the exact contract row;
+input and expected cells are unchanged.
+
 The JSON has no regeneration command. Only the inventory is generated, with
 `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`.
 Required format/inventory/policy commands are documented in `conformance/README.md`;
