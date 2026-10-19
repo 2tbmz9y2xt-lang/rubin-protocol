@@ -119,6 +119,11 @@ func blockStepsFirstPass(raw []byte) (blockStepsPass, error) {
 	if err != nil {
 		return blockStepsPass{}, err
 	}
+	return blockStepsTransactions(raw, header, off, count)
+}
+
+// blockStepsTransactions is the shared after-frame pass: every entry supplies its own parsed frame and count.
+func blockStepsTransactions(raw []byte, header BlockHeader, off int, count uint64) (blockStepsPass, error) {
 	p := blockStepsPass{header: header, start: off, count: count}
 	txids := storedCommitmentFrontier{leafTag: 0x00, nodeTag: 0x01}
 	wtxids := storedCommitmentFrontier{leafTag: 0x02, nodeTag: 0x03}
@@ -260,8 +265,8 @@ func step10DAChunks(raw []byte, off int, count uint64, records []step12DARecord)
 
 // step12Record fills one record; the payload is the transaction's final field, so it ends at the transaction end.
 func step12Record(tx *Tx, txOff, end int, ordinal uint64) step12DARecord {
-	// raw <= 68000125 < 2^32 bounds every offset, length and ordinal, so each conversion is exact.
-	record := step12DARecord{TxOffset: uint32(txOff), PayloadOffset: uint32(end - len(tx.DaPayload)), PayloadLength: uint32(len(tx.DaPayload)), Ordinal: uint32(ordinal), Kind: tx.TxKind} // #nosec G115 -- bounded by raw <= 68000125.
+	// The shared entry bound raw <= 68000157 < 2^32 makes every offset, length and ordinal conversion exact.
+	record := step12DARecord{TxOffset: uint32(txOff), PayloadOffset: uint32(end - len(tx.DaPayload)), PayloadLength: uint32(len(tx.DaPayload)), Ordinal: uint32(ordinal), Kind: tx.TxKind} // #nosec G115 -- bounded by raw <= 68000157.
 	if tx.TxKind == 0x01 {
 		record.ID, record.ChunkCount = tx.DaCommitCore.DaID, tx.DaCommitCore.ChunkCount
 	} else {
