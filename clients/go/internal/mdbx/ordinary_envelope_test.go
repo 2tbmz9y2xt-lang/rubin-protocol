@@ -15,8 +15,10 @@ type ordinaryEnvelopeCase struct {
 }
 
 func ordinaryEnvelopeInput(hOld, f, d, c uint32) OrdinaryEnvelopeInputV1 {
-	return OrdinaryEnvelopeInputV1{KPair: 1, R: 805306368, LRet: 18446744073709551615,
-		HOld: hOld, F: f, D: d, C: c}
+	return OrdinaryEnvelopeInputV1{
+		KPair: 1, R: 805306368, LRet: 18446744073709551615,
+		HOld: hOld, F: f, D: d, C: c,
+	}
 }
 
 // Literal thresholds come from the frozen contract, not evaluator expressions.
