@@ -188,10 +188,12 @@ func TestOperationReservationOwnerConfiguration(t *testing.T) {
 		}},
 		{"A1 constructor admits every limit", func(t *testing.T, label string) {
 			for _, limit := range []uint64{0, 1, 154611151, 805306367, 805306368, 18446744073709551615} {
-				owner, err := NewOperationReservationOwner(limit)
-				if err != nil || owner == nil || owner.shared.limit != limit || reservationLive(owner) != 0 {
-					t.Fatalf("%s: limit %d: %v %v", label, limit, owner, err)
-				}
+				t.Run(fmt.Sprintf("A1 constructor limit %d", limit), func(t *testing.T) {
+					owner, err := NewOperationReservationOwner(limit)
+					if err != nil || owner == nil || owner.shared.limit != limit || reservationLive(owner) != 0 {
+						t.Fatalf("%s: limit %d: %v %v", label, limit, owner, err)
+					}
+				})
 			}
 		}},
 		{"A1 R_MIN admits legacy", func(t *testing.T, label string) {
@@ -628,14 +630,14 @@ func accountCharge(t *testing.T, label string, a *OperationAccount, bytes uint64
 	held, live, calls := accountHeld(a), reservationLive(&OperationReservationOwner{a.shared.origin}), 0
 	err := a.WithReservation(bytes, func() error { calls++; inner(); return nil })
 	if err == nil {
-		if calls != 1 || accountHeld(a) != held || reservationLive(&OperationReservationOwner{a.shared.origin}) != live {
-			t.Fatalf("%s: admitted bytes %d calls=%d held=%d live=%d", label, bytes, calls, accountHeld(a), live)
+		if after := reservationLive(&OperationReservationOwner{a.shared.origin}); calls != 1 || accountHeld(a) != held || after != live {
+			t.Fatalf("%s: admitted bytes %d calls=%d held=%d (want %d) live=%d (want %d)", label, bytes, calls, accountHeld(a), held, after, live)
 		}
 		return true
 	}
 	wantReservationSentinel(t, label, err, errOperationReservationCapacity, textReservationCapacity)
-	if calls != 0 || accountHeld(a) != held || reservationLive(&OperationReservationOwner{a.shared.origin}) != live {
-		t.Fatalf("%s: refused bytes %d calls=%d held=%d", label, bytes, calls, accountHeld(a))
+	if after := reservationLive(&OperationReservationOwner{a.shared.origin}); calls != 0 || accountHeld(a) != held || after != live {
+		t.Fatalf("%s: refused bytes %d calls=%d held=%d (want %d) live=%d (want %d)", label, bytes, calls, accountHeld(a), held, after, live)
 	}
 	return false
 }
@@ -746,8 +748,10 @@ func TestOperationReservationCeilings(t *testing.T) {
 				accountRun(t, "R2 tree", owner, TreeOperation, func(a *OperationAccount) { accountMustRefuse(t, "R2 tree", a, bytes) })
 			}
 			nested := func(kind OperationKind, outer, inner uint64) {
-				accountRun(t, "R2 nested", owner, kind, func(a *OperationAccount) {
-					accountMustAdmit(t, "R2 nested outer", a, outer, func() { accountMustRefuse(t, "R2 nested inner", a, inner) })
+				t.Run(fmt.Sprintf("R2 nested kind %d %d then %d", kind, outer, inner), func(t *testing.T) {
+					accountRun(t, "R2 nested", owner, kind, func(a *OperationAccount) {
+						accountMustAdmit(t, "R2 nested outer", a, outer, func() { accountMustRefuse(t, "R2 nested inner", a, inner) })
+					})
 				})
 			}
 			nested(LaneOperation, 154611183, 1)

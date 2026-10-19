@@ -300,7 +300,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 			t.Fatalf("admit: %s/%v", truth, err)
 		}
 		if live := reservationLive(owner); live != bootstrapFiller+enclosing {
-			t.Fatalf("enclosing live=%d, want %d", live, enclosing)
+			t.Fatalf("enclosing live=%d, want %d", live, bootstrapFiller+enclosing)
 		}
 		bootstrapRequireInitialized(t, store, cfg, StorageProfilePrunedV1, "admit")
 		if again := owner.WithReservation(charge, func() error { return nil }); again != nil {
@@ -322,7 +322,7 @@ func TestStorageBootstrapReservation(t *testing.T) {
 			t.Fatalf("refuse: %s/%v", truth, err)
 		}
 		if live := reservationLive(owner); live != bootstrapFiller+enclosing+1 {
-			t.Fatalf("live=%d, want %d", live, enclosing+1)
+			t.Fatalf("live=%d, want %d", live, bootstrapFiller+enclosing+1)
 		}
 		bootstrapOpenUnchanged(t, store, "refuse")
 		if counts := bootstrapCounts(t, store, "refuse"); counts != bootstrapEmptyCounts {
