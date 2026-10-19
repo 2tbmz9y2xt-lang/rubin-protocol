@@ -294,7 +294,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
     @staticmethod
     def homebrew_dir():
         for root in ("/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"):
-            if os.access(f"{root}/bin/openssl", os.X_OK) and Path(f"{root}/bin/openssl").is_file():
+            if os.access(f"{root}/bin/openssl", os.X_OK):
                 return root
         return None
 
@@ -333,6 +333,13 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         env = self.env_of(self.run_dev_env(b"9.9.9\n"))
         self.assertEqual(env["OPENSSL_DIR"], str(prefix))
         self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_summary_mode_prints_ld_library_path(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        self.version_file.write_bytes(b"9.9.9\n")
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
+        proc = subprocess.run(["bash", str(self.script)], capture_output=True, text=True, env=env, check=False)
+        self.assertIn(f"\nLD_LIBRARY_PATH: {prefix}/lib\n", proc.stdout)
 
     def test_preset_pkg_config_path_is_kept_after_bundle_paths(self):
         prefix = self.make_bundle("bundle-9.9.9", lib64=True)
