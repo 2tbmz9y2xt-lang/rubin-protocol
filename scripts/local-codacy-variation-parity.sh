@@ -235,43 +235,90 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
   fi
 
   remote_pr_head="$(github_pr_head_sha "$repo" "$pr_number" || true)"
+  if [[ ! "$remote_pr_head" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "FAIL: published PR head is missing or not a 40-hex object id" >&2
+    exit 1
+  fi
+  if ! git -C "$repo_root" merge-base --is-ancestor "$remote_pr_head" "$current_head"; then
+    echo "FAIL: published PR head $remote_pr_head is not an ancestor of local candidate $current_head" >&2
+    exit 1
+  fi
   if [[ -z "$codacy_status_json" ]]; then
     echo "  codacy ancestor: unavailable"
-    echo "  github PR head:  ${remote_pr_head:-missing}"
+    echo "  github PR head:  $remote_pr_head"
+    remote_pr_head_after="$(github_pr_head_sha "$repo" "$pr_number" || true)"
+    if [[ "$remote_pr_head_after" != "$remote_pr_head" ]]; then
+      echo "FAIL: published PR head changed during metadata parity check: $remote_pr_head -> ${remote_pr_head_after:-missing}" >&2
+      exit 1
+    fi
     echo "PASS: Codacy metadata unavailable; local merge-base fallback remains $merge_base"
     exit 0
   fi
-  python3 - "$codacy_status_json" "$merge_base" "$remote_pr_head" <<'PY'
+
+  if [[ "$remote_pr_head" == "$current_head" ]]; then
+    expected_baseline_sha="$merge_base"
+  else
+    if ! expected_baseline_sha="$(git -C "$repo_root" merge-base "$remote_pr_head" "$base_ref")"; then
+      echo "FAIL: could not derive the published PR head merge-base with $base_ref" >&2
+      exit 1
+    fi
+  fi
+
+  python3 - "$codacy_status_json" "$expected_baseline_sha" "$remote_pr_head" <<'PY'
 import json
 import sys
 
-data = json.loads(sys.argv[1])
-local_merge_base = sys.argv[2]
-remote_pr_head = sys.argv[3]
-ancestor = data["data"]["commonAncestorCommit"]
-head = data["data"]["headCommit"]
-ancestor_sha = ancestor.get("commitSha")
-head_sha = head.get("commitSha")
+
+def fail(message):
+    print(f"FAIL: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+try:
+    data = json.loads(sys.argv[1])
+    ancestor = data["data"]["commonAncestorCommit"]
+    head = data["data"]["headCommit"]
+except (json.JSONDecodeError, RecursionError, KeyError, TypeError) as exc:
+    fail(f"malformed Codacy PR metadata: {exc}")
+
+if not isinstance(ancestor, dict) or not isinstance(head, dict):
+    fail("malformed Codacy PR metadata")
 ancestor_reports = ancestor.get("reports", [])
 head_reports = head.get("reports", [])
+if not isinstance(ancestor_reports, list) or not isinstance(head_reports, list):
+    fail("malformed Codacy PR metadata")
+
+expected_ancestor = sys.argv[2]
+published_head = sys.argv[3]
+ancestor_sha = ancestor.get("commitSha")
+head_sha = head.get("commitSha")
+
+
+for reports in (ancestor_reports, head_reports):
+    if not all(isinstance(report, dict) for report in reports):
+        fail("malformed Codacy PR metadata")
 
 print(f"  codacy ancestor: {ancestor_sha or 'missing'}")
-print(f"  github PR head:  {remote_pr_head or 'missing'}")
+print(f"  github PR head:  {published_head}")
 print(f"  codacy PR head:  {head_sha or 'missing'}")
-print(f"  ancestor reports processed: {sum(1 for r in ancestor_reports if r.get('status') == 'Processed')}")
-print(f"  head reports processed:     {sum(1 for r in head_reports if r.get('status') == 'Processed')}")
+print(f"  ancestor reports processed: {sum(1 for report in ancestor_reports if report.get('status') == 'Processed')}")
+print(f"  head reports processed:     {sum(1 for report in head_reports if report.get('status') == 'Processed')}")
 
-if not ancestor_sha:
-    print("FAIL: Codacy did not return a common ancestor baseline", file=sys.stderr)
-    raise SystemExit(1)
-if ancestor_sha != local_merge_base:
-    print(
-        f"FAIL: local merge-base {local_merge_base} differs from Codacy common ancestor {ancestor_sha}",
-        file=sys.stderr,
+if not head_sha or head_sha != published_head:
+    fail(f"Codacy PR head {head_sha or 'missing'} differs from published PR head {published_head}")
+if not ancestor_sha or ancestor_sha != expected_ancestor:
+    fail(
+        f"Codacy common ancestor {ancestor_sha or 'missing'} differs from "
+        f"published-head merge-base {expected_ancestor}"
     )
-    raise SystemExit(1)
-print("PASS: Codacy baseline matches local merge-base")
 PY
+
+  remote_pr_head_after="$(github_pr_head_sha "$repo" "$pr_number" || true)"
+  if [[ "$remote_pr_head_after" != "$remote_pr_head" ]]; then
+    echo "FAIL: published PR head changed during metadata parity check: $remote_pr_head -> ${remote_pr_head_after:-missing}" >&2
+    exit 1
+  fi
+  echo "PASS: Codacy metadata binds published PR head $remote_pr_head to external ancestor $expected_baseline_sha; this does not certify cloud coverage of the local candidate"
   exit 0
 fi
 
