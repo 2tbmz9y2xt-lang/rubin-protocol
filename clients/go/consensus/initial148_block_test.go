@@ -745,8 +745,21 @@ func TestInitial148BlockDAFrame(t *testing.T) {
 	if err != nil || summary != want {
 		t.Fatalf("initial148 context projection: got=%+v/%v want=%+v", summary, err, want)
 	}
-	if parsed.TxCount != 3 || len(parsed.Txids) != 3 {
-		t.Fatalf("initial148 context projection: count=%d ids=%d", parsed.TxCount, len(parsed.Txids))
+	if parsed.TxCount != 3 || len(parsed.Txs) != 3 || len(parsed.Txids) != 3 || len(parsed.Wtxids) != 3 {
+		t.Fatalf("initial148 parsed body order: count=%d txs=%d txids=%d wtxids=%d", parsed.TxCount, len(parsed.Txs), len(parsed.Txids), len(parsed.Wtxids))
+	}
+	for i, tx := range txs {
+		if parsed.Txs[i] == nil {
+			t.Fatalf("initial148 parsed body order: tx %d is nil", i)
+		}
+		body, err := MarshalTx(parsed.Txs[i])
+		if err != nil || !bytes.Equal(body, tx) {
+			t.Fatalf("initial148 parsed body order: tx %d body=%x err=%v", i, body, err)
+		}
+		_, txid, wtxid, _, err := ParseTx(tx)
+		if err != nil || parsed.Txids[i] != txid || parsed.Wtxids[i] != wtxid {
+			t.Fatalf("initial148 parsed body order: tx %d tuple txid=%x wtxid=%x err=%v", i, parsed.Txids[i], parsed.Wtxids[i], err)
+		}
 	}
 	// A lost 32-byte offset in the one-byte payload record fails the payload
 	// commitment instead of satisfying this exact accepted summary.
