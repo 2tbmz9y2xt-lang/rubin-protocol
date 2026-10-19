@@ -31,24 +31,11 @@ func canonicalUTXORoot(utxos map[Outpoint]UtxoEntry) [32]byte {
 // determine the first differing absolute bit; both resulting ranges are nonempty.
 func canonicalUTXORootRange(utxos map[Outpoint]UtxoEntry, ordered []Outpoint) [32]byte {
 	if len(ordered) == 1 {
-		h := sha3.New256()
-		_, _ = h.Write([]byte(canonicalUTXOLeafDomain))
-		_, _ = h.Write(logicalStateEntryBytes(ordered[0], utxos[ordered[0]]))
-		var root [32]byte
-		h.Sum(root[:0])
-		return root
+		return canonicalUTXOLeafHash(ordered[0], utxos[ordered[0]])
 	}
 	first := canonicalUTXORoutingKey(ordered[0])
 	last := canonicalUTXORoutingKey(ordered[len(ordered)-1])
-	d := uint16(0)
-	for first[d/8] == last[d/8] {
-		d += 8
-	}
-	difference := first[d/8] ^ last[d/8]
-	for difference&0x80 == 0 {
-		d++
-		difference <<= 1
-	}
+	d := canonicalUTXOFirstDifferingBit(first, last)
 	mask := byte(0x80 >> uint(d%8))
 	split := sort.Search(len(ordered), func(i int) bool {
 		key := canonicalUTXORoutingKey(ordered[i])
@@ -56,6 +43,35 @@ func canonicalUTXORootRange(utxos map[Outpoint]UtxoEntry, ordered []Outpoint) [3
 	})
 	left := canonicalUTXORootRange(utxos, ordered[:split])
 	right := canonicalUTXORootRange(utxos, ordered[split:])
+	return canonicalUTXOBranchHash(d, first, left, right)
+}
+
+func canonicalUTXOLeafHash(op Outpoint, entry UtxoEntry) [32]byte {
+	h := sha3.New256()
+	_, _ = h.Write([]byte(canonicalUTXOLeafDomain))
+	_, _ = h.Write(logicalStateEntryBytes(op, entry))
+	var root [32]byte
+	h.Sum(root[:0])
+	return root
+}
+
+func canonicalUTXOFirstDifferingBit(first, last [36]byte) uint16 {
+	d := uint16(0)
+	for d < 288 && first[d/8] == last[d/8] {
+		d += 8
+	}
+	if d == 288 {
+		return d
+	}
+	difference := first[d/8] ^ last[d/8]
+	for difference&0x80 == 0 {
+		d++
+		difference <<= 1
+	}
+	return d
+}
+
+func canonicalUTXOBranchHash(d uint16, first [36]byte, left, right [32]byte) [32]byte {
 	var preimage [121]byte
 	copy(preimage[:19], canonicalUTXOBranchDomain)
 	binary.BigEndian.PutUint16(preimage[19:21], d)
