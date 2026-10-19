@@ -21,9 +21,11 @@ Default install prefix:
 
 `scripts/dev-env.sh` uses the bundle selected by `scripts/crypto/openssl/VERSION` by
 default when it is built at that prefix, without `RUBIN_OPENSSL_PREFIX`. If the bundle is
-not built, or `VERSION` is not one canonical `MAJOR.MINOR.PATCH` line, it falls back to
-the default OpenSSL selection and prints one warning on stderr naming
-`bash scripts/crypto/openssl/build-openssl-bundle.sh`. An
+not built (no executable `bin/openssl`, `ssl/openssl-fips.cnf` or `lib*/ossl-modules`), it
+falls back to the default OpenSSL selection and prints one warning on stderr naming the
+bundle path and `bash scripts/crypto/openssl/build-openssl-bundle.sh`. If `VERSION` is not
+one canonical `MAJOR.MINOR.PATCH` line, the fallback warning names `VERSION` as unusable
+and not the build command. An
 explicit `RUBIN_OPENSSL_PREFIX` or an already exported `OPENSSL_DIR` takes precedence.
 
 FIPS artifacts produced by the bundle script:

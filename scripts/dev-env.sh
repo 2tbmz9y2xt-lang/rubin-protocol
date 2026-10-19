@@ -93,6 +93,16 @@ use_openssl_prefix() {
     joined_pkg_paths="$(IFS=:; echo "${rubin_pkg_paths[*]}")"
     export PKG_CONFIG_PATH="${joined_pkg_paths}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
   fi
+  local rubin_lib_paths=() joined_lib_paths dir
+  for dir in "${prefix}/lib64" "${prefix}/lib"; do
+    if [[ -d "${dir}" ]]; then
+      rubin_lib_paths+=("${dir}")
+    fi
+  done
+  if [[ ${#rubin_lib_paths[@]} -gt 0 ]]; then
+    joined_lib_paths="$(IFS=:; echo "${rubin_lib_paths[*]}")"
+    export LD_LIBRARY_PATH="${joined_lib_paths}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
   if [[ -d "${prefix}/lib/ossl-modules" ]]; then
     export OPENSSL_MODULES="${prefix}/lib/ossl-modules"
   elif [[ -d "${prefix}/lib64/ossl-modules" ]]; then
@@ -111,20 +121,27 @@ pinned_openssl_version() {
 
 # A warning must never change the exit status, even when stderr is closed.
 warn_pinned_openssl() {
-  echo "WARNING: $1; falling back to the default OpenSSL selection. Run: bash scripts/crypto/openssl/build-openssl-bundle.sh" >&2 || true
+  echo "WARNING: $1; falling back to the default OpenSSL selection$2" >&2 || true
+}
+
+# The definition .github/actions/openssl-bundle/action.yml uses before it skips the build.
+pinned_bundle_built() {
+  local prefix="$1"
+  [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" && -f "${prefix}/ssl/openssl-fips.cnf" ]] || return 1
+  [[ -d "${prefix}/lib/ossl-modules" || -d "${prefix}/lib64/ossl-modules" ]]
 }
 
 select_pinned_openssl() {
   local version prefix
   if ! version="$(pinned_openssl_version)"; then
-    warn_pinned_openssl "scripts/crypto/openssl/VERSION is unusable"
+    warn_pinned_openssl "scripts/crypto/openssl/VERSION is unusable" ""
     return 0
   fi
   prefix="${HOME}/.cache/rubin-openssl/bundle-${version}"
-  if [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" ]]; then
+  if pinned_bundle_built "${prefix}"; then
     use_openssl_prefix "${prefix}"
   else
-    warn_pinned_openssl "pinned OpenSSL bundle not built: ${prefix}"
+    warn_pinned_openssl "pinned OpenSSL bundle not built: ${prefix}" ". Run: bash scripts/crypto/openssl/build-openssl-bundle.sh"
   fi
 }
 

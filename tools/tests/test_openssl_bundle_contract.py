@@ -239,7 +239,7 @@ class OpenSSLBundleContractTests(unittest.TestCase):
 
 DEV_ENV_PATH = REPO_ROOT / "scripts" / "dev-env.sh"
 BUILD_COMMAND = "bash scripts/crypto/openssl/build-openssl-bundle.sh"
-SELECTED_VARS = ("OPENSSL_DIR", "PATH", "PKG_CONFIG_PATH", "OPENSSL_MODULES")
+SELECTED_VARS = ("OPENSSL_DIR", "PATH", "PKG_CONFIG_PATH", "OPENSSL_MODULES", "LD_LIBRARY_PATH")
 
 
 class DevEnvPinnedBundleTests(unittest.TestCase):
@@ -260,14 +260,23 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.version_file.parent.mkdir(parents=True)
         shutil.copy(DEV_ENV_PATH, self.script)
 
-    def make_bundle(self, name: str, executable: bool = True) -> Path:
+    def make_bundle(self, name: str, openssl: str | None = "exec", cnf: bool = True,
+                    modules: bool = True, lib64: bool = False) -> Path:
+        """openssl: exec (built), plain (regular, not executable), dir (directory), None (absent)."""
         prefix = self.home / ".cache" / "rubin-openssl" / name
-        for sub in ("lib/pkgconfig", "lib/ossl-modules", "ssl"):
+        subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules else [])
+        subs += ["lib64/pkgconfig"] if lib64 else []
+        for sub in subs:
             (prefix / sub).mkdir(parents=True)
-        (prefix / "ssl" / "openssl-fips.cnf").write_text("", encoding="utf-8")
-        if executable:
+        if cnf:
+            (prefix / "ssl" / "openssl-fips.cnf").write_text("", encoding="utf-8")
+        if openssl == "dir":
+            (prefix / "bin" / "openssl").mkdir(parents=True)
+        elif openssl is not None:
             (prefix / "bin").mkdir()
             write_stub(prefix / "bin" / "openssl", "#!/bin/sh\nexit 0\n")
+            if openssl == "plain":
+                (prefix / "bin" / "openssl").chmod(0o644)
         return prefix
 
     def run_dev_env(self, version: bytes | None, *command: str, **extra_env: str):
@@ -286,17 +295,29 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         for name in SELECTED_VARS:
             self.assertNotIn(str(prefix), env.get(name, ""), name)
 
+    def assert_bundle_env(self, env: dict, prefix: Path, lib64: bool = False, ld_tail: str = ""):
+        self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+        self.assertTrue(env["PATH"].startswith(f"{prefix}/bin:"), env["PATH"])
+        pkg = f"{prefix}/lib64/pkgconfig:" if lib64 else ""
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{pkg}{prefix}/lib/pkgconfig")
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib/ossl-modules")
+        libs = f"{prefix}/lib64:" if lib64 else ""
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{libs}{prefix}/lib{ld_tail}")
+
     def test_default_uses_pinned_bundle_like_explicit_prefix(self):
-        prefix = self.make_bundle("bundle-9.9.9")
-        default = self.run_dev_env(b"9.9.9\n")
-        explicit = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix))
-        self.assertEqual(default.returncode, 0, default.stderr)
-        self.assertEqual(default.stderr, "")
-        default_env = self.env_of(default)
-        self.assertEqual(default_env["OPENSSL_DIR"], str(prefix))
-        self.assertNotIn("RUBIN_OPENSSL_PREFIX", default_env)
-        for name in SELECTED_VARS:
-            self.assertEqual(default_env.get(name), self.env_of(explicit).get(name), name)
+        for lib64 in (False, True):
+            for ld, tail in (({}, ""), ({"LD_LIBRARY_PATH": ""}, ""), ({"LD_LIBRARY_PATH": "/pre"}, ":/pre")):
+                with self.subTest(lib64=lib64, ld=ld):
+                    shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                    prefix = self.make_bundle("bundle-9.9.9", lib64=lib64)
+                    default = self.run_dev_env(b"9.9.9\n", **ld)
+                    explicit = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix), **ld)
+                    self.assertEqual(default.returncode, 0, default.stderr)
+                    self.assertEqual(default.stderr, "")
+                    default_env = self.env_of(default)
+                    self.assertNotIn("RUBIN_OPENSSL_PREFIX", default_env)
+                    self.assert_bundle_env(default_env, prefix, lib64, tail)
+                    self.assert_bundle_env(self.env_of(explicit), prefix, lib64, tail)
 
     def test_fips_only_wires_config_for_pinned_bundle(self):
         prefix = self.make_bundle("bundle-9.9.9")
@@ -304,13 +325,18 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(self.env_of(proc)["OPENSSL_CONF"], f"{prefix}/ssl/openssl-fips.cnf")
 
     def test_unbuilt_bundle_warns_once_and_keeps_fallback(self):
-        for name, build in (("no directory", None), ("directory without executable", False), ("directory as executable", "dir")):
+        for name, build in (
+            ("no directory", None),
+            ("directory without executable", {"openssl": None}),
+            ("directory as executable", {"openssl": "dir"}),
+            ("non-executable regular file", {"openssl": "plain"}),
+            ("no fips config", {"cnf": False}),
+            ("no modules directory", {"modules": False}),
+        ):
             with self.subTest(name):
                 shutil.rmtree(self.home / ".cache", ignore_errors=True)
                 if build is not None:
-                    prefix = self.make_bundle("bundle-9.9.9", executable=False)
-                    if build == "dir":
-                        (prefix / "bin" / "openssl").mkdir(parents=True)
+                    self.make_bundle("bundle-9.9.9", **build)
                 proc = self.run_dev_env(b"9.9.9\n")
                 prefix = self.home / ".cache" / "rubin-openssl" / "bundle-9.9.9"
                 self.assertEqual(proc.returncode, 0)
@@ -318,6 +344,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                 self.assertIn(str(prefix), proc.stderr)
                 self.assertIn(BUILD_COMMAND, proc.stderr)
                 self.assert_fallback_env(proc, prefix)
+                self.assertNotIn(str(prefix), self.env_of(proc).get("LD_LIBRARY_PATH", ""))
 
     def test_unusable_version_warns_without_echoing_its_bytes(self):
         self.make_bundle("bundle-9.9.9")
@@ -327,7 +354,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0)
                 self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
                 self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
-                self.assertIn(BUILD_COMMAND, proc.stderr)
+                self.assertNotIn(BUILD_COMMAND, proc.stderr)
                 self.assertNotIn("9.9.9", proc.stderr)
                 self.assert_fallback_env(proc, self.home / ".cache/rubin-openssl/bundle-9.9.9")
 
@@ -337,6 +364,7 @@ class DevEnvPinnedBundleTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
         self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
+        self.assertNotIn(BUILD_COMMAND, proc.stderr)
         self.version_file.mkdir()
         proc = self.run_dev_env(None)
         self.assertEqual(proc.returncode, 0)
