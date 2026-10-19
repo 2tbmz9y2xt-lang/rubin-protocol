@@ -167,15 +167,12 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
                 else:
                     self.assert_input_references(item, corpus)
 
-    def assert_expected_bytes(self, value: object, canonical: bool = True) -> None:
+    def assert_byte_literals(self, value: object) -> None:
         if isinstance(value, list):
             for item in value:
-                self.assert_expected_bytes(item, canonical)
+                self.assert_byte_literals(item)
         elif isinstance(value, dict):
             for key, item in value.items():
-                # Preserved corrupt stored data is an observation, not a newly
-                # canonical output. Its explicit byte lengths still apply.
-                is_canonical = canonical and key != "state"
                 if key.endswith("_hex") or key == "hex":
                     literals = item if isinstance(item, list) else [item]
                     for literal in literals:
@@ -188,11 +185,11 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
                             self.assertIs(type(width), int, "expected width type")
                             self.assertGreaterEqual(width, 0, "expected width unsigned")
                             self.assertEqual(len(literal), 2 * width, "expected width")
-                        if is_canonical and key.endswith(
+                        if key.endswith(
                             ("root_hex", "hash_hex", "txid_hex", "chain_id_hex")
                         ):
                             self.assertEqual(len(literal), 64, "expected digest width")
-                        if is_canonical and key.endswith(
+                        if key.endswith(
                             ("key_hex", "K_hex", "mask_hex", "prefix_hex")
                         ):
                             self.assertEqual(len(literal), 72, "expected key width")
@@ -201,7 +198,7 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
                 }:
                     self.assertRegex(item, r"\A(?:0|[1-9][0-9]*)\Z", "wide unsigned")
                 else:
-                    self.assert_expected_bytes(item, is_canonical)
+                    self.assert_byte_literals(item)
 
     def assert_corpus_contract(self, data: dict) -> None:
         self.assertEqual(set(data), {
@@ -244,6 +241,7 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
             self.assertTrue(all(isinstance(s, str) and s for s in ref["sections"]))
         self.assertIsInstance(data["input_fixtures"], dict)
         self.assertTrue(data["input_fixtures"])
+        self.assert_byte_literals(data["input_fixtures"])
         self.assertEqual(len(data["cases"]), 350, "case count")
         ids: set[str] = set()
         for case in data["cases"]:
@@ -259,6 +257,7 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
             self.assertIsInstance(case["expect"], dict)
             self.assertTrue(case["expect"], "nonempty expected cells")
             self.assert_input_references(case["input"], data)
+            self.assert_byte_literals(case["input"])
             boundary = case["input"]["boundary"]
             self.assertIn(boundary, {
                 "SERIALIZATION_DOMAIN", "BLOCK_VALIDITY", "SYMBOLIC_OWNER_TRANSITION",
@@ -285,7 +284,7 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
                             {"entries_hex", "symbolic_map_extent"} & state[role].keys(),
                             "applicable expected complete map or symbolic extent",
                         )
-            self.assert_expected_bytes(case["expect"])
+            self.assert_byte_literals(case["expect"])
         self.assertEqual(len(registry), 28, "source registry count")
 
     def test_utxo_expected_corpus_data_contract(self) -> None:
@@ -313,6 +312,11 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
             ("hex", "expected hex"),
             ("width", "expected width"),
             ("type", "expected hex type"),
+            ("shared_input_hex", "expected hex"),
+            ("input_hex", "expected hex"),
+            ("input_width", "expected width"),
+            ("state_digest_short", "expected digest width"),
+            ("state_digest_long", "expected digest width"),
         )
         for control, diagnostic in controls:
             with self.subTest(control=control):
@@ -337,6 +341,21 @@ class UtxoCommitmentExpectedTests(unittest.TestCase):
                     del symbolic["expect"][control]
                 elif control == "role":
                     del symbolic["expect"]["state"]["CURRENT"]["role"]
+                elif control == "shared_input_hex":
+                    data["input_fixtures"]["wire"]["Q_empty_hex"] = "GG0"
+                elif control == "input_hex":
+                    case = next(c for c in data["cases"] if c["id"] == "HEADER-08")
+                    case["input"]["header_hex"] = "0"
+                elif control == "input_width":
+                    case = next(c for c in data["cases"] if c["id"] == "ORDER-09")
+                    case["input"]["chunk_hex"] = case["input"]["chunk_hex"][:-2]
+                elif control in {"state_digest_short", "state_digest_long"}:
+                    case = next(c for c in data["cases"] if c["id"] == "READ-04-total")
+                    state = case["expect"]["state"]["CURRENT"]
+                    literal = state["binding_root_hex"]
+                    state["binding_root_hex"] = (
+                        literal[:-2] if control == "state_digest_short" else literal + literal[:2]
+                    )
                 else:
                     scalar["expect"]["root_hex"] = {
                         "hex": "GG", "width": "00" * 31, "type": 0,
