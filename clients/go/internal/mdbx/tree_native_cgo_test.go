@@ -208,7 +208,7 @@ func TestTreeNativeTypedStaticLifetime(t *testing.T) {
 			}
 			return refusal
 		})
-		if viewErr != refusal {
+		if !sameError(viewErr, refusal) {
 			t.Fatalf("tree legacy authority callback disposition: %v, want %v", viewErr, refusal)
 		}
 		mustEnvironment(t, store.View(func(reader *Reader) error {
