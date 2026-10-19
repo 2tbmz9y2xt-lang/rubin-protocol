@@ -68,12 +68,6 @@ jobs:
           echo "reason=no-clients-rust-diff" >> "$GITHUB_OUTPUT"
           echo "SKIP: no clients/rust changes in diff scope"
 
-      # OpenSSL dev headers required to compile openssl-sys FFI crate.
-      # Kani proofs only exercise pure-Rust logic, but the crate must compile.
-      - name: Install OpenSSL dev headers
-        if: steps.scope.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-
       # Cache the installed Kani CLI, release bundle, and pinned nightly toolchain
       # so PR reruns do not rebuild/download them from scratch.
       - name: Cache Kani toolchain + CLI
@@ -123,6 +117,12 @@ jobs:
           if [ ! -d "$HOME/.kani/kani-${KANI_VERSION}" ]; then
             cargo kani setup
           fi
+
+      # OpenSSL bundle required to compile openssl-sys FFI crate.
+      # Kani proofs only exercise pure-Rust logic, but the crate must compile.
+      - name: Prepare OpenSSL bundle
+        if: steps.scope.outputs.run == 'true'
+        uses: ./.github/actions/openssl-bundle
 
       # Keep the current proof surface. Step-level timeout fails closed if a
       # harness or cargo-kani stalls; add a kill-after backstop so a trapped

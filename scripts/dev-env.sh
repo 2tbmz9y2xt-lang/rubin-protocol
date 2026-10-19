@@ -78,34 +78,89 @@ if [[ "${GOFLAGS:-}" != *"-buildvcs=false"* ]]; then
   export GOFLAGS="${GOFLAGS:-} -buildvcs=false"
 fi
 
+use_openssl_prefix() {
+  local prefix="$1"
+  prepend_path_if_exists "${prefix}/bin"
+  export OPENSSL_DIR="${prefix}"
+  local rubin_pkg_paths=() joined_pkg_paths
+  if [[ -d "${prefix}/lib64/pkgconfig" ]]; then
+    rubin_pkg_paths+=("${prefix}/lib64/pkgconfig")
+  fi
+  if [[ -d "${prefix}/lib/pkgconfig" ]]; then
+    rubin_pkg_paths+=("${prefix}/lib/pkgconfig")
+  fi
+  if [[ ${#rubin_pkg_paths[@]} -gt 0 ]]; then
+    joined_pkg_paths="$(IFS=:; echo "${rubin_pkg_paths[*]}")"
+    export PKG_CONFIG_PATH="${joined_pkg_paths}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  fi
+  local rubin_lib_paths=() joined_lib_paths dir
+  for dir in "${prefix}/lib64" "${prefix}/lib"; do
+    if [[ -d "${dir}" ]]; then
+      rubin_lib_paths+=("${dir}")
+    fi
+  done
+  if [[ ${#rubin_lib_paths[@]} -gt 0 ]]; then
+    joined_lib_paths="$(IFS=:; echo "${rubin_lib_paths[*]}")"
+    export LD_LIBRARY_PATH="${joined_lib_paths}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+  fi
+  if [[ -d "${prefix}/lib/ossl-modules" ]]; then
+    export OPENSSL_MODULES="${prefix}/lib/ossl-modules"
+  elif [[ -d "${prefix}/lib64/ossl-modules" ]]; then
+    export OPENSSL_MODULES="${prefix}/lib64/ossl-modules"
+  fi
+}
+
+pinned_openssl_version() {
+  local file="${REPO_ROOT}/scripts/crypto/openssl/VERSION" line=""
+  [[ -f "${file}" && -r "${file}" ]] || return 1
+  IFS= read -r line <"${file}" || true
+  printf '%s\n' "${line}" | cmp -s - "${file}" || return 1
+  [[ "${line}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  printf '%s' "${line}"
+}
+
+# A warning must never change the exit status, even when stderr is closed.
+warn_pinned_openssl() {
+  echo "WARNING: $1; falling back to the default OpenSSL selection$2" >&2 || true
+}
+
+# Built: bin/openssl is a regular executable file, ssl/openssl-fips.cnf a file, and lib or lib64 holds an ossl-modules directory.
+pinned_bundle_built() {
+  local prefix="$1"
+  [[ -f "${prefix}/bin/openssl" && -x "${prefix}/bin/openssl" && -f "${prefix}/ssl/openssl-fips.cnf" ]] || return 1
+  [[ -d "${prefix}/lib/ossl-modules" || -d "${prefix}/lib64/ossl-modules" ]]
+}
+
+select_pinned_openssl() {
+  local version prefix
+  if ! version="$(pinned_openssl_version)"; then
+    warn_pinned_openssl "scripts/crypto/openssl/VERSION is unusable" ""
+    return 0
+  fi
+  prefix="${HOME}/.cache/rubin-openssl/bundle-${version}"
+  if pinned_bundle_built "${prefix}"; then
+    use_openssl_prefix "${prefix}"
+  else
+    warn_pinned_openssl "pinned OpenSSL bundle not built: ${prefix}" ". Run: bash scripts/crypto/openssl/build-openssl-bundle.sh"
+  fi
+}
+
 select_openssl() {
   # Optional override for CI / Linux / Windows dev envs where we bring our own OpenSSL bundle.
   # Example:
   #   RUBIN_OPENSSL_PREFIX="$HOME/.cache/rubin-openssl/bundle-$(cat scripts/crypto/openssl/VERSION)" scripts/dev-env.sh -- openssl version -a
   if [[ -n "${RUBIN_OPENSSL_PREFIX:-}" ]]; then
     if [[ -x "${RUBIN_OPENSSL_PREFIX}/bin/openssl" ]]; then
-      prepend_path_if_exists "${RUBIN_OPENSSL_PREFIX}/bin"
-      export OPENSSL_DIR="${RUBIN_OPENSSL_PREFIX}"
-      local rubin_pkg_paths=()
-      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig" ]]; then
-        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib64/pkgconfig")
-      fi
-      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig" ]]; then
-        rubin_pkg_paths+=("${RUBIN_OPENSSL_PREFIX}/lib/pkgconfig")
-      fi
-      if [[ ${#rubin_pkg_paths[@]} -gt 0 ]]; then
-        joined_pkg_paths="$(IFS=:; echo "${rubin_pkg_paths[*]}")"
-        export PKG_CONFIG_PATH="${joined_pkg_paths}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
-      fi
-      if [[ -d "${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules" ]]; then
-        export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib/ossl-modules"
-      elif [[ -d "${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules" ]]; then
-        export OPENSSL_MODULES="${RUBIN_OPENSSL_PREFIX}/lib64/ossl-modules"
-      fi
+      use_openssl_prefix "${RUBIN_OPENSSL_PREFIX}"
     else
       echo "ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: ${RUBIN_OPENSSL_PREFIX}" >&2
       return 1
     fi
+  fi
+
+  # Default: the bundle selected by scripts/crypto/openssl/VERSION, when it is built.
+  if [[ -z "${RUBIN_OPENSSL_PREFIX+set}" && -z "${OPENSSL_DIR+set}" ]]; then
+    select_pinned_openssl
   fi
 
   # Prefer Homebrew OpenSSL@3 to avoid macOS LibreSSL default.

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -233,6 +235,340 @@ class OpenSSLBundleContractTests(unittest.TestCase):
                     )
                     self.assertNotEqual(proc.returncode, 0)
                     self.assertIn("must be one MAJOR.MINOR.PATCH decimal line", proc.stderr)
+
+
+DEV_ENV_PATH = REPO_ROOT / "scripts" / "dev-env.sh"
+BUILD_COMMAND = "bash scripts/crypto/openssl/build-openssl-bundle.sh"
+SELECTED_VARS = ("OPENSSL_DIR", "PATH", "PKG_CONFIG_PATH", "OPENSSL_MODULES", "LD_LIBRARY_PATH")
+
+
+class DevEnvPinnedBundleTests(unittest.TestCase):
+    """Drive the real scripts/dev-env.sh from a copied tree with a temporary HOME."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.stubs = self.tmp / "stubs"
+        self.stubs.mkdir()
+        for tool in ("git", "python3", "node", "npm", "go", "cargo", "rustc", "openssl", "pkg-config"):
+            write_stub(self.stubs / tool, "#!/bin/sh\nexit 0\n")
+        self.script = self.tmp / "repo" / "scripts" / "dev-env.sh"
+        self.version_file = self.script.parent / "crypto" / "openssl" / "VERSION"
+        self.version_file.parent.mkdir(parents=True)
+        shutil.copy(DEV_ENV_PATH, self.script)
+
+    def make_bundle(self, name: str, openssl: str | None = "exec", cnf: bool = True,
+                    modules: bool = True, lib64: bool = False, modules64: bool = False) -> Path:
+        """openssl: exec (built), plain (regular, not executable), dir (directory), None (absent)."""
+        prefix = self.home / ".cache" / "rubin-openssl" / name
+        subs = ["lib/pkgconfig", "ssl"] + (["lib/ossl-modules"] if modules is True else [])
+        subs += ["lib64/pkgconfig"] if lib64 else []
+        subs += ["lib64/ossl-modules"] if modules64 is True else []
+        for sub in subs:
+            (prefix / sub).mkdir(parents=True)
+        if cnf == "dir":
+            (prefix / "ssl" / "openssl-fips.cnf").mkdir()
+        elif cnf:
+            (prefix / "ssl" / "openssl-fips.cnf").write_text("", encoding="utf-8")
+        if modules == "file":
+            (prefix / "lib" / "ossl-modules").write_text("", encoding="utf-8")
+        if modules64 == "file":
+            (prefix / "lib64").mkdir()
+            (prefix / "lib64" / "ossl-modules").write_text("", encoding="utf-8")
+        if openssl == "dir":
+            (prefix / "bin" / "openssl").mkdir(parents=True)
+        elif openssl is not None:
+            (prefix / "bin").mkdir()
+            write_stub(prefix / "bin" / "openssl", "#!/bin/sh\nexit 0\n")
+            if openssl == "plain":
+                (prefix / "bin" / "openssl").chmod(0o644)
+        return prefix
+
+    def run_dev_env(self, version: bytes | None, *command: str, **extra_env: str):
+        if version is not None:
+            self.version_file.write_bytes(version)
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin", **extra_env}
+        return subprocess.run(["bash", str(self.script), "--", *(command or ("env",))],
+                              capture_output=True, text=True, env=env, check=False)
+
+    @staticmethod
+    def env_of(proc) -> dict:
+        return dict(line.split("=", 1) for line in proc.stdout.splitlines() if "=" in line)
+
+    def baseline_fallback_env(self, given: dict) -> dict:
+        """Expected values from the baseline dev-env.sh rules (literal Homebrew paths, host-conditional)."""
+        path = given.get("PATH", f"{self.stubs}:/usr/bin:/bin")
+
+        def prepend(directory: str) -> None:
+            nonlocal path
+            if os.path.isdir(directory) and f":{path}:".count(f":{directory}:") == 0:
+                path = f"{directory}:{path}"
+
+        prepend("/opt/homebrew/bin")
+        prepend("/usr/local/bin")
+        out = {name: given.get(name) for name in ("OPENSSL_DIR", "PKG_CONFIG_PATH", "LD_LIBRARY_PATH")}
+        out.update(OPENSSL_MODULES=None, OPENSSL_CONF=None)
+        if not given.get("OPENSSL_DIR"):
+            for root in ("/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"):
+                if os.access(f"{root}/bin/openssl", os.X_OK):
+                    prepend(f"{root}/bin")
+                    out["OPENSSL_DIR"] = root
+                    tail = given.get("PKG_CONFIG_PATH")
+                    out["PKG_CONFIG_PATH"] = f"{root}/lib/pkgconfig" + (f":{tail}" if tail else "")
+                    if os.path.isdir(f"{root}/lib/ossl-modules"):
+                        out["OPENSSL_MODULES"] = f"{root}/lib/ossl-modules"
+                    break
+        out["PATH"] = path
+        return out
+
+    def assert_baseline_env(self, env: dict, given: dict):
+        for name, expected in self.baseline_fallback_env(given).items():
+            self.assertEqual(env.get(name), expected, name)
+
+    def assert_fallback_env(self, proc, prefix: Path, given: dict | None = None):
+        env = self.env_of(proc)
+        self.assert_baseline_env(env, given or {})
+        for name in SELECTED_VARS:
+            self.assertNotIn(str(prefix), env.get(name, ""), name)
+
+    def expected_path(self, prefix: Path, caller: str | None = None) -> str:
+        """Baseline rules: prepend each existing helper dir unless already present, bundle bin last."""
+        path = caller if caller is not None else f"{self.stubs}:/usr/bin:/bin"
+        for directory in ("/opt/homebrew/bin", "/usr/local/bin", f"{prefix}/bin"):
+            if os.path.isdir(directory) and f":{path}:".count(f":{directory}:") == 0:
+                path = f"{directory}:{path}"
+        return path
+
+    def assert_bundle_env(self, env: dict, prefix: Path, lib64: bool = False, ld_tail: str = "",
+                          caller_path: str | None = None):
+        self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+        self.assertEqual(env["PATH"], self.expected_path(prefix, caller_path))
+        pkg = f"{prefix}/lib64/pkgconfig:" if lib64 else ""
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{pkg}{prefix}/lib/pkgconfig")
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib/ossl-modules")
+        libs = f"{prefix}/lib64:" if lib64 else ""
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{libs}{prefix}/lib{ld_tail}")
+
+    def test_default_uses_pinned_bundle_like_explicit_prefix(self):
+        for lib64 in (False, True):
+            for ld, tail in (({}, ""), ({"LD_LIBRARY_PATH": ""}, ""), ({"LD_LIBRARY_PATH": "/pre"}, ":/pre")):
+                with self.subTest(lib64=lib64, ld=ld):
+                    shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                    prefix = self.make_bundle("bundle-9.9.9", lib64=lib64)
+                    default = self.run_dev_env(b"9.9.9\n", **ld)
+                    explicit = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix), **ld)
+                    self.assertEqual(default.returncode, 0, default.stderr)
+                    self.assertEqual(default.stderr, "")
+                    default_env = self.env_of(default)
+                    self.assertNotIn("RUBIN_OPENSSL_PREFIX", default_env)
+                    self.assert_bundle_env(default_env, prefix, lib64, tail)
+                    self.assert_bundle_env(self.env_of(explicit), prefix, lib64, tail)
+                    explicit_env = self.env_of(explicit)
+                    self.assertNotIn("OPENSSL_CONF", default_env)
+                    self.assertNotIn("OPENSSL_CONF", explicit_env)
+                    self.assertEqual(explicit_env.pop("RUBIN_OPENSSL_PREFIX"), str(prefix))
+                    self.assertEqual(default_env, explicit_env)
+
+    def test_bundle_bin_already_in_caller_path_is_not_moved(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        caller = f"{self.stubs}:{prefix}/bin:/usr/bin:/bin"
+        default = self.env_of(self.run_dev_env(b"9.9.9\n", PATH=caller))
+        explicit = self.env_of(self.run_dev_env(b"9.9.9\n", PATH=caller, RUBIN_OPENSSL_PREFIX=str(prefix)))
+        for env in (default, explicit):
+            self.assert_bundle_env(env, prefix, caller_path=caller)
+
+    def test_non_directory_lib_entries_are_not_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        (prefix / "lib64").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib")
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib/pkgconfig")
+        shutil.rmtree(self.home / ".cache")
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True, modules=False, modules64=True)
+        shutil.rmtree(prefix / "lib")
+        (prefix / "lib").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib64")
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig")
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_regular_file_as_lib64_pkgconfig_is_not_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        (prefix / "lib64").mkdir()
+        (prefix / "lib64" / "pkgconfig").write_text("", encoding="utf-8")
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib/pkgconfig")
+        self.assertEqual(env["LD_LIBRARY_PATH"], f"{prefix}/lib64:{prefix}/lib")
+
+    def test_explicit_prefix_without_library_directories_exports_no_empty_entries(self):
+        prefix = self.home / "bare"
+        (prefix / "bin").mkdir(parents=True)
+        write_stub(prefix / "bin" / "openssl", "#!/bin/sh\nexit 0\n")
+        for given, expected in (({}, None), ({"PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"}, ("/p", "/l"))):
+            with self.subTest(given=given):
+                proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix), **given)
+                env = self.env_of(proc)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+                self.assertEqual((env.get("PKG_CONFIG_PATH"), env.get("LD_LIBRARY_PATH")),
+                                 expected or (None, None))
+
+    def test_explicit_prefix_without_executable_openssl_is_refused(self):
+        prefix = self.make_bundle("bundle-other", openssl="plain")
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stderr, f"ERROR: RUBIN_OPENSSL_PREFIX is set but missing bin/openssl: {prefix}\n")
+
+    def test_explicit_prefix_with_modules_only_under_lib64(self):
+        prefix = self.make_bundle("bundle-other", modules=False, modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix)))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_empty_or_unset_variables_follow_the_baseline_rules(self):
+        pinned = self.make_bundle("bundle-9.9.9")
+        cases = (
+            {"RUBIN_OPENSSL_PREFIX": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl"},
+            {"OPENSSL_DIR": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
+            {"OPENSSL_DIR": "", "PKG_CONFIG_PATH": ""},
+            {"RUBIN_OPENSSL_PREFIX": "", "OPENSSL_DIR": "/caller/openssl", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
+            {"OPENSSL_DIR": "/caller/openssl"},
+            {"OPENSSL_DIR": "/caller/openssl", "PKG_CONFIG_PATH": "/p", "LD_LIBRARY_PATH": "/l"},
+        )
+        for given in cases:
+            with self.subTest(given=given):
+                proc = self.run_dev_env(b"9.9.9\n", **given)
+                env = self.env_of(proc)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(proc.stderr, "")
+                self.assert_baseline_env(env, given)
+                self.assertNotIn(str(pinned), proc.stdout)
+
+    def test_non_empty_explicit_prefix_wins_over_empty_or_set_openssl_dir(self):
+        self.make_bundle("bundle-9.9.9")
+        other = self.make_bundle("bundle-other")
+        for caller in ("", "/caller/openssl"):
+            with self.subTest(openssl_dir=caller):
+                env = self.env_of(self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(other), OPENSSL_DIR=caller))
+                self.assert_bundle_env(env, other)
+
+    def test_modules_only_under_lib64_is_built_and_exported(self):
+        prefix = self.make_bundle("bundle-9.9.9", modules=False, modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["OPENSSL_DIR"], str(prefix))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib64/ossl-modules")
+
+    def test_empty_pkg_config_path_leaves_no_trailing_colon(self):
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", PKG_CONFIG_PATH=""))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig:{prefix}/lib/pkgconfig")
+
+    def test_modules_prefer_lib_when_both_exist(self):
+        prefix = self.make_bundle("bundle-9.9.9", modules64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n"))
+        self.assertEqual(env["OPENSSL_MODULES"], f"{prefix}/lib/ossl-modules")
+
+    def test_explicit_prefix_needs_only_executable_openssl(self):
+        prefix = self.make_bundle("bundle-other", cnf=False, modules=False)
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(prefix))
+        self.assertEqual(self.env_of(proc)["OPENSSL_DIR"], str(prefix))
+        self.assertEqual(proc.stderr, "")
+
+    def test_preset_pkg_config_path_is_kept_after_bundle_paths(self):
+        prefix = self.make_bundle("bundle-9.9.9", lib64=True)
+        env = self.env_of(self.run_dev_env(b"9.9.9\n", PKG_CONFIG_PATH="/pre"))
+        self.assertEqual(env["PKG_CONFIG_PATH"], f"{prefix}/lib64/pkgconfig:{prefix}/lib/pkgconfig:/pre")
+
+    def test_fips_only_wires_config_for_pinned_bundle(self):
+        prefix = self.make_bundle("bundle-9.9.9")
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_FIPS_MODE="only", RUBIN_OPENSSL_SKIP_FIPS_GUARD="1")
+        self.assertEqual(self.env_of(proc)["OPENSSL_CONF"], f"{prefix}/ssl/openssl-fips.cnf")
+
+    def test_unbuilt_bundle_warns_once_and_keeps_fallback(self):
+        for name, build in (
+            ("no directory", None),
+            ("directory without executable", {"openssl": None}),
+            ("directory as executable", {"openssl": "dir"}),
+            ("non-executable regular file", {"openssl": "plain"}),
+            ("no fips config", {"cnf": False}),
+            ("no modules directory", {"modules": False}),
+            ("directory as fips config", {"cnf": "dir"}),
+            ("regular file as modules", {"modules": "file"}),
+            ("regular file as lib64 modules", {"modules": False, "modules64": "file"}),
+        ):
+            with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                if build is not None:
+                    self.make_bundle("bundle-9.9.9", **build)
+                proc = self.run_dev_env(b"9.9.9\n")
+                prefix = self.home / ".cache" / "rubin-openssl" / "bundle-9.9.9"
+                self.assertEqual(proc.returncode, 0)
+                self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+                self.assertIn(str(prefix), proc.stderr)
+                self.assertIn(BUILD_COMMAND, proc.stderr)
+                self.assert_fallback_env(proc, prefix)
+                self.assertNotIn(str(prefix), self.env_of(proc).get("LD_LIBRARY_PATH", ""))
+
+    def test_unusable_version_warns_without_echoing_its_bytes(self):
+        self.make_bundle("bundle-9.9.9")
+        for raw in (b"9.9.9 \n", b"9.9.9\r\n", b"9.9.9", b"9.9.9\n\n", b"9.9.9\n\x00junk", b"9.9\n", b".9.9\n", b"9..9\n", b"9x9x9\n", b"v9.9.9\n", b"9.9.9.9\n", b""):
+            with self.subTest(raw=raw):
+                proc = self.run_dev_env(raw)
+                self.assertEqual(proc.returncode, 0)
+                self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+                self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
+                self.assertNotIn(BUILD_COMMAND, proc.stderr)
+                self.assertNotIn("9.9.9", proc.stderr)
+                self.assert_fallback_env(proc, self.home / ".cache/rubin-openssl/bundle-9.9.9")
+
+    def test_unreadable_version_warns_instead_of_failing(self):
+        self.version_file.unlink(missing_ok=True)
+        proc = self.run_dev_env(None)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+        self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
+        self.assertNotIn(BUILD_COMMAND, proc.stderr)
+        self.version_file.mkdir()
+        proc = self.run_dev_env(None)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
+    def test_unreadable_version_file_warns_instead_of_failing(self):
+        self.make_bundle("bundle-9.9.9")
+        self.version_file.write_bytes(b"9.9.9\n")
+        self.version_file.chmod(0)
+        self.addCleanup(self.version_file.chmod, 0o600)
+        proc = self.run_dev_env(None)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(len(proc.stderr.splitlines()), 1, proc.stderr)
+        self.assertIn("scripts/crypto/openssl/VERSION", proc.stderr)
+        self.assert_fallback_env(proc, self.home / ".cache/rubin-openssl/bundle-9.9.9")
+
+    def test_warning_with_closed_stderr_keeps_exit_status(self):
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
+        self.version_file.write_bytes(b"9.9.9\n")
+        proc = subprocess.run(["bash", "-c", 'exec 2>&-; exec bash "$1" -- true', "x", str(self.script)],
+                              capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(proc.returncode, 0)
+
+    def test_explicit_prefix_wins_over_pinned_default(self):
+        self.make_bundle("bundle-9.9.9")
+        other = self.make_bundle("bundle-other")
+        proc = self.run_dev_env(b"9.9.9\n", RUBIN_OPENSSL_PREFIX=str(other))
+        self.assertEqual(self.env_of(proc)["OPENSSL_DIR"], str(other))
+        self.assertEqual(proc.stderr, "")
+
+    def test_caller_exported_openssl_dir_is_kept_without_warning(self):
+        self.make_bundle("bundle-9.9.9")
+        proc = self.run_dev_env(b"9.9.9\n", OPENSSL_DIR="/caller/openssl")
+        self.assertEqual(self.env_of(proc)["OPENSSL_DIR"], "/caller/openssl")
+        self.assertEqual(proc.stderr, "")
 
 
 if __name__ == "__main__":

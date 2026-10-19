@@ -120,6 +120,9 @@ jobs:
         if: steps.cache-cargo-audit-sec.outputs.cache-hit != 'true'
         run: cargo install cargo-audit@0.22.2 --locked
 
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
+
       - name: Security precheck gate
         run: scripts/security/precheck.sh --ci
 
