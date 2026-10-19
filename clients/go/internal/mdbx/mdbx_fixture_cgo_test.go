@@ -3852,3 +3852,331 @@ func TestReaderGetOptionalSideNativeShape(t *testing.T) {
 		}
 	}
 }
+
+func initial148NativeStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := Create(filepath.Join(t.TempDir(), "db"), ConfigV1{1 << 20, 2 << 20, 256 << 20, 1 << 20, 2 << 20, 4096, 492})
+	mustEnvironment(t, err)
+	t.Cleanup(func() { _ = FixtureStartupRelease(store); _ = store.Close() })
+	return store
+}
+
+func initial148NativeTuple(t *testing.T, got, want OptionalSideValueV1, err error, diagnostic string) {
+	t.Helper()
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: got length=%d present=%v invalid=%v bytes=%d, want length=%d present=%v invalid=%v bytes=%d, %v", diagnostic, got.Length, got.Present, got.InvalidWidth, len(got.Value), want.Length, want.Present, want.InvalidWidth, len(want.Value), err)
+	}
+}
+
+func initial148NativeRefusal(t *testing.T, reader *Reader, dbi DBI, key []byte, diagnostic string) {
+	t.Helper()
+	got, err := reader.GetInitial148OptionalSide(dbi, key)
+	initial148NativeTuple(t, got, OptionalSideValueV1{}, nil, "initial148 refusal zero tuple")
+	engine := requireEnvironmentError(t, err, EngineClass("InvalidInput"), engineOperation("get"), 22, diagnostic)
+	if engine.Cause != nil || engine.ReopenRequired {
+		t.Fatal("initial148 direct refusal error fields")
+	}
+}
+
+func TestInitial148NativeReaderFixture(t *testing.T) {
+	store, header := initial148NativeStore(t), initial148NativeLiteral(t)
+	rows := []struct {
+		rank   uint8
+		length int
+		valid  bool
+	}{{3, 0, false}, {3, 116, false}, {3, 147, false}, {3, 148, true}, {3, 149, false}, {4, 0, false}, {4, 147, false}, {4, 148, true}, {4, 149, true}, {4, 68_000_157, true}, {4, 68_000_158, false}}
+	for i, row := range rows {
+		key, value := [32]byte{byte(i + 1)}, make([]byte, row.length)
+		copy(value, header)
+		mustEnvironment(t, FixtureSeedRawRow(store, row.rank, key[:], value))
+	}
+	var escaped *Reader
+	var held []byte
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		escaped = reader
+		for i, row := range rows {
+			key, want := [32]byte{byte(i + 1)}, OptionalSideValueV1{Length: uint64(row.length), Present: true, InvalidWidth: !row.valid}
+			if row.valid {
+				want.Value = make([]byte, row.length)
+				copy(want.Value, header)
+			}
+			got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[row.rank], key[:])
+			initial148NativeTuple(t, got, want, err, fmt.Sprintf("initial148 native tuple/bad width rank%d length%d", row.rank, row.length))
+			if reader.failure != nil || !reader.usable() || key != ([32]byte{byte(i + 1)}) {
+				t.Fatal("initial148 native bad width poisoned Reader")
+			}
+			if row.valid {
+				got.Value[0] ^= 1
+				got.Value[len(got.Value)-1] ^= 1
+				again, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[row.rank], key[:])
+				initial148NativeTuple(t, again, want, err, "initial148 native owned copy")
+				if row.length == 149 {
+					held = again.Value
+				}
+			}
+			validKey := [32]byte{4}
+			next, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], validKey[:])
+			initial148NativeTuple(t, next, OptionalSideValueV1{Value: header, Length: 148, Present: true}, err, "initial148 next legal operation")
+		}
+		missing := [32]byte{255}
+		for _, rank := range []uint8{3, 4} {
+			got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[rank], missing[:])
+			initial148NativeTuple(t, got, OptionalSideValueV1{}, err, "initial148 native absent")
+		}
+		return nil
+	}))
+	for _, dbi := range []DBI{readDBIsLiteral()[3], {}} {
+		for _, key := range [][]byte{make([]byte, 32), nil} {
+			initial148NativeRefusal(t, escaped, dbi, key, "Reader is not active")
+		}
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		key := [32]byte{4}
+		got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], key[:])
+		initial148NativeTuple(t, got, OptionalSideValueV1{Value: header, Length: 148, Present: true}, err, "initial148 next legal operation sibling View")
+		return nil
+	}))
+	mustEnvironment(t, store.Close())
+	if escaped.active.Load() || escaped.failure != nil || !bytes.Equal(held, append(bytes.Clone(header), 0)) {
+		t.Fatal("initial148 reader expires or owned copy changed after View/Close")
+	}
+}
+
+func TestInitial148NativeInputs(t *testing.T) {
+	key := make([]byte, 32)
+	for _, reader := range []*Reader{nil, {}} {
+		for _, dbi := range []DBI{readDBIsLiteral()[3], {}} {
+			for _, input := range [][]byte{key, nil} {
+				initial148NativeRefusal(t, reader, dbi, input, "Reader is not active")
+			}
+		}
+	}
+	store := initial148NativeStore(t)
+	for _, rank := range []uint8{2, 3, 4, 5} {
+		for _, length := range []int{31, 32, 33} {
+			mustEnvironment(t, FixtureSeedRawRow(store, rank, make([]byte, length), make([]byte, 147)))
+		}
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		copied := &Reader{self: reader, txn: reader.txn, dbis: reader.dbis}
+		copied.active.Store(true)
+		for _, dbi := range []DBI{readDBIsLiteral()[3], {}} {
+			for _, input := range [][]byte{key, nil} {
+				initial148NativeRefusal(t, copied, dbi, input, "Reader is not active")
+			}
+		}
+		for _, row := range []struct {
+			dbi DBI
+			key []byte
+		}{{readDBIsLiteral()[2], key}, {readDBIsLiteral()[5], key}, {DBI{"wrong", 3, 0}, key}, {DBI{"headers-v1", 3, 1}, key}, {DBI{"wrong", 4, 0}, key}, {DBI{"blocks-v1", 4, 1}, key}, {readDBIsLiteral()[3], nil}, {readDBIsLiteral()[3], key[:31]}, {readDBIsLiteral()[3], make([]byte, 33)}, {readDBIsLiteral()[4], key[:31]}, {readDBIsLiteral()[4], make([]byte, 33)}} {
+			initial148NativeRefusal(t, reader, row.dbi, row.key, "invalid optional-side DBI or key")
+			if reader.failure != nil || !reader.usable() {
+				t.Fatal("initial148 direct input refusal recorded or disarmed")
+			}
+			got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], key)
+			initial148NativeTuple(t, got, OptionalSideValueV1{Length: 147, Present: true, InvalidWidth: true}, err, "initial148 next legal operation after input refusal")
+		}
+		return nil
+	}))
+}
+
+func TestInitial148NativeShape(t *testing.T) {
+	for _, rank := range []uint8{3, 4} {
+		for _, row := range []struct {
+			rc      int
+			present bool
+			length  uint64
+		}{{0, false, 148}, {-30798, true, 0}, {-30798, false, 1}, {-30798, true, 1}} {
+			got, err := fixtureInitial148OptionalSideShape(readDBIsLiteral()[rank], row.rc, row.present, row.length)
+			initial148NativeTuple(t, got, OptionalSideValueV1{}, nil, "initial148 impossible native zero tuple")
+			engine := requireEnvironmentError(t, err, EngineClass("LocalInvariant"), engineOperation("get"), -30779, "mdbx_get returned invalid result shape")
+			if engine.Cause != nil || engine.ReopenRequired {
+				t.Fatal("initial148 impossible native error tuple")
+			}
+		}
+		got, err := fixtureInitial148OptionalSideShape(readDBIsLiteral()[rank], -30798, false, 0)
+		initial148NativeTuple(t, got, OptionalSideValueV1{}, err, "initial148 native shape absence")
+		for _, present := range []bool{false, true} {
+			got, err := fixtureInitial148OptionalSideShape(readDBIsLiteral()[rank], 0, present, 0)
+			initial148NativeTuple(t, got, OptionalSideValueV1{Present: true, InvalidWidth: true}, err, "initial148 native zero width")
+		}
+		for _, length := range []uint64{147, 68_000_158, 1 << 31, 1<<64 - 1} {
+			got, err := fixtureInitial148OptionalSideShape(readDBIsLiteral()[rank], 0, true, length)
+			initial148NativeTuple(t, got, OptionalSideValueV1{Length: length, Present: true, InvalidWidth: true}, err, "initial148 native narrowing refused")
+		}
+		got, err = fixtureInitial148OptionalSideShape(readDBIsLiteral()[rank], 5, false, 0)
+		initial148NativeTuple(t, got, OptionalSideValueV1{}, nil, "initial148 EIO zero tuple")
+		engine := requireEnvironmentError(t, err, EngineClass("IO"), engineOperation("get"), 5, "error 5")
+		if engine.Cause != nil || engine.ReopenRequired {
+			t.Fatal("initial148 EIO error tuple")
+		}
+	}
+}
+
+func TestInitial148NativeCallbackLifetime(t *testing.T) {
+	for _, observation := range []string{"success", "bad width", "absent", "input refusal"} {
+		for _, completion := range []string{"nil", "error", "panic"} {
+			t.Run(observation+"/"+completion, func(t *testing.T) {
+				store, header, key := initial148NativeStore(t), initial148NativeLiteral(t), [32]byte{1}
+				mustEnvironment(t, FixtureSeedRawRow(store, 3, key[:], header))
+				bad := [32]byte{2}
+				mustEnvironment(t, FixtureSeedRawRow(store, 3, bad[:], header[:147]))
+				application, marker := errors.New("initial148 application"), &struct{}{}
+				var escaped *Reader
+				var result error
+				var panicked any
+				func() {
+					defer func() { panicked = recover() }()
+					result = store.View(func(reader *Reader) error {
+						escaped = reader
+						selected, want := key, OptionalSideValueV1{Value: header, Length: 148, Present: true}
+						switch observation {
+						case "bad width":
+							selected, want = bad, OptionalSideValueV1{Length: 147, Present: true, InvalidWidth: true}
+						case "absent":
+							selected, want = [32]byte{3}, OptionalSideValueV1{}
+						case "input refusal":
+							initial148NativeRefusal(t, reader, readDBIsLiteral()[2], key[:], "invalid optional-side DBI or key")
+						}
+						got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], selected[:])
+						initial148NativeTuple(t, got, want, err, "initial148 callback observation")
+						next, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], key[:])
+						initial148NativeTuple(t, next, OptionalSideValueV1{Value: header, Length: 148, Present: true}, err, "initial148 next legal operation in callback")
+						if completion == "panic" {
+							panic(marker)
+						}
+						if completion == "error" {
+							return application
+						}
+						return nil
+					})
+				}()
+				if completion == "panic" && panicked != marker || completion != "panic" && panicked != nil || (completion == "error") != sameError(result, application) || completion != "error" && result != nil || escaped.failure != nil || escaped.active.Load() || store.state != storeOPEN || !validStoreShape(store) {
+					t.Fatal("initial148 reader expires: application outcome/resource shape")
+				}
+				initial148NativeRefusal(t, escaped, DBI{}, nil, "Reader is not active")
+				mustEnvironment(t, store.View(func(reader *Reader) error {
+					got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[3], key[:])
+					initial148NativeTuple(t, got, OptionalSideValueV1{Value: header, Length: 148, Present: true}, err, "initial148 next legal operation after callback")
+					return nil
+				}))
+			})
+		}
+	}
+}
+
+func TestInitial148NativeFailureRecording(t *testing.T) {
+	for _, update := range []bool{false, true} {
+		for _, completion := range []string{"ignored", "returned", "wrapped", "application", "panic"} {
+			for _, abort := range []uint32{0, 9, 10} {
+				t.Run(fmt.Sprintf("update%v/%s/abort%d", update, completion, abort), func(t *testing.T) {
+					store, key := initial148NativeStore(t), [32]byte{1}
+					env, writer := store.env, store.writer
+					var escaped *Reader
+					var recorded, returned, application error
+					var panicked any
+					marker := &struct{}{}
+					callback := func(reader *Reader) error {
+						escaped = reader
+						initial148NativeRefusal(t, reader, readDBIsLiteral()[2], key[:], "invalid optional-side DBI or key")
+						initial148NativeRefusal(t, reader, readDBIsLiteral()[4], key[:31], "invalid optional-side DBI or key")
+						if reader.failure != nil || !reader.usable() {
+							t.Fatal("initial148 direct refusal reached native/recording")
+						}
+						got, err := reader.GetInitial148OptionalSide(readDBIsLiteral()[4], key[:])
+						initial148NativeTuple(t, got, OptionalSideValueV1{}, nil, "initial148 native failure zero tuple")
+						engine := requireEnvironmentError(t, err, EngineClass("IO"), engineOperation("get"), 5, "error 5")
+						if engine.Cause != nil || engine.ReopenRequired || !sameError(reader.failure, err) || reader.active.Load() || reader.usable() {
+							t.Fatal("initial148 native failure recording")
+						}
+						recorded = err
+						for _, dbi := range []DBI{readDBIsLiteral()[4], {}} {
+							for _, input := range [][]byte{key[:], nil} {
+								initial148NativeRefusal(t, reader, dbi, input, "Reader is not active")
+							}
+						}
+						switch completion {
+						case "returned":
+							application = recorded
+						case "wrapped":
+							application = fmt.Errorf("initial148 wrapped: %w", recorded)
+						case "application":
+							application = errors.New("initial148 distinct application")
+						case "panic":
+							panic(marker)
+						}
+						return application
+					}
+					invoke := func() {
+						defer func() { panicked = recover() }()
+						if !update {
+							returned = store.View(callback)
+							return
+						}
+						truth, stage, err := store.Update(func(reader *Reader) (Batch, error) { return Batch{}, callback(reader) })
+						returned = err
+						if truth != CommitTruth(1) || stage != UpdateStage(1) {
+							t.Fatal("initial148 native failure Update truth/stage")
+						}
+					}
+					arm := func() {
+						evidence, err := FixtureSelectedDamage(store, bootstrapOwner(t), SelectedDamageGetEIO, 4, key[:], invoke)
+						mustEnvironment(t, err)
+						if evidence.BeginOld != 1 || evidence.BeginRead != 0 || evidence.BeginWrite != 0 || evidence.OldGets != ([8]uint64{4: 1}) || evidence.ReadGets != 0 || evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 {
+							t.Fatalf("initial148 native failure recording census: %+v", evidence)
+						}
+					}
+					if abort == 0 {
+						arm()
+					} else {
+						_, err := fixtureLargeFault(store, abort, 4, key[:], arm)
+						mustEnvironment(t, err)
+					}
+					if completion == "panic" && panicked != marker || completion != "panic" && panicked != nil || !sameError(escaped.failure, recorded) || escaped.active.Load() || !validStoreShape(store) {
+						t.Fatal("initial148 native failure recording: enclosing outcome/Reader")
+					}
+					terminal, primary := store.terminal, store.terminal
+					if completion != "panic" && !sameError(returned, terminal) {
+						t.Fatal("initial148 enclosing error object replaced")
+					}
+					if abort == 10 {
+						engine := requireEnvironmentError(t, terminal, EngineClass("LocalInvariant"), engineOperation("abort"), -30416, pinnedNegativeDiagnostics[-30416])
+						primary = engine.Cause
+						if store.state != storePOISONEDTHREAD || store.txn != escaped.txn || store.env != env || store.writer != writer || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() {
+							t.Fatal("initial148 retained cleanup resource shape")
+						}
+					} else {
+						if store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() {
+							t.Fatal("initial148 consumed cleanup resource shape")
+						}
+						if abort == 9 {
+							parts := terminal.(interface{ Unwrap() []error }).Unwrap()
+							if len(parts) != 2 {
+								t.Fatal("initial148 abort error order")
+							}
+							primary = parts[0]
+							requireEnvironmentError(t, parts[1], EngineClass("IO"), engineOperation("abort"), 5, "error 5")
+						}
+					}
+					if completion == "wrapped" || completion == "application" {
+						parts := primary.(interface{ Unwrap() []error }).Unwrap()
+						if len(parts) != 2 || !sameError(parts[0], application) || !sameError(parts[1], recorded) {
+							t.Fatal("initial148 application/recorded source order or identity")
+						}
+					} else if !sameError(primary, recorded) {
+						t.Fatal("initial148 exact recorded source identity")
+					}
+					initial148NativeRefusal(t, escaped, DBI{}, nil, "Reader is not active")
+					if !sameError(store.View(func(*Reader) error { t.Fatal("terminal callback"); return nil }), terminal) {
+						t.Fatal("initial148 next legal operation terminal View")
+					}
+					truth, stage, next := store.Update(func(*Reader) (Batch, error) { t.Fatal("terminal Update"); return Batch{}, nil })
+					if truth != CommitTruth(1) || stage != UpdateStage(1) || !sameError(next, terminal) {
+						t.Fatal("initial148 next legal operation terminal Update")
+					}
+					mustEnvironment(t, FixtureStartupRelease(store))
+				})
+			}
+		}
+	}
+}

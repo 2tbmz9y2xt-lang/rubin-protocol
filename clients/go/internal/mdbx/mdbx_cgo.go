@@ -2647,6 +2647,54 @@ func optionalSideResult(dbi DBI, key []byte, rc int, bytes unsafe.Pointer, lengt
 	}
 }
 
+// GetInitial148OptionalSide explicitly observes one dormant initial148 header or
+// block row. It preserves GetOptionalSide's absence, damage and Reader lifecycle
+// contract, using fixed widths 148 and 148..68000157 respectively. It neither
+// recognizes a database format nor checks hash identity or body validity.
+func (r *Reader) GetInitial148OptionalSide(dbi DBI, key []byte) (OptionalSideValueV1, error) {
+	if !r.usable() {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	if (dbi != schemaDBIs[3] && dbi != schemaDBIs[4]) || len(key) != 32 {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid optional-side DBI or key", nil)
+	}
+	r.getMu.Lock()
+	defer r.getMu.Unlock()
+	if !r.usable() {
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)
+	}
+	value := C.rubin_mdbx_get(r.txn, r.dbis[dbi.Rank], unsafe.Pointer(&key[0]), C.size_t(len(key)))
+	runtime.KeepAlive(key)
+	result, err := initial148OptionalSideResult(dbi, int(value.rc), unsafe.Pointer(value.bytes), value.length)
+	if err != nil {
+		r.failure = err
+		r.active.Store(false)
+	}
+	return result, err
+}
+
+// initial148OptionalSideResult admits shape and fixed bounds before narrowing
+// length for the only copy. C.size_t is 64-bit on supported targets; every legal
+// value fits C.int. A zero-width success is damage, never getResultEmpty.
+func initial148OptionalSideResult(dbi DBI, rc int, bytes unsafe.Pointer, length C.size_t) (OptionalSideValueV1, error) {
+	minimum, maximum := uint64(Initial148HeaderBytes), uint64(Initial148HeaderBytes)
+	if dbi.Rank == 4 {
+		maximum = Initial148MaxBlockBytes
+	}
+	switch getResultDecision(rc, bytes != nil, uint64(length), minimum, maximum) {
+	case getResultAbsent:
+		return OptionalSideValueV1{}, nil
+	case getResultInvalidBound:
+		return OptionalSideValueV1{Length: uint64(length), Present: true, InvalidWidth: true}, nil
+	case getResultCopy:
+		return OptionalSideValueV1{Value: C.GoBytes(bytes, C.int(length)), Length: uint64(length), Present: true}, nil
+	case getResultInvalidShape:
+		return OptionalSideValueV1{}, adapterError(operationGet, EngineLocalInvariant, codeProblem, "mdbx_get returned invalid result shape", nil)
+	default:
+		return OptionalSideValueV1{}, nativeError(operationGet, rc)
+	}
+}
+
 // ReadRequiredSideLink returns the owned 104-byte staged-v1 SideLink (generation, height): hash, parent hash and
 // chainwork. Postconditions: generation zero is a direct InvalidInput refusal that records nothing; a width, shape or
 // native failure is the error Get already recorded; a positively absent row or one whose chainwork is outside

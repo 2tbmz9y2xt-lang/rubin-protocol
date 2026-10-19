@@ -1040,6 +1040,17 @@ func fixtureOptionalSideShape(dbi DBI, rc int, present bool, length uint64) (Opt
 	return optionalSideResult(dbi, make([]byte, 32), rc, value, C.size_t(length))
 }
 
+// fixtureInitial148OptionalSideShape supplies only tuples refused before copy;
+// the one-byte anchor must never be used as a legal-width value.
+func fixtureInitial148OptionalSideShape(dbi DBI, rc int, present bool, length uint64) (OptionalSideValueV1, error) {
+	var anchor [1]byte
+	var value unsafe.Pointer
+	if present {
+		value = unsafe.Pointer(&anchor[0])
+	}
+	return initial148OptionalSideResult(dbi, rc, value, C.size_t(length))
+}
+
 // SelectedDamageScenario is one closed native-boundary scenario of the fixture-only mdbx_cgo.go preamble block; its
 // values are that block's scenario numbers.
 type SelectedDamageScenario uint32
