@@ -24,12 +24,18 @@ CALLERS = (
     ("ci.yml", "go_race_node", None, None, {}),
     ("ci.yml", "formal_refinement", "steps.formal_gate.outputs.run_formal == 'true'", "openssl", {}),
     ("ci.yml", "conformance_fixtures_drift", None, None, {}),
+    ("ci.yml", "security_ai", None, None, {}),
+    ("codeql.yml", "analyze", "matrix.language == 'go'", None, {}),
     ("codacy-coverage.yml", "coverage", None, None, {}),
     ("combined-load-nightly.yml", "combined-load", None, "openssl", {}),
     ("fips-only-nightly.yml", "fips-only-smoke", None, "openssl", {}),
     ("fuzz-nightly.yml", "fuzz-stage2", None, None,
      {"cache-key-prefix": "openssl-bundle-mldsa-verified", "cache-revision": "v1"}),
+    ("fuzz-nightly.yml", "fuzz-rust", None, None, {}),
+    ("kani.yml", "kani", "steps.scope.outputs.run == 'true'", None, {}),
     ("runtime-perf-guardrails.yml", "runtime-perf", None, "openssl", {}),
+    ("security-supply-chain-nightly.yml", "rust-miri", None, None, {}),
+    ("security-supply-chain-nightly.yml", "cargo-mutants", None, None, {}),
 )
 
 
@@ -172,6 +178,15 @@ class OpenSSLBundleCacheIdentityTests(unittest.TestCase):
             self.assertEqual(call.get("if"), expected_if, f"{path_name}:{job_id}: condition changed")
             self.assertEqual(call.get("id"), expected_id, f"{path_name}:{job_id}: output id changed")
             self.assertEqual(call.get("with") or {}, expected_with, f"{path_name}:{job_id}: cache identity changed")
+
+    @unittest.skipUnless(HAS_PYYAML, "PyYAML unavailable")
+    def test_no_workflow_step_installs_the_distribution_openssl_package(self):
+        yaml = m.load_yaml_module()
+        for path in workflow_files():
+            document = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_id, steps in job_steps(document):
+                for step in (item for item in steps if isinstance(item, dict)):
+                    self.assertNotIn("libssl-dev", str(step.get("run", "")), f"{path.name}:{job_id}: distribution OpenSSL package bypasses the bundle")
 
 
 if __name__ == "__main__":

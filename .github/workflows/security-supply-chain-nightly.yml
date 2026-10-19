@@ -215,12 +215,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install OpenSSL dev headers
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
 
       - name: Install Rust nightly with miri
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable branch SHA, pinned action
@@ -281,12 +277,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install OpenSSL dev headers
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libssl-dev pkg-config
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
