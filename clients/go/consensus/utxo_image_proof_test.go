@@ -28,8 +28,10 @@ const (
 	imageTestHY  = "a92ec5b09f47d0d0b02daac535a9b2633d7268fad9262957a81f31b1fd1abd11"
 )
 
-const imageTestLeafPreimage = "525542494e5f5554584f5f545245455f563101"
-const imageTestBranchPreimage = "525542494e5f5554584f5f545245455f563102"
+const (
+	imageTestLeafPreimage   = "525542494e5f5554584f5f545245455f563101"
+	imageTestBranchPreimage = "525542494e5f5554584f5f545245455f563102"
+)
 
 type imageProofLeaf struct {
 	entry UTXOImageEntry
@@ -40,10 +42,12 @@ func imageProofLeaves(t *testing.T) [8]imageProofLeaf {
 	t.Helper()
 	// A,B,C,X,Y,X2,vout255,vout256: the LE leaf and BE key literals are
 	// independently written; no routing/entry encoder derives either side.
-	txids := [8]string{strings.Repeat("00", 32), strings.Repeat("00", 32),
+	txids := [8]string{
+		strings.Repeat("00", 32), strings.Repeat("00", 32),
 		"80" + strings.Repeat("00", 31), "a7" + strings.Repeat("55", 31),
 		"b9" + strings.Repeat("ff", 31), "a7" + strings.Repeat("55", 31),
-		strings.Repeat("00", 32), strings.Repeat("00", 32)}
+		strings.Repeat("00", 32), strings.Repeat("00", 32),
+	}
 	vouts := [8]uint32{0, 1, 0, 0, 0, 1, 255, 256}
 	leafVout := [8]string{"00000000", "01000000", "00000000", "00000000", "00000000", "01000000", "ff000000", "00010000"}
 	keyVout := [8]string{"00000000", "00000001", "00000000", "00000000", "00000000", "00000001", "000000ff", "00000100"}
@@ -134,7 +138,9 @@ func TestUTXOImageRanges(t *testing.T) {
 		{"C3_ABSENT_INTERNAL", imageTestC07, "b0" + strings.Repeat("00", 35), "01000000" + y.s + "01" + x.s + "0000" + "0000", UTXOImageRange{Entries: []UTXOImageEntry{y.entry}, Predecessor: &x.entry, Terminal: true}},
 		{"C3_AFTER_LAST", imageTestC07, strings.Repeat("ff", 36), "00000000" + "01" + y.s + "0100" + "0003" + imageTestHX + "0000", UTXOImageRange{Predecessor: &y.entry, Terminal: true}},
 	} {
-		t.Run(tc.id, func(t *testing.T) { imageProofAccept(t, tc.id, imageProofPayload(t, tc.root, tc.start, tc.body), tc.want) })
+		t.Run(tc.id, func(t *testing.T) {
+			imageProofAccept(t, tc.id, imageProofPayload(t, tc.root, tc.start, tc.body), tc.want)
+		})
 	}
 }
 
@@ -190,8 +196,11 @@ func TestUTXOImageProofFields(t *testing.T) {
 		id, compact string
 		n           int
 	}{
-		{"C2_DECODE_DATA0", "00", 0}, {"C2_DECODE_DATA252", "fc", 252}, {"C2_DECODE_DATA253", "fdfd00", 253},
-		{"C2_DECODE_DATA65535", "fdffff", 65535}, {"C2_DECODE_DATA65536", "fe00000100", 65536},
+		{"C2_DECODE_DATA0", "00", 0},
+		{"C2_DECODE_DATA252", "fc", 252},
+		{"C2_DECODE_DATA253", "fdfd00", 253},
+		{"C2_DECODE_DATA65535", "fdffff", 65535},
+		{"C2_DECODE_DATA65536", "fe00000100", 65536},
 	} {
 		s := strings.Repeat("00", 36) + "0100000000000000" + "0000" + tc.compact + strings.Repeat("22", tc.n) + strings.Repeat("00", 9)
 		entry := UTXOImageEntry{Entry: UtxoEntry{Value: 1}}
@@ -202,7 +211,7 @@ func TestUTXOImageProofFields(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		id, value, covenant, height, txid string
-		entry                            UTXOImageEntry
+		entry                             UTXOImageEntry
 	}{
 		{"C2_DECODE_VALUE0", "0000000000000000", "0000", "0000000000000000", strings.Repeat("00", 32), UTXOImageEntry{}},
 		{"C2_DECODE_VALUE_MAX", "ffffffffffffffff", "0000", "0000000000000000", strings.Repeat("00", 32), UTXOImageEntry{Entry: UtxoEntry{Value: ^uint64(0)}}},
