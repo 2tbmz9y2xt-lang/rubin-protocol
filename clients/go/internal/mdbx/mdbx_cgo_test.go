@@ -373,7 +373,11 @@ func TestEngineDomainClosure(t *testing.T) {
 	if got := adapterError(operationUpdate, EngineStateMismatch, codeProblem, "mismatch", cause); got.Class != EngineStateMismatch || got.Operation != string(operationUpdate) || got.Code != codeProblem || got.Diagnostic != "mismatch" || !errors.Is(got, cause) {
 		t.Fatal("StateMismatch operation closure drifted")
 	}
-	for _, operation := range []engineOperation{operationCreate, operationOpen, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect} {
+	if got := adapterError(operationOpen, EngineStateMismatch, codeProblem, "recognized schema", cause); got.Class != EngineStateMismatch || got.Operation != "open" || got.Code != -30779 || got.Diagnostic != "recognized schema" || !sameError(got.Cause, cause) || got.ReopenRequired {
+		t.Fatal("recognized schema StateMismatch open domain")
+	}
+
+	for _, operation := range []engineOperation{operationCreate, operationInit, operationAbort, operationClose, operationView, operationGet, operationPrefixPage, operationInspect} {
 		got := adapterError(operation, EngineStateMismatch, codeProblem, "mismatch", cause)
 		if got.Class != EngineLocalInvariant || got.Operation != string(operation) || got.Code != codeProblem || got.Diagnostic != "unsupported engine class" || !errors.Is(got, cause) {
 			t.Fatal("StateMismatch operation closure drifted")
@@ -827,6 +831,7 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	busyTerminal := nativeError(operationClose, codeBusy)
 	published := &Store{env: env, writer: writer, config: cfg, dbis: dbis, state: storeCLOSEBLOCKED, terminal: busyTerminal}
 	published.self = published
+	published.format.Store(2)
 	construction := &Store{env: env, writer: writer, state: storeCLOSEBLOCKED, terminal: orderedErrors(operationClose, orderResultCausesPrimary, errors.New("construction"), busyTerminal)}
 	construction.self = construction
 	unknown := &Store{state: "UNKNOWN"}
@@ -1180,7 +1185,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	if initOutcome.poisoned || openOutcome.poisoned {
 		t.Fatal("nil environment produced a poison owner")
 	}
-	_, initSchemaErr := initializeSchema(empty.txn, encoded)
+	_, initSchemaErr := initializeSchema(empty.txn, encoded, 2, [32]byte{})
 	requireEnvironmentError(t, initSchemaErr, EngineInvalidInput, operationInit, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	for _, create := range []bool{false, true} {
 		_, schemaErr := openSchemaDBIs(empty.txn, create, map[bool]engineOperation{false: operationOpen, true: operationInit}[create])
@@ -1204,15 +1209,18 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	requireEnvironmentError(t, openNativeEnvironment(native.env, filepath.Join(t.TempDir(), "missing", "db"), 0, 0, operationOpen), EngineIO, operationOpen, int(syscall.ENOENT), expectedNativeDiagnostic(int(syscall.ENOENT)))
 	consumeNativeTestStore(t, native)
 	invalidReaders, cfg := &Store{}, environmentConfig()
+	invalidReaders.format.Store(2)
 	cfg.MaxReaders = 0
 	requireEnvironmentError(t, invalidReaders.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidReaders)
 	invalidGeometry := &Store{}
+	invalidGeometry.format.Store(2)
 	cfg = environmentConfig()
 	cfg.PageSize = 3
 	requireEnvironmentError(t, invalidGeometry.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidGeometry)
 	invalidOpenReaders := &Store{}
+	invalidOpenReaders.format.Store(2)
 	cfg, cfg.MaxReaders = environmentConfig(), 0
 	requireEnvironmentError(t, invalidOpenReaders.openEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidOpenReaders)
@@ -1233,6 +1241,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	changed.Upper *= 2
 	geometry := &Store{writer: geometryWriter}
 	geometry.self = geometry
+	geometry.format.Store(2)
 	mustEnvironment(t, geometry.configureCreateEnvironment(geometryPath, changed))
 	mustEnvironment(t, geometry.createEnvironment(geometryPath, changed))
 	geometryOutcome := runLocked(func() transactionOutcome { return geometry.inspectOpenLocked(original) })
@@ -1249,6 +1258,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "malformed")
 		malformed := &Store{}
 		malformed.self = malformed
+		malformed.format.Store(2)
 		mustEnvironment(t, malformed.configureCreateEnvironment(path, original))
 		mustEnvironment(t, createDirectory(path))
 		writer, err := acquireWriter(path, operationCreate, true)
@@ -1268,6 +1278,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	nativeLink := closedEnvironment(t)
 	mustEnvironment(t, os.Link(filepath.Join(nativeLink, "mdbx.dat"), filepath.Join(nativeLink, "mdbx.dat.alias")))
 	linked := &Store{}
+	linked.format.Store(2)
 	mustEnvironment(t, linked.configureCreateEnvironment(nativeLink, environmentConfig()))
 	requireEnvironmentError(t, linked.createEnvironment(nativeLink, environmentConfig()), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
 	consumeNativeTestStore(t, linked)
@@ -2310,6 +2321,7 @@ func TestReadDispositionEffects(t *testing.T) {
 	t.Run("begin nonnil poisons", func(t *testing.T) {
 		store := newStore(t)
 		cfg, dbis := store.config, store.dbis
+		format, identity := store.format.Load(), store.databaseID
 		txn := store.txn
 		mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
 		primary := nativePointerResultError(operationView, "mdbx_txn_begin returned invalid result shape", codeEIO, true)
@@ -2318,6 +2330,8 @@ func TestReadDispositionEffects(t *testing.T) {
 			t.Fatalf("begin nonnil poison ownership drifted: %v/%s", got, store.state)
 		}
 		store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+		store.format.Store(format)
+		store.databaseID = identity
 		mustEnvironment(t, store.Close())
 	})
 	t.Run("application stays open", func(t *testing.T) {
@@ -2350,6 +2364,7 @@ func TestReadDispositionEffects(t *testing.T) {
 	t.Run("thread mismatch poisons", func(t *testing.T) {
 		store := newStore(t)
 		cfg, dbis := store.config, store.dbis
+		format, identity := store.format.Load(), store.databaseID
 		txn := store.txn
 		mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
 		primary := errors.New("callback")
@@ -2359,6 +2374,8 @@ func TestReadDispositionEffects(t *testing.T) {
 			t.Fatalf("abort mismatch disposition drifted: %v/%s", got, store.state)
 		}
 		store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+		store.format.Store(format)
+		store.databaseID = identity
 		mustEnvironment(t, store.Close())
 	})
 	t.Run("Inspect integrity consumes", func(t *testing.T) {
@@ -2374,89 +2391,124 @@ func TestReadDispositionEffects(t *testing.T) {
 }
 
 func TestViewReaderLifetimeAndConcurrentGet(t *testing.T) {
-	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
-	mustEnvironment(t, err)
-	defer func() { mustEnvironment(t, store.Close()) }()
-	dbis := readDBIsLiteral()
-	var nilReader *Reader
-	_, _, nilErr := nilReader.Get(DBI{}, nil)
-	requireEnvironmentError(t, nilErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
-	malformed := &Reader{}
-	malformed.self = malformed
-	malformed.active.Store(true)
-	_, _, malformedErr := malformed.Get(dbis[0], []byte{0})
-	requireEnvironmentError(t, malformedErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
-	var escaped *Reader
-	var copied *Reader
-	err = store.View(func(reader *Reader) error {
-		escaped = reader
-		copied = &Reader{self: reader.self, txn: reader.txn, dbis: reader.dbis}
-		copied.active.Store(true)
-		if _, _, copyErr := copied.Get(dbis[0], []byte{0}); copyErr == nil {
-			t.Fatal("copied Reader reached native Get")
-		}
-		_, _, dbiErr := reader.Get(DBI{}, nil)
-		if engine := requireEnvironmentError(t, dbiErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 DBI"); !sameError(engine.Cause, errSchema) {
-			t.Fatalf("DBI precedence Cause=%v", engine.Cause)
-		}
-		_, _, keyErr := reader.Get(dbis[0], nil)
-		requireEnvironmentError(t, keyErr, EngineInvalidInput, operationGet, codeEINVAL, "invalid SchemaV2 key")
-		start := make(chan struct{})
-		results := make(chan error, 2)
-		var workers sync.WaitGroup
-		workers.Add(2)
-		for range 2 {
-			go func() {
-				defer workers.Done()
-				<-start
-				value, present, getErr := reader.Get(dbis[0], []byte{1})
-				if getErr == nil && (!present || len(value) != 48) {
-					getErr = errors.New("concurrent Get serialization drifted")
+	for _, format := range []uint8{2, 3} {
+		t.Run(fmt.Sprintf("format%d", format), func(t *testing.T) {
+			path, cfg := filepath.Join(t.TempDir(), "db"), environmentConfig()
+			var store *Store
+			var err error
+			if format == 2 {
+				store, err = Create(path, cfg)
+			} else {
+				store, err = CreateTreeV1(path, cfg, [32]byte{7})
+			}
+			mustEnvironment(t, err)
+			defer func() { mustEnvironment(t, store.Close()) }()
+			dbis := readDBIsLiteral()
+			requireInactive := func(reader *Reader, dbi DBI, key []byte) {
+				t.Helper()
+				value, present, getErr := reader.Get(dbi, key)
+				treeNativeError(t, getErr, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+				if value != nil || present {
+					t.Fatal("inactive Reader returned value")
 				}
-				results <- getErr
-			}()
-		}
-		close(start)
-		workers.Wait()
-		for range 2 {
-			if getErr := <-results; getErr != nil {
-				t.Fatal(getErr)
+				if reader != nil && reader.failure != nil {
+					t.Fatal("inactive Reader recorded static refusal")
+				}
 			}
-		}
-		return nil
-	})
-	mustEnvironment(t, err)
-	for name, reader := range map[string]*Reader{"escaped": escaped, "copied": copied} {
-		_, _, getErr := reader.Get(dbis[0], []byte{0})
-		if engine := requireEnvironmentError(t, getErr, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active"); engine.Cause != nil {
-			t.Fatalf("%s Reader Cause=%v", name, engine.Cause)
-		}
+			var nilReader *Reader
+			requireInactive(nilReader, DBI{}, nil)
+			malformed := &Reader{}
+			malformed.self = malformed
+			malformed.active.Store(true)
+			requireInactive(malformed, dbis[0], []byte{0})
+			var escaped *Reader
+			var copied *Reader
+			err = store.View(func(reader *Reader) error {
+				escaped = reader
+				copied = &Reader{self: reader.self, txn: reader.txn, dbis: reader.dbis, format: reader.format, databaseID: reader.databaseID, treeConfig: reader.treeConfig}
+				copied.active.Store(true)
+				requireInactive(copied, dbis[0], []byte{0})
+				value, present, dbiErr := reader.Get(DBI{}, nil)
+				treeNativeError(t, dbiErr, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 DBI", errSchema)
+				if value != nil || present || reader.failure != nil || !reader.usable() {
+					t.Fatal("invalid descriptor changed active Reader")
+				}
+				value, present, keyErr := reader.Get(dbis[0], nil)
+				treeNativeError(t, keyErr, operationGet, EngineClass("InvalidInput"), 22, "invalid SchemaV2 key", nil)
+				if value != nil || present || reader.failure != nil || !reader.usable() {
+					t.Fatal("invalid key changed active Reader")
+				}
+				value, present, getErr := reader.Get(dbis[0], []byte{0})
+				if getErr != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, format}) {
+					t.Fatalf("raw Get after static refusals: %x/%v/%v", value, present, getErr)
+				}
+				start := make(chan struct{})
+				results := make(chan error, 2)
+				var workers sync.WaitGroup
+				workers.Add(2)
+				for range 2 {
+					go func() {
+						defer workers.Done()
+						<-start
+						value, present, getErr := reader.Get(dbis[0], []byte{1})
+						if getErr == nil && (!present || len(value) != 48) {
+							getErr = errors.New("concurrent Get serialization drifted")
+						}
+						results <- getErr
+					}()
+				}
+				close(start)
+				workers.Wait()
+				for range 2 {
+					if getErr := <-results; getErr != nil {
+						t.Fatal(getErr)
+					}
+				}
+				return nil
+			})
+			mustEnvironment(t, err)
+			requireInactive(escaped, dbis[0], []byte{0})
+			requireInactive(copied, dbis[0], []byte{0})
+			waiterReady, waiter := make(chan struct{}), make(chan error, 1)
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				reader.getMu.Lock()
+				go func() {
+					if !reader.usable() {
+						waiter <- errors.New("waiter did not pass initial lifetime check")
+						return
+					}
+					close(waiterReady)
+					value, present, getErr := reader.Get(dbis[0], []byte{0})
+					if value != nil || present {
+						waiter <- errors.New("expired waiter returned value")
+						return
+					}
+					waiter <- getErr
+				}()
+				<-waiterReady
+				for range 100 {
+					runtime.Gosched()
+				}
+				go func() {
+					for reader.active.Load() {
+						runtime.Gosched()
+					}
+					reader.getMu.Unlock()
+				}()
+				return nil
+			}))
+			treeNativeError(t, <-waiter, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				value, present, err := reader.Get(dbis[0], []byte{0})
+				if err != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, format}) {
+					t.Fatal("next View after expired waiter failed")
+				}
+				return nil
+			}))
+			_, err = store.Inspect()
+			mustEnvironment(t, err)
+		})
 	}
-	waiterReady, waiter := make(chan struct{}), make(chan error, 1)
-	mustEnvironment(t, store.View(func(reader *Reader) error {
-		reader.getMu.Lock()
-		go func() {
-			if !reader.usable() {
-				waiter <- errors.New("waiter did not pass initial lifetime check")
-				return
-			}
-			close(waiterReady)
-			_, _, getErr := reader.Get(dbis[0], []byte{0})
-			waiter <- getErr
-		}()
-		<-waiterReady
-		for range 100 {
-			runtime.Gosched()
-		}
-		go func() {
-			for reader.active.Load() {
-				runtime.Gosched()
-			}
-			reader.getMu.Unlock()
-		}()
-		return nil
-	}))
-	requireEnvironmentError(t, <-waiter, EngineInvalidInput, operationGet, codeEINVAL, "Reader is not active")
 }
 
 func panicNilViewCallback(*Reader) error {
@@ -2466,88 +2518,114 @@ func panicNilViewCallback(*Reader) error {
 
 //nolint:errorlint // Exact callback and panic identities are part of the View contract.
 func TestViewErrorPanicAndCloseCoordination(t *testing.T) {
-	if path := os.Getenv("RUBIN_MDBX_PANICNIL_CHILD_PATH"); path != "" {
-		store, _ := Create(path, environmentConfig())
-		t.Fatalf("View returned after panic(nil): %v", store.View(panicNilViewCallback))
-	}
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestViewErrorPanicAndCloseCoordination$", "-test.count=1")
-	cmd.Env = append(os.Environ(), "GODEBUG=panicnil=1", "RUBIN_MDBX_PANICNIL_CHILD_PATH="+filepath.Join(t.TempDir(), "db"))
-	output, runErr := cmd.CombinedOutput()
-	switch {
-	case !strings.Contains(string(output), "RUBIN_MDBX_PANICNIL_TARGET_REACHED"):
-		t.Fatalf("child did not reach View target: %v\n%s", runErr, output)
-	case runErr == nil || !strings.Contains(string(output), "panic: nil") || !strings.Contains(string(output), "panicNilViewCallback"):
-		t.Fatalf("child did not escape through panicNilViewCallback: %v\n%s", runErr, output)
-	}
-	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
-	mustEnvironment(t, err)
-	callbackErr := errors.New("callback")
-	if got := store.View(func(*Reader) error { return callbackErr }); got != callbackErr {
-		t.Fatalf("callback identity changed: %v", got)
-	}
-	abortErr := nativeError(operationAbort, codeEIO)
-	joined := orderedErrors(operationAbort, orderPrimaryResult, callbackErr, abortErr)
-	parts := joined.(interface{ Unwrap() []error }).Unwrap()
-	if len(parts) != 2 || parts[0] != callbackErr || parts[1] != abortErr {
-		t.Fatalf("callback/abort order drifted: %v", joined)
-	}
-	retained := orderedErrors(operationAbort, orderResultCausesPrimary, callbackErr, nativeError(operationAbort, codeThreadMismatch))
-	if engine := requireEnvironmentError(t, retained, EngineLocalInvariant, operationAbort, codeThreadMismatch, expectedNativeDiagnostic(codeThreadMismatch)); engine.Cause != callbackErr {
-		t.Fatalf("poison ownership drifted: %+v", engine)
-	}
-	panicValue := &struct{ value string }{"panic"}
-	var recovered any
-	func() {
-		defer func() { recovered = recover() }()
-		_ = store.View(func(*Reader) error { panic(panicValue) })
-	}()
-	if recovered != panicValue {
-		t.Fatalf("panic cleanup/order drifted: %v", recovered)
-	}
-	entered, release, reentered, done := make(chan struct{}), make(chan struct{}), make(chan [3]error, 1), make(chan error, 1)
-	var once sync.Once
-	releaseView := func() { once.Do(func() { close(release) }) }
-	defer releaseView()
-	go func() {
-		done <- store.View(func(*Reader) error {
-			close(entered)
-			var invoked bool
-			viewErr := store.View(func(*Reader) error { invoked = true; return nil })
-			inspection, inspectErr := store.Inspect()
-			if invoked || inspection != (Inspection{}) {
-				viewErr = errors.New("exclusive observation ownership drifted")
+	for _, row := range []struct {
+		name    string
+		version byte
+		create  func(string, ConfigV1) (*Store, error)
+	}{
+		{"schema2", 2, Create},
+		{"tree", 3, func(path string, cfg ConfigV1) (*Store, error) { return CreateTreeV1(path, cfg, [32]byte{7}) }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if path := os.Getenv("RUBIN_MDBX_PANICNIL_CHILD_PATH"); path != "" {
+				store, err := row.create(path, environmentConfig())
+				mustEnvironment(t, err)
+				t.Fatalf("View returned after panic(nil): %v", store.View(panicNilViewCallback))
 			}
-			reentered <- [3]error{viewErr, inspectErr, store.Close()}
-			<-release
-			return nil
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestViewErrorPanicAndCloseCoordination$/^"+row.name+"$", "-test.count=1")
+			cmd.Env = append(os.Environ(), "GODEBUG=panicnil=1", "RUBIN_MDBX_PANICNIL_CHILD_PATH="+filepath.Join(t.TempDir(), "db"))
+			output, runErr := cmd.CombinedOutput()
+			switch {
+			case !strings.Contains(string(output), "RUBIN_MDBX_PANICNIL_TARGET_REACHED"):
+				t.Fatalf("child did not reach View target: %v\n%s", runErr, output)
+			case runErr == nil || !strings.Contains(string(output), "panic: nil") || !strings.Contains(string(output), "panicNilViewCallback"):
+				t.Fatalf("child did not escape through panicNilViewCallback: %v\n%s", runErr, output)
+			}
+			store, err := row.create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+			mustEnvironment(t, err)
+			readVersion := func(reader *Reader) error {
+				value, present, err := reader.Get(DBI{Name: "meta-v1", Rank: 0}, []byte{0})
+				if err != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, row.version}) {
+					t.Fatalf("View format read drifted: %x/%v/%v", value, present, err)
+				}
+				return nil
+			}
+			callbackErr := errors.New("callback")
+			if got := store.View(func(reader *Reader) error {
+				_ = readVersion(reader)
+				return callbackErr
+			}); got != callbackErr {
+				t.Fatalf("callback identity changed: %v", got)
+			}
+			abortErr := nativeError(operationAbort, codeEIO)
+			joined := orderedErrors(operationAbort, orderPrimaryResult, callbackErr, abortErr)
+			parts := joined.(interface{ Unwrap() []error }).Unwrap()
+			if len(parts) != 2 || parts[0] != callbackErr || parts[1] != abortErr {
+				t.Fatalf("callback/abort order drifted: %v", joined)
+			}
+			retained := orderedErrors(operationAbort, orderResultCausesPrimary, callbackErr, nativeError(operationAbort, codeThreadMismatch))
+			if engine := requireEnvironmentError(t, retained, EngineLocalInvariant, operationAbort, codeThreadMismatch, expectedNativeDiagnostic(codeThreadMismatch)); engine.Cause != callbackErr {
+				t.Fatalf("poison ownership drifted: %+v", engine)
+			}
+			panicValue := &struct{ value string }{"panic"}
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				_ = store.View(func(reader *Reader) error {
+					_ = readVersion(reader)
+					panic(panicValue)
+				})
+			}()
+			if recovered != panicValue {
+				t.Fatalf("panic cleanup/order drifted: %v", recovered)
+			}
+			entered, release, reentered, done := make(chan struct{}), make(chan struct{}), make(chan [3]error, 1), make(chan error, 1)
+			var once sync.Once
+			releaseView := func() { once.Do(func() { close(release) }) }
+			defer releaseView()
+			go func() {
+				done <- store.View(func(reader *Reader) error {
+					_ = readVersion(reader)
+					close(entered)
+					var invoked bool
+					viewErr := store.View(func(*Reader) error { invoked = true; return nil })
+					inspection, inspectErr := store.Inspect()
+					if invoked || inspection != (Inspection{}) {
+						viewErr = errors.New("exclusive observation ownership drifted")
+					}
+					reentered <- [3]error{viewErr, inspectErr, store.Close()}
+					<-release
+					return nil
+				})
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("exclusive observation ownership drifted")
+			}
+			var results [3]error
+			select {
+			case results = <-reentered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("exclusive observation ownership drifted")
+			}
+			for i, operation := range []engineOperation{operationView, operationInspect, operationClose} {
+				requireEnvironmentError(t, results[i], EngineConcurrency, operation, codeBusy, "store operation in progress")
+			}
+			if store.state != storeOPEN || store.terminal != nil {
+				t.Fatal("Store operation did not return Concurrency")
+			}
+			releaseView()
+			select {
+			case viewErr := <-done:
+				mustEnvironment(t, viewErr)
+			case <-time.After(5 * time.Second):
+				t.Fatal("panic cleanup/order drifted")
+			}
+			mustEnvironment(t, store.View(readVersion))
+			mustEnvironment(t, store.Close())
 		})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("exclusive observation ownership drifted")
 	}
-	var results [3]error
-	select {
-	case results = <-reentered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("exclusive observation ownership drifted")
-	}
-	for i, operation := range []engineOperation{operationView, operationInspect, operationClose} {
-		requireEnvironmentError(t, results[i], EngineConcurrency, operation, codeBusy, "store operation in progress")
-	}
-	if store.state != storeOPEN || store.terminal != nil {
-		t.Fatal("Store operation did not return Concurrency")
-	}
-	releaseView()
-	select {
-	case viewErr := <-done:
-		mustEnvironment(t, viewErr)
-	case <-time.After(5 * time.Second):
-		t.Fatal("panic cleanup/order drifted")
-	}
-	mustEnvironment(t, store.View(func(*Reader) error { return nil }))
-	mustEnvironment(t, store.Close())
 }
 
 func TestReadStoreStates(t *testing.T) {
@@ -2567,6 +2645,7 @@ func TestReadStoreStates(t *testing.T) {
 	retainedTxn := store.txn
 	mustEnvironment(t, store.View(func(reader *Reader) error { retainedTxn = reader.txn; return nil }))
 	cfg, dbis := store.config, store.dbis
+	format, identity := store.format.Load(), store.databaseID
 	store.state = "UNKNOWN"
 	requireEnvironmentError(t, store.View(func(*Reader) error { return nil }), EngineLocalInvariant, operationView, codeProblem, "invalid Store state")
 	store.state = storeOPEN
@@ -2591,6 +2670,8 @@ func TestReadStoreStates(t *testing.T) {
 		zeroDBIs[i] = 0
 	}
 	store.state, store.txn, store.config, store.dbis, store.terminal = storePOISONEDTHREAD, retainedTxn, ConfigV1{}, zeroDBIs, poison
+	store.format.Store(0)
+	store.databaseID = [32]byte{}
 	if !sameError(store.View(func(*Reader) error { return nil }), poison) {
 		t.Fatal("POISONED terminal identity changed")
 	}
@@ -2598,6 +2679,8 @@ func TestReadStoreStates(t *testing.T) {
 		t.Fatal("POISONED Inspect identity changed")
 	}
 	store.state, store.txn, store.config, store.dbis, store.terminal = storeOPEN, nil, cfg, dbis, nil
+	store.format.Store(format)
+	store.databaseID = identity
 	mustEnvironment(t, store.Close())
 	terminal := nativeError(operationClose, codeEIO)
 	store.terminal = terminal
@@ -2632,7 +2715,10 @@ func TestInspectObservation(t *testing.T) {
 		t.Fatalf("Inspection provenance drifted: %+v", inspection)
 	}
 	wantDBIs := readDBIsLiteral()
-	for i, row := range inspection.DBIs {
+	if inspection.DBIs[8] != (DBIInspection{}) {
+		t.Fatal("historical unused slot is not zero")
+	}
+	for i, row := range inspection.DBIs[:8] {
 		wantEntries := uint64(0)
 		if i == 0 {
 			wantEntries = 2
@@ -2702,7 +2788,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			"s.operations.TryLock": 1, "adapterError": 2, "s.operations.Unlock": 1,
 			"s.observationStateError": 1, "C.rubin_mdbx_txn_begin": 1,
 			"nativePointerResultError": 1, "int": 1, "s.failedReadBegin": 1,
-			"newReader": 1, "uint64": 1, "limitsForPage": 1, "reader.active.Store": 1,
+			"newReader": 1, "uint8": 1, "s.format.Load": 1, "uint64": 1, "limitsForPage": 1, "reader.active.Store": 1,
 			"<closure>": 1, "reader.expire().retire": 1, "reader.expire": 1,
 			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
 			"callback": 1, "startupCompletionResult": 1,
@@ -2761,6 +2847,11 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 		for i, statement := range fn.Body.List {
 			switch statement := statement.(type) {
 			case *ast.IfStmt:
+				if initial, ok := statement.Init.(*ast.AssignStmt); ok && len(initial.Rhs) == 1 {
+					if invocation, ok := initial.Rhs[0].(*ast.CallExpr); ok && call(invocation.Fun, "r", "treeContext") {
+						guards = append(guards, i)
+					}
+				}
 				if negation, ok := statement.Cond.(*ast.UnaryExpr); ok && negation.Op == token.NOT {
 					if usable, ok := negation.X.(*ast.CallExpr); ok && call(usable.Fun, "r", "usable") {
 						guards = append(guards, i)
@@ -2786,6 +2877,9 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("concurrent %s serialization drifted", name)
 		}
 	}
+	checkLockedRead("ReadTreeAuthorityV1", "treeNativeGet")
+	checkLockedRead("ReadTreeRootBindingV1", "treeNativeGet")
+	checkLockedRead("ReadTreeEvidenceV1", "treeNativeGet")
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
 	checkLockedRead("GetOptionalSide", "C", "rubin_mdbx_get")
 	checkLockedRead("GetInitial148OptionalSide", "C", "rubin_mdbx_get")
@@ -2856,13 +2950,13 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
 		}
 	}
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("initial148OptionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 6 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Contains(body("initial148OptionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 6 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipFound"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipPoint"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipEqual"), "unsafe.Slice(") != 3 {
+	if strings.Count(body("copiedGetResultFor"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("initial148OptionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 6 || strings.Contains(body("copiedGetResultFor"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Contains(body("initial148OptionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 6 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipFound"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipPoint"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipEqual"), "unsafe.Slice(") != 3 {
 		t.Fatal("borrowed native bytes accepted")
 	}
 	requireOrder("canonicalTipFound", "endpoint native envelope order drifted", "int(result.rc)", "canonicalTipResultShape", "unsafe.Slice", "bytes.Compare")
 	requireOrder("canonicalTipPoint", "endpoint source qualification order drifted", "len(row.key) != 16", "height > 0xffffffff", "row.image.length != 104", "unsafe.Slice", "validWork", "copy(point.BlockHash")
 	requireOrder("canonicalTipEqual", "endpoint candidate envelope order drifted", "canonicalTipEndpoint", "len(row.key) != 16", "row.image.length != 104", "unsafe.Slice")
-	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
+	requireOrder("copiedGetResultFor", "bound must precede copy", "readerValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
 	requireOrder("optionalSideResult", "optional-side bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
 	requireOrder("initial148OptionalSideResult", "initial148 bound must precede copy", "uint64(Initial148HeaderBytes)", "maximum = Initial148MaxBlockBytes", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
 	requireOrder("prefixPageRead", "PrefixPage bound must precede copy", "prefixPageNativeResult", "prefixPageStop", "copyPrefixPageRow")
@@ -2993,7 +3087,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	if len(infoCalls) != 1 || render(infoCalls[0]) != "C.mdbx_env_info_ex(s.env, txn, &info, C.size_t(unsafe.Sizeof(info)))" || infoPointers != 1 || len(currentWrites) != 1 || render(currentWrites[0]) != "current := uint64(info.mi_geo.current)" || currentPointers != 0 || infoCalls[0].Pos() >= currentWrites[0].Pos() {
 		t.Fatal("Inspection provenance drifted: environment producer")
 	}
-	if len(ranges) != 1 || ranges[0].Tok != token.DEFINE || !ident(ranges[0].Key, "i") || !ident(ranges[0].Value, "dbi") || render(ranges[0].X) != "SchemaV2DBIs()" || len(statCalls) != 1 || render(statCalls[0]) != "C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))" || statPointers != 1 || statCalls[0].Pos() < ranges[0].Body.Pos() || statCalls[0].End() > ranges[0].Body.End() {
+	if len(ranges) != 1 || ranges[0].Tok != token.DEFINE || !ident(ranges[0].Key, "i") || !ident(ranges[0].Value, "dbi") || render(ranges[0].X) != "formatDBIs(uint8(s.format.Load()))" || len(statCalls) != 1 || render(statCalls[0]) != "C.mdbx_dbi_stat(txn, s.dbis[i], &stat, C.size_t(unsafe.Sizeof(stat)))" || statPointers != 1 || statCalls[0].Pos() < ranges[0].Body.Pos() || statCalls[0].End() > ranges[0].Body.End() {
 		t.Fatal("Inspection provenance drifted: DBI producer")
 	}
 	if len(inspectionWrites) != 3 || invalidWrites != 0 {
@@ -3027,7 +3121,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("ReadTreeAuthorityV1") + body("ReadTreeRootBindingV1") + body("ReadTreeEvidenceV1") + body("treeContext") + body("treeRecord") + body("treeNativeGet") + body("treeRequired") + body("treeEmptyCensus") + body("treeControlRows") + body("treeEvidenceOrigin") + body("treeResolvedEvidence") + body("readerDBI") + body("readerKey") + body("readerValueBounds") + body("treeMetaBounds") + body("validReaderFormat") + body("selectedFormat") + body("copiedGetResult") + body("copiedGetResultFor") + body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)
@@ -3158,17 +3252,17 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				if parsed == file {
 					functions[fn.Name.Name] = fn
 				}
-				if fn.Recv == nil && (fn.Name.Name == "Create" || fn.Name.Name == "Open") {
+				if fn.Recv == nil && (fn.Name.Name == "Create" || fn.Name.Name == "Open" || fn.Name.Name == "CreateTreeV1" || fn.Name.Name == "OpenTreeV1") {
 					allowed[fn.Name.Pos()] = true
 					decls[fn.Name.Name] = append(decls[fn.Name.Name], fn)
 				}
 			}
 		}
 	}
-	require(len(decls["Create"]) == 1 && len(decls["Open"]) == 1, "entrypoint declarations Create/Open=%d/%d, want 1/1", len(decls["Create"]), len(decls["Open"]))
+	require(len(decls["Create"]) == 1 && len(decls["Open"]) == 1 && len(decls["CreateTreeV1"]) == 1 && len(decls["OpenTreeV1"]) == 1, "entrypoint declarations Create/Open=%d/%d, want 1/1", len(decls["Create"]), len(decls["Open"]))
 	for _, parsed := range files {
 		ast.Inspect(parsed, func(node ast.Node) bool {
-			if ident, ok := node.(*ast.Ident); ok && (ident.Name == "Create" || ident.Name == "Open") && !allowed[ident.Pos()] {
+			if ident, ok := node.(*ast.Ident); ok && (ident.Name == "Create" || ident.Name == "Open" || ident.Name == "CreateTreeV1" || ident.Name == "OpenTreeV1") && !allowed[ident.Pos()] {
 				t.Errorf("package-local %s identifier at %s", ident.Name, fset.Position(ident.Pos()))
 			}
 			return true
@@ -3207,7 +3301,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 	}
 	require(len(normalizeSpecs) == 1 && functions["normalizeMDBXModule"] == nil && compact(normalizeSpecs[0]) == "normalizeMDBXModule = sync.OnceValue(func() error { result := C.rubin_mdbx_normalize_debug() return debugNormalizationError(int(result.first), int(result.second)) })", "normalizeMDBXModule OnceValue ownership drifted")
-	for name, expected := range map[string]string{"Create": "validateCreateStatic"} {
+	for name, expected := range map[string]string{"Create": "validateCreateStatic", "CreateTreeV1": "validateCreateTreeStatic"} {
 		fn, normalizeAt := functions[name], token.NoPos
 		ast.Inspect(fn.Body, func(node ast.Node) bool {
 			if call, ok := node.(*ast.CallExpr); ok && callName(call) == "normalizeMDBXModule" {
@@ -3254,7 +3348,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		"validateOpenStatic":              {"cfg.Encode", "adapterError"},
 		"validatePreopenSnapshot":         {"append([]byte(path), 0)", "var info C.MDBX_envinfo", "C.mdbx_preopen_snapinfo", "unsafe.Sizeof(info)", "runtime.KeepAlive(pathBytes)", "C.MDBX_ENODATA", "integrityError", "nativeError"},
 		"validateCreateStatic":            {"validatePath", "requireCreateTargetAbsent", "cfg.Encode", "adapterError"},
-		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, 8)", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
+		"openEnvironment":                 {"C.mdbx_env_set_maxdbs(s.env, C.MDBX_dbi(len(formatDBIs(uint8(s.format.Load())))))", "C.mdbx_env_set_maxreaders(s.env, C.uint(cfg.MaxReaders))", "openNativeEnvironment(s.env, path, C.MDBX_NOSTICKYTHREADS, 0, operationOpen)", "readOwnedFile(filepath.Join(path, name)"},
 		"inspectSchema":                   {"verifyMainCardinality", "openSchemaDBIs", "readRequiredMeta", "validateStoredConfig", "readEffective", "validateEffective"},
 		"openNativeEnvironment":           {"append([]byte(path), 0)", "C.mdbx_env_open", "runtime.KeepAlive(pathBytes)"},
 		"openSchemaDBIs":                  {"C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE", "append([]byte(dbi.Name), 0)", "C.mdbx_dbi_open", "runtime.KeepAlive(name)", "C.mdbx_dbi_flags_ex", "persistent != 0"},
@@ -3269,6 +3363,30 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			}
 			position = next
 		}
+	}
+	// Pin the complete new recognition read closure, including helpers: a
+	// dormant Open may not gain an ignored role/evidence read through indirection.
+	for name, want := range map[string]string{
+		"treeNativeGet":        "C.rubin_mdbx_get|unsafe.Pointer|C.size_t|len|runtime.KeepAlive|copiedGetResultFor|int|unsafe.Pointer",
+		"treeRequired":         "treeNativeGet|treeIntegrity",
+		"treeControlRows":      "treeRequired|bytes.Equal|TreeSchemaVersionValue|treeIntegrity|treeRequired|DecodeConfigV1|treeIntegrity|treeIntegrity|treeRequired|bytes.Equal|treeIntegrity",
+		"treeEmptyCensus":      "int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|uint64|treeIntegrity|treeControlRows",
+		"treeOpenFamily":       "append|[]byte|C.MDBX_db_flags_t|int|C.mdbx_dbi_open|(*C.char)|unsafe.Pointer|runtime.KeepAlive|treeIntegrity|nativeError|int|C.mdbx_dbi_flags_ex|nativeError|treeIntegrity",
+		"treeOpenFamilies":     "formatDBIs|treeOpenFamily",
+		"treeMainCount":        "int|C.mdbx_dbi_open|nativeError|int|C.mdbx_dbi_stat|C.size_t|unsafe.Sizeof|nativeError|uint64|treeIntegrity",
+		"treeRecognizedFormat": "treeOpenFamily|treeRequired|len|bytes.Equal|treeIntegrity",
+		"inspectTreeSchema":    "treeRecognizedFormat|treeMainCount|uint64|len|formatDBIs|treeOpenFamilies|treeOpenConfig|adapterError|treeOpenAuthority",
+		"treeOpenAuthority":    "treeRequired|bytes.Equal|treeIntegrity|treeNativeGet|treeEmptyCensus|DecodeTreeAuthorityV1|treeIntegrity",
+		"treeOpenConfig":       "treeRequired|DecodeConfigV1|treeIntegrity|validateStoredConfig|treeIntegrity|readEffective|validateEffective|treeIntegrity",
+	} {
+		var observed []string
+		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				observed = append(observed, callName(call))
+			}
+			return true
+		})
+		require(strings.Join(observed, "|") == want, "tree recognition helper closure %s: %v", name, observed)
 	}
 	production := string(source)
 	preambleStart, preambleEnd := strings.Index(production, "/*"), strings.Index(production, "*/")
@@ -3286,7 +3404,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	}
 	preambleDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(preamble[:fixtureStart]+preamble[fixtureEnd+len(fixtureClose):])))
 	require(preambleDigest == "eea0cf9602e561fb177673db1088139f3f043d9bfd75dd46a6b35733f1413b43", "cgo preamble digest=%s", preambleDigest)
-	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 2, "single-owner debug normalization drifted")
+	require(strings.Count(ordinarySource.String(), "mdbx_setup_debug") == 2 && strings.Count(ordinarySource.String(), "sync.OnceValue(") == 1 && strings.Count(ordinarySource.String(), "C.rubin_mdbx_normalize_debug()") == 1 && strings.Count(ordinarySource.String(), "normalizeMDBXModule()") == 3, "single-owner debug normalization drifted")
 	require(strings.Count(ordinarySource.String(), "C.mdbx_preopen_snapinfo(") == 1 && strings.Count(body("validatePreopenSnapshot"), "cfg.PageSize") == 0, "preopen snapshot ownership drifted")
 	require(strings.Count(body("Create"), "&Store{") == 1 && strings.Count(body("Create"), "store := &Store{}\n\tstore.self = store") == 1 && strings.Count(body("Create"), "store.writer = writer") == 1 && strings.Count(body("Create"), "return store.consumeFailure(err)") == 4, "Create Store ownership or cleanup drifted")
 	require(strings.Count(body("Open"), "&Store{") == 1 && strings.Count(body("Open"), "store := &Store{writer: writer}\n\tstore.self = store") == 1, "Open Store ownership drifted")
@@ -3295,8 +3413,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require(strings.Count(body("createEnvironment"), nativeFiles) == 1, "native-created file normalization/readback loop drifted")
 	normalizeBody := `{ info, err := os.Lstat(path) if err != nil { return ioError(operation, readDiagnostic, err) } if !validFileInfo(info, empty, false) { return integrityError(operation, name+" is unsafe", nil) } err = os.Chmod(path, 0o600) if err != nil { return ioError(operation, normalizeDiagnostic, err) } return readOwnedFile(path, name, empty, operation, readDiagnostic) }`
 	require(compact(functions["normalizeOwnedFile"].Body) == normalizeBody, "owned-file normalization helper drifted")
-	for _, literal := range []string{"C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate", "C.MDBX_NOSTICKYTHREADS, 0, operationOpen", "C.MDBX_DB_ACCEDE", "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE"} {
-		if strings.Count(production, literal) != 1 {
+	for literal, count := range map[string]int{"C.MDBX_NOSTICKYTHREADS, 0o600, operationCreate": 1, "C.MDBX_NOSTICKYTHREADS, 0, operationOpen": 1, "C.MDBX_DB_ACCEDE": 2, "C.MDBX_DB_DEFAULTS | C.MDBX_CREATE": 2} {
+		if strings.Count(production, literal) != count {
 			t.Errorf("native literal/call-site %q drifted", literal)
 		}
 	}
@@ -3322,7 +3440,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 		return true
 	})
-	require(strings.Join(maxDBsAssignments, "|") == "maxDBs := C.MDBX_dbi(8)|maxDBs = 9" && strings.Join(maxDBsCalls, "|") == "C.mdbx_env_set_maxdbs(s.env, maxDBs)" && strings.Join(fixtureBranches, "|") == "if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) { maxDBs = 9 }", "Create maxdbs ownership drifted: %v / %v / %v", maxDBsAssignments, fixtureBranches, maxDBsCalls)
+	require(strings.Join(maxDBsAssignments, "|") == "maxDBs := C.MDBX_dbi(len(formatDBIs(uint8(s.format.Load()))))|maxDBs = 9" && strings.Join(maxDBsCalls, "|") == "C.mdbx_env_set_maxdbs(s.env, maxDBs)" && strings.Join(fixtureBranches, "|") == "if fixtureCreateExtraDBI != nil && fixtureCreateExtraDBI(path) { maxDBs = 9 }", "Create maxdbs ownership drifted: %v / %v / %v", maxDBsAssignments, fixtureBranches, maxDBsCalls)
 	var nativeLimitCalls, limitWrapperCalls, ordinaryMaxDBCalls, effectCalls []string
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
@@ -3351,10 +3469,10 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
-		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|viewWithStartupCompletion:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)" {
+		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|viewWithStartupCompletion:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)|CreateTreeV1:limitsForPage(cfg.PageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
-	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, 8)", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
+	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, C.MDBX_dbi(len(formatDBIs(uint8(s.format.Load())))))", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
 	require(strings.Join(effectCalls, "|") == "createDirectory:os.Mkdir(path, 0o700)|createDirectory:os.Chmod(path, 0o700)|acquireWriter:filelock.AcquireDirectory(path)|createWriterMarker:os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)|normalizeOwnedFile:os.Chmod(path, 0o600)", "pre-normalization filesystem-effect ownership drifted: %v", effectCalls)
 	var packageNativeLimits, packageMaxDBs, packageEffects []string
 	packageRefs, fileRefs := map[string][]string{}, map[string]int{}
@@ -3393,11 +3511,11 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage|mdbx_cgo.go:CreateTreeV1:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
-		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open" ||
-		fileRefs["validatePreopenSnapshot"] != 2 || fileRefs["validateOpenNativePreconditions"] != 2 ||
+		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open|mdbx_cgo.go:OpenTreeV1" ||
+		fileRefs["validatePreopenSnapshot"] != 2 || fileRefs["validateOpenNativePreconditions"] != 3 ||
 		strings.Join(packageEffects, "|") != "mdbx_cgo.go:createDirectory:os.Mkdir|mdbx_cgo.go:createDirectory:os.Chmod|mdbx_cgo.go:acquireWriter:filelock.AcquireDirectory|mdbx_cgo.go:createWriterMarker:os.OpenFile|mdbx_cgo.go:normalizeOwnedFile:os.Chmod" {
 		t.Fatalf("package-wide native/effect ownership drifted: %v / %v / %v / %v / %v", packageNativeLimits, packageMaxDBs, packageRefs, fileRefs, packageEffects)
 	}
@@ -3446,7 +3564,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		{"PageSize", uint64(stored.PageSize), uint64(caller.PageSize)},
 		{"MaxReaders", uint64(stored.MaxReaders), uint64(caller.MaxReaders)}`
 	require(strings.Count(body("validateStoredConfig"), storedOrder) == 1, "stored/caller ConfigV1 comparison order drifted")
-	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
+	consumeTail := "releaseErr := releaseError(s.writer)\n\ts.writer, s.txn = nil, nil\n\ts.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}\n\ts.format.Store(0)\n\ts.databaseID = [32]byte{}\n\ts.state = storeCLOSED\n\ts.terminal = joinErrors(nativeOutcome, releaseErr)\n\treturn false, s.terminal"
 	require(strings.Count(body("consume"), "nativeOutcome = orderedErrors(operationClose, decision.order, primary, closeErr)") == 1 && strings.Count(body("consume"), consumeTail) == 1, "consume terminal ordering drifted")
 	errorCalls := map[string]int{}
 	ast.Inspect(file, func(node ast.Node) bool {
@@ -3459,7 +3577,16 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		return true
 	})
 	wantErrorCalls := map[string]int{
-		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
+		`adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree store requires typed tree operation", nil)`:   1,
+		`adapterError(op, EngineIntegrity, codeCorrupted, "invalid tree native representation", cause)`:                      1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:               1,
+		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:                 1,
+		`adapterError(operationOpen, EngineStateMismatch, codeProblem, "tree schema unavailable: recognized SchemaV2", nil)`: 1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "Reader is not active", nil)`:                            1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "tree Reader required", nil)`:                            1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree generation", nil)`:                         1,
+		`adapterError(operationGet, EngineInvalidInput, codeEINVAL, "invalid tree evidence reference", nil)`:                 1,
+		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`:                             1, `adapterError(operationCreate, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 2,
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid ConfigV1", err)`: 1, `adapterError(operationOpen, EngineInvalidInput, codeTooLarge, "ConfigV1 exceeds pinned native limits", err)`: 1,
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "ConfigV1 geometry is not natively representable", err)`: 1,
 		`adapterError(operationClose, EngineInvalidInput, codeEINVAL, "nil Store", nil)`:                                        1, `adapterError(operationClose, EngineConcurrency, codeBusy, "store operation in progress", nil)`: 1,
@@ -3520,7 +3647,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			}
 			return true
 		})
-		want := map[string]string{"initializeLocked": "s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true", "inspectOpenLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis"}[name]
+		want := map[string]string{"initializeLocked": "s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3", "inspectOpenLocked": "s.state, s.config, s.dbis = storeOPEN, cfg, dbis"}[name]
 		if len(writes) != 1 || markerAt == token.NoPos || writes[0] != want || writeAt[0] <= markerAt {
 			t.Errorf("%s publication writes=%v marker=%d", name, writes, markerAt)
 		}
@@ -3537,8 +3664,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	for name, want := range map[string]string{
-		"initializeLocked":  "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|initializeSchema|s.abortLocked|int|C.mdbx_txn_commit|commitTransition|nativeError|orderedErrors|s.poison",
-		"inspectOpenLocked": "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|inspectSchema|s.abortLocked",
+		"initializeLocked":  "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|initializeSchema|uint8|s.format.Load|s.abortLocked|int|C.mdbx_txn_commit|commitTransition|nativeError|orderedErrors|s.poison|s.format.Load",
+		"inspectOpenLocked": "C.rubin_mdbx_txn_begin|nativePointerResultError|int|s.poison|s.format.Load|inspectTreeSchema|inspectSchema|s.abortLocked",
 	} {
 		var calls []string
 		ast.Inspect(functions[name].Body, func(node ast.Node) bool {
@@ -3551,11 +3678,34 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			t.Errorf("%s helper ownership drifted: %v", name, calls)
 		}
 	}
+	var formatCalls, formatMethods []string
+	for _, filename := range names {
+		for _, declaration := range files[filename].Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				if selected, ok := node.(*ast.SelectorExpr); ok && selected.Sel.Name == "Store" {
+					if owner, ok := ast.Unparen(selected.X).(*ast.SelectorExpr); ok && owner.Sel.Name == "format" {
+						formatMethods = append(formatMethods, filename+":"+fn.Name.Name)
+					}
+				}
+				if call, ok := node.(*ast.CallExpr); ok && (callName(call) == "s.format.Store" || callName(call) == "store.format.Store") {
+					formatCalls = append(formatCalls, filename+":"+fn.Name.Name+":"+compact(call))
+				}
+				return true
+			})
+		}
+	}
+	wantFormatCalls := "mdbx_cgo.go:Create:store.format.Store(2)|mdbx_cgo.go:Open:store.format.Store(2)|mdbx_cgo.go:poison:s.format.Store(0)|mdbx_cgo.go:consumeFailure:s.format.Store(0)|mdbx_cgo.go:consume:s.format.Store(0)|mdbx_cgo.go:CreateTreeV1:store.format.Store(3)|mdbx_cgo.go:OpenTreeV1:store.format.Store(3)"
+	wantFormatMethods := "mdbx_cgo.go:Create|mdbx_cgo.go:Open|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:CreateTreeV1|mdbx_cgo.go:OpenTreeV1"
+	require(strings.Join(formatCalls, "|") == wantFormatCalls && strings.Join(formatMethods, "|") == wantFormatMethods, "atomic format ownership drifted: %v / %v", formatCalls, formatMethods)
 	var storeWrites, packageStoreWriteOwners []string
 	for _, filename := range names {
 		ast.Inspect(files[filename], func(node ast.Node) bool {
 			if address, ok := node.(*ast.UnaryExpr); ok && address.Op == token.AND {
-				if field, selected := ast.Unparen(address.X).(*ast.SelectorExpr); selected && field.Sel.Name == "canonicalOwnerVerified" {
+				if field, selected := ast.Unparen(address.X).(*ast.SelectorExpr); selected && (field.Sel.Name == "canonicalOwnerVerified" || field.Sel.Name == "format" || field.Sel.Name == "databaseID" || field.Sel.Name == "treeConfig") {
 					packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":permission-address")
 				}
 			}
@@ -3565,7 +3715,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			}
 			name, named := ast.Unparen(literal.Type).(*ast.Ident)
 			seen := map[*ast.TypeSpec]bool{}
-			for named && name.Name != "Store" {
+			for named && name.Name != "Store" && name.Name != "Reader" {
 				spec := typeProofs[name.Name]
 				if spec == nil || seen[spec] {
 					break
@@ -3573,8 +3723,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				seen[spec] = true
 				name, named = ast.Unparen(spec.Type).(*ast.Ident)
 			}
-			if named && name.Name == "Store" {
-				packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":Store-composite")
+			if named && (name.Name == "Store" || name.Name == "Reader") {
+				packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+name.Name+"-composite")
 			}
 			return true
 		})
@@ -3601,7 +3751,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 				for _, lhs := range assignment.Lhs {
 					wholeObject := protectedWholePointerWrite(typeProofs, fn, lhs)
 					selector, ok := lhs.(*ast.SelectorExpr)
-					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth" || selector.Sel.Name == "canonicalOwnerVerified") {
+					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth" || selector.Sel.Name == "canonicalOwnerVerified" || selector.Sel.Name == "format" || selector.Sel.Name == "databaseID" || selector.Sel.Name == "treeConfig") {
 						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
 						if filename == "mdbx_cgo.go" {
 							storeWrites = append(storeWrites, fn.Name.Name+":"+compact(assignment))
@@ -3613,10 +3763,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, true|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [8]C.MDBX_dbi{}, err|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}|consume:s.state = storeCLOSED"
-	// The canonical-owner verification has exactly three writers: Create,
-	// exact-empty bootstrap, and the shared finalized startup publication.
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|Update:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:Update|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -4869,6 +5017,7 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := newUpdateStore(t)
 			cfg, dbis, env, writer := store.config, store.dbis, store.env, store.writer
+			format, identity := store.format.Load(), store.databaseID
 			txn := store.txn
 			mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
 			primary, cleanup := nativeError(operationUpdate, codeENOSPC), nativeError(operationAbort, codeThreadMismatch)
@@ -4915,6 +5064,8 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 				t.Fatal("retained OLD owner dropped")
 			}
 			store.state, store.txn, store.config, store.dbis, store.terminal, store.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+			store.format.Store(format)
+			store.databaseID = identity
 			mustEnvironment(t, store.Close())
 		})
 	}
@@ -5009,6 +5160,7 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 
 		store := newUpdateStore(t)
 		cfg, dbis := store.config, store.dbis
+		format, identity := store.format.Load(), store.databaseID
 		opaqueOld := store.txn
 		mustEnvironment(t, store.View(func(reader *Reader) error { opaqueOld = reader.txn; return nil }))
 		oldCleanup := nativeError(operationAbort, codeThreadMismatch)
@@ -5019,6 +5171,8 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 			t.Fatal("retained OLD owner dropped")
 		}
 		store.state, store.txn, store.config, store.dbis, store.terminal, store.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+		store.format.Store(format)
+		store.databaseID = identity
 		mustEnvironment(t, store.Close())
 
 		store = newUpdateStore(t)
@@ -5065,6 +5219,7 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 		for _, kind := range []string{"write-before-commit", "write-after-commit", "readback", "old-abort"} {
 			store = newUpdateStore(t)
 			cfg, dbis := store.config, store.dbis
+			format, identity := store.format.Load(), store.databaseID
 			retainedTxn := store.txn
 			mustEnvironment(t, store.View(func(reader *Reader) error { retainedTxn = reader.txn; return nil }))
 			if kind == "write-before-commit" {
@@ -5104,6 +5259,8 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 				t.Fatal("Store projection drifted")
 			}
 			store.state, store.txn, store.config, store.dbis, store.terminal, store.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+			store.format.Store(format)
+			store.databaseID = identity
 			mustEnvironment(t, store.Close())
 		}
 
@@ -5184,7 +5341,7 @@ func TestUpdateSourceOwnership(t *testing.T) {
 		t.Fatal("predecessor owner changed")
 	}
 	consume := updateNativeBody(t, source, "consume")
-	consumeEffects := []string{"C.mdbx_env_close_ex", "s.env = nil", "releaseError(s.writer)", "s.writer, s.txn = nil, nil", "s.config, s.dbis = ConfigV1{}, [8]C.MDBX_dbi{}", "s.state = storeCLOSED", "s.terminal = joinErrors(nativeOutcome, releaseErr)"}
+	consumeEffects := []string{"C.mdbx_env_close_ex", "s.env = nil", "releaseError(s.writer)", "s.writer, s.txn = nil, nil", "s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}", "s.state = storeCLOSED", "s.terminal = joinErrors(nativeOutcome, releaseErr)"}
 	previous = -1
 	for _, effect := range consumeEffects {
 		at := strings.Index(consume, effect)
@@ -5306,6 +5463,7 @@ func TestUpdateTerminalLegality(t *testing.T) {
 
 		store = newUpdateStore(t)
 		cfg, dbis := store.config, store.dbis
+		format, identity := store.format.Load(), store.databaseID
 		retainedTxn := store.txn
 		mustEnvironment(t, store.View(func(reader *Reader) error { retainedTxn = reader.txn; return nil }))
 		truth, _, terminal = store.applyUpdateOutcome(updateNativeRetainedWrite(true, nativeError(operationUpdate, codeThreadMismatch), nil, retainedTxn, 1), nil, nil, false)
@@ -5321,6 +5479,8 @@ func TestUpdateTerminalLegality(t *testing.T) {
 			t.Fatal("terminal legality drifted")
 		}
 		store.state, store.txn, store.config, store.dbis, store.terminal, store.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+		store.format.Store(format)
+		store.databaseID = identity
 		mustEnvironment(t, store.Close())
 
 		store = newUpdateStore(t)

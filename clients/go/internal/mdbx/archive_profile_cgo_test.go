@@ -606,6 +606,7 @@ func testArchiveAbort(t *testing.T) {
 	t.Run("synthetic_thread_identity", func(t *testing.T) {
 		s := newUpdateStore(t)
 		cfg, dbis := s.config, s.dbis
+		format, identity := s.format.Load(), s.databaseID
 		txn := s.txn
 		mustEnvironment(t, s.View(func(r *Reader) error { txn = r.txn; return nil }))
 		sentinel := errors.New("decision")
@@ -618,6 +619,8 @@ func testArchiveAbort(t *testing.T) {
 		archiveEmptyPayload(t, out)
 		archiveCached(t, s, out, bootstrapOwner(t))
 		s.state, s.txn, s.config, s.dbis, s.terminal, s.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+		s.format.Store(format)
+		s.databaseID = identity
 		mustEnvironment(t, s.Close())
 	})
 }
