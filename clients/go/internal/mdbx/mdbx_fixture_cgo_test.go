@@ -1102,6 +1102,7 @@ func testArchiveRetained(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newUpdateStore(t)
 			cfg, dbis, env, writer := s.config, s.dbis, s.env, s.writer
+			format, identity := s.format.Load(), s.databaseID
 			primary := nativeError(operationUpdate, codeENOSPC)
 			secondary := errors.Join(nativeError(operationAbort, codeEIO), nativeError(operationGet, codeCorrupted))
 			cleanup := nativeError(operationAbort, codeThreadMismatch)
@@ -1212,6 +1213,8 @@ func testArchiveRetained(t *testing.T) {
 			}
 			// Only the fixture owner releases live tokens; restoration follows release.
 			s.state, s.txn, s.config, s.dbis, s.terminal, s.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+			s.format.Store(format)
+			s.databaseID = identity
 			mustEnvironment(t, s.Close())
 		})
 	}
@@ -3557,6 +3560,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			s := newUpdateStore(t)
 			cfg, dbis, env, writer := s.config, s.dbis, s.env, s.writer
+			format, identity := s.format.Load(), s.databaseID
 			a, sentinel := modelBase(1, 0, 0), errors.New("decision")
 			primary, cleanup := nativeError(operationUpdate, codeENOSPC), nativeError(operationAbort, codeThreadMismatch)
 			var native updateNativeOutcome
@@ -3597,6 +3601,8 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 				mustEnvironment(t, release())
 				// Test-only restoration after the fixture owner released the actual token.
 				s.state, s.txn, s.config, s.dbis, s.terminal, s.terminalTruth = storeOPEN, nil, cfg, dbis, nil, 0
+				s.format.Store(format)
+				s.databaseID = identity
 				mustEnvironment(t, s.Close())
 			}
 		})
@@ -4210,7 +4216,13 @@ func TestInitial148NativeFailureRecording(t *testing.T) {
 						t.Fatal("initial148 next legal operation terminal Update")
 					}
 					mustEnvironment(t, FixtureStartupRelease(store))
-					if route.tree {
+					if route.tree && abort == 10 {
+						// Teardown preserves a retained abort terminal after releasing its handle;
+						// that test-only CLOSED shape is not a production state transition.
+						if store.self != store || store.state != storeCLOSED || store.env != nil || store.writer != nil || store.txn != nil || store.config != (ConfigV1{}) || !reflect.ValueOf(store.dbis).IsZero() || store.format.Load() != 0 || store.databaseID != ([32]byte{}) || !sameError(store.terminal, terminal) || store.terminalTruth != 0 {
+							t.Fatal("tree fixture teardown resource/terminal preservation")
+						}
+					} else if route.tree {
 						treeNativeZeroResources(t, store)
 					}
 				})

@@ -831,6 +831,7 @@ func TestEnvironmentCreateOpenCloseAndShapes(t *testing.T) {
 	busyTerminal := nativeError(operationClose, codeBusy)
 	published := &Store{env: env, writer: writer, config: cfg, dbis: dbis, state: storeCLOSEBLOCKED, terminal: busyTerminal}
 	published.self = published
+	published.format.Store(2)
 	construction := &Store{env: env, writer: writer, state: storeCLOSEBLOCKED, terminal: orderedErrors(operationClose, orderResultCausesPrimary, errors.New("construction"), busyTerminal)}
 	construction.self = construction
 	unknown := &Store{state: "UNKNOWN"}
@@ -1208,15 +1209,18 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	requireEnvironmentError(t, openNativeEnvironment(native.env, filepath.Join(t.TempDir(), "missing", "db"), 0, 0, operationOpen), EngineIO, operationOpen, int(syscall.ENOENT), expectedNativeDiagnostic(int(syscall.ENOENT)))
 	consumeNativeTestStore(t, native)
 	invalidReaders, cfg := &Store{}, environmentConfig()
+	invalidReaders.format.Store(2)
 	cfg.MaxReaders = 0
 	requireEnvironmentError(t, invalidReaders.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidReaders)
 	invalidGeometry := &Store{}
+	invalidGeometry.format.Store(2)
 	cfg = environmentConfig()
 	cfg.PageSize = 3
 	requireEnvironmentError(t, invalidGeometry.configureCreateEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationCreate, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidGeometry)
 	invalidOpenReaders := &Store{}
+	invalidOpenReaders.format.Store(2)
 	cfg, cfg.MaxReaders = environmentConfig(), 0
 	requireEnvironmentError(t, invalidOpenReaders.openEnvironment(t.TempDir(), cfg), EngineInvalidInput, operationOpen, int(syscall.EINVAL), expectedNativeDiagnostic(int(syscall.EINVAL)))
 	consumeNativeTestStore(t, invalidOpenReaders)
@@ -1237,6 +1241,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	changed.Upper *= 2
 	geometry := &Store{writer: geometryWriter}
 	geometry.self = geometry
+	geometry.format.Store(2)
 	mustEnvironment(t, geometry.configureCreateEnvironment(geometryPath, changed))
 	mustEnvironment(t, geometry.createEnvironment(geometryPath, changed))
 	geometryOutcome := runLocked(func() transactionOutcome { return geometry.inspectOpenLocked(original) })
@@ -1253,6 +1258,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "malformed")
 		malformed := &Store{}
 		malformed.self = malformed
+		malformed.format.Store(2)
 		mustEnvironment(t, malformed.configureCreateEnvironment(path, original))
 		mustEnvironment(t, createDirectory(path))
 		writer, err := acquireWriter(path, operationCreate, true)
@@ -1272,6 +1278,7 @@ func TestEnvironmentNativeNegativePaths(t *testing.T) {
 	nativeLink := closedEnvironment(t)
 	mustEnvironment(t, os.Link(filepath.Join(nativeLink, "mdbx.dat"), filepath.Join(nativeLink, "mdbx.dat.alias")))
 	linked := &Store{}
+	linked.format.Store(2)
 	mustEnvironment(t, linked.configureCreateEnvironment(nativeLink, environmentConfig()))
 	requireEnvironmentError(t, linked.createEnvironment(nativeLink, environmentConfig()), EngineIntegrity, operationCreate, codeInvalid, "mdbx.dat is unsafe")
 	consumeNativeTestStore(t, linked)
