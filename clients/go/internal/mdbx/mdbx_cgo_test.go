@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/sha3"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -35,6 +36,102 @@ func sameError(got, want error) bool {
 	}
 	gotValue, wantValue := reflect.ValueOf(got), reflect.ValueOf(want)
 	return gotValue.Type() == wantValue.Type() && gotValue.Kind() == reflect.Pointer && gotValue.Pointer() == wantValue.Pointer()
+}
+
+func initial148NativeLiteral(t *testing.T) []byte {
+	t.Helper()
+	value, err := hex.DecodeString("78563412" +
+		"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+		"202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f" +
+		"0102030405060708" +
+		"8000000000000000000000000000000000000000000000000000000000000001" +
+		"404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f" +
+		"1112131415161718")
+	if err != nil || len(value) != 148 {
+		t.Fatalf("independent initial148 literal: %x %v", value, err)
+	}
+	return value
+}
+
+func TestInitial148NativeRows(t *testing.T) {
+	header := initial148NativeLiteral(t)
+	key := sha3.Sum256(header)
+	for _, row := range []struct {
+		name   string
+		length int
+		block  bool
+	}{{"header148", 148, false}, {"block148", 148, true}, {"block149", 149, true}, {"block68000157", 68_000_157, true}} {
+		t.Run(row.name, func(t *testing.T) {
+			input := make([]byte, row.length)
+			copy(input, header)
+			snapshot, keyBefore := bytes.Clone(input), key
+			got, err := HashBoundInitial148Value(key, input, row.block)
+			if err != nil || !bytes.Equal(got, snapshot) {
+				t.Fatalf("initial148 row exact copy: length %d/%d, %v", len(got), row.length, err)
+			}
+			got[0] ^= 1
+			got[len(got)-1] ^= 1
+			if !bytes.Equal(input, snapshot) || key != keyBefore {
+				t.Fatal("initial148 row ownership")
+			}
+		})
+	}
+}
+
+func TestInitial148NativeRowRefusal(t *testing.T) {
+	header := initial148NativeLiteral(t)
+	key := sha3.Sum256(header)
+	for _, row := range []struct {
+		name   string
+		length int
+		block  bool
+	}{{"nil header", -1, false}, {"empty header", 0, false}, {"header116", 116, false}, {"header147", 147, false}, {"header149", 149, false}, {"block147", 147, true}, {"block68000158", 68_000_158, true}} {
+		t.Run(row.name, func(t *testing.T) {
+			var input []byte
+			if row.length >= 0 {
+				input = make([]byte, row.length)
+				copy(input, header)
+			}
+			before, keyBefore := bytes.Clone(input), key
+			for _, candidate := range [][32]byte{key, {}} {
+				got, err := HashBoundInitial148Value(candidate, input, row.block)
+				if got != nil || !sameError(err, errSchema) || !bytes.Equal(input, before) || key != keyBefore {
+					t.Fatal("initial148 row refusal: width before key, nil output, unchanged input")
+				}
+			}
+		})
+	}
+	for _, block := range []bool{false, true} {
+		before := bytes.Clone(header)
+		got, err := HashBoundInitial148Value([32]byte{}, header, block)
+		if got != nil || !sameError(err, errSchema) || !bytes.Equal(header, before) {
+			t.Fatal("initial148 row refusal: wrong key")
+		}
+	}
+}
+
+func TestInitial148NativeRootBound(t *testing.T) {
+	header := initial148NativeLiteral(t)
+	key := sha3.Sum256(header)
+	for _, index := range []int{108, 139} {
+		for _, block := range []bool{false, true} {
+			changed := bytes.Clone(header)
+			changed[index] ^= 1
+			before := bytes.Clone(changed)
+			got, err := HashBoundInitial148Value(key, changed, block)
+			if got != nil || !sameError(err, errSchema) || !bytes.Equal(changed, before) {
+				t.Fatalf("initial148 root bound to key: root byte %d", index)
+			}
+			got, err = HashBoundInitial148Value(sha3.Sum256(changed), changed, block)
+			if err != nil || !bytes.Equal(got, changed) {
+				t.Fatalf("initial148 root bound to key: independently rekeyed byte %d", index)
+			}
+		}
+	}
+	got, err := HashBoundInitial148Value(sha3.Sum256(header[:116]), header, false)
+	if got != nil || !sameError(err, errSchema) {
+		t.Fatal("initial148 root bound to key: prefix116 digest admitted")
+	}
 }
 
 type nilPointerError struct{}
@@ -2641,6 +2738,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 	requireOrder("Get", "post-native Get failure was not recorded", "C.rubin_mdbx_get", "copiedGetResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("GetOptionalSide", "post-native optional-side failure was not recorded", "C.rubin_mdbx_get", "optionalSideResult", "r.failure = err", "r.active.Store(false)", "return result")
+	requireOrder("GetInitial148OptionalSide", "post-native initial148 failure was not recorded", "C.rubin_mdbx_get", "initial148OptionalSideResult", "r.failure = err", "r.active.Store(false)", "return result")
 	requireOrder("PrefixPage", "post-native PrefixPage failure was not recorded", "prefixPageRead", "r.failure = err", "r.active.Store(false)", "return page")
 	call := func(expr ast.Expr, path ...string) bool {
 		for i := len(path) - 1; i > 0; i-- {
@@ -2690,6 +2788,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 	checkLockedRead("Get", "C", "rubin_mdbx_get")
 	checkLockedRead("GetOptionalSide", "C", "rubin_mdbx_get")
+	checkLockedRead("GetInitial148OptionalSide", "C", "rubin_mdbx_get")
 	checkLockedRead("PrefixPage", "r", "prefixPageRead")
 	checkLockedRead("StartupCanonicalNextV1", "r", "startupCanonicalRead")
 	requireOrder("StartupCanonicalNextV1", "startup pull native failure was not recorded", "startupCanonicalRead", "r.failure = err", "r.active.Store(false)", "return row")
@@ -2699,8 +2798,8 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	}
 	checkLockedRead("CanonicalTipV1", "r", "canonicalTipAcquire")
 	requireOrder("canonicalTipAcquire", "post-native endpoint failure was not recorded", "canonicalTipEndpoint", "canonicalTipPoint", "r.failure = err", "r.active.Store(false)", "return nil, err")
-	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("GetOptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
-	if nativeCalls != 3 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
+	nativeCalls := strings.Count(body("Get"), "C.rubin_mdbx_get") + strings.Count(body("GetOptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("GetInitial148OptionalSide"), "C.rubin_mdbx_get") + strings.Count(body("getSizedValue"), "C.rubin_mdbx_get")
+	if nativeCalls != 4 || strings.Count(body("prefixPageRead"), "C.rubin_mdbx_get_equal_or_great") != 1 || strings.Count(body("PrefixPage"), "r.prefixPageRead(") != 1 {
 		t.Fatal("concurrent Get serialization drifted")
 	}
 	if strings.Count(body("ReadRequiredSideLink"), "r.Get(schemaDBIs[6], key)") != 1 || strings.Count(body("ReadStorageAuthorityV1"), "r.Get(schemaDBIs[0], []byte{2})") != 1 || strings.Count(body("ReadRequiredSideLink")+body("ReadStorageAuthorityV1"), "bootstrapFailure(r, ") != 3 || strings.Contains(body("ReadRequiredSideLink")+body("ReadStorageAuthorityV1"), "C.") {
@@ -2757,7 +2856,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatalf("prefix-page native wrapper gained forbidden owner: %s", forbidden)
 		}
 	}
-	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 5 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 6 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipFound"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipPoint"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipEqual"), "unsafe.Slice(") != 3 {
+	if strings.Count(body("copiedGetResult"), "C.GoBytes(") != 1 || strings.Count(body("optionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("initial148OptionalSideResult"), "C.GoBytes(") != 1 || strings.Count(body("copyPrefixPageRow"), "C.GoBytes(") != 2 || strings.Count(production, "C.GoBytes(") != 6 || strings.Contains(body("copiedGetResult"), "unsafe.Slice") || strings.Contains(body("optionalSideResult"), "unsafe.Slice") || strings.Contains(body("initial148OptionalSideResult"), "unsafe.Slice") || strings.Count(production, "unsafe.Slice(") != 6 || strings.Count(body("prefixPageNativeKey"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipFound"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipPoint"), "unsafe.Slice(") != 1 || strings.Count(body("canonicalTipEqual"), "unsafe.Slice(") != 3 {
 		t.Fatal("borrowed native bytes accepted")
 	}
 	requireOrder("canonicalTipFound", "endpoint native envelope order drifted", "int(result.rc)", "canonicalTipResultShape", "unsafe.Slice", "bytes.Compare")
@@ -2765,6 +2864,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 	requireOrder("canonicalTipEqual", "endpoint candidate envelope order drifted", "canonicalTipEndpoint", "len(row.key) != 16", "row.image.length != 104", "unsafe.Slice")
 	requireOrder("copiedGetResult", "bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultCopy", "C.GoBytes")
 	requireOrder("optionalSideResult", "optional-side bound must precede copy", "rawValueBounds", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
+	requireOrder("initial148OptionalSideResult", "initial148 bound must precede copy", "uint64(Initial148HeaderBytes)", "maximum = Initial148MaxBlockBytes", "getResultDecision", "case getResultInvalidBound", "case getResultCopy", "C.GoBytes")
 	requireOrder("prefixPageRead", "PrefixPage bound must precede copy", "prefixPageNativeResult", "prefixPageStop", "copyPrefixPageRow")
 	requireOrder("prefixPageNativeRow", "PrefixPage native envelope order drifted", "prefixPageValueShape", "prefixPageNativeKey")
 	requireOrder("prefixPageNativeKey", "PrefixPage native key defense drifted", "keyBytes == nil", "keyLength == 0", "keyLength > C.size_t(77)", "unsafe.Slice", "bytes.Compare")
@@ -2927,7 +3027,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			t.Fatal("Inspection provenance drifted")
 		}
 	}
-	readBodies := body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
+	readBodies := body("View") + body("viewWithStartupCompletion") + body("Get") + body("GetOptionalSide") + body("optionalSideResult") + body("GetInitial148OptionalSide") + body("initial148OptionalSideResult") + body("ReadRequiredSideLink") + body("ReadStorageAuthorityV1") + body("PrefixPage") + body("prefixPageInputError") + body("supportedPrefixPageDBI") + body("validPrefixPagePrefix") + body("validPrefixPageContinuation") + body("prefixPageMinimumBytes") + body("validatePrefixPageRequest") + body("validatePrefixPageLimits") + body("newPrefixPageScan") + body("prefixPageShapeError") + body("prefixPageNativeKey") + body("prefixPageFoundCode") + body("prefixPageValueShape") + body("prefixPageNativeRow") + body("prefixPageStoredRow") + body("prefixPageValueLength") + body("prefixPageNativeResult") + body("prefixPageStop") + body("copyPrefixPageRow") + body("advancePrefixPageSeek") + body("prefixPageRead") + body("Inspect") + body("inspectReadLocked")
 	for _, forbidden := range []string{"mdbx_cursor", "filepath.", "os.", "MDBX_TXN_READWRITE", "context.", "time.Sleep", "time.After", "retry"} {
 		if strings.Contains(readBodies, forbidden) {
 			t.Fatalf("read surface gained forbidden path: %s", forbidden)

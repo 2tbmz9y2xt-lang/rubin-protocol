@@ -13,6 +13,12 @@ const (
 	MaxBlockBytes    = 68_000_125
 )
 
+// Initial148HeaderBytes is the explicit dormant initial148 header width.
+const Initial148HeaderBytes = 148
+
+// Initial148MaxBlockBytes bounds a complete initial148 block row.
+const Initial148MaxBlockBytes = 68_000_157
+
 var errSchema = errors.New("invalid MDBX SchemaV2 bytes")
 
 type DBI struct {
@@ -243,6 +249,18 @@ func CanonicalOwnerValue(height uint64) []byte {
 
 func HashBoundValue(key [32]byte, value []byte, block bool) ([]byte, error) {
 	if (!block && len(value) != 116) || (block && (len(value) < 116 || len(value) > MaxBlockBytes)) || sha3.Sum256(value[:min(len(value), 116)]) != key {
+		return nil, errSchema
+	}
+	return append([]byte(nil), value...), nil
+}
+
+// HashBoundInitial148Value binds the complete initial148 header to key and
+// returns an independent copy of the complete row. It does not validate a body.
+func HashBoundInitial148Value(key [32]byte, value []byte, block bool) ([]byte, error) {
+	if (!block && len(value) != Initial148HeaderBytes) || (block && (len(value) < Initial148HeaderBytes || len(value) > Initial148MaxBlockBytes)) {
+		return nil, errSchema
+	}
+	if sha3.Sum256(value[:Initial148HeaderBytes]) != key {
 		return nil, errSchema
 	}
 	return append([]byte(nil), value...), nil
