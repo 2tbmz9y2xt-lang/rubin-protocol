@@ -2476,88 +2476,114 @@ func panicNilViewCallback(*Reader) error {
 
 //nolint:errorlint // Exact callback and panic identities are part of the View contract.
 func TestViewErrorPanicAndCloseCoordination(t *testing.T) {
-	if path := os.Getenv("RUBIN_MDBX_PANICNIL_CHILD_PATH"); path != "" {
-		store, _ := Create(path, environmentConfig())
-		t.Fatalf("View returned after panic(nil): %v", store.View(panicNilViewCallback))
-	}
-	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestViewErrorPanicAndCloseCoordination$", "-test.count=1")
-	cmd.Env = append(os.Environ(), "GODEBUG=panicnil=1", "RUBIN_MDBX_PANICNIL_CHILD_PATH="+filepath.Join(t.TempDir(), "db"))
-	output, runErr := cmd.CombinedOutput()
-	switch {
-	case !strings.Contains(string(output), "RUBIN_MDBX_PANICNIL_TARGET_REACHED"):
-		t.Fatalf("child did not reach View target: %v\n%s", runErr, output)
-	case runErr == nil || !strings.Contains(string(output), "panic: nil") || !strings.Contains(string(output), "panicNilViewCallback"):
-		t.Fatalf("child did not escape through panicNilViewCallback: %v\n%s", runErr, output)
-	}
-	store, err := Create(filepath.Join(t.TempDir(), "db"), environmentConfig())
-	mustEnvironment(t, err)
-	callbackErr := errors.New("callback")
-	if got := store.View(func(*Reader) error { return callbackErr }); got != callbackErr {
-		t.Fatalf("callback identity changed: %v", got)
-	}
-	abortErr := nativeError(operationAbort, codeEIO)
-	joined := orderedErrors(operationAbort, orderPrimaryResult, callbackErr, abortErr)
-	parts := joined.(interface{ Unwrap() []error }).Unwrap()
-	if len(parts) != 2 || parts[0] != callbackErr || parts[1] != abortErr {
-		t.Fatalf("callback/abort order drifted: %v", joined)
-	}
-	retained := orderedErrors(operationAbort, orderResultCausesPrimary, callbackErr, nativeError(operationAbort, codeThreadMismatch))
-	if engine := requireEnvironmentError(t, retained, EngineLocalInvariant, operationAbort, codeThreadMismatch, expectedNativeDiagnostic(codeThreadMismatch)); engine.Cause != callbackErr {
-		t.Fatalf("poison ownership drifted: %+v", engine)
-	}
-	panicValue := &struct{ value string }{"panic"}
-	var recovered any
-	func() {
-		defer func() { recovered = recover() }()
-		_ = store.View(func(*Reader) error { panic(panicValue) })
-	}()
-	if recovered != panicValue {
-		t.Fatalf("panic cleanup/order drifted: %v", recovered)
-	}
-	entered, release, reentered, done := make(chan struct{}), make(chan struct{}), make(chan [3]error, 1), make(chan error, 1)
-	var once sync.Once
-	releaseView := func() { once.Do(func() { close(release) }) }
-	defer releaseView()
-	go func() {
-		done <- store.View(func(*Reader) error {
-			close(entered)
-			var invoked bool
-			viewErr := store.View(func(*Reader) error { invoked = true; return nil })
-			inspection, inspectErr := store.Inspect()
-			if invoked || inspection != (Inspection{}) {
-				viewErr = errors.New("exclusive observation ownership drifted")
+	for _, row := range []struct {
+		name    string
+		version byte
+		create  func(string, ConfigV1) (*Store, error)
+	}{
+		{"schema2", 2, Create},
+		{"tree", 3, func(path string, cfg ConfigV1) (*Store, error) { return CreateTreeV1(path, cfg, [32]byte{7}) }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if path := os.Getenv("RUBIN_MDBX_PANICNIL_CHILD_PATH"); path != "" {
+				store, err := row.create(path, environmentConfig())
+				mustEnvironment(t, err)
+				t.Fatalf("View returned after panic(nil): %v", store.View(panicNilViewCallback))
 			}
-			reentered <- [3]error{viewErr, inspectErr, store.Close()}
-			<-release
-			return nil
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestViewErrorPanicAndCloseCoordination$/^"+row.name+"$", "-test.count=1")
+			cmd.Env = append(os.Environ(), "GODEBUG=panicnil=1", "RUBIN_MDBX_PANICNIL_CHILD_PATH="+filepath.Join(t.TempDir(), "db"))
+			output, runErr := cmd.CombinedOutput()
+			switch {
+			case !strings.Contains(string(output), "RUBIN_MDBX_PANICNIL_TARGET_REACHED"):
+				t.Fatalf("child did not reach View target: %v\n%s", runErr, output)
+			case runErr == nil || !strings.Contains(string(output), "panic: nil") || !strings.Contains(string(output), "panicNilViewCallback"):
+				t.Fatalf("child did not escape through panicNilViewCallback: %v\n%s", runErr, output)
+			}
+			store, err := row.create(filepath.Join(t.TempDir(), "db"), environmentConfig())
+			mustEnvironment(t, err)
+			readVersion := func(reader *Reader) error {
+				value, present, err := reader.Get(DBI{Name: "meta-v1", Rank: 0}, []byte{0})
+				if err != nil || !present || !bytes.Equal(value, []byte{0, 0, 0, row.version}) {
+					t.Fatalf("View format read drifted: %x/%v/%v", value, present, err)
+				}
+				return nil
+			}
+			callbackErr := errors.New("callback")
+			if got := store.View(func(reader *Reader) error {
+				_ = readVersion(reader)
+				return callbackErr
+			}); got != callbackErr {
+				t.Fatalf("callback identity changed: %v", got)
+			}
+			abortErr := nativeError(operationAbort, codeEIO)
+			joined := orderedErrors(operationAbort, orderPrimaryResult, callbackErr, abortErr)
+			parts := joined.(interface{ Unwrap() []error }).Unwrap()
+			if len(parts) != 2 || parts[0] != callbackErr || parts[1] != abortErr {
+				t.Fatalf("callback/abort order drifted: %v", joined)
+			}
+			retained := orderedErrors(operationAbort, orderResultCausesPrimary, callbackErr, nativeError(operationAbort, codeThreadMismatch))
+			if engine := requireEnvironmentError(t, retained, EngineLocalInvariant, operationAbort, codeThreadMismatch, expectedNativeDiagnostic(codeThreadMismatch)); engine.Cause != callbackErr {
+				t.Fatalf("poison ownership drifted: %+v", engine)
+			}
+			panicValue := &struct{ value string }{"panic"}
+			var recovered any
+			func() {
+				defer func() { recovered = recover() }()
+				_ = store.View(func(reader *Reader) error {
+					_ = readVersion(reader)
+					panic(panicValue)
+				})
+			}()
+			if recovered != panicValue {
+				t.Fatalf("panic cleanup/order drifted: %v", recovered)
+			}
+			entered, release, reentered, done := make(chan struct{}), make(chan struct{}), make(chan [3]error, 1), make(chan error, 1)
+			var once sync.Once
+			releaseView := func() { once.Do(func() { close(release) }) }
+			defer releaseView()
+			go func() {
+				done <- store.View(func(reader *Reader) error {
+					_ = readVersion(reader)
+					close(entered)
+					var invoked bool
+					viewErr := store.View(func(*Reader) error { invoked = true; return nil })
+					inspection, inspectErr := store.Inspect()
+					if invoked || inspection != (Inspection{}) {
+						viewErr = errors.New("exclusive observation ownership drifted")
+					}
+					reentered <- [3]error{viewErr, inspectErr, store.Close()}
+					<-release
+					return nil
+				})
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("exclusive observation ownership drifted")
+			}
+			var results [3]error
+			select {
+			case results = <-reentered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("exclusive observation ownership drifted")
+			}
+			for i, operation := range []engineOperation{operationView, operationInspect, operationClose} {
+				requireEnvironmentError(t, results[i], EngineConcurrency, operation, codeBusy, "store operation in progress")
+			}
+			if store.state != storeOPEN || store.terminal != nil {
+				t.Fatal("Store operation did not return Concurrency")
+			}
+			releaseView()
+			select {
+			case viewErr := <-done:
+				mustEnvironment(t, viewErr)
+			case <-time.After(5 * time.Second):
+				t.Fatal("panic cleanup/order drifted")
+			}
+			mustEnvironment(t, store.View(readVersion))
+			mustEnvironment(t, store.Close())
 		})
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("exclusive observation ownership drifted")
 	}
-	var results [3]error
-	select {
-	case results = <-reentered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("exclusive observation ownership drifted")
-	}
-	for i, operation := range []engineOperation{operationView, operationInspect, operationClose} {
-		requireEnvironmentError(t, results[i], EngineConcurrency, operation, codeBusy, "store operation in progress")
-	}
-	if store.state != storeOPEN || store.terminal != nil {
-		t.Fatal("Store operation did not return Concurrency")
-	}
-	releaseView()
-	select {
-	case viewErr := <-done:
-		mustEnvironment(t, viewErr)
-	case <-time.After(5 * time.Second):
-		t.Fatal("panic cleanup/order drifted")
-	}
-	mustEnvironment(t, store.View(func(*Reader) error { return nil }))
-	mustEnvironment(t, store.Close())
 }
 
 func TestReadStoreStates(t *testing.T) {
@@ -4949,6 +4975,7 @@ func TestUpdateOutcomeProjection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			store := newUpdateStore(t)
 			cfg, dbis, env, writer := store.config, store.dbis, store.env, store.writer
+			format, identity := store.format.Load(), store.databaseID
 			txn := store.txn
 			mustEnvironment(t, store.View(func(reader *Reader) error { txn = reader.txn; return nil }))
 			primary, cleanup := nativeError(operationUpdate, codeENOSPC), nativeError(operationAbort, codeThreadMismatch)

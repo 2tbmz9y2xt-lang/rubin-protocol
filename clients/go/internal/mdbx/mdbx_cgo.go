@@ -2851,12 +2851,13 @@ func newPrefixPageScan(dbi DBI, prefix, afterExclusive []byte, maxRows uint32, m
 }
 
 // PrefixPage returns rows after afterExclusive from the Reader's current
-// snapshot. UTXO, canonical, staged and canonical-owner prefixes are exact 8-byte
-// nonzero big-endian image or generation IDs; undo prefixes are any exact 32-byte
-// hash. A non-nil continuation is an exact same-prefix SchemaV2 key. Rows are
-// limited to 1..1440; bytes are limited to 65604 for UTXO, 120 for canonical/staged,
-// 48 for canonical-owner or 65637 for undo through 154611151. A nil continuation
-// starts at prefix.
+// snapshot. UTXO, canonical, staged, canonical-owner and tree-node prefixes are
+// exact 8-byte nonzero big-endian image or generation IDs; undo prefixes are any
+// exact 32-byte hash. A non-nil continuation is an exact same-prefix key in the
+// Reader's selected format, including 46-byte tree-node keys. Rows are limited to
+// 1..1440; bytes are limited to 65604 for UTXO, 120 for canonical/staged, 48 for
+// canonical-owner, 65637 for undo or 186 for tree-node through 154611151. A nil
+// continuation starts at prefix.
 // Inputs are borrowed only synchronously; results are independent copies and no
 // native cursor escapes. Native or stored-row failure returns a zero page,
 // invalidates the Reader, and follows the existing View/Update disposition.

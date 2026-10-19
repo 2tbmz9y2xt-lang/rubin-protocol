@@ -4516,52 +4516,86 @@ func TestTreeNativeTypedCorruption(t *testing.T) {
 }
 
 func TestTreeNativePostorder(t *testing.T) {
-	store, _, _ := treeNativeStore(t)
-	allOnes := [36]byte{}
-	for i := range allOnes {
-		allOnes[i] = 0xff
-	}
-	identities := []TreeNodeIDV1{treeLeaf([36]byte{}), treeBranch(287, [36]byte{}), treeBranch(256, [36]byte{}), treeBranch(255, [36]byte{}), treeBranch(9, [36]byte{}), treeBranch(8, [36]byte{}), treeBranch(7, [36]byte{}), treeLeaf(allOnes), treeBranch(0, [36]byte{})}
-	// Upper/code literals remain independent of the key producer transformed by M02.N.
-	uppers := []string{strings.Repeat("00", 36), strings.Repeat("00", 35) + "01", strings.Repeat("00", 32) + strings.Repeat("ff", 4), strings.Repeat("00", 31) + "01" + strings.Repeat("ff", 4), "007f" + strings.Repeat("ff", 34), "00" + strings.Repeat("ff", 35), "01" + strings.Repeat("ff", 35), strings.Repeat("ff", 36), strings.Repeat("ff", 36)}
-	codes := []string{"0000", "0001", "0020", "0021", "0117", "0118", "0119", "0000", "0120"}
-	keys, values := make([][]byte, len(identities)), make([][]byte, len(identities))
-	for i := len(identities) - 1; i >= 0; i-- {
-		key, err := TreeNodeKey(1, identities[i])
-		mustEnvironment(t, err)
-		keys[i] = treeNativeKeyLiteral(t, uppers[i], codes[i])
-		width := 140
-		if identities[i].Kind == 1 {
-			width = 32
-		}
-		values[i] = bytes.Repeat([]byte{byte(i + 1)}, width)
-		// Raw insertion must reach native paging even under M02.N; no codec admission here.
-		treeNativeSeed(t, store, 8, key, values[i])
-	}
-	for _, remnant := range []bool{false, true} {
-		if remnant {
-			for _, index := range []int{1, 3, 7} {
-				key, err := TreeNodeKey(1, identities[index])
-				mustEnvironment(t, err)
-				mustEnvironment(t, fixtureDeletePrefixRow(store, DBI{Name: "tree-node-v1", Rank: 8}, key))
+	for _, fixture := range []string{"boundary", "shared_upper"} {
+		t.Run(fixture, func(t *testing.T) {
+			store, _, _ := treeNativeStore(t)
+			allOnes := [36]byte{}
+			for i := range allOnes {
+				allOnes[i] = 0xff
 			}
-		}
-		mustEnvironment(t, store.View(func(reader *Reader) error {
-			page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, []byte{0, 0, 0, 0, 0, 0, 0, 1}, nil, 1440, 154611151)
-			var expected []PrefixRow
-			for i, key := range keys {
-				if remnant && (i == 1 || i == 3 || i == 7) {
-					continue
+			identities := []TreeNodeIDV1{treeLeaf([36]byte{}), treeBranch(287, [36]byte{}), treeBranch(256, [36]byte{}), treeBranch(255, [36]byte{}), treeBranch(9, [36]byte{}), treeBranch(8, [36]byte{}), treeBranch(7, [36]byte{}), treeLeaf(allOnes), treeBranch(0, [36]byte{})}
+			// Upper/code literals remain independent of the key producer transformed by M02.N.
+			uppers := []string{strings.Repeat("00", 36), strings.Repeat("00", 35) + "01", strings.Repeat("00", 32) + strings.Repeat("ff", 4), strings.Repeat("00", 31) + "01" + strings.Repeat("ff", 4), "007f" + strings.Repeat("ff", 34), "00" + strings.Repeat("ff", 35), "01" + strings.Repeat("ff", 35), strings.Repeat("ff", 36), strings.Repeat("ff", 36)}
+			codes := []string{"0000", "0001", "0020", "0021", "0117", "0118", "0119", "0000", "0120"}
+			removed := []int{1, 3, 7}
+			if fixture == "shared_upper" {
+				// Every branch has an all-one upper bound. Depth-for-code mutants stay
+				// decodable, so native paging reaches the independent order comparison.
+				identities = []TreeNodeIDV1{treeLeaf(allOnes)}
+				for _, row := range []struct {
+					depth  uint16
+					prefix string
+				}{
+					{287, strings.Repeat("ff", 35) + "fe"},
+					{256, strings.Repeat("ff", 32) + strings.Repeat("00", 4)},
+					{255, strings.Repeat("ff", 31) + "fe" + strings.Repeat("00", 4)},
+					{9, "ff80" + strings.Repeat("00", 34)},
+					{8, "ff" + strings.Repeat("00", 35)},
+					{7, "fe" + strings.Repeat("00", 35)},
+				} {
+					prefix := [36]byte{}
+					copy(prefix[:], mustCodecHex(t, row.prefix))
+					identities = append(identities, treeBranch(row.depth, prefix))
 				}
-				expected = append(expected, PrefixRow{Key: key, Value: values[i]})
+				uppers = []string{strings.Repeat("ff", 36), strings.Repeat("ff", 36), strings.Repeat("ff", 36), strings.Repeat("ff", 36), strings.Repeat("ff", 36), strings.Repeat("ff", 36), strings.Repeat("ff", 36)}
+				codes = []string{"0000", "0001", "0020", "0021", "0117", "0118", "0119"}
+				removed = []int{1, 3, 5}
 			}
-			if err != nil || page.Stop != PrefixPageExhausted || !reflect.DeepEqual(page.Rows, expected) {
-				t.Fatalf("tree postorder complete/remnant native observation: remnant%v page%+v error%v", remnant, page, err)
+			markers := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}
+			keys, values := make([][]byte, len(identities)), make([][]byte, len(identities))
+			for i := len(identities) - 1; i >= 0; i-- {
+				key, err := TreeNodeKey(1, identities[i])
+				mustEnvironment(t, err)
+				keys[i] = treeNativeKeyLiteral(t, uppers[i], codes[i])
+				width := 140
+				if identities[i].Kind == 1 {
+					width = 32
+				}
+				values[i] = bytes.Repeat([]byte{markers[i]}, width)
+				// Raw insertion must reach native paging even under M02.N; no codec admission here.
+				treeNativeSeed(t, store, 8, key, values[i])
 			}
-			page.Rows[0].Key[0] ^= 1
-			page.Rows[0].Value[0] ^= 1
-			return nil
-		}))
+			for _, remnant := range []bool{false, true} {
+				t.Run(fmt.Sprintf("remnant%v", remnant), func(t *testing.T) {
+					if remnant {
+						for _, index := range removed {
+							key, err := TreeNodeKey(1, identities[index])
+							mustEnvironment(t, err)
+							mustEnvironment(t, fixtureDeletePrefixRow(store, DBI{Name: "tree-node-v1", Rank: 8}, key))
+						}
+					}
+					mustEnvironment(t, store.View(func(reader *Reader) error {
+						page, err := reader.PrefixPage(DBI{Name: "tree-node-v1", Rank: 8}, []byte{0, 0, 0, 0, 0, 0, 0, 1}, nil, 1440, 154611151)
+						var expected []PrefixRow
+						for i, key := range keys {
+							if remnant && (i == removed[0] || i == removed[1] || i == removed[2]) {
+								continue
+							}
+							expected = append(expected, PrefixRow{Key: key, Value: values[i]})
+						}
+						if err != nil {
+							t.Fatalf("tree native paging failed before order comparison: %v", err)
+						}
+						if page.Stop != PrefixPageExhausted || !reflect.DeepEqual(page.Rows, expected) {
+							t.Fatalf("tree postorder complete/remnant native observation: remnant%v page%+v error%v", remnant, page, err)
+						}
+						page.Rows[0].Key[0] ^= 1
+						page.Rows[0].Value[0] ^= 1
+						return nil
+					}))
+				})
+			}
+		})
 	}
 }
 
@@ -4630,8 +4664,14 @@ func TestTreeNativePagingBounds(t *testing.T) {
 }
 
 func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
-	for _, row := range []struct{ source, progress byte }{{0, 0}, {1, 0}, {2, 1}, {2, 2}} {
-		t.Run(fmt.Sprintf("source%d/status%d", row.source, row.progress), func(t *testing.T) {
+	for _, row := range []struct {
+		source, progress byte
+		currentFirst     bool
+	}{
+		{0, 0, false}, {1, 0, false}, {2, 1, false}, {2, 2, false},
+		{0, 0, true}, {1, 0, true}, {2, 1, true}, {2, 2, true},
+	} {
+		t.Run(fmt.Sprintf("source%d/status%d/currentFirst%v", row.source, row.progress, row.currentFirst), func(t *testing.T) {
 			store, path, identity := treeNativeStore(t)
 			treeNativeSeed(t, store, 0, []byte{2}, treeNativeAuthorityBytes(t, TreeSourceKindV1(row.source), TreeProgressKindV1(row.progress)))
 			// The authority is valid; unrequested rows are deliberately malformed or absent.
@@ -4642,6 +4682,14 @@ func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
 			} {
 				treeNativeSeed(t, store, 0, key, []byte{0})
 			}
+			want := treeRootFixture(t, false)
+			want.DatabaseID = identity
+			if row.currentFirst {
+				encoded, err := want.Encode()
+				mustEnvironment(t, err)
+				treeNativeSeed(t, store, 0, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, encoded)
+				treeNativeSeed(t, store, 0, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 2}, []byte{0})
+			}
 			mustEnvironment(t, store.Close())
 			opened, err := OpenTreeV1(path, environmentConfig(), identity)
 			if err != nil || opened == nil {
@@ -4650,10 +4698,29 @@ func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
 			if opened.canonicalOwnerVerified {
 				t.Fatal("tree open granted canonical service")
 			}
+			var recorded error
 			err = opened.View(func(reader *Reader) error {
 				got, present, err := reader.ReadTreeAuthorityV1()
 				if err != nil || !present || byte(got.SourceKind) != row.source || byte(got.Progress.Kind) != row.progress {
 					t.Fatal("tree authority inferred role qualification")
+				}
+				if row.currentFirst {
+					root, present, err := reader.ReadTreeRootBindingV1(1)
+					if err != nil || !present || !reflect.DeepEqual(root, want) {
+						t.Fatalf("tree CURRENT root before counter: %+v/%v/%v", root, present, err)
+					}
+					value, present, err := reader.Get(DBI{Name: "meta-v1", Rank: 0}, []byte{0x10, 0, 0, 0, 0, 0, 0, 0, 1})
+					treeNativeIntegrity(t, err, operationGet, errSchema)
+					recorded = err
+					if value != nil || present || reader.failure != recorded || reader.usable() {
+						t.Fatal("tree CURRENT counter width first-failure identity/disarm")
+					}
+					root, present, err = reader.ReadTreeRootBindingV1(2)
+					treeNativeError(t, err, operationGet, EngineClass("InvalidInput"), 22, "Reader is not active", nil)
+					if root != (RootBindingV1{}) || present || reader.failure != recorded {
+						t.Fatal("later LAG read replaced CURRENT counter failure")
+					}
+					return recorded
 				}
 				root, present, err := reader.ReadTreeRootBindingV1(2)
 				if root != (RootBindingV1{}) || present || err != nil {
@@ -4663,9 +4730,14 @@ func TestTreeNativeOpenNoRolePrefetch(t *testing.T) {
 				if root != (RootBindingV1{}) || present {
 					t.Fatal("reached malformed root returned value")
 				}
+				recorded = err
 				return err
 			})
 			treeNativeIntegrity(t, err, operationGet, errSchema)
+			if err != recorded || opened.terminal != recorded || opened.state != storeCLOSED {
+				t.Fatal("tree no-prefetch enclosing View failure identity/resources")
+			}
+			treeNativeZeroResources(t, opened)
 		})
 	}
 }
