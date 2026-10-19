@@ -26,6 +26,7 @@ In `utxo_commitment_expected_v1.json`, the `IMAGE-19-Fbase` and
 `IMAGE-19-no_result_tip` `normative_refs` match the exact contract row;
 input and expected cells are unchanged.
 The eight ORDER-09 through ORDER-14 variant inputs now explicitly name their existing actions.
+`utxo_commitment_expected_v1.json` now supplies complete root-mismatch candidate inputs and explicitly names the READ-02 operation.
 
 The JSON has no regeneration command. Only the inventory is generated, with
 `scripts/dev-env.sh -- python3 tools/gen_conformance_matrix.py`.
