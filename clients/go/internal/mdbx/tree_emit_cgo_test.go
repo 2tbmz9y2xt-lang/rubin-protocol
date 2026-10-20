@@ -1170,5 +1170,6 @@ func TestTreeEmitV1R4R6Extended(t *testing.T) {
 
 // testTreeExact reports that err is the same error value as want, returned unchanged.
 func testTreeExact(err, want error) bool {
-	return err == want
+	var got, exp any = err, want
+	return got == exp
 }
