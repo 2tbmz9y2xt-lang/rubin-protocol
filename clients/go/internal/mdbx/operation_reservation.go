@@ -108,6 +108,14 @@ type OperationAccount struct {
 	shared *operationAccountState
 }
 
+// operationHold owns one resizable charge until its withHold frame leaves. Its amount
+// and closed state, together with the account's sums, are guarded by the owner's mutex.
+type operationHold struct {
+	account *operationAccountState
+	amount  uint64
+	closed  bool
+}
+
 // NewOperationReservationOwner returns an owner with zero live bytes and limit for every
 // limit; the error is always nil.
 func NewOperationReservationOwner(limit uint64) (*OperationReservationOwner, error) {
@@ -216,6 +224,79 @@ func (a *OperationAccount) WithReservation(bytes uint64, callback func() error) 
 		return errOperationReservationInput
 	}
 	return a.shared.origin.withReservation(a.shared, bytes, callback)
+}
+
+// openV1 reports whether a was opened and its WithOperation frame has not left.
+// It changes no charge or state.
+func (a *OperationAccount) openV1() bool {
+	if a == nil || a.shared == nil {
+		return false
+	}
+	s := a.shared.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !a.shared.closed
+}
+
+// withHold runs callback once, synchronously, with a fresh zero-byte hold. It checks
+// only input, returns the callback error unchanged, and closes the hold and releases
+// its remainder before return, panic or Goexit leaves the frame.
+func (a *OperationAccount) withHold(callback func(*operationHold) error) error {
+	if callback == nil || !a.openV1() {
+		return errOperationReservationInput
+	}
+	h := &operationHold{account: a.shared}
+	s := a.shared.origin
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		h.closed = true
+		h.account.held -= h.amount
+		s.live -= h.amount
+		h.amount = 0
+	}()
+	return callback(h)
+}
+
+// grow adds bytes to an open hold, its open account and the aggregate, using the
+// account's shared admission precheck. Input refusals precede capacity refusals;
+// neither refusal changes any amount, including when bytes is zero.
+func (h *operationHold) grow(bytes uint64) error {
+	if h == nil || h.account == nil {
+		return errOperationReservationInput
+	}
+	a, s := h.account, h.account.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h.closed || a.closed {
+		return errOperationReservationInput
+	}
+	if !s.admits(a.ceiling, a.held, bytes) {
+		return errOperationReservationCapacity
+	}
+	h.amount += bytes
+	a.held += bytes
+	s.live += bytes
+	return nil
+}
+
+// shrink releases bytes from an open hold, its account and the aggregate. An amount
+// above the hold's remainder or an unopened or closed hold refuses without changes.
+// An account's closure does not prevent its still-open hold from releasing bytes.
+func (h *operationHold) shrink(bytes uint64) error {
+	if h == nil || h.account == nil {
+		return errOperationReservationInput
+	}
+	a, s := h.account, h.account.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h.closed || bytes > h.amount {
+		return errOperationReservationInput
+	}
+	h.amount -= bytes
+	a.held -= bytes
+	s.live -= bytes
+	return nil
 }
 
 // WithReservation runs callback once, synchronously in the calling goroutine, while bytes
