@@ -311,7 +311,8 @@ func TestTreeDeltaGroupsV1(t *testing.T) {
 	}
 }
 
-// A15 (a)-(e), M29, M35, M36, M-REL-NOEXP, M43: the recorder releases D_j + V once iff charged.
+// A15 (a)-(e), G8, M29, M35, M36, M-REL-NOEXP, M-REL-FAIL, M43: the recorder releases D_j + V once iff charged,
+// a recorded failure included.
 func TestTreeDeltaReleaseV1(t *testing.T) {
 	want := fmt.Sprintf("charge %d|release %d", 3*tdSize+tdV, 3*tdSize+tdV)
 	c := tdGrammar()
@@ -345,6 +346,14 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 		tdInvalid(t, err)
 	}, want)
 	run("c", func(r *treeRecorderV1) { begin(r); r.expireV1() }, want)
+	run("f recorded failure", func(r *treeRecorderV1) {
+		begin(r)
+		err := tdEv{kind: 3, txid: tdTxid(1), tx: 1}.feed(r)
+		tdInvalid(t, err)
+		if !sameError(r.failureV1(), err) {
+			t.Fatal("f: refusal not recorded")
+		}
+	}, want)
 	run("d never", func(r *treeRecorderV1) {}, "")
 	run("d refused", func(r *treeRecorderV1) { tdInvalid(t, r.beginV1(0, 3, [16]byte{})) }, "")
 	refusing := &tdLedger{limit: 1}
@@ -558,6 +567,9 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 	if !sameError(r.failureV1(), err) {
 		t.Fatal("height-0 SPEND not recorded")
 	}
+	if got := ledger.logged(); got != fmt.Sprintf("charge %d", tdSize+tdV) {
+		t.Fatalf("height-0 SPEND ledger %s", got)
+	}
 }
 
 // R8, M21, M37: after expiry sink calls are not active, unrecorded and uncharged; windowV1 is nil.
@@ -654,18 +666,31 @@ func TestTreeDeltaRetainedSinkV1(t *testing.T) {
 	go func() { defer wg.Done(); r.expireV1() }()
 	go func() { defer wg.Done(); _ = c.events[0].feed(r) }()
 	wg.Wait()
-	calls, events := ledger.logged(), len(r.descs)
+	calls, events := ledger.logged(), append([]treeDescV1(nil), r.descs...)
 	done := make(chan error)
 	go func() { done <- c.events[1].feed(r) }()
 	tdInactive(t, <-done)
-	if ledger.logged() != calls || len(r.descs) != events {
-		t.Fatal("expired sink charged or recorded")
+	if ledger.logged() != calls || len(r.descs) != len(events) || fmt.Sprint(r.descs) != fmt.Sprint(events) {
+		t.Fatal("expired sink charged or changed a descriptor")
 	}
 }
 
 // tdBlocking returns a ledger whose chargeV1 signals entry and then blocks until gate is closed.
 func tdBlocking() *tdLedger {
 	return &tdLedger{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+}
+
+// tdEntered waits, bounded, until r's inactive flag is set: expireV1 stores it just before it takes the recorder
+// mutex, and releaseV1 calls expireV1 first, so the flag shows that goroutine B has entered.
+func tdEntered(t *testing.T, r *treeRecorderV1, name string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !r.inactive.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not enter", name)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // tdNotDone asserts that done stays open for a bounded wait while the charge is blocked (T8).
@@ -687,6 +712,7 @@ func TestTreeDeltaExpireWaitsV1(t *testing.T) {
 	go func() { beginDone <- r.beginV1(3, 5, [16]byte{}) }()
 	<-ledger.entered
 	go func() { r.expireV1(); close(expireDone) }()
+	tdEntered(t, r, "expireV1")
 	tdNotDone(t, expireDone, "expireV1")
 	close(ledger.gate)
 	tdOK(t, <-beginDone)
@@ -706,6 +732,7 @@ func TestTreeDeltaReleaseWaitsV1(t *testing.T) {
 	go func() { beginDone <- r.beginV1(3, 3, [16]byte{}) }()
 	<-ledger.entered
 	go func() { r.releaseV1(); close(releaseDone) }()
+	tdEntered(t, r, "releaseV1")
 	tdNotDone(t, releaseDone, "releaseV1")
 	close(ledger.gate)
 	tdOK(t, <-beginDone)
@@ -757,28 +784,75 @@ func tdAllocs(t *testing.T, name string, f func()) {
 	}
 }
 
-// H6, M39, M42, M-OLDV-DECODE: the per-call paths make no heap allocation under each effect.
+// tdFresh adapts call for testing.AllocsPerRun(1, ...), which runs its function once unmeasured and then once
+// measured: run i passes state i, so the measured call starts from its own fresh state, not from the warm-up's.
+func tdFresh(call func(i int)) func() {
+	i := 0
+	return func() { call(i); i++ }
+}
+
+// tdFed is a writer recorder with BEGIN accepted for every event of c and the first k events fed.
+func tdFed(t *testing.T, c tdCase, k int, ledger treeLedgerV1) *treeRecorderV1 {
+	t.Helper()
+	r := c.recorder(treeWriterV1, ledger)
+	tdOK(t, r.beginV1(c.txCount, uint32(len(c.events)), c.generated))
+	for _, e := range c.events[:k] {
+		tdOK(t, e.feed(r))
+	}
+	return r
+}
+
+// tdDrainCount drains one leaves iterator and returns its leaf count; an error fails the test.
+func tdDrainCount(t *testing.T, it treeLeavesV1) int {
+	n := 0
+	for {
+		_, ok, err := it.nextV1()
+		tdOK(t, err)
+		if !ok {
+			return n
+		}
+		n++
+	}
+}
+
+// tdZeroAllocEffect is H6 under one effect: a SPEND and a CREATE eventV1, a first resolveV1 and applyV1 on a fresh
+// delta, a drain of a fresh leaves iterator, expireV1 of an active recorder and a releaseV1 that returns the charge.
+func tdZeroAllocEffect(t *testing.T, undo uint8) {
+	c, old := tdAllocCase(undo)
+	name := func(op string) string { return fmt.Sprintf("%s %d", op, undo) }
+	nop := func() treeLedgerV1 { return &tdNopLedger{} }
+	spend := [2]*treeRecorderV1{tdFed(t, c, 1, nop()), tdFed(t, c, 1, nop())}
+	create := [2]*treeRecorderV1{tdFed(t, c, 3, nop()), tdFed(t, c, 3, nop())}
+	active := [2]*treeRecorderV1{tdFed(t, c, 0, nop()), tdFed(t, c, 0, nop())}
+	ledgers := [2]*tdNopLedger{{}, {}}
+	charged := [2]*treeRecorderV1{tdFed(t, c, 0, ledgers[0]), tdFed(t, c, 0, ledgers[1])}
+	var fresh, resolved [2]*treeDeltaV1
+	for i := range 2 {
+		_, fresh[i] = c.delta(t, treeWriterV1, nop())
+		_, resolved[i] = c.delta(t, treeWriterV1, nop())
+		tdOK(t, resolved[i].resolveV1(old))
+	}
+	its := [2]treeLeavesV1{resolved[0].leavesV1(), resolved[1].leavesV1()}
+	emit, leaves := &tdCountEmitter{}, [2]int{}
+	tdAllocs(t, name("eventV1 SPEND"), tdFresh(func(i int) { tdOK(t, c.events[1].feed(spend[i])) }))
+	tdAllocs(t, name("eventV1 CREATE"), tdFresh(func(i int) { tdOK(t, c.events[3].feed(create[i])) }))
+	tdAllocs(t, name("windowV1"), func() { _ = spend[0].windowV1() })
+	tdAllocs(t, name("failureV1"), func() { _ = spend[0].failureV1() })
+	tdAllocs(t, name("resolveV1"), tdFresh(func(i int) { tdOK(t, fresh[i].resolveV1(old)) }))
+	tdAllocs(t, name("applyV1"), tdFresh(func(i int) { tdOK(t, resolved[i].applyV1(emit)) }))
+	tdAllocs(t, name("leaves nextV1"), tdFresh(func(i int) { leaves[i] = tdDrainCount(t, its[i]) }))
+	tdAllocs(t, name("expireV1"), tdFresh(func(i int) { active[i].expireV1() }))
+	tdAllocs(t, name("releaseV1"), tdFresh(func(i int) { charged[i].releaseV1() }))
+	if leaves[0] == 0 || leaves[1] == 0 || ledgers[0].releases != 1 || ledgers[1].releases != 1 || emit.emits == 0 {
+		t.Fatalf("undo %d: leaves %v releases %d %d emits %d", undo, leaves, ledgers[0].releases, ledgers[1].releases, emit.emits)
+	}
+}
+
+// H6, M39, M42, M-OLDV-DECODE: the per-call paths make no heap allocation under each effect; kA's OLD value carries
+// covenant data (the D18 vector).
 func TestTreeDeltaZeroAllocV1(t *testing.T) {
 	for undo := uint8(1); undo <= 6; undo++ {
-		c, old := tdAllocCase(undo)
-		ledger := &tdNopLedger{}
-		r := c.recorder(treeWriterV1, ledger)
-		tdOK(t, r.beginV1(c.txCount, 4, [16]byte{}))
-		tdOK(t, c.events[0].feed(r))
-		tdOK(t, c.events[1].feed(r))
-		next := 2
-		tdAllocs(t, "eventV1", func() { tdOK(t, c.events[next].feed(r)); next++ })
-		tdAllocs(t, "windowV1", func() { _ = r.windowV1() })
-		tdAllocs(t, "failureV1", func() { _ = r.failureV1() })
-		d, err := r.finishV1()
-		tdOK(t, err)
-		tdAllocs(t, fmt.Sprintf("resolveV1 %d", undo), func() { tdOK(t, d.resolveV1(old)) })
-		emit := &tdCountEmitter{}
-		tdAllocs(t, fmt.Sprintf("applyV1 %d", undo), func() { tdOK(t, d.applyV1(emit)) })
-		it := d.leavesV1()
-		tdAllocs(t, "leaves nextV1", func() { _, _, _ = it.nextV1() })
-		tdAllocs(t, "expireV1", r.expireV1)
-		tdAllocs(t, "releaseV1", r.releaseV1)
+		tdZeroAllocEffect(t, undo)
 	}
 	entry := tdFormed(tdFrame(1, 0, make([]byte, 65_536)), 1, 0)
 	key := tdEntryKey(tdTxid(1), tdTxid(2), 0, 0, 0)
@@ -802,7 +876,8 @@ func tdSequence(t testing.TB, c tdCase, old treeOldV1, n int) func() {
 		tdMust(t, d.resolveV1(old))
 		for range 2 {
 			it := d.leavesV1()
-			for _, ok, _ := it.nextV1(); ok; _, ok, _ = it.nextV1() {
+			for _, ok, err := it.nextV1(); ok || err != nil; _, ok, err = it.nextV1() {
+				tdMust(t, err)
 			}
 		}
 		tdMust(t, d.applyV1(emit))

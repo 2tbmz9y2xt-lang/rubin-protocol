@@ -164,12 +164,15 @@ type tdOpt struct {
 	pair    bool
 }
 
-func tdLeaves(d *treeDeltaV1) []string {
+// tdLeaves drains a fresh leaves iterator; a nextV1 error fails the test instead of ending the list.
+func tdLeaves(t testing.TB, d *treeDeltaV1) []string {
+	t.Helper()
 	var out []string
 	it := d.leavesV1()
 	for {
 		leaf, ok, err := it.nextV1()
-		if err != nil || !ok {
+		tdOK(t, err)
+		if !ok {
 			return out
 		}
 		out = append(out, fmt.Sprintf("%x %v %v %x", leaf.key, leaf.oldPresent, leaf.newPresent, leaf.newValue))
@@ -192,7 +195,7 @@ func tdRunAt(t *testing.T, store *Store, c tdCase, pos treePositionV1, opt tdOpt
 		}
 		rec := &tdRec{}
 		err := d.applyV1(rec)
-		out.apply, out.log, out.leaves = err, rec.log, tdLeaves(d)
+		out.apply, out.log, out.leaves = err, rec.log, tdLeaves(t, d)
 		if !opt.record {
 			tdOK(t, err)
 		}
@@ -275,6 +278,19 @@ func TestTreeDeltaPresenceCasesV1(t *testing.T) {
 	tdLog(t, "A4", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdPut(5, s.eD, s.vD), tdPut(1, s.kD, s.nD), tdPut(5, s.mK, s.man))
 	tdLog(t, "A4 leaves", out.leaves, tdLeaf(s.kA, true, false, nil), tdLeaf(s.kB, false, true, s.nB), tdLeaf(s.kD, true, true, s.nD))
+}
+
+// S6, A4: the only undo-v1 rows are another block's family whose keys sort after Block (its manifest byte-equal to
+// the regenerated one), so the own family is absent: the A4 family is regenerated and no other-block row is emitted
+// or referred.
+func TestTreeDeltaOtherBlockFamilyV1(t *testing.T) {
+	s := tdA4(1, 1)
+	other := tdTxid(0xbc)
+	rows := []tdMemRow{{5, tdManifestKey(other), s.man}, {5, tdEntryKey(other, tdTxid(0x0a), 1, 0, 0), s.vA}}
+	out := tdBoth(t, tdStore(t, s.pre(), rows), s.c, tdOpt{})
+	tdOK(t, out.err)
+	tdLog(t, "S6 other block", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
+		tdRef(1, s.kC), tdPut(5, s.eD, s.vD), tdPut(1, s.kD, s.nD), tdPut(5, s.mK, s.man))
 }
 
 // A5: a LAG intermediate served by the overlay is the regenerated entry value.
@@ -388,7 +404,7 @@ func TestTreeDeltaNotDirtyV1(t *testing.T) {
 	tdOK(t, fixtureTreeOldV1(tdStore(t, s4.pre()), func(old treeOldV1) error {
 		_, d := s4.c.delta(t, treeWriterV1, &tdLedger{})
 		tdOK(t, d.resolveV1(old))
-		first, second := tdLeaves(d), tdLeaves(d)
+		first, second := tdLeaves(t, d), tdLeaves(t, d)
 		if len(first) != 3 || !slices.Equal(first, second) {
 			t.Fatalf("A12 %v / %v", first, second)
 		}
@@ -544,11 +560,16 @@ func tdRejected() []tdVariant {
 	srDelete := r.c
 	srDelete.undo = 6
 	malformedPost := append(slices.Clone(r.nB[:19]), 2)
-	// CREATE-only WriteOrReuse whose one row under Block has an entry-form key and the regenerated manifest bytes:
-	// only the head key-shape check refuses it (no entry read, the tail leaves the prefix).
+	// z is a CREATE-only WriteOrReuse primitive whose only row under Block holds the regenerated manifest bytes under
+	// a key that is not Block || 0x00: an entry-form key (77 bytes, byte 32 = 0x01), Block || 0x01 (33 bytes) or
+	// Block || 0x00 || 0x00 (34 bytes). Each is integrity with cause nil and no emitV1 or referV1 (S6, S12 (ii)).
 	z := tdA4(1, 1)
 	z.c.events, z.c.txCount = z.c.events[:1], 1
 	zRows := append(slices.Clone(z.pre()[:1]), tdMemRow{5, tdEntryKey(z.c.block, tdTxid(0x01), 0, 0, 0), tdManifest(7, tdGen, 1, 0)})
+	byte1 := tdManifestKey(z.c.block)
+	byte1[32] = 0x01
+	zByte := append(slices.Clone(z.pre()[:1]), tdMemRow{5, byte1, tdManifest(7, tdGen, 1, 0)})
+	zLen := append(slices.Clone(z.pre()[:1]), tdMemRow{5, append(tdManifestKey(z.c.block), 0x00), tdManifest(7, tdGen, 1, 0)})
 	return []tdVariant{
 		{"frame past body", pre, short, nil},
 		{"non-minimal CompactSize", pre, tdFrameVariant(f, nonMinimal), nil},
@@ -567,6 +588,8 @@ func tdRejected() []tdVariant {
 		{"WriteOrReuse 1-byte manifest (R-WOR-1)", append(slices.Clone(pre), tdReplace(fam, f.mK, []byte{1})...), wor, nil},
 		{"entry without manifest", append(slices.Clone(pre), tdMemRow{5, f.eA, f.vA}), wor, nil},
 		{"entry-form head with manifest bytes", zRows, z.c, nil},
+		{"33-byte head key Block+0x01", zByte, z.c, nil},
+		{"34-byte head key Block+0x00+0x00", zLen, z.c, nil},
 		{"SourceRetain missing entry", append(slices.Clone(post), tdDrop(fam, f.eA)...), r.c, nil},
 		{"SourceRetain extra entry", append(slices.Clone(post), append(slices.Clone(fam), tdMemRow{5, extra, f.vA})...), r.c, nil},
 		{"SourceRetain manifest height", append(slices.Clone(post), tdReplace(fam, f.mK, tdManifest(8, tdGen, 3, 2))...), r.c, nil},
