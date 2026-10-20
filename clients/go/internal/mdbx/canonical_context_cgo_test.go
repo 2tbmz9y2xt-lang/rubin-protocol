@@ -287,7 +287,7 @@ func contextPhases(t *testing.T) {
 				if row.phase == "both" {
 					plan = nil
 				}
-				outcome = updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, nativeError(operationUpdate, 28), scope)
+				outcome = updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, nativeError(operationUpdate, 28), nil, scope)
 				return nil
 			}))
 			contextPhaseOutcome(t, store, outcome, row.phase)

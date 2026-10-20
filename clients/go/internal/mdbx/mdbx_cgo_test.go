@@ -3469,7 +3469,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		})
 	}
 	if strings.Join(nativeLimitCalls, "|") != "limitsForPage:C.mdbx_limits_dbsize_min|limitsForPage:C.mdbx_limits_dbsize_max|limitsForPage:C.mdbx_limits_keysize_max|limitsForPage:C.mdbx_limits_valsize_max" ||
-		strings.Join(limitWrapperCalls, "|") != "Update:limitsForPage(s.config.PageSize)|viewWithStartupCompletion:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)|CreateTreeV1:limitsForPage(cfg.PageSize)" {
+		strings.Join(limitWrapperCalls, "|") != "newUpdateReaderV1:limitsForPage(s.config.PageSize)|viewWithStartupCompletion:limitsForPage(s.config.PageSize)|Create:limitsForPage(cfg.PageSize)|validateOpenNativePreconditions:limitsForPage(cfg.PageSize)|readEffective:limitsForPage(pageSize)|CreateTreeV1:limitsForPage(cfg.PageSize)" {
 		t.Fatalf("native-limit ownership drifted: %v / %v", nativeLimitCalls, limitWrapperCalls)
 	}
 	require(strings.Join(ordinaryMaxDBCalls, "|") == "configureCreateEnvironment:C.mdbx_env_set_maxdbs(s.env, maxDBs)|openEnvironment:C.mdbx_env_set_maxdbs(s.env, C.MDBX_dbi(len(formatDBIs(uint8(s.format.Load())))))", "ordinary maxdbs ownership drifted: %v", ordinaryMaxDBCalls)
@@ -3511,7 +3511,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:Update:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage|mdbx_cgo.go:CreateTreeV1:limitsForPage" ||
+	if strings.Join(packageNativeLimits, "|") != "mdbx_cgo.go:newUpdateReaderV1:limitsForPage|mdbx_cgo.go:viewWithStartupCompletion:limitsForPage|mdbx_cgo.go:Create:limitsForPage|mdbx_cgo.go:validateOpenNativePreconditions:limitsForPage|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_min|mdbx_cgo.go:limitsForPage:C.mdbx_limits_dbsize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_keysize_max|mdbx_cgo.go:limitsForPage:C.mdbx_limits_valsize_max|mdbx_cgo.go:readEffective:limitsForPage|mdbx_cgo.go:CreateTreeV1:limitsForPage" ||
 		strings.Join(packageMaxDBs, "|") != "mdbx_cgo.go:configureCreateEnvironment:C.mdbx_env_set_maxdbs|mdbx_cgo.go:openEnvironment:C.mdbx_env_set_maxdbs" ||
 		strings.Join(packageRefs["validatePreopenSnapshot"], "|") != "mdbx_cgo.go:validateOpenNativePreconditions" ||
 		strings.Join(packageRefs["validateOpenNativePreconditions"], "|") != "mdbx_cgo.go:Open|mdbx_cgo.go:OpenTreeV1" ||
@@ -3763,8 +3763,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|Update:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:Update|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -3911,7 +3911,7 @@ func TestNativeUpdateImages(t *testing.T) {
 						plan[0].after = AfterKind(1)
 					}
 					primary := nativeError(operationUpdate, 28)
-					outcome := updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, primary)
+					outcome := updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, primary, nil)
 					requireUpdateTruth(t, outcome, row.truth, true, primary, nil)
 					if outcome.stage != 3 {
 						t.Fatal("point readback stage drifted")
@@ -3949,7 +3949,7 @@ func TestNativeUpdateImages(t *testing.T) {
 						change := []ownedMutation{{dbi: dbi, key: key, beforePresent: true, after: AfterKind(2), literal: changed}}
 						requireUpdateTruth(t, store.updateNative(change, nil, reader.txn), 2, true, nil, nil)
 						primary := nativeError(operationUpdate, 28)
-						outcome := updateNativeReadback(store.env, store.dbis, plan, consulted, reader.txn, primary)
+						outcome := updateNativeReadback(store.env, store.dbis, plan, consulted, reader.txn, primary, nil)
 						requireUpdateTruth(t, outcome, 3, true, primary, nil)
 						if outcome.stage != 3 {
 							t.Fatal("unchanged-domain readback stage drifted")
@@ -4130,15 +4130,15 @@ func TestNativeUpdateImages(t *testing.T) {
 					return fmt.Errorf("concurrent update=%+v/%w", concurrent, err)
 				}
 				readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-				failedBegin := updateNativeReadback(nil, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
+				failedBegin := updateNativeReadback(nil, store.dbis, createPlan, nil, reader.txn, readbackPrimary, nil)
 				if failedBegin.stage != 3 {
 					t.Fatal("readback stage drifted")
 				}
 				requireEngineError(t, failedBegin.secondary, EngineInvalidInput, operationUpdate, codeEINVAL)
 				requireUpdateTruth(t, failedBegin, CommitTruthUnknown, true, readbackPrimary, failedBegin.secondary)
-				old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
-				newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary)
-				unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary)
+				old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary, nil)
+				newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary, nil)
+				unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
 				requireUpdateTruth(t, newReadback, CommitTruthNew, true, readbackPrimary, nil)
 				requireUpdateTruth(t, unknown, CommitTruthUnknown, true, readbackPrimary, nil)
@@ -4176,7 +4176,7 @@ func TestNativeUpdateImages(t *testing.T) {
 				if _, err := updateNativeEqual(reader.txn, invalidDBIs[dbi.Rank], key, updateImage{}); err == nil {
 					return errors.New("invalid update comparison DBI accepted")
 				}
-				badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, nil, reader.txn, readbackPrimary)
+				badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, nil, reader.txn, readbackPrimary, nil)
 				if badReadback.truth != CommitTruthUnknown || !sameError(badReadback.primary, readbackPrimary) || badReadback.secondary == nil || badReadback.valid() != nil {
 					return fmt.Errorf("invalid update readback=%+v", badReadback)
 				}
@@ -4236,11 +4236,11 @@ func TestNativeUpdateImages(t *testing.T) {
 			defer runtime.UnlockOSThread()
 			mustEnvironment(t, store.View(func(reader *Reader) error {
 				readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-				old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
+				old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
 				committed := store.updateNative(nonTargetPlan, nil, reader.txn)
 				requireUpdateTruth(t, committed, CommitTruthNew, true, nil, nil)
-				new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
+				new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, new, CommitTruthNew, true, readbackPrimary, nil)
 				return nil
 			}))
