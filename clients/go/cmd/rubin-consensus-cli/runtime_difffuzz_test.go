@@ -654,12 +654,15 @@ func TestPublishRustConsensusCLIForDiffFuzz_ContendedLockTimesOut(t *testing.T) 
 }
 
 func TestPublishRustConsensusCLIForDiffFuzz_StopsAtWaitBound(t *testing.T) {
+	// A correct publish returns once its bound has passed. One more 100ms retry interval ends at
+	// least 100ms after start, which is the 10ms bound plus this slack.
+	const slack = 90 * time.Millisecond
 	for _, tc := range []struct {
 		name          string
 		wait, release time.Duration
 	}{
 		{"lock held throughout, 10ms bound", 10 * time.Millisecond, 0},
-		{"lock released 30ms after start, 60ms bound", 60 * time.Millisecond, 30 * time.Millisecond},
+		{"lock released 50ms after start, 100ms bound", 100 * time.Millisecond, 50 * time.Millisecond},
 	} {
 		targetDir, _ := newDiffFuzzTarget(t, nil)
 		lockPath := filepath.Join(targetDir, "difffuzz-build.lock")
@@ -670,8 +673,8 @@ func TestPublishRustConsensusCLIForDiffFuzz_StopsAtWaitBound(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), lockPath) {
 			t.Errorf("%s: publish returned %v, not an error naming %s", tc.name, err, lockPath)
 		}
-		if elapsed < tc.wait || elapsed >= 100*time.Millisecond {
-			t.Errorf("%s: publish returned %s after start, want at least %s and under 100ms", tc.name, elapsed, tc.wait)
+		if elapsed < tc.wait || elapsed >= tc.wait+slack {
+			t.Errorf("%s: publish returned %s after start, want at least %s and under %s", tc.name, elapsed, tc.wait, tc.wait+slack)
 		}
 	}
 }
