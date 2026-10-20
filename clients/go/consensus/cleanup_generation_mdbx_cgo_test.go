@@ -43,7 +43,7 @@ func generationNewConfig(t *testing.T, cfg mdbx.ConfigV1, a mdbx.StorageAuthorit
 	logicalMDBXAssert(t, err == nil, "capture actual creation config: %v", err)
 	w.cfg = inspection.Config
 	t.Cleanup(func() { _ = w.s.Close() })
-	w.owner, err = mdbx.NewOperationReservationOwner(154611151)
+	w.owner, err = reservationRemaining(t, 154611151)
 	logicalMDBXAssert(t, err == nil, "generation owner: %v", err)
 	truth, stage, err := w.s.BootstrapStorageV1(1, w.owner)
 	logicalMDBXAssert(t, truth == 2 && stage == 3 && err == nil, "generation bootstrap: %v/%v/%v", truth, stage, err)

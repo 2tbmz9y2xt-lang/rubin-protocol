@@ -149,7 +149,7 @@ func newReplayWorld(t testing.TB, tip int) *replayWorld {
 	w.store, err = mdbx.Create(path, cfg)
 	logicalMDBXAssert(t, err == nil, "replay store: %v", err)
 	t.Cleanup(func() { _ = w.store.Close() })
-	w.owner, err = mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+	w.owner, err = reservationRemaining(t, mdbx.MaxOperationDataBytes)
 	logicalMDBXAssert(t, err == nil, "replay owner: %v", err)
 	truth, _, err := w.store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, w.owner)
 	logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "replay bootstrap: %v", err)
