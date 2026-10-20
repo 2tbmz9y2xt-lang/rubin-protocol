@@ -958,12 +958,12 @@ func TestBootstrapTreeReservationBoundary(t *testing.T) {
 				t.Fatal("busy tree bootstrap stage")
 			}
 		}
-		if reservationLive(owner) != MaxOperationDataBytes {
+		if reservationLive(owner) != bootstrapFiller+MaxOperationDataBytes {
 			t.Fatal("tree bootstrap changed enclosing reservation")
 		}
 		return nil
 	}))
-	if reservationLive(owner) != 0 {
+	if reservationLive(owner) != bootstrapFiller {
 		t.Fatal("tree bootstrap retained reservation")
 	}
 	truth, stage, err := store.BootstrapStorageV1(0, nil)
