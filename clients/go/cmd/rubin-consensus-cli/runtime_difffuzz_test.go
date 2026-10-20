@@ -565,8 +565,15 @@ func publishDiffFuzzOnce(t *testing.T, targetDir, src string) string {
 
 func TestPublishRustConsensusCLIForDiffFuzz_ReplacesEarlierFile(t *testing.T) {
 	targetDir, src := newDiffFuzzTarget(t, []byte("new-binary"))
-	writeDiffFuzzFile(t, filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli"), []byte("old"))
+	published, earlier := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli"), filepath.Join(targetDir, "earlier-link")
+	writeDiffFuzzFile(t, published, []byte("old"))
+	if err := os.Link(published, earlier); err != nil {
+		t.Fatal(err)
+	}
 	assertDiffFuzzFileBytes(t, publishDiffFuzzOnce(t, targetDir, src), []byte("new-binary"))
+	if got, err := os.ReadFile(earlier); err != nil || !bytes.Equal(got, []byte("old")) {
+		t.Fatalf("earlier published file rewritten in place, not replaced by rename: %q (err %v)", got, err)
+	}
 }
 
 func TestPublishRustConsensusCLIForDiffFuzz_PublishesCompleteCopy(t *testing.T) {
@@ -629,21 +636,58 @@ func TestPublishRustConsensusCLIForDiffFuzz_ContendedLockTimesOut(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer func() { _ = held.Release() }()
-	calls := 0
-	_, err = publishRustConsensusCLIForDiffFuzz(targetDir, 300*time.Millisecond, func() (string, error) { calls++; return "", nil })
+	calls, done := 0, make(chan error, 1)
+	go func() {
+		_, err := publishRustConsensusCLIForDiffFuzz(targetDir, 300*time.Millisecond, func() (string, error) { calls++; return "", nil })
+		done <- err
+	}()
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("contended publish ignored its 300ms wait bound")
+	}
 	if err == nil || calls != 0 {
 		t.Fatalf("contended publish: err=%v calls=%d", err, calls)
 	}
 }
 
-func TestPublishRustConsensusCLIForDiffFuzz_BuildErrorKeepsEarlierFile(t *testing.T) {
-	targetDir, _ := newDiffFuzzTarget(t, nil)
-	published := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli")
-	writeDiffFuzzFile(t, published, []byte("old"))
+func TestPublishRustConsensusCLIForDiffFuzz_BuildOrCopyErrorKeepsEarlierFile(t *testing.T) {
 	buildErr := errors.New("cargo failed")
-	_, err := publishRustConsensusCLIForDiffFuzz(targetDir, time.Second, func() (string, error) { return "", buildErr })
-	if !errors.Is(err, buildErr) {
-		t.Fatalf("publish error %v, want %v", err, buildErr)
+	for _, tc := range []struct{ buildErr, want error }{{buildErr, buildErr}, {nil, fs.ErrNotExist}} {
+		targetDir, _ := newDiffFuzzTarget(t, nil)
+		published := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli")
+		writeDiffFuzzFile(t, published, []byte("old"))
+		missing := filepath.Join(targetDir, "missing-cargo-out")
+		_, err := publishRustConsensusCLIForDiffFuzz(targetDir, time.Second, func() (string, error) { return missing, tc.buildErr })
+		if !errors.Is(err, tc.want) {
+			t.Fatalf("failed build or copy returned %v, want %v", err, tc.want)
+		}
+		assertDiffFuzzFileBytes(t, published, []byte("old"))
 	}
-	assertDiffFuzzFileBytes(t, published, []byte("old"))
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_CopiesUnderLock(t *testing.T) {
+	targetDir, _ := newDiffFuzzTarget(t, nil)
+	fifo := filepath.Join(targetDir, "cargo-fifo")
+	if out, err := exec.CommandContext(t.Context(), "mkfifo", fifo).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v %s", err, out)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := publishRustConsensusCLIForDiffFuzz(targetDir, time.Second, func() (string, error) { return fifo, nil })
+		done <- err
+	}()
+	w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe, result, _ := filelock.Acquire(filepath.Join(targetDir, "difffuzz-build.lock")); result != filelock.ResultContended {
+		_ = probe.Release()
+		t.Errorf("copy of the build output ran without the build lock (probe acquire: %s)", result)
+	}
+	_, err = w.Write([]byte("fifo-binary"))
+	if err = errors.Join(err, w.Close(), <-done); err != nil {
+		t.Fatal(err)
+	}
+	assertDiffFuzzFileBytes(t, filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli"), []byte("fifo-binary"))
 }
