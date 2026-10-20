@@ -1509,6 +1509,7 @@ func TestOperationHoldExit(t *testing.T) {
 					t.Fatalf("H5 charge before exit: %v", grown)
 				}
 				holdWant(t, "H5 restored prior value", retained, 0, 0, 1)
+				holdRefuse(t, "H5 closed hold after exit", retained, func() error { return retained.shrink(0) }, errOperationReservationInput, textReservationInput)
 				reservationMustAdmit(t, "H5 later owner charge", owner, 154611183)
 			})
 		})
