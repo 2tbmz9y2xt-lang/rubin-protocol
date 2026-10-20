@@ -687,15 +687,15 @@ func TestTreeZeroPrimitivesV1(t *testing.T) {
 			var held uint64
 			op := func() {
 				outcome = fixtureTreeCommitV1(store, fixtureTreeScriptV1{ledger: ledger, pair: pair, consulted: consulted, write: func(s *treeSectionV1) error {
+					// held is read on every return path, so the P-budget check below can fail in every row.
+					defer func() { held = s.pBudgetV1() }()
 					if err := s.pairPreflightV1(pair, consulted); err != nil {
 						return err
 					}
 					if err := s.pairEmitV1(pair); err != nil {
 						return err
 					}
-					err := s.finalV1(pair, consulted)
-					held = s.pBudgetV1()
-					return err
+					return s.finalV1(pair, consulted)
 				}})
 			}
 			if row.mode == 0 {
