@@ -26,6 +26,9 @@ const (
 	treeCallDelivered    = "RUBIN_TREE_CALL_DELIVERED"
 )
 
+// treeCallNilPanicValue is a nil panic value the nilness analyzer cannot fold to a constant.
+var treeCallNilPanicValue any
+
 func treeCallGoroutineRecords() []string {
 	buf := make([]byte, 1<<16)
 	for {
@@ -81,7 +84,7 @@ func treeCallChild(t *testing.T, row string, env ...string) (string, error) {
 
 func TestTreeCallV1Return(t *testing.T) {
 	calls, flag := 0, false
-	err, unwind := treeCallV1(func() error { calls++; flag = true; return nil })
+	unwind, err := treeCallV1(func() error { calls++; flag = true; return nil })
 	if err != nil || unwind != (treeUnwindV1{}) || !flag || calls != 1 {
 		t.Fatalf("normal return = (%v, %+v), flag %v, calls %d", err, unwind, flag, calls)
 	}
@@ -104,17 +107,18 @@ func TestTreeCallV1ErrorIdentity(t *testing.T) {
 		want error
 	}{{"sentinel", sentinel}, {"typed-nil", typedNil}, {"capacity", errOperationReservationCapacity}, {"joined", joined}} {
 		t.Run(row.name, func(t *testing.T) {
-			err, unwind := treeCallV1(func() error { return row.want })
-			if err != row.want || unwind.kind != 0 || unwind.value != nil {
+			unwind, err := treeCallV1(func() error { return row.want })
+			if any(err) != any(row.want) || unwind.kind != 0 || unwind.value != nil {
 				t.Fatalf("got (%v, %+v), want identity of %v", err, unwind, row.want)
 			}
 		})
 	}
-	err, _ := treeCallV1(func() error { return typedNil })
-	if commitErr, ok := err.(*CommitError); err == nil || !ok || commitErr != nil {
+	_, err := treeCallV1(func() error { return typedNil })
+	var commitErr *CommitError
+	if err == nil || !errors.As(err, &commitErr) || commitErr != nil {
 		t.Fatalf("typed-nil error became %#v", err)
 	}
-	err, _ = treeCallV1(func() error { return errOperationReservationCapacity })
+	_, err = treeCallV1(func() error { return errOperationReservationCapacity })
 	if !IsOperationReservationCapacity(err) {
 		t.Fatalf("capacity singleton lost: %v", err)
 	}
@@ -128,7 +132,7 @@ func treeCallRecoverResume(u treeUnwindV1) (recovered any, returned bool) {
 
 func TestTreeCallV1PanicAtCallSite(t *testing.T) {
 	v := new(struct{ n int })
-	err, unwind := treeCallV1(func() error { panic(v) })
+	unwind, err := treeCallV1(func() error { panic(v) })
 	if err != nil || unwind.kind != 1 || unwind.value != v {
 		t.Fatalf("panic = (%v, %+v), want (nil, kind 1, %p)", err, unwind, v)
 	}
@@ -139,14 +143,14 @@ func TestTreeCallV1PanicAtCallSite(t *testing.T) {
 
 func TestTreeCallV1ErrorPanicValue(t *testing.T) {
 	e := errors.New("panic value")
-	err, unwind := treeCallV1(func() error { panic(e) })
-	if err != nil || unwind.kind != 1 || unwind.value != e {
+	unwind, err := treeCallV1(func() error { panic(e) })
+	if err != nil || unwind.kind != 1 || unwind.value != any(e) {
 		t.Fatalf("error panic = (%v, %+v), want (nil, kind 1, %v)", err, unwind, e)
 	}
 }
 
 func TestTreeCallV1NilCall(t *testing.T) {
-	err, unwind := treeCallV1(nil)
+	unwind, err := treeCallV1(nil)
 	var runtimeErr runtime.Error
 	valueErr, isErr := unwind.value.(error)
 	if err != nil || unwind.kind != 1 || !isErr || !errors.As(valueErr, &runtimeErr) {
@@ -158,7 +162,7 @@ func TestTreeCallV1NilCall(t *testing.T) {
 }
 
 func TestTreeCallV1PanicNilDefault(t *testing.T) {
-	err, unwind := treeCallV1(func() error { panic(nil) })
+	unwind, err := treeCallV1(func() error { panic(treeCallNilPanicValue) })
 	panicNil, ok := unwind.value.(*runtime.PanicNilError)
 	if err != nil || unwind.kind != 1 || !ok || panicNil == nil {
 		t.Fatalf("panic(nil) = (%v, %+v), want kind 1 with *runtime.PanicNilError", err, unwind)
@@ -173,11 +177,11 @@ func TestTreeCallV1LockedDelivery(t *testing.T) {
 	calls := 0
 	outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 {
 		calls++
-		_, u := treeCallV1(func() error { panic(v) })
+		u, _ := treeCallV1(func() error { panic(v) })
 		*out = transactionOutcome{err: o}
 		return u
 	})
-	if outcome.err != o || outcome.poisoned || unwind.kind != 1 || unwind.value != v || calls != 1 {
+	if any(outcome.err) != any(o) || outcome.poisoned || unwind.kind != 1 || unwind.value != v || calls != 1 {
 		t.Fatalf("locked panic delivery = (%+v, %+v), calls %d", outcome, unwind, calls)
 	}
 	if recovered, returned := treeCallRecoverResume(unwind); returned || recovered != v {
@@ -222,7 +226,7 @@ func treeGoexitOp(o1, o2 error, poisoned, viaCall bool, markers *treeGoexitMarke
 		*out = transactionOutcome{err: o1}
 		defer func() { *out = transactionOutcome{err: o2, poisoned: poisoned} }()
 		if viaCall {
-			_, u := treeCallV1(func() error {
+			u, _ := treeCallV1(func() error {
 				runtime.Goexit()
 				markers.afterInnerExit = true
 				return nil
@@ -242,7 +246,7 @@ func TestTreeCallV1GoexitDelivery(t *testing.T) {
 			o1, o2 := errors.New("before cleanup"), errors.New("cleanup")
 			var markers treeGoexitMarkers
 			outcome, unwind := runTreeLockedV1(treeGoexitOp(o1, o2, false, viaCall, &markers))
-			if outcome.err != o2 || outcome.poisoned || unwind != (treeUnwindV1{kind: 2}) {
+			if any(outcome.err) != any(o2) || outcome.poisoned || unwind != (treeUnwindV1{kind: 2}) {
 				t.Fatalf("Goexit delivery = (%+v, %+v), want (%v, kind 2)", outcome, unwind, o2)
 			}
 			if markers != (treeGoexitMarkers{}) {
@@ -267,7 +271,7 @@ func (row treeConcurrentRow) op(out *transactionOutcome) treeUnwindV1 {
 		*out = transactionOutcome{err: row.sentinel}
 		return treeUnwindV1{}
 	case 1:
-		_, u := treeCallV1(func() error { panic(row.value) })
+		u, _ := treeCallV1(func() error { panic(row.value) })
 		*out = transactionOutcome{err: row.sentinel}
 		return u
 	}
@@ -327,7 +331,7 @@ func TestTreeCallV1NextOperationAfterGoexit(t *testing.T) {
 	defer operations.Unlock()
 	o := errors.New("next")
 	outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 { *out = transactionOutcome{err: o}; return treeUnwindV1{} })
-	if outcome.err != o || unwind != (treeUnwindV1{}) {
+	if any(outcome.err) != any(o) || unwind != (treeUnwindV1{}) {
 		t.Fatalf("next operation = (%+v, %+v)", outcome, unwind)
 	}
 }
@@ -470,12 +474,12 @@ func treeCallChildNilOp() {
 
 func treeCallChildOpPanicNil() {
 	fmt.Println(treeCallPreMarker)
-	runTreeLockedV1(func(*transactionOutcome) treeUnwindV1 { panic(nil) })
+	runTreeLockedV1(func(*transactionOutcome) treeUnwindV1 { panic(treeCallNilPanicValue) })
 	fmt.Println(treeCallDelivered)
 }
 
 func treeCallChildCallPanicNil() {
-	_, unwind := treeCallV1(func() error { panic(nil) })
+	unwind, _ := treeCallV1(func() error { panic(treeCallNilPanicValue) })
 	if unwind.kind == 1 && unwind.value == nil {
 		fmt.Println(treeCallResultMarker)
 	}
@@ -505,7 +509,7 @@ func treeCallChildRows() []treeCallChildRow {
 
 func (row treeCallChildRow) verify(output string, runErr error) error {
 	if crashed := runErr != nil; crashed != row.crash {
-		return fmt.Errorf("child exit error %v, want crash %v", runErr, row.crash)
+		return fmt.Errorf("child exit error %w, want crash %v", runErr, row.crash)
 	}
 	for _, text := range row.wantTexts {
 		if !strings.Contains(output, text) {
