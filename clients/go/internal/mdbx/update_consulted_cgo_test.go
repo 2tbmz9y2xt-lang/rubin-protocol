@@ -618,7 +618,7 @@ func TestUpdateConsultedSourceOwnership(t *testing.T) {
 	require(MaxPrefixPageBytes == 154611151, "prefix-page byte bound drifted")
 	require(MaxPrefixPageBytes == MaxOperationDataBytes, "prefix-page byte bound alias drifted")
 	text := string(source)
-	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(old, txn *C.MDBX_txn, dbis [8]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
+	require(strings.Contains(text, "func updateNativeDeletes(txn *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, stage *UpdateStage) error {") && strings.Contains(text, "func updateNativePuts(old, txn *C.MDBX_txn, dbis [9]C.MDBX_dbi, plan []ownedMutation, references []updateReference, stage *UpdateStage) error {"), "no-write route signatures drifted")
 	for _, name := range []string{"updateNativeDeletes", "updateNativePuts"} {
 		require(!strings.Contains(strings.ToLower(updateNativeBody(t, source, name)), "consulted"), "no-write route drifted: "+name)
 	}

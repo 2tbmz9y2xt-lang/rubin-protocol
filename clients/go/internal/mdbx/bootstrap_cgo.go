@@ -20,7 +20,7 @@ const bootstrapOperationBytes uint64 = 188
 // Static input is decided before any Store or reservation work: a nil receiver, then a
 // profile outside {StorageProfilePrunedV1, StorageProfileArchiveV1}, each returning a
 // direct EngineInvalidInput refusal with CommitTruthOld. bootstrapOperationBytes are then
-// charged to reservations for the whole operation and released before every return,
+// charged to reservations for a historical store for the whole operation and released before every return,
 // panic and Goexit; a refused charge returns the owner's own error and never reaches
 // Store.Update. Once Update runs, its (CommitTruth, UpdateStage, error) tuple is forwarded
 // unchanged: no class, code, operation, cause, truth or stage is rewritten.
@@ -42,6 +42,13 @@ func (s *Store) BootstrapStorageV1(profile StorageProfileV1, reservations *Opera
 	if !validProfile(profile) {
 		return CommitTruthOld, UpdateStagePrewrite, adapterError(operationUpdate, EngineInvalidInput, codeEINVAL, "invalid bootstrap profile", nil)
 	}
+
+	// The atomic format is the sole preflight observation. Update owns the
+	// concurrency/state refusal, and a tree call never acquires a reservation.
+	if s.format.Load() == 3 {
+		return s.Update(func(reader *Reader) (Batch, error) { return bootstrapBatch(s, reader, profile) })
+	}
+
 	truth := CommitTruthOld
 	stage := UpdateStagePrewrite
 	err := reservations.WithReservation(bootstrapOperationBytes, func() error {

@@ -72,7 +72,10 @@ func bootstrapCounts(t *testing.T, store *Store, marker string) [8]uint64 {
 		t.Fatalf("%s: %v", marker, err)
 	}
 	var counts [8]uint64
-	for rank, dbi := range inspection.DBIs {
+	if inspection.DBIs[8] != (DBIInspection{}) {
+		t.Fatal("historical unused slot is not zero")
+	}
+	for rank, dbi := range inspection.DBIs[:8] {
 		counts[rank] = dbi.Entries
 	}
 	return counts
@@ -800,12 +803,17 @@ func TestStorageBootstrapComposition(t *testing.T) {
 			strings.Count(text, "s.inspectReadLocked(reader.txn)") != 1 {
 			t.Fatal("census transaction ownership drifted")
 		}
-		if bootstrapSelectors(route, "Get") != 2 || bootstrapSelectors(route, "Update") != 1 || bootstrapSelectors(route, "WithReservation") != 1 {
-			t.Fatal("call route drifted: exactly two required-metadata reads, one Update and one reservation")
+		if bootstrapSelectors(route, "Get") != 2 || bootstrapSelectors(route, "Update") != 2 || bootstrapSelectors(route, "WithReservation") != 1 {
+			t.Fatal("call route drifted: exactly two required-metadata reads, tree and legacy Updates and one reservation")
+		}
+		bootstrapBody := updateNativeBody(t, source, "BootstrapStorageV1")
+		treeRefusal := strings.Index(bootstrapBody, "if s.format.Load() == 3 {\n\t\treturn s.Update(")
+		if treeRefusal < 0 || treeRefusal > strings.Index(bootstrapBody, "reservations.WithReservation(") {
+			t.Fatal("tree refusal does not return through Update before reservation")
 		}
 		// Those counts pin uniqueness but not nesting: charging, releasing and only then
-		// updating keeps every one of them. The charge spanning the transaction is the single
-		// Update call sitting inside the callback the single reservation runs.
+		// updating keeps every one of them. The charge spanning the legacy transaction is
+		// its Update call sitting inside the callback the single reservation runs.
 		if reservation := bootstrapCall(route, "WithReservation"); reservation == nil ||
 			bootstrapCall(reservation.Args[1], "Update") == nil {
 			t.Fatal("Store.Update runs outside the reservation callback: the charge is not held for the transaction")
@@ -923,4 +931,46 @@ func bootstrapReadback(t *testing.T, store *Store, plan, change []ownedMutation,
 		return nil
 	}))
 	return outcome
+}
+
+func TestBootstrapTreeReservationBoundary(t *testing.T) {
+	store, _, _ := treeNativeStore(t)
+	before, err := store.Inspect()
+	mustEnvironment(t, err)
+	owner := bootstrapOwner(t)
+	shared := *owner
+	mustEnvironment(t, owner.WithReservation(MaxOperationDataBytes, func() error {
+		for _, candidate := range []*OperationReservationOwner{nil, {}, &shared} {
+			truth, stage, err := store.BootstrapStorageV1(1, candidate)
+			bootstrapRefusal(t, "tree before reservation", truth, err, EngineStateMismatch, operationUpdate, -30779, "tree store requires typed tree operation", nil, false)
+			if stage != UpdateStage(1) {
+				t.Fatal("tree bootstrap prewrite stage")
+			}
+			store.operations.Lock()
+			truth, stage, err = store.BootstrapStorageV1(1, candidate)
+			store.operations.Unlock()
+			bootstrapRefusal(t, "tree busy before reservation", truth, err, EngineConcurrency, operationUpdate, -30778, "store operation in progress", nil, false)
+			if stage != UpdateStage(1) {
+				t.Fatal("busy tree bootstrap stage")
+			}
+		}
+		if reservationLive(owner) != MaxOperationDataBytes {
+			t.Fatal("tree bootstrap changed enclosing reservation")
+		}
+		return nil
+	}))
+	if reservationLive(owner) != 0 {
+		t.Fatal("tree bootstrap retained reservation")
+	}
+	truth, stage, err := store.BootstrapStorageV1(0, nil)
+	bootstrapRefusal(t, "profile before format", truth, err, EngineInvalidInput, operationUpdate, 22, "invalid bootstrap profile", nil, false)
+	if stage != UpdateStage(1) {
+		t.Fatal("invalid profile stage")
+	}
+	after, err := store.Inspect()
+	mustEnvironment(t, err)
+	if before.DBIs != after.DBIs || before.RecentTxnID != after.RecentTxnID || store.canonicalOwnerVerified {
+		t.Fatal("tree bootstrap changed image/permission")
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error { _, _, err := reader.ReadTreeAuthorityV1(); return err }))
 }
