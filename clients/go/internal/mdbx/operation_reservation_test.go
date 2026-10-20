@@ -254,10 +254,10 @@ func TestOperationReservationOwnerBounds(t *testing.T) {
 			reservationMustAdmit(t, label, owner, 154611151)
 		}},
 		{"bounds live above limit", func(t *testing.T, label string) {
-			owner := reservationOwner(t, specRMin)
-			reservationInjectLive(owner, 805306369)
+			owner := reservationFilled(t, 154611151)
+			reservationInjectLive(owner, 650695217+154611152)
 			reservationMustRefuse(t, label, owner, 0)
-			reservationInjectLive(owner, 0)
+			reservationInjectLive(owner, 650695217)
 			reservationMustAdmit(t, label, owner, 154611151)
 		}},
 		{"R3 live at limit", func(t *testing.T, label string) {
@@ -420,10 +420,10 @@ func TestOperationReservationOwnerIdentity(t *testing.T) {
 		{"identity older owner", func(t *testing.T, label string) {
 			older := reservationOwner(t, specRMin)
 			token := reservationReserve(t, label, older, 100)
-			newer := reservationOwner(t, specRMin)
+			newer := reservationFilled(t, 154611151)
 			reservationMustAdmit(t, label, newer, 154611151)
 			reservationReserve(t, label, newer, 100)
-			if newer.shared.release(token) || reservationLive(newer) != 100 || reservationLive(older) != 100 {
+			if newer.shared.release(token) || reservationLive(newer) != 650695217+100 || reservationLive(older) != 100 {
 				t.Fatalf("%s: newer=%d older=%d", label, reservationLive(newer), reservationLive(older))
 			}
 		}},
@@ -657,10 +657,14 @@ func accountMustRefuse(t *testing.T, label string, a *OperationAccount, bytes ui
 }
 
 // accountInput requires, in its own subtest named label, the input refusal from a charge on a, with no callback
-// run and no live change on owner; a panic from the call fails that subtest at this row.
+// run and no live change on owner, which must be a's origin when a was opened; a panic from the call fails that
+// subtest at this row.
 func accountInput(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, bytes uint64, withCallback bool) {
 	t.Helper()
 	t.Run(label, func(t *testing.T) {
+		if a != nil && a.shared != nil && a.shared.origin != owner.shared {
+			t.Fatalf("%s: owner is not the account's origin", label)
+		}
 		before, calls := reservationLive(owner), 0
 		var callback func() error
 		if withCallback {
@@ -878,9 +882,17 @@ func TestOperationAccountInput(t *testing.T) {
 	accountInput(t, "R4 zero-value account", owner, new(OperationAccount), 0, true)
 	accountInput(t, "R4 closed account", owner, retained, 1, true)
 	accountInput(t, "R4 closed account over ceiling", owner, retained, 18446744073709551615, true)
-	accountInput(t, "R4 closed account below floor", reservationOwner(t, 0), retained, 0, true)
 	if held := accountHeld(retained); held != 0 {
 		t.Fatalf("R4 closed held=%d", held)
+	}
+	for _, limit := range []uint64{0, 805306367} {
+		label, below := fmt.Sprintf("R4 closed account below floor %d", limit), reservationOwner(t, limit)
+		var closed *OperationAccount
+		accountRun(t, label, below, TreeOperation, func(a *OperationAccount) { closed = a })
+		accountInput(t, label, below, closed, 0, true)
+		if held := accountHeld(closed); held != 0 {
+			t.Fatalf("%s: held=%d", label, held)
+		}
 	}
 }
 
@@ -951,66 +963,121 @@ func TestOperationReservationLaneConcurrency(t *testing.T) {
 	}
 }
 
-// accountNestedExit charges 300000000 then a nested 100000000 whose callback runs exit, from a new goroutine.
-func accountNestedExit(owner *OperationReservationOwner, exit func()) (recovered any, returned bool) {
+// accountExit is one way a callback leaves its frame and what the goroutine that ran it then observes.
+type accountExit struct {
+	name      string
+	exit      func()
+	recovered any
+	returned  bool
+}
+
+// accountExits lists return, a panic with value, and runtime.Goexit.
+func accountExits(value any) []accountExit {
+	return []accountExit{{"return", func() {}, nil, true}, {"panic", func() { panic(value) }, value, false}, {"Goexit", runtime.Goexit, nil, false}}
+}
+
+// operationOutcome is what one operationExit run observed: the account its callback received, the recovered panic
+// value, whether WithOperation returned, the callback run count and WithOperation's error.
+type operationOutcome struct {
+	account   *OperationAccount
+	recovered any
+	returned  bool
+	calls     int
+	err       error
+}
+
+// operationExit runs WithOperation(kind) on owner in a new goroutine with body as its callback.
+func operationExit(owner *OperationReservationOwner, kind OperationKind, body func(*OperationAccount)) (o operationOutcome) {
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		defer func() { recovered = recover() }()
-		_ = owner.WithOperation(TreeOperation, func(a *OperationAccount) error {
-			return a.WithReservation(300000000, func() error {
-				return a.WithReservation(100000000, func() error { exit(); return nil })
-			})
-		})
-		returned = true
+		defer func() { o.recovered = recover() }()
+		o.err = owner.WithOperation(kind, func(a *OperationAccount) error { o.account, o.calls = a, o.calls+1; body(a); return nil })
+		o.returned = true
 	})
 	wg.Wait()
-	return recovered, returned
+	return o
 }
 
+// operationMustExit requires that o ran its callback once and left as e describes, with a nil WithOperation error.
+func operationMustExit(t *testing.T, label string, o operationOutcome, e accountExit) {
+	t.Helper()
+	if o.recovered != e.recovered || o.returned != e.returned || o.calls != 1 || o.err != nil {
+		t.Fatalf("%s: recovered=%v returned=%v calls=%d err=%v", label, o.recovered, o.returned, o.calls, o.err)
+	}
+}
+
+// TestOperationAccountExit leaves a nested charge by return, panic and Goexit on both kinds (A2, H2, Close): each
+// callback runs once, both charges release exactly once, and the account is closed afterwards.
 func TestOperationAccountExit(t *testing.T) {
-	owner := reservationOwner(t, specRMin)
 	value := &struct{ id int }{2}
-	if recovered, returned := accountNestedExit(owner, func() { panic(value) }); recovered != value || returned {
-		t.Fatalf("H2 panic: recovered=%v returned=%v", recovered, returned)
+	for _, c := range []struct {
+		kind         OperationKind
+		outer, inner uint64
+	}{{LaneOperation, 100000000, 54611183}, {TreeOperation, 300000000, 100000000}} {
+		for _, e := range accountExits(value) {
+			label := fmt.Sprintf("H2 kind %d %s", c.kind, e.name)
+			t.Run(label, func(t *testing.T) {
+				owner, calls := reservationOwner(t, specRMin), [2]int{}
+				o := operationExit(owner, c.kind, func(a *OperationAccount) {
+					_ = a.WithReservation(c.outer, func() error {
+						calls[0]++
+						return a.WithReservation(c.inner, func() error { calls[1]++; e.exit(); return nil })
+					})
+				})
+				operationMustExit(t, label, o, e)
+				if calls != [2]int{1, 1} {
+					t.Fatalf("%s: charge callbacks ran %v times", label, calls)
+				}
+				accountMustHold(t, label, owner, o.account, 0)
+				accountInput(t, label+" closed", owner, o.account, 1, true)
+				reservationNested(t, label+" restored", owner, []uint64{specLaneMax, specLaneMax, specLaneMax, specLaneMax, specLaneMax}, func() {})
+			})
+		}
 	}
-	if live := reservationLive(owner); live != 0 {
-		t.Fatalf("H2 panic live=%d", live)
-	}
-	if recovered, returned := accountNestedExit(owner, runtime.Goexit); recovered != nil || returned {
-		t.Fatalf("H2 Goexit: recovered=%v returned=%v", recovered, returned)
-	}
-	if live := reservationLive(owner); live != 0 {
-		t.Fatalf("H2 Goexit live=%d", live)
-	}
-	reservationNested(t, "H2 restored", owner, []uint64{specLaneMax, specLaneMax, specLaneMax, specLaneMax, specLaneMax}, func() {})
 }
 
-func TestOperationAccountOutlived(t *testing.T) {
-	owner := reservationOwner(t, specRMin)
-	var retained *OperationAccount
-	var release chan struct{}
-	var done chan error
-	accountRun(t, "H4 open", owner, TreeOperation, func(a *OperationAccount) {
-		retained = a
-		release, done = accountHold(t, a, 100000000)
-	})
-	accountInput(t, "H4 closed charge", owner, retained, 1, true)
-	if live, held := reservationLive(owner), accountHeld(retained); live != 100000000 || held != 100000000 {
-		t.Fatalf("H4 held after close: live=%d held=%d", live, held)
+// accountMustHold requires owner live and the held sum of a to both equal want.
+func accountMustHold(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, want uint64) {
+	t.Helper()
+	if live, held := reservationLive(owner), accountHeld(a); live != want || held != want {
+		t.Fatalf("%s: live=%d held=%d, want %d", label, live, held, want)
 	}
+}
+
+// accountOutlived leaves a TreeOperation callback by e while a goroutine it started holds 100000000 bytes (H4).
+func accountOutlived(t *testing.T, label string, e accountExit) {
+	owner := reservationOwner(t, specRMin)
+	release, done, entered := make(chan struct{}), make(chan error, 1), make(chan struct{})
+	o := operationExit(owner, TreeOperation, func(a *OperationAccount) {
+		go func() { done <- a.WithReservation(100000000, func() error { close(entered); <-release; return nil }) }()
+		select {
+		case <-entered:
+		case err := <-done:
+			done <- err
+		}
+		e.exit()
+	})
+	operationMustExit(t, label, o, e)
+	retained := o.account
+	accountInput(t, label+" closed charge", owner, retained, 1, true)
+	accountMustHold(t, label+" held after close", owner, retained, 100000000)
 	close(release)
 	if err := <-done; err != nil {
-		t.Fatalf("H4 held charge: %v", err)
+		t.Fatalf("%s held charge: %v", label, err)
 	}
-	if live, held := reservationLive(owner), accountHeld(retained); live != 0 || held != 0 {
-		t.Fatalf("H4 released once: live=%d held=%d", live, held)
-	}
+	accountMustHold(t, label+" released once", owner, retained, 0)
 	r1, d1 := operationHold(t, owner, TreeOperation, 402653184)
 	r2, d2 := operationHold(t, owner, TreeOperation, 402653184)
 	close(r1)
 	close(r2)
 	if err1, err2 := <-d1, <-d2; err1 != nil || err2 != nil || reservationLive(owner) != 0 {
-		t.Fatalf("H4 pair: %v %v live=%d", err1, err2, reservationLive(owner))
+		t.Fatalf("%s pair: %v %v live=%d", label, err1, err2, reservationLive(owner))
+	}
+}
+
+func TestOperationAccountOutlived(t *testing.T) {
+	for _, e := range accountExits("H4 value") {
+		t.Run("H4 "+e.name, func(t *testing.T) { accountOutlived(t, "H4 "+e.name, e) })
 	}
 }
 
