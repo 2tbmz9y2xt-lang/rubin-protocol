@@ -80,8 +80,9 @@ func (r *treeRecorderV1) eventV1(kind uint8, txid [32]byte, vout, txIndex, input
 	}
 	phase, index := treeEventOrderV1(&e)
 	r.have, r.lastTx, r.lastPhase, r.lastIndex = true, txIndex, phase, index
-	e.seq = uint32(len(r.descs))
+	e.seq = r.count
 	r.descs = append(r.descs, e)
+	r.count++
 	return nil
 }
 
@@ -99,7 +100,7 @@ func (r *treeRecorderV1) eventAdmittedV1(e *treeDescV1) bool {
 		return false
 	}
 	phase, index := treeEventOrderV1(e)
-	return r.treeOrderAfterV1(e.txIndex, phase, index) && uint32(len(r.descs)) < r.eventCount
+	return r.treeOrderAfterV1(e.txIndex, phase, index) && r.count < r.eventCount
 }
 
 // treeEventShapeV1 checks the kind and the per-kind fields (G3, D12-G2).
@@ -120,12 +121,12 @@ func (r *treeRecorderV1) finishV1() (*treeDeltaV1, error) {
 	if r.failure != nil {
 		return nil, r.failure
 	}
-	if !r.begun || uint32(len(r.descs)) != r.eventCount || !treeGroupV1(r.descs) {
+	if !r.begun || r.count != r.eventCount || !treeGroupV1(r.descs, r.count) {
 		return nil, treeDeltaInvalidV1()
 	}
 	d := &treeDeltaV1{rec: r, keys: &treeKeysV1{block: r.prim.block}}
-	for i := range r.descs {
-		if r.descs[i].group == uint32(i) && r.descs[i].kind == treeSpendV1 {
+	for i := uint32(0); i < r.count; i++ {
+		if r.descs[i].group == i && r.descs[i].kind == treeSpendV1 {
 			d.spent++
 		}
 	}
@@ -137,8 +138,7 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 	if !d.framesOKV1() {
 		return treeIntegrity(operationUpdate, nil)
 	}
-	err := d.headV1(old)
-	if err != nil {
+	if err := d.headV1(old); err != nil {
 		return err
 	}
 	for s := range d.rec.descs {
@@ -147,7 +147,7 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 		if !first {
 			continue
 		}
-		if err = d.resolveGroupV1(old, g); err != nil {
+		if err := d.resolveGroupV1(old, g); err != nil {
 			return err
 		}
 	}
@@ -158,7 +158,7 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 func (d *treeDeltaV1) framesOKV1() bool {
 	for s := range d.rec.descs {
 		e := d.eventAtV1(s)
-		if e.kind == treeCreateV1 && !(d.frameInsideV1(e) && treeUTXOValueOKV1(d.formV1(e))) {
+		if e.kind == treeCreateV1 && (!d.frameInsideV1(e) || !treeUTXOValueOKV1(d.formV1(e))) {
 			return false
 		}
 	}

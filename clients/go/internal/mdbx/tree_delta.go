@@ -6,7 +6,6 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 )
 
 // ---- tree_delta.go (owner L1) ----
@@ -50,7 +49,9 @@ type treeDescV1 struct {
 	kind, flags                            uint8
 }
 
-const treeDescSizeV1 = uint64(unsafe.Sizeof(treeDescV1{}))
+// treeDescSizeV1 is descSize, the byte size of treeDescV1 on the 64-bit targets this package builds for (pinned
+// against unsafe.Sizeof by TestTreeDeltaControlBoundV1); the array below is its compile-time guard descSize <= 128.
+const treeDescSizeV1 uint64 = 104
 
 var _ [128 - treeDescSizeV1]struct{} // descSize <= 128 (D6-6 E1, BLOCK 3063)
 
@@ -63,6 +64,7 @@ type treeRecorderV1 struct {
 	window                         []byte
 	ledger                         treeLedgerV1
 	failure                        error
+	count                          uint32 // accepted events
 	begun, charged, released, have bool
 	expired                        bool
 	txCount, eventCount            uint32
@@ -148,29 +150,31 @@ func treeCmpU32V1(a, b uint32) int {
 
 func treeSameKeyV1(a, b *treeDescV1) bool { return a.txid == b.txid && a.vout == b.vout }
 
-// treeGroupV1 sorts the array in place and coalesces groups; false means two consecutive events of one kind (G6).
-func treeGroupV1(descs []treeDescV1) bool {
+// treeGroupV1 sorts the n admitted descriptors in place and coalesces groups; false means two consecutive events of
+// one kind in a group (G6).
+func treeGroupV1(descs []treeDescV1, n uint32) bool {
 	slices.SortFunc(descs, treeCompareDescV1)
-	first := 0
-	for i := range descs {
-		if i > 0 && !treeSameKeyV1(&descs[i], &descs[first]) {
+	first := uint32(0)
+	for i := uint32(1); i < n; i++ {
+		if !treeSameKeyV1(&descs[i], &descs[first]) {
 			treeCloseGroupV1(descs, first, i-1)
 			first = i
-		} else if i > 0 && descs[i].kind == descs[i-1].kind {
+		} else if descs[i].kind == descs[i-1].kind {
 			return false
 		}
-		descs[i].group = uint32(first)
+		descs[i].group = first
 	}
-	if len(descs) > 0 {
-		treeCloseGroupV1(descs, first, len(descs)-1)
+	if n > 0 {
+		descs[0].group = 0
+		treeCloseGroupV1(descs, first, n-1)
 	}
-	treePermuteV1(descs)
+	treePermuteV1(descs, n)
 	return true
 }
 
-func treeCloseGroupV1(descs []treeDescV1, first, last int) {
+func treeCloseGroupV1(descs []treeDescV1, first, last uint32) {
 	g := &descs[first]
-	g.last = uint32(last)
+	g.last = last
 	g.flags = 0
 	if g.kind == treeSpendV1 {
 		g.flags |= treeDescOldV1
@@ -181,9 +185,9 @@ func treeCloseGroupV1(descs []treeDescV1, first, last int) {
 }
 
 // treePermuteV1 stores the original-order permutation inside the array (pos of index seq = sorted index).
-func treePermuteV1(descs []treeDescV1) {
-	for i := range descs {
-		descs[descs[i].seq].pos = uint32(i)
+func treePermuteV1(descs []treeDescV1, n uint32) {
+	for i := uint32(0); i < n; i++ {
+		descs[descs[i].seq].pos = i
 	}
 }
 
@@ -321,11 +325,10 @@ func (d *treeDeltaV1) manifestKeyV1() []byte {
 }
 
 // afterV1 writes key || 0x00 into d.keys.from: the first key strictly after key (T1).
-func (d *treeDeltaV1) afterV1(key []byte) []byte {
+func (d *treeDeltaV1) afterV1(key []byte) {
 	n := copy(d.keys.from[:], key)
 	d.keys.from[n] = 0
 	d.cursor = n + 1
-	return d.keys.from[:n+1]
 }
 
 // formV1 forms the stored value frame || u64le(Height) || coinbase of CREATE e in V (S2, S7).
@@ -474,13 +477,3 @@ func (d *treeDeltaV1) leafV1(g *treeDescV1) treeLeafV1 {
 	leaf.newValue = d.rec.value[:copy(d.rec.value, g.img)]
 	return leaf
 }
-
-type treeControlObjectsV1 struct {
-	rec    treeRecorderV1
-	delta  treeDeltaV1
-	keys   treeKeysV1
-	leaves [2]treeLeafIterV1
-	block  [32]byte
-}
-
-var _ [treeControlBytesV1 - uint64(unsafe.Sizeof(treeControlObjectsV1{}))]struct{} // fixed objects fit C (D14-2, D25)

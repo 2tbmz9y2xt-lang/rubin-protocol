@@ -16,8 +16,8 @@ func TestTreeDeltaControlBoundV1(t *testing.T) {
 	if total > 4096 {
 		t.Fatalf("control objects %d bytes", total)
 	}
-	if size := unsafe.Sizeof(treeDescV1{}); size > 128 {
-		t.Fatalf("descriptor %d bytes", size)
+	if size := uint64(unsafe.Sizeof(treeDescV1{})); size > 128 || size != treeDescSizeV1 {
+		t.Fatalf("descriptor %d bytes, treeDescSizeV1 %d", size, treeDescSizeV1)
 	}
 }
 
@@ -34,6 +34,7 @@ func TestTreeDeltaKeyScratchPointerFreeV1(t *testing.T) {
 			for i := 0; i < typ.NumField(); i++ {
 				walk(typ.Field(i).Type, path+"."+typ.Field(i).Name)
 			}
+		default:
 		}
 	}
 	walk(reflect.TypeFor[treeKeysV1](), "treeKeysV1")

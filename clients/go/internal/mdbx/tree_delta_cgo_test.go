@@ -350,7 +350,7 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 	run("d refused", func(r *treeRecorderV1) { tdInvalid(t, r.beginV1(0, 3, [16]byte{})) }, "")
 	refusing := &tdLedger{limit: 1}
 	rr := c.recorder(treeWriterV1, refusing)
-	if err := rr.beginV1(3, 3, [16]byte{}); err != errOperationReservationCapacity {
+	if err := rr.beginV1(3, 3, [16]byte{}); !sameError(err, errOperationReservationCapacity) {
 		t.Fatalf("charge refusal %v", err)
 	}
 	rr.releaseV1()
@@ -398,7 +398,7 @@ func TestTreeDeltaReadbackReturnV1(t *testing.T) {
 		}
 		r2 := two.recorder(treeReadbackV1, budget.ledgerV1())
 		err := r2.beginV1(3, 2, [16]byte{})
-		if release && err != nil || !release && err != errOperationReservationCapacity {
+		if release && err != nil || !release && !sameError(err, errOperationReservationCapacity) {
 			t.Fatalf("release %v: second draw %v", release, err)
 		}
 	}
@@ -442,7 +442,7 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 		calls := ledger.logged()
 		err := tc.event.feed(r)
 		tdInvalid(t, err)
-		if r.failureV1() != err || ledger.logged() != calls || len(r.descs) != len(tc.before) {
+		if !sameError(r.failureV1(), err) || ledger.logged() != calls || len(r.descs) != len(tc.before) {
 			t.Fatalf("%s: not recorded or charged", tc.name)
 		}
 	}
@@ -463,7 +463,7 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 		calls, recorded := ledger.logged(), r.failureV1()
 		err := r.beginV1(3, 1, [16]byte{})
 		tdInvalid(t, err)
-		if r.failureV1() != err || recorded != nil && err != recorded || ledger.logged() != calls {
+		if !sameError(r.failureV1(), err) || recorded != nil && !sameError(err, recorded) || ledger.logged() != calls {
 			t.Fatalf("%s: not recorded", second)
 		}
 	}
@@ -522,16 +522,16 @@ func TestTreeDeltaChargeRefusedV1(t *testing.T) {
 	ledger := &tdLedger{limit: need - 1}
 	r := c.recorder(treeWriterV1, ledger)
 	err := r.beginV1(3, 5, [16]byte{})
-	if err != errOperationReservationCapacity || r.failureV1() != err || r.descs != nil || r.value != nil {
+	if !sameError(err, errOperationReservationCapacity) || !sameError(r.failureV1(), err) || r.descs != nil || r.value != nil {
 		t.Fatalf("writer refusal %v", err)
 	}
-	if c.events[0].feed(r) != err {
+	if !sameError(c.events[0].feed(r), err) {
 		t.Fatal("later eventV1 did not return the recorded object")
 	}
 	account := &tdLedger{}
 	budget := &treeBudgetV1{held: need - 1, used: 0}
 	rb := c.recorder(treeReadbackV1, budget.ledgerV1())
-	if err := rb.beginV1(3, 5, [16]byte{}); err != errOperationReservationCapacity || budget.used != 0 || account.logged() != "" || rb.descs != nil {
+	if err := rb.beginV1(3, 5, [16]byte{}); !sameError(err, errOperationReservationCapacity) || budget.used != 0 || account.logged() != "" || rb.descs != nil {
 		t.Fatalf("readback refusal %v used %d", err, budget.used)
 	}
 }
@@ -548,7 +548,7 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 		r := tdCase{dir: 1, undo: 1, height: tc.height, gen: 9}.recorder(treeWriterV1, ledger)
 		err := r.beginV1(tc.txCount, 1, tc.generated)
 		tdInvalid(t, err)
-		if r.failureV1() != err || ledger.logged() != "" {
+		if !sameError(r.failureV1(), err) || ledger.logged() != "" {
 			t.Fatalf("%+v: recorded %v ledger %s", tc, r.failureV1(), ledger.logged())
 		}
 	}
@@ -557,7 +557,7 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 	mustEnvironment(t, r.beginV1(1, 1, [16]byte{}))
 	err := tdSpend(tdTxid(1), 0, 0, 0).feed(r)
 	tdInvalid(t, err)
-	if r.failureV1() != err {
+	if !sameError(r.failureV1(), err) {
 		t.Fatal("height-0 SPEND not recorded")
 	}
 	// A13: the admitted height-0 coinbase BEGIN and the height-1 rules.
@@ -583,11 +583,11 @@ func TestTreeDeltaExpiryV1(t *testing.T) {
 		r.expireV1()
 		calls := ledger.logged()
 		tdInactive(t, r.beginV1(3, 5, [16]byte{}))
-		if r.failureV1() != first {
+		if !sameError(r.failureV1(), first) {
 			t.Fatal("beginV1 refusal changed failureV1")
 		}
 		tdInactive(t, c.events[0].feed(r))
-		if r.failureV1() != first || ledger.logged() != calls || r.windowV1() != nil {
+		if !sameError(r.failureV1(), first) || ledger.logged() != calls || r.windowV1() != nil {
 			t.Fatal("post-expiry eventV1 recorded, charged or window lent")
 		}
 	}
@@ -607,10 +607,10 @@ func TestTreeDeltaStickyFailureV1(t *testing.T) {
 	first := tdEv{kind: 3, txid: tdTxid(1), tx: 1}.feed(r)
 	tdInvalid(t, first)
 	calls := ledger.logged()
-	if c.events[0].feed(r) != first || r.beginV1(3, 5, [16]byte{}) != first || r.failureV1() != first {
+	if !sameError(c.events[0].feed(r), first) || !sameError(r.beginV1(3, 5, [16]byte{}), first) || !sameError(r.failureV1(), first) {
 		t.Fatal("later call did not return the first object")
 	}
-	if _, err := r.finishV1(); err != first || ledger.logged() != calls {
+	if _, err := r.finishV1(); !sameError(err, first) || ledger.logged() != calls {
 		t.Fatal("finishV1 did not return the first object")
 	}
 }
@@ -621,7 +621,7 @@ func TestTreeDeltaMaximalCountV1(t *testing.T) {
 	r := tdGrammar().recorder(treeWriterV1, ledger)
 	err := r.beginV1(3, ^uint32(0), [16]byte{})
 	want := uint64(^uint32(0))*tdSize + tdV
-	if err != errOperationReservationCapacity || ledger.logged() != fmt.Sprintf("charge %d", want) || r.descs != nil || r.value != nil {
+	if !sameError(err, errOperationReservationCapacity) || ledger.logged() != fmt.Sprintf("charge %d", want) || r.descs != nil || r.value != nil {
 		t.Fatalf("maximal count %v %s", err, ledger.logged())
 	}
 }

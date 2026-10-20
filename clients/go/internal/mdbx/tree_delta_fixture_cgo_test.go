@@ -404,7 +404,7 @@ func TestTreeDeltaStoredBodyV1(t *testing.T) {
 		tdIntegrity(t, err, nil)
 		sentinel := errors.New("sentinel")
 		_, err = treeStoredBodyV1(&tdOld{inner: inner, fail: func(int, string) error { return sentinel }}, block)
-		if err != sentinel {
+		if !sameError(err, sentinel) {
 			t.Fatalf("R9 sentinel %v", err)
 		}
 		return nil
@@ -584,7 +584,7 @@ func TestTreeDeltaSourceErrorV1(t *testing.T) {
 			}
 			return nil
 		}})
-		if out.err != e || len(out.log) != 0 {
+		if !sameError(out.err, e) || len(out.log) != 0 {
 			t.Fatalf("R6 %v", out.err)
 		}
 	}
@@ -670,7 +670,7 @@ func TestTreeDeltaResolveOrderV1(t *testing.T) {
 		}
 		return nil
 	}})
-	if out.err != mismatch || len(out.log) != 0 {
+	if !sameError(out.err, mismatch) || len(out.log) != 0 {
 		t.Fatalf("R-RO-3 %v", out.err)
 	}
 	tdLog(t, "R-RO-3 reads", out.reads, fmt.Sprintf("next 5 %x", two.mK), fmt.Sprintf("get 1 %x", two.kA), "next 5 failed")
