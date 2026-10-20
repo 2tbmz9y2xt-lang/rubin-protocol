@@ -3,12 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GO_DIR="${ROOT_DIR}/clients/go"
-CONSENSUS_DIR="${GO_DIR}/consensus"
-NODE_DIR="${GO_DIR}/node"
-P2P_DIR="${GO_DIR}/node/p2p"
 ARTIFACTS_DIR="${ROOT_DIR}/.artifacts/fuzz-stage2"
 FUZZ_TIME="${FUZZ_TIME:-45s}"
 FUZZ_MINIMIZE_TIME="${FUZZ_MINIMIZE_TIME:-5s}"
+MODULE_PREFIX="github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/"
+DIFF_PREFIX="./cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_"
+TAB=$'\t'
 
 TARGETS=(
   "./consensus:FuzzValidateTxCovenantsGenesis"
@@ -43,11 +43,28 @@ TARGETS=(
   "./node:FuzzDaFeeFloorPolicyBoundaries"
   "./node/p2p:FuzzReadFrame"
   "./node/p2p:FuzzDecodeVersionPayload"
+  "./cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_MerkleRoots"
+  "./cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_ParseTx"
+  "./cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_Sighash"
+  "./consensus:FuzzAccumulateBlockResourceStats"
+  "./consensus:FuzzBlockTxSemanticsNonce"
+  "./consensus:FuzzConnectBlockParallelDeterminism"
+  "./consensus:FuzzExtractCryptoSigAndSighash"
+  "./consensus:FuzzFeatureBitStateAtHeightFromWindowCounts"
+  "./consensus:FuzzFlagDayHelpers"
+  "./consensus:FuzzParseBlockBytes"
+  "./consensus:FuzzParseBlockHeaderBytes"
+  "./consensus:FuzzParseStealthCovenantData"
+  "./consensus:FuzzParseTx"
+  "./consensus:FuzzReadCompactSize"
+  "./consensus:FuzzValidateP2PKSpendStructural"
+  "./consensus:FuzzValidateTxLocalDispatch"
+  "./node:FuzzDisconnectBlock"
 )
 
 usage() {
   cat <<USAGE
-Usage: scripts/ci/run_fuzz_stage2.sh [--list-json | --target <pkg:Target>]
+Usage: scripts/ci/run_fuzz_stage2.sh [--list-json | --check-inventory | --self-test-inventory | --target <pkg:Target>]
 
 Runs the bounded Go stage2 fuzz target list and writes reproducibility metadata
 under .artifacts/fuzz-stage2/. The script does not commit, push, regenerate
@@ -56,6 +73,8 @@ tracked fixtures, or open issues.
 Modes:
   (no args)          run every target in the list (local use)
   --list-json        print the target list as a compact JSON array and exit
+  --check-inventory  fail unless the list equals the compiled module-wide Fuzz* inventory
+  --self-test-inventory  run the inventory comparison over literal cases (no go)
   --target <spec>    run exactly one listed "pkg:Target" spec (CI matrix use)
 
 Environment:
@@ -80,6 +99,182 @@ list_json() {
   printf '%s]\n' "${out}"
 }
 
+# Inventory records, one per line: K<key> compiled key, F<./pkg> package whose
+# listed keys are not compared, D<line> defect line, G go list failed.
+is_footer() {
+  local path="$1" line="$2"
+  case "${line}" in
+    "ok  ${TAB}${path}" | "ok  ${TAB}${path}${TAB}"* | "?   ${TAB}${path}${TAB}[no test files]") return 0 ;;
+  esac
+  return 1
+}
+
+package_records() {
+  local LC_ALL=C
+  local path="$1" rc="$2" out="$3" pkg keys="" bad=0 footers=0 last=0 line
+  if [[ "${path}" != "${MODULE_PREFIX}"* ]]; then
+    echo "DUNSUPPORTED ${path}"
+    return 0
+  fi
+  pkg="./${path#"${MODULE_PREFIX}"}"
+  if ((rc != 0)); then
+    printf 'DDISCOVERY_FAILED %s\nF%s\n' "${path}" "${pkg}"
+    return 0
+  fi
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    last=0
+    if is_footer "${path}" "${line}"; then
+      footers=$((footers + 1))
+      last=1
+    elif [[ "${line}" =~ ^Fuzz[A-Za-z0-9_]+$ ]]; then
+      keys+="K${pkg}:${line}"$'\n'
+    else
+      bad=1
+      echo "DUNSUPPORTED ${line}"
+    fi
+  done < <(printf '%s' "${out}")
+  if ((footers != 1 || last != 1)); then
+    bad=1
+    echo "DUNSUPPORTED ${path} (footer)"
+  fi
+  if ((bad)); then echo "F${pkg}"; else printf '%s' "${keys}"; fi
+}
+
+# Sets CAP_RC and CAP_OUT (stdout only, trailing newlines kept); stderr passes through.
+capture() {
+  local raw
+  raw="$(rc=0; "$@" || rc=$?; printf 'x%s' "${rc}")"
+  CAP_RC="${raw##*x}"
+  CAP_OUT="${raw%x"${CAP_RC}"}"
+}
+
+discover_inventory() {
+  local path
+  capture go list ./... </dev/null
+  if ((CAP_RC != 0)); then
+    printf 'G\nDDISCOVERY_FAILED go list\n'
+    return 0
+  fi
+  while IFS= read -r path || [[ -n "${path}" ]]; do
+    CAP_RC=0 CAP_OUT=""
+    if [[ "${path}" == "${MODULE_PREFIX}"* ]]; then
+      capture go test -count=1 -run='^$' -list='^Fuzz' "${path}" </dev/null
+    fi
+    package_records "${path}" "${CAP_RC}" "${CAP_OUT}"
+  done < <(printf '%s' "${CAP_OUT}")
+}
+
+inventory_diff() {
+  local listed="$1" compiled="$2" failed="$3" discovery="$4" nl=$'\n' key
+  if [[ "${compiled}" == "${nl}" && "${discovery}" -eq 0 ]]; then
+    echo "EMPTY_INVENTORY"
+    return 0
+  fi
+  while IFS= read -r key; do
+    if [[ -z "${key}" ]]; then continue; fi
+    case "${listed}" in *"${nl}${key}${nl}"*) ;; *) echo "MISSING ${key}" ;; esac
+  done < <(printf '%s' "${compiled}")
+  while IFS= read -r key; do
+    if [[ -z "${key}" ]]; then continue; fi
+    case "${failed}" in *"${nl}${key%%:*}${nl}"*) continue ;; esac
+    case "${compiled}" in *"${nl}${key}${nl}"*) ;; *) echo "STALE ${key}" ;; esac
+  done < <(printf '%s' "${listed}")
+}
+
+# Reads records on stdin, compares with the listed keys in "$@".
+inventory_compare() {
+  local nl=$'\n' listed=$'\n' dups=$'\n' compiled=$'\n' failed=$'\n' out="" diff
+  local glist=0 discovery=0 rec key
+  for key in "$@"; do
+    case "${listed}" in
+      *"${nl}${key}${nl}"*)
+        case "${dups}" in
+          *"${nl}${key}${nl}"*) ;;
+          *) dups+="${key}${nl}"; out+="DUPLICATE ${key}${nl}" ;;
+        esac
+        ;;
+      *) listed+="${key}${nl}" ;;
+    esac
+  done
+  while IFS= read -r rec; do
+    case "${rec}" in
+      K*) compiled+="${rec#K}${nl}" ;;
+      F*) failed+="${rec#F}${nl}" ;;
+      G) glist=1; discovery=1 ;;
+      D*) out+="${rec#D}${nl}"; discovery=1 ;;
+    esac
+  done
+  if ((glist == 0)); then
+    diff="$(inventory_diff "${listed}" "${compiled}" "${failed}" "${discovery}")"
+    if [[ -n "${diff}" ]]; then out+="${diff}${nl}"; fi
+  fi
+  if [[ -z "${out}" ]]; then
+    printf 'inventory OK: %d targets\n' "$#"
+    return 0
+  fi
+  printf '%s' "${out}" | LC_ALL=C sort
+  return 1
+}
+
+st_case() {
+  local name="$1" want="$2" recs="$3" got rc=0 want_rc=1
+  shift 3
+  got="$(printf '%s\n' "${recs}" | inventory_compare "$@")" || rc=$?
+  if [[ "${want}" == "inventory OK:"* ]]; then want_rc=0; fi
+  if [[ "${got}" != "${want}" || "${rc}" -ne "${want_rc}" ]]; then
+    echo "SELF-TEST FAIL: ${name}: rc=${rc} got <<${got}>> want <<${want}>>" >&2
+    ST_FAILS=$((ST_FAILS + 1))
+  fi
+}
+
+pn() { package_records "${MODULE_PREFIX}node" "$@"; }
+pc() { package_records "${MODULE_PREFIX}consensus" "$@"; }
+
+self_test_inventory() {
+  local nl=$'\n' N="${MODULE_PREFIX}node" fn fc recs k want a=./node:FuzzA
+  local cgo=(./consensus:FuzzConnectBlockInMemory ./consensus:FuzzTxDepGraphBuild ./consensus:FuzzDAChunkHashVerify
+    ./consensus:FuzzDAPayloadCommitVerify ./consensus:FuzzUtxoApplyNonCoinbase ./consensus:FuzzVerifySigDispatch
+    ./consensus:FuzzSigCacheDeterminism ./consensus:FuzzSigCheckQueueFlush ./consensus:FuzzSigCacheConcurrentAccess
+    ./consensus:FuzzSuiteRegistryLookup ./consensus:FuzzSigCheckQueueWithCacheIntegration)
+  fn="ok  ${TAB}${N}${TAB}0.1s${nl}" fc="ok  ${TAB}${MODULE_PREFIX}consensus${TAB}0.1s${nl}"
+  ST_FAILS=0
+  if ((${#cgo[@]} != 11)); then echo "SELF-TEST FAIL: cgo key literals: ${#cgo[@]} != 11" >&2; ST_FAILS=1; fi
+  recs="$(pn 0 "FuzzA${nl}${fn}")"
+  st_case "equal sets" "inventory OK: 1 targets" "${recs}" ${a}
+  st_case "MISSING" "MISSING ${a}" "${recs}"
+  st_case "STALE" "STALE ./node:FuzzB" "${recs}" ${a} ./node:FuzzB
+  st_case "DUPLICATE once for three copies" "DUPLICATE ${a}" "${recs}" ${a} ${a} ${a}
+  st_case "same name in two packages" "inventory OK: 2 targets" "${recs}${nl}$(pc 0 "FuzzA${nl}${fc}")" ${a} ./consensus:FuzzA
+  recs="$(pn 1 "FuzzA${nl}"; pc 0 "FuzzC${nl}${fc}")"
+  st_case "failed package, others compared" "DISCOVERY_FAILED ${N}" "${recs}" ${a} ./consensus:FuzzC
+  st_case "failed package beside duplicate" "DISCOVERY_FAILED ${N}${nl}DUPLICATE ${a}" "${recs}" ${a} ${a} ./consensus:FuzzC
+  st_case "failed package, other stale, no EMPTY_INVENTORY" "DISCOVERY_FAILED ${N}${nl}STALE ./consensus:FuzzX" "$(pn 1 ""; pc 0 "${fc}")" ${a} ./consensus:FuzzX
+  st_case "build failed output not classified" "DISCOVERY_FAILED ${N}" "$(pn 1 "FAIL${TAB}${N} [build failed]${nl}FAIL${nl}")" ${a}
+  st_case "go list failure" "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" "$(printf 'G\nDDISCOVERY_FAILED go list\n')" ${a} ${a}
+  st_case "malformed line, valid footer" "UNSUPPORTED fuzzFoo" "$(pn 0 "fuzzFoo${nl}FuzzA${nl}${fn}")" ${a}
+  st_case "malformed line with space" "UNSUPPORTED Fuzz Foo" "$(pn 0 "Fuzz Foo${nl}${fn}")" ${a}
+  st_case "missing footer" "UNSUPPORTED ${N} (footer)" "$(pn 0 "FuzzA${nl}")" ${a}
+  st_case "malformed line and missing footer" "UNSUPPORTED ${N} (footer)${nl}UNSUPPORTED junk" "$(pn 0 "junk${nl}FuzzA")" ${a}
+  st_case "empty line inside" "UNSUPPORTED " "$(pn 0 "FuzzA${nl}${nl}${fn}")" ${a}
+  st_case "empty line after footer" "UNSUPPORTED ${nl}UNSUPPORTED ${N} (footer)" "$(pn 0 "FuzzA${nl}${fn}${nl}")" ${a}
+  st_case "two footers" "UNSUPPORTED ${N} (footer)" "$(pn 0 "${fn}${fn}")" ${a}
+  st_case "footer of another path" "UNSUPPORTED ${N} (footer)${nl}UNSUPPORTED ok  ${TAB}${N}x${TAB}0.1s" "$(pn 0 "ok  ${TAB}${N}x${TAB}0.1s${nl}")" ${a}
+  st_case "no test files footer" "EMPTY_INVENTORY" "$(pn 0 "?   ${TAB}${N}${TAB}[no test files]${nl}")"
+  st_case "footer without trailing tab" "inventory OK: 1 targets" "$(pn 0 "FuzzA${nl}ok  ${TAB}${N}")" ${a}
+  st_case "path outside module prefix" "STALE ${a}${nl}UNSUPPORTED example.com/other" "$(package_records example.com/other 0 "")" ${a}
+  recs="$(pn 0 "${fn}")"
+  st_case "empty compiled output" "EMPTY_INVENTORY" "${recs}" ${a}
+  st_case "empty compiled output beside duplicate" "DUPLICATE ${a}${nl}EMPTY_INVENTORY" "${recs}" ${a} ${a}
+  recs=""
+  for k in "${TARGETS[@]}"; do
+    case " ${cgo[*]} " in *" ${k} "*) ;; *) recs+="K${k}${nl}" ;; esac
+  done
+  want="$(printf 'STALE %s\n' "${cgo[@]}" | LC_ALL=C sort)"
+  st_case "TARGETS minus the 11 cgo keys" "${want}" "${recs}" "${TARGETS[@]}"
+  if ((ST_FAILS != 0)); then return 1; fi
+  echo "inventory self-test OK"
+}
+
 MODE="all"
 TARGET_SPEC=""
 # Full-loop mode only on truly empty argv: an empty-string first arg is rejected.
@@ -96,6 +291,19 @@ if (($# > 0)); then
       fi
       list_json
       exit 0
+      ;;
+    --check-inventory|--self-test-inventory)
+      if (($# > 1)); then
+        echo "FAIL: $1 takes no extra arguments" >&2
+        exit 2
+      fi
+      if [[ "$1" == "--self-test-inventory" ]]; then
+        self_test_inventory
+        exit $?
+      fi
+      cd "${GO_DIR}"
+      if discover_inventory | inventory_compare "${TARGETS[@]}"; then exit 0; fi
+      exit 1
       ;;
     --target)
       if (($# != 2)); then
@@ -150,11 +358,15 @@ STATUS=0
 # Invoked indirectly via trap on EXIT.
 collect_artifacts() {
   : > "${ARTIFACTS_DIR}/go-fuzz-files.txt"
-  local tar_paths=()
-  for dir in "${CONSENSUS_DIR}" "${NODE_DIR}" "${P2P_DIR}"; do
-    if [[ -d "${dir}/testdata/fuzz" ]]; then
-      find "${dir}/testdata/fuzz" -type f | sort >> "${ARTIFACTS_DIR}/go-fuzz-files.txt" || true
-      tar_paths+=("${dir#"${GO_DIR}/"}/testdata/fuzz")
+  local tar_paths=() seen=$'\n' spec dir
+  for spec in "${TARGETS[@]}"; do
+    dir="${spec%%:*}"
+    dir="${dir#./}"
+    case "${seen}" in *$'\n'"${dir}"$'\n'*) continue ;; esac
+    seen+="${dir}"$'\n'
+    if [[ -d "${GO_DIR}/${dir}/testdata/fuzz" ]]; then
+      find "${GO_DIR}/${dir}/testdata/fuzz" -type f | sort >> "${ARTIFACTS_DIR}/go-fuzz-files.txt" || true
+      tar_paths+=("${dir}/testdata/fuzz")
     fi
   done
   if [[ "${#tar_paths[@]}" -gt 0 ]]; then
@@ -210,7 +422,7 @@ write_run_metadata() {
 write_target_metadata() {
   local pkg="$1"
   local target="$2"
-  local metadata_file="${ARTIFACTS_DIR}/${target}.metadata.env"
+  local metadata_file="${ARTIFACTS_DIR}/${pkg#./}/${target}.metadata.env"
   local artifacts_path
   local corpus_path
   corpus_path="$(seed_path_for_pkg "${pkg}" "${target}")"
@@ -224,17 +436,28 @@ write_target_metadata() {
     write_env_field "artifacts_path" "${artifacts_path}"
     write_env_field "seed_path" "${corpus_path}"
     write_env_field "go_test_timeout" "${GO_TEST_TIMEOUT}"
-    write_env_field "command" "cd clients/go && go test -run=^$ -fuzz=\"${target}\" -fuzztime=\"${FUZZ_TIME}\" -fuzzminimizetime=\"${FUZZ_MINIMIZE_TIME}\" -timeout=\"${GO_TEST_TIMEOUT}\" \"${pkg}\""
-    write_env_field "log_path" ".artifacts/fuzz-stage2/${target}.log"
+    write_env_field "command" "cd clients/go && go test -run=^$ -fuzz=\"^${target}\$\" -fuzztime=\"${FUZZ_TIME}\" -fuzzminimizetime=\"${FUZZ_MINIMIZE_TIME}\" -timeout=\"${GO_TEST_TIMEOUT}\" \"${pkg}\""
+    write_env_field "log_path" ".artifacts/fuzz-stage2/${pkg#./}/${target}.log"
   } > "${metadata_file}"
+}
+
+# Requires cargo and the passing, non-skipped seed-parity test before fuzzing.
+differential_preflight() {
+  local preflight_log="$1" test_name="TestRubinConsensusCLI_RustParity_SeedRequests"
+  if ! cargo --version >"${preflight_log}" 2>&1; then return 1; fi
+  go test -count=1 -v -run "^${test_name}\$" ./cmd/rubin-consensus-cli >>"${preflight_log}" 2>&1 || return 1
+  grep -q -- "^--- PASS: ${test_name}" "${preflight_log}" && ! grep -q -- '^--- SKIP:' "${preflight_log}"
 }
 
 run_one_target() {
   local pkg="$1"
   local target="$2"
-  local log_file="${ARTIFACTS_DIR}/${target}.log"
+  local key="${pkg}:${target}"
+  local target_dir="${ARTIFACTS_DIR}/${pkg#./}"
+  local log_file="${target_dir}/${target}.log"
   local corpus_dir="${GO_DIR}/${pkg#./}/testdata/fuzz/${target}"
-  local corpus_before="${ARTIFACTS_DIR}/${target}.corpus-before.txt"
+  local corpus_before="${target_dir}/${target}.corpus-before.txt"
+  mkdir -p "${target_dir}"
   # Snapshot the corpus file list before the run: the benign-exit classifier
   # treats "no new file here" as proof no crasher was written.
   if [[ -d "${corpus_dir}" ]]; then
@@ -243,30 +466,39 @@ run_one_target() {
     : > "${corpus_before}"
   fi
   write_target_metadata "${pkg}" "${target}"
-  echo "==> running ${target} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
-  echo "metadata ${target}: ${ARTIFACTS_DIR}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
-  if go test -run=^$ -fuzz="${target}" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" -timeout="${GO_TEST_TIMEOUT}" "${pkg}" >"${log_file}" 2>&1; then
+  echo "==> running ${key} (${pkg})" | tee -a "${ARTIFACTS_DIR}/summary.log"
+  echo "metadata ${key}: ${target_dir}/${target}.metadata.env" >> "${ARTIFACTS_DIR}/summary.log"
+  if [[ "${key}" == "${DIFF_PREFIX}"* ]]; then
+    if differential_preflight "${target_dir}/${target}.preflight.log"; then
+      echo "PREFLIGHT_PASS ${key}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    else
+      STATUS=1
+      echo "FAIL ${key} (differential preflight)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+      return 0
+    fi
+  fi
+  if go test -run=^$ -fuzz="^${target}\$" -fuzztime="${FUZZ_TIME}" -fuzzminimizetime="${FUZZ_MINIMIZE_TIME}" -timeout="${GO_TEST_TIMEOUT}" "${pkg}" >"${log_file}" 2>&1; then
     # A zero exit is a real PASS only with fuzz-execution evidence: `go test
     # -fuzz=<pattern>` matching nothing exits 0, and a setup f.Skipf() (e.g.
     # unavailable ML-DSA backend, measured 2026-07-29) leaves a bare PASS log.
     if grep -Eq -- '^fuzz: elapsed:' "${log_file}"; then
-      echo "PASS ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+      echo "PASS ${key}" | tee -a "${ARTIFACTS_DIR}/summary.log"
     # Disambiguate via the test binary's own -list output — the truth source
     # for target existence: the no-fuzz-tests warning is not emitted when the
     # package has no fuzz tests at all. The -list run reuses the already-built
     # test binary, so it is cheap. Ambiguity is FAIL (fail closed).
-    elif go test -run='^$' -list "^${target}\$" "${pkg}" >"${ARTIFACTS_DIR}/${target}.list.txt" 2>&1 &&
-      grep -Fxq -- "${target}" "${ARTIFACTS_DIR}/${target}.list.txt"; then
-      echo "SKIP_FUZZ_SETUP ${target} (fuzz target skipped during setup; zero fuzz coverage — ML-DSA backend unavailable? see RUB-1064)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    elif go test -run='^$' -list "^${target}\$" "${pkg}" >"${target_dir}/${target}.list.txt" 2>&1 &&
+      grep -Fxq -- "${target}" "${target_dir}/${target}.list.txt"; then
+      echo "SKIP_FUZZ_SETUP ${key} (fuzz target skipped during setup; zero fuzz coverage — ML-DSA backend unavailable? see RUB-1064)" | tee -a "${ARTIFACTS_DIR}/summary.log"
     else
       STATUS=1
-      echo "FAIL ${target} (no fuzzing executed — target missing from package?)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+      echo "FAIL ${key} (no fuzzing executed — target missing from package?)" | tee -a "${ARTIFACTS_DIR}/summary.log"
     fi
   elif "${ROOT_DIR}/scripts/ci/classify_go_fuzz_exit.sh" "${target}" "${fuzz_seconds}" "${log_file}" "${corpus_before}" "${corpus_dir}"; then
-    echo "PASS_AFTER_BENIGN_DEADLINE ${target} (upstream fuzztime shutdown race; full budget spent, no defect evidence)" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    echo "PASS_AFTER_BENIGN_DEADLINE ${key} (upstream fuzztime shutdown race; full budget spent, no defect evidence)" | tee -a "${ARTIFACTS_DIR}/summary.log"
   else
     STATUS=1
-    echo "FAIL ${target}" | tee -a "${ARTIFACTS_DIR}/summary.log"
+    echo "FAIL ${key}" | tee -a "${ARTIFACTS_DIR}/summary.log"
   fi
 }
 
