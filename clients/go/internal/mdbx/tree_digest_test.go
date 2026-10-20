@@ -115,8 +115,12 @@ func TestTreeDigestV1Envelopes(t *testing.T) {
 		for i := range data {
 			data[i] = 0x33
 		}
+		type1, typeMax := testTreeValue(1, data, 0, 0), testTreeValue(1, data, 0, 0)
+		binary.LittleEndian.PutUint16(type1[8:], 1)
+		binary.LittleEndian.PutUint16(typeMax[8:], 0xffff)
+		// TYPE1, VALUE_ZERO, VALUE_MAX, TYPE_MAX, HEIGHT_MAX.
 		for _, v := range [][]byte{
-			testTreeValue(1, data, 0, 0), testTreeValue(0, data, 0, 0), testTreeValue(^uint64(0), data, ^uint64(0), 1),
+			type1, testTreeValue(0, data, 0, 0), testTreeValue(^uint64(0), data, 0, 0), typeMax, testTreeValue(1, data, ^uint64(0), 1),
 		} {
 			if got, want := treeLeafDigestV1(testKX, v), testTreeLeafPreimage(testKX, v); got != want {
 				t.Fatalf("n=%d: got %x want %x", n, got, want)

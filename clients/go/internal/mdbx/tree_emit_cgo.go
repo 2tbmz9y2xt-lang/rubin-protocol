@@ -19,13 +19,16 @@ type treeNodeRefV1 struct {
 }
 
 // treeFrameV1 is one pointer-free traversal frame. Index i holds the i-th read OLD node of the current path
-// (old, oldValue, oldNext) and, independently, the i-th open NEW branch (open, zero).
+// (old, oldValue, oldNext) and, independently, the i-th open NEW branch (openDepth and its completed zero child).
+// key and value of frame 0 are the scratch for every key and value L2 passes to old, emit and refer.
 type treeFrameV1 struct {
-	old      treeNodeRefV1
-	oldValue [140]byte
-	oldNext  uint8
-	open     treeNodeRefV1
-	zero     treeNodeRefV1
+	old       treeNodeRefV1
+	oldValue  [140]byte
+	oldNext   uint8
+	zero      treeNodeRefV1
+	openDepth uint16
+	key       [46]byte
+	value     [140]byte
 }
 
 type treeStreamKeyV1 struct {
@@ -35,19 +38,16 @@ type treeStreamKeyV1 struct {
 	newPresent bool
 }
 
-// treeWalkV1 is the single per-call working object: the frame array plus fixed scratch.
+// treeWalkV1 is the per-call walker; it stays on the stack. The frame array is its only heap object.
 type treeWalkV1 struct {
-	frames           [treeFrameCapV1]treeFrameV1
+	frames           *[treeFrameCapV1]treeFrameV1
 	oldN, openN      int
 	cur, top         treeNodeRefV1
+	kidZero, kidOne  treeNodeRefV1
 	hasCur, curLeaf  bool
 	topPending       bool
 	leaf             treeStreamKeyV1
 	leafOK, leafDone bool
-	kidZero, kidOne  treeNodeRefV1
-	keyBuf           [46]byte
-	valBuf           [140]byte
-	metaKey          [9]byte
 	generation       uint64
 	old              treeOldV1
 	leaves           treeLeavesV1
@@ -73,7 +73,7 @@ func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databa
 		return err
 	}
 	defer ledger.releaseV1(treeNodeWorkBytesV1)
-	w := &treeWalkV1{generation: generation, old: old, leaves: leaves, emit: emit}
+	w := treeWalkV1{frames: new([treeFrameCapV1]treeFrameV1), generation: generation, old: old, leaves: leaves, emit: emit}
 	binding, err := w.readBinding(databaseID)
 	if err != nil {
 		return err
@@ -85,9 +85,7 @@ func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databa
 }
 
 func (w *treeWalkV1) readBinding(databaseID [32]byte) (RootBindingV1, error) {
-	w.metaKey[0] = 0x11
-	binary.BigEndian.PutUint64(w.metaKey[1:], w.generation)
-	image, err := w.old.getV1(TreeSchemaV1DBIs()[0], w.metaKey[:])
+	image, err := w.old.getV1(TreeSchemaV1DBIs()[0], w.bindingKey())
 	if err != nil {
 		return RootBindingV1{}, err
 	}
@@ -270,7 +268,7 @@ func (w *treeWalkV1) feed(atom treeNodeRefV1, leaf bool) error {
 		d := treeFirstDiffV1(w.cur.key, atom.key)
 		i := w.openN
 		w.openN++
-		w.frames[i].open = treeNodeRefV1{key: treeMask(atom.key, d, false), depth: d}
+		w.frames[i].openDepth = d
 		w.frames[i].zero = w.cur
 	}
 	w.cur, w.hasCur, w.curLeaf = atom, true, leaf
@@ -297,7 +295,7 @@ func (w *treeWalkV1) newTop() (treeNodeRefV1, bool) {
 		return w.cur, true
 	}
 	if w.openN > 0 {
-		return w.frames[w.openN-1].open, true
+		return w.openRef(w.openN - 1), true
 	}
 	return treeNodeRefV1{}, false
 }
@@ -330,28 +328,27 @@ func (w *treeWalkV1) closeOld() error {
 func (w *treeWalkV1) closeCommon() error {
 	w.oldN--
 	node, n := w.buildNew()
-	if bytes.Equal(w.frames[w.oldN].oldValue[:n], w.valBuf[:n]) {
+	if bytes.Equal(w.frames[w.oldN].oldValue[:n], w.frames[0].value[:n]) {
 		return nil
 	}
 	return w.emitNode(node, n)
 }
 
-// buildNew closes the NEW chain top (a stream leaf, else the deepest open branch) into cur and its value in valBuf.
+// buildNew closes the NEW chain top (a stream leaf, else the deepest open branch) into cur and its value in the frame scratch.
 func (w *treeWalkV1) buildNew() (treeNodeRefV1, int) {
 	if w.curLeaf {
 		w.curLeaf = false
-		copy(w.valBuf[:32], w.cur.digest[:])
+		copy(w.frames[0].value[:32], w.cur.digest[:])
 		return w.cur, 32
 	}
 	w.openN--
-	f := &w.frames[w.openN]
-	zero, one := f.zero, w.cur
-	node := treeNodeRefV1{key: f.open.key, depth: f.open.depth}
+	node, zero, one := w.openRef(w.openN), w.frames[w.openN].zero, w.cur
 	node.digest = treeBranchDigestV1(node.id(), zero.digest, one.digest)
-	treeSuffixV1(w.valBuf[0:38], zero)
-	copy(w.valBuf[38:70], zero.digest[:])
-	treeSuffixV1(w.valBuf[70:108], one)
-	copy(w.valBuf[108:140], one.digest[:])
+	value := &w.frames[0].value
+	treeSuffixV1(value[0:38], zero)
+	copy(value[38:70], zero.digest[:])
+	treeSuffixV1(value[70:108], one)
+	copy(value[108:140], one.digest[:])
 	w.kidZero, w.kidOne, w.cur = zero, one, node
 	return node, 140
 }
@@ -361,7 +358,7 @@ func (w *treeWalkV1) emitNode(node treeNodeRefV1, n int) error {
 	if w.emit == nil {
 		return nil
 	}
-	target := treeTargetV1{dbi: TreeSchemaV1DBIs()[8], key: w.nodeKey(node), after: treeImageV1{present: true, value: w.valBuf[:n]}}
+	target := treeTargetV1{dbi: TreeSchemaV1DBIs()[8], key: w.nodeKey(node), after: treeImageV1{present: true, value: w.frames[0].value[:n]}}
 	if err := w.emit.emitV1(target); err != nil {
 		return err
 	}
@@ -401,14 +398,29 @@ func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) erro
 			return err
 		}
 	}
-	return w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.metaKey[:], after: treeImageV1{present: true, value: encoded}})
+	return w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded}})
 }
 
-// nodeKey builds the 46-byte form byte-equal to TreeNodeKey(generation, id) in keyBuf.
+// nodeKey builds the 46-byte form byte-equal to TreeNodeKey(generation, id) in the frame scratch.
 func (w *treeWalkV1) nodeKey(node treeNodeRefV1) []byte {
-	binary.BigEndian.PutUint64(w.keyBuf[:8], w.generation)
-	treeSuffixV1(w.keyBuf[8:], node)
-	return w.keyBuf[:]
+	key := &w.frames[0].key
+	binary.BigEndian.PutUint64(key[:8], w.generation)
+	treeSuffixV1(key[8:], node)
+	return key[:]
+}
+
+// bindingKey builds the root binding row key 0x11 || u64be(generation) in the frame scratch.
+func (w *treeWalkV1) bindingKey() []byte {
+	key := &w.frames[0].key
+	key[0] = 0x11
+	binary.BigEndian.PutUint64(key[1:9], w.generation)
+	return key[:9]
+}
+
+// openRef is the i-th open NEW branch: its prefix is the zero child's key masked at its depth.
+func (w *treeWalkV1) openRef(i int) treeNodeRefV1 {
+	d := w.frames[i].openDepth
+	return treeNodeRefV1{key: treeMask(w.frames[i].zero.key, d, false), depth: d}
 }
 
 func (f *treeFrameV1) child(side uint8) treeNodeRefV1 {
