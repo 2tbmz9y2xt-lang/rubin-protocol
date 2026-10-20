@@ -2124,14 +2124,14 @@ func (s *Store) updateNative(plan []ownedMutation, consulted []ownedConsulted, o
 	return outcome
 }
 
-func invokeUpdate(callback func(*Reader) (Batch, error), reader *Reader) (batch Batch, panicValue any, panicked bool, err error) {
+func invokeUpdate[T any](callback func(*Reader) (T, error), reader *Reader) (result T, panicValue any, panicked bool, err error) {
 	panicked = true
 	func() {
 		defer func() { panicValue = recover() }()
-		batch, err = callback(reader)
+		result, err = callback(reader)
 		panicked = false
 	}()
-	return batch, panicValue, panicked, err
+	return result, panicValue, panicked, err
 }
 
 func (s *Store) updatePlan(callback func(*Reader) (Batch, error), reader *Reader, old *C.MDBX_txn) ([]ownedMutation, []ownedConsulted, largeImageScope, error) {
@@ -2288,12 +2288,7 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	if beginErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, s.failedReadBegin(begun.txn, beginErr)
 	}
-	reader := newReader(begun.txn, s.dbis)
-	reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config
-	reader.updateOld = true
-	reader.ownerVerified = s.canonicalOwnerVerified
-	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
-	reader.active.Store(true)
+	reader := s.newUpdateReaderV1(begun.txn)
 	plan, consulted, large, planErr := s.updatePlan(callback, reader, begun.txn)
 	if planErr != nil {
 		return CommitTruthOld, UpdateStagePrewrite, planErr
@@ -2305,6 +2300,17 @@ func (s *Store) Update(callback func(*Reader) (Batch, error)) (CommitTruth, Upda
 	large.tip.retire()
 	cleanupErr, oldRetained := updateAbortOld(begun.txn)
 	return s.applyUpdateOutcome(outcome, begun.txn, cleanupErr, oldRetained)
+}
+
+// newUpdateReaderV1 builds the Update-position Reader over txn exactly as Update does at base ed0e0d1b (mdbx_cgo.go:2291-2296 there).
+func (s *Store) newUpdateReaderV1(txn *C.MDBX_txn) *Reader {
+	reader := newReader(txn, s.dbis)
+	reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config
+	reader.updateOld = true
+	reader.ownerVerified = s.canonicalOwnerVerified
+	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
+	reader.active.Store(true)
+	return reader
 }
 
 // refusedUpdate preserves the retained terminal truth; invalid/absent truth
