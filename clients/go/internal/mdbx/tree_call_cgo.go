@@ -51,7 +51,7 @@ type treeWorkerV1 struct {
 // runTreeLockedV1 runs op on a fresh goroutine locked to its OS thread. One deferred top-level function delivers exactly
 // one (outcome, unwind): normal return -> (*out, op's unwind); Goexit -> (*out as op's deferred cleanup set it, kind 2);
 // a panic op did not recover is re-raised in the worker without delivery (engine defect, D4 T5), also one raised while
-// a Goexit unwinds, except two that recover cannot see (a nil one under GODEBUG=panicnil=1 raised then, and one that a
+// a Goexit unwinds, except two for which recover returns nil (a nil one under GODEBUG=panicnil=1 raised then, and one that a
 // Goexit called by op's own deferred function supersedes): those are delivered as the Goexit. If out.poisoned the
 // thread stays locked and parks (select {}) after delivery (runLocked law, mdbx_cgo.go:4057-4070 at base ed0e0d1b).
 // op must set *out before every normal return and in its deferred cleanup.

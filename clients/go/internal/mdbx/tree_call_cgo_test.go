@@ -302,7 +302,7 @@ func TestTreeCallV1ProviderPanicDuringGoexit(t *testing.T) {
 }
 
 // TestTreeCallV1GoexitSupersedesOpPanic is structural-only residue (ii): an op panic superseded by a Goexit that op's
-// own deferred function calls is not visible to recover and is delivered as the Goexit.
+// own deferred function calls is one for which recover returns nil, so it is delivered as the Goexit.
 func TestTreeCallV1GoexitSupersedesOpPanic(t *testing.T) {
 	v, o1, o2 := new(struct{ n int }), errors.New("before cleanup"), errors.New("cleanup")
 	var afterExit bool
@@ -602,7 +602,7 @@ func treeCallChildCallPanicNil() {
 }
 
 // treeCallChildGoexitNilPanic is structural-only residue (i): under GODEBUG=panicnil=1 a nil panic that op's deferred
-// function raises while op's Goexit unwinds is not visible to recover and is delivered as the Goexit.
+// function raises while op's Goexit unwinds is one for which recover returns nil, so it is delivered as the Goexit.
 func treeCallChildGoexitNilPanic() {
 	o2 := errors.New("cleanup")
 	afterExit := false
