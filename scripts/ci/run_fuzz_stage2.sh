@@ -9,6 +9,7 @@ FUZZ_MINIMIZE_TIME="${FUZZ_MINIMIZE_TIME:-5s}"
 MODULE_PREFIX="github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/"
 DIFF_PREFIX="./cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_"
 TAB=$'\t'
+GO_CMD=(go)
 
 TARGETS=(
   "./consensus:FuzzValidateTxCovenantsGenesis"
@@ -150,7 +151,7 @@ capture() {
 
 discover_inventory() {
   local path
-  capture go list ./... </dev/null
+  capture "${GO_CMD[@]}" list ./... </dev/null
   if ((CAP_RC != 0)); then
     printf 'G\nDDISCOVERY_FAILED go list\n'
     return 0
@@ -158,7 +159,7 @@ discover_inventory() {
   while IFS= read -r path || [[ -n "${path}" ]]; do
     CAP_RC=0 CAP_OUT=""
     if [[ "${path}" == "${MODULE_PREFIX}"* ]]; then
-      capture go test -count=1 -run='^$' -list='^Fuzz' "${path}" </dev/null
+      capture "${GO_CMD[@]}" test -count=1 -run='^$' -list='^Fuzz' "${path}" </dev/null
     fi
     package_records "${path}" "${CAP_RC}" "${CAP_OUT}"
   done < <(printf '%s' "${CAP_OUT}")
@@ -227,11 +228,31 @@ st_case() {
   fi
 }
 
+# Stand-in for go (GO_CMD) in the self-test: scripted exit codes and stdout, noise on stderr.
+st_go() {
+  case "$1" in
+    list) printf '%s' "${ST_LIST_OUT}"; return "${ST_LIST_RC}" ;;
+  esac
+  echo "#warning st_go noise" >&2
+  case "${!#}" in
+    *node) printf '%s' "${ST_N_OUT}"; return "${ST_N_RC}" ;;
+    *) printf '%s' "${ST_C_OUT}"; return 0 ;;
+  esac
+}
+
+st_disc() {
+  local name="$1" want="$2" recs
+  local GO_CMD=(st_go)
+  shift 2
+  recs="$(discover_inventory 2>/dev/null </dev/null)"
+  st_case "${name}" "${want}" "${recs}" "$@"
+}
+
 pn() { package_records "${MODULE_PREFIX}node" "$@"; }
 pc() { package_records "${MODULE_PREFIX}consensus" "$@"; }
 
 self_test_inventory() {
-  local nl=$'\n' N="${MODULE_PREFIX}node" fn fc recs k want a=./node:FuzzA
+  local nl=$'\n' N="${MODULE_PREFIX}node" fn fc recs k want noise a=./node:FuzzA
   local cgo=(./consensus:FuzzConnectBlockInMemory ./consensus:FuzzTxDepGraphBuild ./consensus:FuzzDAChunkHashVerify
     ./consensus:FuzzDAPayloadCommitVerify ./consensus:FuzzUtxoApplyNonCoinbase ./consensus:FuzzVerifySigDispatch
     ./consensus:FuzzSigCacheDeterminism ./consensus:FuzzSigCheckQueueFlush ./consensus:FuzzSigCacheConcurrentAccess
@@ -250,7 +271,6 @@ self_test_inventory() {
   st_case "failed package beside duplicate" "DISCOVERY_FAILED ${N}${nl}DUPLICATE ${a}" "${recs}" ${a} ${a} ./consensus:FuzzC
   st_case "failed package, other stale, no EMPTY_INVENTORY" "DISCOVERY_FAILED ${N}${nl}STALE ./consensus:FuzzX" "$(pn 1 ""; pc 0 "${fc}")" ${a} ./consensus:FuzzX
   st_case "build failed output not classified" "DISCOVERY_FAILED ${N}" "$(pn 1 "FAIL${TAB}${N} [build failed]${nl}FAIL${nl}")" ${a}
-  st_case "go list failure" "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" "$(printf 'G\nDDISCOVERY_FAILED go list\n')" ${a} ${a}
   st_case "malformed line, valid footer" "UNSUPPORTED fuzzFoo" "$(pn 0 "fuzzFoo${nl}FuzzA${nl}${fn}")" ${a}
   st_case "malformed line with space" "UNSUPPORTED Fuzz Foo" "$(pn 0 "Fuzz Foo${nl}${fn}")" ${a}
   st_case "missing footer" "UNSUPPORTED ${N} (footer)" "$(pn 0 "FuzzA${nl}")" ${a}
@@ -262,6 +282,19 @@ self_test_inventory() {
   st_case "no test files footer" "EMPTY_INVENTORY" "$(pn 0 "?   ${TAB}${N}${TAB}[no test files]${nl}")"
   st_case "footer without trailing tab" "inventory OK: 1 targets" "$(pn 0 "FuzzA${nl}ok  ${TAB}${N}")" ${a}
   st_case "path outside module prefix" "STALE ${a}${nl}UNSUPPORTED example.com/other" "$(package_records example.com/other 0 "")" ${a}
+  ST_LIST_RC=1 ST_LIST_OUT="${N}${nl}" ST_N_RC=0 ST_N_OUT="FuzzA${nl}${fn}"
+  st_disc "go list failure" "DISCOVERY_FAILED go list" ${a}
+  st_disc "go list failure beside duplicate" "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" ${a} ${a}
+  ST_LIST_RC=0 ST_LIST_OUT="${N}${nl}${MODULE_PREFIX}consensus${nl}" ST_C_OUT="FuzzC${nl}${fc}"
+  st_disc "go list ok, packages compared" "inventory OK: 2 targets" ${a} ./consensus:FuzzC
+  GO_CMD=(st_go)
+  noise="$(st_go test node 2>&1 >/dev/null)"
+  if [[ "$(discover_inventory 2>&1 >/dev/null </dev/null)" != "${noise}${nl}${noise}" ]]; then
+    echo "SELF-TEST FAIL: go stderr passes through unclassified" >&2
+    ST_FAILS=$((ST_FAILS + 1))
+  fi
+  ST_N_RC=1
+  st_disc "forwarded list-run exit code" "DISCOVERY_FAILED ${N}" ${a} ./consensus:FuzzC
   recs="$(pn 0 "${fn}")"
   st_case "empty compiled output" "EMPTY_INVENTORY" "${recs}" ${a}
   st_case "empty compiled output beside duplicate" "DUPLICATE ${a}${nl}EMPTY_INVENTORY" "${recs}" ${a} ${a}
