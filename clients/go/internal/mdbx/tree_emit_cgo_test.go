@@ -698,9 +698,11 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 		r := base.run(t, func(_ *testTreeOld, l *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 			l.failN, l.fail = n, sentinel
 		})
-		// No emitV1 or referV1 after the leaves error; node emits before it are permitted (D14-3).
+		// The failing nextV1 is the n-th and last leaves call and the last call before release: no emitV1, referV1
+		// or leaves call after the error (node emits before it are permitted, D14-3).
 		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) ||
-			r.log[len(r.log)-2] != "leaves" || r.foldLog[len(r.foldLog)-2] != "leaves" {
+			r.log[len(r.log)-2] != "leaves" || r.foldLog[len(r.foldLog)-2] != "leaves" ||
+			testTreeCount(r.log, "leaves") != n || testTreeCount(r.foldLog, "leaves") != n {
 			t.Fatalf("R5 n=%d: %v %v %v", n, r.err, r.foldErr, r.log)
 		}
 	}
@@ -762,6 +764,17 @@ func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
 	if !testTreeSubsequence(r.emit.targets, delta) || !reflect.DeepEqual(testTreeWithoutEmits(r.log), r.foldLog) {
 		t.Fatalf("R10 targets %v outside the ascending delta, or logs differ %v / %v", r.emit.targets, r.log, r.foldLog)
 	}
+}
+
+// testTreeCount counts the log entries equal to call.
+func testTreeCount(log []string, call string) int {
+	n := 0
+	for _, c := range log {
+		if c == call {
+			n++
+		}
+	}
+	return n
 }
 
 // testTreeSubsequence reports that got lists elements of want in want's order, each at most once.
