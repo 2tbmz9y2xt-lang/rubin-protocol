@@ -18,12 +18,12 @@ import (
 // recorder mutex so an in-flight call completes (beginV1 and eventV1 test the flag while holding the mutex). After it
 // every sink method returns "tree delta sink is not active" without a charge or copy, windowV1 returns nil, and
 // failureV1 no longer changes (the refusal is not recorded). finishV1 and releaseV1 call expireV1 first. releaseV1 is
-// idempotent and then returns D_j + V through ledger exactly once if beginV1 charged them; the recorder owns that
-// charge for the whole position (D13-8, D26). L1 heap-allocates only the recorder, the delta, one iterator per leavesV1
-// call, the D_j array, the V scratch, one key scratch (a type with no Go pointer: every key and from L1 passes to
-// treeOldV1 or treeEmitterV1 and the regenerated manifest bytes) and at most one 32-byte copy of block in
-// treeStoredBodyV1; the fixed objects, the key scratch and that copy fit treeControlBytesV1, which L5a charges before
-// treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25, D28).
+// idempotent and then, exactly once if beginV1 charged them, drops its references to the D_j array and the V scratch
+// and returns D_j + V through ledger; the recorder owns that charge for the whole position (D13-8, D26, D29). L1
+// heap-allocates only the recorder, the delta, one iterator per leavesV1 call, the D_j array, the V scratch, one key
+// scratch (a type with no Go pointer: every key and from L1 passes to treeOldV1 or treeEmitterV1 and the regenerated
+// manifest bytes) and at most one 32-byte copy of block in treeStoredBodyV1; the fixed objects, the key scratch and
+// that copy fit treeControlBytesV1, which L5a charges before treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25, D28).
 const treeControlBytesV1 uint64 = 4096 // C: L1 per-primitive control objects (recorder, delta, key scratch, 2 leaves iterators, treeStoredBodyV1's 32-byte block copy)
 
 // Event kinds of the closed grammar (BLOCK 3016) and the descriptor flag bits.
@@ -106,6 +106,7 @@ func (r *treeRecorderV1) releaseV1() {
 	defer r.mu.Unlock()
 	if r.charged && !r.released {
 		r.released = true
+		r.begun, r.descs, r.value = false, nil, nil // finishV1 then refuses as with no BEGIN (G6, D29)
 		r.ledger.releaseV1(r.charge)
 	}
 }

@@ -393,6 +393,60 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 	}
 }
 
+// tdPeekLedger logs like tdLedger and, inside releaseV1, records whether rec's descriptor array and value scratch are
+// nil (A15 (f)); releaseV1 calls it under rec's mutex on the same goroutine, so it reads the fields directly.
+type tdPeekLedger struct {
+	tdLedger
+	rec     *treeRecorderV1
+	dropped []bool
+}
+
+func (l *tdPeekLedger) releaseV1(n uint64) {
+	l.dropped = append(l.dropped, l.rec.descs == nil && l.rec.value == nil)
+	l.tdLedger.releaseV1(n)
+}
+
+// tdFinishRecovered calls finishV1 and reports a panic instead of propagating it (A15 (g)).
+func tdFinishRecovered(r *treeRecorderV1) (d *treeDeltaV1, panicked any, err error) {
+	defer func() { panicked = recover() }()
+	d, err = r.finishV1()
+	return d, nil, err
+}
+
+// A15 (f), (g), G6, G8, M-REL-KEEP, M-REL-DROP-LATE, M-FIN-REL: releaseV1 drops both buffer references before its
+// single ledger release; a later finishV1 is the unrecorded invalid tree delta refusal and reads neither buffer.
+func TestTreeDeltaReleaseDropsV1(t *testing.T) {
+	c := tdGrammar()
+	c.events = c.events[:3]
+	ledger := &tdPeekLedger{}
+	r := c.recorder(treeWriterV1, ledger)
+	ledger.rec = r
+	tdOK(t, r.beginV1(3, 3, [16]byte{}))
+	for _, e := range c.events {
+		tdOK(t, e.feed(r))
+	}
+	if d, err := r.finishV1(); err != nil || d == nil {
+		t.Fatalf("finishV1 %v %v", d, err)
+	}
+	r.releaseV1()
+	n := 3*tdSize + tdV
+	want := fmt.Sprintf("charge %d|release %d", n, n)
+	if got := ledger.logged(); got != want || len(ledger.dropped) != 1 || !ledger.dropped[0] {
+		t.Fatalf("f: ledger %s, dropped at the release call %v", got, ledger.dropped)
+	}
+	if r.descs != nil || r.value != nil {
+		t.Fatal("f: references kept after releaseV1")
+	}
+	d, panicked, err := tdFinishRecovered(r)
+	if panicked != nil || d != nil {
+		t.Fatalf("g: finishV1 after releaseV1: panic %v, delta %v", panicked, d)
+	}
+	tdInvalid(t, err)
+	if r.failureV1() != nil || ledger.logged() != want {
+		t.Fatalf("g: failure %v, ledger %s", r.failureV1(), ledger.logged())
+	}
+}
+
 // A19, M43: the readback release returns the bytes before the next primitive's draw.
 func TestTreeDeltaReadbackReturnV1(t *testing.T) {
 	five := tdGrammar()

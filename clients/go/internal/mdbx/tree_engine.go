@@ -148,7 +148,7 @@ type treeEmitterV1 interface {
 // treeLeafV1 is one net-dirty UTXO identity of primitive j in native key order (D6-4: k groups). net-dirty:
 // final presence != logical OLD presence, or both present and final value bytes differ (D12-K).
 // newValue is the stored utxo-v1 value frame || u64le(height) || coinbase, held in L1's value scratch V.
-// It is borrowed until the next nextV1 on the same stream.
+// It is borrowed until the same treeDeltaV1's next resolveV1, applyV1 or any leaves nextV1, or its recorder's releaseV1.
 type treeLeafV1 struct {
 	key        [44]byte
 	oldPresent bool
