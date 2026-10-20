@@ -976,7 +976,7 @@ func TestArchiveProfileNativeImages(t *testing.T) {
 				if name == "H11e_unreadable" {
 					handles[0] = ^handles[0]
 				}
-				native = updateNativeReadback(s.env, handles, mutations, consulted, reader.txn, primary)
+				native = updateNativeReadback(s.env, handles, mutations, consulted, reader.txn, primary, nil)
 				return nil
 			}))
 			if strings.HasSuffix(name, "_final") {
@@ -3504,7 +3504,7 @@ func TestPrunedProfileNativeImages(t *testing.T) {
 				if mode == "unreadable" {
 					handles[0] = ^handles[0]
 				}
-				outcome = updateNativeReadback(s.env, handles, plan, consulted, reader.txn, primary)
+				outcome = updateNativeReadback(s.env, handles, plan, consulted, reader.txn, primary, nil)
 				return nil
 			}))
 			want := CommitTruthUnknown
@@ -3686,7 +3686,7 @@ func TestNativeUpdateGenesisImages(t *testing.T) {
 					if mode == "unreadable" {
 						handles[0] = ^handles[0]
 					}
-					outcome = updateNativeReadback(store.env, handles, plan, owned, reader.txn, primary)
+					outcome = updateNativeReadback(store.env, handles, plan, owned, reader.txn, primary, nil)
 					return nil
 				}))
 				want := map[string]CommitTruth{"old": CommitTruthOld, "new": CommitTruthNew}[mode]

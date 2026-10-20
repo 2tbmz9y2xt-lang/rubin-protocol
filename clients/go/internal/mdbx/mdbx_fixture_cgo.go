@@ -500,7 +500,7 @@ func fixtureLargeNativeCalls() uint32 { return uint32(C.rubin_li_calls()) }
 func fixtureLargeFault(store *Store, mode uint32, rank uint8, key []byte, run func()) (evidence fixtureLargeEvidence, err error) {
 	fixtureLargeMu.Lock()
 	defer fixtureLargeMu.Unlock()
-	if store == nil || len(key) == 0 || rank >= 8 || run == nil {
+	if store == nil || len(key) == 0 || !fixtureRankAdmitted(store, rank) || run == nil {
 		return evidence, errors.New("invalid large-image fixture")
 	}
 	rc := int(C.rubin_li_arm(store.env, store.dbis[rank], C.uint(mode), unsafe.Pointer(&key[0]), C.size_t(len(key))))
@@ -569,7 +569,7 @@ func FixtureCleanupReadbackDrift(store *Store, rank uint8, key []byte, run func(
 // FixtureWriteSnapshotDrift drifts one armed row to 0x7f before the write-transaction begin (large-image mode 14)
 // while run executes, and returns the drift count.
 func FixtureWriteSnapshotDrift(store *Store, rank uint8, key []byte, run func()) (uint32, error) {
-	if store == nil || run == nil || rank >= 8 || len(key) == 0 {
+	if store == nil || run == nil || !fixtureRankAdmitted(store, rank) || len(key) == 0 {
 		return 0, errors.New("invalid write snapshot drift fixture")
 	}
 	evidence, err := fixtureLargeFault(store, 14, rank, key, run)
@@ -818,7 +818,7 @@ func fixtureUpdateWrongThread(store *Store) (updateNativeOutcome, func() error, 
 	if err != nil {
 		return updateNativeConsumed(CommitTruthOld, false, err, nil, 1), nil, err
 	}
-	return updateNativeCommit(store.env, store.dbis, nil, nil, nil, txn, 1), release, nil
+	return updateNativeCommit(store.env, store.dbis, nil, nil, nil, txn, 1, nil), release, nil
 }
 
 func fixtureUpdateAbortWrongThread(store *Store) (updateNativeOutcome, func() error, error) {
@@ -847,7 +847,7 @@ func fixtureUpdateResultTrue(store *Store, plan []ownedMutation) updateNativeOut
 	if rc := int(C.mdbx_txn_break(begun.txn)); rc != codeSuccess {
 		return updateNativeAbort(begun.txn, nativeError(operationUpdate, rc), 1)
 	}
-	return updateNativeCommit(store.env, store.dbis, plan, nil, old.txn, begun.txn, 1)
+	return updateNativeCommit(store.env, store.dbis, plan, nil, old.txn, begun.txn, 1, nil)
 }
 
 func fixtureCleanNew(outcome updateNativeOutcome) bool {
@@ -874,7 +874,7 @@ func fixtureUpdatePostCommitENOSPC(store *Store, plan []ownedMutation) (updateNa
 		_ = C.rubin_fixture_txn_abort(old.txn)
 		return committed, err
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC), nil)
 	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -895,7 +895,7 @@ func fixtureUpdatePostCommitENOSPCUnreadable(store *Store, plan []ownedMutation)
 	}
 	dbis := store.dbis
 	dbis[plan[0].dbi.Rank] = ^C.MDBX_dbi(0)
-	outcome := updateNativeReadback(store.env, dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC), nil)
 	if rc := int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -932,7 +932,7 @@ func fixtureUpdatePostCommitENOSPCThird(store *Store, plan []ownedMutation) (upd
 		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC), nil)
 	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -968,7 +968,7 @@ func fixtureUpdatePostCommitENOSPCMissing(store *Store, plan []ownedMutation) (u
 		_ = C.rubin_fixture_txn_abort(old.txn)
 		return updateNativeConsumed(CommitTruthUnknown, true, nativeError(operationUpdate, rc), nil, 3), nativeError(operationUpdate, rc)
 	}
-	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC))
+	outcome := updateNativeReadback(store.env, store.dbis, plan, nil, old.txn, nativeError(operationUpdate, codeENOSPC), nil)
 	if rc = int(C.rubin_fixture_txn_abort(old.txn)); rc != codeSuccess {
 		return outcome, nativeError(operationAbort, rc)
 	}
@@ -1199,4 +1199,120 @@ func selectedDamageEvidence(scenario SelectedDamageScenario, counts C.rubin_sd_c
 		return evidence, errors.New("selected damage fixture site was not reached exactly as armed")
 	}
 	return evidence, nil
+}
+
+// fixtureRankAdmitted admits ranks below 8, and rank 8 (tree-node-v1) only for a tree-format store (D12-J).
+func fixtureRankAdmitted(store *Store, rank uint8) bool {
+	return rank < 8 || rank == 8 && store.format.Load() == 3
+}
+
+// fixtureTreeOldV1 runs run with a plain ORIGINAL OLD amended read (empty P) begun through treeBeginV1 after arming.
+func fixtureTreeOldV1(store *Store, run func(old treeOldV1) error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	old, err := treeBeginV1(store.env, false)
+	if err != nil {
+		return err
+	}
+	defer C.rubin_fixture_txn_abort(old)
+	return run(&treeAmendedV1{old: old, handles: store.dbis, p: &treeProjectionV1{}})
+}
+
+// fixtureTreeSectionV1 runs run with a section bound to ledger; it never commits and aborts a section run left open.
+func fixtureTreeSectionV1(store *Store, ledger treeLedgerV1, run func(t *treeSectionV1) error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	old, err := treeBeginV1(store.env, false)
+	if err != nil {
+		return err
+	}
+	defer C.rubin_fixture_txn_abort(old)
+	section, outcome := beginTreeSectionV1(store.env, store.dbis, old, ledger)
+	if section == nil {
+		fixtureTreeReleaseV1(outcome)
+		return outcome.primary
+	}
+	err = run(section)
+	if !section.ended {
+		fixtureTreeReleaseV1(section.abortV1(err))
+	}
+	return err
+}
+
+// fixtureTreeScriptV1 is one test-scripted tree operation for fixtureTreeCommitV1. readback nil passes truth = nil;
+// held 0 gives the readback budget treeScratchBytesV1 + pBudgetV1(). mark sees "abort" or "commit" before that call.
+type fixtureTreeScriptV1 struct {
+	ledger    treeLedgerV1
+	pair      []ownedMutation
+	consulted []ownedConsulted
+	write     func(t *treeSectionV1) error
+	readback  func(r *treeReadbackStateV1) error
+	held      uint64
+	mark      func(string)
+	calls     *int
+}
+
+// fixtureTreeCommitV1 is the committing tree seam: ORIGINAL OLD through treeBeginV1, beginTreeSectionV1, the
+// scripted writer, then abortV1 on its error or commitV1 with the scripted truth function.
+func fixtureTreeCommitV1(store *Store, script fixtureTreeScriptV1) updateNativeOutcome {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	old, err := treeBeginV1(store.env, false)
+	if err != nil {
+		return updateNativeConsumed(CommitTruthOld, false, err, nil, UpdateStagePrewrite)
+	}
+	defer C.rubin_fixture_txn_abort(old)
+	section, outcome := beginTreeSectionV1(store.env, store.dbis, old, script.ledger)
+	if section == nil {
+		return outcome
+	}
+	if err = script.write(section); err != nil {
+		script.markV1("abort")
+		return section.abortV1(err)
+	}
+	script.markV1("commit")
+	return section.commitV1(script.pair, script.consulted, script.truthV1(old, store.dbis, section.pBudgetV1()))
+}
+
+func (script fixtureTreeScriptV1) markV1(event string) {
+	if script.mark != nil {
+		script.mark(event)
+	}
+}
+
+func (script fixtureTreeScriptV1) truthV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, pBudget uint64) treeTruthV1 {
+	if script.readback == nil {
+		return nil
+	}
+	held := script.held
+	if held == 0 {
+		held = treeScratchBytesV1 + pBudget
+	}
+	return func(read *C.MDBX_txn) (CommitTruth, error) {
+		if script.calls != nil {
+			*script.calls++
+		}
+		readback, err := newTreeReadbackV1(old, read, dbis, &treeBudgetV1{held: held})
+		if err != nil {
+			return CommitTruthUnknown, err
+		}
+		if err = script.readback(readback); err != nil {
+			return CommitTruthUnknown, err
+		}
+		return readback.verdictV1(script.pair, script.consulted)
+	}
+}
+
+// fixtureTreeReleaseV1 disposes a txn an outcome retained, after its shape was observed and the fault disarmed.
+func fixtureTreeReleaseV1(outcome updateNativeOutcome) {
+	for _, txn := range []*C.MDBX_txn{outcome.retainedWrite, outcome.retainedRead} {
+		if txn != nil {
+			_ = C.rubin_fixture_txn_abort(txn)
+		}
+	}
+}
+
+// fixtureTreeBreakV1 breaks the section's write txn so its commit returns MDBX_RESULT_TRUE (definite OLD).
+func fixtureTreeBreakV1(section *treeSectionV1) error {
+	return fixtureResult(operationUpdate, int(C.mdbx_txn_break(section.write)))
 }
