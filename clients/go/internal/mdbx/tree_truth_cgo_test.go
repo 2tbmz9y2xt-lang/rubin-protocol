@@ -130,8 +130,13 @@ func ttLagSeed(t *testing.T, store *Store) {
 // ttLag is the LAG discriminating operation: P0 creates Z; P1 reads U, X then creates U and rewrites X;
 // P2 reads U, X then deletes U, rewrites X and refers R. Each read is appended to seen.
 func ttLag(old treeOldV1, emit treeEmitterV1, seen *[]string) error {
+	return ttLagZ(old, emit, seen, "z1")
+}
+
+// ttLagZ is ttLag with P0's Z value given; a same-size value other than "z1" keeps every charge and breaks NEW at Z.
+func ttLagZ(old treeOldV1, emit treeEmitterV1, seen *[]string, z string) error {
 	steps := []func() error{
-		func() error { return emit.emitV1(ttTarget(ttUTXO, ttZ, "z1")) },
+		func() error { return emit.emitV1(ttTarget(ttUTXO, ttZ, z)) },
 		func() error { return ttLagRead(old, seen) },
 		func() error { return emit.emitV1(ttTarget(ttUTXO, ttU, "v1")) },
 		func() error { return emit.emitV1(ttTarget(ttNode, ttX, "x1")) },
@@ -170,6 +175,7 @@ type ttLagRun struct {
 	calls         int
 	extra         func(treeEmitterV1) error
 	held          uint64
+	readZ         string
 }
 
 func (run *ttLagRun) script() fixtureTreeScriptV1 {
@@ -189,7 +195,11 @@ func (run *ttLagRun) script() fixtureTreeScriptV1 {
 			return t.finalV1(nil, consulted)
 		},
 		readback: func(r *treeReadbackStateV1) error {
-			if err := ttLag(r.oldV1(), r.emitterV1(), &run.read); err != nil {
+			z := "z1"
+			if run.readZ != "" {
+				z = run.readZ
+			}
+			if err := ttLagZ(r.oldV1(), r.emitterV1(), &run.read, z); err != nil {
 				return err
 			}
 			if run.extra != nil {
@@ -305,7 +315,7 @@ func TestTreeReadbackCompletesAfterFalseV1(t *testing.T) {
 	if plain != "true:or" || evidence.gets != 0 {
 		t.Fatalf("ORIGINAL OLD capture %s %+v", plain, evidence)
 	}
-	run := &ttLagRun{}
+	run := &ttLagRun{readZ: "z9"}
 	outcome, evidence := ttLagFault(t, store, run, 8, 4, ttR)
 	commit := ttCommitError(t, outcome, CommitTruthUnknown)
 	if evidence.gets < 1 || evidence.commits < 1 {
@@ -355,16 +365,17 @@ func TestTreeReadbackOverBudgetV1(t *testing.T) {
 	store, _ := ttStore(t)
 	ttLagSeed(t, store)
 	run := &ttLagRun{}
-	var later error
+	var later, small error
 	run.extra = func(emit treeEmitterV1) error {
 		err := emit.referV1(ttHeaders, bytes.Repeat([]byte{0x66}, 32))
 		later = emit.emitV1(ttTarget(ttUTXO, bytes.Repeat([]byte{0x67}, 44), "v"))
+		small = emit.referV1(ttHeaders, []byte{0x68})
 		return err
 	}
 	outcome, _ := ttLagFault(t, store, run, 8, 6, ttOut)
 	commit := ttCommitError(t, outcome, CommitTruthUnknown)
-	if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) || !treeSameErrorV1(later, errOperationReservationCapacity) {
-		t.Fatalf("over budget %v / %v", commit.ReadbackCause, later)
+	if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) || !treeSameErrorV1(later, errOperationReservationCapacity) || !treeSameErrorV1(small, errOperationReservationCapacity) {
+		t.Fatalf("over budget %v / %v / %v", commit.ReadbackCause, later, small)
 	}
 	_, _, err := updateResult(outcome, nil)
 	if IsOperationReservationCapacity(err) || !IsOperationReservationCapacity(commit.ReadbackCause) || len(run.ledger.after(t, "commit")) != 0 {
@@ -904,4 +915,25 @@ func BenchmarkTreeProjectionStoreV1(b *testing.B) {
 			p.storeV1(at, found, ttUTXO, key, treeEntryImageV1, value)
 		}
 	}
+}
+
+// A7, M-R8: a failed tree native read of ORIGINAL OLD is nativeError(operationUpdate, rc) (D14-8), never operationGet.
+func TestTreeOldReadFailureV1(t *testing.T) {
+	store, _ := ttStore(t)
+	treeNativeSeed(t, store, 1, ttU, []byte("od"))
+	var read error
+	var outcome updateNativeOutcome
+	evidence, err := fixtureLargeFault(store, 28, 1, ttU, func() {
+		outcome = fixtureTreeCommitV1(store, fixtureTreeScriptV1{ledger: &ttLedger{}, write: func(s *treeSectionV1) error {
+			_, read = s.oldV1(false).getV1(ttUTXO, ttU)
+			return read
+		}})
+	})
+	mustEnvironment(t, err)
+	fixtureTreeReleaseV1(outcome)
+	if evidence.gets < 1 || outcome.truth != CommitTruthOld {
+		t.Fatalf("old read fault %+v %+v", evidence, outcome)
+	}
+	ttEngine(t, read, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
+	ttEngine(t, outcome.primary, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 }
