@@ -37,10 +37,10 @@ const (
 )
 
 // treeImageV1 is one row image. An image served from the ORIGINAL OLD txn stays valid until that txn ends (it stays
-// open through write, commit and readback, D2-2). An image served from a P entry stays valid until the next emitV1 or
-// referV1 of the same identity on the same section or readback, or until that section's finalV1 or abortV1 or the end
-// of that readback; an emitV1 or referV1 of another identity neither moves nor overwrites its bytes, and the image may
-// be passed as after.value to emitV1 of another identity (D20).
+// open through write, commit and readback, D2-2). An image served from a P entry stays valid until that section's
+// finalV1 or abortV1 or the end of that readback; no emitV1 or referV1, of its own or another identity, moves or
+// overwrites its bytes (replacing a P entry leaves the replaced bytes unchanged), and the image may be passed as
+// after.value to emitV1 of another identity (D20, D24).
 type treeImageV1 struct {
 	present bool
 	value   []byte
