@@ -75,6 +75,7 @@ func FuzzParseTx(f *testing.F) {
 			return
 		}
 		checkParseTxPrefix(t, b, tx, txid, wtxid, n)
+		checkShorterPrefixRejected(t, b, n)
 		if n < len(b) {
 			checkTrailingBytesRejected(t, b)
 		}
@@ -95,6 +96,13 @@ func checkParseTxPrefix(t *testing.T, b []byte, tx *Tx, txid, wtxid [32]byte, n 
 	}
 	if !reflect.DeepEqual(tx2, tx) {
 		t.Fatalf("prefix parse decoded a different tx: consumed=%d", n)
+	}
+}
+
+func checkShorterPrefixRejected(t *testing.T, b []byte, n int) {
+	t.Helper()
+	if _, _, _, _, err := ParseTx(b[:n-1]); err == nil {
+		t.Fatalf("shorter prefix parsed: consumed=%d is not exact", n)
 	}
 }
 
