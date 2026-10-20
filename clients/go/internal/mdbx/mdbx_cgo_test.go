@@ -3911,7 +3911,7 @@ func TestNativeUpdateImages(t *testing.T) {
 						plan[0].after = AfterKind(1)
 					}
 					primary := nativeError(operationUpdate, 28)
-					outcome := updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, primary)
+					outcome := updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, primary, nil)
 					requireUpdateTruth(t, outcome, row.truth, true, primary, nil)
 					if outcome.stage != 3 {
 						t.Fatal("point readback stage drifted")
@@ -3949,7 +3949,7 @@ func TestNativeUpdateImages(t *testing.T) {
 						change := []ownedMutation{{dbi: dbi, key: key, beforePresent: true, after: AfterKind(2), literal: changed}}
 						requireUpdateTruth(t, store.updateNative(change, nil, reader.txn), 2, true, nil, nil)
 						primary := nativeError(operationUpdate, 28)
-						outcome := updateNativeReadback(store.env, store.dbis, plan, consulted, reader.txn, primary)
+						outcome := updateNativeReadback(store.env, store.dbis, plan, consulted, reader.txn, primary, nil)
 						requireUpdateTruth(t, outcome, 3, true, primary, nil)
 						if outcome.stage != 3 {
 							t.Fatal("unchanged-domain readback stage drifted")
@@ -4130,15 +4130,15 @@ func TestNativeUpdateImages(t *testing.T) {
 					return fmt.Errorf("concurrent update=%+v/%w", concurrent, err)
 				}
 				readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-				failedBegin := updateNativeReadback(nil, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
+				failedBegin := updateNativeReadback(nil, store.dbis, createPlan, nil, reader.txn, readbackPrimary, nil)
 				if failedBegin.stage != 3 {
 					t.Fatal("readback stage drifted")
 				}
 				requireEngineError(t, failedBegin.secondary, EngineInvalidInput, operationUpdate, codeEINVAL)
 				requireUpdateTruth(t, failedBegin, CommitTruthUnknown, true, readbackPrimary, failedBegin.secondary)
-				old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary)
-				newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary)
-				unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary)
+				old := updateNativeReadback(store.env, store.dbis, createPlan, nil, reader.txn, readbackPrimary, nil)
+				newReadback := updateNativeReadback(store.env, store.dbis, newPlan, nil, reader.txn, readbackPrimary, nil)
+				unknown := updateNativeReadback(store.env, store.dbis, oldPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
 				requireUpdateTruth(t, newReadback, CommitTruthNew, true, readbackPrimary, nil)
 				requireUpdateTruth(t, unknown, CommitTruthUnknown, true, readbackPrimary, nil)
@@ -4176,7 +4176,7 @@ func TestNativeUpdateImages(t *testing.T) {
 				if _, err := updateNativeEqual(reader.txn, invalidDBIs[dbi.Rank], key, updateImage{}); err == nil {
 					return errors.New("invalid update comparison DBI accepted")
 				}
-				badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, nil, reader.txn, readbackPrimary)
+				badReadback := updateNativeReadback(store.env, invalidDBIs, createPlan, nil, reader.txn, readbackPrimary, nil)
 				if badReadback.truth != CommitTruthUnknown || !sameError(badReadback.primary, readbackPrimary) || badReadback.secondary == nil || badReadback.valid() != nil {
 					return fmt.Errorf("invalid update readback=%+v", badReadback)
 				}
@@ -4236,11 +4236,11 @@ func TestNativeUpdateImages(t *testing.T) {
 			defer runtime.UnlockOSThread()
 			mustEnvironment(t, store.View(func(reader *Reader) error {
 				readbackPrimary := nativeError(operationUpdate, codeENOSPC)
-				old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
+				old := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, old, CommitTruthOld, true, readbackPrimary, nil)
 				committed := store.updateNative(nonTargetPlan, nil, reader.txn)
 				requireUpdateTruth(t, committed, CommitTruthNew, true, nil, nil)
-				new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary)
+				new := updateNativeReadback(store.env, store.dbis, nonTargetPlan, nil, reader.txn, readbackPrimary, nil)
 				requireUpdateTruth(t, new, CommitTruthNew, true, readbackPrimary, nil)
 				return nil
 			}))

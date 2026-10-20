@@ -526,7 +526,7 @@ func consultedReadback(t *testing.T, store *Store, rows []ConsultedRow, newWitne
 		if unreadable {
 			handles[2] = ^handles[2]
 		}
-		outcome = updateNativeReadback(store.env, handles, plan, consulted, reader.txn, primary)
+		outcome = updateNativeReadback(store.env, handles, plan, consulted, reader.txn, primary, nil)
 		return nil
 	}))
 	return outcome, primary
