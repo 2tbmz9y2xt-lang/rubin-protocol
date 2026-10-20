@@ -249,6 +249,53 @@ type testTreeRun struct {
 	foldRd  []string
 	foldLog []string
 	id      [32]byte
+	newRows map[string][]byte
+}
+
+// newRows is the ROOT/ROWS node set of the NEW map (OLD entries with the stream applied), built by the test recursion.
+func (c testTreeCase) newRows() map[string][]byte {
+	byKey := map[[36]byte][]byte{}
+	for _, e := range c.oldEntries {
+		byKey[e.k] = e.v
+	}
+	for _, l := range c.stream {
+		var k [36]byte
+		copy(k[:], l.key[8:])
+		delete(byKey, k)
+		if l.newPresent {
+			byKey[k] = l.newValue
+		}
+	}
+	var entries []testTreeEntry
+	for k, v := range byKey {
+		entries = append(entries, testTreeEntry{k, v})
+	}
+	sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].k[:], entries[j].k[:]) < 0 })
+	rows := map[string][]byte{}
+	if len(entries) > 0 {
+		testTreeBuild(c.g, entries, rows)
+	}
+	return rows
+}
+
+// checkValues: every put node target carries the byte-spelled NEW value; every delete target is absent and empty.
+func (r testTreeRun) checkValues(t *testing.T) {
+	t.Helper()
+	for i, tg := range r.emit.targets {
+		if !strings.HasPrefix(tg, "8:") {
+			continue
+		}
+		key := strings.TrimSuffix(strings.TrimSuffix(tg, ":true"), ":false")
+		if strings.HasSuffix(tg, ":false") {
+			if len(r.emit.values[i]) != 0 {
+				t.Fatalf("delete %s carries a value", key)
+			}
+			continue
+		}
+		if want, ok := r.newRows[key]; !ok || !bytes.Equal(r.emit.values[i], want) {
+			t.Fatalf("put %s value %x want %x", key, r.emit.values[i], want)
+		}
+	}
 }
 
 func (c testTreeCase) setup() (*testTreeOld, *testTreeLeaves, *testTreeLog) {
@@ -292,7 +339,7 @@ func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves
 	if tweak != nil {
 		tweak(old, leaves, emit, ledger)
 	}
-	r := testTreeRun{emit: emit, id: c.databaseID}
+	r := testTreeRun{emit: emit, id: c.databaseID, newRows: c.newRows()}
 	r.err = treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger)
 	r.reads, r.log = old.reads, log.calls
 	old2, leaves2, log2 := c.setup()
@@ -342,6 +389,7 @@ func (r testTreeRun) accept(t *testing.T, g uint64, targets []string, refers []s
 	if r.err != nil || r.foldErr != nil {
 		t.Fatalf("errors: emit %v fold %v", r.err, r.foldErr)
 	}
+	r.checkValues(t)
 	got := r.emit.targets
 	want := append(append([]string(nil), targets...), testTreeBindingKey(g)+":true")
 	if !reflect.DeepEqual(got, want) {
@@ -585,8 +633,9 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 		r := base.run(t, func(_ *testTreeOld, l *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 			l.failN, l.fail = n, sentinel
 		})
-		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) {
-			t.Fatalf("R5 n=%d: %v %v", n, r.err, r.foldErr)
+		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) || len(r.emit.targets)+len(r.emit.refers) != 0 ||
+			r.log[len(r.log)-2] != "leaves" || r.foldLog[len(r.foldLog)-2] != "leaves" {
+			t.Fatalf("R5 n=%d: %v %v %v", n, r.err, r.foldErr, r.log)
 		}
 	}
 	r := base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
@@ -598,7 +647,7 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 	r = base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 		e.failAt, e.fail = -1, sentinel
 	})
-	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || len(r.emit.targets) != 3 {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || len(r.emit.targets) != 3 || r.log[len(r.log)-2] != "refer" {
 		t.Fatalf("R6 refer: %v %v %v", r.err, r.emit.targets, r.emit.refers)
 	}
 }
@@ -632,7 +681,16 @@ func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
 		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)},
 	}
 	// R10 is reached after the walk (Encode), where earlier node emits are permitted (D14-3).
-	c.run(t, nil).refusal(t, errSchema, "")
+	r := c.run(t, nil)
+	r.refusal(t, errSchema, "")
+	if want := []string{testTreeTarget(7, 288, testKA, false), testTreeTarget(7, 287, [36]byte{}, false)}; !reflect.DeepEqual(r.emit.targets, want) || len(r.emit.refers) != 0 {
+		t.Fatalf("R10 targets %v refers %v", r.emit.targets, r.emit.refers)
+	}
+	wantLog := []string{"charge 147968", "get", "leaves", "get", "get", "leaves", "emit", "emit", "release 147968"}
+	wantFold := []string{"charge 147968", "get", "leaves", "get", "get", "leaves", "release 147968"}
+	if !reflect.DeepEqual(r.log, wantLog) || !reflect.DeepEqual(r.foldLog, wantFold) {
+		t.Fatalf("R10 logs %v / %v", r.log, r.foldLog)
+	}
 }
 
 func TestTreeEmitV1R13R14RootAndPath(t *testing.T) {
@@ -936,6 +994,7 @@ func TestTreeEmitV1K5RecordCheck(t *testing.T) {
 			if r.err != nil || r.foldErr != nil || len(r.emit.targets) != v.entries+1 {
 				t.Fatalf("%s: oracle accepts, got %v %v %v", v.name, r.err, r.foldErr, r.emit.targets)
 			}
+			r.checkValues(t)
 			continue
 		}
 		r.refusal(t, errSchema, "get")
@@ -955,6 +1014,8 @@ func TestTreeEmitV1H1BorrowedBuffers(t *testing.T) {
 		h := c.run(t, func(o *testTreeOld, l *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 			o.scribble, l.scribble, e.scribble = true, true, o
 		})
+		plain.checkValues(t)
+		h.checkValues(t)
 		if !reflect.DeepEqual(plain.emit.targets, h.emit.targets) || !reflect.DeepEqual(plain.emit.values, h.emit.values) || !reflect.DeepEqual(plain.emit.refers, h.emit.refers) || h.err != nil {
 			t.Fatalf("H1 %s differs: %v", name, h.err)
 		}
@@ -975,6 +1036,7 @@ func TestTreeEmitV1H2MaximumValue(t *testing.T) {
 func TestTreeEmitV1H3DeepestBranchOrder(t *testing.T) {
 	e := testTreeE()
 	r := testTreeCase{stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, false, e), testTreeStreamLeaf(7, testKB, false, e), testTreeStreamLeaf(7, testKC, false, e)}}.run(t, nil)
+	r.checkValues(t)
 	if r.emit.targets[1] != testTreeTarget(7, 288, testKB, true) || r.emit.targets[2] != testTreeTarget(7, 287, [36]byte{}, true) {
 		t.Fatalf("H3 order %v", r.emit.targets)
 	}
