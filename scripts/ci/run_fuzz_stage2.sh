@@ -222,14 +222,19 @@ check_inventory() {
   discover_inventory | inventory_compare "$@"
 }
 
-# Compares stdout byte-exactly: want is the expected output without its final newline.
+# Pipes the records into inventory_compare and checks the exit code (0 for an "inventory OK"
+# want, else 1) and stdout as a bash string (NUL bytes are dropped, trailing newlines kept as
+# in capture) against want plus one final newline.
 st_case() {
-  local name="$1" want="$2" recs="$3" want_rc=1
+  local name="$1" want="$2"$'\n' recs="$3" want_rc=1 raw got rc
   shift 3
-  capture inventory_compare "$@" < <(printf '%s\n' "${recs}")
+  raw="$(rc=0; printf '%s\n' "${recs}" | inventory_compare "$@" || rc=$?; printf 'x%s' "${rc}")"
+  rc="${raw##*x}"
+  got="${raw%x"${rc}"}"
   if [[ "${want}" == "inventory OK:"* ]]; then want_rc=0; fi
-  if [[ "${CAP_OUT}" != "${want}"$'\n' || "${CAP_RC}" -ne "${want_rc}" ]]; then
-    echo "SELF-TEST FAIL: ${name}: rc=${CAP_RC} got <<${CAP_OUT}>> want <<${want}>>" >&2
+  if [[ "${got}" != "${want}" || "${rc}" -ne "${want_rc}" ]]; then
+    printf 'SELF-TEST FAIL: %s: rc=%s want_rc=%s got %q want %q\n' \
+      "${name}" "${rc}" "${want_rc}" "${got}" "${want}" >&2
     ST_FAILS=$((ST_FAILS + 1))
   fi
 }
@@ -256,17 +261,18 @@ st_disc() {
   st_case "${name}" "${want}" "${recs}" "$@"
 }
 
-# Runs check_inventory against st_go and compares its stderr byte-exactly (want
-# without its final newline, trailing newlines kept as in capture); defect cases only (exit 1).
+# Runs check_inventory against st_go and checks the exit code (1) and stderr as a bash string
+# (NUL bytes are dropped, trailing newlines kept as in capture) against want plus one final
+# newline; defect cases only.
 st_err() {
-  local name="$1" want="$2" raw got rc
+  local name="$1" want="$2"$'\n' raw got rc
   local GO_CMD=(st_go)
   shift 2
   raw="$(rc=0; check_inventory "$@" 2>&1 >/dev/null </dev/null || rc=$?; printf 'x%s' "${rc}")"
   rc="${raw##*x}"
   got="${raw%x"${rc}"}"
-  if [[ "${got}" != "${want}"$'\n' || "${rc}" -ne 1 ]]; then
-    echo "SELF-TEST FAIL: ${name}: rc=${rc} stderr <<${got}>> want <<${want}>>" >&2
+  if [[ "${got}" != "${want}" || "${rc}" -ne 1 ]]; then
+    printf 'SELF-TEST FAIL: %s: rc=%s want_rc=1 stderr %q want %q\n' "${name}" "${rc}" "${got}" "${want}" >&2
     ST_FAILS=$((ST_FAILS + 1))
   fi
 }
