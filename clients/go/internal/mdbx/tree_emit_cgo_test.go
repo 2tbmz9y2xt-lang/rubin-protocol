@@ -196,7 +196,7 @@ func testTreeOldBinding(top *testTreeNode, endpoint TreeEndpointV1) RootBindingV
 	for i := range b.DatabaseID {
 		b.DatabaseID[i], b.ChainID[i], b.GenesisHash[i] = 0x44, 0x55, 0x66
 	}
-	b.RootDigest, b.Top = treeEmptyDigestV1(), TreeTopV1{Kind: TreeTopEmptyV1}
+	b.RootDigest, b.Top = testTreeC01(), TreeTopV1{Kind: TreeTopEmptyV1}
 	if top != nil {
 		id := TreeNodeIDV1{Kind: TreeNodeBranchV1, Depth: uint16(top.depth), Prefix: top.key}
 		if top.depth == 288 {
@@ -250,10 +250,38 @@ type testTreeRun struct {
 	foldLog []string
 	id      [32]byte
 	newRows map[string][]byte
+	want    RootBindingV1
 }
 
 // newRows is the ROOT/ROWS node set of the NEW map (OLD entries with the stream applied), built by the test recursion.
+// wantBinding is the expected NEW binding: copied OLD fields and Assurance, the run's
+// endpoint, and Top/RootDigest from the test-local ROOT recursion over the NEW entries
+// (or the OLD binding's, for an empty stream).
+func (c testTreeCase) wantBinding(old RootBindingV1) RootBindingV1 {
+	entries := c.newEntries()
+	var top *testTreeNode
+	if len(entries) > 0 {
+		n := testTreeBuild(c.g, entries, map[string][]byte{})
+		top = &n
+	}
+	b := testTreeOldBinding(top, c.endpoint)
+	b.DatabaseID, b.ChainID, b.GenesisHash, b.Assurance = c.databaseID, old.ChainID, old.GenesisHash, old.Assurance
+	if len(c.stream) == 0 {
+		// An empty stream reads no node, so the NEW Top and RootDigest are the OLD binding's (A10, R13 control).
+		b.RootDigest, b.Top = old.RootDigest, old.Top
+	}
+	return b
+}
+
 func (c testTreeCase) newRows() map[string][]byte {
+	rows := map[string][]byte{}
+	if entries := c.newEntries(); len(entries) > 0 {
+		testTreeBuild(c.g, entries, rows)
+	}
+	return rows
+}
+
+func (c testTreeCase) newEntries() []testTreeEntry {
 	byKey := map[[36]byte][]byte{}
 	for _, e := range c.oldEntries {
 		byKey[e.k] = e.v
@@ -271,11 +299,7 @@ func (c testTreeCase) newRows() map[string][]byte {
 		entries = append(entries, testTreeEntry{k, v})
 	}
 	sort.Slice(entries, func(i, j int) bool { return bytes.Compare(entries[i].k[:], entries[j].k[:]) < 0 })
-	rows := map[string][]byte{}
-	if len(entries) > 0 {
-		testTreeBuild(c.g, entries, rows)
-	}
-	return rows
+	return entries
 }
 
 // checkValues: every put node target carries the byte-spelled NEW value; every delete target is absent and empty.
@@ -298,7 +322,8 @@ func (r testTreeRun) checkValues(t *testing.T) {
 	}
 }
 
-func (c testTreeCase) setup() (*testTreeOld, *testTreeLeaves, *testTreeLog) {
+func (c testTreeCase) setup(t *testing.T) (*testTreeOld, *testTreeLeaves, *testTreeLog, RootBindingV1) {
+	t.Helper()
 	log := &testTreeLog{}
 	rows := map[string][]byte{}
 	var top *testTreeNode
@@ -314,13 +339,15 @@ func (c testTreeCase) setup() (*testTreeOld, *testTreeLeaves, *testTreeLog) {
 	if c.mutate != nil {
 		c.mutate(rows, &b)
 	}
-	if enc, err := b.Encode(); err == nil {
-		rows[testTreeBindingKey(c.g)] = enc
+	enc, err := b.Encode()
+	if err != nil {
+		t.Fatalf("OLD binding does not encode: %v", err)
 	}
+	rows[testTreeBindingKey(c.g)] = enc
 	if c.mutate != nil {
 		c.mutate(rows, nil)
 	}
-	return &testTreeOld{rows: rows, log: log}, &testTreeLeaves{items: c.stream, log: log}, log
+	return &testTreeOld{rows: rows, log: log}, &testTreeLeaves{items: c.stream, log: log}, log, b
 }
 
 // testTreeRecover turns a panic into an error so the row's own assertion observes it.
@@ -344,17 +371,17 @@ func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves
 	if c.databaseID == ([32]byte{}) {
 		c.databaseID = testTreeHash(0x44)
 	}
-	old, leaves, log := c.setup()
+	old, leaves, log, oldB := c.setup(t)
 	emit, ledger := &testTreeEmit{log: log}, &testTreeLedger{log: log}
 	if tweak != nil {
 		tweak(old, leaves, emit, ledger)
 	}
-	r := testTreeRun{emit: emit, id: c.databaseID, newRows: c.newRows()}
+	r := testTreeRun{emit: emit, id: c.databaseID, newRows: c.newRows(), want: c.wantBinding(oldB)}
 	r.err = testTreeRecover(func() error {
 		return treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger)
 	})
 	r.reads, r.log = old.reads, log.calls
-	old2, leaves2, log2 := c.setup()
+	old2, leaves2, log2, _ := c.setup(t)
 	ledger2 := &testTreeLedger{log: log2}
 	if tweak != nil {
 		tweak(old2, leaves2, &testTreeEmit{log: log2}, ledger2)
@@ -422,6 +449,9 @@ func (r testTreeRun) accept(t *testing.T, g uint64, targets []string, refers []s
 	}
 	if b.DatabaseID != r.id || b.ChainID != testTreeHash(0x55) || b.GenesisHash != testTreeHash(0x66) || b.CommitmentVersion != 1 {
 		t.Fatalf("copied fields %+v", b)
+	}
+	if !reflect.DeepEqual(b, r.want) {
+		t.Fatalf("NEW binding\n got %+v\nwant %+v", b, r.want)
 	}
 	return b
 }
@@ -493,7 +523,7 @@ func TestTreeEmitV1A7DeleteDown(t *testing.T) {
 		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)},
 	}
 	b = c2.run(t, nil).accept(t, 7, []string{testTreeTarget(7, 288, testKA, false)}, nil, []string{testTreeNodeRead(7, 288, testKA)})
-	if b.RootDigest != treeEmptyDigestV1() || b.Top.Kind != TreeTopEmptyV1 || b.Endpoint.Kind != TreeEndpointPreGenesisV1 {
+	if b.RootDigest != testTreeC01() || b.Top.Kind != TreeTopEmptyV1 || b.Endpoint.Kind != TreeEndpointPreGenesisV1 {
 		t.Fatal("C01 empty")
 	}
 }
@@ -697,12 +727,18 @@ func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
 		}
 	}}
 	c.run(t, nil).refusal(t, nil, "get")
+	var served []byte
 	c.mutate = func(rows map[string][]byte, b *RootBindingV1) {
 		if b == nil {
 			rows[testTreeBindingKey(7)] = rows[testTreeBindingKey(7)][:132]
+			served = rows[testTreeBindingKey(7)]
 		}
 	}
-	_, cause := DecodeRootBindingV1(make([]byte, 132))
+	c.run(t, nil)
+	_, cause := DecodeRootBindingV1(served)
+	if len(served) != 132 || cause == nil {
+		t.Fatalf("R8 served %d bytes, cause %v", len(served), cause)
+	}
 	c.run(t, nil).refusal(t, cause, "get")
 	c = testTreeCase{oldEntries: testTreeABC()[:2], stream: ins, databaseID: testTreeHash(0x45)}
 	c.run(t, nil).refusal(t, nil, "get")
@@ -829,17 +865,22 @@ func TestTreeEmitV1R15GenerationZero(t *testing.T) {
 
 func TestTreeEmitV1K2LedgerRefusal(t *testing.T) {
 	sentinel := errors.New("refused")
-	log := &testTreeLog{}
-	old, leaves := &testTreeOld{rows: map[string][]byte{}, log: log}, &testTreeLeaves{log: log}
-	ledger := &testTreeLedger{log: log, refuse: sentinel}
-	if err := treeEmitNodesV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, &testTreeEmit{log: log}, ledger); !testTreeExact(err, sentinel) {
-		t.Fatal(err)
-	}
-	if err := treeFoldV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, ledger); !testTreeExact(err, sentinel) {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(log.calls, []string{"charge 147968", "charge 147968"}) {
-		t.Fatalf("K2 log %v", log.calls)
+	e := testTreeE()
+	a4 := testTreeCase{g: 7, stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, false, e), testTreeStreamLeaf(7, testKB, false, e), testTreeStreamLeaf(7, testKC, false, e)}}
+	a5 := testTreeCase{g: 7, oldEntries: testTreeABC(), stream: []treeLeafV1{testTreeStreamLeaf(7, testKB, true, nil)}}
+	for _, c := range []testTreeCase{a4, a5} {
+		ep, id := testTreeApplied(6, 0x88, 2), testTreeHash(0x44)
+		old, leaves, log, _ := c.setup(t)
+		ledger := &testTreeLedger{log: log, refuse: sentinel}
+		if err := treeEmitNodesV1(old, 7, ep, id, leaves, &testTreeEmit{log: log}, ledger); !testTreeExact(err, sentinel) {
+			t.Fatal(err)
+		}
+		if err := treeFoldV1(old, 7, ep, id, leaves, ledger); !testTreeExact(err, sentinel) {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(log.calls, []string{"charge 147968", "charge 147968"}) || len(old.reads) != 0 {
+			t.Fatalf("K2 log %v reads %v", log.calls, old.reads)
+		}
 	}
 }
 
@@ -964,14 +1005,22 @@ func TestTreeEmitV1K4AllocationIndependence(t *testing.T) {
 		if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger); err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
+		var foldErr, emitErr error
 		counts[i][0] = testing.AllocsPerRun(20, func() {
 			leaves.i = 0
-			_ = treeFoldV1(old, 7, ep, id, leaves, ledger)
+			if err := treeFoldV1(old, 7, ep, id, leaves, ledger); err != nil {
+				foldErr = err
+			}
 		})
 		counts[i][1] = testing.AllocsPerRun(20, func() {
 			leaves.i = 0
-			_ = treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger)
+			if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger); err != nil {
+				emitErr = err
+			}
 		})
+		if foldErr != nil || emitErr != nil {
+			t.Fatalf("n=%d measured runs: fold %v emit %v", n, foldErr, emitErr)
+		}
 	}
 	if counts[0] != counts[1] {
 		t.Fatalf("K4 allocations differ: 1-leaf %v 64-leaf %v", counts[0], counts[1])
@@ -1119,7 +1168,7 @@ func TestTreeEmitV1R4R6Extended(t *testing.T) {
 	}
 }
 
-// testTreeExact reports that err is want returned unchanged: same chain and same text, so no wrapper was added.
+// testTreeExact reports that err is the same error value as want, returned unchanged.
 func testTreeExact(err, want error) bool {
-	return errors.Is(err, want) && err.Error() == want.Error()
+	return err == want
 }

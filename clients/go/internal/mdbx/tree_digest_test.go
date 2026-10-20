@@ -4,6 +4,7 @@ import (
 	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"testing"
 )
 
@@ -23,10 +24,27 @@ func testTreeHex(t *testing.T, s string) [32]byte {
 func testTreeValue(value uint64, data []byte, height uint64, coinbase byte) []byte {
 	b := binary.LittleEndian.AppendUint64(nil, value)
 	b = append(b, 0, 0)
-	b = appendCompactSize(b, uint64(len(data)))
+	prefix, ok := testTreeCompactSize[len(data)]
+	if !ok {
+		panic(fmt.Sprintf("no literal CompactSize for %d", len(data)))
+	}
+	b = append(b, prefix...)
 	b = append(b, data...)
 	b = binary.LittleEndian.AppendUint64(b, height)
 	return append(b, coinbase)
+}
+
+// testTreeCompactSize spells the CompactSize prefixes literally (CSM S01-S05, plus 33 for E).
+var testTreeCompactSize = map[int][]byte{
+	0: {0x00}, 33: {0x21}, 252: {0xfc}, 253: {0xfd, 0xfd, 0x00}, 65535: {0xfd, 0xff, 0xff}, 65536: {0xfe, 0x00, 0x00, 0x01, 0x00},
+}
+
+// testTreeC01 is the C01 empty-tree digest literal.
+func testTreeC01() [32]byte {
+	var out [32]byte
+	b, _ := hex.DecodeString("0a978e2cf0e03934b2ec7c369b301f8f3a687aed501227a7af76730a8e64f8bb")
+	copy(out[:], b)
+	return out
 }
 
 func testTreeE() []byte { return testTreeValue(1, testTreeData(0x11), 0, 0) }
