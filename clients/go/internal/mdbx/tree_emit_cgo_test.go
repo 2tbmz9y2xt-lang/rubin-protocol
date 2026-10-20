@@ -323,6 +323,16 @@ func (c testTreeCase) setup() (*testTreeOld, *testTreeLeaves, *testTreeLog) {
 	return &testTreeOld{rows: rows, log: log}, &testTreeLeaves{items: c.stream, log: log}, log
 }
 
+// testTreeRecover turns a panic into an error so the row's own assertion observes it.
+func testTreeRecover(f func() error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v", p)
+		}
+	}()
+	return f()
+}
+
 func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves, *testTreeEmit, *testTreeLedger)) testTreeRun {
 	t.Helper()
 	if c.g == 0 && !c.zeroGen {
@@ -340,14 +350,18 @@ func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves
 		tweak(old, leaves, emit, ledger)
 	}
 	r := testTreeRun{emit: emit, id: c.databaseID, newRows: c.newRows()}
-	r.err = treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger)
+	r.err = testTreeRecover(func() error {
+		return treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger)
+	})
 	r.reads, r.log = old.reads, log.calls
 	old2, leaves2, log2 := c.setup()
 	ledger2 := &testTreeLedger{log: log2}
 	if tweak != nil {
 		tweak(old2, leaves2, &testTreeEmit{log: log2}, ledger2)
 	}
-	r.foldErr = treeFoldV1(old2, c.g, c.endpoint, c.databaseID, leaves2, ledger2)
+	r.foldErr = testTreeRecover(func() error {
+		return treeFoldV1(old2, c.g, c.endpoint, c.databaseID, leaves2, ledger2)
+	})
 	r.foldRd, r.foldLog = old2.reads, log2.calls
 	testTreeCheckLedger(t, r.log)
 	testTreeCheckLedger(t, r.foldLog)
