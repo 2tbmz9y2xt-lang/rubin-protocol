@@ -289,10 +289,11 @@ func acquireDiffFuzzBuildLock(path string, wait time.Duration) (*filelock.Handle
 		if result != filelock.ResultContended {
 			return nil, fmt.Errorf("acquire difffuzz build lock %s (%s): %w", path, result, err)
 		}
+		// The last sleep ends at the deadline, and the check after it keeps any attempt from starting later.
+		time.Sleep(min(100*time.Millisecond, time.Until(deadline)))
 		if !time.Now().Before(deadline) {
 			return nil, fmt.Errorf("difffuzz build lock %s still contended after %s", path, wait)
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -649,6 +650,50 @@ func TestPublishRustConsensusCLIForDiffFuzz_ContendedLockTimesOut(t *testing.T) 
 	if err == nil || calls != 0 {
 		t.Fatalf("contended publish: err=%v calls=%d", err, calls)
 	}
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_StopsAtWaitBound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release time.Duration
+	}{{"lock held throughout", 0}, {"lock released 40ms after the 10ms bound", 50 * time.Millisecond}} {
+		calls, elapsed, err := publishAgainstHeldDiffFuzzLock(t, tc.release)
+		if err == nil || calls != 0 {
+			t.Errorf("%s: publish acquired the lock after its 10ms wait bound: err=%v calls=%d", tc.name, err, calls)
+		}
+		if elapsed >= 100*time.Millisecond {
+			t.Errorf("%s: publish returned %s after start, not before one 100ms retry interval passed", tc.name, elapsed)
+		}
+	}
+}
+
+// publishAgainstHeldDiffFuzzLock calls publish with a 10ms wait bound while the test holds the
+// build lock, releases the lock once release has passed when release is positive, and returns
+// the build calls, the time publish took from start and its error.
+func publishAgainstHeldDiffFuzzLock(t *testing.T, release time.Duration) (int, time.Duration, error) {
+	t.Helper()
+	targetDir, _ := newDiffFuzzTarget(t, nil)
+	held, _, err := filelock.Acquire(filepath.Join(targetDir, "difffuzz-build.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Release() })
+	calls, elapsed, done, start := 0, time.Duration(0), make(chan error, 1), time.Now()
+	go func() {
+		_, err := publishRustConsensusCLIForDiffFuzz(targetDir, 10*time.Millisecond, func() (string, error) { calls++; return "", errors.New("build called") })
+		elapsed = time.Since(start)
+		done <- err
+	}()
+	if release > 0 {
+		time.Sleep(release)
+		_ = held.Release()
+	}
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publish ignored its 10ms wait bound")
+	}
+	return calls, elapsed, err
 }
 
 func TestPublishRustConsensusCLIForDiffFuzz_BuildOrCopyErrorKeepsEarlierFile(t *testing.T) {
