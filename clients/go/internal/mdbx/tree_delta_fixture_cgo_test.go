@@ -150,6 +150,7 @@ func (o *tdOld) undoReads() int {
 
 type tdOut struct {
 	err    error
+	apply  error // applyV1's result, recorded when tdOpt.record
 	log    []string
 	leaves []string
 	reads  []string
@@ -157,6 +158,7 @@ type tdOut struct {
 }
 
 type tdOpt struct {
+	record  bool // record an applyV1 error instead of failing at once
 	fail    func(n int, method string) error
 	overlay map[string][]byte
 	pair    bool
@@ -189,8 +191,11 @@ func tdRunAt(t *testing.T, store *Store, c tdCase, pos treePositionV1, opt tdOpt
 			return nil
 		}
 		rec := &tdRec{}
-		tdOK(t, d.applyV1(rec))
-		out.log, out.leaves = rec.log, tdLeaves(d)
+		err := d.applyV1(rec)
+		out.apply, out.log, out.leaves = err, rec.log, tdLeaves(d)
+		if !opt.record {
+			tdOK(t, err)
+		}
 		return nil
 	}
 	if pos == treeWriterV1 {
@@ -253,13 +258,13 @@ func tdIntegrity(t *testing.T, err, cause error) {
 // tdFail returns a tdOut-only integrity check with zero emission.
 func tdRefused(t *testing.T, name string, out tdOut, cause error) {
 	t.Helper()
-	if out.err == nil {
-		t.Fatalf("%s: resolveV1 returned nil", name)
-	}
-	tdIntegrity(t, out.err, cause)
 	if len(out.log) != 0 {
 		t.Fatalf("%s: emitted %v", name, out.log)
 	}
+	if out.err == nil {
+		t.Fatalf("%s: resolveV1 returned nil (applyV1 %v)", name, out.apply)
+	}
+	tdIntegrity(t, out.err, cause)
 }
 
 // A4, A11, A16, M11, M12: the four presence cases, forward WriteOrReuse with the family absent, both positions.
@@ -570,7 +575,7 @@ func tdRejected() []tdVariant {
 // R4, R-WOR-1, R-CMP-1, M16-M19, M28, M54, M55, M-OLDV-INVERSE: integrity before any emission, cause per S10.
 func TestTreeDeltaRejectedV1(t *testing.T) {
 	for _, v := range tdRejected() {
-		out := tdRunAt(t, tdStore(t, v.rows), v.c, treeWriterV1, tdOpt{})
+		out := tdRunAt(t, tdStore(t, v.rows), v.c, treeWriterV1, tdOpt{record: true})
 		tdRefused(t, v.name, out, v.cause)
 	}
 }
