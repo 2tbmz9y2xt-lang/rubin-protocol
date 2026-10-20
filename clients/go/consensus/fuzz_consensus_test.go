@@ -76,6 +76,7 @@ func FuzzParseTx(f *testing.F) {
 		}
 		checkParseTxPrefix(t, b, tx, txid, wtxid, n)
 		checkShorterPrefixRejected(t, b, n)
+		checkReencodingMatchesPrefix(t, b, tx, n)
 		if n < len(b) {
 			checkTrailingBytesRejected(t, b)
 		}
@@ -103,6 +104,17 @@ func checkShorterPrefixRejected(t *testing.T, b []byte, n int) {
 	t.Helper()
 	if _, _, _, _, err := ParseTx(b[:n-1]); err == nil {
 		t.Fatalf("shorter prefix parsed: consumed=%d is not exact", n)
+	}
+}
+
+func checkReencodingMatchesPrefix(t *testing.T, b []byte, tx *Tx, n int) {
+	t.Helper()
+	enc, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx failed: %v", err)
+	}
+	if !bytes.Equal(enc, b[:n]) {
+		t.Fatalf("re-encoding differs from consumed prefix: encoded=%d consumed=%d", len(enc), n)
 	}
 }
 
