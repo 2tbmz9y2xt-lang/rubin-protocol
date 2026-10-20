@@ -544,6 +544,11 @@ func tdRejected() []tdVariant {
 	srDelete := r.c
 	srDelete.undo = 6
 	malformedPost := append(slices.Clone(r.nB[:19]), 2)
+	// CREATE-only WriteOrReuse whose one row under Block has an entry-form key and the regenerated manifest bytes:
+	// only the head key-shape check refuses it (no entry read, the tail leaves the prefix).
+	z := tdA4(1, 1)
+	z.c.events, z.c.txCount = z.c.events[:1], 1
+	zRows := append(slices.Clone(z.pre()[:1]), tdMemRow{5, tdEntryKey(z.c.block, tdTxid(0x01), 0, 0, 0), tdManifest(7, tdGen, 1, 0)})
 	return []tdVariant{
 		{"frame past body", pre, short, nil},
 		{"non-minimal CompactSize", pre, tdFrameVariant(f, nonMinimal), nil},
@@ -561,6 +566,7 @@ func tdRejected() []tdVariant {
 		{"WriteOrReuse entry byte", append(slices.Clone(pre), tdReplace(fam, f.eD, tdFlip(f.vD, 2))...), wor, nil},
 		{"WriteOrReuse 1-byte manifest (R-WOR-1)", append(slices.Clone(pre), tdReplace(fam, f.mK, []byte{1})...), wor, nil},
 		{"entry without manifest", append(slices.Clone(pre), tdMemRow{5, f.eA, f.vA}), wor, nil},
+		{"entry-form head with manifest bytes", zRows, z.c, nil},
 		{"SourceRetain missing entry", append(slices.Clone(post), tdDrop(fam, f.eA)...), r.c, nil},
 		{"SourceRetain extra entry", append(slices.Clone(post), append(slices.Clone(fam), tdMemRow{5, extra, f.vA})...), r.c, nil},
 		{"SourceRetain manifest height", append(slices.Clone(post), tdReplace(fam, f.mK, tdManifest(8, tdGen, 3, 2))...), r.c, nil},
