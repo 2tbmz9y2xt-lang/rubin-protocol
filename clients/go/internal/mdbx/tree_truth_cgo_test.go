@@ -318,10 +318,10 @@ func TestTreeReadbackCompletesAfterFalseV1(t *testing.T) {
 	run := &ttLagRun{readZ: "z9"}
 	outcome, evidence := ttLagFault(t, store, run, 8, 4, ttR)
 	commit := ttCommitError(t, outcome, CommitTruthUnknown)
+	ttEngine(t, commit.ReadbackCause, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 	if evidence.gets < 1 || evidence.commits < 1 {
 		t.Fatalf("fault evidence %+v", evidence)
 	}
-	ttEngine(t, commit.ReadbackCause, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 }
 
 // R9, M28, M-R7: S_r is drawn before any snapshot read; the exact budget S_r + HW selects NEW, one byte less refuses.
@@ -936,4 +936,114 @@ func TestTreeOldReadFailureV1(t *testing.T) {
 	}
 	ttEngine(t, read, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 	ttEngine(t, outcome.primary, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
+}
+
+// L3-LT literals: keys in ascending order b, c, d, e, a, a2, f on one DBI of rank below 8; no byte of va or va2
+// occurs in any other literal of the row.
+var (
+	ltB, ltC, ltD, ltE, ltA, ltA2, ltF = bytes.Repeat([]byte{0x01}, 44), bytes.Repeat([]byte{0x02}, 44), bytes.Repeat([]byte{0x03}, 44), bytes.Repeat([]byte{0x04}, 44), bytes.Repeat([]byte{0x05}, 44), bytes.Repeat([]byte{0x06}, 44), bytes.Repeat([]byte{0x07}, 44)
+	ltVA, ltVA2                        = []byte{0xa1, 0xa2, 0xa3, 0xa4}, []byte{0xb1, 0xb2, 0xb3, 0xb4}
+)
+
+const ltOD, ltVD1, ltVB, ltVC1, ltVC2 = "\x42", "\x41\x41", "\x21\x21", "\x31", "\x32\x32\x32"
+
+// ltHeld checks that the held a and a2 images still equal va and va2 after step.
+func ltHeld(step string, ia, ia2 treeImageV1) error {
+	if !ia.present || !bytes.Equal(ia.value, ltVA) || !ia2.present || !bytes.Equal(ia2.value, ltVA2) {
+		return fmt.Errorf("L3-LT held images after %s: %x %x", step, ia.value, ia2.value)
+	}
+	return nil
+}
+
+func ltPrimitive0(emit treeEmitterV1) error {
+	for _, target := range []treeTargetV1{ttTarget(ttUTXO, ltC, ltVC1), ttTarget(ttUTXO, ltD, ltVD1), {dbi: ttUTXO, key: ltA, after: treeImageV1{true, ltVA}}, {dbi: ttUTXO, key: ltA2, after: treeImageV1{true, ltVA2}}} {
+		if err := emit.emitV1(target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ltScript is the L3-LT operation at either position; any held-image divergence is returned as an error.
+func ltScript(old treeOldV1, emit treeEmitterV1) error {
+	if err := ltPrimitive0(emit); err != nil {
+		return err
+	}
+	ia, err := old.getV1(ttUTXO, ltA)
+	if err != nil {
+		return err
+	}
+	ia2, err := old.getV1(ttUTXO, ltA2)
+	if err != nil {
+		return err
+	}
+	steps := []struct {
+		name string
+		do   func() error
+	}{
+		{"insert b", func() error { return emit.emitV1(ttTarget(ttUTXO, ltB, ltVB)) }},
+		{"longer c", func() error { return emit.emitV1(ttTarget(ttUTXO, ltC, ltVC2)) }},
+		{"absent d", func() error { return emit.emitV1(ttTarget(ttUTXO, ltD, "")) }},
+		{"refer e", func() error { return emit.referV1(ttUTXO, ltE) }},
+	}
+	for _, step := range steps {
+		if err = step.do(); err != nil {
+			return err
+		}
+		if err = ltHeld(step.name, ia, ia2); err != nil {
+			return err
+		}
+	}
+	if err = emit.emitV1(treeTargetV1{dbi: ttUTXO, key: ltF, after: ia}); err != nil {
+		return err
+	}
+	if f, err := old.getV1(ttUTXO, ltF); err != nil || !f.present || !bytes.Equal(f.value, ltVA) {
+		return fmt.Errorf("L3-LT f %s, want va", ttImage(f, err))
+	}
+	return nil
+}
+
+// L3-LT, M-LT-REUSE: a held P image survives insert, longer replacement, absent marker and reference of other
+// identities and can be emitted as another identity's value, at the writer and the readback position (D20 item 1).
+func TestTreeHeldImageLifetimeV1(t *testing.T) {
+	t.Run("writer", func(t *testing.T) {
+		store, _ := ttStore(t)
+		treeNativeSeed(t, store, 1, ltD, []byte(ltOD))
+		var script error
+		mustEnvironment(t, fixtureTreeSectionV1(store, &ttLedger{}, func(s *treeSectionV1) error {
+			script = ltScript(s.oldV1(false), s.writerV1())
+			return nil
+		}))
+		if script != nil {
+			t.Fatal(script)
+		}
+	})
+	t.Run("readback", func(t *testing.T) {
+		store, _ := ttStore(t)
+		treeNativeSeed(t, store, 1, ltD, []byte(ltOD))
+		ledger := &ttLedger{}
+		var written, read error
+		script := fixtureTreeScriptV1{ledger: ledger, mark: ledger.mark,
+			write: func(s *treeSectionV1) error {
+				if written = ltScript(s.oldV1(false), s.writerV1()); written != nil {
+					return written
+				}
+				return s.finalV1(nil, nil)
+			},
+			readback: func(r *treeReadbackStateV1) error {
+				read = ltScript(r.oldV1(), r.emitterV1())
+				return read
+			},
+		}
+		var outcome updateNativeOutcome
+		evidence, err := fixtureLargeFault(store, 8, 6, ttOut, func() { outcome = fixtureTreeCommitV1(store, script) })
+		mustEnvironment(t, err)
+		fixtureTreeReleaseV1(outcome)
+		if written != nil || read != nil {
+			t.Fatalf("writer %v / readback %v", written, read)
+		}
+		if commit := ttCommitError(t, outcome, CommitTruthNew); commit.ReadbackCause != nil || evidence.commits < 1 {
+			t.Fatalf("L3-LT readback %v %+v", commit.ReadbackCause, evidence)
+		}
+	})
 }
