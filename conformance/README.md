@@ -273,13 +273,11 @@ Per-target metadata uses explicit path keys:
 Manual promotion flow:
 
 1. Download the failed workflow artifact and read its `run-metadata.env` plus the
-   matching `<target>.metadata.env`.
+   matching `<package>/<target>.metadata.env`.
    Metadata files are shell-quoted dotenv files, so they can be inspected as
    text or sourced by a local shell without executing command field contents.
-   Go consensus fuzz files are uploaded directly under
-   `clients/go/consensus/testdata/fuzz/**`. Go `node/p2p` fuzz files are in
-   `.artifacts/fuzz-stage2/go-fuzz-testdata.tgz`; extract that archive before
-   following a `clients/go/node/p2p/testdata/fuzz/<FuzzTarget>/` metadata path.
+   Every `clients/go/<package>/testdata/fuzz/**` tree is uploaded directly and
+   is also archived in `.artifacts/fuzz-stage2/go-fuzz-testdata.tgz`.
 2. Reproduce the crash at the recorded commit SHA using the recorded command.
    For Go targets this is the `go test -run=^$ -fuzz=...` command under
    `clients/go`; for Rust targets this is the `cargo fuzz run ...` command under

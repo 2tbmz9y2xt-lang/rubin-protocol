@@ -29,6 +29,8 @@ CALLERS = (
     ("codacy-coverage.yml", "coverage", None, None, {}),
     ("combined-load-nightly.yml", "combined-load", None, "openssl", {}),
     ("fips-only-nightly.yml", "fips-only-smoke", None, "openssl", {}),
+    ("fuzz-nightly.yml", "prepare", None, None,
+     {"cache-key-prefix": "openssl-bundle-mldsa-verified", "cache-revision": "v1"}),
     ("fuzz-nightly.yml", "fuzz-stage2", None, None,
      {"cache-key-prefix": "openssl-bundle-mldsa-verified", "cache-revision": "v1"}),
     ("fuzz-nightly.yml", "fuzz-rust", None, None, {}),
@@ -45,6 +47,7 @@ PLACEMENTS = (
     ("security-supply-chain-nightly.yml", "cargo-mutants", "Install pinned cargo-mutants", "Run bounded cargo-mutants target"),
     ("ci.yml", "security_ai", "Install cargo-audit", "Security precheck gate"),
     ("codeql.yml", "analyze", "Checkout", "Initialize CodeQL"),
+    ("fuzz-nightly.yml", "prepare", None, "run:--check-inventory"),
 )
 
 
