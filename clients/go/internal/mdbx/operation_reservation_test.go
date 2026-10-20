@@ -656,14 +656,30 @@ func accountMustRefuse(t *testing.T, label string, a *OperationAccount, bytes ui
 	}
 }
 
-// accountInput requires the input refusal from a charge on a, with no callback and no live change on owner.
-func accountInput(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, bytes uint64, callback func() error) {
+// accountInput requires, in its own subtest named label, the input refusal from a charge on a, with no callback
+// run and no live change on owner; a panic from the call fails that subtest at this row.
+func accountInput(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, bytes uint64, withCallback bool) {
 	t.Helper()
-	before := reservationLive(owner)
-	wantReservationSentinel(t, label, a.WithReservation(bytes, callback), errOperationReservationInput, textReservationInput)
-	if after := reservationLive(owner); after != before {
-		t.Fatalf("%s: input refusal changed live %d to %d", label, before, after)
-	}
+	t.Run(label, func(t *testing.T) {
+		before, calls := reservationLive(owner), 0
+		var callback func() error
+		if withCallback {
+			callback = func() error { calls++; return nil }
+		}
+		var got error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%s: charge panicked: %v", label, r)
+				}
+			}()
+			got = a.WithReservation(bytes, callback)
+		}()
+		wantReservationSentinel(t, label, got, errOperationReservationInput, textReservationInput)
+		if after := reservationLive(owner); calls != 0 || after != before {
+			t.Fatalf("%s: input refusal ran callback %d times, changed live %d to %d", label, calls, before, after)
+		}
+	})
 }
 
 func TestOperationReservationFloor(t *testing.T) {
@@ -852,18 +868,17 @@ func TestOperationAccountInput(t *testing.T) {
 	run("R4 zero-value owner", &OperationReservationOwner{}, TreeOperation, true)
 	run("R4 zero-value owner below floor irrelevant", &OperationReservationOwner{}, LaneOperation, true)
 	run("R4 nil callback", owner, TreeOperation, false)
-	ran := func() error { t.Fatal("R4 refused charge ran its callback"); return nil }
 	var retained *OperationAccount
 	accountRun(t, "R4 retain", owner, TreeOperation, func(a *OperationAccount) {
 		retained = a
-		accountInput(t, "R4 nil callback", owner, a, 1, nil)
-		accountInput(t, "R4 nil callback over ceiling", owner, a, 402653185, nil)
+		accountInput(t, "R4 nil callback", owner, a, 1, false)
+		accountInput(t, "R4 nil callback over ceiling", owner, a, 402653185, false)
 	})
-	accountInput(t, "R4 nil account", owner, (*OperationAccount)(nil), 1, ran)
-	accountInput(t, "R4 zero-value account", owner, new(OperationAccount), 0, ran)
-	accountInput(t, "R4 closed account", owner, retained, 1, ran)
-	accountInput(t, "R4 closed account over ceiling", owner, retained, 18446744073709551615, ran)
-	accountInput(t, "R4 closed account below floor", reservationOwner(t, 0), retained, 0, ran)
+	accountInput(t, "R4 nil account", owner, (*OperationAccount)(nil), 1, true)
+	accountInput(t, "R4 zero-value account", owner, new(OperationAccount), 0, true)
+	accountInput(t, "R4 closed account", owner, retained, 1, true)
+	accountInput(t, "R4 closed account over ceiling", owner, retained, 18446744073709551615, true)
+	accountInput(t, "R4 closed account below floor", reservationOwner(t, 0), retained, 0, true)
 	if held := accountHeld(retained); held != 0 {
 		t.Fatalf("R4 closed held=%d", held)
 	}
@@ -979,7 +994,7 @@ func TestOperationAccountOutlived(t *testing.T) {
 		retained = a
 		release, done = accountHold(t, a, 100000000)
 	})
-	accountInput(t, "H4 closed charge", owner, retained, 1, func() error { t.Fatal("H4 closed charge ran"); return nil })
+	accountInput(t, "H4 closed charge", owner, retained, 1, true)
 	if live, held := reservationLive(owner), accountHeld(retained); live != 100000000 || held != 100000000 {
 		t.Fatalf("H4 held after close: live=%d held=%d", live, held)
 	}
