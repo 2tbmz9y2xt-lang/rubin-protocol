@@ -87,6 +87,14 @@ jobs:
           regexTarget = "line"
           paths = ['''^rubin-formal/RubinFormal/(UtxoBasicV1|UtxoApplyGenesisV1)\.lean$''']
           regexes = ['''\(hKeyMismatch : SHA3\.sha3_256 w\.pubkey != entry\.covenantData\.extract 1 33\)''']
+
+          [[allowlists]]
+          targetRules = ["generic-api-key"]
+          description = "Allow the obsolete-raw fixture subtest variant list only."
+          condition = "AND"
+          regexTarget = "line"
+          paths = ['''^clients/go/internal/mdbx/obsolete_raw_fixture_cgo_test\.go$''']
+          regexes = ['''^\s*for _, variant := range \[\]string\{"lone-forward", "lone-derived", "paired", "forward-key1[5]", "forward-key1[7]", "derived-key39", "derived-key41", "forward-width103", "forward-width105", "derived-width7", "derived-width9", "absent-owner", "different-height", "different-hash", "partner-error"\} \{$''']
           TOML
           set +e
           timeout --signal=TERM --kill-after=30s 600 \
