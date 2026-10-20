@@ -67,15 +67,39 @@ func FuzzReadCompactSize(f *testing.F) {
 
 func FuzzParseTx(f *testing.F) {
 	f.Add(minimalTxBytesForFuzz())
+	f.Add(append(minimalTxBytesForFuzz(), 0x00))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		_, _, _, n, err := ParseTx(b)
+		_, txid, wtxid, n, err := ParseTx(b)
 		if err != nil {
 			return
 		}
-		if n != len(b) {
-			t.Fatalf("consumed=%d len=%d", n, len(b))
+		checkParseTxPrefix(t, b, txid, wtxid, n)
+		if n < len(b) {
+			checkTrailingBytesRejected(t, b)
 		}
 	})
+}
+
+func checkParseTxPrefix(t *testing.T, b []byte, txid, wtxid [32]byte, n int) {
+	t.Helper()
+	if n <= 0 || n > len(b) {
+		t.Fatalf("consumed=%d len=%d", n, len(b))
+	}
+	_, txid2, wtxid2, n2, err := ParseTx(b[:n])
+	if err != nil {
+		t.Fatalf("prefix parse failed: %v", err)
+	}
+	if n2 != n || txid2 != txid || wtxid2 != wtxid {
+		t.Fatalf("prefix parse differs: consumed=%d want=%d", n2, n)
+	}
+}
+
+func checkTrailingBytesRejected(t *testing.T, b []byte) {
+	t.Helper()
+	_, err := CheckTransactionWithOwnedUtxoSetAndValidationContext(b, map[Outpoint]UtxoEntry{}, 0, 0, [32]byte{}, SuiteValidationContext{})
+	if code := mustTxErrCode(t, err); code != TX_ERR_PARSE {
+		t.Fatalf("trailing bytes: code=%s want=%s", code, TX_ERR_PARSE)
+	}
 }
 
 func FuzzParseBlockBytes(f *testing.F) {
