@@ -656,34 +656,77 @@ func accountMustRefuse(t *testing.T, label string, a *OperationAccount, bytes ui
 	}
 }
 
+// reservationInput requires, in its own subtest named label, the input refusal from call, with *calls (the run
+// count of the callback call passes, if any) still 0 and no live change on owner; a panic from call fails that
+// subtest at this row.
+func reservationInput(t *testing.T, label string, owner *OperationReservationOwner, calls *int, call func(t *testing.T) error) {
+	t.Helper()
+	t.Run(label, func(t *testing.T) {
+		before := reservationLive(owner)
+		var got error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%s: call panicked: %v", label, r)
+				}
+			}()
+			got = call(t)
+		}()
+		wantReservationSentinel(t, label, got, errOperationReservationInput, textReservationInput)
+		if after := reservationLive(owner); *calls != 0 || after != before {
+			t.Fatalf("%s: input refusal ran callback %d times, changed live %d to %d", label, *calls, before, after)
+		}
+	})
+}
+
 // accountInput requires, in its own subtest named label, the input refusal from a charge on a, with no callback
 // run and no live change on owner, which must be a's origin when a was opened; a panic from the call fails that
 // subtest at this row.
 func accountInput(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, bytes uint64, withCallback bool) {
 	t.Helper()
-	t.Run(label, func(t *testing.T) {
+	calls := 0
+	var callback func() error
+	if withCallback {
+		callback = func() error { calls++; return nil }
+	}
+	reservationInput(t, label, owner, &calls, func(t *testing.T) error {
 		if a != nil && a.shared != nil && a.shared.origin != owner.shared {
 			t.Fatalf("%s: owner is not the account's origin", label)
 		}
-		before, calls := reservationLive(owner), 0
-		var callback func() error
-		if withCallback {
-			callback = func() error { calls++; return nil }
-		}
-		var got error
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Fatalf("%s: charge panicked: %v", label, r)
-				}
-			}()
-			got = a.WithReservation(bytes, callback)
-		}()
-		wantReservationSentinel(t, label, got, errOperationReservationInput, textReservationInput)
-		if after := reservationLive(owner); calls != 0 || after != before {
-			t.Fatalf("%s: input refusal ran callback %d times, changed live %d to %d", label, calls, before, after)
-		}
+		return a.WithReservation(bytes, callback)
 	})
+}
+
+// TestOperationReservationInputBelowFloor pins input precedence over the below-R_MIN capacity refusal (R4) on every
+// entry of owners of limit 0 and 805306367: a nil callback on the legacy charge, on WithOperation and on an open
+// account's charge, and a kind outside {1, 2} on WithOperation, each return the input refusal and charge nothing.
+func TestOperationReservationInputBelowFloor(t *testing.T) {
+	none := 0
+	for _, limit := range []uint64{0, 805306367} {
+		owner := reservationOwner(t, limit)
+		prefix := fmt.Sprintf("R4 below floor %d", limit)
+		for _, bytes := range []uint64{0, 1} {
+			reservationInput(t, fmt.Sprintf("%s legacy nil callback bytes %d", prefix, bytes), owner, &none, func(*testing.T) error {
+				return owner.WithReservation(bytes, nil)
+			})
+		}
+		for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+			reservationInput(t, fmt.Sprintf("%s WithOperation nil callback kind %d", prefix, kind), owner, &none, func(*testing.T) error {
+				return owner.WithOperation(kind, nil)
+			})
+			accountRun(t, prefix, owner, kind, func(a *OperationAccount) {
+				for _, bytes := range []uint64{0, 1} {
+					accountInput(t, fmt.Sprintf("%s account nil callback kind %d bytes %d", prefix, kind, bytes), owner, a, bytes, false)
+				}
+			})
+		}
+		for _, kind := range []OperationKind{0, 3, 255} {
+			calls := 0
+			reservationInput(t, fmt.Sprintf("%s WithOperation kind %d", prefix, kind), owner, &calls, func(*testing.T) error {
+				return owner.WithOperation(kind, func(*OperationAccount) error { calls++; return nil })
+			})
+		}
+	}
 }
 
 func TestOperationReservationFloor(t *testing.T) {
