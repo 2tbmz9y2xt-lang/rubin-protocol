@@ -4134,3 +4134,30 @@ func TestRunLegacyExposureScanRejectsStaleCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestRunRejectsInvalidTypedFlagValuesAtFlagParse(t *testing.T) {
+	for _, tc := range []struct {
+		flag  string
+		value string
+		want  string
+	}{
+		{"--mine-blocks", "abc", `invalid value "abc" for flag -mine-blocks: parse error`},
+		{"--mine-blocks", "", `invalid value "" for flag -mine-blocks: parse error`},
+		{"--mine-blocks", "9223372036854775808", `invalid value "9223372036854775808" for flag -mine-blocks: value out of range`},
+		{"--pv-shadow-max", "abc", `invalid value "abc" for flag -pv-shadow-max: parse error`},
+		{"--pv-shadow-max", "-1", `invalid value "-1" for flag -pv-shadow-max: parse error`},
+		{"--pv-shadow-max", "18446744073709551616", `invalid value "18446744073709551616" for flag -pv-shadow-max: value out of range`},
+	} {
+		t.Run(tc.flag+"="+tc.value, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "datadir")
+			var errOut bytes.Buffer
+			code := run([]string{"--datadir", dir, tc.flag, tc.value}, io.Discard, &errOut)
+			if code != 2 || !strings.Contains(errOut.String(), tc.want) || strings.Contains(errOut.String(), "invalid config:") {
+				t.Fatalf("code=%d stderr=%q, want parser rejection %q", code, errOut.String(), tc.want)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("datadir effect before flag-parse rejection: stat err=%v", err)
+			}
+		})
+	}
+}
