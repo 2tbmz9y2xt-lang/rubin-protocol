@@ -596,6 +596,26 @@ func testTreeRemove(g uint64, depth int, k [36]byte) func(map[string][]byte, *Ro
 	}
 }
 
+// testTreeAbsentInsert inserts Z under OLD {A, X, Y} after mut removes a
+// required node record, and pins the R1 refusal with no emit and no refer.
+func testTreeAbsentInsert(t *testing.T, depth int, prefix [36]byte, wantReads []string) {
+	t.Helper()
+	e := testTreeE()
+	c := testTreeCase{
+		oldEntries: []testTreeEntry{{testKA, e}, {testKX, e}, {testKY, e}},
+		stream:     []treeLeafV1{testTreeStreamLeaf(7, testTreeKey(0xa0, 0, 0), false, e)},
+		mutate:     testTreeRemove(7, depth, prefix),
+	}
+	r := c.run(t, nil)
+	r.refusal(t, nil, "get")
+	if !reflect.DeepEqual(r.reads, wantReads) {
+		t.Fatalf("absent insert reads %v want %v", r.reads, wantReads)
+	}
+	if len(r.emit.targets) != 0 || len(r.emit.refers) != 0 {
+		t.Fatalf("absent insert emitted %v referred %v", r.emit.targets, r.emit.refers)
+	}
+}
+
 func TestTreeEmitV1R1AbsentChild(t *testing.T) {
 	c := testTreeCase{oldEntries: testTreeABC(), stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())}, mutate: testTreeRemove(7, 287, [36]byte{})}
 	r := c.run(t, nil)
@@ -603,6 +623,8 @@ func TestTreeEmitV1R1AbsentChild(t *testing.T) {
 	if want := []string{testTreeBindingKey(7), testTreeNodeRead(7, 0, [36]byte{}), testTreeNodeRead(7, 287, [36]byte{})}; !reflect.DeepEqual(r.reads, want) {
 		t.Fatalf("reads %v", r.reads)
 	}
+	p3 := [36]byte{0xa0}
+	testTreeAbsentInsert(t, 3, p3, []string{testTreeBindingKey(7), testTreeNodeRead(7, 0, [36]byte{}), testTreeNodeRead(7, 3, p3)})
 }
 
 func TestTreeEmitV1R2MalformedLeaf(t *testing.T) {
@@ -751,6 +773,7 @@ func TestTreeEmitV1R13R14RootAndPath(t *testing.T) {
 
 func TestTreeEmitV1R11R12TopAndChildDigest(t *testing.T) {
 	replaceA := []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())}
+	testTreeAbsentInsert(t, 0, [36]byte{}, []string{testTreeBindingKey(7), testTreeNodeRead(7, 0, [36]byte{})})
 	r := testTreeCase{oldEntries: testTreeABC()[:2], stream: replaceA, mutate: testTreeRemove(7, 287, [36]byte{})}.run(t, nil)
 	r.refusal(t, nil, "get")
 	if r.reads[len(r.reads)-1] != testTreeNodeRead(7, 287, [36]byte{}) {
