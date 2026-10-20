@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"encoding/binary"
+	"reflect"
 	"testing"
 )
 
@@ -69,28 +70,31 @@ func FuzzParseTx(f *testing.F) {
 	f.Add(minimalTxBytesForFuzz())
 	f.Add(append(minimalTxBytesForFuzz(), 0x00))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		_, txid, wtxid, n, err := ParseTx(b)
+		tx, txid, wtxid, n, err := ParseTx(b)
 		if err != nil {
 			return
 		}
-		checkParseTxPrefix(t, b, txid, wtxid, n)
+		checkParseTxPrefix(t, b, tx, txid, wtxid, n)
 		if n < len(b) {
 			checkTrailingBytesRejected(t, b)
 		}
 	})
 }
 
-func checkParseTxPrefix(t *testing.T, b []byte, txid, wtxid [32]byte, n int) {
+func checkParseTxPrefix(t *testing.T, b []byte, tx *Tx, txid, wtxid [32]byte, n int) {
 	t.Helper()
 	if n <= 0 || n > len(b) {
 		t.Fatalf("consumed=%d len=%d", n, len(b))
 	}
-	_, txid2, wtxid2, n2, err := ParseTx(b[:n])
+	tx2, txid2, wtxid2, n2, err := ParseTx(b[:n])
 	if err != nil {
 		t.Fatalf("prefix parse failed: %v", err)
 	}
 	if n2 != n || txid2 != txid || wtxid2 != wtxid {
 		t.Fatalf("prefix parse differs: consumed=%d want=%d", n2, n)
+	}
+	if !reflect.DeepEqual(tx2, tx) {
+		t.Fatalf("prefix parse decoded a different tx: consumed=%d", n)
 	}
 }
 
