@@ -1206,6 +1206,7 @@ func fixtureRankAdmitted(store *Store, rank uint8) bool {
 	return rank < 8 || rank == 8 && store.format.Load() == 3
 }
 
+// ---- mdbx_fixture_cgo.go (owner L3; rubin_mdbx_fixture tag) ----
 // fixtureTreeOldV1 runs run with a plain ORIGINAL OLD amended read (empty P) begun through treeBeginV1 after arming.
 func fixtureTreeOldV1(store *Store, run func(old treeOldV1) error) error {
 	runtime.LockOSThread()

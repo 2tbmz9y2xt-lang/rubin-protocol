@@ -130,7 +130,7 @@ type treeTargetV1 struct {
 // treeEmitterV1 receives j's targets and references.
 // emitV1, writer (D14-10): prior presence = the amended logical read (P_w entry, else ORIGINAL OLD), never the write txn.
 // present->present: delete then put; present->absent: delete; absent->present: put (put_nooverwrite); absent->absent: no
-// native call. rc law of updateNativePut/updateNativeDeletes: stage 2 before the call; KEYEXIST (put) and NOTFOUND
+// native write call. rc law of updateNativePut/updateNativeDeletes: stage 2 before the call; KEYEXIST (put) and NOTFOUND
 // (delete) -> EngineStateMismatch with the native code; other failures -> nativeError(operationUpdate, rc). Then fused
 // final equality, then the P_w entry (len(key)+len(value), or len(key) when absent); only the shortfall
 // max(0, n - (heldP - liveP)) is charged on the ledger before the copy (D5-2).

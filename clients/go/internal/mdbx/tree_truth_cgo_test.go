@@ -499,8 +499,12 @@ func TestTreeAmendedReadV1(t *testing.T) {
 		mustEnvironment(t, w.referV1(ttUTXO, a))
 		r := bytes.Repeat([]byte{0x99}, 7)
 		mustEnvironment(t, w.referV1(ttBlocks, r))
-		if got := strings.Join(ledger.log, "|"); got != "charge 3|charge 1|charge 1|charge 7" || s.pBudgetV1() != held+7 {
-			t.Fatalf("A12 reference charges %s", got)
+		// Non-fatal, so the P budget check below is observed in the same run.
+		if got := strings.Join(ledger.log, "|"); got != "charge 3|charge 1|charge 1|charge 7" {
+			t.Errorf("A12 reference charges %s", got)
+		}
+		if got := s.pBudgetV1(); got != held+7 {
+			t.Fatalf("A12 P budget %d, want %d", got, held+7)
 		}
 		image, err := s.oldV1(true).getV1(ttBlocks, r)
 		if err != nil || image.present {
@@ -652,7 +656,8 @@ func TestTreeFinalAndPairPreflightV1(t *testing.T) {
 	}
 }
 
-// A9, M13: zero primitives use only the Pair domain and the legacy readback (truth = nil).
+// A9, M13: with zero primitives the test passes truth = nil (L5a's choice, D13-3) and checks the Pair-domain
+// outcomes, a P budget of 0 and no ledger call.
 func TestTreeZeroPrimitivesV1(t *testing.T) {
 	insert, replace := bytes.Repeat([]byte{0x71}, 44), bytes.Repeat([]byte{0x72}, 44)
 	pair := []ownedMutation{
@@ -1089,4 +1094,47 @@ func TestTreeHeldImageLifetimeV1(t *testing.T) {
 			t.Fatalf("L3-LT readback %v %+v", commit.ReadbackCause, evidence)
 		}
 	})
+}
+
+// D2-7, D14-7: an absent target that carries value bytes is an absent marker of len(key) at both positions:
+// the writer charges 44 for the 44-byte key and the readback draws S_r + 44 from a budget of exactly that size.
+func TestTreeAbsentTargetSizeV1(t *testing.T) {
+	const maxStateEntry = 65596
+	store, _ := ttStore(t)
+	treeNativeSeed(t, store, 1, ttU, []byte("od"))
+	absent := treeTargetV1{dbi: ttUTXO, key: ttU, after: treeImageV1{value: []byte("stale value")}}
+	ledger := &ttLedger{}
+	var held, drawn uint64
+	script := fixtureTreeScriptV1{
+		ledger: ledger, mark: ledger.mark, held: 2*maxStateEntry + 44,
+		write: func(s *treeSectionV1) error {
+			if err := s.writerV1().emitV1(absent); err != nil {
+				return err
+			}
+			held = s.pBudgetV1()
+			return s.finalV1(nil, nil)
+		},
+		readback: func(r *treeReadbackStateV1) error {
+			err := r.emitterV1().emitV1(absent)
+			drawn = r.budget.used
+			return err
+		},
+	}
+	var outcome updateNativeOutcome
+	evidence, err := fixtureLargeFault(store, 8, 6, ttOut, func() { outcome = fixtureTreeCommitV1(store, script) })
+	mustEnvironment(t, err)
+	fixtureTreeReleaseV1(outcome)
+	// Non-fatal, so each position's size is observed in the same run.
+	if got := strings.Join(ledger.log, "|"); got != "charge 44|commit" {
+		t.Errorf("writer absent entry: ledger %s, want charge 44", got)
+	}
+	if held != 44 {
+		t.Errorf("writer absent entry: P budget %d, want 44", held)
+	}
+	if drawn != 2*maxStateEntry+44 {
+		t.Errorf("readback absent entry: drawn %d, want %d", drawn, 2*maxStateEntry+44)
+	}
+	if commit := ttCommitError(t, outcome, CommitTruthNew); commit.ReadbackCause != nil || evidence.commits < 1 {
+		t.Fatalf("readback %v evidence %+v", commit.ReadbackCause, evidence)
+	}
 }

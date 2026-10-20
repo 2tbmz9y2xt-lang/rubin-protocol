@@ -2041,7 +2041,7 @@ func updateNativeReadbackConsulted(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, co
 // updateNativeReadbackTruth path byte-identical.
 type treeTruthV1 func(read *C.MDBX_txn) (CommitTruth, error)
 
-func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error, truthOf treeTruthV1, scopes ...largeImageScope) updateNativeOutcome {
+func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error, truth treeTruthV1, scopes ...largeImageScope) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
 	beginErr := nativePointerResultError(operationUpdate, "mdbx_txn_begin returned invalid result shape", int(begun.rc), begun.txn != nil)
 	if beginErr != nil {
@@ -2050,17 +2050,17 @@ func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutat
 		}
 		return updateNativeConsumed(CommitTruthUnknown, true, primary, beginErr, UpdateStageCommitMayHaveCrossed)
 	}
-	var truth CommitTruth
+	var verdict CommitTruth
 	var readErr error
-	if truthOf != nil {
-		truth, readErr = truthOf(begun.txn)
+	if truth != nil {
+		verdict, readErr = truth(begun.txn)
 	} else {
-		truth, readErr = updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted, scopes...)
+		verdict, readErr = updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted, scopes...)
 	}
 	rc := int(C.mdbx_txn_abort(begun.txn))
 	if rc == codeThreadMismatch {
 		retained := updateNativeRetainedRead(primary, joinErrors(readErr, nativeError(operationAbort, rc)), begun.txn)
-		retained.truth = truth
+		retained.truth = verdict
 		return retained
 	}
 	var abortErr error
@@ -2068,9 +2068,9 @@ func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutat
 		abortErr = nativeError(operationAbort, rc)
 	}
 	if readErr != nil {
-		truth = CommitTruthUnknown
+		verdict = CommitTruthUnknown
 	}
-	return updateNativeConsumed(truth, true, primary, joinErrors(readErr, abortErr), UpdateStageCommitMayHaveCrossed)
+	return updateNativeConsumed(verdict, true, primary, joinErrors(readErr, abortErr), UpdateStageCommitMayHaveCrossed)
 }
 
 func updateNativeCommit(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old, write *C.MDBX_txn, stage UpdateStage, truth treeTruthV1, scopes ...largeImageScope) updateNativeOutcome {
@@ -2089,8 +2089,9 @@ func updateNativeCommit(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutatio
 	return updateNativeReadback(env, dbis, plan, consulted, old, commitErr, truth, scopes...)
 }
 
-// treeBeginV1 is the tree path's one txn-begin wrapper (D14-9 (a)); the fixture build intercepts it. The pointer is
-// returned with the error so a caller keeps updateNativeExecute's retained-write projection.
+// treeBeginV1 is the D14-9 (a) txn-begin wrapper over rubin_mdbx_txn_begin: beginTreeSectionV1 begins the write txn
+// and every tree seam begins ORIGINAL OLD through it; the fixture build intercepts it. The pointer is returned with
+// the error so a caller keeps updateNativeExecute's retained-write projection.
 func treeBeginV1(env *C.MDBX_env, readWrite bool) (*C.MDBX_txn, error) {
 	flags := C.MDBX_txn_flags_t(C.MDBX_TXN_RDONLY)
 	if readWrite {

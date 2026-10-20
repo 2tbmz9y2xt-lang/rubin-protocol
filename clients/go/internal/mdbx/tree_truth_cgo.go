@@ -16,11 +16,12 @@ import (
 )
 
 // ---- tree_truth_cgo.go and mdbx_cgo.go (owner L3) ----
-// Native access (D14-8, D14-9): this file reaches MDBX only through Go functions in mdbx_cgo.go (the fixture
-// interceptors exist only in its preamble): treeBeginV1, treeReadPointV1, treeReadNextV1, a one-element
-// updateNativeDeletes call, updateNativePut and updateNativeEqual. A failed native read (rc not SUCCESS or NOTFOUND)
-// is nativeError(operationUpdate, rc), returned unchanged. No L3 function calls releaseV1 on the ledger it is given
-// (D14-12); the P budget, S_r and B_r are released by L5a.
+// Native access (D14-8, D14-9): tree_truth_cgo.go reaches MDBX only through Go functions in mdbx_cgo.go (the fixture interceptors
+// exist only in its preamble): the D14-9 wrappers (txn-begin over rubin_mdbx_txn_begin, RDONLY or READWRITE; ordered point/next;
+// one single-identity delete with the updateNativeDeletes law) and existing Go functions of that file (updateNativePut,
+// updateNativeEqual, legacy Pair, final-equality and readback helpers). Every tree seam begins ORIGINAL OLD through the begin
+// wrapper after arming. A failed native read (rc not SUCCESS or NOTFOUND) is nativeError(operationUpdate, rc), returned
+// unchanged. No L3 function calls releaseV1 on the ledger it is given (D14-12); the P budget, S_r and B_r are released by L5a.
 
 // treeBorrowV1 views a native image; the bytes stay valid only while txn lives and is not written at that identity.
 func treeBorrowV1(image updateImage) (treeImageV1, error) {
@@ -92,11 +93,13 @@ func (p *treeProjectionV1) storeV1(i int, found bool, dbi DBI, key []byte, kind 
 	p.live = p.live + treeEntrySizeV1(entry.key, entry.value) - replaced
 }
 
-func treeKindOfV1(after treeImageV1) uint8 {
+// treeAfterV1 is the P entry kind and value of a planned image. An absent target carries no value into P, so its
+// entry size is len(key) whatever after.value holds (D2-7).
+func treeAfterV1(after treeImageV1) (uint8, []byte) {
 	if after.present {
-		return treeEntryImageV1
+		return treeEntryImageV1, after.value
 	}
-	return treeEntryAbsentV1
+	return treeEntryAbsentV1, nil
 }
 
 // treeExpectedV1 is the native expectation of an image or absent entry.
@@ -359,7 +362,8 @@ func (e treeWriterEmitterV1) emitV1(target treeTargetV1) error {
 	if err != nil {
 		return err
 	}
-	return t.recordV1(target.dbi, target.key, treeKindOfV1(target.after), target.after.value)
+	kind, value := treeAfterV1(target.after)
+	return t.recordV1(target.dbi, target.key, kind, value)
 }
 
 func (e treeWriterEmitterV1) referV1(dbi DBI, key []byte) error {
@@ -495,7 +499,8 @@ func (r *treeReadbackStateV1) foldPairV1(pair []ownedMutation, consulted []owned
 type treeReadbackEmitterV1 struct{ readback *treeReadbackStateV1 }
 
 func (e treeReadbackEmitterV1) emitV1(target treeTargetV1) error {
-	return e.readback.recordV1(target.dbi, target.key, treeKindOfV1(target.after), target.after.value)
+	kind, value := treeAfterV1(target.after)
+	return e.readback.recordV1(target.dbi, target.key, kind, value)
 }
 
 func (e treeReadbackEmitterV1) referV1(dbi DBI, key []byte) error {
