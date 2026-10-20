@@ -310,8 +310,10 @@ func TestTreeDeltaCompareV1(t *testing.T) {
 	store := tdStore(t, s.pre(), s.family())
 	out := tdBoth(t, store, s.c, tdOpt{})
 	mustEnvironment(t, out.err)
-	compare := []string{tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdRef(5, s.eA), tdDel(1, s.kA),
-		tdRef(1, s.kC), tdRef(5, s.eD), tdPut(1, s.kD, s.nD), tdRef(5, s.mK)}
+	compare := []string{
+		tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdRef(5, s.eA), tdDel(1, s.kA),
+		tdRef(1, s.kC), tdRef(5, s.eD), tdPut(1, s.kD, s.nD), tdRef(5, s.mK),
+	}
 	tdLog(t, "A8 Compare", out.log, compare...)
 	pair := tdBoth(t, store, s.c, tdOpt{pair: true})
 	tdLog(t, "A14 Pair body", pair.log, compare[1:]...)
@@ -473,7 +475,7 @@ func TestTreeDeltaCovenantV1(t *testing.T) {
 				continue
 			}
 			tdInvalid(t, err)
-			if r.failureV1() != err {
+			if !sameError(r.failureV1(), err) {
 				t.Fatal("covenant refusal not recorded")
 			}
 		}
@@ -787,8 +789,10 @@ func tdVF() (tdScene, []string) {
 	s.eD = tdEntryKey(s.c.block, tdTxid(0x0d), 2, 0, 0)
 	s.vA, s.vD = tdFormed(tdFrame(301, 0, nil), 2, 0), tdFormed(tdFrame(401, 0, nil), 2, 0)
 	s.nB, s.nD = tdFormed(s.fB, 7, 1), tdFormed(s.fD, 7, 0)
-	return s, []string{tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
-		tdPut(5, s.eD, s.vD), tdPut(1, s.kD, s.nD), tdPut(5, s.mK, s.man)}
+	return s, []string{
+		tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
+		tdPut(5, s.eD, s.vD), tdPut(1, s.kD, s.nD), tdPut(5, s.mK, s.man),
+	}
 }
 
 // R-VF-1, R-VF-2, M-VF-STALE, M-VF-Va, M-VF-Vb: borrowed images are consumed before their own identity is emitted.

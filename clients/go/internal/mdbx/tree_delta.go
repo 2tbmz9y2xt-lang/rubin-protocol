@@ -50,7 +50,7 @@ type treeDescV1 struct {
 }
 
 // treeDescSizeV1 is descSize, the byte size of treeDescV1 on the 64-bit targets this package builds for (pinned
-// against unsafe.Sizeof by TestTreeDeltaControlBoundV1); the array below is its compile-time guard descSize <= 128.
+// against the measured struct size by TestTreeDeltaControlBoundV1); the array below is its compile-time guard descSize <= 128.
 const treeDescSizeV1 uint64 = 104
 
 var _ [128 - treeDescSizeV1]struct{} // descSize <= 128 (D6-6 E1, BLOCK 3063)

@@ -743,7 +743,8 @@ func tdAllocCase(undo uint8) (tdCase, *tdMemOld) {
 	va, vd := tdFormed(tdFrame(10, 0, []byte{1, 2, 3}), 2, 0), tdFormed(tdFrame(11, 0, nil), 2, 0)
 	family := []tdMemRow{
 		{5, tdManifestKey(block), tdManifest(7, [16]byte{}, 2, 2)},
-		{5, tdEntryKey(block, ka, 1, 0, 0), va}, {5, tdEntryKey(block, kd, 1, 1, 0), vd},
+		{5, tdEntryKey(block, ka, 1, 0, 0), va},
+		{5, tdEntryKey(block, kd, 1, 1, 0), vd},
 	}
 	rows := []tdMemRow{{4, block[:], c.body}}
 	if undo >= 5 {
