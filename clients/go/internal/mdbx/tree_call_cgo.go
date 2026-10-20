@@ -38,47 +38,50 @@ type treeDeliveryV1 struct {
 	unwind  treeUnwindV1
 }
 
+// treeWorkerV1 is the state one runTreeLockedV1 worker owns.
+type treeWorkerV1 struct {
+	delivery  treeDeliveryV1
+	completed bool // op returned normally
+	returned  bool // control came back after op: op returned or its panic was recovered outside a Goexit
+	recovered any  // the value the op-level recover returned
+}
+
 // runTreeLockedV1 runs op on a fresh goroutine locked to its OS thread. One deferred top-level function delivers exactly
 // one (outcome, unwind): normal return -> (*out, op's unwind); Goexit -> (*out as op's deferred cleanup set it, kind 2);
-// a panic op did not recover is re-raised in the worker (engine defect, D4 T5). If out.poisoned the thread stays
-// locked and parks (select {}) after delivery (runLocked law, mdbx_cgo.go:4057-4070). op must set *out before every
-// normal return and in its deferred cleanup.
+// a panic op did not recover is re-raised in the worker without delivery (engine defect, D4 T5), also one raised while
+// a Goexit unwinds, except two that recover cannot see (a nil one under GODEBUG=panicnil=1 raised then, and one that a
+// Goexit called by op's own deferred function supersedes): those are delivered as the Goexit. If out.poisoned the
+// thread stays locked and parks (select {}) after delivery (runLocked law, mdbx_cgo.go:4057-4070 at base ed0e0d1b).
+// op must set *out before every normal return and in its deferred cleanup.
 func runTreeLockedV1(op func(out *transactionOutcome) treeUnwindV1) (transactionOutcome, treeUnwindV1) {
 	result := make(chan treeDeliveryV1, 1)
 	go func() {
 		runtime.LockOSThread()
-		var delivery treeDeliveryV1
-		engineFault := false
+		var worker treeWorkerV1
 		defer func() {
-			if engineFault {
-				return
+			if !worker.completed && (worker.returned || worker.recovered != nil) {
+				panic(worker.recovered) //nolint:forbidigo // An op panic is an engine defect: re-raised in the worker without delivery.
 			}
-			if !delivery.outcome.poisoned {
+			if !worker.delivery.outcome.poisoned {
 				runtime.UnlockOSThread()
 			}
-			result <- delivery
-			if delivery.outcome.poisoned {
+			result <- worker.delivery
+			if worker.delivery.outcome.poisoned {
 				select {}
 			}
 		}()
-		delivery.unwind.kind = 2
-		completed, value := runTreeOpV1(op, &delivery)
-		if !completed {
-			engineFault = true
-			panic(value) //nolint:forbidigo // An op panic is an engine defect: re-raised in the worker without delivery.
-		}
+		worker.delivery.unwind.kind = 2
+		runTreeOpV1(op, &worker)
+		worker.returned = true
 	}()
 	delivery := <-result
 	return delivery.outcome, delivery.unwind
 }
 
-// runTreeOpV1 runs op once. completed is true only when op returned normally; a recovered panic returns false with
-// its value; a Goexit inside op does not return.
-func runTreeOpV1(op func(out *transactionOutcome) treeUnwindV1, delivery *treeDeliveryV1) (completed bool, value any) {
-	func() {
-		defer func() { value = recover() }()
-		delivery.unwind = op(&delivery.outcome)
-		completed = true
-	}()
-	return completed, value
+// runTreeOpV1 runs op once and records how it ended. A recovered panic returns to the caller; while a Goexit unwinds
+// the runtime continues the Goexit instead, so the recovered value is recorded for the delivery function.
+func runTreeOpV1(op func(out *transactionOutcome) treeUnwindV1, worker *treeWorkerV1) {
+	defer func() { worker.recovered = recover() }()
+	worker.delivery.unwind = op(&worker.delivery.outcome)
+	worker.completed = true
 }
