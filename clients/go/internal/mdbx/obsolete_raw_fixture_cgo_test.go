@@ -467,9 +467,8 @@ func TestObsoleteGenerationV1CanonicalPair(t *testing.T) {
 			evidence := fixtureLargeEvidence{}
 			pairedEvidence := SelectedDamageEvidence{}
 			if variant == "paired" {
-				owner, err := NewOperationReservationOwner(MaxOperationDataBytes)
-				mustEnvironment(t, err)
-				pairedEvidence, err = FixtureSelectedDamage(store, owner, SelectedDamageProbeOnly, 0, nil, run)
+				var err error
+				pairedEvidence, err = FixtureSelectedDamage(store, reservationFilled(t, MaxOperationDataBytes), SelectedDamageProbeOnly, 0, nil, run)
 				mustEnvironment(t, err)
 			} else if variant == "lone-forward" || variant == "lone-derived" || variant == "partner-error" {
 				var fixtureErr error

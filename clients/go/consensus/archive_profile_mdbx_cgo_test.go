@@ -170,7 +170,7 @@ func TestArchiveSelectedSide(t *testing.T) {
 		store, err := mdbx.Create(filepath.Join(t.TempDir(), "db"), sideWorldConfig)
 		logicalMDBXAssert(t, err == nil, "create: %v", err)
 		t.Cleanup(func() { _ = store.Close() })
-		owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+		owner, err := reservationRemaining(t, mdbx.MaxOperationDataBytes)
 		logicalMDBXAssert(t, err == nil, "owner: %v", err)
 		truth, _, err := store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, owner)
 		logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "bootstrap: %v/%v", truth, err)
@@ -235,7 +235,7 @@ func TestArchiveSelectedSide(t *testing.T) {
 	t.Run("inputs", func(t *testing.T) {
 		// A nil Store is the Store's direct nil-Store refusal before any grant with every owner: valid, nil, zero and a
 		// valid owner whose full lane is already held.
-		owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+		owner, err := reservationRemaining(t, mdbx.MaxOperationDataBytes)
 		logicalMDBXAssert(t, err == nil, "owner: %v", err)
 		nilStore := func(o *mdbx.OperationReservationOwner, label string) {
 			t.Helper()

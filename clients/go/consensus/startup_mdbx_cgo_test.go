@@ -412,6 +412,21 @@ func TestReplayStartupMDBXV1(t *testing.T) {
 			})
 		}
 	}
+	t.Run("H3 owner below R_MIN refuses as storage capacity", func(t *testing.T) {
+		w := startupWorld(t, 0, 0)
+		w.store = w.reopen()
+		before := w.image()
+		below, err := mdbx.NewOperationReservationOwner(805306367)
+		logicalMDBXAssert(t, err == nil && below != nil, "below-floor owner: %v", err)
+		out := VerifyPersistedReplayStartupMDBX(w.store, below, w.genesis.ChainID, w.genesis.GenesisHash)
+		startupTuple(t, out, false, 2, "LOCAL_RESOURCE_UNAVAILABLE(storage_capacity)")
+		logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(out.Err) && out.Decision == ReplayStartupRetryV1, "H3 capacity identity: %+v", out)
+		startupFreshGuard(t, w, false)
+		replaySameImage(t, before, w.image(), "H3 below-floor image")
+		out = VerifyPersistedReplayStartupMDBX(w.store, below, [32]byte{}, w.genesis.GenesisHash)
+		startupTuple(t, out, false, 0, "")
+		logicalMDBXAssert(t, any(out.Err) == any(errInvalidStartupNetworkContext), "H3 earlier context result: %v", out.Err)
+	})
 	t.Run("A09 H09 admission and exact release", func(t *testing.T) {
 		for _, free := range []uint64{4096, 4095} {
 			w := startupWorld(t, 0, 0)

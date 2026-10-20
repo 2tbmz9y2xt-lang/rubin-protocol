@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -45,6 +46,30 @@ var (
 	logicalMDBXOpD  = Outpoint{Txid: filled32(0x44), Vout: 3}
 	logicalMDBXBase = logicalStateCounters{bytes: logicalMDBXTotal, entries: 3}
 )
+
+// reservationRemaining returns an owner of limit R_MIN=805306368 that holds 805306368-remaining filler bytes, in legacy charges of
+// at most LANE_MAX=154611183 from goroutines released at t's cleanup, so its free remainder is exactly remaining for
+// t's lifetime. The error is always nil, matching NewOperationReservationOwner's signature.
+func reservationRemaining(t testing.TB, remaining uint64) (*mdbx.OperationReservationOwner, error) {
+	t.Helper()
+	owner, _ := mdbx.NewOperationReservationOwner(805306368)
+	hold, entered := make(chan struct{}), make(chan error)
+	var wg sync.WaitGroup
+	t.Cleanup(func() { close(hold); wg.Wait() })
+	for fill := 805306368 - remaining; fill > 0; {
+		chunk := min(fill, 154611183)
+		fill -= chunk
+		wg.Go(func() {
+			if err := owner.WithReservation(chunk, func() error { entered <- nil; <-hold; return nil }); err != nil {
+				entered <- err
+			}
+		})
+		if err := <-entered; err != nil {
+			t.Fatalf("%s: reservation filler %d: %v", t.Name(), chunk, err)
+		}
+	}
+	return owner, nil
+}
 
 // logicalMDBXMust unwraps a SchemaV2 constructor over constant test inputs.
 func logicalMDBXMust(value []byte, err error) []byte {
@@ -632,7 +657,7 @@ func TestLogicalMDBXGenesisCounterBootstrapComposition(t *testing.T) {
 			counterKey := []byte{0x10, 0, 0, 0, 0, 0, 0, 0, byte(tc.image)}
 			var authority []byte
 			if tc.profile != 0 {
-				owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+				owner, err := reservationRemaining(t, mdbx.MaxOperationDataBytes)
 				logicalMDBXAssert(t, err == nil, "reservation owner: %v", err)
 				truth, _, err := store.BootstrapStorageV1(tc.profile, owner)
 				logicalMDBXAssert(t, truth == mdbx.CommitTruthNew && err == nil, "bootstrap producer: truth=%v err=%v", truth, err)
@@ -1069,7 +1094,7 @@ func genesisMDBXBoot(t *testing.T, profile mdbx.StorageProfileV1) (*mdbx.Store, 
 	store, err := mdbx.Create(path, cfg)
 	logicalMDBXAssert(t, err == nil, "genesis store: %v", err)
 	t.Cleanup(func() { _ = store.Close() })
-	owner, err := mdbx.NewOperationReservationOwner(154_611_151)
+	owner, err := reservationRemaining(t, 154_611_151)
 	logicalMDBXAssert(t, err == nil, "genesis owner: %v", err)
 	truth, stage, err := store.BootstrapStorageV1(profile, owner)
 	logicalMDBXAssert(t, err == nil && truth == 2 && stage == 3, "genesis bootstrap: %v/%v/%v", truth, stage, err)
