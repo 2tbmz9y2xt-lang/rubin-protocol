@@ -672,7 +672,7 @@ func TestPublishRustConsensusCLIForDiffFuzz_BuildOrCopyErrorKeepsEarlierFile(t *
 
 func TestPublishRustConsensusCLIForDiffFuzz_MkdirOrRenameErrorKeepsEarlierEntry(t *testing.T) {
 	for _, tc := range []struct{ name, earlier, op string }{
-		{"rename onto a non-empty directory", "difffuzz-bin/rubin-consensus-cli/keep", "rename"},
+		{"rename onto an existing directory", "difffuzz-bin/rubin-consensus-cli/keep", "rename"},
 		{"mkdir over a regular file", "difffuzz-bin", "mkdir"},
 	} {
 		targetDir, src := newDiffFuzzTarget(t, []byte("new-binary"))
@@ -739,7 +739,8 @@ func TestPublishRustConsensusCLIForDiffFuzz_CopiesUnderLock(t *testing.T) {
 }
 
 // openDiffFuzzFIFOWriter returns the write end of fifo once publish has opened it to read the
-// build output, and fails the test if publish returns first or neither happens within 5s.
+// build output, and fails the test if the open fails, publish returns first, or neither
+// happens within 5s.
 func openDiffFuzzFIFOWriter(t *testing.T, fifo string, done <-chan error) *os.File {
 	t.Helper()
 	opened := make(chan *os.File, 1)
@@ -752,13 +753,17 @@ func openDiffFuzzFIFOWriter(t *testing.T, fifo string, done <-chan error) *os.Fi
 	}()
 	select {
 	case w := <-opened:
-		return w
+		if w != nil {
+			return w
+		}
+		opened <- nil // the open error is already reported; the drain below closes nothing
 	case err := <-done:
 		t.Errorf("publish returned before it opened the build output for reading: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Error("publish did not open the build output for reading within 5s")
 	}
-	// An O_RDWR open of a FIFO does not block on darwin or linux; it completes the pending writer open.
+	// An O_RDWR open of a FIFO does not block on darwin or linux; it completes the open pending on
+	// the other end, the writer goroutine's or publish's.
 	if r, err := os.OpenFile(fifo, os.O_RDWR, 0); err == nil {
 		_ = errors.Join((<-opened).Close(), r.Close())
 	}
