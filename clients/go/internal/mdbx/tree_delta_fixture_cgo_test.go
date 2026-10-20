@@ -189,15 +189,15 @@ func tdRunAt(t *testing.T, store *Store, c tdCase, pos treePositionV1, opt tdOpt
 			return nil
 		}
 		rec := &tdRec{}
-		mustEnvironment(t, d.applyV1(rec))
+		tdOK(t, d.applyV1(rec))
 		out.log, out.leaves = rec.log, tdLeaves(d)
 		return nil
 	}
 	if pos == treeWriterV1 {
-		mustEnvironment(t, fixtureTreeSectionV1(store, &tdLedger{}, func(s *treeSectionV1) error { return run(s.oldV1(true), &tdLedger{}) }))
+		tdOK(t, fixtureTreeSectionV1(store, &tdLedger{}, func(s *treeSectionV1) error { return run(s.oldV1(true), &tdLedger{}) }))
 	} else {
 		budget := &treeBudgetV1{held: 1 << 30}
-		mustEnvironment(t, fixtureTreeOldV1(store, func(old treeOldV1) error { return run(old, budget.ledgerV1()) }))
+		tdOK(t, fixtureTreeOldV1(store, func(old treeOldV1) error { return run(old, budget.ledgerV1()) }))
 	}
 	tdDisjoint(t, out.log)
 	return out
@@ -266,7 +266,7 @@ func tdRefused(t *testing.T, name string, out tdOut, cause error) {
 func TestTreeDeltaPresenceCasesV1(t *testing.T) {
 	s := tdA4(1, 1)
 	out := tdBoth(t, tdStore(t, s.pre()), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A4", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdPut(5, s.eD, s.vD), tdPut(1, s.kD, s.nD), tdPut(5, s.mK, s.man))
 	tdLog(t, "A4 leaves", out.leaves, tdLeaf(s.kA, true, false, nil), tdLeaf(s.kB, false, true, s.nB), tdLeaf(s.kD, true, true, s.nD))
@@ -278,7 +278,7 @@ func TestTreeDeltaLagIntermediateV1(t *testing.T) {
 	lag := tdFormed(tdFrame(99, 0, []byte{9, 9}), 6, 0)
 	store := tdStore(t, [][]tdMemRow{s.pre()[:1], s.pre()[2:]}...)
 	out := tdBoth(t, store, s.c, tdOpt{overlay: map[string][]byte{string(s.kA): lag}})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	if out.log[2] != tdPut(5, s.eA, lag) {
 		t.Fatalf("A5 entry %s", out.log[2])
 	}
@@ -288,7 +288,7 @@ func TestTreeDeltaLagIntermediateV1(t *testing.T) {
 func TestTreeDeltaReuseV1(t *testing.T) {
 	s := tdA4(1, 1)
 	out := tdBoth(t, tdStore(t, s.pre(), s.family()), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A6", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdRef(5, s.eA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdRef(5, s.eD), tdPut(1, s.kD, s.nD), tdRef(5, s.mK))
 }
@@ -297,7 +297,7 @@ func TestTreeDeltaReuseV1(t *testing.T) {
 func TestTreeDeltaTransientV1(t *testing.T) {
 	s := tdA4(1, 2)
 	out := tdBoth(t, tdStore(t, s.pre()), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	if out.undo != 0 {
 		t.Fatalf("A7 undo-v1 reads %v", out.reads)
 	}
@@ -309,7 +309,7 @@ func TestTreeDeltaCompareV1(t *testing.T) {
 	s := tdA4(1, 3)
 	store := tdStore(t, s.pre(), s.family())
 	out := tdBoth(t, store, s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	compare := []string{
 		tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdRef(5, s.eA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdRef(5, s.eD), tdPut(1, s.kD, s.nD), tdRef(5, s.mK),
@@ -319,7 +319,7 @@ func TestTreeDeltaCompareV1(t *testing.T) {
 	tdLog(t, "A14 Pair body", pair.log, compare[1:]...)
 	s.c.undo = 4
 	out = tdBoth(t, store, s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A8 CompareDelete", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdDel(5, s.eA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdDel(5, s.eD), tdPut(1, s.kD, s.nD), tdDel(5, s.mK))
 }
@@ -329,13 +329,13 @@ func TestTreeDeltaInverseV1(t *testing.T) {
 	s := tdA4(2, 5)
 	store := tdStore(t, s.post(), s.family())
 	out := tdBoth(t, store, s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A9 SourceRetain", out.log, tdRef(4, s.c.block[:]), tdDel(1, s.kB), tdPut(1, s.kA, s.vA), tdRef(5, s.eA),
 		tdRef(1, s.kC), tdPut(1, s.kD, s.vD), tdRef(5, s.eD), tdRef(5, s.mK))
 	tdLog(t, "A9 leaves", out.leaves, tdLeaf(s.kA, false, true, s.vA), tdLeaf(s.kB, true, false, nil), tdLeaf(s.kD, true, true, s.vD))
 	s.c.undo = 6
 	out = tdBoth(t, store, s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A9 SourceDelete", out.log, tdRef(4, s.c.block[:]), tdDel(1, s.kB), tdPut(1, s.kA, s.vA), tdDel(5, s.eA),
 		tdRef(1, s.kC), tdPut(1, s.kD, s.vD), tdDel(5, s.eD), tdDel(5, s.mK))
 }
@@ -346,14 +346,14 @@ func TestTreeDeltaZeroSpentV1(t *testing.T) {
 	s.c.events = s.c.events[:1]
 	s.c.txCount = 1
 	out := tdBoth(t, tdStore(t, s.pre()[:1]), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A10", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.mK, tdManifest(7, tdGen, 1, 0)))
 	// A16: zero net-dirty groups: an equal-bytes present/present group yields no leaf while the family is regenerated.
 	s.c.events = []tdEv{tdSpend(tdTxid(0x0b), 0, 1, 0), tdCreate(tdTxid(0x0b), 0, 1, 0, uint32(len(s.fB)))}
 	s.c.txCount = 2
 	same := tdFormed(s.fB, 7, 0)
 	out = tdBoth(t, tdStore(t, []tdMemRow{{4, s.c.block[:], s.c.body}, {1, s.kB, same}}), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	entry := tdEntryKey(s.c.block, tdTxid(0x0b), 1, 0, 0)
 	tdLog(t, "A16 zero dirty", out.log, tdRef(4, s.c.block[:]), tdPut(5, entry, same), tdRef(1, s.kB), tdPut(5, s.mK, tdManifest(7, tdGen, 2, 1)))
 	if len(out.leaves) != 0 {
@@ -372,7 +372,7 @@ func TestTreeDeltaNotDirtyV1(t *testing.T) {
 	// k is created and spent in the block (absent/absent); k2 is spent and recreated with the exact stored bytes.
 	store := tdStore(t, []tdMemRow{{4, s.c.block[:], s.c.body}, {1, key2, kept}})
 	out := tdBoth(t, store, s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A3/A18", out.log, tdRef(4, s.c.block[:]), tdRef(1, key), tdPut(5, tdEntryKey(s.c.block, k2, 2, 1, 0), kept),
 		tdRef(1, key2), tdPut(5, s.mK, tdManifest(7, tdGen, 3, 1)))
 	if len(out.leaves) != 0 {
@@ -380,9 +380,9 @@ func TestTreeDeltaNotDirtyV1(t *testing.T) {
 	}
 	// A12: two leaves iterators yield identical sequences (drained one after the other, T2).
 	s4 := tdA4(1, 1)
-	mustEnvironment(t, fixtureTreeOldV1(tdStore(t, s4.pre()), func(old treeOldV1) error {
+	tdOK(t, fixtureTreeOldV1(tdStore(t, s4.pre()), func(old treeOldV1) error {
 		_, d := s4.c.delta(t, treeWriterV1, &tdLedger{})
-		mustEnvironment(t, d.resolveV1(old))
+		tdOK(t, d.resolveV1(old))
 		first, second := tdLeaves(d), tdLeaves(d)
 		if len(first) != 3 || !slices.Equal(first, second) {
 			t.Fatalf("A12 %v / %v", first, second)
@@ -396,7 +396,7 @@ func TestTreeDeltaStoredBodyV1(t *testing.T) {
 	block := tdTxid(0x77)
 	body := []byte("seeded block body")
 	store := tdStore(t, []tdMemRow{{4, block[:], body}})
-	mustEnvironment(t, fixtureTreeOldV1(store, func(inner treeOldV1) error {
+	tdOK(t, fixtureTreeOldV1(store, func(inner treeOldV1) error {
 		old := &tdOld{inner: inner}
 		got, err := treeStoredBodyV1(old, block)
 		if err != nil || got.pair || !bytes.Equal(got.bytes, body) || len(old.log) != 1 || old.log[0] != fmt.Sprintf("get 4 %x", block) {
@@ -421,7 +421,7 @@ func TestTreeDeltaEmissionOrderV1(t *testing.T) {
 	s.c.body = append(append([]byte(nil), s.fB...), s.fB...)
 	s.c.events = []tdEv{tdCreate(z, 0, 1, 0, uint32(len(s.fB))), tdCreate(a, 0, 2, uint64(len(s.fB)), uint32(len(s.fB)))}
 	out := tdBoth(t, tdStore(t, s.pre()[:1]), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	value := tdFormed(s.fB, 7, 0)
 	tdLog(t, "A20", out.log, tdRef(4, s.c.block[:]), tdPut(1, tdUTXOKey(9, z, 0), value), tdPut(1, tdUTXOKey(9, a, 0), value))
 }
@@ -440,18 +440,18 @@ func TestTreeDeltaEmissionSequenceV1(t *testing.T) {
 	s := tdA21(1, 1)
 	pre := []tdMemRow{{4, s.c.block[:], s.c.body}, {1, s.kA, s.vA}, {1, s.kD, s.vD}}
 	out := tdBoth(t, tdStore(t, pre), s.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A21 (a)", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdPut(5, s.eA, s.vA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdPut(5, s.eD, s.vD), tdDel(1, s.kD), tdPut(5, s.mK, s.man))
 	inv := tdA21(2, 6)
 	post := []tdMemRow{{4, s.c.block[:], s.c.body}, {1, s.kB, s.nB}}
 	out = tdBoth(t, tdStore(t, post, s.family()), inv.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A21 (b)", out.log, tdRef(4, s.c.block[:]), tdDel(1, s.kB), tdPut(1, s.kA, s.vA), tdDel(5, s.eA),
 		tdRef(1, s.kC), tdPut(1, s.kD, s.vD), tdDel(5, s.eD), tdDel(5, s.mK))
 	cmp := tdA21(1, 3)
 	out = tdBoth(t, tdStore(t, pre, s.family()), cmp.c, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "A21 (c)", out.log, tdRef(4, s.c.block[:]), tdPut(1, s.kB, s.nB), tdRef(5, s.eA), tdDel(1, s.kA),
 		tdRef(1, s.kC), tdRef(5, s.eD), tdDel(1, s.kD), tdRef(5, s.mK))
 }
@@ -462,16 +462,16 @@ func TestTreeDeltaCovenantV1(t *testing.T) {
 	f2, f3, f0 := tdFrame(1, 0x0002, nil), tdFrame(1, 0x0103, nil), tdFrame(1, 0, nil)
 	native := append(append(append([]byte(nil), f2...), f3...), f0...)
 	store := tdStore(t, []tdMemRow{{4, block[:], native}})
-	mustEnvironment(t, fixtureTreeOldV1(store, func(old treeOldV1) error {
+	tdOK(t, fixtureTreeOldV1(store, func(old treeOldV1) error {
 		body, err := treeStoredBodyV1(old, block)
-		mustEnvironment(t, err)
+		tdOK(t, err)
 		c := tdCase{dir: 1, undo: 2, height: 7, gen: 9, block: block, txCount: 2, body: body.bytes}
 		for i, admitted := range []bool{false, false, true} {
 			r := newTreeRecorderV1(treeWriterV1, c.prim(), body, make([]byte, 65_536), &tdLedger{})
-			mustEnvironment(t, r.beginV1(2, 1, [16]byte{}))
+			tdOK(t, r.beginV1(2, 1, [16]byte{}))
 			err := tdCreate(tdTxid(1), 0, 1, uint64(11*i), 11).feed(r)
 			if admitted {
-				mustEnvironment(t, err)
+				tdOK(t, err)
 				continue
 			}
 			tdInvalid(t, err)
@@ -677,7 +677,7 @@ func TestTreeDeltaResolveOrderV1(t *testing.T) {
 	}
 	tdLog(t, "R-RO-3 reads", out.reads, fmt.Sprintf("next 5 %x", two.mK), fmt.Sprintf("get 1 %x", two.kA), "next 5 failed")
 	out = tdRunAt(t, tdStore(t, g1Only, []tdMemRow{{1, two.kD, two.vD}}, fam), two.c, treeWriterV1, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	tdLog(t, "R-RO-4 reads", out.reads, fmt.Sprintf("next 5 %x", two.mK), fmt.Sprintf("get 1 %x", two.kA), fmt.Sprintf("next 5 %x", two.eA),
 		fmt.Sprintf("get 1 %x", two.kD), fmt.Sprintf("next 5 %x", two.eD), "next 5 outside")
 }
@@ -709,7 +709,7 @@ func TestTreeDeltaOldValueCheckV1(t *testing.T) {
 	transient := s.c
 	transient.undo = 2
 	out = tdRunAt(t, tdStore(t, pre), transient, treeWriterV1, tdOpt{})
-	mustEnvironment(t, out.err)
+	tdOK(t, out.err)
 	if out.undo != 0 || !slices.Contains(out.log, tdDel(1, s.kA)) {
 		t.Fatalf("R-OLDV-3 %v %v", out.reads, out.log)
 	}
@@ -723,7 +723,7 @@ func TestTreeDeltaOldValueCheckV1(t *testing.T) {
 		_, oracle := DecodeUTXOValue(value)
 		out = tdRunAt(t, tdStore(t, tdReplace(s.pre(), s.kA, value)), s.c, treeWriterV1, tdOpt{})
 		if oracle == nil {
-			mustEnvironment(t, out.err)
+			tdOK(t, out.err)
 			continue
 		}
 		tdRefused(t, fmt.Sprintf("R-OLDV-5 vector %d", i), out, errSchema)
@@ -799,15 +799,15 @@ func tdVF() (tdScene, []string) {
 func TestTreeDeltaValueFlowForwardV1(t *testing.T) {
 	s, want := tdVF()
 	store := tdStore(t, []tdMemRow{{4, s.c.block[:], s.c.body}})
-	mustEnvironment(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
+	tdOK(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
 		w := section.writerV1()
-		mustEnvironment(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[1], key: s.kA, after: treeImageV1{present: true, value: s.vA}}))
-		mustEnvironment(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[1], key: s.kD, after: treeImageV1{present: true, value: s.vD}}))
+		tdOK(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[1], key: s.kA, after: treeImageV1{present: true, value: s.vA}}))
+		tdOK(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[1], key: s.kD, after: treeImageV1{present: true, value: s.vD}}))
 		rec := &tdRec{next: w}
 		lw := &tdLW{old: section.oldV1(true), emit: rec, copies: map[string][][]byte{}}
 		_, d := s.c.delta(t, treeWriterV1, &tdLedger{})
-		mustEnvironment(t, d.resolveV1(lw))
-		mustEnvironment(t, d.applyV1(lw))
+		tdOK(t, d.resolveV1(lw))
+		tdOK(t, d.applyV1(lw))
 		tdLog(t, "R-VF-1", rec.log, want...)
 		after := section.oldV1(false)
 		for _, row := range []tdMemRow{{5, s.eA, s.vA}, {5, s.eD, s.vD}, {1, s.kD, s.nD}} {
@@ -822,8 +822,8 @@ func TestTreeDeltaValueFlowForwardV1(t *testing.T) {
 	lw := &tdLW{old: tdMem(tdMemRow{1, s.kA, s.vA}, tdMemRow{1, s.kD, s.vD}), emit: rec, copies: map[string][][]byte{}}
 	budget := &treeBudgetV1{held: 1 << 30}
 	_, d := s.c.delta(t, treeReadbackV1, budget.ledgerV1())
-	mustEnvironment(t, d.resolveV1(lw))
-	mustEnvironment(t, d.applyV1(lw))
+	tdOK(t, d.resolveV1(lw))
+	tdOK(t, d.applyV1(lw))
 	tdLog(t, "R-VF-2", rec.log, want...)
 }
 
@@ -832,12 +832,12 @@ func TestTreeDeltaValueFlowInverseV1(t *testing.T) {
 	s := tdA21(2, 6)
 	post := []tdMemRow{{4, s.c.block[:], s.c.body}, {1, s.kB, s.nB}}
 	store := tdStore(t, post, s.family())
-	mustEnvironment(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
+	tdOK(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
 		rec := &tdRec{next: section.writerV1()}
 		lw := &tdLW{old: section.oldV1(true), emit: rec, copies: map[string][][]byte{}}
 		_, d := s.c.delta(t, treeWriterV1, &tdLedger{})
-		mustEnvironment(t, d.resolveV1(lw))
-		mustEnvironment(t, d.applyV1(lw))
+		tdOK(t, d.resolveV1(lw))
+		tdOK(t, d.applyV1(lw))
 		tdLog(t, "R-VF-3", rec.log, tdRef(4, s.c.block[:]), tdDel(1, s.kB), tdPut(1, s.kA, s.vA), tdDel(5, s.eA),
 			tdRef(1, s.kC), tdPut(1, s.kD, s.vD), tdDel(5, s.eD), tdDel(5, s.mK))
 		return nil
@@ -859,7 +859,7 @@ func tdDrain(t *testing.T, d *treeDeltaV1) []string {
 	it := d.leavesV1()
 	for {
 		leaf, ok, err := it.nextV1()
-		mustEnvironment(t, err)
+		tdOK(t, err)
 		if !ok {
 			return out
 		}
@@ -886,16 +886,16 @@ func TestTreeDeltaInverseLeavesV1(t *testing.T) {
 		store := tdStore(t, rows...)
 		c := s.c
 		c.undo = tc.undo
-		mustEnvironment(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
+		tdOK(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
 			if !tc.native {
 				for _, row := range s.family() {
-					mustEnvironment(t, section.writerV1().emitV1(treeTargetV1{dbi: schemaDBIs[5], key: row.key, after: treeImageV1{present: true, value: row.value}}))
+					tdOK(t, section.writerV1().emitV1(treeTargetV1{dbi: schemaDBIs[5], key: row.key, after: treeImageV1{present: true, value: row.value}}))
 				}
 			}
 			_, d := c.delta(t, treeWriterV1, &tdLedger{})
-			mustEnvironment(t, d.resolveV1(section.oldV1(true)))
+			tdOK(t, d.resolveV1(section.oldV1(true)))
 			first := tdDrain(t, d)
-			mustEnvironment(t, d.applyV1(section.writerV1()))
+			tdOK(t, d.applyV1(section.writerV1()))
 			second := tdDrain(t, d)
 			if !slices.Equal(first, want) || !slices.Equal(second, want) {
 				t.Fatalf("sub-row %d:\n%q\n%q", sub+1, first, second)
@@ -911,14 +911,14 @@ func TestTreeDeltaInverseLeavesV1(t *testing.T) {
 	}
 	// (v) L3 pin: a held P-served image survives emitV1 and referV1 of its own identity.
 	store := tdStore(t, s.post())
-	mustEnvironment(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
+	tdOK(t, fixtureTreeSectionV1(store, &tdLedger{}, func(section *treeSectionV1) error {
 		w := section.writerV1()
-		mustEnvironment(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA, after: treeImageV1{present: true, value: s.vA}}))
+		tdOK(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA, after: treeImageV1{present: true, value: s.vA}}))
 		held, err := section.oldV1(true).getV1(schemaDBIs[5], s.eA)
-		mustEnvironment(t, err)
-		mustEnvironment(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA, after: treeImageV1{present: true, value: tdFlip(s.vA, 0)}}))
-		mustEnvironment(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA}))
-		mustEnvironment(t, w.referV1(schemaDBIs[5], s.eA))
+		tdOK(t, err)
+		tdOK(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA, after: treeImageV1{present: true, value: tdFlip(s.vA, 0)}}))
+		tdOK(t, w.emitV1(treeTargetV1{dbi: schemaDBIs[5], key: s.eA}))
+		tdOK(t, w.referV1(schemaDBIs[5], s.eA))
 		if !bytes.Equal(held.value, s.vA) {
 			t.Fatal("(v) held P image changed")
 		}

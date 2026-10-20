@@ -327,11 +327,11 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 			t.Fatalf("%s: ledger %s, want %s", name, got, expect)
 		}
 	}
-	begin := func(r *treeRecorderV1) { mustEnvironment(t, r.beginV1(3, 3, [16]byte{})) }
+	begin := func(r *treeRecorderV1) { tdOK(t, r.beginV1(3, 3, [16]byte{})) }
 	run("a", func(r *treeRecorderV1) {
 		begin(r)
 		for _, e := range c.events {
-			mustEnvironment(t, e.feed(r))
+			tdOK(t, e.feed(r))
 		}
 		if _, err := r.finishV1(); err != nil {
 			t.Fatal(err)
@@ -340,7 +340,7 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 	run("b", func(r *treeRecorderV1) {
 		begin(r)
 		for _, e := range c.events[:2] {
-			mustEnvironment(t, e.feed(r))
+			tdOK(t, e.feed(r))
 		}
 		_, err := r.finishV1()
 		tdInvalid(t, err)
@@ -372,9 +372,9 @@ func TestTreeDeltaReleaseV1(t *testing.T) {
 	// Readback (a): the budget gets the amount back.
 	budget := &treeBudgetV1{held: 1 << 20, used: 7}
 	rb := newTreeRecorderV1(treeReadbackV1, c.prim(), treeBodyV1{bytes: c.body}, nil, budget.ledgerV1())
-	mustEnvironment(t, rb.beginV1(3, 3, [16]byte{}))
+	tdOK(t, rb.beginV1(3, 3, [16]byte{}))
 	for _, e := range c.events {
-		mustEnvironment(t, e.feed(rb))
+		tdOK(t, e.feed(rb))
 	}
 	if _, err := rb.finishV1(); err != nil {
 		t.Fatal(err)
@@ -434,10 +434,10 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 		c := tdCase{dir: 1, undo: 1, height: 7, gen: 9, body: body}
 		r := c.recorder(treeWriterV1, ledger)
 		if tc.begin {
-			mustEnvironment(t, r.beginV1(3, 4, [16]byte{}))
+			tdOK(t, r.beginV1(3, 4, [16]byte{}))
 		}
 		for _, e := range tc.before {
-			mustEnvironment(t, e.feed(r))
+			tdOK(t, e.feed(r))
 		}
 		calls := ledger.logged()
 		err := tc.event.feed(r)
@@ -449,14 +449,14 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 	admitted := tdCase{dir: 1, undo: 1, height: 7, gen: 9, body: body}
 	for _, n := range []uint32{11, 65_551} {
 		r := admitted.recorder(treeWriterV1, &tdLedger{})
-		mustEnvironment(t, r.beginV1(3, 1, [16]byte{}))
-		mustEnvironment(t, tdCreate(k, 0, 1, 0, n).feed(r))
+		tdOK(t, r.beginV1(3, 1, [16]byte{}))
+		tdOK(t, tdCreate(k, 0, 1, 0, n).feed(r))
 	}
 	for _, second := range []string{"second BEGIN", "BEGIN after event"} {
 		ledger := &tdLedger{}
 		r := admitted.recorder(treeWriterV1, ledger)
 		if second == "second BEGIN" {
-			mustEnvironment(t, r.beginV1(3, 1, [16]byte{}))
+			tdOK(t, r.beginV1(3, 1, [16]byte{}))
 		} else {
 			tdInvalid(t, tdSpend(a, 0, 1, 0).feed(r))
 		}
@@ -478,8 +478,8 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 	// finishV1 after EventCount-1 events: returned, not recorded, no charge.
 	ledger := &tdLedger{}
 	r := admitted.recorder(treeWriterV1, ledger)
-	mustEnvironment(t, r.beginV1(3, 2, [16]byte{}))
-	mustEnvironment(t, tdSpend(a, 0, 1, 0).feed(r))
+	tdOK(t, r.beginV1(3, 2, [16]byte{}))
+	tdOK(t, tdSpend(a, 0, 1, 0).feed(r))
 	calls := ledger.logged()
 	if r.failureV1() != nil {
 		t.Fatal("failure before finishV1")
@@ -500,9 +500,9 @@ func TestTreeDeltaGroupRefusalsV1(t *testing.T) {
 	} {
 		c := tdCase{dir: 1, undo: 1, height: 7, gen: 9, txCount: 6, events: events, body: bytes.Repeat(tdFrame(1, 0, nil), 2)}
 		r := c.recorder(treeWriterV1, &tdLedger{})
-		mustEnvironment(t, r.beginV1(6, 2, [16]byte{}))
+		tdOK(t, r.beginV1(6, 2, [16]byte{}))
 		for _, e := range events {
-			mustEnvironment(t, e.feed(r))
+			tdOK(t, e.feed(r))
 		}
 		if r.failureV1() != nil {
 			t.Fatal(name)
@@ -554,7 +554,7 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 	}
 	ledger := &tdLedger{}
 	r := tdCase{dir: 1, undo: 1, height: 0, gen: 9}.recorder(treeWriterV1, ledger)
-	mustEnvironment(t, r.beginV1(1, 1, [16]byte{}))
+	tdOK(t, r.beginV1(1, 1, [16]byte{}))
 	err := tdSpend(tdTxid(1), 0, 0, 0).feed(r)
 	tdInvalid(t, err)
 	if !sameError(r.failureV1(), err) {
@@ -562,11 +562,11 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 	}
 	// A13: the admitted height-0 coinbase BEGIN and the height-1 rules.
 	ok := tdCase{dir: 1, undo: 1, height: 0, gen: 9, body: tdFrame(1, 0, nil)}.recorder(treeWriterV1, &tdLedger{})
-	mustEnvironment(t, ok.beginV1(1, 1, [16]byte{}))
-	mustEnvironment(t, tdCreate(tdTxid(1), 0, 0, 0, 11).feed(ok))
+	tdOK(t, ok.beginV1(1, 1, [16]byte{}))
+	tdOK(t, tdCreate(tdTxid(1), 0, 0, 0, 11).feed(ok))
 	one := tdCase{dir: 1, undo: 1, height: 1, gen: 9}.recorder(treeWriterV1, &tdLedger{})
-	mustEnvironment(t, one.beginV1(1, 1, [16]byte{3: 9}))
-	mustEnvironment(t, tdSpend(tdTxid(1), 0, 0, 0).feed(one))
+	tdOK(t, one.beginV1(1, 1, [16]byte{3: 9}))
+	tdOK(t, tdSpend(tdTxid(1), 0, 0, 0).feed(one))
 }
 
 // R8, M21, M37: after expiry sink calls are not active, unrecorded and uncharged; windowV1 is nil.
@@ -603,7 +603,7 @@ func TestTreeDeltaStickyFailureV1(t *testing.T) {
 	c := tdGrammar()
 	ledger := &tdLedger{}
 	r := c.recorder(treeWriterV1, ledger)
-	mustEnvironment(t, r.beginV1(3, 5, [16]byte{}))
+	tdOK(t, r.beginV1(3, 5, [16]byte{}))
 	first := tdEv{kind: 3, txid: tdTxid(1), tx: 1}.feed(r)
 	tdInvalid(t, first)
 	calls := ledger.logged()
@@ -631,9 +631,9 @@ func TestTreeDeltaWindowV1(t *testing.T) {
 	c := tdGrammar()
 	window := make([]byte, 65_536)
 	r := newTreeRecorderV1(treeWriterV1, c.prim(), treeBodyV1{bytes: c.body}, window, &tdLedger{})
-	mustEnvironment(t, r.beginV1(3, 5, [16]byte{}))
+	tdOK(t, r.beginV1(3, 5, [16]byte{}))
 	for _, e := range c.events {
-		mustEnvironment(t, e.feed(r))
+		tdOK(t, e.feed(r))
 	}
 	before := append([]treeDescV1(nil), r.descs...)
 	for i := 0; i < 3; i++ {
@@ -657,7 +657,7 @@ func TestTreeDeltaRetainedSinkV1(t *testing.T) {
 	c := tdGrammar()
 	ledger := &tdLedger{}
 	r := c.recorder(treeWriterV1, ledger)
-	mustEnvironment(t, r.beginV1(3, 5, [16]byte{}))
+	tdOK(t, r.beginV1(3, 5, [16]byte{}))
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); r.expireV1() }()
@@ -698,7 +698,7 @@ func TestTreeDeltaExpireWaitsV1(t *testing.T) {
 	go func() { r.expireV1(); close(expireDone) }()
 	tdNotDone(t, expireDone, "expireV1")
 	close(ledger.gate)
-	mustEnvironment(t, <-beginDone)
+	tdOK(t, <-beginDone)
 	<-expireDone
 	tdInactive(t, c.events[0].feed(r))
 	if r.failureV1() != nil {
@@ -717,7 +717,7 @@ func TestTreeDeltaReleaseWaitsV1(t *testing.T) {
 	go func() { r.releaseV1(); close(releaseDone) }()
 	tdNotDone(t, releaseDone, "releaseV1")
 	close(ledger.gate)
-	mustEnvironment(t, <-beginDone)
+	tdOK(t, <-beginDone)
 	<-releaseDone
 	n := 3*tdSize + tdV
 	if got := ledger.logged(); got != fmt.Sprintf("charge %d|release %d", n, n) {
@@ -772,18 +772,18 @@ func TestTreeDeltaZeroAllocV1(t *testing.T) {
 		c, old := tdAllocCase(undo)
 		ledger := &tdNopLedger{}
 		r := c.recorder(treeWriterV1, ledger)
-		mustEnvironment(t, r.beginV1(c.txCount, 4, [16]byte{}))
-		mustEnvironment(t, c.events[0].feed(r))
-		mustEnvironment(t, c.events[1].feed(r))
+		tdOK(t, r.beginV1(c.txCount, 4, [16]byte{}))
+		tdOK(t, c.events[0].feed(r))
+		tdOK(t, c.events[1].feed(r))
 		next := 2
-		tdAllocs(t, "eventV1", func() { mustEnvironment(t, c.events[next].feed(r)); next++ })
+		tdAllocs(t, "eventV1", func() { tdOK(t, c.events[next].feed(r)); next++ })
 		tdAllocs(t, "windowV1", func() { _ = r.windowV1() })
 		tdAllocs(t, "failureV1", func() { _ = r.failureV1() })
 		d, err := r.finishV1()
-		mustEnvironment(t, err)
-		tdAllocs(t, fmt.Sprintf("resolveV1 %d", undo), func() { mustEnvironment(t, d.resolveV1(old)) })
+		tdOK(t, err)
+		tdAllocs(t, fmt.Sprintf("resolveV1 %d", undo), func() { tdOK(t, d.resolveV1(old)) })
 		emit := &tdCountEmitter{}
-		tdAllocs(t, fmt.Sprintf("applyV1 %d", undo), func() { mustEnvironment(t, d.applyV1(emit)) })
+		tdAllocs(t, fmt.Sprintf("applyV1 %d", undo), func() { tdOK(t, d.applyV1(emit)) })
 		it := d.leavesV1()
 		tdAllocs(t, "leaves nextV1", func() { _, _, _ = it.nextV1() })
 		tdAllocs(t, "expireV1", r.expireV1)
@@ -879,5 +879,13 @@ func BenchmarkTreeDeltaSequenceV1(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		run()
+	}
+}
+
+// tdOK fails at its caller's line when err is not nil, so a refused row names its own assertion.
+func tdOK(t testing.TB, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
