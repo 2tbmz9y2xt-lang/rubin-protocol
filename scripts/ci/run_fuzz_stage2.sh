@@ -266,7 +266,7 @@ st_cmp() {
 # Runs check_inventory against st_go twice and checks the exit code against want_rc, stdout
 # against out and stderr against err, each as a bash string (NUL bytes are dropped, trailing
 # newlines kept as in capture) plus one final newline.
-st_err() {
+st_check_inventory() {
   local name="$1" want_rc="$2" out="$3" err="$4" raw
   local GO_CMD=(st_go)
   shift 4
@@ -312,21 +312,21 @@ self_test_inventory() {
   st_case "footer without trailing tab" "inventory OK: 1 targets" "$(pn 0 "FuzzA${nl}ok  ${TAB}${N}")" ${a}
   st_case "path outside module prefix" "STALE ${a}${nl}UNSUPPORTED example.com/other" "$(package_records example.com/other 0 "")" ${a}
   ST_LIST_RC=1 ST_LIST_OUT="${N}${nl}" ST_N_RC=1 ST_N_OUT="FuzzA${nl}${fn}"
-  st_err "go list failure, no package run" 1 "DISCOVERY_FAILED go list" "${lw}" ${a}
-  st_err "go list failure beside duplicate" 1 "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" "${lw}" ${a} ${a}
+  st_check_inventory "go list failure, no package run" 1 "DISCOVERY_FAILED go list" "${lw}" ${a}
+  st_check_inventory "go list failure beside duplicate" 1 "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" "${lw}" ${a} ${a}
   ST_LIST_RC=0 ST_N_RC=0 ST_LIST_OUT="${N}${nl}${MODULE_PREFIX}consensus${nl}" ST_C_OUT="FuzzC${nl}${fc}"
-  st_err "go list ok, packages compared" 0 "inventory OK: 2 targets" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
-  st_err "go list ok, MISSING and STALE" 1 "MISSING ./consensus:FuzzC${nl}STALE ./node:FuzzB" "${lw}${nl}${tw}${nl}${tw}" ${a} ./node:FuzzB
+  st_check_inventory "go list ok, packages compared" 0 "inventory OK: 2 targets" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
+  st_check_inventory "go list ok, MISSING and STALE" 1 "MISSING ./consensus:FuzzC${nl}STALE ./node:FuzzB" "${lw}${nl}${tw}${nl}${tw}" ${a} ./node:FuzzB
   ST_LIST_OUT+="example.com/other${nl}"
-  st_err "go list ok, foreign path unsupported, not run" 1 "UNSUPPORTED example.com/other" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
+  st_check_inventory "go list ok, foreign path unsupported, not run" 1 "UNSUPPORTED example.com/other" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
   ST_N_RC=1
-  st_err "forwarded list-run exit code" 1 "DISCOVERY_FAILED ${N}${nl}UNSUPPORTED example.com/other" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
+  st_check_inventory "forwarded list-run exit code" 1 "DISCOVERY_FAILED ${N}${nl}UNSUPPORTED example.com/other" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
   ST_N_RC=0 ST_LIST_OUT="${N}${nl}" ST_N_OUT="fuzzFoo${nl}${fn}"
-  st_err "go list ok, malformed line" 1 "UNSUPPORTED fuzzFoo" "${lw}${nl}${tw}" ${a}
+  st_check_inventory "go list ok, malformed line" 1 "UNSUPPORTED fuzzFoo" "${lw}${nl}${tw}" ${a}
   ST_N_OUT="FuzzA${nl}"
-  st_err "go list ok, missing footer" 1 "UNSUPPORTED ${N} (footer)" "${lw}${nl}${tw}" ${a}
+  st_check_inventory "go list ok, missing footer" 1 "UNSUPPORTED ${N} (footer)" "${lw}${nl}${tw}" ${a}
   ST_N_OUT="${fn}"
-  st_err "go list ok, empty compiled output" 1 "EMPTY_INVENTORY" "${lw}${nl}${tw}" ${a}
+  st_check_inventory "go list ok, empty compiled output" 1 "EMPTY_INVENTORY" "${lw}${nl}${tw}" ${a}
   recs="$(pn 0 "${fn}")"
   st_case "empty compiled output" "EMPTY_INVENTORY" "${recs}" ${a}
   st_case "empty compiled output beside duplicate" "DUPLICATE ${a}${nl}EMPTY_INVENTORY" "${recs}" ${a} ${a}
