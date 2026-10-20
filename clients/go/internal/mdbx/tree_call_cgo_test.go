@@ -301,6 +301,31 @@ func TestTreeCallV1ProviderPanicDuringGoexit(t *testing.T) {
 	}
 }
 
+// TestTreeCallV1GoexitSupersedesOpPanic is structural-only residue (ii): an op panic superseded by a Goexit that op's
+// own deferred function calls is not visible to recover and is delivered as the Goexit.
+func TestTreeCallV1GoexitSupersedesOpPanic(t *testing.T) {
+	v, o1, o2 := new(struct{ n int }), errors.New("before cleanup"), errors.New("cleanup")
+	var afterExit bool
+	outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 {
+		defer func() { *out = transactionOutcome{err: o2} }()
+		*out = transactionOutcome{err: o1}
+		defer func() {
+			runtime.Goexit()
+			afterExit = true
+		}()
+		panic(v)
+	})
+	if any(outcome.err) != any(o2) || outcome.poisoned || unwind != (treeUnwindV1{kind: 2}) {
+		t.Fatalf("op panic superseded by Goexit = (%+v, %+v), want (%v, kind 2, value nil)", outcome, unwind, o2)
+	}
+	if afterExit {
+		t.Fatal("statement after the deferred Goexit ran")
+	}
+	if !treeCallPoll(treeCallWorkersGone) {
+		t.Fatalf("worker frame remained after Goexit delivery: %d", treeCallWorkerCount())
+	}
+}
+
 type treeConcurrentRow struct {
 	sentinel error
 	value    *struct{ n int }
@@ -505,7 +530,7 @@ func treeCallChildPoisonedGoexit() {
 const treeCallHeldText = "rubin tree held engine defect"
 
 // treeCallHeldPanic is an engine panic value whose Error method holds the crash until the caller signals receipt or
-// the A5 bound elapses; the first wait is shared by every later Error call.
+// 10 s elapse (the same bound as treeCallPoll's deadline); the first wait is shared by every later Error call.
 type treeCallHeldPanic struct {
 	receipt chan struct{}
 	once    sync.Once
@@ -576,6 +601,25 @@ func treeCallChildCallPanicNil() {
 	unwind.resumeV1()
 }
 
+// treeCallChildGoexitNilPanic is structural-only residue (i): under GODEBUG=panicnil=1 a nil panic that op's deferred
+// function raises while op's Goexit unwinds is not visible to recover and is delivered as the Goexit.
+func treeCallChildGoexitNilPanic() {
+	o2 := errors.New("cleanup")
+	afterExit := false
+	outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 {
+		defer func() { *out = transactionOutcome{err: o2} }()
+		*out = transactionOutcome{err: errors.New("before cleanup")}
+		defer func() { panic(treeCallNilPanicValue) }()
+		runtime.Goexit()
+		afterExit = true
+		return treeUnwindV1{}
+	})
+	fmt.Println(treeCallDelivered)
+	if outcome == (transactionOutcome{err: o2}) && unwind == (treeUnwindV1{kind: 2}) && !afterExit {
+		fmt.Println(treeCallResultMarker)
+	}
+}
+
 type treeCallChildRow struct {
 	name      string
 	body      func()
@@ -596,12 +640,13 @@ func treeCallChildRows() []treeCallChildRow {
 		{"R3", treeCallChildNilOp, nil, true, []string{treeCallPreMarker, "panic: runtime error"}, treeCallDelivered},
 		{"H1", treeCallChildCallPanicNil, panicNil, true, []string{treeCallResultMarker, "panic: nil"}, ""},
 		{"H4", treeCallChildOpPanicNil, panicNil, true, []string{treeCallPreMarker, "panic: nil"}, treeCallDelivered},
+		{"GoexitNilPanic", treeCallChildGoexitNilPanic, panicNil, false, []string{treeCallDelivered, treeCallResultMarker}, ""},
 	}
 }
 
 func (row treeCallChildRow) verify(output string, runErr error) error {
 	if crashed := runErr != nil; crashed != row.crash {
-		return fmt.Errorf("child exit error %w, want crash %v", runErr, row.crash)
+		return fmt.Errorf("child exit error %s, want crash %v", fmt.Sprint(runErr), row.crash)
 	}
 	for _, text := range row.wantTexts {
 		if !strings.Contains(output, text) {
