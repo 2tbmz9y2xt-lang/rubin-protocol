@@ -560,7 +560,7 @@ func tdRejected() []tdVariant {
 		{"WriteOrReuse missing entry", append(slices.Clone(pre), tdDrop(fam, f.eD)...), wor, nil},
 		{"WriteOrReuse entry byte", append(slices.Clone(pre), tdReplace(fam, f.eD, tdFlip(f.vD, 2))...), wor, nil},
 		{"WriteOrReuse 1-byte manifest (R-WOR-1)", append(slices.Clone(pre), tdReplace(fam, f.mK, []byte{1})...), wor, nil},
-		{"entry without manifest", append(slices.Clone(pre), tdDrop(fam, f.mK)...), wor, nil},
+		{"entry without manifest", append(slices.Clone(pre), tdMemRow{5, f.eA, f.vA}), wor, nil},
 		{"SourceRetain missing entry", append(slices.Clone(post), tdDrop(fam, f.eA)...), r.c, nil},
 		{"SourceRetain extra entry", append(slices.Clone(post), append(slices.Clone(fam), tdMemRow{5, extra, f.vA})...), r.c, nil},
 		{"SourceRetain manifest height", append(slices.Clone(post), tdReplace(fam, f.mK, tdManifest(8, tdGen, 3, 2))...), r.c, nil},
@@ -719,6 +719,11 @@ func TestTreeDeltaOldValueCheckV1(t *testing.T) {
 	tdOK(t, out.err)
 	if out.undo != 0 || !slices.Contains(out.log, tdDel(1, s.kA)) {
 		t.Fatalf("R-OLDV-3 %v %v", out.reads, out.log)
+	}
+	inverse := tdCase{dir: 2, undo: 1, height: 7, gen: 9, block: s.c.block, generated: tdGen, txCount: 2, body: s.c.body, events: []tdEv{tdSpend(tdTxid(0x0a), 0, 1, 0)}}
+	out = tdRunAt(t, tdStore(t, []tdMemRow{{4, s.c.block[:], s.c.body}}), inverse, treeWriterV1, tdOpt{record: true})
+	if errors.Is(out.err, errSchema) {
+		t.Fatalf("R-OLDV scope: inverse WriteOrReuse SPEND-only group refused with errSchema: %v", out.err)
 	}
 	out = tdRunAt(t, tdStore(t, pre, tdDrop(s.family(), s.eA)), s.c, treeWriterV1, tdOpt{})
 	tdRefused(t, "R-OLDV-4", out, errSchema)
@@ -931,4 +936,18 @@ func TestTreeDeltaInverseLeavesV1(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// A13: the admitted height-0 coinbase BEGIN and a height-1 SPEND finish and resolve on a real Store (S3; S12 absent
+// family under WriteOrReuse).
+func TestTreeDeltaAdmittedBeginV1(t *testing.T) {
+	block, gen, frame := tdTxid(0xa0), uint64(9), tdFrame(1, 0, nil)
+	body := []tdMemRow{{4, block[:], frame}}
+	zero := tdCase{dir: 1, undo: 1, height: 0, gen: gen, block: block, txCount: 1, body: frame, events: []tdEv{tdCreate(tdTxid(1), 0, 0, 0, uint32(len(frame)))}}
+	out := tdRunAt(t, tdStore(t, body), zero, treeWriterV1, tdOpt{})
+	tdOK(t, out.err)
+	spent := []tdMemRow{{1, tdUTXOKey(gen, tdTxid(1), 0), tdFormed(tdFrame(11, 0, nil), 0, 1)}}
+	one := tdCase{dir: 1, undo: 1, height: 1, gen: gen, block: block, generated: [16]byte{3: 9}, txCount: 1, body: frame, events: []tdEv{tdSpend(tdTxid(1), 0, 0, 0)}}
+	out = tdRunAt(t, tdStore(t, body, spent), one, treeWriterV1, tdOpt{})
+	tdOK(t, out.err)
 }

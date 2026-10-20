@@ -306,7 +306,7 @@ func (d *treeDeltaV1) utxoKeyV1(e *treeDescV1) []byte {
 	return d.keys.utxo[:]
 }
 
-// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) (schema.go:276-284) into d.keys.entry.
+// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) (schema.go:273-282) into d.keys.entry.
 func (d *treeDeltaV1) entryKeyV1(e *treeDescV1) []byte {
 	copy(d.keys.entry[:], d.keys.block[:])
 	d.keys.entry[32] = 1

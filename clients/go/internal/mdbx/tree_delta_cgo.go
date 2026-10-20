@@ -179,15 +179,22 @@ func (d *treeDeltaV1) headV1(old treeOldV1) error {
 	if !ok || !bytes.HasPrefix(key, block) {
 		return d.absentFamilyV1()
 	}
+	return d.manifestRowV1(key, image.value)
+}
+
+// manifestRowV1 checks the family head row under Block: it must be the manifest key; the value is then checked for the
+// effect (S6c and S6 for SourceRetain/SourceDelete, byte equality with the regenerated manifest otherwise).
+func (d *treeDeltaV1) manifestRowV1(key, value []byte) error {
 	if len(key) != 33 || key[32] != 0 {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	d.family = true
 	d.afterV1(key)
+	undo := d.rec.prim.undo
 	if undo == treeUndoSourceRetainV1 || undo == treeUndoSourceDeleteV1 {
-		return d.retainedManifestV1(key, image.value)
+		return d.retainedManifestV1(key, value)
 	}
-	if !bytes.Equal(image.value, d.keys.manifest[:]) {
+	if !bytes.Equal(value, d.keys.manifest[:]) {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil
@@ -272,16 +279,27 @@ func (d *treeDeltaV1) entryV1(old treeOldV1, g *treeDescV1, oldValue []byte) err
 	}
 	d.afterV1(want)
 	if d.forwardV1() {
-		if !bytes.Equal(image.value, oldValue) {
-			return treeIntegrity(operationUpdate, nil)
-		}
-		return nil
+		return forwardEntryV1(image.value, oldValue)
 	}
-	if !treeUndoValueOKV1(want, image.value) {
+	return inverseEntryV1(g, want, image.value, oldValue)
+}
+
+// forwardEntryV1 is the forward family check of one undo entry: its value equals the held OLD value.
+func forwardEntryV1(value, oldValue []byte) error {
+	if !bytes.Equal(value, oldValue) {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	return nil
+}
+
+// inverseEntryV1 is S6c on a retained undo entry; the entry image becomes the group's restore value and completes the
+// net-dirty bit of a present/present group.
+func inverseEntryV1(g *treeDescV1, want, value, oldValue []byte) error {
+	if !treeUndoValueOKV1(want, value) {
 		return treeIntegrity(operationUpdate, errSchema)
 	}
-	g.img = image.value
-	if g.flags&treeDescOldV1 != 0 && g.flags&treeDescNewV1 != 0 && !bytes.Equal(image.value, oldValue) {
+	g.img = value
+	if g.flags&treeDescOldV1 != 0 && g.flags&treeDescNewV1 != 0 && !bytes.Equal(value, oldValue) {
 		g.flags |= treeDescDirtyV1
 	}
 	return nil

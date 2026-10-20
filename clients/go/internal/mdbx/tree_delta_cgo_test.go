@@ -283,13 +283,12 @@ func TestTreeDeltaChargeV1(t *testing.T) {
 		if got := ledger.logged(); got != fmt.Sprintf("charge %d", want) {
 			t.Fatalf("count %d: ledger %s", count, got)
 		}
-		account := &tdLedger{}
 		budget := &treeBudgetV1{held: 1 << 30, used: 5}
 		rb := newTreeRecorderV1(treeReadbackV1, tdGrammar().prim(), treeBodyV1{}, nil, budget.ledgerV1())
 		if err := rb.beginV1(3, count, [16]byte{}); err != nil {
 			t.Fatal(err)
 		}
-		if budget.used != 5+want || account.logged() != "" {
+		if budget.used != 5+want || ledger.logged() != fmt.Sprintf("charge %d", want) {
 			t.Fatalf("count %d: budget used %d", count, budget.used)
 		}
 	}
@@ -528,10 +527,9 @@ func TestTreeDeltaChargeRefusedV1(t *testing.T) {
 	if !sameError(c.events[0].feed(r), err) {
 		t.Fatal("later eventV1 did not return the recorded object")
 	}
-	account := &tdLedger{}
 	budget := &treeBudgetV1{held: need - 1, used: 0}
 	rb := c.recorder(treeReadbackV1, budget.ledgerV1())
-	if err := rb.beginV1(3, 5, [16]byte{}); !sameError(err, errOperationReservationCapacity) || budget.used != 0 || account.logged() != "" || rb.descs != nil {
+	if err := rb.beginV1(3, 5, [16]byte{}); !sameError(err, errOperationReservationCapacity) || budget.used != 0 || ledger.logged() != fmt.Sprintf("charge %d", need) || rb.descs != nil {
 		t.Fatalf("readback refusal %v used %d", err, budget.used)
 	}
 }
@@ -560,13 +558,6 @@ func TestTreeDeltaBeginConstraintsV1(t *testing.T) {
 	if !sameError(r.failureV1(), err) {
 		t.Fatal("height-0 SPEND not recorded")
 	}
-	// A13: the admitted height-0 coinbase BEGIN and the height-1 rules.
-	ok := tdCase{dir: 1, undo: 1, height: 0, gen: 9, body: tdFrame(1, 0, nil)}.recorder(treeWriterV1, &tdLedger{})
-	tdOK(t, ok.beginV1(1, 1, [16]byte{}))
-	tdOK(t, tdCreate(tdTxid(1), 0, 0, 0, 11).feed(ok))
-	one := tdCase{dir: 1, undo: 1, height: 1, gen: 9}.recorder(treeWriterV1, &tdLedger{})
-	tdOK(t, one.beginV1(1, 1, [16]byte{3: 9}))
-	tdOK(t, tdSpend(tdTxid(1), 0, 0, 0).feed(one))
 }
 
 // R8, M21, M37: after expiry sink calls are not active, unrecorded and uncharged; windowV1 is nil.
