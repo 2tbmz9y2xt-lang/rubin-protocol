@@ -22,7 +22,7 @@ Examples:
 
 ```bash
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -fuzz=FuzzReadCompactSize -fuzztime=30s'
-scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -fuzz=FuzzParseTx -fuzztime=30s'
+scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -fuzz="^FuzzParseTx$" -fuzztime=30s'
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -fuzz=FuzzParseBlockBytes -fuzztime=30s'
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzValidateTxCovenantsGenesis -fuzztime=45s'
 scripts/dev-env.sh -- bash -lc 'cd clients/go/consensus && go test -run=^$ -fuzz=FuzzVerifySigDeterminism -fuzztime=45s'
@@ -72,7 +72,13 @@ Fan-out (single-source lists, derived at run time by the `prepare` job):
 
 - Go: one matrix job per `pkg:Target` from
   `scripts/ci/run_fuzz_stage2.sh --list-json`; the single source is the
-  `TARGETS` array in that script.
+  `TARGETS` array in that script. `prepare` first runs
+  `scripts/ci/run_fuzz_stage2.sh --check-inventory` and fails before fan-out
+  unless `TARGETS` equals the compiled module-wide `Fuzz*` inventory.
+- The three `FuzzRubinConsensusCLI_RustParity_*` legs run a differential
+  preflight before fuzzing: `cargo --version` must succeed and
+  `TestRubinConsensusCLI_RustParity_SeedRequests` must pass without a skip,
+  else the leg fails (`FAIL <key> (differential preflight)`).
 - Rust: `scripts/ci/rust_fuzz_targets.txt` (blank/`#` lines skipped), chunked
   into groups of 5 — the chunking amortises the per-job nightly-toolchain +
   cargo-fuzz + fuzz-crate build cost while keeping wall clock flat.
@@ -120,8 +126,10 @@ Scope of the suppression: the classification turns a non-zero exit green for
 exactly one named upstream race signature, and a zero exit green-with-warning
 for exactly one `-list`-proven setup-skip shape — nothing else.
 
-Artifacts: Go jobs upload `.artifacts/fuzz-stage2/**` plus the
-`testdata/fuzz/**` trees (consensus, node, node/p2p); Rust chunk jobs upload
-`.artifacts/fuzz-rust/**` and `clients/rust/fuzz/artifacts/` — crash evidence
+Artifacts: Go jobs upload `.artifacts/fuzz-stage2/**` (per-target files under
+`.artifacts/fuzz-stage2/<package>/`) plus the `clients/go/**/testdata/fuzz/**`
+trees, in an artifact named `fuzz-stage2-<run_id>-<hex>-a<run_attempt>`, where
+`<hex>` is the hex of the UTF-8 bytes of the `pkg:Target` key; Rust chunk jobs
+upload `.artifacts/fuzz-rust/**` and `clients/rust/fuzz/artifacts/` — crash evidence
 survives a failing target. A final `verdict` job fails unless both matrices
 ended in exact `success`.
