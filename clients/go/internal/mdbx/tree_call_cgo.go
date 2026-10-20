@@ -12,7 +12,9 @@ type treeUnwindV1 struct {
 
 // treeCallV1 runs call in the current goroutine. Normal return: (kind 0, err). A panic is recovered at the call site:
 // (kind 1 value, nil). runtime.Goexit inside call cannot be stopped: treeCallV1 does not return, and the goroutine's
-// deferred functions run (including runTreeLockedV1's delivery). nil call yields kind 1 with the runtime error value.
+// deferred functions run (including runTreeLockedV1's delivery); a panic that call's own deferred functions raise
+// while that Goexit unwinds is recovered here, the Goexit continues and the value is not carried. nil call yields
+// kind 1 with the runtime error value.
 func treeCallV1(call func() error) (unwind treeUnwindV1, err error) {
 	unwind.kind = 1
 	func() {

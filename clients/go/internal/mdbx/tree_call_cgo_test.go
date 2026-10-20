@@ -259,29 +259,45 @@ func TestTreeCallV1GoexitDelivery(t *testing.T) {
 	}
 }
 
+// treeCallProviderPanicGoexit returns a provider call that panics with v while its own Goexit unwinds (main case) or
+// whose deferred Goexit supersedes its panic with v (revcall). after marks a statement that must never run.
+func treeCallProviderPanicGoexit(v any, revcall bool, after *bool) func() error {
+	if revcall {
+		return func() error {
+			defer runtime.Goexit()
+			panic(v)
+		}
+	}
+	return func() error {
+		defer func() { panic(v) }()
+		runtime.Goexit()
+		*after = true
+		return nil
+	}
+}
+
 func TestTreeCallV1ProviderPanicDuringGoexit(t *testing.T) {
-	v, o1, o2 := new(struct{ n int }), errors.New("before cleanup"), errors.New("cleanup")
-	var afterExit, afterCall bool
-	outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 {
-		defer func() { *out = transactionOutcome{err: o2} }()
-		*out = transactionOutcome{err: o1}
-		u, _ := treeCallV1(func() error {
-			defer func() { panic(v) }()
-			runtime.Goexit()
-			afterExit = true
-			return nil
+	for _, revcall := range []bool{false, true} {
+		t.Run(fmt.Sprintf("revcall=%v", revcall), func(t *testing.T) {
+			v, o1, o2 := new(struct{ n int }), errors.New("before cleanup"), errors.New("cleanup")
+			var afterExit, afterCall bool
+			outcome, unwind := runTreeLockedV1(func(out *transactionOutcome) treeUnwindV1 {
+				defer func() { *out = transactionOutcome{err: o2} }()
+				*out = transactionOutcome{err: o1}
+				u, _ := treeCallV1(treeCallProviderPanicGoexit(v, revcall, &afterExit))
+				afterCall = true
+				return u
+			})
+			if any(outcome.err) != any(o2) || outcome.poisoned || unwind != (treeUnwindV1{kind: 2}) {
+				t.Fatalf("provider panic during Goexit = (%+v, %+v), want (%v, kind 2, value nil)", outcome, unwind, o2)
+			}
+			if afterExit || afterCall {
+				t.Fatalf("post-Goexit statements ran: afterExit %v afterCall %v", afterExit, afterCall)
+			}
+			if !treeCallPoll(treeCallWorkersGone) {
+				t.Fatalf("worker frame remained after Goexit delivery: %d", treeCallWorkerCount())
+			}
 		})
-		afterCall = true
-		return u
-	})
-	if any(outcome.err) != any(o2) || outcome.poisoned || unwind != (treeUnwindV1{kind: 2}) {
-		t.Fatalf("provider panic during Goexit = (%+v, %+v), want (%v, kind 2, value nil)", outcome, unwind, o2)
-	}
-	if afterExit || afterCall {
-		t.Fatalf("post-Goexit statements ran: afterExit %v afterCall %v", afterExit, afterCall)
-	}
-	if !treeCallPoll(treeCallWorkersGone) {
-		t.Fatalf("worker frame remained after Goexit delivery: %d", treeCallWorkerCount())
 	}
 }
 
