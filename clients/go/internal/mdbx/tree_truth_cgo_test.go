@@ -243,11 +243,12 @@ func TestTreeLagReadbackNewV1(t *testing.T) {
 	if commit.ReadbackCause != nil || evidence.commits < 1 || run.calls != 1 || strings.Join(run.read, "|") != ttLagSeen {
 		t.Fatalf("readback NEW: %v %+v calls %d read %v", commit.ReadbackCause, evidence, run.calls, run.read)
 	}
+	// Non-fatal, so the after-commit check below is observed in the same run.
 	if got := strings.Join(run.ledger.log, "|"); got != "charge 46|charge 46|charge 48|charge 44|charge 7|commit" {
-		t.Fatalf("P_w ledger log %s, want high-water %d", got, ttHW)
+		t.Errorf("P_w ledger log %s, want high-water %d", got, ttHW)
 	}
-	if len(run.ledger.after(t, "commit")) != 0 {
-		t.Fatal("ledger call after commit")
+	if after := run.ledger.after(t, "commit"); len(after) != 0 {
+		t.Fatalf("ledger calls after commit %v", after)
 	}
 }
 
@@ -375,12 +376,16 @@ func TestTreeReadbackOverBudgetV1(t *testing.T) {
 	}
 	outcome, _ := ttLagFault(t, store, run, 8, 6, ttOut)
 	commit := ttCommitError(t, outcome, CommitTruthUnknown)
+	// Non-fatal, so each of the three properties is observed in the same run.
 	if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) || !treeSameErrorV1(later, errOperationReservationCapacity) || !treeSameErrorV1(small, errOperationReservationCapacity) {
-		t.Fatalf("over budget %v / %v / %v", commit.ReadbackCause, later, small)
+		t.Errorf("over budget %v / %v / %v", commit.ReadbackCause, later, small)
 	}
 	_, _, err := updateResult(outcome, nil)
-	if IsOperationReservationCapacity(err) || !IsOperationReservationCapacity(commit.ReadbackCause) || len(run.ledger.after(t, "commit")) != 0 {
-		t.Fatal("capacity identity or ledger call after commit")
+	if IsOperationReservationCapacity(err) || !IsOperationReservationCapacity(commit.ReadbackCause) {
+		t.Errorf("capacity identity %v / %v", err, commit.ReadbackCause)
+	}
+	if after := run.ledger.after(t, "commit"); len(after) != 0 {
+		t.Fatalf("ledger calls after commit %v", after)
 	}
 }
 
