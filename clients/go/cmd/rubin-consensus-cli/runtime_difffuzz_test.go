@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -15,10 +16,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/filelock"
 )
 
 var (
@@ -236,37 +239,87 @@ func requireRustConsensusCLI(t *testing.T) string {
 			rustConsensusCLIBuildErr = fmt.Errorf("mkdir difffuzz target dir: %w", err)
 			return
 		}
-		cmd := exec.Command(
-			"cargo",
-			"build",
-			"--message-format=json-render-diagnostics",
-			"--target-dir",
-			targetDir,
-			"-p",
-			"rubin-consensus-cli",
-			"--bin",
-			"rubin-consensus-cli",
-		)
-		cmd.Dir = rustDir
-		var stdout bytes.Buffer
-		cmd.Stdout = &stdout
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			rustConsensusCLIBuildErr = fmt.Errorf("cargo build rubin-consensus-cli: %w\n%s", err, stderr.String())
-			return
-		}
-		binPath, err := cargoExecutablePathForDiffFuzz(stdout.Bytes(), "rubin-consensus-cli")
-		if err != nil {
-			rustConsensusCLIBuildErr = fmt.Errorf("resolve cargo executable path: %w", err)
-			return
-		}
-		rustConsensusCLIBinPath = binPath
+		rustConsensusCLIBinPath, rustConsensusCLIBuildErr = publishRustConsensusCLIForDiffFuzz(targetDir, 10*time.Minute,
+			func() (string, error) { return cargoBuildRustConsensusCLIForDiffFuzz(rustDir, targetDir) })
 	})
 	if rustConsensusCLIBuildErr != nil {
 		t.Fatalf("build rust consensus cli: %v", rustConsensusCLIBuildErr)
 	}
 	return rustConsensusCLIBinPath
+}
+
+func cargoBuildRustConsensusCLIForDiffFuzz(rustDir, targetDir string) (string, error) {
+	cmd := exec.CommandContext(context.Background(), "cargo", "build", "--message-format=json-render-diagnostics", "--target-dir", targetDir, "-p", "rubin-consensus-cli", "--bin", "rubin-consensus-cli")
+	cmd.Dir = rustDir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("cargo build rubin-consensus-cli: %w\n%s", err, stderr.String())
+	}
+	binPath, err := cargoExecutablePathForDiffFuzz(stdout.Bytes(), "rubin-consensus-cli")
+	if err != nil {
+		return "", fmt.Errorf("resolve cargo executable path: %w", err)
+	}
+	return binPath, nil
+}
+
+// publishRustConsensusCLIForDiffFuzz runs build under a cross-process lock and renames a
+// copy of its output to one fixed path, so no worker execs a file cargo is replacing.
+func publishRustConsensusCLIForDiffFuzz(targetDir string, wait time.Duration, build func() (string, error)) (string, error) {
+	lock, err := acquireDiffFuzzBuildLock(filepath.Join(targetDir, "difffuzz-build.lock"), wait)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = lock.Release() }()
+	src, err := build()
+	if err != nil {
+		return "", err
+	}
+	return publishDiffFuzzBinary(src, filepath.Join(targetDir, "difffuzz-bin"))
+}
+
+func acquireDiffFuzzBuildLock(path string, wait time.Duration) (*filelock.Handle, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		lock, result, err := filelock.Acquire(path)
+		if err == nil {
+			return lock, nil
+		}
+		if result != filelock.ResultContended {
+			return nil, fmt.Errorf("acquire difffuzz build lock %s (%s): %w", path, result, err)
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("difffuzz build lock %s still contended after %s", path, wait)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func publishDiffFuzzBinary(src, binDir string) (string, error) {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(binDir, "rubin-consensus-cli.tmp-*")
+	if err != nil {
+		return "", err
+	}
+	dst := filepath.Join(binDir, "rubin-consensus-cli")
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Chmod(0o755)
+	}
+	if err = errors.Join(err, tmp.Close()); err == nil {
+		err = os.Rename(tmp.Name(), dst)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	return dst, nil
 }
 
 func runRustConsensusCLIRequest(t *testing.T, bin string, req Request) Response {
@@ -472,4 +525,125 @@ func repoRootForDiffFuzz(t *testing.T) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
+}
+
+func newDiffFuzzTarget(t *testing.T, binary []byte) (string, string) {
+	t.Helper()
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("difffuzz build lock is unsupported on %s", runtime.GOOS)
+	}
+	targetDir := t.TempDir()
+	src := filepath.Join(targetDir, "cargo-out")
+	writeDiffFuzzFile(t, src, binary)
+	return targetDir, src
+}
+
+func writeDiffFuzzFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := errors.Join(os.MkdirAll(filepath.Dir(path), 0o755), os.WriteFile(path, data, 0o644)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDiffFuzzFileBytes(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("%s holds %q (err %v), want %q", path, got, err, want)
+	}
+}
+
+func publishDiffFuzzOnce(t *testing.T, targetDir, src string) string {
+	t.Helper()
+	calls := 0
+	got, err := publishRustConsensusCLIForDiffFuzz(targetDir, time.Second, func() (string, error) { calls++; return src, nil })
+	if err != nil || calls != 1 {
+		t.Fatalf("publish: err=%v calls=%d", err, calls)
+	}
+	return got
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_ReplacesEarlierFile(t *testing.T) {
+	targetDir, src := newDiffFuzzTarget(t, []byte("new-binary"))
+	writeDiffFuzzFile(t, filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli"), []byte("old"))
+	assertDiffFuzzFileBytes(t, publishDiffFuzzOnce(t, targetDir, src), []byte("new-binary"))
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_PublishesCompleteCopy(t *testing.T) {
+	targetDir, src := newDiffFuzzTarget(t, []byte("binary-v1"))
+	got := publishDiffFuzzOnce(t, targetDir, src)
+	if want := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli"); got != want {
+		t.Fatalf("published path %q, want %q", got, want)
+	}
+	info, err := os.Lstat(got)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o755 {
+		t.Fatalf("published file: info=%v err=%v", info, err)
+	}
+	writeDiffFuzzFile(t, src, []byte("binary-v2-rewritten"))
+	assertDiffFuzzFileBytes(t, got, []byte("binary-v1"))
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_SerializesBuilds(t *testing.T) {
+	binary := bytes.Repeat([]byte{0x5a}, 1<<16)
+	targetDir, src := newDiffFuzzTarget(t, binary)
+	var running, maxRunning atomic.Int32
+	build := func() (string, error) {
+		n := running.Add(1)
+		for cur := maxRunning.Load(); n > cur && !maxRunning.CompareAndSwap(cur, n); cur = maxRunning.Load() {
+		}
+		time.Sleep(50 * time.Millisecond)
+		running.Add(-1)
+		return src, nil
+	}
+	want := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli")
+	results, start := make(chan string, 8), make(chan struct{})
+	for range 8 {
+		go func() {
+			<-start
+			got, err := publishRustConsensusCLIForDiffFuzz(targetDir, 5*time.Second, build)
+			results <- fmt.Sprintf("%s err=%v", got, err)
+		}()
+	}
+	close(start)
+	timeout := time.After(10 * time.Second)
+	for range 8 {
+		select {
+		case got := <-results:
+			if got != want+" err=<nil>" {
+				t.Fatalf("publish returned %q, want %q", got, want)
+			}
+		case <-timeout:
+			t.Fatal("publishers did not finish within 10s")
+		}
+	}
+	if maxRunning.Load() != 1 {
+		t.Fatalf("max concurrent builds %d, want 1", maxRunning.Load())
+	}
+	assertDiffFuzzFileBytes(t, want, binary)
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_ContendedLockTimesOut(t *testing.T) {
+	targetDir, _ := newDiffFuzzTarget(t, nil)
+	held, _, err := filelock.Acquire(filepath.Join(targetDir, "difffuzz-build.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = held.Release() }()
+	calls := 0
+	_, err = publishRustConsensusCLIForDiffFuzz(targetDir, 300*time.Millisecond, func() (string, error) { calls++; return "", nil })
+	if err == nil || calls != 0 {
+		t.Fatalf("contended publish: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestPublishRustConsensusCLIForDiffFuzz_BuildErrorKeepsEarlierFile(t *testing.T) {
+	targetDir, _ := newDiffFuzzTarget(t, nil)
+	published := filepath.Join(targetDir, "difffuzz-bin", "rubin-consensus-cli")
+	writeDiffFuzzFile(t, published, []byte("old"))
+	buildErr := errors.New("cargo failed")
+	_, err := publishRustConsensusCLIForDiffFuzz(targetDir, time.Second, func() (string, error) { return "", buildErr })
+	if !errors.Is(err, buildErr) {
+		t.Fatalf("publish error %v, want %v", err, buildErr)
+	}
+	assertDiffFuzzFileBytes(t, published, []byte("old"))
 }
