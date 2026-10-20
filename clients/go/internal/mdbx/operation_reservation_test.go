@@ -291,9 +291,9 @@ func TestOperationReservationOwnerOrder(t *testing.T) {
 		{"order nil owner", invalid(nil)},
 		{"order zero-value owner", invalid(&OperationReservationOwner{})},
 		{"order nil callback before capacity", func(t *testing.T, label string) {
-			owner := reservationFilled(t, 154611151)
+			owner, none := reservationFilled(t, 154611151), 0
 			for _, bytes := range []uint64{154611152, 1} {
-				wantReservationSentinel(t, label, owner.WithReservation(bytes, nil), errOperationReservationInput, textReservationInput)
+				reservationInput(t, fmt.Sprintf("%s bytes %d", label, bytes), owner, &none, func(*testing.T) error { return owner.WithReservation(bytes, nil) })
 			}
 			reservationMustAdmit(t, label, owner, 154611151)
 		}},
@@ -618,9 +618,15 @@ func accountRun(t *testing.T, label string, owner *OperationReservationOwner, ki
 }
 
 func accountHeld(a *OperationAccount) uint64 {
+	held, _ := accountState(a)
+	return held
+}
+
+// accountState reads the held sum and closed flag of a under its origin's mutex.
+func accountState(a *OperationAccount) (held uint64, closed bool) {
 	a.shared.origin.mu.Lock()
 	defer a.shared.origin.mu.Unlock()
-	return a.shared.held
+	return a.shared.held, a.shared.closed
 }
 
 // accountCharge charges bytes on a, running inner while held, and reports admission; a refusal must be the
@@ -680,8 +686,8 @@ func reservationInput(t *testing.T, label string, owner *OperationReservationOwn
 }
 
 // accountInput requires, in its own subtest named label, the input refusal from a charge on a, with no callback
-// run and no live change on owner, which must be a's origin when a was opened; a panic from the call fails that
-// subtest at this row.
+// run and no live change on owner, which must be a's origin when a was opened, and, when a has shared state, no
+// change of its held sum or closed flag across the call; a panic from the call fails that subtest at this row.
 func accountInput(t *testing.T, label string, owner *OperationReservationOwner, a *OperationAccount, bytes uint64, withCallback bool) {
 	t.Helper()
 	calls := 0
@@ -690,16 +696,27 @@ func accountInput(t *testing.T, label string, owner *OperationReservationOwner, 
 		callback = func() error { calls++; return nil }
 	}
 	reservationInput(t, label, owner, &calls, func(t *testing.T) error {
-		if a != nil && a.shared != nil && a.shared.origin != owner.shared {
+		if a == nil || a.shared == nil {
+			return a.WithReservation(bytes, callback)
+		}
+		if a.shared.origin != owner.shared {
 			t.Fatalf("%s: owner is not the account's origin", label)
 		}
-		return a.WithReservation(bytes, callback)
+		held, closed := accountState(a)
+		err := a.WithReservation(bytes, callback)
+		if afterHeld, afterClosed := accountState(a); afterHeld != held || afterClosed != closed {
+			t.Fatalf("%s: input refusal changed held %d to %d, closed %v to %v", label, held, afterHeld, closed, afterClosed)
+		}
+		return err
 	})
 }
 
-// TestOperationReservationInputBelowFloor pins input precedence over the below-R_MIN capacity refusal (R4) on every
-// entry of owners of limit 0 and 805306367: a nil callback on the legacy charge, on WithOperation and on an open
-// account's charge, and a kind outside {1, 2} on WithOperation, each return the input refusal and charge nothing.
+// TestOperationReservationInputBelowFloor pins R4 input refusals on owners of limit 0 and 805306367. On the legacy
+// charge and on an open account's charge, a nil callback returns the input refusal ahead of the below-R_MIN capacity
+// refusal those charges would otherwise return. WithOperation performs no capacity check, so its rows (a nil
+// callback, and a kind outside {1, 2}) pin only that a below-floor owner still answers them with the input refusal
+// and no capacity refusal comes first. No row runs a callback, changes the owner's live counter or, on an account,
+// changes its held sum or closed flag.
 func TestOperationReservationInputBelowFloor(t *testing.T) {
 	none := 0
 	for _, limit := range []uint64{0, 805306367} {
@@ -897,16 +914,14 @@ func TestOperationAccountErrorIdentity(t *testing.T) {
 
 func TestOperationAccountInput(t *testing.T) {
 	owner := reservationOwner(t, specRMin)
+	// run requires the input refusal from WithOperation on o, with no callback run and no live change on owner.
 	run := func(label string, o *OperationReservationOwner, kind OperationKind, withCallback bool) {
 		calls := 0
 		callback := func(*OperationAccount) error { calls++; return nil }
 		if !withCallback {
 			callback = nil
 		}
-		wantReservationSentinel(t, label, o.WithOperation(kind, callback), errOperationReservationInput, textReservationInput)
-		if calls != 0 {
-			t.Fatalf("%s: callback ran %d times", label, calls)
-		}
+		reservationInput(t, label, owner, &calls, func(*testing.T) error { return o.WithOperation(kind, callback) })
 	}
 	for _, kind := range []OperationKind{0, 3, 255} {
 		run(fmt.Sprintf("R4 kind %d", kind), owner, kind, true)
@@ -914,7 +929,7 @@ func TestOperationAccountInput(t *testing.T) {
 	run("R4 nil owner", nil, TreeOperation, true)
 	run("R4 zero-value owner", &OperationReservationOwner{}, TreeOperation, true)
 	run("R4 zero-value owner below floor irrelevant", &OperationReservationOwner{}, LaneOperation, true)
-	run("R4 nil callback", owner, TreeOperation, false)
+	run("R4 WithOperation nil callback", owner, TreeOperation, false)
 	var retained *OperationAccount
 	accountRun(t, "R4 retain", owner, TreeOperation, func(a *OperationAccount) {
 		retained = a
@@ -932,7 +947,9 @@ func TestOperationAccountInput(t *testing.T) {
 		label, below := fmt.Sprintf("R4 closed account below floor %d", limit), reservationOwner(t, limit)
 		var closed *OperationAccount
 		accountRun(t, label, below, TreeOperation, func(a *OperationAccount) { closed = a })
-		accountInput(t, label, below, closed, 0, true)
+		for _, bytes := range []uint64{0, 1} {
+			accountInput(t, fmt.Sprintf("%s bytes %d", label, bytes), below, closed, bytes, true)
+		}
 		if held := accountHeld(closed); held != 0 {
 			t.Fatalf("%s: held=%d", label, held)
 		}
