@@ -282,19 +282,21 @@ self_test_inventory() {
   st_case "no test files footer" "EMPTY_INVENTORY" "$(pn 0 "?   ${TAB}${N}${TAB}[no test files]${nl}")"
   st_case "footer without trailing tab" "inventory OK: 1 targets" "$(pn 0 "FuzzA${nl}ok  ${TAB}${N}")" ${a}
   st_case "path outside module prefix" "STALE ${a}${nl}UNSUPPORTED example.com/other" "$(package_records example.com/other 0 "")" ${a}
-  ST_LIST_RC=1 ST_LIST_OUT="${N}${nl}" ST_N_RC=0 ST_N_OUT="FuzzA${nl}${fn}"
+  ST_LIST_RC=1 ST_LIST_OUT="${N}${nl}" ST_N_RC=1 ST_N_OUT="FuzzA${nl}${fn}"
   st_disc "go list failure" "DISCOVERY_FAILED go list" ${a}
   st_disc "go list failure beside duplicate" "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" ${a} ${a}
-  ST_LIST_RC=0 ST_LIST_OUT="${N}${nl}${MODULE_PREFIX}consensus${nl}" ST_C_OUT="FuzzC${nl}${fc}"
+  ST_LIST_RC=0 ST_N_RC=0 ST_LIST_OUT="${N}${nl}${MODULE_PREFIX}consensus${nl}" ST_C_OUT="FuzzC${nl}${fc}"
   st_disc "go list ok, packages compared" "inventory OK: 2 targets" ${a} ./consensus:FuzzC
+  ST_LIST_OUT+="example.com/other${nl}"
+  st_disc "go list ok, foreign path unsupported" "UNSUPPORTED example.com/other" ${a} ./consensus:FuzzC
   GO_CMD=(st_go)
   noise="$(st_go test node 2>&1 >/dev/null)"
   if [[ "$(discover_inventory 2>&1 >/dev/null </dev/null)" != "${noise}${nl}${noise}" ]]; then
-    echo "SELF-TEST FAIL: go stderr passes through unclassified" >&2
+    echo "SELF-TEST FAIL: go stderr passes through, foreign path not run" >&2
     ST_FAILS=$((ST_FAILS + 1))
   fi
   ST_N_RC=1
-  st_disc "forwarded list-run exit code" "DISCOVERY_FAILED ${N}" ${a} ./consensus:FuzzC
+  st_disc "forwarded list-run exit code" "DISCOVERY_FAILED ${N}${nl}UNSUPPORTED example.com/other" ${a} ./consensus:FuzzC
   recs="$(pn 0 "${fn}")"
   st_case "empty compiled output" "EMPTY_INVENTORY" "${recs}" ${a}
   st_case "empty compiled output beside duplicate" "DUPLICATE ${a}${nl}EMPTY_INVENTORY" "${recs}" ${a} ${a}
