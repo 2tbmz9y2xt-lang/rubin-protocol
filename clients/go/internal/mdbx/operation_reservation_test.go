@@ -215,7 +215,7 @@ func TestOperationReservationOwnerBounds(t *testing.T) {
 		{"bounds zero bytes", func(t *testing.T, label string) { reservationMustAdmit(t, label, reservationFilled(t, 154611151), 0) }},
 		{"bounds one byte", func(t *testing.T, label string) { reservationMustAdmit(t, label, reservationFilled(t, 154611151), 1) }},
 		{"bounds per-operation exact", func(t *testing.T, label string) {
-			reservationMustAdmit(t, label, reservationFilled(t, 309222303), 154611151)
+			reservationMustAdmit(t, label, reservationFilled(t, 309222303), 154611183)
 		}},
 		{"bounds aggregate exact", func(t *testing.T, label string) {
 			inner := 0
@@ -251,7 +251,7 @@ func TestOperationReservationOwnerBounds(t *testing.T) {
 			reservationMustAdmit(t, label, owner, 1)
 			reservationMustRefuse(t, label, owner, 2)
 			reservationInjectLive(owner, 0)
-			reservationMustAdmit(t, label, owner, 154611151)
+			reservationMustAdmit(t, label, owner, 154611183)
 		}},
 		{"bounds live above limit", func(t *testing.T, label string) {
 			owner := reservationFilled(t, 154611151)

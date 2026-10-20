@@ -1112,7 +1112,8 @@ const (
 )
 
 // SelectedDamageEvidence is the bounded native evidence of one armed invocation: site counters, injected faults and
-// the full-lane probe observations at post-plan write begin, commit, readback begin and around the OLD abort.
+// the MaxOperationDataBytes probe observations at post-plan write begin, commit, readback begin and around the OLD
+// abort.
 type SelectedDamageEvidence struct {
 	BeginOld, BeginWrite, BeginRead uint64
 	OldGets                         [8]uint64
@@ -1130,8 +1131,8 @@ type selectedDamageProbe struct {
 
 var selectedDamageMu sync.Mutex
 
-// rubinSelectedDamageProbe is the fixed synchronous reservation probe: one competing full-lane WithReservation whose
-// callback only counts; it touches no Store, spawns nothing and never panics.
+// rubinSelectedDamageProbe is the fixed synchronous reservation probe: one competing WithReservation of the legacy
+// MaxOperationDataBytes budget whose callback only counts; it touches no Store, spawns nothing and never panics.
 //
 //export rubinSelectedDamageProbe
 func rubinSelectedDamageProbe(handle C.uintptr_t) {

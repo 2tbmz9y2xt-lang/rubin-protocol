@@ -8,7 +8,7 @@ import (
 // LaneMaxBytes (LANE_MAX) is the reservation ceiling of every storage operation other than
 // a complete-block tree-integrated one; TreeLaneMaxBytes (TREE_LANE_MAX) is the ceiling of
 // one complete-block tree-integrated operation; MinReservationLimit (R_MIN = R_DEFAULT) is
-// the smallest aggregate limit under which an owner admits any charge.
+// the smallest aggregate limit at which an owner admits any charge.
 const (
 	LaneMaxBytes        uint64 = 154_611_183
 	TreeLaneMaxBytes    uint64 = 402_653_184
@@ -87,9 +87,10 @@ type operationReservationToken struct {
 
 // OperationReservationOwner admits storage operation bytes against one process-local
 // aggregate limit. Every copy of an owner shares the same limit and live counter, nothing
-// is persisted, and the zero value refuses every call. An owner below MinReservationLimit
-// refuses every charge with the capacity refusal; it never latches or clamps. An owner and
-// every copy of it is safe for concurrent use.
+// is persisted, and the zero value refuses every call with the input refusal. An owner
+// below MinReservationLimit refuses with the capacity refusal every charge that passes the
+// input checks (a nil callback or a closed account is the input refusal first); it never
+// latches or clamps. An owner and every copy of it is safe for concurrent use.
 //
 // A tree-integrated operation opens exactly one WithOperation(TreeOperation) before its
 // first charge and charges every primitive only through that account; an owner
