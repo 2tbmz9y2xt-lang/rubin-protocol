@@ -217,6 +217,11 @@ inventory_compare() {
   return 1
 }
 
+# The --check-inventory pipeline; listed keys in "$@".
+check_inventory() {
+  discover_inventory | inventory_compare "$@"
+}
+
 st_case() {
   local name="$1" want="$2" recs="$3" got rc=0 want_rc=1
   shift 3
@@ -228,12 +233,14 @@ st_case() {
   fi
 }
 
+# shellcheck disable=SC2329
+# Invoked indirectly via GO_CMD.
 # Stand-in for go (GO_CMD) in the self-test: scripted exit codes and stdout, noise on stderr.
 st_go() {
+  echo "#warning st_go $1 noise" >&2
   case "$1" in
     list) printf '%s' "${ST_LIST_OUT}"; return "${ST_LIST_RC}" ;;
   esac
-  echo "#warning st_go noise" >&2
   case "${!#}" in
     *node) printf '%s' "${ST_N_OUT}"; return "${ST_N_RC}" ;;
     *) printf '%s' "${ST_C_OUT}"; return 0 ;;
@@ -248,11 +255,24 @@ st_disc() {
   st_case "${name}" "${want}" "${recs}" "$@"
 }
 
+# Runs check_inventory against st_go and compares its stderr; defect cases only (exit 1).
+st_err() {
+  local name="$1" want="$2" got rc=0
+  local GO_CMD=(st_go)
+  shift 2
+  got="$(check_inventory "$@" 2>&1 >/dev/null </dev/null)" || rc=$?
+  if [[ "${got}" != "${want}" || "${rc}" -ne 1 ]]; then
+    echo "SELF-TEST FAIL: ${name}: rc=${rc} stderr <<${got}>> want <<${want}>>" >&2
+    ST_FAILS=$((ST_FAILS + 1))
+  fi
+}
+
 pn() { package_records "${MODULE_PREFIX}node" "$@"; }
 pc() { package_records "${MODULE_PREFIX}consensus" "$@"; }
 
 self_test_inventory() {
-  local nl=$'\n' N="${MODULE_PREFIX}node" fn fc recs k want noise a=./node:FuzzA
+  local nl=$'\n' N="${MODULE_PREFIX}node" fn fc recs k want a=./node:FuzzA
+  local lw="#warning st_go list noise" tw="#warning st_go test noise"
   local cgo=(./consensus:FuzzConnectBlockInMemory ./consensus:FuzzTxDepGraphBuild ./consensus:FuzzDAChunkHashVerify
     ./consensus:FuzzDAPayloadCommitVerify ./consensus:FuzzUtxoApplyNonCoinbase ./consensus:FuzzVerifySigDispatch
     ./consensus:FuzzSigCacheDeterminism ./consensus:FuzzSigCheckQueueFlush ./consensus:FuzzSigCacheConcurrentAccess
@@ -285,16 +305,12 @@ self_test_inventory() {
   ST_LIST_RC=1 ST_LIST_OUT="${N}${nl}" ST_N_RC=1 ST_N_OUT="FuzzA${nl}${fn}"
   st_disc "go list failure" "DISCOVERY_FAILED go list" ${a}
   st_disc "go list failure beside duplicate" "DISCOVERY_FAILED go list${nl}DUPLICATE ${a}" ${a} ${a}
+  st_err "go list failure: stderr is only go list stderr, no package run" "${lw}" ${a}
   ST_LIST_RC=0 ST_N_RC=0 ST_LIST_OUT="${N}${nl}${MODULE_PREFIX}consensus${nl}" ST_C_OUT="FuzzC${nl}${fc}"
   st_disc "go list ok, packages compared" "inventory OK: 2 targets" ${a} ./consensus:FuzzC
   ST_LIST_OUT+="example.com/other${nl}"
   st_disc "go list ok, foreign path unsupported" "UNSUPPORTED example.com/other" ${a} ./consensus:FuzzC
-  GO_CMD=(st_go)
-  noise="$(st_go test node 2>&1 >/dev/null)"
-  if [[ "$(discover_inventory 2>&1 >/dev/null </dev/null)" != "${noise}${nl}${noise}" ]]; then
-    echo "SELF-TEST FAIL: go stderr passes through, foreign path not run" >&2
-    ST_FAILS=$((ST_FAILS + 1))
-  fi
+  st_err "stderr is only go list and go test -list stderr, foreign path not run" "${lw}${nl}${tw}${nl}${tw}" ${a} ./consensus:FuzzC
   ST_N_RC=1
   st_disc "forwarded list-run exit code" "DISCOVERY_FAILED ${N}${nl}UNSUPPORTED example.com/other" ${a} ./consensus:FuzzC
   recs="$(pn 0 "${fn}")"
@@ -337,7 +353,7 @@ if (($# > 0)); then
         exit $?
       fi
       cd "${GO_DIR}"
-      if discover_inventory | inventory_compare "${TARGETS[@]}"; then exit 0; fi
+      if check_inventory "${TARGETS[@]}"; then exit 0; fi
       exit 1
       ;;
     --target)
