@@ -189,8 +189,10 @@ func testTreeBindingKey(g uint64) string {
 }
 
 func testTreeOldBinding(top *testTreeNode, endpoint TreeEndpointV1) RootBindingV1 {
-	b := RootBindingV1{DatabaseID: [32]byte{0x44}, CommitmentVersion: 1, Endpoint: endpoint,
-		Assurance: TreeAssuranceV1{Kind: TreeAssuranceFullHistoryV1}}
+	b := RootBindingV1{
+		DatabaseID: [32]byte{0x44}, CommitmentVersion: 1, Endpoint: endpoint,
+		Assurance: TreeAssuranceV1{Kind: TreeAssuranceFullHistoryV1},
+	}
 	for i := range b.DatabaseID {
 		b.DatabaseID[i], b.ChainID[i], b.GenesisHash[i] = 0x44, 0x55, 0x66
 	}
@@ -424,8 +426,10 @@ func TestTreeEmitV1A7DeleteDown(t *testing.T) {
 	if b.RootDigest != testTreeHex(t, "14bd6311f35ed9534d8cd8a101bc09c5d289978e393e775271fd9e446c8cde8d") || b.Top.Kind != TreeTopLeafV1 {
 		t.Fatal("C02 top leaf")
 	}
-	c2 := testTreeCase{oldEntries: testTreeABC()[:1], oldEP: testTreeApplied(0, 0x77, 1), preGenesis: true,
-		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)}}
+	c2 := testTreeCase{
+		oldEntries: testTreeABC()[:1], oldEP: testTreeApplied(0, 0x77, 1), preGenesis: true,
+		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)},
+	}
 	b = c2.run(t, nil).accept(t, 7, []string{testTreeTarget(7, 288, testKA, false)}, nil, []string{testTreeNodeRead(7, 288, testKA)})
 	if b.RootDigest != treeEmptyDigestV1() || b.Top.Kind != TreeTopEmptyV1 || b.Endpoint.Kind != TreeEndpointPreGenesisV1 {
 		t.Fatal("C01 empty")
@@ -469,12 +473,14 @@ func TestTreeEmitV1A10EmptyStream(t *testing.T) {
 
 func TestTreeEmitV1A12AssuranceCopy(t *testing.T) {
 	ref := &TreeImportReferenceV1{OriginalDatabaseID: testTreeHash(0x99), OriginalCurrentID: 3, OriginalLagID: 4, OriginalRole: TreeOriginalCurrentV1, EvidenceID: testTreeHash(0xaa)}
-	c := testTreeCase{oldEntries: testTreeABC()[:1], stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())},
+	c := testTreeCase{
+		oldEntries: testTreeABC()[:1], stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())},
 		mutate: func(_ map[string][]byte, b *RootBindingV1) {
 			if b != nil {
 				b.Assurance = TreeAssuranceV1{Kind: TreeAssuranceImportedBaseV1, Import: ref}
 			}
-		}}
+		},
+	}
 	b := c.run(t, nil).accept(t, 7, []string{testTreeTarget(7, 288, testKA, true)}, nil, []string{testTreeNodeRead(7, 288, testKA)})
 	if b.Assurance.Kind != TreeAssuranceImportedBaseV1 || *b.Assurance.Import != *ref {
 		t.Fatal("A12")
@@ -538,12 +544,14 @@ func TestTreeEmitV1R1AbsentChild(t *testing.T) {
 }
 
 func TestTreeEmitV1R2MalformedLeaf(t *testing.T) {
-	c := testTreeCase{oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())},
+	c := testTreeCase{
+		oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())},
 		mutate: func(rows map[string][]byte, b *RootBindingV1) {
 			if b == nil {
 				rows[testTreeRef(7, 288, testKA)] = append(rows[testTreeRef(7, 288, testKA)], 0)
 			}
-		}}
+		},
+	}
 	c.run(t, nil).refusal(t, errSchema, "get")
 }
 
@@ -569,7 +577,7 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 		r := base.run(t, func(o *testTreeOld, _ *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 			o.failN, o.fail = n, sentinel
 		})
-		if r.err != sentinel || r.foldErr != sentinel || len(r.reads) != n || len(r.emit.targets) != 0 {
+		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) || len(r.reads) != n || len(r.emit.targets) != 0 {
 			t.Fatalf("R4 n=%d: %v %v %v", n, r.err, r.foldErr, r.reads)
 		}
 	}
@@ -577,20 +585,20 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 		r := base.run(t, func(_ *testTreeOld, l *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 			l.failN, l.fail = n, sentinel
 		})
-		if r.err != sentinel || r.foldErr != sentinel {
+		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) {
 			t.Fatalf("R5 n=%d: %v %v", n, r.err, r.foldErr)
 		}
 	}
 	r := base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 		e.failAt, e.fail = 1, sentinel
 	})
-	if r.err != sentinel || len(r.emit.targets) != 1 || len(r.emit.refers) != 0 {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 1 || len(r.emit.refers) != 0 {
 		t.Fatalf("R6 emit: %v %v", r.err, r.emit.targets)
 	}
 	r = base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 		e.failAt, e.fail = -1, sentinel
 	})
-	if r.err != sentinel || len(r.emit.refers) != 1 || len(r.emit.targets) != 3 {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || len(r.emit.targets) != 3 {
 		t.Fatalf("R6 refer: %v %v %v", r.err, r.emit.targets, r.emit.refers)
 	}
 }
@@ -619,8 +627,10 @@ func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
 		}
 	}
 	c.run(t, nil).accept(t, 7, []string{testTreeTarget(7, 288, testKC, true), testTreeTarget(7, 0, [36]byte{}, true)}, []string{testTreeRef(7, 287, [36]byte{})}, nil)
-	c = testTreeCase{oldEntries: testTreeABC()[:2], oldEP: testTreeApplied(0, 0x77, 1), preGenesis: true,
-		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)}}
+	c = testTreeCase{
+		oldEntries: testTreeABC()[:2], oldEP: testTreeApplied(0, 0x77, 1), preGenesis: true,
+		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)},
+	}
 	// R10 is reached after the walk (Encode), where earlier node emits are permitted (D14-3).
 	c.run(t, nil).refusal(t, errSchema, "")
 }
@@ -708,12 +718,14 @@ func TestTreeEmitV1R11R12TopAndChildDigest(t *testing.T) {
 }
 
 func TestTreeEmitV1R15GenerationZero(t *testing.T) {
-	r := testTreeCase{zeroGen: true, oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(0, testKC, false, testTreeE())},
+	r := testTreeCase{
+		zeroGen: true, oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(0, testKC, false, testTreeE())},
 		mutate: func(rows map[string][]byte, b *RootBindingV1) {
 			if b == nil {
 				delete(rows, testTreeBindingKey(0))
 			}
-		}}.run(t, nil)
+		},
+	}.run(t, nil)
 	r.refusal(t, nil, "get")
 	if !reflect.DeepEqual(r.reads, []string{"0:110000000000000000"}) || len(r.emit.targets)+len(r.emit.refers) != 0 {
 		t.Fatalf("R15 reads %v", r.reads)
@@ -725,10 +737,10 @@ func TestTreeEmitV1K2LedgerRefusal(t *testing.T) {
 	log := &testTreeLog{}
 	old, leaves := &testTreeOld{rows: map[string][]byte{}, log: log}, &testTreeLeaves{log: log}
 	ledger := &testTreeLedger{log: log, refuse: sentinel}
-	if err := treeEmitNodesV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, &testTreeEmit{log: log}, ledger); err != sentinel {
+	if err := treeEmitNodesV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, &testTreeEmit{log: log}, ledger); !testTreeExact(err, sentinel) {
 		t.Fatal(err)
 	}
-	if err := treeFoldV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, ledger); err != sentinel {
+	if err := treeFoldV1(old, 7, TreeEndpointV1{}, [32]byte{}, leaves, ledger); !testTreeExact(err, sentinel) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(log.calls, []string{"charge 147968", "charge 147968"}) {
@@ -752,6 +764,7 @@ func TestTreeEmitV1K3FrameGuards(t *testing.T) {
 			}
 		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.String, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 			t.Fatalf("frame holds %v", ty)
+		default:
 		}
 	}
 	walk(reflect.TypeOf(f))
@@ -988,7 +1001,7 @@ func TestTreeEmitV1R4R6Extended(t *testing.T) {
 			r := c.tc.run(t, func(o *testTreeOld, _ *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 				o.failN, o.fail = c.n, inj
 			})
-			if r.err != inj || r.foldErr != inj || len(r.reads) != c.n || len(r.foldRd) != c.n || len(r.emit.targets)+len(r.emit.refers) != 0 || r.log[len(r.log)-2] != "get" {
+			if !testTreeExact(r.err, inj) || !testTreeExact(r.foldErr, inj) || len(r.reads) != c.n || len(r.foldRd) != c.n || len(r.emit.targets)+len(r.emit.refers) != 0 || r.log[len(r.log)-2] != "get" {
 				t.Fatalf("R4 n=%d: %v %v", c.n, r.err, r.log)
 			}
 		}
@@ -996,13 +1009,18 @@ func TestTreeEmitV1R4R6Extended(t *testing.T) {
 	r := a4.run(t, func(_ *testTreeOld, _ *testTreeLeaves, em *testTreeEmit, _ *testTreeLedger) {
 		em.failAt, em.fail = 6, sentinel
 	})
-	if r.err != sentinel || len(r.emit.targets) != 6 || r.log[len(r.log)-2] != "emit" {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 6 || r.log[len(r.log)-2] != "emit" {
 		t.Fatalf("R6 binding emit: %v %v", r.err, r.log)
 	}
 	r = a4.run(t, func(_ *testTreeOld, _ *testTreeLeaves, em *testTreeEmit, _ *testTreeLedger) {
 		em.failAt, em.fail = 1, sentinel
 	})
-	if r.err != sentinel || len(r.emit.targets) != 1 || r.log[len(r.log)-2] != "emit" {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 1 || r.log[len(r.log)-2] != "emit" {
 		t.Fatalf("R6 first emit: %v %v", r.err, r.log)
 	}
+}
+
+// testTreeExact reports that err is want returned unchanged: same chain and same text, so no wrapper was added.
+func testTreeExact(err, want error) bool {
+	return errors.Is(err, want) && err.Error() == want.Error()
 }
