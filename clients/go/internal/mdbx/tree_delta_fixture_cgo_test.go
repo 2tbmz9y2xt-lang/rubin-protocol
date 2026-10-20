@@ -575,8 +575,10 @@ func tdRejected() []tdVariant {
 // R4, R-WOR-1, R-CMP-1, M16-M19, M28, M54, M55, M-OLDV-INVERSE: integrity before any emission, cause per S10.
 func TestTreeDeltaRejectedV1(t *testing.T) {
 	for _, v := range tdRejected() {
-		out := tdRunAt(t, tdStore(t, v.rows), v.c, treeWriterV1, tdOpt{record: true})
-		tdRefused(t, v.name, out, v.cause)
+		t.Run(v.name, func(t *testing.T) {
+			out := tdRunAt(t, tdStore(t, v.rows), v.c, treeWriterV1, tdOpt{record: true})
+			tdRefused(t, v.name, out, v.cause)
+		})
 	}
 }
 
