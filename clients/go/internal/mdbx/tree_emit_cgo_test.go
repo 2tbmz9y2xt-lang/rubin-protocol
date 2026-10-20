@@ -41,7 +41,7 @@ func (o *testTreeOld) getV1(dbi DBI, key []byte) (treeImageV1, error) {
 	}
 	out := append([]byte(nil), v...)
 	if o.scribble {
-		o.served = append(o.served, out, append([]byte(nil), key...))
+		o.served = append(o.served, out)
 	}
 	return treeImageV1{present: true, value: out}, nil
 }
@@ -253,7 +253,6 @@ type testTreeRun struct {
 	want    RootBindingV1
 }
 
-// newRows is the ROOT/ROWS node set of the NEW map (OLD entries with the stream applied), built by the test recursion.
 // wantBinding is the expected NEW binding: copied OLD fields and Assurance, the run's
 // endpoint, and Top/RootDigest from the test-local ROOT recursion over the NEW entries
 // (or the OLD binding's, for an empty stream).
@@ -273,6 +272,7 @@ func (c testTreeCase) wantBinding(old RootBindingV1) RootBindingV1 {
 	return b
 }
 
+// newRows is the ROOT/ROWS node set of the NEW map (OLD entries with the stream applied), built by the test recursion.
 func (c testTreeCase) newRows() map[string][]byte {
 	rows := map[string][]byte{}
 	if entries := c.newEntries(); len(entries) > 0 {
@@ -626,8 +626,9 @@ func testTreeRemove(g uint64, depth int, k [36]byte) func(map[string][]byte, *Ro
 	}
 }
 
-// testTreeAbsentInsert inserts Z under OLD {A, X, Y} after mut removes a
-// required node record, and pins the R1 refusal with no emit and no refer.
+// testTreeAbsentInsert inserts Z under OLD {A, X, Y} after removing a required node record and pins the R1 refusal
+// in the M43 narrowed form: the absent record is the last read, the refusing read is the last call before release
+// and no root binding is emitted. Node emits and refers before the refusal are permitted (D14-3).
 func testTreeAbsentInsert(t *testing.T, depth int, prefix [36]byte, wantReads []string) {
 	t.Helper()
 	e := testTreeE()
@@ -640,9 +641,6 @@ func testTreeAbsentInsert(t *testing.T, depth int, prefix [36]byte, wantReads []
 	r.refusal(t, nil, "get")
 	if !reflect.DeepEqual(r.reads, wantReads) {
 		t.Fatalf("absent insert reads %v want %v", r.reads, wantReads)
-	}
-	if len(r.emit.targets) != 0 || len(r.emit.refers) != 0 {
-		t.Fatalf("absent insert emitted %v referred %v", r.emit.targets, r.emit.refers)
 	}
 }
 
@@ -679,7 +677,8 @@ func TestTreeEmitV1R3Presence(t *testing.T) {
 	c = testTreeCase{oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(7, testKB, false, testTreeE())}}
 	r = c.run(t, nil)
 	r.refusal(t, nil, "get")
-	if want := []string{testTreeBindingKey(7), testTreeNodeRead(7, 287, [36]byte{}), testTreeNodeRead(7, 288, testKB)}; !reflect.DeepEqual(r.reads, want[:len(r.reads)]) || len(r.reads) < 2 {
+	want := []string{testTreeBindingKey(7), testTreeNodeRead(7, 287, [36]byte{}), testTreeNodeRead(7, 288, testKB)}
+	if n := len(r.reads); n < 2 || n > len(want) || !reflect.DeepEqual(r.reads, want[:n]) {
 		t.Fatalf("R3(ii) reads %v", r.reads)
 	}
 }
@@ -699,7 +698,8 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 		r := base.run(t, func(_ *testTreeOld, l *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 			l.failN, l.fail = n, sentinel
 		})
-		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) || len(r.emit.targets)+len(r.emit.refers) != 0 ||
+		// No emitV1 or referV1 after the leaves error; node emits before it are permitted (D14-3).
+		if !testTreeExact(r.err, sentinel) || !testTreeExact(r.foldErr, sentinel) ||
 			r.log[len(r.log)-2] != "leaves" || r.foldLog[len(r.foldLog)-2] != "leaves" {
 			t.Fatalf("R5 n=%d: %v %v %v", n, r.err, r.foldErr, r.log)
 		}
@@ -707,13 +707,13 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 	r := base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 		e.failAt, e.fail = 1, sentinel
 	})
-	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 1 || len(r.emit.refers) != 0 {
-		t.Fatalf("R6 emit: %v %v", r.err, r.emit.targets)
+	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 1 || r.log[len(r.log)-2] != "emit" {
+		t.Fatalf("R6 emit: %v %v", r.err, r.log)
 	}
 	r = base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
 		e.failAt, e.fail = -1, sentinel
 	})
-	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || len(r.emit.targets) != 3 || r.log[len(r.log)-2] != "refer" {
+	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || r.log[len(r.log)-2] != "refer" {
 		t.Fatalf("R6 refer: %v %v %v", r.err, r.emit.targets, r.emit.refers)
 	}
 }
@@ -752,17 +752,43 @@ func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
 		oldEntries: testTreeABC()[:2], oldEP: testTreeApplied(0, 0x77, 1), preGenesis: true,
 		stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, nil)},
 	}
-	// R10 is reached after the walk (Encode), where earlier node emits are permitted (D14-3).
+	// R10 is reached once the NEW Top is known; node emits and refers before it are permitted (D14-3).
 	r := c.run(t, nil)
 	r.refusal(t, errSchema, "")
-	if want := []string{testTreeTarget(7, 288, testKA, false), testTreeTarget(7, 287, [36]byte{}, false)}; !reflect.DeepEqual(r.emit.targets, want) || len(r.emit.refers) != 0 {
-		t.Fatalf("R10 targets %v refers %v", r.emit.targets, r.emit.refers)
+	if want := []string{testTreeBindingKey(7), testTreeNodeRead(7, 287, [36]byte{}), testTreeNodeRead(7, 288, testKA)}; !reflect.DeepEqual(r.reads, want) {
+		t.Fatalf("R10 reads %v", r.reads)
 	}
-	wantLog := []string{"charge 147968", "get", "leaves", "get", "get", "leaves", "emit", "emit", "release 147968"}
-	wantFold := []string{"charge 147968", "get", "leaves", "get", "get", "leaves", "release 147968"}
-	if !reflect.DeepEqual(r.log, wantLog) || !reflect.DeepEqual(r.foldLog, wantFold) {
-		t.Fatalf("R10 logs %v / %v", r.log, r.foldLog)
+	delta := []string{testTreeTarget(7, 288, testKA, false), testTreeTarget(7, 287, [36]byte{}, false)}
+	if !testTreeSubsequence(r.emit.targets, delta) || !reflect.DeepEqual(testTreeWithoutEmits(r.log), r.foldLog) {
+		t.Fatalf("R10 targets %v outside the ascending delta, or logs differ %v / %v", r.emit.targets, r.log, r.foldLog)
 	}
+}
+
+// testTreeSubsequence reports that got lists elements of want in want's order, each at most once.
+func testTreeSubsequence(got, want []string) bool {
+	next := 0
+	for _, g := range got {
+		for next < len(want) && want[next] != g {
+			next++
+		}
+		if next == len(want) {
+			return false
+		}
+		next++
+	}
+	return true
+}
+
+// testTreeWithoutEmits drops emitV1 and referV1 entries: what remains is the read, leaves and ledger sequence,
+// which is identical in both functions (state_and_error_order, D16-3).
+func testTreeWithoutEmits(log []string) []string {
+	var out []string
+	for _, c := range log {
+		if c != "emit" && c != "refer" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func TestTreeEmitV1R13R14RootAndPath(t *testing.T) {
@@ -1123,15 +1149,15 @@ func TestTreeEmitV1H3DeepestBranchOrder(t *testing.T) {
 	e := testTreeE()
 	r := testTreeCase{stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, false, e), testTreeStreamLeaf(7, testKB, false, e), testTreeStreamLeaf(7, testKC, false, e)}}.run(t, nil)
 	r.checkValues(t)
-	if r.emit.targets[1] != testTreeTarget(7, 288, testKB, true) || r.emit.targets[2] != testTreeTarget(7, 287, [36]byte{}, true) {
+	if len(r.emit.targets) < 3 || r.emit.targets[1] != testTreeTarget(7, 288, testKB, true) || r.emit.targets[2] != testTreeTarget(7, 287, [36]byte{}, true) {
 		t.Fatalf("H3 order %v", r.emit.targets)
 	}
 	k8, k9 := testTreeKey(0, 0, 255), testTreeKey(0, 0, 256)
 	r = testTreeCase{stream: []treeLeafV1{testTreeStreamLeaf(7, k8, false, e), testTreeStreamLeaf(7, k9, false, e)}}.run(t, nil)
 	c8, c9 := testTreeLeafPreimage(k8, e), testTreeLeafPreimage(k9, e)
 	want := append(append(append(testTreeSuffix(288, k8), c8[:]...), testTreeSuffix(288, k9)...), c9[:]...)
-	if r.emit.targets[2] != testTreeTarget(7, 279, [36]byte{}, true) || !bytes.Equal(r.emit.values[2], want) {
-		t.Fatalf("A9/H3 branch 279 value %x", r.emit.values[2])
+	if len(r.emit.targets) < 3 || r.emit.targets[2] != testTreeTarget(7, 279, [36]byte{}, true) || !bytes.Equal(r.emit.values[2], want) {
+		t.Fatalf("A9/H3 branch 279 targets %v", r.emit.targets)
 	}
 }
 
@@ -1149,7 +1175,9 @@ func TestTreeEmitV1R4R6Extended(t *testing.T) {
 			r := c.tc.run(t, func(o *testTreeOld, _ *testTreeLeaves, _ *testTreeEmit, _ *testTreeLedger) {
 				o.failN, o.fail = c.n, inj
 			})
-			if !testTreeExact(r.err, inj) || !testTreeExact(r.foldErr, inj) || len(r.reads) != c.n || len(r.foldRd) != c.n || len(r.emit.targets)+len(r.emit.refers) != 0 || r.log[len(r.log)-2] != "get" {
+			// No target can precede the failing read (the first target needs it: ascending order, read before emit);
+			// a refer before it is permitted (D14-3), none after it.
+			if !testTreeExact(r.err, inj) || !testTreeExact(r.foldErr, inj) || len(r.reads) != c.n || len(r.foldRd) != c.n || len(r.emit.targets) != 0 || r.log[len(r.log)-2] != "get" {
 				t.Fatalf("R4 n=%d: %v %v", c.n, r.err, r.log)
 			}
 		}
