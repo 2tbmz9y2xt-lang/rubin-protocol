@@ -606,7 +606,8 @@ func TestTreeFinalAndPairPreflightV1(t *testing.T) {
 			consulted := []ownedConsulted{{dbi: ttHeaders, key: ttC}}
 			var outcome updateNativeOutcome
 			_, err := FixtureWriteSnapshotDrift(store, row.dbi.Rank, row.key, func() {
-				outcome = fixtureTreeCommitV1(store, fixtureTreeScriptV1{ledger: &ttLedger{}, pair: pair, consulted: consulted, calls: &calls,
+				outcome = fixtureTreeCommitV1(store, fixtureTreeScriptV1{
+					ledger: &ttLedger{}, pair: pair, consulted: consulted, calls: &calls,
 					readback: func(*treeReadbackStateV1) error { return nil },
 					write: func(s *treeSectionV1) error {
 						if !row.final {
@@ -615,7 +616,8 @@ func TestTreeFinalAndPairPreflightV1(t *testing.T) {
 						mustEnvironment(t, s.writerV1().referV1(ttBlocks, ttR))
 						mustEnvironment(t, s.writerV1().emitV1(ttTarget(ttUTXO, ttZ, "z1")))
 						return s.finalV1(nil, nil)
-					}})
+					},
+				})
 			})
 			mustEnvironment(t, err)
 			ttMismatch(t, outcome.primary, row.diagnostic)
@@ -1023,7 +1025,8 @@ func TestTreeHeldImageLifetimeV1(t *testing.T) {
 		treeNativeSeed(t, store, 1, ltD, []byte(ltOD))
 		ledger := &ttLedger{}
 		var written, read error
-		script := fixtureTreeScriptV1{ledger: ledger, mark: ledger.mark,
+		script := fixtureTreeScriptV1{
+			ledger: ledger, mark: ledger.mark,
 			write: func(s *treeSectionV1) error {
 				if written = ltScript(s.oldV1(false), s.writerV1()); written != nil {
 					return written

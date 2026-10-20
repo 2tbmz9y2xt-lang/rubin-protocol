@@ -62,7 +62,7 @@ func TestTreeBudgetAndConstantsV1(t *testing.T) {
 	primitive := treePrimitiveV1{direction: treeForwardV1, kind: treeKindLagForwardV1, undo: 3, generation: 4, height: 5, block: [32]byte{6}, endpoint: TreeEndpointV1{}}
 	body := treeBodyV1{bytes: []byte{7}, pair: true}
 	leaf := treeLeafV1{key: [44]byte{8}, oldPresent: true, newPresent: true, newValue: []byte{9}}
-	var _ treeLeavesV1 = (treeLeavesV1)(nil)
+	_ = treeLeavesV1(nil)
 	if primitive != (treePrimitiveV1{1, 6, 3, 4, 5, [32]byte{6}, TreeEndpointV1{}}) || string(body.bytes) != "\x07" || !body.pair {
 		t.Fatalf("declaration shapes %+v %+v", primitive, body)
 	}
