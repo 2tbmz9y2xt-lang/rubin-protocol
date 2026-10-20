@@ -59,11 +59,15 @@ func TestTreeBudgetAndConstantsV1(t *testing.T) {
 	if encodings != [...]uint8{1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9} || treeWriterV1 != 1 || treeReadbackV1 != 2 {
 		t.Fatalf("encodings %v", encodings)
 	}
-	primitive := treePrimitiveV1{direction: treeForwardV1, kind: treeKindLagForwardV1}
-	body, leaf := treeBodyV1{pair: true}, treeLeafV1{newPresent: true}
-	var leaves treeLeavesV1
-	if primitive.direction != 1 || !body.pair || !leaf.newPresent || leaves != nil {
-		t.Fatal("declaration shapes")
+	primitive := treePrimitiveV1{direction: treeForwardV1, kind: treeKindLagForwardV1, undo: 3, generation: 4, height: 5, block: [32]byte{6}, endpoint: TreeEndpointV1{}}
+	body := treeBodyV1{bytes: []byte{7}, pair: true}
+	leaf := treeLeafV1{key: [44]byte{8}, oldPresent: true, newPresent: true, newValue: []byte{9}}
+	var _ treeLeavesV1 = (treeLeavesV1)(nil)
+	if primitive != (treePrimitiveV1{1, 6, 3, 4, 5, [32]byte{6}, TreeEndpointV1{}}) || string(body.bytes) != "\x07" || !body.pair {
+		t.Fatalf("declaration shapes %+v %+v", primitive, body)
+	}
+	if leaf.key != [44]byte{8} || !leaf.oldPresent || !leaf.newPresent || string(leaf.newValue) != "\x09" {
+		t.Fatalf("leaf shape %+v", leaf)
 	}
 }
 

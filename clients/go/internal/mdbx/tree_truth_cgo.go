@@ -243,7 +243,8 @@ func (t *treeSectionV1) recordV1(dbi DBI, key []byte, kind uint8, value []byte) 
 	i, found := t.pw.findV1(dbi, key)
 	n := treeEntrySizeV1(key, value)
 	if free := t.heldP - t.pw.live; n > free {
-		if err := t.ledger.chargeV1(n - free); err != nil {
+		err := t.ledger.chargeV1(n - free)
+		if err != nil {
 			return err
 		}
 		t.heldP += n - free
@@ -257,7 +258,8 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 	handle := t.handles[target.dbi.Rank]
 	if prior {
 		one := [1]ownedMutation{{dbi: target.dbi, key: target.key, beforePresent: true}}
-		if err := updateNativeDeletes(t.write, t.handles, one[:], &t.reached); err != nil {
+		err := updateNativeDeletes(t.write, t.handles, one[:], &t.reached)
+		if err != nil {
 			return err
 		}
 	}
@@ -267,7 +269,8 @@ func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 		if err != nil {
 			return err
 		}
-		if err = updateNativePut(t.write, handle, target.key, image, target.after.value, &t.reached); err != nil {
+		err = updateNativePut(t.write, handle, target.key, image, target.after.value, &t.reached)
+		if err != nil {
 			return err
 		}
 		expected = image
@@ -288,7 +291,8 @@ func (t *treeSectionV1) pairPreflightV1(pair []ownedMutation, consulted []ownedC
 
 // pairEmitV1 writes the Pair after the last primitive: all deletes, then all puts (legacy order).
 func (t *treeSectionV1) pairEmitV1(pair []ownedMutation) error {
-	if err := updateNativeDeletes(t.write, t.handles, pair, &t.reached); err != nil {
+	err := updateNativeDeletes(t.write, t.handles, pair, &t.reached)
+	if err != nil {
 		return err
 	}
 	return updateNativePuts(t.old, t.write, t.handles, pair, t.references, &t.reached)
@@ -299,14 +303,17 @@ func (t *treeSectionV1) pairEmitV1(pair []ownedMutation) error {
 func (t *treeSectionV1) finalV1(pair []ownedMutation, consulted []ownedConsulted) error {
 	const diagnostic = "final update image mismatch"
 	for _, entry := range t.pw.entries {
-		if err := t.finalEntryV1(entry, diagnostic); err != nil {
+		err := t.finalEntryV1(entry, diagnostic)
+		if err != nil {
 			return err
 		}
 	}
-	if err := updateNativeVerify(t.old, t.write, t.handles, pair, t.references); err != nil {
+	err := updateNativeVerify(t.old, t.write, t.handles, pair, t.references)
+	if err != nil {
 		return err
 	}
-	if err := updateNativeScopedMatch(t.old, t.write, t.handles, pair, consulted, diagnostic); err != nil {
+	err = updateNativeScopedMatch(t.old, t.write, t.handles, pair, consulted, diagnostic)
+	if err != nil {
 		return err
 	}
 	t.pw = treeProjectionV1{}
@@ -348,7 +355,8 @@ func (e treeWriterEmitterV1) emitV1(target treeTargetV1) error {
 	if err != nil {
 		return err
 	}
-	if err = t.writeTargetV1(target, prior.present); err != nil {
+	err = t.writeTargetV1(target, prior.present)
+	if err != nil {
 		return err
 	}
 	return t.recordV1(target.dbi, target.key, treeKindOfV1(target.after), target.after.value)
@@ -446,7 +454,8 @@ func (r *treeReadbackStateV1) foldProjectionV1() (bool, bool, error) {
 		}
 		newEqual := oldEqual
 		if entry.kind != treeEntryReferenceV1 {
-			if newEqual, err = r.planEqualV1(handle, entry); err != nil {
+			newEqual, err = r.planEqualV1(handle, entry)
+			if err != nil {
 				return false, false, err
 			}
 		}
