@@ -436,7 +436,7 @@ func (r testTreeRun) accept(t *testing.T, g uint64, targets []string, refers []s
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("targets\n got %v\nwant %v", got, want)
 	}
-	if !reflect.DeepEqual(append([]string{}, r.emit.refers...), append([]string{}, refers...)) {
+	if !testTreeSameMultiset(r.emit.refers, refers) {
 		t.Fatalf("refers got %v want %v", r.emit.refers, refers)
 	}
 	wantReads := append([]string{testTreeBindingKey(g)}, reads...)
@@ -447,7 +447,7 @@ func (r testTreeRun) accept(t *testing.T, g uint64, targets []string, refers []s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.DatabaseID != r.id || b.ChainID != testTreeHash(0x55) || b.GenesisHash != testTreeHash(0x66) || b.CommitmentVersion != 1 {
+	if b.DatabaseID != r.id || b.ChainID != r.want.ChainID || b.GenesisHash != r.want.GenesisHash || b.CommitmentVersion != 1 {
 		t.Fatalf("copied fields %+v", b)
 	}
 	if !reflect.DeepEqual(b, r.want) {
@@ -466,6 +466,12 @@ func testTreeA8Value() []byte { return testTreeValue(2, testTreeData(0x11), 0, 0
 func TestTreeEmitV1A4InsertIntoEmpty(t *testing.T) {
 	e := testTreeE()
 	c := testTreeCase{stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, false, e), testTreeStreamLeaf(7, testKB, false, e), testTreeStreamLeaf(7, testKC, false, e)}}
+	// A4's OLD ChainID and GenesisHash differ from every other case's (0x55, 0x66), so a constant cannot pass as a copy (M24).
+	c.mutate = func(_ map[string][]byte, b *RootBindingV1) {
+		if b != nil {
+			b.ChainID, b.GenesisHash = testTreeHash(0x5c), testTreeHash(0x6c)
+		}
+	}
 	r := c.run(t, nil)
 	b := r.accept(t, 7, []string{
 		testTreeTarget(7, 288, testKA, true), testTreeTarget(7, 288, testKB, true), testTreeTarget(7, 287, [36]byte{}, true),
@@ -486,6 +492,9 @@ func TestTreeEmitV1A4InsertIntoEmpty(t *testing.T) {
 	}
 	if b.Endpoint != testTreeApplied(6, 0x88, 2) {
 		t.Fatal("endpoint")
+	}
+	if b.ChainID != testTreeHash(0x5c) || b.GenesisHash != testTreeHash(0x6c) {
+		t.Fatalf("A4 copied ChainID %x GenesisHash %x", b.ChainID, b.GenesisHash)
 	}
 }
 
@@ -712,12 +721,51 @@ func TestTreeEmitV1R4R5R6Injected(t *testing.T) {
 	if !testTreeExact(r.err, sentinel) || len(r.emit.targets) != 1 || r.log[len(r.log)-2] != "emit" {
 		t.Fatalf("R6 emit: %v %v", r.err, r.log)
 	}
-	r = base.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
-		e.failAt, e.fail = -1, sentinel
-	})
-	if !testTreeExact(r.err, sentinel) || len(r.emit.refers) != 1 || r.log[len(r.log)-2] != "refer" {
-		t.Fatalf("R6 refer: %v %v %v", r.err, r.emit.targets, r.emit.refers)
+	for _, rc := range testTreeReferRuns(base) {
+		r = rc.c.run(t, func(_ *testTreeOld, _ *testTreeLeaves, e *testTreeEmit, _ *testTreeLedger) {
+			e.failAt, e.fail = -rc.k, sentinel
+		})
+		// The failing referV1 is the k-th and last refer and the last call before release; no binding is emitted.
+		if !testTreeExact(r.err, sentinel) || testTreeCount(r.log, "refer") != rc.k || r.log[len(r.log)-2] != "refer" || testTreeBindingEmitted(r.emit.targets) {
+			t.Fatalf("R6 refer %s k=%d: %v %v %v", rc.name, rc.k, r.err, r.log, r.emit.targets)
+		}
 	}
+}
+
+type testTreeReferRun struct {
+	name string
+	c    testTreeCase
+	k    int
+}
+
+// testTreeReferRuns lists the C1 runs that make a referV1 (A5 twice: both children of the emitted branch (0)).
+func testTreeReferRuns(a5 testTreeCase) []testTreeReferRun {
+	ab := testTreeABC()[:2]
+	return []testTreeReferRun{
+		{"A5", a5, 1},
+		{"A5", a5, 2},
+		{"A6", testTreeCase{oldEntries: ab, stream: []treeLeafV1{testTreeStreamLeaf(7, testKC, false, testTreeE())}}, 1},
+		{"A7", testTreeCase{oldEntries: ab, stream: []treeLeafV1{testTreeStreamLeaf(7, testKB, true, nil)}}, 1},
+		{"A10", testTreeCase{oldEntries: ab}, 1},
+		{"A13", testTreeCase{oldEntries: ab, stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())}}, 1},
+	}
+}
+
+func testTreeBindingEmitted(targets []string) bool {
+	for _, tg := range targets {
+		if strings.HasPrefix(tg, "0:") {
+			return true
+		}
+	}
+	return false
+}
+
+// testTreeSameMultiset compares reference keys as multisets: order is free, multiplicity counts (C1).
+func testTreeSameMultiset(got, want []string) bool {
+	a, b := append([]string{}, got...), append([]string{}, want...)
+	sort.Strings(a)
+	sort.Strings(b)
+	return reflect.DeepEqual(a, b)
 }
 
 func TestTreeEmitV1R7R8R9R10Binding(t *testing.T) {
@@ -1141,7 +1189,7 @@ func TestTreeEmitV1H1BorrowedBuffers(t *testing.T) {
 		})
 		plain.checkValues(t)
 		h.checkValues(t)
-		if !reflect.DeepEqual(plain.emit.targets, h.emit.targets) || !reflect.DeepEqual(plain.emit.values, h.emit.values) || !reflect.DeepEqual(plain.emit.refers, h.emit.refers) || h.err != nil {
+		if !reflect.DeepEqual(plain.emit.targets, h.emit.targets) || !reflect.DeepEqual(plain.emit.values, h.emit.values) || !testTreeSameMultiset(plain.emit.refers, h.emit.refers) || h.err != nil {
 			t.Fatalf("H1 %s differs: %v", name, h.err)
 		}
 	}
