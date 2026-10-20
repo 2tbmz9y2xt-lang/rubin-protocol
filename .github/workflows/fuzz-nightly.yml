@@ -27,12 +27,35 @@ jobs:
   # stays flat as the lists grow.
   prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Cold path: ~2 min checkout/setup + <=~8 min OpenSSL bundle source build,
+    # plus compiling 11 test packages for the inventory check.
+    timeout-minutes: 30
     outputs:
       go_targets: ${{ steps.lists.outputs.go_targets }}
       rust_chunks: ${{ steps.lists.outputs.rust_chunks }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          cache: true
+          cache-dependency-path: clients/go/go.mod
+
+      # Same dedicated cache identity as fuzz-stage2, so discovery compiles in
+      # the environment the legs run in.
+      - name: Prepare OpenSSL bundle
+        uses: ./.github/actions/openssl-bundle
+        with:
+          cache-key-prefix: openssl-bundle-mldsa-verified
+          cache-revision: v1
+
+      # Fails before fan-out unless TARGETS equals the compiled Go Fuzz* inventory.
+      - name: Check Go fuzz inventory
+        env:
+          RUBIN_OPENSSL_PREFIX: ${{ env.OPENSSL_DIR }}
+        run: |
+          scripts/dev-env.sh -- bash -lc "cd \"$GITHUB_WORKSPACE\" && scripts/ci/run_fuzz_stage2.sh --check-inventory"
 
       - name: Emit fuzz target matrices
         id: lists
@@ -71,9 +94,11 @@ jobs:
         env:
           FUZZ_TARGET: ${{ matrix.target }}
         run: |
-          # ":" and "/" are invalid in artifact names; the function name after
-          # the "pkg:Target" colon is a clean identifier.
-          echo "FUZZ_TARGET_NAME=${FUZZ_TARGET##*:}" >> "$GITHUB_ENV"
+          # ":" and "/" are invalid in artifact names and the bare function name
+          # collides across packages; the hex of the exact "pkg:Target" key is
+          # unique and artifact-safe.
+          hex="$(printf '%s' "$FUZZ_TARGET" | od -An -v -tx1 | tr -d ' \n')"
+          echo "FUZZ_TARGET_NAME=${hex}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -113,6 +138,12 @@ jobs:
           openssl version
           openssl list -signature-algorithms | grep -E 'ML-DSA-87'
 
+      # The differential targets build the Rust consensus CLI (pin of ci.yml).
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: startsWith(matrix.target, './cmd/rubin-consensus-cli:FuzzRubinConsensusCLI_RustParity_')
+        with:
+          toolchain: 1.99.0
+
       - name: Run stage2 fuzz target (timeboxed)
         env:
           FUZZ_TIME: ${{ github.event.inputs.fuzz_time || '300s' }}
@@ -131,9 +162,7 @@ jobs:
           name: fuzz-stage2-${{ github.run_id }}-${{ env.FUZZ_TARGET_NAME }}-a${{ github.run_attempt }}
           path: |
             .artifacts/fuzz-stage2/**
-            clients/go/consensus/testdata/fuzz/**
-            clients/go/node/testdata/fuzz/**
-            clients/go/node/p2p/testdata/fuzz/**
+            clients/go/**/testdata/fuzz/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
