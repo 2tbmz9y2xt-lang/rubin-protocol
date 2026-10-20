@@ -123,7 +123,7 @@ func (r *treeRecorderV1) finishV1() (*treeDeltaV1, error) {
 	if !r.begun || uint32(len(r.descs)) != r.eventCount || !treeGroupV1(r.descs) {
 		return nil, treeDeltaInvalidV1()
 	}
-	d := &treeDeltaV1{rec: r}
+	d := &treeDeltaV1{rec: r, keys: &treeKeysV1{block: r.prim.block}}
 	for i := range r.descs {
 		if r.descs[i].group == uint32(i) && r.descs[i].kind == treeSpendV1 {
 			d.spent++
@@ -171,7 +171,7 @@ func (d *treeDeltaV1) headV1(old treeOldV1) error {
 	if undo == treeUndoTransientV1 {
 		return nil
 	}
-	block := d.rec.prim.block[:]
+	block := d.keys.block[:]
 	key, image, ok, err := old.nextV1(schemaDBIs[5], block)
 	if err != nil {
 		return err
@@ -187,7 +187,7 @@ func (d *treeDeltaV1) headV1(old treeOldV1) error {
 	if undo == treeUndoSourceRetainV1 || undo == treeUndoSourceDeleteV1 {
 		return d.retainedManifestV1(key, image.value)
 	}
-	if !bytes.Equal(image.value, d.manifest[:]) {
+	if !bytes.Equal(image.value, d.keys.manifest[:]) {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil
@@ -205,7 +205,7 @@ func (d *treeDeltaV1) retainedManifestV1(key, value []byte) error {
 	if !treeUndoValueOKV1(key, value) {
 		return treeIntegrity(operationUpdate, errSchema)
 	}
-	if !bytes.Equal(value[1:9], d.manifest[1:9]) || !bytes.Equal(value[25:33], d.manifest[25:33]) {
+	if !bytes.Equal(value[1:9], d.keys.manifest[1:9]) || !bytes.Equal(value[25:33], d.keys.manifest[25:33]) {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil
@@ -262,7 +262,7 @@ func (d *treeDeltaV1) markDirtyV1(g *treeDescV1, image treeImageV1) {
 
 // entryV1 takes the next undo-v1 row, which must be g's UndoEntryKey, and checks its value while OLD is held.
 func (d *treeDeltaV1) entryV1(old treeOldV1, g *treeDescV1, oldValue []byte) error {
-	key, image, ok, err := old.nextV1(schemaDBIs[5], d.from[:d.cursor])
+	key, image, ok, err := old.nextV1(schemaDBIs[5], d.keys.from[:d.cursor])
 	if err != nil {
 		return err
 	}
@@ -292,11 +292,11 @@ func (d *treeDeltaV1) tailV1(old treeOldV1) error {
 	if !d.family {
 		return nil
 	}
-	key, _, ok, err := old.nextV1(schemaDBIs[5], d.from[:d.cursor])
+	key, _, ok, err := old.nextV1(schemaDBIs[5], d.keys.from[:d.cursor])
 	if err != nil {
 		return err
 	}
-	if ok && bytes.HasPrefix(key, d.rec.prim.block[:]) {
+	if ok && bytes.HasPrefix(key, d.keys.block[:]) {
 		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil

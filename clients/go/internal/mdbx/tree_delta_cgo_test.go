@@ -467,6 +467,14 @@ func TestTreeDeltaGrammarRefusalsV1(t *testing.T) {
 			t.Fatalf("%s: not recorded", second)
 		}
 	}
+	// finishV1 on a fresh recorder with no BEGIN (G6): returned, not recorded, no ledger call.
+	fresh := &tdLedger{}
+	rf := admitted.recorder(treeWriterV1, fresh)
+	_, err0 := rf.finishV1()
+	tdInvalid(t, err0)
+	if rf.failureV1() != nil || fresh.logged() != "" {
+		t.Fatal("finishV1 without BEGIN recorded or charged")
+	}
 	// finishV1 after EventCount-1 events: returned, not recorded, no charge.
 	ledger := &tdLedger{}
 	r := admitted.recorder(treeWriterV1, ledger)

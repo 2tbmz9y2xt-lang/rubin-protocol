@@ -1,6 +1,7 @@
 package mdbx
 
 import (
+	"reflect"
 	"testing"
 	"unsafe"
 )
@@ -11,11 +12,29 @@ func TestTreeDeltaControlBoundV1(t *testing.T) {
 		t.Fatalf("treeControlBytesV1 = %d", treeControlBytesV1)
 	}
 	var leaves treeLeafIterV1
-	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
+	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + uint64(unsafe.Sizeof(treeKeysV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
 	if total > 4096 {
 		t.Fatalf("control objects %d bytes", total)
 	}
 	if size := unsafe.Sizeof(treeDescV1{}); size > 128 {
 		t.Fatalf("descriptor %d bytes", size)
 	}
+}
+
+// H10 (a), M-K-PTR: the key scratch K holds no field that can carry a Go pointer (D28, G10).
+func TestTreeDeltaKeyScratchPointerFreeV1(t *testing.T) {
+	var walk func(typ reflect.Type, path string)
+	walk = func(typ reflect.Type, path string) {
+		switch typ.Kind() {
+		case reflect.Pointer, reflect.UnsafePointer, reflect.Slice, reflect.String, reflect.Map, reflect.Chan, reflect.Func, reflect.Interface:
+			t.Errorf("key scratch field %s has kind %s", path, typ.Kind())
+		case reflect.Array:
+			walk(typ.Elem(), path+"[]")
+		case reflect.Struct:
+			for i := 0; i < typ.NumField(); i++ {
+				walk(typ.Field(i).Type, path+"."+typ.Field(i).Name)
+			}
+		}
+	}
+	walk(reflect.TypeFor[treeKeysV1](), "treeKeysV1")
 }

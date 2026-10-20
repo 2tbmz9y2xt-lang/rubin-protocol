@@ -21,9 +21,11 @@ import (
 // failureV1 no longer changes (the refusal is not recorded). finishV1 and releaseV1 call expireV1 first. releaseV1 is
 // idempotent and then returns D_j + V through ledger exactly once if beginV1 charged them; the recorder owns that
 // charge for the whole position (D13-8, D26). L1 heap-allocates only the recorder, the delta, one iterator per leavesV1
-// call, the D_j array, the V scratch and at most one 32-byte copy of block in treeStoredBodyV1; the fixed objects and
-// that copy fit treeControlBytesV1, which L5a charges before treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25).
-const treeControlBytesV1 uint64 = 4096 // C: L1 per-primitive control objects (recorder, delta, 2 leaves iterators, treeStoredBodyV1's 32-byte block copy)
+// call, the D_j array, the V scratch, one key scratch (a type with no Go pointer: every key and from L1 passes to
+// treeOldV1 or treeEmitterV1 and the regenerated manifest bytes) and at most one 32-byte copy of block in
+// treeStoredBodyV1; the fixed objects, the key scratch and that copy fit treeControlBytesV1, which L5a charges before
+// treeStoredBodyV1 and newTreeRecorderV1 (D14-2, D25, D28).
+const treeControlBytesV1 uint64 = 4096 // C: L1 per-primitive control objects (recorder, delta, key scratch, 2 leaves iterators, treeStoredBodyV1's 32-byte block copy)
 
 // Event kinds of the closed grammar (BLOCK 3016) and the descriptor flag bits.
 const (
@@ -230,13 +232,20 @@ func treeUndoValueOKV1(key, value []byte) bool {
 // into V: the formed body value, or, for an inverse group with newPresent true, a copy of the entry image resolveV1
 // obtained for that group, which the treeImageV1 lifetime keeps readable after applyV1 (D24).
 type treeDeltaV1 struct {
-	rec      *treeRecorderV1
-	spent    uint32 // number of SPEND-first groups
-	family   bool   // own family present at the S12 (ii) head read
-	cursor   int    // length of the undo-v1 cursor key in from
+	rec    *treeRecorderV1
+	keys   *treeKeysV1
+	spent  uint32 // number of SPEND-first groups
+	family bool   // own family present at the S12 (ii) head read
+	cursor int    // length of the undo-v1 cursor key in keys.from
+}
+
+// treeKeysV1 is the key scratch K (D28, G10): every key and from L1 passes to treeOldV1 or treeEmitterV1 and the
+// regenerated manifest. It holds only byte arrays, so a slice of it is a valid cgo argument.
+type treeKeysV1 struct {
+	block    [32]byte
 	manifest [33]byte
-	utxoKey  [44]byte
-	entryKey [77]byte
+	utxo     [44]byte
+	entry    [77]byte
 	from     [78]byte
 }
 
@@ -275,48 +284,48 @@ func (d *treeDeltaV1) familyEffectV1() uint8 {
 	return treeEffectReferV1
 }
 
-// buildManifestV1 regenerates UndoManifestValue(Height, Generated, TxCount, spentCount) into d.manifest (S5).
+// buildManifestV1 regenerates UndoManifestValue(Height, Generated, TxCount, spentCount) into d.keys.manifest (S5).
 func (d *treeDeltaV1) buildManifestV1() {
 	r := d.rec
-	d.manifest[0] = 1
-	binary.BigEndian.PutUint64(d.manifest[1:], r.prim.height)
-	copy(d.manifest[9:], r.generated[:])
-	binary.BigEndian.PutUint32(d.manifest[25:], r.txCount)
-	binary.BigEndian.PutUint32(d.manifest[29:], d.spent)
+	d.keys.manifest[0] = 1
+	binary.BigEndian.PutUint64(d.keys.manifest[1:], r.prim.height)
+	copy(d.keys.manifest[9:], r.generated[:])
+	binary.BigEndian.PutUint32(d.keys.manifest[25:], r.txCount)
+	binary.BigEndian.PutUint32(d.keys.manifest[29:], d.spent)
 }
 
-// utxoKeyV1 writes UTXOKey(Generation, txid, vout) (schema.go:159-167) into d.utxoKey.
+// utxoKeyV1 writes UTXOKey(Generation, txid, vout) (schema.go:159-167) into d.keys.utxo.
 func (d *treeDeltaV1) utxoKeyV1(e *treeDescV1) []byte {
-	binary.BigEndian.PutUint64(d.utxoKey[:], d.rec.prim.generation)
-	copy(d.utxoKey[8:], e.txid[:])
-	binary.BigEndian.PutUint32(d.utxoKey[40:], e.vout)
-	return d.utxoKey[:]
+	binary.BigEndian.PutUint64(d.keys.utxo[:], d.rec.prim.generation)
+	copy(d.keys.utxo[8:], e.txid[:])
+	binary.BigEndian.PutUint32(d.keys.utxo[40:], e.vout)
+	return d.keys.utxo[:]
 }
 
-// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) (schema.go:276-284) into d.entryKey.
+// entryKeyV1 writes UndoEntryKey(Block, txid, txIndex, inputIndex, vout) (schema.go:276-284) into d.keys.entry.
 func (d *treeDeltaV1) entryKeyV1(e *treeDescV1) []byte {
-	copy(d.entryKey[:], d.rec.prim.block[:])
-	d.entryKey[32] = 1
-	binary.BigEndian.PutUint32(d.entryKey[33:], e.txIndex)
-	binary.BigEndian.PutUint32(d.entryKey[37:], e.inputIndex)
-	copy(d.entryKey[41:], e.txid[:])
-	binary.BigEndian.PutUint32(d.entryKey[73:], e.vout)
-	return d.entryKey[:]
+	copy(d.keys.entry[:], d.keys.block[:])
+	d.keys.entry[32] = 1
+	binary.BigEndian.PutUint32(d.keys.entry[33:], e.txIndex)
+	binary.BigEndian.PutUint32(d.keys.entry[37:], e.inputIndex)
+	copy(d.keys.entry[41:], e.txid[:])
+	binary.BigEndian.PutUint32(d.keys.entry[73:], e.vout)
+	return d.keys.entry[:]
 }
 
-// manifestKeyV1 writes Block || 0x00 into d.from and returns it.
+// manifestKeyV1 writes Block || 0x00 into d.keys.from and returns it.
 func (d *treeDeltaV1) manifestKeyV1() []byte {
-	copy(d.from[:], d.rec.prim.block[:])
-	d.from[32] = 0
-	return d.from[:33]
+	copy(d.keys.from[:], d.keys.block[:])
+	d.keys.from[32] = 0
+	return d.keys.from[:33]
 }
 
-// afterV1 writes key || 0x00 into d.from: the first key strictly after key (T1).
+// afterV1 writes key || 0x00 into d.keys.from: the first key strictly after key (T1).
 func (d *treeDeltaV1) afterV1(key []byte) []byte {
-	n := copy(d.from[:], key)
-	d.from[n] = 0
+	n := copy(d.keys.from[:], key)
+	d.keys.from[n] = 0
 	d.cursor = n + 1
-	return d.from[:n+1]
+	return d.keys.from[:n+1]
 }
 
 // formV1 forms the stored value frame || u64le(Height) || coinbase of CREATE e in V (S2, S7).
@@ -354,7 +363,7 @@ func (d *treeDeltaV1) groupFirstV1(e *treeDescV1) (*treeDescV1, bool) {
 func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
 	r := d.rec
 	if !r.body.pair {
-		err := emit.referV1(schemaDBIs[4], r.prim.block[:])
+		err := emit.referV1(schemaDBIs[4], d.keys.block[:])
 		if err != nil {
 			return err
 		}
@@ -370,7 +379,7 @@ func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
 			return err
 		}
 	}
-	return d.familyRowV1(emit, d.manifestKeyV1(), d.manifest[:])
+	return d.familyRowV1(emit, d.manifestKeyV1(), d.keys.manifest[:])
 }
 
 // applyGroupV1 emits one group's effects at its first event in the S11 order.
@@ -469,6 +478,7 @@ func (d *treeDeltaV1) leafV1(g *treeDescV1) treeLeafV1 {
 type treeControlObjectsV1 struct {
 	rec    treeRecorderV1
 	delta  treeDeltaV1
+	keys   treeKeysV1
 	leaves [2]treeLeafIterV1
 	block  [32]byte
 }
