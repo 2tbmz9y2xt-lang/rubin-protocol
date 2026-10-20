@@ -355,8 +355,12 @@ func TestTreeReadbackBudgetV1(t *testing.T) {
 				return
 			}
 			commit := ttCommitError(t, outcome, CommitTruthUnknown)
-			if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) || len(run.ledger.after(t, "commit")) != 0 {
-				t.Fatalf("budget refusal %v", commit.ReadbackCause)
+			// Non-fatal, so the after-commit check below is observed in the same run.
+			if !treeSameErrorV1(commit.ReadbackCause, errOperationReservationCapacity) {
+				t.Errorf("budget refusal %v", commit.ReadbackCause)
+			}
+			if after := run.ledger.after(t, "commit"); len(after) != 0 {
+				t.Fatalf("ledger calls after commit %v", after)
 			}
 		})
 	}
@@ -553,8 +557,12 @@ func TestTreeCheckedStaleV1(t *testing.T) {
 					stage = UpdateStageWriteStartedDefinitelyPrecommit
 				}
 				ttOutcome(t, outcome, CommitTruthOld, stage)
-				if drift != 1 || len(ledger.after(t, "abort")) != 0 {
-					t.Fatalf("drift %d log %v", drift, ledger.log)
+				// Non-fatal, so the after-abort check below is observed in the same run.
+				if drift != 1 {
+					t.Errorf("drift %d", drift)
+				}
+				if after := ledger.after(t, "abort"); len(after) != 0 {
+					t.Fatalf("ledger calls after abort %v", after)
 				}
 				ttReopen(t, store, path, ttRow{row.dbi, row.key, []byte{0x7f}}, ttRow{ttUTXO, ttZ, nil})
 			})

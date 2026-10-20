@@ -1,7 +1,9 @@
 package mdbx
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +14,24 @@ func treeSameErrorV1(got, want error) bool {
 	}
 	g, w := reflect.ValueOf(got), reflect.ValueOf(want)
 	return g.Type() == w.Type() && g.Kind() == reflect.Pointer && g.Pointer() == w.Pointer()
+}
+
+// treeFieldsV1 lists a struct type's fields as "name type; " in declaration order.
+func treeFieldsV1(typ reflect.Type) string {
+	var out strings.Builder
+	for field := range typ.Fields() {
+		fmt.Fprintf(&out, "%s %s; ", field.Name, field.Type)
+	}
+	return out.String()
+}
+
+// treeMethodsV1 lists an interface type's methods, unexported included, as "name signature; ".
+func treeMethodsV1(typ reflect.Type) string {
+	var out strings.Builder
+	for method := range typ.Methods() {
+		fmt.Fprintf(&out, "%s %s; ", method.Name, method.Type)
+	}
+	return out.String()
 }
 
 // A10, A13, H5: budget arithmetic, the ledger view and the exact constants (literals from CSM line 358, 671-672).
@@ -59,13 +79,22 @@ func TestTreeBudgetAndConstantsV1(t *testing.T) {
 	if encodings != [...]uint8{1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9} || treeWriterV1 != 1 || treeReadbackV1 != 2 {
 		t.Fatalf("encodings %v", encodings)
 	}
-	// Frozen declaration order (D12-B, D12-I): primitive is built by name and compared with a positional literal, body
-	// and leaf are built positionally and read back by name, so a reorder, a type change or a swap of two same-typed
-	// fields fails to compile or fails the comparison.
+	// Frozen declarations (D12-B, D12-I): the field names, exact types and order of treePrimitiveV1, treeBodyV1 and
+	// treeLeafV1 and the method set of treeLeavesV1 are compared with the contract text, so a reorder, a rename, any
+	// type change (a named type with the same underlying type included) or another nextV1 signature fails here.
+	shapes := [...]string{treeFieldsV1(reflect.TypeFor[treePrimitiveV1]()), treeFieldsV1(reflect.TypeFor[treeBodyV1]()), treeFieldsV1(reflect.TypeFor[treeLeafV1]()), treeMethodsV1(reflect.TypeFor[treeLeavesV1]())}
+	if shapes != [...]string{
+		"direction uint8; kind uint8; undo uint8; generation uint64; height uint64; block [32]uint8; endpoint mdbx.TreeEndpointV1; ",
+		"bytes []uint8; pair bool; ",
+		"key [44]uint8; oldPresent bool; newPresent bool; newValue []uint8; ",
+		"nextV1 func() (mdbx.treeLeafV1, bool, error); ",
+	} {
+		t.Errorf("declaration shapes %q", shapes)
+	}
+	// By-name and positional construction agree with that order.
 	primitive := treePrimitiveV1{direction: treeForwardV1, kind: treeKindLagForwardV1, undo: 3, generation: 4, height: 5, block: [32]byte{6}, endpoint: TreeEndpointV1{}}
 	body := treeBodyV1{[]byte{7}, true}
 	leaf := treeLeafV1{[44]byte{8}, true, false, []byte{9}}
-	_ = treeLeavesV1(nil)
 	if primitive != (treePrimitiveV1{1, 6, 3, 4, 5, [32]byte{6}, TreeEndpointV1{}}) || string(body.bytes) != "\x07" || !body.pair {
 		t.Fatalf("declaration shapes %+v %+v", primitive, body)
 	}
