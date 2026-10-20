@@ -318,10 +318,11 @@ func TestTreeReadbackCompletesAfterFalseV1(t *testing.T) {
 	run := &ttLagRun{readZ: "z9"}
 	outcome, evidence := ttLagFault(t, store, run, 8, 4, ttR)
 	commit := ttCommitError(t, outcome, CommitTruthUnknown)
-	ttEngine(t, commit.ReadbackCause, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
+	// Non-fatal, so the cause assertion below is observed in the same run.
 	if evidence.gets < 1 || evidence.commits < 1 {
-		t.Fatalf("fault evidence %+v", evidence)
+		t.Errorf("fault evidence %+v", evidence)
 	}
+	ttEngine(t, commit.ReadbackCause, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 }
 
 // R9, M28, M-R7: S_r is drawn before any snapshot read; the exact budget S_r + HW selects NEW, one byte less refuses.
@@ -919,7 +920,8 @@ func BenchmarkTreeProjectionStoreV1(b *testing.B) {
 	}
 }
 
-// A7, M-R8: a failed tree native read of ORIGINAL OLD is nativeError(operationUpdate, rc) (D14-8), never operationGet.
+// M-R8: a failed plain getV1 point read of ORIGINAL OLD at the writer position (mode 28) is
+// nativeError(operationUpdate, rc) (D14-8), never operationGet, and it is the abort primary.
 func TestTreeOldReadFailureV1(t *testing.T) {
 	store, _ := ttStore(t)
 	treeNativeSeed(t, store, 1, ttU, []byte("od"))
@@ -938,6 +940,31 @@ func TestTreeOldReadFailureV1(t *testing.T) {
 	}
 	ttEngine(t, read, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 	ttEngine(t, outcome.primary, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
+}
+
+// M-R8n: a failed plain nextV1 lower-bound read (treeReadNextV1) is nativeError(operationUpdate, rc) (D14-8). Mode 29
+// fails every lower-bound read of the second intercepted RDONLY txn on a DBI other than the armed one: the outer
+// seam's ORIGINAL OLD is the first RDONLY txn and reads normally, the nested seam's ORIGINAL OLD is the second.
+func TestTreeNextReadFailureV1(t *testing.T) {
+	store, _ := ttStore(t)
+	treeNativeSeed(t, store, 1, ttU, []byte("od"))
+	var control string
+	var failed error
+	evidence, err := fixtureLargeFault(store, 29, 4, ttR, func() {
+		mustEnvironment(t, fixtureTreeOldV1(store, func(outer treeOldV1) error {
+			key, image, ok, err := outer.nextV1(ttUTXO, ttU[:1])
+			control = fmt.Sprintf("%x=%s/%v", key, ttImage(image, err), ok)
+			return fixtureTreeOldV1(store, func(inner treeOldV1) error {
+				_, _, _, failed = inner.nextV1(ttUTXO, ttU[:1])
+				return nil
+			})
+		}))
+	})
+	mustEnvironment(t, err)
+	if control != fmt.Sprintf("%x=true:od/true", ttU) || evidence.gets != 1 {
+		t.Errorf("control %s evidence %+v", control, evidence)
+	}
+	ttEngine(t, failed, EngineIO, codeEIO, nativeDiagnostic(codeEIO))
 }
 
 // L3-LT literals: keys in ascending order b, c, d, e, a, a2, f on one DBI of rank below 8; no byte of va or va2

@@ -59,14 +59,16 @@ func TestTreeBudgetAndConstantsV1(t *testing.T) {
 	if encodings != [...]uint8{1, 2, 1, 2, 3, 4, 5, 6, 7, 8, 9} || treeWriterV1 != 1 || treeReadbackV1 != 2 {
 		t.Fatalf("encodings %v", encodings)
 	}
+	// Frozen declaration order (D12-B, D12-I): each literal is positional and read back by field name, so a reorder,
+	// a type change or a swap of two same-typed fields fails to compile or fails the comparison.
 	primitive := treePrimitiveV1{direction: treeForwardV1, kind: treeKindLagForwardV1, undo: 3, generation: 4, height: 5, block: [32]byte{6}, endpoint: TreeEndpointV1{}}
-	body := treeBodyV1{bytes: []byte{7}, pair: true}
-	leaf := treeLeafV1{key: [44]byte{8}, oldPresent: true, newPresent: true, newValue: []byte{9}}
-	_ = treeLeavesV1(nil)
+	body := treeBodyV1{[]byte{7}, true}
+	leaf := treeLeafV1{[44]byte{8}, true, false, []byte{9}}
+	var _ func(treeLeavesV1) (treeLeafV1, bool, error) = treeLeavesV1.nextV1
 	if primitive != (treePrimitiveV1{1, 6, 3, 4, 5, [32]byte{6}, TreeEndpointV1{}}) || string(body.bytes) != "\x07" || !body.pair {
 		t.Fatalf("declaration shapes %+v %+v", primitive, body)
 	}
-	if leaf.key != [44]byte{8} || !leaf.oldPresent || !leaf.newPresent || string(leaf.newValue) != "\x09" {
+	if leaf.key != [44]byte{8} || !leaf.oldPresent || leaf.newPresent || string(leaf.newValue) != "\x09" {
 		t.Fatalf("leaf shape %+v", leaf)
 	}
 }
