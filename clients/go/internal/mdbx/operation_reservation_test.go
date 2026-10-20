@@ -857,9 +857,9 @@ func accountHold(t *testing.T, a *OperationAccount, bytes uint64) (release chan 
 	return release, done
 }
 
-// operationHold opens kind on owner in a new goroutine and charges bytes on it until release is closed; done
+// operationChargeHold opens kind on owner in a new goroutine and charges bytes on it until release is closed; done
 // reports WithOperation's return.
-func operationHold(t *testing.T, owner *OperationReservationOwner, kind OperationKind, bytes uint64) (release chan struct{}, done chan error) {
+func operationChargeHold(t *testing.T, owner *OperationReservationOwner, kind OperationKind, bytes uint64) (release chan struct{}, done chan error) {
 	t.Helper()
 	release, done, entered := make(chan struct{}), make(chan error, 1), make(chan struct{})
 	go func() {
@@ -878,8 +878,8 @@ func operationHold(t *testing.T, owner *OperationReservationOwner, kind Operatio
 func TestOperationReservationAggregate(t *testing.T) {
 	owner := reservationOwner(t, specRMin)
 	dup := *owner
-	r1, d1 := operationHold(t, owner, TreeOperation, 402653184)
-	r2, d2 := operationHold(t, &dup, TreeOperation, 402653184)
+	r1, d1 := operationChargeHold(t, owner, TreeOperation, 402653184)
+	r2, d2 := operationChargeHold(t, &dup, TreeOperation, 402653184)
 	if live := reservationLive(owner); live != 805306368 {
 		t.Fatalf("A4 live=%d", live)
 	}
@@ -1126,8 +1126,8 @@ func accountOutlived(t *testing.T, label string, e accountExit) {
 		t.Fatalf("%s held charge: %v", label, err)
 	}
 	accountMustHold(t, label+" released once", owner, retained, 0)
-	r1, d1 := operationHold(t, owner, TreeOperation, 402653184)
-	r2, d2 := operationHold(t, owner, TreeOperation, 402653184)
+	r1, d1 := operationChargeHold(t, owner, TreeOperation, 402653184)
+	r2, d2 := operationChargeHold(t, owner, TreeOperation, 402653184)
 	close(r1)
 	close(r2)
 	if err1, err2 := <-d1, <-d2; err1 != nil || err2 != nil || reservationLive(owner) != 0 {
@@ -1160,4 +1160,421 @@ func BenchmarkOperationAccountWithReservation(b *testing.B) {
 		}
 		return nil
 	})
+}
+
+// holdState takes one coherent snapshot of the three sums owned by a hold.
+func holdState(h *operationHold) [3]uint64 {
+	s := h.account.origin
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return [3]uint64{h.amount, h.account.held, s.live}
+}
+
+func holdWant(t *testing.T, label string, h *operationHold, amount, held, live uint64) {
+	t.Helper()
+	if got := holdState(h); got != [3]uint64{amount, held, live} {
+		t.Fatalf("%s: amount/held/live=%v want %v", label, got, [3]uint64{amount, held, live})
+	}
+}
+
+func holdOK(t *testing.T, label string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("%s: %v", label, err)
+	}
+}
+
+// holdRefuse requires the exact singleton and an unchanged, independently captured state.
+func holdRefuse(t *testing.T, label string, h *operationHold, call func() error, want error, text string) {
+	t.Helper()
+	before := holdState(h)
+	wantReservationSentinel(t, label, call(), want, text)
+	if after := holdState(h); after != before {
+		t.Fatalf("%s: refusal changed amount/held/live %v to %v", label, before, after)
+	}
+}
+
+// holdRun opens exactly one synchronous hold callback and requires success.
+func holdRun(t *testing.T, a *OperationAccount, body func(*operationHold)) {
+	t.Helper()
+	calls := 0
+	err := a.withHold(func(h *operationHold) error { calls++; body(h); return nil })
+	if err != nil || calls != 1 {
+		t.Fatalf("withHold: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestOperationHoldNonLIFO(t *testing.T) {
+	for _, limit := range []uint64{805306368, 18446744073709551615} {
+		t.Run(fmt.Sprintf("A9 limit %d", limit), func(t *testing.T) {
+			owner := reservationOwner(t, limit)
+			accountRun(t, "A9", owner, TreeOperation, func(a *OperationAccount) {
+				var retained *operationHold
+				holdRun(t, a, func(h *operationHold) {
+					retained = h
+					holdWant(t, "A9 initially zero", h, 0, 0, 0)
+					holdOK(t, "A9 zero grow", h.grow(0))
+					holdWant(t, "A9 zero grow unchanged", h, 0, 0, 0)
+					holdOK(t, "A9 initial grow", h.grow(200000000))
+					holdWant(t, "A9 initial charge", h, 200000000, 200000000, 200000000)
+					calls := 0
+					err := a.WithReservation(100000000, func() error {
+						calls++
+						holdOK(t, "A9 non-LIFO shrink", h.shrink(200000000))
+						holdWant(t, "A9 nested remains", h, 0, 100000000, 100000000)
+						holdOK(t, "A9 reuse released capacity", h.grow(302653184))
+						holdWant(t, "A9 ceiling", h, 302653184, 402653184, 402653184)
+						holdRefuse(t, "A9 ceiling plus one", h, func() error { return h.grow(1) }, errOperationReservationCapacity, textReservationCapacity)
+						return nil
+					})
+					if err != nil || calls != 1 {
+						t.Fatalf("A9 nested: err=%v calls=%d", err, calls)
+					}
+					holdWant(t, "A9 nested frame left", h, 302653184, 302653184, 302653184)
+				})
+				holdWant(t, "A9 remainder released once", retained, 0, 0, 0)
+			})
+		})
+	}
+}
+
+func TestOperationHoldErrorIdentity(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	sentinel := &struct{ error }{errors.New("A10 callback")}
+	accountRun(t, "A10", owner, TreeOperation, func(a *OperationAccount) {
+		for _, want := range []error{nil, sentinel} {
+			calls, stage := 0, 1
+			var retained *operationHold
+			got := a.withHold(func(h *operationHold) error {
+				calls++
+				if stage != 1 {
+					t.Fatal("A10 callback was not synchronous")
+				}
+				retained, stage = h, 2
+				holdOK(t, "A10 grow", h.grow(1))
+				return want
+			})
+			if any(got) != any(want) || !errors.Is(got, want) || calls != 1 || stage != 2 {
+				t.Fatalf("A10 got=%v want=%v calls=%d stage=%d", got, want, calls, stage)
+			}
+			holdWant(t, "A10 frame released", retained, 0, 0, 0)
+		}
+	})
+}
+
+// startResizableHold keeps a hold in a joined goroutine until finish, including on test failure.
+func startResizableHold(t *testing.T, a *OperationAccount, bytes uint64) (*operationHold, func()) {
+	t.Helper()
+	entered, release, done := make(chan *operationHold), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- a.withHold(func(h *operationHold) error {
+			if err := h.grow(bytes); err != nil {
+				return err
+			}
+			entered <- h
+			<-release
+			return nil
+		})
+	}()
+	var h *operationHold
+	select {
+	case h = <-entered:
+	case err := <-done:
+		t.Fatalf("hold did not enter: %v", err)
+	}
+	finish := sync.OnceFunc(func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Errorf("hold frame: %v", err)
+		}
+	})
+	t.Cleanup(finish)
+	return h, finish
+}
+
+func TestOperationHoldSharedCeiling(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	accountRun(t, "A11", owner, TreeOperation, func(a *OperationAccount) {
+		var second *operationHold
+		var finish func()
+		holdRun(t, a, func(first *operationHold) {
+			holdOK(t, "A11 first grow", first.grow(200000000))
+			second, finish = startResizableHold(t, a, 202653184)
+			holdWant(t, "A11 first sum", first, 200000000, 402653184, 402653184)
+			holdWant(t, "A11 second sum", second, 202653184, 402653184, 402653184)
+			for _, h := range []*operationHold{first, second} {
+				holdRefuse(t, "A11 combined ceiling", h, func() error { return h.grow(1) }, errOperationReservationCapacity, textReservationCapacity)
+			}
+		})
+		holdWant(t, "A11 first frame left", second, 202653184, 202653184, 202653184)
+		holdOK(t, "A11 reuse first capacity", second.grow(200000000))
+		holdWant(t, "A11 second ceiling", second, 402653184, 402653184, 402653184)
+		finish()
+		holdWant(t, "A11 both frames left", second, 0, 0, 0)
+	})
+}
+
+func TestOperationHoldAggregate(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	r1, d1 := operationChargeHold(t, owner, TreeOperation, 402653184)
+	r3, d3 := operationChargeHold(t, owner, TreeOperation, 200000000)
+	finishOne := sync.OnceFunc(func() { close(r1); holdOK(t, "A12 operation one", <-d1) })
+	finishThree := sync.OnceFunc(func() { close(r3); holdOK(t, "A12 operation three", <-d3) })
+	defer finishOne()
+	defer finishThree()
+	accountRun(t, "A12 operation two", owner, TreeOperation, func(a *OperationAccount) {
+		holdRun(t, a, func(h *operationHold) {
+			holdOK(t, "A12 aggregate exactly full", h.grow(202653184))
+			holdWant(t, "A12 below ceiling full aggregate", h, 202653184, 202653184, 805306368)
+			holdOK(t, "A12 zero shrink", h.shrink(0))
+			holdWant(t, "A12 zero unchanged", h, 202653184, 202653184, 805306368)
+			holdRefuse(t, "A12 aggregate only refusal", h, func() error { return h.grow(1) }, errOperationReservationCapacity, textReservationCapacity)
+			finishOne()
+			holdWant(t, "A12 operation one released", h, 202653184, 202653184, 402653184)
+			holdOK(t, "A12 aggregate reuse", h.grow(1))
+			holdWant(t, "A12 one more admitted", h, 202653185, 202653185, 402653185)
+			finishThree()
+		})
+		accountMustHold(t, "A12 final", owner, a, 0)
+	})
+}
+
+func holdOpenWant(t *testing.T, owner *OperationReservationOwner, a *OperationAccount, want bool) {
+	t.Helper()
+	live := reservationLive(owner)
+	held, closed := uint64(0), false
+	initialized := a != nil && a.shared != nil
+	if initialized {
+		held, closed = accountState(a)
+	}
+	if got := a.openV1(); got != want {
+		t.Fatalf("A13 openV1=%v want %v", got, want)
+	}
+	if initialized {
+		afterHeld, afterClosed := accountState(a)
+		if afterHeld != held || afterClosed != closed {
+			t.Fatal("A13 openV1 changed held or closed")
+		}
+	}
+	if reservationLive(owner) != live {
+		t.Fatal("A13 openV1 changed owner live")
+	}
+}
+
+func TestOperationAccountOpenV1(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	holdOpenWant(t, owner, nil, false)
+	holdOpenWant(t, owner, new(OperationAccount), false)
+	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+		var retained *OperationAccount
+		accountRun(t, "A13", owner, kind, func(a *OperationAccount) {
+			retained = a
+			accountMustAdmit(t, "A13 charged predicate", a, 1, func() { holdOpenWant(t, owner, a, true) })
+		})
+		holdOpenWant(t, owner, retained, false)
+	}
+}
+
+func TestOperationHoldRetained(t *testing.T) {
+	for _, limit := range []uint64{0, 805306368} {
+		owner := reservationOwner(t, limit)
+		accountRun(t, "R6 retained", owner, TreeOperation, func(a *OperationAccount) {
+			var retained *operationHold
+			holdRun(t, a, func(h *operationHold) {
+				retained = h
+				if limit != 0 {
+					holdOK(t, "R6 grow", h.grow(100000000))
+					holdRefuse(t, "R6 oversized shrink", h, func() error { return h.shrink(100000001) }, errOperationReservationInput, textReservationInput)
+					holdRefuse(t, "R6 maximum shrink", h, func() error { return h.shrink(18446744073709551615) }, errOperationReservationInput, textReservationInput)
+					holdOK(t, "R6 release amount", h.shrink(100000000))
+					holdWant(t, "R6 empty after shrink", h, 0, 0, 0)
+					holdRefuse(t, "R6 duplicate shrink", h, func() error { return h.shrink(1) }, errOperationReservationInput, textReservationInput)
+				}
+			})
+			for _, bytes := range []uint64{0, 1} {
+				holdRefuse(t, "R6 closed grow input before capacity", retained, func() error { return retained.grow(bytes) }, errOperationReservationInput, textReservationInput)
+				holdRefuse(t, "R6 closed shrink", retained, func() error { return retained.shrink(bytes) }, errOperationReservationInput, textReservationInput)
+			}
+			holdWant(t, "R6 final", retained, 0, 0, 0)
+		})
+	}
+}
+
+func TestOperationHoldBelowFloor(t *testing.T) {
+	for _, limit := range []uint64{0, 805306367} {
+		owner := reservationOwner(t, limit)
+		for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
+			accountRun(t, "R6 below floor", owner, kind, func(a *OperationAccount) {
+				holdRun(t, a, func(h *operationHold) {
+					for _, bytes := range []uint64{0, 1} {
+						holdRefuse(t, "R6 grow capacity", h, func() error { return h.grow(bytes) }, errOperationReservationCapacity, textReservationCapacity)
+					}
+					holdWant(t, "R6 floor unchanged", h, 0, 0, 0)
+				})
+			})
+		}
+	}
+}
+
+func TestOperationHoldInput(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	var retained *OperationAccount
+	accountRun(t, "R7", owner, TreeOperation, func(a *OperationAccount) {
+		retained = a
+		calls := 0
+		reservationInput(t, "R7 nil callback", owner, &calls, func(*testing.T) error { return a.withHold(nil) })
+		accountMustHold(t, "R7 nil callback unchanged", owner, a, 0)
+	})
+	for i, a := range []*OperationAccount{nil, new(OperationAccount), retained} {
+		calls := 0
+		reservationInput(t, fmt.Sprintf("R7 account %d", i), owner, &calls, func(*testing.T) error {
+			return a.withHold(func(*operationHold) error { calls++; return nil })
+		})
+	}
+	accountMustHold(t, "R7 closed unchanged", owner, retained, 0)
+	for i, h := range []*operationHold{nil, new(operationHold)} {
+		for _, bytes := range []uint64{0, 1} {
+			calls := 0
+			reservationInput(t, fmt.Sprintf("R7 hold %d grow %d", i, bytes), owner, &calls, func(*testing.T) error { return h.grow(bytes) })
+			reservationInput(t, fmt.Sprintf("R7 hold %d shrink %d", i, bytes), owner, &calls, func(*testing.T) error { return h.shrink(bytes) })
+		}
+	}
+}
+
+func TestOperationHoldCeilings(t *testing.T) {
+	for _, limit := range []uint64{805306368, 18446744073709551615} {
+		owner := reservationOwner(t, limit)
+		accountRun(t, "R8 tree", owner, TreeOperation, func(a *OperationAccount) {
+			var retained *operationHold
+			holdRun(t, a, func(h *operationHold) {
+				retained = h
+				holdRefuse(t, "R8 tree ceiling plus one", h, func() error { return h.grow(402653185) }, errOperationReservationCapacity, textReservationCapacity)
+				holdRefuse(t, "R8 maximum u64 empty", h, func() error { return h.grow(18446744073709551615) }, errOperationReservationCapacity, textReservationCapacity)
+				holdOK(t, "R8 partial tree", h.grow(300000000))
+				holdRefuse(t, "R8 sum exceeds ceiling", h, func() error { return h.grow(102653185) }, errOperationReservationCapacity, textReservationCapacity)
+				holdRefuse(t, "R8 maximum u64 charged", h, func() error { return h.grow(18446744073709551615) }, errOperationReservationCapacity, textReservationCapacity)
+				holdWant(t, "R8 admitted amount preserved", h, 300000000, 300000000, 300000000)
+			})
+			holdWant(t, "R8 tree released once", retained, 0, 0, 0)
+		})
+		accountRun(t, "R8 lane", owner, LaneOperation, func(a *OperationAccount) {
+			holdRun(t, a, func(h *operationHold) {
+				holdRefuse(t, "R8 lane ceiling plus one", h, func() error { return h.grow(154611184) }, errOperationReservationCapacity, textReservationCapacity)
+				holdOK(t, "R8 lane exact ceiling", h.grow(154611183))
+				holdWant(t, "R8 lane ceiling admitted", h, 154611183, 154611183, 154611183)
+			})
+			accountMustHold(t, "R8 lane released once", owner, a, 0)
+		})
+	}
+}
+
+func TestOperationHoldInjectedLive(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	accountRun(t, "R9", owner, TreeOperation, func(a *OperationAccount) {
+		holdRun(t, a, func(h *operationHold) {
+			reservationInjectLive(owner, 805306369)
+			defer reservationInjectLive(owner, 0)
+			for _, bytes := range []uint64{0, 1} {
+				holdRefuse(t, "R9 live above limit", h, func() error { return h.grow(bytes) }, errOperationReservationCapacity, textReservationCapacity)
+			}
+			holdWant(t, "R9 no subtraction wrap", h, 0, 0, 805306369)
+		})
+		accountMustHold(t, "R9 reset before frame exit", owner, a, 0)
+	})
+}
+
+func TestOperationHoldExit(t *testing.T) {
+	value := &struct{ id int }{5}
+	for _, e := range accountExits(value) {
+		t.Run("H5 "+e.name, func(t *testing.T) {
+			owner := reservationOwner(t, 805306368)
+			reservationNested(t, "H5 prior charge", owner, []uint64{1}, func() {
+				var retained *operationHold
+				var grown [3]uint64
+				var growth error
+				o := operationExit(owner, TreeOperation, func(a *OperationAccount) {
+					_ = a.withHold(func(h *operationHold) error {
+						retained = h
+						if growth = h.grow(150000000); growth != nil {
+							return growth
+						}
+						grown = holdState(h)
+						e.exit()
+						return nil
+					})
+				})
+				operationMustExit(t, "H5 propagation", o, e)
+				holdOK(t, "H5 charge before exit", growth)
+				if grown != [3]uint64{150000000, 150000000, 150000001} {
+					t.Fatalf("H5 charge before exit: %v", grown)
+				}
+				holdWant(t, "H5 restored prior value", retained, 0, 0, 1)
+				reservationMustAdmit(t, "H5 later owner charge", owner, 154611183)
+			})
+		})
+	}
+}
+
+func TestOperationHoldConcurrent(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	accountRun(t, "H5 concurrent", owner, TreeOperation, func(a *OperationAccount) {
+		accountMustAdmit(t, "H5 prior account charge", a, 1, func() {
+			holdRun(t, a, func(h *operationHold) {
+				results := make(chan error, 2)
+				var wg sync.WaitGroup
+				for range 2 {
+					wg.Go(func() {
+						for range 1000 {
+							if err := h.grow(1000); err != nil {
+								results <- err
+								return
+							}
+							if err := h.shrink(1000); err != nil {
+								results <- err
+								return
+							}
+						}
+						results <- nil
+					})
+				}
+				wg.Wait()
+				holdOK(t, "H5 worker one", <-results)
+				holdOK(t, "H5 worker two", <-results)
+				holdWant(t, "H5 balanced concurrent changes", h, 0, 1, 1)
+			})
+			accountMustHold(t, "H5 zero remainder frame", owner, a, 1)
+		})
+		accountMustHold(t, "H5 all frames left", owner, a, 0)
+	})
+}
+
+func TestOperationHoldOutlived(t *testing.T) {
+	owner := reservationOwner(t, 805306368)
+	var a *OperationAccount
+	var h *operationHold
+	var finish func()
+	accountRun(t, "H6", owner, TreeOperation, func(account *OperationAccount) {
+		a = account
+		h, finish = startResizableHold(t, a, 100000000)
+	})
+	holdWant(t, "H6 account closure keeps hold", h, 100000000, 100000000, 100000000)
+	calls := 0
+	reservationInput(t, "H6 withHold after account close", owner, &calls, func(*testing.T) error {
+		return a.withHold(func(*operationHold) error { calls++; return nil })
+	})
+	holdRefuse(t, "H6 grow after account close", h, func() error { return h.grow(1) }, errOperationReservationInput, textReservationInput)
+	holdOK(t, "H6 shrink after account close", h.shrink(50000000))
+	holdWant(t, "H6 partial release", h, 50000000, 50000000, 50000000)
+	finish()
+	holdWant(t, "H6 frame remainder released once", h, 0, 0, 0)
+	r1, d1 := operationChargeHold(t, owner, TreeOperation, 402653184)
+	r2, d2 := operationChargeHold(t, owner, TreeOperation, 402653184)
+	if live := reservationLive(owner); live != 805306368 {
+		t.Fatalf("H6 later pair live=%d", live)
+	}
+	close(r1)
+	holdOK(t, "H6 later first", <-d1)
+	close(r2)
+	holdOK(t, "H6 later second", <-d2)
+	accountMustHold(t, "H6 final", owner, a, 0)
 }
