@@ -4,6 +4,8 @@ package mdbx
 
 import "runtime"
 
+// ---- tree_call_cgo.go and mdbx_cgo.go (owner L4) ----
+
 // treeUnwindV1 records how a provider call or a locked operation ended.
 type treeUnwindV1 struct {
 	kind  uint8 // 0 none, 1 panic, 2 goexit
@@ -15,7 +17,9 @@ type treeUnwindV1 struct {
 // deferred functions run (including runTreeLockedV1's delivery); a panic that call's own deferred functions raise
 // while that Goexit unwinds is recovered here, the Goexit continues and the value is not carried. nil call yields
 // kind 1 with the runtime error value.
-func treeCallV1(call func() error) (unwind treeUnwindV1, err error) {
+func treeCallV1(call func() error) (treeUnwindV1, error) {
+	var unwind treeUnwindV1
+	var err error
 	unwind.kind = 1
 	func() {
 		defer func() { unwind.value = recover() }()
