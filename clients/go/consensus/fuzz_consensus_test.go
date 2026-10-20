@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"encoding/binary"
+	"reflect"
 	"testing"
 )
 
@@ -67,15 +68,62 @@ func FuzzReadCompactSize(f *testing.F) {
 
 func FuzzParseTx(f *testing.F) {
 	f.Add(minimalTxBytesForFuzz())
+	f.Add(append(minimalTxBytesForFuzz(), 0x00))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		_, _, _, n, err := ParseTx(b)
+		tx, txid, wtxid, n, err := ParseTx(b)
 		if err != nil {
 			return
 		}
-		if n != len(b) {
-			t.Fatalf("consumed=%d len=%d", n, len(b))
+		checkParseTxPrefix(t, b, tx, txid, wtxid, n)
+		checkShorterPrefixRejected(t, b, n)
+		checkReencodingMatchesPrefix(t, b, tx, n)
+		if n < len(b) {
+			checkTrailingBytesRejected(t, b)
 		}
 	})
+}
+
+func checkParseTxPrefix(t *testing.T, b []byte, tx *Tx, txid, wtxid [32]byte, n int) {
+	t.Helper()
+	if n <= 0 || n > len(b) {
+		t.Fatalf("consumed=%d len=%d", n, len(b))
+	}
+	tx2, txid2, wtxid2, n2, err := ParseTx(b[:n])
+	if err != nil {
+		t.Fatalf("prefix parse failed: %v", err)
+	}
+	if n2 != n || txid2 != txid || wtxid2 != wtxid {
+		t.Fatalf("prefix parse differs: consumed=%d want=%d", n2, n)
+	}
+	if !reflect.DeepEqual(tx2, tx) {
+		t.Fatalf("prefix parse decoded a different tx: consumed=%d", n)
+	}
+}
+
+func checkShorterPrefixRejected(t *testing.T, b []byte, n int) {
+	t.Helper()
+	if _, _, _, _, err := ParseTx(b[:n-1]); err == nil {
+		t.Fatalf("shorter prefix parsed: consumed=%d is not exact", n)
+	}
+}
+
+func checkReencodingMatchesPrefix(t *testing.T, b []byte, tx *Tx, n int) {
+	t.Helper()
+	enc, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatalf("MarshalTx failed: %v", err)
+	}
+	if !bytes.Equal(enc, b[:n]) {
+		t.Fatalf("re-encoding differs from consumed prefix: encoded=%d consumed=%d", len(enc), n)
+	}
+}
+
+func checkTrailingBytesRejected(t *testing.T, b []byte) {
+	t.Helper()
+	_, err := CheckTransactionWithOwnedUtxoSetAndValidationContext(b, map[Outpoint]UtxoEntry{}, 0, 0, [32]byte{}, SuiteValidationContext{})
+	if code := mustTxErrCode(t, err); code != TX_ERR_PARSE {
+		t.Fatalf("trailing bytes: code=%s want=%s", code, TX_ERR_PARSE)
+	}
 }
 
 func FuzzParseBlockBytes(f *testing.F) {

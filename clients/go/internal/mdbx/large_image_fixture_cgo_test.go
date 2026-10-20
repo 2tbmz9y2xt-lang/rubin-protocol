@@ -1195,8 +1195,7 @@ func TestCanonicalContextWindowV1Native(t *testing.T) {
 
 func contextProbe(t *testing.T, store *Store, run func()) SelectedDamageEvidence {
 	t.Helper()
-	owner, err := NewOperationReservationOwner(154_611_151)
-	mustEnvironment(t, err)
+	owner := reservationFilled(t, 154_611_151)
 	evidence, err := FixtureSelectedDamage(store, owner, SelectedDamageScenario(1), 0, nil, run)
 	mustEnvironment(t, err)
 	return evidence
@@ -1479,9 +1478,8 @@ func contextNativeSource(t *testing.T) {
 			}
 			var probe SelectedDamageEvidence
 			if variant == "EIO consumed abort" {
-				owner, err := NewOperationReservationOwner(154_611_151)
-				mustEnvironment(t, err)
-				probe, err = FixtureSelectedDamage(store, owner, SelectedDamageScenario(5), rank, key, run)
+				var err error
+				probe, err = FixtureSelectedDamage(store, reservationFilled(t, 154_611_151), SelectedDamageScenario(5), rank, key, run)
 				mustEnvironment(t, err)
 			} else {
 				probe = contextProbe(t, store, func() {

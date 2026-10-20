@@ -268,7 +268,7 @@ func TestCleanupSideV1(t *testing.T) {
 			if truth != CommitTruth(1) || stage != 1 || !sameError(err, errOperationReservationCapacity) {
 				t.Fatalf("SIDE Q-1 refusal: %s/%d/%v", truth, stage, err)
 			}
-			if owner.shared.live != 1 {
+			if owner.shared.live != bootstrapFiller+1 {
 				t.Fatal("SIDE capacity changed the pre-call charge")
 			}
 			return nil

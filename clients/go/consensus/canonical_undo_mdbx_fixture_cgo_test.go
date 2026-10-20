@@ -49,7 +49,7 @@ func undoNativeCell(t *testing.T, name string) {
 		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(store, 5, expected[1].Key, raw) == nil, "raw OLD seed")
 		physical[1].Literal = raw
 	}
-	owner, err := mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+	owner, err := reservationRemaining(t, mdbx.MaxOperationDataBytes)
 	logicalMDBXAssert(t, err == nil, "native reservation: %v", err)
 	var equal bool
 	var direct, outer error

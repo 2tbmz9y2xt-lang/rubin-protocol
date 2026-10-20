@@ -5624,8 +5624,7 @@ func TestReaderStorageAuthorityV1(t *testing.T) {
 	store, err := Create(filepath.Join(t.TempDir(), "db"), selectedSideAccessorConfig)
 	mustEnvironment(t, err)
 	defer func() { _ = store.Close() }()
-	owner, err := NewOperationReservationOwner(MaxOperationDataBytes)
-	mustEnvironment(t, err)
+	owner := reservationFilled(t, MaxOperationDataBytes)
 	if truth, _, err := store.BootstrapStorageV1(StorageProfileArchiveV1, owner); err != nil || truth != CommitTruthNew {
 		t.Fatalf("bootstrap: %v/%v", truth, err)
 	}

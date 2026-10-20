@@ -127,7 +127,7 @@ func newSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
 	w.store, err = mdbx.Create(w.path, sideWorldConfig)
 	logicalMDBXAssert(t, err == nil, "side world store: %v", err)
 	t.Cleanup(func() { _ = w.store.Close() })
-	w.owner, err = mdbx.NewOperationReservationOwner(mdbx.MaxOperationDataBytes)
+	w.owner, err = reservationRemaining(t, mdbx.MaxOperationDataBytes)
 	logicalMDBXAssert(t, err == nil, "side world owner: %v", err)
 	truth, _, err := w.store.BootstrapStorageV1(mdbx.StorageProfilePrunedV1, w.owner)
 	logicalMDBXAssert(t, err == nil && truth == mdbx.CommitTruthNew, "side world bootstrap: %v/%v", truth, err)
