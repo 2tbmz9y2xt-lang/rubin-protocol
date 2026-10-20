@@ -1378,7 +1378,7 @@ func contextNativeWidths(t *testing.T) {
 					if outcome.stage != 1 {
 						t.Fatal("unqualified prewrite Q stage")
 					}
-					outcome = updateNativeReadback(store.env, store.dbis, nil, nil, reader.txn, nativeError(operationUpdate, 28), scope)
+					outcome = updateNativeReadback(store.env, store.dbis, nil, nil, reader.txn, nativeError(operationUpdate, 28), nil, scope)
 					contextError(t, outcome.secondary, "StateMismatch", -30779, "canonical context OLD image is incomplete")
 					requireUpdateTruth(t, outcome, 3, true, outcome.primary, outcome.secondary)
 					return nil
@@ -1708,7 +1708,7 @@ func contextNativeOriginal(t *testing.T) {
 					changed := store.updateNative(third, nil, reader.txn)
 					requireUpdateTruth(t, changed, 2, true, changed.primary, nil)
 					contextError(t, changed.primary, "Capacity", 28, "error 28")
-					outcome = updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, nativeError(operationUpdate, 28), scope)
+					outcome = updateNativeReadback(store.env, store.dbis, plan, nil, reader.txn, nativeError(operationUpdate, 28), nil, scope)
 					return nil
 				}))
 			})

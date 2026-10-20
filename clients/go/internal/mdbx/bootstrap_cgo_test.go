@@ -931,7 +931,7 @@ func bootstrapReadback(t *testing.T, store *Store, plan, change []ownedMutation,
 		if flip {
 			handles[0] = ^handles[0]
 		}
-		outcome = updateNativeReadback(store.env, handles, plan, consulted, reader.txn, primary)
+		outcome = updateNativeReadback(store.env, handles, plan, consulted, reader.txn, primary, nil)
 		return nil
 	}))
 	return outcome
