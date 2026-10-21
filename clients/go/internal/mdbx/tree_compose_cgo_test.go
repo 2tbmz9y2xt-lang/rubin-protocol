@@ -1322,3 +1322,95 @@ func TestTreeComposeNoSurvivorReadbackV1(t *testing.T) {
 	}
 	s.settled(t)
 }
+
+// tcTipCell is the H7 provider action: CanonicalTipV1 of a generation with no canonical-v1 row stores a cell on the
+// Reader; the test keeps the Reader and the cell pointer. It never calls t.Fatal (worker goroutine).
+type tcTipCell struct {
+	old  *Reader
+	cell *canonicalTipCell
+}
+
+func (c *tcTipCell) take(t *testing.T, old *Reader) {
+	point, err := old.CanonicalTipV1(9)
+	if point != nil || err != nil || old.tip == nil || old.tip.generation != 9 {
+		t.Errorf("CanonicalTipV1(9) %v %v cell %+v", point, err, old.tip)
+	}
+	c.old, c.cell = old, old.tip
+}
+
+// retired reports the H7 observation: the Reader is unusable and the cell is canonicalTipCell{}.
+func (c *tcTipCell) retired() bool {
+	return c.cell != nil && !c.old.usable() && *c.cell == canonicalTipCell{}
+}
+
+// H7, M38-M40: the provider Reader is expired and its source cell retired when its call returns (writer, at the
+// first charge after CURRENT's writer provider returned), on a writer Goexit (before resume) and at the readback.
+func TestTreeComposeReaderExpiryV1(t *testing.T) {
+	t.Run("writer", func(t *testing.T) {
+		s := tcNew(t, 3)
+		var tip tcTipCell
+		cur, returned, observed := s.prims[0], false, ""
+		cur.custom = func(old *Reader, rec *treeRecorderV1) error {
+			tip.take(t, old)
+			err := cur.stream(rec)
+			returned = true
+			return err
+		}
+		s.ledger.before = func(n uint64) {
+			if returned && observed == "" {
+				observed = fmt.Sprintf("%d %v", n, tip.retired())
+			}
+		}
+		r := s.run(nil)
+		r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		if !strings.HasSuffix(observed, " true") || strings.HasPrefix(observed, fmt.Sprint(tcStep)+" ") {
+			t.Fatalf("first charge after CURRENT returned (before its step 8): %q", observed)
+		}
+		s.settled(t)
+	})
+	t.Run("goexit", func(t *testing.T) {
+		s := tcNew(t, 3)
+		var tip tcTipCell
+		lag1 := s.prims[1]
+		lag1.custom = func(old *Reader, rec *treeRecorderV1) error {
+			tip.take(t, old)
+			if err := lag1.stream(rec); err != nil {
+				t.Errorf("stream: %v", err)
+			}
+			runtime.Goexit()
+			return nil
+		}
+		s.goexitRun(t, func(r tcResult) {
+			if r.unwind.kind != 2 || !tip.retired() {
+				t.Errorf("goexit unwind %d retired %v", r.unwind.kind, tip.retired())
+			}
+		})
+		s.settled(t)
+	})
+	t.Run("readback", func(t *testing.T) {
+		s := tcNew(t, 2)
+		body := append(append([]byte(nil), tcFU...), tcFC...)
+		treeNativeSeed(t, s.store, 4, tcB1[:], body)
+		s.prims[1].events = []tdEv{tdCreate(tcTU, 0, 0, 0, uint32(len(tcFU))), tdCreate(tcTU, 1, 0, uint64(len(tcFU)), uint32(len(tcFC)))}
+		var tip tcTipCell
+		cur, lag1, observed := s.prims[0], s.prims[1], false
+		cur.custom = func(old *Reader, rec *treeRecorderV1) error {
+			if cur.calls[treeReadbackV1] == 1 {
+				tip.take(t, old)
+			}
+			return cur.stream(rec)
+		}
+		lag1.custom = func(old *Reader, rec *treeRecorderV1) error {
+			if lag1.calls[treeReadbackV1] == 1 {
+				observed = tip.retired()
+			}
+			return lag1.stream(rec)
+		}
+		r := s.crossed(t)
+		r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		if !observed {
+			t.Fatal("CURRENT's readback Reader or cell still live at LAG1's readback entry")
+		}
+		s.settled(t)
+	})
+}
