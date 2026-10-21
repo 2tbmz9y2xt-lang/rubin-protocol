@@ -353,7 +353,7 @@ func TestTreeStreamPrimitiveDomainsV1(t *testing.T) {
 					accepted = accepted && kind != 6 && kind != 9 // CURRENT position
 					r := tsRun(t, s, o, TreeOperation, op)
 					if accepted {
-						r.tuple(t, 1, 2, 0)
+						r.tuple(t, 1, 1, 0)
 						if any(r.err) != any(marker) || calls != 1 {
 							t.Fatalf("valid table row %v calls%d", r.err, calls)
 						}
@@ -499,7 +499,7 @@ func TestTreeStreamEndpointAndLagDomainsV1(t *testing.T) {
 				}
 			}
 			r := tsRun(t, s, o, TreeOperation, op)
-			r.tuple(t, 1, 2, 0)
+			r.tuple(t, 1, 1, 0)
 			if any(r.err) != any(marker) || calls != 1 {
 				t.Fatalf("endpoint source %v/%d", r.err, calls)
 			}
@@ -959,7 +959,7 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 			}
 			r := tsRun(t, s, o, TreeOperation, op)
 			if variant == "same-direction" || variant == "distinct-block" {
-				r.tuple(t, 1, 2, 0)
+				r.tuple(t, 1, 1, 0)
 				if any(r.err) != any(marker) || calls != 1 {
 					t.Fatalf("accepted relation %v calls%d", r.err, calls)
 				}

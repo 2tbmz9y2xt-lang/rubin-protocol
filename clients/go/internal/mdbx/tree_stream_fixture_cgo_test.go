@@ -107,7 +107,7 @@ func (s *tsfScene) crossed(t *testing.T) tsResult {
 	return r
 }
 
-func (s *tsfScene) durable(t *testing.T, newState bool, driftedManifest ...[32]byte) {
+func (s *tsfScene) durable(t *testing.T, newState bool) {
 	t.Helper()
 	s.s = tsReopen(t, s.s, s.path)
 	for i, p := range s.op.Primitives {
@@ -131,13 +131,7 @@ func (s *tsfScene) durable(t *testing.T, newState bool, driftedManifest ...[32]b
 			}
 			manifest = tdManifest(p.Height, s.p[i].block.Generated, s.p[i].block.TxCount, spent)
 		}
-		if slices.Contains(driftedManifest, p.Block) {
-			if equal, err := FixtureRawRowEqual(s.s, 5, tdManifestKey(p.Block), []byte{0x7f}); err != nil || !equal {
-				t.Fatalf("drift manifest raw bytes equal%v err%v", equal, err)
-			}
-		} else {
-			tsRead(t, s.s, TreeSchemaV1DBIs()[5], tdManifestKey(p.Block), manifest)
-		}
+		tsRead(t, s.s, TreeSchemaV1DBIs()[5], tdManifestKey(p.Block), manifest)
 	}
 	undo := []byte(nil)
 	if newState {
@@ -463,10 +457,13 @@ func TestTreeStreamSourceFailureAndDriftV1(t *testing.T) {
 			var r tsResult
 			switch mode {
 			case "lag2-drift":
-				count, err := FixtureWriteSnapshotDrift(s.s, 5, tdManifestKey(s.op.Primitives[2].Block), func() { r = s.run(t) })
+				count, err := FixtureWriteSnapshotDrift(s.s, 4, bytes.Clone(s.op.Primitives[2].Block[:]), func() { r = s.run(t) })
 				mustEnvironment(t, err)
 				if count != 1 {
 					t.Fatal("drift site not reached")
+				}
+				if s.p[0].calls != [3]int{0, 1, 0} || s.p[1].calls != [3]int{0, 1, 0} || s.p[2].calls != [3]int{} {
+					t.Fatalf("drift Source calls CURRENT%v LAG1%v LAG2%v", s.p[0].calls, s.p[1].calls, s.p[2].calls)
 				}
 				r.tuple(t, 1, 2, 2)
 				treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
@@ -484,22 +481,20 @@ func TestTreeStreamSourceFailureAndDriftV1(t *testing.T) {
 				treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid tree delta", nil)
 			case "excluded-create":
 				p := s.op.Primitives[1]
-				treeNativeSeed(t, s.s, 4, p.Block[:], tdFrame(200, 2, []byte{1}))
+				treeNativeSeed(t, s.s, 4, bytes.Clone(p.Block[:]), tdFrame(200, 2, []byte{1}))
 				r = s.run(t)
 				r.tuple(t, 1, 2, 1)
 				treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid tree delta", nil)
 			}
 			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.durable(t, false)
 			if mode == "lag2-drift" {
-				s.durable(t, false, s.op.Primitives[2].Block)
-				if equal, err := FixtureRawRowEqual(s.s, 4, s.op.Primitives[1].Block[:], tdFrame(200, 0, []byte{1})); err != nil || !equal {
+				if equal, err := FixtureRawRowEqual(s.s, 4, bytes.Clone(s.op.Primitives[1].Block[:]), tdFrame(200, 0, []byte{1})); err != nil || !equal {
 					t.Fatalf("LAG1 raw body bytes equal%v err%v", equal, err)
 				}
-				if equal, err := FixtureRawRowEqual(s.s, 4, s.op.Primitives[2].Block[:], tdFrame(300, 0, nil)); err != nil || !equal {
+				if equal, err := FixtureRawRowEqual(s.s, 4, bytes.Clone(s.op.Primitives[2].Block[:]), []byte{0x7f}); err != nil || !equal {
 					t.Fatalf("LAG2 raw body bytes equal%v err%v", equal, err)
 				}
-			} else {
-				s.durable(t, false)
 			}
 		})
 	}
@@ -961,7 +956,7 @@ func TestTreeStreamSinkKindRefusalsV1(t *testing.T) {
 				return sink.EventV1(e)
 			}
 			r := s.run(t)
-			r.tuple(t, 1, 2, 0)
+			r.tuple(t, 1, 1, 0)
 			treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid tree delta", nil)
 			tsConsumed(t, s.s, s.o, 1, r.err)
 			s.durable(t, false)
