@@ -1459,3 +1459,102 @@ func TestTreeComposeBindingStageV1(t *testing.T) {
 		})
 	}
 }
+
+// tcTwoLeaf is the N2 plan: generation 1 holds UTXO rows a and b (leaves A and B under root branch R); CURRENT
+// (tx 0 coinbase without outputs, tx 1 spends a) changes only a, so leaf B is the boundary reference.
+func tcTwoLeaf(t *testing.T) (*tcScene, []byte) {
+	t.Helper()
+	store, path := ttStore(t)
+	frame := tdFrame(500, 0, nil)
+	keyA, keyB := tdUTXOKey(1, tdTxid(0xa1), 0), tdUTXOKey(1, tdTxid(0xa2), 0)
+	value := tdFormed(frame, 3, 0)
+	entries := []testTreeEntry{tcEntry(keyA, value), tcEntry(keyB, value)}
+	nodes := map[string][]byte{}
+	testTreeBuild(1, entries, nodes)
+	for name, row := range nodes {
+		key := make([]byte, (len(name)-2)/2)
+		_, err := fmt.Sscanf(name[2:], "%x", &key)
+		mustEnvironment(t, err)
+		treeNativeSeed(t, store, 8, key, row)
+	}
+	treeNativeSeed(t, store, 1, keyA, value)
+	treeNativeSeed(t, store, 1, keyB, value)
+	treeNativeSeed(t, store, 0, tcBindingKey(1), tcBinding(t, 1, tcOldEP, entries...))
+	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
+	s.pair = []ownedMutation{{dbi: ttBlocks, key: tcB0[:], after: AfterLiteral, literal: tcF0}}
+	s.prims = []*tcPrim{{name: "C", prim: tcForward(treeKindConnectV1, 1, 10, tcB0), txCount: 2, events: []tdEv{tdSpend(tdTxid(0xa1), 0, 1, 0)}, ledger: s.ledger}}
+	return s, testTreeNodeKey(1, 288, [36]byte(keyB[8:]))
+}
+
+// N2: mode 4 deletes leaf B (CURRENT's boundary reference) after the commit; the readback's predicate fails, UNKNOWN.
+func TestTreeComposeBoundaryReferenceV1(t *testing.T) {
+	s, leafB := tcTwoLeaf(t)
+	var r tcResult
+	evidence, err := fixtureLargeFault(s.store, 4, 8, leafB, func() { r = s.run(nil) })
+	mustEnvironment(t, err)
+	if evidence.commits < 1 || evidence.drift < 1 {
+		t.Fatalf("mode 4 did not fire: %+v", evidence)
+	}
+	r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+	tcCrossedCause(t, r.err, CommitTruthUnknown, nil)
+	if s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
+		t.Fatalf("N2 state %v truth %d", s.store.state, s.store.terminalTruth)
+	}
+	s.settled(t)
+}
+
+// tcNetClean is the N3 plan: CURRENT's tx 1 creates u and tx 2 spends it (no target at UTXOKey(1, u)).
+func tcNetClean(t *testing.T) (*tcScene, []byte) {
+	t.Helper()
+	s := tcNew(t, 1)
+	u, fu := tdTxid(0x60), tdFrame(600, 0, nil)
+	body := append(append([]byte(nil), tcF0...), fu...)
+	s.pair[0].literal = body
+	s.prims[0].txCount = 3
+	s.prims[0].events = []tdEv{tdCreate(tcT0, 0, 0, 0, uint32(len(tcF0))), tdCreate(u, 0, 1, uint64(len(tcF0)), uint32(len(fu))), tdSpend(u, 0, 2, 0)}
+	return s, tdUTXOKey(1, u, 0)
+}
+
+// N3: the non-net-dirty outpoint u is a reference: drift there after the commit (mode 3) is UNKNOWN, and drift in
+// the write txn after the first put (mode 13) is refused by complete final pair equality.
+func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
+	t.Run("readback", func(t *testing.T) {
+		s, key := tcNetClean(t)
+		var r tcResult
+		evidence, err := fixtureLargeFault(s.store, 3, 1, key, func() { r = s.run(nil) })
+		mustEnvironment(t, err)
+		if evidence.commits < 1 || evidence.drift < 1 {
+			t.Fatalf("mode 3 did not fire: %+v", evidence)
+		}
+		r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+		tcCrossedCause(t, r.err, CommitTruthUnknown, nil)
+		s.settled(t)
+	})
+	t.Run("writer", func(t *testing.T) {
+		s, key := tcNetClean(t)
+		var r tcResult
+		evidence, err := fixtureLargeFault(s.store, 13, 1, key, func() { r = s.run(nil) })
+		mustEnvironment(t, err)
+		if evidence.drift < 1 {
+			t.Fatalf("mode 13 did not fire: %+v", evidence)
+		}
+		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
+		ttMismatch(t, r.err, "final update image mismatch")
+		s.settled(t)
+		s.consumed(t, r.err)
+	})
+}
+
+// Control for N2 and N3: the same plans under the clean crossing (mode 12, no drift) read back NEW, so their UNKNOWN
+// and final-equality results come from the armed drift.
+func TestTreeComposeReferenceControlV1(t *testing.T) {
+	for name, build := range map[string]func(*testing.T) (*tcScene, []byte){"N2": tcTwoLeaf, "N3": tcNetClean} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := build(t)
+			r := s.crossed(t)
+			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+			tcCrossedCause(t, r.err, CommitTruthNew, nil)
+			s.settled(t)
+		})
+	}
+}
