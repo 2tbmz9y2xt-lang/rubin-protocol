@@ -369,16 +369,16 @@ func TestTreeComposeOrderV1(t *testing.T) {
 			t.Fatalf("primitive %d: %q precedes entry, want the step-1 charge (%v)", j, prev, log)
 		}
 	}
+	budgets := tcPBudgets(t)
+	if want := []uint64{0, budgets[0], budgets[1]}; fmt.Sprint(s.ledger.stepHeld) != fmt.Sprint(want) {
+		t.Fatalf("held before each step-1 charge %v, want the P budget after the previous primitive %v", s.ledger.stepHeld, want)
+	}
 	tcReleasedBefore(t, log, "L1", 1)
 	tcReleasedBefore(t, log, "L2", 1)
 	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)) {
 		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
 	}
 	s.settled(t)
-	budgets := tcPBudgets(t)
-	if want := []uint64{0, budgets[0], budgets[1]}; fmt.Sprint(s.ledger.stepHeld) != fmt.Sprint(want) {
-		t.Fatalf("held before each step-1 charge %v, want the P budget after the previous primitive %v", s.ledger.stepHeld, want)
-	}
 	if treeReaderBytesV1 != 208+728+128+80 || tcStep != 74_872 {
 		t.Fatal("R literal drifted")
 	}
@@ -757,8 +757,14 @@ func TestTreeComposePrimaryCompositionV1(t *testing.T) {
 			}
 			r := s.run(nil)
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-			if !errors.Is(r.err, f) || !errors.Is(r.err, sink) || sink == nil {
-				t.Fatalf("primary %v lacks F or s", r.err)
+			if sink == nil {
+				t.Errorf("R8 rec.beginV1(0) recorded no s")
+			}
+			if !errors.Is(r.err, f) {
+				t.Errorf("primary %v lacks F", r.err)
+			}
+			if !errors.Is(r.err, sink) {
+				t.Errorf("primary %v lacks s", r.err)
 			}
 			s.settled(t)
 		})
@@ -802,13 +808,16 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 			var r tcResult
 			early := func() (p any) { defer func() { p = recover() }(); r = s.run(nil); return nil }()
 			if early != nil {
-				t.Fatalf("%s: resumed inside the composer %v", variant, early)
+				t.Errorf("%s: resumed inside the composer %v", variant, early)
 			}
 			if variant != "clean" && s.store.state != storeCLOSED {
 				t.Errorf("%s: state %v before resume", variant, s.store.state)
 			}
 			if variant == "clean" && (s.store.state != storeOPEN || s.store.terminal != nil) {
 				t.Errorf("H1 clean state %v terminal %v before resume, want OPEN and nil", s.store.state, s.store.terminal)
+			}
+			if early != nil {
+				t.FailNow()
 			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if r.unwind.kind != 1 || escaped.usable() {
