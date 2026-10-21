@@ -403,8 +403,11 @@ fn witness_slots_unassigned_0x0102_rejected() {
 }
 
 #[test]
-fn witness_slots_stealth() {
-    assert_eq!(witness_slots(0x0105, &[]).unwrap(), 1); // COV_TYPE_CORE_STEALTH (CORE_STEALTH_WITNESS_SLOTS=1)
+fn witness_slots_retired_0x0105_rejected() {
+    for covenant_data in [vec![], vec![0x55; 1600]] {
+        let err = witness_slots(0x0105, &covenant_data).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
 }
 
 #[test]

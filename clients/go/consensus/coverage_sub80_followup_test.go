@@ -48,7 +48,7 @@ func TestCoverageResidual_FeatureBitsValidationAndFallbacks(t *testing.T) {
 	}
 }
 
-func TestCoverageResidual_SpendVerifyAndStealthBranches(t *testing.T) {
+func TestCoverageResidual_SpendVerifyBranches(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	pub := kp.PubkeyBytes()
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
@@ -72,16 +72,6 @@ func TestCoverageResidual_SpendVerifyAndStealthBranches(t *testing.T) {
 		t.Fatalf("expected threshold noncanonical rejection, got %v", err)
 	}
 
-	stealthCov := make([]byte, MAX_STEALTH_COVENANT_DATA)
-	keyID := sha3_256(pub)
-	copy(stealthCov[ML_KEM_1024_CT_BYTES:], keyID[:])
-	stealthEntry := UtxoEntry{Value: 1, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: stealthCov}
-	badSig := append([]byte(nil), sig...)
-	badSig[0] ^= 0x01
-	stealthWitness := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: badSig}
-	if err := validateCoreStealthSpend(stealthEntry, stealthWitness, tx, inputIndex, inputValue, chainID, 0); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_INVALID {
-		t.Fatalf("expected stealth invalid signature, got %v", err)
-	}
 }
 
 func TestCoverageResidual_TxParseAndDaCoreBranches(t *testing.T) {
@@ -201,19 +191,6 @@ func MerkleRootFromTxBytes(t *testing.T, txs [][]byte) [32]byte {
 		t.Fatalf("MerkleRootTxids: %v", err)
 	}
 	return root
-}
-
-func TestCoverageResidual_StealthHappyPathSmoke(t *testing.T) {
-	kp := mustMLDSA87Keypair(t)
-	pub := kp.PubkeyBytes()
-	keyID := sha3_256(pub)
-	entry := UtxoEntry{Value: 1, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: append(make([]byte, ML_KEM_1024_CT_BYTES), keyID[:]...)}
-	tx, inputIndex, inputValue, chainID := testSighashContextTx()
-	sig := signDigestWithSighashType(t, kp, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)
-	w := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: pub, Signature: sig}
-	if err := validateCoreStealthSpend(entry, w, tx, inputIndex, inputValue, chainID, 0); err != nil {
-		t.Fatalf("expected valid stealth spend, got %v", err)
-	}
 }
 
 func TestCoverageResidual_BlockBasicValueBoundHeightZero(t *testing.T) {

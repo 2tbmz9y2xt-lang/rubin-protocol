@@ -1404,23 +1404,6 @@ func TestLiveSigCacheSharedBySequentialSpendPaths(t *testing.T) {
 		t.Fatalf("threshold path must share the cache: calls=%d", backend.calls)
 	}
 
-	// CORE_STEALTH path.
-	stealth := coreStealthSpendValidation{
-		entry:      UtxoEntry{Value: 1000, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: stealthCovenantDataForKeyID(keyID)},
-		w:          w,
-		tx:         tx,
-		inputValue: 1000,
-		registry:   reg,
-		rotation:   DefaultRotationProvider{},
-		sigCache:   cache,
-	}
-	if err := validateCoreStealthSpendAtHeight(stealth); err != nil {
-		t.Fatalf("stealth: %v", err)
-	}
-	if backend.calls != 1 {
-		t.Fatalf("stealth path must share the cache: calls=%d", backend.calls)
-	}
-
 	// Key-binding mismatch with otherwise cached signature bytes: rejected
 	// before verification, no hit, nothing inserted.
 	hits, entries := cache.Hits(), cache.Len()

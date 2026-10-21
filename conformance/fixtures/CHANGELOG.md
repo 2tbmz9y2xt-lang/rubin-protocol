@@ -11,6 +11,39 @@ Policy:
 
 ---
 
+## 2026-10-22 — Retire CORE_STEALTH verification consumers (RUB-1710)
+
+Manual source editing, under the separately invoked narrow governance permission
+in `rubin-spec@cf66cbee5da707335be819502d46333174da0a13`, retires the whole
+`CV-STEALTH` gate and its permanently nonreusable IDs `CV-ST-COV-01/02` and
+`CV-ST-U-01/02/03/04/05/06`. Only `NATIVE-ROT-SPEND-STEALTH-01/02/03` are removed
+from `CV-NATIVE-ROTATION-SPEND.json`; the nine other objects retain their exact
+bytes and order. Their raw covenant labels and the inherited legacy Lean
+`*-02` expectations are not a full current-protocol semantic correspondence.
+
+Add new, previously unused negative IDs `CV-COV-0105-01` in
+`CV-COVENANT-GENESIS.json` and `CV-U-UNKCOV-0105-01` in `CV-UTXO-BASIC.json`.
+They require `TX_ERR_COVENANT_TYPE_INVALID` for literal tag `0x0105` with the
+former 1600-byte opaque payload at creation and referenced-input disposition,
+respectively. The referenced UTXO is mature, noncoinbase-created, value 100,
+with no witness and an otherwise valid retained-covenant output. These are new
+identities, not new outcomes assigned to retired identities.
+
+Historical anchors remain protocol `624010c12bc1d7afe13ad9f0e832101d3c77f0cf`,
+tree `82b30fe779d80d987deca8e198040c8300ebcafd`. Actual immediate pre-removal
+anchors are protocol `e3e49cd68db2ff1373d4e6a12e45b15624a08f3b`, tree
+`b456623b673c470bb828d11c501a1c693a7a9fa9`. Both snapshots bind the retired
+`CV-STEALTH.json` blob `7feb1a049182da98d67e3a55c01a223dc1b029cb` and partially
+retained `CV-NATIVE-ROTATION-SPEND.json` blob
+`e5c4ea0f6386f99417990a1774837102e5a1f0a7`. No historical evidence is rewritten.
+
+JSON inputs are manually owned. Existing output producers remain
+`tools/gen_conformance_matrix.py`, `tools/formal/gen_lean_conformance_vectors.py`,
+`clients/go/cmd/formal-trace` and `tools/formal/gen_lean_refinement_from_traces.py`.
+The native-rotation Lean list remains manually owned with its bounded legacy
+model limitation. This entry records source changes and does not claim generator,
+client, conformance or formal execution results.
+
 ## 2026-10-19 — Independent UTXO commitment expected authority (RUB-1680)
 
 Manual authoring adds `protocol/utxo_commitment_expected_v1.json`, bound to

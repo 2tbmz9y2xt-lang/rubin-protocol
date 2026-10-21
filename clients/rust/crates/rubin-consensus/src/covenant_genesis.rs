@@ -1,17 +1,15 @@
 use std::collections::HashMap;
 
 use crate::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT,
-    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
-    MAX_ANCHOR_PAYLOAD_SIZE, MAX_COVENANT_DATA_PER_OUTPUT, MAX_P2PK_COVENANT_DATA,
-    SIMPLICITY_MAX_GROUP_OUTPUTS,
+    COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC,
+    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
+    MAX_ANCHOR_PAYLOAD_SIZE, MAX_P2PK_COVENANT_DATA, SIMPLICITY_MAX_GROUP_OUTPUTS,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
 use crate::simplicity_covenant::{
     validate_core_simplicity_covenant_data, validate_core_simplicity_deployment_active,
 };
-use crate::stealth::parse_stealth_covenant_data;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider};
 use crate::tx::{Tx, TxOutput};
 use crate::vault::{parse_multisig_covenant_data, parse_vault_covenant_data};
@@ -109,23 +107,8 @@ pub fn validate_tx_covenants_genesis(
         Ok(true)
     }
 
-    fn validate_stealth_da(out: &TxOutput, tx_kind: u8) -> Result<bool, TxError> {
+    fn validate_da_commit(out: &TxOutput, tx_kind: u8) -> Result<bool, TxError> {
         match out.covenant_type {
-            COV_TYPE_CORE_STEALTH => {
-                if out.value == 0 {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "CORE_STEALTH value must be > 0",
-                    ));
-                }
-                if out.covenant_data.len() as u64 > MAX_COVENANT_DATA_PER_OUTPUT {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrCovenantTypeInvalid,
-                        "CORE_STEALTH covenant_data length exceeds MAX_COVENANT_DATA_PER_OUTPUT",
-                    ));
-                }
-                let _ = parse_stealth_covenant_data(&out.covenant_data)?;
-            }
             COV_TYPE_DA_COMMIT => {
                 if tx_kind != 0x01 {
                     return Err(TxError::new(
@@ -182,9 +165,7 @@ pub fn validate_tx_covenants_genesis(
             COV_TYPE_VAULT | COV_TYPE_MULTISIG | COV_TYPE_HTLC => {
                 validate_vault_multisig_htlc(out).map(|_| ())
             }
-            COV_TYPE_CORE_STEALTH | COV_TYPE_DA_COMMIT => {
-                validate_stealth_da(out, tx.tx_kind).map(|_| ())
-            }
+            COV_TYPE_DA_COMMIT => validate_da_commit(out, tx.tx_kind).map(|_| ()),
             COV_TYPE_CORE_SIMPLICITY => {
                 validate_core_simplicity_genesis_output(out, block_height, rp).map(|program_cmr| {
                     simplicity_output_cmrs.push(program_cmr);

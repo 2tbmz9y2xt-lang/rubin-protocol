@@ -1,8 +1,5 @@
 use crate::block_basic::ParsedBlock;
-use crate::constants::{
-    CORE_STEALTH_WITNESS_SLOTS, COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
-    COV_TYPE_P2PK, COV_TYPE_VAULT,
-};
+use crate::constants::{COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT};
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::{validate_htlc_spend_q, HtlcSpendContext};
 use crate::precompute::PrecomputedTxContext;
@@ -11,7 +8,6 @@ use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
 use crate::simplicity_covenant::reject_core_simplicity_spend_if_present;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
-use crate::stealth::validate_stealth_spend_q;
 use crate::suite_registry::{DefaultRotationProvider, RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
@@ -293,27 +289,6 @@ fn validate_input_spend(
                     block_height,
                     block_mtp,
                 },
-                sighash_cache,
-                sig_queue,
-                Some(rotation),
-                Some(registry),
-            )
-        }
-
-        COV_TYPE_CORE_STEALTH => {
-            if assigned.len() != CORE_STEALTH_WITNESS_SLOTS as usize {
-                return Err(TxError::new(
-                    ErrorCode::TxErrParse,
-                    "CORE_STEALTH witness_slots must be 1",
-                ));
-            }
-            validate_stealth_spend_q(
-                entry,
-                &assigned[0],
-                input_index,
-                input_value,
-                chain_id,
-                block_height,
                 sighash_cache,
                 sig_queue,
                 Some(rotation),

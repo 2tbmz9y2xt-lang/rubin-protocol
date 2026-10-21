@@ -1,6 +1,8 @@
 package consensus
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -79,6 +81,36 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	}
 }
 
+func TestValidateTxCovenantsGenesis_Retired0105(t *testing.T) {
+	for _, size := range []int{0, 1, 32, 33, 1567, 1568, 1599, 1600, 1601, 65536} {
+		for _, value := range []uint64{0, 1} {
+			for _, opaque := range []byte{0x00, 0xff} {
+				t.Run(fmt.Sprintf("length_%d/value_%d/opaque_%02x", size, value, opaque), func(t *testing.T) {
+					raw := txWithOneInputOneOutput([32]byte{0x71}, 0, value, 0x0105, bytes.Repeat([]byte{opaque}, size))
+					tx, _ := mustParseTxForUtxo(t, raw)
+					err := ValidateTxCovenantsGenesis(tx, [32]byte{}, 200, nil)
+					assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
+				})
+			}
+		}
+	}
+}
+
+func TestValidateTxCovenantsGenesis_Retired0105OutputOrder(t *testing.T) {
+	badP2PK := TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte{0x02}, make([]byte, 32)...)}
+	retired := TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
+	for _, tc := range []struct {
+		outputs []TxOutput
+		want    ErrorCode
+	}{
+		{[]TxOutput{badP2PK, retired}, "TX_ERR_SIG_ALG_INVALID"},
+		{[]TxOutput{retired, badP2PK}, "TX_ERR_COVENANT_TYPE_INVALID"},
+	} {
+		err := ValidateTxCovenantsGenesis(&Tx{Outputs: tc.outputs}, [32]byte{}, 200, nil)
+		assertTxErrCode(t, err, tc.want)
+	}
+}
+
 func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 	validP2PK := make([]byte, MAX_P2PK_COVENANT_DATA)
 	validP2PK[0] = SUITE_ID_ML_DSA_87
@@ -107,6 +139,21 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 			name:    "unassigned_0001_rejected",
 			output:  TxOutput{Value: 1, CovenantType: 0x0001, CovenantData: []byte{0x00}},
 			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
+		},
+		{
+			name:    "unassigned_0102_rejected",
+			output:  TxOutput{Value: 1, CovenantType: 0x0102, CovenantData: []byte{0x00}},
+			wantErr: "TX_ERR_COVENANT_TYPE_INVALID",
+		},
+		{
+			name:    "unassigned_0107_rejected",
+			output:  TxOutput{Value: 1, CovenantType: 0x0107, CovenantData: []byte{0x00}},
+			wantErr: "TX_ERR_COVENANT_TYPE_INVALID",
+		},
+		{
+			name:    "reserved_00ff_rejected",
+			output:  TxOutput{Value: 1, CovenantType: 0x00ff, CovenantData: []byte{0x00}},
+			wantErr: "TX_ERR_COVENANT_TYPE_INVALID",
 		},
 		{
 			name:    "anchor_ok",

@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 //
 // Parses arbitrary bytes into a Tx, builds a synthetic `PrecomputedTxContext`
 // and minimal `ParsedBlock`, then calls `validate_tx_local`. Known covenant
-// types reach their spend validators; the arbitrary unknown 0x0102 value is
+// types reach their spend validators; unassigned 0x0102/0x0105 values are
 // rejected before spend dispatch.
 //
 // Goal: exercise known-covenant spend dispatch and the pre-dispatch unknown
@@ -42,8 +42,8 @@ fuzz_target!(|data: &[u8]| {
     let block_height = u64::from_le_bytes(params[32..40].try_into().unwrap());
     let block_mtp = u64::from_le_bytes(params[40..48].try_into().unwrap());
 
-    // Select known covenant types plus arbitrary unknown 0x0102. Known values
-    // exercise spend dispatch; 0x0102 exercises rejection before dispatch.
+    // Select known covenant types plus unassigned 0x0102/0x0105. Known values
+    // exercise spend dispatch; unassigned inputs reject before dispatch.
     let cov_selector = params[48] % 6;
     let covenant_type: u16 = match cov_selector {
         0 => 0x0000, // COV_TYPE_P2PK
@@ -51,12 +51,12 @@ fuzz_target!(|data: &[u8]| {
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
         4 => 0x0102,
-        5 => 0x0105, // COV_TYPE_CORE_STEALTH
+        5 => 0x0105, // retired/unassigned
         _ => unreachable!(),
     };
 
     // Build synthetic covenant_data for the selected type. Known types use
-    // their layouts; the unassigned 0x0102 value deliberately uses opaque data.
+    // their layouts; unassigned values deliberately use opaque data.
     let build_covenant_data = |suite_id: u8, pk: &[u8]| -> Vec<u8> {
         match covenant_type {
             0x0000 => {
@@ -67,18 +67,6 @@ fuzz_target!(|data: &[u8]| {
                     key_id[j] = *b;
                 }
                 cd.extend_from_slice(&key_id);
-                cd
-            }
-            0x0105 => {
-                // STEALTH: ciphertext(1568) + one_time_key_id(32) = 1600 bytes
-                // (MAX_STEALTH_COVENANT_DATA). Fill from fuzz data for variety.
-                let mut cd = vec![0u8; 1600];
-                for (j, b) in pk.iter().enumerate() {
-                    if j >= 1600 {
-                        break;
-                    }
-                    cd[j] = *b;
-                }
                 cd
             }
             0x0100 => {
@@ -142,10 +130,10 @@ fuzz_target!(|data: &[u8]| {
         }
     };
 
-    // Allocate synthetic witness slots for each input. The unassigned 0x0102
-    // case is still expected to reject before spend dispatch.
+    // Allocate synthetic witness slots for each input. Unassigned cases are
+    // still expected to reject before spend dispatch.
     let slots_per_input: usize = match covenant_type {
-        0x0000 | 0x0102 | 0x0105 => 1, // P2PK / unknown / STEALTH
+        0x0000 | 0x0102 => 1, // P2PK / unknown
         0x0100 => 2,                     // HTLC
         0x0104 => 1,                     // MULTISIG (threshold=1)
         0x0101 => 1,                     // VAULT (threshold=1)

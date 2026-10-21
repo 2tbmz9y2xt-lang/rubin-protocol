@@ -39,7 +39,7 @@ class CovenantRegistryDispositionTests(unittest.TestCase):
             0x0102: "CovenantDisposition.invalidCovenantType",
             0x0103: "CovenantDisposition.accepted CovenantKind.coreDACommit",
             0x0104: "CovenantDisposition.accepted CovenantKind.coreMultisig",
-            0x0105: "CovenantDisposition.accepted CovenantKind.coreStealth",
+            0x0105: "CovenantDisposition.invalidCovenantType",
             0x0106: "CovenantDisposition.deploymentGated CovenantKind.coreSimplicity",
             0x0003: "CovenantDisposition.invalidCovenantType",
             0x00FE: "CovenantDisposition.invalidCovenantType",
@@ -61,7 +61,7 @@ class CovenantRegistryDispositionTests(unittest.TestCase):
                 "CovenantDisposition.errorCode? (covenantDisposition 0x0107) = some invalidCovenantTypeError",
                 "invalidCovenantTypeError = \"TX_ERR_COVENANT_TYPE_INVALID\"",
                 "CovenantDisposition.errorCode? (covenantDisposition 0x00FF) = none",
-                "CovenantDisposition.errorCode? (covenantDisposition 0x0105) = none",
+                'CovenantDisposition.errorCode? (covenantDisposition 261) = some "TX_ERR_COVENANT_TYPE_INVALID"',
                 "CovenantDisposition.errorCode? (covenantDisposition 0x0106) = none",
             ]
         )

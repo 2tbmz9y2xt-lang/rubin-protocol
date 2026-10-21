@@ -453,7 +453,7 @@ mod deferred_spend_tests;
 mod htlc_tests;
 #[cfg(test)]
 #[path = "sig_queue_p2pk_stealth_tests.rs"]
-mod p2pk_stealth_tests;
+mod p2pk_tests;
 #[cfg(test)]
 #[path = "sig_queue_queue_tests.rs"]
 mod queue_tests;

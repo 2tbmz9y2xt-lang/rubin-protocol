@@ -23,7 +23,6 @@ pub mod simplicity;
 mod simplicity_covenant;
 pub mod simplicity_txcontext;
 mod spend_verify;
-mod stealth;
 pub mod subsidy;
 pub mod suite_registry;
 pub mod tx;
@@ -81,7 +80,6 @@ pub use sighash::{
     is_valid_sighash_type, sighash_v1_digest, sighash_v1_digest_with_cache,
     sighash_v1_digest_with_type, SighashV1PrehashCache,
 };
-pub use stealth::{parse_stealth_covenant_data, validate_stealth_spend, StealthCovenant};
 pub use subsidy::block_subsidy;
 pub use suite_registry::{
     canonical_rotation_network_name, canonical_rotation_network_name_normalized,

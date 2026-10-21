@@ -76,14 +76,6 @@ fn p2pk_sig_cache_tuple(tx: &crate::tx::Tx, input_index: usize) -> (u8, &[u8], &
     (witness.suite_id, &witness.pubkey, crypto_signature, digest)
 }
 
-fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
-    let mut cov = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
-    let key_id = sha3_256(pubkey);
-    let split = cov.len() - 32;
-    cov[split..].copy_from_slice(&key_id);
-    cov
-}
-
 #[test]
 fn apply_non_coinbase_tx_basic_workq_multisig_branch() {
     let kp1 = kp_or_skip!();
@@ -264,75 +256,107 @@ fn apply_non_coinbase_tx_basic_workq_htlc_claim_branch() {
 }
 
 #[test]
-fn apply_non_coinbase_tx_basic_workq_stealth_branch() {
-    let kp = kp_or_skip!();
-    let cov_data = stealth_covenant_data_for_pubkey(&kp.pubkey);
-    let prev_txid = [0xeeu8; 32];
-    let txid = [0xffu8; 32];
-    let tx = crate::tx::Tx {
-        version: 1,
-        tx_kind: 0x00,
-        tx_nonce: 1,
-        inputs: vec![crate::tx::TxInput {
-            prev_txid,
-            prev_vout: 0,
-            script_sig: vec![],
-            sequence: 0,
-        }],
-        outputs: vec![crate::tx::TxOutput {
-            value: 400,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: p2pk_covenant_data_for_pubkey(&kp.pubkey),
-        }],
-        locktime: 0,
-        witness: vec![sign_input_witness(
-            &crate::tx::Tx {
-                version: 1,
-                tx_kind: 0x00,
-                tx_nonce: 1,
-                inputs: vec![crate::tx::TxInput {
-                    prev_txid,
-                    prev_vout: 0,
-                    script_sig: vec![],
-                    sequence: 0,
-                }],
-                outputs: vec![crate::tx::TxOutput {
-                    value: 400,
-                    covenant_type: COV_TYPE_P2PK,
-                    covenant_data: p2pk_covenant_data_for_pubkey(&kp.pubkey),
-                }],
-                locktime: 0,
-                witness: vec![],
-                da_payload: vec![],
-                da_commit_core: None,
-                da_chunk_core: None,
-            },
-            0,
-            500,
-            ZERO_CHAIN_ID,
-            &kp,
-        )],
-        da_payload: vec![],
-        da_commit_core: None,
-        da_chunk_core: None,
+fn connect_block_retired_0x0105_refusal_preserves_state_and_nonce_prefix() {
+    let kp = test_mldsa87_keypair().expect("ML-DSA-87 available");
+    let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let mut prefix = p2pk_tx(1, vec![p2pk_input([0xa1; 32])], 90, cov.clone());
+    prefix.witness = vec![sign_input_witness(&prefix, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let prefix_bytes = crate::marshal_tx(&prefix).expect("marshal prefix");
+    let original = crate::InMemoryChainState {
+        utxos: HashMap::from([
+            (
+                Outpoint {
+                    txid: [0xa1; 32],
+                    vout: 0,
+                },
+                p2pk_utxo(cov.clone()),
+            ),
+            (
+                Outpoint {
+                    txid: [0xb1; 32],
+                    vout: 0,
+                },
+                UtxoEntry {
+                    value: 100,
+                    covenant_type: 0x0105,
+                    covenant_data: vec![0x55; 1600],
+                    creation_height: 0,
+                    created_by_coinbase: false,
+                },
+            ),
+        ]),
+        already_generated: 0,
     };
-    let utxos = HashMap::from([(
-        Outpoint {
-            txid: prev_txid,
-            vout: 0,
-        },
-        UtxoEntry {
-            value: 500,
-            covenant_type: COV_TYPE_CORE_STEALTH,
-            covenant_data: cov_data,
-            creation_height: 0,
-            created_by_coinbase: false,
-        },
-    )]);
-
-    let (next_utxos, summary) = deferred_apply(&tx, txid, &utxos, 1).expect("stealth branch");
-    assert_eq!(summary.fee, 100);
-    assert_eq!(next_utxos.len(), 1);
+    for (retired_output, nonce, expected) in [
+        (false, 2, ErrorCode::TxErrCovenantTypeInvalid),
+        (true, 2, ErrorCode::TxErrCovenantTypeInvalid),
+        (true, 1, ErrorCode::TxErrNonceReplay),
+    ] {
+        let mut refused = p2pk_tx(nonce, vec![p2pk_input([0xb1; 32])], 90, cov.clone());
+        if retired_output {
+            refused.inputs[0].prev_txid = [0xc1; 32];
+            refused.outputs[0] = crate::TxOutput {
+                value: 1,
+                covenant_type: 0x0105,
+                covenant_data: vec![0x55; 1600],
+            };
+        }
+        let refused_bytes = crate::marshal_tx(&refused).expect("marshal refusal");
+        let txs = vec![prefix_bytes.clone(), refused_bytes];
+        let mut block_txs = vec![coinbase_with_witness_commitment(1, &txs)];
+        block_txs.extend(txs);
+        let txids: Vec<_> = block_txs
+            .iter()
+            .map(|b| parse_tx(b).expect("parse").1)
+            .collect();
+        let root = merkle_root_txids(&txids).expect("merkle");
+        let block = build_block_bytes([0x22; 32], root, [0xff; 32], 9, &block_txs);
+        for parallel in [false, true] {
+            let mut state = original.clone();
+            let result = if parallel {
+                crate::connect_block_parallel_sig_verify(
+                    &block, None, None, 1, None, &mut state, ZERO_CHAIN_ID, 2,
+                )
+            } else {
+                crate::connect_block_basic_in_memory_at_height(
+                    &block, None, None, 1, None, &mut state, ZERO_CHAIN_ID,
+                )
+            };
+            assert_eq!(result.unwrap_err().code, expected);
+            assert_eq!(state, original);
+        }
+        let parsed = crate::parse_block_bytes(&block).expect("parse block");
+        let before_txs = parsed.txs.clone();
+        let before_utxos = original.utxos.clone();
+        assert_eq!(
+            crate::precompute_tx_contexts(&parsed, &original.utxos, 1)
+                .unwrap_err()
+                .code,
+            expected
+        );
+        assert_eq!(parsed.txs, before_txs);
+        assert_eq!(original.utxos, before_utxos);
+    }
+    let coinbase = coinbase_with_witness_commitment(1, std::slice::from_ref(&prefix_bytes));
+    let root = merkle_root_txids(&[
+        parse_tx(&coinbase).expect("coinbase").1,
+        parse_tx(&prefix_bytes).expect("prefix").1,
+    ])
+    .expect("merkle");
+    let block = build_block_bytes([0x22; 32], root, [0xff; 32], 9, &[coinbase, prefix_bytes]);
+    let mut sequential = original.clone();
+    let summary = crate::connect_block_basic_in_memory_at_height(
+        &block, None, None, 1, None, &mut sequential, ZERO_CHAIN_ID,
+    )
+    .expect("prefix nonce remains available after refusal");
+    assert_eq!(summary.sum_fees, 10);
+    let mut parallel = original;
+    let parallel_summary = crate::connect_block_parallel_sig_verify(
+        &block, None, None, 1, None, &mut parallel, ZERO_CHAIN_ID, 2,
+    )
+    .expect("independent parallel block after refusal");
+    assert_eq!(parallel_summary.sum_fees, 10);
+    assert_eq!(parallel, sequential);
 }
 
 #[test]

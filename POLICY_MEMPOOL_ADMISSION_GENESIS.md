@@ -231,7 +231,6 @@ CORE_P2PK
 CORE_HTLC
 CORE_VAULT
 CORE_MULTISIG
-CORE_STEALTH
 ```
 
 Exempt non-spendable covenant types (dust gate does not apply):
@@ -317,7 +316,6 @@ This rule applies to:
 - vault spends;
 - HTLC spends;
 - multisig spends;
-- stealth spends;
 
 DA duplicate commits remain governed by the stricter relay rule in
 `spec/RUBIN_COMPACT_BLOCKS.md`: the first-seen commit for a `da_id` is

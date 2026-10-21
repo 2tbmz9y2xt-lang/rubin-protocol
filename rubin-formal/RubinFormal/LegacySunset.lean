@@ -5,7 +5,7 @@
 
   Before H4: old suite spends valid (even after H2 create cutoff).
   At/after H4: old suite spends rejected for ALL native covenant types.
-  Non-committing create formats (VAULT/MULTISIG/HTLC/STEALTH) are not
+  Non-committing create formats (VAULT/MULTISIG/HTLC) are not
   affected by the H2 P2PK-create cutoff since they don't commit suite at creation.
 
   Spec: CANONICAL §4.1.2 (five-case table), §4.1.4 (sunset).
@@ -70,7 +70,7 @@ theorem fi_rot_06_old_suite_not_spendable_after_h4
 
 /-- After H4, old suite spend gate rejects with TX_ERR_SIG_ALG_INVALID.
     This is the universal sunset: ALL native covenant types (P2PK, MULTISIG,
-    VAULT, STEALTH) reject old suite spends after H4. -/
+    VAULT) reject old suite spends after H4. -/
 theorem fi_rot_06_old_suite_rejected_after_h4
     (reg : SuiteRegistry) (d : RotationDeploymentDescriptor) (h : Nat)
     (hwf : wellFormedDescriptor reg d)
@@ -94,7 +94,7 @@ theorem fi_rot_06_new_suite_always_spendable_after_h4
 
 /-! ### Non-committing covenant types and H2
 
-  VAULT, MULTISIG, HTLC, and STEALTH do not commit suite_id at creation.
+  VAULT, MULTISIG, and HTLC do not commit suite_id at creation.
   The H2 create cutoff only affects P2PK (which commits suite in covenant data).
   Spend-side gate is uniform — all types use NATIVE_SPEND_SUITES. -/
 

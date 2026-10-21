@@ -39,11 +39,6 @@ func wcUnknownCovenantEntry(value uint64) UtxoEntry {
 	return UtxoEntry{Value: value, CovenantType: 0x0102, CovenantData: []byte{0x01, 0x00, 0x00}}
 }
 
-func wcCoreStealthEntry(value uint64) UtxoEntry {
-	data := make([]byte, MAX_STEALTH_COVENANT_DATA)
-	return UtxoEntry{Value: value, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: data}
-}
-
 func dummyWitnessItems(n int) []WitnessItem {
 	items := make([]WitnessItem, n)
 	for i := range items {
@@ -164,34 +159,16 @@ func TestComputeWitnessAssignments_UnknownCovenant0x0102Rejected(t *testing.T) {
 	}
 }
 
-func TestComputeWitnessAssignments_SingleCoreStealth(t *testing.T) {
-	tx := makeCursorTx(oneInput(), 1)
-	entries := []UtxoEntry{wcCoreStealthEntry(100)}
-
-	assigns, total, err := ComputeWitnessAssignments(tx, entries)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if total != 1 {
-		t.Fatalf("total=%d, want 1", total)
-	}
-	a := assigns[0]
-	if a.Start != 0 || a.End != 1 || a.Slots != 1 {
-		t.Fatalf("CORE_STEALTH: got Start=%d End=%d Slots=%d, want 0,1,1", a.Start, a.End, a.Slots)
-	}
-}
-
 // Mixed covenant families — verifies cursor advances correctly across types.
 func TestComputeWitnessAssignments_MixedCovenants(t *testing.T) {
-	// 4 inputs: P2PK(1) + HTLC(2) + MULTISIG(3) + CORE_STEALTH(1) = 7 total
-	// (CORE_EXT retired per RUB-585; substituted with CORE_STEALTH, also single-slot)
+	// 4 inputs: P2PK(1) + HTLC(2) + MULTISIG(3) + MULTISIG(1) = 7 total
 	inputs := nInputs(4)
 	tx := makeCursorTx(inputs, 7)
 	entries := []UtxoEntry{
 		wcP2PKEntry(100),
 		wcHTLCEntry(50),
 		wcMultisigEntry(200, 2, 3),
-		wcCoreStealthEntry(10),
+		wcMultisigEntry(10, 1, 1),
 	}
 
 	assigns, total, err := ComputeWitnessAssignments(tx, entries)
@@ -217,17 +194,15 @@ func TestComputeWitnessAssignments_MixedCovenants(t *testing.T) {
 	if assigns[2].Start != 3 || assigns[2].End != 6 {
 		t.Fatalf("MULTISIG: [%d,%d), want [3,6)", assigns[2].Start, assigns[2].End)
 	}
-	// CORE_STEALTH: [6,7)
+	// Single-key MULTISIG: [6,7)
 	if assigns[3].Start != 6 || assigns[3].End != 7 {
-		t.Fatalf("CORE_STEALTH: [%d,%d), want [6,7)", assigns[3].Start, assigns[3].End)
+		t.Fatalf("MULTISIG(1): [%d,%d), want [6,7)", assigns[3].Start, assigns[3].End)
 	}
 }
 
-// Five remaining covenant families (CORE_EXT retired per RUB-585);
-// CORE_STEALTH is used twice as the single-slot stand-in.
+// Retained covenant families with two single-key MULTISIG inputs.
 func TestComputeWitnessAssignments_AllCovenantFamilies(t *testing.T) {
-	// P2PK(1) + HTLC(2) + MULTISIG(2) + VAULT(3) + CORE_STEALTH(1) + CORE_STEALTH(1) = 10
-	// (CORE_EXT retired per RUB-585; substituted with CORE_STEALTH, also single-slot)
+	// P2PK(1) + HTLC(2) + MULTISIG(2) + VAULT(3) + MULTISIG(1) + MULTISIG(1) = 10
 	inputs := nInputs(6)
 	tx := makeCursorTx(inputs, 10)
 	entries := []UtxoEntry{
@@ -235,8 +210,8 @@ func TestComputeWitnessAssignments_AllCovenantFamilies(t *testing.T) {
 		wcHTLCEntry(50),
 		wcMultisigEntry(200, 1, 2),
 		wcVaultEntry(300, 2, 3),
-		wcCoreStealthEntry(10),
-		wcCoreStealthEntry(25),
+		wcMultisigEntry(10, 1, 1),
+		wcMultisigEntry(25, 1, 1),
 	}
 
 	assigns, total, err := ComputeWitnessAssignments(tx, entries)

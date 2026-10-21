@@ -98,10 +98,21 @@ class SourceRebindTests(unittest.TestCase):
         root = TOOLS_DIR.parent
         doc = self.active_manifest_doc()
         self.assertEqual(m.validate_active_path_manifest(root, doc), [])
+        for path, expected_disposition, wrong_disposition in (
+            ("RubinFormal/BlockHeaderRoundtrip.lean", "BYTE_EXACT", "RECONCILE_CURRENT_PROTOCOL"),
+            ("RubinFormal/LegacySunset.lean", "RECONCILE_CURRENT_PROTOCOL", "BYTE_EXACT"),
+            ("tests/test_covenant_registry_disposition.py", "IMPORT_PACKAGE_CHECK_OR_TEST", "BYTE_EXACT"),
+        ):
+            with self.subTest(path=path):
+                doc = self.active_manifest_doc()
+                doc["source_rebind"]["active_path_manifest"][path]["disposition"] = wrong_disposition
+                self.assertIn(
+                    f"source_rebind.active_path_manifest[{path}].disposition drift: "
+                    f"expected {expected_disposition!r}, "
+                    f"got {wrong_disposition!r}",
+                    m.validate_active_path_manifest(root, doc),
+                )
         path = "RubinFormal/BlockHeaderRoundtrip.lean"
-        doc = self.active_manifest_doc()
-        doc["source_rebind"]["active_path_manifest"][path]["disposition"] = "RECONCILE_CURRENT_PROTOCOL"
-        self.assertTrue(any("disposition drift" in error for error in m.validate_active_path_manifest(root, doc)))
         doc = self.active_manifest_doc()
         doc["source_rebind"]["active_path_manifest"][path]["candidate_sha256"] = "0" * 64
         self.assertTrue(any("candidate hash drift" in error for error in m.validate_active_path_manifest(root, doc)))

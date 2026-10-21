@@ -1,15 +1,12 @@
-use super::test_support::{
-    htlc_claim_fixture, htlc_spend_context, make_stealth_entry, sign_witness, test_tx_context,
-};
+use super::test_support::{htlc_claim_fixture, htlc_spend_context, sign_witness, test_tx_context};
 use super::*;
 use crate::constants::{
-    COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA, SUITE_ID_ML_DSA_87,
+    SUITE_ID_SENTINEL,
 };
 use crate::hash::sha3_256;
 use crate::htlc::validate_htlc_spend_q;
 use crate::spend_verify::validate_p2pk_spend_q;
-use crate::stealth::validate_stealth_spend_q;
 use crate::suite_registry::SuiteRegistry;
 use crate::tx::WitnessItem;
 use crate::tx_helpers::p2pk_covenant_data_for_pubkey;
@@ -116,120 +113,6 @@ fn validate_p2pk_covenant_data_invalid_q() {
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
-// Stealth Error Path Tests (4)
-
-#[test]
-fn validate_stealth_invalid_suite_q() {
-    let kp = Mldsa87Keypair::generate().expect("kp");
-    let one_time_key_id = sha3_256(&kp.pubkey_bytes());
-    let entry = make_stealth_entry(one_time_key_id);
-    let (tx, ii, iv, cid) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
-    witness.suite_id = 0xFE; // unknown suite
-    let reg = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&reg);
-    let err = validate_stealth_spend_q(
-        &entry,
-        &witness,
-        ii,
-        iv,
-        cid,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&reg),
-    )
-    .expect_err("must reject non-native suite");
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
-}
-
-#[test]
-fn validate_stealth_bad_covenant_data_q() {
-    let kp = Mldsa87Keypair::generate().expect("kp");
-    let entry = UtxoEntry {
-        value: 100,
-        covenant_type: COV_TYPE_CORE_STEALTH,
-        covenant_data: vec![0u8; 10], // wrong length (not 1600)
-        creation_height: 0,
-        created_by_coinbase: false,
-    };
-    let (tx, ii, iv, cid) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let witness = sign_witness(&kp, &tx, ii, iv, cid);
-    let reg = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&reg);
-    let err = validate_stealth_spend_q(
-        &entry,
-        &witness,
-        ii,
-        iv,
-        cid,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&reg),
-    )
-    .expect_err("must reject bad covenant data");
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-}
-
-#[test]
-fn validate_stealth_non_canonical_sig_q() {
-    let kp = Mldsa87Keypair::generate().expect("kp");
-    let one_time_key_id = sha3_256(&kp.pubkey_bytes());
-    let entry = make_stealth_entry(one_time_key_id);
-    let (tx, ii, iv, cid) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let mut witness = sign_witness(&kp, &tx, ii, iv, cid);
-    witness.pubkey = vec![0u8; 10]; // non-canonical length
-    let reg = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&reg);
-    let err = validate_stealth_spend_q(
-        &entry,
-        &witness,
-        ii,
-        iv,
-        cid,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&reg),
-    )
-    .expect_err("must reject non-canonical");
-    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
-}
-
-#[test]
-fn validate_stealth_key_binding_mismatch_q() {
-    // Valid witness but pubkey hash doesn't match one_time_key_id in covenant
-    let kp = Mldsa87Keypair::generate().expect("kp");
-    let wrong_key_id = [0xCC; 32]; // doesn't match sha3_256(kp.pubkey_bytes())
-    let entry = make_stealth_entry(wrong_key_id);
-    let (tx, ii, iv, cid) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let witness = sign_witness(&kp, &tx, ii, iv, cid);
-    let reg = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&reg);
-    let err = validate_stealth_spend_q(
-        &entry,
-        &witness,
-        ii,
-        iv,
-        cid,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&reg),
-    )
-    .expect_err("must reject key binding mismatch");
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
-}
-
 // Queue Concurrency Tests (2)
 
 #[test]
@@ -287,7 +170,7 @@ fn concurrent_flush_safety_q() {
     assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
 }
 
-// Extended error path tests (4)
+// Extended error path tests (3)
 
 #[test]
 fn validate_htlc_extended_payload_validation_q() {
@@ -391,34 +274,4 @@ fn validate_p2pk_extended_validation_q() {
     )
     .expect_err("must reject covenant suite mismatch");
     assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
-}
-
-#[test]
-fn validate_stealth_extended_safety_q() {
-    // Stealth covenant data with exact right length but
-    // embedded ciphertext is zeroed — key binding still must match
-    let kp = Mldsa87Keypair::generate().expect("kp");
-    let one_time_key_id = sha3_256(&kp.pubkey_bytes());
-    let entry = make_stealth_entry(one_time_key_id);
-    let (tx, ii, iv, cid) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let witness = sign_witness(&kp, &tx, ii, iv, cid);
-    let reg = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&reg);
-    // This should SUCCEED (key binding matches)
-    validate_stealth_spend_q(
-        &entry,
-        &witness,
-        ii,
-        iv,
-        cid,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&reg),
-    )
-    .expect("stealth with zeroed ciphertext must pass validation");
-    assert_eq!(queue.len(), 1);
-    queue.flush().expect("flush");
 }
