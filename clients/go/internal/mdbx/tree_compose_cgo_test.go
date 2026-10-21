@@ -1016,13 +1016,13 @@ func TestTreeComposeHoldV1(t *testing.T) {
 			}
 			last := tcLastCharge(s.ledger.log)
 			if row.name == "short" {
+				s.reopen(t, s.oldRows(t)...)
 				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 				if !IsOperationReservationCapacity(r.err) || last != fmt.Sprintf("refuse %d", tcHr(2)) {
 					t.Fatalf("R5 err %v last %q", r.err, last)
 				}
 				s.settled(t)
 				s.consumed(t, CommitTruthOld, r.err)
-				s.reopen(t, s.oldRows(t)...)
 				return
 			}
 			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
@@ -1081,13 +1081,13 @@ func TestTreeComposeReadbackErrorV1(t *testing.T) {
 			r := s.crossed(t)
 			var commit *CommitError
 			if !errors.As(r.err, &commit) || commit.ReadbackCause != want {
-				t.Fatalf("R6 err %v, want a CommitError whose ReadbackCause is %v by identity", r.err, want)
+				t.Errorf("R6 err %v, want a CommitError whose ReadbackCause is %v by identity", r.err, want)
 			}
 			if s.prims[2].calls[treeReadbackV1] != 0 {
 				t.Errorf("R6 LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
 			}
-			r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 			tcCrossedCause(t, r.err, CommitTruthUnknown, want)
+			r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 			if s.prims[2].calls[treeReadbackV1] != 0 || s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
 				t.Fatalf("R6 LAG2 readback %d state %v", s.prims[2].calls[treeReadbackV1], s.store.state)
 			}
