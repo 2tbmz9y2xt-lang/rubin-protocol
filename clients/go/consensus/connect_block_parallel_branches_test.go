@@ -1038,9 +1038,13 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 	})
 
 	t.Run("vault_disallowed_destination_type", func(t *testing.T) {
-		ownerKP, vaultKP, _, ownerCovData, vaultCovData, _, _, _ := buildVaultSpendSetup(t)
+		ownerKP, vaultKP, _, ownerCovData, vaultCovData, destCovData, ownerLockID, whitelistH := buildVaultSpendSetup(t)
 
-		multisigOutData := encodeMultisigCovenantData(1, [][32]byte{{0x01}})
+		anchorOutData := []byte{0x01}
+		anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
+		whitelistA, whitelistB := sortKeys32(anchorH, whitelistH)
+		vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+		vaultCovData = encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
 
 		prevVault := hashWithPrefix(0xB2)
 		prevOwner := hashWithPrefix(0xB3)
@@ -1053,7 +1057,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 				{PrevTxid: prevOwner, PrevVout: 0, Sequence: 0},
 			},
 			Outputs: []TxOutput{
-				{Value: 50, CovenantType: COV_TYPE_MULTISIG, CovenantData: multisigOutData},
+				{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: anchorOutData},
+				{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 			},
 		}
 		tx.Witness = []WitnessItem{
@@ -1067,12 +1072,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 		}
 		q := NewSigCheckQueue(1)
 		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, q, nil, nil)
-		if err == nil {
-			t.Fatal("expected disallowed destination type error")
-		}
-		if !isTxErrCode(err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED) {
-			t.Fatalf("expected TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, got: %v", err)
-		}
+		assertTxErrCodeMsg(t, err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
 	})
 }
 

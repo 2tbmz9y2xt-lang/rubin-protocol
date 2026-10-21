@@ -891,11 +891,12 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
 	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
 
-	multisigOutData := encodeMultisigCovenantData(1, [][32]byte{{0x01}})
-	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_MULTISIG, multisigOutData))
+	anchorOutData := []byte{0x01}
+	anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
+	whitelistA, whitelistB := sortKeys32(anchorH, ownerLockID)
 
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
-	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
 
 	tx := &Tx{
 		Version: 1,
@@ -906,7 +907,8 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
 		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_MULTISIG, CovenantData: multisigOutData},
+			{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: anchorOutData},
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: ownerCovData},
 		},
 	}
 	tx.Witness = []WitnessItem{
@@ -928,12 +930,7 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 	}
 
 	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
-	}
+	assertTxErrCodeMsg(t, err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
