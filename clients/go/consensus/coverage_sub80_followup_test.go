@@ -71,7 +71,6 @@ func TestCoverageResidual_SpendVerifyBranches(t *testing.T) {
 	if err := validateThresholdSigSpend(testThresholdSigSpendCheck(keys, 1, ws, env)); err == nil || mustTxErrCode(t, err) != TX_ERR_SIG_NONCANONICAL {
 		t.Fatalf("expected threshold noncanonical rejection, got %v", err)
 	}
-
 }
 
 func TestCoverageResidual_TxParseAndDaCoreBranches(t *testing.T) {

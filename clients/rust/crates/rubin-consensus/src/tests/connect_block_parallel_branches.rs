@@ -315,11 +315,24 @@ fn connect_block_retired_0x0105_refusal_preserves_state_and_nonce_prefix() {
             let mut state = original.clone();
             let result = if parallel {
                 crate::connect_block_parallel_sig_verify(
-                    &block, None, None, 1, None, &mut state, ZERO_CHAIN_ID, 2,
+                    &block,
+                    None,
+                    None,
+                    1,
+                    None,
+                    &mut state,
+                    ZERO_CHAIN_ID,
+                    2,
                 )
             } else {
                 crate::connect_block_basic_in_memory_at_height(
-                    &block, None, None, 1, None, &mut state, ZERO_CHAIN_ID,
+                    &block,
+                    None,
+                    None,
+                    1,
+                    None,
+                    &mut state,
+                    ZERO_CHAIN_ID,
                 )
             };
             assert_eq!(result.unwrap_err().code, expected);
@@ -346,13 +359,26 @@ fn connect_block_retired_0x0105_refusal_preserves_state_and_nonce_prefix() {
     let block = build_block_bytes([0x22; 32], root, [0xff; 32], 9, &[coinbase, prefix_bytes]);
     let mut sequential = original.clone();
     let summary = crate::connect_block_basic_in_memory_at_height(
-        &block, None, None, 1, None, &mut sequential, ZERO_CHAIN_ID,
+        &block,
+        None,
+        None,
+        1,
+        None,
+        &mut sequential,
+        ZERO_CHAIN_ID,
     )
     .expect("prefix nonce remains available after refusal");
     assert_eq!(summary.sum_fees, 10);
     let mut parallel = original;
     let parallel_summary = crate::connect_block_parallel_sig_verify(
-        &block, None, None, 1, None, &mut parallel, ZERO_CHAIN_ID, 2,
+        &block,
+        None,
+        None,
+        1,
+        None,
+        &mut parallel,
+        ZERO_CHAIN_ID,
+        2,
     )
     .expect("independent parallel block after refusal");
     assert_eq!(parallel_summary.sum_fees, 10);

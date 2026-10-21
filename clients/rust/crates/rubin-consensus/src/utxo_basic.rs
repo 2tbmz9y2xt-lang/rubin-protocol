@@ -1813,12 +1813,7 @@ mod tests {
             vec![tx_output(1, 0x0105, vec![0x55; 1600])],
         );
         let utxo_set = HashMap::new();
-        assert_retired_apply_refusal(
-            &tx,
-            &utxo_set,
-            [0; 32],
-            ErrorCode::TxErrCovenantTypeInvalid,
-        );
+        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrCovenantTypeInvalid);
         tx.tx_nonce = 0;
         assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrTxNonceInvalid);
         tx.tx_nonce = 1;
