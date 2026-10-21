@@ -12,11 +12,10 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 
 ## Claim boundary (critical)
 
-This proof pack is an executable replay/refinement surface for the non-`CV-PV-*`
-conformance fixtures whose replay modules are imported by
-`RubinFormal.Conformance.Index`, plus live Lean theorems over select canonical
-sections. It provides reproducible machine-checked evidence but **is not** a
-universal formal verification of the entire CANONICAL spec.
+This proof pack contains bounded executable replay/refinement evidence for the
+models imported by `RubinFormal.Conformance.Index`, plus Lean theorems over
+their registered scopes. It provides reproducible machine-checked evidence but
+**is not** a universal formal verification of the entire CANONICAL spec.
 
 Current machine-readable status: `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`.
 
@@ -26,8 +25,8 @@ evidence; it is not universal/model section proof evidence.
 
 Permitted claim formulations (OK):
 
-- "Lean executable semantics replay the non-`CV-PV-*` conformance fixtures
-  represented by modules imported by `RubinFormal.Conformance.Index`"
+- "Lean executable evidence covers the bounded model lists imported by
+  `RubinFormal.Conformance.Index`; runtime/parallel-only `CV-PV-*` is excluded"
 - "Bridge evidence is op-scoped Lean evidence; Go/Rust correspondence remains human-reviewed"
 - "Formal coverage is machine-readable with explicit evidence levels: universal, behavioral, assumption-backed, contract-level, and model-level"
 
@@ -38,6 +37,22 @@ identify residual, bridge, model, or other bounded formal scopes. Row status,
 evidence, and claims apply to that registered row, not automatically to a
 manifest member. An unregistered manifest H2 is not thereby formally proved,
 and a registered formal row need not remain an independent manifest member.
+
+The single `spec_section_hashes_sha3_256` pins the exact approved locally prepared
+retirement manifest as a disposition; it proves no model applicability, canonical
+validity or client parity. The unchanged static Lean registry model accepts
+`0x0105`; the UTXO model retains `CV-ST-U-01` without stealth validation. Neither
+proves retirement.
+Local spec preparation precedes metadata human merge, then spec first
+publication/merge, then client removal. Old canonical spec/new pin comparison
+necessarily rejects between the metadata and matching spec merges.
+
+Native-rotation replay uses a manual legacy bounded stub, unwritten by current
+generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
+`suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
+The CLI `rotation_spend_suite_check` ignores `covenant_type` after parsing, so
+these labels do not prove individual covenant spends or full JSON/manual-stub
+semantic equivalence. The unchanged stub does not prove proposed `0x0105` retirement.
 
 Prohibited claim formulations (NOT OK):
 

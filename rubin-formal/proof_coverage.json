@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "ef634a18893920ec616368213cf3e37f506da0023833928305e19165abd3393e",
+  "spec_section_hashes_sha3_256": "97d02bb483911f8e9e302804be78d382b2fa5c83cf02529e6eb275bffe6d09d9",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -837,10 +837,10 @@
       },
       "evidence_level": "machine_checked_model",
       "limitations": [
-        "Scope: static Lean model/helper for bounded u16 tag disposition only; no live implementation bridge is claimed. This row does not claim output acceptance, activation or deployment behavior, descriptor semantics, spend rules, cryptographic semantics, or client equivalence.",
+        "Scope: static Lean model/helper for bounded u16 tag disposition only; no live implementation bridge is claimed. This row does not claim output acceptance, activation or deployment behavior, descriptor semantics, spend rules, cryptographic semantics, or client equivalence. The unchanged model still accepts CORE_STEALTH 0x0105 and does not implement or prove its proposed retirement.",
         "The retained validateOutGenesis evidence consists of canonical accepted samples, unknown/reserved rejection theorems, and CV-COVENANT-GENESIS replay for the legacy genesis-model surface. It does not claim a universal acceptance characterization and does not cover CORE_STEALTH or CORE_SIMPLICITY."
       ],
-      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: the named accepted tags, reserved 0x00FF, deployment-gated CORE_SIMPLICITY at 0x0106, explicit invalid 0x0001, and the generic invalid complement including 0x0102 and all other unnamed u16 tags, with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The tag 0x0102 remains invalid and unassigned, with no activation, support, or executable semantics. This is tag disposition only and not a live implementation bridge. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they neither define activation or descriptor behavior nor cover CORE_STEALTH or CORE_SIMPLICITY."
+      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: the named accepted tags including CORE_STEALTH 0x0105, reserved 0x00FF, deployment-gated CORE_SIMPLICITY at 0x0106, explicit invalid 0x0001, and the generic invalid complement including 0x0102 and all other unnamed u16 tags, with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The tag 0x0102 remains invalid and unassigned, with no activation, support, or executable semantics. This is pre-retirement tag disposition only and not a live implementation bridge; the manifest pin does not change that model or prove the proposed 0x0105 retirement. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they neither define activation or descriptor behavior nor cover CORE_STEALTH or CORE_SIMPLICITY."
     },
     {
       "section_key": "difficulty_update",
@@ -1117,10 +1117,10 @@
         "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
         "RubinFormal.utxo_apply_basic_chain_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean"
       },
-      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path.",
+      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path. This unchanged pre-retirement model does not implement or prove the proposed 0x0105 retirement.",
       "limitations": [
         "RUB-1252's U_pre_genesis/U_parent selection, genesis S0 = 0, complete final-genesis S1, StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
-        "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal is not a live-consensus claim. CORE_STEALTH 0x0105 remains accepted for CV-ST-U-01 without stealth-specific validation, not as evidence of a consensus-valid stealth spend.",
+        "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal is not a live-consensus claim. CORE_STEALTH 0x0105 remains accepted for CV-ST-U-01 without stealth-specific validation, not as evidence of a consensus-valid stealth spend. The manifest disposition does not change that acceptance or establish the proposed retirement.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
@@ -1711,10 +1711,10 @@
   "proof_level": "refinement",
   "claims": {
     "allowed": [
-      "Lean executable semantics replay the non-CV-PV conformance fixtures represented by modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope",
+      "Lean executable replay/refinement evidence is bounded by the models and modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope. The native-rotation manual legacy stub is not written by current generators: JSON *-02 rows use create_height=100, height=199, suite_id=2 and expect_ok=true, whereas Lean uses spendHeight=200 and expectOk=false. rotation_spend_suite_check ignores covenant_type after parsing, so these labels do not prove individual covenant spends or full JSON/manual-stub semantic equivalence",
       "Lean evidence is op-scoped and mixed; any correspondence to Go/Rust is human-reviewed rather than machine-checked implementation equivalence",
       "The registry currently covers 31 machine-checked coverage entries: 23 proved, 5 proved_with_axiom, and 3 stated. Evidence levels comprise 22 universal, 5 assumption-backed, 3 model, and 1 contract entries.",
-      "formal claims are bounded by explicit forbidden claims below",
+      "Formal claims are row-scoped and bounded by the explicit forbidden claims below. spec_section_hashes_sha3_256 is the single-manifest disposition of the exact approved locally prepared retirement snapshot, not proof of model applicability, 0x0105 retirement behavior, canonical validity, or client parity. Release order is local spec preparation, metadata human merge, spec first publication/merge, then client removal; the old canonical spec/new pin comparison necessarily fails closed between the metadata and matching spec merges. The prepared spec remains noncanonical until its own human merge",
       "Bridge theorems (LIVE/BRIDGE class) prove properties of Lean transcriptions of Go/Rust functions. Lean-to-Go/Rust parity is verified by human code review, not machine-checked. The behavioral claim applies to the Lean transcription; transfer to Go/Rust binary relies on the reviewed parity."
     ],
     "forbidden": [
