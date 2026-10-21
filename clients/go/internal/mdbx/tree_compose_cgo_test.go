@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 // Test-owned literals for the L5a composer rows. Keys, frames, values, bindings and amounts are built here from the
@@ -38,6 +39,8 @@ type tcLedger struct {
 	hook        map[int]func()
 	noCharge    bool
 	refuseStep  bool // refuse the next step-1 charge
+	refuseNext  bool // refuse the next charge of any amount
+	stepHeld    []uint64
 	violations  []string
 }
 
@@ -49,9 +52,12 @@ func (l *tcLedger) chargeV1(n uint64) error {
 	if l.noCharge {
 		l.violations = append(l.violations, fmt.Sprintf("charge %d after readback entry", n))
 	}
-	refuse := l.refuseStep && n == tcStep
+	if n == tcStep {
+		l.stepHeld = append(l.stepHeld, l.held)
+	}
+	refuse := l.refuseStep && n == tcStep || l.refuseNext
 	if refuse || l.calls == l.refuseAt || l.limit != 0 && n > l.limit-l.held {
-		l.refuseStep = false
+		l.refuseStep, l.refuseNext = false, false
 		l.log = append(l.log, fmt.Sprintf("refuse %d", n))
 		return errOperationReservationCapacity
 	}
@@ -230,6 +236,13 @@ func (s *tcScene) settled(t *testing.T) {
 	}
 }
 
+// settledNow is settled for a goroutine that may not call t.Fatal (H4 before resumeV1).
+func (s *tcScene) settledNow(t *testing.T) {
+	if s.ledger.held != 0 || len(s.ledger.violations) != 0 {
+		t.Errorf("ledger before resume held %d violations %v", s.ledger.held, s.ledger.violations)
+	}
+}
+
 // consumed checks the CLOSED Store and the next legacy Update returning the cached terminal without a callback.
 func (s *tcScene) consumed(t *testing.T, err error) {
 	t.Helper()
@@ -317,10 +330,156 @@ func TestTreeComposeOrderV1(t *testing.T) {
 		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
 	}
 	s.settled(t)
+	budgets := tcPBudgets(t)
+	if want := []uint64{0, budgets[0], budgets[1]}; fmt.Sprint(s.ledger.stepHeld) != fmt.Sprint(want) {
+		t.Fatalf("held before each step-1 charge %v, want the P budget after the previous primitive %v", s.ledger.stepHeld, want)
+	}
 	if treeReaderBytesV1 != 208+728+128+80 || tcStep != 74_872 {
 		t.Fatal("R literal drifted")
 	}
+	tcAllocationGuards(t, s.store)
 	s.reopen(t, s.newRows(t)...)
+}
+
+// tcP replays P_w per D2-7 (len(key)+len(value); len(key) for an absent marker or reference). The new entry is
+// covered before its copy while a replaced entry is still held (D5-2 shortfall before the copy), and the replaced
+// size leaves live after it; high is the high-water mark, the P budget.
+type tcP struct {
+	live, high uint64
+	sizes      map[string]uint64
+}
+
+func (p *tcP) put(rank int, key []byte, value int) {
+	id := fmt.Sprintf("%d:%x", rank, key)
+	n := uint64(len(key) + value)
+	p.high = max(p.high, p.live+n)
+	p.live = p.live - p.sizes[id] + n
+	p.sizes[id] = n
+}
+
+// tcPBudgets is the P budget after CURRENT, LAG1 and LAG2 of the A1 plan, from the planned images in applyV1 order
+// (D14-1 as amended by D20: a forward SPEND's undo entry precedes its UTXO effect) and L2's node and binding targets.
+func tcPBudgets(t *testing.T) [3]uint64 {
+	p := &tcP{sizes: map[string]uint64{}}
+	kT0, kU, kC := tdUTXOKey(1, tcT0, 0), tdUTXOKey(2, tcTU, 0), tdUTXOKey(2, tcTC, 0)
+	vT0, vU, vC := tcValue(tcF0, 10), tcValue(tcFU, 5), tcValue(tcFC, 6)
+	leaf := func(g uint64, key []byte) []byte { return testTreeNodeKey(g, 288, [36]byte(key[8:])) }
+	manifest := len(tdManifest(0, [16]byte{}, 0, 0))
+	var out [3]uint64
+	p.put(1, kT0, len(vT0))
+	p.put(5, tdManifestKey(tcB0), manifest)
+	p.put(8, leaf(1, kT0), 32)
+	p.put(0, tcBindingKey(1), len(tcBinding(t, 1, tcEndpoint(10, tcB0), tcEntry(kT0, vT0))))
+	out[0] = p.high
+	p.put(4, tcB1[:], 0)
+	p.put(1, kU, len(vU))
+	p.put(5, tdManifestKey(tcB1), manifest)
+	p.put(8, leaf(2, kU), 32)
+	p.put(0, tcBindingKey(2), len(tcBinding(t, 2, tcEndpoint(5, tcB1), tcEntry(kU, vU))))
+	out[1] = p.high
+	p.put(4, tcB2[:], 0)
+	p.put(1, kC, len(vC))
+	p.put(5, tdEntryKey(tcB2, tcTU, 1, 0, 0), len(vU))
+	p.put(1, kU, 0)
+	p.put(5, tdManifestKey(tcB2), manifest)
+	p.put(8, leaf(2, kU), 0)
+	p.put(8, leaf(2, kC), 32)
+	p.put(0, tcBindingKey(2), len(tcBinding(t, 2, tcEndpoint(6, tcB2), tcEntry(kC, vC))))
+	out[2] = p.high
+	return out
+}
+
+var tcOldSink treeOldV1
+
+// tcAllocAvg is the runtime.MemStats TotalAlloc delta of f averaged over 100 runs after one warm-up run.
+func tcAllocAvg(f func()) float64 {
+	f()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range 100 {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return float64(after.TotalAlloc-before.TotalAlloc) / 100
+}
+
+// tcAllocationGuards are the A1 bounds behind R = 208 + 728 + 128 + 80 (D33, D34, D36, D37) on a read txn of the
+// committed A1 Store.
+func tcAllocationGuards(t *testing.T, store *Store) {
+	t.Helper()
+	if size := unsafe.Sizeof(Reader{}); size > 208 {
+		t.Fatalf("Reader is %d bytes, above 208 (D33)", size)
+	}
+	old, err := treeBeginV1(store.env, false)
+	mustEnvironment(t, err)
+	defer updateAbortOld(old)
+	reader := store.newUpdateReaderV1(old)
+	defer func() { reader.expire().retire() }()
+	tcVisitGuard(t, reader)
+	tcOldGuard(t, &treeSectionV1{old: old, handles: store.dbis}, &treeReadbackStateV1{old: old, handles: store.dbis})
+	marker := append(append(make([]byte, 32), 1), make([]byte, 44)...)
+	projection := &treeProjectionV1{entries: []treeEntryV1{{dbi: schemaDBIs[5], key: marker, kind: treeEntryAbsentV1}}}
+	tcSeekGuard(t, &treeAmendedV1{old: old, handles: store.dbis, p: projection}, marker)
+}
+
+// tcVisitGuard: one LargeImageBlockBodyV1 visit of CURRENT's committed body with one ReadAt into a preallocated
+// 65,536-byte buffer allocates at most 728 bytes (D34).
+func tcVisitGuard(t *testing.T, reader *Reader) {
+	t.Helper()
+	buf, reads := make([]byte, 65_536), 0
+	visitor := func(row LargeImageRowV1) error {
+		reads++
+		n, err := row.ReadAt(buf, 0)
+		if n != len(tcF0) {
+			return fmt.Errorf("read %d bytes: %w", n, err)
+		}
+		return nil
+	}
+	var visitErr error
+	visit := tcAllocAvg(func() {
+		visitErr = errors.Join(visitErr, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: LargeImageBlockBodyV1, Hash: tcB0}, visitor))
+	})
+	t.Logf("D34 visit allocation %.1f bytes", visit)
+	if visitErr != nil || visit > 728 || reads != 101 {
+		t.Fatalf("block-body visit with one ReadAt: %.1f bytes, %d reads, err %v (D34 bound 728)", visit, reads, visitErr)
+	}
+}
+
+// tcOldGuard: each oldV1 result stored into a package-level treeOldV1 allocates at most 64 bytes (D36).
+func tcOldGuard(t *testing.T, section *treeSectionV1, readback *treeReadbackStateV1) {
+	t.Helper()
+	for _, row := range []struct {
+		name string
+		f    func()
+	}{
+		{"checked", func() { tcOldSink = section.oldV1(true) }},
+		{"writer", func() { tcOldSink = section.oldV1(false) }},
+		{"readback", func() { tcOldSink = readback.oldV1() }},
+	} {
+		got := tcAllocAvg(row.f)
+		t.Logf("D36 %s oldV1 allocation %.1f bytes", row.name, got)
+		if got > 64 {
+			t.Fatalf("%s oldV1 allocates %.1f bytes, above 64 (D36)", row.name, got)
+		}
+	}
+}
+
+// tcSeekGuard: one nextV1 (write nil, so only mergedNextV1) from 0x00 x 32 over the shadowed 77-byte absent marker
+// allocates at most 80 bytes (D37); the marker is stepped over, so the returned key sorts after it.
+func tcSeekGuard(t *testing.T, amended *treeAmendedV1, marker []byte) {
+	t.Helper()
+	var key []byte
+	var nextErr error
+	from := make([]byte, 32)
+	got := tcAllocAvg(func() {
+		var err error
+		key, _, _, err = amended.nextV1(schemaDBIs[5], from)
+		nextErr = errors.Join(nextErr, err)
+	})
+	t.Logf("D37 seek allocation %.1f bytes", got)
+	if nextErr != nil || got > 80 || string(key) <= string(marker) {
+		t.Fatalf("seek over a shadowed marker: %.1f bytes, key %x, err %v (D37 bound 80)", got, key, nextErr)
+	}
 }
 
 func tcIndex(t *testing.T, log []string, entry string) int {
@@ -597,6 +756,7 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 					t.Errorf("recorder still active")
 				}
 				tdInactive(t, kept.eventV1(2, tcTC, 0, 0, 0, 0, 20))
+				s.settledNow(t)
 				if recorded != (r.err != nil) || recorded && !sameError(r.err, f) {
 					t.Errorf("goexit err %v", r.err)
 				}
@@ -615,22 +775,9 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 	}
 }
 
-// tcBudgetP runs the A1 plan once and returns the P budget held at the H_r charge (the last charge).
-func tcBudgetP(t *testing.T) uint64 {
-	t.Helper()
-	s := tcNew(t, 3)
-	var p uint64
-	s.ledger.hook = map[int]func(){}
-	for i := 1; i < 64; i++ {
-		s.ledger.hook[i] = func() { p = s.ledger.held }
-	}
-	s.run(nil).want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-	return p
-}
-
 // A2, R5, M6, M7, M16, M21, M28: exact H_r on the P + H_r ledger, crossed run ending NEW; refusal at P + H_r - 1.
 func TestTreeComposeHoldV1(t *testing.T) {
-	p := tcBudgetP(t)
+	p := tcPBudgets(t)[2]
 	for _, row := range []struct {
 		name    string
 		limit   uint64
@@ -739,6 +886,7 @@ func TestTreeComposeReadbackUnwindV1(t *testing.T) {
 						t.Errorf("mode 12: %v %d", err, evidence.commits)
 					}
 					check(r)
+					s.settledNow(t)
 					r.unwind.resumeV1()
 				}()
 				<-done
@@ -750,6 +898,143 @@ func TestTreeComposeReadbackUnwindV1(t *testing.T) {
 				t.Fatalf("state %v truth %d", s.store.state, s.store.terminalTruth)
 			}
 			s.settled(t)
+		})
+	}
+}
+
+// A4, M29: the readback returns W + F_fixed + C + R and D_j + V of CURRENT before LAG1's draw, so it completes
+// inside P + S_r + B_r; EventCount 1 for CURRENT and 2 for LAG1 (two coinbase outputs over a two-frame body).
+func TestTreeComposeReadbackReturnV1(t *testing.T) {
+	s := tcNew(t, 2)
+	body := append(append([]byte(nil), tcFU...), tcFC...)
+	treeNativeSeed(t, s.store, 4, tcB1[:], body)
+	s.prims[1].events = []tdEv{tdCreate(tcTU, 0, 0, 0, uint32(len(tcFU))), tdCreate(tcTU, 1, 0, uint64(len(tcFU)), uint32(len(tcFC)))}
+	r := s.crossed(t)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	tcCrossedCause(t, r.err, CommitTruthNew, nil)
+	log := s.ledger.log
+	if s.prims[0].calls[treeReadbackV1] != 1 || s.prims[1].calls[treeReadbackV1] != 1 || tcIndex(t, log, "enter 2 C") > tcIndex(t, log, "enter 2 L1") {
+		t.Fatalf("readback calls %d %d log %v", s.prims[0].calls[treeReadbackV1], s.prims[1].calls[treeReadbackV1], log)
+	}
+	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)) {
+		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
+	}
+	s.settled(t)
+}
+
+// A5, M24: a Pair put of CURRENT's absent blocks-v1 row is its body.
+func TestTreeComposePairBodyV1(t *testing.T) {
+	s := tcNew(t, 1)
+	r := s.run(nil)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil || r.unwind.kind != 0 || s.prims[0].calls[treeWriterV1] != 1 {
+		t.Fatalf("A5 err %v unwind %+v calls %d", r.err, r.unwind, s.prims[0].calls[treeWriterV1])
+	}
+	s.settled(t)
+	s.reopen(t, s.newRows(t)[:4]...)
+}
+
+// tcRollback is the A6 plan: ROLLBACK_NEW (SourceDelete) of block BR at generation 3, height 8, whose coinbase
+// created kR; the Pair deletes blocks-v1[BR]. seeded false leaves blocks-v1[BR] absent (R10).
+func tcRollback(t *testing.T, seeded bool) (*tcScene, []ttRow) {
+	t.Helper()
+	store, path := ttStore(t)
+	block, txid, frame := tdTxid(0xc0), tdTxid(0x40), tdFrame(400, 0, nil)
+	key, value := tdUTXOKey(3, txid, 0), tdFormed(frame, 8, 1)
+	parent := tcEndpoint(7, tdTxid(0xbf))
+	if seeded {
+		treeNativeSeed(t, store, 4, block[:], frame)
+	}
+	leaf, digest := testTreeNodeKey(3, 288, [36]byte(key[8:])), testTreeLeafPreimage([36]byte(key[8:]), value)
+	for _, row := range []ttRow{{ttUTXO, key, value}, {schemaDBIs[5], tdManifestKey(block), tdManifest(8, [16]byte{}, 1, 0)},
+		{TreeSchemaV1DBIs()[8], leaf, digest[:]}, {TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))}} {
+		treeNativeSeed(t, store, row.dbi.Rank, row.key, row.want)
+	}
+	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
+	s.pair = []ownedMutation{{dbi: ttBlocks, key: block[:], beforePresent: true, after: AfterAbsent}}
+	prim := treePrimitiveV1{direction: treeInverseV1, kind: treeKindRollbackNewV1, undo: treeUndoSourceDeleteV1, generation: 3, height: 8, block: block, endpoint: parent}
+	s.prims = []*tcPrim{{name: "R", prim: prim, txCount: 1, events: []tdEv{tdCreate(txid, 0, 0, 0, uint32(len(frame)))}, ledger: s.ledger}}
+	after := []ttRow{{ttBlocks, block[:], nil}, {ttUTXO, key, nil}, {schemaDBIs[5], tdManifestKey(block), nil},
+		{TreeSchemaV1DBIs()[8], leaf, nil}, {TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, parent)}}
+	return s, after
+}
+
+// A6, M-REF-DEL: a Pair-deleted body is the ORIGINAL OLD row bound with pair = true; the rollback commits NEW.
+func TestTreeComposePairDeleteV1(t *testing.T) {
+	s, after := tcRollback(t, true)
+	r := s.run(nil)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil || s.prims[0].calls[treeWriterV1] != 1 {
+		t.Fatalf("A6 err %v calls %d", r.err, s.prims[0].calls[treeWriterV1])
+	}
+	s.settled(t)
+	s.reopen(t, after...)
+}
+
+// R10, M-DEL-ABS: a Pair delete of an absent ORIGINAL OLD body is the stored-body integrity result at index 0.
+func TestTreeComposePairDeleteAbsentV1(t *testing.T) {
+	s, _ := tcRollback(t, false)
+	r := s.run(nil)
+	r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
+	treeNativeIntegrity(t, r.err, operationUpdate, nil)
+	if s.prims[0].calls[treeWriterV1] != 0 || fmt.Sprint(s.ledger.log) != fmt.Sprintf("[charge %d release %d]", tcStep, tcStep) {
+		t.Fatalf("R10 calls %d log %v", s.prims[0].calls[treeWriterV1], s.ledger.log)
+	}
+	s.settled(t)
+	s.consumed(t, r.err)
+	block := tdTxid(0xc0)
+	key, value := tdUTXOKey(3, tdTxid(0x40), 0), tdFormed(tdFrame(400, 0, nil), 8, 1)
+	s.reopen(t, ttRow{ttBlocks, block[:], nil}, ttRow{ttUTXO, key, value}, ttRow{TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))})
+}
+
+// R2, M2, M3: the first charge after LAG1's writer provider returned is refused: OLD at index 1, LAG2 unreached.
+func TestTreeComposeGrowthRefusalV1(t *testing.T) {
+	s := tcNew(t, 3)
+	s.prims[1].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
+		s.ledger.refuseNext = pos == treeWriterV1
+		return nil
+	}
+	r := s.run(nil)
+	r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+	if r.err != errOperationReservationCapacity || s.prims[2].calls[treeWriterV1] != 0 {
+		t.Fatalf("R2 err %v LAG2 calls %d", r.err, s.prims[2].calls[treeWriterV1])
+	}
+	s.settled(t)
+	s.consumed(t, r.err)
+	s.reopen(t, s.oldRows(t)...)
+}
+
+// R3, M4: a checked-read drift at CURRENT is STALE before any put (stage 1, index 0); a drift only LAG2 reads is
+// STALE at index 2 after the earlier puts (stage 2), before LAG2's fold charge.
+func TestTreeComposeCheckedDriftV1(t *testing.T) {
+	for _, row := range []struct {
+		name  string
+		key   []byte
+		stage UpdateStage
+		index int
+	}{
+		{"current", tdUTXOKey(1, tcT0, 0), UpdateStagePrewrite, 0},
+		{"lag2", tdUTXOKey(2, tcTC, 0), UpdateStageWriteStartedDefinitelyPrecommit, 2},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s := tcNew(t, 3)
+			r := s.run(func() { treeNativeSeed(t, s.store, 1, row.key, []byte{0x7f}) })
+			r.want(t, CommitTruthOld, row.stage, row.index)
+			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
+			log := s.ledger.log
+			if row.index == 0 && s.prims[1].calls[treeWriterV1] != 0 {
+				t.Fatalf("LAG1 called after CURRENT's STALE")
+			}
+			if row.index == 2 && strings.Contains(strings.Join(log[tcIndex(t, log, "return 1 L2"):], "|"), fmt.Sprintf("charge %d", tcL2)) {
+				t.Fatalf("LAG2 fold reached after its STALE: %v", log)
+			}
+			s.settled(t)
+			s.consumed(t, r.err)
+			rows := append(s.oldRows(t)[1:], ttRow{ttUTXO, row.key, []byte{0x7f}})
+			if row.index == 2 {
+				rows = append(s.oldRows(t), ttRow{ttUTXO, row.key, []byte{0x7f}})
+			}
+			s.reopen(t, rows...)
 		})
 	}
 }
