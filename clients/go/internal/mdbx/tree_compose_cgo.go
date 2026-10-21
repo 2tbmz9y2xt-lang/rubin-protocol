@@ -177,7 +177,7 @@ func (e *treeScopeV1) stepV1(j int) error {
 	if err != nil || e.unwind.kind != 0 {
 		return err
 	}
-	if err = e.deltaV1(prim); err != nil {
+	if err := e.deltaV1(prim); err != nil {
 		return err
 	}
 	e.rec.releaseV1()
@@ -194,16 +194,15 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitivePlanV1) error {
 		return err
 	}
 	e.events = max(e.events, e.rec.eventCount)
-	if err = d.resolveV1(e.checkedV1()); err != nil {
+	if err := d.resolveV1(e.checkedV1()); err != nil {
 		return err
 	}
 	if e.rb == nil {
-		err = treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger)
-		if err != nil {
+		if err := treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger); err != nil {
 			return err
 		}
 	}
-	if err = d.applyV1(e.emitterV1()); err != nil {
+	if err := d.applyV1(e.emitterV1()); err != nil {
 		return err
 	}
 	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger)

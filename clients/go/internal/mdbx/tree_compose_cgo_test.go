@@ -264,9 +264,12 @@ func tcValue(frame []byte, height uint64) []byte { return tdFormed(frame, height
 // oldRows are the ORIGINAL OLD bytes of every A1 target.
 func (s *tcScene) oldRows(t *testing.T) []ttRow {
 	return []ttRow{
-		{ttUTXO, tdUTXOKey(1, tcT0, 0), nil}, {ttBlocks, tcB0[:], nil}, {schemaDBIs[5], tdManifestKey(tcB0), nil},
+		{ttUTXO, tdUTXOKey(1, tcT0, 0), nil},
+		{ttBlocks, tcB0[:], nil},
+		{schemaDBIs[5], tdManifestKey(tcB0), nil},
 		{TreeSchemaV1DBIs()[0], tcBindingKey(1), tcBinding(t, 1, tcOldEP)},
-		{ttUTXO, tdUTXOKey(2, tcTU, 0), nil}, {TreeSchemaV1DBIs()[0], tcBindingKey(2), tcBinding(t, 2, tcOldEP)},
+		{ttUTXO, tdUTXOKey(2, tcTU, 0), nil},
+		{TreeSchemaV1DBIs()[0], tcBindingKey(2), tcBinding(t, 2, tcOldEP)},
 	}
 }
 
@@ -275,10 +278,15 @@ func (s *tcScene) newRows(t *testing.T) []ttRow {
 	kT0, kU, kC := tdUTXOKey(1, tcT0, 0), tdUTXOKey(2, tcTU, 0), tdUTXOKey(2, tcTC, 0)
 	vT0, vU, vC := tcValue(tcF0, 10), tcValue(tcFU, 5), tcValue(tcFC, 6)
 	return []ttRow{
-		{ttUTXO, kT0, vT0}, {ttBlocks, tcB0[:], tcF0}, {schemaDBIs[5], tdManifestKey(tcB0), tdManifest(10, [16]byte{}, 1, 0)},
+		{ttUTXO, kT0, vT0},
+		{ttBlocks, tcB0[:], tcF0},
+		{schemaDBIs[5], tdManifestKey(tcB0), tdManifest(10, [16]byte{}, 1, 0)},
 		{TreeSchemaV1DBIs()[0], tcBindingKey(1), tcBinding(t, 1, tcEndpoint(10, tcB0), tcEntry(kT0, vT0))},
-		{ttUTXO, kU, nil}, {ttUTXO, kC, vC}, {schemaDBIs[5], tdManifestKey(tcB1), tdManifest(5, [16]byte{}, 1, 0)},
-		{schemaDBIs[5], tdManifestKey(tcB2), tdManifest(6, [16]byte{}, 2, 1)}, {schemaDBIs[5], tdEntryKey(tcB2, tcTU, 1, 0, 0), vU},
+		{ttUTXO, kU, nil},
+		{ttUTXO, kC, vC},
+		{schemaDBIs[5], tdManifestKey(tcB1), tdManifest(5, [16]byte{}, 1, 0)},
+		{schemaDBIs[5], tdManifestKey(tcB2), tdManifest(6, [16]byte{}, 2, 1)},
+		{schemaDBIs[5], tdEntryKey(tcB2, tcTU, 1, 0, 0), vU},
 		{TreeSchemaV1DBIs()[0], tcBindingKey(2), tcBinding(t, 2, tcEndpoint(6, tcB2), tcEntry(kC, vC))},
 	}
 }
