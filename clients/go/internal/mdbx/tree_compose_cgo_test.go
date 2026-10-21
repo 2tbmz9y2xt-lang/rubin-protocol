@@ -5,6 +5,8 @@ package mdbx
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -1557,4 +1559,69 @@ func TestTreeComposeReferenceControlV1(t *testing.T) {
 			s.settled(t)
 		})
 	}
+}
+
+const (
+	tcPoisonedChildEnv    = "RUBIN_MDBX_TC_POISONED_CHILD"
+	tcPoisonedChildMarker = "RUBIN_MDBX_TC_POISONED_REACHED"
+)
+
+// H3 mode-15 poisoned Goexit subcase, M22: run in a child test process (test_evidence_rules child-process rule) so no
+// parked runTreeLockedV1 worker remains in the parent test binary.
+func TestTreeComposePoisonedGoexitV1(t *testing.T) {
+	t.Run("mode15", func(t *testing.T) {
+		if os.Getenv(tcPoisonedChildEnv) != "" {
+			tcPoisonedChild(t)
+			if !t.Failed() {
+				fmt.Println(tcPoisonedChildMarker)
+			}
+			return
+		}
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestTreeComposePoisonedGoexitV1$/^mode15$", "-test.count=1")
+		cmd.Env = append(os.Environ(), tcPoisonedChildEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(output), "\n"+tcPoisonedChildMarker+"\n") {
+			t.Fatalf("poisoned child: %v\n%s", err, output)
+		}
+	})
+}
+
+func tcPoisonedChild(t *testing.T) {
+	s := tcNew(t, 3)
+	lag1 := s.prims[1]
+	lag1.custom = func(_ *Reader, rec *treeRecorderV1) error {
+		err := lag1.stream(rec)
+		if lag1.calls[treeReadbackV1] == 1 {
+			runtime.Goexit()
+		}
+		return err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var r tcResult
+		evidence, err := fixtureLargeFault(s.store, 15, 0, tcOut(), func() { r = s.run(nil) })
+		if err != nil || evidence.commits < 1 {
+			t.Errorf("mode 15: %v %+v", err, evidence)
+		}
+		var commit *CommitError
+		var cause *EngineError
+		if r.unwind.kind != 2 || r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || !errors.As(r.err, &commit) || !errors.As(commit.ReadbackCause, &cause) {
+			t.Errorf("mode 15 result %+v", r)
+		} else if cause.Class != EngineLocalInvariant || cause.Operation != string(operationAbort) || cause.Code != -30416 || cause.Diagnostic != expectedNativeDiagnostic(-30416) {
+			t.Errorf("mode 15 ReadbackCause %+v", cause)
+		}
+		if s.store.state != storePOISONEDTHREAD {
+			t.Errorf("mode 15 state %v", s.store.state)
+		}
+		s.settledNow(t)
+		r.unwind.resumeV1()
+	}()
+	<-done
+	if !treeCallPoll(treeCallParkedWorker) {
+		t.Fatal("no parked runTreeLockedV1 worker after a poisoned delivery")
+	}
+	mustEnvironment(t, fixtureLargeRelease(s.store))
+	s.settled(t)
+	s.reopen(t, s.newRows(t)...)
 }
