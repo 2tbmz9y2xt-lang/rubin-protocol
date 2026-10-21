@@ -268,17 +268,36 @@ func (s *tcScene) settledNow(t *testing.T) {
 	}
 }
 
-// consumed checks the CLOSED Store and the next legacy Update returning the cached terminal without a callback.
-func (s *tcScene) consumed(t *testing.T, err error) {
+// consumed checks the CLOSED Store and the next legacy Update returning (want, Prewrite, the cached terminal) without a
+// callback (D868: store.terminalTruth clamped by refusedUpdate; want is the truth the row states).
+func (s *tcScene) consumed(t *testing.T, want CommitTruth, err error) {
 	t.Helper()
 	if s.store.state != storeCLOSED || s.store.terminal == nil {
 		t.Fatalf("store state %v terminal %v, want CLOSED", s.store.state, s.store.terminal)
 	}
 	calls := 0
 	truth, stage, next := s.store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
-	if calls != 0 || stage != UpdateStagePrewrite || next == nil || err != nil && !sameError(next, err) || truth == 0 {
-		t.Fatalf("next Update %d %d %v (calls %d), want cached terminal %v", truth, stage, next, calls, err)
+	if calls != 0 || stage != UpdateStagePrewrite || next == nil || err != nil && !sameError(next, err) || truth != want {
+		t.Fatalf("next Update %d %d %v (calls %d), want truth %d and cached terminal %v", truth, stage, next, calls, want, err)
 	}
+}
+
+// following runs the next legal operation on an OPEN Store: a seam call of a zero-primitive plan whose one Pair puts a
+// fresh blocks-v1 key, expected NEW at stage 3; it returns that row for the reopen.
+func (s *tcScene) following(t *testing.T) ttRow {
+	t.Helper()
+	if s.store.state != storeOPEN {
+		t.Fatalf("store state %v before the following seam call, want OPEN", s.store.state)
+	}
+	key := tdTxid(0xee)
+	s.prims = nil
+	s.pair = []ownedMutation{{dbi: ttBlocks, key: key[:], after: AfterLiteral, literal: []byte{0x5a}}}
+	r := s.run(nil)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil {
+		t.Fatalf("following seam call err %v", r.err)
+	}
+	return ttRow{ttBlocks, key[:], []byte{0x5a}}
 }
 
 func (s *tcScene) reopen(t *testing.T, rows ...ttRow) {
@@ -383,7 +402,7 @@ func TestTreeComposeOrderV1(t *testing.T) {
 		t.Fatal("R literal drifted")
 	}
 	tcAllocationGuards(t, s.store)
-	s.reopen(t, s.newRows(t)...)
+	s.reopen(t, append(s.newRows(t), s.following(t))...)
 }
 
 // tcP replays P_w per D2-7 (len(key)+len(value); len(key) for an absent marker or reference). The new entry is
@@ -586,7 +605,13 @@ func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 			if len(s.ledger.log) != 0 {
 				t.Fatalf("zero primitives touched the ledger: %v", s.ledger.log)
 			}
-			s.reopen(t, ttRow{ttBlocks, tcB0[:], tcF0})
+			rows := []ttRow{{ttBlocks, tcB0[:], tcF0}}
+			if crossed {
+				s.consumed(t, CommitTruthNew, r.err)
+			} else {
+				rows = append(rows, s.following(t))
+			}
+			s.reopen(t, rows...)
 		})
 	}
 }
@@ -620,7 +645,7 @@ func TestTreeComposeStepRefusalV1(t *testing.T) {
 				t.Fatalf("R1 err %v calls %d %d", r.err, s.prims[1].calls[1], s.prims[2].calls[1])
 			}
 			s.settled(t)
-			s.consumed(t, r.err)
+			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, s.oldRows(t)...)
 		})
 	}
@@ -663,7 +688,7 @@ func TestTreeComposePairPreflightV1(t *testing.T) {
 			if len(s.ledger.log) != 0 {
 				t.Fatalf("ledger touched: %v", s.ledger.log)
 			}
-			s.consumed(t, r.err)
+			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, ttRow{ttBlocks, tcB0[:], []byte{0x7f}}, ttRow{ttUTXO, tdUTXOKey(1, tcT0, 0), nil})
 		})
 	}
@@ -680,7 +705,7 @@ func TestTreeComposeAbsentBodyV1(t *testing.T) {
 		t.Fatal("LAG source called")
 	}
 	s.settled(t)
-	s.consumed(t, r.err)
+	s.consumed(t, CommitTruthOld, r.err)
 	s.reopen(t, s.oldRows(t)...)
 }
 
@@ -734,39 +759,54 @@ func TestTreeComposeProviderErrorV1(t *testing.T) {
 				t.Fatalf("err %v, want %v", r.err, row.want)
 			}
 			s.settled(t)
-			s.consumed(t, row.want)
+			s.consumed(t, CommitTruthOld, row.want)
 			s.reopen(t, s.oldRows(t)...)
 		})
 	}
 }
 
-// R8, M19: two recorded failures are both in the primary.
+// R8, M19: two recorded failures are both in the primary (returned s or nil); one recorded F returned is F itself.
 func TestTreeComposePrimaryCompositionV1(t *testing.T) {
 	f := treeIntegrity(operationGet, nil)
-	for _, returned := range []bool{true, false} {
-		t.Run(fmt.Sprint(returned), func(t *testing.T) {
+	for _, variant := range []string{"returned", "nil", "single"} {
+		t.Run(variant, func(t *testing.T) {
 			s := tcNew(t, 3)
 			var sink error
 			s.prims[1].custom = func(old *Reader, rec *treeRecorderV1) error {
 				old.failure = f
-				sink = rec.beginV1(0, 0, [16]byte{})
-				if returned {
+				switch variant {
+				case "single":
+					return f
+				case "returned":
+					sink = rec.beginV1(0, 0, [16]byte{})
 					return sink
 				}
+				sink = rec.beginV1(0, 0, [16]byte{})
 				return nil
 			}
 			r := s.run(nil)
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-			if sink == nil {
-				t.Errorf("R8 rec.beginV1(0) recorded no s")
+			if s.prims[2].calls[treeWriterV1] != 0 {
+				t.Errorf("R8 LAG2 writer count %d, want 0", s.prims[2].calls[treeWriterV1])
 			}
-			if !errors.Is(r.err, f) {
-				t.Errorf("primary %v lacks F", r.err)
-			}
-			if !errors.Is(r.err, sink) {
-				t.Errorf("primary %v lacks s", r.err)
+			if variant == "single" {
+				if r.err != f {
+					t.Fatalf("R8 single primary %v, want F by identity", r.err)
+				}
+			} else {
+				if sink == nil {
+					t.Errorf("R8 rec.beginV1(0) recorded no s")
+				}
+				if !errors.Is(r.err, f) {
+					t.Errorf("primary %v lacks F", r.err)
+				}
+				if !errors.Is(r.err, sink) {
+					t.Errorf("primary %v lacks s", r.err)
+				}
 			}
 			s.settled(t)
+			s.consumed(t, CommitTruthOld, r.err)
+			s.reopen(t, s.oldRows(t)...)
 		})
 	}
 }
@@ -829,7 +869,7 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 				if !sameError(r.err, want) || s.store.terminal != want {
 					t.Fatalf("%s panic err %v terminal %v, want %v", variant, r.err, s.store.terminal, want)
 				}
-				s.consumed(t, want)
+				s.consumed(t, CommitTruthOld, want)
 			} else if r.err != nil || s.store.state != storeOPEN || s.store.terminal != nil {
 				t.Fatalf("clean panic err %v state %v", r.err, s.store.state)
 			}
@@ -846,7 +886,9 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 				s.reopenOpen(t, s.oldRows(t)...)
 				next := s.run(nil)
 				next.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+				return
 			}
+			s.reopen(t, s.oldRows(t)...)
 		})
 	}
 }
@@ -898,6 +940,7 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 				}
 				s.prims[1].custom = nil
 				s.run(nil).want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+				s.reopen(t, s.newRows(t)...)
 				return
 			case "mode9":
 				tcMode9(t, s)
@@ -905,7 +948,7 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 				if s.store.terminal != want {
 					t.Fatalf("terminal %v, want %v", s.store.terminal, want)
 				}
-				s.consumed(t, want)
+				s.consumed(t, CommitTruthOld, want)
 			}
 			s.reopen(t, s.oldRows(t)...)
 		})
@@ -973,23 +1016,31 @@ func TestTreeComposeHoldV1(t *testing.T) {
 			}
 			last := tcLastCharge(s.ledger.log)
 			if row.name == "short" {
-				s.reopen(t, s.oldRows(t)...)
 				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 				if !IsOperationReservationCapacity(r.err) || last != fmt.Sprintf("refuse %d", tcHr(2)) {
 					t.Fatalf("R5 err %v last %q", r.err, last)
 				}
 				s.settled(t)
-				s.consumed(t, r.err)
+				s.consumed(t, CommitTruthOld, r.err)
+				s.reopen(t, s.oldRows(t)...)
 				return
 			}
 			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 			if last != fmt.Sprintf("charge %d", tcHr(2)) {
 				t.Fatalf("last charge %q", last)
 			}
+			tcNoChargeAfterHr(t, s.ledger.log)
 			if row.crossed && s.prims[0].calls[treeReadbackV1] != 1 {
 				t.Fatal("readback did not run")
 			}
 			s.settled(t)
+			rows := s.newRows(t)
+			if row.crossed {
+				s.consumed(t, CommitTruthNew, r.err)
+			} else {
+				rows = append(rows, s.following(t))
+			}
+			s.reopen(t, rows...)
 		})
 	}
 }
@@ -1006,26 +1057,58 @@ func (s *tcScene) crossed(t *testing.T) tcResult {
 	return r
 }
 
-// R6, M8, M9, M10: a readback provider error is the ReadbackCause; LAG2's readback is unreached.
+// R6, M8, M9, M10: a readback provider error is the ReadbackCause; LAG2's readback is unreached. Subcase recorded:
+// LAG1's readback provider records F on its Reader and returns nil, so ReadbackCause == F.
 func TestTreeComposeReadbackErrorV1(t *testing.T) {
-	s := tcNew(t, 3)
-	s.prims[1].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
-		if pos == treeReadbackV1 {
-			return tcSentinel
+	f := treeIntegrity(operationGet, nil)
+	for _, variant := range []string{"sentinel", "recorded"} {
+		t.Run(variant, func(t *testing.T) {
+			s := tcNew(t, 3)
+			want := error(tcSentinel)
+			s.prims[1].act = func(pos treePositionV1, old *Reader, _ *treeRecorderV1) error {
+				if pos != treeReadbackV1 {
+					return nil
+				}
+				if variant == "recorded" {
+					old.failure = f
+					return nil
+				}
+				return tcSentinel
+			}
+			if variant == "recorded" {
+				want = f
+			}
+			r := s.crossed(t)
+			var commit *CommitError
+			if !errors.As(r.err, &commit) || commit.ReadbackCause != want {
+				t.Fatalf("R6 err %v, want a CommitError whose ReadbackCause is %v by identity", r.err, want)
+			}
+			if s.prims[2].calls[treeReadbackV1] != 0 {
+				t.Errorf("R6 LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
+			}
+			r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+			tcCrossedCause(t, r.err, CommitTruthUnknown, want)
+			if s.prims[2].calls[treeReadbackV1] != 0 || s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
+				t.Fatalf("R6 LAG2 readback %d state %v", s.prims[2].calls[treeReadbackV1], s.store.state)
+			}
+			tcNoChargeAfterHr(t, s.ledger.log)
+			s.settled(t)
+			s.consumed(t, CommitTruthUnknown, r.err)
+			s.reopen(t, s.newRows(t)...)
+		})
+	}
+}
+
+// tcNoChargeAfterHr is the "no chargeV1 after the commit" observation: the composer goes from the H_r charge straight
+// into commitV1, so no "charge " entry follows the H_r charge in the ledger log.
+func tcNoChargeAfterHr(t *testing.T, log []string) {
+	t.Helper()
+	at := tcIndex(t, log, fmt.Sprintf("charge %d", tcHr(2)))
+	for _, e := range log[at+1:] {
+		if strings.HasPrefix(e, "charge ") {
+			t.Errorf("%s after the H_r charge (after the commit)", e)
 		}
-		return nil
 	}
-	r := s.crossed(t)
-	if s.prims[2].calls[treeReadbackV1] != 0 {
-		t.Errorf("R6 LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
-	}
-	r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
-	tcCrossedCause(t, r.err, CommitTruthUnknown, tcSentinel)
-	if s.prims[2].calls[treeReadbackV1] != 0 || s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
-		t.Fatalf("R6 LAG2 readback %d state %v", s.prims[2].calls[treeReadbackV1], s.store.state)
-	}
-	s.settled(t)
-	s.reopen(t, s.newRows(t)...)
 }
 
 // H3 (clean, recorded and sink-only RP and RG), M13, M18b, M34, M35, M42: readback unwinds consume the Store with
@@ -1079,9 +1162,11 @@ func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
 		s.settledNow(t)
 	}
 	done, resumed := make(chan struct{}), false
+	var got tcResult
 	go func() {
 		defer close(done)
 		var r tcResult
+		defer func() { got = r }()
 		evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
 		if err != nil || evidence.commits < 1 {
 			t.Errorf("mode 12: %v %d", err, evidence.commits)
@@ -1100,6 +1185,7 @@ func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
 		t.Fatal("statement after resumeV1 ran")
 	}
 	s.settled(t)
+	s.consumed(t, CommitTruthUnknown, got.err)
 	s.reopen(t, s.newRows(t)...)
 }
 
@@ -1121,6 +1207,13 @@ func TestTreeComposeReadbackReturnV1(t *testing.T) {
 		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
 	}
 	s.settled(t)
+	s.consumed(t, CommitTruthNew, r.err)
+	s.reopen(t, tcA4Rows(t, s)...)
+}
+
+// tcA4Rows are NEW bytes of A4's plan: CURRENT's A1 targets and LAG1's first coinbase output (not spent here).
+func tcA4Rows(t *testing.T, s *tcScene) []ttRow {
+	return append(s.newRows(t)[:4], ttRow{ttUTXO, tdUTXOKey(2, tcTU, 0), tcValue(tcFU, 5)})
 }
 
 // A5, M24: a Pair put of CURRENT's absent blocks-v1 row is its body.
@@ -1132,7 +1225,7 @@ func TestTreeComposePairBodyV1(t *testing.T) {
 		t.Fatalf("A5 err %v unwind %+v calls %d", r.err, r.unwind, s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
-	s.reopen(t, s.newRows(t)[:4]...)
+	s.reopen(t, append(s.newRows(t)[:4], s.following(t))...)
 }
 
 // tcRollback is the A6 plan: ROLLBACK_NEW (SourceDelete) of block BR at generation 3, height 8, whose coinbase
@@ -1178,7 +1271,7 @@ func TestTreeComposePairDeleteV1(t *testing.T) {
 		t.Fatalf("A6 err %v calls %d", r.err, s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
-	s.reopen(t, after...)
+	s.reopen(t, append(after, s.following(t))...)
 }
 
 // R10, M-DEL-ABS: a Pair delete of an absent ORIGINAL OLD body is the stored-body integrity result at index 0.
@@ -1191,7 +1284,7 @@ func TestTreeComposePairDeleteAbsentV1(t *testing.T) {
 		t.Fatalf("R10 calls %d log %v", s.prims[0].calls[treeWriterV1], s.ledger.log)
 	}
 	s.settled(t)
-	s.consumed(t, r.err)
+	s.consumed(t, CommitTruthOld, r.err)
 	block := tdTxid(0xc0)
 	key, value := tdUTXOKey(3, tdTxid(0x40), 0), tdFormed(tdFrame(400, 0, nil), 8, 1)
 	s.reopen(t, ttRow{ttBlocks, block[:], nil}, ttRow{ttUTXO, key, value}, ttRow{TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))})
@@ -1216,7 +1309,7 @@ func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 		t.Fatalf("R2 ledger after LAG1 return %q", got)
 	}
 	s.settled(t)
-	s.consumed(t, r.err)
+	s.consumed(t, CommitTruthOld, r.err)
 	s.reopen(t, s.oldRows(t)...)
 }
 
@@ -1235,7 +1328,7 @@ func TestTreeComposeWorkRefusalV1(t *testing.T) {
 			t.Fatalf("R13a writer calls %d %d %d", s.prims[0].calls[1], s.prims[1].calls[1], s.prims[2].calls[1])
 		}
 		s.settled(t)
-		s.consumed(t, r.err)
+		s.consumed(t, CommitTruthOld, r.err)
 		s.reopen(t, s.oldRows(t)...)
 	})
 	t.Run("emit", func(t *testing.T) {
@@ -1250,7 +1343,7 @@ func TestTreeComposeWorkRefusalV1(t *testing.T) {
 			t.Fatalf("R13b err %v LAG2 calls %d log %v", r.err, s.prims[2].calls[1], seg)
 		}
 		s.settled(t)
-		s.consumed(t, r.err)
+		s.consumed(t, CommitTruthOld, r.err)
 		s.reopen(t, s.oldRows(t)...)
 	})
 }
@@ -1294,7 +1387,7 @@ func TestTreeComposeCheckedDriftV1(t *testing.T) {
 				t.Fatalf("LAG2 fold reached after its STALE: %v", log)
 			}
 			s.settled(t)
-			s.consumed(t, r.err)
+			s.consumed(t, CommitTruthOld, r.err)
 			rows := append(s.oldRows(t)[1:], ttRow{ttUTXO, row.key, []byte{0x7f}})
 			if row.index == 2 {
 				rows = append(s.oldRows(t), ttRow{ttUTXO, row.key, []byte{0x7f}})
@@ -1330,14 +1423,21 @@ func TestTreeComposeRetainedRecorderV1(t *testing.T) {
 				if r.err != tcSentinel {
 					t.Fatalf("H5 err %v", r.err)
 				}
+				s.consumed(t, CommitTruthOld, tcSentinel)
+				s.reopen(t, s.oldRows(t)...)
 				return
 			}
-			defer func() {
-				if got := recover(); got != v {
-					t.Fatalf("resumed %v", got)
-				}
+			func() {
+				defer func() {
+					if got := recover(); got != v {
+						t.Fatalf("resumed %v", got)
+					}
+				}()
+				r.unwind.resumeV1()
 			}()
-			r.unwind.resumeV1()
+			s.prims[1].act = nil
+			s.reopenOpen(t, s.oldRows(t)...)
+			s.run(nil).want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		})
 	}
 }
@@ -1414,6 +1514,8 @@ func TestTreeComposeNoSurvivorV1(t *testing.T) {
 		t.Fatalf("live weak pointers at LAG1 step, LAG2 step, H_r: %v", seen)
 	}
 	s.settled(t)
+	s.ledger.before = nil
+	s.reopen(t, append(s.newRows(t), s.following(t))...)
 }
 
 // H6 readback subcase on A4's plan: LAG1's readback provider, first, collects and finds CURRENT's readback objects gone.
@@ -1445,6 +1547,8 @@ func TestTreeComposeNoSurvivorReadbackV1(t *testing.T) {
 		t.Fatalf("CURRENT readback objects live at LAG1 readback entry: %d", live)
 	}
 	s.settled(t)
+	s.consumed(t, CommitTruthNew, r.err)
+	s.reopen(t, tcA4Rows(t, s)...)
 }
 
 // tcTipCell is the H7 provider action: CanonicalTipV1 of a generation with no canonical-v1 row stores a cell on the
@@ -1491,6 +1595,8 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 			t.Fatalf("first charge after CURRENT returned (before its step 8): %q", observed)
 		}
 		s.settled(t)
+		s.ledger.before = nil
+		s.reopen(t, append(s.newRows(t), s.following(t))...)
 	})
 	t.Run("goexit", func(t *testing.T) {
 		s := tcNew(t, 3)
@@ -1510,6 +1616,7 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 			}
 		})
 		s.settled(t)
+		s.reopen(t, append(s.oldRows(t), s.following(t))...)
 	})
 	t.Run("readback", func(t *testing.T) {
 		s := tcNew(t, 2)
@@ -1536,6 +1643,8 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 			t.Fatal("CURRENT's readback Reader or cell still live at LAG1's readback entry")
 		}
 		s.settled(t)
+		s.consumed(t, CommitTruthNew, r.err)
+		s.reopen(t, tcA4Rows(t, s)...)
 	})
 }
 
@@ -1573,7 +1682,7 @@ func TestTreeComposeBindingStageV1(t *testing.T) {
 				t.Fatalf("provider calls %d", s.prims[0].calls[treeWriterV1])
 			}
 			s.settled(t)
-			s.consumed(t, r.err)
+			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, ttRow{ttUTXO, tdUTXOKey(1, tcT0, 0), nil}, ttRow{ttBlocks, tcB0[:], nil}, ttRow{schemaDBIs[5], tdManifestKey(tcB0), nil}, ttRow{bindings, key, row})
 		})
 	}
@@ -1620,6 +1729,8 @@ func TestTreeComposeBoundaryReferenceV1(t *testing.T) {
 		t.Fatalf("N2 state %v truth %d", s.store.state, s.store.terminalTruth)
 	}
 	s.settled(t)
+	s.consumed(t, CommitTruthUnknown, r.err)
+	s.reopen(t, ttRow{TreeSchemaV1DBIs()[8], leafB, nil}, ttRow{ttUTXO, tdUTXOKey(1, tdTxid(0xa1), 0), nil}, ttRow{ttBlocks, tcB0[:], tcF0})
 }
 
 // tcNetClean is the N3 plan: CURRENT's tx 1 creates u and tx 2 spends it (no target at UTXOKey(1, u)).
@@ -1648,6 +1759,8 @@ func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
 		r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 		tcCrossedCause(t, r.err, CommitTruthUnknown, nil)
 		s.settled(t)
+		s.consumed(t, CommitTruthUnknown, r.err)
+		s.reopen(t, ttRow{ttUTXO, key, []byte{0x7f}}, ttRow{ttBlocks, tcB0[:], s.pair[0].literal})
 	})
 	t.Run("writer", func(t *testing.T) {
 		s, key := tcNetClean(t)
@@ -1660,7 +1773,8 @@ func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
 		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 		ttMismatch(t, r.err, "final update image mismatch")
 		s.settled(t)
-		s.consumed(t, r.err)
+		s.consumed(t, CommitTruthOld, r.err)
+		s.reopen(t, append(s.oldRows(t)[:4], ttRow{ttUTXO, key, nil})...)
 	})
 }
 
