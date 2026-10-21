@@ -49,11 +49,13 @@ func (r tsResult) tuple(t *testing.T, truth CommitTruth, stage UpdateStage, inde
 func tsRun(t *testing.T, s *Store, o *OperationReservationOwner, kind OperationKind, op TreeOperationV1) tsResult {
 	t.Helper()
 	var r tsResult
+	calls := 0
 	before := reservationLive(o)
 	mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
-		r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+		r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { calls++; return op, nil })
 		return nil
 	}))
+	if calls != 1 { t.Fatalf("public callback calls%d, want1", calls) }
 	if got := reservationLive(o); got != before {
 		t.Fatalf("owner live %d, want pre-call %d", got, before)
 	}
@@ -286,7 +288,6 @@ func TestTreeStreamPrimitiveDomainsV1(t *testing.T) {
 func TestTreeStreamPrimitiveRefusalsV1(t *testing.T) {
 	rows := []struct { name string; edit func(*TreeOperationV1) }{
 		{"nil-source", func(o *TreeOperationV1) { o.Primitives[0].Source = nil }},
-		{"generation-zero", func(o *TreeOperationV1) { o.Primitives[0].Generation = 0 }},
 		{"nonlag-at-one", func(o *TreeOperationV1) { o.Primitives = append(o.Primitives, o.Primitives[0]) }},
 		{"forward-pregenesis", func(o *TreeOperationV1) { o.Primitives[0].Endpoint = TreeEndpointV1{} }},
 		{"forward-height", func(o *TreeOperationV1) { o.Primitives[0].Endpoint.Height++ }},
@@ -313,6 +314,20 @@ func TestTreeStreamPrimitiveRefusalsV1(t *testing.T) {
 		t.Run(fmt.Sprintf("kind%d-empty", kind), func(t *testing.T) { tsRejected(t, kind, func(*testing.T) TreeOperationV1 { return TreeOperationV1{} }, false) })
 		t.Run(fmt.Sprintf("kind%d-consult-only", kind), func(t *testing.T) { tsRejected(t, kind, func(*testing.T) TreeOperationV1 { return TreeOperationV1{Pair: TreePairV1{Consulted: []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: []byte{3}}}}} }, false) })
 	}
+	t.Run("generation-zero", func(t *testing.T) {
+		s,path,o:=tsNew(t);tsRoots(t,s,o,1);calls:=0
+		op:=tsOperation(t,tsSource(func(_ TreePositionV1,_ *Reader,sink *TreeDeltaSinkV1)error{calls++;return sink.BeginV1(TreeBlockV1{TxCount:1})}))
+		op.Primitives[0].Generation=0
+		r:=tsRun(t,s,o,TreeOperation,op);tsRefusal(t,r,false)
+		if calls!=0||s.state!=storeOPEN||s.terminal!=nil||s.terminalTruth!=0{t.Fatal("generation-zero admission effects")}
+		mustEnvironment(t,s.View(func(*Reader)error{return nil}))
+		body:=op.Pair.Mutations[0];tsRead(t,s,body.DBI,body.Key,nil)
+		op.Primitives[0].Generation=1
+		r=tsRun(t,s,o,TreeOperation,op);r.tuple(t,2,3,-1);mustEnvironment(t,r.err)
+		if calls!=1{t.Fatalf("generation-one Source calls%d, want1",calls)}
+		s=tsReopen(t,s,path);tsRead(t,s,body.DBI,body.Key,body.Literal)
+		tsRead(t,s,TreeSchemaV1DBIs()[0],tsRootKey(1),tsRootBytes(t,op.Primitives[0].Endpoint))
+	})
 	tsRejected(t, LaneOperation, func(t *testing.T) TreeOperationV1 { return tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { t.Fatal("Lane primitive Source"); return nil })) }, false)
 }
 
@@ -594,7 +609,7 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 				op.Primitives = []TreePrimitiveV1{p,q,third}
 			case "inverse-forward": p.Direction,p.Kind,p.Undo,p.Height = 2,8,5,6; p.Endpoint.Height = 5; op.Primitives = []TreePrimitiveV1{p,q}
 			case "same-direction": p.Kind = 3; op.Primitives = []TreePrimitiveV1{p,q}
-			case "distinct-block": third.Block = tdTxid(0xee); op.Primitives = []TreePrimitiveV1{p,third}
+			case "distinct-block": third.Block,third.Undo = tdTxid(0xee),5; op.Primitives = []TreePrimitiveV1{p,third}
 			}
 			if variant == "over-cap" { op.Pair.Mutations = tsMany(16385) }
 			if variant == "forward-inverse" || variant == "over-cap" {

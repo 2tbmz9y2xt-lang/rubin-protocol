@@ -96,7 +96,7 @@ func tsConsumed(t *testing.T,s *Store,o *OperationReservationOwner,truth CommitT
 	if err:=s.View(func(*Reader)error{calls++;return nil});err!=terminal||calls!=0{t.Fatal("consumed View did not reuse terminal")}
 }
 
-func (s *tsfScene) durable(t *testing.T,newState bool) {
+func (s *tsfScene) durable(t *testing.T,newState bool,driftedManifest ...[32]byte) {
 	t.Helper()
 	s.s=tsReopen(t,s.s,s.path)
 	for i,p:=range s.op.Primitives {
@@ -107,8 +107,11 @@ func (s *tsfScene) durable(t *testing.T,newState bool) {
 		if newState&&i!=1{value=tdFormed(frame,p.Height,1)}
 		tsRead(t,s.s,TreeSchemaV1DBIs()[1],tdUTXOKey(p.Generation,txid,0),value)
 		manifest:=[]byte(nil);if newState{spent:=uint32(0);if i==2{spent=1};manifest=tdManifest(p.Height,s.p[i].block.Generated,s.p[i].block.TxCount,spent)}
+		if slices.Contains(driftedManifest,p.Block){manifest=[]byte{0x7f}}
 		tsRead(t,s.s,TreeSchemaV1DBIs()[5],tdManifestKey(p.Block),manifest)
 	}
+	undo:=[]byte(nil);if newState{undo=tdFormed(tdFrame(200,0,[]byte{1}),5,1)}
+	tsRead(t,s.s,TreeSchemaV1DBIs()[5],tdEntryKey(s.op.Primitives[2].Block,tdTxid(0x20),1,0,0),undo)
 	current:=s.op.Pair.Mutations[0];body:=[]byte(nil);if newState{body=current.Literal};tsRead(t,s.s,current.DBI,current.Key,body)
 	for _,m:=range tsEntry(t).Pair.Mutations{tsRead(t,s.s,m.DBI,m.Key,m.Literal)}
 	for _,g:=range []uint64{1,2}{tsRead(t,s.s,TreeSchemaV1DBIs()[0],tsRootKey(g),s.binding(t,g,newState))}
@@ -273,7 +276,11 @@ func TestTreeStreamSourceFailureAndDriftV1(t *testing.T) {
 				r=s.run(t);r.tuple(t,1,2,1);treeNativeError(t,r.err,"update","InvalidInput",22,"invalid tree delta",nil)
 			}
 			tsConsumed(t,s.s,s.o,1,r.err)
-			if mode!="lag2-drift"{s.durable(t,false)}
+			if mode=="lag2-drift"{
+				s.durable(t,false,s.op.Primitives[2].Block)
+				tsRead(t,s.s,TreeSchemaV1DBIs()[4],s.op.Primitives[1].Block[:],tdFrame(200,0,[]byte{1}))
+				tsRead(t,s.s,TreeSchemaV1DBIs()[4],s.op.Primitives[2].Block[:],tdFrame(300,0,nil))
+			}else{s.durable(t,false)}
 		})
 	}
 }
@@ -282,24 +289,29 @@ func TestTreeStreamProviderUnwindAndLifetimeV1(t *testing.T) {
 	for _,mode:=range []string{"panic","goexit","reader-panic","reader-goexit"} {
 		t.Run(mode,func(t *testing.T){
 			s:=tsfNew(t);value:=new(int);key:=tsTarget(77).Key;var failure error
+			readerFault:=mode=="reader-panic"||mode=="reader-goexit"
 			s.p[1].after=func(_ TreePositionV1,r *Reader,_ *TreeDeltaSinkV1)error{
-				if mode=="reader-panic"||mode=="reader-goexit"{_,_,failure=r.Get(TreeSchemaV1DBIs()[6],key)}
+				if readerFault{_,_,failure=r.Get(TreeSchemaV1DBIs()[6],key)}
 				if mode=="goexit"||mode=="reader-goexit"{runtime.Goexit()};panic(value)
 			}
-			post:=false
-			run:=func(){_ = s.run(t);post=true}
-			if mode=="reader-panic"||mode=="reader-goexit"{
-				next:=run;run=func(){_,err:=FixtureSelectedDamage(s.s,s.o,SelectedDamageGetEIO,6,key,next);mustEnvironment(t,err)}
+			post:=false;var recovered any
+			run:=func(){
+				done:=make(chan struct{})
+				go func(){defer close(done);defer func(){recovered=recover();if reservationLive(s.o)!=0{t.Error("hold still live at unwind delivery")}}();_ = s.run(t);post=true}()
+				<-done
 			}
-			if mode=="goexit"||mode=="reader-goexit"{done:=make(chan struct{});go func(){defer close(done);run()}();<-done}else{
-				var recovered any;func(){defer func(){recovered=recover();if reservationLive(s.o)!=0{t.Error("hold still live at panic delivery")}}();run()}()
-				if recovered!=value{t.Fatalf("provider panic identity %v",recovered)}
-			}
+			if readerFault{
+				evidence,err:=FixtureSelectedDamage(s.s,s.o,SelectedDamageGetEIO,6,key,run);mustEnvironment(t,err)
+				if failure==nil||evidence.Faults!=1||evidence.OldGets[6]!=1{t.Fatalf("provider Reader fault %v evidence%+v",failure,evidence)}
+				treeNativeError(t,failure,"get","IO",5,"error 5",nil)
+			}else{run()}
+			if (mode=="panic"||mode=="reader-panic")&&recovered!=value{t.Fatalf("provider panic identity %v",recovered)}
+			if (mode=="goexit"||mode=="reader-goexit")&&recovered!=nil{t.Fatalf("provider Goexit panicked %v",recovered)}
 			if post||reservationLive(s.o)!=0||s.p[1].reader==nil||s.p[1].reader.usable(){t.Fatal("provider unwind lifetime")}
 			tsExpiredReader(t,s.p[1].reader)
 			if s.p[1].sink.WindowV1()!=nil{t.Fatal("expired sink window")}
 			treeNativeError(t,s.p[1].sink.EventV1(TreeEventV1{Kind:2}),"update","InvalidInput",22,"tree delta sink is not active",nil)
-			if failure!=nil{if s.s.terminal!=failure{t.Fatal("provider F was not terminal")};tsConsumed(t,s.s,s.o,1,failure)}else{if s.s.state!=storeOPEN||s.s.terminal!=nil{t.Fatal("clean provider unwind consumed Store")};tsFollowing(t,s.s,s.o)}
+			if readerFault{if s.s.terminal!=failure{t.Fatal("provider F was not terminal")};tsConsumed(t,s.s,s.o,1,failure)}else{if s.s.state!=storeOPEN||s.s.terminal!=nil{t.Fatal("clean provider unwind consumed Store")};tsFollowing(t,s.s,s.o)}
 			s.durable(t,false)
 		})
 	}
