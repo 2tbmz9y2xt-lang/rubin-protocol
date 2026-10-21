@@ -1290,7 +1290,7 @@ func (script fixtureTreeScriptV1) truthV1(old *C.MDBX_txn, dbis [9]C.MDBX_dbi, p
 	if held == 0 {
 		held = treeScratchBytesV1 + pBudget
 	}
-	return func(read *C.MDBX_txn) (CommitTruth, error) {
+	return func(read *C.MDBX_txn, _ error) (CommitTruth, error) {
 		if script.calls != nil {
 			*script.calls++
 		}
@@ -1317,4 +1317,21 @@ func fixtureTreeReleaseV1(outcome updateNativeOutcome) {
 // fixtureTreeBreakV1 breaks the section's write txn so its commit returns MDBX_RESULT_TRUE (definite OLD).
 func fixtureTreeBreakV1(section *treeSectionV1) error {
 	return fixtureResult(operationUpdate, int(C.mdbx_txn_break(section.write)))
+}
+
+// ---- mdbx_fixture_cgo.go (owner L5a; rubin_mdbx_fixture tag) ----
+// fixtureTreeComposeV1 is the L5a test entry seam (D12-J): it begins ORIGINAL OLD through treeBeginV1 (after arming),
+// runs hook holding no Store lock, then calls updateTreeLockedV1 under store.operations and returns its five results
+// unchanged. updateTreeLockedV1 consumes old; the unwind is not resumed here.
+func fixtureTreeComposeV1(store *Store, ledger treeLedgerV1, plan *treePlanV1, hook func()) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+	old, err := treeBeginV1(store.env, false)
+	if err != nil {
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, err
+	}
+	if hook != nil {
+		hook()
+	}
+	store.operations.Lock()
+	defer store.operations.Unlock()
+	return store.updateTreeLockedV1(old, ledger, plan)
 }

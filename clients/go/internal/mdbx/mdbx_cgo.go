@@ -2039,7 +2039,7 @@ func updateNativeReadbackConsulted(old, read *C.MDBX_txn, dbis [9]C.MDBX_dbi, co
 
 // treeTruthV1 evaluates the one strict snapshot after a possible crossing. nil keeps the legacy
 // updateNativeReadbackTruth path byte-identical.
-type treeTruthV1 func(read *C.MDBX_txn) (CommitTruth, error)
+type treeTruthV1 func(read *C.MDBX_txn, primary error) (CommitTruth, error)
 
 func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutation, consulted []ownedConsulted, old *C.MDBX_txn, primary error, truth treeTruthV1, scopes ...largeImageScope) updateNativeOutcome {
 	begun := C.rubin_mdbx_txn_begin(env, C.MDBX_TXN_RDONLY)
@@ -2053,7 +2053,7 @@ func updateNativeReadback(env *C.MDBX_env, dbis [9]C.MDBX_dbi, plan []ownedMutat
 	var verdict CommitTruth
 	var readErr error
 	if truth != nil {
-		verdict, readErr = truth(begun.txn)
+		verdict, readErr = truth(begun.txn, primary)
 	} else {
 		verdict, readErr = updateNativeReadbackTruth(old, begun.txn, dbis, plan, consulted, scopes...)
 	}
