@@ -272,6 +272,22 @@ func (s *tcScene) reopen(t *testing.T, rows ...ttRow) {
 	}
 }
 
+// reopenOpen closes the OPEN Store, reopens it, checks rows and keeps the reopened Store for the next seam call.
+func (s *tcScene) reopenOpen(t *testing.T, rows ...ttRow) {
+	t.Helper()
+	mustEnvironment(t, s.store.Close())
+	opened, err := OpenTreeV1(s.path, environmentConfig(), [32]byte{7})
+	mustEnvironment(t, err)
+	t.Cleanup(func() { _ = opened.Close() })
+	for _, row := range rows {
+		equal, err := FixtureRawRowEqual(opened, row.dbi.Rank, row.key, row.want)
+		if err != nil || !equal {
+			t.Fatalf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
+		}
+	}
+	s.store = opened
+}
+
 func tcValue(frame []byte, height uint64) []byte { return tdFormed(frame, height, 1) }
 
 // oldRows are the ORIGINAL OLD bytes of every A1 target.
@@ -714,19 +730,38 @@ func TestTreeComposePrimaryCompositionV1(t *testing.T) {
 	}
 }
 
-// H1, M11, M12: a clean writer panic leaves the Store OPEN; a recorded F consumes it with F.
+// tcFail makes a provider's failure before its unwind: "recorded" records F on its Reader, "sink" calls
+// rec.beginV1(0, 0) (L1 records s, the D12-G2 BEGIN refusal, with no charge) and returns s; "clean" does nothing.
+func tcFail(t *testing.T, variant string, f error, old *Reader, rec *treeRecorderV1) error {
+	switch variant {
+	case "recorded":
+		old.failure = f
+		return f
+	case "sink":
+		sink := rec.beginV1(0, 0, [16]byte{})
+		if sink == nil || rec.failureV1() != sink || old.failure != nil {
+			t.Errorf("sink-only precondition: s %v recorded %v reader %v", sink, rec.failureV1(), old.failure)
+		}
+		return sink
+	}
+	return nil
+}
+
+// H1, M11, M12, M39: a clean writer panic leaves the Store OPEN; a recorded F or sink-only s consumes it.
 func TestTreeComposeWriterPanicV1(t *testing.T) {
 	f := treeIntegrity(operationGet, nil)
-	for _, recorded := range []bool{false, true} {
-		t.Run(fmt.Sprint(recorded), func(t *testing.T) {
+	for _, variant := range []string{"clean", "recorded", "sink"} {
+		t.Run(variant, func(t *testing.T) {
 			s := tcNew(t, 3)
 			v := new(int)
 			var escaped *Reader
-			s.prims[1].act = func(_ treePositionV1, old *Reader, _ *treeRecorderV1) error {
+			var want error
+			s.prims[1].custom = func(old *Reader, rec *treeRecorderV1) error {
 				escaped = old
-				if recorded {
-					old.failure = f
+				if variant != "sink" {
+					mustEnvironment(t, s.prims[1].stream(rec))
 				}
+				want = tcFail(t, variant, f, old, rec)
 				panic(v)
 			}
 			r := s.run(nil)
@@ -735,11 +770,12 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 				t.Fatalf("unwind %+v usable %v", r.unwind, escaped.usable())
 			}
 			s.settled(t)
+			recorded := variant != "clean"
 			if recorded {
-				if !sameError(r.err, f) || s.store.terminal != f {
-					t.Fatalf("recorded panic err %v terminal %v", r.err, s.store.terminal)
+				if !sameError(r.err, want) || s.store.terminal != want {
+					t.Fatalf("%s panic err %v terminal %v, want %v", variant, r.err, s.store.terminal, want)
 				}
-				s.consumed(t, f)
+				s.consumed(t, want)
 			} else if r.err != nil || s.store.state != storeOPEN || s.store.terminal != nil {
 				t.Fatalf("clean panic err %v state %v", r.err, s.store.state)
 			}
@@ -752,7 +788,8 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 				r.unwind.resumeV1()
 			}()
 			if !recorded {
-				s.prims[1].act = nil
+				s.prims[1].custom = nil
+				s.reopenOpen(t, s.oldRows(t)...)
 				next := s.run(nil)
 				next.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 			}
@@ -760,45 +797,95 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 	}
 }
 
-// H2, H5, M18b, M26, M41: a writer Goexit after a valid BEGIN releases D_j + V once and projects from the capture.
+// H2, H5, M18b, M22b, M26, M40, M41: a writer Goexit after a valid BEGIN releases D_j + V once and projects from
+// the capture; a recorded F or sink-only s consumes the Store; mode 9 (nil primary, OLD cleanup EIO) consumes it with E.
 func TestTreeComposeWriterGoexitV1(t *testing.T) {
 	f := treeIntegrity(operationGet, nil)
-	for _, recorded := range []bool{false, true} {
-		t.Run(fmt.Sprint(recorded), func(t *testing.T) {
+	for _, variant := range []string{"clean", "recorded", "sink", "mode9"} {
+		t.Run(variant, func(t *testing.T) {
 			s := tcNew(t, 3)
 			var kept *treeRecorderV1
-			s.prims[1].act = func(_ treePositionV1, old *Reader, rec *treeRecorderV1) error {
+			var want error
+			s.prims[1].custom = func(old *Reader, rec *treeRecorderV1) error {
 				kept = rec
-				if recorded {
-					old.failure = f
+				if variant != "sink" {
+					if err := s.prims[1].stream(rec); err != nil {
+						t.Errorf("stream: %v", err)
+					}
 				}
+				want = tcFail(t, variant, f, old, rec)
 				runtime.Goexit()
 				return nil
 			}
-			s.goexitRun(t, func(r tcResult) {
+			inspect := func(r tcResult) {
 				if r.unwind.kind != 2 || r.truth != CommitTruthOld || r.stage != UpdateStageWriteStartedDefinitelyPrecommit || r.index != 1 {
 					t.Errorf("goexit result %+v", r)
 				}
-				if kept.windowV1() != nil || kept.failureV1() != nil {
-					t.Errorf("recorder still active")
-				}
-				tdInactive(t, kept.eventV1(2, tcTC, 0, 0, 0, 0, 20))
+				tcExpired(t, kept, want, variant == "sink")
 				s.settledNow(t)
-				if recorded != (r.err != nil) || recorded && !sameError(r.err, f) {
-					t.Errorf("goexit err %v", r.err)
+				if variant == "mode9" && (r.err == nil || r.err != s.store.terminal) || variant != "mode9" && !sameError(r.err, want) {
+					t.Errorf("goexit err %v, want %v (terminal %v)", r.err, want, s.store.terminal)
 				}
-			})
+			}
+			if variant != "mode9" {
+				s.goexitRun(t, inspect)
+			} else {
+				evidence, err := fixtureLargeFault(s.store, 9, 0, []byte{0}, func() { s.goexitRun(t, inspect) })
+				mustEnvironment(t, err)
+				if evidence.aborts != 1 || evidence.commits != 0 {
+					t.Fatalf("mode 9 evidence %+v", evidence)
+				}
+			}
 			s.settled(t)
-			if recorded {
-				s.consumed(t, f)
+			switch variant {
+			case "clean":
+				if s.store.state != storeOPEN {
+					t.Fatalf("clean goexit state %v", s.store.state)
+				}
+				s.prims[1].custom = nil
+				s.run(nil).want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				return
+			case "mode9":
+				tcMode9(t, s)
+			default:
+				if s.store.terminal != want {
+					t.Fatalf("terminal %v, want %v", s.store.terminal, want)
+				}
+				s.consumed(t, want)
 			}
-			if s.store.state != storeOPEN {
-				t.Fatalf("clean goexit state %v", s.store.state)
-			}
-			s.prims[1].act = nil
-			s.run(nil).want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+			s.reopen(t, s.oldRows(t)...)
 		})
+	}
+}
+
+// tcExpired is the H5 observation on a retained recorder: eventV1 is the D6-3 expired-sink refusal, windowV1 is nil
+// and failureV1 is unchanged (s for a sink-only provider, else nil). It never calls t.Fatal (worker-safe).
+func tcExpired(t *testing.T, rec *treeRecorderV1, sink error, sinkOnly bool) {
+	var engine *EngineError
+	err := rec.eventV1(2, tcTC, 0, 0, 0, 0, 20)
+	if !errors.As(err, &engine) || engine.Class != EngineInvalidInput || engine.Code != codeEINVAL || engine.Diagnostic != "tree delta sink is not active" || engine.Cause != nil {
+		t.Errorf("retained recorder event %v", err)
+	}
+	want := error(nil)
+	if sinkOnly {
+		want = sink
+	}
+	if rec.windowV1() != nil || rec.failureV1() != want {
+		t.Errorf("retained recorder window %v failure %v, want failure %v", rec.windowV1() != nil, rec.failureV1(), want)
+	}
+}
+
+// tcMode9 checks the H2 nil-primary cleanup-failure outcome: CLOSED with the OLD-abort EIO and the next legacy Update.
+func tcMode9(t *testing.T, s *tcScene) {
+	t.Helper()
+	engine := requireEnvironmentError(t, s.store.terminal, EngineIO, operationAbort, 5, "error 5")
+	if engine.Cause != nil || engine.ReopenRequired || s.store.state != storeCLOSED {
+		t.Fatalf("mode 9 terminal %+v state %v", engine, s.store.state)
+	}
+	calls := 0
+	truth, stage, next := s.store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
+	if truth != CommitTruthOld || stage != UpdateStagePrewrite || next != s.store.terminal || calls != 0 {
+		t.Fatalf("next Update %d %d %v calls %d", truth, stage, next, calls)
 	}
 }
 
