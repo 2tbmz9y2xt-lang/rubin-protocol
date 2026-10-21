@@ -795,8 +795,11 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 			}
 			var r tcResult
 			early := func() (p any) { defer func() { p = recover() }(); r = s.run(nil); return nil }()
-			if variant != "clean" && s.store.state != storeCLOSED || early != nil {
-				t.Fatalf("%s: state %v before resume, resumed inside the composer %v", variant, s.store.state, early)
+			if early != nil {
+				t.Fatalf("%s: resumed inside the composer %v", variant, early)
+			}
+			if variant != "clean" && s.store.state != storeCLOSED {
+				t.Errorf("%s: state %v before resume", variant, s.store.state)
 			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if r.unwind.kind != 1 || escaped.usable() {
