@@ -361,8 +361,12 @@ func TestTreeComposeOrderV1(t *testing.T) {
 			t.Fatalf("%s writer calls %d", p.name, p.calls[treeWriterV1])
 		}
 		at := tcIndex(t, log, fmt.Sprintf("enter 1 %s", p.name))
-		if log[at-1] != fmt.Sprintf("charge %d", tcStep) {
-			t.Fatalf("primitive %d: %q precedes entry, want the step-1 charge (%v)", j, log[at-1], log)
+		prev := "(none)"
+		if at > 0 {
+			prev = log[at-1]
+		}
+		if prev != fmt.Sprintf("charge %d", tcStep) {
+			t.Fatalf("primitive %d: %q precedes entry, want the step-1 charge (%v)", j, prev, log)
 		}
 	}
 	tcReleasedBefore(t, log, "L1", 1)
@@ -789,7 +793,11 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 				want = tcFail(t, variant, f, old, rec)
 				panic(v)
 			}
-			r := s.run(nil)
+			var r tcResult
+			early := func() (p any) { defer func() { p = recover() }(); r = s.run(nil); return nil }()
+			if variant != "clean" && s.store.state != storeCLOSED || early != nil {
+				t.Fatalf("%s: state %v before resume, resumed inside the composer %v", variant, s.store.state, early)
+			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if r.unwind.kind != 1 || escaped.usable() {
 				t.Fatalf("unwind %+v usable %v", r.unwind, escaped.usable())
