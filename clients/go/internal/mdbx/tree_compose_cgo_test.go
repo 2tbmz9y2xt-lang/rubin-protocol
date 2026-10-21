@@ -636,22 +636,49 @@ func TestTreeComposeAbsentBodyV1(t *testing.T) {
 	s.reopen(t, s.oldRows(t)...)
 }
 
-// R4, M3, M15: E at LAG1's writer after CURRENT emitted.
+// tcCapacity is the R4 capacity provider: the ledger refuses D_j + V at its beginV1, a following eventV1 returns that
+// same recorded singleton (precondition, checked here), and the provider returns it with no Reader failure.
+func tcCapacity(t *testing.T, l *tcLedger) func(*Reader, *treeRecorderV1) error {
+	return func(old *Reader, rec *treeRecorderV1) error {
+		l.refuseNext = true
+		begin := rec.beginV1(1, 1, [16]byte{})
+		event := rec.eventV1(2, tcTU, 0, 0, 0, 0, uint32(len(tcFU)))
+		if begin != errOperationReservationCapacity || event != begin || old.failure != nil {
+			t.Errorf("R4 capacity precondition: begin %v event %v reader %v", begin, event, old.failure)
+		}
+		return begin
+	}
+}
+
+// R4, M3, M15, M45: E at LAG1's writer after CURRENT emitted; a returned recorded singleton stays the singleton.
 func TestTreeComposeProviderErrorV1(t *testing.T) {
 	recorded := treeIntegrity(operationGet, nil)
 	for _, row := range []struct {
 		name string
-		act  func(old *Reader) error
+		act  func(t *testing.T, s *tcScene) func(*Reader, *treeRecorderV1) error
 		want error
 	}{
-		{"sentinel", func(*Reader) error { return tcSentinel }, tcSentinel},
-		{"recorded", func(old *Reader) error { old.failure = recorded; return nil }, recorded},
+		{"sentinel", func(*testing.T, *tcScene) func(*Reader, *treeRecorderV1) error {
+			return func(*Reader, *treeRecorderV1) error { return tcSentinel }
+		}, tcSentinel},
+		{"recorded", func(*testing.T, *tcScene) func(*Reader, *treeRecorderV1) error {
+			return func(old *Reader, _ *treeRecorderV1) error { old.failure = recorded; return nil }
+		}, recorded},
+		{"capacity", func(t *testing.T, s *tcScene) func(*Reader, *treeRecorderV1) error { return tcCapacity(t, s.ledger) }, errOperationReservationCapacity},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			s := tcNew(t, 3)
-			s.prims[1].act = func(pos treePositionV1, old *Reader, _ *treeRecorderV1) error { return row.act(old) }
+			act := row.act(t, s)
+			if row.name == "capacity" {
+				s.prims[1].custom = act
+			} else {
+				s.prims[1].act = func(_ treePositionV1, old *Reader, rec *treeRecorderV1) error { return act(old, rec) }
+			}
 			r := s.run(nil)
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			if row.name == "capacity" && (r.err != errOperationReservationCapacity || !IsOperationReservationCapacity(r.err)) {
+				t.Fatalf("R4 capacity err %v is not the singleton by identity", r.err)
+			}
 			if !sameError(r.err, row.want) || s.prims[2].calls[1] != 0 {
 				t.Fatalf("err %v, want %v", r.err, row.want)
 			}

@@ -87,11 +87,10 @@ func (e *treeScopeV1) slotV1() {
 	}
 }
 
-// treeExactV1 reports whether provider is exactly the recorded *EngineError f (readPrimary's de-duplication rule).
+// treeExactV1 reports whether provider is exactly f: interface identity for every dynamic type of f (D39). Every f is
+// a pointer-typed engine value, so the comparison cannot panic.
 func treeExactV1(provider, f error) bool {
-	recorded, ok := any(f).(*EngineError)
-	returned, exact := any(provider).(*EngineError)
-	return ok && exact && returned == recorded
+	return any(provider) == any(f)
 }
 
 // treePrimaryV1 is the D12-G1 provider primary: providerErr, then the Reader's and the recorder's failure in that order.
