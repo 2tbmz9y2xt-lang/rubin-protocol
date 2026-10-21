@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
+	"weak"
 )
 
 // Test-owned literals for the L5a composer rows. Keys, frames, values, bindings and amounts are built here from the
@@ -42,10 +43,14 @@ type tcLedger struct {
 	refuseNext  bool // refuse the next charge of any amount
 	stepHeld    []uint64
 	violations  []string
+	before      func(n uint64) // runs at the start of every chargeV1 (H6, H7)
 }
 
 func (l *tcLedger) chargeV1(n uint64) error {
 	l.calls++
+	if l.before != nil {
+		l.before(n)
+	}
 	if hook := l.hook[l.calls]; hook != nil {
 		hook()
 	}
@@ -1173,4 +1178,147 @@ func TestTreeComposeCheckedDriftV1(t *testing.T) {
 			s.reopen(t, rows...)
 		})
 	}
+}
+
+// H5, M18: a recorder LAG1's writer provider retains is expired after the seam returns (sentinel) and before the
+// panic marker is resumed: eventV1 is the expired-sink refusal, windowV1 nil, failureV1 still nil.
+func TestTreeComposeRetainedRecorderV1(t *testing.T) {
+	for _, panics := range []bool{false, true} {
+		t.Run(fmt.Sprint(panics), func(t *testing.T) {
+			s := tcNew(t, 3)
+			v := new(int)
+			var kept *treeRecorderV1
+			s.prims[1].act = func(_ treePositionV1, _ *Reader, rec *treeRecorderV1) error {
+				kept = rec
+				if panics {
+					panic(v)
+				}
+				return tcSentinel
+			}
+			r := s.run(nil)
+			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			tcExpired(t, kept, nil, false)
+			if t.Failed() {
+				t.FailNow()
+			}
+			s.settled(t)
+			if !panics {
+				if r.err != tcSentinel {
+					t.Fatalf("H5 err %v", r.err)
+				}
+				return
+			}
+			defer func() {
+				if got := recover(); got != v {
+					t.Fatalf("resumed %v", got)
+				}
+			}()
+			r.unwind.resumeV1()
+		})
+	}
+}
+
+// tcWeak is one primitive's weak pointers to its recorder, window and provider Reader (H6).
+type tcWeak struct {
+	rec    weak.Pointer[treeRecorderV1]
+	window weak.Pointer[byte]
+	reader weak.Pointer[Reader]
+}
+
+func (w *tcWeak) take(old *Reader, rec *treeRecorderV1) {
+	w.rec, w.window, w.reader = weak.Make(rec), weak.Make(&rec.windowV1()[0]), weak.Make(old)
+}
+
+func (w *tcWeak) live() int {
+	n := 0
+	for _, alive := range []bool{w.rec.Value() != nil, w.window.Value() != nil, w.reader.Value() != nil} {
+		if alive {
+			n++
+		}
+	}
+	return n
+}
+
+func tcGC() {
+	runtime.GC()
+	runtime.GC()
+}
+
+// tcTakeWeak makes p's writer provider take its weak pointers while its sink is active, after its stream.
+func tcTakeWeak(p *tcPrim, w *tcWeak) {
+	p.custom = func(old *Reader, rec *treeRecorderV1) error {
+		err := p.stream(rec)
+		w.take(old, rec)
+		return err
+	}
+}
+
+// H6, M31, M36: no recorder, window or provider Reader of an earlier writer primitive survives its step 8 at LAG1's
+// and LAG2's step-1 charge and at the H_r charge; at the readback, CURRENT's three are gone at LAG1's entry.
+func TestTreeComposeNoSurvivorV1(t *testing.T) {
+	s := tcNew(t, 3)
+	var weaks [3]tcWeak
+	for j, p := range s.prims {
+		tcTakeWeak(p, &weaks[j])
+	}
+	steps := 0
+	var seen []int
+	s.ledger.before = func(n uint64) {
+		if n != tcStep && n != tcHr(2) {
+			return
+		}
+		if n == tcStep {
+			steps++
+		}
+		earlier := steps - 1
+		if n == tcHr(2) {
+			earlier = 3
+		}
+		if earlier < 1 {
+			return
+		}
+		tcGC()
+		live := 0
+		for j := range earlier {
+			live += weaks[j].live()
+		}
+		seen = append(seen, live)
+	}
+	r := s.run(nil)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if fmt.Sprint(seen) != "[0 0 0]" {
+		t.Fatalf("live weak pointers at LAG1 step, LAG2 step, H_r: %v", seen)
+	}
+	s.settled(t)
+}
+
+// H6 readback subcase on A4's plan: LAG1's readback provider, first, collects and finds CURRENT's readback objects gone.
+func TestTreeComposeNoSurvivorReadbackV1(t *testing.T) {
+	s := tcNew(t, 2)
+	body := append(append([]byte(nil), tcFU...), tcFC...)
+	treeNativeSeed(t, s.store, 4, tcB1[:], body)
+	s.prims[1].events = []tdEv{tdCreate(tcTU, 0, 0, 0, uint32(len(tcFU))), tdCreate(tcTU, 1, 0, uint64(len(tcFU)), uint32(len(tcFC)))}
+	var current tcWeak
+	cur, lag1 := s.prims[0], s.prims[1]
+	cur.custom = func(old *Reader, rec *treeRecorderV1) error {
+		err := cur.stream(rec)
+		if cur.calls[treeReadbackV1] == 1 {
+			current.take(old, rec)
+		}
+		return err
+	}
+	live := -1
+	lag1.custom = func(old *Reader, rec *treeRecorderV1) error {
+		if lag1.calls[treeReadbackV1] == 1 {
+			tcGC()
+			live = current.live()
+		}
+		return lag1.stream(rec)
+	}
+	r := s.crossed(t)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if live != 0 {
+		t.Fatalf("CURRENT readback objects live at LAG1 readback entry: %d", live)
+	}
+	s.settled(t)
 }
