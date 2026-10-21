@@ -254,6 +254,47 @@ func (r tcResult) want(t *testing.T, truth CommitTruth, stage UpdateStage, index
 	}
 }
 
+// check is want without stopping, so the named assertions after it in a row still run. It is not a t.Helper, so each
+// field fails at its own line here.
+func (r tcResult) check(t *testing.T, truth CommitTruth, stage UpdateStage, index int) {
+	if r.truth != truth {
+		t.Errorf("result truth %d (err %v), want %d", r.truth, r.err, truth)
+	}
+	if r.stage != stage {
+		t.Errorf("result stage %d (err %v), want %d", r.stage, r.err, stage)
+	}
+	if r.index != index {
+		t.Errorf("result index %d (err %v), want %d", r.index, r.err, index)
+	}
+}
+
+// tcFirstRefusal is the first refused amount in the ledger log, or "(none)".
+func tcFirstRefusal(log []string) string {
+	for _, e := range log {
+		if strings.HasPrefix(e, "refuse ") {
+			return e
+		}
+	}
+	return "(none)"
+}
+
+// reopenNow is reopen for the rows a row names before its first fatal check; it reports with t.Errorf.
+func (s *tcScene) reopenNow(t *testing.T, rows ...ttRow) {
+	t.Helper()
+	if s.store.state == storeOPEN {
+		mustEnvironment(t, s.store.Close())
+	}
+	opened, err := OpenTreeV1(s.path, environmentConfig(), [32]byte{7})
+	mustEnvironment(t, err)
+	defer func() { mustEnvironment(t, opened.Close()) }()
+	for _, row := range rows {
+		equal, err := FixtureRawRowEqual(opened, row.dbi.Rank, row.key, row.want)
+		if err != nil || !equal {
+			t.Errorf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
+		}
+	}
+}
+
 func (s *tcScene) settled(t *testing.T) {
 	t.Helper()
 	if s.ledger.held != 0 || len(s.ledger.violations) != 0 {
@@ -678,13 +719,14 @@ func TestTreeComposePairPreflightV1(t *testing.T) {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			s := tcNew(t, n)
 			r := s.run(func() { treeNativeSeed(t, s.store, 4, tcB0[:], []byte{0x7f}) })
-			r.want(t, CommitTruthOld, UpdateStagePrewrite, -1)
-			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
+			r.check(t, CommitTruthOld, UpdateStagePrewrite, -1)
 			for _, p := range s.prims {
 				if p.calls[1] != 0 {
-					t.Fatalf("%s called", p.name)
+					t.Errorf("%s called", p.name)
 				}
 			}
+			r.want(t, CommitTruthOld, UpdateStagePrewrite, -1)
+			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
 			if len(s.ledger.log) != 0 {
 				t.Fatalf("ledger touched: %v", s.ledger.log)
 			}
@@ -1278,6 +1320,13 @@ func TestTreeComposePairDeleteV1(t *testing.T) {
 func TestTreeComposePairDeleteAbsentV1(t *testing.T) {
 	s, _ := tcRollback(t, false)
 	r := s.run(nil)
+	r.check(t, CommitTruthOld, UpdateStagePrewrite, 0)
+	if engine, ok := directTestEngineError(r.err); !ok || engine.Class != EngineClass("Integrity") {
+		t.Errorf("R10 err %v, want the Integrity class", r.err)
+	}
+	if s.prims[0].calls[treeWriterV1] != 0 {
+		t.Errorf("R10 CURRENT writer calls %d, want 0", s.prims[0].calls[treeWriterV1])
+	}
 	r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
 	treeNativeIntegrity(t, r.err, operationUpdate, nil)
 	if s.prims[0].calls[treeWriterV1] != 0 || fmt.Sprint(s.ledger.log) != fmt.Sprintf("[charge %d release %d]", tcStep, tcStep) {
@@ -1318,6 +1367,10 @@ func TestTreeComposeWorkRefusalV1(t *testing.T) {
 	t.Run("fold", func(t *testing.T) {
 		s := tcRefuseL2(t, 0, 1)
 		r := s.run(nil)
+		r.check(t, CommitTruthOld, UpdateStagePrewrite, 0)
+		if got := tcFirstRefusal(s.ledger.log); got != "refuse 147968" {
+			t.Errorf("R13a first refusal %q, want refuse 147968", got)
+		}
 		r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
 		at := tcIndex(t, s.ledger.log, "refuse 147968")
 		if r.err != errOperationReservationCapacity || tcIndex(t, s.ledger.log, "return 1 C")+1 != at ||
@@ -1334,6 +1387,10 @@ func TestTreeComposeWorkRefusalV1(t *testing.T) {
 	t.Run("emit", func(t *testing.T) {
 		s := tcRefuseL2(t, 1, 2)
 		r := s.run(nil)
+		r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+		if s.prims[2].calls[treeWriterV1] != 0 {
+			t.Errorf("R13b LAG2 writer calls %d, want 0", s.prims[2].calls[treeWriterV1])
+		}
 		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 		from := tcIndex(t, s.ledger.log, "return 1 L1") + 1
 		to := tcIndex(t, s.ledger.log, "refuse 147968")
@@ -1770,6 +1827,11 @@ func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
 		if evidence.drift < 1 {
 			t.Fatalf("mode 13 did not fire: %+v", evidence)
 		}
+		r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
+		if engine, ok := directTestEngineError(r.err); !ok || engine.Diagnostic != "final update image mismatch" {
+			t.Errorf("N3 writer err %v, want final update image mismatch", r.err)
+		}
+		s.reopenNow(t, ttRow{ttUTXO, key, nil})
 		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 		ttMismatch(t, r.err, "final update image mismatch")
 		s.settled(t)
