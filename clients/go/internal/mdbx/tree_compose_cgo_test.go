@@ -612,6 +612,9 @@ func TestTreeComposeStepRefusalV1(t *testing.T) {
 			}
 			s.armRefuseStep("L1")
 			r := s.run(nil)
+			if s.prims[2].calls[1] != 0 {
+				t.Errorf("R1 LAG2 writer count %d, want 0", s.prims[2].calls[1])
+			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if !IsOperationReservationCapacity(r.err) || s.prims[1].calls[1] != 0 || s.prims[2].calls[1] != 0 {
 				t.Fatalf("R1 err %v calls %d %d", r.err, s.prims[1].calls[1], s.prims[2].calls[1])
@@ -720,6 +723,9 @@ func TestTreeComposeProviderErrorV1(t *testing.T) {
 				s.prims[1].act = func(_ treePositionV1, old *Reader, rec *treeRecorderV1) error { return act(old, rec) }
 			}
 			r := s.run(nil)
+			if !sameError(r.err, row.want) {
+				t.Errorf("R4 %s err %v, want %v", row.name, r.err, row.want)
+			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if row.name == "capacity" && (r.err != errOperationReservationCapacity || !IsOperationReservationCapacity(r.err)) {
 				t.Fatalf("R4 capacity err %v is not the singleton by identity", r.err)
@@ -800,6 +806,9 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 			}
 			if variant != "clean" && s.store.state != storeCLOSED {
 				t.Errorf("%s: state %v before resume", variant, s.store.state)
+			}
+			if variant == "clean" && (s.store.state != storeOPEN || s.store.terminal != nil) {
+				t.Errorf("H1 clean state %v terminal %v before resume, want OPEN and nil", s.store.state, s.store.terminal)
 			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if r.unwind.kind != 1 || escaped.usable() {
@@ -943,6 +952,11 @@ func TestTreeComposeHoldV1(t *testing.T) {
 				if evidence.commits < 1 {
 					t.Fatal("mode 12 did not commit")
 				}
+				for _, e := range s.ledger.log[tcIndex(t, s.ledger.log, "enter 2 C"):] {
+					if strings.HasPrefix(e, "charge ") {
+						t.Errorf("A2 %s after the commit (after the first readback entry)", e)
+					}
+				}
 				tcCrossedCause(t, r.err, CommitTruthNew, nil)
 			}
 			if !row.crossed {
@@ -950,13 +964,13 @@ func TestTreeComposeHoldV1(t *testing.T) {
 			}
 			last := tcLastCharge(s.ledger.log)
 			if row.name == "short" {
+				s.reopen(t, s.oldRows(t)...)
 				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 				if !IsOperationReservationCapacity(r.err) || last != fmt.Sprintf("refuse %d", tcHr(2)) {
 					t.Fatalf("R5 err %v last %q", r.err, last)
 				}
 				s.settled(t)
 				s.consumed(t, r.err)
-				s.reopen(t, s.oldRows(t)...)
 				return
 			}
 			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
@@ -993,6 +1007,9 @@ func TestTreeComposeReadbackErrorV1(t *testing.T) {
 		return nil
 	}
 	r := s.crossed(t)
+	if s.prims[2].calls[treeReadbackV1] != 0 {
+		t.Errorf("R6 LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
+	}
 	r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 	tcCrossedCause(t, r.err, CommitTruthUnknown, tcSentinel)
 	if s.prims[2].calls[treeReadbackV1] != 0 || s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
@@ -1036,6 +1053,9 @@ func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
 		panic(v)
 	}
 	check := func(r tcResult) {
+		if s.store.state != storeCLOSED {
+			t.Errorf("H3 state %v, want CLOSED", s.store.state)
+		}
 		if r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || r.unwind.kind != map[bool]uint8{false: 1, true: 2}[goexit] {
 			t.Errorf("readback unwind result %+v", r)
 		}
