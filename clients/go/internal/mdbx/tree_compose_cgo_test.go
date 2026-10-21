@@ -438,7 +438,6 @@ func TestTreeComposeOrderV1(t *testing.T) {
 	if r.unwind.kind != 0 {
 		t.Errorf("A1 unwind %+v, want none", r.unwind)
 	}
-	s.reopenOpen(t, s.newRows(t)...)
 	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	log := s.ledger.log
 	for j, p := range s.prims {
@@ -769,6 +768,7 @@ func TestTreeComposePairPreflightV1(t *testing.T) {
 			if len(s.ledger.log) != 0 {
 				t.Errorf("ledger touched: %v", s.ledger.log)
 			}
+			s.settled(t)
 			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
 			r.want(t, CommitTruthOld, UpdateStagePrewrite, -1)
 			s.consumed(t, CommitTruthOld, r.err)
@@ -1418,7 +1418,6 @@ func TestTreeComposePairBodyV1(t *testing.T) {
 		t.Errorf("A5 writer calls %d, want 1", s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
-	s.reopenOpen(t, s.newRows(t)[:4]...)
 	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.reopen(t, append(s.newRows(t)[:4], s.following(t))...)
 }
@@ -1469,7 +1468,6 @@ func TestTreeComposePairDeleteV1(t *testing.T) {
 		t.Errorf("A6 writer calls %d, want 1", s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
-	s.reopenOpen(t, after...)
 	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.reopen(t, append(after, s.following(t))...)
 }

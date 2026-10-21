@@ -162,7 +162,8 @@ func (e *treeScopeV1) emitterV1() treeEmitterV1 {
 // stepV1 runs primitive j (I-SEQ steps 1-8). A nil error with e.unwind.kind != 0 is a recovered provider panic.
 func (e *treeScopeV1) stepV1(j int) error {
 	e.j = j
-	if err := e.ledger.chargeV1(treeStepBytesV1); err != nil {
+	err := e.ledger.chargeV1(treeStepBytesV1)
+	if err != nil {
 		return err
 	}
 	e.held = true
@@ -176,7 +177,8 @@ func (e *treeScopeV1) stepV1(j int) error {
 	if err != nil || e.unwind.kind != 0 {
 		return err
 	}
-	if err := e.deltaV1(prim); err != nil {
+	err = e.deltaV1(prim)
+	if err != nil {
 		return err
 	}
 	e.rec.releaseV1()
@@ -193,15 +195,18 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitivePlanV1) error {
 		return err
 	}
 	e.events = max(e.events, e.rec.eventCount)
-	if err := d.resolveV1(e.checkedV1()); err != nil {
+	err = d.resolveV1(e.checkedV1())
+	if err != nil {
 		return err
 	}
 	if e.rb == nil {
-		if err := treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger); err != nil {
+		err = treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger)
+		if err != nil {
 			return err
 		}
 	}
-	if err := d.applyV1(e.emitterV1()); err != nil {
+	err = d.applyV1(e.emitterV1())
+	if err != nil {
 		return err
 	}
 	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger)
@@ -258,13 +263,15 @@ func (c *treeComposeV1) opV1(out *transactionOutcome) treeUnwindV1 {
 	return c.unwind
 }
 
-// cleanupV1 is op's deferred cleanup (D4 T3): on a writer-position Goexit it aborts the write txn with R_j, then it
-// releases every engine charge still held exactly once and writes *out field by field from the captured outcome.
+// cleanupV1 is op's deferred cleanup (D4 T3), run after the slot function expired and released the recorder: it
+// releases every engine charge still held exactly once, then on a writer-position panic or Goexit aborts the write
+// txn with R_j, and writes *out field by field from the captured outcome.
 func (c *treeComposeV1) cleanupV1(out *transactionOutcome) {
-	if !c.done && !c.committed && c.writer.t != nil {
+	unwound := !c.done && !c.committed && c.writer.t != nil
+	c.releaseV1()
+	if unwound {
 		c.outcome, c.index = c.writer.t.abortV1(c.writer.recorded), c.writer.j
 	}
-	c.releaseV1()
 	out.err = c.outcome.primary
 	out.poisoned = c.outcome.retainedWrite != nil || c.outcome.retainedRead != nil
 }
@@ -291,16 +298,22 @@ func (c *treeComposeV1) runV1() {
 		return
 	}
 	w.t = t
-	if err := t.pairPreflightV1(w.plan.pair, w.plan.consulted); err != nil {
+	err := t.pairPreflightV1(w.plan.pair, w.plan.consulted)
+	if err != nil {
 		c.abortV1(err, -1)
 		return
 	}
-	if stopped, err := w.loopV1(); stopped {
-		c.unwind = w.unwind
+	stopped, err := w.loopV1()
+	if stopped && w.unwind.kind != 0 {
+		c.unwind, w.recorded = w.unwind, err // P: R_j is the step-2 primary; cleanupV1 aborts after the release (T3)
+		return
+	}
+	if stopped {
 		c.abortV1(err, w.j)
 		return
 	}
-	if err := c.holdV1(); err != nil {
+	err = c.holdV1()
+	if err != nil {
 		c.abortV1(err, -1)
 		return
 	}
@@ -315,17 +328,20 @@ func (c *treeComposeV1) abortV1(err error, index int) {
 // H_r = S_r + B_r with B_r = W + F_fixed + C + R + V + L2 + descSize x max_j EventCount_j (D13-14).
 func (c *treeComposeV1) holdV1() error {
 	w := c.writer
-	if err := w.t.pairEmitV1(w.plan.pair); err != nil {
+	err := w.t.pairEmitV1(w.plan.pair)
+	if err != nil {
 		return err
 	}
-	if err := w.t.finalV1(w.plan.pair, w.plan.consulted); err != nil {
+	err = w.t.finalV1(w.plan.pair, w.plan.consulted)
+	if err != nil {
 		return err
 	}
 	if len(w.plan.primitives) == 0 {
 		return nil
 	}
 	hr := treeScratchBytesV1 + treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(w.events)
-	if err := w.ledger.chargeV1(hr); err != nil {
+	err = w.ledger.chargeV1(hr)
+	if err != nil {
 		return err
 	}
 	c.heldR = hr
