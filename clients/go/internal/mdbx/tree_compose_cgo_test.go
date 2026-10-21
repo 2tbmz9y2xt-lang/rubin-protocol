@@ -297,15 +297,21 @@ func (s *tcScene) reopenNow(t *testing.T, rows ...ttRow) {
 
 func (s *tcScene) settled(t *testing.T) {
 	t.Helper()
-	if s.ledger.held != 0 || len(s.ledger.violations) != 0 {
-		t.Fatalf("ledger held %d violations %v log %v", s.ledger.held, s.ledger.violations, s.ledger.log)
+	if s.ledger.held != 0 {
+		t.Errorf("ledger held %d, want 0 (log %v)", s.ledger.held, s.ledger.log)
+	}
+	if len(s.ledger.violations) != 0 {
+		t.Errorf("ledger violations %v", s.ledger.violations)
 	}
 }
 
 // settledNow is settled for a goroutine that may not call t.Fatal (H4 before resumeV1).
 func (s *tcScene) settledNow(t *testing.T) {
-	if s.ledger.held != 0 || len(s.ledger.violations) != 0 {
-		t.Errorf("ledger before resume held %d violations %v", s.ledger.held, s.ledger.violations)
+	if s.ledger.held != 0 {
+		t.Errorf("ledger before resume held %d, want 0", s.ledger.held)
+	}
+	if len(s.ledger.violations) != 0 {
+		t.Errorf("ledger before resume violations %v", s.ledger.violations)
 	}
 }
 
@@ -313,13 +319,25 @@ func (s *tcScene) settledNow(t *testing.T) {
 // callback (D868: store.terminalTruth clamped by refusedUpdate; want is the truth the row states).
 func (s *tcScene) consumed(t *testing.T, want CommitTruth, err error) {
 	t.Helper()
-	if s.store.state != storeCLOSED || s.store.terminal == nil {
-		t.Fatalf("store state %v terminal %v, want CLOSED", s.store.state, s.store.terminal)
+	if s.store.state != storeCLOSED {
+		t.Errorf("store state %v, want CLOSED", s.store.state)
+	}
+	if s.store.terminal == nil {
+		t.Errorf("store terminal nil, want the cached terminal")
 	}
 	calls := 0
 	truth, stage, next := s.store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
-	if calls != 0 || stage != UpdateStagePrewrite || next == nil || err != nil && !sameError(next, err) || truth != want {
-		t.Fatalf("next Update %d %d %v (calls %d), want truth %d and cached terminal %v", truth, stage, next, calls, want, err)
+	if calls != 0 {
+		t.Errorf("next Update callback count %d, want 0", calls)
+	}
+	if stage != UpdateStagePrewrite {
+		t.Errorf("next Update stage %d, want Prewrite", stage)
+	}
+	if next == nil || err != nil && !sameError(next, err) {
+		t.Errorf("next Update err %v, want cached terminal %v", next, err)
+	}
+	if truth != want {
+		t.Errorf("next Update truth %d, want %d", truth, want)
 	}
 }
 
@@ -352,22 +370,24 @@ func (s *tcScene) reopen(t *testing.T, rows ...ttRow) {
 	for _, row := range rows {
 		equal, err := FixtureRawRowEqual(opened, row.dbi.Rank, row.key, row.want)
 		if err != nil || !equal {
-			t.Fatalf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
+			t.Errorf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
 		}
 	}
 }
 
-// reopenOpen closes the OPEN Store, reopens it, checks rows and keeps the reopened Store for the next seam call.
+// reopenOpen closes the Store if OPEN, reopens it, checks rows and keeps the reopened Store for the next seam call.
 func (s *tcScene) reopenOpen(t *testing.T, rows ...ttRow) {
 	t.Helper()
-	mustEnvironment(t, s.store.Close())
+	if s.store.state == storeOPEN {
+		mustEnvironment(t, s.store.Close())
+	}
 	opened, err := OpenTreeV1(s.path, environmentConfig(), [32]byte{7})
 	mustEnvironment(t, err)
 	t.Cleanup(func() { _ = opened.Close() })
 	for _, row := range rows {
 		equal, err := FixtureRawRowEqual(opened, row.dbi.Rank, row.key, row.want)
 		if err != nil || !equal {
-			t.Fatalf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
+			t.Errorf("reopened %s %x: want %x (%v)", row.dbi.Name, row.key, row.want, err)
 		}
 	}
 	s.store = opened
@@ -411,10 +431,15 @@ func tcHr(maxEvents uint64) uint64 { return tcSr + tcBrFix + tdSize*maxEvents }
 func TestTreeComposeOrderV1(t *testing.T) {
 	s := tcNew(t, 3)
 	r := s.run(nil)
-	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-	if r.err != nil || r.unwind.kind != 0 {
-		t.Fatalf("A1 err %v unwind %+v", r.err, r.unwind)
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil {
+		t.Errorf("A1 err %v, want nil", r.err)
 	}
+	if r.unwind.kind != 0 {
+		t.Errorf("A1 unwind %+v, want none", r.unwind)
+	}
+	s.reopenOpen(t, s.newRows(t)...)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	log := s.ledger.log
 	for j, p := range s.prims {
 		if p.calls[treeWriterV1] != 1 {
@@ -632,19 +657,24 @@ func TestTreeComposeZeroPrimitivesV1(t *testing.T) {
 			var r tcResult
 			if crossed {
 				evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
+				if len(s.ledger.log) != 0 {
+					t.Errorf("zero primitives touched the ledger: %v", s.ledger.log)
+				}
 				mustEnvironment(t, err)
 				if evidence.commits < 1 {
-					t.Fatal("mode 12 did not commit")
+					t.Errorf("mode 12 did not commit")
 				}
-				r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+				r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				tcCrossedCause(t, r.err, CommitTruthNew, nil)
+				r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 			} else {
 				r = s.run(nil)
+				if len(s.ledger.log) != 0 {
+					t.Errorf("zero primitives touched the ledger: %v", s.ledger.log)
+				}
+				r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 				mustEnvironment(t, r.err)
-			}
-			if len(s.ledger.log) != 0 {
-				t.Fatalf("zero primitives touched the ledger: %v", s.ledger.log)
 			}
 			rows := []ttRow{{ttBlocks, tcB0[:], tcF0}}
 			if crossed {
@@ -662,8 +692,15 @@ func tcOut() []byte { return []byte{0x09} }
 func tcCrossedCause(t *testing.T, err error, truth CommitTruth, readback error) {
 	t.Helper()
 	var commit *CommitError
-	if !errors.As(err, &commit) || commit.Truth != truth || !sameError(commit.ReadbackCause, readback) {
-		t.Fatalf("commit error %v, want truth %d readback %v", err, truth, readback)
+	if !errors.As(err, &commit) {
+		t.Errorf("commit error %v is not a CommitError", err)
+		return
+	}
+	if commit.Truth != truth {
+		t.Errorf("commit error truth %d, want %d", commit.Truth, truth)
+	}
+	if !sameError(commit.ReadbackCause, readback) {
+		t.Errorf("commit error ReadbackCause %v, want %v", commit.ReadbackCause, readback)
 	}
 	treeNativeError(t, commit.Cause, operationUpdate, EngineCapacity, codeENOSPC, "error 28", nil)
 }
@@ -681,10 +718,14 @@ func TestTreeComposeStepRefusalV1(t *testing.T) {
 			if s.prims[2].calls[1] != 0 {
 				t.Errorf("R1 LAG2 writer count %d, want 0", s.prims[2].calls[1])
 			}
-			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-			if !IsOperationReservationCapacity(r.err) || s.prims[1].calls[1] != 0 || s.prims[2].calls[1] != 0 {
-				t.Fatalf("R1 err %v calls %d %d", r.err, s.prims[1].calls[1], s.prims[2].calls[1])
+			r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			if !IsOperationReservationCapacity(r.err) {
+				t.Errorf("R1/R12 err %v, want errOperationReservationCapacity", r.err)
 			}
+			if s.prims[1].calls[1] != 0 {
+				t.Errorf("R1 LAG1 writer count %d, want 0", s.prims[1].calls[1])
+			}
+			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			s.settled(t)
 			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, s.oldRows(t)...)
@@ -725,11 +766,11 @@ func TestTreeComposePairPreflightV1(t *testing.T) {
 					t.Errorf("%s called", p.name)
 				}
 			}
-			r.want(t, CommitTruthOld, UpdateStagePrewrite, -1)
-			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
 			if len(s.ledger.log) != 0 {
-				t.Fatalf("ledger touched: %v", s.ledger.log)
+				t.Errorf("ledger touched: %v", s.ledger.log)
 			}
+			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
+			r.want(t, CommitTruthOld, UpdateStagePrewrite, -1)
 			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, ttRow{ttBlocks, tcB0[:], []byte{0x7f}}, ttRow{ttUTXO, tdUTXOKey(1, tcT0, 0), nil})
 		})
@@ -741,11 +782,15 @@ func TestTreeComposeAbsentBodyV1(t *testing.T) {
 	s := tcNew(t, 3)
 	mustEnvironment(t, fixtureDeletePrefixRow(s.store, ttBlocks, tcB1[:]))
 	r := s.run(nil)
+	if s.prims[1].calls[1] != 0 {
+		t.Errorf("R9 LAG1 writer count %d, want 0", s.prims[1].calls[1])
+	}
+	if s.prims[2].calls[1] != 0 {
+		t.Errorf("R9 LAG2 writer count %d, want 0", s.prims[2].calls[1])
+	}
+	r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 	r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 	treeNativeIntegrity(t, r.err, operationUpdate, nil)
-	if s.prims[1].calls[1] != 0 || s.prims[2].calls[1] != 0 {
-		t.Fatal("LAG source called")
-	}
 	s.settled(t)
 	s.consumed(t, CommitTruthOld, r.err)
 	s.reopen(t, s.oldRows(t)...)
@@ -793,13 +838,17 @@ func TestTreeComposeProviderErrorV1(t *testing.T) {
 			if !sameError(r.err, row.want) {
 				t.Errorf("R4 %s err %v, want %v", row.name, r.err, row.want)
 			}
+			r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			if row.name == "capacity" && r.err != errOperationReservationCapacity {
+				t.Errorf("R4 capacity err %v is not the singleton by identity", r.err)
+			}
+			if row.name == "capacity" && !IsOperationReservationCapacity(r.err) {
+				t.Errorf("R4 capacity IsOperationReservationCapacity(%v) false", r.err)
+			}
+			if s.prims[2].calls[1] != 0 {
+				t.Errorf("R4 LAG2 writer count %d, want 0", s.prims[2].calls[1])
+			}
 			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-			if row.name == "capacity" && (r.err != errOperationReservationCapacity || !IsOperationReservationCapacity(r.err)) {
-				t.Fatalf("R4 capacity err %v is not the singleton by identity", r.err)
-			}
-			if !sameError(r.err, row.want) || s.prims[2].calls[1] != 0 {
-				t.Fatalf("err %v, want %v", r.err, row.want)
-			}
 			s.settled(t)
 			s.consumed(t, CommitTruthOld, row.want)
 			s.reopen(t, s.oldRows(t)...)
@@ -827,13 +876,13 @@ func TestTreeComposePrimaryCompositionV1(t *testing.T) {
 				return nil
 			}
 			r := s.run(nil)
-			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if s.prims[2].calls[treeWriterV1] != 0 {
 				t.Errorf("R8 LAG2 writer count %d, want 0", s.prims[2].calls[treeWriterV1])
 			}
 			if variant == "single" {
 				if r.err != f {
-					t.Fatalf("R8 single primary %v, want F by identity", r.err)
+					t.Errorf("R8 single primary %v, want F by identity", r.err)
 				}
 			} else {
 				if sink == nil {
@@ -846,6 +895,7 @@ func TestTreeComposePrimaryCompositionV1(t *testing.T) {
 					t.Errorf("primary %v lacks s", r.err)
 				}
 			}
+			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			s.settled(t)
 			s.consumed(t, CommitTruthOld, r.err)
 			s.reopen(t, s.oldRows(t)...)
@@ -895,25 +945,42 @@ func TestTreeComposeWriterPanicV1(t *testing.T) {
 			if variant != "clean" && s.store.state != storeCLOSED {
 				t.Errorf("%s: state %v before resume", variant, s.store.state)
 			}
-			if variant == "clean" && (s.store.state != storeOPEN || s.store.terminal != nil) {
-				t.Errorf("H1 clean state %v terminal %v before resume, want OPEN and nil", s.store.state, s.store.terminal)
+			if variant == "clean" && s.store.state != storeOPEN {
+				t.Errorf("H1 clean state %v before resume, want OPEN", s.store.state)
+			}
+			if variant == "clean" && s.store.terminal != nil {
+				t.Errorf("H1 clean terminal %v before resume, want nil", s.store.terminal)
 			}
 			if early != nil {
 				t.FailNow()
 			}
-			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-			if r.unwind.kind != 1 || escaped.usable() {
-				t.Fatalf("unwind %+v usable %v", r.unwind, escaped.usable())
+			r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			if r.unwind.kind != 1 {
+				t.Errorf("unwind kind %d, want 1", r.unwind.kind)
 			}
-			s.settled(t)
+			if escaped.usable() {
+				t.Errorf("escaped provider Reader still usable")
+			}
 			recorded := variant != "clean"
+			if recorded && !sameError(r.err, want) {
+				t.Errorf("%s panic err %v, want %v", variant, r.err, want)
+			}
+			if recorded && s.store.terminal != want {
+				t.Errorf("%s panic terminal %v, want %v", variant, s.store.terminal, want)
+			}
+			if !recorded && r.err != nil {
+				t.Errorf("clean panic err %v, want nil", r.err)
+			}
+			if !recorded && s.store.state != storeOPEN {
+				t.Errorf("clean panic state %v, want OPEN", s.store.state)
+			}
+			if !recorded && s.store.terminal != nil {
+				t.Errorf("clean panic terminal %v, want nil", s.store.terminal)
+			}
+			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			s.settled(t)
 			if recorded {
-				if !sameError(r.err, want) || s.store.terminal != want {
-					t.Fatalf("%s panic err %v terminal %v, want %v", variant, r.err, s.store.terminal, want)
-				}
 				s.consumed(t, CommitTruthOld, want)
-			} else if r.err != nil || s.store.state != storeOPEN || s.store.terminal != nil {
-				t.Fatalf("clean panic err %v state %v", r.err, s.store.state)
 			}
 			func() {
 				defer func() {
@@ -956,13 +1023,22 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 				return nil
 			}
 			inspect := func(r tcResult) {
-				if r.unwind.kind != 2 || r.truth != CommitTruthOld || r.stage != UpdateStageWriteStartedDefinitelyPrecommit || r.index != 1 {
-					t.Errorf("goexit result %+v", r)
+				if r.unwind.kind != 2 {
+					t.Errorf("goexit unwind kind %d, want 2", r.unwind.kind)
 				}
+				r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 				tcExpired(t, kept, want, variant == "sink")
 				s.settledNow(t)
-				if variant == "mode9" && (r.err == nil || r.err != s.store.terminal) || variant != "mode9" && !sameError(r.err, want) {
-					t.Errorf("goexit err %v, want %v (terminal %v)", r.err, want, s.store.terminal)
+				if variant == "mode9" && (r.err == nil || r.err != s.store.terminal) {
+					t.Errorf("goexit mode 9 err %v, want the terminal %v", r.err, s.store.terminal)
+				}
+				if variant != "mode9" && !sameError(r.err, want) {
+					t.Errorf("goexit err %v, want %v", r.err, want)
+				}
+				if variant == "recorded" || variant == "sink" {
+					if s.store.state != storeCLOSED {
+						t.Errorf("goexit %s state %v before resume, want CLOSED", variant, s.store.state)
+					}
 				}
 			}
 			if variant != "mode9" {
@@ -970,8 +1046,11 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 			} else {
 				evidence, err := fixtureLargeFault(s.store, 9, 0, []byte{0}, func() { s.goexitRun(t, inspect) })
 				mustEnvironment(t, err)
-				if evidence.aborts != 1 || evidence.commits != 0 {
-					t.Fatalf("mode 9 evidence %+v", evidence)
+				if evidence.aborts != 1 {
+					t.Errorf("mode 9 aborts %d, want 1", evidence.aborts)
+				}
+				if evidence.commits != 0 {
+					t.Errorf("mode 9 commits %d, want 0", evidence.commits)
 				}
 			}
 			s.settled(t)
@@ -988,7 +1067,7 @@ func TestTreeComposeWriterGoexitV1(t *testing.T) {
 				tcMode9(t, s)
 			default:
 				if s.store.terminal != want {
-					t.Fatalf("terminal %v, want %v", s.store.terminal, want)
+					t.Errorf("terminal %v, want %v", s.store.terminal, want)
 				}
 				s.consumed(t, CommitTruthOld, want)
 			}
@@ -1009,8 +1088,11 @@ func tcExpired(t *testing.T, rec *treeRecorderV1, sink error, sinkOnly bool) {
 	if sinkOnly {
 		want = sink
 	}
-	if rec.windowV1() != nil || rec.failureV1() != want {
-		t.Errorf("retained recorder window %v failure %v, want failure %v", rec.windowV1() != nil, rec.failureV1(), want)
+	if rec.windowV1() != nil {
+		t.Errorf("retained recorder window not nil")
+	}
+	if rec.failureV1() != want {
+		t.Errorf("retained recorder failure %v, want %v", rec.failureV1(), want)
 	}
 }
 
@@ -1018,13 +1100,28 @@ func tcExpired(t *testing.T, rec *treeRecorderV1, sink error, sinkOnly bool) {
 func tcMode9(t *testing.T, s *tcScene) {
 	t.Helper()
 	engine := requireEnvironmentError(t, s.store.terminal, EngineIO, operationAbort, 5, "error 5")
-	if engine.Cause != nil || engine.ReopenRequired || s.store.state != storeCLOSED {
-		t.Fatalf("mode 9 terminal %+v state %v", engine, s.store.state)
+	if engine.Cause != nil {
+		t.Errorf("mode 9 terminal cause %v, want nil", engine.Cause)
+	}
+	if engine.ReopenRequired {
+		t.Errorf("mode 9 terminal ReopenRequired true")
+	}
+	if s.store.state != storeCLOSED {
+		t.Errorf("mode 9 state %v, want CLOSED", s.store.state)
 	}
 	calls := 0
 	truth, stage, next := s.store.Update(func(*Reader) (Batch, error) { calls++; return Batch{}, nil })
-	if truth != CommitTruthOld || stage != UpdateStagePrewrite || next != s.store.terminal || calls != 0 {
-		t.Fatalf("next Update %d %d %v calls %d", truth, stage, next, calls)
+	if truth != CommitTruthOld {
+		t.Errorf("next Update truth %d, want OLD", truth)
+	}
+	if stage != UpdateStagePrewrite {
+		t.Errorf("next Update stage %d, want Prewrite", stage)
+	}
+	if next != s.store.terminal {
+		t.Errorf("next Update err %v, want the terminal", next)
+	}
+	if calls != 0 {
+		t.Errorf("next Update callback count %d, want 0", calls)
 	}
 }
 
@@ -1044,7 +1141,7 @@ func TestTreeComposeHoldV1(t *testing.T) {
 				evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
 				mustEnvironment(t, err)
 				if evidence.commits < 1 {
-					t.Fatal("mode 12 did not commit")
+					t.Errorf("mode 12 did not commit")
 				}
 				for _, e := range s.ledger.log[tcIndex(t, s.ledger.log, "enter 2 C"):] {
 					if strings.HasPrefix(e, "charge ") {
@@ -1058,23 +1155,28 @@ func TestTreeComposeHoldV1(t *testing.T) {
 			}
 			last := tcLastCharge(s.ledger.log)
 			if row.name == "short" {
-				s.reopen(t, s.oldRows(t)...)
-				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
-				if !IsOperationReservationCapacity(r.err) || last != fmt.Sprintf("refuse %d", tcHr(2)) {
-					t.Fatalf("R5 err %v last %q", r.err, last)
+				s.reopenNow(t, s.oldRows(t)...)
+				r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
+				if !IsOperationReservationCapacity(r.err) {
+					t.Errorf("R5 err %v, want errOperationReservationCapacity", r.err)
 				}
+				if last != fmt.Sprintf("refuse %d", tcHr(2)) {
+					t.Errorf("R5 last %q, want refuse H_r", last)
+				}
+				r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 				s.settled(t)
 				s.consumed(t, CommitTruthOld, r.err)
 				return
 			}
-			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+			r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 			if last != fmt.Sprintf("charge %d", tcHr(2)) {
-				t.Fatalf("last charge %q", last)
+				t.Errorf("last charge %q", last)
 			}
-			tcNoChargeAfterHr(t, s.ledger.log)
 			if row.crossed && s.prims[0].calls[treeReadbackV1] != 1 {
-				t.Fatal("readback did not run")
+				t.Errorf("readback did not run")
 			}
+			r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+			tcNoChargeAfterHr(t, s.ledger.log)
 			s.settled(t)
 			rows := s.newRows(t)
 			if row.crossed {
@@ -1094,7 +1196,7 @@ func (s *tcScene) crossed(t *testing.T) tcResult {
 	evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
 	mustEnvironment(t, err)
 	if evidence.commits < 1 {
-		t.Fatal("mode 12 did not commit")
+		t.Errorf("mode 12 did not commit")
 	}
 	return r
 }
@@ -1128,10 +1230,14 @@ func TestTreeComposeReadbackErrorV1(t *testing.T) {
 			if s.prims[2].calls[treeReadbackV1] != 0 {
 				t.Errorf("R6 LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
 			}
+			r.check(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 			tcCrossedCause(t, r.err, CommitTruthUnknown, want)
 			r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
-			if s.prims[2].calls[treeReadbackV1] != 0 || s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
-				t.Fatalf("R6 LAG2 readback %d state %v", s.prims[2].calls[treeReadbackV1], s.store.state)
+			if s.store.state != storeCLOSED {
+				t.Errorf("R6 state %v, want CLOSED", s.store.state)
+			}
+			if s.store.terminalTruth != CommitTruthUnknown {
+				t.Errorf("R6 terminal truth %d, want UNKNOWN", s.store.terminalTruth)
 			}
 			tcNoChargeAfterHr(t, s.ledger.log)
 			s.settled(t)
@@ -1190,16 +1296,16 @@ func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
 		if s.store.state != storeCLOSED {
 			t.Errorf("H3 state %v, want CLOSED", s.store.state)
 		}
-		if r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || r.unwind.kind != map[bool]uint8{false: 1, true: 2}[goexit] {
-			t.Errorf("readback unwind result %+v", r)
+		r.check(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+		if r.unwind.kind != map[bool]uint8{false: 1, true: 2}[goexit] {
+			t.Errorf("readback unwind kind %d", r.unwind.kind)
 		}
-		var commit *CommitError
-		var cause *EngineError
-		if !errors.As(r.err, &commit) || !sameError(commit.ReadbackCause, want) || commit.Truth != CommitTruthUnknown || !errors.As(commit.Cause, &cause) || cause.Class != EngineCapacity || cause.Code != codeENOSPC || cause.Diagnostic != "error 28" || cause.Cause != nil {
-			t.Errorf("readback unwind err %v, want ReadbackCause %v", r.err, want)
+		tcUnwindCause(t, r.err, want)
+		if s.store.terminalTruth != CommitTruthUnknown {
+			t.Errorf("terminal truth %d, want UNKNOWN", s.store.terminalTruth)
 		}
-		if s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown || s.prims[2].calls[treeReadbackV1] != 0 {
-			t.Errorf("state %v truth %d LAG2 readback %d", s.store.state, s.store.terminalTruth, s.prims[2].calls[treeReadbackV1])
+		if s.prims[2].calls[treeReadbackV1] != 0 {
+			t.Errorf("LAG2 readback count %d, want 0", s.prims[2].calls[treeReadbackV1])
 		}
 		s.settledNow(t)
 	}
@@ -1233,20 +1339,59 @@ func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
 
 // A4, M29: the readback returns W + F_fixed + C + R and D_j + V of CURRENT before LAG1's draw, so it completes
 // inside P + S_r + B_r; EventCount 1 for CURRENT and 2 for LAG1 (two coinbase outputs over a two-frame body).
+// tcUnwindCause checks the H3 CommitError field by field; it never calls t.Fatal (worker goroutine).
+func tcUnwindCause(t *testing.T, err error, want error) {
+	var commit *CommitError
+	if !errors.As(err, &commit) {
+		t.Errorf("readback unwind err %v is not a CommitError", err)
+		return
+	}
+	if !sameError(commit.ReadbackCause, want) {
+		t.Errorf("readback unwind ReadbackCause %v, want %v", commit.ReadbackCause, want)
+	}
+	if commit.Truth != CommitTruthUnknown {
+		t.Errorf("readback unwind CommitError truth %d, want UNKNOWN", commit.Truth)
+	}
+	var cause *EngineError
+	if !errors.As(commit.Cause, &cause) {
+		t.Errorf("readback unwind Cause %v is not an EngineError", commit.Cause)
+		return
+	}
+	if cause.Class != EngineCapacity {
+		t.Errorf("readback unwind Cause class %v, want Capacity", cause.Class)
+	}
+	if cause.Code != codeENOSPC {
+		t.Errorf("readback unwind Cause code %d, want ENOSPC", cause.Code)
+	}
+	if cause.Diagnostic != "error 28" {
+		t.Errorf("readback unwind Cause diagnostic %q", cause.Diagnostic)
+	}
+	if cause.Cause != nil {
+		t.Errorf("readback unwind Cause cause %v, want nil", cause.Cause)
+	}
+}
+
 func TestTreeComposeReadbackReturnV1(t *testing.T) {
 	s := tcNew(t, 2)
 	body := append(append([]byte(nil), tcFU...), tcFC...)
 	treeNativeSeed(t, s.store, 4, tcB1[:], body)
 	s.prims[1].events = []tdEv{tdCreate(tcTU, 0, 0, 0, uint32(len(tcFU))), tdCreate(tcTU, 1, 0, uint64(len(tcFU)), uint32(len(tcFC)))}
 	r := s.crossed(t)
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	tcCrossedCause(t, r.err, CommitTruthNew, nil)
 	log := s.ledger.log
-	if s.prims[0].calls[treeReadbackV1] != 1 || s.prims[1].calls[treeReadbackV1] != 1 || tcIndex(t, log, "enter 2 C") > tcIndex(t, log, "enter 2 L1") {
-		t.Fatalf("readback calls %d %d log %v", s.prims[0].calls[treeReadbackV1], s.prims[1].calls[treeReadbackV1], log)
+	if s.prims[0].calls[treeReadbackV1] != 1 {
+		t.Errorf("CURRENT readback calls %d, want 1", s.prims[0].calls[treeReadbackV1])
+	}
+	if s.prims[1].calls[treeReadbackV1] != 1 {
+		t.Errorf("LAG1 readback calls %d, want 1", s.prims[1].calls[treeReadbackV1])
+	}
+	if tcIndex(t, log, "enter 2 C") > tcIndex(t, log, "enter 2 L1") {
+		t.Errorf("readback order %v", log)
 	}
 	if last := tcLastCharge(log); last != fmt.Sprintf("charge %d", tcHr(2)) {
-		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
+		t.Errorf("last charge %q, want H_r %d", last, tcHr(2))
 	}
 	s.settled(t)
 	s.consumed(t, CommitTruthNew, r.err)
@@ -1262,11 +1407,19 @@ func tcA4Rows(t *testing.T, s *tcScene) []ttRow {
 func TestTreeComposePairBodyV1(t *testing.T) {
 	s := tcNew(t, 1)
 	r := s.run(nil)
-	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-	if r.err != nil || r.unwind.kind != 0 || s.prims[0].calls[treeWriterV1] != 1 {
-		t.Fatalf("A5 err %v unwind %+v calls %d", r.err, r.unwind, s.prims[0].calls[treeWriterV1])
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil {
+		t.Errorf("A5 err %v, want nil", r.err)
+	}
+	if r.unwind.kind != 0 {
+		t.Errorf("A5 unwind %+v, want none", r.unwind)
+	}
+	if s.prims[0].calls[treeWriterV1] != 1 {
+		t.Errorf("A5 writer calls %d, want 1", s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
+	s.reopenOpen(t, s.newRows(t)[:4]...)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.reopen(t, append(s.newRows(t)[:4], s.following(t))...)
 }
 
@@ -1308,11 +1461,16 @@ func tcRollback(t *testing.T, seeded bool) (*tcScene, []ttRow) {
 func TestTreeComposePairDeleteV1(t *testing.T) {
 	s, after := tcRollback(t, true)
 	r := s.run(nil)
-	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-	if r.err != nil || s.prims[0].calls[treeWriterV1] != 1 {
-		t.Fatalf("A6 err %v calls %d", r.err, s.prims[0].calls[treeWriterV1])
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	if r.err != nil {
+		t.Errorf("A6 err %v, want nil", r.err)
+	}
+	if s.prims[0].calls[treeWriterV1] != 1 {
+		t.Errorf("A6 writer calls %d, want 1", s.prims[0].calls[treeWriterV1])
 	}
 	s.settled(t)
+	s.reopenOpen(t, after...)
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.reopen(t, append(after, s.following(t))...)
 }
 
@@ -1329,8 +1487,8 @@ func TestTreeComposePairDeleteAbsentV1(t *testing.T) {
 	}
 	r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
 	treeNativeIntegrity(t, r.err, operationUpdate, nil)
-	if s.prims[0].calls[treeWriterV1] != 0 || fmt.Sprint(s.ledger.log) != fmt.Sprintf("[charge %d release %d]", tcStep, tcStep) {
-		t.Fatalf("R10 calls %d log %v", s.prims[0].calls[treeWriterV1], s.ledger.log)
+	if fmt.Sprint(s.ledger.log) != fmt.Sprintf("[charge %d release %d]", tcStep, tcStep) {
+		t.Errorf("R10 log %v", s.ledger.log)
 	}
 	s.settled(t)
 	s.consumed(t, CommitTruthOld, r.err)
@@ -1348,10 +1506,14 @@ func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 		return nil
 	}
 	r := s.run(nil)
-	r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
-	if r.err != errOperationReservationCapacity || s.prims[2].calls[treeWriterV1] != 0 {
-		t.Fatalf("R2 err %v LAG2 calls %d", r.err, s.prims[2].calls[treeWriterV1])
+	r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+	if r.err != errOperationReservationCapacity {
+		t.Errorf("R2 err %v, want errOperationReservationCapacity", r.err)
 	}
+	if s.prims[2].calls[treeWriterV1] != 0 {
+		t.Errorf("R2 LAG2 writer calls %d, want 0", s.prims[2].calls[treeWriterV1])
+	}
+	r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 	from := tcIndex(t, s.ledger.log, "return 1 L1") + 1
 	to := tcIndex(t, s.ledger.log, "refuse 32")
 	if got := strings.Join(s.ledger.log[from:to+1], ","); got != "charge 147968,release 147968,refuse 32" {
@@ -1362,42 +1524,67 @@ func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 	s.reopen(t, s.oldRows(t)...)
 }
 
-// R13, M46, M47 (D40): L2's work charge refused at CURRENT's step-5 fold (a) and at LAG1's step-7 emission (b).
+// R13, M46, M47 (D40): (a) the first charge of any amount after CURRENT's writer provider returned is refused, which
+// is CURRENT's step-5 fold charge; (b) the second 147,968 charge after LAG1's writer provider returned, its step-7
+// emission charge, is refused.
 func TestTreeComposeWorkRefusalV1(t *testing.T) {
 	t.Run("fold", func(t *testing.T) {
-		s := tcRefuseL2(t, 0, 1)
+		s := tcNew(t, 3)
+		s.prims[0].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
+			s.ledger.refuseNext = pos == treeWriterV1
+			return nil
+		}
 		r := s.run(nil)
 		r.check(t, CommitTruthOld, UpdateStagePrewrite, 0)
 		if got := tcFirstRefusal(s.ledger.log); got != "refuse 147968" {
 			t.Errorf("R13a first refusal %q, want refuse 147968", got)
 		}
+		if r.err != errOperationReservationCapacity {
+			t.Errorf("R13a err %v, want errOperationReservationCapacity", r.err)
+		}
+		if s.prims[0].calls[treeWriterV1] != 1 {
+			t.Errorf("R13a CURRENT writer calls %d, want 1", s.prims[0].calls[treeWriterV1])
+		}
+		if s.prims[1].calls[treeWriterV1] != 0 {
+			t.Errorf("R13a LAG1 writer calls %d, want 0", s.prims[1].calls[treeWriterV1])
+		}
+		if s.prims[2].calls[treeWriterV1] != 0 {
+			t.Errorf("R13a LAG2 writer calls %d, want 0", s.prims[2].calls[treeWriterV1])
+		}
 		r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
 		at := tcIndex(t, s.ledger.log, "refuse 147968")
-		if r.err != errOperationReservationCapacity || tcIndex(t, s.ledger.log, "return 1 C")+1 != at ||
-			slices.Contains(s.ledger.log[at:], "release 147968") {
-			t.Fatalf("R13a err %v log %v", r.err, s.ledger.log)
+		if tcIndex(t, s.ledger.log, "return 1 C")+1 != at {
+			t.Errorf("R13a refusal is not the first charge after CURRENT returned: %v", s.ledger.log)
 		}
-		if s.prims[0].calls[treeWriterV1] != 1 || s.prims[1].calls[treeWriterV1] != 0 || s.prims[2].calls[treeWriterV1] != 0 {
-			t.Fatalf("R13a writer calls %d %d %d", s.prims[0].calls[1], s.prims[1].calls[1], s.prims[2].calls[1])
+		if slices.Contains(s.ledger.log[at:], "release 147968") {
+			t.Errorf("R13a release of 147968 after the refusal: %v", s.ledger.log)
 		}
 		s.settled(t)
 		s.consumed(t, CommitTruthOld, r.err)
 		s.reopen(t, s.oldRows(t)...)
 	})
 	t.Run("emit", func(t *testing.T) {
-		s := tcRefuseL2(t, 1, 2)
+		s := tcRefuseL2(t)
 		r := s.run(nil)
 		r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 		if s.prims[2].calls[treeWriterV1] != 0 {
 			t.Errorf("R13b LAG2 writer calls %d, want 0", s.prims[2].calls[treeWriterV1])
 		}
+		if r.err != errOperationReservationCapacity {
+			t.Errorf("R13b err %v, want errOperationReservationCapacity", r.err)
+		}
 		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 		from := tcIndex(t, s.ledger.log, "return 1 L1") + 1
 		to := tcIndex(t, s.ledger.log, "refuse 147968")
 		seg := s.ledger.log[from:to]
-		if r.err != errOperationReservationCapacity || s.prims[2].calls[treeWriterV1] != 0 ||
-			len(seg) < 2 || seg[0] != "charge 147968" || seg[1] != "release 147968" || slices.Contains(seg[2:], "charge 147968") {
-			t.Fatalf("R13b err %v LAG2 calls %d log %v", r.err, s.prims[2].calls[1], seg)
+		if len(seg) < 2 || seg[0] != "charge 147968" {
+			t.Errorf("R13b fold charge is not the first charge after LAG1 returned: %v", seg)
+		}
+		if len(seg) < 2 || seg[1] != "release 147968" {
+			t.Errorf("R13b fold charge not released before the refusal: %v", seg)
+		}
+		if len(seg) >= 2 && slices.Contains(seg[2:], "charge 147968") {
+			t.Errorf("R13b another admitted 147968 charge before the refusal: %v", seg)
 		}
 		s.settled(t)
 		s.consumed(t, CommitTruthOld, r.err)
@@ -1405,14 +1592,14 @@ func TestTreeComposeWorkRefusalV1(t *testing.T) {
 	})
 }
 
-// tcRefuseL2 arms, after primitive j's writer stream (its beginV1 charge included), refusal of the k-th following
-// charge of amount 147,968.
-func tcRefuseL2(t *testing.T, j, k int) *tcScene {
+// tcRefuseL2 arms, after LAG1's writer stream (its beginV1 charge included), refusal of the second following charge
+// of amount 147,968.
+func tcRefuseL2(t *testing.T) *tcScene {
 	t.Helper()
 	s := tcNew(t, 3)
-	s.prims[j].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
+	s.prims[1].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
 		if pos == treeWriterV1 {
-			s.ledger.refuseL2 = k
+			s.ledger.refuseL2 = 2
 		}
 		return nil
 	}
@@ -1434,12 +1621,13 @@ func TestTreeComposeCheckedDriftV1(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			s := tcNew(t, 3)
 			r := s.run(func() { treeNativeSeed(t, s.store, 1, row.key, []byte{0x7f}) })
+			r.check(t, CommitTruthOld, row.stage, row.index)
+			if row.index == 0 && s.prims[1].calls[treeWriterV1] != 0 {
+				t.Errorf("LAG1 called after CURRENT's STALE")
+			}
 			r.want(t, CommitTruthOld, row.stage, row.index)
 			ttMismatch(t, r.err, "OLD/write snapshot mismatch")
 			log := s.ledger.log
-			if row.index == 0 && s.prims[1].calls[treeWriterV1] != 0 {
-				t.Fatalf("LAG1 called after CURRENT's STALE")
-			}
 			if row.index == 2 && strings.Contains(strings.Join(log[tcIndex(t, log, "return 1 L2"):], "|"), fmt.Sprintf("charge %d", tcL2)) {
 				t.Fatalf("LAG2 fold reached after its STALE: %v", log)
 			}
@@ -1470,8 +1658,9 @@ func TestTreeComposeRetainedRecorderV1(t *testing.T) {
 				return tcSentinel
 			}
 			r := s.run(nil)
-			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+			r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			tcExpired(t, kept, nil, false)
+			r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
 			if t.Failed() {
 				t.FailNow()
 			}
@@ -1566,10 +1755,11 @@ func TestTreeComposeNoSurvivorV1(t *testing.T) {
 		seen = append(seen, live)
 	}
 	r := s.run(nil)
-	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	if fmt.Sprint(seen) != "[0 0 0]" {
-		t.Fatalf("live weak pointers at LAG1 step, LAG2 step, H_r: %v", seen)
+		t.Errorf("live weak pointers at LAG1 step, LAG2 step, H_r: %v", seen)
 	}
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.settled(t)
 	s.ledger.before = nil
 	s.reopen(t, append(s.newRows(t), s.following(t))...)
@@ -1599,10 +1789,11 @@ func TestTreeComposeNoSurvivorReadbackV1(t *testing.T) {
 		return lag1.stream(rec)
 	}
 	r := s.crossed(t)
-	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+	r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	if live != 0 {
-		t.Fatalf("CURRENT readback objects live at LAG1 readback entry: %d", live)
+		t.Errorf("CURRENT readback objects live at LAG1 readback entry: %d", live)
 	}
+	r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 	s.settled(t)
 	s.consumed(t, CommitTruthNew, r.err)
 	s.reopen(t, tcA4Rows(t, s)...)
@@ -1623,9 +1814,20 @@ func (c *tcTipCell) take(t *testing.T, old *Reader) {
 	c.old, c.cell = old, old.tip
 }
 
-// retired reports the H7 observation: the Reader is unusable and the cell is canonicalTipCell{}.
-func (c *tcTipCell) retired() bool {
-	return c.cell != nil && !c.old.usable() && *c.cell == canonicalTipCell{}
+// expired reports the M38 half of the H7 observation: the provider Reader is unusable.
+func (c *tcTipCell) expired() bool { return c.old != nil && !c.old.usable() }
+
+// cleared reports the M39 half of the H7 observation: the cell is canonicalTipCell{}.
+func (c *tcTipCell) cleared() bool { return c.cell != nil && *c.cell == canonicalTipCell{} }
+
+// tcRetired checks both H7 halves on their own lines; it never calls t.Fatal (worker goroutine).
+func tcRetired(t *testing.T, at string, expired, cleared bool) {
+	if !expired {
+		t.Errorf("%s: provider Reader still usable", at)
+	}
+	if !cleared {
+		t.Errorf("%s: canonicalTipCell not retired", at)
+	}
 }
 
 // H7, M38-M40: the provider Reader is expired and its source cell retired when its call returns (writer, at the
@@ -1634,7 +1836,9 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 	t.Run("writer", func(t *testing.T) {
 		s := tcNew(t, 3)
 		var tip tcTipCell
-		cur, returned, observed := s.prims[0], false, ""
+		cur, returned, observed := s.prims[0], false, false
+		var amount uint64
+		var expired, cleared bool
 		cur.custom = func(old *Reader, rec *treeRecorderV1) error {
 			tip.take(t, old)
 			err := cur.stream(rec)
@@ -1642,15 +1846,17 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 			return err
 		}
 		s.ledger.before = func(n uint64) {
-			if returned && observed == "" {
-				observed = fmt.Sprintf("%d %v", n, tip.retired())
+			if returned && !observed {
+				observed, amount, expired, cleared = true, n, tip.expired(), tip.cleared()
 			}
 		}
 		r := s.run(nil)
-		r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-		if !strings.HasSuffix(observed, " true") || strings.HasPrefix(observed, fmt.Sprint(tcStep)+" ") {
-			t.Fatalf("first charge after CURRENT returned (before its step 8): %q", observed)
+		r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		if !observed || amount == tcStep {
+			t.Errorf("first charge after CURRENT returned is %d (observed %v), want one before its step 8", amount, observed)
 		}
+		tcRetired(t, "first charge after CURRENT returned", expired, cleared)
+		r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		s.settled(t)
 		s.ledger.before = nil
 		s.reopen(t, append(s.newRows(t), s.following(t))...)
@@ -1668,9 +1874,10 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 			return nil
 		}
 		s.goexitRun(t, func(r tcResult) {
-			if r.unwind.kind != 2 || !tip.retired() {
-				t.Errorf("goexit unwind %d retired %v", r.unwind.kind, tip.retired())
+			if r.unwind.kind != 2 {
+				t.Errorf("goexit unwind %d, want 2", r.unwind.kind)
 			}
+			tcRetired(t, "goexit before resume", tip.expired(), tip.cleared())
 		})
 		s.settled(t)
 		s.reopen(t, append(s.oldRows(t), s.following(t))...)
@@ -1681,7 +1888,8 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 		treeNativeSeed(t, s.store, 4, tcB1[:], body)
 		s.prims[1].events = []tdEv{tdCreate(tcTU, 0, 0, 0, uint32(len(tcFU))), tdCreate(tcTU, 1, 0, uint64(len(tcFU)), uint32(len(tcFC)))}
 		var tip tcTipCell
-		cur, lag1, observed := s.prims[0], s.prims[1], false
+		cur, lag1 := s.prims[0], s.prims[1]
+		var expired, cleared bool
 		cur.custom = func(old *Reader, rec *treeRecorderV1) error {
 			if cur.calls[treeReadbackV1] == 1 {
 				tip.take(t, old)
@@ -1690,15 +1898,14 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 		}
 		lag1.custom = func(old *Reader, rec *treeRecorderV1) error {
 			if lag1.calls[treeReadbackV1] == 1 {
-				observed = tip.retired()
+				expired, cleared = tip.expired(), tip.cleared()
 			}
 			return lag1.stream(rec)
 		}
 		r := s.crossed(t)
+		r.check(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		tcRetired(t, "CURRENT's readback at LAG1's readback entry", expired, cleared)
 		r.want(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
-		if !observed {
-			t.Fatal("CURRENT's readback Reader or cell still live at LAG1's readback entry")
-		}
 		s.settled(t)
 		s.consumed(t, CommitTruthNew, r.err)
 		s.reopen(t, tcA4Rows(t, s)...)
@@ -1726,17 +1933,36 @@ func TestTreeComposeBindingStageV1(t *testing.T) {
 				mustEnvironment(t, fixtureSeedPrefixRawRow(s.store, bindings, key, row))
 			}
 			r := s.run(nil)
+			r.check(t, CommitTruthOld, UpdateStagePrewrite, 0)
+			if s.prims[0].calls[treeWriterV1] != 1 {
+				t.Errorf("provider calls %d, want 1", s.prims[0].calls[treeWriterV1])
+			}
 			r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
 			engine, direct := directTestEngineError(r.err)
-			if !direct || engine.Class != EngineIntegrity || engine.Operation != string(operationUpdate) || engine.Code != codeCorrupted || engine.Diagnostic != "invalid tree native representation" || engine.ReopenRequired {
-				t.Fatalf("N1 err %+v", r.err)
+			if !direct {
+				t.Fatalf("N1 err %+v is not a direct EngineError", r.err)
+			}
+			if engine.Class != EngineIntegrity {
+				t.Errorf("N1 class %v, want Integrity", engine.Class)
+			}
+			if engine.Operation != string(operationUpdate) {
+				t.Errorf("N1 operation %q, want update", engine.Operation)
+			}
+			if engine.Code != codeCorrupted {
+				t.Errorf("N1 code %d, want corrupted", engine.Code)
+			}
+			if engine.Diagnostic != "invalid tree native representation" {
+				t.Errorf("N1 diagnostic %q", engine.Diagnostic)
+			}
+			if engine.ReopenRequired {
+				t.Errorf("N1 ReopenRequired true")
 			}
 			_, decodeErr := DecodeRootBindingV1(malformed)
-			if variant == "malformed" && (decodeErr == nil || !errors.Is(engine.Cause, decodeErr)) || variant != "malformed" && engine.Cause != nil {
-				t.Fatalf("N1 cause %v (decode %v)", engine.Cause, decodeErr)
+			if variant == "malformed" && (decodeErr == nil || !errors.Is(engine.Cause, decodeErr)) {
+				t.Errorf("N1 cause %v, want the decode error %v", engine.Cause, decodeErr)
 			}
-			if s.prims[0].calls[treeWriterV1] != 1 {
-				t.Fatalf("provider calls %d", s.prims[0].calls[treeWriterV1])
+			if variant != "malformed" && engine.Cause != nil {
+				t.Errorf("N1 cause %v, want nil", engine.Cause)
 			}
 			s.settled(t)
 			s.consumed(t, CommitTruthOld, r.err)
@@ -1777,13 +2003,20 @@ func TestTreeComposeBoundaryReferenceV1(t *testing.T) {
 	var r tcResult
 	evidence, err := fixtureLargeFault(s.store, 4, 8, leafB, func() { r = s.run(nil) })
 	mustEnvironment(t, err)
-	if evidence.commits < 1 || evidence.drift < 1 {
-		t.Fatalf("mode 4 did not fire: %+v", evidence)
+	if evidence.commits < 1 {
+		t.Errorf("mode 4 did not commit: %+v", evidence)
 	}
-	r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+	if evidence.drift < 1 {
+		t.Errorf("mode 4 did not drift: %+v", evidence)
+	}
+	r.check(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 	tcCrossedCause(t, r.err, CommitTruthUnknown, nil)
-	if s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown {
-		t.Fatalf("N2 state %v truth %d", s.store.state, s.store.terminalTruth)
+	r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+	if s.store.state != storeCLOSED {
+		t.Errorf("N2 state %v, want CLOSED", s.store.state)
+	}
+	if s.store.terminalTruth != CommitTruthUnknown {
+		t.Errorf("N2 terminal truth %d, want UNKNOWN", s.store.terminalTruth)
 	}
 	s.settled(t)
 	s.consumed(t, CommitTruthUnknown, r.err)
@@ -1810,11 +2043,15 @@ func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
 		var r tcResult
 		evidence, err := fixtureLargeFault(s.store, 3, 1, key, func() { r = s.run(nil) })
 		mustEnvironment(t, err)
-		if evidence.commits < 1 || evidence.drift < 1 {
-			t.Fatalf("mode 3 did not fire: %+v", evidence)
+		if evidence.commits < 1 {
+			t.Errorf("mode 3 did not commit: %+v", evidence)
 		}
-		r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+		if evidence.drift < 1 {
+			t.Errorf("mode 3 did not drift: %+v", evidence)
+		}
+		r.check(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 		tcCrossedCause(t, r.err, CommitTruthUnknown, nil)
+		r.want(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
 		s.settled(t)
 		s.consumed(t, CommitTruthUnknown, r.err)
 		s.reopen(t, ttRow{ttUTXO, key, []byte{0x7f}}, ttRow{ttBlocks, tcB0[:], s.pair[0].literal})
@@ -1825,7 +2062,7 @@ func TestTreeComposeNetCleanReferenceV1(t *testing.T) {
 		evidence, err := fixtureLargeFault(s.store, 13, 1, key, func() { r = s.run(nil) })
 		mustEnvironment(t, err)
 		if evidence.drift < 1 {
-			t.Fatalf("mode 13 did not fire: %+v", evidence)
+			t.Errorf("mode 13 did not fire: %+v", evidence)
 		}
 		r.check(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, -1)
 		if engine, ok := directTestEngineError(r.err); !ok || engine.Diagnostic != "final update image mismatch" {
@@ -1879,6 +2116,28 @@ func TestTreeComposePoisonedGoexitV1(t *testing.T) {
 	})
 }
 
+// tcPoisonedCause checks the mode-15 ReadbackCause field by field; it never calls t.Fatal (worker goroutine).
+func tcPoisonedCause(t *testing.T, err error) {
+	var commit *CommitError
+	var cause *EngineError
+	if !errors.As(err, &commit) || !errors.As(commit.ReadbackCause, &cause) {
+		t.Errorf("mode 15 err %v, want a CommitError with an EngineError ReadbackCause", err)
+		return
+	}
+	if cause.Class != EngineLocalInvariant {
+		t.Errorf("mode 15 ReadbackCause class %v", cause.Class)
+	}
+	if cause.Operation != string(operationAbort) {
+		t.Errorf("mode 15 ReadbackCause operation %q", cause.Operation)
+	}
+	if cause.Code != -30416 {
+		t.Errorf("mode 15 ReadbackCause code %d", cause.Code)
+	}
+	if cause.Diagnostic != expectedNativeDiagnostic(-30416) {
+		t.Errorf("mode 15 ReadbackCause diagnostic %q", cause.Diagnostic)
+	}
+}
+
 func tcPoisonedChild(t *testing.T) {
 	s := tcNew(t, 3)
 	lag1 := s.prims[1]
@@ -1897,13 +2156,11 @@ func tcPoisonedChild(t *testing.T) {
 		if err != nil || evidence.commits < 1 {
 			t.Errorf("mode 15: %v %+v", err, evidence)
 		}
-		var commit *CommitError
-		var cause *EngineError
-		if r.unwind.kind != 2 || r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || !errors.As(r.err, &commit) || !errors.As(commit.ReadbackCause, &cause) {
-			t.Errorf("mode 15 result %+v", r)
-		} else if cause.Class != EngineLocalInvariant || cause.Operation != string(operationAbort) || cause.Code != -30416 || cause.Diagnostic != expectedNativeDiagnostic(-30416) {
-			t.Errorf("mode 15 ReadbackCause %+v", cause)
+		if r.unwind.kind != 2 {
+			t.Errorf("mode 15 unwind kind %d, want 2", r.unwind.kind)
 		}
+		r.check(t, CommitTruthUnknown, UpdateStageCommitMayHaveCrossed, -1)
+		tcPoisonedCause(t, r.err)
 		if s.store.state != storePOISONEDTHREAD {
 			t.Errorf("mode 15 state %v", s.store.state)
 		}
