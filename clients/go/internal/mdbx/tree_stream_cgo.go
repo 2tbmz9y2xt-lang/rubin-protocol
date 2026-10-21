@@ -138,7 +138,8 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // failures consume or retain Store resources under the existing owner; clean
 // writer unwind leaves OPEN, readback failure preserves UNKNOWN and its causes.
 func (s *Store) UpdateTreeV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) (CommitTruth, UpdateStage, int, error) {
-	if err := treeEntryInputV1(s, account, callback); err != nil {
+	err := treeEntryInputV1(s, account, callback)
+	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, err
 	}
 	if !s.operations.TryLock() {
@@ -186,7 +187,8 @@ func (s *Store) treeEntryLockedV1(account *OperationAccount, callback func(*Read
 	if err != nil || unwind.kind != 0 {
 		return CommitTruthOld, UpdateStagePrewrite, -1, unwind, err
 	}
-	if err = treeAdmitV1(op, account); err != nil {
+	err = treeAdmitV1(op, account)
+	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, s.abortReadLocked(old, err, false)
 	}
 	return e.executeV1(account, op)
@@ -226,12 +228,12 @@ func (e *treePublicEntryV1) executeV1(account *OperationAccount, op TreeOperatio
 	var unwind treeUnwindV1
 	started := false
 	err := account.withHold(func(hold *operationHold) error {
-		if err := hold.grow(treePlanCopyBytesV1(op.Pair)); err != nil {
+		err := hold.grow(treePlanCopyBytesV1(op.Pair))
+		if err != nil {
 			return err
 		}
 		plan := treeOwnPlanV1(op)
 		started = true
-		var err error
 		truth, stage, index, unwind, err = e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{hold}, &plan)
 		return err
 	})
@@ -254,10 +256,12 @@ func treeAdmitV1(op TreeOperationV1, account *OperationAccount) error {
 	if len(op.Primitives) != 0 && account.shared.ceiling != TreeLaneMaxBytes {
 		return updateInvalidBatch()
 	}
-	if err := treePrimitivesAdmitV1(op.Primitives); err != nil {
+	err := treePrimitivesAdmitV1(op.Primitives)
+	if err != nil {
 		return err
 	}
-	if err := treePairScanV1(op.Pair); err != nil {
+	err = treePairScanV1(op.Pair)
+	if err != nil {
 		return err
 	}
 	return treePairRelationsV1(op)
@@ -324,7 +328,8 @@ func treePairScanV1(pair TreePairV1) error {
 	var budget updateBudget
 	var previous Mutation
 	for j, m := range pair.Mutations {
-		if err := treeMutationScanV1(j == 0, previous, m, &budget); err != nil {
+		err := treeMutationScanV1(j == 0, previous, m, &budget)
+		if err != nil {
 			return err
 		}
 		previous = m
@@ -332,7 +337,8 @@ func treePairScanV1(pair TreePairV1) error {
 	var count uint64
 	var prior ConsultedRow
 	for j, row := range pair.Consulted {
-		if err := treeConsultedScanV1(j == 0, prior, row, &count); err != nil {
+		err := treeConsultedScanV1(j == 0, prior, row, &count)
+		if err != nil {
 			return err
 		}
 		prior = row
@@ -440,8 +446,10 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	plan := treePlanV1{primitives: make([]treePrimitivePlanV1, len(op.Primitives)), pair: make([]ownedMutation, len(op.Pair.Mutations)), consulted: make([]ownedConsulted, len(op.Pair.Consulted))}
 	for j, p := range op.Primitives {
 		plan.primitives[j] = treePrimitivePlanV1{
-			treePrimitiveV1: treePrimitiveV1{direction: uint8(p.Direction), kind: uint8(p.Kind), undo: uint8(p.Undo),
-				generation: p.Generation, height: p.Height, block: p.Block, endpoint: p.Endpoint},
+			treePrimitiveV1: treePrimitiveV1{
+				direction: uint8(p.Direction), kind: uint8(p.Kind), undo: uint8(p.Undo),
+				generation: p.Generation, height: p.Height, block: p.Block, endpoint: p.Endpoint,
+			},
 			source: treePublicSourceV1(p.Source),
 		}
 	}
