@@ -46,3 +46,12 @@ by repository governance. Automatic approval and automatic merge are disabled.
 
 Repository documentation must not be used to infer consensus activation,
 governance approval, task status, or complete formal coverage.
+
+## License
+
+Rubin-owned material that the licensor is authorized to license is licensed
+under the [Apache License 2.0](LICENSE). Separately licensed third-party
+material retains its own terms and is excluded from that declaration. See
+[NOTICE](NOTICE) for bundled attribution and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the dependency inventory
+and the limits of this licensing declaration.
