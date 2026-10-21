@@ -145,13 +145,18 @@ func tcBindingKey(g uint64) []byte { return append([]byte{0x11}, tdUTXOKey(g, [3
 
 func tcBinding(t *testing.T, g uint64, ep TreeEndpointV1, entries ...testTreeEntry) []byte {
 	t.Helper()
+	return tcBindingID(t, [32]byte{7}, g, ep, entries...)
+}
+
+func tcBindingID(t *testing.T, id [32]byte, g uint64, ep TreeEndpointV1, entries ...testTreeEntry) []byte {
+	t.Helper()
 	var top *testTreeNode
 	if len(entries) > 0 {
 		node := testTreeBuild(g, entries, map[string][]byte{})
 		top = &node
 	}
 	binding := testTreeOldBinding(top, ep)
-	binding.DatabaseID = [32]byte{7}
+	binding.DatabaseID = id
 	encoded, err := binding.Encode()
 	mustEnvironment(t, err)
 	return encoded
@@ -1413,4 +1418,44 @@ func TestTreeComposeReaderExpiryV1(t *testing.T) {
 		}
 		s.settled(t)
 	})
+}
+
+// N1: CURRENT's generation binding row absent, malformed (132 bytes) or of another DatabaseID is the fold's integrity
+// result at index 0 before any put (stage 1); the provider ran once.
+func TestTreeComposeBindingStageV1(t *testing.T) {
+	malformed := make([]byte, 132)
+	for _, variant := range []string{"absent", "malformed", "foreign"} {
+		t.Run(variant, func(t *testing.T) {
+			s := tcNew(t, 1)
+			bindings, key := TreeSchemaV1DBIs()[0], tcBindingKey(1)
+			var row []byte
+			switch variant {
+			case "absent":
+				mustEnvironment(t, fixtureDeletePrefixRow(s.store, bindings, key))
+			case "malformed":
+				row = malformed
+			case "foreign":
+				row = tcBindingID(t, [32]byte{8}, 1, tcOldEP)
+			}
+			if row != nil {
+				mustEnvironment(t, fixtureSeedPrefixRawRow(s.store, bindings, key, row))
+			}
+			r := s.run(nil)
+			r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
+			engine, direct := directTestEngineError(r.err)
+			if !direct || engine.Class != EngineIntegrity || engine.Operation != string(operationUpdate) || engine.Code != codeCorrupted || engine.Diagnostic != "invalid tree native representation" || engine.ReopenRequired {
+				t.Fatalf("N1 err %+v", r.err)
+			}
+			_, decodeErr := DecodeRootBindingV1(malformed)
+			if variant == "malformed" && (decodeErr == nil || !errors.Is(engine.Cause, decodeErr)) || variant != "malformed" && engine.Cause != nil {
+				t.Fatalf("N1 cause %v (decode %v)", engine.Cause, decodeErr)
+			}
+			if s.prims[0].calls[treeWriterV1] != 1 {
+				t.Fatalf("provider calls %d", s.prims[0].calls[treeWriterV1])
+			}
+			s.settled(t)
+			s.consumed(t, r.err)
+			s.reopen(t, ttRow{ttUTXO, tdUTXOKey(1, tcT0, 0), nil}, ttRow{ttBlocks, tcB0[:], nil}, ttRow{schemaDBIs[5], tdManifestKey(tcB0), nil}, ttRow{bindings, key, row})
+		})
+	}
 }
