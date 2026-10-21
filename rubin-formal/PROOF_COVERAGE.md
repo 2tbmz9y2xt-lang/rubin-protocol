@@ -5,10 +5,17 @@
 
 Текущее состояние: machine-readable source-of-truth (`proof_coverage.json`) фиксирует
 `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 31 current coverage entries и явные
-`notes` / `limitations` для non-universal claims. Conformance-фикстуры
-Lean replay/refinement слой покрывает non-`CV-PV-*` conformance fixtures,
-представленные модулями, импортированными `RubinFormal.Conformance.Index`.
-Runtime/parallel-only `CV-PV-*` gates в этот Lean replay scope не входят.
+`notes` / `limitations` для non-universal claims. Lean replay/refinement evidence
+is bounded by the models imported by `RubinFormal.Conformance.Index`;
+runtime/parallel-only `CV-PV-*` gates remain outside this scope.
+
+Native-rotation replay is a manual legacy bounded stub, not output of current
+generators. Its `*-02` JSON rows use `create_height=100`, `height=199`,
+`suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
+The CLI `rotation_spend_suite_check` ignores `covenant_type` after parsing;
+these labels prove neither individual covenant spends nor full JSON/manual-stub
+semantic equivalence. Unchanged registry/UTXO models and replay evidence do not
+implement or prove the proposed `0x0105` retirement.
 
 `SECTION_HASHES` manifest membership and formal `coverage[]` registry membership
 are independent sets, not a one-to-one mapping. The registry has exactly 31
@@ -18,6 +25,13 @@ model, or other bounded formal scopes. Row status, evidence, and claims apply
 to that registered row, not automatically to a manifest member. An unregistered
 manifest H2 is not thereby formally proved, and a registered formal row need
 not remain an independent manifest member.
+
+The single manifest digest is a disposition of the exact approved locally
+prepared retirement snapshot, not proof of applicability, canonical validity or
+client parity. Local spec preparation precedes metadata human merge, then spec
+first publication/merge, then client removal. The prepared spec is noncanonical
+until its human merge; old canonical spec/new pin comparison necessarily rejects
+between the metadata and matching spec merges.
 
 Конечный CV replay — это compiled conformance evidence. Теорема
 `cv_*_vectors_pass` section-registered только там, где она является
