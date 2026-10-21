@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -43,6 +44,8 @@ type tcLedger struct {
 	noCharge    bool
 	refuseStep  bool // refuse the next step-1 charge
 	refuseNext  bool // refuse the next charge of any amount
+	refuseOther bool // refuse the next charge whose amount is not tcL2 (R2)
+	refuseL2    int  // refuse the refuseL2-th following charge of amount tcL2 (R13)
 	stepHeld    []uint64
 	violations  []string
 	before      func(n uint64) // runs at the start of every chargeV1 (H6, H7)
@@ -62,15 +65,25 @@ func (l *tcLedger) chargeV1(n uint64) error {
 	if n == tcStep {
 		l.stepHeld = append(l.stepHeld, l.held)
 	}
-	refuse := l.refuseStep && n == tcStep || l.refuseNext
-	if refuse || l.calls == l.refuseAt || l.limit != 0 && n > l.limit-l.held {
-		l.refuseStep, l.refuseNext = false, false
+	if l.armed(n) || l.calls == l.refuseAt || l.limit != 0 && n > l.limit-l.held {
+		l.refuseStep, l.refuseNext, l.refuseOther = false, false, false
 		l.log = append(l.log, fmt.Sprintf("refuse %d", n))
 		return errOperationReservationCapacity
 	}
 	l.held += n
 	l.log = append(l.log, fmt.Sprintf("charge %d", n))
 	return nil
+}
+
+// armed reports whether a provider-set selector refuses this charge of amount n.
+func (l *tcLedger) armed(n uint64) bool {
+	if l.refuseL2 > 0 && n == tcL2 {
+		l.refuseL2--
+		if l.refuseL2 == 0 {
+			return true
+		}
+	}
+	return l.refuseStep && n == tcStep || l.refuseNext || l.refuseOther && n != tcL2
 }
 
 func (l *tcLedger) releaseV1(n uint64) {
@@ -1094,16 +1107,25 @@ func tcRollback(t *testing.T, seeded bool) (*tcScene, []ttRow) {
 		treeNativeSeed(t, store, 4, block[:], frame)
 	}
 	leaf, digest := testTreeNodeKey(3, 288, [36]byte(key[8:])), testTreeLeafPreimage([36]byte(key[8:]), value)
-	for _, row := range []ttRow{{ttUTXO, key, value}, {schemaDBIs[5], tdManifestKey(block), tdManifest(8, [16]byte{}, 1, 0)},
-		{TreeSchemaV1DBIs()[8], leaf, digest[:]}, {TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))}} {
+	for _, row := range []ttRow{
+		{ttUTXO, key, value},
+		{schemaDBIs[5], tdManifestKey(block), tdManifest(8, [16]byte{}, 1, 0)},
+		{TreeSchemaV1DBIs()[8], leaf, digest[:]},
+		{TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))},
+	} {
 		treeNativeSeed(t, store, row.dbi.Rank, row.key, row.want)
 	}
 	s := &tcScene{store: store, path: path, ledger: &tcLedger{}}
 	s.pair = []ownedMutation{{dbi: ttBlocks, key: block[:], beforePresent: true, after: AfterAbsent}}
 	prim := treePrimitiveV1{direction: treeInverseV1, kind: treeKindRollbackNewV1, undo: treeUndoSourceDeleteV1, generation: 3, height: 8, block: block, endpoint: parent}
 	s.prims = []*tcPrim{{name: "R", prim: prim, txCount: 1, events: []tdEv{tdCreate(txid, 0, 0, 0, uint32(len(frame)))}, ledger: s.ledger}}
-	after := []ttRow{{ttBlocks, block[:], nil}, {ttUTXO, key, nil}, {schemaDBIs[5], tdManifestKey(block), nil},
-		{TreeSchemaV1DBIs()[8], leaf, nil}, {TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, parent)}}
+	after := []ttRow{
+		{ttBlocks, block[:], nil},
+		{ttUTXO, key, nil},
+		{schemaDBIs[5], tdManifestKey(block), nil},
+		{TreeSchemaV1DBIs()[8], leaf, nil},
+		{TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, parent)},
+	}
 	return s, after
 }
 
@@ -1135,11 +1157,12 @@ func TestTreeComposePairDeleteAbsentV1(t *testing.T) {
 	s.reopen(t, ttRow{ttBlocks, block[:], nil}, ttRow{ttUTXO, key, value}, ttRow{TreeSchemaV1DBIs()[0], tcBindingKey(3), tcBinding(t, 3, tcEndpoint(8, block), tcEntry(key, value))})
 }
 
-// R2, M2, M3: the first charge after LAG1's writer provider returned is refused: OLD at index 1, LAG2 unreached.
+// R2, M2, M3 (D40): the first charge after LAG1's writer provider returned whose amount is not 147,968 is refused:
+// LAG1's step-6 reference of its 32-byte stored-body key, after exactly its step-5 fold charge and release.
 func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 	s := tcNew(t, 3)
 	s.prims[1].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
-		s.ledger.refuseNext = pos == treeWriterV1
+		s.ledger.refuseOther = pos == treeWriterV1
 		return nil
 	}
 	r := s.run(nil)
@@ -1147,9 +1170,63 @@ func TestTreeComposeGrowthRefusalV1(t *testing.T) {
 	if r.err != errOperationReservationCapacity || s.prims[2].calls[treeWriterV1] != 0 {
 		t.Fatalf("R2 err %v LAG2 calls %d", r.err, s.prims[2].calls[treeWriterV1])
 	}
+	from := tcIndex(t, s.ledger.log, "return 1 L1") + 1
+	to := tcIndex(t, s.ledger.log, "refuse 32")
+	if got := strings.Join(s.ledger.log[from:to+1], ","); got != "charge 147968,release 147968,refuse 32" {
+		t.Fatalf("R2 ledger after LAG1 return %q", got)
+	}
 	s.settled(t)
 	s.consumed(t, r.err)
 	s.reopen(t, s.oldRows(t)...)
+}
+
+// R13, M46, M47 (D40): L2's work charge refused at CURRENT's step-5 fold (a) and at LAG1's step-7 emission (b).
+func TestTreeComposeWorkRefusalV1(t *testing.T) {
+	t.Run("fold", func(t *testing.T) {
+		s := tcRefuseL2(t, 0, 1)
+		r := s.run(nil)
+		r.want(t, CommitTruthOld, UpdateStagePrewrite, 0)
+		at := tcIndex(t, s.ledger.log, "refuse 147968")
+		if r.err != errOperationReservationCapacity || tcIndex(t, s.ledger.log, "return 1 C")+1 != at ||
+			slices.Contains(s.ledger.log[at:], "release 147968") {
+			t.Fatalf("R13a err %v log %v", r.err, s.ledger.log)
+		}
+		if s.prims[0].calls[treeWriterV1] != 1 || s.prims[1].calls[treeWriterV1] != 0 || s.prims[2].calls[treeWriterV1] != 0 {
+			t.Fatalf("R13a writer calls %d %d %d", s.prims[0].calls[1], s.prims[1].calls[1], s.prims[2].calls[1])
+		}
+		s.settled(t)
+		s.consumed(t, r.err)
+		s.reopen(t, s.oldRows(t)...)
+	})
+	t.Run("emit", func(t *testing.T) {
+		s := tcRefuseL2(t, 1, 2)
+		r := s.run(nil)
+		r.want(t, CommitTruthOld, UpdateStageWriteStartedDefinitelyPrecommit, 1)
+		from := tcIndex(t, s.ledger.log, "return 1 L1") + 1
+		to := tcIndex(t, s.ledger.log, "refuse 147968")
+		seg := s.ledger.log[from:to]
+		if r.err != errOperationReservationCapacity || s.prims[2].calls[treeWriterV1] != 0 ||
+			len(seg) < 2 || seg[0] != "charge 147968" || seg[1] != "release 147968" || slices.Contains(seg[2:], "charge 147968") {
+			t.Fatalf("R13b err %v LAG2 calls %d log %v", r.err, s.prims[2].calls[1], seg)
+		}
+		s.settled(t)
+		s.consumed(t, r.err)
+		s.reopen(t, s.oldRows(t)...)
+	})
+}
+
+// tcRefuseL2 arms, after primitive j's writer stream (its beginV1 charge included), refusal of the k-th following
+// charge of amount 147,968.
+func tcRefuseL2(t *testing.T, j, k int) *tcScene {
+	t.Helper()
+	s := tcNew(t, 3)
+	s.prims[j].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
+		if pos == treeWriterV1 {
+			s.ledger.refuseL2 = k
+		}
+		return nil
+	}
+	return s
 }
 
 // R3, M4: a checked-read drift at CURRENT is STALE before any put (stage 1, index 0); a drift only LAG2 reads is
