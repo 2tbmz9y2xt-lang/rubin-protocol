@@ -85,17 +85,6 @@ func (s *tsfScene) crossed(t *testing.T) tsResult {
 	return r
 }
 
-func tsConsumed(t *testing.T,s *Store,o *OperationReservationOwner,truth CommitTruth,terminal error) {
-	t.Helper()
-	if s.state!=storeCLOSED||s.terminal!=terminal||s.terminalTruth!=truth{t.Fatalf("consumed %s terminal%v truth%d",s.state,s.terminal,s.terminalTruth)}
-	calls:=0
-	mustEnvironment(t,o.WithOperation(TreeOperation,func(a *OperationAccount)error{
-		r:=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){calls++;return tsPair(9),nil});r.tuple(t,truth,1,-1)
-		if r.err!=terminal||calls!=0{t.Fatal("consumed UpdateTreeV1 did not reuse terminal")};return nil
-	}))
-	if err:=s.View(func(*Reader)error{calls++;return nil});err!=terminal||calls!=0{t.Fatal("consumed View did not reuse terminal")}
-}
-
 func (s *tsfScene) durable(t *testing.T,newState bool,driftedManifest ...[32]byte) {
 	t.Helper()
 	s.s=tsReopen(t,s.s,s.path)

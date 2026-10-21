@@ -103,6 +103,17 @@ func tsFollowing(t *testing.T, s *Store, o *OperationReservationOwner) {
 	mustEnvironment(t, r.err)
 }
 
+func tsConsumed(t *testing.T,s *Store,o *OperationReservationOwner,truth CommitTruth,terminal error) {
+	t.Helper()
+	if s.state!=storeCLOSED||s.terminal!=terminal||s.terminalTruth!=truth{t.Fatalf("consumed %s terminal%v truth%d",s.state,s.terminal,s.terminalTruth)}
+	calls:=0
+	mustEnvironment(t,o.WithOperation(TreeOperation,func(a *OperationAccount)error{
+		r:=tsInvoke(s,a,func(*Reader)(TreeOperationV1,error){calls++;return tsPair(9),nil});r.tuple(t,truth,1,-1)
+		if r.err!=terminal||calls!=0{t.Fatal("consumed UpdateTreeV1 did not reuse terminal")};return nil
+	}))
+	if err:=s.View(func(*Reader)error{calls++;return nil});err!=terminal||calls!=0{t.Fatal("consumed View did not reuse terminal")}
+}
+
 func tsRead(t *testing.T, s *Store, dbi DBI, key, want []byte) {
 	t.Helper()
 	mustEnvironment(t, s.View(func(r *Reader) error {
@@ -163,6 +174,16 @@ func tsRejected(t *testing.T, kind OperationKind, build func(*testing.T) TreeOpe
 	s, path, o := tsNew(t)
 	op := build(t)
 	snapshot := fmt.Sprintf("%#v", op.Pair)
+	oldValues:=make([][]byte,len(op.Pair.Mutations));readable:=make([]bool,len(op.Pair.Mutations))
+	mustEnvironment(t,s.View(func(reader *Reader)error{
+		for i,m:=range op.Pair.Mutations{
+			// Only malformed DBI/key addresses cannot be read by public Reader.Get.
+			if readerDBI(3,m.DBI)!=nil||!readerKey(3,m.DBI.Rank,m.Key){continue}
+			value,_,err:=reader.Get(m.DBI,m.Key);if err!=nil{return err}
+			oldValues[i],readable[i]=bytes.Clone(value),true
+		}
+		return nil
+	}))
 	r := tsRun(t, s, o, kind, op)
 	tsRefusal(t, r, capacity)
 	if s.state != storeOPEN || s.terminal != nil || s.terminalTruth != 0 {
@@ -174,8 +195,8 @@ func tsRejected(t *testing.T, kind OperationKind, build func(*testing.T) TreeOpe
 	tsFollowing(t, s, o)
 	s = tsReopen(t, s, path)
 	for i, m := range op.Pair.Mutations {
-		if (i == 0 || i == len(op.Pair.Mutations)-1) && m.DBI.Rank == 6 && len(m.Key) == 16 && !bytes.Equal(m.Key, tsTarget(900_000).Key) {
-			tsRead(t, s, m.DBI, m.Key, nil)
+		if readable[i] && !(m.DBI==tsTarget(900_000).DBI&&bytes.Equal(m.Key,tsTarget(900_000).Key)) {
+			tsRead(t, s, m.DBI, m.Key, oldValues[i])
 		}
 	}
 }
@@ -220,7 +241,7 @@ func TestTreeStreamStoreRefusalsV1(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s, _, _ := treeNativeStore(t)
 			o := reservationOwner(t, 805_306_368)
-			if name == "format2" { s = newUpdateStore(t) }
+			if name == "format2" { s = newUpdateStore(t); t.Cleanup(func(){_ = s.Close()}) }
 			if name == "consumed" { _, _ = s.consume(nativeError(operationUpdate, 5)); s.latchUpdateTerminalTruth() }
 			if name == "closed" {mustEnvironment(t,s.Close())}
 			calls := 0
@@ -257,7 +278,7 @@ func TestTreeStreamPrimitiveDomainsV1(t *testing.T) {
 		for _,kind := range []int{0,1,2,3,4,5,6,7,8,9,10,255} {
 			for _,undo := range []int{0,1,2,3,4,5,6,7,255} {
 				t.Run(fmt.Sprintf("dir%d/kind%d/undo%d", direction, kind, undo), func(t *testing.T) {
-					s, _, o := tsNew(t)
+					s, path, o := tsNew(t)
 					calls := 0
 					marker := errors.New("domain source reached")
 					op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }))
@@ -274,11 +295,14 @@ func TestTreeStreamPrimitiveDomainsV1(t *testing.T) {
 					if accepted {
 						r.tuple(t, 1, 2, 0)
 						if r.err != marker || calls != 1 { t.Fatalf("valid table row %v calls%d", r.err, calls) }
+						tsConsumed(t,s,o,1,marker)
 					} else {
 						tsRefusal(t, r, false)
 						if calls != 0 { t.Fatal("rejected domain reached Source") }
 						tsFollowing(t, s, o)
 					}
+					s=tsReopen(t,s,path);body:=op.Pair.Mutations[0];tsRead(t,s,body.DBI,body.Key,nil)
+					for _,m:=range tsEntry(t).Pair.Mutations{tsRead(t,s,m.DBI,m.Key,m.Literal)}
 				})
 			}
 		}
@@ -353,7 +377,7 @@ func tsRoots(t *testing.T, s *Store, o *OperationReservationOwner, generations .
 func TestTreeStreamEndpointAndLagDomainsV1(t *testing.T) {
 	for _, inverseHeight := range []int{-1, 0, 5} {
 		t.Run(fmt.Sprint(inverseHeight), func(t *testing.T) {
-			s, _, o := tsNew(t)
+			s, path, o := tsNew(t)
 			calls, marker := 0, errors.New("endpoint accepted")
 			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }))
 			if inverseHeight >= 0 {
@@ -363,16 +387,20 @@ func TestTreeStreamEndpointAndLagDomainsV1(t *testing.T) {
 			}
 			r := tsRun(t, s, o, TreeOperation, op); r.tuple(t, 1, 2, 0)
 			if r.err != marker || calls != 1 { t.Fatalf("endpoint source %v/%d", r.err, calls) }
+			tsConsumed(t,s,o,1,marker)
+			s=tsReopen(t,s,path);body:=op.Pair.Mutations[0];tsRead(t,s,body.DBI,body.Key,nil)
+			for _,m:=range tsEntry(t).Pair.Mutations{tsRead(t,s,m.DBI,m.Key,m.Literal)}
 		})
 	}
 	var lagRows []struct { kind, undo, direction byte }
 	for _,kind:=range []byte{6,9}{for _,undo:=range []byte{0,1,2,3,4,5,6,7,255}{direction:=byte(1);if kind==9{direction=2};lagRows=append(lagRows,struct{kind,undo,direction byte}{kind,undo,direction})}}
 	for _, row := range lagRows {
 		t.Run(fmt.Sprintf("lag%d-%d", row.kind, row.undo), func(t *testing.T) {
-			s, _, o := tsNew(t); tsRoots(t, s, o, 1)
+			s, path, o := tsNew(t); tsRoots(t, s, o, 1)
 			calls,currentCalls,marker := 0,0,errors.New("LAG reached")
 			first := tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error { currentCalls++;return sink.BeginV1(TreeBlockV1{TxCount: 1}) })
 			op := tsOperation(t, first)
+			currentBody:=op.Pair.Mutations[0]
 			lag := op.Primitives[0]; lag.Direction, lag.Kind, lag.Undo = TreeDirectionV1(row.direction), TreePrimitiveKindV1(row.kind), TreeUndoEffectV1(row.undo)
 			lag.Source = tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker })
 			if row.direction == 2 { lag.Block[0] ^= 1; lag.Endpoint.Height-- }
@@ -387,7 +415,12 @@ func TestTreeStreamEndpointAndLagDomainsV1(t *testing.T) {
 			op.Pair = TreePairV1{}; op.Primitives = append(op.Primitives, lag)
 			r := tsRun(t, s, o, TreeOperation, op)
 			accepted:=row.kind==6&&(row.undo==1||row.undo==2)||row.kind==9&&(row.undo==5||row.undo==6)
-			if accepted{r.tuple(t,1,2,1);if r.err!=marker||calls!=1||currentCalls!=1{t.Fatalf("LAG accepted %v calls%d/%d",r.err,calls,currentCalls)}}else{tsRefusal(t,r,false);if calls!=0||currentCalls!=0{t.Fatal("LAG undo refusal reached Source")};tsFollowing(t,s,o)}
+			if accepted{r.tuple(t,1,2,1);if r.err!=marker||calls!=1||currentCalls!=1{t.Fatalf("LAG accepted %v calls%d/%d",r.err,calls,currentCalls)};tsConsumed(t,s,o,1,marker)}else{tsRefusal(t,r,false);if calls!=0||currentCalls!=0{t.Fatal("LAG undo refusal reached Source")};tsFollowing(t,s,o)}
+			s=tsReopen(t,s,path)
+			tsRead(t,s,TreeSchemaV1DBIs()[0],tsRootKey(1),tsRootBytes(t,TreeEndpointV1{}))
+			tsRead(t,s,TreeSchemaV1DBIs()[5],tdManifestKey(op.Primitives[0].Block),nil)
+			tsRead(t,s,currentBody.DBI,currentBody.Key,currentBody.Literal);tsRead(t,s,body.DBI,body.Key,body.Literal)
+			for _,m:=range tsEntry(t).Pair.Mutations{tsRead(t,s,m.DBI,m.Key,m.Literal)}
 		})
 	}
 }
@@ -595,7 +628,7 @@ func TestTreeStreamReferencesV1(t *testing.T) {
 func TestTreeStreamDirectionRelationV1(t *testing.T) {
 	for _, variant := range []string{"forward-inverse", "inverse-forward", "over-cap", "same-direction", "distinct-block"} {
 		t.Run(variant, func(t *testing.T) {
-			s, _, o := tsNew(t); calls := 0; marker := errors.New("direction admitted")
+			s, path, o := tsNew(t); calls := 0; marker := errors.New("direction admitted")
 			op := tsOperation(t, tsSource(func(TreePositionV1,*Reader,*TreeDeltaSinkV1) error { calls++; return marker }))
 			p := op.Primitives[0]; q := p; q.Kind = 6; q.Generation = 2
 			third := q; third.Direction, third.Kind, third.Undo = 2, 9, 6; third.Endpoint.Height--
@@ -619,9 +652,13 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 			r := tsRun(t, s, o, TreeOperation, op)
 			if variant == "same-direction" || variant == "distinct-block" {
 				r.tuple(t,1,2,0); if r.err != marker || calls != 1 { t.Fatalf("accepted relation %v calls%d",r.err,calls) }
+				tsConsumed(t,s,o,1,marker)
 			} else {
 				tsRefusal(t,r,false); if calls != 0 || s.state != storeOPEN || s.terminalTruth != 0 { t.Fatal("D27 admission effects") }; tsFollowing(t,s,o)
 			}
+			s=tsReopen(t,s,path)
+			for _,m:=range op.Pair.Mutations{tsRead(t,s,m.DBI,m.Key,nil)}
+			for _,m:=range tsEntry(t).Pair.Mutations{tsRead(t,s,m.DBI,m.Key,m.Literal)}
 		})
 	}
 }
