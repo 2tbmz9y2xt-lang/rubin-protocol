@@ -96,8 +96,9 @@ func (s *tsfScene) durable(t *testing.T,newState bool,driftedManifest ...[32]byt
 		if newState&&i!=1{value=tdFormed(frame,p.Height,1)}
 		tsRead(t,s.s,TreeSchemaV1DBIs()[1],tdUTXOKey(p.Generation,txid,0),value)
 		manifest:=[]byte(nil);if newState{spent:=uint32(0);if i==2{spent=1};manifest=tdManifest(p.Height,s.p[i].block.Generated,s.p[i].block.TxCount,spent)}
-		if slices.Contains(driftedManifest,p.Block){manifest=[]byte{0x7f}}
-		tsRead(t,s.s,TreeSchemaV1DBIs()[5],tdManifestKey(p.Block),manifest)
+		if slices.Contains(driftedManifest,p.Block){
+			if equal,err:=FixtureRawRowEqual(s.s,5,tdManifestKey(p.Block),[]byte{0x7f});err!=nil||!equal{t.Fatalf("drift manifest raw bytes equal%v err%v",equal,err)}
+		}else{tsRead(t,s.s,TreeSchemaV1DBIs()[5],tdManifestKey(p.Block),manifest)}
 	}
 	undo:=[]byte(nil);if newState{undo=tdFormed(tdFrame(200,0,[]byte{1}),5,1)}
 	tsRead(t,s.s,TreeSchemaV1DBIs()[5],tdEntryKey(s.op.Primitives[2].Block,tdTxid(0x20),1,0,0),undo)
@@ -267,8 +268,8 @@ func TestTreeStreamSourceFailureAndDriftV1(t *testing.T) {
 			tsConsumed(t,s.s,s.o,1,r.err)
 			if mode=="lag2-drift"{
 				s.durable(t,false,s.op.Primitives[2].Block)
-				tsRead(t,s.s,TreeSchemaV1DBIs()[4],s.op.Primitives[1].Block[:],tdFrame(200,0,[]byte{1}))
-				tsRead(t,s.s,TreeSchemaV1DBIs()[4],s.op.Primitives[2].Block[:],tdFrame(300,0,nil))
+				if equal,err:=FixtureRawRowEqual(s.s,4,s.op.Primitives[1].Block[:],tdFrame(200,0,[]byte{1}));err!=nil||!equal{t.Fatalf("LAG1 raw body bytes equal%v err%v",equal,err)}
+				if equal,err:=FixtureRawRowEqual(s.s,4,s.op.Primitives[2].Block[:],tdFrame(300,0,nil));err!=nil||!equal{t.Fatalf("LAG2 raw body bytes equal%v err%v",equal,err)}
 			}else{s.durable(t,false)}
 		})
 	}
