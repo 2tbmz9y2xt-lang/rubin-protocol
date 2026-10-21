@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "active",
-  "notes": "Bridge map for model theorem -> Lean conformance evidence. Each critical_op carries one evidence_level from the exact mixed taxonomy; Go/Rust correspondence remains human-reviewed rather than a machine-checked implementation-equivalence claim.",
+  "notes": "Bridge map for model theorem -> Lean conformance evidence. Each critical_op carries one evidence_level from the exact mixed taxonomy; Go/Rust correspondence remains human-reviewed rather than a machine-checked implementation-equivalence claim. The manifest disposition changes no theorem, trace or model; unchanged pre-retirement evidence does not prove the proposed 0x0105 retirement.",
   "source_rebind": {
     "source_oid": "2d9f1024f1d0b1bfb3fe6a8b727762e7a979b3a0",
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
@@ -323,7 +323,7 @@
       "proof_trust": "compiler_trusted",
       "contract_scope": "Exact bounded native GoTrace check of `utxoBasicOuts.all checkUtxoBasic = true` for the listed current utxo_apply_basic vectors.",
       "limitations": [
-        "This exact trace check covers only the listed vectors and does not establish a universal UTXO refinement claim.",
+        "This exact trace check covers only the listed unchanged pre-retirement vectors and does not establish a universal UTXO refinement claim or prove the proposed 0x0105 retirement.",
         "It does not claim live Go/Rust implementation equivalence; separate universal theorems retain their own scope."
       ],
       "trace_source_file": "rubin-formal/RubinFormal/Refinement/GoTraceV1.lean",
