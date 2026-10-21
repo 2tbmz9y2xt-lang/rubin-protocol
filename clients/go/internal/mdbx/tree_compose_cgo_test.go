@@ -966,54 +966,76 @@ func TestTreeComposeReadbackErrorV1(t *testing.T) {
 	s.reopen(t, s.newRows(t)...)
 }
 
-// H3 (clean RP and RG), M13, M18b, M34, M35: readback unwinds consume the Store with UNKNOWN from the capture.
+// H3 (clean, recorded and sink-only RP and RG), M13, M18b, M34, M35, M42: readback unwinds consume the Store with
+// UNKNOWN from the capture and ReadbackCause nil, F or s.
 func TestTreeComposeReadbackUnwindV1(t *testing.T) {
+	f := treeIntegrity(operationGet, nil)
 	for _, goexit := range []bool{false, true} {
-		t.Run(fmt.Sprint(goexit), func(t *testing.T) {
-			s := tcNew(t, 3)
-			v := new(int)
-			s.prims[1].act = func(pos treePositionV1, _ *Reader, _ *treeRecorderV1) error {
-				if pos == treeReadbackV1 && goexit {
-					runtime.Goexit()
-				}
-				if pos == treeReadbackV1 {
-					panic(v)
-				}
-				return nil
-			}
-			check := func(r tcResult) {
-				if r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || r.unwind.kind != map[bool]uint8{false: 1, true: 2}[goexit] {
-					t.Errorf("readback unwind result %+v", r)
-				}
-				var commit *CommitError
-				if !errors.As(r.err, &commit) || commit.ReadbackCause != nil || commit.Truth != CommitTruthUnknown {
-					t.Errorf("readback unwind err %v", r.err)
-				}
-			}
-			if goexit {
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					var r tcResult
-					evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
-					if err != nil || evidence.commits < 1 {
-						t.Errorf("mode 12: %v %d", err, evidence.commits)
-					}
-					check(r)
-					s.settledNow(t)
-					r.unwind.resumeV1()
-				}()
-				<-done
-			} else {
-				r := s.crossed(t)
-				check(r)
-			}
-			if s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown || s.prims[2].calls[treeReadbackV1] != 0 {
-				t.Fatalf("state %v truth %d", s.store.state, s.store.terminalTruth)
-			}
-			s.settled(t)
-		})
+		for _, variant := range []string{"clean", "recorded", "sink"} {
+			t.Run(fmt.Sprint(goexit, variant), func(t *testing.T) {
+				tcReadbackUnwind(t, goexit, variant, f)
+			})
+		}
 	}
+}
+
+func tcReadbackUnwind(t *testing.T, goexit bool, variant string, f error) {
+	s := tcNew(t, 3)
+	v := new(int)
+	var want error
+	lag1 := s.prims[1]
+	lag1.custom = func(old *Reader, rec *treeRecorderV1) error {
+		if lag1.calls[treeReadbackV1] == 0 {
+			return lag1.stream(rec)
+		}
+		if variant != "sink" {
+			if err := lag1.stream(rec); err != nil {
+				t.Errorf("readback stream: %v", err)
+			}
+		}
+		want = tcFail(t, variant, f, old, rec)
+		if goexit {
+			runtime.Goexit()
+		}
+		panic(v)
+	}
+	check := func(r tcResult) {
+		if r.truth != CommitTruthUnknown || r.stage != UpdateStageCommitMayHaveCrossed || r.index != -1 || r.unwind.kind != map[bool]uint8{false: 1, true: 2}[goexit] {
+			t.Errorf("readback unwind result %+v", r)
+		}
+		var commit *CommitError
+		var cause *EngineError
+		if !errors.As(r.err, &commit) || !sameError(commit.ReadbackCause, want) || commit.Truth != CommitTruthUnknown || !errors.As(commit.Cause, &cause) || cause.Class != EngineCapacity || cause.Code != codeENOSPC || cause.Diagnostic != "error 28" || cause.Cause != nil {
+			t.Errorf("readback unwind err %v, want ReadbackCause %v", r.err, want)
+		}
+		if s.store.state != storeCLOSED || s.store.terminalTruth != CommitTruthUnknown || s.prims[2].calls[treeReadbackV1] != 0 {
+			t.Errorf("state %v truth %d LAG2 readback %d", s.store.state, s.store.terminalTruth, s.prims[2].calls[treeReadbackV1])
+		}
+		s.settledNow(t)
+	}
+	done, resumed := make(chan struct{}), false
+	go func() {
+		defer close(done)
+		var r tcResult
+		evidence, err := fixtureLargeFault(s.store, 12, 0, tcOut(), func() { r = s.run(nil) })
+		if err != nil || evidence.commits < 1 {
+			t.Errorf("mode 12: %v %d", err, evidence.commits)
+		}
+		check(r)
+		defer func() {
+			if got := recover(); !goexit && got != v {
+				t.Errorf("resumed %v", got)
+			}
+		}()
+		r.unwind.resumeV1()
+		resumed = true
+	}()
+	<-done
+	if resumed {
+		t.Fatal("statement after resumeV1 ran")
+	}
+	s.settled(t)
+	s.reopen(t, s.newRows(t)...)
 }
 
 // A4, M29: the readback returns W + F_fixed + C + R and D_j + V of CURRENT before LAG1's draw, so it completes
