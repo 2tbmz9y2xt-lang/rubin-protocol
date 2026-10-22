@@ -380,11 +380,21 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 
 func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
 	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
 	return decodeTreeAuthorityV1(b, &control, nil)
 }
 
 func inspectTreeAuthorityV1(b []byte) error {
 	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
 	var inspection authorityInspection
 	_, err := decodeTreeAuthorityV1(b, &control, &inspection)
 	return err
@@ -394,13 +404,13 @@ func decodeTreeAuthorityV1(b []byte, control *authorityDecodeControl, inspection
 	if !all(len(b) >= 67, len(b) <= MaxMetadataBytes) {
 		return TreeAuthorityV1{}, errSchema
 	}
-	r := authorityReader{b: b, ok: true, tree: true, control: control, inspection: inspection}
+	r := authorityReader{b: b, ok: true, tree: true}
 	tree, authorityBytes := decodeTreeEnvelope(&r)
 	if !r.ok {
 		return TreeAuthorityV1{}, errSchema
 	}
-	inner := authorityReader{b: authorityBytes, ok: true, tree: true, control: control, inspection: inspection}
-	tree.Authority = decodeAuthority(&inner)
+	inner := authorityReader{b: authorityBytes, ok: true, tree: true, borrowed: inspection != nil}
+	tree.Authority = decodeAuthority(&inner, control, inspection)
 	tree.Progress.Payload = r.take(r.remaining())
 	if !inner.ok || inner.remaining() != 0 {
 		return TreeAuthorityV1{}, errSchema

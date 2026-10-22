@@ -258,8 +258,13 @@ func DecodeStorageAuthorityV1(b []byte) (StorageAuthorityV1, error) {
 		return StorageAuthorityV1{}, errSchema
 	}
 	var control authorityDecodeControl
-	r := authorityReader{b: b, ok: true, control: &control}
-	a := decodeAuthority(&r)
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
+	r := authorityReader{b: b, ok: true}
+	a := decodeAuthority(&r, &control, nil)
 	if !r.ok || r.off != len(b) || ValidateStorageAuthorityV1(a) != nil {
 		return StorageAuthorityV1{}, errSchema
 	}
@@ -267,12 +272,11 @@ func DecodeStorageAuthorityV1(b []byte) (StorageAuthorityV1, error) {
 }
 
 type authorityReader struct {
-	b          []byte
-	off        int
-	ok         bool
-	tree       bool
-	control    *authorityDecodeControl
-	inspection *authorityInspection
+	b        []byte
+	off      int
+	ok       bool
+	tree     bool
+	borrowed bool
 }
 
 func (r *authorityReader) take(n int) []byte {
@@ -338,7 +342,7 @@ func (r *authorityReader) blob() []byte {
 		return nil
 	}
 	b := r.take(int(n)) // #nosec G115 -- n <= remaining <= MaxMetadataBytes is proved above.
-	if r.inspection != nil {
+	if r.borrowed {
 		return b
 	}
 	return append([]byte(nil), b...)
