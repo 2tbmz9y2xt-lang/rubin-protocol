@@ -984,8 +984,10 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 
 func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	for _, row := range []struct{ got, want uintptr }{
-		{unsafe.Sizeof(ownedMutation{}), 128}, {unsafe.Sizeof(ownedConsulted{}), 48},
-		{unsafe.Sizeof(treePrimitiveV1{}), 144}, {unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
+		{unsafe.Sizeof(ownedMutation{}), 128},
+		{unsafe.Sizeof(ownedConsulted{}), 48},
+		{unsafe.Sizeof(treePrimitiveV1{}), 144},
+		{unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
 	} {
 		if row.got != row.want {
 			t.Fatalf("resource layout%d want%d", row.got, row.want)
@@ -1051,11 +1053,17 @@ func TestTreeStreamPrimitiveCountDomainV1(t *testing.T) {
 
 func TestTreeStreamPlanChargeArithmeticV1(t *testing.T) {
 	for _, row := range []struct{ total, count, size, want uint64 }{
-		{0, 0, 128, 0}, {0, 1, 128, 128}, {0, 2, 48, 96},
-		{402653056, 1, 128, 402653184}, {402653057, 1, 128, 402653185},
-		{402653183, 1, 1, 402653184}, {402653184, 1, 1, 402653185},
-		{402653185, 0, 1, 402653185}, {0, 18446744073709551615, 128, 402653185},
-		{0, 144115188075855872, 128, 402653185}, {402653184, 18446744073709551615, 1, 402653185},
+		{0, 0, 128, 0},
+		{0, 1, 128, 128},
+		{0, 2, 48, 96},
+		{402653056, 1, 128, 402653184},
+		{402653057, 1, 128, 402653185},
+		{402653183, 1, 1, 402653184},
+		{402653184, 1, 1, 402653185},
+		{402653185, 0, 1, 402653185},
+		{0, 18446744073709551615, 128, 402653185},
+		{0, 144115188075855872, 128, 402653185},
+		{402653184, 18446744073709551615, 1, 402653185},
 	} {
 		if got := treePlanChargeAddV1(row.total, row.count, row.size); got != row.want {
 			t.Fatalf("scaled add (%d,%d,%d)=%d want%d", row.total, row.count, row.size, got, row.want)
