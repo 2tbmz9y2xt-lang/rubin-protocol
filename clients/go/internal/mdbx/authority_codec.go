@@ -4,6 +4,161 @@ import "encoding/binary"
 
 const authorityPointBytes, authorityDetachedBytes = 40, 48
 
+// Collection views borrow only during synchronous literal inspection. Owned
+// decoding and validation use the same accessors over their independent slices.
+type authorityPoints struct {
+	owned   []AuthorityPointV1
+	encoded []byte
+	count   int
+}
+
+func (v authorityPoints) len() int {
+	if v.encoded != nil {
+		return v.count
+	}
+	return len(v.owned)
+}
+
+func (v authorityPoints) at(i int) AuthorityPointV1 {
+	if v.encoded == nil {
+		return v.owned[i]
+	}
+	r := authorityReader{b: v.encoded[i*authorityPointBytes : (i+1)*authorityPointBytes], ok: true}
+	return decodePoint(&r)
+}
+
+func (v authorityPoints) contains(point AuthorityPointV1) bool {
+	for i := 0; i < v.len(); i++ {
+		if v.at(i) == point {
+			return true
+		}
+	}
+	return false
+}
+
+func (v authorityPoints) hasHash(hash [32]byte, end int) bool {
+	for i := 0; i < end; i++ {
+		if v.at(i).BlockHash == hash {
+			return true
+		}
+	}
+	return false
+}
+
+type authoritySpans struct {
+	owned   []CleanupSpanV1
+	encoded []byte
+	count   int
+}
+
+func (v authoritySpans) len() int {
+	if v.encoded != nil {
+		return v.count
+	}
+	return len(v.owned)
+}
+
+func (v authoritySpans) at(i int) CleanupSpanV1 {
+	if v.encoded == nil {
+		return v.owned[i]
+	}
+	r := authorityReader{b: v.encoded, ok: true}
+	for n := 0; ; n++ {
+		var span CleanupSpanV1
+		decodeSpan(&r, &span)
+		if n == i {
+			return span
+		}
+	}
+}
+
+func (v authoritySpans) contains(span CleanupSpanV1) bool {
+	for i := 0; i < v.len(); i++ {
+		if v.at(i) == span {
+			return true
+		}
+	}
+	return false
+}
+
+type authorityDetached struct {
+	owned   []DetachedSuffixEntryV1
+	encoded []byte
+	count   int
+}
+
+func (v authorityDetached) len() int {
+	if v.encoded != nil {
+		return v.count
+	}
+	return len(v.owned)
+}
+
+func (v authorityDetached) at(i int) DetachedSuffixEntryV1 {
+	if v.encoded == nil {
+		return v.owned[i]
+	}
+	r := authorityReader{b: v.encoded[i*authorityDetachedBytes : (i+1)*authorityDetachedBytes], ok: true}
+	return decodeDetachedEntry(&r)
+}
+
+func (v authorityDetached) hasHash(hash [32]byte, end int) bool {
+	for i := 0; i < end; i++ {
+		if v.at(i).Hash == hash {
+			return true
+		}
+	}
+	return false
+}
+
+type authorityInspection struct {
+	old, new       authorityPoints
+	phase, carried authoritySpans
+	detached       authorityDetached
+}
+
+type authorityDecodeControl struct {
+	cleanup  CleanupV1
+	replay   ReplayV1
+	ordinary OrdinaryApplyV1
+	pending  StorageProfileV1
+	excluded InvalidBranchV1
+	detached DetachedSuffixV1
+	failure  RecordedFailureV1
+	cursor   AuthorityPointV1
+	hash     [32]byte
+	selected SelectedSideV1
+}
+
+type authorityValidation struct {
+	StorageAuthorityV1
+	old, new       authorityPoints
+	phase, carried authoritySpans
+	detached       authorityDetached
+}
+
+func projectAuthority(a StorageAuthorityV1, inspection *authorityInspection) authorityValidation {
+	v := authorityValidation{StorageAuthorityV1: a}
+	if inspection != nil {
+		v.old, v.new = inspection.old, inspection.new
+		v.phase, v.carried, v.detached = inspection.phase, inspection.carried, inspection.detached
+		return v
+	}
+	if a.Cleanup != nil {
+		v.phase.owned = a.Cleanup.Spans
+	}
+	if a.Ordinary != nil {
+		v.old.owned, v.new.owned = a.Ordinary.OldSuffix, a.Ordinary.NewSuffix
+		if a.Ordinary.CarriedCleanup != nil {
+			v.carried.owned = a.Ordinary.CarriedCleanup.Spans
+		}
+	}
+	if a.DetachedSuffix != nil {
+		v.detached.owned = a.DetachedSuffix.Entries
+	}
+	return v
+}
+
 type authoritySizer uint64
 
 func (s *authoritySizer) add(value uint64) {
@@ -102,8 +257,14 @@ func DecodeStorageAuthorityV1(b []byte) (StorageAuthorityV1, error) {
 	if len(b) < 40 || len(b) > MaxMetadataBytes {
 		return StorageAuthorityV1{}, errSchema
 	}
+	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
 	r := authorityReader{b: b, ok: true}
-	a := decodeAuthority(&r)
+	a := decodeAuthority(&r, &control, nil)
 	if !r.ok || r.off != len(b) || ValidateStorageAuthorityV1(a) != nil {
 		return StorageAuthorityV1{}, errSchema
 	}
@@ -111,10 +272,11 @@ func DecodeStorageAuthorityV1(b []byte) (StorageAuthorityV1, error) {
 }
 
 type authorityReader struct {
-	b    []byte
-	off  int
-	ok   bool
-	tree bool
+	b        []byte
+	off      int
+	ok       bool
+	tree     bool
+	borrowed bool
 }
 
 func (r *authorityReader) take(n int) []byte {
@@ -179,5 +341,9 @@ func (r *authorityReader) blob() []byte {
 		r.ok = false
 		return nil
 	}
-	return append([]byte(nil), r.take(int(n))...) // #nosec G115 -- n <= remaining <= MaxMetadataBytes is proved above.
+	b := r.take(int(n)) // #nosec G115 -- n <= remaining <= MaxMetadataBytes is proved above.
+	if r.borrowed {
+		return b
+	}
+	return append([]byte(nil), b...)
 }

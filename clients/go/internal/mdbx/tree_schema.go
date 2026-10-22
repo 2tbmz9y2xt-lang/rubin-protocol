@@ -221,11 +221,13 @@ func ValidateTreeRow(d DBI, key, value []byte) error {
 	switch d.Rank {
 	case 0:
 		return treeMetaValue(key, value)
+	case 1:
+		_, err := decodeUTXOValue(value)
+		return err
 	case 3, 4:
 		var hash [32]byte
 		copy(hash[:], key)
-		_, err := HashBoundInitial148Value(hash, value, d.Rank == 4)
-		return err
+		return validateInitial148Value(hash, value, d.Rank == 4)
 	case 8:
 		_, id, _ := DecodeTreeNodeKey(key)
 		_, err := DecodeTreeNodeValue(id, value)
@@ -242,15 +244,13 @@ func treeMetaValue(key, value []byte) error {
 			return errSchema
 		}
 	case 2:
-		_, err := DecodeTreeAuthorityV1(value)
-		return err
+		return inspectTreeAuthorityV1(value)
 	case 3:
 		if !all(len(value) == 32, !bytes.Equal(value, make([]byte, 32))) {
 			return errSchema
 		}
 	case 0x11:
-		_, err := DecodeRootBindingV1(value)
-		return err
+		return inspectRootBindingV1(value)
 	case 0x12:
 		return validateTreeEvidenceRow(key[1:], value)
 	default:

@@ -191,11 +191,28 @@ func encodeTreeReference(out *[]byte, ref TreeImportReferenceV1) {
 	*out = append(*out, ref.EvidenceID[:]...)
 }
 
-func decodeTreeReference(r *authorityReader) *TreeImportReferenceV1 {
-	return &TreeImportReferenceV1{OriginalDatabaseID: r.hash32(), OriginalCurrentID: r.u64(), OriginalLagID: r.u64(), OriginalRole: TreeOriginalRoleV1(r.tag(2)), EvidenceID: r.hash32()}
+type rootDecodeControl struct {
+	top      TreeNodeIDV1
+	imported TreeImportReferenceV1
+}
+
+func decodeTreeReference(r *authorityReader, c *rootDecodeControl) *TreeImportReferenceV1 {
+	c.imported = TreeImportReferenceV1{OriginalDatabaseID: r.hash32(), OriginalCurrentID: r.u64(), OriginalLagID: r.u64(), OriginalRole: TreeOriginalRoleV1(r.tag(2)), EvidenceID: r.hash32()}
+	return &c.imported
 }
 
 func DecodeRootBindingV1(b []byte) (RootBindingV1, error) {
+	var control rootDecodeControl
+	return decodeRootBindingV1(b, &control)
+}
+
+func inspectRootBindingV1(b []byte) error {
+	var control rootDecodeControl
+	_, err := decodeRootBindingV1(b, &control)
+	return err
+}
+
+func decodeRootBindingV1(b []byte, control *rootDecodeControl) (RootBindingV1, error) {
 	if len(b) < 133 || len(b) > 328 {
 		return RootBindingV1{}, errSchema
 	}
@@ -205,10 +222,10 @@ func DecodeRootBindingV1(b []byte) (RootBindingV1, error) {
 	}
 	root := RootBindingV1{DatabaseID: r.hash32(), CommitmentVersion: r.u8(), ChainID: r.hash32(), GenesisHash: r.hash32()}
 	root.Endpoint = decodeTreeEndpoint(&r)
-	root.RootDigest, root.Top = r.hash32(), decodeTreeTop(&r)
+	root.RootDigest, root.Top = r.hash32(), decodeTreeTop(&r, control)
 	root.Assurance.Kind = TreeAssuranceKindV1(r.tag(2))
 	if root.Assurance.Kind == TreeAssuranceImportedBaseV1 {
-		root.Assurance.Import = decodeTreeReference(&r)
+		root.Assurance.Import = decodeTreeReference(&r, control)
 	}
 	if !all(r.ok, r.remaining() == 0, validRootBinding(root)) {
 		return RootBindingV1{}, errSchema
@@ -228,7 +245,7 @@ func decodeTreeEndpoint(r *authorityReader) TreeEndpointV1 {
 	return endpoint
 }
 
-func decodeTreeTop(r *authorityReader) TreeTopV1 {
+func decodeTreeTop(r *authorityReader, control *rootDecodeControl) TreeTopV1 {
 	top := TreeTopV1{Kind: TreeTopKindV1(r.u8())}
 	switch top.Kind {
 	case TreeTopEmptyV1:
@@ -238,7 +255,8 @@ func decodeTreeTop(r *authorityReader) TreeTopV1 {
 			r.ok = false
 			return top
 		}
-		top.Node = &id
+		control.top = id
+		top.Node = &control.top
 	default:
 		r.ok = false
 	}
@@ -288,13 +306,14 @@ func validTreeSource(tree TreeAuthorityV1) bool {
 	}
 }
 
-func validTreeRoles(tree TreeAuthorityV1) bool {
+func validTreeRoles(tree TreeAuthorityV1, projection authorityValidation) bool {
 	a := tree.Authority
-	roles := []uint64{a.ActiveGenerationID, tree.LagGenerationID}
+	roles := [4]uint64{a.ActiveGenerationID, tree.LagGenerationID}
+	n := 2
 	if a.Replay != nil {
-		roles = append(roles, a.Replay.TargetGenerationID, tree.TargetLagGenerationID)
+		roles[2], roles[3], n = a.Replay.TargetGenerationID, tree.TargetLagGenerationID, 4
 	}
-	for i, role := range roles {
+	for i, role := range roles[:n] {
 		if role == 0 || role >= a.NextGenerationID {
 			return false
 		}
@@ -304,27 +323,28 @@ func validTreeRoles(tree TreeAuthorityV1) bool {
 			}
 		}
 	}
-	return treeExcludedOwners(a, roles)
+	return treeExcludedOwners(projection, roles[:n])
 }
 
-func treeExcludedOwners(a StorageAuthorityV1, roles []uint64) bool {
-	cleanup, selected := a.Cleanup, a.SelectedSide
+func treeExcludedOwners(a authorityValidation, roles []uint64) bool {
+	cleanup, selected := a.phase, a.SelectedSide
 	if a.Ordinary != nil {
-		cleanup, selected = a.Ordinary.CarriedCleanup, a.Ordinary.CapturedSelectedSide
+		cleanup, selected = a.carried, a.Ordinary.CapturedSelectedSide
 	}
 	for _, role := range roles {
 		if selected != nil && selected.GenerationID == role {
 			return false
 		}
-		if cleanup != nil && !treeCleanupExcludes(cleanup, role) {
+		if !treeCleanupExcludes(cleanup, role) {
 			return false
 		}
 	}
 	return true
 }
 
-func treeCleanupExcludes(cleanup *CleanupV1, role uint64) bool {
-	for _, span := range cleanup.Spans {
+func treeCleanupExcludes(cleanup authoritySpans, role uint64) bool {
+	for i := 0; i < cleanup.len(); i++ {
+		span := cleanup.at(i)
 		if (span.Kind == CleanupSpanGenerationV1 || span.Kind == CleanupSpanSideV1) && span.GenerationID == role {
 			return false
 		}
@@ -333,8 +353,11 @@ func treeCleanupExcludes(cleanup *CleanupV1, role uint64) bool {
 }
 
 func validTreeAuthority(tree TreeAuthorityV1) bool {
-	a := tree.Authority
-	return validTreeSource(tree) && validTop(a) && validPhasePayloadFor(a, true) && validDescriptorsFor(a, true) && validOwners(a) && validTreeRoles(tree)
+	return validTreeAuthorityFor(tree, projectAuthority(tree.Authority, nil))
+}
+
+func validTreeAuthorityFor(tree TreeAuthorityV1, a authorityValidation) bool {
+	return validTreeSource(tree) && validTop(a.StorageAuthorityV1) && validPhasePayloadFor(a, true) && validDescriptorsFor(a, true) && validOwners(a) && validTreeRoles(tree, a)
 }
 
 func (tree TreeAuthorityV1) Encode() ([]byte, error) {
@@ -356,36 +379,75 @@ func (tree TreeAuthorityV1) Encode() ([]byte, error) {
 }
 
 func DecodeTreeAuthorityV1(b []byte) (TreeAuthorityV1, error) {
+	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
+	return decodeTreeAuthorityV1(b, &control, nil)
+}
+
+func inspectTreeAuthorityV1(b []byte) error {
+	var control authorityDecodeControl
+	control.ordinary.Cursor = &control.cursor
+	control.ordinary.CapturedSelectedSide = &control.selected
+	control.ordinary.CarriedCleanup = &control.cleanup
+	control.ordinary.RecordedFailure = &control.failure
+	control.failure.FailedBlockHash = &control.hash
+	var inspection authorityInspection
+	_, err := decodeTreeAuthorityV1(b, &control, &inspection)
+	return err
+}
+
+func decodeTreeAuthorityV1(b []byte, control *authorityDecodeControl, inspection *authorityInspection) (TreeAuthorityV1, error) {
 	if !all(len(b) >= 67, len(b) <= MaxMetadataBytes) {
 		return TreeAuthorityV1{}, errSchema
 	}
 	r := authorityReader{b: b, ok: true, tree: true}
-	if r.tag(1) != 1 {
+	tree, authorityBytes := decodeTreeEnvelope(&r)
+	if !r.ok {
 		return TreeAuthorityV1{}, errSchema
+	}
+	inner := authorityReader{b: authorityBytes, ok: true, tree: true, borrowed: inspection != nil}
+	tree.Authority = decodeAuthority(&inner, control, inspection)
+	tree.Progress.Payload = r.take(r.remaining())
+	if !inner.ok || inner.remaining() != 0 {
+		return TreeAuthorityV1{}, errSchema
+	}
+	if !validTreeAuthorityFor(tree, projectAuthority(tree.Authority, inspection)) {
+		return TreeAuthorityV1{}, errSchema
+	}
+	if inspection == nil {
+		tree.Progress.Payload = append([]byte(nil), tree.Progress.Payload...)
+	}
+	return tree, nil
+}
+
+func decodeTreeEnvelope(r *authorityReader) (TreeAuthorityV1, []byte) {
+	if r.tag(1) != 1 {
+		return TreeAuthorityV1{}, nil
 	}
 	tree := TreeAuthorityV1{SourceKind: TreeSourceKindV1(r.u8()), LagGenerationID: r.u64(), TargetLagGenerationID: r.u64()}
 	if tree.SourceKind > 2 {
-		return TreeAuthorityV1{}, errSchema
+		r.ok = false
+		return TreeAuthorityV1{}, nil
 	}
 	n := int64(r.u32())
 	if !all(n >= 40, n <= int64(r.remaining())) {
-		return TreeAuthorityV1{}, errSchema
+		r.ok = false
+		return TreeAuthorityV1{}, nil
 	}
 	authorityBytes := r.take(int(n))
 	tree.Progress.Kind = TreeProgressKindV1(r.u8())
 	if tree.Progress.Kind > 2 {
-		return TreeAuthorityV1{}, errSchema
+		r.ok = false
+		return TreeAuthorityV1{}, nil
 	}
 	payloadLength := int64(r.u32())
 	if !all(r.ok, payloadLength == int64(r.remaining())) {
-		return TreeAuthorityV1{}, errSchema
+		r.ok = false
+		return TreeAuthorityV1{}, nil
 	}
-	inner := authorityReader{b: authorityBytes, ok: true, tree: true}
-	tree.Authority = decodeAuthority(&inner)
-	tree.Progress.Payload = r.take(r.remaining())
-	if !all(inner.ok, inner.remaining() == 0, validTreeAuthority(tree)) {
-		return TreeAuthorityV1{}, errSchema
-	}
-	tree.Progress.Payload = append([]byte(nil), tree.Progress.Payload...)
-	return tree, nil
+	return tree, authorityBytes
 }
