@@ -5,9 +5,9 @@
 
 use rubin_consensus::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK,
-    COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_P2PK_COVENANT_DATA, SUITE_ID_ML_DSA_87,
+    COV_TYPE_VAULT, MAX_P2PK_COVENANT_DATA, SUITE_ID_ML_DSA_87,
 };
-use rubin_consensus::{parse_tx, validate_tx_covenants_genesis, Tx, TxInput, TxOutput};
+use rubin_consensus::{parse_tx, validate_tx_covenants_genesis, ErrorCode, Tx, TxInput, TxOutput};
 
 // =============================================================
 // Malformed tx bytes → parse_tx fails, never reaches genesis
@@ -156,13 +156,14 @@ fn cov_genesis_unknown_type_rejected() {
 }
 
 #[test]
-fn cov_genesis_reserved_future_rejected() {
+fn cov_genesis_unknown_00ff_rejected() {
     let tx = make_tx_with_outputs(vec![TxOutput {
         value: 100,
-        covenant_type: COV_TYPE_RESERVED_FUTURE,
+        covenant_type: 0x00FF,
         covenant_data: vec![0x00; 10],
     }]);
-    assert!(validate_tx_covenants_genesis(&tx, 1, None).is_err());
+    let err = validate_tx_covenants_genesis(&tx, 1, None).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]
@@ -274,7 +275,7 @@ fn cov_genesis_all_known_types_no_panic() {
         COV_TYPE_MULTISIG,
         0x0105,
         COV_TYPE_DA_COMMIT,
-        COV_TYPE_RESERVED_FUTURE,
+        0x00FF,
         0xFFFF,
     ] {
         let tx = make_tx_with_outputs(vec![TxOutput {

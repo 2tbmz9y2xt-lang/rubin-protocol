@@ -33,7 +33,7 @@ class CovenantRegistryDispositionTests(unittest.TestCase):
             0x0000: "CovenantDisposition.accepted CovenantKind.coreP2PK",
             0x0001: "CovenantDisposition.invalidCovenantType",
             0x0002: "CovenantDisposition.accepted CovenantKind.coreAnchor",
-            0x00FF: "CovenantDisposition.reserved",
+            0x00FF: "CovenantDisposition.invalidCovenantType",
             0x0100: "CovenantDisposition.accepted CovenantKind.coreHTLC",
             0x0101: "CovenantDisposition.accepted CovenantKind.coreVault",
             0x0102: "CovenantDisposition.invalidCovenantType",
@@ -60,7 +60,7 @@ class CovenantRegistryDispositionTests(unittest.TestCase):
                 "CovenantDisposition.errorCode? (covenantDisposition 0x0102) = some invalidCovenantTypeError",
                 "CovenantDisposition.errorCode? (covenantDisposition 0x0107) = some invalidCovenantTypeError",
                 "invalidCovenantTypeError = \"TX_ERR_COVENANT_TYPE_INVALID\"",
-                "CovenantDisposition.errorCode? (covenantDisposition 0x00FF) = none",
+                "CovenantDisposition.errorCode? (covenantDisposition 0x00FF) = some invalidCovenantTypeError",
                 'CovenantDisposition.errorCode? (covenantDisposition 261) = some "TX_ERR_COVENANT_TYPE_INVALID"',
                 "CovenantDisposition.errorCode? (covenantDisposition 0x0106) = none",
             ]

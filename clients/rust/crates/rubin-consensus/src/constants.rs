@@ -60,7 +60,6 @@ pub const MAX_SIMPLICITY_ENVELOPE_BYTES: usize = 32_768;
 
 pub const COV_TYPE_P2PK: u16 = 0x0000;
 pub const COV_TYPE_ANCHOR: u16 = 0x0002;
-pub const COV_TYPE_RESERVED_FUTURE: u16 = 0x00FF;
 pub const COV_TYPE_HTLC: u16 = 0x0100;
 pub const COV_TYPE_VAULT: u16 = 0x0101;
 pub const COV_TYPE_DA_COMMIT: u16 = 0x0103;

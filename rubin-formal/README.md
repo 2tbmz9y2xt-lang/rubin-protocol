@@ -40,9 +40,9 @@ and a registered formal row need not remain an independent manifest member.
 
 The single `spec_section_hashes_sha3_256` pins the exact approved locally prepared
 retirement manifest as a disposition; it proves no model applicability, canonical
-validity or client parity. The static Lean registry model now classifies
-`0x0105` as invalid, and the UTXO model no longer retains the `CV-ST-U-01`
-acceptance exception. These bounded model changes do not establish live-client
+validity or client parity. The static Lean registry model classifies
+every non-assigned tag, including `0x00FF`, `0x0102` and `0x0105`, as invalid,
+and the UTXO model refuses every non-retained tag. These bounded model changes do not establish live-client
 correctness or Go/Rust parity.
 Local spec preparation precedes metadata human merge, then spec first
 publication/merge, then client removal. Old canonical spec/new pin comparison
