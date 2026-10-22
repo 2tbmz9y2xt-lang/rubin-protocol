@@ -436,11 +436,11 @@ fn validate_tx_covenants_genesis_da_commit_valid_for_da_tx() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_reserved_future_rejected() {
+fn validate_tx_covenants_genesis_unknown_00ff_rejected() {
     let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
     tx.outputs = vec![crate::tx::TxOutput {
         value: 1,
-        covenant_type: COV_TYPE_RESERVED_FUTURE,
+        covenant_type: 0x00FF,
         covenant_data: vec![0x00],
     }];
     let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
