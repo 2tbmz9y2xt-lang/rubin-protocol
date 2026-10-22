@@ -467,12 +467,12 @@ func wantTreeModelLiteral(t *testing.T, a StorageAuthorityV1, valid bool) {
 	encodeAuthority(&inner, tree.Authority)
 	literal := treeEnvelopeLiteral(inner, byte(tree.SourceKind), 0, nil)
 	if valid {
-		wantTreeAuthority(t, tree)
 		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, literal, nil)
+		wantTreeAuthority(t, tree)
 		return
 	}
-	wantTreeAuthorityEncodeError(t, tree)
 	wantTreeAuthorityDecodeError(t, literal)
+	wantTreeAuthorityEncodeError(t, tree)
 }
 
 func TestTreeAuthorityLiterals(t *testing.T) {
