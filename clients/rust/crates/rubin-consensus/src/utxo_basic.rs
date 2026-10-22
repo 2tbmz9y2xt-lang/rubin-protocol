@@ -1729,7 +1729,7 @@ mod tests {
         assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
     }
 
-    fn assert_retired_apply_refusal(
+    fn assert_unknown_apply_refusal(
         tx: &Tx,
         utxo_set: &HashMap<Outpoint, UtxoEntry>,
         chain_id: [u8; 32],
@@ -1768,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn retired_0x0105_input_refusal_preserves_state_before_witness_work() {
+    fn unknown_0x0105_input_refusal_preserves_state_before_witness_work() {
         let (valid_tx, mut utxo_set, txid, chain_id) = signed_multisig_case();
         utxo_set.extend([utxo([0xb1; 32], 100, 0x0105, vec![0x55; 1600])]);
         let original = utxo_set.clone();
@@ -1782,7 +1782,7 @@ mod tests {
         for witness in [vec![], vec![extra.clone(), extra], vec![wrong_suite]] {
             let mut tx = unsigned_tx(0, 2, vec![tx_input([0xb1; 32])], valid_tx.outputs.clone());
             tx.witness = witness;
-            assert_retired_apply_refusal(
+            assert_unknown_apply_refusal(
                 &tx,
                 &utxo_set,
                 chain_id,
@@ -1797,15 +1797,15 @@ mod tests {
         assert_eq!(summary.fee, 10);
         assert_eq!(summary.utxo_count, 2);
         assert_eq!(utxo_set, original);
-        let retired = Outpoint {
+        let unknown = Outpoint {
             txid: [0xb1; 32],
             vout: 0,
         };
-        assert_eq!(next.get(&retired), original.get(&retired));
+        assert_eq!(next.get(&unknown), original.get(&unknown));
     }
 
     #[test]
-    fn retired_0x0105_output_precedes_missing_input() {
+    fn unknown_0x0105_output_precedes_missing_input() {
         let mut tx = unsigned_tx(
             0,
             1,
@@ -1813,16 +1813,16 @@ mod tests {
             vec![tx_output(1, 0x0105, vec![0x55; 1600])],
         );
         let utxo_set = HashMap::new();
-        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrCovenantTypeInvalid);
+        assert_unknown_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrCovenantTypeInvalid);
         tx.tx_nonce = 0;
-        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrTxNonceInvalid);
+        assert_unknown_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrTxNonceInvalid);
         tx.tx_nonce = 1;
         tx.inputs.clear();
-        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrParse);
+        assert_unknown_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrParse);
     }
 
     #[test]
-    fn retired_0x0105_resolution_keeps_bounded_input_order() {
+    fn unknown_0x0105_resolution_keeps_bounded_input_order() {
         let keypair = Mldsa87Keypair::generate().expect("prefix keypair");
         let cov = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
         let utxo_set = HashMap::from([
@@ -1848,7 +1848,7 @@ mod tests {
                 if prefix {
                     tx.witness = vec![sign_input_witness(&tx, 0, 100, [0; 32], &keypair)];
                 }
-                assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], expected);
+                assert_unknown_apply_refusal(&tx, &utxo_set, [0; 32], expected);
             }
         }
     }

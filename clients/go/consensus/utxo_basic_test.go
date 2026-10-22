@@ -78,7 +78,7 @@ func mustParseTxForUtxo(t *testing.T, txBytes []byte) (*Tx, [32]byte) {
 	return tx, txid
 }
 
-func retired0105WitnessCases() []struct {
+func unknown0105WitnessCases() []struct {
 	name    string
 	witness []WitnessItem
 } {
@@ -92,7 +92,7 @@ func retired0105WitnessCases() []struct {
 	}
 }
 
-func retired0105InputTx(t *testing.T, witness []WitnessItem) (*Tx, [32]byte) {
+func unknown0105InputTx(t *testing.T, witness []WitnessItem) (*Tx, [32]byte) {
 	t.Helper()
 	raw := txWithOneInputOneOutputWithWitness(hashWithPrefix(0xee), 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), witness)
 	return mustParseTxForUtxo(t, raw)
@@ -107,17 +107,17 @@ func snapshotRefusalUtxos(utxos map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 	return before
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_Retired0105NoEffects(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_Unknown0105NoEffects(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	sibling := Outpoint{Txid: hashWithPrefix(0xef)}
-	for _, tc := range retired0105WitnessCases() {
+	for _, tc := range unknown0105WitnessCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			utxos := map[Outpoint]UtxoEntry{
 				{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
 				sibling:                      {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 99},
 			}
 			backend := newLiveSigCacheBackend(t, true, nil)
-			tx, txid := retired0105InputTx(t, tc.witness)
+			tx, txid := unknown0105InputTx(t, tc.witness)
 			before := snapshotRefusalUtxos(utxos)
 			work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, txid, utxos, 200, 1, [32]byte{}, nil, nil)
 			assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
@@ -125,7 +125,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_Retired0105NoEffects(t *testing.T) {
 				t.Fatalf("refusal work=%v summary=%v backend calls=%d", work, summary, backend.calls)
 			}
 			if !reflect.DeepEqual(utxos, before) {
-				t.Fatal("retired input refusal changed the full caller snapshot")
+				t.Fatal("unknown input refusal changed the full caller snapshot")
 			}
 			// An independent retained spend still succeeds on that original snapshot.
 			tx, txid = mustParseTxForUtxo(t, txWithOneInputOneOutput(sibling.Txid, 0, 20, COV_TYPE_P2PK, validP2PKCovenantData()))
@@ -143,7 +143,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_Retired0105NoEffects(t *testing.T) {
 
 func TestApplyNonCoinbaseTxBasic_UnassignedInputTags(t *testing.T) {
 	for _, tag := range []uint16{0x0001, 0x00ff, 0x0102, 0x0107} {
-		tx, txid := retired0105InputTx(t, nil)
+		tx, txid := unknown0105InputTx(t, nil)
 		utxos := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: tag, CovenantData: make([]byte, 1600)}}
 		before := snapshotRefusalUtxos(utxos)
 		work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 1, [32]byte{})
@@ -154,7 +154,7 @@ func TestApplyNonCoinbaseTxBasic_UnassignedInputTags(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_Retired0105StageOrder(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_Unknown0105StageOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		nonce  uint64
@@ -189,7 +189,7 @@ func TestApplyNonCoinbaseTxBasic_Retired0105StageOrder(t *testing.T) {
 	}
 }
 
-func TestCheckTransaction_Retired0105KeepsParsePriority(t *testing.T) {
+func TestCheckTransaction_Unknown0105KeepsParsePriority(t *testing.T) {
 	valid := txWithOneInputOneOutput(hashWithPrefix(0xee), 0, 1, 0x0105, make([]byte, 1600))
 	for _, tc := range []struct {
 		name string
@@ -211,9 +211,9 @@ func TestCheckTransaction_Retired0105KeepsParsePriority(t *testing.T) {
 	}
 }
 
-func TestApplyNonCoinbaseTxBasic_Retired0105InputOrder(t *testing.T) {
+func TestApplyNonCoinbaseTxBasic_Unknown0105InputOrder(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
-	prefix, missing, retired := hashWithPrefix(0xe0), hashWithPrefix(0xe1), hashWithPrefix(0xee)
+	prefix, missing, unknown := hashWithPrefix(0xe0), hashWithPrefix(0xe1), hashWithPrefix(0xee)
 	for _, tc := range []struct {
 		name     string
 		first    [32]byte
@@ -222,10 +222,10 @@ func TestApplyNonCoinbaseTxBasic_Retired0105InputOrder(t *testing.T) {
 		immature bool
 		want     ErrorCode
 	}{
-		{"missing_first", missing, retired, false, false, "TX_ERR_MISSING_UTXO"},
-		{"retired_first_underflow", retired, missing, false, false, "TX_ERR_COVENANT_TYPE_INVALID"},
-		{"retired_first_extra", retired, missing, true, false, "TX_ERR_COVENANT_TYPE_INVALID"},
-		{"maturity_before_retired", retired, missing, false, true, "TX_ERR_COINBASE_IMMATURE"},
+		{"missing_first", missing, unknown, false, false, "TX_ERR_MISSING_UTXO"},
+		{"unknown_first_underflow", unknown, missing, false, false, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{"unknown_first_extra", unknown, missing, true, false, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{"maturity_before_unknown", unknown, missing, false, true, "TX_ERR_COINBASE_IMMATURE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &Tx{Version: 1, TxNonce: 1, Inputs: []TxInput{{PrevTxid: prefix}, {PrevTxid: tc.first}, {PrevTxid: tc.second}}, Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}}
@@ -240,7 +240,7 @@ func TestApplyNonCoinbaseTxBasic_Retired0105InputOrder(t *testing.T) {
 			tx, txid := mustParseTxForUtxo(t, raw)
 			utxos := map[Outpoint]UtxoEntry{
 				{Txid: prefix}:  {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())},
-				{Txid: retired}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 199, CreatedByCoinbase: tc.immature},
+				{Txid: unknown}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 199, CreatedByCoinbase: tc.immature},
 			}
 			before := snapshotRefusalUtxos(utxos)
 			work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 1, [32]byte{})

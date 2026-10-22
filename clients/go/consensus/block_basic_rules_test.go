@@ -221,7 +221,7 @@ func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
-func TestValidateBlockBasic_Retired0105Coinbase(t *testing.T) {
+func TestValidateBlockBasic_Unknown0105Coinbase(t *testing.T) {
 	coinbase, _ := mustParseTxForUtxo(t, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1))
 	coinbase.Outputs[0] = TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
 	raw, err := MarshalTx(coinbase)

@@ -258,10 +258,10 @@ func TestApplyNonCoinbaseTxBasicWorkQ_HTLCClaimBranch(t *testing.T) {
 	_ = nextUtxos
 }
 
-func TestApplyNonCoinbaseTxBasicWorkQ_Retired0105NoEffects(t *testing.T) {
-	for _, tc := range retired0105WitnessCases() {
+func TestApplyNonCoinbaseTxBasicWorkQ_Unknown0105NoEffects(t *testing.T) {
+	for _, tc := range unknown0105WitnessCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tx, txid := retired0105InputTx(t, tc.witness)
+			tx, txid := unknown0105InputTx(t, tc.witness)
 			utxos := map[Outpoint]UtxoEntry{
 				{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
 				{Txid: hashWithPrefix(0xef)}: {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: 99},
@@ -271,27 +271,27 @@ func TestApplyNonCoinbaseTxBasicWorkQ_Retired0105NoEffects(t *testing.T) {
 			queue.Push(0x01, []byte{7}, []byte{8}, [32]byte{9}, nil)
 			prefix := queue.tasks[0]
 			prefix.pubkey, prefix.sig = bytes.Clone(prefix.pubkey), bytes.Clone(prefix.sig)
-			backend := newLiveSigCacheBackend(t, false, errors.New("retired queued input reached verification"))
+			backend := newLiveSigCacheBackend(t, false, errors.New("unknown queued input reached verification"))
 			work, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(tx, txid, utxos, 200, 1, 1, [32]byte{}, queue, nil, nil)
 			assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
 			if work != nil || summary != nil || backend.calls != 0 {
 				t.Fatalf("refusal work=%v summary=%v backend calls=%d", work, summary, backend.calls)
 			}
 			if queue.Len() != 1 {
-				t.Fatalf("retired input refusal changed queue length: %d", queue.Len())
+				t.Fatalf("unknown input refusal changed queue length: %d", queue.Len())
 			}
 			got := queue.tasks[0]
 			if got.suiteID != prefix.suiteID || !bytes.Equal(got.pubkey, prefix.pubkey) || !bytes.Equal(got.sig, prefix.sig) || got.digest != prefix.digest || !errors.Is(got.errOnFail, prefix.errOnFail) || !errors.Is(prefix.errOnFail, got.errOnFail) {
-				t.Fatal("retired input refusal changed the queue prefix")
+				t.Fatal("unknown input refusal changed the queue prefix")
 			}
 			if !reflect.DeepEqual(utxos, before) {
-				t.Fatal("retired input refusal changed the full caller snapshot")
+				t.Fatal("unknown input refusal changed the full caller snapshot")
 			}
 		})
 	}
 }
 
-func assertRetired0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos map[Outpoint]UtxoEntry, want ErrorCode) {
+func assertUnknown0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos map[Outpoint]UtxoEntry, want ErrorCode) {
 	t.Helper()
 	prev, target := hashWithPrefix(0xed), filledHash(0xff)
 	txs := [][]byte{coinbaseWithWitnessCommitmentAtHeight(t, 200, prefix, rejected), prefix, rejected}
@@ -315,7 +315,7 @@ func assertRetired0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos 
 				calls = 0 // No queue flush is reached after the later refusal.
 			}
 			if summary != nil || backend.calls != calls || !reflect.DeepEqual(state.Utxos, before) || state.AlreadyGenerated.Cmp(generated) != 0 {
-				t.Fatalf("refusal published state/fee or verified the retired input: summary=%+v calls=%d", summary, backend.calls)
+				t.Fatalf("refusal published state/fee or verified the unknown input: summary=%+v calls=%d", summary, backend.calls)
 			}
 			// The discarded private nonce prefix does not prevent an independent valid block.
 			if summary, err := connectSupplyPath(parallel, validBlock, &prev, &target, 200, state); err != nil || summary == nil || summary.SumFees != Uint128FromU64(5) {
@@ -325,7 +325,7 @@ func assertRetired0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos 
 	}
 }
 
-func TestConnectBlock_Retired0105NoPublication(t *testing.T) {
+func TestConnectBlock_Unknown0105NoPublication(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	sibling := hashWithPrefix(0xef)
 	prefix, _ := mustParseTxForUtxo(t, txWithOneInputOneOutput(sibling, 0, 20, COV_TYPE_P2PK, validP2PKCovenantData()))
@@ -335,17 +335,17 @@ func TestConnectBlock_Retired0105NoPublication(t *testing.T) {
 		{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
 		{Txid: sibling}:              {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 99},
 	}
-	for _, tc := range retired0105WitnessCases() {
+	for _, tc := range unknown0105WitnessCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tx, _ := retired0105InputTx(t, tc.witness)
+			tx, _ := unknown0105InputTx(t, tc.witness)
 			tx.TxNonce = 2
-			assertRetired0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_COVENANT_TYPE_INVALID")
+			assertUnknown0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_COVENANT_TYPE_INVALID")
 		})
 	}
-	t.Run("nonce_replay_before_retired_creation", func(t *testing.T) {
-		tx, _ := retired0105InputTx(t, nil)
+	t.Run("nonce_replay_before_unknown_creation", func(t *testing.T) {
+		tx, _ := unknown0105InputTx(t, nil)
 		tx.Outputs[0] = TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
-		assertRetired0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_NONCE_REPLAY")
+		assertUnknown0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_NONCE_REPLAY")
 	})
 }
 

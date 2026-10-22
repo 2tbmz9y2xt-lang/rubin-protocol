@@ -256,7 +256,7 @@ fn apply_non_coinbase_tx_basic_workq_htlc_claim_branch() {
 }
 
 #[test]
-fn connect_block_retired_0x0105_refusal_preserves_state_and_nonce_prefix() {
+fn connect_block_unknown_0x0105_refusal_preserves_state_and_nonce_prefix() {
     let kp = test_mldsa87_keypair().expect("ML-DSA-87 available");
     let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
     let mut prefix = p2pk_tx(1, vec![p2pk_input([0xa1; 32])], 90, cov.clone());
@@ -287,13 +287,13 @@ fn connect_block_retired_0x0105_refusal_preserves_state_and_nonce_prefix() {
         ]),
         already_generated: 0,
     };
-    for (retired_output, nonce, expected) in [
+    for (unknown_output, nonce, expected) in [
         (false, 2, ErrorCode::TxErrCovenantTypeInvalid),
         (true, 2, ErrorCode::TxErrCovenantTypeInvalid),
         (true, 1, ErrorCode::TxErrNonceReplay),
     ] {
         let mut refused = p2pk_tx(nonce, vec![p2pk_input([0xb1; 32])], 90, cov.clone());
-        if retired_output {
+        if unknown_output {
             refused.inputs[0].prev_txid = [0xc1; 32];
             refused.outputs[0] = crate::TxOutput {
                 value: 1,

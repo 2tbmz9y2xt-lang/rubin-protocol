@@ -57,7 +57,7 @@ REQUIRED_SECTION_EVIDENCE_LEVELS = {
     "parallel_validation_equivalence": "machine_checked_universal",
     "native_rotation": "machine_checked_universal",
     "spend_gate_bridge": "machine_checked_universal",
-    "threshold_stealth_spend_suite_gate": "machine_checked_universal",
+    "threshold_spend_suite_gate": "machine_checked_universal",
     "htlc_spend_side_structural": "machine_checked_universal",
     "create_side_live_gate": "machine_checked_universal",
     "htlc_spend_side_crypto_assumption": "machine_checked_assumption_backed",

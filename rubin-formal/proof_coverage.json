@@ -1531,7 +1531,7 @@
       "evidence_level": "machine_checked_universal"
     },
     {
-      "section_key": "threshold_stealth_spend_suite_gate",
+      "section_key": "threshold_spend_suite_gate",
       "section_heading": "## Threshold Spend Pre-Rotation Suite Gate Bridge",
       "status": "proved",
       "proof_trust": "compiler_trusted",
@@ -1550,10 +1550,10 @@
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_passes_on_gate_accept": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean",
         "RubinFormal.ThresholdSpendSuiteGateBridge.live_threshold_suite_check_rejects_on_gate_reject": "rubin-formal/RubinFormal/ThresholdSpendSuiteGateBridge.lean"
       },
-      "notes": "Pre-rotation-only bridge for the threshold-sig per-item comparison in validateThresholdSigSpendNoCrypto. The section_key threshold_stealth_spend_suite_gate is a historical name; its registered theorems cover threshold comparison only. They bind only the no-descriptor singleton ML-DSA-87 case; descriptor-present and post-rotation behavior is excluded and fails closed.",
+      "notes": "Pre-rotation-only bridge for the threshold-sig per-item comparison in validateThresholdSigSpendNoCrypto. Its registered theorems cover threshold comparison only. They bind only the no-descriptor singleton ML-DSA-87 case; descriptor-present and post-rotation behavior is excluded and fails closed.",
       "limitations": [
         "Per-item pre-rotation comparison only; threshold counting and all descriptor-present/post-rotation behavior remain outside this row.",
-        "No independent stealth live model or Go/Rust parity claim is registered."
+        "No Go/Rust parity claim is registered."
       ],
       "evidence_level": "machine_checked_universal"
     },

@@ -837,10 +837,10 @@ func TestValidateTxLocal_Vault_SigValid(t *testing.T) {
 	}
 }
 
-func TestValidateTxLocal_Retired0105(t *testing.T) {
-	for _, tc := range retired0105WitnessCases() {
+func TestValidateTxLocal_Unknown0105(t *testing.T) {
+	for _, tc := range unknown0105WitnessCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			tx, _ := retired0105InputTx(t, tc.witness)
+			tx, _ := unknown0105InputTx(t, tc.witness)
 			sighashCache, err := NewSighashV1PrehashCache(tx)
 			if err != nil {
 				t.Fatalf("NewSighashV1PrehashCache: %v", err)
@@ -849,7 +849,7 @@ func TestValidateTxLocal_Retired0105(t *testing.T) {
 			before := snapshotRefusalUtxos(map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xee)}: resolved[0]})
 			tvc := TxValidationContext{TxIndex: 1, Tx: tx, ResolvedInputs: resolved, WitnessEnd: len(tx.Witness), SighashCache: sighashCache, Fee: Uint128FromU64(10)}
 			cache := NewSigCache(4)
-			backend := newLiveSigCacheBackend(t, false, errors.New("retired worker input reached verification"))
+			backend := newLiveSigCacheBackend(t, false, errors.New("unknown worker input reached verification"))
 			result := ValidateTxLocal(tvc, [32]byte{}, 200, 1, cache)
 			assertTxErrCode(t, result.Err, "TX_ERR_COVENANT_TYPE_INVALID")
 			if result.Valid || result.SigCount != 0 || result.Fee != Uint128FromU64(10) || backend.calls != 0 || cache.Len() != 0 || cache.Hits() != 0 {
