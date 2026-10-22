@@ -148,7 +148,9 @@ func validProfilePromises(a StorageAuthorityV1) bool {
 	return false
 }
 
-func validPhasePayload(a StorageAuthorityV1) bool { return validPhasePayloadFor(projectAuthority(a, nil), false) }
+func validPhasePayload(a StorageAuthorityV1) bool {
+	return validPhasePayloadFor(projectAuthority(a, nil), false)
+}
 
 func validPhasePayloadFor(a authorityValidation, tree bool) bool {
 	pending := a.PendingTargetProfile != nil

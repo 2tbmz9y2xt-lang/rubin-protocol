@@ -600,18 +600,46 @@ func TestTreeAuthorityLiterals(t *testing.T) {
 		{"DISCONNECT failure", func(o *OrdinaryApplyV1) { o.RecordedFailure = modelFailure(1) }},
 		{"CONNECT OLD cursor", func(o *OrdinaryApplyV1) { o.Stage = 2; p := o.OldSuffix[0]; o.Cursor = &p }},
 		{"CONNECT nil cursor", func(o *OrdinaryApplyV1) { o.Stage = 2 }},
-		{"CONNECT failure", func(o *OrdinaryApplyV1) { o.Stage = 2; p := o.NewSuffix[0]; o.Cursor, o.RecordedFailure = &p, modelFailure(1) }},
+		{"CONNECT failure", func(o *OrdinaryApplyV1) {
+			o.Stage = 2
+			p := o.NewSuffix[0]
+			o.Cursor, o.RecordedFailure = &p, modelFailure(1)
+		}},
 		{"ROLLBACK missing failure", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p }},
 		{"ROLLBACK nil cursor", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 3, modelFailure(1) }},
 		{"RESTORE nil cursor", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 4, modelFailure(2) }},
 		{"RESTORE missing failure", func(o *OrdinaryApplyV1) { o.Stage = 4; p := o.OldSuffix[1]; o.Cursor = &p }},
-		{"RESTORE no OLD", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 4, modelFailure(2); p := o.OldSuffix[1]; o.Cursor = &p; o.OldSuffix = nil }},
+		{"RESTORE no OLD", func(o *OrdinaryApplyV1) {
+			o.Stage, o.RecordedFailure = 4, modelFailure(2)
+			p := o.OldSuffix[1]
+			o.Cursor = &p
+			o.OldSuffix = nil
+		}},
 		{"wrong target", func(o *OrdinaryApplyV1) { o.Target.BlockHash = modelHash(99) }},
 		{"wrong captured tip", func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.TipHash = modelHash(99) }},
 		{"wrong captured F", func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.F++; o.CapturedSelectedSide.RowCount = 2 }},
-		{"failure empty result", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); o.RecordedFailure.ExactResult = nil }},
-		{"failure empty evidence", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); o.RecordedFailure.Evidence = nil }},
-		{"failure hash outside NEW", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); h := modelHash(99); o.RecordedFailure.FailedBlockHash = &h }},
+		{"failure empty result", func(o *OrdinaryApplyV1) {
+			o.Stage = 3
+			p := o.NewSuffix[0]
+			o.Cursor = &p
+			o.RecordedFailure = modelFailure(1)
+			o.RecordedFailure.ExactResult = nil
+		}},
+		{"failure empty evidence", func(o *OrdinaryApplyV1) {
+			o.Stage = 3
+			p := o.NewSuffix[0]
+			o.Cursor = &p
+			o.RecordedFailure = modelFailure(1)
+			o.RecordedFailure.Evidence = nil
+		}},
+		{"failure hash outside NEW", func(o *OrdinaryApplyV1) {
+			o.Stage = 3
+			p := o.NewSuffix[0]
+			o.Cursor = &p
+			o.RecordedFailure = modelFailure(1)
+			h := modelHash(99)
+			o.RecordedFailure.FailedBlockHash = &h
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			a := modelOrdinary(1, 3, 3, 3, 1, 0, 0)

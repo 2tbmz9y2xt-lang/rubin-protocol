@@ -92,7 +92,9 @@ func validDetachedFor(d *DetachedSuffixV1, entries authorityDetached, tree bool)
 	return all(d.Cursor == (AuthorityPointV1{Height: first.Height, BlockHash: first.Hash}), d.LogicalBytes == sum)
 }
 
-func validDescriptors(a StorageAuthorityV1) bool { return validDescriptorsFor(projectAuthority(a, nil), false) }
+func validDescriptors(a StorageAuthorityV1) bool {
+	return validDescriptorsFor(projectAuthority(a, nil), false)
+}
 
 func validDescriptorsFor(a authorityValidation, tree bool) bool {
 	if a.SelectedSide != nil && !validSelectedFor(a.SelectedSide, tree) {
