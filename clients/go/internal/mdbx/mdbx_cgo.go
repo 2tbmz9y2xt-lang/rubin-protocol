@@ -4531,6 +4531,10 @@ func treeUpdateRefusal() error {
 	return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree store requires typed tree operation", nil)
 }
 
+func treeStreamRefusalV1() error {
+	return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "typed tree operation requires tree store", nil)
+}
+
 func treeIntegrity(op engineOperation, cause error) error {
 	// Positive representation facts are an adapter result, not a native
 	// MDBX_CORRUPTED return. They require no reopen/retry interpretation.

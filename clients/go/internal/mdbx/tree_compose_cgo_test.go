@@ -211,7 +211,10 @@ func tcNew(t *testing.T, n int) *tcScene {
 func (s *tcScene) plan() *treePlanV1 {
 	plan := &treePlanV1{pair: s.pair}
 	for _, p := range s.prims {
-		plan.primitives = append(plan.primitives, treePrimitivePlanV1{treePrimitiveV1: p.prim, source: p.source})
+		plan.primitives = append(plan.primitives, TreePrimitiveV1{
+			Direction: TreeDirectionV1(p.prim.direction), Kind: TreePrimitiveKindV1(p.prim.kind), Undo: TreeUndoEffectV1(p.prim.undo),
+			Generation: p.prim.generation, Height: p.prim.height, Block: p.prim.block, Endpoint: p.prim.endpoint, Source: treeSourceV1(p.source),
+		})
 	}
 	return plan
 }
