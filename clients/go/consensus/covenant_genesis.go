@@ -59,7 +59,7 @@ func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, chainID [32]byte
 		return [32]byte{}, false, validateAnchorGenesisOutput(out)
 	case COV_TYPE_DA_COMMIT:
 		return [32]byte{}, false, validateDACommitGenesisOutput(txKind, out)
-	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_STEALTH:
+	case COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC:
 		return [32]byte{}, false, validateParsedValueGenesisOutput(out)
 	case COV_TYPE_CORE_SIMPLICITY:
 		return validateCoreSimplicityGenesisOutput(out, chainID, blockHeight, simplicityDeployment)
@@ -118,8 +118,6 @@ func validateParsedValueGenesisOutput(out TxOutput) error {
 		return validateMultisigGenesisOutput(out)
 	case COV_TYPE_HTLC:
 		return validateHTLCGenesisOutput(out)
-	case COV_TYPE_CORE_STEALTH:
-		return validateCoreStealthGenesisOutput(out)
 	default:
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
 	}
@@ -149,14 +147,6 @@ func validateHTLCGenesisOutput(out TxOutput) error {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC value must be > 0")
 	}
 	return nil
-}
-
-func validateCoreStealthGenesisOutput(out TxOutput) error {
-	if out.Value == 0 {
-		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_STEALTH value must be > 0")
-	}
-	_, err := ParseStealthCovenantData(out.CovenantData)
-	return err
 }
 
 func validateDACommitGenesisOutput(txKind byte, out TxOutput) error {

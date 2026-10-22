@@ -32,13 +32,6 @@ fn dummy_witness() -> WitnessItem {
     }
 }
 
-fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
-    let mut cov = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
-    let split = cov.len() - 32;
-    cov[split..].copy_from_slice(&sha3_256(pubkey));
-    cov
-}
-
 fn make_parsed_block(coinbase: Tx, txs: Vec<Tx>) -> ParsedBlock {
     let mut all_txs = Vec::with_capacity(1 + txs.len());
     all_txs.push(coinbase);
@@ -573,61 +566,70 @@ fn validate_tx_local_real_signature_full_path() {
 }
 
 #[test]
-fn validate_tx_local_stealth_valid() {
-    let kp = match super::test_mldsa87_keypair() {
-        Some(kp) => kp,
-        None => return,
+fn validate_tx_local_retired_0x0105_refuses_before_witness_dispatch() {
+    let extra = WitnessItem {
+        suite_id: 0,
+        pubkey: vec![],
+        signature: vec![],
     };
-
-    let prev_txid = [0x55u8; 32];
-    let mut tx = Tx {
-        version: 1,
-        tx_kind: 0x00,
-        tx_nonce: 3,
-        inputs: vec![TxInput {
-            prev_txid,
-            prev_vout: 0,
-            script_sig: Vec::new(),
-            sequence: 0,
-        }],
-        outputs: vec![TxOutput {
-            value: 90,
-            covenant_type: COV_TYPE_P2PK,
-            covenant_data: super::p2pk_covenant_data_for_pubkey(&kp.pubkey),
-        }],
-        locktime: 0,
-        da_commit_core: None,
-        da_chunk_core: None,
-        witness: Vec::new(),
-        da_payload: Vec::new(),
-    };
-    tx.witness = vec![super::sign_input_witness(&tx, 0, 100, [0u8; 32], &kp)];
-
-    let pb = make_parsed_block(simple_coinbase(), vec![tx]);
-    let ptc = PrecomputedTxContext {
-        tx_index: 1,
-        tx_block_idx: 1,
-        txid: [0u8; 32],
-        resolved_inputs: vec![UtxoEntry {
-            value: 100,
-            covenant_type: COV_TYPE_CORE_STEALTH,
-            covenant_data: stealth_covenant_data_for_pubkey(&kp.pubkey),
-            creation_height: 1,
-            created_by_coinbase: false,
-        }],
-        witness_start: 0,
-        witness_end: 1,
-        input_outpoints: vec![Outpoint {
-            txid: prev_txid,
-            vout: 0,
-        }],
-        fee: 10,
-    };
-
-    let result = validate_tx_local(&ptc, &pb, [0u8; 32], 100, 0, None);
-    assert!(result.valid, "expected valid, got {:?}", result.err);
-    assert!(result.err.is_none());
-    assert_eq!(result.sig_count, 1);
+    let mut wrong_suite = dummy_witness();
+    wrong_suite.suite_id = 0x02;
+    for witness in [vec![], vec![extra.clone(), extra], vec![wrong_suite]] {
+        let mut tx = simple_p2pk_tx(0x55);
+        tx.witness = witness;
+        let bytes = crate::marshal_tx(&tx).expect("marshal");
+        let (tx, txid, _, consumed) = crate::parse_tx(&bytes).expect("admitted encoding");
+        assert_eq!(consumed, bytes.len());
+        let witness_end = tx.witness.len();
+        let before_tx = tx.clone();
+        let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+        let ptc = PrecomputedTxContext {
+            tx_index: 1,
+            tx_block_idx: 1,
+            txid,
+            resolved_inputs: vec![UtxoEntry {
+                value: 100,
+                covenant_type: 0x0105,
+                covenant_data: vec![0x55; 1600],
+                creation_height: 0,
+                created_by_coinbase: false,
+            }],
+            witness_start: 0,
+            witness_end,
+            input_outpoints: vec![Outpoint {
+                txid: [0x55; 32],
+                vout: 0,
+            }],
+            fee: 10,
+        };
+        let before_ptc = ptc.clone();
+        let cache = crate::SigCache::new(8);
+        let result = validate_tx_local(&ptc, &pb, [0; 32], 200, 0, Some(&cache));
+        assert!(!result.valid);
+        assert_eq!(
+            result.err.as_ref().unwrap().code,
+            ErrorCode::TxErrCovenantTypeInvalid
+        );
+        assert_eq!((result.sig_count, result.fee), (0, 10));
+        let pooled = run_tx_validation_workers(
+            &WorkerCancellationToken::new(),
+            2,
+            vec![ptc.clone()],
+            &pb,
+            [0; 32],
+            200,
+            0,
+            Some(cache.clone()),
+        )
+        .expect("completed worker");
+        assert_eq!(pooled.len(), 1);
+        assert!(pooled[0].error.is_none());
+        assert_eq!(pooled[0].value.as_ref(), Some(&result));
+        assert_eq!(first_tx_error(&pooled), result.err);
+        assert_eq!(ptc, before_ptc);
+        assert_eq!(pb.txs[1], before_tx);
+        assert_eq!((cache.len(), cache.hits(), cache.misses()), (0, 0, 0));
+    }
 }
 
 #[test]

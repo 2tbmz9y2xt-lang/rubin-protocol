@@ -4,6 +4,12 @@
 **Baseline:** origin/main@7e00b641 (post-rotation: PR#728 Go + PR#736 Rust)
 **Runner:** `conformance/runner/run_cv_bundle.py`
 
+**Historical coverage note (2026-10-22, RUB-1710):** The result and suite list
+below describe the original 2026-03-18 baseline. `CV-STEALTH` and the three
+`NATIVE-ROT-SPEND-STEALTH-01/02/03` vectors are retired under the separately
+invoked canonical governance permission. Their identities remain permanently
+nonreusable; this historical result is not evidence of current coverage.
+
 ## Result
 
 ```

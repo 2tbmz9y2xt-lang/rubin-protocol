@@ -39,13 +39,8 @@ pub const MAX_VAULT_KEYS: u8 = 12;
 pub const MAX_VAULT_WHITELIST_ENTRIES: u16 = 1024;
 pub const MAX_MULTISIG_KEYS: u8 = 12;
 pub const COV_TYPE_MULTISIG: u16 = 0x0104;
-pub const COV_TYPE_CORE_STEALTH: u16 = 0x0105;
-pub const CORE_STEALTH_WITNESS_SLOTS: u64 = 1;
 pub const COV_TYPE_CORE_SIMPLICITY: u16 = 0x0106;
 pub const SIMPLICITY_WITNESS_SLOTS: u64 = 1;
-
-#[deprecated(note = "use COV_TYPE_CORE_STEALTH")]
-pub const COV_TYPE_STEALTH: u16 = COV_TYPE_CORE_STEALTH;
 
 pub const MAX_TX_INPUTS: u64 = 1024;
 pub const MAX_TX_OUTPUTS: u64 = 1024;
@@ -75,8 +70,6 @@ pub const LOCK_MODE_TIMESTAMP: u8 = 0x01;
 
 pub const ML_DSA_87_PUBKEY_BYTES: u64 = 2592;
 pub const ML_DSA_87_SIG_BYTES: u64 = 4627;
-pub const ML_KEM_1024_CT_BYTES: u64 = 1568;
-pub const MAX_STEALTH_COVENANT_DATA: u64 = 1600;
 
 pub const SIGHASH_ALL: u8 = 0x01;
 pub const SIGHASH_NONE: u8 = 0x02;
@@ -108,23 +101,11 @@ mod tests {
     #[test]
     fn core_cov_type_names_preserve_wire_values() {
         assert_eq!(COV_TYPE_DA_COMMIT, 0x0103);
-        assert_eq!(COV_TYPE_CORE_STEALTH, 0x0105);
         assert_eq!(COV_TYPE_CORE_SIMPLICITY, 0x0106);
-        assert_eq!(COV_TYPE_CORE_STEALTH.to_le_bytes(), 0x0105u16.to_le_bytes());
         assert_eq!(
             COV_TYPE_CORE_SIMPLICITY.to_le_bytes(),
             0x0106u16.to_le_bytes()
         );
         assert_eq!(SIMPLICITY_WITNESS_SLOTS, 1);
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn legacy_cov_type_aliases_preserve_wire_values() {
-        assert_eq!(COV_TYPE_STEALTH, COV_TYPE_CORE_STEALTH);
-        assert_eq!(
-            COV_TYPE_STEALTH.to_le_bytes(),
-            COV_TYPE_CORE_STEALTH.to_le_bytes()
-        );
     }
 }

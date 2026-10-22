@@ -1,6 +1,5 @@
 use super::test_support::{
-    encode_htlc_claim_payload, htlc_spend_context, make_stealth_entry, sign_witness,
-    test_tx_context,
+    encode_htlc_claim_payload, htlc_spend_context, sign_witness, test_tx_context,
 };
 use super::*;
 use crate::constants::{
@@ -9,7 +8,6 @@ use crate::constants::{
 use crate::hash::sha3_256;
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend_q};
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
-use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_q};
 use crate::suite_registry::SuiteRegistry;
 use crate::tx::WitnessItem;
 use crate::tx_helpers::p2pk_covenant_data_for_pubkey;
@@ -179,33 +177,4 @@ fn validate_htlc_spend_q_defers_and_flushes() {
     assert_eq!(queue.len(), 1);
     queue.flush().expect("flush");
     assert!(parse_htlc_covenant_data(&entry.covenant_data).is_ok());
-}
-
-#[test]
-fn validate_stealth_spend_q_defers_and_flushes() {
-    let keypair = Mldsa87Keypair::generate().expect("keypair");
-    let one_time_key_id = sha3_256(&keypair.pubkey_bytes());
-    let entry = make_stealth_entry(one_time_key_id);
-    let (tx, input_index, input_value, chain_id) = test_tx_context();
-    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
-    let witness = sign_witness(&keypair, &tx, input_index, input_value, chain_id);
-    let registry = SuiteRegistry::default_registry();
-    let mut queue = SigCheckQueue::new(1).with_registry(&registry);
-
-    validate_stealth_spend_q(
-        &entry,
-        &witness,
-        input_index,
-        input_value,
-        chain_id,
-        0,
-        &mut cache,
-        Some(&mut queue),
-        None,
-        Some(&registry),
-    )
-    .expect("queued stealth");
-    assert_eq!(queue.len(), 1);
-    queue.flush().expect("flush");
-    assert!(parse_stealth_covenant_data(&entry.covenant_data).is_ok());
 }

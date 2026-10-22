@@ -1523,50 +1523,28 @@ fn threshold_spend_rejects_non_native_suite_via_rotation() {
 }
 
 #[test]
-fn stealth_spend_rejects_non_native_suite_via_rotation() {
-    use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteRegistry};
-
-    struct EmptySpend;
-    impl RotationProvider for EmptySpend {
-        fn native_create_suites(&self, _h: u64) -> NativeSuiteSet {
-            NativeSuiteSet::new(&[])
-        }
-        fn native_spend_suites(&self, _h: u64) -> NativeSuiteSet {
-            NativeSuiteSet::new(&[])
-        }
-    }
-
-    let entry = crate::utxo_basic::UtxoEntry {
-        value: 100,
-        covenant_type: COV_TYPE_CORE_STEALTH,
-        covenant_data: vec![0u8; MAX_STEALTH_COVENANT_DATA as usize],
-        creation_height: 0,
-        created_by_coinbase: false,
-    };
-    let w = crate::tx::WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: vec![],
-        signature: vec![],
-    };
-    let tx_bytes = minimal_tx_bytes();
-    let (tx, _, _, _) = parse_tx(&tx_bytes).expect("parse");
-    let mut cache = crate::sighash::SighashV1PrehashCache::new(&tx).expect("cache");
-    let rp = EmptySpend;
-    let reg = SuiteRegistry::default_registry();
-    let err = crate::stealth::validate_stealth_spend_at_height(
-        &entry,
-        &w,
-        &tx,
-        0,
-        100,
-        [0u8; 32],
-        0,
-        &mut cache,
-        Some(&rp),
-        Some(&reg),
-    )
-    .unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigAlgInvalid);
+fn validate_block_basic_coinbase_retired_0x0105_rejected() {
+    let wroot = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
+    let coinbase = coinbase_tx_with_outputs(
+        1,
+        &[
+            TestOutput {
+                value: 1,
+                covenant_type: 0x0105,
+                covenant_data: vec![0x55; 1600],
+            },
+            TestOutput {
+                value: 0,
+                covenant_type: COV_TYPE_ANCHOR,
+                covenant_data: witness_commitment_hash(wroot).to_vec(),
+            },
+        ],
+    );
+    let (_, txid, _, _) = parse_tx(&coinbase).expect("parse coinbase");
+    let root = merkle_root_txids(&[txid]).expect("merkle root");
+    let block = build_block_bytes([0x22; 32], root, [0xff; 32], 9, &[coinbase]);
+    let err = validate_block_basic_at_height(&block, None, None, 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
 }
 
 #[test]

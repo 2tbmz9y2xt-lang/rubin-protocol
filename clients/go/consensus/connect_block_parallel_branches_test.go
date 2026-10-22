@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"math/big"
 	"reflect"
 	"testing"
 )
@@ -257,46 +258,95 @@ func TestApplyNonCoinbaseTxBasicWorkQ_HTLCClaimBranch(t *testing.T) {
 	_ = nextUtxos
 }
 
-func TestApplyNonCoinbaseTxBasicWorkQ_StealthBranch(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkQ_Retired0105NoEffects(t *testing.T) {
+	for _, tc := range retired0105WitnessCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, txid := retired0105InputTx(t, tc.witness)
+			utxos := map[Outpoint]UtxoEntry{
+				{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
+				{Txid: hashWithPrefix(0xef)}: {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: 99},
+			}
+			before := snapshotRefusalUtxos(utxos)
+			queue := NewSigCheckQueue(1)
+			queue.Push(0x01, []byte{7}, []byte{8}, [32]byte{9}, nil)
+			prefix := queue.tasks[0]
+			prefix.pubkey, prefix.sig = bytes.Clone(prefix.pubkey), bytes.Clone(prefix.sig)
+			backend := newLiveSigCacheBackend(t, false, errors.New("retired queued input reached verification"))
+			work, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(tx, txid, utxos, 200, 1, 1, [32]byte{}, queue, nil, nil)
+			assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
+			if work != nil || summary != nil || backend.calls != 0 {
+				t.Fatalf("refusal work=%v summary=%v backend calls=%d", work, summary, backend.calls)
+			}
+			if queue.Len() != 1 {
+				t.Fatalf("retired input refusal changed queue length: %d", queue.Len())
+			}
+			got := queue.tasks[0]
+			if got.suiteID != prefix.suiteID || !bytes.Equal(got.pubkey, prefix.pubkey) || !bytes.Equal(got.sig, prefix.sig) || got.digest != prefix.digest || !errors.Is(got.errOnFail, prefix.errOnFail) || !errors.Is(prefix.errOnFail, got.errOnFail) {
+				t.Fatal("retired input refusal changed the queue prefix")
+			}
+			if !reflect.DeepEqual(utxos, before) {
+				t.Fatal("retired input refusal changed the full caller snapshot")
+			}
+		})
+	}
+}
+
+func assertRetired0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos map[Outpoint]UtxoEntry, want ErrorCode) {
+	t.Helper()
+	prev, target := hashWithPrefix(0xed), filledHash(0xff)
+	txs := [][]byte{coinbaseWithWitnessCommitmentAtHeight(t, 200, prefix, rejected), prefix, rejected}
+	block := buildBlockBytes(t, prev, MerkleRootFromTxBytes(t, txs), target, 1, txs)
+	validTxs := [][]byte{coinbaseWithWitnessCommitmentAtHeight(t, 200, prefix), prefix}
+	validBlock := buildBlockBytes(t, prev, MerkleRootFromTxBytes(t, validTxs), target, 1, validTxs)
+	for _, parallel := range []bool{false, true} {
+		name := "sequential"
+		if parallel {
+			name = "parallel"
+		}
+		t.Run(name, func(t *testing.T) {
+			state := &InMemoryChainState{Utxos: snapshotRefusalUtxos(utxos), AlreadyGenerated: new(big.Int)}
+			before := snapshotRefusalUtxos(state.Utxos)
+			generated := new(big.Int).Set(state.AlreadyGenerated)
+			backend := newLiveSigCacheBackend(t, true, nil)
+			summary, err := connectSupplyPath(parallel, block, &prev, &target, 200, state)
+			assertTxErrCode(t, err, want)
+			calls := 1 // The accepted P2PK prefix verifies once on the sequential path.
+			if parallel {
+				calls = 0 // No queue flush is reached after the later refusal.
+			}
+			if summary != nil || backend.calls != calls || !reflect.DeepEqual(state.Utxos, before) || state.AlreadyGenerated.Cmp(generated) != 0 {
+				t.Fatalf("refusal published state/fee or verified the retired input: summary=%+v calls=%d", summary, backend.calls)
+			}
+			// The discarded private nonce prefix does not prevent an independent valid block.
+			if summary, err := connectSupplyPath(parallel, validBlock, &prev, &target, 200, state); err != nil || summary == nil || summary.SumFees != Uint128FromU64(5) {
+				t.Fatalf("subsequent valid block summary=%+v err=%v", summary, err)
+			}
+		})
+	}
+}
+
+func TestConnectBlock_Retired0105NoPublication(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
-	keyID := sha3_256(kp.PubkeyBytes())
-
-	covData := makeStealthCovenantData(keyID)
-	prevTxid := hashWithPrefix(0xEE)
-
-	utxoSet := map[Outpoint]UtxoEntry{
-		{Txid: prevTxid, Vout: 0}: {
-			Value:        500,
-			CovenantType: COV_TYPE_CORE_STEALTH,
-			CovenantData: covData,
-		},
+	sibling := hashWithPrefix(0xef)
+	prefix, _ := mustParseTxForUtxo(t, txWithOneInputOneOutput(sibling, 0, 20, COV_TYPE_P2PK, validP2PKCovenantData()))
+	prefix.Witness = []WitnessItem{signP2PKInputWitness(t, prefix, 0, 25, [32]byte{}, kp)}
+	prefixBytes := txBytesFromTx(t, prefix)
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
+		{Txid: sibling}:              {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 99},
 	}
-
-	outCovData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs:  []TxInput{{PrevTxid: prevTxid, PrevVout: 0, Sequence: 0}},
-		Outputs: []TxOutput{{Value: 400, CovenantType: COV_TYPE_P2PK, CovenantData: outCovData}},
+	for _, tc := range retired0105WitnessCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, _ := retired0105InputTx(t, tc.witness)
+			tx.TxNonce = 2
+			assertRetired0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_COVENANT_TYPE_INVALID")
+		})
 	}
-
-	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 500, [32]byte{}, kp)}
-
-	q := NewSigCheckQueue(1)
-	nextUtxos, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xFF), utxoSet, 1, 0, [32]byte{}, q, nil, nil)
-	if err != nil {
-		t.Fatalf("stealth branch: %v", err)
-	}
-	if err := q.Flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	if fee.Cmp(Uint128FromU64(100)) != 0 {
-		t.Errorf("expected fee=100, got %d", fee)
-	}
-	if len(nextUtxos) != 1 {
-		t.Errorf("expected 1 UTXO, got %d", len(nextUtxos))
-	}
+	t.Run("nonce_replay_before_retired_creation", func(t *testing.T) {
+		tx, _ := retired0105InputTx(t, nil)
+		tx.Outputs[0] = TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
+		assertRetired0105BlockRefusal(t, prefixBytes, txBytesFromTx(t, tx), utxos, "TX_ERR_NONCE_REPLAY")
+	})
 }
 
 func TestApplyNonCoinbaseTxBasicWorkQ_ErrorPaths(t *testing.T) {
@@ -988,9 +1038,13 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 	})
 
 	t.Run("vault_disallowed_destination_type", func(t *testing.T) {
-		ownerKP, vaultKP, _, ownerCovData, vaultCovData, _, _, _ := buildVaultSpendSetup(t)
+		ownerKP, vaultKP, _, ownerCovData, _, destCovData, ownerLockID, whitelistH := buildVaultSpendSetup(t)
 
-		stealthOutData := stealthCovenantDataForKeyID([32]byte{0x01})
+		anchorOutData := []byte{0x01}
+		anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
+		whitelistA, whitelistB := sortKeys32(anchorH, whitelistH)
+		vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
+		vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
 
 		prevVault := hashWithPrefix(0xB2)
 		prevOwner := hashWithPrefix(0xB3)
@@ -1003,7 +1057,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 				{PrevTxid: prevOwner, PrevVout: 0, Sequence: 0},
 			},
 			Outputs: []TxOutput{
-				{Value: 50, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: stealthOutData},
+				{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: anchorOutData},
+				{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 			},
 		}
 		tx.Witness = []WitnessItem{
@@ -1017,12 +1072,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 		}
 		q := NewSigCheckQueue(1)
 		_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxos, 200, 0, [32]byte{}, q, nil, nil)
-		if err == nil {
-			t.Fatal("expected disallowed destination type error")
-		}
-		if !isTxErrCode(err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED) {
-			t.Fatalf("expected TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, got: %v", err)
-		}
+		assertTxErrCodeMsg(t, err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
 	})
 }
 

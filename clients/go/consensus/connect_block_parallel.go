@@ -390,13 +390,6 @@ func applyNonCoinbaseTxBasicWorkQ(
 			); err != nil {
 				return nil, Uint128{}, err
 			}
-		case COV_TYPE_CORE_STEALTH:
-			if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
-				return nil, Uint128{}, txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
-			}
-			if err := validateCoreStealthSpendQ(entry, assigned[0], tx, uint32(inputIndex), entry.Value, chainID, height, sighashCache, sigQueue, rotation, registry); err != nil {
-				return nil, Uint128{}, err
-			}
 		case COV_TYPE_CORE_SIMPLICITY:
 			if len(assigned) != SIMPLICITY_WITNESS_SLOTS {
 				return nil, Uint128{}, txerr(TX_ERR_PARSE, "CORE_SIMPLICITY witness_slots must be 1")

@@ -2,31 +2,6 @@ package consensus
 
 import "testing"
 
-func TestCoverageResidual4_StealthInvalidSighashType(t *testing.T) {
-	var chainID [32]byte
-	var prev [32]byte
-	prev[0] = 0x71
-
-	kp := mustMLDSA87Keypair(t)
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
-	tx, _ := mustParseTxForUtxo(t, txBytes)
-	validWitness := signP2PKInputWitness(t, tx, 0, 100, chainID, kp)
-	validWitness.Signature[len(validWitness.Signature)-1] = 0x7f
-
-	entry := UtxoEntry{
-		Value:        100,
-		CovenantType: COV_TYPE_CORE_STEALTH,
-		CovenantData: stealthCovenantDataForKeyID(sha3_256(validWitness.Pubkey)),
-	}
-	err := validateCoreStealthSpend(entry, validWitness, tx, 0, 100, chainID, 200)
-	if err == nil {
-		t.Fatalf("expected invalid sighash rejection")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_SIGHASH_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_SIGHASH_TYPE_INVALID)
-	}
-}
-
 func TestCoverageResidual4_ParseTxAdditionalBranches(t *testing.T) {
 	t.Run("standard_tx_rejects_da_payload", func(t *testing.T) {
 		bad := append([]byte(nil), minimalTxBytes()...)
@@ -190,34 +165,5 @@ func TestCoverageResidual4_U128HelperBranches(t *testing.T) {
 
 	if _, err := addU64ToU128(u128{hi: ^uint64(0), lo: ^uint64(0)}, 1); err == nil || mustTxErrCode(t, err) != TX_ERR_PARSE {
 		t.Fatalf("expected addU64ToU128 overflow, got %v", err)
-	}
-}
-
-func TestCoverageResidual4_ApplyNonCoinbaseTxBasicWorkStealthSpend(t *testing.T) {
-	var chainID [32]byte
-	var prev [32]byte
-	prev[0] = 0x72
-
-	kp := mustMLDSA87Keypair(t)
-	txBytes := txWithOneInputOneOutput(prev, 0, 90, COV_TYPE_P2PK, validP2PKCovenantData())
-	tx, txid := mustParseTxForUtxo(t, txBytes)
-	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chainID, kp)}
-
-	utxos := map[Outpoint]UtxoEntry{
-		{Txid: prev, Vout: 0}: {
-			Value:        100,
-			CovenantType: COV_TYPE_CORE_STEALTH,
-			CovenantData: stealthCovenantDataForKeyID(sha3_256(kp.PubkeyBytes())),
-		},
-	}
-	work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 0, chainID)
-	if err != nil {
-		t.Fatalf("ApplyNonCoinbaseTxBasicUpdate(stealth): %v", err)
-	}
-	if summary == nil || summary.Fee.Cmp(Uint128FromU64(10)) != 0 {
-		t.Fatalf("unexpected summary: %+v", summary)
-	}
-	if len(work) != 1 {
-		t.Fatalf("unexpected work size: %d", len(work))
 	}
 }
