@@ -1,7 +1,6 @@
 use crate::constants::{
-    COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA,
-    MAX_STEALTH_COVENANT_DATA, ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
-    SUITE_ID_SENTINEL,
+    COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, MAX_HTLC_COVENANT_DATA, SIGHASH_ALL,
+    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
 };
 use crate::hash::sha3_256;
 use crate::htlc::HtlcSpendContext;
@@ -86,18 +85,6 @@ pub(super) fn encode_htlc_claim_payload(preimage: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(preimage.len() as u16).to_le_bytes());
     out.extend_from_slice(preimage);
     out
-}
-
-pub(super) fn make_stealth_entry(one_time_key_id: [u8; 32]) -> UtxoEntry {
-    let mut out = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
-    out[ML_KEM_1024_CT_BYTES as usize..].copy_from_slice(&one_time_key_id);
-    UtxoEntry {
-        value: 100,
-        covenant_type: COV_TYPE_CORE_STEALTH,
-        covenant_data: out,
-        creation_height: 0,
-        created_by_coinbase: false,
-    }
 }
 
 // Build a valid HTLC claim fixture shared by queued-spend tests.

@@ -67,7 +67,7 @@ structure SimplicityExecOut where
   accepted : Option Bool
   finalCounter : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "717efa88e7fcc549d659b58aa4b83d56051fd42daf1b8d9df51f91233e0770d8"
+def goTraceFixturesDigestSHA3_256 : String := "ad91b1064599c784592e03795ce38f6e77fa559eded994fc5effd9c18f2072c8"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },
@@ -104,6 +104,7 @@ def utxoBasicOuts : List UtxoBasicOut := [
   { id := "CV-U-19", ok := true, err := "", fee := some 100, utxoCount := some 0 },
   { id := "CV-U-FEE-U128-01", ok := true, err := "", fee := some 18446744073709551616, utxoCount := some 0 },
   { id := "CV-U-UNKCOV-01", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
+  { id := "CV-U-UNKCOV-0105-01", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-UNKCOV-02", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-UNKCOV-03", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none },
   { id := "CV-U-UNKCOV-06", ok := false, err := "TX_ERR_COVENANT_TYPE_INVALID", fee := none, utxoCount := none }

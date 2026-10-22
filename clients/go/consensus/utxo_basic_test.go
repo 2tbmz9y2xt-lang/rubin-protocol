@@ -1,7 +1,7 @@
 package consensus
 
 import (
-	"errors"
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -76,6 +76,186 @@ func mustParseTxForUtxo(t *testing.T, txBytes []byte) (*Tx, [32]byte) {
 		t.Fatalf("ParseTx: %v", err)
 	}
 	return tx, txid
+}
+
+func retired0105WitnessCases() []struct {
+	name    string
+	witness []WitnessItem
+} {
+	return []struct {
+		name    string
+		witness []WitnessItem
+	}{
+		{name: "none"},
+		{name: "extra", witness: dummyWitnesses(2)},
+		{name: "wrong_suite", witness: []WitnessItem{{SuiteID: 0x02, Pubkey: make([]byte, 2592), Signature: bytes.Repeat([]byte{0x01}, 4628)}}},
+	}
+}
+
+func retired0105InputTx(t *testing.T, witness []WitnessItem) (*Tx, [32]byte) {
+	t.Helper()
+	raw := txWithOneInputOneOutputWithWitness(hashWithPrefix(0xee), 0, 90, COV_TYPE_P2PK, validP2PKCovenantData(), witness)
+	return mustParseTxForUtxo(t, raw)
+}
+
+func snapshotRefusalUtxos(utxos map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
+	before := make(map[Outpoint]UtxoEntry, len(utxos))
+	for op, entry := range utxos {
+		entry.CovenantData = bytes.Clone(entry.CovenantData)
+		before[op] = entry
+	}
+	return before
+}
+
+func TestApplyNonCoinbaseTxBasicUpdate_Retired0105NoEffects(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	sibling := Outpoint{Txid: hashWithPrefix(0xef)}
+	for _, tc := range retired0105WitnessCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			utxos := map[Outpoint]UtxoEntry{
+				{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 100},
+				sibling:                      {Value: 25, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 99},
+			}
+			backend := newLiveSigCacheBackend(t, true, nil)
+			tx, txid := retired0105InputTx(t, tc.witness)
+			before := snapshotRefusalUtxos(utxos)
+			work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, txid, utxos, 200, 1, [32]byte{}, nil, nil)
+			assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
+			if work != nil || summary != nil || backend.calls != 0 {
+				t.Fatalf("refusal work=%v summary=%v backend calls=%d", work, summary, backend.calls)
+			}
+			if !reflect.DeepEqual(utxos, before) {
+				t.Fatal("retired input refusal changed the full caller snapshot")
+			}
+			// An independent retained spend still succeeds on that original snapshot.
+			tx, txid = mustParseTxForUtxo(t, txWithOneInputOneOutput(sibling.Txid, 0, 20, COV_TYPE_P2PK, validP2PKCovenantData()))
+			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 25, [32]byte{}, kp)}
+			work, summary, err = ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 1, [32]byte{})
+			if err != nil || summary == nil || summary.Fee != Uint128FromU64(5) || len(work) != 2 || backend.calls != 1 {
+				t.Fatalf("subsequent retained spend summary=%+v work=%v calls=%d err=%v", summary, work, backend.calls, err)
+			}
+			if !reflect.DeepEqual(utxos, before) {
+				t.Fatal("subsequent independent operation changed the supplied snapshot")
+			}
+		})
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_UnassignedInputTags(t *testing.T) {
+	for _, tag := range []uint16{0x0001, 0x00ff, 0x0102, 0x0107} {
+		tx, txid := retired0105InputTx(t, nil)
+		utxos := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: tag, CovenantData: make([]byte, 1600)}}
+		before := snapshotRefusalUtxos(utxos)
+		work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 1, [32]byte{})
+		assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
+		if work != nil || summary != nil || !reflect.DeepEqual(utxos, before) {
+			t.Fatalf("unassigned tag 0x%04x published work or changed caller UTXOs", tag)
+		}
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_Retired0105StageOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		nonce  uint64
+		inputs []TxInput
+		want   ErrorCode
+	}{
+		{"nonce", 0, nil, "TX_ERR_TX_NONCE_INVALID"},
+		{"input_count", 1, nil, "TX_ERR_PARSE"},
+		{"output_before_missing", 1, []TxInput{{PrevTxid: hashWithPrefix(0xe1)}}, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{"output_before_unsupported", 1, []TxInput{{PrevTxid: hashWithPrefix(0xe2)}}, "TX_ERR_COVENANT_TYPE_INVALID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{Version: 1, TxNonce: tc.nonce, Inputs: tc.inputs, Outputs: []TxOutput{{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}}}
+			raw, err := MarshalTx(tx)
+			if err != nil {
+				t.Fatalf("MarshalTx: %v", err)
+			}
+			utxos := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xe2)}: {Value: 100, CovenantType: 0x0107, CovenantData: []byte{0xff}}}
+			before := snapshotRefusalUtxos(utxos)
+			checked, err := CheckTransaction(raw, utxos, 200, 1, [32]byte{})
+			assertTxErrCode(t, err, tc.want)
+			if checked != nil || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("rejection published a result or changed caller UTXOs")
+			}
+			queue := NewSigCheckQueue(1)
+			work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xe3), utxos, 200, 1, [32]byte{}, queue, nil, nil)
+			assertTxErrCode(t, err, tc.want)
+			if work != nil || fee != (Uint128{}) || queue.Len() != 0 || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("queued stage rejection published a result or changed caller state")
+			}
+		})
+	}
+}
+
+func TestCheckTransaction_Retired0105KeepsParsePriority(t *testing.T) {
+	valid := txWithOneInputOneOutput(hashWithPrefix(0xee), 0, 1, 0x0105, make([]byte, 1600))
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want ErrorCode
+	}{
+		{"truncated", valid[:len(valid)-1], "TX_ERR_PARSE"},
+		{"registered_witness_shape", txWithOneInputOneOutputWithWitness(hashWithPrefix(0xee), 0, 1, 0x0105, make([]byte, 1600), []WitnessItem{{SuiteID: 0x01, Pubkey: []byte{1}, Signature: []byte{1}}}), "TX_ERR_SIG_NONCANONICAL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			utxos := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xee)}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}}
+			before := snapshotRefusalUtxos(utxos)
+			checked, err := CheckTransaction(tc.raw, utxos, 200, 1, [32]byte{})
+			assertTxErrCode(t, err, tc.want)
+			if checked != nil || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("parse rejection published a result or changed caller UTXOs")
+			}
+		})
+	}
+}
+
+func TestApplyNonCoinbaseTxBasic_Retired0105InputOrder(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	prefix, missing, retired := hashWithPrefix(0xe0), hashWithPrefix(0xe1), hashWithPrefix(0xee)
+	for _, tc := range []struct {
+		name     string
+		first    [32]byte
+		second   [32]byte
+		extra    bool
+		immature bool
+		want     ErrorCode
+	}{
+		{"missing_first", missing, retired, false, false, "TX_ERR_MISSING_UTXO"},
+		{"retired_first_underflow", retired, missing, false, false, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{"retired_first_extra", retired, missing, true, false, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{"maturity_before_retired", retired, missing, false, true, "TX_ERR_COINBASE_IMMATURE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &Tx{Version: 1, TxNonce: 1, Inputs: []TxInput{{PrevTxid: prefix}, {PrevTxid: tc.first}, {PrevTxid: tc.second}}, Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}}
+			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
+			if tc.extra {
+				tx.Witness = append(tx.Witness, dummyWitnesses(2)...)
+			}
+			raw, err := MarshalTx(tx)
+			if err != nil {
+				t.Fatalf("MarshalTx: %v", err)
+			}
+			tx, txid := mustParseTxForUtxo(t, raw)
+			utxos := map[Outpoint]UtxoEntry{
+				{Txid: prefix}:  {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes())},
+				{Txid: retired}: {Value: 100, CovenantType: 0x0105, CovenantData: make([]byte, 1600), CreationHeight: 199, CreatedByCoinbase: tc.immature},
+			}
+			before := snapshotRefusalUtxos(utxos)
+			work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, txid, utxos, 200, 1, [32]byte{})
+			assertTxErrCode(t, err, tc.want)
+			if work != nil || summary != nil || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("ordered rejection published work/summary or changed caller UTXOs")
+			}
+			queue := NewSigCheckQueue(1)
+			work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 1, [32]byte{}, queue, nil, nil)
+			assertTxErrCode(t, err, tc.want)
+			if work != nil || fee != (Uint128{}) || queue.Len() != 0 || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("queued input-order rejection published work/fee or changed caller state")
+			}
+		})
+	}
 }
 
 func TestApplyNonCoinbaseTxBasicUpdate_P2PKOK(t *testing.T) {
@@ -707,15 +887,19 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 
 	vaultKP := mustMLDSA87Keypair(t)
 	ownerKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
 
 	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
 	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	destLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
 
-	stealthOutData := stealthCovenantDataForKeyID([32]byte{0x01})
-	whitelistH := sha3_256(OutputDescriptorBytes(COV_TYPE_CORE_STEALTH, stealthOutData))
+	anchorOutData := []byte{0x01}
+	anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
+	whitelistA, whitelistB := sortKeys32(anchorH, destLockID)
 
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
-	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistH})
+	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
 
 	tx := &Tx{
 		Version: 1,
@@ -726,7 +910,8 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 			{PrevTxid: prevFee, PrevVout: 0},
 		},
 		Outputs: []TxOutput{
-			{Value: 100, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: stealthOutData},
+			{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: anchorOutData},
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
 	}
 	tx.Witness = []WitnessItem{
@@ -748,12 +933,7 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 	}
 
 	_, err := ApplyNonCoinbaseTxBasic(tx, txid, utxos, 200, 1000, chainID)
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-	if got := mustTxErrCode(t, err); got != TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED {
-		t.Fatalf("code=%s, want %s", got, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED)
-	}
+	assertTxErrCodeMsg(t, err, TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "disallowed destination covenant_type for CORE_VAULT spend")
 }
 
 func TestApplyNonCoinbaseTxBasic_VaultRejectsFeeSponsor(t *testing.T) {
@@ -867,16 +1047,9 @@ func TestApplyNonCoinbaseTxBasic_MultisigInputAccepted(t *testing.T) {
 }
 
 func TestWitnessSlotsUnknownCovenantRejected(t *testing.T) {
-	_, err := WitnessSlots(0x7777, nil)
-	if err == nil {
-		t.Fatal("WitnessSlots must reject unknown covenant type")
-	}
-	var txErr *TxError
-	if !errors.As(err, &txErr) {
-		t.Fatalf("expected TxError, got %T", err)
-	}
-	if txErr.Code != TX_ERR_COVENANT_TYPE_INVALID {
-		t.Fatalf("code=%s, want %s", txErr.Code, TX_ERR_COVENANT_TYPE_INVALID)
+	for _, tag := range []uint16{0x0001, 0x00ff, 0x0102, 0x0105, 0x0107, 0x7777} {
+		_, err := WitnessSlots(tag, make([]byte, 1600))
+		assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
 	}
 }
 

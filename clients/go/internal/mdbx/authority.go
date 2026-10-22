@@ -148,9 +148,11 @@ func validProfilePromises(a StorageAuthorityV1) bool {
 	return false
 }
 
-func validPhasePayload(a StorageAuthorityV1) bool { return validPhasePayloadFor(a, false) }
+func validPhasePayload(a StorageAuthorityV1) bool {
+	return validPhasePayloadFor(projectAuthority(a, nil), false)
+}
 
-func validPhasePayloadFor(a StorageAuthorityV1, tree bool) bool {
+func validPhasePayloadFor(a authorityValidation, tree bool) bool {
 	pending := a.PendingTargetProfile != nil
 	switch a.Phase {
 	case StoragePhaseNoneV1:
@@ -158,7 +160,7 @@ func validPhasePayloadFor(a StorageAuthorityV1, tree bool) bool {
 			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending)))
 	case StoragePhasePruneGCV1:
 		return all(a.Cleanup != nil, a.Replay == nil, a.Ordinary == nil,
-			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanupFor(a.Cleanup, tree)
+			anyTrue(all(a.Lifecycle == StorageLifecycleStableV1, !pending), all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, pending))) && validCleanupFor(a.phase, tree)
 	case StoragePhaseReplayV1:
 		return all(a.Lifecycle == StorageLifecycleRecoveryRequiredV1, a.Cleanup == nil, a.Replay != nil, a.Ordinary == nil, !pending) && validReplayFor(a.Replay, tree)
 	case StoragePhaseOrdinaryApplyV1:
@@ -181,7 +183,7 @@ func validTop(a StorageAuthorityV1) bool {
 }
 
 func ValidateStorageAuthorityV1(a StorageAuthorityV1) error {
-	if !validTop(a) || !validPhasePayload(a) || !validDescriptors(a) || !validOwners(a) {
+	if !validTop(a) || !validPhasePayload(a) || !validDescriptors(a) || !validOwners(projectAuthority(a, nil)) {
 		return errSchema
 	}
 	return nil

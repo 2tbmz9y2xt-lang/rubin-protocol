@@ -1,14 +1,15 @@
 package mdbx
 
-func validCleanupRelations(a StorageAuthorityV1, cleanup *CleanupV1, selected *SelectedSideV1, side uint64) (uint64, bool) {
+func validCleanupRelations(a StorageAuthorityV1, cleanup authoritySpans, selected *SelectedSideV1, side uint64) (uint64, bool) {
 	obsolete, first := uint64(0), uint64(0)
-	if cleanup == nil {
+	if cleanup.len() == 0 {
 		return obsolete, true
 	}
 	if selected != nil {
 		first = selected.TipHeight - uint64(selected.RowCount) + 1
 	}
-	for _, span := range cleanup.Spans {
+	for i := 0; i < cleanup.len(); i++ {
+		span := cleanup.at(i)
 		owner := [5]bool{
 			false,
 			all(span.GenerationID != a.ActiveGenerationID, span.GenerationID != side),
@@ -26,35 +27,34 @@ func validCleanupRelations(a StorageAuthorityV1, cleanup *CleanupV1, selected *S
 	return obsolete, true
 }
 
-func validOwners(a StorageAuthorityV1) bool {
-	replay, cleanup, selected := uint64(0), a.Cleanup, a.SelectedSide
+func validOwners(a authorityValidation) bool {
+	replay, cleanup, selected := uint64(0), a.phase, a.SelectedSide
 	if a.Replay != nil {
 		replay = a.Replay.TargetGenerationID
 	}
 	if a.Ordinary != nil {
-		cleanup, selected = a.Ordinary.CarriedCleanup, a.Ordinary.CapturedSelectedSide
+		cleanup, selected = a.carried, a.Ordinary.CapturedSelectedSide
 	}
 	side, sidesOK := ownerSide(selected, cleanup)
 	if !sidesOK || (a.Ordinary == nil && !validLiveSide(selected, cleanup)) {
 		return false
 	}
-	obsolete, cleanupOK := validCleanupRelations(a, cleanup, selected, side)
+	obsolete, cleanupOK := validCleanupRelations(a.StorageAuthorityV1, cleanup, selected, side)
 	active, next := a.ActiveGenerationID, a.NextGenerationID
 	return all(cleanupOK, anyTrue(replay == 0, replay != active), anyTrue(side == 0, side != active), anyTrue(replay == 0, replay < next), anyTrue(side == 0, side < next), anyTrue(obsolete == 0, obsolete < next))
 }
 
 // ownerSide returns the side generation named by the selected side or, overriding it, the first SIDE span, and
 // whether the two agree when both are present.
-func ownerSide(selected *SelectedSideV1, cleanup *CleanupV1) (uint64, bool) {
+func ownerSide(selected *SelectedSideV1, cleanup authoritySpans) (uint64, bool) {
 	side := uint64(0)
 	if selected != nil {
 		side = selected.GenerationID
 	}
-	if cleanup != nil {
-		for _, span := range cleanup.Spans {
-			if span.Kind == CleanupSpanSideV1 {
-				return span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
-			}
+	for i := 0; i < cleanup.len(); i++ {
+		span := cleanup.at(i)
+		if span.Kind == CleanupSpanSideV1 {
+			return span.GenerationID, anyTrue(side == 0, side == span.GenerationID)
 		}
 	}
 	return side, true
@@ -63,12 +63,13 @@ func ownerSide(selected *SelectedSideV1, cleanup *CleanupV1) (uint64, bool) {
 // validLiveSide admits a live selected side beside a pending SIDE span only in the rolling-prepared shape: the one-slot
 // descriptor and exactly SIDE(g,first-1,first-1,first-1) (RUBIN_MEMPOOL_POLICY.md 6.4.1.3). A captured ORDINARY side
 // and its frozen SIDE keep the separate relation of validOrdinaryTarget. validSelected already proved first>=F+1>=1.
-func validLiveSide(selected *SelectedSideV1, cleanup *CleanupV1) bool {
-	if selected == nil || cleanup == nil {
+func validLiveSide(selected *SelectedSideV1, cleanup authoritySpans) bool {
+	if selected == nil || cleanup.len() == 0 {
 		return true
 	}
 	first := selected.TipHeight - uint64(selected.RowCount) + 1
-	for _, span := range cleanup.Spans {
+	for i := 0; i < cleanup.len(); i++ {
+		span := cleanup.at(i)
 		if span.Kind == CleanupSpanSideV1 {
 			return all(selected.RowCount == 1439, selected.TipHeight-selected.F >= 1440,
 				span == CleanupSpanV1{Kind: CleanupSpanSideV1, GenerationID: selected.GenerationID, FirstHeight: first - 1, LastHeight: first - 1, NextHeight: first - 1})

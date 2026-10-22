@@ -356,6 +356,11 @@ func TestTreeFull148Admission(t *testing.T) {
 				input := make([]byte, width)
 				copy(input, header)
 				want := width == 148 || rank == 4 && (width == 149 || width == 68000157)
+				var expected error
+				if !want {
+					expected = errSchema
+				}
+				wantTreeLiteral(t, dbi, key[:], input, expected)
 				if err := ValidateTreeRow(dbi, key[:], input); (err == nil) != want || err != nil && !exactErr(err) {
 					t.Fatalf("tree full148 admission = %v; want valid=%v", err, want)
 				}
@@ -367,17 +372,39 @@ func TestTreeFull148Admission(t *testing.T) {
 		changed := bytes.Clone(header)
 		changed[147] ^= 1
 		for _, wrong := range [][32]byte{key, old, {}} {
+			wantTreeLiteral(t, dbi, wrong[:], changed, errSchema)
 			if err := ValidateTreeRow(dbi, wrong[:], changed); !exactErr(err) {
 				t.Fatalf("tree full148 wrong key = %v", err)
 			}
 		}
 		rekeyed := sha3.Sum256(changed)
+		wantTreeLiteral(t, dbi, rekeyed[:], changed, nil)
 		if err := ValidateTreeRow(dbi, rekeyed[:], changed); err != nil {
 			t.Fatalf("tree full148 rekey = %v", err)
 		}
 	}
 	if err := ValidateTreeRow(DBI{"blocks-v1", 9, 0}, key[:], header); !exactErr(err) {
 		t.Fatalf("unknown rank fell through = %v", err)
+	}
+}
+
+func wantTreeLiteral(t *testing.T, dbi DBI, key, input []byte, expected error) {
+	t.Helper()
+	keyBefore, before := bytes.Clone(key), bytes.Clone(input)
+	var got error
+	mismatch := false
+	allocations := testing.AllocsPerRun(1, func() {
+		got = ValidateTreeRow(dbi, key, input)
+		mismatch = mismatch || expected == nil && got != nil || expected != nil && !exactErr(got)
+	})
+	if mismatch {
+		t.Fatalf("tree literal result = %v; want %v", got, expected)
+	}
+	if allocations != 0 {
+		t.Fatalf("tree literal allocations = %v; want 0", allocations)
+	}
+	if !bytes.Equal(key, keyBefore) || !bytes.Equal(input, before) {
+		t.Fatal("tree literal changed input")
 	}
 }
 
@@ -391,6 +418,42 @@ func TestTreeMetaRows(t *testing.T) {
 	nodeKey := treeKeyLiteral(t, strings.Repeat("00", 36), "0000")
 	generation := []byte{0, 0, 0, 0, 0, 0, 0, 1}
 	utxo := make([]byte, 20)
+	utxoKey := append(bytes.Clone(generation), make([]byte, 36)...)
+	for _, row := range []struct {
+		size   int
+		prefix []byte
+	}{{0, []byte{0}}, {1, []byte{1}}, {252, []byte{252}}, {253, []byte{253, 253, 0}}, {65535, []byte{253, 255, 255}}, {65536, []byte{254, 0, 0, 1, 0}}} {
+		size := row.size
+		for _, coinbase := range []byte{0, 1} {
+			t.Run(fmt.Sprintf("UTXO%d/coinbase%d", size, coinbase), func(t *testing.T) {
+				// Independently pinned CompactSize widths and little-endian payload.
+				literal := append(make([]byte, 10), row.prefix...)
+				literal = append(literal, bytes.Repeat([]byte{0x73}, size)...)
+				literal = append(literal, make([]byte, 8)...)
+				literal = append(literal, coinbase)
+				dbi := DBI{"utxo-v1", 1, 0}
+				wantTreeLiteral(t, dbi, utxoKey, literal, nil)
+				decoded, err := DecodeUTXOValue(literal)
+				if err != nil || len(decoded.CovenantData) != size || (size == 0 && decoded.CovenantData != nil) || decoded.Coinbase != (coinbase == 1) {
+					t.Fatalf("public UTXO owned shape = %#v, %v", decoded, err)
+				}
+				for _, bad := range [][]byte{literal[:len(literal)-1], append(bytes.Clone(literal), 0)} {
+					wantTreeLiteral(t, dbi, utxoKey, bad, errSchema)
+					if got, err := DecodeUTXOValue(bad); !reflect.DeepEqual(got, UTXOValue{}) || !exactErr(err) {
+						t.Fatalf("public UTXO zero result = %#v, %v", got, err)
+					}
+				}
+				literal[len(literal)-1] = 2
+				wantTreeLiteral(t, dbi, utxoKey, literal, errSchema)
+			})
+		}
+	}
+	for _, bad := range [][]byte{make([]byte, 19), make([]byte, 65561), append(make([]byte, 10), 253), append(append(make([]byte, 10), 253, 1, 0), make([]byte, 10)...), append(append(make([]byte, 10), 1), make([]byte, 9)...), append(append(make([]byte, 10), 0), make([]byte, 10)...)} {
+		wantTreeLiteral(t, DBI{"utxo-v1", 1, 0}, utxoKey, bad, errSchema)
+		if got, err := DecodeUTXOValue(bad); !reflect.DeepEqual(got, UTXOValue{}) || !exactErr(err) {
+			t.Fatalf("public UTXO zero result = %#v, %v", got, err)
+		}
+	}
 	manifest := make([]byte, 33)
 	manifest[0] = 1
 	entryKey := make([]byte, 77)
@@ -417,6 +480,9 @@ func TestTreeMetaRows(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			keyBefore, valueBefore := bytes.Clone(row.key), bytes.Clone(row.value)
+			if row.dbi.Rank >= 1 && row.dbi.Rank <= 7 && row.name != "undo entry" || row.name == "authority" || row.name == "root" || row.name == "counter" {
+				wantTreeLiteral(t, row.dbi, row.key, row.value, nil)
+			}
 			if err := ValidateTreeRow(row.dbi, row.key, row.value); err != nil {
 				t.Fatalf("tree meta %s = %v", row.name, err)
 			}

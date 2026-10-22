@@ -14,8 +14,9 @@ generators. Its `*-02` JSON rows use `create_height=100`, `height=199`,
 `suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
 The CLI `rotation_spend_suite_check` ignores `covenant_type` after parsing;
 these labels prove neither individual covenant spends nor full JSON/manual-stub
-semantic equivalence. Unchanged registry/UTXO models and replay evidence do not
-implement or prove the proposed `0x0105` retirement.
+semantic equivalence. The bounded registry/UTXO models now reject `0x0105`
+without the former acceptance exception; their replay evidence does not prove
+live-client correctness or Go/Rust parity.
 
 `SECTION_HASHES` manifest membership and formal `coverage[]` registry membership
 are independent sets, not a one-to-one mapping. The registry has exactly 31

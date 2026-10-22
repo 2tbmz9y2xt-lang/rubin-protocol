@@ -6,8 +6,8 @@ use libfuzzer_sys::fuzz_target;
 //
 // Constructs a minimal Tx with fuzzed covenant type, covenant data, and
 // witness items. Derives slot counts for known covenants to exercise
-// HTLC (2 slots), VAULT/MULTISIG (threshold-dependent), and P2PK/STEALTH
-// (1 slot). The unassigned 0x0102 case exercises rejection before dispatch.
+// HTLC (2 slots), VAULT/MULTISIG (threshold-dependent), and P2PK (1 slot).
+// Unassigned 0x0102/0x0105 inputs exercise rejection before dispatch.
 //
 // Invariants checked:
 // - Determinism: two calls with same input produce identical result.
@@ -23,8 +23,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut pos = 0;
 
-    // Select known covenants for spend-dispatch coverage and 0x0102 for
-    // unknown-covenant rejection before witness-slot assignment.
+    // Select known covenants for spend-dispatch coverage and unassigned values
+    // for rejection before witness-slot assignment.
     let cov_selector = data[pos] % 6;
     let covenant_type: u16 = match cov_selector {
         0 => 0x0000, // COV_TYPE_P2PK
@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
         4 => 0x0102,
-        5 => 0x0105, // COV_TYPE_CORE_STEALTH
+        5 => 0x0105, // retired/unassigned
         _ => unreachable!(),
     };
     pos += 2; // consume both bytes for layout stability
@@ -40,37 +40,13 @@ fuzz_target!(|data: &[u8]| {
     let suite_id = data[pos];
     pos += 1;
 
-    // For STEALTH (0x0105), covenant_data must be exactly 1600 bytes.
-    // For other types, read length from a single byte (max 255).
-    let (cov_data_len, cov_data_fixed) = if covenant_type == 0x0105 {
-        // Skip the length byte but use remaining fuzz bytes to fill 1600-byte buffer.
-        let _ = data[pos]; // consume the byte for layout consistency
-        (0usize, true)
-    } else {
-        (data[pos] as usize, false)
-    };
+    let cov_data_len = data[pos] as usize;
     pos += 1;
-
-    let covenant_data = if cov_data_fixed {
-        // STEALTH: build 1600-byte covenant_data from available fuzz bytes.
-        let available = if pos + 44 < data.len() {
-            data.len() - pos - 44
-        } else {
-            0
-        };
-        let take = available.min(1600);
-        let mut cd = vec![0u8; 1600];
-        cd[..take].copy_from_slice(&data[pos..pos + take]);
-        pos += take;
-        cd
-    } else {
-        if pos + cov_data_len > data.len() - 44 {
-            return;
-        }
-        let cd = data[pos..pos + cov_data_len].to_vec();
-        pos += cov_data_len;
-        cd
-    };
+    if pos + cov_data_len > data.len() - 44 {
+        return;
+    }
+    let covenant_data = data[pos..pos + cov_data_len].to_vec();
+    pos += cov_data_len;
 
     if pos + 4 > data.len() - 40 {
         return;
@@ -101,12 +77,11 @@ fuzz_target!(|data: &[u8]| {
     chain_id.copy_from_slice(&data[pos..pos + 32]);
 
     // Provide witness items for known covenants, including multi-slot paths.
-    // The unassigned 0x0102 input uses an arbitrary slot count and is rejected
+    // Unassigned inputs use an arbitrary slot count and are rejected
     // before witness-slot assignment.
     let witness_slot_count: usize = match covenant_type {
         0x0000 => 1, // COV_TYPE_P2PK
         0x0102 => 1,
-        0x0105 => 1, // COV_TYPE_CORE_STEALTH
         0x0100 => 2, // COV_TYPE_HTLC
         0x0104 => {   // COV_TYPE_MULTISIG: threshold from covenant_data[1]
             covenant_data.get(1).copied().unwrap_or(1).max(1) as usize

@@ -48,7 +48,6 @@ inductive CovenantKind where
   | coreVault
   | coreDACommit
   | coreMultisig
-  | coreStealth
   | coreSimplicity
 deriving Repr, DecidableEq
 

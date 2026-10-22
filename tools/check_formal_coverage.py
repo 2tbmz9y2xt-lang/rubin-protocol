@@ -69,13 +69,13 @@ EXPECTED_SOURCE_REBIND_SCALARS = {
     "inventory_sha256": "77c9bac4f36c0bbce260388baad93216cd2b231e12c2a7edfc170ec3070596d6",
     "original_imported_source_paths": 116,
     "active_imported_source_paths": 102,
-    "byte_exact_path_count": 67,
-    "reconcile_current_protocol_path_count": 25,
+    "byte_exact_path_count": 65,
+    "reconcile_current_protocol_path_count": 26,
     "drop_retired_generated_source_path_count": 4, "drop_retired_source_path_count": 3, "drop_stale_source_path_count": 7,
     "import_adapt_single_owner_path_count": 1,
     "transplant_check_logic_path_count": 2,
-    "import_package_check_or_test_path_count": 7,
-    "active_partition_equation": "67 + 25 + 1 + 2 + 7 = 102",
+    "import_package_check_or_test_path_count": 8,
+    "active_partition_equation": "65 + 26 + 1 + 2 + 8 = 102",
     "original_inventory_equation": "102 + 4 + 3 + 7 = 116",
 }
 EXPECTED_SOURCE_MANIFEST_PIN_SHA256 = "62f58d1c3151e98f4252d5bfb570d141c03f64ab4feb070c1328912b6bbf39c1"
@@ -104,6 +104,7 @@ EXPECTED_SOURCE_REBIND_PATHS = {
         "RubinFormal/FeatureActivationLiveBridge.lean",
         "RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal/HtlcSpendStructuralLiveBridge.lean",
+        "RubinFormal/LegacySunset.lean",
         "RubinFormal/NativeRegistryResolution.lean",
         "RubinFormal/NativeSuiteRotation.lean",
         "RubinFormal/PerTxStateMachine.lean",
@@ -121,6 +122,7 @@ EXPECTED_SOURCE_REBIND_PATHS = {
     "transplant_check_logic_paths": {"scripts/check.sh", "tools/check_formal_registry_truth.py"},
     "import_package_check_or_test_paths": {
         "tests/test_check_formal_registry_truth.py",
+        "tests/test_covenant_registry_disposition.py",
         "tests/test_integration.py",
         "tests/test_path_resolution.py",
         "tests/test_registry_extraction.py",
