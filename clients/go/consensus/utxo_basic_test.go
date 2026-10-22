@@ -887,13 +887,16 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 
 	vaultKP := mustMLDSA87Keypair(t)
 	ownerKP := mustMLDSA87Keypair(t)
+	destKP := mustMLDSA87Keypair(t)
 
 	ownerCovData := p2pkCovenantDataForPubkey(ownerKP.PubkeyBytes())
 	ownerLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, ownerCovData))
+	destCovData := p2pkCovenantDataForPubkey(destKP.PubkeyBytes())
+	destLockID := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, destCovData))
 
 	anchorOutData := []byte{0x01}
 	anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
-	whitelistA, whitelistB := sortKeys32(anchorH, ownerLockID)
+	whitelistA, whitelistB := sortKeys32(anchorH, destLockID)
 
 	vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
 	vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
@@ -908,7 +911,7 @@ func TestApplyNonCoinbaseTxBasic_VaultRejectsDisallowedDestinationCovenantTypeEv
 		},
 		Outputs: []TxOutput{
 			{Value: 0, CovenantType: COV_TYPE_ANCHOR, CovenantData: anchorOutData},
-			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: ownerCovData},
+			{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: destCovData},
 		},
 	}
 	tx.Witness = []WitnessItem{
