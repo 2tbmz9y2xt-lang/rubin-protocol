@@ -982,6 +982,119 @@ func TestTreeStreamDirectionRelationV1(t *testing.T) {
 	}
 }
 
+func TestTreeStreamResourceLayoutV1(t *testing.T) {
+	for _, row := range []struct{ got, want uintptr }{
+		{unsafe.Sizeof(ownedMutation{}), 128}, {unsafe.Sizeof(ownedConsulted{}), 48},
+		{unsafe.Sizeof(treePrimitiveV1{}), 144}, {unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
+	} {
+		if row.got != row.want {
+			t.Fatalf("resource layout%d want%d", row.got, row.want)
+		}
+	}
+	var leaves treeLeafIterV1
+	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + uint64(unsafe.Sizeof(treeKeysV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
+	if total+144+8 > 4096 {
+		t.Fatalf("enlarged control objects%d exceed4096", total+144+8)
+	}
+}
+
+func TestTreeStreamBorrowedPlanV1(t *testing.T) {
+	source := tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return nil })
+	op := tsOperation(t, &source)
+	op.Primitives = append(op.Primitives, op.Primitives[0])[:1]
+	op.Pair.Mutations = append(op.Pair.Mutations, tsTarget(17))
+	row := tsTarget(18)
+	op.Pair.Consulted = []ConsultedRow{{row.DBI, row.Key}}
+	plan := treeOwnPlanV1(op)
+	if &plan.primitives[0] != &op.Primitives[0] || len(plan.primitives) != len(op.Primitives) || cap(plan.primitives) != cap(op.Primitives) || plan.primitives[0] != op.Primitives[0] {
+		t.Fatal("primitive backing/header/Source/Endpoint not borrowed intact")
+	}
+	if len(plan.pair) != 2 || cap(plan.pair) != 2 || len(plan.consulted) != 1 || cap(plan.consulted) != 1 {
+		t.Fatal("owned Pair arrays are not exact")
+	}
+	var q uint64
+	for i, m := range op.Pair.Mutations {
+		q += uint64(len(m.Key) + len(m.Literal))
+		if &plan.pair[i].key[0] == &m.Key[0] || &plan.pair[i].literal[0] == &m.Literal[0] || !bytes.Equal(plan.pair[i].key, m.Key) || !bytes.Equal(plan.pair[i].literal, m.Literal) {
+			t.Fatal("owned Pair payload aliases or differs")
+		}
+	}
+	if &plan.consulted[0].key[0] == &row.Key[0] || !bytes.Equal(plan.consulted[0].key, row.Key) || treePlanCopyBytesV1(op.Pair) != q+uint64(len(row.Key))+304 {
+		t.Fatal("owned Consulted payload or complete PC")
+	}
+	entry := tsEntry(t).Pair
+	q = 0
+	for _, m := range entry.Mutations {
+		q += uint64(len(m.Key) + len(m.Literal))
+	}
+	if treePlanCopyBytesV1(entry) != q+256 {
+		t.Fatal("ENTRY complete PC")
+	}
+}
+
+func TestTreeStreamPrimitiveCountDomainV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	tsRoots(t, s, o, 1)
+	marker, calls := errors.New("first Source marker"), 0
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }))
+	for len(op.Primitives) < 722 {
+		p := op.Primitives[0]
+		p.Kind = 6
+		op.Primitives = append(op.Primitives, p)
+	}
+	r := tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 1, 1, 0)
+	if any(r.err) != any(marker) || calls != 1 {
+		t.Fatalf("722 primitive first Source identity/count %v/%d", r.err, calls)
+	}
+}
+
+func TestTreeStreamPlanChargeArithmeticV1(t *testing.T) {
+	for _, row := range []struct{ total, count, size, want uint64 }{
+		{0, 0, 128, 0}, {0, 1, 128, 128}, {0, 2, 48, 96},
+		{402653056, 1, 128, 402653184}, {402653057, 1, 128, 402653185},
+		{402653183, 1, 1, 402653184}, {402653184, 1, 1, 402653185},
+		{402653185, 0, 1, 402653185}, {0, 18446744073709551615, 128, 402653185},
+		{0, 144115188075855872, 128, 402653185}, {402653184, 18446744073709551615, 1, 402653185},
+	} {
+		if got := treePlanChargeAddV1(row.total, row.count, row.size); got != row.want {
+			t.Fatalf("scaled add (%d,%d,%d)=%d want%d", row.total, row.count, row.size, got, row.want)
+		}
+	}
+}
+
+func TestTreeStreamCopyAfterReservationV1(t *testing.T) {
+	s, path, _ := treeNativeStore(t)
+	o := reservationOwner(t, 805_306_367)
+	plans := []TreeOperationV1{{Pair: TreePairV1{Mutations: tsMany(1)}}, {Pair: TreePairV1{Mutations: tsMany(8)}}}
+	var counts [2]float64
+	for i, op := range plans {
+		calls := 0
+		callback := func(*Reader) (TreeOperationV1, error) { calls++; return op, nil }
+		mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			counts[i] = testing.AllocsPerRun(10, func() {
+				r := tsInvoke(s, a, callback)
+				r.tuple(t, 1, 1, -1)
+				if any(r.err) != any(errOperationReservationCapacity) || s.state != storeOPEN || reservationLive(o) != 0 {
+					t.Fatalf("public allocation refusal %v/%s/live%d", r.err, s.state, reservationLive(o))
+				}
+			})
+			return nil
+		}))
+		if calls != 11 {
+			t.Fatalf("allocation callbacks%d want11 including warmup", calls)
+		}
+	}
+	if counts[0] != counts[1] {
+		t.Fatalf("copy-before-grow allocations1=%g allocations8=%g", counts[0], counts[1])
+	}
+	mustEnvironment(t, s.View(func(*Reader) error { return nil }))
+	s = tsReopen(t, s, path)
+	for _, m := range plans[1].Pair.Mutations {
+		tsRead(t, s, m.DBI, m.Key, nil)
+	}
+}
+
 func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 	for _, kind := range []OperationKind{LaneOperation, TreeOperation} {
 		t.Run(fmt.Sprintf("pair-only-kind%d", kind), func(t *testing.T) {
@@ -994,34 +1107,51 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 			if kind == TreeOperation {
 				ceiling = 402_653_184
 			}
-			for _, short := range []uint64{1, 0} {
-				mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
-					filler := ceiling - uint64(len(m.Key)+len(m.Literal)) + short
-					return a.WithReservation(filler, func() error {
-						r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
-						if short == 1 {
-							r.tuple(t, 1, 1, -1)
-							if any(r.err) != any(errOperationReservationCapacity) {
-								t.Fatalf("PC refusal identity %v", r.err)
+			for _, after := range []AfterKind{2, 1} {
+				if after == 1 {
+					m.AfterKind, m.BeforePresent, m.Literal = 1, true, nil
+					op.Pair.Mutations[0] = m
+				}
+				for _, short := range []uint64{1, 0} {
+					mustEnvironment(t, o.WithOperation(kind, func(a *OperationAccount) error {
+						filler := ceiling - uint64(len(m.Key)+len(m.Literal)+128) + short
+						return a.WithReservation(filler, func() error {
+							callbacks := 0
+							r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { callbacks++; return op, nil })
+							if callbacks != 1 {
+								t.Fatal("Pair callback count")
 							}
-						} else {
-							r.tuple(t, 2, 3, -1)
-							mustEnvironment(t, r.err)
-						}
-						if reservationLive(o) != filler {
-							t.Fatal("Pair hold not released")
-						}
-						return nil
-					})
-				}))
+							if short == 1 {
+								r.tuple(t, 1, 1, -1)
+								if any(r.err) != any(errOperationReservationCapacity) {
+									t.Fatalf("PC refusal identity %v", r.err)
+								}
+								if s.state != storeOPEN {
+									t.Fatal("PC refusal consumed Store")
+								}
+								var want []byte
+								if after == 1 {
+									want = tsTarget(10).Literal
+								}
+								tsRead(t, s, m.DBI, m.Key, want)
+							} else {
+								r.tuple(t, 2, 3, -1)
+								mustEnvironment(t, r.err)
+							}
+							if reservationLive(o) != filler {
+								t.Fatal("Pair hold not released")
+							}
+							return nil
+						})
+					}))
+					if reservationLive(o) != 0 {
+						t.Fatal("Pair account close leaked")
+					}
+				}
+				s = tsReopen(t, s, path)
+				tsRead(t, s, m.DBI, m.Key, m.Literal)
 			}
-			s = tsReopen(t, s, path)
-			tsRead(t, s, m.DBI, m.Key, m.Literal)
-			m.AfterKind, m.BeforePresent, m.Literal = 1, true, nil
-			r := tsRun(t, s, o, kind, TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{m}}})
-			r.tuple(t, 2, 3, -1)
-			mustEnvironment(t, r.err)
-			tsRead(t, tsReopen(t, s, path), m.DBI, m.Key, nil)
+			tsRead(t, s, m.DBI, m.Key, nil)
 		})
 	}
 	t.Run("A7-caller-buffers-and-PC", func(t *testing.T) {
@@ -1054,7 +1184,7 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 		op.Pair.Consulted = []ConsultedRow{{consulted.DBI, consulted.Key}}
 		key, value := bytes.Clone(originalTarget.Key), bytes.Clone(originalTarget.Literal)
 		targetIdentity = bytes.Clone(key)
-		pc := uint64(len(body.Key) + len(body.Literal) + len(key) + len(value) + len(consulted.Key))
+		pc := uint64(len(body.Key) + len(body.Literal) + len(key) + len(value) + len(consulted.Key) + 304)
 		r := tsRun(t, s, o, TreeOperation, op)
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
@@ -1081,10 +1211,19 @@ func TestTreeStreamCapacityAndClosingV1(t *testing.T) {
 			}
 			calls := 0
 			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return nil }))
-			r := tsRun(t, s, o, TreeOperation, op)
-			r.tuple(t, 1, 1, -1)
-			if any(r.err) != any(errOperationReservationCapacity) || !IsOperationReservationCapacity(r.err) || calls != 0 || s.state != storeOPEN {
-				t.Fatalf("R4 effects %v calls%d state%s", r.err, calls, s.state)
+			callbacks, before := 0, reservationLive(o)
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				for attempt := range 2 {
+					r := tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { callbacks++; return op, nil })
+					r.tuple(t, 1, 1, -1)
+					if any(r.err) != any(errOperationReservationCapacity) || !IsOperationReservationCapacity(r.err) || calls != 0 || callbacks != attempt+1 || s.state != storeOPEN || reservationLive(o) != before {
+						t.Fatalf("R4 effects %v calls%d state%s", r.err, calls, s.state)
+					}
+				}
+				return nil
+			}))
+			if callbacks != 2 || reservationLive(o) != before {
+				t.Fatalf("H3 callbacks%d, want2", callbacks)
 			}
 			mustEnvironment(t, s.View(func(*Reader) error { return nil }))
 		})

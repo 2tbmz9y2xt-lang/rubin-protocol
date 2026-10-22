@@ -240,7 +240,7 @@ func TestTreeStreamComposedAndExactAccountV1(t *testing.T) {
 			s := tsfNew(t)
 			wantP := s.budgets(t)
 			var sample uint64
-			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal))
+			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
 			s.p[2].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
 				if pos == 1 {
 					sample = reservationLive(s.o)
@@ -283,7 +283,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 		t.Run(fmt.Sprintf("R7-Hr-short%d", short), func(t *testing.T) {
 			s := tsfNew(t)
 			budgets := s.budgets(t)
-			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal))
+			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
 			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_400 - 104*2 + short
 			var r tsResult
 			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
@@ -313,7 +313,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 	}
 	t.Run("R7-P-growth", func(t *testing.T) {
 		s := tsfNew(t)
-		pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal))
+		pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
 		// CURRENT UTXO64 + manifest(33+33) =130; its first node needs78.
 		filler := uint64(402_653_184) - pc - 74_872 - 104 - 65_560 - 147_968 - 207
 		var r tsResult
@@ -665,6 +665,37 @@ func tsfFill(t *testing.T, o *OperationReservationOwner, n uint64) func() {
 		}
 	}
 	return func() { close(release); wg.Wait() }
+}
+
+// A7: four fixed native boundaries observe complete Pair PC through OLD cleanup.
+func TestTreeStreamPairHoldNativeBoundariesV1(t *testing.T) {
+	for _, short := range []uint64{1, 0} {
+		t.Run(fmt.Sprintf("free-G-plus-PC-minus%d", short), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			op := tsPair(33)
+			m := op.Pair.Mutations[0]
+			pc := uint64(len(m.Key) + len(m.Literal) + 128)
+			filler := uint64(805_306_368) - 154_611_151 - pc + short
+			reservationFill(t, o, filler)
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 6, m.Key, func() {
+				r = tsRun(t, s, o, TreeOperation, op)
+			})
+			mustEnvironment(t, err)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			if evidence.BeginOld != 1 || evidence.BeginWrite != 1 || evidence.BeginRead != 0 || evidence.Commits != 1 || evidence.OldAborts != 1 || evidence.Faults != 0 {
+				t.Fatalf("pair-only native lifecycle %+v", evidence)
+			}
+			if evidence.Probes != 4 || evidence.ProbeDenied != 4*short || evidence.ProbeRan != 4*(1-short) {
+				t.Fatalf("Pair PC native probes short%d: %+v", short, evidence)
+			}
+			if reservationLive(o) != filler {
+				t.Fatal("Pair PC not released after OLD cleanup")
+			}
+			tsRead(t, tsReopen(t, s, path), m.DBI, m.Key, m.Literal)
+		})
+	}
 }
 
 func TestTreeStreamNoReadbackAccountDrawV1(t *testing.T) {

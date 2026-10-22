@@ -10,12 +10,14 @@ import "C"
 import (
 	"bytes"
 	"encoding/binary"
+	"unsafe"
 )
 
 // TreePairV1 contains ordinary non-tree targets and unchanged consulted rows.
 // Rows must be strictly (rank, key) ordered in each slice and disjoint. Rank 8
 // is never a Pair row. AfterOldValueRef is forbidden. The operation owns copies
-// after admission; callers leave all input slices unchanged until callback return.
+// after admission. Pair slices, records and Key/Literal bytes remain immutable
+// through the first Source call, or operation completion if no Source is reached.
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
@@ -42,6 +44,9 @@ type TreePairV1 struct {
 // into sink.WindowV1(); CURRENT bytes must already be held under the composer's
 // validation charge. Retain neither window, record nor sink after returning,
 // start no goroutine that outlives the call, and return sink refusals unchanged.
+// Source bytes and objects remain complete and immutable through their last
+// writer/equality consumer. Original Pair buffers cannot also be mutable backing
+// still needed by a Source.
 type TreeSourceV1 interface {
 	TreeDeltaV1(position TreePositionV1, old *Reader, sink *TreeDeltaSinkV1) error
 }
@@ -69,6 +74,10 @@ type TreePrimitiveV1 struct {
 }
 
 // TreeOperationV1 is one immutable complete CURRENT/LAG plan and ordinary Pair.
+// Primitive backing and Source bindings remain immutable through completion,
+// including readback and unwind cleanup. At the first Source call all owned Pair
+// copies exist; only the independent original Pair buffers may then be mutated.
+// Borrowed input remains the caller's funding obligation.
 type TreeOperationV1 struct {
 	Primitives []TreePrimitiveV1
 	Pair       TreePairV1
@@ -125,12 +134,17 @@ func (s *TreeDeltaSinkV1) WindowV1() []byte {
 // precede that row's cap; consulted shape/order precede its count. Caps precede
 // every own-family, generation-root and consulted/target overlap check.
 //
-// One account hold charges Pair key/literal copies before cloning, then serves
+// One account hold charges complete owned Pair arrays and key/literal copies
+// before allocating or cloning, then serves
 // every engine charge exactly. It is released before result, panic or Goexit
 // delivery. Capacity/input errors retain identity. The composer chooses account
 // kind; hash-global absent rows become expected-absent targets, identical rows
 // become Consulted, and differing rows must be classified before returning the
 // plan. The engine performs no hash-global classification.
+// Pair inputs remain immutable through the first Source call (or completion if
+// none); primitive backing and Source bindings remain immutable through completion
+// including unwind cleanup. Source backing remains immutable through its last
+// consumer and cannot alias Pair buffers mutated after their independent copy.
 //
 // Results preserve the composer's truth, reached stage and error; index is the
 // primitive owning the first reached source-owned result, otherwise -1. Every
@@ -431,28 +445,28 @@ func treePairOwnedV1(primitives []TreePrimitiveV1, dbi DBI, key []byte) bool {
 	return false
 }
 
+func treePlanChargeAddV1(total, count, size uint64) uint64 {
+	if total > TreeLaneMaxBytes || count > (TreeLaneMaxBytes-total)/size {
+		return TreeLaneMaxBytes + 1
+	}
+	return total + count*size
+}
+
 func treePlanCopyBytesV1(pair TreePairV1) uint64 {
-	var n uint64
+	n := treePlanChargeAddV1(0, uint64(len(pair.Mutations)), uint64(unsafe.Sizeof(ownedMutation{})))
+	n = treePlanChargeAddV1(n, uint64(len(pair.Consulted)), uint64(unsafe.Sizeof(ownedConsulted{})))
 	for _, m := range pair.Mutations {
-		n += uint64(len(m.Key)) + uint64(len(m.Literal))
+		n = treePlanChargeAddV1(n, uint64(len(m.Key)), 1)
+		n = treePlanChargeAddV1(n, uint64(len(m.Literal)), 1)
 	}
 	for _, row := range pair.Consulted {
-		n += uint64(len(row.Key))
+		n = treePlanChargeAddV1(n, uint64(len(row.Key)), 1)
 	}
 	return n
 }
 
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
-	plan := treePlanV1{primitives: make([]treePrimitivePlanV1, len(op.Primitives)), pair: make([]ownedMutation, len(op.Pair.Mutations)), consulted: make([]ownedConsulted, len(op.Pair.Consulted))}
-	for j, p := range op.Primitives {
-		plan.primitives[j] = treePrimitivePlanV1{
-			treePrimitiveV1: treePrimitiveV1{
-				direction: uint8(p.Direction), kind: uint8(p.Kind), undo: uint8(p.Undo),
-				generation: p.Generation, height: p.Height, block: p.Block, endpoint: p.Endpoint,
-			},
-			source: treePublicSourceV1(p.Source),
-		}
-	}
+	plan := treePlanV1{primitives: op.Primitives, pair: make([]ownedMutation, len(op.Pair.Mutations)), consulted: make([]ownedConsulted, len(op.Pair.Consulted))}
 	for j, m := range op.Pair.Mutations {
 		plan.pair[j] = ownedMutation{m.DBI, updateClone(m.Key), m.BeforePresent, m.AfterKind, updateClone(m.Literal), m.RefDBI, updateClone(m.RefKey)}
 	}
@@ -460,10 +474,4 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 		plan.consulted[j] = ownedConsulted{dbi: row.DBI, key: updateClone(row.Key)}
 	}
 	return plan
-}
-
-func treePublicSourceV1(source TreeSourceV1) treeSourceV1 {
-	return func(p treePositionV1, old *Reader, recorder *treeRecorderV1) error {
-		return source.TreeDeltaV1(TreePositionV1(p), old, &TreeDeltaSinkV1{recorder: recorder})
-	}
 }
