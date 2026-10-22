@@ -28,9 +28,9 @@ manifest H2 is not thereby formally proved, and a registered formal row need
 not remain an independent manifest member.
 
 The single manifest digest is a disposition of the exact approved locally
-prepared retirement snapshot, not proof of applicability, canonical validity or
-client parity. Local spec preparation precedes metadata human merge, then spec
-first publication/merge, then client removal. The prepared spec is noncanonical
+prepared covenant-registry snapshot, not proof of applicability, canonical
+validity or client parity. Local spec preparation precedes metadata human
+merge, then spec first publication/merge. The prepared spec is noncanonical
 until its human merge; old canonical spec/new pin comparison necessarily rejects
 between the metadata and matching spec merges.
 
