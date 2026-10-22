@@ -4,9 +4,8 @@
 //! Invariant: no panic on any parsed Tx + block_height; deterministic results.
 
 use rubin_consensus::constants::{
-    COV_TYPE_ANCHOR, COV_TYPE_CORE_STEALTH, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG,
-    COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_P2PK_COVENANT_DATA,
-    SUITE_ID_ML_DSA_87,
+    COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK,
+    COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT, MAX_P2PK_COVENANT_DATA, SUITE_ID_ML_DSA_87,
 };
 use rubin_consensus::{parse_tx, validate_tx_covenants_genesis, Tx, TxInput, TxOutput};
 
@@ -273,7 +272,7 @@ fn cov_genesis_all_known_types_no_panic() {
         COV_TYPE_HTLC,
         COV_TYPE_VAULT,
         COV_TYPE_MULTISIG,
-        COV_TYPE_CORE_STEALTH,
+        0x0105,
         COV_TYPE_DA_COMMIT,
         COV_TYPE_RESERVED_FUTURE,
         0xFFFF,

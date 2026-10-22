@@ -1,10 +1,9 @@
 use std::sync::{Mutex, OnceLock};
 
 use crate::constants::{
-    COV_TYPE_CORE_STEALTH, COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP,
-    MAX_HTLC_COVENANT_DATA, MAX_STEALTH_COVENANT_DATA, ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES,
-    ML_KEM_1024_CT_BYTES, SIGHASH_ALL, SIGHASH_ANYONECANPAY, SIGHASH_NONE, SIGHASH_SINGLE,
-    SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
+    COV_TYPE_HTLC, COV_TYPE_P2PK, LOCK_MODE_HEIGHT, LOCK_MODE_TIMESTAMP, MAX_HTLC_COVENANT_DATA,
+    ML_DSA_87_PUBKEY_BYTES, ML_DSA_87_SIG_BYTES, SIGHASH_ALL, SIGHASH_ANYONECANPAY, SIGHASH_NONE,
+    SIGHASH_SINGLE, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL,
 };
 use crate::error::ErrorCode;
 use crate::featurebits::{
@@ -13,7 +12,6 @@ use crate::featurebits::{
 use crate::htlc::{parse_htlc_covenant_data, validate_htlc_spend, HtlcSpendContext};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_type};
 use crate::spend_verify::{validate_p2pk_spend, validate_threshold_sig_spend};
-use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend};
 use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 use crate::utxo_basic::UtxoEntry;
 use crate::verify_sig_openssl::{
@@ -69,18 +67,6 @@ fn p2pk_entry_for_pubkey(pubkey: &[u8]) -> UtxoEntry {
     UtxoEntry {
         value: 100,
         covenant_type: COV_TYPE_P2PK,
-        covenant_data: cov,
-        creation_height: 0,
-        created_by_coinbase: false,
-    }
-}
-
-fn stealth_entry_for_pubkey(pubkey: &[u8]) -> UtxoEntry {
-    let mut cov = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
-    cov[ML_KEM_1024_CT_BYTES as usize..].copy_from_slice(&crate::hash::sha3_256(pubkey));
-    UtxoEntry {
-        value: 100,
-        covenant_type: COV_TYPE_CORE_STEALTH,
         covenant_data: cov,
         creation_height: 0,
         created_by_coinbase: false,
@@ -508,46 +494,4 @@ fn validate_threshold_sig_spend_rejects_assignment_and_threshold_errors() {
         threshold_spend_error_code(&keys, &ws),
         ErrorCode::TxErrSigInvalid
     );
-}
-
-#[test]
-fn validate_stealth_spend_rejects_noncanonical_and_bad_sighash() {
-    let tx = base_tx();
-    let entry = stealth_entry_for_pubkey(&mldsa_pubkey(1));
-    assert!(parse_stealth_covenant_data(&entry.covenant_data).is_ok());
-    let w = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: vec![1],
-        signature: vec![1],
-    };
-    let err = validate_stealth_spend(&entry, &w, &tx, 0, 100, dummy_chain_id(), 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigNoncanonical);
-
-    let w = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey: mldsa_pubkey(1),
-        signature: {
-            let mut sig = vec![0x00; ML_DSA_87_SIG_BYTES as usize];
-            sig.push(0x7f);
-            sig
-        },
-    };
-    let err = validate_stealth_spend(&entry, &w, &tx, 0, 100, dummy_chain_id(), 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSighashTypeInvalid);
-}
-
-#[test]
-fn validate_stealth_spend_reaches_digest_and_verify_path() {
-    let tx = base_tx();
-    let pubkey = mldsa_pubkey(1);
-    let entry = stealth_entry_for_pubkey(&pubkey);
-    let mut sig = vec![0x00; ML_DSA_87_SIG_BYTES as usize];
-    sig.push(SIGHASH_ALL);
-    let w = WitnessItem {
-        suite_id: SUITE_ID_ML_DSA_87,
-        pubkey,
-        signature: sig,
-    };
-    let err = validate_stealth_spend(&entry, &w, &tx, 0, 100, dummy_chain_id(), 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
 }

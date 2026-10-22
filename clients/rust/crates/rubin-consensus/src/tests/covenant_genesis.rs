@@ -386,27 +386,28 @@ fn validate_tx_covenants_genesis_unknown_covenant_zero_value_rejected() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_stealth_ok() {
-    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    let cov = vec![0x55u8; MAX_STEALTH_COVENANT_DATA as usize];
-    tx.outputs = vec![crate::tx::TxOutput {
-        value: 1,
-        covenant_type: COV_TYPE_CORE_STEALTH,
-        covenant_data: cov,
-    }];
-    validate_tx_covenants_genesis(&tx, 0, None).expect("ok");
-}
-
-#[test]
-fn validate_tx_covenants_genesis_stealth_zero_value_rejected() {
-    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    tx.outputs = vec![crate::tx::TxOutput {
-        value: 0,
-        covenant_type: COV_TYPE_CORE_STEALTH,
-        covenant_data: vec![0x55u8; MAX_STEALTH_COVENANT_DATA as usize],
-    }];
-    let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+fn validate_tx_covenants_genesis_retired_0x0105_rejected_for_any_payload() {
+    for value in [0, 1] {
+        for len in [0, 1, 32, 33, 1567, 1568, 1599, 1600, 1601, 65536] {
+            for fill in [0x00, 0xff] {
+                let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+                tx.outputs = vec![crate::tx::TxOutput {
+                    value,
+                    covenant_type: 0x0105,
+                    covenant_data: vec![fill; len],
+                }];
+                let bytes = crate::marshal_tx(&tx).expect("marshal creation input");
+                let (tx, _, _, consumed) = parse_tx(&bytes).expect("admitted encoding");
+                assert_eq!(consumed, bytes.len());
+                let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
+                assert_eq!(
+                    err.code,
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "value={value} len={len} fill={fill}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -448,14 +449,16 @@ fn validate_tx_covenants_genesis_reserved_future_rejected() {
 
 #[test]
 fn validate_tx_covenants_genesis_unknown_type_rejected() {
-    let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
-    tx.outputs = vec![crate::tx::TxOutput {
-        value: 1,
-        covenant_type: 0xffff,
-        covenant_data: vec![0x00],
-    }];
-    let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    for covenant_type in [0x0001, 0x0102, 0x0107, 0xffff] {
+        let mut tx = parse_tx(&minimal_tx_bytes()).expect("parse").0;
+        tx.outputs = vec![crate::tx::TxOutput {
+            value: 1,
+            covenant_type,
+            covenant_data: vec![0x00],
+        }];
+        let err = validate_tx_covenants_genesis(&tx, 0, None).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    }
 }
 
 #[test]

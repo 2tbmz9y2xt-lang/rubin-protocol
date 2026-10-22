@@ -40,9 +40,10 @@ and a registered formal row need not remain an independent manifest member.
 
 The single `spec_section_hashes_sha3_256` pins the exact approved locally prepared
 retirement manifest as a disposition; it proves no model applicability, canonical
-validity or client parity. The unchanged static Lean registry model accepts
-`0x0105`; the UTXO model retains `CV-ST-U-01` without stealth validation. Neither
-proves retirement.
+validity or client parity. The static Lean registry model now classifies
+`0x0105` as invalid, and the UTXO model no longer retains the `CV-ST-U-01`
+acceptance exception. These bounded model changes do not establish live-client
+correctness or Go/Rust parity.
 Local spec preparation precedes metadata human merge, then spec first
 publication/merge, then client removal. Old canonical spec/new pin comparison
 necessarily rejects between the metadata and matching spec merges.
@@ -52,7 +53,7 @@ generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
 `suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
 The CLI `rotation_spend_suite_check` ignores `covenant_type` after parsing, so
 these labels do not prove individual covenant spends or full JSON/manual-stub
-semantic equivalence. The unchanged stub does not prove proposed `0x0105` retirement.
+semantic equivalence. Removing its three retired rows proves no live covenant spend.
 
 Prohibited claim formulations (NOT OK):
 

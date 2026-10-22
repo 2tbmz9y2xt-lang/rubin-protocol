@@ -28,7 +28,6 @@ def covenantDisposition (tag : Nat) : CovenantDisposition :=
   else if tag = 0x0101 then CovenantDisposition.accepted CovenantKind.coreVault
   else if tag = 0x0103 then CovenantDisposition.accepted CovenantKind.coreDACommit
   else if tag = 0x0104 then CovenantDisposition.accepted CovenantKind.coreMultisig
-  else if tag = 0x0105 then CovenantDisposition.accepted CovenantKind.coreStealth
   else if tag = 0x0106 then CovenantDisposition.deploymentGated CovenantKind.coreSimplicity
   else CovenantDisposition.invalidCovenantType
 
@@ -43,11 +42,10 @@ def section14DispositionCase (tag : Nat) (disposition : CovenantDisposition) : P
     (tag = 0x0101 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreVault) ∨
     (tag = 0x0103 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreDACommit) ∨
     (tag = 0x0104 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreMultisig) ∨
-    (tag = 0x0105 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreStealth) ∨
     (tag = 0x0106 ∧ disposition = CovenantDisposition.deploymentGated CovenantKind.coreSimplicity) ∨
     (tag ≠ 0x0000 ∧ tag ≠ 0x0001 ∧ tag ≠ 0x0002 ∧ tag ≠ 0x00FF ∧
       tag ≠ 0x0100 ∧ tag ≠ 0x0101 ∧ tag ≠ 0x0103 ∧
-      tag ≠ 0x0104 ∧ tag ≠ 0x0105 ∧ tag ≠ 0x0106 ∧
+      tag ≠ 0x0104 ∧ tag ≠ 0x0106 ∧
       disposition = CovenantDisposition.invalidCovenantType))
 
 /-- Every u16 tag has exactly the static Section 14 disposition in the matrix.
@@ -74,14 +72,11 @@ theorem covenantDispositionComplete (tag : Nat) (hU16 : tag < 0x10000) :
   by_cases hMultisig : tag = 0x0104
   · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
       hDaCommit, hMultisig]
-  by_cases hStealth : tag = 0x0105
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig, hStealth]
   by_cases hSimplicity : tag = 0x0106
   · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig, hStealth, hSimplicity]
+      hDaCommit, hMultisig, hSimplicity]
   · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig, hStealth, hSimplicity]
+      hDaCommit, hMultisig, hSimplicity]
 
 private def repeatByte (b : UInt8) (n : Nat) : Bytes :=
   Id.run <| do

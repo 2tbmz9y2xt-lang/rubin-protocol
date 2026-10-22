@@ -24,8 +24,6 @@ def COV_TYPE_VAULT : Nat := 0x0101
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
 def COV_TYPE_HTLC : Nat := 0x0100
 def COV_TYPE_MULTISIG : Nat := 0x0104
--- Retained for CV-ST-U-01 (RUB-1340 item 5); no stealth-specific validation.
-def COV_TYPE_STEALTH : Nat := 0x0105
 
 /- Pre-rotation: only ML-DSA-87 for native P2PK spend.
    Post-rotation (Q-FORMAL-ROTATION-04): `suite ∉ NATIVE_SPEND_SUITES(h)`. -/
@@ -583,8 +581,7 @@ def scanSingleInputStep
   else if e.covenantType != COV_TYPE_P2PK &&
       e.covenantType != COV_TYPE_HTLC &&
       e.covenantType != COV_TYPE_VAULT &&
-      e.covenantType != COV_TYPE_MULTISIG &&
-      e.covenantType != COV_TYPE_STEALTH then
+      e.covenantType != COV_TYPE_MULTISIG then
     throw "TX_ERR_COVENANT_TYPE_INVALID"
 
   let lockId := outputDescriptorLockId e
@@ -735,8 +732,7 @@ def validateBasicWitnesses
     if entry.covenantType != COV_TYPE_P2PK &&
         entry.covenantType != COV_TYPE_HTLC &&
         entry.covenantType != COV_TYPE_VAULT &&
-        entry.covenantType != COV_TYPE_MULTISIG &&
-        entry.covenantType != COV_TYPE_STEALTH then
+        entry.covenantType != COV_TYPE_MULTISIG then
       throw "TX_ERR_COVENANT_TYPE_INVALID"
     if entry.covenantType == COV_TYPE_VAULT then
       let vault ← CovenantGenesisV1.parseVaultCovenantData entry.covenantData
@@ -761,7 +757,7 @@ example : (Id.run do
     let op := txInOutpoint input
     let empty := InputScanState.empty
     let prior := { empty with sumIn := 7, sumInVault := 3, vaultInputs := 1, inputCovTypes := [0x0100], requiredWitnessSlots := 2, consumedOutpoints := [{ op with vout := 1 }] }
-    for tag in [0x0102, 0x0106, 0x0107, 0x00FF, 0xFFFF, 0x10000, 0x10001] do
+    for tag in [0x0102, 0x0105, 0x0106, 0x0107, 0x00FF, 0xFFFF, 0x10000, 0x10001] do
       let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
       let m := (Std.RBMap.empty : Std.RBMap Outpoint UtxoEntry cmpOutpoint).insert op e
       for acc in [empty, prior] do
@@ -785,7 +781,7 @@ example : (Id.run do
       | .error "TX_ERR_MISSING_UTXO" => pure ()
       | _ => return false
     -- Retained non-P2PK/non-vault entries keep the complete accumulator update.
-    for tag in [0x0100, 0x0104, 0x0105] do
+    for tag in [0x0100, 0x0104] do
       let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
       match scanSingleInputStep input (Std.RBMap.empty.insert op e) 100 prior with
       | .error _ => return false
@@ -826,14 +822,14 @@ example : (Id.run do
 
 -- Direct caller-built states include Anchor/DA-commit, unreachable from scanning.
 example : (Id.run do
-    for tag in [0x0002, 0x0103, 0x0102, 0x0106, 0x0107, 0x00FF, 0x10000] do
+    for tag in [0x0002, 0x0103, 0x0102, 0x0105, 0x0106, 0x0107, 0x00FF, 0x10000] do
       let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
       for witnesses in [[], [default]] do
         let tx : Tx := { (default : Tx) with witness := witnesses }
         match validateBasicWitnesses ByteArray.empty tx { InputScanState.empty with inputEntries := [e] } false with
         | .error "TX_ERR_COVENANT_TYPE_INVALID" => pure ()
         | _ => return false
-    for tag in [0x0100, 0x0104, 0x0105] do
+    for tag in [0x0100, 0x0104] do
       let e : UtxoEntry := ⟨11, tag, ByteArray.empty, 0, false⟩
       let state := { InputScanState.empty with inputEntries := [e] }
       match validateBasicWitnesses ByteArray.empty { (default : Tx) with witness := [default] } state false with

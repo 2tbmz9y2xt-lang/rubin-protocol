@@ -101,51 +101,6 @@ func TestCoverage_SpendVerifyBranches(t *testing.T) {
 	}
 }
 
-func TestCoverage_StealthBranches(t *testing.T) {
-	if _, err := ParseStealthCovenantData(nil); err == nil {
-		t.Fatalf("expected nil covenant_data rejection")
-	}
-	if _, err := ParseStealthCovenantData(make([]byte, MAX_STEALTH_COVENANT_DATA-1)); err == nil {
-		t.Fatalf("expected length mismatch")
-	}
-
-	entry := UtxoEntry{
-		Value:        1,
-		CovenantType: COV_TYPE_CORE_STEALTH,
-		CovenantData: make([]byte, MAX_STEALTH_COVENANT_DATA),
-	}
-	tx := &Tx{
-		Version: 1,
-		TxKind:  0x00,
-		TxNonce: 1,
-		Inputs:  []TxInput{{PrevTxid: [32]byte{0x55}, PrevVout: 0, Sequence: 0}},
-		Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: make([]byte, 33)}},
-	}
-
-	w := WitnessItem{SuiteID: 0x99}
-	if err := validateCoreStealthSpend(entry, w, tx, 0, 1, [32]byte{}, 0); err == nil {
-		t.Fatalf("expected suite invalid")
-	}
-
-	w = WitnessItem{
-		SuiteID:   SUITE_ID_ML_DSA_87,
-		Pubkey:    make([]byte, ML_DSA_87_PUBKEY_BYTES),
-		Signature: make([]byte, ML_DSA_87_SIG_BYTES+1),
-	}
-	if err := validateCoreStealthSpend(entry, w, tx, 0, 1, [32]byte{}, 0); err == nil {
-		t.Fatalf("expected key binding mismatch")
-	}
-
-	w = WitnessItem{
-		SuiteID:   SUITE_ID_ML_DSA_87,
-		Pubkey:    make([]byte, 1),
-		Signature: make([]byte, 1),
-	}
-	if err := validateCoreStealthSpend(entry, w, tx, 0, 1, [32]byte{}, 0); err == nil {
-		t.Fatalf("expected noncanonical witness rejection")
-	}
-}
-
 func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -170,15 +125,6 @@ func TestCoverage_NilCovenantDataUsesGenericMalformedContext(t *testing.T) {
 			},
 			code:    TX_ERR_VAULT_MALFORMED,
 			message: "CORE_VAULT covenant_data too short",
-		},
-		{
-			name: "stealth",
-			parse: func(covData []byte) error {
-				_, err := ParseStealthCovenantData(covData)
-				return err
-			},
-			code:    TX_ERR_COVENANT_TYPE_INVALID,
-			message: "CORE_STEALTH covenant_data length mismatch",
 		},
 		{
 			name: "multisig",

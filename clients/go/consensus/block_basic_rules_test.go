@@ -221,6 +221,31 @@ func TestValidateBlockBasic_CovenantInvalid(t *testing.T) {
 	expectValidateBlockBasicErr(t, block, &prev, &target, BLOCK_ERR_WITNESS_COMMITMENT)
 }
 
+func TestValidateBlockBasic_Retired0105Coinbase(t *testing.T) {
+	coinbase, _ := mustParseTxForUtxo(t, coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, 1))
+	coinbase.Outputs[0] = TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
+	raw, err := MarshalTx(coinbase)
+	if err != nil {
+		t.Fatalf("MarshalTx: %v", err)
+	}
+	prev, target := hashWithPrefix(0x89), filledHash(0xff)
+	block := buildBlockBytes(t, prev, MerkleRootFromTxBytes(t, [][]byte{raw}), target, 21, [][]byte{raw})
+	summary, err := ValidateBlockBasicWithContextAndFeesAtHeight(block, &prev, &target, 1, nil, Uint128{}, Uint128{})
+	assertTxErrCode(t, err, "TX_ERR_COVENANT_TYPE_INVALID")
+	if summary != nil {
+		t.Fatalf("rejected coinbase returned a block summary: %+v", summary)
+	}
+
+	// The earlier block commitment failure keeps its priority over creation.
+	coinbase.Outputs = coinbase.Outputs[:1]
+	raw, err = MarshalTx(coinbase)
+	if err != nil {
+		t.Fatalf("MarshalTx without commitment: %v", err)
+	}
+	block = buildBlockBytes(t, prev, MerkleRootFromTxBytes(t, [][]byte{raw}), target, 21, [][]byte{raw})
+	expectValidateBlockBasicErr(t, block, &prev, &target, "BLOCK_ERR_WITNESS_COMMITMENT")
+}
+
 func TestValidateBlockBasic_SubsidyExceeded(t *testing.T) {
 	height := uint64(1)
 	alreadyGenerated := uint64(0)

@@ -284,8 +284,6 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 		return ctx.captureVaultInput(inputIndex, entry, assigned)
 	case COV_TYPE_HTLC:
 		return ctx.validateHTLCInput(inputIndex, entry, assigned)
-	case COV_TYPE_CORE_STEALTH:
-		return ctx.validateCoreStealthInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_SIMPLICITY:
 		return ctx.validateCoreSimplicityInput(inputIndex, entry, assigned)
 	default:
@@ -368,25 +366,6 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 		chainID:     ctx.chainID,
 		blockHeight: ctx.height,
 		blockMTP:    ctx.blockMTP,
-		cache:       ctx.sighashCache,
-		rotation:    ctx.rotation,
-		registry:    ctx.registry,
-		sigCache:    ctx.sigCache,
-	})
-}
-
-func (ctx *nonCoinbaseApplyContext) validateCoreStealthInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
-	if len(assigned) != CORE_STEALTH_WITNESS_SLOTS {
-		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
-	}
-	return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{
-		entry:       entry,
-		w:           assigned[0],
-		tx:          ctx.tx,
-		inputIndex:  uint32(inputIndex),
-		inputValue:  entry.Value,
-		chainID:     ctx.chainID,
-		blockHeight: ctx.height,
 		cache:       ctx.sighashCache,
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,

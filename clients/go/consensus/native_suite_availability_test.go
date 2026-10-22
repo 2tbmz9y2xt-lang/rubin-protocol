@@ -29,11 +29,11 @@ func (p *nativeSuiteAvailabilityRotation) NativeSpendSuites(uint64) *NativeSuite
 }
 
 type nativeSuiteAvailabilityFixture struct {
-	entry, htlcEntry, stealthEntry UtxoEntry
-	w, path                        WitnessItem
-	tx                             *Tx
-	cache                          *SighashV1PrehashCache
-	keyID                          [32]byte
+	entry, htlcEntry UtxoEntry
+	w, path          WitnessItem
+	tx               *Tx
+	cache            *SighashV1PrehashCache
+	keyID            [32]byte
 }
 
 func newNativeSuiteAvailabilityFixture(t *testing.T) nativeSuiteAvailabilityFixture {
@@ -51,8 +51,7 @@ func newNativeSuiteAvailabilityFixture(t *testing.T) nativeSuiteAvailabilityFixt
 	claimKeyID := [32]byte{0x71}
 	htlcEntry := makeHTLCEntry([32]byte{0x72}, LOCK_MODE_HEIGHT, 1, claimKeyID, keyID)
 	path := WitnessItem{SuiteID: SUITE_ID_SENTINEL, Pubkey: keyID[:], Signature: []byte{0x01}}
-	stealthEntry := UtxoEntry{Value: 100, CovenantType: COV_TYPE_CORE_STEALTH, CovenantData: makeStealthCovenantData(keyID)}
-	return nativeSuiteAvailabilityFixture{entry: entry, htlcEntry: htlcEntry, stealthEntry: stealthEntry, w: w, path: path, tx: tx, cache: cache, keyID: keyID}
+	return nativeSuiteAvailabilityFixture{entry: entry, htlcEntry: htlcEntry, w: w, path: path, tx: tx, cache: cache, keyID: keyID}
 }
 
 type nativeSuiteAvailabilityOrigin struct {
@@ -82,9 +81,6 @@ func (f nativeSuiteAvailabilityFixture) origins() []nativeSuiteAvailabilityOrigi
 		{"htlc", "CORE_HTLC suite not in native spend set", false, func(rotation RotationProvider, registry *SuiteRegistry) error {
 			return validateHTLCSignaturePrecheck(f.w, f.keyID, 1, rotation, registry)
 		}},
-		{"stealth", "CORE_STEALTH suite not in native spend set", false, func(rotation RotationProvider, registry *SuiteRegistry) error {
-			return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{entry: f.stealthEntry, w: f.w, tx: f.tx, inputValue: 100, blockHeight: 1, cache: f.cache, rotation: rotation, registry: registry})
-		}},
 		{"p2pk_q", "CORE_P2PK suite not in native spend set", false, func(rotation RotationProvider, registry *SuiteRegistry) error {
 			return validateP2PKSpendQ(f.entry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, registry)
 		}},
@@ -92,9 +88,6 @@ func (f nativeSuiteAvailabilityFixture) origins() []nativeSuiteAvailabilityOrigi
 		{"vault_q", "CORE_VAULT suite not in native spend set", false, threshold("CORE_VAULT", true)},
 		{"htlc_q", "CORE_HTLC suite not in native spend set", false, func(rotation RotationProvider, registry *SuiteRegistry) error {
 			return validateHTLCSpendQ(f.htlcEntry, f.path, f.w, f.tx, 0, 100, [32]byte{}, 1, 0, f.cache, NewSigCheckQueue(1), rotation, registry)
-		}},
-		{"stealth_q", "CORE_STEALTH suite not in native spend set", false, func(rotation RotationProvider, registry *SuiteRegistry) error {
-			return validateCoreStealthSpendQ(f.stealthEntry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, registry)
 		}},
 	}
 }
@@ -243,9 +236,6 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 		{"htlc", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error {
 			return validateHTLCSpendQ(f.htlcEntry, f.path, f.w, f.tx, 0, 100, [32]byte{}, 1, 0, f.cache, q, r, reg)
 		}},
-		{"stealth", func(q *SigCheckQueue, r RotationProvider, reg *SuiteRegistry) error {
-			return validateCoreStealthSpendQ(f.stealthEntry, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, q, r, reg)
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, missingRegistry := range []bool{false, true} {
@@ -255,7 +245,7 @@ func TestNativeSuiteAvailabilityQueueRollback(t *testing.T) {
 				if missingRegistry {
 					rotation.spend, registry, suffix, cause = NewNativeSuiteSet(SUITE_ID_ML_DSA_87), NewSuiteRegistryFromParams(nil), "not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable
 				}
-				message := "CORE_" + map[string]string{"p2pk": "P2PK", "htlc": "HTLC", "stealth": "STEALTH"}[tc.name] + " suite " + suffix
+				message := "CORE_" + map[string]string{"p2pk": "P2PK", "htlc": "HTLC"}[tc.name] + " suite " + suffix
 				mustTxErrorCause(t, tc.run(q, rotation, registry), TX_ERR_SIG_ALG_INVALID, message, cause)
 				if !samePrefix(q, prefix) {
 					t.Fatalf("queue prefix changed: %+v", q.tasks)
@@ -380,12 +370,6 @@ func TestNativeSuiteAvailabilityPublicPaths(t *testing.T) {
 		}},
 		{"create_shape", "invalid CORE_P2PK covenant_data length", func(rotation RotationProvider) error {
 			return ValidateTxCovenantsGenesis(&Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK}}}, [32]byte{}, 1, rotation)
-		}},
-		{"stealth_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error {
-			return validateCoreStealthSpendAtHeight(coreStealthSpendValidation{entry: UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, w: f.w, rotation: rotation, registry: DefaultSuiteRegistry()})
-		}},
-		{"stealth_q_shape", "CORE_STEALTH covenant_data length mismatch", func(rotation RotationProvider) error {
-			return validateCoreStealthSpendQ(UtxoEntry{CovenantType: COV_TYPE_CORE_STEALTH}, f.w, f.tx, 0, 100, [32]byte{}, 1, f.cache, NewSigCheckQueue(1), rotation, DefaultSuiteRegistry())
 		}},
 	} {
 		rotation := &nativeSuiteAvailabilityRotation{}

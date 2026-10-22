@@ -139,9 +139,6 @@ func checkSpendCovenant(
 	case COV_TYPE_HTLC:
 		_, err := ParseHTLCCovenantData(covData)
 		return err
-	case COV_TYPE_CORE_STEALTH:
-		_, err := ParseStealthCovenantData(covData)
-		return err
 	case COV_TYPE_CORE_SIMPLICITY:
 		// Resolve-phase accept (like P2PK): the full §14.3 covenant-data + spend validation runs at
 		// spend time (validateCoreSimplicitySpend -> parseCoreSimplicityCovenantData with value).

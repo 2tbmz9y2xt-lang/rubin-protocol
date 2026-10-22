@@ -59,8 +59,6 @@ import RubinFormal.Conformance.CVFeaturebitsVectors
 import RubinFormal.Conformance.CVFeaturebitsReplay
 import RubinFormal.Conformance.CVFlagdayVectors
 import RubinFormal.Conformance.CVFlagdayReplay
-import RubinFormal.Conformance.CVStealthVectors
-import RubinFormal.Conformance.CVStealthReplay
 import RubinFormal.Conformance.CVDevnetGenesisVectors
 import RubinFormal.Conformance.CVDevnetGenesisReplay
 import RubinFormal.Conformance.CVDevnetSubsidyVectors

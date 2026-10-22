@@ -180,8 +180,6 @@ func validateInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) err
 		return validateVaultInputSpendQ(check, env)
 	case COV_TYPE_HTLC:
 		return validateHTLCInputSpendQ(check, env)
-	case COV_TYPE_CORE_STEALTH:
-		return validateCoreStealthInputSpendQ(check, env)
 	case COV_TYPE_CORE_SIMPLICITY:
 		return validateCoreSimplicityInputSpendQ(check, env)
 	default:
@@ -234,16 +232,6 @@ func validateHTLCInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv)
 		check.entry, check.assigned[0], check.assigned[1], check.tx,
 		check.inputIndex, check.inputValue, env.chainID, env.blockHeight,
 		env.blockMTP, env.sighashCache, env.sigQueue, env.rotation, env.registry,
-	)
-}
-
-func validateCoreStealthInputSpendQ(check txInputSpendCheck, env txValidationWorkerEnv) error {
-	if len(check.assigned) != CORE_STEALTH_WITNESS_SLOTS {
-		return txerr(TX_ERR_PARSE, "CORE_STEALTH witness_slots must be 1")
-	}
-	return validateCoreStealthSpendQ(
-		check.entry, check.assigned[0], check.tx, check.inputIndex, check.inputValue,
-		env.chainID, env.blockHeight, env.sighashCache, env.sigQueue, env.rotation, env.registry,
 	)
 }
 

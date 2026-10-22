@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::constants::{
-    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_CORE_STEALTH,
-    COV_TYPE_DA_COMMIT, COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
+    COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT,
+    COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT,
 };
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
@@ -13,7 +13,6 @@ use crate::sig_queue::SigCheckQueue;
 use crate::sighash::SighashV1PrehashCache;
 use crate::simplicity_covenant::reject_core_simplicity_spend;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
-use crate::stealth::{parse_stealth_covenant_data, validate_stealth_spend_q};
 use crate::suite_registry::{RotationProvider, SuiteRegistry};
 use crate::tx::{Tx, TxInput};
 use crate::vault::{
@@ -564,9 +563,6 @@ fn validate_resolved_spend(
         COV_TYPE_VAULT => VaultSpendState::capture(entry, range, input_index)
             .map(|captured| *vault = Some(captured)),
         COV_TYPE_HTLC => apply_htlc_spend(ctx, entry, assigned, input_index, cache, queue),
-        COV_TYPE_CORE_STEALTH => {
-            apply_stealth_spend(ctx, entry, assigned, input_index, cache, queue)
-        }
         _ => Ok(()),
     }
 }
@@ -651,35 +647,6 @@ fn apply_htlc_spend(
             block_height: ctx.height,
             block_mtp: ctx.block_mtp,
         },
-        cache,
-        queue,
-        ctx.rotation,
-        ctx.registry,
-    )?;
-    Ok(())
-}
-
-fn apply_stealth_spend(
-    ctx: &UtxoApplyImplContext<'_>,
-    entry: &UtxoEntry,
-    assigned: &[crate::tx::WitnessItem],
-    input_index: u32,
-    cache: &mut SighashV1PrehashCache<'_>,
-    queue: Option<&mut SigCheckQueue>,
-) -> Result<(), TxError> {
-    let [witness] = assigned else {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "CORE_STEALTH witness_slots must be 1",
-        ));
-    };
-    validate_stealth_spend_q(
-        entry,
-        witness,
-        input_index,
-        entry.value,
-        ctx.chain_id,
-        ctx.height,
         cache,
         queue,
         ctx.rotation,
@@ -855,10 +822,6 @@ fn non_vault_inputs_owned_by(
 fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), TxError> {
     match covenant_type {
         COV_TYPE_P2PK => Ok(()),
-        COV_TYPE_CORE_STEALTH => {
-            let _ = parse_stealth_covenant_data(covenant_data)?;
-            Ok(())
-        }
         COV_TYPE_VAULT => {
             parse_vault_covenant_data_for_spend(covenant_data)?;
             Ok(())
@@ -881,10 +844,7 @@ fn check_spend_covenant(covenant_type: u16, covenant_data: &[u8]) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{
-        LOCK_MODE_HEIGHT, MAX_STEALTH_COVENANT_DATA, SIGHASH_ALL, SUITE_ID_ML_DSA_87,
-        SUITE_ID_SENTINEL,
-    };
+    use crate::constants::{LOCK_MODE_HEIGHT, SIGHASH_ALL, SUITE_ID_ML_DSA_87, SUITE_ID_SENTINEL};
     use crate::sighash::sighash_v1_digest;
     use crate::tx::{DaCommitCore, Tx, TxInput, TxOutput, WitnessItem};
     use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
@@ -1570,13 +1530,6 @@ mod tests {
         payload
     }
 
-    fn stealth_covenant_data_for_pubkey(pubkey: &[u8]) -> Vec<u8> {
-        let mut covenant_data = vec![0u8; MAX_STEALTH_COVENANT_DATA as usize];
-        let split = covenant_data.len() - 32;
-        covenant_data[split..].copy_from_slice(&sha3_256(pubkey));
-        covenant_data
-    }
-
     fn signed_vault_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
         let prev_vault = [0x81; 32];
         let prev_fee = [0x82; 32];
@@ -1719,54 +1672,6 @@ mod tests {
         (tx, utxo_set, txid, chain_id)
     }
 
-    fn signed_stealth_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {
-        let prev_txid = [0xb1; 32];
-        let txid = [0xb2; 32];
-        let chain_id = [0xb3; 32];
-
-        let keypair = Mldsa87Keypair::generate().expect("stealth keypair");
-        let output_cov = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
-
-        let mut tx = Tx {
-            version: 1,
-            tx_kind: 0x00,
-            tx_nonce: 1,
-            inputs: vec![TxInput {
-                prev_txid,
-                prev_vout: 0,
-                script_sig: vec![],
-                sequence: 0,
-            }],
-            outputs: vec![TxOutput {
-                value: 400,
-                covenant_type: COV_TYPE_P2PK,
-                covenant_data: output_cov,
-            }],
-            locktime: 0,
-            witness: vec![],
-            da_payload: vec![],
-            da_commit_core: None,
-            da_chunk_core: None,
-        };
-        tx.witness = vec![sign_input_witness(&tx, 0, 500, chain_id, &keypair)];
-
-        let utxo_set = HashMap::from([(
-            Outpoint {
-                txid: prev_txid,
-                vout: 0,
-            },
-            UtxoEntry {
-                value: 500,
-                covenant_type: COV_TYPE_CORE_STEALTH,
-                covenant_data: stealth_covenant_data_for_pubkey(&keypair.pubkey_bytes()),
-                creation_height: 0,
-                created_by_coinbase: false,
-            },
-        )]);
-
-        (tx, utxo_set, txid, chain_id)
-    }
-
     fn assert_apply_preserves_caller_utxos(
         tx: &Tx,
         utxo_set: &HashMap<Outpoint, UtxoEntry>,
@@ -1824,10 +1729,128 @@ mod tests {
         assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
     }
 
+    fn assert_retired_apply_refusal(
+        tx: &Tx,
+        utxo_set: &HashMap<Outpoint, UtxoEntry>,
+        chain_id: [u8; 32],
+        expected: ErrorCode,
+    ) {
+        let bytes = crate::marshal_tx(tx).expect("marshal refusal input");
+        let (tx, txid, _, consumed) = crate::parse_tx(&bytes).expect("admitted encoding");
+        assert_eq!(consumed, bytes.len());
+        for deferred in [false, true] {
+            let before = utxo_set.clone();
+            let result = if deferred {
+                apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
+                    &tx, txid, utxo_set, 200, 0, 0, chain_id, None, None,
+                )
+            } else {
+                apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+                    &tx, txid, utxo_set, 200, 0, 0, chain_id, None, None,
+                )
+            };
+            assert_eq!(result.unwrap_err().code, expected);
+            assert_eq!(utxo_set, &before);
+        }
+        let before = utxo_set.clone();
+        let cache = crate::SigCache::new(8);
+        let mut queue = SigCheckQueue::new(2).with_cache(cache.clone());
+        let mark = queue.mark();
+        let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+            &tx, txid, utxo_set, 200, 0, 0, chain_id, None, None, &mut queue,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, expected);
+        assert_eq!(utxo_set, &before);
+        assert!(queue.is_empty());
+        assert_eq!(queue.mark(), mark);
+        assert_eq!((cache.len(), cache.hits(), cache.misses()), (0, 0, 0));
+    }
+
     #[test]
-    fn apply_non_coinbase_tx_basic_update_stealth_does_not_mutate_caller_utxos() {
-        let (tx, utxo_set, txid, chain_id) = signed_stealth_case();
-        assert_apply_preserves_caller_utxos(&tx, &utxo_set, txid, chain_id);
+    fn retired_0x0105_input_refusal_preserves_state_before_witness_work() {
+        let (valid_tx, mut utxo_set, txid, chain_id) = signed_multisig_case();
+        utxo_set.extend([utxo([0xb1; 32], 100, 0x0105, vec![0x55; 1600])]);
+        let original = utxo_set.clone();
+        let extra = WitnessItem {
+            suite_id: 0,
+            pubkey: vec![],
+            signature: vec![],
+        };
+        let mut wrong_suite = valid_tx.witness[0].clone();
+        wrong_suite.suite_id = 0x02;
+        for witness in [vec![], vec![extra.clone(), extra], vec![wrong_suite]] {
+            let mut tx = unsigned_tx(0, 2, vec![tx_input([0xb1; 32])], valid_tx.outputs.clone());
+            tx.witness = witness;
+            assert_retired_apply_refusal(
+                &tx,
+                &utxo_set,
+                chain_id,
+                ErrorCode::TxErrCovenantTypeInvalid,
+            );
+        }
+        assert_eq!(utxo_set, original);
+        let (next, summary) = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+            &valid_tx, txid, &utxo_set, 200, 0, 0, chain_id, None, None,
+        )
+        .expect("independent multisig spend after refusals");
+        assert_eq!(summary.fee, 10);
+        assert_eq!(summary.utxo_count, 2);
+        assert_eq!(utxo_set, original);
+        let retired = Outpoint {
+            txid: [0xb1; 32],
+            vout: 0,
+        };
+        assert_eq!(next.get(&retired), original.get(&retired));
+    }
+
+    #[test]
+    fn retired_0x0105_output_precedes_missing_input() {
+        let mut tx = unsigned_tx(
+            0,
+            1,
+            vec![tx_input([0xb1; 32])],
+            vec![tx_output(1, 0x0105, vec![0x55; 1600])],
+        );
+        let utxo_set = HashMap::new();
+        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrCovenantTypeInvalid);
+        tx.tx_nonce = 0;
+        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrTxNonceInvalid);
+        tx.tx_nonce = 1;
+        tx.inputs.clear();
+        assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], ErrorCode::TxErrParse);
+    }
+
+    #[test]
+    fn retired_0x0105_resolution_keeps_bounded_input_order() {
+        let keypair = Mldsa87Keypair::generate().expect("prefix keypair");
+        let cov = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
+        let utxo_set = HashMap::from([
+            utxo([0xa1; 32], 100, COV_TYPE_P2PK, cov.clone()),
+            utxo([0xb1; 32], 100, 0x0105, vec![0x55; 1600]),
+        ]);
+        for (first, second, expected) in [
+            ([0xc1; 32], [0xb1; 32], ErrorCode::TxErrMissingUtxo),
+            ([0xb1; 32], [0xc1; 32], ErrorCode::TxErrCovenantTypeInvalid),
+        ] {
+            for prefix in [false, true] {
+                let mut inputs = Vec::new();
+                if prefix {
+                    inputs.push(tx_input([0xa1; 32]));
+                }
+                inputs.extend([tx_input(first), tx_input(second)]);
+                let mut tx = unsigned_tx(
+                    0,
+                    1,
+                    inputs,
+                    vec![tx_output(90, COV_TYPE_P2PK, cov.clone())],
+                );
+                if prefix {
+                    tx.witness = vec![sign_input_witness(&tx, 0, 100, [0; 32], &keypair)];
+                }
+                assert_retired_apply_refusal(&tx, &utxo_set, [0; 32], expected);
+            }
+        }
     }
 
     #[test]

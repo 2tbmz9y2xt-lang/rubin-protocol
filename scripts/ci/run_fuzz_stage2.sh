@@ -55,7 +55,6 @@ TARGETS=(
   "./consensus:FuzzFlagDayHelpers"
   "./consensus:FuzzParseBlockBytes"
   "./consensus:FuzzParseBlockHeaderBytes"
-  "./consensus:FuzzParseStealthCovenantData"
   "./consensus:FuzzParseTx"
   "./consensus:FuzzReadCompactSize"
   "./consensus:FuzzValidateP2PKSpendStructural"
