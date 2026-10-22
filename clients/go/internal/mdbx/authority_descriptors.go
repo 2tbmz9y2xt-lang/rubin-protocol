@@ -27,14 +27,15 @@ func validSpan(s CleanupSpanV1) bool {
 	return false
 }
 
-func validCleanupFor(c *CleanupV1, tree bool) bool {
-	if len(c.Spans) < 1 {
+func validCleanupFor(spans authoritySpans, tree bool) bool {
+	if spans.len() < 1 {
 		return false
 	}
 	previous := CleanupSpanKindV1(0)
 	var generation uint64
 	generations := 0
-	for _, span := range c.Spans {
+	for i := 0; i < spans.len(); i++ {
+		span := spans.at(i)
 		if !validSpan(span) || !validSpanOrder(span, previous, generation, tree) {
 			return false
 		}
@@ -71,32 +72,33 @@ func validReplayFor(v *ReplayV1, tree bool) bool {
 	return false
 }
 
-func validDetachedFor(d *DetachedSuffixV1, tree bool) bool {
-	if !all(len(d.Entries) >= 1, len(d.Entries) <= 1440, int(d.EntryCount) == len(d.Entries)) {
+func validDetachedFor(d *DetachedSuffixV1, entries authorityDetached, tree bool) bool {
+	if !all(entries.len() >= 1, entries.len() <= 1440, int(d.EntryCount) == entries.len()) {
 		return false
 	}
-	seen, sum := map[[32]byte]bool{}, uint64(0)
-	for i, entry := range d.Entries {
+	sum := uint64(0)
+	for i := 0; i < entries.len(); i++ {
+		entry := entries.at(i)
 		if !all(entry.Height <= maxAuthorityHeight, entry.BlockBytesLen >= 1,
-			entry.BlockBytesLen <= authorityBlockMaximum(tree), !seen[entry.Hash]) {
+			entry.BlockBytesLen <= authorityBlockMaximum(tree), !entries.hasHash(entry.Hash, i)) {
 			return false
 		}
-		if i > 0 && !validPointStep(d.Entries[i-1].Height, entry.Height, true) {
+		if i > 0 && !validPointStep(entries.at(i-1).Height, entry.Height, true) {
 			return false
 		}
-		seen[entry.Hash], sum = true, sum+entry.BlockBytesLen
+		sum += entry.BlockBytesLen
 	}
-	first := d.Entries[0]
+	first := entries.at(0)
 	return all(d.Cursor == (AuthorityPointV1{Height: first.Height, BlockHash: first.Hash}), d.LogicalBytes == sum)
 }
 
-func validDescriptors(a StorageAuthorityV1) bool { return validDescriptorsFor(a, false) }
+func validDescriptors(a StorageAuthorityV1) bool { return validDescriptorsFor(projectAuthority(a, nil), false) }
 
-func validDescriptorsFor(a StorageAuthorityV1, tree bool) bool {
+func validDescriptorsFor(a authorityValidation, tree bool) bool {
 	if a.SelectedSide != nil && !validSelectedFor(a.SelectedSide, tree) {
 		return false
 	}
-	if a.DetachedSuffix != nil && !validDetachedFor(a.DetachedSuffix, tree) {
+	if a.DetachedSuffix != nil && !validDetachedFor(a.DetachedSuffix, a.detached, tree) {
 		return false
 	}
 	branch := a.ExcludedInvalidBranch

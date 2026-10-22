@@ -1,22 +1,21 @@
 package mdbx
 
-import "slices"
-
-func validPoints(points []AuthorityPointV1, descending bool, seen map[[32]byte]bool) bool {
+func validPoints(points authorityPoints, descending bool, earlier authorityPoints) bool {
 	var previous uint64
-	for i, point := range points {
-		if !all(point.Height <= maxAuthorityHeight, !seen[point.BlockHash]) {
+	for i := 0; i < points.len(); i++ {
+		point := points.at(i)
+		if !all(point.Height <= maxAuthorityHeight, !points.hasHash(point.BlockHash, i), !earlier.hasHash(point.BlockHash, earlier.len())) {
 			return false
 		}
 		if i > 0 && !validPointStep(previous, point.Height, descending) {
 			return false
 		}
-		seen[point.BlockHash], previous = true, point.Height
+		previous = point.Height
 	}
 	return true
 }
 
-func validFailure(f *RecordedFailureV1, newSuffix []AuthorityPointV1) bool {
+func validFailure(f *RecordedFailureV1, newSuffix authorityPoints) bool {
 	if f == nil {
 		return true
 	}
@@ -28,52 +27,55 @@ func validFailure(f *RecordedFailureV1, newSuffix []AuthorityPointV1) bool {
 		if f.FailedBlockHash == nil {
 			return true
 		}
-		return slices.ContainsFunc(newSuffix, func(point AuthorityPointV1) bool {
-			return point.BlockHash == *f.FailedBlockHash
-		})
+		return newSuffix.hasHash(*f.FailedBlockHash, newSuffix.len())
 	case RecordedFailureStoreIntegrityV1, RecordedFailureLocalInvariantV1, RecordedFailureNoncanonicalV1:
 		return f.FailedBlockHash == nil
 	}
 	return false
 }
 
-func validStage(o *OrdinaryApplyV1) bool {
+func validStage(a authorityValidation) bool {
+	o := a.Ordinary
 	switch o.Stage {
 	case OrdinaryStageDisconnectV1:
-		return validDisconnectStage(o)
+		return validDisconnectStage(a)
 	case OrdinaryStageConnectV1:
-		return validConnectStage(o)
+		return validConnectStage(a)
 	case OrdinaryStageRollbackNewV1:
-		return validRollbackNewStage(o)
+		return validRollbackNewStage(a)
 	case OrdinaryStageRestoreOldV1:
-		return validRestoreOldStage(o)
+		return validRestoreOldStage(a)
 	}
 	return false
 }
 
-func validDisconnectStage(o *OrdinaryApplyV1) bool {
-	return len(o.OldSuffix) > 0 && o.RecordedFailure == nil && (o.Cursor == nil || slices.Contains(o.OldSuffix, *o.Cursor))
+func validDisconnectStage(a authorityValidation) bool {
+	o := a.Ordinary
+	return a.old.len() > 0 && o.RecordedFailure == nil && (o.Cursor == nil || a.old.contains(*o.Cursor))
 }
 
-func validConnectStage(o *OrdinaryApplyV1) bool {
-	return len(o.NewSuffix) > 0 && o.RecordedFailure == nil && ((o.Cursor == nil && len(o.OldSuffix) == 0) || (o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor)))
+func validConnectStage(a authorityValidation) bool {
+	o := a.Ordinary
+	return a.new.len() > 0 && o.RecordedFailure == nil && ((o.Cursor == nil && a.old.len() == 0) || (o.Cursor != nil && a.new.contains(*o.Cursor)))
 }
 
-func validRollbackNewStage(o *OrdinaryApplyV1) bool {
-	return len(o.NewSuffix) > 0 && o.RecordedFailure != nil && o.Cursor != nil && slices.Contains(o.NewSuffix, *o.Cursor) && (len(o.OldSuffix) > 0 || *o.Cursor != o.NewSuffix[0])
+func validRollbackNewStage(a authorityValidation) bool {
+	o := a.Ordinary
+	return a.new.len() > 0 && o.RecordedFailure != nil && o.Cursor != nil && a.new.contains(*o.Cursor) && (a.old.len() > 0 || *o.Cursor != a.new.at(0))
 }
 
-func validRestoreOldStage(o *OrdinaryApplyV1) bool {
-	return len(o.OldSuffix) > 0 && o.RecordedFailure != nil && o.Cursor != nil && *o.Cursor != o.OldSuffix[0] && slices.Contains(o.OldSuffix, *o.Cursor)
+func validRestoreOldStage(a authorityValidation) bool {
+	o := a.Ordinary
+	return a.old.len() > 0 && o.RecordedFailure != nil && o.Cursor != nil && *o.Cursor != a.old.at(0) && a.old.contains(*o.Cursor)
 }
 
-func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
-	if len(points) == 0 {
+func suffixF(points authorityPoints, descending bool) (uint64, bool) {
+	if points.len() == 0 {
 		return 0, false
 	}
-	point := points[0]
+	point := points.at(0)
 	if descending {
-		point = points[len(points)-1]
+		point = points.at(points.len() - 1)
 	}
 	if point.Height == 0 {
 		return 0, false
@@ -84,30 +86,31 @@ func suffixF(points []AuthorityPointV1, descending bool) (uint64, bool) {
 // validOrdinaryTargetFor requires a nonempty N whose last point is the target and a captured side describing exactly N
 // (RUBIN_MEMPOOL_POLICY.md 6.4.1.2, 6.4.1.7): a full capture whose rows are exactly N, or the one-slot capture of
 // N[1:] plus the same-generation frozen SIDE singleton at N[0] in carried_cleanup, whose union is N of 1440.
-func validOrdinaryTargetFor(o *OrdinaryApplyV1, f uint64, tree bool) bool {
+func validOrdinaryTargetFor(a authorityValidation, f uint64, tree bool) bool {
+	o := a.Ordinary
 	side := o.CapturedSelectedSide
-	if len(o.NewSuffix) == 0 || side == nil || !validSelectedFor(side, tree) {
+	if a.new.len() == 0 || side == nil || !validSelectedFor(side, tree) {
 		return false
 	}
-	target := o.NewSuffix[len(o.NewSuffix)-1]
+	target := a.new.at(a.new.len() - 1)
 	if !all(o.Target == target, side.F == f, side.TipHeight == target.Height, side.TipHash == target.BlockHash) {
 		return false
 	}
 	first := side.TipHeight - uint64(side.RowCount) + 1
-	if int(side.RowCount) == len(o.NewSuffix) {
-		return first == o.NewSuffix[0].Height
+	if int(side.RowCount) == a.new.len() {
+		return first == a.new.at(0).Height
 	}
-	return validCapturedUnion(o, side, first)
+	return validCapturedUnion(a, side, first)
 }
 
 // validCapturedUnion is the captured1439+frozenSIDE1 union covering N1440; the captured row count alone never
 // stands for the union's cardinality.
-func validCapturedUnion(o *OrdinaryApplyV1, side *SelectedSideV1, first uint64) bool {
-	if o.CarriedCleanup == nil || len(o.NewSuffix) != 1440 || side.RowCount != 1439 || first != o.NewSuffix[0].Height+1 {
+func validCapturedUnion(a authorityValidation, side *SelectedSideV1, first uint64) bool {
+	if a.Ordinary.CarriedCleanup == nil || a.new.len() != 1440 || side.RowCount != 1439 || first != a.new.at(0).Height+1 {
 		return false
 	}
 	frozen := CleanupSpanV1{Kind: CleanupSpanSideV1, GenerationID: side.GenerationID, FirstHeight: first - 1, LastHeight: first - 1, NextHeight: first - 1}
-	return slices.Contains(o.CarriedCleanup.Spans, frozen)
+	return a.carried.contains(frozen)
 }
 
 func laggedPromise(height, window uint64) uint64 {
@@ -117,40 +120,38 @@ func laggedPromise(height, window uint64) uint64 {
 	return height - window + 1
 }
 
-func validOrdinaryPromises(a StorageAuthorityV1) bool {
+func validOrdinaryPromises(a authorityValidation) bool {
 	height := uint64(0)
-	if len(a.Ordinary.OldSuffix) > 0 {
-		height = a.Ordinary.OldSuffix[0].Height
+	if a.old.len() > 0 {
+		height = a.old.at(0).Height
 	} else {
-		height = a.Ordinary.NewSuffix[0].Height - 1
+		height = a.new.at(0).Height - 1
 	}
 	return a.U == laggedPromise(height, 1440)
 }
 
-func validOrdinaryTailFor(a StorageAuthorityV1, f uint64, tree bool) bool {
+func validOrdinaryTailFor(a authorityValidation, f uint64, tree bool) bool {
 	o := a.Ordinary
-	if !validOrdinaryTargetFor(o, f, tree) || !validStage(o) || !validFailure(o.RecordedFailure, o.NewSuffix) {
+	if !validOrdinaryTargetFor(a, f, tree) || !validStage(a) || !validFailure(o.RecordedFailure, a.new) {
 		return false
 	}
-	if o.CarriedCleanup != nil && !validCleanupFor(o.CarriedCleanup, tree) {
+	if o.CarriedCleanup != nil && !validCleanupFor(a.carried, tree) {
 		return false
 	}
 	return validOrdinaryPromises(a)
 }
 
-func validOrdinaryFor(a StorageAuthorityV1, tree bool) bool {
-	o := a.Ordinary
-	if !all(len(o.OldSuffix) <= 1440, len(o.NewSuffix) >= 1, len(o.NewSuffix) <= 1440,
-		anyTrue(len(o.OldSuffix) >= 1, len(o.NewSuffix) >= 2)) {
+func validOrdinaryFor(a authorityValidation, tree bool) bool {
+	if !all(a.old.len() <= 1440, a.new.len() >= 1, a.new.len() <= 1440,
+		anyTrue(a.old.len() >= 1, a.new.len() >= 2)) {
 		return false
 	}
-	seen := map[[32]byte]bool{}
-	if !validPoints(o.OldSuffix, true, seen) || !validPoints(o.NewSuffix, false, seen) {
+	if !validPoints(a.old, true, authorityPoints{}) || !validPoints(a.new, false, a.old) {
 		return false
 	}
-	oldF, oldOK := suffixF(o.OldSuffix, true)
-	newF, newOK := suffixF(o.NewSuffix, false)
-	if !all(anyTrue(len(o.OldSuffix) == 0, oldOK), anyTrue(len(o.NewSuffix) == 0, newOK)) {
+	oldF, oldOK := suffixF(a.old, true)
+	newF, newOK := suffixF(a.new, false)
+	if !all(anyTrue(a.old.len() == 0, oldOK), anyTrue(a.new.len() == 0, newOK)) {
 		return false
 	}
 	if !anyTrue(all(oldOK, !newOK), all(!oldOK, newOK), all(oldOK, newOK, oldF == newF)) {

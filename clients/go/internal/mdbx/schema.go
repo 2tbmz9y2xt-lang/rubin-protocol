@@ -192,6 +192,15 @@ func (u UTXOValue) Encode() ([]byte, error) {
 }
 
 func DecodeUTXOValue(b []byte) (UTXOValue, error) {
+	u, err := decodeUTXOValue(b)
+	if err != nil {
+		return UTXOValue{}, err
+	}
+	u.CovenantData = append([]byte(nil), u.CovenantData...)
+	return u, nil
+}
+
+func decodeUTXOValue(b []byte) (UTXOValue, error) {
 	if len(b) < 20 || len(b) > 65_560 {
 		return UTXOValue{}, errSchema
 	}
@@ -207,7 +216,7 @@ func DecodeUTXOValue(b []byte) (UTXOValue, error) {
 	if coinbase > 1 {
 		return UTXOValue{}, errSchema
 	}
-	return UTXOValue{Value: binary.LittleEndian.Uint64(b), CovenantType: binary.LittleEndian.Uint16(b[8:]), CovenantData: append([]byte(nil), b[off:end]...), CreationHeight: binary.LittleEndian.Uint64(b[end:]), Coinbase: coinbase == 1}, nil
+	return UTXOValue{Value: binary.LittleEndian.Uint64(b), CovenantType: binary.LittleEndian.Uint16(b[8:]), CovenantData: b[off:end], CreationHeight: binary.LittleEndian.Uint64(b[end:]), Coinbase: coinbase == 1}, nil
 }
 
 func HeightKey(imageID, height uint64) ([]byte, error) {
@@ -257,13 +266,20 @@ func HashBoundValue(key [32]byte, value []byte, block bool) ([]byte, error) {
 // HashBoundInitial148Value binds the complete initial148 header to key and
 // returns an independent copy of the complete row. It does not validate a body.
 func HashBoundInitial148Value(key [32]byte, value []byte, block bool) ([]byte, error) {
-	if (!block && len(value) != Initial148HeaderBytes) || (block && (len(value) < Initial148HeaderBytes || len(value) > Initial148MaxBlockBytes)) {
-		return nil, errSchema
-	}
-	if sha3.Sum256(value[:Initial148HeaderBytes]) != key {
-		return nil, errSchema
+	if err := validateInitial148Value(key, value, block); err != nil {
+		return nil, err
 	}
 	return append([]byte(nil), value...), nil
+}
+
+func validateInitial148Value(key [32]byte, value []byte, block bool) error {
+	if (!block && len(value) != Initial148HeaderBytes) || (block && (len(value) < Initial148HeaderBytes || len(value) > Initial148MaxBlockBytes)) {
+		return errSchema
+	}
+	if sha3.Sum256(value[:Initial148HeaderBytes]) != key {
+		return errSchema
+	}
+	return nil
 }
 
 func UndoManifestKey(blockHash [32]byte) []byte {

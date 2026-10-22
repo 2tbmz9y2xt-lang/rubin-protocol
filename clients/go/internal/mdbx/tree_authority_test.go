@@ -53,6 +53,7 @@ func treeImportLiteral(t *testing.T, role byte) []byte {
 
 func wantTreeRootError(t *testing.T, input []byte) {
 	t.Helper()
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, input, errSchema)
 	before := bytes.Clone(input)
 	got, err := DecodeRootBindingV1(input)
 	if !reflect.DeepEqual(got, RootBindingV1{}) || !exactErr(err) || !bytes.Equal(input, before) {
@@ -80,6 +81,7 @@ func wantTreeRootEncodeError(t *testing.T, root RootBindingV1) {
 func TestTreeRootLiterals(t *testing.T) {
 	for _, applied := range []bool{false, true} {
 		root, literal := treeRootFixture(t, applied), treeRootLiteral(t, applied)
+		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, literal, nil)
 		got, err := root.Encode()
 		if err != nil || !bytes.Equal(got, literal) {
 			t.Fatalf("root literal applied=%v = %x, %v; want %x", applied, got, err, literal)
@@ -106,6 +108,7 @@ func TestTreeRootLiterals(t *testing.T) {
 			literal = append(literal, suffix...)
 			literal = append(literal, 2)
 			literal = append(literal, treeImportLiteral(t, role)...)
+			wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, literal, nil)
 			encoded, err := root.Encode()
 			if err != nil || len(encoded) != 328 || !bytes.Equal(encoded, literal) {
 				t.Fatalf("root top/assurance literal = %x, %v", encoded, err)
@@ -114,6 +117,7 @@ func TestTreeRootLiterals(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(decoded, root) {
 				t.Fatalf("root top/assurance decode = %#v, %v", decoded, err)
 			}
+			wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, literal, nil)
 			second, err := DecodeRootBindingV1(literal)
 			if err != nil {
 				t.Fatal(err)
@@ -181,6 +185,7 @@ func TestTreeEndpointShape(t *testing.T) {
 		t.Fatalf("endpoint upper bound = %x, %v", encoded, err)
 	}
 	decoded, err := DecodeRootBindingV1(encoded)
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, encoded, nil)
 	if err != nil || decoded.Endpoint != r.Endpoint {
 		t.Fatalf("endpoint upper decode = %#v, %v", decoded.Endpoint, err)
 	}
@@ -294,6 +299,10 @@ func TestTreeTopAssuranceShape(t *testing.T) {
 	}
 	wantTreeRootError(t, make([]byte, 132))
 	wantTreeRootError(t, make([]byte, 329))
+	_, leafSuffix := treeChildLiteral(t, 0, 1)
+	preTop := append(bytes.Clone(treeRootLiteral(t, false)[:131]), 1)
+	preTop = append(preTop, leafSuffix...)
+	wantTreeRootError(t, append(preTop, 1))
 }
 
 func treeEvidenceFixture() TreeEvidenceV1 {
@@ -423,6 +432,7 @@ func wantTreeAuthority(t *testing.T, tree TreeAuthorityV1) []byte {
 	if err != nil {
 		t.Fatalf("tree authority encode: %v; %#v", err, tree)
 	}
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, encoded, nil)
 	decoded, err := DecodeTreeAuthorityV1(encoded)
 	if err != nil || !reflect.DeepEqual(decoded, tree) {
 		t.Fatalf("tree authority decode = %#v, %v; want %#v", decoded, err, tree)
@@ -432,6 +442,7 @@ func wantTreeAuthority(t *testing.T, tree TreeAuthorityV1) []byte {
 
 func wantTreeAuthorityDecodeError(t *testing.T, input []byte) {
 	t.Helper()
+	wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, input, errSchema)
 	before := bytes.Clone(input)
 	got, err := DecodeTreeAuthorityV1(input)
 	if !reflect.DeepEqual(got, TreeAuthorityV1{}) || !exactErr(err) || !bytes.Equal(input, before) {
@@ -445,6 +456,23 @@ func wantTreeAuthorityEncodeError(t *testing.T, tree TreeAuthorityV1) {
 	if got, err := tree.Encode(); got != nil || !exactErr(err) || !bytes.Equal(before, treeInputSnapshot(t, tree)) {
 		t.Fatalf("authority encode refusal = %x, %v; input changed", got, err)
 	}
+}
+
+func wantTreeModelLiteral(t *testing.T, a StorageAuthorityV1, valid bool) {
+	t.Helper()
+	tree := treeAuthorityFixture(a)
+	// The existing encoder only constructs bytes here; the expected decision is
+	// fixed by the case, independently of any production validation result.
+	var inner []byte
+	encodeAuthority(&inner, tree.Authority)
+	literal := treeEnvelopeLiteral(inner, byte(tree.SourceKind), 0, nil)
+	if valid {
+		wantTreeAuthority(t, tree)
+		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, literal, nil)
+		return
+	}
+	wantTreeAuthorityEncodeError(t, tree)
+	wantTreeAuthorityDecodeError(t, literal)
 }
 
 func TestTreeAuthorityLiterals(t *testing.T) {
@@ -461,10 +489,32 @@ func TestTreeAuthorityLiterals(t *testing.T) {
 				wantTreeAuthorityDecodeError(t, literal[:n])
 			}
 			wantTreeAuthorityDecodeError(t, append(bytes.Clone(literal), 0))
+			// Reframe each incomplete inner record so outer length validation does
+			// not mask the nested count, option, record or blob boundary.
+			for end := 40; end < len(inner); end++ {
+				wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner[:end], byte(tree.SourceKind), 0, nil))
+			}
+			wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(append(bytes.Clone(inner), 0), byte(tree.SourceKind), 0, nil))
+			for _, field := range []struct {
+				offset  int
+				invalid byte
+			}{{0, 2}, {1, 3}, {34, 5}, {35, 3}} {
+				for _, invalid := range []byte{0, field.invalid} {
+					bad := bytes.Clone(inner)
+					bad[field.offset] = invalid
+					wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(bad, byte(tree.SourceKind), 0, nil))
+				}
+			}
 		})
 	}
 	for _, cursor := range []byte{1, 2} {
 		wantTreeAuthority(t, treeAuthorityFixture(modelReplay(cursor)))
+	}
+	for offset := 36; offset < 40; offset++ {
+		inner := bytes.Clone(codecLiteralCases(t)[0].b)
+		binary.BigEndian.PutUint64(inner[26:], 20)
+		inner[offset] = 2
+		wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner, 0, 0, nil))
 	}
 	base := treeAuthorityFixture(modelReplay(1))
 	base.SourceKind, base.Authority.Replay.Cursor = 2, ReplayCursorV1{}
@@ -488,6 +538,184 @@ func TestTreeAuthorityLiterals(t *testing.T) {
 			}
 		})
 	}
+	for _, row := range []authorityCase{
+		{"OLD1440", modelOrdinaryD1440()},
+		{"NEW1440", modelOrdinary(2, 0, 1440, 0, 1, 0, 0)},
+		{"DISCONNECT", modelOrdinary(1, 2, 2, 2, 1, 0, 0)},
+		{"CONNECT nil", modelOrdinary(2, 0, 2, 0, 1, 0, 0)},
+		{"CONNECT present", modelOrdinary(2, 1, 2, 1, 1, 0, 0)},
+		{"ROLLBACK_NEW", modelOrdinary(3, 1, 2, 1, 1, 0, 0)},
+		{"RESTORE_OLD", modelOrdinary(4, 2, 2, 2, 1, 0, 0)},
+		{"detached1440", modelDetached1440()},
+	} {
+		t.Run(row.name, func(t *testing.T) { wantTreeModelLiteral(t, row.a, true) })
+	}
+	combined := modelOrdinaryD1440()
+	combined.Ordinary.NewSuffix = modelPoints(561, 1440, true, 5000)
+	combined.Ordinary.Target = combined.Ordinary.NewSuffix[1439]
+	combined.Ordinary.CapturedSelectedSide = modelSide(2, 560, 2000, 1440, 1440)
+	combined.Ordinary.CapturedSelectedSide.TipHash = combined.Ordinary.Target.BlockHash
+	t.Run("OLD1440+NEW1440", func(t *testing.T) { wantTreeModelLiteral(t, combined, true) })
+	for _, stage := range []byte{1, 2, 3, 4} {
+		for _, last := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stage%d/cursorLast%v", stage, last), func(t *testing.T) {
+				a := modelOrdinary(stage, 2, 2, 2, 1, 0, 0)
+				points := a.Ordinary.NewSuffix
+				if stage == 1 || stage == 4 {
+					points = a.Ordinary.OldSuffix
+				}
+				cursor := points[0]
+				if last {
+					cursor = points[1]
+				}
+				a.Ordinary.Cursor = &cursor
+				wantTreeModelLiteral(t, a, stage != 4 || last)
+			})
+		}
+	}
+	for _, kind := range []byte{1, 2, 3, 4} {
+		for _, hashPresent := range []bool{false, true} {
+			t.Run(fmt.Sprintf("failure%d/hash%v", kind, hashPresent), func(t *testing.T) {
+				a := modelOrdinary(3, 1, 2, 1, 1, 0, 0)
+				a.Ordinary.RecordedFailure = modelFailure(kind)
+				if hashPresent {
+					hash := a.Ordinary.NewSuffix[1].BlockHash
+					a.Ordinary.RecordedFailure.FailedBlockHash = &hash
+				}
+				wantTreeModelLiteral(t, a, !hashPresent || kind == 1)
+			})
+		}
+	}
+	for _, row := range []mutationCase[OrdinaryApplyV1]{
+		{"OLD duplicate", func(o *OrdinaryApplyV1) { o.OldSuffix[1].BlockHash = o.OldSuffix[0].BlockHash }},
+		{"NEW duplicate", func(o *OrdinaryApplyV1) { o.NewSuffix[1].BlockHash = o.NewSuffix[0].BlockHash }},
+		{"cross duplicate", func(o *OrdinaryApplyV1) { o.NewSuffix[0].BlockHash = o.OldSuffix[0].BlockHash }},
+		{"OLD direction", func(o *OrdinaryApplyV1) { o.OldSuffix[1].Height = 4 }},
+		{"OLD gap", func(o *OrdinaryApplyV1) { o.OldSuffix[1].Height = 1 }},
+		{"NEW direction", func(o *OrdinaryApplyV1) { o.NewSuffix[1].Height = 0 }},
+		{"NEW gap", func(o *OrdinaryApplyV1) { o.NewSuffix[1].Height = 3 }},
+		{"stage0", func(o *OrdinaryApplyV1) { o.Stage = 0 }},
+		{"stage5", func(o *OrdinaryApplyV1) { o.Stage = 5 }},
+		{"DISCONNECT NEW cursor", func(o *OrdinaryApplyV1) { p := o.NewSuffix[0]; o.Cursor = &p }},
+		{"DISCONNECT failure", func(o *OrdinaryApplyV1) { o.RecordedFailure = modelFailure(1) }},
+		{"CONNECT OLD cursor", func(o *OrdinaryApplyV1) { o.Stage = 2; p := o.OldSuffix[0]; o.Cursor = &p }},
+		{"CONNECT nil cursor", func(o *OrdinaryApplyV1) { o.Stage = 2 }},
+		{"CONNECT failure", func(o *OrdinaryApplyV1) { o.Stage = 2; p := o.NewSuffix[0]; o.Cursor, o.RecordedFailure = &p, modelFailure(1) }},
+		{"ROLLBACK missing failure", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p }},
+		{"ROLLBACK nil cursor", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 3, modelFailure(1) }},
+		{"RESTORE nil cursor", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 4, modelFailure(2) }},
+		{"RESTORE missing failure", func(o *OrdinaryApplyV1) { o.Stage = 4; p := o.OldSuffix[1]; o.Cursor = &p }},
+		{"RESTORE no OLD", func(o *OrdinaryApplyV1) { o.Stage, o.RecordedFailure = 4, modelFailure(2); p := o.OldSuffix[1]; o.Cursor = &p; o.OldSuffix = nil }},
+		{"wrong target", func(o *OrdinaryApplyV1) { o.Target.BlockHash = modelHash(99) }},
+		{"wrong captured tip", func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.TipHash = modelHash(99) }},
+		{"wrong captured F", func(o *OrdinaryApplyV1) { o.CapturedSelectedSide.F++; o.CapturedSelectedSide.RowCount = 2 }},
+		{"failure empty result", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); o.RecordedFailure.ExactResult = nil }},
+		{"failure empty evidence", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); o.RecordedFailure.Evidence = nil }},
+		{"failure hash outside NEW", func(o *OrdinaryApplyV1) { o.Stage = 3; p := o.NewSuffix[0]; o.Cursor = &p; o.RecordedFailure = modelFailure(1); h := modelHash(99); o.RecordedFailure.FailedBlockHash = &h }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			a := modelOrdinary(1, 3, 3, 3, 1, 0, 0)
+			row.mutate(a.Ordinary)
+			wantTreeModelLiteral(t, a, false)
+		})
+	}
+	for _, row := range []authorityCase{
+		{"OLD1441", modelOrdinary(1, 1441, 1, 2000, 1, 0, 561)},
+		{"NEW1441", modelOrdinary(2, 0, 1441, 0, 1, 0, 0)},
+		{"NEW0", modelOrdinary(1, 1, 0, 1, 1, 0, 0)},
+		{"D0 C1", modelOrdinary(2, 0, 1, 0, 1, 0, 0)},
+		{"DISCONNECT no OLD", modelOrdinary(1, 0, 2, 0, 1, 0, 0)},
+		{"ROLLBACK D0 terminal", modelOrdinary(3, 0, 2, 0, 1, 0, 0)},
+	} {
+		t.Run(row.name, func(t *testing.T) { wantTreeModelLiteral(t, row.a, false) })
+	}
+	fork := modelOrdinary(1, 1, 1440, 2000, 1, 0, 561)
+	fork.Ordinary.NewSuffix = modelPoints(2001, 1440, true, 5000)
+	fork.Ordinary.Target = fork.Ordinary.NewSuffix[1439]
+	fork.Ordinary.CapturedSelectedSide = modelSide(2, 1999, 3440, 1440, 1440)
+	fork.Ordinary.CapturedSelectedSide.TipHash = fork.Ordinary.Target.BlockHash
+	t.Run("common F isolated", func(t *testing.T) { wantTreeModelLiteral(t, fork, false) })
+	rollback := modelOrdinary(3, 0, 2, 0, 1, 0, 0)
+	cursor := rollback.Ordinary.NewSuffix[1]
+	rollback.Ordinary.Cursor = &cursor
+	t.Run("ROLLBACK D0 nonterminal", func(t *testing.T) { wantTreeModelLiteral(t, rollback, true) })
+	union := modelOrdinary(2, 0, 1440, 0, 1, 0, 0)
+	union.Ordinary.CapturedSelectedSide.RowCount, union.Ordinary.CapturedSelectedSide.LogicalBytes = 1439, 1439
+	union.Ordinary.CarriedCleanup = &CleanupV1{[]CleanupSpanV1{{4, 2, 1, 1, 1}}}
+	t.Run("captured1439+SIDE1", func(t *testing.T) { wantTreeModelLiteral(t, union, true) })
+	for _, span := range []*CleanupV1{nil, {[]CleanupSpanV1{{4, 2, 0, 0, 0}}}, {[]CleanupSpanV1{{4, 2, 0, 1, 0}}}} {
+		union.Ordinary.CarriedCleanup = span
+		wantTreeModelLiteral(t, union, false)
+	}
+	for _, row := range []mutationCase[CleanupSpanV1]{
+		{"range", func(s *CleanupSpanV1) { s.FirstHeight = 1 }},
+		{"owner", func(s *CleanupSpanV1) { s.GenerationID = 2 }},
+		{"ID0", func(s *CleanupSpanV1) { s.GenerationID = 0 }},
+		{"promise", func(s *CleanupSpanV1) { s.LastHeight = 1 }},
+		{"tag", func(s *CleanupSpanV1) { s.Kind = 5 }},
+	} {
+		t.Run("cleanup "+row.name, func(t *testing.T) {
+			a := modelPrune(false)
+			row.mutate(&a.Cleanup.Spans[0])
+			wantTreeModelLiteral(t, a, false)
+		})
+	}
+	for _, row := range []mutationCase[SelectedSideV1]{
+		{"full count", func(s *SelectedSideV1) { s.RowCount = 1 }},
+		{"full bytes0", func(s *SelectedSideV1) { s.LogicalBytes = 0 }},
+		{"full bytes high", func(s *SelectedSideV1) { s.LogicalBytes = 136000315 }},
+	} {
+		t.Run("selected "+row.name, func(t *testing.T) {
+			a := modelBase(1, 0, 0)
+			a.SelectedSide = modelSide(2, 0, 2, 2, 2)
+			row.mutate(a.SelectedSide)
+			wantTreeModelLiteral(t, a, false)
+		})
+	}
+	for _, owner := range []string{"point", "detached"} {
+		t.Run("single zero "+owner, func(t *testing.T) {
+			a := modelOrdinary(1, 2, 2, 2, 1, 0, 0)
+			if owner == "point" {
+				a.Ordinary.OldSuffix[0].BlockHash = [32]byte{}
+			} else {
+				a = modelDetached1440()
+				a.DetachedSuffix.Entries[0].Hash, a.DetachedSuffix.Cursor.BlockHash = [32]byte{}, [32]byte{}
+			}
+			wantTreeModelLiteral(t, a, true)
+		})
+	}
+	for _, row := range []mutationCase[DetachedSuffixV1]{
+		{"duplicate", func(d *DetachedSuffixV1) { d.Entries[1].Hash = d.Entries[0].Hash }},
+		{"step", func(d *DetachedSuffixV1) { d.Entries[1].Height = d.Entries[0].Height }},
+		{"cursor", func(d *DetachedSuffixV1) { d.Cursor.BlockHash = modelHash(99) }},
+		{"count", func(d *DetachedSuffixV1) { d.EntryCount-- }},
+		{"sum", func(d *DetachedSuffixV1) { d.LogicalBytes++ }},
+		{"length0", func(d *DetachedSuffixV1) { d.Entries[1].BlockBytesLen = 0; d.LogicalBytes-- }},
+		{"length68000158", func(d *DetachedSuffixV1) { d.Entries[1].BlockBytesLen = 68000158; d.LogicalBytes += 68000157 }},
+	} {
+		t.Run("detached "+row.name, func(t *testing.T) {
+			a := modelDetached1440()
+			row.mutate(a.DetachedSuffix)
+			wantTreeModelLiteral(t, a, false)
+		})
+	}
+	for _, count := range []int{0, 1441} {
+		a := modelPrune(false)
+		a.DetachedSuffix = modelDetached(count, 1)
+		wantTreeModelLiteral(t, a, false)
+	}
+	coexisting := modelOrdinary(1, 1, 1, 1, 1, 0, 0)
+	coexisting.SelectedSide = modelSide(3, 0, 2, 2, 2)
+	wantTreeModelLiteral(t, coexisting, false)
+	selectedDetached := modelPrune(false)
+	selectedDetached.SelectedSide, selectedDetached.DetachedSuffix = modelSide(2, 0, 1, 1, 1), modelDetached(1, 1)
+	wantTreeModelLiteral(t, selectedDetached, false)
+	a := modelDetached1440()
+	for i := range a.DetachedSuffix.Entries {
+		a.DetachedSuffix.Entries[i].BlockBytesLen = 68000157
+	}
+	a.DetachedSuffix.LogicalBytes = 1440 * 68000157
+	wantTreeModelLiteral(t, a, true)
 }
 
 func TestTreeAuthorityFiveSpans(t *testing.T) {
@@ -518,6 +746,11 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 		if got, err := DecodeTreeAuthorityV1(literal); err != nil || !reflect.DeepEqual(got, tree) {
 			t.Fatalf("ordinary carried five-span decode = %#v, %v; want %#v", got, err, tree)
 		}
+		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, literal, nil)
+		malformed := bytes.Clone(inner)
+		malformed[435] = 5
+		wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(malformed, 0, 0, nil))
+		wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner[:467], 0, 0, nil))
 		if got, err := tree.Authority.Encode(); got != nil || !exactErr(err) {
 			t.Fatalf("historical carried five-span encode = %x, %v", got, err)
 		}
@@ -537,6 +770,10 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 	if got := wantTreeAuthority(t, tree); !bytes.Equal(got, literal) {
 		t.Fatalf("five-span literal = %x; want %x", got, literal)
 	}
+	malformed := bytes.Clone(inner)
+	malformed[121] = 5
+	wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(malformed, 0, 0, nil))
+	wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner[:153], 0, 0, nil))
 	if a, err := DecodeStorageAuthorityV1(inner); !exactErr(err) || !reflect.DeepEqual(a, StorageAuthorityV1{}) {
 		t.Fatalf("historical five-span decode = %#v, %v", a, err)
 	}
@@ -569,6 +806,7 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 				wantTreeAuthority(t, candidate)
 			} else {
 				wantTreeAuthorityEncodeError(t, candidate)
+				wantTreeModelLiteral(t, a, false)
 			}
 		})
 	}
@@ -583,6 +821,25 @@ func TestTreeAuthorityFiveSpans(t *testing.T) {
 		wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(bad, 0, 0, nil))
 	}
 	wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner[:54], 0, 0, nil))
+	for _, row := range []struct {
+		name              string
+		first, last, next uint64
+		valid             bool
+	}{{"exact", 9, 9, 9, true}, {"gap", 8, 8, 8, false}, {"overlap", 10, 10, 10, false}, {"wider", 8, 9, 8, false}} {
+		t.Run("live SIDE "+row.name, func(t *testing.T) {
+			a := modelBase(1, 0, 0)
+			a.Phase, a.Cleanup = 2, &CleanupV1{[]CleanupSpanV1{{4, 2, row.first, row.last, row.next}}}
+			a.SelectedSide = modelSide(2, 8, 1448, 1439, 1439)
+			wantTreeModelLiteral(t, a, row.valid)
+		})
+	}
+	for _, count := range []uint16{1438, 1439} {
+		for _, logical := range []uint64{1438, 1439, 97852225924} {
+			a := modelBase(1, 0, 0)
+			a.SelectedSide = modelSide(2, 8, 1448, count, logical)
+			wantTreeModelLiteral(t, a, count == 1439 && logical == 1439)
+		}
+	}
 }
 
 func TestTreeAuthorityRoles(t *testing.T) {
@@ -608,6 +865,12 @@ func TestTreeAuthorityRoles(t *testing.T) {
 			tree := treeAuthorityFixture(modelReplay(1))
 			row.mutate(&tree)
 			wantTreeAuthorityEncodeError(t, tree)
+			var inner []byte
+			encodeAuthority(&inner, tree.Authority)
+			literal := treeEnvelopeLiteral(inner, 1, 0, nil)
+			binary.BigEndian.PutUint64(literal[2:], tree.LagGenerationID)
+			binary.BigEndian.PutUint64(literal[10:], tree.TargetLagGenerationID)
+			wantTreeAuthorityDecodeError(t, literal)
 		})
 	}
 	base := wantTreeAuthority(t, treeAuthorityFixture(modelReplay(1)))
@@ -663,6 +926,7 @@ func TestTreeLiveLagOwnerExclusion(t *testing.T) {
 					wantTreeAuthority(t, tree)
 				} else {
 					wantTreeAuthorityEncodeError(t, tree)
+					wantTreeModelLiteral(t, a, false)
 					if generation == 10 {
 						inner, err := tree.Authority.Encode()
 						if err != nil {
@@ -690,10 +954,19 @@ func TestTreeProgressShape(t *testing.T) {
 						tree.Progress.Payload = []byte{0x80}
 					}
 					valid := source == 1 && status == 0 && !hasPayload || source == 2 && (status == 1 || status == 2) && hasPayload
+					inner := bytes.Clone(codecLiteralCases(t)[7].b)
+					binary.BigEndian.PutUint64(inner[26:], 20)
+					if source == 2 {
+						inner[189] = 0
+					}
+					literal := treeEnvelopeLiteral(inner, source, status, tree.Progress.Payload)
+					binary.BigEndian.PutUint64(literal[10:], 11)
 					if valid {
 						wantTreeAuthority(t, tree)
+						wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, literal, nil)
 					} else {
 						wantTreeAuthorityEncodeError(t, tree)
+						wantTreeAuthorityDecodeError(t, literal)
 					}
 				})
 			}
@@ -712,6 +985,13 @@ func TestTreeProgressShape(t *testing.T) {
 			a := treeAuthorityFixture(modelBase(1, 0, 0))
 			row.mutate(&a)
 			wantTreeAuthorityEncodeError(t, a)
+			if row.name != "NONE replay sibling" {
+				var inner []byte
+				encodeAuthority(&inner, a.Authority)
+				literal := treeEnvelopeLiteral(inner, byte(a.SourceKind), byte(a.Progress.Kind), a.Progress.Payload)
+				binary.BigEndian.PutUint64(literal[10:], a.TargetLagGenerationID)
+				wantTreeAuthorityDecodeError(t, literal)
+			}
 		})
 	}
 	for _, cursor := range []ReplayCursorV1{{Kind: 1}, {Kind: 2, BlockHash: modelHash(12)}, {Height: 1}, {BlockHash: modelHash(1)}, {Kind: 3}} {
@@ -723,6 +1003,15 @@ func TestTreeProgressShape(t *testing.T) {
 	genesis := treeAuthorityFixture(modelReplay(1))
 	genesis.Authority.Replay.Cursor = ReplayCursorV1{}
 	wantTreeAuthorityEncodeError(t, genesis)
+	innerZero := bytes.Clone(codecLiteralCases(t)[7].b)
+	binary.BigEndian.PutUint64(innerZero[26:], 20)
+	innerZero[189] = 0
+	wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(innerZero, 1, 0, nil))
+	for _, index := range []int{7, 3} {
+		inner := bytes.Clone(codecLiteralCases(t)[index].b)
+		binary.BigEndian.PutUint64(inner[26:], 20)
+		wantTreeAuthorityDecodeError(t, treeEnvelopeLiteral(inner, 2, 1, []byte{0x80}))
+	}
 	for _, status := range []byte{1, 2} {
 		tree := treeAuthorityFixture(modelReplay(1))
 		tree.SourceKind, tree.Progress = 2, TreeProgressV1{TreeProgressKindV1(status), []byte{}}
@@ -780,6 +1069,7 @@ func TestTreeDescriptor148Bound(t *testing.T) {
 						wantTreeAuthority(t, tree)
 					} else {
 						wantTreeAuthorityEncodeError(t, tree)
+						wantTreeModelLiteral(t, a, false)
 					}
 					legacy, legacyErr := tree.Authority.Encode()
 					if maximum == 68000125 {
@@ -903,6 +1193,7 @@ func TestTreeAuthorityNestedIsolation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{2}, encoded, nil)
 			second, err := DecodeTreeAuthorityV1(encoded)
 			if err != nil {
 				t.Fatal(err)
@@ -999,8 +1290,14 @@ func TestTreeTopDecodeKind(t *testing.T) {
 		literal := append(bytes.Clone(treeRootLiteral(t, true)[:207]), kind)
 		literal = append(literal, suffix...)
 		literal = append(literal, 1)
+		wantTreeLiteral(t, DBI{"meta-v1", 0, 0}, []byte{0x11, 0, 0, 0, 0, 0, 0, 0, 1}, literal, nil)
 		if got, err := DecodeRootBindingV1(literal); err != nil || !reflect.DeepEqual(got, root) {
 			t.Fatalf("valid top kind sibling = %#v, %v", got, err)
+		}
+		if kind == 2 {
+			badPadding := bytes.Clone(literal)
+			badPadding[243] ^= 1
+			wantTreeRootError(t, badPadding)
 		}
 		literal[207] = 3 - kind
 		wantTreeRootError(t, literal)
