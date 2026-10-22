@@ -434,11 +434,25 @@ func treePairRelationsV1(op TreeOperationV1) error {
 }
 
 func treePairOwnedV1(primitives []TreePrimitiveV1, dbi DBI, key []byte) bool {
-	for _, p := range primitives {
-		if dbi.Rank == 5 && bytes.HasPrefix(key, p.Block[:]) {
-			return true
+	switch dbi.Rank {
+	case 0:
+		if len(key) != 9 || key[0] != 0x11 {
+			return false
 		}
-		if dbi.Rank == 0 && len(key) == 9 && key[0] == 0x11 && binary.BigEndian.Uint64(key[1:]) == p.Generation {
+		return treePairGenerationOwnedV1(primitives, binary.BigEndian.Uint64(key[1:]))
+	case 5:
+		for _, p := range primitives {
+			if bytes.HasPrefix(key, p.Block[:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func treePairGenerationOwnedV1(primitives []TreePrimitiveV1, generation uint64) bool {
+	for _, p := range primitives {
+		if generation == p.Generation {
 			return true
 		}
 	}
