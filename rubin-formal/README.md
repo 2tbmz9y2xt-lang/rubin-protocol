@@ -39,13 +39,13 @@ manifest member. An unregistered manifest H2 is not thereby formally proved,
 and a registered formal row need not remain an independent manifest member.
 
 The single `spec_section_hashes_sha3_256` pins the exact approved locally prepared
-retirement manifest as a disposition; it proves no model applicability, canonical
+covenant-registry manifest as a disposition; it proves no model applicability, canonical
 validity or client parity. The static Lean registry model classifies
 every non-assigned tag, including `0x00FF`, `0x0102` and `0x0105`, as invalid,
 and the UTXO model refuses every non-retained tag. These bounded model changes do not establish live-client
 correctness or Go/Rust parity.
-Local spec preparation precedes metadata human merge, then spec first
-publication/merge, then client removal. Old canonical spec/new pin comparison
+Local spec preparation precedes spec draft publication, then metadata human
+merge, then spec merge. Old canonical spec/new pin comparison
 necessarily rejects between the metadata and matching spec merges.
 
 Native-rotation replay uses a manual legacy bounded stub, unwritten by current
