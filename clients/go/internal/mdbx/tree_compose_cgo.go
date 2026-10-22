@@ -39,21 +39,22 @@ type treePlanV1 struct {
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
 // the unwind capture recorded. call is the Source call wrapper, created once per scope before primitive 0 (D34).
 type treeScopeV1 struct {
-	s        *Store
-	old      *C.MDBX_txn
-	plan     *treePlanV1
-	position treePositionV1
-	ledger   treeLedgerV1
-	t        *treeSectionV1
-	rb       *treeReadbackStateV1
-	j        int
-	reader   *Reader
-	rec      *treeRecorderV1
-	recorded error
-	unwind   treeUnwindV1
-	call     func() error
-	held     bool   // W + F_fixed + C + R of j is charged
-	events   uint32 // max_j EventCount_j at the writer
+	s           *Store
+	old         *C.MDBX_txn
+	plan        *treePlanV1
+	position    treePositionV1
+	ledger      treeLedgerV1
+	t           *treeSectionV1
+	rb          *treeReadbackStateV1
+	j           int
+	reader      *Reader
+	rec         *treeRecorderV1
+	recorded    error
+	unwind      treeUnwindV1
+	call        func() error
+	held        bool   // W + F_fixed + C + R of j is charged
+	events      uint32 // max_j EventCount_j at the writer
+	observation TreeObservationV1
 }
 
 // treeComposeV1 is the frame-held state of one updateTreeLockedV1 call: the captured outcome and index (D17 item 3)
@@ -180,6 +181,11 @@ func (e *treeScopeV1) stepV1(j int) error {
 		return err
 	}
 	e.rec = newTreeRecorderV1(e.position, prim, body, make([]byte, treeWindowBytesV1), e.ledger)
+	if coverage := e.plan.primitives[j].Coverage; coverage != nil {
+		e.rec.coverage = *coverage
+		e.observation = TreeObservationV1{DatabaseID: coverage.DatabaseID, Generation: prim.generation, Block: prim.block, Height: prim.height, Primitive: j, Position: TreePositionV1(e.position)}
+		e.rec.observation = &e.observation
+	}
 	err = e.invokeV1()
 	if err != nil || e.unwind.kind != 0 {
 		return err
@@ -207,7 +213,7 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 		return err
 	}
 	if e.rb == nil {
-		err = treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger)
+		err = treeFoldV1(e.checkedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.ledger, e.rec.observation)
 		if err != nil {
 			return err
 		}
@@ -216,7 +222,7 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 	if err != nil {
 		return err
 	}
-	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger)
+	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger, e.rec.observation)
 }
 
 // loopV1 runs every primitive in index order and stops at the first result or unwind; it reports the stop.
@@ -305,6 +311,7 @@ func (c *treeComposeV1) runV1() {
 		return
 	}
 	w.t = t
+	t.covered = len(w.plan.primitives) != 0 && w.plan.primitives[0].Coverage != nil
 	err := t.pairPreflightV1(w.plan.pair, w.plan.consulted)
 	if err != nil {
 		c.abortV1(err, -1)
@@ -335,6 +342,9 @@ func (c *treeComposeV1) abortV1(err error, index int) {
 // H_r = S_r + B_r with B_r = W + F_fixed + C + R + V + L2 + descSize x max_j EventCount_j (D13-14).
 func (c *treeComposeV1) holdV1() error {
 	w := c.writer
+	if w.t.covered {
+		return c.coveredHoldV1()
+	}
 	err := w.t.pairEmitV1(w.plan.pair)
 	if err != nil {
 		return err
@@ -343,11 +353,33 @@ func (c *treeComposeV1) holdV1() error {
 	if err != nil {
 		return err
 	}
+	return c.reserveV1()
+}
+
+func (c *treeComposeV1) coveredHoldV1() error {
+	w := c.writer
+	err := w.t.freezeV1(w.plan.pair, w.plan.consulted)
+	if err != nil {
+		return err
+	}
+	err = c.reserveV1()
+	if err != nil {
+		return err
+	}
+	err = w.t.flushV1(w.plan.pair)
+	if err != nil {
+		return err
+	}
+	return w.t.finalV1(w.plan.pair, w.plan.consulted)
+}
+
+func (c *treeComposeV1) reserveV1() error {
+	w := c.writer
 	if len(w.plan.primitives) == 0 {
 		return nil
 	}
 	hr := treeScratchBytesV1 + treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(w.events)
-	err = w.ledger.chargeV1(hr)
+	err := w.ledger.chargeV1(hr)
 	if err != nil {
 		return err
 	}

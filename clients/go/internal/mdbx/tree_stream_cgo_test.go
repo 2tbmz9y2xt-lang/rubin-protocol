@@ -988,6 +988,10 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(ownedConsulted{}), 48},
 		{unsafe.Sizeof(treePrimitiveV1{}), 144},
 		{unsafe.Sizeof(TreeDeltaSinkV1{}), 8},
+		{unsafe.Sizeof(treeImageV1{}), 32},
+		{unsafe.Sizeof(treeAmendedV1{}), 64},
+		{unsafe.Sizeof(treeEntryV1{}), 80},
+		{unsafe.Sizeof(TreeSourceCoverageV1{}), 136},
 	} {
 		if row.got != row.want {
 			t.Fatalf("resource layout%d want%d", row.got, row.want)
@@ -995,8 +999,9 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 	}
 	var leaves treeLeafIterV1
 	total := uint64(unsafe.Sizeof(treeRecorderV1{})) + uint64(unsafe.Sizeof(treeDeltaV1{})) + uint64(unsafe.Sizeof(treeKeysV1{})) + 2*uint64(unsafe.Sizeof(leaves)) + 32
-	if total+144+8 > 4096 {
-		t.Fatalf("enlarged control objects%d exceed4096", total+144+8)
+	control := total + 144 + 8 + 2*uint64(unsafe.Sizeof(treeScopeV1{})) + uint64(unsafe.Sizeof(TreeObservationV1{}))
+	if control > 4096 {
+		t.Fatalf("enlarged control objects%d exceed4096", control)
 	}
 }
 
@@ -1356,6 +1361,7 @@ func TestTreeStreamUnboundSinkV1(t *testing.T) {
 
 func TestTreeStreamSurfaceV1(t *testing.T) {
 	want := []string{"TreePositionV1", "TreeWriterV1", "TreeReadbackV1", "TreeDeltaSinkV1", "TreeOutpointV1", "TreeEventKindV1", "TreeEventSpendV1", "TreeEventCreateV1", "TreeBlockV1", "TreeEventV1", "BeginV1", "EventV1", "WindowV1", "TreeUndoEffectV1", "UndoWriteOrReuseV1", "UndoTransientV1", "UndoCompareV1", "UndoCompareDeleteV1", "UndoSourceRetainV1", "UndoSourceDeleteV1", "TreeDirectionV1", "TreeForwardV1", "TreeInverseV1", "TreePrimitiveKindV1", "TreeKindDirectApplyV1", "TreeKindConnectV1", "TreeKindReplayNextV1", "TreeKindFirstGenesisV1", "TreeKindRestoreOldV1", "TreeKindLagForwardV1", "TreeKindDisconnectV1", "TreeKindRollbackNewV1", "TreeKindLagReverseV1", "TreePairV1", "TreeSourceV1", "TreePrimitiveV1", "TreeOperationV1", "UpdateTreeV1"}
+	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
 	var got []string
 	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -1402,8 +1408,552 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	if TreeForwardV1 != 1 || TreeInverseV1 != 2 || TreeWriterV1 != 1 || TreeReadbackV1 != 2 || TreeEventSpendV1 != 1 || TreeEventCreateV1 != 2 {
 		t.Fatal("public identity conversion domain")
 	}
+	for i, kind := range []TreeObservationKindV1{TreeObservationAbsentV1, TreeObservationMalformedV1, TreeObservationIdentityMismatchV1, TreeObservationDigestMismatchV1} {
+		if int(kind) != i+1 {
+			t.Fatalf("observation encoding%d=%d", i, kind)
+		}
+	}
 	if n := uint64(unsafe.Sizeof(treeDescV1{})); n != 104 || n > 128 {
 		t.Fatalf("descriptor size%d", n)
+	}
+}
+
+func tsCounterKey(g uint64) []byte { return binary.BigEndian.AppendUint64([]byte{0x10}, g) }
+
+func tsCover(op *TreeOperationV1, meta ...TreeBlockV1) {
+	for i := range op.Primitives {
+		p := &op.Primitives[i]
+		p.Coverage = &TreeSourceCoverageV1{DatabaseID: [32]byte{7}, Generation: p.Generation, Block: p.Block, Height: p.Height, HeaderBytes: 148, BodyKind: 2, BlockMeta: meta[i]}
+		for _, m := range op.Pair.Mutations {
+			if m.DBI.Rank == 4 && m.AfterKind == 2 && bytes.Equal(m.Key, p.Block[:]) {
+				p.Coverage.BodyKind, p.Coverage.CurrentBody = 1, m.Literal
+			}
+		}
+	}
+}
+
+func tsSeedCounter(t *testing.T, s *Store, o *OperationReservationOwner, g uint64, present bool, value []byte) {
+	t.Helper()
+	op := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(g), BeforePresent: present, AfterKind: 2, Literal: value}}}}
+	r := tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+}
+
+// Admission is observed at the public owner: none of these refusals may invoke
+// Source or charge the operation, and both the body and next operation survive.
+func TestTreeCoveredPreflightV1(t *testing.T) {
+	rows := []struct {
+		name string
+		edit func(*TreeOperationV1)
+	}{
+		{"database", func(o *TreeOperationV1) { o.Primitives[0].Coverage.DatabaseID[0]++ }},
+		{"generation", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Generation++ }},
+		{"block", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Block[0]++ }},
+		{"height", func(o *TreeOperationV1) { o.Primitives[0].Coverage.Height++ }},
+		{"header0", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 0 }},
+		{"header116", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 116 }},
+		{"header149", func(o *TreeOperationV1) { o.Primitives[0].Coverage.HeaderBytes = 149 }},
+		{"kind0", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 0 }},
+		{"kind3", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 3 }},
+		{"count0", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BlockMeta.TxCount = 0 }},
+		{"current-nil", func(o *TreeOperationV1) { o.Primitives[0].Coverage.CurrentBody = nil }},
+		{"current-empty", func(o *TreeOperationV1) { o.Primitives[0].Coverage.CurrentBody = []byte{} }},
+		{"current-short", func(o *TreeOperationV1) {
+			c := o.Primitives[0].Coverage
+			c.CurrentBody = c.CurrentBody[:len(c.CurrentBody)-1]
+		}},
+		{"current-other-backing", func(o *TreeOperationV1) { c := o.Primitives[0].Coverage; c.CurrentBody = bytes.Clone(c.CurrentBody) }},
+		{"current-missing-literal", func(o *TreeOperationV1) { o.Pair.Mutations = nil }},
+		{"current-before-present", func(o *TreeOperationV1) { o.Pair.Mutations[0].BeforePresent = true }},
+		{"current-delete", func(o *TreeOperationV1) { m := &o.Pair.Mutations[0]; m.AfterKind, m.Literal = 1, nil }},
+		{"stored-extra-body", func(o *TreeOperationV1) { o.Primitives[0].Coverage.BodyKind = 2; o.Pair.Mutations = nil }},
+		{"stored-extra-empty", func(o *TreeOperationV1) {
+			c := o.Primitives[0].Coverage
+			c.BodyKind, c.CurrentBody = 2, []byte{}
+			o.Pair.Mutations = nil
+		}},
+		{"stored-extra-literal", func(o *TreeOperationV1) { c := o.Primitives[0].Coverage; c.BodyKind, c.CurrentBody = 2, nil }},
+		{"mixed-covered-first", func(o *TreeOperationV1) {
+			p := o.Primitives[0]
+			p.Kind, p.Coverage = 6, nil
+			o.Primitives = append(o.Primitives, p)
+		}},
+		{"mixed-raw-first", func(o *TreeOperationV1) {
+			p := o.Primitives[0]
+			p.Kind = 6
+			o.Primitives[0].Coverage = nil
+			o.Primitives = append(o.Primitives, p)
+		}},
+		{"genesis-tx2", func(o *TreeOperationV1) {
+			p := &o.Primitives[0]
+			p.Height, p.Endpoint.Height, p.Coverage.Height = 0, 0, 0
+			p.Coverage.BlockMeta.TxCount = 2
+		}},
+		{"genesis-generated", func(o *TreeOperationV1) {
+			p := &o.Primitives[0]
+			p.Height, p.Endpoint.Height, p.Coverage.Height = 0, 0, 0
+			p.Coverage.BlockMeta.Generated[0] = 1
+		}},
+		{"untouched-utxo-target", func(o *TreeOperationV1) {
+			m := Mutation{DBI: TreeSchemaV1DBIs()[1], Key: tdUTXOKey(1, tdTxid(0xdd), 0), AfterKind: 2, Literal: tdFormed(tdFrame(77, 0, nil), 5, 0)}
+			o.Pair.Mutations = append([]Mutation{m}, o.Pair.Mutations...)
+		}},
+		{"cancellation-utxo-target", func(o *TreeOperationV1) {
+			m := Mutation{DBI: TreeSchemaV1DBIs()[1], Key: tdUTXOKey(1, tdTxid(0x55), 0), AfterKind: 2, Literal: tdFormed(tdFrame(77, 0, nil), 5, 0)}
+			o.Pair.Mutations = append([]Mutation{m}, o.Pair.Mutations...)
+			o.Primitives[0].Coverage.BlockMeta = TreeBlockV1{TxCount: 2, EventCount: 2}
+		}},
+		{"counter-target", func(o *TreeOperationV1) {
+			m := Mutation{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(1), AfterKind: 2, Literal: make([]byte, 16)}
+			o.Pair.Mutations = append([]Mutation{m}, o.Pair.Mutations...)
+		}},
+		{"counter-consulted", func(o *TreeOperationV1) { o.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[0], tsCounterKey(1)}} }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			calls, marker := 0, errors.New("covered source reached")
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return marker }))
+			tsCover(&op, TreeBlockV1{TxCount: 1})
+			body := bytes.Clone(op.Pair.Mutations[0].Literal)
+			key := bytes.Clone(op.Pair.Mutations[0].Key)
+			row.edit(&op)
+			if row.name == "cancellation-utxo-target" {
+				tsRoots(t, s, o, 1)
+				tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+				op.Primitives[0].Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+					calls++
+					if err := sink.BeginV1(TreeBlockV1{TxCount: 2, EventCount: 2}); err != nil {
+						return err
+					}
+					if err := sink.EventV1(tsCreate(0x55, 0, 0, 148, 11)); err != nil {
+						return err
+					}
+					return sink.EventV1(tsSpend(0x55, 0, 1, 0))
+				})
+			}
+			r := tsRun(t, s, o, TreeOperation, op)
+			tsRefusal(t, r, false)
+			if calls != 0 || reservationLive(o) != 0 || s.state != storeOPEN {
+				t.Fatalf("pure admission calls%d live%d state%s", calls, reservationLive(o), s.state)
+			}
+			if len(body) != 159 {
+				t.Fatal("body setup width")
+			}
+			tsFollowing(t, s, o)
+			tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[4], key, nil)
+		})
+	}
+	t.Run("accepted-domains", tsCoveredAccepted)
+	t.Run("begin-exact", tsCoveredBegin)
+}
+
+func tsCoveredAccepted(t *testing.T) {
+	for _, mode := range []string{"raw", "current", "stored", "stored-delete", "genesis", "rank1-consulted"} {
+		t.Run(mode, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+			calls := [3]int{}
+			meta := TreeBlockV1{TxCount: 1, Generated: [16]byte{15: 9}}
+			if mode == "genesis" {
+				meta.Generated = [16]byte{}
+			}
+			op := tsOperation(t, tsSource(func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+				calls[pos]++
+				return sink.BeginV1(meta)
+			}))
+			if mode == "genesis" {
+				op.Primitives[0].Height, op.Primitives[0].Endpoint.Height = 0, 0
+			}
+			body := op.Pair.Mutations[0]
+			if mode == "stored" || mode == "stored-delete" {
+				mustEnvironment(t, tsRun(t, s, o, TreeOperation, TreeOperationV1{Pair: op.Pair}).err)
+				op.Pair.Mutations = nil
+				if mode == "stored-delete" {
+					op.Pair.Mutations = []Mutation{{DBI: body.DBI, Key: body.Key, BeforePresent: true, AfterKind: 1}}
+				}
+			}
+			if mode != "raw" {
+				tsCover(&op, meta)
+			}
+			if mode == "rank1-consulted" {
+				op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0xdd), 0)}}
+			}
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			if calls != [3]int{0, 1, 0} {
+				t.Fatalf("Source positions%v", calls)
+			}
+			s = tsReopen(t, s, path)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), make([]byte, 16))
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsRootBytes(t, op.Primitives[0].Endpoint))
+			want := body.Literal
+			if mode == "stored-delete" {
+				want = nil
+			}
+			tsRead(t, s, body.DBI, body.Key, want)
+			tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(op.Primitives[0].Block), tdManifest(op.Primitives[0].Height, meta.Generated, 1, 0))
+		})
+	}
+}
+
+func tsCoveredBegin(t *testing.T) {
+	for _, field := range []string{"tx", "events", "generated"} {
+		t.Run(field, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			calls := 0
+			meta := TreeBlockV1{TxCount: 1}
+			actual := meta
+			switch field {
+			case "tx":
+				actual.TxCount = 2
+			case "events":
+				actual.EventCount = 1
+			case "generated":
+				actual.Generated[0] = 1
+			}
+			op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { calls++; return nil }))
+			op.Primitives[0].Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+				calls++
+				if err := sink.BeginV1(actual); err != nil {
+					return err
+				}
+				return errors.New("mismatched covered Begin accepted")
+			})
+			tsCover(&op, meta)
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 1, 1, 0)
+			treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid tree delta", nil)
+			if calls != 1 {
+				t.Fatalf("BEGIN calls%d", calls)
+			}
+			tsConsumed(t, s, o, 1, r.err)
+			tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[4], op.Primitives[0].Block[:], nil)
+		})
+	}
+}
+
+// tsCoveredDelta supplies only public input records; projection, counters,
+// ordering and equality are produced by UpdateTreeV1 itself.
+func tsCoveredDelta(t *testing.T, height uint64, tag byte, meta TreeBlockV1, events []TreeEventV1, frames []byte) TreeOperationV1 {
+	t.Helper()
+	op := tsOperation(t, nil)
+	body := append(initial148NativeLiteral(t), frames...)
+	body[140] ^= tag
+	block := sha3.Sum256(body[:148])
+	p := &op.Primitives[0]
+	p.Block, p.Height = block, height
+	p.Endpoint = TreeEndpointV1{Kind: 1, Height: height, BlockHash: block, CumulativeChainwork: [40]byte{39: 37}}
+	p.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+		if err := sink.BeginV1(meta); err != nil {
+			return err
+		}
+		for _, event := range events {
+			if err := sink.EventV1(event); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	op.Pair.Mutations = []Mutation{{DBI: TreeSchemaV1DBIs()[4], Key: block[:], AfterKind: 2, Literal: body}}
+	tsCover(&op, meta)
+	return op
+}
+
+func tsCreate(tx byte, vout, txIndex uint32, offset uint64, length uint32) TreeEventV1 {
+	return TreeEventV1{Kind: 2, Outpoint: TreeOutpointV1{Txid: tdTxid(tx), Vout: vout}, TxIndex: txIndex, FrameOffset: offset, FrameLength: length}
+}
+
+func tsSpend(tx byte, vout, txIndex, input uint32) TreeEventV1 {
+	return TreeEventV1{Kind: 1, Outpoint: TreeOutpointV1{Txid: tdTxid(tx), Vout: vout}, TxIndex: txIndex, InputIndex: input}
+}
+
+func tsCounterLiteral(total, count uint64) []byte {
+	return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, total), count)
+}
+
+func tsExpectedBinding(t *testing.T, endpoint TreeEndpointV1, entries ...testTreeEntry) []byte {
+	t.Helper()
+	top := testTreeBuild(1, entries, map[string][]byte{})
+	binding := testTreeOldBinding(&top, endpoint)
+	binding.DatabaseID = [32]byte{7}
+	encoded, err := binding.Encode()
+	mustEnvironment(t, err)
+	return encoded
+}
+
+func TestTreeCoveredCountersV1(t *testing.T) {
+	for _, row := range []struct {
+		size    int
+		total   uint64
+		literal string
+	}{
+		{0, 56, "00000000000000380000000000000001"},
+		{1, 57, "00000000000000390000000000000001"},
+		{65536, 65596, "000000000001003c0000000000000001"},
+	} {
+		t.Run(fmt.Sprintf("entry%d", row.size), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+			frame := tdFrame(71, 0, bytes.Repeat([]byte{3}, row.size))
+			event := tsCreate(0x11, 0, 0, 148, uint32(len(frame)))
+			op := tsCoveredDelta(t, 5, 0x41, TreeBlockV1{TxCount: 1, EventCount: 1, Generated: [16]byte{0: 5}}, []TreeEventV1{event}, frame)
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			s = tsReopen(t, s, path)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), mustCodecHex(t, row.literal))
+			value, key := tdFormed(frame, 5, 1), tdUTXOKey(1, tdTxid(0x11), 0)
+			tsRead(t, s, TreeSchemaV1DBIs()[1], key, value)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsExpectedBinding(t, op.Primitives[0].Endpoint, testTreeEntry{[36]byte(key[8:]), value}))
+			if uint64(len(value))+36 != row.total {
+				t.Fatal("independent entry envelope")
+			}
+		})
+	}
+	t.Run("all-groups-and-inverse", tsCounterGroups)
+	t.Run("equal-replacement", tsCounterEqual)
+	t.Run("inconsistent-inputs", tsCounterRefusals)
+	t.Run("retained-generated", tsCounterGenerated)
+	t.Run("subset-residual", tsCounterSubset)
+}
+
+func tsCounterGroups(t *testing.T) {
+	s, path, o := tsNew(t)
+	tsRoots(t, s, o, 1)
+	tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+	a, b, c := tdFrame(11, 0, nil), tdFrame(22, 0, []byte{1}), tdFrame(33, 0, []byte{2, 3})
+	frames := append(append(bytes.Clone(a), b...), c...)
+	initialEvents := []TreeEventV1{tsCreate(0x11, 0, 1, 148, 11), tsCreate(0x22, 1, 1, 159, 12), tsCreate(0x33, 2, 1, 171, 13)}
+	initial := tsCoveredDelta(t, 5, 0x42, TreeBlockV1{TxCount: 2, EventCount: 3}, initialEvents, frames)
+	mustEnvironment(t, tsRun(t, s, o, TreeOperation, initial).err)
+	ka, kb, kc := tdUTXOKey(1, tdTxid(0x11), 0), tdUTXOKey(1, tdTxid(0x22), 1), tdUTXOKey(1, tdTxid(0x33), 2)
+	va, vb, vc := tdFormed(a, 5, 0), tdFormed(b, 5, 0), tdFormed(c, 5, 0)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), mustCodecHex(t, "00000000000000ab0000000000000003"))
+	replacement, created, canceled := tdFrame(44, 0, []byte{1, 2, 3, 4}), tdFrame(55, 0, nil), tdFrame(66, 0, []byte{7})
+	nextFrames := append(append(bytes.Clone(created), replacement...), canceled...)
+	events := []TreeEventV1{tsCreate(0x44, 0, 0, 148, 11), tsSpend(0x11, 0, 1, 0), tsCreate(0x11, 0, 1, 159, 15), tsSpend(0x22, 1, 2, 0), tsCreate(0x55, 0, 3, 174, 12), tsSpend(0x55, 0, 4, 0)}
+	meta := TreeBlockV1{TxCount: 5, EventCount: 6, Generated: [16]byte{15: 8}}
+	next := tsCoveredDelta(t, 6, 0x43, meta, events, nextFrames)
+	r := tsRun(t, s, o, TreeOperation, next)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	newA, newD, kd := tdFormed(replacement, 6, 0), tdFormed(created, 6, 1), tdUTXOKey(1, tdTxid(0x44), 0)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), mustCodecHex(t, "00000000000000ae0000000000000003"))
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsExpectedBinding(t, next.Primitives[0].Endpoint, testTreeEntry{[36]byte(ka[8:]), newA}, testTreeEntry{[36]byte(kc[8:]), vc}, testTreeEntry{[36]byte(kd[8:]), newD}))
+	tsRead(t, s, TreeSchemaV1DBIs()[1], kb, nil)
+	tsRead(t, s, TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0x55), 0), nil)
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(next.Primitives[0].Block, tdTxid(0x11), 1, 0, 0), va)
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(next.Primitives[0].Block, tdTxid(0x22), 2, 0, 1), vb)
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(next.Primitives[0].Block), tdManifest(6, meta.Generated, 5, 2))
+	inverse := next
+	inverse.Pair = TreePairV1{}
+	inverse.Primitives = slices.Clone(next.Primitives)
+	p := &inverse.Primitives[0]
+	p.Direction, p.Kind, p.Undo, p.Endpoint = 2, 7, 5, initial.Primitives[0].Endpoint
+	tsCover(&inverse, meta)
+	r = tsRun(t, s, o, TreeOperation, inverse)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	s = tsReopen(t, s, path)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), mustCodecHex(t, "00000000000000ab0000000000000003"))
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsExpectedBinding(t, initial.Primitives[0].Endpoint, testTreeEntry{[36]byte(ka[8:]), va}, testTreeEntry{[36]byte(kb[8:]), vb}, testTreeEntry{[36]byte(kc[8:]), vc}))
+	tsRead(t, s, TreeSchemaV1DBIs()[1], kd, nil)
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(next.Primitives[0].Block), tdManifest(6, meta.Generated, 5, 2))
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(next.Primitives[0].Block, tdTxid(0x11), 1, 0, 0), va)
+}
+
+func tsCounterEqual(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("counter-corrupt%v", corrupt), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+			frame := tdFrame(77, 0, []byte{8})
+			initial := tsCoveredDelta(t, 5, 0x44, TreeBlockV1{TxCount: 2, EventCount: 1}, []TreeEventV1{tsCreate(0x77, 0, 1, 148, 12)}, frame)
+			mustEnvironment(t, tsRun(t, s, o, TreeOperation, initial).err)
+			if corrupt {
+				tsSeedCounter(t, s, o, 1, true, tsCounterLiteral(56, 1))
+			}
+			events := []TreeEventV1{tsSpend(0x77, 0, 1, 0), tsCreate(0x77, 0, 1, 148, 12)}
+			op := tsCoveredDelta(t, 5, 0x45, TreeBlockV1{TxCount: 2, EventCount: 2}, events, frame)
+			key := tdUTXOKey(1, tdTxid(0x77), 0)
+			op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[1], key}}
+			r := tsRun(t, s, o, TreeOperation, op)
+			counter, undo, manifest := tsCounterLiteral(57, 1), tdFormed(frame, 5, 0), tdManifest(5, [16]byte{}, 2, 1)
+			if corrupt {
+				r.tuple(t, 1, 1, 0)
+				treeNativeIntegrity(t, r.err, "update", nil)
+				engine := requireEngineError(t, r.err, EngineIntegrity, operationUpdate, -30796)
+				if any(r.err) != any(engine) || engine.TreeObservation != nil {
+					t.Fatal("equal subset localized")
+				}
+				tsConsumed(t, s, o, 1, r.err)
+				counter, undo, manifest = tsCounterLiteral(56, 1), nil, nil
+			} else {
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			}
+			s = tsReopen(t, s, path)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), counter)
+			tsRead(t, s, TreeSchemaV1DBIs()[1], key, tdFormed(frame, 5, 0))
+			tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(op.Primitives[0].Block, tdTxid(0x77), 1, 0, 0), undo)
+			tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(op.Primitives[0].Block), manifest)
+		})
+	}
+}
+
+func tsCounterRefusals(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		value    []byte
+		observed bool
+	}{
+		{"cross-zero-count", tsCounterLiteral(56, 0), false},
+		{"cross-low", tsCounterLiteral(55, 1), false},
+		{"cross-high", tsCounterLiteral(65597, 1), false},
+		{"record-bound", tsCounterLiteral(1<<59, 1), true},
+		{"record-count-overflow", tsCounterLiteral(56, ^uint64(0)), true},
+		{"record-height-bytes", tsCounterLiteral(86_545_431, 1545), true},
+		{"record-height-count", tsCounterLiteral(86_545_400, 1_545_455), true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, row.value)
+			op := tsCoveredDelta(t, 1, 0x46, TreeBlockV1{TxCount: 1}, nil, nil)
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 1, 1, 0)
+			treeNativeIntegrity(t, r.err, "update", nil)
+			engine := requireEngineError(t, r.err, EngineIntegrity, operationUpdate, -30796)
+			if any(r.err) != any(engine) {
+				t.Fatal("counter refusal replaced raw primary")
+			}
+			if row.observed && (engine.TreeObservation == nil || engine.TreeObservation.Kind != 2 || engine.TreeObservation.Rank != 0 || engine.TreeObservation.KeyLength != 9) {
+				t.Fatalf("counter record observation %+v", engine.TreeObservation)
+			}
+			if !row.observed && engine.TreeObservation != nil {
+				t.Fatalf("cross-row contradiction localized: %+v", engine.TreeObservation)
+			}
+			tsConsumed(t, s, o, 1, r.err)
+			tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[0], tsCounterKey(1), row.value)
+		})
+	}
+}
+
+func tsCounterGenerated(t *testing.T) {
+	for _, restore := range []bool{false, true} {
+		for _, wrong := range []bool{false, true} {
+			t.Run(fmt.Sprintf("restore%v/wrong%v", restore, wrong), func(t *testing.T) {
+				s, path, o := tsNew(t)
+				tsRoots(t, s, o, 1)
+				tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+				meta := TreeBlockV1{TxCount: 1, EventCount: 1, Generated: [16]byte{15: 8}}
+				event, frame := tsCreate(0x66, 0, 0, 148, 11), tdFrame(7, 0, nil)
+				initial := tsCoveredDelta(t, 5, 0x47, meta, []TreeEventV1{event}, frame)
+				mustEnvironment(t, tsRun(t, s, o, TreeOperation, initial).err)
+				op := initial
+				op.Primitives, op.Pair = slices.Clone(initial.Primitives), TreePairV1{}
+				p := &op.Primitives[0]
+				p.Direction, p.Kind, p.Undo = 2, 7, 5
+				p.Endpoint = TreeEndpointV1{Kind: 1, Height: 4, BlockHash: tdTxid(0xee), CumulativeChainwork: [40]byte{39: 4}}
+				tsCover(&op, meta)
+				if restore {
+					mustEnvironment(t, tsRun(t, s, o, TreeOperation, op).err)
+					p.Direction, p.Kind, p.Undo, p.Endpoint = 1, 5, 3, initial.Primitives[0].Endpoint
+				}
+				if wrong {
+					meta.Generated[15] = 9
+				}
+				calls := [3]int{}
+				p.Source = tsSource(func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+					calls[pos]++
+					if err := sink.BeginV1(meta); err != nil {
+						return err
+					}
+					return sink.EventV1(event)
+				})
+				tsCover(&op, meta)
+				r := tsRun(t, s, o, TreeOperation, op)
+				if wrong {
+					r.tuple(t, 1, 1, 0)
+					treeNativeIntegrity(t, r.err, "update", nil)
+					engine := requireEngineError(t, r.err, EngineIntegrity, operationUpdate, -30796)
+					if any(r.err) != any(engine) || engine.TreeObservation != nil {
+						t.Fatal("manifest contradiction localized")
+					}
+					tsConsumed(t, s, o, 1, r.err)
+				} else {
+					r.tuple(t, 2, 3, -1)
+					mustEnvironment(t, r.err)
+				}
+				if calls != [3]int{0, 1, 0} {
+					t.Fatalf("retained source positions%v", calls)
+				}
+				s = tsReopen(t, s, path)
+				tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(p.Block), tdManifest(5, [16]byte{15: 8}, 1, 0))
+				present := restore != wrong
+				counter, value := make([]byte, 16), []byte(nil)
+				if present {
+					counter, value = tsCounterLiteral(56, 1), tdFormed(frame, 5, 1)
+				}
+				tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), counter)
+				tsRead(t, s, TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0x66), 0), value)
+			})
+		}
+	}
+}
+
+func tsCounterSubset(t *testing.T) {
+	for _, row := range []struct {
+		name         string
+		total, count uint64
+		valid        bool
+	}{
+		{"before-bytes", 112, 2, false},
+		{"before-count", 113, 1, false},
+		{"residual", 114, 3, false},
+		{"exact", 113, 2, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+			a, b := tdFrame(3, 0, nil), tdFrame(4, 0, []byte{1})
+			initial := tsCoveredDelta(t, 5, 0x48, TreeBlockV1{TxCount: 1, EventCount: 2}, []TreeEventV1{tsCreate(0x11, 0, 0, 148, 11), tsCreate(0x22, 1, 0, 159, 12)}, append(bytes.Clone(a), b...))
+			mustEnvironment(t, tsRun(t, s, o, TreeOperation, initial).err)
+			parent := tsCounterLiteral(row.total, row.count)
+			tsSeedCounter(t, s, o, 1, true, parent)
+			op := tsCoveredDelta(t, 6, 0x49, TreeBlockV1{TxCount: 2, EventCount: 2}, []TreeEventV1{tsSpend(0x11, 0, 1, 0), tsSpend(0x22, 1, 1, 1)}, nil)
+			op.Primitives[0].Kind, op.Primitives[0].Undo = 1, 2
+			r := tsRun(t, s, o, TreeOperation, op)
+			if row.valid {
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			} else {
+				r.tuple(t, 1, 1, 0)
+				treeNativeIntegrity(t, r.err, "update", nil)
+				engine := requireEngineError(t, r.err, EngineIntegrity, operationUpdate, -30796)
+				if any(r.err) != any(engine) || engine.TreeObservation != nil {
+					t.Fatal("subset/residual localized")
+				}
+				tsConsumed(t, s, o, 1, r.err)
+			}
+			s = tsReopen(t, s, path)
+			want := parent
+			va, vb := tdFormed(a, 5, 1), tdFormed(b, 5, 1)
+			if row.valid {
+				want, va, vb = make([]byte, 16), nil, nil
+			}
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), want)
+			tsRead(t, s, TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0x11), 0), va)
+			tsRead(t, s, TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0x22), 1), vb)
+			tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(op.Primitives[0].Block), nil)
+		})
 	}
 }
 

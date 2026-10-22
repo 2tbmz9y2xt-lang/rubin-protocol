@@ -74,6 +74,8 @@ type treeRecorderV1 struct {
 	charge                         uint64
 	descs                          []treeDescV1
 	value                          []byte
+	coverage                       TreeSourceCoverageV1
+	observation                    *TreeObservationV1
 }
 
 func newTreeRecorderV1(position treePositionV1, prim treePrimitiveV1, body treeBodyV1, window []byte, ledger treeLedgerV1) *treeRecorderV1 {
@@ -237,21 +239,26 @@ func treeUndoValueOKV1(key, value []byte) bool {
 // into V: the formed body value, or, for an inverse group with newPresent true, a copy of the entry image resolveV1
 // obtained for that group, which the treeImageV1 lifetime keeps readable after applyV1 (D24).
 type treeDeltaV1 struct {
-	rec    *treeRecorderV1
-	keys   *treeKeysV1
-	spent  uint32 // number of SPEND-first groups
-	family bool   // own family present at the S12 (ii) head read
-	cursor int    // length of the undo-v1 cursor key in keys.from
+	rec                      *treeRecorderV1
+	keys                     *treeKeysV1
+	spent                    uint32 // number of SPEND-first groups
+	family                   bool   // own family present at the S12 (ii) head read
+	cursor                   int    // length of the undo-v1 cursor key in keys.from
+	parentBytes, parentCount uint64
+	beforeBytes, beforeCount uint64
+	afterBytes, afterCount   uint64
+	counter                  [16]byte
 }
 
 // treeKeysV1 is the key scratch K (D28, G10): every key and from L1 passes to treeOldV1 or treeEmitterV1 and the
 // regenerated manifest. It holds only byte arrays, so a slice of it is a valid cgo argument.
 type treeKeysV1 struct {
-	block    [32]byte
-	manifest [33]byte
-	utxo     [44]byte
-	entry    [77]byte
-	from     [78]byte
+	block      [32]byte
+	manifest   [33]byte
+	utxo       [44]byte
+	entry      [77]byte
+	from       [78]byte
+	counterKey [9]byte
 }
 
 // Undo effect values (D8-2), compared by number as L5b converts them by identity.
@@ -383,7 +390,13 @@ func (d *treeDeltaV1) applyV1(emit treeEmitterV1) error {
 			return err
 		}
 	}
-	return d.familyRowV1(emit, d.manifestKeyV1(), d.keys.manifest[:])
+	if err := d.familyRowV1(emit, d.manifestKeyV1(), d.keys.manifest[:]); err != nil {
+		return err
+	}
+	if d.rec.observation == nil {
+		return nil
+	}
+	return emit.emitV1(treeTargetV1{dbi: schemaDBIs[0], key: d.keys.counterKey[:], after: treeImageV1{present: true, value: d.counter[:]}})
 }
 
 // applyGroupV1 emits one group's effects at its first event in the S11 order.

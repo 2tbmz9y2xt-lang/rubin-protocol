@@ -29,6 +29,49 @@ type TreeBlockV1 struct {
 	Generated  [16]byte
 }
 
+// TreeSourceCoverageV1 binds an already qualified complete immutable source.
+// BodyKind 1 borrows the same complete body backing as the expected-absent Pair
+// literal; BodyKind 2 uses the protected stored body and requires CurrentBody nil.
+// All primitives are covered or all omit Coverage. Qualification of the body,
+// header, hashes, work and Generated belongs to the caller, through cleanup.
+type TreeSourceCoverageV1 struct {
+	DatabaseID  [32]byte
+	Generation  uint64
+	Block       [32]byte
+	Height      uint64
+	HeaderBytes uint16
+	BodyKind    uint8
+	BlockMeta   TreeBlockV1
+	CurrentBody []byte
+}
+
+// TreeObservationKindV1 describes a bounded artifact detection, not eligibility
+// for recovery, a protocol result, or permission to retry the Store.
+type TreeObservationKindV1 uint8
+
+const (
+	TreeObservationAbsentV1           TreeObservationKindV1 = 1
+	TreeObservationMalformedV1        TreeObservationKindV1 = 2
+	TreeObservationIdentityMismatchV1 TreeObservationKindV1 = 3
+	TreeObservationDigestMismatchV1   TreeObservationKindV1 = 4
+)
+
+// TreeObservationV1 is copied diagnostic context at the actual detection site.
+// A node needs both original flags; outer owners separately qualify roles and
+// progress. Native IO and unlocalized/source contradictions carry no observation.
+type TreeObservationV1 struct {
+	DatabaseID                       [32]byte
+	Generation                       uint64
+	Block                            [32]byte
+	Height                           uint64
+	Key                              [46]byte
+	Primitive                        int
+	Rank, KeyLength                  uint8
+	Position                         TreePositionV1
+	Kind                             TreeObservationKindV1
+	OriginalImage, OriginalReference bool
+}
+
 // TreeEventV1 is copied by value; CREATE points into the block's output frame.
 type TreeEventV1 struct {
 	Kind        TreeEventKindV1

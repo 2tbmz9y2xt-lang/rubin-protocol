@@ -94,6 +94,619 @@ func tsfNew(t *testing.T) *tsfScene {
 	return &tsfScene{s: s, path: path, o: o, op: op, p: p}
 }
 
+func tsfCover(t *testing.T, s *tsfScene) {
+	t.Helper()
+	for _, g := range []uint64{1, 2} {
+		treeNativeSeed(t, s.s, 0, tsCounterKey(g), make([]byte, 16))
+	}
+	for j := 1; j < 3; j++ {
+		frame := tdFrame(200, 0, []byte{1})
+		if j == 2 {
+			frame = tdFrame(300, 0, nil)
+		}
+		body := append(initial148NativeLiteral(t), frame...)
+		body[140] ^= byte(0x80 + j)
+		block := sha3.Sum256(body[:148])
+		s.op.Primitives[j].Block, s.op.Primitives[j].Endpoint.BlockHash = block, block
+		for i := range s.p[j].events {
+			if s.p[j].events[i].Kind == 2 {
+				s.p[j].events[i].FrameOffset += 148
+			}
+		}
+		treeNativeSeed(t, s.s, 3, block[:], body[:148])
+		treeNativeSeed(t, s.s, 4, block[:], body)
+	}
+	tsCover(&s.op, s.p[0].block, s.p[1].block, s.p[2].block)
+}
+
+// The LAG starts from two real original leaves. Modifying the first requires
+// both its original branch and leaf; CURRENT remains a separate healthy tree.
+func tsfOriginalLag(t *testing.T, s *tsfScene) ([][]byte, [][]byte) {
+	t.Helper()
+	a, b := tdUTXOKey(2, tdTxid(0x20), 0), tdUTXOKey(2, tdTxid(0x90), 0)
+	va, vb := tdFormed(tdFrame(7, 0, []byte{1}), 4, 1), tdFormed(tdFrame(8, 0, nil), 4, 1)
+	rows := map[string][]byte{}
+	entries := []testTreeEntry{tcEntry(a, va), tcEntry(b, vb)}
+	_ = testTreeBuild(2, entries, rows)
+	keys, values := [][]byte{a, b}, [][]byte{va, vb}
+	for name, value := range rows {
+		key := testTreeRowKey(name)
+		treeNativeSeed(t, s.s, 8, key, value)
+		keys, values = append(keys, key), append(values, value)
+	}
+	treeNativeSeed(t, s.s, 1, a, va)
+	treeNativeSeed(t, s.s, 1, b, vb)
+	treeNativeSeed(t, s.s, 0, tsCounterKey(2), tsCounterLiteral(113, 2))
+	treeNativeSeed(t, s.s, 0, tsRootKey(2), tcBinding(t, 2, tcEndpoint(4, tdTxid(0xa0)), entries...))
+	s.p[1].block = TreeBlockV1{TxCount: 2, EventCount: 2}
+	s.p[1].events = []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsCreate(0x20, 0, 1, 148, 12)}
+	tsCover(&s.op, s.p[0].block, s.p[1].block, s.p[2].block)
+	return keys, values
+}
+
+func tsfUnusedArm(t *testing.T, s *tsfScene, run func()) SelectedDamageEvidence {
+	t.Helper()
+	evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 0, tsCounterKey(1), run)
+	if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" {
+		t.Fatalf("unused keyed arm diagnostic %v evidence%+v", err, evidence)
+	}
+	if evidence.Faults != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
+		t.Fatalf("prewrite native attempts %+v", evidence)
+	}
+	return evidence
+}
+
+func TestTreeCoveredPreflightFixtureV1(t *testing.T) {
+	t.Run("begin-exact-readback", tsfCoveredBeginReadback)
+	t.Run("late-original", tsfCoveredLate)
+	t.Run("healthy-keyed-arm", func(t *testing.T) {
+		s := tsfNew(t)
+		tsfCover(t, s)
+		_, _ = tsfOriginalLag(t, s)
+		var r tsResult
+		evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 0, tsCounterKey(1), func() { r = s.run(t) })
+		mustEnvironment(t, err)
+		r.tuple(t, 1, 2, -1)
+		treeNativeError(t, r.err, "update", "IO", 5, "error 5", nil)
+		if evidence.Faults != 1 || evidence.Deletes != 1 || evidence.Commits != 0 || s.p[2].calls != [3]int{0, 1, 0} {
+			t.Fatalf("healthy first target arm %+v calls%v", evidence, s.p[2].calls)
+		}
+		tsConsumed(t, s.s, s.o, 1, r.err)
+	})
+	t.Run("first-source", tsfCoveredFirstSource)
+	t.Run("repeated-original-presence", tsfCoveredRepeated)
+	t.Run("physical-order", tsfCoveredOrder)
+	t.Run("truth", tsfCoveredTruth)
+	t.Run("prewrite-reserve", tsfCoveredReserve)
+	t.Run("target-consulted", tsfCoveredOverlap)
+	t.Run("empty-root-digest", tsfCoveredEmptyRoot)
+	t.Run("postflush-domain", tsfCoveredFinalDomain)
+	t.Run("observation-cleanup", tsfCoveredObservationCleanup)
+	t.Run("transient-before", tsfCoveredTransient)
+	t.Run("projected-capacity", tsfCoveredCapacity)
+	t.Run("source-lifecycle", tsfCoveredLifecycle)
+}
+
+func tsfCoveredLate(t *testing.T) {
+	for _, artifact := range []string{"counter", "root", "leaf", "branch"} {
+		for _, damage := range []string{"absent", "malformed", "identity", "digest"} {
+			if (artifact == "counter" || artifact == "root") && damage == "digest" {
+				continue
+			}
+			if artifact != "root" && artifact != "branch" && damage == "identity" {
+				continue
+			}
+			t.Run(artifact+"/"+damage, func(t *testing.T) {
+				s := tsfNew(t)
+				tsfCover(t, s)
+				keys, values := tsfOriginalLag(t, s)
+				rank, key, value, wantKind := tsfDamageTarget(t, s, artifact, damage, keys, values)
+				if damage == "absent" {
+					mustEnvironment(t, fixtureDeletePrefixRow(s.s, TreeSchemaV1DBIs()[rank], key))
+				} else {
+					treeNativeSeed(t, s.s, rank, key, value)
+				}
+				var r tsResult
+				evidence := tsfUnusedArm(t, s, func() { r = s.run(t) })
+				r.tuple(t, 1, 1, 1)
+				var engine *EngineError
+				if !errors.As(r.err, &engine) || any(engine) != any(r.err) || engine.Class != "Integrity" {
+					t.Fatalf("late original error identity%v", r.err)
+				}
+				var cause error
+				if damage == "malformed" || artifact == "branch" && damage == "identity" {
+					cause = errSchema
+				}
+				treeNativeIntegrity(t, r.err, "update", cause)
+				tsObservation(t, engine.TreeObservation, s.op.Primitives[1], rank, key, wantKind, 1, 1, true, true)
+				if s.p[0].calls != [3]int{0, 1, 0} || s.p[1].calls != [3]int{0, 1, 0} || s.p[2].calls != [3]int{} || evidence.BeginWrite != 1 {
+					t.Fatalf("late planning calls %v/%v/%v evidence%+v", s.p[0].calls, s.p[1].calls, s.p[2].calls, evidence)
+				}
+				tsConsumed(t, s.s, s.o, 1, r.err)
+				s.s = tsReopen(t, s.s, s.path)
+				tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(1), make([]byte, 16))
+				tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsRootKey(1), tsRootBytes(t, TreeEndpointV1{}))
+				tsRead(t, s.s, TreeSchemaV1DBIs()[4], s.op.Primitives[0].Block[:], nil)
+				tsRead(t, s.s, TreeSchemaV1DBIs()[1], tdUTXOKey(1, tdTxid(0x10), 0), nil)
+				tsRead(t, s.s, TreeSchemaV1DBIs()[5], tdManifestKey(s.op.Primitives[0].Block), nil)
+			})
+		}
+	}
+}
+
+func tsfDamageTarget(t *testing.T, s *tsfScene, artifact, damage string, keys, values [][]byte) (uint8, []byte, []byte, TreeObservationKindV1) {
+	t.Helper()
+	rank, key, value := uint8(0), tsCounterKey(2), tsCounterLiteral(113, 2)
+	if artifact == "root" {
+		key = tsRootKey(2)
+		mustEnvironment(t, s.s.View(func(r *Reader) error { var err error; value, _, err = r.Get(TreeSchemaV1DBIs()[0], key); return err }))
+	}
+	if artifact == "leaf" || artifact == "branch" {
+		rank = 8
+		for i := 2; i < len(keys); i++ {
+			if artifact == "branch" && len(values[i]) == 140 || artifact == "leaf" && len(values[i]) == 32 && bytes.Equal(keys[i][8:44], tdUTXOKey(2, tdTxid(0x20), 0)[8:]) {
+				key, value = keys[i], values[i]
+			}
+		}
+	}
+	kind := TreeObservationKindV1(1)
+	if damage == "malformed" {
+		value, kind = []byte{1}, 2
+	}
+	if damage == "digest" {
+		value, kind = bytes.Clone(value), 4
+		value[len(value)-1] ^= 1
+	}
+	if damage == "identity" {
+		value, kind = bytes.Clone(value), 3
+		if rank == 8 {
+			value[0] ^= 0x80
+		} else {
+			value[1] ^= 1
+		}
+	}
+	return rank, bytes.Clone(key), value, kind
+}
+
+func tsfCoveredEmptyRoot(t *testing.T) {
+	for _, damaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("damaged%v", damaged), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			binding, err := DecodeRootBindingV1(tsRootBytes(t, tcEndpoint(4, tdTxid(0xee))))
+			mustEnvironment(t, err)
+			if damaged {
+				binding.RootDigest[0] ^= 1
+			}
+			value, err := binding.Encode()
+			mustEnvironment(t, err)
+			treeNativeSeed(t, s.s, 0, tsRootKey(2), value)
+			var r tsResult
+			if damaged {
+				tsfUnusedArm(t, s, func() { r = s.run(t) })
+				r.tuple(t, 1, 1, 1)
+				treeNativeIntegrity(t, r.err, "update", nil)
+				tsObservation(t, r.err.(*EngineError).TreeObservation, s.op.Primitives[1], 0, tsRootKey(2), 4, 1, 1, true, true)
+				tsConsumed(t, s.s, s.o, 1, r.err)
+			} else {
+				r = s.run(t)
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			}
+		})
+	}
+}
+
+func tsObservation(t *testing.T, got *TreeObservationV1, p TreePrimitiveV1, rank uint8, key []byte, kind TreeObservationKindV1, j int, position TreePositionV1, image, reference bool) {
+	t.Helper()
+	want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: p.Generation, Block: p.Block, Height: p.Height, Rank: rank, KeyLength: uint8(len(key)), Kind: kind, Primitive: j, Position: position, OriginalImage: image, OriginalReference: reference}
+	copy(want.Key[:], key)
+	if got == nil || *got != want {
+		t.Fatalf("observation got%+v want%+v", got, want)
+	}
+}
+
+func tsfCoveredFirstSource(t *testing.T) {
+	for _, mode := range []string{"direct", "wrapped", "caused", "typed-nil"} {
+		t.Run(mode, func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			marker := errors.New("CURRENT source")
+			var primary error = marker
+			switch mode {
+			case "wrapped":
+				primary = fmt.Errorf("source context: %w", marker)
+			case "caused":
+				primary = &EngineError{Class: "IO", Operation: "get", Code: 5, Diagnostic: "source", Cause: marker}
+			case "typed-nil":
+				var typed *nilPointerError
+				primary = typed
+			}
+			s.p[0].before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return primary }
+			var r tsResult
+			tsfUnusedArm(t, s, func() { r = s.run(t) })
+			r.tuple(t, 1, 1, 0)
+			if any(r.err) != any(primary) || s.p[0].calls != [3]int{0, 1, 0} || s.p[1].calls != [3]int{} || s.p[2].calls != [3]int{} {
+				t.Fatalf("CURRENT precedence %v calls%v/%v/%v", r.err, s.p[0].calls, s.p[1].calls, s.p[2].calls)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.durable(t, false)
+		})
+	}
+}
+
+func tsfCoveredRepeated(t *testing.T) {
+	for _, original := range []bool{false, true} {
+		t.Run(fmt.Sprintf("original-present%v", original), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			if original {
+				_, _ = tsfOriginalLag(t, s)
+				s.p[1].block, s.p[1].events = TreeBlockV1{TxCount: 2, EventCount: 1}, []TreeEventV1{tsSpend(0x20, 0, 1, 0)}
+				s.p[2].block, s.p[2].events = TreeBlockV1{TxCount: 1, EventCount: 1}, []TreeEventV1{tsCreate(0x20, 0, 0, 148, 11)}
+				tsCover(&s.op, s.p[0].block, s.p[1].block, s.p[2].block)
+			}
+			r := s.run(t)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			for _, p := range s.p {
+				if p.calls != [3]int{0, 1, 0} {
+					t.Fatalf("repeated Source calls%v", p.calls)
+				}
+			}
+			if !original {
+				s.durable(t, true)
+				tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(2), mustCodecHex(t, "00000000000000380000000000000001"))
+				return
+			}
+			s.s = tsReopen(t, s.s, s.path)
+			key, value := tdUTXOKey(2, tdTxid(0x20), 0), tdFormed(tdFrame(300, 0, nil), 6, 1)
+			other, unchanged := tdUTXOKey(2, tdTxid(0x90), 0), tdFormed(tdFrame(8, 0, nil), 4, 1)
+			tsRead(t, s.s, TreeSchemaV1DBIs()[1], key, value)
+			tsRead(t, s.s, TreeSchemaV1DBIs()[1], other, unchanged)
+			tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(2), mustCodecHex(t, "00000000000000700000000000000002"))
+			tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsRootKey(2), tcBinding(t, 2, s.op.Primitives[2].Endpoint, tcEntry(key, value), tcEntry(other, unchanged)))
+		})
+	}
+}
+
+// One existing UTXO and its leaf and branch change. Counter/UTXO delete first;
+// the new undo/body are absent. The leaf delete is exactly the third delete and
+// the generation root delete exactly the fifth, independent of production order.
+func tsfCoveredOrder(t *testing.T) {
+	for _, target := range []string{"leaf", "root", "pair-root"} {
+		t.Run(target, func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			keys, values := tsfOriginalLag(t, s)
+			// The replacement becomes CURRENT with a genuinely new Pair body.
+			s.op.Primitives = []TreePrimitiveV1{s.op.Primitives[1]}
+			s.op.Primitives[0].Kind = 2
+			body := append(initial148NativeLiteral(t), tdFrame(200, 0, []byte{1})...)
+			body[140] ^= 0x74
+			block := sha3.Sum256(body[:148])
+			s.op.Primitives[0].Block, s.op.Primitives[0].Endpoint.BlockHash = block, block
+			s.p[1].events[1].FrameOffset = 148
+			s.op.Pair = TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[4], Key: block[:], AfterKind: 2, Literal: body}}}
+			tsCover(&s.op, s.p[1].block)
+			rank, key, wantDeletes := uint8(0), tsRootKey(2), uint64(5)
+			if target == "leaf" {
+				rank, wantDeletes = 8, 3
+				for i := 2; i < len(keys); i++ {
+					if len(values[i]) == 32 && bytes.Equal(keys[i][8:44], tdUTXOKey(2, tdTxid(0x20), 0)[8:]) {
+						key = keys[i]
+					}
+				}
+			}
+			if target == "pair-root" {
+				tsRoots(t, s.s, s.o, 3)
+				m := Mutation{DBI: TreeSchemaV1DBIs()[0], Key: tsRootKey(3), BeforePresent: true, AfterKind: 2, Literal: tsRootBytes(t, TreeEndpointV1{})}
+				s.op.Pair.Mutations = append([]Mutation{m}, s.op.Pair.Mutations...)
+				key = tsRootKey(3)
+			}
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, rank, key, func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, 1, 2, -1)
+			treeNativeError(t, r.err, "update", "IO", 5, "error 5", nil)
+			if evidence.Deletes != wantDeletes || evidence.Faults != 1 || evidence.Commits != 0 {
+				t.Fatalf("%s delete order %+v want%d", target, evidence, wantDeletes)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.s = tsReopen(t, s.s, s.path)
+			tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(2), tsCounterLiteral(113, 2))
+			tsRead(t, s.s, TreeSchemaV1DBIs()[1], keys[0], values[0])
+		})
+	}
+}
+
+func tsfCoveredTruth(t *testing.T) {
+	for _, row := range []struct {
+		scenario SelectedDamageScenario
+		truth    CommitTruth
+	}{
+		{SelectedDamageCommitOld, 1}, {SelectedDamageCommitNew, 2}, {SelectedDamageCommitUnreadable, 3}, {SelectedDamageCommitThird, 3},
+	} {
+		t.Run(fmt.Sprintf("scenario%d", row.scenario), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			s.op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[0], []byte{2}}}
+			var before, after uint64
+			s.p[0].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+				if pos == 2 {
+					before = reservationLive(s.o)
+				}
+				return nil
+			}
+			s.p[2].after = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+				if pos == 2 {
+					after = reservationLive(s.o)
+				}
+				return nil
+			}
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(s.s, s.o, row.scenario, 0, tsCounterKey(1), func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, row.truth, 3, -1)
+			var ce *CommitError
+			if !errors.As(r.err, &ce) || ce.Truth != row.truth || evidence.Commits != 1 || reservationLive(s.o) != 0 {
+				t.Fatalf("covered truth result%v evidence%+v", r.err, evidence)
+			}
+			if row.scenario != SelectedDamageCommitUnreadable {
+				for _, p := range s.p {
+					if p.calls != [3]int{0, 1, 1} {
+						t.Fatalf("two positions %v", p.calls)
+					}
+				}
+				if before != after {
+					t.Fatalf("readback account draw %d -> %d", before, after)
+				}
+			}
+			if row.scenario == SelectedDamageCommitOld || row.scenario == SelectedDamageCommitNew {
+				s.durable(t, row.truth == 2)
+			}
+			if row.scenario == SelectedDamageCommitThird {
+				tsConsumed(t, s.s, s.o, row.truth, r.err)
+				opened, check := OpenTreeV1(s.path, environmentConfig(), [32]byte{7})
+				treeNativeIntegrity(t, check, "open", errSchema)
+				if opened != nil {
+					t.Fatal("malformed third authority retained Store resources")
+				}
+			}
+		})
+	}
+}
+
+func TestTreeCompleteObservationV1(t *testing.T) {
+	for _, mode := range []string{"planned-image", "planned-absence", "computed-edge"} {
+		for _, position := range []TreePositionV1{1, 2} {
+			t.Run(fmt.Sprintf("negative-node/%s/position%d", mode, position), func(t *testing.T) {
+				tsfNegativeNodeObservation(t, mode, position)
+			})
+		}
+	}
+	t.Run("negative-source-height", func(t *testing.T) {
+		s := tsfNew(t)
+		tsfCover(t, s)
+		s.op.Primitives = s.op.Primitives[:2]
+		p := &s.op.Primitives[1]
+		// Deliberately violates source/sequence qualification: a genesis LAG
+		// cannot follow this nonempty CURRENT in the same generation. It must
+		// not localize the already planned counter as ORIGINAL damage.
+		p.Generation, p.Height, p.Endpoint.Height = 1, 0, 0
+		p.Endpoint.CumulativeChainwork[39] = 1
+		tsCover(&s.op, s.p[0].block, s.p[1].block)
+		var r tsResult
+		tsfUnusedArm(t, s, func() { r = s.run(t) })
+		r.tuple(t, 1, 1, 1)
+		treeNativeIntegrity(t, r.err, "update", nil)
+		if r.err.(*EngineError).TreeObservation != nil {
+			t.Fatal("planned counter/source height localized")
+		}
+		tsConsumed(t, s.s, s.o, 1, r.err)
+	})
+	for _, readback := range []bool{false, true} {
+		for _, damage := range []string{"absent", "malformed", "digest"} {
+			t.Run(fmt.Sprintf("planned-container/readback%v/%s", readback, damage), func(t *testing.T) {
+				s := tsfNew(t)
+				tsfCover(t, s)
+				_, _ = tsfOriginalLag(t, s)
+				s.op.Primitives = slices.Clone(s.op.Primitives[1:])
+				s.op.Primitives[0].Kind = 2
+				s.op.Pair = TreePairV1{}
+				later := []TreeEventV1{tsSpend(0x90, 0, 1, 0), tsCreate(0x90, 0, 1, 148, 11)}
+				s.p[2].events = later
+				if readback {
+					// Negative immutable-source probe: writer touches the healthy
+					// first leaf; readback's second Source instead touches the bad
+					// original child through the independently built P_r parent.
+					// With immutable events writer preflight finds this damage first.
+					s.p[2].events = []TreeEventV1{tsSpend(0x20, 0, 1, 0), tsCreate(0x20, 0, 1, 148, 11)}
+					s.p[2].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+						if pos == 2 {
+							s.p[2].events = later
+						}
+						return nil
+					}
+				}
+				tsCover(&s.op, s.p[1].block, s.p[2].block)
+				key := testTreeNodeKey(2, 288, [36]byte(tdUTXOKey(2, tdTxid(0x90), 0)[8:]))
+				tsDamageLeaf(t, s.s, key, damage)
+				r := tsfObservationRun(t, s, readback)
+				position, index := TreePositionV1(1), 1
+				observed := r.err
+				if readback {
+					var ce *CommitError
+					if !errors.As(r.err, &ce) || ce.Truth != 3 {
+						t.Fatalf("readback observation result%v", r.err)
+					}
+					treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+					observed, position = ce.ReadbackCause, 2
+				}
+				var engine *EngineError
+				if !errors.As(observed, &engine) || any(engine) != any(observed) {
+					t.Fatalf("observed pointer%v", observed)
+				}
+				var cause error
+				if damage == "malformed" {
+					cause = errSchema
+				}
+				treeNativeIntegrity(t, observed, "update", cause)
+				kind := map[string]TreeObservationKindV1{"absent": 1, "malformed": 2, "digest": 4}[damage]
+				tsObservation(t, engine.TreeObservation, s.op.Primitives[index], 8, key, kind, index, position, true, true)
+				tsConsumed(t, s.s, s.o, r.truth, r.err)
+			})
+		}
+	}
+}
+
+func tsfCoveredBeginReadback(t *testing.T) {
+	for _, field := range []string{"tx", "events", "generated"} {
+		t.Run(field, func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			actual := s.p[1].block
+			switch field {
+			case "tx":
+				actual.TxCount++
+			case "events":
+				actual.EventCount++
+			case "generated":
+				actual.Generated[0] = 1
+			}
+			s.p[1].before = func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+				if pos != 2 {
+					return nil
+				}
+				if err := sink.BeginV1(actual); err != nil {
+					return err
+				}
+				return errors.New("mismatched readback Begin accepted")
+			}
+			r := tsfObservationRun(t, s, true)
+			var ce *CommitError
+			if !errors.As(r.err, &ce) || ce.Truth != 3 {
+				t.Fatalf("readback Begin result %v", r.err)
+			}
+			treeNativeError(t, ce.Cause, "update", "Capacity", 28, "error 28", nil)
+			treeNativeError(t, ce.ReadbackCause, "update", "InvalidInput", 22, "invalid tree delta", nil)
+			if s.p[0].calls != [3]int{0, 1, 1} || s.p[1].calls != [3]int{0, 1, 1} || s.p[2].calls != [3]int{0, 1, 0} {
+				t.Fatalf("Begin source positions %v/%v/%v", s.p[0].calls, s.p[1].calls, s.p[2].calls)
+			}
+			tsConsumed(t, s.s, s.o, 3, r.err)
+			s.durable(t, true)
+		})
+	}
+}
+
+// Deliberately invalid lower-owner projections exercise the detector. Qualified
+// immutable public Sources cannot manufacture these inconsistent planned rows.
+func tsfNegativeNodeObservation(t *testing.T, mode string, position TreePositionV1) {
+	t.Helper()
+	s, _, _ := tsNew(t)
+	p := TreePrimitiveV1{Generation: 2, Block: tdTxid(0xb1), Height: 5}
+	utxo := tdUTXOKey(2, tdTxid(0x20), 0)
+	value := tdFormed(tdFrame(7, 0, nil), 4, 1)
+	route := [36]byte(utxo[8:])
+	key := testTreeNodeKey(2, 288, route)
+	digest := testTreeLeafPreimage(route, value)
+	binding := tcBinding(t, 2, tcEndpoint(4, tdTxid(0xa0)), tcEntry(utxo, value))
+	treeNativeSeed(t, s, 0, tsRootKey(2), binding)
+	treeNativeSeed(t, s, 8, key, digest[:])
+	target := treeTargetV1{dbi: TreeSchemaV1DBIs()[8], key: key}
+	kind, image, reference := TreeObservationKindV1(1), false, true
+	var cause error
+	if mode == "planned-image" {
+		target.after = treeImageV1{present: true, value: []byte{1}}
+		kind, cause = 2, errSchema
+	}
+	if mode == "computed-edge" {
+		// A planned binding's zero Top link is computed; the fetched node is
+		// still physical ORIGINAL. Its wrong digest forces that actual read.
+		target = treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: tsRootKey(2), after: treeImageV1{present: true, value: binding}}
+		treeNativeSeed(t, s, 8, key, bytes.Repeat([]byte{0x7f}, 32))
+		kind, image, reference = 4, true, false
+	}
+	context := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 2, Block: p.Block, Height: 5, Primitive: 1, Position: position}
+	probe := func(old treeOldV1, emit treeEmitterV1, ledger treeLedgerV1) error {
+		if err := emit.emitV1(target); err != nil {
+			return err
+		}
+		leaves := &testTreeLeaves{items: []treeLeafV1{testTreeStreamLeaf(2, route, true, value)}, log: &testTreeLog{}}
+		return treeEmitNodesV1(old, 2, tcEndpoint(5, p.Block), [32]byte{7}, leaves, emit, ledger, &context)
+	}
+	observed := tsfNodeOriginRun(t, s, position, probe)
+	treeNativeIntegrity(t, observed, "update", cause)
+	var engine *EngineError
+	if !errors.As(observed, &engine) || any(engine) != any(observed) {
+		t.Fatalf("node detector pointer %v", observed)
+	}
+	context = TreeObservationV1{}
+	tsObservation(t, engine.TreeObservation, p, 8, key, kind, 1, position, image, reference)
+}
+
+func tsfNodeOriginRun(t *testing.T, s *Store, position TreePositionV1, probe func(treeOldV1, treeEmitterV1, treeLedgerV1) error) error {
+	t.Helper()
+	ledger := &ttLedger{}
+	if position == 1 {
+		outcome := fixtureTreeCommitV1(s, fixtureTreeScriptV1{ledger: ledger, write: func(section *treeSectionV1) error {
+			section.covered = true
+			return probe(section.oldV1(true), section.writerV1(), ledger)
+		}})
+		ttOutcome(t, outcome, 1, 1)
+		return outcome.primary
+	}
+	var detected error
+	calls := 0
+	script := fixtureTreeScriptV1{
+		ledger: ledger, calls: &calls, held: treeScratchBytesV1 + treeNodeWorkBytesV1 + treeValueBytesV1,
+		write: func(section *treeSectionV1) error { return section.writerV1().emitV1(ttTarget(ttUTXO, ttZ, "z1")) },
+		readback: func(read *treeReadbackStateV1) error {
+			detected = probe(read.oldV1(), read.emitterV1(), read.budget.ledgerV1())
+			return detected
+		},
+	}
+	var outcome updateNativeOutcome
+	evidence, err := fixtureLargeFault(s, 8, 6, ttOut, func() { outcome = fixtureTreeCommitV1(s, script) })
+	mustEnvironment(t, err)
+	fixtureTreeReleaseV1(outcome)
+	commit := ttCommitError(t, outcome, 3)
+	if calls != 1 || evidence.commits != 1 || detected == nil || any(commit.ReadbackCause) != any(detected) {
+		t.Fatalf("node readback calls%d evidence%+v detector%v cause%v", calls, evidence, detected, commit.ReadbackCause)
+	}
+	return commit.ReadbackCause
+}
+
+func tsDamageLeaf(t *testing.T, s *Store, key []byte, damage string) {
+	t.Helper()
+	if damage == "absent" {
+		mustEnvironment(t, fixtureDeletePrefixRow(s, TreeSchemaV1DBIs()[8], key))
+		return
+	}
+	value := []byte{1}
+	if damage == "digest" {
+		value = bytes.Repeat([]byte{0x7f}, 32)
+	}
+	treeNativeSeed(t, s, 8, key, value)
+}
+
+func tsfObservationRun(t *testing.T, s *tsfScene, readback bool) tsResult {
+	t.Helper()
+	var r tsResult
+	if readback {
+		_, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageCommitNew, 0, tsCounterKey(2), func() { r = s.run(t) })
+		mustEnvironment(t, err)
+		r.tuple(t, 3, 3, -1)
+		return r
+	}
+	evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 0, tsCounterKey(2), func() { r = s.run(t) })
+	if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" || evidence.Faults != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
+		t.Fatalf("planned-container prewrite evidence%+v fixture%v", evidence, err)
+	}
+	r.tuple(t, 1, 1, 1)
+	return r
+}
+
 func (s *tsfScene) run(t *testing.T) tsResult { return tsRun(t, s.s, s.o, TreeOperation, s.op) }
 
 func (s *tsfScene) crossed(t *testing.T) tsResult {
@@ -171,6 +784,9 @@ func (s *tsfScene) binding(t *testing.T, g uint64, newState bool) []byte {
 		if j == 2 {
 			body = tdFrame(300, 0, nil)
 		}
+		if j != 0 && p.Coverage != nil {
+			body = append(make([]byte, 148), body...)
+		}
 		for _, e := range s.p[j].events {
 			key := tdUTXOKey(g, e.Outpoint.Txid, e.Outpoint.Vout)
 			id := string(key)
@@ -223,6 +839,9 @@ func (s *tsfScene) budgets(t *testing.T) [3]uint64 {
 			p.put(1, old, 0)
 		}
 		p.put(5, tdManifestKey(prim.Block), 33)
+		if prim.Coverage != nil {
+			p.put(0, tsCounterKey(prim.Generation), 16)
+		}
 		if i == 2 {
 			p.put(8, testTreeNodeKey(2, 288, [36]byte(tdUTXOKey(2, tdTxid(0x20), 0)[8:])), 0)
 		}
@@ -232,6 +851,335 @@ func (s *tsfScene) budgets(t *testing.T) [3]uint64 {
 		out[i] = p.high
 	}
 	return out
+}
+
+func tsfCoveredReserve(t *testing.T) {
+	for _, short := range []uint64{1, 0} {
+		t.Run(fmt.Sprintf("short%d", short), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			budgets := s.budgets(t)
+			pc := uint64(128 + 32 + len(s.op.Pair.Mutations[0].Literal))
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_400 - 208 + short
+			var r tsResult
+			run := func() {
+				mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					return a.WithReservation(filler, func() error {
+						r = tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+						if reservationLive(s.o) != filler {
+							t.Fatal("covered reserve hold leaked")
+						}
+						return nil
+					})
+				}))
+			}
+			if short != 0 {
+				tsfUnusedArm(t, s, run)
+				r.tuple(t, 1, 1, -1)
+				if any(r.err) != any(errOperationReservationCapacity) {
+					t.Fatalf("prewrite H_r identity%v", r.err)
+				}
+				tsConsumed(t, s.s, s.o, 1, r.err)
+			} else {
+				run()
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			}
+			if reservationLive(s.o) != 0 {
+				t.Fatal("covered reserve operation leaked")
+			}
+			s.durable(t, short == 0)
+		})
+	}
+}
+
+func tsfCoveredOverlap(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("target%v", changed), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			key := tdUTXOKey(2, tdTxid(0x20), 0)
+			if !changed {
+				key = tdUTXOKey(2, tdTxid(0xee), 0)
+			}
+			s.op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[1], key}}
+			var r tsResult
+			if changed {
+				tsfUnusedArm(t, s, func() { r = s.run(t) })
+				r.tuple(t, 1, 1, -1)
+				treeNativeError(t, r.err, "update", "InvalidInput", 22, "invalid Update Batch", nil)
+				tsConsumed(t, s.s, s.o, 1, r.err)
+			} else {
+				r = s.run(t)
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+			}
+			if s.p[2].calls != [3]int{0, 1, 0} {
+				t.Fatal("final ownership checked before last source")
+			}
+			s.durable(t, !changed)
+		})
+	}
+}
+
+func tsfCoveredFinalDomain(t *testing.T) {
+	s := tsfNew(t)
+	tsfCover(t, s)
+	m := tsTarget(0x1234)
+	treeNativeSeed(t, s.s, 6, m.Key, m.Literal)
+	s.op.Pair.Consulted = []ConsultedRow{{m.DBI, m.Key}}
+	var r tsResult
+	evidence, err := fixtureLargeFault(s.s, 13, 6, m.Key, func() { r = s.run(t) })
+	mustEnvironment(t, err)
+	r.tuple(t, 1, 2, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "final update image mismatch", nil)
+	if evidence.drift != 1 || evidence.commits != 0 || r.err.(*EngineError).TreeObservation != nil {
+		t.Fatalf("late native domain failure%v evidence%+v", r.err, evidence)
+	}
+	tsConsumed(t, s.s, s.o, 1, r.err)
+	s.durable(t, false)
+	tsRead(t, s.s, m.DBI, m.Key, m.Literal)
+}
+
+func tsfCoveredObservationCleanup(t *testing.T) {
+	for _, mode := range []uint32{9, 10} {
+		t.Run(fmt.Sprintf("old-abort%d", mode), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			mustEnvironment(t, fixtureDeletePrefixRow(s.s, TreeSchemaV1DBIs()[0], tsCounterKey(2)))
+			var r tsResult
+			_, err := fixtureLargeFault(s.s, mode, 0, tsCounterKey(2), func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, 1, 1, 1)
+			parts, ok := r.err.(interface{ Unwrap() []error })
+			if !ok || len(parts.Unwrap()) != 2 {
+				t.Fatalf("ordered observation cleanup%v", r.err)
+			}
+			primary, cleanup := parts.Unwrap()[0], parts.Unwrap()[1]
+			treeNativeIntegrity(t, primary, "update", nil)
+			var engine *EngineError
+			if !errors.As(r.err, &engine) || any(engine) != any(primary) || !errors.Is(r.err, primary) {
+				t.Fatal("cleanup lost primary pointer/errors.As")
+			}
+			tsObservation(t, engine.TreeObservation, s.op.Primitives[1], 0, tsCounterKey(2), 1, 1, 1, true, true)
+			if mode == 9 {
+				treeNativeError(t, cleanup, "abort", "IO", 5, "error 5", nil)
+				tsConsumed(t, s.s, s.o, 1, r.err)
+			} else {
+				failure := requireEngineError(t, cleanup, "LocalInvariant", "abort", -30416)
+				if !failure.ReopenRequired || s.s.state != storePOISONEDTHREAD || s.s.txn == nil {
+					t.Fatal("retained cleanup disposition")
+				}
+				calls := 0
+				mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					next := tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return s.op, nil })
+					if any(next.err) != any(s.s.terminal) || calls != 0 {
+						t.Fatal("retained cleanup next operation")
+					}
+					return nil
+				}))
+				mustEnvironment(t, fixtureLargeRelease(s.s))
+			}
+			if reservationLive(s.o) != 0 {
+				t.Fatal("observation cleanup hold leaked")
+			}
+		})
+	}
+}
+
+func tsfCoveredTransient(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("invalid-before%v", invalid), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			keys, values := tsfOriginalLag(t, s)
+			s.op.Primitives = []TreePrimitiveV1{s.op.Primitives[1]}
+			s.op.Primitives[0].Kind, s.op.Primitives[0].Undo = 1, 2
+			s.op.Pair = TreePairV1{}
+			if invalid {
+				bad := bytes.Clone(values[0])
+				bad[len(bad)-1] = 2
+				treeNativeSeed(t, s.s, 1, keys[0], bad)
+			}
+			tsCover(&s.op, s.p[1].block)
+			var r tsResult
+			if invalid {
+				evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 0, tsCounterKey(2), func() { r = s.run(t) })
+				if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" || evidence.Faults != 0 || evidence.Deletes != 0 {
+					t.Fatalf("Transient prewrite evidence%+v fixture%v", evidence, err)
+				}
+				r.tuple(t, 1, 1, 0)
+				treeNativeIntegrity(t, r.err, "update", errSchema)
+				if r.err.(*EngineError).TreeObservation != nil {
+					t.Fatal("UTXO source contradiction localized")
+				}
+				tsConsumed(t, s.s, s.o, 1, r.err)
+			} else {
+				r = s.run(t)
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+				tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(2), tsCounterLiteral(113, 2))
+			}
+		})
+	}
+}
+
+func tsfCoveredCapacity(t *testing.T) {
+	for _, denied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("P-denied%v", denied), func(t *testing.T) {
+			s, path, o := tsNew(t)
+			tsRoots(t, s, o, 1)
+			tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+			frame := tdFrame(7, 0, bytes.Repeat([]byte{8}, 65536))
+			var events []TreeEventV1
+			var frames []byte
+			for vout := uint32(0); vout < 3; vout++ {
+				events = append(events, tsCreate(0x77, vout, 0, uint64(148+len(frames)), 65551))
+				frames = append(frames, frame...)
+			}
+			op := tsCoveredDelta(t, 5, 0x4a, TreeBlockV1{TxCount: 1, EventCount: 3}, events, frames)
+			var r tsResult
+			run := func() {
+				mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					filler := uint64(0)
+					if denied {
+						pair := uint64(128 + 32 + len(op.Pair.Mutations[0].Literal))
+						filler = 402_653_184 - pair - 74_872 - 104*3 - 65_560 - 147_968
+					}
+					return a.WithReservation(filler, func() error {
+						r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+						if reservationLive(o) != filler {
+							t.Fatal("P boundary leaked hold")
+						}
+						return nil
+					})
+				}))
+			}
+			key := tdUTXOKey(1, tdTxid(0x77), 0)
+			evidence, err := FixtureSelectedDamage(s, o, SelectedDamagePutEIO, 1, key, run)
+			if denied {
+				if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" || evidence.Faults != 0 || evidence.Deletes != 0 || evidence.Commits != 0 {
+					t.Fatalf("P prewrite evidence%+v fixture%v", evidence, err)
+				}
+				r.tuple(t, 1, 1, 0)
+				if any(r.err) != any(errOperationReservationCapacity) {
+					t.Fatalf("P capacity identity%v", r.err)
+				}
+			} else {
+				mustEnvironment(t, err)
+				r.tuple(t, 1, 2, -1)
+				treeNativeError(t, r.err, "update", "IO", 5, "error 5", nil)
+				if evidence.Faults != 1 || evidence.Deletes != 1 {
+					t.Fatalf("healthy P arm%+v", evidence)
+				}
+			}
+			tsConsumed(t, s, o, 1, r.err)
+			s = tsReopen(t, s, path)
+			tsRead(t, s, TreeSchemaV1DBIs()[1], key, nil)
+			tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), make([]byte, 16))
+			tsRead(t, s, TreeSchemaV1DBIs()[4], op.Primitives[0].Block[:], nil)
+		})
+	}
+}
+
+func tsfCoveredLifecycle(t *testing.T) {
+	for _, cleanup := range []uint32{0, 9, 10} {
+		for _, delivery := range []string{"nil", "error", "panic", "goexit"} {
+			t.Run(fmt.Sprintf("cleanup%d/%s", cleanup, delivery), func(t *testing.T) {
+				s := tsfNew(t)
+				tsfCover(t, s)
+				marker, panicValue := errors.New("covered LAG source"), new(int)
+				s.p[1].before = func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+					switch delivery {
+					case "error":
+						return marker
+					case "panic":
+						panic(panicValue)
+					case "goexit":
+						runtime.Goexit()
+					}
+					return nil
+				}
+				var r tsResult
+				var recovered any
+				returned := false
+				run := func() {
+					defer func() { recovered = recover() }()
+					invoke := func() { r = s.run(t); returned = true }
+					if cleanup == 0 {
+						invoke()
+						return
+					}
+					_, err := fixtureLargeFault(s.s, cleanup, 0, tsCounterKey(2), invoke)
+					mustEnvironment(t, err)
+				}
+				if delivery == "goexit" {
+					done := make(chan struct{})
+					go func() { defer close(done); run() }()
+					<-done
+				} else {
+					run()
+				}
+				if delivery == "panic" && recovered != panicValue {
+					t.Fatalf("covered source panic identity%v", recovered)
+				}
+				if delivery != "panic" && recovered != nil {
+					t.Fatalf("unexpected source panic%v", recovered)
+				}
+				wantReturn := delivery == "nil" || delivery == "error"
+				if returned != wantReturn || reservationLive(s.o) != 0 {
+					t.Fatal("source delivery/hold lifetime")
+				}
+				if delivery == "nil" {
+					r.tuple(t, 2, 3, -1)
+					if cleanup == 0 {
+						mustEnvironment(t, r.err)
+					}
+				} else if delivery == "error" {
+					r.tuple(t, 1, 1, 1)
+					if !errors.Is(r.err, marker) {
+						t.Fatal("covered source primary lost")
+					}
+				}
+				tsExpiredReader(t, s.p[1].reader)
+				if s.p[1].sink.WindowV1() != nil {
+					t.Fatal("covered source retained live window")
+				}
+				tsCoveredLifecycleState(t, s, delivery, cleanup)
+			})
+		}
+	}
+}
+
+func tsCoveredLifecycleState(t *testing.T, s *tsfScene, delivery string, cleanup uint32) {
+	t.Helper()
+	truth := CommitTruth(1)
+	if delivery == "nil" {
+		truth = 2
+	}
+	if cleanup == 0 && delivery != "error" {
+		if s.s.state != storeOPEN || s.s.terminal != nil {
+			t.Fatal("clean covered source state")
+		}
+		tsFollowing(t, s.s, s.o)
+		return
+	}
+	if cleanup != 10 {
+		tsConsumed(t, s.s, s.o, truth, s.s.terminal)
+		return
+	}
+	if s.s.state != storePOISONEDTHREAD || s.s.txn == nil || s.s.terminalTruth != truth {
+		t.Fatal("retained covered source state")
+	}
+	calls := 0
+	mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		next := tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { calls++; return s.op, nil })
+		if any(next.err) != any(s.s.terminal) || calls != 0 {
+			t.Fatal("retained covered Source next operation")
+		}
+		return nil
+	}))
+	mustEnvironment(t, fixtureLargeRelease(s.s))
 }
 
 func TestTreeStreamComposedAndExactAccountV1(t *testing.T) {
@@ -501,76 +1449,85 @@ func TestTreeStreamSourceFailureAndDriftV1(t *testing.T) {
 }
 
 func TestTreeStreamProviderUnwindAndLifetimeV1(t *testing.T) {
-	for _, mode := range []string{"panic", "goexit", "reader-panic", "reader-goexit"} {
-		t.Run(mode, func(t *testing.T) {
-			s := tsfNew(t)
-			value := new(int)
-			key := tsTarget(77).Key
-			var failure error
-			readerFault := mode == "reader-panic" || mode == "reader-goexit"
-			s.p[1].after = func(_ TreePositionV1, r *Reader, _ *TreeDeltaSinkV1) error {
-				if readerFault {
-					_, _, failure = r.Get(TreeSchemaV1DBIs()[6], key)
-				}
-				if mode == "goexit" || mode == "reader-goexit" {
-					runtime.Goexit()
-				}
-				panic(value)
+	for _, covered := range []bool{false, true} {
+		for _, mode := range []string{"panic", "goexit", "reader-panic", "reader-goexit"} {
+			name := mode
+			if covered {
+				name += "/covered"
 			}
-			post := false
-			var recovered any
-			run := func() {
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					defer func() {
-						recovered = recover()
-						if reservationLive(s.o) != 0 {
-							t.Error("hold still live at unwind delivery")
-						}
+			t.Run(name, func(t *testing.T) {
+				s := tsfNew(t)
+				if covered {
+					tsfCover(t, s)
+				}
+				value := new(int)
+				key := tsTarget(77).Key
+				var failure error
+				readerFault := mode == "reader-panic" || mode == "reader-goexit"
+				s.p[1].after = func(_ TreePositionV1, r *Reader, _ *TreeDeltaSinkV1) error {
+					if readerFault {
+						_, _, failure = r.Get(TreeSchemaV1DBIs()[6], key)
+					}
+					if mode == "goexit" || mode == "reader-goexit" {
+						runtime.Goexit()
+					}
+					panic(value)
+				}
+				post := false
+				var recovered any
+				run := func() {
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						defer func() {
+							recovered = recover()
+							if reservationLive(s.o) != 0 {
+								t.Error("hold still live at unwind delivery")
+							}
+						}()
+						_ = s.run(t)
+						post = true
 					}()
-					_ = s.run(t)
-					post = true
-				}()
-				<-done
-			}
-			if readerFault {
-				evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 6, key, run)
-				mustEnvironment(t, err)
-				if failure == nil || evidence.Faults != 1 || evidence.OldGets[6] != 1 {
-					t.Fatalf("provider Reader fault %v evidence%+v", failure, evidence)
+					<-done
 				}
-				treeNativeError(t, failure, "get", "IO", 5, "error 5", nil)
-			} else {
-				run()
-			}
-			if (mode == "panic" || mode == "reader-panic") && recovered != value {
-				t.Fatalf("provider panic identity %v", recovered)
-			}
-			if (mode == "goexit" || mode == "reader-goexit") && recovered != nil {
-				t.Fatalf("provider Goexit panicked %v", recovered)
-			}
-			if post || reservationLive(s.o) != 0 || s.p[1].reader == nil || s.p[1].reader.usable() {
-				t.Fatal("provider unwind lifetime")
-			}
-			tsExpiredReader(t, s.p[1].reader)
-			if s.p[1].sink.WindowV1() != nil {
-				t.Fatal("expired sink window")
-			}
-			treeNativeError(t, s.p[1].sink.EventV1(TreeEventV1{Kind: 2}), "update", "InvalidInput", 22, "tree delta sink is not active", nil)
-			if readerFault {
-				if any(s.s.terminal) != any(failure) {
-					t.Fatal("provider F was not terminal")
+				if readerFault {
+					evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 6, key, run)
+					mustEnvironment(t, err)
+					if failure == nil || evidence.Faults != 1 || evidence.OldGets[6] != 1 {
+						t.Fatalf("provider Reader fault %v evidence%+v", failure, evidence)
+					}
+					treeNativeError(t, failure, "get", "IO", 5, "error 5", nil)
+				} else {
+					run()
 				}
-				tsConsumed(t, s.s, s.o, 1, failure)
-			} else {
-				if s.s.state != storeOPEN || s.s.terminal != nil {
-					t.Fatal("clean provider unwind consumed Store")
+				if (mode == "panic" || mode == "reader-panic") && recovered != value {
+					t.Fatalf("provider panic identity %v", recovered)
 				}
-				tsFollowing(t, s.s, s.o)
-			}
-			s.durable(t, false)
-		})
+				if (mode == "goexit" || mode == "reader-goexit") && recovered != nil {
+					t.Fatalf("provider Goexit panicked %v", recovered)
+				}
+				if post || reservationLive(s.o) != 0 || s.p[1].reader == nil || s.p[1].reader.usable() {
+					t.Fatal("provider unwind lifetime")
+				}
+				tsExpiredReader(t, s.p[1].reader)
+				if s.p[1].sink.WindowV1() != nil {
+					t.Fatal("expired sink window")
+				}
+				treeNativeError(t, s.p[1].sink.EventV1(TreeEventV1{Kind: 2}), "update", "InvalidInput", 22, "tree delta sink is not active", nil)
+				if readerFault {
+					if any(s.s.terminal) != any(failure) {
+						t.Fatal("provider F was not terminal")
+					}
+					tsConsumed(t, s.s, s.o, 1, failure)
+				} else {
+					if s.s.state != storeOPEN || s.s.terminal != nil {
+						t.Fatal("clean provider unwind consumed Store")
+					}
+					tsFollowing(t, s.s, s.o)
+				}
+				s.durable(t, false)
+			})
+		}
 	}
 }
 

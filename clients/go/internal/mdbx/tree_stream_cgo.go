@@ -71,6 +71,9 @@ type TreePrimitiveV1 struct {
 	// requires Applied(Height, Block); inverse at height 0 requires PreGenesis,
 	// otherwise Applied(Height-1). Valid chainwork is preserved without recomputation.
 	Endpoint TreeEndpointV1
+	// Coverage binds a qualified complete source. All primitives carry it or
+	// all omit it. Covered operations finish planning before native mutation.
+	Coverage *TreeSourceCoverageV1
 }
 
 // TreeOperationV1 is one immutable complete CURRENT/LAG plan and ordinary Pair.
@@ -201,7 +204,7 @@ func (s *Store) treeEntryLockedV1(account *OperationAccount, callback func(*Read
 	if err != nil || unwind.kind != 0 {
 		return CommitTruthOld, UpdateStagePrewrite, -1, unwind, err
 	}
-	err = treeAdmitV1(op, account)
+	err = treeAdmitV1(op, account, s.databaseID)
 	if err != nil {
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, s.abortReadLocked(old, err, false)
 	}
@@ -263,14 +266,14 @@ func (l treeAccountLedgerV1) chargeV1(n uint64) error { return l.hold.grow(n) }
 
 func (l treeAccountLedgerV1) releaseV1(n uint64) { _ = l.hold.shrink(n) }
 
-func treeAdmitV1(op TreeOperationV1, account *OperationAccount) error {
+func treeAdmitV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) error {
 	if len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 {
 		return updateInvalidBatch()
 	}
 	if len(op.Primitives) != 0 && account.shared.ceiling != TreeLaneMaxBytes {
 		return updateInvalidBatch()
 	}
-	err := treePrimitivesAdmitV1(op.Primitives)
+	err := treePrimitivesAdmitV1(op, databaseID)
 	if err != nil {
 		return err
 	}
@@ -281,12 +284,58 @@ func treeAdmitV1(op TreeOperationV1, account *OperationAccount) error {
 	return treePairRelationsV1(op)
 }
 
-func treePrimitivesAdmitV1(primitives []TreePrimitiveV1) error {
-	for j, p := range primitives {
-		if !treePrimitiveShapeV1(p, j) || !treeBlockDirectionsV1(primitives[:j], p) {
+func treeCoverageAdmitV1(op TreeOperationV1, p TreePrimitiveV1, databaseID [32]byte) bool {
+	if (p.Coverage == nil) != (op.Primitives[0].Coverage == nil) {
+		return false
+	}
+	if p.Coverage == nil {
+		return true
+	}
+	c := p.Coverage
+	return treeCoverageIdentityV1(c, p, databaseID) && c.HeaderBytes == 148 && treeCoverageMetaV1(c) && treeCoverageBodyV1(op.Pair, p)
+}
+
+func treeCoverageIdentityV1(c *TreeSourceCoverageV1, p TreePrimitiveV1, databaseID [32]byte) bool {
+	return c.DatabaseID == databaseID && c.Generation == p.Generation && c.Block == p.Block && c.Height == p.Height
+}
+
+func treeCoverageMetaV1(c *TreeSourceCoverageV1) bool {
+	if c.BlockMeta.TxCount == 0 {
+		return false
+	}
+	return c.Height != 0 || c.BlockMeta.TxCount == 1 && c.BlockMeta.Generated == [16]byte{}
+}
+
+func treeCoverageBodyV1(pair TreePairV1, p TreePrimitiveV1) bool {
+	c := p.Coverage
+	for _, m := range pair.Mutations {
+		if m.DBI.Rank != 4 || !bytes.Equal(m.Key, p.Block[:]) {
+			continue
+		}
+		if c.BodyKind == 2 {
+			return c.CurrentBody == nil && m.AfterKind != AfterLiteral
+		}
+		return c.BodyKind == 1 && treeCoverageLiteralV1(m, c)
+	}
+	return c.BodyKind == 2 && c.CurrentBody == nil
+}
+
+func treeCoverageLiteralV1(m Mutation, c *TreeSourceCoverageV1) bool {
+	if len(c.CurrentBody) == 0 || len(m.Literal) != len(c.CurrentBody) {
+		return false
+	}
+	return !m.BeforePresent && m.AfterKind == AfterLiteral && &m.Literal[0] == &c.CurrentBody[0]
+}
+
+func treePrimitivesAdmitV1(op TreeOperationV1, databaseID [32]byte) error {
+	for j, p := range op.Primitives {
+		if !treePrimitiveShapeV1(p, j) || !treeBlockDirectionsV1(op.Primitives[:j], p) {
 			return updateInvalidBatch()
 		}
 		if !treeUndoAllowedV1(p) || !treeEndpointAllowedV1(p) {
+			return updateInvalidBatch()
+		}
+		if !treeCoverageAdmitV1(op, p, databaseID) {
 			return updateInvalidBatch()
 		}
 	}
@@ -421,25 +470,24 @@ func treeConsultedScanV1(first bool, previous, row ConsultedRow, count *uint64) 
 
 func treePairRelationsV1(op TreeOperationV1) error {
 	for _, m := range op.Pair.Mutations {
-		if treePairOwnedV1(op.Primitives, m.DBI, m.Key) || updateConsultedContains(op.Pair.Consulted, m.DBI, m.Key) {
+		if treePairOwnedV1(op.Primitives, m.DBI, m.Key, true) || updateConsultedContains(op.Pair.Consulted, m.DBI, m.Key) {
 			return updateInvalidBatch()
 		}
 	}
 	for _, row := range op.Pair.Consulted {
-		if treePairOwnedV1(op.Primitives, row.DBI, row.Key) {
+		if treePairOwnedV1(op.Primitives, row.DBI, row.Key, false) {
 			return updateInvalidBatch()
 		}
 	}
 	return nil
 }
 
-func treePairOwnedV1(primitives []TreePrimitiveV1, dbi DBI, key []byte) bool {
+func treePairOwnedV1(primitives []TreePrimitiveV1, dbi DBI, key []byte, mutation bool) bool {
 	switch dbi.Rank {
 	case 0:
-		if len(key) != 9 || key[0] != 0x11 {
-			return false
-		}
-		return treePairGenerationOwnedV1(primitives, binary.BigEndian.Uint64(key[1:]))
+		return treePairMetaOwnedV1(primitives, key)
+	case 1:
+		return mutation && len(primitives) != 0 && primitives[0].Coverage != nil
 	case 5:
 		for _, p := range primitives {
 			if bytes.HasPrefix(key, p.Block[:]) {
@@ -448,6 +496,19 @@ func treePairOwnedV1(primitives []TreePrimitiveV1, dbi DBI, key []byte) bool {
 		}
 	}
 	return false
+}
+
+func treePairMetaOwnedV1(primitives []TreePrimitiveV1, key []byte) bool {
+	if len(key) != 9 {
+		return false
+	}
+	if key[0] == 0x11 {
+		return treePairGenerationOwnedV1(primitives, binary.BigEndian.Uint64(key[1:]))
+	}
+	if key[0] != 0x10 || len(primitives) == 0 {
+		return false
+	}
+	return primitives[0].Coverage != nil && treePairGenerationOwnedV1(primitives, binary.BigEndian.Uint64(key[1:]))
 }
 
 func treePairGenerationOwnedV1(primitives []TreePrimitiveV1, generation uint64) bool {

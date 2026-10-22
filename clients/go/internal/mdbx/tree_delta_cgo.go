@@ -2,7 +2,10 @@
 
 package mdbx
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // treeStoredBodyV1 reads the blocks-v1 (rank 4) row of block through old. Absent -> treeIntegrity(operationUpdate, nil).
 // Present -> {bytes: the image value, uncopied; pair: false}. Its only heap allocation is at most one 32-byte copy of
@@ -47,6 +50,9 @@ func (r *treeRecorderV1) beginV1(blockTxCount, eventCount uint32, generated [16]
 		return err
 	}
 	if r.begun || r.beginRefusedV1(blockTxCount, generated) {
+		return r.recordV1(treeDeltaInvalidV1())
+	}
+	if r.observation != nil && r.coverage.BlockMeta != (TreeBlockV1{TxCount: blockTxCount, EventCount: eventCount, Generated: generated}) {
 		return r.recordV1(treeDeltaInvalidV1())
 	}
 	n := treeDescSizeV1*uint64(eventCount) + treeValueBytesV1
@@ -141,6 +147,9 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 	if err := d.headV1(old); err != nil {
 		return err
 	}
+	if err := d.counterHeadV1(old); err != nil {
+		return err
+	}
 	for s := range d.rec.descs {
 		e := d.eventAtV1(s)
 		g, first := d.groupFirstV1(e)
@@ -151,7 +160,99 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 			return err
 		}
 	}
-	return d.tailV1(old)
+	if err := d.tailV1(old); err != nil {
+		return err
+	}
+	return d.counterFinishV1()
+}
+
+func (d *treeDeltaV1) counterHeadV1(old treeOldV1) error {
+	if d.rec.observation == nil {
+		return nil
+	}
+	d.keys.counterKey[0] = 0x10
+	binary.BigEndian.PutUint64(d.keys.counterKey[1:], d.rec.prim.generation)
+	image, err := old.getV1(schemaDBIs[0], d.keys.counterKey[:])
+	if err != nil {
+		return err
+	}
+	if !image.present {
+		return d.counterFailureV1(image, TreeObservationAbsentV1, nil)
+	}
+	if len(image.value) != 16 {
+		return d.counterFailureV1(image, TreeObservationMalformedV1, errSchema)
+	}
+	d.parentBytes = binary.BigEndian.Uint64(image.value)
+	d.parentCount = binary.BigEndian.Uint64(image.value[8:])
+	if !d.counterRecordOKV1() {
+		return d.counterFailureV1(image, TreeObservationMalformedV1, nil)
+	}
+	if !treeCounterEnvelopeV1(d.parentBytes, d.parentCount, 1<<59) {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	return nil
+}
+
+func (d *treeDeltaV1) counterRecordOKV1() bool {
+	// Endpoint admission bounds height to at most 2^32, so both products fit
+	// uint64. Forward reads U_parent (h heights); inverse reads U_h (h+1).
+	heights := d.rec.prim.height
+	if !d.forwardV1() {
+		heights++
+	}
+	return d.parentBytes <= heights*86_545_430 && d.parentCount <= heights*1_545_454
+}
+
+func (d *treeDeltaV1) counterFailureV1(image treeImageV1, kind TreeObservationKindV1, cause error) error {
+	if image.planned {
+		return treeIntegrity(operationUpdate, cause)
+	}
+	return treeObserveV1(treeIntegrity(operationUpdate, cause), d.rec.observation, 0, d.keys.counterKey[:], kind, image, !image.planned)
+}
+
+func treeCounterEnvelopeV1(total, count, limit uint64) bool {
+	if total >= limit {
+		return false
+	}
+	return count <= total/56 && count >= (total+65595)/65596
+}
+
+// Counter subsets include equal replacements and cancellations, not only leaves.
+// Check the residual before deriving parent-before+after, so input integrity wins.
+func (d *treeDeltaV1) counterFinishV1() error {
+	if d.rec.observation == nil {
+		return nil
+	}
+	if d.beforeBytes > d.parentBytes || d.beforeCount > d.parentCount {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	residualBytes, residualCount := d.parentBytes-d.beforeBytes, d.parentCount-d.beforeCount
+	if !treeCounterEnvelopeV1(residualBytes, residualCount, 1<<59) {
+		return treeIntegrity(operationUpdate, nil)
+	}
+	return d.counterResultV1(residualBytes, residualCount)
+}
+
+func (d *treeDeltaV1) counterResultV1(residualBytes, residualCount uint64) error {
+	if d.afterBytes > ^uint64(0)-residualBytes || d.afterCount > ^uint64(0)-residualCount {
+		return updateNativeInvariant("derived logical state counters exceed bounds")
+	}
+	total, count := residualBytes+d.afterBytes, residualCount+d.afterCount
+	if !treeCounterEnvelopeV1(total, count, 1<<59) || d.afterBytes >= 1<<60 || d.parentBytes > (1<<60)-1-d.afterBytes {
+		return updateNativeInvariant("derived logical state counters exceed bounds")
+	}
+	binary.BigEndian.PutUint64(d.counter[:], total)
+	binary.BigEndian.PutUint64(d.counter[8:], count)
+	return nil
+}
+
+func treeCounterAddV1(total, count *uint64, length uint64) error {
+	if length > ^uint64(0)-*total || *count == ^uint64(0) {
+		return updateNativeInvariant("logical state subset exceeds uint64")
+	}
+	*total += length
+	*count++
+	return nil
 }
 
 // framesOKV1 is S2 for every CREATE event: frame inside the body and the formed value in the DecodeUTXOValue domain.
@@ -214,6 +315,9 @@ func (d *treeDeltaV1) retainedManifestV1(key, value []byte) error {
 	if !bytes.Equal(value[1:9], d.keys.manifest[1:9]) || !bytes.Equal(value[25:33], d.keys.manifest[25:33]) {
 		return treeIntegrity(operationUpdate, nil)
 	}
+	if d.rec.observation != nil && !bytes.Equal(value[9:25], d.keys.manifest[9:25]) {
+		return treeIntegrity(operationUpdate, nil)
+	}
 	return nil
 }
 
@@ -229,12 +333,38 @@ func (d *treeDeltaV1) resolveGroupV1(old treeOldV1, g *treeDescV1) error {
 	if d.oldValueRefusedV1(g, image.value) {
 		return treeIntegrity(operationUpdate, errSchema)
 	}
+	if err := d.counterBeforeV1(image); err != nil {
+		return err
+	}
 	g.img = image.value
 	d.markDirtyV1(g, image)
-	if g.kind != treeSpendV1 || !d.family {
+	if g.kind == treeSpendV1 && d.family {
+		if err := d.entryV1(old, g, image.value); err != nil {
+			return err
+		}
+	}
+	return d.counterGroupV1(g)
+}
+
+func (d *treeDeltaV1) counterBeforeV1(image treeImageV1) error {
+	if d.rec.observation == nil || !image.present {
 		return nil
 	}
-	return d.entryV1(old, g, image.value)
+	if !treeUTXOValueOKV1(image.value) {
+		return treeIntegrity(operationUpdate, errSchema)
+	}
+	return treeCounterAddV1(&d.beforeBytes, &d.beforeCount, 36+uint64(len(image.value)))
+}
+
+func (d *treeDeltaV1) counterGroupV1(g *treeDescV1) error {
+	if d.rec.observation == nil {
+		return nil
+	}
+	present, value := d.finalV1(g)
+	if !present {
+		return nil
+	}
+	return treeCounterAddV1(&d.afterBytes, &d.afterCount, 36+uint64(len(value)))
 }
 
 // coveredV1 is S3 presence coverage and the inverse S4 removal check.
