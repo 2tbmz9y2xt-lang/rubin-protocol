@@ -54,7 +54,6 @@ deriving Repr, DecidableEq
 /-- Exact static disposition of a Section 14 covenant tag. -/
 inductive CovenantDisposition where
   | accepted (kind : CovenantKind)
-  | reserved
   | deploymentGated (kind : CovenantKind)
   | invalidCovenantType
 deriving Repr, DecidableEq

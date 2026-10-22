@@ -9,8 +9,8 @@ Section 14 disposition. It does not define output acceptance, deployment or
 activation behavior, descriptors, spend rules, cryptography, or client parity.
 
 The retained theorem surface consists of the static disposition theorem plus
-canonical sample and rejection theorems that remain valid under the current
-protocol error taxonomy.
+canonical accepted-sample and tag-distinctness theorems; unknown-tag rejection
+in the legacy genesis model is carried by `validate_out_genesis_rejects_unknown`.
 -/
 
 namespace RubinFormal
@@ -21,9 +21,7 @@ open CovenantGenesisV1
     separate from the legacy six-branch genesis model. -/
 def covenantDisposition (tag : Nat) : CovenantDisposition :=
   if tag = 0x0000 then CovenantDisposition.accepted CovenantKind.coreP2PK
-  else if tag = 0x0001 then CovenantDisposition.invalidCovenantType
   else if tag = 0x0002 then CovenantDisposition.accepted CovenantKind.coreAnchor
-  else if tag = 0x00FF then CovenantDisposition.reserved
   else if tag = 0x0100 then CovenantDisposition.accepted CovenantKind.coreHTLC
   else if tag = 0x0101 then CovenantDisposition.accepted CovenantKind.coreVault
   else if tag = 0x0103 then CovenantDisposition.accepted CovenantKind.coreDACommit
@@ -35,15 +33,13 @@ def covenantDisposition (tag : Nat) : CovenantDisposition :=
 def section14DispositionCase (tag : Nat) (disposition : CovenantDisposition) : Prop :=
   tag < 0x10000 ∧
     ((tag = 0x0000 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreP2PK) ∨
-    (tag = 0x0001 ∧ disposition = CovenantDisposition.invalidCovenantType) ∨
     (tag = 0x0002 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreAnchor) ∨
-    (tag = 0x00FF ∧ disposition = CovenantDisposition.reserved) ∨
     (tag = 0x0100 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreHTLC) ∨
     (tag = 0x0101 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreVault) ∨
     (tag = 0x0103 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreDACommit) ∨
     (tag = 0x0104 ∧ disposition = CovenantDisposition.accepted CovenantKind.coreMultisig) ∨
     (tag = 0x0106 ∧ disposition = CovenantDisposition.deploymentGated CovenantKind.coreSimplicity) ∨
-    (tag ≠ 0x0000 ∧ tag ≠ 0x0001 ∧ tag ≠ 0x0002 ∧ tag ≠ 0x00FF ∧
+    (tag ≠ 0x0000 ∧ tag ≠ 0x0002 ∧
       tag ≠ 0x0100 ∧ tag ≠ 0x0101 ∧ tag ≠ 0x0103 ∧
       tag ≠ 0x0104 ∧ tag ≠ 0x0106 ∧
       disposition = CovenantDisposition.invalidCovenantType))
@@ -56,27 +52,21 @@ theorem covenantDispositionComplete (tag : Nat) (hU16 : tag < 0x10000) :
   refine ⟨hU16, ?_⟩
   by_cases hP2PK : tag = 0x0000
   · simp [covenantDisposition, hP2PK]
-  by_cases hInvalidOne : tag = 0x0001
-  · simp [covenantDisposition, hP2PK, hInvalidOne]
   by_cases hAnchor : tag = 0x0002
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor]
-  by_cases hReserved : tag = 0x00FF
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved]
+  · simp [covenantDisposition, hP2PK, hAnchor]
   by_cases hHtlc : tag = 0x0100
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc]
   by_cases hVault : tag = 0x0101
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc, hVault]
   by_cases hDaCommit : tag = 0x0103
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc, hVault, hDaCommit]
   by_cases hMultisig : tag = 0x0104
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc, hVault, hDaCommit, hMultisig]
   by_cases hSimplicity : tag = 0x0106
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig, hSimplicity]
-  · simp [covenantDisposition, hP2PK, hInvalidOne, hAnchor, hReserved, hHtlc, hVault,
-      hDaCommit, hMultisig, hSimplicity]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc, hVault, hDaCommit, hMultisig,
+      hSimplicity]
+  · simp [covenantDisposition, hP2PK, hAnchor, hHtlc, hVault, hDaCommit, hMultisig,
+      hSimplicity]
 
 private def repeatByte (b : UInt8) (n : Nat) : Bytes :=
   Id.run <| do
@@ -219,15 +209,5 @@ theorem validate_out_genesis_da_commit_canonical_ok :
       | .ok () => true
       | _ => false) = true := by
   native_decide
-
-/-- The legacy genesis model rejects the reserved-future tag. -/
-theorem validate_out_genesis_reserved_future_rejects
-    (value txKind blockHeight : Nat) (covData : Bytes) :
-    validateOutGenesis { value := value, covenantType := COV_TYPE_RESERVED_FUTURE, covenantData := covData } txKind blockHeight =
-      .error "TX_ERR_COVENANT_TYPE_INVALID" := by
-  apply validate_out_genesis_rejects_unknown
-  all_goals
-    simp [COV_TYPE_RESERVED_FUTURE, COV_TYPE_P2PK, COV_TYPE_ANCHOR, COV_TYPE_VAULT,
-      COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_DA_COMMIT]
 
 end RubinFormal

@@ -151,7 +151,7 @@ func TestValidateTxCovenantsGenesis_Table(t *testing.T) {
 			wantErr: "TX_ERR_COVENANT_TYPE_INVALID",
 		},
 		{
-			name:    "reserved_00ff_rejected",
+			name:    "unknown_00ff_rejected",
 			output:  TxOutput{Value: 1, CovenantType: 0x00ff, CovenantData: []byte{0x00}},
 			wantErr: "TX_ERR_COVENANT_TYPE_INVALID",
 		},
@@ -364,8 +364,8 @@ func TestValidateTxCovenantsGenesis_MoreBranches(t *testing.T) {
 			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
 		},
 		{
-			name:    "reserved_future_rejected",
-			tx:      &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_RESERVED_FUTURE, CovenantData: []byte{0x00}}}},
+			name:    "unknown_00ff_creation_rejected",
+			tx:      &Tx{Outputs: []TxOutput{{Value: 1, CovenantType: 0x00FF, CovenantData: []byte{0x00}}}},
 			wantErr: TX_ERR_COVENANT_TYPE_INVALID,
 		},
 		{

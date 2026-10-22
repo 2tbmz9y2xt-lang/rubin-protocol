@@ -85,7 +85,7 @@
       "RubinFormal/ConnectBlockFull.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"3e01c90632d91091e1882535f3ecdb099e4c72b38d9ee52c7923a144ed4d698b","candidate_sha256":"8ffc9ef313d980eb13fe0b87a5bb9e43494d16bb7173b5bd870bf32d7d4b26d4"},
       "RubinFormal/ConnectBlockStrong.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"9b8aed27abe1b618aa6cede957c1e9a0b28d04dc3e81cff2f4c86234a83a0258","candidate_sha256":"601b49906968020a63fdd813f4291019a81897699d660fd258ab2fce446c5691"},
       "RubinFormal/CovenantParserGaps.lean": {"disposition":"BYTE_EXACT","source_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0","candidate_sha256":"37e6ed125e90489f5ff03f18e693c51e3ae4bceab5255da91eadcac52409d2b0"},
-      "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"03eb7a29897ede05b585daf854d841f13c50f65c5724a2af752f9117debd0b95"},
+      "RubinFormal/CovenantRegistryExhaustive.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"7ce2cf0832a63e234c7616fad9791b4a382ea1f10bb57b5d074111b54038ed29","candidate_sha256":"dbfb8bc11a1eb208803f271bfd25442f99fa8167926fbad755138697ffd217ce"},
       "RubinFormal/CreateSideLiveGateBridge.lean": {"disposition":"BYTE_EXACT","source_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c","candidate_sha256":"bd3702ab78260d7b3ba5e7c9aa3ba93c484cb21c54aabc4410d1194fabeda73c"},
       "RubinFormal/DaIntegrityBehavioral.lean": {"disposition":"RECONCILE_CURRENT_PROTOCOL","source_sha256":"e5b5f91fe1140d56cfaad36b88465332e1ee72547471a1bdccd189cb5e028cf7","candidate_sha256":"a1a5c7a767e90b3c258c1b06581923160a8f6474856e31589bdea64522106848"},
       "RubinFormal/DeterminismRequirements.lean": {"disposition":"BYTE_EXACT","source_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8","candidate_sha256":"d2db16f90fb246d739e72cd23b717f87025145a836a018743d625faffb6cb0a8"},
@@ -163,7 +163,7 @@
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
       "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"f879322ac28c316f02e62225131a61f70e5ea1224db91233564a68508682fe96"},
-      "tests/test_covenant_registry_disposition.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"4e3c4d5b514f99b6ac3965a83db917b4deea3ce18b92d1edf964082c429a2030"},
+      "tests/test_covenant_registry_disposition.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"290f7ccdf7dcab1fb1c4c291df193aee1c03d482374c267cd6a7a0c777c04e1a"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
       "tests/test_registry_extraction.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"1b95552b124485d1374dbb3aab3cc7fb793f2924eaac6a380016a81323e07654","candidate_sha256":"ae327b4b419d4f0cca3b53cd97341188e26f0b66e6e13cb0323445b53805db94"},
@@ -171,7 +171,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"99547df73c2ce8328d049281bc85e274800a79f36c0392b24cdbb806f87b6c6f"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"5c114bae5f7c6c0e194157b4f7603b0d9e1ce3764e0e187839ba73b2865c3a7b"}
     }
   },
   "coverage": [
@@ -816,7 +816,6 @@
         "RubinFormal.validate_out_genesis_htlc_canonical_ok",
         "RubinFormal.validate_out_genesis_da_commit_canonical_ok",
         "RubinFormal.validate_out_genesis_rejects_unknown",
-        "RubinFormal.validate_out_genesis_reserved_future_rejects",
         "RubinFormal.dispatch_unknown_covenant_error"
       ],
       "file": "rubin-formal/RubinFormal/PinnedSections.lean",
@@ -834,15 +833,14 @@
         "RubinFormal.validate_out_genesis_htlc_canonical_ok": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.validate_out_genesis_da_commit_canonical_ok": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.validate_out_genesis_rejects_unknown": "rubin-formal/RubinFormal/CovenantParserGaps.lean",
-        "RubinFormal.validate_out_genesis_reserved_future_rejects": "rubin-formal/RubinFormal/CovenantRegistryExhaustive.lean",
         "RubinFormal.dispatch_unknown_covenant_error": "rubin-formal/RubinFormal/ErrorPriority.lean"
       },
       "evidence_level": "machine_checked_model",
       "limitations": [
-        "Scope: static Lean model/helper for bounded u16 tag disposition only; no live implementation bridge is claimed. This row does not claim output acceptance, activation or deployment behavior, descriptor semantics, spend rules, cryptographic semantics, or client equivalence. Former covenant tag 0x0105 is in the invalid complement with the exact registry error marker.",
-        "The retained validateOutGenesis evidence consists of canonical accepted samples, unknown/reserved rejection theorems, and CV-COVENANT-GENESIS replay for the legacy genesis-model surface. It does not claim a universal acceptance characterization or CORE_SIMPLICITY support."
+        "Scope: static Lean model/helper for bounded u16 tag disposition only; no live implementation bridge is claimed. This row does not claim output acceptance, activation or deployment behavior, descriptor semantics, spend rules, cryptographic semantics, or client equivalence. Covenant tag 0x0105 is in the invalid complement with the exact registry error marker.",
+        "The retained validateOutGenesis evidence consists of canonical accepted samples, the unknown-tag rejection theorem, and CV-COVENANT-GENESIS replay for the legacy genesis-model surface. It does not claim a universal acceptance characterization or CORE_SIMPLICITY support."
       ],
-      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: accepted P2PK/ANCHOR/HTLC/VAULT/DA_COMMIT/MULTISIG, reserved 0x00FF, deployment-gated CORE_SIMPLICITY at 0x0106, explicit invalid 0x0001, and the generic invalid complement including 0x0102, former covenant tag 0x0105 and all other unnamed u16 tags, with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The tags 0x0102 and 0x0105 remain invalid and unassigned, with no activation, support, or executable semantics. This static disposition is not a live implementation bridge; the manifest pin alone does not prove model applicability or client refusal. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they do not define activation or descriptor behavior or CORE_SIMPLICITY support."
+      "notes": "Primary §14 static Lean-model/helper lane: `covenantDispositionComplete` machine-checks the exact static disposition for every u16 tag: accepted P2PK/ANCHOR/HTLC/VAULT/DA_COMMIT/MULTISIG, deployment-gated CORE_SIMPLICITY at 0x0106, and the generic invalid complement including 0x0001, 0x00FF, 0x0102, 0x0105 and all other unnamed u16 tags, with TX_ERR_COVENANT_TYPE_INVALID as the registry error marker. The tags 0x0102 and 0x0105 are invalid, with no activation, support, or executable semantics. This static disposition is not a live implementation bridge; the manifest pin alone does not prove model applicability or client refusal. The retained canonical accepted-sample and rejection theorems plus CV-COVENANT-GENESIS replay are bounded legacy genesis-model evidence; they do not define activation or descriptor behavior or CORE_SIMPLICITY support."
     },
     {
       "section_key": "difficulty_update",
@@ -1119,10 +1117,10 @@
         "RubinFormal.utxo_apply_basic_universal_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean",
         "RubinFormal.utxo_apply_basic_chain_refinement": "rubin-formal/RubinFormal/RefinementBridgeV1.lean"
       },
-      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path. The bounded UtxoBasicV1 model refuses former covenant tag 0x0105 through its invalid-type boundary; no live-client retirement proof follows from this model alone.",
+      "notes": "Block connection pipeline with coinbase, value conservation, and per-tx state machine. Current CORE_VAULT spend proofs remain registered; the retained experimental VaultStateMachine lifecycle corpus is not current-protocol evidence. Coinbase UTXO marking is covered by the current list-to-RBMap bridge and query-level semantics. Vault-policy replay is limited to the safe subset/default-order path. The bounded UtxoBasicV1 model refuses non-retained covenant tags, including 0x0105, through its invalid-type boundary; no live-client proof follows from this model alone.",
       "limitations": [
         "RUB-1252's U_pre_genesis/U_parent selection, genesis S0 = 0, complete final-genesis S1, StateEntryBytes and LogicalStateBytes definitions, final-image accounting, bound below 2^59 with checked-u64 sufficiency, and STORE_INTEGRITY/LOCAL_INVARIANT/NO_VALIDITY_RESULT StateView required-read handoff are not proved by the registered UTXO theorems.",
-        "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal, including former covenant tag 0x0105, is not a live-consensus claim. The dedicated CV-STEALTH replay and its CV-ST-U-01 acceptance bypass are retired; the manifest pin alone establishes no client behavior.",
+        "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal, including covenant tag 0x0105, is not a live-consensus claim. The manifest pin alone establishes no client behavior.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
@@ -1690,8 +1688,8 @@
     "proved_with_axiom_rows": 5,
     "stated_rows": 3,
     "deferred_rows": 0,
-    "theorem_references": 492,
-    "unique_theorem_names": 478,
+    "theorem_references": 491,
+    "unique_theorem_names": 477,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",

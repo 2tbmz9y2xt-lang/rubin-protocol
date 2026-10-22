@@ -63,8 +63,6 @@ func validateTxOutputCovenantGenesis(txKind byte, out TxOutput, chainID [32]byte
 		return [32]byte{}, false, validateParsedValueGenesisOutput(out)
 	case COV_TYPE_CORE_SIMPLICITY:
 		return validateCoreSimplicityGenesisOutput(out, chainID, blockHeight, simplicityDeployment)
-	case COV_TYPE_RESERVED_FUTURE:
-		return [32]byte{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "reserved covenant_type")
 	default:
 		return [32]byte{}, false, txerr(TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
 	}

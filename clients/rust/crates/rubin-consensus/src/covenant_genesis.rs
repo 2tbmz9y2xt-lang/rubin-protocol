@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use crate::constants::{
     COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT, COV_TYPE_HTLC,
-    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_RESERVED_FUTURE, COV_TYPE_VAULT,
-    MAX_ANCHOR_PAYLOAD_SIZE, MAX_P2PK_COVENANT_DATA, SIMPLICITY_MAX_GROUP_OUTPUTS,
+    COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT, MAX_ANCHOR_PAYLOAD_SIZE,
+    MAX_P2PK_COVENANT_DATA, SIMPLICITY_MAX_GROUP_OUTPUTS,
 };
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::parse_htlc_covenant_data;
@@ -171,10 +171,6 @@ pub fn validate_tx_covenants_genesis(
                     simplicity_output_cmrs.push(program_cmr);
                 })
             }
-            COV_TYPE_RESERVED_FUTURE => Err(TxError::new(
-                ErrorCode::TxErrCovenantTypeInvalid,
-                "reserved covenant_type",
-            )),
             _ => Err(TxError::new(
                 ErrorCode::TxErrCovenantTypeInvalid,
                 "unknown covenant_type",

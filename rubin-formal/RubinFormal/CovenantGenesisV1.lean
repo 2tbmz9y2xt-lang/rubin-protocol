@@ -22,7 +22,6 @@ def SUITE_ID_ML_DSA_87 : Nat := 0x01
 
 def COV_TYPE_P2PK : Nat := 0x0000
 def COV_TYPE_ANCHOR : Nat := 0x0002
-def COV_TYPE_RESERVED_FUTURE : Nat := 0x00FF
 def COV_TYPE_HTLC : Nat := 0x0100
 def COV_TYPE_VAULT : Nat := 0x0101
 def COV_TYPE_DA_COMMIT : Nat := 0x0103
