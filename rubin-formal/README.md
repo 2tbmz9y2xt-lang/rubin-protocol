@@ -53,7 +53,7 @@ generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
 `suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
 The CLI `rotation_spend_suite_check` ignores `covenant_type` after parsing, so
 these labels do not prove individual covenant spends or full JSON/manual-stub
-semantic equivalence. Removing its three retired rows proves no live covenant spend.
+semantic equivalence.
 
 Prohibited claim formulations (NOT OK):
 

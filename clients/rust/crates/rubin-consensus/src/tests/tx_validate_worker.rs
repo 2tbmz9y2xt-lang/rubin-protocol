@@ -566,7 +566,7 @@ fn validate_tx_local_real_signature_full_path() {
 }
 
 #[test]
-fn validate_tx_local_retired_0x0105_refuses_before_witness_dispatch() {
+fn validate_tx_local_unknown_0x0105_refuses_before_witness_dispatch() {
     let extra = WitnessItem {
         suite_id: 0,
         pubkey: vec![],

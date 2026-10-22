@@ -81,7 +81,7 @@ func TestValidateTxCovenantsGenesis_P2PK_BadSuite(t *testing.T) {
 	}
 }
 
-func TestValidateTxCovenantsGenesis_Retired0105(t *testing.T) {
+func TestValidateTxCovenantsGenesis_Unknown0105(t *testing.T) {
 	for _, size := range []int{0, 1, 32, 33, 1567, 1568, 1599, 1600, 1601, 65536} {
 		for _, value := range []uint64{0, 1} {
 			for _, opaque := range []byte{0x00, 0xff} {
@@ -96,15 +96,15 @@ func TestValidateTxCovenantsGenesis_Retired0105(t *testing.T) {
 	}
 }
 
-func TestValidateTxCovenantsGenesis_Retired0105OutputOrder(t *testing.T) {
+func TestValidateTxCovenantsGenesis_Unknown0105OutputOrder(t *testing.T) {
 	badP2PK := TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte{0x02}, make([]byte, 32)...)}
-	retired := TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
+	unknown := TxOutput{Value: 1, CovenantType: 0x0105, CovenantData: make([]byte, 1600)}
 	for _, tc := range []struct {
 		outputs []TxOutput
 		want    ErrorCode
 	}{
-		{[]TxOutput{badP2PK, retired}, "TX_ERR_SIG_ALG_INVALID"},
-		{[]TxOutput{retired, badP2PK}, "TX_ERR_COVENANT_TYPE_INVALID"},
+		{[]TxOutput{badP2PK, unknown}, "TX_ERR_SIG_ALG_INVALID"},
+		{[]TxOutput{unknown, badP2PK}, "TX_ERR_COVENANT_TYPE_INVALID"},
 	} {
 		err := ValidateTxCovenantsGenesis(&Tx{Outputs: tc.outputs}, [32]byte{}, 200, nil)
 		assertTxErrCode(t, err, tc.want)

@@ -386,7 +386,7 @@ fn validate_tx_covenants_genesis_unknown_covenant_zero_value_rejected() {
 }
 
 #[test]
-fn validate_tx_covenants_genesis_retired_0x0105_rejected_for_any_payload() {
+fn validate_tx_covenants_genesis_unknown_0x0105_rejected_for_any_payload() {
     for value in [0, 1] {
         for len in [0, 1, 32, 33, 1567, 1568, 1599, 1600, 1601, 65536] {
             for fill in [0x00, 0xff] {

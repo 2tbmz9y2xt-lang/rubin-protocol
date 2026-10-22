@@ -1523,7 +1523,7 @@ fn threshold_spend_rejects_non_native_suite_via_rotation() {
 }
 
 #[test]
-fn validate_block_basic_coinbase_retired_0x0105_rejected() {
+fn validate_block_basic_coinbase_unknown_0x0105_rejected() {
     let wroot = witness_merkle_root_wtxids(&[[0u8; 32]]).expect("witness root");
     let coinbase = coinbase_tx_with_outputs(
         1,

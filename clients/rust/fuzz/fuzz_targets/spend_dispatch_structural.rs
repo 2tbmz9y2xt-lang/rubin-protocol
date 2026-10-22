@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
         2 => 0x0101, // COV_TYPE_VAULT
         3 => 0x0104, // COV_TYPE_MULTISIG
         4 => 0x0102,
-        5 => 0x0105, // retired/unassigned
+        5 => 0x0105, // unassigned
         _ => unreachable!(),
     };
     pos += 2; // consume both bytes for layout stability
