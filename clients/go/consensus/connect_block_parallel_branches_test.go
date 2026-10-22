@@ -1038,13 +1038,13 @@ func TestApplyNonCoinbaseTxBasicWorkQ_VaultErrorPaths(t *testing.T) {
 	})
 
 	t.Run("vault_disallowed_destination_type", func(t *testing.T) {
-		ownerKP, vaultKP, _, ownerCovData, vaultCovData, destCovData, ownerLockID, whitelistH := buildVaultSpendSetup(t)
+		ownerKP, vaultKP, _, ownerCovData, _, destCovData, ownerLockID, whitelistH := buildVaultSpendSetup(t)
 
 		anchorOutData := []byte{0x01}
 		anchorH := sha3_256(OutputDescriptorBytes(COV_TYPE_ANCHOR, anchorOutData))
 		whitelistA, whitelistB := sortKeys32(anchorH, whitelistH)
 		vaultKeyID := sha3_256(vaultKP.PubkeyBytes())
-		vaultCovData = encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
+		vaultCovData := encodeVaultCovenantData(ownerLockID, 1, [][32]byte{vaultKeyID}, [][32]byte{whitelistA, whitelistB})
 
 		prevVault := hashWithPrefix(0xB2)
 		prevOwner := hashWithPrefix(0xB3)
