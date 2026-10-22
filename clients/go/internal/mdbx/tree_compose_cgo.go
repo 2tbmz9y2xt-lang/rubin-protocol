@@ -18,13 +18,20 @@ const treeStepBytesV1 = treeWindowBytesV1 + treeFixedBytesV1 + treeControlBytesV
 
 type treeSourceV1 func(position treePositionV1, old *Reader, rec *treeRecorderV1) error
 
-type treePrimitivePlanV1 struct {
-	treePrimitiveV1
-	source treeSourceV1
+func (source treeSourceV1) TreeDeltaV1(position TreePositionV1, old *Reader, sink *TreeDeltaSinkV1) error {
+	return source(treePositionV1(position), old, sink.recorder)
+}
+
+// treeAdmittedPrimitiveV1 converts only the reached record after its step charge.
+func treeAdmittedPrimitiveV1(p *TreePrimitiveV1) treePrimitiveV1 {
+	return treePrimitiveV1{
+		direction: uint8(p.Direction), kind: uint8(p.Kind), undo: uint8(p.Undo),
+		generation: p.Generation, height: p.Height, block: p.Block, endpoint: p.Endpoint,
+	}
 }
 
 type treePlanV1 struct {
-	primitives []treePrimitivePlanV1
+	primitives []TreePrimitiveV1 // immutable caller backing borrowed through completion
 	pair       []ownedMutation
 	consulted  []ownedConsulted
 }
@@ -68,7 +75,7 @@ func newTreeScopeV1(s *Store, old *C.MDBX_txn, plan *treePlanV1, position treePo
 }
 
 func (e *treeScopeV1) sourceV1() error {
-	return e.plan.primitives[e.j].source(e.position, e.reader, e.rec)
+	return e.plan.primitives[e.j].Source.TreeDeltaV1(TreePositionV1(e.position), e.reader, &TreeDeltaSinkV1{recorder: e.rec})
 }
 
 // slotV1 is the scope's one deferred slot function: a Reader still in its slot means the call did not return (a
@@ -167,17 +174,17 @@ func (e *treeScopeV1) stepV1(j int) error {
 		return err
 	}
 	e.held = true
-	prim := &e.plan.primitives[j]
+	prim := treeAdmittedPrimitiveV1(&e.plan.primitives[j])
 	body, err := e.bodyV1(prim.block)
 	if err != nil {
 		return err
 	}
-	e.rec = newTreeRecorderV1(e.position, prim.treePrimitiveV1, body, make([]byte, treeWindowBytesV1), e.ledger)
+	e.rec = newTreeRecorderV1(e.position, prim, body, make([]byte, treeWindowBytesV1), e.ledger)
 	err = e.invokeV1()
 	if err != nil || e.unwind.kind != 0 {
 		return err
 	}
-	err = e.deltaV1(prim)
+	err = e.deltaV1(&prim)
 	if err != nil {
 		return err
 	}
@@ -189,7 +196,7 @@ func (e *treeScopeV1) stepV1(j int) error {
 }
 
 // deltaV1 is steps 3-7: finish, resolve, the writer-only fold, apply and node emission.
-func (e *treeScopeV1) deltaV1(prim *treePrimitivePlanV1) error {
+func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 	d, err := e.rec.finishV1()
 	if err != nil {
 		return err
@@ -223,7 +230,7 @@ func (e *treeScopeV1) loopV1() (bool, error) {
 	return false, nil
 }
 
-// updateTreeLockedV1 runs F1 steps 6-9 for an admitted, owned plan under s.operations held by the caller.
+// updateTreeLockedV1 runs F1 steps 6-9 for an admitted borrowed-primitive / owned-Pair plan under s.operations held by the caller.
 // Its op closure assigns a frame-held updateNativeOutcome and index on every exit, deferred cleanup included;
 // *out receives err and poisoned field by field from it. On Goexit, truth, stage, index and the primary-vs-cleanup
 // split are read from that captured value, never from *out. Precondition: every primitive Generation != 0, and no Block is in both a forward and an inverse primitive (L5b phase P, D27).

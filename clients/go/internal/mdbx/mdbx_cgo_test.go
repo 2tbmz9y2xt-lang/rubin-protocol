@@ -3578,6 +3578,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	})
 	wantErrorCalls := map[string]int{
 		`adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree store requires typed tree operation", nil)`:   1,
+		`adapterError(operationUpdate, EngineStateMismatch, codeProblem, "typed tree operation requires tree store", nil)`:   1,
 		`adapterError(op, EngineIntegrity, codeCorrupted, "invalid tree native representation", cause)`:                      1,
 		`adapterError(operationCreate, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:               1,
 		`adapterError(operationOpen, EngineInvalidInput, codeEINVAL, "invalid tree database identity", nil)`:                 1,
