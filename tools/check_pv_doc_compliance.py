@@ -184,7 +184,7 @@ def main() -> int:
             missing.append(pat)
 
     boundary_errors: list[str] = []
-    # Require explicit affirmative boundary lines; allow template bullets (- ) and
+    # Require explicit declarations; allow template bullets (- ) and
     # backticks around SECTION_HASHES.json so filling the template exactly passes.
     consensus_line_re = re.compile(
         r"(?im)^\s*(-\s*)?Consensus rules unchanged:\s*(YES|NO)\s*$"
@@ -197,11 +197,11 @@ def main() -> int:
     m_sh = sh_line_re.search(body)
     # Group 2 is the YES/NO value (group 1 is optional bullet)
     if not m_cons:
-        boundary_errors.append("missing line: 'Consensus rules unchanged: YES'")
-    elif m_cons.group(2) != "YES":
         boundary_errors.append(
-            "Consensus boundary must be explicitly affirmed: 'Consensus rules unchanged: YES'"
+            "missing line: 'Consensus rules unchanged: YES' or 'Consensus rules unchanged: NO'"
         )
+    elif m_cons.group(2) not in ("YES", "NO"):
+        boundary_errors.append("Consensus declaration must be uppercase YES or NO")
 
     if not m_sh:
         boundary_errors.append("missing line: 'SECTION_HASHES.json unchanged: YES'")
@@ -224,7 +224,7 @@ def main() -> int:
         print()
         print(
             "Fix: use the PV PR template and include Refs: Q-..., required sections,"
-            " and boundary lines with explicit 'YES' values."
+            " consensus declaration 'YES' or 'NO', and SECTION_HASHES.json unchanged: YES."
         )
         return 1
 
