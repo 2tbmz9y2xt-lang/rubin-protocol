@@ -29,10 +29,10 @@ not remain an independent manifest member.
 
 The single manifest digest is a disposition of the exact approved locally
 prepared covenant-registry snapshot, not proof of applicability, canonical
-validity or client parity. Local spec preparation precedes metadata human
-merge, then spec first publication/merge. The prepared spec is noncanonical
-until its human merge; old canonical spec/new pin comparison necessarily rejects
-between the metadata and matching spec merges.
+validity or client parity. Local spec preparation precedes spec draft
+publication, then metadata human merge, then spec merge. The prepared spec is
+noncanonical until its human merge; old canonical spec/new pin comparison
+necessarily rejects between the metadata and matching spec merges.
 
 Конечный CV replay — это compiled conformance evidence. Теорема
 `cv_*_vectors_pass` section-registered только там, где она является
