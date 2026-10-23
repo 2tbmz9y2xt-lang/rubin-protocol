@@ -811,10 +811,15 @@ func logicalMDBXSnapshot(mutations []mdbx.Mutation) [][]byte {
 // TestLogicalMDBXBridgeDormantCensus is a type-aware structural census: it proves
 // only the dormancy and build rows, never a behavioral assertion.
 func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
-	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles []string }
+	var listed struct{ GoFiles, CgoFiles, IgnoredGoFiles, TestGoFiles []string }
 	out, err := exec.CommandContext(t.Context(), "go", "list", "-e", "-json", ".").Output()
 	logicalMDBXAssert(t, err == nil && json.Unmarshal(out, &listed) == nil, "go list: %v", err)
-	for _, name := range []string{"logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "startup_mdbx_cgo.go", "startup_mdbx_cgo_test.go", "replay_step_mdbx_cgo.go", "replay_step_mdbx_cgo_test.go"} {
+	logicalMDBXAssert(t, slices.Contains(listed.GoFiles, "block_tree_source_mdbx_cgo.go") && slices.Contains(listed.TestGoFiles, "block_tree_source_mdbx_cgo_test.go"), "block source ordinary build membership")
+	fixture, fixtureReadErr := os.ReadFile("block_tree_source_mdbx_fixture_cgo_test.go")
+	logicalMDBXAssert(t, fixtureReadErr == nil, "block source fixture read: %v", fixtureReadErr)
+	fixtureExpression, fixtureParseErr := constraint.Parse(strings.SplitN(string(fixture), "\n", 2)[0])
+	logicalMDBXAssert(t, fixtureParseErr == nil && fixtureExpression.String() == "rubin_mdbx_fixture && "+logicalMDBXConstraint, "block source fixture constraint: %v/%v", fixtureExpression, fixtureParseErr)
+	for _, name := range []string{"block_tree_source_mdbx_cgo.go", "block_tree_source_mdbx_cgo_test.go", "logical_state_mdbx_cgo.go", "logical_state_mdbx_cgo_test.go", "genesis_mdbx_cgo_external_test.go", "selected_side_damage_mdbx_cgo.go", "selected_side_damage_mdbx_cgo_test.go", "archive_profile_mdbx_cgo.go", "archive_profile_mdbx_cgo_test.go", "stored_block_commitments_stream_test.go", "cleanup_generation_mdbx_cgo.go", "cleanup_generation_mdbx_cgo_test.go", "detached_drain_mdbx_cgo.go", "detached_drain_mdbx_cgo_test.go", "replay_entry_mdbx_cgo.go", "replay_entry_mdbx_cgo_test.go", "replay_recovery_mdbx_cgo.go", "replay_recovery_mdbx_cgo_test.go", "replay_path_mdbx_cgo.go", "replay_path_mdbx_cgo_test.go", "canonical_undo_mdbx_cgo.go", "canonical_undo_mdbx_cgo_test.go", "startup_mdbx_cgo.go", "startup_mdbx_cgo_test.go", "replay_step_mdbx_cgo.go", "replay_step_mdbx_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "read %s: %v", name, readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -832,7 +837,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	sources := slices.Concat(listed.GoFiles, listed.CgoFiles, listed.IgnoredGoFiles)
 	// IgnoredGoFiles also lists these exact rubin_mdbx_fixture-tagged test files; they are test code, not non-test sources.
 	sources = slices.DeleteFunc(sources, func(name string) bool {
-		return name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "startup_mdbx_fixture_cgo_test.go" || name == "replay_step_mdbx_fixture_cgo_test.go"
+		return name == "block_tree_source_mdbx_fixture_cgo_test.go" || name == "selected_side_damage_mdbx_fixture_cgo_test.go" || name == "archive_profile_mdbx_fixture_cgo_test.go" || name == "cleanup_drains_mdbx_fixture_cgo_test.go" || name == "replay_entry_mdbx_fixture_cgo_test.go" || name == "replay_recovery_mdbx_fixture_cgo_test.go" || name == "replay_path_mdbx_fixture_cgo_test.go" || name == "canonical_undo_mdbx_fixture_cgo_test.go" || name == "startup_mdbx_fixture_cgo_test.go" || name == "replay_step_mdbx_fixture_cgo_test.go"
 	})
 	fset, imports, files := token.NewFileSet(), 0, make([]*ast.File, 0, len(sources))
 	for _, name := range sources {
@@ -841,12 +846,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				logicalMDBXAssert(t, name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 11, "bridge lost dormancy: %d non-test internal/mdbx imports, want 11", imports)
+	logicalMDBXAssert(t, imports == 12, "bridge lost dormancy: %d non-test internal/mdbx imports, want 12", imports)
 	native := startupCensusNative(t)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
@@ -926,6 +931,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		})
 	}
 	startupCensusUses(t, fset, files, info, parents, native)
+	blockTreeCensusUsesV1(t, fset, files, info, native)
 	// Resolve dormant public uses in the actual node and command packages too.
 	// The existing incomplete-import checker remains deliberately tolerant of
 	// unrelated types, while every protected spelling must resolve nonvacuously.
@@ -972,6 +978,102 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 
 // The exact declarations supply object identity despite the existing deliberate
 // incomplete-import checker. They are type evidence only, never an executable seam.
+func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File, info *types.Info, native *types.Package) {
+	t.Helper()
+	owned := "block_tree_source_mdbx_cgo.go"
+	definitions := map[types.Object]bool{}
+	var sourcePackage *types.Package
+	protected := map[string]bool{"prepareBlockTreeEffectV1": true, "blockTreeSourceV1": true, "TreeDeltaV1": true}
+	resolved := map[string]int{}
+	for _, file := range files {
+		if fset.Position(file.Pos()).Filename != owned {
+			continue
+		}
+		for _, declaration := range file.Decls {
+			switch d := declaration.(type) {
+			case *ast.FuncDecl:
+				logicalMDBXAssert(t, info.Defs[d.Name] != nil, "block source unresolved helper %s", d.Name.Name)
+				definitions[info.Defs[d.Name]] = true
+				sourcePackage = info.Defs[d.Name].Pkg()
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					if typ, ok := spec.(*ast.TypeSpec); ok {
+						logicalMDBXAssert(t, info.Defs[typ.Name] != nil, "block source unresolved type %s", typ.Name.Name)
+						definitions[info.Defs[typ.Name]] = true
+					}
+				}
+			}
+		}
+	}
+	for id, object := range info.Defs {
+		if protected[id.Name] && strings.HasSuffix(fset.Position(id.Pos()).Filename, owned) {
+			logicalMDBXAssert(t, object != nil, "block source unresolved definition %s", id.Name)
+			definitions[object] = true
+			resolved[id.Name]++
+		}
+	}
+	for name := range protected {
+		logicalMDBXAssert(t, resolved[name] == 1, "block source definition %s: %d", name, resolved[name])
+	}
+	for object := range definitions {
+		if object.Name() == "blockTreeSourceV1" {
+			iface, ok := native.Scope().Lookup("TreeSourceV1").Type().Underlying().(*types.Interface)
+			logicalMDBXAssert(t, ok && types.Implements(types.NewPointer(object.Type()), iface), "block source does not implement exact native interface")
+		}
+	}
+	nativeUses := map[string]int{}
+	for id, object := range info.Uses {
+		filename := fset.Position(id.Pos()).Filename
+		if definitions[object] {
+			logicalMDBXAssert(t, filename == owned, "block source lost dormancy: %s at %s", id.Name, fset.Position(id.Pos()))
+		}
+		if filename == owned && object.Pkg() == native {
+			nativeUses[id.Name]++
+		}
+	}
+	for _, name := range []string{"TreePrimitiveV1", "TreeSourceCoverageV1", "TreeEventV1", "TreeOutpointV1", "BeginV1", "EventV1", "WindowV1", "WithReservation", "VisitLargeImageV1", "ReadAt", "Present", "Length", "HeightKey", "CanonicalOwnerKey", "ChainValue", "CanonicalOwnerValue", "TreeSchemaV1DBIs", "BlockMeta", "CurrentBody", "Generated", "FrameOffset", "FrameLength"} {
+		logicalMDBXAssert(t, nativeUses[name] != 0, "block source resolved no native uses: %s", name)
+	}
+	for _, file := range files {
+		if fset.Position(file.Pos()).Filename != owned {
+			continue
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if ok && protected[id.Name] && info.Defs[id] == nil {
+				logicalMDBXAssert(t, info.Uses[id] != nil, "block source unresolved protected use %s", id.Name)
+			}
+			selector, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			// Standard-library imports remain deliberately incomplete. Require
+			// every producer/native selector, using type identity through aliases.
+			ownedReceiver := false
+			if root, ok := selector.X.(*ast.Ident); ok {
+				if pkg, ok := info.Uses[root].(*types.PkgName); ok {
+					ownedReceiver = pkg.Imported() == native
+				}
+			}
+			receiver := types.Unalias(info.TypeOf(selector.X))
+			for {
+				pointer, ok := receiver.(*types.Pointer)
+				if !ok {
+					break
+				}
+				receiver = types.Unalias(pointer.Elem())
+			}
+			if named, ok := receiver.(*types.Named); ok {
+				ownedReceiver = ownedReceiver || named.Obj().Pkg() == native || named.Obj().Pkg() == sourcePackage
+			}
+			if ownedReceiver {
+				logicalMDBXAssert(t, info.Uses[selector.Sel] != nil, "block source unresolved selector %s at %s", selector.Sel.Name, fset.Position(selector.Pos()))
+			}
+			return true
+		})
+	}
+}
+
 func startupCensusNative(t *testing.T) *types.Package {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -979,6 +1081,45 @@ func startupCensusNative(t *testing.T) *types.Package {
 type Reader struct{}
 type Store struct{}
 type OperationReservationOwner struct{}
+type OperationAccount struct{}
+func (*OperationAccount) WithReservation(uint64,func()error)error{return nil}
+type DBI struct{Name string; Rank uint8; Flags uint32}
+type AfterKind uint8
+const(AfterAbsent AfterKind=1; AfterLiteral AfterKind=2)
+type Mutation struct{DBI DBI; Key []byte; BeforePresent bool; AfterKind AfterKind; Literal []byte; RefDBI DBI; RefKey []byte}
+func TreeSchemaV1DBIs()[9]DBI{return [9]DBI{}}
+func HeightKey(uint64,uint64)([]byte,error){return nil,nil}
+func CanonicalOwnerKey(uint64,[32]byte)([]byte,error){return nil,nil}
+func ChainValue([32]byte,[32]byte,[40]byte)[]byte{return nil}
+func CanonicalOwnerValue(uint64)[]byte{return nil}
+type TreePositionV1 uint8
+const(TreeWriterV1 TreePositionV1=1; TreeReadbackV1 TreePositionV1=2)
+type TreeDirectionV1 uint8
+const TreeForwardV1 TreeDirectionV1=1
+type TreePrimitiveKindV1 uint8
+type TreeUndoEffectV1 uint8
+type TreeEndpointKindV1 uint8
+type TreeEndpointV1 struct{Kind TreeEndpointKindV1; Height uint64; BlockHash [32]byte; CumulativeChainwork [40]byte}
+type TreeBlockV1 struct{EventCount,TxCount uint32; Generated [16]byte}
+type TreeSourceCoverageV1 struct{DatabaseID [32]byte; Generation uint64; Block [32]byte; Height uint64; HeaderBytes uint16; BodyKind uint8; BlockMeta TreeBlockV1; CurrentBody []byte}
+type TreeSourceV1 interface{TreeDeltaV1(TreePositionV1,*Reader,*TreeDeltaSinkV1)error}
+type TreePrimitiveV1 struct{Direction TreeDirectionV1; Kind TreePrimitiveKindV1; Generation uint64; Block [32]byte; Height uint64; Source TreeSourceV1; Undo TreeUndoEffectV1; Endpoint TreeEndpointV1; Coverage *TreeSourceCoverageV1}
+type TreeDeltaSinkV1 struct{}
+func (*TreeDeltaSinkV1) BeginV1(TreeBlockV1)error{return nil}
+func (*TreeDeltaSinkV1) EventV1(TreeEventV1)error{return nil}
+func (*TreeDeltaSinkV1) WindowV1()[]byte{return nil}
+type TreeOutpointV1 struct{Txid [32]byte; Vout uint32}
+type TreeEventKindV1 uint8
+const(TreeEventSpendV1 TreeEventKindV1=1; TreeEventCreateV1 TreeEventKindV1=2)
+type TreeEventV1 struct{Kind TreeEventKindV1; Outpoint TreeOutpointV1; TxIndex,InputIndex uint32; FrameOffset uint64; FrameLength uint32}
+type LargeImageKindV1 uint8
+const LargeImageBlockBodyV1 LargeImageKindV1=1
+type LargeImageSelectorV1 struct{Kind LargeImageKindV1; Hash [32]byte}
+type LargeImageRowV1 struct{}
+func (LargeImageRowV1) Present()bool{return false}
+func (LargeImageRowV1) Length()uint64{return 0}
+func (LargeImageRowV1) ReadAt([]byte,uint64)(int,error){return 0,nil}
+func (*Reader) VisitLargeImageV1(LargeImageSelectorV1,func(LargeImageRowV1)error)error{return nil}
 type StartupCanonicalCompletionV1 uint8
 const StartupCanonicalNotCompleteV1 StartupCanonicalCompletionV1 = 0
 const StartupCanonicalActiveAndReplayCompleteV1 StartupCanonicalCompletionV1 = 1
