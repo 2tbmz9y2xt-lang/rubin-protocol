@@ -71,17 +71,20 @@ func irFailureV1(t *testing.T, err error, kind logicalStateFailureKind, text str
 
 func TestInitial148RequiredR(t *testing.T) {
 	t.Run("full-original-and-decoder-alias", func(t *testing.T) {
-		for _, size := range []int{0, 1, 65536} {
-			t.Run(fmt.Sprint(size), func(t *testing.T) {
+		for _, tc := range []struct { size int; value uint64; covenant uint16; height uint64; coinbase bool }{
+			{0, 0, 0, 0, false}, {1, 37, 1, 99, true}, {65536, ^uint64(0), ^uint16(0), ^uint64(0), true},
+		} {
+			t.Run(fmt.Sprint(tc.size), func(t *testing.T) {
+				size := tc.size
 				w := btNew(t)
 				op := Outpoint{Txid: [32]byte{42}, Vout: 7}
-				frame := btFrame(^uint64(0), ^uint16(0), bytes.Repeat([]byte{5}, size))
-				value := btValue(frame, ^uint64(0), true)
+				frame := btFrame(tc.value, tc.covenant, bytes.Repeat([]byte{5}, size))
+				value := btValue(frame, tc.height, tc.coinbase)
 				w.pair(t, btMutation(1, btUTXOKey(1, op), value))
 				irCounterV1(t, w, 36+uint64(len(value)), 1)
 				err := irRunV1(t, w, irRequestV1(1, 2), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
 					first := view.Lookup(op)
-					logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.entry.Value == ^uint64(0) && first.entry.CovenantType == ^uint16(0) && first.entry.CreationHeight == ^uint64(0) && first.entry.CreatedByCoinbase && bytes.Equal(first.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "full decoded record lost a field")
+					logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.entry.Value == tc.value && first.entry.CovenantType == tc.covenant && first.entry.CreationHeight == tc.height && first.entry.CreatedByCoinbase == tc.coinbase && bytes.Equal(first.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "full decoded record lost a field")
 					scope := view.(*initial148RequiredScopeV1)
 					logicalMDBXAssert(t, bytes.Equal(scope.facts[0].original, value), "retained original suffix differs")
 					if size != 0 { first.entry.CovenantData[0] = 9 }
