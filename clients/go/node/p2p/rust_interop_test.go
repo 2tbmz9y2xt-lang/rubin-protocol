@@ -216,7 +216,15 @@ func startRustSendCmpctSync(t *testing.T, value string) (*exec.Cmd, *bytes.Buffe
 	return cmd, logs
 }
 
-func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.Buffer, *atomic.Int32) {
+// sendCmpctProxy records the injection result. settled is closed once the
+// injection is written or the proxy has stopped, so a reader of injected that
+// waits on settled observes the final count.
+type sendCmpctProxy struct {
+	injected atomic.Int32
+	settled  chan struct{}
+}
+
+func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.Buffer, *sendCmpctProxy) {
 	t.Helper()
 	bin := requireRustInterop(t)
 	addr := startInteropSyncSource(t)
@@ -228,18 +236,24 @@ func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.
 		t.Fatalf("listen proxy: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	injected := new(atomic.Int32)
-	go runSendCmpctProxy(ctx, listener, addr, payload, injected)
+	proxy := &sendCmpctProxy{settled: make(chan struct{})}
+	go runSendCmpctProxy(ctx, listener, addr, payload, proxy)
 	cmd, logs := startRustInteropClient(t, bin, listener.Addr().String(), "sync-blocks")
 	t.Cleanup(func() { terminateHelper(cmd) })
-	return cmd, logs, injected
+	return cmd, logs, proxy
 }
 
 // runSendCmpctProxy forwards one Rust connection to the Go Service. Rust-to-Go
 // bytes are copied unchanged; Go-to-Rust frames are forwarded by this single
 // goroutine, which writes the injected sendcmpct right after the Service's own
 // sendcmpct and before reading any further Service frame.
-func runSendCmpctProxy(ctx context.Context, listener net.Listener, serviceAddr string, payload []byte, injected *atomic.Int32) {
+func runSendCmpctProxy(ctx context.Context, listener net.Listener, serviceAddr string, payload []byte, proxy *sendCmpctProxy) {
+	settled := false
+	defer func() {
+		if !settled {
+			close(proxy.settled)
+		}
+	}()
 	rustConn, err := listener.Accept()
 	if err != nil {
 		return
@@ -251,7 +265,10 @@ func runSendCmpctProxy(ctx context.Context, listener net.Listener, serviceAddr s
 		return
 	}
 	defer goConn.Close()
-	go func() { _, _ = io.Copy(goConn, rustConn) }()
+	go func() {
+		_, _ = io.Copy(goConn, rustConn)
+		_ = goConn.Close()
+	}()
 	magic := networkMagic("devnet")
 	maxSize := node.DefaultPeerRuntimeConfig("devnet", 8).MaxMessageSize
 	pending := true
@@ -267,13 +284,19 @@ func runSendCmpctProxy(ctx context.Context, listener net.Listener, serviceAddr s
 		if writeFrame(rustConn, magic, message{Command: messageSendCmpct, Payload: payload}, maxSize) != nil {
 			return
 		}
-		injected.Add(1)
+		proxy.injected.Add(1)
+		settled = true
+		close(proxy.settled)
 	}
 }
 
-func requireOneInjection(t *testing.T, injected *atomic.Int32) {
+func requireOneInjection(t *testing.T, proxy *sendCmpctProxy) {
 	t.Helper()
-	if got := injected.Load(); got != 1 {
+	select {
+	case <-proxy.settled:
+	case <-time.After(5 * time.Second):
+	}
+	if got := proxy.injected.Load(); got != 1 {
 		t.Fatalf("injected sendcmpct frames=%d, want 1", got)
 	}
 }
@@ -294,6 +317,7 @@ func waitRustInteropExit1(t *testing.T, cmd *exec.Cmd, logs *bytes.Buffer) strin
 		return logs.String()
 	case <-time.After(5 * time.Second):
 		terminateHelper(cmd)
+		<-done
 		t.Fatalf("rust helper timeout, want exit 1\nstderr:\n%s", logs.String())
 	}
 	return ""
@@ -347,6 +371,7 @@ func startRustInteropServer(t *testing.T, bin, action string, extraArgs ...strin
 	ready, err := readReadyLine(stdout)
 	if err != nil {
 		terminateHelper(cmd)
+		_ = cmd.Wait()
 		t.Fatalf("read helper ready line: %v\nstderr:\n%s", err, stderr.String())
 	}
 	return cmd, ready, &stderr
@@ -438,6 +463,7 @@ func waitRustInterop(t *testing.T, cmd *exec.Cmd, logs *bytes.Buffer) {
 		}
 	case <-time.After(5 * time.Second):
 		terminateHelper(cmd)
+		<-done
 		t.Fatalf("rust helper timeout\nstderr:\n%s", logs.String())
 	}
 }
