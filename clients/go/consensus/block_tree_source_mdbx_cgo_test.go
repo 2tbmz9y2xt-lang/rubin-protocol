@@ -516,37 +516,36 @@ func btSyntaxLimits(t *testing.T) {
 	}
 	base := btTransaction(1, 0, nil, nil, nil, []byte{0}, nil)
 	for _, count := range []uint64{0, 2, 4294967296} {
-		raw := append(make([]byte, 148), btCompact(count)...)
+		raw := btBody(148, 1, [32]byte{})
+		raw = append(raw[:148], btCompact(count)...)
 		raw = append(raw, base.raw...)
-		r := btRequest(btBody(148, 1, [32]byte{}, base), 0)
-		r.Raw = raw
-		_, _, err := btPrepare(t, w, r)
+		if count == 2 {
+			second := btTransaction(2, 0, nil, nil, nil, []byte{0}, nil)
+			raw = append(raw, second.raw...)
+		}
+		r := btRequest(raw, 0)
+		r.Kind = 4
+		_, effect, err := btPrepare(t, w, r)
 		btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
+		logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero(), "invalid genesis syntax published effect")
 	}
 }
 
 func btCountLimitCases() []btSyntaxCase {
-	base := btTransaction(1, 0, nil, nil, nil, []byte{0}, nil)
-	inputs := make([]Outpoint, 1024)
-	outputs := make([][]byte, 1024)
+	inputs := make([]Outpoint, 1025)
+	outputs := make([][]byte, 1025)
 	for i := range outputs {
 		outputs[i] = btFrame(1, 0, nil)
 	}
 	witness := append(btCompact(1024), make([]byte, 3*1024)...)
 	rows := []btSyntaxCase{
-		{"inputs1024", btTransaction(1, 0, inputs, nil, nil, []byte{0}, nil), true},
-		{"outputs1024", btTransaction(1, 0, nil, outputs, nil, []byte{0}, nil), true},
+		{"inputs1024", btTransaction(1, 0, inputs[:1024], nil, nil, []byte{0}, nil), true},
+		{"outputs1024", btTransaction(1, 0, nil, outputs[:1024], nil, []byte{0}, nil), true},
 		{"witness1024", btTransaction(1, 0, nil, nil, nil, witness, nil), true},
 		{"covenant65537", btTransaction(1, 0, nil, [][]byte{btFrame(1, 0, make([]byte, 65537))}, nil, []byte{0}, nil), false},
-	}
-	for _, row := range []struct {
-		name   string
-		offset int
-	}{{"inputs1025", 13}, {"outputs1025", 14}, {"witness1025", len(base.core)}} {
-		tx := base
-		tx.raw = append(bytes.Clone(base.raw[:row.offset]), btCompact(1025)...)
-		tx.raw = append(tx.raw, base.raw[row.offset+1:]...)
-		rows = append(rows, btSyntaxCase{row.name, tx, false})
+		{"inputs1025", btTransaction(1, 0, inputs, nil, nil, []byte{0}, nil), false},
+		{"outputs1025", btTransaction(1, 0, nil, outputs, nil, []byte{0}, nil), false},
+		{"witness1025", btTransaction(1, 0, nil, nil, nil, append(btCompact(1025), make([]byte, 3*1025)...), nil), false},
 	}
 	for _, size := range []int{99992, 99993} {
 		witness := []byte{1, 0x7f, 0}
