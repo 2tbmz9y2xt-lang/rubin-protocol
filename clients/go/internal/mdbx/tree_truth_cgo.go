@@ -362,20 +362,13 @@ func (t *treeSectionV1) freezeV1(pair []ownedMutation, consulted []ownedConsulte
 }
 
 func treeProjectionConflictV1(e treeEntryV1, pair []ownedMutation, consulted []ownedConsulted) bool {
-	for _, m := range pair {
-		if m.dbi.Rank == e.dbi.Rank && bytes.Equal(m.key, e.key) {
-			return true
-		}
+	if canonicalTargetIndex(pair, e.dbi.Rank, e.key) >= 0 {
+		return true
 	}
 	if e.kind == treeEntryReferenceV1 {
 		return false
 	}
-	for _, row := range consulted {
-		if row.dbi.Rank == e.dbi.Rank && bytes.Equal(row.key, e.key) {
-			return true
-		}
-	}
-	return false
+	return obsoleteConsultedContains(consulted, e.dbi.Rank, e.key)
 }
 
 // flushV1 consumes only frozen P. All node identities precede every root,
