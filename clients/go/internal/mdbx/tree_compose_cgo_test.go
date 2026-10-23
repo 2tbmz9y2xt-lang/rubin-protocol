@@ -550,19 +550,23 @@ func tcAllocAvg(f func()) (avg float64, windows int, found bool) {
 	return 0, windows, false
 }
 
+// tcAllocBase is a size-class allocation: below 16 bytes the Go tiny allocator serves pointer-free makes, and
+// -race disables it, so the same make would measure differently with and without -race.
+const tcAllocBase = 16
+
 var tcAllocSink []byte
 
 func TestTcAllocAvgDiscardsContaminatedFirstWindow(t *testing.T) {
 	calls := 0
 	avg, windows, found := tcAllocAvg(func() {
 		calls++
-		tcAllocSink = make([]byte, 8)
+		tcAllocSink = make([]byte, tcAllocBase)
 		if calls == 2 {
 			tcAllocSink = make([]byte, 16)
 		}
 	})
-	if !found || avg != 8 || windows < 2 {
-		t.Fatalf("avg %.1f, windows %d, found %v, want 8, at least 2, true", avg, windows, found)
+	if !found || avg != tcAllocBase || windows < 2 {
+		t.Fatalf("avg %.1f, windows %d, found %v, want %d, at least 2, true", avg, windows, found, tcAllocBase)
 	}
 }
 
@@ -570,7 +574,7 @@ func TestTcAllocAvgReportsNotFoundAfterTenWindows(t *testing.T) {
 	calls := 0
 	_, windows, found := tcAllocAvg(func() {
 		calls++
-		tcAllocSink = make([]byte, 8)
+		tcAllocSink = make([]byte, tcAllocBase)
 		if (calls-2)%tcAllocRuns == 0 {
 			tcAllocSink = make([]byte, 16)
 		}
