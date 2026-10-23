@@ -19,22 +19,77 @@ func TestTreeRootReadFaultV1(t *testing.T) {
 	t.Run("node-width-and-absence", trNodeV1)
 	t.Run("Source-first-failure", trSourceFailureV1)
 	t.Run("trusted-spent-leaf", trTrustedSpendV1)
-	t.Run("binding-malformed", func(t *testing.T) {
-		s, _, o := tsNew(t)
-		request, _, _ := trRequestV1(t, 6)
-		treeNativeSeed(t, s, 0, tsRootKey(1), []byte{0xff})
-		trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-			var engine *EngineError
-			if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() {
-				t.Fatalf("malformed binding %x/%v", root, err)
+	t.Run("binding-malformed", trBindingMalformedV1)
+}
+
+func trBindingMalformedV1(t *testing.T) {
+	for _, variant := range []string{"framing", "valid-import", "zero-current", "zero-lag"} {
+		t.Run(variant, func(t *testing.T) {
+			s, path, o := tsNew(t)
+			request, _, frame := trRequestV1(t, 6)
+			value := trBindingV1(t, 1, request.Parent)
+			value[len(value)-1] = 2
+			// Imported database 6, current 7, lag 8, role 2, evidence 9.
+			value = append(value, treeImportLiteral(t, 2)...)
+			switch variant {
+			case "framing":
+				value = []byte{0xff}
+			case "zero-current":
+				clear(value[len(value)-49 : len(value)-41])
+			case "zero-lag":
+				clear(value[len(value)-41 : len(value)-33])
 			}
-			want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 0, KeyLength: 9, Kind: 2, OriginalImage: true, OriginalReference: true}
-			copy(want.Key[:], tsRootKey(1))
-			if engine.TreeObservation == nil || *engine.TreeObservation != want {
-				t.Fatalf("binding observation %+v want %+v", engine.TreeObservation, want)
+			treeNativeSeed(t, s, 0, tsRootKey(1), value)
+			var failed *Reader
+			outer := trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
+				if variant == "valid-import" {
+					mustEnvironment(t, err)
+					if root != trWantRootV1(t, frame, 6) || !reader.usable() {
+						t.Fatalf("valid imported binding root%x active%v", root, reader.usable())
+					}
+					return
+				}
+				failed = reader
+				trBindingRefusedV1(t, request, reader, account, root, err)
+			})
+			if variant != "valid-import" {
+				trBindingConsumedV1(t, s, failed, outer)
+				s = tsReopen(t, s, path)
+			}
+			equal, err := FixtureRawRowEqual(s, 0, tsRootKey(1), value)
+			mustEnvironment(t, err)
+			if !equal {
+				t.Fatal("root read changed stored binding")
 			}
 		})
-	})
+	}
+}
+
+func trBindingRefusedV1(t *testing.T, request TreeRootReadV1, reader *Reader, account *OperationAccount, root [32]byte, err error) {
+	t.Helper()
+	treeNativeIntegrity(t, err, operationUpdate, errSchema)
+	engine := err.(*EngineError)
+	if root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
+		t.Fatalf("malformed binding %x/%v", root, err)
+	}
+	want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 0, KeyLength: 9, Kind: 2, OriginalImage: true, OriginalReference: true}
+	copy(want.Key[:], tsRootKey(1))
+	if engine.TreeObservation == nil || *engine.TreeObservation != want {
+		t.Fatalf("binding observation %+v want %+v", engine.TreeObservation, want)
+	}
+	if _, next := reader.DeriveTreeRootV1(account, request); next == nil || any(reader.failure) != any(err) {
+		t.Fatal("malformed binding Reader allowed sibling or lost cause")
+	}
+}
+
+func trBindingConsumedV1(t *testing.T, s *Store, reader *Reader, cause error) {
+	t.Helper()
+	next := s.View(func(*Reader) error { t.Fatal("consumed binding Store invoked callback"); return nil })
+	if any(next) != any(cause) || any(s.Close()) != any(cause) {
+		t.Fatal("malformed binding lost terminal cause")
+	}
+	treeNativeZeroResources(t, s)
+	tsExpiredReader(t, reader)
 }
 
 func trTrustedSpendV1(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"sort"
 )
 
 // TreeResolvedInputV1 borrows one exact original present R suffix. The caller
@@ -230,11 +231,11 @@ func (o *treeRootOldV1) originalV1(key []byte, image treeImageV1) error {
 		}
 	}
 	want := treeDescV1{txid: op.Txid, vout: op.Vout}
-	for i := range o.rec.descs {
-		event := &o.rec.descs[i]
-		if treeSameKeyV1(&want, event) && event.flags&treeDescOldV1 != 0 {
-			return treeIntegrity(operationUpdate, nil)
-		}
+	// finishV1 sorts by identity then sequence. Zero is the minimum sequence;
+	// >= also keeps an exact sequence-zero match despite the comparator's +1.
+	i := sort.Search(len(o.rec.descs), func(i int) bool { return treeCompareDescV1(o.rec.descs[i], want) >= 0 })
+	if i < len(o.rec.descs) && treeSameKeyV1(&want, &o.rec.descs[i]) && o.rec.descs[i].flags&treeDescOldV1 != 0 {
+		return treeIntegrity(operationUpdate, nil)
 	}
 	return nil
 }

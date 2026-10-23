@@ -130,6 +130,7 @@ func TestTreeRootReadV1(t *testing.T) {
 		}
 	})
 	t.Run("original-input-bytes", trOriginalV1)
+	t.Run("original-input-groups", trOriginalGroupsV1)
 	t.Run("closed-input-domain", trInvalidV1)
 	t.Run("single-reservation-and-width", trBoundV1)
 	t.Run("trusted-unchanged-subtree", trTrustedV1)
@@ -212,6 +213,112 @@ func trOriginalV1(t *testing.T) {
 					t.Fatalf("original-input refusal root%x err%v active%v", root, err, reader.usable())
 				}
 			})
+		})
+	}
+}
+
+func trGroupedRequestV1(t *testing.T, height uint64, paired bool) (TreeRootReadV1, []TreeEventV1, []TreeResolvedInputV1) {
+	t.Helper()
+	request, _, _ := trRequestV1(t, height)
+	ops := []TreeOutpointV1{{Txid: tdTxid(9), Vout: 1}, {Txid: tdTxid(9), Vout: 3}, {Txid: tdTxid(37)}}
+	body := initial148NativeLiteral(t)
+	var events []TreeEventV1
+	inputs := make([]TreeResolvedInputV1, len(ops))
+	// Increasing output indexes, but key order differs from arrival order.
+	for _, i := range []int{2, 0, 1} {
+		frame := tdFrame(uint64(i+7), 0, []byte{byte(i)})
+		events = append(events, TreeEventV1{Kind: 2, Outpoint: ops[i], FrameOffset: uint64(len(body)), FrameLength: uint32(len(frame))})
+		body = append(body, frame...)
+		inputs[i] = TreeResolvedInputV1{Outpoint: ops[i], Value: tdFormed(frame, height, 1)}
+	}
+	if paired {
+		for i, op := range ops {
+			events = append(events, TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1, InputIndex: uint32(i)})
+		}
+	}
+	meta := TreeBlockV1{TxCount: 2, EventCount: uint32(len(events))}
+	request.Primitive.Coverage.CurrentBody, request.Primitive.Coverage.BlockMeta = body, meta
+	request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+		if err := sink.BeginV1(meta); err != nil {
+			return err
+		}
+		for _, event := range events {
+			if err := sink.EventV1(event); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return request, events, inputs
+}
+
+func trOriginalGroupsV1(t *testing.T) {
+	for _, variant := range []string{"first", "middle", "last", "equal", "CREATE-SPEND", "SPEND-CREATE"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			request, events, _ := trGroupedRequestV1(t, 6, variant == "CREATE-SPEND" || variant == "SPEND-CREATE")
+			trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent))
+			if variant != "CREATE-SPEND" {
+				seed, _, inputs := trGroupedRequestV1(t, 5, false)
+				trPopulateV1(t, s, o, seed)
+				request.Parent, request.Inputs = seed.Primitive.Endpoint, inputs
+				for i := range 3 {
+					if variant == "SPEND-CREATE" {
+						events[i+3] = events[i]
+						events[i+3].TxIndex = 1
+					}
+					events[i] = TreeEventV1{Kind: 1, Outpoint: events[i].Outpoint, TxIndex: 1, InputIndex: uint32(i)}
+				}
+				for i, name := range []string{"first", "middle", "last"} {
+					if variant == name || variant == "SPEND-CREATE" && i == 1 {
+						request.Inputs = append(request.Inputs[:i], request.Inputs[i+1:]...)
+					}
+				}
+			}
+			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+				if variant == "equal" || variant == "CREATE-SPEND" {
+					mustEnvironment(t, err)
+					if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() {
+						t.Fatalf("grouped cancellation root %x active%v", root, reader.usable())
+					}
+					return
+				}
+				treeNativeIntegrity(t, err, operationUpdate, nil)
+				if root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
+					t.Fatalf("grouped missing R root%x err%v active%v", root, err, reader.usable())
+				}
+			})
+		})
+	}
+}
+
+// Measure the real lookup owner without native I/O masking descriptor-search
+// cost. All groups are CREATEs and the request has no original inputs.
+func BenchmarkTreeRootOriginalV1(b *testing.B) {
+	for _, count := range []int{64, 512, 4096} {
+		b.Run(fmt.Sprintf("events-%d", count), func(b *testing.B) {
+			rec := &treeRecorderV1{descs: make([]treeDescV1, count)}
+			keys := make([][]byte, count)
+			for i := range rec.descs {
+				rec.descs[i] = treeDescV1{txid: tdTxid(9), vout: uint32(2*i + 1), seq: uint32(i), kind: 2}
+				keys[i] = tdUTXOKey(1, tdTxid(9), uint32(2*i+1))
+			}
+			if !treeGroupV1(rec.descs, uint32(count)) {
+				b.Fatal("CREATE groups refused")
+			}
+			old := &treeRootOldV1{rec: rec}
+			for _, vout := range []uint32{0, uint32(count), uint32(2 * count)} {
+				if err := old.originalV1(tdUTXOKey(1, tdTxid(9), vout), treeImageV1{}); err != nil {
+					b.Fatalf("absent identity: %v", err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := old.originalV1(keys[i%count], treeImageV1{}); err != nil {
+					b.Fatal(err)
+				}
+			}
 		})
 	}
 }
