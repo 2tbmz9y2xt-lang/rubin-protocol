@@ -77,18 +77,19 @@ func treeEmitNodesV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, 
 }
 
 func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1) error {
-	_, err := treeRunResultV1(old, generation, endpoint, databaseID, leaves, emit, ledger, observation, nil)
+	w := treeWalkV1{generation: generation, old: old, leaves: leaves, emit: emit, observation: observation}
+	_, err := treeRunResultV1(w, endpoint, databaseID, ledger, nil)
 	return err
 }
 
 // seed is supplied only for the definitionally empty genesis parent. All other
 // callers retain the existing committed-binding read and walk.
-func treeRunResultV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1, seed *RootBindingV1) ([32]byte, error) {
+func treeRunResultV1(w treeWalkV1, endpoint TreeEndpointV1, databaseID [32]byte, ledger treeLedgerV1, seed *RootBindingV1) ([32]byte, error) {
 	if err := ledger.chargeV1(treeNodeWorkBytesV1); err != nil {
 		return [32]byte{}, err
 	}
 	defer ledger.releaseV1(treeNodeWorkBytesV1)
-	w := treeWalkV1{frames: new([treeFrameCapV1]treeFrameV1), generation: generation, old: old, leaves: leaves, emit: emit, observation: observation}
+	w.frames = new([treeFrameCapV1]treeFrameV1)
 	var binding RootBindingV1
 	if seed != nil {
 		binding = *seed

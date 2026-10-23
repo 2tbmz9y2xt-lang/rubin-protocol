@@ -141,7 +141,8 @@ func (r *Reader) treeRootReadV1(request TreeRootReadV1, ledger treeLedgerV1) ([3
 	if err = delta.resolveV1(old); err != nil {
 		return [32]byte{}, r.treeRootRecordV1(err)
 	}
-	root, err := treeRunResultV1(old, p.Generation, p.Endpoint, r.databaseID, delta.leavesV1(), nil, ledger, &observation, seed)
+	w := treeWalkV1{generation: p.Generation, old: old, leaves: delta.leavesV1(), observation: &observation}
+	root, err := treeRunResultV1(w, p.Endpoint, r.databaseID, ledger, seed)
 	return root, r.treeRootRecordV1(err)
 }
 
