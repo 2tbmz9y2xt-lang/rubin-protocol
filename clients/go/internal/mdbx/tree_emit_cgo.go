@@ -77,17 +77,30 @@ func treeEmitNodesV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, 
 }
 
 func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1) error {
+	_, err := treeRunResultV1(old, generation, endpoint, databaseID, leaves, emit, ledger, observation, nil)
+	return err
+}
+
+// seed is supplied only for the definitionally empty genesis parent. All other
+// callers retain the existing committed-binding read and walk.
+func treeRunResultV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1, seed *RootBindingV1) ([32]byte, error) {
 	if err := ledger.chargeV1(treeNodeWorkBytesV1); err != nil {
-		return err
+		return [32]byte{}, err
 	}
 	defer ledger.releaseV1(treeNodeWorkBytesV1)
 	w := treeWalkV1{frames: new([treeFrameCapV1]treeFrameV1), generation: generation, old: old, leaves: leaves, emit: emit, observation: observation}
-	binding, err := w.readBinding(databaseID)
-	if err != nil {
-		return err
+	var binding RootBindingV1
+	if seed != nil {
+		binding = *seed
+	} else {
+		var err error
+		binding, err = w.readBinding(databaseID)
+		if err != nil {
+			return [32]byte{}, err
+		}
 	}
 	if err := w.walk(); err != nil {
-		return err
+		return [32]byte{}, err
 	}
 	return w.finish(binding, endpoint)
 }
@@ -444,7 +457,7 @@ func (w *treeWalkV1) referIfKept(node treeNodeRefV1) error {
 	return w.emit.referV1(TreeSchemaV1DBIs()[8], w.nodeKey(node))
 }
 
-func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) error {
+func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) ([32]byte, error) {
 	next := binding
 	next.Endpoint = endpoint
 	next.RootDigest, next.Top = treeEmptyDigestV1(), TreeTopV1{Kind: TreeTopEmptyV1}
@@ -454,21 +467,25 @@ func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) erro
 	}
 	encoded, err := next.Encode()
 	if err != nil {
-		return treeIntegrity(operationUpdate, err)
+		return [32]byte{}, treeIntegrity(operationUpdate, err)
 	}
 	if w.emit == nil {
-		return nil
+		return next.RootDigest, nil
 	}
 	if w.hasCur {
 		if err := w.referIfKept(w.cur); err != nil {
-			return err
+			return [32]byte{}, err
 		}
 	}
 	var links uint8
 	if w.hasCur && w.cur.original {
 		links = 1
 	}
-	return w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded, links: links}})
+	err = w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded, links: links}})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return next.RootDigest, nil
 }
 
 // nodeKey builds the 46-byte form byte-equal to TreeNodeKey(generation, id) in the frame scratch.

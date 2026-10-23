@@ -76,6 +76,7 @@ type treeRecorderV1 struct {
 	value                          []byte
 	coverage                       TreeSourceCoverageV1
 	observation                    *TreeObservationV1
+	rootReadOnly                   bool // D observes records without consuming R counters.
 }
 
 func newTreeRecorderV1(position treePositionV1, prim treePrimitiveV1, body treeBodyV1, window []byte, ledger treeLedgerV1) *treeRecorderV1 {

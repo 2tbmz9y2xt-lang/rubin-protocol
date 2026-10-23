@@ -214,11 +214,7 @@ func validLogicalStateCounterEnvelope(c logicalStateCounters, height uint64) boo
 	if c.entries > height*1_545_454 {
 		return false
 	}
-	if c.entries > ^uint64(0)/maxLogicalStateEntryBytes {
-		return false
-	}
-	return c.bytes >= c.entries*minLogicalStateEntryBytes &&
-		c.bytes <= c.entries*maxLogicalStateEntryBytes &&
+	return validLogicalStateResidualEnvelope(c.bytes, c.entries) &&
 		c.bytes <= height*maxCreatedLogicalStateBytes
 }
 
@@ -377,7 +373,11 @@ func validLogicalStateResidualEnvelope(bytes, entries uint64) bool {
 	if entries == 0 {
 		return bytes == 0
 	}
-	return bytes >= entries*minLogicalStateEntryBytes && bytes <= entries*maxLogicalStateEntryBytes
+	// Division preserves the mathematical bounds even when 65596*entries
+	// exceeds uint64. The lower bound also excludes a zero byte total here.
+	upperQuotient := bytes / maxLogicalStateEntryBytes
+	upperOK := entries > upperQuotient || entries == upperQuotient && bytes%maxLogicalStateEntryBytes == 0
+	return entries <= bytes/minLogicalStateEntryBytes && upperOK
 }
 
 func logicalStatePutOverflow(w *logicalStatePlanWork, n uint64) bool {

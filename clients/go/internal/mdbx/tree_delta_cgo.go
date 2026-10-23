@@ -167,7 +167,7 @@ func (d *treeDeltaV1) resolveV1(old treeOldV1) error {
 }
 
 func (d *treeDeltaV1) counterHeadV1(old treeOldV1) error {
-	if d.rec.observation == nil {
+	if d.rec.observation == nil || d.rec.rootReadOnly {
 		return nil
 	}
 	d.keys.counterKey[0] = 0x10
@@ -220,7 +220,7 @@ func treeCounterEnvelopeV1(total, count, limit uint64) bool {
 // Counter subsets include equal replacements and cancellations, not only leaves.
 // Check the residual before deriving parent-before+after, so input integrity wins.
 func (d *treeDeltaV1) counterFinishV1() error {
-	if d.rec.observation == nil {
+	if d.rec.observation == nil || d.rec.rootReadOnly {
 		return nil
 	}
 	if d.beforeBytes > d.parentBytes || d.beforeCount > d.parentCount {
@@ -347,7 +347,7 @@ func (d *treeDeltaV1) resolveGroupV1(old treeOldV1, g *treeDescV1) error {
 }
 
 func (d *treeDeltaV1) counterBeforeV1(image treeImageV1) error {
-	if d.rec.observation == nil || !image.present {
+	if d.rec.observation == nil || d.rec.rootReadOnly || !image.present {
 		return nil
 	}
 	if !treeUTXOValueOKV1(image.value) {
@@ -357,7 +357,7 @@ func (d *treeDeltaV1) counterBeforeV1(image treeImageV1) error {
 }
 
 func (d *treeDeltaV1) counterGroupV1(g *treeDescV1) error {
-	if d.rec.observation == nil {
+	if d.rec.observation == nil || d.rec.rootReadOnly {
 		return nil
 	}
 	present, value := d.finalV1(g)
