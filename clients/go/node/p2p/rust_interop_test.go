@@ -220,13 +220,16 @@ func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.
 	t.Helper()
 	bin := requireRustInterop(t)
 	addr := startInteropSyncSource(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var lc net.ListenConfig
+	listener, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen proxy: %v", err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	injected := new(atomic.Int32)
-	go runSendCmpctProxy(listener, addr, payload, injected)
+	go runSendCmpctProxy(ctx, listener, addr, payload, injected)
 	cmd, logs := startRustInteropClient(t, bin, listener.Addr().String(), "sync-blocks")
 	t.Cleanup(func() { terminateHelper(cmd) })
 	return cmd, logs, injected
@@ -236,13 +239,14 @@ func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.
 // bytes are copied unchanged; Go-to-Rust frames are forwarded by this single
 // goroutine, which writes the injected sendcmpct right after the Service's own
 // sendcmpct and before reading any further Service frame.
-func runSendCmpctProxy(listener net.Listener, serviceAddr string, payload []byte, injected *atomic.Int32) {
+func runSendCmpctProxy(ctx context.Context, listener net.Listener, serviceAddr string, payload []byte, injected *atomic.Int32) {
 	rustConn, err := listener.Accept()
 	if err != nil {
 		return
 	}
 	defer rustConn.Close()
-	goConn, err := net.Dial("tcp", serviceAddr)
+	var dialer net.Dialer
+	goConn, err := dialer.DialContext(ctx, "tcp", serviceAddr)
 	if err != nil {
 		return
 	}
