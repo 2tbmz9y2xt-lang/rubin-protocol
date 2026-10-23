@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/sha3"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -21,8 +22,8 @@ import (
 // construction time. Expected identifiers never call the cursor or ParseTx.
 type btTx struct {
 	raw, core []byte
-	id [32]byte
-	frames [][]byte
+	id        [32]byte
+	frames    [][]byte
 }
 
 func btCompact(n uint64) []byte {
@@ -87,7 +88,8 @@ func btDaCore(kind byte, signature []byte) []byte {
 }
 
 func btBody(width int, salt byte, parent [32]byte, txs ...btTx) []byte {
-	b := make([]byte, width)
+	b := make([]byte, 0, width)
+	b = append(b, make([]byte, width)...)
 	b[0], b[width-1] = 1, salt
 	copy(b[4:36], parent[:])
 	b = append(b, btCompact(uint64(len(txs)))...)
@@ -99,16 +101,18 @@ func btBody(width int, salt byte, parent [32]byte, txs ...btTx) []byte {
 
 func btRequest(raw []byte, height uint64) blockTreeRequestV1 {
 	block := sha3.Sum256(raw[:148])
-	return blockTreeRequestV1{DatabaseID: [32]byte{7}, Generation: 1, Block: block, Height: height,
+	return blockTreeRequestV1{
+		DatabaseID: [32]byte{7}, Generation: 1, Block: block, Height: height,
 		HeaderBytes: 148, BodyKind: 1, Raw: raw, Generated: &Uint128{}, Direction: 1, Kind: 2, Undo: 1,
-		Endpoint: mdbx.TreeEndpointV1{Kind: 1, Height: height, BlockHash: block, CumulativeChainwork: [40]byte{39: 99}}}
+		Endpoint: mdbx.TreeEndpointV1{Kind: 1, Height: height, BlockHash: block, CumulativeChainwork: [40]byte{39: 99}},
+	}
 }
 
 type btResult struct {
 	truth mdbx.CommitTruth
 	stage mdbx.UpdateStage
 	index int
-	err error
+	err   error
 }
 
 func (r btResult) want(t *testing.T, truth, stage uint8, index int) {
@@ -119,23 +123,25 @@ func (r btResult) want(t *testing.T, truth, stage uint8, index int) {
 }
 
 type btWorld struct {
-	s *mdbx.Store
+	s     *mdbx.Store
 	owner *mdbx.OperationReservationOwner
-	path string
-	cfg mdbx.ConfigV1
+	path  string
+	cfg   mdbx.ConfigV1
 }
 
 func btNew(t *testing.T) *btWorld {
 	t.Helper()
-	w := &btWorld{path: filepath.Join(t.TempDir(), "tree"), cfg: mdbx.ConfigV1{Lower: 1<<20, Now: 2<<20, Upper: 256<<20, Growth: 1<<20, Shrink: 2<<20, PageSize: 4096, MaxReaders: 492}}
+	w := &btWorld{path: filepath.Join(t.TempDir(), "tree"), cfg: mdbx.ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 256 << 20, Growth: 1 << 20, Shrink: 2 << 20, PageSize: 4096, MaxReaders: 492}}
 	var err error
 	w.s, err = mdbx.CreateTreeV1(w.path, w.cfg, [32]byte{7})
 	logicalMDBXAssert(t, err == nil, "CreateTreeV1: %v", err)
 	w.owner, err = mdbx.NewOperationReservationOwner(805306368)
 	logicalMDBXAssert(t, err == nil, "reservation owner: %v", err)
 	t.Cleanup(func() { _ = w.s.Close() })
-	root := mdbx.RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1,
-		RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}
+	root := mdbx.RootBindingV1{
+		DatabaseID: [32]byte{7}, CommitmentVersion: 1,
+		RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1},
+	}
 	encoded, err := root.Encode()
 	logicalMDBXAssert(t, err == nil, "empty binding: %v", err)
 	authority, err := (mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1}, LagGenerationID: 2}).Encode()
@@ -155,7 +161,7 @@ func btMutation(rank int, key, value []byte) mdbx.Mutation {
 func btSort(rows []mdbx.Mutation) {
 	slices.SortFunc(rows, func(a, b mdbx.Mutation) int {
 		if a.DBI.Rank != b.DBI.Rank {
-			return int(a.DBI.Rank)-int(b.DBI.Rank)
+			return int(a.DBI.Rank) - int(b.DBI.Rank)
 		}
 		return bytes.Compare(a.Key, b.Key)
 	})
@@ -177,11 +183,11 @@ func (w *btWorld) pair(t *testing.T, rows ...mdbx.Mutation) {
 // The real native operation owns all counts, undo, counters and tree effects.
 // Observation wrappers below delegate the complete source unchanged.
 type btObserved struct {
-	t *testing.T
+	t      *testing.T
 	source *blockTreeSourceV1
-	calls [3]int
+	calls  [3]int
 	reader *mdbx.Reader
-	sink *mdbx.TreeDeltaSinkV1
+	sink   *mdbx.TreeDeltaSinkV1
 	before func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error
 }
 
@@ -211,21 +217,31 @@ func (w *btWorld) run(t *testing.T, requests []blockTreeRequestV1, edit func([]b
 					request.Raw = bytes.Clone(request.Raw)
 					if request.Raw != nil && request.HeaderBytes == 148 {
 						_, present, readErr := r.Get(mdbx.TreeSchemaV1DBIs()[3], request.Block[:])
-						if readErr != nil { return mdbx.TreeOperationV1{}, readErr }
-						if !present { op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(request.Block[:]), bytes.Clone(request.Raw[:148]))) }
+						if readErr != nil {
+							return mdbx.TreeOperationV1{}, readErr
+						}
+						if !present {
+							op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(request.Block[:]), bytes.Clone(request.Raw[:148])))
+						}
 					}
 					source := new(blockTreeSourceV1)
 					effect, prepareErr := prepareBlockTreeEffectV1(source, r, a, request)
-					if prepareErr != nil { return mdbx.TreeOperationV1{}, prepareErr }
+					if prepareErr != nil {
+						return mdbx.TreeOperationV1{}, prepareErr
+					}
 					effects[i] = effect
 					observed[i] = &btObserved{t: t, source: source}
 					op.Primitives = append(op.Primitives, effect.Primitive)
 					op.Primitives[i].Source = observed[i]
 					op.Pair.Mutations = append(op.Pair.Mutations, effect.Index[:]...)
-					if effect.CurrentBody.AfterKind != 0 { op.Pair.Mutations = append(op.Pair.Mutations, effect.CurrentBody) }
+					if effect.CurrentBody.AfterKind != 0 {
+						op.Pair.Mutations = append(op.Pair.Mutations, effect.CurrentBody)
+					}
 				}
 				btSort(op.Pair.Mutations)
-				if edit != nil { edit(effects, observed, &op) }
+				if edit != nil {
+					edit(effects, observed, &op)
+				}
 				return op, nil
 			})
 			return nil
@@ -268,7 +284,7 @@ func (w *btWorld) reopen(t *testing.T) {
 	t.Helper()
 	previous := w.s.View(func(*mdbx.Reader) error { return nil })
 	closeErr := w.s.Close()
-	logicalMDBXAssert(t, closeErr == previous, "close before reopen: %v, cached %v", closeErr, previous)
+	logicalMDBXAssert(t, reflect.ValueOf(closeErr).Equal(reflect.ValueOf(previous)), "close before reopen: %v, cached %v", closeErr, previous)
 	var err error
 	w.s, err = mdbx.OpenTreeV1(w.path, w.cfg, [32]byte{7})
 	logicalMDBXAssert(t, err == nil, "OpenTreeV1: %v", err)
@@ -276,8 +292,9 @@ func (w *btWorld) reopen(t *testing.T) {
 
 func btFailure(t *testing.T, err error, kind logicalStateFailureKind, message string) {
 	t.Helper()
-	f, ok := err.(*logicalStateFailure)
-	logicalMDBXAssert(t, ok && f.kind == kind && f.cause != nil && f.cause.Error() == message && f.Error() == message, "source error = %T %v, want %d/%q", err, err, kind, message)
+	var f *logicalStateFailure
+	ok := errors.As(err, &f)
+	logicalMDBXAssert(t, ok && f != nil && reflect.ValueOf(err).Equal(reflect.ValueOf(f)) && f.kind == kind && f.cause != nil && f.cause.Error() == message && f.Error() == message, "source error = %T %v, want %d/%q", err, err, kind, message)
 }
 
 func btPrepare(t *testing.T, w *btWorld, request blockTreeRequestV1) (*blockTreeSourceV1, blockTreeEffectV1, error) {
@@ -290,7 +307,9 @@ func btPrepare(t *testing.T, w *btWorld, request blockTreeRequestV1) (*blockTree
 			request.Raw = bytes.Clone(request.Raw)
 			return w.s.View(func(r *mdbx.Reader) error {
 				effect, result = prepareBlockTreeEffectV1(&source, r, a, request)
-				if result == nil && request.Raw != nil { logicalMDBXAssert(t, &source.Raw[0] == &request.Raw[0], "producer copied the charged borrowed body") }
+				if result == nil && request.Raw != nil {
+					logicalMDBXAssert(t, &source.Raw[0] == &request.Raw[0], "producer copied the charged borrowed body")
+				}
 				return nil
 			})
 		})
@@ -313,7 +332,10 @@ func TestBlockTreeSourceV1(t *testing.T) {
 
 func btShape(t *testing.T) {
 	valid := btRequest(btBody(148, 1, [32]byte{}, btTransaction(1, 0, nil, nil, nil, []byte{0}, nil)), 1)
-	rows := []struct { name string; edit func(*blockTreeRequestV1) }{
+	rows := []struct {
+		name string
+		edit func(*blockTreeRequestV1)
+	}{
 		{"generation0", func(r *blockTreeRequestV1) { r.Generation = 0 }},
 		{"Generatednil", func(r *blockTreeRequestV1) { r.Generated = nil }},
 		{"width0", func(r *blockTreeRequestV1) { r.HeaderBytes = 0 }},
@@ -329,7 +351,8 @@ func btShape(t *testing.T) {
 	w := btNew(t)
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			r := valid; row.edit(&r)
+			r := valid
+			row.edit(&r)
 			source, effect, err := btPrepare(t, w, r)
 			btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request")
 			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero() && reflect.ValueOf(*source).IsZero(), "failure published a source/effect")
@@ -338,7 +361,14 @@ func btShape(t *testing.T) {
 	for _, row := range []string{"dst", "reader", "account"} {
 		t.Run("nil-"+row, func(t *testing.T) {
 			dst, reader, account := &blockTreeSourceV1{}, &mdbx.Reader{}, &mdbx.OperationAccount{}
-			switch row { case "dst": dst = nil; case "reader": reader = nil; case "account": account = nil }
+			switch row {
+			case "dst":
+				dst = nil
+			case "reader":
+				reader = nil
+			case "account":
+				account = nil
+			}
 			effect, err := prepareBlockTreeEffectV1(dst, reader, account, valid)
 			btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request")
 			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero(), "nil required field published effect")
@@ -353,7 +383,7 @@ func btShape(t *testing.T) {
 	zero := &mdbx.OperationAccount{}
 	expected := zero.WithReservation(1, func() error { t.Fatal("zero account callback"); return nil })
 	effect, err := prepareBlockTreeEffectV1(&blockTreeSourceV1{}, &mdbx.Reader{}, zero, valid)
-	logicalMDBXAssert(t, err == expected && reflect.ValueOf(effect).IsZero(), "account refusal wrapped: %v", err)
+	logicalMDBXAssert(t, reflect.ValueOf(err).Equal(reflect.ValueOf(expected)) && reflect.ValueOf(effect).IsZero(), "account refusal wrapped: %v", err)
 }
 
 func btCompactCases(t *testing.T) {
@@ -386,12 +416,17 @@ func btFraming(t *testing.T) {
 	for _, width := range []int{116, 148} {
 		for _, kind := range []byte{0, 1, 2} {
 			t.Run(fmt.Sprintf("%d/kind%d", width, kind), func(t *testing.T) {
-				payload := []byte(nil); if kind != 0 { payload = bytes.Repeat([]byte{0x55}, 1025) }
+				payload := []byte(nil)
+				if kind != 0 {
+					payload = bytes.Repeat([]byte{0x55}, 1025)
+				}
 				tx := btTransaction(1, kind, []Outpoint{{Txid: [32]byte{8}}}, frames, bytes.Repeat([]byte{0x56}, 253), []byte{1, 0x7f, 1, 3, 2, 4, 5}, payload)
 				second := btTransaction(2, 0, []Outpoint{{Txid: [32]byte{6}}, {Txid: [32]byte{7}}}, nil, nil, []byte{0}, nil)
 				raw := btBody(width, 5, [32]byte{4}, tx, second)
-				r := btRequest(btBody(148, 5, [32]byte{}, tx), 5); r.Raw, r.HeaderBytes = raw, uint16(width)
-				r.Block = sha3.Sum256(raw[:width]); r.Endpoint.BlockHash = r.Block
+				r := btRequest(btBody(148, 5, [32]byte{}, tx), 5)
+				r.Raw, r.HeaderBytes = raw, uint16(width)
+				r.Block = sha3.Sum256(raw[:width])
+				r.Endpoint.BlockHash = r.Block
 				source, effect, err := btPrepare(t, w, r)
 				logicalMDBXAssert(t, err == nil && source.coverage.BlockMeta.TxCount == 2 && source.coverage.BlockMeta.EventCount == 4, "frame/count %d/%d: %+v %v", width, kind, source.coverage, err)
 				logicalMDBXAssert(t, bytes.Equal(source.Raw, raw) && &effect.CurrentBody.Literal[0] == &source.Raw[0] && &source.coverage.CurrentBody[0] == &source.Raw[0], "body backing copied")
@@ -401,12 +436,19 @@ func btFraming(t *testing.T) {
 	tx := btTransaction(1, 0, []Outpoint{{}}, [][]byte{btFrame(1, 0, nil)}, nil, []byte{0}, nil)
 	valid := btBody(148, 7, [32]byte{}, tx)
 	for end := range len(valid) {
-		r := btRequest(valid, 1); r.Raw = valid[:end]
+		r := btRequest(valid, 1)
+		r.Raw = valid[:end]
 		_, _, err := btPrepare(t, w, r)
-		if end == 0 { btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request"); continue }
+		if end == 0 {
+			btFailure(t, err, logicalStateFailureLocalInvariant, "invalid block tree source request")
+			continue
+		}
 		btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 	}
-	for _, row := range []struct { name string; raw []byte }{
+	for _, row := range []struct {
+		name string
+		raw  []byte
+	}{
 		{"trailing", append(bytes.Clone(valid), 0)},
 		{"tx-count0", append(bytes.Clone(valid[:148]), 0)},
 		{"tx-count-nonminimal", append(append(bytes.Clone(valid[:148]), 253, 1, 0), tx.raw...)},
@@ -417,7 +459,8 @@ func btFraming(t *testing.T) {
 		{"script-overflow", append(append(bytes.Clone(valid[:199]), 33), valid[200:]...)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			r := btRequest(valid, 1); r.Raw = row.raw
+			r := btRequest(valid, 1)
+			r.Raw = row.raw
 			source, effect, err := btPrepare(t, w, r)
 			btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero() && reflect.ValueOf(*source).IsZero(), "malformed body published effect")
@@ -431,13 +474,16 @@ func btCountCharge(t *testing.T) {
 	for _, remaining := range []uint64{4823, 4824} {
 		err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 			return a.WithReservation(402653184-remaining, func() error {
-				request := r; request.Raw = bytes.Clone(r.Raw)
+				request := r
+				request.Raw = bytes.Clone(r.Raw)
 				return w.s.View(func(reader *mdbx.Reader) error {
 					var source blockTreeSourceV1
 					effect, prepareErr := prepareBlockTreeEffectV1(&source, reader, a, request)
 					if remaining == 4823 {
 						logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(prepareErr) && reflect.ValueOf(effect).IsZero() && reflect.ValueOf(source).IsZero(), "below preparation grant: %v", prepareErr)
-					} else { logicalMDBXAssert(t, prepareErr == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 1, "exact preparation grant: %v", prepareErr) }
+					} else {
+						logicalMDBXAssert(t, prepareErr == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 1, "exact preparation grant: %v", prepareErr)
+					}
 					logicalMDBXAssert(t, a.WithReservation(remaining, func() error { return nil }) == nil, "preparation grant not released exactly")
 					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(a.WithReservation(remaining+1, func() error { return nil })), "enclosing grant changed")
 					return nil
@@ -448,7 +494,11 @@ func btCountCharge(t *testing.T) {
 	}
 }
 
-type btSyntaxCase struct { name string; tx btTx; valid bool }
+type btSyntaxCase struct {
+	name  string
+	tx    btTx
+	valid bool
+}
 
 func btSyntaxLimits(t *testing.T) {
 	w := btNew(t)
@@ -456,15 +506,20 @@ func btSyntaxLimits(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			r := btRequest(btBody(148, 1, [32]byte{}, row.tx), 1)
 			_, effect, err := btPrepare(t, w, r)
-			if row.valid { logicalMDBXAssert(t, err == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 1, "admitted syntax: %v", err); return }
+			if row.valid {
+				logicalMDBXAssert(t, err == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 1, "admitted syntax: %v", err)
+				return
+			}
 			btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero(), "invalid syntax published effect")
 		})
 	}
 	base := btTransaction(1, 0, nil, nil, nil, []byte{0}, nil)
 	for _, count := range []uint64{0, 2, 4294967296} {
-		raw := append(make([]byte, 148), btCompact(count)...); raw = append(raw, base.raw...)
-		r := btRequest(btBody(148, 1, [32]byte{}, base), 0); r.Raw = raw
+		raw := append(make([]byte, 148), btCompact(count)...)
+		raw = append(raw, base.raw...)
+		r := btRequest(btBody(148, 1, [32]byte{}, base), 0)
+		r.Raw = raw
 		_, _, err := btPrepare(t, w, r)
 		btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 	}
@@ -473,7 +528,10 @@ func btSyntaxLimits(t *testing.T) {
 func btCountLimitCases() []btSyntaxCase {
 	base := btTransaction(1, 0, nil, nil, nil, []byte{0}, nil)
 	inputs := make([]Outpoint, 1024)
-	outputs := make([][]byte, 1024); for i := range outputs { outputs[i] = btFrame(1, 0, nil) }
+	outputs := make([][]byte, 1024)
+	for i := range outputs {
+		outputs[i] = btFrame(1, 0, nil)
+	}
 	witness := append(btCompact(1024), make([]byte, 3*1024)...)
 	rows := []btSyntaxCase{
 		{"inputs1024", btTransaction(1, 0, inputs, nil, nil, []byte{0}, nil), true},
@@ -481,17 +539,26 @@ func btCountLimitCases() []btSyntaxCase {
 		{"witness1024", btTransaction(1, 0, nil, nil, nil, witness, nil), true},
 		{"covenant65537", btTransaction(1, 0, nil, [][]byte{btFrame(1, 0, make([]byte, 65537))}, nil, []byte{0}, nil), false},
 	}
-	for _, row := range []struct { name string; offset int }{{"inputs1025", 13}, {"outputs1025", 14}, {"witness1025", len(base.core)}} {
-		tx := base; tx.raw = append(bytes.Clone(base.raw[:row.offset]), btCompact(1025)...); tx.raw = append(tx.raw, base.raw[row.offset+1:]...)
+	for _, row := range []struct {
+		name   string
+		offset int
+	}{{"inputs1025", 13}, {"outputs1025", 14}, {"witness1025", len(base.core)}} {
+		tx := base
+		tx.raw = append(bytes.Clone(base.raw[:row.offset]), btCompact(1025)...)
+		tx.raw = append(tx.raw, base.raw[row.offset+1:]...)
 		rows = append(rows, btSyntaxCase{row.name, tx, false})
 	}
 	for _, size := range []int{99992, 99993} {
-		witness := []byte{1, 0x7f, 0}; witness = append(witness, btCompact(uint64(size))...); witness = append(witness, make([]byte, size)...)
+		witness := []byte{1, 0x7f, 0}
+		witness = append(witness, btCompact(uint64(size))...)
+		witness = append(witness, make([]byte, size)...)
 		rows = append(rows, btSyntaxCase{fmt.Sprintf("witness-bytes%d", size+8), btTransaction(1, 0, nil, nil, nil, witness, nil), size == 99992})
 	}
 	for _, size := range []int{32, 33} {
 		tx := btTransaction(1, 0, []Outpoint{{}}, nil, nil, []byte{0}, nil)
-		raw := append(bytes.Clone(tx.raw[:50]), byte(size)); raw = append(raw, make([]byte, size)...); tx.raw = append(raw, tx.raw[51:]...)
+		raw := append(bytes.Clone(tx.raw[:50]), byte(size))
+		raw = append(raw, make([]byte, size)...)
+		tx.raw = append(raw, tx.raw[51:]...)
 		rows = append(rows, btSyntaxCase{fmt.Sprintf("script%d", size), tx, size == 32})
 	}
 	return rows
@@ -504,21 +571,37 @@ func btCompactOwners(t *testing.T) {
 	output := btTransaction(1, 0, nil, [][]byte{btFrame(1, 0, nil)}, nil, []byte{0}, nil)
 	da := btTransaction(1, 1, nil, nil, nil, []byte{0}, nil)
 	witness := btTransaction(1, 0, nil, nil, nil, []byte{1, 0, 0, 0}, nil)
-	for _, row := range []struct { name string; tx btTx; offset int }{
-		{"input-count", base, 13}, {"output-count", base, 14}, {"script-len", input, 50},
-		{"covenant-len", output, 25}, {"batchsig-len", da, 190}, {"witness-count", base, 19},
-		{"pubkey-len", witness, 21}, {"signature-len", witness, 22}, {"payload-len", base, 20},
+	for _, row := range []struct {
+		name   string
+		tx     btTx
+		offset int
+	}{
+		{"input-count", base, 13},
+		{"output-count", base, 14},
+		{"script-len", input, 50},
+		{"covenant-len", output, 25},
+		{"batchsig-len", da, 190},
+		{"witness-count", base, 19},
+		{"pubkey-len", witness, 21},
+		{"signature-len", witness, 22},
+		{"payload-len", base, 20},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			r := btRequest(btBody(148, 1, [32]byte{}, row.tx), 1)
-			_, _, controlErr := btPrepare(t, w, r); logicalMDBXAssert(t, controlErr == nil, "nearest valid owner: %v", controlErr)
-			tx := row.tx; tx.raw = append(bytes.Clone(tx.raw[:row.offset]), 253, tx.raw[row.offset], 0); tx.raw = append(tx.raw, row.tx.raw[row.offset+1:]...)
+			_, _, controlErr := btPrepare(t, w, r)
+			logicalMDBXAssert(t, controlErr == nil, "nearest valid owner: %v", controlErr)
+			tx := row.tx
+			tx.raw = append(bytes.Clone(tx.raw[:row.offset]), 253, tx.raw[row.offset], 0)
+			tx.raw = append(tx.raw, row.tx.raw[row.offset+1:]...)
 			r.Raw = btBody(148, 1, [32]byte{}, tx)
 			_, _, err := btPrepare(t, w, r)
 			btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
 		})
 	}
-	txs := make([]btTx, 253); for i := range txs { txs[i] = base }
+	txs := make([]btTx, 253)
+	for i := range txs {
+		txs[i] = base
+	}
 	r := btRequest(btBody(148, 1, [32]byte{}, txs...), 1)
 	_, effect, err := btPrepare(t, w, r)
 	logicalMDBXAssert(t, err == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 253 && effect.Primitive.Coverage.BlockMeta.EventCount == 0, "3-byte tx_count: %v", err)
@@ -527,10 +610,14 @@ func btCompactOwners(t *testing.T) {
 func btSpanTruncation(t *testing.T) {
 	w := btNew(t)
 	for _, kind := range []byte{0, 1, 2} {
-		payload := []byte(nil); if kind != 0 { payload = []byte{1, 2, 3, 4, 5, 6, 7} }
+		payload := []byte(nil)
+		if kind != 0 {
+			payload = []byte{1, 2, 3, 4, 5, 6, 7}
+		}
 		tx := btTransaction(1, kind, []Outpoint{{Txid: [32]byte{3}}}, [][]byte{btFrame(4, 0, []byte{5, 6, 7, 8, 9})}, []byte{1, 2, 3}, []byte{1, 0x7f, 1, 9, 2, 8, 7}, payload)
 		r := btRequest(btBody(148, 1, [32]byte{}, tx), 1)
-		_, _, err := btPrepare(t, w, r); logicalMDBXAssert(t, err == nil, "complete kind%d control: %v", kind, err)
+		_, _, err := btPrepare(t, w, r)
+		logicalMDBXAssert(t, err == nil, "complete kind%d control: %v", kind, err)
 		complete := r.Raw
 		for end := 162; end < len(complete); end++ {
 			r.Raw = complete[:end]
@@ -555,7 +642,10 @@ func btDaLimitCases() []btSyntaxCase {
 			tx := btTransaction(1, kind, nil, nil, nil, []byte{0}, []byte{1})
 			// zero inputs/outputs give core offset19; da_id is32 bytes.
 			binary.LittleEndian.PutUint16(tx.raw[51:53], count)
-			valid := count != 0 && count <= 61; if kind == 2 { valid = count < 61 }
+			valid := count != 0 && count <= 61
+			if kind == 2 {
+				valid = count < 61
+			}
 			rows = append(rows, btSyntaxCase{fmt.Sprintf("kind%d/chunk%d", kind, count), tx, valid})
 		}
 	}
@@ -614,7 +704,9 @@ func btUTXOKey(g uint64, op Outpoint) []byte {
 func btValue(frame []byte, height uint64, coinbase bool) []byte {
 	b := append(bytes.Clone(frame), make([]byte, 8)...)
 	binary.LittleEndian.PutUint64(b[len(frame):], height)
-	if coinbase { return append(b, 1) }
+	if coinbase {
+		return append(b, 1)
+	}
 	return append(b, 0)
 }
 
@@ -631,7 +723,11 @@ func btIndexes(t *testing.T, w *btWorld, r blockTreeRequestV1, present bool) {
 	canonical := binary.BigEndian.AppendUint64(nil, r.Generation)
 	canonical = binary.BigEndian.AppendUint64(canonical, r.Height)
 	owner := append(binary.BigEndian.AppendUint64(nil, r.Generation), r.Block[:]...)
-	if !present { w.read(t, 2, canonical, nil); w.read(t, 7, owner, nil); return }
+	if !present {
+		w.read(t, 2, canonical, nil)
+		w.read(t, 7, owner, nil)
+		return
+	}
 	value := append(bytes.Clone(r.Block[:]), r.Raw[4:36]...)
 	value = append(value, r.Endpoint.CumulativeChainwork[:]...)
 	w.read(t, 2, canonical, value)
@@ -643,7 +739,7 @@ func btState(t *testing.T, w *btWorld, generation uint64, endpoint mdbx.TreeEndp
 	var total uint64
 	for op, entry := range entries {
 		value := btValue(btFrame(entry.Value, entry.CovenantType, entry.CovenantData), entry.CreationHeight, entry.CreatedByCoinbase)
-		total += 36+uint64(len(value))
+		total += 36 + uint64(len(value))
 		w.read(t, 1, btUTXOKey(generation, op), value)
 	}
 	counter := binary.BigEndian.AppendUint64(nil, total)
@@ -667,29 +763,48 @@ func btEntry(value uint64, kind uint16, data []byte, height uint64, coinbase boo
 func btNodes(t *testing.T, reader *mdbx.Reader, generation uint64, entries map[Outpoint]UtxoEntry, top mdbx.TreeTopV1) {
 	t.Helper()
 	var ordered []Outpoint
-	for op := range entries { ordered = append(ordered, op) }
+	for op := range entries {
+		ordered = append(ordered, op)
+	}
 	slices.SortFunc(ordered, func(a, b Outpoint) int { return bytes.Compare(btUTXOKey(1, a), btUTXOKey(1, b)) })
 	var children []mdbx.TreeChildV1
 	for _, op := range ordered {
-		var key [36]byte; copy(key[:32], op.Txid[:]); binary.BigEndian.PutUint32(key[32:], op.Vout)
+		var key [36]byte
+		copy(key[:32], op.Txid[:])
+		binary.BigEndian.PutUint32(key[32:], op.Vout)
 		id := mdbx.TreeNodeIDV1{Kind: 1, Depth: 288, RoutingKey: key}
 		digest := sha3.Sum256(append([]byte("RUBIN_UTXO_TREE_V1\x01"), logicalStateEntryBytes(op, entries[op])...))
-		nativeKey := append(binary.BigEndian.AppendUint64(nil, generation), key[:]...); nativeKey = append(nativeKey, 0, 0)
+		nativeKey := append(binary.BigEndian.AppendUint64(nil, generation), key[:]...)
+		nativeKey = append(nativeKey, 0, 0)
 		value, present, err := reader.Get(mdbx.TreeSchemaV1DBIs()[8], nativeKey)
 		logicalMDBXAssert(t, err == nil && present && bytes.Equal(value, digest[:]), "complete leaf node %x: %x/%t/%v", nativeKey, value, present, err)
 		children = append(children, mdbx.TreeChildV1{ID: id, Digest: digest})
 	}
-	if len(children) == 0 { logicalMDBXAssert(t, top.Kind == 0 && top.Node == nil, "empty top"); return }
-	if len(children) == 1 { logicalMDBXAssert(t, top.Kind == 1 && top.Node != nil && *top.Node == children[0].ID, "leaf top"); return }
+	if len(children) == 0 {
+		logicalMDBXAssert(t, top.Kind == 0 && top.Node == nil, "empty top")
+		return
+	}
+	if len(children) == 1 {
+		logicalMDBXAssert(t, top.Kind == 1 && top.Node != nil && *top.Node == children[0].ID, "leaf top")
+		return
+	}
 	logicalMDBXAssert(t, len(children) == 2, "bounded fixture has %d leaves", len(children))
 	depth := canonicalUTXOFirstDifferingBit(children[0].ID.RoutingKey, children[1].ID.RoutingKey)
 	prefix := children[0].ID.RoutingKey
-	for bit := depth; bit < 288; bit++ { prefix[bit/8] &^= 0x80 >> (bit%8) }
+	for bit := depth; bit < 288; bit++ {
+		prefix[bit/8] &^= 0x80 >> (bit % 8)
+	}
 	id := mdbx.TreeNodeIDV1{Kind: 2, Depth: depth, Prefix: prefix}
 	logicalMDBXAssert(t, top.Kind == 2 && top.Node != nil && *top.Node == id, "branch top")
-	nodeKey, err := mdbx.TreeNodeKey(generation, id); logicalMDBXAssert(t, err == nil, "branch identity")
+	nodeKey, err := mdbx.TreeNodeKey(generation, id)
+	logicalMDBXAssert(t, err == nil, "branch identity")
 	var expected []byte
-	for _, child := range children { key, keyErr := mdbx.TreeNodeKey(1, child.ID); logicalMDBXAssert(t, keyErr == nil, "child identity"); expected = append(expected, key[8:]...); expected = append(expected, child.Digest[:]...) }
+	for _, child := range children {
+		key, keyErr := mdbx.TreeNodeKey(1, child.ID)
+		logicalMDBXAssert(t, keyErr == nil, "child identity")
+		expected = append(expected, key[8:]...)
+		expected = append(expected, child.Digest[:]...)
+	}
 	value, present, err := reader.Get(mdbx.TreeSchemaV1DBIs()[8], nodeKey)
 	logicalMDBXAssert(t, err == nil && present && bytes.Equal(value, expected), "complete branch node %x: %x/%t/%v", nodeKey, value, present, err)
 }
@@ -701,15 +816,21 @@ func btNewBody(t *testing.T) {
 				w := btNew(t)
 				data := bytes.Repeat([]byte{0x4e}, length)
 				frames := [][]byte{btFrame(11, 2, nil), btFrame(12, 0, nil), btFrame(13, 0x103, nil), btFrame(14, 0, data)}
-				payload := []byte(nil); if kind != 0 { payload = bytes.Repeat([]byte{0x6c}, 65536) }
+				payload := []byte(nil)
+				if kind != 0 {
+					payload = bytes.Repeat([]byte{0x6c}, 65536)
+				}
 				tx := btTransaction(3, kind, []Outpoint{{Txid: [32]byte{0xff}, Vout: 19}}, frames, []byte{7, 8, 9}, []byte{1, 0x7f, 1, 3, 2, 4, 5}, payload)
 				r := btRequest(btBody(148, byte(length+int(kind)+1), [32]byte{0x31}, tx), 8)
 				r.Generated = &Uint128{Hi: 0x0102030405060708, Lo: 0x1112131415161718}
 				result, effects, observed := w.run(t, []blockTreeRequestV1{r}, nil)
-				result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "apply: %v", result.err)
+				result.want(t, 2, 3, -1)
+				logicalMDBXAssert(t, result.err == nil, "apply: %v", result.err)
 				logicalMDBXAssert(t, effects[0].Primitive.Coverage.BlockMeta.EventCount == 2 && effects[0].Primitive.Coverage.BlockMeta.TxCount == 1 && observed[0].calls == ([3]int{0, 1, 0}), "complete source/count: %+v calls%v", effects[0], observed[0].calls)
 				btState(t, w, 1, r.Endpoint, map[Outpoint]UtxoEntry{{Txid: tx.id, Vout: 1}: btEntry(12, 0, nil, 8, true), {Txid: tx.id, Vout: 3}: btEntry(14, 0, data, 8, true)})
-				for _, vout := range []uint32{0, 2} { w.read(t, 1, btUTXOKey(1, Outpoint{Txid: tx.id, Vout: vout}), nil) }
+				for _, vout := range []uint32{0, 2} {
+					w.read(t, 1, btUTXOKey(1, Outpoint{Txid: tx.id, Vout: vout}), nil)
+				}
 				w.read(t, 4, r.Block[:], r.Raw)
 				w.read(t, 5, append(bytes.Clone(r.Block[:]), 0), btManifest(r, 1, 0))
 				btIndexes(t, w, r, true)
@@ -726,7 +847,8 @@ func btRoundTrip(t *testing.T) {
 	seedTx := btTransaction(1, 0, nil, [][]byte{btFrame(20, 0, []byte{1}), btFrame(21, 0, nil)}, nil, []byte{0}, nil)
 	seed := btRequest(btBody(148, 1, [32]byte{}, seedTx), 1)
 	result, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "seed source: %v", result.err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "seed source: %v", result.err)
 	op := Outpoint{Txid: seedTx.id}
 	op2 := Outpoint{Txid: seedTx.id, Vout: 1}
 	coinbase := btTransaction(2, 0, nil, [][]byte{btFrame(30, 0, nil)}, nil, []byte{0}, nil)
@@ -735,33 +857,48 @@ func btRoundTrip(t *testing.T) {
 	r := btRequest(btBody(148, 2, seed.Block, coinbase, spend), 2)
 	r.Generated = &Uint128{Hi: 4, Lo: 0x102030405060708}
 	result, forward, _ := w.run(t, []blockTreeRequestV1{r}, nil)
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "forward source: %v", result.err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "forward source: %v", result.err)
 	logicalMDBXAssert(t, forward[0].Primitive.Coverage.BlockMeta.EventCount == 6, "complete SPEND/CREATE count")
 	btState(t, w, 1, r.Endpoint, map[Outpoint]UtxoEntry{{Txid: spend.id}: btEntry(40, 0, bytes.Repeat([]byte{5}, 253), 2, false), {Txid: spend.id, Vout: 1}: btEntry(41, 0, nil, 2, false)})
-	w.read(t, 1, btUTXOKey(1, op), nil); w.read(t, 1, btUTXOKey(1, op2), nil); w.read(t, 1, btUTXOKey(1, cancel), nil)
+	w.read(t, 1, btUTXOKey(1, op), nil)
+	w.read(t, 1, btUTXOKey(1, op2), nil)
+	w.read(t, 1, btUTXOKey(1, cancel), nil)
 	w.read(t, 5, append(bytes.Clone(r.Block[:]), 0), btManifest(r, 2, 2))
 	w.read(t, 5, undoLiteralKey(r.Block, op2, 1, 0), btValue(seedTx.frames[1], 1, true))
 	w.read(t, 5, undoLiteralKey(r.Block, op, 1, 1), btValue(seedTx.frames[0], 1, true))
 	w.read(t, 5, undoLiteralKey(r.Block, cancel, 1, 2), nil)
 	btIndexes(t, w, r, true)
-	bad := r; bad.BodyKind, bad.Raw, bad.Direction, bad.Kind, bad.Undo = 2, nil, 2, 7, 5
-	bad.CanonicalBeforePresent, bad.OwnerBeforePresent = true, true; bad.Endpoint = seed.Endpoint
-	bad.Generated = &Uint128{Hi: r.Generated.Hi, Lo: r.Generated.Lo+1}
+	bad := r
+	bad.BodyKind, bad.Raw, bad.Direction, bad.Kind, bad.Undo = 2, nil, 2, 7, 5
+	bad.CanonicalBeforePresent, bad.OwnerBeforePresent = true, true
+	bad.Endpoint = seed.Endpoint
+	bad.Generated = &Uint128{Hi: r.Generated.Hi, Lo: r.Generated.Lo + 1}
 	btGeneratedRefusal(t, w, bad, btManifest(r, 2, 2))
-	for _, policy := range []struct { kind mdbx.TreePrimitiveKindV1; undo mdbx.TreeUndoEffectV1 }{{7, 5}, {8, 5}, {9, 5}} {
-		inverse := r; inverse.BodyKind, inverse.Raw = 2, nil
+	for _, policy := range []struct {
+		kind mdbx.TreePrimitiveKindV1
+		undo mdbx.TreeUndoEffectV1
+	}{{7, 5}, {8, 5}, {9, 5}} {
+		inverse := r
+		inverse.BodyKind, inverse.Raw = 2, nil
 		inverse.Direction, inverse.Kind, inverse.Undo = 2, policy.kind, policy.undo
-		inverse.Endpoint = seed.Endpoint; inverse.CanonicalBeforePresent, inverse.OwnerBeforePresent = true, true
+		inverse.Endpoint = seed.Endpoint
+		inverse.CanonicalBeforePresent, inverse.OwnerBeforePresent = true, true
 		requests := btInverseRequests(t, w, inverse)
 		result, effects, _ := w.run(t, requests, nil)
-		result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil && reflect.ValueOf(effects[len(effects)-1].CurrentBody).IsZero(), "inverse: %v", result.err)
+		result.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, result.err == nil && reflect.ValueOf(effects[len(effects)-1].CurrentBody).IsZero(), "inverse: %v", result.err)
 		btState(t, w, 1, seed.Endpoint, map[Outpoint]UtxoEntry{op: btEntry(20, 0, []byte{1}, 1, true), op2: btEntry(21, 0, nil, 1, true)})
 		btIndexes(t, w, r, false)
-		for _, absent := range []Outpoint{{Txid: spend.id}, {Txid: spend.id, Vout: 1}, cancel} { w.read(t, 1, btUTXOKey(1, absent), nil) }
+		for _, absent := range []Outpoint{{Txid: spend.id}, {Txid: spend.id, Vout: 1}, cancel} {
+			w.read(t, 1, btUTXOKey(1, absent), nil)
+		}
 		w.read(t, 5, append(bytes.Clone(r.Block[:]), 0), btManifest(r, 2, 2))
-		restore := r; restore.BodyKind, restore.Raw, restore.Kind, restore.Undo = 2, nil, 5, 3
+		restore := r
+		restore.BodyKind, restore.Raw, restore.Kind, restore.Undo = 2, nil, 5, 3
 		result, _, _ = w.run(t, []blockTreeRequestV1{restore}, nil)
-		result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "RESTORE_OLD: %v", result.err)
+		result.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, result.err == nil, "RESTORE_OLD: %v", result.err)
 		w.read(t, 5, undoLiteralKey(r.Block, op2, 1, 0), btValue(seedTx.frames[1], 1, true))
 		w.read(t, 5, undoLiteralKey(r.Block, op, 1, 1), btValue(seedTx.frames[0], 1, true))
 	}
@@ -771,16 +908,20 @@ func btGeneratedRefusal(t *testing.T, w *btWorld, request blockTreeRequestV1, ma
 	t.Helper()
 	result, _, observed := w.run(t, []blockTreeRequestV1{request}, nil)
 	result.want(t, 1, 1, 0)
-	engine, ok := result.err.(*mdbx.EngineError)
-	logicalMDBXAssert(t, ok && engine.Operation == "update" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && engine.Cause == nil && engine.TreeObservation == nil && observed[0].calls == ([3]int{0, 1, 0}), "retained scalar mismatch: %+v", result.err)
-	logicalMDBXAssert(t, w.s.View(func(*mdbx.Reader) error { t.Fatal("consumed scalar refusal View"); return nil }) == result.err, "scalar refusal did not cache actual error")
+	var engine *mdbx.EngineError
+	ok := errors.As(result.err, &engine)
+	logicalMDBXAssert(t, ok && engine != nil && reflect.ValueOf(result.err).Equal(reflect.ValueOf(engine)) && engine.Operation == "update" && engine.Class == "Integrity" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && engine.Cause == nil && engine.TreeObservation == nil && observed[0].calls == ([3]int{0, 1, 0}), "retained scalar mismatch: %+v", result.err)
+	cached := w.s.View(func(*mdbx.Reader) error { t.Fatal("consumed scalar refusal View"); return nil })
+	logicalMDBXAssert(t, reflect.ValueOf(cached).Equal(reflect.ValueOf(result.err)), "scalar refusal did not cache actual error")
 	w.reopen(t)
 	w.read(t, 5, append(bytes.Clone(request.Block[:]), 0), manifest)
 }
 
 func btInverseRequests(t *testing.T, w *btWorld, inverse blockTreeRequestV1) []blockTreeRequestV1 {
 	t.Helper()
-	if inverse.Kind != 9 { return []blockTreeRequestV1{inverse} }
+	if inverse.Kind != 9 {
+		return []blockTreeRequestV1{inverse}
+	}
 	tx := btTransaction(91, 0, nil, nil, nil, []byte{0}, nil)
 	seed := btRequest(btBody(148, 91, [32]byte{}, tx), 0)
 	seed.Generation, seed.Kind = 2, 4
@@ -796,16 +937,22 @@ func btInverseRequests(t *testing.T, w *btWorld, inverse blockTreeRequestV1) []b
 func btGenesis(t *testing.T) {
 	w := btNew(t)
 	tx := btTransaction(1, 0, []Outpoint{{Txid: [32]byte{0x77}}}, [][]byte{btFrame(9, 0, nil)}, nil, []byte{0}, nil)
-	r := btRequest(btBody(148, 8, [32]byte{}, tx), 0); r.Kind = 4
+	r := btRequest(btBody(148, 8, [32]byte{}, tx), 0)
+	r.Kind = 4
 	result, _, _ := w.run(t, []blockTreeRequestV1{r}, nil)
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "genesis: %v", result.err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "genesis: %v", result.err)
 	btState(t, w, 1, r.Endpoint, map[Outpoint]UtxoEntry{{Txid: tx.id}: btEntry(9, 0, nil, 0, true)})
-	inverse := r; inverse.Raw, inverse.BodyKind, inverse.Direction, inverse.Kind, inverse.Undo = nil, 2, 2, 8, 6
-	inverse.Endpoint = mdbx.TreeEndpointV1{}; inverse.CanonicalBeforePresent, inverse.OwnerBeforePresent = true, true
+	inverse := r
+	inverse.Raw, inverse.BodyKind, inverse.Direction, inverse.Kind, inverse.Undo = nil, 2, 2, 8, 6
+	inverse.Endpoint = mdbx.TreeEndpointV1{}
+	inverse.CanonicalBeforePresent, inverse.OwnerBeforePresent = true, true
 	result, _, _ = w.run(t, []blockTreeRequestV1{inverse}, func(_ []blockTreeEffectV1, _ []*btObserved, operation *mdbx.TreeOperationV1) {
-		operation.Pair.Mutations = append(operation.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: inverse.Block[:], BeforePresent: true, AfterKind: 1}); btSort(operation.Pair.Mutations)
+		operation.Pair.Mutations = append(operation.Pair.Mutations, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[4], Key: inverse.Block[:], BeforePresent: true, AfterKind: 1})
+		btSort(operation.Pair.Mutations)
 	})
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "genesis inverse: %v", result.err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "genesis inverse: %v", result.err)
 	btState(t, w, 1, mdbx.TreeEndpointV1{}, nil)
 	w.read(t, 1, btUTXOKey(1, Outpoint{Txid: tx.id}), nil)
 	w.read(t, 5, append(bytes.Clone(r.Block[:]), 0), nil)
@@ -818,26 +965,42 @@ func btAdmission(t *testing.T) {
 			w := btNew(t)
 			tx := btTransaction(1, 0, nil, [][]byte{btFrame(1, 0, nil)}, nil, []byte{0}, nil)
 			r := btRequest(btBody(148, 1, [32]byte{}, tx), 1)
-			if name == "width116" { r.Raw = btBody(116, 1, [32]byte{}, tx); r.HeaderBytes = 116 }
+			if name == "width116" {
+				r.Raw = btBody(116, 1, [32]byte{}, tx)
+				r.HeaderBytes = 116
+			}
 			result, _, sources := w.run(t, []blockTreeRequestV1{r}, func(e []blockTreeEffectV1, _ []*btObserved, op *mdbx.TreeOperationV1) {
 				body, owner := 2, 3
-				if name == "width116" { body, owner = 1, 2 }
+				if name == "width116" {
+					body, owner = 1, 2
+				}
 				switch name {
-				case "canonical-omitted": op.Pair.Mutations = op.Pair.Mutations[1:]
-				case "owner-omitted": op.Pair.Mutations = op.Pair.Mutations[:owner]
-				case "canonical-key": op.Pair.Mutations[0].Key[15]++
-				case "owner-key": op.Pair.Mutations[owner].Key[39]++
-				case "canonical-presence": op.Pair.Mutations[0].BeforePresent = true
-				case "owner-presence": op.Pair.Mutations[owner].BeforePresent = true
-				case "body-omitted": op.Pair.Mutations = append(op.Pair.Mutations[:body], op.Pair.Mutations[body+1:]...)
-				case "body-copy": op.Pair.Mutations[body].Literal = bytes.Clone(e[0].CurrentBody.Literal)
-				case "coverage-copy": op.Primitives[0].Coverage.CurrentBody = bytes.Clone(e[0].CurrentBody.Literal)
+				case "canonical-omitted":
+					op.Pair.Mutations = op.Pair.Mutations[1:]
+				case "owner-omitted":
+					op.Pair.Mutations = op.Pair.Mutations[:owner]
+				case "canonical-key":
+					op.Pair.Mutations[0].Key[15]++
+				case "owner-key":
+					op.Pair.Mutations[owner].Key[39]++
+				case "canonical-presence":
+					op.Pair.Mutations[0].BeforePresent = true
+				case "owner-presence":
+					op.Pair.Mutations[owner].BeforePresent = true
+				case "body-omitted":
+					op.Pair.Mutations = append(op.Pair.Mutations[:body], op.Pair.Mutations[body+1:]...)
+				case "body-copy":
+					op.Pair.Mutations[body].Literal = bytes.Clone(e[0].CurrentBody.Literal)
+				case "coverage-copy":
+					op.Primitives[0].Coverage.CurrentBody = bytes.Clone(e[0].CurrentBody.Literal)
 				}
 			})
 			result.want(t, 1, 1, -1)
 			pure := name == "body-omitted" || name == "body-copy" || name == "coverage-copy" || name == "width116"
 			logicalMDBXAssert(t, result.err != nil && sources[0].calls == ([3]int{}), "admission source calls %v / %v", sources[0].calls, result.err)
-			if !pure { w.reopen(t) }
+			if !pure {
+				w.reopen(t)
+			}
 			w.read(t, 4, r.Block[:], nil)
 			logicalMDBXAssert(t, w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "admission consumed Store")
 		})
@@ -850,16 +1013,19 @@ func btCompound(t *testing.T) {
 	second := btTransaction(2, 0, nil, [][]byte{btFrame(11, 0, []byte{1})}, nil, []byte{0}, nil)
 	r1 := btRequest(btBody(148, 1, [32]byte{}, first), 5)
 	r1.Generated = &Uint128{Hi: 5}
-	r2 := btRequest(btBody(148, 2, [32]byte{}, second), 4); r2.Kind, r2.Generation = 6, 2
+	r2 := btRequest(btBody(148, 2, [32]byte{}, second), 4)
+	r2.Kind, r2.Generation = 6, 2
 	r2.Generated = &Uint128{Lo: 7}
-	r3 := r1; r3.Kind, r3.Generation, r3.BodyKind, r3.Raw = 6, 2, 2, nil
+	r3 := r1
+	r3.Kind, r3.Generation, r3.BodyKind, r3.Raw = 6, 2, 2, nil
 	// r3 must use a stored source: its complete body is persisted independently
 	// before the compound, while CURRENT uses a distinct genuinely new block.
 	w.pair(t, btMutation(3, r1.Block[:], r1.Raw[:148]), btMutation(4, r1.Block[:], r1.Raw))
 	w.read(t, 5, append(bytes.Clone(r1.Block[:]), 0), nil)
 	r1.BodyKind, r1.Raw = 2, nil
 	result, _, sources := w.run(t, []blockTreeRequestV1{r1, r2, r3}, nil)
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "CURRENT/LAG: %v", result.err)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "CURRENT/LAG: %v", result.err)
 	logicalMDBXAssert(t, sources[0].calls == ([3]int{0, 1, 0}) && sources[1].calls == ([3]int{0, 1, 0}) && sources[2].calls == ([3]int{0, 1, 0}), "compound source calls %v/%v/%v", sources[0].calls, sources[1].calls, sources[2].calls)
 	btState(t, w, 1, r1.Endpoint, map[Outpoint]UtxoEntry{{Txid: first.id}: btEntry(10, 0, nil, 5, true)})
 	btState(t, w, 2, r3.Endpoint, map[Outpoint]UtxoEntry{{Txid: first.id}: btEntry(10, 0, nil, 5, true), {Txid: second.id}: btEntry(11, 0, []byte{1}, 4, true)})
@@ -878,11 +1044,16 @@ func btCompound(t *testing.T) {
 	firstLag.CanonicalBeforePresent, firstLag.OwnerBeforePresent = true, true
 	firstLag.Endpoint = mdbx.TreeEndpointV1{Kind: 1, Height: 3, CumulativeChainwork: [40]byte{39: 99}}
 	result, _, sources = w.run(t, []blockTreeRequestV1{current, last, firstLag}, nil)
-	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "CURRENT/reverse LAG compound: %v", result.err)
-	for _, source := range sources { logicalMDBXAssert(t, source.calls == ([3]int{0, 1, 0}), "reverse source calls %v", source.calls) }
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil, "CURRENT/reverse LAG compound: %v", result.err)
+	for _, source := range sources {
+		logicalMDBXAssert(t, source.calls == ([3]int{0, 1, 0}), "reverse source calls %v", source.calls)
+	}
 	btState(t, w, 1, current.Endpoint, nil)
 	btState(t, w, 2, firstLag.Endpoint, nil)
-	for _, request := range []blockTreeRequestV1{current, last, firstLag} { btIndexes(t, w, request, false) }
+	for _, request := range []blockTreeRequestV1{current, last, firstLag} {
+		btIndexes(t, w, request, false)
+	}
 	w.read(t, 5, append(bytes.Clone(r3.Block[:]), 0), btManifest(r3, 1, 0))
 	w.read(t, 5, append(bytes.Clone(r2.Block[:]), 0), btManifest(r2, 1, 0))
 	inspection, inspectErr := w.s.Inspect()
@@ -918,7 +1089,8 @@ func btReplacement(t *testing.T) {
 					btSort(operation.Pair.Mutations)
 				}
 			})
-			result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "replacement: %v", result.err)
+			result.want(t, 2, 3, -1)
+			logicalMDBXAssert(t, result.err == nil, "replacement: %v", result.err)
 			btState(t, w, 1, r.Endpoint, map[Outpoint]UtxoEntry{bOp: btEntry(20, 0, bytes.Repeat([]byte{4}, 253), 5, false)})
 			w.read(t, 1, btUTXOKey(1, cOp), nil)
 			w.read(t, 5, append(bytes.Clone(r.Block[:]), 0), btManifest(r, 3, 2))
@@ -928,4 +1100,3 @@ func btReplacement(t *testing.T) {
 		})
 	}
 }
-

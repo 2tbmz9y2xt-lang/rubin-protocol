@@ -15,30 +15,30 @@ import (
 // preconditions, and funds the request/result/backing before allocating them.
 // They remain immutable and funded through native readback and cleanup.
 type blockTreeRequestV1 struct {
-	DatabaseID [32]byte
-	Generation uint64
-	Block [32]byte
-	Height uint64
-	HeaderBytes uint16
-	BodyKind uint8
-	Raw []byte
-	Generated *Uint128
-	Direction mdbx.TreeDirectionV1
-	Kind mdbx.TreePrimitiveKindV1
-	Undo mdbx.TreeUndoEffectV1
-	Endpoint mdbx.TreeEndpointV1
+	DatabaseID             [32]byte
+	Generation             uint64
+	Block                  [32]byte
+	Height                 uint64
+	HeaderBytes            uint16
+	BodyKind               uint8
+	Raw                    []byte
+	Generated              *Uint128
+	Direction              mdbx.TreeDirectionV1
+	Kind                   mdbx.TreePrimitiveKindV1
+	Undo                   mdbx.TreeUndoEffectV1
+	Endpoint               mdbx.TreeEndpointV1
 	CanonicalBeforePresent bool
-	OwnerBeforePresent bool
+	OwnerBeforePresent     bool
 }
 
 type blockTreeSourceV1 struct {
 	coverage mdbx.TreeSourceCoverageV1
-	Raw []byte
+	Raw      []byte
 }
 
 type blockTreeEffectV1 struct {
-	Primitive mdbx.TreePrimitiveV1
-	Index [2]mdbx.Mutation
+	Primitive   mdbx.TreePrimitiveV1
+	Index       [2]mdbx.Mutation
 	CurrentBody mdbx.Mutation
 }
 
@@ -167,17 +167,17 @@ func (s *blockTreeSourceV1) visitV1(old *mdbx.Reader, window []byte, visit func(
 }
 
 type blockTreeCursorV1 struct {
-	raw []byte
-	row mdbx.LargeImageRowV1
-	window []byte
-	source *blockTreeSourceV1
-	sink *mdbx.TreeDeltaSinkV1
-	hash *sha3.SHA3
-	digest *sha3.SHA3
-	err error
+	raw         []byte
+	row         mdbx.LargeImageRowV1
+	window      []byte
+	source      *blockTreeSourceV1
+	sink        *mdbx.TreeDeltaSinkV1
+	hash        *sha3.SHA3
+	digest      *sha3.SHA3
+	err         error
 	length, off uint64
 	txs, events uint32
-	field [40]byte
+	field       [40]byte
 }
 
 func (c *blockTreeCursorV1) failV1() {
@@ -229,7 +229,7 @@ func (c *blockTreeCursorV1) skipV1(n uint64) {
 	}
 	if c.raw != nil {
 		if c.hash != nil {
-			_, _ = c.hash.Write(c.raw[c.off:c.off+n])
+			_, _ = c.hash.Write(c.raw[c.off : c.off+n])
 		}
 		c.off += n
 		return
@@ -268,8 +268,12 @@ func (c *blockTreeCursorV1) blockV1(width uint16, height uint64) [32]byte {
 	c.skipV1(4)
 	var parent [32]byte
 	copy(parent[:], c.fixedV1(32))
-	c.skipV1(uint64(width)-36)
+	c.skipV1(uint64(width) - 36)
 	n := c.compactV1(math.MaxUint32)
+	if n > math.MaxUint32 {
+		c.failV1()
+		return parent
+	}
 	if n == 0 || height == 0 && n != 1 {
 		c.failV1()
 	}
@@ -317,7 +321,7 @@ func (c *blockTreeCursorV1) outputV1(tx, vout uint32, id [32]byte, emit bool) {
 	if kind == 0x0002 || kind == 0x0103 || !emit {
 		return
 	}
-	length := c.off-start
+	length := c.off - start
 	if length > math.MaxUint32 {
 		c.failV1()
 		return
@@ -385,7 +389,7 @@ func (c *blockTreeCursorV1) daCoreV1(kind uint8) {
 		if n == 0 || uint64(n) > MAX_DA_CHUNK_COUNT {
 			c.failV1()
 		}
-		c.skipV1(32+8+32+32+32+1)
+		c.skipV1(32 + 8 + 32 + 32 + 32 + 1)
 		c.skipV1(c.compactV1(MAX_DA_MANIFEST_BYTES_PER_TX))
 	case 2:
 		c.skipV1(32)
