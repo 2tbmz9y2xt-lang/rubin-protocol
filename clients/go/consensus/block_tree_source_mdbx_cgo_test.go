@@ -232,8 +232,26 @@ func (w *btWorld) run(t *testing.T, requests []blockTreeRequestV1, edit func([]b
 		})
 	})
 	logicalMDBXAssert(t, err == nil, "test account: %v", err)
-	logicalMDBXAssert(t, w.owner.WithReservation(805306368, func() error { return nil }) == nil, "operation leaked a reservation")
+	btReservationsReleased(t, w.owner)
 	return result, effects, observed
+}
+
+func btReservationsReleased(t *testing.T, owner *mdbx.OperationReservationOwner) {
+	t.Helper()
+	entered := false
+	// Both TreeOperation grants stay live together, covering 805306368 bytes.
+	err := owner.WithOperation(mdbx.TreeOperation, func(first *mdbx.OperationAccount) error {
+		return first.WithReservation(402653184, func() error {
+			return owner.WithOperation(mdbx.TreeOperation, func(second *mdbx.OperationAccount) error {
+				return second.WithReservation(402653184, func() error {
+					entered = true
+					return nil
+				})
+			})
+		})
+	})
+	logicalMDBXAssert(t, err == nil, "operation leaked a reservation: %v", err)
+	logicalMDBXAssert(t, entered, "full aggregate reservation callback did not run")
 }
 
 func (w *btWorld) read(t *testing.T, rank int, key, want []byte) {

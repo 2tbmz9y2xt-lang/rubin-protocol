@@ -131,7 +131,8 @@ func btfCallbackCleanup(t *testing.T) {
 				if delivery == "goexit" { done := make(chan struct{}); go func() { defer close(done); run() }(); <-done } else { run() }
 				btFailure(t, primary, logicalStateFailureLocalInvariant, "invalid block tree source request")
 				_, _, expired := kept.Get(mdbx.TreeSchemaV1DBIs()[0], []byte{2})
-				logicalMDBXAssert(t, expired != nil && w.owner.WithReservation(805306368, func() error { return nil }) == nil, "callback Reader/grant survived")
+				logicalMDBXAssert(t, expired != nil, "callback Reader/grant survived")
+				btReservationsReleased(t, w.owner)
 				if delivery == "panic" { logicalMDBXAssert(t, recovered == panicValue && !post, "panic delivery changed") }
 				if delivery == "goexit" { logicalMDBXAssert(t, !post, "Goexit returned") }
 				actualState, _, stateErr := mdbx.FixtureStartupCleanup(w.s, 0, false, func() {})
