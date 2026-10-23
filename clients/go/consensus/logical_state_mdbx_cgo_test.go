@@ -982,6 +982,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 	t.Helper()
 	owned := "block_tree_source_mdbx_cgo.go"
 	definitions := map[types.Object]bool{}
+	var sourcePackage *types.Package
 	protected := map[string]bool{"prepareBlockTreeEffectV1": true, "blockTreeSourceV1": true, "TreeDeltaV1": true}
 	resolved := map[string]int{}
 	for _, file := range files {
@@ -991,6 +992,7 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 			case *ast.FuncDecl:
 				logicalMDBXAssert(t, info.Defs[d.Name] != nil, "block source unresolved helper %s", d.Name.Name)
 				definitions[info.Defs[d.Name]] = true
+				sourcePackage = info.Defs[d.Name].Pkg()
 			case *ast.GenDecl:
 				for _, spec := range d.Specs { if typ, ok := spec.(*ast.TypeSpec); ok { logicalMDBXAssert(t, info.Defs[typ.Name] != nil, "block source unresolved type %s", typ.Name.Name); definitions[info.Defs[typ.Name]] = true } }
 			}
@@ -1025,7 +1027,21 @@ func blockTreeCensusUsesV1(t *testing.T, fset *token.FileSet, files []*ast.File,
 			id, ok := n.(*ast.Ident)
 			if ok && protected[id.Name] && info.Defs[id] == nil { logicalMDBXAssert(t, info.Uses[id] != nil, "block source unresolved protected use %s", id.Name) }
 			selector, ok := n.(*ast.SelectorExpr)
-			if ok { logicalMDBXAssert(t, info.Uses[selector.Sel] != nil, "block source unresolved selector %s at %s", selector.Sel.Name, fset.Position(selector.Pos())) }
+			if !ok { return true }
+			// Standard-library imports remain deliberately incomplete. Require
+			// every producer/native selector, using type identity through aliases.
+			ownedReceiver := false
+			if root, ok := selector.X.(*ast.Ident); ok {
+				if pkg, ok := info.Uses[root].(*types.PkgName); ok { ownedReceiver = pkg.Imported() == native }
+			}
+			receiver := types.Unalias(info.TypeOf(selector.X))
+			for {
+				pointer, ok := receiver.(*types.Pointer)
+				if !ok { break }
+				receiver = types.Unalias(pointer.Elem())
+			}
+			if named, ok := receiver.(*types.Named); ok { ownedReceiver = ownedReceiver || named.Obj().Pkg() == native || named.Obj().Pkg() == sourcePackage }
+			if ownedReceiver { logicalMDBXAssert(t, info.Uses[selector.Sel] != nil, "block source unresolved selector %s at %s", selector.Sel.Name, fset.Position(selector.Pos())) }
 			return true
 		})
 	}
