@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +160,139 @@ func TestRustInterop_RustClientSyncsFiveBlocksFromGo(t *testing.T) {
 	defer terminateHelper(cmd)
 
 	waitRustInterop(t, cmd, logs)
+}
+
+func TestRustInterop_GoToRustSendCmpctUnsupportedVersionKeepsSession(t *testing.T) {
+	cmd, logs, injected := startGoSendCmpctProxySync(t, []byte{2, 2, 0, 0, 0, 0, 0, 0, 0})
+	waitRustInterop(t, cmd, logs)
+	requireOneInjection(t, injected)
+}
+
+func TestRustInterop_GoToRustSendCmpctMalformedModeEndsSession(t *testing.T) {
+	cmd, logs, injected := startGoSendCmpctProxySync(t, []byte{3, 2, 0, 0, 0, 0, 0, 0, 0})
+	stderr := waitRustInteropExit1(t, cmd, logs)
+	if !strings.Contains(stderr, "unsupported compact relay mode") {
+		t.Fatalf("stderr=%q, want unsupported compact relay mode", stderr)
+	}
+	requireOneInjection(t, injected)
+}
+
+func TestRustInterop_RustToGoSendCmpctUnsupportedVersionKeepsSession(t *testing.T) {
+	cmd, logs := startRustSendCmpctSync(t, "2:2")
+	waitRustInterop(t, cmd, logs)
+}
+
+func TestRustInterop_RustToGoSendCmpctSupportedVersionBaseline(t *testing.T) {
+	cmd, logs := startRustSendCmpctSync(t, "2:1")
+	waitRustInterop(t, cmd, logs)
+}
+
+func TestRustInterop_RustToGoSendCmpctMalformedModeEndsSession(t *testing.T) {
+	cmd, logs := startRustSendCmpctSync(t, "3:2")
+	stderr := waitRustInteropExit1(t, cmd, logs)
+	if !strings.HasPrefix(stderr, "action: ") {
+		t.Fatalf("stderr=%q, want prefix %q", stderr, "action: ")
+	}
+}
+
+func startInteropSyncSource(t *testing.T) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	source := newTestHarness(t, 6, "127.0.0.1:0", nil)
+	if err := source.service.Start(ctx); err != nil {
+		t.Fatalf("source.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = source.service.Close() })
+	return source.service.Addr()
+}
+
+func startRustSendCmpctSync(t *testing.T, value string) (*exec.Cmd, *bytes.Buffer) {
+	t.Helper()
+	bin := requireRustInterop(t)
+	addr := startInteropSyncSource(t)
+	cmd, logs := startRustInteropClient(t, bin, addr, "sync-blocks", "--sendcmpct", value)
+	t.Cleanup(func() { terminateHelper(cmd) })
+	return cmd, logs
+}
+
+func startGoSendCmpctProxySync(t *testing.T, payload []byte) (*exec.Cmd, *bytes.Buffer, *atomic.Int32) {
+	t.Helper()
+	bin := requireRustInterop(t)
+	addr := startInteropSyncSource(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	injected := new(atomic.Int32)
+	go runSendCmpctProxy(listener, addr, payload, injected)
+	cmd, logs := startRustInteropClient(t, bin, listener.Addr().String(), "sync-blocks")
+	t.Cleanup(func() { terminateHelper(cmd) })
+	return cmd, logs, injected
+}
+
+// runSendCmpctProxy forwards one Rust connection to the Go Service. Rust-to-Go
+// bytes are copied unchanged; Go-to-Rust frames are forwarded by this single
+// goroutine, which writes the injected sendcmpct right after the Service's own
+// sendcmpct and before reading any further Service frame.
+func runSendCmpctProxy(listener net.Listener, serviceAddr string, payload []byte, injected *atomic.Int32) {
+	rustConn, err := listener.Accept()
+	if err != nil {
+		return
+	}
+	defer rustConn.Close()
+	goConn, err := net.Dial("tcp", serviceAddr)
+	if err != nil {
+		return
+	}
+	defer goConn.Close()
+	go func() { _, _ = io.Copy(goConn, rustConn) }()
+	magic := networkMagic("devnet")
+	maxSize := node.DefaultPeerRuntimeConfig("devnet", 8).MaxMessageSize
+	pending := true
+	for {
+		frame, err := readFrame(goConn, magic, maxSize)
+		if err != nil || writeFrame(rustConn, magic, frame, maxSize) != nil {
+			return
+		}
+		if !pending || frame.Command != messageSendCmpct {
+			continue
+		}
+		pending = false
+		if writeFrame(rustConn, magic, message{Command: messageSendCmpct, Payload: payload}, maxSize) != nil {
+			return
+		}
+		injected.Add(1)
+	}
+}
+
+func requireOneInjection(t *testing.T, injected *atomic.Int32) {
+	t.Helper()
+	if got := injected.Load(); got != 1 {
+		t.Fatalf("injected sendcmpct frames=%d, want 1", got)
+	}
+}
+
+// waitRustInteropExit1 requires the helper to exit with code 1 before the
+// 5-second deadline and returns its stderr.
+func waitRustInteropExit1(t *testing.T, cmd *exec.Cmd, logs *bytes.Buffer) string {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	select {
+	case <-done:
+		if code := cmd.ProcessState.ExitCode(); code != 1 {
+			t.Fatalf("rust helper exit code=%d, want 1\nstderr:\n%s", code, logs.String())
+		}
+		return logs.String()
+	case <-time.After(5 * time.Second):
+		terminateHelper(cmd)
+		t.Fatalf("rust helper timeout, want exit 1\nstderr:\n%s", logs.String())
+	}
+	return ""
 }
 
 func requireRustInterop(t *testing.T) string {

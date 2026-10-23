@@ -39,6 +39,7 @@ pub struct CliConfig {
     pub bind_addr: String,
     pub connect_addr: Option<String>,
     pub best_height: u64,
+    pub sendcmpct: Vec<(u8, u64)>,
 }
 
 pub fn run_cli(args: &[String]) -> Result<(), String> {
@@ -67,6 +68,7 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
     let mut connect_addr = None;
     let mut payload_hex = String::new();
     let mut best_height = 0u64;
+    let mut sendcmpct = Vec::new();
 
     let mut idx = 1usize;
     while idx < args.len() {
@@ -109,6 +111,13 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
                     .parse::<u64>()
                     .map_err(|err| format!("invalid --best-height: {err}"))?;
             }
+            "--sendcmpct" => {
+                idx += 1;
+                let raw = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --sendcmpct".to_string())?;
+                sendcmpct.push(parse_sendcmpct(raw)?);
+            }
             unknown => return Err(format!("unknown flag: {unknown}")),
         }
         idx += 1;
@@ -127,6 +136,9 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
     if mode == Mode::Client && connect_addr.is_none() {
         return Err("--connect is required in client mode".to_string());
     }
+    if mode == Mode::Server && !sendcmpct.is_empty() {
+        return Err("--sendcmpct requires client mode".to_string());
+    }
 
     Ok(CliConfig {
         mode,
@@ -134,7 +146,30 @@ pub fn parse_args(args: &[String]) -> Result<CliConfig, String> {
         bind_addr,
         connect_addr,
         best_height,
+        sendcmpct,
     })
+}
+
+fn parse_sendcmpct(raw: &str) -> Result<(u8, u64), String> {
+    let invalid = || format!("invalid --sendcmpct: {raw}");
+    let (mode, version) = raw.split_once(':').ok_or_else(invalid)?;
+    let mode = mode.parse::<u8>().map_err(|_| invalid())?;
+    let version = version.parse::<u64>().map_err(|_| invalid())?;
+    Ok((mode, version))
+}
+
+fn send_sendcmpct(session: &mut PeerSession, frames: &[(u8, u64)]) -> Result<(), String> {
+    for (mode, version) in frames {
+        let mut payload = vec![*mode];
+        payload.extend_from_slice(&version.to_le_bytes());
+        session
+            .write_message(&WireMessage {
+                command: "sendcmpct".to_string(),
+                payload,
+            })
+            .map_err(|err| format!("sendcmpct: {err}"))?;
+    }
+    Ok(())
 }
 
 pub fn run(cfg: CliConfig) -> Result<(), String> {
@@ -187,6 +222,7 @@ where
                 local.genesis_hash,
             )
             .map_err(|err| format!("handshake: {err}"))?;
+            send_sendcmpct(&mut session, &cfg.sendcmpct)?;
             run_action(&mut session, &cfg.action).map_err(|err| format!("action: {err}"))
         }
     }
@@ -663,6 +699,7 @@ mod tests {
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
             connect_addr: Some(addr.to_string()),
             best_height: 0,
+            sendcmpct: Vec::new(),
         })
         .expect("client run");
         server.join().expect("server");
@@ -789,5 +826,132 @@ mod tests {
 
         server.join().expect("server").expect("server result");
         client.join().expect("client");
+    }
+
+    fn client_args(extra: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "client".to_string(),
+            "--connect".to_string(),
+            "127.0.0.1:9000".to_string(),
+        ];
+        args.extend(extra.iter().map(|arg| arg.to_string()));
+        args
+    }
+
+    #[test]
+    fn parse_args_sendcmpct_accepts_values_in_order() {
+        let cfg = parse_args(&client_args(&[
+            "--sendcmpct",
+            "2:2",
+            "--sendcmpct",
+            "3:2",
+            "--sendcmpct",
+            "255:2",
+            "--sendcmpct",
+            "2:18446744073709551615",
+            "--sendcmpct",
+            "+1:+7",
+        ]))
+        .expect("parse");
+        assert_eq!(
+            cfg.sendcmpct,
+            vec![(2, 2), (3, 2), (255, 2), (2, u64::MAX), (1, 7)]
+        );
+    }
+
+    #[test]
+    fn parse_args_sendcmpct_rejects_malformed_values() {
+        for raw in [
+            "22",
+            "256:2",
+            ":2",
+            "2:",
+            "2:x",
+            "x:2",
+            "2:2:2",
+            "2:18446744073709551616",
+        ] {
+            let err = parse_args(&client_args(&["--sendcmpct", raw])).unwrap_err();
+            assert!(err.starts_with("invalid --sendcmpct"), "{raw}: {err}");
+        }
+        let err = parse_args(&client_args(&["--sendcmpct"])).unwrap_err();
+        assert_eq!(err, "missing value for --sendcmpct");
+    }
+
+    #[test]
+    fn parse_args_sendcmpct_requires_client_mode_after_value_check() {
+        let server = |raw: &str| {
+            parse_args(&[
+                "server".to_string(),
+                "--sendcmpct".to_string(),
+                raw.to_string(),
+            ])
+            .unwrap_err()
+        };
+        assert_eq!(server("2:2"), "--sendcmpct requires client mode");
+        assert!(server("2:x").starts_with("invalid --sendcmpct"));
+    }
+
+    fn loopback_handshake(listener: TcpListener) -> PeerSession {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut cfg = default_peer_runtime_config("devnet", 8);
+        cfg.read_deadline = Duration::from_secs(2);
+        cfg.write_deadline = Duration::from_secs(2);
+        let local = local_version(0).expect("local");
+        perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+            .expect("handshake")
+    }
+
+    #[test]
+    fn run_client_writes_sendcmpct_frames_after_handshake() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        let server = thread::spawn(move || {
+            let mut session = loopback_handshake(listener);
+            let first = session.read_message().expect("first frame");
+            let second = session.read_message().expect("second frame");
+            let after = session.read_message();
+            (first, second, after.is_err())
+        });
+        let args = vec![
+            "client".to_string(),
+            "--connect".to_string(),
+            addr,
+            "--sendcmpct".to_string(),
+            "2:2".to_string(),
+            "--sendcmpct".to_string(),
+            "1:258".to_string(),
+            "--action".to_string(),
+            "idle".to_string(),
+        ];
+        run_cli_with_ready(&args, |_| Ok(())).expect("client run");
+        let (first, second, closed_after) = server.join().expect("server");
+        assert_eq!(first.command, "sendcmpct");
+        assert_eq!(first.payload, vec![0x02, 0x02, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(second.command, "sendcmpct");
+        assert_eq!(second.payload, vec![0x01, 0x02, 0x01, 0, 0, 0, 0, 0, 0]);
+        assert!(closed_after, "no further frame expected after sendcmpct");
+    }
+
+    #[test]
+    fn send_sendcmpct_maps_write_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || loopback_handshake(listener));
+        let stream = TcpStream::connect(addr).expect("connect");
+        let control = stream.try_clone().expect("clone");
+        let mut cfg = default_peer_runtime_config("devnet", 8);
+        cfg.read_deadline = Duration::from_secs(2);
+        cfg.write_deadline = Duration::from_secs(2);
+        let local = local_version(0).expect("local");
+        let mut session =
+            perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                .expect("handshake");
+        let _peer = server.join().expect("server");
+        control
+            .shutdown(std::net::Shutdown::Write)
+            .expect("shutdown write");
+        let err = send_sendcmpct(&mut session, &[(2, 2)]).unwrap_err();
+        assert!(err.starts_with("sendcmpct: "), "{err}");
     }
 }
