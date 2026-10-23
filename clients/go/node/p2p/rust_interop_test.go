@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -190,8 +191,53 @@ func TestRustInterop_RustToGoSendCmpctSupportedVersionBaseline(t *testing.T) {
 func TestRustInterop_RustToGoSendCmpctMalformedModeEndsSession(t *testing.T) {
 	cmd, logs := startRustSendCmpctSync(t, "3:2")
 	stderr := waitRustInteropExit1(t, cmd, logs)
-	if !strings.HasPrefix(stderr, "action: ") {
-		t.Fatalf("stderr=%q, want prefix %q", stderr, "action: ")
+	if err := checkPeerCloseActionError(stderr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var osErrorSuffix = regexp.MustCompile(` \(os error [0-9]+\)$`)
+
+// checkPeerCloseActionError accepts helper stderr only when the session ended
+// after the handshake because the peer closed it, not because the helper's
+// own read deadline expired.
+func checkPeerCloseActionError(stderr string) error {
+	text, ok := strings.CutPrefix(strings.TrimSuffix(stderr, "\n"), "action: ")
+	if !ok {
+		return fmt.Errorf("stderr=%q, want prefix %q", stderr, "action: ")
+	}
+	for _, bad := range []string{"peer read timeout", "deadline exceeded", "timed out", "temporarily unavailable"} {
+		if strings.Contains(text, bad) {
+			return fmt.Errorf("stderr=%q contains %q, want a peer close", stderr, bad)
+		}
+	}
+	if strings.Contains(text, "peer closed connection") || osErrorSuffix.MatchString(text) {
+		return nil
+	}
+	return fmt.Errorf("stderr=%q, want a peer close error", stderr)
+}
+
+func TestRustInterop_SendCmpctPeerCloseCheckClassifiesStderr(t *testing.T) {
+	for _, stderr := range []string{
+		"action: peer closed connection\n",
+		"action: Connection reset by peer (os error 54)\n",
+		"action: Broken pipe (os error 32)",
+	} {
+		if err := checkPeerCloseActionError(stderr); err != nil {
+			t.Errorf("accept %q: %v", stderr, err)
+		}
+	}
+	for _, stderr := range []string{
+		"action: peer read timeout\n",
+		"action: Resource temporarily unavailable (os error 35)\n",
+		"action: operation timed out (os error 60)\n",
+		"handshake: peer closed connection\n",
+		"action: sync height mismatch: got 1 want 5\n",
+		"action: (os error x)\n",
+	} {
+		if checkPeerCloseActionError(stderr) == nil {
+			t.Errorf("reject %q: accepted", stderr)
+		}
 	}
 }
 

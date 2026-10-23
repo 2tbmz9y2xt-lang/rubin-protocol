@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rubin_consensus::block_hash;
@@ -267,35 +267,37 @@ pub fn run_action(session: &mut PeerSession, action: &Action) -> io::Result<()> 
             }
             Ok(())
         }
-        Action::SyncBlocks => {
-            let mut data_dir = unique_interop_temp_dir();
-            fs::create_dir_all(&data_dir)?;
-            let block_store =
-                BlockStore::create(block_store_path(&data_dir)).map_err(io::Error::other)?;
-            let chain_state_path = chain_state_path(&data_dir);
-            let mut cfg = default_sync_config(
-                Some(POW_LIMIT),
-                devnet_genesis_chain_id(),
-                Some(chain_state_path),
-            );
-            cfg.network = "devnet".to_string();
-            let mut engine = SyncEngine::new(ChainState::new(), Some(block_store), cfg)
-                .map_err(io::Error::other)?;
-            let synced_height = session.run_block_sync_loop(&mut engine)?;
-            if synced_height != session.state().remote_version.best_height {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "sync height mismatch: got {} want {}",
-                        synced_height,
-                        session.state().remote_version.best_height
-                    ),
-                ));
-            }
-            let _ = fs::remove_dir_all(&mut data_dir);
-            Ok(())
-        }
+        Action::SyncBlocks => sync_blocks_in(session, &unique_interop_temp_dir()),
     }
+}
+
+fn sync_blocks_in(session: &mut PeerSession, data_dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(data_dir)?;
+    let result = sync_blocks_with_dir(session, data_dir);
+    let _ = fs::remove_dir_all(data_dir);
+    result
+}
+
+fn sync_blocks_with_dir(session: &mut PeerSession, data_dir: &Path) -> io::Result<()> {
+    let block_store = BlockStore::create(block_store_path(data_dir)).map_err(io::Error::other)?;
+    let chain_state_path = chain_state_path(data_dir);
+    let mut cfg = default_sync_config(
+        Some(POW_LIMIT),
+        devnet_genesis_chain_id(),
+        Some(chain_state_path),
+    );
+    cfg.network = "devnet".to_string();
+    let mut engine =
+        SyncEngine::new(ChainState::new(), Some(block_store), cfg).map_err(io::Error::other)?;
+    let synced_height = session.run_block_sync_loop(&mut engine)?;
+    let remote_height = session.state().remote_version.best_height;
+    if synced_height != remote_height {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("sync height mismatch: got {synced_height} want {remote_height}"),
+        ));
+    }
+    Ok(())
 }
 
 pub fn local_version(best_height: u64) -> Result<VersionPayloadV1, String> {
@@ -953,5 +955,25 @@ mod tests {
             .expect("shutdown write");
         let err = send_sendcmpct(&mut session, &[(2, 2)]).unwrap_err();
         assert!(err.starts_with("sendcmpct: "), "{err}");
+    }
+
+    #[test]
+    fn sync_blocks_removes_data_dir_on_error_return() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || drop(loopback_handshake(listener)));
+        let stream = TcpStream::connect(addr).expect("connect");
+        let mut cfg = default_peer_runtime_config("devnet", 8);
+        cfg.read_deadline = Duration::from_secs(2);
+        cfg.write_deadline = Duration::from_secs(2);
+        let local = local_version(0).expect("local");
+        let mut session =
+            perform_version_handshake(stream, cfg, local, local.chain_id, local.genesis_hash)
+                .expect("handshake");
+        server.join().expect("server");
+        let data_dir = unique_interop_temp_dir();
+        let err = sync_blocks_in(&mut session, &data_dir).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert!(!data_dir.exists(), "data dir left behind: {data_dir:?}");
     }
 }
