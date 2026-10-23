@@ -523,16 +523,65 @@ func tcPBudgets(t *testing.T) [3]uint64 {
 
 var tcOldSink treeOldV1
 
-// tcAllocAvg is the runtime.MemStats TotalAlloc delta of f averaged over 100 runs after one warm-up run.
-func tcAllocAvg(f func()) float64 {
+const (
+	tcAllocRuns    = 100
+	tcAllocWindows = 10
+)
+
+// tcAllocAvg is the per-call runtime.MemStats TotalAlloc delta of f over a window of 100 calls after one warm-up
+// call. f allocates the same bytes on every call, so a window whose delta is not a multiple of 100 holds an
+// allocation outside f (for example the runtime scavenger) and is discarded; at most 10 windows are measured. It
+// returns the clean average, the number of windows used and whether a clean window was found. A contamination that
+// is itself a multiple of 100 bytes is not detected.
+func tcAllocAvg(f func()) (avg float64, windows int, found bool) {
 	f()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for range 100 {
-		f()
+	for windows < tcAllocWindows {
+		windows++
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range tcAllocRuns {
+			f()
+		}
+		runtime.ReadMemStats(&after)
+		if delta := after.TotalAlloc - before.TotalAlloc; delta%tcAllocRuns == 0 {
+			return float64(delta) / tcAllocRuns, windows, true
+		}
 	}
-	runtime.ReadMemStats(&after)
-	return float64(after.TotalAlloc-before.TotalAlloc) / 100
+	return 0, windows, false
+}
+
+// tcAllocBase is a size-class allocation: below 16 bytes the Go tiny allocator serves pointer-free makes, and
+// -race disables it, so the same make would measure differently with and without -race.
+const tcAllocBase = 16
+
+var tcAllocSink []byte
+
+func TestTcAllocAvgDiscardsContaminatedFirstWindow(t *testing.T) {
+	calls := 0
+	avg, windows, found := tcAllocAvg(func() {
+		calls++
+		tcAllocSink = make([]byte, tcAllocBase)
+		if calls == 2 {
+			tcAllocSink = make([]byte, 16)
+		}
+	})
+	if !found || avg != tcAllocBase || windows < 2 {
+		t.Fatalf("avg %.1f, windows %d, found %v, want %d, at least 2, true", avg, windows, found, tcAllocBase)
+	}
+}
+
+func TestTcAllocAvgReportsNotFoundAfterTenWindows(t *testing.T) {
+	calls := 0
+	_, windows, found := tcAllocAvg(func() {
+		calls++
+		tcAllocSink = make([]byte, tcAllocBase)
+		if (calls-2)%tcAllocRuns == 0 {
+			tcAllocSink = make([]byte, 16)
+		}
+	})
+	if found || windows != tcAllocWindows {
+		t.Fatalf("windows %d, found %v, want %d, false", windows, found, tcAllocWindows)
+	}
 }
 
 // tcAllocationGuards are the A1 bounds behind R = 208 + 728 + 128 + 80 (D33, D34, D36, D37) on a read txn of the
@@ -568,11 +617,14 @@ func tcVisitGuard(t *testing.T, reader *Reader) {
 		return nil
 	}
 	var visitErr error
-	visit := tcAllocAvg(func() {
+	visit, windows, found := tcAllocAvg(func() {
 		visitErr = errors.Join(visitErr, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: LargeImageBlockBodyV1, Hash: tcB0}, visitor))
 	})
-	t.Logf("D34 visit allocation %.1f bytes", visit)
-	if visitErr != nil || visit > 728 || reads != 101 {
+	if !found {
+		t.Fatalf("no clean allocation window in %d (D34), err %v", windows, visitErr)
+	}
+	t.Logf("D34 visit allocation %.1f bytes in %d windows", visit, windows)
+	if visitErr != nil || visit > 728 || reads != 1+tcAllocRuns*windows {
 		t.Fatalf("block-body visit with one ReadAt: %.1f bytes, %d reads, err %v (D34 bound 728)", visit, reads, visitErr)
 	}
 }
@@ -588,8 +640,11 @@ func tcOldGuard(t *testing.T, section *treeSectionV1, readback *treeReadbackStat
 		{"writer", func() { tcOldSink = section.oldV1(false) }},
 		{"readback", func() { tcOldSink = readback.oldV1() }},
 	} {
-		got := tcAllocAvg(row.f)
-		t.Logf("D36 %s oldV1 allocation %.1f bytes", row.name, got)
+		got, windows, found := tcAllocAvg(row.f)
+		if !found {
+			t.Fatalf("%s: no clean allocation window in %d (D36)", row.name, windows)
+		}
+		t.Logf("D36 %s oldV1 allocation %.1f bytes in %d windows", row.name, got, windows)
 		if got > 64 {
 			t.Fatalf("%s oldV1 allocates %.1f bytes, above 64 (D36)", row.name, got)
 		}
@@ -603,12 +658,15 @@ func tcSeekGuard(t *testing.T, amended *treeAmendedV1, marker []byte) {
 	var key []byte
 	var nextErr error
 	from := make([]byte, 32)
-	got := tcAllocAvg(func() {
+	got, windows, found := tcAllocAvg(func() {
 		var err error
 		key, _, _, err = amended.nextV1(schemaDBIs[5], from)
 		nextErr = errors.Join(nextErr, err)
 	})
-	t.Logf("D37 seek allocation %.1f bytes", got)
+	if !found {
+		t.Fatalf("no clean allocation window in %d (D37), err %v", windows, nextErr)
+	}
+	t.Logf("D37 seek allocation %.1f bytes in %d windows", got, windows)
 	if nextErr != nil || got > 80 || string(key) <= string(marker) {
 		t.Fatalf("seek over a shadowed marker: %.1f bytes, key %x, err %v (D37 bound 80)", got, key, nextErr)
 	}
