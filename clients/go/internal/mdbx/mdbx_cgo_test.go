@@ -2788,7 +2788,7 @@ func assertReadSurfaceOwnershipAST(t *testing.T) {
 			"s.operations.TryLock": 1, "adapterError": 2, "s.operations.Unlock": 1,
 			"s.observationStateError": 1, "C.rubin_mdbx_txn_begin": 1,
 			"nativePointerResultError": 1, "int": 1, "s.failedReadBegin": 1,
-			"newReader": 1, "uint8": 1, "s.format.Load": 1, "uint64": 1, "limitsForPage": 1, "reader.active.Store": 1,
+			"newReader": 1, "uint8": 1, "s.format.Load": 1, "uint64": 1, "limitsForPage": 1, "reader.captureLineageV1": 1, "reader.active.Store": 1,
 			"<closure>": 1, "reader.expire().retire": 1, "reader.expire": 1,
 			"readPrimary": 1, "s.abortReadLocked": 1, "startupPublicationAllowed": 1,
 			"callback": 1, "startupCompletionResult": 1,
@@ -5334,7 +5334,7 @@ func TestUpdateSourceOwnership(t *testing.T) {
 		t.Fatal("predecessor owner changed")
 	}
 	applyCalls := updateNativeCalls(t, source, "applyUpdateOutcome")
-	if !reflect.DeepEqual(applyCalls, map[string]int{"outcome.valid": 1, "joinErrors": 1, "updateResult": 1, "updateRetained": 1, "s.poison": 1, "s.consume": 1}) || strings.Contains(body, "s.consume(") {
+	if !reflect.DeepEqual(applyCalls, map[string]int{"s.advanceLineageV1": 1, "outcome.valid": 1, "joinErrors": 1, "updateResult": 1, "updateRetained": 1, "s.poison": 1, "s.consume": 1}) || strings.Contains(body, "s.consume(") {
 		t.Fatal("predecessor owner changed")
 	}
 	apply := updateNativeBody(t, source, "applyUpdateOutcome")

@@ -881,25 +881,71 @@ type Store struct {
 	// Create publication, bootstrapBatch after its exact-empty census and finalized StartupVerifyCanonicalV1 set it.
 	// Open never does; every non-OPEN state refuses before a Reader exists, so nothing clears it.
 	canonicalOwnerVerified bool
+
+	// Process-local mutation lineage (RUBIN_COMPACT_BLOCKS.md Section 10 retained-proof reuse), read and written
+	// only under operations: lineageID is drawn once at construction (0 means non-cacheable), lineageEpoch advances
+	// once per production native commit attempt, and lineageExhausted replaces a wrap at the maximum epoch.
+	lineageID        uint64
+	lineageEpoch     uint64
+	lineageExhausted bool
 }
+
+var storeLineageLast atomic.Uint64
 
 type Reader struct {
 	self       *Reader
 	txn        *C.MDBX_txn
 	dbis       [9]C.MDBX_dbi
 	format     uint8
+	updateOld  bool
 	databaseID [32]byte
 	treeConfig ConfigV1
 	getMu      sync.Mutex
 	active     atomic.Bool
-	failure    error
 	largeVisit atomic.Bool
+	failure    error
 	maxKey     uint64
-	updateOld  bool
 	tip        *canonicalTipCell
+
+	// lineageID and lineageEpoch are the Store lineage captured once at construction; immutable afterwards.
+	lineageID    uint64
+	lineageEpoch uint64
 
 	// ownerVerified is the Store's canonical-owner verification copied when Update or View created this Reader.
 	ownerVerified bool
+	// lineageReusable is false when the Store's identity or epoch space was exhausted at capture.
+	lineageReusable bool
+}
+
+// drawLineageV1 assigns a process-unique nonzero identity; an exhausted counter leaves 0 (non-cacheable), never a reuse.
+func (s *Store) drawLineageV1() {
+	for {
+		last := storeLineageLast.Load()
+		if last == ^uint64(0) {
+			return
+		}
+		if storeLineageLast.CompareAndSwap(last, last+1) {
+			s.lineageID = last + 1
+			return
+		}
+	}
+}
+
+// advanceLineageV1 invalidates the current epoch exactly once for a native commit attempt; the maximum epoch exhausts instead of wrapping.
+func (s *Store) advanceLineageV1(commitAttempted bool) {
+	switch {
+	case !commitAttempted:
+	case s.lineageEpoch == ^uint64(0):
+		s.lineageExhausted = true
+	default:
+		s.lineageEpoch++
+	}
+}
+
+// captureLineageV1 copies the Store lineage into a Reader before any callback can observe it.
+func (r *Reader) captureLineageV1(s *Store) {
+	r.lineageID, r.lineageEpoch = s.lineageID, s.lineageEpoch
+	r.lineageReusable = s.lineageID != 0 && !s.lineageExhausted
 }
 
 const (
@@ -2300,6 +2346,7 @@ func updateAbortOldResult(rc int) (error, bool) {
 }
 
 func (s *Store) applyUpdateOutcome(outcome updateNativeOutcome, old *C.MDBX_txn, cleanup error, oldRetained bool) (CommitTruth, UpdateStage, error) {
+	s.advanceLineageV1(outcome.commitAttempted)
 	if shapeErr := outcome.valid(); shapeErr != nil && (outcome.retainedWrite != nil || outcome.retainedRead != nil) {
 		return CommitTruthOld, UpdateStageInvalid, joinErrors(shapeErr, cleanup)
 	}
@@ -2371,6 +2418,7 @@ func (s *Store) newUpdateReaderV1(txn *C.MDBX_txn) *Reader {
 	reader.updateOld = true
 	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
+	reader.captureLineageV1(s)
 	reader.active.Store(true)
 	return reader
 }
@@ -2439,6 +2487,7 @@ func (s *Store) viewWithStartupCompletion(callback func(*Reader) (StartupCanonic
 	reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config
 	reader.ownerVerified = s.canonicalOwnerVerified
 	reader.maxKey = uint64(limitsForPage(s.config.PageSize).maxKey)
+	reader.captureLineageV1(s)
 	reader.active.Store(true)
 	var completion StartupCanonicalCompletionV1
 	returned := false
@@ -3381,6 +3430,7 @@ func Create(path string, cfg ConfigV1) (*Store, error) {
 	}
 	store := &Store{}
 	store.self = store
+	store.drawLineageV1()
 	store.format.Store(2)
 	err = store.configureCreateEnvironment(path, cfg)
 	if err != nil {
@@ -3425,6 +3475,7 @@ func Open(path string, cfg ConfigV1) (*Store, error) {
 	}
 	store := &Store{writer: writer}
 	store.self = store
+	store.drawLineageV1()
 	store.format.Store(2)
 	err = store.openEnvironment(path, cfg)
 	if err != nil {
@@ -4561,6 +4612,7 @@ func CreateTreeV1(path string, cfg ConfigV1, databaseID [32]byte) (*Store, error
 	}
 	store := &Store{databaseID: databaseID}
 	store.self = store
+	store.drawLineageV1()
 	store.format.Store(3)
 	if err = store.configureCreateEnvironment(path, cfg); err != nil {
 		return store.consumeFailure(err)
@@ -4613,6 +4665,7 @@ func OpenTreeV1(path string, cfg ConfigV1, databaseID [32]byte) (*Store, error) 
 	}
 	store := &Store{writer: writer, databaseID: databaseID}
 	store.self = store
+	store.drawLineageV1()
 	store.format.Store(3)
 	if err = store.openEnvironment(path, cfg); err != nil {
 		return store.consumeFailure(err)
