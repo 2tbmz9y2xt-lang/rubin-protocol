@@ -196,7 +196,7 @@ func TestRustInterop_RustToGoSendCmpctMalformedModeEndsSession(t *testing.T) {
 	}
 }
 
-var osErrorSuffix = regexp.MustCompile(` \(os error [0-9]+\)$`)
+var peerCloseOSError = regexp.MustCompile(`(Connection reset by peer|Broken pipe|Software caused connection abort|Invalid argument) \(os error [0-9]+\)$`)
 
 // checkPeerCloseActionError accepts helper stderr only when the session ended
 // after the handshake because the peer closed it, not because the helper's
@@ -211,7 +211,7 @@ func checkPeerCloseActionError(stderr string) error {
 			return fmt.Errorf("stderr=%q contains %q, want a peer close", stderr, bad)
 		}
 	}
-	if strings.Contains(text, "peer closed connection") || osErrorSuffix.MatchString(text) {
+	if strings.Contains(text, "peer closed connection") || peerCloseOSError.MatchString(text) {
 		return nil
 	}
 	return fmt.Errorf("stderr=%q, want a peer close error", stderr)
@@ -222,6 +222,8 @@ func TestRustInterop_SendCmpctPeerCloseCheckClassifiesStderr(t *testing.T) {
 		"action: peer closed connection\n",
 		"action: Connection reset by peer (os error 54)\n",
 		"action: Broken pipe (os error 32)",
+		"action: Software caused connection abort (os error 103)\n",
+		"action: Invalid argument (os error 22)\n",
 	} {
 		if err := checkPeerCloseActionError(stderr); err != nil {
 			t.Errorf("accept %q: %v", stderr, err)
@@ -234,6 +236,9 @@ func TestRustInterop_SendCmpctPeerCloseCheckClassifiesStderr(t *testing.T) {
 		"handshake: peer closed connection\n",
 		"action: sync height mismatch: got 1 want 5\n",
 		"action: (os error x)\n",
+		"action: No space left on device (os error 28)\n",
+		"action: A connection attempt failed (os error 10060)\n",
+		"action: Connection reset by peer (os error x)\n",
 	} {
 		if checkPeerCloseActionError(stderr) == nil {
 			t.Errorf("reject %q: accepted", stderr)
