@@ -287,6 +287,7 @@ func TestBlockTreeSourceV1(t *testing.T) {
 	t.Run("framing", btFraming)
 	t.Run("syntax-limits", btSyntaxLimits)
 	t.Run("compact-owners", btCompactOwners)
+	t.Run("complete-span-truncation", btSpanTruncation)
 	t.Run("count-charge", btCountCharge)
 	t.Run("layout", btLayout)
 	t.Run("captured-fields", btCaptured)
@@ -503,6 +504,23 @@ func btCompactOwners(t *testing.T) {
 	r := btRequest(btBody(148, 1, [32]byte{}, txs...), 1)
 	_, effect, err := btPrepare(t, w, r)
 	logicalMDBXAssert(t, err == nil && effect.Primitive.Coverage.BlockMeta.TxCount == 253 && effect.Primitive.Coverage.BlockMeta.EventCount == 0, "3-byte tx_count: %v", err)
+}
+
+func btSpanTruncation(t *testing.T) {
+	w := btNew(t)
+	for _, kind := range []byte{0, 1, 2} {
+		payload := []byte(nil); if kind != 0 { payload = []byte{1, 2, 3, 4, 5, 6, 7} }
+		tx := btTransaction(1, kind, []Outpoint{{Txid: [32]byte{3}}}, [][]byte{btFrame(4, 0, []byte{5, 6, 7, 8, 9})}, []byte{1, 2, 3}, []byte{1, 0x7f, 1, 9, 2, 8, 7}, payload)
+		r := btRequest(btBody(148, 1, [32]byte{}, tx), 1)
+		_, _, err := btPrepare(t, w, r); logicalMDBXAssert(t, err == nil, "complete kind%d control: %v", kind, err)
+		complete := r.Raw
+		for end := 162; end < len(complete); end++ {
+			r.Raw = complete[:end]
+			_, effect, err := btPrepare(t, w, r)
+			btFailure(t, err, logicalStateFailureLocalInvariant, "qualified block tree source framing differs")
+			logicalMDBXAssert(t, reflect.ValueOf(effect).IsZero(), "kind%d truncated at%d published effect", kind, end)
+		}
+	}
 }
 
 func btDaLimitCases() []btSyntaxCase {
