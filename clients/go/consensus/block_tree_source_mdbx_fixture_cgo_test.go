@@ -64,7 +64,7 @@ func btfStored(t *testing.T) {
 				w.pair(t, btMutation(3, r.Block[:], r.Raw[:148]), btMutation(4, r.Block[:], r.Raw))
 			}
 			if variant == "malformed" {
-				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, r.Block[:], []byte{0x7f}) == nil, "stored malformed fixture")
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, bytes.Clone(r.Block[:]), []byte{0x7f}) == nil, "stored malformed fixture")
 			}
 			stored := bytes.Clone(r.Raw)
 			r.BodyKind, r.Raw = 2, nil
@@ -76,7 +76,7 @@ func btfStored(t *testing.T) {
 				if variant == "IO-abort" {
 					scenario = mdbx.SelectedDamageGetAbortEIO
 				}
-				evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 4, r.Block[:], run)
+				evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 4, bytes.Clone(r.Block[:]), run)
 				logicalMDBXAssert(t, err == nil && evidence.Faults != 0 && evidence.Commits == 0 && evidence.Deletes == 0, "stored IO site %+v/%v", evidence, err)
 				result.want(t, 1, 1, -1)
 				var engine *mdbx.EngineError
@@ -236,7 +236,7 @@ func btfSourcePrimary(t *testing.T) {
 				})
 			}
 			if variant == "reader-direct" || variant == "reader-wrapped" || variant == "reader-caused" {
-				evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 3, other.Block[:], run)
+				evidence, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 3, bytes.Clone(other.Block[:]), run)
 				logicalMDBXAssert(t, fixtureErr == nil && evidence.Faults == 1 && evidence.Commits == 0 && evidence.Deletes == 0, "Reader failure site: %+v/%v", evidence, fixtureErr)
 			} else {
 				run()

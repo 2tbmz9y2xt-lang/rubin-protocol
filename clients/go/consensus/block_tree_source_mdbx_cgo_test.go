@@ -968,6 +968,8 @@ func btAdmission(t *testing.T) {
 			if name == "width116" {
 				r.Raw = btBody(116, 1, [32]byte{}, tx)
 				r.HeaderBytes = 116
+				r.Block = sha3.Sum256(r.Raw[:116])
+				r.Endpoint.BlockHash = r.Block
 			}
 			result, _, sources := w.run(t, []blockTreeRequestV1{r}, func(e []blockTreeEffectV1, _ []*btObserved, op *mdbx.TreeOperationV1) {
 				body, owner := 2, 3
@@ -995,11 +997,41 @@ func btAdmission(t *testing.T) {
 					op.Primitives[0].Coverage.CurrentBody = bytes.Clone(e[0].CurrentBody.Literal)
 				}
 			})
-			result.want(t, 1, 1, -1)
+			presence := name == "canonical-presence" || name == "owner-presence"
+			if presence {
+				result.want(t, 1, 2, -1)
+				var engine *mdbx.EngineError
+				ok := errors.As(result.err, &engine)
+				logicalMDBXAssert(t, ok && engine != nil && reflect.ValueOf(result.err).Equal(reflect.ValueOf(engine)) && engine.Operation == "update" && engine.Class == "StateMismatch" && engine.Code == -30798 && engine.Diagnostic == "MDBX_NOTFOUND: No matching key/data pair found" && engine.Cause == nil && engine.TreeObservation == nil && !engine.ReopenRequired, "index presence refusal: %T %+v", result.err, result.err)
+				logicalMDBXAssert(t, sources[0].calls == ([3]int{0, 1, 0}), "index presence source calls %v", sources[0].calls)
+				called := 0
+				err := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+					truth, stage, index, err := w.s.UpdateTreeV1(a, func(*mdbx.Reader) (mdbx.TreeOperationV1, error) {
+						called++
+						t.Fatal("consumed index presence callback")
+						return mdbx.TreeOperationV1{}, nil
+					})
+					(btResult{truth: truth, stage: stage, index: index, err: err}).want(t, 1, 1, -1)
+					logicalMDBXAssert(t, reflect.ValueOf(err).Equal(reflect.ValueOf(result.err)) && called == 0 && sources[0].calls == ([3]int{0, 1, 0}), "cached index presence refusal: %v callback%d source%v", err, called, sources[0].calls)
+					return nil
+				})
+				logicalMDBXAssert(t, err == nil, "cached index presence account: %v", err)
+				btReservationsReleased(t, w.owner)
+			} else {
+				result.want(t, 1, 1, -1)
+				logicalMDBXAssert(t, result.err != nil && sources[0].calls == ([3]int{}), "admission source calls %v / %v", sources[0].calls, result.err)
+			}
 			pure := name == "body-omitted" || name == "body-copy" || name == "coverage-copy" || name == "width116"
-			logicalMDBXAssert(t, result.err != nil && sources[0].calls == ([3]int{}), "admission source calls %v / %v", sources[0].calls, result.err)
 			if !pure {
 				w.reopen(t)
+			}
+			if presence {
+				btState(t, w, 1, mdbx.TreeEndpointV1{}, nil)
+				btIndexes(t, w, r, false)
+				w.read(t, 1, btUTXOKey(1, Outpoint{Txid: tx.id}), nil)
+				w.read(t, 3, r.Block[:], nil)
+				inspection, err := w.s.Inspect()
+				logicalMDBXAssert(t, err == nil && len(inspection.DBIs) == 9 && inspection.DBIs[1].Entries == 0 && inspection.DBIs[8].Entries == 0, "index presence OLD UTXO/nodes: %+v/%v", inspection, err)
 			}
 			w.read(t, 4, r.Block[:], nil)
 			logicalMDBXAssert(t, w.s.View(func(*mdbx.Reader) error { return nil }) == nil, "admission consumed Store")
