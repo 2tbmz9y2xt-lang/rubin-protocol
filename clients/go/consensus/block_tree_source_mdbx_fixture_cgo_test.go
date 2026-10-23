@@ -74,6 +74,7 @@ func btfStored(t *testing.T) {
 				result.want(t, 1, 1, -1)
 				var engine *mdbx.EngineError
 				logicalMDBXAssert(t, errors.As(result.err, &engine) && engine.Operation == "get" && engine.Class == "IO" && engine.Code == 5 && engine.Diagnostic == "error 5" && engine.TreeObservation == nil, "stored IO remapped: %+v", result.err)
+				if variant == "IO" { logicalMDBXAssert(t, result.err == engine && engine.Cause == nil, "stored IO original object wrapped or reclassified: %T %v", result.err, result.err) }
 				btfCached(t, w, result)
 				return
 			}
