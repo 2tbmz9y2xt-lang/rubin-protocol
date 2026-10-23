@@ -40,7 +40,7 @@ func trRequestV1(t *testing.T, height uint64) (TreeRootReadV1, []TreeEventV1, []
 	})
 	parent := TreeEndpointV1{}
 	if height != 0 {
-		parent = TreeEndpointV1{Kind: 1, Height: height-1, BlockHash: tdTxid(5), CumulativeChainwork: [40]byte{39: 37}}
+		parent = TreeEndpointV1{Kind: 1, Height: height - 1, BlockHash: tdTxid(5), CumulativeChainwork: [40]byte{39: 37}}
 	}
 	return TreeRootReadV1{Primitive: p, Parent: parent}, events, frame
 }
@@ -146,7 +146,9 @@ func trTrustedV1(t *testing.T) {
 	want := testTreeBuild(1, []testTreeEntry{old, trEntryV1(tdUTXOKey(1, tdTxid(37), 0), tdFormed(frame, 6, 1))}, map[string][]byte{})
 	trReadV1(t, s, o, request, func(_ *Reader, _ *OperationAccount, root [32]byte, err error) {
 		mustEnvironment(t, err)
-		if root != want.digest { t.Fatalf("trusted unchanged subtree root %x want%x", root, want.digest) }
+		if root != want.digest {
+			t.Fatalf("trusted unchanged subtree root %x want%x", root, want.digest)
+		}
 	})
 }
 
@@ -174,7 +176,9 @@ func trOriginalV1(t *testing.T) {
 				frame := tdFrame(7, 0, []byte{4})
 				seed.Primitive.Coverage.CurrentBody = append(initial148NativeLiteral(t), frame...)
 				seed.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
-					if err := sink.BeginV1(TreeBlockV1{TxCount: 1, EventCount: 1}); err != nil { return err }
+					if err := sink.BeginV1(TreeBlockV1{TxCount: 1, EventCount: 1}); err != nil {
+						return err
+					}
 					return sink.EventV1(TreeEventV1{Kind: 2, Outpoint: op, FrameOffset: 148, FrameLength: uint32(len(frame))})
 				})
 				trPopulateV1(t, s, o, seed)
@@ -203,7 +207,7 @@ func trOriginalV1(t *testing.T) {
 					return
 				}
 				var engine *EngineError
-				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineIntegrity || reader.usable() || reader.failure != err {
+				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineIntegrity || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("original-input refusal root%x err%v active%v", root, err, reader.usable())
 				}
 			})
@@ -219,29 +223,48 @@ func trInvalidV1(t *testing.T) {
 			request, _, _ := trRequestV1(t, 6)
 			p, c := &request.Primitive, request.Primitive.Coverage
 			switch variant {
-			case "generation": p.Generation, c.Generation = 0, 0
-			case "database": c.DatabaseID[0]++
-			case "coverage-generation": c.Generation++
-			case "coverage-block": c.Block[0]++
-			case "coverage-height": c.Height++
-			case "header": c.HeaderBytes = 116
-			case "body-kind": c.BodyKind = 2
-			case "body-empty": c.CurrentBody = nil
-			case "direction": p.Direction = 2
-			case "kind": p.Kind = 2
-			case "undo": p.Undo = 1
-			case "endpoint": p.Endpoint.BlockHash[0]++
-			case "parent-height": request.Parent.Height++
-			case "parent-kind": request.Parent.Kind = 0
-			case "parent-work": request.Parent.CumulativeChainwork = [40]byte{}
-			case "meta-tx": c.BlockMeta.TxCount = 0
+			case "generation":
+				p.Generation, c.Generation = 0, 0
+			case "database":
+				c.DatabaseID[0]++
+			case "coverage-generation":
+				c.Generation++
+			case "coverage-block":
+				c.Block[0]++
+			case "coverage-height":
+				c.Height++
+			case "header":
+				c.HeaderBytes = 116
+			case "body-kind":
+				c.BodyKind = 2
+			case "body-empty":
+				c.CurrentBody = nil
+			case "direction":
+				p.Direction = 2
+			case "kind":
+				p.Kind = 2
+			case "undo":
+				p.Undo = 1
+			case "endpoint":
+				p.Endpoint.BlockHash[0]++
+			case "parent-height":
+				request.Parent.Height++
+			case "parent-kind":
+				request.Parent.Kind = 0
+			case "parent-work":
+				request.Parent.CumulativeChainwork = [40]byte{}
+			case "meta-tx":
+				c.BlockMeta.TxCount = 0
 			case "inputs-duplicate":
 				c.BlockMeta.EventCount = 2
 				v := tdFormed(tdFrame(1, 0, nil), 1, 0)
 				request.Inputs = []TreeResolvedInputV1{{Value: v}, {Value: v}}
-			case "inputs-width": request.Inputs = []TreeResolvedInputV1{{Value: []byte{1}}}
-			case "inputs-count": request.Inputs = make([]TreeResolvedInputV1, 2)
-			case "nil-source": p.Source = nil
+			case "inputs-width":
+				request.Inputs = []TreeResolvedInputV1{{Value: []byte{1}}}
+			case "inputs-count":
+				request.Inputs = make([]TreeResolvedInputV1, 2)
+			case "nil-source":
+				p.Source = nil
 			}
 			p.Source = trCountingSourceV1(p.Source, t)
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
@@ -282,12 +305,16 @@ func trBoundV1(t *testing.T) {
 		return s.View(func(reader *Reader) error {
 			return account.WithReservation(266480, func() error {
 				request.Primitive.Source = tsSource(func(pos TreePositionV1, sourceReader *Reader, sink *TreeDeltaSinkV1) error {
-					if reservationLive(o) != 554984 { t.Fatalf("simultaneous R+D backing %d, want 554984", reservationLive(o)) }
+					if reservationLive(o) != 554984 {
+						t.Fatalf("simultaneous R+D backing %d, want 554984", reservationLive(o))
+					}
 					return base.TreeDeltaV1(pos, sourceReader, sink)
 				})
 				_, err := reader.DeriveTreeRootV1(account, request)
 				mustEnvironment(t, err)
-				if reservationLive(o) != 266480 { t.Fatal("D released R or retained native backing past last use") }
+				if reservationLive(o) != 266480 {
+					t.Fatal("D released R or retained native backing past last use")
+				}
 				return nil
 			})
 		})
@@ -312,10 +339,16 @@ func trCapacityV1(t *testing.T, s *Store, o *OperationReservationOwner) {
 			return s.View(func(reader *Reader) error {
 				request, _, _ := trRequestV1(t, 0)
 				return account.WithReservation(402653184-288504+extra, func() error {
-					if extra == 1 { request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t) }
+					if extra == 1 {
+						request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
+					}
 					root, err := reader.DeriveTreeRootV1(account, request)
-					if extra == 0 { mustEnvironment(t, err) }
-					if extra == 1 && (!sameError(err, errOperationReservationCapacity) || root != ([32]byte{}) || !reader.usable()) { t.Fatalf("D capacity-before-source %x/%v", root, err) }
+					if extra == 0 {
+						mustEnvironment(t, err)
+					}
+					if extra == 1 && (!sameError(err, errOperationReservationCapacity) || root != ([32]byte{}) || !reader.usable()) {
+						t.Fatalf("D capacity-before-source %x/%v", root, err)
+					}
 					return nil
 				})
 			})
@@ -327,7 +360,9 @@ func trCapacityV1(t *testing.T, s *Store, o *OperationReservationOwner) {
 			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
 			root, err := reader.DeriveTreeRootV1(account, request)
 			var engine *EngineError
-			if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineInvalidInput || !reader.usable() { t.Fatal("wrong account kind admitted or changed Reader") }
+			if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineInvalidInput || !reader.usable() {
+				t.Fatal("wrong account kind admitted or changed Reader")
+			}
 			return nil
 		})
 	}))
@@ -339,7 +374,9 @@ func trCapacityV1(t *testing.T, s *Store, o *OperationReservationOwner) {
 			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
 			root, err := reader.DeriveTreeRootV1(account, request)
 			var engine *EngineError
-			if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineInvalidInput || !reader.usable() || reservationLive(o) != 0 { t.Fatal("nil/zero/closed account reached source/reservation") }
+			if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineInvalidInput || !reader.usable() || reservationLive(o) != 0 {
+				t.Fatal("nil/zero/closed account reached source/reservation")
+			}
 			return nil
 		}))
 	}
@@ -379,8 +416,12 @@ func TestTreeRootReadOutcomeV1(t *testing.T) {
 			kind := TreeObservationAbsentV1
 			if variant == "binding-endpoint" || variant == "binding-database" {
 				id, endpoint := [32]byte{7}, request.Parent
-				if variant == "binding-endpoint" { endpoint.BlockHash[0]++ }
-				if variant == "binding-database" { id[0]++ }
+				if variant == "binding-endpoint" {
+					endpoint.BlockHash[0]++
+				}
+				if variant == "binding-database" {
+					id[0]++
+				}
 				trSeedV1(t, s, o, 0, tsRootKey(1), trBindingIDV1(t, id, 1, endpoint))
 				kind = TreeObservationIdentityMismatchV1
 			}
@@ -391,11 +432,13 @@ func TestTreeRootReadOutcomeV1(t *testing.T) {
 				}
 				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 0, KeyLength: 9, Kind: kind, OriginalImage: true, OriginalReference: true}
 				copy(want.Key[:], tsRootKey(1))
-				if *engine.TreeObservation != want || reader.usable() || reader.failure != err {
+				if *engine.TreeObservation != want || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("observation %+v want %+v; active%v", engine.TreeObservation, want, reader.usable())
 				}
 				_, next := reader.DeriveTreeRootV1(account, request)
-				if next == nil || reader.failure != err { t.Fatal("failed Reader reused") }
+				if next == nil || any(reader.failure) != any(err) {
+					t.Fatal("failed Reader reused")
+				}
 			})
 		})
 	}
@@ -414,8 +457,10 @@ func trUnwindV1(t *testing.T, delivery string) {
 		kept = sink
 		mustEnvironment(t, sink.BeginV1(request.Primitive.Coverage.BlockMeta))
 		switch delivery {
-		case "panic": panic(panicValue)
-		case "goexit": runtime.Goexit()
+		case "panic":
+			panic(panicValue)
+		case "goexit":
+			runtime.Goexit()
 		}
 		return primary
 	})
@@ -423,7 +468,9 @@ func trUnwindV1(t *testing.T, delivery string) {
 	run := func() {
 		defer func() { recovered = recover() }()
 		trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-			if err != primary || root != ([32]byte{}) || !reader.usable() { t.Fatal("source primary changed") }
+			if any(err) != any(primary) || root != ([32]byte{}) || !reader.usable() {
+				t.Fatal("source primary changed")
+			}
 		})
 		ranAfter = true
 	}
@@ -431,8 +478,16 @@ func trUnwindV1(t *testing.T, delivery string) {
 		done := make(chan struct{})
 		go func() { defer close(done); run() }()
 		<-done
-	} else { run() }
-	if delivery == "panic" && recovered != panicValue { t.Fatal("original panic changed") }
-	if delivery != "error" && ranAfter { t.Fatal("unwind continued") }
-	if reservationLive(o) != 0 || kept.WindowV1() != nil || kept.BeginV1(TreeBlockV1{}) == nil { t.Fatal("unwind leaked backing/sink") }
+	} else {
+		run()
+	}
+	if delivery == "panic" && recovered != panicValue {
+		t.Fatal("original panic changed")
+	}
+	if delivery != "error" && ranAfter {
+		t.Fatal("unwind continued")
+	}
+	if reservationLive(o) != 0 || kept.WindowV1() != nil || kept.BeginV1(TreeBlockV1{}) == nil {
+		t.Fatal("unwind leaked backing/sink")
+	}
 }

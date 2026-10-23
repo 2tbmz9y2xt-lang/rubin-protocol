@@ -34,16 +34,16 @@ type initial148RequiredFactV1 struct {
 // Fixed slices contain only actually obtained point facts. No completeness or
 // full-map predicate can be established through this view.
 type initial148RequiredScopeV1 struct {
-	reader          *mdbx.Reader
-	account         *mdbx.OperationAccount
-	request         initial148RequiredRequestV1
-	facts           []initial148RequiredFactV1
-	inputs          []mdbx.TreeResolvedInputV1
-	counters        logicalStateCounters
-	first           error
-	calls           uint64
-	active, sealed  bool
-	haveCounters    bool
+	reader         *mdbx.Reader
+	account        *mdbx.OperationAccount
+	request        initial148RequiredRequestV1
+	facts          []initial148RequiredFactV1
+	inputs         []mdbx.TreeResolvedInputV1
+	counters       logicalStateCounters
+	first          error
+	calls          uint64
+	active, sealed bool
+	haveCounters   bool
 }
 
 func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationAccount, request initial148RequiredRequestV1, use func(logicalStateView, func() initial148RootReadOutcomeV1) error) error {
@@ -54,12 +54,15 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 	if events > (math.MaxUint64-69656)/196824 || events > uint64(math.MaxInt)/128 {
 		return localLogicalStateFailure("required state bound exceeds integer domain")
 	}
+	capacity := int(events)
 	return account.WithReservation(69656+196824*events, func() error {
-		scope := initial148RequiredScopeV1{reader: reader, account: account, request: request, active: true,
-			facts: make([]initial148RequiredFactV1, 0, int(events)), inputs: make([]mdbx.TreeResolvedInputV1, 0, int(events))}
+		scope := initial148RequiredScopeV1{
+			reader: reader, account: account, request: request, active: true,
+			facts: make([]initial148RequiredFactV1, 0, capacity), inputs: make([]mdbx.TreeResolvedInputV1, 0, capacity),
+		}
 		defer scope.expireV1()
 		err := use(&scope, scope.deriveV1)
-		if scope.first == nil || err == scope.first {
+		if scope.first == nil || any(err) == any(scope.first) {
 			return err
 		}
 		if err == nil {
@@ -72,7 +75,7 @@ func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationA
 func initial148RequiredShapeV1(request initial148RequiredRequestV1) bool {
 	p, s := request.Primitive, request.Source
 	bound, ok := p.Source.(*blockTreeSourceV1)
-	if !ok || bound == nil || p.Coverage == nil || len(s.Raw) == 0 {
+	if !ok || bound == nil || p.Coverage == nil {
 		return false
 	}
 	if !initial148RequiredCoverageV1(s, *bound) || !initial148RequiredCoverageV1(s, blockTreeSourceV1{Raw: p.Coverage.CurrentBody, coverage: *p.Coverage}) {
@@ -212,7 +215,7 @@ func (s *initial148RequiredScopeV1) rememberV1(op Outpoint, value []byte, presen
 	if len(s.facts) == cap(s.facts) {
 		return localLogicalStateFailure("required state fact bound exceeded")
 	}
-	s.facts = append(s.facts, initial148RequiredFactV1{outpoint: op, original: value, length: 36+uint64(len(value)), present: present})
+	s.facts = append(s.facts, initial148RequiredFactV1{outpoint: op, original: value, length: 36 + uint64(len(value)), present: present})
 	if present {
 		s.inputs = append(s.inputs, mdbx.TreeResolvedInputV1{Outpoint: mdbx.TreeOutpointV1{Txid: op.Txid, Vout: op.Vout}, Value: value})
 	}
@@ -226,7 +229,7 @@ func (s *initial148RequiredScopeV1) Counters() logicalStateCounterRead {
 	}
 	if !s.haveCounters {
 		if err := s.readCountersV1(); err != nil {
-			s.failV1(err)
+			err = s.failV1(err)
 			counterKind, _ := logicalMDBXReadKinds(initial148RequiredFailureKindV1(err))
 			return logicalStateCounterRead{kind: counterKind, cause: err}
 		}

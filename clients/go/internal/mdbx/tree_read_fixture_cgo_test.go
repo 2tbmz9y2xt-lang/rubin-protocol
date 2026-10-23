@@ -24,10 +24,14 @@ func TestTreeRootReadFaultV1(t *testing.T) {
 		treeNativeSeed(t, s, 0, tsRootKey(1), []byte{0xff})
 		trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
 			var engine *EngineError
-			if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() { t.Fatalf("malformed binding %x/%v", root, err) }
+			if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() {
+				t.Fatalf("malformed binding %x/%v", root, err)
+			}
 			want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 0, KeyLength: 9, Kind: 2, OriginalImage: true, OriginalReference: true}
 			copy(want.Key[:], tsRootKey(1))
-			if engine.TreeObservation == nil || *engine.TreeObservation != want { t.Fatalf("binding observation %+v want %+v", engine.TreeObservation, want) }
+			if engine.TreeObservation == nil || *engine.TreeObservation != want {
+				t.Fatalf("binding observation %+v want %+v", engine.TreeObservation, want)
+			}
 		})
 	})
 }
@@ -81,7 +85,8 @@ func trTrustedSpendV1(t *testing.T) {
 		rank       uint8
 		key, value []byte
 	}{
-		{0, tsRootKey(1), binding}, {1, key, value},
+		{0, tsRootKey(1), binding},
+		{1, key, value},
 		{8, testTreeNodeKey(1, 288, [36]byte(key[8:])), leaf[:]},
 	} {
 		equal, err := FixtureRawRowEqual(s, row.rank, row.key, row.value)
@@ -103,26 +108,39 @@ func trSourceFailureV1(t *testing.T) {
 			request.Primitive.Source = tsSource(func(_ TreePositionV1, reader *Reader, _ *TreeDeltaSinkV1) error {
 				_, _, first = reader.Get(TreeSchemaV1DBIs()[0], []byte{2})
 				switch mode {
-				case "returned": returned = first
-				case "wrapped": returned = fmt.Errorf("Source: %w", first)
-				case "panic": panic(panicValue)
+				case "returned":
+					returned = first
+				case "wrapped":
+					returned = fmt.Errorf("Source: %w", first)
+				case "panic":
+					panic(panicValue)
 				}
 				return returned
 			})
 			evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 0, []byte{2}, func() {
 				defer func() { recovered = recover() }()
 				trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-					if root != ([32]byte{}) || reader.usable() || reader.failure != first { t.Fatal("Source native failure did not remain recorded") }
-					if mode != "wrapped" && err != first { t.Fatal("Source first error identity changed") }
+					if root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(first) {
+						t.Fatal("Source native failure did not remain recorded")
+					}
+					if mode != "wrapped" && any(err) != any(first) {
+						t.Fatal("Source first error identity changed")
+					}
 					if mode == "wrapped" {
 						parts, ok := err.(interface{ Unwrap() []error })
-						if !ok || len(parts.Unwrap()) != 2 || parts.Unwrap()[0] != returned || parts.Unwrap()[1] != first { t.Fatalf("Source primary order %v", err) }
+						if !ok || len(parts.Unwrap()) != 2 || any(parts.Unwrap()[0]) != any(returned) || any(parts.Unwrap()[1]) != any(first) {
+							t.Fatalf("Source primary order %v", err)
+						}
 					}
 				})
 			})
 			mustEnvironment(t, err)
-			if mode == "panic" && recovered != panicValue { t.Fatal("Source panic+failure changed") }
-			if evidence.Faults != 1 || evidence.Deletes != 0 || evidence.Commits != 0 || reservationLive(o) != 0 { t.Fatalf("Source failure effects %+v", evidence) }
+			if mode == "panic" && recovered != panicValue {
+				t.Fatal("Source panic+failure changed")
+			}
+			if evidence.Faults != 1 || evidence.Deletes != 0 || evidence.Commits != 0 || reservationLive(o) != 0 {
+				t.Fatalf("Source failure effects %+v", evidence)
+			}
 		})
 	}
 }
@@ -141,11 +159,17 @@ func trNodeV1(t *testing.T) {
 			kind := TreeObservationAbsentV1
 			if variant != "absent" && variant != "identity" {
 				n := 32
-				if variant == "width31" { n = 31 }
-				if variant == "width33" { n = 33 }
+				if variant == "width31" {
+					n = 31
+				}
+				if variant == "width33" {
+					n = 33
+				}
 				treeNativeSeed(t, s, 8, nodeKey, make([]byte, n))
 				kind = TreeObservationMalformedV1
-				if variant == "digest" { kind = TreeObservationDigestMismatchV1 }
+				if variant == "digest" {
+					kind = TreeObservationDigestMismatchV1
+				}
 			}
 			if variant == "identity" {
 				entries := []testTreeEntry{tcEntry(key, value), tcEntry(tdUTXOKey(1, tdTxid(200), 0), tdFormed(tdFrame(8, 0, nil), 1, 0))}
@@ -162,15 +186,21 @@ func trNodeV1(t *testing.T) {
 			meta := TreeBlockV1{TxCount: 2, EventCount: 1}
 			request.Primitive.Coverage.BlockMeta = meta
 			request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
-				if err := sink.BeginV1(meta); err != nil { return err }
+				if err := sink.BeginV1(meta); err != nil {
+					return err
+				}
 				return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
 			})
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
 				var engine *EngineError
-				if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() { t.Fatalf("node result %x/%v", root, err) }
+				if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() {
+					t.Fatalf("node result %x/%v", root, err)
+				}
 				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 8, KeyLength: 46, Kind: kind, OriginalImage: true, OriginalReference: true}
 				copy(want.Key[:], nodeKey)
-				if engine.TreeObservation == nil || *engine.TreeObservation != want { t.Fatalf("node observation %+v want %+v", engine.TreeObservation, want) }
+				if engine.TreeObservation == nil || *engine.TreeObservation != want {
+					t.Fatalf("node observation %+v want %+v", engine.TreeObservation, want)
+				}
 			})
 		})
 	}
@@ -191,14 +221,20 @@ func trSelectorsV1(t *testing.T) {
 				t.Fatalf("D performed range/write requests: %+v", evidence)
 			}
 			want := [8]uint64{}
-			if height != 0 { want[0], want[1] = 1, 1 }
+			if height != 0 {
+				want[0], want[1] = 1, 1
+			}
 			if evidence.OldGets != want || evidence.NodeGets != 0 {
 				t.Fatalf("parent selectors %+v, want %v and zero nodes", evidence, want)
 			}
 			var points uint64
-			for _, n := range evidence.OldGets { points += n }
+			for _, n := range evidence.OldGets {
+				points += n
+			}
 			points += evidence.NodeGets
-			if height != 0 && points > 578 { t.Fatal("captured 577E+1 point ceiling exceeded") }
+			if height != 0 && points > 578 {
+				t.Fatal("captured 577E+1 point ceiling exceeded")
+			}
 		})
 	}
 }
@@ -214,21 +250,29 @@ func trIOV1(t *testing.T) {
 			raw = cause
 			treeNativeError(t, cause, "update", "IO", 5, "error 5", nil)
 			var engine *EngineError
-			if !errors.As(cause, &engine) || engine.TreeObservation != nil || root != ([32]byte{}) || reader.usable() || reader.failure != cause {
+			if !errors.As(cause, &engine) || engine.TreeObservation != nil || root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(cause) {
 				t.Fatal("unavailable D fabricated localization/result or lost failure")
 			}
 			_, next := reader.DeriveTreeRootV1(account, request)
-			if next == nil || reader.failure != raw { t.Fatal("failed Reader allowed sibling") }
+			if next == nil || any(reader.failure) != any(raw) {
+				t.Fatal("failed Reader allowed sibling")
+			}
 		})
 	})
 	mustEnvironment(t, err)
-	if evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 { t.Fatalf("native IO counts %+v", evidence) }
+	if evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 {
+		t.Fatalf("native IO counts %+v", evidence)
+	}
 	s = tsReopen(t, s, path)
 	equal, err := FixtureRawRowEqual(s, 0, tsRootKey(1), binding)
-	if err != nil || !equal { t.Fatal("native IO changed canonical binding") }
+	if err != nil || !equal {
+		t.Fatal("native IO changed canonical binding")
+	}
 	trReadV1(t, s, o, request, func(_ *Reader, _ *OperationAccount, root [32]byte, err error) {
 		mustEnvironment(t, err)
-		if root != trWantRootV1(t, frame, 6) { t.Fatal("fresh Reader did not derive afresh") }
+		if root != trWantRootV1(t, frame, 6) {
+			t.Fatal("fresh Reader did not derive afresh")
+		}
 	})
 }
 
@@ -238,7 +282,10 @@ func trMalformedV1(t *testing.T) {
 	badCoinbase[len(badCoinbase)-1] = 2
 	badCompact := append(bytes.Clone(good[:10]), 253, 1, 0)
 	badCompact = append(badCompact, good[11:]...)
-	for _, tc := range []struct { name string; value []byte }{
+	for _, tc := range []struct {
+		name  string
+		value []byte
+	}{
 		{"short", good[:19]},
 		{"oversized-before-copy", make([]byte, 65561)},
 		{"nonminimal-length", badCompact},
@@ -255,15 +302,21 @@ func trMalformedV1(t *testing.T) {
 			meta := TreeBlockV1{TxCount: 2, EventCount: 1}
 			request.Primitive.Coverage.BlockMeta = meta
 			request.Primitive.Source = tsSource(func(_ TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
-				if err := sink.BeginV1(meta); err != nil { return err }
+				if err := sink.BeginV1(meta); err != nil {
+					return err
+				}
 				return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
 			})
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
 				var engine *EngineError
-				if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() { t.Fatalf("malformed D result %x/%v", root, err) }
+				if !errors.As(err, &engine) || engine.Class != EngineIntegrity || root != ([32]byte{}) || reader.usable() {
+					t.Fatalf("malformed D result %x/%v", root, err)
+				}
 				want := TreeObservationV1{DatabaseID: [32]byte{7}, Generation: 1, Block: request.Primitive.Block, Height: 6, Primitive: 0, Position: 1, Rank: 1, KeyLength: 44, Kind: 2, OriginalImage: true, OriginalReference: true}
 				copy(want.Key[:], key)
-				if engine.TreeObservation == nil || *engine.TreeObservation != want { t.Fatalf("malformed D observation %+v want %+v", engine.TreeObservation, want) }
+				if engine.TreeObservation == nil || *engine.TreeObservation != want {
+					t.Fatalf("malformed D observation %+v want %+v", engine.TreeObservation, want)
+				}
 			})
 		})
 	}
@@ -276,10 +329,14 @@ func trApplicationV1(t *testing.T) {
 				s, _, o := tsNew(t)
 				request, _, _ := trRequestV1(t, 0)
 				primary := error(&EngineError{Operation: "source", Class: class, Diagnostic: "application refusal"})
-				if wrapped { primary = fmt.Errorf("source: %w", primary) }
+				if wrapped {
+					primary = fmt.Errorf("source: %w", primary)
+				}
 				request.Primitive.Source = tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return primary })
 				trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
-					if err != primary || root != ([32]byte{}) || !reader.usable() || reader.failure != nil { t.Fatal("application error acquired native provenance") }
+					if any(err) != any(primary) || root != ([32]byte{}) || !reader.usable() || reader.failure != nil {
+						t.Fatal("application error acquired native provenance")
+					}
 					fresh, _, _ := trRequestV1(t, 0)
 					_, next := reader.DeriveTreeRootV1(account, fresh)
 					mustEnvironment(t, next)

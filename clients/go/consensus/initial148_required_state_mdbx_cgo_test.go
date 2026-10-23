@@ -34,7 +34,7 @@ func irPrepareV1(t *testing.T, reader *mdbx.Reader, account *mdbx.OperationAccou
 func irRunV1(t *testing.T, w *btWorld, request blockTreeRequestV1, parent mdbx.TreeEndpointV1, use func(logicalStateView, func() initial148RootReadOutcomeV1) error) error {
 	t.Helper()
 	result, outer := irObservedV1(t, w, request, parent, use)
-	logicalMDBXAssert(t, outer == result || result != nil && errors.Is(outer, result), "outer View lost producer result: %v/%v", outer, result)
+	logicalMDBXAssert(t, any(outer) == any(result) || result != nil && errors.Is(outer, result), "outer View lost producer result: %v/%v", outer, result)
 	return result
 }
 
@@ -71,7 +71,13 @@ func irFailureV1(t *testing.T, err error, kind logicalStateFailureKind, text str
 
 func TestInitial148RequiredR(t *testing.T) {
 	t.Run("full-original-and-decoder-alias", func(t *testing.T) {
-		for _, tc := range []struct { size int; value uint64; covenant uint16; height uint64; coinbase bool }{
+		for _, tc := range []struct {
+			size     int
+			value    uint64
+			covenant uint16
+			height   uint64
+			coinbase bool
+		}{
 			{0, 0, 0, 0, false}, {1, 37, 1, 99, true}, {65536, ^uint64(0), ^uint16(0), ^uint64(0), true},
 		} {
 			t.Run(fmt.Sprint(tc.size), func(t *testing.T) {
@@ -87,11 +93,13 @@ func TestInitial148RequiredR(t *testing.T) {
 					logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.entry.Value == tc.value && first.entry.CovenantType == tc.covenant && first.entry.CreationHeight == tc.height && first.entry.CreatedByCoinbase == tc.coinbase && bytes.Equal(first.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "full decoded record lost a field")
 					scope := view.(*initial148RequiredScopeV1)
 					logicalMDBXAssert(t, bytes.Equal(scope.facts[0].original, value), "retained original suffix differs")
-					if size != 0 { first.entry.CovenantData[0] = 9 }
+					if size != 0 {
+						first.entry.CovenantData[0] = 9
+					}
 					second := view.Lookup(op)
 					logicalMDBXAssert(t, second.kind == logicalStateRowPresent && bytes.Equal(scope.facts[0].original, value) && bytes.Equal(second.entry.CovenantData, bytes.Repeat([]byte{5}, size)), "decoded clone changed retained R backing")
 					counter := view.Counters()
-					logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: 36+uint64(len(value)), entries: 1}) && len(scope.facts) == 1, "repeat counted present Y twice")
+					logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: 36 + uint64(len(value)), entries: 1}) && len(scope.facts) == 1, "repeat counted present Y twice")
 					return nil
 				})
 				logicalMDBXAssert(t, err == nil, "equal R copies refused: %v", err)
@@ -141,7 +149,7 @@ func irDistinctResidualCaseV1(t *testing.T, total uint64, counterFirst bool) {
 		failure = irAccumulateResidualV1(t, view, derive, ops, total, counterFirst)
 		return nil // The producer must retain a refusal ignored by its callback.
 	})
-	logicalMDBXAssert(t, err == failure, "accumulated residual primary replaced: %v/%v", err, failure)
+	logicalMDBXAssert(t, any(err) == any(failure), "accumulated residual primary replaced: %v/%v", err, failure)
 	next := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
 		logicalMDBXAssert(t, view.Lookup(ops[0]).kind == logicalStateRowPresent, "next scope lost first row")
 		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "next scope retained prior failure")
@@ -170,17 +178,17 @@ func irAccumulateResidualV1(t *testing.T, view logicalStateView, derive func() i
 		return nil
 	}
 	irFailureV1(t, failure, logicalStateFailureStoreIntegrity, "required subset exceeds parent counters")
-	logicalMDBXAssert(t, view.Lookup(ops[0]).cause == failure && view.Counters().cause == failure, "accumulated first cause replaced")
+	logicalMDBXAssert(t, any(view.Lookup(ops[0]).cause) == any(failure) && any(view.Counters().cause) == any(failure), "accumulated first cause replaced")
 	out := derive()
-	logicalMDBXAssert(t, out.cause == failure && !out.derived && out.root == ([32]byte{}) && !out.hasObservation, "accumulated refusal produced root/localization")
+	logicalMDBXAssert(t, any(out.cause) == any(failure) && !out.derived && out.root == ([32]byte{}) && !out.hasObservation, "accumulated refusal produced root/localization")
 	return failure
 }
 
 func irResidualV1(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name         string
 		total, count uint64
-		valid bool
+		valid        bool
 	}{
 		{"zero-residual", 56, 1, true},
 		{"lower", 112, 2, true},
@@ -196,7 +204,9 @@ func irResidualV1(t *testing.T) {
 				w := btNew(t)
 				op := Outpoint{Txid: [32]byte{1}}
 				var data []byte
-				if tc.name == "lower-minus-one" || tc.name == "bytes-exceeded" { data = []byte{1} }
+				if tc.name == "lower-minus-one" || tc.name == "bytes-exceeded" {
+					data = []byte{1}
+				}
 				w.pair(t, btMutation(1, btUTXOKey(1, op), btValue(btFrame(1, 0, data), 0, true)))
 				irCounterV1(t, w, tc.total, tc.count)
 				var failure error
@@ -209,20 +219,24 @@ func irResidualV1(t *testing.T) {
 						row := view.Lookup(op)
 						failure = row.cause
 					}
-					if !counterFirst && failure == nil { failure = view.Counters().cause }
+					if !counterFirst && failure == nil {
+						failure = view.Counters().cause
+					}
 					logicalMDBXAssert(t, (failure == nil) == tc.valid, "residual checkpoint = %v", failure)
 					if failure != nil {
 						var logical *logicalStateFailure
 						logicalMDBXAssert(t, errors.As(failure, &logical) && logical.kind == logicalStateFailureStoreIntegrity, "residual class %v", failure)
 						want := "invalid required residual counters"
-						if tc.name == "count-exceeded" || tc.name == "bytes-exceeded" { want = "required subset exceeds parent counters" }
+						if tc.name == "count-exceeded" || tc.name == "bytes-exceeded" {
+							want = "required subset exceeds parent counters"
+						}
 						logicalMDBXAssert(t, logical.cause.Error() == want, "residual owning checkpoint %v, want %s", failure, want)
 						out := derive()
-						logicalMDBXAssert(t, out.cause == failure && !out.derived && out.root == ([32]byte{}), "residual refusal reached D")
+						logicalMDBXAssert(t, any(out.cause) == any(failure) && !out.derived && out.root == ([32]byte{}), "residual refusal reached D")
 					}
 					return failure
 				})
-				logicalMDBXAssert(t, err == failure, "residual primary replaced")
+				logicalMDBXAssert(t, any(err) == any(failure), "residual primary replaced")
 			})
 		}
 	}
@@ -259,8 +273,12 @@ func TestInitial148RequiredOrigin(t *testing.T) {
 						source := request.Primitive.Source.(*blockTreeSourceV1)
 						var failure error
 						result := withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
-							if variant == "coverage" { source.coverage.BlockMeta.EventCount++ }
-							if variant == "backing" { source.Raw = bytes.Clone(source.Raw) }
+							if variant == "coverage" {
+								source.coverage.BlockMeta.EventCount++
+							}
+							if variant == "backing" {
+								source.Raw = bytes.Clone(source.Raw)
+							}
 							out := derive()
 							failure = out.cause
 							if variant == "unchanged" {
@@ -271,7 +289,7 @@ func TestInitial148RequiredOrigin(t *testing.T) {
 							}
 							return failure
 						})
-						logicalMDBXAssert(t, result == failure, "source identity failure replaced")
+						logicalMDBXAssert(t, any(result) == any(failure), "source identity failure replaced")
 						return nil
 					})
 				}) == nil, "source identity operation")
@@ -283,7 +301,7 @@ func TestInitial148RequiredOrigin(t *testing.T) {
 		w := btNew(t)
 		primary := txerr(TX_ERR_MISSING_UTXO, "earlier established rejection")
 		err := irRunV1(t, w, irRequestV1(6, 20), mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}, func(logicalStateView, func() initial148RootReadOutcomeV1) error { return primary })
-		logicalMDBXAssert(t, err == primary, "earlier consensus error replaced by later parent read")
+		logicalMDBXAssert(t, any(err) == any(primary), "earlier consensus error replaced by later parent read")
 	})
 }
 
@@ -297,7 +315,9 @@ func irOriginsV1(t *testing.T) {
 			logicalMDBXAssert(t, seedResult.err == nil, "origin seed: %v", seedResult.err)
 			op := Outpoint{Txid: seedTx.id}
 			coinbase := btTransaction(32, 0, nil, [][]byte{btFrame(10, 0, nil)}, nil, []byte{0}, nil)
-			if origin == "in-block" { op = Outpoint{Txid: coinbase.id} }
+			if origin == "in-block" {
+				op = Outpoint{Txid: coinbase.id}
+			}
 			spend := btTransaction(33, 0, []Outpoint{op}, [][]byte{btFrame(11, 0, nil)}, nil, []byte{0}, nil)
 			request := btRequest(btBody(148, 32, seed.Block, coinbase, spend), 4)
 			request.Kind, request.Undo = 1, 2
@@ -336,7 +356,7 @@ func irReusableV1(t *testing.T) {
 			application := errors.New("application stop")
 			for _, previous := range []error{nil, application} {
 				result := withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error { return previous })
-				logicalMDBXAssert(t, result == previous, "application identity changed")
+				logicalMDBXAssert(t, any(result) == any(previous), "application identity changed")
 				result = withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 					out := derive()
 					logicalMDBXAssert(t, out.derived && out.cause == nil, "clean same-Reader reuse refused: %v", out.cause)
@@ -356,7 +376,10 @@ func irCapacityV1(t *testing.T) {
 		return w.s.View(func(reader *mdbx.Reader) error {
 			request := irPrepareV1(t, reader, account, irRequestV1(0, 48), mdbx.TreeEndpointV1{})
 			return account.WithReservation(402653184-266480+1, func() error {
-				err := withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error { t.Fatal("R capacity refusal reached callback"); return nil })
+				err := withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error {
+					t.Fatal("R capacity refusal reached callback")
+					return nil
+				})
 				logicalMDBXAssert(t, err != nil && err.Error() == "storage operation reservation capacity unavailable", "R capacity refusal %v", err)
 				return nil
 			})
@@ -374,7 +397,7 @@ func irCapacityV1(t *testing.T) {
 					return nil
 				})
 			})
-			logicalMDBXAssert(t, result == cause, "ignored D capacity lost raw cause")
+			logicalMDBXAssert(t, any(result) == any(cause), "ignored D capacity lost raw cause")
 			result = withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 				out := derive()
 				logicalMDBXAssert(t, out.derived && out.cause == nil && !out.hasObservation, "fresh same Reader/account after capacity %+v", out)
@@ -395,30 +418,56 @@ func irShapesV1(t *testing.T) {
 			logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
 				return w.s.View(func(reader *mdbx.Reader) error {
 					captured := irPrepareV1(t, reader, a, irRequestV1(0, 21), mdbx.TreeEndpointV1{})
-					callback := func(logicalStateView, func() initial148RootReadOutcomeV1) error { t.Fatal("invalid wrapper reached callback"); return nil }
+					callback := func(logicalStateView, func() initial148RootReadOutcomeV1) error {
+						t.Fatal("invalid wrapper reached callback")
+						return nil
+					}
 					switch variant {
-					case "nil-reader": reader = nil
-					case "nil-account": a = nil
-					case "nil-callback": callback = nil
-					case "nil-source": captured.Primitive.Source = (*blockTreeSourceV1)(nil)
-					case "foreign-source": captured.Primitive.Source = &btObserved{t: t, source: captured.Primitive.Source.(*blockTreeSourceV1)}
-					case "nil-coverage": captured.Primitive.Coverage = nil
-					case "raw-copy": captured.Source.Raw = bytes.Clone(captured.Source.Raw)
-					case "raw-length": captured.Source.Raw = captured.Source.Raw[:len(captured.Source.Raw)-1]
-					case "coverage-backing": captured.Source.coverage.CurrentBody = bytes.Clone(captured.Source.Raw)
-					case "database": captured.Source.coverage.DatabaseID[0]++
-					case "generation": captured.Primitive.Generation++
-					case "block": captured.Primitive.Block[0]++
-					case "height": captured.Primitive.Height++
-					case "header": captured.Source.coverage.HeaderBytes = 116
-					case "body-kind": captured.Source.coverage.BodyKind = 2
-					case "meta": captured.Source.coverage.BlockMeta.EventCount++
-					case "direction": captured.Primitive.Direction = 2
-					case "kind": captured.Primitive.Kind = 2
-					case "undo": captured.Primitive.Undo = 1
-					case "endpoint": captured.Primitive.Endpoint.BlockHash[0]++
-					case "parent": captured.Parent.Kind = 1
-					case "multiple-invalid": captured.Source.Raw = nil; captured.Primitive.Coverage = nil
+					case "nil-reader":
+						reader = nil
+					case "nil-account":
+						a = nil
+					case "nil-callback":
+						callback = nil
+					case "nil-source":
+						captured.Primitive.Source = (*blockTreeSourceV1)(nil)
+					case "foreign-source":
+						captured.Primitive.Source = &btObserved{t: t, source: captured.Primitive.Source.(*blockTreeSourceV1)}
+					case "nil-coverage":
+						captured.Primitive.Coverage = nil
+					case "raw-copy":
+						captured.Source.Raw = bytes.Clone(captured.Source.Raw)
+					case "raw-length":
+						captured.Source.Raw = captured.Source.Raw[:len(captured.Source.Raw)-1]
+					case "coverage-backing":
+						captured.Source.coverage.CurrentBody = bytes.Clone(captured.Source.Raw)
+					case "database":
+						captured.Source.coverage.DatabaseID[0]++
+					case "generation":
+						captured.Primitive.Generation++
+					case "block":
+						captured.Primitive.Block[0]++
+					case "height":
+						captured.Primitive.Height++
+					case "header":
+						captured.Source.coverage.HeaderBytes = 116
+					case "body-kind":
+						captured.Source.coverage.BodyKind = 2
+					case "meta":
+						captured.Source.coverage.BlockMeta.EventCount++
+					case "direction":
+						captured.Primitive.Direction = 2
+					case "kind":
+						captured.Primitive.Kind = 2
+					case "undo":
+						captured.Primitive.Undo = 1
+					case "endpoint":
+						captured.Primitive.Endpoint.BlockHash[0]++
+					case "parent":
+						captured.Parent.Kind = 1
+					case "multiple-invalid":
+						captured.Source.Raw = nil
+						captured.Primitive.Coverage = nil
 					}
 					err := withInitial148RequiredStateV1(reader, a, captured, callback)
 					irFailureV1(t, err, logicalStateFailureLocalInvariant, "invalid required state request")
@@ -474,13 +523,18 @@ func irDeliveryV1(t *testing.T) {
 					result = irRunV1(t, w, irRequestV1(0, 23), mdbx.TreeEndpointV1{}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 						kept, root = view, derive
 						if withFailure {
-							for range 3 { failure = view.Lookup(Outpoint{}).cause }
+							for range 3 {
+								failure = view.Lookup(Outpoint{}).cause
+							}
 							logicalMDBXAssert(t, failure != nil, "bounded point failure missing")
 						}
 						switch delivery {
-						case "error": return primary
-						case "panic": panic(panicValue)
-						case "goexit": runtime.Goexit()
+						case "error":
+							return primary
+						case "panic":
+							panic(panicValue)
+						case "goexit":
+							runtime.Goexit()
 						}
 						return nil
 					})
@@ -490,15 +544,27 @@ func irDeliveryV1(t *testing.T) {
 					done := make(chan struct{})
 					go func() { defer close(done); run() }()
 					<-done
-				} else { run() }
-				if delivery == "panic" { logicalMDBXAssert(t, recovered == panicValue && !post, "original panic was changed") }
-				if delivery == "goexit" { logicalMDBXAssert(t, !post, "Goexit continued") }
-				if delivery == "nil" && withFailure { logicalMDBXAssert(t, result == failure, "ignored first failure lost") }
-				if delivery == "nil" && !withFailure { logicalMDBXAssert(t, result == nil, "clean callback refused") }
-				if delivery == "error" && !withFailure { logicalMDBXAssert(t, result == primary, "application error identity changed") }
+				} else {
+					run()
+				}
+				if delivery == "panic" {
+					logicalMDBXAssert(t, recovered == panicValue && !post, "original panic was changed")
+				}
+				if delivery == "goexit" {
+					logicalMDBXAssert(t, !post, "Goexit continued")
+				}
+				if delivery == "nil" && withFailure {
+					logicalMDBXAssert(t, any(result) == any(failure), "ignored first failure lost")
+				}
+				if delivery == "nil" && !withFailure {
+					logicalMDBXAssert(t, result == nil, "clean callback refused")
+				}
+				if delivery == "error" && !withFailure {
+					logicalMDBXAssert(t, any(result) == any(primary), "application error identity changed")
+				}
 				if delivery == "error" && withFailure {
 					joined, ok := result.(interface{ Unwrap() []error })
-					logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2 && joined.Unwrap()[0] == primary && joined.Unwrap()[1] == failure, "callback/first failure order: %v", result)
+					logicalMDBXAssert(t, ok && len(joined.Unwrap()) == 2 && any(joined.Unwrap()[0]) == any(primary) && any(joined.Unwrap()[1]) == any(failure), "callback/first failure order: %v", result)
 				}
 				irFailureV1(t, kept.Counters().cause, logicalStateFailureLocalInvariant, "required state scope is not active")
 				irFailureV1(t, root().cause, logicalStateFailureLocalInvariant, "required root derive is not available")

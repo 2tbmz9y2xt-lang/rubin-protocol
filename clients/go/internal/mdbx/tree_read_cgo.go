@@ -29,7 +29,7 @@ type TreeRootReadV1 struct {
 // opens no transaction, emits no mutation and returns no digest on failure.
 // Parent rows are point-only; at height zero the parent is definitionally empty.
 func (r *Reader) DeriveTreeRootV1(account *OperationAccount, request TreeRootReadV1) (root [32]byte, err error) {
-	if err = r.treeRootReadInputV1(account, request); err != nil {
+	if err := r.treeRootReadInputV1(account, request); err != nil {
 		return root, err
 	}
 	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(request.Primitive.Coverage.BlockMeta.EventCount)

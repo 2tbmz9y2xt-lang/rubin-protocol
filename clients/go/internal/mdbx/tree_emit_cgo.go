@@ -461,9 +461,13 @@ func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) ([32
 	next := binding
 	next.Endpoint = endpoint
 	next.RootDigest, next.Top = treeEmptyDigestV1(), TreeTopV1{Kind: TreeTopEmptyV1}
+	var links uint8
 	if w.hasCur {
 		id := w.cur.id()
 		next.RootDigest, next.Top = w.cur.digest, TreeTopV1{Kind: TreeTopKindV1(id.Kind), Node: &id}
+		if w.cur.original {
+			links = 1
+		}
 	}
 	encoded, err := next.Encode()
 	if err != nil {
@@ -476,10 +480,6 @@ func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) ([32
 		if err := w.referIfKept(w.cur); err != nil {
 			return [32]byte{}, err
 		}
-	}
-	var links uint8
-	if w.hasCur && w.cur.original {
-		links = 1
 	}
 	err = w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded, links: links}})
 	if err != nil {

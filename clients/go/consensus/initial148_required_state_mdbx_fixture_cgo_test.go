@@ -40,13 +40,18 @@ func irNativeFaultV1(t *testing.T) {
 					first = row.cause
 					logicalMDBXAssert(t, row.kind == logicalStateRowUnavailable && logicalStateEntryZero(row.entry), "native unavailable became absence/integrity")
 					observation = root()
-					logicalMDBXAssert(t, observation.cause == first && !observation.derived && observation.root == ([32]byte{}) && !observation.hasObservation && observation.observation == (mdbx.TreeObservationV1{}), "unavailable fabricated root/observation")
+					logicalMDBXAssert(t, any(observation.cause) == any(first) && !observation.derived && observation.root == ([32]byte{}) && !observation.hasObservation && observation.observation == (mdbx.TreeObservationV1{}), "unavailable fabricated root/observation")
 					switch delivery {
-					case "returned": returned = first
-					case "wrapped": returned = fmt.Errorf("callback: %w", first)
-					case "application": returned = errors.New("application error")
-					case "panic": panic(panicValue)
-					case "goexit": runtime.Goexit()
+					case "returned":
+						returned = first
+					case "wrapped":
+						returned = fmt.Errorf("callback: %w", first)
+					case "application":
+						returned = errors.New("application error")
+					case "panic":
+						panic(panicValue)
+					case "goexit":
+						runtime.Goexit()
 					}
 					return returned
 				})
@@ -61,23 +66,33 @@ func irNativeFaultV1(t *testing.T) {
 				done := make(chan struct{})
 				go func() { defer close(done); armed() }()
 				<-done
-			} else { armed() }
+			} else {
+				armed()
+			}
 			// Goexit does not assign the outer fixture's returned evidence. Its
 			// deferred release and the scoped account are still directly observed.
 			if delivery != "goexit" {
 				logicalMDBXAssert(t, fixtureErr == nil && counts.Faults == 1 && counts.Commits == 0 && counts.Deletes == 0 && counts.OldGets[0] == 0 && counts.NodeGets == 0 && counts.OldPulls == ([8]uint64{}), "first read/terminal selectors %+v/%v", counts, fixtureErr)
 			}
 			btfEngine(t, first, "get", mdbx.EngineIO, 5, "error 5")
-			if delivery == "panic" { logicalMDBXAssert(t, recovered == panicValue && !post, "panic+native failure changed panic") }
-			if delivery == "goexit" { logicalMDBXAssert(t, !post, "Goexit+failure continued") }
-			if delivery == "ignored" || delivery == "returned" { logicalMDBXAssert(t, result == first, "native identity replaced") }
+			if delivery == "panic" {
+				logicalMDBXAssert(t, recovered == panicValue && !post, "panic+native failure changed panic")
+			}
+			if delivery == "goexit" {
+				logicalMDBXAssert(t, !post, "Goexit+failure continued")
+			}
+			if delivery == "ignored" || delivery == "returned" {
+				logicalMDBXAssert(t, any(result) == any(first), "native identity replaced")
+			}
 			if delivery == "wrapped" || delivery == "application" {
 				parts, ok := result.(interface{ Unwrap() []error })
-				logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && parts.Unwrap()[0] == returned && parts.Unwrap()[1] == first, "exact joined error order %v", result)
+				logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && any(parts.Unwrap()[0]) == any(returned) && any(parts.Unwrap()[1]) == any(first), "exact joined error order %v", result)
 				viewParts, ok := outer.(interface{ Unwrap() []error })
-				logicalMDBXAssert(t, ok && len(viewParts.Unwrap()) == 2 && viewParts.Unwrap()[0] == result && viewParts.Unwrap()[1] == first, "outer View projection order %v", outer)
+				logicalMDBXAssert(t, ok && len(viewParts.Unwrap()) == 2 && any(viewParts.Unwrap()[0]) == any(result) && any(viewParts.Unwrap()[1]) == any(first), "outer View projection order %v", outer)
 			}
-			if delivery == "ignored" || delivery == "returned" { logicalMDBXAssert(t, outer == first, "outer exact native cause changed") }
+			if delivery == "ignored" || delivery == "returned" {
+				logicalMDBXAssert(t, any(outer) == any(first), "outer exact native cause changed")
+			}
 			irFailureV1(t, kept.Counters().cause, logicalStateFailureLocalInvariant, "required state scope is not active")
 			irFailureV1(t, derive().cause, logicalStateFailureLocalInvariant, "required root derive is not available")
 			btReservationsReleased(t, w.owner)
@@ -109,11 +124,15 @@ func irLocalizedV1(t *testing.T) {
 				logicalMDBXAssert(t, w.s.View(func(reader *mdbx.Reader) error {
 					for i, rowKey := range keys {
 						if bytes.Equal(rowKey, key) && damage != "endpoint" {
-							if damage == "malformed" { images[i] = []byte{0xff} }
+							if damage == "malformed" {
+								images[i] = []byte{0xff}
+							}
 							continue
 						}
 						value, _, readErr := reader.Get(mdbx.TreeSchemaV1DBIs()[0], rowKey)
-						if readErr != nil { return readErr }
+						if readErr != nil {
+							return readErr
+						}
 						images[i] = value
 					}
 					return nil
@@ -131,16 +150,22 @@ func irLocalizedV1(t *testing.T) {
 					logicalMDBXAssert(t, copied == want && engine.TreeObservation != nil && *engine.TreeObservation == want, "all copied fields %+v want %+v", copied, want)
 					engine.TreeObservation.Key[0] ^= 0x80
 					logicalMDBXAssert(t, copied == want, "outcome aliases engine observation")
-					if delivery == "returned" { returned = cause }
-					if delivery == "wrapped" { returned = fmt.Errorf("callback: %w", cause) }
+					if delivery == "returned" {
+						returned = cause
+					}
+					if delivery == "wrapped" {
+						returned = fmt.Errorf("callback: %w", cause)
+					}
 					return returned
 				})
-				if delivery != "wrapped" { logicalMDBXAssert(t, result == cause, "localized first cause changed") }
+				if delivery != "wrapped" {
+					logicalMDBXAssert(t, any(result) == any(cause), "localized first cause changed")
+				}
 				if delivery == "wrapped" {
 					parts, ok := result.(interface{ Unwrap() []error })
-					logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && parts.Unwrap()[0] == returned && parts.Unwrap()[1] == cause, "localized wrap order %v", result)
+					logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && any(parts.Unwrap()[0]) == any(returned) && any(parts.Unwrap()[1]) == any(cause), "localized wrap order %v", result)
 					viewParts, ok := outer.(interface{ Unwrap() []error })
-					logicalMDBXAssert(t, ok && len(viewParts.Unwrap()) == 2 && viewParts.Unwrap()[0] == result && viewParts.Unwrap()[1] == cause, "localized outer View projection order %v", outer)
+					logicalMDBXAssert(t, ok && len(viewParts.Unwrap()) == 2 && any(viewParts.Unwrap()[0]) == any(result) && any(viewParts.Unwrap()[1]) == any(cause), "localized outer View projection order %v", outer)
 				}
 				w.reopen(t)
 				after, err := w.s.Inspect()
@@ -162,18 +187,24 @@ func irMalformedV1(t *testing.T) {
 			key, rank := btUTXOKey(1, op), uint8(1)
 			value := btValue(btFrame(7, 0, nil), 0, true)
 			switch variant {
-			case "counter-15": rank, key, value = 0, btMeta(0x10, 1), make([]byte, 15)
-			case "counter-17": rank, key, value = 0, btMeta(0x10, 1), make([]byte, 17)
+			case "counter-15":
+				rank, key, value = 0, btMeta(0x10, 1), make([]byte, 15)
+			case "counter-17":
+				rank, key, value = 0, btMeta(0x10, 1), make([]byte, 17)
 			case "counter-height-bytes":
 				irCounterV1(t, w, 86545431, 2000)
 				rank, key = 0, btMeta(0x10, 1)
 			case "counter-height-count":
 				irCounterV1(t, w, 56*1545455, 1545455)
 				rank, key = 0, btMeta(0x10, 1)
-			case "row-19": value = value[:19]
-			case "row-65561": value = make([]byte, 65561)
-			case "row-coinbase": value[len(value)-1] = 2
-			case "row-compact": value[10] = 253
+			case "row-19":
+				value = value[:19]
+			case "row-65561":
+				value = make([]byte, 65561)
+			case "row-coinbase":
+				value[len(value)-1] = 2
+			case "row-compact":
+				value[10] = 253
 			}
 			if variant != "counter-height-bytes" && variant != "counter-height-count" {
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, key, value) == nil, "malformed setup")
@@ -190,10 +221,10 @@ func irMalformedV1(t *testing.T) {
 					cause = row.cause
 				}
 				out := derive()
-				logicalMDBXAssert(t, out.cause == cause && !out.derived && out.root == ([32]byte{}) && !out.hasObservation, "malformed R promoted to D/localization")
+				logicalMDBXAssert(t, any(out.cause) == any(cause) && !out.derived && out.root == ([32]byte{}) && !out.hasObservation, "malformed R promoted to D/localization")
 				return cause
 			})
-			logicalMDBXAssert(t, err == cause, "malformed R cause replaced: %v", err)
+			logicalMDBXAssert(t, any(err) == any(cause), "malformed R cause replaced: %v", err)
 		})
 	}
 }
@@ -208,11 +239,15 @@ func irSelectorsV1(t *testing.T) {
 				request = irRequestV1(6, 47)
 				parent = mdbx.TreeEndpointV1{Kind: 1, Height: 5, CumulativeChainwork: [40]byte{39: 1}}
 			}
-			if variant == "counter-copies" { irCounterV1(t, w, 112, 2) }
+			if variant == "counter-copies" {
+				irCounterV1(t, w, 112, 2)
+			}
 			var result error
 			evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
 				result = irRunV1(t, w, request, parent, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
-					if variant == "earlier-error" { return primary }
+					if variant == "earlier-error" {
+						return primary
+					}
 					if variant == "counter-copies" {
 						first := view.Counters()
 						logicalMDBXAssert(t, first.kind == logicalStateCountersPresent && first.cause == nil && first.counters == (logicalStateCounters{bytes: 112, entries: 2}), "first captured pair %+v", first)
@@ -227,9 +262,15 @@ func irSelectorsV1(t *testing.T) {
 				})
 			})
 			wantGets := [8]uint64{}
-			if variant == "counter-copies" { wantGets[0] = 1 }
+			if variant == "counter-copies" {
+				wantGets[0] = 1
+			}
 			logicalMDBXAssert(t, err == nil && evidence.OldGets == wantGets && evidence.OldPulls == ([8]uint64{}) && evidence.NodeGets == 0 && evidence.NodePulls == 0 && evidence.Deletes == 0 && evidence.Commits == 0, "captured counter/genesis/terminal selectors: %+v/%v", evidence, err)
-			if variant == "earlier-error" { logicalMDBXAssert(t, result == primary, "earlier error identity") } else { logicalMDBXAssert(t, result == nil, "genesis producer refused: %v", result) }
+			if variant == "earlier-error" {
+				logicalMDBXAssert(t, any(result) == any(primary), "earlier error identity")
+			} else {
+				logicalMDBXAssert(t, result == nil, "genesis producer refused: %v", result)
+			}
 		})
 	}
 }
