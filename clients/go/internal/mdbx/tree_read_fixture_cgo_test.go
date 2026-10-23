@@ -7,6 +7,7 @@ import (
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -244,10 +245,11 @@ func trIOV1(t *testing.T) {
 	request, _, frame := trRequestV1(t, 6)
 	binding := tcBinding(t, 1, request.Parent)
 	treeNativeSeed(t, s, 0, tsRootKey(1), binding)
-	var raw error
+	var raw, outer error
+	var failed *Reader
 	evidence, err := FixtureSelectedDamage(s, o, SelectedDamageGetEIO, 0, tsRootKey(1), func() {
-		trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, cause error) {
-			raw = cause
+		outer = trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, cause error) {
+			raw, failed = cause, reader
 			treeNativeError(t, cause, "update", "IO", 5, "error 5", nil)
 			var engine *EngineError
 			if !errors.As(cause, &engine) || engine.TreeObservation != nil || root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(cause) {
@@ -260,7 +262,15 @@ func trIOV1(t *testing.T) {
 		})
 	})
 	mustEnvironment(t, err)
-	if evidence.Faults != 1 || evidence.Commits != 0 || evidence.Deletes != 0 {
+	next := s.View(func(*Reader) error { t.Fatal("consumed Store invoked callback"); return nil })
+	_, inspectErr := s.Inspect()
+	closeErr := s.Close()
+	if any(outer) != any(raw) || any(next) != any(raw) || any(inspectErr) != any(raw) || any(closeErr) != any(raw) {
+		t.Fatalf("native IO terminal identity changed: outer %v, View %v, Inspect %v, Close %v", outer, next, inspectErr, closeErr)
+	}
+	treeNativeZeroResources(t, s)
+	tsExpiredReader(t, failed)
+	if evidence.Faults != 1 || evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.Deletes != 0 || reservationLive(o) != 0 {
 		t.Fatalf("native IO counts %+v", evidence)
 	}
 	s = tsReopen(t, s, path)
@@ -323,17 +333,22 @@ func trMalformedV1(t *testing.T) {
 }
 
 func trApplicationV1(t *testing.T) {
-	for _, class := range []EngineClass{EngineCapacity, EngineIntegrity} {
+	for _, class := range []EngineClass{EngineCapacity, EngineIntegrity, EngineIO} {
 		for _, wrapped := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/wrapped-%v", class, wrapped), func(t *testing.T) {
 				s, _, o := tsNew(t)
+				before, err := s.Inspect()
+				mustEnvironment(t, err)
 				request, _, _ := trRequestV1(t, 0)
 				primary := error(&EngineError{Operation: "source", Class: class, Diagnostic: "application refusal"})
+				if class == EngineIO {
+					primary = &EngineError{Operation: "update", Class: EngineIO, Code: 5, Diagnostic: "error 5"}
+				}
 				if wrapped {
 					primary = fmt.Errorf("source: %w", primary)
 				}
 				request.Primitive.Source = tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { return primary })
-				trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
+				outer := trReadV1(t, s, o, request, func(reader *Reader, account *OperationAccount, root [32]byte, err error) {
 					if any(err) != any(primary) || root != ([32]byte{}) || !reader.usable() || reader.failure != nil {
 						t.Fatal("application error acquired native provenance")
 					}
@@ -341,6 +356,15 @@ func trApplicationV1(t *testing.T) {
 					_, next := reader.DeriveTreeRootV1(account, fresh)
 					mustEnvironment(t, next)
 				})
+				if any(outer) != any(primary) {
+					t.Fatal("outer View changed application error identity")
+				}
+				mustEnvironment(t, s.View(func(*Reader) error { return nil }))
+				after, err := s.Inspect()
+				mustEnvironment(t, err)
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("application refusal changed Store image")
+				}
 			})
 		}
 	}

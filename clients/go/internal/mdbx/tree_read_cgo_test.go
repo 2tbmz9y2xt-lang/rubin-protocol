@@ -45,10 +45,10 @@ func trRequestV1(t *testing.T, height uint64) (TreeRootReadV1, []TreeEventV1, []
 	return TreeRootReadV1{Primitive: p, Parent: parent}, events, frame
 }
 
-func trReadV1(t *testing.T, s *Store, o *OperationReservationOwner, request TreeRootReadV1, use func(*Reader, *OperationAccount, [32]byte, error)) {
+func trReadV1(t *testing.T, s *Store, o *OperationReservationOwner, request TreeRootReadV1, use func(*Reader, *OperationAccount, [32]byte, error)) (viewErr error) {
 	t.Helper()
 	mustEnvironment(t, o.WithOperation(TreeOperation, func(account *OperationAccount) error {
-		_ = s.View(func(reader *Reader) error {
+		viewErr = s.View(func(reader *Reader) error {
 			root, err := reader.DeriveTreeRootV1(account, request)
 			use(reader, account, root, err)
 			return err
@@ -58,6 +58,7 @@ func trReadV1(t *testing.T, s *Store, o *OperationReservationOwner, request Tree
 	if reservationLive(o) != 0 {
 		t.Fatal("root method leaked its reservation")
 	}
+	return viewErr
 }
 
 func trSeedV1(t *testing.T, s *Store, o *OperationReservationOwner, rank uint8, key, value []byte) {
