@@ -1715,8 +1715,9 @@ mod tests {
     use crate::p2p_runtime::{
         build_envelope_header, decode_inventory_vectors, default_peer_runtime_config,
         encode_inventory_vectors, network_magic, perform_version_handshake,
-        perform_version_handshake_with_read_authorizer, InventoryVector, LiveMessageOutcome,
-        PeerManager, PeerRuntimeConfig, VersionPayloadV1, WireMessage, MSG_TX,
+        perform_version_handshake_with_read_authorizer, CompactModeSnapshot, InventoryVector,
+        LiveMessageOutcome, PeerManager, PeerRuntimeConfig, PeerSession, VersionPayloadV1,
+        WireMessage, MSG_TX,
     };
     use crate::sync_reorg::TxPoolCleanupPlan;
     use crate::test_helpers::{block_with_txs, signed_conflicting_p2pk_state_and_txs};
@@ -2549,6 +2550,98 @@ mod tests {
         shared.stop.store(true, Ordering::SeqCst);
         drop(session);
         handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    fn sendcmpct_live_payload(mode: u8, version: u64) -> Vec<u8> {
+        let mut payload = vec![mode];
+        payload.extend_from_slice(&version.to_le_bytes());
+        payload
+    }
+
+    fn sendcmpct_live_peer(
+        name: &str,
+    ) -> (
+        SharedServiceState,
+        PeerSession,
+        JoinHandle<Result<(), String>>,
+        PathBuf,
+    ) {
+        let (sync_engine, dir) = test_engine(name);
+        let mut runtime_cfg = default_peer_runtime_config("devnet", 8);
+        runtime_cfg.read_deadline = Duration::from_secs(2);
+        runtime_cfg.write_deadline = Duration::from_secs(1);
+        let shared = test_shared_state(runtime_cfg.clone(), Vec::new(), sync_engine);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handler_shared = shared.clone();
+        let handler = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept peer");
+            super::handle_peer(stream, None, handler_shared)
+        });
+        let local = local_version(0).expect("local version");
+        let session = perform_version_handshake(
+            TcpStream::connect(addr).expect("connect service"),
+            runtime_cfg,
+            local,
+            local.chain_id,
+            local.genesis_hash,
+        )
+        .expect("handshake");
+        (shared, session, handler, dir)
+    }
+
+    fn send_live_frames(session: &mut PeerSession, frames: &[(&str, Vec<u8>)]) {
+        for (command, payload) in frames {
+            session
+                .write_message(&WireMessage {
+                    command: command.to_string(),
+                    payload: payload.clone(),
+                })
+                .expect("send live frame");
+        }
+    }
+
+    #[test]
+    fn sendcmpct_live_session_continues_after_ignored_version() {
+        let (shared, mut session, handler, dir) =
+            sendcmpct_live_peer("rubin-node-p2p-sendcmpct-ignore");
+        send_live_frames(
+            &mut session,
+            &[
+                ("sendcmpct", sendcmpct_live_payload(2, 1)),
+                ("sendcmpct", sendcmpct_live_payload(1, 2)),
+                ("ping", Vec::new()),
+            ],
+        );
+        while session.read_message().expect("read live response").command != "pong" {}
+        let peers = shared.peer_manager.snapshot();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peers[0].remote_compact_mode,
+            CompactModeSnapshot {
+                mode: 2,
+                version: 1
+            }
+        );
+        shared.stop.store(true, Ordering::SeqCst);
+        drop(session);
+        let _ = handler.join().expect("handler join");
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn sendcmpct_live_session_ends_on_malformed_mode() {
+        let (shared, mut session, handler, dir) =
+            sendcmpct_live_peer("rubin-node-p2p-sendcmpct-malformed");
+        send_live_frames(&mut session, &[("sendcmpct", sendcmpct_live_payload(3, 2))]);
+        let err = handler
+            .join()
+            .expect("handler join")
+            .expect_err("malformed mode ends the session");
+        assert!(err.contains("unsupported compact relay mode"), "{err}");
+        while session.read_message().is_ok() {}
+        shared.stop.store(true, Ordering::SeqCst);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
