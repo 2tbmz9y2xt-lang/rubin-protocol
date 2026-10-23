@@ -616,10 +616,10 @@ func tcVisitGuard(t *testing.T, reader *Reader) {
 	visit, windows, found := tcAllocAvg(func() {
 		visitErr = errors.Join(visitErr, reader.VisitLargeImageV1(LargeImageSelectorV1{Kind: LargeImageBlockBodyV1, Hash: tcB0}, visitor))
 	})
-	t.Logf("D34 visit allocation %.1f bytes in %d windows", visit, windows)
 	if !found {
-		t.Fatalf("no clean allocation window in %d (D34)", windows)
+		t.Fatalf("no clean allocation window in %d (D34), err %v", windows, visitErr)
 	}
+	t.Logf("D34 visit allocation %.1f bytes in %d windows", visit, windows)
 	if visitErr != nil || visit > 728 || reads != 1+tcAllocRuns*windows {
 		t.Fatalf("block-body visit with one ReadAt: %.1f bytes, %d reads, err %v (D34 bound 728)", visit, reads, visitErr)
 	}
@@ -637,10 +637,10 @@ func tcOldGuard(t *testing.T, section *treeSectionV1, readback *treeReadbackStat
 		{"readback", func() { tcOldSink = readback.oldV1() }},
 	} {
 		got, windows, found := tcAllocAvg(row.f)
-		t.Logf("D36 %s oldV1 allocation %.1f bytes in %d windows", row.name, got, windows)
 		if !found {
 			t.Fatalf("%s: no clean allocation window in %d (D36)", row.name, windows)
 		}
+		t.Logf("D36 %s oldV1 allocation %.1f bytes in %d windows", row.name, got, windows)
 		if got > 64 {
 			t.Fatalf("%s oldV1 allocates %.1f bytes, above 64 (D36)", row.name, got)
 		}
@@ -659,10 +659,10 @@ func tcSeekGuard(t *testing.T, amended *treeAmendedV1, marker []byte) {
 		key, _, _, err = amended.nextV1(schemaDBIs[5], from)
 		nextErr = errors.Join(nextErr, err)
 	})
-	t.Logf("D37 seek allocation %.1f bytes in %d windows", got, windows)
 	if !found {
-		t.Fatalf("no clean allocation window in %d (D37)", windows)
+		t.Fatalf("no clean allocation window in %d (D37), err %v", windows, nextErr)
 	}
+	t.Logf("D37 seek allocation %.1f bytes in %d windows", got, windows)
 	if nextErr != nil || got > 80 || string(key) <= string(marker) {
 		t.Fatalf("seek over a shadowed marker: %.1f bytes, key %x, err %v (D37 bound 80)", got, key, nextErr)
 	}
