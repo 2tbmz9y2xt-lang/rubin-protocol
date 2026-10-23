@@ -88,6 +88,7 @@ func (l *testTreeLeaves) nextV1() (treeLeafV1, bool, error) {
 type testTreeEmit struct {
 	targets  []string
 	values   [][]byte
+	links    []uint8
 	refers   []string
 	log      *testTreeLog
 	failAt   int
@@ -108,6 +109,7 @@ func (e *testTreeEmit) emitV1(t treeTargetV1) error {
 	e.log.add("emit")
 	e.targets = append(e.targets, fmt.Sprintf("%d:%x:%v", t.dbi.Rank, t.key, t.after.present))
 	e.values = append(e.values, append([]byte(nil), t.after.value...))
+	e.links = append(e.links, t.after.links)
 	e.overwrite(t.key, t.after.value)
 	if e.failAt == len(e.targets) {
 		return e.fail
@@ -378,7 +380,7 @@ func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves
 	}
 	r := testTreeRun{emit: emit, id: c.databaseID, newRows: c.newRows(), want: c.wantBinding(oldB)}
 	r.err = testTreeRecover(func() error {
-		return treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger)
+		return treeEmitNodesV1(old, c.g, c.endpoint, c.databaseID, leaves, emit, ledger, nil)
 	})
 	r.reads, r.log = old.reads, log.calls
 	old2, leaves2, log2, _ := c.setup(t)
@@ -387,7 +389,7 @@ func (c testTreeCase) run(t *testing.T, tweak func(*testTreeOld, *testTreeLeaves
 		tweak(old2, leaves2, &testTreeEmit{log: log2}, ledger2)
 	}
 	r.foldErr = testTreeRecover(func() error {
-		return treeFoldV1(old2, c.g, c.endpoint, c.databaseID, leaves2, ledger2)
+		return treeFoldV1(old2, c.g, c.endpoint, c.databaseID, leaves2, ledger2, nil)
 	})
 	r.foldRd, r.foldLog = old2.reads, log2.calls
 	testTreeCheckLedger(t, r.log)
@@ -544,6 +546,35 @@ func TestTreeEmitV1A8Replace(t *testing.T) {
 	c14 := testTreeHex(t, "d8ca4a9d2c487486e0dd12ea08862b0c8c0f87c292b2dab4010b85bce5c30fc9")
 	if b.RootDigest != c14 || !bytes.Equal(r.emit.values[0], c14[:]) {
 		t.Fatal("C14")
+	}
+}
+
+// Literal transfer proof below the public net-dirty filter. Same-value leaves
+// exercise closeCommon without inventing a changed-value hash collision or
+// accepting a contradictory persisted tree. Native covered integration is owned
+// by TestTreeCompleteObservationV1; this test pins kept image/outgoing bits.
+func TestTreeEmitKeptOriginV1(t *testing.T) {
+	for _, n := range []int{1, 2} {
+		t.Run(fmt.Sprintf("common%d", n), func(t *testing.T) {
+			entries := testTreeABC()[:n]
+			c := testTreeCase{oldEntries: entries, stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, entries[0].v)}}
+			r := c.run(t, nil)
+			refs, reads := []string{testTreeRef(7, 288, testKA)}, []string{testTreeNodeRead(7, 288, testKA)}
+			if n == 2 {
+				refs = []string{testTreeRef(7, 287, [36]byte{})}
+				reads = append([]string{testTreeNodeRead(7, 287, [36]byte{})}, reads...)
+			}
+			r.accept(t, 7, nil, refs, reads)
+			if !reflect.DeepEqual(r.emit.links, []uint8{1}) {
+				t.Fatalf("kept Top origin %v", r.emit.links)
+			}
+		})
+	}
+	c := testTreeCase{oldEntries: testTreeABC()[:2], stream: []treeLeafV1{testTreeStreamLeaf(7, testKA, true, testTreeA8Value())}}
+	r := c.run(t, nil)
+	r.accept(t, 7, []string{testTreeTarget(7, 288, testKA, true), testTreeTarget(7, 287, [36]byte{}, true)}, []string{testTreeRef(7, 288, testKB)}, []string{testTreeNodeRead(7, 287, [36]byte{}), testTreeNodeRead(7, 288, testKA)})
+	if !reflect.DeepEqual(r.emit.links, []uint8{0, 2, 0}) {
+		t.Fatalf("computed leaf/kept one-child/Top origins%v", r.emit.links)
 	}
 }
 
@@ -959,10 +990,10 @@ func TestTreeEmitV1K2LedgerRefusal(t *testing.T) {
 		ep, id := testTreeApplied(6, 0x88, 2), testTreeHash(0x44)
 		old, leaves, log, _ := c.setup(t)
 		ledger := &testTreeLedger{log: log, refuse: sentinel}
-		if err := treeEmitNodesV1(old, 7, ep, id, leaves, &testTreeEmit{log: log}, ledger); !testTreeExact(err, sentinel) {
+		if err := treeEmitNodesV1(old, 7, ep, id, leaves, &testTreeEmit{log: log}, ledger, nil); !testTreeExact(err, sentinel) {
 			t.Fatal(err)
 		}
-		if err := treeFoldV1(old, 7, ep, id, leaves, ledger); !testTreeExact(err, sentinel) {
+		if err := treeFoldV1(old, 7, ep, id, leaves, ledger, nil); !testTreeExact(err, sentinel) {
 			t.Fatal(err)
 		}
 		if !reflect.DeepEqual(log.calls, []string{"charge 147968", "charge 147968"}) || len(old.reads) != 0 {
@@ -1089,19 +1120,19 @@ func TestTreeEmitV1K4AllocationIndependence(t *testing.T) {
 		old, stream := testTreeFlat(n)
 		leaves, emit, ledger := &testTreeFlatLeaves{items: stream}, &testTreeFlatEmit{}, &testTreeFlatLedger{}
 		ep, id := testTreeApplied(6, 0x88, 2), testTreeHash(0x44)
-		if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger); err != nil {
+		if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger, nil); err != nil {
 			t.Fatalf("n=%d: %v", n, err)
 		}
 		var foldErr, emitErr error
 		counts[i][0] = testing.AllocsPerRun(20, func() {
 			leaves.i = 0
-			if err := treeFoldV1(old, 7, ep, id, leaves, ledger); err != nil {
+			if err := treeFoldV1(old, 7, ep, id, leaves, ledger, nil); err != nil {
 				foldErr = err
 			}
 		})
 		counts[i][1] = testing.AllocsPerRun(20, func() {
 			leaves.i = 0
-			if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger); err != nil {
+			if err := treeEmitNodesV1(old, 7, ep, id, leaves, emit, ledger, nil); err != nil {
 				emitErr = err
 			}
 		})

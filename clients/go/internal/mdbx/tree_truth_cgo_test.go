@@ -580,6 +580,88 @@ func TestTreeCheckedStaleV1(t *testing.T) {
 	}
 }
 
+// Covered reads expose logical P while separately checking every physical OLD
+// point/successor. A final merged equality alone cannot see the skipped rows.
+func TestTreeCoveredOriginalReadsV1(t *testing.T) {
+	for _, mode := range []string{"point-shadow", "range-absence", "range-before", "range-intervening", "range-end"} {
+		for _, drift := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/drift%v", mode, drift), func(t *testing.T) {
+				store, _ := ttStore(t)
+				for _, key := range [][]byte{{0xa1}, {0xc1}} {
+					treeNativeSeed(t, store, 1, key, []byte("old"))
+				}
+				var observed error
+				run := func() {
+					observed = fixtureTreeSectionV1(store, &ttLedger{}, func(section *treeSectionV1) error {
+						section.covered = true
+						return ttCoveredRead(t, section, mode)
+					})
+				}
+				if drift {
+					key := []byte{0xa1}
+					if mode == "range-intervening" {
+						key = []byte{0xb1}
+					}
+					if mode == "range-end" {
+						key = []byte{0xe1}
+					}
+					count, err := FixtureWriteSnapshotDrift(store, 1, key, run)
+					mustEnvironment(t, err)
+					if count != 1 {
+						t.Fatalf("physical drift count%d", count)
+					}
+					ttMismatch(t, observed, "OLD/write snapshot mismatch")
+				} else {
+					run()
+					mustEnvironment(t, observed)
+				}
+			})
+		}
+	}
+}
+
+func ttCoveredRead(t *testing.T, section *treeSectionV1, mode string) error {
+	t.Helper()
+	w := section.writerV1()
+	key, value := []byte{0xa1}, "planned"
+	if mode == "range-absence" {
+		value = ""
+	}
+	if mode == "range-before" {
+		key = []byte{0xa0}
+	}
+	if err := w.emitV1(ttTarget(ttUTXO, key, value)); err != nil {
+		return err
+	}
+	if section.reached != 1 {
+		t.Fatalf("projection stage%d", section.reached)
+	}
+	old := section.oldV1(true)
+	if mode == "point-shadow" {
+		image, err := old.getV1(ttUTXO, key)
+		if err == nil && ttImage(image, nil) != "true:planned" {
+			t.Fatalf("logical point%v", image)
+		}
+		return err
+	}
+	from, want := []byte{0xa0}, "a1=planned"
+	switch mode {
+	case "range-absence":
+		from, want = []byte{0xa1}, "c1=old"
+	case "range-before":
+		want = "a0=planned"
+	case "range-intervening":
+		from, want = []byte{0xb0}, "c1=old"
+	case "range-end":
+		from, want = []byte{0xe0}, "="
+	}
+	k, image, ok, err := old.nextV1(ttUTXO, from)
+	if err == nil && fmt.Sprintf("%x=%s", k, image.value) != want {
+		t.Fatalf("logical successor%x=%s/%v want%s", k, image.value, ok, want)
+	}
+	return err
+}
+
 // R3, M11, M-REL: a refused P_w growth leaves P_w and the budget unchanged and aborts without a release.
 func TestTreeWriterChargeRefusedV1(t *testing.T) {
 	store, path := ttStore(t)
@@ -1003,7 +1085,7 @@ func ltHeld(step string, ia, ia2 treeImageV1) error {
 }
 
 func ltPrimitive0(emit treeEmitterV1) error {
-	for _, target := range []treeTargetV1{ttTarget(ttUTXO, ltC, ltVC1), ttTarget(ttUTXO, ltD, ltVD1), {dbi: ttUTXO, key: ltA, after: treeImageV1{true, ltVA}}, {dbi: ttUTXO, key: ltA2, after: treeImageV1{true, ltVA2}}} {
+	for _, target := range []treeTargetV1{ttTarget(ttUTXO, ltC, ltVC1), ttTarget(ttUTXO, ltD, ltVD1), {dbi: ttUTXO, key: ltA, after: treeImageV1{present: true, value: ltVA}}, {dbi: ttUTXO, key: ltA2, after: treeImageV1{present: true, value: ltVA2}}} {
 		if err := emit.emitV1(target); err != nil {
 			return err
 		}

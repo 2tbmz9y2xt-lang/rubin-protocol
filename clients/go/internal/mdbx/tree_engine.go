@@ -43,6 +43,8 @@ const (
 // after.value to emitV1 of another identity (D20, D24).
 type treeImageV1 struct {
 	present bool
+	planned bool
+	links   uint8
 	value   []byte
 }
 
@@ -112,8 +114,9 @@ func (l treeBudgetLedgerV1) chargeV1(n uint64) error {
 func (l treeBudgetLedgerV1) releaseV1(n uint64) { l.budget.returnV1(n) }
 
 // treeOldV1 reads primitive j's protected logical OLD at the current position (D2-2): P_x overlay, then ORIGINAL OLD.
-// A reference entry in P passes through to ORIGINAL OLD. In checked mode (writer steps 4-5) every access also reads
-// the write txn at the same identity (getV1) or range (nextV1); a difference returns the existing EngineStateMismatch
+// A reference entry in P passes through to ORIGINAL OLD. Checked raw reads compare logical OLD to write;
+// covered reads compare physical ORIGINAL to write before any P merge. Every native successor is checked,
+// including shadowed/skipped rows. A difference returns the existing EngineStateMismatch
 // "OLD/write snapshot mismatch" (D3 S). nextV1 returns the first present identity with key >= from in dbi; absent markers are skipped.
 type treeOldV1 interface {
 	getV1(dbi DBI, key []byte) (treeImageV1, error)

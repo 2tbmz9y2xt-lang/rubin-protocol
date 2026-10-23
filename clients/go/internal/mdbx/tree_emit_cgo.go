@@ -5,6 +5,7 @@ package mdbx
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 )
 
 // treeFrameCapV1 is 288 branches plus one leaf (CSM 2.6: a path has at most 288 branches).
@@ -12,23 +13,27 @@ const treeFrameCapV1 = 289
 
 // treeNodeRefV1 names one node (depth 288 is a leaf; key is its routing key, else the branch prefix) with its digest.
 type treeNodeRefV1 struct {
-	digest  [32]byte
-	key     [36]byte
-	depth   uint16
-	emitted bool
+	digest   [32]byte
+	key      [36]byte
+	depth    uint16
+	emitted  bool
+	original bool
+	links    uint8
 }
 
 // treeFrameV1 is one pointer-free traversal frame. Index i holds the i-th read OLD node of the current path
 // (old, oldValue, oldNext) and, independently, the i-th open NEW branch (openDepth and its completed zero child).
 // key and value of frame 0 are the scratch for every key and value L2 passes to old, emit and refer.
 type treeFrameV1 struct {
-	old       treeNodeRefV1
-	oldValue  [140]byte
-	oldNext   uint8
-	zero      treeNodeRefV1
-	openDepth uint16
-	key       [46]byte
-	value     [140]byte
+	old         treeNodeRefV1
+	oldValue    [140]byte
+	oldNext     uint8
+	oldOriginal bool
+	oldLinks    uint8
+	zero        treeNodeRefV1
+	openDepth   uint16
+	key         [46]byte
+	value       [140]byte
 }
 
 type treeStreamKeyV1 struct {
@@ -52,6 +57,7 @@ type treeWalkV1 struct {
 	old              treeOldV1
 	leaves           treeLeavesV1
 	emit             treeEmitterV1
+	observation      *TreeObservationV1
 }
 
 var treeAllOnesV1 = [36]byte{
@@ -60,22 +66,22 @@ var treeAllOnesV1 = [36]byte{
 }
 
 // treeFoldV1 is the read-only fold: the reads, checks and Encode validation of treeEmitNodesV1, with no emitter.
-func treeFoldV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, ledger treeLedgerV1) error {
-	return treeRunV1(old, generation, endpoint, databaseID, leaves, nil, ledger)
+func treeFoldV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, ledger treeLedgerV1, observation *TreeObservationV1) error {
+	return treeRunV1(old, generation, endpoint, databaseID, leaves, nil, ledger, observation)
 }
 
 // treeEmitNodesV1 emits j's node delta in ascending TreeNodeKey, refers the required unchanged boundary set and
 // emits the root binding of generation last. On a refusal it returns the first error and calls nothing later.
-func treeEmitNodesV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1) error {
-	return treeRunV1(old, generation, endpoint, databaseID, leaves, emit, ledger)
+func treeEmitNodesV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1) error {
+	return treeRunV1(old, generation, endpoint, databaseID, leaves, emit, ledger, observation)
 }
 
-func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1) error {
+func treeRunV1(old treeOldV1, generation uint64, endpoint TreeEndpointV1, databaseID [32]byte, leaves treeLeavesV1, emit treeEmitterV1, ledger treeLedgerV1, observation *TreeObservationV1) error {
 	if err := ledger.chargeV1(treeNodeWorkBytesV1); err != nil {
 		return err
 	}
 	defer ledger.releaseV1(treeNodeWorkBytesV1)
-	w := treeWalkV1{frames: new([treeFrameCapV1]treeFrameV1), generation: generation, old: old, leaves: leaves, emit: emit}
+	w := treeWalkV1{frames: new([treeFrameCapV1]treeFrameV1), generation: generation, old: old, leaves: leaves, emit: emit, observation: observation}
 	binding, err := w.readBinding(databaseID)
 	if err != nil {
 		return err
@@ -92,16 +98,44 @@ func (w *treeWalkV1) readBinding(databaseID [32]byte) (RootBindingV1, error) {
 		return RootBindingV1{}, err
 	}
 	if !image.present {
-		return RootBindingV1{}, treeIntegrity(operationUpdate, nil)
+		return RootBindingV1{}, w.bindingFailure(image, TreeObservationAbsentV1, nil)
 	}
 	binding, err := DecodeRootBindingV1(image.value)
 	if err != nil {
-		return RootBindingV1{}, treeIntegrity(operationUpdate, err)
+		return RootBindingV1{}, w.bindingFailure(image, TreeObservationMalformedV1, err)
 	}
 	if binding.DatabaseID != databaseID {
-		return RootBindingV1{}, treeIntegrity(operationUpdate, nil)
+		return RootBindingV1{}, w.bindingFailure(image, TreeObservationIdentityMismatchV1, nil)
 	}
-	return binding, w.setTop(binding)
+	err = w.setTop(binding)
+	if err != nil {
+		return binding, treeObserveV1(err, w.observation, 0, w.bindingKey(), TreeObservationDigestMismatchV1, image, !image.planned)
+	}
+	w.top.original = !image.planned || image.links&1 != 0
+	return binding, nil
+}
+
+func (w *treeWalkV1) bindingFailure(image treeImageV1, kind TreeObservationKindV1, cause error) error {
+	return treeObserveV1(treeIntegrity(operationUpdate, cause), w.observation, 0, w.bindingKey(), kind, image, !image.planned)
+}
+
+// treeObserveV1 attaches an owned fixed copy without replacing the raw error.
+func treeObserveV1(err error, context *TreeObservationV1, rank uint8, key []byte, kind TreeObservationKindV1, image treeImageV1, reference bool) error {
+	keyLength := len(key)
+	if context == nil || keyLength > len(context.Key) {
+		return err
+	}
+	var engine *EngineError
+	if !errors.As(err, &engine) || engine == nil || any(err) != any(engine) {
+		return err
+	}
+	observation := *context
+	observation.Key = [46]byte{}
+	copy(observation.Key[:], key)
+	observation.Rank, observation.KeyLength, observation.Kind = rank, uint8(keyLength), kind
+	observation.OriginalImage, observation.OriginalReference = !image.planned, reference
+	engine.TreeObservation = &observation
+	return err
 }
 
 func (w *treeWalkV1) setTop(binding RootBindingV1) error {
@@ -180,24 +214,45 @@ func (w *treeWalkV1) read(cand treeNodeRefV1) error {
 		return err
 	}
 	if !image.present {
-		return treeIntegrity(operationUpdate, nil)
+		return w.nodeFailure(cand, image, TreeObservationAbsentV1, nil)
 	}
 	if !treeRecordOKV1(cand, image.value) {
-		return treeIntegrity(operationUpdate, errSchema)
+		return w.nodeFailure(cand, image, treeRecordFailureKindV1(cand, image.value), errSchema)
 	}
 	i := w.oldN
 	w.oldN++
 	w.frames[i].old = cand
 	copy(w.frames[i].oldValue[:], image.value)
 	w.frames[i].oldNext = 0
+	w.frames[i].oldOriginal = !image.planned
+	w.frames[i].oldLinks = image.links
+	if !image.planned {
+		w.frames[i].oldLinks = 3
+	}
 	if w.frames[i].recordDigest() != cand.digest {
-		return treeIntegrity(operationUpdate, nil)
+		return w.nodeFailure(cand, image, TreeObservationDigestMismatchV1, nil)
 	}
 	if cand.depth == 288 {
 		w.frames[i].oldNext = 2
 		return w.matchLeaf()
 	}
 	return nil
+}
+
+func treeRecordFailureKindV1(node treeNodeRefV1, value []byte) TreeObservationKindV1 {
+	if node.depth == 288 || len(value) != 140 {
+		return TreeObservationMalformedV1
+	}
+	_, zeroErr := decodeTreeSuffix(value[:38])
+	_, oneErr := decodeTreeSuffix(value[70:108])
+	if zeroErr != nil || oneErr != nil {
+		return TreeObservationMalformedV1
+	}
+	return TreeObservationIdentityMismatchV1
+}
+
+func (w *treeWalkV1) nodeFailure(node treeNodeRefV1, image treeImageV1, kind TreeObservationKindV1, cause error) error {
+	return treeObserveV1(treeIntegrity(operationUpdate, cause), w.observation, 8, w.nodeKey(node), kind, image, node.original)
 }
 
 func (w *treeWalkV1) matchLeaf() error {
@@ -331,6 +386,9 @@ func (w *treeWalkV1) closeCommon() error {
 	w.oldN--
 	node, n := w.buildNew()
 	if bytes.Equal(w.frames[w.oldN].oldValue[:n], w.frames[0].value[:n]) {
+		w.cur.original = w.frames[w.oldN].oldOriginal
+		w.cur.links = w.frames[w.oldN].oldLinks
+		w.cur.emitted = false
 		return nil
 	}
 	return w.emitNode(node, n)
@@ -346,6 +404,12 @@ func (w *treeWalkV1) buildNew() (treeNodeRefV1, int) {
 	w.openN--
 	node, zero, one := w.openRef(w.openN), w.frames[w.openN].zero, w.cur
 	node.digest = treeBranchDigestV1(node.id(), zero.digest, one.digest)
+	if zero.original {
+		node.links |= 1
+	}
+	if one.original {
+		node.links |= 2
+	}
 	value := &w.frames[0].value
 	treeSuffixV1(value[0:38], zero)
 	copy(value[38:70], zero.digest[:])
@@ -360,7 +424,7 @@ func (w *treeWalkV1) emitNode(node treeNodeRefV1, n int) error {
 	if w.emit == nil {
 		return nil
 	}
-	target := treeTargetV1{dbi: TreeSchemaV1DBIs()[8], key: w.nodeKey(node), after: treeImageV1{present: true, value: w.frames[0].value[:n]}}
+	target := treeTargetV1{dbi: TreeSchemaV1DBIs()[8], key: w.nodeKey(node), after: treeImageV1{present: true, value: w.frames[0].value[:n], links: node.links}}
 	if err := w.emit.emitV1(target); err != nil {
 		return err
 	}
@@ -400,7 +464,11 @@ func (w *treeWalkV1) finish(binding RootBindingV1, endpoint TreeEndpointV1) erro
 			return err
 		}
 	}
-	return w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded}})
+	var links uint8
+	if w.hasCur && w.cur.original {
+		links = 1
+	}
+	return w.emit.emitV1(treeTargetV1{dbi: TreeSchemaV1DBIs()[0], key: w.bindingKey(), after: treeImageV1{present: true, value: encoded, links: links}})
 }
 
 // nodeKey builds the 46-byte form byte-equal to TreeNodeKey(generation, id) in the frame scratch.
@@ -430,7 +498,9 @@ func (f *treeFrameV1) child(side uint8) treeNodeRefV1 {
 	id, _ := decodeTreeSuffix(f.oldValue[off : off+38])
 	var digest [32]byte
 	copy(digest[:], f.oldValue[off+38:off+70])
-	return treeRefOfID(id, digest)
+	ref := treeRefOfID(id, digest)
+	ref.original = f.oldLinks&(1<<side) != 0
+	return ref
 }
 
 func (f *treeFrameV1) recordDigest() [32]byte {

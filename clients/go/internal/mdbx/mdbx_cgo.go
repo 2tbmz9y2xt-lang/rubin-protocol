@@ -513,6 +513,9 @@ type EngineError struct {
 	Diagnostic     string
 	Cause          error
 	ReopenRequired bool
+
+	// TreeObservation is optional copied local tree context; it changes no result.
+	TreeObservation *TreeObservationV1
 }
 
 func (e *EngineError) Error() string {
@@ -627,12 +630,12 @@ func validEngineClass(operation engineOperation, class EngineClass) bool {
 
 func engineError(operation engineOperation, class EngineClass, code int, diagnostic string, cause error) *EngineError {
 	if !validEngineOperation(operation) {
-		return &EngineError{EngineLocalInvariant, string(operationInit), codeProblem, "unsupported engine operation", cause, false}
+		return &EngineError{EngineLocalInvariant, string(operationInit), codeProblem, "unsupported engine operation", cause, false, nil}
 	}
 	if !validEngineClass(operation, class) {
-		return &EngineError{EngineLocalInvariant, string(operation), codeProblem, "unsupported engine class", cause, false}
+		return &EngineError{EngineLocalInvariant, string(operation), codeProblem, "unsupported engine class", cause, false, nil}
 	}
-	return &EngineError{class, string(operation), code, diagnostic, cause, reopenRequired(code)}
+	return &EngineError{class, string(operation), code, diagnostic, cause, reopenRequired(code), nil}
 }
 
 func nativeDiagnostic(code int) string {

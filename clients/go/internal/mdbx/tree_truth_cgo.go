@@ -45,6 +45,8 @@ type treeEntryV1 struct {
 	dbi        DBI
 	key, value []byte
 	kind       uint8
+	links      uint8
+	oldPresent bool
 }
 
 // treeProjectionV1 is P_w or P_r: entries ordered by (DBI rank, key), never map order; live counts D2-7 entry bytes.
@@ -116,10 +118,13 @@ func treeSnapshotMismatchV1() error {
 
 func treeInvalidInputV1() error { return updateNativeInvariant("invalid native update input") }
 
-// treeAmendedV1 is the amended read (D2-2): P overlay, then ORIGINAL OLD; checked mode compares the write txn (D3 S).
+// treeAmendedV1 returns P over ORIGINAL OLD. Checked raw reads compare that
+// amended image with the write txn; covered reads compare physical ORIGINAL
+// before P can shadow a point or any native successor (D2-2, D3 S).
 type treeAmendedV1 struct {
 	old, write *C.MDBX_txn
 	handles    [9]C.MDBX_dbi
+	covered    bool
 	p          *treeProjectionV1
 }
 
@@ -129,7 +134,7 @@ func (a *treeAmendedV1) logicalV1(dbi DBI, key []byte) (treeImageV1, error) {
 	}
 	if i, found := a.p.findV1(dbi, key); found && a.p.entries[i].kind != treeEntryReferenceV1 {
 		entry := a.p.entries[i]
-		return treeImageV1{present: entry.kind == treeEntryImageV1, value: entry.value}, nil
+		return treeImageV1{present: entry.kind == treeEntryImageV1, value: entry.value, planned: true, links: entry.links}, nil
 	}
 	return treeReadPointV1(a.old, a.handles[dbi.Rank], key)
 }
@@ -139,11 +144,18 @@ func (a *treeAmendedV1) getV1(dbi DBI, key []byte) (treeImageV1, error) {
 	if err != nil || a.write == nil {
 		return image, err
 	}
+	expected := image
+	if a.covered {
+		expected, err = treeReadPointV1(a.old, a.handles[dbi.Rank], key)
+		if err != nil {
+			return treeImageV1{}, err
+		}
+	}
 	actual, err := treeReadPointV1(a.write, a.handles[dbi.Rank], key)
 	if err != nil {
 		return treeImageV1{}, err
 	}
-	if actual.present != image.present || !bytes.Equal(actual.value, image.value) {
+	if !treeSameImageV1(actual, expected) {
 		return treeImageV1{}, treeSnapshotMismatchV1()
 	}
 	return image, nil
@@ -154,14 +166,14 @@ func (a *treeAmendedV1) nextV1(dbi DBI, from []byte) ([]byte, treeImageV1, bool,
 		return nil, treeImageV1{}, false, treeInvalidInputV1()
 	}
 	key, image, ok, err := a.mergedNextV1(dbi, from)
-	if err != nil || a.write == nil {
+	if err != nil || a.write == nil || a.covered {
 		return key, image, ok, err
 	}
 	actualKey, actual, actualOK, err := treeReadNextV1(a.write, a.handles[dbi.Rank], from)
 	if err != nil {
 		return nil, treeImageV1{}, false, err
 	}
-	if actualOK != ok || !bytes.Equal(actualKey, key) || !bytes.Equal(actual.value, image.value) {
+	if !treeSameSuccessorV1(actualKey, actual, actualOK, key, image, ok) {
 		return nil, treeImageV1{}, false, treeSnapshotMismatchV1()
 	}
 	return key, image, ok, nil
@@ -173,7 +185,7 @@ func (a *treeAmendedV1) mergedNextV1(dbi DBI, from []byte) ([]byte, treeImageV1,
 	seek := from
 	for {
 		at = a.skipReferencesV1(dbi, at)
-		nativeKey, native, nativeOK, err := treeReadNextV1(a.old, a.handles[dbi.Rank], seek)
+		nativeKey, native, nativeOK, err := a.nativeNextV1(dbi, seek)
 		if err != nil {
 			return nil, treeImageV1{}, false, err
 		}
@@ -183,6 +195,30 @@ func (a *treeAmendedV1) mergedNextV1(dbi DBI, from []byte) ([]byte, treeImageV1,
 		}
 		seek, at = append(append(make([]byte, 0, len(key)+1), key...), 0), at+1
 	}
+}
+
+// nativeNextV1 checks each physical successor before P can hide or precede it.
+func (a *treeAmendedV1) nativeNextV1(dbi DBI, seek []byte) ([]byte, treeImageV1, bool, error) {
+	key, image, ok, err := treeReadNextV1(a.old, a.handles[dbi.Rank], seek)
+	if err != nil || !a.covered || a.write == nil {
+		return key, image, ok, err
+	}
+	actualKey, actual, actualOK, err := treeReadNextV1(a.write, a.handles[dbi.Rank], seek)
+	if err != nil {
+		return nil, treeImageV1{}, false, err
+	}
+	if !treeSameSuccessorV1(actualKey, actual, actualOK, key, image, ok) {
+		return nil, treeImageV1{}, false, treeSnapshotMismatchV1()
+	}
+	return key, image, ok, nil
+}
+
+func treeSameImageV1(a, b treeImageV1) bool {
+	return a.present == b.present && bytes.Equal(a.value, b.value)
+}
+
+func treeSameSuccessorV1(aKey []byte, a treeImageV1, aOK bool, bKey []byte, b treeImageV1, bOK bool) bool {
+	return aOK == bOK && bytes.Equal(aKey, bKey) && treeSameImageV1(a, b)
 }
 
 func (a *treeAmendedV1) skipReferencesV1(dbi DBI, at int) int {
@@ -202,7 +238,7 @@ func (a *treeAmendedV1) chooseV1(dbi DBI, at int, nativeKey []byte, native treeI
 	if entry.kind == treeEntryAbsentV1 {
 		return entry.key, treeImageV1{}, false, true
 	}
-	return entry.key, treeImageV1{present: true, value: entry.value}, true, false
+	return entry.key, treeImageV1{present: true, value: entry.value, planned: true, links: entry.links}, true, false
 }
 
 // treeSectionV1 is the write section of one tree operation: write txn, P_w and its high-water P budget.
@@ -216,6 +252,7 @@ type treeSectionV1 struct {
 	heldP      uint64
 	references []updateReference
 	ended      bool
+	covered    bool
 }
 
 // beginTreeSectionV1 begins the write txn with updateNativeExecute's begin path. On failure it returns nil and that
@@ -232,7 +269,7 @@ func beginTreeSectionV1(env *C.MDBX_env, dbis [9]C.MDBX_dbi, old *C.MDBX_txn, le
 }
 
 func (t *treeSectionV1) oldV1(checked bool) treeOldV1 {
-	amended := &treeAmendedV1{old: t.old, handles: t.handles, p: &t.pw}
+	amended := &treeAmendedV1{old: t.old, handles: t.handles, p: &t.pw, covered: t.covered}
 	if checked {
 		amended.write = t.write
 	}
@@ -256,7 +293,9 @@ func (t *treeSectionV1) recordV1(dbi DBI, key []byte, kind uint8, value []byte) 
 	return nil
 }
 
-// writeTargetV1 applies the D14-10 table from the logical prior presence, then the fused final equality.
+// writeTargetV1 applies D14-10 and fused final equality. Raw callers supply
+// logical prior presence; covered flush supplies frozen physical ORIGINAL
+// presence after complete preflight. This owner does not derive either mode.
 func (t *treeSectionV1) writeTargetV1(target treeTargetV1, prior bool) error {
 	handle := t.handles[target.dbi.Rank]
 	if prior {
@@ -299,6 +338,79 @@ func (t *treeSectionV1) pairEmitV1(pair []ownedMutation) error {
 		return err
 	}
 	return updateNativePuts(t.old, t.write, t.handles, pair, t.references, &t.reached)
+}
+
+// freezeV1 checks every P identity against ORIGINAL, then fixes physical presence.
+// Pair conflicts are operation-owned refusals; no source is invoked by this pass.
+func (t *treeSectionV1) freezeV1(pair []ownedMutation, consulted []ownedConsulted) error {
+	for i := range t.pw.entries {
+		e := &t.pw.entries[i]
+		if treeProjectionConflictV1(*e, pair, consulted) {
+			return updateInvalidBatch()
+		}
+		err := updateNativeOldMatch(t.old, t.write, t.handles[e.dbi.Rank], e.key, "OLD/write snapshot mismatch")
+		if err != nil {
+			return err
+		}
+		image, err := treeReadPointV1(t.old, t.handles[e.dbi.Rank], e.key)
+		if err != nil {
+			return err
+		}
+		e.oldPresent = image.present
+	}
+	return nil
+}
+
+func treeProjectionConflictV1(e treeEntryV1, pair []ownedMutation, consulted []ownedConsulted) bool {
+	if canonicalTargetIndex(pair, e.dbi.Rank, e.key) >= 0 {
+		return true
+	}
+	if e.kind == treeEntryReferenceV1 {
+		return false
+	}
+	return obsoleteConsultedContains(consulted, e.dbi.Rank, e.key)
+}
+
+// flushV1 consumes only frozen P. All node identities precede every root,
+// including ordinary Pair roots. Entries are already in TreeNodeKey order.
+func (t *treeSectionV1) flushV1(pair []ownedMutation) error {
+	for pass := uint8(0); pass < 3; pass++ {
+		if pass == 2 {
+			err := t.pairEmitV1(pair)
+			if err != nil {
+				return err
+			}
+		}
+		err := t.flushPassV1(pass)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *treeSectionV1) flushPassV1(pass uint8) error {
+	for _, e := range t.pw.entries {
+		if e.kind == treeEntryReferenceV1 || treeFlushPassV1(e) != pass {
+			continue
+		}
+		after := treeImageV1{present: e.kind == treeEntryImageV1, value: e.value}
+		err := t.writeTargetV1(treeTargetV1{dbi: e.dbi, key: e.key, after: after}, e.oldPresent)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func treeFlushPassV1(e treeEntryV1) uint8 {
+	if e.dbi.Rank == 8 {
+		return 1
+	}
+	if e.dbi.Rank == 0 && len(e.key) == 9 && e.key[0] == 0x11 {
+		return 2
+	}
+	return 0
 }
 
 // finalV1 is complete final pair equality (D2-4): P_w identities, Pair targets, references and Consulted rows.
@@ -354,6 +466,19 @@ type treeWriterEmitterV1 struct{ section *treeSectionV1 }
 
 func (e treeWriterEmitterV1) emitV1(target treeTargetV1) error {
 	t := e.section
+	if t.covered {
+		kind, value := treeAfterV1(target.after)
+		err := t.recordV1(target.dbi, target.key, kind, value)
+		if err != nil {
+			return err
+		}
+		i, _ := t.pw.findV1(target.dbi, target.key)
+		t.pw.entries[i].links = target.after.links
+		if !bytes.Equal(t.pw.entries[i].value, value) {
+			return updateNativeInvariant("projected update image mismatch")
+		}
+		return nil
+	}
 	prior, err := t.oldV1(false).getV1(target.dbi, target.key)
 	if err != nil {
 		return err
@@ -500,7 +625,13 @@ type treeReadbackEmitterV1 struct{ readback *treeReadbackStateV1 }
 
 func (e treeReadbackEmitterV1) emitV1(target treeTargetV1) error {
 	kind, value := treeAfterV1(target.after)
-	return e.readback.recordV1(target.dbi, target.key, kind, value)
+	r := e.readback
+	if err := r.recordV1(target.dbi, target.key, kind, value); err != nil {
+		return err
+	}
+	i, _ := r.pr.findV1(target.dbi, target.key)
+	r.pr.entries[i].links = target.after.links
+	return nil
 }
 
 func (e treeReadbackEmitterV1) referV1(dbi DBI, key []byte) error {
