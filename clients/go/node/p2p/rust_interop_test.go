@@ -239,6 +239,8 @@ func TestRustInterop_SendCmpctPeerCloseCheckClassifiesStderr(t *testing.T) {
 		"action: No space left on device (os error 28)\n",
 		"action: A connection attempt failed (os error 10060)\n",
 		"action: Connection reset by peer (os error x)\n",
+		"action: Broken pipe (os error 32) x\n",
+		"action: peer closed connection after peer read timeout\n",
 	} {
 		if checkPeerCloseActionError(stderr) == nil {
 			t.Errorf("reject %q: accepted", stderr)
