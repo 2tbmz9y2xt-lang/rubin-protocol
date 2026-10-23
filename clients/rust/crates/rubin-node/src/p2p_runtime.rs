@@ -1186,6 +1186,10 @@ impl PeerSession {
 
     fn handle_sendcmpct(&mut self, payload: &[u8]) -> io::Result<()> {
         let msg = parse_sendcmpct_runtime_payload(payload)?;
+        if msg.version != COMPACT_RELAY_VERSION {
+            // Unsupported compact wire version with a valid mode: ignored as if not received.
+            return Ok(());
+        }
         self.remote_compact_mode = CompactModeSnapshot {
             mode: msg.mode,
             version: msg.version,
@@ -4296,12 +4300,6 @@ fn parse_sendcmpct_runtime_payload(payload: &[u8]) -> io::Result<CompactModeSnap
         mode: payload[0],
         version: u64::from_le_bytes(version),
     };
-    if out.version != COMPACT_RELAY_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unsupported compact relay version",
-        ));
-    }
     if out.mode > 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -8020,6 +8018,132 @@ mod tests {
         assert_eq!(runtime_payload_cap(""), 0);
     }
 
+    fn sendcmpct_test_session() -> (PeerSession, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let session =
+            PeerSession::new(stream, default_peer_runtime_config("devnet", 8)).expect("session");
+        (session, client)
+    }
+
+    fn sendcmpct_collect(
+        session: &mut PeerSession,
+        engine: &mut SyncEngine,
+        payload: Vec<u8>,
+    ) -> io::Result<LiveMessageOutcome> {
+        session.collect_live_responses(
+            WireMessage {
+                command: MESSAGE_SENDCMPCT.to_string(),
+                payload,
+            },
+            engine,
+            None,
+        )
+    }
+
+    fn assert_sendcmpct_state(session: &PeerSession, mode: u8, version: u64) {
+        assert_eq!(
+            session.remote_compact_mode,
+            CompactModeSnapshot { mode, version }
+        );
+        assert_eq!(session.peer.ban_score, 0);
+        assert_eq!(session.peer.last_error, "");
+    }
+
+    #[test]
+    fn sendcmpct_supported_version_applies_mode() {
+        let mut engine = test_sync_engine_with_genesis();
+        for mode in [0u8, 1, 2] {
+            let (mut session, _client) = sendcmpct_test_session();
+            let outcome = sendcmpct_collect(
+                &mut session,
+                &mut engine,
+                sendcmpct_runtime_payload(mode, 1),
+            )
+            .expect("supported offer");
+            assert!(outcome.responses.is_empty());
+            assert_sendcmpct_state(&session, mode, 1);
+        }
+        let (mut session, _client) = sendcmpct_test_session();
+        sendcmpct_collect(&mut session, &mut engine, sendcmpct_runtime_payload(0, 2))
+            .expect("ignored offer");
+        sendcmpct_collect(&mut session, &mut engine, sendcmpct_runtime_payload(1, 1))
+            .expect("later supported offer");
+        assert_sendcmpct_state(&session, 1, 1);
+    }
+
+    #[test]
+    fn sendcmpct_unsupported_version_is_state_neutral_ignore() {
+        let mut engine = test_sync_engine_with_genesis();
+        for prior in [false, true] {
+            for mode in [0u8, 1, 2] {
+                for version in [0u64, 2, 3, u64::MAX] {
+                    let (mut session, _client) = sendcmpct_test_session();
+                    let (want_mode, want_version) = if prior { (2, 1) } else { (0, 0) };
+                    if prior {
+                        sendcmpct_collect(
+                            &mut session,
+                            &mut engine,
+                            sendcmpct_runtime_payload(2, 1),
+                        )
+                        .expect("prior offer");
+                    }
+                    let outcome = sendcmpct_collect(
+                        &mut session,
+                        &mut engine,
+                        sendcmpct_runtime_payload(mode, version),
+                    )
+                    .expect("unsupported version is ignored");
+                    assert!(outcome.responses.is_empty());
+                    assert_sendcmpct_state(&session, want_mode, want_version);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sendcmpct_malformed_width_then_mode_order() {
+        let mut engine = test_sync_engine_with_genesis();
+        let mut long = sendcmpct_runtime_payload(3, 2);
+        long.push(0);
+        let cases = [
+            (
+                sendcmpct_runtime_payload(3, 2),
+                "unsupported compact relay mode",
+            ),
+            (
+                sendcmpct_runtime_payload(255, u64::MAX),
+                "unsupported compact relay mode",
+            ),
+            (
+                sendcmpct_runtime_payload(3, 1),
+                "unsupported compact relay mode",
+            ),
+            (vec![3, 2], "sendcmpct payload width mismatch"),
+            (
+                sendcmpct_runtime_payload(3, 2)[..8].to_vec(),
+                "sendcmpct payload width mismatch",
+            ),
+            (long, "sendcmpct payload width mismatch"),
+        ];
+        for (payload, want) in cases {
+            let (mut session, _client) = sendcmpct_test_session();
+            sendcmpct_collect(&mut session, &mut engine, sendcmpct_runtime_payload(2, 1))
+                .expect("prior offer");
+            let err = sendcmpct_collect(&mut session, &mut engine, payload.clone())
+                .expect_err("malformed sendcmpct");
+            assert_eq!(err.to_string(), want, "payload {payload:?}");
+            assert_eq!(
+                session.remote_compact_mode,
+                CompactModeSnapshot {
+                    mode: 2,
+                    version: 1
+                }
+            );
+        }
+    }
+
     #[test]
     fn sendcmpct_live_dispatch_records_peer_mode() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -8084,15 +8208,13 @@ mod tests {
             .collect_live_responses(
                 WireMessage {
                     command: MESSAGE_SENDCMPCT.to_string(),
-                    payload: sendcmpct_runtime_payload(3, COMPACT_RELAY_VERSION + 1),
+                    payload: sendcmpct_runtime_payload(3, 2),
                 },
                 &mut engine,
                 None,
             )
-            .expect_err("future version must fail before future-mode validation");
-        assert!(err
-            .to_string()
-            .contains("unsupported compact relay version"));
+            .expect_err("unknown mode must fail before version handling");
+        assert!(err.to_string().contains("unsupported compact relay mode"));
         assert_eq!(
             session.remote_compact_mode,
             CompactModeSnapshot {

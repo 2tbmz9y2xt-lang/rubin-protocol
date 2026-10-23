@@ -49,6 +49,10 @@ func (p *peer) handleSendCmpct(payload []byte) error {
 	if err != nil {
 		return err
 	}
+	if msg.Version != compactRelayVersion {
+		// Unsupported compact wire version with a valid mode: ignored as if not received.
+		return nil
+	}
 	p.setRemoteCompactMode(compactModeSnapshot{Mode: msg.Mode, Version: msg.Version})
 	return nil
 }
@@ -63,9 +67,6 @@ func parseSendCmpctRuntimePayload(payload []byte) (sendCmpctPayload, error) {
 		return sendCmpctPayload{}, errors.New("sendcmpct payload width mismatch")
 	}
 	out := sendCmpctPayload{Mode: payload[0], Version: binary.LittleEndian.Uint64(payload[1:])}
-	if out.Version != compactRelayVersion {
-		return sendCmpctPayload{}, errors.New("unsupported compact relay version")
-	}
 	if out.Mode > 2 {
 		return sendCmpctPayload{}, errors.New("unsupported compact relay mode")
 	}

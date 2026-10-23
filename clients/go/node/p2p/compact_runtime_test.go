@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -20,20 +21,118 @@ func TestSendCmpctPostHandshakeCommandPathRecordsPeerMode(t *testing.T) {
 		t.Fatalf("remote compact mode=%+v, want mode=2 version=%d", got, compactRelayVersion)
 	}
 
-	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 1, compactRelayVersion+1)}); err == nil || err.Error() != "unsupported compact relay version" {
-		t.Fatalf("unsupported version err=%v, want version rejection", err)
-	}
-	if got := p.remoteCompactMode(); got.Mode != 2 || got.Version != compactRelayVersion {
-		t.Fatalf("unsupported version changed remote compact mode: %+v", got)
-	}
-	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, compactRelayVersion+1)}); err == nil || err.Error() != "unsupported compact relay version" {
-		t.Fatalf("future version/future mode err=%v, want version rejection", err)
-	}
 	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: []byte{1, 2}}); err == nil {
 		t.Fatal("short sendcmpct payload must fail")
 	}
 	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, compactRelayVersion)}); err == nil {
 		t.Fatal("unknown sendcmpct mode must fail")
+	}
+}
+
+const maxU64 = ^uint64(0)
+
+func requireSendCmpctState(t *testing.T, p *peer, want compactModeSnapshot, label string) {
+	t.Helper()
+	if got := p.remoteCompactMode(); got != want {
+		t.Fatalf("%s: remote compact mode=%+v, want %+v", label, got, want)
+	}
+	if st := p.snapshotState(); st.BanScore != 0 || st.LastError != "" {
+		t.Fatalf("%s: state=%+v, want no score and no error", label, st)
+	}
+	if n := p.conn.(*scriptedConn).Len(); n != 0 {
+		t.Fatalf("%s: wrote %d bytes, want none", label, n)
+	}
+}
+
+func applySendCmpct(t *testing.T, p *peer, mode uint8, version uint64) {
+	t.Helper()
+	if err := p.handleMessage(message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, mode, version)}); err != nil {
+		t.Fatalf("sendcmpct(%d, %d): %v", mode, version, err)
+	}
+}
+
+func TestSendCmpctAppliesSupportedVersion(t *testing.T) {
+	for _, mode := range []uint8{0, 1, 2} {
+		p := newCompactScriptedPeer(t)
+		applySendCmpct(t, p, mode, 1)
+		requireSendCmpctState(t, p, compactModeSnapshot{Mode: mode, Version: 1}, "apply")
+	}
+	p := newCompactScriptedPeer(t)
+	applySendCmpct(t, p, 0, 2)
+	applySendCmpct(t, p, 1, 1)
+	requireSendCmpctState(t, p, compactModeSnapshot{Mode: 1, Version: 1}, "ignored then applied")
+}
+
+func TestSendCmpctUnsupportedVersionIsIgnored(t *testing.T) {
+	for _, prior := range []bool{false, true} {
+		for _, mode := range []uint8{0, 1, 2} {
+			for _, version := range []uint64{0, 2, 3, maxU64} {
+				p := newCompactScriptedPeer(t)
+				want := compactModeSnapshot{}
+				if prior {
+					want = compactModeSnapshot{Mode: 2, Version: 1}
+					applySendCmpct(t, p, 2, 1)
+				}
+				applySendCmpct(t, p, mode, version)
+				requireSendCmpctState(t, p, want, "ignored offer")
+			}
+		}
+	}
+}
+
+func TestSendCmpctMalformedOrder(t *testing.T) {
+	long := append(sendCmpctRuntimePayload(t, 3, 2), 0)
+	cases := []struct {
+		payload []byte
+		want    string
+	}{
+		{sendCmpctRuntimePayload(t, 3, 2), "unsupported compact relay mode"},
+		{sendCmpctRuntimePayload(t, 255, maxU64), "unsupported compact relay mode"},
+		{sendCmpctRuntimePayload(t, 3, 1), "unsupported compact relay mode"},
+		{[]byte{3, 2}, "sendcmpct payload width mismatch"},
+		{sendCmpctRuntimePayload(t, 3, 2)[:8], "sendcmpct payload width mismatch"},
+		{long, "sendcmpct payload width mismatch"},
+	}
+	for _, tc := range cases {
+		p := newCompactScriptedPeer(t)
+		prior := compactModeSnapshot{Mode: 2, Version: 1}
+		applySendCmpct(t, p, 2, 1)
+		err := p.handleMessage(message{Command: messageSendCmpct, Payload: tc.payload})
+		if err == nil || err.Error() != tc.want {
+			t.Fatalf("payload %x: err=%v, want %q", tc.payload, err, tc.want)
+		}
+		if got := p.remoteCompactMode(); got != prior {
+			t.Fatalf("payload %x: remote compact mode=%+v, want %+v", tc.payload, got, prior)
+		}
+	}
+}
+
+func TestSendCmpctRunContinuesAfterIgnoredVersion(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	conn := &scriptedConn{}
+	for _, frame := range []message{
+		{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 2, 1)},
+		{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 1, 2)},
+		{Command: messageVersion},
+	} {
+		conn.reads = append(conn.reads, scriptedRead{data: mustPeerRuntimeFrameBytes(t, p, frame)})
+	}
+	p.conn = conn
+	err := p.run(context.Background())
+	if err == nil || err.Error() != "invalid version message after handshake" {
+		t.Fatalf("run err=%v, want next frame processed", err)
+	}
+	requireSendCmpctState(t, p, compactModeSnapshot{Mode: 2, Version: 1}, "run")
+	if conn.writeCount != 0 {
+		t.Fatalf("run wrote %d frames, want none", conn.writeCount)
+	}
+}
+
+func TestSendCmpctRunEndsOnMalformedMode(t *testing.T) {
+	p := newPeerRuntimeTestPeer(t)
+	p.conn = &scriptedConn{reads: []scriptedRead{{data: mustPeerRuntimeFrameBytes(t, p, message{Command: messageSendCmpct, Payload: sendCmpctRuntimePayload(t, 3, 2)})}}}
+	if err := p.run(context.Background()); err == nil || err.Error() != "unsupported compact relay mode" {
+		t.Fatalf("run err=%v, want mode error", err)
 	}
 }
 
