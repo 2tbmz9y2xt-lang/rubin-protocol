@@ -847,6 +847,28 @@ func btCompound(t *testing.T) {
 	btState(t, w, 2, r3.Endpoint, map[Outpoint]UtxoEntry{{Txid: first.id}: btEntry(10, 0, nil, 5, true), {Txid: second.id}: btEntry(11, 0, []byte{1}, 4, true)})
 	w.read(t, 5, append(bytes.Clone(r3.Block[:]), 0), btManifest(r3, 1, 0))
 	w.read(t, 5, append(bytes.Clone(r2.Block[:]), 0), btManifest(r2, 1, 0))
+	current := r1
+	current.Direction, current.Kind, current.Undo = 2, 7, 5
+	current.CanonicalBeforePresent, current.OwnerBeforePresent = true, true
+	current.Endpoint = mdbx.TreeEndpointV1{Kind: 1, Height: 4, CumulativeChainwork: [40]byte{39: 99}}
+	last := r3
+	last.Direction, last.Kind, last.Undo = 2, 9, 5
+	last.CanonicalBeforePresent, last.OwnerBeforePresent = true, true
+	last.Endpoint = r2.Endpoint
+	firstLag := r2
+	firstLag.Raw, firstLag.BodyKind, firstLag.Direction, firstLag.Kind, firstLag.Undo = nil, 2, 2, 9, 5
+	firstLag.CanonicalBeforePresent, firstLag.OwnerBeforePresent = true, true
+	firstLag.Endpoint = mdbx.TreeEndpointV1{Kind: 1, Height: 3, CumulativeChainwork: [40]byte{39: 99}}
+	result, _, sources = w.run(t, []blockTreeRequestV1{current, last, firstLag}, nil)
+	result.want(t, 2, 3, -1); logicalMDBXAssert(t, result.err == nil, "CURRENT/reverse LAG compound: %v", result.err)
+	for _, source := range sources { logicalMDBXAssert(t, source.calls == ([3]int{0, 1, 0}), "reverse source calls %v", source.calls) }
+	btState(t, w, 1, current.Endpoint, nil)
+	btState(t, w, 2, firstLag.Endpoint, nil)
+	for _, request := range []blockTreeRequestV1{current, last, firstLag} { btIndexes(t, w, request, false) }
+	w.read(t, 5, append(bytes.Clone(r3.Block[:]), 0), btManifest(r3, 1, 0))
+	w.read(t, 5, append(bytes.Clone(r2.Block[:]), 0), btManifest(r2, 1, 0))
+	inspection, inspectErr := w.s.Inspect()
+	logicalMDBXAssert(t, inspectErr == nil && inspection.DBIs[8].Entries == 0, "inverse retained stale tree nodes: %v", inspectErr)
 }
 
 func btReplacement(t *testing.T) {
