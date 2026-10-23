@@ -48,6 +48,22 @@ func btfCached(t *testing.T, w *btWorld, previous btResult) {
 	logicalMDBXAssert(t, reflect.ValueOf(viewErr) == reflect.ValueOf(previous.err) && called == 0, "cached View changed error or ran callback: %v/%d", viewErr, called)
 }
 
+func btfAbortResult(t *testing.T, err error, mode uint32, primary error) {
+	t.Helper()
+	if mode == 9 {
+		if primary != nil {
+			parts, ok := err.(interface{ Unwrap() []error })
+			logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && parts.Unwrap()[0] == primary, "application/abort order: %v", err)
+			err = parts.Unwrap()[1]
+		}
+		engine := btfEngine(t, err, "abort", "IO", 5, "error 5")
+		logicalMDBXAssert(t, engine.TreeObservation == nil, "abort fabricated tree observation")
+		return
+	}
+	engine, ok := err.(*mdbx.EngineError)
+	logicalMDBXAssert(t, ok && engine.Operation == "abort" && engine.Class == "LocalInvariant" && engine.Code == -30416 && engine.Diagnostic == "MDBX_THREAD_MISMATCH: A thread has attempted to use a not owned object, e.g. a transaction that started by another thread" && engine.Cause == primary && engine.ReopenRequired && engine.TreeObservation == nil, "retained abort tuple: %T %+v", err, err)
+}
+
 func btfStored(t *testing.T) {
 	for _, variant := range []string{"absent", "malformed", "IO", "IO-abort", "valid"} {
 		t.Run(variant, func(t *testing.T) {
@@ -148,7 +164,7 @@ func btfCallbackCleanup(t *testing.T) {
 						logicalMDBXAssert(t, state == "CLOSED", "consumed callback state %s", state)
 					}
 					if mode == 10 {
-						logicalMDBXAssert(t, state == "POISONEDTHREAD", "retained callback state %s", state)
+						logicalMDBXAssert(t, state == "POISONED_THREAD", "retained callback state %s", state)
 					}
 					post = true
 				}
@@ -160,8 +176,9 @@ func btfCallbackCleanup(t *testing.T) {
 					run()
 				}
 				btFailure(t, primary, logicalStateFailureLocalInvariant, "invalid block tree source request")
-				_, _, expired := kept.Get(mdbx.TreeSchemaV1DBIs()[0], []byte{2})
-				logicalMDBXAssert(t, expired != nil, "callback Reader/grant survived")
+				expiredValue, expiredPresent, expired := kept.Get(mdbx.TreeSchemaV1DBIs()[0], []byte{2})
+				logicalMDBXAssert(t, expiredValue == nil && !expiredPresent, "callback Reader returned data after expiry")
+				btfEngine(t, expired, "get", "InvalidInput", 22, "Reader is not active")
 				btReservationsReleased(t, w.owner)
 				if delivery == "panic" {
 					logicalMDBXAssert(t, recovered == panicValue && !post, "panic delivery changed")
@@ -169,26 +186,30 @@ func btfCallbackCleanup(t *testing.T) {
 				if delivery == "goexit" {
 					logicalMDBXAssert(t, !post, "Goexit returned")
 				}
-				actualState, _, stateErr := mdbx.FixtureStartupCleanup(w.s, 0, false, func() {})
+				stateCalls := 0
+				actualState, verified, stateErr := mdbx.FixtureStartupCleanup(w.s, 0, false, func() { stateCalls++ })
 				wantState := "OPEN"
 				if mode == 9 {
-					wantState = "CLOSED"
+					logicalMDBXAssert(t, actualState == "" && !verified && stateErr != nil && stateErr.Error() == "invalid startup cleanup fixture" && stateCalls == 0, "consumed env remained available: %s/%v calls%d", actualState, stateErr, stateCalls)
+				} else {
+					if mode == 10 {
+						wantState = "POISONED_THREAD"
+					}
+					logicalMDBXAssert(t, stateErr == nil && actualState == wantState && stateCalls == 1, "post-unwind owner state %s/%v calls%d", actualState, stateErr, stateCalls)
 				}
-				if mode == 10 {
-					wantState = "POISONEDTHREAD"
-				}
-				logicalMDBXAssert(t, stateErr == nil && actualState == wantState, "post-unwind owner state %s/%v", actualState, stateErr)
 				if delivery == "error" {
 					result.want(t, 1, 1, -1)
 					logicalMDBXAssert(t, errors.Is(result.err, primary), "callback primary lost: %v", result.err)
 					if mode == 0 {
 						logicalMDBXAssert(t, result.err == primary, "clean callback wrapped primary")
 					} else {
+						btfAbortResult(t, result.err, mode, primary)
 						btfCached(t, w, result)
 					}
 				}
 				if delivery != "error" && mode != 0 {
 					terminal := w.s.View(func(*mdbx.Reader) error { t.Fatal("unwind terminal View callback"); return nil })
+					btfAbortResult(t, terminal, mode, nil)
 					btfCached(t, w, btResult{truth: 1, stage: 1, index: -1, err: terminal})
 				}
 				if mode == 0 {
@@ -298,9 +319,13 @@ func btfSectionCleanup(t *testing.T) {
 			})
 			logicalMDBXAssert(t, err == nil && errors.Is(result.err, primary), "section cleanup error %v/%v", result.err, err)
 			result.want(t, 1, 1, 0)
+			btFailure(t, primary, logicalStateFailureLocalInvariant, "invalid block tree source position")
+			parts, ok := result.err.(interface{ Unwrap() []error })
+			logicalMDBXAssert(t, ok && len(parts.Unwrap()) == 2 && parts.Unwrap()[0] == primary, "section primary/cleanup order: %v", result.err)
+			btfAbortResult(t, parts.Unwrap()[1], mode, nil)
 			want := "CLOSED"
 			if mode == 10 {
-				want = "POISONEDTHREAD"
+				want = "POISONED_THREAD"
 			}
 			logicalMDBXAssert(t, state == want, "section cleanup state %s want %s", state, want)
 			btfCached(t, w, result)
@@ -471,10 +496,24 @@ func btfWantOld(t *testing.T, w *btWorld, rows []btfRow, damagedRank uint8, dama
 func btfDamage(t *testing.T, w *btWorld, rank uint8, key []byte, damage string) {
 	t.Helper()
 	if rank == 8 {
+		var result btResult
+		setup := btMutation(6, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 4), 4), make([]byte, 104))
 		drifts, err := mdbx.FixtureWriteSnapshotDrift(w.s, 8, key, func() {
-			w.pair(t, btMutation(6, binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 4), 4), make([]byte, 104)))
+			accountErr := w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+				result.truth, result.stage, result.index, result.err = w.s.UpdateTreeV1(a, func(*mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					return mdbx.TreeOperationV1{Pair: mdbx.TreePairV1{Mutations: []mdbx.Mutation{setup}}}, nil
+				})
+				return nil
+			})
+			logicalMDBXAssert(t, accountErr == nil, "drift setup account: %v", accountErr)
 		})
 		logicalMDBXAssert(t, err == nil && drifts == 1, "persisted original node drift: %d/%v", drifts, err)
+		result.want(t, 2, 3, -1)
+		commit, ok := result.err.(*mdbx.CommitError)
+		logicalMDBXAssert(t, ok && commit.Truth == 2 && commit.ReadbackCause == nil, "drift setup commit: %T %v", result.err, result.err)
+		btfEngine(t, commit.Cause, "update", "Capacity", 28, "error 28")
+		btfCached(t, w, result)
+		w.reopen(t)
 		// Remove only the harmless setup row through the actual Pair grammar.
 		w.pair(t, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[6], Key: binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 4), 4), BeforePresent: true, AfterKind: 1})
 		return
@@ -513,7 +552,12 @@ func btfReadback(t *testing.T) {
 				truth = 3
 			}
 			result.want(t, truth, 3, -1)
-			logicalMDBXAssert(t, result.err != nil && (!failSource || errors.Is(result.err, sourceErr)), "readback error lost: %v", result.err)
+			commit, ok := result.err.(*mdbx.CommitError)
+			logicalMDBXAssert(t, ok && uint8(commit.Truth) == truth && commit.ReadbackCause == sourceErr, "readback error tuple: %T %v", result.err, result.err)
+			btfEngine(t, commit.Cause, "update", "Capacity", 28, "error 28")
+			if failSource {
+				btFailure(t, sourceErr, logicalStateFailureLocalInvariant, "invalid block tree source position")
+			}
 			btfCached(t, w, result)
 			w.reopen(t)
 			w.read(t, 4, r.Block[:], r.Raw)
