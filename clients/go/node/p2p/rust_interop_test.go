@@ -196,7 +196,7 @@ func TestRustInterop_RustToGoSendCmpctMalformedModeEndsSession(t *testing.T) {
 	}
 }
 
-var peerCloseOSError = regexp.MustCompile(`(Connection reset by peer|Broken pipe|Software caused connection abort|Invalid argument) \(os error [0-9]+\)$`)
+var peerCloseOSError = regexp.MustCompile(`^(Connection reset by peer|Broken pipe|Software caused connection abort|Invalid argument) \(os error [0-9]+\)$`)
 
 // checkPeerCloseActionError accepts helper stderr only when the session ended
 // after the handshake because the peer closed it, not because the helper's
@@ -211,7 +211,7 @@ func checkPeerCloseActionError(stderr string) error {
 			return fmt.Errorf("stderr=%q contains %q, want a peer close", stderr, bad)
 		}
 	}
-	if strings.Contains(text, "peer closed connection") || peerCloseOSError.MatchString(text) {
+	if text == "peer closed connection" || peerCloseOSError.MatchString(text) {
 		return nil
 	}
 	return fmt.Errorf("stderr=%q, want a peer close error", stderr)
@@ -240,6 +240,8 @@ func TestRustInterop_SendCmpctPeerCloseCheckClassifiesStderr(t *testing.T) {
 		"action: A connection attempt failed (os error 10060)\n",
 		"action: Connection reset by peer (os error x)\n",
 		"action: Broken pipe (os error 32) x\n",
+		"action: create blockstore directory /x: Invalid argument (os error 22)\n",
+		"action: read: peer closed connection\n",
 		"action: peer closed connection after peer read timeout\n",
 	} {
 		if checkPeerCloseActionError(stderr) == nil {
