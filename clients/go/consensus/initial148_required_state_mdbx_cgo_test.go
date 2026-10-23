@@ -111,6 +111,69 @@ func TestInitial148RequiredR(t *testing.T) {
 		logicalMDBXAssert(t, err == nil, "absent repeat: %v", err)
 	})
 	t.Run("distinct-residual-checkpoints", irResidualV1)
+	t.Run("accumulated-distinct-residual", irDistinctResidualV1)
+}
+
+func irDistinctResidualV1(t *testing.T) {
+	for _, total := range []uint64{200, 210} {
+		for _, counterFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("total-%d/counter-first-%v", total, counterFirst), func(t *testing.T) {
+				irDistinctResidualCaseV1(t, total, counterFirst)
+			})
+		}
+	}
+}
+
+func irDistinctResidualCaseV1(t *testing.T, total uint64, counterFirst bool) {
+	w := btNew(t)
+	ops := [2]Outpoint{{Txid: [32]byte{61}}, {Txid: [32]byte{62}}}
+	for i, size := range []int{44, 54} {
+		value := btValue(btFrame(uint64(i+1), 0, bytes.Repeat([]byte{3}, size)), 0, true)
+		logicalMDBXAssert(t, len(value)+36 == 100+10*i, "distinct row size differs")
+		w.pair(t, btMutation(1, btUTXOKey(1, ops[i]), value))
+	}
+	irCounterV1(t, w, total, 2)
+	tx := btTransaction(63, 0, nil, [][]byte{btFrame(1, 0, nil), btFrame(2, 0, nil)}, nil, []byte{0}, nil)
+	request := btRequest(btBody(148, 63, [32]byte{}, tx), 1)
+	request.Kind, request.Undo = 1, 2
+	var failure error
+	err := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+		failure = irAccumulateResidualV1(t, view, derive, ops, total, counterFirst)
+		return nil // The producer must retain a refusal ignored by its callback.
+	})
+	logicalMDBXAssert(t, err == failure, "accumulated residual primary replaced: %v/%v", err, failure)
+	next := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+		logicalMDBXAssert(t, view.Lookup(ops[0]).kind == logicalStateRowPresent, "next scope lost first row")
+		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "next scope retained prior failure")
+		return nil
+	})
+	logicalMDBXAssert(t, next == nil, "clean next scope refused: %v", next)
+}
+
+func irAccumulateResidualV1(t *testing.T, view logicalStateView, derive func() initial148RootReadOutcomeV1, ops [2]Outpoint, total uint64, counterFirst bool) error {
+	t.Helper()
+	if counterFirst {
+		counter := view.Counters()
+		logicalMDBXAssert(t, counter.kind == logicalStateCountersPresent && counter.counters == (logicalStateCounters{bytes: total, entries: 2}), "record-valid counter refused: %v", counter.cause)
+	}
+	first := view.Lookup(ops[0])
+	logicalMDBXAssert(t, first.kind == logicalStateRowPresent && first.cause == nil && len(first.entry.CovenantData) == 44, "first distinct checkpoint refused")
+	second := view.Lookup(ops[1])
+	failure := second.cause
+	if !counterFirst {
+		logicalMDBXAssert(t, second.kind == logicalStateRowPresent && second.cause == nil && len(second.entry.CovenantData) == 54, "rows-before-counter checkpoint refused")
+		failure = view.Counters().cause
+	}
+	if total == 210 {
+		logicalMDBXAssert(t, second.kind == logicalStateRowPresent && failure == nil, "exact-zero accumulated residual refused: %v", failure)
+		logicalMDBXAssert(t, view.Counters().counters == (logicalStateCounters{bytes: 210, entries: 2}), "accepted counter changed")
+		return nil
+	}
+	irFailureV1(t, failure, logicalStateFailureStoreIntegrity, "required subset exceeds parent counters")
+	logicalMDBXAssert(t, view.Lookup(ops[0]).cause == failure && view.Counters().cause == failure, "accumulated first cause replaced")
+	out := derive()
+	logicalMDBXAssert(t, out.cause == failure && !out.derived && out.root == ([32]byte{}) && !out.hasObservation, "accumulated refusal produced root/localization")
+	return failure
 }
 
 func irResidualV1(t *testing.T) {

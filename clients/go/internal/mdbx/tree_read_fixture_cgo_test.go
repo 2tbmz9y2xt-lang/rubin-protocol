@@ -4,6 +4,7 @@ package mdbx
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"errors"
 	"fmt"
 	"testing"
@@ -16,6 +17,7 @@ func TestTreeRootReadFaultV1(t *testing.T) {
 	t.Run("application-error-is-not-native", trApplicationV1)
 	t.Run("node-width-and-absence", trNodeV1)
 	t.Run("Source-first-failure", trSourceFailureV1)
+	t.Run("trusted-spent-leaf", trTrustedSpendV1)
 	t.Run("binding-malformed", func(t *testing.T) {
 		s, _, o := tsNew(t)
 		request, _, _ := trRequestV1(t, 6)
@@ -28,6 +30,66 @@ func TestTreeRootReadFaultV1(t *testing.T) {
 			if engine.TreeObservation == nil || *engine.TreeObservation != want { t.Fatalf("binding observation %+v want %+v", engine.TreeObservation, want) }
 		})
 	})
+}
+
+func trTrustedSpendV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	seed, _, frame := trRequestV1(t, 5)
+	trPopulateV1(t, s, o, seed)
+	op := TreeOutpointV1{Txid: tdTxid(37)}
+	key := tdUTXOKey(1, op.Txid, 0)
+	value := tdFormed(frame, 5, 1)
+	binding := trBindingV1(t, 1, seed.Primitive.Endpoint, trEntryV1(key, value))
+	leaf := sha3.Sum256(append(append([]byte("RUBIN_UTXO_TREE_V1\x01"), key[8:]...), value...))
+	value[0]++ // A valid same-length field change; binding and leaf stay canonical.
+	treeNativeSeed(t, s, 1, key, value)
+	request, _, _ := trRequestV1(t, 6)
+	request.Parent = seed.Primitive.Endpoint
+	request.Inputs = []TreeResolvedInputV1{{Outpoint: op, Value: bytes.Clone(value)}}
+	meta := TreeBlockV1{TxCount: 2, EventCount: 1}
+	request.Primitive.Coverage.BlockMeta = meta
+	request.Primitive.Source = tsSource(func(pos TreePositionV1, _ *Reader, sink *TreeDeltaSinkV1) error {
+		if pos != 1 {
+			return fmt.Errorf("unexpected SPEND source position %d", pos)
+		}
+		if err := sink.BeginV1(meta); err != nil {
+			return err
+		}
+		return sink.EventV1(TreeEventV1{Kind: 1, Outpoint: op, TxIndex: 1})
+	})
+	for range 2 {
+		evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() {
+			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+				mustEnvironment(t, err)
+				if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) {
+					t.Fatalf("trusted last SPEND root %x", root)
+				}
+				if !reader.usable() || reader.failure != nil {
+					t.Fatal("permitted local-trust SPEND disarmed Reader")
+				}
+			})
+		})
+		mustEnvironment(t, err)
+		if evidence.OldGets != ([8]uint64{1, 1}) || evidence.NodeGets != 1 {
+			t.Fatalf("SPEND point requests %+v", evidence)
+		}
+		if [6]uint64{evidence.BeginWrite, evidence.Commits, evidence.Deletes, evidence.NodePulls, evidence.Faults, reservationLive(o)} != ([6]uint64{}) || evidence.OldPulls != ([8]uint64{}) {
+			t.Fatalf("SPEND range/write/resource effects %+v", evidence)
+		}
+	}
+	for _, row := range []struct {
+		rank       uint8
+		key, value []byte
+	}{
+		{0, tsRootKey(1), binding}, {1, key, value},
+		{8, testTreeNodeKey(1, 288, [36]byte(key[8:])), leaf[:]},
+	} {
+		equal, err := FixtureRawRowEqual(s, row.rank, row.key, row.value)
+		mustEnvironment(t, err)
+		if !equal {
+			t.Fatalf("trusted SPEND changed canonical rank %d row", row.rank)
+		}
+	}
 }
 
 func trSourceFailureV1(t *testing.T) {
