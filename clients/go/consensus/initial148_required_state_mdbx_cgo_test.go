@@ -335,7 +335,7 @@ func irShapesV1(t *testing.T) {
 					case "nil-account": a = nil
 					case "nil-callback": callback = nil
 					case "nil-source": captured.Primitive.Source = (*blockTreeSourceV1)(nil)
-					case "foreign-source": captured.Primitive.Source = nil
+					case "foreign-source": captured.Primitive.Source = &btObserved{t: t, source: captured.Primitive.Source.(*blockTreeSourceV1)}
 					case "nil-coverage": captured.Primitive.Coverage = nil
 					case "raw-copy": captured.Source.Raw = bytes.Clone(captured.Source.Raw)
 					case "raw-length": captured.Source.Raw = captured.Source.Raw[:len(captured.Source.Raw)-1]

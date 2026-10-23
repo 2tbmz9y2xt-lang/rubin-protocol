@@ -219,7 +219,7 @@ func trInvalidV1(t *testing.T) {
 			request, _, _ := trRequestV1(t, 6)
 			p, c := &request.Primitive, request.Primitive.Coverage
 			switch variant {
-			case "generation": p.Generation = 0
+			case "generation": p.Generation, c.Generation = 0, 0
 			case "database": c.DatabaseID[0]++
 			case "coverage-generation": c.Generation++
 			case "coverage-block": c.Block[0]++
