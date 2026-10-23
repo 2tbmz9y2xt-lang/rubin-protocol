@@ -296,6 +296,28 @@ func irCapacityV1(t *testing.T) {
 			})
 		})
 	}) == nil, "R capacity scope")
+	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(account *mdbx.OperationAccount) error {
+		return w.s.View(func(reader *mdbx.Reader) error {
+			request := irPrepareV1(t, reader, account, irRequestV1(0, 51), mdbx.TreeEndpointV1{})
+			var cause error
+			result := withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+				return account.WithReservation(402653184-266480-288504+1, func() error {
+					out := derive()
+					cause = out.cause
+					logicalMDBXAssert(t, !out.derived && out.root == ([32]byte{}) && mdbx.IsOperationReservationCapacity(cause) && !out.hasObservation && out.observation == (mdbx.TreeObservationV1{}), "D capacity outcome %+v", out)
+					return nil
+				})
+			})
+			logicalMDBXAssert(t, result == cause, "ignored D capacity lost raw cause")
+			result = withInitial148RequiredStateV1(reader, account, request, func(_ logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+				out := derive()
+				logicalMDBXAssert(t, out.derived && out.cause == nil && !out.hasObservation, "fresh same Reader/account after capacity %+v", out)
+				return out.cause
+			})
+			logicalMDBXAssert(t, result == nil, "capacity refusal disarmed clean Reader/account")
+			return nil
+		})
+	}) == nil, "scoped D capacity outcome")
 	btReservationsReleased(t, w.owner)
 }
 
