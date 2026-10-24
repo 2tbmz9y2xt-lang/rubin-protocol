@@ -89,6 +89,9 @@ func TestReplayEntryInventory148LargestCount(t *testing.T) {
 	backing := make([][148]byte, 547_320)
 	accepted := HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Headers: backing[:547_319], Bytes: 81_003_212}
 	replay148Check(t, "I8 largest", accepted, 81_003_330, "")
+	wrong := accepted
+	wrong.Bytes = 81_003_213
+	replay148Check(t, "I8 largest wrong Bytes", wrong, 81_003_330, selectedSideInvariant)
 	above := HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Headers: backing, Bytes: 81_003_360}
 	replay148Check(t, "I8 above", above, 81_003_330, selectedSideInvariant)
 }
