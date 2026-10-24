@@ -1016,7 +1016,7 @@ func TestValidateTxLocal_OrderedResults(t *testing.T) {
 	kp, other := requiredOrderedKeypair(t), requiredOrderedKeypair(t)
 	for _, tc := range []struct {
 		name, code, msg string
-		selects        bool
+		selects         bool
 	}{
 		{"suite", "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set", true},
 		{"key", "TX_ERR_SIG_INVALID", "CORE_P2PK key binding mismatch", true},
@@ -1106,7 +1106,9 @@ func runWorkerOrderUnwind(t *testing.T, kp, other *MLDSA87Keypair, first string)
 		return first == "valid", nil
 	})
 	env := newTxValidationWorkerEnv(tvc, [32]byte{}, 200, 0, nil)
-	call := func() { assertTxErrCodeMsg(t, validateTxLocalInputs(tvc, tvc.Tx, env), "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid") }
+	call := func() {
+		assertTxErrCodeMsg(t, validateTxLocalInputs(tvc, tvc.Tx, env), "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+	}
 	switch first {
 	case "invalid":
 		call()

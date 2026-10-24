@@ -96,7 +96,10 @@ fn rub721_worker_order() {
                     ErrorCode::TxErrParse,
                     "witness underflow in worker",
                 )),
-                4 => Some(TxError::new(ErrorCode::TxErrParse, "witness_count mismatch")),
+                4 => Some(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "witness_count mismatch",
+                )),
                 8 => Some(TxError::new(
                     ErrorCode::TxErrCovenantTypeInvalid,
                     "unsupported covenant in witness_slots",
@@ -104,7 +107,8 @@ fn rub721_worker_order() {
                 _ => None,
             };
             let pb = make_parsed_block(simple_coinbase(), vec![tx]);
-            let mut ptcs = precompute_tx_contexts(&pb, &snapshot, 100).expect("real precompute context");
+            let mut ptcs =
+                precompute_tx_contexts(&pb, &snapshot, 100).expect("real precompute context");
             match variant {
                 3 => ptcs[0].witness_end = 1,
                 4 => ptcs[0].witness_end += 1,

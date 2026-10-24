@@ -365,13 +365,7 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
                 .iter()
                 .all(|out| out.covenant_type != COV_TYPE_VAULT);
         let entry_mark = self.sig_queue.as_ref().map(|queue| queue.mark());
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            self.validate_spends(ctx)?;
-            self.add_outputs(ctx)?;
-            self.validate_vault_creation(ctx)?;
-            self.validate_vault_spend(ctx)?;
-            self.finish()
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| self.apply_resolved_stages(ctx)));
         if ordinary && !matches!(&result, Ok(Ok(_))) {
             if let (Some(mark), Some(queue)) = (entry_mark, self.sig_queue.as_deref_mut()) {
                 queue.settle_suffix(mark)?;
@@ -381,6 +375,17 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
             Ok(result) => result,
             Err(payload) => resume_unwind(payload),
         }
+    }
+
+    fn apply_resolved_stages(
+        &mut self,
+        ctx: &UtxoApplyImplContext<'_>,
+    ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+        self.validate_spends(ctx)?;
+        self.add_outputs(ctx)?;
+        self.validate_vault_creation(ctx)?;
+        self.validate_vault_spend(ctx)?;
+        self.finish()
     }
 
     fn resolve_input(

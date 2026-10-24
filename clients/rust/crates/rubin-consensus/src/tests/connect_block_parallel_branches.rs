@@ -161,7 +161,8 @@ fn rub721_transaction_order() {
             if !first_valid {
                 let mut wrong = tx.clone();
                 wrong.tx_nonce += 10;
-                tx.witness[first] = sign_input_witness(&wrong, first as u32, 100, ZERO_CHAIN_ID, &kp);
+                tx.witness[first] =
+                    sign_input_witness(&wrong, first as u32, 100, ZERO_CHAIN_ID, &kp);
             }
             let expected_later = match variant {
                 0 => {
@@ -325,7 +326,9 @@ fn rub721_transaction_unwind() {
                 &prefix, [0x87; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
             )
             .expect("next valid sibling after unwind");
-            queue.flush().expect("retained prefix survives later unwind");
+            queue
+                .flush()
+                .expect("retained prefix survives later unwind");
         }
     }
 }

@@ -1072,10 +1072,20 @@ fn run_connect_block_first_error_cases(
             let mut wrong = spend(&cov, 1, 0, 90);
             let mut signed_other = wrong.clone();
             signed_other.tx_nonce = 11;
-            wrong.witness = vec![sign_input_witness(&signed_other, 0, 100, ZERO_CHAIN_ID, &kp)];
+            wrong.witness = vec![sign_input_witness(
+                &signed_other,
+                0,
+                100,
+                ZERO_CHAIN_ID,
+                &kp,
+            )];
             let wrong = encode(wrong);
             let later_cases = [
-                (missing(&cov, 2), ErrorCode::TxErrMissingUtxo, "utxo not found"),
+                (
+                    missing(&cov, 2),
+                    ErrorCode::TxErrMissingUtxo,
+                    "utxo not found",
+                ),
                 (
                     valid(0, 1, 90),
                     ErrorCode::TxErrTxNonceInvalid,
