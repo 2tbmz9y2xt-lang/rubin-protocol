@@ -14,6 +14,7 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 CHANGELOG = Path("conformance/fixtures/CHANGELOG.md")
 FIXTURE_RE = re.compile(r"^conformance/fixtures/CV-[A-Z0-9-]+\.json$")
 PROTOCOL_FIXTURE_RE = re.compile(r"^conformance/fixtures/protocol/[A-Za-z0-9._-]+\.json$")
+FALLBACK_RANGE = "HEAD~1..HEAD"
 GIT_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
 
 
@@ -29,7 +30,7 @@ def is_safe_git_ref(ref: str) -> bool:
 
 
 def git_ref_exists(ref: str) -> bool:
-    p = run(["git", "rev-parse", "--verify", "--quiet", "--", ref], check=False)
+    p = run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], check=False)
     return p.returncode == 0
 
 
@@ -38,24 +39,39 @@ def select_diff_ref() -> str:
     if base_ref and is_safe_git_ref(base_ref):
         run(["git", "fetch", "--depth=1", "origin", base_ref], check=False)
         return f"origin/{base_ref}...HEAD"
-    elif base_ref:
+    if base_ref:
         print(f"WARN: ignoring unsafe GITHUB_BASE_REF={base_ref!r}", file=sys.stderr)
-        return "origin/main...HEAD" if git_ref_exists("origin/main") else "HEAD~1..HEAD"
-    elif git_ref_exists("origin/main"):
+    if git_ref_exists("origin/main"):
         return "origin/main...HEAD"
-    elif git_ref_exists("main"):
+    if git_ref_exists("main"):
         return "main...HEAD"
-    return "HEAD~1..HEAD"
+    print(f"policy: origin/main and main unresolved \u2014 falling back to {FALLBACK_RANGE}", file=sys.stderr)
+    return FALLBACK_RANGE
 
 
-def changed_files() -> list[str]:
-    diff_ref = select_diff_ref()
-    p = run(["git", "diff", "--name-only", "--diff-filter=ACMRT", diff_ref], check=False)
+def committed_names(diff_ref: str) -> tuple[str, str | None]:
+    """Return (effective range, `git diff --name-only` stdout); stdout is None when no range could be diffed."""
+    cmd = ["git", "diff", "--name-only", "--diff-filter=ACMRT"]
+    p = run([*cmd, diff_ref], check=False)
+    if p.returncode != 0 and diff_ref != FALLBACK_RANGE:
+        print(f"policy: git diff {diff_ref} failed \u2014 falling back to {FALLBACK_RANGE}", file=sys.stderr)
+        diff_ref = FALLBACK_RANGE
+        p = run([*cmd, diff_ref], check=False)
     if p.returncode != 0:
-        p = run(["git", "diff", "--name-only", "--diff-filter=ACMRT", "HEAD~1..HEAD"], check=False)
-        if p.returncode != 0:
-            return []
-    files = {line.strip() for line in p.stdout.splitlines() if line.strip()}
+        print(f"policy: git diff {FALLBACK_RANGE} failed \u2014 no committed changes inspected", file=sys.stderr)
+        print("policy: diff range = none", file=sys.stderr)
+        return "none", None
+    print(f"policy: diff range = {diff_ref}", file=sys.stderr)
+    return diff_ref, p.stdout
+
+
+def changed_files(diff_ref: str, effective: list[str]) -> list[str]:
+    """Append the effective committed range (or "none") to `effective` for changelog_added_text()."""
+    effective_ref, committed = committed_names(diff_ref)
+    effective.append(effective_ref)
+    if committed is None:
+        return []
+    files = {line.strip() for line in committed.splitlines() if line.strip()}
     # Local convenience: include working tree changes (staged + unstaged) and
     # untracked files so the policy check also works before first commit.
     p_worktree = run(
@@ -88,20 +104,26 @@ def changed_files() -> list[str]:
     return sorted(files)
 
 
-def changelog_added_text() -> str:
+def added_lines(p: subprocess.CompletedProcess[str]) -> list[str]:
+    return [l[1:] for l in p.stdout.splitlines() if l.startswith("+") and not l.startswith("+++")]
+
+
+def changelog_added_text(effective_ref: str) -> str:
     added: list[str] = []
-    commands = [
-        ["git", "diff", "--unified=0", select_diff_ref(), "--", CHANGELOG.as_posix()],
-        ["git", "diff", "--unified=0", "--", CHANGELOG.as_posix()],
-        ["git", "diff", "--cached", "--unified=0", "--", CHANGELOG.as_posix()],
-    ]
-    for cmd in commands:
+    path = CHANGELOG.as_posix()
+    if effective_ref != "none":
+        p = run(["git", "diff", "--unified=0", effective_ref, "--", path], check=False)
+        if p.returncode == 0:
+            added += added_lines(p)
+        else:
+            print(
+                f"policy: git diff {effective_ref} -- {path} failed \u2014 committed CHANGELOG text not inspected",
+                file=sys.stderr,
+            )
+    for cmd in (["git", "diff", "--unified=0", "--", path], ["git", "diff", "--cached", "--unified=0", "--", path]):
         p = run(cmd, check=False)
-        if p.returncode != 0:
-            continue
-        for line in p.stdout.splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                added.append(line[1:])
+        if p.returncode == 0:
+            added += added_lines(p)
     return "\n".join(added)
 
 
@@ -125,7 +147,7 @@ def check_generator_not_in_ci(errors: list[str]) -> None:
                 )
 
 
-def check_fixture_changelog_guard(changed: list[str], errors: list[str]) -> None:
+def check_fixture_changelog_guard(changed: list[str], errors: list[str], effective_ref: str) -> None:
     fixtures_changed = [p for p in changed if FIXTURE_RE.match(p) or PROTOCOL_FIXTURE_RE.match(p)]
     if not fixtures_changed:
         return
@@ -139,7 +161,7 @@ def check_fixture_changelog_guard(changed: list[str], errors: list[str]) -> None
     if not (ROOT / CHANGELOG).exists():
         errors.append("missing conformance/fixtures/CHANGELOG.md")
         return
-    changelog_text = changelog_added_text()
+    changelog_text = changelog_added_text(effective_ref)
 
     for fixture_path in fixtures_changed:
         name = Path(fixture_path).name
@@ -149,10 +171,11 @@ def check_fixture_changelog_guard(changed: list[str], errors: list[str]) -> None
 
 def main() -> int:
     errors: list[str] = []
-    changed = changed_files()
+    effective: list[str] = []
+    changed = changed_files(select_diff_ref(), effective)
 
     check_generator_not_in_ci(errors)
-    check_fixture_changelog_guard(changed, errors)
+    check_fixture_changelog_guard(changed, errors, effective[0])
 
     if errors:
         for err in errors:
