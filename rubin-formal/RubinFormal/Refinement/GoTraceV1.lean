@@ -67,7 +67,7 @@ structure SimplicityExecOut where
   accepted : Option Bool
   finalCounter : Option Nat
 
-def goTraceFixturesDigestSHA3_256 : String := "ad91b1064599c784592e03795ce38f6e77fa559eded994fc5effd9c18f2072c8"
+def goTraceFixturesDigestSHA3_256 : String := "6d7466236da425059962e3704e070b16a75a59a70544e2cb325fc9567fcfac1b"
 
 def parseOuts : List ParseOut := [
   { id := "PARSE-01", ok := true, err := "", consumed := 21, txidHex := "0xd205b2f6296a4cc1e4ec65d1b80309ed98d3a1c03d241c675ff761c6a4502bc0", wtxidHex := "0xf760a70e1e838404d8e41679962064dc1bf4fa181699009644a14d0aa389ab4e" },

@@ -66,7 +66,7 @@ func TestValidateBlockTxSemantics_NonceReplay(t *testing.T) {
 			Inputs: []TxInput{{
 				PrevTxid: [32]byte{0x01},
 				PrevVout: 0,
-				Sequence: 0xffffffff,
+				Sequence: 0x7fffffff,
 			}},
 			Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
 		}
@@ -102,7 +102,7 @@ func TestValidateBlockTxSemantics_CovenantError(t *testing.T) {
 		Inputs: []TxInput{{
 			PrevTxid: [32]byte{0x02},
 			PrevVout: 0,
-			Sequence: 0xffffffff,
+			Sequence: 0x7fffffff,
 		}},
 		Outputs: []TxOutput{{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}},
 	}
@@ -118,7 +118,7 @@ func TestValidateBlockTxSemantics_CovenantError(t *testing.T) {
 
 	var cmr [32]byte
 	cmr[0] = 0x44
-	simp := &Tx{TxKind: 0x00, TxNonce: 100, Inputs: []TxInput{{PrevTxid: [32]byte{0x03}, Sequence: 0xffffffff}}, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: encodeSimplicityCovenantData(cmr, nil)}}}
+	simp := &Tx{TxKind: 0x00, TxNonce: 100, Inputs: []TxInput{{PrevTxid: [32]byte{0x03}, Sequence: 0x7fffffff}}, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_CORE_SIMPLICITY, CovenantData: encodeSimplicityCovenantData(cmr, nil)}}}
 	err = validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbase, simp}}, 1, nil)
 	assertTxErrCode(t, err, TX_ERR_COVENANT_TYPE_INVALID)
 	if err := validateBlockTxSemantics(&ParsedBlock{Txs: []*Tx{coinbase, simp}}, 1, testRotationProvider{createSuiteID: SUITE_ID_ML_DSA_87}); err != nil {

@@ -90,14 +90,8 @@ func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 }
 
 func (ctx *nonCoinbaseApplyContext) prepare() error {
-	if ctx.tx == nil {
-		return txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if ctx.tx.TxNonce == 0 {
-		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
-	}
-	if len(ctx.tx.Inputs) == 0 {
-		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	if err := ValidateSpendTxS1A(ctx.tx); err != nil {
+		return err
 	}
 	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.chainID, ctx.height, ctx.rotation); err != nil {
 		return err
@@ -111,12 +105,10 @@ func (ctx *nonCoinbaseApplyContext) prepare() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
-	seenInputs := make(map[Outpoint]struct{}, len(ctx.tx.Inputs))
-	var zeroTxid [32]byte
 	witnessCursor := 0
 	ctx.resolved = make([]nonCoinbaseResolvedInput, 0, len(ctx.tx.Inputs))
 	for _, in := range ctx.tx.Inputs {
-		entry, op, err := ctx.resolveInput(in, seenInputs, zeroTxid)
+		entry, op, err := ctx.lookupInputEntry(in)
 		if err != nil {
 			return err
 		}
@@ -147,36 +139,78 @@ func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) resolveInput(in TxInput, seenInputs map[Outpoint]struct{}, zeroTxid [32]byte) (UtxoEntry, Outpoint, error) {
-	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
-		return UtxoEntry{}, Outpoint{}, err
+// ValidateSpendTxS1A checks a parsed non-coinbase transaction; the caller must
+// exclude coinbase transactions. It never changes tx or caller state.
+// The six families run in order: nonzero nonce, nonempty inputs, forbidden
+// coinbase prevouts, empty script_sig, valid sequence, and unique outpoints.
+// Each input family scans ascending indices and must pass before the next starts.
+// Zero nonce returns TX_ERR_TX_NONCE_INVALID; sequence > 0x7fffffff returns
+// TX_ERR_SEQUENCE_INVALID; other structural failures return TX_ERR_PARSE.
+// A defensive nil tx refusal also returns TX_ERR_PARSE, outside the parsed domain.
+// Rules: https://github.com/2tbmz9y2xt-lang/rubin-spec/blob/main/spec/RUBIN_L1_CANONICAL.md#16-transaction-structural-rules-normative
+func ValidateSpendTxS1A(tx *Tx) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
 	}
-	entry, op, err := ctx.lookupInputEntry(in, seenInputs)
-	if err != nil {
-		return UtxoEntry{}, Outpoint{}, err
+	if tx.TxNonce == 0 {
+		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
-	return entry, op, nil
+	if len(tx.Inputs) == 0 {
+		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
+	if err := validateSpendTxCoinbasePrevouts(tx.Inputs); err != nil {
+		return err
+	}
+	if err := validateSpendTxScriptSigs(tx.Inputs); err != nil {
+		return err
+	}
+	if err := validateSpendTxSequences(tx.Inputs); err != nil {
+		return err
+	}
+	return validateSpendTxUniqueOutpoints(tx.Inputs)
 }
 
-func validateNonCoinbaseInputEncoding(in TxInput, zeroTxid [32]byte) error {
-	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-		return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
-	}
-	if len(in.ScriptSig) != 0 {
-		return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
-	}
-	if in.Sequence > 0x7fffffff {
-		return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+func validateSpendTxCoinbasePrevouts(inputs []TxInput) error {
+	for _, in := range inputs {
+		if in.PrevVout == 0xffff_ffff && in.PrevTxid == ([32]byte{}) {
+			return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		}
 	}
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput, seenInputs map[Outpoint]struct{}) (UtxoEntry, Outpoint, error) {
-	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-	if _, exists := seenInputs[op]; exists {
-		return UtxoEntry{}, Outpoint{}, txerr(TX_ERR_PARSE, "duplicate input outpoint")
+func validateSpendTxScriptSigs(inputs []TxInput) error {
+	for _, in := range inputs {
+		if len(in.ScriptSig) != 0 {
+			return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
+		}
 	}
-	seenInputs[op] = struct{}{}
+	return nil
+}
+
+func validateSpendTxSequences(inputs []TxInput) error {
+	for _, in := range inputs {
+		if in.Sequence > 0x7fffffff {
+			return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+		}
+	}
+	return nil
+}
+
+func validateSpendTxUniqueOutpoints(inputs []TxInput) error {
+	seen := make(map[Outpoint]struct{}, len(inputs))
+	for _, in := range inputs {
+		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		if _, exists := seen[op]; exists {
+			return txerr(TX_ERR_PARSE, "duplicate input outpoint")
+		}
+		seen[op] = struct{}{}
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput) (UtxoEntry, Outpoint, error) {
+	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 	entry, ok := ctx.work[op]
 	if !ok && ctx.inputView != nil {
 		var err error

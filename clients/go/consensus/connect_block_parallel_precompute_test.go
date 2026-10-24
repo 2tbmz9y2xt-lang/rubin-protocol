@@ -1,9 +1,42 @@
 package consensus
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestPrecomputeTxContexts_Section16GlobalFamilyOrder(t *testing.T) {
+	valid, utxos := section16SignedControl(t)
+	before := cloneUtxoSet(utxos)
+	control := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{valid})
+	want, err := PrecomputeTxContexts(control, utxos, 100)
+	if err != nil || len(want) != 1 || want[0].Fee.Cmp(Uint128FromU64(10)) != 0 {
+		t.Fatalf("valid standalone control: contexts=%v err=%v", want, err)
+	}
+	for _, tc := range section16StructuralCases()[4:] {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := section16TestTx(tc.nonce, tc.inputs)
+			pb := makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx})
+			contexts, err := PrecomputeTxContexts(pb, utxos, 100)
+			assertTxErrCodeMsg(t, err, tc.want, tc.msg)
+			if contexts != nil || !reflect.DeepEqual(utxos, before) {
+				t.Fatal("standalone rejection published contexts or changed caller snapshot")
+			}
+		})
+	}
+	tx := section16TestTx(1, []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x80000000}})
+	tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
+	contexts, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+	assertTxErrCodeMsg(t, err, TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+	if contexts != nil || !reflect.DeepEqual(utxos, before) {
+		t.Fatal("paired standalone rejection changed state or returned contexts")
+	}
+	got, err := PrecomputeTxContexts(control, utxos, 100)
+	if err != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(utxos, before) {
+		t.Fatalf("standalone rejected-then-valid control changed: %v", err)
+	}
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test helpers for precompute tests

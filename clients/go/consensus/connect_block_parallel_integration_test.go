@@ -7,6 +7,71 @@ import (
 	"testing"
 )
 
+func TestConnectBlock_Section16GlobalFamilyOrder(t *testing.T) {
+	valid, utxos := section16SignedControl(t)
+	prev, target := hashWithPrefix(0x77), filledHash(0xff)
+	initial := &InMemoryChainState{Utxos: utxos, AlreadyGenerated: big.NewInt(123)}
+	makeState := func() *InMemoryChainState {
+		return &InMemoryChainState{Utxos: cloneUtxoSet(utxos), AlreadyGenerated: new(big.Int).Set(initial.AlreadyGenerated)}
+	}
+	block := func(txs ...*Tx) []byte {
+		raw := make([][]byte, 0, len(txs)+1)
+		for _, tx := range txs {
+			raw = append(raw, txBytesFromTx(t, tx))
+		}
+		cb := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 1, BlockSubsidyBig(1, initial.AlreadyGenerated)+10, raw...)
+		raw = append([][]byte{cb}, raw...)
+		ids := make([][32]byte, len(raw))
+		for i := range raw {
+			ids[i] = testTxID(t, raw[i])
+		}
+		root, err := MerkleRootTxids(ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return buildBlockBytes(t, prev, root, target, 1, raw)
+	}
+	validBlock := block(valid)
+	for _, parallel := range []bool{false, true} {
+		connect := func(raw []byte, state *InMemoryChainState) (*ConnectBlockBasicSummary, error) {
+			if parallel {
+				return ConnectBlockParallelSigVerify(raw, &prev, &target, 1, []uint64{0}, state, [32]byte{}, 4)
+			}
+			return ConnectBlockBasicInMemoryAtHeight(raw, &prev, &target, 1, []uint64{0}, state, [32]byte{})
+		}
+		controlState := makeState()
+		control, err := connect(validBlock, controlState)
+		if err != nil || control.SumFees.Cmp(Uint128FromU64(10)) != 0 {
+			t.Fatalf("valid connect control: %v", err)
+		}
+		bad := section16TestTx(2, []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x80000000}, {PrevVout: 0xffffffff}})
+		for _, mode := range []string{"valid_then_structural", "earlier_output", "earlier_missing"} {
+			first := section16SnapshotTx(valid)
+			state := makeState()
+			want, msg := TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase"
+			switch mode {
+			case "earlier_output":
+				first.Outputs = []TxOutput{{CovenantType: 0x0105}}
+				want, msg = TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type"
+			case "earlier_missing":
+				first.Inputs[0].PrevTxid = hashWithPrefix(0x69)
+				want, msg = TX_ERR_MISSING_UTXO, "utxo not found"
+			}
+			summary, err := connect(block(first, bad), state)
+			assertTxErrCodeMsg(t, err, want, msg)
+			if summary != nil || !reflect.DeepEqual(state, initial) {
+				t.Fatalf("%s parallel=%v: rejection published state or summary", mode, parallel)
+			}
+			if mode == "valid_then_structural" {
+				got, err := connect(validBlock, state)
+				if err != nil || !reflect.DeepEqual(got, control) || !reflect.DeepEqual(state, controlState) {
+					t.Fatalf("rejected-then-valid connect differs from control: %v", err)
+				}
+			}
+		}
+	}
+}
+
 // Integration parity suite (Q-PV-15): tests that sequential and parallel
 // validation produce the same verdict, error code, first-invalid behavior,
 // and post-state digest for valid, invalid, and mixed scenarios.

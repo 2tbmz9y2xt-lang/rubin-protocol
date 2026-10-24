@@ -473,13 +473,17 @@ def inputValueSum
       pure (e.value + (← tail))
 
 def validateStructuralInputs (inputs : List TxIn) : Except String Unit := do
-  match inputs with
-  | [] => pure ()
-  | i :: rest =>
-      if isCoinbasePrevout i then throw "TX_ERR_PARSE"
-      if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
-      if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
-      validateStructuralInputs rest
+  for i in inputs do
+    if isCoinbasePrevout i then throw "TX_ERR_PARSE"
+  for i in inputs do
+    if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
+  for i in inputs do
+    if i.sequence > 0x7fffffff then throw "TX_ERR_SEQUENCE_INVALID"
+  let mut seen : Std.RBSet Outpoint cmpOutpoint := Std.RBSet.empty
+  for i in inputs do
+    let op := txInOutpoint i
+    if seen.contains op then throw "TX_ERR_PARSE"
+    seen := seen.insert op
 
 structure InputScanState where
   sumIn : Nat
@@ -847,6 +851,13 @@ def validateBasicTxEnvelope (tx : Tx) : Except String Unit := do
     throw "TX_ERR_PARSE"
   pure ()
 
+/-- Common pure S1A selector: nonce, count, then complete ascending input
+families. The standalone scan primitive retains its independent duplicate
+guard; whole-Tx application reaches that scan only after this selector. -/
+def validateSpendTxS1A (tx : Tx) : Except String Unit := do
+  validateBasicTxEnvelope tx
+  validateStructuralInputs tx.inputs
+
 def validateBasicVaultSpend
     (tx : Tx)
     (inputState : InputScanState) : Except String Unit := do
@@ -896,8 +907,7 @@ def prepareNonCoinbaseTxCore
   let _ := chainId
   let tx ← parseTx txBytes
 
-  validateBasicTxEnvelope tx
-  validateStructuralInputs tx.inputs
+  validateSpendTxS1A tx
 
   -- Output creation precedes input lookup to preserve deterministic error
   -- priority for invalid outputs versus missing UTXOs.

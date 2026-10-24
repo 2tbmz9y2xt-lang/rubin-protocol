@@ -1,6 +1,7 @@
 use super::*;
 use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::suite_registry::RotationProvider;
+use crate::utxo_basic::validate_spend_tx_s1a;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug)]
@@ -30,22 +31,6 @@ fn add_block_resource_stat(current: u64, delta: u64, msg: &'static str) -> Resul
     current
         .checked_add(delta)
         .ok_or_else(|| TxError::new(ErrorCode::TxErrParse, msg))
-}
-
-fn validate_non_coinbase_nonce_and_input_count(tx: &Tx) -> Result<(), TxError> {
-    if tx.tx_nonce == 0 && tx.inputs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::TxErrTxNonceInvalid,
-            "tx_nonce must be >= 1 for non-coinbase",
-        ));
-    }
-    if tx.inputs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "non-coinbase must have at least one input",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn validate_block_tx_semantics(
@@ -86,7 +71,7 @@ impl ParsedBlock {
                 "coinbase-like tx found at index > 0",
             ));
         }
-        validate_non_coinbase_nonce_and_input_count(tx)?;
+        validate_spend_tx_s1a(tx)?;
         if !seen_nonces.insert(tx.tx_nonce) {
             return Err(TxError::new(
                 ErrorCode::TxErrNonceReplay,
@@ -140,7 +125,7 @@ mod tests {
             inputs: vec![TxInput {
                 prev_txid: [0x22; 32],
                 prev_vout: 0,
-                script_sig: vec![0x01],
+                script_sig: vec![],
                 sequence: 1,
             }],
             outputs: vec![TxOutput {
@@ -238,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn section16_nonce_before_input_count() {
+    fn section16_global_family_order_nonce_before_input_count() {
         for (nonce, want) in [
             (0, ErrorCode::TxErrTxNonceInvalid),
             (1, ErrorCode::TxErrParse),
@@ -264,10 +249,46 @@ mod tests {
             assert_eq!(err.code, want);
         }
 
-        let mut single_nonce = spend(0, 1);
-        single_nonce.inputs[0].script_sig.clear();
-        validate_block_tx_semantics(&parsed_block(vec![coinbase(1), single_nonce]), 1, None)
-            .expect("single nonce must be deferred to transaction validation");
+        let err =
+            validate_block_tx_semantics(&parsed_block(vec![coinbase(1), spend(0, 1)]), 1, None)
+                .expect_err("single nonce rejects before later transaction work");
+        assert_eq!(err.code, ErrorCode::TxErrTxNonceInvalid);
+        assert_eq!(err.msg, "tx_nonce must be >= 1 for non-coinbase");
+    }
+
+    #[test]
+    fn section16_global_family_order_replay_prefix() {
+        for nonce in [7, 8] {
+            let mut bad = spend(nonce, 1);
+            bad.inputs[0].sequence = 0x8000_0000;
+            bad.inputs.push(TxInput {
+                prev_txid: [0; 32],
+                prev_vout: u32::MAX,
+                script_sig: vec![],
+                sequence: 0,
+            });
+            let mut seen = HashSet::from([7, 11]);
+            let before = seen.clone();
+            let err = ParsedBlock::validate_non_coinbase_block_tx(&bad, &mut seen)
+                .expect_err("structural before replay");
+            assert_eq!(
+                (err.code, err.msg),
+                (
+                    ErrorCode::TxErrParse,
+                    "coinbase prevout encoding forbidden in non-coinbase",
+                ),
+            );
+            assert_eq!(seen, before, "S1A rejection changed entry nonce prefix");
+        }
+        let mut replay = spend(7, 1);
+        replay.outputs[0].covenant_type = 0x0105;
+        let err = validate_block_tx_semantics(
+            &parsed_block(vec![coinbase(1), spend(7, 1), replay]),
+            1,
+            None,
+        )
+        .expect_err("replay before output");
+        assert_eq!(err.code, ErrorCode::TxErrNonceReplay);
     }
 
     #[test]

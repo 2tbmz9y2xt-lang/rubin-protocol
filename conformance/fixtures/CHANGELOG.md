@@ -11,6 +11,24 @@ Policy:
 
 ---
 
+## 2026-10-24 — global Section 16 S1A families (RUB-1223)
+
+The existing CV-UTXO-BASIC byte operation now covers complete coinbase-prevout
+and script_sig families before sequence, sequence before duplicate outpoints,
+nonadjacent duplicates before lookup, and structural failure before an unknown
+0x0105 output. The paired nonminimal input-count encoding retains P0 priority.
+CV-BLOCK-BASIC adds the two-input sequence/coinbase result, sequence/duplicate,
+S1A before replay, nonce-zero/nonempty-input rejection, and passing-S1A replay
+before output validation. Expected errors are literal specification results.
+
+These are handwritten finite byte fixtures. Existing generators own MATRIX,
+Lean vectors, raw native Go traces and selected refinement output. New negative
+Section16 rows are excluded by the unchanged refinement retention predicate;
+CVBlockBasicReplay observes them through its bounded S1A/replay companion.
+The existing CV-B-11/12/14 omitted-resource exceptions remain earlier than that
+companion, including CV-B-14's anchor-byte error before nonce replay. No full
+block, cryptographic, resource-order or total-SpendTx proof is claimed.
+
 ## 2026-10-22 — Retire CORE_STEALTH verification consumers (RUB-1710)
 
 Manual source editing, under the separately invoked narrow governance permission
