@@ -430,7 +430,9 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 		if evidence.commits != 1 {
 			t.Fatalf("N15 retained OLD commits %d", evidence.commits)
 		}
-		// Expected tuple: tsfCoveredLifecycle cleanup10/nil, tree_stream_fixture_cgo_test.go:1134 (r.tuple(t, 2, 3, -1)).
+		// Nearest existing pin: tsfCoveredLifecycle cleanup10/nil (tree_stream_fixture_cgo_test.go:1134, r.tuple(t, 2, 3, -1))
+		// uses the same fault mode 10, key tsCounterKey(2) and nil source delivery, but on a tsfCover scene; no existing
+		// row pins this plain tsfNew scene, so the literal tuple here is this row's own assertion.
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		if old == nil || any(s.s.txn) != old {
 			t.Fatal("N15 retained OLD: the retained handle is not the ORIGINAL OLD txn")
@@ -464,6 +466,7 @@ func mbRetainedReadbackRows(t *testing.T) {
 	}
 	t.Run("retained readback", func(t *testing.T) {
 		defer mbChildMarker(t)
+		parked := mbParkedWorkers()
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
 		var old any
@@ -479,16 +482,17 @@ func mbRetainedReadbackRows(t *testing.T) {
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		tcPoisonedCause(t, r.err)
 		if old == nil || any(s.s.txn) == old {
-			t.Fatal("N15 retained readback: the retained handle is not the readback txn")
+			t.Fatal("N15 retained readback: no ORIGINAL OLD txn recorded, or the retained handle is still the ORIGINAL OLD txn")
 		}
-		if !treeCallPoll(treeCallParkedWorker) {
-			t.Fatal("N15 retained readback: no parked worker after a poisoned delivery")
+		if !mbParkedOneMore(parked) {
+			t.Fatalf("N15 retained readback: parked workers %d, want %d after a poisoned delivery", mbParkedWorkers(), parked+1)
 		}
 		mbTreeRetained(t, s, r, before, "N15 retained readback")
 		s.durable(t, true)
 	})
 	t.Run("retained readback goexit", func(t *testing.T) {
 		defer mbChildMarker(t)
+		parked := mbParkedWorkers()
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
 		var old any
@@ -518,14 +522,33 @@ func mbRetainedReadbackRows(t *testing.T) {
 		}
 		tcPoisonedCause(t, s.s.terminal)
 		if old == nil || s.s.txn == nil || any(s.s.txn) == old {
-			t.Fatal("N15 readback goexit: the retained handle is not the readback txn")
+			t.Fatal("N15 readback goexit: no retained handle, no ORIGINAL OLD txn recorded, or the retained handle is still the ORIGINAL OLD txn")
 		}
-		if !treeCallPoll(treeCallParkedWorker) {
-			t.Fatal("N15 readback goexit: no parked worker after a poisoned delivery")
+		if !mbParkedOneMore(parked) {
+			t.Fatalf("N15 readback goexit: parked workers %d, want %d after a poisoned delivery", mbParkedWorkers(), parked+1)
 		}
 		mbEpoch(t, s.s, before+1, "N15 retained readback goexit")
 		mustEnvironment(t, fixtureLargeRelease(s.s))
 	})
+}
+
+// mbParkedWorkers counts parked thread-locked runTreeLockedV1 workers (the treeCallParkedWorker predicate as a
+// count): both retained readback rows share one child process and a parked worker never exits, so each row
+// attributes its own park by polling until the count first equals one more than before the row (it is not
+// re-checked after that sample).
+func mbParkedWorkers() int {
+	count := 0
+	for _, record := range treeCallGoroutineRecords() {
+		header, _, _ := strings.Cut(record, "\n")
+		if strings.Contains(header, "[select (no cases)") && strings.Contains(header, ", locked to thread") && strings.Contains(record, treeCallCreatorV1) {
+			count++
+		}
+	}
+	return count
+}
+
+func mbParkedOneMore(before int) bool {
+	return treeCallPoll(func() bool { return mbParkedWorkers() == before+1 })
 }
 
 func mbChildMarker(t *testing.T) {
