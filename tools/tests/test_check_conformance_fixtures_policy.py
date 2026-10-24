@@ -276,7 +276,7 @@ class RangeTests(PolicyBase):
     def test_h3_changelog_hunk_outside_fallback_range_is_rejected(self):
         seed(self.repo)
         set_origin_main(self.repo, unrelated_commit(self.repo))
-        commit(self.repo, "log", conformance__fixtures__CHANGELOG_md="# Changelog\n- CV-Y.json updated\n")
+        commit(self.repo, "log", **{"conformance__fixtures__CHANGELOG.md": "# Changelog\n- CV-Y.json updated\n"})
         (self.repo / "conformance/fixtures/CV-Y.json").write_text('{"v":2}\n', encoding="utf-8")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "fixture only")
