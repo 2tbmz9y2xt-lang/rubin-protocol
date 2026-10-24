@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -58,10 +59,10 @@ func TestReplayEntryInventory148Decisions(t *testing.T) {
 	for _, status := range []HeaderCandidateStatusV1{HeaderCandidateIncompleteV1, HeaderCandidateCapacityRefusedV1} {
 		nonzero := complete
 		nonzero.Status = status
-		replay148Check(t, "I6 nonzero", nonzero, 508, selectedSideInvariant)
+		replay148Check(t, fmt.Sprintf("I6 nonzero status %d", status), nonzero, 508, selectedSideInvariant)
 	}
 	for _, status := range []HeaderCandidateStatusV1{0, 4} {
-		replay148Check(t, "I6 unknown", HeaderCandidateInventory148V1{Status: status}, 508, selectedSideInvariant)
+		replay148Check(t, fmt.Sprintf("I6 unknown status %d", status), HeaderCandidateInventory148V1{Status: status}, 508, selectedSideInvariant)
 	}
 }
 
