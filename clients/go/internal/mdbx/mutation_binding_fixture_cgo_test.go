@@ -395,7 +395,7 @@ func TestMutationBindingTreeComposeUnwindV1(t *testing.T) {
 // the latched terminal ones, the handle is kept, and the one native attempt advanced the epoch once.
 func mbTreeRetained(t *testing.T, s *tsfScene, r tsResult, before uint64, marker string) {
 	t.Helper()
-	if r.stage != UpdateStageCommitMayHaveCrossed || r.err == nil || s.s.state != storePOISONEDTHREAD || s.s.txn == nil {
+	if r.err == nil || s.s.state != storePOISONEDTHREAD || s.s.txn == nil {
 		t.Fatalf("%s: %+v state %s", marker, r, s.s.state)
 	}
 	if r.truth != s.s.terminalTruth || any(r.err) != any(s.s.terminal) {
@@ -405,6 +405,16 @@ func mbTreeRetained(t *testing.T, s *tsfScene, r tsResult, before uint64, marker
 	mustEnvironment(t, fixtureLargeRelease(s.s))
 }
 
+// mbOldTxn records the ORIGINAL OLD txn of the CURRENT provider Reader at the writer position (R4 reads ORIGINAL OLD).
+func mbOldTxn(s *tsfScene, old *any) {
+	s.p[0].before = func(pos TreePositionV1, r *Reader, _ *TreeDeltaSinkV1) error {
+		if pos == 1 {
+			*old = any(r.txn)
+		}
+		return nil
+	}
+}
+
 // N15 retained ambiguity through Store.UpdateTreeV1 on the existing tsfNew scene and large-image modes:
 // mode 10 retains ORIGINAL OLD after a crossed commit (tsCoveredLifecycleState); mode 15 retains the readback
 // txn, on the normal readback path and on a readback-position provider Goexit (unwoundV1).
@@ -412,13 +422,19 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 	t.Run("retained OLD", func(t *testing.T) {
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
+		var old any
+		mbOldTxn(s, &old)
 		var r tsResult
 		evidence, err := fixtureLargeFault(s.s, 10, 0, tsCounterKey(2), func() { r = s.run(t) })
 		mustEnvironment(t, err)
 		if evidence.commits != 1 {
 			t.Fatalf("N15 retained OLD commits %d", evidence.commits)
 		}
+		// Expected tuple: tsfCoveredLifecycle cleanup10/nil, tree_stream_fixture_cgo_test.go:1134 (r.tuple(t, 2, 3, -1)).
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		if old == nil || any(s.s.txn) != old {
+			t.Fatal("N15 retained OLD: the retained handle is not the ORIGINAL OLD txn")
+		}
 		mbTreeRetained(t, s, r, before, "N15 retained OLD")
 	})
 	t.Run("retained readback child", func(t *testing.T) {
@@ -450,18 +466,33 @@ func mbRetainedReadbackRows(t *testing.T) {
 		defer mbChildMarker(t)
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
+		var old any
+		mbOldTxn(s, &old)
 		var r tsResult
 		evidence, err := fixtureLargeFault(s.s, 15, 0, []byte{9}, func() { r = s.run(t) })
 		mustEnvironment(t, err)
 		if evidence.commits != 1 {
 			t.Fatalf("N15 retained readback commits %d", evidence.commits)
 		}
+		// No existing test pins the normal-path mode-15 tuple: the verdict NEW is checked independently below against
+		// the durable post-image (tsfScene.durable), and the cause against tcPoisonedCause (tree_compose_cgo_test.go:2179).
+		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		tcPoisonedCause(t, r.err)
+		if old == nil || any(s.s.txn) == old {
+			t.Fatal("N15 retained readback: the retained handle is not the readback txn")
+		}
+		if !treeCallPoll(treeCallParkedWorker) {
+			t.Fatal("N15 retained readback: no parked worker after a poisoned delivery")
+		}
 		mbTreeRetained(t, s, r, before, "N15 retained readback")
+		s.durable(t, true)
 	})
 	t.Run("retained readback goexit", func(t *testing.T) {
 		defer mbChildMarker(t)
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
+		var old any
+		mbOldTxn(s, &old)
 		s.p[1].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
 			if pos == 2 {
 				runtime.Goexit()
@@ -480,8 +511,17 @@ func mbRetainedReadbackRows(t *testing.T) {
 			})
 		}()
 		<-done
-		if s.s.state != storePOISONEDTHREAD || s.s.txn == nil || s.s.terminalTruth != CommitTruthUnknown || r != (tsResult{}) {
+		// The public entry resumes the Goexit on this goroutine, so neither the result nor the fixture return reaches
+		// the caller; the latched terminal is checked against tcPoisonedChild (tree_compose_cgo_test.go:2221-2230).
+		if s.s.state != storePOISONEDTHREAD || s.s.terminalTruth != CommitTruthUnknown || r != (tsResult{}) {
 			t.Fatalf("N15 readback goexit: state %s truth %s result %+v", s.s.state, s.s.terminalTruth, r)
+		}
+		tcPoisonedCause(t, s.s.terminal)
+		if old == nil || s.s.txn == nil || any(s.s.txn) == old {
+			t.Fatal("N15 readback goexit: the retained handle is not the readback txn")
+		}
+		if !treeCallPoll(treeCallParkedWorker) {
+			t.Fatal("N15 readback goexit: no parked worker after a poisoned delivery")
 		}
 		mbEpoch(t, s.s, before+1, "N15 retained readback goexit")
 		mustEnvironment(t, fixtureLargeRelease(s.s))
