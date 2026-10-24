@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -652,13 +651,23 @@ func queueFixtureTask(q *SigCheckQueue, index byte, err error) {
 	q.Push(0x01, make([]byte, 2592), make([]byte, 4627), [32]byte{index}, err)
 }
 
+// queueFixtureTaskEqual compares the comparable error and panic fixtures by identity.
+func queueFixtureTaskEqual(got, want sigCheckTask) bool {
+	return got.suiteID == want.suiteID &&
+		(got.pubkey == nil) == (want.pubkey == nil) && bytes.Equal(got.pubkey, want.pubkey) &&
+		(got.sig == nil) == (want.sig == nil) && bytes.Equal(got.sig, want.sig) &&
+		got.digest == want.digest && any(got.errOnFail) == any(want.errOnFail) &&
+		got.settled == want.settled && any(got.err) == any(want.err) &&
+		got.panicValue == want.panicValue && got.panicked == want.panicked
+}
+
 func requireQueueCleared(t *testing.T, q *SigCheckQueue, n int) {
 	t.Helper()
 	if q.Len() != 0 {
 		t.Fatalf("consumed queue length=%d", q.Len())
 	}
 	for i, task := range q.tasks[:n] {
-		if !reflect.DeepEqual(task, sigCheckTask{}) {
+		if !queueFixtureTaskEqual(task, sigCheckTask{}) {
 			t.Fatalf("consumed slot %d retains task outcome or payload", i)
 		}
 	}
@@ -692,7 +701,7 @@ func TestSigCheckQueue_OrderedResults(t *testing.T) {
 				for i := 1; i < n; i++ {
 					queueFixtureTask(q, byte(i), errors.New("later task"))
 				}
-				if got := q.Flush(); got != first {
+				if got := q.Flush(); any(got) != any(first) {
 					t.Fatalf("lowest submitted error identity lost: %v", got)
 				}
 				if calls.Load() != int32(n) {
@@ -708,10 +717,11 @@ func TestSigCheckQueue_OrderedResults(t *testing.T) {
 			var calls atomic.Int32
 			queueVerifierHook(t, func(_ string, _, _, msg []byte) (bool, error) {
 				calls.Add(1)
-				if msg[0] == 0 {
+				switch msg[0] {
+				case 0:
 					close(lowerEntered)
 					<-releaseLower
-				} else if msg[0] == 1 {
+				case 1:
 					<-lowerEntered
 					close(higherDone)
 				}
@@ -736,7 +746,7 @@ func TestSigCheckQueue_OrderedResults(t *testing.T) {
 				if premature {
 					t.Fatal("Flush returned before its lower worker joined")
 				}
-				if got != first || calls.Load() != int32(n) {
+				if any(got) != any(first) || calls.Load() != int32(n) {
 					t.Fatalf("reverse completion selected %v, calls=%d", got, calls.Load())
 				}
 				requireQueueCleared(t, q, n)
@@ -781,17 +791,17 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 			}
 		}
 		for _, interval := range [][2]int{{1, 2}, {0, 3}, {1, 3}} {
-			if err := q.settleRange(sigCheckQueueMark{interval[0]}, sigCheckQueueMark{interval[1]}); err != first {
+			if err := q.settleRange(sigCheckQueueMark{interval[0]}, sigCheckQueueMark{interval[1]}); any(err) != any(first) {
 				t.Fatal("overlapping selection changed original failure")
 			}
 		}
 		if calls != [3]int{1, 1, 0} || q.tasks[2].settled || q.tasks[2].err != nil || q.tasks[2].panicked || q.tasks[2].panicValue != nil || !q.tasks[0].settled || q.tasks[0].err != nil || q.tasks[0].panicked || q.tasks[0].panicValue != nil {
 			t.Fatalf("serial prefix/pending shape: calls=%v tasks=%+v", calls, q.tasks)
 		}
-		if !q.tasks[1].settled || q.tasks[1].err != first || q.tasks[1].panicked || q.tasks[1].panicValue != nil {
+		if !q.tasks[1].settled || any(q.tasks[1].err) != any(first) || q.tasks[1].panicked || q.tasks[1].panicValue != nil {
 			t.Fatal("original-error payload shape")
 		}
-		if err := q.Flush(); err != first || calls != [3]int{1, 1, 1} {
+		if err := q.Flush(); any(err) != any(first) || calls != [3]int{1, 1, 1} {
 			t.Fatalf("Flush recomputed terminal task or omitted pending: err=%v calls=%v", err, calls)
 		}
 		requireQueueCleared(t, q, 3)
@@ -829,7 +839,7 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 			requireQueuePanic(t, "invalid signature queue range", func() {
 				_ = q.settleRange(sigCheckQueueMark{bounds[0]}, sigCheckQueueMark{bounds[1]})
 			})
-			if !reflect.DeepEqual(q.tasks[0], before) || calls != 0 {
+			if !queueFixtureTaskEqual(q.tasks[0], before) || calls != 0 {
 				t.Fatal("invalid range changed task or invoked verifier")
 			}
 		}
@@ -845,10 +855,10 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 			got := q.settleRange(sigCheckQueueMark{}, q.mark())
 			if original == nil {
 				assertTxErrCodeMsg(t, got, "TX_ERR_SIG_INVALID", "signature verification failed (fail-closed default)")
-			} else if got != original {
+			} else if any(got) != any(original) {
 				t.Fatal("errOnFail original interface replaced")
 			}
-			if q.Flush() != got {
+			if any(q.Flush()) != any(got) {
 				t.Fatal("terminal errOnFail identity changed during Flush")
 			}
 		}
@@ -863,13 +873,13 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 				queueFixtureTask(q, 0, errors.New("distinct fallback"))
 				first := q.settleRange(sigCheckQueueMark{}, q.mark())
 				mustTxErrorCause(t, first, "TX_ERR_SIG_INVALID", "verify_sig: EVP_DigestVerify internal error", TxErrorCauseLocalCryptoBackendFault)
-				if first == rawErr || q.settleRange(sigCheckQueueMark{}, q.mark()) != first || q.Flush() != first || calls != 1 {
+				if any(first) == any(rawErr) || any(q.settleRange(sigCheckQueueMark{}, q.mark())) != any(first) || any(q.Flush()) != any(first) || calls != 1 {
 					t.Fatal("binding projection or fault memoization changed")
 				}
 				queueFixtureTask(q, 0, nil)
 				next := q.Flush()
 				mustTxErrorCause(t, next, "TX_ERR_SIG_INVALID", "verify_sig: EVP_DigestVerify internal error", TxErrorCauseLocalCryptoBackendFault)
-				if calls != 2 || next == first {
+				if calls != 2 || any(next) == any(first) {
 					t.Fatal("fault survived globally into the next batch")
 				}
 			}
@@ -886,14 +896,14 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 		opensslConsensusInitFn = func() error { calls++; return errors.New("synthetic consensus init failure") }
 		original := ensureOpenSSLConsensusInit()
 		mustTxErrorCause(t, original, "TX_ERR_PARSE", "openssl consensus init: synthetic consensus init failure", TxErrorCauseLocalCryptoBackendFault)
-		if ok, got := verifySigWithRegistry(0x01, pubkey, sig, [32]byte{}, registry); ok || got != original {
+		if ok, got := verifySigWithRegistry(0x01, pubkey, sig, [32]byte{}, registry); ok || any(got) != any(original) {
 			t.Fatal("producer did not forward independently observed latched error")
 		}
 		q.Push(0x01, pubkey, sig, [32]byte{}, errors.New("distinct fallback"))
-		if got := q.settleRange(sigCheckQueueMark{}, q.mark()); got != original {
+		if got := q.settleRange(sigCheckQueueMark{}, q.mark()); any(got) != any(original) {
 			t.Fatal("first selection replaced independent producer identity")
 		}
-		if q.settleRange(sigCheckQueueMark{}, q.mark()) != original || q.Flush() != original || calls != 1 {
+		if any(q.settleRange(sigCheckQueueMark{}, q.mark())) != any(original) || any(q.Flush()) != any(original) || calls != 1 {
 			t.Fatal("init-latched identity or invocation count changed")
 		}
 		requireQueueCleared(t, q, 1)
@@ -952,7 +962,7 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 						requireQueuePanic(t, panicValue, func() { _ = q.settleRange(sigCheckQueueMark{}, q.mark()) })
 					} else if state != "pending" {
 						got := q.settleRange(sigCheckQueueMark{}, q.mark())
-						if (state == "success" && got != nil) || (state == "error" && got != original) {
+						if (state == "success" && got != nil) || (state == "error" && any(got) != any(original)) {
 							t.Fatal("prefix terminal state setup")
 						}
 					}
@@ -962,11 +972,11 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 					queueFixtureTask(q, 1, errors.New("dropped error"))
 					if dropped == "panic" {
 						requireQueuePanic(t, panicValue, func() { _ = q.settleRange(mark, q.mark()) })
-					} else if q.settleRange(mark, q.mark()) != q.tasks[1].errOnFail {
+					} else if any(q.settleRange(mark, q.mark())) != any(q.tasks[1].errOnFail) {
 						t.Fatal("dropped error identity")
 					}
 					q.rollbackTo(mark)
-					if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) || q.tasks[0].errOnFail != original || !reflect.DeepEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
+					if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) || any(q.tasks[0].errOnFail) != any(original) || !queueFixtureTaskEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
 						t.Fatal("rollback changed prefix or retained dropped outcome")
 					}
 					healthy = true
@@ -975,7 +985,7 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 						t.Fatal("reused suffix retained terminal result")
 					}
 					got := q.Flush()
-					if state == "error" && got != original {
+					if state == "error" && any(got) != any(original) {
 						t.Fatal("retained prefix original error changed")
 					}
 					if state == "panic" {
@@ -1062,7 +1072,7 @@ func TestSigCheckQueue_PanicDomains(t *testing.T) {
 					}
 				} else {
 					for range 2 {
-						if q.settleRange(sigCheckQueueMark{}, q.mark()) != first {
+						if any(q.settleRange(sigCheckQueueMark{}, q.mark())) != any(first) {
 							t.Fatal("earlier error lost to later panic")
 						}
 					}
@@ -1076,7 +1086,7 @@ func TestSigCheckQueue_PanicDomains(t *testing.T) {
 					got := q.Flush()
 					if panicFirst {
 						assertTxErrCodeMsg(t, got, "TX_ERR_SIG_INVALID", "signature worker panic (fail-closed)")
-					} else if got != first {
+					} else if any(got) != any(first) {
 						t.Fatal("full reduction changed lower original error")
 					}
 				}

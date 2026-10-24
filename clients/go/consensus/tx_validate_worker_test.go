@@ -919,7 +919,8 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 func TestValidateTxLocal_QueueResult(t *testing.T) {
 	kp := requiredOrderedKeypair(t)
 	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
-	tx := &Tx{Version: 1, TxNonce: 1,
+	tx := &Tx{
+		Version: 1, TxNonce: 1,
 		Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0x31)}, {PrevTxid: hashWithPrefix(0x32)}},
 		Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: cov}},
 	}
@@ -942,7 +943,8 @@ func TestValidateTxLocal_QueueResult(t *testing.T) {
 				}
 				return valid, nil
 			})
-			tvc := TxValidationContext{TxIndex: 7, Tx: tx,
+			tvc := TxValidationContext{
+				TxIndex: 7, Tx: tx,
 				ResolvedInputs: []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}, {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}},
 				WitnessStart:   0, WitnessEnd: 2, SighashCache: cache, Fee: Uint128{Hi: 1, Lo: 10},
 			}

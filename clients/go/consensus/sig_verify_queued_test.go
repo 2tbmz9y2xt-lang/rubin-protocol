@@ -3,7 +3,6 @@ package consensus
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"testing"
 )
 
@@ -442,10 +441,10 @@ func TestValidateThresholdSigSpendQ_OrderedResults(t *testing.T) {
 				}
 				err := validateThresholdSigSpendQ(tc.keys, 2, []WitnessItem{first, tc.second}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", tc.rotation, nil)
 				mustTxErrorCause(t, err, wantCode, wantMsg, wantCause)
-				if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) {
+				if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) {
 					t.Fatal("threshold selected or changed enclosing prefix")
 				}
-				if !reflect.DeepEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
+				if !queueFixtureTaskEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
 					t.Fatal("threshold retained rejected key payload/outcome")
 				}
 				if err := validateThresholdSigSpendQ([][32]byte{keyID1}, 1, []WitnessItem{validFirst}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil); err != nil {
@@ -474,7 +473,7 @@ func TestValidateThresholdSigSpendQ_OrderedResults(t *testing.T) {
 		requireQueuePanic(t, panicValue, func() {
 			_ = validateThresholdSigSpendQ([][32]byte{keyID1, keyID2}, 2, []WitnessItem{validFirst, {SuiteID: SUITE_ID_SENTINEL}}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
 		})
-		if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) || !reflect.DeepEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
+		if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) || !queueFixtureTaskEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
 			t.Fatal("panic did not clear only threshold suffix")
 		}
 		panicNow = false
@@ -509,7 +508,7 @@ func TestValidateThresholdSigSpendQ_SlotMismatch(t *testing.T) {
 	prefix.sig = append([]byte(nil), prefix.sig...)
 	err = validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	assertTxErrCodeMsg(t, err, "TX_ERR_PARSE", "witness slot assignment mismatch")
-	if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) {
+	if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) {
 		t.Fatal("slot mismatch selected or changed enclosing prefix")
 	}
 	next := WitnessItem{SuiteID: 0x01, Pubkey: kp1.PubkeyBytes(), Signature: signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)}

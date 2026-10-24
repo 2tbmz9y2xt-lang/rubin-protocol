@@ -689,11 +689,12 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 						}
 						assertTxErrCodeMsg(t, err, "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
 					}
-					if disposition == "error" {
+					switch disposition {
+					case "error":
 						invoke()
-					} else if disposition == "panic" {
+					case "panic":
 						requireQueuePanic(t, earlierPanic, invoke)
-					} else {
+					default:
 						requireQueuePanic(t, laterPanic, invoke)
 					}
 					assertState(t, initial, before)
@@ -799,7 +800,6 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 		t.Run("valid signatures before subsidy failure", func(t *testing.T) {
 			reject(t, block(subsidy+21, firstRaw, secondRaw), "BLOCK_ERR_SUBSIDY_EXCEEDED", cov)
 		})
-
 	})
 }
 

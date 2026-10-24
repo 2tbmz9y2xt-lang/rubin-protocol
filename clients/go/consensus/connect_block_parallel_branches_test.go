@@ -64,8 +64,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SigQueueRollbackToEntryMark(t *testing.T) 
 						!bytes.Equal(got.pubkey, want.pubkey) ||
 						!bytes.Equal(got.sig, want.sig) ||
 						got.digest != want.digest ||
-						got.errOnFail != want.errOnFail || got.settled != want.settled ||
-						got.err != want.err || got.panicValue != want.panicValue || got.panicked != want.panicked {
+						any(got.errOnFail) != any(want.errOnFail) || got.settled != want.settled ||
+						any(got.err) != any(want.err) || got.panicValue != want.panicValue || got.panicked != want.panicked {
 						t.Fatalf("queue task %d after %s differs from entry state", i, stage)
 					}
 				}
@@ -1456,7 +1456,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 	for _, variant := range []string{"suite", "key", "selector", "missing", "vault_output", "vault_input"} {
 		for _, firstValid := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/firstValid%v", variant, firstValid), func(t *testing.T) {
-				tx := &Tx{Version: 1, TxNonce: 1,
+				tx := &Tx{
+					Version: 1, TxNonce: 1,
 					Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xe1)}, {PrevTxid: hashWithPrefix(0xe2)}},
 					Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
 				}
@@ -1518,11 +1519,11 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 				if work != nil || fee != (Uint128{}) || !reflect.DeepEqual(utxos, before) {
 					t.Fatal("rejection published work/fee or changed caller state")
 				}
-				if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) {
+				if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) {
 					t.Fatal("WorkQ selected or erased enclosing prefix")
 				}
 				for _, task := range q.tasks[:cap(q.tasks)][1:] {
-					if !reflect.DeepEqual(task, sigCheckTask{}) {
+					if !queueFixtureTaskEqual(task, sigCheckTask{}) {
 						t.Fatal("current suffix retains payload or outcome")
 					}
 				}
@@ -1545,7 +1546,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 		}
 		keys := [][32]byte{key, otherKey}
 		multi := encodeMultisigCovenantData(2, keys)
-		tx := &Tx{Version: 1, TxNonce: 1,
+		tx := &Tx{
+			Version: 1, TxNonce: 1,
 			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xf1)}, {PrevTxid: hashWithPrefix(0xf2)}},
 			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
 		}
@@ -1594,18 +1596,19 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 							t.Fatal("suppressed later panic published work/fee")
 						}
 					}
-					if earlier == "error" {
+					switch earlier {
+					case "error":
 						invoke()
-					} else if earlier == "panic" {
+					case "panic":
 						requireQueuePanic(t, earlierPanic, invoke)
-					} else {
+					default:
 						requireQueuePanic(t, laterPanic, invoke)
 					}
-					if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) || !reflect.DeepEqual(utxos, before) {
+					if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) || !reflect.DeepEqual(utxos, before) {
 						t.Fatal("nested panic changed caller state or enclosing prefix")
 					}
 					for _, task := range q.tasks[:cap(q.tasks)][1:] {
-						if !reflect.DeepEqual(task, sigCheckTask{}) {
+						if !queueFixtureTaskEqual(task, sigCheckTask{}) {
 							t.Fatal("nested panic retained current task")
 						}
 					}
