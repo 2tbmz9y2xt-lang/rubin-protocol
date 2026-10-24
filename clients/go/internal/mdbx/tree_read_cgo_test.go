@@ -216,7 +216,8 @@ func trOriginalV1(t *testing.T) {
 					return
 				}
 				treeNativeIntegrity(t, err, operationUpdate, nil)
-				if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
+				var engine *EngineError
+				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("original-input refusal root%x err%v active%v", root, err, reader.usable())
 				}
 			})
@@ -295,7 +296,8 @@ func trOriginalGroupsV1(t *testing.T) {
 					return
 				}
 				treeNativeIntegrity(t, err, operationUpdate, nil)
-				if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
+				var engine *EngineError
+				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("grouped missing R root%x err%v active%v", root, err, reader.usable())
 				}
 			})
@@ -319,7 +321,8 @@ func trAdmissionRefusedV1(t *testing.T, reader *Reader, account *OperationAccoun
 			}
 		}
 		treeNativeError(t, err, op, EngineClass("InvalidInput"), 22, diagnostic, nil)
-		if err.(*EngineError).TreeObservation != nil || reservationLive(owner) != held {
+		var engine *EngineError
+		if !errors.As(err, &engine) || engine.TreeObservation != nil || reservationLive(owner) != held {
 			t.Fatal("admission observed or changed account charge")
 		}
 		if reader != nil && (reader.active.Load() != active || any(reader.failure) != any(failure)) {
