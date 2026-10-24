@@ -110,7 +110,7 @@ func TestInitial148RequiredR(t *testing.T) {
 	})
 	t.Run("absent-repeat", func(t *testing.T) {
 		w := btNew(t)
-		err := irRunV1(t, w, irRequestV1(1, 3), mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+		err := irRunV1(t, w, irRequestV1(1, 3), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
 			for range 2 {
 				row := view.Lookup(Outpoint{Txid: [32]byte{99}})
 				logicalMDBXAssert(t, row.kind == logicalStateRowAbsent && logicalStateEntryZero(row.entry) && row.cause == nil, "definitive absence changed")
@@ -147,12 +147,12 @@ func irDistinctResidualCaseV1(t *testing.T, total uint64, counterFirst bool) {
 	request := btRequest(btBody(148, 63, [32]byte{}, tx), 1)
 	request.Kind, request.Undo = 1, 2
 	var failure error
-	err := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+	err := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 		failure = irAccumulateResidualV1(t, view, derive, ops, total, counterFirst)
 		return nil // The producer must retain a refusal ignored by its callback.
 	})
 	logicalMDBXAssert(t, any(err) == any(failure), "accumulated residual primary replaced: %v/%v", err, failure)
-	next := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
+	next := irRunV1(t, w, request, mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, _ func() initial148RootReadOutcomeV1) error {
 		logicalMDBXAssert(t, view.Lookup(ops[0]).kind == logicalStateRowPresent, "next scope lost first row")
 		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "next scope retained prior failure")
 		return nil
@@ -212,7 +212,7 @@ func irResidualV1(t *testing.T) {
 				w.pair(t, btMutation(1, btUTXOKey(1, op), btValue(btFrame(1, 0, data), 0, true)))
 				irCounterV1(t, w, tc.total, tc.count)
 				var failure error
-				err := irRunV1(t, w, irRequestV1(1, 7), mdbx.TreeEndpointV1{Kind: 1}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+				err := irRunV1(t, w, irRequestV1(1, 7), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 					if counterFirst {
 						counter := view.Counters()
 						failure = counter.cause
