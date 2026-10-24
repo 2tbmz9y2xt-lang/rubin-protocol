@@ -1433,3 +1433,88 @@ fn precompute_input_encoding_precedes_lookup() {
     .expect("empty script_sig with sequence 0x7fffffff");
     assert_eq!(contexts.len(), 1);
 }
+
+#[test]
+fn section16_global_family_order_public_precompute() {
+    let a = precompute_input_for_test([0x51; 32], 0);
+    let cb = TxInput {
+        prev_txid: [0; 32],
+        prev_vout: u32::MAX,
+        ..a.clone()
+    };
+    let seq = TxInput {
+        sequence: 0x8000_0000,
+        ..a.clone()
+    };
+    let script = TxInput {
+        prev_vout: 1,
+        script_sig: vec![1],
+        ..a.clone()
+    };
+    let later_seq = TxInput {
+        prev_vout: 1,
+        ..seq.clone()
+    };
+    let set = HashMap::from([(
+        Outpoint {
+            txid: [0x61; 32],
+            vout: 0,
+        },
+        precompute_p2pk_utxo(2),
+    )]);
+    let before = set.clone();
+    let valid = make_parsed_block(
+        simple_coinbase(),
+        vec![precompute_p2pk_spend_for_test(
+            1,
+            precompute_input_for_test([0x61; 32], 0),
+            1,
+        )],
+    );
+    let expected = precompute_tx_contexts(&valid, &set, 100).expect("valid standalone control");
+    assert_eq!(expected.len(), 1);
+    assert_eq!(expected[0].fee, 1);
+    for (inputs, bad_output, code, message) in [
+        (
+            vec![seq.clone(), cb],
+            false,
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        ),
+        (
+            vec![seq.clone(), script],
+            false,
+            ErrorCode::TxErrParse,
+            "script_sig must be empty under genesis covenant set",
+        ),
+        (
+            vec![a.clone(), a, later_seq],
+            false,
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        ),
+        (
+            vec![seq],
+            true,
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        ),
+    ] {
+        let mut tx = precompute_p2pk_spend_for_test(1, inputs[0].clone(), 1);
+        tx.inputs = inputs;
+        if bad_output {
+            tx.outputs = vec![TxOutput {
+                value: 0,
+                covenant_type: 0x0105,
+                covenant_data: vec![],
+            }];
+        }
+        let result = precompute_tx_contexts(&make_parsed_block(simple_coinbase(), vec![tx]), &set, 100);
+        let err = result.expect_err("standalone S1A rejection returns no contexts");
+        assert_eq!((err.code, err.msg), (code, message));
+        assert_eq!(set, before, "caller snapshot changed");
+    }
+    let got = precompute_tx_contexts(&valid, &set, 100).expect("rejected then valid");
+    assert_eq!(got, expected);
+    assert_eq!(set, before);
+}

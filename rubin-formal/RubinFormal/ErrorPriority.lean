@@ -15,9 +15,9 @@ linkage → merkle (via explicit-bind equivalence) → witness (existing).
 - `applyDaLenChecks` (LIVE, called from `parseTxFromCursor`):
   4 DA-length checks, all TX_ERR_PARSE.
 - `applyTxPreInputChecks` (LIVE, called from `applyNonCoinbaseTxBasicNoCrypto`):
-  nonce invalid → empty inputs → output covenant loop.
-- `validateInputStructural` (LIVE, per-input loop):
-  coinbase prevout → scriptSig → sequence.
+  common global S1A → output covenant loop. Nonce/count lemmas cover its prefix.
+- `validateInputStructural` (standalone single-input lemma domain):
+  coinbase prevout → scriptSig → sequence, without a whole-Tx/global-order claim.
 
 ## Coverage notes
 - `parseTxFromCursor` header/bounds (lines 108-139): all TX_ERR_PARSE — same error code,
@@ -385,14 +385,16 @@ theorem preinput_empty_inputs_priority
     (hNonce : (tx.txNonce == 0) = false)
     (hInputs : (tx.inputs.length == 0) = true) :
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
-  unfold applyTxPreInputChecks; rw [hNonce, hInputs]; rfl
+  unfold applyTxPreInputChecks UtxoBasicV1.validateSpendTxS1A UtxoBasicV1.validateBasicTxEnvelope
+  rw [hNonce, hInputs]; rfl
 
 open UtxoApplyGenesisV1 in
 theorem preinput_nonce_zero_priority
     (tx : UtxoBasicV1.Tx) (height : Nat)
     (hNonce : (tx.txNonce == 0) = true) :
     applyTxPreInputChecks tx height = .error "TX_ERR_TX_NONCE_INVALID" := by
-  unfold applyTxPreInputChecks; rw [hNonce]; rfl
+  unfold applyTxPreInputChecks UtxoBasicV1.validateSpendTxS1A UtxoBasicV1.validateBasicTxEnvelope
+  rw [hNonce]; rfl
 
 /-! ## Live DA-len checks ordering (applyDaLenChecks)
 
@@ -432,8 +434,10 @@ theorem dalen_kind2_bounds
 
 /-! ## Per-input structural ordering (validateInputStructural)
 
-LIVE sub-function called from applyNonCoinbaseTxBasicNoCrypto per-input loop.
-Ordering: coinbase prevout → scriptSig → sequence.
+Standalone single-input statements retain their registered identifiers.
+Whole-Tx application instead uses the common S1A selector. These lemmas prove
+only coinbase prevout → scriptSig → sequence for one input; generated replay
+observes the named multi-input global-family results.
 -/
 
 open UtxoApplyGenesisV1 in

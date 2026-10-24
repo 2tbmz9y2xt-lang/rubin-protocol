@@ -222,14 +222,8 @@ func applyNonCoinbaseTxBasicWorkQ(
 		}
 	}()
 
-	if tx == nil {
-		return nil, Uint128{}, txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if tx.TxNonce == 0 {
-		return nil, Uint128{}, txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
-	}
-	if len(tx.Inputs) == 0 {
-		return nil, Uint128{}, txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	if err := ValidateSpendTxS1A(tx); err != nil {
+		return nil, Uint128{}, err
 	}
 
 	if err := ValidateTxCovenantsGenesis(tx, chainID, height, rotation); err != nil {
@@ -254,20 +248,11 @@ func applyNonCoinbaseTxBasicWorkQ(
 	witnessCursor := 0
 	var inputLockIDs [][32]byte
 	var inputCovTypes []uint16
-	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
 	resolvedInputs := make([]UtxoEntry, 0, len(tx.Inputs))
 	resolvedWitness := make([][]WitnessItem, 0, len(tx.Inputs))
 	resolvedOutpoints := make([]Outpoint, 0, len(tx.Inputs))
-	var zeroTxid [32]byte
 	for _, in := range tx.Inputs {
-		if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
-			return nil, Uint128{}, err
-		}
 		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-		if _, exists := seenInputs[op]; exists {
-			return nil, Uint128{}, txerr(TX_ERR_PARSE, "duplicate input outpoint")
-		}
-		seenInputs[op] = struct{}{}
 		entry, ok := utxoSet[op]
 		if !ok {
 			return nil, Uint128{}, txerr(TX_ERR_MISSING_UTXO, "utxo not found")

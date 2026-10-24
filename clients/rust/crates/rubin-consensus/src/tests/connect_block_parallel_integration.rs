@@ -12,6 +12,120 @@ fn clone_state(
     }
 }
 
+#[test]
+fn section16_global_family_order_connect_transaction_index() {
+    let kp = test_mldsa87_keypair().expect("ML-DSA backend required by sanctioned runner");
+    let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let raw = tx_with_one_input_one_output([0x61; 32], 0, 90, COV_TYPE_P2PK, &cov);
+    let (mut valid, _, _, _) = parse_tx(&raw).expect("parsed control");
+    valid.witness = vec![sign_input_witness(&valid, 0, 100, ZERO_CHAIN_ID, &kp)];
+    let initial = crate::InMemoryChainState {
+        utxos: HashMap::from([(
+            Outpoint {
+                txid: [0x61; 32],
+                vout: 0,
+            },
+            UtxoEntry {
+                value: 100,
+                covenant_type: COV_TYPE_P2PK,
+                covenant_data: cov,
+                creation_height: 0,
+                created_by_coinbase: false,
+            },
+        )]),
+        already_generated: 123,
+    };
+    let prev = [0x77; 32];
+    let target = [0xff; 32];
+    let block = |txs: &[crate::tx::Tx]| {
+        let mut raw = txs
+            .iter()
+            .map(|tx| crate::marshal_tx(tx).expect("marshal"))
+            .collect::<Vec<_>>();
+        let cb = coinbase_with_witness_commitment_and_p2pk_value(
+            1,
+            crate::subsidy::block_subsidy(1, 123) + 10,
+            &raw,
+        );
+        raw.insert(0, cb);
+        let ids = raw
+            .iter()
+            .map(|tx| parse_tx(tx).unwrap().1)
+            .collect::<Vec<_>>();
+        build_block_bytes(prev, merkle_root_txids(&ids).unwrap(), target, 1, &raw)
+    };
+    let valid_block = block(&[valid.clone()]);
+    for parallel in [false, true] {
+        let connect = |raw: &[u8], state: &mut crate::InMemoryChainState| {
+            if parallel {
+                crate::connect_block_parallel_sig_verify(
+                    raw,
+                    Some(prev),
+                    Some(target),
+                    1,
+                    Some(&[0]),
+                    state,
+                    ZERO_CHAIN_ID,
+                    4,
+                )
+            } else {
+                crate::connect_block_basic_in_memory_at_height(
+                    raw,
+                    Some(prev),
+                    Some(target),
+                    1,
+                    Some(&[0]),
+                    state,
+                    ZERO_CHAIN_ID,
+                )
+            }
+        };
+        let mut control_state = initial.clone();
+        let expected = connect(&valid_block, &mut control_state).expect("valid signed control");
+        assert_eq!(expected.sum_fees, 10);
+        let mut bad = valid.clone();
+        bad.tx_nonce = 2;
+        bad.inputs[0].sequence = 0x8000_0000;
+        bad.inputs.push(crate::tx::TxInput {
+            prev_txid: [0; 32],
+            prev_vout: u32::MAX,
+            script_sig: vec![],
+            sequence: 0,
+        });
+        for mode in ["valid_then_structural", "earlier_output", "earlier_missing"] {
+            let mut first = valid.clone();
+            let mut state = initial.clone();
+            let (code, message) = match mode {
+                "earlier_output" => {
+                    first.outputs[0].covenant_type = 0x0105;
+                    (ErrorCode::TxErrCovenantTypeInvalid, "unknown covenant_type")
+                }
+                "earlier_missing" => {
+                    first.inputs[0].prev_txid = [0x69; 32];
+                    (ErrorCode::TxErrMissingUtxo, "utxo not found")
+                }
+                _ => (
+                    ErrorCode::TxErrParse,
+                    "coinbase prevout encoding forbidden in non-coinbase",
+                ),
+            };
+            let err = connect(&block(&[first, bad.clone()]), &mut state)
+                .expect_err("transaction-index refusal");
+            assert_eq!(
+                (err.code, err.msg),
+                (code, message),
+                "{mode} parallel={parallel}",
+            );
+            assert_eq!(state, initial, "initialized caller state changed");
+            if mode == "valid_then_structural" {
+                let got = connect(&valid_block, &mut state).expect("rejected then valid");
+                assert_eq!(got, expected);
+                assert_eq!(state, control_state);
+            }
+        }
+    }
+}
+
 fn err_code(err: &crate::error::TxError) -> ErrorCode {
     err.code
 }

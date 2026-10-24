@@ -4,6 +4,7 @@ import RubinFormal.ByteWireV2
 import RubinFormal.MerkleV2
 import RubinFormal.PowV1
 import RubinFormal.TxWeightV2
+import RubinFormal.UtxoBasicV1
 
 namespace RubinFormal
 
@@ -370,6 +371,18 @@ def validateBlockBasic
     throw "BLOCK_ERR_MERKLE_INVALID"
   -- witness commitment check
   checkWitnessCommitment pb
+
+/-- Bounded suffix companion, separate from the existing prefix validator.
+The admitted replay fixtures establish the exact-coinbase and earlier resource
+prerequisites. This function models only common S1A before local nonce replay;
+it has no output/UTXO/fee/state input and does not prove full block validity. -/
+def validateBlockTxS1ABeforeReplay (pb : ParsedBlock) : Except String Unit := do
+  let mut seen : List Nat := []
+  for raw in pb.txs.drop 1 do
+    let tx ← UtxoBasicV1.parseTx raw
+    UtxoBasicV1.validateSpendTxS1A tx
+    if seen.contains tx.txNonce then throw "TX_ERR_NONCE_REPLAY"
+    seen := seen.concat tx.txNonce
 
 -- F-AUDIT-04: Duplicate txid uniqueness.
 -- Go enforces nonce uniqueness in validateBlockTxSemantics (block_basic_txs.go:35-39)

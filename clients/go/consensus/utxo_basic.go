@@ -90,14 +90,8 @@ func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 }
 
 func (ctx *nonCoinbaseApplyContext) prepare() error {
-	if ctx.tx == nil {
-		return txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if ctx.tx.TxNonce == 0 {
-		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
-	}
-	if len(ctx.tx.Inputs) == 0 {
-		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	if err := ValidateSpendTxS1A(ctx.tx); err != nil {
+		return err
 	}
 	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.chainID, ctx.height, ctx.rotation); err != nil {
 		return err
@@ -111,12 +105,10 @@ func (ctx *nonCoinbaseApplyContext) prepare() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
-	seenInputs := make(map[Outpoint]struct{}, len(ctx.tx.Inputs))
-	var zeroTxid [32]byte
 	witnessCursor := 0
 	ctx.resolved = make([]nonCoinbaseResolvedInput, 0, len(ctx.tx.Inputs))
 	for _, in := range ctx.tx.Inputs {
-		entry, op, err := ctx.resolveInput(in, seenInputs, zeroTxid)
+		entry, op, err := ctx.lookupInputEntry(in)
 		if err != nil {
 			return err
 		}
@@ -147,36 +139,72 @@ func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) resolveInput(in TxInput, seenInputs map[Outpoint]struct{}, zeroTxid [32]byte) (UtxoEntry, Outpoint, error) {
-	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
-		return UtxoEntry{}, Outpoint{}, err
+// ValidateSpendTxS1A applies the six global structural families to a parsed
+// non-coinbase transaction, without changing the transaction or caller state.
+// Each input family completes in ascending order before the next family starts.
+func ValidateSpendTxS1A(tx *Tx) error {
+	if tx == nil {
+		return txerr(TX_ERR_PARSE, "nil tx")
 	}
-	entry, op, err := ctx.lookupInputEntry(in, seenInputs)
-	if err != nil {
-		return UtxoEntry{}, Outpoint{}, err
+	if tx.TxNonce == 0 {
+		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	}
-	return entry, op, nil
+	if len(tx.Inputs) == 0 {
+		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
+	}
+	if err := validateSpendTxCoinbasePrevouts(tx.Inputs); err != nil {
+		return err
+	}
+	if err := validateSpendTxScriptSigs(tx.Inputs); err != nil {
+		return err
+	}
+	if err := validateSpendTxSequences(tx.Inputs); err != nil {
+		return err
+	}
+	return validateSpendTxUniqueOutpoints(tx.Inputs)
 }
 
-func validateNonCoinbaseInputEncoding(in TxInput, zeroTxid [32]byte) error {
-	if in.PrevVout == 0xffff_ffff && in.PrevTxid == zeroTxid {
-		return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
-	}
-	if len(in.ScriptSig) != 0 {
-		return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
-	}
-	if in.Sequence > 0x7fffffff {
-		return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+func validateSpendTxCoinbasePrevouts(inputs []TxInput) error {
+	for _, in := range inputs {
+		if in.PrevVout == 0xffff_ffff && in.PrevTxid == ([32]byte{}) {
+			return txerr(TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		}
 	}
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput, seenInputs map[Outpoint]struct{}) (UtxoEntry, Outpoint, error) {
-	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-	if _, exists := seenInputs[op]; exists {
-		return UtxoEntry{}, Outpoint{}, txerr(TX_ERR_PARSE, "duplicate input outpoint")
+func validateSpendTxScriptSigs(inputs []TxInput) error {
+	for _, in := range inputs {
+		if len(in.ScriptSig) != 0 {
+			return txerr(TX_ERR_PARSE, "script_sig must be empty under genesis covenant set")
+		}
 	}
-	seenInputs[op] = struct{}{}
+	return nil
+}
+
+func validateSpendTxSequences(inputs []TxInput) error {
+	for _, in := range inputs {
+		if in.Sequence > 0x7fffffff {
+			return txerr(TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+		}
+	}
+	return nil
+}
+
+func validateSpendTxUniqueOutpoints(inputs []TxInput) error {
+	seen := make(map[Outpoint]struct{}, len(inputs))
+	for _, in := range inputs {
+		op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
+		if _, exists := seen[op]; exists {
+			return txerr(TX_ERR_PARSE, "duplicate input outpoint")
+		}
+		seen[op] = struct{}{}
+	}
+	return nil
+}
+
+func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput) (UtxoEntry, Outpoint, error) {
+	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
 	entry, ok := ctx.work[op]
 	if !ok && ctx.inputView != nil {
 		var err error

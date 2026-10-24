@@ -3,6 +3,67 @@ use crate::tx::{Tx, TxInput, TxOutput, WitnessItem};
 use crate::validate_stored_block_commitments;
 
 #[test]
+fn section16_global_family_order_public_block_basic() {
+    let base = tx_with_one_input_one_output(
+        [0x51; 32],
+        0,
+        1,
+        COV_TYPE_P2PK,
+        &valid_p2pk_covenant_data(),
+    );
+    let (base, _, _, _) = parse_tx(&base).expect("ordinary parsed spend");
+    let a = base.inputs[0].clone();
+    let coinbase_prevout = TxInput {
+        prev_txid: [0; 32],
+        prev_vout: u32::MAX,
+        ..a.clone()
+    };
+    let seq = TxInput {
+        sequence: 0x8000_0000,
+        ..a.clone()
+    };
+    let script = TxInput {
+        prev_vout: 1,
+        script_sig: vec![1],
+        ..a.clone()
+    };
+    let later_seq = TxInput {
+        prev_vout: 1,
+        ..seq.clone()
+    };
+    for (inputs, code, message) in [
+        (
+            vec![seq.clone(), coinbase_prevout],
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        ),
+        (
+            vec![seq, script],
+            ErrorCode::TxErrParse,
+            "script_sig must be empty under genesis covenant set",
+        ),
+        (
+            vec![a.clone(), a, later_seq],
+            ErrorCode::TxErrSequenceInvalid,
+            "sequence exceeds 0x7fffffff",
+        ),
+    ] {
+        let mut tx = base.clone();
+        tx.inputs = inputs;
+        let raw = crate::marshal_tx(&tx).expect("marshal mixed structural input");
+        let cb = coinbase_with_witness_commitment(0, &[raw.clone()]);
+        let root = merkle_root_txids(&[parse_tx(&cb).unwrap().1, parse_tx(&raw).unwrap().1])
+            .unwrap();
+        let prev = [0x55; 32];
+        let target = [0xff; 32];
+        let block = build_block_bytes(prev, root, target, 56, &[cb, raw]);
+        let err = validate_block_basic_at_height(&block, Some(prev), Some(target), 0)
+            .expect_err("global family result");
+        assert_eq!((err.code, err.msg), (code, message));
+    }
+}
+
+#[test]
 fn parse_block_bytes_ok() {
     let tx = minimal_tx_bytes();
     let (_t, txid, _w, _n) = parse_tx(&tx).expect("tx");

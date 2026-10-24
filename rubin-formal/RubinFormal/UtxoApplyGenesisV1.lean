@@ -375,9 +375,9 @@ def vaultSpendOutputsAllowed
     (outs : List UtxoBasicV1.TxOut) : Bool :=
   outs.all (vaultSpendOutputAllowed whitelist)
 
-/-- Per-input structural checks from the for-loop (lines 218-220).
-    LIVE sub-function: called from applyNonCoinbaseTxBasicNoCrypto per-input loop.
-    Ordering: coinbase prevout → scriptSig non-empty → sequence invalid. -/
+/-- Standalone single-input lemma domain. Whole-transaction application uses
+    UtxoBasicV1.validateSpendTxS1A before outputs and does not select errors here.
+    These single-input statements do not assert a global family order. -/
 def validateInputStructural (i : UtxoBasicV1.TxIn) : Except String Unit := do
   if UtxoBasicV1.isCoinbasePrevout i then throw "TX_ERR_PARSE"
   if i.scriptSig.size != 0 then throw "TX_ERR_PARSE"
@@ -410,15 +410,13 @@ def validateInputUtxoLookup
         else Except.ok e
       else Except.ok e
 
-/-- Pre-input semantic checks: nonce, parse, output covenants.
+/-- Pre-input semantic checks: common global S1A, then output covenants.
     LIVE sub-function: applyNonCoinbaseTxBasicNoCrypto calls it directly.
-    Ordering: TX_ERR_TX_NONCE_INVALID → TX_ERR_PARSE (empty inputs) →
-    TX_ERR_COVENANT_TYPE_INVALID (output validation) → per-input checks. -/
+    All six S1A families finish before output validation or input resolution. -/
 def applyTxPreInputChecks
     (tx : UtxoBasicV1.Tx)
     (height : Nat) : Except String Unit := do
-  if tx.txNonce == 0 then throw "TX_ERR_TX_NONCE_INVALID"
-  if tx.inputs.length == 0 then throw "TX_ERR_PARSE"
+  UtxoBasicV1.validateSpendTxS1A tx
   for o in tx.outputs do
     CovenantGenesisV1.validateOutGenesis
       { value := o.value, covenantType := o.covenantType, covenantData := o.covenantData }
@@ -724,15 +722,12 @@ def applyNonCoinbaseTxBasicNoCrypto
   let mut inputLockIds : List Bytes := []
   let mut inputCovTypes : List Nat := []
 
-  let mut seen : Std.RBSet Outpoint UtxoBasicV1.cmpOutpoint := Std.RBSet.empty
-
   for inputIndex in [0:tx.inputs.length] do
     let i := tx.inputs.get! inputIndex
-    validateInputStructural i
     let op : Outpoint := { txid := i.prevTxid, vout := i.prevVout }
-    let isDup := seen.contains op
-    seen := seen.insert op
-    let e ← validateInputUtxoLookup isDup (next.find? op) height
+    -- The common S1A selector has already established uniqueness. The lookup
+    -- helper's standalone duplicate-domain lemmas remain independently true.
+    let e ← validateInputUtxoLookup false (next.find? op) height
 
     -- spend covenant structural validity (parsers)
     let dispatchReady ←
