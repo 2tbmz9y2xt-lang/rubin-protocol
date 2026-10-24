@@ -7,7 +7,7 @@ use crate::constants::{
 use crate::hash::sha3_256;
 use crate::htlc::validate_htlc_spend_q;
 use crate::spend_verify::validate_p2pk_spend_q;
-use crate::suite_registry::SuiteRegistry;
+use crate::suite_registry::{NativeSuiteSet, RotationProvider, SuiteRegistry};
 use crate::tx::WitnessItem;
 use crate::tx_helpers::p2pk_covenant_data_for_pubkey;
 use crate::utxo_basic::UtxoEntry;
@@ -273,5 +273,62 @@ fn validate_p2pk_extended_validation_q() {
         Some(&reg),
     )
     .expect_err("must reject covenant suite mismatch");
-    assert_eq!(err.code, ErrorCode::TxErrCovenantTypeInvalid);
+    assert_eq!(err.code.as_str(), "TX_ERR_SIG_ALG_INVALID");
+    assert_eq!(err.msg, "CORE_P2PK covenant_data suite_id mismatch");
+}
+
+struct P2pkOverlapRotation;
+
+impl RotationProvider for P2pkOverlapRotation {
+    fn native_create_suites(&self, _: u64) -> NativeSuiteSet {
+        NativeSuiteSet::new(&[0x01])
+    }
+
+    fn native_spend_suites(&self, _: u64) -> NativeSuiteSet {
+        NativeSuiteSet::new(&[0x01, 0x02])
+    }
+}
+
+#[test]
+fn validate_p2pk_rotation_overlap_suite_mismatch_q() {
+    let default = SuiteRegistry::default_registry();
+    let mut suites = std::collections::BTreeMap::new();
+    for suite_id in [0x01, 0x02] {
+        let mut params = default.lookup(0x01).expect("default suite").clone();
+        params.suite_id = suite_id;
+        suites.insert(suite_id, params);
+    }
+    let registry = SuiteRegistry::with_suites(suites);
+    let mut w = WitnessItem {
+        suite_id: 0x02,
+        pubkey: vec![0; 2592],
+        signature: vec![0; 4628],
+    };
+    w.signature[4627] = 0x01;
+    let entry = UtxoEntry {
+        value: 100,
+        covenant_type: COV_TYPE_P2PK,
+        covenant_data: p2pk_covenant_data_for_pubkey(&w.pubkey),
+        creation_height: 0,
+        created_by_coinbase: false,
+    };
+    let (tx, ii, iv, cid) = test_tx_context();
+    let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+    let mut queue = SigCheckQueue::new(1).with_registry(&registry);
+    let result = validate_p2pk_spend_q(
+        &entry,
+        &w,
+        ii,
+        iv,
+        cid,
+        1,
+        &mut cache,
+        Some(&mut queue),
+        Some(&P2pkOverlapRotation),
+        Some(&registry),
+    );
+    assert_eq!(queue.len(), 0, "suite mismatch queued signature work");
+    let err = result.expect_err("rotation overlap suite mismatch");
+    assert_eq!(err.code.as_str(), "TX_ERR_SIG_ALG_INVALID");
+    assert_eq!(err.msg, "CORE_P2PK covenant_data suite_id mismatch");
 }

@@ -545,9 +545,24 @@ func TestValidateP2PKSpendQ_CovenantDataInvalid(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected covenant_data invalid error")
 	}
-	if !isTxErrCode(err, TX_ERR_COVENANT_TYPE_INVALID) {
-		t.Fatalf("expected TX_ERR_COVENANT_TYPE_INVALID, got: %v", err)
+	assertTxErrCodeMsg(t, err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK covenant_data suite_id mismatch")
+}
+
+func TestValidateP2PKSpendQ_RotationOverlapSuiteMismatch(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	params.SuiteID = 0x02
+	registry := NewSuiteRegistryFromParams([]SuiteParams{canonicalDefaultRuntimeSuiteParams(), params})
+	rotation := &mockRotationProvider{h2: 1}
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	w := WitnessItem{SuiteID: 0x02, Pubkey: make([]byte, 2592), Signature: make([]byte, 4628)}
+	w.Signature[4627] = 0x01
+	entry := p2pkEntryForPub(t, 0x01, w.Pubkey)
+	queue := NewSigCheckQueue(1).WithRegistry(registry)
+	err := validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 1, nil, queue, rotation, registry)
+	if queue.Len() != 0 {
+		t.Fatalf("suite mismatch queued %d signature checks", queue.Len())
 	}
+	assertTxErrCodeMsg(t, err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK covenant_data suite_id mismatch")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

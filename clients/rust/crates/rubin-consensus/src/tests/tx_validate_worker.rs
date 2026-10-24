@@ -148,6 +148,22 @@ fn precompute_single_tx(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn validate_tx_local_p2pk_default_provider_suite_mismatch() {
+    let mut tx = simple_p2pk_tx(0x42);
+    tx.witness[0].signature[4627] = 0x01;
+    let (pb, mut ptcs, _) = precompute_single_tx(tx, 100, 100);
+    let mut cov = crate::tx_helpers::p2pk_covenant_data_for_pubkey(&pb.txs[1].witness[0].pubkey);
+    // Structural-only pre-state: 0xFF cannot be produced by native creation.
+    cov[0] = 0xFF;
+    ptcs[0].resolved_inputs[0].covenant_data = cov;
+    let result = validate_tx_local(&ptcs[0], &pb, [0; 32], 100, 0, None);
+    assert!(!result.valid, "suite mismatch reported valid");
+    let err = result.err.expect("suite mismatch error");
+    assert_eq!(err.code.as_str(), "TX_ERR_SIG_ALG_INVALID");
+    assert_eq!(err.msg, "CORE_P2PK covenant_data suite_id mismatch");
+}
+
+#[test]
 fn validate_tx_local_witness_underflow() {
     let tx = simple_p2pk_tx(0x42);
     let (pb, mut ptcs, _snap) = precompute_single_tx(tx, 100, 100);
