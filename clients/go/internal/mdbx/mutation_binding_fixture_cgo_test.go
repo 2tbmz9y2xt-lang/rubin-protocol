@@ -295,3 +295,93 @@ func TestMutationBindingTreeUnwindV1(t *testing.T) {
 		mbEpoch(t, s.s, before+1, "N15 readback result")
 	})
 }
+
+// N12 retained cleanup failure: the existing wrong-thread lifecycle fixture with a retained OLD cleanup, crossed
+// with and without a real native attempt; the epoch follows commitAttempted only.
+func TestMutationBindingRetainedCleanupV1(t *testing.T) {
+	for _, attempted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("attempted%v", attempted), func(t *testing.T) {
+			s := newUpdateStore(t)
+			native, release, err := fixtureUpdateWrongThread(s)
+			mustEnvironment(t, err)
+			defer func() { _ = release() }()
+			token := updateRetained(native)
+			cleanup := nativeError(operationAbort, codeThreadMismatch)
+			native = updateNativeRetainedWrite(false, nativeError(operationUpdate, codeENOSPC), nil, token, UpdateStagePrewrite)
+			if attempted {
+				native = updateNativeConsumed(CommitTruthNew, true, nil, nil, UpdateStageCommitMayHaveCrossed)
+			}
+			before := s.lineageEpoch
+			truth, stage, terminal := s.applyUpdateOutcome(native, token, cleanup, attempted)
+			if truth != native.truth || stage != native.stage || terminal == nil || s.state != storePOISONEDTHREAD || s.txn != token {
+				t.Fatalf("N12 retained cleanup projection: %s/%d/%v %s", truth, stage, terminal, s.state)
+			}
+			want := before
+			if attempted {
+				want++
+			}
+			mbEpoch(t, s, want, "N12 retained cleanup failure")
+		})
+	}
+}
+
+// mbTcWriterUnwind arms the writer-position provider of the tcNew scene with the existing tcFail variant and unwind.
+func mbTcWriterUnwind(t *testing.T, s *tcScene, variant string, goexit bool, v *int) {
+	f := treeIntegrity(operationGet, nil)
+	s.prims[1].custom = func(old *Reader, rec *treeRecorderV1) error {
+		if variant != "sink" {
+			mustEnvironment(t, s.prims[1].stream(rec))
+		}
+		tcFail(t, variant, f, old, rec)
+		if goexit {
+			runtime.Goexit()
+		}
+		panic(v)
+	}
+}
+
+// mbTcUnwindPath pins which projection the unwind took: clean -> treeUnwoundV1 (nil primary, OPEN); recorded and
+// sink -> applyUpdateOutcome with a non-nil primary and commitAttempted=false (CLOSED), per updateTreeLockedV1.
+func mbTcUnwindPath(t *testing.T, s *tcScene, r tcResult, variant string, before uint64) {
+	t.Helper()
+	if r.unwind.kind == 0 || r.stage != UpdateStageWriteStartedDefinitelyPrecommit {
+		t.Errorf("N16 %s: unwind %d stage %d", variant, r.unwind.kind, r.stage)
+	}
+	clean := variant == "clean"
+	if clean != (r.err == nil) || clean != (s.store.state == storeOPEN) || !clean && s.store.state != storeCLOSED {
+		t.Errorf("N16 %s path: err %v state %s", variant, r.err, s.store.state)
+	}
+	if s.store.lineageEpoch != before {
+		t.Errorf("N16 %s writer-position unwind: epoch=%d, want %d", variant, s.store.lineageEpoch, before)
+	}
+}
+
+func TestMutationBindingTreeComposeUnwindV1(t *testing.T) {
+	for _, variant := range []string{"clean", "recorded", "sink"} {
+		t.Run("panic "+variant, func(t *testing.T) {
+			s := tcNew(t, 3)
+			before := s.store.lineageEpoch
+			v := new(int)
+			mbTcWriterUnwind(t, s, variant, false, v)
+			var r tcResult
+			func() { defer func() { _ = recover() }(); r = s.run(nil) }()
+			mbTcUnwindPath(t, s, r, variant, before)
+			func() {
+				defer func() {
+					if got := recover(); got != v {
+						t.Fatalf("N16 resumed %v", got)
+					}
+				}()
+				r.unwind.resumeV1()
+			}()
+			s.settled(t)
+		})
+		t.Run("goexit "+variant, func(t *testing.T) {
+			s := tcNew(t, 3)
+			before := s.store.lineageEpoch
+			mbTcWriterUnwind(t, s, variant, true, nil)
+			s.goexitRun(t, func(r tcResult) { mbTcUnwindPath(t, s, r, variant, before) })
+			s.settled(t)
+		})
+	}
+}
