@@ -633,10 +633,12 @@ theorem perinput_scriptsig_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : 
     (i.scriptSig.size != 0) = true →
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
   intro tx height i hNonce hInputs hCoinbase hScriptSig
+  have hScriptSigNe : i.scriptSig.size ≠ 0 := by
+    simpa only [bne_iff_ne] using hScriptSig
   have hS1A : UtxoBasicV1.validateSpendTxS1A tx = .error "TX_ERR_PARSE" := by
     simp [UtxoBasicV1.validateSpendTxS1A, UtxoBasicV1.validateBasicTxEnvelope,
-      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSig,
-      List.forIn, List.forIn.loop, Except.bind]
+      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSigNe,
+      List.forIn, List.forIn.loop, bind, pure, Except.bind, Except.pure]
   unfold applyTxPreInputChecks
   rw [hS1A]
   rfl
@@ -650,6 +652,8 @@ theorem perinput_duplicate_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : 
     i.sequence ≤ 0x7fffffff →
     applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
   intro tx height i hNonce hInputs hCoinbase hScriptSig hSequence
+  have hScriptSigEq : i.scriptSig.size = 0 := by
+    simpa only [bne, Bool.not_eq_false', Nat.beq_eq_true_eq] using hScriptSig
   have hEmpty :
       (Std.RBSet.empty : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).contains
         (UtxoBasicV1.txInOutpoint i) = false := rfl
@@ -664,8 +668,9 @@ theorem perinput_duplicate_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : 
     rfl
   have hS1A : UtxoBasicV1.validateSpendTxS1A tx = .error "TX_ERR_PARSE" := by
     simp [UtxoBasicV1.validateSpendTxS1A, UtxoBasicV1.validateBasicTxEnvelope,
-      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSig,
-      Nat.not_lt.mpr hSequence, List.forIn, List.forIn.loop, Except.bind, hEmpty, hSeen]
+      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSigEq,
+      Nat.not_lt.mpr hSequence, List.forIn, List.forIn.loop, bind, pure,
+      Except.bind, Except.pure, hEmpty, hSeen]
   unfold applyTxPreInputChecks
   rw [hS1A]
   rfl
