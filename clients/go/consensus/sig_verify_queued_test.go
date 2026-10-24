@@ -430,6 +430,8 @@ func TestValidateThresholdSigSpendQ_OrderedResults(t *testing.T) {
 				q := NewSigCheckQueue(1)
 				q.Push(SUITE_ID_ML_DSA_87, existingKP.PubkeyBytes(), existingSig, existingDigest, txerr(TX_ERR_SIG_INVALID, "existing invalid"))
 				prefix := q.tasks[0]
+				prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+				prefix.sig = append([]byte(nil), prefix.sig...)
 				first := validFirst
 				wantCode, wantMsg := ErrorCode("TX_ERR_SIG_INVALID"), "TEST-MULTISIG signature invalid"
 				wantCause := TxErrorCauseUnspecified
@@ -468,6 +470,8 @@ func TestValidateThresholdSigSpendQ_OrderedResults(t *testing.T) {
 		q := NewSigCheckQueue(1)
 		q.Push(0x01, existingKP.PubkeyBytes(), existingSig, existingDigest, errors.New("prior prefix"))
 		prefix := q.tasks[0]
+		prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+		prefix.sig = append([]byte(nil), prefix.sig...)
 		requireQueuePanic(t, panicValue, func() {
 			_ = validateThresholdSigSpendQ([][32]byte{keyID1, keyID2}, 2, []WitnessItem{validFirst, {SuiteID: SUITE_ID_SENTINEL}}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
 		})
@@ -502,6 +506,8 @@ func TestValidateThresholdSigSpendQ_SlotMismatch(t *testing.T) {
 	}
 	q.Push(0x01, kp1.PubkeyBytes(), sig, digest, errors.New("prior prefix"))
 	prefix := q.tasks[0]
+	prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+	prefix.sig = append([]byte(nil), prefix.sig...)
 	err = validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
 	assertTxErrCodeMsg(t, err, "TX_ERR_PARSE", "witness slot assignment mismatch")
 	if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) {

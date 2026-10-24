@@ -1511,6 +1511,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 				q := NewSigCheckQueue(1)
 				q.Push(0x01, other.PubkeyBytes(), prefixSig, prefixDigest, errors.New("enclosing prefix"))
 				prefix := q.tasks[0]
+				prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+				prefix.sig = append([]byte(nil), prefix.sig...)
 				work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xe3), utxos, 200, 0, [32]byte{}, q, nil, nil)
 				assertTxErrCodeMsg(t, err, wantCode, wantMsg)
 				if work != nil || fee != (Uint128{}) || !reflect.DeepEqual(utxos, before) {
@@ -1580,6 +1582,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 					q := NewSigCheckQueue(1)
 					queueFixtureTask(q, 0xee, errors.New("enclosing prefix"))
 					prefix, before := q.tasks[0], cloneUtxoSet(utxos)
+					prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+					prefix.sig = append([]byte(nil), prefix.sig...)
 					invoke := func() {
 						work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xf3), utxos, 200, 0, [32]byte{}, q, nil, nil)
 						if earlier != "error" {

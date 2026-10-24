@@ -957,6 +957,8 @@ func TestSigCheckQueue_Settlement(t *testing.T) {
 						}
 					}
 					prefix, mark := q.tasks[0], q.mark()
+					prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+					prefix.sig = append([]byte(nil), prefix.sig...)
 					queueFixtureTask(q, 1, errors.New("dropped error"))
 					if dropped == "panic" {
 						requireQueuePanic(t, panicValue, func() { _ = q.settleRange(mark, q.mark()) })
