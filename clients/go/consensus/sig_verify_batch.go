@@ -160,13 +160,13 @@ func (q *SigCheckQueue) evaluate(index int) {
 // its needed ascending prefix is evaluated; raw panics remain raw panics.
 func (q *SigCheckQueue) settleRange(start, end sigCheckQueueMark) error {
 	if start.len < 0 || end.len < start.len || end.len > q.Len() {
-		panic("invalid signature queue range")
+		panic("invalid signature queue range") //nolint:forbidigo // RUB-721: reject an invalid private range before task effects.
 	}
 	for i := start.len; i < end.len; i++ {
 		q.evaluate(i)
 		t := &q.tasks[i]
 		if t.panicked {
-			panic(t.panicValue)
+			panic(t.panicValue) //nolint:forbidigo // RUB-721: propagate the original memoized raw panic.
 		}
 		if t.err != nil {
 			return t.err

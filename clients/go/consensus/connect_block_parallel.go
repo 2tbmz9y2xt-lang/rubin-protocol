@@ -113,7 +113,7 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 			summary, err = nil, earlier
 			return
 		}
-		panic(laterPanic)
+		panic(laterPanic) //nolint:forbidigo // RUB-721: preserve the later raw panic after the earlier interval succeeds.
 	}()
 
 	summary, err = func() (*ConnectBlockBasicSummary, error) {
@@ -255,7 +255,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 				return
 			}
 		}
-		panic(laterPanic)
+		panic(laterPanic) //nolint:forbidigo // RUB-721: preserve the later raw panic after the earlier interval succeeds.
 	}()
 
 	result, resultFee, err = func() (map[Outpoint]UtxoEntry, Uint128, error) {

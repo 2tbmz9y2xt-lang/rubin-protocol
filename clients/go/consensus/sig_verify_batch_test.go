@@ -1132,7 +1132,7 @@ func TestSigCheckQueue_PanicDomains(t *testing.T) {
 		healthy := false
 		queueVerifierHook(t, func(string, []byte, []byte, []byte) (bool, error) {
 			if !healthy {
-				panic(nil)
+				panic(nil) //nolint:govet // RUB-721: exercise the required raw-nil outcome with panicnil=1.
 			}
 			return true, nil
 		})
