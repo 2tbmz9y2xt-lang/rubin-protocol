@@ -2223,8 +2223,12 @@ mod tests {
 
     #[test]
     fn apply_non_coinbase_tx_basic_update_deferred_sigchecks_rolls_back_queue_on_late_tx_error() {
-        let (mut tx, utxo_set, txid, chain_id) = signed_p2pk_case();
+        let (mut tx, mut utxo_set, txid, chain_id) = signed_p2pk_case();
+        let keypair = Mldsa87Keypair::generate().expect("keypair");
+        let input = utxo_set.values_mut().next().expect("input UTXO");
+        input.covenant_data = p2pk_covenant_data_for_pubkey(&keypair.pubkey_bytes());
         tx.outputs[0].value = 101;
+        tx.witness = vec![sign_input_witness(&tx, 0, 100, chain_id, &keypair)];
 
         let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_sigchecks(
             &tx, txid, &utxo_set, 1, 0, 0, chain_id, None, None,
@@ -2232,5 +2236,6 @@ mod tests {
         .expect_err("late value-conservation failure must return error, not leave queued tasks");
 
         assert_eq!(err.code, ErrorCode::TxErrValueConservation);
+        assert_eq!(err.msg, "sum_out exceeds sum_in");
     }
 }
