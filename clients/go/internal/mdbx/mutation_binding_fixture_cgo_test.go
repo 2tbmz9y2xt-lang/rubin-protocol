@@ -387,3 +387,73 @@ func TestMutationBindingTreeComposeUnwindV1(t *testing.T) {
 		})
 	}
 }
+
+// mbTreeRetained pins a retained (POISONED_THREAD) public UpdateTreeV1 result: the returned truth and error are
+// the latched terminal ones, the handle is kept, and the one native attempt advanced the epoch once.
+func mbTreeRetained(t *testing.T, s *tsfScene, r tsResult, before uint64, marker string) {
+	t.Helper()
+	if r.stage != UpdateStageCommitMayHaveCrossed || r.err == nil || s.s.state != storePOISONEDTHREAD || s.s.txn == nil {
+		t.Fatalf("%s: %+v state %s", marker, r, s.s.state)
+	}
+	if r.truth != s.s.terminalTruth || any(r.err) != any(s.s.terminal) {
+		t.Fatalf("%s: truth %s/%s err %v/%v", marker, r.truth, s.s.terminalTruth, r.err, s.s.terminal)
+	}
+	mbEpoch(t, s.s, before+1, marker)
+	mustEnvironment(t, fixtureLargeRelease(s.s))
+}
+
+// N15 retained ambiguity through Store.UpdateTreeV1 on the existing tsfNew scene and large-image modes:
+// mode 10 retains ORIGINAL OLD after a crossed commit (tsCoveredLifecycleState); mode 15 retains the readback
+// txn, on the normal readback path and on a readback-position provider Goexit (unwoundV1).
+func TestMutationBindingTreeRetainedV1(t *testing.T) {
+	t.Run("retained OLD", func(t *testing.T) {
+		s := tsfNew(t)
+		before := s.s.lineageEpoch
+		var r tsResult
+		evidence, err := fixtureLargeFault(s.s, 10, 0, tsCounterKey(2), func() { r = s.run(t) })
+		mustEnvironment(t, err)
+		if evidence.commits != 1 {
+			t.Fatalf("N15 retained OLD commits %d", evidence.commits)
+		}
+		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
+		mbTreeRetained(t, s, r, before, "N15 retained OLD")
+	})
+	t.Run("retained readback", func(t *testing.T) {
+		s := tsfNew(t)
+		before := s.s.lineageEpoch
+		var r tsResult
+		evidence, err := fixtureLargeFault(s.s, 15, 0, []byte{9}, func() { r = s.run(t) })
+		mustEnvironment(t, err)
+		if evidence.commits != 1 {
+			t.Fatalf("N15 retained readback commits %d", evidence.commits)
+		}
+		mbTreeRetained(t, s, r, before, "N15 retained readback")
+	})
+	t.Run("retained readback goexit", func(t *testing.T) {
+		s := tsfNew(t)
+		before := s.s.lineageEpoch
+		s.p[1].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+			if pos == 2 {
+				runtime.Goexit()
+			}
+			return nil
+		}
+		var r tsResult
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = fixtureLargeFault(s.s, 15, 0, []byte{9}, func() {
+				_ = s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					r = tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+					return nil
+				})
+			})
+		}()
+		<-done
+		if s.s.state != storePOISONEDTHREAD || s.s.txn == nil || s.s.terminalTruth != CommitTruthUnknown || r != (tsResult{}) {
+			t.Fatalf("N15 readback goexit: state %s truth %s result %+v", s.s.state, s.s.terminalTruth, r)
+		}
+		mbEpoch(t, s.s, before+1, "N15 retained readback goexit")
+		mustEnvironment(t, fixtureLargeRelease(s.s))
+	})
+}
