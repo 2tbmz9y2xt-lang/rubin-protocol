@@ -197,8 +197,14 @@ pub fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_deferred_si
     Ok((work, summary))
 }
 
-/// Applies the six global structural families to a parsed non-coinbase Tx.
-/// Each input family scans in ascending order before the next family starts.
+/// Checks a parsed non-coinbase transaction; the caller must exclude coinbase
+/// transactions. It never changes the transaction or caller state.
+/// The six families run in order: nonzero nonce, nonempty inputs, forbidden
+/// coinbase prevouts, empty script_sig, valid sequence, and unique outpoints.
+/// Each input family scans ascending indices and must pass before the next starts.
+/// Zero nonce returns TX_ERR_TX_NONCE_INVALID; sequence > 0x7fffffff returns
+/// TX_ERR_SEQUENCE_INVALID; other structural failures return TX_ERR_PARSE.
+/// Rules: <https://github.com/2tbmz9y2xt-lang/rubin-spec/blob/main/spec/RUBIN_L1_CANONICAL.md#16-transaction-structural-rules-normative>.
 pub fn validate_spend_tx_s1a(tx: &Tx) -> Result<(), TxError> {
     if tx.tx_nonce == 0 {
         return Err(TxError::new(

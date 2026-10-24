@@ -139,9 +139,15 @@ func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
 	return nil
 }
 
-// ValidateSpendTxS1A applies the six global structural families to a parsed
-// non-coinbase transaction, without changing the transaction or caller state.
-// Each input family completes in ascending order before the next family starts.
+// ValidateSpendTxS1A checks a parsed non-coinbase transaction; the caller must
+// exclude coinbase transactions. It never changes tx or caller state.
+// The six families run in order: nonzero nonce, nonempty inputs, forbidden
+// coinbase prevouts, empty script_sig, valid sequence, and unique outpoints.
+// Each input family scans ascending indices and must pass before the next starts.
+// Zero nonce returns TX_ERR_TX_NONCE_INVALID; sequence > 0x7fffffff returns
+// TX_ERR_SEQUENCE_INVALID; other structural failures return TX_ERR_PARSE.
+// A defensive nil tx refusal also returns TX_ERR_PARSE, outside the parsed domain.
+// Rules: https://github.com/2tbmz9y2xt-lang/rubin-spec/blob/main/spec/RUBIN_L1_CANONICAL.md#16-transaction-structural-rules-normative
 func ValidateSpendTxS1A(tx *Tx) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")

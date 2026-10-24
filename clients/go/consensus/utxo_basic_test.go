@@ -1266,9 +1266,15 @@ func TestValidateBlockTxSemantics_Section16GlobalFamilyOrder(t *testing.T) {
 			t.Fatal("S1A rejection changed entry nonce prefix")
 		}
 	}
+	coinbase := section16TestTx(0, []TxInput{{PrevVout: ^uint32(0), Sequence: ^uint32(0)}})
+	coinbase.Locktime = 1
+	prefix := section16TestTx(7, []TxInput{{PrevTxid: hashWithPrefix(0x52)}})
 	tx := section16TestTx(7, []TxInput{{PrevTxid: hashWithPrefix(0x51)}})
 	tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
-	assertTxErrCodeMsg(t, validateNonCoinbaseBlockTx(tx, map[uint64]struct{}{7: {}}), TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+	pb := &ParsedBlock{Txs: []*Tx{coinbase, prefix, tx}}
+	assertTxErrCodeMsg(t, validateBlockTxSemantics(pb, 1, nil), TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+	tx.TxNonce = 8
+	assertTxErrCodeMsg(t, validateBlockTxSemantics(pb, 1, nil), TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
 }
 
 func TestApplyNonCoinbaseTxBasic_Section16StructuralOrder(t *testing.T) {

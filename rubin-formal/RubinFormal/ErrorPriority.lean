@@ -1,5 +1,6 @@
 import RubinFormal.BlockValidationOrder
 import RubinFormal.UtxoApplyGenesisV1
+import RubinFormal.CoinbaseBehavioral
 
 /-!
 # Error Priority Ordering (§13 / §25)
@@ -8,7 +9,7 @@ import RubinFormal.UtxoApplyGenesisV1
 Direct error propagation for all 6 stages: parse → PoW → target →
 linkage → merkle (via explicit-bind equivalence) → witness (existing).
 
-## Tx-level — live sub-function decomposition
+## Tx-level — selected model calls and standalone helper domains
 - `applyWitnessChecks` (LIVE, called from `parseTxFromCursor`):
   OVERFLOW → SIG_NONCANONICAL ordering via rfl equivalence; SIG_ALG_INVALID
   belongs to later spend-path validation.
@@ -16,14 +17,20 @@ linkage → merkle (via explicit-bind equivalence) → witness (existing).
   4 DA-length checks, all TX_ERR_PARSE.
 - `applyTxPreInputChecks` (LIVE, called from `applyNonCoinbaseTxBasicNoCrypto`):
   common global S1A → output covenant loop. Nonce/count lemmas cover its prefix.
+  ScriptSig and duplicate live bridges cover singleton `[i]` and identical-pair
+  `[i,i]` inputs, respectively, with arbitrary outputs and height.
 - `validateInputStructural` (standalone single-input lemma domain):
   coinbase prevout → scriptSig → sequence, without a whole-Tx/global-order claim.
 
 ## Coverage notes
 - `parseTxFromCursor` header/bounds (lines 108-139): all TX_ERR_PARSE — same error code,
   no priority ambiguity within these sub-checks.
-- Per-input UTXO lookup/duplicate/covenant-type: mutable state in for-loop; individual
-  check functions (`validateInputUtxoLookup`, `dispatchCovenantValidation`) are proved.
+- The live per-input lookup calls `validateInputUtxoLookup false` after S1A;
+  its duplicate=true result remains a standalone helper theorem. Separate
+  `dispatchCovenantValidation` lemmas cover their stated per-input domains.
+- The semantic ordinal chain is an abstract ordering/injectivity model. Existing
+  common-selector source and generated replay cover named multi-input outcomes;
+  the selected bridges do not prove the full SpendTx order.
 - Error code distinctness: all block + tx codes via `by decide` (35 theorems).
 
 ## §13 Contract summary
@@ -219,8 +226,8 @@ theorem validate_success_pow
 /-! ## Tx-level error code distinctness (§7/§13)
 
 Pairwise inequality for all tx error codes used in the validation pipeline.
-Ordering is proved via live sub-function decomposition (see sections below),
-not via enum models.
+Selected model-call and standalone helper results appear below. Their separate
+stage ordinals do not establish a universal whole-transaction execution order.
 -/
 
 theorem err_ne_tx_parse_witness_overflow :
@@ -375,8 +382,9 @@ theorem error_priority_merkle_top_ss
 /-! ## Live semantic tx pre-input ordering (applyTxPreInputChecks)
 
 `applyTxPreInputChecks` is a LIVE sub-function called from
-`applyNonCoinbaseTxBasicNoCrypto`. Ordering proved by unfold+rw
-on the top checks of the do-block.
+`applyNonCoinbaseTxBasicNoCrypto`. The nonce/count lemmas below cover its
+envelope prefix. Later singleton/pair bridges derive selected S1A failures
+on this same caller before arbitrary output checks.
 -/
 
 open UtxoApplyGenesisV1 in
@@ -487,8 +495,10 @@ theorem output_count_min_fail (minOut : Bool) (h : minOut = false) :
 
 /-! ## Per-input UTXO lookup ordering (validateInputUtxoLookup)
 
-LIVE sub-function called from per-input loop. Written without do-notation
-to enable formal ordering proofs. Ordering: duplicate → missing → anchor/DA → coinbase.
+The per-input loop calls this helper with duplicate=false after S1A. Its
+duplicate=true refusal below is an independently callable helper domain;
+the live lookup suffix is missing → anchor/DA → coinbase. Written without
+do-notation to enable formal ordering proofs.
 -/
 
 open UtxoApplyGenesisV1 in
@@ -573,13 +583,12 @@ theorem err_ne_tx_value_parse : ("TX_ERR_VALUE_CONSERVATION" : String) ≠ "TX_E
 theorem err_ne_tx_value_missing : ("TX_ERR_VALUE_CONSERVATION" : String) ≠ "TX_ERR_MISSING_UTXO" := by decide
 theorem err_ne_tx_value_covenant : ("TX_ERR_VALUE_CONSERVATION" : String) ≠ "TX_ERR_COVENANT_TYPE_INVALID" := by decide
 
-/-! ## Stage-position witnesses: link live sub-functions to their position
-    in parseTxFromCursor and applyNonCoinbaseTxBasicNoCrypto.
+/-! ## Selected model-call and helper failure witnesses
 
-    Each theorem explicitly names the live function AND its error code,
-    proving the stage-to-function correspondence. Combined with
-    do-block short-circuit semantics (earlier stages prevent later ones),
-    this gives the full ordering chain on live code.
+    The scriptSig singleton and duplicate identical-pair witnesses target
+    applyTxPreInputChecks itself, with field/list premises for earlier-family
+    success. Other witnesses retain their stated model-call or helper domains.
+    These selected results do not establish a full transaction ordering chain.
 -/
 
 -- parseTxFromCursor ordering
@@ -617,16 +626,49 @@ theorem semantic_stage2_nonce_live : ∀ tx height,
   fun tx height h => preinput_nonce_zero_priority tx height h
 
 open UtxoApplyGenesisV1 in
-theorem perinput_scriptsig_live : ∀ i,
+theorem perinput_scriptsig_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : UtxoBasicV1.TxIn),
+    (tx.txNonce == 0) = false →
+    tx.inputs = [i] →
     UtxoBasicV1.isCoinbasePrevout i = false →
     (i.scriptSig.size != 0) = true →
-    validateInputStructural i = .error "TX_ERR_PARSE" :=
-  fun i h1 h2 => input_scriptsig_priority i h1 h2
+    applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
+  intro tx height i hNonce hInputs hCoinbase hScriptSig
+  have hS1A : UtxoBasicV1.validateSpendTxS1A tx = .error "TX_ERR_PARSE" := by
+    simp [UtxoBasicV1.validateSpendTxS1A, UtxoBasicV1.validateBasicTxEnvelope,
+      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSig,
+      List.forIn, List.forIn.loop, Except.bind]
+  unfold applyTxPreInputChecks
+  rw [hS1A]
+  rfl
 
 open UtxoApplyGenesisV1 in
-theorem perinput_duplicate_live : ∀ e height,
-    validateInputUtxoLookup true e height = .error "TX_ERR_PARSE" :=
-  fun e height => utxo_duplicate_priority e height
+theorem perinput_duplicate_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : UtxoBasicV1.TxIn),
+    (tx.txNonce == 0) = false →
+    tx.inputs = [i, i] →
+    UtxoBasicV1.isCoinbasePrevout i = false →
+    (i.scriptSig.size != 0) = false →
+    i.sequence ≤ 0x7fffffff →
+    applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" := by
+  intro tx height i hNonce hInputs hCoinbase hScriptSig hSequence
+  have hEmpty :
+      (Std.RBSet.empty : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).contains
+        (UtxoBasicV1.txInOutpoint i) = false := rfl
+  have hSeen :
+      ((Std.RBSet.empty : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).insert
+        (UtxoBasicV1.txInOutpoint i)).contains (UtxoBasicV1.txInOutpoint i) = true := by
+    change (match UtxoBasicV1.cmpOutpoint (UtxoBasicV1.txInOutpoint i) (UtxoBasicV1.txInOutpoint i) with
+      | .lt => none
+      | .gt => none
+      | .eq => some (UtxoBasicV1.txInOutpoint i)).isSome = true
+    rw [cmpOutpoint_refl]
+    rfl
+  have hS1A : UtxoBasicV1.validateSpendTxS1A tx = .error "TX_ERR_PARSE" := by
+    simp [UtxoBasicV1.validateSpendTxS1A, UtxoBasicV1.validateBasicTxEnvelope,
+      UtxoBasicV1.validateStructuralInputs, hNonce, hInputs, hCoinbase, hScriptSig,
+      Nat.not_lt.mpr hSequence, List.forIn, List.forIn.loop, Except.bind, hEmpty, hSeen]
+  unfold applyTxPreInputChecks
+  rw [hS1A]
+  rfl
 
 open UtxoApplyGenesisV1 in
 theorem perinput_unknown_covenant_live : ∀ e tx wc h m,
@@ -649,12 +691,12 @@ theorem postloop_value_overspend_live : ∀ so si vic siv,
     validateValueConservation so si vic siv = .error "TX_ERR_VALUE_CONSERVATION" :=
   fun so si vic siv h => value_conservation_overspend so si vic siv h
 
-/-! ## Machine-checked bridge: enum stages ↔ live function error codes
+/-! ## Stage ordinals paired with selected model-call and helper results
 
-Bridge lemmas connect pipeline stage enums to live sub-functions.
-Each theorem proves: stage ordinal = N ∧ live_function(args) = error.
-Combined with stage ordering chain, this gives machine-checked
-enum-to-live-function correspondence.
+Each bridge conjoins an ordinal equality with the exact function result under
+its stated premises. The semantic scriptSig/duplicate bridges target the
+pre-input caller on selected singleton/pair domains. Other helper bridges retain
+their own domains; the abstract ordinal chain is not an execution theorem.
 -/
 
 -- Parse pipeline enum
@@ -806,14 +848,15 @@ theorem parse_stage_chain :
     txParseStageOrd .WitnessChecks < txParseStageOrd .DaLenChecks := by
   simp [txParseStageOrd]
 
--- Semantic pipeline enum
+-- Abstract semantic-stage model. InputStructural groups the four post-envelope
+-- S1A families: coinbase prevout, scriptSig, sequence, duplicate outpoints.
 inductive TxSemanticStage where
   | EmptyInputs | Nonce | OutputCovenants | InputStructural
   | UtxoLookup | CovenantDispatch | WitnessCursor | ValueConservation
 deriving DecidableEq
 
 def txSemanticStageOrd : TxSemanticStage → Nat
-  | .EmptyInputs => 1 | .Nonce => 0 | .OutputCovenants => 2 | .InputStructural => 3
+  | .EmptyInputs => 1 | .Nonce => 0 | .OutputCovenants => 3 | .InputStructural => 2
   | .UtxoLookup => 4 | .CovenantDispatch => 5 | .WitnessCursor => 6 | .ValueConservation => 7
 
 theorem txSemanticStageOrd_injective (a b : TxSemanticStage)
@@ -836,10 +879,15 @@ theorem bridge_semantic_nonce (tx : UtxoBasicV1.Tx) (height : Nat)
   ⟨rfl, preinput_nonce_zero_priority tx height h⟩
 
 open UtxoApplyGenesisV1 in
-theorem bridge_semantic_duplicate (e : Option UtxoBasicV1.UtxoEntry) (height : Nat) :
-    txSemanticStageOrd .UtxoLookup = 4 ∧
-    validateInputUtxoLookup true e height = .error "TX_ERR_PARSE" :=
-  ⟨rfl, utxo_duplicate_priority e height⟩
+theorem bridge_semantic_duplicate (tx : UtxoBasicV1.Tx) (height : Nat) (i : UtxoBasicV1.TxIn)
+    (hNonce : (tx.txNonce == 0) = false)
+    (hInputs : tx.inputs = [i, i])
+    (hCoinbase : UtxoBasicV1.isCoinbasePrevout i = false)
+    (hScriptSig : (i.scriptSig.size != 0) = false)
+    (hSequence : i.sequence ≤ 0x7fffffff) :
+    txSemanticStageOrd .InputStructural = 2 ∧
+    applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" :=
+  ⟨rfl, perinput_duplicate_live tx height i hNonce hInputs hCoinbase hScriptSig hSequence⟩
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_unknown_covenant
@@ -860,9 +908,9 @@ theorem bridge_semantic_value (so si vic siv : Nat) (h : (so > si) = true) :
 
 theorem semantic_stage_chain :
     txSemanticStageOrd .Nonce < txSemanticStageOrd .EmptyInputs ∧
-    txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .OutputCovenants ∧
-    txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .InputStructural ∧
-    txSemanticStageOrd .InputStructural < txSemanticStageOrd .UtxoLookup ∧
+    txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .InputStructural ∧
+    txSemanticStageOrd .InputStructural < txSemanticStageOrd .OutputCovenants ∧
+    txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .UtxoLookup ∧
     txSemanticStageOrd .UtxoLookup < txSemanticStageOrd .CovenantDispatch ∧
     txSemanticStageOrd .CovenantDispatch < txSemanticStageOrd .WitnessCursor ∧
     txSemanticStageOrd .WitnessCursor < txSemanticStageOrd .ValueConservation := by
@@ -876,17 +924,19 @@ theorem bridge_semantic_output_covenant (out : CovenantGenesisV1.TxOut)
     (h4 : (out.covenantType == CovenantGenesisV1.COV_TYPE_MULTISIG) = false)
     (h5 : (out.covenantType == CovenantGenesisV1.COV_TYPE_HTLC) = false)
     (h6 : (out.covenantType == CovenantGenesisV1.COV_TYPE_DA_COMMIT) = false) :
-    txSemanticStageOrd TxSemanticStage.OutputCovenants = 2 ∧
+    txSemanticStageOrd TxSemanticStage.OutputCovenants = 3 ∧
     CovenantGenesisV1.validateOutGenesis out txKind height = .error "TX_ERR_COVENANT_TYPE_INVALID" := by
   exact ⟨rfl, by unfold CovenantGenesisV1.validateOutGenesis; simp only [h1, h2, h3, h4, h5, h6, ite_false]; rfl⟩
 
 open UtxoApplyGenesisV1 in
-theorem bridge_semantic_scriptsig (i : UtxoBasicV1.TxIn)
+theorem bridge_semantic_scriptsig (tx : UtxoBasicV1.Tx) (height : Nat) (i : UtxoBasicV1.TxIn)
+    (hNonce : (tx.txNonce == 0) = false)
+    (hInputs : tx.inputs = [i])
     (hCoinbase : UtxoBasicV1.isCoinbasePrevout i = false)
     (h : (i.scriptSig.size != 0) = true) :
-    txSemanticStageOrd .InputStructural = 3 ∧
-    validateInputStructural i = .error "TX_ERR_PARSE" :=
-  ⟨rfl, input_scriptsig_priority i hCoinbase h⟩
+    txSemanticStageOrd .InputStructural = 2 ∧
+    applyTxPreInputChecks tx height = .error "TX_ERR_PARSE" :=
+  ⟨rfl, perinput_scriptsig_live tx height i hNonce hInputs hCoinbase h⟩
 
 open UtxoApplyGenesisV1 in
 theorem bridge_semantic_witness_cursor (cursor witnessLen : Nat)
@@ -918,11 +968,12 @@ theorem err_ne_parse_ts_old : ("BLOCK_ERR_PARSE" : String) ≠ "BLOCK_ERR_TIMEST
 theorem err_ne_parse_ts_future : ("BLOCK_ERR_PARSE" : String) ≠ "BLOCK_ERR_TIMESTAMP_FUTURE" := by decide
 theorem err_ne_tx_parse_nonce : ("TX_ERR_PARSE" : String) ≠ "TX_ERR_NONCE_REPLAY" := by decide
 
-/-! ## §13 Contract: Consensus Error Ordering Complete
+/-! ## §13 Error-order contracts and stage models
 
-Composition theorems that bundle the individual stage-priority, totality, and
-success-chain results into unified §13 contract statements.  These are LIVE
-on `validateBlockBasic` and the tx sub-function pipeline — not model-only.
+The block contract bundles the stated results on `validateBlockBasic`.
+The transaction contracts below assert abstract stage ordering and injectivity;
+separate bridges retain their selected model-call or standalone helper domains.
+They do not compose a universal SpendTx execution-order theorem.
 -/
 
 /-- §13 Block-level contract: totality + error dominance + full success chain.
@@ -982,16 +1033,18 @@ theorem tx_parse_pipeline_deterministic :
     (∀ a b, txParseStageOrd a = txParseStageOrd b → a = b) := by
   exact ⟨parse_stage_chain, txParseStageOrd_injective⟩
 
-/-- Tx semantic pipeline: model-level stage ordering is strict + injective.
-    Live grounding provided by separate bridge theorems: `bridge_semantic_*`
-    for most stages, plus `input_sequence_priority` and
-    `input_coinbase_prevout_priority` for InputStructural sub-checks. -/
+/-- Abstract tx semantic stage ordering is strict and injective. Separate
+    scriptSig singleton and duplicate identical-pair bridges target the actual
+    pre-input caller with arbitrary outputs/height. The unchanged single-input
+    helpers retain standalone domains; named multi-input global results belong
+    to the common-selector source/generated replay, not this ordinal theorem.
+    No full SpendTx, replay, or cryptographic order is proved here. -/
 theorem tx_semantic_pipeline_deterministic :
-    -- Strict stage ordering (complete chain, all 7 adjacent pairs)
+    -- Strict ordering of the abstract model's 7 adjacent pairs
     (txSemanticStageOrd .Nonce < txSemanticStageOrd .EmptyInputs ∧
-     txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .OutputCovenants ∧
-     txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .InputStructural ∧
-     txSemanticStageOrd .InputStructural < txSemanticStageOrd .UtxoLookup ∧
+     txSemanticStageOrd .EmptyInputs < txSemanticStageOrd .InputStructural ∧
+     txSemanticStageOrd .InputStructural < txSemanticStageOrd .OutputCovenants ∧
+     txSemanticStageOrd .OutputCovenants < txSemanticStageOrd .UtxoLookup ∧
      txSemanticStageOrd .UtxoLookup < txSemanticStageOrd .CovenantDispatch ∧
      txSemanticStageOrd .CovenantDispatch < txSemanticStageOrd .WitnessCursor ∧
      txSemanticStageOrd .WitnessCursor < txSemanticStageOrd .ValueConservation) ∧

@@ -390,8 +390,9 @@ def validateWitnessCursorComplete (cursor witnessLen : Nat) : Except String Unit
   if cursor != witnessLen then Except.error "TX_ERR_PARSE" else Except.ok ()
 
 /-- Per-input UTXO lookup and pre-covenant checks.
-    LIVE sub-function: called from applyNonCoinbaseTxBasicNoCrypto per-input loop.
-    Ordering: duplicate → missing UTXO → anchor/DA → coinbase maturity.
+    The live applyNonCoinbaseTxBasicNoCrypto loop passes isDuplicate=false after
+    common S1A; its lookup order is missing UTXO → anchor/DA → coinbase maturity.
+    The duplicate=true refusal remains only a standalone helper theorem domain.
     Written without do-notation to avoid join points for formal proofs. -/
 def validateInputUtxoLookup
     (isDuplicate : Bool)
