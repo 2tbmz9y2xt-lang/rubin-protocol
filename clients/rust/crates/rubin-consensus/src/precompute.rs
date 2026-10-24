@@ -8,7 +8,7 @@ use crate::covenant_genesis::validate_tx_covenants_genesis;
 use crate::error::{ErrorCode, TxError};
 use crate::simplicity_covenant::reject_core_simplicity_spend;
 use crate::tx::{Tx, TxInput, TxOutput};
-use crate::utxo_basic::{validate_non_coinbase_input_encoding, Outpoint, UtxoEntry};
+use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::vault::witness_slots;
 
 /// Immutable, precomputed context for a single non-coinbase transaction within
@@ -79,13 +79,13 @@ struct CollectedPrecomputeInputs {
 /// caller-owned and must stay immutable for the lifetime of returned contexts.
 /// Resolved UTXO bytes are detached, so the caller may mutate `utxo_snapshot`
 /// after return. This API repeats the connect path's non-coinbase coinbase-like,
-/// nonce, and replay checks and validates output creation. Contexts are intended
+/// global S1A, and replay checks and validates output creation. Contexts are intended
 /// for read-only workers, which validate resolved inputs; this exported API
 /// currently has no production caller. Default chain and rotation context match
 /// the standalone path.
 ///
 /// With the default chain and rotation context, errors owned by this precompute
-/// path (non-coinbase coinbase-like, nonce, and replay checks; output creation;
+/// path (non-coinbase coinbase-like, global S1A, and replay checks; output creation;
 /// input resolution; witness boundaries; and value conservation) preserve the
 /// corresponding sequential first-error order.
 pub fn precompute_tx_contexts(
@@ -145,18 +145,6 @@ fn precompute_tx_context(
     overlay: &HashMap<Outpoint, UtxoEntry>,
     block_height: u64,
 ) -> Result<(PrecomputedTxContext, Vec<Outpoint>), TxError> {
-    if tx.tx_nonce == 0 {
-        return Err(TxError::new(
-            ErrorCode::TxErrTxNonceInvalid,
-            "tx_nonce must be >= 1 for non-coinbase",
-        ));
-    }
-    if tx.inputs.is_empty() {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "non-coinbase must have at least one input",
-        ));
-    }
     validate_tx_covenants_genesis(tx, block_height, None)?;
     let inputs = collect_precompute_inputs(tx, overlay, block_height)?;
     let (witness_start, witness_end) = precompute_witness_bounds(
@@ -194,9 +182,8 @@ fn collect_precompute_inputs(
         sum_in: 0,
         stopped_at_core_simplicity: false,
     };
-    let mut seen_inputs = HashSet::with_capacity(tx.inputs.len());
     for input in &tx.inputs {
-        let (entry, op) = resolve_precompute_input(input, &mut seen_inputs, overlay, block_height)?;
+        let (entry, op) = resolve_precompute_input(input, overlay, block_height)?;
         if entry.covenant_type == COV_TYPE_CORE_SIMPLICITY {
             // Standalone precompute is reject-only for 0x0106 under the default
             // context. Stop before trailing inputs and defer the dedicated
@@ -221,21 +208,13 @@ fn collect_precompute_inputs(
 
 fn resolve_precompute_input(
     input: &TxInput,
-    seen_inputs: &mut HashSet<Outpoint>,
     overlay: &HashMap<Outpoint, UtxoEntry>,
     block_height: u64,
 ) -> Result<(UtxoEntry, Outpoint), TxError> {
-    validate_non_coinbase_input_encoding(input)?;
     let op = Outpoint {
         txid: input.prev_txid,
         vout: input.prev_vout,
     };
-    if !seen_inputs.insert(op.clone()) {
-        return Err(TxError::new(
-            ErrorCode::TxErrParse,
-            "duplicate input outpoint",
-        ));
-    }
     let entry = overlay
         .get(&op)
         .cloned()

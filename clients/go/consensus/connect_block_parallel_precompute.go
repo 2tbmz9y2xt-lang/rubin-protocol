@@ -84,14 +84,14 @@ type precomputeTxInputs struct {
 // remain caller-owned and must stay immutable for the lifetime of returned
 // contexts. Resolved UTXO bytes are detached, so the caller may mutate
 // utxoSnapshot after return. It repeats the connect path's non-coinbase
-// coinbase-like, nonce, and replay checks and validates output creation.
+// coinbase-like, global S1A, and replay checks and validates output creation.
 // Contexts are intended for read-only workers, which validate resolved inputs;
 // this exported API currently has no production caller. Default chain and
 // rotation context match standalone.
 //
 // Returns an error if any input resolution, witness assignment, or value
 // conservation check fails. With the default chain and rotation context, errors
-// owned by this precompute path (non-coinbase coinbase-like, nonce, and replay
+// owned by this precompute path (non-coinbase coinbase-like, global S1A, and replay
 // checks; output creation; input resolution; witness boundaries; and value
 // conservation) preserve the corresponding sequential first-error order.
 func PrecomputeTxContexts(
@@ -150,18 +150,12 @@ func precomputeNonCoinbaseTxContexts(
 	return results, nil
 }
 
-// precomputeTxPreChecks runs the structural + covenant-genesis pre-validation the
-// precompute/worker path must share with the sequential apply path. nil rotation
+// precomputeTxPreChecks runs covenant-genesis validation after the public loop's
+// block-local S1A/replay check. nil rotation
 // carries no SimplicityDeploymentProvider, so the zero chain_id is unused here.
 func precomputeTxPreChecks(tx *Tx, blockHeight uint64) error {
 	if tx == nil {
 		return txerr(TX_ERR_PARSE, "nil tx")
-	}
-	if tx.TxNonce == 0 {
-		return txerr(TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
-	}
-	if len(tx.Inputs) == 0 {
-		return txerr(TX_ERR_PARSE, "non-coinbase must have at least one input")
 	}
 	return ValidateTxCovenantsGenesis(tx, [32]byte{}, blockHeight, nil)
 }
@@ -220,10 +214,8 @@ func collectPrecomputeTxInputs(
 		ResolvedInputs: make([]UtxoEntry, 0, len(tx.Inputs)),
 		InputOutpoints: make([]Outpoint, 0, len(tx.Inputs)),
 	}
-	seenInputs := make(map[Outpoint]struct{}, len(tx.Inputs))
-
 	for _, in := range tx.Inputs {
-		entry, op, slots, err := resolvePrecomputeInput(in, seenInputs, overlay, blockHeight)
+		entry, op, slots, err := resolvePrecomputeInput(in, overlay, blockHeight)
 		if err != nil {
 			return precomputeTxInputs{}, err
 		}
@@ -242,20 +234,10 @@ func collectPrecomputeTxInputs(
 
 func resolvePrecomputeInput(
 	in TxInput,
-	seenInputs map[Outpoint]struct{},
 	overlay map[Outpoint]UtxoEntry,
 	blockHeight uint64,
 ) (UtxoEntry, Outpoint, int, error) {
-	var zeroTxid [32]byte
-	if err := validateNonCoinbaseInputEncoding(in, zeroTxid); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, err
-	}
-
 	op := Outpoint{Txid: in.PrevTxid, Vout: in.PrevVout}
-	if err := rememberPrecomputeInput(op, seenInputs); err != nil {
-		return UtxoEntry{}, Outpoint{}, 0, err
-	}
-
 	entry, ok := overlay[op]
 	if !ok {
 		return UtxoEntry{}, Outpoint{}, 0, txerr(TX_ERR_MISSING_UTXO, "utxo not found")
@@ -272,14 +254,6 @@ func resolvePrecomputeInput(
 		return UtxoEntry{}, Outpoint{}, 0, err
 	}
 	return entry, op, slots, nil
-}
-
-func rememberPrecomputeInput(op Outpoint, seenInputs map[Outpoint]struct{}) error {
-	if _, exists := seenInputs[op]; exists {
-		return txerr(TX_ERR_PARSE, "duplicate input outpoint")
-	}
-	seenInputs[op] = struct{}{}
-	return nil
 }
 
 func validatePrecomputeEntry(entry UtxoEntry, blockHeight uint64) error {

@@ -425,7 +425,7 @@ func TestConnectBlockInputViewEarlyErrors(t *testing.T) {
 			e.CreatedByCoinbase = true
 			v.entries[op0] = e
 		}, []Outpoint{op0}},
-		{"duplicate_before_second_read", "TX_ERR_PARSE", "duplicate input outpoint", func(tx *Tx, _ *inputViewTestView) { tx.Inputs[1] = tx.Inputs[0] }, []Outpoint{op0}},
+		{"duplicate_before_all_reads", "TX_ERR_PARSE", "duplicate input outpoint", func(tx *Tx, _ *inputViewTestView) { tx.Inputs[1] = tx.Inputs[0] }, nil},
 		{"witness_underflow_before_next_input", "TX_ERR_PARSE", "witness underflow", func(tx *Tx, _ *inputViewTestView) { tx.Witness = nil }, []Outpoint{op0}},
 		{"bad_merkle_before_all_reads", "BLOCK_ERR_MERKLE_INVALID", "merkle_root mismatch", nil, nil},
 	} {
@@ -561,7 +561,7 @@ func TestConnectBlockInputViewUnavailableAtTransactionTwoInputOne(t *testing.T) 
 	}
 }
 
-func TestConnectBlockInputViewInheritedInputOrder(t *testing.T) {
+func TestConnectBlockInputViewS1ABeforeReadFailure(t *testing.T) {
 	op0, op1 := Outpoint{Txid: hashWithPrefix(0x61)}, Outpoint{Txid: hashWithPrefix(0x62)}
 	tx := inputViewTx(1, op0, op1)
 	tx.Inputs[1].Sequence = 0x80000000
@@ -570,8 +570,8 @@ func TestConnectBlockInputViewInheritedInputOrder(t *testing.T) {
 	cause := errors.New("first input unavailable")
 	view.rows[op0] = logicalStateRowRead{kind: logicalStateRowUnavailable, cause: cause}
 	_, err := inputViewConnect(t, input, view, Uint128{})
-	assertInputViewFailure(t, err, op0, 1, 0, 1, cause, "first input unavailable")
-	assertInputViewReads(t, view, op0)
+	assertInputViewTxError(t, err, "TX_ERR_SEQUENCE_INVALID", "sequence exceeds 0x7fffffff")
+	assertInputViewReads(t, view)
 	state := &InMemoryChainState{Utxos: copyUtxoMap(view.entries), AlreadyGenerated: new(big.Int)}
 	_, err = ConnectBlockBasicInMemoryAtHeight(input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, 1, nil, state, [32]byte{})
 	assertInputViewTxError(t, err, "TX_ERR_SEQUENCE_INVALID", "sequence exceeds 0x7fffffff")

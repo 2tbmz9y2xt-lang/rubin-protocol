@@ -2,7 +2,9 @@ package consensus
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -1095,10 +1097,103 @@ func section16StructuralCases() []section16StructuralCase {
 		{name: "input_count_only", nonce: 1, want: TX_ERR_PARSE, msg: "non-coinbase must have at least one input"},
 		{name: "coinbase_prevout_before_script_sig", nonce: 1, inputs: []TxInput{{PrevVout: coinbasePrevout.PrevVout, ScriptSig: []byte{0x01}}}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
 		{name: "coinbase_prevout_before_sequence", nonce: 1, inputs: []TxInput{{PrevVout: coinbasePrevout.PrevVout, Sequence: 0x8000_0000}}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
-		{name: "input_index_order", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x8000_0000}, coinbasePrevout}, want: TX_ERR_SEQUENCE_INVALID, msg: "sequence exceeds 0x7fffffff"},
+		{name: "later_coinbase_before_earlier_sequence", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x8000_0000}, coinbasePrevout}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
 		{name: "script_sig_only", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x52), ScriptSig: []byte{0x01}}}, want: TX_ERR_PARSE, msg: "script_sig must be empty under genesis covenant set"},
 		{name: "sequence_only", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x53), Sequence: 0x8000_0000}}, want: TX_ERR_SEQUENCE_INVALID, msg: "sequence exceeds 0x7fffffff"},
 		{name: "coinbase_prevout_only", nonce: 1, inputs: []TxInput{coinbasePrevout}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
+		{name: "later_coinbase_before_earlier_script", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), ScriptSig: []byte{1}}, coinbasePrevout}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
+		{name: "later_script_before_earlier_sequence", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x8000_0000}, {PrevTxid: hashWithPrefix(0x52), ScriptSig: []byte{1}}}, want: TX_ERR_PARSE, msg: "script_sig must be empty under genesis covenant set"},
+		{name: "sequence_before_earlier_duplicate", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x52), Sequence: 0x8000_0000}}, want: TX_ERR_SEQUENCE_INVALID, msg: "sequence exceeds 0x7fffffff"},
+		{name: "nonadjacent_duplicate", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x51), PrevVout: 1}, {PrevTxid: hashWithPrefix(0x51)}}, want: TX_ERR_PARSE, msg: "duplicate input outpoint"},
+		{name: "later_coinbase_before_missing", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, coinbasePrevout}, want: TX_ERR_PARSE, msg: "coinbase prevout encoding forbidden in non-coinbase"},
+		{name: "two_sequence_failures", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x8000_0000}, {PrevTxid: hashWithPrefix(0x52), Sequence: 0xffffffff}}, want: TX_ERR_SEQUENCE_INVALID, msg: "sequence exceeds 0x7fffffff"},
+	}
+}
+
+func section16SnapshotTx(tx *Tx) *Tx {
+	if tx == nil {
+		return nil
+	}
+	out := *tx
+	out.Inputs = slices.Clone(tx.Inputs)
+	for i := range out.Inputs {
+		out.Inputs[i].ScriptSig = slices.Clone(tx.Inputs[i].ScriptSig)
+	}
+	out.Outputs = slices.Clone(tx.Outputs)
+	for i := range out.Outputs {
+		out.Outputs[i].CovenantData = slices.Clone(tx.Outputs[i].CovenantData)
+	}
+	out.Witness = slices.Clone(tx.Witness)
+	for i := range out.Witness {
+		out.Witness[i].Pubkey = slices.Clone(tx.Witness[i].Pubkey)
+		out.Witness[i].Signature = slices.Clone(tx.Witness[i].Signature)
+	}
+	out.DaPayload = slices.Clone(tx.DaPayload)
+	if tx.DaCommitCore != nil {
+		core := *tx.DaCommitCore
+		core.BatchSig = slices.Clone(tx.DaCommitCore.BatchSig)
+		out.DaCommitCore = &core
+	}
+	if tx.DaChunkCore != nil {
+		core := *tx.DaChunkCore
+		out.DaChunkCore = &core
+	}
+	return &out
+}
+
+func TestValidateSpendTxS1A(t *testing.T) {
+	cases := append(section16StructuralCases(), []section16StructuralCase{
+		{name: "minimal", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), ScriptSig: []byte{}}}},
+		{name: "max_valid", nonce: 0xffffffffffffffff, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x7fffffff}}},
+		{name: "zero_txid_only", nonce: 1, inputs: []TxInput{{PrevVout: 0}}},
+		{name: "max_vout_only", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), PrevVout: 0xffffffff}}},
+		{name: "equal_txid_distinct_vout", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x51), PrevVout: 1}}},
+		{name: "full_width_vout", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x51), PrevVout: 0x10000}}},
+		{name: "distinct_txid_equal_vout", nonce: 1, inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x52)}}},
+		{name: "full_width_txid", nonce: 1, inputs: []TxInput{{PrevTxid: [32]byte{0: 0x51}}, {PrevTxid: [32]byte{0: 0x51, 31: 1}}}},
+		{name: "empty_inputs", nonce: 1, inputs: []TxInput{}, want: TX_ERR_PARSE, msg: "non-coinbase must have at least one input"},
+	}...)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := section16TestTx(tc.nonce, tc.inputs)
+			tx.Witness = []WitnessItem{{SuiteID: 0x7f, Pubkey: []byte{2, 3}, Signature: []byte{4, 5}}, {Pubkey: []byte{}, Signature: nil}}
+			tx.DaPayload = []byte{6, 7}
+			// S1A reads only its six families. Snapshot every nested owner as
+			// well, including DA objects, without asking S1A to validate them.
+			tx.DaCommitCore = &DaCommitCore{BatchNumber: 9, BatchSig: []byte{8, 9}, DaID: hashWithPrefix(0x61)}
+			tx.DaChunkCore = &DaChunkCore{ChunkIndex: 2, ChunkHash: hashWithPrefix(0x62)}
+			before := section16SnapshotTx(tx)
+			for repeat := 0; repeat < 2; repeat++ {
+				err := ValidateSpendTxS1A(tx)
+				if tc.want == "" {
+					if err != nil {
+						t.Fatalf("valid S1A: %v", err)
+					}
+				} else {
+					assertTxErrCodeMsg(t, err, tc.want, tc.msg)
+				}
+				if !reflect.DeepEqual(tx, before) {
+					t.Fatal("caller Tx changed during S1A")
+				}
+			}
+		})
+	}
+	assertTxErrCodeMsg(t, ValidateSpendTxS1A(nil), TX_ERR_PARSE, "nil tx")
+	for _, tx := range []*Tx{
+		{TxNonce: 1, Inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51)}}},
+		{
+			TxNonce: 1, Inputs: []TxInput{{PrevTxid: hashWithPrefix(0x51), ScriptSig: []byte{}}},
+			Outputs: []TxOutput{{CovenantData: []byte{}}}, Witness: []WitnessItem{{Pubkey: []byte{}, Signature: []byte{}}},
+			DaPayload: []byte{}, DaCommitCore: &DaCommitCore{BatchSig: []byte{}}, DaChunkCore: &DaChunkCore{},
+		},
+	} {
+		before := section16SnapshotTx(tx)
+		if err := ValidateSpendTxS1A(tx); err != nil {
+			t.Fatalf("valid nil/empty S1A control: %v", err)
+		}
+		if !reflect.DeepEqual(tx, before) {
+			t.Fatal("caller Tx changed during S1A")
+		}
 	}
 }
 
@@ -1117,7 +1212,21 @@ func section16TestUtxos() map[Outpoint]UtxoEntry {
 	return map[Outpoint]UtxoEntry{{Txid: prev}: {Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}
 }
 
-func TestValidateBlockTxSemantics_Section16NonceBeforeInputCount(t *testing.T) {
+func section16SignedControl(t *testing.T) (*Tx, map[Outpoint]UtxoEntry) {
+	t.Helper()
+	kp := mustMLDSA87Keypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	tx := section16TestTx(1, []TxInput{{PrevTxid: hashWithPrefix(0x61)}, {PrevTxid: hashWithPrefix(0x62)}})
+	tx.Outputs = []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}
+	utxos := map[Outpoint]UtxoEntry{
+		{Txid: hashWithPrefix(0x61)}: {Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: slices.Clone(cov)},
+		{Txid: hashWithPrefix(0x62)}: {Value: 50, CovenantType: COV_TYPE_P2PK, CovenantData: slices.Clone(cov)},
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 50, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 50, [32]byte{}, kp)}
+	return tx, utxos
+}
+
+func TestValidateBlockTxSemantics_Section16GlobalFamilyOrder(t *testing.T) {
 	for _, tc := range section16StructuralCases()[:2] {
 		t.Run(tc.name, func(t *testing.T) {
 			txBytes, err := MarshalTx(section16TestTx(tc.nonce, tc.inputs))
@@ -1134,7 +1243,7 @@ func TestValidateBlockTxSemantics_Section16NonceBeforeInputCount(t *testing.T) {
 			assertTxErrCodeMsg(t, err, tc.want, tc.msg)
 		})
 	}
-	t.Run("single_nonce_deferred_to_transaction_order", func(t *testing.T) {
+	t.Run("single_nonce_rejected", func(t *testing.T) {
 		txBytes, err := MarshalTx(section16TestTx(0, []TxInput{{PrevTxid: hashWithPrefix(0x58)}}))
 		if err != nil {
 			t.Fatalf("MarshalTx: %v", err)
@@ -1145,10 +1254,27 @@ func TestValidateBlockTxSemantics_Section16NonceBeforeInputCount(t *testing.T) {
 			t.Fatalf("MerkleRootTxids: %v", err)
 		}
 		prev, target := hashWithPrefix(0x55), filledHash(0xff)
-		if _, err := ValidateBlockBasicAtHeight(buildBlockBytes(t, prev, root, target, 56, [][]byte{coinbase, txBytes}), &prev, &target, 0); err != nil {
-			t.Fatalf("single nonce must be deferred to transaction validation: %v", err)
-		}
+		_, err = ValidateBlockBasicAtHeight(buildBlockBytes(t, prev, root, target, 56, [][]byte{coinbase, txBytes}), &prev, &target, 0)
+		assertTxErrCodeMsg(t, err, TX_ERR_TX_NONCE_INVALID, "tx_nonce must be >= 1 for non-coinbase")
 	})
+	for _, nonce := range []uint64{7, 8} {
+		tx := section16TestTx(nonce, []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x80000000}, {PrevVout: 0xffffffff}})
+		seen := map[uint64]struct{}{7: {}, 11: {}}
+		before := map[uint64]struct{}{7: {}, 11: {}}
+		assertTxErrCodeMsg(t, validateNonCoinbaseBlockTx(tx, seen), TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		if !reflect.DeepEqual(seen, before) {
+			t.Fatal("S1A rejection changed entry nonce prefix")
+		}
+	}
+	coinbase := section16TestTx(0, []TxInput{{PrevVout: ^uint32(0), Sequence: ^uint32(0)}})
+	coinbase.Locktime = 1
+	prefix := section16TestTx(7, []TxInput{{PrevTxid: hashWithPrefix(0x52)}})
+	tx := section16TestTx(7, []TxInput{{PrevTxid: hashWithPrefix(0x51)}})
+	tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
+	pb := &ParsedBlock{Txs: []*Tx{coinbase, prefix, tx}}
+	assertTxErrCodeMsg(t, validateBlockTxSemantics(pb, 1, nil), TX_ERR_NONCE_REPLAY, "duplicate tx_nonce in block")
+	tx.TxNonce = 8
+	assertTxErrCodeMsg(t, validateBlockTxSemantics(pb, 1, nil), TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
 }
 
 func TestApplyNonCoinbaseTxBasic_Section16StructuralOrder(t *testing.T) {
@@ -1156,12 +1282,42 @@ func TestApplyNonCoinbaseTxBasic_Section16StructuralOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			utxos := section16TestUtxos()
 			before := cloneUtxoSet(utxos)
-			_, err := ApplyNonCoinbaseTxBasic(section16TestTx(tc.nonce, tc.inputs), hashWithPrefix(0x56), utxos, 1, 0, [32]byte{})
+			tx := section16TestTx(tc.nonce, tc.inputs)
+			if tc.name == "nonce_before_input_count" {
+				tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
+			}
+			work, summary, err := ApplyNonCoinbaseTxBasicUpdate(tx, hashWithPrefix(0x56), utxos, 1, 0, [32]byte{})
 			assertTxErrCodeMsg(t, err, tc.want, tc.msg)
+			if work != nil || summary != nil {
+				t.Fatal("S1A rejection returned candidate or summary")
+			}
 			if !reflect.DeepEqual(utxos, before) {
 				t.Fatal("caller UTXOs changed on rejection")
 			}
 		})
+	}
+	for _, sequence := range []uint32{0x80000000, 0} {
+		tx := section16TestTx(1, []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: sequence}})
+		tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
+		_, err := ApplyNonCoinbaseTxBasic(tx, hashWithPrefix(0x56), section16TestUtxos(), 1, 0, [32]byte{})
+		if sequence != 0 {
+			assertTxErrCodeMsg(t, err, TX_ERR_SEQUENCE_INVALID, "sequence exceeds 0x7fffffff")
+		} else {
+			assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "unknown covenant_type")
+		}
+	}
+	tx := section16TestTx(1, []TxInput{{PrevTxid: hashWithPrefix(0x51)}, {PrevVout: 0xffffffff}})
+	utxos := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0x51)}: {CovenantType: COV_TYPE_ANCHOR}}
+	_, err := ApplyNonCoinbaseTxBasic(tx, hashWithPrefix(0x56), utxos, 1, 0, [32]byte{})
+	assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+	for _, inputs := range [][]TxInput{
+		{{PrevVout: 0}},
+		{{PrevTxid: hashWithPrefix(0x51), PrevVout: 0xffffffff}},
+		{{PrevTxid: hashWithPrefix(0x51)}, {PrevTxid: hashWithPrefix(0x51), PrevVout: 1}},
+		{{PrevTxid: [32]byte{0: 0x51}}, {PrevTxid: [32]byte{0: 0x51, 31: 1}}},
+	} {
+		_, err := ApplyNonCoinbaseTxBasic(section16TestTx(1, inputs), hashWithPrefix(0x56), section16TestUtxos(), 1, 0, [32]byte{})
+		assertTxErrCodeMsg(t, err, TX_ERR_MISSING_UTXO, "utxo not found")
 	}
 }
 
@@ -1190,13 +1346,25 @@ func TestApplyNonCoinbaseTxBasic_HTLCCreationFirstErrorOrder(t *testing.T) {
 	}
 }
 
+func section16SameSigTasks(got, want []sigCheckTask) bool {
+	return (got == nil) == (want == nil) && slices.EqualFunc(got, want, func(got, want sigCheckTask) bool {
+		return got.suiteID == want.suiteID && got.digest == want.digest &&
+			errors.Is(got.errOnFail, want.errOnFail) && errors.Is(want.errOnFail, got.errOnFail) &&
+			reflect.DeepEqual(got.pubkey, want.pubkey) && reflect.DeepEqual(got.sig, want.sig)
+	})
+}
+
 func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 	for _, tc := range section16StructuralCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			utxos := section16TestUtxos()
 			before := cloneUtxoSet(utxos)
 			queue := NewSigCheckQueue(1)
-			work, _, err := applyNonCoinbaseTxBasicWorkQ(section16TestTx(tc.nonce, tc.inputs), hashWithPrefix(0x57), utxos, 1, 0, [32]byte{}, queue, nil, nil)
+			tx := section16TestTx(tc.nonce, tc.inputs)
+			if tc.name == "sequence_only" || tc.name == "nonce_before_input_count" {
+				tx.Outputs = []TxOutput{{CovenantType: 0x0105}}
+			}
+			work, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0x57), utxos, 1, 0, [32]byte{}, queue, nil, nil)
 			assertTxErrCodeMsg(t, err, tc.want, tc.msg)
 			if work != nil || queue.Len() != 0 {
 				t.Fatalf("rejection changed returned work or queued signatures: work=%v queue=%d", work, queue.Len())
@@ -1205,6 +1373,42 @@ func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 				t.Fatal("caller UTXOs changed on queued rejection")
 			}
 		})
+	}
+	valid, utxos := section16SignedControl(t)
+	beforeUtxos := cloneUtxoSet(utxos)
+	wantWork, wantSummary, err := ApplyNonCoinbaseTxBasicUpdate(valid, hashWithPrefix(0x63), utxos, 1, 0, [32]byte{})
+	if err != nil || wantSummary.Fee.Cmp(Uint128FromU64(10)) != 0 {
+		t.Fatalf("signed valid control: summary=%v err=%v", wantSummary, err)
+	}
+	for _, populated := range []bool{false, true} {
+		queue := NewSigCheckQueue(1)
+		if populated {
+			if _, _, err := applyNonCoinbaseTxBasicWorkQ(valid, hashWithPrefix(0x63), utxos, 1, 0, [32]byte{}, queue, nil, nil); err != nil {
+				t.Fatalf("populate queue: %v", err)
+			}
+		}
+		before := slices.Clone(queue.tasks)
+		for i := range before {
+			before[i].pubkey = slices.Clone(before[i].pubkey)
+			before[i].sig = slices.Clone(before[i].sig)
+		}
+		bad := section16TestTx(1, []TxInput{{PrevTxid: hashWithPrefix(0x51), Sequence: 0x80000000}, {PrevVout: 0xffffffff}})
+		bad.Outputs = []TxOutput{{CovenantType: 0x0105}}
+		work, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(bad, hashWithPrefix(0x64), utxos, 1, 0, 0, [32]byte{}, queue, nil, nil)
+		assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
+		if work != nil || summary != nil || !section16SameSigTasks(queue.tasks, before) || !reflect.DeepEqual(utxos, beforeUtxos) {
+			t.Fatal("S1A rejection changed entry queue/caller UTXOs or returned a candidate")
+		}
+		work, summary, err = applyNonCoinbaseTxBasicUpdateWithMTPQ(valid, hashWithPrefix(0x63), utxos, 1, 0, 0, [32]byte{}, queue, nil, nil)
+		if err != nil || !reflect.DeepEqual(work, wantWork) || !reflect.DeepEqual(summary, wantSummary) {
+			t.Fatalf("rejected-then-valid differs from valid alone: %v", err)
+		}
+		if queue.Len() != len(before)+2 || (len(before) > 0 && !section16SameSigTasks(queue.tasks[:len(before)], before)) {
+			t.Fatal("valid operation changed entry queue jobs/order")
+		}
+		if err := queue.Flush(); err != nil {
+			t.Fatalf("retained genuine signatures: %v", err)
+		}
 	}
 }
 

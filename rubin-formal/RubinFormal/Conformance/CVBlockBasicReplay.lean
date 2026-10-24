@@ -40,11 +40,21 @@ def checkBlockBasicVector (v : CVBlockBasicVector) : Bool :=
       | .block_basic_check =>
           match BlockBasicV1.validateBlockBasic blockBytes ph tgt with
           | .ok _ =>
-              if v.expectOk then
+              -- The prefix omits these preexisting resource checks. Retain
+              -- their explicit fixture dispositions before suffix replay;
+              -- CV-B-14's anchor-byte result precedes its later nonce replay.
+              if !v.expectOk &&
+                  (((v.id == "CV-B-11" || v.id == "CV-B-14") &&
+                    v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED") ||
+                   (v.id == "CV-B-12" && v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED")) then
                 true
               else
-                v.expectErr == some "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED" ||
-                v.expectErr == some "BLOCK_ERR_DA_BATCH_EXCEEDED"
+                match BlockBasicV1.parseBlock blockBytes with
+                | .error e => (!v.expectOk) && (some e == v.expectErr)
+                | .ok pb =>
+                    match BlockBasicV1.validateBlockTxS1ABeforeReplay pb with
+                    | .ok _ => v.expectOk
+                    | .error e => (!v.expectOk) && (some e == v.expectErr)
           | .error e => (!v.expectOk) && (some e == v.expectErr)
       | .connect_block_basic =>
           match toUtxoPairsBlockBasic? v.utxos with

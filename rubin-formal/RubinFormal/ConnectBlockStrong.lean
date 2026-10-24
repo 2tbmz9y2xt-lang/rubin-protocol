@@ -212,8 +212,7 @@ private theorem prepareNonCoinbaseTxCore_success_components_for_oracle
       computeBasicFee tx inputState = .ok core.fee := by
   unfold prepareNonCoinbaseTxCore at hCore
   rcases except_bind_eq_ok hCore with ⟨tx, hParse, hRest1⟩
-  rcases except_bind_eq_ok hRest1 with ⟨_u1, _hEnv, hRest2⟩
-  rcases except_bind_eq_ok hRest2 with ⟨_u2, _hStruct, hRest3⟩
+  rcases except_bind_eq_ok hRest1 with ⟨_u1, _hS1A, hRest3⟩
   rcases except_bind_eq_ok hRest3 with ⟨_u3, _hOutputs, hRest4⟩
   rcases except_bind_eq_ok hRest4 with ⟨inputState, hScan, hRest5⟩
   rcases except_bind_eq_ok hRest5 with ⟨_u4, _hLayout, hRest6⟩
