@@ -35,18 +35,20 @@ func (*replay148NilView) Inventory148V1(uint64) HeaderCandidateInventory148V1 {
 }
 func (*replay148NilView) ProtectV1(uint64) (bool, func()) { return true, func() {} }
 
-func replay148Check(t *testing.T, name string, inv HeaderCandidateInventory148V1, limit uint64, want string) *replay148View {
+func replay148Check(t *testing.T, name string, inv HeaderCandidateInventory148V1, limit uint64, want string) {
 	t.Helper()
+	before := inv
+	before.Tips, before.Headers = slices.Clone(inv.Tips), slices.Clone(inv.Headers)
 	view := &replay148View{inv: inv}
 	got, result := replayEntryInventory148(view, limit)
-	if result != want || !reflect.DeepEqual(got, inv) || view.calls != 1 || view.limit != limit {
-		t.Fatalf("%s: result %q want %q, inventory changed %v, calls %d, limit %d want %d", name, result, want, !reflect.DeepEqual(got, inv), view.calls, view.limit, limit)
+	changed := !reflect.DeepEqual(got, before) || !reflect.DeepEqual(view.inv, before)
+	if result != want || changed || view.calls != 1 || view.limit != limit {
+		t.Fatalf("%s: result %q want %q, inventory changed %v, calls %d, limit %d want %d", name, result, want, changed, view.calls, view.limit, limit)
 	}
-	return view
 }
 
 func TestReplayEntryInventory148Decisions(t *testing.T) {
-	tips, headers := make([][32]byte, 2), make([][148]byte, 3)
+	tips, headers := [][32]byte{{0xa1, 1}, {0xa2, 2}}, [][148]byte{{0xb1, 1}, {0xb2, 2}, {0xb3, 3}}
 	complete := HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Version: 3, Tips: tips, Headers: headers, Bytes: 508}
 	replay148Check(t, "I1", complete, 508, "")
 	replay148Check(t, "I2", HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1}, 0, "")
