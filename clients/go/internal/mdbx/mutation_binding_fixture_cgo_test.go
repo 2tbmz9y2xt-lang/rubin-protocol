@@ -5,7 +5,10 @@ package mdbx
 import (
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -418,7 +421,33 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 		r.tuple(t, CommitTruthNew, UpdateStageCommitMayHaveCrossed, -1)
 		mbTreeRetained(t, s, r, before, "N15 retained OLD")
 	})
+	t.Run("retained readback child", func(t *testing.T) {
+		if os.Getenv(mbRetainedChildEnv) != "" {
+			return
+		}
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestMutationBindingTreeRetainedV1$/^retained_readback", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), mbRetainedChildEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil || strings.Count(string(output), "\n"+mbRetainedChildMarker+"\n") != 2 {
+			t.Fatalf("retained readback child: %v\n%s", err, output)
+		}
+	})
+	mbRetainedReadbackRows(t)
+}
+
+const (
+	mbRetainedChildEnv    = "RUBIN_MDBX_MB_RETAINED_CHILD"
+	mbRetainedChildMarker = "RUBIN_MDBX_MB_RETAINED_REACHED"
+)
+
+// mbRetainedReadbackRows runs only in a child test process: a retained readback handle is a poisoned delivery that
+// parks the runTreeLockedV1 worker thread, which must not remain in the parent test binary.
+func mbRetainedReadbackRows(t *testing.T) {
+	if os.Getenv(mbRetainedChildEnv) == "" {
+		return
+	}
 	t.Run("retained readback", func(t *testing.T) {
+		defer mbChildMarker(t)
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
 		var r tsResult
@@ -430,6 +459,7 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 		mbTreeRetained(t, s, r, before, "N15 retained readback")
 	})
 	t.Run("retained readback goexit", func(t *testing.T) {
+		defer mbChildMarker(t)
 		s := tsfNew(t)
 		before := s.s.lineageEpoch
 		s.p[1].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
@@ -456,4 +486,10 @@ func TestMutationBindingTreeRetainedV1(t *testing.T) {
 		mbEpoch(t, s.s, before+1, "N15 retained readback goexit")
 		mustEnvironment(t, fixtureLargeRelease(s.s))
 	})
+}
+
+func mbChildMarker(t *testing.T) {
+	if !t.Failed() {
+		fmt.Println(mbRetainedChildMarker)
+	}
 }
