@@ -1476,7 +1476,7 @@ fn section16_global_family_order_public_precompute() {
     assert_eq!(expected[0].fee, 1);
     for (inputs, bad_output, code, message) in [
         (
-            vec![seq.clone(), cb],
+            vec![seq.clone(), cb.clone()],
             false,
             ErrorCode::TxErrParse,
             "coinbase prevout encoding forbidden in non-coinbase",
@@ -1488,7 +1488,7 @@ fn section16_global_family_order_public_precompute() {
             "script_sig must be empty under genesis covenant set",
         ),
         (
-            vec![a.clone(), a, later_seq],
+            vec![a.clone(), a.clone(), later_seq],
             false,
             ErrorCode::TxErrSequenceInvalid,
             "sequence exceeds 0x7fffffff",
@@ -1498,6 +1498,18 @@ fn section16_global_family_order_public_precompute() {
             true,
             ErrorCode::TxErrSequenceInvalid,
             "sequence exceeds 0x7fffffff",
+        ),
+        (
+            vec![a.clone(), cb],
+            false,
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        ),
+        (
+            vec![a.clone(), precompute_input_for_test([0x51; 32], 1), a],
+            false,
+            ErrorCode::TxErrParse,
+            "duplicate input outpoint",
         ),
     ] {
         let mut tx = precompute_p2pk_spend_for_test(1, inputs[0].clone(), 1);
