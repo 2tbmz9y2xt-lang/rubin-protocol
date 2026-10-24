@@ -3713,7 +3713,7 @@ func validDirectConsumedReadTerminal(err error) (bool, bool) {
 	case operationAbort:
 		_, valid := directNativeResult(operationAbort, err)
 		return valid && engine.Code != codeThreadMismatch, true
-	case operationGet:
+	case operationGet, operationUpdate:
 		if engine.Diagnostic == "invalid tree native representation" {
 			return validTreeIntegrityTerminal(engine), true
 		}
@@ -3728,7 +3728,7 @@ func validDirectConsumedReadTerminal(err error) (bool, bool) {
 }
 
 func validTreeIntegrityTerminal(engine *EngineError) bool {
-	valid := engine.Operation == "get" && engine.Class == EngineIntegrity && engine.Code == codeCorrupted
+	valid := (engine.Operation == "get" || engine.Operation == "update") && engine.Class == EngineIntegrity && engine.Code == codeCorrupted
 	if !valid || engine.Diagnostic != "invalid tree native representation" || engine.ReopenRequired {
 		return false
 	}

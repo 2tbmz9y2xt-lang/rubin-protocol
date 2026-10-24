@@ -3,9 +3,63 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"math/big"
 	"reflect"
 	"testing"
 )
+
+// Both owners must implement mathematical inequalities rather than overflowing
+// uint64 products. The literal admitted pair is pinned independently of them.
+func TestLogicalStateMathematicalEnvelope(t *testing.T) {
+	const height uint64 = 4294967295
+	const count uint64 = 281217514386694
+	const total uint64 = 15748180805654864
+	product := new(big.Int).Mul(new(big.Int).SetUint64(count), big.NewInt(65596))
+	if product.IsUint64() {
+		t.Fatal("boundary fixture does not overflow the upper uint64 product")
+	}
+	for _, tc := range []struct {
+		name    string
+		bytes   uint64
+		entries uint64
+		valid   bool
+	}{
+		{"large-admitted", total, count, true},
+		{"large-lower-minus-one", total - 1, count, false},
+		{"lower", 112, 2, true},
+		{"lower-minus-one", 111, 2, false},
+		{"upper", 131192, 2, true},
+		{"upper-plus-one", 131193, 2, false},
+		{"empty", 0, 0, true},
+		{"nonempty-zero-total", 0, 1, false},
+		{"empty-nonzero-total", 1, 0, false},
+		{"uint64-total", ^uint64(0), ^uint64(0) / 56, true},
+		{"count-over-lower", 56, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lo := new(big.Int).Mul(new(big.Int).SetUint64(tc.entries), big.NewInt(56))
+			hi := new(big.Int).Mul(new(big.Int).SetUint64(tc.entries), big.NewInt(65596))
+			value := new(big.Int).SetUint64(tc.bytes)
+			oracle := value.Cmp(lo) >= 0 && value.Cmp(hi) <= 0
+			if oracle != tc.valid {
+				t.Fatalf("independent mathematical oracle = %v, want %v", oracle, tc.valid)
+			}
+			if got := validLogicalStateResidualEnvelope(tc.bytes, tc.entries); got != oracle {
+				t.Fatalf("residual mathematical envelope = %v, want %v", got, oracle)
+			}
+			bounded := oracle && tc.bytes <= height*86545430 && tc.entries <= height*1545454
+			if got := validLogicalStateCounterEnvelope(logicalStateCounters{bytes: tc.bytes, entries: tc.entries}, height); got != bounded {
+				t.Fatalf("record mathematical envelope = %v, want %v", got, bounded)
+			}
+		})
+	}
+	if validLogicalStateCounterEnvelope(logicalStateCounters{bytes: 56 * 1545455, entries: 1545455}, 1) {
+		t.Fatal("per-height count guard was lost")
+	}
+	if validLogicalStateCounterEnvelope(logicalStateCounters{bytes: 86545431, entries: 2000}, 1) {
+		t.Fatal("per-height byte guard was lost")
+	}
+}
 
 type logicalStateTestView struct {
 	counter      logicalStateCounterRead
