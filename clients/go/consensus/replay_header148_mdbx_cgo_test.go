@@ -65,10 +65,17 @@ func TestReplayEntryInventory148Decisions(t *testing.T) {
 	}
 }
 
+// replay148NilCall turns a panic on the nil view into a value the I7 assertion checks.
+func replay148NilCall() (got HeaderCandidateInventory148V1, result string, panicked any) {
+	defer func() { panicked = recover() }()
+	got, result = replayEntryInventory148(nil, 508)
+	return got, result, nil
+}
+
 func TestReplayEntryInventory148NilViews(t *testing.T) {
-	got, result := replayEntryInventory148(nil, 508)
-	if result != replayEntryRecovery || !reflect.DeepEqual(got, HeaderCandidateInventory148V1{}) {
-		t.Fatalf("I7 nil view: %q %+v", result, got)
+	got, result, panicked := replay148NilCall()
+	if panicked != nil || result != replayEntryRecovery || !reflect.DeepEqual(got, HeaderCandidateInventory148V1{}) {
+		t.Fatalf("I7 nil view: %q %+v panic %v", result, got, panicked)
 	}
 	var typed *replay148NilView
 	got, result = replayEntryInventory148(typed, 508)
@@ -87,16 +94,16 @@ func TestReplayEntryInventory148LargestCount(t *testing.T) {
 
 func TestReplayHeader148Limits(t *testing.T) {
 	if replayEntryWalk148Bytes != 404_134 || replayEntryInventory148Limit != 81_003_330 || replayRecoveryMin148Bytes != 3_550_886 {
-		t.Fatalf("L1 walk %d limit %d M %d", replayEntryWalk148Bytes, replayEntryInventory148Limit, replayRecoveryMin148Bytes)
+		t.Errorf("L1 walk %d limit %d M %d", replayEntryWalk148Bytes, replayEntryInventory148Limit, replayRecoveryMin148Bytes)
 	}
 	if replayInvLimit148(0) != 81_003_330 || replayInvLimit148(154_611_151) != 81_003_330 {
-		t.Fatalf("L1 lane limits %d %d", replayInvLimit148(0), replayInvLimit148(154_611_151))
+		t.Errorf("L1 lane limits %d %d", replayInvLimit148(0), replayInvLimit148(154_611_151))
 	}
 	if replayInvLimit(154_611_151) != 71_815_566 || replayRecoveryMinBytes != 3_550_822 {
-		t.Fatalf("L1 116 pins %d %d", replayInvLimit(154_611_151), replayRecoveryMinBytes)
+		t.Errorf("L1 116 pins %d %d", replayInvLimit(154_611_151), replayRecoveryMinBytes)
 	}
 	if replayInvLimit148(3_550_886) != 0 || replayInvLimit148(3_550_886+276) != 148 {
-		t.Fatalf("L2 %d %d", replayInvLimit148(3_550_886), replayInvLimit148(3_550_886+276))
+		t.Errorf("L2 %d %d", replayInvLimit148(3_550_886), replayInvLimit148(3_550_886+276))
 	}
 }
 
