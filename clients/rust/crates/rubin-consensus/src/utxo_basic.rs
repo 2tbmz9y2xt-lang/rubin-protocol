@@ -1324,10 +1324,7 @@ mod tests {
         };
         for (name, inputs) in [
             ("script_sig_only", vec![script]),
-            (
-                "later_script_before_sequence",
-                vec![sequence, later_script],
-            ),
+            ("later_script_before_sequence", vec![sequence, later_script]),
         ] {
             assert_section16_error(
                 name,
@@ -1414,15 +1411,7 @@ mod tests {
         let pure = validate_spend_tx_s1a(&tx).expect_err(name);
         assert_eq!((pure.code, pure.msg), (want, message), "{name}");
         let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
-            &tx,
-            [0x56; 32],
-            &utxo_set,
-            1,
-            0,
-            0,
-            [0u8; 32],
-            None,
-            None,
+            &tx, [0x56; 32], &utxo_set, 1, 0, 0, [0u8; 32], None, None,
         )
         .expect_err(name);
         assert_eq!(err.code, want, "{name}");
@@ -1462,11 +1451,7 @@ mod tests {
             ("max_valid", u64::MAX, vec![max_sequence]),
             ("zero_txid_only", 1, vec![tx_input([0; 32])]),
             ("max_vout_only", 1, vec![max_vout]),
-            (
-                "equal_txid_distinct_vout",
-                1,
-                vec![a.clone(), next_vout],
-            ),
+            ("equal_txid_distinct_vout", 1, vec![a.clone(), next_vout]),
             ("full_width_vout", 1, vec![a.clone(), full_vout]),
             (
                 "distinct_txid_equal_vout",
@@ -1580,8 +1565,7 @@ mod tests {
             let got = section16_apply_queued(&valid, txid, &set, chain_id, &mut queue)
                 .expect("rejected then valid");
             assert_eq!(
-                got,
-                expected,
+                got, expected,
                 "rejected-then-valid differs from valid alone",
             );
             assert_eq!(queue.len(), entry_len + 1);
@@ -1626,7 +1610,8 @@ mod tests {
             ],
             vec![tx_output(0, 0x0105, vec![])],
         );
-        let err = section16_apply_queued(&bad, txid, set, chain_id, queue).expect_err("S1A refusal");
+        let err =
+            section16_apply_queued(&bad, txid, set, chain_id, queue).expect_err("S1A refusal");
         assert_eq!(
             (err.code, err.msg),
             (

@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"slices"
 	"testing"
@@ -1341,7 +1342,8 @@ func TestApplyNonCoinbaseTxBasic_HTLCCreationFirstErrorOrder(t *testing.T) {
 
 func section16SameSigTasks(got, want []sigCheckTask) bool {
 	return (got == nil) == (want == nil) && slices.EqualFunc(got, want, func(got, want sigCheckTask) bool {
-		return got.suiteID == want.suiteID && got.digest == want.digest && got.errOnFail == want.errOnFail &&
+		return got.suiteID == want.suiteID && got.digest == want.digest &&
+			errors.Is(got.errOnFail, want.errOnFail) && errors.Is(want.errOnFail, got.errOnFail) &&
 			reflect.DeepEqual(got.pubkey, want.pubkey) && reflect.DeepEqual(got.sig, want.sig)
 	})
 }
