@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/big"
 	"reflect"
 	"testing"
@@ -63,8 +64,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SigQueueRollbackToEntryMark(t *testing.T) 
 						!bytes.Equal(got.pubkey, want.pubkey) ||
 						!bytes.Equal(got.sig, want.sig) ||
 						got.digest != want.digest ||
-						!errors.Is(got.errOnFail, want.errOnFail) ||
-						!errors.Is(want.errOnFail, got.errOnFail) {
+						got.errOnFail != want.errOnFail || got.settled != want.settled ||
+						got.err != want.err || got.panicValue != want.panicValue || got.panicked != want.panicked {
 						t.Fatalf("queue task %d after %s differs from entry state", i, stage)
 					}
 				}
@@ -1438,4 +1439,179 @@ func sortKeys32(a, b [32]byte) ([32]byte, [32]byte) {
 		return b, a
 	}
 	return a, b
+}
+
+func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
+	kp, other := requiredOrderedKeypair(t), requiredOrderedKeypair(t)
+	prefixDigest := [32]byte{0xee}
+	prefixSig, err := other.SignDigest32(prefixDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	dest := p2pkCovenantDataForPubkey(other.PubkeyBytes())
+	owner := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, cov))
+	whitelist := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, dest))
+	vault := encodeVaultCovenantData(owner, 1, [][32]byte{sha3_256(kp.PubkeyBytes())}, [][32]byte{whitelist})
+	for _, variant := range []string{"suite", "key", "selector", "missing", "vault_output", "vault_input"} {
+		for _, firstValid := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/firstValid%v", variant, firstValid), func(t *testing.T) {
+				tx := &Tx{Version: 1, TxNonce: 1,
+					Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xe1)}, {PrevTxid: hashWithPrefix(0xe2)}},
+					Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
+				}
+				if variant == "vault_input" {
+					tx.Inputs = append([]TxInput{{PrevTxid: hashWithPrefix(0xe0)}}, tx.Inputs...)
+				}
+				if variant == "vault_output" {
+					tx.Outputs[0].CovenantType = COV_TYPE_VAULT
+					tx.Outputs[0].CovenantData = encodeVaultCovenantData([32]byte{0xee}, 1, [][32]byte{sha3_256(kp.PubkeyBytes())}, [][32]byte{whitelist})
+				}
+				utxos := make(map[Outpoint]UtxoEntry)
+				for i, in := range tx.Inputs {
+					entry := UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte(nil), cov...)}
+					if variant == "vault_input" && i == 0 {
+						entry.CovenantType, entry.CovenantData = COV_TYPE_VAULT, append([]byte(nil), vault...)
+					}
+					utxos[Outpoint{Txid: in.PrevTxid}] = entry
+					tx.Witness = append(tx.Witness, signP2PKInputWitness(t, tx, uint32(i), 100, [32]byte{}, kp))
+				}
+				firstIndex := 0
+				if variant == "vault_input" {
+					firstIndex = 1
+				}
+				if !firstValid {
+					tx.Witness[firstIndex] = signP2PKInputWitness(t, tx, uint32(firstIndex), 100, [32]byte{0x77}, kp)
+				}
+				last := len(tx.Witness) - 1
+				wantCode, wantMsg := ErrorCode("TX_ERR_SIG_INVALID"), "CORE_P2PK signature invalid"
+				switch variant {
+				case "suite":
+					tx.Witness[last].SuiteID = 0xfe
+					if firstValid {
+						wantCode, wantMsg = "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set"
+					}
+				case "key":
+					tx.Witness[last].Pubkey = other.PubkeyBytes()
+					if firstValid {
+						wantMsg = "CORE_P2PK key binding mismatch"
+					}
+				case "selector", "vault_input":
+					tx.Witness[last].Signature[len(tx.Witness[last].Signature)-1] = 0x00
+					if firstValid || variant == "vault_input" {
+						wantCode, wantMsg = "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type"
+					}
+				case "missing":
+					delete(utxos, Outpoint{Txid: tx.Inputs[last].PrevTxid})
+					wantCode, wantMsg = "TX_ERR_MISSING_UTXO", "utxo not found"
+				case "vault_output":
+					wantCode, wantMsg = "TX_ERR_VAULT_OWNER_AUTH_REQUIRED", "missing owner-authorized input for CORE_VAULT creation"
+				}
+				before := cloneUtxoSet(utxos)
+				q := NewSigCheckQueue(1)
+				q.Push(0x01, other.PubkeyBytes(), prefixSig, prefixDigest, errors.New("enclosing prefix"))
+				prefix := q.tasks[0]
+				work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xe3), utxos, 200, 0, [32]byte{}, q, nil, nil)
+				assertTxErrCodeMsg(t, err, wantCode, wantMsg)
+				if work != nil || fee != (Uint128{}) || !reflect.DeepEqual(utxos, before) {
+					t.Fatal("rejection published work/fee or changed caller state")
+				}
+				if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) {
+					t.Fatal("WorkQ selected or erased enclosing prefix")
+				}
+				for _, task := range q.tasks[:cap(q.tasks)][1:] {
+					if !reflect.DeepEqual(task, sigCheckTask{}) {
+						t.Fatal("current suffix retains payload or outcome")
+					}
+				}
+				valid := &Tx{Version: 1, TxNonce: 2, Inputs: []TxInput{{PrevTxid: hashWithPrefix(0xe4)}}, Outputs: []TxOutput{{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: dest}}}
+				valid.Witness = []WitnessItem{signP2PKInputWitness(t, valid, 0, 100, [32]byte{}, kp)}
+				validState := map[Outpoint]UtxoEntry{{Txid: hashWithPrefix(0xe4)}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}
+				if next, fee, err := applyNonCoinbaseTxBasicWorkQ(valid, hashWithPrefix(0xe5), validState, 200, 0, [32]byte{}, q, nil, nil); err != nil || next == nil || fee != (Uint128{Lo: 10}) || q.Flush() != nil {
+					t.Fatalf("same queue valid next call: %v", err)
+				}
+			})
+		}
+	}
+	t.Run("nested threshold panic reconciliation", func(t *testing.T) {
+		key := sha3_256(kp.PubkeyBytes())
+		otherKey := sha3_256(other.PubkeyBytes())
+		thresholdKP := kp
+		if bytes.Compare(key[:], otherKey[:]) > 0 {
+			key, otherKey = otherKey, key
+			thresholdKP = other
+		}
+		keys := [][32]byte{key, otherKey}
+		multi := encodeMultisigCovenantData(2, keys)
+		tx := &Tx{Version: 1, TxNonce: 1,
+			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xf1)}, {PrevTxid: hashWithPrefix(0xf2)}},
+			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
+		}
+		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, thresholdKP), {SuiteID: SUITE_ID_SENTINEL}}
+		digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		utxos := map[Outpoint]UtxoEntry{
+			{Txid: hashWithPrefix(0xf1)}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov},
+			{Txid: hashWithPrefix(0xf2)}: {Value: 100, CovenantType: COV_TYPE_MULTISIG, CovenantData: multi},
+		}
+		for _, earlier := range []string{"error", "panic", "success"} {
+			for _, rawNil := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/rawNil%v", earlier, rawNil), func(t *testing.T) {
+					t.Setenv("GODEBUG", "panicnil=1")
+					laterPanic, earlierPanic := any(&struct{ label string }{"later"}), any(&struct{ label string }{"earlier"})
+					if rawNil {
+						laterPanic = nil
+					}
+					healthy := false
+					queueVerifierHook(t, func(_ string, _, _, msg []byte) (bool, error) {
+						if healthy {
+							return true, nil
+						}
+						if bytes.Equal(msg, digest0[:]) {
+							if earlier == "panic" {
+								panic(earlierPanic)
+							}
+							return earlier == "success", nil
+						}
+						panic(laterPanic)
+					})
+					q := NewSigCheckQueue(1)
+					queueFixtureTask(q, 0xee, errors.New("enclosing prefix"))
+					prefix, before := q.tasks[0], cloneUtxoSet(utxos)
+					invoke := func() {
+						work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xf3), utxos, 200, 0, [32]byte{}, q, nil, nil)
+						if earlier != "error" {
+							t.Fatal("later panic returned normally")
+						}
+						assertTxErrCodeMsg(t, err, "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+						if work != nil || fee != (Uint128{}) {
+							t.Fatal("suppressed later panic published work/fee")
+						}
+					}
+					if earlier == "error" {
+						invoke()
+					} else if earlier == "panic" {
+						requireQueuePanic(t, earlierPanic, invoke)
+					} else {
+						requireQueuePanic(t, laterPanic, invoke)
+					}
+					if q.Len() != 1 || !reflect.DeepEqual(q.tasks[0], prefix) || !reflect.DeepEqual(utxos, before) {
+						t.Fatal("nested panic changed caller state or enclosing prefix")
+					}
+					for _, task := range q.tasks[:cap(q.tasks)][1:] {
+						if !reflect.DeepEqual(task, sigCheckTask{}) {
+							t.Fatal("nested panic retained current task")
+						}
+					}
+					healthy = true
+					queueFixtureTask(q, 0xef, nil)
+					if q.Flush() != nil {
+						t.Fatal("same queue unusable after nested panic")
+					}
+				})
+			}
+		}
+	})
 }

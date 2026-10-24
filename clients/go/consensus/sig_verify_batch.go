@@ -31,11 +31,15 @@ type SigCheckQueue struct {
 }
 
 type sigCheckTask struct {
-	suiteID   uint8
-	pubkey    []byte
-	sig       []byte
-	digest    [32]byte
-	errOnFail error // error to return if this verification fails
+	suiteID    uint8
+	pubkey     []byte
+	sig        []byte
+	digest     [32]byte
+	errOnFail  error // error to return if this verification fails
+	settled    bool
+	err        error
+	panicValue any
+	panicked   bool
 }
 
 type sigCheckQueueMark struct {
@@ -90,7 +94,7 @@ func (q *SigCheckQueue) Push(suiteID uint8, pubkey, sig []byte, digest [32]byte,
 	})
 }
 
-// Len returns the number of pending verification tasks.
+// Len returns the number of retained verification tasks, including settled tasks.
 func (q *SigCheckQueue) Len() int {
 	if q == nil {
 		return 0
@@ -113,7 +117,7 @@ func (q *SigCheckQueue) rollbackTo(mark sigCheckQueueMark) {
 	q.tasks = q.tasks[:mark.len]
 }
 
-// Panics returns the number of panics recovered during the last Flush.
+// Panics returns the cumulative number of panics projected by multi-task Flush.
 func (q *SigCheckQueue) Panics() uint64 {
 	if q == nil {
 		return 0
@@ -121,46 +125,71 @@ func (q *SigCheckQueue) Panics() uint64 {
 	return q.panics.Load()
 }
 
-// Flush verifies all queued signatures in parallel and returns the first error
-// (by submission order) if any verification fails. Returns nil if all signatures
-// are valid.
-//
-// After Flush, the queue is empty and can be reused.
-//
-// Error ordering: the first recorded error by submission order is returned.
-// The early-abort flag means some higher-index tasks may be skipped, so the
-// returned error may not be the absolute lowest failing index if a lower-index
-// task was skipped due to concurrency. This is acceptable because:
-//   - The queue is only used during IBD, where error ordering is not consensus-critical
-//   - Both paths (sequential and parallel) agree on accept/reject outcomes
-//   - The block IS invalid regardless of which signature error is surfaced
+// evaluate records a task's original terminal outcome once. Each active worker
+// owns a distinct index; queue selection and mutation are externally confined.
+func (q *SigCheckQueue) evaluate(index int) {
+	t := &q.tasks[index]
+	if t.settled {
+		return
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			t.panicValue = recover()
+			t.panicked = true
+		}
+		t.settled = true
+	}()
+	if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
+		completed = true
+		return
+	}
+	ok, err := verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
+	switch {
+	case err != nil:
+		t.err = err
+	case !ok:
+		t.err = t.errOnFail
+	case q.cache != nil:
+		q.cache.Insert(t.suiteID, t.pubkey, t.sig, t.digest)
+	}
+	completed = true
+}
+
+// settleRange selects an already-produced interval without consuming it. Only
+// its needed ascending prefix is evaluated; raw panics remain raw panics.
+func (q *SigCheckQueue) settleRange(start, end sigCheckQueueMark) error {
+	if start.len < 0 || end.len < start.len || end.len > q.Len() {
+		panic("invalid signature queue range")
+	}
+	for i := start.len; i < end.len; i++ {
+		q.evaluate(i)
+		t := &q.tasks[i]
+		if t.panicked {
+			panic(t.panicValue)
+		}
+		if t.err != nil {
+			return t.err
+		}
+	}
+	return nil
+}
+
+// Flush completes every pending task, joins its workers and selects by original
+// submission index. The full entry cardinality determines panic policy: one
+// task propagates its raw panic; multiple tasks use the legacy fail-closed error.
+// All consumed task references are cleared, including on raw panic propagation.
 func (q *SigCheckQueue) Flush() error {
 	if q == nil || len(q.tasks) == 0 {
 		return nil
 	}
-	defer func() { q.tasks = q.tasks[:0] }()
+	defer q.rollbackTo(sigCheckQueueMark{})
 
 	n := len(q.tasks)
 
 	// Single task: verify inline to avoid goroutine overhead.
 	if n == 1 {
-		t := q.tasks[0]
-		if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
-			return nil // cache hit — previously verified valid
-		}
-		var ok bool
-		var err error
-		ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return t.errOnFail
-		}
-		if q.cache != nil {
-			q.cache.Insert(t.suiteID, t.pubkey, t.sig, t.digest)
-		}
-		return nil
+		return q.settleRange(sigCheckQueueMark{}, q.mark())
 	}
 
 	// Multiple tasks: fan out across workers.
@@ -177,9 +206,7 @@ func (q *SigCheckQueue) Flush() error {
 		workers = n
 	}
 
-	results := make([]error, n)
 	var wg sync.WaitGroup
-	var anyFailed atomic.Bool // early-abort: skip remaining sigs after first failure
 
 	taskCh := make(chan int, n)
 	for i := 0; i < n; i++ {
@@ -191,37 +218,8 @@ func (q *SigCheckQueue) Flush() error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			var currentIdx int
-			defer func() {
-				if r := recover(); r != nil {
-					q.panics.Add(1)
-					results[currentIdx] = txerr(TX_ERR_SIG_INVALID, "signature worker panic (fail-closed)")
-					anyFailed.Store(true)
-				}
-			}()
 			for idx := range taskCh {
-				currentIdx = idx
-				if anyFailed.Load() {
-					continue // drain channel without expensive crypto work
-				}
-				t := q.tasks[idx]
-				// Cache lookup: skip expensive crypto if previously verified valid.
-				if q.cache != nil && q.cache.Lookup(t.suiteID, t.pubkey, t.sig, t.digest) {
-					continue // cache hit — valid
-				}
-				var ok bool
-				var err error
-				ok, err = verifySigWithRegistry(t.suiteID, t.pubkey, t.sig, t.digest, q.registry)
-				if err != nil {
-					results[idx] = err
-					anyFailed.Store(true)
-				} else if !ok {
-					results[idx] = t.errOnFail
-					anyFailed.Store(true)
-				} else if q.cache != nil {
-					q.cache.Insert(t.suiteID, t.pubkey, t.sig, t.digest)
-				}
-				// results[idx] remains nil if valid
+				q.evaluate(idx)
 			}
 		}()
 	}
@@ -229,12 +227,19 @@ func (q *SigCheckQueue) Flush() error {
 	wg.Wait()
 
 	// Return first error by submission order (deterministic).
-	for _, err := range results {
-		if err != nil {
-			return err
+	var first error
+	for i := range q.tasks {
+		t := &q.tasks[i]
+		err := t.err
+		if t.panicked {
+			q.panics.Add(1)
+			err = txerr(TX_ERR_SIG_INVALID, "signature worker panic (fail-closed)")
+		}
+		if first == nil {
+			first = err
 		}
 	}
-	return nil
+	return first
 }
 
 // AssertFlushed returns an error if the queue has unflushed tasks. This is a
