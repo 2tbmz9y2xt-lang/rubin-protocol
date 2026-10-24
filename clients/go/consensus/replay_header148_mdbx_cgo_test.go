@@ -35,13 +35,18 @@ func (*replay148NilView) Inventory148V1(uint64) HeaderCandidateInventory148V1 {
 }
 func (*replay148NilView) ProtectV1(uint64) (bool, func()) { return true, func() {} }
 
+// replay148Same compares every field element-wise; nil and empty slices compare equal.
+func replay148Same(a, b HeaderCandidateInventory148V1) bool {
+	return a.Status == b.Status && a.Version == b.Version && a.Bytes == b.Bytes && slices.Equal(a.Tips, b.Tips) && slices.Equal(a.Headers, b.Headers)
+}
+
 func replay148Check(t *testing.T, name string, inv HeaderCandidateInventory148V1, limit uint64, want string) {
 	t.Helper()
 	before := inv
 	before.Tips, before.Headers = slices.Clone(inv.Tips), slices.Clone(inv.Headers)
 	view := &replay148View{inv: inv}
 	got, result := replayEntryInventory148(view, limit)
-	changed := !reflect.DeepEqual(got, before) || !reflect.DeepEqual(view.inv, before)
+	changed := !replay148Same(got, before) || !replay148Same(view.inv, before)
 	if result != want || changed || view.calls != 1 || view.limit != limit {
 		t.Fatalf("%s: result %q want %q, inventory changed %v, calls %d, limit %d want %d", name, result, want, changed, view.calls, view.limit, limit)
 	}
