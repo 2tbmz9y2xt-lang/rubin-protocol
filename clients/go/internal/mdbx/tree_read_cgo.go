@@ -4,6 +4,7 @@ package mdbx
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"math"
@@ -19,7 +20,8 @@ type TreeResolvedInputV1 struct {
 
 // TreeRootReadV1 binds one fresh noncommitting derivation to its selected parent.
 // Primitive is forward, DirectApply, UndoTransient and covered by a complete
-// current initial148 body. Inputs contain no caller-computed root or node hash.
+// current initial148 body. Inputs are strictly ordered by raw Txid then numeric
+// Vout, with no duplicate key, caller-computed root or node hash.
 type TreeRootReadV1 struct {
 	Primitive TreePrimitiveV1
 	Parent    TreeEndpointV1
@@ -30,7 +32,7 @@ type TreeRootReadV1 struct {
 // opens no transaction, emits no mutation and returns no digest on failure.
 // Parent rows are point-only; at height zero the parent is definitionally empty.
 func (r *Reader) DeriveTreeRootV1(account *OperationAccount, request TreeRootReadV1) (root [32]byte, err error) {
-	if err := r.treeRootReadInputV1(account, request); err != nil {
+	if err := r.CheckTreeRootReadV1(account, request); err != nil {
 		return root, err
 	}
 	n := treeStepBytesV1 + treeValueBytesV1 + treeNodeWorkBytesV1 + treeDescSizeV1*uint64(request.Primitive.Coverage.BlockMeta.EventCount)
@@ -46,7 +48,10 @@ func (r *Reader) DeriveTreeRootV1(account *OperationAccount, request TreeRootRea
 	return root, nil
 }
 
-func (r *Reader) treeRootReadInputV1(account *OperationAccount, request TreeRootReadV1) error {
+// CheckTreeRootReadV1 checks Reader, account and request admission without I/O,
+// reservation, observation, or changing their state. Derive repeats this check
+// with the final borrowed Inputs before reserving its work.
+func (r *Reader) CheckTreeRootReadV1(account *OperationAccount, request TreeRootReadV1) error {
 	if err := r.treeContext(); err != nil {
 		return err
 	}
@@ -104,13 +109,18 @@ func treeRootReadInputsV1(inputs []TreeResolvedInputV1) error {
 		if !treeUTXOValueOKV1(input.Value) {
 			return treeDeltaInvalidV1()
 		}
-		for _, previous := range inputs[:i] {
-			if previous.Outpoint == input.Outpoint {
-				return treeDeltaInvalidV1()
-			}
+		if i != 0 && treeRootOutpointCompareV1(inputs[i-1].Outpoint, input.Outpoint) >= 0 {
+			return treeDeltaInvalidV1()
 		}
 	}
 	return nil
+}
+
+func treeRootOutpointCompareV1(a, b TreeOutpointV1) int {
+	if order := bytes.Compare(a.Txid[:], b.Txid[:]); order != 0 {
+		return order
+	}
+	return cmp.Compare(a.Vout, b.Vout)
 }
 
 func (r *Reader) treeRootReadV1(request TreeRootReadV1, ledger treeLedgerV1) ([32]byte, error) {
@@ -222,18 +232,18 @@ func (o *treeRootOldV1) originalV1(key []byte, image treeImageV1) error {
 	var op TreeOutpointV1
 	copy(op.Txid[:], key[8:40])
 	op.Vout = binary.BigEndian.Uint32(key[40:])
-	for _, input := range o.request.Inputs {
-		if input.Outpoint == op {
-			if !image.present || !bytes.Equal(image.value, input.Value) {
-				return treeIntegrity(operationUpdate, nil)
-			}
-			return nil
+	inputs := o.request.Inputs
+	i := sort.Search(len(inputs), func(i int) bool { return treeRootOutpointCompareV1(inputs[i].Outpoint, op) >= 0 })
+	if i < len(inputs) && inputs[i].Outpoint == op {
+		if !image.present || !bytes.Equal(image.value, inputs[i].Value) {
+			return treeIntegrity(operationUpdate, nil)
 		}
+		return nil
 	}
 	want := treeDescV1{txid: op.Txid, vout: op.Vout}
 	// finishV1 sorts by identity then sequence. Zero is the minimum sequence;
 	// >= also keeps an exact sequence-zero match despite the comparator's +1.
-	i := sort.Search(len(o.rec.descs), func(i int) bool { return treeCompareDescV1(o.rec.descs[i], want) >= 0 })
+	i = sort.Search(len(o.rec.descs), func(i int) bool { return treeCompareDescV1(o.rec.descs[i], want) >= 0 })
 	if i < len(o.rec.descs) && treeSameKeyV1(&want, &o.rec.descs[i]) && o.rec.descs[i].flags&treeDescOldV1 != 0 {
 		return treeIntegrity(operationUpdate, nil)
 	}

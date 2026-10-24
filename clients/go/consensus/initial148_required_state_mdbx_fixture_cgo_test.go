@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
@@ -230,6 +231,37 @@ func irMalformedV1(t *testing.T) {
 }
 
 func irSelectorsV1(t *testing.T) {
+	for _, height := range []uint64{0, 6} {
+		w := btNew(t)
+		foreign, err := mdbx.CreateTreeV1(filepath.Join(t.TempDir(), "foreign"), w.cfg, [32]byte{8})
+		logicalMDBXAssert(t, err == nil, "selector foreign setup: %v", err)
+		t.Cleanup(func() { _ = foreign.Close() })
+		legacy := logicalMDBXStore(t)
+		logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+			return w.s.View(func(reader *mdbx.Reader) error {
+				parent := mdbx.TreeEndpointV1{}
+				if height != 0 {
+					parent = mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, CumulativeChainwork: [40]byte{39: 1}}
+				}
+				request := irPrepareV1(t, reader, a, irRequestV1(height, 56), parent)
+				for _, store := range []*mdbx.Store{foreign, legacy} {
+					logicalMDBXAssert(t, store.View(func(wrong *mdbx.Reader) error {
+						evidence, err := mdbx.FixtureSelectedDamage(store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() {
+							op, diagnostic := "update", "invalid tree delta"
+							if store == legacy {
+								op, diagnostic = "get", "tree Reader required"
+							}
+							irAdmissionAttemptV1(t, wrong, a, a, request, op, diagnostic)
+						})
+						logicalMDBXAssert(t, err == nil && evidence == (mdbx.SelectedDamageEvidence{}), "admission native selectors %+v/%v", evidence, err)
+						return nil
+					}) == nil, "selector wrong Reader scope")
+				}
+				return nil
+			})
+		}) == nil, "admission selector operation")
+		btReservationsReleased(t, w.owner)
+	}
 	for _, variant := range []string{"genesis", "earlier-error", "counter-copies"} {
 		t.Run(variant, func(t *testing.T) {
 			w := btNew(t)

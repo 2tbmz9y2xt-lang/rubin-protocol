@@ -7,6 +7,7 @@ import (
 	"crypto/sha3"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"testing"
@@ -106,6 +107,8 @@ func trWantRootV1(t *testing.T, frame []byte, height uint64) [32]byte {
 }
 
 func TestTreeRootReadV1(t *testing.T) {
+	t.Run("shared-admission", trAdmissionV1)
+	t.Run("sorted-inputs", trInputsV1)
 	t.Run("fresh-point-only-root", func(t *testing.T) {
 		s, _, o := tsNew(t)
 		request, _, frame := trRequestV1(t, 6)
@@ -200,7 +203,11 @@ func trOriginalV1(t *testing.T) {
 			case "coinbase":
 				request.Inputs[0].Value[len(value)-1] = 0
 			}
+			before := trInputSnapshotV1(request.Inputs)
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+				if !reflect.DeepEqual(request.Inputs, before) {
+					t.Fatal("original comparison changed borrowed inputs")
+				}
 				if variant == "equal" {
 					mustEnvironment(t, err)
 					if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) {
@@ -208,8 +215,8 @@ func trOriginalV1(t *testing.T) {
 					}
 					return
 				}
-				var engine *EngineError
-				if root != ([32]byte{}) || !errors.As(err, &engine) || engine.Class != EngineIntegrity || reader.usable() || any(reader.failure) != any(err) {
+				treeNativeIntegrity(t, err, operationUpdate, nil)
+				if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("original-input refusal root%x err%v active%v", root, err, reader.usable())
 				}
 			})
@@ -220,13 +227,13 @@ func trOriginalV1(t *testing.T) {
 func trGroupedRequestV1(t *testing.T, height uint64, paired bool) (TreeRootReadV1, []TreeEventV1, []TreeResolvedInputV1) {
 	t.Helper()
 	request, _, _ := trRequestV1(t, height)
-	ops := []TreeOutpointV1{{Txid: tdTxid(9), Vout: 1}, {Txid: tdTxid(9), Vout: 3}, {Txid: tdTxid(37)}}
+	ops := []TreeOutpointV1{{Txid: [32]byte{31: 255}, Vout: 255}, {Txid: [32]byte{31: 255}, Vout: 256}, {Txid: [32]byte{0: 1}}}
 	body := initial148NativeLiteral(t)
 	var events []TreeEventV1
 	inputs := make([]TreeResolvedInputV1, len(ops))
 	// Increasing output indexes, but key order differs from arrival order.
 	for _, i := range []int{2, 0, 1} {
-		frame := tdFrame(uint64(i+7), 0, []byte{byte(i)})
+		frame := tdFrame(7, 0, []byte{4})
 		events = append(events, TreeEventV1{Kind: 2, Outpoint: ops[i], FrameOffset: uint64(len(body)), FrameLength: uint32(len(frame))})
 		body = append(body, frame...)
 		inputs[i] = TreeResolvedInputV1{Outpoint: ops[i], Value: tdFormed(frame, height, 1)}
@@ -275,7 +282,11 @@ func trOriginalGroupsV1(t *testing.T) {
 					}
 				}
 			}
+			before := trInputSnapshotV1(request.Inputs)
 			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
+				if !reflect.DeepEqual(request.Inputs, before) {
+					t.Fatal("grouped original comparison changed borrowed inputs")
+				}
 				if variant == "equal" || variant == "CREATE-SPEND" {
 					mustEnvironment(t, err)
 					if root != sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")) || !reader.usable() {
@@ -284,10 +295,178 @@ func trOriginalGroupsV1(t *testing.T) {
 					return
 				}
 				treeNativeIntegrity(t, err, operationUpdate, nil)
-				if root != ([32]byte{}) || reader.usable() || any(reader.failure) != any(err) {
+				if root != ([32]byte{}) || err.(*EngineError).TreeObservation != nil || reader.usable() || any(reader.failure) != any(err) {
 					t.Fatalf("grouped missing R root%x err%v active%v", root, err, reader.usable())
 				}
 			})
+		})
+	}
+}
+
+func trAdmissionRefusedV1(t *testing.T, reader *Reader, account *OperationAccount, owner *OperationReservationOwner, request TreeRootReadV1, op engineOperation, diagnostic string) {
+	t.Helper()
+	active, failure, held := false, error(nil), reservationLive(owner)
+	if reader != nil {
+		active, failure = reader.active.Load(), reader.failure
+	}
+	for _, derive := range []bool{false, true} {
+		err := reader.CheckTreeRootReadV1(account, request)
+		if derive {
+			var root [32]byte
+			root, err = reader.DeriveTreeRootV1(account, request)
+			if root != ([32]byte{}) {
+				t.Fatal("admission refusal produced root")
+			}
+		}
+		treeNativeError(t, err, op, EngineClass("InvalidInput"), 22, diagnostic, nil)
+		if err.(*EngineError).TreeObservation != nil || reservationLive(owner) != held {
+			t.Fatal("admission observed or changed account charge")
+		}
+		if reader != nil && (reader.active.Load() != active || any(reader.failure) != any(failure)) {
+			t.Fatal("admission changed Reader state")
+		}
+	}
+}
+
+func trAdmissionV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	request, _, _ := trRequestV1(t, 0)
+	request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
+	var closed *OperationAccount
+	mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error { closed = a; return nil }))
+	var expired *Reader
+	mustEnvironment(t, s.View(func(r *Reader) error { expired = r; return nil }))
+	mustEnvironment(t, o.WithOperation(TreeOperation, func(account *OperationAccount) error {
+		for _, reader := range []*Reader{nil, {}, expired} {
+			trAdmissionRefusedV1(t, reader, nil, o, request, operationGet, "Reader is not active")
+			trAdmissionRefusedV1(t, reader, account, o, request, operationGet, "Reader is not active")
+		}
+		return s.View(func(reader *Reader) error {
+			copied := &Reader{self: reader, txn: reader.txn, dbis: reader.dbis, format: 3, databaseID: reader.databaseID, treeConfig: reader.treeConfig}
+			copied.active.Store(true)
+			trAdmissionRefusedV1(t, copied, nil, o, request, operationGet, "Reader is not active")
+			trAdmissionRefusedV1(t, copied, account, o, request, operationGet, "Reader is not active")
+			for _, invalid := range []*OperationAccount{nil, {}, closed} {
+				trAdmissionRefusedV1(t, reader, invalid, o, request, operationUpdate, "invalid tree delta")
+			}
+			mustEnvironment(t, o.WithOperation(LaneOperation, func(a *OperationAccount) error {
+				trAdmissionRefusedV1(t, reader, a, o, request, operationUpdate, "invalid tree delta")
+				return nil
+			}))
+			bad := request
+			bad.Parent.Kind = 1
+			mustEnvironment(t, account.WithReservation(402653184, func() error {
+				trAdmissionRefusedV1(t, reader, account, o, bad, operationUpdate, "invalid tree delta")
+				mustEnvironment(t, reader.CheckTreeRootReadV1(account, request))
+				return nil
+			}))
+			fresh, _, _ := trRequestV1(t, 0)
+			_, err := reader.DeriveTreeRootV1(account, fresh)
+			return err
+		})
+	}))
+	for _, tree := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "admission")
+		var foreign *Store
+		var err error
+		if tree {
+			foreign, err = CreateTreeV1(path, environmentConfig(), [32]byte{8})
+		} else {
+			foreign, err = Create(path, environmentConfig())
+		}
+		mustEnvironment(t, err)
+		for _, height := range []uint64{0, 6} {
+			request, _, _ := trRequestV1(t, height)
+			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return foreign.View(func(r *Reader) error {
+					if tree {
+						trAdmissionRefusedV1(t, r, a, o, request, operationUpdate, "invalid tree delta")
+					} else {
+						trAdmissionRefusedV1(t, r, nil, o, request, operationGet, "tree Reader required")
+						trAdmissionRefusedV1(t, r, a, o, request, operationGet, "tree Reader required")
+					}
+					return nil
+				})
+			}))
+		}
+		mustEnvironment(t, foreign.Close())
+	}
+}
+
+func trInputsV1(t *testing.T) {
+	for _, variant := range []string{"descending", "duplicate-equal", "duplicate-different", "malformed"} {
+		t.Run(variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			request, _, inputs := trGroupedRequestV1(t, 6, false)
+			trSeedV1(t, s, o, 0, tsRootKey(1), trBindingV1(t, 1, request.Parent))
+			request.Inputs = inputs
+			switch variant {
+			case "descending":
+				inputs[0], inputs[1] = inputs[1], inputs[0]
+			case "duplicate-equal", "duplicate-different":
+				inputs[1].Outpoint = inputs[0].Outpoint
+				if variant == "duplicate-different" {
+					inputs[1].Value = bytes.Clone(inputs[0].Value)
+					inputs[1].Value[0]++
+				}
+			case "malformed":
+				inputs[1].Value = []byte{1}
+			}
+			before := trInputSnapshotV1(request.Inputs)
+			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return s.View(func(r *Reader) error {
+					trAdmissionRefusedV1(t, r, a, o, request, operationUpdate, "invalid tree delta")
+					mustEnvironment(t, a.WithReservation(402653184, func() error {
+						trAdmissionRefusedV1(t, r, a, o, request, operationUpdate, "invalid tree delta")
+						return nil
+					}))
+					if !reflect.DeepEqual(request.Inputs, before) {
+						t.Fatal("native loan changed descriptors or suffixes")
+					}
+					return nil
+				})
+			}))
+		})
+	}
+}
+
+func trInputSnapshotV1(inputs []TreeResolvedInputV1) []TreeResolvedInputV1 {
+	copyInputs := append([]TreeResolvedInputV1(nil), inputs...)
+	for i := range copyInputs {
+		copyInputs[i].Value = bytes.Clone(copyInputs[i].Value)
+	}
+	return copyInputs
+}
+
+func BenchmarkTreeRootInputsV1(b *testing.B) {
+	for _, count := range []int{64, 512, 4096} {
+		inputs := make([]TreeResolvedInputV1, count)
+		keys := make([][]byte, count)
+		value := tdFormed(tdFrame(7, 0, []byte{4}), 5, 1)
+		for i := range inputs {
+			inputs[i] = TreeResolvedInputV1{Outpoint: TreeOutpointV1{Txid: tdTxid(9), Vout: uint32(i)}, Value: value}
+			keys[i] = tdUTXOKey(1, tdTxid(9), uint32(i))
+		}
+		b.Run(fmt.Sprintf("validate-%d", count), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if err := treeRootReadInputsV1(inputs); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("original-%d", count), func(b *testing.B) {
+			old := &treeRootOldV1{request: TreeRootReadV1{Inputs: inputs}}
+			image := treeImageV1{value: value, present: true}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := old.originalV1(keys[i%count], image); err != nil {
+					b.Fatal(err)
+				}
+			}
 		})
 	}
 }

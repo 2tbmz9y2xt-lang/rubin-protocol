@@ -8,6 +8,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"sync"
 	"testing"
@@ -243,6 +245,7 @@ func irResidualV1(t *testing.T) {
 }
 
 func TestInitial148RequiredOrigin(t *testing.T) {
+	t.Run("reversed-interleaved-inputs", irInputOrderV1)
 	t.Run("genesis-literal-root", func(t *testing.T) {
 		w := btNew(t)
 		request := irRequestV1(0, 19)
@@ -339,6 +342,7 @@ func irOriginsV1(t *testing.T) {
 }
 
 func TestInitial148RequiredScope(t *testing.T) {
+	t.Run("early-native-admission", irAdmissionV1)
 	t.Run("request-shapes", irShapesV1)
 	t.Run("last-use-and-one-shot", irLifetimeV1)
 	t.Run("capacity-before-callback", irCapacityV1)
@@ -346,6 +350,106 @@ func TestInitial148RequiredScope(t *testing.T) {
 	t.Run("concurrent-independent-scopes", irConcurrentV1)
 	t.Run("clean-Reader-reuse", irReusableV1)
 	logicalMDBXAssert(t, unsafe.Sizeof(initial148RequiredFactV1{}) <= 128 && unsafe.Sizeof(mdbx.TreeResolvedInputV1{}) <= 64 && unsafe.Sizeof(initial148RequiredScopeV1{}) < 4096, "captured fixed controls exceed their allowance")
+}
+
+func irAdmissionAttemptV1(t *testing.T, reader *mdbx.Reader, account, funding *mdbx.OperationAccount, request initial148RequiredRequestV1, operation, diagnostic string) {
+	t.Helper()
+	for _, held := range []uint64{0, 402653184} {
+		for _, result := range []error{nil, txerr(TX_ERR_MISSING_UTXO, "chosen callback result")} {
+			logicalMDBXAssert(t, funding.WithReservation(held, func() error {
+				calls := 0
+				err := withInitial148RequiredStateV1(reader, account, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error { calls++; return result })
+				var engine *mdbx.EngineError
+				logicalMDBXAssert(t, reflect.TypeOf(err) == reflect.TypeFor[*mdbx.EngineError]() && errors.As(err, &engine) && engine.Operation == operation && string(engine.Class) == "InvalidInput" && engine.Code == 22 && engine.Diagnostic == diagnostic && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil && calls == 0, "early admission tuple/callback: %v calls%d", err, calls)
+				return nil
+			}) == nil, "admission capacity witness setup")
+		}
+	}
+	logicalMDBXAssert(t, funding.WithReservation(402653184, func() error { return nil }) == nil, "admission retained account backing")
+}
+
+func irAdmissionV1(t *testing.T) {
+	w := btNew(t)
+	foreign, err := mdbx.CreateTreeV1(filepath.Join(t.TempDir(), "foreign"), w.cfg, [32]byte{8})
+	logicalMDBXAssert(t, err == nil, "foreign tree setup: %v", err)
+	t.Cleanup(func() { _ = foreign.Close() })
+	legacy := logicalMDBXStore(t)
+	var expired *mdbx.Reader
+	logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { expired = r; return nil }) == nil, "expired Reader setup")
+	var closed *mdbx.OperationAccount
+	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error { closed = a; return nil }) == nil, "closed account setup")
+	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error {
+		return w.s.View(func(reader *mdbx.Reader) error {
+			for _, height := range []uint64{0, 6} {
+				parent := mdbx.TreeEndpointV1{}
+				if height != 0 {
+					parent = mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, CumulativeChainwork: [40]byte{39: 1}}
+				}
+				request := irPrepareV1(t, reader, a, irRequestV1(height, 52), parent)
+				for _, store := range []*mdbx.Store{foreign, legacy} {
+					logicalMDBXAssert(t, store.View(func(wrong *mdbx.Reader) error {
+						op, diagnostic := "update", "invalid tree delta"
+						if store == legacy {
+							op, diagnostic = "get", "tree Reader required"
+						}
+						irAdmissionAttemptV1(t, wrong, a, a, request, op, diagnostic)
+						return nil
+					}) == nil, "admission changed foreign Reader/Store")
+				}
+				irAdmissionAttemptV1(t, expired, a, a, request, "get", "Reader is not active")
+				for _, invalid := range []*mdbx.OperationAccount{{}, closed} {
+					irAdmissionAttemptV1(t, reader, invalid, a, request, "update", "invalid tree delta")
+				}
+				logicalMDBXAssert(t, w.owner.WithOperation(mdbx.LaneOperation, func(lane *mdbx.OperationAccount) error {
+					irAdmissionAttemptV1(t, reader, lane, a, request, "update", "invalid tree delta")
+					return nil
+				}) == nil, "wrong-kind account setup")
+				logicalMDBXAssert(t, withInitial148RequiredStateV1(reader, a, request, func(logicalStateView, func() initial148RootReadOutcomeV1) error { return nil }) == nil, "admission disarmed same clean Reader/account")
+			}
+			return nil
+		})
+	}) == nil, "early admission operation")
+	btReservationsReleased(t, w.owner)
+}
+
+func irInputOrderV1(t *testing.T) {
+	w := btNew(t)
+	frames := make([][]byte, 257)
+	for i := range frames {
+		frames[i] = btFrame(9, 0, []byte{4})
+	}
+	seedTx := btTransaction(53, 0, nil, frames, nil, []byte{0}, nil)
+	seed := btRequest(btBody(148, 53, [32]byte{}, seedTx), 3)
+	seedResult, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
+	logicalMDBXAssert(t, seedResult.err == nil, "ordered R seed: %v", seedResult.err)
+	ops := []Outpoint{{Txid: seedTx.id, Vout: 255}, {Txid: seedTx.id, Vout: 256}}
+	coinbase := btTransaction(54, 0, nil, [][]byte{btFrame(10, 0, nil)}, nil, []byte{0}, nil)
+	spend := btTransaction(55, 0, ops, nil, nil, []byte{0}, nil)
+	request := btRequest(btBody(148, 54, seed.Block, coinbase, spend), 4)
+	request.Kind, request.Undo = 1, 2
+	body := bytes.Clone(request.Raw)
+	entries := make(map[Outpoint]UtxoEntry)
+	for i := range 255 {
+		entries[Outpoint{Txid: seedTx.id, Vout: uint32(i)}] = UtxoEntry{Value: 9, CovenantData: []byte{4}, CreationHeight: 3, CreatedByCoinbase: true}
+	}
+	entries[Outpoint{Txid: coinbase.id}] = UtxoEntry{Value: 10, CreationHeight: 4, CreatedByCoinbase: true}
+	want := canonicalUTXORoot(entries)
+	err := irRunV1(t, w, request, seed.Endpoint, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+		logicalMDBXAssert(t, view.Counters().kind == logicalStateCountersPresent, "ordered R counters")
+		missing := Outpoint{Txid: [32]byte{99}}
+		for _, op := range []Outpoint{ops[1], missing, ops[0], ops[1], missing, ops[0]} {
+			row := view.Lookup(op)
+			logicalMDBXAssert(t, row.cause == nil && (row.kind == logicalStateRowPresent) == (op != missing), "interleaved R lookup %v", row.cause)
+		}
+		scope := view.(*initial148RequiredScopeV1)
+		first := scope.facts[0].original
+		out := derive()
+		logicalMDBXAssert(t, out.derived && out.cause == nil && out.root == want, "owned input sort root%x want%x cause%v", out.root, want, out.cause)
+		logicalMDBXAssert(t, len(scope.facts) == 3 && scope.facts[0].outpoint == ops[1] && bytes.Equal(first, btValue(frames[256], 3, true)) && &scope.facts[0].original[0] == &first[0], "sort reordered facts or replaced first suffix")
+		return out.cause
+	})
+	logicalMDBXAssert(t, err == nil, "ordered R derivation: %v", err)
+	logicalMDBXAssert(t, bytes.Equal(request.Raw, body), "descriptor sort changed captured transaction/input order")
 }
 
 func irReusableV1(t *testing.T) {
@@ -411,7 +515,7 @@ func irCapacityV1(t *testing.T) {
 }
 
 func irShapesV1(t *testing.T) {
-	variants := []string{"nil-reader", "nil-account", "nil-callback", "nil-source", "foreign-source", "nil-coverage", "raw-copy", "raw-length", "coverage-backing", "database", "generation", "block", "height", "header", "body-kind", "meta", "direction", "kind", "undo", "endpoint", "parent", "multiple-invalid"}
+	variants := []string{"nil-reader", "nil-account", "nil-callback", "nil-source", "foreign-source", "nil-coverage", "raw-copy", "raw-length", "coverage-backing", "database", "generation", "block", "height", "header", "body-kind", "meta", "direction", "kind", "undo", "endpoint", "parent", "multiple-invalid", "invalid-shape-inactive"}
 	for _, variant := range variants {
 		t.Run(variant, func(t *testing.T) {
 			w := btNew(t)
@@ -468,6 +572,9 @@ func irShapesV1(t *testing.T) {
 					case "multiple-invalid":
 						captured.Source.Raw = nil
 						captured.Primitive.Coverage = nil
+					case "invalid-shape-inactive":
+						reader = &mdbx.Reader{}
+						captured.Source.Raw = nil
 					}
 					err := withInitial148RequiredStateV1(reader, a, captured, callback)
 					irFailureV1(t, err, logicalStateFailureLocalInvariant, "invalid required state request")

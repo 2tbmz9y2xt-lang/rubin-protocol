@@ -263,6 +263,41 @@ func trNodeV1(t *testing.T) {
 }
 
 func trSelectorsV1(t *testing.T) {
+	for _, variant := range []string{"descending", "duplicate-equal", "duplicate-different", "malformed"} {
+		t.Run("sorted-invalid-"+variant, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			request, _, inputs := trGroupedRequestV1(t, 6, false)
+			switch variant {
+			case "descending":
+				inputs[0], inputs[1] = inputs[1], inputs[0]
+			case "duplicate-equal", "duplicate-different":
+				inputs[1].Outpoint = inputs[0].Outpoint
+				if variant == "duplicate-different" {
+					inputs[1].Value[0]++
+				}
+			case "malformed":
+				inputs[1].Value = []byte{1}
+			}
+			request.Inputs = inputs
+			request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return s.View(func(r *Reader) error {
+					evidence, err := FixtureSelectedDamage(s, o, SelectedDamageProbeOnly, 0, nil, func() {
+						trAdmissionRefusedV1(t, r, a, o, request, operationUpdate, "invalid tree delta")
+						mustEnvironment(t, a.WithReservation(402653184, func() error {
+							trAdmissionRefusedV1(t, r, a, o, request, operationUpdate, "invalid tree delta")
+							return nil
+						}))
+					})
+					mustEnvironment(t, err)
+					if evidence != (SelectedDamageEvidence{}) {
+						t.Fatalf("sorted input refusal native selectors %+v", evidence)
+					}
+					return nil
+				})
+			}))
+		})
+	}
 	for _, height := range []uint64{0, 6} {
 		t.Run(fmt.Sprint(height), func(t *testing.T) {
 			s, _, o := tsNew(t)

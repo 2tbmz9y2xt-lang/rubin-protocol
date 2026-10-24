@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"sort"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -49,6 +50,9 @@ type initial148RequiredScopeV1 struct {
 func withInitial148RequiredStateV1(reader *mdbx.Reader, account *mdbx.OperationAccount, request initial148RequiredRequestV1, use func(logicalStateView, func() initial148RootReadOutcomeV1) error) error {
 	if reader == nil || account == nil || use == nil || !initial148RequiredShapeV1(request) {
 		return localLogicalStateFailure("invalid required state request")
+	}
+	if err := reader.CheckTreeRootReadV1(account, mdbx.TreeRootReadV1{Primitive: request.Primitive, Parent: request.Parent}); err != nil {
+		return err
 	}
 	events := uint64(request.Source.coverage.BlockMeta.EventCount)
 	if events > (math.MaxUint64-69656)/196824 || events > uint64(math.MaxInt)/128 {
@@ -287,6 +291,9 @@ func (s *initial148RequiredScopeV1) deriveV1() initial148RootReadOutcomeV1 {
 	if !initial148RequiredShapeV1(s.request) {
 		return initial148RequiredOutcomeV1(s.failV1(localLogicalStateFailure("invalid required state request")))
 	}
+	sort.Slice(s.inputs, func(i, j int) bool {
+		return logicalOutpointLess(Outpoint(s.inputs[i].Outpoint), Outpoint(s.inputs[j].Outpoint))
+	})
 	root, err := s.reader.DeriveTreeRootV1(s.account, mdbx.TreeRootReadV1{Primitive: s.request.Primitive, Parent: s.request.Parent, Inputs: s.inputs})
 	if err != nil {
 		return initial148RequiredOutcomeV1(s.failV1(err))
