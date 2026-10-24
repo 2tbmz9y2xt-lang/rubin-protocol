@@ -1482,6 +1482,12 @@ fn section16_global_family_order_public_precompute() {
             "coinbase prevout encoding forbidden in non-coinbase",
         ),
         (
+            vec![script.clone(), cb.clone()],
+            false,
+            ErrorCode::TxErrParse,
+            "coinbase prevout encoding forbidden in non-coinbase",
+        ),
+        (
             vec![seq.clone(), script],
             false,
             ErrorCode::TxErrParse,
