@@ -1060,8 +1060,12 @@ func TestSigCheckQueue_PanicDomains(t *testing.T) {
 					if !q.tasks[0].settled || !q.tasks[0].panicked || q.tasks[0].panicValue != panicValue || q.tasks[0].err != nil {
 						t.Fatal("raw-panic terminal shape")
 					}
-				} else if q.settleRange(sigCheckQueueMark{}, q.mark()) != first || q.settleRange(sigCheckQueueMark{}, q.mark()) != first {
-					t.Fatal("earlier error lost to later panic")
+				} else {
+					for range 2 {
+						if q.settleRange(sigCheckQueueMark{}, q.mark()) != first {
+							t.Fatal("earlier error lost to later panic")
+						}
+					}
 				}
 				if calls != 1 || q.Panics() != 0 || (n > 1 && q.tasks[1].settled) {
 					t.Fatalf("serial selection executed later task: calls=%d", calls)
