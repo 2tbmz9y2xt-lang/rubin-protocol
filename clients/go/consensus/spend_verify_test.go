@@ -123,6 +123,72 @@ func TestValidateP2PKSpend_OkAndFailureModes(t *testing.T) {
 	}
 }
 
+func TestP2PKSuiteErrorOrder(t *testing.T) {
+	tx, inputIndex, inputValue, chainID := testSighashContextTx()
+	rotation := RotationProvider(&mockRotationProvider{h2: 1})
+	params := canonicalDefaultRuntimeSuiteParams()
+	params.SuiteID = 0x02
+	registry := NewSuiteRegistryFromParams([]SuiteParams{canonicalDefaultRuntimeSuiteParams(), params})
+	for _, name := range []string{
+		"suite_mismatch", "key_binding", "sighash_type", "length_0", "length_1",
+		"length_32", "length_34", "membership", "pubkey_length", "signature_length", "matching_suite",
+	} {
+		t.Run(name, func(t *testing.T) {
+			rp := rotation
+			w := WitnessItem{SuiteID: 0x02, Pubkey: make([]byte, 2592), Signature: make([]byte, 4628)}
+			w.Signature[4627] = 0x01
+			switch name {
+			case "sighash_type":
+				w.Signature[4627] = 0x04
+			case "pubkey_length":
+				w.Pubkey = w.Pubkey[:2591]
+			case "signature_length":
+				w.Signature = w.Signature[1:]
+			}
+			entry := p2pkEntryForPub(t, 0x01, w.Pubkey)
+			code, message := ErrorCode("TX_ERR_SIG_ALG_INVALID"), "CORE_P2PK covenant_data suite_id mismatch"
+			switch name {
+			case "key_binding":
+				entry.CovenantData[1] ^= 1
+			case "matching_suite":
+				entry.CovenantData[0] = 0x02
+				entry.CovenantData[1] ^= 1
+				code, message = "TX_ERR_SIG_INVALID", "CORE_P2PK key binding mismatch"
+			case "length_0", "length_1", "length_32", "length_34":
+				length := map[string]int{"length_0": 0, "length_1": 1, "length_32": 32, "length_34": 34}[name]
+				entry.CovenantData = append(entry.CovenantData, 0)[:length]
+				if length == 34 {
+					entry.CovenantData[0] = w.SuiteID
+				}
+				code, message = "TX_ERR_COVENANT_TYPE_INVALID", "CORE_P2PK covenant_data invalid"
+			case "membership":
+				rp = DefaultRotationProvider{}
+				code, message = "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set"
+			case "pubkey_length", "signature_length":
+				code, message = "TX_ERR_SIG_NONCANONICAL", "non-canonical witness item lengths"
+			}
+			env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, blockHeight: 1, rotation: rp, registry: registry}
+			for _, route := range []struct {
+				name string
+				run  func() error
+			}{
+				{"direct", func() error { return validateP2PKSpendAtHeight(testP2PKSpendCheck(entry, w, env)) }},
+				{"queued", func() error {
+					return validateP2PKSpendQ(entry, w, tx, inputIndex, inputValue, chainID, 1, nil, nil, rp, registry)
+				}},
+			} {
+				t.Run(route.name, func(t *testing.T) {
+					err := route.run()
+					assertTxErrCodeMsg(t, err, code, message)
+					if te, ok := err.(*TxError); !ok || te.Cause() != TxErrorCauseUnspecified {
+						t.Fatalf("expected plain uncaused TxError, got %T: %v", err, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestValidateThresholdSigSpend_MismatchAndThresholdLogic(t *testing.T) {
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
 	env := testSpendSigEnv{tx: tx, inputIndex: inputIndex, inputValue: inputValue, chainID: chainID, context: "ctx"}
