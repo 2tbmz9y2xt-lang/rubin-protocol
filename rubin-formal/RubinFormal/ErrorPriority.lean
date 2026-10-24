@@ -655,10 +655,10 @@ theorem perinput_duplicate_live : ∀ (tx : UtxoBasicV1.Tx) (height : Nat) (i : 
   have hScriptSigEq : i.scriptSig.size = 0 := by
     simpa only [bne, Bool.not_eq_false', Nat.beq_eq_true_eq] using hScriptSig
   have hEmpty :
-      (Std.RBSet.empty : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).contains
+      (∅ : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).contains
         (UtxoBasicV1.txInOutpoint i) = false := rfl
   have hSeen :
-      ((Std.RBSet.empty : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).insert
+      ((∅ : Std.RBSet UtxoBasicV1.Outpoint UtxoBasicV1.cmpOutpoint).insert
         (UtxoBasicV1.txInOutpoint i)).contains (UtxoBasicV1.txInOutpoint i) = true := by
     change (match UtxoBasicV1.cmpOutpoint (UtxoBasicV1.txInOutpoint i) (UtxoBasicV1.txInOutpoint i) with
       | .lt => none
