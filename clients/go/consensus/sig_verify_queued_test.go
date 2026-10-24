@@ -1,7 +1,8 @@
 package consensus
 
 import (
-	"strings"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -323,9 +324,9 @@ func TestValidateThresholdSigSpendQ_RollbackPreservesExistingQueue(t *testing.T)
 	}
 }
 
-func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) {
-	kp1 := mustMLDSA87Keypair(t)
-	kp2 := mustMLDSA87Keypair(t)
+func TestValidateThresholdSigSpendQ_OrderedResults(t *testing.T) {
+	kp1 := requiredOrderedKeypair(t)
+	kp2 := requiredOrderedKeypair(t)
 	keyID1 := sha3_256(kp1.PubkeyBytes())
 	keyID2 := sha3_256(kp2.PubkeyBytes())
 
@@ -336,20 +337,23 @@ func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) 
 	invalidSighashSig := append([]byte(nil), sig2...)
 	invalidSighashSig[len(invalidSighashSig)-1] = 0x00
 
-	existingKP := mustMLDSA87Keypair(t)
+	existingKP := requiredOrderedKeypair(t)
 	existingDigest := [32]byte{0xA6}
 	existingSig, err := existingKP.SignDigest32(existingDigest)
 	if err != nil {
 		t.Fatalf("existing sign: %v", err)
 	}
 
+	badFirstSig := signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, [32]byte{0x77}, SIGHASH_ALL)
 	validFirst := WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp1.PubkeyBytes(), Signature: sig1}
 	tests := []struct {
 		name       string
 		keys       [][32]byte
 		second     WitnessItem
+		rotation   RotationProvider
 		wantErr    ErrorCode
 		wantErrMsg string
+		wantCause  TxErrorCause
 	}{
 		{
 			name:       "sentinel_with_data",
@@ -363,7 +367,21 @@ func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) 
 			keys:       [][32]byte{keyID1, keyID2},
 			second:     WitnessItem{SuiteID: 0xFE, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
 			wantErr:    TX_ERR_SIG_ALG_INVALID,
-			wantErrMsg: "suite not in native spend set",
+			wantErrMsg: "TEST-MULTISIG suite not in native spend set",
+		},
+		{
+			name:       "sentinel_with_signature_data",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_SENTINEL, Signature: []byte{0x01}},
+			wantErr:    "TX_ERR_PARSE",
+			wantErrMsg: "SENTINEL witness must be keyless",
+		},
+		{
+			name:       "noncanonical_pubkey_length",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes()[:ML_DSA_87_PUBKEY_BYTES-1], Signature: sig2},
+			wantErr:    "TX_ERR_SIG_NONCANONICAL",
+			wantErrMsg: "non-canonical witness item lengths",
 		},
 		{
 			name:       "noncanonical_lengths",
@@ -377,7 +395,7 @@ func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) 
 			keys:       [][32]byte{keyID1, {0xEE}},
 			second:     WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
 			wantErr:    TX_ERR_SIG_INVALID,
-			wantErrMsg: "key binding mismatch",
+			wantErrMsg: "TEST-MULTISIG key binding mismatch",
 		},
 		{
 			name:       "invalid_sighash_type",
@@ -386,36 +404,87 @@ func TestValidateThresholdSigSpendQ_RollbackOnLateThresholdErrors(t *testing.T) 
 			wantErr:    TX_ERR_SIGHASH_TYPE_INVALID,
 			wantErrMsg: "invalid sighash_type",
 		},
+		{
+			name:       "unregistered_suite",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: 0x02, Pubkey: kp2.PubkeyBytes(), Signature: sig2},
+			rotation:   &nativeSuiteAvailabilityRotation{spend: NewNativeSuiteSet(0x01, 0x02)},
+			wantErr:    "TX_ERR_SIG_ALG_INVALID",
+			wantErrMsg: "TEST-MULTISIG suite not registered",
+			wantCause:  TxErrorCauseNativeSuiteRegistryEntryUnavailable,
+		},
+		{
+			name:       "threshold_not_met",
+			keys:       [][32]byte{keyID1, keyID2},
+			second:     WitnessItem{SuiteID: SUITE_ID_SENTINEL},
+			wantErr:    "TX_ERR_SIG_INVALID",
+			wantErrMsg: "TEST-MULTISIG threshold not met",
+		},
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			q := NewSigCheckQueue(1)
-			q.Push(SUITE_ID_ML_DSA_87, existingKP.PubkeyBytes(), existingSig, existingDigest, txerr(TX_ERR_SIG_INVALID, "existing invalid"))
-			preLen := q.Len()
-
-			err := validateThresholdSigSpendQ(tc.keys, 2, []WitnessItem{validFirst, tc.second}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
-			if err == nil {
-				t.Fatal("expected late threshold error")
-			}
-			if !isTxErrCode(err, tc.wantErr) {
-				t.Fatalf("expected %s, got: %v", tc.wantErr, err)
-			}
-			if tc.wantErrMsg != "" && !strings.Contains(err.Error(), tc.wantErrMsg) {
-				t.Fatalf("expected error containing %q, got: %v", tc.wantErrMsg, err)
-			}
-			if q.Len() != preLen {
-				t.Fatalf("expected rollback to pre-call queue length %d, got %d", preLen, q.Len())
-			}
-			if err := q.Flush(); err != nil {
-				t.Fatalf("pre-existing queued task should still flush: %v", err)
-			}
-		})
+		for _, firstValid := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/firstValid%v", tc.name, firstValid), func(t *testing.T) {
+				q := NewSigCheckQueue(1)
+				q.Push(SUITE_ID_ML_DSA_87, existingKP.PubkeyBytes(), existingSig, existingDigest, txerr(TX_ERR_SIG_INVALID, "existing invalid"))
+				prefix := q.tasks[0]
+				prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+				prefix.sig = append([]byte(nil), prefix.sig...)
+				first := validFirst
+				wantCode, wantMsg := ErrorCode("TX_ERR_SIG_INVALID"), "TEST-MULTISIG signature invalid"
+				wantCause := TxErrorCauseUnspecified
+				if firstValid {
+					wantCode, wantMsg = tc.wantErr, tc.wantErrMsg
+					wantCause = tc.wantCause
+				} else {
+					first.Signature = badFirstSig
+				}
+				err := validateThresholdSigSpendQ(tc.keys, 2, []WitnessItem{first, tc.second}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", tc.rotation, nil)
+				mustTxErrorCause(t, err, wantCode, wantMsg, wantCause)
+				if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) {
+					t.Fatal("threshold selected or changed enclosing prefix")
+				}
+				if !queueFixtureTaskEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
+					t.Fatal("threshold retained rejected key payload/outcome")
+				}
+				if err := validateThresholdSigSpendQ([][32]byte{keyID1}, 1, []WitnessItem{validFirst}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil); err != nil {
+					t.Fatalf("same queue valid next threshold: %v", err)
+				}
+				if err := q.Flush(); err != nil {
+					t.Fatalf("retained prefix and next valid helper: %v", err)
+				}
+			})
+		}
 	}
+	t.Run("private panic cleanup and valid next helper", func(t *testing.T) {
+		panicValue := &struct{ label string }{"threshold panic"}
+		panicNow := true
+		queueVerifierHook(t, func(string, []byte, []byte, []byte) (bool, error) {
+			if panicNow {
+				panic(panicValue)
+			}
+			return true, nil
+		})
+		q := NewSigCheckQueue(1)
+		q.Push(0x01, existingKP.PubkeyBytes(), existingSig, existingDigest, errors.New("prior prefix"))
+		prefix := q.tasks[0]
+		prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+		prefix.sig = append([]byte(nil), prefix.sig...)
+		requireQueuePanic(t, panicValue, func() {
+			_ = validateThresholdSigSpendQ([][32]byte{keyID1, keyID2}, 2, []WitnessItem{validFirst, {SuiteID: SUITE_ID_SENTINEL}}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil)
+		})
+		if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) || !queueFixtureTaskEqual(q.tasks[:cap(q.tasks)][1], sigCheckTask{}) {
+			t.Fatal("panic did not clear only threshold suffix")
+		}
+		panicNow = false
+		if err := validateThresholdSigSpendQ([][32]byte{keyID1}, 1, []WitnessItem{validFirst}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST-MULTISIG", nil, nil); err != nil || q.Flush() != nil {
+			t.Fatalf("same queue invalid after panic: %v", err)
+		}
+	})
 }
 
 func TestValidateThresholdSigSpendQ_SlotMismatch(t *testing.T) {
-	kp1 := mustMLDSA87Keypair(t)
+	kp1 := requiredOrderedKeypair(t)
 	keyID1 := sha3_256(kp1.PubkeyBytes())
 
 	tx, inputIndex, inputValue, chainID := testSighashContextTx()
@@ -428,12 +497,23 @@ func TestValidateThresholdSigSpendQ_SlotMismatch(t *testing.T) {
 	}
 
 	q := NewSigCheckQueue(1)
-	err := validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
-	if err == nil {
-		t.Fatal("expected slot mismatch error")
+	digest := [32]byte{0x44}
+	sig, err := kp1.SignDigest32(digest)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !isTxErrCode(err, TX_ERR_PARSE) {
-		t.Fatalf("expected TX_ERR_PARSE, got: %v", err)
+	q.Push(0x01, kp1.PubkeyBytes(), sig, digest, errors.New("prior prefix"))
+	prefix := q.tasks[0]
+	prefix.pubkey = append([]byte(nil), prefix.pubkey...)
+	prefix.sig = append([]byte(nil), prefix.sig...)
+	err = validateThresholdSigSpendQ(keys, 1, ws, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil)
+	assertTxErrCodeMsg(t, err, "TX_ERR_PARSE", "witness slot assignment mismatch")
+	if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prefix) {
+		t.Fatal("slot mismatch selected or changed enclosing prefix")
+	}
+	next := WitnessItem{SuiteID: 0x01, Pubkey: kp1.PubkeyBytes(), Signature: signDigestWithSighashType(t, kp1, tx, inputIndex, inputValue, chainID, SIGHASH_ALL)}
+	if err := validateThresholdSigSpendQ(keys, 1, []WitnessItem{next}, tx, inputIndex, inputValue, chainID, 0, cache, q, "TEST", nil, nil); err != nil || q.Flush() != nil {
+		t.Fatalf("same queue valid after slot mismatch: %v", err)
 	}
 }
 

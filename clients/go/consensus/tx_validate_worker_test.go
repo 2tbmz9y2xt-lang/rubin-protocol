@@ -1,10 +1,13 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -910,5 +913,52 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 	err := validateTestInputSpendQ(entry, []WitnessItem{{}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for HTLC wrong slot count")
+	}
+}
+
+func TestValidateTxLocal_QueueResult(t *testing.T) {
+	kp := requiredOrderedKeypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	tx := &Tx{
+		Version: 1, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0x31)}, {PrevTxid: hashWithPrefix(0x32)}},
+		Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: cov}},
+	}
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, kp)}
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, valid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("valid%v", valid), func(t *testing.T) {
+			var calls atomic.Int32
+			queueVerifierHook(t, func(_ string, _, _, msg []byte) (bool, error) {
+				calls.Add(1)
+				if !valid && !bytes.Equal(msg, digest0[:]) {
+					panic("later task panic must lose to lower original error")
+				}
+				return valid, nil
+			})
+			tvc := TxValidationContext{
+				TxIndex: 7, Tx: tx,
+				ResolvedInputs: []UtxoEntry{{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}, {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}},
+				WitnessStart:   0, WitnessEnd: 2, SighashCache: cache, Fee: Uint128{Hi: 1, Lo: 10},
+			}
+			result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
+			if result.Valid != valid || result.Fee != (Uint128{Hi: 1, Lo: 10}) || result.TxIndex != 7 || result.SigCount != 2 || calls.Load() != 2 {
+				t.Fatalf("worker queue projection: result=%+v calls=%d", result, calls.Load())
+			}
+			if valid {
+				if result.Err != nil {
+					t.Fatal(result.Err)
+				}
+			} else {
+				assertTxErrCodeMsg(t, result.Err, "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+			}
+		})
 	}
 }

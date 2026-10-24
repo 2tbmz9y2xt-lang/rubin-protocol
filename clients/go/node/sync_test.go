@@ -249,7 +249,7 @@ func TestValidateParallelValidationMode(t *testing.T) {
 	}
 }
 
-func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
+func TestPVShadowFirstError_SequentialTruthPreserved(t *testing.T) {
 	target := consensus.POW_LIMIT
 	cfg := DefaultSyncConfig(&target, devnetGenesisChainID, "")
 	// Storeless engine: a stock devnet identity now fails closed rather than
@@ -260,13 +260,19 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	cfg.ParallelValidationMode = "shadow"
 	cfg.PVShadowMaxSamples = 2
 
-	signer := mustNodeMLDSA87Keypair(t)
+	signer, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		t.Fatalf("required ML-DSA-87 backend: %v", err)
+	}
+	t.Cleanup(func() { signer.Close() })
 	keyID := sha3.Sum256(signer.PubkeyBytes())
 	fromAddr, err := ParseMineAddress(hex.EncodeToString(keyID[:]))
 	if err != nil {
 		t.Fatalf("ParseMineAddress: %v", err)
 	}
 	st, ops := testSpendableChainState(fromAddr, []uint64{100})
+	st.AlreadyGenerated = consensus.Uint128FromU64(123)
+	before := cloneChainState(st)
 
 	engine, err := NewSyncEngine(st, nil, cfg)
 	if err != nil {
@@ -276,7 +282,7 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	engine.SetStderr(&stderr)
 	inOp := ops[0]
 
-	// tx1: valid structure, but corrupt the signature so sequential path returns TX_ERR_SIG_INVALID.
+	// tx1 has a canonical signature for a different digest domain.
 	changeAddress := append([]byte(nil), fromAddr...)
 	toAddress := append([]byte(nil), fromAddr...)
 	tx1 := mustBuildSignedTransferTxForSyncTest(t, engine.chainState.Utxos, []consensus.Outpoint{inOp}, 1, 0, 1, signer, changeAddress, toAddress)
@@ -284,11 +290,20 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTx(tx1): %v", err)
 	}
-	// Flip one byte in the first witness signature (P2PK => witness[0]).
 	if len(parsed1.Witness) == 0 || len(parsed1.Witness[0].Signature) == 0 {
 		t.Fatal("expected witness signature in tx1")
 	}
-	parsed1.Witness[0].Signature[0] ^= 0xFF
+	wrongChainID := devnetGenesisChainID
+	wrongChainID[0] ^= 0xff
+	wrongDigest, err := consensus.SighashV1DigestWithType(parsed1, 0, 100, wrongChainID, consensus.SIGHASH_ALL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongSig, err := signer.SignDigest32(wrongDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed1.Witness[0].Signature = append(wrongSig, consensus.SIGHASH_ALL)
 	tx1, err = consensus.MarshalTx(parsed1)
 	if err != nil {
 		t.Fatalf("MarshalTx(tx1): %v", err)
@@ -299,7 +314,7 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 		t.Fatalf("ParseTx(tx1 after corrupt): %v", err)
 	}
 
-	// tx2: missing UTXO, so parallel pre-check may return TX_ERR_MISSING_UTXO before flushing sigs.
+	// tx2's missing input must follow the retained tx1 signature result.
 	tx2obj := &consensus.Tx{
 		Version:  1,
 		TxKind:   0x00,
@@ -322,17 +337,21 @@ func TestPVShadowMismatch_SequentialTruthPreserved(t *testing.T) {
 	coinbase := coinbaseWithWitnessCommitmentAndP2PKValueForWtxids(t, height, subsidy, [][32]byte{{}, wtxid1, wtxid2})
 	block := buildMultiTxBlock(t, st.TipHash, target, 2, coinbase, tx1, tx2)
 
-	_, err = engine.ApplyBlock(block, nil)
-	if err == nil || !strings.Contains(err.Error(), string(consensus.TX_ERR_SIG_INVALID)) {
-		t.Fatalf("expected sequential truth error %s, got %v", consensus.TX_ERR_SIG_INVALID, err)
+	summary, err := engine.ApplyBlock(block, nil)
+	var txErr *consensus.TxError
+	if summary != nil || !errors.As(err, &txErr) || txErr.Code != "TX_ERR_SIG_INVALID" || txErr.Msg != "CORE_P2PK signature invalid" {
+		t.Fatalf("sequential truth summary=%v error=%v", summary, err)
+	}
+	if st.Height == 0 || !reflect.DeepEqual(st.Utxos, before.Utxos) || st.AlreadyGenerated != before.AlreadyGenerated || st.Height != before.Height || st.TipHash != before.TipHash || st.HasTip != before.HasTip {
+		t.Fatal("rejected shadow-active block changed initialized caller state")
 	}
 
 	mismatches, samples := engine.PVShadowStats()
-	if mismatches == 0 || len(samples) == 0 {
-		t.Fatalf("expected pv shadow mismatch recorded, got mismatches=%d samples=%v", mismatches, samples)
+	if mismatches != 0 || len(samples) != 0 {
+		t.Fatalf("order-induced shadow mismatch: mismatches=%d samples=%v", mismatches, samples)
 	}
-	if !strings.Contains(stderr.String(), "pv_shadow: mismatch") {
-		t.Fatalf("expected pv_shadow diagnostic on stderr, got: %q", stderr.String())
+	if stderr.Len() != 0 || engine.PVTelemetry().Snapshot().BlocksValidated != 1 {
+		t.Fatalf("shadow did not run silently: stderr=%q telemetry=%+v", stderr.String(), engine.PVTelemetry().Snapshot())
 	}
 }
 

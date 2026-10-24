@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"math/big"
 	"reflect"
 	"testing"
@@ -438,7 +440,7 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 		for vout := uint32(0); vout < 3; vout++ {
 			utxos[Outpoint{Txid: prev, Vout: vout}] = UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte(nil), cov...)}
 		}
-		return &InMemoryChainState{Utxos: utxos, AlreadyGenerated: new(big.Int)}
+		return &InMemoryChainState{Utxos: utxos, AlreadyGenerated: big.NewInt(123)}
 	}
 	spend := func(cov []byte, nonce uint64, vout uint32, value uint64) *Tx {
 		return &Tx{Version: 1, TxKind: 0, TxNonce: nonce, Inputs: []TxInput{{PrevTxid: prev, PrevVout: vout, Sequence: 0}}, Outputs: []TxOutput{{Value: value, CovenantType: COV_TYPE_P2PK, CovenantData: cov}}}
@@ -478,7 +480,10 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 	reject := func(t *testing.T, b []byte, want ErrorCode, cov []byte, wantMsg ...string) {
 		t.Helper()
 		seq, seqBefore := state(cov), state(cov)
-		_, seqErr := ConnectBlockBasicInMemoryAtHeightAndSuiteContext(b, &prev, &target, height, []uint64{0}, seq, [32]byte{}, rotation, nil)
+		seqSummary, seqErr := ConnectBlockBasicInMemoryAtHeightAndSuiteContext(b, &prev, &target, height, []uint64{0}, seq, [32]byte{}, rotation, nil)
+		if seqSummary != nil {
+			t.Fatal("rejected sequential block published summary")
+		}
 		if got := mustTxErrCode(t, seqErr); got != want {
 			t.Fatalf("sequential=%s, want %s", got, want)
 		}
@@ -487,18 +492,33 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 			t.Fatalf("sequential error=%v, want message %q", seqErr, wantMsg[0])
 		}
 		assertState(t, seq, seqBefore)
-		par, parBefore := state(cov), state(cov)
-		_, parErr := ConnectBlockParallelSigVerifyWithSuiteContext(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, rotation, nil, 2)
-		if got := mustTxErrCode(t, parErr); got != want {
-			t.Fatalf("parallel=%s, want %s", got, want)
+		contexts := []bool{true}
+		if !rub1099 {
+			contexts = []bool{false, true}
 		}
-		var parTxErr *TxError
-		if len(wantMsg) != 0 && (!errors.As(parErr, &parTxErr) || parTxErr == nil || parTxErr.Msg != wantMsg[0]) {
-			t.Fatalf("parallel error=%v, want message %q", parErr, wantMsg[0])
+		for _, suiteContext := range contexts {
+			par, parBefore := state(cov), state(cov)
+			var parSummary *ConnectBlockBasicSummary
+			var parErr error
+			if suiteContext {
+				parSummary, parErr = ConnectBlockParallelSigVerifyWithSuiteContext(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, rotation, DefaultSuiteRegistry(), 2)
+			} else {
+				parSummary, parErr = ConnectBlockParallelSigVerify(b, &prev, &target, height, []uint64{0}, par, [32]byte{}, 2)
+			}
+			if parSummary != nil {
+				t.Fatal("rejected parallel block published summary")
+			}
+			if got := mustTxErrCode(t, parErr); got != want {
+				t.Fatalf("parallel=%s, want %s", got, want)
+			}
+			var parTxErr *TxError
+			if len(wantMsg) != 0 && (!errors.As(parErr, &parTxErr) || parTxErr == nil || parTxErr.Msg != wantMsg[0]) {
+				t.Fatalf("parallel error=%v, want message %q", parErr, wantMsg[0])
+			}
+			assertState(t, par, parBefore)
 		}
-		assertState(t, par, parBefore)
 	}
-	subsidy := BlockSubsidyBig(height, new(big.Int))
+	subsidy := BlockSubsidyBig(height, big.NewInt(123))
 	t.Run("precrypto", func(t *testing.T) {
 		cov := validP2PKCovenantData()
 		coinbaseLike := coinbaseTxWithOutputs(uint32(height), []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov}})
@@ -598,6 +618,137 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 			tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp)}
 			return txBytesFromTx(t, tx)
 		}
+		other := requiredOrderedKeypair(t)
+		for _, variant := range []string{"suite", "key", "selector"} {
+			for _, firstValid := range []bool{false, true} {
+				t.Run(fmt.Sprintf("same_tx/%s/firstValid%v", variant, firstValid), func(t *testing.T) {
+					tx := spend(cov, 1, 0, 190)
+					tx.Inputs = append(tx.Inputs, TxInput{PrevTxid: prev, PrevVout: 1})
+					chain := [32]byte{0x77}
+					if firstValid {
+						chain = [32]byte{}
+					}
+					tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, chain, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, kp)}
+					code, msg := ErrorCode("TX_ERR_SIG_INVALID"), "CORE_P2PK signature invalid"
+					switch variant {
+					case "suite":
+						tx.Witness[1].SuiteID = 0xfe
+						if firstValid {
+							code, msg = "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set"
+						}
+					case "key":
+						tx.Witness[1].Pubkey = other.PubkeyBytes()
+						if firstValid {
+							msg = "CORE_P2PK key binding mismatch"
+						}
+					case "selector":
+						tx.Witness[1].Signature[len(tx.Witness[1].Signature)-1] = 0x00
+						if firstValid {
+							code, msg = "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type"
+						}
+					}
+					reject(t, block(subsidy, txBytesFromTx(t, tx)), code, cov, msg)
+				})
+			}
+		}
+		t.Run("earlier transaction result during later threshold panic", func(t *testing.T) {
+			key, otherKey := sha3_256(kp.PubkeyBytes()), sha3_256(other.PubkeyBytes())
+			thresholdKP := kp
+			if bytes.Compare(key[:], otherKey[:]) > 0 {
+				key, otherKey, thresholdKP = otherKey, key, other
+			}
+			multi := encodeMultisigCovenantData(2, [][32]byte{key, otherKey})
+			first := spend(cov, 1, 0, 90)
+			first.Witness = []WitnessItem{signP2PKInputWitness(t, first, 0, 100, [32]byte{}, kp)}
+			second := spend(cov, 2, 1, 90)
+			second.Witness = []WitnessItem{signP2PKInputWitness(t, second, 0, 100, [32]byte{}, thresholdKP), {SuiteID: SUITE_ID_SENTINEL}}
+			digest, err := SighashV1DigestWithType(first, 0, 100, [32]byte{}, SIGHASH_ALL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := block(subsidy, txBytesFromTx(t, first), txBytesFromTx(t, second))
+			for _, disposition := range []string{"error", "panic", "success"} {
+				t.Run(disposition, func(t *testing.T) {
+					laterPanic, earlierPanic := &struct{ label string }{"later tx"}, &struct{ label string }{"earlier tx"}
+					queueVerifierHook(t, func(_ string, _, _, msg []byte) (bool, error) {
+						if bytes.Equal(msg, digest[:]) {
+							if disposition == "panic" {
+								panic(earlierPanic)
+							}
+							return disposition == "success", nil
+						}
+						panic(laterPanic)
+					})
+					initial := state(cov)
+					initial.Utxos[Outpoint{Txid: prev, Vout: 1}] = UtxoEntry{Value: 100, CovenantType: COV_TYPE_MULTISIG, CovenantData: multi}
+					before := &InMemoryChainState{Utxos: cloneUtxoSet(initial.Utxos), AlreadyGenerated: new(big.Int).Set(initial.AlreadyGenerated)}
+					invoke := func() {
+						summary, err := ConnectBlockParallelSigVerify(raw, &prev, &target, height, []uint64{0}, initial, [32]byte{}, 2)
+						if disposition != "error" || summary != nil {
+							t.Fatal("later block panic returned without earlier error or published summary")
+						}
+						assertTxErrCodeMsg(t, err, "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+					}
+					switch disposition {
+					case "error":
+						invoke()
+					case "panic":
+						requireQueuePanic(t, earlierPanic, invoke)
+					default:
+						requireQueuePanic(t, laterPanic, invoke)
+					}
+					assertState(t, initial, before)
+				})
+			}
+		})
+
+		for _, firstValid := range []bool{false, true} {
+			first := spend(cov, 1, 0, 90)
+			chainID := [32]byte{0x77}
+			if firstValid {
+				chainID = [32]byte{}
+			}
+			first.Witness = []WitnessItem{signP2PKInputWitness(t, first, 0, 100, chainID, kp)}
+			firstRaw := txBytesFromTx(t, first)
+			for _, later := range []struct {
+				name string
+				raw  []byte
+				code ErrorCode
+				msg  string
+			}{
+				{"missing", missing(cov, 2), "TX_ERR_MISSING_UTXO", "utxo not found"},
+				{"nonce_zero", txBytesFromTx(t, spend(cov, 0, 1, 90)), "TX_ERR_TX_NONCE_INVALID", "tx_nonce must be >= 1 for non-coinbase"},
+				{"replay", valid(1, 1, 90), "TX_ERR_NONCE_REPLAY", "duplicate tx_nonce in block"},
+				{"invalid_output", invalid(cov, 2, 1), "TX_ERR_COVENANT_TYPE_INVALID", "CORE_P2PK value must be > 0"},
+			} {
+				name := fmt.Sprintf("retained_signature/%s/firstValid%v", later.name, firstValid)
+				t.Run(name, func(t *testing.T) {
+					code, msg := ErrorCode("TX_ERR_SIG_INVALID"), "CORE_P2PK signature invalid"
+					if firstValid {
+						code, msg = later.code, later.msg
+					}
+					reject(t, block(subsidy, firstRaw, later.raw), code, cov, msg)
+				})
+			}
+			// A global linkage failure remains before all transaction signatures.
+			t.Run(fmt.Sprintf("global_linkage/firstValid%v", firstValid), func(t *testing.T) {
+				bad := block(subsidy, firstRaw)
+				bad[4] ^= 1
+				reject(t, bad, "BLOCK_ERR_LINKAGE_INVALID", cov, "prev_block_hash mismatch")
+			})
+			t.Run(fmt.Sprintf("global_parse/firstValid%v", firstValid), func(t *testing.T) {
+				reject(t, append(block(subsidy, firstRaw), 0), "BLOCK_ERR_PARSE", cov, "trailing bytes after tx list")
+			})
+			t.Run(fmt.Sprintf("global_resource/firstValid%v", firstValid), func(t *testing.T) {
+				filler := txWithNonceAndOutputs(3, repeatedAnchorOutputs(3, 50_000))
+				reject(t, block(subsidy, firstRaw, filler), "BLOCK_ERR_ANCHOR_BYTES_EXCEEDED", cov, "anchor bytes exceeded")
+			})
+			t.Run(fmt.Sprintf("global_coinbase/firstValid%v", firstValid), func(t *testing.T) {
+				coinbase := coinbaseWithWitnessCommitmentAndVaultOutputAtHeight(t, height, 1, validVaultCovenantDataForP2PKOutput(), firstRaw)
+				reject(t, buildBlock(coinbase, firstRaw), "BLOCK_ERR_COINBASE_INVALID", cov, "coinbase must not create CORE_VAULT outputs")
+			})
+		}
+
 		coinbaseLike := coinbaseTxWithOutputs(uint32(height), []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: cov}})
 		cases := []struct {
 			name string
@@ -625,13 +776,30 @@ func runConnectBlockFirstErrorCases(t *testing.T, rub1099 bool) {
 				reject(t, buildBlock(vaultBeforeReplay, replayFirst, replaySecond), BLOCK_ERR_COINBASE_INVALID, cov)
 			})
 		}
-		validBlock := block(subsidy+20, valid(1, 0, 90), valid(2, 1, 90))
+		firstRaw, secondRaw := valid(1, 0, 90), valid(2, 1, 90)
+		validBlock := block(subsidy+20, firstRaw, secondRaw)
 		seq, par := state(cov), state(cov)
 		seqSummary, seqErr := ConnectBlockBasicInMemoryAtHeight(validBlock, &prev, &target, height, []uint64{0}, seq, [32]byte{})
 		parSummary, parErr := ConnectBlockParallelSigVerify(validBlock, &prev, &target, height, []uint64{0}, par, [32]byte{}, 2)
-		if seqErr != nil || parErr != nil || seqSummary.PostStateDigest != parSummary.PostStateDigest || !reflect.DeepEqual(seq, par) {
+		if seqErr != nil || parErr != nil || seqSummary.PostStateDigest != parSummary.PostStateDigest || !reflect.DeepEqual(seq, par) || seqSummary.SumFees != (Uint128{Lo: 20}) || parSummary.SumFees != (Uint128{Lo: 20}) || parSummary.SigTaskCount != 2 || parSummary.WorkerPanics != 0 {
 			t.Fatalf("valid multi-tx parity failed: seq=%v par=%v", seqErr, parErr)
 		}
+		if par.AlreadyGenerated.Cmp(new(big.Int).SetUint64(123+subsidy)) != 0 || parSummary.AlreadyGenerated != (Uint128{Lo: 123}) || parSummary.AlreadyGeneratedN1 != (Uint128{Lo: 123 + subsidy}) || parSummary.UtxoCount != 4 {
+			t.Fatalf("valid supply/summary: state=%s summary=%+v", par.AlreadyGenerated, parSummary)
+		}
+		coinbaseRaw := coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, height, subsidy+20, firstRaw, secondRaw)
+		expected := map[Outpoint]UtxoEntry{
+			{Txid: prev, Vout: 2}: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov},
+		}
+		expected[Outpoint{Txid: testTxID(t, firstRaw)}] = UtxoEntry{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: height}
+		expected[Outpoint{Txid: testTxID(t, secondRaw)}] = UtxoEntry{Value: 90, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: height}
+		expected[Outpoint{Txid: testTxID(t, coinbaseRaw)}] = UtxoEntry{Value: subsidy + 20, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: height, CreatedByCoinbase: true}
+		if !reflect.DeepEqual(par.Utxos, expected) {
+			t.Fatalf("valid exact UTXO result: got=%#v want=%#v", par.Utxos, expected)
+		}
+		t.Run("valid signatures before subsidy failure", func(t *testing.T) {
+			reject(t, block(subsidy+21, firstRaw, secondRaw), "BLOCK_ERR_SUBSIDY_EXCEEDED", cov)
+		})
 	})
 }
 
