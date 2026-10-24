@@ -1362,8 +1362,9 @@ func TestTreeStreamUnboundSinkV1(t *testing.T) {
 func TestTreeStreamSurfaceV1(t *testing.T) {
 	want := []string{"TreePositionV1", "TreeWriterV1", "TreeReadbackV1", "TreeDeltaSinkV1", "TreeOutpointV1", "TreeEventKindV1", "TreeEventSpendV1", "TreeEventCreateV1", "TreeBlockV1", "TreeEventV1", "BeginV1", "EventV1", "WindowV1", "TreeUndoEffectV1", "UndoWriteOrReuseV1", "UndoTransientV1", "UndoCompareV1", "UndoCompareDeleteV1", "UndoSourceRetainV1", "UndoSourceDeleteV1", "TreeDirectionV1", "TreeForwardV1", "TreeInverseV1", "TreePrimitiveKindV1", "TreeKindDirectApplyV1", "TreeKindConnectV1", "TreeKindReplayNextV1", "TreeKindFirstGenesisV1", "TreeKindRestoreOldV1", "TreeKindLagForwardV1", "TreeKindDisconnectV1", "TreeKindRollbackNewV1", "TreeKindLagReverseV1", "TreePairV1", "TreeSourceV1", "TreePrimitiveV1", "TreeOperationV1", "UpdateTreeV1"}
 	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
+	want = append(want, "TreeResolvedInputV1", "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
 	var got []string
-	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go"} {
+	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go", "tree_read_cgo.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 		mustEnvironment(t, err)
 		for _, decl := range f.Decls {
