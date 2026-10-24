@@ -311,10 +311,7 @@ func assertUnknown0105BlockRefusal(t *testing.T, prefix, rejected []byte, utxos 
 			backend := newLiveSigCacheBackend(t, true, nil)
 			summary, err := connectSupplyPath(parallel, block, &prev, &target, 200, state)
 			assertTxErrCode(t, err, want)
-			calls := 1 // The accepted P2PK prefix verifies once on the sequential path.
-			if parallel {
-				calls = 0 // No queue flush is reached after the later refusal.
-			}
+			calls := 1 // Both paths verify the accepted P2PK prefix before the later refusal.
 			if summary != nil || backend.calls != calls || !reflect.DeepEqual(state.Utxos, before) || state.AlreadyGenerated.Cmp(generated) != 0 {
 				t.Fatalf("refusal published state/fee or verified the unknown input: summary=%+v calls=%d", summary, backend.calls)
 			}
