@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -180,7 +181,8 @@ func TestP2PKSuiteErrorOrder(t *testing.T) {
 				t.Run(route.name, func(t *testing.T) {
 					err := route.run()
 					assertTxErrCodeMsg(t, err, code, message)
-					if te, ok := err.(*TxError); !ok || te.Cause() != TxErrorCauseUnspecified {
+					var te *TxError
+					if !errors.As(err, &te) || te.Cause() != TxErrorCauseUnspecified {
 						t.Fatalf("expected plain uncaused TxError, got %T: %v", err, err)
 					}
 				})
