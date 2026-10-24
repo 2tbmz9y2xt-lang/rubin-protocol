@@ -83,10 +83,10 @@ class PolicyBase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        env = mock.patch.dict(os.environ, GIT_ENV)
+        clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "GITHUB_BASE_REF"}
+        env = mock.patch.dict(os.environ, {**clean, **GIT_ENV}, clear=True)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("GITHUB_BASE_REF", None)
         self.repo = new_repo(self.root)
 
     def run_tool(self) -> subprocess.CompletedProcess[str]:
@@ -122,10 +122,12 @@ class PolicyBase(unittest.TestCase):
         return [l for l in stderr.splitlines() if l.startswith("policy:")]
 
     def ab_repo(self) -> None:
-        """c0 on main, c1 on main, feat branch with c2; origin/main = c0."""
+        """c0 on main, c1 on main, feat branch with c2 (fixture + CHANGELOG entry); origin/main = c0."""
         c0 = seed(self.repo)
         commit(self.repo, "c1", README="1\n")
         git(self.repo, "checkout", "-q", "-b", "feat")
+        (self.repo / "conformance/fixtures/CV-Y.json").write_text('{"v":2}\n', encoding="utf-8")
+        (self.repo / CHANGELOG).write_text("# Changelog\n- CV-Y.json updated\n", encoding="utf-8")
         commit(self.repo, "c2", README="2\n")
         set_origin_main(self.repo, c0)
 
@@ -182,6 +184,10 @@ class SelectionTests(PolicyBase):
             [f"policy: origin/main and main unresolved {DASH} falling back to HEAD~1..HEAD",
              "policy: diff range = HEAD~1..HEAD"],
         )
+        mod = load_tool()
+        eff: list[str] = []
+        self.assertIn("README", self.in_repo(lambda: mod.changed_files("HEAD~1..HEAD", eff)))
+        self.assertEqual(eff, ["HEAD~1..HEAD"])
 
     def test_h2_unsafe_base_ref_never_reaches_git(self):
         self.ab_repo()
@@ -260,16 +266,34 @@ class RangeTests(PolicyBase):
             [f"policy: git diff origin/main...HEAD failed {DASH} falling back to HEAD~1..HEAD",
              "policy: diff range = HEAD~1..HEAD"],
         )
+        mod = load_tool()
+        eff: list[str] = []
+        changed = self.in_repo(lambda: mod.changed_files("origin/main...HEAD", eff))
+        self.assertIn("conformance/fixtures/CV-Y.json", changed)
+        self.assertIn(CHANGELOG, changed)
+        self.assertEqual(eff, ["HEAD~1..HEAD"])
+
+    def test_h3_changelog_hunk_outside_fallback_range_is_rejected(self):
+        seed(self.repo)
+        set_origin_main(self.repo, unrelated_commit(self.repo))
+        commit(self.repo, "log", conformance__fixtures__CHANGELOG_md="# Changelog\n- CV-Y.json updated\n")
+        (self.repo / "conformance/fixtures/CV-Y.json").write_text('{"v":2}\n', encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "fixture only")
+        self.assert_no_merge_base("origin/main")
+        p = self.run_tool()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("ERROR: fixture JSON changed but conformance/fixtures/CHANGELOG.md not updated", p.stderr)
 
     def _no_commit_lines(self, first: list[str]) -> list[str]:
         return first + [f"policy: git diff HEAD~1..HEAD failed {DASH} no committed changes inspected",
                         "policy: diff range = none"]
 
-    def _untracked_fixture_stays_ignored(self) -> None:
+    def _untracked_fixture_stays_ignored(self, diff_ref: str) -> None:
         (self.repo / "conformance/fixtures/CV-Z.json").write_text("{}\n", encoding="utf-8")
         mod = load_tool()
         eff: list[str] = []
-        self.assertEqual(self.in_repo(lambda: mod.changed_files(mod.FALLBACK_RANGE, eff)), [])
+        self.assertEqual(self.in_repo(lambda: mod.changed_files(diff_ref, eff)), [])
         self.assertEqual(eff, ["none"])
 
     def test_h5_single_commit_no_refs(self):
@@ -282,7 +306,7 @@ class RangeTests(PolicyBase):
             self.policy_lines(p.stderr),
             self._no_commit_lines([f"policy: origin/main and main unresolved {DASH} falling back to HEAD~1..HEAD"]),
         )
-        self._untracked_fixture_stays_ignored()
+        self._untracked_fixture_stays_ignored("HEAD~1..HEAD")
 
     def test_h7_both_ranges_fail(self):
         seed(self.repo)
@@ -295,7 +319,7 @@ class RangeTests(PolicyBase):
             self.policy_lines(p.stderr),
             self._no_commit_lines([f"policy: git diff origin/main...HEAD failed {DASH} falling back to HEAD~1..HEAD"]),
         )
-        self._untracked_fixture_stays_ignored()
+        self._untracked_fixture_stays_ignored("origin/main...HEAD")
 
     def test_h6_committed_changelog_diff_failure_is_visible(self):
         c0 = seed(self.repo)
