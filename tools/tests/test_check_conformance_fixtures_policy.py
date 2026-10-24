@@ -83,10 +83,17 @@ class PolicyBase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        home = self.root / "home"
+        home.mkdir()
         clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "GITHUB_BASE_REF"}
-        env = mock.patch.dict(os.environ, {**clean, **GIT_ENV}, clear=True)
+        isolated = {**GIT_ENV, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")}
+        env = mock.patch.dict(os.environ, {**clean, **isolated}, clear=True)
         env.start()
         self.addCleanup(env.stop)
+        self.assertEqual(os.environ["HOME"], str(home))
+        self.assertEqual(os.environ["XDG_CONFIG_HOME"], str(home / ".config"))
+        attr = subprocess.run(["git", "var", "GIT_ATTR_GLOBAL"], text=True, capture_output=True, check=True)  # nosec B603
+        self.assertTrue(attr.stdout.startswith(str(home)), attr.stdout)
         self.repo = new_repo(self.root)
 
     def run_tool(self) -> subprocess.CompletedProcess[str]:
@@ -170,6 +177,7 @@ class SelectionTests(PolicyBase):
         mod = load_tool()
         self.assertEqual(self.in_repo(mod.select_diff_ref), "main...HEAD")
         p = self.run_tool()
+        self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(self.policy_lines(p.stderr), ["policy: diff range = main...HEAD"])
 
     def test_h1_neither_ref_falls_back_visibly(self):

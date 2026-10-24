@@ -104,26 +104,26 @@ def changed_files(diff_ref: str, effective: list[str]) -> list[str]:
     return sorted(files)
 
 
-def added_lines(p: subprocess.CompletedProcess[str]) -> list[str]:
-    return [l[1:] for l in p.stdout.splitlines() if l.startswith("+") and not l.startswith("+++")]
-
-
 def changelog_added_text(effective_ref: str) -> str:
     added: list[str] = []
-    path = CHANGELOG.as_posix()
+    commands = [
+        ["git", "diff", "--unified=0", "--", CHANGELOG.as_posix()],
+        ["git", "diff", "--cached", "--unified=0", "--", CHANGELOG.as_posix()],
+    ]
     if effective_ref != "none":
-        p = run(["git", "diff", "--unified=0", effective_ref, "--", path], check=False)
-        if p.returncode == 0:
-            added += added_lines(p)
-        else:
-            print(
-                f"policy: git diff {effective_ref} -- {path} failed \u2014 committed CHANGELOG text not inspected",
-                file=sys.stderr,
-            )
-    for cmd in (["git", "diff", "--unified=0", "--", path], ["git", "diff", "--cached", "--unified=0", "--", path]):
+        commands.insert(0, ["git", "diff", "--unified=0", effective_ref, "--", CHANGELOG.as_posix()])
+    for cmd in commands:
         p = run(cmd, check=False)
-        if p.returncode == 0:
-            added += added_lines(p)
+        if p.returncode != 0:
+            if effective_ref != "none" and cmd is commands[0]:
+                print(
+                    f"policy: git diff {effective_ref} -- {CHANGELOG.as_posix()} failed \u2014 committed CHANGELOG text not inspected",
+                    file=sys.stderr,
+                )
+            continue
+        for line in p.stdout.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                added.append(line[1:])
     return "\n".join(added)
 
 
