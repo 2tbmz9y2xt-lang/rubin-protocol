@@ -1267,127 +1267,121 @@ mod tests {
     }
 
     fn section16_input_order_cases() {
-        let coinbase_prevout = TxInput {
-            prev_txid: [0u8; 32],
+        section16_coinbase_input_order_cases();
+        section16_script_input_order_cases();
+        section16_sequence_and_duplicate_cases();
+    }
+
+    fn section16_coinbase_input_order_cases() {
+        let a = tx_input([0x51; 32]);
+        let coinbase = TxInput {
             prev_vout: u32::MAX,
-            script_sig: vec![],
-            sequence: 0,
+            ..tx_input([0; 32])
         };
-        assert_section16_error(
-            "later_coinbase_before_earlier_sequence",
-            1,
-            vec![
-                TxInput {
-                    prev_txid: [0x51; 32],
-                    prev_vout: 0,
-                    script_sig: vec![],
-                    sequence: 0x8000_0000,
-                },
-                coinbase_prevout.clone(),
-            ],
-            ErrorCode::TxErrParse,
-            "coinbase prevout encoding forbidden in non-coinbase",
-        );
-        assert_section16_error(
-            "script_sig_only",
-            1,
-            vec![TxInput {
-                prev_txid: [0x52; 32],
-                prev_vout: 0,
-                script_sig: vec![0x01],
-                sequence: 0,
-            }],
-            ErrorCode::TxErrParse,
-            "script_sig must be empty under genesis covenant set",
-        );
-        assert_section16_error(
-            "sequence_only",
-            1,
-            vec![TxInput {
-                prev_txid: [0x53; 32],
-                prev_vout: 0,
-                script_sig: vec![],
-                sequence: 0x8000_0000,
-            }],
-            ErrorCode::TxErrSequenceInvalid,
-            "sequence exceeds 0x7fffffff",
-        );
+        let sequence = TxInput {
+            sequence: 0x8000_0000,
+            ..a.clone()
+        };
+        let script = TxInput {
+            script_sig: vec![1],
+            ..a.clone()
+        };
+        for (name, inputs) in [
+            (
+                "later_coinbase_before_earlier_sequence",
+                vec![sequence, coinbase.clone()],
+            ),
+            (
+                "later_coinbase_before_script",
+                vec![script, coinbase.clone()],
+            ),
+            ("later_coinbase_before_missing", vec![a, coinbase]),
+        ] {
+            assert_section16_error(
+                name,
+                1,
+                inputs,
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            );
+        }
+    }
+
+    fn section16_script_input_order_cases() {
+        let a = tx_input([0x51; 32]);
+        let sequence = TxInput {
+            sequence: 0x8000_0000,
+            ..a.clone()
+        };
+        let script = TxInput {
+            script_sig: vec![0x01],
+            ..tx_input([0x52; 32])
+        };
+        let later_script = TxInput {
+            prev_vout: 1,
+            script_sig: vec![1],
+            ..a
+        };
+        for (name, inputs) in [
+            ("script_sig_only", vec![script]),
+            (
+                "later_script_before_sequence",
+                vec![sequence, later_script],
+            ),
+        ] {
+            assert_section16_error(
+                name,
+                1,
+                inputs,
+                ErrorCode::TxErrParse,
+                "script_sig must be empty under genesis covenant set",
+            );
+        }
+    }
+
+    fn section16_sequence_and_duplicate_cases() {
         let a = tx_input([0x51; 32]);
         let b = TxInput {
             prev_vout: 1,
             ..a.clone()
         };
-        for (name, inputs, code, msg) in [
-            (
-                "later_coinbase_before_script",
-                vec![
-                    TxInput {
-                        script_sig: vec![1],
-                        ..a.clone()
-                    },
-                    coinbase_prevout.clone(),
-                ],
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
-            ),
-            (
-                "later_script_before_sequence",
-                vec![
-                    TxInput {
-                        sequence: 0x8000_0000,
-                        ..a.clone()
-                    },
-                    TxInput {
-                        script_sig: vec![1],
-                        ..b.clone()
-                    },
-                ],
-                ErrorCode::TxErrParse,
-                "script_sig must be empty under genesis covenant set",
-            ),
+        let mut sequence = a.clone();
+        sequence.sequence = 0x8000_0000;
+        let later_sequence = TxInput {
+            sequence: 0x8000_0000,
+            ..b.clone()
+        };
+        let max_sequence = TxInput {
+            sequence: 0xffff_ffff,
+            ..b.clone()
+        };
+        let isolated_sequence = TxInput {
+            sequence: 0x8000_0000,
+            ..tx_input([0x53; 32])
+        };
+        for (name, inputs) in [
+            ("sequence_only", vec![isolated_sequence]),
             (
                 "sequence_before_earlier_duplicate",
-                vec![
-                    a.clone(),
-                    a.clone(),
-                    TxInput {
-                        sequence: 0x8000_0000,
-                        ..b.clone()
-                    },
-                ],
-                ErrorCode::TxErrSequenceInvalid,
-                "sequence exceeds 0x7fffffff",
+                vec![a.clone(), a.clone(), later_sequence],
             ),
-            (
-                "nonadjacent_duplicate",
-                vec![a.clone(), b.clone(), a.clone()],
-                ErrorCode::TxErrParse,
-                "duplicate input outpoint",
-            ),
-            (
-                "later_coinbase_before_missing",
-                vec![a.clone(), coinbase_prevout],
-                ErrorCode::TxErrParse,
-                "coinbase prevout encoding forbidden in non-coinbase",
-            ),
-            (
-                "two_sequence_failures",
-                vec![
-                    TxInput {
-                        sequence: 0x8000_0000,
-                        ..a
-                    },
-                    TxInput {
-                        sequence: 0xffff_ffff,
-                        ..b
-                    },
-                ],
-                ErrorCode::TxErrSequenceInvalid,
-                "sequence exceeds 0x7fffffff",
-            ),
+            ("two_sequence_failures", vec![sequence, max_sequence]),
         ] {
-            assert_section16_error(name, 1, inputs, code, msg);
+            assert_section16_error(
+                name,
+                1,
+                inputs,
+                ErrorCode::TxErrSequenceInvalid,
+                "sequence exceeds 0x7fffffff",
+            );
         }
+        assert_section16_error(
+            "nonadjacent_duplicate",
+            1,
+            vec![a.clone(), b, a],
+            ErrorCode::TxErrParse,
+            "duplicate input outpoint",
+        );
     }
 
     fn assert_section16_error(
@@ -1420,7 +1414,15 @@ mod tests {
         let pure = validate_spend_tx_s1a(&tx).expect_err(name);
         assert_eq!((pure.code, pure.msg), (want, message), "{name}");
         let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
-            &tx, [0x56; 32], &utxo_set, 1, 0, 0, [0u8; 32], None, None,
+            &tx,
+            [0x56; 32],
+            &utxo_set,
+            1,
+            0,
+            0,
+            [0u8; 32],
+            None,
+            None,
         )
         .expect_err(name);
         assert_eq!(err.code, want, "{name}");
@@ -1430,57 +1432,53 @@ mod tests {
 
     #[test]
     fn section16_global_family_order_boundaries_and_outputs() {
+        section16_accepted_boundary_cases();
+        section16_output_precedence_cases();
+        section16_coinbase_before_nonspendable_case();
+    }
+
+    fn section16_boundary_inputs() -> [(&'static str, u64, Vec<TxInput>); 8] {
         let a = tx_input([0x51; 32]);
         let mut tail = a.clone();
         tail.prev_txid[31] ^= 1;
-        for (name, nonce, inputs) in [
+        let max_sequence = TxInput {
+            sequence: 0x7fff_ffff,
+            ..a.clone()
+        };
+        let max_vout = TxInput {
+            prev_vout: u32::MAX,
+            ..a.clone()
+        };
+        let next_vout = TxInput {
+            prev_vout: 1,
+            ..a.clone()
+        };
+        let full_vout = TxInput {
+            prev_vout: 0x10000,
+            ..a.clone()
+        };
+        [
             ("minimal", 1, vec![a.clone()]),
-            (
-                "max_valid",
-                u64::MAX,
-                vec![TxInput {
-                    sequence: 0x7fff_ffff,
-                    ..a.clone()
-                }],
-            ),
+            ("max_valid", u64::MAX, vec![max_sequence]),
             ("zero_txid_only", 1, vec![tx_input([0; 32])]),
-            (
-                "max_vout_only",
-                1,
-                vec![TxInput {
-                    prev_vout: u32::MAX,
-                    ..a.clone()
-                }],
-            ),
+            ("max_vout_only", 1, vec![max_vout]),
             (
                 "equal_txid_distinct_vout",
                 1,
-                vec![
-                    a.clone(),
-                    TxInput {
-                        prev_vout: 1,
-                        ..a.clone()
-                    },
-                ],
+                vec![a.clone(), next_vout],
             ),
-            (
-                "full_width_vout",
-                1,
-                vec![
-                    a.clone(),
-                    TxInput {
-                        prev_vout: 0x10000,
-                        ..a.clone()
-                    },
-                ],
-            ),
+            ("full_width_vout", 1, vec![a.clone(), full_vout]),
             (
                 "distinct_txid_equal_vout",
                 1,
                 vec![a.clone(), tx_input([0x52; 32])],
             ),
-            ("full_width_txid", 1, vec![a.clone(), tail]),
-        ] {
+            ("full_width_txid", 1, vec![a, tail]),
+        ]
+    }
+
+    fn section16_accepted_boundary_cases() {
+        for (name, nonce, inputs) in section16_boundary_inputs() {
             let tx = unsigned_tx(
                 0,
                 nonce,
@@ -1493,31 +1491,32 @@ mod tests {
             );
             validate_spend_tx_s1a(&tx).expect(name);
             validate_spend_tx_s1a(&tx).expect("repeat pure call");
-            let err = apply_non_coinbase_tx_basic_update(
-                &tx,
-                [0x56; 32],
-                &HashMap::new(),
-                1,
-                0,
-                [0; 32],
-            )
-            .expect_err(name);
+            let err =
+                apply_non_coinbase_tx_basic_update(&tx, [0x56; 32], &HashMap::new(), 1, 0, [0; 32])
+                    .expect_err(name);
             assert_eq!(err.code, ErrorCode::TxErrMissingUtxo, "{name}");
         }
+    }
+
+    fn section16_output_precedence_cases() {
         for (sequence, code, message) in [
             (
                 0x8000_0000,
                 ErrorCode::TxErrSequenceInvalid,
                 "sequence exceeds 0x7fffffff",
             ),
-            (0, ErrorCode::TxErrCovenantTypeInvalid, "unknown covenant_type"),
+            (
+                0,
+                ErrorCode::TxErrCovenantTypeInvalid,
+                "unknown covenant_type",
+            ),
         ] {
             let tx = unsigned_tx(
                 0,
                 1,
                 vec![TxInput {
                     sequence,
-                    ..a.clone()
+                    ..tx_input([0x51; 32])
                 }],
                 vec![tx_output(0, 0x0105, vec![])],
             );
@@ -1533,11 +1532,14 @@ mod tests {
             assert_eq!((err.code, err.msg), (code, message));
             assert_eq!(set, before);
         }
+    }
+
+    fn section16_coinbase_before_nonspendable_case() {
         let tx = unsigned_tx(
             0,
             1,
             vec![
-                a,
+                tx_input([0x51; 32]),
                 TxInput {
                     prev_vout: u32::MAX,
                     ..tx_input([0; 32])
@@ -1568,100 +1570,81 @@ mod tests {
         for populated in [false, true] {
             let mut queue = SigCheckQueue::new(1);
             if populated {
-                apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
-                    &valid,
-                    txid,
-                    &set,
-                    1,
-                    0,
-                    0,
-                    chain_id,
-                    None,
-                    None,
-                    &mut queue,
-                )
-                .expect("populate first job");
-                apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
-                    &prior,
-                    prior_txid,
-                    &prior_set,
-                    1,
-                    0,
-                    0,
-                    prior_chain,
-                    None,
-                    None,
-                    &mut queue,
-                )
-                .expect("populate distinct second job");
+                section16_apply_queued(&valid, txid, &set, chain_id, &mut queue)
+                    .expect("populate first job");
+                section16_apply_queued(&prior, prior_txid, &prior_set, prior_chain, &mut queue)
+                    .expect("populate distinct second job");
             }
-            let entry_mark = queue.mark();
-            let entry_jobs = format!("{queue:?}");
             let entry_len = queue.len();
-            let bad = unsigned_tx(
-                0,
-                1,
-                vec![
-                    TxInput {
-                        sequence: 0x8000_0000,
-                        ..tx_input([0x51; 32])
-                    },
-                    TxInput {
-                        prev_vout: u32::MAX,
-                        ..tx_input([0; 32])
-                    },
-                ],
-                vec![tx_output(0, 0x0105, vec![])],
-            );
-            let err = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
-                &bad,
-                txid,
-                &set,
-                1,
-                0,
-                0,
-                chain_id,
-                None,
-                None,
-                &mut queue,
-            )
-            .expect_err("S1A refusal");
+            assert_section16_queue_refusal(txid, &set, chain_id, &mut queue);
+            let got = section16_apply_queued(&valid, txid, &set, chain_id, &mut queue)
+                .expect("rejected then valid");
             assert_eq!(
-                (err.code, err.msg),
-                (
-                    ErrorCode::TxErrParse,
-                    "coinbase prevout encoding forbidden in non-coinbase",
-                ),
+                got,
+                expected,
+                "rejected-then-valid differs from valid alone",
             );
-            assert_eq!(
-                queue.mark(),
-                entry_mark,
-                "entry queue length/accounting changed",
-            );
-            assert_eq!(
-                format!("{queue:?}"),
-                entry_jobs,
-                "entry jobs/order/payload changed",
-            );
-            assert_eq!(set, before_set, "caller UTXOs changed");
-            let got = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
-                &valid,
-                txid,
-                &set,
-                1,
-                0,
-                0,
-                chain_id,
-                None,
-                None,
-                &mut queue,
-            )
-            .expect("rejected then valid");
-            assert_eq!(got, expected, "rejected-then-valid differs from valid alone");
             assert_eq!(queue.len(), entry_len + 1);
             queue.flush().expect("retained genuine signatures");
             assert_eq!(set, before_set);
         }
+    }
+
+    fn section16_apply_queued(
+        tx: &Tx,
+        txid: [u8; 32],
+        set: &HashMap<Outpoint, UtxoEntry>,
+        chain_id: [u8; 32],
+        queue: &mut SigCheckQueue,
+    ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+        apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+            tx, txid, set, 1, 0, 0, chain_id, None, None, queue,
+        )
+    }
+
+    fn assert_section16_queue_refusal(
+        txid: [u8; 32],
+        set: &HashMap<Outpoint, UtxoEntry>,
+        chain_id: [u8; 32],
+        queue: &mut SigCheckQueue,
+    ) {
+        let entry_mark = queue.mark();
+        let entry_jobs = format!("{queue:?}");
+        let before_set = (*set).clone();
+        let bad = unsigned_tx(
+            0,
+            1,
+            vec![
+                TxInput {
+                    sequence: 0x8000_0000,
+                    ..tx_input([0x51; 32])
+                },
+                TxInput {
+                    prev_vout: u32::MAX,
+                    ..tx_input([0; 32])
+                },
+            ],
+            vec![tx_output(0, 0x0105, vec![])],
+        );
+        let err = section16_apply_queued(&bad, txid, set, chain_id, queue).expect_err("S1A refusal");
+        assert_eq!(
+            (err.code, err.msg),
+            (
+                ErrorCode::TxErrParse,
+                "coinbase prevout encoding forbidden in non-coinbase",
+            ),
+        );
+        assert_eq!(
+            queue.mark(),
+            entry_mark,
+            "entry queue length/accounting changed",
+        );
+        assert_eq!(
+            format!("{queue:?}"),
+            entry_jobs,
+            "entry jobs/order/payload changed",
+        );
+        assert_eq!(set, &before_set, "caller UTXOs changed");
     }
 
     fn signed_p2pk_case() -> (Tx, HashMap<Outpoint, UtxoEntry>, [u8; 32], [u8; 32]) {

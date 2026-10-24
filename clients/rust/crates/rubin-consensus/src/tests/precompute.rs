@@ -1521,7 +1521,8 @@ fn section16_global_family_order_public_precompute() {
                 covenant_data: vec![],
             }];
         }
-        let result = precompute_tx_contexts(&make_parsed_block(simple_coinbase(), vec![tx]), &set, 100);
+        let result =
+            precompute_tx_contexts(&make_parsed_block(simple_coinbase(), vec![tx]), &set, 100);
         let err = result.expect_err("standalone S1A rejection returns no contexts");
         assert_eq!((err.code, err.msg), (code, message));
         assert_eq!(set, before, "caller snapshot changed");

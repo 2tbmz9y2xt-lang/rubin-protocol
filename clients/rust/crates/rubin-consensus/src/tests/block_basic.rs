@@ -4,13 +4,8 @@ use crate::validate_stored_block_commitments;
 
 #[test]
 fn section16_global_family_order_public_block_basic() {
-    let base = tx_with_one_input_one_output(
-        [0x51; 32],
-        0,
-        1,
-        COV_TYPE_P2PK,
-        &valid_p2pk_covenant_data(),
-    );
+    let base =
+        tx_with_one_input_one_output([0x51; 32], 0, 1, COV_TYPE_P2PK, &valid_p2pk_covenant_data());
     let (base, _, _, _) = parse_tx(&base).expect("ordinary parsed spend");
     let a = base.inputs[0].clone();
     let coinbase_prevout = TxInput {
@@ -51,9 +46,9 @@ fn section16_global_family_order_public_block_basic() {
         let mut tx = base.clone();
         tx.inputs = inputs;
         let raw = crate::marshal_tx(&tx).expect("marshal mixed structural input");
-        let cb = coinbase_with_witness_commitment(0, &[raw.clone()]);
-        let root = merkle_root_txids(&[parse_tx(&cb).unwrap().1, parse_tx(&raw).unwrap().1])
-            .unwrap();
+        let cb = coinbase_with_witness_commitment(0, std::slice::from_ref(&raw));
+        let root =
+            merkle_root_txids(&[parse_tx(&cb).unwrap().1, parse_tx(&raw).unwrap().1]).unwrap();
         let prev = [0x55; 32];
         let target = [0xff; 32];
         let block = build_block_bytes(prev, root, target, 56, &[cb, raw]);

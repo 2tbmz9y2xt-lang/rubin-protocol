@@ -1339,6 +1339,13 @@ func TestApplyNonCoinbaseTxBasic_HTLCCreationFirstErrorOrder(t *testing.T) {
 	}
 }
 
+func section16SameSigTasks(got, want []sigCheckTask) bool {
+	return (got == nil) == (want == nil) && slices.EqualFunc(got, want, func(got, want sigCheckTask) bool {
+		return got.suiteID == want.suiteID && got.digest == want.digest && got.errOnFail == want.errOnFail &&
+			reflect.DeepEqual(got.pubkey, want.pubkey) && reflect.DeepEqual(got.sig, want.sig)
+	})
+}
+
 func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 	for _, tc := range section16StructuralCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1381,14 +1388,14 @@ func TestApplyNonCoinbaseTxBasicWorkQ_Section16StructuralOrder(t *testing.T) {
 		bad.Outputs = []TxOutput{{CovenantType: 0x0105}}
 		work, summary, err := applyNonCoinbaseTxBasicUpdateWithMTPQ(bad, hashWithPrefix(0x64), utxos, 1, 0, 0, [32]byte{}, queue, nil, nil)
 		assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "coinbase prevout encoding forbidden in non-coinbase")
-		if work != nil || summary != nil || !reflect.DeepEqual(queue.tasks, before) || !reflect.DeepEqual(utxos, beforeUtxos) {
+		if work != nil || summary != nil || !section16SameSigTasks(queue.tasks, before) || !reflect.DeepEqual(utxos, beforeUtxos) {
 			t.Fatal("S1A rejection changed entry queue/caller UTXOs or returned a candidate")
 		}
 		work, summary, err = applyNonCoinbaseTxBasicUpdateWithMTPQ(valid, hashWithPrefix(0x63), utxos, 1, 0, 0, [32]byte{}, queue, nil, nil)
 		if err != nil || !reflect.DeepEqual(work, wantWork) || !reflect.DeepEqual(summary, wantSummary) {
 			t.Fatalf("rejected-then-valid differs from valid alone: %v", err)
 		}
-		if queue.Len() != len(before)+2 || (len(before) > 0 && !reflect.DeepEqual(queue.tasks[:len(before)], before)) {
+		if queue.Len() != len(before)+2 || (len(before) > 0 && !section16SameSigTasks(queue.tasks[:len(before)], before)) {
 			t.Fatal("valid operation changed entry queue jobs/order")
 		}
 		if err := queue.Flush(); err != nil {
