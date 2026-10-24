@@ -187,6 +187,7 @@ func irMalformedV1(t *testing.T) {
 			op := Outpoint{Txid: [32]byte{9}}
 			key, rank := btUTXOKey(1, op), uint8(1)
 			value := btValue(btFrame(7, 0, nil), 0, true)
+			height := uint64(1)
 			switch variant {
 			case "counter-15":
 				rank, key, value = 0, btMeta(0x10, 1), make([]byte, 15)
@@ -196,7 +197,8 @@ func irMalformedV1(t *testing.T) {
 				irCounterV1(t, w, 86545431, 2000)
 				rank, key = 0, btMeta(0x10, 1)
 			case "counter-height-count":
-				irCounterV1(t, w, 56*1545455, 1545455)
+				height = 10
+				irCounterV1(t, w, 865454296, 15454541)
 				rank, key = 0, btMeta(0x10, 1)
 			case "row-19":
 				value = value[:19]
@@ -211,10 +213,10 @@ func irMalformedV1(t *testing.T) {
 				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, rank, key, value) == nil, "malformed setup")
 			}
 			var cause error
-			err := irRunV1(t, w, irRequestV1(1, 46), mdbx.TreeEndpointV1{Kind: 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
+			err := irRunV1(t, w, irRequestV1(height, 46), mdbx.TreeEndpointV1{Kind: 1, Height: height - 1, CumulativeChainwork: [40]byte{39: 1}}, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 				if rank == 0 {
 					row := view.Counters()
-					logicalMDBXAssert(t, row.kind == logicalStateCountersStoreIntegrity, "counter integrity before arithmetic: %+v", row)
+					logicalMDBXAssert(t, row.kind == logicalStateCountersStoreIntegrity, "%s counter integrity before arithmetic: %+v", variant, row)
 					cause = row.cause
 				} else {
 					row := view.Lookup(op)

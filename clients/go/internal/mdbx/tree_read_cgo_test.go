@@ -549,17 +549,18 @@ func trInvalidV1(t *testing.T) {
 			case "inputs-width":
 				request.Inputs = []TreeResolvedInputV1{{Value: []byte{1}}}
 			case "inputs-count":
-				request.Inputs = make([]TreeResolvedInputV1, 2)
+				v := tdFormed(tdFrame(1, 0, nil), 1, 0)
+				request.Inputs = []TreeResolvedInputV1{{Value: v}, {Outpoint: TreeOutpointV1{Vout: 1}, Value: v}}
 			case "nil-source":
 				p.Source = nil
 			}
 			p.Source = trCountingSourceV1(p.Source, t)
-			trReadV1(t, s, o, request, func(reader *Reader, _ *OperationAccount, root [32]byte, err error) {
-				var engine *EngineError
-				if !errors.As(err, &engine) || engine.Class != EngineInvalidInput || root != ([32]byte{}) || !reader.usable() || reservationLive(o) != 0 {
-					t.Fatalf("invalid domain result root%x err%v active%v", root, err, reader.usable())
-				}
-			})
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(account *OperationAccount) error {
+				return s.View(func(reader *Reader) error {
+					trAdmissionRefusedV1(t, reader, account, o, request, operationUpdate, "invalid tree delta")
+					return nil
+				})
+			}))
 		})
 	}
 }
