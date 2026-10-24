@@ -1,10 +1,12 @@
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+
 use crate::block_basic::ParsedBlock;
 use crate::constants::{COV_TYPE_HTLC, COV_TYPE_MULTISIG, COV_TYPE_P2PK, COV_TYPE_VAULT};
 use crate::error::{ErrorCode, TxError};
 use crate::htlc::{validate_htlc_spend_q, HtlcSpendContext};
 use crate::precompute::PrecomputedTxContext;
 use crate::sig_cache::SigCache;
-use crate::sig_queue::SigCheckQueue;
+use crate::sig_queue::{SigCheckQueue, SigCheckQueueMark};
 use crate::sighash::SighashV1PrehashCache;
 use crate::simplicity_covenant::reject_core_simplicity_spend_if_present;
 use crate::spend_verify::{validate_p2pk_spend_q, validate_threshold_sig_spend_q};
@@ -31,7 +33,7 @@ pub struct TxValidationResult {
     /// Non-`None` if validation failed. The error is a canonical `TX_ERR_*`
     /// error suitable for deterministic error reporting.
     pub err: Option<TxError>,
-    /// Number of signature verification operations executed.
+    /// Tasks queued for the final full flush; zero on an earlier rejection.
     pub sig_count: usize,
     /// Exact u128 transaction fee, copied from [`PrecomputedTxContext`].
     pub fee: u128,
@@ -95,11 +97,53 @@ fn validate_worker_inputs(
     sighash_cache: &mut SighashV1PrehashCache<'_>,
     sig_queue: &mut SigCheckQueue,
 ) -> Result<usize, TxError> {
+    let entry_mark = sig_queue.mark();
+    let ordinary = ptc
+        .resolved_inputs
+        .iter()
+        .all(|entry| entry.covenant_type != COV_TYPE_VAULT)
+        && tx
+            .outputs
+            .iter()
+            .all(|out| out.covenant_type != COV_TYPE_VAULT);
+    let mut select_earlier = false;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        collect_worker_spends(
+            ptc,
+            tx,
+            ctx,
+            sighash_cache,
+            sig_queue,
+            ordinary,
+            &mut select_earlier,
+        )
+    }));
+    if select_earlier {
+        sig_queue.settle_suffix(entry_mark)?;
+    }
+    if !matches!(&result, Ok(Ok(_))) {
+        sig_queue.rollback_to(entry_mark);
+    }
+    match result {
+        Ok(result) => result,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn collect_worker_spends(
+    ptc: &PrecomputedTxContext,
+    tx: &Tx,
+    ctx: &TxLocalSpendContext<'_>,
+    sighash_cache: &mut SighashV1PrehashCache<'_>,
+    sig_queue: &mut SigCheckQueue,
+    ordinary: bool,
+    select_earlier: &mut bool,
+) -> Result<usize, TxError> {
     let mut witness_cursor = ptc.witness_start;
     for (input_index, entry) in ptc.resolved_inputs.iter().enumerate() {
         let slots = witness_slots(entry.covenant_type, &entry.covenant_data)?;
         let assigned = assigned_worker_witness(tx, witness_cursor, slots, ptc.witness_end)?;
-
+        *select_earlier = ordinary;
         validate_input_spend(
             entry,
             assigned,
@@ -113,7 +157,7 @@ fn validate_worker_inputs(
             ctx.registry,
             Some(&mut *sig_queue),
         )?;
-
+        *select_earlier = false;
         witness_cursor += slots;
     }
     Ok(witness_cursor)
@@ -160,6 +204,7 @@ pub fn validate_tx_local(
     let rotation = DefaultRotationProvider;
     let registry = SuiteRegistry::default_registry();
     let mut sig_queue = sig_queue_with_optional_cache(&registry, sig_cache);
+    let sig_queue_empty_mark = sig_queue.mark();
     let spend_context = TxLocalSpendContext {
         chain_id,
         block_height,
@@ -174,7 +219,17 @@ pub fn validate_tx_local(
             Err(e) => return tx_validation_error_result(ptc, e),
         };
 
+    finish_tx_validation_result(ptc, witness_cursor, &mut sig_queue, sig_queue_empty_mark)
+}
+
+fn finish_tx_validation_result(
+    ptc: &PrecomputedTxContext,
+    witness_cursor: usize,
+    sig_queue: &mut SigCheckQueue,
+    entry_mark: SigCheckQueueMark,
+) -> TxValidationResult {
     if witness_cursor != ptc.witness_end {
+        sig_queue.rollback_to(entry_mark);
         return tx_validation_error_result(
             ptc,
             TxError::new(ErrorCode::TxErrParse, "witness_count mismatch"),

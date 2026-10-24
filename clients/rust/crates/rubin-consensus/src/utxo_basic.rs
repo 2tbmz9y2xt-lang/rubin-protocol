@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use crate::constants::{
     COINBASE_MATURITY, COV_TYPE_ANCHOR, COV_TYPE_CORE_SIMPLICITY, COV_TYPE_DA_COMMIT,
@@ -140,24 +141,33 @@ pub(crate) fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queu
     sig_queue: &mut SigCheckQueue,
 ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
     let entry_mark = sig_queue.mark();
-    let result = apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
-        UtxoApplyImplContext {
-            tx,
-            txid,
-            utxo_set,
-            height,
-            block_timestamp,
-            block_mtp,
-            chain_id,
-            rotation,
-            registry,
-        },
-        Some(&mut *sig_queue),
-    );
-    if result.is_err() {
-        sig_queue.rollback_to(entry_mark);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
+            UtxoApplyImplContext {
+                tx,
+                txid,
+                utxo_set,
+                height,
+                block_timestamp,
+                block_mtp,
+                chain_id,
+                rotation,
+                registry,
+            },
+            Some(&mut *sig_queue),
+        )
+    }));
+    match result {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(err)) => {
+            sig_queue.rollback_to(entry_mark);
+            Err(err)
+        }
+        Err(payload) => {
+            sig_queue.rollback_to(entry_mark);
+            resume_unwind(payload)
+        }
     }
-    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,11 +305,7 @@ fn apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_impl(
     validate_apply_inputs(&ctx)?;
     let mut state = UtxoApplyState::new(&ctx, sig_queue)?;
     state.resolve_inputs(&ctx)?;
-    state.validate_spends(&ctx)?;
-    state.add_outputs(&ctx)?;
-    state.validate_vault_creation(&ctx)?;
-    state.validate_vault_spend(&ctx)?;
-    state.finish()
+    state.apply_resolved(&ctx)
 }
 
 fn validate_apply_inputs(ctx: &UtxoApplyImplContext<'_>) -> Result<(), TxError> {
@@ -346,6 +352,35 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
             ));
         }
         Ok(())
+    }
+
+    fn apply_resolved(
+        &mut self,
+        ctx: &UtxoApplyImplContext<'_>,
+    ) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+        let ordinary = self.vault_input_count == 0
+            && ctx
+                .tx
+                .outputs
+                .iter()
+                .all(|out| out.covenant_type != COV_TYPE_VAULT);
+        let entry_mark = self.sig_queue.as_ref().map(|queue| queue.mark());
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.validate_spends(ctx)?;
+            self.add_outputs(ctx)?;
+            self.validate_vault_creation(ctx)?;
+            self.validate_vault_spend(ctx)?;
+            self.finish()
+        }));
+        if ordinary && !matches!(&result, Ok(Ok(_))) {
+            if let (Some(mark), Some(queue)) = (entry_mark, self.sig_queue.as_deref_mut()) {
+                queue.settle_suffix(mark)?;
+            }
+        }
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
+        }
     }
 
     fn resolve_input(
@@ -516,7 +551,7 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
         Ok(())
     }
 
-    fn finish(self) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
+    fn finish(&mut self) -> Result<(HashMap<Outpoint, UtxoEntry>, UtxoApplySummary), TxError> {
         if self.sum_out > self.sum_in {
             return Err(TxError::new(
                 ErrorCode::TxErrValueConservation,
@@ -535,7 +570,7 @@ impl<'tx, 'queue> UtxoApplyState<'tx, 'queue> {
             fee,
             utxo_count: self.work.len() as u64,
         };
-        Ok((self.work, summary))
+        Ok((std::mem::take(&mut self.work), summary))
     }
 }
 

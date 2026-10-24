@@ -248,3 +248,205 @@ fn sig_check_queue_empty_flush_is_ok() {
     let mut queue = SigCheckQueue::new(1);
     queue.flush().expect("empty flush");
 }
+
+#[test]
+fn rub721_consuming_suffix() {
+    let kp = Mldsa87Keypair::generate().expect("RUB-721 requires native ML-DSA");
+    let registry = SuiteRegistry::default_registry();
+    let prefix_digest = [0x71; 32];
+    let prefix_sig = kp.sign_digest32(prefix_digest).expect("prefix signature");
+    for bound in [false, true] {
+        for prefix_count in [0, 1] {
+            // (task count, failing index, verifier error, expected evaluations)
+            for (count, bad, verifier_error, evaluations) in [
+                (0, None, false, 0),
+                (1, None, false, 1),
+                (3, None, false, 3),
+                (1, Some(0), false, 1),
+                (3, Some(0), false, 1),
+                (3, Some(1), false, 2),
+                (3, Some(0), true, 1),
+            ] {
+                let cache = SigCache::new(16);
+                let mut queue = SigCheckQueue::new(4).with_cache(cache.clone());
+                if bound {
+                    queue = queue.with_registry(&registry);
+                }
+                for _ in 0..prefix_count {
+                    queue
+                        .push(
+                            1,
+                            &kp.pubkey_bytes(),
+                            &prefix_sig,
+                            prefix_digest,
+                            TxError::new(ErrorCode::TxErrSigInvalid, "retained prefix"),
+                        )
+                        .unwrap();
+                }
+                let mark = queue.mark();
+                let prefix = queue.tasks.clone();
+                let entry_registry = queue.registry.clone();
+                for index in 0..count {
+                    let signed_digest = [0x80 + index as u8; 32];
+                    let mut pubkey = kp.pubkey_bytes();
+                    let mut signature = kp.sign_digest32(signed_digest).unwrap();
+                    let digest = if bad.is_some_and(|first| index >= first) {
+                        [0xa0 + index as u8; 32]
+                    } else {
+                        signed_digest
+                    };
+                    let suite = if verifier_error && index == 0 {
+                        0xfe
+                    } else {
+                        1
+                    };
+                    let message = if index == 0 {
+                        "suffix zero"
+                    } else {
+                        "suffix later"
+                    };
+                    queue_or_verify_signature(
+                        suite,
+                        &pubkey,
+                        &signature,
+                        digest,
+                        &registry,
+                        &mut Some(&mut queue),
+                        TxError::new(ErrorCode::TxErrSigInvalid, message),
+                    )
+                    .unwrap();
+                    pubkey.fill(0);
+                    signature.fill(0);
+                }
+                let expected = match (bad, verifier_error) {
+                    (_, true) => Err(TxError::new(
+                        ErrorCode::TxErrSigAlgInvalid,
+                        "verify_sig: unsupported suite_id",
+                    )),
+                    (Some(0), false) => {
+                        Err(TxError::new(ErrorCode::TxErrSigInvalid, "suffix zero"))
+                    }
+                    (Some(_), false) => {
+                        Err(TxError::new(ErrorCode::TxErrSigInvalid, "suffix later"))
+                    }
+                    (None, false) => Ok(()),
+                };
+                assert_eq!(queue.settle_suffix(mark), expected);
+                assert_eq!(queue.mark(), mark);
+                assert_eq!(queue.tasks, prefix);
+                assert_eq!(queue.registry, entry_registry);
+                assert_eq!((cache.hits(), cache.misses()), (0, evaluations));
+                let observed = (cache.len(), cache.hits(), cache.misses());
+                queue.settle_suffix(mark).unwrap();
+                assert_eq!((cache.len(), cache.hits(), cache.misses()), observed);
+                queue_or_verify_signature(
+                    1,
+                    &kp.pubkey_bytes(),
+                    &prefix_sig,
+                    prefix_digest,
+                    &registry,
+                    &mut Some(&mut queue),
+                    TxError::new(ErrorCode::TxErrSigInvalid, "next valid sibling"),
+                )
+                .unwrap();
+                queue
+                    .flush()
+                    .expect("prefix and valid sibling remain usable");
+                assert_eq!(queue.queued_bytes, 0);
+                assert!(queue.tasks.is_empty());
+                assert_eq!(
+                    cache.len(),
+                    evaluations as usize - usize::from(bad.is_some()) + 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rub721_consuming_suffix_budget_and_empty_binding() {
+    let kp = Mldsa87Keypair::generate().expect("RUB-721 requires native ML-DSA");
+    let registry = SuiteRegistry::default_registry();
+    let pubkey = kp.pubkey_bytes();
+    let digest = [0x72; 32];
+    let signature = kp.sign_digest32(digest).unwrap();
+    let failure = TxError::new(ErrorCode::TxErrSigInvalid, "budget task");
+    let mut queue = SigCheckQueue::new(1);
+    let unbound = queue.mark();
+    queue.queued_bytes = MAX_SIGCHECK_QUEUE_BYTES;
+    assert_eq!(
+        queue_or_verify_signature(
+            1,
+            &pubkey,
+            &signature,
+            digest,
+            &registry,
+            &mut Some(&mut queue),
+            failure.clone(),
+        )
+        .unwrap_err(),
+        TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue queued-byte budget exceeded"
+        )
+    );
+    assert!(queue.registry.is_some());
+    queue.settle_suffix(unbound).unwrap();
+    assert_eq!(
+        queue.mark(),
+        unbound,
+        "empty suffix restores failed-push binding"
+    );
+    let task_bytes = sigcheck_task_bytes(pubkey.len(), signature.len()).unwrap();
+    queue.queued_bytes = MAX_SIGCHECK_QUEUE_BYTES - task_bytes;
+    let byte_mark = queue.mark();
+    queue
+        .push(1, &pubkey, &signature, digest, failure.clone())
+        .unwrap();
+    assert_eq!(queue.queued_bytes, MAX_SIGCHECK_QUEUE_BYTES);
+    assert_eq!(
+        queue
+            .push(1, &pubkey, &signature, digest, failure.clone())
+            .unwrap_err(),
+        TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue queued-byte budget exceeded"
+        )
+    );
+    queue.settle_suffix(byte_mark).unwrap();
+    assert_eq!(queue.mark(), byte_mark);
+    queue
+        .push(1, &pubkey, &signature, digest, failure.clone())
+        .unwrap();
+    queue.flush().unwrap();
+
+    queue
+        .push(1, &pubkey, &signature, digest, failure.clone())
+        .unwrap();
+    let prefix = queue.tasks.clone();
+    let mark = queue.mark();
+    let cap = max_sigcheck_queue_tasks(queue.registry.as_ref()).unwrap();
+    while queue.len() < cap {
+        queue.push(0xfe, &[], &[], digest, failure.clone()).unwrap();
+    }
+    assert_eq!(
+        queue
+            .push(1, &pubkey, &signature, digest, failure.clone())
+            .unwrap_err(),
+        TxError::new(
+            ErrorCode::TxErrWitnessOverflow,
+            "SigCheckQueue task budget exceeded"
+        )
+    );
+    assert_eq!(
+        queue.settle_suffix(mark).unwrap_err(),
+        TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "verify_sig: unsupported suite_id"
+        )
+    );
+    assert_eq!(queue.mark(), mark);
+    assert_eq!(queue.tasks, prefix);
+    queue.push(1, &pubkey, &signature, digest, failure).unwrap();
+    queue.flush().unwrap();
+}

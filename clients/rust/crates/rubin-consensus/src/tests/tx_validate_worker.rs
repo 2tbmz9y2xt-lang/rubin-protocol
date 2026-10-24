@@ -15,6 +15,146 @@ use crate::utxo_basic::{Outpoint, UtxoEntry};
 use crate::worker_pool::{WorkerCancellationToken, WorkerPoolError, WorkerResult};
 type TxWorkerResult = WorkerResult<TxValidationResult, TxError>;
 
+#[test]
+fn rub721_worker_order() {
+    use crate::tx_helpers::{p2pk_covenant_data_for_pubkey, sign_transaction};
+    use crate::verify_sig_openssl::Mldsa87Keypair;
+    let kp = Mldsa87Keypair::generate().expect("RUB-721 requires native ML-DSA");
+    let other = Mldsa87Keypair::generate().expect("RUB-721 requires native ML-DSA");
+    let covenant = p2pk_covenant_data_for_pubkey(&kp.pubkey_bytes());
+    let vault = super::encode_vault_covenant_data(
+        [0x44; 32],
+        1,
+        &[sha3_256(&kp.pubkey_bytes())],
+        &[[0x55; 32]],
+    );
+    for first_valid in [false, true] {
+        for variant in 0..9 {
+            let mut tx = simple_p2pk_tx(0x91);
+            tx.outputs[0].covenant_data = covenant.clone();
+            let mut second = tx.inputs[0].clone();
+            second.prev_txid = [0x92; 32];
+            tx.inputs.push(second);
+            if variant == 5 {
+                tx.outputs[0].covenant_type = COV_TYPE_VAULT;
+                tx.outputs[0].covenant_data = vault.clone();
+            }
+            let first = if variant == 6 {
+                let mut input = tx.inputs[0].clone();
+                input.prev_txid = [0x93; 32];
+                tx.inputs.insert(0, input);
+                1
+            } else {
+                0
+            };
+            let mut snapshot = make_utxo_snapshot_for_tx(&tx, 100);
+            for entry in snapshot.values_mut() {
+                entry.covenant_data = covenant.clone();
+            }
+            // Sign the ordinary input bytes before replacing the Vault entry;
+            // its threshold uses the same native key and input value.
+            sign_transaction(&mut tx, &snapshot, [0; 32], &kp).unwrap();
+            if !first_valid {
+                let mut wrong = tx.clone();
+                wrong.tx_nonce += 10;
+                sign_transaction(&mut wrong, &snapshot, [0; 32], &kp).unwrap();
+                tx.witness[first] = wrong.witness[first].clone();
+            }
+            if variant == 6 {
+                let entry = snapshot
+                    .get_mut(&Outpoint {
+                        txid: [0x93; 32],
+                        vout: 0,
+                    })
+                    .unwrap();
+                entry.covenant_type = COV_TYPE_VAULT;
+                entry.covenant_data = vault.clone();
+            }
+            let expected_later = match variant {
+                0 => {
+                    tx.witness[1].suite_id = 0xfe;
+                    Some(TxError::new(
+                        ErrorCode::TxErrSigAlgInvalid,
+                        "CORE_P2PK suite not in native spend set",
+                    ))
+                }
+                1 => {
+                    tx.witness[1].pubkey = other.pubkey_bytes();
+                    Some(TxError::new(
+                        ErrorCode::TxErrSigInvalid,
+                        "CORE_P2PK key binding mismatch",
+                    ))
+                }
+                2 | 5 | 6 => {
+                    *tx.witness.last_mut().unwrap().signature.last_mut().unwrap() = 0;
+                    Some(TxError::new(
+                        ErrorCode::TxErrSighashTypeInvalid,
+                        "invalid sighash_type",
+                    ))
+                }
+                3 => Some(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "witness underflow in worker",
+                )),
+                4 => Some(TxError::new(ErrorCode::TxErrParse, "witness_count mismatch")),
+                8 => Some(TxError::new(
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "unsupported covenant in witness_slots",
+                )),
+                _ => None,
+            };
+            let pb = make_parsed_block(simple_coinbase(), vec![tx]);
+            let mut ptcs = precompute_tx_contexts(&pb, &snapshot, 100).expect("real precompute context");
+            match variant {
+                3 => ptcs[0].witness_end = 1,
+                4 => ptcs[0].witness_end += 1,
+                8 => ptcs[0].resolved_inputs[1].covenant_type = 0x0102,
+                _ => {}
+            }
+            let expected = if !first_valid && matches!(variant, 0 | 1 | 2 | 7) {
+                Some(TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_P2PK signature invalid",
+                ))
+            } else {
+                expected_later
+            };
+            let contexts_before = ptcs.clone();
+            let transactions_before = pb.txs.clone();
+            let snapshot_before = snapshot.clone();
+            let result = validate_tx_local(&ptcs[0], &pb, [0; 32], 100, 0, None);
+            assert_eq!(
+                result.err, expected,
+                "variant {variant}, first_valid={first_valid}"
+            );
+            assert_eq!(result.valid, expected.is_none());
+            assert_eq!(result.sig_count, if variant == 7 { 2 } else { 0 });
+            assert_eq!(result.tx_index, 1);
+            assert_eq!(result.fee, if variant == 6 { 210 } else { 110 });
+            let batch = run_tx_validation_workers(
+                &WorkerCancellationToken::new(),
+                2,
+                ptcs.clone(),
+                &pb,
+                [0; 32],
+                100,
+                0,
+                None,
+            )
+            .unwrap();
+            assert_eq!(batch.len(), 1);
+            assert!(
+                batch[0].error.is_none(),
+                "domain result uses the existing pool value envelope"
+            );
+            assert_eq!(batch[0].value.as_ref(), Some(&result));
+            assert_eq!(ptcs, contexts_before);
+            assert_eq!(pb.txs, transactions_before);
+            assert_eq!(snapshot, snapshot_before);
+        }
+    }
+}
+
 fn valid_p2pk_covenant_data() -> Vec<u8> {
     // Genesis-valid CORE_P2PK covenant_data: suite_id byte + key-id placeholder.
     // `precompute_tx_contexts` now validates output covenant genesis, so P2PK

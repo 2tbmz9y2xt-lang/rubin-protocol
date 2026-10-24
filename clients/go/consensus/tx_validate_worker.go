@@ -17,8 +17,8 @@ type TxValidationResult struct {
 	// TX_ERR_* error suitable for deterministic error reporting.
 	Err error
 
-	// SigCount is the number of signature verification operations that
-	// were executed (including deferred+flushed).
+	// SigCount is the number of queued tasks submitted to the final full
+	// flush, including cache hits. Early input errors leave it zero.
 	SigCount int
 
 	// Fee is the precomputed exact u128 transaction fee, copied from
@@ -115,6 +115,13 @@ func newTxValidationWorkerEnv(
 }
 
 func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWorkerEnv) error {
+	entryMark := env.sigQueue.mark()
+	completed := false
+	defer func() {
+		if !completed {
+			env.sigQueue.rollbackTo(entryMark)
+		}
+	}()
 	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
 	// the per-input spend loop.
 	simplicityCtx, err := buildSimplicityStep3dContext(tx, tvc.ResolvedInputs, env.blockHeight, env.chainID, env.rotation)
@@ -122,6 +129,7 @@ func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWork
 		return err
 	}
 	env.simplicityCtx = simplicityCtx
+	orderedDomain := workerHasCompleteSigOrder(tvc.ResolvedInputs, tx.Outputs)
 	witnessCursor := tvc.WitnessStart
 	for inputIndex, entry := range tvc.ResolvedInputs {
 		assigned, slots, err := assignedWorkerWitness(tx, tvc, entry, witnessCursor)
@@ -135,7 +143,7 @@ func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWork
 			inputIndex: uint32(inputIndex),
 			inputValue: entry.Value,
 		}
-		if err := validateInputSpendQ(check, env); err != nil {
+		if err := validateOrderedWorkerSpend(check, env, entryMark, orderedDomain); err != nil {
 			return err
 		}
 		witnessCursor += slots
@@ -143,7 +151,45 @@ func validateTxLocalInputs(tvc TxValidationContext, tx *Tx, env txValidationWork
 	if witnessCursor != len(tx.Witness) {
 		return txerr(TX_ERR_PARSE, "witness_count mismatch")
 	}
+	completed = true
 	return nil
+}
+
+// The current worker does not produce complete Vault input or creation order.
+func workerHasCompleteSigOrder(inputs []UtxoEntry, outputs []TxOutput) bool {
+	for _, entry := range inputs {
+		if entry.CovenantType == COV_TYPE_VAULT {
+			return false
+		}
+	}
+	for _, output := range outputs {
+		if output.CovenantType == COV_TYPE_VAULT {
+			return false
+		}
+	}
+	return true
+}
+
+// Select only at the S4 boundary; witness assignment and final cardinality
+// errors keep their original result. Native unwinding preserves a later panic
+// unless an earlier queued error is selected.
+func validateOrderedWorkerSpend(check txInputSpendCheck, env txValidationWorkerEnv, start sigCheckQueueMark, orderedDomain bool) (err error) {
+	completed := false
+	defer func() {
+		if completed && err == nil {
+			return
+		}
+		if !orderedDomain {
+			return
+		}
+		if earlier := env.sigQueue.settleRange(start, env.sigQueue.mark()); earlier != nil {
+			err = earlier
+			_ = recover()
+		}
+	}()
+	err = validateInputSpendQ(check, env)
+	completed = true
+	return err
 }
 
 func assignedWorkerWitness(tx *Tx, tvc TxValidationContext, entry UtxoEntry, witnessCursor int) ([]WitnessItem, int, error) {

@@ -680,7 +680,7 @@ fn integration_parity_multiple_valid_txs() {
 }
 
 #[test]
-fn connect_block_transaction_index_first_error_order() {
+fn rub721_block_order() {
     run_connect_block_first_error_cases(false, None);
 }
 
@@ -1068,6 +1068,125 @@ fn run_connect_block_first_error_cases(
             reject(&block(subsidy + 20, &txs), want, &cov, 100, None);
         }
 
+        if !rub1099 {
+            let mut wrong = spend(&cov, 1, 0, 90);
+            let mut signed_other = wrong.clone();
+            signed_other.tx_nonce = 11;
+            wrong.witness = vec![sign_input_witness(&signed_other, 0, 100, ZERO_CHAIN_ID, &kp)];
+            let wrong = encode(wrong);
+            let later_cases = [
+                (missing(&cov, 2), ErrorCode::TxErrMissingUtxo, "utxo not found"),
+                (
+                    valid(0, 1, 90),
+                    ErrorCode::TxErrTxNonceInvalid,
+                    "tx_nonce must be >= 1 for non-coinbase",
+                ),
+                (
+                    valid(1, 1, 90),
+                    ErrorCode::TxErrNonceReplay,
+                    "duplicate tx_nonce in block",
+                ),
+                (
+                    valid(2, 1, 0),
+                    ErrorCode::TxErrCovenantTypeInvalid,
+                    "CORE_P2PK value must be > 0",
+                ),
+            ];
+            let reject_public = |raw: &[u8], code, message| {
+                for workers in [1, 2, 4] {
+                    for explicit in [false, true] {
+                        let mut candidate = state(&cov, 100);
+                        let before = candidate.clone();
+                        let outcome = if explicit {
+                            crate::connect_block_parallel_sig_verify_with_suite_context(
+                                raw,
+                                Some(prev),
+                                Some(target),
+                                height,
+                                Some(&[0]),
+                                &mut candidate,
+                                ZERO_CHAIN_ID,
+                                None,
+                                Some(&crate::SuiteRegistry::default_registry()),
+                                workers,
+                            )
+                        } else {
+                            crate::connect_block_parallel_sig_verify(
+                                raw,
+                                Some(prev),
+                                Some(target),
+                                height,
+                                Some(&[0]),
+                                &mut candidate,
+                                ZERO_CHAIN_ID,
+                                workers,
+                            )
+                        };
+                        assert_eq!(
+                            outcome.unwrap_err(),
+                            crate::error::TxError::new(code, message)
+                        );
+                        assert_eq!(candidate, before, "rejection published state");
+                    }
+                }
+            };
+            for (later, code, message) in later_cases {
+                let raw = block(subsidy, &[wrong.clone(), later.clone()]);
+                reject_public(
+                    &raw,
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_P2PK signature invalid",
+                );
+                reject_public(&block(subsidy, &[valid(1, 0, 90), later]), code, message);
+            }
+            reject_public(
+                &block(subsidy + 21, &[valid(1, 0, 90), valid(2, 1, 90)]),
+                ErrorCode::BlockErrSubsidyExceeded,
+                "coinbase outputs exceed subsidy+fees bound",
+            );
+
+            for first_valid in [false, true] {
+                let first = if first_valid {
+                    valid(1, 0, 90)
+                } else {
+                    wrong.clone()
+                };
+                let raw = block(subsidy, &[first, valid(2, 1, 90)]);
+                let mut candidate = state(&cov, 100);
+                let before = candidate.clone();
+                let provider = super::connect_block_parallel_branches::Rub721LaterSpend::new();
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    crate::connect_block_parallel_sig_verify_with_suite_context(
+                        &raw,
+                        Some(prev),
+                        Some(target),
+                        height,
+                        Some(&[0]),
+                        &mut candidate,
+                        ZERO_CHAIN_ID,
+                        Some(&provider),
+                        None,
+                        2,
+                    )
+                }));
+                if first_valid {
+                    assert_eq!(
+                        outcome.unwrap_err().downcast_ref::<&str>(),
+                        Some(&"RUB-721 later spend")
+                    );
+                } else {
+                    assert_eq!(
+                        outcome.unwrap().unwrap_err(),
+                        crate::error::TxError::new(
+                            ErrorCode::TxErrSigInvalid,
+                            "CORE_P2PK signature invalid"
+                        )
+                    );
+                }
+                assert_eq!(candidate, before, "unwind/rejection published state");
+            }
+        }
+
         if rub1099 {
             let replay_first = valid(1, 0, 90);
             let replay_second = valid(1, 1, 90);
@@ -1152,6 +1271,10 @@ fn run_connect_block_first_error_cases(
             2,
         )
         .expect("parallel valid");
+        assert_eq!(seq_summary.sum_fees, 20);
+        assert_eq!(par_summary.sum_fees, 20);
+        assert_eq!(par_summary.sig_task_count, 2);
+        assert_eq!(par_summary.worker_panics, 0);
         assert_eq!(seq_summary.post_state_digest, par_summary.post_state_digest);
         assert_eq!(seq, par);
     }
