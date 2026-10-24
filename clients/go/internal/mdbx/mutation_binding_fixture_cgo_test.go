@@ -296,8 +296,10 @@ func TestMutationBindingTreeUnwindV1(t *testing.T) {
 	})
 }
 
-// N12 retained cleanup failure: the existing wrong-thread lifecycle fixture with a retained OLD cleanup, crossed
-// with and without a real native attempt; the epoch follows commitAttempted only.
+// N12 retained cleanup failure on the existing wrong-thread lifecycle fixture, with a thread-mismatch OLD cleanup
+// error in both rows: attempted=false retains the write txn (updateNativeRetainedWrite, oldRetained=false);
+// attempted=true is a committed outcome that retains the OLD txn (oldRetained=true). The epoch follows
+// commitAttempted only.
 func TestMutationBindingRetainedCleanupV1(t *testing.T) {
 	for _, attempted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("attempted%v", attempted), func(t *testing.T) {
