@@ -228,3 +228,145 @@ fn p2pk_at_height_key_binding_mismatch() {
 
     assert_eq!(err.code, ErrorCode::TxErrSigInvalid);
 }
+
+fn p2pk_overlap_registry() -> SuiteRegistry {
+    let default = SuiteRegistry::default_registry();
+    let mut suites = BTreeMap::new();
+    for suite_id in [0x01, 0x02] {
+        let mut params = default.lookup(0x01).expect("default suite").clone();
+        params.suite_id = suite_id;
+        suites.insert(suite_id, params);
+    }
+    SuiteRegistry::with_suites(suites)
+}
+
+#[test]
+fn p2pk_suite_error_order() {
+    let registry = p2pk_overlap_registry();
+    let (tx, ii, iv, cid) = dummy_tx_ctx();
+    for name in [
+        "suite_mismatch",
+        "key_binding",
+        "sighash_type",
+        "length_0",
+        "length_1",
+        "length_32",
+        "length_34",
+        "membership",
+        "pubkey_length",
+        "signature_length",
+        "matching_suite",
+    ] {
+        let mut rotation = TestSpendSetRotation {
+            spend: NativeSuiteSet::new(&[0x01, 0x02]),
+        };
+        let mut w = WitnessItem {
+            suite_id: 0x02,
+            pubkey: vec![0; 2592],
+            signature: vec![0; 4628],
+        };
+        w.signature[4627] = 0x01;
+        match name {
+            "sighash_type" => w.signature[4627] = 0x04,
+            "pubkey_length" => w.pubkey.truncate(2591),
+            "signature_length" => {
+                w.signature.remove(0);
+            }
+            _ => {}
+        }
+        let mut entry = make_p2pk_entry(&w.pubkey);
+        let (mut code, mut message) = (
+            "TX_ERR_SIG_ALG_INVALID",
+            "CORE_P2PK covenant_data suite_id mismatch",
+        );
+        match name {
+            "key_binding" => entry.covenant_data[1] ^= 1,
+            "matching_suite" => {
+                entry.covenant_data[0] = 0x02;
+                entry.covenant_data[1] ^= 1;
+                code = "TX_ERR_SIG_INVALID";
+                message = "CORE_P2PK key binding mismatch";
+            }
+            "length_0" | "length_1" | "length_32" | "length_34" => {
+                let length = match name {
+                    "length_0" => 0,
+                    "length_1" => 1,
+                    "length_32" => 32,
+                    _ => 34,
+                };
+                entry.covenant_data.resize(length, 0);
+                if length == 34 {
+                    entry.covenant_data[0] = w.suite_id;
+                }
+                code = "TX_ERR_COVENANT_TYPE_INVALID";
+                message = "CORE_P2PK covenant_data invalid";
+            }
+            "membership" => {
+                rotation.spend = NativeSuiteSet::new(&[0x01]);
+                message = "CORE_P2PK suite not in native spend set";
+            }
+            "pubkey_length" | "signature_length" => {
+                code = "TX_ERR_SIG_NONCANONICAL";
+                message = "non-canonical witness item lengths";
+            }
+            _ => {}
+        }
+        let mut cache = SighashV1PrehashCache::new(&tx).expect("cache");
+        let err = validate_p2pk_spend_q(
+            &entry,
+            &w,
+            ii,
+            iv,
+            cid,
+            1,
+            &mut cache,
+            None,
+            Some(&rotation),
+            Some(&registry),
+        )
+        .expect_err(name);
+        assert_eq!(err.code.as_str(), code, "{name}");
+        assert_eq!(err.msg, message, "{name}");
+    }
+}
+
+#[test]
+fn p2pk_rotation_overlap_apply_suite_mismatch() {
+    let registry = p2pk_overlap_registry();
+    let rotation = TestSpendSetRotation {
+        spend: NativeSuiteSet::new(&[0x01, 0x02]),
+    };
+    let (mut tx, _, _, cid) = dummy_tx_ctx();
+    tx.outputs[0].covenant_data[0] = 0x01;
+    let mut w = WitnessItem {
+        suite_id: 0x02,
+        pubkey: vec![0; 2592],
+        signature: vec![0; 4628],
+    };
+    w.signature[4627] = 0x01;
+    let entry = make_p2pk_entry(&w.pubkey);
+    tx.witness = vec![w];
+    let utxos = std::collections::HashMap::from([(
+        crate::utxo_basic::Outpoint {
+            txid: tx.inputs[0].prev_txid,
+            vout: 0,
+        },
+        entry,
+    )]);
+    let before = utxos.clone();
+    let result = crate::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context(
+        &tx,
+        [0; 32],
+        &utxos,
+        1,
+        0,
+        0,
+        cid,
+        Some(&rotation),
+        Some(&registry),
+    );
+    assert_eq!(utxos, before, "retained caller UTXOs");
+    let err = result.expect_err("rotation overlap suite mismatch");
+    assert_eq!(err.code.as_str(), "TX_ERR_SIG_ALG_INVALID");
+    assert_eq!(err.msg, "CORE_P2PK covenant_data suite_id mismatch");
+}

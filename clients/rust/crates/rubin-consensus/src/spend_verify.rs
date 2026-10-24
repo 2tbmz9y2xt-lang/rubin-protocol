@@ -175,12 +175,16 @@ fn validate_witness_item_lengths(w: &WitnessItem, params: &SuiteParams) -> Resul
 }
 
 fn p2pk_covenant_key_id(entry: &UtxoEntry, suite_id: u8) -> Result<[u8; 32], TxError> {
-    if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA
-        || entry.covenant_data[0] != suite_id
-    {
+    if entry.covenant_data.len() as u64 != MAX_P2PK_COVENANT_DATA {
         return Err(TxError::new(
             ErrorCode::TxErrCovenantTypeInvalid,
             "CORE_P2PK covenant_data invalid",
+        ));
+    }
+    if entry.covenant_data.first() != Some(&suite_id) {
+        return Err(TxError::new(
+            ErrorCode::TxErrSigAlgInvalid,
+            "CORE_P2PK covenant_data suite_id mismatch",
         ));
     }
     let mut key_id = [0u8; 32];

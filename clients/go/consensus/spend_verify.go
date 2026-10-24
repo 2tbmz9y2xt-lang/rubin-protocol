@@ -147,8 +147,11 @@ func validateP2PKSpendAtHeight(check p2pkSpendCheck) error {
 		return txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths")
 	}
 
-	if len(check.entry.CovenantData) != MAX_P2PK_COVENANT_DATA || check.entry.CovenantData[0] != w.SuiteID {
+	if len(check.entry.CovenantData) != MAX_P2PK_COVENANT_DATA {
 		return txerr(TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK covenant_data invalid")
+	}
+	if check.entry.CovenantData[0] != w.SuiteID {
+		return txerr(TX_ERR_SIG_ALG_INVALID, "CORE_P2PK covenant_data suite_id mismatch")
 	}
 
 	var keyID [32]byte

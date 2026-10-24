@@ -12,6 +12,31 @@ import (
 // ValidateTxLocal unit tests
 // ─────────────────────────────────────────────────────────────────────────────
 
+func TestValidateTxLocal_P2PKDefaultProviderSuiteMismatch(t *testing.T) {
+	tx, _, _, chainID := testSighashContextTx()
+	w := WitnessItem{SuiteID: 0x01, Pubkey: make([]byte, 2592), Signature: make([]byte, 4628)}
+	w.Signature[4627] = 0x01
+	tx.Witness = []WitnessItem{w}
+	// Structural-only pre-state: 0xFF cannot be produced by native creation.
+	entry := p2pkEntryForPub(t, 0xFF, w.Pubkey)
+	cache, err := NewSighashV1PrehashCache(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := ValidateTxLocal(TxValidationContext{
+		TxIndex:        1,
+		Tx:             tx,
+		ResolvedInputs: []UtxoEntry{entry},
+		WitnessStart:   0,
+		WitnessEnd:     1,
+		SighashCache:   cache,
+	}, chainID, 1, 0, nil)
+	if result.Valid {
+		t.Fatal("suite mismatch reported valid")
+	}
+	assertTxErrCodeMsg(t, result.Err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK covenant_data suite_id mismatch")
+}
+
 func TestValidateTxLocal_P2PK_Valid(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())

@@ -109,6 +109,32 @@ func snapshotRefusalUtxos(utxos map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 	return before
 }
 
+func TestApplyNonCoinbaseTxBasicUpdate_P2PKRotationOverlapSuiteMismatch(t *testing.T) {
+	params := canonicalDefaultRuntimeSuiteParams()
+	params.SuiteID = 0x02
+	registry := NewSuiteRegistryFromParams([]SuiteParams{canonicalDefaultRuntimeSuiteParams(), params})
+	rotation := &mockRotationProvider{h2: 1}
+	tx, _, _, chainID := testSighashContextTx()
+	w := WitnessItem{SuiteID: 0x02, Pubkey: make([]byte, 2592), Signature: make([]byte, 4628)}
+	w.Signature[4627] = 0x01
+	tx.Witness = []WitnessItem{w}
+	entry := p2pkEntryForPub(t, 0x01, w.Pubkey)
+	utxos := map[Outpoint]UtxoEntry{{Txid: tx.Inputs[0].PrevTxid}: entry}
+	before := snapshotRefusalUtxos(utxos)
+	backend := newLiveSigCacheBackend(t, true, nil)
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, [32]byte{}, utxos, 1, 0, chainID, rotation, registry)
+	if backend.calls != 0 {
+		t.Fatalf("suite mismatch made %d verifier calls", backend.calls)
+	}
+	if work != nil || summary != nil {
+		t.Fatalf("suite mismatch published work=%v summary=%v", work, summary)
+	}
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("suite mismatch changed the retained caller UTXOs")
+	}
+	assertTxErrCodeMsg(t, err, "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK covenant_data suite_id mismatch")
+}
+
 func TestApplyNonCoinbaseTxBasicUpdate_Unknown0105NoEffects(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	sibling := Outpoint{Txid: hashWithPrefix(0xef)}
