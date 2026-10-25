@@ -1584,7 +1584,6 @@ func (f suffixFixture) priorTask(t *testing.T, q *SigCheckQueue) sigCheckTask {
 	return task
 }
 
-// sameTxErr reports equal code, msg and cause, or both nil.
 func sameTxErr(a, b error) bool {
 	var x, y *TxError
 	if a == nil || b == nil || !errors.As(a, &x) || !errors.As(b, &y) {
@@ -1593,8 +1592,7 @@ func sameTxErr(a, b error) bool {
 	return x.Code == y.Code && x.Msg == y.Msg && x.Cause() == y.Cause()
 }
 
-// runSuffix returns the direct error; raw, queued and both block paths must match its code, msg,
-// cause and success result, and a rejection must leave caller and queue state unchanged.
+// runSuffix returns the direct error; every path matches its error and success result, state intact.
 func (f suffixFixture) runSuffix(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider) error {
 	t.Helper()
 	before, txid := cloneUtxoSet(utxos), testTxID(t, txBytesFromTx(t, tx))
@@ -1712,6 +1710,9 @@ func TestCanonicalSuffix_R3BeforeR4(t *testing.T) {
 	bad := UtxoEntry{Value: 100, CovenantType: COV_TYPE_MULTISIG, CovenantData: []byte{1}}
 	tx, utxos := suffixTx(f.payTo(1), &p2pk, &bad)
 	f.sign(t, tx, 0, 0, 0, 0)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
+	htlc := UtxoEntry{Value: 100, CovenantType: COV_TYPE_HTLC, CovenantData: []byte{1}}
+	tx, utxos = suffixTx(f.payTo(1), &bad, &htlc) // R3 at input 0 beats the S4 HTLC data parse
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
 	bad = UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{1}}
 	tx, utxos = suffixTx(f.payTo(1), &p2pk, &bad)
@@ -1863,8 +1864,7 @@ func TestCanonicalSuffix_S3bBeforeS3d(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, activeSimplicityRotation([32]byte{}, 1)), TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
 }
 
-// H09: each reachable S5 exit and boundary keeps its result; u128 sums of at most
-// 1024 u64 addends cannot overflow, and subtraction runs after sum_out <= sum_in.
+// H09: S5 exits keep their results; u128 sums of <= 1024 u64 cannot overflow; subtract after sum_out <= sum_in.
 func TestCanonicalSuffix_S5Boundaries(t *testing.T) {
 	f := newSuffixFixture(t)
 	const maxU64 = ^uint64(0)
