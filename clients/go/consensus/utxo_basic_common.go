@@ -125,23 +125,12 @@ func cloneUtxoEntry(entry UtxoEntry) UtxoEntry {
 
 func checkSpendCovenant(
 	covType uint16,
-	covData []byte,
+	_ []byte,
 ) error {
 	switch covType {
-	case COV_TYPE_P2PK:
-		return nil
-	case COV_TYPE_VAULT:
-		_, err := ParseVaultCovenantDataForSpend(covData)
-		return err
-	case COV_TYPE_MULTISIG:
-		_, err := ParseMultisigCovenantData(covData)
-		return err
-	case COV_TYPE_HTLC:
-		_, err := ParseHTLCCovenantData(covData)
-		return err
-	case COV_TYPE_CORE_SIMPLICITY:
-		// Resolve-phase accept (like P2PK): the full §14.3 covenant-data + spend validation runs at
-		// spend time (validateCoreSimplicitySpend -> parseCoreSimplicityCovenantData with value).
+	case COV_TYPE_P2PK, COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC, COV_TYPE_CORE_SIMPLICITY:
+		// R1 admits the known type only; Vault/Multisig witness-slot metadata
+		// parses at R3 and the HTLC data parse at S4 (CANONICAL §16 rule 7).
 		return nil
 	default:
 		// Reserved/unknown are unsupported in basic apply path.
@@ -245,6 +234,7 @@ type nonCoinbaseApplyContext struct {
 	registry      *SuiteRegistry
 	sighashCache  *SighashV1PrehashCache
 	sigCache      *SigCache
+	sigQueue      *SigCheckQueue
 	inputView     *blockInputViewState
 	resolved      []nonCoinbaseResolvedInput
 	simplicityCtx *SimplicityTxContext

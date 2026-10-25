@@ -31,112 +31,12 @@ func applyNonCoinbaseTxBasicWork(input nonCoinbaseApplyWorkInput) (map[Outpoint]
 	}).apply()
 }
 
-func (ctx *nonCoinbaseApplyContext) apply() (map[Outpoint]UtxoEntry, Uint128, error) {
-	if err := ctx.applyPreOutputPhases(); err != nil {
-		return nil, Uint128{}, err
-	}
-	if err := ctx.addSpendableOutputs(); err != nil {
-		return nil, Uint128{}, err
-	}
-	if err := ctx.applyPostOutputRules(); err != nil {
-		return nil, Uint128{}, err
-	}
-	fee, err := ctx.finalizeValueAndFee()
-	if err != nil {
-		return nil, Uint128{}, err
-	}
-	return ctx.work, fee, nil
-}
-
-func (ctx *nonCoinbaseApplyContext) applyPreOutputPhases() error {
-	if err := ctx.prepare(); err != nil {
-		return err
-	}
-	if err := ctx.resolveInputs(); err != nil {
-		return err
-	}
-	// §2.4 step 3d (see buildSimplicityStep3dContext): eager group cap after input resolution, before
-	// the spend loop.
-	simplicityCtx, err := buildSimplicityStep3dContextWithDescriptors(
-		ctx.tx, ctx.resolvedEntries(), ctx.height, ctx.chainID, ctx.rotation, ctx.inputView != nil,
-	)
-	if err != nil {
-		return err
-	}
-	ctx.simplicityCtx = simplicityCtx
-	return ctx.validateInputSpends()
-}
-
-func (ctx *nonCoinbaseApplyContext) applyPostOutputRules() error {
-	if ctx.createsVault {
-		if err := ctx.validateVaultCreations(); err != nil {
-			return err
-		}
-	}
-	if ctx.spend.vaultInputCount == 1 {
-		if err := ctx.validateVaultSpend(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func cloneUtxoSet(src map[Outpoint]UtxoEntry) map[Outpoint]UtxoEntry {
 	out := make(map[Outpoint]UtxoEntry, len(src))
 	for k, v := range src {
 		out[k] = cloneUtxoEntry(v)
 	}
 	return out
-}
-
-func (ctx *nonCoinbaseApplyContext) prepare() error {
-	if err := ValidateSpendTxS1A(ctx.tx); err != nil {
-		return err
-	}
-	if err := ValidateTxCovenantsGenesis(ctx.tx, ctx.chainID, ctx.height, ctx.rotation); err != nil {
-		return err
-	}
-	sighashCache, err := NewSighashV1PrehashCache(ctx.tx)
-	if err != nil {
-		return err
-	}
-	ctx.sighashCache = sighashCache
-	return nil
-}
-
-func (ctx *nonCoinbaseApplyContext) resolveInputs() error {
-	witnessCursor := 0
-	ctx.resolved = make([]nonCoinbaseResolvedInput, 0, len(ctx.tx.Inputs))
-	for _, in := range ctx.tx.Inputs {
-		entry, op, err := ctx.lookupInputEntry(in)
-		if err != nil {
-			return err
-		}
-		if err := ctx.validateResolvedInputEntry(entry); err != nil {
-			return err
-		}
-		slots, err := WitnessSlots(entry.CovenantType, entry.CovenantData)
-		if err != nil {
-			return err
-		}
-		if slots <= 0 {
-			return txerr(TX_ERR_PARSE, "invalid witness slots")
-		}
-		if witnessCursor+slots > len(ctx.tx.Witness) {
-			return txerr(TX_ERR_PARSE, "witness underflow")
-		}
-		assigned := ctx.tx.Witness[witnessCursor : witnessCursor+slots]
-		ctx.resolved = append(ctx.resolved, nonCoinbaseResolvedInput{
-			entry:    entry,
-			witness:  append([]WitnessItem(nil), assigned...),
-			outpoint: op,
-		})
-		witnessCursor += slots
-	}
-	if witnessCursor != len(ctx.tx.Witness) {
-		return txerr(TX_ERR_PARSE, "witness_count mismatch")
-	}
-	return nil
 }
 
 // ValidateSpendTxS1A checks a parsed non-coinbase transaction; the caller must
@@ -233,10 +133,20 @@ func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) 
 	if err := ctx.validateCoinbaseInputMaturity(entry); err != nil {
 		return err
 	}
-	if err := ctx.captureVaultResolvedInput(entry); err != nil {
+	if err := checkSpendCovenant(entry.CovenantType, entry.CovenantData); err != nil {
 		return err
 	}
-	return checkSpendCovenant(entry.CovenantType, entry.CovenantData)
+	return ctx.validateSimplicityInputDeployment(entry)
+}
+
+// validateSimplicityInputDeployment is the R1 deployment disposition of a
+// CORE_SIMPLICITY input (CANONICAL §16 rule 7: inactive 0x0106 is unknown and
+// rejects before witness-slot assignment). The bound surface memoizes the read.
+func (ctx *nonCoinbaseApplyContext) validateSimplicityInputDeployment(entry UtxoEntry) error {
+	if entry.CovenantType != COV_TYPE_CORE_SIMPLICITY {
+		return nil
+	}
+	return validateCoreSimplicityDeploymentActive(ctx.chainID, ctx.height, simplicityDeploymentFromRotation(ctx.rotation))
 }
 
 func isNonSpendableInputCovenant(covType uint16) bool {
@@ -254,56 +164,12 @@ func (ctx *nonCoinbaseApplyContext) validateCoinbaseInputMaturity(entry UtxoEntr
 	return nil
 }
 
-func (ctx *nonCoinbaseApplyContext) captureVaultResolvedInput(entry UtxoEntry) error {
-	if entry.CovenantType != COV_TYPE_VAULT {
-		return nil
-	}
-	ctx.spend.vaultInputCount++
-	if ctx.spend.vaultInputCount > 1 {
-		return txerr(TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
-	}
-	return nil
-}
-
 func (ctx *nonCoinbaseApplyContext) resolvedEntries() []UtxoEntry {
 	entries := make([]UtxoEntry, 0, len(ctx.resolved))
 	for _, input := range ctx.resolved {
 		entries = append(entries, input.entry)
 	}
 	return entries
-}
-
-func (ctx *nonCoinbaseApplyContext) validateInputSpends() error {
-	// §14.3 lowest-wire-index first-error: every input (including CORE_SIMPLICITY) is validated in
-	// wire order by the loop below. The former CORE_SIMPLICITY short-circuit here was a reject-only
-	// artifact — it validated ONLY the first simplicity input and returned, which under live spend
-	// would skip all other inputs AND preempt a lower-wire-index error (RUB-615 removed it).
-	for inputIndex, input := range ctx.resolved {
-		if err := ctx.validateInputSpend(inputIndex, input); err != nil {
-			return err
-		}
-		inputLockID := sha3_256(OutputDescriptorBytes(input.entry.CovenantType, input.entry.CovenantData))
-		ctx.spend.inputLockIDs = append(ctx.spend.inputLockIDs, inputLockID)
-		ctx.spend.inputCovTypes = append(ctx.spend.inputCovTypes, input.entry.CovenantType)
-		var err error
-		ctx.spend.sumIn, err = addU64ToU128(ctx.spend.sumIn, input.entry.Value)
-		if err != nil {
-			return err
-		}
-		if input.entry.CovenantType == COV_TYPE_VAULT {
-			ctx.spend.sumInVault, err = addU64ToU128(ctx.spend.sumInVault, input.entry.Value)
-			if err != nil {
-				return err
-			}
-		}
-		delete(ctx.work, input.outpoint)
-		if ctx.inputView != nil {
-			if _, preBlock := ctx.inputView.spent[input.outpoint]; !preBlock {
-				ctx.inputView.spent[input.outpoint] = 0
-			}
-		}
-	}
-	return nil
 }
 
 func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input nonCoinbaseResolvedInput) error {
@@ -315,7 +181,7 @@ func (ctx *nonCoinbaseApplyContext) validateInputSpend(inputIndex int, input non
 	case COV_TYPE_MULTISIG:
 		return ctx.validateMultisigInput(inputIndex, entry, assigned)
 	case COV_TYPE_VAULT:
-		return ctx.captureVaultInput(inputIndex, entry, assigned)
+		return ctx.validateVaultInput(inputIndex, entry, assigned)
 	case COV_TYPE_HTLC:
 		return ctx.validateHTLCInput(inputIndex, entry, assigned)
 	case COV_TYPE_CORE_SIMPLICITY:
@@ -329,7 +195,7 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 	if len(assigned) != 1 {
 		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 	}
-	return validateP2PKSpendAtHeight(p2pkSpendCheck{
+	check := p2pkSpendCheck{
 		entry:       entry,
 		witness:     assigned[0],
 		blockHeight: ctx.height,
@@ -343,7 +209,11 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 			registry:   ctx.registry,
 			sigCache:   ctx.sigCache,
 		},
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateP2PKSpendQ(entry, assigned[0], ctx.tx, check.sig.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
+	}
+	return validateP2PKSpendAtHeight(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -351,7 +221,7 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 	if err != nil {
 		return err
 	}
-	return validateThresholdSigSpendAtHeight(thresholdSigSpendCheck{
+	check := thresholdSigSpendCheck{
 		keys:        m.Keys,
 		threshold:   m.Threshold,
 		witnesses:   assigned,
@@ -367,7 +237,11 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 			sigCache:   ctx.sigCache,
 			context:    "CORE_MULTISIG",
 		},
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateThresholdSigSpendQ(m.Keys, m.Threshold, assigned, ctx.tx, check.sig.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, "CORE_MULTISIG", ctx.rotation, ctx.registry)
+	}
+	return validateThresholdSigSpendAtHeight(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) captureVaultInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -390,7 +264,7 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 	if len(assigned) != 2 {
 		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 	}
-	return validateHTLCSpendAtHeightWithSigCache(htlcSpendCheck{
+	check := htlcSpendCheck{
 		entry:       entry,
 		pathItem:    assigned[0],
 		sigItem:     assigned[1],
@@ -404,7 +278,11 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,
 		sigCache:    ctx.sigCache,
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateHTLCSpendQ(entry, assigned[0], assigned[1], ctx.tx, check.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
+	}
+	return validateHTLCSpendAtHeightWithSigCache(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -422,49 +300,4 @@ func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(inputIndex int, 
 		cache:       ctx.sighashCache,
 		txContext:   ctx.simplicityCtx,
 	})
-}
-
-func (ctx *nonCoinbaseApplyContext) addSpendableOutputs() error {
-	for i, out := range ctx.tx.Outputs {
-		var err error
-		ctx.sumOut, err = addU64ToU128(ctx.sumOut, out.Value)
-		if err != nil {
-			return err
-		}
-		if out.CovenantType == COV_TYPE_VAULT {
-			ctx.createsVault = true
-		}
-		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
-			continue
-		}
-		op := Outpoint{Txid: ctx.txid, Vout: uint32(i)}
-		ctx.work[op] = UtxoEntry{
-			Value:             out.Value,
-			CovenantType:      out.CovenantType,
-			CovenantData:      append([]byte(nil), out.CovenantData...),
-			CreationHeight:    ctx.height,
-			CreatedByCoinbase: false,
-		}
-	}
-	return nil
-}
-
-// finalizeValueAndFee runs tx-wide value conservation and then derives the
-// fee. The fee is the exact u128 difference sum_in-sum_out and is returned
-// unnarrowed: a fee above u64 is a protocol-valid outcome, never a parse or
-// value-conservation error.
-func (ctx *nonCoinbaseApplyContext) finalizeValueAndFee() (Uint128, error) {
-	valueBase := &TxContextBase{
-		TotalIn:  uint128FromInternal(ctx.spend.sumIn),
-		TotalOut: uint128FromInternal(ctx.sumOut),
-		Height:   ctx.height,
-	}
-	if errTx := CheckValueConservationTxWide(valueBase, ctx.spend.vaultInputCount == 1, uint128FromInternal(ctx.spend.sumInVault)); errTx != nil {
-		return Uint128{}, errTx
-	}
-	feeU128, err := subU128(ctx.spend.sumIn, ctx.sumOut)
-	if err != nil {
-		return Uint128{}, err
-	}
-	return uint128FromInternal(feeU128), nil
 }

@@ -426,7 +426,8 @@ func TestConnectBlockInputViewEarlyErrors(t *testing.T) {
 			v.entries[op0] = e
 		}, []Outpoint{op0}},
 		{"duplicate_before_all_reads", "TX_ERR_PARSE", "duplicate input outpoint", func(tx *Tx, _ *inputViewTestView) { tx.Inputs[1] = tx.Inputs[0] }, nil},
-		{"witness_underflow_before_next_input", "TX_ERR_PARSE", "witness underflow", func(tx *Tx, _ *inputViewTestView) { tx.Witness = nil }, []Outpoint{op0}},
+		// R3 runs only after complete R1: the later read failure wins (A19).
+		{"next_input_read_failure_before_witness_underflow", "", "", func(tx *Tx, _ *inputViewTestView) { tx.Witness = nil }, []Outpoint{op0, op1}},
 		{"bad_merkle_before_all_reads", "BLOCK_ERR_MERKLE_INVALID", "merkle_root mismatch", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -441,7 +442,14 @@ func TestConnectBlockInputViewEarlyErrors(t *testing.T) {
 				input.BlockBytes[36] ^= 1
 			}
 			_, err := inputViewConnect(t, input, view, Uint128{})
-			assertInputViewTxError(t, err, tc.code, tc.message)
+			if tc.code == "" {
+				var readErr *blockInputViewReadError
+				if !errors.As(err, &readErr) || readErr.outpoint != op1 || readErr.inputIndex != 1 || err.Error() != readErr.failure.Error() {
+					t.Fatalf("error=%v, want op1 read failure", err)
+				}
+			} else {
+				assertInputViewTxError(t, err, tc.code, tc.message)
+			}
 			assertInputViewReads(t, view, tc.reads...)
 		})
 	}
@@ -1493,7 +1501,12 @@ func TestConnectBlockInputViewPrivateSimplicityGate(t *testing.T) {
 			view := inputViewNew(pre)
 			_, err := inputViewConnect(t, input, view, Uint128{})
 			assertInputViewTxError(t, err, "TX_ERR_COVENANT_TYPE_INVALID", tc.message)
-			assertInputViewReads(t, view, reads...)
+			if tc.name == "active_cap" {
+				assertInputViewReads(t, view, reads...)
+				return
+			}
+			// R1 rejects the inactive CORE_SIMPLICITY input1 (D2); no later read (A19).
+			assertInputViewReads(t, view, reads[0], reads[1])
 		})
 	}
 }

@@ -2,7 +2,7 @@ package consensus
 
 import "testing"
 
-func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidationPriority(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkQ_LaterInactiveSimplicityR1PrecedesEarlierInputErrors(t *testing.T) {
 	makeTx := func(firstPrev, simpPrev [32]byte, witness []WitnessItem) *Tx {
 		return &Tx{
 			Version: TX_WIRE_VERSION,
@@ -32,24 +32,24 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidatio
 		message string
 	}{
 		{
-			name: "p2pk_missing_witness",
+			name: "later_r1_precedes_p2pk_r3_witness_underflow",
 			tx:   makeTx(p2pkPrev, p2pkSimpPrev, nil),
 			utxos: map[Outpoint]UtxoEntry{
 				makeOutpoint(p2pkPrev):     {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
 				makeOutpoint(p2pkSimpPrev): coreSimplicityAcceptEntry(100),
 			},
-			code:    TX_ERR_PARSE,
-			message: "witness underflow",
+			code:    TX_ERR_COVENANT_TYPE_INVALID,
+			message: "CORE_SIMPLICITY deployment not active",
 		},
 		{
-			name: "htlc_malformed_data",
+			name: "later_r1_precedes_htlc_s4_malformed_data",
 			tx:   makeTx(htlcPrev, htlcSimpPrev, dummyWitnesses(2)),
 			utxos: map[Outpoint]UtxoEntry{
 				makeOutpoint(htlcPrev):     {Value: 100, CovenantType: COV_TYPE_HTLC, CovenantData: []byte{0x01}},
 				makeOutpoint(htlcSimpPrev): coreSimplicityAcceptEntry(100),
 			},
 			code:    TX_ERR_COVENANT_TYPE_INVALID,
-			message: "CORE_HTLC covenant_data length mismatch",
+			message: "CORE_SIMPLICITY deployment not active",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

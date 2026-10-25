@@ -1237,9 +1237,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	}
 }
 
-// TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError exercises line 305-306:
-// UTXO with corrupt vault covenant data triggers checkSpendCovenant error.
-func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
+// Corrupt vault covenant data fails its parse; one input cannot tell R3 from S4.
+func TestApplyNonCoinbaseTxBasicWorkQ_CorruptVaultCovenantDataRejected(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
 	prevTxid := hashWithPrefix(0xEE)
@@ -1264,9 +1263,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 
 	q := NewSigCheckQueue(1)
 	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, q, nil, nil)
-	if err == nil {
-		t.Fatal("expected checkSpendCovenant error for corrupt vault data")
-	}
+	assertTxErrCodeMsg(t, err, TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data too short")
 }
 
 func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) {
@@ -1496,7 +1493,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 					}
 				case "selector", "vault_input":
 					tx.Witness[last].Signature[len(tx.Witness[last].Signature)-1] = 0x00
-					if firstValid || variant == "vault_input" {
+					if firstValid {
 						wantCode, wantMsg = "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type"
 					}
 				case "missing":
@@ -1533,7 +1530,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 			})
 		}
 	}
-	t.Run("nested threshold panic reconciliation", func(t *testing.T) {
+	nested := func(t *testing.T, vaultOutput bool) {
 		key := sha3_256(kp.PubkeyBytes())
 		otherKey := sha3_256(other.PubkeyBytes())
 		thresholdKP := kp
@@ -1547,6 +1544,9 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 			Version: 1, TxNonce: 1,
 			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xf1)}, {PrevTxid: hashWithPrefix(0xf2)}},
 			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
+		}
+		if vaultOutput { // the RUB-721 earlier-interval settle also covers Vault transactions
+			tx.Outputs[0] = TxOutput{Value: 190, CovenantType: COV_TYPE_VAULT, CovenantData: vault}
 		}
 		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, thresholdKP), {SuiteID: SUITE_ID_SENTINEL}}
 		digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
@@ -1595,6 +1595,11 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 					}
 					switch earlier {
 					case "error":
+						defer func() {
+							if r := recover(); r != nil {
+								t.Fatalf("later panic escaped the earlier queued error: %v", r)
+							}
+						}()
 						invoke()
 					case "panic":
 						requireQueuePanic(t, earlierPanic, invoke)
@@ -1617,5 +1622,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 				})
 			}
 		}
-	})
+	}
+	t.Run("nested threshold panic reconciliation", func(t *testing.T) { nested(t, false) })
+	t.Run("nested threshold panic reconciliation vault", func(t *testing.T) { nested(t, true) })
 }

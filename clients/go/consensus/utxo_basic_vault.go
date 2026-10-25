@@ -81,6 +81,9 @@ func (ctx *nonCoinbaseApplyContext) rejectVaultOutputRecursion() error {
 }
 
 func (ctx *nonCoinbaseApplyContext) validateVaultSpendSignature() error {
+	if ctx.sigQueue != nil {
+		return validateThresholdSigSpendQ(ctx.spend.vaultSigKeys, ctx.spend.vaultSigThreshold, ctx.spend.vaultSigWitness, ctx.tx, ctx.spend.vaultSigInputIndex, ctx.spend.vaultSigInputValue, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, "CORE_VAULT", ctx.rotation, ctx.registry)
+	}
 	return validateThresholdSigSpendAtHeight(thresholdSigSpendCheck{
 		keys:        ctx.spend.vaultSigKeys,
 		threshold:   ctx.spend.vaultSigThreshold,

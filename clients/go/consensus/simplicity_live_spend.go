@@ -20,9 +20,10 @@ type coreSimplicitySpendValidation struct {
 	txContext   *SimplicityTxContext
 }
 
-// validateCoreSimplicitySpendAtHeight runs §14.3 steps 1-7 for one CORE_SIMPLICITY input. The §23.2.4
-// activation gate and the §2.4 step-3d group cap were already enforced EAGERLY by the caller
-// (buildSimplicityStep3dContext), so this runs only for an active deployment. It computes digest32
+// validateCoreSimplicitySpendAtHeight runs §14.3 steps 1-7 for one CORE_SIMPLICITY input of an active
+// deployment, after the §2.4 step-3d group cap. On the stage-owner path (applyNonCoinbaseTxBasicWork/WorkQ)
+// the R1 gate (validateSimplicityInputDeployment) rejects first and the S3d check is a re-check that cannot
+// fail; on the standalone worker path S3d entry remains the first deployment check. It computes digest32
 // eagerly (reusing SighashV1DigestWithType — NOT a new digest) and threads it + the pre-built per-tx
 // SimplicityTxContext into the RUB-614 host adapter (FRESH per-input meter); step 1 (suite_id) before step 2 (sighash byte).
 func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error {
@@ -42,11 +43,12 @@ func validateCoreSimplicitySpendAtHeight(v coreSimplicitySpendValidation) error 
 	})
 }
 
-// buildSimplicityStep3dContext performs §2.4 step 3d EAGERLY (every dispatch path runs it after input
-// resolution, before the spend loop): no-op when no CORE_SIMPLICITY input; else the §23.2.4 activation
-// gate is enforced HERE at step-3d entry (checkSpendCovenant accepts CORE_SIMPLICITY at step 3), before
-// the group cap — so an inactive deployment rejects ahead of the cap and every §14.3/lower-wire-index
-// spend error. Lazy per-program construction is forbidden ("NOT a conforming implementation of the error order").
+// buildSimplicityStep3dContext performs §2.4 step 3d EAGERLY after input resolution, before the spend loop:
+// no-op without a CORE_SIMPLICITY input; else it checks the §23.2.4 activation gate at step-3d entry, before
+// the group cap. On the stage-owner path the R1 gate (validateSimplicityInputDeployment) rejected first, so
+// this is a re-check that cannot fail; on the standalone worker path it is the first deployment check, ahead
+// of the cap and every §14.3/lower-wire-index spend error. Lazy per-program construction is forbidden ("NOT a
+// conforming implementation of the error order").
 func buildSimplicityStep3dContext(tx *Tx, resolvedInputs []UtxoEntry, height uint64, chainID [32]byte, rotation RotationProvider) (*SimplicityTxContext, error) {
 	return buildSimplicityStep3dContextWithDescriptors(tx, resolvedInputs, height, chainID, rotation, false)
 }

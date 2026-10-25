@@ -202,14 +202,17 @@ func TestCheckSpendCovenant_SupportedTypes(t *testing.T) {
 }
 
 func TestCheckSpendCovenant_Errors(t *testing.T) {
-	if err := checkSpendCovenant(COV_TYPE_VAULT, nil); err == nil {
-		t.Fatalf("expected error for invalid CORE_VAULT covenant_data")
+	// R1 is type disposition only; the S4 HTLC parse is pinned in TestCanonicalSuffix_R3BeforeR4.
+	for _, covType := range []uint16{COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC} {
+		if err := checkSpendCovenant(covType, nil); err != nil {
+			t.Fatalf("checkSpendCovenant(%#x, nil) at R1: %v", covType, err)
+		}
 	}
-	if err := checkSpendCovenant(COV_TYPE_MULTISIG, nil); err == nil {
-		t.Fatalf("expected error for invalid CORE_MULTISIG covenant_data")
+	if err := parseWitnessSlotMetadata(UtxoEntry{CovenantType: COV_TYPE_VAULT}); err == nil {
+		t.Fatalf("expected R3 error for invalid CORE_VAULT covenant_data")
 	}
-	if err := checkSpendCovenant(COV_TYPE_HTLC, nil); err == nil {
-		t.Fatalf("expected error for invalid CORE_HTLC covenant_data")
+	if err := parseWitnessSlotMetadata(UtxoEntry{CovenantType: COV_TYPE_MULTISIG}); err == nil {
+		t.Fatalf("expected R3 error for invalid CORE_MULTISIG covenant_data")
 	}
 	err := checkSpendCovenant(0x9999, []byte{0x01})
 	if err == nil {
