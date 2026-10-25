@@ -1,11 +1,9 @@
 package consensus
 
-// This file is the single Go owner of the non-coinbase spend suffix
-// (RUBIN_CONSENSUS_STATE_MACHINE.md §2.4): BIND, S2, R1, R2, R3, R4, S3b,
-// S3d, S4 in ascending input order, S5, then one private work delta. The
-// immediate and queued signature modes run the same stage sequence; only the
-// S4 signature sink differs (ctx.sigQueue). No stage mutates ctx.work before
-// S5 succeeds.
+// This file owns the non-coinbase spend suffix (CSM §2.4) of the immediate (applyNonCoinbaseTxBasicWork)
+// and queued (applyNonCoinbaseTxBasicWorkQ) apply paths: BIND, S2, R1, R2, R3, R4, S3b, S3d, S4 in
+// ascending input order, S5, then one private work delta. Both run the same stage sequence; only the S4
+// signature sink differs (ctx.sigQueue). No stage mutates ctx.work before S5 succeeds.
 
 // boundSpendSurface is the per-transaction memo of the spend-height surface.
 // Each part (create set, spend set, Simplicity deployment set) is read from

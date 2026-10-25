@@ -1238,7 +1238,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 }
 
 // Corrupt vault covenant data fails its parse; one input cannot tell R3 from S4.
-func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicWorkQ_CorruptVaultCovenantDataRejected(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
 	prevTxid := hashWithPrefix(0xEE)
@@ -1543,7 +1543,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 		tx := &Tx{
 			Version: 1, TxNonce: 1,
 			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xf1)}, {PrevTxid: hashWithPrefix(0xf2)}},
-			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
+			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_VAULT, CovenantData: vault}}, // RUB-721 settle covers Vault txs
 		}
 		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, thresholdKP), {SuiteID: SUITE_ID_SENTINEL}}
 		digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
