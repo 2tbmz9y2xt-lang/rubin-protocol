@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use sha3::{Digest, Sha3_256};
 
@@ -296,15 +297,20 @@ fn apply_non_coinbase_txs_parallel(
         None => SigCheckQueue::new(workers),
     };
     let entry_mark = sig_queue.mark();
-    let (work_utxos, sum_fees) =
-        match collect_queued_non_coinbase_txs(prepared, state_utxos, ctx, &mut sig_queue) {
-            Ok(result) => result,
-            Err(err) => {
-                sig_queue.rollback_to(entry_mark);
-                debug_assert_eq!(sig_queue.mark(), entry_mark, "signature queue rollback");
-                return Err(err);
-            }
-        };
+    let collected = catch_unwind(AssertUnwindSafe(|| {
+        collect_queued_non_coinbase_txs(prepared, state_utxos, ctx, &mut sig_queue)
+    }));
+    let (work_utxos, sum_fees) = match collected {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            sig_queue.settle_suffix(entry_mark)?;
+            return Err(err);
+        }
+        Err(payload) => {
+            sig_queue.settle_suffix(entry_mark)?;
+            resume_unwind(payload)
+        }
+    };
 
     let sig_task_count = sig_queue.len() as u64;
     sig_queue.flush()?;

@@ -184,6 +184,21 @@ impl SigCheckQueue {
         }
     }
 
+    /// Select an aborting owner's first result while consuming only its suffix.
+    pub(crate) fn settle_suffix(&mut self, mark: SigCheckQueueMark) -> Result<(), TxError> {
+        self.queued_bytes = mark.queued_bytes;
+        let unbound_registry = if mark.registry_was_bound {
+            None
+        } else {
+            self.registry.take()
+        };
+        let registry = self.registry.as_ref().or(unbound_registry.as_ref());
+        for task in self.tasks.drain(mark.len..) {
+            verify_queued_task(task, registry, self.cache.as_ref())?;
+        }
+        Ok(())
+    }
+
     fn ensure_registry(&mut self, registry: &SuiteRegistry) -> Result<(), TxError> {
         match &self.registry {
             Some(current) if current != registry => Err(TxError::new(

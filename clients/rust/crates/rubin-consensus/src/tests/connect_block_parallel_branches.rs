@@ -1,6 +1,28 @@
 use super::*;
 use crate::output_descriptor_bytes;
 
+pub(super) struct Rub721LaterSpend(std::cell::Cell<usize>);
+
+impl Rub721LaterSpend {
+    pub(super) fn new() -> Self {
+        Self(std::cell::Cell::new(0))
+    }
+}
+
+impl crate::suite_registry::RotationProvider for Rub721LaterSpend {
+    fn native_create_suites(&self, _: u64) -> crate::suite_registry::NativeSuiteSet {
+        crate::suite_registry::NativeSuiteSet::new(&[1])
+    }
+
+    fn native_spend_suites(&self, _: u64) -> crate::suite_registry::NativeSuiteSet {
+        let call = self.0.replace(self.0.get() + 1);
+        if call == 1 {
+            std::panic::panic_any("RUB-721 later spend");
+        }
+        crate::suite_registry::NativeSuiteSet::new(&[1])
+    }
+}
+
 fn deferred_apply(
     tx: &crate::tx::Tx,
     txid: [u8; 32],
@@ -74,6 +96,241 @@ fn p2pk_sig_cache_tuple(tx: &crate::tx::Tx, input_index: usize) -> (u8, &[u8], &
     )
     .expect("sighash digest");
     (witness.suite_id, &witness.pubkey, crypto_signature, digest)
+}
+
+#[test]
+fn rub721_transaction_order() {
+    let kp = test_mldsa87_keypair().expect("RUB-721 requires native ML-DSA");
+    let other = test_mldsa87_keypair().expect("RUB-721 requires native ML-DSA");
+    let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let vault = encode_vault_covenant_data(
+        [0x44; 32],
+        1,
+        &[sha3_256(&kp.pubkey)],
+        &[sha3_256(&output_descriptor_bytes(COV_TYPE_P2PK, &cov))],
+    );
+    for first_valid in [false, true] {
+        for variant in 0..7 {
+            let mut tx = p2pk_tx(
+                1,
+                vec![p2pk_input([0x81; 32]), p2pk_input([0x82; 32])],
+                90,
+                cov.clone(),
+            );
+            let mut utxos = HashMap::from([
+                (
+                    Outpoint {
+                        txid: [0x81; 32],
+                        vout: 0,
+                    },
+                    p2pk_utxo(cov.clone()),
+                ),
+                (
+                    Outpoint {
+                        txid: [0x82; 32],
+                        vout: 0,
+                    },
+                    p2pk_utxo(cov.clone()),
+                ),
+            ]);
+            if variant == 3 {
+                tx.outputs[0].value = 201;
+            }
+            if variant == 5 {
+                tx.outputs[0].covenant_type = COV_TYPE_VAULT;
+                tx.outputs[0].covenant_data = vault.clone();
+            }
+            let first = if variant == 6 {
+                tx.inputs.insert(0, p2pk_input([0x83; 32]));
+                let mut entry = p2pk_utxo(vault.clone());
+                entry.covenant_type = COV_TYPE_VAULT;
+                utxos.insert(
+                    Outpoint {
+                        txid: [0x83; 32],
+                        vout: 0,
+                    },
+                    entry,
+                );
+                1
+            } else {
+                0
+            };
+            tx.witness = (0..tx.inputs.len())
+                .map(|index| sign_input_witness(&tx, index as u32, 100, ZERO_CHAIN_ID, &kp))
+                .collect();
+            if !first_valid {
+                let mut wrong = tx.clone();
+                wrong.tx_nonce += 10;
+                tx.witness[first] =
+                    sign_input_witness(&wrong, first as u32, 100, ZERO_CHAIN_ID, &kp);
+            }
+            let expected_later = match variant {
+                0 => {
+                    tx.witness[1].suite_id = 0xfe;
+                    crate::error::TxError::new(
+                        ErrorCode::TxErrSigAlgInvalid,
+                        "CORE_P2PK suite not in native spend set",
+                    )
+                }
+                1 => {
+                    tx.witness[1].pubkey = other.pubkey.clone();
+                    crate::error::TxError::new(
+                        ErrorCode::TxErrSigInvalid,
+                        "CORE_P2PK key binding mismatch",
+                    )
+                }
+                2 | 6 => {
+                    *tx.witness.last_mut().unwrap().signature.last_mut().unwrap() = 0;
+                    crate::error::TxError::new(
+                        ErrorCode::TxErrSighashTypeInvalid,
+                        "invalid sighash_type",
+                    )
+                }
+                3 => crate::error::TxError::new(
+                    ErrorCode::TxErrValueConservation,
+                    "sum_out exceeds sum_in",
+                ),
+                4 => {
+                    utxos.remove(&Outpoint {
+                        txid: [0x82; 32],
+                        vout: 0,
+                    });
+                    crate::error::TxError::new(ErrorCode::TxErrMissingUtxo, "utxo not found")
+                }
+                _ => crate::error::TxError::new(
+                    ErrorCode::TxErrVaultOwnerAuthRequired,
+                    "missing owner-authorized input for CORE_VAULT creation",
+                ),
+            };
+            let expected = if first_valid || variant >= 4 {
+                expected_later
+            } else {
+                crate::error::TxError::new(
+                    ErrorCode::TxErrSigInvalid,
+                    "CORE_P2PK signature invalid",
+                )
+            };
+            let before = utxos.clone();
+            let tx_before = tx.clone();
+            assert_eq!(
+                deferred_apply(&tx, [0x84; 32], &utxos, 1).unwrap_err(),
+                expected
+            );
+            let cache = crate::sig_cache::SigCache::new(16);
+            let mut queue = crate::sig_queue::SigCheckQueue::new(2).with_cache(cache.clone());
+            let mut prefix = p2pk_tx(19, vec![p2pk_input([0x81; 32])], 99, cov.clone());
+            prefix.witness = vec![sign_input_witness(&prefix, 0, 100, ZERO_CHAIN_ID, &kp)];
+            let apply = |current: &crate::tx::Tx, queue: &mut crate::sig_queue::SigCheckQueue| {
+                crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+                    current, [0x84; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, queue,
+                )
+            };
+            apply(&prefix, &mut queue).unwrap();
+            let mark = queue.mark();
+            assert_eq!(
+                apply(&tx, &mut queue).unwrap_err(),
+                expected,
+                "variant {variant}, first_valid={first_valid}"
+            );
+            assert_eq!(queue.mark(), mark);
+            assert_eq!(queue.len(), 1);
+            assert_eq!(utxos, before);
+            assert_eq!(tx, tx_before);
+            apply(&prefix, &mut queue).expect("next valid sibling");
+            queue.flush().expect("retained prefix remains valid");
+            let tuple = p2pk_sig_cache_tuple(&prefix, 0);
+            assert!(cache.lookup(tuple.0, tuple.1, tuple.2, tuple.3));
+        }
+    }
+}
+
+#[test]
+fn rub721_transaction_unwind() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let kp = test_mldsa87_keypair().expect("RUB-721 requires native ML-DSA");
+    let cov = p2pk_covenant_data_for_pubkey(&kp.pubkey);
+    let utxos = HashMap::from([
+        (
+            Outpoint {
+                txid: [0x85; 32],
+                vout: 0,
+            },
+            p2pk_utxo(cov.clone()),
+        ),
+        (
+            Outpoint {
+                txid: [0x86; 32],
+                vout: 0,
+            },
+            p2pk_utxo(cov.clone()),
+        ),
+    ]);
+    let before = utxos.clone();
+    for vault_output in [false, true] {
+        for first_valid in [false, true] {
+            let mut tx = p2pk_tx(
+                1,
+                vec![p2pk_input([0x85; 32]), p2pk_input([0x86; 32])],
+                90,
+                cov.clone(),
+            );
+            if vault_output {
+                tx.outputs[0].covenant_type = COV_TYPE_VAULT;
+                tx.outputs[0].covenant_data = encode_vault_covenant_data(
+                    [0x44; 32],
+                    1,
+                    &[sha3_256(&kp.pubkey)],
+                    &[[0x55; 32]],
+                );
+            }
+            tx.witness = (0..2)
+                .map(|index| sign_input_witness(&tx, index, 100, ZERO_CHAIN_ID, &kp))
+                .collect();
+            if !first_valid {
+                let mut wrong = tx.clone();
+                wrong.tx_nonce += 10;
+                tx.witness[0] = sign_input_witness(&wrong, 0, 100, ZERO_CHAIN_ID, &kp);
+            }
+            let mut prefix = p2pk_tx(19, vec![p2pk_input([0x85; 32])], 99, cov.clone());
+            prefix.witness = vec![sign_input_witness(&prefix, 0, 100, ZERO_CHAIN_ID, &kp)];
+            let mut queue = crate::sig_queue::SigCheckQueue::new(1);
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+                &prefix, [0x87; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
+            )
+            .unwrap();
+            let mark = queue.mark();
+            let provider = Rub721LaterSpend::new();
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+                    &tx, [0x87; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, Some(&provider), None, &mut queue,
+                )
+            }));
+            if first_valid || vault_output {
+                assert_eq!(
+                    outcome.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"RUB-721 later spend")
+                );
+            } else {
+                assert_eq!(
+                    outcome.unwrap().unwrap_err(),
+                    crate::error::TxError::new(
+                        ErrorCode::TxErrSigInvalid,
+                        "CORE_P2PK signature invalid"
+                    )
+                );
+            }
+            assert_eq!(queue.mark(), mark);
+            assert_eq!(queue.len(), 1);
+            assert_eq!(utxos, before);
+            crate::utxo_basic::apply_non_coinbase_tx_basic_update_with_mtp_and_suite_context_queued_sigchecks(
+                &prefix, [0x87; 32], &utxos, 1, 0, 0, ZERO_CHAIN_ID, None, None, &mut queue,
+            )
+            .expect("next valid sibling after unwind");
+            queue
+                .flush()
+                .expect("retained prefix survives later unwind");
+        }
+    }
 }
 
 #[test]
@@ -1600,7 +1857,7 @@ fn queued_sigchecks_transaction_entry_rollback_to_mark() {
     };
 
     for prepopulated in [false, true] {
-        let cache = crate::sig_cache::SigCache::new(1);
+        let cache = crate::sig_cache::SigCache::new(2);
         let mut queue = crate::sig_queue::SigCheckQueue::new(1).with_cache(cache.clone());
         let prefix_tx = if prepopulated {
             let mut prefix_tx = late_tx.clone();
@@ -1658,9 +1915,9 @@ fn queued_sigchecks_transaction_entry_rollback_to_mark() {
             queue.flush().expect("preserved prefix flushes");
             let prefix = p2pk_sig_cache_tuple(&prefix_tx, 0);
             let rejected = p2pk_sig_cache_tuple(&late_tx, 0);
-            assert_eq!(cache.len(), 1);
+            assert_eq!(cache.len(), 2);
             assert!(cache.lookup(prefix.0, prefix.1, prefix.2, prefix.3));
-            assert!(!cache.lookup(rejected.0, rejected.1, rejected.2, rejected.3));
+            assert!(cache.lookup(rejected.0, rejected.1, rejected.2, rejected.3));
         }
     }
 }

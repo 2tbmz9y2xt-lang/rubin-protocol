@@ -1,10 +1,15 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -910,5 +915,220 @@ func TestValidateInputSpendQ_HTLCWrongSlots(t *testing.T) {
 	err := validateTestInputSpendQ(entry, []WitnessItem{{}}, &Tx{})
 	if err == nil {
 		t.Fatalf("expected error for HTLC wrong slot count")
+	}
+}
+
+func TestValidateTxLocal_QueueResult(t *testing.T) {
+	kp := requiredOrderedKeypair(t)
+	tvc := orderedWorkerContext(t, kp, "")
+	tx := tvc.Tx
+	digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, valid := range []bool{false, true} {
+		t.Run(fmt.Sprintf("valid%v", valid), func(t *testing.T) {
+			var calls atomic.Int32
+			queueVerifierHook(t, func(_ string, _, _, msg []byte) (bool, error) {
+				calls.Add(1)
+				if !valid && !bytes.Equal(msg, digest0[:]) {
+					panic("later task panic must lose to lower original error")
+				}
+				return valid, nil
+			})
+			result := ValidateTxLocal(tvc, [32]byte{}, 1, 0, nil)
+			if result.Valid != valid || result.Fee != (Uint128{Hi: 1, Lo: 10}) || result.TxIndex != 7 || result.SigCount != 2 || calls.Load() != 2 {
+				t.Fatalf("worker queue projection: result=%+v calls=%d", result, calls.Load())
+			}
+			if valid {
+				if result.Err != nil {
+					t.Fatal(result.Err)
+				}
+			} else {
+				assertTxErrCodeMsg(t, result.Err, "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+			}
+		})
+	}
+}
+
+func orderedWorkerContext(t *testing.T, kp *MLDSA87Keypair, variant string) TxValidationContext {
+	t.Helper()
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	tx := &Tx{
+		Version: 1, TxNonce: 1,
+		Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0x31)}, {PrevTxid: hashWithPrefix(0x32)}},
+		Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: cov}},
+	}
+	vault := encodeVaultCovenantData([32]byte{0x77}, 1, [][32]byte{sha3_256(kp.PubkeyBytes())}, [][32]byte{{0x88}})
+	if variant == "vault_input" {
+		tx.Inputs = append([]TxInput{{PrevTxid: hashWithPrefix(0x30)}}, tx.Inputs...)
+	}
+	if variant == "vault_output" {
+		tx.Outputs[0].CovenantType, tx.Outputs[0].CovenantData = COV_TYPE_VAULT, vault
+	}
+	utxos := make(map[Outpoint]UtxoEntry)
+	for i, input := range tx.Inputs {
+		entry := UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+		if variant == "vault_input" && i == 0 {
+			entry.CovenantType, entry.CovenantData = COV_TYPE_VAULT, vault
+		}
+		utxos[Outpoint{Txid: input.PrevTxid}] = entry
+		tx.Witness = append(tx.Witness, signP2PKInputWitness(t, tx, uint32(i), 100, [32]byte{}, kp))
+	}
+	tvc, err := precomputeTxContext(7, tx, hashWithPrefix(0x33), utxos, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the worker's exact wide-fee copy independently of precompute's fee.
+	tvc.Fee = Uint128{Hi: 1, Lo: 10}
+	return tvc
+}
+
+func mutateWorkerOrderCase(t *testing.T, tvc *TxValidationContext, kp, other *MLDSA87Keypair, variant string, firstValid bool) {
+	t.Helper()
+	first := 0
+	if variant == "vault_input" {
+		first = 1
+	}
+	if !firstValid {
+		tvc.Tx.Witness[first] = signP2PKInputWitness(t, tvc.Tx, uint32(first), 100, [32]byte{0x99}, kp)
+	}
+	last := len(tvc.Tx.Witness) - 1
+	switch variant {
+	case "suite":
+		tvc.Tx.Witness[last].SuiteID = 0xfe
+	case "key":
+		tvc.Tx.Witness[last].Pubkey = other.PubkeyBytes()
+	case "selector", "vault_input", "vault_output":
+		tvc.Tx.Witness[last].Signature[len(tvc.Tx.Witness[last].Signature)-1] = 0x00
+	case "slots":
+		tvc.ResolvedInputs[last].CovenantType = 0x0105
+	case "underflow":
+		tvc.WitnessEnd--
+	case "cardinality":
+		tvc.Tx.Witness = append(tvc.Tx.Witness, tvc.Tx.Witness[last])
+	case "simplicity_prepare":
+		tvc.ResolvedInputs[last].CovenantType = COV_TYPE_CORE_SIMPLICITY
+	}
+}
+
+func TestValidateTxLocal_OrderedResults(t *testing.T) {
+	kp, other := requiredOrderedKeypair(t), requiredOrderedKeypair(t)
+	for _, tc := range []struct {
+		name, code, msg string
+		selects         bool
+	}{
+		{"suite", "TX_ERR_SIG_ALG_INVALID", "CORE_P2PK suite not in native spend set", true},
+		{"key", "TX_ERR_SIG_INVALID", "CORE_P2PK key binding mismatch", true},
+		{"selector", "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type", true},
+		{"slots", "TX_ERR_COVENANT_TYPE_INVALID", "unsupported covenant in witness_slots", false},
+		{"underflow", "TX_ERR_PARSE", "witness underflow in worker", false},
+		{"cardinality", "TX_ERR_PARSE", "witness_count mismatch", false},
+		{"simplicity_prepare", "TX_ERR_COVENANT_TYPE_INVALID", "CORE_SIMPLICITY deployment not active", false},
+		{"vault_input", "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type", false},
+		{"vault_output", "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type", false},
+	} {
+		for _, firstValid := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/firstValid%v", tc.name, firstValid), func(t *testing.T) {
+				tvc := orderedWorkerContext(t, kp, tc.name)
+				mutateWorkerOrderCase(t, &tvc, kp, other, tc.name, firstValid)
+				before, err := json.Marshal(tvc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cacheBefore := *tvc.SighashCache
+				cacheBefore.singleOutputs = maps.Clone(tvc.SighashCache.singleOutputs)
+				wantCode, wantMsg := ErrorCode(tc.code), tc.msg
+				if tc.selects && !firstValid {
+					wantCode, wantMsg = "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid"
+				}
+				result := ValidateTxLocal(tvc, [32]byte{}, 200, 0, nil)
+				assertTxErrCodeMsg(t, result.Err, wantCode, wantMsg)
+				if result.Valid || result.SigCount != 0 || result.TxIndex != 7 || result.Fee != (Uint128{Hi: 1, Lo: 10}) {
+					t.Fatalf("early worker result changed: %+v", result)
+				}
+				// The public result cannot expose the worker-owned queue's backing slots.
+				env := newTxValidationWorkerEnv(tvc, [32]byte{}, 200, 0, nil)
+				assertTxErrCodeMsg(t, validateTxLocalInputs(tvc, tvc.Tx, env), wantCode, wantMsg)
+				requireQueueCleared(t, env.sigQueue, cap(env.sigQueue.tasks))
+				after, err := json.Marshal(tvc)
+				if err != nil || !bytes.Equal(before, after) || !reflect.DeepEqual(cacheBefore, *tvc.SighashCache) {
+					t.Fatal("worker changed transaction or precomputed context")
+				}
+				good := orderedWorkerContext(t, kp, "")
+				env.sighashCache = good.SighashCache
+				if err := validateTxLocalInputs(good, good.Tx, env); err != nil {
+					t.Fatalf("valid sibling after rejection: %v", err)
+				}
+				if env.sigQueue.Len() != 2 || env.sigQueue.Flush() != nil {
+					t.Fatal("successful worker lost queued tasks or inherited rejected state")
+				}
+			})
+		}
+	}
+	for _, first := range []string{"invalid", "valid", "panic"} {
+		t.Run("unwind/"+first, func(t *testing.T) { runWorkerOrderUnwind(t, kp, other, first) })
+	}
+}
+
+func runWorkerOrderUnwind(t *testing.T, kp, other *MLDSA87Keypair, first string) {
+	t.Helper()
+	tvc := orderedWorkerContext(t, kp, "")
+	keys := [][32]byte{sha3_256(kp.PubkeyBytes()), sha3_256(other.PubkeyBytes())}
+	signers := []*MLDSA87Keypair{kp, other}
+	if bytes.Compare(keys[0][:], keys[1][:]) > 0 {
+		keys[0], keys[1], signers[0], signers[1] = keys[1], keys[0], signers[1], signers[0]
+	}
+	tvc.ResolvedInputs[1].CovenantType = COV_TYPE_MULTISIG
+	tvc.ResolvedInputs[1].CovenantData = encodeMultisigCovenantData(2, keys)
+	tvc.Tx.Witness[1] = signP2PKInputWitness(t, tvc.Tx, 1, 100, [32]byte{}, signers[0])
+	tvc.Tx.Witness = append(tvc.Tx.Witness, signP2PKInputWitness(t, tvc.Tx, 1, 100, [32]byte{}, signers[1]))
+	tvc.Tx.Witness[2].SuiteID, tvc.WitnessEnd = 0xfe, 3
+	before, err := json.Marshal(tvc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest0, err := SighashV1DigestWithType(tvc.Tx, 0, 100, [32]byte{}, SIGHASH_ALL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reusing := false
+	queueVerifierHook(t, func(_ string, _, _, digest []byte) (bool, error) {
+		if reusing {
+			return true, nil
+		}
+		if !bytes.Equal(digest, digest0[:]) {
+			panic("later worker threshold panic")
+		}
+		if first == "panic" {
+			panic("earlier worker signature panic")
+		}
+		return first == "valid", nil
+	})
+	env := newTxValidationWorkerEnv(tvc, [32]byte{}, 200, 0, nil)
+	call := func() {
+		assertTxErrCodeMsg(t, validateTxLocalInputs(tvc, tvc.Tx, env), "TX_ERR_SIG_INVALID", "CORE_P2PK signature invalid")
+	}
+	switch first {
+	case "invalid":
+		call()
+	case "valid":
+		requireQueuePanic(t, "later worker threshold panic", call)
+	case "panic":
+		requireQueuePanic(t, "earlier worker signature panic", call)
+	}
+	requireQueueCleared(t, env.sigQueue, cap(env.sigQueue.tasks))
+	after, err := json.Marshal(tvc)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("unwind changed transaction or precomputed context")
+	}
+	reusing = true
+	good := orderedWorkerContext(t, kp, "")
+	env.sighashCache = good.SighashCache
+	if err := validateTxLocalInputs(good, good.Tx, env); err != nil {
+		t.Fatalf("valid sibling after unwind: %v", err)
+	}
+	if env.sigQueue.Len() != 2 || env.sigQueue.Flush() != nil {
+		t.Fatal("unwind contaminated the next valid worker")
 	}
 }

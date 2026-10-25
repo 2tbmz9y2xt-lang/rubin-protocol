@@ -1,7 +1,9 @@
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+
 use crate::constants::{MAX_P2PK_COVENANT_DATA, SUITE_ID_SENTINEL};
 use crate::error::{ErrorCode, TxError};
 use crate::hash::sha3_256;
-use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue};
+use crate::sig_queue::{queue_or_verify_signature, SigCheckQueue, SigCheckQueueMark};
 use crate::sighash::{is_valid_sighash_type, sighash_v1_digest_with_cache, SighashV1PrehashCache};
 use crate::suite_registry::{
     DefaultRotationProvider, NativeSuiteSet, RotationProvider, SuiteParams, SuiteRegistry,
@@ -356,74 +358,120 @@ pub(crate) fn validate_threshold_sig_spend_q(
     }
 
     let native_spend = rp.native_spend_suites(block_height);
-    let mut valid: u8 = 0;
     let queue_mark = sig_queue.as_ref().map(|queue| queue.mark());
+    let mut spend = ThresholdSigSpend {
+        input_index,
+        input_value,
+        chain_id,
+        context,
+        cache,
+        registry: reg,
+        native_spend: &native_spend,
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        spend.validate_keys(keys, threshold, ws, &mut sig_queue)
+    }));
+    finish_threshold_sigchecks(result, sig_queue, queue_mark)
+}
 
-    let result = (|| -> Result<(), TxError> {
-        for i in 0..keys.len() {
-            let w = &ws[i];
-            if w.suite_id == SUITE_ID_SENTINEL {
-                if !w.pubkey.is_empty() || !w.signature.is_empty() {
-                    return Err(TxError::new(
-                        ErrorCode::TxErrParse,
-                        "SENTINEL witness must be keyless",
-                    ));
-                }
-                continue;
+fn finish_threshold_sigchecks(
+    result: std::thread::Result<Result<(), TxError>>,
+    sig_queue: Option<&mut SigCheckQueue>,
+    queue_mark: Option<SigCheckQueueMark>,
+) -> Result<(), TxError> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => {
+            if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
+                queue.settle_suffix(mark)?;
             }
+            Err(err)
+        }
+        Err(payload) => {
+            if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
+                queue.rollback_to(mark);
+            }
+            resume_unwind(payload)
+        }
+    }
+}
 
-            let params = spend_suite_params(
-                w,
-                &native_spend,
-                reg,
-                threshold_sig_error_message(
-                    context,
-                    ThresholdSigErrorDetail::SuiteNotInNativeSpendSet,
-                ),
-                threshold_sig_error_message(context, ThresholdSigErrorDetail::SuiteNotRegistered),
-            )?;
-            validate_witness_item_lengths(w, params)?;
+struct ThresholdSigSpend<'a, 'tx> {
+    input_index: u32,
+    input_value: u64,
+    chain_id: [u8; 32],
+    context: &'static str,
+    cache: &'a mut SighashV1PrehashCache<'tx>,
+    registry: &'a SuiteRegistry,
+    native_spend: &'a NativeSuiteSet,
+}
 
-            verify_mldsa_key_and_sig_q(
-                w,
-                keys[i],
-                input_index,
-                input_value,
-                chain_id,
-                cache,
-                reg,
-                &mut sig_queue,
-                TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    threshold_sig_error_message(
-                        context,
-                        ThresholdSigErrorDetail::KeyBindingMismatch,
-                    ),
-                ),
-                TxError::new(
-                    ErrorCode::TxErrSigInvalid,
-                    threshold_sig_error_message(context, ThresholdSigErrorDetail::SignatureInvalid),
-                ),
-            )?;
-            valid = valid.saturating_add(1);
+impl ThresholdSigSpend<'_, '_> {
+    fn validate_keys(
+        &mut self,
+        keys: &[[u8; 32]],
+        threshold: u8,
+        ws: &[WitnessItem],
+        sig_queue: &mut Option<&mut SigCheckQueue>,
+    ) -> Result<(), TxError> {
+        let mut valid: u8 = 0;
+        for (key, witness) in keys.iter().zip(ws) {
+            if self.validate_key(witness, *key, sig_queue)? {
+                valid = valid.saturating_add(1);
+            }
         }
         if valid < threshold {
             return Err(TxError::new(
                 ErrorCode::TxErrSigInvalid,
-                threshold_sig_error_message(context, ThresholdSigErrorDetail::ThresholdNotMet),
+                threshold_sig_error_message(self.context, ThresholdSigErrorDetail::ThresholdNotMet),
             ));
         }
         Ok(())
-    })();
+    }
 
-    match result {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            if let (Some(mark), Some(queue)) = (queue_mark, sig_queue) {
-                queue.rollback_to(mark);
+    fn validate_key(
+        &mut self,
+        w: &WitnessItem,
+        key: [u8; 32],
+        sig_queue: &mut Option<&mut SigCheckQueue>,
+    ) -> Result<bool, TxError> {
+        if w.suite_id == SUITE_ID_SENTINEL {
+            if !w.pubkey.is_empty() || !w.signature.is_empty() {
+                return Err(TxError::new(
+                    ErrorCode::TxErrParse,
+                    "SENTINEL witness must be keyless",
+                ));
             }
-            Err(err)
+            return Ok(false);
         }
+        let params = spend_suite_params(
+            w,
+            self.native_spend,
+            self.registry,
+            threshold_sig_error_message(
+                self.context,
+                ThresholdSigErrorDetail::SuiteNotInNativeSpendSet,
+            ),
+            threshold_sig_error_message(self.context, ThresholdSigErrorDetail::SuiteNotRegistered),
+        )?;
+        validate_witness_item_lengths(w, params)?;
+        let binding =
+            threshold_sig_error_message(self.context, ThresholdSigErrorDetail::KeyBindingMismatch);
+        let invalid =
+            threshold_sig_error_message(self.context, ThresholdSigErrorDetail::SignatureInvalid);
+        verify_mldsa_key_and_sig_q(
+            w,
+            key,
+            self.input_index,
+            self.input_value,
+            self.chain_id,
+            self.cache,
+            self.registry,
+            sig_queue,
+            TxError::new(ErrorCode::TxErrSigInvalid, binding),
+            TxError::new(ErrorCode::TxErrSigInvalid, invalid),
+        )?;
+        Ok(true)
     }
 }
 

@@ -10,10 +10,8 @@ import "encoding/binary"
 // When sigQueue is nil, these functions fall back to the existing sequential
 // verification — making them safe to call unconditionally.
 //
-// IMPORTANT: These functions produce DIFFERENT ERROR ORDERING than the
-// sequential path when sigQueue is non-nil. They are only safe for use
-// during IBD (Initial Block Download) where error ordering is not
-// consensus-critical.
+// Owners select earlier produced intervals before discarding them on failure.
+// Complete transaction stage production remains the caller's responsibility.
 
 // verifyMLDSAKeyAndSigQ is the queue-aware variant of verifyMLDSAKeyAndSigWithCache.
 // When sigQueue is non-nil, it performs all fast pre-checks (key binding, sighash
@@ -136,8 +134,16 @@ func validateThresholdSigSpendQ(
 	nativeSpend := rotation.NativeSpendSuites(blockHeight)
 	valid := 0
 	queueMark := sigQueue.mark()
-	rollbackOnError := func(err error) error {
-		sigQueue.rollbackTo(queueMark)
+	completed := false
+	defer func() {
+		if !completed {
+			sigQueue.rollbackTo(queueMark)
+		}
+	}()
+	selectOnError := func(err error) error {
+		if earlier := sigQueue.settleRange(queueMark, sigQueue.mark()); earlier != nil {
+			return earlier
+		}
 		return err
 	}
 
@@ -145,32 +151,33 @@ func validateThresholdSigSpendQ(
 		w := ws[i]
 		if w.SuiteID == SUITE_ID_SENTINEL {
 			if len(w.Pubkey) != 0 || len(w.Signature) != 0 {
-				return rollbackOnError(txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless"))
+				return selectOnError(txerr(TX_ERR_PARSE, "SENTINEL witness must be keyless"))
 			}
 			continue
 		}
 
 		if !nativeSpend.Contains(w.SuiteID) {
-			return rollbackOnError(nativeSuiteMembershipError(nativeSpend, context+" suite not in native spend set"))
+			return selectOnError(nativeSuiteMembershipError(nativeSpend, context+" suite not in native spend set"))
 		}
 
 		params, ok := registry.Lookup(w.SuiteID)
 		if !ok {
-			return rollbackOnError(txerrWithCause(TX_ERR_SIG_ALG_INVALID, context+" suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable))
+			return selectOnError(txerrWithCause(TX_ERR_SIG_ALG_INVALID, context+" suite not registered", TxErrorCauseNativeSuiteRegistryEntryUnavailable))
 		}
 
 		if len(w.Pubkey) != params.PubkeyLen || len(w.Signature) != params.SigLen+1 {
-			return rollbackOnError(txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths"))
+			return selectOnError(txerr(TX_ERR_SIG_NONCANONICAL, "non-canonical witness item lengths"))
 		}
 
 		if err := verifyMLDSAKeyAndSigQ(w, keys[i], tx, inputIndex, inputValue, chainID, cache, sigQueue, registry, context); err != nil {
-			return rollbackOnError(err)
+			return selectOnError(err)
 		}
 		valid++
 	}
 	if valid < int(threshold) {
-		return rollbackOnError(txerr(TX_ERR_SIG_INVALID, context+" threshold not met"))
+		return selectOnError(txerr(TX_ERR_SIG_INVALID, context+" threshold not met"))
 	}
+	completed = true
 	return nil
 }
 
