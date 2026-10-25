@@ -1410,7 +1410,7 @@ func TestObsoleteGenerationV1TreeRoot(t *testing.T) {
 	}
 }
 
-// obsolete148Seed seeds an own index entry naming a 148-byte header hashed in the test.
+// obsolete148Seed builds the index key, the index entry and the 148-byte header it names, hashed in the test; it writes nothing.
 func obsolete148Seed(t *testing.T, store *Store) ([]byte, []byte, [32]byte, []byte) {
 	t.Helper()
 	header := make([]byte, 148)
@@ -1468,6 +1468,13 @@ func obsolete148Projection(t *testing.T, store *Store, variant string) uint8 {
 		header[140] ^= 1
 	case "entry-parent":
 		entry[32] ^= 1
+	case "width115", "width116", "width117", "width147", "width149":
+		// Width-only variant: the entry names the exact stored header, so only the width rule can refuse.
+		width := 0
+		_, _ = fmt.Sscanf(variant, "width%d", &width)
+		header = append(header, make([]byte, 1)...)[:width]
+		hash = sha3.Sum256(header)
+		copy(entry, hash[:])
 	}
 	obsoleteSeedTree(t, store, 2, key, entry)
 	if variant != "header-absent" {
@@ -1504,7 +1511,7 @@ func obsolete148Projection(t *testing.T, store *Store, variant string) uint8 {
 
 // P1-P3: the own-index header proof uses the Reader format's header width.
 func TestObsoleteGenerationV1Projection148(t *testing.T) {
-	for _, variant := range []string{"valid", "header-absent", "header-empty", "header116", "header147", "header149", "header-utxo", "header-nonce", "entry-parent", "key15", "key17", "height-over", "value103", "value105", "work-zero", "work-over", "work-high"} {
+	for _, variant := range []string{"valid", "header-absent", "header-empty", "header116", "header147", "header149", "header-utxo", "header-nonce", "entry-parent", "key15", "key17", "height-over", "value103", "value105", "work-zero", "work-over", "work-high", "width116", "width147", "width149"} {
 		t.Run(variant, func(t *testing.T) {
 			store, _, _ := treeNativeStore(t)
 			want := uint8(2)
@@ -1522,6 +1529,14 @@ func TestObsoleteGenerationV1Projection148(t *testing.T) {
 			t.Fatalf("format-2 148-byte header projection %d want Invalid", got)
 		}
 	})
+	for variant, want := range map[string]uint8{"width115": 2, "width116": 3, "width117": 2} {
+		t.Run("format2-"+variant, func(t *testing.T) {
+			store, _, _ := consultedStore(t)
+			if got := obsolete148Projection(t, store, variant); got != want {
+				t.Fatalf("format-2 %s projection %d want %d", variant, got, want)
+			}
+		})
+	}
 }
 
 // H1, H2: format-3 node rows and witnesses reach no admission path and expire with their View.
@@ -1551,6 +1566,15 @@ func TestObsoleteGenerationV1TreeInert(t *testing.T) {
 		t.Fatal("foreign tree witness disposition", truth, stage, legacy.state)
 	}
 	consultedRequireImage(t, legacy, seed.DBI, seed.Key, seed.Literal, true, "tree witness OLD")
+	// Witness only: no row reaches the row-reader check, so only the witness-reader check refuses.
+	truth, stage, err = legacy.Update(func(*Reader) (Batch, error) {
+		return Batch{ObsoleteConsulted: []ObsoletePageWitnessV1{saved.Witness}}, nil
+	})
+	obsoleteRequireError(t, err, "update", "InvalidInput", 22, "invalid Update Batch")
+	if truth.String() != "OLD" || int(stage) != 1 || string(legacy.state) != "OPEN" {
+		t.Fatal("foreign witness-only disposition", truth, stage, legacy.state)
+	}
+	consultedRequireImage(t, legacy, seed.DBI, seed.Key, seed.Literal, true, "tree witness-only OLD")
 	calls := 0
 	truth, stage, err = tree.Update(func(*Reader) (Batch, error) { calls++; return obsoleteBatch(saved), nil })
 	treeNativeError(t, err, operationUpdate, EngineClass("StateMismatch"), -30779, "tree store requires typed tree operation", nil)
