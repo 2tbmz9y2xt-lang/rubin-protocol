@@ -421,8 +421,8 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 	simpPrev := hashWithPrefix(0xE1)
 	// current_simplicity_precedes_later_missing_utxo was a reject-only artifact: it relied on the
 	// removed resolveInputs early-return. R1 resolves every input in wire order with the per-input
-	// CORE_SIMPLICITY deployment check (validateSimplicityInputDeployment); the Simplicity spend runs
-	// later at S3d, so an earlier Simplicity input no longer precedes a later missing UTXO.
+	// CORE_SIMPLICITY deployment check (validateSimplicityInputDeployment); with an active deployment
+	// the Simplicity spend runs at S4, after a later input's missing UTXO surfaces at R1.
 	// Live first-error ordering is covered by TestSimplicityLiveGate_OrderedErrorSet.
 
 	// R1 (inactive CORE_SIMPLICITY at input1) precedes R3 (input0 underflow).
