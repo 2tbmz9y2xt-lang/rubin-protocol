@@ -195,10 +195,7 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 	if len(assigned) != 1 {
 		return txerr(TX_ERR_PARSE, "CORE_P2PK witness_slots must be 1")
 	}
-	if ctx.sigQueue != nil {
-		return validateP2PKSpendQ(entry, assigned[0], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
-	}
-	return validateP2PKSpendAtHeight(p2pkSpendCheck{
+	check := p2pkSpendCheck{
 		entry:       entry,
 		witness:     assigned[0],
 		blockHeight: ctx.height,
@@ -212,7 +209,11 @@ func (ctx *nonCoinbaseApplyContext) validateP2PKInput(inputIndex int, entry Utxo
 			registry:   ctx.registry,
 			sigCache:   ctx.sigCache,
 		},
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateP2PKSpendQ(entry, assigned[0], ctx.tx, check.sig.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
+	}
+	return validateP2PKSpendAtHeight(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -220,10 +221,7 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 	if err != nil {
 		return err
 	}
-	if ctx.sigQueue != nil {
-		return validateThresholdSigSpendQ(m.Keys, m.Threshold, assigned, ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, "CORE_MULTISIG", ctx.rotation, ctx.registry)
-	}
-	return validateThresholdSigSpendAtHeight(thresholdSigSpendCheck{
+	check := thresholdSigSpendCheck{
 		keys:        m.Keys,
 		threshold:   m.Threshold,
 		witnesses:   assigned,
@@ -239,7 +237,11 @@ func (ctx *nonCoinbaseApplyContext) validateMultisigInput(inputIndex int, entry 
 			sigCache:   ctx.sigCache,
 			context:    "CORE_MULTISIG",
 		},
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateThresholdSigSpendQ(m.Keys, m.Threshold, assigned, ctx.tx, check.sig.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.sighashCache, ctx.sigQueue, "CORE_MULTISIG", ctx.rotation, ctx.registry)
+	}
+	return validateThresholdSigSpendAtHeight(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) captureVaultInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
@@ -262,10 +264,7 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 	if len(assigned) != 2 {
 		return txerr(TX_ERR_PARSE, "CORE_HTLC witness_slots must be 2")
 	}
-	if ctx.sigQueue != nil {
-		return validateHTLCSpendQ(entry, assigned[0], assigned[1], ctx.tx, uint32(inputIndex), entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
-	}
-	return validateHTLCSpendAtHeightWithSigCache(htlcSpendCheck{
+	check := htlcSpendCheck{
 		entry:       entry,
 		pathItem:    assigned[0],
 		sigItem:     assigned[1],
@@ -279,7 +278,11 @@ func (ctx *nonCoinbaseApplyContext) validateHTLCInput(inputIndex int, entry Utxo
 		rotation:    ctx.rotation,
 		registry:    ctx.registry,
 		sigCache:    ctx.sigCache,
-	})
+	}
+	if ctx.sigQueue != nil {
+		return validateHTLCSpendQ(entry, assigned[0], assigned[1], ctx.tx, check.inputIndex, entry.Value, ctx.chainID, ctx.height, ctx.blockMTP, ctx.sighashCache, ctx.sigQueue, ctx.rotation, ctx.registry)
+	}
+	return validateHTLCSpendAtHeightWithSigCache(check)
 }
 
 func (ctx *nonCoinbaseApplyContext) validateCoreSimplicityInput(inputIndex int, entry UtxoEntry, assigned []WitnessItem) error {
