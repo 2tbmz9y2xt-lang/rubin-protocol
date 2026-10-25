@@ -1875,6 +1875,10 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 // relay entry: STABLE_TERMINAL_REJECT by typed cause, the unchanged public
 // rejection, and no residency. A genuinely absent input stays MISSING_DEPENDENCY.
 func TestRelayAdmissionNonSpendableCovenantIsStableTerminal(t *testing.T) {
+	control := newRelayHarness(t, nil, 1_000_000)
+	if got := control.mp.AddRemoteTxForRelay(control.tx(0, 100_000, 100_000, 1), control.context()); got.Disposition != RelayAdmissionRetained || got.Err != nil {
+		t.Fatalf("P2PK control: disposition=%v err=%v, want RETAINED", got.Disposition, got.Err)
+	}
 	for _, covType := range []uint16{consensus.COV_TYPE_ANCHOR, consensus.COV_TYPE_DA_COMMIT} {
 		h := newRelayHarness(t, nil, 1_000_000)
 		raw := h.tx(0, 100_000, 100_000, 1)

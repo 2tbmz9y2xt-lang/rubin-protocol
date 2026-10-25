@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -962,4 +963,10 @@ func TestPrecomputeTxContexts_NonSpendableCovenantCause(t *testing.T) {
 	delete(utxos, op)
 	_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
 	assertTxErrorCause(t, "precompute absent", err, TX_ERR_MISSING_UTXO, "utxo not found", TxErrorCauseUnspecified)
+	utxos[op] = UtxoEntry{Value: 10, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}
+	_, err = PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+	var txErr *TxError
+	if !errors.As(err, &txErr) || txErr.Code == TX_ERR_MISSING_UTXO || txErr.Cause() != TxErrorCauseUnspecified {
+		t.Fatalf("precompute P2PK entry: err=%v, want an uncaused non-MISSING_UTXO error", err)
+	}
 }
