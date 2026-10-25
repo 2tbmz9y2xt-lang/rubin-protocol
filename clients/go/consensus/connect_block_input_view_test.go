@@ -1526,8 +1526,7 @@ func TestConnectBlockInputViewNoSimplicityContext(t *testing.T) {
 	assertInputViewReads(t, view, op)
 }
 
-// A19/H19: R2 is not established before R1 completes, so a later input's read
-// failure beats two Vault inputs, and a lower R1 failure stops further reads.
+// A19/H19: a later R1 read failure beats two Vault inputs (R2); a lower R1 failure stops reads.
 func TestCanonicalSuffix_InputViewReadFailure(t *testing.T) {
 	op0, op1, op2 := Outpoint{Txid: hashWithPrefix(0xc0)}, Outpoint{Txid: hashWithPrefix(0xc1)}, Outpoint{Txid: hashWithPrefix(0xc2)}
 	vault := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{0x01}}

@@ -413,7 +413,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityImmatureCoinbasePrecedesDis
 	}
 }
 
-func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority(t *testing.T) {
+func TestApplyNonCoinbaseTxBasicUpdate_LaterInactiveSimplicityR1PrecedesEarlierR3(t *testing.T) {
 	makeOutpoint := func(prev [32]byte) Outpoint {
 		return Outpoint{Txid: prev, Vout: 0}
 	}
@@ -425,7 +425,6 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 	// the Simplicity spend runs at S4, after a later input's missing UTXO surfaces at R1.
 	// Live first-error ordering is covered by TestSimplicityLiveGate_OrderedErrorSet.
 
-	// R1 (inactive CORE_SIMPLICITY at input1) precedes R3 (input0 underflow).
 	t.Run("later_inactive_simplicity_r1_precedes_earlier_p2pk_witness_underflow", func(t *testing.T) {
 		tx := &Tx{
 			Version: TX_WIRE_VERSION,
@@ -1525,9 +1524,7 @@ func TestApplyNonCoinbaseTxBasicFeeAboveU64(t *testing.T) {
 	}
 }
 
-// Canonical suffix (CSM §2.4) evidence: every case is checked through the raw
-// public checker, the parsed direct apply and the queued owner, and every
-// rejection must leave the caller map and the queue prefix unchanged.
+// Canonical suffix (CSM §2.4) evidence; runSuffix checks every case on all five paths.
 
 type suffixFixture struct {
 	kp, other *MLDSA87Keypair
@@ -1587,55 +1584,72 @@ func (f suffixFixture) priorTask(t *testing.T, q *SigCheckQueue) sigCheckTask {
 	return task
 }
 
-// runSuffix returns the direct error after checking that the raw and queued
-// paths agree with it and that a rejection changed no caller or queue state.
+// sameTxErr reports equal code, msg and cause, or both nil.
+func sameTxErr(a, b error) bool {
+	var x, y *TxError
+	if a == nil || b == nil || !errors.As(a, &x) || !errors.As(b, &y) {
+		return a == nil && b == nil
+	}
+	return x.Code == y.Code && x.Msg == y.Msg && x.Cause() == y.Cause()
+}
+
+// runSuffix returns the direct error; raw, queued and both block paths must match its code, msg,
+// cause and success result, and a rejection must leave caller and queue state unchanged.
 func (f suffixFixture) runSuffix(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider) error {
 	t.Helper()
-	before := cloneUtxoSet(utxos)
-	_, _, direct := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil)
-	_, raw := CheckTransactionWithOwnedUtxoSetAndSuiteContext(txBytesFromTx(t, tx), cloneUtxoSet(utxos), 200, 0, [32]byte{}, rotation, nil)
+	before, txid := cloneUtxoSet(utxos), testTxID(t, txBytesFromTx(t, tx))
+	work, summary, direct := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, txid, utxos, 200, 0, [32]byte{}, rotation, nil)
+	checked, raw := CheckTransactionWithOwnedUtxoSetAndSuiteContext(txBytesFromTx(t, tx), cloneUtxoSet(utxos), 200, 0, [32]byte{}, rotation, nil)
 	q := NewSigCheckQueue(1)
 	prior := f.priorTask(t, q)
-	work, _, queued := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil)
+	qwork, qfee, queued := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 200, 0, [32]byte{}, q, rotation, nil)
 	if queued == nil {
 		queued = q.Flush()
-	} else if work != nil || q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prior) {
+	} else if qwork != nil || q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prior) {
 		t.Fatalf("queued rejection published work or changed the queue prefix: len=%d", q.Len())
 	}
-	if !reflect.DeepEqual(utxos, before) {
-		t.Fatal("caller UTXO map changed")
+	if !reflect.DeepEqual(utxos, before) || !sameTxErr(raw, direct) || !sameTxErr(queued, direct) {
+		t.Fatalf("caller map changed or raw=%v queued=%v, direct=%v", raw, queued, direct)
 	}
-	for name, err := range map[string]error{"raw": raw, "queued": queued} {
-		if errors.Is(err, direct) || (err != nil && direct != nil && err.Error() == direct.Error()) || (err == nil && direct == nil) {
-			continue
-		}
-		t.Fatalf("%s=%v, direct=%v", name, err, direct)
+	if direct == nil && (checked.Fee != summary.Fee || qfee != summary.Fee || !reflect.DeepEqual(qwork, work)) {
+		t.Fatal("raw or queued success result differs from direct")
 	}
-	if direct != nil {
-		f.assertBlockPathsReject(t, tx, utxos, rotation, direct)
-	}
+	f.assertBlockPaths(t, tx, utxos, rotation, direct, work, summary)
 	return direct
 }
 
-// assertBlockPathsReject requires the direct error and no state change from both public block connectors.
-func (f suffixFixture) assertBlockPathsReject(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider, direct error) {
+// assertBlockPaths requires the direct error and unchanged state, or the direct fee and UTXO result.
+func (f suffixFixture) assertBlockPaths(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider, direct error, work map[Outpoint]UtxoEntry, summary *UtxoApplySummary) {
 	t.Helper()
-	input := inputViewBlock(t, 200, 1, tx)
-	for _, name := range []string{"sequential", "parallel"} {
+	in := inputViewBlock(t, 200, 1, tx)
+	for _, workers := range []int{0, 2} {
 		state := &InMemoryChainState{Utxos: cloneUtxoSet(utxos), AlreadyGenerated: big.NewInt(0)}
-		var err error
-		if name == "sequential" {
-			_, err = ConnectBlockBasicInMemoryAtHeightAndSuiteContext(input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, input.BlockHeight, input.PrevTimestamps, state, [32]byte{}, rotation, nil)
+		got, err := (*ConnectBlockBasicSummary)(nil), error(nil)
+		if workers == 0 {
+			got, err = ConnectBlockBasicInMemoryAtHeightAndSuiteContext(in.BlockBytes, in.ExpectedPrevHash, in.ExpectedTarget, in.BlockHeight, in.PrevTimestamps, state, [32]byte{}, rotation, nil)
 		} else {
-			_, err = ConnectBlockParallelSigVerifyWithSuiteContext(input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, input.BlockHeight, input.PrevTimestamps, state, [32]byte{}, rotation, nil, 2)
+			got, err = ConnectBlockParallelSigVerifyWithSuiteContext(in.BlockBytes, in.ExpectedPrevHash, in.ExpectedTarget, in.BlockHeight, in.PrevTimestamps, state, [32]byte{}, rotation, nil, workers)
 		}
-		if err == nil || err.Error() != direct.Error() {
-			t.Fatalf("%s block=%v, direct=%v", name, err, direct)
+		if !sameTxErr(err, direct) || (direct != nil && (!reflect.DeepEqual(state.Utxos, utxos) || state.AlreadyGenerated.Sign() != 0)) {
+			t.Fatalf("workers=%d block=%v, direct=%v (or rejection changed state)", workers, err, direct)
 		}
-		if !reflect.DeepEqual(state.Utxos, utxos) || state.AlreadyGenerated.Sign() != 0 {
-			t.Fatalf("%s block rejection changed caller state", name)
+		if direct == nil && (got.SumFees != summary.Fee || !blockStateHoldsWork(state.Utxos, work)) {
+			t.Fatalf("workers=%d block success result differs from direct", workers)
 		}
 	}
+}
+
+// blockStateHoldsWork reports that state is work plus outputs of one other txid (the coinbase).
+func blockStateHoldsWork(state, work map[Outpoint]UtxoEntry) bool {
+	missing, extra := cloneUtxoSet(work), map[[32]byte]bool{}
+	for op, entry := range state {
+		if w, ok := work[op]; !ok {
+			extra[op.Txid] = true
+		} else if reflect.DeepEqual(w, entry) {
+			delete(missing, op)
+		}
+	}
+	return len(extra) == 1 && len(missing) == 0
 }
 
 func TestCanonicalSuffix_S2BeforeR1(t *testing.T) {
@@ -1699,6 +1713,10 @@ func TestCanonicalSuffix_R3BeforeR4(t *testing.T) {
 	tx, utxos := suffixTx(f.payTo(1), &p2pk, &bad)
 	f.sign(t, tx, 0, 0, 0, 0)
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
+	bad = UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{1}}
+	tx, utxos = suffixTx(f.payTo(1), &p2pk, &bad)
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, f.other)} // input 0 fails S4
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data too short")
 }
 
 func TestCanonicalSuffix_S3bBeforeS4(t *testing.T) {
@@ -1732,11 +1750,14 @@ func TestCanonicalSuffix_VaultAtInputOrder(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "output not whitelisted for CORE_VAULT")
 }
 
-// flippingRotation serves the genesis spend set on its first read only.
-type flippingRotation struct{ spendReads int }
+// flippingRotation serves the genesis create and spend sets on the first read of each only.
+type flippingRotation struct{ createReads, spendReads int }
 
 func (r *flippingRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
-	return DefaultRotationProvider{}.NativeCreateSuites(0)
+	if r.createReads++; r.createReads == 1 {
+		return DefaultRotationProvider{}.NativeCreateSuites(0)
+	}
+	return NewNativeSuiteSet(0x7f)
 }
 
 func (r *flippingRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
@@ -1818,8 +1839,7 @@ func TestCanonicalSuffix_RejectThenValid(t *testing.T) {
 	}
 }
 
-// simplicityCapTx is input0 P2PK with an invalid signature followed by enough
-// same-CMR CORE_SIMPLICITY inputs to exceed the S3d input group cap.
+// simplicityCapTx: input0 P2PK with a bad signature, then same-CMR inputs over the S3d group cap.
 func (f suffixFixture) simplicityCapTx() (*Tx, map[Outpoint]UtxoEntry) {
 	tx, _, utxos := simplicityLiveTx(9, simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL))
 	op := Outpoint{Txid: hashWithPrefix(0xf1)}
@@ -1843,10 +1863,8 @@ func TestCanonicalSuffix_S3bBeforeS3d(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, activeSimplicityRotation([32]byte{}, 1)), TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
 }
 
-// H09: with every S4 check valid, each reachable S5 exit and boundary keeps its
-// existing result. The sum_in/sum_out u128 additions cannot overflow: at most
-// MAX_TX_INPUTS (1024) u64 addends stay below 2^74, and the subtraction runs
-// only after Rule 4 has proven sum_out <= sum_in.
+// H09: each reachable S5 exit and boundary keeps its result; u128 sums of at most
+// 1024 u64 addends cannot overflow, and subtraction runs after sum_out <= sum_in.
 func TestCanonicalSuffix_S5Boundaries(t *testing.T) {
 	f := newSuffixFixture(t)
 	const maxU64 = ^uint64(0)
@@ -1886,8 +1904,7 @@ func TestCanonicalSuffix_S5Boundaries(t *testing.T) {
 	}
 }
 
-// H13: arbitrary generic unknown covenant types, 0x0102 included, take the
-// generic S2 and R1 rejections only.
+// H13: generic unknown covenant types, 0x0102 included, take the generic S2 and R1 rejections only.
 func TestCanonicalSuffix_GenericUnknownCovenants(t *testing.T) {
 	f := newSuffixFixture(t)
 	p2pk := f.p2pkEntry()
@@ -1901,8 +1918,7 @@ func TestCanonicalSuffix_GenericUnknownCovenants(t *testing.T) {
 	}
 }
 
-// H14: empty inputs, empty and surplus witness cursors and zero values keep
-// their existing errors on every path; a nil tx keeps the direct refusal.
+// H14: empty inputs, empty/surplus witness cursors, zero values and a nil tx keep their errors.
 func TestCanonicalSuffix_ShapeBoundaries(t *testing.T) {
 	f := newSuffixFixture(t)
 	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(nil, [32]byte{}, nil, 200, 0, [32]byte{}, nil, nil); err == nil {
@@ -1925,8 +1941,7 @@ func TestCanonicalSuffix_ShapeBoundaries(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, zeroTx, zUtxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK value must be > 0")
 }
 
-// H15: a local verifier-binding failure keeps its typed process-local cause on
-// the direct and queued paths instead of becoming a transaction verdict.
+// H15: a local verifier-binding failure keeps its process-local cause on direct and queued paths.
 func TestCanonicalSuffix_LocalBackendFailure(t *testing.T) {
 	f := newSuffixFixture(t)
 	const unboundAlg = "ML-DSA-87-NOT-LIVE-BOUND"
@@ -1953,8 +1968,7 @@ func TestCanonicalSuffix_LocalBackendFailure(t *testing.T) {
 	}
 }
 
-// mutatingRotation rewrites the caller's map and nested covenant_data at the
-// first S4 signature check, after R1 has detached its snapshots.
+// mutatingRotation rewrites caller UTXO data at the first S4 check, after R1 detached snapshots.
 type mutatingRotation struct{ utxos map[Outpoint]UtxoEntry }
 
 func (r *mutatingRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
@@ -1983,21 +1997,6 @@ func TestCanonicalSuffix_CallerMutationAfterEntry(t *testing.T) {
 	}
 }
 
-// flippingCreateRotation serves the genesis create set on its first read only.
-type flippingCreateRotation struct{ createReads int }
-
-func (r *flippingCreateRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
-	r.createReads++
-	if r.createReads == 1 {
-		return DefaultRotationProvider{}.NativeCreateSuites(0)
-	}
-	return NewNativeSuiteSet(0x7f)
-}
-
-func (r *flippingCreateRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
-	return DefaultRotationProvider{}.NativeSpendSuites(0)
-}
-
 // flippingDeploymentRotation publishes the active deployment set on its first read only.
 type flippingDeploymentRotation struct {
 	testRotationProvider
@@ -2017,11 +2016,11 @@ func TestCanonicalSuffix_BoundCreateSet(t *testing.T) {
 	p2pk := f.p2pkEntry()
 	tx, utxos := suffixTx(append(f.payTo(40), f.payTo(50)...), &p2pk)
 	f.sign(t, tx, 0)
-	rotation := &flippingCreateRotation{}
+	rotation := &flippingRotation{}
 	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil); err != nil || rotation.createReads != 1 {
 		t.Fatalf("err=%v reads=%d", err, rotation.createReads)
 	}
-	rotation = &flippingCreateRotation{}
+	rotation = &flippingRotation{}
 	q := NewSigCheckQueue(1)
 	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.createReads != 1 {
 		t.Fatalf("queued err=%v reads=%d", err, rotation.createReads)

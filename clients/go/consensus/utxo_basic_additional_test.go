@@ -202,8 +202,7 @@ func TestCheckSpendCovenant_SupportedTypes(t *testing.T) {
 }
 
 func TestCheckSpendCovenant_Errors(t *testing.T) {
-	// R1 is type disposition only; the known-type data parses moved to R3
-	// (Vault, Multisig) and S4 (HTLC) under CANONICAL §16 rule 7.
+	// R1 is type disposition only; data parses run at R3 (Vault, Multisig) and S4 (HTLC).
 	for _, covType := range []uint16{COV_TYPE_VAULT, COV_TYPE_MULTISIG, COV_TYPE_HTLC} {
 		if err := checkSpendCovenant(covType, nil); err != nil {
 			t.Fatalf("checkSpendCovenant(%#x, nil) at R1: %v", covType, err)

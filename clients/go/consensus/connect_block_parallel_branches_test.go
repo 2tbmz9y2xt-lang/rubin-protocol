@@ -1237,8 +1237,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	}
 }
 
-// TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError: a UTXO with corrupt
-// vault covenant data fails the R3 witness-slot metadata parse (parseWitnessSlotMetadata).
+// Corrupt vault covenant data fails the R3 witness-slot metadata parse (parseWitnessSlotMetadata).
 func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
