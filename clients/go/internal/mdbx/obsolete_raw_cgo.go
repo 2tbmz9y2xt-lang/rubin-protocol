@@ -25,9 +25,10 @@ const (
 	ObsoleteRootV1 ObsoleteClassV1 = 6
 )
 
-// ObsoleteProjectionV1 reports only the own-index/header proof: the named header has the
-// Reader's format width (148 bytes on a format-3 Reader, 116 otherwise), hashes to the entry
-// hash and carries the entry parent hash.
+// ObsoleteProjectionV1 reports only the own-index/header proof. Proven holds exactly when the
+// index key is 16 bytes with height <= 0xffffffff, the index value is 104 bytes with valid
+// work, and the named header is present, has the Reader's format width (148 bytes on a
+// format-3 Reader, 116 otherwise), hashes to the entry hash and carries the entry parent hash.
 type ObsoleteProjectionV1 uint8
 
 const (

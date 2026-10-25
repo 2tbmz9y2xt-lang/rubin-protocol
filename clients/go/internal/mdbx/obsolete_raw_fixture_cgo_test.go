@@ -1329,7 +1329,7 @@ func TestObsoleteGenerationV1TreeNodes(t *testing.T) {
 	}))
 }
 
-// N2, N4 boundary: a 1440-row node page stops on the 65_596 key-byte budget, then continues.
+// Boundary (byte budget unchanged): a maxRows=1440 node page stops at 65_596/46 = 1426 rows on the key-byte budget, then continues.
 func TestObsoleteGenerationV1TreeNodeByteLimit(t *testing.T) {
 	const keyBytes, budget, extra = 46, 65_596, 4
 	fit := budget / keyBytes
