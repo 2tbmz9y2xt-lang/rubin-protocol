@@ -1524,8 +1524,6 @@ func TestApplyNonCoinbaseTxBasicFeeAboveU64(t *testing.T) {
 	}
 }
 
-// Canonical suffix (CSM §2.4) evidence; runSuffix checks every case on all five paths.
-
 type suffixFixture struct {
 	kp, other *MLDSA87Keypair
 	cov       []byte
@@ -1909,7 +1907,6 @@ func TestCanonicalSuffix_S5Boundaries(t *testing.T) {
 	}
 }
 
-// H13: generic unknown covenant types, 0x0102 included, take the generic S2 and R1 rejections only.
 func TestCanonicalSuffix_GenericUnknownCovenants(t *testing.T) {
 	f := newSuffixFixture(t)
 	p2pk := f.p2pkEntry()
@@ -1923,7 +1920,6 @@ func TestCanonicalSuffix_GenericUnknownCovenants(t *testing.T) {
 	}
 }
 
-// H14: empty inputs, empty/surplus witness cursors, zero values and a nil tx keep their errors.
 func TestCanonicalSuffix_ShapeBoundaries(t *testing.T) {
 	f := newSuffixFixture(t)
 	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(nil, [32]byte{}, nil, 200, 0, [32]byte{}, nil, nil); err == nil {
@@ -1946,7 +1942,6 @@ func TestCanonicalSuffix_ShapeBoundaries(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, zeroTx, zUtxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK value must be > 0")
 }
 
-// H15: a local verifier-binding failure keeps its process-local cause on direct and queued paths.
 func TestCanonicalSuffix_LocalBackendFailure(t *testing.T) {
 	f := newSuffixFixture(t)
 	const unboundAlg = "ML-DSA-87-NOT-LIVE-BOUND"
@@ -1988,7 +1983,6 @@ func (r *mutatingRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
 	return DefaultRotationProvider{}.NativeSpendSuites(0)
 }
 
-// H16: caller mutation after entry cannot reach the detached R1 snapshots.
 func TestCanonicalSuffix_CallerMutationAfterEntry(t *testing.T) {
 	f := newSuffixFixture(t)
 	p2pk := f.p2pkEntry()

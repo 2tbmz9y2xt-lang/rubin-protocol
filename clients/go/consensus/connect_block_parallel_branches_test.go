@@ -1530,7 +1530,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 			})
 		}
 	}
-	t.Run("nested threshold panic reconciliation", func(t *testing.T) {
+	nested := func(t *testing.T, vaultOutput bool) {
 		key := sha3_256(kp.PubkeyBytes())
 		otherKey := sha3_256(other.PubkeyBytes())
 		thresholdKP := kp
@@ -1543,7 +1543,10 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 		tx := &Tx{
 			Version: 1, TxNonce: 1,
 			Inputs:  []TxInput{{PrevTxid: hashWithPrefix(0xf1)}, {PrevTxid: hashWithPrefix(0xf2)}},
-			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_VAULT, CovenantData: vault}}, // RUB-721 settle covers Vault txs
+			Outputs: []TxOutput{{Value: 190, CovenantType: COV_TYPE_P2PK, CovenantData: dest}},
+		}
+		if vaultOutput { // the RUB-721 earlier-interval settle also covers Vault transactions
+			tx.Outputs[0] = TxOutput{Value: 190, CovenantType: COV_TYPE_VAULT, CovenantData: vault}
 		}
 		tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, kp), signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, thresholdKP), {SuiteID: SUITE_ID_SENTINEL}}
 		digest0, err := SighashV1DigestWithType(tx, 0, 100, [32]byte{}, SIGHASH_ALL)
@@ -1619,5 +1622,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 				})
 			}
 		}
-	})
+	}
+	t.Run("nested threshold panic reconciliation", func(t *testing.T) { nested(t, false) })
+	t.Run("nested threshold panic reconciliation vault", func(t *testing.T) { nested(t, true) })
 }
