@@ -208,3 +208,50 @@ func TestCoverageResidual_ErrorHelpersSmoke(t *testing.T) {
 		t.Fatalf("code=%s, want %s", txe.Code, TX_ERR_PARSE)
 	}
 }
+
+// assertTxErrorCause pins the producer's own TxError, unwrapped by errors.As
+// (pass-through identity), with its exact public code, message and cause.
+func assertTxErrorCause(t *testing.T, label string, err error, code ErrorCode, msg string, cause TxErrorCause) {
+	t.Helper()
+	var txErr *TxError
+	if !errors.As(err, &txErr) {
+		t.Fatalf("%s: err=%T %v, want *TxError", label, err, err)
+	}
+	if txErr.Code != code || txErr.Msg != msg || txErr.Cause() != cause {
+		t.Fatalf("%s: got code=%s msg=%q cause=%d, want code=%s msg=%q cause=%d", label, txErr.Code, txErr.Msg, txErr.Cause(), code, msg, cause)
+	}
+}
+
+func nonSpendableCauseFixture(covType uint16) (*Tx, Outpoint, map[Outpoint]UtxoEntry) {
+	op := Outpoint{Txid: filled32(0x01), Vout: 0}
+	tx := &Tx{TxNonce: 1, Inputs: []TxInput{{PrevTxid: op.Txid, PrevVout: op.Vout}}, Outputs: []TxOutput{{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}}}
+	return tx, op, map[Outpoint]UtxoEntry{op: {Value: 10, CovenantType: covType, CovenantData: []byte{0x01}}}
+}
+
+func TestTxErrorCausePermanentNonSpendableCovenantSequentialAndParallel(t *testing.T) {
+	const msg = "attempt to spend non-spendable covenant"
+	paths := map[string]func(*Tx, map[Outpoint]UtxoEntry) error{
+		"sequential": func(tx *Tx, utxos map[Outpoint]UtxoEntry) error {
+			_, _, err := ApplyNonCoinbaseTxBasicUpdate(tx, filled32(0x02), utxos, 1, 0, [32]byte{})
+			return err
+		},
+		"parallel": func(tx *Tx, utxos map[Outpoint]UtxoEntry) error {
+			_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, filled32(0x02), utxos, 1, 0, [32]byte{}, nil, nil, nil)
+			return err
+		},
+	}
+	for name, run := range paths {
+		for _, covType := range []uint16{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT} {
+			tx, _, utxos := nonSpendableCauseFixture(covType)
+			assertTxErrorCause(t, name, run(tx, utxos), TX_ERR_MISSING_UTXO, msg, TxErrorCausePermanentNonSpendableCovenant)
+		}
+		tx, op, utxos := nonSpendableCauseFixture(COV_TYPE_ANCHOR)
+		delete(utxos, op)
+		assertTxErrorCause(t, name+" absent", run(tx, utxos), TX_ERR_MISSING_UTXO, "utxo not found", TxErrorCauseUnspecified)
+		utxos[op] = UtxoEntry{Value: 10, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()}
+		var txErr *TxError
+		if err := run(tx, utxos); !errors.As(err, &txErr) || txErr.Code == TX_ERR_MISSING_UTXO || txErr.Cause() != TxErrorCauseUnspecified {
+			t.Fatalf("%s P2PK entry: err=%v, want an uncaused non-MISSING_UTXO error", name, err)
+		}
+	}
+}

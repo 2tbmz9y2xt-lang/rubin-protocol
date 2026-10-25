@@ -296,7 +296,7 @@ func applyNonCoinbaseTxBasicWorkQ(
 			}
 
 			if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
-				return nil, Uint128{}, txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+				return nil, Uint128{}, txerrWithCause(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant)
 			}
 
 			// Overflow-safe maturity check: avoid entry.CreationHeight+COINBASE_MATURITY wrapping.

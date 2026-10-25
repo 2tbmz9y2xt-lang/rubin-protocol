@@ -258,7 +258,7 @@ func resolvePrecomputeInput(
 
 func validatePrecomputeEntry(entry UtxoEntry, blockHeight uint64) error {
 	if entry.CovenantType == COV_TYPE_ANCHOR || entry.CovenantType == COV_TYPE_DA_COMMIT {
-		return txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+		return txerrWithCause(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant)
 	}
 	if entry.CreatedByCoinbase && (blockHeight < entry.CreationHeight || blockHeight-entry.CreationHeight < COINBASE_MATURITY) {
 		return txerr(TX_ERR_COINBASE_IMMATURE, "coinbase immature")
