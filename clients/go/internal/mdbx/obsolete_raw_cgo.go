@@ -94,11 +94,15 @@ func obsoleteShape(op engineOperation) error {
 	return adapterError(op, EngineLocalInvariant, codeProblem, "invalid native obsolete generation result", nil)
 }
 
-// obsoleteRank returns 255 for a closed-domain refusal, including a tree class off format 3.
-func obsoleteRank(class ObsoleteClassV1, format uint8) uint8 {
+// obsoleteSelectorRank returns 255 for a closed-domain refusal, including a tree class off format 3.
+func obsoleteSelectorRank(class ObsoleteClassV1, format uint8) uint8 {
 	if class >= ObsoleteNodeV1 && format != 3 {
 		return 255
 	}
+	return obsoleteRank(class)
+}
+
+func obsoleteRank(class ObsoleteClassV1) uint8 {
 	switch class {
 	case ObsoleteUTXOV1:
 		return 1
@@ -184,7 +188,7 @@ func (r *Reader) ObsoleteGenerationPageV1(g uint64, class ObsoleteClassV1, after
 	if !r.usable() {
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "Reader is not active")
 	}
-	rank := obsoleteRank(class, r.format)
+	rank := obsoleteSelectorRank(class, r.format)
 	if g == 0 || rank == 255 {
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "invalid obsolete generation selector")
 	}
@@ -204,6 +208,7 @@ func obsoletePrefix(g uint64, class ObsoleteClassV1) ([]byte, bool) {
 		return append([]byte{0x10}, prefix...), true
 	case ObsoleteRootV1:
 		return append([]byte{0x11}, prefix...), true
+	case ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteDerivedV1, ObsoleteNodeV1:
 	}
 	return prefix, false
 }

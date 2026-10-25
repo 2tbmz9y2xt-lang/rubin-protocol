@@ -548,9 +548,19 @@ func TestObsoleteGenerationV1TreeBounds(t *testing.T) {
 			after []byte
 			count uint32
 		}{
-			{5, nil, 0}, {5, nil, 1441}, {5, nil, math.MaxUint32}, {5, []byte{}, 1}, {5, obsoleteGenerationLiteral(8), 1},
-			{5, append(obsoleteGenerationLiteral(10), make([]byte, 38)...), 1}, {5, append(bytes.Clone(g), make([]byte, 2015)...), 1},
-			{6, nil, 0}, {6, nil, 1441}, {6, []byte{}, 1}, {6, g, 1}, {6, append([]byte{0x10}, g...), 1}, {6, append(bytes.Clone(root), 0), 1},
+			{5, nil, 0},
+			{5, nil, 1441},
+			{5, nil, math.MaxUint32},
+			{5, []byte{}, 1},
+			{5, obsoleteGenerationLiteral(8), 1},
+			{5, append(obsoleteGenerationLiteral(10), make([]byte, 38)...), 1},
+			{5, append(bytes.Clone(g), make([]byte, 2015)...), 1},
+			{6, nil, 0},
+			{6, nil, 1441},
+			{6, []byte{}, 1},
+			{6, g, 1},
+			{6, append([]byte{0x10}, g...), 1},
+			{6, append(bytes.Clone(root), 0), 1},
 		}
 		for _, query := range queries {
 			page, err := reader.ObsoleteGenerationPageV1(9, query.class, query.after, query.count)
