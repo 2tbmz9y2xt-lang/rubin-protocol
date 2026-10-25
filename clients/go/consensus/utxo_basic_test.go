@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 	"slices"
 	"testing"
@@ -419,9 +420,9 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 	p2pkPrev := hashWithPrefix(0xE0)
 	simpPrev := hashWithPrefix(0xE1)
 	// current_simplicity_precedes_later_missing_utxo was a reject-only artifact: it relied on the
-	// removed resolveInputs early-return. Under live spend, input resolution processes all inputs in
-	// wire order (a missing UTXO at a later input surfaces during resolution), and the CORE_SIMPLICITY
-	// activation/spend check runs afterward in validateInputSpends — so that ordering no longer holds.
+	// removed resolveInputs early-return. R1 resolves every input in wire order with the per-input
+	// CORE_SIMPLICITY deployment check (validateSimplicityInputDeployment); the Simplicity spend runs
+	// later at S3d, so an earlier Simplicity input no longer precedes a later missing UTXO.
 	// Live first-error ordering is covered by TestSimplicityLiveGate_OrderedErrorSet.
 
 	// R1 (inactive CORE_SIMPLICITY at input1) precedes R3 (input0 underflow).
@@ -1610,7 +1611,31 @@ func (f suffixFixture) runSuffix(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEn
 		}
 		t.Fatalf("%s=%v, direct=%v", name, err, direct)
 	}
+	if direct != nil {
+		f.assertBlockPathsReject(t, tx, utxos, rotation, direct)
+	}
 	return direct
+}
+
+// assertBlockPathsReject requires the direct error and no state change from both public block connectors.
+func (f suffixFixture) assertBlockPathsReject(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider, direct error) {
+	t.Helper()
+	input := inputViewBlock(t, 200, 1, tx)
+	for _, name := range []string{"sequential", "parallel"} {
+		state := &InMemoryChainState{Utxos: cloneUtxoSet(utxos), AlreadyGenerated: big.NewInt(0)}
+		var err error
+		if name == "sequential" {
+			_, err = ConnectBlockBasicInMemoryAtHeightAndSuiteContext(input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, input.BlockHeight, input.PrevTimestamps, state, [32]byte{}, rotation, nil)
+		} else {
+			_, err = ConnectBlockParallelSigVerifyWithSuiteContext(input.BlockBytes, input.ExpectedPrevHash, input.ExpectedTarget, input.BlockHeight, input.PrevTimestamps, state, [32]byte{}, rotation, nil, 2)
+		}
+		if err == nil || err.Error() != direct.Error() {
+			t.Fatalf("%s block=%v, direct=%v", name, err, direct)
+		}
+		if !reflect.DeepEqual(state.Utxos, utxos) || state.AlreadyGenerated.Sign() != 0 {
+			t.Fatalf("%s block rejection changed caller state", name)
+		}
+	}
 }
 
 func TestCanonicalSuffix_S2BeforeR1(t *testing.T) {
@@ -1955,5 +1980,65 @@ func TestCanonicalSuffix_CallerMutationAfterEntry(t *testing.T) {
 	work, fee, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, &mutatingRotation{utxos: utxos}, nil)
 	if err != nil || fee != Uint128FromU64(10) || len(work) != 1 || q.Flush() != nil {
 		t.Fatalf("detached snapshot followed caller mutation: err=%v fee=%v", err, fee)
+	}
+}
+
+// flippingCreateRotation serves the genesis create set on its first read only.
+type flippingCreateRotation struct{ createReads int }
+
+func (r *flippingCreateRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
+	r.createReads++
+	if r.createReads == 1 {
+		return DefaultRotationProvider{}.NativeCreateSuites(0)
+	}
+	return NewNativeSuiteSet(0x7f)
+}
+
+func (r *flippingCreateRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
+	return DefaultRotationProvider{}.NativeSpendSuites(0)
+}
+
+// flippingDeploymentRotation publishes the active deployment set on its first read only.
+type flippingDeploymentRotation struct {
+	testRotationProvider
+	reads int
+}
+
+func (r *flippingDeploymentRotation) PublishedSimplicityDeployments() ([]SimplicityDeploymentDescriptor, [32]byte, bool, error) {
+	r.reads++
+	if r.reads == 1 {
+		return r.testRotationProvider.PublishedSimplicityDeployments()
+	}
+	return nil, [32]byte{}, false, nil
+}
+
+func TestCanonicalSuffix_BoundCreateSet(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(append(f.payTo(40), f.payTo(50)...), &p2pk)
+	f.sign(t, tx, 0)
+	rotation := &flippingCreateRotation{}
+	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil); err != nil || rotation.createReads != 1 {
+		t.Fatalf("err=%v reads=%d", err, rotation.createReads)
+	}
+	rotation = &flippingCreateRotation{}
+	q := NewSigCheckQueue(1)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.createReads != 1 {
+		t.Fatalf("queued err=%v reads=%d", err, rotation.createReads)
+	}
+}
+
+func TestCanonicalSuffix_BoundDeploymentSet(t *testing.T) {
+	sig := simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL)
+	inner := activeSimplicityRotation([32]byte{}, 1).(testRotationProvider)
+	tx, txid, utxos := simplicityLiveTx(2, sig)
+	rotation := &flippingDeploymentRotation{testRotationProvider: inner}
+	if err := runSimplicitySeq(tx, txid, utxos, 1, [32]byte{}, rotation); err != nil || rotation.reads != 1 {
+		t.Fatalf("err=%v reads=%d", err, rotation.reads)
+	}
+	rotation = &flippingDeploymentRotation{testRotationProvider: inner}
+	q := NewSigCheckQueue(1)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, txid, utxos, 1, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.reads != 1 {
+		t.Fatalf("queued err=%v reads=%d", err, rotation.reads)
 	}
 }
