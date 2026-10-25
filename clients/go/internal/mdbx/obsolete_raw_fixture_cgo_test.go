@@ -11,6 +11,7 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -1254,4 +1255,306 @@ func TestObsoleteGenerationV1UndoLimit(t *testing.T) {
 	obsoleteRawImage(t, store, 5, manifest, []byte{0x31})
 	obsoleteRawImage(t, store, 5, first, value)
 	obsoleteRawImage(t, store, 5, last, value)
+}
+
+// obsoleteTreeNodeLiteral writes g || upper(36) || code(2) from spec literals, not from TreeNodeKey.
+func obsoleteTreeNodeLiteral(g uint64, upper [36]byte, code uint16) []byte {
+	return binary.BigEndian.AppendUint16(append(obsoleteGenerationLiteral(g), upper[:]...), code)
+}
+
+type obsoleteTreeRow struct{ key, value []byte }
+
+// obsoleteTreeFamily is a depth-0 branch over two leaves split by routing bit 0, listed in
+// the zero-first postorder of the ordinary-apply visit: zero leaf, one leaf, branch.
+func obsoleteTreeFamily(g uint64) []obsoleteTreeRow {
+	var zero, one, all [36]byte
+	zero[35], one[0] = 1, 0x80
+	for i := range all {
+		all[i] = 0xff
+	}
+	return []obsoleteTreeRow{
+		{obsoleteTreeNodeLiteral(g, zero, 0), bytes.Repeat([]byte{0xa1}, 32)},
+		{obsoleteTreeNodeLiteral(g, one, 0), bytes.Repeat([]byte{0xa2}, 32)},
+		{obsoleteTreeNodeLiteral(g, all, 288), bytes.Repeat([]byte{0xa3}, 140)},
+	}
+}
+
+func obsoleteTreeKeys(rows []obsoleteTreeRow) [][]byte {
+	keys := make([][]byte, len(rows))
+	for i, row := range rows {
+		keys[i] = row.key
+	}
+	return keys
+}
+
+func obsoleteRequireRaw(t *testing.T, rows []ObsoleteRowV1, want []obsoleteTreeRow) {
+	t.Helper()
+	for i, row := range rows {
+		buffer := make([]byte, len(want[i].value))
+		n, err := row.ReadAt(buffer, 0)
+		if row.Length() != uint64(len(want[i].value)) || n != len(buffer) || (err != nil && err != io.EOF) || !bytes.Equal(buffer, want[i].value) {
+			t.Fatalf("raw tree row %d: length=%d n=%d err=%v", i, row.Length(), n, err)
+		}
+	}
+}
+
+// N1-N3: generation-isolated node rows in native postorder with continuation.
+func TestObsoleteGenerationV1TreeNodes(t *testing.T) {
+	store, _, _ := treeNativeStore(t)
+	family := obsoleteTreeFamily(9)
+	for _, row := range append(append(family, obsoleteTreeFamily(8)...), obsoleteTreeFamily(10)...) {
+		treeNativeSeed(t, store, 8, row.key, row.value)
+	}
+	treeNativeSeed(t, store, 1, append(obsoleteGenerationLiteral(9), make([]byte, 33)...), make([]byte, 50))
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		for _, row := range family {
+			if _, _, err := DecodeTreeNodeKey(row.key); err != nil {
+				t.Fatalf("family literal is not a well-formed node key: %x", row.key)
+			}
+		}
+		page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, page, 1, 1, obsoleteTreeKeys(family)...)
+		obsoleteRequireRaw(t, page.Rows, family)
+		first, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, first, 2, 1, family[0].key)
+		rest, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, first.Next, 7)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, rest, 1, 1, obsoleteTreeKeys(family[1:])...)
+		empty, err := reader.ObsoleteGenerationPageV1(math.MaxUint64, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, empty, 1, 1)
+		return nil
+	}))
+}
+
+// N5: malformed node rows are raw rows at their native position, never integrity.
+func TestObsoleteGenerationV1TreeMalformedNodes(t *testing.T) {
+	store, _, _ := treeNativeStore(t)
+	g := obsoleteGenerationLiteral(9)
+	var code289, nonCanonical [36]byte
+	code289[0], nonCanonical[0] = 0x20, 0xc0
+	malformedKeys := [][]byte{
+		append(bytes.Clone(g), bytes.Repeat([]byte{0x40}, 37)...),
+		append(bytes.Clone(g), bytes.Repeat([]byte{0x90}, 39)...),
+		obsoleteTreeNodeLiteral(9, code289, 289),
+		obsoleteTreeNodeLiteral(9, nonCanonical, 1),
+	}
+	rows := append([]obsoleteTreeRow(nil), obsoleteTreeFamily(9)...)
+	for _, key := range malformedKeys {
+		if _, _, err := DecodeTreeNodeKey(key); err == nil {
+			t.Fatalf("hostile key unexpectedly decodes: %x", key)
+		}
+		rows = append(rows, obsoleteTreeRow{key, []byte{0x5c}})
+	}
+	for i, width := range []int{0, 31, 33, 139, 141} {
+		var upper [36]byte
+		upper[0] = byte(0x10 + 0x20*i)
+		rows = append(rows, obsoleteTreeRow{obsoleteTreeNodeLiteral(9, upper, 0), bytes.Repeat([]byte{0x6d}, width)})
+	}
+	for _, row := range rows {
+		treeNativeSeed(t, store, 8, row.key, row.value)
+	}
+	root := append([]byte{0x11}, g...)
+	treeNativeSeed(t, store, 0, root, make([]byte, 133))
+	sort.Slice(rows, func(i, j int) bool { return bytes.Compare(rows[i].key, rows[j].key) < 0 })
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, page, 1, 1, obsoleteTreeKeys(rows)...)
+		obsoleteRequireRaw(t, page.Rows, rows)
+		if !reader.usable() || reader.failure != nil {
+			t.Fatal("malformed raw node rows disarmed Reader")
+		}
+		value, present, err := reader.Get(TreeSchemaV1DBIs()[0], root)
+		if err != nil || !present || len(value) != 133 {
+			t.Fatalf("unrelated Get after malformed page: %d/%v/%v", len(value), present, err)
+		}
+		return nil
+	}))
+}
+
+// R1, R2: the root binding is one raw meta point, isolated from the counter point.
+func TestObsoleteGenerationV1TreeRoot(t *testing.T) {
+	for _, width := range []int{133, 0, 132, 329} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			store, _, _ := treeNativeStore(t)
+			root := append([]byte{0x11}, obsoleteGenerationLiteral(9)...)
+			counter := append([]byte{0x10}, obsoleteGenerationLiteral(9)...)
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteRootV1, nil, 1)
+				mustEnvironment(t, err)
+				obsoleteRequirePage(t, page, 1, 1)
+				return nil
+			}))
+			treeNativeSeed(t, store, 0, root, bytes.Repeat([]byte{0x3e}, width))
+			treeNativeSeed(t, store, 0, counter, make([]byte, 16))
+			mustEnvironment(t, store.View(func(reader *Reader) error {
+				page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteRootV1, nil, 1)
+				mustEnvironment(t, err)
+				obsoleteRequirePage(t, page, 1, 1, root)
+				obsoleteRequireRaw(t, page.Rows, []obsoleteTreeRow{{root, bytes.Repeat([]byte{0x3e}, width)}})
+				after, err := reader.ObsoleteGenerationPageV1(9, ObsoleteRootV1, root, 1)
+				mustEnvironment(t, err)
+				obsoleteRequirePage(t, after, 1, 1)
+				counted, err := reader.ObsoleteGenerationPageV1(9, ObsoleteCounterV1, nil, 1)
+				mustEnvironment(t, err)
+				obsoleteRequirePage(t, counted, 1, 1, counter)
+				if !reader.usable() || reader.failure != nil {
+					t.Fatal("raw root row disarmed Reader")
+				}
+				return nil
+			}))
+		})
+	}
+}
+
+// obsolete148Seed seeds an own index entry naming a 148-byte header hashed in the test.
+func obsolete148Seed(t *testing.T, store *Store) ([]byte, []byte, [32]byte, []byte) {
+	t.Helper()
+	header := make([]byte, 148)
+	header[3], header[108], header[140], header[147] = 1, 0x44, 0x55, 7
+	for i := 4; i < 36; i++ {
+		header[i] = 0x22
+	}
+	hash := sha3.Sum256(header)
+	key := binary.BigEndian.AppendUint64(obsoleteGenerationLiteral(9), 1)
+	entry := append(append(bytes.Clone(hash[:]), header[4:36]...), make([]byte, 40)...)
+	entry[103] = 1
+	return key, entry, hash, header
+}
+
+func obsoleteSeedTree(t *testing.T, store *Store, rank uint8, key, value []byte) {
+	t.Helper()
+	if store.format.Load() == 3 {
+		treeNativeSeed(t, store, rank, key, value)
+		return
+	}
+	obsoleteSeed(t, store, rank, key, value)
+}
+
+func obsolete148Projection(t *testing.T, store *Store, variant string) uint8 {
+	t.Helper()
+	key, entry, hash, header := obsolete148Seed(t, store)
+	switch variant {
+	case "key15":
+		key = key[:15]
+	case "key17":
+		key = append(key, 1)
+	case "height-over":
+		binary.BigEndian.PutUint64(key[8:], 0x100000000)
+	case "value103":
+		entry = entry[:103]
+	case "value105":
+		entry = append(entry, 1)
+	case "work-zero":
+		entry[103] = 0
+	case "work-over":
+		entry[67] = 1
+	case "work-high":
+		entry[66] = 1
+	case "header-empty":
+		header = []byte{}
+	case "header116":
+		header = header[:116]
+	case "header147":
+		header = header[:147]
+	case "header149":
+		header = append(header, 1)
+	case "header-utxo":
+		header[108] ^= 1
+	case "header-nonce":
+		header[140] ^= 1
+	case "entry-parent":
+		entry[32] ^= 1
+	}
+	obsoleteSeedTree(t, store, 2, key, entry)
+	if variant != "header-absent" {
+		obsoleteSeedTree(t, store, 3, hash[:], header)
+	}
+	undo := [][]byte{bytes.Clone(hash[:]), append(bytes.Clone(hash[:]), 0), append(bytes.Clone(hash[:]), 2, 0xff)}
+	for i, k := range undo {
+		obsoleteSeedTree(t, store, 5, k, []byte{byte(i)})
+	}
+	var projection uint8
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		index := obsoleteIndexPage(t, reader, 9)
+		page, err := reader.ObsoleteUndoPageV1(index.Rows[0], nil, 1)
+		mustEnvironment(t, err)
+		projection = uint8(page.Projection)
+		if projection == 3 {
+			obsoleteRequirePage(t, page, 2, 3, undo[0])
+			rest, err := reader.ObsoleteUndoPageV1(index.Rows[0], undo[0], 7)
+			mustEnvironment(t, err)
+			obsoleteRequirePage(t, rest, 1, 3, undo[1:]...)
+			return nil
+		}
+		obsoleteRequirePage(t, page, 1, 2)
+		refused, err := reader.ObsoleteUndoPageV1(index.Rows[0], undo[0], 7)
+		obsoleteRequireZero(t, refused)
+		obsoleteRequireError(t, err, "prefix-page", "InvalidInput", 22, "invalid obsolete generation page bounds")
+		if !reader.usable() || reader.failure != nil {
+			t.Fatal("invalid 148 projection disarmed Reader")
+		}
+		return nil
+	}))
+	return projection
+}
+
+// P1-P3: the own-index header proof uses the Reader format's header width.
+func TestObsoleteGenerationV1Projection148(t *testing.T) {
+	for _, variant := range []string{"valid", "header-absent", "header-empty", "header116", "header147", "header149", "header-utxo", "header-nonce", "entry-parent", "key15", "key17", "height-over", "value103", "value105", "work-zero", "work-over", "work-high"} {
+		t.Run(variant, func(t *testing.T) {
+			store, _, _ := treeNativeStore(t)
+			want := uint8(2)
+			if variant == "valid" {
+				want = 3
+			}
+			if got := obsolete148Projection(t, store, variant); got != want {
+				t.Fatalf("format-3 projection %d want %d", got, want)
+			}
+		})
+	}
+	t.Run("format2-148", func(t *testing.T) {
+		store, _, _ := consultedStore(t)
+		if got := obsolete148Projection(t, store, "valid"); got != 2 {
+			t.Fatalf("format-2 148-byte header projection %d want Invalid", got)
+		}
+	})
+}
+
+// H1, H2: format-3 node rows and witnesses reach no admission path and expire with their View.
+func TestObsoleteGenerationV1TreeInert(t *testing.T) {
+	tree, _, _ := treeNativeStore(t)
+	family := obsoleteTreeFamily(9)
+	treeNativeSeed(t, tree, 8, family[0].key, family[0].value)
+	var saved ObsoletePageV1
+	mustEnvironment(t, tree.View(func(reader *Reader) error {
+		var err error
+		saved, err = reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, saved, 1, 1, family[0].key)
+		return nil
+	}))
+	n, err := saved.Rows[0].ReadAt(make([]byte, 1), 0)
+	if n != 0 {
+		t.Fatal("expired node row copied bytes")
+	}
+	obsoleteRequireError(t, err, "get", "InvalidInput", 22, "Reader is not active")
+	legacy, _, _ := consultedStore(t)
+	seed := consultedCounter(t, 9)
+	largeCommit(t, legacy, Batch{Mutations: []Mutation{seed}})
+	truth, stage, err := legacy.Update(func(*Reader) (Batch, error) { return obsoleteBatch(saved), nil })
+	obsoleteRequireError(t, err, "update", "InvalidInput", 22, "invalid Update Batch")
+	if truth.String() != "OLD" || int(stage) != 1 || string(legacy.state) != "OPEN" {
+		t.Fatal("foreign tree witness disposition", truth, stage, legacy.state)
+	}
+	consultedRequireImage(t, legacy, seed.DBI, seed.Key, seed.Literal, true, "tree witness OLD")
+	calls := 0
+	truth, stage, err = tree.Update(func(*Reader) (Batch, error) { calls++; return obsoleteBatch(saved), nil })
+	treeNativeError(t, err, operationUpdate, EngineClass("StateMismatch"), -30779, "tree store requires typed tree operation", nil)
+	if truth != CommitTruth(1) || stage != UpdateStage(1) || calls != 0 {
+		t.Fatal("tree store admitted an obsolete callback")
+	}
 }
