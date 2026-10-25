@@ -423,7 +423,8 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 	// activation/spend check runs afterward in validateInputSpends — so that ordering no longer holds.
 	// Live first-error ordering is covered by TestSimplicityLiveGate_OrderedErrorSet.
 
-	t.Run("earlier_p2pk_witness_underflow_precedes_later_simplicity", func(t *testing.T) {
+	// R1 (inactive CORE_SIMPLICITY at input1) precedes R3 (input0 underflow).
+	t.Run("later_inactive_simplicity_r1_precedes_earlier_p2pk_witness_underflow", func(t *testing.T) {
 		tx := &Tx{
 			Version: TX_WIRE_VERSION,
 			TxKind:  0x00,
@@ -452,7 +453,7 @@ func TestApplyNonCoinbaseTxBasicUpdate_CoreSimplicityPreservesInputOrderPriority
 		if work != nil || summary != nil {
 			t.Fatalf("expected no mutation on reject, got work=%v summary=%v", work, summary)
 		}
-		assertTxErrCodeMsg(t, err, TX_ERR_PARSE, "witness underflow")
+		assertTxErrCodeMsg(t, err, TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY deployment not active")
 	})
 }
 

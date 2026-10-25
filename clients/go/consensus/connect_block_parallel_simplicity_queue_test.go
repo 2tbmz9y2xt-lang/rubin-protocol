@@ -38,8 +38,8 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidatio
 				makeOutpoint(p2pkPrev):     {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData()},
 				makeOutpoint(p2pkSimpPrev): coreSimplicityAcceptEntry(100),
 			},
-			code:    TX_ERR_PARSE,
-			message: "witness underflow",
+			code:    TX_ERR_COVENANT_TYPE_INVALID,
+			message: "CORE_SIMPLICITY deployment not active",
 		},
 		{
 			name: "htlc_malformed_data",
@@ -49,7 +49,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicityPreservesEarlierPrevalidatio
 				makeOutpoint(htlcSimpPrev): coreSimplicityAcceptEntry(100),
 			},
 			code:    TX_ERR_COVENANT_TYPE_INVALID,
-			message: "CORE_HTLC covenant_data length mismatch",
+			message: "CORE_SIMPLICITY deployment not active",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

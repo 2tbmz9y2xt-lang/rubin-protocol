@@ -1496,7 +1496,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 					}
 				case "selector", "vault_input":
 					tx.Witness[last].Signature[len(tx.Witness[last].Signature)-1] = 0x00
-					if firstValid || variant == "vault_input" {
+					if firstValid {
 						wantCode, wantMsg = "TX_ERR_SIGHASH_TYPE_INVALID", "invalid sighash_type"
 					}
 				case "missing":
