@@ -25,7 +25,9 @@ const (
 	ObsoleteRootV1 ObsoleteClassV1 = 6
 )
 
-// ObsoleteProjectionV1 reports only the fixed own-index/header proof.
+// ObsoleteProjectionV1 reports only the own-index/header proof: the named header has the
+// Reader's format width (148 bytes on a format-3 Reader, 116 otherwise), hashes to the entry
+// hash and carries the entry parent hash.
 type ObsoleteProjectionV1 uint8
 
 const (
@@ -184,6 +186,8 @@ func obsoletePageBounds(after, prefix []byte, maxKey uint64, maxRows uint32, poi
 }
 
 // ObsoleteGenerationPageV1 observes physical ownership only, including malformed rows.
+// On a Reader whose format is not 3, ObsoleteNodeV1 and ObsoleteRootV1 return the zero page
+// and the same InvalidInput "invalid obsolete generation selector" refusal as an unknown class.
 func (r *Reader) ObsoleteGenerationPageV1(g uint64, class ObsoleteClassV1, after []byte, maxRows uint32) (ObsoletePageV1, error) {
 	if !r.usable() {
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "Reader is not active")
@@ -237,6 +241,7 @@ func obsoleteUndoBounds(after []byte, maxKey uint64, maxRows uint32) bool {
 }
 
 // ObsoleteUndoPageV1 proves the index's own projection before dependent bounds or traversal.
+// The header proof width is 148 bytes on a format-3 Reader and 116 bytes otherwise.
 // The proof reads no predecessor and confers no consumer disposal authority.
 func (r *Reader) ObsoleteUndoPageV1(index ObsoleteRowV1, after []byte, maxRows uint32) (ObsoletePageV1, error) {
 	if err := r.obsoleteUndoInput(index, after, maxRows); err != nil {

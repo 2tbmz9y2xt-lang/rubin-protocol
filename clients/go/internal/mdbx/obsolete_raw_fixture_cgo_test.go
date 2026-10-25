@@ -1329,6 +1329,32 @@ func TestObsoleteGenerationV1TreeNodes(t *testing.T) {
 	}))
 }
 
+// N2, N4 boundary: a 1440-row node page stops on the 65_596 key-byte budget, then continues.
+func TestObsoleteGenerationV1TreeNodeByteLimit(t *testing.T) {
+	const keyBytes, budget, extra = 46, 65_596, 4
+	fit := budget / keyBytes
+	store, _, _ := treeNativeStore(t)
+	keys := make([][]byte, fit+extra)
+	for i := range keys {
+		var upper [36]byte
+		binary.BigEndian.PutUint16(upper[34:], uint16(i))
+		keys[i] = obsoleteTreeNodeLiteral(9, upper, 0)
+		if len(keys[i]) != keyBytes {
+			t.Fatalf("node key width %d", len(keys[i]))
+		}
+		treeNativeSeed(t, store, 8, keys[i], make([]byte, 32))
+	}
+	mustEnvironment(t, store.View(func(reader *Reader) error {
+		page, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1440)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, page, uint8(PrefixPageByteLimit), 1, keys[:fit]...)
+		rest, err := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, page.Next, 1440)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, rest, 1, 1, keys[fit:]...)
+		return nil
+	}))
+}
+
 // N5: malformed node rows are raw rows at their native position, never integrity.
 func TestObsoleteGenerationV1TreeMalformedNodes(t *testing.T) {
 	store, _, _ := treeNativeStore(t)
@@ -1410,8 +1436,8 @@ func TestObsoleteGenerationV1TreeRoot(t *testing.T) {
 	}
 }
 
-// obsolete148Seed builds the index key, the index entry and the 148-byte header it names, hashed in the test; it writes nothing.
-func obsolete148Seed(t *testing.T, store *Store) ([]byte, []byte, [32]byte, []byte) {
+// obsolete148Rows builds the index key, the index entry and the 148-byte header it names, hashed in the test.
+func obsolete148Rows(t *testing.T) ([]byte, []byte, [32]byte, []byte) {
 	t.Helper()
 	header := make([]byte, 148)
 	header[3], header[108], header[140], header[147] = 1, 0x44, 0x55, 7
@@ -1436,7 +1462,7 @@ func obsoleteSeedTree(t *testing.T, store *Store, rank uint8, key, value []byte)
 
 func obsolete148Projection(t *testing.T, store *Store, variant string) uint8 {
 	t.Helper()
-	key, entry, hash, header := obsolete148Seed(t, store)
+	key, entry, hash, header := obsolete148Rows(t)
 	switch variant {
 	case "key15":
 		key = key[:15]
