@@ -1520,3 +1520,25 @@ func TestConnectBlockInputViewNoSimplicityContext(t *testing.T) {
 	}
 	assertInputViewReads(t, view, op)
 }
+
+// A19/H19: R2 is not established before R1 completes, so a later input's read
+// failure beats two Vault inputs, and a lower R1 failure stops further reads.
+func TestCanonicalSuffix_InputViewReadFailure(t *testing.T) {
+	op0, op1, op2 := Outpoint{Txid: hashWithPrefix(0xc0)}, Outpoint{Txid: hashWithPrefix(0xc1)}, Outpoint{Txid: hashWithPrefix(0xc2)}
+	vault := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{0x01}}
+	tx := inputViewTx(1, op0, op1, op2)
+	view := inputViewNew(map[Outpoint]UtxoEntry{op0: vault, op1: vault})
+	view.rows[op2] = logicalStateRowRead{kind: logicalStateRowUnavailable, cause: errors.New("input2 unavailable")}
+	_, err := inputViewConnect(t, inputViewBlock(t, 1, 1, tx), view, Uint128{})
+	var readErr *blockInputViewReadError
+	if !errors.As(err, &readErr) || readErr.outpoint != op2 || readErr.inputIndex != 2 {
+		t.Fatalf("error=%v, want input2 read failure", err)
+	}
+	assertInputViewReads(t, view, op0, op1, op2)
+
+	view = inputViewNew(map[Outpoint]UtxoEntry{op0: vault})
+	view.rows[op2] = logicalStateRowRead{kind: logicalStateRowUnavailable, cause: errors.New("input2 unavailable")}
+	_, err = inputViewConnect(t, inputViewBlock(t, 1, 1, tx), view, Uint128{})
+	assertInputViewTxError(t, err, "TX_ERR_MISSING_UTXO", "utxo not found")
+	assertInputViewReads(t, view, op0, op1)
+}

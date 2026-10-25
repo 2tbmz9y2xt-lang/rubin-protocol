@@ -1522,3 +1522,297 @@ func TestApplyNonCoinbaseTxBasicFeeAboveU64(t *testing.T) {
 		t.Fatalf("precompute fee=%s want=%s", precomputed.String(), wantFee.String())
 	}
 }
+
+// Canonical suffix (CSM §2.4) evidence: every case is checked through the raw
+// public checker, the parsed direct apply and the queued owner, and every
+// rejection must leave the caller map and the queue prefix unchanged.
+
+type suffixFixture struct {
+	kp, other *MLDSA87Keypair
+	cov       []byte
+}
+
+func newSuffixFixture(t *testing.T) suffixFixture {
+	kp := requiredOrderedKeypair(t)
+	return suffixFixture{kp: kp, other: requiredOrderedKeypair(t), cov: p2pkCovenantDataForPubkey(kp.PubkeyBytes())}
+}
+
+func (f suffixFixture) ownerLock() [32]byte {
+	return sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, f.cov))
+}
+
+func (f suffixFixture) vaultData(whitelist ...[32]byte) []byte {
+	return encodeVaultCovenantData(f.ownerLock(), 1, [][32]byte{sha3_256(f.kp.PubkeyBytes())}, whitelist)
+}
+
+func (f suffixFixture) p2pkEntry() UtxoEntry {
+	return UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: append([]byte(nil), f.cov...)}
+}
+
+// suffixTx builds inputs prefixed 0xa0+i and outputs; entries[i] nil means absent.
+func suffixTx(outputs []TxOutput, entries ...*UtxoEntry) (*Tx, map[Outpoint]UtxoEntry) {
+	tx := &Tx{Version: TX_WIRE_VERSION, TxNonce: 1, Outputs: outputs}
+	utxos := make(map[Outpoint]UtxoEntry)
+	for i, e := range entries {
+		op := Outpoint{Txid: hashWithPrefix(byte(0xa0 + i))}
+		tx.Inputs = append(tx.Inputs, TxInput{PrevTxid: op.Txid})
+		if e != nil {
+			utxos[op] = *e
+		}
+	}
+	return tx, utxos
+}
+
+func (f suffixFixture) sign(t *testing.T, tx *Tx, indexes ...int) {
+	for _, i := range indexes {
+		tx.Witness = append(tx.Witness, signP2PKInputWitness(t, tx, uint32(i), 100, [32]byte{}, f.kp))
+	}
+}
+
+func (f suffixFixture) payTo(value uint64) []TxOutput {
+	return []TxOutput{{Value: value, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(f.other.PubkeyBytes())}}
+}
+
+func (f suffixFixture) priorTask(t *testing.T, q *SigCheckQueue) sigCheckTask {
+	digest := [32]byte{0xee}
+	sig, err := f.other.SignDigest32(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Push(SUITE_ID_ML_DSA_87, f.other.PubkeyBytes(), sig, digest, errors.New("prior task"))
+	task := q.tasks[0]
+	task.pubkey, task.sig = append([]byte(nil), task.pubkey...), append([]byte(nil), task.sig...)
+	return task
+}
+
+// runSuffix returns the direct error after checking that the raw and queued
+// paths agree with it and that a rejection changed no caller or queue state.
+func (f suffixFixture) runSuffix(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider) error {
+	t.Helper()
+	before := cloneUtxoSet(utxos)
+	_, _, direct := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil)
+	_, raw := CheckTransactionWithOwnedUtxoSetAndSuiteContext(txBytesFromTx(t, tx), cloneUtxoSet(utxos), 200, 0, [32]byte{}, rotation, nil)
+	q := NewSigCheckQueue(1)
+	prior := f.priorTask(t, q)
+	work, _, queued := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil)
+	if queued == nil {
+		queued = q.Flush()
+	} else if work != nil || q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prior) {
+		t.Fatalf("queued rejection published work or changed the queue prefix: len=%d", q.Len())
+	}
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("caller UTXO map changed")
+	}
+	for name, err := range map[string]error{"raw": raw, "queued": queued} {
+		if errors.Is(err, direct) || (err != nil && direct != nil && err.Error() == direct.Error()) || (err == nil && direct == nil) {
+			continue
+		}
+		t.Fatalf("%s=%v, direct=%v", name, err, direct)
+	}
+	return direct
+}
+
+func TestCanonicalSuffix_S2BeforeR1(t *testing.T) {
+	f := newSuffixFixture(t)
+	tx, utxos := suffixTx([]TxOutput{{Value: 0, CovenantType: COV_TYPE_P2PK, CovenantData: f.cov}}, nil)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_P2PK value must be > 0")
+}
+
+func TestCanonicalSuffix_R1BeforeR2(t *testing.T) {
+	f := newSuffixFixture(t)
+	vault := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: f.vaultData()}
+	immature := f.p2pkEntry()
+	immature.CreatedByCoinbase, immature.CreationHeight = true, 199
+	for _, tc := range []struct {
+		name  string
+		last  *UtxoEntry
+		code  ErrorCode
+		msg   string
+		cause TxErrorCause
+	}{
+		{"missing", nil, TX_ERR_MISSING_UTXO, "utxo not found", TxErrorCauseUnspecified},
+		{"nonspendable", &UtxoEntry{Value: 0, CovenantType: COV_TYPE_ANCHOR}, TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant},
+		{"immature", &immature, TX_ERR_COINBASE_IMMATURE, "coinbase immature", TxErrorCauseUnspecified},
+		{"unknown", &UtxoEntry{Value: 1, CovenantType: 0x0777, CovenantData: []byte{1}}, TX_ERR_COVENANT_TYPE_INVALID, "unsupported covenant in basic apply", TxErrorCauseUnspecified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, utxos := suffixTx(f.payTo(1), &vault, &vault, tc.last)
+			mustTxErrorCause(t, f.runSuffix(t, tx, utxos, nil), tc.code, tc.msg, tc.cause)
+		})
+	}
+}
+
+func TestCanonicalSuffix_NonSpendableCause(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(1), &p2pk, &UtxoEntry{CovenantType: COV_TYPE_DA_COMMIT})
+	mustTxErrorCause(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant)
+	tx, utxos = suffixTx(f.payTo(1), &p2pk, nil)
+	mustTxErrorCause(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_MISSING_UTXO, "utxo not found", TxErrorCauseUnspecified)
+}
+
+func TestCanonicalSuffix_R1BeforeR3(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(1), &p2pk, nil) // input0 has no witness: R3 underflow
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_MISSING_UTXO, "utxo not found")
+}
+
+func TestCanonicalSuffix_R2BeforeR3(t *testing.T) {
+	f := newSuffixFixture(t)
+	vault := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: f.vaultData()}
+	bad := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{1}}
+	tx, utxos := suffixTx(f.payTo(1), &vault, &bad)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_MULTI_INPUT_FORBIDDEN, "multiple CORE_VAULT inputs forbidden")
+}
+
+func TestCanonicalSuffix_R3BeforeR4(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	bad := UtxoEntry{Value: 100, CovenantType: COV_TYPE_MULTISIG, CovenantData: []byte{1}}
+	tx, utxos := suffixTx(f.payTo(1), &p2pk, &bad)
+	f.sign(t, tx, 0, 0, 0, 0)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
+}
+
+func TestCanonicalSuffix_S3bBeforeS4(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	foreign := encodeVaultCovenantData([32]byte{0xee}, 1, [][32]byte{sha3_256(f.kp.PubkeyBytes())}, [][32]byte{{0x01}})
+	tx, utxos := suffixTx([]TxOutput{{Value: 50, CovenantType: COV_TYPE_VAULT, CovenantData: foreign}}, &p2pk)
+	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, f.other)}
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
+}
+
+func TestCanonicalSuffix_S4BeforeS5(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(1_000), &p2pk, &p2pk)
+	f.sign(t, tx, 0)
+	tx.Witness = append(tx.Witness, signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, f.other))
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_SIG_INVALID, "CORE_P2PK key binding mismatch")
+	tx.Witness = nil
+	f.sign(t, tx, 0, 1)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
+}
+
+func TestCanonicalSuffix_VaultAtInputOrder(t *testing.T) {
+	f := newSuffixFixture(t)
+	vault := UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: f.vaultData([32]byte{0x01})}
+	owner := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(150), &vault, &owner)
+	f.sign(t, tx, 0)
+	tx.Witness = append(tx.Witness, signP2PKInputWitness(t, tx, 1, 100, [32]byte{}, f.other))
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "output not whitelisted for CORE_VAULT")
+}
+
+// flippingRotation serves the genesis spend set on its first read only.
+type flippingRotation struct{ spendReads int }
+
+func (r *flippingRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
+	return DefaultRotationProvider{}.NativeCreateSuites(0)
+}
+
+func (r *flippingRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
+	r.spendReads++
+	if r.spendReads == 1 {
+		return DefaultRotationProvider{}.NativeSpendSuites(0)
+	}
+	return NewNativeSuiteSet(0x7f)
+}
+
+func TestCanonicalSuffix_ImmutableSurface(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(150), &p2pk, &p2pk)
+	f.sign(t, tx, 0, 1)
+	rotation := &flippingRotation{}
+	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil)
+	if err != nil || summary.Fee != Uint128FromU64(50) || len(work) != 1 || rotation.spendReads != 1 {
+		t.Fatalf("err=%v reads=%d", err, rotation.spendReads)
+	}
+	rotation = &flippingRotation{}
+	q := NewSigCheckQueue(1)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.spendReads != 1 {
+		t.Fatalf("queued err=%v reads=%d", err, rotation.spendReads)
+	}
+}
+
+func TestCanonicalSuffix_CallerStateAtomic(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(1_000), &p2pk)
+	f.sign(t, tx, 0)
+	ctx := &nonCoinbaseApplyContext{tx: tx, txid: hashWithPrefix(0xb0), work: utxos, height: 200}
+	before := cloneUtxoSet(utxos)
+	if _, _, err := ctx.apply(); err == nil {
+		t.Fatal("expected S5 rejection")
+	}
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("S5 rejection mutated the work image before the private delta")
+	}
+	ctx.resolved[0].entry.CovenantData[0] ^= 1
+	if !reflect.DeepEqual(utxos, before) {
+		t.Fatal("resolved input aliases the caller covenant_data")
+	}
+}
+
+func TestCanonicalSuffix_QueueRollback(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	tx, utxos := suffixTx(f.payTo(1_000), &p2pk, &p2pk)
+	f.sign(t, tx, 0, 1)
+	q := NewSigCheckQueue(1)
+	prior := f.priorTask(t, q)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, nil, nil); err == nil {
+		t.Fatal("expected S5 rejection")
+	}
+	if q.Len() != 1 || !queueFixtureTaskEqual(q.tasks[0], prior) {
+		t.Fatalf("queue after rejection len=%d", q.Len())
+	}
+}
+
+func TestCanonicalSuffix_RejectThenValid(t *testing.T) {
+	f := newSuffixFixture(t)
+	p2pk := f.p2pkEntry()
+	bad, utxos := suffixTx(f.payTo(1_000), &p2pk)
+	f.sign(t, bad, 0)
+	good := &Tx{Version: bad.Version, TxNonce: 1, Inputs: bad.Inputs, Outputs: f.payTo(90)}
+	f.sign(t, good, 0)
+	q := NewSigCheckQueue(1)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(bad, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, nil, nil); err == nil {
+		t.Fatal("expected rejection")
+	}
+	work, fee, err := applyNonCoinbaseTxBasicWorkQ(good, hashWithPrefix(0xb1), utxos, 200, 0, [32]byte{}, q, nil, nil)
+	if err != nil || fee != Uint128FromU64(10) || len(work) != 1 || q.Len() != 1 || q.Flush() != nil {
+		t.Fatalf("valid sibling err=%v fee=%v len=%d", err, fee, q.Len())
+	}
+	if f.runSuffix(t, good, utxos, nil) != nil {
+		t.Fatal("valid sibling rejected on the direct path")
+	}
+}
+
+// simplicityCapTx is input0 P2PK with an invalid signature followed by enough
+// same-CMR CORE_SIMPLICITY inputs to exceed the S3d input group cap.
+func (f suffixFixture) simplicityCapTx() (*Tx, map[Outpoint]UtxoEntry) {
+	tx, _, utxos := simplicityLiveTx(9, simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL))
+	op := Outpoint{Txid: hashWithPrefix(0xf1)}
+	utxos[op] = f.p2pkEntry()
+	tx.Inputs = append([]TxInput{{PrevTxid: op.Txid}}, tx.Inputs...)
+	tx.Witness = append([]WitnessItem{{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: f.kp.PubkeyBytes(), Signature: make([]byte, 4_628)}}, tx.Witness...)
+	return tx, utxos
+}
+
+func TestCanonicalSuffix_S3dBeforeS4(t *testing.T) {
+	f := newSuffixFixture(t)
+	tx, utxos := f.simplicityCapTx()
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, activeSimplicityRotation([32]byte{}, 1)), TX_ERR_COVENANT_TYPE_INVALID, "CORE_SIMPLICITY same-cmr input group exceeds limit")
+}
+
+func TestCanonicalSuffix_S3bBeforeS3d(t *testing.T) {
+	f := newSuffixFixture(t)
+	tx, utxos := f.simplicityCapTx()
+	foreign := encodeVaultCovenantData([32]byte{0xee}, 1, [][32]byte{sha3_256(f.kp.PubkeyBytes())}, [][32]byte{{0x01}})
+	tx.Outputs = append(tx.Outputs, TxOutput{Value: 1, CovenantType: COV_TYPE_VAULT, CovenantData: foreign})
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, activeSimplicityRotation([32]byte{}, 1)), TX_ERR_VAULT_OWNER_AUTH_REQUIRED, "missing owner-authorized input for CORE_VAULT creation")
+}
