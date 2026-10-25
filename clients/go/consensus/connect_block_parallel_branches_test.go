@@ -1237,7 +1237,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_SighashPrehashError(t *testing.T) {
 	}
 }
 
-// Corrupt vault covenant data fails the R3 witness-slot metadata parse (parseWitnessSlotMetadata).
+// Corrupt vault covenant data fails its parse; one input cannot tell R3 from S4.
 func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 	kp := mustMLDSA87Keypair(t)
 	covData := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
@@ -1263,9 +1263,7 @@ func TestApplyNonCoinbaseTxBasicWorkQ_CheckSpendCovenantError(t *testing.T) {
 
 	q := NewSigCheckQueue(1)
 	_, _, err := applyNonCoinbaseTxBasicWorkQ(tx, [32]byte{}, utxoSet, 1, 0, [32]byte{}, q, nil, nil)
-	if err == nil {
-		t.Fatal("expected R3 witness-slot metadata error for corrupt vault data")
-	}
+	assertTxErrCodeMsg(t, err, TX_ERR_VAULT_MALFORMED, "CORE_VAULT covenant_data too short")
 }
 
 func TestApplyNonCoinbaseTxBasicWorkQ_CoreSimplicitySpendRejected(t *testing.T) {

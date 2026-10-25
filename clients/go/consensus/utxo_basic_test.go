@@ -1711,9 +1711,17 @@ func TestCanonicalSuffix_R3BeforeR4(t *testing.T) {
 	tx, utxos := suffixTx(f.payTo(1), &p2pk, &bad)
 	f.sign(t, tx, 0, 0, 0, 0)
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
+	tx, utxos = suffixTx(f.payTo(1), &bad, nil) // the Multisig parse runs after R1
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_MISSING_UTXO, "utxo not found")
 	htlc := UtxoEntry{Value: 100, CovenantType: COV_TYPE_HTLC, CovenantData: []byte{1}}
 	tx, utxos = suffixTx(f.payTo(1), &bad, &htlc) // R3 at input 0 beats the S4 HTLC data parse
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_MULTISIG covenant_data too short")
+	tx, utxos = suffixTx(f.payTo(1), &p2pk, &htlc) // an input-0 S4 error beats the input-1 HTLC parse
+	tx.Witness = append([]WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, f.other)}, dummyWitnesses(2)...)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_SIG_INVALID, "CORE_P2PK key binding mismatch")
+	tx, utxos = suffixTx(f.payTo(1), &htlc) // the S4 HTLC data parse is the path's verdict
+	tx.Witness = dummyWitnesses(2)
+	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_COVENANT_TYPE_INVALID, "CORE_HTLC covenant_data length mismatch")
 	bad = UtxoEntry{Value: 100, CovenantType: COV_TYPE_VAULT, CovenantData: []byte{1}}
 	tx, utxos = suffixTx(f.payTo(1), &p2pk, &bad)
 	tx.Witness = []WitnessItem{signP2PKInputWitness(t, tx, 0, 100, [32]byte{}, f.other)} // input 0 fails S4
@@ -1772,17 +1780,17 @@ func (r *flippingRotation) NativeSpendSuites(uint64) *NativeSuiteSet {
 func TestCanonicalSuffix_ImmutableSurface(t *testing.T) {
 	f := newSuffixFixture(t)
 	p2pk := f.p2pkEntry()
-	tx, utxos := suffixTx(f.payTo(150), &p2pk, &p2pk)
+	tx, utxos := suffixTx(append(f.payTo(70), f.payTo(80)...), &p2pk, &p2pk)
 	f.sign(t, tx, 0, 1)
 	rotation := &flippingRotation{}
 	work, summary, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil)
-	if err != nil || summary.Fee != Uint128FromU64(50) || len(work) != 1 || rotation.spendReads != 1 {
-		t.Fatalf("err=%v reads=%d", err, rotation.spendReads)
+	if err != nil || summary.Fee != Uint128FromU64(50) || len(work) != 2 || rotation.spendReads != 1 || rotation.createReads != 1 {
+		t.Fatalf("err=%v reads=%+v", err, rotation)
 	}
 	rotation = &flippingRotation{}
 	q := NewSigCheckQueue(1)
-	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.spendReads != 1 {
-		t.Fatalf("queued err=%v reads=%d", err, rotation.spendReads)
+	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.spendReads != 1 || rotation.createReads != 1 {
+		t.Fatalf("queued err=%v reads=%+v", err, rotation)
 	}
 }
 
@@ -2009,22 +2017,6 @@ func (r *flippingDeploymentRotation) PublishedSimplicityDeployments() ([]Simplic
 		return r.testRotationProvider.PublishedSimplicityDeployments()
 	}
 	return nil, [32]byte{}, false, nil
-}
-
-func TestCanonicalSuffix_BoundCreateSet(t *testing.T) {
-	f := newSuffixFixture(t)
-	p2pk := f.p2pkEntry()
-	tx, utxos := suffixTx(append(f.payTo(40), f.payTo(50)...), &p2pk)
-	f.sign(t, tx, 0)
-	rotation := &flippingRotation{}
-	if _, _, err := ApplyNonCoinbaseTxBasicUpdateWithMTPAndSuiteContext(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, rotation, nil); err != nil || rotation.createReads != 1 {
-		t.Fatalf("err=%v reads=%d", err, rotation.createReads)
-	}
-	rotation = &flippingRotation{}
-	q := NewSigCheckQueue(1)
-	if _, _, err := applyNonCoinbaseTxBasicWorkQ(tx, hashWithPrefix(0xb0), utxos, 200, 0, [32]byte{}, q, rotation, nil); err != nil || q.Flush() != nil || rotation.createReads != 1 {
-		t.Fatalf("queued err=%v reads=%d", err, rotation.createReads)
-	}
 }
 
 func TestCanonicalSuffix_BoundDeploymentSet(t *testing.T) {
