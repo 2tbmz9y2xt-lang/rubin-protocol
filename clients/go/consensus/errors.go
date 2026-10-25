@@ -62,9 +62,12 @@ const (
 // error was produced, for the consumers that must tell an outcome that is NOT
 // stable invalidity of the candidate bytes — a fault of THIS PROCESS, or an
 // admission input this node could not determine — apart from invalidity of the
-// bytes themselves. The public ErrorCode alone cannot express that difference:
-// TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_SIG_ALG_INVALID and
-// TX_ERR_COVENANT_TYPE_INVALID each carry both meanings today.
+// bytes themselves, and to tell a permanent rejection apart from a retryable
+// dependency absence that shares its code. The public ErrorCode alone cannot
+// express those differences: TX_ERR_PARSE, TX_ERR_SIG_INVALID,
+// TX_ERR_SIG_ALG_INVALID and TX_ERR_COVENANT_TYPE_INVALID each carry both
+// meanings today, and TX_ERR_MISSING_UTXO carries both an absent input and an
+// input that can never be spent.
 //
 // It is additive in BEHAVIOR, not in struct shape. Preserved exactly: every
 // public ErrorCode, every message, Error() rendering, every accept/reject
@@ -86,8 +89,10 @@ const (
 // already-selected cause forward but must never overwrite or erase it, and no
 // consumer may infer one from message text.
 //
-// Adding a member is a constant plus one consumer arm. It never changes this
-// type, the accessor, or an existing mapping.
+// Adding a member is a constant plus one arm in each closed consumer switch:
+// node relay admission (relayDispositionForInputError) and the node canonical
+// mempool plan classifier (canonicalMempoolCauseAbortsPlan). It never changes
+// this type, the accessor, or an existing mapping.
 type TxErrorCause uint8
 
 const (
@@ -145,6 +150,12 @@ const (
 	// TxErrorCauseNativeSuiteRegistryEntryUnavailable means membership was
 	// established, but the bound registry had no entry for that suite.
 	TxErrorCauseNativeSuiteRegistryEntryUnavailable
+	// TxErrorCausePermanentNonSpendableCovenant means an input resolved to a
+	// UTXO entry of covenant type CORE_ANCHOR or CORE_DA_COMMIT. Its public
+	// error stays TX_ERR_MISSING_UTXO, shared with a genuinely absent input, but
+	// such an entry can never become spendable, so it is stable terminal
+	// invalidity of these bytes, not a retryable dependency absence.
+	TxErrorCausePermanentNonSpendableCovenant
 )
 
 type TxError struct {

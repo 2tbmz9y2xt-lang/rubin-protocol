@@ -1002,7 +1002,8 @@ func canonicalMempoolCauseAbortsPlan(cause consensus.TxErrorCause) bool {
 	case consensus.TxErrorCauseUnspecified,
 		consensus.TxErrorCauseSimplicityDeploymentInactiveProvider,
 		consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen,
-		consensus.TxErrorCauseSimplicityWitnessSuiteInvalid:
+		consensus.TxErrorCauseSimplicityWitnessSuiteInvalid,
+		consensus.TxErrorCausePermanentNonSpendableCovenant:
 		return false
 	default:
 		return true

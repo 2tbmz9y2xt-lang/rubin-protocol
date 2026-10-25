@@ -228,7 +228,7 @@ func (ctx *nonCoinbaseApplyContext) lookupInputEntry(in TxInput) (UtxoEntry, Out
 
 func (ctx *nonCoinbaseApplyContext) validateResolvedInputEntry(entry UtxoEntry) error {
 	if isNonSpendableInputCovenant(entry.CovenantType) {
-		return txerr(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant")
+		return txerrWithCause(TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant)
 	}
 	if err := ctx.validateCoinbaseInputMaturity(entry); err != nil {
 		return err

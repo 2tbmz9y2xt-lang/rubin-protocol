@@ -951,3 +951,15 @@ func TestPrecomputeTxContexts_ContextDetachesSnapshotBytes(t *testing.T) {
 		t.Fatalf("context bytes alias caller snapshot: got %x want %x", got, want)
 	}
 }
+
+func TestPrecomputeTxContexts_NonSpendableCovenantCause(t *testing.T) {
+	for _, covType := range []uint16{COV_TYPE_ANCHOR, COV_TYPE_DA_COMMIT} {
+		tx, _, utxos := nonSpendableCauseFixture(covType)
+		_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+		assertTxErrorCause(t, "precompute", err, TX_ERR_MISSING_UTXO, "attempt to spend non-spendable covenant", TxErrorCausePermanentNonSpendableCovenant)
+	}
+	tx, op, utxos := nonSpendableCauseFixture(COV_TYPE_ANCHOR)
+	delete(utxos, op)
+	_, err := PrecomputeTxContexts(makeParsedBlockForPrecompute(makeSimpleCoinbase(), []*Tx{tx}), utxos, 100)
+	assertTxErrorCause(t, "precompute absent", err, TX_ERR_MISSING_UTXO, "utxo not found", TxErrorCauseUnspecified)
+}

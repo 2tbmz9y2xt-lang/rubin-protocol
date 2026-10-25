@@ -1638,3 +1638,28 @@ func canonicalMOImageFingerprint(t *testing.T, mp *Mempool, generationAdvance ui
 	}
 	return out.String()
 }
+
+// A candidate spending a supplied CORE_ANCHOR / CORE_DA_COMMIT entry is an
+// EXCLUSION from the new image (keep=false, nil error), never a plan abort.
+func TestCanonicalMempoolNonSpendableCovenantCauseExcludes(t *testing.T) {
+	if canonicalMempoolCauseAbortsPlan(consensus.TxErrorCausePermanentNonSpendableCovenant) {
+		t.Fatal("permanent non-spendable cause aborted the plan")
+	}
+	for _, covType := range []uint16{consensus.COV_TYPE_ANCHOR, consensus.COV_TYPE_DA_COMMIT} {
+		h := newRelayHarness(t, nil, 1_000_000)
+		raw := h.tx(0, 100_000, 100_000, 1)
+		tx, txid, wtxid, _, err := consensus.ParseTx(raw)
+		if err != nil {
+			t.Fatalf("ParseTx: %v", err)
+		}
+		chain := canonicalDATestChainFromState(t, h.st)
+		utxos := copyUtxoSet(h.st.Utxos)
+		entry := utxos[h.outpoints[0]]
+		entry.CovenantType = covType
+		utxos[h.outpoints[0]] = entry
+		checked, keep, err := canonicalCheckedAgainstFinalChain(raw, tx, consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid}, utxos, chain)
+		if checked != nil || keep || err != nil {
+			t.Fatalf("covenant %d: checked=%v keep=%v err=%v, want exclusion without plan abort", covType, checked, keep, err)
+		}
+	}
+}

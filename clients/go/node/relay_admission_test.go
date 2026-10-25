@@ -1869,3 +1869,44 @@ func TestAdmitDACandidateFailuresCarryOriginatingDisposition(t *testing.T) {
 		t.Fatalf("typed impossible-invariant disposition=%v, want INTERNAL", got)
 	}
 }
+
+// TestRelayAdmissionNonSpendableCovenantIsStableTerminal drives an input that
+// resolves to a supplied CORE_ANCHOR / CORE_DA_COMMIT entry through the public
+// relay entry: STABLE_TERMINAL_REJECT by typed cause, the unchanged public
+// rejection, and no residency. A genuinely absent input stays MISSING_DEPENDENCY.
+func TestRelayAdmissionNonSpendableCovenantIsStableTerminal(t *testing.T) {
+	for _, covType := range []uint16{consensus.COV_TYPE_ANCHOR, consensus.COV_TYPE_DA_COMMIT} {
+		h := newRelayHarness(t, nil, 1_000_000)
+		raw := h.tx(0, 100_000, 100_000, 1)
+		entry := h.st.Utxos[h.outpoints[0]]
+		entry.CovenantType = covType
+		h.st.Utxos[h.outpoints[0]] = entry
+		got := h.mp.AddRemoteTxForRelay(raw, h.context())
+		if got.Disposition != RelayAdmissionStableTerminalReject {
+			t.Fatalf("covenant %d: disposition=%v, want STABLE_TERMINAL_REJECT (err=%v)", covType, got.Disposition, got.Err)
+		}
+		if kind := admitKind(t, got.Err); kind != TxAdmitRejected || got.Err.Error() != "TX_ERR_MISSING_UTXO: attempt to spend non-spendable covenant" {
+			t.Fatalf("covenant %d: kind=%s message=%q", covType, kind, got.Err.Error())
+		}
+		if h.mp.Contains(txID(t, raw)) {
+			t.Fatalf("covenant %d: rejected candidate became resident", covType)
+		}
+	}
+	h := newRelayHarness(t, nil, 1_000_000)
+	raw := h.tx(0, 100_000, 100_000, 1)
+	delete(h.st.Utxos, h.outpoints[0])
+	if got := h.mp.AddRemoteTxForRelay(raw, h.context()); got.Disposition != RelayAdmissionMissingDependency || got.Err == nil || got.Err.Error() != "TX_ERR_MISSING_UTXO: utxo not found" {
+		t.Fatalf("absent input: disposition=%v err=%v, want MISSING_DEPENDENCY", got.Disposition, got.Err)
+	}
+}
+
+// TestRelayDispositionForInputErrorNonSpendableNeedsTheCause proves the shared
+// code and the exact message never select STABLE_TERMINAL_REJECT without the cause.
+func TestRelayDispositionForInputErrorNonSpendableNeedsTheCause(t *testing.T) {
+	misleading := &consensus.TxError{Code: consensus.TX_ERR_MISSING_UTXO, Msg: "attempt to spend non-spendable covenant"}
+	for _, nonDependency := range []RelayAdmissionDisposition{RelayAdmissionStableTerminalReject, RelayAdmissionInternal} {
+		if got := relayDispositionForInputError(misleading, nonDependency); got != RelayAdmissionMissingDependency {
+			t.Fatalf("uncaused non-spendable message=%v, want MISSING_DEPENDENCY", got)
+		}
+	}
+}

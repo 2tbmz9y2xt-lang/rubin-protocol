@@ -537,7 +537,7 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 // selection, reading only typed values the producer set — never Error(), Msg,
 // backend text, or an OpenSSL error string.
 //
-// It reads the typed CAUSE first, because the cause outranks the code. Four families need it:
+// It reads the typed CAUSE first, because the cause outranks the code. Five families need it:
 //
 //   - A process-local crypto-backend fault is published under a public code that
 //     also carries genuine candidate invalidity (TX_ERR_PARSE for a latched
@@ -566,15 +566,14 @@ func relayDispositionForPolicyError(err error) RelayAdmissionDisposition {
 //     still governed by the caller's own exact-context proof.
 //   - Reached native-suite set/registry unavailability is UNAVAILABLE by cause despite its shared TX_ERR_SIG_ALG_INVALID code.
 //   - A non-0xF0 CORE_SIMPLICITY witness is candidate-intrinsic and policy-independent, so it stays STABLE_TERMINAL_REJECT.
+//   - An input resolving to a CORE_ANCHOR or CORE_DA_COMMIT entry can never become
+//     spendable, so it is STABLE_TERMINAL_REJECT by cause although its public code
+//     TX_ERR_MISSING_UTXO is the retryable-dependency code below.
 //
-// ORDERING NOTE — structural, and deliberately NOT claimed by any test. Reading
-// the cause before the code switch is a PAIRWISE fact, and on today's inputs the
-// two orders are observationally identical: every current non-zero cause emits
-// TX_ERR_PARSE, TX_ERR_SIG_INVALID, TX_ERR_SIG_ALG_INVALID or
-// TX_ERR_COVENANT_TYPE_INVALID, and none of those codes is a member of the
-// switch set below. No error can therefore carry a cause AND a switch-set code,
-// so no test can separate the two orders — the order is load-bearing only for a
-// FUTURE producer whose cause and code disagree, and none exists today.
+// ORDERING NOTE. Reading the cause before the code switch is load-bearing:
+// TxErrorCausePermanentNonSpendableCovenant is emitted with TX_ERR_MISSING_UTXO,
+// a member of the switch set below, so the opposite order would publish it as
+// MISSING_DEPENDENCY. Every other non-zero cause emits a code outside that set.
 //
 // The cause switch is closed in BOTH directions. TxErrorCauseUnspecified is an
 // explicit arm that falls through to the code fallback below; every other value
@@ -605,7 +604,8 @@ func relayDispositionForInputError(err error, nonDependency RelayAdmissionDispos
 			consensus.TxErrorCauseNativeSuiteSetUnavailable,
 			consensus.TxErrorCauseNativeSuiteRegistryEntryUnavailable:
 			return RelayAdmissionUnavailable
-		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen, consensus.TxErrorCauseSimplicityWitnessSuiteInvalid:
+		case consensus.TxErrorCauseSimplicityDeploymentInactiveFrozen, consensus.TxErrorCauseSimplicityWitnessSuiteInvalid,
+			consensus.TxErrorCausePermanentNonSpendableCovenant:
 			return RelayAdmissionStableTerminalReject
 		default:
 			return RelayAdmissionInternal
