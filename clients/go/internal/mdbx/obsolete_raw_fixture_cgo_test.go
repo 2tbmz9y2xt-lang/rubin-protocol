@@ -1566,15 +1566,17 @@ func TestObsoleteGenerationV1TreeInert(t *testing.T) {
 		t.Fatal("foreign tree witness disposition", truth, stage, legacy.state)
 	}
 	consultedRequireImage(t, legacy, seed.DBI, seed.Key, seed.Literal, true, "tree witness OLD")
-	// Witness only: no row reaches the row-reader check, so only the witness-reader check refuses.
+	// No rows and one ordinary mutation: the empty-batch guard does not fire, so the witness-reader check refuses.
+	extra := consultedCounter(t, 10)
 	truth, stage, err = legacy.Update(func(*Reader) (Batch, error) {
-		return Batch{ObsoleteConsulted: []ObsoletePageWitnessV1{saved.Witness}}, nil
+		return Batch{Mutations: []Mutation{extra}, ObsoleteConsulted: []ObsoletePageWitnessV1{saved.Witness}}, nil
 	})
 	obsoleteRequireError(t, err, "update", "InvalidInput", 22, "invalid Update Batch")
 	if truth.String() != "OLD" || int(stage) != 1 || string(legacy.state) != "OPEN" {
 		t.Fatal("foreign witness-only disposition", truth, stage, legacy.state)
 	}
 	consultedRequireImage(t, legacy, seed.DBI, seed.Key, seed.Literal, true, "tree witness-only OLD")
+	consultedRequireImage(t, legacy, extra.DBI, extra.Key, nil, false, "tree witness-only mutation absent")
 	calls := 0
 	truth, stage, err = tree.Update(func(*Reader) (Batch, error) { calls++; return obsoleteBatch(saved), nil })
 	treeNativeError(t, err, operationUpdate, EngineClass("StateMismatch"), -30779, "tree store requires typed tree operation", nil)
