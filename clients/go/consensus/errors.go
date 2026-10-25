@@ -89,9 +89,9 @@ const (
 // already-selected cause forward but must never overwrite or erase it, and no
 // consumer may infer one from message text.
 //
-// Adding a member is a constant plus its arm in each closed consumer switch.
-// Node relay admission (relayDispositionForInputError) needs an arm for every
-// member; an unlisted one falls to its default and becomes INTERNAL. The node
+// Adding a member is a constant plus whatever arm each closed consumer switch
+// needs. Node relay admission (relayDispositionForInputError) needs an arm for
+// every member; an unlisted one falls to its default and becomes INTERNAL. The node
 // canonical mempool plan classifier (canonicalMempoolCauseAbortsPlan) lists
 // only the causes that do not abort the plan, so a member needs an arm there
 // only when it must not abort; its default aborts. It never changes this type,

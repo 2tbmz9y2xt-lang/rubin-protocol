@@ -1653,11 +1653,16 @@ func TestCanonicalMempoolNonSpendableCovenantCauseExcludes(t *testing.T) {
 			t.Fatalf("ParseTx: %v", err)
 		}
 		chain := canonicalDATestChainFromState(t, h.st)
+		ids := consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid}
+		control, keep, err := canonicalCheckedAgainstFinalChain(raw, tx, ids, copyUtxoSet(h.st.Utxos), chain)
+		if control == nil || !keep || err != nil {
+			t.Fatalf("P2PK control: checked=%v keep=%v err=%v, want kept", control, keep, err)
+		}
 		utxos := copyUtxoSet(h.st.Utxos)
 		entry := utxos[h.outpoints[0]]
 		entry.CovenantType = covType
 		utxos[h.outpoints[0]] = entry
-		checked, keep, err := canonicalCheckedAgainstFinalChain(raw, tx, consensus.ParsedTxIDs{TxID: txid, WTxID: wtxid}, utxos, chain)
+		checked, keep, err := canonicalCheckedAgainstFinalChain(raw, tx, ids, utxos, chain)
 		if checked != nil || keep || err != nil {
 			t.Fatalf("covenant %d: checked=%v keep=%v err=%v, want exclusion without plan abort", covType, checked, keep, err)
 		}
