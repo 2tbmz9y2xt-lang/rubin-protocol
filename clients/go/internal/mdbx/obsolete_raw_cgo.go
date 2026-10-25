@@ -25,15 +25,15 @@ const (
 	ObsoleteRootV1 ObsoleteClassV1 = 6
 )
 
-// ObsoleteProjectionV1 reports only the own-index/header proof. ObsoleteGenerationPageV1
-// reports NotApplicable. On a successful ObsoleteUndoPageV1 return, Proven holds exactly when
-// the index row is present with a 16-byte key whose big-endian height (key[8:16]) is
-// <= 0xffffffff and a 104-byte value whose work field (value[64:104]) has bytes 0-2 zero and
-// either byte 3 equal to 1 with bytes 4-39 zero, or byte 3 equal to 0 with bytes 4-39 not all
-// zero; and the header named by the entry hash (value[0:32]) is present, has the Reader's
-// format width (148 bytes on a format-3 Reader, 116 otherwise), has SHA3-256 equal to that
-// entry hash and carries the entry parent hash (value[32:64]) at header[4:36]. Otherwise it
-// reports Invalid.
+// ObsoleteProjectionV1 reports only the own-index/header proof. On a successful return,
+// ObsoleteGenerationPageV1 reports NotApplicable. On a successful ObsoleteUndoPageV1 return,
+// Proven holds exactly when the index row is present with a 16-byte key whose big-endian
+// height (key[8:16]) is <= 0xffffffff and a 104-byte value whose work field (value[64:104])
+// has bytes 0-2 zero and either byte 3 equal to 1 with bytes 4-39 zero, or byte 3 equal to 0
+// with bytes 4-39 not all zero; and the header named by the entry hash (value[0:32]) is
+// present, has the Reader's format width (148 bytes on a format-3 Reader, 116 otherwise), has
+// SHA3-256 equal to that entry hash and carries the entry parent hash (value[32:64]) at
+// header[4:36]. Otherwise it reports Invalid.
 type ObsoleteProjectionV1 uint8
 
 const (
@@ -261,7 +261,8 @@ func obsoleteUndoBounds(after []byte, maxKey uint64, maxRows uint32) bool {
 //     witness over the points read; a non-nil after returns the page-bounds refusal above.
 //  4. Proven: an after that does not start with the 32-byte entry hash returns the
 //     page-bounds refusal; otherwise the undo rows under that prefix are paged as
-//     ObsoleteGenerationPageV1 pages its rows, with Projection Proven.
+//     ObsoleteGenerationPageV1 pages its rows, with Projection Proven and a witness that also
+//     carries the projection points read.
 func (r *Reader) ObsoleteUndoPageV1(index ObsoleteRowV1, after []byte, maxRows uint32) (ObsoletePageV1, error) {
 	if err := r.obsoleteUndoInput(index, after, maxRows); err != nil {
 		return ObsoletePageV1{}, err
