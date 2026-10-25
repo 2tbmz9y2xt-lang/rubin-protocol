@@ -1616,7 +1616,6 @@ func (f suffixFixture) runSuffix(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEn
 	return direct
 }
 
-// assertBlockPaths requires the direct error and unchanged state, or the direct fee and UTXO result.
 func (f suffixFixture) assertBlockPaths(t *testing.T, tx *Tx, utxos map[Outpoint]UtxoEntry, rotation RotationProvider, direct error, work map[Outpoint]UtxoEntry, summary *UtxoApplySummary) {
 	t.Helper()
 	in := inputViewBlock(t, 200, 1, tx)
@@ -1759,7 +1758,6 @@ func TestCanonicalSuffix_VaultAtInputOrder(t *testing.T) {
 	assertTxErrCodeMsg(t, f.runSuffix(t, tx, utxos, nil), TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, "output not whitelisted for CORE_VAULT")
 }
 
-// flippingRotation serves the genesis create and spend sets on the first read of each only.
 type flippingRotation struct{ createReads, spendReads int }
 
 func (r *flippingRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
@@ -1848,7 +1846,6 @@ func TestCanonicalSuffix_RejectThenValid(t *testing.T) {
 	}
 }
 
-// simplicityCapTx: input0 P2PK with a bad signature, then same-CMR inputs over the S3d group cap.
 func (f suffixFixture) simplicityCapTx() (*Tx, map[Outpoint]UtxoEntry) {
 	tx, _, utxos := simplicityLiveTx(9, simplicityEnvelopeSignature([]byte{0x24}, nil, SIGHASH_ALL))
 	op := Outpoint{Txid: hashWithPrefix(0xf1)}
@@ -1976,7 +1973,6 @@ func TestCanonicalSuffix_LocalBackendFailure(t *testing.T) {
 	}
 }
 
-// mutatingRotation rewrites caller UTXO data at the first S4 check, after R1 detached snapshots.
 type mutatingRotation struct{ utxos map[Outpoint]UtxoEntry }
 
 func (r *mutatingRotation) NativeCreateSuites(uint64) *NativeSuiteSet {
@@ -2005,7 +2001,6 @@ func TestCanonicalSuffix_CallerMutationAfterEntry(t *testing.T) {
 	}
 }
 
-// flippingDeploymentRotation publishes the active deployment set on its first read only.
 type flippingDeploymentRotation struct {
 	testRotationProvider
 	reads int

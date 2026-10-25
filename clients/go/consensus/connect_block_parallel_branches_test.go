@@ -1592,6 +1592,11 @@ func TestApplyNonCoinbaseTxBasicWorkQ_OrderedResults(t *testing.T) {
 					}
 					switch earlier {
 					case "error":
+						defer func() {
+							if r := recover(); r != nil {
+								t.Fatalf("later panic escaped the earlier queued error: %v", r)
+							}
+						}()
 						invoke()
 					case "panic":
 						requireQueuePanic(t, earlierPanic, invoke)
