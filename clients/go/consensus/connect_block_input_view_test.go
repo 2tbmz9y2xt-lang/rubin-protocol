@@ -1501,7 +1501,12 @@ func TestConnectBlockInputViewPrivateSimplicityGate(t *testing.T) {
 			view := inputViewNew(pre)
 			_, err := inputViewConnect(t, input, view, Uint128{})
 			assertInputViewTxError(t, err, "TX_ERR_COVENANT_TYPE_INVALID", tc.message)
-			assertInputViewReads(t, view, reads...)
+			if tc.name == "active_cap" {
+				assertInputViewReads(t, view, reads...)
+				return
+			}
+			// R1 rejects the inactive CORE_SIMPLICITY input1 (D2); no later read (A19).
+			assertInputViewReads(t, view, reads[0], reads[1])
 		})
 	}
 }
