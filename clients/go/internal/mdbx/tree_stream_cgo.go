@@ -244,12 +244,14 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	op, value, panicked, err := invokeUpdate(callback, e.reader)
 	returned = true
 	e.reader.expire().retire()
-	e.retireEntryV1()
+	e.expireEntryV1()
 	primary, infrastructure := readPrimary(err, e.reader.failure)
 	if panicked {
+		e.retireEntryV1()
 		return TreeOperationV1{}, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
 	if primary != nil {
+		e.retireEntryV1()
 		return TreeOperationV1{}, treeUnwindV1{}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
 	return op, treeUnwindV1{}, nil
@@ -284,9 +286,14 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 	}
 	err = e.prewriteV1(account, op, saved)
 	if err != nil {
+		e.retireEntryV1()
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.store.abortReadLocked(e.old, err, false)
 	}
 	plan := treeOwnPlanV1(op)
+	if e.inventory != nil {
+		plan.inventory = e.inventory
+		plan.inventory.ownV1(&plan)
+	}
 	return e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{e.hold}, &plan)
 }
 
@@ -295,8 +302,8 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	if admissionErr != nil {
 		return admissionErr
 	}
-	if e.inventory != nil || op.Pair.EntryInventory != nil {
-		return entryInputV1()
+	if err := e.entryAdmitV1(&op, account); err != nil {
+		return err
 	}
 	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
 		return updateInvalidBatch()

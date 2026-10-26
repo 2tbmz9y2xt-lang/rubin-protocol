@@ -3,12 +3,13 @@
 package mdbx
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"sync"
 )
 
-// EntryInventoryV1 identifies one non-GEN inventory preparation, not admission.
+// EntryInventoryV1 identifies one same-entry inventory preparation.
 type EntryInventoryV1 struct{ scope *entryInventoryStateV1 }
 
 // EntryInventoryRowV1 lends immutable metadata and bounded reads during its
@@ -69,8 +70,8 @@ type entryInventoryStateV1 struct {
 	decode      [2]authorityDecodeControl
 	inspection  [2]authorityInspection
 	authority   [2]TreeAuthorityV1
-	rootControl [2]rootDecodeControl
-	roots       [2]RootBindingV1
+	rootControl rootDecodeControl
+	endpoints   [2]TreeEndpointV1
 	failure     *EntryInventoryFailureV1
 	maxKey      uint64
 	serial      uint64
@@ -156,8 +157,7 @@ func (s *entryInventoryStateV1) failureResultV1() *EntryInventoryFailureV1 {
 	return nil
 }
 
-// VisitEntryInventoryV1 observes the complete non-GEN physical source domain.
-// Selected GEN is refused after the supported sources, without GEN access.
+// VisitEntryInventoryV1 observes the complete protected physical source domain.
 // A physical stop can instead return a nonnil sidecar with a nil SourceError.
 func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryInventoryRowV1) error) (*EntryInventoryFailureV1, error) {
 	if !r.usable() || token.scope == nil {
@@ -177,13 +177,17 @@ func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryI
 	if visit == nil {
 		return nil, entryInputV1()
 	}
-	defer func() { s.access.active = false }()
+	defer s.clearSourcesV1()
 	var cursor entryCursorV1
+	var context EntryInventoryRowV1
 	stream := &entryStreamV1{}
 	s.stream = stream // register before any fallible source work
-	w := entryWalkV1{s: s, old: r, visit: visit, stream: stream, cursor: &cursor}
+	w := entryWalkV1{s: s, old: r, visit: visit, stream: stream, cursor: &cursor, context: &context}
 	failure := s.failure // survives callback expiry and mutable-borrow retirement
-	return s.resultV1(failure, w.runV1())
+	err := w.runV1()
+	s.clearSourcesV1()
+	s.completed = err == nil && !s.failed && !s.retired
+	return s.resultV1(failure, err)
 }
 
 func (s *entryInventoryStateV1) visitableV1(r *Reader) bool {
@@ -281,17 +285,72 @@ func (e *treePublicEntryV1) retireEntryV1() {
 	}
 }
 
+// Expiry ends public capabilities while retaining the private complete recipe.
+func (e *treePublicEntryV1) expireEntryV1() {
+	e.reader.getMu.Lock()
+	defer e.reader.getMu.Unlock()
+	e.reader.entry = nil
+	if e.inventory != nil {
+		e.inventory.clearSourcesV1()
+	}
+}
+
+func (s *entryInventoryStateV1) clearSourcesV1() {
+	if !s.failed && s.access.key != nil {
+		s.failure.Prefix = s.access.key[:0] // private request storage, never a lease
+	}
+	if s.stream != nil {
+		*s.stream = entryStreamV1{}
+		s.stream = nil
+	}
+	s.row = EntryInventoryRowV1{}
+	s.access.reader, s.access.key, s.access.image = nil, nil, updateImage{}
+	s.access.active = false
+}
+
+func (e *treePublicEntryV1) entryAdmitV1(op *TreeOperationV1, account *OperationAccount) error {
+	s, token := e.inventory, op.Pair.EntryInventory
+	if s == nil && token == nil {
+		return nil
+	}
+	if s == nil || token == nil || token.scope != s {
+		return entryInputV1()
+	}
+	valid := all(s.entry == e, s.reader == e.reader, s.account == account, s.reader.txn == e.old, s.completed, !s.failed, !s.retired, len(op.Primitives) == 0)
+	if !valid || !s.targetSameV1(&op.Pair) {
+		return entryInputV1()
+	}
+	return nil
+}
+
+func (s *entryInventoryStateV1) targetSameV1(pair *TreePairV1) bool {
+	if len(pair.Mutations) != len(s.mutations) || len(pair.Consulted) != len(s.consulted) {
+		return false
+	}
+	for i := range s.mutations {
+		a, b := &s.mutations[i], &pair.Mutations[i]
+		if !all(a.DBI == b.DBI, a.BeforePresent == b.BeforePresent, a.AfterKind == b.AfterKind, a.RefDBI == b.RefDBI, bytes.Equal(a.Key, b.Key), bytes.Equal(a.Literal, b.Literal), bytes.Equal(a.RefKey, b.RefKey)) {
+			return false
+		}
+	}
+	for i := range s.consulted {
+		if s.consulted[i].DBI != pair.Consulted[i].DBI || !bytes.Equal(s.consulted[i].Key, pair.Consulted[i].Key) {
+			return false
+		}
+	}
+	return true
+}
+
 // Called under the immutable Reader getMu before ORIGINAL OLD is aborted.
 func (s *entryInventoryStateV1) retireV1() {
 	s.retired = true
-	if s.stream != nil {
-		*s.stream = entryStreamV1{}
-	}
+	s.clearSourcesV1()
 	s.entry, s.reader, s.account = nil, nil, nil
 	s.oldBytes, s.nextBytes, s.mutations, s.consulted = nil, nil, nil, nil
 	s.decode, s.inspection, s.authority = [2]authorityDecodeControl{}, [2]authorityInspection{}, [2]TreeAuthorityV1{}
-	s.rootControl, s.roots, s.row = [2]rootDecodeControl{}, [2]RootBindingV1{}, EntryInventoryRowV1{}
-	s.access.reader, s.access.key, s.access.image = nil, nil, updateImage{}
-	s.access.active = false
+	s.rootControl, s.endpoints = rootDecodeControl{}, [2]TreeEndpointV1{}
+	if !s.failed {
+		s.failure.Key, s.failure.Prefix = nil, nil
+	}
 	// The separate failure owns only bytes/error; suspended Visit may return it.
 }

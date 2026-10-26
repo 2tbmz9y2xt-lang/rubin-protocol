@@ -39,6 +39,7 @@ type treePlanV1 struct {
 	consulted  []ownedConsulted
 	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
 	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
+	inventory  *entryInventoryStateV1
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -311,6 +312,9 @@ func (e *treeScopeV1) loopV1() (bool, error) {
 func (s *Store) updateTreeLockedV1(old *C.MDBX_txn, ledger treeLedgerV1, plan *treePlanV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	c := &treeComposeV1{writer: newTreeScopeV1(s, old, plan, treeWriterV1, ledger), index: -1}
 	_, unwind := runTreeLockedV1(c.opV1)
+	if plan.inventory != nil {
+		plan.inventory.entry.retireEntryV1()
+	}
 	cleanup, oldRetained := updateAbortOld(old)
 	if unwind.kind != 0 && c.outcome.primary == nil {
 		return c.outcome.truth, c.outcome.stage, c.index, unwind, s.treeUnwoundV1(c.outcome, old, cleanup, oldRetained)
@@ -389,6 +393,9 @@ func (c *treeComposeV1) runV1() {
 	w.t = t
 	t.covered = len(w.plan.primitives) != 0 && w.plan.primitives[0].Coverage != nil
 	err := t.pairPreflightV1(w.plan.pair, w.plan.consulted)
+	if err == nil {
+		err = c.entryMatchV1("OLD/write snapshot mismatch")
+	}
 	if err != nil {
 		c.abortV1(err, -1)
 		return
@@ -427,6 +434,9 @@ func (c *treeComposeV1) holdV1() error {
 	}
 	err = w.t.finalV1(w.plan.pair, w.plan.consulted)
 	if err != nil {
+		return err
+	}
+	if err := c.entryMatchV1("final update image mismatch"); err != nil {
 		return err
 	}
 	return c.reserveV1()
@@ -494,6 +504,8 @@ func (c *treeComposeV1) commitV1() {
 	var truth treeTruthV1
 	if len(w.plan.primitives) != 0 {
 		truth = c.truthV1
+	} else if w.plan.inventory != nil {
+		truth = c.entryTruthV1
 	}
 	c.committed = true
 	c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)
