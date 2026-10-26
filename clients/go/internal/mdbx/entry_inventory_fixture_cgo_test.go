@@ -921,6 +921,32 @@ func TestEntryInventoryV1SourcesNativeOutcomes(t *testing.T) {
 	t.Run("stream-exact-capacity", eissCapacity)
 	t.Run("native-stream-unwind-disposition", eissNativeUnwind)
 	t.Run("physical-link-shapes", eissLinkShapes)
+	t.Run("present-hash-bound-rewrite", eissProspectiveMalformed)
+}
+
+func eissProspectiveMalformed(t *testing.T) {
+	for _, owner := range []struct{ rank, index, source, artifact, last uint8 }{{3, 1, 11, 6, 9}, {4, 2, 12, 7, 11}} {
+		t.Run(fmt.Sprintf("present-rank%d-rewrite-samefalse", owner.rank), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			m := pair.Mutations[owner.index]
+			value := bytes.Clone(m.Literal)
+			value[len(value)-1] ^= 1
+			mustEnvironment(t, fixtureSeedPrefixRawRow(f.s, m.DBI, m.Key, value))
+			last := uint8(0)
+			result, token, failure, err := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				last = row.Source
+				return nil
+			})
+			eiInput(t, result.err)
+			eissFailure(t, failure, owner.source, owner.artifact, 0, 1, 4, 21, 3, [32]byte(m.Key), m.Key, nil, nil)
+			if err != nil || token.scope.completed || last != owner.last || f.s.state != storeOPEN {
+				t.Fatalf("differing required bytes lost positive failure %+v/%v/last%d", failure, err, last)
+			}
+			tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+			tsFollowing(t, f.s, f.o)
+		})
+	}
 }
 
 func eissFailure(t *testing.T, failure *EntryInventoryFailureV1, source, artifact, role, access, observation uint8, generation, height uint64, hash [32]byte, key, prefix []byte, cause error) {
@@ -1560,20 +1586,19 @@ func eissLargeFamily(t *testing.T) {
 	f := eisNew(t, 3, 1, nil)
 	pair := eisCapture(t, f, 1, 1, false, false)
 	hash := f.hashes[3]
-	manifest := eisMutation(5, UndoManifestKey(hash), UndoManifestValue(3, [16]byte{}, 1, 16385))
-	manifest.BeforePresent = true
-	rows := []Mutation{manifest}
+	dbi := TreeSchemaV1DBIs()[5]
+	rows := []fixtureRawRow{{dbi, UndoManifestKey(hash), UndoManifestValue(3, [16]byte{}, 1, 16385)}}
 	value, err := (UTXOValue{Value: 17, CovenantType: 2, CovenantData: []byte{3}, CreationHeight: 1}).Encode()
 	mustEnvironment(t, err)
 	for i := uint32(0); i < 16385; i++ {
-		rows = append(rows, eisMutation(5, UndoEntryKey(hash, [32]byte{3}, 0, i, 0), value))
+		rows = append(rows, fixtureRawRow{dbi, UndoEntryKey(hash, [32]byte{3}, 0, i, 0), value})
 		if len(rows) == 1000 {
-			eisSeed(t, f, rows)
+			mustEnvironment(t, fixtureSeedRows(f.s, rows...))
 			rows = nil
 		}
 	}
 	if len(rows) != 0 {
-		eisSeed(t, f, rows)
+		mustEnvironment(t, fixtureSeedRows(f.s, rows...))
 	}
 	count := 0
 	eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {

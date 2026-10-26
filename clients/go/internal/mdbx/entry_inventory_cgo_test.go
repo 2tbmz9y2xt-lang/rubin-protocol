@@ -511,6 +511,9 @@ func eisProspective(t *testing.T) {
 	}
 	for _, owner := range []struct{ rank, index, source, artifact, last uint8 }{{3, 1, 11, 6, 9}, {4, 2, 12, 7, 11}, {6, 3, 13, 9, 9}} {
 		for _, same := range []bool{false, true} {
+			if !same && owner.rank != 6 {
+				continue // malformed hash-bound rows require the native fixture owner
+			}
 			t.Run(fmt.Sprintf("present-rank%d-rewrite-same%v", owner.rank, same), func(t *testing.T) {
 				f := eisNew(t, 3, 1, nil)
 				pair := eisCapture(t, f, 1, 1, false, false)
@@ -723,9 +726,9 @@ func eisBodyWindows(t *testing.T) {
 				entry.Authority.Ordinary.CapturedSelectedSide.LogicalBytes = uint64(len(body))
 				pair.Mutations[0].Literal = eiEncoded(t, entry)
 			} else {
-				m := eisMutation(4, f.hashes[0][:], body)
-				m.BeforePresent = true
-				eisSeed(t, f, []Mutation{m})
+				remove := Mutation{DBI: TreeSchemaV1DBIs()[4], Key: bytes.Clone(f.hashes[0][:]), BeforePresent: true, AfterKind: 1}
+				eisSeed(t, f, []Mutation{remove})
+				eisSeed(t, f, []Mutation{eisMutation(4, f.hashes[0][:], body)})
 			}
 			reached := false
 			eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
