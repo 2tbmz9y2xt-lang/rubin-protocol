@@ -250,7 +250,7 @@ func (w *entryWalkV1) emitV1(row *EntryInventoryRowV1, key []byte, image *update
 	}
 	row.access, row.serial = a, s.serial
 	s.row = *row
-	*image, key = updateImage{}, nil
+	*image = updateImage{}
 	err := w.visitRowV1(row)
 	if s.retired {
 		return entryInputV1()
@@ -704,16 +704,17 @@ func (w *entryWalkV1) rawShapeV1(key []byte, image updateImage) error {
 func (w *entryWalkV1) undoV1(row *EntryInventoryRowV1) error {
 	var key [33]byte
 	copy(key[:32], row.Hash[:])
-	image, err := w.requiredV1(row, key[:])
+	var err error
+	w.stream.row.image, err = w.requiredV1(row, key[:])
 	if err != nil {
 		return err
 	}
-	borrow, _ := treeBorrowV1(image)
+	borrow, _ := treeBorrowV1(w.stream.row.image)
 	if len(borrow.value) != 33 || borrow.value[0] != 1 || binary.BigEndian.Uint64(borrow.value[1:]) != row.Height {
 		return w.s.stopV1(4, nil)
 	}
 	w.cursor.positions[0], w.cursor.positions[1] = 0, uint64(binary.BigEndian.Uint32(borrow.value[29:]))
-	borrow.value, image = nil, updateImage{}
+	borrow.value, w.stream.row.image = nil, updateImage{}
 	if err := w.scanV1(row); err != nil {
 		return err
 	}

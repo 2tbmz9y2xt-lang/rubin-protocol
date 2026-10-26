@@ -1339,8 +1339,8 @@ func eissExpiryCase(t *testing.T, physical bool) {
 	pair := eisCapture(t, f, 1, 2, false, false)
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	type reading struct {
-		n int
-		err error
+		n     int
+		err   error
 		value byte
 	}
 	reads := make(chan reading, 4)

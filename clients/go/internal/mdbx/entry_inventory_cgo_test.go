@@ -237,7 +237,7 @@ func eisCapture(t *testing.T, f *eisFixture, d, c int, rolling, reuse bool) Tree
 		f.old.Authority.Phase = 2
 		f.old.Authority.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 4, GenerationID: 21, FirstHeight: boundary + 1, NextHeight: boundary + 1, LastHeight: boundary + 1}}}
 	}
-	side := &SelectedSideV1{GenerationID: 21, F: boundary, TipHeight: tip.Height, TipHash: tip.BlockHash, CumulativeChainwork: eisWork(tip.Height), RowCount: uint16(count), LogicalBytes: uint64(count)*148}
+	side := &SelectedSideV1{GenerationID: 21, F: boundary, TipHeight: tip.Height, TipHash: tip.BlockHash, CumulativeChainwork: eisWork(tip.Height), RowCount: uint16(count), LogicalBytes: uint64(count) * 148}
 	if c > 1 {
 		f.old.Authority.SelectedSide = side
 		f.old.Authority.NextGenerationID = 22
@@ -421,7 +421,7 @@ func eisOwed(t *testing.T) {
 		if row.Source <= 4 {
 			return nil
 		}
-		if row.Source < phase && !(phase == 13 && row.Source == 11) {
+		if row.Source < phase && (phase != 13 || row.Source != 11) {
 			t.Fatalf("source order %d -> %d", phase, row.Source)
 		}
 		if row.Source != phase {
