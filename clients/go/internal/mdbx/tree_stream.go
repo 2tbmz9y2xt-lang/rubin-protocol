@@ -130,3 +130,57 @@ const (
 // After the call, and on nil or zero-value sinks, methods refuse with "tree delta
 // sink is not active" without changing the recorded failure; WindowV1 is nil.
 type TreeDeltaSinkV1 struct{ recorder *treeRecorderV1 }
+
+// TreeRoleDeltaV1 is one generation role of a TreeDeltaReportV1. Present is
+// false only for an absent LAG role, and then every other field is zero.
+// Generation is the role's generation id. BytesBefore/CountBefore are the
+// 0x10||g counter values in ORIGINAL OLD; BytesAfter/CountAfter are that
+// counter in the image the attempt commits (36+len(value) bytes per entry).
+// IndexAdded/IndexRemoved count owned rank-2 Pair targets keyed under the
+// generation from the caller-declared Pair presence: IndexAdded those with
+// BeforePresent false and a literal After, IndexRemoved those with BeforePresent
+// true and an absent After. Present-to-present replacements and rank-7 rows are
+// not counted. The counts are exact for every committed operation: a false
+// BeforePresent declaration is refused only at flush, after Proof has returned,
+// so that operation never commits.
+type TreeRoleDeltaV1 struct {
+	Present                  bool
+	Generation               uint64
+	BytesBefore, CountBefore uint64
+	BytesAfter, CountAfter   uint64
+	IndexAdded, IndexRemoved uint64
+}
+
+// TreeUndoFamilyEffectV1 is the physical effect one primitive applies to the
+// undo-v1 family of its Block: none, written, kept or deleted. A Transient
+// primitive is always none, even when ORIGINAL holds a family under its Block.
+type TreeUndoFamilyEffectV1 uint8
+
+const (
+	TreeUndoFamilyNoneV1    TreeUndoFamilyEffectV1 = 0
+	TreeUndoFamilyWrittenV1 TreeUndoFamilyEffectV1 = 1
+	TreeUndoFamilyKeptV1    TreeUndoFamilyEffectV1 = 2
+	TreeUndoFamilyDeletedV1 TreeUndoFamilyEffectV1 = 3
+)
+
+// TreeUndoChargeV1 is one primitive's undo-family record. Entries and Bytes
+// (36+len(value) per entry) describe the family written, kept or deleted: the
+// entries before a forward primitive, after an inverse one. Both are zero for
+// TreeUndoFamilyNoneV1. Records are per primitive, in primitive order; applied in
+// that order, Written adds Bytes, Deleted removes Bytes, Kept and None change
+// nothing. A Block named twice is not deduplicated.
+type TreeUndoChargeV1 struct {
+	Effect         TreeUndoFamilyEffectV1
+	Entries, Bytes uint64
+}
+
+// TreeDeltaReportV1 states the storage-image difference between ORIGINAL OLD
+// and the image one covered UpdateTreeV1 attempt commits. Current describes
+// Primitives[0].Generation, Lag the single generation of Primitives[1:], and
+// Undo has one record per primitive. It holds no Reader, row bytes or reference
+// into the write image; the engine owns its backing and it is valid only during
+// the Proof call.
+type TreeDeltaReportV1 struct {
+	Current, Lag TreeRoleDeltaV1
+	Undo         []TreeUndoChargeV1
+}

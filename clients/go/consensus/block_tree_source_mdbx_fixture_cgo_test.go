@@ -21,6 +21,8 @@ func TestBlockTreeSourceFixtureV1(t *testing.T) {
 	t.Run("section-cleanup", btfSectionCleanup)
 	t.Run("late-original", btfLateOriginal)
 	t.Run("commit-readback", btfReadback)
+	t.Run("proof-report", btfProofReport)
+	t.Run("proof-truncated", btfProofTruncated)
 }
 
 func btfRequest(salt byte) blockTreeRequestV1 {
@@ -564,4 +566,79 @@ func btfReadback(t *testing.T) {
 			btIndexes(t, w, r, true)
 		})
 	}
+}
+
+// btfProofScene stores two LAG bodies: block 1 creates an output that block 2 spends.
+func btfProofScene(t *testing.T) (*btWorld, []blockTreeRequestV1, btTx, btTx) {
+	t.Helper()
+	w := btNew(t)
+	created := btTransaction(31, 0, nil, [][]byte{btFrame(41, 0, []byte{1, 2})}, nil, []byte{0}, nil)
+	lag1 := btRequest(btBody(148, 31, [32]byte{}, created), 4)
+	inert := btTransaction(32, 0, nil, nil, nil, []byte{0}, nil)
+	spend := btTransaction(33, 0, []Outpoint{{Txid: created.id}}, [][]byte{btFrame(42, 0, nil)}, nil, []byte{0}, nil)
+	lag2 := btRequest(btBody(148, 32, lag1.Block, inert, spend), 5)
+	for _, r := range []*blockTreeRequestV1{&lag1, &lag2} {
+		w.pair(t, btMutation(3, r.Block[:], r.Raw[:148]), btMutation(4, r.Block[:], r.Raw))
+		r.Generation, r.Kind, r.BodyKind, r.Raw = 2, 6, 2, nil
+	}
+	return w, []blockTreeRequestV1{btfRequest(30), lag1, lag2}, created, spend
+}
+
+func btfProofRun(t *testing.T, w *btWorld, requests []blockTreeRequestV1, calls *int, report *mdbx.TreeDeltaReportV1) btResult {
+	t.Helper()
+	result, _, _ := w.run(t, requests, func(_ []blockTreeEffectV1, _ []*btObserved, op *mdbx.TreeOperationV1) {
+		op.Proof = func(r *mdbx.TreeDeltaReportV1) error {
+			*calls++
+			*report = *r
+			report.Undo = append([]mdbx.TreeUndoChargeV1(nil), r.Undo...)
+			return nil
+		}
+	})
+	return result
+}
+
+func btfCounter(total, count uint64) []byte {
+	return binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, total), count)
+}
+
+// P2/P3 through the real RUB-1612 source: the report equals the committed rows.
+func btfProofReport(t *testing.T) {
+	w, requests, created, spend := btfProofScene(t)
+	calls := 0
+	var report mdbx.TreeDeltaReportV1
+	result := btfProofRun(t, w, requests, &calls, &report)
+	result.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, result.err == nil && calls == 1, "proof run: %v calls%d", result.err, calls)
+	spent := btValue(created.frames[0], 4, true)
+	last := btValue(spend.frames[0], 5, false)
+	current := btValue(btFrame(30, 0, []byte{30}), 6, true)
+	logicalMDBXAssert(t, report.Current.Present && report.Current.Generation == 1 && report.Current.CountAfter == 1 && report.Current.BytesAfter == 36+uint64(len(current)) && report.Current.IndexAdded == 1, "current role %+v", report.Current)
+	logicalMDBXAssert(t, report.Lag.Present && report.Lag.Generation == 2 && report.Lag.BytesBefore == 0 && report.Lag.CountBefore == 0 && report.Lag.CountAfter == 1 && report.Lag.BytesAfter == 36+uint64(len(last)) && report.Lag.IndexAdded == 2, "lag role %+v", report.Lag)
+	want := []mdbx.TreeUndoChargeV1{{Effect: mdbx.TreeUndoFamilyWrittenV1}, {Effect: mdbx.TreeUndoFamilyWrittenV1}, {Effect: mdbx.TreeUndoFamilyWrittenV1, Entries: 1, Bytes: 36 + uint64(len(spent))}}
+	logicalMDBXAssert(t, reflect.DeepEqual(report.Undo, want), "undo %+v", report.Undo)
+	w.read(t, 0, btMeta(0x10, 1), btfCounter(report.Current.BytesAfter, report.Current.CountAfter))
+	w.read(t, 0, btMeta(0x10, 2), btfCounter(report.Lag.BytesAfter, report.Lag.CountAfter))
+	w.read(t, 1, btUTXOKey(2, Outpoint{Txid: created.id}), nil)
+	w.read(t, 1, btUTXOKey(2, Outpoint{Txid: spend.id}), last)
+	entry := append(bytes.Clone(requests[2].Block[:]), 1, 0, 0, 0, 1, 0, 0, 0, 0)
+	entry = append(entry, created.id[:]...)
+	w.read(t, 5, binary.BigEndian.AppendUint32(entry, 0), spent)
+}
+
+// H1: a truncated stored LAG body takes the RUB-1612 refusal; Proof is never called.
+func btfProofTruncated(t *testing.T) {
+	w, requests, _, _ := btfProofScene(t)
+	var stored []byte
+	logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+		v, _, err := r.Get(mdbx.TreeSchemaV1DBIs()[4], requests[2].Block[:])
+		stored = bytes.Clone(v)
+		return err
+	}) == nil, "stored read")
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 4, bytes.Clone(requests[2].Block[:]), stored[:len(stored)-1]) == nil, "truncate stored body")
+	calls := 0
+	var report mdbx.TreeDeltaReportV1
+	result := btfProofRun(t, w, requests, &calls, &report)
+	result.want(t, 1, 1, -1)
+	btFailure(t, result.err, logicalStateFailureStoreIntegrity, "required block tree source framing differs")
+	logicalMDBXAssert(t, calls == 0, "Proof calls%d after source refusal", calls)
 }

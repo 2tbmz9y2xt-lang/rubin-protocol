@@ -10,6 +10,7 @@ import "C"
 import (
 	"bytes"
 	"encoding/binary"
+	"reflect"
 	"unsafe"
 )
 
@@ -83,9 +84,25 @@ type TreePrimitiveV1 struct {
 // including readback and unwind cleanup. At the first Source call all owned Pair
 // copies exist; only the independent original Pair buffers may then be mutated.
 // Borrowed input remains the caller's funding obligation.
+//
+// Proof is optional. When non-nil, admission refuses with "invalid Update
+// Batch" (OLD/Prewrite/-1) unless the operation has at least one primitive,
+// every primitive carries Coverage, and Primitives[1:] share one generation
+// distinct from Primitives[0].Generation; the step-5 plan-copy charge then also
+// covers the TreeDeltaReportV1 backing. UpdateTreeV1 calls Proof exactly once,
+// after the complete covered preflight, freeze and reservation and before the
+// first native write, never at readback; Proof is not called when an earlier
+// step refuses. A non-nil result E ends the attempt as (OLD, Prewrite, -1, E)
+// with no write, consumes the Store with terminal E and releases the account
+// charges once. A Proof panic or Goexit takes the writer-position unwind with
+// index -1; a clean unwind leaves the Store OPEN, then the panic or Goexit
+// resumes. A nil result continues to flush, final checks and commit unchanged.
+// Proof must not call any Store, Reader or OperationAccount method,
+// must not retain the report, and must start no goroutine that outlives the call.
 type TreeOperationV1 struct {
 	Primitives []TreePrimitiveV1
 	Pair       TreePairV1
+	Proof      func(*TreeDeltaReportV1) error
 }
 
 // BeginV1 supplies the block header before any event.
@@ -281,11 +298,14 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	if e.inventory != nil || op.Pair.EntryInventory != nil {
 		return entryInputV1()
 	}
+	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
+		return updateInvalidBatch()
+	}
 	if saved != nil {
 		return saved
 	}
 	// A zero-byte grow also preserves the post-callback open check.
-	return e.hold.grow(treePlanCopyBytesV1(op.Pair))
+	return e.hold.grow(treeStepFiveBytesV1(op))
 }
 
 type treeAccountLedgerV1 struct{ hold *operationHold }
@@ -555,6 +575,41 @@ func treePlanChargeAddV1(total, count, size uint64) uint64 {
 	return total + count*size
 }
 
+// treeProofShapeV1 is the Proof admission row: a non-empty covered plan whose
+// LAG primitives share one generation distinct from CURRENT.
+func treeProofShapeV1(primitives []TreePrimitiveV1) bool {
+	if len(primitives) == 0 {
+		return false
+	}
+	for j, p := range primitives {
+		if p.Coverage == nil || j != 0 && !treeProofLagV1(primitives, p) {
+			return false
+		}
+	}
+	return true
+}
+
+func treeProofLagV1(primitives []TreePrimitiveV1, p TreePrimitiveV1) bool {
+	return p.Generation == primitives[1].Generation && p.Generation != primitives[0].Generation
+}
+
+// Actual report backing sizes, pinned by TestTreeStreamResourceLayoutV1.
+var (
+	treeReportBytesV1     = uint64(reflect.TypeFor[TreeDeltaReportV1]().Size())
+	treeUndoRecordBytesV1 = uint64(reflect.TypeFor[TreeUndoChargeV1]().Size())
+)
+
+// treeStepFiveBytesV1 is the single step-5 charge: the plan copy plus, with a
+// Proof, the report and its per-primitive undo records.
+func treeStepFiveBytesV1(op TreeOperationV1) uint64 {
+	n := treePlanCopyBytesV1(op.Pair)
+	if op.Proof == nil {
+		return n
+	}
+	n = treePlanChargeAddV1(n, 1, treeReportBytesV1)
+	return treePlanChargeAddV1(n, uint64(len(op.Primitives)), treeUndoRecordBytesV1)
+}
+
 func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 	n := treePlanChargeAddV1(0, uint64(len(pair.Mutations)), uint64(unsafe.Sizeof(ownedMutation{})))
 	n = treePlanChargeAddV1(n, uint64(len(pair.Consulted)), uint64(unsafe.Sizeof(ownedConsulted{})))
@@ -575,6 +630,9 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	}
 	for j, row := range op.Pair.Consulted {
 		plan.consulted[j] = ownedConsulted{dbi: row.DBI, key: updateClone(row.Key)}
+	}
+	if op.Proof != nil {
+		plan.proof, plan.report = op.Proof, &TreeDeltaReportV1{Undo: make([]TreeUndoChargeV1, len(op.Primitives))}
 	}
 	return plan
 }
