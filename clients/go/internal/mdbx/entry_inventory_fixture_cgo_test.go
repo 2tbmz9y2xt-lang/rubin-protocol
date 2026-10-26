@@ -4,11 +4,14 @@ package mdbx
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"strings"
@@ -1945,14 +1948,15 @@ func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureL
 	t.Helper()
 	stage, truth, commits := UpdateStage(1), CommitTruth(1), uint32(0)
 	diagnostic := "OLD/write snapshot mismatch"
+	crossed := mode == 3 || mode == 7
 	if mode == 13 {
 		stage, diagnostic = 2, "final update image mismatch"
 	}
-	if mode == 3 {
+	if crossed {
 		stage, truth, commits = 3, 3, 1
 	}
 	result.tuple(t, truth, stage, -1)
-	if mode == 3 {
+	if crossed {
 		commit := tipCommit(t, result.err, 3, nil)
 		if commit.ReadbackCause != nil || commit.Cause == nil {
 			t.Fatalf("residual false acquired an invented readback cause %+v", commit)
@@ -1971,7 +1975,7 @@ func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureL
 
 func eicLateDomain(t *testing.T) {
 	t.Run("false-before-required-read", eicTruthContinuation)
-	for _, mode := range []uint32{14, 13, 3} {
+	for _, mode := range []uint32{14, 13, 3, 7} {
 		t.Run(fmt.Sprintf("position%d", mode), func(t *testing.T) {
 			f := eisNew(t, 17000, 2, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
@@ -2027,7 +2031,8 @@ func eicTruthContinuation(t *testing.T) {
 	treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
 	treeNativeError(t, commit.ReadbackCause, "update", "IO", 5, "error 5", nil)
 	eissFailure(t, token.scope.failure, 5, 8, 1, 2, 1, 11, 3, f.hashes[3], f.hashes[3][:], f.hashes[3][:], commit.ReadbackCause)
-	if evidence.drift != 1 || evidence.gets != 1 || evidence.commits != 1 || evidence.aborts != 1 || evidence.closes != 1 || !token.scope.retired || token.scope.stream != nil || token.scope.access.image != (updateImage{}) {
+	// closes counts injected close failures (modes11/24), not successful closes.
+	if evidence.drift != 1 || evidence.gets != 1 || evidence.commits != 1 || evidence.aborts != 1 || evidence.closes != 0 || !token.scope.retired || token.scope.stream != nil || token.scope.access.image != (updateImage{}) {
 		t.Fatalf("one strict-snapshot false/fault/cleanup frontier %+v", evidence)
 	}
 	tsConsumed(t, f.s, f.o, 3, result.err)
@@ -2304,6 +2309,20 @@ func eicDisposition(t *testing.T) {
 	}
 	for _, mode := range []uint32{7, 8, 12, 15, 16} {
 		t.Run(fmt.Sprintf("native-position-mode%d", mode), func(t *testing.T) {
+			const childEnv = "RUBIN_MDBX_ENTRY_RETAINED_CHILD"
+			const childMarker = "RUBIN_MDBX_ENTRY_RETAINED_REACHED"
+			if mode == 15 && os.Getenv(childEnv) != "1" {
+				// Retained readback permanently parks its worker, even after release.
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEntryInventoryV1NativeOutcomes$/^NativeDisposition$/^native-position-mode15$", "-test.count=1", "-test.v")
+				cmd.Env = append(os.Environ(), childEnv+"=1")
+				output, err := cmd.CombinedOutput()
+				if err != nil || strings.Count(string(output), "\n"+childMarker+"\n") != 1 {
+					t.Fatalf("retained ENTRY readback child: %v\n%s", err, output)
+				}
+				return
+			}
 			f := eisNew(t, 3, 1, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
 			var result tsResult
@@ -2338,6 +2357,9 @@ func eicDisposition(t *testing.T) {
 				want = eiEncoded(t, f.old)
 			}
 			tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, want)
+			if mode == 15 {
+				fmt.Println(childMarker)
+			}
 		})
 	}
 }
