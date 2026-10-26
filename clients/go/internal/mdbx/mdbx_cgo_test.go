@@ -3152,21 +3152,207 @@ func packageTypeProofs(files map[string]*ast.File) map[string]*ast.TypeSpec {
 	return types
 }
 
-func protectedWholePointerWrite(types map[string]*ast.TypeSpec, fn *ast.FuncDecl, lhs ast.Expr) bool {
+type assignmentTypeProof struct {
+	types  map[string]*ast.TypeSpec
+	owners map[*ast.TypeSpec]*ast.File
+}
+
+func assignmentTypes(files map[string]*ast.File) assignmentTypeProof {
+	proof := assignmentTypeProof{types: map[string]*ast.TypeSpec{}, owners: map[*ast.TypeSpec]*ast.File{}}
+	for _, file := range files {
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || general.Tok != token.TYPE {
+				continue
+			}
+			for _, specification := range general.Specs {
+				named := specification.(*ast.TypeSpec)
+				if _, duplicate := proof.types[named.Name.Name]; duplicate {
+					proof.types[named.Name.Name] = nil
+					continue
+				}
+				proof.types[named.Name.Name], proof.owners[named] = named, file
+			}
+		}
+	}
+	return proof
+}
+
+func (proof assignmentTypeProof) declaration(name *ast.Ident) (*ast.TypeSpec, *ast.File) {
+	declaration := proof.types[name.Name]
+	if declaration == nil || declaration.TypeParams != nil {
+		return nil, nil
+	}
+	if name.Obj != nil && name.Obj.Decl != declaration {
+		return nil, nil
+	}
+	return declaration, proof.owners[declaration]
+}
+
+func (proof assignmentTypeProof) aggregate(expression ast.Expr, seen map[*ast.TypeSpec]bool) (*ast.StructType, *ast.File) {
+	name, ok := ast.Unparen(expression).(*ast.Ident)
+	if !ok {
+		return nil, nil
+	}
+	declaration, owner := proof.declaration(name)
+	if declaration == nil || seen[declaration] {
+		return nil, nil
+	}
+	seen[declaration] = true
+	if shape, ok := ast.Unparen(declaration.Type).(*ast.StructType); ok {
+		return shape, owner
+	}
+	return proof.aggregate(declaration.Type, seen)
+}
+
+func (proof assignmentTypeProof) imported(expression *ast.SelectorExpr, owner *ast.File) bool {
+	qualifier, ok := ast.Unparen(expression.X).(*ast.Ident)
+	if !ok || owner == nil || qualifier.Obj != nil || qualifier.Name == "_" {
+		return false
+	}
+	if _, shadowed := proof.types[qualifier.Name]; shadowed {
+		return false
+	}
+	matches := 0
+	for _, imported := range owner.Imports {
+		if assignmentImportName(imported) == qualifier.Name {
+			matches++
+		}
+	}
+	return matches == 1
+}
+
+func assignmentImportName(imported *ast.ImportSpec) string {
+	if imported.Name != nil {
+		return imported.Name.Name
+	}
+	return filepath.Base(strings.Trim(imported.Path.Value, "\""))
+}
+
+func (proof assignmentTypeProof) copiedValue(expression ast.Expr, owner *ast.File, seen map[*ast.TypeSpec]bool) bool {
+	switch value := ast.Unparen(expression).(type) {
+	case *ast.Ident:
+		return proof.copiedNamed(value, seen)
+	case *ast.StructType:
+		return proof.copiedFields(value, owner, seen)
+	case *ast.ArrayType:
+		return proof.copiedValue(value.Elt, owner, seen)
+	case *ast.StarExpr:
+		// Copying a declared pointer field does not write its pointee.
+		shape, _ := proof.aggregate(value.X, map[*ast.TypeSpec]bool{})
+		return shape != nil || proof.copiedValue(value.X, owner, seen)
+	case *ast.SelectorExpr:
+		return proof.imported(value, owner)
+	}
+	return false
+}
+
+func (proof assignmentTypeProof) copiedFields(shape *ast.StructType, owner *ast.File, seen map[*ast.TypeSpec]bool) bool {
+	names := map[string]bool{}
+	for _, field := range shape.Fields.List {
+		if !assignmentFieldNames(field, names) || !proof.copiedValue(field.Type, owner, seen) {
+			return false
+		}
+	}
+	return true
+}
+
+func assignmentFieldNames(field *ast.Field, seen map[string]bool) bool {
+	names := field.Names
+	if len(names) == 0 {
+		expression := ast.Unparen(field.Type)
+		if pointer, ok := expression.(*ast.StarExpr); ok {
+			expression = ast.Unparen(pointer.X)
+		}
+		if selected, ok := expression.(*ast.SelectorExpr); ok {
+			expression = selected.Sel
+		}
+		name, ok := expression.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		names = []*ast.Ident{name}
+	}
+	for _, name := range names {
+		if name.Name != "_" && seen[name.Name] {
+			return false
+		}
+		seen[name.Name] = true
+	}
+	return true
+}
+
+func (proof assignmentTypeProof) copiedNamed(value *ast.Ident, seen map[*ast.TypeSpec]bool) bool {
+	declaration, owner := proof.declaration(value)
+	if declaration == nil {
+		return provenScalarOrSequence(proof.types, value, map[*ast.TypeSpec]bool{})
+	}
+	if value.Name == "Store" || value.Name == "Reader" || seen[declaration] {
+		return false
+	}
+	if _, pointerAlias := ast.Unparen(declaration.Type).(*ast.StarExpr); pointerAlias {
+		return false
+	}
+	seen[declaration] = true
+	defer delete(seen, declaration)
+	return proof.copiedValue(declaration.Type, owner, seen)
+}
+
+func (proof assignmentTypeProof) target(fn *ast.FuncDecl, expression ast.Expr) ast.Expr {
+	if name, ok := ast.Unparen(expression).(*ast.Ident); ok {
+		declared, _ := directFunctionBinding(fn, name)
+		return declared
+	}
+	selected, ok := ast.Unparen(expression).(*ast.SelectorExpr)
+	if !ok {
+		return nil
+	}
+	name, ok := ast.Unparen(selected.X).(*ast.Ident)
+	if !ok {
+		return nil
+	}
+	declared, bound := directFunctionBinding(fn, name)
+	pointer, ok := ast.Unparen(declared).(*ast.StarExpr)
+	if !bound || !ok {
+		return nil
+	}
+	shape, _ := proof.aggregate(pointer.X, map[*ast.TypeSpec]bool{})
+	if shape == nil {
+		return nil
+	}
+	return assignmentField(shape, selected.Sel.Name)
+}
+
+func assignmentField(shape *ast.StructType, name string) ast.Expr {
+	var target ast.Expr
+	for _, field := range shape.Fields.List {
+		for _, candidate := range field.Names {
+			if candidate.Name == name {
+				if target != nil {
+					return nil
+				}
+				target = field.Type
+			}
+		}
+	}
+	return target
+}
+
+func protectedWholePointerWrite(proof assignmentTypeProof, fn *ast.FuncDecl, lhs ast.Expr) bool {
 	dereference, ok := ast.Unparen(lhs).(*ast.StarExpr)
 	if !ok {
 		return false
 	}
-	name, ok := ast.Unparen(dereference.X).(*ast.Ident)
-	if !ok {
-		return true
-	}
-	declared, ok := directFunctionBinding(fn, name)
-	if !ok {
-		return true
-	}
+	declared := proof.target(fn, dereference.X)
 	pointer, ok := ast.Unparen(declared).(*ast.StarExpr)
-	return !ok || !provenScalarOrSequence(types, pointer.X, map[*ast.TypeSpec]bool{})
+	if !ok {
+		return true
+	}
+	if provenScalarOrSequence(proof.types, pointer.X, map[*ast.TypeSpec]bool{}) {
+		return false
+	}
+	shape, owner := proof.aggregate(pointer.X, map[*ast.TypeSpec]bool{})
+	return shape == nil || !proof.copiedValue(pointer.X, owner, map[*ast.TypeSpec]bool{})
 }
 
 func directFunctionBinding(fn *ast.FuncDecl, name *ast.Ident) (ast.Expr, bool) {
@@ -3240,6 +3426,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		ordinarySource.Write(source)
 	}
 	typeProofs := packageTypeProofs(files)
+	assignmentProofs := assignmentTypes(files)
 	require(files["obsolete_raw_cgo.go"] != nil, "ordinary build omitted obsolete raw source")
 	file, source := files["mdbx_cgo.go"], sources["mdbx_cgo.go"]
 	require(file != nil, "ordinary build omitted mdbx_cgo.go")
@@ -3750,7 +3937,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 					return true
 				}
 				for _, lhs := range assignment.Lhs {
-					wholeObject := protectedWholePointerWrite(typeProofs, fn, lhs)
+					wholeObject := protectedWholePointerWrite(assignmentProofs, fn, lhs)
 					selector, ok := lhs.(*ast.SelectorExpr)
 					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth" || selector.Sel.Name == "canonicalOwnerVerified" || selector.Sel.Name == "format" || selector.Sel.Name == "databaseID" || selector.Sel.Name == "treeConfig") {
 						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
@@ -3764,8 +3951,8 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 			})
 		}
 	}
-	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|retire:*tip = canonicalTipCell{}|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:retire|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}
@@ -3795,15 +3982,61 @@ func TestStorageAuthorityV1CodecStoreWriteGuard(t *testing.T) {
 		{"generic package type shadow", `package p; type count uint64; func f[count any](out *count, value count) { *out = value }`, true},
 		{"generic pointer type shadow", `package p; type Ptr = *uint64; func f[Ptr ~*T, T any](out Ptr, value T) { *out = value }`, true},
 		{"generic receiver shadow", `package p; type Count uint64; type Box[Count any] struct{}; func (b Box[Count]) f(out *Count, value Count) { *out = value }`, true},
+		{"copied aggregate", `package p; type Store struct{}; type Image struct { data *Store; n uint64 }; type Row struct { image Image; bytes []byte }; func f(x *Row) { *x = Row{} }`, false},
+		{"copied aggregate renamed", `package p; type Store struct{}; type Image struct { data *Store; n uint64 }; type Row struct { image Image; bytes []byte }; func f(unrelated *Row) { *unrelated = Row{} }`, false},
+		{"copied alias renamed", `package p; type Image struct { n uint64 }; type Row struct { image Image; data *Image }; type Alias = Row; func f(renamed *Alias) { (*(renamed)) = Alias{} }`, false},
+		{"copied embedded value", `package p; type Value struct { n uint64 }; type Row struct { Value; words [2]Value }; func f(x *Row) { *x = Row{} }`, false},
+		{"explicit field alias", `package p; type Image struct { n uint64 }; type Alias = Image; type Owner struct { image *Alias }; type Receiver = Owner; func (r *Receiver) f() { *((r).image) = Alias{} }`, false},
+		{"Reader field", `package p; type Reader struct{}; type Alias = Reader; type Owner struct { reader *Alias }; func (r *Owner) f() { *r.reader = Alias{} }`, true},
+		{"Store field", `package p; type Store struct{}; type Owner struct { store *Store }; func (r *Owner) f() { *r.store = Store{} }`, true},
+		{"pointer field copied", `package p; type Reader struct{}; type Owner struct { reader *Reader }; func f(r *Owner) { *r = Owner{} }`, false},
+		{"direct Reader", `package p; type Reader struct{}; func f(x *Reader) { *x = Reader{} }`, true},
+		{"Reader alias", `package p; type Reader struct{}; type Alias = Reader; func f(x *Alias) { *x = Alias{} }`, true},
+		{"Reader pointer alias", `package p; type Reader struct{}; type Pointer = *Reader; func f(x Pointer) { *x = Reader{} }`, true},
+		{"named Store value", `package p; type Store struct{}; type Row struct { value Store }; func f(x *Row) { *x = Row{} }`, true},
+		{"named Reader value", `package p; type Reader struct{}; type Row struct { value Reader }; func f(x *Row) { *x = Row{} }`, true},
+		{"embedded Reader", `package p; type Reader struct{}; type Row struct { Reader }; func f(x *Row) { *x = Row{} }`, true},
+		{"embedded Store", `package p; type Store struct{}; type Row struct { Store }; func f(x *Row) { *x = Row{} }`, true},
+		{"nested alias value", `package p; type Store struct{}; type Alias = Store; type Row struct { nested struct { value Alias } }; func f(x *Row) { *x = Row{} }`, true},
+		{"nested Reader value", `package p; type Reader struct{}; type Row struct { nested struct { value Reader } }; func f(x *Row) { *x = Row{} }`, true},
+		{"fixed protected array", `package p; type Reader struct{}; type Alias = Reader; type Row struct { values [2]Alias }; func f(x *Row) { *x = Row{} }`, true},
+		{"fixed Store array", `package p; type Store struct{}; type Row struct { values [2]Store }; func f(x *Row) { *x = Row{} }`, true},
+		{"unknown field type", `package p; type Row struct { value Missing }; func f(x *Row) { *x = Row{} }`, true},
+		{"unknown pointer endpoint", `package p; type Row struct { value *Missing }; func f(x *Row) { *x = Row{} }`, true},
+		{"unknown target field", `package p; type Row struct { n uint64 }; func f(x *Row) { *x.missing = 0 }`, true},
+		{"ambiguous type", `package p; type Row struct { n uint64 }; type Row struct { other uint64 }; func f(x *Row) { *x = Row{} }`, true},
+		{"ambiguous field", `package p; type Value struct{}; type Row struct { value *Value; value *Value }; func f(x *Row) { *x.value = Value{} }`, true},
+		{"ambiguous copied field", `package p; type Row struct { n uint64; n uint64 }; func f(x *Row) { *x = Row{} }`, true},
+		{"cyclic aliases", `package p; type Row = Other; type Other = Row; func f(x *Row) { *x = Row{} }`, true},
+		{"cyclic field owner", `package p; type Row = Other; type Other = Row; func f(x *Row) { *x.value = 0 }`, true},
+		{"cyclic values", `package p; type Row struct { next [1]Row }; func f(x *Row) { *x = Row{} }`, true},
+		{"pointer alias field", `package p; type Value struct{}; type Pointer = *Value; type Row struct { value Pointer }; func f(x *Row) { *x = Row{} }`, true},
+		{"local pointer alias", `package p; type Value struct{}; type Pointer = *Value; func f(x Pointer) { *x = Value{} }`, true},
+		{"local declaration binding", `package p; type Row struct { n uint64 }; func f(x *Row) { type Row struct{}; func(x *Row) { *x = Row{} }(nil) }`, true},
+		{"generic field type", `package p; type Box[T any] struct { value T }; type Row struct { box Box[uint64] }; func f(x *Row) { *x = Row{} }`, true},
+		{"promoted field unsupported", `package p; type Value struct{}; type Base struct { value *Value }; type Row struct { Base }; func f(x *Row) { *x.value = Value{} }`, true},
+		{"bound grouped import", `package p; import "unsafe"; type Row struct { key, value unsafe.Pointer }; func f(x *Row) { *x = Row{} }`, false},
+		{"bound import alias", `package p; import native "unsafe"; type Row struct { value native.Pointer }; func f(x *Row) { *x = Row{} }`, false},
+		{"unbound import", `package p; type Row struct { value native.Pointer }; func f(x *Row) { *x = Row{} }`, true},
+		{"blank import unbound", `package p; import _ "unsafe"; type Row struct { value _.Pointer }; func f(x *Row) { *x = Row{} }`, true},
+		{"shadowed import", `package p; import "unsafe"; type unsafe struct{}; type Row struct { value unsafe.Pointer }; func f(x *Row) { *x = Row{} }`, true},
+		{"ambiguous import", `package p; import native "unsafe"; import native "reflect"; type Row struct { value native.Pointer }; func f(x *Row) { *x = Row{} }`, true},
+		{"declaring file import", "package p; import \"unsafe\"; type Image struct { data unsafe.Pointer }\n---\npackage p; type Row struct { image Image }; func f(x *Row) { *x = Row{} }", false},
+		{"wrong file import", "package p; type Image struct { data unsafe.Pointer }\n---\npackage p; import \"unsafe\"; type Row struct { image Image }; func f(x *Row) { *x = Row{} }", true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, "guard.go", row.source, 0)
-			if err != nil {
-				t.Fatal(err)
+			files := map[string]*ast.File{}
+			var file *ast.File
+			for i, source := range strings.Split(row.source, "\n---\n") {
+				name := fmt.Sprintf("guard%d.go", i)
+				parsed, err := parser.ParseFile(fset, name, source, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[name], file = parsed, parsed
 			}
-			files := map[string]*ast.File{"guard.go": file}
-			types := packageTypeProofs(files)
+			proof := assignmentTypes(files)
 			var fn *ast.FuncDecl
 			for _, declaration := range file.Decls {
 				if candidate, ok := declaration.(*ast.FuncDecl); ok && candidate.Name.Name == "f" {
@@ -3820,7 +4053,7 @@ func TestStorageAuthorityV1CodecStoreWriteGuard(t *testing.T) {
 					return true
 				}
 				for _, lhs := range assignment.Lhs {
-					got = got || protectedWholePointerWrite(types, fn, lhs)
+					got = got || protectedWholePointerWrite(proof, fn, lhs)
 				}
 				return true
 			})

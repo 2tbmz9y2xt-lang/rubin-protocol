@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-// EntryInventoryV1 identifies one controls-only preparation, not an admission.
+// EntryInventoryV1 identifies one non-GEN inventory preparation, not admission.
 type EntryInventoryV1 struct{ scope *entryInventoryStateV1 }
 
 // EntryInventoryRowV1 lends immutable metadata and bounded reads during its
@@ -57,8 +57,7 @@ type entryRowAccessV1 struct {
 	active bool
 }
 
-// All backing is fixed except the two precharged maxKey request/failure buffers.
-// No cursor, source-completion stream or equality state exists in this leaf.
+// Fixed state owns retirement; the sole Visit walker owns its source cursor.
 type entryInventoryStateV1 struct {
 	entry       *treePublicEntryV1
 	reader      *Reader
@@ -81,6 +80,7 @@ type entryInventoryStateV1 struct {
 	failed      bool
 	row         EntryInventoryRowV1
 	access      entryRowAccessV1
+	stream      *entryStreamV1
 }
 
 var errEntryStoppedV1 = errors.New("ENTRY inventory stopped")
@@ -91,7 +91,7 @@ func entryInputV1() error {
 
 // PrepareEntryInventoryV1 consumes one preparation on the initial ORIGINAL OLD
 // Reader. Ordinary Pair grammar precedes funding and physical source access.
-// A returned handle never establishes complete inventory or permits a write.
+// Preparation alone does not establish completed inventory or permit a write.
 func (r *Reader) PrepareEntryInventoryV1(account *OperationAccount, target TreePairV1) (EntryInventoryV1, *EntryInventoryFailureV1, error) {
 	if !r.usable() {
 		return EntryInventoryV1{}, nil, entryInputV1()
@@ -130,17 +130,23 @@ func (e *treePublicEntryV1) initialReaderV1(r *Reader) bool {
 }
 
 func (s *entryInventoryStateV1) preparedV1(err error) (EntryInventoryV1, *EntryInventoryFailureV1, error) {
-	if err != nil || s.failed {
-		return EntryInventoryV1{}, s.failureResultV1(), s.resultV1(err)
+	failure, err := s.resultV1(s.failure, err)
+	if err != nil || failure != nil {
+		return EntryInventoryV1{}, failure, err
 	}
 	return EntryInventoryV1{scope: s}, nil, nil
 }
 
-func (s *entryInventoryStateV1) resultV1(err error) error {
-	if errors.Is(errEntryStoppedV1, err) {
-		return s.failure.SourceError
+// Preparation and Visit project the same first-failure frame. Visit supplies
+// its saved inert pointer, which remains available after callback expiry.
+func (s *entryInventoryStateV1) resultV1(failure *EntryInventoryFailureV1, err error) (*EntryInventoryFailureV1, error) {
+	if !s.failed {
+		return nil, err
 	}
-	return err
+	if errors.Is(errEntryStoppedV1, err) {
+		err = failure.SourceError
+	}
+	return failure, err
 }
 
 func (s *entryInventoryStateV1) failureResultV1() *EntryInventoryFailureV1 {
@@ -150,8 +156,8 @@ func (s *entryInventoryStateV1) failureResultV1() *EntryInventoryFailureV1 {
 	return nil
 }
 
-// VisitEntryInventoryV1 emits CURRENT counter/binding, then LAG counter/binding.
-// The supported prefix ends with invalid ENTRY inventory; it never completes.
+// VisitEntryInventoryV1 observes the complete non-GEN physical source domain.
+// Selected GEN is refused after the supported sources, without GEN access.
 // A physical stop can instead return a nonnil sidecar with a nil SourceError.
 func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryInventoryRowV1) error) (*EntryInventoryFailureV1, error) {
 	if !r.usable() || token.scope == nil {
@@ -172,16 +178,19 @@ func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryI
 		return nil, entryInputV1()
 	}
 	defer func() { s.access.active = false }()
-	w := entryWalkV1{s: s, old: r, visit: visit}
-	err := w.controlsV1()
-	return s.failureResultV1(), s.resultV1(err)
+	var cursor entryCursorV1
+	stream := &entryStreamV1{}
+	s.stream = stream // register before any fallible source work
+	w := entryWalkV1{s: s, old: r, visit: visit, stream: stream, cursor: &cursor}
+	failure := s.failure // survives callback expiry and mutable-borrow retirement
+	return s.resultV1(failure, w.runV1())
 }
 
 func (s *entryInventoryStateV1) visitableV1(r *Reader) bool {
 	return s.reader == r && s.entry == r.entry && !s.completed && !s.visiting && !s.retired && !s.failed && s.account.openV1()
 }
 
-func (s *entryInventoryStateV1) requestV1(row EntryInventoryRowV1, access uint8, key []byte) {
+func (s *entryInventoryStateV1) requestV1(row *EntryInventoryRowV1, access uint8, key []byte) {
 	if s.failed {
 		return
 	}
@@ -190,8 +199,10 @@ func (s *entryInventoryStateV1) requestV1(row EntryInventoryRowV1, access uint8,
 	f.Generation, f.Height, f.Hash = row.Generation, row.Height, row.Hash
 	f.Access, f.Observation, f.SourceError = access, 0, nil
 	f.Key = f.Key[:copy(f.Key[:cap(f.Key)], key)]
-	// A has only point/ReadAt requests, never a cursor prefix.
 	f.Prefix = nil
+	if access == 2 {
+		f.Prefix = f.Hash[:]
+	}
 }
 
 func (s *entryInventoryStateV1) stopV1(observation uint8, err error) error {
@@ -245,8 +256,12 @@ func (a *entryRowAccessV1) readV1(dst []byte, offset uint64) (int, error) {
 	if s.failed {
 		return 0, largeImageInput("ENTRY inventory row is not active")
 	}
-	s.requestV1(s.row, 3, a.key)
-	image, err := r.obsoletePoint(0, a.key, operationGet)
+	s.requestV1(&s.row, 3, a.key)
+	w := entryWalkV1{s: s}
+	image, literal, err := w.literalV1(entryRankV1(s.row.Artifact), a.key)
+	if err == nil && !literal {
+		image, err = r.obsoletePoint(entryRankV1(s.row.Artifact), a.key, operationGet)
+	}
 	if err == nil && (!image.present || image.length != a.image.length) {
 		err = obsoleteShape(operationGet)
 	}
@@ -269,6 +284,9 @@ func (e *treePublicEntryV1) retireEntryV1() {
 // Called under the immutable Reader getMu before ORIGINAL OLD is aborted.
 func (s *entryInventoryStateV1) retireV1() {
 	s.retired = true
+	if s.stream != nil {
+		*s.stream = entryStreamV1{}
+	}
 	s.entry, s.reader, s.account = nil, nil, nil
 	s.oldBytes, s.nextBytes, s.mutations, s.consulted = nil, nil, nil, nil
 	s.decode, s.inspection, s.authority = [2]authorityDecodeControl{}, [2]authorityInspection{}, [2]TreeAuthorityV1{}
