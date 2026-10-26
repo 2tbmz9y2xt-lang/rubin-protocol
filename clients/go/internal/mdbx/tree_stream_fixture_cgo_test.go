@@ -2132,6 +2132,31 @@ func TestTreeProofAfterReserveV1(t *testing.T) {
 	}
 }
 
+// N3: a freezeV1 drift precedes Proof. CURRENT inserts the first leaf of an
+// empty generation-1 tree, so its rank-8 leaf row enters P through the unchecked
+// emitter read only; the first OLD/write comparison of that row is freezeV1.
+func TestTreeProofAfterFreezeDriftV1(t *testing.T) {
+	s := tsfNew(t)
+	tsfCover(t, s)
+	var log tsProofLog
+	s.op.Proof = log.proof
+	leaf := testTreeNodeKey(1, 288, tcEntry(tdUTXOKey(1, tdTxid(0x10), 0), nil).k)
+	var r tsResult
+	count, err := FixtureWriteSnapshotDrift(s.s, 8, leaf, func() { r = s.run(t) })
+	mustEnvironment(t, err)
+	if count != 1 || log.calls != 0 {
+		t.Fatalf("freeze drift count%d Proof calls%d", count, log.calls)
+	}
+	for j, p := range s.p {
+		if p.calls != [3]int{0, 1, 0} {
+			t.Fatalf("primitive %d Source calls%v before freeze", j, p.calls)
+		}
+	}
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+	tsConsumed(t, s.s, s.o, 1, r.err)
+}
+
 // N5: a Proof panic or Goexit takes the writer unwind with index -1, no write,
 // a released account and an OPEN Store.
 func TestTreeProofUnwindV1(t *testing.T) {

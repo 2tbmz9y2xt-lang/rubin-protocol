@@ -95,7 +95,9 @@ type TreePrimitiveV1 struct {
 // step refuses. A non-nil result E ends the attempt as (OLD, Prewrite, -1, E)
 // with no write, consumes the Store with terminal E and releases the account
 // charges once. A Proof panic or Goexit takes the writer-position unwind with
-// index -1. Proof must not call any Store, Reader or OperationAccount method,
+// index -1; a clean unwind leaves the Store OPEN, then the panic or Goexit
+// resumes. A nil result continues to flush, final checks and commit unchanged.
+// Proof must not call any Store, Reader or OperationAccount method,
 // must not retain the report, and must start no goroutine that outlives the call.
 type TreeOperationV1 struct {
 	Primitives []TreePrimitiveV1
