@@ -138,11 +138,14 @@ func (c *treeComposeV1) entryTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, er
 	if err != nil {
 		return CommitTruthUnknown, err
 	}
-	if old && residual {
+	switch {
+	case !residual:
+		return CommitTruthUnknown, nil
+	case old:
 		return CommitTruthOld, nil
-	}
-	if next && residual {
+	case next:
 		return CommitTruthNew, nil
+	default:
+		return CommitTruthUnknown, nil
 	}
-	return CommitTruthUnknown, nil
 }
