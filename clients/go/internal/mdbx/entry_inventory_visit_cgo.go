@@ -316,6 +316,18 @@ func (w *entryWalkV1) targetImageV1(old, projected updateImage) (updateImage, er
 	return updateImage{}, entryInputV1()
 }
 
+// After imageV1 succeeds, a matching target proves OLD was absent.
+func (w *entryWalkV1) malformedImageV1(row *EntryInventoryRowV1, key []byte) error {
+	_, literal, err := w.literalV1(entryRankV1(row.Artifact), key)
+	if err != nil {
+		return err
+	}
+	if literal {
+		return entryInputV1()
+	}
+	return w.s.stopV1(4, nil)
+}
+
 func (w *entryWalkV1) runV1() error {
 	w.stream.seek = make([]byte, w.s.maxKey)
 	if err := w.controlsV1(); err != nil {
@@ -478,6 +490,9 @@ func (w *entryWalkV1) canonicalHeaderV1(height uint64, entry *[104]byte) error {
 func (w *entryWalkV1) headerV1(row *EntryInventoryRowV1, image updateImage, parent [32]byte) error {
 	borrow, _ := treeBorrowV1(image)
 	if validateInitial148Value(row.Hash, borrow.value, false) != nil || [32]byte(borrow.value[4:36]) != parent {
+		if row.Source == 11 {
+			return w.malformedImageV1(row, row.Hash[:])
+		}
 		return w.s.stopV1(4, nil)
 	}
 	return nil
@@ -615,7 +630,7 @@ func (w *entryWalkV1) capturedLinkV1(row *EntryInventoryRowV1, key []byte, paren
 	b, _ := treeBorrowV1(image)
 	work := [40]byte(b.value[64:])
 	if !all([32]byte(b.value[:32]) == row.Hash, [32]byte(b.value[32:64]) == parent, validWork(work)) {
-		return w.s.stopV1(4, nil)
+		return w.malformedImageV1(row, key)
 	}
 	side := w.s.authority[1].Authority.Ordinary.CapturedSelectedSide
 	if row.Height == side.TipHeight && work != side.CumulativeChainwork {

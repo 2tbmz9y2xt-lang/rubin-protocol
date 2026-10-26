@@ -659,10 +659,11 @@ func eisBoundaries(t *testing.T) {
 			}
 		})
 	}
-	for _, variant := range []string{"wrong-O-descriptor", "header-parent", "link-tip-work"} {
+	for _, variant := range []string{"wrong-O-descriptor", "header-parent", "link-parent", "link-zero-work", "link-tip-work"} {
 		t.Run(variant, func(t *testing.T) {
 			f := eisNew(t, 3, 1, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
+			before := eiEncoded(t, f.old)
 			entry, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
 			mustEnvironment(t, err)
 			switch variant {
@@ -679,6 +680,10 @@ func eisBoundaries(t *testing.T) {
 				entry.Authority.Ordinary.NewSuffix[0].BlockHash = hash
 				entry.Authority.Ordinary.Target.BlockHash = hash
 				entry.Authority.Ordinary.CapturedSelectedSide.TipHash = hash
+			case "link-parent":
+				pair.Mutations[3].Literal[32] ^= 1
+			case "link-zero-work":
+				clear(pair.Mutations[3].Literal[64:])
 			case "link-tip-work":
 				pair.Mutations[3].Literal[103] = 9 // valid nonzero work, wrong admitted tip
 			}
@@ -689,20 +694,15 @@ func eisBoundaries(t *testing.T) {
 				return nil
 			})
 			eiInput(t, result.err)
-			if variant == "header-parent" {
-				if failure == nil || failure.Source != 11 || failure.Observation != 4 || failure.SourceError != nil || visitErr != nil || last != 9 {
-					t.Fatal("valid-hash header with mismatched parent did not fail at source11")
-				}
-			} else {
-				eiInput(t, visitErr)
-				want := uint8(9)
-				if variant == "wrong-O-descriptor" {
-					want = 4
-				}
-				if failure != nil || last != want {
-					t.Fatalf("pure identity/work refusal invented source failure %+v/%d", failure, last)
-				}
+			want := uint8(9)
+			if variant == "wrong-O-descriptor" {
+				want = 4
 			}
+			if failure != nil || last != want {
+				t.Fatalf("pure identity/work refusal invented source failure %+v/%d", failure, last)
+			}
+			eiInput(t, visitErr)
+			(&eiScene{s: f.s, o: f.o, pair: pair, oldBytes: before}).unchanged(t)
 		})
 	}
 }
