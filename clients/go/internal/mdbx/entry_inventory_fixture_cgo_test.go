@@ -1975,37 +1975,119 @@ func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureL
 
 func eicLateDomain(t *testing.T) {
 	t.Run("false-before-required-read", eicTruthContinuation)
-	for _, mode := range []uint32{14, 13, 3, 7} {
+	t.Run("ordinary-OLD-residual-UNKNOWN", eicOldTruthContinuation)
+	t.Run("late-source-read-error", eicLateRead)
+	for _, mode := range []uint32{14, 13, 3} {
 		t.Run(fmt.Sprintf("position%d", mode), func(t *testing.T) {
 			f := eisNew(t, 17000, 2, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
-			key := eisHeight(11, 16999) // not the early O-tip/common-boundary requests
-			changed := eisChain(f.hashes[16999], f.hashes[16998], 16999)
-			changed[103] ^= 1
 			var result tsResult
-			var evidence fixtureLargeEvidence
 			count := 0
-			_, err := fixtureTipCursor(f.s, 1, 1, 1, 0, func() {
-				mustEnvironment(t, fixtureTipDrift(key, changed, true))
-				var faultErr error
-				evidence, faultErr = fixtureLargeFault(f.s, mode, 2, key, func() {
-					result, _, _, _ = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
-						if row.Source == 7 {
-							if row.Height != uint64(count) {
-								t.Fatal("late equality fixture did not visit its full literal archive")
-							}
-							count++
+			// This body is beyond16384 and outside O, the common boundary and Pair.
+			evidence, err := fixtureLargeFault(f.s, mode, 4, f.hashes[16998][:], func() {
+				result, _, _, _ = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source == 7 {
+						if row.Height != uint64(count) {
+							t.Fatal("late equality fixture did not visit its full literal archive")
 						}
-						return nil
-					})
+						count++
+					}
+					return nil
 				})
-				mustEnvironment(t, faultErr)
 			})
 			mustEnvironment(t, err)
 			if count != 17001 {
 				t.Fatalf("late residual was never reached after literal row17001: %d", count)
 			}
 			eicMismatch(t, f, result, evidence, mode)
+			if mode == 3 {
+				tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, pair.Mutations[0].Literal)
+			}
+		})
+	}
+}
+
+func eicOldTruthContinuation(t *testing.T) {
+	f := eisNew(t, 17000, 2, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	// This common-boundary drift distinguishes ordinary OLD from residual UNKNOWN;
+	// it makes no claim about first detection at a late private source.
+	key := eisHeight(11, 16999)
+	changed := eisChain(f.hashes[16999], f.hashes[16998], 16999)
+	changed[103] ^= 1
+	var result tsResult
+	var evidence fixtureLargeEvidence
+	count := 0
+	_, err := fixtureTipCursor(f.s, 1, 1, 1, 0, func() {
+		mustEnvironment(t, fixtureTipDrift(key, changed, true))
+		var faultErr error
+		evidence, faultErr = fixtureLargeFault(f.s, 7, 2, key, func() {
+			result, _, _, _ = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == 7 {
+					if row.Height != uint64(count) {
+						t.Fatal("continuation fixture did not visit its full literal archive")
+					}
+					count++
+				}
+				return nil
+			})
+		})
+		mustEnvironment(t, faultErr)
+	})
+	mustEnvironment(t, err)
+	if count != 17001 {
+		t.Fatalf("continuation public archive rows: %d", count)
+	}
+	eicMismatch(t, f, result, evidence, 7)
+}
+
+func eicLateRead(t *testing.T) {
+	for _, test := range []struct {
+		mode, gets, commits uint32
+		stage               UpdateStage
+		truth               CommitTruth
+	}{{1, 2, 0, 1, 1}, {30, 3, 0, 2, 1}, {8, 1, 1, 3, 3}} {
+		t.Run(fmt.Sprintf("position%d-mode%d", test.stage, test.mode), func(t *testing.T) {
+			f := eisNew(t, 17000, 2, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			var result tsResult
+			var token EntryInventoryV1
+			var publicFailure *EntryInventoryFailureV1
+			var publicError error
+			count := 0
+			evidence, err := fixtureLargeFault(f.s, test.mode, 4, f.hashes[16998][:], func() {
+				result, token, publicFailure, publicError = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source == 7 {
+						if row.Height != uint64(count) {
+							t.Fatal("late read fixture did not visit its full literal archive")
+						}
+						count++
+					}
+					return nil // No ReadAt: each selected OLD get belongs to one pass.
+				})
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, test.truth, test.stage, -1)
+			if count != 17001 || publicFailure != nil || publicError != nil || !token.scope.completed || token.scope.failure == nil {
+				t.Fatalf("private error interrupted public completion: %d/%+v/%v", count, publicFailure, publicError)
+			}
+			physical := result.err
+			want := eiEncoded(t, f.old)
+			if test.stage == 3 {
+				commit := tipCommit(t, result.err, 3, token.scope.failure.SourceError)
+				treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+				physical, want = commit.ReadbackCause, pair.Mutations[0].Literal
+			}
+			treeNativeError(t, physical, "update", "IO", 5, "error 5", nil)
+			eissFailure(t, token.scope.failure, 7, 7, 1, 1, 1, 11, 16998, f.hashes[16998], f.hashes[16998][:], nil, physical)
+			if token.scope.failure.Prefix != nil || evidence.gets != test.gets || evidence.commits != test.commits || evidence.aborts != 1 || evidence.closes != 0 || evidence.drift != 0 || reservationLive(f.o) != 0 {
+				t.Fatalf("late read/native cleanup frontier %+v", evidence)
+			}
+			if !token.scope.retired || token.scope.reader != nil || token.scope.stream != nil || token.scope.access.active || token.scope.access.reader != nil || token.scope.access.key != nil || token.scope.access.image != (updateImage{}) || f.s.txn != nil || f.s.env != nil {
+				t.Fatal("late read consumed owner retained native handles or source capability")
+			}
+			tsConsumed(t, f.s, f.o, test.truth, result.err)
+			tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, want)
 		})
 	}
 }
