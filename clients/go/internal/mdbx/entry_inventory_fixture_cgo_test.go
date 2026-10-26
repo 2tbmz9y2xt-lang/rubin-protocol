@@ -2142,9 +2142,9 @@ func eicNodeRemnant(t *testing.T) {
 			}
 			keys[3][44], keys[3][45] = 1, 32 // root last; child links may be absent
 			for i, key := range keys {
-				value := bytes.Repeat([]byte{byte(i+1)}, 32)
+				value := bytes.Repeat([]byte{byte(i + 1)}, 32)
 				if i == 1 || i == 3 {
-					value = bytes.Repeat([]byte{byte(i+1)}, 140)
+					value = bytes.Repeat([]byte{byte(i + 1)}, 140)
 				}
 				treeNativeSeed(t, f.s, 8, key, value)
 			}
@@ -2394,7 +2394,7 @@ func eicPairRoles(t *testing.T) {
 			f := eisNew(t, 3, 1, nil)
 			var evidenceKeys [2][]byte
 			for i, g := range []uint64{11, 13} {
-				capsule, err := (TreeEvidenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, Payload: []byte{byte(0xa1+i)}}).Encode()
+				capsule, err := (TreeEvidenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, Payload: []byte{byte(0xa1 + i)}}).Encode()
 				mustEnvironment(t, err)
 				id := sha3.Sum256(capsule)
 				evidenceKeys[i] = append([]byte{0x12}, id[:]...)
@@ -2405,7 +2405,7 @@ func eicPairRoles(t *testing.T) {
 					if err != nil || !present {
 						return errors.New("missing actual role binding")
 					}
-					root.Assurance = TreeAssuranceV1{Kind: 2, Import: &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, OriginalRole: TreeOriginalRoleV1(i+1), EvidenceID: id}}
+					root.Assurance = TreeAssuranceV1{Kind: 2, Import: &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, OriginalRole: TreeOriginalRoleV1(i + 1), EvidenceID: id}}
 					value, err = root.Encode()
 					if err != nil {
 						return err
@@ -2426,7 +2426,7 @@ func eicPairRoles(t *testing.T) {
 						return errors.New("imported role reference mismatch")
 					}
 					capsule, err := r.ReadTreeEvidenceV1(*root.Assurance.Import)
-					if err != nil || !bytes.Equal(capsule.Payload, []byte{byte(0xa1+i)}) {
+					if err != nil || !bytes.Equal(capsule.Payload, []byte{byte(0xa1 + i)}) {
 						return errors.New("actual independent role capsule mismatch")
 					}
 				}

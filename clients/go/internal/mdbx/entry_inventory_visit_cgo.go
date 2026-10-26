@@ -893,12 +893,12 @@ func (w *entryWalkV1) generationV1(g uint64) error {
 
 // Active keyed ownership retains its integrity priority and actual request context.
 func (w *entryWalkV1) ownerV1(role int, primary *EntryInventoryRowV1) (uint64, bool, error) {
-	g := w.s.authority[0].Authority.ActiveGenerationID
+	g, sourceRole := w.s.authority[0].Authority.ActiveGenerationID, uint8(1)
 	if role == 1 {
-		g = w.s.authority[0].LagGenerationID
+		g, sourceRole = w.s.authority[0].LagGenerationID, 2
 	}
 	row := w.context
-	*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: uint8(role + 1), Generation: g, Hash: primary.Hash}
+	*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: sourceRole, Generation: g, Hash: primary.Hash}
 	var key [40]byte
 	binary.BigEndian.PutUint64(key[:8], g)
 	copy(key[8:], primary.Hash[:])
@@ -1118,7 +1118,7 @@ func (w *entryWalkV1) reverseV1(primary *EntryInventoryRowV1) error {
 
 func (w *entryWalkV1) dependentsV1(row *EntryInventoryRowV1) error {
 	for _, artifact := range [2]uint8{7, 8} {
-		row.Source, row.Artifact = 14 + artifact, artifact
+		row.Source, row.Artifact = 14+artifact, artifact
 		keep, err := w.keptV1(row)
 		if err != nil {
 			return err

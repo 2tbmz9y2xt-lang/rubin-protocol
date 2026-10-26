@@ -401,7 +401,7 @@ func (c *treeComposeV1) runV1() {
 		return
 	}
 	stopped, err := w.loopV1()
-	if stopped && w.unwind.kind != 0 {
+	if all(stopped, w.unwind.kind != 0) {
 		c.unwind, w.recorded = w.unwind, err // P: R_j is the step-2 primary; cleanupV1 aborts after the release (T3)
 		return
 	}
@@ -436,7 +436,8 @@ func (c *treeComposeV1) holdV1() error {
 	if err != nil {
 		return err
 	}
-	if err := c.entryMatchV1("final update image mismatch"); err != nil {
+	err = c.entryMatchV1("final update image mismatch")
+	if err != nil {
 		return err
 	}
 	return c.reserveV1()

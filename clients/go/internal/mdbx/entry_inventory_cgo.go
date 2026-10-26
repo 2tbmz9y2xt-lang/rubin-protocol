@@ -186,7 +186,7 @@ func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryI
 	failure := s.failure // survives callback expiry and mutable-borrow retirement
 	err := w.runV1()
 	s.clearSourcesV1()
-	s.completed = err == nil && !s.failed && !s.retired
+	s.completed = all(err == nil, !s.failed, !s.retired)
 	return s.resultV1(failure, err)
 }
 

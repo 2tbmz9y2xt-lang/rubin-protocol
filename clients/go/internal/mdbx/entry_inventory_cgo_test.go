@@ -1885,13 +1885,14 @@ func eicToken(t *testing.T) {
 				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, pair.Mutations[0].Literal)
 			} else {
 				result.tuple(t, 1, 1, -1)
-				if mode == "proof" || mode == "ordinary-shape" {
+				switch mode {
+				case "proof", "ordinary-shape":
 					tsRefusal(t, result, false)
-				} else if mode == "discard-after-complete" || mode == "discard-after-prepare" {
+				case "discard-after-complete", "discard-after-prepare":
 					if any(result.err) != any(marker) {
 						t.Fatal("callback discard interface changed")
 					}
-				} else {
+				default:
 					eiInput(t, result.err)
 				}
 				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
@@ -1911,9 +1912,9 @@ func eicLifetime(t *testing.T) {
 		t.Run(fmt.Sprint(short), func(t *testing.T) {
 			f := eisNew(t, 3, 1, nil)
 			pair := eisCapture(t, f, 1, 1, false, false)
-			pc := uint64(128*len(pair.Mutations))
+			pc := uint64(128 * len(pair.Mutations))
 			for _, m := range pair.Mutations {
-				pc += uint64(len(m.Key)+len(m.Literal))
+				pc += uint64(len(m.Key) + len(m.Literal))
 			}
 			e := uint64(8192) + 6*uint64(limitsForPage(f.s.config.PageSize).maxKey)
 			filler := uint64(402653184) - e - pc + short
@@ -2016,9 +2017,9 @@ func eicOwnedBacking(t *testing.T, observe ...func(*entryInventoryStateV1, *tree
 	pair := eisCapture(t, f, 1, 1, false, false)
 	pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(11)}}
 	before := bytes.Clone(pair.Mutations[0].Literal)
-	pc := uint64(128*len(pair.Mutations)+48*len(pair.Consulted))
+	pc := uint64(128*len(pair.Mutations) + 48*len(pair.Consulted))
 	for _, m := range pair.Mutations {
-		pc += uint64(len(m.Key)+len(m.Literal))
+		pc += uint64(len(m.Key) + len(m.Literal))
 	}
 	pc += uint64(len(pair.Consulted[0].Key))
 	sentinel := errors.New("owned rebind observed")

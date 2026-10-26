@@ -7,7 +7,10 @@ package mdbx
 */
 import "C"
 
-import "bytes"
+import (
+	"bytes"
+	"errors"
+)
 
 // ownV1 rebinds the descriptor after the single ordinary Pair clone. No public
 // stream, original target borrow, or operation is retained into composition.
@@ -46,7 +49,7 @@ func (s *entryInventoryStateV1) equalV1(candidate *C.MDBX_txn, plan *treePlanV1)
 		s.reader.getMu.Unlock()
 	}()
 	err := w.runV1()
-	if err == errEntryStoppedV1 {
+	if errors.Is(errEntryStoppedV1, err) {
 		err = s.failure.SourceError
 	}
 	return w.equal && !s.failed, err
@@ -83,7 +86,8 @@ func (w *entryWalkV1) scanCompareV1(row *EntryInventoryRowV1) error {
 	left, right := w.stream, w.other
 	for {
 		right.row = largeNativeRow{}
-		if err := w.fetchV1(right, row); err != nil {
+		err := w.fetchV1(right, row)
+		if err != nil {
 			return err
 		}
 		if right.done {
@@ -91,7 +95,7 @@ func (w *entryWalkV1) scanCompareV1(row *EntryInventoryRowV1) error {
 			return nil
 		}
 		if !left.done && bytes.Compare(right.row.key, left.row.key) >= 0 {
-			w.equal = obsoleteRowsEqual(left.row, right.row, left.domain.rank, w.plan.consulted) && w.equal
+			w.equal = all(obsoleteRowsEqual(left.row, right.row, left.domain.rank, w.plan.consulted), w.equal)
 			return nil
 		}
 		w.equal = false

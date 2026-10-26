@@ -302,7 +302,8 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	if admissionErr != nil {
 		return admissionErr
 	}
-	if err := e.entryAdmitV1(&op, account); err != nil {
+	err := e.entryAdmitV1(&op, account)
+	if err != nil {
 		return err
 	}
 	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
