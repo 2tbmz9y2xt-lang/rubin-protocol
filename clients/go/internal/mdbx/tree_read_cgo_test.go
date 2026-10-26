@@ -586,8 +586,8 @@ func trBoundV1(t *testing.T) {
 	request, _, _ := trRequestV1(t, 0)
 	base := request.Primitive.Source
 	request.Primitive.Source = tsSource(func(pos TreePositionV1, reader *Reader, sink *TreeDeltaSinkV1) error {
-		if reservationLive(o) != 288504 {
-			t.Fatalf("D reservation = %d, want 288504", reservationLive(o))
+		if reservationLive(o) != 288512 {
+			t.Fatalf("D reservation = %d, want 288512", reservationLive(o))
 		}
 		return base.TreeDeltaV1(pos, reader, sink)
 	})
@@ -596,8 +596,8 @@ func trBoundV1(t *testing.T) {
 		return s.View(func(reader *Reader) error {
 			return account.WithReservation(266480, func() error {
 				request.Primitive.Source = tsSource(func(pos TreePositionV1, sourceReader *Reader, sink *TreeDeltaSinkV1) error {
-					if reservationLive(o) != 554984 {
-						t.Fatalf("simultaneous R+D backing %d, want 554984", reservationLive(o))
+					if reservationLive(o) != 554992 {
+						t.Fatalf("simultaneous R+D backing %d, want 554992", reservationLive(o))
 					}
 					return base.TreeDeltaV1(pos, sourceReader, sink)
 				})
@@ -629,7 +629,7 @@ func trCapacityV1(t *testing.T, s *Store, o *OperationReservationOwner) {
 		mustEnvironment(t, o.WithOperation(TreeOperation, func(account *OperationAccount) error {
 			return s.View(func(reader *Reader) error {
 				request, _, _ := trRequestV1(t, 0)
-				return account.WithReservation(402653184-288504+extra, func() error {
+				return account.WithReservation(402653184-288512+extra, func() error {
 					if extra == 1 {
 						request.Primitive.Source = trCountingSourceV1(request.Primitive.Source, t)
 					}

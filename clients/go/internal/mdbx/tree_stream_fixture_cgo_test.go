@@ -14,6 +14,103 @@ import (
 	"testing"
 )
 
+// The native fixture primary selector invokes this reached-owner check. It
+// models the account window after public precheck, without a scheduler seam.
+func tsClosedBeforeHoldV1(t *testing.T) {
+	for _, mode := range []string{"application", "malformed", "valid", "attached", "panic", "panic-nil", "goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			var closed *OperationAccount
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				closed = a
+				return nil
+			}))
+			marker, value := errors.New("pre-hold application"), new(int)
+			calls, returned := 0, false
+			var result tsResult
+			var recovered any
+			run := func() {
+				defer func() { recovered = recover() }()
+				var unwind treeUnwindV1
+				defer func() { unwind.resumeV1() }()
+				s.operations.Lock()
+				defer s.operations.Unlock()
+				result.truth, result.stage, result.index, unwind, result.err = s.treeEntryLockedV1(closed, func(r *Reader) (TreeOperationV1, error) {
+					calls++
+					got, present, err := r.Get(TreeSchemaV1DBIs()[0], []byte{2})
+					if err != nil || !present || !bytes.Equal(got, tsEntry(t).Pair.Mutations[0].Literal) {
+						t.Fatal("closed pre-hold fallback lost real ORIGINAL OLD")
+					}
+					token, failure, err := r.PrepareEntryInventoryV1(closed, tsPair(51).Pair)
+					if token.scope != nil || failure != nil || reservationLive(o) != 0 {
+						t.Fatal("closed pre-hold fallback acquired ENTRY backing")
+					}
+					eiInput(t, err)
+					switch mode {
+					case "application":
+						return TreeOperationV1{}, marker
+					case "malformed":
+						return TreeOperationV1{}, nil
+					case "panic":
+						panic(value)
+					case "panic-nil":
+						panic(treeCallNilPanicValue)
+					case "goexit":
+						runtime.Goexit()
+					}
+					op := tsPair(51)
+					if mode == "attached" {
+						op.Pair.EntryInventory = &EntryInventoryV1{}
+					}
+					return op, nil
+				})
+				returned = unwind.kind == 0
+			}
+			if mode == "goexit" {
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					run()
+				}()
+				eiAwait(t, done)
+			} else {
+				run()
+			}
+			switch mode {
+			case "application":
+				if any(result.err) != any(marker) {
+					t.Fatal("saved hold refusal replaced application")
+				}
+			case "malformed":
+				tsRefusal(t, result, false)
+			case "valid":
+				if any(result.err) != any(errOperationReservationInput) {
+					t.Fatal("saved original hold singleton replaced")
+				}
+			case "attached":
+				eiInput(t, result.err)
+			case "panic":
+				if returned || recovered != value {
+					t.Fatal("fallback changed panic")
+				}
+			case "panic-nil":
+				if returned || recovered == nil {
+					t.Fatal("fallback changed panic(nil)")
+				}
+			case "goexit":
+				if returned || recovered != nil {
+					t.Fatal("fallback changed Goexit")
+				}
+			}
+			if calls != 1 || s.state != storeOPEN || reservationLive(o) != 0 {
+				t.Fatal("fallback callback/cleanup count")
+			}
+			tsRead(t, s, TreeSchemaV1DBIs()[6], tsTarget(51).Key, nil)
+			tsFollowing(t, s, o)
+		})
+	}
+}
+
 // tsfProvider streams public value records; its hooks exercise only the
 // explicitly listed provider refusals, accounting observations and unwinds.
 type tsfProvider struct {
@@ -860,7 +957,7 @@ func tsfCoveredReserve(t *testing.T) {
 			tsfCover(t, s)
 			budgets := s.budgets(t)
 			pc := uint64(128 + 32 + len(s.op.Pair.Mutations[0].Literal))
-			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_400 - 208 + short
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + short
 			var r tsResult
 			run := func() {
 				mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
@@ -1044,7 +1141,7 @@ func tsfCoveredCapacity(t *testing.T) {
 					filler := uint64(0)
 					if denied {
 						pair := uint64(128 + 32 + len(op.Pair.Mutations[0].Literal))
-						filler = 402_653_184 - pair - 74_872 - 104*3 - 65_560 - 147_968
+						filler = 402_653_184 - pair - 74_880 - 104*3 - 65_560 - 147_968
 					}
 					return a.WithReservation(filler, func() error {
 						r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
@@ -1202,8 +1299,8 @@ func TestTreeStreamComposedAndExactAccountV1(t *testing.T) {
 				r = s.run(t)
 			}
 			r.tuple(t, 2, 3, -1)
-			if sample != pc+wantP[1]+74_872 {
-				t.Fatalf("A4 live%d want PC%d+P%d+74872", sample, pc, wantP[1])
+			if sample != pc+wantP[1]+74_880 {
+				t.Fatalf("A4 live%d want PC%d+P%d+74880", sample, pc, wantP[1])
 			}
 			if crossed {
 				tcCrossedCause(t, r.err, 2, nil)
@@ -1232,7 +1329,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 			s := tsfNew(t)
 			budgets := s.budgets(t)
 			pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
-			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_400 - 104*2 + short
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 104*2 + short
 			var r tsResult
 			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 				return a.WithReservation(filler, func() error {
@@ -1263,7 +1360,7 @@ func TestTreeStreamReadbackReservationV1(t *testing.T) {
 		s := tsfNew(t)
 		pc := uint64(len(s.op.Pair.Mutations[0].Key) + len(s.op.Pair.Mutations[0].Literal) + 128)
 		// CURRENT UTXO64 + manifest(33+33) =130; its first node needs78.
-		filler := uint64(402_653_184) - pc - 74_872 - 104 - 65_560 - 147_968 - 207
+		filler := uint64(402_653_184) - pc - 74_880 - 104 - 65_560 - 147_968 - 207
 		var r tsResult
 		mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
 			return a.WithReservation(filler, func() error {

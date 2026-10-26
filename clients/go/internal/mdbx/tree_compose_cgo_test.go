@@ -18,11 +18,11 @@ import (
 // Test-owned literals for the L5a composer rows. Keys, frames, values, bindings and amounts are built here from the
 // schema layouts and the D12-E/D13-14/D14-2/D33-D37 constants, never through tree_compose_cgo.go.
 const (
-	tcStep  = 65_536 + 4_096 + 4_096 + 1_144 // W + F_fixed + C + R = 74,872
+	tcStep  = 65_536 + 4_096 + 4_096 + 1_152 // W + F_fixed + C + R = 74,880
 	tcV     = 65_560
 	tcL2    = 147_968
 	tcSr    = 131_192
-	tcBrFix = 288_400 // W + F_fixed + C + R + V + L2
+	tcBrFix = 288_408 // W + F_fixed + C + R + V + L2
 )
 
 var (
@@ -466,7 +466,7 @@ func TestTreeComposeOrderV1(t *testing.T) {
 		t.Fatalf("last charge %q, want H_r %d", last, tcHr(2))
 	}
 	s.settled(t)
-	if treeReaderBytesV1 != 208+728+128+80 || tcStep != 74_872 {
+	if treeReaderBytesV1 != 216+728+128+80 || tcStep != 74_880 {
 		t.Fatal("R literal drifted")
 	}
 	tcAllocationGuards(t, s.store)
@@ -584,12 +584,12 @@ func TestTcAllocAvgReportsNotFoundAfterTenWindows(t *testing.T) {
 	}
 }
 
-// tcAllocationGuards are the A1 bounds behind R = 208 + 728 + 128 + 80 (D33, D34, D36, D37) on a read txn of the
+// tcAllocationGuards are the A1 bounds behind R = 216 + 728 + 128 + 80 (D33, D34, D36, D37) on a read txn of the
 // committed A1 Store.
 func tcAllocationGuards(t *testing.T, store *Store) {
 	t.Helper()
-	if size := unsafe.Sizeof(Reader{}); size > 208 {
-		t.Fatalf("Reader is %d bytes, above 208 (D33)", size)
+	if size := unsafe.Sizeof(Reader{}); size > 216 {
+		t.Fatalf("Reader is %d bytes, above 216 (D33)", size)
 	}
 	old, err := treeBeginV1(store.env, false)
 	mustEnvironment(t, err)
