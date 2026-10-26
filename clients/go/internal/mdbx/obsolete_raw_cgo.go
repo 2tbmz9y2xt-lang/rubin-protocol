@@ -19,9 +19,21 @@ const (
 	ObsoleteIndexV1   ObsoleteClassV1 = 2
 	ObsoleteCounterV1 ObsoleteClassV1 = 3
 	ObsoleteDerivedV1 ObsoleteClassV1 = 4
+	// ObsoleteNodeV1 and ObsoleteRootV1 exist only on a format-3 Reader: the
+	// tree-node rows of g and the root binding 0x11 || u64be(g), as raw rows.
+	ObsoleteNodeV1 ObsoleteClassV1 = 5
+	ObsoleteRootV1 ObsoleteClassV1 = 6
 )
 
-// ObsoleteProjectionV1 reports only the fixed own-index/header proof.
+// ObsoleteProjectionV1 reports only the own-index/header proof. On a successful return,
+// ObsoleteGenerationPageV1 reports NotApplicable. On a successful ObsoleteUndoPageV1 return,
+// Proven holds exactly when the index row is present with a 16-byte key whose big-endian
+// height (key[8:16]) is <= 0xffffffff and a 104-byte value whose work field (value[64:104])
+// has bytes 0-2 zero and either byte 3 equal to 1 with bytes 4-39 zero, or byte 3 equal to 0
+// with bytes 4-39 not all zero; and the header named by the entry hash (value[0:32]) is
+// present, has the Reader's format width (148 bytes on a format-3 Reader, 116 otherwise), has
+// SHA3-256 equal to that entry hash and carries the entry parent hash (value[32:64]) at
+// header[4:36]. Otherwise it reports Invalid.
 type ObsoleteProjectionV1 uint8
 
 const (
@@ -90,6 +102,14 @@ func obsoleteShape(op engineOperation) error {
 	return adapterError(op, EngineLocalInvariant, codeProblem, "invalid native obsolete generation result", nil)
 }
 
+// obsoleteSelectorRank returns 255 for a closed-domain refusal, including a tree class off format 3.
+func obsoleteSelectorRank(class ObsoleteClassV1, format uint8) uint8 {
+	if class >= ObsoleteNodeV1 && format != 3 {
+		return 255
+	}
+	return obsoleteRank(class)
+}
+
 func obsoleteRank(class ObsoleteClassV1) uint8 {
 	switch class {
 	case ObsoleteUTXOV1:
@@ -100,6 +120,10 @@ func obsoleteRank(class ObsoleteClassV1) uint8 {
 		return 0
 	case ObsoleteDerivedV1:
 		return 7
+	case ObsoleteNodeV1:
+		return 8
+	case ObsoleteRootV1:
+		return 0
 	}
 	return 255
 }
@@ -168,25 +192,35 @@ func obsoletePageBounds(after, prefix []byte, maxKey uint64, maxRows uint32, poi
 }
 
 // ObsoleteGenerationPageV1 observes physical ownership only, including malformed rows.
+// On a Reader whose format is not 3, ObsoleteNodeV1 and ObsoleteRootV1 return the zero page
+// and the same InvalidInput "invalid obsolete generation selector" refusal as an unknown class.
 func (r *Reader) ObsoleteGenerationPageV1(g uint64, class ObsoleteClassV1, after []byte, maxRows uint32) (ObsoletePageV1, error) {
 	if !r.usable() {
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "Reader is not active")
 	}
-	rank := obsoleteRank(class)
+	rank := obsoleteSelectorRank(class, r.format)
 	if g == 0 || rank == 255 {
 		return ObsoletePageV1{}, obsoleteInput(operationPrefixPage, "invalid obsolete generation selector")
 	}
-	prefix := make([]byte, 8)
-	binary.BigEndian.PutUint64(prefix, g)
-	point := class == ObsoleteCounterV1
-	if point {
-		prefix = append([]byte{0x10}, prefix...)
-	}
+	prefix, point := obsoletePrefix(g, class)
 	if !obsoletePageBounds(after, prefix, r.maxKey, maxRows, point) {
 		return ObsoletePageV1{}, obsoleteBounds()
 	}
 	domain := obsoleteDomain{rank: rank, prefix: prefix, after: bytes.Clone(after), point: point}
 	return r.obsoletePage(domain, maxRows, ObsoleteProjectionNotApplicableV1, nil)
+}
+
+// obsoletePrefix returns the 8-byte generation range prefix, or a 9-byte meta point key.
+func obsoletePrefix(g uint64, class ObsoleteClassV1) ([]byte, bool) {
+	prefix := binary.BigEndian.AppendUint64(nil, g)
+	switch class {
+	case ObsoleteCounterV1:
+		return append([]byte{0x10}, prefix...), true
+	case ObsoleteRootV1:
+		return append([]byte{0x11}, prefix...), true
+	case ObsoleteUTXOV1, ObsoleteIndexV1, ObsoleteDerivedV1, ObsoleteNodeV1:
+	}
+	return prefix, false
 }
 
 func (r *Reader) obsoleteUndoInput(index ObsoleteRowV1, after []byte, maxRows uint32) error {
@@ -213,7 +247,22 @@ func obsoleteUndoBounds(after []byte, maxKey uint64, maxRows uint32) bool {
 }
 
 // ObsoleteUndoPageV1 proves the index's own projection before dependent bounds or traversal.
-// The proof reads no predecessor and confers no consumer disposal authority.
+// The proof reads no predecessor and confers no consumer disposal authority. Every error
+// returns the zero page. In order:
+//  1. An inactive Reader returns InvalidInput "Reader is not active"; an index row that is
+//     nil, from another Reader or not an index row returns InvalidInput "invalid or foreign
+//     obsolete generation index"; maxRows outside 1..1440, or a non-nil after shorter than
+//     32 bytes or longer than the Reader's key limit, returns InvalidInput "invalid obsolete
+//     generation page bounds".
+//  2. The projection (see ObsoleteProjectionV1) is read with a header proof width of 148
+//     bytes on a format-3 Reader and 116 bytes otherwise; a native read failure is returned
+//     and deactivates the Reader.
+//  3. Invalid: a nil after returns an exhausted page with no rows, Projection Invalid and a
+//     witness over the points read; a non-nil after returns the page-bounds refusal above.
+//  4. Proven: an after that does not start with the 32-byte entry hash returns the
+//     page-bounds refusal; otherwise the undo rows under that prefix are paged as
+//     ObsoleteGenerationPageV1 pages its rows, with Projection Proven and a witness that also
+//     carries the projection points read.
 func (r *Reader) ObsoleteUndoPageV1(index ObsoleteRowV1, after []byte, maxRows uint32) (ObsoletePageV1, error) {
 	if err := r.obsoleteUndoInput(index, after, maxRows); err != nil {
 		return ObsoletePageV1{}, err
@@ -265,12 +314,21 @@ func (r *Reader) obsoleteProjection(index ObsoleteRowV1) ([32]byte, []obsoletePo
 	if err != nil {
 		return hash, points, false, err
 	}
-	if !header.present || header.length != 116 {
+	width := obsoleteHeaderWidth(r.format)
+	if !header.present || uint64(header.length) != width {
 		return hash, points, false, nil
 	}
-	data := make([]byte, 116)
-	_, _ = largeImageCopy(data, header.bytes, 116, 0)
+	data := make([]byte, width)
+	_, _ = largeImageCopy(data, header.bytes, width, 0)
 	return hash, points, sha3.Sum256(data) == hash && bytes.Equal(data[4:36], entry[32:64]), nil
+}
+
+// obsoleteHeaderWidth is the stored header width: 148 on format 3, 116 otherwise.
+func obsoleteHeaderWidth(format uint8) uint64 {
+	if format == 3 {
+		return 148
+	}
+	return 116
 }
 
 func obsoleteIndexShape(key []byte, image updateImage) bool {
