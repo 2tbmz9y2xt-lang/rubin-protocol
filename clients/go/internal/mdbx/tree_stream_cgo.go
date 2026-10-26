@@ -99,10 +99,21 @@ type TreePrimitiveV1 struct {
 // resumes. A nil result continues to flush, final checks and commit unchanged.
 // Proof must not call any Store, Reader or OperationAccount method,
 // must not retain the report, and must start no goroutine that outlives the call.
+//
+// HeaderSlot is optional. When non-nil, after the Proof row and before the
+// step-5 charge, admission refuses with "invalid Update Batch" when Proof is
+// nil, when ValidateTreeRow(headers-v1, Hash, Header) fails, or when a Pair
+// mutation or Consulted row names headers-v1 at Hash; it refuses with "Update
+// Batch exceeds bound" when the slot, counted as one more auxiliary 32-byte-key
+// 148-byte-literal mutation and one more Consulted row, exceeds a Pair cap.
+// Every earlier admission row wins. The step-5 charge then also covers one
+// owned mutation and one owned Consulted row with the slot's key and literal;
+// the engine copies the slot at step 5 and never reads the caller's value after.
 type TreeOperationV1 struct {
 	Primitives []TreePrimitiveV1
 	Pair       TreePairV1
 	Proof      func(*TreeDeltaReportV1) error
+	HeaderSlot *TreeHeaderSlotV1
 }
 
 // BeginV1 supplies the block header before any event.
@@ -300,6 +311,10 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	}
 	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
 		return updateInvalidBatch()
+	}
+	slotErr := treeHeaderSlotAdmitV1(op)
+	if slotErr != nil {
+		return slotErr
 	}
 	if saved != nil {
 		return saved
@@ -593,16 +608,65 @@ func treeProofLagV1(primitives []TreePrimitiveV1, p TreePrimitiveV1) bool {
 	return p.Generation == primitives[1].Generation && p.Generation != primitives[0].Generation
 }
 
+// treeHeaderSlotAdmitV1 is the header-slot admission row; its first failing
+// check wins: Proof nil, representation, Pair overlap, then caps.
+func treeHeaderSlotAdmitV1(op TreeOperationV1) error {
+	slot := op.HeaderSlot
+	if slot == nil {
+		return nil
+	}
+	if op.Proof == nil || ValidateTreeRow(schemaDBIs[3], slot.Hash[:], slot.Header[:]) != nil || treeHeaderSlotOverlapV1(op.Pair, slot.Hash[:]) {
+		return updateInvalidBatch()
+	}
+	return treeHeaderSlotCapsV1(op.Pair, slot)
+}
+
+func treeHeaderSlotOverlapV1(pair TreePairV1, hash []byte) bool {
+	for _, m := range pair.Mutations {
+		if m.DBI.Rank == 3 && bytes.Equal(m.Key, hash) {
+			return true
+		}
+	}
+	for _, row := range pair.Consulted {
+		if row.DBI.Rank == 3 && bytes.Equal(row.Key, hash) {
+			return true
+		}
+	}
+	return false
+}
+
+// treeHeaderSlotCapsV1 recounts the already admitted non-reverse Pair caps with
+// the slot as one more auxiliary mutation, then the Consulted cap with one more row.
+func treeHeaderSlotCapsV1(pair TreePairV1, slot *TreeHeaderSlotV1) error {
+	var budget updateBudget
+	for _, m := range pair.Mutations {
+		_ = budget.addMutation(m)
+	}
+	m := Mutation{DBI: schemaDBIs[3], Key: slot.Hash[:], AfterKind: AfterLiteral, Literal: slot.Header[:]}
+	if !budget.addMutation(m) || uint64(len(pair.Consulted)) >= maxUpdateConsulted {
+		return updateBoundError()
+	}
+	return nil
+}
+
+// treeHeaderSlotCopyBytesV1 is the step-5 charge of the slot: one owned
+// mutation with its key and literal and one owned Consulted row with its key.
+var treeHeaderSlotCopyBytesV1 = uint64(reflect.TypeFor[ownedMutation]().Size()+reflect.TypeFor[ownedConsulted]().Size()) + 32 + 148 + 32
+
 // Actual report backing sizes, pinned by TestTreeStreamResourceLayoutV1.
 var (
 	treeReportBytesV1     = uint64(reflect.TypeFor[TreeDeltaReportV1]().Size())
 	treeUndoRecordBytesV1 = uint64(reflect.TypeFor[TreeUndoChargeV1]().Size())
 )
 
-// treeStepFiveBytesV1 is the single step-5 charge: the plan copy plus, with a
-// Proof, the report and its per-primitive undo records.
+// treeStepFiveBytesV1 is the single step-5 charge: the plan copy, plus with a
+// HeaderSlot its owned mutation and Consulted row, plus with a Proof the report
+// and its per-primitive undo records.
 func treeStepFiveBytesV1(op TreeOperationV1) uint64 {
 	n := treePlanCopyBytesV1(op.Pair)
+	if op.HeaderSlot != nil {
+		n = treePlanChargeAddV1(n, 1, treeHeaderSlotCopyBytesV1)
+	}
 	if op.Proof == nil {
 		return n
 	}
@@ -624,7 +688,10 @@ func treePlanCopyBytesV1(pair TreePairV1) uint64 {
 }
 
 func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
-	plan := treePlanV1{primitives: op.Primitives, pair: make([]ownedMutation, len(op.Pair.Mutations)), consulted: make([]ownedConsulted, len(op.Pair.Consulted))}
+	extra := treeHeaderSlotRowsV1(op.HeaderSlot)
+	plan := treePlanV1{primitives: op.Primitives, slot: treeOwnHeaderSlotV1(op.HeaderSlot)}
+	plan.pair = make([]ownedMutation, len(op.Pair.Mutations), len(op.Pair.Mutations)+extra)
+	plan.consulted = make([]ownedConsulted, len(op.Pair.Consulted), len(op.Pair.Consulted)+extra)
 	for j, m := range op.Pair.Mutations {
 		plan.pair[j] = ownedMutation{m.DBI, updateClone(m.Key), m.BeforePresent, m.AfterKind, updateClone(m.Literal), m.RefDBI, updateClone(m.RefKey)}
 	}
@@ -635,4 +702,22 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 		plan.proof, plan.report = op.Proof, &TreeDeltaReportV1{Undo: make([]TreeUndoChargeV1, len(op.Primitives))}
 	}
 	return plan
+}
+
+// treeHeaderSlotRowsV1 is the spare owned Pair and Consulted capacity of a slot.
+func treeHeaderSlotRowsV1(slot *TreeHeaderSlotV1) int {
+	if slot == nil {
+		return 0
+	}
+	return 1
+}
+
+// treeOwnHeaderSlotV1 copies the slot as Hash||Header; nil without a slot.
+func treeOwnHeaderSlotV1(slot *TreeHeaderSlotV1) []byte {
+	if slot == nil {
+		return nil
+	}
+	owned := make([]byte, 0, 180)
+	owned = append(owned, slot.Hash[:]...)
+	return append(owned, slot.Header[:]...)
 }

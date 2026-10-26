@@ -39,6 +39,7 @@ type treePlanV1 struct {
 	consulted  []ownedConsulted
 	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
 	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
+	slot       []byte                         // step-5 owned TreeOperationV1.HeaderSlot as Hash||Header; nil without a slot
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and

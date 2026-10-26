@@ -995,6 +995,7 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(TreeRoleDeltaV1{}), 64},
 		{unsafe.Sizeof(TreeUndoChargeV1{}), 24},
 		{unsafe.Sizeof(TreeDeltaReportV1{}), 152},
+		{unsafe.Sizeof(TreeHeaderSlotV1{}), 180},
 		{uintptr(treeReportBytesV1), unsafe.Sizeof(TreeDeltaReportV1{})},
 		{uintptr(treeUndoRecordBytesV1), unsafe.Sizeof(TreeUndoChargeV1{})},
 	} {
@@ -1369,6 +1370,7 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
 	want = append(want, "TreeResolvedInputV1", "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
 	want = append(want, "TreeRoleDeltaV1", "TreeUndoFamilyEffectV1", "TreeUndoFamilyNoneV1", "TreeUndoFamilyWrittenV1", "TreeUndoFamilyKeptV1", "TreeUndoFamilyDeletedV1", "TreeUndoChargeV1", "TreeDeltaReportV1")
+	want = append(want, "TreeHeaderSlotV1")
 	var got []string
 	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go", "tree_read_cgo.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -2470,5 +2472,191 @@ func TestTreeProofCounterIntegrityV1(t *testing.T) {
 	treeNativeIntegrity(t, r.err, "update", nil)
 	if log.calls != 0 {
 		t.Fatal("Proof called after counter refusal")
+	}
+}
+
+// tsSlot is a representation-valid header slot distinct from tsEntry's header.
+func tsSlot(t *testing.T) *TreeHeaderSlotV1 {
+	slot := &TreeHeaderSlotV1{}
+	copy(slot.Header[:], initial148NativeLiteral(t))
+	slot.Header[141] ^= 0x40
+	slot.Hash = sha3.Sum256(slot.Header[:])
+	return slot
+}
+
+// tsSlotShape is a covered CURRENT whose Source returns marker, a counting
+// Proof and a valid slot, with aux extra staged targets after the body.
+func tsSlotShape(t *testing.T, calls, proofs *int, marker error, aux int) TreeOperationV1 {
+	op := tsProofShape(t, calls, marker)
+	op.Proof = func(*TreeDeltaReportV1) error { *proofs++; return nil }
+	op.HeaderSlot = tsSlot(t)
+	for n := 1; n <= aux; n++ {
+		op.Pair.Mutations = append(op.Pair.Mutations, tsTarget(uint64(n)))
+	}
+	return op
+}
+
+func tsSlotConsulted(op *TreeOperationV1, rows int) {
+	for n := 1; n <= rows; n++ {
+		target := tsTarget(uint64(n))
+		op.Pair.Consulted = append(op.Pair.Consulted, ConsultedRow{target.DBI, target.Key})
+	}
+}
+
+// N3: each slot admission refusal returns "invalid Update Batch" with zero
+// Proof and zero Source calls; with HeaderSlot nil the same Pair and Consulted
+// rows keep their pre-change result.
+func TestTreeHeaderSlotAdmissionV1(t *testing.T) {
+	rows := []struct {
+		name string
+		edit func(*testing.T, *TreeOperationV1)
+	}{
+		{"proof-nil", func(_ *testing.T, op *TreeOperationV1) { op.Proof = nil }},
+		{"hash", func(_ *testing.T, op *TreeOperationV1) { op.HeaderSlot.Hash[0] ^= 1 }},
+		{"header", func(_ *testing.T, op *TreeOperationV1) { op.HeaderSlot.Header[0] ^= 1 }},
+		{"pair-overlap", func(_ *testing.T, op *TreeOperationV1) {
+			m := Mutation{DBI: TreeSchemaV1DBIs()[3], Key: bytes.Clone(op.HeaderSlot.Hash[:]), AfterKind: 2, Literal: bytes.Clone(op.HeaderSlot.Header[:])}
+			op.Pair.Mutations = append([]Mutation{m}, op.Pair.Mutations...)
+		}},
+		{"consulted-overlap", func(_ *testing.T, op *TreeOperationV1) {
+			op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[3], bytes.Clone(op.HeaderSlot.Hash[:])}}
+		}},
+		{"proof-nil-aux-cap", func(t *testing.T, op *TreeOperationV1) {
+			op.Proof = nil
+			if len(op.Pair.Mutations) != 16_384 {
+				t.Fatalf("aux mutations%d", len(op.Pair.Mutations))
+			}
+		}},
+	}
+	for _, row := range rows {
+		aux := 0
+		if row.name == "proof-nil-aux-cap" {
+			aux = 16_383
+		}
+		t.Run(row.name, func(t *testing.T) {
+			calls, proofs, marker := 0, 0, errors.New("source reached")
+			tsRejected(t, TreeOperation, func(t *testing.T) TreeOperationV1 {
+				op := tsSlotShape(t, &calls, &proofs, marker, aux)
+				row.edit(t, &op)
+				return op
+			}, false)
+			if calls != 0 || proofs != 0 {
+				t.Fatalf("slot admission reached Source%d Proof%d", calls, proofs)
+			}
+			s, _, o := tsNew(t)
+			op := tsSlotShape(t, &calls, &proofs, marker, aux)
+			row.edit(t, &op)
+			op.HeaderSlot = nil
+			r := tsRun(t, s, o, TreeOperation, op)
+			r.tuple(t, 1, 1, 0)
+			if any(r.err) != any(marker) || calls != 1 || proofs != 0 {
+				t.Fatalf("HeaderSlot-nil shape changed %v calls%d proofs%d", r.err, calls, proofs)
+			}
+		})
+	}
+}
+
+// N5: the slot counts as one more aux mutation and one more Consulted row.
+func TestTreeHeaderSlotCapsV1(t *testing.T) {
+	for _, row := range []struct {
+		name           string
+		aux, consulted int
+		bound          bool
+	}{
+		{"aux-16384", 16_383, 0, true},
+		{"aux-16383", 16_382, 0, false},
+		{"consulted-16384", 0, 16_384, true},
+		{"consulted-16383", 0, 16_383, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			calls, proofs, marker := 0, 0, errors.New("source reached")
+			op := tsSlotShape(t, &calls, &proofs, marker, row.aux)
+			tsSlotConsulted(&op, row.consulted)
+			r := tsRun(t, s, o, TreeOperation, op)
+			if row.bound {
+				tsRefusal(t, r, true)
+				if calls != 0 || proofs != 0 || s.state != storeOPEN {
+					t.Fatalf("slot cap reached Source%d Proof%d state %s", calls, proofs, s.state)
+				}
+				tsFollowing(t, s, o)
+				return
+			}
+			r.tuple(t, 1, 1, 0)
+			if any(r.err) != any(marker) || calls != 1 || proofs != 0 {
+				t.Fatalf("slot under cap refused %v calls%d proofs%d", r.err, calls, proofs)
+			}
+		})
+	}
+}
+
+// P3/N4: HeaderSlot nil keeps the step-5 amount; a slot adds one owned
+// mutation (128) with its 32-byte key and 148-byte literal and one owned
+// Consulted row (48) with its 32-byte key; one byte short refuses at step 5.
+func TestTreeHeaderSlotChargeV1(t *testing.T) {
+	calls, proofs := 0, 0
+	op := tsSlotShape(t, &calls, &proofs, nil, 0)
+	body := op.Pair.Mutations[0]
+	want := uint64(len(body.Key)+len(body.Literal)+128) + 152 + 24
+	op.HeaderSlot = nil
+	if got := treeStepFiveBytesV1(op); got != want {
+		t.Fatalf("HeaderSlot-nil step-5 charge%d want%d", got, want)
+	}
+	op.HeaderSlot = tsSlot(t)
+	want += 128 + 32 + 148 + 48 + 32
+	if got := treeStepFiveBytesV1(op); got != want {
+		t.Fatalf("slot step-5 charge%d want%d", got, want)
+	}
+	for _, short := range []uint64{1, 0} {
+		t.Run(fmt.Sprint(short), func(t *testing.T) {
+			s, _, o := tsNew(t)
+			sources, proofs, marker := 0, 0, errors.New("source reached")
+			op := tsSlotShape(t, &sources, &proofs, marker, 0)
+			filler := TreeLaneMaxBytes - want + short
+			var r tsResult
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(filler, func() error {
+					r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+					return nil
+				})
+			}))
+			if any(r.err) != any(errOperationReservationCapacity) || sources != 0 || proofs != 0 || reservationLive(o) != 0 {
+				t.Fatalf("charge refusal %v sources%d proofs%d live%d", r.err, sources, proofs, reservationLive(o))
+			}
+			if short == 1 {
+				r.tuple(t, 1, 1, -1)
+				if s.state != storeOPEN {
+					t.Fatal("step-5 refusal consumed Store")
+				}
+				tsFollowing(t, s, o)
+				return
+			}
+			// Passing step 5 leaves no headroom for the first primitive step charge.
+			r.tuple(t, 1, 1, 0)
+		})
+	}
+}
+
+// The step-5 copy owns the slot and spare Pair/Consulted capacity for it; a
+// later change to the caller's slot does not reach the owned copy.
+func TestTreeHeaderSlotOwnedCopyV1(t *testing.T) {
+	calls, proofs := 0, 0
+	op := tsSlotShape(t, &calls, &proofs, nil, 1)
+	tsSlotConsulted(&op, 1)
+	op.Pair.Consulted[0].Key = tsTarget(2).Key
+	want := append(bytes.Clone(op.HeaderSlot.Hash[:]), op.HeaderSlot.Header[:]...)
+	plan := treeOwnPlanV1(op)
+	op.HeaderSlot.Hash[0] ^= 1
+	op.HeaderSlot.Header[0] ^= 1
+	if !bytes.Equal(plan.slot, want) || len(plan.slot) != 180 || cap(plan.slot) != 180 {
+		t.Fatal("owned slot differs from the step-5 copy")
+	}
+	if len(plan.pair) != 2 || cap(plan.pair) != 3 || len(plan.consulted) != 1 || cap(plan.consulted) != 2 {
+		t.Fatal("owned Pair arrays lack exactly one slot entry of capacity")
+	}
+	op.HeaderSlot = nil
+	plan = treeOwnPlanV1(op)
+	if plan.slot != nil || cap(plan.pair) != 2 || cap(plan.consulted) != 1 {
+		t.Fatal("HeaderSlot-nil plan changed")
 	}
 }
