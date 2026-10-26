@@ -1071,12 +1071,13 @@ func (w *entryWalkV1) indexV1(row *EntryInventoryRowV1, key []byte, image *updat
 	if err := w.reverseV1(row); err != nil {
 		return err
 	}
+	w.stream.row.image, header = header, updateImage{}
 	row.Source, row.Artifact, row.Projection = 17, 4, 3
 	if err := w.emitV1(row, key, image); err != nil {
 		return err
 	}
 	row.Source, row.Artifact, row.Projection = 20, 6, 0
-	return w.projectedRowsV1(row, &header, keep)
+	return w.projectedRowsV1(row, &w.stream.row.image, keep)
 }
 
 func (w *entryWalkV1) invalidIndexV1(row *EntryInventoryRowV1, key []byte, image *updateImage, keep bool) error {

@@ -1368,14 +1368,34 @@ func eissUnwind(t *testing.T) {
 }
 
 func eissExpiry(t *testing.T) {
-	for _, physical := range []bool{false, true} {
-		t.Run(fmt.Sprint(physical), func(t *testing.T) { eissExpiryCase(t, physical) })
+	for _, site := range []uint8{11, 17} {
+		for _, physical := range []bool{false, true} {
+			t.Run(fmt.Sprintf("source%d-physical%v", site, physical), func(t *testing.T) { eissExpiryCase(t, site, physical) })
+		}
 	}
 }
 
-func eissExpiryCase(t *testing.T, physical bool) {
-	f := eisNew(t, 3, 1, nil)
+func eissExpiryCase(t *testing.T, site uint8, physical bool) {
+	var cleanup []CleanupSpanV1
+	if site == 17 {
+		cleanup = []CleanupSpanV1{{Kind: 1, GenerationID: 5}}
+	}
+	f := eisNew(t, 3, 1, cleanup)
 	pair := eisCapture(t, f, 1, 2, false, false)
+	hash := sha3.Sum256(eisHeader(3, f.hashes[2], 9))
+	key, pending := hash[:], eisChain(hash, f.hashes[2], 3)
+	rank, mode, gets, first := uint8(3), uint32(1), uint32(2), byte(1)
+	if site == 17 {
+		header := eisHeader(9, [32]byte{0x77}, 0x64)
+		hash = sha3.Sum256(header)
+		key, pending = eisHeight(5, 9), header
+		rank, mode, gets, first = 2, 28, 1, hash[0]
+		eisSeed(t, f, []Mutation{
+			eisMutation(2, key, eisChain(hash, [32]byte(header[4:36]), 9)),
+			eisMutation(3, hash[:], header),
+			eisMutation(7, eisOwner(5, hash), CanonicalOwnerValue(9)),
+		})
+	}
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	type reading struct {
 		n     int
@@ -1406,12 +1426,20 @@ func eissExpiryCase(t *testing.T, physical bool) {
 				go func() {
 					defer close(done)
 					failure, visitErr = r.VisitEntryInventoryV1(token, func(v EntryInventoryRowV1) error {
-						if v.Source != 11 {
+						if v.Source != site {
 							return nil
 						}
 						row, stream = v, token.scope.stream
-						if !stream.row.image.present {
-							t.Error("expiry did not suspend a real native parked link")
+						if stream == nil || reservationLive(f.o) != 8192+6*r.maxKey {
+							t.Error("expiry did not suspend a registered source with its exact hold")
+						} else {
+							borrow, err := treeBorrowV1(stream.row.image)
+							if err != nil || !borrow.present || !bytes.Equal(borrow.value, pending) {
+								t.Error("expiry did not suspend the actual registered pending link/header")
+							}
+						}
+						if site == 17 && (v.Projection != 3 || v.Artifact != 4 || v.Role != 0 || v.Generation != 5 || v.Height != 9 || v.Hash != hash || !bytes.Equal(v.Key, key) || !v.Present || v.Length != 104) {
+							t.Error("expiry did not reach the complete Proven GEN projection")
 						}
 						if physical {
 							_, sourceErr = v.ReadAt(make([]byte, 1), 0)
@@ -1432,7 +1460,7 @@ func eissExpiryCase(t *testing.T, physical bool) {
 				select {
 				case <-entered:
 				case <-time.After(5 * time.Second):
-					t.Fatal("Visit did not reach actual captured header")
+					t.Fatal("Visit did not reach the pending source visitor")
 				}
 				return TreeOperationV1{Pair: pair}, nil
 			})
@@ -1448,10 +1476,9 @@ func eissExpiryCase(t *testing.T, physical bool) {
 		}))
 	}
 	if physical {
-		hash := sha3.Sum256(eisHeader(3, f.hashes[2], 9))
-		evidence, err := fixtureLargeFault(f.s, 1, 3, hash[:], run)
+		evidence, err := fixtureLargeFault(f.s, mode, rank, key, run)
 		mustEnvironment(t, err)
-		if evidence.gets != 2 || evidence.aborts != 1 || evidence.commits != 0 {
+		if evidence.gets != gets || evidence.aborts != 1 || evidence.commits != 0 {
 			t.Fatalf("expiry native source frontier %+v", evidence)
 		}
 	} else {
@@ -1459,6 +1486,9 @@ func eissExpiryCase(t *testing.T, physical bool) {
 	}
 	eissRetired(t, token, stream)
 	eiRowInput(t, row, "ENTRY inventory row is not active")
+	if token.scope.stream != nil || reservationLive(f.o) != 0 {
+		t.Fatal("suspended visitor retained its registered source or hold before release")
+	}
 	if !physical {
 		for range 4 {
 			select {
@@ -1468,7 +1498,7 @@ func eissExpiryCase(t *testing.T, physical bool) {
 					if read.value != 0xa5 {
 						t.Fatal("expired source read touched destination")
 					}
-				} else if read.n != 1 || read.err != nil || read.value != 1 {
+				} else if read.n != 1 || read.err != nil || read.value != first {
 					t.Fatal("native row read crossed retirement with changed bytes")
 				}
 			case <-time.After(5 * time.Second):
@@ -1483,7 +1513,12 @@ func eissExpiryCase(t *testing.T, physical bool) {
 		t.Fatal("expired visitor completed or retained a hold")
 	}
 	if physical {
-		eissFailure(t, failure, 11, 6, 0, 3, 1, 21, 3, row.Hash, row.Key, nil, sourceErr)
+		treeNativeError(t, sourceErr, "get", "IO", 5, "error 5", nil)
+		if site == 17 {
+			eissFailure(t, failure, 17, 4, 0, 3, 1, 5, 9, hash, key, nil, sourceErr)
+		} else {
+			eissFailure(t, failure, 11, 6, 0, 3, 1, 21, 3, hash, key, nil, sourceErr)
+		}
 		tsConsumed(t, f.s, f.o, 1, sourceErr)
 		return
 	}

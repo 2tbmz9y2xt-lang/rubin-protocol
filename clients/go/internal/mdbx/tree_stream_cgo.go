@@ -22,7 +22,7 @@ import (
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
-	// EntryInventory is preparation only; this controls-only predecessor refuses it.
+	// EntryInventory accepts the completed token for this same entry, account and Pair.
 	EntryInventory *EntryInventoryV1
 }
 
