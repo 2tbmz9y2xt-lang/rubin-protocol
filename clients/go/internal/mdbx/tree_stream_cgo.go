@@ -89,9 +89,14 @@ type TreePrimitiveV1 struct {
 // Batch" (OLD/Prewrite/-1) unless the operation has at least one primitive,
 // every primitive carries Coverage, and Primitives[1:] share one generation
 // distinct from Primitives[0].Generation; the step-5 plan-copy charge then also
-// covers the TreeDeltaReportV1 backing. Proof must not call any Store, Reader or
-// OperationAccount method, must not retain the report, and must start no
-// goroutine that outlives the call.
+// covers the TreeDeltaReportV1 backing. UpdateTreeV1 calls Proof exactly once,
+// after the complete covered preflight, freeze and reservation and before the
+// first native write, never at readback; Proof is not called when an earlier
+// step refuses. A non-nil result E ends the attempt as (OLD, Prewrite, -1, E)
+// with no write, consumes the Store with terminal E and releases the account
+// charges once. A Proof panic or Goexit takes the writer-position unwind with
+// index -1. Proof must not call any Store, Reader or OperationAccount method,
+// must not retain the report, and must start no goroutine that outlives the call.
 type TreeOperationV1 struct {
 	Primitives []TreePrimitiveV1
 	Pair       TreePairV1
@@ -623,6 +628,9 @@ func treeOwnPlanV1(op TreeOperationV1) treePlanV1 {
 	}
 	for j, row := range op.Pair.Consulted {
 		plan.consulted[j] = ownedConsulted{dbi: row.DBI, key: updateClone(row.Key)}
+	}
+	if op.Proof != nil {
+		plan.proof, plan.report = op.Proof, &TreeDeltaReportV1{Undo: make([]TreeUndoChargeV1, len(op.Primitives))}
 	}
 	return plan
 }

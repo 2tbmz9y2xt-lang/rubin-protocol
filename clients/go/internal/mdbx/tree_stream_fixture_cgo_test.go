@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"slices"
 	"sync"
@@ -2052,5 +2053,146 @@ func TestTreeStreamSinkKindRefusalsV1(t *testing.T) {
 			tsConsumed(t, s.s, s.o, 1, r.err)
 			s.durable(t, false)
 		})
+	}
+}
+
+// P2/P3: CURRENT plus a stored two-block LAG burst; block 2 spends the output
+// block 1 created, so it is absent from Lag After and one Undo[2] entry.
+func TestTreeProofLagBurstV1(t *testing.T) {
+	s := tsfNew(t)
+	tsfCover(t, s)
+	var log tsProofLog
+	s.op.Proof = log.proof
+	r := s.run(t)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	current, spent, last := tdFormed(tdFrame(100, 0, nil), 10, 1), tdFormed(tdFrame(200, 0, []byte{1}), 5, 1), tdFormed(tdFrame(300, 0, nil), 6, 1)
+	want := TreeDeltaReportV1{
+		Current: TreeRoleDeltaV1{Present: true, Generation: 1, BytesAfter: tsEnvelope(current), CountAfter: 1},
+		Lag:     TreeRoleDeltaV1{Present: true, Generation: 2, BytesAfter: tsEnvelope(last), CountAfter: 1},
+		Undo:    []TreeUndoChargeV1{{Effect: TreeUndoFamilyWrittenV1}, {Effect: TreeUndoFamilyWrittenV1}, {Effect: TreeUndoFamilyWrittenV1, Entries: 1, Bytes: tsEnvelope(spent)}},
+	}
+	if log.calls != 1 || !reflect.DeepEqual(log.report, want) {
+		t.Fatalf("burst report %+v want %+v", log.report, want)
+	}
+	s.durable(t, true)
+	for _, role := range []TreeRoleDeltaV1{log.report.Current, log.report.Lag} {
+		tsRead(t, s.s, TreeSchemaV1DBIs()[0], tsCounterKey(role.Generation), tsCounterLiteral(role.BytesAfter, role.CountAfter))
+	}
+	tsRead(t, s.s, TreeSchemaV1DBIs()[5], tdEntryKey(s.op.Primitives[2].Block, tdTxid(0x20), 1, 0, 0), spent)
+}
+
+// P8: Proof precedes the first flushV1 write.
+func TestTreeProofBeforeFlushV1(t *testing.T) {
+	s := tsfNew(t)
+	tsfCover(t, s)
+	var log tsProofLog
+	s.op.Proof = log.proof
+	var r tsResult
+	evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 0, tsCounterKey(1), func() { r = s.run(t) })
+	mustEnvironment(t, err)
+	if evidence.Faults != 1 || evidence.Commits != 0 || log.calls != 1 {
+		t.Fatalf("flush arm %+v Proof calls%d", evidence, log.calls)
+	}
+	r.tuple(t, 1, 2, -1)
+}
+
+// N3: the H_r capacity refusal precedes Proof.
+func TestTreeProofAfterReserveV1(t *testing.T) {
+	for _, short := range []uint64{1, 0} {
+		t.Run(fmt.Sprintf("short%d", short), func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			var log tsProofLog
+			s.op.Proof = log.proof
+			budgets := s.budgets(t)
+			pc := uint64(128+32+len(s.op.Pair.Mutations[0].Literal)) + 152 + 3*24
+			filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + short
+			var r tsResult
+			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(filler, func() error {
+					r = tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+					return nil
+				})
+			}))
+			if short == 0 {
+				r.tuple(t, 2, 3, -1)
+				if log.calls != 1 {
+					t.Fatalf("passing reserve Proof calls%d", log.calls)
+				}
+				return
+			}
+			r.tuple(t, 1, 1, -1)
+			if any(r.err) != any(errOperationReservationCapacity) || log.calls != 0 {
+				t.Fatalf("H_r refusal %v Proof calls%d", r.err, log.calls)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.durable(t, false)
+		})
+	}
+}
+
+// N5: a Proof panic or Goexit takes the writer unwind with index -1, no write,
+// a released account and an OPEN Store.
+func TestTreeProofUnwindV1(t *testing.T) {
+	for _, mode := range []string{"panic", "goexit"} {
+		t.Run(mode, func(t *testing.T) {
+			s := tsfNew(t)
+			tsfCover(t, s)
+			value, calls := new(int), 0
+			s.op.Proof = func(*TreeDeltaReportV1) error {
+				calls++
+				if mode == "goexit" {
+					runtime.Goexit()
+				}
+				panic(value)
+			}
+			var r tsResult
+			var unwind treeUnwindV1
+			var accountErr error
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				accountErr = s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+					s.s.operations.Lock()
+					defer s.s.operations.Unlock()
+					r.truth, r.stage, r.index, unwind, r.err = s.s.treeEntryLockedV1(a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+					return nil
+				})
+			}()
+			<-done
+			mustEnvironment(t, accountErr)
+			r.tuple(t, 1, 1, -1)
+			kind := uint8(1)
+			if mode == "goexit" {
+				kind = 2
+			}
+			if calls != 1 || r.err != nil || unwind.kind != kind || (kind == 1 && unwind.value != value) {
+				t.Fatalf("Proof unwind calls%d err%v unwind%+v", calls, r.err, unwind)
+			}
+			if s.s.state != storeOPEN || s.s.terminal != nil || reservationLive(s.o) != 0 {
+				t.Fatal("Proof unwind lifecycle")
+			}
+			tsFollowing(t, s.s, s.o)
+			s.durable(t, false)
+		})
+	}
+}
+
+// P1 call count at readback: a commit that reaches the readback evaluator
+// still calls Proof once, at the writer only.
+func TestTreeProofNotAtReadbackV1(t *testing.T) {
+	s := tsfNew(t)
+	tsfCover(t, s)
+	var log tsProofLog
+	s.op.Proof = log.proof
+	var r tsResult
+	_, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageCommitNew, 0, tsCounterKey(2), func() { r = s.run(t) })
+	mustEnvironment(t, err)
+	if r.stage != 3 {
+		t.Fatalf("commit did not cross: %+v", r)
+	}
+	if log.calls != 1 || s.p[0].calls[TreeReadbackV1] != 1 {
+		t.Fatalf("Proof calls%d readback Source calls%d", log.calls, s.p[0].calls[TreeReadbackV1])
 	}
 }

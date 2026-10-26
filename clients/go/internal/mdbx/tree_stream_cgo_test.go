@@ -2211,3 +2211,264 @@ func TestTreeProofChargeV1(t *testing.T) {
 		})
 	}
 }
+
+// tsProofLog copies each report it receives; the report is valid only during
+// the call.
+type tsProofLog struct {
+	calls  int
+	err    error
+	report TreeDeltaReportV1
+}
+
+func (l *tsProofLog) proof(r *TreeDeltaReportV1) error {
+	l.calls++
+	l.report = *r
+	l.report.Undo = slices.Clone(r.Undo)
+	return l.err
+}
+
+func tsEnvelope(values ...[]byte) uint64 {
+	var n uint64
+	for _, v := range values {
+		n += 36 + uint64(len(v))
+	}
+	return n
+}
+
+// tsProofBase commits two outputs at height 5 and seeds their counter literal.
+type tsProofBase struct {
+	s      *Store
+	path   string
+	o      *OperationReservationOwner
+	va, vb []byte
+	parent []byte
+}
+
+func tsProofNew(t *testing.T) *tsProofBase {
+	t.Helper()
+	s, path, o := tsNew(t)
+	tsRoots(t, s, o, 1)
+	tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+	a, b := tdFrame(11, 0, nil), tdFrame(22, 0, []byte{1})
+	initial := tsCoveredDelta(t, 5, 0x50, TreeBlockV1{TxCount: 1, EventCount: 2}, []TreeEventV1{tsCreate(0x11, 0, 0, 148, 11), tsCreate(0x22, 1, 0, 159, 12)}, append(bytes.Clone(a), b...))
+	mustEnvironment(t, tsRun(t, s, o, TreeOperation, initial).err)
+	base := &tsProofBase{s: s, path: path, o: o, va: tdFormed(a, 5, 1), vb: tdFormed(b, 5, 1)}
+	base.parent = tsCounterLiteral(tsEnvelope(base.va, base.vb), 2)
+	tsSeedCounter(t, s, o, 1, true, base.parent)
+	return base
+}
+
+func tsIndexRows(block [32]byte, height uint64) (Mutation, Mutation) {
+	value := make([]byte, 104)
+	copy(value, block[:])
+	key := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, 1), height)
+	owner := append(binary.BigEndian.AppendUint64(nil, 1), block[:]...)
+	return Mutation{DBI: TreeSchemaV1DBIs()[2], Key: key, AfterKind: 2, Literal: value}, Mutation{DBI: TreeSchemaV1DBIs()[7], Key: owner, AfterKind: 2, Literal: binary.BigEndian.AppendUint64(nil, height)}
+}
+
+// tsProofForward spends both base outputs and creates three, with the
+// canonical (rank 2) and owner (rank 7) rows of its block.
+func tsProofForward(t *testing.T) (TreeOperationV1, [3][]byte) {
+	t.Helper()
+	c, d, e := tdFrame(33, 0, []byte{1, 2, 3}), tdFrame(44, 0, nil), tdFrame(45, 0, []byte{9})
+	frames := append(append(bytes.Clone(c), d...), e...)
+	events := []TreeEventV1{tsCreate(0x33, 0, 0, 148, 14), tsSpend(0x11, 0, 1, 0), tsSpend(0x22, 1, 1, 1), tsCreate(0x44, 0, 1, 162, 11), tsCreate(0x44, 1, 1, 173, 12)}
+	op := tsCoveredDelta(t, 6, 0x51, TreeBlockV1{TxCount: 2, EventCount: 5}, events, frames)
+	op.Primitives[0].Kind = TreeKindDirectApplyV1
+	canonical, owner := tsIndexRows(op.Primitives[0].Block, 6)
+	op.Pair.Mutations = []Mutation{canonical, op.Pair.Mutations[0], owner} // rank order
+	tsCover(&op, TreeBlockV1{TxCount: 2, EventCount: 5})
+	return op, [3][]byte{tdFormed(c, 6, 1), tdFormed(d, 6, 0), tdFormed(e, 6, 0)}
+}
+
+func tsProofRows(op TreeOperationV1) [][2][]byte {
+	block := op.Primitives[0].Block
+	canonical, owner := tsIndexRows(block, 6)
+	rows := [][2][]byte{{{0}, tsCounterKey(1)}, {{0}, tsRootKey(1)}, {{2}, canonical.Key}, {{7}, owner.Key}, {{4}, block[:]}, {{5}, tdManifestKey(block)}}
+	rows = append(rows, [2][]byte{{5}, tdEntryKey(block, tdTxid(0x11), 1, 0, 0)}, [2][]byte{{5}, tdEntryKey(block, tdTxid(0x22), 1, 1, 1)})
+	for _, k := range [][]byte{tdUTXOKey(1, tdTxid(0x11), 0), tdUTXOKey(1, tdTxid(0x22), 1), tdUTXOKey(1, tdTxid(0x33), 0), tdUTXOKey(1, tdTxid(0x44), 0), tdUTXOKey(1, tdTxid(0x44), 1)} {
+		rows = append(rows, [2][]byte{{1}, k})
+	}
+	return rows
+}
+
+func tsRowValues(t *testing.T, s *Store, rows [][2][]byte) [][]byte {
+	t.Helper()
+	values := make([][]byte, len(rows))
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		for i, row := range rows {
+			v, present, err := r.Get(TreeSchemaV1DBIs()[row[0][0]], row[1])
+			if err != nil {
+				return err
+			}
+			if present {
+				values[i] = bytes.Clone(v)
+			}
+		}
+		return nil
+	}))
+	return values
+}
+
+// P1/P7: one call; every field equals an independent literal and the committed
+// rows; a nil Proof commits the same rows.
+func TestTreeProofCurrentReportV1(t *testing.T) {
+	base := tsProofNew(t)
+	op, created := tsProofForward(t)
+	var log tsProofLog
+	op.Proof = log.proof
+	r := tsRun(t, base.s, base.o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	after := tsEnvelope(created[:]...)
+	want := TreeDeltaReportV1{
+		Current: TreeRoleDeltaV1{Present: true, Generation: 1, BytesBefore: tsEnvelope(base.va, base.vb), CountBefore: 2, BytesAfter: after, CountAfter: 3, IndexAdded: 1},
+		Undo:    []TreeUndoChargeV1{{Effect: TreeUndoFamilyWrittenV1, Entries: 2, Bytes: tsEnvelope(base.va, base.vb)}},
+	}
+	if log.calls != 1 || !reflect.DeepEqual(log.report, want) {
+		t.Fatalf("Proof calls%d report %+v want %+v", log.calls, log.report, want)
+	}
+	if !bytes.Equal(base.parent, tsCounterLiteral(want.Current.BytesBefore, want.Current.CountBefore)) {
+		t.Fatal("Before differs from the seeded counter")
+	}
+	s := tsReopen(t, base.s, base.path)
+	tsRead(t, s, TreeSchemaV1DBIs()[0], tsCounterKey(1), tsCounterLiteral(log.report.Current.BytesAfter, log.report.Current.CountAfter))
+	block := op.Primitives[0].Block
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(block, tdTxid(0x11), 1, 0, 0), base.va)
+	tsRead(t, s, TreeSchemaV1DBIs()[5], tdEntryKey(block, tdTxid(0x22), 1, 1, 1), base.vb)
+	withProof := tsRowValues(t, s, tsProofRows(op))
+	plain := tsProofNew(t)
+	op, _ = tsProofForward(t)
+	r = tsRun(t, plain.s, plain.o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	if got := tsRowValues(t, plain.s, tsProofRows(op)); !reflect.DeepEqual(got, withProof) {
+		t.Fatal("nil-Proof NEW differs from Proof NEW")
+	}
+}
+
+// P4: equal events and index, different covenant_data length.
+func TestTreeProofBytesAfterV1(t *testing.T) {
+	var seen []uint64
+	for _, size := range []int{1, 2} {
+		s, path, o := tsNew(t)
+		tsRoots(t, s, o, 1)
+		tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+		frame := tdFrame(71, 0, bytes.Repeat([]byte{3}, size))
+		op := tsCoveredDelta(t, 5, 0x52, TreeBlockV1{TxCount: 1, EventCount: 1}, []TreeEventV1{tsCreate(0x11, 0, 0, 148, uint32(len(frame)))}, frame)
+		var log tsProofLog
+		op.Proof = log.proof
+		mustEnvironment(t, tsRun(t, s, o, TreeOperation, op).err)
+		got := log.report.Current
+		if got.BytesAfter != tsEnvelope(tdFormed(frame, 5, 1)) || got.CountAfter != 1 {
+			t.Fatalf("size%d After %d/%d", size, got.BytesAfter, got.CountAfter)
+		}
+		tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[0], tsCounterKey(1), tsCounterLiteral(got.BytesAfter, got.CountAfter))
+		seen = append(seen, got.BytesAfter)
+	}
+	if seen[0] == seen[1] {
+		t.Fatal("covenant_data length not reported")
+	}
+}
+
+// P6: an inverse RollbackNew reports the removed index and the family it
+// deletes (SourceDelete) or keeps (SourceRetain), sized from ORIGINAL.
+func TestTreeProofInverseReportV1(t *testing.T) {
+	for _, undo := range []TreeUndoEffectV1{UndoSourceDeleteV1, UndoSourceRetainV1} {
+		t.Run(fmt.Sprint(undo), func(t *testing.T) {
+			base := tsProofNew(t)
+			op, created := tsProofForward(t)
+			initialEndpoint := TreeEndpointV1{Kind: 1, Height: 5, BlockHash: tdTxid(0xa5), CumulativeChainwork: [40]byte{39: 5}}
+			mustEnvironment(t, tsRun(t, base.s, base.o, TreeOperation, op).err)
+			inverse := op
+			inverse.Primitives = slices.Clone(op.Primitives)
+			p := &inverse.Primitives[0]
+			p.Direction, p.Kind, p.Undo, p.Endpoint = TreeInverseV1, TreeKindRollbackNewV1, undo, initialEndpoint
+			canonical, owner := tsIndexRows(p.Block, 6)
+			canonical.BeforePresent, canonical.AfterKind, canonical.Literal = true, 1, nil
+			owner.BeforePresent, owner.AfterKind, owner.Literal = true, 1, nil
+			inverse.Pair = TreePairV1{Mutations: []Mutation{canonical, owner}}
+			tsCover(&inverse, TreeBlockV1{TxCount: 2, EventCount: 5})
+			var log tsProofLog
+			inverse.Proof = log.proof
+			r := tsRun(t, base.s, base.o, TreeOperation, inverse)
+			r.tuple(t, 2, 3, -1)
+			mustEnvironment(t, r.err)
+			effect := TreeUndoFamilyDeletedV1
+			manifest := []byte(nil)
+			if undo == UndoSourceRetainV1 {
+				effect, manifest = TreeUndoFamilyKeptV1, tdManifest(6, [16]byte{}, 2, 2)
+			}
+			want := TreeDeltaReportV1{
+				Current: TreeRoleDeltaV1{Present: true, Generation: 1, BytesBefore: tsEnvelope(created[:]...), CountBefore: 3, BytesAfter: tsEnvelope(base.va, base.vb), CountAfter: 2, IndexRemoved: 1},
+				Undo:    []TreeUndoChargeV1{{Effect: effect, Entries: 2, Bytes: tsEnvelope(base.va, base.vb)}},
+			}
+			if log.calls != 1 || !reflect.DeepEqual(log.report, want) {
+				t.Fatalf("inverse report %+v want %+v", log.report, want)
+			}
+			s := tsReopen(t, base.s, base.path)
+			tsRead(t, s, TreeSchemaV1DBIs()[5], tdManifestKey(p.Block), manifest)
+			tsRead(t, s, canonical.DBI, canonical.Key, nil)
+		})
+	}
+}
+
+// P9: a Transient primitive over an ORIGINAL family reports None 0/0 and
+// leaves the family unchanged.
+func TestTreeProofTransientFamilyV1(t *testing.T) {
+	s, path, o := tsNew(t)
+	tsRoots(t, s, o, 1)
+	tsSeedCounter(t, s, o, 1, false, make([]byte, 16))
+	frame := tdFrame(5, 0, nil)
+	op := tsCoveredDelta(t, 5, 0x53, TreeBlockV1{TxCount: 1, EventCount: 1}, []TreeEventV1{tsCreate(0x11, 0, 0, 148, 11)}, frame)
+	op.Primitives[0].Kind, op.Primitives[0].Undo = TreeKindDirectApplyV1, UndoTransientV1
+	block := op.Primitives[0].Block
+	manifest := tdManifest(5, [16]byte{}, 1, 0)
+	seed := TreeOperationV1{Pair: TreePairV1{Mutations: []Mutation{{DBI: TreeSchemaV1DBIs()[5], Key: tdManifestKey(block), AfterKind: 2, Literal: manifest}}}}
+	mustEnvironment(t, tsRun(t, s, o, TreeOperation, seed).err)
+	var log tsProofLog
+	op.Proof = log.proof
+	r := tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	if log.calls != 1 || len(log.report.Undo) != 1 || log.report.Undo[0] != (TreeUndoChargeV1{}) {
+		t.Fatalf("Transient undo record %+v", log.report.Undo)
+	}
+	tsRead(t, tsReopen(t, s, path), TreeSchemaV1DBIs()[5], tdManifestKey(block), manifest)
+}
+
+// N1: the Proof error is returned unchanged, consumes the Store and writes nothing.
+func TestTreeProofRefusalV1(t *testing.T) {
+	base := tsProofNew(t)
+	op, _ := tsProofForward(t)
+	rows := tsProofRows(op)
+	original := tsRowValues(t, base.s, rows)
+	sentinel := errors.New("proof refused")
+	log := tsProofLog{err: sentinel}
+	op.Proof = log.proof
+	r := tsRun(t, base.s, base.o, TreeOperation, op)
+	r.tuple(t, 1, 1, -1)
+	if any(r.err) != any(sentinel) || log.calls != 1 {
+		t.Fatalf("Proof error %v calls%d", r.err, log.calls)
+	}
+	tsConsumed(t, base.s, base.o, 1, sentinel)
+	if got := tsRowValues(t, tsReopen(t, base.s, base.path), rows); !reflect.DeepEqual(got, original) {
+		t.Fatal("Proof refusal wrote")
+	}
+}
+
+// H2: a malformed counter refuses before Proof.
+func TestTreeProofCounterIntegrityV1(t *testing.T) {
+	s, _, o := tsNew(t)
+	tsRoots(t, s, o, 1)
+	tsSeedCounter(t, s, o, 1, false, tsCounterLiteral(1<<59, 1))
+	op := tsCoveredDelta(t, 1, 0x54, TreeBlockV1{TxCount: 1}, nil, nil)
+	var log tsProofLog
+	op.Proof = log.proof
+	r := tsRun(t, s, o, TreeOperation, op)
+	r.tuple(t, 1, 1, 0)
+	treeNativeIntegrity(t, r.err, "update", nil)
+	if log.calls != 0 {
+		t.Fatal("Proof called after counter refusal")
+	}
+}

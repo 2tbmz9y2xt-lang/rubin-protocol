@@ -7,7 +7,10 @@ package mdbx
 */
 import "C"
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // ---- tree_compose_cgo.go (owner L5a) ----
 
@@ -34,6 +37,8 @@ type treePlanV1 struct {
 	primitives []TreePrimitiveV1 // immutable caller backing borrowed through completion
 	pair       []ownedMutation
 	consulted  []ownedConsulted
+	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
+	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -66,6 +71,7 @@ type treeComposeV1 struct {
 	unwind    treeUnwindV1
 	done      bool   // op assigned outcome on a normal path
 	committed bool   // commitV1 was entered
+	proving   bool   // the Proof frame was entered: a writer unwind reports index -1
 	heldR     uint64 // S_r + B_r
 }
 
@@ -222,7 +228,69 @@ func (e *treeScopeV1) deltaV1(prim *treePrimitiveV1) error {
 	if err != nil {
 		return err
 	}
+	e.reportV1(d)
 	return treeEmitNodesV1(e.uncheckedV1(), prim.generation, prim.endpoint, e.s.databaseID, d.leavesV1(), e.emitterV1(), e.ledger, e.rec.observation)
+}
+
+// reportV1 captures primitive j's report values at the writer from its applied derivation: the role's first
+// primitive supplies the ORIGINAL counter it read, every primitive the counter it emitted into P, and j its undo record.
+func (e *treeScopeV1) reportV1(d *treeDeltaV1) {
+	report := e.plan.report
+	if report == nil || e.rb != nil {
+		return
+	}
+	role := &report.Current
+	if e.j != 0 {
+		role = &report.Lag
+	}
+	if !role.Present {
+		role.Present, role.Generation = true, d.rec.prim.generation
+		role.BytesBefore, role.CountBefore = d.parentBytes, d.parentCount
+	}
+	role.BytesAfter, role.CountAfter = binary.BigEndian.Uint64(d.counter[:8]), binary.BigEndian.Uint64(d.counter[8:])
+	report.Undo[e.j] = treeUndoRecordV1(d)
+}
+
+// treeUndoEffectsV1 maps familyEffectV1 to the physical undo-family effect.
+var treeUndoEffectsV1 = [4]TreeUndoFamilyEffectV1{
+	treeEffectNoneV1: TreeUndoFamilyNoneV1, treeEffectReferV1: TreeUndoFamilyKeptV1,
+	treeEffectAbsentV1: TreeUndoFamilyDeletedV1, treeEffectPresentV1: TreeUndoFamilyWrittenV1,
+}
+
+// treeUndoRecordV1 is one primitive's undo record: the family entries are the checked before subset of a forward
+// primitive and the checked after subset of an inverse one.
+func treeUndoRecordV1(d *treeDeltaV1) TreeUndoChargeV1 {
+	effect := treeUndoEffectsV1[d.familyEffectV1()]
+	switch {
+	case effect == TreeUndoFamilyNoneV1:
+		return TreeUndoChargeV1{}
+	case d.forwardV1():
+		return TreeUndoChargeV1{Effect: effect, Entries: d.beforeCount, Bytes: d.beforeBytes}
+	}
+	return TreeUndoChargeV1{Effect: effect, Entries: d.afterCount, Bytes: d.afterBytes}
+}
+
+// treeIndexV1 counts the role's owned canonical-v1 (rank 2) Pair targets that become present or absent; a
+// replacement and canonical-owner-v1 (rank 7) rows are not counted.
+func treeIndexV1(role *TreeRoleDeltaV1, pair []ownedMutation) {
+	for i := range pair {
+		if role.Present && treeIndexRowV1(&pair[i], role.Generation) {
+			treeIndexCountV1(role, &pair[i])
+		}
+	}
+}
+
+func treeIndexRowV1(m *ownedMutation, generation uint64) bool {
+	return m.dbi == schemaDBIs[2] && len(m.key) >= 8 && binary.BigEndian.Uint64(m.key) == generation
+}
+
+func treeIndexCountV1(role *TreeRoleDeltaV1, m *ownedMutation) {
+	switch {
+	case !m.beforePresent && m.after == AfterLiteral:
+		role.IndexAdded++
+	case m.beforePresent && m.after == AfterAbsent:
+		role.IndexRemoved++
+	}
 }
 
 // loopV1 runs every primitive in index order and stops at the first result or unwind; it reports the stop.
@@ -283,10 +351,18 @@ func (c *treeComposeV1) cleanupV1(out *transactionOutcome) {
 	unwound := !c.done && !c.committed && c.writer.t != nil
 	c.releaseV1()
 	if unwound {
-		c.outcome, c.index = c.writer.t.abortV1(c.writer.recorded), c.writer.j
+		c.outcome, c.index = c.writer.t.abortV1(c.writer.recorded), c.unwoundIndexV1()
 	}
 	out.err = c.outcome.primary
 	out.poisoned = c.outcome.retainedWrite != nil || c.outcome.retainedRead != nil
+}
+
+// unwoundIndexV1 is the index of a writer unwind: -1 inside the Proof frame, else the primitive that unwound.
+func (c *treeComposeV1) unwoundIndexV1() int {
+	if c.proving {
+		return -1
+	}
+	return c.writer.j
 }
 
 func (c *treeComposeV1) releaseV1() {
@@ -366,11 +442,34 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	if err != nil {
 		return err
 	}
+	err = c.proofV1()
+	if err != nil || c.unwind.kind != 0 {
+		return err
+	}
 	err = w.t.flushV1(w.plan.pair)
 	if err != nil {
 		return err
 	}
 	return w.t.finalV1(w.plan.pair, w.plan.consulted)
+}
+
+// proofV1 is the one Proof call (RUB-1748): after freezeV1 and reserveV1, before flushV1, through the writer-position
+// wrapper. Its error is returned unchanged; a panic is captured in c.unwind and a Goexit unwinds through cleanupV1.
+func (c *treeComposeV1) proofV1() error {
+	plan := c.writer.plan
+	if plan.proof == nil {
+		return nil
+	}
+	treeIndexV1(&plan.report.Current, plan.pair)
+	treeIndexV1(&plan.report.Lag, plan.pair)
+	c.proving = true
+	unwind, err := treeCallV1(c.proveV1)
+	c.unwind = unwind
+	return err
+}
+
+func (c *treeComposeV1) proveV1() error {
+	return c.writer.plan.proof(c.writer.plan.report)
 }
 
 func (c *treeComposeV1) reserveV1() error {
@@ -388,6 +487,9 @@ func (c *treeComposeV1) reserveV1() error {
 }
 
 func (c *treeComposeV1) commitV1() {
+	if c.unwind.kind != 0 {
+		return // a Proof panic or Goexit: cleanupV1 aborts after the release (T3)
+	}
 	w := c.writer
 	var truth treeTruthV1
 	if len(w.plan.primitives) != 0 {
