@@ -11,10 +11,745 @@ import (
 	"io"
 	"reflect"
 	"runtime"
+	"sort"
 	"testing"
 	"time"
 	"unsafe"
 )
+
+// These fixtures own persisted bytes and independently check the complete
+// canonical bijection before the real startup owner publishes permission.
+type eisFixture struct {
+	s       *Store
+	o       *OperationReservationOwner
+	old     TreeAuthorityV1
+	headers [][]byte
+	hashes  [][32]byte
+	height  uint64
+}
+
+func eisHeader(height uint64, parent [32]byte, branch byte) []byte {
+	b := make([]byte, 148)
+	binary.LittleEndian.PutUint32(b, 1)
+	copy(b[4:36], parent[:])
+	b[36], b[68], b[100] = branch, 2, 3
+	binary.LittleEndian.PutUint64(b[140:], height+17)
+	return b
+}
+
+func eisWork(height uint64) [40]byte {
+	var work [40]byte
+	binary.BigEndian.PutUint64(work[32:], height+1)
+	return work
+}
+
+func eisChain(hash, parent [32]byte, height uint64) []byte {
+	b := make([]byte, 104)
+	copy(b, hash[:])
+	copy(b[32:], parent[:])
+	w := eisWork(height)
+	copy(b[64:], w[:])
+	return b
+}
+
+func eisHeight(g, h uint64) []byte {
+	b := make([]byte, 16)
+	binary.BigEndian.PutUint64(b, g)
+	binary.BigEndian.PutUint64(b[8:], h)
+	return b
+}
+
+func eisOwner(g uint64, hash [32]byte) []byte {
+	b := make([]byte, 40)
+	binary.BigEndian.PutUint64(b, g)
+	copy(b[8:], hash[:])
+	return b
+}
+
+func eisMutation(rank uint8, key, value []byte) Mutation {
+	return Mutation{DBI: TreeSchemaV1DBIs()[rank], Key: bytes.Clone(key), AfterKind: 2, Literal: bytes.Clone(value)}
+}
+
+func eisSeed(t *testing.T, f *eisFixture, rows []Mutation) {
+	t.Helper()
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].DBI.Rank != rows[j].DBI.Rank {
+			return rows[i].DBI.Rank < rows[j].DBI.Rank
+		}
+		return bytes.Compare(rows[i].Key, rows[j].Key) < 0
+	})
+	r := tsRun(t, f.s, f.o, TreeOperation, TreeOperationV1{Pair: TreePairV1{Mutations: rows}})
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+}
+
+func eisNew(t *testing.T, height uint64, profile byte, cleanup []CleanupSpanV1) *eisFixture {
+	t.Helper()
+	s, _, _ := treeNativeStore(t)
+	f := &eisFixture{s: s, o: reservationOwner(t, 805306368), height: height}
+	f.old = TreeAuthorityV1{Authority: StorageAuthorityV1{Version: 1, ActiveProfile: StorageProfileV1(profile), ActiveGenerationID: 11, NextGenerationID: 21, Phase: 1, Lifecycle: 1}, LagGenerationID: 13}
+	if height >= 1440 {
+		f.old.Authority.U = height - 1439
+	}
+	if profile == 1 && height >= 15120 {
+		f.old.Authority.B = height - 15119
+	}
+	if len(cleanup) != 0 {
+		f.old.Authority.Phase, f.old.Authority.Cleanup = 2, &CleanupV1{Spans: cleanup}
+	}
+	var parent [32]byte
+	var rows []Mutation
+	for h := uint64(0); h <= height; h++ {
+		header := eisHeader(h, parent, 1)
+		hash := sha3.Sum256(header)
+		f.headers, f.hashes = append(f.headers, header), append(f.hashes, hash)
+		rows = append(rows, eisMutation(2, eisHeight(11, h), eisChain(hash, parent, h)), eisMutation(3, hash[:], header), eisMutation(4, hash[:], header), eisMutation(7, eisOwner(11, hash), CanonicalOwnerValue(h)))
+		if h >= f.old.Authority.U {
+			rows = append(rows, eisMutation(5, append(bytes.Clone(hash[:]), 0), UndoManifestValue(h, [16]byte{}, 0, 0)))
+		}
+		parent = hash
+		if h%1000 == 999 {
+			eisSeed(t, f, rows)
+			rows = nil
+		}
+	}
+	lag := uint64(0)
+	if height >= 15120 {
+		lag = 720*((height-15120)/720) + 1
+	}
+	for h := uint64(0); h < lag; h++ {
+		p := [32]byte{}
+		if h != 0 {
+			p = f.hashes[h-1]
+		}
+		rows = append(rows, eisMutation(2, eisHeight(13, h), eisChain(f.hashes[h], p, h)), eisMutation(7, eisOwner(13, f.hashes[h]), CanonicalOwnerValue(h)))
+	}
+	a, err := f.old.Encode()
+	mustEnvironment(t, err)
+	rows = append(rows, eisMutation(0, []byte{2}, a))
+	for i, g := range []uint64{11, 13} {
+		root := RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, ChainID: [32]byte{4}, GenesisHash: f.hashes[0], RootDigest: treeEmptyDigest(t), Assurance: TreeAssuranceV1{Kind: 1}}
+		if i == 0 {
+			root.Endpoint = TreeEndpointV1{Kind: 1, Height: height, BlockHash: f.hashes[height], CumulativeChainwork: eisWork(height)}
+		}
+		if i == 1 && lag != 0 {
+			root.Endpoint = TreeEndpointV1{Kind: 1, Height: lag - 1, BlockHash: f.hashes[lag-1], CumulativeChainwork: eisWork(lag - 1)}
+		}
+		value, encodeErr := root.Encode()
+		mustEnvironment(t, encodeErr)
+		rows = append(rows, eisMutation(0, tsCounterKey(g), make([]byte, 16)), eisMutation(0, binary.BigEndian.AppendUint64([]byte{0x11}, g), value))
+	}
+	eisSeed(t, f, rows)
+	eisQualify(t, f)
+	return f
+}
+
+func eisQualify(t *testing.T, f *eisFixture) {
+	t.Helper()
+	err, cached := f.s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
+		a, present, err := r.ReadTreeAuthorityV1()
+		if err != nil || !present || a.Authority.ActiveGenerationID != 11 || a.LagGenerationID != 13 {
+			return 0, errors.New("seeded pair authority mismatch")
+		}
+		for _, g := range []uint64{11, 13} {
+			root, found, rootErr := r.ReadTreeRootBindingV1(g)
+			if rootErr != nil || !found || root.DatabaseID != ([32]byte{7}) {
+				return 0, errors.New("seeded binding mismatch")
+			}
+			count := uint64(0)
+			if root.Endpoint.Kind == 1 {
+				count = root.Endpoint.Height + 1
+			}
+			for h := uint64(0); h < count; h++ {
+				forward, exists, readErr := r.Get(TreeSchemaV1DBIs()[2], eisHeight(g, h))
+				if readErr != nil || !exists || len(forward) != 104 || [32]byte(forward[:32]) != f.hashes[h] {
+					return 0, errors.New("seeded forward mismatch")
+				}
+				owner, exists, readErr := r.Get(TreeSchemaV1DBIs()[7], eisOwner(g, f.hashes[h]))
+				if readErr != nil || !exists || !bytes.Equal(owner, CanonicalOwnerValue(h)) {
+					return 0, errors.New("seeded reverse mismatch")
+				}
+				header, exists, readErr := r.Get(TreeSchemaV1DBIs()[3], f.hashes[h][:])
+				if readErr != nil || !exists || sha3.Sum256(header) != f.hashes[h] {
+					return 0, errors.New("seeded header mismatch")
+				}
+			}
+			prefix := eisHeight(g, 0)[:8]
+			for _, rank := range []uint8{2, 7} {
+				var after []byte
+				var actual uint64
+				for {
+					page, pageErr := r.PrefixPage(TreeSchemaV1DBIs()[rank], prefix, after, 256, 65596)
+					if pageErr != nil {
+						return 0, pageErr
+					}
+					actual += uint64(len(page.Rows))
+					if page.Stop == PrefixPageExhausted {
+						break
+					}
+					after = page.Rows[len(page.Rows)-1].Key
+				}
+				if actual != count {
+					return 0, errors.New("seeded canonical keyset mismatch")
+				}
+			}
+		}
+		return 1, nil
+	})
+	if err != nil || cached {
+		t.Fatalf("actual startup qualification: %v/%v", err, cached)
+	}
+}
+
+// Capture uses the ordinary authority codec, including its frozen SIDE union.
+// No source answer or inventory token is supplied by this fixture.
+func eisCapture(t *testing.T, f *eisFixture, d, c int, rolling, reuse bool) TreePairV1 {
+	t.Helper()
+	boundary := f.height - uint64(d)
+	var old, next []AuthorityPointV1
+	for i := range d {
+		h := f.height - uint64(i)
+		old = append(old, AuthorityPointV1{Height: h, BlockHash: f.hashes[h]})
+	}
+	parent := f.hashes[boundary]
+	var rows, targets []Mutation
+	for i := range c {
+		h := boundary + uint64(i) + 1
+		header := eisHeader(h, parent, 9)
+		hash := sha3.Sum256(header)
+		next = append(next, AuthorityPointV1{Height: h, BlockHash: hash})
+		member := []Mutation{eisMutation(3, hash[:], header), eisMutation(4, hash[:], header), eisMutation(6, eisHeight(21, h), eisChain(hash, parent, h))}
+		if c == 1 {
+			targets = append(targets, member...)
+			if reuse {
+				rows = append(rows, member[:2]...)
+				targets = targets[2:]
+			}
+		} else {
+			rows = append(rows, member...)
+		}
+		parent = hash
+	}
+	tip := next[len(next)-1]
+	count := c
+	if rolling {
+		count = 1439
+		f.old.Authority.Phase = 2
+		f.old.Authority.Cleanup = &CleanupV1{Spans: []CleanupSpanV1{{Kind: 4, GenerationID: 21, FirstHeight: boundary + 1, NextHeight: boundary + 1, LastHeight: boundary + 1}}}
+	}
+	side := &SelectedSideV1{GenerationID: 21, F: boundary, TipHeight: tip.Height, TipHash: tip.BlockHash, CumulativeChainwork: eisWork(tip.Height), RowCount: uint16(count), LogicalBytes: uint64(count)*148}
+	if c > 1 {
+		f.old.Authority.SelectedSide = side
+		f.old.Authority.NextGenerationID = 22
+		control := eisMutation(0, []byte{2}, eiEncoded(t, f.old))
+		control.BeforePresent = true
+		rows = append(rows, control)
+	}
+	if len(rows) != 0 {
+		eisSeed(t, f, rows)
+	}
+	entry := f.old
+	entry.Authority.Phase, entry.Authority.Lifecycle, entry.Authority.Cleanup, entry.Authority.SelectedSide = 4, 2, nil, nil
+	entry.Authority.NextGenerationID = 22
+	stage := OrdinaryStageDisconnectV1
+	if d == 0 {
+		stage = OrdinaryStageConnectV1
+	}
+	entry.Authority.Ordinary = &OrdinaryApplyV1{Stage: stage, Target: tip, OldSuffix: old, NewSuffix: next, CarriedCleanup: f.old.Authority.Cleanup, CapturedSelectedSide: side}
+	control := eisMutation(0, []byte{2}, eiEncoded(t, entry))
+	control.BeforePresent = true
+	return TreePairV1{Mutations: append([]Mutation{control}, targets...)}
+}
+
+func eisInvoke(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInventoryRowV1) error) (tsResult, EntryInventoryV1, *EntryInventoryFailureV1, error) {
+	t.Helper()
+	var token EntryInventoryV1
+	var failure *EntryInventoryFailureV1
+	var visitErr error
+	var result tsResult
+	mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+			token = eiPrepare(t, r, a, pair)
+			failure, visitErr = r.VisitEntryInventoryV1(token, visit)
+			if token.scope.completed != (failure == nil && visitErr == nil) {
+				t.Fatal("completion differs from the whole no-GEN outcome")
+			}
+			// Omit the token: PREPARED alone must refuse even completed queries.
+			return TreeOperationV1{Pair: pair}, nil
+		})
+		return nil
+	}))
+	if reservationLive(f.o) != 0 {
+		t.Fatal("source operation retained its hold")
+	}
+	result.tuple(t, 1, 1, -1)
+	return result, token, failure, visitErr
+}
+
+func eisSuccess(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInventoryRowV1) error) {
+	t.Helper()
+	before := eiEncoded(t, f.old)
+	entry, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
+	mustEnvironment(t, err)
+	result, token, failure, err := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+		eisPayload(t, f, entry.Authority.Ordinary.NewSuffix, row)
+		return visit(row)
+	})
+	if failure != nil || err != nil || !token.scope.completed {
+		t.Fatalf("full no-GEN query %+v/%v/completed%v", failure, err, token.scope.completed)
+	}
+	eiInput(t, result.err)
+	tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, before)
+	if f.s.state != storeOPEN {
+		t.Fatal("prepared successful query changed Store state")
+	}
+	tsFollowing(t, f.s, f.o)
+}
+
+func eisPayload(t *testing.T, f *eisFixture, points []AuthorityPointV1, row EntryInventoryRowV1) {
+	t.Helper()
+	if row.Source < 5 {
+		return
+	}
+	if row.Source > 15 {
+		t.Fatal("unsupported successful inventory source")
+	}
+	artifact := [11]uint8{8, 6, 7, 7, 8, 8, 6, 7, 9, 7, 9}[row.Source-5]
+	role, generation := uint8(1), uint64(11)
+	if row.Source >= 11 {
+		role, generation = 0, 21
+	}
+	if row.Artifact != artifact || row.Role != role || row.Generation != generation || row.IndexCount != 0 || row.Node != (TreeNodeIDV1{}) || row.Projection != 0 {
+		t.Fatalf("source%d output tuple %+v", row.Source, row)
+	}
+	if row.Source == 6 {
+		if row.Count != f.height+1 || row.Height != 0 || row.Hash != ([32]byte{}) || row.Key != nil || row.Present || row.Length != 0 {
+			t.Fatalf("nonphysical header group payload %+v", row)
+		}
+		return
+	}
+	if !row.Present || row.Count != 0 {
+		t.Fatalf("physical source payload %+v", row)
+	}
+	if row.Source <= 10 {
+		if row.Height > f.height {
+			t.Fatal("canonical source height outside the qualified domain")
+		}
+		if row.Hash != f.hashes[row.Height] {
+			t.Fatal("canonical/owed/O hash differs from independent persisted fixture")
+		}
+	} else {
+		if row.Height < points[0].Height || row.Height-points[0].Height >= uint64(len(points)) {
+			t.Fatal("captured source height outside the admitted N")
+		}
+		if row.Hash != points[row.Height-points[0].Height].BlockHash {
+			t.Fatal("captured source hash differs from the admitted immutable N")
+		}
+	}
+	switch artifact {
+	case 6, 7:
+		if !bytes.Equal(row.Key, row.Hash[:]) || row.Length < 148 || artifact == 6 && row.Length != 148 {
+			t.Fatal("header/body physical key or length changed")
+		}
+	case 8:
+		if !bytes.HasPrefix(row.Key, row.Hash[:]) || len(row.Key) != 33 && len(row.Key) != 77 || len(row.Key) == 33 && row.Length != 33 {
+			t.Fatal("raw compact-undo physical key or length changed")
+		}
+	case 9:
+		if !bytes.Equal(row.Key, eisHeight(21, row.Height)) || row.Length != 104 {
+			t.Fatal("captured SideLink physical key or length changed")
+		}
+	}
+}
+
+func TestEntryInventoryV1Sources(t *testing.T) {
+	t.Run("archive-17001", eisArchive)
+	t.Run("canonical-owed-order", eisOwed)
+	t.Run("captured-and-frozen-SIDE", eisRolling)
+	t.Run("fresh-and-reused", eisProspective)
+	t.Run("unsupported-GEN-after-prefix", eisGEN)
+	t.Run("native-and-literal-ReadAt", eisReads)
+	t.Run("admitted-boundaries", eisBoundaries)
+	t.Run("body-window-backing", eisBodyWindows)
+	if unsafe.Sizeof(entryWalkV1{}) != 40 || unsafe.Sizeof(entryCursorV1{}) != 80 || unsafe.Sizeof(entryStreamV1{}) != 184 {
+		t.Fatal("fixed source walker/cursor/stream differs from 40/80/184")
+	}
+}
+
+func eisArchive(t *testing.T) {
+	f := eisNew(t, 17000, 2, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	var count, last uint64
+	counts := [16]int{}
+	eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+		if row.Source >= 16 || row.Projection != 0 || row.Node != (TreeNodeIDV1{}) {
+			t.Fatalf("unexpected non-GEN payload %+v", row)
+		}
+		counts[row.Source]++
+		if row.Source == 7 {
+			if row.Height != count || row.Hash != f.hashes[count] || row.Length != 148 || !row.Present || row.Artifact != 7 || row.Role != 1 || row.Generation != 11 || !bytes.Equal(row.Key, f.hashes[count][:]) {
+				t.Fatalf("ARCHIVE literal source%d at%d: %+v", count, row.Height, row)
+			}
+			count++
+			last = row.Height
+		}
+		if row.Source == 6 {
+			if row.Count != 17001 || row.Key != nil || row.Present || row.Length != 0 || row.Height != 0 || row.Hash != ([32]byte{}) || row.IndexCount != 0 {
+				t.Fatalf("group-only source6 %+v", row)
+			}
+			eiRowInput(t, row, "ENTRY inventory row is not active")
+		}
+		return nil
+	})
+	if count != 17001 || last != 17000 || counts != ([16]int{1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 17001, 9: 1439, 11: 1, 12: 1, 13: 1}) {
+		t.Fatalf("ARCHIVE full frontier %d/%d/%v", count, last, counts)
+	}
+}
+
+func eisOwed(t *testing.T) {
+	spans := []CleanupSpanV1{{Kind: 2, GenerationID: 11, FirstHeight: 0, NextHeight: 3, LastHeight: 4}, {Kind: 3, GenerationID: 11, FirstHeight: 0, NextHeight: 2, LastHeight: 3}}
+	f := eisNew(t, 15125, 1, spans)
+	// UNDO duties below U need their actual manifests; these are not O aliases.
+	for _, h := range []uint64{2, 3} {
+		eisSeed(t, f, []Mutation{eisMutation(5, UndoManifestKey(f.hashes[h]), UndoManifestValue(h, [16]byte{}, 0, 0))})
+	}
+	pair := eisCapture(t, f, 2, 2, false, false)
+	phase, last := uint8(0), uint64(0)
+	counts := [16]int{}
+	eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+		counts[row.Source]++
+		if row.Source <= 4 {
+			return nil
+		}
+		if row.Source < phase && !(phase == 13 && row.Source == 11) {
+			t.Fatalf("source order %d -> %d", phase, row.Source)
+		}
+		if row.Source != phase {
+			last = row.Height
+		} else if row.Source == 5 {
+			if row.Height+1 != last {
+				t.Fatal("O undo is not tip down")
+			}
+			last = row.Height
+		} else if row.Source >= 7 && row.Source <= 10 {
+			if row.Height != last+1 {
+				t.Fatalf("source%d ascending %d -> %d", row.Source, last, row.Height)
+			}
+			last = row.Height
+		}
+		phase = row.Source
+		if row.Source == 7 && counts[7] == 1 && row.Height != 1 {
+			t.Fatal("L_body substituted service B for APPLIED LAG+1")
+		}
+		if row.Source == 8 && row.Height != uint64(counts[8]+2) {
+			t.Fatal("nondefault BLOCKS next_height not observed")
+		}
+		if row.Source == 10 && row.Height != uint64(counts[10]+1) {
+			t.Fatal("nondefault UNDO next_height not observed")
+		}
+		return nil
+	})
+	if counts[5] != 2 || counts[8] != 2 || counts[10] != 2 || counts[9] != 1438 || counts[11] != 2 || counts[12] != 2 || counts[13] != 2 {
+		t.Fatalf("distinct owed/O/capture counts %v", counts)
+	}
+}
+
+func eisRolling(t *testing.T) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1440, true, false)
+	counts := [16]int{}
+	index, position := uint64(0), 0
+	eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+		counts[row.Source]++
+		if row.Source < 11 {
+			return nil
+		}
+		want := [3]uint8{11, 12, 13}
+		if index == 0 {
+			want = [3]uint8{11, 14, 15}
+		}
+		if row.Source != want[position] || row.Height != index+3 || row.Role != 0 || row.Generation != 21 || !row.Present || row.IndexCount != 0 || row.Count != 0 {
+			t.Fatalf("captured N%d position%d %+v", index, position, row)
+		}
+		if position == 2 && (row.Artifact != 9 || row.Length != 104 || !bytes.Equal(row.Key, eisHeight(21, index+3))) {
+			t.Fatal("SideLink is not the actual 16/104 physical row")
+		}
+		position++
+		if position == 3 {
+			position = 0
+			index++
+		}
+		return nil
+	})
+	if index != 1440 || counts[11] != 1440 || counts[12] != 1439 || counts[13] != 1439 || counts[14] != 1 || counts[15] != 1 {
+		t.Fatalf("rolling1439+SIDE1 union %v", counts)
+	}
+}
+
+func eisProspective(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reuse%v", reuse), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, reuse)
+			for _, m := range pair.Mutations[1:] {
+				tsRead(t, f.s, m.DBI, m.Key, nil)
+			}
+			var count int
+			eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source >= 11 {
+					count++
+					if row.Height != 3 || row.Generation != 21 || row.Role != 0 {
+						t.Fatal("prospective/reused source identity changed")
+					}
+				}
+				return nil
+			})
+			if count != 3 {
+				t.Fatal("fresh/reused source omitted")
+			}
+		})
+	}
+	for _, owner := range []struct{ rank, index, source, artifact, last uint8 }{{3, 1, 11, 6, 9}, {4, 2, 12, 7, 11}, {6, 3, 13, 9, 9}} {
+		for _, same := range []bool{false, true} {
+			t.Run(fmt.Sprintf("present-rank%d-rewrite-same%v", owner.rank, same), func(t *testing.T) {
+				f := eisNew(t, 3, 1, nil)
+				pair := eisCapture(t, f, 1, 1, false, false)
+				m := pair.Mutations[owner.index]
+				value := bytes.Clone(m.Literal)
+				if !same {
+					value[len(value)-1] ^= 1
+				}
+				eisSeed(t, f, []Mutation{eisMutation(owner.rank, m.Key, value)})
+				last := uint8(0)
+				result, _, failure, err := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					last = row.Source
+					return nil
+				})
+				eiInput(t, result.err)
+				if last != owner.last {
+					t.Fatal("present rewrite reached a later source")
+				}
+				if same {
+					eiInput(t, err)
+					if failure != nil {
+						t.Fatal("identical unsupported rewrite invented physical failure")
+					}
+				} else if err != nil || failure == nil || failure.Source != owner.source || failure.Artifact != owner.artifact || failure.Observation != 4 || failure.SourceError != nil || failure.Role != 0 || failure.Generation != 21 || failure.Height != 3 || !bytes.Equal(failure.Key, m.Key) {
+					t.Fatalf("differing required bytes lost positive failure %+v/%v", failure, err)
+				}
+			})
+		}
+	}
+}
+
+func eisGEN(t *testing.T) {
+	for _, application := range []string{"nil", "direct", "wrapped", "typed-nil"} {
+		t.Run(application, func(t *testing.T) {
+			f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			marker := errors.New("supported visitor result")
+			var app error
+			last := uint8(0)
+			result, token, failure, err := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				last = row.Source
+				if row.Source == 13 {
+					switch application {
+					case "direct":
+						app = marker
+					case "wrapped":
+						app = fmt.Errorf("visitor: %w", marker)
+					case "typed-nil":
+						var typed *nilPointerError
+						app = typed
+					}
+				}
+				return app
+			})
+			eiInput(t, result.err)
+			if failure != nil || token.scope.completed || last != 13 {
+				t.Fatalf("GEN refusal/completion/frontier %+v/%v/%d", failure, token.scope.completed, last)
+			}
+			if app == nil {
+				eiInput(t, err)
+			} else if any(err) != any(app) {
+				t.Fatal("late GEN refusal overwrote earlier visitor interface")
+			}
+		})
+	}
+	t.Run("returned-refusal", func(t *testing.T) {
+		f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+		pair := eisCapture(t, f, 1, 1, false, false)
+		last := uint8(0)
+		mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			result := tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+				token := eiPrepare(t, r, a, pair)
+				failure, err := r.VisitEntryInventoryV1(token, func(row EntryInventoryRowV1) error {
+					last = row.Source
+					return nil
+				})
+				if failure != nil || token.scope.completed || last != 13 {
+					t.Fatal("returned GEN refusal changed its supported prefix")
+				}
+				eiInput(t, err)
+				return TreeOperationV1{}, err
+			})
+			result.tuple(t, 1, 1, -1)
+			eiInput(t, result.err)
+			return nil
+		}))
+		if reservationLive(f.o) != 0 || f.s.state != storeOPEN {
+			t.Fatal("returned pure GEN refusal did not cleanly release")
+		}
+		tsFollowing(t, f.s, f.o)
+	})
+}
+
+func eisReads(t *testing.T) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	var expired EntryInventoryRowV1
+	eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+		if row.Source != 5 && row.Source != 7 && row.Source < 11 {
+			return nil
+		}
+		want := f.headers[row.Height]
+		if row.Source == 5 {
+			want = UndoManifestValue(row.Height, [16]byte{}, 0, 0)
+		} else if row.Source >= 11 {
+			for _, m := range pair.Mutations[1:] {
+				if bytes.Equal(row.Key, m.Key) {
+					want = m.Literal
+				}
+			}
+		}
+		eiReadBoundaries(t, row, want)
+		copyRow := row
+		copyRow.Key, copyRow.Source, copyRow.Artifact, copyRow.Length, copyRow.Present = []byte{2}, 255, 255, 0, false
+		dst := bytes.Repeat([]byte{0xa5}, len(want)+1)
+		n, err := copyRow.ReadAt(dst, 0)
+		if n != len(want) || !treeSameErrorV1(err, io.EOF) || !bytes.Equal(dst[:n], want) || dst[n] != 0xa5 {
+			t.Fatal("metadata value copy redirected native/literal source")
+		}
+		expired = row
+		return nil
+	})
+	eiRowInput(t, expired, "ENTRY inventory row is not active")
+}
+
+func eisBoundaries(t *testing.T) {
+	for _, counts := range [][2]int{{0, 2}, {2, 1}, {2, 3}} {
+		t.Run(fmt.Sprint(counts), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, counts[0], counts[1], false, false)
+			old, next := 0, 0
+			eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == 5 {
+					old++
+				}
+				if row.Source == 11 {
+					next++
+				}
+				return nil
+			})
+			if old != counts[0] || next != counts[1] {
+				t.Fatalf("D/N boundary %d/%d, want %v", old, next, counts)
+			}
+		})
+	}
+	for _, variant := range []string{"wrong-O-descriptor", "header-parent", "link-tip-work"} {
+		t.Run(variant, func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			entry, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
+			mustEnvironment(t, err)
+			switch variant {
+			case "wrong-O-descriptor":
+				entry.Authority.Ordinary.OldSuffix[0].BlockHash = [32]byte{0x44}
+			case "header-parent":
+				pair.Mutations[1].Literal[4] ^= 1
+				hash := sha3.Sum256(pair.Mutations[1].Literal)
+				for i := 1; i <= 2; i++ {
+					pair.Mutations[i].Key = bytes.Clone(hash[:])
+				}
+				pair.Mutations[2].Literal = bytes.Clone(pair.Mutations[1].Literal)
+				copy(pair.Mutations[3].Literal[:32], hash[:])
+				entry.Authority.Ordinary.NewSuffix[0].BlockHash = hash
+				entry.Authority.Ordinary.Target.BlockHash = hash
+				entry.Authority.Ordinary.CapturedSelectedSide.TipHash = hash
+			case "link-tip-work":
+				pair.Mutations[3].Literal[103] = 9 // valid nonzero work, wrong admitted tip
+			}
+			pair.Mutations[0].Literal = eiEncoded(t, entry)
+			last := uint8(0)
+			result, _, failure, visitErr := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				last = row.Source
+				return nil
+			})
+			eiInput(t, result.err)
+			if variant == "header-parent" {
+				if failure == nil || failure.Source != 11 || failure.Observation != 4 || failure.SourceError != nil || visitErr != nil || last != 9 {
+					t.Fatal("valid-hash header with mismatched parent did not fail at source11")
+				}
+			} else {
+				eiInput(t, visitErr)
+				want := uint8(9)
+				if variant == "wrong-O-descriptor" {
+					want = 4
+				}
+				if failure != nil || last != want {
+					t.Fatalf("pure identity/work refusal invented source failure %+v/%d", failure, last)
+				}
+			}
+		})
+	}
+}
+
+func eisBodyWindows(t *testing.T) {
+	for _, literal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("literal%v", literal), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			body, source, height := bytes.Clone(f.headers[0]), uint8(7), uint64(0)
+			if literal {
+				body, source, height = bytes.Clone(pair.Mutations[2].Literal), 12, 3
+			}
+			for i := range 65536 {
+				body = append(body, byte(i%251))
+			}
+			if literal {
+				pair.Mutations[2].Literal = body
+				entry, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
+				mustEnvironment(t, err)
+				entry.Authority.Ordinary.CapturedSelectedSide.LogicalBytes = uint64(len(body))
+				pair.Mutations[0].Literal = eiEncoded(t, entry)
+			} else {
+				m := eisMutation(4, f.hashes[0][:], body)
+				m.BeforePresent = true
+				eisSeed(t, f, []Mutation{m})
+			}
+			reached := false
+			eisSuccess(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == source && row.Height == height {
+					reached = true
+					dst := make([]byte, 65536)
+					n, err := row.ReadAt(dst, 0)
+					if row.Length != 65684 || n != 65536 || err != nil || !bytes.Equal(dst, body[:65536]) {
+						t.Fatal("native/literal full window changed")
+					}
+					dst = bytes.Repeat([]byte{0xa5}, 200)
+					n, err = row.ReadAt(dst, 65536)
+					if n != 148 || !treeSameErrorV1(err, io.EOF) || !bytes.Equal(dst[:148], body[65536:]) || !bytes.Equal(dst[148:], bytes.Repeat([]byte{0xa5}, 52)) {
+						t.Fatal("native/literal nonzero offset EOF boundary changed")
+					}
+				}
+				return nil
+			})
+			if !reached {
+				t.Fatal("body window source was omitted")
+			}
+		})
+	}
+}
 
 // These fixtures persist real bytes through the ordinary public writer. The
 // expected observations below are independent literal control/error tuples.
@@ -816,7 +1551,7 @@ func eiFunding(t *testing.T) {
 			})
 		}
 	}
-	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3688 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 {
+	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3696 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 {
 		t.Fatal("funded typed-live layout changed")
 	}
 }
