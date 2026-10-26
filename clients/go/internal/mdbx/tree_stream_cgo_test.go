@@ -992,6 +992,11 @@ func TestTreeStreamResourceLayoutV1(t *testing.T) {
 		{unsafe.Sizeof(treeAmendedV1{}), 64},
 		{unsafe.Sizeof(treeEntryV1{}), 80},
 		{unsafe.Sizeof(TreeSourceCoverageV1{}), 136},
+		{unsafe.Sizeof(TreeRoleDeltaV1{}), 64},
+		{unsafe.Sizeof(TreeUndoChargeV1{}), 24},
+		{unsafe.Sizeof(TreeDeltaReportV1{}), 152},
+		{uintptr(treeReportBytesV1), unsafe.Sizeof(TreeDeltaReportV1{})},
+		{uintptr(treeUndoRecordBytesV1), unsafe.Sizeof(TreeUndoChargeV1{})},
 	} {
 		if row.got != row.want {
 			t.Fatalf("resource layout%d want%d", row.got, row.want)
@@ -1363,6 +1368,7 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	want := []string{"TreePositionV1", "TreeWriterV1", "TreeReadbackV1", "TreeDeltaSinkV1", "TreeOutpointV1", "TreeEventKindV1", "TreeEventSpendV1", "TreeEventCreateV1", "TreeBlockV1", "TreeEventV1", "BeginV1", "EventV1", "WindowV1", "TreeUndoEffectV1", "UndoWriteOrReuseV1", "UndoTransientV1", "UndoCompareV1", "UndoCompareDeleteV1", "UndoSourceRetainV1", "UndoSourceDeleteV1", "TreeDirectionV1", "TreeForwardV1", "TreeInverseV1", "TreePrimitiveKindV1", "TreeKindDirectApplyV1", "TreeKindConnectV1", "TreeKindReplayNextV1", "TreeKindFirstGenesisV1", "TreeKindRestoreOldV1", "TreeKindLagForwardV1", "TreeKindDisconnectV1", "TreeKindRollbackNewV1", "TreeKindLagReverseV1", "TreePairV1", "TreeSourceV1", "TreePrimitiveV1", "TreeOperationV1", "UpdateTreeV1"}
 	want = append(want, "TreeSourceCoverageV1", "TreeObservationV1", "TreeObservationKindV1", "TreeObservationAbsentV1", "TreeObservationMalformedV1", "TreeObservationIdentityMismatchV1", "TreeObservationDigestMismatchV1")
 	want = append(want, "TreeResolvedInputV1", "TreeRootReadV1", "CheckTreeRootReadV1", "DeriveTreeRootV1")
+	want = append(want, "TreeRoleDeltaV1", "TreeUndoFamilyEffectV1", "TreeUndoFamilyNoneV1", "TreeUndoFamilyWrittenV1", "TreeUndoFamilyKeptV1", "TreeUndoFamilyDeletedV1", "TreeUndoChargeV1", "TreeDeltaReportV1")
 	var got []string
 	for _, path := range []string{"tree_stream.go", "tree_stream_cgo.go", "tree_read_cgo.go"} {
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
@@ -1412,6 +1418,11 @@ func TestTreeStreamSurfaceV1(t *testing.T) {
 	for i, kind := range []TreeObservationKindV1{TreeObservationAbsentV1, TreeObservationMalformedV1, TreeObservationIdentityMismatchV1, TreeObservationDigestMismatchV1} {
 		if int(kind) != i+1 {
 			t.Fatalf("observation encoding%d=%d", i, kind)
+		}
+	}
+	for i, v := range []TreeUndoFamilyEffectV1{TreeUndoFamilyNoneV1, TreeUndoFamilyWrittenV1, TreeUndoFamilyKeptV1, TreeUndoFamilyDeletedV1} {
+		if int(v) != i {
+			t.Fatalf("undo family encoding %d=%d", i, v)
 		}
 	}
 	if n := uint64(unsafe.Sizeof(treeDescV1{})); n != 104 || n > 128 {
@@ -2079,4 +2090,124 @@ func TestTreeStreamMetaKeyShapesV1(t *testing.T) {
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
 	})
+}
+
+func tsProofNil(*TreeDeltaReportV1) error { return nil }
+
+// tsProofShape builds a covered CURRENT plus the given LAG generations; the
+// CURRENT Source returns marker, so a passing admission reaches primitive 0.
+func tsProofShape(t *testing.T, calls *int, marker error, lags ...uint64) TreeOperationV1 {
+	op := tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { *calls++; return marker }))
+	for _, g := range lags {
+		lag := op.Primitives[0]
+		lag.Kind, lag.Generation = TreeKindLagForwardV1, g
+		op.Primitives = append(op.Primitives, lag)
+	}
+	meta := make([]TreeBlockV1, len(op.Primitives))
+	for i := range meta {
+		meta[i] = TreeBlockV1{TxCount: 1}
+	}
+	tsCover(&op, meta...)
+	return op
+}
+
+// N2: the Proof admission row refuses before Source and charge; with Proof nil
+// the same shapes keep their pre-change result.
+func TestTreeProofAdmissionV1(t *testing.T) {
+	rows := []struct {
+		name  string
+		build func(*testing.T, *int, error) TreeOperationV1
+	}{
+		{"zero-primitives", func(*testing.T, *int, error) TreeOperationV1 { return tsPair(51) }},
+		{"uncovered", func(t *testing.T, calls *int, marker error) TreeOperationV1 {
+			return tsOperation(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error { *calls++; return marker }))
+		}},
+		{"lag-two-generations", func(t *testing.T, calls *int, marker error) TreeOperationV1 {
+			return tsProofShape(t, calls, marker, 2, 3)
+		}},
+		{"lag-equals-current", func(t *testing.T, calls *int, marker error) TreeOperationV1 { return tsProofShape(t, calls, marker, 1) }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			calls, proofs, marker := 0, 0, errors.New("source reached")
+			tsRejected(t, TreeOperation, func(t *testing.T) TreeOperationV1 {
+				op := row.build(t, &calls, marker)
+				op.Proof = func(*TreeDeltaReportV1) error { proofs++; return nil }
+				return op
+			}, false)
+			if calls != 0 || proofs != 0 {
+				t.Fatalf("Proof admission reached Source%d Proof%d", calls, proofs)
+			}
+			s, _, o := tsNew(t)
+			r := tsRun(t, s, o, TreeOperation, row.build(t, &calls, marker))
+			if row.name == "zero-primitives" {
+				r.tuple(t, 2, 3, -1)
+				mustEnvironment(t, r.err)
+				return
+			}
+			r.tuple(t, 1, 1, 0)
+			if any(r.err) != any(marker) || calls != 1 {
+				t.Fatalf("Proof-nil shape changed %v calls%d", r.err, calls)
+			}
+		})
+	}
+	t.Run("valid-lag-shape", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, marker := 0, errors.New("source reached")
+		op := tsProofShape(t, &calls, marker, 2, 2)
+		op.Proof = tsProofNil
+		r := tsRun(t, s, o, TreeOperation, op)
+		r.tuple(t, 1, 1, 0)
+		if any(r.err) != any(marker) || calls != 1 {
+			t.Fatalf("valid Proof shape refused %v calls%d", r.err, calls)
+		}
+	})
+}
+
+// P5/N4: the step-5 charge is unchanged with Proof nil and adds the report
+// backing (152 + 24 per primitive) with Proof; one byte short refuses at step 5.
+func TestTreeProofChargeV1(t *testing.T) {
+	calls := 0
+	op := tsProofShape(t, &calls, nil, 2)
+	body := op.Pair.Mutations[0]
+	plan := uint64(len(body.Key) + len(body.Literal) + 128)
+	if treeStepFiveBytesV1(op) != plan || treePlanCopyBytesV1(op.Pair) != plan {
+		t.Fatal("Proof-nil step-5 charge changed")
+	}
+	op.Proof = tsProofNil
+	want := plan + 152 + 2*24
+	if got := treeStepFiveBytesV1(op); got != want {
+		t.Fatalf("Proof step-5 charge%d want%d", got, want)
+	}
+	op.Primitives = op.Primitives[:1]
+	want -= 24
+	for _, short := range []uint64{1, 0} {
+		t.Run(fmt.Sprint(short), func(t *testing.T) {
+			s, _, o := tsNew(t)
+			sources, marker := 0, errors.New("source reached")
+			op := tsProofShape(t, &sources, marker)
+			op.Proof = tsProofNil
+			filler := TreeLaneMaxBytes - want + short
+			var r tsResult
+			mustEnvironment(t, o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(filler, func() error {
+					r = tsInvoke(s, a, func(*Reader) (TreeOperationV1, error) { return op, nil })
+					return nil
+				})
+			}))
+			if any(r.err) != any(errOperationReservationCapacity) || sources != 0 || reservationLive(o) != 0 {
+				t.Fatalf("charge refusal %v sources%d live%d", r.err, sources, reservationLive(o))
+			}
+			if short == 1 {
+				r.tuple(t, 1, 1, -1)
+				if s.state != storeOPEN {
+					t.Fatal("step-5 refusal consumed Store")
+				}
+				tsFollowing(t, s, o)
+				return
+			}
+			// Passing step 5 leaves no headroom for the first primitive step charge.
+			r.tuple(t, 1, 1, 0)
+		})
+	}
 }

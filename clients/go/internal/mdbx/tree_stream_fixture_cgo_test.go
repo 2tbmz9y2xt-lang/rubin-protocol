@@ -17,7 +17,7 @@ import (
 // The native fixture primary selector invokes this reached-owner check. It
 // models the account window after public precheck, without a scheduler seam.
 func tsClosedBeforeHoldV1(t *testing.T) {
-	for _, mode := range []string{"application", "malformed", "valid", "attached", "panic", "panic-nil", "goexit"} {
+	for _, mode := range []string{"application", "malformed", "valid", "attached", "proof-shape", "panic", "panic-nil", "goexit"} {
 		t.Run(mode, func(t *testing.T) {
 			s, _, o := tsNew(t)
 			var closed *OperationAccount
@@ -62,6 +62,9 @@ func tsClosedBeforeHoldV1(t *testing.T) {
 					if mode == "attached" {
 						op.Pair.EntryInventory = &EntryInventoryV1{}
 					}
+					if mode == "proof-shape" {
+						op.Proof = func(*TreeDeltaReportV1) error { t.Fatal("Proof called at admission"); return nil }
+					}
 					return op, nil
 				})
 				returned = unwind.kind == 0
@@ -89,6 +92,9 @@ func tsClosedBeforeHoldV1(t *testing.T) {
 				}
 			case "attached":
 				eiInput(t, result.err)
+			case "proof-shape":
+				// The Proof admission row wins over the saved closed-account refusal.
+				tsRefusal(t, result, false)
 			case "panic":
 				if returned || recovered != value {
 					t.Fatal("fallback changed panic")
