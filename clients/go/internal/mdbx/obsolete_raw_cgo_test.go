@@ -500,3 +500,84 @@ func TestObsoleteGenerationV1UndoTokens(t *testing.T) {
 		return nil
 	}))
 }
+
+type obsoleteSelectorCase struct {
+	g     uint64
+	class ObsoleteClassV1
+}
+
+func obsoleteRequireSelectorRefusal(t *testing.T, reader *Reader, selectors []obsoleteSelectorCase) {
+	t.Helper()
+	for _, selector := range selectors {
+		page, err := reader.ObsoleteGenerationPageV1(selector.g, selector.class, nil, 1)
+		obsoleteRequireZero(t, page)
+		obsoleteRequireError(t, err, "prefix-page", "InvalidInput", 22, "invalid obsolete generation selector")
+	}
+	if !reader.usable() || reader.failure != nil {
+		t.Fatal("selector refusal disarmed Reader")
+	}
+}
+
+// F1: the tree classes exist only on a format-3 Reader; the closed domain stays closed on both formats.
+func TestObsoleteGenerationV1TreeSelectors(t *testing.T) {
+	legacy, _, _ := consultedStore(t)
+	mustEnvironment(t, legacy.View(func(reader *Reader) error {
+		obsoleteRequireSelectorRefusal(t, reader, []obsoleteSelectorCase{{1, 5}, {1, 6}, {math.MaxUint64, 5}, {math.MaxUint64, 6}})
+		return nil
+	}))
+	tree, _, _ := treeNativeStore(t)
+	mustEnvironment(t, tree.View(func(reader *Reader) error {
+		obsoleteRequireSelectorRefusal(t, reader, []obsoleteSelectorCase{{1, 0}, {1, 7}, {1, 255}, {0, 5}, {0, 6}})
+		for _, class := range []ObsoleteClassV1{5, 6} {
+			page, err := reader.ObsoleteGenerationPageV1(1, class, nil, 1)
+			mustEnvironment(t, err)
+			obsoleteRequirePage(t, page, 1, 1)
+		}
+		return nil
+	}))
+}
+
+// N4: the node page keeps the range grammar and the root page the point grammar.
+func TestObsoleteGenerationV1TreeBounds(t *testing.T) {
+	tree, _, _ := treeNativeStore(t)
+	g := obsoleteGenerationLiteral(9)
+	root := append([]byte{0x11}, g...)
+	mustEnvironment(t, tree.View(func(reader *Reader) error {
+		queries := []struct {
+			class ObsoleteClassV1
+			after []byte
+			count uint32
+		}{
+			{5, nil, 0},
+			{5, nil, 1441},
+			{5, nil, math.MaxUint32},
+			{5, []byte{}, 1},
+			{5, obsoleteGenerationLiteral(8), 1},
+			{5, append(obsoleteGenerationLiteral(10), make([]byte, 38)...), 1},
+			{5, append(bytes.Clone(g), make([]byte, 2015)...), 1},
+			{6, nil, 0},
+			{6, nil, 1441},
+			{6, []byte{}, 1},
+			{6, g, 1},
+			{6, append([]byte{0x10}, g...), 1},
+			{6, append(bytes.Clone(root), 0), 1},
+		}
+		for _, query := range queries {
+			page, err := reader.ObsoleteGenerationPageV1(9, query.class, query.after, query.count)
+			obsoleteRequireZero(t, page)
+			obsoleteRequireError(t, err, "prefix-page", "InvalidInput", 22, "invalid obsolete generation page bounds")
+		}
+		for _, class := range []ObsoleteClassV1{5, 6} {
+			page, err := reader.ObsoleteGenerationPageV1(9, class, nil, 1440)
+			mustEnvironment(t, err)
+			obsoleteRequirePage(t, page, 1, 1)
+		}
+		page, err := reader.ObsoleteGenerationPageV1(9, 6, root, 1)
+		mustEnvironment(t, err)
+		obsoleteRequirePage(t, page, 1, 1)
+		if !reader.usable() || reader.failure != nil {
+			t.Fatal("bounds refusal disarmed Reader")
+		}
+		return nil
+	}))
+}
