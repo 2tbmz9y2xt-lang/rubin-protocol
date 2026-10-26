@@ -447,6 +447,10 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	if err != nil || c.unwind.kind != 0 {
 		return err
 	}
+	err = w.t.headerSlotV1(w.plan)
+	if err != nil {
+		return err
+	}
 	err = w.t.flushV1(w.plan.pair)
 	if err != nil {
 		return err

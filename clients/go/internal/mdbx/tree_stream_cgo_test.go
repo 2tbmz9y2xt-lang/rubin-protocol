@@ -2503,36 +2503,76 @@ func tsSlotConsulted(op *TreeOperationV1, rows int) {
 	}
 }
 
+func tsSlotBadHash(_ *testing.T, op *TreeOperationV1)   { op.HeaderSlot.Hash[0] ^= 1 }
+func tsSlotBadHeader(_ *testing.T, op *TreeOperationV1) { op.HeaderSlot.Header[0] ^= 1 }
+
+// tsSlotAtCap requires a Pair of exactly 16,384 mutations, the aux cap the slot would exceed.
+func tsSlotAtCap(t *testing.T, op *TreeOperationV1) {
+	if len(op.Pair.Mutations) != 16_384 {
+		t.Fatalf("aux mutations%d", len(op.Pair.Mutations))
+	}
+}
+
+// tsSlotNeighbors are two valid headers-v1 rows whose keys sort below and above the slot hash.
+func tsSlotNeighbors(t *testing.T, slot *TreeHeaderSlotV1) (lo, hi Mutation) {
+	for v := 0; v < 256 && (lo.Key == nil || hi.Key == nil); v++ {
+		header := slot.Header
+		header[143] = byte(v)
+		hash := sha3.Sum256(header[:])
+		m := Mutation{DBI: TreeSchemaV1DBIs()[3], Key: hash[:], AfterKind: 2, Literal: header[:]}
+		switch c := bytes.Compare(hash[:], slot.Hash[:]); {
+		case c < 0 && lo.Key == nil:
+			lo = m
+		case c > 0 && hi.Key == nil:
+			hi = m
+		}
+	}
+	if lo.Key == nil || hi.Key == nil {
+		t.Fatal("no neighbor headers")
+	}
+	return lo, hi
+}
+
+// tsSlotPairOverlap places the slot's row between two other headers-v1 targets.
+func tsSlotPairOverlap(t *testing.T, op *TreeOperationV1) {
+	lo, hi := tsSlotNeighbors(t, op.HeaderSlot)
+	m := Mutation{DBI: TreeSchemaV1DBIs()[3], Key: bytes.Clone(op.HeaderSlot.Hash[:]), AfterKind: 2, Literal: bytes.Clone(op.HeaderSlot.Header[:])}
+	op.Pair.Mutations = append([]Mutation{lo, m, hi}, op.Pair.Mutations...)
+}
+
+// tsSlotConsultedOverlap places the slot's row between two other Consulted rows.
+func tsSlotConsultedOverlap(t *testing.T, op *TreeOperationV1) {
+	lo, hi := tsSlotNeighbors(t, op.HeaderSlot)
+	dbi := TreeSchemaV1DBIs()[3]
+	op.Pair.Consulted = []ConsultedRow{{dbi, lo.Key}, {dbi, bytes.Clone(op.HeaderSlot.Hash[:])}, {dbi, hi.Key}}
+}
+
 // N3: each slot admission refusal returns "invalid Update Batch" with zero
 // Proof and zero Source calls; with HeaderSlot nil the same Pair and Consulted
 // rows keep their pre-change result.
 func TestTreeHeaderSlotAdmissionV1(t *testing.T) {
 	rows := []struct {
 		name string
+		aux  int
 		edit func(*testing.T, *TreeOperationV1)
 	}{
-		{"proof-nil", func(_ *testing.T, op *TreeOperationV1) { op.Proof = nil }},
-		{"hash", func(_ *testing.T, op *TreeOperationV1) { op.HeaderSlot.Hash[0] ^= 1 }},
-		{"header", func(_ *testing.T, op *TreeOperationV1) { op.HeaderSlot.Header[0] ^= 1 }},
-		{"pair-overlap", func(_ *testing.T, op *TreeOperationV1) {
-			m := Mutation{DBI: TreeSchemaV1DBIs()[3], Key: bytes.Clone(op.HeaderSlot.Hash[:]), AfterKind: 2, Literal: bytes.Clone(op.HeaderSlot.Header[:])}
-			op.Pair.Mutations = append([]Mutation{m}, op.Pair.Mutations...)
-		}},
-		{"consulted-overlap", func(_ *testing.T, op *TreeOperationV1) {
-			op.Pair.Consulted = []ConsultedRow{{TreeSchemaV1DBIs()[3], bytes.Clone(op.HeaderSlot.Hash[:])}}
-		}},
-		{"proof-nil-aux-cap", func(t *testing.T, op *TreeOperationV1) {
+		{"proof-nil", 0, func(_ *testing.T, op *TreeOperationV1) { op.Proof = nil }},
+		{"hash", 0, tsSlotBadHash},
+		{"header", 0, tsSlotBadHeader},
+		{"pair-overlap", 0, tsSlotPairOverlap},
+		{"consulted-overlap", 0, tsSlotConsultedOverlap},
+		{"proof-nil-aux-cap", 16_383, func(t *testing.T, op *TreeOperationV1) {
 			op.Proof = nil
-			if len(op.Pair.Mutations) != 16_384 {
-				t.Fatalf("aux mutations%d", len(op.Pair.Mutations))
-			}
+			tsSlotAtCap(t, op)
 		}},
+		// Each later check precedes the slot caps: the slot would also exceed the aux cap.
+		{"hash-aux-cap", 16_383, func(t *testing.T, op *TreeOperationV1) { tsSlotBadHash(t, op); tsSlotAtCap(t, op) }},
+		{"header-aux-cap", 16_383, func(t *testing.T, op *TreeOperationV1) { tsSlotBadHeader(t, op); tsSlotAtCap(t, op) }},
+		{"pair-overlap-aux-cap", 16_380, func(t *testing.T, op *TreeOperationV1) { tsSlotPairOverlap(t, op); tsSlotAtCap(t, op) }},
+		{"consulted-overlap-aux-cap", 16_383, func(t *testing.T, op *TreeOperationV1) { tsSlotConsultedOverlap(t, op); tsSlotAtCap(t, op) }},
 	}
 	for _, row := range rows {
-		aux := 0
-		if row.name == "proof-nil-aux-cap" {
-			aux = 16_383
-		}
+		aux := row.aux
 		t.Run(row.name, func(t *testing.T) {
 			calls, proofs, marker := 0, 0, errors.New("source reached")
 			tsRejected(t, TreeOperation, func(t *testing.T) TreeOperationV1 {
@@ -2556,6 +2596,95 @@ func TestTreeHeaderSlotAdmissionV1(t *testing.T) {
 	}
 }
 
+// L2/O1: the ENTRY inventory row precedes an invalid slot, an existing
+// Consulted-row or Pair cap overflow precedes a Proof-nil slot, and the
+// account-ceiling, primitive, Proof-shape and Pair-relation rows precede a
+// slot over the aux cap.
+func TestTreeHeaderSlotAdmitOrderV1(t *testing.T) {
+	t.Run("entry-inventory", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, proofs := 0, 0
+		op := tsSlotShape(t, &calls, &proofs, nil, 0)
+		op.Pair.EntryInventory = &EntryInventoryV1{}
+		tsSlotBadHash(t, &op)
+		r := tsRun(t, s, o, TreeOperation, op)
+		r.tuple(t, 1, 1, -1)
+		eiInput(t, r.err)
+		if calls != 0 || proofs != 0 {
+			t.Fatalf("reached Source%d Proof%d", calls, proofs)
+		}
+	})
+	// The Proof-shape row and the Pair-relation row each precede a slot that
+	// would exceed the aux cap.
+	t.Run("proof-shape", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, proofs := 0, 0
+		op := tsSlotShape(t, &calls, &proofs, nil, 16_383)
+		op.Primitives[0].Coverage = nil
+		r := tsRun(t, s, o, TreeOperation, op)
+		tsRefusal(t, r, false)
+		if calls != 0 || proofs != 0 {
+			t.Fatalf("reached Source%d Proof%d", calls, proofs)
+		}
+	})
+	// The account-ceiling and primitive admission rows precede the same slot.
+	for _, row := range []struct {
+		name string
+		kind OperationKind
+		edit func(*TreeOperationV1)
+	}{
+		{"ceiling", LaneOperation, func(*TreeOperationV1) {}},
+		{"primitive", TreeOperation, func(op *TreeOperationV1) { op.Primitives[0].Source = nil }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, _, o := tsNew(t)
+			calls, proofs := 0, 0
+			op := tsSlotShape(t, &calls, &proofs, nil, 16_383)
+			row.edit(&op)
+			r := tsRun(t, s, o, row.kind, op)
+			tsRefusal(t, r, false)
+			if calls != 0 || proofs != 0 {
+				t.Fatalf("reached Source%d Proof%d", calls, proofs)
+			}
+		})
+	}
+	t.Run("relations", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, proofs := 0, 0
+		op := tsSlotShape(t, &calls, &proofs, nil, 16_383)
+		target := tsTarget(1)
+		op.Pair.Consulted = []ConsultedRow{{target.DBI, target.Key}}
+		r := tsRun(t, s, o, TreeOperation, op)
+		tsRefusal(t, r, false)
+		if calls != 0 || proofs != 0 {
+			t.Fatalf("reached Source%d Proof%d", calls, proofs)
+		}
+	})
+	t.Run("consulted-cap", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, proofs := 0, 0
+		op := tsSlotShape(t, &calls, &proofs, nil, 0)
+		tsSlotConsulted(&op, 16_385)
+		op.Proof = nil
+		r := tsRun(t, s, o, TreeOperation, op)
+		tsRefusal(t, r, true)
+		if calls != 0 || proofs != 0 {
+			t.Fatalf("reached Source%d Proof%d", calls, proofs)
+		}
+	})
+	t.Run("pair-cap", func(t *testing.T) {
+		s, _, o := tsNew(t)
+		calls, proofs := 0, 0
+		op := tsSlotShape(t, &calls, &proofs, nil, 16_384)
+		op.Proof = nil
+		r := tsRun(t, s, o, TreeOperation, op)
+		tsRefusal(t, r, true)
+		if calls != 0 || proofs != 0 {
+			t.Fatalf("reached Source%d Proof%d", calls, proofs)
+		}
+	})
+}
+
 // N5: the slot counts as one more aux mutation and one more Consulted row.
 func TestTreeHeaderSlotCapsV1(t *testing.T) {
 	for _, row := range []struct {
@@ -2567,12 +2696,19 @@ func TestTreeHeaderSlotCapsV1(t *testing.T) {
 		{"aux-16383", 16_382, 0, false},
 		{"consulted-16384", 0, 16_384, true},
 		{"consulted-16383", 0, 16_383, false},
+		{"literal-155659728", -1, 0, true},
+		{"literal-155659727", -2, 0, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			s, _, o := tsNew(t)
 			calls, proofs, marker := 0, 0, errors.New("source reached")
-			op := tsSlotShape(t, &calls, &proofs, marker, row.aux)
+			op := tsSlotShape(t, &calls, &proofs, marker, max(row.aux, 0))
 			tsSlotConsulted(&op, row.consulted)
+			if row.aux < 0 {
+				// -1: the slot's 148 literal bytes exceed maxUpdateLiterals by one;
+				// -2: they reach it exactly.
+				tsSlotLiterals(t, &op, maxUpdateLiterals-148+uint64(2+row.aux))
+			}
 			r := tsRun(t, s, o, TreeOperation, op)
 			if row.bound {
 				tsRefusal(t, r, true)
@@ -2588,6 +2724,31 @@ func TestTreeHeaderSlotCapsV1(t *testing.T) {
 			}
 		})
 	}
+}
+
+// tsSlotLiterals raises op's Pair literal bytes to exactly total with
+// rank-4 block rows of at most Initial148MaxBlockBytes, kept in (rank, key)
+// order; a handful of rows leaves the aux count far below its cap.
+func tsSlotLiterals(t *testing.T, op *TreeOperationV1, total uint64) {
+	t.Helper()
+	var have uint64
+	for _, m := range op.Pair.Mutations {
+		have += uint64(len(m.Literal))
+	}
+	for n := byte(0); have < total; n++ {
+		size := min(total-have, Initial148MaxBlockBytes)
+		if size < Initial148HeaderBytes {
+			t.Fatal("literal remainder below one header")
+		}
+		value := make([]byte, size)
+		value[0] = n
+		hash := sha3.Sum256(value[:Initial148HeaderBytes])
+		op.Pair.Mutations = append(op.Pair.Mutations, Mutation{DBI: TreeSchemaV1DBIs()[4], Key: hash[:], AfterKind: AfterLiteral, Literal: value})
+		have += size
+	}
+	slices.SortStableFunc(op.Pair.Mutations, func(a, b Mutation) int {
+		return treeRowCmpV1(a.DBI.Rank, a.Key, treeRowKeyV1{rank: b.DBI.Rank, key: b.Key})
+	})
 }
 
 // P3/N4: HeaderSlot nil keeps the step-5 amount; a slot adds one owned
@@ -2658,5 +2819,63 @@ func TestTreeHeaderSlotOwnedCopyV1(t *testing.T) {
 	plan = treeOwnPlanV1(op)
 	if plan.slot != nil || cap(plan.pair) != 2 || cap(plan.consulted) != 1 {
 		t.Fatal("HeaderSlot-nil plan changed")
+	}
+}
+
+// The resolved slot joins the owned Pair and Consulted arrays in (rank, key)
+// order inside the spare capacity.
+func TestTreeHeaderSlotJoinOrderV1(t *testing.T) {
+	m := func(rank uint8, key byte) ownedMutation {
+		return ownedMutation{dbi: TreeSchemaV1DBIs()[rank], key: []byte{key}}
+	}
+	pair := append(make([]ownedMutation, 0, 4), m(1, 1), m(5, 2), m(5, 3))
+	backing := &pair[0]
+	pair = treeSlotInsertV1(pair, m(3, 9))
+	got := []uint8{pair[0].dbi.Rank, pair[1].dbi.Rank, pair[2].dbi.Rank, pair[3].dbi.Rank}
+	if !slices.Equal(got, []uint8{1, 3, 5, 5}) || pair[2].key[0] != 2 || &pair[0] != backing {
+		t.Fatalf("slot Pair position %v", got)
+	}
+	c := func(rank uint8, key byte) ownedConsulted {
+		return ownedConsulted{dbi: TreeSchemaV1DBIs()[rank], key: []byte{key}}
+	}
+	// Rank-3 neighbors below and above the slot key: the position is decided by
+	// key, not by rank alone.
+	ranked := append(make([]ownedMutation, 0, 5), m(1, 1), m(3, 5), m(3, 12), m(5, 2))
+	ranked = treeSlotInsertV1(ranked, m(3, 9))
+	keys := []byte{ranked[0].key[0], ranked[1].key[0], ranked[2].key[0], ranked[3].key[0], ranked[4].key[0]}
+	if !slices.Equal(keys, []byte{1, 5, 9, 12, 2}) || ranked[2].dbi.Rank != 3 {
+		t.Fatalf("slot Pair position among rank-3 neighbors %v", keys)
+	}
+	// Rank-3 Consulted neighbors below and above the slot key.
+	consulted := append(make([]ownedConsulted, 0, 4), c(0, 1), c(3, 5), c(3, 10))
+	consulted = treeSlotConsultedV1(consulted, c(3, 9))
+	if consulted[1].key[0] != 5 || consulted[2].key[0] != 9 || consulted[3].key[0] != 10 || cap(consulted) != 4 {
+		t.Fatal("slot Consulted position")
+	}
+}
+
+// Both joins stay inside the spare capacity of the step-5 owned plan: zero
+// allocations for the absent insert into Pair and for the identical-row
+// insert into Consulted.
+func TestTreeHeaderSlotJoinAllocsV1(t *testing.T) {
+	calls, proofs := 0, 0
+	op := tsSlotShape(t, &calls, &proofs, nil, 1)
+	tsSlotConsulted(&op, 1)
+	plan := treeOwnPlanV1(op)
+	pairs, rows := len(plan.pair), len(plan.consulted)
+	m := ownedMutation{dbi: TreeSchemaV1DBIs()[3], key: plan.slot[:32:32], after: AfterLiteral, literal: plan.slot[32:]}
+	row := ownedConsulted{dbi: TreeSchemaV1DBIs()[3], key: plan.slot[:32:32]}
+	// Each join appends into the spare capacity of plan's backing array and
+	// shifts elements inside it, so that backing's contents change; the grown
+	// slice is never assigned back to plan.pair or plan.consulted, so their
+	// lengths stay fixed and every run appends within the same spare capacity.
+	// The test reads only the allocation count and the result length.
+	var pairOut []ownedMutation
+	var rowsOut []ownedConsulted
+	if n := testing.AllocsPerRun(10, func() { pairOut = treeSlotInsertV1(plan.pair, m) }); n != 0 || len(pairOut) != pairs+1 {
+		t.Fatalf("Pair join allocations %v", n)
+	}
+	if n := testing.AllocsPerRun(10, func() { rowsOut = treeSlotConsultedV1(plan.consulted, row) }); n != 0 || len(rowsOut) != rows+1 {
+		t.Fatalf("Consulted join allocations %v", n)
 	}
 }

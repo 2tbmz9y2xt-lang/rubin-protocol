@@ -18,7 +18,7 @@ import (
 // The native fixture primary selector invokes this reached-owner check. It
 // models the account window after public precheck, without a scheduler seam.
 func tsClosedBeforeHoldV1(t *testing.T) {
-	for _, mode := range []string{"application", "malformed", "valid", "attached", "proof-shape", "slot-invalid", "panic", "panic-nil", "goexit"} {
+	for _, mode := range []string{"application", "malformed", "valid", "attached", "proof-shape", "slot-invalid", "slot-cap", "panic", "panic-nil", "goexit"} {
 		t.Run(mode, func(t *testing.T) {
 			s, _, o := tsNew(t)
 			var closed *OperationAccount
@@ -58,6 +58,10 @@ func tsClosedBeforeHoldV1(t *testing.T) {
 						panic(treeCallNilPanicValue)
 					case "goexit":
 						runtime.Goexit()
+					}
+					if mode == "slot-cap" {
+						slotCalls, slotProofs := 0, 0
+						return tsSlotShape(t, &slotCalls, &slotProofs, nil, 16_383), nil
 					}
 					op := tsPair(51)
 					if mode == "attached" {
@@ -102,6 +106,9 @@ func tsClosedBeforeHoldV1(t *testing.T) {
 			case "slot-invalid":
 				// The slot admission row wins over the saved closed-account refusal.
 				tsRefusal(t, result, false)
+			case "slot-cap":
+				// The slot cap row also wins over the saved closed-account refusal.
+				tsRefusal(t, result, true)
 			case "panic":
 				if returned || recovered != value {
 					t.Fatal("fallback changed panic")
@@ -2225,5 +2232,308 @@ func TestTreeProofNotAtReadbackV1(t *testing.T) {
 	}
 	if log.calls != 1 || s.p[0].calls[TreeReadbackV1] != 1 {
 		t.Fatalf("Proof calls%d readback Source calls%d", log.calls, s.p[0].calls[TreeReadbackV1])
+	}
+}
+
+// tsfSlot is the covered LAG burst with a counting Proof that returns nil and a valid
+// header slot whose row x is absent from ORIGINAL.
+func tsfSlot(t *testing.T) (*tsfScene, *tsProofLog, []byte, []byte) {
+	t.Helper()
+	s := tsfNew(t)
+	tsfCover(t, s)
+	log := &tsProofLog{}
+	s.op.Proof = log.proof
+	s.op.HeaderSlot = tsSlot(t)
+	return s, log, bytes.Clone(s.op.HeaderSlot.Hash[:]), bytes.Clone(s.op.HeaderSlot.Header[:])
+}
+
+// tsfSlotUnreached requires an armed keyed site the attempt never reached.
+func tsfSlotUnreached(t *testing.T, evidence SelectedDamageEvidence, err error) {
+	t.Helper()
+	if err == nil || err.Error() != "selected damage fixture site was not reached exactly as armed" || evidence.Faults != 0 {
+		t.Fatalf("armed slot site reached: %v evidence%+v", err, evidence)
+	}
+}
+
+func tsfSlotDiffers(t *testing.T, err error) {
+	t.Helper()
+	treeNativeError(t, err, "update", "StateMismatch", -30779, "tree header slot differs", nil)
+	if engine, _ := directTestEngineError(err); engine.TreeObservation != nil {
+		t.Fatal("slot refusal carries a tree observation")
+	}
+}
+
+// tsfDump is every committed row of every rank, keyed "rank/key".
+func tsfDump(t *testing.T, s *Store) map[string]string {
+	t.Helper()
+	rows := map[string]string{}
+	mustEnvironment(t, s.View(func(r *Reader) error {
+		for rank := range r.dbis {
+			for from := []byte{0}; ; {
+				key, value, ok, err := treeReadNextV1(r.txn, r.dbis[rank], from)
+				if err != nil || !ok {
+					if err != nil {
+						return err
+					}
+					break
+				}
+				rows[fmt.Sprintf("%d/%x", rank, key)] = string(value.value)
+				from = append(bytes.Clone(key), 0)
+			}
+		}
+		return nil
+	}))
+	return rows
+}
+
+// P1: an absent row x is inserted with Header; the complete committed store
+// otherwise equals the same burst run with HeaderSlot nil.
+func TestTreeHeaderSlotAbsentV1(t *testing.T) {
+	s, log, key, header := tsfSlot(t)
+	r := s.run(t)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	if log.calls != 1 {
+		t.Fatalf("Proof calls%d", log.calls)
+	}
+	got := tsfDump(t, s.s)
+	base, _, _, _ := tsfSlot(t)
+	base.op.HeaderSlot = nil
+	r = base.run(t)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	want := tsfDump(t, base.s)
+	x := fmt.Sprintf("3/%x", key)
+	if got[x] != string(header) {
+		t.Fatal("row x is not Header")
+	}
+	delete(got, x)
+	if !reflect.DeepEqual(got, want) || len(want) == 0 {
+		t.Fatalf("slot run store differs from HeaderSlot-nil run: %d vs %d rows", len(got), len(want))
+	}
+	s.durable(t, true)
+	tsRead(t, s.s, TreeSchemaV1DBIs()[3], key, header)
+}
+
+// P2: a byte-identical row x is reused: NEW with no put at x.
+func TestTreeHeaderSlotIdenticalV1(t *testing.T) {
+	s, log, key, header := tsfSlot(t)
+	treeNativeSeed(t, s.s, 3, key, header)
+	var r tsResult
+	evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 3, key, func() { r = s.run(t) })
+	tsfSlotUnreached(t, evidence, err)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	if log.calls != 1 || evidence.Commits != 1 {
+		t.Fatalf("Proof calls%d evidence%+v", log.calls, evidence)
+	}
+	s.durable(t, true)
+	tsRead(t, s.s, TreeSchemaV1DBIs()[3], key, header)
+}
+
+// P4: the first ORIGINAL OLD read of x follows Proof and precedes every write.
+func TestTreeHeaderSlotAfterProofV1(t *testing.T) {
+	s, log, key, _ := tsfSlot(t)
+	var r tsResult
+	evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 3, key, func() { r = s.run(t) })
+	mustEnvironment(t, err)
+	if evidence.Faults != 1 || evidence.Deletes != 0 || evidence.Commits != 0 || log.calls != 1 {
+		t.Fatalf("slot read evidence%+v Proof calls%d", evidence, log.calls)
+	}
+	r.tuple(t, 1, 1, -1)
+	treeNativeError(t, r.err, "update", "IO", 5, "error 5", nil)
+	tsConsumed(t, s.s, s.o, 1, r.err)
+}
+
+// P5: the readback compares row x for an insert and for a reuse.
+func TestTreeHeaderSlotReadbackV1(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reuse%v", reuse), func(t *testing.T) {
+			s, _, key, header := tsfSlot(t)
+			if reuse {
+				treeNativeSeed(t, s.s, 3, key, header)
+			}
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageCommitUnreadable, 3, key, func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, 3, 3, -1)
+			var ce *CommitError
+			if !errors.As(r.err, &ce) || ce.Truth != 3 || evidence.Faults != 2 || evidence.Commits != 1 {
+				t.Fatalf("slot readback %v evidence%+v", r.err, evidence)
+			}
+			// Position: the resolution runs once and is not repeated at readback.
+			// Rank-3 ORIGINAL OLD gets: none in this scene without a slot, two
+			// in the resolution (equality, classification), then two more before
+			// the readback's read-transaction get of x faults. Insert: the
+			// readback target image pass and the OLD side of its target
+			// equality. Reuse: finalV1's Consulted match and the OLD side of the
+			// readback Consulted equality.
+			if evidence.OldGets[3] != 4 {
+				t.Fatalf("rank-3 ORIGINAL OLD gets %d, want 4", evidence.OldGets[3])
+			}
+			tsConsumed(t, s.s, s.o, 3, r.err)
+		})
+	}
+}
+
+// P6: a writer-position Source that rewrites the caller's slot after
+// admission does not reach the owned copy.
+func TestTreeHeaderSlotAliasV1(t *testing.T) {
+	s, _, key, header := tsfSlot(t)
+	slot := s.op.HeaderSlot
+	s.p[0].before = func(pos TreePositionV1, _ *Reader, _ *TreeDeltaSinkV1) error {
+		if pos == TreeWriterV1 {
+			slot.Hash[0] ^= 1
+			slot.Header[0] ^= 1
+		}
+		return nil
+	}
+	r := s.run(t)
+	r.tuple(t, 2, 3, -1)
+	mustEnvironment(t, r.err)
+	s.durable(t, true)
+	tsRead(t, s.s, TreeSchemaV1DBIs()[3], key, header)
+	tsRead(t, s.s, TreeSchemaV1DBIs()[3], slot.Hash[:], nil)
+}
+
+// N1/N2: a differing row x, at the same width, at 116 bytes or empty, refuses
+// with no write, consumes the Store and leaves the row unchanged.
+func TestTreeHeaderSlotDiffersV1(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		edit func([]byte) []byte
+	}{
+		{"byte147", func(h []byte) []byte { h[147] ^= 1; return h }},
+		{"width116", func(h []byte) []byte { return h[:116] }},
+		{"empty", func([]byte) []byte { return []byte{} }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			s, log, key, header := tsfSlot(t)
+			stored := row.edit(bytes.Clone(header))
+			treeNativeSeed(t, s.s, 3, key, stored)
+			var r tsResult
+			evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamagePutEIO, 3, key, func() { r = s.run(t) })
+			tsfSlotUnreached(t, evidence, err)
+			r.tuple(t, 1, 1, -1)
+			tsfSlotDiffers(t, r.err)
+			if log.calls != 1 || evidence.Deletes != 0 || evidence.Commits != 0 {
+				t.Fatalf("Proof calls%d evidence%+v", log.calls, evidence)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.durable(t, false)
+			if equal, err := FixtureRawRowEqual(s.s, 3, key, stored); err != nil || !equal {
+				t.Fatalf("row x changed: equal%v %v", equal, err)
+			}
+		})
+	}
+}
+
+// L1: an EIO from either ORIGINAL OLD read of an absent row x (mode 28: the
+// OLD/write equality read; mode 1: the classification read) keeps that error
+// unchanged on the Proof error route, with no write at x.
+func TestTreeHeaderSlotReadFaultV1(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		mode uint32
+		gets uint32
+	}{{"equality", 28, 1}, {"classification", 1, 2}} {
+		t.Run(row.name, func(t *testing.T) {
+			s, log, key, _ := tsfSlot(t)
+			var r tsResult
+			evidence, err := fixtureLargeFault(s.s, row.mode, 3, key, func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			r.tuple(t, 1, 1, -1)
+			treeNativeError(t, r.err, "update", EngineIO, codeEIO, expectedNativeDiagnostic(codeEIO), nil)
+			if log.calls != 1 || evidence.gets != row.gets || evidence.commits != 0 {
+				t.Fatalf("Proof calls%d evidence%+v", log.calls, evidence)
+			}
+			tsConsumed(t, s.s, s.o, 1, r.err)
+			s.durable(t, false)
+			if _, present := tsfDump(t, s.s)[fmt.Sprintf("3/%x", key)]; present {
+				t.Fatal("row x was written")
+			}
+		})
+	}
+}
+
+// N6: a Proof error, a Proof panic and the H_r refusal each keep their result
+// and leave row x unread.
+func TestTreeHeaderSlotEarlierResultsV1(t *testing.T) {
+	t.Run("proof-error", func(t *testing.T) {
+		s, log, key, _ := tsfSlot(t)
+		log.err = errors.New("proof refused")
+		var r tsResult
+		evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 3, key, func() { r = s.run(t) })
+		tsfSlotUnreached(t, evidence, err)
+		r.tuple(t, 1, 1, -1)
+		if any(r.err) != any(log.err) || log.calls != 1 {
+			t.Fatalf("Proof error %v calls%d", r.err, log.calls)
+		}
+		tsConsumed(t, s.s, s.o, 1, log.err)
+	})
+	t.Run("proof-panic", func(t *testing.T) {
+		s, _, key, _ := tsfSlot(t)
+		value := new(int)
+		s.op.Proof = func(*TreeDeltaReportV1) error { panic(value) }
+		var r tsResult
+		var unwind treeUnwindV1
+		evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 3, key, func() {
+			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				s.s.operations.Lock()
+				defer s.s.operations.Unlock()
+				r.truth, r.stage, r.index, unwind, r.err = s.s.treeEntryLockedV1(a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+				return nil
+			}))
+		})
+		tsfSlotUnreached(t, evidence, err)
+		r.tuple(t, 1, 1, -1)
+		if r.err != nil || unwind.kind != 1 || unwind.value != value || s.s.state != storeOPEN || reservationLive(s.o) != 0 {
+			t.Fatalf("Proof panic %v unwind%+v state %s", r.err, unwind, s.s.state)
+		}
+	})
+	t.Run("reserve", func(t *testing.T) {
+		s, log, key, _ := tsfSlot(t)
+		budgets := s.budgets(t)
+		pc := uint64(128+32+len(s.op.Pair.Mutations[0].Literal)) + 152 + 3*24 + 128 + 32 + 148 + 48 + 32
+		filler := uint64(402_653_184) - pc - budgets[2] - 131_192 - 288_408 - 208 + 1
+		var r tsResult
+		evidence, err := FixtureSelectedDamage(s.s, s.o, SelectedDamageGetEIO, 3, key, func() {
+			mustEnvironment(t, s.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(filler, func() error {
+					r = tsInvoke(s.s, a, func(*Reader) (TreeOperationV1, error) { return s.op, nil })
+					return nil
+				})
+			}))
+		})
+		tsfSlotUnreached(t, evidence, err)
+		r.tuple(t, 1, 1, -1)
+		// The writer Source ran, so this is the H_r refusal, not the step-5 one.
+		if any(r.err) != any(errOperationReservationCapacity) || log.calls != 0 || s.p[0].calls != [3]int{0, 1, 0} {
+			t.Fatalf("H_r refusal %v Proof calls%d Source calls%v", r.err, log.calls, s.p[0].calls)
+		}
+		tsConsumed(t, s.s, s.o, 1, r.err)
+	})
+}
+
+// H1: an OLD/write drift at x is the existing mismatch, checked before the
+// row is classified.
+func TestTreeHeaderSlotDriftV1(t *testing.T) {
+	for _, differing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("differing%v", differing), func(t *testing.T) {
+			s, log, key, header := tsfSlot(t)
+			if differing {
+				header[147] ^= 1
+				treeNativeSeed(t, s.s, 3, key, header)
+			}
+			var r tsResult
+			count, err := FixtureWriteSnapshotDrift(s.s, 3, key, func() { r = s.run(t) })
+			mustEnvironment(t, err)
+			if count != 1 || log.calls != 1 {
+				t.Fatalf("drift count%d Proof calls%d", count, log.calls)
+			}
+			r.tuple(t, 1, 1, -1)
+			treeNativeError(t, r.err, "update", "StateMismatch", -30779, "OLD/write snapshot mismatch", nil)
+			tsConsumed(t, s.s, s.o, 1, r.err)
+		})
 	}
 }
