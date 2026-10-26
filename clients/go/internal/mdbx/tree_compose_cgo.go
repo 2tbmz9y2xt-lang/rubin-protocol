@@ -11,7 +11,7 @@ import "bytes"
 
 // ---- tree_compose_cgo.go (owner L5a) ----
 
-const treeReaderBytesV1 uint64 = 1144 // R: the provider Reader newUpdateReaderV1 allocates per Source call (208, D33) plus the engine-side allocation of one LargeImageBlockBodyV1 visit with one ReadAt on it (728, D34) plus two 64-byte amended read objects reachable at once (128, D36) plus one mergedNextV1 seek copy (80, D37)
+const treeReaderBytesV1 uint64 = 1152 // R: the provider Reader newUpdateReaderV1 allocates per Source call (216, D33) plus the engine-side allocation of one LargeImageBlockBodyV1 visit with one ReadAt on it (728, D34) plus two 64-byte amended read objects reachable at once (128, D36) plus one mergedNextV1 seek copy (80, D37)
 
 // treeStepBytesV1 is the per-primitive charge W + F_fixed + C + R (D12-E, D14-2, D33), made before the body read.
 const treeStepBytesV1 = treeWindowBytesV1 + treeFixedBytesV1 + treeControlBytesV1 + treeReaderBytesV1

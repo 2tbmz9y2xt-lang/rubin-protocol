@@ -1201,8 +1201,8 @@ func TestTreeStreamPairOwnershipAndAccountingV1(t *testing.T) {
 		r := tsRun(t, s, o, TreeOperation, op)
 		r.tuple(t, 2, 3, -1)
 		mustEnvironment(t, r.err)
-		if sample != pc+74_872 {
-			t.Fatalf("PC before primitive sample%d want%d", sample, pc+74_872)
+		if sample != pc+74_880 {
+			t.Fatalf("PC before primitive sample%d want%d", sample, pc+74_880)
 		}
 		s = tsReopen(t, s, path)
 		tsRead(t, s, originalTarget.DBI, key, value)

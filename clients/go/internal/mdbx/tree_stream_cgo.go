@@ -21,6 +21,8 @@ import (
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
+	// EntryInventory is preparation only; this controls-only predecessor refuses it.
+	EntryInventory *EntryInventoryV1
 }
 
 // TreeSourceV1 is an immutable, replayable complete block source. At each position
@@ -200,22 +202,16 @@ func (s *Store) treeEntryLockedV1(account *OperationAccount, callback func(*Read
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, s.failedReadBegin(old, err)
 	}
 	e := treePublicEntryV1{store: s, old: old, reader: s.newUpdateReaderV1(old)}
-	op, unwind, err := e.callbackV1(callback)
-	if err != nil || unwind.kind != 0 {
-		return CommitTruthOld, UpdateStagePrewrite, -1, unwind, err
-	}
-	err = treeAdmitV1(op, account, s.databaseID)
-	if err != nil {
-		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, s.abortReadLocked(old, err, false)
-	}
-	return e.executeV1(account, op)
+	return e.executeV1(account, callback)
 }
 
 // treePublicEntryV1 owns ORIGINAL OLD only until callback refusal or composer handoff.
 type treePublicEntryV1 struct {
-	store  *Store
-	old    *C.MDBX_txn
-	reader *Reader
+	store     *Store
+	old       *C.MDBX_txn
+	reader    *Reader
+	hold      *operationHold
+	inventory *entryInventoryStateV1
 }
 
 func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, error)) (TreeOperationV1, treeUnwindV1, error) {
@@ -223,6 +219,7 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	defer func() {
 		if !returned {
 			e.reader.expire().retire()
+			e.retireEntryV1()
 			primary, infrastructure := readPrimary(nil, e.reader.failure)
 			_ = e.store.abortReadLocked(e.old, primary, infrastructure)
 		}
@@ -230,6 +227,7 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	op, value, panicked, err := invokeUpdate(callback, e.reader)
 	returned = true
 	e.reader.expire().retire()
+	e.retireEntryV1()
 	primary, infrastructure := readPrimary(err, e.reader.failure)
 	if panicked {
 		return TreeOperationV1{}, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
@@ -240,24 +238,54 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	return op, treeUnwindV1{}, nil
 }
 
-func (e *treePublicEntryV1) executeV1(account *OperationAccount, op TreeOperationV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+func (e *treePublicEntryV1) executeV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error)) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	truth, stage, index := CommitTruthOld, UpdateStagePrewrite, -1
 	var unwind treeUnwindV1
 	started := false
 	err := account.withHold(func(hold *operationHold) error {
-		err := hold.grow(treePlanCopyBytesV1(op.Pair))
-		if err != nil {
-			return err
-		}
-		plan := treeOwnPlanV1(op)
 		started = true
-		truth, stage, index, unwind, err = e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{hold}, &plan)
+		e.reader.getMu.Lock()
+		e.hold = hold
+		e.reader.entry = e
+		e.reader.getMu.Unlock()
+		var err error
+		truth, stage, index, unwind, err = e.admittedV1(account, callback, nil)
 		return err
 	})
 	if !started {
-		err = e.store.abortReadLocked(e.old, err, false)
+		// Closing between the public precheck and hold entry never suppresses
+		// the original callback, its unwind or ordinary admission priority.
+		return e.admittedV1(account, callback, err)
 	}
 	return truth, stage, index, unwind, err
+}
+
+func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error), saved error) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
+	op, unwind, err := e.callbackV1(callback)
+	if err != nil || unwind.kind != 0 {
+		return CommitTruthOld, UpdateStagePrewrite, -1, unwind, err
+	}
+	err = e.prewriteV1(account, op, saved)
+	if err != nil {
+		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.store.abortReadLocked(e.old, err, false)
+	}
+	plan := treeOwnPlanV1(op)
+	return e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{e.hold}, &plan)
+}
+
+func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
+	admissionErr := treeAdmitV1(op, account, e.store.databaseID)
+	if admissionErr != nil {
+		return admissionErr
+	}
+	if e.inventory != nil || op.Pair.EntryInventory != nil {
+		return entryInputV1()
+	}
+	if saved != nil {
+		return saved
+	}
+	// A zero-byte grow also preserves the post-callback open check.
+	return e.hold.grow(treePlanCopyBytesV1(op.Pair))
 }
 
 type treeAccountLedgerV1 struct{ hold *operationHold }

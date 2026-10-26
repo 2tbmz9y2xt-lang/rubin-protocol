@@ -915,6 +915,9 @@ type Reader struct {
 	ownerVerified bool
 	// lineageReusable is false when the Store's identity or epoch space was exhausted at capture.
 	lineageReusable bool
+
+	// entry links only the initial UpdateTreeV1 callback, guarded by getMu.
+	entry *treePublicEntryV1
 }
 
 // drawLineageV1 assigns a process-unique nonzero identity; an exhausted counter leaves 0 (non-cacheable), never a reuse.
