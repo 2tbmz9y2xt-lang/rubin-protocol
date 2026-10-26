@@ -2653,7 +2653,7 @@ func eicPriorOrphan(t *testing.T) {
 	eisSeed(t, f, []Mutation{
 		eisMutation(2, eisHeight(7, 9), eisChain(hash, [32]byte(header[4:36]), 9)),
 		eisMutation(3, hash[:], header), eisMutation(4, hash[:], header),
-		eisMutation(5, UndoManifestKey(hash), UndoManifestValue(9, [16]byte{}, 2, 40)),
+		eisMutation(5, UndoManifestKey(hash), UndoManifestValue(9, [16]byte{}, 1, 2)),
 		eisMutation(7, eisOwner(7, hash), CanonicalOwnerValue(9)),
 	})
 	// This is the actual raw disposable namespace writer. The ordinary Pair
