@@ -411,8 +411,8 @@ func (r *replayRecompute) targetHeader(hash [32]byte) (BlockHeader, []byte, erro
 		return BlockHeader{}, nil, err
 	}
 	r.step = ""
-	header, parseErr := ParseBlockHeaderBytes(raw)
-	blockHash, hashErr := BlockHash(raw)
+	header, parseErr := r.q.parse(raw)
+	blockHash, hashErr := r.q.hashOf(raw)
 	if !present || parseErr != nil || hashErr != nil || blockHash != hash {
 		return header, nil, selectedSideDefect("replay target header absent or misnamed")
 	}

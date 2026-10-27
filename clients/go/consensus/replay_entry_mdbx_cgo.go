@@ -526,6 +526,8 @@ type replayQualifier struct {
 	genesis    PublishedGenesisContextV1
 	excluded   *[32]byte
 	headers    [][116]byte
+	headers148 [][148]byte // the width-148 qualifier's headers; headers is then nil
+	wide       bool        // every header, canonical row, anchor and target is exactly 148 bytes
 	tips       [][32]byte
 	nodes      []replayNode
 	kids       []replayKid
@@ -569,14 +571,32 @@ type replayCandidate struct {
 }
 
 func newReplayQualifier(g PublishedGenesisContextV1, inv HeaderCandidateInventoryV1, excluded *mdbx.InvalidBranchV1) *replayQualifier {
-	q := &replayQualifier{genesis: g, headers: inv.Headers, badFrom: math.MaxUint64, atC: math.MaxUint64}
+	q := newReplayQualifierState(g, excluded, len(inv.Headers))
+	q.headers = inv.Headers
+	return q.index(inv.Tips)
+}
+
+// newReplayQualifier148 is newReplayQualifier over raw 148-byte headers: every identity, parse and PoW is at width 148.
+func newReplayQualifier148(g PublishedGenesisContextV1, inv HeaderCandidateInventory148V1, excluded *mdbx.InvalidBranchV1) *replayQualifier {
+	q := newReplayQualifierState(g, excluded, len(inv.Headers))
+	q.headers148, q.wide = inv.Headers, true
+	return q.index(inv.Tips)
+}
+
+func newReplayQualifierState(g PublishedGenesisContextV1, excluded *mdbx.InvalidBranchV1, n int) *replayQualifier {
+	q := &replayQualifier{genesis: g, badFrom: math.MaxUint64, atC: math.MaxUint64}
 	if excluded != nil {
 		q.excluded = &excluded.FirstInvalidBlockHash
 	}
 	q.ring, q.scratch = make([]uint64, WINDOW_SIZE), make([]uint64, WINDOW_SIZE)
-	q.nodes = make([]replayNode, len(inv.Headers))
-	for i := range inv.Headers {
-		hash, _ := BlockHash(inv.Headers[i][:]) // A 116-byte header always hashes.
+	q.nodes = make([]replayNode, n)
+	return q
+}
+
+// index hashes every supplied header, collapses duplicate hashes and sorts the parent index and the listed tips.
+func (q *replayQualifier) index(tips [][32]byte) *replayQualifier {
+	for i := range q.nodes {
+		hash, _ := q.hashOf(q.raw(i)) // A header of the qualifier's width always hashes.
 		q.nodes[i] = replayNode{hash: hash, pos: uint32(i)}
 	}
 	slices.SortFunc(q.nodes, func(a, b replayNode) int { return bytes.Compare(a.hash[:], b.hash[:]) })
@@ -586,9 +606,50 @@ func newReplayQualifier(g PublishedGenesisContextV1, inv HeaderCandidateInventor
 		q.kids[i] = replayKid{parent: q.parentOf(i), pos: i}
 	}
 	slices.SortFunc(q.kids, replayKidCompare)
-	slices.SortFunc(inv.Tips, replayHashCompare)
-	q.tips = slices.Compact(inv.Tips)
+	slices.SortFunc(tips, replayHashCompare)
+	q.tips = slices.Compact(tips)
 	return q
+}
+
+// raw is the supplied header at inventory position pos.
+func (q *replayQualifier) raw(pos int) []byte {
+	if q.wide {
+		return q.headers148[pos][:]
+	}
+	return q.headers[pos][:]
+}
+
+// width is the qualifier's exact header width.
+func (q *replayQualifier) width() int {
+	if q.wide {
+		return Initial148HeaderBytes
+	}
+	return BLOCK_HEADER_BYTES
+}
+
+// parse decodes raw at the qualifier's width; a width-148 header projects onto BlockHeader (utxo_root drops out).
+func (q *replayQualifier) parse(raw []byte) (BlockHeader, error) {
+	if q.wide {
+		header, err := ParseInitial148HeaderBytes(raw)
+		return header.blockHeader(), err
+	}
+	return ParseBlockHeaderBytes(raw)
+}
+
+// hashOf is the block hash of raw at the qualifier's width.
+func (q *replayQualifier) hashOf(raw []byte) ([32]byte, error) {
+	if q.wide {
+		return Initial148BlockHash(raw)
+	}
+	return BlockHash(raw)
+}
+
+// pow is the PoW check of raw against target at the qualifier's width.
+func (q *replayQualifier) pow(raw []byte, target [32]byte) error {
+	if q.wide {
+		return Initial148PowCheck(raw, target)
+	}
+	return PowCheck(raw, target)
 }
 
 func replayHashCompare(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) }
@@ -596,11 +657,11 @@ func replayHashCompare(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) }
 // parentOf is the PrevBlockHash of node i's header bytes.
 func (q *replayQualifier) parentOf(i int) [32]byte {
 	var parent [32]byte
-	copy(parent[:], q.headers[q.nodes[i].pos][4:36])
+	copy(parent[:], q.header(i)[4:36])
 	return parent
 }
 
-func (q *replayQualifier) header(i int) []byte { return q.headers[q.nodes[i].pos][:] }
+func (q *replayQualifier) header(i int) []byte { return q.raw(int(q.nodes[i].pos)) }
 
 func (q *replayQualifier) find(hash [32]byte) int {
 	i, ok := slices.BinarySearchFunc(q.nodes, hash, func(n replayNode, h [32]byte) int { return bytes.Compare(n.hash[:], h[:]) })
@@ -702,8 +763,8 @@ func (q *replayQualifier) canonicalHeader(h uint64, hash, parent [32]byte, raw, 
 
 // canonicalIdentity is D5 (hash), D6 (stored parent vs header and previous entry) and D7 (height-0 genesis identity).
 func (q *replayQualifier) canonicalIdentity(h uint64, hash, parent [32]byte, raw []byte) (BlockHeader, error) {
-	header, err := ParseBlockHeaderBytes(raw)
-	blockHash, hashErr := BlockHash(raw)
+	header, err := q.parse(raw)
+	blockHash, hashErr := q.hashOf(raw)
 	if err != nil || hashErr != nil || blockHash != hash {
 		return header, selectedSideDefect("replay canonical header hash mismatch")
 	}
@@ -766,7 +827,7 @@ func (q *replayQualifier) countIdentityTip(hash [32]byte) bool {
 // canonicalOK is D10: PoW at height 0 (CANONICAL L1802, L2232); CAN15 target, PoW and CAN22 above it.
 func (q *replayQualifier) canonicalOK(h uint64, raw []byte, header BlockHeader) bool {
 	if h == 0 {
-		return PowCheck(raw, header.Target) == nil
+		return q.pow(raw, header.Target) == nil
 	}
 	return q.headerOK(h, raw, header, -1, q.target)
 }
@@ -783,7 +844,7 @@ func (q *replayQualifier) headerOK(h uint64, raw []byte, header BlockHeader, par
 		}
 		expected = target
 	}
-	if header.Target != expected || PowCheck(raw, expected) != nil {
+	if header.Target != expected || q.pow(raw, expected) != nil {
 		return false
 	}
 	k := int(min(h, 11))
@@ -795,7 +856,7 @@ func (q *replayQualifier) headerOK(h uint64, raw []byte, header BlockHeader, par
 func (q *replayQualifier) gather(parent int, h uint64, n int, dst []uint64) {
 	i, height := 0, h-1
 	for cur := parent; cur >= 0 && i < n; i++ {
-		header, _ := ParseBlockHeaderBytes(q.header(cur))
+		header, _ := q.parse(q.header(cur))
 		dst[i], height = header.Timestamp, height-1
 		cur = q.receivedParent(cur)
 	}
@@ -884,7 +945,7 @@ func (q *replayQualifier) qualify(i, parent int, parentBad bool) {
 	n.flags |= replayNodeReached
 	height, target, work, bad := q.parentState(parent, parentBad)
 	n.height = height
-	header, _ := ParseBlockHeaderBytes(q.header(i))
+	header, _ := q.parse(q.header(i))
 	blockWork, err := q.blockWork(header.Target)
 	if err == nil {
 		work.Add(work, blockWork)
@@ -904,7 +965,7 @@ func (q *replayQualifier) parentState(parent int, canonicalBad bool) (uint64, [3
 		return q.attachK + 1, q.target, new(big.Int).Set(&q.work), canonicalBad
 	}
 	p := q.nodes[parent]
-	ph, _ := ParseBlockHeaderBytes(q.header(parent))
+	ph, _ := q.parse(q.header(parent))
 	return p.height + 1, ph.Target, new(big.Int).SetBytes(p.work[:]), p.flags&replayNodeBad != 0
 }
 
@@ -912,7 +973,8 @@ func (q *replayQualifier) isExcluded(hash [32]byte) bool {
 	return q.excluded != nil && *q.excluded == hash
 }
 
-// anchor is the Fork F height-0 anchor: Published[:116], else the supplied GenesisHash header; decode, PoW and exclusion.
+// anchor is the Fork F height-0 anchor: Published[:width], else the supplied GenesisHash header; decode, PoW and
+// exclusion. A non-nil Published holds at least width bytes hashing to GenesisHash (the published-genesis context check).
 func (q *replayQualifier) anchor() {
 	raw := q.genesis.Published
 	i := q.find(q.genesis.GenesisHash)
@@ -925,9 +987,10 @@ func (q *replayQualifier) anchor() {
 	if raw == nil {
 		return
 	}
-	header, _ := ParseBlockHeaderBytes(raw[:BLOCK_HEADER_BYTES])
+	raw = raw[:q.width()]
+	header, _ := q.parse(raw)
 	work, err := WorkFromTarget(header.Target)
-	if err != nil || PowCheck(raw[:BLOCK_HEADER_BYTES], header.Target) != nil {
+	if err != nil || q.pow(raw, header.Target) != nil {
 		q.badFrom, work = 0, big.NewInt(1)
 	}
 	if q.isExcluded(q.genesis.GenesisHash) {
