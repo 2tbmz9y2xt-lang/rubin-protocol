@@ -255,7 +255,7 @@ func (o *ReplayEntryOwnerV1) RecomputeReplayTargetMDBX(reader *mdbx.Reader, limi
 	if err != nil || refused != "" {
 		return ReplayRecomputationV1{Report: replayRecomputeRefused(refused), Result: refused}, err
 	}
-	return r.recompute(inv)
+	return r.recompute(newReplayQualifier(o.genesis, inv, a.ExcludedInvalidBranch), inv.Version)
 }
 
 func replayRecomputeDomain(a mdbx.StorageAuthorityV1) bool {
@@ -275,9 +275,8 @@ func replayRecomputeRefused(result string) ReplayRecomputationReportV1 {
 
 // prepare is (f5)-(f7): the target identity against the context, the minimum share and the inventory status.
 func (r *replayRecompute) prepare(limit uint64) (HeaderCandidateInventoryV1, string, error) {
-	target, g := r.rp.Target, r.owner.genesis
 	switch {
-	case target.ChainID != g.ChainID || target.GenesisHash != g.GenesisHash:
+	case !r.targetIdentityOK():
 		return HeaderCandidateInventoryV1{}, "", selectedSideDefect("replay target identity differs from the context")
 	case limit < replayRecoveryMinBytes:
 		return HeaderCandidateInventoryV1{}, selectedSideCapacity, nil
@@ -289,9 +288,16 @@ func (r *replayRecompute) prepare(limit uint64) (HeaderCandidateInventoryV1, str
 	return inv, result, nil
 }
 
-// recompute is (f8)-(f13): both streams, then classification, then protection for PLAN_CHANGE/ACTIVATION_ELIGIBLE.
-func (r *replayRecompute) recompute(inv HeaderCandidateInventoryV1) (ReplayRecomputationV1, error) {
-	r.q = newReplayQualifier(r.owner.genesis, inv, r.a.ExcludedInvalidBranch)
+// targetIdentityOK is (f5): the target's chain and genesis identity equal the context's.
+func (r *replayRecompute) targetIdentityOK() bool {
+	target, g := r.rp.Target, r.owner.genesis
+	return target.ChainID == g.ChainID && target.GenesisHash == g.GenesisHash
+}
+
+// recompute is (f8)-(f13) over the qualifier q of the inventory with version: both streams, then classification, then
+// protection for PLAN_CHANGE/ACTIVATION_ELIGIBLE.
+func (r *replayRecompute) recompute(q *replayQualifier, version uint64) (ReplayRecomputationV1, error) {
+	r.q = q
 	r.q.atC = r.rp.Target.TipHeight
 	tip, err := r.q.walk(r.reader, uint64(r.a.ActiveGenerationID), &r.step)
 	if err != nil {
@@ -309,7 +315,7 @@ func (r *replayRecompute) recompute(inv HeaderCandidateInventoryV1) (ReplayRecom
 	if report == ReplayRecomputationRefusedV1 {
 		return ReplayRecomputationV1{Report: report, Result: replayEntryRecovery}, nil
 	}
-	return r.protect(inv.Version, report)
+	return r.protect(version, report)
 }
 
 // snapshot keeps the active stream's end state, which selection and the comparand read after the target stream.

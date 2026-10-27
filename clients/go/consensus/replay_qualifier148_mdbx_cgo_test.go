@@ -715,3 +715,201 @@ func TestReplayQualifier148Protect(t *testing.T) {
 		t.Fatalf("R7 stale: releases %d versions %v", v.releases, v.versions)
 	}
 }
+
+// q148TargetRows is the generation-2 target index of heights 0..n of s with each header row; edit may change a height.
+func q148TargetRows(t *testing.T, s *q148Seq, n int, edit func(h int, rows []mdbx.Mutation) []mdbx.Mutation) []mdbx.Mutation {
+	t.Helper()
+	var rows []mdbx.Mutation
+	for h := 0; h <= n; h++ {
+		parent := [32]byte{}
+		if h > 0 {
+			parent = s.hashes[h-1]
+		}
+		key, _ := mdbx.HeightKey(2, uint64(h))
+		row := []mdbx.Mutation{btMutation(3, bytes.Clone(s.hashes[h][:]), bytes.Clone(s.headers[h][:])), btMutation(2, key, mdbx.ChainValue(s.hashes[h], parent, s.work(t, h))), q148Owner2(s.hashes[h], h)}
+		if edit != nil {
+			row = edit(h, row)
+		}
+		rows = append(rows, row...)
+	}
+	return rows
+}
+
+// q148Owner2 is the canonical-owner row paired with a generation-2 index row.
+func q148Owner2(hash [32]byte, h int) mdbx.Mutation {
+	return btMutation(7, logicalMDBXMust(mdbx.CanonicalOwnerKey(2, hash)), mdbx.CanonicalOwnerValue(uint64(h)))
+}
+
+// q148Replay is the REPLAY authority with the cursor APPLIED at the target tip c of s in generation 2.
+func q148Replay(w *q148World, s *q148Seq, c int, t *testing.T) mdbx.StorageAuthorityV1 {
+	a := q148Active()
+	target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: w.g.GenesisHash, TipHash: s.hashes[c], TipHeight: uint64(c), CumulativeChainwork: s.work(t, c)}
+	a.Phase, a.Replay = mdbx.StoragePhaseReplayV1, &mdbx.ReplayV1{TargetGenerationID: 2, Target: target, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: uint64(c), BlockHash: s.hashes[c]}}
+	return a
+}
+
+// recompute runs Q6 under one Reader; reader reports whether the report carries that Reader.
+func (w *q148World) recompute(t *testing.T, view HeaderCandidateViewV1, a mdbx.StorageAuthorityV1, limit uint64) (out ReplayRecomputationV1, reader bool, err error) {
+	t.Helper()
+	if verr := w.s.View(func(r *mdbx.Reader) error {
+		out, err = NewReplayEntryOwnerV1(view, w.g).recompute148(r, a, limit)
+		reader = out.reader == r
+		return nil
+	}); verr != nil {
+		t.Fatalf("view: %v", verr)
+	}
+	return out, reader, err
+}
+
+// q148Recomputation builds the active index 0..2 of a slow sequence and a target index forked at 2 with tip T at
+// height 4; active extends the active index beyond 2 (unlisted, so it is only the published comparand).
+func q148Recomputation(t *testing.T, active int) (*q148World, *q148Seq, *q148Seq) {
+	s := q148Slow(t, active)
+	w := newQ148World(t, s, active, nil)
+	tg := s.clone(2)
+	tg.extend(t, 2, 3*TARGET_BLOCK_INTERVAL, false)
+	w.pair(t, q148TargetRows(t, tg, 4, func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+		if h <= min(active, 2) {
+			return rows[1:] // the header row is already stored by the active index
+		}
+		return rows
+	})...)
+	return w, s, tg
+}
+
+// TestReplayQualifier148Recompute is A7: Q6 classifies the fresh 148 best tip against T and the published comparand
+// and calls ProtectV1 once; Release, reader, authority and activeTip are carried in every class.
+func TestReplayQualifier148Recompute(t *testing.T) {
+	w, s, tg := q148Recomputation(t, 2)
+	child := tg.clone(4)
+	child.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
+	heavy := s.clone(2)
+	heavy.extend(t, 3, 4*TARGET_BLOCK_INTERVAL, false) // not T's headers (those are spaced 3 intervals)
+	wd, _, tgd := q148Recomputation(t, 5)
+	childD := tgd.clone(4)
+	childD.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
+	for _, c := range []struct {
+		label  string
+		w      *q148World
+		tg     *q148Seq
+		view   *q148View
+		report ReplayRecomputationReportV1
+		result string
+		tip    uint64
+	}{
+		{"(a) T", w, tg, &q148View{inv: q148Complete(nil, nil)}, ReplayRecomputationActivationEligibleV1, "", 2},
+		{"(b) descendant", w, tg, &q148View{inv: q148Complete([][32]byte{child.tip()}, child.headers[5:])}, ReplayRecomputationActivationEligibleV1, "", 2},
+		{"(c) other branch", w, tg, &q148View{inv: q148Complete([][32]byte{heavy.tip()}, heavy.headers[3:])}, ReplayRecomputationPlanChangeV1, "", 2},
+		{"(d) comparand outranks T", wd, tgd, &q148View{inv: q148Complete([][32]byte{childD.tip()}, childD.headers[5:])}, ReplayRecomputationPlanChangeV1, "", 5},
+		{"STALE", w, tg, &q148View{inv: q148Complete(nil, nil), stale: true}, ReplayRecomputationStaleV1, replayEntryStale, 2},
+	} {
+		a := q148Replay(c.w, c.tg, 4, t)
+		out, reader, err := c.w.recompute(t, c.view, a, mdbx.MaxOperationDataBytes)
+		if err != nil || out.Report != c.report || out.Result != c.result || out.Release == nil || !reader || out.activeTip != c.tip || out.authority.Replay != a.Replay {
+			t.Fatalf("A7 %s: %+v reader %v %v", c.label, out, reader, err)
+		}
+		out.Release()
+		if !slices.Equal(c.view.versions, []uint64{9}) || c.view.releases != 1 || !slices.Equal(c.view.limits, []uint64{replayInvLimit148(mdbx.MaxOperationDataBytes)}) {
+			t.Fatalf("A7 %s: ProtectV1 %v releases %d limits %v", c.label, c.view.versions, c.view.releases, c.view.limits)
+		}
+	}
+}
+
+// TestReplayQualifier148RecomputeRefusals is R8 with R1 and R2 for Q6: each refusal or defect as the baseline target
+// stream classifies it, with no ProtectV1; the minimum-share refusal makes no inventory call.
+func TestReplayQualifier148RecomputeRefusals(t *testing.T) {
+	w, _, tg := q148Recomputation(t, 2)
+	ok := func() *q148View { return &q148View{inv: q148Complete(nil, nil)} }
+	other := q148Replay(w, tg, 4, t)
+	other.Replay.Target.ChainID[0] ^= 1
+	tipless := q148Replay(w, tg, 4, t)
+	tipless.Replay.Target.TipHash[0] ^= 1
+	off := q148Replay(w, tg, 4, t)
+	off.Replay.Cursor.Height = 3
+	for _, c := range []struct {
+		label, result, defect string
+		view                  HeaderCandidateViewV1
+		a                     mdbx.StorageAuthorityV1
+		limit                 uint64
+		report                ReplayRecomputationReportV1
+	}{
+		{"domain", "", "", ok(), off, mdbx.MaxOperationDataBytes, ReplayRecomputationNotApplicableV1},
+		{"identity", "", "replay target identity differs from the context", ok(), other, mdbx.MaxOperationDataBytes, 0},
+		{"below M148", selectedSideCapacity, "", ok(), q148Replay(w, tg, 4, t), replayRecoveryMin148Bytes - 1, ReplayRecomputationRefusedV1},
+		{"incomplete", replayEntryRecovery, "", &q148View{inv: HeaderCandidateInventory148V1{Status: HeaderCandidateIncompleteV1}}, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes, ReplayRecomputationRefusedV1},
+		{"116-only view", replayEntryRecovery, "", &replayView{inv: replayComplete(nil, nil)}, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes, ReplayRecomputationRefusedV1},
+		{"tip identity", "", "replay target index identity mismatch", ok(), tipless, mdbx.MaxOperationDataBytes, 0},
+	} {
+		out, _, err := w.recompute(t, c.view, c.a, c.limit)
+		if c.defect != "" {
+			q148Defect(t, err, c.defect, "R8 "+c.label)
+		} else if err != nil || out.Report != c.report || out.Result != c.result {
+			t.Fatalf("R8 %s: %+v %v", c.label, out, err)
+		}
+		if v, ok := c.view.(*q148View); ok && (len(v.versions) != 0 || c.label == "below M148" && len(v.limits) != 0) {
+			t.Fatalf("R8 %s: ProtectV1 %v limits %v", c.label, v.versions, v.limits)
+		}
+	}
+	bad := &q148View{inv: HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Tips: [][32]byte{{1}}, Bytes: 31}}
+	_, _, err := w.recompute(t, bad, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes)
+	var failure *selectedSideFailure
+	if !errors.As(err, &failure) || failure.result != selectedSideInvariant || len(bad.versions) != 0 {
+		t.Fatalf("R1 invariant: %v", err)
+	}
+	out, _, err := w.recompute(t, ok(), q148Replay(w, tg, 4, t), replayRecoveryMin148Bytes)
+	if err != nil || out.Report != ReplayRecomputationActivationEligibleV1 {
+		t.Fatalf("R8 at M148: %+v %v", out, err)
+	}
+}
+
+// TestReplayQualifier148RecomputeTargetRows is R8 over target-index rows: a row above the cursor, a wrong genesis
+// identity and an absent header row are selected-side defects; a height gap is TARGET_LOCAL with its Evidence row.
+func TestReplayQualifier148RecomputeTargetRows(t *testing.T) {
+	other := newQ148Seq(t, POW_LIMIT, 1<<30+1)
+	for _, c := range []struct {
+		label, defect string
+		local         uint64
+		edit          func(s, tg *q148Seq) []mdbx.Mutation
+	}{
+		{"above cursor", "replay target index row above the cursor", 0, func(s, tg *q148Seq) []mdbx.Mutation {
+			tg.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
+			return q148TargetRows(t, tg, 5, nil)[3*5:]
+		}},
+		{"genesis", "replay target index identity mismatch", 0, func(s, tg *q148Seq) []mdbx.Mutation {
+			key, _ := mdbx.HeightKey(2, 0)
+			return []mdbx.Mutation{btMutation(2, key, mdbx.ChainValue(other.hashes[0], [32]byte{}, other.work(t, 0))), q148Owner2(other.hashes[0], 0)}
+		}},
+		{"header absent", "replay target header absent or misnamed", 0, nil},
+		{"gap", "", 3, nil},
+	} {
+		s := q148Slow(t, 2)
+		w := newQ148World(t, s, 2, nil)
+		tg := s.clone(2)
+		tg.extend(t, 2, 3*TARGET_BLOCK_INTERVAL, false)
+		rows := q148TargetRows(t, tg, 4, func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			switch {
+			case c.label == "gap" && h == 3, c.label == "genesis" && h == 0:
+				return nil
+			case h <= 2, c.label == "header absent" && h == 3:
+				return rows[1:]
+			}
+			return rows
+		})
+		if c.edit != nil {
+			rows = append(rows, c.edit(s, tg)...)
+		}
+		w.pair(t, rows...)
+		v := &q148View{inv: q148Complete(nil, nil)}
+		out, _, err := w.recompute(t, v, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes)
+		key, _ := mdbx.HeightKey(2, c.local)
+		switch {
+		case c.defect != "":
+			q148Defect(t, err, c.defect, "R8 "+c.label)
+		case err != nil || out.Report != ReplayRecomputationTargetLocalV1 || out.Evidence.DBI != mdbx.SchemaV2DBIs()[2] || !bytes.Equal(out.Evidence.Key, key):
+			t.Fatalf("R8 %s: %+v %v", c.label, out, err)
+		}
+		if len(v.versions) != 0 {
+			t.Fatalf("R8 %s: ProtectV1 %v", c.label, v.versions)
+		}
+	}
+}

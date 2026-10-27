@@ -53,3 +53,35 @@ func (c *replayEntryCall) decided148(result string) (mdbx.RecoveryTargetV1, uint
 	_, err := c.decide(result, "")
 	return mdbx.RecoveryTargetV1{}, 0, err
 }
+
+// recompute148 is RecomputeReplayTargetMDBX after its gates, for the caller's authority a on a format-3 Reader at width
+// 148: the domain check (NOT_APPLICABLE), the target identity, the minimum share against replayRecoveryMin148Bytes,
+// the inventory of view148 at replayInvLimit148(limit), then both streams, classification and one ProtectV1 with the
+// baseline report, Release and error results. ProtectV1 runs on o.view, whose dynamic value is the 148 view whenever
+// the 148 inventory was obtained. It performs no authority read.
+func (o *ReplayEntryOwnerV1) recompute148(reader *mdbx.Reader, a mdbx.StorageAuthorityV1, limit uint64) (ReplayRecomputationV1, error) {
+	if !replayRecomputeDomain(a) {
+		return ReplayRecomputationV1{Report: ReplayRecomputationNotApplicableV1}, nil
+	}
+	r := &replayRecompute{owner: o, reader: reader, a: a, rp: *a.Replay}
+	inv, refused, err := r.prepare148(limit)
+	if err != nil || refused != "" {
+		return ReplayRecomputationV1{Report: replayRecomputeRefused(refused), Result: refused}, err
+	}
+	return r.recompute(newReplayQualifier148(o.genesis, inv, a.ExcludedInvalidBranch), inv.Version)
+}
+
+// prepare148 is prepare with the 148 minimum share, limit and inventory.
+func (r *replayRecompute) prepare148(limit uint64) (HeaderCandidateInventory148V1, string, error) {
+	switch {
+	case !r.targetIdentityOK():
+		return HeaderCandidateInventory148V1{}, "", selectedSideDefect("replay target identity differs from the context")
+	case limit < replayRecoveryMin148Bytes:
+		return HeaderCandidateInventory148V1{}, selectedSideCapacity, nil
+	}
+	inv, result := replayEntryInventory148(r.owner.view148(), replayInvLimit148(limit))
+	if result == selectedSideInvariant {
+		return inv, "", replayRecoveryRefusal(result, "header candidate inventory producer violation")
+	}
+	return inv, result, nil
+}
