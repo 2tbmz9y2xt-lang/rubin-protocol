@@ -57,7 +57,8 @@ const (
 // storage_capacity) for REFUSED, STALE_LOCAL_PLAN for STALE and empty otherwise; Evidence is non-zero exactly for
 // TARGET_LOCAL (the canonical-v1 row of the first target-local defect); Release is non-nil exactly for STALE,
 // PLAN_CHANGE and ACTIVATION_ELIGIBLE and the caller runs it exactly once after its own commit; on an error only
-// ReadResource is set. On a tree Reader the report also carries the read TreeAuthorityV1 envelope (replayTreeRecompute).
+// ReadResource among the exported fields is set. On a tree Reader the report, including one returned with an error by
+// recompute148, also carries the read TreeAuthorityV1 envelope in an unexported field (replayTreeRecompute).
 type ReplayRecomputationV1 struct {
 	Report       ReplayRecomputationReportV1
 	Result       string

@@ -461,3 +461,13 @@ func TestReplayTreeRecomputeDomain(t *testing.T) {
 		"D2: %+v %v", c.report, c.recErr)
 	logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "D2: %d/%d", c.truth, c.stage)
 }
+
+// Y1 STALE: a STALE report from Q6 carries the read envelope as well; its conversion is the empty plan.
+func TestReplayTreeRecomputeStale(t *testing.T) {
+	w, before, view := rtReplayWorld(t)
+	view.stale = true
+	image := rtImage(t, w.btWorld)
+	c := rtRecompute(t, w.btWorld, NewReplayEntryOwnerV1(view, w.g), false)
+	logicalMDBXAssert(t, c.recErr == nil && c.report.Report == ReplayRecomputationStaleV1 && c.report.Result == replayEntryStale && reflect.DeepEqual(c.report.envelope, before), "Y1 STALE: %+v %v", c.report, c.recErr)
+	logicalMDBXAssert(t, c.convErr == nil && reflect.ValueOf(c.batch).IsZero() && c.truth == mdbx.CommitTruthOld && reflect.DeepEqual(image, rtImage(t, w.btWorld)) && view.releases == 1, "Y1 STALE conversion: %+v %d", c.batch, c.truth)
+}
