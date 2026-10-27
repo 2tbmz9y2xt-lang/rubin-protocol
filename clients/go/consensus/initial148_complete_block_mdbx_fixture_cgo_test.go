@@ -55,7 +55,8 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 			// site is never reached; the queued entries read B and fault once.
 			sequentialEarlier := c.opts.badSig && workers < 0
 			reached := fixtureErr == nil && counts.Faults == 1
-			logicalMDBXAssert(t, counts.Commits == 0 && (reached != sequentialEarlier) && (reached || counts.Faults == 0 && fixtureErr != nil), "%s workers=%d fixture: %+v / %v", c.name, workers, counts, fixtureErr)
+			unreached := counts.Faults == 0 && fixtureErr != nil && fixtureErr.Error() == icbSiteNotReachedV1
+			logicalMDBXAssert(t, counts.Commits == 0 && (reached != sequentialEarlier) && (reached || unreached), "%s workers=%d fixture: %+v / %v", c.name, workers, counts, fixtureErr)
 			// The enclosing View returns the native reader's sticky fault joined
 			// to the callback error; the outer entry keeps that run error and the
 			// selected validation error separately.
@@ -80,8 +81,6 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 	}
 }
 
-// icbParentBindingV1 reads the generation-1 parent root binding (rank 0) of
-// the seeded h=5 image and the rank-8 key of the root node it names.
 // TestInitial148CompleteBlockRowIntegrityH5 (C08) damages persisted state the
 // selected R/cap reads consume, each paired with a bad header root: a
 // malformed complete parent row B, an active cap over a valid counter
@@ -129,6 +128,13 @@ func TestInitial148CompleteBlockRowIntegrityH5(t *testing.T) {
 	}
 }
 
+// icbSiteNotReachedV1 is FixtureSelectedDamage's exact error when run ran but
+// the armed site was never read (internal/mdbx/mdbx_fixture_cgo.go); its two
+// pre-run refusals carry different texts.
+const icbSiteNotReachedV1 = "selected damage fixture site was not reached exactly as armed"
+
+// icbParentBindingV1 reads the generation-1 parent root binding (rank 0) of
+// the seeded h=5 image and the rank-8 key of the root node it names.
 func icbParentBindingV1(t *testing.T, w *btWorld) (mdbx.RootBindingV1, []byte) {
 	t.Helper()
 	var raw []byte
@@ -264,30 +270,50 @@ func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
 	}
 }
 
-// TestInitial148CompleteBlockGenesisPersistedStateH0 (C07, C08): over an applied generation-1 h=4 parent the
-// active-cap genesis accepts (literal root, GeneratedN1 zero) with an EIO armed on a row, the counters, the
-// binding or the top node never reached, and again after all four are malformed.
+// TestInitial148CompleteBlockGenesisPersistedStateH0 (C07, C08) admits the
+// published genesis over a store that already holds generation-1 parent
+// state: an applied h=4 block's UTXO rows, root binding, tree nodes and
+// counters. One native EIO is armed in turn on a persisted UTXO row, the
+// counters, the root binding and its top node: none is reached (no parent
+// read). Then the counters, the binding, the top node and the row are all
+// made malformed. With the cap active from height 0 every run accepts with
+// the literal genesis root and GeneratedN1 zero.
 func TestInitial148CompleteBlockGenesisPersistedStateH0(t *testing.T) {
 	for _, parallel := range []bool{false, true} {
 		w := btNew(t)
 		_, _, tx1 := icbSeedV1(t, w, validP2PKCovenantData(), icbHeightV1)
-		_, node := icbParentBindingV1(t, w)
 		row := btUTXOKey(1, Outpoint{Txid: tx1.id})
+		_, node := icbParentBindingV1(t, w)
 		in, _ := icbGenesisInputV1(t, -1)
 		icbCapAtV1(&in, 0)
+		literal := icbGenesisRootV1(t, in.Raw)
 		accept := func(label string) {
+			t.Helper()
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 				out, delivered, got, err := icbValidateOnceV1(t, w, account, in, parallel)
-				logicalMDBXAssert(t, err == nil && delivered != nil && out.required.derived && out.required.root == icbGenesisRootV1(t, in.Raw) && got.transition.alreadyGeneratedN1 == (Uint128{}), "%s parallel=%v h0 over persisted state: %v / %+v", label, parallel, err, out)
+				logicalMDBXAssert(t, err == nil && out.validationErr == nil && delivered != nil, "%s parallel=%v genesis over persisted state: %v / %+v", label, parallel, err, out)
+				logicalMDBXAssert(t, out.required.derived && out.required.cause == nil && out.required.root == literal && got.transition.alreadyGeneratedN1 == (Uint128{}), "%s parallel=%v h0 tuple: %+v", label, parallel, out.required)
 			})
 		}
-		for i, key := range [][]byte{row, btMeta(0x10, 1), btMeta(0x11, 1), node} {
-			counts, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, []uint8{1, 0, 0, 8}[i], key, func() { accept("eio") })
-			logicalMDBXAssert(t, counts.Faults == 0 && counts.Commits == 0 && fixtureErr != nil, "site %d parallel=%v persisted parent read: %+v / %v", i, parallel, counts, fixtureErr)
+		for _, site := range []struct {
+			name string
+			rank uint8
+			key  []byte
+		}{
+			{"utxo-row", 1, row},
+			{"counters", 0, btMeta(0x10, 1)},
+			{"root-binding", 0, btMeta(0x11, 1)},
+			{"top-node", 8, node},
+		} {
+			ran := 0
+			counts, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, site.rank, site.key, func() { ran++; accept(site.name) })
+			unreached := fixtureErr != nil && fixtureErr.Error() == icbSiteNotReachedV1
+			logicalMDBXAssert(t, ran == 1 && unreached && counts.Faults == 0 && counts.Commits == 0, "%s parallel=%v persisted parent site was read (ran %d): %+v / %v", site.name, parallel, ran, counts, fixtureErr)
 		}
 		btfDamage(t, w, 8, node, "malformed")
 		irCounterV1(t, w, 1, 1)
-		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), []byte{0xff}) == nil && mdbx.FixtureSeedRawRow(w.s, 1, row, []byte{0xff}) == nil, "malform")
-		accept("malformed")
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), []byte{0xff}) == nil, "malform binding")
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 1, row, []byte{0xff}) == nil, "malform row")
+		accept("malformed-parent-state")
 	}
 }

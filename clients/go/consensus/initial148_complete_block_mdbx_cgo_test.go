@@ -96,13 +96,16 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 	// the 256-byte per-input metadata allowance.
 	logicalMDBXAssert(t, 2*65_536/minInput < 3197 && 3197+256 <= 4096, "covenant row")
 	// At most n/41 inputs + n/11 outputs; two candidate maps at 256 bytes per
-	// entry fit the 512 row per output byte: 2*256/11 < 512.
-	logicalMDBXAssert(t, 2*256/minOutput < 512, "candidate map row")
+	// entry fit the 512 row: 2*256*(n/41 + n/11) < 512*n, i.e.
+	// 2*256*(11+41) < 512*41*11.
+	logicalMDBXAssert(t, 2*256*(minOutput+minInput) < 512*minInput*minOutput, "candidate map row")
 	// The typed map entry and queued task fit their 256-byte logical charges.
 	entry := unsafe.Sizeof(Outpoint{}) + unsafe.Sizeof(UtxoEntry{})
 	task := unsafe.Sizeof(sigCheckTask{})
 	logicalMDBXAssert(t, entry <= 256 && task <= 256, "typed sizes entry=%d task=%d", entry, task)
-	// blockStepsDA: one step12DARecord per non-zero TxKind tx (<= n records).
+	// block_steps_1_12.go: blockStepsDA allocates one step12DARecord per
+	// non-zero TxKind transaction (blockStepsPass.account), so at most n
+	// records, each within the census's 64-byte typed size.
 	logicalMDBXAssert(t, unsafe.Sizeof(step12DARecord{}) <= 64, "DA record size %d", unsafe.Sizeof(step12DARecord{}))
 	// The fixed allowance covers the pinned Simplicity live memory and frame.
 	logicalMDBXAssert(t, 1_048_576+65_536 < 16_777_216, "fixed allowance")
@@ -404,18 +407,36 @@ func TestInitial148CompleteBlockGenesisFrozenParentH0(t *testing.T) {
 
 // TestInitial148CompleteBlockEndpointHashGuard (C11) supplies an Endpoint
 // whose block hash differs from the computed full148 hash of a valid
-// genesis: the composer's own guard refuses before source preparation, so
-// no source scratch is charged and no required-read tuple exists.
+// genesis: the composer's own guard refuses before source preparation and no
+// required-read tuple exists. The account leaves exactly W + 4823 bytes free,
+// one short of the 4824-byte source scratch charge, so the endpoint error
+// (not that capacity refusal) shows the guard ran first; the control with
+// the correct endpoint over the same hold hits the capacity refusal.
 func TestInitial148CompleteBlockEndpointHashGuard(t *testing.T) {
 	for _, parallel := range []bool{false, true} {
 		w := btNew(t)
 		in, _ := icbGenesisInputV1(t, -1)
-		in.Endpoint.BlockHash[31] ^= 1
-		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-			out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
-			irFailureV1(t, err, logicalStateFailureLocalInvariant, "complete initial148 endpoint hash differs")
-			logicalMDBXAssert(t, delivered == nil && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "parallel=%v endpoint guard tuple: %+v", parallel, out)
-		})
+		tariff, ok := initial148CompleteTariffV1(in)
+		logicalMDBXAssert(t, ok, "tariff")
+		for _, bad := range []bool{true, false} {
+			probe := in
+			if bad {
+				probe.Endpoint.BlockHash[31] ^= 1
+			}
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				hold := account.WithReservation(icbLaneV1-tariff-4823, func() error {
+					out, delivered, _, err := icbValidateOnceV1(t, w, account, probe, parallel)
+					logicalMDBXAssert(t, delivered == nil && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "bad=%v parallel=%v guard tuple: %+v", bad, parallel, out)
+					if bad {
+						irFailureV1(t, err, logicalStateFailureLocalInvariant, "complete initial148 endpoint hash differs")
+						return nil
+					}
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(err), "parallel=%v source scratch charge did not refuse at W+4823: %v", parallel, err)
+					return nil
+				})
+				logicalMDBXAssert(t, hold == nil, "pre-hold: %v", hold)
+			})
+		}
 	}
 }
 
@@ -560,8 +581,8 @@ func icbSameTxErrorV1(got, want error) bool {
 }
 
 // TestInitial148CompleteBlockEarlierConnectErrorBeforeD (C06) keeps the genesis
-// body intact but freezes an empty create-suite set, so the refusal happens
-// inside the candidate after source preparation; D still never runs.
+// body intact but freezes an empty create-suite set, so the refusal is the
+// connect stage's TxError (steps 1-12 pass), and D never runs.
 func TestInitial148CompleteBlockEarlierConnectErrorBeforeD(t *testing.T) {
 	for _, parallel := range []bool{false, true} {
 		w := btNew(t)
@@ -1067,14 +1088,20 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 		tariff, ok := initial148CompleteTariffV1(f.in)
 		logicalMDBXAssert(t, ok, "tariff")
 		var native btResult
-		builderReturned, consumed := false, 0
+		builderReturned, consumed, early, released := false, 0, 0, 0
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			observed := &btObserved{t: t}
+			// The native writer may run this on its own goroutine: record only;
+			// the assertions run on the test goroutine after UpdateTreeV1.
 			observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
-				logicalMDBXAssert(t, builderReturned, "parallel=%v source consumed before the builder returned", parallel)
+				if !builderReturned {
+					early++
+				}
 				// W stays held: the remaining lane cannot fit another W.
 				held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
-				logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(held), "parallel=%v W released before native last use: %v", parallel, held)
+				if !mdbx.IsOperationReservationCapacity(held) {
+					released++
+				}
 				consumed++
 				return nil
 			}
@@ -1096,6 +1123,8 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 				return native.err
 			})
 			logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.root == f.header.UtxoRoot, "parallel=%v composed acceptance: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, early == 0, "parallel=%v source consumed before the builder returned (%d)", parallel, early)
+			logicalMDBXAssert(t, released == 0, "parallel=%v W released before native last use (%d)", parallel, released)
 		})
 		native.want(t, 2, 3, -1)
 		logicalMDBXAssert(t, consumed > 0, "parallel=%v native writer never consumed the source", parallel)
@@ -1129,14 +1158,17 @@ func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 			f := icbH5VariantV1(t, w, opts)
 			tariff, ok := initial148CompleteTariffV1(f.in)
 			logicalMDBXAssert(t, ok, "tariff")
-			composed, consumed := false, 0
+			composed, consumed, released := false, 0, 0
 			var nativeOut error
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 				observed := &btObserved{t: t}
+				// Possibly on the native writer goroutine: record only; asserted below.
 				observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
 					consumed++
 					held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
-					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(held), "%s parallel=%v W released before native failure: %v", mode, parallel, held)
+					if !mdbx.IsOperationReservationCapacity(held) {
+						released++
+					}
 					return nativeErr
 				}
 				out, err := icbEntryV1(parallel)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
@@ -1161,6 +1193,7 @@ func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 					return
 				}
 				logicalMDBXAssert(t, errors.Is(err, nativeErr) && any(err) == any(nativeOut) && out.attempted && out.validationErr == nil && out.required.derived, "%s parallel=%v run error replaced: %v / %+v", mode, parallel, err, out)
+				logicalMDBXAssert(t, released == 0, "%s parallel=%v W released before native failure (%d)", mode, parallel, released)
 				logicalMDBXAssert(t, composed && consumed > 0 && icbHoldsExactlyV1(account, 0), "%s parallel=%v composed=%v consumed=%d or residual hold", mode, parallel, composed, consumed)
 			})
 			if mode == "native" {
@@ -1365,16 +1398,20 @@ func icbDiscardRunV1(w *btWorld, account *mdbx.OperationAccount, in initial148Co
 	return out, delivered, err
 }
 
-// icbPendingDiscardV1 (C09 discard) is icbRefusedDiscardV1 behind tx1's
-// pending invalid signature.
+// icbPendingDiscardV1 (C09 discard) rejects opts plus tx1's pending invalid
+// signature through every entry, with the tuple of icbRefusedDiscardV1.
 func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 	t.Helper()
 	opts.badSig = true
 	icbRefusedDiscardV1(t, name, opts, TX_ERR_SIG_INVALID, "CORE_P2PK signature invalid")
 }
 
-// icbRefusedDiscardV1: exact bare TxError, no result, no D; then the same account is free and the
-// valid block over the same parent succeeds with fresh D and only its own fees (20) and created set.
+// icbRefusedDiscardV1 rejects opts through every entry with the exact bare
+// TxError code/msg, no delivered result and no D; then on the same account
+// the whole lane is free again (W, R and source released), and a fresh
+// invocation of the valid block over the same parent succeeds with fresh D,
+// exactly its own fees (20) and created set: no nonce, fee or candidate
+// effect of the refused invocation survives.
 func icbRefusedDiscardV1(t *testing.T, name string, opts icbH5OptsV1, code ErrorCode, msg string) {
 	t.Helper()
 	for _, workers := range []int{-1, 1, 4} {
@@ -1387,24 +1424,34 @@ func icbRefusedDiscardV1(t *testing.T, name string, opts icbH5OptsV1, code Error
 			var txErr *TxError
 			exact := errors.As(err, &txErr) && any(txErr) == any(err) && txErr.Code == code && txErr.Msg == msg
 			logicalMDBXAssert(t, exact && !delivered && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d rejected tuple: %v / %+v", name, workers, err, out)
-			logicalMDBXAssert(t, account.WithReservation(402_653_184, func() error { return nil }) == nil, "%s workers=%d residual hold after rejection", name, workers)
-			fees, created := Uint128{}, map[Outpoint]UtxoEntry(nil)
-			out, err = icbEntryWorkersV1(workers)(account, good.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			free := account.WithReservation(402_653_184, func() error { return nil })
+			logicalMDBXAssert(t, free == nil, "%s workers=%d residual hold after rejection: %v", name, workers, free)
+			var fees Uint128
+			var created map[Outpoint]UtxoEntry
+			delivered = false
+			run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
 				return w.s.View(func(reader *mdbx.Reader) error {
 					result, verr := validate(reader)
 					if result != nil {
+						delivered = true
 						fees, created = result.transition.sumFees, maps.Clone(result.transition.createdUtxos)
 					}
 					return verr
 				})
-			})
-			logicalMDBXAssert(t, err == nil && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
-			logicalMDBXAssert(t, opts.vault || opts.simplicity != 0 || fees == (Uint128{Lo: 20}) && reflect.DeepEqual(created, good.created), "%s workers=%d refused effects leaked: %+v %+v", name, workers, fees, created)
+			}
+			out, err = icbEntryWorkersV1(workers)(account, good.in, run)
+			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
+			if !opts.vault && opts.simplicity == 0 {
+				logicalMDBXAssert(t, fees == (Uint128{Lo: 20}) && reflect.DeepEqual(created, good.created), "%s workers=%d refused effects leaked: fees=%+v created=%+v", name, workers, fees, created)
+			}
 		})
 	}
 }
 
-// TestInitial148CompleteBlockAcceptedRollbackH5 (C06 rollback): tx2 refused after tx1 was accepted.
+// TestInitial148CompleteBlockAcceptedRollbackH5 (C06 candidate rollback)
+// refuses tx2 (sum_out exceeds sum_in) after tx1 was accepted into the
+// candidate: the exact conservation error, no result and no D, and the
+// fresh valid invocation on the same account and parent is unaffected.
 func TestInitial148CompleteBlockAcceptedRollbackH5(t *testing.T) {
 	icbRefusedDiscardV1(t, "tx2-refused-after-tx1-accepted", icbH5OptsV1{overspend: true, flip: 1}, TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
 }
