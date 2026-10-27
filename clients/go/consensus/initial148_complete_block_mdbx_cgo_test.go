@@ -312,16 +312,77 @@ func icbValidateOnceV1(t *testing.T, w *btWorld, account *mdbx.OperationAccount,
 func TestInitial148CompleteBlockGenesisAccept(t *testing.T) {
 	for _, parallel := range []bool{false, true} {
 		w := btNew(t)
-		in, header := icbGenesisInputV1(t, -1)
+		in, _ := icbGenesisInputV1(t, -1)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			out, delivered, got, err := icbValidateOnceV1(t, w, account, in, parallel)
 			logicalMDBXAssert(t, err == nil && out.validationErr == nil && out.attempted && delivered != nil, "parallel=%v genesis acceptance: %v / %+v", parallel, err, out)
-			logicalMDBXAssert(t, out.required.derived && out.required.cause == nil && out.required.root == header.UtxoRoot, "parallel=%v fresh D root %x want header %x", parallel, out.required.root, header.UtxoRoot)
+			literal := icbGenesisRootV1(t, in.Raw)
+			logicalMDBXAssert(t, hex.EncodeToString(literal[:]) == icbGenesisRootHexV1, "genesis literal recursion %x", literal)
+			logicalMDBXAssert(t, out.required.derived && out.required.cause == nil && out.required.root == literal, "parallel=%v fresh D root %x want literal %x", parallel, out.required.root, literal)
 			logicalMDBXAssert(t, got.summary.TxCount == 1 && got.summary.BlockHash == in.Endpoint.BlockHash, "genesis summary: %+v", got.summary)
 			logicalMDBXAssert(t, got.transition.alreadyGeneratedN1 == (Uint128{}) && got.transition.sumFees == (Uint128{}) && len(got.transition.createdUtxos) != 0, "genesis transition: %+v", got.transition)
 			logicalMDBXAssert(t, got.effect.Primitive.Height == 0 && got.effect.Primitive.Block == in.Endpoint.BlockHash, "genesis effect identity: %+v", got.effect.Primitive)
 			// After run the frame released the delivered result.
 			logicalMDBXAssert(t, delivered.transition == nil && delivered.effect.Primitive.Source == nil, "result escaped run: %+v", *delivered)
+		})
+	}
+}
+
+// icbGenesisRootHexV1 is the CSM 2.6 recursion (icbRootV1) over the final
+// spendable genesis map built by icbGenesisRootV1 from the literal body; it
+// is pinned independently of the header under test.
+const icbGenesisRootHexV1 = "c53b167dd819e13c2442bde23729bfe6c09d899624ebaf7e98e0bb44466c694b"
+
+// icbGenesisRootV1 builds the final genesis map from the literal outputs of
+// the single genesis transaction (U_pre_genesis is empty) at height 0 as
+// coinbase rows and returns its literal CSM 2.6 root.
+func icbGenesisRootV1(t *testing.T, raw []byte) [32]byte {
+	t.Helper()
+	tx, txid, _, n, err := ParseTx(raw[149:])
+	logicalMDBXAssert(t, err == nil && 149+n == len(raw), "genesis tx parse: %v", err)
+	leaves := map[[36]byte][]byte{}
+	for i, out := range tx.Outputs {
+		// ANCHOR (0x0002) and DA_COMMIT outputs are not spendable members.
+		if out.CovenantType == COV_TYPE_ANCHOR || out.CovenantType == COV_TYPE_DA_COMMIT {
+			continue
+		}
+		icbLeafKindV1(leaves, Outpoint{Txid: txid, Vout: uint32(i)}, out.Value, out.CovenantType, out.CovenantData, 0, true)
+	}
+	return icbRootV1(leaves)
+}
+
+// TestInitial148CompleteBlockGenesisFrozenParentH0 (C07, C08) runs the
+// admitted genesis on a store whose persisted logical counters are malformed
+// while the cap is active from height 0: h0 reads no persisted parent
+// counter (S0=0), accepts with the literal root and keeps GeneratedN1 zero.
+func TestInitial148CompleteBlockGenesisFrozenParentH0(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		irCounterV1(t, w, 1, 1)
+		in, _ := icbGenesisInputV1(t, -1)
+		icbCapAtV1(&in, 0)
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, delivered, got, err := icbValidateOnceV1(t, w, account, in, parallel)
+			logicalMDBXAssert(t, err == nil && out.validationErr == nil && delivered != nil, "parallel=%v active h0 cap with malformed persisted counters: %v / %+v", parallel, err, out)
+			literal := icbGenesisRootV1(t, in.Raw)
+			logicalMDBXAssert(t, out.required.derived && out.required.root == literal && got.transition.alreadyGeneratedN1 == (Uint128{}), "parallel=%v h0 tuple: %+v", parallel, out.required)
+		})
+	}
+}
+
+// TestInitial148CompleteBlockEndpointHashGuard (C11) supplies an Endpoint
+// whose block hash differs from the computed full148 hash of a valid
+// genesis: the composer's own guard refuses before source preparation, so
+// no source scratch is charged and no required-read tuple exists.
+func TestInitial148CompleteBlockEndpointHashGuard(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, _ := icbGenesisInputV1(t, -1)
+		in.Endpoint.BlockHash[31] ^= 1
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+			irFailureV1(t, err, logicalStateFailureLocalInvariant, "complete initial148 endpoint hash differs")
+			logicalMDBXAssert(t, delivered == nil && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "parallel=%v endpoint guard tuple: %+v", parallel, out)
 		})
 	}
 }
@@ -1077,8 +1138,9 @@ func TestInitial148CompleteBlockErrorPairsH5(t *testing.T) {
 		{name: "valid-prior-control", opts: icbH5OptsV1{overspend: true, flip: 1}},
 		{name: "subsidy-before-cap-and-root", opts: icbH5OptsV1{cbExtra: icbSubsidy5V1 + 1, flip: 1}, capFrom: icbHeightV1, counters: [2]uint64{1, 1}},
 		{name: "subsidy-boundary-accepts", opts: icbH5OptsV1{cbExtra: icbSubsidy5V1}},
+		{name: "tx-before-subsidy", opts: icbH5OptsV1{overspend: true, cbExtra: icbSubsidy5V1 + 1, flip: 1}, capFrom: icbHeightV1, counters: [2]uint64{1, 1}},
 	}
-	for i, base := range []icbH5CaseV1{mismatch, mismatch, sig, sig, conservation, subsidy, {}} {
+	for i, base := range []icbH5CaseV1{mismatch, mismatch, sig, sig, conservation, subsidy, {}, conservation} {
 		c := cases[i]
 		c.code, c.msg, c.derived = base.code, base.msg, base.derived
 		icbH5RunCaseV1(t, c)
@@ -1521,8 +1583,9 @@ func TestInitial148CompleteBlockUnwindReleaseH5(t *testing.T) {
 			f := icbH5FixtureV1(t, w)
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 				failure, panicValue := errors.New("enclosing failure after success"), new(int)
-				var err error
+				var err, validated error
 				var recovered any
+				delivered := false
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
@@ -1530,7 +1593,7 @@ func TestInitial148CompleteBlockUnwindReleaseH5(t *testing.T) {
 					_, err = icbEntryWorkersV1(workers)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
 						verr := w.s.View(func(reader *mdbx.Reader) error {
 							result, verr := validate(reader)
-							logicalMDBXAssert(t, result != nil && verr == nil, "%s workers=%d success: %v", delivery, workers, verr)
+							delivered, validated = result != nil, verr
 							return verr
 						})
 						switch delivery {
@@ -1543,6 +1606,8 @@ func TestInitial148CompleteBlockUnwindReleaseH5(t *testing.T) {
 					})
 				}()
 				<-done
+				// FailNow must run on the test goroutine: the condition was recorded above.
+				logicalMDBXAssert(t, delivered && validated == nil, "%s workers=%d success: %v", delivery, workers, validated)
 				switch delivery {
 				case "error":
 					logicalMDBXAssert(t, errors.Is(err, failure) && recovered == nil, "%s workers=%d: %v", delivery, workers, err)
