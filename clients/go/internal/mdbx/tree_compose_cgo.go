@@ -39,6 +39,7 @@ type treePlanV1 struct {
 	consulted  []ownedConsulted
 	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
 	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
+	inventory  *entryInventoryStateV1
 }
 
 // treeScopeV1 is one position's slots (op or the truth evaluator, D30, D35): the Reader slot, the recorder slot and
@@ -311,6 +312,9 @@ func (e *treeScopeV1) loopV1() (bool, error) {
 func (s *Store) updateTreeLockedV1(old *C.MDBX_txn, ledger treeLedgerV1, plan *treePlanV1) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	c := &treeComposeV1{writer: newTreeScopeV1(s, old, plan, treeWriterV1, ledger), index: -1}
 	_, unwind := runTreeLockedV1(c.opV1)
+	if plan.inventory != nil {
+		plan.inventory.entry.retireEntryV1()
+	}
 	cleanup, oldRetained := updateAbortOld(old)
 	if unwind.kind != 0 && c.outcome.primary == nil {
 		return c.outcome.truth, c.outcome.stage, c.index, unwind, s.treeUnwoundV1(c.outcome, old, cleanup, oldRetained)
@@ -379,6 +383,7 @@ func (c *treeComposeV1) releaseV1() {
 	}
 }
 
+// runV1 checks preflight, applies the plan and preserves the first failure or unwind.
 func (c *treeComposeV1) runV1() {
 	w := c.writer
 	t, outcome := beginTreeSectionV1(w.s.env, w.s.dbis, w.old, w.ledger)
@@ -389,12 +394,15 @@ func (c *treeComposeV1) runV1() {
 	w.t = t
 	t.covered = len(w.plan.primitives) != 0 && w.plan.primitives[0].Coverage != nil
 	err := t.pairPreflightV1(w.plan.pair, w.plan.consulted)
+	if err == nil {
+		err = c.entryMatchV1("OLD/write snapshot mismatch")
+	}
 	if err != nil {
 		c.abortV1(err, -1)
 		return
 	}
 	stopped, err := w.loopV1()
-	if stopped && w.unwind.kind != 0 {
+	if all(stopped, w.unwind.kind != 0) {
 		c.unwind, w.recorded = w.unwind, err // P: R_j is the step-2 primary; cleanupV1 aborts after the release (T3)
 		return
 	}
@@ -414,7 +422,7 @@ func (c *treeComposeV1) abortV1(err error, index int) {
 	c.outcome, c.index, c.done = c.writer.t.abortV1(err), index, true
 }
 
-// holdV1 emits the Pair, runs complete final pair equality and, with at least one primitive, charges
+// holdV1 emits the Pair, checks final Pair and ENTRY equality and, with at least one primitive, charges
 // H_r = S_r + B_r with B_r = W + F_fixed + C + R + V + L2 + descSize x max_j EventCount_j (D13-14).
 func (c *treeComposeV1) holdV1() error {
 	w := c.writer
@@ -426,6 +434,10 @@ func (c *treeComposeV1) holdV1() error {
 		return err
 	}
 	err = w.t.finalV1(w.plan.pair, w.plan.consulted)
+	if err != nil {
+		return err
+	}
+	err = c.entryMatchV1("final update image mismatch")
 	if err != nil {
 		return err
 	}
@@ -486,6 +498,7 @@ func (c *treeComposeV1) reserveV1() error {
 	return nil
 }
 
+// commitV1 selects truthV1 or entryTruthV1; cleanupV1 owns an unwinding proof.
 func (c *treeComposeV1) commitV1() {
 	if c.unwind.kind != 0 {
 		return // a Proof panic or Goexit: cleanupV1 aborts after the release (T3)
@@ -494,6 +507,8 @@ func (c *treeComposeV1) commitV1() {
 	var truth treeTruthV1
 	if len(w.plan.primitives) != 0 {
 		truth = c.truthV1
+	} else if w.plan.inventory != nil {
+		truth = c.entryTruthV1
 	}
 	c.committed = true
 	c.outcome = w.t.commitV1(w.plan.pair, w.plan.consulted, truth)

@@ -4,11 +4,14 @@ package mdbx
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"strings"
@@ -906,7 +909,8 @@ func eifCapacity(t *testing.T) {
 	x.unchanged(t)
 }
 
-func TestEntryInventoryV1SourcesNativeOutcomes(t *testing.T) {
+// TestEntryInventoryV1NativeOutcomes checks native failures, equality and Store disposition.
+func TestEntryInventoryV1NativeOutcomes(t *testing.T) {
 	t.Run("physical-source-frontiers", eissFrontiers)
 	t.Run("required-native-content", eissRequired)
 	t.Run("raw-family-and-exhaustion", eissRaw)
@@ -914,14 +918,27 @@ func TestEntryInventoryV1SourcesNativeOutcomes(t *testing.T) {
 	t.Run("ReadAt-native-and-literal", eissReads)
 	t.Run("registered-stream-unwind", eissUnwind)
 	t.Run("parked-link-expiry", eissExpiry)
-	t.Run("full-query-no-write", eissNoWrite)
-	t.Run("GEN-has-zero-native-requests", eissGEN)
+	t.Run("CompleteAttachment", eissNoWrite)
+	t.Run("GENFirstFailure", eissGEN)
 	t.Run("owed-required-content", eissOwedRequired)
 	t.Run("raw-family-16385-spent", eissLargeFamily)
 	t.Run("stream-exact-capacity", eissCapacity)
 	t.Run("native-stream-unwind-disposition", eissNativeUnwind)
 	t.Run("physical-link-shapes", eissLinkShapes)
 	t.Run("present-hash-bound-rewrite", eissProspectiveMalformed)
+	t.Run("ExactEquality", eicExactEquality)
+	t.Run("LateDomain", eicLateDomain)
+	t.Run("ExactTargetExclusion", eicTargetExclusion)
+	t.Run("FirstFailure", eicFirstFailure)
+	t.Run("NativeDisposition", eicDisposition)
+	t.Run("PairRoles", eicPairRoles)
+	t.Run("NodeRemnant", eicNodeRemnant)
+	t.Run("ControlEquality", eicControlEquality)
+	t.Run("GENMaxKey", eicGENMaxKey)
+	t.Run("OwnerPriority", eicOwnerPriority)
+	t.Run("ProjectionResult", eicProjectionResult)
+	t.Run("PriorOrphanNonzeroUndo", eicPriorOrphan)
+	t.Run("PassRetirement", eicPassRetirement)
 }
 
 func eissProspectiveMalformed(t *testing.T) {
@@ -1257,6 +1274,7 @@ func eissReads(t *testing.T) {
 	}
 }
 
+// eissRetired checks source retirement under the surviving immutable mutex locator.
 func eissRetired(t *testing.T, token EntryInventoryV1, stream *entryStreamV1) {
 	t.Helper()
 	mu := token.scope.access.mu
@@ -1269,7 +1287,7 @@ func eissRetired(t *testing.T, token EntryInventoryV1, stream *entryStreamV1) {
 		t.Fatal("actual registered stream retained source backing")
 	}
 	s := token.scope
-	if !s.retired || s.reader != nil || s.entry != nil || s.account != nil || s.access.reader != nil || s.access.key != nil || s.access.image != (updateImage{}) || s.access.active || s.mutations != nil || s.consulted != nil || s.oldBytes != nil || s.nextBytes != nil || !reflect.ValueOf(s.authority).IsZero() || !reflect.ValueOf(s.inspection).IsZero() || !reflect.ValueOf(s.decode).IsZero() || !reflect.ValueOf(s.roots).IsZero() || !reflect.ValueOf(s.rootControl).IsZero() || !reflect.ValueOf(s.row).IsZero() {
+	if !s.retired || s.reader != nil || s.entry != nil || s.account != nil || s.access.reader != nil || s.access.key != nil || s.access.image != (updateImage{}) || s.access.active || s.mutations != nil || s.consulted != nil || s.oldBytes != nil || s.nextBytes != nil || !reflect.ValueOf(s.authority).IsZero() || !reflect.ValueOf(s.inspection).IsZero() || !reflect.ValueOf(s.decode).IsZero() || !reflect.ValueOf(s.endpoints).IsZero() || !reflect.ValueOf(s.rootControl).IsZero() || !reflect.ValueOf(s.row).IsZero() {
 		t.Fatal("actual source retirement retained state/access borrows")
 	}
 }
@@ -1354,15 +1372,37 @@ func eissUnwind(t *testing.T) {
 	}
 }
 
+// eissExpiry covers callback expiry while a captured or obsolete header is parked.
 func eissExpiry(t *testing.T) {
-	for _, physical := range []bool{false, true} {
-		t.Run(fmt.Sprint(physical), func(t *testing.T) { eissExpiryCase(t, physical) })
+	for _, site := range []uint8{11, 17} {
+		for _, physical := range []bool{false, true} {
+			t.Run(fmt.Sprintf("source%d-physical%v", site, physical), func(t *testing.T) { eissExpiryCase(t, site, physical) })
+		}
 	}
 }
 
-func eissExpiryCase(t *testing.T, physical bool) {
-	f := eisNew(t, 3, 1, nil)
+// eissExpiryCase checks parked-header and row retirement at the selected callback source.
+func eissExpiryCase(t *testing.T, site uint8, physical bool) {
+	var cleanup []CleanupSpanV1
+	if site == 17 {
+		cleanup = []CleanupSpanV1{{Kind: 1, GenerationID: 5}}
+	}
+	f := eisNew(t, 3, 1, cleanup)
 	pair := eisCapture(t, f, 1, 2, false, false)
+	hash := sha3.Sum256(eisHeader(3, f.hashes[2], 9))
+	key, pending := hash[:], eisChain(hash, f.hashes[2], 3)
+	rank, mode, gets, first := uint8(3), uint32(1), uint32(2), byte(1)
+	if site == 17 {
+		header := eisHeader(9, [32]byte{0x77}, 0x64)
+		hash = sha3.Sum256(header)
+		key, pending = eisHeight(5, 9), header
+		rank, mode, gets, first = 2, 28, 1, hash[0]
+		eisSeed(t, f, []Mutation{
+			eisMutation(2, key, eisChain(hash, [32]byte(header[4:36]), 9)),
+			eisMutation(3, hash[:], header),
+			eisMutation(7, eisOwner(5, hash), CanonicalOwnerValue(9)),
+		})
+	}
 	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	type reading struct {
 		n     int
@@ -1393,12 +1433,20 @@ func eissExpiryCase(t *testing.T, physical bool) {
 				go func() {
 					defer close(done)
 					failure, visitErr = r.VisitEntryInventoryV1(token, func(v EntryInventoryRowV1) error {
-						if v.Source != 11 {
+						if v.Source != site {
 							return nil
 						}
 						row, stream = v, token.scope.stream
-						if !stream.row.image.present {
-							t.Error("expiry did not suspend a real native parked link")
+						if stream == nil || reservationLive(f.o) != 8192+6*r.maxKey {
+							t.Error("expiry did not suspend a registered source with its exact hold")
+						} else {
+							borrow, err := treeBorrowV1(stream.row.image)
+							if err != nil || !borrow.present || !bytes.Equal(borrow.value, pending) {
+								t.Error("expiry did not suspend the actual registered pending link/header")
+							}
+						}
+						if site == 17 && (v.Projection != 3 || v.Artifact != 4 || v.Role != 0 || v.Generation != 5 || v.Height != 9 || v.Hash != hash || !bytes.Equal(v.Key, key) || !v.Present || v.Length != 104) {
+							t.Error("expiry did not reach the complete Proven GEN projection")
 						}
 						if physical {
 							_, sourceErr = v.ReadAt(make([]byte, 1), 0)
@@ -1419,7 +1467,7 @@ func eissExpiryCase(t *testing.T, physical bool) {
 				select {
 				case <-entered:
 				case <-time.After(5 * time.Second):
-					t.Fatal("Visit did not reach actual captured header")
+					t.Fatal("Visit did not reach the pending source visitor")
 				}
 				return TreeOperationV1{Pair: pair}, nil
 			})
@@ -1435,10 +1483,9 @@ func eissExpiryCase(t *testing.T, physical bool) {
 		}))
 	}
 	if physical {
-		hash := sha3.Sum256(eisHeader(3, f.hashes[2], 9))
-		evidence, err := fixtureLargeFault(f.s, 1, 3, hash[:], run)
+		evidence, err := fixtureLargeFault(f.s, mode, rank, key, run)
 		mustEnvironment(t, err)
-		if evidence.gets != 2 || evidence.aborts != 1 || evidence.commits != 0 {
+		if evidence.gets != gets || evidence.aborts != 1 || evidence.commits != 0 {
 			t.Fatalf("expiry native source frontier %+v", evidence)
 		}
 	} else {
@@ -1446,6 +1493,9 @@ func eissExpiryCase(t *testing.T, physical bool) {
 	}
 	eissRetired(t, token, stream)
 	eiRowInput(t, row, "ENTRY inventory row is not active")
+	if token.scope.stream != nil || reservationLive(f.o) != 0 {
+		t.Fatal("suspended visitor retained its registered source or hold before release")
+	}
 	if !physical {
 		for range 4 {
 			select {
@@ -1455,7 +1505,7 @@ func eissExpiryCase(t *testing.T, physical bool) {
 					if read.value != 0xa5 {
 						t.Fatal("expired source read touched destination")
 					}
-				} else if read.n != 1 || read.err != nil || read.value != 1 {
+				} else if read.n != 1 || read.err != nil || read.value != first {
 					t.Fatal("native row read crossed retirement with changed bytes")
 				}
 			case <-time.After(5 * time.Second):
@@ -1470,7 +1520,12 @@ func eissExpiryCase(t *testing.T, physical bool) {
 		t.Fatal("expired visitor completed or retained a hold")
 	}
 	if physical {
-		eissFailure(t, failure, 11, 6, 0, 3, 1, 21, 3, row.Hash, row.Key, nil, sourceErr)
+		treeNativeError(t, sourceErr, "get", "IO", 5, "error 5", nil)
+		if site == 17 {
+			eissFailure(t, failure, 17, 4, 0, 3, 1, 5, 9, hash, key, nil, sourceErr)
+		} else {
+			eissFailure(t, failure, 11, 6, 0, 3, 1, 21, 3, hash, key, nil, sourceErr)
+		}
 		tsConsumed(t, f.s, f.o, 1, sourceErr)
 		return
 	}
@@ -1480,6 +1535,7 @@ func eissExpiryCase(t *testing.T, physical bool) {
 	tsFollowing(t, f.s, f.o)
 }
 
+// eissNoWrite checks attachment admission and the actual native write/commit frontier.
 func eissNoWrite(t *testing.T) {
 	for _, attach := range []bool{false, true} {
 		t.Run(fmt.Sprintf("attach%v", attach), func(t *testing.T) {
@@ -1508,17 +1564,30 @@ func eissNoWrite(t *testing.T) {
 				}))
 			})
 			mustEnvironment(t, err)
-			result.tuple(t, 1, 1, -1)
-			eiInput(t, result.err)
-			if evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.Deletes != 0 || evidence.OldAborts != 1 || reservationLive(f.o) != 0 || evidence.OldGets[3] != 3 || evidence.OldGets[7] != 0 || evidence.NodeGets != 0 || evidence.NodePulls != 0 {
+			if attach {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				if evidence.BeginWrite != 1 || evidence.Commits != 1 || evidence.OldAborts != 1 {
+					t.Fatalf("complete attachment missed native commit %+v", evidence)
+				}
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, pair.Mutations[0].Literal)
+			} else {
+				result.tuple(t, 1, 1, -1)
+				eiInput(t, result.err)
+				if evidence.BeginWrite != 0 || evidence.Commits != 0 || evidence.OldGets[3] != 3 {
+					t.Fatalf("unattached complete inventory wrote %+v", evidence)
+				}
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+			}
+			if reservationLive(f.o) != 0 || evidence.NodeGets != 0 || evidence.NodePulls != 0 {
 				t.Fatalf("prepared full query crossed write boundary %+v", evidence)
 			}
-			tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
 			tsFollowing(t, f.s, f.o)
 		})
 	}
 }
 
+// eissGEN checks the first physical GEN failure and its incomplete-token result.
 func eissGEN(t *testing.T) {
 	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
 	// A real zero counter is still a selected GEN; it cannot authorize omission.
@@ -1535,12 +1604,12 @@ func eissGEN(t *testing.T) {
 		})
 	})
 	mustEnvironment(t, err)
-	eiInput(t, result.err)
-	eiInput(t, sourceErr)
-	if failure != nil || last != 13 || evidence.gets != 0 || evidence.commits != 0 || evidence.aborts != 1 || f.s.state != storeOPEN {
-		t.Fatalf("GEN refusal touched its zero-counter native domain %+v/%d/%+v", failure, last, evidence)
+	eissFailure(t, failure, 19, 2, 0, 1, 1, 5, 0, [32]byte{}, tsCounterKey(5), nil, sourceErr)
+	treeNativeError(t, sourceErr, "get", "IO", 5, "error 5", nil)
+	if any(result.err) != any(sourceErr) || last != 13 || evidence.gets != 1 || evidence.commits != 0 || evidence.aborts != 1 {
+		t.Fatalf("first GEN counter lost physical failure %+v/%d/%+v", failure, last, evidence)
 	}
-	tsFollowing(t, f.s, f.o)
+	tsConsumed(t, f.s, f.o, 1, sourceErr)
 }
 
 func eissOwedRequired(t *testing.T) {
@@ -1802,4 +1871,996 @@ func eissLinkShapes(t *testing.T) {
 			eiInput(t, result.err)
 		})
 	}
+}
+
+// eicExactEquality checks residual bytes and key presence at all three equality positions.
+func eicExactEquality(t *testing.T) {
+	for _, domain := range []struct {
+		rank uint8
+		root bool
+	}{
+		{0, false},
+		{0, true},
+		{1, false},
+		{2, false},
+		{7, false},
+		{8, false},
+	} {
+		rank := domain.rank
+		for _, mode := range []uint32{14, 13, 3} {
+			t.Run(fmt.Sprintf("rank%d-position%d", rank, mode), func(t *testing.T) {
+				f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+				pair := eisCapture(t, f, 1, 1, false, false)
+				key := eisHeight(5, 9)
+				switch rank {
+				case 0:
+					key = tsCounterKey(5)
+					if domain.root {
+						key = tsRootKey(5)
+					}
+				case 1:
+					key = make([]byte, 44)
+					binary.BigEndian.PutUint64(key, 5)
+					key[43] = 1
+				case 7:
+					key = eisOwner(5, [32]byte{0x41})
+				case 8:
+					key = make([]byte, 46)
+					binary.BigEndian.PutUint64(key, 5)
+					key[43] = 1 // literal leaf upper bound, code0
+				}
+				// These disposable raw controls have equal length before and after;
+				// no semantic source owner or logical charge is manufactured.
+				treeNativeSeed(t, f.s, rank, key, []byte{0x35})
+				var result tsResult
+				var token EntryInventoryV1
+				evidence, err := fixtureLargeFault(f.s, mode, rank, key, func() {
+					result, token, _, _ = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+				})
+				mustEnvironment(t, err)
+				eicMismatch(t, f, result, evidence, mode)
+				if !token.scope.retired || token.scope.stream != nil || token.scope.access.active || token.scope.access.image != (updateImage{}) {
+					t.Fatal("failed equality retained a source lease")
+				}
+			})
+		}
+	}
+	for _, present := range []bool{false, true} {
+		for _, mode := range []uint32{14, 13, 3} {
+			t.Run(fmt.Sprintf("keyset-old-present%v-position%d", present, mode), func(t *testing.T) {
+				f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+				pair := eisCapture(t, f, 1, 1, false, false)
+				key := eisHeight(5, 9)
+				if present {
+					treeNativeSeed(t, f.s, 2, key, []byte{0x35})
+				}
+				var result tsResult
+				var evidence fixtureLargeEvidence
+				_, err := fixtureTipCursor(f.s, 1, 1, 1, 0, func() {
+					mustEnvironment(t, fixtureTipDrift(key, []byte{0x35}, !present))
+					var faultErr error
+					evidence, faultErr = fixtureLargeFault(f.s, mode, 2, key, func() {
+						result, _, _, _ = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+					})
+					mustEnvironment(t, faultErr)
+				})
+				mustEnvironment(t, err)
+				eicMismatch(t, f, result, evidence, mode)
+			})
+		}
+	}
+}
+
+// eicMismatch pins mismatch truth/stage, native counts and the original commit cause.
+func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureLargeEvidence, mode uint32) {
+	t.Helper()
+	stage, truth, commits := UpdateStage(1), CommitTruth(1), uint32(0)
+	diagnostic := "OLD/write snapshot mismatch"
+	crossed := mode == 3 || mode == 7
+	if mode == 13 {
+		stage, diagnostic = 2, "final update image mismatch"
+	}
+	if crossed {
+		stage, truth, commits = 3, 3, 1
+	}
+	result.tuple(t, truth, stage, -1)
+	if crossed {
+		commit := tipCommit(t, result.err, 3, nil)
+		if commit.ReadbackCause != nil || commit.Cause == nil {
+			t.Fatalf("residual false acquired an invented readback cause %+v", commit)
+		}
+	} else {
+		treeNativeError(t, result.err, "update", "StateMismatch", -30779, diagnostic, nil)
+	}
+	if evidence.drift != 1 || evidence.commits != commits || evidence.aborts != 1 || reservationLive(f.o) != 0 {
+		t.Fatalf("exact equality native frontier %+v", evidence)
+	}
+	tsConsumed(t, f.s, f.o, truth, result.err)
+	if mode != 3 {
+		tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+	}
+}
+
+// eicLateDomain checks drift beyond 16,384 bodies after complete public traversal.
+func eicLateDomain(t *testing.T) {
+	t.Run("false-before-required-read", eicTruthContinuation)
+	t.Run("ordinary-OLD-residual-UNKNOWN", eicOldTruthContinuation)
+	t.Run("late-source-read-error", eicLateRead)
+	for _, mode := range []uint32{14, 13, 3} {
+		t.Run(fmt.Sprintf("position%d", mode), func(t *testing.T) {
+			f := eisNew(t, 17000, 2, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			var result tsResult
+			count := 0
+			// This body is beyond16384 and outside O, the common boundary and Pair.
+			evidence, err := fixtureLargeFault(f.s, mode, 4, f.hashes[16998][:], func() {
+				result, _, _, _ = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source == 7 {
+						if row.Height != uint64(count) {
+							t.Fatal("late equality fixture did not visit its full literal archive")
+						}
+						count++
+					}
+					return nil
+				})
+			})
+			mustEnvironment(t, err)
+			if count != 17001 {
+				t.Fatalf("late residual was never reached after literal row17001: %d", count)
+			}
+			eicMismatch(t, f, result, evidence, mode)
+			if mode == 3 {
+				tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, pair.Mutations[0].Literal)
+			}
+		})
+	}
+}
+
+// eicOldTruthContinuation requires UNKNOWN for ordinary OLD with a false ENTRY residual.
+func eicOldTruthContinuation(t *testing.T) {
+	f := eisNew(t, 17000, 2, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	// This common-boundary drift distinguishes ordinary OLD from residual UNKNOWN;
+	// it makes no claim about first detection at a late private source.
+	key := eisHeight(11, 16999)
+	changed := eisChain(f.hashes[16999], f.hashes[16998], 16999)
+	changed[103] ^= 1
+	var result tsResult
+	var evidence fixtureLargeEvidence
+	count := 0
+	_, err := fixtureTipCursor(f.s, 1, 1, 1, 0, func() {
+		mustEnvironment(t, fixtureTipDrift(key, changed, true))
+		var faultErr error
+		evidence, faultErr = fixtureLargeFault(f.s, 7, 2, key, func() {
+			result, _, _, _ = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == 7 {
+					if row.Height != uint64(count) {
+						t.Fatal("continuation fixture did not visit its full literal archive")
+					}
+					count++
+				}
+				return nil
+			})
+		})
+		mustEnvironment(t, faultErr)
+	})
+	mustEnvironment(t, err)
+	if count != 17001 {
+		t.Fatalf("continuation public archive rows: %d", count)
+	}
+	eicMismatch(t, f, result, evidence, 7)
+}
+
+// eicLateRead checks late body-read cause/stage and owner disposal in each private pass.
+func eicLateRead(t *testing.T) {
+	for _, test := range []struct {
+		mode, gets, commits uint32
+		stage               UpdateStage
+		truth               CommitTruth
+	}{{1, 2, 0, 1, 1}, {30, 3, 0, 2, 1}, {8, 1, 1, 3, 3}} {
+		t.Run(fmt.Sprintf("position%d-mode%d", test.stage, test.mode), func(t *testing.T) {
+			f := eisNew(t, 17000, 2, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			var result tsResult
+			var token EntryInventoryV1
+			var publicFailure *EntryInventoryFailureV1
+			var publicError error
+			count := 0
+			evidence, err := fixtureLargeFault(f.s, test.mode, 4, f.hashes[16998][:], func() {
+				result, token, publicFailure, publicError = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source == 7 {
+						if row.Height != uint64(count) {
+							t.Fatal("late read fixture did not visit its full literal archive")
+						}
+						count++
+					}
+					return nil // No ReadAt: each selected OLD get belongs to one pass.
+				})
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, test.truth, test.stage, -1)
+			if count != 17001 || publicFailure != nil || publicError != nil || !token.scope.completed || token.scope.failure == nil {
+				t.Fatalf("private error interrupted public completion: %d/%+v/%v", count, publicFailure, publicError)
+			}
+			physical := result.err
+			want := eiEncoded(t, f.old)
+			if test.stage == 3 {
+				commit := tipCommit(t, result.err, 3, token.scope.failure.SourceError)
+				treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+				physical, want = commit.ReadbackCause, pair.Mutations[0].Literal
+			}
+			treeNativeError(t, physical, "update", "IO", 5, "error 5", nil)
+			eissFailure(t, token.scope.failure, 7, 7, 1, 1, 1, 11, 16998, f.hashes[16998], f.hashes[16998][:], nil, physical)
+			if token.scope.failure.Prefix != nil || evidence.gets != test.gets || evidence.commits != test.commits || evidence.aborts != 1 || evidence.closes != 0 || evidence.drift != 0 || reservationLive(f.o) != 0 {
+				t.Fatalf("late read/native cleanup frontier %+v", evidence)
+			}
+			if !token.scope.retired || token.scope.reader != nil || token.scope.stream != nil || token.scope.access.active || token.scope.access.reader != nil || token.scope.access.key != nil || token.scope.access.image != (updateImage{}) || f.s.txn != nil || f.s.env != nil {
+				t.Fatal("late read consumed owner retained native handles or source capability")
+			}
+			tsConsumed(t, f.s, f.o, test.truth, result.err)
+			tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, want)
+		})
+	}
+}
+
+// eicTruthContinuation checks that a false fold still preserves a later required-read error.
+func eicTruthContinuation(t *testing.T) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	var result tsResult
+	var token EntryInventoryV1
+	var publicFailure *EntryInventoryFailureV1
+	var publicError error
+	// Mode29 is the existing commit+drift/strict-later-cursor fault. CURRENT's
+	// counter is already false before the exact O-undo cursor request fails.
+	evidence, err := fixtureLargeFault(f.s, 29, 0, tsCounterKey(11), func() {
+		result, token, publicFailure, publicError = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+	})
+	mustEnvironment(t, err)
+	result.tuple(t, 3, 3, -1)
+	commit, ok := result.err.(*CommitError)
+	if !ok || publicFailure != nil || publicError != nil || !token.scope.completed || commit.Truth != 3 || commit.ReadbackCause == nil {
+		t.Fatalf("early false suppressed later strict source: %v/%+v/%v", result.err, publicFailure, publicError)
+	}
+	treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+	treeNativeError(t, commit.ReadbackCause, "update", "IO", 5, "error 5", nil)
+	eissFailure(t, token.scope.failure, 5, 8, 1, 2, 1, 11, 3, f.hashes[3], f.hashes[3][:], f.hashes[3][:], commit.ReadbackCause)
+	// closes counts injected close failures (modes11/24), not successful closes.
+	if evidence.drift != 1 || evidence.gets != 1 || evidence.commits != 1 || evidence.aborts != 1 || evidence.closes != 0 || !token.scope.retired || token.scope.stream != nil || token.scope.access.image != (updateImage{}) {
+		t.Fatalf("one strict-snapshot false/fault/cleanup frontier %+v", evidence)
+	}
+	tsConsumed(t, f.s, f.o, 3, result.err)
+}
+
+// eicTargetExclusion checks exact-key exclusion against a same-family residual.
+func eicTargetExclusion(t *testing.T) {
+	for _, mode := range []uint32{14, 13, 3} {
+		t.Run(fmt.Sprintf("body-family-position%d", mode), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			if pair.Mutations[2].DBI.Rank != 4 || bytes.Equal(pair.Mutations[2].Key, f.hashes[0][:]) {
+				t.Fatal("target and residual must be independent exact identities in one family")
+			}
+			var result tsResult
+			evidence, err := fixtureLargeFault(f.s, mode, 4, f.hashes[0][:], func() {
+				result, _, _, _ = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+			})
+			mustEnvironment(t, err)
+			eicMismatch(t, f, result, evidence, mode)
+		})
+	}
+}
+
+// eicFirstFailure pins first-source context and cause identity after expiry and retirement.
+func eicFirstFailure(t *testing.T) {
+	for _, source := range []uint8{17, 20, 23, 24, 28} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("source%d-wrapped%v", source, wrapped), func(t *testing.T) {
+				f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+				pair := eisCapture(t, f, 1, 1, false, false)
+				header := eisHeader(9, [32]byte{0x77}, 0x62)
+				hash := sha3.Sum256(header)
+				eisSeed(t, f, []Mutation{eisMutation(2, eisHeight(5, 9), eisChain(hash, [32]byte(header[4:36]), 9)), eisMutation(3, hash[:], header), eisMutation(7, eisOwner(5, hash), CanonicalOwnerValue(9))})
+				rank, artifact, role, g, h := uint8(7), uint8(5), uint8(0), uint64(5), uint64(9)
+				key, prefix, access, mode := eisOwner(5, hash), []byte(nil), uint8(1), uint32(28)
+				contextHash := hash
+				switch source {
+				case 20:
+					rank, artifact, key = 3, 6, hash[:]
+				case 23:
+					rank, artifact, key, access, mode = 8, 10, eisHeight(5, 0)[:8], 2, 0
+					prefix, h, contextHash = bytes.Clone(key), 0, [32]byte{}
+				case 24:
+					rank, artifact, key, h, contextHash = 0, 11, tsRootKey(5), 0, [32]byte{}
+				case 28:
+					role, g, h, key = 1, 11, 0, eisOwner(11, hash)
+				}
+				var token EntryInventoryV1
+				var failure *EntryInventoryFailureV1
+				var physical, callback error
+				var result tsResult
+				run := func() {
+					mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+						result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+							token = eiPrepare(t, r, a, pair)
+							failure, physical = r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+							callback = physical
+							if wrapped {
+								callback = fmt.Errorf("native source: %w", physical)
+							}
+							return TreeOperationV1{Pair: pair}, callback
+						})
+						return nil
+					}))
+				}
+				if mode == 0 {
+					evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageStartupPullEIO, rank, key, run)
+					mustEnvironment(t, err)
+					if evidence.Faults != 1 || evidence.NodePulls != 1 || evidence.Commits != 0 {
+						t.Fatalf("exact node page request did not fail %+v", evidence)
+					}
+				} else {
+					evidence, err := fixtureLargeFault(f.s, mode, rank, key, run)
+					mustEnvironment(t, err)
+					if evidence.gets != 1 || evidence.commits != 0 {
+						t.Fatalf("raw own request did not fail %+v", evidence)
+					}
+				}
+				eissFailure(t, failure, source, artifact, role, access, 1, g, h, contextHash, key, prefix, physical)
+				treeNativeError(t, physical, "get", "IO", 5, "error 5", nil)
+				if !errors.Is(result.err, callback) || !errors.Is(result.err, physical) || token.scope.completed || !token.scope.retired || token.scope.stream != nil || token.scope.access.active {
+					t.Fatal("first physical interface/context or retirement was replaced")
+				}
+				frozenKey, frozenPrefix := bytes.Clone(failure.Key), bytes.Clone(failure.Prefix)
+				pair.Mutations[0].Literal[0] ^= 1 // callback and original OLD have ended
+				if !bytes.Equal(failure.Key, frozenKey) || !bytes.Equal(failure.Prefix, frozenPrefix) || any(failure.SourceError) != any(physical) {
+					t.Fatal("inert first failure changed after input mutation/Reader expiry")
+				}
+				tsConsumed(t, f.s, f.o, 1, result.err)
+			})
+		}
+	}
+}
+
+// eicNodeRemnant checks native postorder/root-last traversal and reached-key failure.
+func eicNodeRemnant(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("malformed-key%v", malformed), func(t *testing.T) {
+			f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			keys := make([][]byte, 4)
+			for i := range keys {
+				keys[i] = make([]byte, 46)
+				binary.BigEndian.PutUint64(keys[i], 5)
+			}
+			keys[1][8] = 0x7f
+			for i := 9; i < 44; i++ {
+				keys[1][i] = 0xff
+			}
+			keys[1][44], keys[1][45] = 1, 31 // depth1 branch, upper zero subtree
+			keys[2][8] = 0x80
+			for i := 8; i < 44; i++ {
+				keys[3][i] = 0xff
+			}
+			keys[3][44], keys[3][45] = 1, 32 // root last; child links may be absent
+			for i, key := range keys {
+				value := bytes.Repeat([]byte{byte(i + 1)}, 32)
+				if i == 1 || i == 3 {
+					value = bytes.Repeat([]byte{byte(i + 1)}, 140)
+				}
+				treeNativeSeed(t, f.s, 8, key, value)
+			}
+			bad := append(bytes.Clone(eisHeight(5, 0)[:8]), 0x40)
+			if malformed {
+				treeNativeSeed(t, f.s, 8, bad, []byte{0x72})
+			}
+			nodes, roots := 0, 0
+			var prefix []byte
+			result, token, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == 24 {
+					roots++
+					if nodes != 4 {
+						t.Fatal("root binding preceded a remaining native postorder node")
+					}
+				}
+				if row.Source == 23 {
+					if !bytes.Equal(row.Key, keys[nodes]) || row.Role != 0 || row.Generation != 5 || row.Hash != ([32]byte{}) || row.Height != 0 || row.Count != 0 || row.IndexCount != 0 || row.Projection != 0 || !row.Present {
+						t.Fatalf("native zero-first postorder identity %d: %+v", nodes, row)
+					}
+					wantKind, wantDepth := TreeNodeKindV1(1), uint16(288)
+					if nodes == 1 {
+						wantKind, wantDepth = 2, 1
+					}
+					if nodes == 3 {
+						wantKind, wantDepth = 2, 0
+					}
+					if row.Node.Kind != wantKind || row.Node.Depth != wantDepth {
+						t.Fatal("node remnant fabricated kind or branch depth")
+					}
+					nodes++
+					prefix = bytes.Clone(row.Key[:8])
+				}
+				return nil
+			})
+			if malformed {
+				result.tuple(t, 1, 1, -1)
+				eiInput(t, result.err)
+				eissFailure(t, failure, 23, 10, 0, 2, 4, 5, 0, [32]byte{}, bad, prefix, nil)
+				if err != nil || nodes != 1 || roots != 0 || token.scope.completed {
+					t.Fatal("complete malformed node was skipped or prepassed")
+				}
+			} else {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				if err != nil || failure != nil || nodes != 4 || roots != 1 {
+					t.Fatal("partial node remnant was not exhausted through root-last")
+				}
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+// eicDisposition checks completed-callback/native outcomes and the next Store operation.
+func eicDisposition(t *testing.T) {
+	for _, cleanup := range []uint32{0, 9, 10} {
+		for _, application := range []string{"nil", "direct", "wrapped", "typed-nil", "panic", "panic-nil", "goexit"} {
+			t.Run(fmt.Sprintf("completed-%s-cleanup%d", application, cleanup), func(t *testing.T) {
+				f := eisNew(t, 3, 1, nil)
+				pair := eisCapture(t, f, 1, 1, false, false)
+				marker := errors.New("completed callback result")
+				var app error
+				switch application {
+				case "direct":
+					app = marker
+				case "wrapped":
+					app = fmt.Errorf("application: %w", marker)
+				case "typed-nil":
+					var typed *nilPointerError
+					app = typed
+				}
+				var token EntryInventoryV1
+				var result tsResult
+				var recovered any
+				var evidence fixtureLargeEvidence
+				returned := false
+				invoke := func() {
+					mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+						result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+							token = eiPrepare(t, r, a, pair)
+							failure, err := r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+							if failure != nil || err != nil || !token.scope.completed || token.scope.stream != nil || token.scope.access.active {
+								t.Fatal("completed callback retained sources or failed before its application result")
+							}
+							switch application {
+							case "panic":
+								panic(marker)
+							case "panic-nil":
+								panic(treeCallNilPanicValue)
+							case "goexit":
+								runtime.Goexit()
+							}
+							pair.EntryInventory = &token
+							return TreeOperationV1{Pair: pair}, app
+						})
+						return nil
+					}))
+				}
+				run := func() {
+					defer func() { recovered = recover() }()
+					if cleanup == 0 {
+						invoke()
+					} else {
+						var err error
+						evidence, err = fixtureLargeFault(f.s, cleanup, 0, []byte{2}, invoke)
+						mustEnvironment(t, err)
+					}
+					returned = true
+				}
+				if application == "goexit" {
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						run()
+					}()
+					eiAwait(t, done)
+				} else {
+					run()
+				}
+				unwind := application == "panic" || application == "panic-nil" || application == "goexit"
+				if application == "panic" && recovered != marker || application == "panic-nil" && recovered == nil || application == "goexit" && recovered != nil || returned == unwind {
+					t.Fatal("native cleanup replaced the completed callback's unwind")
+				}
+				truth := CommitTruth(1)
+				if application == "nil" {
+					truth = 2
+				}
+				if !unwind {
+					stage := UpdateStage(1)
+					if application == "nil" {
+						stage = 3
+					}
+					result.tuple(t, truth, stage, -1)
+					if cleanup == 0 && any(result.err) != any(app) {
+						t.Fatal("clean application interface changed")
+					}
+					if cleanup != 0 && (evidence.aborts != 1 || evidence.commits != uint32(truth-1)) {
+						t.Fatalf("application refusal attempted a commit or skipped cleanup %+v", evidence)
+					}
+					if app != nil && !errors.Is(result.err, app) {
+						t.Fatal("native cleanup lost the original application interface")
+					}
+				}
+				if !token.scope.retired || token.scope.reader != nil || token.scope.stream != nil || token.scope.access.reader != nil || token.scope.access.key != nil || token.scope.access.image != (updateImage{}) || reservationLive(f.o) != 0 {
+					t.Fatal("completed callback cleanup retained a capability or charged hold")
+				}
+				if cleanup == 0 {
+					if f.s.state != storeOPEN {
+						t.Fatal("clean completed callback closed the Store")
+					}
+					tsFollowing(t, f.s, f.o)
+				} else {
+					eicTerminalNext(t, f, truth, cleanup == 10)
+				}
+			})
+		}
+	}
+	for _, mode := range []uint32{7, 8, 12, 15, 16} {
+		t.Run(fmt.Sprintf("native-position-mode%d", mode), func(t *testing.T) {
+			const childEnv = "RUBIN_MDBX_ENTRY_RETAINED_CHILD"
+			const childMarker = "RUBIN_MDBX_ENTRY_RETAINED_REACHED"
+			if mode == 15 && os.Getenv(childEnv) != "1" {
+				// Retained readback permanently parks its worker, even after release.
+				ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEntryInventoryV1NativeOutcomes$/^NativeDisposition$/^native-position-mode15$", "-test.count=1", "-test.v")
+				cmd.Env = append(os.Environ(), childEnv+"=1")
+				output, err := cmd.CombinedOutput()
+				if err != nil || strings.Count(string(output), "\n"+childMarker+"\n") != 1 {
+					t.Fatalf("retained ENTRY readback child: %v\n%s", err, output)
+				}
+				return
+			}
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			var result tsResult
+			var token EntryInventoryV1
+			evidence, err := fixtureLargeFault(f.s, mode, 0, tsCounterKey(13), func() {
+				result, token, _, _ = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+			})
+			mustEnvironment(t, err)
+			truth := CommitTruth(2)
+			if mode == 7 {
+				truth = 1
+			}
+			if mode == 8 {
+				truth = 3
+			}
+			result.tuple(t, truth, 3, -1)
+			var commit *CommitError
+			if !errors.As(result.err, &commit) || commit.Truth != truth || commit.Cause == nil || evidence.commits != 1 || evidence.aborts != 1 || !token.scope.retired {
+				t.Fatalf("raw truth/cause/cleanup disposition %+v/%v", evidence, result.err)
+			}
+			treeNativeError(t, commit.Cause, "update", "Capacity", 28, "error 28", nil)
+			if mode == 8 {
+				treeNativeError(t, commit.ReadbackCause, "update", "IO", 5, "error 5", nil)
+				eissFailure(t, token.scope.failure, 3, 2, 2, 1, 1, 13, 0, [32]byte{}, tsCounterKey(13), nil, commit.ReadbackCause)
+			}
+			if (mode == 7 || mode == 12) && commit.ReadbackCause != nil {
+				t.Fatal("complete OLD/NEW truth acquired a readback cause")
+			}
+			eicTerminalNext(t, f, truth, mode == 15)
+			want := pair.Mutations[0].Literal
+			if mode == 7 {
+				want = eiEncoded(t, f.old)
+			}
+			tsRead(t, tsReopen(t, f.s, f.path), TreeSchemaV1DBIs()[0], []byte{2}, want)
+			if mode == 15 {
+				fmt.Println(childMarker)
+			}
+		})
+	}
+}
+
+// eicTerminalNext checks terminal owner shape and rejects subsequent callbacks.
+func eicTerminalNext(t *testing.T, f *eisFixture, truth CommitTruth, retained bool) {
+	t.Helper()
+	want := storeCLOSED
+	if retained {
+		want = storePOISONEDTHREAD
+	}
+	if f.s.state != want || f.s.terminal == nil || f.s.terminalTruth != truth || reservationLive(f.o) != 0 || retained != (f.s.txn != nil) {
+		t.Fatalf("raw native owner shape %s/%v/%d/retained%v", f.s.state, f.s.terminal, f.s.terminalTruth, f.s.txn != nil)
+	}
+	calls := 0
+	if any(f.s.View(func(*Reader) error {
+		calls++
+		return nil
+	})) != any(f.s.terminal) {
+		t.Fatal("terminal View did not return the exact terminal interface")
+	}
+	mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		next := tsInvoke(f.s, a, func(*Reader) (TreeOperationV1, error) {
+			calls++
+			return tsPair(55), nil
+		})
+		next.tuple(t, truth, 1, -1)
+		if calls != 0 || any(next.err) != any(f.s.terminal) {
+			t.Fatal("terminal ENTRY permitted a next callback or replaced its terminal")
+		}
+		return nil
+	}))
+	if retained {
+		mustEnvironment(t, FixtureStartupRelease(f.s))
+	}
+}
+
+// eicPairRoles checks independent role controls and assurance sources through equality.
+func eicPairRoles(t *testing.T) {
+	for _, test := range []struct {
+		role uint8
+		mode uint32
+	}{
+		{0, 0},
+		{1, 28},
+		{2, 28},
+		{1, 14},
+		{2, 14},
+		{1, 13},
+		{2, 13},
+		{1, 3},
+		{2, 3},
+	} {
+		failRole := test.role
+		t.Run(fmt.Sprintf("distinct-assurance-role%d-mode%d", failRole, test.mode), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			var evidenceKeys [2][]byte
+			for i, g := range []uint64{11, 13} {
+				capsule, err := (TreeEvidenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, Payload: []byte{byte(0xa1 + i)}}).Encode()
+				mustEnvironment(t, err)
+				id := sha3.Sum256(capsule)
+				evidenceKeys[i] = append([]byte{0x12}, id[:]...)
+				treeNativeSeed(t, f.s, 0, evidenceKeys[i], capsule)
+				var value []byte
+				mustEnvironment(t, f.s.View(func(r *Reader) error {
+					root, present, err := r.ReadTreeRootBindingV1(g)
+					if err != nil || !present {
+						return errors.New("missing actual role binding")
+					}
+					root.Assurance = TreeAssuranceV1{Kind: 2, Import: &TreeImportReferenceV1{OriginalDatabaseID: [32]byte{7}, OriginalCurrentID: 11, OriginalLagID: 13, OriginalRole: TreeOriginalRoleV1(i + 1), EvidenceID: id}}
+					value, err = root.Encode()
+					if err != nil {
+						return err
+					}
+					return nil
+				}))
+				treeNativeSeed(t, f.s, 0, tsRootKey(g), value)
+			}
+			mustEnvironment(t, f.s.Close())
+			var err error
+			f.s, err = OpenTreeV1(f.path, environmentConfig(), [32]byte{7})
+			mustEnvironment(t, err)
+			t.Cleanup(func() { _ = f.s.Close() })
+			eisQualify(t, f, func(r *Reader) error {
+				for i, g := range []uint64{11, 13} {
+					root, present, err := r.ReadTreeRootBindingV1(g)
+					if err != nil || !present || root.Assurance.Import == nil || root.Assurance.Import.OriginalRole != TreeOriginalRoleV1(i+1) {
+						return errors.New("imported role reference mismatch")
+					}
+					capsule, err := r.ReadTreeEvidenceV1(*root.Assurance.Import)
+					if err != nil || !bytes.Equal(capsule.Payload, []byte{byte(0xa1 + i)}) {
+						return errors.New("actual independent role capsule mismatch")
+					}
+				}
+				return nil
+			})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			controls := 0
+			var result tsResult
+			var token EntryInventoryV1
+			var failure *EntryInventoryFailureV1
+			var sourceErr error
+			run := func() {
+				result, token, failure, sourceErr = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source <= 4 {
+						controls++
+						if row.Source != uint8(controls) || row.Role != uint8((controls+1)/2) || row.Generation != []uint64{11, 11, 13, 13}[controls-1] {
+							t.Fatal("equal roots deduplicated distinct role controls")
+						}
+						if row.Source == 2 && row.IndexCount != 4 || row.Source == 4 && row.IndexCount != 0 {
+							t.Fatal("endpoint-only handoff replaced CURRENT or empty-LAG state")
+						}
+					}
+					return nil
+				})
+			}
+			if failRole == 0 {
+				run()
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				if failure != nil || sourceErr != nil || controls != 4 {
+					t.Fatal("complete per-role assurance was not independently preserved")
+				}
+				tsFollowing(t, f.s, f.o)
+			} else if test.mode != 28 {
+				evidence, err := fixtureLargeFault(f.s, test.mode, 0, evidenceKeys[failRole-1], run)
+				mustEnvironment(t, err)
+				if failure != nil || sourceErr != nil || controls != 4 {
+					t.Fatal("assurance drift fixture failed before complete public inventory")
+				}
+				eicMismatch(t, f, result, evidence, test.mode)
+			} else {
+				key := evidenceKeys[failRole-1]
+				evidence, err := fixtureLargeFault(f.s, 28, 0, key, run)
+				mustEnvironment(t, err)
+				g := []uint64{11, 13}[failRole-1]
+				eissFailure(t, failure, 26, 12, failRole, 1, 1, g, 0, [32]byte{}, key, nil, sourceErr)
+				if controls != int(failRole)*2 || evidence.gets != 1 || evidence.commits != 0 || token.scope.completed || !token.scope.retired {
+					t.Fatalf("per-role shared-control last use changed %d/%+v", controls, evidence)
+				}
+				tsConsumed(t, f.s, f.o, 1, result.err)
+			}
+		})
+	}
+}
+
+// eicControlEquality checks both roles' controls in all three residual comparisons.
+func eicControlEquality(t *testing.T) {
+	for _, source := range []uint8{1, 2, 3, 4} {
+		for _, mode := range []uint32{14, 13, 3} {
+			t.Run(fmt.Sprintf("source%d-position%d", source, mode), func(t *testing.T) {
+				f := eisNew(t, 3, 1, nil)
+				pair := eisCapture(t, f, 1, 1, false, false)
+				g := uint64(11)
+				if source >= 3 {
+					g = 13
+				}
+				key := tsCounterKey(g)
+				if source%2 == 0 {
+					key = tsRootKey(g)
+				}
+				var result tsResult
+				evidence, err := fixtureLargeFault(f.s, mode, 0, key, func() {
+					result, _, _, _ = eicInvoke(t, f, pair, func(EntryInventoryRowV1) error { return nil })
+				})
+				mustEnvironment(t, err)
+				eicMismatch(t, f, result, evidence, mode)
+			})
+		}
+	}
+}
+
+// eicGENMaxKey checks full-length successor handling and selected-generation isolation.
+func eicGENMaxKey(t *testing.T) {
+	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}, {Kind: 1, GenerationID: 7}})
+	pair := eisCapture(t, f, 1, 1, false, false)
+	m := int(limitsForPage(f.s.config.PageSize).maxKey)
+	key := bytes.Repeat([]byte{0xff}, m)
+	binary.BigEndian.PutUint64(key, 5)
+	treeNativeSeed(t, f.s, 1, key, []byte{0x36})
+	outside := make([]byte, 44)
+	binary.BigEndian.PutUint64(outside, 6)
+	treeNativeSeed(t, f.s, 1, outside, []byte{0x37})
+	seen, roots := 0, 0
+	result, _, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+		if row.Source == 16 {
+			seen++
+			if !bytes.Equal(row.Key, key) || row.Generation != 5 || row.Artifact != 3 || row.Role != 0 || row.Length != 1 || row.Projection != 0 {
+				t.Fatalf("full-M successor changed the selected GEN prefix %+v", row)
+			}
+			buf := []byte{0}
+			n, readErr := row.ReadAt(buf, 0)
+			if n != 1 || readErr != nil || buf[0] != 0x36 {
+				t.Fatal("raw max-key row lost its current-access bytes")
+			}
+		}
+		if row.Source == 24 {
+			roots++
+		}
+		return nil
+	})
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	if failure != nil || err != nil || seen != 1 || roots != 2 || m < 77 || m >= 65536 {
+		t.Fatalf("actual-M complete GEN frontier: %d/%d/M%d/%+v/%v", seen, roots, m, failure, err)
+	}
+}
+
+// eicOwnerPriority checks required-owner precedence; see entryWalkV1.ownerV1.
+func eicOwnerPriority(t *testing.T) {
+	for _, role := range []uint8{1, 2} {
+		for _, defect := range []string{"owner-width", "owner-height", "forward-absent", "forward-width", "forward-hash", "forward-work"} {
+			t.Run(fmt.Sprintf("role%d-%s", role, defect), func(t *testing.T) {
+				f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+				pair := eisCapture(t, f, 1, 1, false, false)
+				hash := [32]byte{0x82}
+				treeNativeSeed(t, f.s, 2, eisHeight(5, 9), eisChain(hash, [32]byte{0x77}, 9))
+				g := []uint64{11, 13}[role-1]
+				owner := CanonicalOwnerValue(9)
+				if defect == "owner-width" {
+					owner = owner[:7]
+				}
+				if defect == "owner-height" {
+					owner = CanonicalOwnerValue(0x100000000)
+				}
+				treeNativeSeed(t, f.s, 7, eisOwner(g, hash), owner)
+				if defect != "forward-absent" && defect != "owner-width" && defect != "owner-height" {
+					forward := eisChain(hash, [32]byte{0x77}, 9)
+					switch defect {
+					case "forward-width":
+						forward = forward[:103]
+					case "forward-hash":
+						forward[0] ^= 1
+					case "forward-work":
+						clear(forward[64:])
+					}
+					treeNativeSeed(t, f.s, 2, eisHeight(g, 9), forward)
+				}
+				last := uint8(0)
+				result, token, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					last = row.Source
+					return nil
+				})
+				result.tuple(t, 1, 1, -1)
+				eiInput(t, result.err)
+				artifact, height, key := uint8(4), uint64(9), eisHeight(g, 9)
+				if defect == "owner-width" || defect == "owner-height" {
+					artifact, height, key = 5, 0, eisOwner(g, hash)
+				}
+				eissFailure(t, failure, 28, artifact, role, 1, 4, g, height, hash, key, nil, nil)
+				if err != nil || token.scope.completed || last != 19 || f.s.state != storeOPEN {
+					t.Fatal("raw absent header or reverse displaced the earlier active ownership inconsistency")
+				}
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+				tsFollowing(t, f.s, f.o)
+			})
+		}
+	}
+}
+
+// eicProjectionResult checks Invalid versus Unverifiable; see entryWalkV1.indexV1.
+func eicProjectionResult(t *testing.T) {
+	for _, reverse := range []string{"missing-reverse", "short-reverse", "wrong-reverse"} {
+		t.Run(reverse, func(t *testing.T) {
+			f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			header := eisHeader(9, [32]byte{0x77}, 0x64)
+			hash := sha3.Sum256(header)
+			treeNativeSeed(t, f.s, 2, eisHeight(5, 9), eisChain(hash, [32]byte(header[4:36]), 9))
+			treeNativeSeed(t, f.s, 3, hash[:], header)
+			if reverse != "missing-reverse" {
+				owner := CanonicalOwnerValue(10)
+				if reverse == "short-reverse" {
+					owner = CanonicalOwnerValue(9)[:7]
+				}
+				treeNativeSeed(t, f.s, 7, eisOwner(5, hash), owner)
+			}
+			var result tsResult
+			var token EntryInventoryV1
+			var failure *EntryInventoryFailureV1
+			var visitErr error
+			last := uint8(0)
+			evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageProbeOnly, 0, []byte{2}, func() {
+				result, token, failure, visitErr = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					last = row.Source
+					return nil
+				})
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, 1, 1, -1)
+			eiInput(t, result.err)
+			eissFailure(t, failure, 17, 5, 0, 1, 3, 5, 9, hash, eisOwner(5, hash), nil, nil)
+			if visitErr != nil || token.scope.completed || last != 19 || evidence.BeginWrite != 0 || evidence.Commits != 0 || f.s.state != storeOPEN {
+				t.Fatal("valid own header with unproven raw reverse became absent ownership or a completed token")
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+	for _, defect := range []string{"absent", "width147", "hash", "parent"} {
+		t.Run(defect, func(t *testing.T) {
+			f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			header := eisHeader(9, [32]byte{0x77}, 0x63)
+			hash, parent := sha3.Sum256(header), [32]byte(header[4:36])
+			if defect == "parent" {
+				parent[0] ^= 1
+			}
+			treeNativeSeed(t, f.s, 2, eisHeight(5, 9), eisChain(hash, parent, 9))
+			if defect != "absent" {
+				if defect == "width147" {
+					header = header[:147]
+				}
+				if defect == "hash" {
+					header[147] ^= 1
+				}
+				treeNativeSeed(t, f.s, 3, hash[:], header)
+			}
+			seen := 0
+			var result tsResult
+			var failure *EntryInventoryFailureV1
+			var visitErr error
+			// The existing point fault is an actual non-access sentinel. Its
+			// commit transport still runs, so NEW retains its ordinary capacity cause.
+			evidence, err := fixtureLargeFault(f.s, 28, 7, eisOwner(5, hash), func() {
+				result, _, failure, visitErr = eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+					if row.Source == 17 {
+						seen++
+						if row.Projection != 1 || row.Height != 0 || row.Hash != ([32]byte{}) {
+							t.Fatal("invalid own header supplied a dependent identity")
+						}
+					}
+					if row.Source == 20 || row.Source == 21 || row.Source == 22 {
+						t.Fatal("Invalid own projection reached a dependent source")
+					}
+					return nil
+				})
+			})
+			mustEnvironment(t, err)
+			result.tuple(t, 2, 3, -1)
+			_ = tipCommit(t, result.err, 2, nil)
+			if failure != nil || visitErr != nil || seen != 1 || evidence.gets != 0 || evidence.commits != 1 {
+				t.Fatalf("invalid header queried raw reverse or changed its outcome %+v/%+v/%v", evidence, failure, visitErr)
+			}
+			tsConsumed(t, f.s, f.o, 2, result.err)
+		})
+	}
+}
+
+// eicPriorOrphan prevents orphan reverse rows from gaining prior-owner authority.
+func eicPriorOrphan(t *testing.T) {
+	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}, {Kind: 1, GenerationID: 7}})
+	pair := eisCapture(t, f, 1, 1, false, false)
+	header := eisHeader(9, [32]byte{0x77}, 0x65)
+	hash := sha3.Sum256(header)
+	eisSeed(t, f, []Mutation{
+		eisMutation(2, eisHeight(7, 9), eisChain(hash, [32]byte(header[4:36]), 9)),
+		eisMutation(3, hash[:], header), eisMutation(4, hash[:], header),
+		eisMutation(5, UndoManifestKey(hash), UndoManifestValue(9, [16]byte{}, 1, 2)),
+		eisMutation(7, eisOwner(7, hash), CanonicalOwnerValue(9)),
+	})
+	// This is the actual raw disposable namespace writer. The ordinary Pair
+	// owner correctly refuses an unpaired forward/reverse mutation.
+	treeNativeSeed(t, f.s, 7, eisOwner(5, hash), CanonicalOwnerValue(9))
+	for i := range 2 {
+		key := make([]byte, 77)
+		copy(key[:32], hash[:])
+		key[32] = 1
+		binary.BigEndian.PutUint32(key[37:41], uint32(i))
+		key[41] = byte(0x81 + i)
+		treeNativeSeed(t, f.s, 5, key, tdFormed(tdFrame(7, 0, nil), 9, 0))
+	}
+	counts := [25]int{}
+	result, _, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+		counts[row.Source]++
+		if row.Source >= 20 && row.Source <= 22 {
+			if row.Generation != 7 || row.Height != 9 || row.Hash != hash {
+				t.Fatal("orphan derived row displaced the complete later own proof")
+			}
+		}
+		return nil
+	})
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	if failure != nil || err != nil || counts[17] != 1 || counts[18] != 2 || counts[20] != 1 || counts[21] != 1 || counts[22] != 3 {
+		t.Fatalf("earlier orphan derived owner gained authority or escaped raw enumeration: %v/%+v/%v", counts, failure, err)
+	}
+}
+
+// eicPassRetirement observes source retirement at entryInventoryStateV1.equalV1 return.
+func eicPassRetirement(t *testing.T) {
+	eicOwnedBacking(t, func(s *entryInventoryStateV1, plan *treePlanV1, r *Reader) {
+		equal, err := s.equalV1(r.txn, plan)
+		if err != nil || !equal || s.failed {
+			t.Fatalf("actual residual pass over live ORIGINAL OLD failed: %v/%v", equal, err)
+		}
+		// Observe the actual helper return before the sentinel's outer cleanup
+		// could clear these same cells and conceal an omitted pass retirement.
+		if s.stream != nil || s.access.active || s.access.reader != nil || s.access.key != nil || s.access.image != (updateImage{}) || !reflect.ValueOf(s.row).IsZero() {
+			t.Fatal("private equalV1 returned with live sources before its caller could abort a snapshot")
+		}
+		if !r.getMu.TryLock() {
+			t.Fatal("private equality retained the initial-reader mutex")
+		}
+		r.getMu.Unlock()
+	})
 }
