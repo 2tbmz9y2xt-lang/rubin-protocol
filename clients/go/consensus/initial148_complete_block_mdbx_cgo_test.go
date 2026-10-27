@@ -156,8 +156,9 @@ func icbGenesisContextV1(in initial148CompleteBlockInputV1) initial148CompleteBl
 func TestInitial148CompleteBlockReservationBoundary(t *testing.T) {
 	w := btNew(t)
 	in := icbInputV1()
-	tariff, ok := initial148CompleteTariffV1(in)
-	logicalMDBXAssert(t, ok, "tariff")
+	// Contract W for icbInputV1 (n=200, d=0, c=0, r=2, a=10, p=1, g=0):
+	// 16,777,216 + 8,192*200 + 1,024*2 + 2*10 + 8*1 = 18,417,692.
+	const tariff = uint64(18_417_692)
 	for _, spare := range []uint64{0, 1} {
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			// TREE_LANE_MAX=402,653,184 is the TreeOperation account ceiling.

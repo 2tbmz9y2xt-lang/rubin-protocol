@@ -98,7 +98,8 @@ func icbParentBindingV1(t *testing.T, w *btWorld) (mdbx.RootBindingV1, []byte) {
 // icbDeriveDamageV1 arms or applies one D-only native fault after the parent
 // seed and observes in through one entry. R reads only UTXO rows and
 // counters; D alone reads the root binding and the tree nodes.
-func icbDeriveDamageV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1, damage string, workers int) icbObservedV1 {
+// The second result is the rank-8 key of the node that D reads first.
+func icbDeriveDamageV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1, damage string, workers int) (icbObservedV1, []byte) {
 	t.Helper()
 	binding, node := icbParentBindingV1(t, w)
 	var got icbObservedV1
@@ -110,10 +111,20 @@ func icbDeriveDamageV1(t *testing.T, w *btWorld, in initial148CompleteBlockInput
 	switch damage {
 	case "binding-eio":
 		eio(0, btMeta(0x11, 1))
-		return got
+		return got, node
 	case "node-eio":
 		eio(8, node)
-		return got
+		return got, node
+	case "node-malformed":
+		// The existing rank-8 drift helper persists 0x7f as the root node row.
+		btfDamage(t, w, 8, node, "malformed")
+	case "node-absent":
+		// A well-formed binding naming a valid node identity with no stored row.
+		binding = icbAbsentNodeBindingV1(t, binding)
+		value, err := binding.Encode()
+		logicalMDBXAssert(t, err == nil && mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), value) == nil, "rebind node: %v", err)
+		node, err = mdbx.TreeNodeKey(1, *binding.Top.Node)
+		logicalMDBXAssert(t, err == nil, "absent node key: %v", err)
 	case "binding-absent":
 		logicalMDBXAssert(t, mdbx.FixtureStartupDeleteRow(w.s, 0, btMeta(0x11, 1)) == nil, "delete binding")
 	case "binding-malformed":
@@ -125,7 +136,29 @@ func icbDeriveDamageV1(t *testing.T, w *btWorld, in initial148CompleteBlockInput
 		logicalMDBXAssert(t, err == nil && mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), value) == nil, "rebind endpoint: %v", err)
 	}
 	observe()
-	return got
+	return got, node
+}
+
+// icbAbsentNodeBindingV1 moves the binding's top to a different valid node
+// identity of the same kind; no rank-8 row exists under its key.
+func icbAbsentNodeBindingV1(t *testing.T, binding mdbx.RootBindingV1) mdbx.RootBindingV1 {
+	t.Helper()
+	id := *binding.Top.Node
+	switch {
+	case id.Kind == mdbx.TreeNodeLeafV1:
+		id.RoutingKey[35] ^= 0x01
+	case id.Depth > 0:
+		id.Prefix[0] ^= 0x80
+	default:
+		id.Depth = 1
+	}
+	binding.Top.Node = &id
+	return binding
+}
+
+// icbNodeKeyV1 is the observed key projection for a rank-8 node key.
+func icbNodeKeyV1(o mdbx.TreeObservationV1, key []byte) bool {
+	return int(o.KeyLength) == len(key) && bytes.Equal(o.Key[:o.KeyLength], key)
 }
 
 // TestInitial148CompleteBlockDeriveFailureH5 (C10) makes only the fresh D of
@@ -139,18 +172,21 @@ func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
 	cases := []struct {
 		damage string
 		kind   mdbx.TreeObservationKindV1
+		rank   uint8
 	}{
-		{"binding-eio", 0},
-		{"node-eio", 0},
-		{"binding-absent", mdbx.TreeObservationAbsentV1},
-		{"binding-malformed", mdbx.TreeObservationMalformedV1},
-		{"binding-endpoint", mdbx.TreeObservationIdentityMismatchV1},
+		{"binding-eio", 0, 0},
+		{"node-eio", 0, 8},
+		{"binding-absent", mdbx.TreeObservationAbsentV1, 0},
+		{"binding-malformed", mdbx.TreeObservationMalformedV1, 0},
+		{"binding-endpoint", mdbx.TreeObservationIdentityMismatchV1, 0},
+		{"node-malformed", mdbx.TreeObservationMalformedV1, 8},
+		{"node-absent", mdbx.TreeObservationAbsentV1, 8},
 	}
 	for _, c := range cases {
 		for _, workers := range []int{-1, 1, 4} {
 			w := btNew(t)
 			f := icbH5FixtureV1(t, w)
-			got := icbDeriveDamageV1(t, w, f.in, c.damage, workers)
+			got, node := icbDeriveDamageV1(t, w, f.in, c.damage, workers)
 			req, verr := got.out.required, got.out.validationErr
 			var txErr *TxError
 			logicalMDBXAssert(t, got.out.attempted && verr != nil && !errors.As(verr, &txErr) && got.summary == (BlockBasicSummary{}), "%s workers=%d no-result: err=%v verr=%v", c.damage, workers, got.err, verr)
@@ -163,9 +199,18 @@ func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
 			}
 			o := req.observation
 			logicalMDBXAssert(t, engine.Class == mdbx.EngineIntegrity && req.hasObservation && engine.TreeObservation != nil && o == *engine.TreeObservation, "%s workers=%d observation lost: %+v", c.damage, workers, req)
-			// Observation identity: database 7, generation 1, this block at h=5, writer position 1, rank 0.
-			same := o.DatabaseID == [32]byte{7} && o.Generation == 1 && o.Block == f.in.Endpoint.BlockHash && o.Height == icbHeightV1 && o.Position == 1 && o.Rank == 0 && o.Kind == c.kind
+			// Observation identity: database 7, generation 1, this block at h=5, writer position 1, the damaged rank.
+			same := o.DatabaseID == [32]byte{7} && o.Generation == 1 && o.Block == f.in.Endpoint.BlockHash && o.Height == icbHeightV1 && o.Position == 1 && o.Rank == c.rank && o.Kind == c.kind
 			logicalMDBXAssert(t, same, "%s workers=%d observation %+v", c.damage, workers, o)
+			if c.rank == 8 {
+				// The drifted root node, or the rebound absent identity; absence has no cause, a short record the schema cause.
+				logicalMDBXAssert(t, icbNodeKeyV1(o, node), "%s workers=%d node key %x want %x", c.damage, workers, o.Key, node)
+				wantCause := engine.Cause == nil
+				if c.kind == mdbx.TreeObservationMalformedV1 {
+					wantCause = engine.Cause != nil && engine.Cause.Error() == "invalid MDBX SchemaV2 bytes"
+				}
+				logicalMDBXAssert(t, wantCause && engine.Operation == "update" && engine.Code == -30796 && engine.Diagnostic == "invalid tree native representation" && !engine.ReopenRequired, "%s workers=%d node cause %+v", c.damage, workers, engine)
+			}
 		}
 	}
 }
