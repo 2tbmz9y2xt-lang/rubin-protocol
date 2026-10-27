@@ -260,7 +260,12 @@ func (s *q148Seq) clone(h int) *q148Seq {
 
 // push appends one header over the last with the given target and timestamp; meets selects the PoW verdict.
 func (s *q148Seq) push(t *testing.T, target [32]byte, timestamp uint64, meets bool) {
-	h := q148Header(t, s.hashes[len(s.hashes)-1], target, timestamp, func(raw []byte) bool { return q148Meets(raw, target) == meets })
+	s.pushWith(t, target, timestamp, func(raw []byte) bool { return q148Meets(raw, target) == meets })
+}
+
+// pushWith appends one header over the last with the given target and timestamp, searched until accept holds.
+func (s *q148Seq) pushWith(t *testing.T, target [32]byte, timestamp uint64, accept func(raw []byte) bool) {
+	h := q148Header(t, s.hashes[len(s.hashes)-1], target, timestamp, accept)
 	s.headers, s.hashes, s.times, s.targets = append(s.headers, h), append(s.hashes, q148Hash(h[:])), append(s.times, timestamp), append(s.targets, target)
 }
 
@@ -424,6 +429,41 @@ func TestReplayQualifier148PrefixTip(t *testing.T) {
 	b.extend(t, 4, 2*TARGET_BLOCK_INTERVAL, false)
 	v := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[4:])}
 	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.hashes[2], 2, s.work(t, 2), 5, "A3")
+}
+
+// q148FullFailsPrefixMeets holds when the 148-byte PoW verdict fails while the 116-byte prefix verdict would pass.
+func q148FullFailsPrefixMeets(target [32]byte) func(raw []byte) bool {
+	return func(raw []byte) bool { return !q148Meets(raw, target) && q148Meets(raw[:116], target) }
+}
+
+// q148BothMeet holds when both the 148-byte and the 116-byte prefix PoW verdicts pass.
+func q148BothMeet(target [32]byte) func(raw []byte) bool {
+	return func(raw []byte) bool { return q148Meets(raw, target) && q148Meets(raw[:116], target) }
+}
+
+// TestReplayQualifier148PrefixTipPow is A3 for PoW: canonical height 3 carries its expected target (the parent target,
+// below the first retarget) and fails PoW over all 148 bytes while its 116-byte prefix would pass; every other header
+// passes both verdicts. The published prefix tip is height 2, and neither the canonical tip nor a heavier received
+// branch from height 3 is eligible.
+func TestReplayQualifier148PrefixTipPow(t *testing.T) {
+	both := q148BothMeet(q148Half)
+	grow := func(s *q148Seq, n int) {
+		for range n {
+			s.pushWith(t, q148Half, s.times[len(s.times)-1]+2*TARGET_BLOCK_INTERVAL, both)
+		}
+	}
+	s := newQ148Seq(t, q148Half, 1<<30)
+	grow(s, 2)
+	s.pushWith(t, q148Half, s.times[2]+2*TARGET_BLOCK_INTERVAL, q148FullFailsPrefixMeets(q148Half))
+	if raw := s.headers[3]; q148Meets(raw[:], q148Half) || !q148Meets(raw[:116], q148Half) {
+		t.Fatal("A3 pow: height 3 must fail PoW at 148 and pass it over its 116-byte prefix")
+	}
+	grow(s, 2) // heights 4..5
+	w := newQ148World(t, s, 5, nil)
+	b := s.clone(3)
+	grow(b, 4) // heights 4..7
+	v := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[4:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.hashes[2], 2, s.work(t, 2), 5, "A3 pow")
 }
 
 // TestReplayQualifier148ForkF is A4 and A5: with an empty active index the anchor is Published[:148] (A4) or the
@@ -638,6 +678,12 @@ func TestReplayQualifier148ReceivedIneligible(t *testing.T) {
 		return b
 	}
 	excludedBranch := branch(q148Half, t0+10, true)
+	powBranch := s.clone(0)
+	powBranch.pushWith(t, q148Half, t0+10, q148FullFailsPrefixMeets(q148Half))
+	powBranch.pushWith(t, q148Half, t0+20, q148BothMeet(q148Half))
+	if raw := powBranch.headers[1]; q148Meets(raw[:], q148Half) || !q148Meets(raw[:116], q148Half) {
+		t.Fatal("R4 pow: height 1 must fail PoW at 148 and pass it over its 116-byte prefix")
+	}
 	orphan := q148Header(t, [32]byte{9}, q148Half, t0+10, q148Any)
 	for _, c := range []struct {
 		label   string
@@ -645,7 +691,7 @@ func TestReplayQualifier148ReceivedIneligible(t *testing.T) {
 		exclude *[32]byte
 	}{
 		{"target", q148Complete([][32]byte{branch(POW_LIMIT, t0+10, true).tip()}, branch(POW_LIMIT, t0+10, true).headers[1:]), nil},
-		{"pow", q148Complete([][32]byte{branch(q148Half, t0+10, false).tip()}, branch(q148Half, t0+10, false).headers[1:]), nil},
+		{"pow", q148Complete([][32]byte{powBranch.tip()}, powBranch.headers[1:]), nil},
 		{"mtp floor", q148Complete([][32]byte{branch(q148Half, t0, true).tip()}, branch(q148Half, t0, true).headers[1:]), nil},
 		{"ceiling", q148Complete([][32]byte{branch(q148Half, t0+MAX_FUTURE_DRIFT+1, true).tip()}, branch(q148Half, t0+MAX_FUTURE_DRIFT+1, true).headers[1:]), nil},
 		{"excluded descendant", q148Complete([][32]byte{excludedBranch.tip()}, excludedBranch.headers[1:]), &excludedBranch.hashes[1]},
