@@ -29,9 +29,53 @@ func TestRetainedImageMDBX(t *testing.T) {
 	}
 }
 
-func riGenesis(t *testing.T) (*btWorld, []byte, [32]byte) {
+// riNew qualifies the actual empty pair before any canonical fixture writes.
+func riNew(t *testing.T) *btWorld {
 	t.Helper()
 	w := btNew(t)
+	err, cached := w.s.StartupVerifyCanonicalV1(riEmptyPair)
+	logicalMDBXAssert(t, err == nil && !cached, "empty pair startup qualification: %v/%v", err, cached)
+	return w
+}
+
+// riEmptyPair returns completion only after inspecting both empty canonical roles.
+func riEmptyPair(r *mdbx.Reader) (mdbx.StartupCanonicalCompletionV1, error) {
+	a, present, err := r.ReadTreeAuthorityV1()
+	want := mdbx.TreeAuthorityV1{Authority: mdbx.StorageAuthorityV1{Version: 1, ActiveProfile: 1, ActiveGenerationID: 1, NextGenerationID: 5, Phase: 1, Lifecycle: 1}, LagGenerationID: 2}
+	if err != nil || !present || !reflect.DeepEqual(a, want) {
+		return 0, fmt.Errorf("empty pair authority mismatch: %w", err)
+	}
+	for _, g := range []uint64{1, 2} {
+		if err := riEmptyRole(r, g); err != nil {
+			return 0, err
+		}
+	}
+	return mdbx.StartupCanonicalActiveAndReplayCompleteV1, nil
+}
+
+// riEmptyRole checks the seeded empty binding, counter and both actual index keysets.
+func riEmptyRole(r *mdbx.Reader, g uint64) error {
+	root, present, err := r.ReadTreeRootBindingV1(g)
+	want := mdbx.RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}
+	if err != nil || !present || root != want {
+		return fmt.Errorf("empty role binding mismatch g%d: %w", g, err)
+	}
+	value, present, err := r.Get(mdbx.TreeSchemaV1DBIs()[0], btMeta(0x10, g))
+	if err != nil || !present || !bytes.Equal(value, make([]byte, 16)) {
+		return fmt.Errorf("empty role counter mismatch g%d: %w", g, err)
+	}
+	for _, rank := range []uint8{2, 7} {
+		row, found, err := r.StartupCanonicalNextV1(mdbx.TreeSchemaV1DBIs()[rank], g, nil)
+		if err != nil || found || !reflect.DeepEqual(row, mdbx.PrefixRow{}) {
+			return fmt.Errorf("empty canonical keyset mismatch g%d/rank%d: %w", g, rank, err)
+		}
+	}
+	return nil
+}
+
+func riGenesis(t *testing.T) (*btWorld, []byte, [32]byte) {
+	t.Helper()
+	w := riNew(t)
 	raw := initial148BlockGenesis(t)
 	r := btRequest(raw, 0)
 	r.Kind, r.Endpoint.CumulativeChainwork = 4, [40]byte{39: 1}
@@ -168,7 +212,7 @@ func riResource(t *testing.T, err error, resource string) *RetainedProofFailureV
 }
 
 func riControls(t *testing.T) {
-	w := btNew(t)
+	w := riNew(t)
 	var closed *mdbx.OperationAccount
 	logicalMDBXAssert(t, w.owner.WithOperation(mdbx.TreeOperation, func(a *mdbx.OperationAccount) error { closed = a; return nil }) == nil, "capture expired account")
 	var uninitialized retainedReadV1
@@ -233,7 +277,7 @@ func riControls(t *testing.T) {
 func riDomain(t *testing.T) {
 	for _, row := range []string{"NONE-recovery", "GC-recovery", "SIDE1440", "SIDE1441", "REPLAY-image", "ORDINARY-connect"} {
 		t.Run(row, func(t *testing.T) {
-			w := btNew(t)
+			w := riNew(t)
 			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 				switch row {
 				case "REPLAY-image":
@@ -369,28 +413,16 @@ func riOptional(t *testing.T) {
 		{"selected", false, true, false, 0},
 		{"selected", true, false, false, 0},
 		{"selected", true, true, true, 0},
-		{"selected+SIDE", true, true, false, 510},
-		{"selected-header-bad", true, true, false, 0},
-		{"detached-header-bad", true, true, false, 0},
+		{"detached+SIDE", true, true, false, 510},
 	} {
 		t.Run(fmt.Sprintf("%s/header%v/body%v/bad%v", row.kind, row.header, row.body, row.malformed), func(t *testing.T) {
 			kind := row.kind
-			if kind == "selected-header-bad" {
-				kind = "selected"
-			}
-			if kind == "detached-header-bad" {
-				kind = "detached"
-			}
-			w := btNew(t)
+			w := riNew(t)
 			raw := initial148BlockGenesis(t)
 			hash := sha3.Sum256(raw[:148])
 			var mutations []mdbx.Mutation
 			if row.header {
-				header := bytes.Clone(raw[:148])
-				if row.kind != kind {
-					header[140] ^= 1
-				}
-				mutations = append(mutations, btMutation(3, hash[:], header))
+				mutations = append(mutations, btMutation(3, hash[:], raw[:148]))
 			}
 			if row.body {
 				body := raw
@@ -399,12 +431,12 @@ func riOptional(t *testing.T) {
 				}
 				mutations = append(mutations, btMutation(4, hash[:], body))
 			}
-			if kind != "detached" {
+			if kind == "SIDE" || kind == "selected" {
 				key, _ := mdbx.HeightKey(3, 5)
 				mutations = append(mutations, btMutation(6, key, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})))
 			}
-			if kind == "selected+SIDE" {
-				key, _ := mdbx.HeightKey(4, 0)
+			if kind == "detached+SIDE" {
+				key, _ := mdbx.HeightKey(4, 5)
 				mutations = append(mutations, btMutation(6, key, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})))
 			}
 			if len(mutations) != 0 {
@@ -412,14 +444,14 @@ func riOptional(t *testing.T) {
 			}
 			encoded := riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 				switch kind {
-				case "selected", "selected+SIDE":
+				case "selected":
 					a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: hash, RowCount: 1, LogicalBytes: 298, CumulativeChainwork: [40]byte{39: 1}}
-					if kind == "selected+SIDE" {
-						a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 4}}}
-					}
-				case "detached":
+				case "detached", "detached+SIDE":
 					a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
 					a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 5, Hash: hash, BlockBytesLen: 298}}, Cursor: mdbx.AuthorityPointV1{Height: 5, BlockHash: hash}, EntryCount: 1, LogicalBytes: 298}
+					if kind == "detached+SIDE" {
+						a.Authority.Cleanup.Spans = append(a.Authority.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 4, FirstHeight: 5, LastHeight: 5, NextHeight: 5})
+					}
 				case "SIDE":
 					a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3, FirstHeight: 5, NextHeight: 5, LastHeight: 5}}}
 				}
@@ -436,7 +468,7 @@ func riOptional(t *testing.T) {
 				failure := riResource(t, err, resource)
 				if resource == "selected_damage" {
 					artifact := "body"
-					if !row.header || row.kind != kind {
+					if !row.header {
 						artifact = "header"
 					}
 					d := failure.Damage

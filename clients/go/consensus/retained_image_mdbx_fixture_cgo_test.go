@@ -27,6 +27,7 @@ func TestRetainedImageMDBXCommitOutcomes(t *testing.T) {
 	t.Run("D12-native-acquisition-frontiers", rifResources)
 	t.Run("D14-caller-unwind", rifUnwind)
 	t.Run("D5-detached-frontier", rifDetached)
+	t.Run("D5-D20-malformed-headers", rifMalformedHeaders)
 	t.Run("D8-role-origin", rifOrigins)
 	t.Run("D9-checked-pre-arithmetic", rifOverflow)
 	t.Run("D11-D14-D20-D27-first-source", rifSources)
@@ -138,10 +139,52 @@ func rifDetached(t *testing.T) {
 	}
 }
 
+// Corrupt the actual header row only after the healthy descriptor and body exist.
+func rifMalformedHeaders(t *testing.T) {
+	for _, kind := range []string{"selected-header-bad", "detached-header-bad"} {
+		t.Run(kind, func(t *testing.T) {
+			w := riNew(t)
+			hash, raw := rifBody(t, w, 0)
+			if kind == "selected-header-bad" {
+				key, _ := mdbx.HeightKey(3, 5)
+				w.pair(t, btMutation(6, key, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})))
+			}
+			encoded := riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+				if kind == "selected-header-bad" {
+					a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: hash, RowCount: 1, LogicalBytes: 298, CumulativeChainwork: [40]byte{39: 1}}
+					return
+				}
+				a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+				a.Authority.DetachedSuffix = &mdbx.DetachedSuffixV1{Entries: []mdbx.DetachedSuffixEntryV1{{Height: 5, Hash: hash, BlockBytesLen: 298}}, Cursor: mdbx.AuthorityPointV1{Height: 5, BlockHash: hash}, EntryCount: 1, LogicalBytes: 298}
+			})
+			header := bytes.Clone(raw[:148])
+			header[140] ^= 1
+			rifSeed(t, w, 3, hash[:], header)
+			var out rifResult
+			evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, hash[:], func() { out = rifRun(t, w, nil, "source") })
+			logicalMDBXAssert(t, harness != nil && harness.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && evidence.OldGets[4] == 0 && evidence.NodePulls == 0, "malformed header advanced to later source: %+v/%v", evidence, harness)
+			resource := "storage_capacity"
+			if kind == "selected-header-bad" {
+				resource = "selected_damage"
+			}
+			f := riResource(t, out.source, resource)
+			logicalMDBXAssert(t, f.Cause.Error() == "retained header is malformed" && out.image == (retainedPreImageV1{}), "header refusal cause or partial image: %+v/%v", out.image, out.source)
+			if resource == "selected_damage" {
+				d := f.Damage
+				logicalMDBXAssert(t, d.Generation == 3 && d.Height == 5 && d.Hash == hash && d.Artifact == "header" && d.Cause == f.Cause, "exact malformed selected header tuple: %+v", d)
+			}
+			out.native.want(t, 1, 1, -1)
+			logicalMDBXAssert(t, out.native.err == out.source && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldAborts == 1, "header refusal changed native outcome: %+v/%+v", out, evidence)
+			w.read(t, 0, []byte{2}, encoded)
+			rifOpen(t, w)
+		})
+	}
+}
+
 func rifOrigins(t *testing.T) {
 	for _, member := range []string{"chain", "genesis", "counter-envelope", "CURRENT-counter", "CURRENT-root", "LAG-counter", "LAG-root"} {
 		t.Run(member, func(t *testing.T) {
-			w := btNew(t)
+			w := riNew(t)
 			if member == "chain" || member == "genesis" {
 				var root mdbx.RootBindingV1
 				logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { var err error; root, _, err = r.ReadTreeRootBindingV1(2); return err }) == nil, "read origin source")
@@ -189,7 +232,7 @@ func rifOrigins(t *testing.T) {
 // These scalar-domain corruption controls make no complete-map or attained-store claim.
 func rifOverflow(t *testing.T) {
 	for _, entries := range []uint64{^uint64(0) / 56, ^uint64(0)/65596 + 1} {
-		w := btNew(t)
+		w := riNew(t)
 		rifSeed(t, w, 0, btMeta(0x10, 1), mdbx.LogicalCounterValue(^uint64(0), entries))
 		out := rifRun(t, w, nil, "source")
 		f := riResource(t, out.source, "storage_capacity")
@@ -205,7 +248,7 @@ func rifSeed(t *testing.T, w *btWorld, rank uint8, key, value []byte) {
 
 func rifWorld(t *testing.T, generations ...uint64) *btWorld {
 	t.Helper()
-	w := btNew(t)
+	w := riNew(t)
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{}
 		for _, g := range generations {
@@ -806,7 +849,7 @@ func rifSources(t *testing.T) {
 	}
 	for _, source := range []string{"SIDE-link-absent", "SIDE-link-malformed", "SIDE-link-IO"} {
 		t.Run(source, func(t *testing.T) {
-			w := btNew(t)
+			w := riNew(t)
 			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 				a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3}}}
 			})
@@ -1013,7 +1056,7 @@ func rifResources(t *testing.T) {
 	}
 	for _, share := range []uint64{15328255, 15328256} {
 		t.Run(fmt.Sprintf("whole-family-share%d", share), func(t *testing.T) {
-			w := btNew(t)
+			w := riNew(t)
 			hash := [32]byte{1}
 			rifFamily(t, w, hash, 5, 2, "113")
 			var charge uint64
