@@ -372,10 +372,13 @@ func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 		in, header := icbGenesisInputV1(t, -1)
 		native := errors.New("native writer failure after builder return")
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			var spent *blockSpentInputSource
 			out, err := icbEntryV1(parallel)(account, in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
 				verr := w.s.View(func(reader *mdbx.Reader) error {
 					result, verr := validate(reader)
 					logicalMDBXAssert(t, result != nil && verr == nil, "parallel=%v success: %v", parallel, verr)
+					spent = result.transition.spentInputs
+					logicalMDBXAssert(t, spent != nil && spent.raw != nil, "parallel=%v spent source live within run", parallel)
 					return verr
 				})
 				if verr != nil {
@@ -384,6 +387,7 @@ func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 				return native
 			})
 			logicalMDBXAssert(t, errors.Is(err, native) && out.attempted && out.validationErr == nil, "parallel=%v run error kept: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, reflect.DeepEqual(*spent, blockSpentInputSource{}), "parallel=%v unexhausted spent source discarded after run: %+v", parallel, *spent)
 			logicalMDBXAssert(t, out.required.derived && out.required.root == header.UtxoRoot, "parallel=%v D evidence kept: %+v", parallel, out.required)
 			// A fresh next invocation succeeds on the same account.
 			out2, delivered, _, err2 := icbValidateOnceV1(t, w, account, in, parallel)
