@@ -984,8 +984,10 @@ func TestInitial148CompleteBlockCapBoundaryV1(t *testing.T) {
 		{name: "draining-S1-equals-S0", opts: at, capFrom: icbCapHeightV1, counters: [2]uint64{maxLogicalStateBytes + 89*1000, icbCapMaxEntriesV1}},
 		{name: "below-bound-native", opts: at, capFrom: icbCapHeightV1},
 		{name: "inactive-malformed", opts: at, capFrom: icbCapHeightV1 + 1, counters: [2]uint64{1, 1}},
-		{name: "cap-exceeded-before-root", opts: icbH5OptsV1{height: icbCapHeightV1, split: true, flip: 1}, capFrom: icbCapHeightV1, counters: stable,
-			code: BLOCK_ERR_STATE_CAP_EXCEEDED, msg: "logical state cap exceeded"},
+		{
+			name: "cap-exceeded-before-root", opts: icbH5OptsV1{height: icbCapHeightV1, split: true, flip: 1}, capFrom: icbCapHeightV1, counters: stable,
+			code: BLOCK_ERR_STATE_CAP_EXCEEDED, msg: "logical state cap exceeded",
+		},
 	} {
 		icbH5RunCaseV1(t, c)
 	}
