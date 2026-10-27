@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"reflect"
 	"runtime"
 	"slices"
@@ -101,6 +102,10 @@ func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
 	entry := unsafe.Sizeof(Outpoint{}) + unsafe.Sizeof(UtxoEntry{})
 	task := unsafe.Sizeof(sigCheckTask{})
 	logicalMDBXAssert(t, entry <= 256 && task <= 256, "typed sizes entry=%d task=%d", entry, task)
+	// block_steps_1_12.go: blockStepsDA allocates one step12DARecord per
+	// non-zero TxKind transaction (blockStepsPass.account), so at most n
+	// records, each within the census's 64-byte typed size.
+	logicalMDBXAssert(t, unsafe.Sizeof(step12DARecord{}) <= 64, "DA record size %d", unsafe.Sizeof(step12DARecord{}))
 	// The fixed allowance covers the pinned Simplicity live memory and frame.
 	logicalMDBXAssert(t, 1_048_576+65_536 < 16_777_216, "fixed allowance")
 }
@@ -1321,12 +1326,21 @@ func icbDiscardRunV1(w *btWorld, account *mdbx.OperationAccount, in initial148Co
 }
 
 // icbPendingDiscardV1 (C09 discard) rejects opts plus tx1's pending invalid
-// signature through every entry, then on the same account: the whole lane is
-// free again (W, R and source released), and a fresh invocation of the valid
-// block over the same parent succeeds with fresh D.
+// signature through every entry, with the tuple of icbRefusedDiscardV1.
 func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 	t.Helper()
 	opts.badSig = true
+	icbRefusedDiscardV1(t, name, opts, TX_ERR_SIG_INVALID, "CORE_P2PK signature invalid")
+}
+
+// icbRefusedDiscardV1 rejects opts through every entry with the exact bare
+// TxError code/msg, no delivered result and no D; then on the same account
+// the whole lane is free again (W, R and source released), and a fresh
+// invocation of the valid block over the same parent succeeds with fresh D,
+// exactly its own fees (20) and created set: no nonce, fee or candidate
+// effect of the refused invocation survives.
+func icbRefusedDiscardV1(t *testing.T, name string, opts icbH5OptsV1, code ErrorCode, msg string) {
+	t.Helper()
 	for _, workers := range []int{-1, 1, 4} {
 		w := btNew(t)
 		bad := icbH5VariantV1(t, w, opts)
@@ -1335,14 +1349,36 @@ func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			out, delivered, err := icbDiscardRunV1(w, account, bad.in, workers)
 			var txErr *TxError
-			exact := errors.As(err, &txErr) && any(txErr) == any(err) && txErr.Code == TX_ERR_SIG_INVALID && txErr.Msg == "CORE_P2PK signature invalid"
+			exact := errors.As(err, &txErr) && any(txErr) == any(err) && txErr.Code == code && txErr.Msg == msg
 			logicalMDBXAssert(t, exact && !delivered && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d rejected tuple: %v / %+v", name, workers, err, out)
 			free := account.WithReservation(402_653_184, func() error { return nil })
 			logicalMDBXAssert(t, free == nil, "%s workers=%d residual hold after rejection: %v", name, workers, free)
-			out, delivered, err = icbDiscardRunV1(w, account, good.in, workers)
-			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
+			var fees Uint128
+			var created map[Outpoint]UtxoEntry
+			run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				return w.s.View(func(reader *mdbx.Reader) error {
+					result, verr := validate(reader)
+					if result != nil {
+						fees, created = result.transition.sumFees, maps.Clone(result.transition.createdUtxos)
+					}
+					return verr
+				})
+			}
+			out, err = icbEntryWorkersV1(workers)(account, good.in, run)
+			logicalMDBXAssert(t, err == nil && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
+			if !opts.vault && opts.simplicity == 0 {
+				logicalMDBXAssert(t, fees == (Uint128{Lo: 20}) && reflect.DeepEqual(created, good.created), "%s workers=%d refused effects leaked: fees=%+v created=%+v", name, workers, fees, created)
+			}
 		})
 	}
+}
+
+// TestInitial148CompleteBlockAcceptedRollbackH5 (C06 candidate rollback)
+// refuses tx2 (sum_out exceeds sum_in) after tx1 was accepted into the
+// candidate: the exact conservation error, no result and no D, and the
+// fresh valid invocation on the same account and parent is unaffected.
+func TestInitial148CompleteBlockAcceptedRollbackH5(t *testing.T) {
+	icbRefusedDiscardV1(t, "tx2-refused-after-tx1-accepted", icbH5OptsV1{overspend: true, flip: 1}, TX_ERR_VALUE_CONSERVATION, "sum_out exceeds sum_in")
 }
 
 // TestInitial148CompleteBlockDiscardH5 (C09 discard) is the duplicate-spend
