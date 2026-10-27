@@ -805,3 +805,49 @@ func TestReplayTreeEntryAccountFitMaximal(t *testing.T) {
 	logicalMDBXAssert(t, out.Err == nil && out.Truth == mdbx.CommitTruthNew && out.Result == "", "X2 maximal: %+v", out)
 	logicalMDBXAssert(t, bytes.Equal(rtImageRow(t, w.btWorld, []byte{2}), full), "X2 maximal: the committed envelope is not the maximal plan")
 }
+
+// E10 (genesis first), D2 (entry): a complete published genesis at NONE/STABLE/PRE_GENESIS (empty active index) is the
+// baseline genesis-first decision with no inventory, no Q5 and no ProtectV1; a meta key 2 absence whose census finds a
+// row is TERMINAL_STORE_INTEGRITY(canonical)/OLD at PREWRITE before any inventory (the image does not reopen, so its
+// zero mutation is the engine's OLD/PREWRITE truth, as in TestReplayTreeDirectAbsence).
+func TestReplayTreeEntryGenesisFirst(t *testing.T) {
+	w, s, view := rtEntryWorld(t, nil)
+	w.g.Published = append(bytes.Clone(s.headers[0][:]), make([]byte, 118)...)
+	hash, err := BlockHash(w.g.Published[:BLOCK_HEADER_BYTES])
+	logicalMDBXAssert(t, err == nil, "genesis hash: %v", err)
+	w.g.GenesisHash, w.g.ChainID = hash, sha3.Sum256(append([]byte("RUBIN-GENESIS-v1"), w.g.Published...))
+	image := rtImage(t, w.btWorld)
+	out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+	logicalMDBXAssert(t, out.Err == nil && out.Decision == replayEntryGenesisFirst && view.limits == nil && view.versions == nil && view.releases == 0,
+		"E10 genesis first: %+v view %+v", out, view)
+	rtRefused(t, out, "", image, rtImage(t, w.btWorld), "E10 genesis first")
+	d2 := rtNew(t, mdbx.TreeAuthorityV1{}, btMutation(0, btMeta(0x10, 1), make([]byte, 16)))
+	view = &q148View{}
+	out = NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}).EnterReplayTargetMDBX(d2.s, d2.owner)
+	var engine *mdbx.EngineError
+	logicalMDBXAssert(t, out.Result == selectedSideIntegrity && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.CanonicalTruth == "OLD" &&
+		out.Replay == nil && out.Decision == "" && errors.As(out.Err, &engine) && engine.Class == mdbx.EngineIntegrity && view.limits == nil, "D2 entry: %+v", out)
+}
+
+// E9(a) aggregate remainder: competing charges leave the owner (at MinReservationLimit) a remainder below OWN, so the
+// OWN charge is refused and the denied UpdateTreeV1 runs the gates; at a remainder of OWN-1 the identity-page charge is
+// admitted and the H>0 identity decides not eligible, at a remainder below that charge it is refused (capacity). No
+// Q5, no ProtectV1 and no write either way.
+func TestReplayTreeEntryCapacityRemainder(t *testing.T) {
+	for remainder, want := range map[uint64][2]string{replayTreeOwnBytes - 1: {"", replayEntryNotEligible}, replayEntryIdentityBytes - 1: {selectedSideCapacity, ""}} {
+		s := q148Slow(t, 5)
+		w := newQ148World(t, s, 5, nil)
+		view := &q148View{}
+		owner, err := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit)
+		logicalMDBXAssert(t, err == nil, "owner: %v", err)
+		image := rtImage(t, w.btWorld)
+		var out ReplayEntryOutcomeV1
+		rtCharges(t, owner, mdbx.MinReservationLimit-remainder, func() {
+			out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, owner)
+		})
+		label := fmt.Sprintf("E9(a) remainder %d", remainder)
+		logicalMDBXAssert(t, out.Err == nil && out.Decision == want[1], "%s: %+v", label, out)
+		rtRefused(t, out, want[0], image, rtImage(t, w.btWorld), label)
+		logicalMDBXAssert(t, view.limits == nil && view.versions == nil, "%s: Q5 ran", label)
+	}
+}

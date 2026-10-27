@@ -1522,11 +1522,13 @@ func TestReplayEntryPlanShape(t *testing.T) {
 		slices.EqualFunc(keys(batch.Consulted), want(0, 1, 7, 8), bytes.Equal), "planned Batch DBIs and Consulted: %+v", batch)
 }
 
-// H27 (placement only; the timing is R11's): every occurrence of ProtectV1, qualifyAndPlan, plan, runRelease and release in
-// replay_entry_mdbx_cgo.go (comments excluded) is classified by enclosing declaration, function-literal and block nesting,
-// the innermost statement holding a call, and role (a go statement marks every occurrence in it), and the census equals the
-// H27 placements exactly; the clear precedes the invocation, and the deferred (plain) runRelease precedes (follows) both
-// Store.Update calls that take plan.
+// H27 (placement only; the timing is R11's): every occurrence of ProtectV1, qualifyAndPlan, plan, runRelease, release and
+// treeEnter in replay_entry_mdbx_cgo.go (comments excluded) is classified by enclosing declaration, function-literal and
+// block nesting, the innermost statement holding a call, and role (a go statement marks every occurrence in it), and the
+// census equals the H27 placements exactly; the clear precedes the invocation, and the deferred (plain) runRelease
+// precedes (follows) all three commit calls: both Store.Update calls that take plan and the format-3 treeEnter call. The
+// format-3 entry route functions in replay_tree_route_mdbx_cgo.go contain no ProtectV1, runRelease, release, defer or go
+// (selector_closure), so the release stays owned by EnterReplayTargetMDBX.
 func TestReplayEntryProtectPlacement(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "replay_entry_mdbx_cgo.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "parse: %v", err)
@@ -1562,8 +1564,43 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 	clear, invoke := pos["runRelease: nested = lhs nil release"], pos["runRelease: nested call *ast.ExprStmt release"]
 	logicalMDBXAssert(t, clear > 0 && invoke > 0 && clear < invoke, "clear %d before invocation %d", clear, invoke)
 	deferred, plain := at("call *ast.DeferStmt runRelease"), at("call *ast.ExprStmt runRelease")
-	logicalMDBXAssert(t, deferred > 0 && first > 0 && deferred < first, "deferred runRelease %d before both Updates %d", deferred, first)
-	logicalMDBXAssert(t, plain > 0 && first > 0 && last < plain, "plain runRelease %d after both Updates %d", plain, last)
+	logicalMDBXAssert(t, deferred > 0 && first > 0 && deferred < first, "deferred runRelease %d before the three commit calls %d", deferred, first)
+	logicalMDBXAssert(t, plain > 0 && first > 0 && last < plain, "plain runRelease %d after the three commit calls %d", plain, last)
+	replayTreeRouteNoRelease(t)
+}
+
+// replayTreeRouteNoRelease asserts that each format-3 entry route function of replay_tree_route_mdbx_cgo.go exists and
+// holds no ProtectV1, runRelease or release identifier and no defer or go statement.
+func replayTreeRouteNoRelease(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "replay_tree_route_mdbx_cgo.go", nil, 0)
+	logicalMDBXAssert(t, err == nil, "parse route: %v", err)
+	route := []string{
+		"replayTreeStoreRefused", "replayTreeRefused", "treeEnter", "treePlan", "treeBatch", "treeQualified", "treeEntryBatch",
+		"replayTreeEntryRows", "treeTargetRoot", "replayTreeEncode", "replayTreeOperation", "replayTreeNonPair",
+	}
+	found := map[string]string{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !slices.Contains(route, fn.Name.Name) {
+			continue
+		}
+		found[fn.Name.Name] = ""
+		ast.Inspect(fn, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.DeferStmt, *ast.GoStmt:
+				found[fn.Name.Name] += fmt.Sprintf(" %T", x)
+			case *ast.Ident:
+				if slices.Contains([]string{"ProtectV1", "runRelease", "release"}, x.Name) {
+					found[fn.Name.Name] += " " + x.Name
+				}
+			}
+			return true
+		})
+	}
+	logicalMDBXAssert(t, len(found) == len(route), "route functions missing: %v", found)
+	for name, hits := range found {
+		logicalMDBXAssert(t, hits == "", "route function %s holds%s", name, hits)
+	}
 }
 
 // replayPlacement classifies the identifier on top of stack as "declaration: [go] [literal]... [nested] role name".

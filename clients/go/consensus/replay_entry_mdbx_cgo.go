@@ -154,9 +154,14 @@ type replayEntryCall struct {
 	release      func()
 }
 
-// EnterReplayTargetMDBX runs sources (b), (d) and (e), selected by the persisted authority, under one full-lane grant
-// around one Store.Update; on the owner's exact capacity refusal one grant-free control-only Update evaluates the
-// step-1 gates. The release ProtectV1 returned runs exactly once after Store.Update returns, panic included.
+// EnterReplayTargetMDBX runs sources (b), (d) and (e), selected by the persisted authority. On a format-2 store it runs
+// under one full-lane grant around one Store.Update; on the owner's exact capacity refusal one grant-free control-only
+// Update evaluates the step-1 gates. On a format-3 store, selected only by Store.Update's exact tree-store refusal
+// (which is consumed), it opens one LaneOperation account, takes the OWN evidence charge (replayTreeOwnBytes) on it
+// and makes one pair-only UpdateTreeV1 whose plan runs with lane OWN (inventory share replayInvLimit148(OWN)); on the
+// owner's exact capacity refusal of OWN one UpdateTreeV1 on the same account evaluates the step-1 gates with the
+// identity-page charge taken on that account and decides the denied refusal (a persisted REPLAY still resumes). The
+// release ProtectV1 returned runs exactly once after the last of these commit calls returns, panic included.
 func (o *ReplayEntryOwnerV1) EnterReplayTargetMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if err := replayEntryContext(o.genesis); err != nil {

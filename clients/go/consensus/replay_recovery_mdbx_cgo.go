@@ -156,9 +156,13 @@ func replayRecoveryAuthorityBatch(literal []byte, consulted []mdbx.ConsultedRow)
 }
 
 // PlanDirectReplayEntryMDBX plans the direct header-qualified replay-target entry on NONE/STABLE with no selected side
-// and a positive-height active identity (MP 1704-1706, 2618-2639) through the merged inventory, walk, selection,
-// protection and entry plan with the inventory share invLimit(limit). The release is non-nil exactly when ProtectV1
-// returned one; the caller runs it exactly once after its Update.
+// and a positive-height active identity (MP 1704-1706, 2618-2639). On a format-2 Reader it runs the merged inventory,
+// walk, selection, protection and entry plan with the inventory share replayInvLimit(limit) after the minimum share
+// replayRecoveryMinBytes. On a format-3 Reader, selected only by ReadStorageAuthorityV1's exact tree-Reader refusal, it
+// reads the TreeAuthorityV1 envelope, requires the minimum share replayRecoveryMin148Bytes (M148), and runs the 148
+// qualification with the inventory share replayInvLimit148(limit), the two-allocation sequence check and the format-3
+// entry plan, whose Batch the caller commits through one pair-only UpdateTreeV1, never Store.Update. The release is
+// non-nil exactly when ProtectV1 returned one; the caller runs it exactly once after its commit call.
 func (o *ReplayEntryOwnerV1) PlanDirectReplayEntryMDBX(reader *mdbx.Reader, limit uint64) (ReplayRecoveryPlanV1, func(), error) {
 	a, proceed, plan, err := o.directEntryGates(reader, limit)
 	if !proceed && replayTreeRefused(err, replayTreeReaderRefusal) {
@@ -172,8 +176,10 @@ func (o *ReplayEntryOwnerV1) PlanDirectReplayEntryMDBX(reader *mdbx.Reader, limi
 	return plan, call.release, err
 }
 
-// directEntryGates is (h1)-(h6): context, LANE_MAX, authority, domain, minimum share and the step-1 identity page;
-// proceed is true only for NONE/STABLE with no selected side and an H>0 identity.
+// directEntryGates is the format-2 (h1)-(h6): context, LANE_MAX, authority, domain, the minimum share
+// replayRecoveryMinBytes and the step-1 identity page; proceed is true only for NONE/STABLE with no selected side and an
+// H>0 identity. On a tree Reader it returns the authority read's tree-Reader refusal, and replayTreeDirect applies the
+// format-3 gates with the minimum share replayRecoveryMin148Bytes.
 func (o *ReplayEntryOwnerV1) directEntryGates(reader *mdbx.Reader, limit uint64) (mdbx.StorageAuthorityV1, bool, ReplayRecoveryPlanV1, error) {
 	a, done, err := o.replayRecoveryGates(reader, limit)
 	switch {

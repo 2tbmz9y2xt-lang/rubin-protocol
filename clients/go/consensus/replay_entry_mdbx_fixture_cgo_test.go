@@ -694,3 +694,33 @@ func TestReplayTreeFixtureEntryCallbackEIO(t *testing.T) {
 			reflect.ValueOf(plan).IsZero() && reflect.ValueOf(batch).IsZero() && view.limits == nil && view.versions == nil, "%s: %v decision %q result %q plan %+v", c.label, got, call.decision, call.result, plan)
 	}
 }
+
+// E8 (write snapshot): the consulted envelope row drifts before the UpdateTreeV1 write begin: STALE_LOCAL_PLAN/OLD with
+// the raw StateMismatch before the write begin.
+func TestReplayTreeFixtureEntrySnapshotDrift(t *testing.T) {
+	w, _, view := rtEntryWorld(t, nil)
+	var out ReplayEntryOutcomeV1
+	drift, err := mdbx.FixtureWriteSnapshotDrift(w.s, 0, []byte{2}, func() { out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner) })
+	logicalMDBXAssert(t, err == nil && drift == 1 && out.Result == replayEntryStale && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite &&
+		out.CanonicalTruth == "OLD" && out.Replay == nil, "E8 drift: %d %v %+v", drift, err, out)
+	replayEngineClass(t, out.Err, mdbx.EngineStateMismatch, "E8 drift")
+	logicalMDBXAssert(t, len(view.versions) == 1 && view.releases == 1, "E8 drift: ProtectV1 %v releases %d", view.versions, view.releases)
+	// The drifted 0x7f envelope latches the Store and is not a legal tree image, so neither a readback nor a reopen is
+	// available; zero mutation is the engine's OLD/PREWRITE truth for a refusal before the write begin.
+}
+
+// D1 (direct entry): an undecodable envelope (version 2) is TERMINAL_STORE_INTEGRITY with an empty ReadResource and no
+// plan, Q5 or ProtectV1.
+func TestReplayTreeFixtureDirectIntegrity(t *testing.T) {
+	legal, err := rtStable().Encode()
+	logicalMDBXAssert(t, err == nil, "encode: %v", err)
+	w, _, view := rtEntryWorld(t, nil)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, append([]byte{2}, legal[1:]...)) == nil, "D1 seed")
+	err = w.s.View(func(r *mdbx.Reader) error {
+		plan, release, perr := NewReplayEntryOwnerV1(view, w.g).PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+		replayEngineClass(t, perr, mdbx.EngineIntegrity, "D1 direct")
+		logicalMDBXAssert(t, release == nil && reflect.ValueOf(plan).IsZero() && recoveryClass(perr, plan.ReadResource) == selectedSideIntegrity, "D1 direct: %+v %v", plan, perr)
+		return nil
+	})
+	logicalMDBXAssert(t, view.limits == nil && view.versions == nil, "D1 direct: Q5 ran (view err %v)", err)
+}
