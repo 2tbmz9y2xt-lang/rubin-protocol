@@ -289,13 +289,13 @@ func replayTreeEntryRows(literal, root []byte, n uint64) []mdbx.Mutation {
 func (c *replayEntryCall) treeTargetRoot(reader *mdbx.Reader, active uint64, target mdbx.RecoveryTargetV1) ([]byte, error) {
 	c.step = selectedSideCanonical
 	binding, present, err := reader.ReadTreeRootBindingV1(active)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, err
-	case !present:
-		return nil, &selectedSideFailure{result: selectedSideIntegrity, cause: errors.New("active CURRENT root binding absent")}
 	}
 	c.step = ""
+	if !present {
+		return nil, &selectedSideFailure{result: selectedSideIntegrity, cause: errors.New("active CURRENT root binding absent")}
+	}
 	root := mdbx.RootBindingV1{
 		DatabaseID: binding.DatabaseID, CommitmentVersion: 1, ChainID: target.ChainID, GenesisHash: target.GenesisHash,
 		Endpoint: mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointPreGenesisV1}, RootDigest: sha3.Sum256([]byte(canonicalUTXOEmptyDomain)),

@@ -799,6 +799,28 @@ func TestReplayTreeDirectEntry(t *testing.T) {
 	logicalMDBXAssert(t, reflect.DeepEqual(plan.Batch.Consulted, replayEntryConsulted(1, 5)), "direct consulted")
 }
 
+// D5 (direct entry): the active CURRENT binding absent is a decided integrity refusal, so ReadResource is empty.
+func TestReplayTreeDirectBindingAbsent(t *testing.T) {
+	s := q148Slow(t, 5)
+	w := newQ148World(t, s, 5, nil)
+	b := s.clone(2)
+	b.extend(t, 5, 3*TARGET_BLOCK_INTERVAL, false)
+	rtSet(t, w.btWorld, rtStable(), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: btMeta(0x11, 1), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	view := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[3:])}
+	ran := false
+	_ = w.s.View(func(r *mdbx.Reader) error { // the integrity refusal latches the Store
+		plan, release, perr := NewReplayEntryOwnerV1(view, w.g).PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+		logicalMDBXAssert(t, reflect.ValueOf(plan.Batch).IsZero() && perr != nil, "D5 direct: %+v %v", plan, perr)
+		logicalMDBXAssert(t, plan.ReadResource == "" && recoveryClass(perr, plan.ReadResource) == selectedSideIntegrity, "D5 direct read class: %q %v", plan.ReadResource, perr)
+		// D5 follows Q5's ProtectV1, so the release is non-nil and the caller runs it once.
+		logicalMDBXAssert(t, release != nil, "D5 direct: nil release after ProtectV1")
+		release()
+		ran = true
+		return nil
+	})
+	logicalMDBXAssert(t, ran && len(view.limits) == 1 && view.releases == 1, "D5 direct: Q5 limits %v releases %d", view.limits, view.releases)
+}
+
 // D4, D2 (direct entry): exact-empty absence is no plan and no error; a non-empty absence is integrity; neither reads
 // the view.
 func TestReplayTreeDirectAbsence(t *testing.T) {
