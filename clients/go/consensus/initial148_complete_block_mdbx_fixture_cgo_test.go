@@ -66,7 +66,7 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 				continue
 			}
 			logicalMDBXAssert(t, counts.Faults == 1 && !errors.As(verr, &txErr), "%s workers=%d unavailable became %v (faults %d)", c.name, workers, verr, counts.Faults)
-			btfEngine(t, got.out.required.cause, "get", mdbx.EngineIO, 5, "error 5")
+			_ = btfEngine(t, got.out.required.cause, "get", mdbx.EngineIO, 5, "error 5")
 			logicalMDBXAssert(t, (any(verr) == any(got.out.required.cause) || icbWrapsCauseV1(verr, got.out.required.cause)) && !got.out.required.derived && got.out.required.root == ([32]byte{}), "%s workers=%d raw cause tuple: %v / %+v", c.name, workers, verr, got.out.required)
 		}
 		w := btNew(t)
