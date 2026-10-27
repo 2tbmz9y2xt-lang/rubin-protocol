@@ -123,7 +123,9 @@ func rifDetached(t *testing.T) {
 			var out rifResult
 			var evidence mdbx.SelectedDamageEvidence
 			var harness error
+			nodePulls := uint64(1)
 			if malformed {
+				nodePulls = 0
 				rifSeed(t, w, 4, z[:], body[:149])
 				evidence, harness = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 3, y[:], func() { out = rifRun(t, w, nil, "source") })
 				riResource(t, out.source, "storage_capacity")
@@ -132,7 +134,7 @@ func rifDetached(t *testing.T) {
 				evidence, harness = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageStartupPullEIO, 5, z[:], func() { out = rifRun(t, w, nil, "source") })
 				logicalMDBXAssert(t, out.source == nil && out.image.exactRet == 956 && evidence.OldPulls[5] == 0, "detached charged undo or lost row: %+v/%v", out.image, out.source)
 			}
-			logicalMDBXAssert(t, harness != nil && harness.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && evidence.NodePulls == 0, "detached order/undo frontier: %+v/%v", evidence, harness)
+			logicalMDBXAssert(t, harness != nil && harness.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && evidence.NodePulls == nodePulls && evidence.OldPulls[5] == 0, "detached order/undo frontier: %+v/%v", evidence, harness)
 			w.read(t, 0, []byte{2}, encoded)
 			rifOpen(t, w)
 		})
@@ -412,21 +414,23 @@ func rifKinds(t *testing.T) {
 		})
 	}
 	t.Run("partial-remnants202-100-68-0", func(t *testing.T) {
-		w := rifWorld(t, 3)
 		leaf, _ := mdbx.TreeNodeKey(3, mdbx.TreeNodeIDV1{Kind: 1, Depth: 288})
 		branch, _ := mdbx.TreeNodeKey(3, mdbx.TreeNodeIDV1{Kind: 2})
 		root := btMeta(0x11, 3)
-		for _, key := range [][]byte{leaf, branch} {
-			rifSeed(t, w, 8, key, []byte{1})
-		}
-		rifSeed(t, w, 0, root, []byte{1})
+		// Each raw presence image has its own startup-qualified active roles.
 		for _, step := range []struct {
-			rank uint8
-			key  []byte
+			mask uint8
 			want uint64
-		}{{0, nil, 266}, {8, branch, 164}, {0, root, 132}, {8, leaf, 64}} {
-			if step.key != nil {
-				logicalMDBXAssert(t, mdbx.FixtureStartupDeleteRow(w.s, step.rank, step.key) == nil, "remove exactly one partial term")
+		}{{7, 266}, {5, 164}, {1, 132}, {0, 64}} {
+			w := rifWorld(t, 3)
+			for _, term := range []struct {
+				mask uint8
+				rank uint8
+				key  []byte
+			}{{1, 8, leaf}, {2, 8, branch}, {4, 0, root}} {
+				if step.mask&term.mask != 0 {
+					rifSeed(t, w, term.rank, term.key, []byte{1})
+				}
 			}
 			out := rifRun(t, w, nil, "source")
 			logicalMDBXAssert(t, out.source == nil && out.image.exactRet == step.want && out.image.complete[0] == (retainedCompleteV1{3, true}), "actual remaining202/100/68/0: %+v/%v want%d", out.image, out.source, step.want)
@@ -742,7 +746,9 @@ func rifUndo(t *testing.T) {
 					logicalMDBXAssert(t, f.Cause.Error() == "retained undo family is absent or incomplete", "maximum manifest rejected before whole-family count: %v", f.Cause)
 				}
 				if row.spent == 414635 {
-					logicalMDBXAssert(t, f.Cause.Error() == "invalid cleanup canonical undo", "oversized manifest reached later family slot: %v", f.Cause)
+					failure, ok := f.Cause.(*selectedSideFailure)
+					logicalMDBXAssert(t, ok && failure != nil && failure.result == "TERMINAL_STORE_INTEGRITY(canonical)" && failure.cause != nil && failure.cause.Error() == "invalid cleanup canonical undo", "oversized manifest lost source wrapper: %T %v", f.Cause, f.Cause)
+					logicalMDBXAssert(t, failure.Error() == "TERMINAL_STORE_INTEGRITY(canonical): invalid cleanup canonical undo" && any(failure.Unwrap()) == any(failure.cause) && any(f.Unwrap()) == any(failure), "oversized manifest changed source cause: %v", f.Cause)
 				}
 			}
 			rifOpen(t, w)
