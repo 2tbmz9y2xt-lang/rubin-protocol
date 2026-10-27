@@ -1188,7 +1188,7 @@ func icbUpdateTreeH5V1(t *testing.T, w *btWorld, f icbH5V1, parallel bool) icbUp
 // at every call.
 func (got icbUpdateTreeV1) check(t *testing.T, f icbH5V1, name string, runErr error, want [3]int) {
 	t.Helper()
-	logicalMDBXAssert(t, got.err == runErr && got.out.attempted && got.out.validationErr == nil && got.out.required.root == f.header.UtxoRoot, "%s composed acceptance: %v / %+v", name, got.err, got.out)
+	logicalMDBXAssert(t, any(got.err) == any(runErr) && got.out.attempted && got.out.validationErr == nil && got.out.required.root == f.header.UtxoRoot, "%s composed acceptance: %v / %+v", name, got.err, got.out)
 	logicalMDBXAssert(t, got.badWindow == 0, "%s native source window length differs from 65536 (%d)", name, got.badWindow)
 	got.native.want(t, 2, 3, -1)
 	logicalMDBXAssert(t, got.calls.calls == want, "%s source calls per position %v, want %v", name, got.calls.calls, want)
