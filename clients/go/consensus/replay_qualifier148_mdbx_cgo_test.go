@@ -164,7 +164,7 @@ func TestReplayQualifier148Anchor(t *testing.T) {
 		g.GenesisHash = q148Hash(gh[:])
 		q := q148Qualifier(g, nil, gh)
 		if c.published {
-			g.Published = append(gh[:], make([]byte, 118)...) // 266 bytes, as the context check admits
+			g.Published = append(gh[:], make([]byte, 118)...) // 266 bytes meeting the Q4 precondition (the 148 context check is RUB-1627's)
 			q = q148Qualifier(g, nil)
 		}
 		q.anchor()
@@ -410,7 +410,7 @@ func TestReplayQualifier148Tie(t *testing.T) {
 }
 
 // TestReplayQualifier148PrefixTip is A3: canonical height 3 declares a target other than its expected one; the
-// published prefix tip is height 2 and a heavier received branch below the bad header is ineligible.
+// published prefix tip is height 2 and a heavier received branch descending from the bad header is ineligible.
 func TestReplayQualifier148PrefixTip(t *testing.T) {
 	s := q148Slow(t, 2)
 	s.push(t, q148Half, s.times[2]+2*TARGET_BLOCK_INTERVAL, true)
@@ -550,6 +550,9 @@ func TestReplayQualifier148View(t *testing.T) {
 func TestReplayQualifier148CanonicalDefects(t *testing.T) {
 	s := q148Slow(t, 2)
 	other := newQ148Seq(t, POW_LIMIT, 1<<30+1) // a different genesis
+	// side is a height-2 header whose PrevBlockHash skips height 1.
+	side := q148Header(t, s.hashes[0], s.targets[2], s.times[2], q148Any)
+	sideHash := q148Hash(side[:])
 	key := func(h uint64) []byte { k, _ := mdbx.HeightKey(1, h); return k }
 	for _, c := range []struct {
 		label, message string
@@ -582,9 +585,15 @@ func TestReplayQualifier148CanonicalDefects(t *testing.T) {
 			}
 			return rows
 		}},
-		{"stored parent", "replay canonical header linkage mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+		{"stored parent differs from PrevBlockHash", "replay canonical header linkage mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
 			if h == 2 {
 				rows[1] = btMutation(2, key(2), mdbx.ChainValue(s.hashes[2], s.hashes[0], s.work(t, 2)))
+			}
+			return rows
+		}},
+		{"stored parent equals PrevBlockHash, differs from the previous entry", "replay canonical header linkage mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 2 {
+				return []mdbx.Mutation{btMutation(3, bytes.Clone(sideHash[:]), bytes.Clone(side[:])), btMutation(2, key(2), mdbx.ChainValue(sideHash, s.hashes[0], s.work(t, 2))), q148Owner(sideHash, 2)}
 			}
 			return rows
 		}},
@@ -680,6 +689,14 @@ func TestReplayQualifier148AnchorIneligible(t *testing.T) {
 			continue
 		}
 		out.decided(t, replayEntryRecovery, 0, "R6 "+c.label)
+		if c.exclude {
+			continue
+		}
+		q := q148Qualifier(w.g, nil) // the anchor's own ineligibility, apart from the child's target check
+		q.anchor()
+		if q.badFrom != 0 || q.work.Cmp(big.NewInt(1)) != 0 || q.target != c.target {
+			t.Fatalf("R6 %s anchor: badFrom %d work %v target %x, want 0, 1, %x", c.label, q.badFrom, &q.work, q.target, c.target)
+		}
 	}
 }
 
