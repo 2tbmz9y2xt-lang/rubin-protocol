@@ -3,8 +3,15 @@
 package consensus
 
 import (
+	"bytes"
+	"crypto/sha3"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"reflect"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -459,5 +466,320 @@ func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
 				return nil
 			}) == nil, "pre-hold")
 		})
+	}
+}
+
+// icbKeyDERV1 is a 54-byte seed-only ML-DSA-87 PKCS#8 key (seed = repeat(a5, 32)),
+// so every fixture txid and wtxid below is deterministic.
+const icbKeyDERV1 = "3034020100300b060960864801650304031304228020" +
+	"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+
+// icbFinalRootHexV1 is CSM 2.6 Root of the final map {C, cb:0, tx2:0}, computed
+// independently from the section 2.6 text over the literal leaf bytes.
+// icbHeightV1 block at height 5 spends rows of an Applied parent at height 4.
+// already_generated(5) = sum of block_subsidy(1..4) and already_generated(6)
+// under L1 section 19.1 (MINEABLE_CAP 4.9e15, shift 20, tail 19,025,875).
+const (
+	icbHeightV1       = 5
+	icbGenerated5V1   = 18_691_989_860
+	icbGenerated6V1   = 23_364_976_184
+	icbFinalRootHexV1 = "2a7a92ce203c7af8d45e4deb964bd2d15ea7f22c02405f2ee7ad738ac51153de"
+)
+
+// icbH5V1 is the h>0 fixture: seeded parent rows C (coinbase, immature),
+// A and B (P2PK to the fixture key); block txs cb, tx1 (A -> O1) and
+// tx2 (O1 + B -> O2). Final map: C, cb:0, tx2:0. Absent: A, B, the in-block
+// created-then-spent O1 and the nonspendable cb:1 anchor.
+type icbH5V1 struct {
+	in                        initial148CompleteBlockInputV1
+	header                    Initial148Header
+	c, a, b, o1, cb0, o2      Outpoint
+	parentLeaves, finalLeaves map[[36]byte][]byte
+	preSpendLeaves            map[[36]byte][]byte
+	created                   map[Outpoint]UtxoEntry
+}
+
+func icbKeyV1(t *testing.T) *MLDSA87Keypair {
+	t.Helper()
+	der, err := hex.DecodeString(icbKeyDERV1)
+	logicalMDBXAssert(t, err == nil, "key literal: %v", err)
+	kp, err := NewMLDSA87KeypairFromDER(der)
+	if err != nil && strings.Contains(err.Error(), "unsupported") {
+		t.Skipf("ML-DSA backend unavailable: %v", err)
+	}
+	logicalMDBXAssert(t, err == nil, "fixture key: %v", err)
+	t.Cleanup(kp.Close)
+	return kp
+}
+
+// icbSignV1 signs every input with deterministic FIPS 204 ML-DSA.
+func icbSignV1(t *testing.T, kp *MLDSA87Keypair, tx *Tx, values ...uint64) []byte {
+	t.Helper()
+	for i, value := range values {
+		digest, err := SighashV1DigestWithType(tx, uint32(i), value, [32]byte{}, SIGHASH_ALL)
+		logicalMDBXAssert(t, err == nil, "sighash: %v", err)
+		sig, err := kp.SignDigest32ForConformanceFixture(digest)
+		logicalMDBXAssert(t, err == nil, "deterministic sign: %v", err)
+		tx.Witness[i] = WitnessItem{SuiteID: SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: append(sig, SIGHASH_ALL)}
+	}
+	raw, err := MarshalTx(tx)
+	logicalMDBXAssert(t, err == nil, "marshal: %v", err)
+	return raw
+}
+
+// icbLeafV1 is CSM 2.6 K(op) and S(op,e) built from literal fields.
+func icbLeafV1(leaves map[[36]byte][]byte, op Outpoint, value uint64, data []byte, height uint64, coinbase bool) {
+	var key [36]byte
+	copy(key[:], op.Txid[:])
+	binary.BigEndian.PutUint32(key[32:], op.Vout)
+	s := binary.LittleEndian.AppendUint32(bytes.Clone(op.Txid[:]), op.Vout)
+	leaves[key] = append(s, btValue(btFrame(value, COV_TYPE_P2PK, data), height, coinbase)...)
+}
+
+// icbRootV1 is the written CSM 2.6 recursion with literal 19-byte domains.
+func icbRootV1(leaves map[[36]byte][]byte) [32]byte {
+	keys := make([][36]byte, 0, len(leaves))
+	for k := range leaves {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(x, y [36]byte) int { return bytes.Compare(x[:], y[:]) })
+	return icbNodeV1(keys, leaves)
+}
+
+func icbNodeV1(keys [][36]byte, leaves map[[36]byte][]byte) [32]byte {
+	domain, _ := hex.DecodeString("525542494e5f5554584f5f545245455f5631")
+	switch len(keys) {
+	case 0:
+		return sha3.Sum256(append(domain, 0x00))
+	case 1:
+		return sha3.Sum256(append(append(domain, 0x01), leaves[keys[0]]...))
+	}
+	d := 0
+	for icbBitV1(keys[0], d) == icbBitV1(keys[len(keys)-1], d) {
+		d++
+	}
+	var prefix [36]byte
+	copy(prefix[:d/8], keys[0][:d/8])
+	if d%8 != 0 {
+		prefix[d/8] = keys[0][d/8] & byte(0xff<<(8-d%8))
+	}
+	split := slices.IndexFunc(keys, func(k [36]byte) bool { return icbBitV1(k, d) == 1 })
+	left, right := icbNodeV1(keys[:split], leaves), icbNodeV1(keys[split:], leaves)
+	pre := binary.BigEndian.AppendUint16(append(domain, 0x02), uint16(d))
+	pre = append(append(append(pre, prefix[:]...), left[:]...), right[:]...)
+	return sha3.Sum256(pre)
+}
+
+func icbBitV1(k [36]byte, i int) byte { return (k[i/8] >> (7 - i%8)) & 1 }
+
+// icbSeedV1 applies the parent block at height 4 through the real native
+// operation and returns its endpoint.
+func icbSeedV1(t *testing.T, w *btWorld, cov []byte) (blockTreeRequestV1, btTx, btTx) {
+	t.Helper()
+	tx0 := btTransaction(41, 0, nil, [][]byte{btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData())}, nil, []byte{0}, nil)
+	tx1 := btTransaction(42, 0, nil, [][]byte{btFrame(1000, COV_TYPE_P2PK, cov), btFrame(2000, COV_TYPE_P2PK, cov)}, nil, []byte{0}, nil)
+	seed := btRequest(btBody(148, 41, [32]byte{}, tx0, tx1), icbHeightV1-1)
+	result, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
+	logicalMDBXAssert(t, result.err == nil, "parent seed: %v", result.err)
+	return seed, tx0, tx1
+}
+
+func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
+	t.Helper()
+	kp := icbKeyV1(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	seed, tx0, seedTx := icbSeedV1(t, w, cov)
+	f := icbH5V1{c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}}
+	tx1 := inputViewTx(1, f.a)
+	tx1.Outputs[0] = TxOutput{Value: 990, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	raw1 := icbSignV1(t, kp, tx1, 1000)
+	f.o1 = Outpoint{Txid: testTxID(t, raw1)}
+	tx2 := inputViewTx(2, f.o1, f.b)
+	tx2.Outputs[0] = TxOutput{Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	raw2 := icbSignV1(t, kp, tx2, 990, 2000)
+	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
+	commit := initial148BlockWitnessCommit(t, raw1, raw2)
+	cb := coinbaseTxWithOutputs(icbHeightV1, []testOutput{{value: 20, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	f.cb0 = Outpoint{Txid: testTxID(t, cb)}
+	f.icbLeavesV1(cov)
+	root := icbRootV1(f.finalLeaves)
+	raw := initial148BlockFrame(t, [][]byte{cb, raw1, raw2}, func(h *initial148BlockHead) { h.parent, h.root = seed.Block, root })
+	hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "block hash: %v", err)
+	f.header, err = ParseInitial148HeaderBytes(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "header: %v", err)
+	f.in = icbInputV1()
+	f.in.Raw, f.in.Height, f.in.ParentHash, f.in.ExpectedTarget = raw, icbHeightV1, seed.Block, POW_LIMIT
+	f.in.ParentTimestamps = []uint64{blockStepsMedian, blockStepsMedian, blockStepsMedian, blockStepsMedian, blockStepsMedian}
+	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(icbHeightV1)
+	f.in.Registry = DefaultSuiteRegistry()
+	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: icbHeightV1, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
+	f.created = map[Outpoint]UtxoEntry{
+		f.cb0: {Value: 20, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: icbHeightV1, CreatedByCoinbase: true},
+		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: icbHeightV1},
+	}
+	return f
+}
+
+// icbLeavesV1 builds the parent, pre-spend (after tx1, before tx2) and final
+// leaf maps from literal fields.
+func (f *icbH5V1) icbLeavesV1(cov []byte) {
+	f.parentLeaves, f.preSpendLeaves, f.finalLeaves = map[[36]byte][]byte{}, map[[36]byte][]byte{}, map[[36]byte][]byte{}
+	for _, m := range []map[[36]byte][]byte{f.parentLeaves, f.preSpendLeaves, f.finalLeaves} {
+		icbLeafV1(m, f.c, 7, validP2PKCovenantData(), icbHeightV1-1, true)
+	}
+	icbLeafV1(f.parentLeaves, f.a, 1000, cov, icbHeightV1-1, false)
+	icbLeafV1(f.parentLeaves, f.b, 2000, cov, icbHeightV1-1, false)
+	for _, m := range []map[[36]byte][]byte{f.preSpendLeaves, f.finalLeaves} {
+		icbLeafV1(m, f.cb0, 20, validP2PKCovenantData(), icbHeightV1, true)
+	}
+	icbLeafV1(f.preSpendLeaves, f.b, 2000, cov, icbHeightV1-1, false)
+	icbLeafV1(f.preSpendLeaves, f.o1, 990, cov, icbHeightV1, false)
+	icbLeafV1(f.finalLeaves, f.o2, 2980, cov, icbHeightV1, false)
+}
+
+// icbSpentV1 drains the single-pass preblock spent stream: tx2's in-block O1
+// spend is not a parent row and is skipped.
+func icbSpentV1(source *blockSpentInputSource) []blockSpentInput {
+	var got []blockSpentInput
+	for item, ok := source.next(); ok; item, ok = source.next() {
+		got = append(got, item)
+	}
+	return got
+}
+
+type icbObservedV1 struct {
+	out     initial148CompleteBlockOutcomeV1
+	err     error
+	summary BlockBasicSummary
+	result  connectBlockInputViewResult
+	spent   []blockSpentInput
+	block   [32]byte
+	height  uint64
+}
+
+func icbObserveV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1, workers int) icbObservedV1 {
+	t.Helper()
+	var got icbObservedV1
+	icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+		run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			return w.s.View(func(reader *mdbx.Reader) error {
+				result, err := validate(reader)
+				if result != nil {
+					got.summary, got.result = result.summary, *result.transition
+					got.block, got.height = result.effect.Primitive.Block, result.effect.Primitive.Height
+					got.spent = icbSpentV1(result.transition.spentInputs)
+				}
+				return err
+			})
+		}
+		if workers < 0 {
+			got.out, got.err = withInitial148CompleteBlockV1(account, in, run)
+			return
+		}
+		got.out, got.err = withInitial148CompleteBlockParallelV1(account, in, workers, run)
+	})
+	got.result.spentInputs = nil
+	return got
+}
+
+// TestInitial148CompleteBlockAcceptH5 (C01, C03) accepts a signed h=5 block
+// through both entries; the expected header root is the literal CSM 2.6
+// encoding of the finite final map, pinned as icbFinalRootHexV1.
+func TestInitial148CompleteBlockAcceptH5(t *testing.T) {
+	var first *icbObservedV1
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		want, err := hex.DecodeString(icbFinalRootHexV1)
+		logicalMDBXAssert(t, err == nil && bytes.Equal(f.header.UtxoRoot[:], want), "header root %x is not the pinned literal %s", f.header.UtxoRoot, icbFinalRootHexV1)
+		parent, preSpend := icbRootV1(f.parentLeaves), icbRootV1(f.preSpendLeaves)
+		logicalMDBXAssert(t, parent != f.header.UtxoRoot && preSpend != f.header.UtxoRoot && parent != preSpend, "parent/pre-spend/final roots must differ")
+		got := icbObserveV1(t, w, f.in, workers)
+		logicalMDBXAssert(t, got.err == nil && got.out.attempted && got.out.validationErr == nil, "workers=%d acceptance: %v / %+v", workers, got.err, got.out)
+		logicalMDBXAssert(t, got.out.required.derived && got.out.required.cause == nil && !got.out.required.hasObservation && got.out.required.root == f.header.UtxoRoot, "workers=%d fresh D root %x", workers, got.out.required.root)
+		logicalMDBXAssert(t, got.summary.TxCount == 3 && got.summary.BlockHash == f.in.Endpoint.BlockHash && got.block == f.in.Endpoint.BlockHash && got.height == icbHeightV1, "workers=%d identity: %+v", workers, got.summary)
+		logicalMDBXAssert(t, got.result.sumFees == (Uint128{Lo: 20}) && got.result.alreadyGenerated == (Uint128{Lo: icbGenerated5V1}) && got.result.alreadyGeneratedN1 == (Uint128{Lo: icbGenerated6V1}), "workers=%d scalars: %+v", workers, got.result)
+		logicalMDBXAssert(t, reflect.DeepEqual(got.result.createdUtxos, f.created), "workers=%d created: %+v", workers, got.result.createdUtxos)
+		// Each spent parent row is StateEntryBytes of a 33-byte P2PK covenant: 45+44 = 89.
+		wantSpent := []blockSpentInput{{outpoint: f.a, txIndex: 1, inputIndex: 0, logicalEntryLength: 89}, {outpoint: f.b, txIndex: 2, inputIndex: 1, logicalEntryLength: 89}}
+		logicalMDBXAssert(t, reflect.DeepEqual(got.spent, wantSpent), "workers=%d spent stream: %+v", workers, got.spent)
+		if first == nil {
+			first = &got
+			continue
+		}
+		logicalMDBXAssert(t, reflect.DeepEqual(got, *first), "workers=%d differs from sequential: %+v", workers, got)
+	}
+}
+
+// icbComposeV1 is the enclosing builder: the root-valid result is composed
+// into one TreeOperationV1 (header row, Primitive, both Index rows and
+// CurrentBody), exactly as the existing bt operation composes a source.
+func icbComposeV1(result *initial148CompleteBlockResultV1, observed *btObserved, header []byte, present bool) mdbx.TreeOperationV1 {
+	var op mdbx.TreeOperationV1
+	if !present {
+		op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(result.effect.Primitive.Block[:]), bytes.Clone(header)))
+	}
+	op.Primitives = []mdbx.TreePrimitiveV1{result.effect.Primitive}
+	op.Primitives[0].Source = observed
+	op.Pair.Mutations = append(op.Pair.Mutations, result.effect.Index[:]...)
+	if result.effect.CurrentBody.AfterKind != 0 {
+		op.Pair.Mutations = append(op.Pair.Mutations, result.effect.CurrentBody)
+	}
+	btSort(op.Pair.Mutations)
+	return op
+}
+
+// TestInitial148CompleteBlockUpdateTreeH5 (C13) composes the root-valid h=5
+// result into a real Store.UpdateTreeV1 inside run: the native writer and
+// readback consume the immutable source after the builder (and its Reader)
+// returned, while W is still held on the same account; the native
+// truth/stage/index are the owner's own values and the final rows are written.
+func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		tariff, ok := initial148CompleteTariffV1(f.in)
+		logicalMDBXAssert(t, ok, "tariff")
+		var native btResult
+		builderReturned, consumed := false, 0
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			observed := &btObserved{t: t}
+			observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
+				logicalMDBXAssert(t, builderReturned, "parallel=%v source consumed before the builder returned", parallel)
+				// W stays held: the remaining lane cannot fit another W.
+				held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
+				logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(held), "parallel=%v W released before native last use: %v", parallel, held)
+				consumed++
+				return nil
+			}
+			out, err := icbEntryV1(parallel)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				native.truth, native.stage, native.index, native.err = w.s.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					result, verr := validate(reader)
+					if verr != nil {
+						return mdbx.TreeOperationV1{}, verr
+					}
+					observed.source = result.effect.Primitive.Source.(*blockTreeSourceV1)
+					_, present, gerr := reader.Get(mdbx.TreeSchemaV1DBIs()[3], result.effect.Primitive.Block[:])
+					if gerr != nil {
+						return mdbx.TreeOperationV1{}, gerr
+					}
+					op := icbComposeV1(result, observed, f.in.Raw[:Initial148HeaderBytes], present)
+					builderReturned = true
+					return op, nil
+				})
+				return native.err
+			})
+			logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.root == f.header.UtxoRoot, "parallel=%v composed acceptance: %v / %+v", parallel, err, out)
+		})
+		native.want(t, 2, 3, -1)
+		logicalMDBXAssert(t, consumed > 0, "parallel=%v native writer never consumed the source", parallel)
+		cov := f.created[f.o2].CovenantData
+		w.read(t, 1, btUTXOKey(1, f.o2), btValue(btFrame(2980, COV_TYPE_P2PK, cov), icbHeightV1, false))
+		w.read(t, 1, btUTXOKey(1, f.cb0), btValue(btFrame(20, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1, true))
+		w.read(t, 1, btUTXOKey(1, f.c), btValue(btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1-1, true))
+		for _, gone := range []Outpoint{f.a, f.b, f.o1, {Txid: f.cb0.Txid, Vout: 1}} {
+			w.read(t, 1, btUTXOKey(1, gone), nil)
+		}
 	}
 }
