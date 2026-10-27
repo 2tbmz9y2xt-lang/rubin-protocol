@@ -440,6 +440,7 @@ func rifKinds(t *testing.T) {
 }
 
 func rifNodeFrontier(t *testing.T) {
+	t.Run("index-IO-before-malformed-node", rifIndexNodeOrder)
 	for _, valid := range []bool{false, true} {
 		t.Run(fmt.Sprintf("first-valid%v", valid), func(t *testing.T) {
 			w := rifWorld(t, 3)
@@ -474,6 +475,23 @@ func rifNodeFrontier(t *testing.T) {
 		btfEngine(t, f.Cause, "prefix-page", "IO", 5, "error 5")
 		undoNativeConsumed(t, w.s, out.native.err)
 	})
+}
+
+func rifIndexNodeOrder(t *testing.T) {
+	w := rifWorld(t, 3)
+	prefix := binary.BigEndian.AppendUint64(nil, 3)
+	rifSeed(t, w, 8, prefix, []byte{1})
+	var out rifResult
+	// Index starts at the generation prefix before the complete malformed Node key.
+	evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageStartupPullEIO, 2, prefix, func() { out = rifRun(t, w, nil, "source") })
+	out.native.want(t, 1, 1, -1)
+	f := riResource(t, out.source, "branch_data")
+	btfEngine(t, f.Cause, "prefix-page", "IO", 5, "error 5")
+	parts := genesisMDBXCauses(out.native.err)
+	logicalMDBXAssert(t, len(parts) == 2 && parts[0] == out.source && parts[1] == f.Cause, "Index application/Reader cause order: %v", parts)
+	logicalMDBXAssert(t, harness == nil && evidence.OldPulls[2] == 1 && evidence.Faults == 1 && evidence.NodePulls == 0, "Index/Node source frontier: %+v/%v", evidence, harness)
+	logicalMDBXAssert(t, out.image == (retainedPreImageV1{}) && evidence.BeginWrite == 0 && evidence.Deletes == 0 && evidence.Commits == 0 && evidence.OldAborts == 1, "Index refusal native effects: %+v/%+v", out, evidence)
+	undoNativeConsumed(t, w.s, out.native.err)
 }
 
 // One real forward family distinguishes each negative-evidence sibling under both old-prefix states.
