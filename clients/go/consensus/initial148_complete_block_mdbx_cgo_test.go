@@ -1035,6 +1035,73 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 	}
 }
 
+// TestInitial148CompleteBlockUpdateTreeFailuresH5 (C13) runs the h=5
+// fixture inside a real Store.UpdateTreeV1. A root mismatch makes the builder
+// return the validation error with no operation: nothing is written and the
+// parent rows stay. A root-valid result composed into the operation whose
+// native source consumption then fails returns that native error unchanged
+// (validationErr stays nil, the result is not replaced by a validation
+// projection), W is still held at the native failure and released after run,
+// and nothing is written.
+func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
+	nativeErr := errors.New("native source consumption failure")
+	for _, mode := range []string{"validation", "native"} {
+		for _, parallel := range []bool{false, true} {
+			w := btNew(t)
+			opts := icbH5OptsV1{}
+			if mode == "validation" {
+				opts.flip = 1
+			}
+			f := icbH5VariantV1(t, w, opts)
+			tariff, ok := initial148CompleteTariffV1(f.in)
+			logicalMDBXAssert(t, ok, "tariff")
+			composed, consumed := false, 0
+			var nativeOut error
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				observed := &btObserved{t: t}
+				observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
+					consumed++
+					held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(held), "%s parallel=%v W released before native failure: %v", mode, parallel, held)
+					return nativeErr
+				}
+				out, err := icbEntryV1(parallel)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+					_, _, _, nativeOut = w.s.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+						result, verr := validate(reader)
+						if verr != nil {
+							return mdbx.TreeOperationV1{}, verr
+						}
+						observed.source = result.effect.Primitive.Source.(*blockTreeSourceV1)
+						_, present, gerr := reader.Get(mdbx.TreeSchemaV1DBIs()[3], result.effect.Primitive.Block[:])
+						if gerr != nil {
+							return mdbx.TreeOperationV1{}, gerr
+						}
+						composed = true
+						return icbComposeV1(result, observed, f.in.Raw[:Initial148HeaderBytes], present), nil
+					})
+					return nativeOut
+				})
+				if mode == "validation" {
+					var txErr *TxError
+					logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == BLOCK_ERR_UTXO_ROOT_MISMATCH && any(out.validationErr) == any(err) && !composed && consumed == 0, "%s parallel=%v: %v composed=%v consumed=%d", mode, parallel, err, composed, consumed)
+					return
+				}
+				logicalMDBXAssert(t, errors.Is(err, nativeErr) && any(err) == any(nativeOut) && out.attempted && out.validationErr == nil && out.required.derived, "%s parallel=%v run error replaced: %v / %+v", mode, parallel, err, out)
+				logicalMDBXAssert(t, composed && consumed > 0 && icbHoldsExactlyV1(account, 0), "%s parallel=%v composed=%v consumed=%d or residual hold", mode, parallel, composed, consumed)
+			})
+			if mode == "native" {
+				// The failed native writer closes this store handle; read the
+				// durable state through a fresh handle.
+				w.reopen(t)
+			}
+			cov := f.created[f.o2].CovenantData
+			w.read(t, 1, btUTXOKey(1, f.o2), nil)
+			w.read(t, 1, btUTXOKey(1, f.cb0), nil)
+			w.read(t, 1, btUTXOKey(1, f.a), btValue(btFrame(1000, COV_TYPE_P2PK, cov), f.h-1, false))
+		}
+	}
+}
+
 // icbSubsidy5V1 is block_subsidy(5) = already_generated(6) - already_generated(5).
 const icbSubsidy5V1 = icbGenerated6V1 - icbGenerated5V1
 

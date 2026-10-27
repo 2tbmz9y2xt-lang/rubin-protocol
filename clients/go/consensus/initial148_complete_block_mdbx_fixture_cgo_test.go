@@ -10,9 +10,11 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-// TestInitial148CompleteBlockFixtureAdmission runs the composer against the
-// native tree store inside an existing TreeOperation account: a rejection
-// inside UpdateTreeV1's builder must return no operation, so no write occurs.
+// TestInitial148CompleteBlockFixtureAdmission runs the composer under the
+// fixture build against a read-only Store.View owner inside an existing
+// TreeOperation account: a steps 1-12 rejection delivers no result, keeps the
+// exact error and has no D evidence. The UpdateTreeV1 no-operation/no-write
+// case is TestInitial148CompleteBlockUpdateTreeFailuresH5.
 func TestInitial148CompleteBlockFixtureAdmission(t *testing.T) {
 	w := btNew(t)
 	in := icbInputV1()
