@@ -1371,7 +1371,7 @@
       "limitations": [
         "The counted LIVE bridge theorems are constrained to the real `validateBlockBasicCheck` path after parse/pow/target/linkage/merkle/witness prefix success, and the accept theorem additionally assumes nonce replay passes on the remaining suffix. This row does not claim unrelated block-basic stages beyond that covered timestamp gate.",
         "No chain-wide timestamp monotonicity claim beyond the covered `timestampBounds` gate and current replayed integration path is asserted here.",
-        "The constrained LIVE bridge theorems and the CV-TIMESTAMP block_basic_check replay run on BlockBasicV1.parseBlock, whose header grammar is 116 bytes without utxo_root; they do not cover the 148-byte Section 10.1 header grammar or the Section 10.3 block_hash and Proof-of-Work preimage over all 148 header bytes."
+        "The registered theorems validateBlockBasicCheck_timestamp_stage, validateBlockBasicCheck_timestamp_ok_constrained, validateBlockBasicCheck_timestamp_old_rejected_constrained and validateBlockBasicCheck_timestamp_future_rejected_constrained and the CV-TIMESTAMP block_basic_check replay run on BlockBasicV1.parseBlock, whose header grammar is 116 bytes without utxo_root; they do not cover the 148-byte Section 10.1 header grammar or the Section 10.3 block_hash and Proof-of-Work preimage over all 148 header bytes."
       ],
       "evidence_level": "machine_checked_universal"
     },
