@@ -14,28 +14,30 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
-type retainedRoleV1 struct{ generation, s, n, j uint64 }
-type retainedCompleteV1 struct {
-	generation uint64
-	complete   bool
-}
-type retainedOriginV1 struct{ database, chain, genesis [32]byte }
-type retainedPreImageV1 struct {
-	binding  mdbx.MutationBindingV1
-	exactRet uint64
-	complete [2]retainedCompleteV1
-}
-type retainedReadV1 struct {
-	reader               *mdbx.Reader
-	account              *mdbx.OperationAccount
-	authority            mdbx.TreeAuthorityV1
-	binding              mdbx.MutationBindingV1
-	roles                [2]retainedRoleV1
-	endpoints            [2]mdbx.TreeEndpointV1
-	origin               retainedOriginV1
-	lateHeader           [32]byte
-	omitHeader, prepared bool
-}
+type (
+	retainedRoleV1     struct{ generation, s, n, j uint64 }
+	retainedCompleteV1 struct {
+		generation uint64
+		complete   bool
+	}
+	retainedOriginV1   struct{ database, chain, genesis [32]byte }
+	retainedPreImageV1 struct {
+		binding  mdbx.MutationBindingV1
+		exactRet uint64
+		complete [2]retainedCompleteV1
+	}
+	retainedReadV1 struct {
+		reader               *mdbx.Reader
+		account              *mdbx.OperationAccount
+		authority            mdbx.TreeAuthorityV1
+		binding              mdbx.MutationBindingV1
+		roles                [2]retainedRoleV1
+		endpoints            [2]mdbx.TreeEndpointV1
+		origin               retainedOriginV1
+		lateHeader           [32]byte
+		omitHeader, prepared bool
+	}
+)
 
 // SelectedRowDamageV1 identifies the row for the separate selected-clear owner.
 type SelectedRowDamageV1 struct {
@@ -108,7 +110,9 @@ func retainedFailureV1(resource string, cause error) error {
 }
 
 // retainedRequiredV1 reuses the canonical integrity identity without adding effects.
-func retainedRequiredV1(cause error) error { return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: cause} }
+func retainedRequiredV1(cause error) error {
+	return &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: cause}
+}
 
 // retainedSourceV1 never invents a native cause or drops the first source wrapper.
 func retainedSourceV1(err error, required bool) error {
@@ -287,12 +291,8 @@ func (w *retainedWalkV1) visitV1() error {
 	if err := w.optionalV1(); err != nil {
 		return err
 	}
-	cleanup := w.read.authority.Authority.Cleanup
-	if cleanup == nil {
-		return nil
-	}
 	at := 0
-	for _, span := range cleanup.Spans {
+	for _, span := range retainedSpansV1(w.read.authority.Authority) {
 		if span.Kind == mdbx.CleanupSpanGenerationV1 {
 			w.pre.complete[at] = retainedCompleteV1{span.GenerationID, true}
 			if err := w.generationV1(at); err != nil {
@@ -315,11 +315,10 @@ func (w *retainedWalkV1) canonicalV1(undo bool) error {
 			return err
 		}
 	}
-	cleanup := w.read.authority.Authority.Cleanup
-	if cleanup == nil || first == 0 {
+	if first == 0 {
 		return nil
 	}
-	for _, s := range cleanup.Spans {
+	for _, s := range retainedSpansV1(w.read.authority.Authority) {
 		if s.Kind == kind {
 			if err := w.rangeV1(s.NextHeight, min(s.LastHeight, first-1), bits); err != nil {
 				return err
@@ -356,35 +355,32 @@ type retainedArtifactV1 struct {
 }
 
 // optionalAtV1 streams the admitted authority order without a copied selector list.
-func (read *retainedReadV1) optionalAtV1(at int) (retainedArtifactV1, bool, error) {
+func (read *retainedReadV1) optionalAtV1(at uint64) (retainedArtifactV1, bool, error) {
 	a := read.authority.Authority
 	if s := a.SelectedSide; s != nil {
-		n := int(s.TipHeight - selectedSideFirst(s) + 1)
-		if at < n {
-			item, err := read.sideV1(s.GenerationID, selectedSideFirst(s)+uint64(at))
+		if at < uint64(s.RowCount) {
+			item, err := read.sideV1(s.GenerationID, selectedSideFirst(s)+at)
 			item.bits, item.selected = 3, true
 			return item, true, err
 		}
-		at -= n
+		at -= uint64(s.RowCount)
 	}
 	if d := a.DetachedSuffix; d != nil {
-		if at < len(d.Entries) {
+		if at < uint64(d.EntryCount) {
 			e := d.Entries[at]
 			return retainedArtifactV1{hash: e.Hash, height: e.Height, bits: 3}, true, nil
 		}
-		at -= len(d.Entries)
+		at -= uint64(d.EntryCount)
 	}
 	return read.sideAtV1(at)
 }
 
 // sideAtV1 resolves only the remaining pending SIDE span after stronger descriptors.
-func (read *retainedReadV1) sideAtV1(at int) (retainedArtifactV1, bool, error) {
-	if a := read.authority.Authority; a.Cleanup != nil {
-		for _, s := range a.Cleanup.Spans {
-			if s.Kind == mdbx.CleanupSpanSideV1 && uint64(at) <= s.LastHeight-s.NextHeight {
-				item, err := read.sideV1(s.GenerationID, s.NextHeight+uint64(at))
-				return item, true, err
-			}
+func (read *retainedReadV1) sideAtV1(at uint64) (retainedArtifactV1, bool, error) {
+	for _, s := range retainedSpansV1(read.authority.Authority) {
+		if s.Kind == mdbx.CleanupSpanSideV1 && at <= s.LastHeight-s.NextHeight {
+			item, err := read.sideV1(s.GenerationID, s.NextHeight+at)
+			return item, true, err
 		}
 	}
 	return retainedArtifactV1{}, false, nil
@@ -399,25 +395,31 @@ func (read *retainedReadV1) sideV1(g, h uint64) (retainedArtifactV1, error) {
 	return retainedArtifactV1{hash: [32]byte(value[:32]), parent: [32]byte(value[32:64]), height: h, generation: g, bits: 2}, nil
 }
 
+// retainedSpansV1 borrows the decoded cleanup descriptors without copying backing.
+func retainedSpansV1(a mdbx.StorageAuthorityV1) []mdbx.CleanupSpanV1 {
+	if a.Cleanup == nil {
+		return nil
+	}
+	return a.Cleanup.Spans
+}
+
 // retainedOwedV1 includes only an undrained required duty of this artifact kind.
 func retainedOwedV1(a mdbx.StorageAuthorityV1, height uint64, kind mdbx.CleanupSpanKindV1) bool {
-	if a.Cleanup != nil {
-		for _, s := range a.Cleanup.Spans {
-			if s.Kind == kind && height >= s.NextHeight && height <= s.LastHeight {
-				return true
-			}
+	for _, s := range retainedSpansV1(a) {
+		if s.Kind == kind && height >= s.NextHeight && height <= s.LastHeight {
+			return true
 		}
 	}
 	return false
 }
 
 // ownersV1 resolves one protected CURRENT point and only earlier optional owners.
-func (read *retainedReadV1) ownersV1(hash [32]byte, before int) (retainedArtifactV1, error) {
+func (read *retainedReadV1) ownersV1(hash [32]byte, before uint64) (retainedArtifactV1, error) {
 	k, err := read.canonicalOwnerV1(hash)
 	if err != nil {
 		return k, err
 	}
-	for at := 0; at < before; at++ {
+	for at := uint64(0); at < before; at++ {
 		item, present, err := read.optionalAtV1(at)
 		if err != nil || !present {
 			return k, err
@@ -452,7 +454,7 @@ func (read *retainedReadV1) canonicalOwnerV1(hash [32]byte) (retainedArtifactV1,
 
 // optionalV1 charges the first owner occurrence of each kind and hash.
 func (w *retainedWalkV1) optionalV1() error {
-	for at := 0; ; at++ {
+	for at := uint64(0); ; at++ {
 		item, present, err := w.read.optionalAtV1(at)
 		if err != nil || !present {
 			return err
@@ -539,7 +541,7 @@ func (w *retainedWalkV1) headerChargeV1(item retainedArtifactV1) error {
 
 // retainedValueV1 uses bounded windows into one already funded complete value.
 func retainedValueV1(size uint64, read func([]byte, uint64) (int, error)) ([]byte, error) {
-	value := make([]byte, int(size))
+	value := make([]byte, size)
 	for at := 0; at < len(value); {
 		end := min(at+65536, len(value))
 		if _, err := read(value[at:end], uint64(at)); err != nil {
@@ -735,6 +737,8 @@ func (raw *retainedRawV1) observeV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteC
 		raw.charge, _ = RetainedNodeChargeV1(id.Kind)
 	case mdbx.ObsoleteRootV1:
 		raw.charge = RetainedRootChargeV1
+	case mdbx.ObsoleteCounterV1:
+		raw.charge = 0
 	}
 	return nil
 }
@@ -796,6 +800,9 @@ func (read *retainedReadV1) reverseV1(g uint64, hash [32]byte) (uint64, bool, er
 
 // priorV1 requires the actual admissible hash and healthy-header parent.
 func (read *retainedReadV1) priorV1(g, h uint64, item retainedArtifactV1) (bool, error) {
+	if g == item.generation && h >= item.height {
+		return false, nil
+	}
 	key, _ := mdbx.HeightKey(g, h)
 	raw, present, err := read.exactV1(g, mdbx.ObsoleteIndexV1, key)
 	valid := present && raw.admissible && [32]byte(raw.value[:32]) == item.hash && [32]byte(raw.value[32:64]) == item.parent
@@ -835,7 +842,7 @@ func (w *retainedWalkV1) generationV1(at int) error {
 			if err := w.addV1(raw.charge); err != nil {
 				return err
 			}
-			if class == mdbx.ObsoleteIndexV1 && raw.admissible {
+			if raw.admissible {
 				if err := w.indexV1(at, raw); err != nil {
 					return err
 				}
@@ -908,14 +915,11 @@ func (w *retainedWalkV1) contributionV1(at int, item retainedArtifactV1) (uint64
 	}
 	fact := w.pre.complete[at]
 	h, valid, err := w.read.reverseV1(fact.generation, item.hash)
+	if valid {
+		prior, err = w.read.priorV1(fact.generation, h, item)
+	}
 	if err != nil {
 		return h, valid, true, err
-	}
-	if valid && h < item.height {
-		prior, err = w.read.priorV1(fact.generation, h, item)
-		if err != nil {
-			return h, valid, true, err
-		}
 	}
 	if !prior && !fact.complete {
 		return h, valid, true, retainedFailureV1("branch_data", errors.New("retained prefix membership is inconclusive"))

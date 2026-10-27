@@ -43,14 +43,10 @@ func RetainedTreeChargeV1(entries uint64) (uint64, error) {
 	if entries == 0 {
 		return RetainedRootChargeV1, nil
 	}
-	if entries > (math.MaxUint64-RetainedRootChargeV1)/68 {
+	if entries-1 > (math.MaxUint64-100)/170 {
 		return 0, errRetainedArithmetic
 	}
-	leaf := 68*entries + RetainedRootChargeV1
-	if entries-1 > (math.MaxUint64-leaf)/102 {
-		return 0, errRetainedArithmetic
-	}
-	return leaf + 102*(entries-1), nil
+	return 100 + 170*(entries-1), nil
 }
 
 // RetainedNodeChargeV1 charges an established raw node kind without decoding its value.

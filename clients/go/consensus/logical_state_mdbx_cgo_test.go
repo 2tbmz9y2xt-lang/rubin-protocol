@@ -1196,7 +1196,7 @@ type OptionalSideValueV1 struct{Value []byte; Present bool}
 func (*Reader) GetOptionalSide(DBI,[]byte)(OptionalSideValueV1,error){return OptionalSideValueV1{},nil}
 func (*Reader) GetInitial148OptionalSide(DBI,[]byte)(OptionalSideValueV1,error){return OptionalSideValueV1{},nil}
 type ObsoleteClassV1 uint8
-const(ObsoleteUTXOV1 ObsoleteClassV1=1; ObsoleteIndexV1 ObsoleteClassV1=2; ObsoleteDerivedV1 ObsoleteClassV1=4; ObsoleteNodeV1 ObsoleteClassV1=5; ObsoleteRootV1 ObsoleteClassV1=6)
+const(ObsoleteUTXOV1 ObsoleteClassV1=1; ObsoleteIndexV1 ObsoleteClassV1=2; ObsoleteCounterV1 ObsoleteClassV1=3; ObsoleteDerivedV1 ObsoleteClassV1=4; ObsoleteNodeV1 ObsoleteClassV1=5; ObsoleteRootV1 ObsoleteClassV1=6)
 type ObsoleteRowV1 struct{}
 func (ObsoleteRowV1) Key()[]byte{return nil}
 func (ObsoleteRowV1) Length()uint64{return 0}

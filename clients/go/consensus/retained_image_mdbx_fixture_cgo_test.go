@@ -74,7 +74,9 @@ func rifEdges(t *testing.T) {
 				want = 0
 			case "stronger-all-kinds-false":
 				w, _, z = riGenesis(t)
-				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}} })
+				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+					a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+				})
 				rifForward(t, w, 3, 0, y, [32]byte{})
 				rifForward(t, w, 3, 1, z, [32]byte{})
 				want = 1003
@@ -321,10 +323,13 @@ func rifKinds(t *testing.T) {
 		value  []byte
 		charge uint64
 	}{
-		{"leaf", 8, 1, make([]byte, 32), 132}, {"branch", 8, 2, make([]byte, 140), 166},
-		{"malformed-key", 8, 0, []byte{1}, 0}, {"leaf-malformed-value", 8, 1, []byte{1}, 132},
+		{"leaf", 8, 1, make([]byte, 32), 132},
+		{"branch", 8, 2, make([]byte, 140), 166},
+		{"malformed-key", 8, 0, []byte{1}, 0},
+		{"leaf-malformed-value", 8, 1, []byte{1}, 132},
 		{"branch-malformed-value", 8, 2, []byte{1}, 166},
-		{"root-valid", 0, 0, nil, 96}, {"root-malformed-value", 0, 0, []byte{1}, 96},
+		{"root-valid", 0, 0, nil, 96},
+		{"root-malformed-value", 0, 0, []byte{1}, 96},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := rifWorld(t, 3)
@@ -501,9 +506,13 @@ func rifPrefix(t *testing.T) {
 		wrongParent bool
 		want        uint64
 	}{
-		{"missing-nonadjacent", -1, false, false, 0}, {"first-positive-false-prefix", 0, false, false, 846},
-		{"self", 2, false, false, 0}, {"future", 3, false, false, 0}, {"malformed-R", -2, false, false, 0},
-		{"wrong-parent-true", 0, true, true, 846}, {"wrong-parent-false", 0, false, true, 0},
+		{"missing-nonadjacent", -1, false, false, 0},
+		{"first-positive-false-prefix", 0, false, false, 846},
+		{"self", 2, false, false, 0},
+		{"future", 3, false, false, 0},
+		{"malformed-R", -2, false, false, 0},
+		{"wrong-parent-true", 0, true, true, 846},
+		{"wrong-parent-false", 0, false, true, 0},
 		{"wrong-hash-false", 1, true, false, 0},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -663,9 +672,16 @@ func rifUndo(t *testing.T) {
 		spent uint32
 		want  uint64
 	}{
-		{"113", 2, 735}, {"zero", 0, 622}, {"722", 722, 41054},
-		{"duplicate", 2, 0}, {"coordinate", 2, 0}, {"extra", 1, 0}, {"height", 1, 0},
-		{"malformed", 0, 0}, {"envelope414634", 414634, 0}, {"envelope414635", 414635, 0},
+		{"113", 2, 735},
+		{"zero", 0, 622},
+		{"722", 722, 41054},
+		{"duplicate", 2, 0},
+		{"coordinate", 2, 0},
+		{"extra", 1, 0},
+		{"height", 1, 0},
+		{"malformed", 0, 0},
+		{"envelope414634", 414634, 0},
+		{"envelope414635", 414635, 0},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			w := rifWorld(t, 3)
@@ -737,20 +753,29 @@ func rifSources(t *testing.T) {
 				child := bytes.Clone(genesis)
 				child[140] ^= 1
 				x := riSide(t, w, child, 3, 1)
-				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}} })
+				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+					a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3, FirstHeight: 1, NextHeight: 1, LastHeight: 1}}}
+				})
 				evidence, harness = mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 4, x[:], func() { out = rifRun(t, w, nil, "source") })
 			case "counter-width":
 				rifSeed(t, w, 0, btMeta(0x10, 1), make([]byte, 15))
 				out = rifRun(t, w, nil, "source")
 			case "active-binding":
 				var healthy []byte
-				logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { healthy, _, _ = r.Get(mdbx.TreeSchemaV1DBIs()[0], btMeta(0x11, 1)); return nil }) == nil, "capture active binding")
-				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}} })
+				logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+					healthy, _, _ = r.Get(mdbx.TreeSchemaV1DBIs()[0], btMeta(0x11, 1))
+					return nil
+				}) == nil, "capture active binding")
+				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+					a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+				})
 				rifSeed(t, w, 0, btMeta(0x11, 3), healthy)
 				rifSeed(t, w, 0, btMeta(0x11, 1), []byte{0})
 				out = rifRun(t, w, nil, "source")
 			case "required-header-before-R", "malformed-required-header-before-R":
-				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.ActiveProfile, a.Authority.U, a.Authority.Phase, a.Authority.Cleanup = 2, 1, 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}} })
+				riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+					a.Authority.ActiveProfile, a.Authority.U, a.Authority.Phase, a.Authority.Cleanup = 2, 1, 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 1, GenerationID: 3}}}
+				})
 				rifForward(t, w, 3, 0, hash, [32]byte{})
 				if source == "required-header-before-R" {
 					logicalMDBXAssert(t, mdbx.FixtureStartupDeleteRow(w.s, 3, hash[:]) == nil, "delete required header")
@@ -782,7 +807,9 @@ func rifSources(t *testing.T) {
 	for _, source := range []string{"SIDE-link-absent", "SIDE-link-malformed", "SIDE-link-IO"} {
 		t.Run(source, func(t *testing.T) {
 			w := btNew(t)
-			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3}}} })
+			riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+				a.Authority.Phase, a.Authority.Cleanup = 2, &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: 4, GenerationID: 3}}}
+			})
 			key, _ := mdbx.HeightKey(3, 0)
 			if source == "SIDE-link-malformed" {
 				rifSeed(t, w, 6, key, []byte{1})
@@ -865,7 +892,11 @@ func rifWindows(t *testing.T) {
 	rifSeed(t, w, 0, btMeta(0x10, 2), mdbx.LogicalCounterValue(89, 1))
 	for h := uint64(0); h <= 4320; h++ {
 		var entry []byte
-		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { key, _ := mdbx.HeightKey(1, h); entry, _, _ = r.Get(mdbx.TreeSchemaV1DBIs()[2], key); return nil }) == nil, "LAG index source")
+		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+			key, _ := mdbx.HeightKey(1, h)
+			entry, _, _ = r.Get(mdbx.TreeSchemaV1DBIs()[2], key)
+			return nil
+		}) == nil, "LAG index source")
 		key, _ := mdbx.HeightKey(2, h)
 		hash := [32]byte(entry[:32])
 		reverse, _ := mdbx.CanonicalOwnerKey(2, hash)
@@ -874,7 +905,12 @@ func rifWindows(t *testing.T) {
 	}
 	for h := uint64(18000); h <= 20000; h++ {
 		var hash [32]byte
-		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error { key, _ := mdbx.HeightKey(1, h); entry, _, _ := r.Get(mdbx.TreeSchemaV1DBIs()[2], key); hash = [32]byte(entry[:32]); return nil }) == nil, "undo range source")
+		logicalMDBXAssert(t, w.s.View(func(r *mdbx.Reader) error {
+			key, _ := mdbx.HeightKey(1, h)
+			entry, _, _ := r.Get(mdbx.TreeSchemaV1DBIs()[2], key)
+			hash = [32]byte(entry[:32])
+			return nil
+		}) == nil, "undo range source")
 		rifSeed(t, w, 5, mdbx.UndoManifestKey(hash), mdbx.UndoManifestValue(h, [16]byte{}, 1, 0))
 	}
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
@@ -888,12 +924,15 @@ func rifWindows(t *testing.T) {
 	logicalMDBXAssert(t, err == nil && got.exactRet == 10357696, "H20000/B4881/L_body4321 lower body/undo: %+v/%v", got, err)
 	sideKey, _ := mdbx.HeightKey(4, 1)
 	rifSeed(t, w, 6, sideKey, mdbx.ChainValue(lowerHash, lowerParent, [40]byte{39: 1}))
-	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) { a.Authority.Cleanup.Spans = append(a.Authority.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 4, FirstHeight: 1, LastHeight: 1, NextHeight: 1}) })
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.Cleanup.Spans = append(a.Authority.Cleanup.Spans, mdbx.CleanupSpanV1{Kind: 4, GenerationID: 4, FirstHeight: 1, LastHeight: 1, NextHeight: 1})
+	})
 	got, err = riRead(t, w, nil)
 	logicalMDBXAssert(t, err == nil && got.exactRet == 10357696, "SIDE body-only overlap: %+v/%v", got, err)
 	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
 		a.Authority.Cleanup.Spans = []mdbx.CleanupSpanV1{
-			{Kind: 1, GenerationID: 3}, {Kind: 2, GenerationID: 1, FirstHeight: 4000, NextHeight: 4000, LastHeight: 4880},
+			{Kind: 1, GenerationID: 3},
+			{Kind: 2, GenerationID: 1, FirstHeight: 4000, NextHeight: 4000, LastHeight: 4880},
 			{Kind: 3, GenerationID: 1, FirstHeight: 18000, NextHeight: 18000, LastHeight: 18560},
 			{Kind: 4, GenerationID: 4, FirstHeight: 1, NextHeight: 1, LastHeight: 1},
 		}

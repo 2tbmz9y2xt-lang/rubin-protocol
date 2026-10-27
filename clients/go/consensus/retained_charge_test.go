@@ -36,7 +36,7 @@ func TestRetainedChargeV1(t *testing.T) {
 			before := bytes.Clone(raw)
 			_, want := mdbx.DecodeUTXOValue(raw)
 			got, err := RetainedStateEntryChargeV1(raw)
-			if got != 0 || want == nil || err != want || !bytes.Equal(raw, before) {
+			if got != 0 || want == nil || any(err) != any(want) || !bytes.Equal(raw, before) {
 				t.Fatalf("sole decoder cause/input: %d/%v/%v", got, err, want)
 			}
 		}

@@ -179,19 +179,28 @@ func riControls(t *testing.T) {
 	err = riContext(t, w, nil, func(read *retainedReadV1) error {
 		riLocal(t, prepareRetainedReadV1(nil, read.reader, read.account, nil))
 		nonzero := retainedReadV1{lateHeader: [32]byte{1}}
-		snapshot := nonzero
+		lateHeader := nonzero.lateHeader
 		riLocal(t, prepareRetainedReadV1(&nonzero, read.reader, read.account, nil))
-		logicalMDBXAssert(t, reflect.DeepEqual(nonzero, snapshot), "unused nonzero destination changed")
+		logicalMDBXAssert(t, nonzero.lateHeader == lateHeader, "unused nonzero destination header changed")
+		nonzero.lateHeader = [32]byte{}
+		logicalMDBXAssert(t, reflect.ValueOf(nonzero).IsZero(), "unused nonzero destination changed")
 		before := *read
+		authority, encodeErr := read.authority.Encode()
+		logicalMDBXAssert(t, encodeErr == nil, "snapshot active authority: %v", encodeErr)
 		riLocal(t, prepareRetainedReadV1(read, read.reader, read.account, nil))
-		if !reflect.DeepEqual(*read, before) {
+		afterAuthority, encodeErr := read.authority.Encode()
+		logicalMDBXAssert(t, encodeErr == nil && bytes.Equal(afterAuthority, authority), "active authority changed: %v", encodeErr)
+		logicalMDBXAssert(t, len(read.authority.Progress.Payload) == len(before.authority.Progress.Payload) && cap(read.authority.Progress.Payload) == cap(before.authority.Progress.Payload) && reflect.ValueOf(read.authority.Progress.Payload).Pointer() == reflect.ValueOf(before.authority.Progress.Payload).Pointer(), "active authority source backing changed")
+		a, b := read.authority.Authority, before.authority.Authority
+		logicalMDBXAssert(t, a.Cleanup == b.Cleanup && a.Replay == b.Replay && a.Ordinary == b.Ordinary && a.PendingTargetProfile == b.PendingTargetProfile && a.ExcludedInvalidBranch == b.ExcludedInvalidBranch && a.SelectedSide == b.SelectedSide && a.DetachedSuffix == b.DetachedSuffix, "active authority pointers changed")
+		if read.reader != before.reader || read.account != before.account || read.binding != before.binding || read.roles != before.roles || read.endpoints != before.endpoints || read.origin != before.origin || read.lateHeader != before.lateHeader || read.omitHeader != before.omitHeader || read.prepared != before.prepared {
 			t.Fatal("active destination changed")
 		}
 		for _, bad := range []*mdbx.OperationAccount{nil, {}, closed} {
 			var dst retainedReadV1
 			want := bad.WithReservation(0, func() error { t.Fatal("bad account entered"); return nil })
 			got := prepareRetainedReadV1(&dst, read.reader, bad, nil)
-			if got != want || !reflect.ValueOf(dst).IsZero() {
+			if any(got) != any(want) || !reflect.ValueOf(dst).IsZero() {
 				t.Fatalf("actual account error/zero output: %v/%v", got, want)
 			}
 		}
@@ -217,8 +226,8 @@ func riControls(t *testing.T) {
 	w.s, err = mdbx.OpenTreeV1(w.path, w.cfg, [32]byte{7})
 	logicalMDBXAssert(t, err == nil, "fresh OpenTreeV1: %v", err)
 	_, err = riRead(t, w, nil)
-	native, ok := err.(*mdbx.EngineError)
-	logicalMDBXAssert(t, ok && native.Operation == "get" && native.Class == "InvalidInput" && native.Code == 22 && native.Diagnostic == "canonical owner index is not verified" && native.Cause == nil, "unverified owner permission: %T %v", err, err)
+	var native *mdbx.EngineError
+	logicalMDBXAssert(t, errors.As(err, &native) && native != nil && any(err) == any(native) && native.Operation == "get" && native.Class == "InvalidInput" && native.Code == 22 && native.Diagnostic == "canonical owner index is not verified" && native.Cause == nil, "unverified owner permission: %T %v", err, err)
 }
 
 func riDomain(t *testing.T) {
@@ -268,10 +277,12 @@ type riNilCause struct{}
 
 func (*riNilCause) Error() string { panic("typed-nil cause invoked") }
 
-type riNilMap map[string]int
-type riNilSlice []byte
-type riNilFunc func()
-type riNilChan chan int
+type (
+	riNilMap   map[string]int
+	riNilSlice []byte
+	riNilFunc  func()
+	riNilChan  chan int
+)
 
 func (riNilMap) Error() string   { panic("nil map cause invoked") }
 func (riNilSlice) Error() string { panic("nil slice cause invoked") }
@@ -292,7 +303,7 @@ func riCarriers(t *testing.T) {
 				if resource == "selected_damage" {
 					f.Damage = &SelectedRowDamageV1{Generation: 3, Height: 0xffffffff, Hash: [32]byte{9}, Artifact: artifact, Cause: cause}
 				}
-				if f.Unwrap() != cause || !errors.Is(f, base) || f.Error() != cause.Error() {
+				if any(f.Unwrap()) != any(cause) || !errors.Is(f, base) || f.Error() != cause.Error() {
 					t.Fatalf("exact wrapper not retained: %+v", f)
 				}
 			}
@@ -300,10 +311,15 @@ func riCarriers(t *testing.T) {
 	}
 	var typedNil *riNilCause
 	validDamage := &SelectedRowDamageV1{Generation: 3, Artifact: "header", Cause: base}
-	for _, f := range []*RetainedProofFailureV1{nil,
-		{Cause: base}, {Resource: "unknown", Cause: base}, {Resource: "storage_capacity"},
-		{Resource: "branch_data", Cause: typedNil}, {Resource: "canonical_artifact_read", Cause: base, Damage: validDamage},
-		{Resource: "selected_damage", Cause: base}, {Resource: "selected_damage", Cause: typedNil, Damage: validDamage},
+	for _, f := range []*RetainedProofFailureV1{
+		nil,
+		{Cause: base},
+		{Resource: "unknown", Cause: base},
+		{Resource: "storage_capacity"},
+		{Resource: "branch_data", Cause: typedNil},
+		{Resource: "canonical_artifact_read", Cause: base, Damage: validDamage},
+		{Resource: "selected_damage", Cause: base},
+		{Resource: "selected_damage", Cause: typedNil, Damage: validDamage},
 		{Resource: "selected_damage", Cause: base, Damage: &SelectedRowDamageV1{Artifact: "header", Cause: base}},
 		{Resource: "selected_damage", Cause: base, Damage: &SelectedRowDamageV1{Generation: 3, Height: 1 << 32, Artifact: "header", Cause: base}},
 		{Resource: "selected_damage", Cause: base, Damage: &SelectedRowDamageV1{Generation: 3, Artifact: "undo", Cause: base}},
@@ -312,7 +328,7 @@ func riCarriers(t *testing.T) {
 		{Resource: "selected_damage", Cause: base, Damage: &SelectedRowDamageV1{Generation: 3, Artifact: "body", Cause: typedNil}},
 	} {
 		message := "invalid retained proof failure"
-		if f != nil && f.Cause == base && f.Resource == "selected_damage" {
+		if f != nil && any(f.Cause) == any(base) && f.Resource == "selected_damage" {
 			message = "invalid retained selected damage"
 		}
 		logicalMDBXAssert(t, f.Error() == message, "invalid carrier Error discriminator: %v", f)
@@ -341,14 +357,21 @@ func riOptional(t *testing.T) {
 		malformed    bool
 		want         uint64
 	}{
-		{"SIDE", true, true, false, 362}, {"SIDE", true, false, false, 64},
-		{"detached", true, true, false, 510}, {"detached", true, false, false, 212},
-		{"detached", false, true, false, 362}, {"detached", false, false, false, 64},
-		{"SIDE", true, true, true, 0}, {"detached", true, true, true, 0},
-		{"selected", true, true, false, 510}, {"selected", false, true, false, 0}, {"selected", true, false, false, 0},
+		{"SIDE", true, true, false, 362},
+		{"SIDE", true, false, false, 64},
+		{"detached", true, true, false, 510},
+		{"detached", true, false, false, 212},
+		{"detached", false, true, false, 362},
+		{"detached", false, false, false, 64},
+		{"SIDE", true, true, true, 0},
+		{"detached", true, true, true, 0},
+		{"selected", true, true, false, 510},
+		{"selected", false, true, false, 0},
+		{"selected", true, false, false, 0},
 		{"selected", true, true, true, 0},
 		{"selected+SIDE", true, true, false, 510},
-		{"selected-header-bad", true, true, false, 0}, {"detached-header-bad", true, true, false, 0},
+		{"selected-header-bad", true, true, false, 0},
+		{"detached-header-bad", true, true, false, 0},
 	} {
 		t.Run(fmt.Sprintf("%s/header%v/body%v/bad%v", row.kind, row.header, row.body, row.malformed), func(t *testing.T) {
 			kind := row.kind
@@ -417,7 +440,7 @@ func riOptional(t *testing.T) {
 						artifact = "header"
 					}
 					d := failure.Damage
-					logicalMDBXAssert(t, d.Generation == 3 && d.Height == 5 && d.Hash == hash && d.Artifact == artifact && d.Cause == failure.Cause, "exact damage tuple: %+v", d)
+					logicalMDBXAssert(t, d.Generation == 3 && d.Height == 5 && d.Hash == hash && d.Artifact == artifact && any(d.Cause) == any(failure.Cause), "exact damage tuple: %+v", d)
 				}
 			}
 			w.read(t, 0, []byte{2}, encoded)
