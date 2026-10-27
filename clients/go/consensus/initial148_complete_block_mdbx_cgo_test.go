@@ -425,7 +425,7 @@ func TestInitial148CompleteBlockRootMismatch(t *testing.T) {
 				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
 				var txErr *TxError
 				logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == BLOCK_ERR_UTXO_ROOT_MISMATCH && txErr.Msg == "utxo_root mismatch" && any(out.validationErr) == any(err), "flip=%d parallel=%v mismatch: %v", flip, parallel, err)
-				logicalMDBXAssert(t, delivered == nil && out.attempted && out.required.derived && out.required.cause == nil && out.required.root != header.UtxoRoot, "flip=%d mismatch outcome: %+v", flip, out)
+				logicalMDBXAssert(t, delivered == nil && out.attempted && out.required.derived && out.required.cause == nil && out.required.root == icbGenesisRootV1(t, in.Raw) && out.required.root != header.UtxoRoot, "flip=%d mismatch outcome: %+v", flip, out)
 			})
 		}
 	}
@@ -459,7 +459,7 @@ func TestInitial148CompleteBlockEarlierErrorBeforeD(t *testing.T) {
 func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 	for _, parallel := range []bool{false, true} {
 		w := btNew(t)
-		in, header := icbGenesisInputV1(t, -1)
+		in, _ := icbGenesisInputV1(t, -1)
 		native := errors.New("native writer failure after builder return")
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			var spent *blockSpentInputSource
@@ -478,7 +478,7 @@ func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 			})
 			logicalMDBXAssert(t, errors.Is(err, native) && out.attempted && out.validationErr == nil, "parallel=%v run error kept: %v / %+v", parallel, err, out)
 			logicalMDBXAssert(t, reflect.DeepEqual(*spent, blockSpentInputSource{}), "parallel=%v unexhausted spent source discarded after run: %+v", parallel, *spent)
-			logicalMDBXAssert(t, out.required.derived && out.required.root == header.UtxoRoot, "parallel=%v D evidence kept: %+v", parallel, out.required)
+			logicalMDBXAssert(t, out.required.derived && out.required.root == icbGenesisRootV1(t, in.Raw), "parallel=%v D evidence kept: %+v", parallel, out.required)
 			// A fresh next invocation succeeds on the same account.
 			out2, delivered, _, err2 := icbValidateOnceV1(t, w, account, in, parallel)
 			logicalMDBXAssert(t, err2 == nil && delivered != nil && out2.required.derived, "parallel=%v fresh retry: %v", parallel, err2)
