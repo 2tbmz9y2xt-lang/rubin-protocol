@@ -161,6 +161,9 @@ func replayRecoveryAuthorityBatch(literal []byte, consulted []mdbx.ConsultedRow)
 // returned one; the caller runs it exactly once after its Update.
 func (o *ReplayEntryOwnerV1) PlanDirectReplayEntryMDBX(reader *mdbx.Reader, limit uint64) (ReplayRecoveryPlanV1, func(), error) {
 	a, proceed, plan, err := o.directEntryGates(reader, limit)
+	if !proceed && replayTreeRefused(err, replayTreeReaderRefusal) {
+		return o.replayTreeDirect(reader, limit)
+	}
 	if !proceed {
 		return plan, nil, err
 	}

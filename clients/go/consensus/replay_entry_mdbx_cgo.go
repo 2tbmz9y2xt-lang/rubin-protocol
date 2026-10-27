@@ -148,7 +148,8 @@ type replayEntryCall struct {
 	planned      bool
 	census       bool // The third leaf's BS census read is in flight (dormant in this leaf).
 	denied       bool
-	lane         uint64 // A Reader-scoped planner's lane share; zero is the full lane (replayEntryInventoryLimit).
+	lane         uint64                 // A Reader-scoped planner's lane share; zero is the full lane (replayEntryInventoryLimit).
+	account      *mdbx.OperationAccount // The format-3 route's operation account; nil on format 2.
 	replay       *mdbx.ReplayV1
 	release      func()
 }
@@ -182,6 +183,12 @@ func (o *ReplayEntryOwnerV1) EnterReplayTargetMDBX(store *mdbx.Store, reservatio
 		}
 		call.denied = true
 		out.Truth, out.Stage, out.Err = store.Update(call.plan)
+	}
+	if replayTreeStoreRefused(out) {
+		var raw bool
+		if out, raw = call.treeEnter(store); raw {
+			return out
+		}
 	}
 	call.runRelease()
 	return replayEntryProject(out, call)
@@ -258,7 +265,7 @@ func (c *replayEntryCall) identityCharged(reader *mdbx.Reader, generation uint64
 	var identity uint8
 	var readErr error
 	// The callback returns nil, so a non-nil result is the owner's refusal of the control charge.
-	if c.reservations.WithReservation(replayEntryIdentityBytes, func() error {
+	if c.controlCharge(func() error {
 		var site string
 		identity, site, readErr = replayEntryIdentity(reader, generation)
 		c.step = site
@@ -268,6 +275,15 @@ func (c *replayEntryCall) identityCharged(reader *mdbx.Reader, generation uint64
 		return 0, err
 	}
 	return identity, readErr
+}
+
+// controlCharge runs read under the nested 512-byte control charge: on the format-3 route's account, else as one
+// owner operation of its own.
+func (c *replayEntryCall) controlCharge(read func() error) error {
+	if c.account != nil {
+		return c.account.WithReservation(replayEntryIdentityBytes, read)
+	}
+	return c.reservations.WithReservation(replayEntryIdentityBytes, read)
 }
 
 // replayEntryIdentity is the step-1 identity-page read; on error it returns the identity-page read-site label.
@@ -449,6 +465,9 @@ func replayEntryPart(part error, call *replayEntryCall) string {
 		if e != nil {
 			return replayEntryEngine(e, call)
 		}
+	}
+	if mdbx.IsOperationReservationCapacity(part) {
+		return selectedSideCapacity // The format-3 step-5 Pair copy refused by the owner aggregate (UpdateTreeV1).
 	}
 	return selectedSideInvariant
 }

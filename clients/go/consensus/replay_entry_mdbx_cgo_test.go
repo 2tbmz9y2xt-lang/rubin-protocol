@@ -1538,7 +1538,7 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 			return true
 		}
 		stack = append(stack, n)
-		if id, ok := n.(*ast.Ident); ok && slices.Contains([]string{"ProtectV1", "qualifyAndPlan", "plan", "runRelease", "release"}, id.Name) {
+		if id, ok := n.(*ast.Ident); ok && slices.Contains([]string{"ProtectV1", "qualifyAndPlan", "plan", "runRelease", "release", "treeEnter"}, id.Name) {
 			key := replayPlacement(stack)
 			got[key], pos[key] = got[key]+1, max(pos[key], id.Pos())
 		}
@@ -1553,10 +1553,12 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 		"EnterReplayTargetMDBX: call *ast.DeferStmt runRelease": 1, "EnterReplayTargetMDBX: call *ast.ExprStmt runRelease": 1,
 		"runRelease: decl runRelease": 1, "runRelease: := lhs release release": 1, "runRelease: := rhs release": 1,
 		"runRelease: cmp != nil release": 1, "runRelease: nested = lhs nil release": 1, "runRelease: nested call *ast.ExprStmt release": 1,
+		"EnterReplayTargetMDBX: nested call *ast.AssignStmt treeEnter": 1,
 	}
 	logicalMDBXAssert(t, reflect.DeepEqual(got, want), "placement census: %v", got)
 	at := func(k string) token.Pos { return pos["EnterReplayTargetMDBX: "+k] }
-	first, last := min(at("literal arg store.Update plan"), at("nested arg store.Update plan")), max(at("literal arg store.Update plan"), at("nested arg store.Update plan"))
+	first := min(at("literal arg store.Update plan"), at("nested arg store.Update plan"), at("nested call *ast.AssignStmt treeEnter"))
+	last := max(at("literal arg store.Update plan"), at("nested arg store.Update plan"), at("nested call *ast.AssignStmt treeEnter"))
 	clear, invoke := pos["runRelease: nested = lhs nil release"], pos["runRelease: nested call *ast.ExprStmt release"]
 	logicalMDBXAssert(t, clear > 0 && invoke > 0 && clear < invoke, "clear %d before invocation %d", clear, invoke)
 	deferred, plain := at("call *ast.DeferStmt runRelease"), at("call *ast.ExprStmt runRelease")

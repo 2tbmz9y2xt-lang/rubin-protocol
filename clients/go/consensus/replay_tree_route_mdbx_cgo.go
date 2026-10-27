@@ -3,7 +3,10 @@
 package consensus
 
 import (
+	"crypto/sha3"
+	"encoding/binary"
 	"errors"
+	"math"
 	"reflect"
 	"syscall"
 
@@ -25,6 +28,24 @@ type replayTreeRefusal struct {
 	diagnostic string
 	reopen     bool
 }
+
+// replayTreeStoreRefusal is Store.Update's refusal of a tree store before its callback.
+var replayTreeStoreRefusal = replayTreeRefusal{mdbx.EngineStateMismatch, "update", -30779, "tree store requires typed tree operation", false}
+
+const (
+	// replayTreePairBytes (P_PAIR) bounds the step-5 charge of the entry plan: one envelope literal of at most
+	// mdbx.MaxMetadataBytes plus four 16-byte or binding target rows, five keys, four Consulted keys and the owned
+	// arrays (the fit through the engine is TestReplayTreeEntryAccountFit).
+	replayTreePairBytes uint64 = mdbx.MaxMetadataBytes + 4096
+	// replayTreeOwnBytes (OWN) is the entry route's evidence charge: LANE_MAX less P_PAIR.
+	replayTreeOwnBytes = mdbx.LaneMaxBytes - replayTreePairBytes
+)
+
+// OWN fits the legacy grant and covers the 148 minimum share; a violation does not compile.
+const (
+	_ = mdbx.MaxOperationDataBytes - replayTreeOwnBytes
+	_ = replayTreeOwnBytes - replayRecoveryMin148Bytes
+)
 
 // replayTreeReaderRefusal is ReadStorageAuthorityV1's tree-Reader refusal; that refusal leaves the Reader active.
 var replayTreeReaderRefusal = replayTreeRefusal{mdbx.EngineInvalidInput, "get", int(syscall.EINVAL), "tree Reader requires tree authority accessor", false}
@@ -127,4 +148,189 @@ func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
 		return mdbx.Batch{}, err
 	}
 	return replayRecoveryAuthorityBatch(literal, replayEntryConsulted(a.ActiveGenerationID, report.activeTip)), nil
+}
+
+// replayTreeStoreRefused reports the F1 discriminator: Store.Update's exact tree-store refusal at OLD/PREWRITE.
+func replayTreeStoreRefused(out ReplayEntryOutcomeV1) bool {
+	return out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && replayTreeRefused(out.Err, replayTreeStoreRefusal)
+}
+
+// treeEnter is the format-3 route of EnterReplayTargetMDBX after the baseline frame returned the tree-store refusal:
+// one LaneOperation whose OWN evidence charge wraps one UpdateTreeV1 with lane OWN; on the owner's exact capacity
+// refusal of OWN, one UpdateTreeV1 on the same account runs the denied gates. raw is set for any other charge error,
+// which the caller returns with an empty CanonicalTruth. The caller runs the release and the projection.
+func (c *replayEntryCall) treeEnter(store *mdbx.Store) (ReplayEntryOutcomeV1, bool) {
+	out := ReplayEntryOutcomeV1{Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
+	c.lane = replayTreeOwnBytes
+	err := c.reservations.WithOperation(mdbx.LaneOperation, func(account *mdbx.OperationAccount) error {
+		c.account = account
+		ran := false
+		err := account.WithReservation(replayTreeOwnBytes, func() error {
+			ran, c.denied = true, false
+			out.Truth, out.Stage, _, out.Err = store.UpdateTreeV1(account, c.treePlan)
+			return nil
+		})
+		if ran || err.Error() != selectedSideCapacityText {
+			return err
+		}
+		c.denied = true
+		out.Truth, out.Stage, _, out.Err = store.UpdateTreeV1(account, c.treePlan)
+		return nil
+	})
+	if err != nil {
+		out.Err = err
+		return out, true
+	}
+	return out, false
+}
+
+// treePlan is plan on a tree Reader converted to the pair-only operation.
+func (c *replayEntryCall) treePlan(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+	batch, err := c.treeBatch(reader)
+	if err != nil {
+		return mdbx.TreeOperationV1{}, err
+	}
+	return replayTreeOperation(batch)
+}
+
+// treeBatch is plan's sequence over the envelope: proved exact-empty absence is not eligible and writes nothing; a
+// persisted REPLAY resumes; then the gates, the denied stop and the 148 qualification with sequence and plan.
+func (c *replayEntryCall) treeBatch(reader *mdbx.Reader) (mdbx.Batch, error) {
+	envelope, present, err := reader.ReadTreeAuthorityV1()
+	switch {
+	case err != nil:
+		return mdbx.Batch{}, err
+	case !present:
+		return c.decide("", replayEntryNotEligible)
+	case envelope.Authority.Phase == mdbx.StoragePhaseReplayV1:
+		resumed := *envelope.Authority.Replay
+		c.replay = &resumed
+		return c.decide("", replayEntryResume)
+	}
+	source, decided, err := c.gates(reader, envelope.Authority)
+	if err != nil || decided {
+		return mdbx.Batch{}, err
+	}
+	if c.denied {
+		return c.decide(selectedSideCapacity, "")
+	}
+	return c.treeQualified(reader, envelope, source)
+}
+
+// treeQualified is Q5, then sequence availability for two allocations, then the E plan.
+func (c *replayEntryCall) treeQualified(reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1, source byte) (mdbx.Batch, error) {
+	target, tipHeight, err := c.qualify148(reader, envelope.Authority)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	if envelope.Authority.NextGenerationID > math.MaxUint64-2 {
+		return c.decide(selectedSideInvariant, "")
+	}
+	return c.treeEntryBatch(reader, envelope, source, target, tipHeight)
+}
+
+// treeEntryBatch is the format-3 REPLAY_PROGRESS plan (GEN 1100-1112, REPLAY 4502-4521): target CURRENT n and target
+// LAG n+1 from n = next_generation_id, next n+2, GENESIS_REPLAY with the cursor PRE_GENESIS, the envelope and both
+// targets' zero counter and empty PRE_GENESIS FULL_HISTORY binding rows.
+func (c *replayEntryCall) treeEntryBatch(reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1, source byte, target mdbx.RecoveryTargetV1, tipHeight uint64) (mdbx.Batch, error) {
+	a := &envelope.Authority
+	root, err := c.treeTargetRoot(reader, a.ActiveGenerationID, target)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	profile := a.ActiveProfile
+	if source == 'd' {
+		profile = *a.PendingTargetProfile
+	}
+	n, active := a.NextGenerationID, a.ActiveGenerationID
+	replay := mdbx.ReplayV1{TargetProfile: profile, TargetGenerationID: n, Target: target, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}}
+	a.Phase, a.Lifecycle, a.Replay, a.NextGenerationID, a.PendingTargetProfile = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1, &replay, n+2, nil
+	envelope.TargetLagGenerationID, envelope.SourceKind, envelope.Progress = n+1, mdbx.TreeSourceGenesisReplayV1, mdbx.TreeProgressV1{}
+	literal, err := replayTreeEncode(envelope)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	c.replay, c.planned, c.step = &replay, true, ""
+	return mdbx.Batch{Mutations: replayTreeEntryRows(literal, root, n), Consulted: replayEntryConsulted(active, tipHeight)}, nil
+}
+
+// replayTreeEntryRows is the envelope row, then both targets' counter rows, then their binding rows ((rank, key) order).
+func replayTreeEntryRows(literal, root []byte, n uint64) []mdbx.Mutation {
+	meta := mdbx.TreeSchemaV1DBIs()[0]
+	rows := []mdbx.Mutation{{DBI: meta, Key: []byte{0x02}, BeforePresent: true, AfterKind: mdbx.AfterLiteral, Literal: literal}}
+	for _, tag := range []byte{0x10, 0x11} {
+		value := root
+		if tag == 0x10 {
+			value = mdbx.LogicalCounterValue(0, 0)
+		}
+		for _, g := range []uint64{n, n + 1} {
+			rows = append(rows, mdbx.Mutation{DBI: meta, Key: binary.BigEndian.AppendUint64([]byte{tag}, g), AfterKind: mdbx.AfterLiteral, Literal: value})
+		}
+	}
+	return rows
+}
+
+// treeTargetRoot reads the active CURRENT binding for its DatabaseID and encodes the targets' empty binding (AUTH
+// 1034-1062). A transient read failure carries the canonical-artifact read site; absence is integrity.
+func (c *replayEntryCall) treeTargetRoot(reader *mdbx.Reader, active uint64, target mdbx.RecoveryTargetV1) ([]byte, error) {
+	c.step = selectedSideCanonical
+	binding, present, err := reader.ReadTreeRootBindingV1(active)
+	switch {
+	case err != nil:
+		return nil, err
+	case !present:
+		return nil, &selectedSideFailure{result: selectedSideIntegrity, cause: errors.New("active CURRENT root binding absent")}
+	}
+	c.step = ""
+	root := mdbx.RootBindingV1{
+		DatabaseID: binding.DatabaseID, CommitmentVersion: 1, ChainID: target.ChainID, GenesisHash: target.GenesisHash,
+		Endpoint: mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointPreGenesisV1}, RootDigest: sha3.Sum256([]byte(canonicalUTXOEmptyDomain)),
+		Top: mdbx.TreeTopV1{Kind: mdbx.TreeTopEmptyV1}, Assurance: mdbx.TreeAssuranceV1{Kind: mdbx.TreeAssuranceFullHistoryV1},
+	}
+	encoded, err := root.Encode()
+	if err != nil {
+		return nil, &selectedSideFailure{result: selectedSideInvariant, cause: err}
+	}
+	return encoded, nil
+}
+
+// replayTreeDirect is PlanDirectReplayEntryMDBX on a tree Reader after its context and LANE_MAX gates: a read error is
+// returned with ReadResource empty; proved exact-empty absence and any domain other than NONE/STABLE with no selected
+// side is no plan; the minimum share is M148 (M); then the identity page and, for an H>0 identity, Q5, sequence and
+// the E plan with lane = limit.
+func (o *ReplayEntryOwnerV1) replayTreeDirect(reader *mdbx.Reader, limit uint64) (ReplayRecoveryPlanV1, func(), error) {
+	envelope, present, err := reader.ReadTreeAuthorityV1()
+	a := envelope.Authority
+	switch {
+	case err != nil || !present:
+		return ReplayRecoveryPlanV1{}, nil, err
+	case !replayTreeDirectDomain(a):
+		return ReplayRecoveryPlanV1{}, nil, nil
+	case limit < replayRecoveryMin148Bytes:
+		return ReplayRecoveryPlanV1{}, nil, replayRecoveryRefusal(selectedSideCapacity, "replay entry share below the minimum")
+	}
+	identity, site, err := replayEntryIdentity(reader, a.ActiveGenerationID)
+	if err != nil || identity != 2 {
+		return ReplayRecoveryPlanV1{ReadResource: site}, nil, err
+	}
+	call := &replayEntryCall{owner: o, sentinel: errors.New("direct replay entry decision"), lane: limit}
+	plan, err := replayTreeDirectPlan(call, reader, envelope)
+	return plan, call.release, err
+}
+
+// replayTreeDirectDomain is NONE/STABLE with no selected side.
+func replayTreeDirectDomain(a mdbx.StorageAuthorityV1) bool {
+	return a.Phase == mdbx.StoragePhaseNoneV1 && a.Lifecycle == mdbx.StorageLifecycleStableV1 && a.SelectedSide == nil
+}
+
+// replayTreeDirectPlan is replayRecoveryDirect over Q5, sequence and the E plan; a decided outcome becomes its refusal.
+func replayTreeDirectPlan(call *replayEntryCall, reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1) (ReplayRecoveryPlanV1, error) {
+	batch, err := call.treeQualified(reader, envelope, 'b')
+	switch {
+	case errors.Is(err, call.sentinel):
+		return ReplayRecoveryPlanV1{}, replayRecoveryRefusal(call.result, "direct replay entry refused")
+	case err != nil:
+		return ReplayRecoveryPlanV1{ReadResource: call.step}, err
+	}
+	return ReplayRecoveryPlanV1{Batch: batch}, nil
 }

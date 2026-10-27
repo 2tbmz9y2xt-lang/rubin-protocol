@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -470,4 +471,316 @@ func TestReplayTreeRecomputeStale(t *testing.T) {
 	c := rtRecompute(t, w.btWorld, NewReplayEntryOwnerV1(view, w.g), false)
 	logicalMDBXAssert(t, c.recErr == nil && c.report.Report == ReplayRecomputationStaleV1 && c.report.Result == replayEntryStale && reflect.DeepEqual(c.report.envelope, before), "Y1 STALE: %+v %v", c.report, c.recErr)
 	logicalMDBXAssert(t, c.convErr == nil && reflect.ValueOf(c.batch).IsZero() && c.truth == mdbx.CommitTruthOld && reflect.DeepEqual(image, rtImage(t, w.btWorld)) && view.releases == 1, "Y1 STALE conversion: %+v %d", c.batch, c.truth)
+}
+
+// rtSet rewrites the envelope of a format-3 world (rows of other generations are untouched).
+func rtSet(t *testing.T, w *btWorld, envelope mdbx.TreeAuthorityV1, extra ...mdbx.Mutation) {
+	t.Helper()
+	literal, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil, "envelope encode: %v", err)
+	m := btMutation(0, []byte{2}, literal)
+	m.BeforePresent = true
+	w.pair(t, append(extra, m)...)
+}
+
+// rtEntryWorld is btNew's NONE/STABLE envelope (active 1, lag 2, next 5) with an empty active index and a 148 sequence
+// 0..3 from its own genesis, the inventory holding the genesis header (Fork F identity anchor, no published genesis);
+// edit, when non-nil, rewrites the envelope.
+func rtEntryWorld(t *testing.T, edit func(e *mdbx.TreeAuthorityV1)) (*q148World, *q148Seq, *q148View) {
+	t.Helper()
+	s := newQ148Seq(t, POW_LIMIT, 1<<30)
+	s.extend(t, 3, 2*TARGET_BLOCK_INTERVAL, false)
+	w := newQ148World(t, s, -1, nil)
+	logicalMDBXAssert(t, reflect.DeepEqual(rtEnvelope(t, w.btWorld), rtStable()), "entry world premise")
+	if edit != nil {
+		e := rtStable()
+		edit(&e)
+		rtSet(t, w.btWorld, e)
+	}
+	return w, s, &q148View{inv: q148Complete([][32]byte{s.tip()}, s.headers)}
+}
+
+// rtBinding is the target image binding from AUTH 1034-1062: database {7}, commitment 1, the target's chain and
+// genesis, PRE_GENESIS, the empty-tree digest sha3-256("RUBIN_UTXO_TREE_V1\x00"), Top empty, FULL_HISTORY.
+func rtBinding(t *testing.T, chain, genesis [32]byte) []byte {
+	t.Helper()
+	encoded, err := (mdbx.RootBindingV1{DatabaseID: [32]byte{7}, CommitmentVersion: 1, ChainID: chain, GenesisHash: genesis, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}).Encode()
+	logicalMDBXAssert(t, err == nil, "binding: %v", err)
+	return encoded
+}
+
+// rtEntered is the E plan's envelope from the aliases for before with n = next, target profile profile and target.
+func rtEntered(before mdbx.TreeAuthorityV1, profile mdbx.StorageProfileV1, target mdbx.RecoveryTargetV1) mdbx.TreeAuthorityV1 {
+	want := before
+	n := before.Authority.NextGenerationID
+	want.Authority.Phase, want.Authority.Lifecycle, want.Authority.PendingTargetProfile = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1, nil
+	want.Authority.Replay = &mdbx.ReplayV1{TargetProfile: profile, TargetGenerationID: n, Target: target, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}}
+	want.Authority.NextGenerationID = n + 2
+	want.TargetLagGenerationID, want.SourceKind, want.Progress = n+1, mdbx.TreeSourceGenesisReplayV1, mdbx.TreeProgressV1{}
+	return want
+}
+
+// rtTargetRows asserts both target generations' zero counter and empty binding rows (E1, M6).
+func rtTargetRows(t *testing.T, w *btWorld, n uint64, binding []byte, label string) {
+	t.Helper()
+	for _, g := range []uint64{n, n + 1} {
+		logicalMDBXAssert(t, bytes.Equal(rtImageRow(t, w, btMeta(0x10, g)), make([]byte, 16)), "%s: counter row of %d", label, g)
+		logicalMDBXAssert(t, bytes.Equal(rtImageRow(t, w, btMeta(0x11, g)), binding), "%s: binding row of %d", label, g)
+	}
+}
+
+// rtSameExceptMeta asserts every family count other than meta and every image row other than the envelope and the
+// generations 5 and 6 rows is unchanged.
+func rtSameExceptMeta(t *testing.T, before, after [][]byte, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, len(before) == len(after) && bytes.Equal(before[0][8:], after[0][8:]), "%s: a non-meta family changed", label)
+	for i := 1; i < len(before); i++ {
+		logicalMDBXAssert(t, i == 3 || i >= 13 || bytes.Equal(before[i], after[i]), "%s: row %d changed", label, i)
+	}
+}
+
+// E1, E2, E3, X1, X2, H4, M1, M6, M7, M11: source (b) and (d) enter through one pair-only UpdateTreeV1 that allocates
+// target CURRENT n and target LAG n+1 and writes both target images; the account is an owner at MinReservationLimit.
+func TestReplayTreeEntry(t *testing.T) {
+	archive := mdbx.StorageProfileArchiveV1
+	for _, c := range []struct {
+		label   string
+		edit    func(e *mdbx.TreeAuthorityV1)
+		profile mdbx.StorageProfileV1
+	}{
+		{"E1 source b", nil, mdbx.StorageProfilePrunedV1},
+		{"E2 source d", func(e *mdbx.TreeAuthorityV1) {
+			e.Authority.Lifecycle, e.Authority.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &archive
+		}, mdbx.StorageProfileArchiveV1},
+		{"E3 boundary", func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = math.MaxUint64 - 2 }, mdbx.StorageProfilePrunedV1},
+	} {
+		w, s, view := rtEntryWorld(t, c.edit)
+		before := rtEnvelope(t, w.btWorld)
+		image := rtImage(t, w.btWorld)
+		out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+		target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
+		want := rtEntered(before, c.profile, target)
+		logicalMDBXAssert(t, out.Err == nil && out.Truth == mdbx.CommitTruthNew && out.CanonicalTruth == "NEW" && out.Result == "" && out.Decision == "" && reflect.DeepEqual(out.Replay, want.Authority.Replay),
+			"%s outcome: %+v", c.label, out)
+		got := rtEnvelope(t, w.btWorld)
+		decoded := rtLegal(t, rtImageRow(t, w.btWorld, []byte{2}), c.label)
+		logicalMDBXAssert(t, reflect.DeepEqual(got, want) && reflect.DeepEqual(decoded, want), "%s readback: %+v want %+v", c.label, got, want)
+		n := before.Authority.NextGenerationID
+		rtTargetRows(t, w.btWorld, n, rtBinding(t, w.g.ChainID, s.hashes[0]), c.label)
+		after := rtImage(t, w.btWorld)
+		rtSameExceptMeta(t, image, after, c.label)
+		logicalMDBXAssert(t, binary.BigEndian.Uint64(after[0][:8]) == binary.BigEndian.Uint64(image[0][:8])+4, "%s: meta rows %x -> %x", c.label, image[0][:8], after[0][:8])
+		logicalMDBXAssert(t, view.releases == 1 && len(view.versions) == 1, "%s: ProtectV1 %v releases %d", c.label, view.versions, view.releases)
+		logicalMDBXAssert(t, reflect.DeepEqual(view.limits, []uint64{replayInvLimit148(replayTreeOwnBytes)}), "%s: lane %v", c.label, view.limits)
+	}
+}
+
+// X2, M10: with competing charges leaving exactly LANE_MAX of an owner at MinReservationLimit, the entry plan commits:
+// OWN plus its step-5 charge fit the account ceiling and the aggregate (OWN = LANE_MAX - P_PAIR, compile-checked).
+func TestReplayTreeEntryAccountFit(t *testing.T) {
+	logicalMDBXAssert(t, replayTreeOwnBytes+replayTreePairBytes == mdbx.LaneMaxBytes && replayTreeOwnBytes <= mdbx.MaxOperationDataBytes && replayTreeOwnBytes >= replayRecoveryMin148Bytes, "OWN %d", replayTreeOwnBytes)
+	w, _, view := rtEntryWorld(t, nil)
+	var out ReplayEntryOutcomeV1
+	rtCharges(t, w.owner, mdbx.MinReservationLimit-mdbx.LaneMaxBytes, func() {
+		out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+	})
+	logicalMDBXAssert(t, out.Err == nil && out.Truth == mdbx.CommitTruthNew, "X2: %+v", out)
+}
+
+// E4, M12: a persisted REPLAY resumes with zero mutation and no view call, also when the OWN charge is refused.
+func TestReplayTreeEntryResume(t *testing.T) {
+	for _, limit := range []uint64{mdbx.MinReservationLimit, 1} {
+		for _, kind := range []mdbx.TreeSourceKindV1{mdbx.TreeSourceGenesisReplayV1, mdbx.TreeSourceImageV1} {
+			w := q148WorldOf(t)
+			e := rtStable()
+			profile := mdbx.StorageProfileArchiveV1
+			e.Authority.Phase, e.Authority.Lifecycle = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1
+			e.Authority.Replay = &mdbx.ReplayV1{
+				TargetProfile: profile, TargetGenerationID: 3, Target: mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}, TipHash: [32]byte{9}, TipHeight: 4, CumulativeChainwork: [40]byte{39: 5}},
+				Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1},
+			}
+			e.TargetLagGenerationID, e.SourceKind = 4, kind
+			if kind == mdbx.TreeSourceImageV1 {
+				e.Progress, e.Authority.Replay.Cursor = mdbx.TreeProgressV1{Kind: mdbx.TreeProgressPartialV1, Payload: []byte{1}}, mdbx.ReplayCursorV1{}
+			}
+			rtSet(t, w, e)
+			image := rtImage(t, w)
+			owner, _ := mdbx.NewOperationReservationOwner(limit)
+			view := &q148View{}
+			out := NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}).EnterReplayTargetMDBX(w.s, owner)
+			label := fmt.Sprintf("E4 limit %d kind %d", limit, kind)
+			logicalMDBXAssert(t, out.Err == nil && out.Decision == replayEntryResume && out.Result == "" && out.Truth == mdbx.CommitTruthOld && out.CanonicalTruth == "OLD" && reflect.DeepEqual(out.Replay, e.Authority.Replay),
+				"%s: %+v", label, out)
+			logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)) && reflect.DeepEqual(rtEnvelope(t, w), e) && view.limits == nil && view.versions == nil, "%s: image or view", label)
+		}
+	}
+}
+
+func q148WorldOf(t *testing.T) *btWorld {
+	t.Helper()
+	return btNew(t)
+}
+
+// rtRefused asserts a zero-mutation OLD outcome with result.
+func rtRefused(t *testing.T, out ReplayEntryOutcomeV1, result string, image, after [][]byte, label string) {
+	t.Helper()
+	logicalMDBXAssert(t, out.Truth == mdbx.CommitTruthOld && out.CanonicalTruth == "OLD" && out.Result == result && out.Replay == nil, "%s: %+v want %q", label, out, result)
+	logicalMDBXAssert(t, reflect.DeepEqual(image, after), "%s: image changed", label)
+}
+
+// E5, E10, M3, M13: sequence exhaustion is TERMINAL_LOCAL_INVARIANT(evidence) before the DatabaseID read (the active
+// CURRENT binding is deleted, so a read before the check would be integrity).
+func TestReplayTreeEntryExhausted(t *testing.T) {
+	for _, next := range []uint64{math.MaxUint64 - 1, math.MaxUint64} {
+		w, _, view := rtEntryWorld(t, nil)
+		e := rtStable()
+		e.Authority.NextGenerationID = next
+		rtSet(t, w.btWorld, e, mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: btMeta(0x11, 1), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+		image := rtImage(t, w.btWorld)
+		out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+		rtRefused(t, out, selectedSideInvariant, image, rtImage(t, w.btWorld), fmt.Sprintf("E5 next %d", next))
+		logicalMDBXAssert(t, out.Err == nil && view.releases == 1, "E5 next %d: %v releases %d", next, out.Err, view.releases)
+	}
+}
+
+// D5: an absent active CURRENT binding after sequence availability is TERMINAL_STORE_INTEGRITY(canonical).
+func TestReplayTreeEntryBindingAbsent(t *testing.T) {
+	w, _, view := rtEntryWorld(t, nil)
+	rtSet(t, w.btWorld, rtStable(), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: btMeta(0x11, 1), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
+	image := rtImage(t, w.btWorld)
+	out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+	rtRefused(t, out, selectedSideIntegrity, image, rtImage(t, w.btWorld), "D5 absent")
+}
+
+// E6, E7, E8, D4: qualification refusals and exact-empty absence write nothing.
+func TestReplayTreeEntryRefusals(t *testing.T) {
+	for _, c := range []struct {
+		label  string
+		view   func(v *q148View, s *q148Seq)
+		result string
+	}{
+		{"E6 genesis only", func(v *q148View, s *q148Seq) { v.inv = q148Complete([][32]byte{s.hashes[0]}, s.headers[:1]) }, replayEntryRecovery},
+		{"E7 incomplete", func(v *q148View, _ *q148Seq) {
+			v.inv = HeaderCandidateInventory148V1{Status: HeaderCandidateIncompleteV1}
+		}, replayEntryRecovery},
+		{"E8 stale", func(v *q148View, _ *q148Seq) { v.stale = true }, replayEntryStale},
+	} {
+		for _, next := range []uint64{5, math.MaxUint64} {
+			w, s, view := rtEntryWorld(t, func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = next })
+			c.view(view, s)
+			image := rtImage(t, w.btWorld)
+			out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+			rtRefused(t, out, c.result, image, rtImage(t, w.btWorld), fmt.Sprintf("%s next %d", c.label, next))
+		}
+	}
+	w := rtNew(t, mdbx.TreeAuthorityV1{})
+	image := rtImage(t, w)
+	view := &q148View{}
+	out := NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}).EnterReplayTargetMDBX(w.s, w.owner)
+	logicalMDBXAssert(t, out.Err == nil && out.Decision == replayEntryNotEligible && view.limits == nil, "D4: %+v", out)
+	rtRefused(t, out, "", image, rtImage(t, w), "D4")
+}
+
+// rtCharges nests owner-level LaneOperation charges totalling live bytes, then runs body.
+func rtCharges(t *testing.T, owner *mdbx.OperationReservationOwner, live uint64, body func()) {
+	t.Helper()
+	if live == 0 {
+		body()
+		return
+	}
+	step := min(live, mdbx.LaneMaxBytes)
+	err := owner.WithReservation(step, func() error {
+		rtCharges(t, owner, live-step, body)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "competing charge %d: %v", step, err)
+}
+
+// E9(a), E9(b), E10: the OWN charge refused before the authority read; the step-5 Pair copy refused after sequence
+// availability; with sequence exhausted the step-5 setup is E5, and the OWN refusal precedes the sequence check.
+func TestReplayTreeEntryCapacity(t *testing.T) {
+	for _, next := range []uint64{5, math.MaxUint64} {
+		w, _, view := rtEntryWorld(t, func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = next })
+		image := rtImage(t, w.btWorld)
+		owner, _ := mdbx.NewOperationReservationOwner(mdbx.MinReservationLimit - 1)
+		out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, owner)
+		rtRefused(t, out, selectedSideCapacity, image, rtImage(t, w.btWorld), fmt.Sprintf("E9(a) next %d", next))
+		logicalMDBXAssert(t, view.limits == nil && view.versions == nil, "E9(a): Q5 ran")
+	}
+	for next, result := range map[uint64]string{5: selectedSideCapacity, math.MaxUint64: selectedSideInvariant} {
+		w, _, view := rtEntryWorld(t, func(e *mdbx.TreeAuthorityV1) { e.Authority.NextGenerationID = next })
+		image := rtImage(t, w.btWorld)
+		var out ReplayEntryOutcomeV1
+		rtCharges(t, w.owner, mdbx.MinReservationLimit-replayTreeOwnBytes, func() {
+			out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+		})
+		label := fmt.Sprintf("E9(b) next %d", next)
+		rtRefused(t, out, result, image, rtImage(t, w.btWorld), label)
+		logicalMDBXAssert(t, len(view.versions) == 1 && view.releases == 1, "%s: Q5 did not run: %+v", label, view)
+		logicalMDBXAssert(t, next != 5 || mdbx.IsOperationReservationCapacity(out.Err), "%s: not the step-5 refusal: %v", label, out.Err)
+	}
+}
+
+// Y2, M14 and direct entry (E1): the format-3 minimum share is M148 (below it no identity read and no Q5; at it Q5
+// runs); at the full share the direct entry plans the E plan with lane = limit, and the plan commits through K.
+func TestReplayTreeDirectEntry(t *testing.T) {
+	s := q148Slow(t, 5)
+	w := newQ148World(t, s, 5, nil)
+	b := s.clone(2)
+	b.extend(t, 5, 3*TARGET_BLOCK_INTERVAL, false)
+	view := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[3:])}
+	owner := NewReplayEntryOwnerV1(view, w.g)
+	image := rtImage(t, w.btWorld)
+	err := w.s.View(func(r *mdbx.Reader) error {
+		plan, release, perr := owner.PlanDirectReplayEntryMDBX(r, replayRecoveryMin148Bytes-1)
+		logicalMDBXAssert(t, replayRecoveryMin148Bytes-1 == 3_550_885 && release == nil && reflect.ValueOf(plan).IsZero() && recoveryClass(perr, plan.ReadResource) == selectedSideCapacity, "Y2 M148-1: %+v %v", plan, perr)
+		logicalMDBXAssert(t, view.limits == nil, "Y2: Q5 ran below M148: %v", view.limits)
+		// At M148 the 148 inventory share is zero, so Q5 runs and the nonempty inventory is the producer violation.
+		plan, release, perr = owner.PlanDirectReplayEntryMDBX(r, replayRecoveryMin148Bytes)
+		logicalMDBXAssert(t, release == nil && reflect.ValueOf(plan).IsZero() && recoveryClass(perr, "") == selectedSideInvariant, "Y2 M148: %+v %v", plan, perr)
+		logicalMDBXAssert(t, reflect.DeepEqual(view.limits, []uint64{replayInvLimit148(replayRecoveryMin148Bytes)}), "Y2 M148: Q5 limits %v", view.limits)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "Y2 view: %v", err)
+	view.limits = nil
+	var plan ReplayRecoveryPlanV1
+	var release func()
+	cerr := w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		truth, _, _, uerr := w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			var perr error
+			plan, release, perr = owner.PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+			logicalMDBXAssert(t, perr == nil, "direct plan: %v", perr)
+			return replayTreeOperation(plan.Batch)
+		})
+		logicalMDBXAssert(t, uerr == nil && truth == mdbx.CommitTruthNew, "direct commit: %d %v", truth, uerr)
+		return nil
+	})
+	logicalMDBXAssert(t, cerr == nil && release != nil, "direct account: %v", cerr)
+	release()
+	target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: w.g.GenesisHash, TipHash: b.tip(), TipHeight: 7, CumulativeChainwork: b.work(t, 7)}
+	want := rtEntered(rtStable(), mdbx.StorageProfilePrunedV1, target)
+	logicalMDBXAssert(t, reflect.DeepEqual(rtEnvelope(t, w.btWorld), want), "direct readback: %+v", rtEnvelope(t, w.btWorld))
+	rtTargetRows(t, w.btWorld, 5, rtBinding(t, w.g.ChainID, w.g.GenesisHash), "direct")
+	rtSameExceptMeta(t, image, rtImage(t, w.btWorld), "direct")
+	logicalMDBXAssert(t, reflect.DeepEqual(view.limits, []uint64{replayInvLimit148(mdbx.MaxOperationDataBytes)}), "direct lane: %v", view.limits)
+	logicalMDBXAssert(t, reflect.DeepEqual(plan.Batch.Consulted, replayEntryConsulted(1, 5)), "direct consulted")
+}
+
+// D4, D2 (direct entry): exact-empty absence is no plan and no error; a non-empty absence is integrity; neither reads
+// the view.
+func TestReplayTreeDirectAbsence(t *testing.T) {
+	g := PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}
+	for label, w := range map[string]*btWorld{"D4": rtNew(t, mdbx.TreeAuthorityV1{}), "D2": rtNew(t, mdbx.TreeAuthorityV1{}, btMutation(0, btMeta(0x10, 1), make([]byte, 16)))} {
+		view := &q148View{}
+		err := w.s.View(func(r *mdbx.Reader) error {
+			plan, release, perr := NewReplayEntryOwnerV1(view, g).PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+			want := ""
+			if label == "D2" {
+				want = selectedSideIntegrity
+			}
+			logicalMDBXAssert(t, release == nil && reflect.ValueOf(plan).IsZero() && (perr == nil) == (label == "D4") && (perr == nil || recoveryClass(perr, plan.ReadResource) == want), "%s: %+v %v", label, plan, perr)
+			return nil
+		})
+		logicalMDBXAssert(t, (err == nil || label == "D2") && view.limits == nil, "%s view: %v", label, err) // D2 latches the Store
+	}
 }
