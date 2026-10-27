@@ -737,8 +737,9 @@ func (v *rtPanicView) Inventory148V1(limit uint64) HeaderCandidateInventory148V1
 
 // result_and_effect_closure (panic, format 3): a panic inside the format-3 entry route's plan callback propagates with
 // its payload unchanged through UpdateTreeV1 and the OWN charge, mutates nothing and runs no release (ProtectV1 never
-// returned one); the next entry on the same store and owner commits E1 and runs its release exactly once. The plan calls
-// no view method after ProtectV1 (qualify148), so no panic with a pending release is reachable on this route.
+// returned one); the next entry on the same store and owner commits E1 and runs its release exactly once. No
+// test-controlled hook runs after ProtectV1 (qualify148), so this test covers the pre-ProtectV1 panic; the release after
+// ProtectV1 is the shared deferred runRelease in EnterReplayTargetMDBX, checked by TestReplayEntryProtectPlacement.
 func TestReplayTreeEntryPanic(t *testing.T) {
 	w, _, inner := rtEntryWorld(t, nil)
 	image := rtImage(t, w.btWorld)

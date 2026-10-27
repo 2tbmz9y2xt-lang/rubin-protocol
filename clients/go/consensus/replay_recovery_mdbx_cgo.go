@@ -90,9 +90,9 @@ func replayRecoveryRefusal(result, message string) error {
 // Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan. On a tree Reader
 // (replayTreeIntent) the domain is read from the TreeAuthorityV1 envelope: without a selected side the plan writes
 // the planned envelope, RECOVERY_REQUIRED with pending = the active profile and TargetLagGenerationID, SourceKind and
-// Progress none (every other envelope field is the read one); with a selected side the clear planner's result is returned unchanged, and on a tree Reader
-// that result is always the clear planner's ReadStorageAuthorityV1 tree-Reader refusal with an empty ReadResource
-// (RUB-1729 owns that branch).
+// Progress none (every other envelope field is the read one); with a selected side the clear planner's result is
+// returned unchanged, and on a tree Reader that result is always the clear planner's ReadStorageAuthorityV1
+// tree-Reader refusal with an empty ReadResource (RUB-1729 owns that branch).
 func PlanRecoveryIntentMDBX(reader *mdbx.Reader) (ReplayRecoveryPlanV1, error) {
 	a, err := reader.ReadStorageAuthorityV1()
 	if replayTreeRefused(err, replayTreeReaderRefusal) {
