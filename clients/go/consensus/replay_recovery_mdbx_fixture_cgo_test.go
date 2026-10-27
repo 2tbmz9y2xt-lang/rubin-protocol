@@ -3,8 +3,10 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -292,5 +294,151 @@ func TestReplayRecoveryFixtureIntentSideRefusals(t *testing.T) {
 		logicalMDBXAssert(t, clear.err != nil && intent.err != nil && intent.err.Error() == clear.err.Error() && intent.resource == clear.resource && intent.batch == 0,
 			"R46 %s: intent %+v clear %+v", c.label, intent, clear)
 		logicalMDBXAssert(t, recoveryClass(intent.err, intent.resource) == recoveryClass(clear.err, clear.resource), "R46 %s class", c.label)
+	}
+}
+
+// D1 (format-3 intent): a meta key 2 row that is no decodable legal TreeAuthorityV1 is TERMINAL_STORE_INTEGRITY(canonical)
+// with ReadResource empty, refused at PREWRITE before any write (the latched Store refuses every later read); no role
+// is guessed.
+func TestReplayTreeFixtureIntentUndecodable(t *testing.T) {
+	legal, err := rtPrune().Encode()
+	logicalMDBXAssert(t, err == nil, "encode: %v", err)
+	damaged := map[string][]byte{"version 2": append([]byte{2}, legal[1:]...), "source kind 3": bytes.Clone(legal), "GENESIS_REPLAY at PRUNE_GC": bytes.Clone(legal), "target lag at PRUNE_GC": bytes.Clone(legal)}
+	damaged["source kind 3"][1], damaged["GENESIS_REPLAY at PRUNE_GC"][1], damaged["target lag at PRUNE_GC"][17] = 3, 1, 3
+	progress := bytes.Clone(legal)
+	logicalMDBXAssert(t, bytes.Equal(progress[len(progress)-5:], make([]byte, 5)), "progress tail premise: %x", progress[len(progress)-5:])
+	progress[len(progress)-5] = byte(mdbx.TreeProgressPartialV1)
+	damaged["progress at PRUNE_GC"] = progress
+	damaged["STABLE with pending"] = rtIllegalStablePending(t)
+	replay := rtPrune()
+	replay.Authority.Phase, replay.Authority.Lifecycle, replay.Authority.Cleanup = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1, nil
+	replay.Authority.Replay = &mdbx.ReplayV1{TargetProfile: mdbx.StorageProfilePrunedV1, TargetGenerationID: 3, Target: mdbx.RecoveryTargetV1{TipHeight: 1, CumulativeChainwork: [40]byte{39: 1}}, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}}
+	replay.TargetLagGenerationID, replay.SourceKind = 4, mdbx.TreeSourceGenesisReplayV1
+	replayLegal, err := replay.Encode()
+	logicalMDBXAssert(t, err == nil && bytes.Equal(replayLegal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 4}), "REPLAY target lag premise: %v %x", err, replayLegal[10:18])
+	lagZero, lagActive := bytes.Clone(replayLegal), bytes.Clone(replayLegal)
+	lagZero[17], lagActive[17] = 0, 1
+	damaged["REPLAY target lag zero"], damaged["REPLAY target lag = active"] = lagZero, lagActive
+	for label, value := range damaged {
+		w := rtNew(t, rtPrune())
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, value) == nil, "%s seed", label)
+		c := rtIntent(t, w)
+		logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideIntegrity && c.truth == mdbx.CommitTruthOld,
+			"D1 %s: %+v %v %v", label, c.plan, c.planErr, c.err)
+		logicalMDBXAssert(t, c.stage == mdbx.UpdateStagePrewrite && c.index == -1, "D1 %s: the refusal reached stage %d", label, c.stage)
+	}
+}
+
+// D3 (format-3 intent): a transient native failure of the envelope get or of a control-row get inside the absence
+// census is LOCAL_RESOURCE_UNAVAILABLE(storage_io) with ReadResource empty, never an empty plan, and nothing written.
+func TestReplayTreeFixtureIntentEIO(t *testing.T) {
+	for label, c := range map[string]struct {
+		envelope mdbx.TreeAuthorityV1
+		key      []byte
+	}{"envelope get": {rtPrune(), []byte{2}}, "absence census": {mdbx.TreeAuthorityV1{}, []byte{0}}} {
+		w := rtNew(t, c.envelope)
+		image := rtImage(t, w)
+		var out rtCommit
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() { out = rtIntent(t, w) })
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "D3 %s fixture: %v %+v", label, err, evidence)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, out.planErr != nil && errors.As(out.planErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(out.plan).IsZero() && out.truth == mdbx.CommitTruthOld &&
+			recoveryClass(out.planErr, out.plan.ReadResource) == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "D3 %s: %+v %v %v", label, out.plan, out.planErr, out.err)
+		w.reopen(t)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "D3 %s: image changed", label)
+	}
+}
+
+// V capacity (format-3 intent): a legal envelope of exactly MaxMetadataBytes grows by the one pending-profile byte past
+// the size bound: LOCAL_RESOURCE_UNAVAILABLE(storage_capacity) at PREWRITE, no latch, the envelope row unchanged.
+func TestReplayTreeFixtureIntentCapacity(t *testing.T) {
+	envelope := rtPrune()
+	envelope.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte{1}}
+	base, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil, "base encode: %v", err)
+	envelope.Authority.ExcludedInvalidBranch.ExactConsensusError = bytes.Repeat([]byte{1}, 1+mdbx.MaxMetadataBytes-len(base))
+	full, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil && len(full) == mdbx.MaxMetadataBytes, "full encode: %d %v", len(full), err)
+	w := rtNew(t, rtPrune())
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, full) == nil, "seed")
+	image := rtImage(t, w)
+	c := rtIntent(t, w)
+	logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideCapacity &&
+		c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "capacity: %+v %v %v", c.plan, c.planErr, c.err)
+	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)) && reflect.DeepEqual(rtEnvelope(t, w), envelope), "capacity: the Store latched or the image changed")
+}
+
+// rtIllegalStablePending is a PRUNE_GC envelope whose lifecycle byte is STABLE while it carries a pending profile: the
+// legal RECOVERY_REQUIRED+pending encoding compared with the PRUNE_GC/STABLE encoding without pending (rtPrune); the
+// first differing byte after the 22-byte envelope header must be the lifecycle byte (asserted), and it is rewritten.
+func rtIllegalStablePending(t *testing.T) []byte {
+	t.Helper()
+	profile := mdbx.StorageProfilePrunedV1
+	required := rtPrune()
+	required.Authority.Lifecycle, required.Authority.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &profile
+	encoded, err := required.Encode()
+	logicalMDBXAssert(t, err == nil, "required encode: %v", err)
+	stable, err := rtPrune().Encode()
+	logicalMDBXAssert(t, err == nil, "stable encode: %v", err)
+	for i := 22; i < len(stable); i++ {
+		if encoded[i] != stable[i] {
+			logicalMDBXAssert(t, encoded[i] == byte(mdbx.StorageLifecycleRecoveryRequiredV1) && stable[i] == byte(mdbx.StorageLifecycleStableV1), "lifecycle byte premise at %d: %d/%d", i, encoded[i], stable[i])
+			encoded[i] = byte(mdbx.StorageLifecycleStableV1)
+			return encoded
+		}
+	}
+	t.Fatal("no lifecycle byte")
+	return nil
+}
+
+// D1, H1 (format-3 recomputation and conversion): a REPLAY meta key 2 row whose target lag equals the active id, the
+// lag id or the target CURRENT id, or is zero, is TERMINAL_STORE_INTEGRITY(canonical) with ReadResource empty before
+// Q6 (no inventory call), never a three-role conversion; nothing is written.
+func TestReplayTreeFixtureRecomputeUndecodable(t *testing.T) {
+	replay := rtReplayEnvelope(mdbx.StorageAuthorityV1{ActiveGenerationID: 1, Phase: mdbx.StoragePhaseReplayV1, Replay: &mdbx.ReplayV1{
+		TargetGenerationID: 2,
+		Target:             mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}, TipHash: [32]byte{1}, TipHeight: 1, CumulativeChainwork: [40]byte{39: 1}}, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: 1, BlockHash: [32]byte{1}},
+	}})
+	legal, err := replay.Encode()
+	logicalMDBXAssert(t, err == nil, "REPLAY encode: %v", err)
+	logicalMDBXAssert(t, bytes.Equal(legal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 4}), "REPLAY target lag premise: %x", legal[10:18])
+	for label, lag := range map[string]byte{"control": 4, "zero": 0, "= active": 1, "= target": 2, "= lag": 3} {
+		damaged := bytes.Clone(legal)
+		damaged[17] = lag
+		w := rtNew(t, rtStable())
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, damaged) == nil, "%s seed", label)
+		view := &q148View{}
+		c := rtRecompute(t, w, NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}), false)
+		if lag == 4 {
+			logicalMDBXAssert(t, recoveryClass(c.recErr, c.report.ReadResource) != selectedSideIntegrity && c.report.envelope.TargetLagGenerationID == 4 && len(view.limits) == 1,
+				"H1 control: the legal envelope did not reach Q6: %+v %v", c.report, c.recErr)
+			continue
+		}
+		logicalMDBXAssert(t, c.recErr != nil && errors.Is(c.err, c.recErr) && reflect.ValueOf(c.report).IsZero() && recoveryClass(c.recErr, c.report.ReadResource) == selectedSideIntegrity,
+			"H1 %s: %+v %v", label, c.report, c.recErr)
+		logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite && view.limits == nil && view.versions == nil, "H1 %s: %d/%d view %+v", label, c.truth, c.stage, view)
+	}
+}
+
+// D3 (format-3 recomputation): a transient native failure of the envelope get or inside the absence census is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_io) with ReadResource empty before Q6, never NOT_APPLICABLE, and nothing written.
+func TestReplayTreeFixtureRecomputeEIO(t *testing.T) {
+	for label, c := range map[string]struct {
+		envelope mdbx.TreeAuthorityV1
+		key      []byte
+	}{"envelope get": {rtStable(), []byte{2}}, "absence census": {mdbx.TreeAuthorityV1{}, []byte{0}}} {
+		w := rtNew(t, c.envelope)
+		image := rtImage(t, w)
+		view := &q148View{}
+		var out rtRecomputed
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() {
+			out = rtRecompute(t, w, NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}), false)
+		})
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "D3 %s fixture: %v %+v", label, err, evidence)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, out.recErr != nil && errors.As(out.recErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(out.report).IsZero() && out.truth == mdbx.CommitTruthOld &&
+			recoveryClass(out.recErr, out.report.ReadResource) == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" && view.limits == nil, "D3 %s: %+v %v %v", label, out.report, out.recErr, out.err)
+		w.reopen(t)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "D3 %s: image changed", label)
 	}
 }
