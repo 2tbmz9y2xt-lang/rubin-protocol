@@ -8,7 +8,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"math"
+	"math/big"
+	"slices"
 	"testing"
+
+	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
 // q148Half is a target that about half of all hashes meet, so a full-148 and a 116-prefix PoW verdict can differ.
@@ -194,5 +198,503 @@ func TestReplayQualifier116Unchanged(t *testing.T) {
 	q.anchor()
 	if q.count != 1 || q.target != q148Half || q.badFrom != math.MaxUint64 {
 		t.Fatalf("116 anchor: count %d target %x badFrom %d", q.count, q.target, q.badFrom)
+	}
+}
+
+// q148View is the test producer of HeaderCandidateView148V1; it also implements HeaderCandidateViewV1 (the owner's
+// view type) and records every call.
+type q148View struct {
+	inv        HeaderCandidateInventory148V1
+	calls116   int
+	limits     []uint64
+	versions   []uint64
+	stale      bool
+	nilRelease bool
+	releases   int
+}
+
+func (v *q148View) InventoryV1(uint64) HeaderCandidateInventoryV1 {
+	v.calls116++
+	return HeaderCandidateInventoryV1{}
+}
+
+func (v *q148View) Inventory148V1(limit uint64) HeaderCandidateInventory148V1 {
+	v.limits = append(v.limits, limit)
+	return v.inv
+}
+
+func (v *q148View) ProtectV1(version uint64) (bool, func()) {
+	v.versions = append(v.versions, version)
+	if v.nilRelease {
+		return !v.stale, nil
+	}
+	return !v.stale, func() { v.releases++ }
+}
+
+// q148Complete is a Complete 148 inventory with Version 9 and exact Bytes (32 per tip, 148 per header).
+func q148Complete(tips [][32]byte, headers [][148]byte) HeaderCandidateInventory148V1 {
+	return HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Version: 9, Tips: tips, Headers: headers, Bytes: 32*uint64(len(tips)) + 148*uint64(len(headers))}
+}
+
+// q148Seq is a 148-byte header sequence from its own genesis; each header takes its Section 15 expected target unless
+// the caller overrides it.
+type q148Seq struct {
+	headers [][148]byte
+	hashes  [][32]byte
+	times   []uint64
+	targets [][32]byte
+}
+
+func newQ148Seq(t *testing.T, target [32]byte, timestamp uint64) *q148Seq {
+	g := q148Header(t, [32]byte{}, target, timestamp, func(raw []byte) bool { return q148Meets(raw, target) })
+	return &q148Seq{headers: [][148]byte{g}, hashes: [][32]byte{q148Hash(g[:])}, times: []uint64{timestamp}, targets: [][32]byte{target}}
+}
+
+func (s *q148Seq) clone(h int) *q148Seq {
+	return &q148Seq{headers: slices.Clone(s.headers[:h+1]), hashes: slices.Clone(s.hashes[:h+1]), times: slices.Clone(s.times[:h+1]), targets: slices.Clone(s.targets[:h+1])}
+}
+
+// push appends one header over the last with the given target and timestamp; meets selects the PoW verdict.
+func (s *q148Seq) push(t *testing.T, target [32]byte, timestamp uint64, meets bool) {
+	h := q148Header(t, s.hashes[len(s.hashes)-1], target, timestamp, func(raw []byte) bool { return q148Meets(raw, target) == meets })
+	s.headers, s.hashes, s.times, s.targets = append(s.headers, h), append(s.hashes, q148Hash(h[:])), append(s.times, timestamp), append(s.targets, target)
+}
+
+// extend appends n headers spaced by spacing seconds; keep forces the parent target instead of the expected one.
+func (s *q148Seq) extend(t *testing.T, n int, spacing uint64, keep bool) {
+	t.Helper()
+	for range n {
+		h := uint64(len(s.headers))
+		target, err := ReplayExpectedTargetV1(h, s.targets[h-1], s.times[max(0, int(h)-int(WINDOW_SIZE)):])
+		if err != nil {
+			t.Fatalf("expected target at %d: %v", h, err)
+		}
+		if keep {
+			target = s.targets[h-1]
+		}
+		s.push(t, target, s.times[h-1]+spacing, true)
+	}
+}
+
+func (s *q148Seq) tip() [32]byte { return s.hashes[len(s.hashes)-1] }
+
+// work is the cumulative chainwork of heights 0..h as the 40-byte big-endian encoding.
+func (s *q148Seq) work(t *testing.T, h int) [40]byte {
+	sum := new(big.Int)
+	for _, target := range s.targets[:h+1] {
+		w, err := WorkFromTarget(target)
+		if err != nil {
+			t.Fatalf("work of %x: %v", target, err)
+		}
+		sum.Add(sum, w)
+	}
+	return [40]byte(sum.FillBytes(make([]byte, 40)))
+}
+
+// q148World is a format-3 store whose generation-1 canonical index holds heights 0..n of a 148-byte sequence.
+type q148World struct {
+	*btWorld
+	g PublishedGenesisContextV1
+}
+
+func newQ148World(t *testing.T, s *q148Seq, n int, edit func(h int, rows []mdbx.Mutation) []mdbx.Mutation) *q148World {
+	t.Helper()
+	w := &q148World{btWorld: btNew(t), g: PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: s.hashes[0]}}
+	var rows []mdbx.Mutation
+	for h := 0; h <= n; h++ {
+		parent := [32]byte{}
+		if h > 0 {
+			parent = s.hashes[h-1]
+		}
+		key, err := mdbx.HeightKey(1, uint64(h))
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := []mdbx.Mutation{btMutation(3, bytes.Clone(s.hashes[h][:]), bytes.Clone(s.headers[h][:])), btMutation(2, key, mdbx.ChainValue(s.hashes[h], parent, s.work(t, h))), q148Owner(s.hashes[h], h)}
+		if edit != nil {
+			row = edit(h, row)
+		}
+		rows = append(rows, row...)
+	}
+	if n >= 0 {
+		w.pair(t, rows...)
+	}
+	return w
+}
+
+// q148Owner is the canonical-owner row paired with a generation-1 index row (format-3 Pair pairing rule).
+func q148Owner(hash [32]byte, h int) mdbx.Mutation {
+	return btMutation(7, logicalMDBXMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(uint64(h)))
+}
+
+type q148Out struct {
+	target mdbx.RecoveryTargetV1
+	tip    uint64
+	err    error
+	call   *replayEntryCall
+}
+
+// qualify runs Q5 under one Reader of the format-3 store and then the caller's release handling.
+func (w *q148World) qualify(t *testing.T, view HeaderCandidateViewV1, a mdbx.StorageAuthorityV1, lane uint64) q148Out {
+	t.Helper()
+	out := q148Out{call: &replayEntryCall{owner: NewReplayEntryOwnerV1(view, w.g), sentinel: errors.New("q148 decision"), lane: lane}}
+	if err := w.s.View(func(r *mdbx.Reader) error {
+		out.target, out.tip, out.err = out.call.qualify148(r, a)
+		return nil
+	}); err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	out.call.runRelease()
+	return out
+}
+
+func q148Active() mdbx.StorageAuthorityV1 { return mdbx.StorageAuthorityV1{ActiveGenerationID: 1} }
+
+// selected asserts a selection of tip at height with work, the walk tip height and exactly one ProtectV1 and release.
+func (o q148Out) selected(t *testing.T, w *q148World, v *q148View, tip [32]byte, height uint64, work [40]byte, walkTip uint64, label string) {
+	t.Helper()
+	want := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: w.g.GenesisHash, TipHash: tip, TipHeight: height, CumulativeChainwork: work}
+	if o.err != nil || o.target != want || o.tip != walkTip || o.call.result != "" {
+		t.Fatalf("%s: got %+v tip %d %q %v, want %+v tip %d", label, o.target, o.tip, o.call.result, o.err, want, walkTip)
+	}
+	if !slices.Equal(v.versions, []uint64{9}) || v.releases != 1 || v.calls116 != 0 {
+		t.Fatalf("%s: ProtectV1 %v releases %d 116 calls %d", label, v.versions, v.releases, v.calls116)
+	}
+}
+
+// decided asserts a decided outcome: zero target and tip height, the sentinel, result, and the ProtectV1 count.
+func (o q148Out) decided(t *testing.T, result string, protects int, label string) {
+	t.Helper()
+	if !errors.Is(o.err, o.call.sentinel) || o.target != (mdbx.RecoveryTargetV1{}) || o.tip != 0 || o.call.result != result {
+		t.Fatalf("%s: got %+v tip %d %q %v, want %q", label, o.target, o.tip, o.call.result, o.err, result)
+	}
+	if v, ok := o.call.owner.view.(*q148View); ok && len(v.versions) != protects {
+		t.Fatalf("%s: ProtectV1 calls %d, want %d", label, len(v.versions), protects)
+	}
+}
+
+// q148Slow is a canonical sequence 0..n spaced 2*TARGET_BLOCK_INTERVAL under POW_LIMIT.
+func q148Slow(t *testing.T, n int) *q148Seq {
+	s := newQ148Seq(t, POW_LIMIT, 1<<30)
+	s.extend(t, n, 2*TARGET_BLOCK_INTERVAL, false)
+	return s
+}
+
+// TestReplayQualifier148Select is A1 and Q3: on a format-3 Reader, a received 148 branch attached at k=2 below the
+// canonical tip H=5 with greater chainwork is selected; the walk tip height is H; the 148 limit is requested.
+func TestReplayQualifier148Select(t *testing.T) {
+	s := q148Slow(t, 5)
+	w := newQ148World(t, s, 5, nil)
+	b := s.clone(2)
+	b.extend(t, 5, 3*TARGET_BLOCK_INTERVAL, false) // heights 3..7
+	v := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[3:])}
+	out := w.qualify(t, v, q148Active(), 0)
+	out.selected(t, w, v, b.tip(), 7, b.work(t, 7), 5, "A1")
+	if !slices.Equal(v.limits, []uint64{replayInvLimit148(0)}) || replayInvLimit148(0) == replayInvLimit(0) {
+		t.Fatalf("A1: limits %v, want the 148 full-lane limit %d", v.limits, replayInvLimit148(0))
+	}
+}
+
+// TestReplayQualifier148Tie is A2: three tips of equal chainwork (the canonical tip and two received tips at its
+// height); the lexicographically smallest hash is selected.
+func TestReplayQualifier148Tie(t *testing.T) {
+	s := q148Slow(t, 4)
+	w := newQ148World(t, s, 4, nil)
+	b1, b2 := s.clone(3), s.clone(3)
+	b1.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
+	b2.extend(t, 1, 4*TARGET_BLOCK_INTERVAL, false)
+	tips := [][32]byte{s.tip(), b1.tip(), b2.tip()}
+	smallest := slices.MinFunc(tips, replayHashCompare)
+	v := &q148View{inv: q148Complete(tips[1:], [][148]byte{b1.headers[4], b2.headers[4]})}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, smallest, 4, s.work(t, 4), 4, "A2")
+}
+
+// TestReplayQualifier148PrefixTip is A3: canonical height 3 declares a target other than its expected one; the
+// published prefix tip is height 2 and a heavier received branch below the bad header is ineligible.
+func TestReplayQualifier148PrefixTip(t *testing.T) {
+	s := q148Slow(t, 2)
+	s.push(t, q148Half, s.times[2]+2*TARGET_BLOCK_INTERVAL, true)
+	s.extend(t, 2, 2*TARGET_BLOCK_INTERVAL, true) // heights 4..5 keep the parent target
+	w := newQ148World(t, s, 5, nil)
+	b := s.clone(3)
+	b.extend(t, 4, 2*TARGET_BLOCK_INTERVAL, false)
+	v := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[4:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.hashes[2], 2, s.work(t, 2), 5, "A3")
+}
+
+// TestReplayQualifier148ForkF is A4 and A5: with an empty active index the anchor is Published[:148] (A4) or the
+// inventory header named GenesisHash (A5), and the received branch from it is selected; the genesis header alone is
+// reached but is no positive-height candidate.
+func TestReplayQualifier148ForkF(t *testing.T) {
+	s := newQ148Seq(t, POW_LIMIT, 1<<30)
+	s.extend(t, 3, 2*TARGET_BLOCK_INTERVAL, false)
+	w := newQ148World(t, s, -1, nil)
+	w.g.Published = append(bytes.Clone(s.headers[0][:]), make([]byte, 118)...)
+	v := &q148View{inv: q148Complete([][32]byte{s.tip()}, s.headers[1:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.tip(), 3, s.work(t, 3), 0, "A4")
+	w.g.Published = nil
+	v = &q148View{inv: q148Complete([][32]byte{s.tip()}, s.headers)}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.tip(), 3, s.work(t, 3), 0, "A5")
+	v = &q148View{inv: q148Complete([][32]byte{s.hashes[0]}, s.headers[:1])}
+	w.qualify(t, v, q148Active(), 0).decided(t, replayEntryRecovery, 0, "A5 genesis alone")
+}
+
+// TestReplayQualifier148Retarget is A6: canonical heights 0..100 and received 101..10099 spaced 1 second; the received
+// header at 10080 is qualified against the target from the 10080 timestamps of heights 0..10079, canonical ring
+// included. Its parent-target twin is ineligible and the canonical tip is selected.
+func TestReplayQualifier148Retarget(t *testing.T) {
+	s := q148Slow(t, 100)
+	w := newQ148World(t, s, 100, nil)
+	fast := s.clone(100)
+	fast.extend(t, int(WINDOW_SIZE)+19-100, 1, false)
+	quarter := [32]byte(new(big.Int).Rsh(new(big.Int).SetBytes(POW_LIMIT[:]), 2).FillBytes(make([]byte, 32)))
+	if fast.targets[WINDOW_SIZE] != quarter || fast.targets[WINDOW_SIZE-1] != POW_LIMIT {
+		t.Fatalf("schedule: boundary target %x", fast.targets[WINDOW_SIZE])
+	}
+	v := &q148View{inv: q148Complete([][32]byte{fast.tip()}, fast.headers[101:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, fast.tip(), uint64(len(fast.hashes)-1), fast.work(t, len(fast.hashes)-1), 100, "A6 boundary")
+	kept := fast.clone(int(WINDOW_SIZE) - 1)
+	kept.extend(t, 20, 1, true)
+	v = &q148View{inv: q148Complete([][32]byte{kept.tip()}, kept.headers[101:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, s.tip(), 100, s.work(t, 100), 100, "A6 boundary keeps parent target")
+}
+
+// TestReplayQualifier148MTP is A6's timestamp floor: at heights 1, 11 and 12 the MTP is the median of the min(h,11)
+// newest ancestors; a header at the MTP is ineligible and one second above it is selected.
+func TestReplayQualifier148MTP(t *testing.T) {
+	s := newQ148Seq(t, POW_LIMIT, 1<<30)
+	s.extend(t, 11, 10, false)
+	w := newQ148World(t, s, 0, nil)
+	for _, h := range []int{1, 11, 12} {
+		k := min(h, 11)
+		window := slices.Clone(s.times[h-k : h])
+		slices.Sort(window)
+		mtp := window[k/2]
+		for _, ts := range []uint64{mtp, mtp + 1} {
+			b := s.clone(h - 1)
+			b.push(t, POW_LIMIT, ts, true)
+			v := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[1:])}
+			out := w.qualify(t, v, q148Active(), 0)
+			if ts == mtp {
+				out.decided(t, replayEntryRecovery, 0, "A6 at MTP")
+				continue
+			}
+			out.selected(t, w, v, b.tip(), uint64(h), b.work(t, h), 0, "A6 above MTP")
+		}
+	}
+}
+
+// TestReplayQualifier148InventoryRefusals is R1 and Q5's limit: each refused 148 inventory decides its result before
+// the walk (the canonical index has a height gap the walk would report) and before ProtectV1; at a lane whose 148
+// limit an inventory meets exactly it is accepted, and one lane byte less refuses it.
+func TestReplayQualifier148InventoryRefusals(t *testing.T) {
+	s := q148Slow(t, 2)
+	gap := newQ148World(t, s, 2, func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+		if h == 1 {
+			return rows[:1]
+		}
+		return rows
+	})
+	for _, c := range []struct {
+		inv    HeaderCandidateInventory148V1
+		result string
+	}{
+		{HeaderCandidateInventory148V1{Status: HeaderCandidateIncompleteV1}, replayEntryRecovery},
+		{HeaderCandidateInventory148V1{Status: HeaderCandidateCapacityRefusedV1}, selectedSideCapacity},
+		{HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Tips: [][32]byte{{1}}, Bytes: 31}, selectedSideInvariant},
+		{HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Headers: s.headers[1:2], Bytes: 116}, selectedSideInvariant},
+	} {
+		v := &q148View{inv: c.inv}
+		gap.qualify(t, v, q148Active(), 0).decided(t, c.result, 0, "R1 "+c.result)
+	}
+	w := newQ148World(t, s, 2, nil)
+	b := s.clone(1)
+	b.extend(t, 2, 3*TARGET_BLOCK_INTERVAL, false)
+	lane := replayRecoveryMin148Bytes
+	for (replayInvLimit148(lane) < 32+148*2 || (replayInvLimit148(lane)-148*2)%32 != 0) || replayInvLimit148(lane-1) == replayInvLimit148(lane) {
+		lane++
+	}
+	inv := q148Complete(slices.Repeat([][32]byte{b.tip()}, int((replayInvLimit148(lane)-148*2)/32)), b.headers[2:])
+	if inv.Bytes != replayInvLimit148(lane) {
+		t.Fatalf("fixture: Bytes %d, limit %d", inv.Bytes, replayInvLimit148(lane))
+	}
+	v := &q148View{inv: inv}
+	w.qualify(t, v, q148Active(), lane).selected(t, w, v, b.tip(), 3, b.work(t, 3), 2, "R1 exact limit")
+	v = &q148View{inv: inv}
+	w.qualify(t, v, q148Active(), lane-1).decided(t, selectedSideInvariant, 0, "R1 one byte over")
+}
+
+// TestReplayQualifier148View is Q7 and R2: an owner view without the 148 interface (or none) is the absent view; a
+// typed-nil 148 provider is returned as itself.
+func TestReplayQualifier148View(t *testing.T) {
+	s := q148Slow(t, 1)
+	w := newQ148World(t, s, 1, nil)
+	legacy := &replayView{inv: replayComplete(nil, nil)}
+	w.qualify(t, legacy, q148Active(), 0).decided(t, replayEntryRecovery, 0, "R2 116-only view")
+	if legacy.calls != 0 || len(legacy.versions) != 0 {
+		t.Fatalf("R2: 116 view called: inventory %d protect %d", legacy.calls, len(legacy.versions))
+	}
+	w.qualify(t, nil, q148Active(), 0).decided(t, replayEntryRecovery, 0, "R2 nil view")
+	var typed *q148View
+	if got := NewReplayEntryOwnerV1(typed, w.g).view148(); got == nil || got.(*q148View) != nil {
+		t.Fatalf("Q7: typed-nil provider not returned as itself: %#v", got)
+	}
+	v := &q148View{}
+	if got := NewReplayEntryOwnerV1(v, w.g).view148(); got != HeaderCandidateView148V1(v) {
+		t.Fatal("Q7: 148 view not returned")
+	}
+}
+
+// TestReplayQualifier148CanonicalDefects is R3: each format-3 canonical-index defect returns the baseline
+// selected-side defect, the first failing check winning; no ProtectV1.
+func TestReplayQualifier148CanonicalDefects(t *testing.T) {
+	s := q148Slow(t, 2)
+	other := newQ148Seq(t, POW_LIMIT, 1<<30+1) // a different genesis
+	key := func(h uint64) []byte { k, _ := mdbx.HeightKey(1, h); return k }
+	for _, c := range []struct {
+		label, message string
+		edit           func(h int, rows []mdbx.Mutation) []mdbx.Mutation
+	}{
+		{"gap", "replay canonical index height gap", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 1 {
+				return rows[:1]
+			}
+			return rows
+		}},
+		{"gap and work", "replay canonical index height gap", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 1 {
+				return rows[:1]
+			}
+			if h == 2 {
+				rows[1] = btMutation(2, key(2), mdbx.ChainValue(s.hashes[2], s.hashes[1], [40]byte{}))
+			}
+			return rows
+		}},
+		{"work outside domain", "replay canonical index work outside domain", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 1 {
+				rows[1] = btMutation(2, key(1), mdbx.ChainValue(s.hashes[1], s.hashes[0], [40]byte{}))
+			}
+			return rows
+		}},
+		{"header absent", "replay canonical header absent", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 2 {
+				return rows[1:]
+			}
+			return rows
+		}},
+		{"stored parent", "replay canonical header linkage mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 2 {
+				rows[1] = btMutation(2, key(2), mdbx.ChainValue(s.hashes[2], s.hashes[0], s.work(t, 2)))
+			}
+			return rows
+		}},
+		{"genesis", "replay canonical genesis mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 0 {
+				return []mdbx.Mutation{btMutation(3, bytes.Clone(other.hashes[0][:]), bytes.Clone(other.headers[0][:])), btMutation(2, key(0), mdbx.ChainValue(other.hashes[0], [32]byte{}, other.work(t, 0))), q148Owner(other.hashes[0], 0)}
+			}
+			return nil
+		}},
+		{"chainwork", "replay canonical chainwork mismatch", func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+			if h == 2 {
+				rows[1] = btMutation(2, key(2), mdbx.ChainValue(s.hashes[2], s.hashes[1], s.work(t, 1)))
+			}
+			return rows
+		}},
+	} {
+		w := newQ148World(t, s, 2, c.edit)
+		v := &q148View{inv: q148Complete(nil, nil)}
+		out := w.qualify(t, v, q148Active(), 0)
+		q148Defect(t, out.err, c.message, "R3 "+c.label)
+		if out.target != (mdbx.RecoveryTargetV1{}) || len(v.versions) != 0 {
+			t.Fatalf("R3 %s: target %+v ProtectV1 %v", c.label, out.target, v.versions)
+		}
+	}
+}
+
+// TestReplayQualifier148ReceivedIneligible is R4 and R5: over a canonical genesis-only index (target q148Half) every
+// received branch that fails its expected target, its 148 PoW, the MTP floor or the timestamp ceiling, is excluded,
+// descends from such a header, is never reached, or is a listed tip with no header decides replayEntryRecovery.
+func TestReplayQualifier148ReceivedIneligible(t *testing.T) {
+	s := newQ148Seq(t, q148Half, 1<<30)
+	w := newQ148World(t, s, 0, nil)
+	t0 := s.times[0]
+	branch := func(target [32]byte, ts uint64, meets bool) *q148Seq {
+		b := s.clone(0)
+		b.push(t, target, ts, meets)
+		b.extend(t, 1, 10, false)
+		return b
+	}
+	excludedBranch := branch(q148Half, t0+10, true)
+	orphan := q148Header(t, [32]byte{9}, q148Half, t0+10, q148Any)
+	for _, c := range []struct {
+		label   string
+		inv     HeaderCandidateInventory148V1
+		exclude *[32]byte
+	}{
+		{"target", q148Complete([][32]byte{branch(POW_LIMIT, t0+10, true).tip()}, branch(POW_LIMIT, t0+10, true).headers[1:]), nil},
+		{"pow", q148Complete([][32]byte{branch(q148Half, t0+10, false).tip()}, branch(q148Half, t0+10, false).headers[1:]), nil},
+		{"mtp floor", q148Complete([][32]byte{branch(q148Half, t0, true).tip()}, branch(q148Half, t0, true).headers[1:]), nil},
+		{"ceiling", q148Complete([][32]byte{branch(q148Half, t0+MAX_FUTURE_DRIFT+1, true).tip()}, branch(q148Half, t0+MAX_FUTURE_DRIFT+1, true).headers[1:]), nil},
+		{"excluded descendant", q148Complete([][32]byte{excludedBranch.tip()}, excludedBranch.headers[1:]), &excludedBranch.hashes[1]},
+		{"never reached", q148Complete([][32]byte{q148Hash(orphan[:])}, [][148]byte{orphan}), nil},
+		{"tip without header", q148Complete([][32]byte{{7}}, nil), nil},
+	} {
+		a := q148Active()
+		if c.exclude != nil {
+			a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidBlockHash: *c.exclude}
+		}
+		v := &q148View{inv: c.inv}
+		w.qualify(t, v, a, 0).decided(t, replayEntryRecovery, 0, "R4/R5 "+c.label)
+	}
+	ok := branch(q148Half, t0+10, true)
+	v := &q148View{inv: q148Complete([][32]byte{ok.tip()}, ok.headers[1:])}
+	w.qualify(t, v, q148Active(), 0).selected(t, w, v, ok.tip(), 2, ok.work(t, 2), 0, "R4 control")
+}
+
+// TestReplayQualifier148AnchorIneligible is R6: a Fork F anchor that fails its 148 PoW, carries a zero target, or is
+// excluded leaves no eligible descendant, so Q5 decides replayEntryRecovery.
+func TestReplayQualifier148AnchorIneligible(t *testing.T) {
+	for _, c := range []struct {
+		label   string
+		target  [32]byte
+		meets   bool
+		exclude bool
+	}{{"pow", q148Half, false, false}, {"zero target", [32]byte{}, true, false}, {"excluded", POW_LIMIT, true, true}, {"control", POW_LIMIT, true, false}} {
+		g := q148Header(t, [32]byte{}, c.target, 1<<30, func(raw []byte) bool { return c.target == [32]byte{} || q148Meets(raw, c.target) == c.meets })
+		s := &q148Seq{headers: [][148]byte{g}, hashes: [][32]byte{q148Hash(g[:])}, times: []uint64{1 << 30}, targets: [][32]byte{c.target}}
+		child := c.target
+		if child == ([32]byte{}) {
+			child = POW_LIMIT // the zero-target anchor's child cannot meet its parent target; it declares POW_LIMIT
+		}
+		s.push(t, child, 1<<30+10, true)
+		w := newQ148World(t, s, -1, nil)
+		w.g.Published = append(bytes.Clone(g[:]), make([]byte, 118)...)
+		a := q148Active()
+		if c.exclude {
+			a.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidBlockHash: s.hashes[0]}
+		}
+		v := &q148View{inv: q148Complete([][32]byte{s.tip()}, s.headers[1:])}
+		out := w.qualify(t, v, a, 0)
+		if c.label == "control" {
+			out.selected(t, w, v, s.tip(), 1, s.work(t, 1), 0, "R6 control")
+			continue
+		}
+		out.decided(t, replayEntryRecovery, 0, "R6 "+c.label)
+	}
+}
+
+// TestReplayQualifier148Protect is R7: a nil release decides selectedSideInvariant with no stored release; a stale
+// version decides replayEntryStale after storing the release, which the caller runs once.
+func TestReplayQualifier148Protect(t *testing.T) {
+	s := q148Slow(t, 2)
+	w := newQ148World(t, s, 2, nil)
+	v := &q148View{inv: q148Complete(nil, nil), nilRelease: true}
+	out := w.qualify(t, v, q148Active(), 0)
+	out.decided(t, selectedSideInvariant, 1, "R7 nil release")
+	v = &q148View{inv: q148Complete(nil, nil), stale: true}
+	out = w.qualify(t, v, q148Active(), 0)
+	out.decided(t, replayEntryStale, 1, "R7 stale")
+	if v.releases != 1 || out.call.release != nil || !slices.Equal(v.versions, []uint64{9}) {
+		t.Fatalf("R7 stale: releases %d versions %v", v.releases, v.versions)
 	}
 }

@@ -851,12 +851,12 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				logicalMDBXAssert(t, name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
+				logicalMDBXAssert(t, name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go" || name == "replay_qualifier148_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
 			}
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 14, "bridge lost dormancy: %d non-test internal/mdbx imports, want 14", imports)
+	logicalMDBXAssert(t, imports == 15, "bridge lost dormancy: %d non-test internal/mdbx imports, want 15", imports)
 	native := startupCensusNative(t)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
