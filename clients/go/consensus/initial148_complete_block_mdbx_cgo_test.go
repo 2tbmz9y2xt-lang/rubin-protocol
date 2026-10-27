@@ -86,7 +86,7 @@ func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
 		}, local},
 		{"capacity-before-identity", func(in *initial148CompleteBlockInputV1) {
 			in.Raw, in.Generation = make([]byte, initial148BlockMaxBytes+1), 0
-		}, func(err error) bool { return err == ErrInitial148BlockCapacity }},
+		}, func(err error) bool { return errors.Is(err, ErrInitial148BlockCapacity) }},
 		{"zero-generation", func(in *initial148CompleteBlockInputV1) { in.Generation = 0 }, local},
 		{"zero-database", func(in *initial148CompleteBlockInputV1) { in.DatabaseID = [32]byte{} }, local},
 		{"height-above-u32", func(in *initial148CompleteBlockInputV1) { in.Height = 1 << 32 }, local},
@@ -94,8 +94,8 @@ func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
 		{"endpoint-height", func(in *initial148CompleteBlockInputV1) { in.Endpoint.Height = 2 }, local},
 		{"positive-published-genesis", func(in *initial148CompleteBlockInputV1) { in.PublishedGenesis = in.Raw }, local},
 		{"identity-before-target", func(in *initial148CompleteBlockInputV1) { in.Generation, in.ExpectedTarget = 0, [32]byte{} }, local},
-		{"target-context", func(in *initial148CompleteBlockInputV1) { in.ExpectedTarget = [32]byte{} }, func(err error) bool { return err == ErrBlockSteps1To12Context }},
-		{"timestamp-context", func(in *initial148CompleteBlockInputV1) { in.ParentTimestamps = nil }, func(err error) bool { return err == ErrBlockSteps1To12Context }},
+		{"target-context", func(in *initial148CompleteBlockInputV1) { in.ExpectedTarget = [32]byte{} }, func(err error) bool { return errors.Is(err, ErrBlockSteps1To12Context) }},
+		{"timestamp-context", func(in *initial148CompleteBlockInputV1) { in.ParentTimestamps = nil }, func(err error) bool { return errors.Is(err, ErrBlockSteps1To12Context) }},
 		{"genesis-generated", func(in *initial148CompleteBlockInputV1) {
 			*in = icbGenesisContextV1(*in)
 			in.AlreadyGenerated = Uint128{Lo: 1}
@@ -107,7 +107,7 @@ func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
 		{"genesis-zero-target", func(in *initial148CompleteBlockInputV1) {
 			*in = icbGenesisContextV1(*in)
 			in.ExpectedTarget = [32]byte{}
-		}, func(err error) bool { return err == ErrBlockSteps1To12Context }},
+		}, func(err error) bool { return errors.Is(err, ErrBlockSteps1To12Context) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

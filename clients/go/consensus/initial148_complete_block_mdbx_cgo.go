@@ -96,7 +96,7 @@ func withInitial148CompleteBlockBodyV1(account *mdbx.OperationAccount, input ini
 // initial148CompleteAdmitV1 applies the local refusals in their fixed order and
 // returns the W tariff.
 func initial148CompleteAdmitV1(account *mdbx.OperationAccount, input initial148CompleteBlockInputV1, run initial148CompleteRunV1) (uint64, error) {
-	if account == nil || run == nil || input.CapRegistry == nil || input.Registry == nil || !initial148FrozenRotationV1(input.Rotation, input.Height) {
+	if !initial148CompleteOwnersV1(account, input, run) {
 		return 0, localLogicalStateFailure("invalid complete initial148 request")
 	}
 	if len(input.Raw) > initial148BlockMaxBytes {
@@ -113,6 +113,10 @@ func initial148CompleteAdmitV1(account *mdbx.OperationAccount, input initial148C
 		return 0, localLogicalStateFailure("complete initial148 reservation exceeds integer domain")
 	}
 	return w, nil
+}
+
+func initial148CompleteOwnersV1(account *mdbx.OperationAccount, input initial148CompleteBlockInputV1, run initial148CompleteRunV1) bool {
+	return account != nil && run != nil && input.CapRegistry != nil && input.Registry != nil && initial148FrozenRotationV1(input.Rotation, input.Height)
 }
 
 func initial148FrozenRotationV1(rotation RotationProvider, height uint64) bool {
