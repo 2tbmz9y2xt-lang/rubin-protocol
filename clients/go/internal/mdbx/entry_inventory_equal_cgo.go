@@ -12,8 +12,7 @@ import (
 	"errors"
 )
 
-// ownV1 rebinds the descriptor after the single ordinary Pair clone. No public
-// stream, original target borrow, or operation is retained into composition.
+// ownV1 rebinds the descriptor to the sole ordinary Pair clone before composition.
 func (s *entryInventoryStateV1) ownV1(plan *treePlanV1) {
 	s.reader.getMu.Lock()
 	s.nextBytes = plan.pair[0].literal
@@ -24,8 +23,7 @@ func (s *entryInventoryStateV1) ownV1(plan *treePlanV1) {
 	s.reader.getMu.Unlock()
 }
 
-// equalV1 replays ORIGINAL selection with exclusive fresh private Readers.
-// Every source is retired before its caller can abort a strict read snapshot.
+// equalV1 replays ORIGINAL selection and retires every private source before snapshot abort.
 func (s *entryInventoryStateV1) equalV1(candidate *C.MDBX_txn, plan *treePlanV1) (bool, error) {
 	s.reader.getMu.Lock()
 	original := s.reader
@@ -62,6 +60,7 @@ func (w *entryWalkV1) operationV1() engineOperation {
 	return operationGet
 }
 
+// pointCompareV1 folds full bytes except exact Pair/Consulted identities; false never skips errors.
 func (w *entryWalkV1) pointCompareV1(row *EntryInventoryRowV1, key []byte, image *updateImage) error {
 	if w.candidate == nil {
 		return nil
@@ -78,7 +77,7 @@ func (w *entryWalkV1) pointCompareV1(row *EntryInventoryRowV1, key []byte, image
 	return nil
 }
 
-// Candidate-only keys and both exhaustion observations remain in the fold.
+// scanCompareV1 folds candidate-only keys and both exhaustion observations.
 func (w *entryWalkV1) scanCompareV1(row *EntryInventoryRowV1) error {
 	if w.candidate == nil {
 		return nil
@@ -110,6 +109,7 @@ func (w *entryWalkV1) advanceOtherV1() {
 	}
 }
 
+// entryMatchV1 extends the reached Pair check with the same ENTRY recipe and diagnostic.
 func (c *treeComposeV1) entryMatchV1(diagnostic string) error {
 	w := c.writer
 	if w.plan.inventory == nil {
@@ -122,8 +122,7 @@ func (c *treeComposeV1) entryMatchV1(diagnostic string) error {
 	return err
 }
 
-// entryTruthV1 extends the existing single-snapshot truth callback. False
-// predicates never skip a subsequent required ordinary or residual source.
+// entryTruthV1 completes both predicates in the strict snapshot before OLD-first selection.
 func (c *treeComposeV1) entryTruthV1(read *C.MDBX_txn, _ error) (CommitTruth, error) {
 	w, p := c.writer, c.writer.plan
 	old, next, err := updateNativeReadbackTargets(w.old, read, w.s.dbis, p.pair, w.t.references)

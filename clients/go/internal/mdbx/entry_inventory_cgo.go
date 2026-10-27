@@ -119,8 +119,9 @@ func (r *Reader) PrepareEntryInventoryV1(account *OperationAccount, target TreeP
 	return s.preparedV1(s.prepareV1())
 }
 
+// preparableV1 checks initial-frame eligibility before the guarded account.openV1 call.
 func (e *treePublicEntryV1) preparableV1(r *Reader, account *OperationAccount) bool {
-	if !e.initialReaderV1(r) || e.inventory != nil || e.hold == nil || account == nil {
+	if !all(e.initialReaderV1(r), e.inventory == nil, e.hold != nil, account != nil) {
 		return false
 	}
 	return e.hold.account == account.shared && account.openV1() && account.shared.ceiling == TreeLaneMaxBytes
@@ -190,8 +191,10 @@ func (r *Reader) VisitEntryInventoryV1(token EntryInventoryV1, visit func(EntryI
 	return s.resultV1(failure, err)
 }
 
+// visitableV1 checks descriptor eligibility before the guarded account.openV1 call.
 func (s *entryInventoryStateV1) visitableV1(r *Reader) bool {
-	return s.reader == r && s.entry == r.entry && !s.completed && !s.visiting && !s.retired && !s.failed && s.account.openV1()
+	eligible := all(s.reader == r, s.entry == r.entry, !s.completed, !s.visiting, !s.retired, !s.failed)
+	return eligible && s.account.openV1()
 }
 
 func (s *entryInventoryStateV1) requestV1(row *EntryInventoryRowV1, access uint8, key []byte) {
@@ -285,7 +288,7 @@ func (e *treePublicEntryV1) retireEntryV1() {
 	}
 }
 
-// Expiry ends public capabilities while retaining the private complete recipe.
+// expireEntryV1 ends public access; private state remains for entryAdmitV1.
 func (e *treePublicEntryV1) expireEntryV1() {
 	e.reader.getMu.Lock()
 	defer e.reader.getMu.Unlock()
@@ -295,6 +298,7 @@ func (e *treePublicEntryV1) expireEntryV1() {
 	}
 }
 
+// clearSourcesV1 retires mutable sources under getMu and preserves inert failure storage.
 func (s *entryInventoryStateV1) clearSourcesV1() {
 	if !s.failed && s.access.key != nil {
 		s.failure.Prefix = s.access.key[:0] // private request storage, never a lease
@@ -308,6 +312,7 @@ func (s *entryInventoryStateV1) clearSourcesV1() {
 	s.access.active = false
 }
 
+// entryAdmitV1 binds the completed token to this OLD, account and Pair after ordinary admission.
 func (e *treePublicEntryV1) entryAdmitV1(op *TreeOperationV1, account *OperationAccount) error {
 	s, token := e.inventory, op.Pair.EntryInventory
 	if s == nil && token == nil {
@@ -323,8 +328,9 @@ func (e *treePublicEntryV1) entryAdmitV1(op *TreeOperationV1, account *Operation
 	return nil
 }
 
+// targetSameV1 compares both ordered Pair collections before the sole treeOwnPlanV1 clone.
 func (s *entryInventoryStateV1) targetSameV1(pair *TreePairV1) bool {
-	if len(pair.Mutations) != len(s.mutations) || len(pair.Consulted) != len(s.consulted) {
+	if !all(len(pair.Mutations) == len(s.mutations), len(pair.Consulted) == len(s.consulted)) {
 		return false
 	}
 	for i := range s.mutations {
@@ -334,14 +340,14 @@ func (s *entryInventoryStateV1) targetSameV1(pair *TreePairV1) bool {
 		}
 	}
 	for i := range s.consulted {
-		if s.consulted[i].DBI != pair.Consulted[i].DBI || !bytes.Equal(s.consulted[i].Key, pair.Consulted[i].Key) {
+		if !all(s.consulted[i].DBI == pair.Consulted[i].DBI, bytes.Equal(s.consulted[i].Key, pair.Consulted[i].Key)) {
 			return false
 		}
 	}
 	return true
 }
 
-// Called under the immutable Reader getMu before ORIGINAL OLD is aborted.
+// retireV1 clears the descriptor under getMu before the ORIGINAL OLD abort.
 func (s *entryInventoryStateV1) retireV1() {
 	s.retired = true
 	s.clearSourcesV1()

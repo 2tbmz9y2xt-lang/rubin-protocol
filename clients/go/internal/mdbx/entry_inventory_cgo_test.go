@@ -1684,8 +1684,7 @@ func eiApplicationLifecycle(t *testing.T) {
 	}
 }
 
-// The native owner, including ordinary admission and the sole clone, produces
-// the result. Fixtures provide only persisted rows and immutable public input.
+// eicInvoke exercises Prepare/Visit/attach through the real native owner and sole clone.
 func eicInvoke(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInventoryRowV1) error) (tsResult, EntryInventoryV1, *EntryInventoryFailureV1, error) {
 	t.Helper()
 	var token EntryInventoryV1
@@ -1713,11 +1712,12 @@ func eicInvoke(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInv
 	return result, token, failure, visitErr
 }
 
+// eicProjection distinguishes raw Invalid from prior dedup at the full native operation boundary.
 func eicProjection(t *testing.T) {
-	for _, variant := range []string{"missing-header", "proven", "prior-owner", "prior-parent-invalid", "prospective-header"} {
+	for _, variant := range []string{"missing-header", "proven", "prior-owner", "prior-parent-invalid", "later-parent-invalid", "prospective-header"} {
 		t.Run(variant, func(t *testing.T) {
 			spans := []CleanupSpanV1{{Kind: 1, GenerationID: 5}}
-			if variant == "prior-owner" || variant == "prior-parent-invalid" {
+			if variant == "prior-owner" || variant == "prior-parent-invalid" || variant == "later-parent-invalid" {
 				spans = append(spans, CleanupSpanV1{Kind: 1, GenerationID: 7})
 			}
 			f := eisNew(t, 3, 1, spans)
@@ -1729,11 +1729,15 @@ func eicProjection(t *testing.T) {
 				hash = [32]byte(pair.Mutations[1].Key)
 			}
 			parent := [32]byte(header[4:36])
+			dependentGeneration := uint64(5)
+			if variant == "prior-parent-invalid" {
+				dependentGeneration = 7
+			}
 			var rows []Mutation
 			for _, span := range spans {
 				rows = append(rows, eisMutation(0, tsCounterKey(span.GenerationID), make([]byte, 16)))
 				forwardParent := parent
-				if variant == "prior-parent-invalid" && span.GenerationID == 5 {
+				if variant == "prior-parent-invalid" && span.GenerationID == 5 || variant == "later-parent-invalid" && span.GenerationID == 7 {
 					forwardParent[0] ^= 1
 				}
 				rows = append(rows, eisMutation(2, eisHeight(span.GenerationID, height), eisChain(hash, forwardParent, height)), eisMutation(7, eisOwner(span.GenerationID, hash), CanonicalOwnerValue(height)))
@@ -1754,8 +1758,15 @@ func eicProjection(t *testing.T) {
 					t.Fatalf("GEN inherited sibling payload %+v", row)
 				}
 				if row.Source == 17 {
+					if counts[17] > len(spans) {
+						t.Fatal("duplicate obsolete index observation")
+					}
+					g := spans[counts[17]-1].GenerationID
+					if row.Artifact != 4 || row.Generation != g || !row.Present || row.Length != 104 || !bytes.Equal(row.Key, eisHeight(g, height)) {
+						t.Fatalf("obsolete index lost its exact source payload %+v", row)
+					}
 					projection = row.Projection
-					if variant == "missing-header" || variant == "prior-parent-invalid" && row.Generation == 5 {
+					if variant == "missing-header" || variant == "prior-parent-invalid" && g == 5 || variant == "later-parent-invalid" && g == 7 {
 						if row.Projection != 1 || row.Hash != ([32]byte{}) || row.Height != 0 {
 							t.Fatal("invalid projection retained a dependent identity")
 						}
@@ -1764,6 +1775,11 @@ func eicProjection(t *testing.T) {
 					}
 				} else if row.Projection != 0 {
 					t.Fatal("projection tag leaked into a sibling source")
+				}
+				if row.Source >= 20 && row.Source <= 22 {
+					if row.Generation != dependentGeneration || row.Height != height || row.Hash != hash || row.Artifact != [3]uint8{6, 7, 8}[row.Source-20] {
+						t.Fatalf("dependent source escaped its complete own projection %+v", row)
+					}
 				}
 				return nil
 			})
@@ -1788,6 +1804,9 @@ func eicProjection(t *testing.T) {
 			}
 			if f.s.state != storeOPEN {
 				t.Fatal("raw projection changed native disposition")
+			}
+			for _, m := range pair.Mutations {
+				tsRead(t, f.s, m.DBI, m.Key, m.Literal)
 			}
 			tsFollowing(t, f.s, f.o)
 		})
