@@ -3,6 +3,7 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 
@@ -74,5 +75,97 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 		got := icbObserveV1(t, w, f.in, workers)
 		var txErr *TxError
 		logicalMDBXAssert(t, errors.As(got.err, &txErr) && txErr.Code == TX_ERR_MISSING_UTXO && txErr.Msg == "utxo not found" && got.out.required == (initial148RootReadOutcomeV1{}), "workers=%d absence: %v / %+v", workers, got.err, got.out.required)
+	}
+}
+
+// icbParentBindingV1 reads the generation-1 parent root binding (rank 0) of
+// the seeded h=5 image and the rank-8 key of the root node it names.
+func icbParentBindingV1(t *testing.T, w *btWorld) (mdbx.RootBindingV1, []byte) {
+	t.Helper()
+	var raw []byte
+	logicalMDBXAssert(t, w.s.View(func(reader *mdbx.Reader) error {
+		value, _, err := reader.Get(mdbx.TreeSchemaV1DBIs()[0], btMeta(0x11, 1))
+		raw = bytes.Clone(value)
+		return err
+	}) == nil, "binding read")
+	binding, err := mdbx.DecodeRootBindingV1(raw)
+	logicalMDBXAssert(t, err == nil && binding.Top.Node != nil, "parent binding top: %v", err)
+	node, err := mdbx.TreeNodeKey(1, *binding.Top.Node)
+	logicalMDBXAssert(t, err == nil, "node key: %v", err)
+	return binding, node
+}
+
+// icbDeriveDamageV1 arms or applies one D-only native fault after the parent
+// seed and observes in through one entry. R reads only UTXO rows and
+// counters; D alone reads the root binding and the tree nodes.
+func icbDeriveDamageV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1, damage string, workers int) icbObservedV1 {
+	t.Helper()
+	binding, node := icbParentBindingV1(t, w)
+	var got icbObservedV1
+	observe := func() { got = icbObserveV1(t, w, in, workers) }
+	eio := func(rank uint8, key []byte) {
+		counts, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, rank, key, observe)
+		logicalMDBXAssert(t, err == nil && counts.Faults == 1 && counts.Commits == 0, "%s workers=%d fixture: %+v / %v", damage, workers, counts, err)
+	}
+	switch damage {
+	case "binding-eio":
+		eio(0, btMeta(0x11, 1))
+		return got
+	case "node-eio":
+		eio(8, node)
+		return got
+	case "binding-absent":
+		logicalMDBXAssert(t, mdbx.FixtureStartupDeleteRow(w.s, 0, btMeta(0x11, 1)) == nil, "delete binding")
+	case "binding-malformed":
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), []byte{0xff}) == nil, "malform binding")
+	case "binding-endpoint":
+		// A well-formed binding whose parent block hash differs from the selected parent.
+		binding.Endpoint.BlockHash[0] ^= 0x01
+		value, err := binding.Encode()
+		logicalMDBXAssert(t, err == nil && mdbx.FixtureSeedRawRow(w.s, 0, btMeta(0x11, 1), value) == nil, "rebind endpoint: %v", err)
+	}
+	observe()
+	return got
+}
+
+// TestInitial148CompleteBlockDeriveFailureH5 (C10) makes only the fresh D of
+// the root-valid h=5 block fail, through the sequential entry and the queued
+// entry with one and four workers: a native EIO on the root binding or root
+// node (unavailable: no observation), and an absent, malformed or
+// endpoint-inconsistent parent root binding (localized integrity with its
+// observation). Each keeps the raw D cause as the validation error,
+// derived=false, a zero root and no delivered result; none is a mismatch.
+func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
+	cases := []struct {
+		damage string
+		kind   mdbx.TreeObservationKindV1
+	}{
+		{"binding-eio", 0},
+		{"node-eio", 0},
+		{"binding-absent", mdbx.TreeObservationAbsentV1},
+		{"binding-malformed", mdbx.TreeObservationMalformedV1},
+		{"binding-endpoint", mdbx.TreeObservationIdentityMismatchV1},
+	}
+	for _, c := range cases {
+		for _, workers := range []int{-1, 1, 4} {
+			w := btNew(t)
+			f := icbH5FixtureV1(t, w)
+			got := icbDeriveDamageV1(t, w, f.in, c.damage, workers)
+			req, verr := got.out.required, got.out.validationErr
+			var txErr *TxError
+			logicalMDBXAssert(t, got.out.attempted && verr != nil && !errors.As(verr, &txErr) && got.summary == (BlockBasicSummary{}), "%s workers=%d no-result: err=%v verr=%v", c.damage, workers, got.err, verr)
+			logicalMDBXAssert(t, any(req.cause) == any(verr) && !req.derived && req.root == ([32]byte{}), "%s workers=%d raw D cause: %v / %+v", c.damage, workers, verr, req)
+			var engine *mdbx.EngineError
+			logicalMDBXAssert(t, errors.As(req.cause, &engine), "%s workers=%d cause is not native: %T %v", c.damage, workers, req.cause, req.cause)
+			if c.kind == 0 {
+				logicalMDBXAssert(t, engine.Class == mdbx.EngineIO && !req.hasObservation && req.observation == (mdbx.TreeObservationV1{}), "%s workers=%d unavailable fabricated observation: %+v", c.damage, workers, req)
+				continue
+			}
+			o := req.observation
+			logicalMDBXAssert(t, engine.Class == mdbx.EngineIntegrity && req.hasObservation && engine.TreeObservation != nil && o == *engine.TreeObservation, "%s workers=%d observation lost: %+v", c.damage, workers, req)
+			// Observation identity: database 7, generation 1, this block at h=5, writer position 1, rank 0.
+			same := o.DatabaseID == [32]byte{7} && o.Generation == 1 && o.Block == f.in.Endpoint.BlockHash && o.Height == icbHeightV1 && o.Position == 1 && o.Rank == 0 && o.Kind == c.kind
+			logicalMDBXAssert(t, same, "%s workers=%d observation %+v", c.damage, workers, o)
+		}
 	}
 }

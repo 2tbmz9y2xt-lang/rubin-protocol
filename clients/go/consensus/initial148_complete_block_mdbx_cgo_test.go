@@ -1247,3 +1247,47 @@ func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
 	icbH5RunCaseV1(t, icbH5CaseV1{name: "S3d-control", opts: group, code: TX_ERR_COVENANT_TYPE_INVALID, msg: "CORE_SIMPLICITY same-cmr input group exceeds limit"})
 	icbPendingDiscardV1(t, "S3d-pending", group)
 }
+
+// TestInitial148CompleteBlockDeriveCapacityH5 (C10 capacity, h>0) is the h=5
+// form of TestInitial148CompleteBlockDeriveCapacityNoResult: the same account
+// keeps exactly W, R=69,656+196,824E and D=288,408+104E free (the control is
+// delivered), then one byte less; the refused D keeps its raw capacity cause,
+// derived=false, no observation and no result through every entry. E is the
+// EventCount the control's delivered source coverage records.
+func TestInitial148CompleteBlockDeriveCapacityH5(t *testing.T) {
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		tariff, ok := initial148CompleteTariffV1(f.in)
+		logicalMDBXAssert(t, ok, "tariff")
+		var events uint64
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			_, err := withInitial148CompleteBlockV1(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				return w.s.View(func(reader *mdbx.Reader) error {
+					result, verr := validate(reader)
+					if result != nil {
+						events = uint64(result.effect.Primitive.Coverage.BlockMeta.EventCount)
+					}
+					return verr
+				})
+			})
+			logicalMDBXAssert(t, err == nil && events != 0, "event count control: %v", err)
+		})
+		hold := uint64(402_653_184) - tariff - (69_656 + 196_824*events) - (288_408 + 104*events)
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
+				out, delivered, err := icbDiscardRunV1(w, account, f.in, workers)
+				logicalMDBXAssert(t, err == nil && delivered && out.required.derived, "workers=%d exact D residual: %v / %+v", workers, err, out)
+				return nil
+			}) == nil, "pre-hold control")
+			logicalMDBXAssert(t, account.WithReservation(hold+1, func() error {
+				out, delivered, err := icbDiscardRunV1(w, account, f.in, workers)
+				var txErr *TxError
+				logicalMDBXAssert(t, !errors.As(err, &txErr) && mdbx.IsOperationReservationCapacity(err), "workers=%d D capacity: %v", workers, err)
+				logicalMDBXAssert(t, any(out.validationErr) == any(err) && any(out.required.cause) == any(err), "workers=%d raw D cause lost: %+v", workers, out)
+				logicalMDBXAssert(t, !delivered && out.attempted && !out.required.derived && out.required.root == ([32]byte{}) && !out.required.hasObservation, "workers=%d D capacity outcome: %+v", workers, out)
+				return nil
+			}) == nil, "pre-hold")
+		})
+	}
+}
