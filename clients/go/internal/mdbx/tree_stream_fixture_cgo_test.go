@@ -2537,3 +2537,106 @@ func TestTreeHeaderSlotDriftV1(t *testing.T) {
 		})
 	}
 }
+
+// tsfEntrySlotV1 runs one ENTRY operation on a fresh eisFixture with SelectedDamageGetEIO armed on (rank 3, x) for
+// a valid slot x the ENTRY Visit does not read. build gets the completed token's Pair, the slot (nil for the
+// control) and a counting Proof. It returns the result, the Proof calls and the post-run Store, account and ENTRY
+// state.
+func tsfEntrySlotV1(t *testing.T, withSlot bool, build func(TreePairV1, *TreeHeaderSlotV1, func(*TreeDeltaReportV1) error) TreeOperationV1) (tsResult, int, string) {
+	t.Helper()
+	f := eisNew(t, 3, 1, nil)
+	target := eisCapture(t, f, 1, 1, false, false)
+	slot := tsSlot(t)
+	var r tsResult
+	var token EntryInventoryV1
+	proofs := 0
+	proof := func(*TreeDeltaReportV1) error { proofs++; return nil }
+	evidence, err := FixtureSelectedDamage(f.s, f.o, SelectedDamageGetEIO, 3, slot.Hash[:], func() {
+		mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			r = tsInvoke(f.s, a, func(rd *Reader) (TreeOperationV1, error) {
+				token = eiPrepare(t, rd, a, target)
+				failure, visitErr := rd.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+				if failure != nil || visitErr != nil || !token.scope.completed {
+					t.Fatalf("ENTRY walk %+v/%v", failure, visitErr)
+				}
+				pair := target
+				pair.EntryInventory = &token
+				var s *TreeHeaderSlotV1
+				if withSlot {
+					s = slot
+				}
+				return build(pair, s, proof), nil
+			})
+			return nil
+		}))
+	})
+	tsfSlotUnreached(t, evidence, err)
+	state := fmt.Sprintf("%s/%v/%d/%v%v%v", f.s.state, f.s.terminal, reservationLive(f.o), token.scope.retired, token.scope.completed, token.scope.failed)
+	for _, m := range target.Mutations {
+		mustEnvironment(t, f.s.View(func(rd *Reader) error {
+			value, present, err := rd.Get(m.DBI, m.Key)
+			state += fmt.Sprintf("|%v%x", present, value)
+			return err
+		}))
+	}
+	return r, proofs, state
+}
+
+// N7: an ENTRY operation carrying a HeaderSlot keeps every ordinary, ENTRY and
+// Proof-shape result, reaches the slot row only with zero primitives and Proof
+// nil, and never resolves the slot.
+func TestTreeHeaderSlotEntryV1(t *testing.T) {
+	differ := func(pair TreePairV1, slot *TreeHeaderSlotV1, _ func(*TreeDeltaReportV1) error) TreeOperationV1 {
+		pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[3], Key: bytes.Repeat([]byte{0x5a}, 32)}}
+		return TreeOperationV1{Pair: pair, HeaderSlot: slot}
+	}
+	primitive := func(pair TreePairV1, slot *TreeHeaderSlotV1, proof func(*TreeDeltaReportV1) error) TreeOperationV1 {
+		calls := 0
+		p := tsProofShape(t, &calls, nil).Primitives[0]
+		coverage := *p.Coverage
+		coverage.BodyKind, coverage.CurrentBody = 2, nil // the ENTRY Pair stages no body
+		p.Coverage = &coverage
+		return TreeOperationV1{Primitives: []TreePrimitiveV1{p}, Pair: pair, Proof: proof, HeaderSlot: slot}
+	}
+	proofShape := func(pair TreePairV1, slot *TreeHeaderSlotV1, proof func(*TreeDeltaReportV1) error) TreeOperationV1 {
+		return TreeOperationV1{Pair: pair, Proof: proof, HeaderSlot: slot}
+	}
+	slotRow := func(pair TreePairV1, slot *TreeHeaderSlotV1, _ func(*TreeDeltaReportV1) error) TreeOperationV1 {
+		return TreeOperationV1{Pair: pair, HeaderSlot: slot}
+	}
+	rows := []struct {
+		name  string
+		build func(TreePairV1, *TreeHeaderSlotV1, func(*TreeDeltaReportV1) error) TreeOperationV1
+		check func(*testing.T, tsResult)
+	}{
+		{"a-differing-target", differ, func(t *testing.T, r tsResult) { r.tuple(t, 1, 1, -1); eiInput(t, r.err) }},
+		{"b-primitive", primitive, func(t *testing.T, r tsResult) { r.tuple(t, 1, 1, -1); eiInput(t, r.err) }},
+		{"c-proof-shape", proofShape, func(t *testing.T, r tsResult) { tsRefusal(t, r, false) }},
+	}
+	var refusedC string
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			r, proofs, state := tsfEntrySlotV1(t, true, row.build)
+			control, controlProofs, controlState := tsfEntrySlotV1(t, false, row.build)
+			row.check(t, r)
+			row.check(t, control)
+			if proofs != 0 || controlProofs != 0 || state != controlState {
+				t.Fatalf("Proof calls %d/%d state %s, control %s", proofs, controlProofs, state, controlState)
+			}
+			refusedC = state
+		})
+	}
+	t.Run("d-slot-row", func(t *testing.T) {
+		r, proofs, state := tsfEntrySlotV1(t, true, slotRow)
+		tsRefusal(t, r, false)
+		if proofs != 0 || state != refusedC {
+			t.Fatalf("Proof calls %d state %s, (c) refusal %s", proofs, state, refusedC)
+		}
+		control, _, controlState := tsfEntrySlotV1(t, false, slotRow)
+		control.tuple(t, 2, 3, -1)
+		mustEnvironment(t, control.err)
+		if controlState == refusedC {
+			t.Fatal("accepted ENTRY control left the refused state")
+		}
+	})
+}

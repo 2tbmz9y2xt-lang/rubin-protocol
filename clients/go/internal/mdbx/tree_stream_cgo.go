@@ -337,7 +337,7 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 
 // prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
 func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
-	budget, admissionErr := treeAdmitBudgetV1(op, account, e.store.databaseID)
+	slotOver, admissionErr := treeAdmitSlotV1(op, account, e.store.databaseID)
 	if admissionErr != nil {
 		return admissionErr
 	}
@@ -348,7 +348,7 @@ func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperati
 	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
 		return updateInvalidBatch()
 	}
-	slotErr := treeHeaderSlotAdmitV1(op, budget)
+	slotErr := treeHeaderSlotAdmitV1(op, slotOver)
 	if slotErr != nil {
 		return slotErr
 	}
@@ -366,27 +366,29 @@ func (l treeAccountLedgerV1) chargeV1(n uint64) error { return l.hold.grow(n) }
 func (l treeAccountLedgerV1) releaseV1(n uint64) { _ = l.hold.shrink(n) }
 
 func treeAdmitV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) error {
-	_, err := treeAdmitBudgetV1(op, account, databaseID)
+	_, err := treeAdmitSlotV1(op, account, databaseID)
 	return err
 }
 
-// treeAdmitBudgetV1 is treeAdmitV1 that also returns the non-reverse Pair budget its one Pair scan built.
-func treeAdmitBudgetV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) (updateBudget, error) {
+// treeAdmitSlotV1 is treeAdmitV1 that also returns the verdict of its one Pair scan on whether op.HeaderSlot, as
+// one more auxiliary mutation, exceeds a non-reverse Pair mutation cap; the verdict is false without a slot or on
+// error. Only that verdict, never a budget, is held in the frames live during the scan (RUB-1750 resource_boundary).
+func treeAdmitSlotV1(op TreeOperationV1, account *OperationAccount, databaseID [32]byte) (bool, error) {
 	if len(op.Primitives) == 0 && len(op.Pair.Mutations) == 0 {
-		return updateBudget{}, updateInvalidBatch()
+		return false, updateInvalidBatch()
 	}
 	if len(op.Primitives) != 0 && account.shared.ceiling != TreeLaneMaxBytes {
-		return updateBudget{}, updateInvalidBatch()
+		return false, updateInvalidBatch()
 	}
 	err := treePrimitivesAdmitV1(op, databaseID)
 	if err != nil {
-		return updateBudget{}, err
+		return false, err
 	}
-	budget, err := treePairScanV1(op.Pair)
+	over, err := treePairScanV1(op.Pair, op.HeaderSlot)
 	if err != nil {
-		return budget, err
+		return false, err
 	}
-	return budget, treePairRelationsV1(op)
+	return over, treePairRelationsV1(op)
 }
 
 func treeCoverageAdmitV1(op TreeOperationV1, p TreePrimitiveV1, databaseID [32]byte) bool {
@@ -492,13 +494,13 @@ func treeEndpointAllowedV1(p TreePrimitiveV1) bool {
 	return p.Endpoint.Kind == TreeEndpointAppliedV1 && p.Endpoint.Height == p.Height-1
 }
 
-func treePairScanV1(pair TreePairV1) (updateBudget, error) {
+func treePairScanV1(pair TreePairV1, slot *TreeHeaderSlotV1) (bool, error) {
 	var budget updateBudget
 	var previous Mutation
 	for j, m := range pair.Mutations {
 		err := treeMutationScanV1(j == 0, previous, m, &budget)
 		if err != nil {
-			return budget, err
+			return false, err
 		}
 		previous = m
 	}
@@ -507,11 +509,20 @@ func treePairScanV1(pair TreePairV1) (updateBudget, error) {
 	for j, row := range pair.Consulted {
 		err := treeConsultedScanV1(j == 0, prior, row, &count)
 		if err != nil {
-			return budget, err
+			return false, err
 		}
 		prior = row
 	}
-	return budget, nil
+	return treeHeaderSlotOverV1(budget, slot), nil
+}
+
+// treeHeaderSlotOverV1 reports whether slot, added as one more auxiliary 32-byte-key 148-byte-literal mutation to
+// the budget of the scanned Pair, exceeds a mutation cap; false without a slot.
+func treeHeaderSlotOverV1(budget updateBudget, slot *TreeHeaderSlotV1) bool {
+	if slot == nil {
+		return false
+	}
+	return !budget.addMutation(Mutation{DBI: schemaDBIs[3], Key: slot.Hash[:], AfterKind: AfterLiteral, Literal: slot.Header[:]})
 }
 
 func treePairIdentityV1(dbi DBI, key []byte) bool {
@@ -652,7 +663,8 @@ func treeProofLagV1(primitives []TreePrimitiveV1, p TreePrimitiveV1) bool {
 
 // treeHeaderSlotAdmitV1 is the header-slot admission row; its first failing
 // check wins: Proof nil, representation, Pair overlap, then caps.
-func treeHeaderSlotAdmitV1(op TreeOperationV1, budget updateBudget) error {
+// over is the Pair scan's mutation-cap verdict for the slot; the Consulted cap is counted here.
+func treeHeaderSlotAdmitV1(op TreeOperationV1, over bool) error {
 	slot := op.HeaderSlot
 	if slot == nil {
 		return nil
@@ -660,7 +672,10 @@ func treeHeaderSlotAdmitV1(op TreeOperationV1, budget updateBudget) error {
 	if op.Proof == nil || ValidateTreeRow(schemaDBIs[3], slot.Hash[:], slot.Header[:]) != nil || treeHeaderSlotOverlapV1(op.Pair, slot.Hash[:]) {
 		return updateInvalidBatch()
 	}
-	return treeHeaderSlotCapsV1(op.Pair, slot, budget)
+	if over || uint64(len(op.Pair.Consulted)) >= maxUpdateConsulted {
+		return updateBoundError()
+	}
+	return nil
 }
 
 // treeHeaderSlotOverlapV1 binary-searches the admitted, strictly (rank, key) ordered Mutations and Consulted rows.
@@ -688,16 +703,6 @@ func treeMutationCmpV1(m Mutation, k treeRowKeyV1) int { return treeRowCmpV1(m.D
 
 func treeConsultedRowCmpV1(row ConsultedRow, k treeRowKeyV1) int {
 	return treeRowCmpV1(row.DBI.Rank, row.Key, k)
-}
-
-// treeHeaderSlotCapsV1 adds the slot, as one more auxiliary mutation, to the budget the one Pair scan built, then
-// counts it as one more Consulted row.
-func treeHeaderSlotCapsV1(pair TreePairV1, slot *TreeHeaderSlotV1, budget updateBudget) error {
-	m := Mutation{DBI: schemaDBIs[3], Key: slot.Hash[:], AfterKind: AfterLiteral, Literal: slot.Header[:]}
-	if !budget.addMutation(m) || uint64(len(pair.Consulted)) >= maxUpdateConsulted {
-		return updateBoundError()
-	}
-	return nil
 }
 
 // treeHeaderSlotCopyBytesV1 is the step-5 charge of the slot: one owned
