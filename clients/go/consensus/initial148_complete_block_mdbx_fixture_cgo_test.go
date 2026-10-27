@@ -247,7 +247,7 @@ func TestInitial148CompleteBlockDeriveFailureH5(t *testing.T) {
 			logicalMDBXAssert(t, got.out.attempted && verr != nil && !errors.As(verr, &txErr) && got.summary == (BlockBasicSummary{}), "%s workers=%d no-result: err=%v verr=%v", c.damage, workers, got.err, verr)
 			logicalMDBXAssert(t, any(req.cause) == any(verr) && !req.derived && req.root == ([32]byte{}), "%s workers=%d raw D cause: %v / %+v", c.damage, workers, verr, req)
 			var engine *mdbx.EngineError
-			logicalMDBXAssert(t, errors.As(req.cause, &engine), "%s workers=%d cause is not native: %T %v", c.damage, workers, req.cause, req.cause)
+			logicalMDBXAssert(t, errors.As(req.cause, &engine) && any(engine) == any(req.cause), "%s workers=%d cause is not the raw native error: %T %v", c.damage, workers, req.cause, req.cause)
 			if c.kind == 0 {
 				logicalMDBXAssert(t, engine.Class == mdbx.EngineIO && !req.hasObservation && req.observation == (mdbx.TreeObservationV1{}), "%s workers=%d unavailable fabricated observation: %+v", c.damage, workers, req)
 				continue
@@ -337,7 +337,7 @@ func TestInitial148CompleteBlockUpdateTreeReadbackH5(t *testing.T) {
 		})
 		logicalMDBXAssert(t, fixtureErr == nil && counts.Commits == 1, "%s fixture: %+v / %v", name, counts, fixtureErr)
 		var commitErr *mdbx.CommitError
-		logicalMDBXAssert(t, errors.As(got.native.err, &commitErr) && commitErr.Truth == mdbx.CommitTruthNew, "%s native commit error: %v", name, got.native.err)
+		logicalMDBXAssert(t, errors.As(got.native.err, &commitErr) && any(commitErr) == any(got.native.err) && commitErr.Truth == mdbx.CommitTruthNew, "%s native commit error: %v", name, got.native.err)
 		got.check(t, f, name, got.native.err, [3]int{0, 1, 1})
 		// The crossed commit consumes the Store with that same terminal error.
 		terminal := w.s.View(func(*mdbx.Reader) error { return nil })
