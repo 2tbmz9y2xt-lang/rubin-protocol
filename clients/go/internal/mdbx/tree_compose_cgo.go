@@ -39,6 +39,7 @@ type treePlanV1 struct {
 	consulted  []ownedConsulted
 	proof      func(*TreeDeltaReportV1) error // TreeOperationV1.Proof
 	report     *TreeDeltaReportV1             // step-5 charged backing, filled at the writer; nil without proof
+	slot       []byte                         // step-5 owned TreeOperationV1.HeaderSlot as Hash||Header; nil without a slot
 	inventory  *entryInventoryStateV1
 }
 
@@ -456,6 +457,10 @@ func (c *treeComposeV1) coveredHoldV1() error {
 	}
 	err = c.proofV1()
 	if err != nil || c.unwind.kind != 0 {
+		return err
+	}
+	err = w.t.headerSlotV1(w.plan)
+	if err != nil {
 		return err
 	}
 	err = w.t.flushV1(w.plan.pair)

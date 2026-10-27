@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"math"
 	"runtime"
+	"slices"
 	"sort"
 	"unsafe"
 )
@@ -369,6 +370,67 @@ func treeProjectionConflictV1(e treeEntryV1, pair []ownedMutation, consulted []o
 		return false
 	}
 	return obsoleteConsultedContains(consulted, e.dbi.Rank, e.key)
+}
+
+// headerSlotV1 decides plan's header slot (RUB-1750) after Proof returns nil and before the first write, with reads only:
+// the OLD/write equality check of row x (its ORIGINAL OLD and write images), then one more ORIGINAL OLD read of x.
+// Absent joins the Pair as an expected-absent insert of Header; a byte-identical row joins the Consulted rows; any
+// other present value, including another width or an empty value, refuses with no write. Both joins keep (rank, key)
+// order inside the step-5 spare capacity, so flushV1, finalV1 and the readback cover the slot as an ordinary Pair
+// target or Consulted row.
+func (t *treeSectionV1) headerSlotV1(plan *treePlanV1) error {
+	if plan.slot == nil {
+		return nil
+	}
+	handle, key, header := t.handles[3], plan.slot[:32:32], plan.slot[32:]
+	err := updateNativeOldMatch(t.old, t.write, handle, key, "OLD/write snapshot mismatch")
+	if err != nil {
+		return err
+	}
+	image, err := treeReadPointV1(t.old, handle, key)
+	if err != nil {
+		return err
+	}
+	if !image.present {
+		plan.pair = treeSlotInsertV1(plan.pair, ownedMutation{dbi: schemaDBIs[3], key: key, after: AfterLiteral, literal: header})
+		return nil
+	}
+	if !bytes.Equal(image.value, header) {
+		return adapterError(operationUpdate, EngineStateMismatch, codeProblem, "tree header slot differs", nil)
+	}
+	plan.consulted = treeSlotConsultedV1(plan.consulted, ownedConsulted{dbi: schemaDBIs[3], key: key})
+	return nil
+}
+
+// treeSlotInsertV1 inserts m at its (rank, key) position. Tree Pairs carry no AfterOldValueRef, so the preflight
+// references are empty and no index moves.
+func treeSlotInsertV1(pair []ownedMutation, m ownedMutation) []ownedMutation {
+	at := treePairAtV1(pair, m.dbi.Rank, m.key)
+	pair = append(pair, m)
+	copy(pair[at+1:], pair[at:len(pair)-1])
+	pair[at] = m
+	return pair
+}
+
+// treePairAtV1 binary-searches the (rank, key) ordered owned Pair for the insertion position.
+func treePairAtV1(pair []ownedMutation, rank uint8, key []byte) int {
+	at, _ := slices.BinarySearchFunc(pair, treeRowKeyV1{rank: rank, key: key}, treeOwnedCmpV1)
+	return at
+}
+
+func treeOwnedCmpV1(m ownedMutation, k treeRowKeyV1) int { return treeRowCmpV1(m.dbi.Rank, m.key, k) }
+
+func treeOwnedConsultedCmpV1(row ownedConsulted, k treeRowKeyV1) int {
+	return treeRowCmpV1(row.dbi.Rank, row.key, k)
+}
+
+// treeSlotConsultedV1 inserts row at its binary-searched (rank, key) position.
+func treeSlotConsultedV1(consulted []ownedConsulted, row ownedConsulted) []ownedConsulted {
+	at, _ := slices.BinarySearchFunc(consulted, treeRowKeyV1{rank: row.dbi.Rank, key: row.key}, treeOwnedConsultedCmpV1)
+	consulted = append(consulted, row)
+	copy(consulted[at+1:], consulted[at:len(consulted)-1])
+	consulted[at] = row
+	return consulted
 }
 
 // flushV1 consumes only frozen P. All node identities precede every root,

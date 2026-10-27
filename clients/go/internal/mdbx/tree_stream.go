@@ -184,3 +184,10 @@ type TreeDeltaReportV1 struct {
 	Current, Lag TreeRoleDeltaV1
 	Undo         []TreeUndoChargeV1
 }
+
+// TreeHeaderSlotV1 names one optional headers-v1 row of a covered operation:
+// Hash is the row key and Header its 148-byte literal.
+type TreeHeaderSlotV1 struct {
+	Hash   [32]byte
+	Header [148]byte
+}
