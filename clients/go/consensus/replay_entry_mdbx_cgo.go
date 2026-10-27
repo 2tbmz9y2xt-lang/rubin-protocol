@@ -974,7 +974,8 @@ func (q *replayQualifier) isExcluded(hash [32]byte) bool {
 }
 
 // anchor is the Fork F height-0 anchor: Published[:width], else the supplied GenesisHash header; decode, PoW and
-// exclusion. A non-nil Published holds at least width bytes hashing to GenesisHash (the published-genesis context check).
+// exclusion. Precondition: a non-nil Published holds at least width bytes whose block hash at width is GenesisHash,
+// established by the operation's published-genesis context check before qualification; its 148 form is RUB-1627's.
 func (q *replayQualifier) anchor() {
 	raw := q.genesis.Published
 	i := q.find(q.genesis.GenesisHash)
