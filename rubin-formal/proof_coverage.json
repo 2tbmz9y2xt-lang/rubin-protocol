@@ -1125,7 +1125,7 @@
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
         "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication.",
-        "The registered UTXO theorems do not prove the canonical complete-state UTXO tree or its root bytes (RUBIN_CONSENSUS_STATE_MACHINE.md §2.6, RUBIN_L1_CANONICAL.md §18.5), the derivation of Root(U_candidate), or any IMAGE entry, cover, historical-membership, persisted-seed or COMPLETE obligation (RUBIN_MEMPOOL_POLICY.md §6.4.1.8); the registered theorems do not relate a matching root or a received image to execution of the skipped history."
+        "The registered UTXO theorems and fixture replays do not prove the canonical complete-state UTXO tree or its root bytes (RUBIN_CONSENSUS_STATE_MACHINE.md §2.6, RUBIN_L1_CANONICAL.md §18.5), the derivation of Root(U_candidate), or any IMAGE entry, cover, historical-membership, persisted-seed or COMPLETE obligation (RUBIN_MEMPOOL_POLICY.md §6.4.1.8); they do not relate a matching root or a received image to execution of the skipped history."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1371,7 +1371,7 @@
       "limitations": [
         "The counted LIVE bridge theorems are constrained to the real `validateBlockBasicCheck` path after parse/pow/target/linkage/merkle/witness prefix success, and the accept theorem additionally assumes nonce replay passes on the remaining suffix. This row does not claim unrelated block-basic stages beyond that covered timestamp gate.",
         "No chain-wide timestamp monotonicity claim beyond the covered `timestampBounds` gate and current replayed integration path is asserted here.",
-        "The constrained LIVE bridge theorems run on BlockBasicV1.parseBlock, whose header grammar is 116 bytes without utxo_root; they do not cover the 148-byte Section 10.1 header grammar or the Section 10.3 block_hash and Proof-of-Work preimage over all 148 header bytes."
+        "The constrained LIVE bridge theorems and the CV-TIMESTAMP block_basic_check replay run on BlockBasicV1.parseBlock, whose header grammar is 116 bytes without utxo_root; they do not cover the 148-byte Section 10.1 header grammar or the Section 10.3 block_hash and Proof-of-Work preimage over all 148 header bytes."
       ],
       "evidence_level": "machine_checked_universal"
     },
