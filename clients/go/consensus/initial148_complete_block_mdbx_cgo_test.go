@@ -860,7 +860,8 @@ func icbH5RunCaseV1(t *testing.T, c icbH5CaseV1) {
 			continue
 		}
 		// The selected error is the bare TxError itself, not a join carrying it.
-		txErr, ok := got.err.(*TxError)
+		var txErr *TxError
+		ok := errors.As(got.err, &txErr) && any(txErr) == any(got.err)
 		logicalMDBXAssert(t, ok && txErr.Code == c.code && txErr.Msg == c.msg && any(got.out.validationErr) == any(got.err), "%s workers=%d error %v, want %s/%s", c.name, workers, got.err, c.code, c.msg)
 		logicalMDBXAssert(t, got.out.attempted && got.summary == (BlockBasicSummary{}), "%s workers=%d result delivered: %+v", c.name, workers, got.summary)
 		if !c.derived {

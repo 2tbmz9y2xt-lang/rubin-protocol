@@ -60,7 +60,7 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 			logicalMDBXAssert(t, got.out.attempted && verr != nil && errors.Is(got.err, verr) && got.summary == (BlockBasicSummary{}), "%s workers=%d result delivered: err=%v verr=%v %+v", c.name, workers, got.err, verr, got.summary)
 			var txErr *TxError
 			if c.opts.badSig {
-				txErr, ok := verr.(*TxError)
+				ok := errors.As(verr, &txErr) && any(txErr) == any(verr)
 				logicalMDBXAssert(t, ok && txErr.Code == TX_ERR_SIG_INVALID && txErr.Msg == "CORE_P2PK signature invalid", "%s workers=%d earlier error lost: %v", c.name, workers, verr)
 				logicalMDBXAssert(t, got.out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d later read recorded: %+v", c.name, workers, got.out.required)
 				continue
