@@ -4,6 +4,7 @@ package consensus
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/sha3"
 	"encoding/binary"
 	"encoding/hex"
@@ -496,6 +497,7 @@ type icbH5V1 struct {
 	header                    Initial148Header
 	c, a, b, o1, cb0, o2      Outpoint
 	v, o3, s, o4              Outpoint
+	sRows, sSpent             int
 	parentLeaves, finalLeaves map[[36]byte][]byte
 	preSpendLeaves            map[[36]byte][]byte
 	created                   map[Outpoint]UtxoEntry
@@ -538,11 +540,15 @@ func icbSignedRawV1(t *testing.T, tx *Tx) []byte {
 
 // icbLeafV1 is CSM 2.6 K(op) and S(op,e) built from literal fields.
 func icbLeafV1(leaves map[[36]byte][]byte, op Outpoint, value uint64, data []byte, height uint64, coinbase bool) {
+	icbLeafKindV1(leaves, op, value, COV_TYPE_P2PK, data, height, coinbase)
+}
+
+func icbLeafKindV1(leaves map[[36]byte][]byte, op Outpoint, value uint64, kind uint16, data []byte, height uint64, coinbase bool) {
 	var key [36]byte
 	copy(key[:], op.Txid[:])
 	binary.BigEndian.PutUint32(key[32:], op.Vout)
 	s := binary.LittleEndian.AppendUint32(bytes.Clone(op.Txid[:]), op.Vout)
-	leaves[key] = append(s, btValue(btFrame(value, COV_TYPE_P2PK, data), height, coinbase)...)
+	leaves[key] = append(s, btValue(btFrame(value, kind, data), height, coinbase)...)
 }
 
 // icbRootV1 is the written CSM 2.6 recursion with literal 19-byte domains.
@@ -608,14 +614,16 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 // spend A again after tx1's in-block spend (tombstone) instead of B.
 // tx2 edits tx2 before it is signed; post2 edits the signed tx2. vault seeds
 // a parent Vault row V and appends tx3 (V + O2 -> O3); tx3 edits it before
-// signing. simplicity (with vault) also seeds a CORE_SIMPLICITY row S, freezes
-// an active deployment at the fixture height and appends tx4 (S -> O4).
+// signing. simplicity n (with vault) also seeds n accept-CMR CORE_SIMPLICITY
+// rows from S, freezes an active deployment at the fixture height and appends
+// tx4 spending the first spend4 of them (0: all n; -> O4, fee 10).
 type icbH5OptsV1 struct {
 	missing, badSig, overspend, split, dup bool
 	cbExtra, height                        uint64
 	flip                                   int
 	tx2, post2, tx3                        func(*Tx)
-	vault, simplicity                      bool
+	vault                                  bool
+	simplicity, spend4                     int
 }
 
 func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
@@ -643,8 +651,9 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	if opts.vault {
 		txs = append(txs, f.icbVaultTx3V1(t, kp, cov, opts))
 	}
-	if opts.simplicity {
-		txs = append(txs, f.icbSimplicityTx4V1(t, cov))
+	if opts.simplicity > 0 {
+		f.sRows, f.sSpent = opts.simplicity, cmp.Or(opts.spend4, opts.simplicity)
+		txs = append(txs, f.icbSimplicityTx4V1(t, cov, f.sSpent))
 	}
 	commit := initial148BlockWitnessCommit(t, txs...)
 	cbOuts := []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
@@ -672,7 +681,7 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	f.in.ParentTimestamps = slices.Repeat([]uint64{blockStepsMedian}, int(min(h, 11)))
 	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(h)
 	f.in.Registry = DefaultSuiteRegistry()
-	if opts.simplicity {
+	if opts.simplicity > 0 {
 		f.in.Rotation = icbSimplicityFrozenV1(h, f.in.ChainID)
 	}
 	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: h, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
@@ -719,18 +728,21 @@ func icbVaultFramesV1(opts icbH5OptsV1, kp *MLDSA87Keypair, cov []byte) [][]byte
 		return nil
 	}
 	frames := [][]byte{btFrame(500, COV_TYPE_VAULT, icbVaultCovV1(kp, cov))}
-	if opts.simplicity {
+	for range opts.simplicity {
 		frames = append(frames, btFrame(300, COV_TYPE_CORE_SIMPLICITY, encodeSimplicityCovenantData(coreSimplicityAcceptCMR, nil)))
 	}
 	return frames
 }
 
-// icbSimplicityTx4V1 spends S with the accept program (fee 10).
-func (f *icbH5V1) icbSimplicityTx4V1(t *testing.T, cov []byte) []byte {
+// icbSimplicityTx4V1 spends the n rows from S with the accept program (fee 10).
+func (f *icbH5V1) icbSimplicityTx4V1(t *testing.T, cov []byte, n int) []byte {
 	t.Helper()
-	tx4 := inputViewTx(4, f.s)
-	tx4.Outputs[0] = TxOutput{Value: 290, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
-	tx4.Witness = []WitnessItem{coreSimplicityAcceptWitness()}
+	tx4 := inputViewTx(4)
+	for i := range n {
+		tx4.Inputs = append(tx4.Inputs, TxInput{PrevTxid: f.s.Txid, PrevVout: f.s.Vout + uint32(i)})
+		tx4.Witness = append(tx4.Witness, coreSimplicityAcceptWitness())
+	}
+	tx4.Outputs[0] = TxOutput{Value: 300*uint64(n) - 10, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
 	raw4 := icbSignedRawV1(t, tx4)
 	f.o4 = Outpoint{Txid: testTxID(t, raw4)}
 	return raw4
@@ -770,7 +782,11 @@ func (f *icbH5V1) icbVaultLeavesV1(cov []byte) {
 	delete(f.finalLeaves, key)
 	icbLeafV1(f.finalLeaves, f.o3, 3470, cov, f.h, false)
 	if f.o4 != (Outpoint{}) {
-		icbLeafV1(f.finalLeaves, f.o4, 290, cov, f.h, false)
+		icbLeafV1(f.finalLeaves, f.o4, 300*uint64(f.sSpent)-10, cov, f.h, false)
+	}
+	for i := f.sSpent; i < f.sRows; i++ {
+		op := Outpoint{Txid: f.s.Txid, Vout: f.s.Vout + uint32(i)}
+		icbLeafKindV1(f.finalLeaves, op, 300, COV_TYPE_CORE_SIMPLICITY, encodeSimplicityCovenantData(coreSimplicityAcceptCMR, nil), f.h-1, false)
 	}
 }
 
@@ -1136,7 +1152,7 @@ func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 	for _, workers := range []int{-1, 1, 4} {
 		w := btNew(t)
 		bad := icbH5VariantV1(t, w, opts)
-		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{vault: opts.vault, simplicity: opts.simplicity, cbExtra: opts.cbExtra})
+		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{vault: opts.vault, simplicity: opts.simplicity, spend4: 1, cbExtra: opts.cbExtra})
 		logicalMDBXAssert(t, good.in.Parent == bad.in.Parent, "%s workers=%d fixtures do not share the parent", name, workers)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			out, delivered, err := icbDiscardRunV1(w, account, bad.in, workers)
@@ -1203,7 +1219,7 @@ func TestInitial148CompleteBlockPendingStagesH5(t *testing.T) {
 // its own and loses to tx1's pending invalid signature with the full discard
 // tuple.
 func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
-	mixed := icbH5OptsV1{vault: true, simplicity: true, cbExtra: 20}
+	mixed := icbH5OptsV1{vault: true, simplicity: 1, cbExtra: 20}
 	for _, workers := range []int{-1, 1, 4} {
 		w := btNew(t)
 		f := icbH5VariantV1(t, w, mixed)
@@ -1224,4 +1240,10 @@ func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
 	whitelist.flip, whitelist.tx3 = 1, func(tx *Tx) { tx.Outputs[0].CovenantData = validP2PKCovenantData() }
 	icbH5RunCaseV1(t, icbH5CaseV1{name: "vault-whitelist-control", opts: whitelist, code: TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, msg: "output not whitelisted for CORE_VAULT"})
 	icbPendingDiscardV1(t, "vault-whitelist-pending", whitelist)
+	// S3d: nine same-CMR inputs exceed SIMPLICITY_MAX_GROUP_INPUTS (8) after
+	// complete R1, R3 and S3b (simplicity_txcontext.go populate input views).
+	group := mixed
+	group.flip, group.simplicity = 1, 9
+	icbH5RunCaseV1(t, icbH5CaseV1{name: "S3d-control", opts: group, code: TX_ERR_COVENANT_TYPE_INVALID, msg: "CORE_SIMPLICITY same-cmr input group exceeds limit"})
+	icbPendingDiscardV1(t, "S3d-pending", group)
 }
