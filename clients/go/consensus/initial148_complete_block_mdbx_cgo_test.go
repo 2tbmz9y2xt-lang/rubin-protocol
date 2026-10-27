@@ -966,6 +966,25 @@ func (f *icbH5V1) icbVaultLeavesV1(cov []byte) {
 	}
 }
 
+// icbCandidateV1 is the valid variant's expected candidate from its literal
+// inputs: tx1 and tx2 pay fee 10 each and create O2 (f.created); with tx3,
+// O2 is spent into O3 (3470) for fee 10; with tx4, sSpent Simplicity rows
+// of 300 become O4 (300*sSpent-10) for fee 10.
+func (f *icbH5V1) icbCandidateV1() (Uint128, map[Outpoint]UtxoEntry) {
+	fees, created := uint64(20), maps.Clone(f.created)
+	cov := created[f.o2].CovenantData
+	if f.o3 != (Outpoint{}) {
+		delete(created, f.o2)
+		created[f.o3] = UtxoEntry{Value: 3470, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: f.h}
+		fees += 10
+	}
+	if f.o4 != (Outpoint{}) {
+		created[f.o4] = UtxoEntry{Value: 300*uint64(f.sSpent) - 10, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: f.h}
+		fees += 10
+	}
+	return Uint128{Lo: fees}, created
+}
+
 // icbLeavesV1 builds the parent, pre-spend (after tx1, before tx2) and final
 // leaf maps from literal fields.
 func (f *icbH5V1) icbLeavesV1(cov []byte, cbValue uint64) {
@@ -1095,66 +1114,117 @@ func icbComposeV1(result *initial148CompleteBlockResultV1, observed *icbNativeSo
 	return op
 }
 
+// icbSourceCallsV1 records each native source call per TreePositionV1:
+// the call count, calls made while W was not held, and calls whose Reader is
+// the builder's own Reader or while the builder's Reader still answers a Get
+// (internal/mdbx expires it when the builder returns, tree_stream_cgo.go
+// callbackV1, so a later Get refuses with "Reader is not active").
+type icbSourceCallsV1 struct {
+	calls, unheld, builderLive [3]int
+	builder                    *mdbx.Reader
+	key                        []byte
+}
+
+func (c *icbSourceCallsV1) record(account *mdbx.OperationAccount, tariff uint64, p mdbx.TreePositionV1, r *mdbx.Reader) {
+	// W stays held: the remaining lane cannot fit another W.
+	held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
+	if !mdbx.IsOperationReservationCapacity(held) {
+		c.unheld[p]++
+	}
+	if _, _, err := c.builder.Get(mdbx.TreeSchemaV1DBIs()[3], c.key); r == c.builder || err == nil {
+		c.builderLive[p]++
+	}
+	c.calls[p]++
+}
+
+// icbUpdateTreeV1 is one composed attempt of TestInitial148CompleteBlockUpdateTreeH5.
+type icbUpdateTreeV1 struct {
+	native    btResult
+	out       initial148CompleteBlockOutcomeV1
+	err       error
+	calls     icbSourceCallsV1
+	badWindow int
+}
+
+// icbUpdateTreeH5V1 composes the root-valid h=5 result of f into a real
+// Store.UpdateTreeV1 inside run on a fresh TreeOperation account and records
+// every native source call per position.
+func icbUpdateTreeH5V1(t *testing.T, w *btWorld, f icbH5V1, parallel bool) icbUpdateTreeV1 {
+	t.Helper()
+	tariff, ok := initial148CompleteTariffV1(f.in)
+	logicalMDBXAssert(t, ok, "tariff")
+	var got icbUpdateTreeV1
+	icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+		observed := &icbNativeSourceV1{}
+		// The native writer may run this on its own goroutine: record only;
+		// the assertions run on the test goroutine after UpdateTreeV1.
+		observed.before = func(p mdbx.TreePositionV1, r *mdbx.Reader, _ *mdbx.TreeDeltaSinkV1) error {
+			got.calls.record(account, tariff, p, r)
+			return nil
+		}
+		got.out, got.err = icbEntryV1(parallel)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			got.native.truth, got.native.stage, got.native.index, got.native.err = w.s.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+				result, verr := validate(reader)
+				if verr != nil {
+					return mdbx.TreeOperationV1{}, verr
+				}
+				observed.source = result.effect.Primitive.Source.(*blockTreeSourceV1)
+				got.calls.builder, got.calls.key = reader, bytes.Clone(result.effect.Primitive.Block[:])
+				_, present, gerr := reader.Get(mdbx.TreeSchemaV1DBIs()[3], got.calls.key)
+				if gerr != nil {
+					return mdbx.TreeOperationV1{}, gerr
+				}
+				return icbComposeV1(result, observed, f.in.Raw[:Initial148HeaderBytes], present), nil
+			})
+			return got.native.err
+		})
+		got.badWindow = observed.badWindow
+	})
+	return got
+}
+
+// check asserts the accepted outcome under run error runErr, the exact
+// per-position call counts want, and W held and the builder's Reader expired
+// at every call.
+func (got icbUpdateTreeV1) check(t *testing.T, f icbH5V1, name string, runErr error, want [3]int) {
+	t.Helper()
+	logicalMDBXAssert(t, got.err == runErr && got.out.attempted && got.out.validationErr == nil && got.out.required.root == f.header.UtxoRoot, "%s composed acceptance: %v / %+v", name, got.err, got.out)
+	logicalMDBXAssert(t, got.badWindow == 0, "%s native source window length differs from 65536 (%d)", name, got.badWindow)
+	got.native.want(t, 2, 3, -1)
+	logicalMDBXAssert(t, got.calls.calls == want, "%s source calls per position %v, want %v", name, got.calls.calls, want)
+	for _, p := range []mdbx.TreePositionV1{mdbx.TreeWriterV1, mdbx.TreeReadbackV1} {
+		logicalMDBXAssert(t, got.calls.unheld[p] == 0, "%s position %d: W released before native last use (%d)", name, p, got.calls.unheld[p])
+		logicalMDBXAssert(t, got.calls.builderLive[p] == 0, "%s position %d consumed the source under the builder Reader (%d)", name, p, got.calls.builderLive[p])
+	}
+}
+
+// icbFinalRowsH5V1 reads the h=5 final rows written by the composed operation.
+func icbFinalRowsH5V1(t *testing.T, w *btWorld, f icbH5V1) {
+	t.Helper()
+	cov := f.created[f.o2].CovenantData
+	w.read(t, 1, btUTXOKey(1, f.o2), btValue(btFrame(2980, COV_TYPE_P2PK, cov), icbHeightV1, false))
+	w.read(t, 1, btUTXOKey(1, f.cb0), btValue(btFrame(20, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1, true))
+	w.read(t, 1, btUTXOKey(1, f.c), btValue(btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1-1, true))
+	for _, gone := range []Outpoint{f.a, f.b, f.o1, {Txid: f.cb0.Txid, Vout: 1}} {
+		w.read(t, 1, btUTXOKey(1, gone), nil)
+	}
+}
+
 // TestInitial148CompleteBlockUpdateTreeH5 (C13) composes the root-valid h=5
-// result into a real Store.UpdateTreeV1 inside run: the native writer and
-// readback consume the immutable source after the builder (and its Reader)
-// returned, while W is still held on the same account; the native
-// truth/stage/index are the owner's own values and the final rows are written.
+// result into a real Store.UpdateTreeV1 inside run: the native writer
+// consumes the immutable source exactly once through a fresh Reader after
+// the builder's Reader expired, while W is still held on the same account;
+// the native truth/stage/index are the owner's own values and the final rows
+// are written. A commit that reports success runs no readback (internal/mdbx
+// updateNativeReadback runs the truth evaluator only after a possibly
+// crossed commit), so the readback position is observed by
+// TestInitial148CompleteBlockUpdateTreeReadbackH5 under the fixture tag.
 func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
-	for _, parallel := range []bool{false, true} {
+	for name, parallel := range map[string]bool{"sequential": false, "parallel": true} {
 		w := btNew(t)
 		f := icbH5FixtureV1(t, w)
-		tariff, ok := initial148CompleteTariffV1(f.in)
-		logicalMDBXAssert(t, ok, "tariff")
-		var native btResult
-		builderReturned, consumed, early, released := false, 0, 0, 0
-		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-			observed := &icbNativeSourceV1{}
-			// The native writer may run this on its own goroutine: record only;
-			// the assertions run on the test goroutine after UpdateTreeV1.
-			observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
-				if !builderReturned {
-					early++
-				}
-				// W stays held: the remaining lane cannot fit another W.
-				held := account.WithReservation(402_653_184-tariff+1, func() error { return nil })
-				if !mdbx.IsOperationReservationCapacity(held) {
-					released++
-				}
-				consumed++
-				return nil
-			}
-			out, err := icbEntryV1(parallel)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
-				native.truth, native.stage, native.index, native.err = w.s.UpdateTreeV1(account, func(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
-					result, verr := validate(reader)
-					if verr != nil {
-						return mdbx.TreeOperationV1{}, verr
-					}
-					observed.source = result.effect.Primitive.Source.(*blockTreeSourceV1)
-					_, present, gerr := reader.Get(mdbx.TreeSchemaV1DBIs()[3], result.effect.Primitive.Block[:])
-					if gerr != nil {
-						return mdbx.TreeOperationV1{}, gerr
-					}
-					op := icbComposeV1(result, observed, f.in.Raw[:Initial148HeaderBytes], present)
-					builderReturned = true
-					return op, nil
-				})
-				return native.err
-			})
-			logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.root == f.header.UtxoRoot, "parallel=%v composed acceptance: %v / %+v", parallel, err, out)
-			logicalMDBXAssert(t, early == 0, "parallel=%v source consumed before the builder returned (%d)", parallel, early)
-			logicalMDBXAssert(t, released == 0, "parallel=%v W released before native last use (%d)", parallel, released)
-			logicalMDBXAssert(t, observed.badWindow == 0, "parallel=%v native source window length differs from 65536 (%d)", parallel, observed.badWindow)
-		})
-		native.want(t, 2, 3, -1)
-		logicalMDBXAssert(t, consumed > 0, "parallel=%v native writer never consumed the source", parallel)
-		cov := f.created[f.o2].CovenantData
-		w.read(t, 1, btUTXOKey(1, f.o2), btValue(btFrame(2980, COV_TYPE_P2PK, cov), icbHeightV1, false))
-		w.read(t, 1, btUTXOKey(1, f.cb0), btValue(btFrame(20, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1, true))
-		w.read(t, 1, btUTXOKey(1, f.c), btValue(btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData()), icbHeightV1-1, true))
-		for _, gone := range []Outpoint{f.a, f.b, f.o1, {Txid: f.cb0.Txid, Vout: 1}} {
-			w.read(t, 1, btUTXOKey(1, gone), nil)
-		}
+		icbUpdateTreeH5V1(t, w, f, parallel).check(t, f, name, nil, [3]int{0, 1, 0})
+		icbFinalRowsH5V1(t, w, f)
 	}
 }
 
@@ -1431,8 +1501,8 @@ func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 // TxError code/msg, no delivered result and no D; then on the same account
 // the whole lane is free again (W, R and source released), and a fresh
 // invocation of the valid block over the same parent succeeds with fresh D,
-// exactly its own fees (20) and created set: no nonce, fee or candidate
-// effect of the refused invocation survives.
+// exactly its own fees and created set (icbCandidateV1): no nonce, fee or
+// candidate effect of the refused invocation survives.
 func icbRefusedDiscardV1(t *testing.T, name string, opts icbH5OptsV1, code ErrorCode, msg string) {
 	t.Helper()
 	for _, workers := range []int{-1, 1, 4} {
@@ -1462,9 +1532,8 @@ func icbRefusedDiscardV1(t *testing.T, name string, opts icbH5OptsV1, code Error
 			}
 			out, err = icbEntryWorkersV1(workers)(account, good.in, run)
 			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
-			if !opts.vault && opts.simplicity == 0 {
-				logicalMDBXAssert(t, fees == (Uint128{Lo: 20}) && reflect.DeepEqual(created, good.created), "%s workers=%d refused effects leaked: fees=%+v created=%+v", name, workers, fees, created)
-			}
+			wantFees, wantCreated := good.icbCandidateV1()
+			logicalMDBXAssert(t, fees == wantFees && reflect.DeepEqual(created, wantCreated), "%s workers=%d refused effects leaked: fees=%+v created=%+v", name, workers, fees, created)
 		})
 	}
 }

@@ -317,3 +317,32 @@ func TestInitial148CompleteBlockGenesisPersistedStateH0(t *testing.T) {
 		accept("malformed-parent-state")
 	}
 }
+
+// TestInitial148CompleteBlockUpdateTreeReadbackH5 (C13 readback) is
+// TestInitial148CompleteBlockUpdateTreeH5 with the commit armed to report a
+// failure after it crossed (SelectedDamageCommitNew): the native truth
+// evaluator replays the source at TreeReadbackV1, so the writer and the
+// readback each consume it exactly once through a fresh Reader after the
+// builder's Reader expired, with W held; the outer error is the native
+// *CommitError (truth New) returned by run, never a validation projection;
+// the Store is consumed with that terminal error and, reopened, holds the
+// final rows.
+func TestInitial148CompleteBlockUpdateTreeReadbackH5(t *testing.T) {
+	for name, parallel := range map[string]bool{"sequential": false, "parallel": true} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		var got icbUpdateTreeV1
+		counts, fixtureErr := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageCommitNew, 0, nil, func() {
+			got = icbUpdateTreeH5V1(t, w, f, parallel)
+		})
+		logicalMDBXAssert(t, fixtureErr == nil && counts.Commits == 1, "%s fixture: %+v / %v", name, counts, fixtureErr)
+		var commitErr *mdbx.CommitError
+		logicalMDBXAssert(t, errors.As(got.native.err, &commitErr) && commitErr.Truth == mdbx.CommitTruthNew, "%s native commit error: %v", name, got.native.err)
+		got.check(t, f, name, got.native.err, [3]int{0, 1, 1})
+		// The crossed commit consumes the Store with that same terminal error.
+		terminal := w.s.View(func(*mdbx.Reader) error { return nil })
+		logicalMDBXAssert(t, any(terminal) == any(got.native.err), "%s Store terminal %v", name, terminal)
+		w.reopen(t)
+		icbFinalRowsH5V1(t, w, f)
+	}
+}
