@@ -310,6 +310,15 @@ func TestReplayTreeFixtureIntentUndecodable(t *testing.T) {
 	progress[len(progress)-5] = byte(mdbx.TreeProgressPartialV1)
 	damaged["progress at PRUNE_GC"] = progress
 	damaged["STABLE with pending"] = rtIllegalStablePending(t)
+	replay := rtPrune()
+	replay.Authority.Phase, replay.Authority.Lifecycle, replay.Authority.Cleanup = mdbx.StoragePhaseReplayV1, mdbx.StorageLifecycleRecoveryRequiredV1, nil
+	replay.Authority.Replay = &mdbx.ReplayV1{TargetProfile: mdbx.StorageProfilePrunedV1, TargetGenerationID: 3, Target: mdbx.RecoveryTargetV1{TipHeight: 1, CumulativeChainwork: [40]byte{39: 1}}, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}}
+	replay.TargetLagGenerationID, replay.SourceKind = 4, mdbx.TreeSourceGenesisReplayV1
+	replayLegal, err := replay.Encode()
+	logicalMDBXAssert(t, err == nil && bytes.Equal(replayLegal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 4}), "REPLAY target lag premise: %v %x", err, replayLegal[10:18])
+	lagZero, lagActive := bytes.Clone(replayLegal), bytes.Clone(replayLegal)
+	lagZero[17], lagActive[17] = 0, 1
+	damaged["REPLAY target lag zero"], damaged["REPLAY target lag = active"] = lagZero, lagActive
 	for label, value := range damaged {
 		w := rtNew(t, rtPrune())
 		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, value) == nil, "%s seed", label)
@@ -360,8 +369,8 @@ func TestReplayTreeFixtureIntentCapacity(t *testing.T) {
 }
 
 // rtIllegalStablePending is a PRUNE_GC envelope whose lifecycle byte is STABLE while it carries a pending profile: the
-// legal RECOVERY_REQUIRED encoding with its one lifecycle byte (the only byte after the length field that differs from
-// the STABLE encoding with the same pending presence) rewritten.
+// legal RECOVERY_REQUIRED+pending encoding compared with the PRUNE_GC/STABLE encoding without pending (rtPrune); the
+// first differing byte after the 22-byte envelope header must be the lifecycle byte (asserted), and it is rewritten.
 func rtIllegalStablePending(t *testing.T) []byte {
 	t.Helper()
 	profile := mdbx.StorageProfilePrunedV1

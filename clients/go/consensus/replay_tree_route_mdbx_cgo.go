@@ -12,9 +12,10 @@ import (
 
 // The format-3 route of the dormant replay metadata writers (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.2, 6.4.1.3 and
 // 6.4.1.8). No production caller. On a tree store each writer reads the TreeAuthorityV1 envelope; a plan it builds
-// itself is one pair-only Batch whose meta key 2 row is that envelope's encoding, while the selected-side intent branch
-// returns the clear planner's result unchanged. replayTreeOperation is the only route from such a Batch to
-// Store.UpdateTreeV1.
+// itself is one pair-only Batch whose meta key 2 row is the encoding of the planned envelope. The selected-side intent
+// branch instead returns the clear planner's result, which on a tree Reader is always its ReadStorageAuthorityV1
+// tree-Reader refusal with an empty ReadResource (RUB-1729 owns that branch). replayTreeOperation is the only route
+// from such a Batch to Store.UpdateTreeV1.
 
 // replayTreeRefusal is the comparable identity of a direct EngineError with a nil Cause and nil TreeObservation.
 type replayTreeRefusal struct {
