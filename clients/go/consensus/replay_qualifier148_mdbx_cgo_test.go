@@ -7,9 +7,13 @@ import (
 	"crypto/sha3"
 	"encoding/binary"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -938,4 +942,105 @@ func TestReplayQualifier148RecomputeTargetRows(t *testing.T) {
 			t.Fatalf("R8 %s: ProtectV1 %v", c.label, v.versions)
 		}
 	}
+}
+
+// q148Primitives are the six header primitives the X1 census lists.
+var q148Primitives = map[string]bool{"ParseBlockHeaderBytes": true, "BlockHash": true, "PowCheck": true, "ParseInitial148HeaderBytes": true, "Initial148BlockHash": true, "Initial148PowCheck": true}
+
+// TestReplayQualifier148WidthCensus is X1 and H3: every call of a header primitive in the qualifier's three files lies
+// on exactly one width path of the replayQualifier width dispatch (parse, hashOf, pow): 148 inside the `if q.wide`
+// body, 116 after it. The BlockHash call of replayEntryContext is the published-genesis context check (RUB-1627), on
+// neither qualifier path.
+func TestReplayQualifier148WidthCensus(t *testing.T) {
+	var got []string
+	fset := token.NewFileSet()
+	for _, name := range []string{"replay_entry_mdbx_cgo.go", "replay_recovery_mdbx_cgo.go", "replay_qualifier148_mdbx_cgo.go"} {
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		got = append(got, q148WidthCensus(name, file)...)
+	}
+	slices.Sort(got)
+	want := []string{
+		"replay_entry_mdbx_cgo.go hashOf BlockHash 116",
+		"replay_entry_mdbx_cgo.go hashOf Initial148BlockHash 148",
+		"replay_entry_mdbx_cgo.go parse ParseBlockHeaderBytes 116",
+		"replay_entry_mdbx_cgo.go parse ParseInitial148HeaderBytes 148",
+		"replay_entry_mdbx_cgo.go pow Initial148PowCheck 148",
+		"replay_entry_mdbx_cgo.go pow PowCheck 116",
+		"replay_entry_mdbx_cgo.go replayEntryContext BlockHash context",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("X1 census:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// q148WidthCensus lists each primitive call of file as "file function primitive path".
+func q148WidthCensus(name string, file *ast.File) []string {
+	var stack []ast.Node
+	var rows []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && q148Primitives[id.Name] {
+				rows = append(rows, name+" "+q148WidthPath(stack, id.Name))
+			}
+		}
+		return true
+	})
+	return rows
+}
+
+// q148WidthPath is "function primitive path" for a call on stack: path is "148" inside the body of an `if q.wide`
+// of a *replayQualifier method, "116" elsewhere in such a method, "context" in the function replayEntryContext, and
+// "none" otherwise (including outside any function, named "-").
+func q148WidthPath(stack []ast.Node, primitive string) string {
+	fn, wide := (*ast.FuncDecl)(nil), false
+	for i, n := range stack {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			fn = node
+		case *ast.IfStmt:
+			wide = wide || i+1 < len(stack) && stack[i+1] == node.Body && q148WideCond(node.Cond)
+		}
+	}
+	switch {
+	case fn == nil:
+		return "- " + primitive + " none"
+	case q148QualifierMethod(fn) && wide:
+		return fn.Name.Name + " " + primitive + " 148"
+	case q148QualifierMethod(fn):
+		return fn.Name.Name + " " + primitive + " 116"
+	case fn.Recv == nil && fn.Name.Name == "replayEntryContext":
+		return fn.Name.Name + " " + primitive + " context"
+	}
+	return fn.Name.Name + " " + primitive + " none"
+}
+
+// q148QualifierMethod reports whether fn is a method with receiver type *replayQualifier.
+func q148QualifierMethod(fn *ast.FuncDecl) bool {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return false
+	}
+	star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	id, ok := star.X.(*ast.Ident)
+	return ok && id.Name == "replayQualifier"
+}
+
+// q148WideCond reports whether cond is exactly the selector q.wide.
+func q148WideCond(cond ast.Expr) bool {
+	sel, ok := cond.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == "q" && sel.Sel.Name == "wide"
 }
