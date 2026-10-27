@@ -8,11 +8,16 @@ import (
 )
 
 type entryWalkV1 struct {
-	s      *entryInventoryStateV1
-	old    *Reader
-	visit  func(EntryInventoryRowV1) error
-	stream *entryStreamV1
-	cursor *entryCursorV1
+	s         *entryInventoryStateV1
+	old       *Reader
+	candidate *Reader
+	visit     func(EntryInventoryRowV1) error
+	stream    *entryStreamV1
+	other     *entryStreamV1
+	cursor    *entryCursorV1
+	context   *EntryInventoryRowV1
+	plan      *treePlanV1
+	equal     bool
 }
 
 type entryCursorV1 struct {
@@ -25,13 +30,22 @@ func entryRankV1(artifact uint8) uint8 {
 	return ranks[artifact]
 }
 
+// pointV1 captures request context before the OLD read and private candidate comparison.
 func (w *entryWalkV1) pointV1(row *EntryInventoryRowV1, key []byte) (updateImage, error) {
 	w.s.requestV1(row, 1, key)
-	image, err := w.old.obsoletePoint(entryRankV1(row.Artifact), key, operationGet)
+	image, err := w.old.obsoletePoint(entryRankV1(row.Artifact), key, w.operationV1())
 	if err != nil {
 		return updateImage{}, w.s.stopV1(1, err)
 	}
+	if err := w.pointCompareV1(row, key, &image); err != nil {
+		return updateImage{}, err
+	}
 	return image, nil
+}
+
+func (w *entryWalkV1) rowV1(source, artifact, role uint8, generation uint64) *EntryInventoryRowV1 {
+	w.s.row = EntryInventoryRowV1{Source: source, Artifact: artifact, Role: role, Generation: generation}
+	return &w.s.row
 }
 
 func (w *entryWalkV1) requiredV1(row *EntryInventoryRowV1, key []byte) (updateImage, error) {
@@ -108,22 +122,28 @@ func (s *entryInventoryStateV1) transitionV1() error {
 	return nil
 }
 
+// allocationV1 checks the fresh-generation or carried-side tuple after transitionV1.
 func (s *entryInventoryStateV1) allocationV1() bool {
 	o, next := s.authority[0].Authority, s.authority[1].Authority
 	captured := next.Ordinary.CapturedSelectedSide
 	if s.inspection[1].new.len() == 1 && o.SelectedSide == nil {
-		return o.NextGenerationID != ^uint64(0) && next.NextGenerationID == o.NextGenerationID+1 && captured.GenerationID == o.NextGenerationID
+		return all(o.NextGenerationID != ^uint64(0), next.NextGenerationID == o.NextGenerationID+1, captured.GenerationID == o.NextGenerationID)
 	}
-	return o.NextGenerationID == next.NextGenerationID && o.SelectedSide != nil && *o.SelectedSide == *captured
+	if o.SelectedSide == nil {
+		return false
+	}
+	return all(o.NextGenerationID == next.NextGenerationID, *o.SelectedSide == *captured)
 }
 
+// entryExclusionSameV1 compares complete exclusion identity after the optional-record guards.
 func entryExclusionSameV1(a, b *InvalidBranchV1) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.FirstInvalidHeight == b.FirstInvalidHeight && a.FirstInvalidBlockHash == b.FirstInvalidBlockHash && bytes.Equal(a.ExactConsensusError, b.ExactConsensusError)
+	return all(a.FirstInvalidHeight == b.FirstInvalidHeight, a.FirstInvalidBlockHash == b.FirstInvalidBlockHash, bytes.Equal(a.ExactConsensusError, b.ExactConsensusError))
 }
 
+// targetsV1 admits authority/N targets and requires the fresh C1 link; see MEMPOOL 6.4.1.7.
 func (s *entryInventoryStateV1) targetsV1() error {
 	if !s.mutations[0].BeforePresent {
 		return entryInputV1()
@@ -135,21 +155,22 @@ func (s *entryInventoryStateV1) targetsV1() error {
 		}
 		link = link || m.DBI.Rank == 6
 	}
-	if s.inspection[1].new.len() == 1 && s.authority[0].Authority.SelectedSide == nil && !link {
+	if all(s.inspection[1].new.len() == 1, s.authority[0].Authority.SelectedSide == nil, !link) {
 		return entryInputV1()
 	}
 	return nil
 }
 
+// targetIdentityV1 admits absent literal N headers or fresh C1 body/link targets.
 func (s *entryInventoryStateV1) targetIdentityV1(m Mutation) bool {
-	if m.BeforePresent || m.AfterKind != AfterLiteral {
+	if !all(!m.BeforePresent, m.AfterKind == AfterLiteral) {
 		return false
 	}
 	n := s.inspection[1].new
 	if m.DBI.Rank == 3 {
 		return n.hasHash([32]byte(m.Key), n.len())
 	}
-	if n.len() != 1 || s.authority[0].Authority.SelectedSide != nil {
+	if !all(n.len() == 1, s.authority[0].Authority.SelectedSide == nil) {
 		return false
 	}
 	p := n.at(0)
@@ -159,8 +180,12 @@ func (s *entryInventoryStateV1) targetIdentityV1(m Mutation) bool {
 	return s.targetLinkV1(m, p)
 }
 
+// targetLinkV1 checks rank/width before the complete SideLink hash/generation/height tuple.
 func (s *entryInventoryStateV1) targetLinkV1(m Mutation, p AuthorityPointV1) bool {
-	return m.DBI.Rank == 6 && len(m.Literal) == 104 && bytes.Equal(m.Literal[:32], p.BlockHash[:]) && binary.BigEndian.Uint64(m.Key) == s.authority[1].Authority.Ordinary.CapturedSelectedSide.GenerationID && binary.BigEndian.Uint64(m.Key[8:]) == p.Height
+	if m.DBI.Rank != 6 || len(m.Literal) != 104 {
+		return false
+	}
+	return all(bytes.Equal(m.Literal[:32], p.BlockHash[:]), binary.BigEndian.Uint64(m.Key) == s.authority[1].Authority.Ordinary.CapturedSelectedSide.GenerationID, binary.BigEndian.Uint64(m.Key[8:]) == p.Height)
 }
 
 func entryMetaV1(kind byte, generation uint64) [9]byte {
@@ -170,28 +195,30 @@ func entryMetaV1(kind byte, generation uint64) [9]byte {
 	return key
 }
 
+// controlsV1 visits CURRENT then LAG counters and each role's own binding.
 func (w *entryWalkV1) controlsV1() error {
 	s := w.s
 	for role, g := range [2]uint64{s.authority[0].Authority.ActiveGenerationID, s.authority[0].LagGenerationID} {
-		row := EntryInventoryRowV1{Source: uint8(1 + role*2), Artifact: 2, Role: uint8(role + 1), Generation: g}
+		row := w.rowV1(uint8(1+role*2), 2, uint8(role+1), g)
 		key := entryMetaV1(0x10, g)
-		image, err := w.requiredV1(&row, key[:])
+		image, err := w.requiredV1(row, key[:])
 		if err != nil {
 			return err
 		}
 		if image.length != 16 {
 			return s.stopV1(4, nil)
 		}
-		if err := w.emitV1(&row, key[:], &image); err != nil {
+		if err := w.emitV1(row, key[:], &image); err != nil {
 			return err
 		}
-		if err := w.bindingV1(uint8(role), g, &row); err != nil {
+		if err := w.bindingV1(uint8(role), g, row); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// bindingV1 retains a full root through assuranceV1, then clears aliases and keeps its endpoint.
 func (w *entryWalkV1) bindingV1(role uint8, generation uint64, row *EntryInventoryRowV1) error {
 	s := w.s
 	*row = EntryInventoryRowV1{Source: 2 + role*2, Artifact: 11, Role: role + 1, Generation: generation}
@@ -201,22 +228,26 @@ func (w *entryWalkV1) bindingV1(role uint8, generation uint64, row *EntryInvento
 		return err
 	}
 	b, _ := treeBorrowV1(image)
-	s.roots[role], err = decodeRootBindingV1(b.value, &s.rootControl[role])
-	if err != nil || s.roots[role].DatabaseID != w.old.databaseID {
+	root, err := decodeRootBindingV1(b.value, &s.rootControl)
+	if err != nil || root.DatabaseID != w.old.databaseID {
 		return s.stopV1(4, nil)
 	}
-	if s.roots[role].Endpoint.Kind == 1 {
-		row.IndexCount = s.roots[role].Endpoint.Height + 1
+	s.endpoints[role] = root.Endpoint
+	if root.Endpoint.Kind == 1 {
+		row.IndexCount = root.Endpoint.Height + 1
 	}
 	b.value = nil
 	if err := w.emitV1(row, key[:], &image); err != nil {
 		return err
 	}
-	return w.assuranceV1(role, row)
+	err = w.assuranceV1(root.Assurance.Import, row)
+	root.Top.Node, root.Assurance.Import = nil, nil
+	s.rootControl = rootDecodeControl{}
+	return err
 }
 
-func (w *entryWalkV1) assuranceV1(role uint8, row *EntryInventoryRowV1) error {
-	ref := w.s.roots[role].Assurance.Import
+// assuranceV1 borrows qualified capsule bytes under the requesting role's exact evidence key.
+func (w *entryWalkV1) assuranceV1(ref *TreeImportReferenceV1, row *EntryInventoryRowV1) error {
 	if ref == nil {
 		return nil
 	}
@@ -237,8 +268,12 @@ func (w *entryWalkV1) assuranceV1(role uint8, row *EntryInventoryRowV1) error {
 	return nil
 }
 
-// Move the caller's image into the registered access owner before unlocking.
+// emitV1 moves native images into registered access before unlocking for the visitor.
 func (w *entryWalkV1) emitV1(row *EntryInventoryRowV1, key []byte, image *updateImage) error {
+	if w.visit == nil {
+		*image = updateImage{}
+		return nil
+	}
 	s, r := w.s, w.old
 	s.serial++
 	a := &s.access
@@ -278,7 +313,15 @@ func (w *entryWalkV1) visitRowV1(row *EntryInventoryRowV1) error {
 	return w.visit(*row)
 }
 
+// literalV1 resolves only exact rank/key targets from the immutable Pair or its sole owned clone.
 func (w *entryWalkV1) literalV1(rank uint8, key []byte) (updateImage, bool, error) {
+	if w.plan != nil {
+		if i := canonicalTargetIndex(w.plan.pair, rank, key); i >= 0 {
+			image, err := updateOwnedImage(w.plan.pair[i].literal)
+			return image, true, err
+		}
+		return updateImage{}, false, nil
+	}
 	for _, m := range w.s.mutations {
 		if m.DBI.Rank == rank && bytes.Equal(m.Key, key) {
 			image, err := updateOwnedImage(m.Literal)
@@ -328,6 +371,7 @@ func (w *entryWalkV1) malformedImageV1(row *EntryInventoryRowV1, key []byte) err
 	return w.s.stopV1(4, nil)
 }
 
+// runV1 visits the fixed source order and stops at the first refusal; see COMPACT 10.1.
 func (w *entryWalkV1) runV1() error {
 	w.stream.seek = make([]byte, w.s.maxKey)
 	if err := w.controlsV1(); err != nil {
@@ -351,25 +395,15 @@ func (w *entryWalkV1) runV1() error {
 	if err := w.capturedV1(); err != nil {
 		return err
 	}
-	return w.finishV1()
+	return w.obsoleteV1()
 }
 
-func (w *entryWalkV1) finishV1() error {
-	for _, spans := range [2]authoritySpans{w.s.inspection[0].phase, w.s.inspection[1].carried} {
-		for i := 0; i < spans.len(); i++ {
-			if spans.at(i).Kind == 1 {
-				return entryInputV1()
-			}
-		}
-	}
-	w.s.completed = true // the sole full-domain completion, under getMu
-	return nil
-}
-
+// headerGroupV1 emits canonical cardinality without a physical row or ReadAt capability.
 func (w *entryWalkV1) headerGroupV1() error {
-	row := EntryInventoryRowV1{Source: 6, Artifact: 6, Role: 1, Generation: w.s.authority[0].Authority.ActiveGenerationID, Count: w.s.roots[0].Endpoint.Height + 1}
+	row := w.rowV1(6, 6, 1, w.s.authority[0].Authority.ActiveGenerationID)
+	row.Count = w.s.endpoints[0].Height + 1
 	image := updateImage{}
-	return w.emitV1(&row, nil, &image)
+	return w.emitV1(row, nil, &image)
 }
 
 func entryHeightV1(generation, height uint64) [16]byte {
@@ -379,12 +413,14 @@ func entryHeightV1(generation, height uint64) [16]byte {
 	return key
 }
 
+// canonicalPointV1 validates the exact CURRENT forward entry before exposing copied fields.
 func (w *entryWalkV1) canonicalPointV1(height uint64) ([104]byte, error) {
 	var value [104]byte
 	g := w.s.authority[0].Authority.ActiveGenerationID
-	row := EntryInventoryRowV1{Source: 27, Artifact: 4, Role: 1, Generation: g, Height: height}
+	row := w.rowV1(27, 4, 1, g)
+	row.Height = height
 	key := entryHeightV1(g, height)
-	image, err := w.requiredV1(&row, key[:])
+	image, err := w.requiredV1(row, key[:])
 	if err != nil {
 		return value, err
 	}
@@ -398,8 +434,9 @@ func (w *entryWalkV1) canonicalPointV1(height uint64) ([104]byte, error) {
 	return value, nil
 }
 
+// boundaryV1 binds O/N to the stored CURRENT endpoint and common height.
 func (s *entryInventoryStateV1) boundaryV1() (uint64, error) {
-	tip, old := s.roots[0].Endpoint, s.inspection[1].old
+	tip, old := s.endpoints[0], s.inspection[1].old
 	if tip.Kind != 1 {
 		return 0, entryInputV1()
 	}
@@ -432,16 +469,16 @@ func (w *entryWalkV1) pathsV1() error {
 	return w.commonPathV1(f)
 }
 
-// The common boundary binds the first N parent to actual CURRENT bytes.
+// commonPathV1 binds the first N parent to actual CURRENT common-boundary bytes.
 func (w *entryWalkV1) commonPathV1(height uint64) error {
 	entry, err := w.canonicalPointV1(height)
 	if err != nil {
 		return err
 	}
-	expected := w.s.roots[0].Endpoint.BlockHash
+	expected := w.s.endpoints[0].BlockHash
 	if w.s.inspection[1].old.len() > 0 {
 		expected = w.cursor.hashes[1]
-	} else if [40]byte(entry[64:]) != w.s.roots[0].Endpoint.CumulativeChainwork {
+	} else if [40]byte(entry[64:]) != w.s.endpoints[0].CumulativeChainwork {
 		return entryInputV1()
 	}
 	if expected != [32]byte(entry[:32]) {
@@ -454,6 +491,7 @@ func (w *entryWalkV1) commonPathV1(height uint64) error {
 	return nil
 }
 
+// oldPathV1 checks each O entry/header/parent at its original tip-down position.
 func (w *entryWalkV1) oldPathV1(i int) error {
 	old := w.s.inspection[1].old
 	p := old.at(i)
@@ -464,7 +502,7 @@ func (w *entryWalkV1) oldPathV1(i int) error {
 	if [32]byte(entry[:32]) != p.BlockHash {
 		return entryInputV1()
 	}
-	if i == 0 && [40]byte(entry[64:]) != w.s.roots[0].Endpoint.CumulativeChainwork {
+	if i == 0 && [40]byte(entry[64:]) != w.s.endpoints[0].CumulativeChainwork {
 		return entryInputV1()
 	}
 	if err := w.canonicalHeaderV1(p.Height, &entry); err != nil {
@@ -478,18 +516,20 @@ func (w *entryWalkV1) oldPathV1(i int) error {
 	return nil
 }
 
+// canonicalHeaderV1 reads the required header under its actual CURRENT context.
 func (w *entryWalkV1) canonicalHeaderV1(height uint64, entry *[104]byte) error {
-	row := EntryInventoryRowV1{Source: 27, Artifact: 6, Role: 1, Generation: w.s.authority[0].Authority.ActiveGenerationID, Height: height, Hash: [32]byte(entry[:32])}
-	image, err := w.requiredV1(&row, row.Hash[:])
+	row := w.rowV1(27, 6, 1, w.s.authority[0].Authority.ActiveGenerationID)
+	row.Height, row.Hash = height, [32]byte(entry[:32])
+	image, err := w.requiredV1(row, row.Hash[:])
 	if err != nil {
 		return err
 	}
-	return w.headerV1(&row, image, [32]byte(entry[32:64]))
+	return w.headerV1(row, image, [32]byte(entry[32:64]))
 }
 
+// headerV1 checks header codec/parent while preserving captured-input priority.
 func (w *entryWalkV1) headerV1(row *EntryInventoryRowV1, image updateImage, parent [32]byte) error {
-	borrow, _ := treeBorrowV1(image)
-	if validateInitial148Value(row.Hash, borrow.value, false) != nil || [32]byte(borrow.value[4:36]) != parent {
+	if !entryLinkedV1(&image, &row.Hash, &parent) {
 		if row.Source == 11 {
 			return w.malformedImageV1(row, row.Hash[:])
 		}
@@ -498,12 +538,14 @@ func (w *entryWalkV1) headerV1(row *EntryInventoryRowV1, image updateImage, pare
 	return nil
 }
 
+// oldUndoV1 visits exact O undo families in tip-down suffix order.
 func (w *entryWalkV1) oldUndoV1() error {
 	old := w.s.inspection[1].old
 	for i := 0; i < old.len(); i++ {
 		p := old.at(i)
-		row := EntryInventoryRowV1{Source: 5, Artifact: 8, Role: 1, Generation: w.s.authority[0].Authority.ActiveGenerationID, Height: p.Height, Hash: p.BlockHash}
-		if err := w.undoV1(&row); err != nil {
+		row := w.rowV1(5, 8, 1, w.s.authority[0].Authority.ActiveGenerationID)
+		row.Height, row.Hash = p.Height, p.BlockHash
+		if err := w.undoV1(row); err != nil {
 			return err
 		}
 	}
@@ -523,20 +565,22 @@ func (w *entryWalkV1) bodyV1(row *EntryInventoryRowV1) error {
 	return w.emitV1(row, row.Hash[:], &image)
 }
 
+// bodyFirstV1 derives L_body from archive policy or LAG, independently of service B.
 func (w *entryWalkV1) bodyFirstV1() uint64 {
-	if w.s.authority[0].Authority.ActiveProfile == 2 || w.s.roots[1].Endpoint.Kind == 0 {
+	if w.s.authority[0].Authority.ActiveProfile == 2 || w.s.endpoints[1].Kind == 0 {
 		return 0
 	}
-	return w.s.roots[1].Endpoint.Height + 1
+	return w.s.endpoints[1].Height + 1
 }
 
+// canonicalV1 visits canonical rows before remaining owed spans of the same artifact.
 func (w *entryWalkV1) canonicalV1(undo bool) error {
 	s := w.s
 	first, source, artifact, kind := w.bodyFirstV1(), uint8(7), uint8(7), CleanupSpanBlocksV1
 	if undo {
 		first, source, artifact, kind = s.authority[0].Authority.U, 9, 8, CleanupSpanUndoV1
 	}
-	if err := w.heightRangeV1(first, s.roots[0].Endpoint.Height, source, artifact, undo); err != nil {
+	if err := w.heightRangeV1(first, s.endpoints[0].Height, source, artifact, undo); err != nil {
 		return err
 	}
 	for i := 0; i < s.inspection[0].phase.len(); i++ {
@@ -551,20 +595,22 @@ func (w *entryWalkV1) canonicalV1(undo bool) error {
 	return nil
 }
 
+// heightRangeV1 visits required heights ascending and deduplicates exact O undo identities.
 func (w *entryWalkV1) heightRangeV1(first, last uint64, source, artifact uint8, undo bool) error {
 	for height := first; height <= last; height++ {
 		entry, err := w.canonicalPointV1(height)
 		if err != nil {
 			return err
 		}
-		row := EntryInventoryRowV1{Source: source, Artifact: artifact, Role: 1, Generation: w.s.authority[0].Authority.ActiveGenerationID, Height: height, Hash: [32]byte(entry[:32])}
+		row := w.rowV1(source, artifact, 1, w.s.authority[0].Authority.ActiveGenerationID)
+		row.Height, row.Hash = height, [32]byte(entry[:32])
 		if undo && w.s.inspection[1].old.hasHash(row.Hash, w.s.inspection[1].old.len()) {
 			continue
 		}
 		if undo {
-			err = w.undoV1(&row)
+			err = w.undoV1(row)
 		} else {
-			err = w.bodyV1(&row)
+			err = w.bodyV1(row)
 		}
 		if err != nil {
 			return err
@@ -584,6 +630,7 @@ func (w *entryWalkV1) capturedV1() error {
 	return nil
 }
 
+// capturedMemberV1 proves each N link/header/body in order and parks only the registered link.
 func (w *entryWalkV1) capturedMemberV1(i int, parent [32]byte) error {
 	p := w.s.inspection[1].new.at(i)
 	side := w.s.authority[1].Authority.Ordinary.CapturedSelectedSide
@@ -591,21 +638,22 @@ func (w *entryWalkV1) capturedMemberV1(i int, parent [32]byte) error {
 	if p.Height < side.TipHeight-uint64(side.RowCount)+1 {
 		bodySource, linkSource = 14, 15
 	}
-	row := EntryInventoryRowV1{Source: linkSource, Artifact: 9, Generation: side.GenerationID, Height: p.Height, Hash: p.BlockHash}
+	row := w.rowV1(linkSource, 9, 0, side.GenerationID)
+	row.Height, row.Hash = p.Height, p.BlockHash
 	key := entryHeightV1(side.GenerationID, p.Height)
-	if err := w.capturedLinkV1(&row, key[:], parent); err != nil {
+	if err := w.capturedLinkV1(row, key[:], parent); err != nil {
 		return err
 	}
 	row.Source, row.Artifact = 11, 6
-	if err := w.capturedHeaderV1(&row, parent); err != nil {
+	if err := w.capturedHeaderV1(row, parent); err != nil {
 		return err
 	}
 	row.Source, row.Artifact = bodySource, 7
-	if err := w.bodyV1(&row); err != nil {
+	if err := w.bodyV1(row); err != nil {
 		return err
 	}
 	row.Source, row.Artifact = linkSource, 9
-	return w.emitV1(&row, key[:], &w.stream.row.image)
+	return w.emitV1(row, key[:], &w.stream.row.image)
 }
 
 func (w *entryWalkV1) capturedHeaderV1(row *EntryInventoryRowV1, parent [32]byte) error {
@@ -665,41 +713,126 @@ func entrySuccessorV1(buffer, key []byte) []byte {
 	return buffer[:0]
 }
 
-func (w *entryWalkV1) fetchV1(row *EntryInventoryRowV1) error {
-	stream := w.stream
+// fetchV1 records the exact seek/reached key and prefix before a source can fail.
+func (w *entryWalkV1) fetchV1(stream *entryStreamV1, row *EntryInventoryRowV1) error {
+	if stream.done || len(stream.seek) == 0 {
+		stream.done = true
+		return nil
+	}
 	w.s.requestV1(row, 2, stream.seek)
-	next, err := stream.reader.obsoleteFetch(stream.domain, stream.seek, operationGet)
+	w.s.failure.Prefix = w.s.access.key[:copy(w.s.access.key[:cap(w.s.access.key)], stream.domain.prefix)]
+	next, err := stream.reader.obsoleteFetch(stream.domain, stream.seek, w.operationV1())
 	if err != nil {
 		return w.s.stopV1(1, err)
 	}
 	stream.row, stream.done = next, next.done
 	if !next.done {
 		w.s.requestV1(row, 2, next.key) // a positive row owns its actual key
+		w.s.failure.Prefix = w.s.access.key[:copy(w.s.access.key[:cap(w.s.access.key)], stream.domain.prefix)]
 	}
 	return nil
 }
 
+// scanV1 exhausts both selected keysets, including candidate-only keys, before changing domains.
 func (w *entryWalkV1) scanV1(row *EntryInventoryRowV1) error {
 	stream := w.stream
-	stream.reader, stream.domain, stream.done = w.old, obsoleteDomain{rank: 5, prefix: row.Hash[:]}, false
-	stream.seek = stream.seek[:copy(stream.seek[:cap(stream.seek)], row.Hash[:])]
+	w.scanStartV1(stream, w.old, row)
+	if w.other != nil {
+		w.scanStartV1(w.other, w.candidate, row)
+	}
 	for {
 		stream.row = largeNativeRow{}
-		if err := w.fetchV1(row); err != nil {
+		if err := w.fetchV1(stream, row); err != nil {
+			return err
+		}
+		if err := w.scanCompareV1(row); err != nil {
 			return err
 		}
 		if stream.done {
 			stream.reader, stream.domain, stream.row = nil, obsoleteDomain{}, largeNativeRow{}
 			return nil
 		}
-		if err := w.rawShapeV1(stream.row.key, stream.row.image); err != nil {
+		w.s.requestV1(row, 2, stream.row.key)
+		w.s.failure.Prefix = w.s.access.key[:copy(w.s.access.key[:cap(w.s.access.key)], stream.domain.prefix)]
+		if err := w.scanRowV1(row); err != nil {
 			return err
 		}
-		if err := w.emitV1(row, stream.row.key, &stream.row.image); err != nil {
-			return err
-		}
-		stream.seek = entrySuccessorV1(stream.seek, stream.row.key)
 	}
+}
+
+// scanStartV1 reconstructs a family using the existing cursor and bounded seek backing.
+func (w *entryWalkV1) scanStartV1(stream *entryStreamV1, reader *Reader, row *EntryInventoryRowV1) {
+	stream.reader, stream.done = reader, false
+	prefix := row.Hash[:]
+	if row.Source != 22 && row.Artifact != 8 {
+		// Captured linkage has ended. This existing cursor slot is stable while
+		// successor advancement mutates seek, including a full-M suffix of ff.
+		binary.BigEndian.PutUint64(w.cursor.hashes[0][:8], row.Generation)
+		prefix = w.cursor.hashes[0][:8]
+	}
+	stream.domain = obsoleteDomain{rank: entryRankV1(row.Artifact), prefix: prefix}
+	stream.seek = stream.seek[:copy(stream.seek[:cap(stream.seek)], prefix)]
+}
+
+// scanRowV1 validates/projects the reached row before emission and successor advancement.
+func (w *entryWalkV1) scanRowV1(row *EntryInventoryRowV1) error {
+	stream := w.stream
+	if row.Source == 17 && len(stream.row.key) == 16 {
+		return w.indexRowV1(row)
+	}
+	if err := w.rawRowV1(row); err != nil {
+		return err
+	}
+	if err := w.emitV1(row, stream.row.key, &stream.row.image); err != nil {
+		return err
+	}
+	stream.seek = entrySuccessorV1(stream.seek, stream.row.key)
+	w.advanceOtherV1()
+	return nil
+}
+
+// rawRowV1 checks node identity and undo framing without dropping raw disposable controls.
+func (w *entryWalkV1) rawRowV1(row *EntryInventoryRowV1) error {
+	switch row.Source {
+	case 17:
+		row.Projection = 1
+	case 23:
+		row.Node = TreeNodeIDV1{}
+		g, id, err := DecodeTreeNodeKey(w.stream.row.key)
+		if err != nil || g != row.Generation {
+			return w.s.stopV1(4, nil)
+		}
+		row.Node = id
+	}
+	if row.Artifact == 8 {
+		return w.rawShapeV1(w.stream.row.key, w.stream.row.image)
+	}
+	return nil
+}
+
+// indexRowV1 retains only fixed resume identity and candidate exhaustion across a child scan.
+func (w *entryWalkV1) indexRowV1(row *EntryInventoryRowV1) error {
+	var fixed [16]byte
+	copy(fixed[:], w.stream.row.key)
+	image := w.stream.row.image
+	w.stream.row, w.stream.domain = largeNativeRow{}, obsoleteDomain{}
+	done := false
+	if w.other != nil {
+		done = w.other.done
+		w.other.row, w.other.domain = largeNativeRow{}, obsoleteDomain{}
+	}
+	if err := w.indexV1(row, fixed[:], &image); err != nil {
+		return err
+	}
+	*row = EntryInventoryRowV1{Source: 17, Artifact: 4, Generation: binary.BigEndian.Uint64(fixed[:])}
+	w.scanStartV1(w.stream, w.old, row)
+	w.stream.seek = entrySuccessorV1(w.stream.seek, fixed[:])
+	if w.other != nil {
+		w.scanStartV1(w.other, w.candidate, row)
+		w.other.done = done
+	}
+	w.advanceOtherV1()
+	return nil
 }
 
 func (w *entryWalkV1) rawShapeV1(key []byte, image updateImage) error {
@@ -716,13 +849,17 @@ func (w *entryWalkV1) rawShapeV1(key []byte, image updateImage) error {
 	return nil
 }
 
+// undoV1 checks the manifest and full family count, including valid zero-spent exhaustion.
 func (w *entryWalkV1) undoV1(row *EntryInventoryRowV1) error {
 	var key [33]byte
 	copy(key[:32], row.Hash[:])
 	var err error
-	w.stream.row.image, err = w.requiredV1(row, key[:])
+	w.stream.row.image, err = w.pointV1(row, key[:])
 	if err != nil {
 		return err
+	}
+	if !w.stream.row.image.present {
+		return w.absentUndoV1(row, key[:])
 	}
 	borrow, _ := treeBorrowV1(w.stream.row.image)
 	if len(borrow.value) != 33 || borrow.value[0] != 1 || binary.BigEndian.Uint64(borrow.value[1:]) != row.Height {
@@ -735,6 +872,315 @@ func (w *entryWalkV1) undoV1(row *EntryInventoryRowV1) error {
 	}
 	if w.cursor.positions[0] != w.cursor.positions[1] {
 		return w.s.stopV1(4, nil)
+	}
+	return nil
+}
+
+// absentUndoV1 exposes optional obsolete absence but stops immediately for required undo.
+func (w *entryWalkV1) absentUndoV1(row *EntryInventoryRowV1, key []byte) error {
+	if row.Source != 22 {
+		return w.s.stopV1(2, nil)
+	}
+	w.cursor.positions = [2]uint64{}
+	if err := w.emitV1(row, key, &w.stream.row.image); err != nil {
+		return err
+	}
+	return w.scanV1(row)
+}
+
+// obsoleteV1 visits every selected obsolete generation in descriptor order.
+func (w *entryWalkV1) obsoleteV1() error {
+	spans := w.s.inspection[0].phase
+	for i := 0; i < spans.len(); i++ {
+		if spans.at(i).Kind != 1 {
+			continue
+		}
+		if err := w.generationV1(spans.at(i).GenerationID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// generationV1 keeps counter/families/postorder nodes/root-last contiguous; see COMPACT 10.1.
+func (w *entryWalkV1) generationV1(g uint64) error {
+	row := w.rowV1(19, 2, 0, g)
+	key := entryMetaV1(0x10, g)
+	image, err := w.pointV1(row, key[:])
+	if err != nil {
+		return err
+	}
+	if err := w.emitV1(row, key[:], &image); err != nil {
+		return err
+	}
+	for i, source := range [4]uint8{16, 17, 18, 23} {
+		row = w.rowV1(source, [4]uint8{3, 4, 5, 10}[i], 0, g)
+		if err := w.scanV1(row); err != nil {
+			return err
+		}
+	}
+	row = w.rowV1(24, 11, 0, g)
+	key[0] = 0x11
+	image, err = w.pointV1(row, key[:])
+	if err != nil {
+		return err
+	}
+	return w.emitV1(row, key[:], &image)
+}
+
+// ownerV1 preserves active keyed integrity priority and each actual request's context.
+func (w *entryWalkV1) ownerV1(role int, primary *EntryInventoryRowV1) (uint64, bool, error) {
+	g, sourceRole := w.s.authority[0].Authority.ActiveGenerationID, uint8(1)
+	if role == 1 {
+		g, sourceRole = w.s.authority[0].LagGenerationID, 2
+	}
+	row := w.context
+	*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: sourceRole, Generation: g, Hash: primary.Hash}
+	var key [40]byte
+	binary.BigEndian.PutUint64(key[:8], g)
+	copy(key[8:], primary.Hash[:])
+	image, err := w.pointV1(row, key[:])
+	if err != nil || !image.present {
+		return 0, false, err
+	}
+	b, _ := treeBorrowV1(image)
+	if len(b.value) != 8 || binary.BigEndian.Uint64(b.value) > 0xffffffff {
+		return 0, false, w.s.stopV1(4, nil)
+	}
+	row.Height, row.Artifact = binary.BigEndian.Uint64(b.value), 4
+	forward := entryHeightV1(g, row.Height)
+	image, err = w.pointV1(row, forward[:])
+	if err != nil {
+		return 0, false, err
+	}
+	if !entryForwardV1(&image, &primary.Hash) {
+		return 0, false, w.s.stopV1(4, nil)
+	}
+	return row.Height, true, nil
+}
+
+// keptV1 returns 0=none, 1=prior dedup, 2=required keep; see MEMPOOL 6.4.1.3.
+func (w *entryWalkV1) keptV1(row *EntryInventoryRowV1) (uint8, error) {
+	for role := 0; role < 2; role++ {
+		k, owned, err := w.ownerV1(role, row)
+		if err != nil {
+			return 0, err
+		}
+		if owned && w.activeKeepV1(row.Artifact, role, k) {
+			return 2, nil
+		}
+	}
+	if w.phaseKeepV1(row) {
+		return 2, nil
+	}
+	return w.priorV1(row)
+}
+
+// phaseKeepV1 recognizes the frozen N header/body or O undo promise.
+func (w *entryWalkV1) phaseKeepV1(row *EntryInventoryRowV1) bool {
+	points := w.s.inspection[1].new
+	if row.Artifact == 8 {
+		points = w.s.inspection[1].old
+	}
+	return points.hasHash(row.Hash, points.len())
+}
+
+// activeKeepV1 uses the canonical owner's height/boundary before independent CURRENT duties.
+func (w *entryWalkV1) activeKeepV1(artifact uint8, role int, height uint64) bool {
+	if artifact == 6 {
+		return true
+	}
+	first, kind := w.bodyFirstV1(), CleanupSpanBlocksV1
+	if artifact == 8 {
+		first, kind = w.s.authority[0].Authority.U, CleanupSpanUndoV1
+	}
+	if height >= first {
+		return true
+	}
+	return w.owedV1(kind, role, height)
+}
+
+// owedV1 matches CURRENT artifact family and remaining-height interval as one duty tuple.
+func (w *entryWalkV1) owedV1(kind CleanupSpanKindV1, role int, height uint64) bool {
+	if role != 0 {
+		return false
+	}
+	spans := w.s.inspection[0].phase
+	for i := 0; i < spans.len(); i++ {
+		s := spans.at(i)
+		if all(s.Kind == kind, height >= s.NextHeight, height <= s.LastHeight) {
+			return true
+		}
+	}
+	return false
+}
+
+// priorV1 returns prior-only dedup after complete earlier-slot proof; errors stop the caller.
+func (w *entryWalkV1) priorV1(primary *EntryInventoryRowV1) (uint8, error) {
+	spans := w.s.inspection[0].phase
+	for i := 0; i < spans.len(); i++ {
+		span := spans.at(i)
+		if span.Kind != 1 || span.GenerationID >= primary.Generation {
+			continue
+		}
+		owned, err := w.priorOwnerV1(primary, span.GenerationID)
+		if owned || err != nil {
+			return 1, err
+		}
+	}
+	return 0, nil
+}
+
+// priorOwnerV1 proves an earlier raw reverse/forward/header without granting active priority.
+func (w *entryWalkV1) priorOwnerV1(primary *EntryInventoryRowV1, g uint64) (bool, error) {
+	row := w.context
+	*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: g, Hash: primary.Hash}
+	var key [40]byte
+	binary.BigEndian.PutUint64(key[:8], g)
+	copy(key[8:], primary.Hash[:])
+	image, err := w.pointV1(row, key[:])
+	if err != nil || !image.present {
+		return false, err
+	}
+	b, _ := treeBorrowV1(image)
+	if len(b.value) != 8 || binary.BigEndian.Uint64(b.value) > 0xffffffff {
+		return false, nil
+	}
+	row.Artifact, row.Height = 4, binary.BigEndian.Uint64(b.value)
+	forward := entryHeightV1(g, row.Height)
+	image, err = w.pointV1(row, forward[:])
+	if err != nil {
+		return false, err
+	}
+	if !entryForwardV1(&image, &primary.Hash) {
+		return false, nil
+	}
+	b, _ = treeBorrowV1(image)
+	parent := [32]byte(b.value[32:64])
+	row.Source, row.Artifact = 20, 6
+	image, err = w.projectedV1(row, primary.Hash[:])
+	return entryLinkedV1(&image, &primary.Hash, &parent), err
+}
+
+// projectedV1 admits absent OLD headers supplied by the immutable Pair overlay.
+func (w *entryWalkV1) projectedV1(row *EntryInventoryRowV1, key []byte) (updateImage, error) {
+	image, err := w.pointV1(row, key)
+	if err != nil {
+		return image, err
+	}
+	projected, literal, err := w.literalV1(entryRankV1(row.Artifact), key)
+	if literal {
+		return projected, err
+	}
+	return image, err
+}
+
+// entryLinkedV1 checks the existing 148-byte codec before reading the header parent.
+func entryLinkedV1(image *updateImage, hash, parent *[32]byte) bool {
+	b, _ := treeBorrowV1(*image)
+	return validateInitial148Value(*hash, b.value, false) == nil && [32]byte(b.value[4:36]) == *parent
+}
+
+// entryForwardV1 checks complete forward width, exact hash and valid work.
+func entryForwardV1(image *updateImage, hash *[32]byte) bool {
+	b, _ := treeBorrowV1(*image)
+	return len(b.value) == 104 && [32]byte(b.value[:32]) == *hash && validWork([40]byte(b.value[64:]))
+}
+
+// indexV1 preserves owner/prior/header/reverse order before projection and dependent rows.
+func (w *entryWalkV1) indexV1(row *EntryInventoryRowV1, key []byte, image *updateImage) error {
+	row.Projection = 1
+	b, _ := treeBorrowV1(*image)
+	if !obsoleteIndexShape(key, *image) || !validWork([40]byte(b.value[64:])) {
+		return w.emitV1(row, key, image)
+	}
+	row.Height, row.Hash = binary.BigEndian.Uint64(key[8:]), [32]byte(b.value[:32])
+	parent := [32]byte(b.value[32:64])
+	b.value = nil
+	row.Source, row.Artifact, row.Projection = 20, 6, 0
+	keep, err := w.keptV1(row)
+	if err != nil {
+		return err
+	}
+	header, err := w.projectedV1(row, row.Hash[:])
+	if err != nil {
+		return err
+	}
+	if !entryLinkedV1(&header, &row.Hash, &parent) {
+		return w.invalidIndexV1(row, key, image, keep)
+	}
+	if err := w.reverseV1(row); err != nil {
+		return err
+	}
+	w.stream.row.image, header = header, updateImage{}
+	row.Source, row.Artifact, row.Projection = 17, 4, 3
+	if err := w.emitV1(row, key, image); err != nil {
+		return err
+	}
+	row.Source, row.Artifact, row.Projection = 20, 6, 0
+	return w.projectedRowsV1(row, &w.stream.row.image, keep)
+}
+
+// invalidIndexV1 stops only for required keep; prior dedup permits Invalid with zero height/hash.
+func (w *entryWalkV1) invalidIndexV1(row *EntryInventoryRowV1, key []byte, image *updateImage, keep uint8) error {
+	if keep == 2 {
+		return w.s.stopV1(4, nil)
+	}
+	row.Source, row.Artifact, row.Projection = 17, 4, 1
+	row.Height, row.Hash = 0, [32]byte{}
+	return w.emitV1(row, key, image)
+}
+
+// projectedRowsV1 deduplicates the header, clears its parked image, then visits dependents.
+func (w *entryWalkV1) projectedRowsV1(row *EntryInventoryRowV1, header *updateImage, keep uint8) error {
+	if keep == 0 {
+		if err := w.emitV1(row, row.Hash[:], header); err != nil {
+			return err
+		}
+	}
+	*header = updateImage{}
+	return w.dependentsV1(row)
+}
+
+// reverseV1 refuses unproven own reverse after valid header; see MEMPOOL 6.4.1.3.
+func (w *entryWalkV1) reverseV1(primary *EntryInventoryRowV1) error {
+	row := w.context
+	*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: primary.Generation, Height: primary.Height, Hash: primary.Hash}
+	var key [40]byte
+	binary.BigEndian.PutUint64(key[:8], primary.Generation)
+	copy(key[8:], primary.Hash[:])
+	image, err := w.pointV1(row, key[:])
+	if err != nil {
+		return err
+	}
+	b, _ := treeBorrowV1(image)
+	if !image.present || len(b.value) != 8 || binary.BigEndian.Uint64(b.value) != primary.Height {
+		return w.s.stopV1(3, nil)
+	}
+	return nil
+}
+
+// dependentsV1 checks body/undo keeps separately before requesting otherwise-owned artifacts.
+func (w *entryWalkV1) dependentsV1(row *EntryInventoryRowV1) error {
+	for _, artifact := range [2]uint8{7, 8} {
+		row.Source, row.Artifact = 14+artifact, artifact
+		keep, err := w.keptV1(row)
+		if err != nil {
+			return err
+		}
+		if keep != 0 {
+			continue
+		}
+		if artifact == 8 {
+			return w.undoV1(row)
+		}
+		image, err := w.pointV1(row, row.Hash[:])
+		if err != nil {
+			return err
+		}
+		if err := w.emitV1(row, row.Hash[:], &image); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -23,7 +23,7 @@ import (
 type TreePairV1 struct {
 	Mutations []Mutation
 	Consulted []ConsultedRow
-	// EntryInventory is preparation only; this controls-only predecessor refuses it.
+	// EntryInventory accepts the completed token for this same entry, account and Pair.
 	EntryInventory *EntryInventoryV1
 }
 
@@ -267,6 +267,7 @@ type treePublicEntryV1 struct {
 	inventory *entryInventoryStateV1
 }
 
+// callbackV1 expires public borrows while retaining successful ENTRY recipes for admission.
 func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, error)) (TreeOperationV1, treeUnwindV1, error) {
 	returned := false
 	defer func() {
@@ -280,12 +281,14 @@ func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, 
 	op, value, panicked, err := invokeUpdate(callback, e.reader)
 	returned = true
 	e.reader.expire().retire()
-	e.retireEntryV1()
+	e.expireEntryV1()
 	primary, infrastructure := readPrimary(err, e.reader.failure)
 	if panicked {
+		e.retireEntryV1()
 		return TreeOperationV1{}, treeUnwindV1{kind: 1, value: value}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
 	if primary != nil {
+		e.retireEntryV1()
 		return TreeOperationV1{}, treeUnwindV1{}, e.store.abortReadLocked(e.old, primary, infrastructure)
 	}
 	return op, treeUnwindV1{}, nil
@@ -313,6 +316,7 @@ func (e *treePublicEntryV1) executeV1(account *OperationAccount, callback func(*
 	return truth, stage, index, unwind, err
 }
 
+// admittedV1 admits before cloning the Pair and rebinding ENTRY through native completion.
 func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error), saved error) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	op, unwind, err := e.callbackV1(callback)
 	if err != nil || unwind.kind != 0 {
@@ -320,19 +324,26 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 	}
 	err = e.prewriteV1(account, op, saved)
 	if err != nil {
+		e.retireEntryV1()
 		return CommitTruthOld, UpdateStagePrewrite, -1, treeUnwindV1{}, e.store.abortReadLocked(e.old, err, false)
 	}
 	plan := treeOwnPlanV1(op)
+	if e.inventory != nil {
+		plan.inventory = e.inventory
+		plan.inventory.ownV1(&plan)
+	}
 	return e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{e.hold}, &plan)
 }
 
+// prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
 func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
 	budget, admissionErr := treeAdmitBudgetV1(op, account, e.store.databaseID)
 	if admissionErr != nil {
 		return admissionErr
 	}
-	if e.inventory != nil || op.Pair.EntryInventory != nil {
-		return entryInputV1()
+	err := e.entryAdmitV1(&op, account)
+	if err != nil {
+		return err
 	}
 	if op.Proof != nil && !treeProofShapeV1(op.Primitives) {
 		return updateInvalidBatch()

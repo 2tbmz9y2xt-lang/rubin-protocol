@@ -21,6 +21,7 @@ import (
 // canonical bijection before the real startup owner publishes permission.
 type eisFixture struct {
 	s       *Store
+	path    string
 	o       *OperationReservationOwner
 	old     TreeAuthorityV1
 	headers [][]byte
@@ -85,8 +86,8 @@ func eisSeed(t *testing.T, f *eisFixture, rows []Mutation) {
 
 func eisNew(t *testing.T, height uint64, profile byte, cleanup []CleanupSpanV1) *eisFixture {
 	t.Helper()
-	s, _, _ := treeNativeStore(t)
-	f := &eisFixture{s: s, o: reservationOwner(t, 805306368), height: height}
+	s, path, _ := treeNativeStore(t)
+	f := &eisFixture{s: s, path: path, o: reservationOwner(t, 805306368), height: height}
 	f.old = TreeAuthorityV1{Authority: StorageAuthorityV1{Version: 1, ActiveProfile: StorageProfileV1(profile), ActiveGenerationID: 11, NextGenerationID: 21, Phase: 1, Lifecycle: 1}, LagGenerationID: 13}
 	if height >= 1440 {
 		f.old.Authority.U = height - 1439
@@ -144,7 +145,7 @@ func eisNew(t *testing.T, height uint64, profile byte, cleanup []CleanupSpanV1) 
 	return f
 }
 
-func eisQualify(t *testing.T, f *eisFixture) {
+func eisQualify(t *testing.T, f *eisFixture, additional ...func(*Reader) error) {
 	t.Helper()
 	err, cached := f.s.StartupVerifyCanonicalV1(func(r *Reader) (StartupCanonicalCompletionV1, error) {
 		a, present, err := r.ReadTreeAuthorityV1()
@@ -192,6 +193,11 @@ func eisQualify(t *testing.T, f *eisFixture) {
 				if actual != count {
 					return 0, errors.New("seeded canonical keyset mismatch")
 				}
+			}
+		}
+		for _, check := range additional {
+			if err := check(r); err != nil {
+				return 0, err
 			}
 		}
 		return 1, nil
@@ -288,18 +294,20 @@ func eisInvoke(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInv
 
 func eisSuccess(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInventoryRowV1) error) {
 	t.Helper()
-	before := eiEncoded(t, f.old)
 	entry, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
 	mustEnvironment(t, err)
-	result, token, failure, err := eisInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+	result, token, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
 		eisPayload(t, f, entry.Authority.Ordinary.NewSuffix, row)
 		return visit(row)
 	})
 	if failure != nil || err != nil || !token.scope.completed {
-		t.Fatalf("full no-GEN query %+v/%v/completed%v", failure, err, token.scope.completed)
+		t.Fatalf("full query %+v/%v/completed%v", failure, err, token.scope.completed)
 	}
-	eiInput(t, result.err)
-	tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, before)
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	for _, m := range pair.Mutations {
+		tsRead(t, f.s, m.DBI, m.Key, m.Literal)
+	}
 	if f.s.state != storeOPEN {
 		t.Fatal("prepared successful query changed Store state")
 	}
@@ -362,17 +370,22 @@ func eisPayload(t *testing.T, f *eisFixture, points []AuthorityPointV1, row Entr
 	}
 }
 
-func TestEntryInventoryV1Sources(t *testing.T) {
-	t.Run("archive-17001", eisArchive)
-	t.Run("canonical-owed-order", eisOwed)
-	t.Run("captured-and-frozen-SIDE", eisRolling)
-	t.Run("fresh-and-reused", eisProspective)
-	t.Run("unsupported-GEN-after-prefix", eisGEN)
+func TestEntryInventoryV1(t *testing.T) {
+	t.Run("ArchiveComplete", eisArchive)
+	t.Run("Order", eisOwed)
+	t.Run("UnionOwners", eisRolling)
+	t.Run("FreshC1", eisProspective)
+	t.Run("GENCompletion", eisGEN)
 	t.Run("native-and-literal-ReadAt", eisReads)
 	t.Run("admitted-boundaries", eisBoundaries)
 	t.Run("body-window-backing", eisBodyWindows)
-	if unsafe.Sizeof(entryWalkV1{}) != 40 || unsafe.Sizeof(entryCursorV1{}) != 80 || unsafe.Sizeof(entryStreamV1{}) != 184 {
-		t.Fatal("fixed source walker/cursor/stream differs from 40/80/184")
+	t.Run("OwnProjection", eicProjection)
+	t.Run("LowerBodyOwner", eicLowerBody)
+	t.Run("NodeRemnant", eicNodes)
+	t.Run("TokenBinding", eicToken)
+	t.Run("Lifetime", eicLifetime)
+	if unsafe.Sizeof(entryWalkV1{}) != 80 || unsafe.Sizeof(entryCursorV1{}) != 80 || unsafe.Sizeof(entryStreamV1{}) != 184 {
+		t.Fatal("fixed source walker/cursor/stream differs from 80/80/184")
 	}
 }
 
@@ -569,11 +582,13 @@ func eisGEN(t *testing.T) {
 				return app
 			})
 			eiInput(t, result.err)
-			if failure != nil || token.scope.completed || last != 13 {
-				t.Fatalf("GEN refusal/completion/frontier %+v/%v/%d", failure, token.scope.completed, last)
+			if failure != nil || token.scope.completed != (app == nil) {
+				t.Fatalf("GEN completion/frontier %+v/%v/%d", failure, token.scope.completed, last)
 			}
 			if app == nil {
-				eiInput(t, err)
+				if err != nil || last != 24 {
+					t.Fatalf("complete empty GEN: %v/last%d", err, last)
+				}
 			} else if any(err) != any(app) {
 				t.Fatal("late GEN refusal overwrote earlier visitor interface")
 			}
@@ -590,14 +605,14 @@ func eisGEN(t *testing.T) {
 					last = row.Source
 					return nil
 				})
-				if failure != nil || token.scope.completed || last != 13 {
-					t.Fatal("returned GEN refusal changed its supported prefix")
+				if failure != nil || !token.scope.completed || last != 24 || err != nil {
+					t.Fatal("complete GEN changed its final frontier")
 				}
-				eiInput(t, err)
-				return TreeOperationV1{}, err
+				pair.EntryInventory = &token
+				return TreeOperationV1{Pair: pair}, nil
 			})
-			result.tuple(t, 1, 1, -1)
-			eiInput(t, result.err)
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
 			return nil
 		}))
 		if reservationLive(f.o) != 0 || f.s.state != storeOPEN {
@@ -900,6 +915,7 @@ func TestEntryInventoryV1Controls(t *testing.T) {
 			var reader *Reader
 			var token EntryInventoryV1
 			calls := 0
+			prefixDone := errors.New("four controls observed")
 			result := x.run(t, func(r *Reader, a *OperationAccount) (TreeOperationV1, error) {
 				reader = r
 				token = eiPrepare(t, r, a, x.pair)
@@ -931,12 +947,17 @@ func TestEntryInventoryV1Controls(t *testing.T) {
 					}
 					kept = row
 					calls++
+					if calls == 4 {
+						return prefixDone
+					}
 					return nil
 				})
 				if failure != nil || calls != 4 || token.scope.completed {
 					t.Fatalf("prefix completion %d/%+v/%v", calls, failure, token.scope.completed)
 				}
-				eiInput(t, err)
+				if any(err) != any(prefixDone) {
+					t.Fatal("control visitor sentinel identity changed")
+				}
 				eiRowInput(t, kept, "ENTRY inventory row is not active")
 				failure, err = r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error {
 					t.Fatal("second Visit emitted")
@@ -1188,7 +1209,7 @@ func eiRetired(t *testing.T, token EntryInventoryV1) {
 	if s.access.mu == nil || s.access.reader != nil || s.access.image != (updateImage{}) || s.access.key != nil || s.access.active {
 		t.Fatal("retained native row borrow or lost immutable mutex locator")
 	}
-	if !reflect.ValueOf(s.decode).IsZero() || !reflect.ValueOf(s.inspection).IsZero() || !reflect.ValueOf(s.authority).IsZero() || !reflect.ValueOf(s.roots).IsZero() || !reflect.ValueOf(s.rootControl).IsZero() {
+	if !reflect.ValueOf(s.decode).IsZero() || !reflect.ValueOf(s.inspection).IsZero() || !reflect.ValueOf(s.authority).IsZero() || !reflect.ValueOf(s.endpoints).IsZero() || !reflect.ValueOf(s.rootControl).IsZero() {
 		t.Fatal("retained authority/root borrows")
 	}
 }
@@ -1554,7 +1575,7 @@ func eiFunding(t *testing.T) {
 			})
 		}
 	}
-	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3696 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 || unsafe.Sizeof(TreeOperationV1{}) != 96 {
+	if unsafe.Sizeof(Reader{}) != 216 || unsafe.Sizeof(entryInventoryStateV1{}) != 3192 || unsafe.Sizeof(entryRowAccessV1{}) != 80 || unsafe.Sizeof(EntryInventoryRowV1{}) != 208 || unsafe.Sizeof(EntryInventoryFailureV1{}) != 120 || unsafe.Sizeof(treePublicEntryV1{}) != 40 || unsafe.Sizeof(operationHold{}) != 24 || unsafe.Sizeof(TreeOperationV1{}) != 96 || unsafe.Sizeof(treePlanV1{}) != 120 {
 		t.Fatal("funded typed-live layout changed")
 	}
 }
@@ -1660,5 +1681,442 @@ func eiApplicationLifecycle(t *testing.T) {
 				x.unchanged(t)
 			})
 		}
+	}
+}
+
+// eicInvoke exercises Prepare/Visit/attach through the real native owner and sole clone.
+func eicInvoke(t *testing.T, f *eisFixture, pair TreePairV1, visit func(EntryInventoryRowV1) error) (tsResult, EntryInventoryV1, *EntryInventoryFailureV1, error) {
+	t.Helper()
+	var token EntryInventoryV1
+	var failure *EntryInventoryFailureV1
+	var visitErr error
+	var result tsResult
+	mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+			token = eiPrepare(t, r, a, pair)
+			failure, visitErr = r.VisitEntryInventoryV1(token, visit)
+			if failure == nil && visitErr == nil {
+				if !token.scope.completed || token.scope.stream != nil || token.scope.access.active || token.scope.access.reader != nil || token.scope.access.key != nil || token.scope.access.image != (updateImage{}) {
+					t.Fatal("completed public walk retained a source before owned rebind")
+				}
+			}
+			attached := token // a token value copy shares the genuine preparation
+			pair.EntryInventory = &attached
+			return TreeOperationV1{Pair: pair}, visitErr
+		})
+		return nil
+	}))
+	if reservationLive(f.o) != 0 {
+		t.Fatal("complete ENTRY retained its operation hold")
+	}
+	return result, token, failure, visitErr
+}
+
+// eicProjection distinguishes raw Invalid from prior dedup at the full native operation boundary.
+func eicProjection(t *testing.T) {
+	for _, variant := range []string{"missing-header", "proven", "prior-owner", "prior-parent-invalid", "later-parent-invalid", "prospective-header"} {
+		t.Run(variant, func(t *testing.T) {
+			spans := []CleanupSpanV1{{Kind: 1, GenerationID: 5}}
+			if variant == "prior-owner" || variant == "prior-parent-invalid" || variant == "later-parent-invalid" {
+				spans = append(spans, CleanupSpanV1{Kind: 1, GenerationID: 7})
+			}
+			f := eisNew(t, 3, 1, spans)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			header := eisHeader(9, [32]byte{0x77}, 0x61)
+			hash, height := sha3.Sum256(header), uint64(9)
+			if variant == "prospective-header" {
+				header, height = pair.Mutations[1].Literal, 3
+				hash = [32]byte(pair.Mutations[1].Key)
+			}
+			parent := [32]byte(header[4:36])
+			dependentGeneration := uint64(5)
+			if variant == "prior-parent-invalid" {
+				dependentGeneration = 7
+			}
+			var rows []Mutation
+			for _, span := range spans {
+				rows = append(rows, eisMutation(0, tsCounterKey(span.GenerationID), make([]byte, 16)))
+				forwardParent := parent
+				if variant == "prior-parent-invalid" && span.GenerationID == 5 || variant == "later-parent-invalid" && span.GenerationID == 7 {
+					forwardParent[0] ^= 1
+				}
+				rows = append(rows, eisMutation(2, eisHeight(span.GenerationID, height), eisChain(hash, forwardParent, height)), eisMutation(7, eisOwner(span.GenerationID, hash), CanonicalOwnerValue(height)))
+			}
+			if variant != "missing-header" && variant != "prospective-header" {
+				rows = append(rows, eisMutation(3, hash[:], header), eisMutation(4, hash[:], header))
+			}
+			rows = append(rows, eisMutation(5, UndoManifestKey(hash), UndoManifestValue(height, [16]byte{}, 0, 0)))
+			eisSeed(t, f, rows)
+			counts := [25]int{}
+			var projection uint8
+			result, token, failure, visitErr := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				counts[row.Source]++
+				if row.Source < 16 {
+					return nil
+				}
+				if row.Role != 0 || row.Count != 0 || row.IndexCount != 0 || row.Node != (TreeNodeIDV1{}) {
+					t.Fatalf("GEN inherited sibling payload %+v", row)
+				}
+				if row.Source == 17 {
+					if counts[17] > len(spans) {
+						t.Fatal("duplicate obsolete index observation")
+					}
+					g := spans[counts[17]-1].GenerationID
+					if row.Artifact != 4 || row.Generation != g || !row.Present || row.Length != 104 || !bytes.Equal(row.Key, eisHeight(g, height)) {
+						t.Fatalf("obsolete index lost its exact source payload %+v", row)
+					}
+					projection = row.Projection
+					if variant == "missing-header" || variant == "prior-parent-invalid" && g == 5 || variant == "later-parent-invalid" && g == 7 {
+						if row.Projection != 1 || row.Hash != ([32]byte{}) || row.Height != 0 {
+							t.Fatal("invalid projection retained a dependent identity")
+						}
+					} else if row.Projection != 3 || row.Height != height || row.Hash != hash {
+						t.Fatalf("own forward/header/reverse did not establish exact Proven identity %+v", row)
+					}
+				} else if row.Projection != 0 {
+					t.Fatal("projection tag leaked into a sibling source")
+				}
+				if row.Source >= 20 && row.Source <= 22 {
+					if row.Generation != dependentGeneration || row.Height != height || row.Hash != hash || row.Artifact != [3]uint8{6, 7, 8}[row.Source-20] {
+						t.Fatalf("dependent source escaped its complete own projection %+v", row)
+					}
+				}
+				return nil
+			})
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
+			if failure != nil || visitErr != nil || !token.scope.completed {
+				t.Fatalf("complete GEN did not commit %+v/%v", failure, visitErr)
+			}
+			switch variant {
+			case "missing-header":
+				if projection != 1 || counts[20]+counts[21]+counts[22] != 0 {
+					t.Fatal("invalid header reached reverse or dependent source")
+				}
+			case "prospective-header":
+				if counts[11] != 1 || counts[20] != 0 || counts[21] != 0 || counts[22] != 1 || projection != 3 {
+					t.Fatalf("owned prospective header failed to enable own undo: %v", counts)
+				}
+			default:
+				if counts[20] != 1 || counts[21] != 1 || counts[22] != 1 || counts[17] != len(spans) {
+					t.Fatalf("earlier complete owner was omitted or duplicated: %v", counts)
+				}
+			}
+			if f.s.state != storeOPEN {
+				t.Fatal("raw projection changed native disposition")
+			}
+			for _, m := range pair.Mutations {
+				tsRead(t, f.s, m.DBI, m.Key, m.Literal)
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+func eicNodes(t *testing.T) {
+	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}, {Kind: 1, GenerationID: 7}})
+	pair := eisCapture(t, f, 1, 1, false, false)
+	var controls [][3]uint64
+	result, _, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+		if row.Source >= 16 {
+			controls = append(controls, [3]uint64{uint64(row.Source), uint64(row.Artifact), row.Generation})
+			if row.Present || row.Length != 0 || row.Node.Kind != 0 || row.Projection != 0 || row.Height != 0 || row.Hash != ([32]byte{}) {
+				t.Fatal("empty generation fabricated a physical row")
+			}
+		}
+		return nil
+	})
+	result.tuple(t, 2, 3, -1)
+	mustEnvironment(t, result.err)
+	if err != nil || failure != nil || !reflect.DeepEqual(controls, [][3]uint64{{19, 2, 5}, {24, 11, 5}, {19, 2, 7}, {24, 11, 7}}) {
+		t.Fatalf("ascending contiguous GEN controls/root-last: %v/%+v/%v", controls, failure, err)
+	}
+}
+
+func eicToken(t *testing.T) {
+	for _, mode := range []string{"complete", "missing", "zero", "incomplete", "incomplete-proof", "ordinary-shape", "failed-visitor", "changed-authority", "changed-consulted", "proof", "primitive", "discard-after-complete", "discard-after-prepare"} {
+		t.Run(mode, func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			var token EntryInventoryV1
+			var result tsResult
+			marker := errors.New("discarded ENTRY")
+			proofCalls, sourceCalls := 0, 0
+			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+					token = eiPrepare(t, r, a, pair)
+					if mode == "discard-after-prepare" {
+						return TreeOperationV1{}, marker
+					}
+					if mode != "incomplete" && mode != "incomplete-proof" {
+						failure, err := r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error {
+							if mode == "failed-visitor" {
+								return marker
+							}
+							return nil
+						})
+						if failure != nil || mode != "failed-visitor" && err != nil || mode == "failed-visitor" && any(err) != any(marker) {
+							t.Fatalf("token preparation source outcome %+v/%v", failure, err)
+						}
+					}
+					op := TreeOperationV1{Pair: pair}
+					op.Pair.EntryInventory = &token
+					switch mode {
+					case "ordinary-shape":
+						op.Pair.Mutations = nil
+					case "missing":
+						op.Pair.EntryInventory = nil
+					case "zero":
+						zero := EntryInventoryV1{}
+						op.Pair.EntryInventory = &zero
+					case "changed-authority":
+						op.Pair.Mutations = append([]Mutation(nil), pair.Mutations...)
+						next, err := DecodeTreeAuthorityV1(pair.Mutations[0].Literal)
+						mustEnvironment(t, err)
+						next.Authority.NextGenerationID++
+						op.Pair.Mutations[0].Literal = eiEncoded(t, next)
+					case "changed-consulted":
+						op.Pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(11)}}
+					case "proof", "incomplete-proof":
+						op.Proof = func(*TreeDeltaReportV1) error {
+							proofCalls++
+							return nil
+						}
+					case "primitive":
+						p, body := tsPrimitive(t, tsSource(func(TreePositionV1, *Reader, *TreeDeltaSinkV1) error {
+							sourceCalls++
+							return nil
+						}))
+						p.Generation = 11
+						op.Primitives = []TreePrimitiveV1{p}
+						op.Pair.Mutations = append(append([]Mutation(nil), pair.Mutations...), body)
+						sort.Slice(op.Pair.Mutations, func(i, j int) bool { return updateOrdered(op.Pair.Mutations[i], op.Pair.Mutations[j]) })
+					case "discard-after-complete":
+						return TreeOperationV1{}, marker
+					}
+					return op, nil
+				})
+				return nil
+			}))
+			if mode == "complete" {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, pair.Mutations[0].Literal)
+			} else {
+				result.tuple(t, 1, 1, -1)
+				switch mode {
+				case "proof", "ordinary-shape":
+					tsRefusal(t, result, false)
+				case "discard-after-complete", "discard-after-prepare":
+					if any(result.err) != any(marker) {
+						t.Fatal("callback discard interface changed")
+					}
+				default:
+					eiInput(t, result.err)
+				}
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+			}
+			if proofCalls != 0 || sourceCalls != 0 || reservationLive(f.o) != 0 || f.s.state != storeOPEN || !token.scope.retired || token.scope.stream != nil || token.scope.reader != nil || token.scope.access.active {
+				t.Fatal("token/Proof/primitive refusal crossed an effect or retained a source")
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+func eicLifetime(t *testing.T) {
+	t.Run("owned-descriptor-backing", func(t *testing.T) { eicOwnedBacking(t) })
+	t.Run("closed-after-complete-before-grow", eicClosedComplete)
+	for _, short := range []uint64{0, 1} {
+		t.Run(fmt.Sprint(short), func(t *testing.T) {
+			f := eisNew(t, 3, 1, nil)
+			pair := eisCapture(t, f, 1, 1, false, false)
+			pc := uint64(128 * len(pair.Mutations))
+			for _, m := range pair.Mutations {
+				pc += uint64(len(m.Key) + len(m.Literal))
+			}
+			e := uint64(8192) + 6*uint64(limitsForPage(f.s.config.PageSize).maxKey)
+			filler := uint64(402653184) - e - pc + short
+			var result tsResult
+			var token EntryInventoryV1
+			var kept EntryInventoryRowV1
+			mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+				return a.WithReservation(filler, func() error {
+					result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+						token = eiPrepare(t, r, a, pair)
+						failure, err := r.VisitEntryInventoryV1(token, func(row EntryInventoryRowV1) error {
+							if reservationLive(f.o) != filler+e {
+								t.Fatal("PC was charged before full ordinary admission")
+							}
+							kept = row
+							return nil
+						})
+						if failure != nil || err != nil || !token.scope.completed || token.scope.stream != nil || token.scope.access.reader != nil || token.scope.access.key != nil {
+							t.Fatal("public sources survived completed Visit into rebind")
+						}
+						pair.EntryInventory = &token
+						return TreeOperationV1{Pair: pair}, nil
+					})
+					if reservationLive(f.o) != filler {
+						t.Fatal("one hold did not release E and PC exactly once")
+					}
+					return nil
+				})
+			}))
+			if short == 0 {
+				result.tuple(t, 2, 3, -1)
+				mustEnvironment(t, result.err)
+			} else {
+				result.tuple(t, 1, 1, -1)
+				if any(result.err) != any(errOperationReservationCapacity) {
+					t.Fatal("one-byte-short PC lost the original capacity singleton")
+				}
+				tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+			}
+			eiRowInput(t, kept, "ENTRY inventory row is not active")
+			if !token.scope.retired || token.scope.stream != nil || token.scope.access.image != (updateImage{}) || token.scope.reader != nil || reservationLive(f.o) != 0 {
+				t.Fatal("native cleanup left an ENTRY read capability or reservation")
+			}
+			tsFollowing(t, f.s, f.o)
+		})
+	}
+}
+
+func eicClosedComplete(t *testing.T) {
+	f := eisNew(t, 3, 1, nil)
+	pair := eisCapture(t, f, 1, 1, false, false)
+	ready, closeNow, closed := make(chan *OperationAccount, 1), make(chan struct{}), make(chan struct{})
+	released := false
+	release := func() {
+		if !released {
+			close(closeNow)
+			released = true
+		}
+	}
+	t.Cleanup(func() {
+		release()
+		eiAwait(t, closed)
+	})
+	go func() {
+		defer close(closed)
+		_ = f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+			ready <- a
+			<-closeNow
+			return nil
+		})
+	}()
+	var account *OperationAccount
+	select {
+	case account = <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-account operation did not enter")
+	}
+	var token EntryInventoryV1
+	result := tsInvoke(f.s, account, func(r *Reader) (TreeOperationV1, error) {
+		token = eiPrepare(t, r, account, pair)
+		failure, err := r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+		if failure != nil || err != nil || !token.scope.completed {
+			t.Fatal("account-close fixture did not complete its genuine sources")
+		}
+		release()
+		eiAwait(t, closed)
+		pair.EntryInventory = &token
+		return TreeOperationV1{Pair: pair}, nil
+	})
+	result.tuple(t, 1, 1, -1)
+	if any(result.err) != any(errOperationReservationInput) || !token.scope.retired || token.scope.stream != nil || reservationLive(f.o) != 0 || f.s.state != storeOPEN {
+		t.Fatal("completed token reordered the existing post-admission closed-account singleton")
+	}
+	tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+	tsFollowing(t, f.s, f.o)
+}
+
+func eicOwnedBacking(t *testing.T, observe ...func(*entryInventoryStateV1, *treePlanV1, *Reader)) {
+	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+	pair := eisCapture(t, f, 1, 1, false, false)
+	pair.Consulted = []ConsultedRow{{DBI: TreeSchemaV1DBIs()[0], Key: tsCounterKey(11)}}
+	before := bytes.Clone(pair.Mutations[0].Literal)
+	pc := uint64(128*len(pair.Mutations) + 48*len(pair.Consulted))
+	for _, m := range pair.Mutations {
+		pc += uint64(len(m.Key) + len(m.Literal))
+	}
+	pc += uint64(len(pair.Consulted[0].Key))
+	sentinel := errors.New("owned rebind observed")
+	var result tsResult
+	var token EntryInventoryV1
+	mustEnvironment(t, f.o.WithOperation(TreeOperation, func(a *OperationAccount) error {
+		return a.WithReservation(pc, func() error {
+			result = tsInvoke(f.s, a, func(r *Reader) (TreeOperationV1, error) {
+				token = eiPrepare(t, r, a, pair)
+				failure, err := r.VisitEntryInventoryV1(token, func(EntryInventoryRowV1) error { return nil })
+				if failure != nil || err != nil || !token.scope.completed || token.scope.stream != nil {
+					t.Fatal("owner-focused rebind did not receive a completed genuine descriptor")
+				}
+				plan := treeOwnPlanV1(TreeOperationV1{Pair: pair})
+				token.scope.ownV1(&plan)
+				s := token.scope
+				if &s.nextBytes[0] != &plan.pair[0].literal[0] || &s.nextBytes[0] == &pair.Mutations[0].Literal[0] || s.mutations != nil || s.consulted != nil || !bytes.Equal(before, pair.Mutations[0].Literal) {
+					t.Fatal("descriptor rebind retained the original Pair or acquired a second image")
+				}
+				base := uintptr(unsafe.Pointer(&plan.pair[0].literal[0]))
+				end := base + uintptr(len(plan.pair[0].literal))
+				for _, view := range [][]byte{s.inspection[1].old.encoded, s.inspection[1].new.encoded, s.inspection[1].carried.encoded} {
+					at := uintptr(unsafe.Pointer(&view[0]))
+					if at < base || at+uintptr(len(view)) > end {
+						t.Fatal("nested prospective descriptor view did not rebind into the owned Pair")
+					}
+				}
+				if plan.proof != nil || plan.report != nil || reservationLive(f.o) != pc+8192+6*r.maxKey {
+					t.Fatal("ENTRY rebind acquired Proof/report/Undo backing or lost its funding interval")
+				}
+				for _, check := range observe {
+					check(s, &plan, r)
+				}
+				return TreeOperationV1{}, sentinel
+			})
+			if reservationLive(f.o) != pc || !token.scope.retired || token.scope.nextBytes != nil {
+				t.Fatal("test-owned plan funding ended before descriptor retirement")
+			}
+			return nil
+		})
+	}))
+	result.tuple(t, 1, 1, -1)
+	if any(result.err) != any(sentinel) || !bytes.Equal(before, pair.Mutations[0].Literal) {
+		t.Fatal("rebind observation changed the immutable input or callback interface")
+	}
+	tsRead(t, f.s, TreeSchemaV1DBIs()[0], []byte{2}, eiEncoded(t, f.old))
+	tsFollowing(t, f.s, f.o)
+}
+
+func eicLowerBody(t *testing.T) {
+	for _, k := range []uint64{0, 3} {
+		t.Run(fmt.Sprintf("canonical-k%d-disposal-h9", k), func(t *testing.T) {
+			f := eisNew(t, 15125, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
+			pair := eisCapture(t, f, 1, 1, false, false)
+			hash, parent := f.hashes[k], [32]byte(f.headers[k][4:36])
+			eisSeed(t, f, []Mutation{eisMutation(2, eisHeight(5, 9), eisChain(hash, parent, 9)), eisMutation(7, eisOwner(5, hash), CanonicalOwnerValue(9)), eisMutation(5, UndoManifestKey(hash), UndoManifestValue(9, [16]byte{}, 0, 0))})
+			body, header := 0, 0
+			result, _, failure, err := eicInvoke(t, f, pair, func(row EntryInventoryRowV1) error {
+				if row.Source == 20 {
+					header++
+				}
+				if row.Source == 21 {
+					body++
+					if row.Height != 9 || row.Hash != hash || !row.Present || row.Length != 148 {
+						t.Fatal("obsolete reference height replaced actual canonical ownership")
+					}
+				}
+				return nil
+			})
+			result.tuple(t, 2, 3, -1)
+			mustEnvironment(t, result.err)
+			want := 0
+			if k == 0 {
+				want = 1
+			}
+			if failure != nil || err != nil || body != want || header != 0 || f.old.Authority.B != 6 {
+				t.Fatalf("actual L_body1 vs serviceB6/disposal h9: body%d/header%d/%+v/%v", body, header, failure, err)
+			}
+		})
 	}
 }

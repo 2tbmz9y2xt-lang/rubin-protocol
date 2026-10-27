@@ -3399,6 +3399,7 @@ func provenScalarOrSequence(types map[string]*ast.TypeSpec, expression ast.Expr,
 	return false
 }
 
+// TestNoPackageLocalEnvironmentEntrypointCaller pins native and metadata-write ownership.
 func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require := func(ok bool, format string, args ...any) {
 		t.Helper()
@@ -3940,10 +3941,14 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 					wholeObject := protectedWholePointerWrite(assignmentProofs, fn, lhs)
 					selector, ok := lhs.(*ast.SelectorExpr)
 					if wholeObject || ok && (selector.Sel.Name == "state" || selector.Sel.Name == "config" || selector.Sel.Name == "dbis" || selector.Sel.Name == "terminalTruth" || selector.Sel.Name == "canonicalOwnerVerified" || selector.Sel.Name == "format" || selector.Sel.Name == "databaseID" || selector.Sel.Name == "treeConfig") {
-						packageStoreWriteOwners = append(packageStoreWriteOwners, filename+":"+fn.Name.Name)
+						owner := filename + ":" + fn.Name.Name
 						if filename == "mdbx_cgo.go" {
 							storeWrites = append(storeWrites, fn.Name.Name+":"+compact(assignment))
+						} else {
+							text := sources[filename][fset.Position(assignment.Pos()).Offset:fset.Position(assignment.End()).Offset]
+							owner += ":" + strings.Join(strings.Fields(string(text)), " ")
 						}
+						packageStoreWriteOwners = append(packageStoreWriteOwners, owner)
 						break
 					}
 				}
@@ -3952,7 +3957,7 @@ func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 		}
 	}
 	wantStoreWrites := "applyUpdateOutcome:s.terminalTruth = truth|applyUpdateOutcome:s.terminalTruth = truth|latchUpdateTerminalTruth:s.terminalTruth = CommitTruthOld|newUpdateReaderV1:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:reader.format, reader.databaseID, reader.treeConfig = uint8(s.format.Load()), s.databaseID, s.config|viewWithStartupCompletion:s.canonicalOwnerVerified = true|initializeLocked:s.state, s.config, s.dbis, s.canonicalOwnerVerified = storeOPEN, cfg, dbis, s.format.Load() != 3|inspectOpenLocked:s.state, s.config, s.dbis = storeOPEN, cfg, dbis|poison:s.state, s.txn, s.config, s.dbis, s.terminal = storePOISONEDTHREAD, txn, ConfigV1{}, [9]C.MDBX_dbi{}, err|poison:s.databaseID = [32]byte{}|consumeFailure:s.databaseID = [32]byte{}|consume:s.state, s.terminal = decision.next, nativeOutcome|consume:s.config, s.dbis = ConfigV1{}, [9]C.MDBX_dbi{}|consume:s.databaseID = [32]byte{}|consume:s.state = storeCLOSED"
-	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
+	wantStoreOwners := "bootstrap_cgo.go:bootstrapBatch:s.canonicalOwnerVerified = true|entry_inventory_equal_cgo.go:equalV1:r.format, r.databaseID, r.maxKey = original.format, original.databaseID, s.maxKey|entry_inventory_equal_cgo.go:equalV1:*right = entryStreamV1{}|entry_inventory_visit_cgo.go:ownerV1:*row = EntryInventoryRowV1{Source: 28, Artifact: 5, Role: sourceRole, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:priorOwnerV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: g, Hash: primary.Hash}|entry_inventory_visit_cgo.go:reverseV1:*row = EntryInventoryRowV1{Source: 17, Artifact: 5, Generation: primary.Generation, Height: primary.Height, Hash: primary.Hash}|mdbx_cgo.go:Reader-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:Store-composite|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:applyUpdateOutcome|mdbx_cgo.go:latchUpdateTerminalTruth|mdbx_cgo.go:newUpdateReaderV1|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:viewWithStartupCompletion|mdbx_cgo.go:initializeLocked|mdbx_cgo.go:inspectOpenLocked|mdbx_cgo.go:poison|mdbx_cgo.go:poison|mdbx_cgo.go:consumeFailure|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume|mdbx_cgo.go:consume"
 	if strings.Join(storeWrites, "|") != wantStoreWrites || strings.Join(packageStoreWriteOwners, "|") != wantStoreOwners {
 		t.Fatalf("Store publication/clear ownership drifted: %v / %v", storeWrites, packageStoreWriteOwners)
 	}

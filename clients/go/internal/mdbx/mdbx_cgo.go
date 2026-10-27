@@ -86,7 +86,7 @@ static void rubin_tip_close(MDBX_cursor *cursor) {
 typedef struct { unsigned mode, calls, gets, commits, aborts, closes, drift; MDBX_env *env; MDBX_txn *old_txn, *write_txn, *read_txn; MDBX_dbi dbi; unsigned char key[65536]; size_t key_len; } rubin_li_state;
 static rubin_li_state rubin_li;
 int rubin_li_arm(MDBX_env *env, MDBX_dbi dbi, unsigned mode, const void *key, size_t length) {
-	if (rubin_li.mode || !env || mode < 1 || mode > 29 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
+	if (rubin_li.mode || !env || mode < 1 || mode > 30 || length == 0 || length > sizeof(rubin_li.key) || !key) return MDBX_EINVAL;
 	memset(&rubin_li, 0, sizeof(rubin_li));
 	rubin_li.mode = mode; rubin_li.env = env; rubin_li.dbi = dbi; rubin_li.key_len = length;
 	memcpy(rubin_li.key, key, length);
@@ -220,11 +220,12 @@ static int rubin_sd_get_fault(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val 
 }
 static int rubin_sd_get(const MDBX_txn *txn, MDBX_dbi dbi, const MDBX_val *key, MDBX_val *data) {
 	if (rubin_li.mode) rubin_li.calls++;
-	int li_old_fault = (rubin_li.mode == 1 || rubin_li.mode == 2 || rubin_li.mode == 24 || rubin_li.mode == 28) && txn == rubin_li.old_txn;
+	int li_old_fault = (rubin_li.mode == 1 || rubin_li.mode == 2 || rubin_li.mode == 24 || rubin_li.mode == 28 || rubin_li.mode == 30) && txn == rubin_li.old_txn;
 	int li_read_fault = rubin_li.mode == 8 && txn == rubin_li.read_txn;
 	if ((li_old_fault || li_read_fault) && dbi == rubin_li.dbi && key->iov_len == rubin_li.key_len && memcmp(key->iov_base, rubin_li.key, key->iov_len) == 0) {
 		rubin_li.gets++;
 		if (li_old_fault && rubin_li.mode != 28 && rubin_li.gets == 1) return mdbx_get(txn, dbi, key, data);
+		if (rubin_li.mode == 30 && rubin_li.gets == 2) return mdbx_get(txn, dbi, key, data);
 		data->iov_base = NULL; data->iov_len = 0; return MDBX_EIO;
 	}
 	if ((rubin_li.mode == 17 || rubin_li.mode == 18) && txn == rubin_li.old_txn && dbi == rubin_li.dbi) {
