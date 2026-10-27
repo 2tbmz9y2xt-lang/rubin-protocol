@@ -495,6 +495,7 @@ type icbH5V1 struct {
 	in                        initial148CompleteBlockInputV1
 	header                    Initial148Header
 	c, a, b, o1, cb0, o2      Outpoint
+	v, o3, s, o4              Outpoint
 	parentLeaves, finalLeaves map[[36]byte][]byte
 	preSpendLeaves            map[[36]byte][]byte
 	created                   map[Outpoint]UtxoEntry
@@ -582,10 +583,11 @@ func icbBitV1(k [36]byte, i int) byte { return (k[i/8] >> (7 - i%8)) & 1 }
 
 // icbSeedV1 applies the parent block at height 4 through the real native
 // operation and returns its endpoint.
-func icbSeedV1(t *testing.T, w *btWorld, cov []byte, height uint64) (blockTreeRequestV1, btTx, btTx) {
+func icbSeedV1(t *testing.T, w *btWorld, cov []byte, height uint64, extra ...[]byte) (blockTreeRequestV1, btTx, btTx) {
 	t.Helper()
 	tx0 := btTransaction(41, 0, nil, [][]byte{btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData())}, nil, []byte{0}, nil)
-	tx1 := btTransaction(42, 0, nil, [][]byte{btFrame(1000, COV_TYPE_P2PK, cov), btFrame(2000, COV_TYPE_P2PK, cov)}, nil, []byte{0}, nil)
+	frames := append([][]byte{btFrame(1000, COV_TYPE_P2PK, cov), btFrame(2000, COV_TYPE_P2PK, cov)}, extra...)
+	tx1 := btTransaction(42, 0, nil, frames, nil, []byte{0}, nil)
 	seed := btRequest(btBody(148, 41, [32]byte{}, tx0, tx1), height-1)
 	result, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
 	logicalMDBXAssert(t, result.err == nil, "parent seed: %v", result.err)
@@ -604,12 +606,16 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 // height (0: icbHeightV1) moves the whole fixture; split pays the coinbase
 // as two P2PK outputs of 10 (net +1 row, +89 logical bytes); dup makes tx2
 // spend A again after tx1's in-block spend (tombstone) instead of B.
-// tx2 edits tx2 before it is signed; post2 edits the signed tx2.
+// tx2 edits tx2 before it is signed; post2 edits the signed tx2. vault seeds
+// a parent Vault row V and appends tx3 (V + O2 -> O3); tx3 edits it before
+// signing. simplicity (with vault) also seeds a CORE_SIMPLICITY row S, freezes
+// an active deployment at the fixture height and appends tx4 (S -> O4).
 type icbH5OptsV1 struct {
 	missing, badSig, overspend, split, dup bool
 	cbExtra, height                        uint64
 	flip                                   int
-	tx2, post2                             func(*Tx)
+	tx2, post2, tx3                        func(*Tx)
+	vault, simplicity                      bool
 }
 
 func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
@@ -617,8 +623,8 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	kp := icbKeyV1(t)
 	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
 	h := max(opts.height, icbHeightV1)
-	seed, tx0, seedTx := icbSeedV1(t, w, cov, h)
-	f := icbH5V1{h: h, c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}}
+	seed, tx0, seedTx := icbSeedV1(t, w, cov, h, icbVaultFramesV1(opts, kp, cov)...)
+	f := icbH5V1{h: h, c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}, v: Outpoint{Txid: seedTx.id, Vout: 2}, s: Outpoint{Txid: seedTx.id, Vout: 3}}
 	spend1 := f.a
 	if opts.missing {
 		spend1 = Outpoint{Txid: [32]byte{0x99}}
@@ -631,6 +637,55 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 		raw1 = icbSignedRawV1(t, tx1)
 	}
 	f.o1 = Outpoint{Txid: testTxID(t, raw1)}
+	raw2 := icbTx2V1(t, kp, cov, &f, opts)
+	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
+	txs := [][]byte{raw1, raw2}
+	if opts.vault {
+		txs = append(txs, f.icbVaultTx3V1(t, kp, cov, opts))
+	}
+	if opts.simplicity {
+		txs = append(txs, f.icbSimplicityTx4V1(t, cov))
+	}
+	commit := initial148BlockWitnessCommit(t, txs...)
+	cbOuts := []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
+	if opts.split {
+		cbOuts = []testOutput{{value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
+	}
+	cb := coinbaseTxWithOutputs(uint32(h), append(cbOuts, testOutput{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}))
+	f.cb0 = Outpoint{Txid: testTxID(t, cb)}
+	f.icbLeavesV1(cov, cbOuts[0].value)
+	f.icbVaultLeavesV1(cov)
+	if opts.split {
+		icbLeafV1(f.finalLeaves, Outpoint{Txid: f.cb0.Txid, Vout: 1}, 10, validP2PKCovenantData(), h, true)
+	}
+	root := icbRootV1(f.finalLeaves)
+	if opts.flip > 0 {
+		root[opts.flip-1] ^= 0x80
+	}
+	raw := initial148BlockFrame(t, append([][]byte{cb}, txs...), func(h *initial148BlockHead) { h.parent, h.root = seed.Block, root })
+	hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "block hash: %v", err)
+	f.header, err = ParseInitial148HeaderBytes(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "header: %v", err)
+	f.in = icbInputV1()
+	f.in.Raw, f.in.Height, f.in.ParentHash, f.in.ExpectedTarget = raw, h, seed.Block, POW_LIMIT
+	f.in.ParentTimestamps = slices.Repeat([]uint64{blockStepsMedian}, int(min(h, 11)))
+	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(h)
+	f.in.Registry = DefaultSuiteRegistry()
+	if opts.simplicity {
+		f.in.Rotation = icbSimplicityFrozenV1(h, f.in.ChainID)
+	}
+	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: h, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
+	f.created = map[Outpoint]UtxoEntry{
+		f.cb0: {Value: 20 + opts.cbExtra, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: h, CreatedByCoinbase: true},
+		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: h},
+	}
+	return f
+}
+
+// icbTx2V1 signs tx2 (O1 + B -> O2) with the opts perturbations.
+func icbTx2V1(t *testing.T, kp *MLDSA87Keypair, cov []byte, f *icbH5V1, opts icbH5OptsV1) []byte {
+	t.Helper()
 	spend2 := f.b
 	if opts.dup {
 		spend2 = f.a
@@ -644,42 +699,79 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 		opts.tx2(tx2)
 	}
 	raw2 := icbSignV1(t, kp, tx2, 990, 2000)
-	if opts.post2 != nil {
-		opts.post2(tx2)
-		raw2 = icbSignedRawV1(t, tx2)
+	if opts.post2 == nil {
+		return raw2
 	}
-	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
-	commit := initial148BlockWitnessCommit(t, raw1, raw2)
-	cbOuts := []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
-	if opts.split {
-		cbOuts = []testOutput{{value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
+	opts.post2(tx2)
+	return icbSignedRawV1(t, tx2)
+}
+
+// icbVaultCovV1 is a 1-of-1 CORE_VAULT to the fixture key whose owner lock
+// and only whitelisted destination are both the fixture P2PK descriptor.
+func icbVaultCovV1(kp *MLDSA87Keypair, cov []byte) []byte {
+	lock := sha3_256(OutputDescriptorBytes(COV_TYPE_P2PK, cov))
+	return encodeVaultCovenantData(lock, 1, [][32]byte{sha3_256(kp.PubkeyBytes())}, [][32]byte{lock})
+}
+
+// icbVaultFramesV1 adds the parent Vault row V (500) for opts.vault.
+func icbVaultFramesV1(opts icbH5OptsV1, kp *MLDSA87Keypair, cov []byte) [][]byte {
+	if !opts.vault {
+		return nil
 	}
-	cb := coinbaseTxWithOutputs(uint32(h), append(cbOuts, testOutput{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}))
-	f.cb0 = Outpoint{Txid: testTxID(t, cb)}
-	f.icbLeavesV1(cov, cbOuts[0].value)
-	if opts.split {
-		icbLeafV1(f.finalLeaves, Outpoint{Txid: f.cb0.Txid, Vout: 1}, 10, validP2PKCovenantData(), h, true)
+	frames := [][]byte{btFrame(500, COV_TYPE_VAULT, icbVaultCovV1(kp, cov))}
+	if opts.simplicity {
+		frames = append(frames, btFrame(300, COV_TYPE_CORE_SIMPLICITY, encodeSimplicityCovenantData(coreSimplicityAcceptCMR, nil)))
 	}
-	root := icbRootV1(f.finalLeaves)
-	if opts.flip > 0 {
-		root[opts.flip-1] ^= 0x80
+	return frames
+}
+
+// icbSimplicityTx4V1 spends S with the accept program (fee 10).
+func (f *icbH5V1) icbSimplicityTx4V1(t *testing.T, cov []byte) []byte {
+	t.Helper()
+	tx4 := inputViewTx(4, f.s)
+	tx4.Outputs[0] = TxOutput{Value: 290, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	tx4.Witness = []WitnessItem{coreSimplicityAcceptWitness()}
+	raw4 := icbSignedRawV1(t, tx4)
+	f.o4 = Outpoint{Txid: testTxID(t, raw4)}
+	return raw4
+}
+
+// icbSimplicityFrozenV1 is the caller-frozen surface with the active test
+// deployment already read, as the composer admits it.
+func icbSimplicityFrozenV1(height uint64, chainID [32]byte) *boundSpendSurfaceWithDeployment {
+	rp := activeSimplicityRotation(chainID, 1).(testRotationProvider)
+	base := &boundSpendSurface{inner: rp, height: height, haveCreate: true, haveSpend: true, create: rp.NativeCreateSuites(height), spend: rp.NativeSpendSuites(height)}
+	d, anchor, ok, err := rp.PublishedSimplicityDeployments()
+	return &boundSpendSurfaceWithDeployment{boundSpendSurface: base, provider: rp, descriptors: d, setAnchor: anchor, ok: ok, err: err, have: true}
+}
+
+// icbVaultTx3V1 signs tx3 (V + O2 -> O3, fee 10): a Vault spend whose
+// owner-authorized input O2 was created by tx2 in this block.
+func (f *icbH5V1) icbVaultTx3V1(t *testing.T, kp *MLDSA87Keypair, cov []byte, opts icbH5OptsV1) []byte {
+	t.Helper()
+	tx3 := inputViewTx(3, f.v, f.o2)
+	tx3.Outputs[0] = TxOutput{Value: 3470, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	if opts.tx3 != nil {
+		opts.tx3(tx3)
 	}
-	raw := initial148BlockFrame(t, [][]byte{cb, raw1, raw2}, func(h *initial148BlockHead) { h.parent, h.root = seed.Block, root })
-	hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
-	logicalMDBXAssert(t, err == nil, "block hash: %v", err)
-	f.header, err = ParseInitial148HeaderBytes(raw[:Initial148HeaderBytes])
-	logicalMDBXAssert(t, err == nil, "header: %v", err)
-	f.in = icbInputV1()
-	f.in.Raw, f.in.Height, f.in.ParentHash, f.in.ExpectedTarget = raw, h, seed.Block, POW_LIMIT
-	f.in.ParentTimestamps = slices.Repeat([]uint64{blockStepsMedian}, int(min(h, 11)))
-	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(h)
-	f.in.Registry = DefaultSuiteRegistry()
-	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: h, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
-	f.created = map[Outpoint]UtxoEntry{
-		f.cb0: {Value: 20 + opts.cbExtra, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: h, CreatedByCoinbase: true},
-		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: h},
+	raw3 := icbSignV1(t, kp, tx3, 500, 2980)
+	f.o3 = Outpoint{Txid: testTxID(t, raw3)}
+	return raw3
+}
+
+// icbVaultLeavesV1 replaces the spent O2 with O3 in the final map.
+func (f *icbH5V1) icbVaultLeavesV1(cov []byte) {
+	if f.o3 == (Outpoint{}) {
+		return
 	}
-	return f
+	var key [36]byte
+	copy(key[:], f.o2.Txid[:])
+	binary.BigEndian.PutUint32(key[32:], f.o2.Vout)
+	delete(f.finalLeaves, key)
+	icbLeafV1(f.finalLeaves, f.o3, 3470, cov, f.h, false)
+	if f.o4 != (Outpoint{}) {
+		icbLeafV1(f.finalLeaves, f.o4, 290, cov, f.h, false)
+	}
 }
 
 // icbLeavesV1 builds the parent, pre-spend (after tx1, before tx2) and final
@@ -1044,7 +1136,7 @@ func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
 	for _, workers := range []int{-1, 1, 4} {
 		w := btNew(t)
 		bad := icbH5VariantV1(t, w, opts)
-		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{})
+		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{vault: opts.vault, simplicity: opts.simplicity, cbExtra: opts.cbExtra})
 		logicalMDBXAssert(t, good.in.Parent == bad.in.Parent, "%s workers=%d fixtures do not share the parent", name, workers)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			out, delivered, err := icbDiscardRunV1(w, account, bad.in, workers)
@@ -1100,4 +1192,36 @@ func TestInitial148CompleteBlockPendingStagesH5(t *testing.T) {
 		icbH5RunCaseV1(t, icbH5CaseV1{name: c.stage + "-control", opts: opts, code: c.code, msg: c.msg})
 		icbPendingDiscardV1(t, c.stage+"-pending", opts)
 	}
+}
+
+// TestInitial148CompleteBlockMixedStagesH5 (C09 mixed stages) accepts one
+// h=5 block whose native P2PK spends (tx1, tx2) are followed by a CORE_VAULT
+// spend (tx3: V + the in-block O2 -> whitelisted O3) and a CORE_SIMPLICITY
+// spend under the frozen active deployment (tx4: S -> O4) on the shared
+// input-view path, through the sequential entry and the queued entry with
+// one and four workers. tx3's synchronous whitelist refusal is selected on
+// its own and loses to tx1's pending invalid signature with the full discard
+// tuple.
+func TestInitial148CompleteBlockMixedStagesH5(t *testing.T) {
+	mixed := icbH5OptsV1{vault: true, simplicity: true, cbExtra: 20}
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5VariantV1(t, w, mixed)
+		logicalMDBXAssert(t, f.header.UtxoRoot == icbRootV1(f.finalLeaves) && f.o3 != (Outpoint{}) && f.o4 != (Outpoint{}), "workers=%d literal final root", workers)
+		got := icbObserveV1(t, w, f.in, workers)
+		logicalMDBXAssert(t, got.err == nil && got.out.validationErr == nil && got.out.required.derived && got.out.required.root == f.header.UtxoRoot, "workers=%d mixed acceptance: %v / %+v", workers, got.err, got.out)
+		cov := f.created[f.o2].CovenantData
+		created := map[Outpoint]UtxoEntry{
+			f.cb0: {Value: 40, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: icbHeightV1, CreatedByCoinbase: true},
+			f.o3:  {Value: 3470, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: icbHeightV1},
+			f.o4:  {Value: 290, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: icbHeightV1},
+		}
+		logicalMDBXAssert(t, got.summary.TxCount == 5 && got.result.sumFees == (Uint128{Lo: 40}) && reflect.DeepEqual(got.result.createdUtxos, created), "workers=%d mixed candidate: %+v", workers, got.result)
+		ok := len(got.spent) == 4 && got.spent[2].outpoint == f.v && got.spent[2].txIndex == 3 && got.spent[3].outpoint == f.s && got.spent[3].txIndex == 4
+		logicalMDBXAssert(t, ok && got.spent[2].inputIndex == 0 && got.spent[3].inputIndex == 0, "workers=%d vault/simplicity spent rows: %+v", workers, got.spent)
+	}
+	whitelist := mixed
+	whitelist.flip, whitelist.tx3 = 1, func(tx *Tx) { tx.Outputs[0].CovenantData = validP2PKCovenantData() }
+	icbH5RunCaseV1(t, icbH5CaseV1{name: "vault-whitelist-control", opts: whitelist, code: TX_ERR_VAULT_OUTPUT_NOT_WHITELISTED, msg: "output not whitelisted for CORE_VAULT"})
+	icbPendingDiscardV1(t, "vault-whitelist-pending", whitelist)
 }
