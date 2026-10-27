@@ -3,8 +3,10 @@
 package consensus
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
@@ -293,4 +295,61 @@ func TestReplayRecoveryFixtureIntentSideRefusals(t *testing.T) {
 			"R46 %s: intent %+v clear %+v", c.label, intent, clear)
 		logicalMDBXAssert(t, recoveryClass(intent.err, intent.resource) == recoveryClass(clear.err, clear.resource), "R46 %s class", c.label)
 	}
+}
+
+// D1 (format-3 intent): a meta key 2 row that is no decodable legal TreeAuthorityV1 is TERMINAL_STORE_INTEGRITY(canonical)
+// with ReadResource empty, refused at PREWRITE before any write (the latched Store refuses every later read); no role
+// is guessed.
+func TestReplayTreeFixtureIntentUndecodable(t *testing.T) {
+	legal, err := rtPrune().Encode()
+	logicalMDBXAssert(t, err == nil, "encode: %v", err)
+	damaged := map[string][]byte{"version 2": append([]byte{2}, legal[1:]...), "source kind 3": bytes.Clone(legal), "GENESIS_REPLAY at PRUNE_GC": bytes.Clone(legal), "target lag at PRUNE_GC": bytes.Clone(legal)}
+	damaged["source kind 3"][1], damaged["GENESIS_REPLAY at PRUNE_GC"][1], damaged["target lag at PRUNE_GC"][17] = 3, 1, 3
+	for label, value := range damaged {
+		w := rtNew(t, rtPrune())
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, value) == nil, "%s seed", label)
+		c := rtIntent(t, w)
+		logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideIntegrity && c.truth == mdbx.CommitTruthOld,
+			"D1 %s: %+v %v %v", label, c.plan, c.planErr, c.err)
+		logicalMDBXAssert(t, c.stage == mdbx.UpdateStagePrewrite && c.index == -1, "D1 %s: the refusal reached stage %d", label, c.stage)
+	}
+}
+
+// D3 (format-3 intent): a transient native failure of the envelope get or of a control-row get inside the absence
+// census is LOCAL_RESOURCE_UNAVAILABLE(storage_io) with ReadResource empty, never an empty plan, and nothing written.
+func TestReplayTreeFixtureIntentEIO(t *testing.T) {
+	for label, c := range map[string]struct {
+		envelope mdbx.TreeAuthorityV1
+		key      []byte
+	}{"envelope get": {rtPrune(), []byte{2}}, "absence census": {mdbx.TreeAuthorityV1{}, []byte{0}}} {
+		w := rtNew(t, c.envelope)
+		image := rtImage(t, w)
+		var out rtCommit
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() { out = rtIntent(t, w) })
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "D3 %s fixture: %v %+v", label, err, evidence)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, out.planErr != nil && errors.As(out.planErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(out.plan).IsZero() && out.truth == mdbx.CommitTruthOld &&
+			recoveryClass(out.planErr, out.plan.ReadResource) == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)", "D3 %s: %+v %v %v", label, out.plan, out.planErr, out.err)
+		w.reopen(t)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "D3 %s: image changed", label)
+	}
+}
+
+// V capacity (format-3 intent): a legal envelope of exactly MaxMetadataBytes grows by the one pending-profile byte past
+// the size bound: LOCAL_RESOURCE_UNAVAILABLE(storage_capacity) at PREWRITE, no latch, the envelope row unchanged.
+func TestReplayTreeFixtureIntentCapacity(t *testing.T) {
+	envelope := rtPrune()
+	envelope.Authority.ExcludedInvalidBranch = &mdbx.InvalidBranchV1{FirstInvalidHeight: 9, FirstInvalidBlockHash: [32]byte{9}, ExactConsensusError: []byte{1}}
+	base, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil, "base encode: %v", err)
+	envelope.Authority.ExcludedInvalidBranch.ExactConsensusError = bytes.Repeat([]byte{1}, 1+mdbx.MaxMetadataBytes-len(base))
+	full, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil && len(full) == mdbx.MaxMetadataBytes, "full encode: %d %v", len(full), err)
+	w := rtNew(t, rtPrune())
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, full) == nil, "seed")
+	image := rtImage(t, w)
+	c := rtIntent(t, w)
+	logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideCapacity &&
+		c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "capacity: %+v %v %v", c.plan, c.planErr, c.err)
+	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)) && reflect.DeepEqual(rtEnvelope(t, w), envelope), "capacity: the Store latched or the image changed")
 }

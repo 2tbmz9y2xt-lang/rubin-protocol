@@ -33,7 +33,8 @@ const _ = mdbx.MaxOperationDataBytes - replayRecoveryIntentBytes
 // in flight for a Reader, Store or native failure; empty for a plan, an authority read failure and a decided refusal,
 // except that every error of the direct entry's identity page carries LOCAL_RESOURCE_UNAVAILABLE(canonical_artifact_read)
 // and every error of the selected-side clear planner carries that planner's own ReadResource. The empty plan is a zero
-// Batch with a nil error; Store.Update refuses it as an invalid Batch, so the caller decides that outcome itself.
+// Batch with a nil error; Store.Update refuses it as an invalid Batch, so the caller decides that outcome itself. On a
+// tree store the Batch is committed through replayTreeOperation and Store.UpdateTreeV1, never through Store.Update.
 type ReplayRecoveryPlanV1 struct {
 	Batch        mdbx.Batch
 	ReadResource string
@@ -81,9 +82,13 @@ func replayRecoveryRefusal(result, message string) error {
 
 // PlanRecoveryIntentMDBX plans the recovery intent (MP 2495-2503, 1553-1571): RECOVERY_REQUIRED with pending = the
 // active profile, through the selected-side clear when a side is selected; no ReplayV1, target, generation or counter.
-// Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan.
+// Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan. On a tree Reader
+// the plan is read from and writes the TreeAuthorityV1 envelope (replayTreeIntent).
 func PlanRecoveryIntentMDBX(reader *mdbx.Reader) (ReplayRecoveryPlanV1, error) {
 	a, err := reader.ReadStorageAuthorityV1()
+	if replayTreeRefused(err, replayTreeReaderRefusal) {
+		return replayTreeIntent(reader)
+	}
 	if err != nil {
 		return ReplayRecoveryPlanV1{}, err
 	}
