@@ -1527,8 +1527,8 @@ func TestReplayEntryPlanShape(t *testing.T) {
 // block nesting, the innermost statement holding a call, and role (a go statement marks every occurrence in it), and the
 // census equals the H27 placements exactly; the clear precedes the invocation, and the deferred (plain) runRelease
 // precedes (follows) all three commit calls: both Store.Update calls that take plan and the format-3 treeEnter call. The
-// format-3 entry route functions in replay_tree_route_mdbx_cgo.go contain no ProtectV1, runRelease, release, defer or go
-// (selector_closure), so the release stays owned by EnterReplayTargetMDBX.
+// functions of replay_tree_route_mdbx_cgo.go, every one of them, contain no ProtectV1, runRelease, release, defer or go
+// (selector_closure), so the release stays owned by EnterReplayTargetMDBX and PlanDirectReplayEntryMDBX.
 func TestReplayEntryProtectPlacement(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "replay_entry_mdbx_cgo.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "parse: %v", err)
@@ -1569,19 +1569,21 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 	replayTreeRouteNoRelease(t)
 }
 
-// replayTreeRouteNoRelease asserts that each format-3 entry route function of replay_tree_route_mdbx_cgo.go exists and
-// holds no ProtectV1, runRelease or release identifier and no defer or go statement.
+// replayTreeRouteNoRelease asserts that every function of replay_tree_route_mdbx_cgo.go holds no ProtectV1, runRelease
+// or release identifier and no defer or go statement, and that the named format-3 route functions exist. No exception
+// is needed: the direct entry's release is returned by PlanDirectReplayEntryMDBX in replay_recovery_mdbx_cgo.go.
 func replayTreeRouteNoRelease(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "replay_tree_route_mdbx_cgo.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "parse route: %v", err)
 	route := []string{
 		"replayTreeStoreRefused", "replayTreeRefused", "treeEnter", "treePlan", "treeBatch", "treeQualified", "treeEntryBatch",
 		"replayTreeEntryRows", "treeTargetRoot", "replayTreeEncode", "replayTreeOperation", "replayTreeNonPair",
+		"replayTreeCapacity", "replayTreeDirectPlan", "replayTreeIntent", "replayTreeRecompute", "replayTreeConversion",
 	}
 	found := map[string]string{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || !slices.Contains(route, fn.Name.Name) {
+		if !ok {
 			continue
 		}
 		found[fn.Name.Name] = ""
@@ -1597,7 +1599,10 @@ func replayTreeRouteNoRelease(t *testing.T) {
 			return true
 		})
 	}
-	logicalMDBXAssert(t, len(found) == len(route), "route functions missing: %v", found)
+	for _, name := range route {
+		_, ok := found[name]
+		logicalMDBXAssert(t, ok, "route function %s missing: %v", name, found)
+	}
 	for name, hits := range found {
 		logicalMDBXAssert(t, hits == "", "route function %s holds%s", name, hits)
 	}

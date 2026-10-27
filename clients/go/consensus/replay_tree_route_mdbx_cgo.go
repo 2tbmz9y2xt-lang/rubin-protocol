@@ -184,6 +184,20 @@ func (c *replayEntryCall) treeEnter(store *mdbx.Store) (ReplayEntryOutcomeV1, bo
 	return out, false
 }
 
+// replayTreeCapacity classifies the format-3 route's engine step-5 Pair copy refused by the owner aggregate: an
+// UpdateTreeV1 Err that is exactly the owner's capacity refusal at OLD/PREWRITE is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_capacity) (E9(b)); Err is kept. A format-2 outcome (no route account) is unchanged.
+func replayTreeCapacity(out ReplayEntryOutcomeV1, call *replayEntryCall) ReplayEntryOutcomeV1 {
+	if call.account != nil && replayTreeStepCapacity(out) {
+		out.Result = selectedSideCapacity
+	}
+	return out
+}
+
+func replayTreeStepCapacity(out ReplayEntryOutcomeV1) bool {
+	return out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && mdbx.IsOperationReservationCapacity(out.Err)
+}
+
 // treePlan is plan on a tree Reader converted to the pair-only operation.
 func (c *replayEntryCall) treePlan(reader *mdbx.Reader) (mdbx.TreeOperationV1, error) {
 	batch, err := c.treeBatch(reader)
@@ -294,36 +308,8 @@ func (c *replayEntryCall) treeTargetRoot(reader *mdbx.Reader, active uint64, tar
 	return encoded, nil
 }
 
-// replayTreeDirect is PlanDirectReplayEntryMDBX on a tree Reader after its context and LANE_MAX gates: a read error is
-// returned with ReadResource empty; proved exact-empty absence and any domain other than NONE/STABLE with no selected
-// side is no plan; the minimum share is M148 (M); then the identity page and, for an H>0 identity, Q5, sequence and
-// the E plan with lane = limit.
-func (o *ReplayEntryOwnerV1) replayTreeDirect(reader *mdbx.Reader, limit uint64) (ReplayRecoveryPlanV1, func(), error) {
-	envelope, present, err := reader.ReadTreeAuthorityV1()
-	a := envelope.Authority
-	switch {
-	case err != nil || !present:
-		return ReplayRecoveryPlanV1{}, nil, err
-	case !replayTreeDirectDomain(a):
-		return ReplayRecoveryPlanV1{}, nil, nil
-	case limit < replayRecoveryMin148Bytes:
-		return ReplayRecoveryPlanV1{}, nil, replayRecoveryRefusal(selectedSideCapacity, "replay entry share below the minimum")
-	}
-	identity, site, err := replayEntryIdentity(reader, a.ActiveGenerationID)
-	if err != nil || identity != 2 {
-		return ReplayRecoveryPlanV1{ReadResource: site}, nil, err
-	}
-	call := &replayEntryCall{owner: o, sentinel: errors.New("direct replay entry decision"), lane: limit}
-	plan, err := replayTreeDirectPlan(call, reader, envelope)
-	return plan, call.release, err
-}
-
-// replayTreeDirectDomain is NONE/STABLE with no selected side.
-func replayTreeDirectDomain(a mdbx.StorageAuthorityV1) bool {
-	return a.Phase == mdbx.StoragePhaseNoneV1 && a.Lifecycle == mdbx.StorageLifecycleStableV1 && a.SelectedSide == nil
-}
-
-// replayTreeDirectPlan is replayRecoveryDirect over Q5, sequence and the E plan; a decided outcome becomes its refusal.
+// replayTreeDirectPlan is replayRecoveryDirect over Q5, sequence and the E plan with lane = limit, after directEntryGates'
+// format-3 gates (minimum share M148); a decided outcome becomes its refusal.
 func replayTreeDirectPlan(call *replayEntryCall, reader *mdbx.Reader, envelope mdbx.TreeAuthorityV1) (ReplayRecoveryPlanV1, error) {
 	batch, err := call.treeQualified(reader, envelope, 'b')
 	switch {

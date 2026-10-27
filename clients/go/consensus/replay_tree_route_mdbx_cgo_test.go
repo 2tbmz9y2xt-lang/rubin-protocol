@@ -721,6 +721,38 @@ func TestReplayTreeEntryCapacity(t *testing.T) {
 	}
 }
 
+// rtPanicView panics with its armed payload once, in Inventory148V1, inside the format-3 plan callback.
+type rtPanicView struct {
+	*q148View
+	payload any
+}
+
+func (v *rtPanicView) Inventory148V1(limit uint64) HeaderCandidateInventory148V1 {
+	if payload := v.payload; payload != nil {
+		v.payload = nil
+		panic(payload)
+	}
+	return v.q148View.Inventory148V1(limit)
+}
+
+// result_and_effect_closure (panic, format 3): a panic inside the format-3 entry route's plan callback propagates with
+// its payload unchanged through UpdateTreeV1 and the OWN charge, mutates nothing and runs no release (ProtectV1 never
+// returned one); the next entry on the same store and owner commits E1 and runs its release exactly once. The plan calls
+// no view method after ProtectV1 (qualify148), so no panic with a pending release is reachable on this route.
+func TestReplayTreeEntryPanic(t *testing.T) {
+	w, _, inner := rtEntryWorld(t, nil)
+	image := rtImage(t, w.btWorld)
+	payload := &struct{ n int }{17}
+	owner := NewReplayEntryOwnerV1(&rtPanicView{q148View: inner, payload: payload}, w.g)
+	func() {
+		defer func() { logicalMDBXAssert(t, recover() == payload, "panic payload changed") }()
+		owner.EnterReplayTargetMDBX(w.s, w.owner)
+	}()
+	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w.btWorld)) && inner.versions == nil && inner.releases == 0, "panic: mutation or release: %+v", inner)
+	out := owner.EnterReplayTargetMDBX(w.s, w.owner)
+	logicalMDBXAssert(t, out.Truth == mdbx.CommitTruthNew && out.Err == nil && out.Result == "" && len(inner.versions) == 1 && inner.releases == 1, "after panic: %+v %+v", out, inner)
+}
+
 // Y2, M14 and direct entry (E1): the format-3 minimum share is M148 (below it no identity read and no Q5; at it Q5
 // runs); at the full share the direct entry plans the E plan with lane = limit, and the plan commits through K.
 func TestReplayTreeDirectEntry(t *testing.T) {

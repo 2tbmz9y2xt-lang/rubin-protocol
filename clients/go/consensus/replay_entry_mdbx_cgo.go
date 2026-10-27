@@ -196,7 +196,7 @@ func (o *ReplayEntryOwnerV1) EnterReplayTargetMDBX(store *mdbx.Store, reservatio
 		}
 	}
 	call.runRelease()
-	return replayEntryProject(out, call)
+	return replayTreeCapacity(replayEntryProject(out, call), call)
 }
 
 func (c *replayEntryCall) runRelease() {
@@ -470,9 +470,6 @@ func replayEntryPart(part error, call *replayEntryCall) string {
 		if e != nil {
 			return replayEntryEngine(e, call)
 		}
-	}
-	if mdbx.IsOperationReservationCapacity(part) {
-		return selectedSideCapacity // The format-3 step-5 Pair copy refused by the owner aggregate (UpdateTreeV1).
 	}
 	return selectedSideInvariant
 }

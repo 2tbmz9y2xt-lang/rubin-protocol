@@ -14,9 +14,11 @@ import (
 )
 
 // Dormant Reader-scoped recovery planners and the pre-activation recomputation (RUBIN_MEMPOOL_POLICY.md Sections
-// 6.4.1.5 and 6.4.1.8). No production caller. Each runs inside its caller's Store.Update callback (Store.UpdateTreeV1
-// for the tree-Reader intent route of PlanRecoveryIntentMDBX), writes nothing,
+// 6.4.1.5 and 6.4.1.8). No production caller. Each runs inside its caller's commit callback, writes nothing,
 // reserves nothing and returns one plan, report, refusal or error; a plan takes effect only when the caller returns it.
+// On a format-2 Reader that callback is Store.Update's; on a format-3 (tree) Reader every planner here
+// (PlanRecoveryIntentMDBX, PlanDirectReplayEntryMDBX, RecomputeReplayTargetMDBX and PlanReplayTargetConversionMDBX)
+// runs inside Store.UpdateTreeV1's plan callback, and a Batch it returns is committed through replayTreeOperation.
 
 const (
 	// replayRecoveryMinBytes is M, the identity, walk and plan terms of the entry lane (RE L27-36): 3,550,822.
@@ -87,7 +89,8 @@ func replayRecoveryRefusal(result, message string) error {
 // active profile, through the selected-side clear when a side is selected; no ReplayV1, target, generation or counter.
 // Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan. On a tree Reader
 // (replayTreeIntent) the domain is read from the TreeAuthorityV1 envelope: without a selected side the plan writes
-// the planned envelope; with a selected side the clear planner's result is returned unchanged, and on a tree Reader
+// the planned envelope, RECOVERY_REQUIRED with pending = the active profile and TargetLagGenerationID, SourceKind and
+// Progress none (every other envelope field is the read one); with a selected side the clear planner's result is returned unchanged, and on a tree Reader
 // that result is always the clear planner's ReadStorageAuthorityV1 tree-Reader refusal with an empty ReadResource
 // (RUB-1729 owns that branch).
 func PlanRecoveryIntentMDBX(reader *mdbx.Reader) (ReplayRecoveryPlanV1, error) {
@@ -164,34 +167,59 @@ func replayRecoveryAuthorityBatch(literal []byte, consulted []mdbx.ConsultedRow)
 // entry plan, whose Batch the caller commits through one pair-only UpdateTreeV1, never Store.Update. The release is
 // non-nil exactly when ProtectV1 returned one; the caller runs it exactly once after its commit call.
 func (o *ReplayEntryOwnerV1) PlanDirectReplayEntryMDBX(reader *mdbx.Reader, limit uint64) (ReplayRecoveryPlanV1, func(), error) {
-	a, proceed, plan, err := o.directEntryGates(reader, limit)
-	if !proceed && replayTreeRefused(err, replayTreeReaderRefusal) {
-		return o.replayTreeDirect(reader, limit)
-	}
+	gated, proceed, plan, err := o.directEntryGates(reader, limit)
 	if !proceed {
 		return plan, nil, err
 	}
 	call := &replayEntryCall{owner: o, sentinel: errors.New("direct replay entry decision"), lane: limit}
-	plan, err = replayRecoveryDirect(call, reader, a)
+	plan, err = replayDirectPlan(call, reader, gated)
 	return plan, call.release, err
 }
 
-// directEntryGates is the format-2 (h1)-(h6): context, LANE_MAX, authority, domain, the minimum share
-// replayRecoveryMinBytes and the step-1 identity page; proceed is true only for NONE/STABLE with no selected side and an
-// H>0 identity. On a tree Reader it returns the authority read's tree-Reader refusal, and replayTreeDirect applies the
-// format-3 gates with the minimum share replayRecoveryMin148Bytes.
-func (o *ReplayEntryOwnerV1) directEntryGates(reader *mdbx.Reader, limit uint64) (mdbx.StorageAuthorityV1, bool, ReplayRecoveryPlanV1, error) {
-	a, done, err := o.replayRecoveryGates(reader, limit)
+// replayDirectGated is the authority directEntryGates decided on: the format-2 authority, or the format-3 envelope.
+type replayDirectGated struct {
+	envelope mdbx.TreeAuthorityV1
+	tree     bool
+}
+
+// directEntryGates is (h1)-(h6): context, LANE_MAX, authority, domain, the minimum share (replayRecoveryMinBytes on
+// format 2, replayRecoveryMin148Bytes on format 3) and the step-1 identity page; proceed is true only for NONE/STABLE
+// with no selected side and an H>0 identity.
+func (o *ReplayEntryOwnerV1) directEntryGates(reader *mdbx.Reader, limit uint64) (replayDirectGated, bool, ReplayRecoveryPlanV1, error) {
+	gated, done, err := o.directEntryAuthority(reader, limit)
+	a, minimum := gated.envelope.Authority, replayRecoveryMinBytes
+	if gated.tree {
+		minimum = replayRecoveryMin148Bytes
+	}
 	switch {
 	case done:
-		return a, false, ReplayRecoveryPlanV1{}, err
+		return gated, false, ReplayRecoveryPlanV1{}, err
 	case a.Phase != mdbx.StoragePhaseNoneV1 || a.Lifecycle != mdbx.StorageLifecycleStableV1 || a.SelectedSide != nil:
-		return a, false, ReplayRecoveryPlanV1{}, nil
-	case limit < replayRecoveryMinBytes:
-		return a, false, ReplayRecoveryPlanV1{}, replayRecoveryRefusal(selectedSideCapacity, "replay entry share below the minimum")
+		return gated, false, ReplayRecoveryPlanV1{}, nil
+	case limit < minimum:
+		return gated, false, ReplayRecoveryPlanV1{}, replayRecoveryRefusal(selectedSideCapacity, "replay entry share below the minimum")
 	}
 	identity, site, err := replayEntryIdentity(reader, a.ActiveGenerationID)
-	return a, err == nil && identity == 2, ReplayRecoveryPlanV1{ReadResource: site}, err
+	return gated, err == nil && identity == 2, ReplayRecoveryPlanV1{ReadResource: site}, err
+}
+
+// directEntryAuthority is replayRecoveryGates; on the authority read's exact tree-Reader refusal it reads the
+// TreeAuthorityV1 envelope instead, and a read error or proved exact-empty absence is done (absence with a nil error).
+func (o *ReplayEntryOwnerV1) directEntryAuthority(reader *mdbx.Reader, limit uint64) (replayDirectGated, bool, error) {
+	a, done, err := o.replayRecoveryGates(reader, limit)
+	if !done || !replayTreeRefused(err, replayTreeReaderRefusal) {
+		return replayDirectGated{envelope: mdbx.TreeAuthorityV1{Authority: a}}, done, err
+	}
+	envelope, present, err := reader.ReadTreeAuthorityV1()
+	return replayDirectGated{envelope: envelope, tree: true}, err != nil || !present, err
+}
+
+// replayDirectPlan is (h7)-(h12) on the gated format: replayRecoveryDirect on format 2, replayTreeDirectPlan on format 3.
+func replayDirectPlan(call *replayEntryCall, reader *mdbx.Reader, gated replayDirectGated) (ReplayRecoveryPlanV1, error) {
+	if gated.tree {
+		return replayTreeDirectPlan(call, reader, gated.envelope)
+	}
+	return replayRecoveryDirect(call, reader, gated.envelope.Authority)
 }
 
 // replayRecoveryDirect is (h7)-(h12) through the merged qualifyAndPlan; a decided outcome becomes its refusal.
@@ -222,8 +250,10 @@ func (o *ReplayEntryOwnerV1) replayRecoveryGates(reader *mdbx.Reader, limit uint
 // PlanReplayTargetConversionMDBX plans the target-to-GENERATION plan change (MP 2508-2512) for a PLAN_CHANGE report
 // returned by RecomputeReplayTargetMDBX on this same Reader; any other report is the empty Batch and nil. It reads
 // nothing: PRUNE_GC/RECOVERY_REQUIRED, pending = ReplayV1.target_profile, ReplayV1 cleared and CleanupV1 exactly
-// {GENERATION(target_generation_id)}; no row is deleted, no counter written and no target index row touched. A report
-// carrying a tree envelope is planned by replayTreeConversion (both target generations become GENERATION spans).
+// {GENERATION(target_generation_id)} on format 2; no row is deleted, no counter written and no target index row touched.
+// A report carrying a tree envelope (format 3) is planned by replayTreeConversion: the same authority change, except that
+// CleanupV1 is replaced by exactly the two target generations (target_generation_id and TargetLagGenerationID) as
+// GENERATION spans in ascending order, and TargetLagGenerationID, SourceKind and Progress become none.
 func PlanReplayTargetConversionMDBX(reader *mdbx.Reader, report ReplayRecomputationV1) (mdbx.Batch, error) {
 	if report.Report != ReplayRecomputationPlanChangeV1 || report.reader == nil || report.reader != reader {
 		return mdbx.Batch{}, nil
