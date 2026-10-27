@@ -1034,10 +1034,10 @@ func fixtureOpenStoredReadersMismatch(path string) (*Store, error) {
 	return reopenAfterFixture(path, cfg, store, mutationErr)
 }
 
-// FixtureSeedRawRow writes one raw row of any width into the SchemaV2 DBI of rank; consensus fixture tests use it to
+// FixtureSeedRawRow writes one raw row of any width into the Store format's DBI of rank; consensus fixture tests use it to
 // persist damaged images (wrong width, wrong hash, unpaired owner row) that the ordinary Update grammar refuses.
 func FixtureSeedRawRow(store *Store, rank uint8, key, value []byte) error {
-	return fixtureSeedPrefixRawRow(store, schemaDBIs[rank], key, value)
+	return fixtureSeedPrefixRawRow(store, formatDBIs(uint8(store.format.Load()))[rank], key, value)
 }
 
 // FixtureStartupDeleteRow creates a definitive absence through the existing raw

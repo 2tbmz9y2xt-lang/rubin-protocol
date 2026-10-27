@@ -371,6 +371,13 @@ func (r *Reader) obsoleteScanPage(domain obsoleteDomain, maxRows uint32, page Ob
 		}
 		page.Rows = append(page.Rows, ObsoleteRowV1{span: &obsoleteSpan{reader: r, rank: domain.rank, key: row.key, image: row.image}})
 		copied += uint64(len(row.key))
+		// One-node accounting pages expose the complete key before any successor
+		// acquisition. This cap stop does not establish successor presence.
+		if domain.rank == 8 && maxRows == 1 {
+			page.Stop, page.Next = PrefixPageRowLimit, page.Rows[0].Key()
+			domain.end = false
+			break
+		}
 		seek = largeImageAdvance(row.key, r.maxKey)
 	}
 	page.Witness.scope = &obsoleteWitness{reader: r, domain: domain, points: points}

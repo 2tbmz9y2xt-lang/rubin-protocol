@@ -1575,7 +1575,13 @@ func TestObsoleteGenerationV1TreeInert(t *testing.T) {
 		var err error
 		saved, err = reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, nil, 1)
 		mustEnvironment(t, err)
-		obsoleteRequirePage(t, saved, 1, 1, family[0].key)
+		obsoleteRequirePage(t, saved, 2, 1, family[0].key)
+		if !bytes.Equal(saved.Next, family[0].key) {
+			t.Fatal("single node page continuation differs")
+		}
+		empty, nextErr := reader.ObsoleteGenerationPageV1(9, ObsoleteNodeV1, saved.Next, 1)
+		mustEnvironment(t, nextErr)
+		obsoleteRequirePage(t, empty, 1, 1)
 		return nil
 	}))
 	n, err := saved.Rows[0].ReadAt(make([]byte, 1), 0)
