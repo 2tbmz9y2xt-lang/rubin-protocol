@@ -4,7 +4,6 @@ package consensus
 
 import (
 	"errors"
-	"reflect"
 	"runtime"
 	"testing"
 
@@ -62,6 +61,10 @@ func TestInitial148CompleteBlockTariffLiteral(t *testing.T) {
 	in.PublishedGenesis = in.Raw
 	w, ok = initial148CompleteTariffV1(in)
 	logicalMDBXAssert(t, ok && w == 18_417_692-8+384, "W same backing literal: %d/%v", w, ok)
+	in.Rotation = &boundSpendSurfaceWithDeployment{boundSpendSurface: icbFrozenV1(0), descriptors: make([]SimplicityDeploymentDescriptor, 2), have: true}
+	w, ok = initial148CompleteTariffV1(in)
+	// d=2 concrete descriptors add 2*16,384.
+	logicalMDBXAssert(t, ok && w == 18_417_692-8+384+32_768, "W descriptor literal: %d/%v", w, ok)
 }
 
 func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
@@ -189,7 +192,7 @@ func TestInitial148CompleteBlockRunProtocol(t *testing.T) {
 	w := btNew(t)
 	in := icbInputV1()
 	want := icbStepsErrorV1(t, in)
-	same := func(err error) bool { return reflect.DeepEqual(err, want) }
+	same := func(err error) bool { return icbSameTxErrorV1(err, want) }
 	for _, parallel := range []bool{false, true} {
 		entry := icbEntryV1(parallel)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
@@ -278,7 +281,7 @@ func icbGenesisInputV1(t *testing.T, flip int) (initial148CompleteBlockInputV1, 
 	return in, header
 }
 
-func icbValidateOnceV1(t *testing.T, w *btWorld, account *mdbx.OperationAccount, in initial148CompleteBlockInputV1, parallel bool) (initial148CompleteBlockOutcomeV1, error, *initial148CompleteBlockResultV1, initial148CompleteBlockResultV1) {
+func icbValidateOnceV1(t *testing.T, w *btWorld, account *mdbx.OperationAccount, in initial148CompleteBlockInputV1, parallel bool) (initial148CompleteBlockOutcomeV1, *initial148CompleteBlockResultV1, initial148CompleteBlockResultV1, error) {
 	t.Helper()
 	var delivered *initial148CompleteBlockResultV1
 	var copied initial148CompleteBlockResultV1
@@ -293,7 +296,7 @@ func icbValidateOnceV1(t *testing.T, w *btWorld, account *mdbx.OperationAccount,
 			return verr
 		})
 	})
-	return out, err, delivered, copied
+	return out, delivered, copied, err
 }
 
 func TestInitial148CompleteBlockGenesisAccept(t *testing.T) {
@@ -301,12 +304,12 @@ func TestInitial148CompleteBlockGenesisAccept(t *testing.T) {
 		w := btNew(t)
 		in, header := icbGenesisInputV1(t, -1)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-			out, err, delivered, got := icbValidateOnceV1(t, w, account, in, parallel)
+			out, delivered, got, err := icbValidateOnceV1(t, w, account, in, parallel)
 			logicalMDBXAssert(t, err == nil && out.validationErr == nil && out.attempted && delivered != nil, "parallel=%v genesis acceptance: %v / %+v", parallel, err, out)
 			logicalMDBXAssert(t, out.required.derived && out.required.cause == nil && out.required.root == header.UtxoRoot, "parallel=%v fresh D root %x want header %x", parallel, out.required.root, header.UtxoRoot)
 			logicalMDBXAssert(t, got.summary.TxCount == 1 && got.summary.BlockHash == in.Endpoint.BlockHash, "genesis summary: %+v", got.summary)
 			logicalMDBXAssert(t, got.transition.alreadyGeneratedN1 == (Uint128{}) && got.transition.sumFees == (Uint128{}) && len(got.transition.createdUtxos) != 0, "genesis transition: %+v", got.transition)
-			logicalMDBXAssert(t, got.effect.Primitive.Height == 0 && got.effect.Primitive.Block == in.Endpoint.BlockHash && &got.effect.CurrentBody != nil, "genesis effect identity: %+v", got.effect.Primitive)
+			logicalMDBXAssert(t, got.effect.Primitive.Height == 0 && got.effect.Primitive.Block == in.Endpoint.BlockHash, "genesis effect identity: %+v", got.effect.Primitive)
 			// After run the frame released the delivered result.
 			logicalMDBXAssert(t, delivered.transition == nil && delivered.effect.Primitive.Source == nil, "result escaped run: %+v", *delivered)
 		})
@@ -319,7 +322,7 @@ func TestInitial148CompleteBlockRootMismatch(t *testing.T) {
 			w := btNew(t)
 			in, header := icbGenesisInputV1(t, flip)
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-				out, err, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
 				var txErr *TxError
 				logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == BLOCK_ERR_UTXO_ROOT_MISMATCH && txErr.Msg == "utxo_root mismatch" && any(out.validationErr) == any(err), "flip=%d parallel=%v mismatch: %v", flip, parallel, err)
 				logicalMDBXAssert(t, delivered == nil && out.attempted && out.required.derived && out.required.cause == nil && out.required.root != header.UtxoRoot, "flip=%d mismatch outcome: %+v", flip, out)
@@ -342,7 +345,7 @@ func TestInitial148CompleteBlockEarlierErrorBeforeD(t *testing.T) {
 		logicalMDBXAssert(t, err == nil, "hash: %v", err)
 		in.Endpoint.BlockHash = hash
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-			out, err, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+			out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
 			var txErr *TxError
 			logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == TX_ERR_PARSE && txErr.Msg == "da_payload_len must be 0 for tx_kind=0x00" && any(out.validationErr) == any(err), "parallel=%v earlier error must win: %v", parallel, err)
 			logicalMDBXAssert(t, delivered == nil && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "parallel=%v no D after earlier error: %+v", parallel, out)
@@ -370,10 +373,10 @@ func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 				}
 				return native
 			})
-			logicalMDBXAssert(t, err == native && out.attempted && out.validationErr == nil, "parallel=%v run error kept: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, errors.Is(err, native) && out.attempted && out.validationErr == nil, "parallel=%v run error kept: %v / %+v", parallel, err, out)
 			logicalMDBXAssert(t, out.required.derived && out.required.root == header.UtxoRoot, "parallel=%v D evidence kept: %+v", parallel, out.required)
 			// A fresh next invocation succeeds on the same account.
-			out2, err2, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+			out2, delivered, _, err2 := icbValidateOnceV1(t, w, account, in, parallel)
 			logicalMDBXAssert(t, err2 == nil && delivered != nil && out2.required.derived, "parallel=%v fresh retry: %v", parallel, err2)
 		})
 	}
@@ -396,7 +399,32 @@ func TestInitial148CompleteBlockRunErrorAfterRejection(t *testing.T) {
 				})
 				return native
 			})
-			logicalMDBXAssert(t, err == native && out.attempted && reflect.DeepEqual(out.validationErr, want), "parallel=%v run error not overwritten: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, errors.Is(err, native) && out.attempted && icbSameTxErrorV1(out.validationErr, want), "parallel=%v run error not overwritten: %v / %+v", parallel, err, out)
+		})
+	}
+}
+
+// icbSameTxErrorV1 compares two independently produced TxErrors by code and message.
+func icbSameTxErrorV1(got, want error) bool {
+	var g, w *TxError
+	return errors.As(got, &g) && errors.As(want, &w) && g.Code == w.Code && g.Msg == w.Msg
+}
+
+// TestInitial148CompleteBlockEarlierConnectErrorBeforeD (C06) keeps the genesis
+// body intact but freezes an empty create-suite set, so the refusal happens
+// inside the candidate after source preparation; D still never runs.
+func TestInitial148CompleteBlockEarlierConnectErrorBeforeD(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, _ := icbGenesisInputV1(t, 0)
+		frozen := icbFrozenV1(0)
+		frozen.create = NewNativeSuiteSet()
+		in.Rotation = frozen
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+			var txErr *TxError
+			logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == TX_ERR_SIG_ALG_INVALID && txErr.Msg == "CORE_P2PK suite not in native create set" && any(out.validationErr) == any(err), "parallel=%v earlier connect error must win: %v", parallel, err)
+			logicalMDBXAssert(t, delivered == nil && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "parallel=%v no D after earlier error: %+v", parallel, out)
 		})
 	}
 }
