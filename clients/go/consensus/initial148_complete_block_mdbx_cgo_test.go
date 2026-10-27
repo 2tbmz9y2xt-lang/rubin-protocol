@@ -29,8 +29,14 @@ func icbInputV1() initial148CompleteBlockInputV1 {
 		Parent:      mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: 0, BlockHash: parent},
 		Endpoint:    mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: 1, BlockHash: [32]byte{0x52}},
 		CapRegistry: &validatedLogicalStateCapRegistry{}, Registry: icbRegistryV1(),
-		Rotation: &boundSpendSurface{inner: DefaultRotationProvider{}, height: 1, haveCreate: true, haveSpend: true},
+		Rotation: icbFrozenV1(1),
 	}
+}
+
+// icbFrozenV1 is the caller-frozen default suite surface at height.
+func icbFrozenV1(height uint64) *boundSpendSurface {
+	inner := DefaultRotationProvider{}
+	return &boundSpendSurface{inner: inner, height: height, haveCreate: true, haveSpend: true, create: inner.NativeCreateSuites(height), spend: inner.NativeSpendSuites(height)}
 }
 
 func icbWithAccountV1(t *testing.T, w *btWorld, use func(*mdbx.OperationAccount)) {
@@ -129,7 +135,7 @@ func icbGenesisContextV1(in initial148CompleteBlockInputV1) initial148CompleteBl
 	in.Height, in.ParentHash, in.ParentTimestamps, in.PublishedGenesis = 0, [32]byte{}, nil, in.Raw
 	in.Parent = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointPreGenesisV1}
 	in.Endpoint.Height = 0
-	in.Rotation = &boundSpendSurface{inner: DefaultRotationProvider{}, height: 0, haveCreate: true, haveSpend: true}
+	in.Rotation = icbFrozenV1(0)
 	return in
 }
 
@@ -250,4 +256,74 @@ func TestInitial148CompleteBlockRunUnwind(t *testing.T) {
 		_, err := withInitial148CompleteBlockV1(account, in, func(func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error { return errors.New("fresh") })
 		logicalMDBXAssert(t, err != nil && err.Error() == "fresh", "fresh invocation after unwind: %v", err)
 	})
+}
+
+// icbGenesisInputV1 binds the published initial148 genesis literal as the
+// admitted h0 body; flip (when >= 0) toggles one utxo_root header byte.
+func icbGenesisInputV1(t *testing.T, flip int) (initial148CompleteBlockInputV1, Initial148Header) {
+	t.Helper()
+	raw := initial148BlockGenesis(t)
+	if flip >= 0 {
+		raw[108+flip] ^= 0x01
+	}
+	header, err := ParseInitial148HeaderBytes(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "genesis header: %v", err)
+	hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
+	logicalMDBXAssert(t, err == nil, "genesis hash: %v", err)
+	in := icbGenesisContextV1(icbInputV1())
+	in.Raw, in.PublishedGenesis, in.ExpectedTarget = raw, raw, header.Target
+	// The enclosing owner supplies the qualified cumulative work; any nonzero
+	// value is an admissible immutable operation input here.
+	in.Endpoint.BlockHash, in.Endpoint.CumulativeChainwork = hash, [40]byte{39: 1}
+	return in, header
+}
+
+func icbValidateOnceV1(t *testing.T, w *btWorld, account *mdbx.OperationAccount, in initial148CompleteBlockInputV1, parallel bool) (initial148CompleteBlockOutcomeV1, error, *initial148CompleteBlockResultV1, initial148CompleteBlockResultV1) {
+	t.Helper()
+	var delivered *initial148CompleteBlockResultV1
+	var copied initial148CompleteBlockResultV1
+	out, err := icbEntryV1(parallel)(account, in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+		return w.s.View(func(reader *mdbx.Reader) error {
+			result, verr := validate(reader)
+			if result != nil {
+				delivered, copied = result, *result
+				copied.transition = &connectBlockInputViewResult{}
+				*copied.transition = *result.transition
+			}
+			return verr
+		})
+	})
+	return out, err, delivered, copied
+}
+
+func TestInitial148CompleteBlockGenesisAccept(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, header := icbGenesisInputV1(t, -1)
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, err, delivered, got := icbValidateOnceV1(t, w, account, in, parallel)
+			logicalMDBXAssert(t, err == nil && out.validationErr == nil && out.attempted && delivered != nil, "parallel=%v genesis acceptance: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, out.required.derived && out.required.cause == nil && out.required.root == header.UtxoRoot, "parallel=%v fresh D root %x want header %x", parallel, out.required.root, header.UtxoRoot)
+			logicalMDBXAssert(t, got.summary.TxCount == 1 && got.summary.BlockHash == in.Endpoint.BlockHash, "genesis summary: %+v", got.summary)
+			logicalMDBXAssert(t, got.transition.alreadyGeneratedN1 == (Uint128{}) && got.transition.sumFees == (Uint128{}) && len(got.transition.createdUtxos) != 0, "genesis transition: %+v", got.transition)
+			logicalMDBXAssert(t, got.effect.Primitive.Height == 0 && got.effect.Primitive.Block == in.Endpoint.BlockHash && &got.effect.CurrentBody != nil, "genesis effect identity: %+v", got.effect.Primitive)
+			// After run the frame released the delivered result.
+			logicalMDBXAssert(t, delivered.transition == nil && delivered.effect.Primitive.Source == nil, "result escaped run: %+v", *delivered)
+		})
+	}
+}
+
+func TestInitial148CompleteBlockRootMismatch(t *testing.T) {
+	for _, flip := range []int{0, 31} {
+		for _, parallel := range []bool{false, true} {
+			w := btNew(t)
+			in, header := icbGenesisInputV1(t, flip)
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				out, err, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+				var txErr *TxError
+				logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == BLOCK_ERR_UTXO_ROOT_MISMATCH && txErr.Msg == "utxo_root mismatch" && any(out.validationErr) == any(err), "flip=%d parallel=%v mismatch: %v", flip, parallel, err)
+				logicalMDBXAssert(t, delivered == nil && out.attempted && out.required.derived && out.required.cause == nil && out.required.root != header.UtxoRoot, "flip=%d mismatch outcome: %+v", flip, out)
+			})
+		}
+	}
 }
