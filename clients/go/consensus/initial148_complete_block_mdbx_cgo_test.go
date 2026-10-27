@@ -76,6 +76,35 @@ func TestInitial148CompleteBlockTariffLiteral(t *testing.T) {
 	logicalMDBXAssert(t, ok && w == 18_417_692-8+384+32_768, "W descriptor literal: %d/%v", w, ok)
 }
 
+// TestInitial148CompleteBlockTariffCensus (C12) checks the census arithmetic
+// and typed-size inequalities that close the W formula, independently of
+// initial148CompleteTariffV1.
+func TestInitial148CompleteBlockTariffCensus(t *testing.T) {
+	// The linear rows sum to the 8,192*n coefficient.
+	rows := []uint64{1, 127, 512, 4096, 512, 512, 2432}
+	var sum uint64
+	for _, r := range rows {
+		sum += r
+	}
+	logicalMDBXAssert(t, sum == 8192, "linear census rows sum %d", sum)
+	// tx_parse.go: input = prev_txid 32 + prev_vout 4 + script_sig CompactSize 1 + sequence 4;
+	// output = value 8 + covenant_type 2 + covenant_data CompactSize 1.
+	const minInput, minOutput = 32 + 4 + 1 + 4, 8 + 2 + 1
+	logicalMDBXAssert(t, minInput == 41 && minOutput == 11, "minimum wire sizes %d/%d", minInput, minOutput)
+	// Two 65,536-byte covenant copies per minimum input fit the 4,096 row with
+	// the 256-byte per-input metadata allowance.
+	logicalMDBXAssert(t, 2*65_536/minInput < 3197 && 3197+256 <= 4096, "covenant row")
+	// At most n/41 inputs + n/11 outputs; two candidate maps at 256 bytes per
+	// entry fit the 512 row per output byte: 2*256/11 < 512.
+	logicalMDBXAssert(t, 2*256/minOutput < 512, "candidate map row")
+	// The typed map entry and queued task fit their 256-byte logical charges.
+	entry := unsafe.Sizeof(Outpoint{}) + unsafe.Sizeof(UtxoEntry{})
+	task := unsafe.Sizeof(sigCheckTask{})
+	logicalMDBXAssert(t, entry <= 256 && task <= 256, "typed sizes entry=%d task=%d", entry, task)
+	// The fixed allowance covers the pinned Simplicity live memory and frame.
+	logicalMDBXAssert(t, 1_048_576+65_536 < 16_777_216, "fixed allowance")
+}
+
 func TestInitial148CompleteBlockLocalRefusalOrder(t *testing.T) {
 	w := btNew(t)
 	local := func(err error) bool {
