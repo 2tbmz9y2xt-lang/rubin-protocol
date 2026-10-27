@@ -419,6 +419,48 @@ func TestInitial148CompleteBlockEndpointHashGuard(t *testing.T) {
 	}
 }
 
+// TestInitial148CompleteBlockGenesisTargetMismatch (C06, ORDER steps 2-5)
+// runs the composer's h0 header step on the published genesis, whose header
+// target is POW_LIMIT (all 0xff), against an admissible in-range expected
+// target that differs in the last byte. The mismatch is a TxError before D
+// with no result; header PoW refusal precedes it and the merkle commitment
+// follows it, each pinned by a dual-violation row plus a merkle-only control.
+func TestInitial148CompleteBlockGenesisTargetMismatch(t *testing.T) {
+	lower := [32]byte{}
+	for i := range lower {
+		lower[i] = 0xff
+	}
+	lower[31] = 0xfe
+	tiny := [32]byte{31: 0x01}
+	cases := []struct {
+		name     string
+		header   func(raw []byte)
+		expected [32]byte
+		code     ErrorCode
+		msg      string
+	}{
+		{"mismatch", func([]byte) {}, lower, BLOCK_ERR_TARGET_INVALID, "target mismatch"},
+		{"pow-before-mismatch", func(raw []byte) { copy(raw[76:108], tiny[:]) }, lower, BLOCK_ERR_POW_INVALID, "pow invalid"},
+		{"mismatch-before-merkle", func(raw []byte) { raw[36] ^= 0x01 }, lower, BLOCK_ERR_TARGET_INVALID, "target mismatch"},
+		{"merkle-control", func(raw []byte) { raw[36] ^= 0x01 }, POW_LIMIT, BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch"},
+	}
+	for _, tc := range cases {
+		for _, parallel := range []bool{false, true} {
+			w := btNew(t)
+			in, _ := icbGenesisInputV1(t, -1)
+			raw := append([]byte(nil), in.Raw...)
+			tc.header(raw)
+			in.Raw, in.PublishedGenesis, in.ExpectedTarget = raw, raw, tc.expected
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+				var txErr *TxError
+				logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == tc.code && txErr.Msg == tc.msg && any(out.validationErr) == any(err), "%s parallel=%v genesis header error: %v", tc.name, parallel, err)
+				logicalMDBXAssert(t, delivered == nil && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "%s parallel=%v no result and no D: %+v", tc.name, parallel, out)
+			})
+		}
+	}
+}
+
 func TestInitial148CompleteBlockRootMismatch(t *testing.T) {
 	for _, flip := range []int{0, 31} {
 		for _, parallel := range []bool{false, true} {
