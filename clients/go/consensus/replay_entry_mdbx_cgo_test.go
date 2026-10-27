@@ -1522,11 +1522,13 @@ func TestReplayEntryPlanShape(t *testing.T) {
 		slices.EqualFunc(keys(batch.Consulted), want(0, 1, 7, 8), bytes.Equal), "planned Batch DBIs and Consulted: %+v", batch)
 }
 
-// H27 (placement only; the timing is R11's): every occurrence of ProtectV1, qualifyAndPlan, plan, runRelease and release in
-// replay_entry_mdbx_cgo.go (comments excluded) is classified by enclosing declaration, function-literal and block nesting,
-// the innermost statement holding a call, and role (a go statement marks every occurrence in it), and the census equals the
-// H27 placements exactly; the clear precedes the invocation, and the deferred (plain) runRelease precedes (follows) both
-// Store.Update calls that take plan.
+// H27 (placement only; the timing is R11's): every occurrence of ProtectV1, qualifyAndPlan, plan, runRelease, release and
+// treeEnter in replay_entry_mdbx_cgo.go (comments excluded) is classified by enclosing declaration, function-literal and
+// block nesting, the innermost statement holding a call, and role (a go statement marks every occurrence in it), and the
+// census equals the H27 placements exactly; the clear precedes the invocation, and the deferred (plain) runRelease
+// precedes (follows) all three commit calls: both Store.Update calls that take plan and the format-3 treeEnter call. The
+// functions of replay_tree_route_mdbx_cgo.go, every one of them, contain no ProtectV1, runRelease, release, defer or go
+// (selector_closure), so the release stays owned by EnterReplayTargetMDBX and PlanDirectReplayEntryMDBX.
 func TestReplayEntryProtectPlacement(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "replay_entry_mdbx_cgo.go", nil, 0)
 	logicalMDBXAssert(t, err == nil, "parse: %v", err)
@@ -1538,7 +1540,7 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 			return true
 		}
 		stack = append(stack, n)
-		if id, ok := n.(*ast.Ident); ok && slices.Contains([]string{"ProtectV1", "qualifyAndPlan", "plan", "runRelease", "release"}, id.Name) {
+		if id, ok := n.(*ast.Ident); ok && slices.Contains([]string{"ProtectV1", "qualifyAndPlan", "plan", "runRelease", "release", "treeEnter"}, id.Name) {
 			key := replayPlacement(stack)
 			got[key], pos[key] = got[key]+1, max(pos[key], id.Pos())
 		}
@@ -1553,15 +1555,57 @@ func TestReplayEntryProtectPlacement(t *testing.T) {
 		"EnterReplayTargetMDBX: call *ast.DeferStmt runRelease": 1, "EnterReplayTargetMDBX: call *ast.ExprStmt runRelease": 1,
 		"runRelease: decl runRelease": 1, "runRelease: := lhs release release": 1, "runRelease: := rhs release": 1,
 		"runRelease: cmp != nil release": 1, "runRelease: nested = lhs nil release": 1, "runRelease: nested call *ast.ExprStmt release": 1,
+		"EnterReplayTargetMDBX: nested call *ast.AssignStmt treeEnter": 1,
 	}
 	logicalMDBXAssert(t, reflect.DeepEqual(got, want), "placement census: %v", got)
 	at := func(k string) token.Pos { return pos["EnterReplayTargetMDBX: "+k] }
-	first, last := min(at("literal arg store.Update plan"), at("nested arg store.Update plan")), max(at("literal arg store.Update plan"), at("nested arg store.Update plan"))
+	first := min(at("literal arg store.Update plan"), at("nested arg store.Update plan"), at("nested call *ast.AssignStmt treeEnter"))
+	last := max(at("literal arg store.Update plan"), at("nested arg store.Update plan"), at("nested call *ast.AssignStmt treeEnter"))
 	clear, invoke := pos["runRelease: nested = lhs nil release"], pos["runRelease: nested call *ast.ExprStmt release"]
 	logicalMDBXAssert(t, clear > 0 && invoke > 0 && clear < invoke, "clear %d before invocation %d", clear, invoke)
 	deferred, plain := at("call *ast.DeferStmt runRelease"), at("call *ast.ExprStmt runRelease")
-	logicalMDBXAssert(t, deferred > 0 && first > 0 && deferred < first, "deferred runRelease %d before both Updates %d", deferred, first)
-	logicalMDBXAssert(t, plain > 0 && first > 0 && last < plain, "plain runRelease %d after both Updates %d", plain, last)
+	logicalMDBXAssert(t, deferred > 0 && first > 0 && deferred < first, "deferred runRelease %d before the three commit calls %d", deferred, first)
+	logicalMDBXAssert(t, plain > 0 && first > 0 && last < plain, "plain runRelease %d after the three commit calls %d", plain, last)
+	replayTreeRouteNoRelease(t)
+}
+
+// replayTreeRouteNoRelease asserts that every function of replay_tree_route_mdbx_cgo.go holds no ProtectV1, runRelease
+// or release identifier and no defer or go statement, and that the named format-3 route functions exist. No exception
+// is needed: the direct entry's release is returned by PlanDirectReplayEntryMDBX in replay_recovery_mdbx_cgo.go.
+func replayTreeRouteNoRelease(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "replay_tree_route_mdbx_cgo.go", nil, 0)
+	logicalMDBXAssert(t, err == nil, "parse route: %v", err)
+	route := []string{
+		"replayTreeStoreRefused", "replayTreeRefused", "treeEnter", "treePlan", "treeBatch", "treeQualified", "treeEntryBatch",
+		"replayTreeEntryRows", "treeTargetRoot", "replayTreeEncode", "replayTreeOperation", "replayTreeNonPair",
+		"replayTreeCapacity", "replayTreeDirectPlan", "replayTreeIntent", "replayTreeRecompute", "replayTreeConversion",
+	}
+	found := map[string]string{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		found[fn.Name.Name] = ""
+		ast.Inspect(fn, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.DeferStmt, *ast.GoStmt:
+				found[fn.Name.Name] += fmt.Sprintf(" %T", x)
+			case *ast.Ident:
+				if slices.Contains([]string{"ProtectV1", "runRelease", "release"}, x.Name) {
+					found[fn.Name.Name] += " " + x.Name
+				}
+			}
+			return true
+		})
+	}
+	for _, name := range route {
+		_, ok := found[name]
+		logicalMDBXAssert(t, ok, "route function %s missing: %v", name, found)
+	}
+	for name, hits := range found {
+		logicalMDBXAssert(t, hits == "", "route function %s holds%s", name, hits)
+	}
 }
 
 // replayPlacement classifies the identifier on top of stack as "declaration: [go] [literal]... [nested] role name".

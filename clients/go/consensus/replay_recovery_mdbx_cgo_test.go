@@ -1318,3 +1318,20 @@ func TestReplayRecomputeConversionDrainThenEntry(t *testing.T) {
 	logicalMDBXAssert(t, out.Err == nil && a.Phase == mdbx.StoragePhaseReplayV1 && a.Replay != nil && a.Replay.TargetGenerationID == 3 && a.NextGenerationID == 4 &&
 		a.Replay.TargetProfile == mdbx.StorageProfileArchiveV1, "A16 entry: %+v %+v", out, a.Replay)
 }
+
+// X3: with a selected side on a format-3 Reader the intent keeps its baseline result, the clear planner's own
+// result: an empty plan and the exact tree-Reader refusal of ReadStorageAuthorityV1, with nothing written.
+func TestReplayRecoveryIntentSideTreeReader(t *testing.T) {
+	envelope := rtStable()
+	envelope.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 0, TipHeight: 1, TipHash: [32]byte{1}, CumulativeChainwork: sideWorldWork(1), RowCount: 1, LogicalBytes: 1}
+	w := rtNew(t, envelope)
+	image := rtImage(t, w)
+	err := w.s.View(func(r *mdbx.Reader) error {
+		plan, perr := PlanRecoveryIntentMDBX(r)
+		clear, cerr := PlanSelectedSideClearMDBX(r)
+		logicalMDBXAssert(t, reflect.ValueOf(plan).IsZero() && replayTreeRefused(perr, replayTreeReaderRefusal), "X3 intent: %+v %v", plan, perr)
+		logicalMDBXAssert(t, clear.ReadResource == "" && len(clear.Batch.Mutations) == 0 && replaySameRaw(perr, cerr), "X3 clear: %+v %v %v", clear, cerr, perr)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil && reflect.DeepEqual(image, rtImage(t, w)), "X3 view: %v", err)
+}

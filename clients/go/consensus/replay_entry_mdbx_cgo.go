@@ -148,14 +148,20 @@ type replayEntryCall struct {
 	planned      bool
 	census       bool // The third leaf's BS census read is in flight (dormant in this leaf).
 	denied       bool
-	lane         uint64 // A Reader-scoped planner's lane share; zero is the full lane (replayEntryInventoryLimit).
+	lane         uint64                 // A Reader-scoped planner's lane share; zero is the full lane (replayEntryInventoryLimit).
+	account      *mdbx.OperationAccount // The format-3 route's operation account; nil on format 2.
 	replay       *mdbx.ReplayV1
 	release      func()
 }
 
-// EnterReplayTargetMDBX runs sources (b), (d) and (e), selected by the persisted authority, under one full-lane grant
-// around one Store.Update; on the owner's exact capacity refusal one grant-free control-only Update evaluates the
-// step-1 gates. The release ProtectV1 returned runs exactly once after Store.Update returns, panic included.
+// EnterReplayTargetMDBX runs sources (b), (d) and (e), selected by the persisted authority. On a format-2 store it runs
+// under one full-lane grant around one Store.Update; on the owner's exact capacity refusal one grant-free control-only
+// Update evaluates the step-1 gates. On a format-3 store, selected only by Store.Update's exact tree-store refusal
+// (which is consumed), it opens one LaneOperation account, takes the OWN evidence charge (replayTreeOwnBytes) on it
+// and makes one pair-only UpdateTreeV1 whose plan runs with lane OWN (inventory share replayInvLimit148(OWN)); on the
+// owner's exact capacity refusal of OWN one UpdateTreeV1 on the same account evaluates the step-1 gates with the
+// identity-page charge taken on that account and decides the denied refusal (a persisted REPLAY still resumes). The
+// release ProtectV1 returned runs exactly once after the last of these commit calls returns, panic included.
 func (o *ReplayEntryOwnerV1) EnterReplayTargetMDBX(store *mdbx.Store, reservations *mdbx.OperationReservationOwner) ReplayEntryOutcomeV1 {
 	out := ReplayEntryOutcomeV1{CanonicalTruth: "OLD", Truth: mdbx.CommitTruthOld, Stage: mdbx.UpdateStagePrewrite}
 	if err := replayEntryContext(o.genesis); err != nil {
@@ -183,8 +189,14 @@ func (o *ReplayEntryOwnerV1) EnterReplayTargetMDBX(store *mdbx.Store, reservatio
 		call.denied = true
 		out.Truth, out.Stage, out.Err = store.Update(call.plan)
 	}
+	if replayTreeStoreRefused(out) {
+		var raw bool
+		if out, raw = call.treeEnter(store); raw {
+			return out
+		}
+	}
 	call.runRelease()
-	return replayEntryProject(out, call)
+	return replayTreeCapacity(replayEntryProject(out, call), call)
 }
 
 func (c *replayEntryCall) runRelease() {
@@ -258,7 +270,7 @@ func (c *replayEntryCall) identityCharged(reader *mdbx.Reader, generation uint64
 	var identity uint8
 	var readErr error
 	// The callback returns nil, so a non-nil result is the owner's refusal of the control charge.
-	if c.reservations.WithReservation(replayEntryIdentityBytes, func() error {
+	if c.controlCharge(func() error {
 		var site string
 		identity, site, readErr = replayEntryIdentity(reader, generation)
 		c.step = site
@@ -268,6 +280,15 @@ func (c *replayEntryCall) identityCharged(reader *mdbx.Reader, generation uint64
 		return 0, err
 	}
 	return identity, readErr
+}
+
+// controlCharge runs read under the nested 512-byte control charge: on the format-3 route's account, else as one
+// owner operation of its own.
+func (c *replayEntryCall) controlCharge(read func() error) error {
+	if c.account != nil {
+		return c.account.WithReservation(replayEntryIdentityBytes, read)
+	}
+	return c.reservations.WithReservation(replayEntryIdentityBytes, read)
 }
 
 // replayEntryIdentity is the step-1 identity-page read; on error it returns the identity-page read-site label.

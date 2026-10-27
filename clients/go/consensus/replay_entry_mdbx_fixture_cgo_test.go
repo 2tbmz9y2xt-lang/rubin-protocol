@@ -4,9 +4,11 @@ package consensus
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -245,6 +247,10 @@ func TestReplayEntryFixtureSnapshotDrift(t *testing.T) {
 	drift, err := mdbx.FixtureWriteSnapshotDrift(w.store, 0, []byte{2}, func() { out = w.enter(view, w.genesis) })
 	logicalMDBXAssert(t, err == nil && drift == 1 && out.Result == replayEntryStale && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite, "R10: %d %v %+v", drift, err, out)
 	replayEngineClass(t, out.Err, mdbx.EngineStateMismatch, "R10")
+	// X3 (M8): this format-2 Store.Update StateMismatch is not the F1 tree-store refusal; the projection cannot show it,
+	// because the consumed Store hands UpdateTreeV1 the same error.
+	var mismatch *mdbx.EngineError
+	logicalMDBXAssert(t, errors.As(out.Err, &mismatch) && mismatch.Diagnostic == "OLD/write snapshot mismatch" && !replayTreeStoreRefused(ReplayEntryOutcomeV1{Truth: out.Truth, Stage: out.Stage, Err: out.Err}), "X3 F1 selected a format-2 StateMismatch: %v", out.Err)
 	replayConsumed(t, w.store, out.Err, "R10")
 	// The drifted authority row is the only change: every other image row is byte-identical.
 	w.store = w.reopen()
@@ -563,4 +569,162 @@ func TestReplayEntryFixturePrefixTipTransient(t *testing.T) {
 	replayConsumed(t, w.store, out.Err, "X2 transient")
 	w.store = w.reopen()
 	replaySameImage(t, image, w.image(), "X2 transient")
+}
+
+// rtArmedEntry runs the format-3 entry of an rtEntryWorld under one armed scenario.
+func rtArmedEntry(t *testing.T, w *q148World, view *q148View, scenario mdbx.SelectedDamageScenario, key []byte) (ReplayEntryOutcomeV1, mdbx.SelectedDamageEvidence) {
+	t.Helper()
+	var out ReplayEntryOutcomeV1
+	evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, scenario, 0, key, func() { out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner) })
+	logicalMDBXAssert(t, err == nil, "fixture %d: %v", scenario, err)
+	return out, evidence
+}
+
+// H3: a possibly crossed format-3 entry commit is the baseline crossing projection; NEW carries the planned ReplayV1.
+func TestReplayTreeFixtureEntryCrossed(t *testing.T) {
+	for _, c := range []struct {
+		scenario mdbx.SelectedDamageScenario
+		truth    mdbx.CommitTruth
+		result   string
+		canon    string
+	}{
+		{mdbx.SelectedDamageCommitOld, mdbx.CommitTruthOld, "TERMINAL_PERSISTENCE(old)", "OLD"},
+		{mdbx.SelectedDamageCommitNew, mdbx.CommitTruthNew, "TERMINAL_PERSISTENCE(new)", "NEW"},
+		{mdbx.SelectedDamageCommitUnreadable, mdbx.CommitTruthUnknown, "TERMINAL_PERSISTENCE(neither_or_unreadable)", "UNKNOWN"},
+	} {
+		w, s, view := rtEntryWorld(t, nil)
+		pre := rtImage(t, w.btWorld)
+		out, evidence := rtArmedEntry(t, w, view, c.scenario, []byte{2})
+		logicalMDBXAssert(t, evidence.Faults >= 1 && evidence.Commits == 1 && (c.scenario != mdbx.SelectedDamageCommitUnreadable || evidence.ReadGets >= 1), "H3 %d evidence: %+v", c.scenario, evidence)
+		logicalMDBXAssert(t, out.Stage == mdbx.UpdateStageCommitMayHaveCrossed && out.Truth == c.truth && out.Result == c.result && out.CanonicalTruth == c.canon && out.Err != nil &&
+			(out.Replay != nil) == (c.truth == mdbx.CommitTruthNew), "H3 %d: %+v", c.scenario, out)
+		w.reopen(t)
+		target := mdbx.RecoveryTargetV1{ChainID: w.g.ChainID, GenesisHash: s.hashes[0], TipHash: s.tip(), TipHeight: 3, CumulativeChainwork: s.work(t, 3)}
+		switch c.truth {
+		case mdbx.CommitTruthOld:
+			logicalMDBXAssert(t, reflect.DeepEqual(pre, rtImage(t, w.btWorld)), "H3 old: image changed")
+		case mdbx.CommitTruthNew:
+			want := rtEntered(rtStable(), mdbx.StorageProfilePrunedV1, target)
+			logicalMDBXAssert(t, reflect.DeepEqual(rtEnvelope(t, w.btWorld), want) && reflect.DeepEqual(out.Replay, want.Authority.Replay), "H3 new: %+v", out.Replay)
+		}
+	}
+}
+
+// E9(c), D3, D5: native faults of the format-3 entry, each with zero mutation and its class.
+func TestReplayTreeFixtureEntryFaults(t *testing.T) {
+	for _, c := range []struct {
+		label    string
+		empty    bool
+		scenario mdbx.SelectedDamageScenario
+		key      []byte
+		result   string
+	}{
+		{"E9(c) write begin", false, mdbx.SelectedDamageWriteBeginTxnFull, nil, "LOCAL_RESOURCE_UNAVAILABLE(storage_transaction)"},
+		{"D3 envelope get", false, mdbx.SelectedDamageGetEIO, []byte{2}, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"},
+		{"D3 absence census", true, mdbx.SelectedDamageGetEIO, []byte{0}, "LOCAL_RESOURCE_UNAVAILABLE(storage_io)"},
+		{"D5 transient", false, mdbx.SelectedDamageGetEIO, btMeta(0x11, 1), selectedSideCanonical},
+	} {
+		w, _, view := rtEntryWorld(t, nil)
+		if c.empty {
+			w.q148Empty(t)
+		}
+		image := rtImage(t, w.btWorld)
+		out, evidence := rtArmedEntry(t, w, view, c.scenario, c.key)
+		logicalMDBXAssert(t, evidence.Faults == 1 && evidence.Commits == 0 && out.Result == c.result && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.CanonicalTruth == "OLD",
+			"%s: %+v %+v", c.label, out, evidence)
+		w.reopen(t)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w.btWorld)), "%s: image changed", c.label)
+	}
+}
+
+// q148Empty replaces the world by an exact-empty format-3 store.
+func (w *q148World) q148Empty(t *testing.T) {
+	t.Helper()
+	w.btWorld = rtNew(t, mdbx.TreeAuthorityV1{})
+}
+
+// D1, D5: an undecodable envelope, and an undecodable or foreign active CURRENT binding, are TERMINAL_STORE_INTEGRITY.
+func TestReplayTreeFixtureEntryIntegrity(t *testing.T) {
+	legal, err := rtStable().Encode()
+	logicalMDBXAssert(t, err == nil, "encode: %v", err)
+	foreign, err := (mdbx.RootBindingV1{DatabaseID: [32]byte{8}, CommitmentVersion: 1, RootDigest: sha3.Sum256([]byte("RUBIN_UTXO_TREE_V1\x00")), Assurance: mdbx.TreeAssuranceV1{Kind: 1}}).Encode()
+	logicalMDBXAssert(t, err == nil, "foreign: %v", err)
+	for label, row := range map[string][2][]byte{
+		"D1 version 2":        {{2}, append([]byte{2}, legal[1:]...)},
+		"D5 undecodable 0x11": {btMeta(0x11, 1), {0xff}},
+		"D5 foreign database": {btMeta(0x11, 1), foreign},
+	} {
+		w, _, view := rtEntryWorld(t, nil)
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, row[0], row[1]) == nil, "%s seed", label)
+		out := NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner)
+		logicalMDBXAssert(t, out.Result == selectedSideIntegrity && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.CanonicalTruth == "OLD" && out.Replay == nil, "%s: %+v", label, out)
+	}
+}
+
+// D3 inside the callback: a failed envelope get or census get is returned by the entry plan and the direct entry as
+// the native EngineIO error itself, never a D4 decision, a sentinel, a Q5 call or a plan (M5).
+func TestReplayTreeFixtureEntryCallbackEIO(t *testing.T) {
+	for _, c := range []struct {
+		label  string
+		empty  bool
+		key    []byte
+		direct bool
+	}{{"entry envelope get", false, []byte{2}, false}, {"entry census", true, []byte{0}, false}, {"direct envelope get", false, []byte{2}, true}, {"direct census", true, []byte{0}, true}} {
+		w, _, view := rtEntryWorld(t, nil)
+		if c.empty {
+			w.q148Empty(t)
+		}
+		owner := NewReplayEntryOwnerV1(view, w.g)
+		call := &replayEntryCall{owner: owner, sentinel: errors.New("d3 decision"), lane: replayTreeOwnBytes}
+		var got error
+		var plan ReplayRecoveryPlanV1
+		var batch mdbx.Batch
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() {
+			_ = w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+				_, _, _, _ = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					if c.direct {
+						plan, _, got = owner.PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+					} else {
+						batch, got = call.treeBatch(r)
+					}
+					return mdbx.TreeOperationV1{}, got
+				})
+				return nil
+			})
+		})
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "%s fixture: %v %+v", c.label, err, evidence)
+		logicalMDBXAssert(t, errors.As(got, &engine) && engine.Class == mdbx.EngineIO && !errors.Is(got, call.sentinel) && call.decision == "" && call.result == "" &&
+			reflect.ValueOf(plan).IsZero() && reflect.ValueOf(batch).IsZero() && view.limits == nil && view.versions == nil, "%s: %v decision %q result %q plan %+v", c.label, got, call.decision, call.result, plan)
+	}
+}
+
+// E8 (write snapshot): the consulted envelope row drifts before the UpdateTreeV1 write begin: STALE_LOCAL_PLAN/OLD with
+// the raw StateMismatch before the write begin.
+func TestReplayTreeFixtureEntrySnapshotDrift(t *testing.T) {
+	w, _, view := rtEntryWorld(t, nil)
+	var out ReplayEntryOutcomeV1
+	drift, err := mdbx.FixtureWriteSnapshotDrift(w.s, 0, []byte{2}, func() { out = NewReplayEntryOwnerV1(view, w.g).EnterReplayTargetMDBX(w.s, w.owner) })
+	logicalMDBXAssert(t, err == nil && drift == 1 && out.Result == replayEntryStale && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite &&
+		out.CanonicalTruth == "OLD" && out.Replay == nil, "E8 drift: %d %v %+v", drift, err, out)
+	replayEngineClass(t, out.Err, mdbx.EngineStateMismatch, "E8 drift")
+	logicalMDBXAssert(t, len(view.versions) == 1 && view.releases == 1, "E8 drift: ProtectV1 %v releases %d", view.versions, view.releases)
+	// The drifted 0x7f envelope latches the Store and is not a legal tree image, so neither a readback nor a reopen is
+	// available; zero mutation is the engine's OLD/PREWRITE truth for a refusal before the write begin.
+}
+
+// D1 (direct entry): an undecodable envelope (version 2) is TERMINAL_STORE_INTEGRITY with an empty ReadResource and no
+// plan, Q5 or ProtectV1.
+func TestReplayTreeFixtureDirectIntegrity(t *testing.T) {
+	legal, err := rtStable().Encode()
+	logicalMDBXAssert(t, err == nil, "encode: %v", err)
+	w, _, view := rtEntryWorld(t, nil)
+	logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, append([]byte{2}, legal[1:]...)) == nil, "D1 seed")
+	err = w.s.View(func(r *mdbx.Reader) error {
+		plan, release, perr := NewReplayEntryOwnerV1(view, w.g).PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+		replayEngineClass(t, perr, mdbx.EngineIntegrity, "D1 direct")
+		logicalMDBXAssert(t, release == nil && reflect.ValueOf(plan).IsZero() && recoveryClass(perr, plan.ReadResource) == selectedSideIntegrity, "D1 direct: %+v %v", plan, perr)
+		return nil
+	})
+	logicalMDBXAssert(t, view.limits == nil && view.versions == nil, "D1 direct: Q5 ran (view err %v)", err)
 }
