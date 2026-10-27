@@ -247,6 +247,10 @@ func TestReplayEntryFixtureSnapshotDrift(t *testing.T) {
 	drift, err := mdbx.FixtureWriteSnapshotDrift(w.store, 0, []byte{2}, func() { out = w.enter(view, w.genesis) })
 	logicalMDBXAssert(t, err == nil && drift == 1 && out.Result == replayEntryStale && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite, "R10: %d %v %+v", drift, err, out)
 	replayEngineClass(t, out.Err, mdbx.EngineStateMismatch, "R10")
+	// X3 (M8): this format-2 Store.Update StateMismatch is not the F1 tree-store refusal; the projection cannot show it,
+	// because the consumed Store hands UpdateTreeV1 the same error.
+	var mismatch *mdbx.EngineError
+	logicalMDBXAssert(t, errors.As(out.Err, &mismatch) && mismatch.Diagnostic == "OLD/write snapshot mismatch" && !replayTreeStoreRefused(ReplayEntryOutcomeV1{Truth: out.Truth, Stage: out.Stage, Err: out.Err}), "X3 F1 selected a format-2 StateMismatch: %v", out.Err)
 	replayConsumed(t, w.store, out.Err, "R10")
 	// The drifted authority row is the only change: every other image row is byte-identical.
 	w.store = w.reopen()
