@@ -527,6 +527,13 @@ func icbSignV1(t *testing.T, kp *MLDSA87Keypair, tx *Tx, values ...uint64) []byt
 	return raw
 }
 
+func icbSignedRawV1(t *testing.T, tx *Tx) []byte {
+	t.Helper()
+	raw, err := MarshalTx(tx)
+	logicalMDBXAssert(t, err == nil, "marshal: %v", err)
+	return raw
+}
+
 // icbLeafV1 is CSM 2.6 K(op) and S(op,e) built from literal fields.
 func icbLeafV1(leaves map[[36]byte][]byte, op Outpoint, value uint64, data []byte, height uint64, coinbase bool) {
 	var key [36]byte
@@ -586,23 +593,52 @@ func icbSeedV1(t *testing.T, w *btWorld, cov []byte) (blockTreeRequestV1, btTx, 
 
 func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 	t.Helper()
+	return icbH5VariantV1(t, w, icbH5OptsV1{})
+}
+
+// icbH5OptsV1 perturbs one dimension of the h=5 fixture: tx1 spends an
+// unseeded outpoint (missing), tx1's signature is corrupted (badSig), tx2
+// creates one unit more than it spends (overspend), the coinbase pays
+// cbExtra above the fee-only output, or header root byte flip-1 is inverted.
+type icbH5OptsV1 struct {
+	missing, badSig, overspend bool
+	cbExtra                    uint64
+	flip                       int
+}
+
+func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
+	t.Helper()
 	kp := icbKeyV1(t)
 	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
 	seed, tx0, seedTx := icbSeedV1(t, w, cov)
 	f := icbH5V1{c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}}
-	tx1 := inputViewTx(1, f.a)
+	spend1 := f.a
+	if opts.missing {
+		spend1 = Outpoint{Txid: [32]byte{0x99}}
+	}
+	tx1 := inputViewTx(1, spend1)
 	tx1.Outputs[0] = TxOutput{Value: 990, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
 	raw1 := icbSignV1(t, kp, tx1, 1000)
+	if opts.badSig {
+		tx1.Witness[0].Signature[0] ^= 0x01
+		raw1 = icbSignedRawV1(t, tx1)
+	}
 	f.o1 = Outpoint{Txid: testTxID(t, raw1)}
 	tx2 := inputViewTx(2, f.o1, f.b)
 	tx2.Outputs[0] = TxOutput{Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
+	if opts.overspend {
+		tx2.Outputs[0].Value = 2991
+	}
 	raw2 := icbSignV1(t, kp, tx2, 990, 2000)
 	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
 	commit := initial148BlockWitnessCommit(t, raw1, raw2)
-	cb := coinbaseTxWithOutputs(icbHeightV1, []testOutput{{value: 20, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	cb := coinbaseTxWithOutputs(icbHeightV1, []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
 	f.cb0 = Outpoint{Txid: testTxID(t, cb)}
-	f.icbLeavesV1(cov)
+	f.icbLeavesV1(cov, 20+opts.cbExtra)
 	root := icbRootV1(f.finalLeaves)
+	if opts.flip > 0 {
+		root[opts.flip-1] ^= 0x80
+	}
 	raw := initial148BlockFrame(t, [][]byte{cb, raw1, raw2}, func(h *initial148BlockHead) { h.parent, h.root = seed.Block, root })
 	hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
 	logicalMDBXAssert(t, err == nil, "block hash: %v", err)
@@ -615,7 +651,7 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 	f.in.Registry = DefaultSuiteRegistry()
 	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: icbHeightV1, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
 	f.created = map[Outpoint]UtxoEntry{
-		f.cb0: {Value: 20, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: icbHeightV1, CreatedByCoinbase: true},
+		f.cb0: {Value: 20 + opts.cbExtra, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: icbHeightV1, CreatedByCoinbase: true},
 		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: icbHeightV1},
 	}
 	return f
@@ -623,7 +659,7 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 
 // icbLeavesV1 builds the parent, pre-spend (after tx1, before tx2) and final
 // leaf maps from literal fields.
-func (f *icbH5V1) icbLeavesV1(cov []byte) {
+func (f *icbH5V1) icbLeavesV1(cov []byte, cbValue uint64) {
 	f.parentLeaves, f.preSpendLeaves, f.finalLeaves = map[[36]byte][]byte{}, map[[36]byte][]byte{}, map[[36]byte][]byte{}
 	for _, m := range []map[[36]byte][]byte{f.parentLeaves, f.preSpendLeaves, f.finalLeaves} {
 		icbLeafV1(m, f.c, 7, validP2PKCovenantData(), icbHeightV1-1, true)
@@ -631,7 +667,7 @@ func (f *icbH5V1) icbLeavesV1(cov []byte) {
 	icbLeafV1(f.parentLeaves, f.a, 1000, cov, icbHeightV1-1, false)
 	icbLeafV1(f.parentLeaves, f.b, 2000, cov, icbHeightV1-1, false)
 	for _, m := range []map[[36]byte][]byte{f.preSpendLeaves, f.finalLeaves} {
-		icbLeafV1(m, f.cb0, 20, validP2PKCovenantData(), icbHeightV1, true)
+		icbLeafV1(m, f.cb0, cbValue, validP2PKCovenantData(), icbHeightV1, true)
 	}
 	icbLeafV1(f.preSpendLeaves, f.b, 2000, cov, icbHeightV1-1, false)
 	icbLeafV1(f.preSpendLeaves, f.o1, 990, cov, icbHeightV1, false)
@@ -783,4 +819,124 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 			w.read(t, 1, btUTXOKey(1, gone), nil)
 		}
 	}
+}
+
+// icbSubsidy5V1 is block_subsidy(5) = already_generated(6) - already_generated(5).
+const icbSubsidy5V1 = icbGenerated6V1 - icbGenerated5V1
+
+// icbCapAtV1 activates the cap for the fixture chain id from height.
+func icbCapAtV1(in *initial148CompleteBlockInputV1, height uint64) {
+	in.CapRegistry = &validatedLogicalStateCapRegistry{rows: []validatedLogicalStateCapRegistryRow{{chainID: in.ChainID, activationHeight: height}}}
+}
+
+type icbH5CaseV1 struct {
+	name     string
+	opts     icbH5OptsV1
+	capFrom  uint64 // 0: inactive registry
+	counters [2]uint64
+	code     ErrorCode
+	msg      string
+	derived  bool
+}
+
+// icbH5RunCaseV1 observes one variant through every entry. A nil code means
+// root-valid acceptance with fresh D; otherwise no result is delivered and D
+// evidence is present only for the root mismatch.
+func icbH5RunCaseV1(t *testing.T, c icbH5CaseV1) {
+	t.Helper()
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5VariantV1(t, w, c.opts)
+		if c.capFrom != 0 {
+			icbCapAtV1(&f.in, c.capFrom)
+		}
+		if c.counters != ([2]uint64{}) {
+			irCounterV1(t, w, c.counters[0], c.counters[1])
+		}
+		got := icbObserveV1(t, w, f.in, workers)
+		if c.code == "" {
+			logicalMDBXAssert(t, got.err == nil && got.out.validationErr == nil && got.summary.TxCount == 3, "%s workers=%d acceptance: %v", c.name, workers, got.err)
+			logicalMDBXAssert(t, got.out.required.derived && got.out.required.root == f.header.UtxoRoot, "%s workers=%d fresh D: %+v", c.name, workers, got.out.required)
+			continue
+		}
+		var txErr *TxError
+		logicalMDBXAssert(t, errors.As(got.err, &txErr) && txErr.Code == c.code && txErr.Msg == c.msg && any(got.out.validationErr) == any(got.err), "%s workers=%d error %v, want %s/%s", c.name, workers, got.err, c.code, c.msg)
+		logicalMDBXAssert(t, got.out.attempted && got.summary == (BlockBasicSummary{}), "%s workers=%d result delivered: %+v", c.name, workers, got.summary)
+		if !c.derived {
+			logicalMDBXAssert(t, got.out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d D ran after earlier error: %+v", c.name, workers, got.out.required)
+			continue
+		}
+		final := icbRootV1(f.finalLeaves)
+		logicalMDBXAssert(t, got.out.required.derived && got.out.required.cause == nil && got.out.required.root == final && final != f.header.UtxoRoot, "%s workers=%d D evidence: %+v", c.name, workers, got.out.required)
+	}
+}
+
+// TestInitial148CompleteBlockCapH5 (C02, C08) keeps the h=5 final map. The
+// active cap reads the native parent counters (and a nondefault valid
+// below-bound state) and still requires fresh D; an inactive registry with
+// malformed counters proves zero cap-only reads while D still runs; active
+// malformed counters are a store-integrity no-result before D.
+func TestInitial148CompleteBlockCapH5(t *testing.T) {
+	malformed := [2]uint64{1, 1}
+	for _, c := range []icbH5CaseV1{
+		{name: "active-native-counters", capFrom: icbHeightV1},
+		{name: "active-below-bound-nondefault", capFrom: icbHeightV1, counters: [2]uint64{89 * 10, 10}},
+		{name: "inactive-malformed-counters", capFrom: icbHeightV1 + 1, counters: malformed},
+		{name: "inactive-empty-registry-malformed-counters", counters: malformed},
+	} {
+		icbH5RunCaseV1(t, c)
+	}
+	for _, workers := range []int{-1, 4} {
+		w := btNew(t)
+		f := icbH5VariantV1(t, w, icbH5OptsV1{flip: 1})
+		icbCapAtV1(&f.in, icbHeightV1)
+		irCounterV1(t, w, malformed[0], malformed[1])
+		got := icbObserveV1(t, w, f.in, workers)
+		// The required producer validates the counter envelope on the cap's first Counters read.
+		irFailureV1(t, got.err, logicalStateFailureStoreIntegrity, "invalid required logical counter envelope")
+		logicalMDBXAssert(t, any(got.out.validationErr) == any(got.err) && got.summary == (BlockBasicSummary{}), "workers=%d cap no-result delivered: %+v", workers, got.summary)
+		// The selected R failure keeps its exact raw cause; D never ran.
+		required := got.out.required
+		logicalMDBXAssert(t, icbWrapsCauseV1(got.err, required.cause) && !required.derived && !required.hasObservation && required.root == ([32]byte{}), "workers=%d cap no-result tuple: %+v", workers, required)
+	}
+}
+
+// TestInitial148CompleteBlockErrorPairsH5 (C03, C04, C05, C06) pins the
+// first error of each ordered pair through the sequential entry and the
+// queued entry with one and four workers: tx1's queued invalid signature
+// wins over tx2's later synchronous conservation error; the valid-signature
+// control selects tx2's error; subsidy precedes active-cap reads; every
+// earlier error precedes D; a completed D with a differing first or last
+// header root byte is the canonical mismatch.
+func TestInitial148CompleteBlockErrorPairsH5(t *testing.T) {
+	// sig_verify_queued.go and spend_verify.go: context "CORE_P2PK" + " signature invalid".
+	sig := icbH5CaseV1{code: TX_ERR_SIG_INVALID, msg: "CORE_P2PK signature invalid"}
+	conservation := icbH5CaseV1{code: TX_ERR_VALUE_CONSERVATION, msg: "sum_out exceeds sum_in"}
+	subsidy := icbH5CaseV1{code: BLOCK_ERR_SUBSIDY_EXCEEDED, msg: "coinbase outputs exceed subsidy+fees bound"}
+	mismatch := icbH5CaseV1{code: BLOCK_ERR_UTXO_ROOT_MISMATCH, msg: "utxo_root mismatch", derived: true}
+	cases := []icbH5CaseV1{
+		{name: "mismatch-first-byte", opts: icbH5OptsV1{flip: 1}},
+		{name: "mismatch-last-byte", opts: icbH5OptsV1{flip: 32}},
+		{name: "queued-sig-before-later-sync", opts: icbH5OptsV1{badSig: true, overspend: true, flip: 1}},
+		{name: "sig-before-root", opts: icbH5OptsV1{badSig: true, flip: 1}},
+		{name: "valid-prior-control", opts: icbH5OptsV1{overspend: true, flip: 1}},
+		{name: "subsidy-before-cap-and-root", opts: icbH5OptsV1{cbExtra: icbSubsidy5V1 + 1, flip: 1}, capFrom: icbHeightV1, counters: [2]uint64{1, 1}},
+		{name: "subsidy-boundary-accepts", opts: icbH5OptsV1{cbExtra: icbSubsidy5V1}},
+	}
+	for i, base := range []icbH5CaseV1{mismatch, mismatch, sig, sig, conservation, subsidy, {}} {
+		c := cases[i]
+		c.code, c.msg, c.derived = base.code, base.msg, base.derived
+		icbH5RunCaseV1(t, c)
+	}
+}
+
+// icbWrapsCauseV1 holds when err is an application wrapper (input-view read
+// error and/or logicalStateFailure) whose cause is exactly the raw cause.
+func icbWrapsCauseV1(err, cause error) bool {
+	var read *blockInputViewReadError
+	if errors.As(err, &read) {
+		err = read.failure
+	}
+	var failure *logicalStateFailure
+	return cause != nil && errors.As(err, &failure) && any(failure.cause) == any(cause)
 }

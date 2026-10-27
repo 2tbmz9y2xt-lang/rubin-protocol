@@ -338,43 +338,45 @@ func (f *initial148CompleteBlockFrameV1) treeRequestV1(block [32]byte, generated
 // joined by the producer never replaces an earlier selected error.
 func (f *initial148CompleteBlockFrameV1) requiredV1(reader *mdbx.Reader, headerRoot [32]byte, generated Uint128, result *initial148CompleteBlockResultV1) error {
 	request := initial148RequiredRequestV1{Source: f.source, Primitive: result.effect.Primitive, Parent: f.input.Parent}
-	var selected error
+	var selected, first error
 	scopeErr := withInitial148RequiredStateV1(reader, f.account, request, func(view logicalStateView, derive func() initial148RootReadOutcomeV1) error {
 		selected = f.candidateV1(view, derive, headerRoot, generated, result)
+		if scope, ok := view.(*initial148RequiredScopeV1); ok {
+			first = scope.first
+		}
 		return selected
 	})
 	if selected == nil {
 		return scopeErr
 	}
-	f.recordReadFailureV1(scopeErr, selected)
+	f.recordReadFailureV1(first, selected)
 	return selected
 }
 
 // recordReadFailureV1 preserves the producer's raw first cause and observation
 // only when the selected error is that R failure, not an earlier result.
-func (f *initial148CompleteBlockFrameV1) recordReadFailureV1(scopeErr, selected error) {
+func (f *initial148CompleteBlockFrameV1) recordReadFailureV1(first, selected error) {
 	if f.outcome.required.derived || f.outcome.required.cause != nil {
 		return
 	}
-	first := initial148ScopeFirstV1(scopeErr, selected)
-	if first != nil && errors.Is(selected, first) {
+	if initial148SelectedReadV1(selected, first) {
 		f.outcome.required = initial148RequiredOutcomeV1(first)
 	}
 }
 
-func initial148ScopeFirstV1(scopeErr, selected error) error {
-	if any(scopeErr) == any(selected) {
-		return nil
+// initial148SelectedReadV1 reports whether the selected error is the scope's
+// first R failure itself or one of its application wrappers (the input-view
+// read error or a logicalStateFailure), which carry that cause without Unwrap.
+func initial148SelectedReadV1(selected, first error) bool {
+	if first == nil {
+		return false
 	}
-	joined, ok := scopeErr.(interface{ Unwrap() []error })
-	if !ok {
-		return nil
+	var read *blockInputViewReadError
+	if errors.As(selected, &read) {
+		selected = read.failure
 	}
-	parts := joined.Unwrap()
-	if len(parts) != 2 {
-		return nil
-	}
-	return parts[1]
+	var failure *logicalStateFailure
+	return errors.Is(selected, first) || errors.As(selected, &failure) && any(failure.cause) == any(first)
 }
 
 func (f *initial148CompleteBlockFrameV1) candidateV1(view logicalStateView, derive func() initial148RootReadOutcomeV1, headerRoot [32]byte, generated Uint128, result *initial148CompleteBlockResultV1) error {
