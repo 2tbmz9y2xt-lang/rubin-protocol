@@ -82,6 +82,53 @@ func TestInitial148CompleteBlockReadFailureH5(t *testing.T) {
 
 // icbParentBindingV1 reads the generation-1 parent root binding (rank 0) of
 // the seeded h=5 image and the rank-8 key of the root node it names.
+// TestInitial148CompleteBlockRowIntegrityH5 (C08) damages persisted state the
+// selected R/cap reads consume, each paired with a bad header root: a
+// malformed complete parent row B, an active cap over a valid counter
+// envelope inconsistent with the present rows, and both together (row
+// integrity is classified before the cap's counter arithmetic). Each is a
+// store-integrity no-result keeping its raw cause; no TxError, mismatch, D
+// or result.
+func TestInitial148CompleteBlockRowIntegrityH5(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		row, counters bool
+		text          string
+	}{
+		{name: "malformed-row", row: true, text: "invalid MDBX SchemaV2 bytes"},
+		{name: "inconsistent-counters", counters: true, text: "required subset exceeds parent counters"},
+		{name: "row-before-counters", row: true, counters: true, text: "invalid MDBX SchemaV2 bytes"},
+	} {
+		for _, workers := range []int{-1, 1, 4} {
+			w := btNew(t)
+			f := icbH5VariantV1(t, w, icbH5OptsV1{flip: 1})
+			if c.row {
+				// B's complete row with an invalid coinbase flag byte (2).
+				value := btValue(btFrame(2000, COV_TYPE_P2PK, f.created[f.o2].CovenantData), f.h-1, false)
+				value[len(value)-1] = 2
+				logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 1, btUTXOKey(1, f.b), value) == nil, "malformed row setup")
+			}
+			if c.counters {
+				icbCapAtV1(&f.in, icbHeightV1)
+				irCounterV1(t, w, 89, 1)
+			}
+			got := icbObserveV1(t, w, f.in, workers)
+			var failure *logicalStateFailure
+			var read *blockInputViewReadError
+			var txErr *TxError
+			required := got.out.required
+			if errors.As(got.err, &read) {
+				failure = read.failure
+			} else {
+				_ = errors.As(got.err, &failure)
+			}
+			selected := failure != nil && failure.kind == logicalStateFailureStoreIntegrity && failure.cause.Error() == c.text
+			logicalMDBXAssert(t, selected && icbWrapsCauseV1(got.err, required.cause) && !errors.As(got.err, &txErr), "%s workers=%d: %T %v", c.name, workers, got.err, got.err)
+			logicalMDBXAssert(t, any(got.out.validationErr) == any(got.err) && got.summary == (BlockBasicSummary{}) && !required.derived && required.root == ([32]byte{}), "%s workers=%d no-result tuple: %+v", c.name, workers, required)
+		}
+	}
+}
+
 func icbParentBindingV1(t *testing.T, w *btWorld) (mdbx.RootBindingV1, []byte) {
 	t.Helper()
 	var raw []byte
