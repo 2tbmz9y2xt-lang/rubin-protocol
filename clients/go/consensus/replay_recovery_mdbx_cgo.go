@@ -14,7 +14,8 @@ import (
 )
 
 // Dormant Reader-scoped recovery planners and the pre-activation recomputation (RUBIN_MEMPOOL_POLICY.md Sections
-// 6.4.1.5 and 6.4.1.8). No production caller. Each runs inside its caller's Store.Update callback, writes nothing,
+// 6.4.1.5 and 6.4.1.8). No production caller. Each runs inside its caller's Store.Update callback (Store.UpdateTreeV1
+// for the tree-Reader intent route of PlanRecoveryIntentMDBX), writes nothing,
 // reserves nothing and returns one plan, report, refusal or error; a plan takes effect only when the caller returns it.
 
 const (
@@ -83,7 +84,8 @@ func replayRecoveryRefusal(result, message string) error {
 // PlanRecoveryIntentMDBX plans the recovery intent (MP 2495-2503, 1553-1571): RECOVERY_REQUIRED with pending = the
 // active profile, through the selected-side clear when a side is selected; no ReplayV1, target, generation or counter.
 // Any authority other than PRUNE_GC/STABLE or NONE/STABLE with a selected side is the empty plan. On a tree Reader
-// the plan is read from and writes the TreeAuthorityV1 envelope (replayTreeIntent).
+// (replayTreeIntent) the domain is read from the TreeAuthorityV1 envelope: without a selected side the plan writes
+// that envelope; with a selected side the selected-side clear planner's result is returned unchanged.
 func PlanRecoveryIntentMDBX(reader *mdbx.Reader) (ReplayRecoveryPlanV1, error) {
 	a, err := reader.ReadStorageAuthorityV1()
 	if replayTreeRefused(err, replayTreeReaderRefusal) {

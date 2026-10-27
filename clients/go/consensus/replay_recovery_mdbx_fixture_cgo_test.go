@@ -305,6 +305,11 @@ func TestReplayTreeFixtureIntentUndecodable(t *testing.T) {
 	logicalMDBXAssert(t, err == nil, "encode: %v", err)
 	damaged := map[string][]byte{"version 2": append([]byte{2}, legal[1:]...), "source kind 3": bytes.Clone(legal), "GENESIS_REPLAY at PRUNE_GC": bytes.Clone(legal), "target lag at PRUNE_GC": bytes.Clone(legal)}
 	damaged["source kind 3"][1], damaged["GENESIS_REPLAY at PRUNE_GC"][1], damaged["target lag at PRUNE_GC"][17] = 3, 1, 3
+	progress := bytes.Clone(legal)
+	logicalMDBXAssert(t, bytes.Equal(progress[len(progress)-5:], make([]byte, 5)), "progress tail premise: %x", progress[len(progress)-5:])
+	progress[len(progress)-5] = byte(mdbx.TreeProgressPartialV1)
+	damaged["progress at PRUNE_GC"] = progress
+	damaged["STABLE with pending"] = rtIllegalStablePending(t)
 	for label, value := range damaged {
 		w := rtNew(t, rtPrune())
 		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, value) == nil, "%s seed", label)
@@ -352,4 +357,27 @@ func TestReplayTreeFixtureIntentCapacity(t *testing.T) {
 	logicalMDBXAssert(t, c.planErr != nil && errors.Is(c.err, c.planErr) && reflect.ValueOf(c.plan).IsZero() && recoveryClass(c.planErr, c.plan.ReadResource) == selectedSideCapacity &&
 		c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "capacity: %+v %v %v", c.plan, c.planErr, c.err)
 	logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)) && reflect.DeepEqual(rtEnvelope(t, w), envelope), "capacity: the Store latched or the image changed")
+}
+
+// rtIllegalStablePending is a PRUNE_GC envelope whose lifecycle byte is STABLE while it carries a pending profile: the
+// legal RECOVERY_REQUIRED encoding with its one lifecycle byte (the only byte after the length field that differs from
+// the STABLE encoding with the same pending presence) rewritten.
+func rtIllegalStablePending(t *testing.T) []byte {
+	t.Helper()
+	profile := mdbx.StorageProfilePrunedV1
+	required := rtPrune()
+	required.Authority.Lifecycle, required.Authority.PendingTargetProfile = mdbx.StorageLifecycleRecoveryRequiredV1, &profile
+	encoded, err := required.Encode()
+	logicalMDBXAssert(t, err == nil, "required encode: %v", err)
+	stable, err := rtPrune().Encode()
+	logicalMDBXAssert(t, err == nil, "stable encode: %v", err)
+	for i := 22; i < len(stable); i++ {
+		if encoded[i] != stable[i] {
+			logicalMDBXAssert(t, encoded[i] == byte(mdbx.StorageLifecycleRecoveryRequiredV1) && stable[i] == byte(mdbx.StorageLifecycleStableV1), "lifecycle byte premise at %d: %d/%d", i, encoded[i], stable[i])
+			encoded[i] = byte(mdbx.StorageLifecycleStableV1)
+			return encoded
+		}
+	}
+	t.Fatal("no lifecycle byte")
+	return nil
 }

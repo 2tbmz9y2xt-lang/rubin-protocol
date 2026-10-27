@@ -162,7 +162,7 @@ func TestReplayTreeReaderRefusal(t *testing.T) {
 	logicalMDBXAssert(t, errors.As(refusal, &engine) && engine.Class == mdbx.EngineInvalidInput && engine.Operation == "get" && engine.Code == 22 &&
 		engine.Diagnostic == "tree Reader requires tree authority accessor" && engine.Cause == nil && !engine.ReopenRequired && engine.TreeObservation == nil, "F2 pinned refusal: %#v", refusal)
 	logicalMDBXAssert(t, replayTreeRefused(refusal, replayTreeReaderRefusal), "F2: the exact refusal is not selected")
-	variants := map[string]error{"nil": nil, "wrapped": fmt.Errorf("w: %w", refusal), "typed nil": (*mdbx.EngineError)(nil), "other": errors.New("tree Reader requires tree authority accessor")}
+	variants := map[string]error{"nil": nil, "wrapped": fmt.Errorf("w: %w", refusal), "joined": errors.Join(refusal), "typed nil": (*mdbx.EngineError)(nil), "other": errors.New("tree Reader requires tree authority accessor")}
 	for label, edit := range map[string]func(e *mdbx.EngineError){
 		"class": func(e *mdbx.EngineError) { e.Class = mdbx.EngineStateMismatch }, "operation": func(e *mdbx.EngineError) { e.Operation = "update" },
 		"code": func(e *mdbx.EngineError) { e.Code = -30779 }, "diagnostic": func(e *mdbx.EngineError) { e.Diagnostic = "Reader is not active" },

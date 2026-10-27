@@ -4,15 +4,17 @@ package consensus
 
 import (
 	"errors"
+	"reflect"
 	"syscall"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
 // The format-3 route of the dormant replay metadata writers (RUBIN_MEMPOOL_POLICY.md Sections 6.4.1.2, 6.4.1.3 and
-// 6.4.1.8). No production caller. On a tree store each writer reads the TreeAuthorityV1 envelope and plans one
-// pair-only Batch whose meta key 2 row is that envelope's encoding; replayTreeOperation is the only route from such a
-// Batch to Store.UpdateTreeV1.
+// 6.4.1.8). No production caller. On a tree store each writer reads the TreeAuthorityV1 envelope; a plan it builds
+// itself is one pair-only Batch whose meta key 2 row is that envelope's encoding, while the selected-side intent branch
+// returns the clear planner's result unchanged. replayTreeOperation is the only route from such a Batch to
+// Store.UpdateTreeV1.
 
 // replayTreeRefusal is the comparable identity of a direct EngineError with a nil Cause and nil TreeObservation.
 type replayTreeRefusal struct {
@@ -26,11 +28,11 @@ type replayTreeRefusal struct {
 // replayTreeReaderRefusal is ReadStorageAuthorityV1's tree-Reader refusal; that refusal leaves the Reader active.
 var replayTreeReaderRefusal = replayTreeRefusal{mdbx.EngineInvalidInput, "get", int(syscall.EINVAL), "tree Reader requires tree authority accessor", false}
 
-// replayTreeRefused reports whether err is exactly want: a direct (unwrapped) EngineError whose fields all equal want,
-// with Cause and TreeObservation nil.
+// replayTreeRefused reports whether err itself (never a wrapped or joined error) is an EngineError whose fields all
+// equal want, with Cause and TreeObservation nil.
 func replayTreeRefused(err error, want replayTreeRefusal) bool {
 	var e *mdbx.EngineError
-	if !errors.As(err, &e) || e == nil || errors.Unwrap(err) != nil || e.TreeObservation != nil {
+	if !errors.As(err, &e) || e == nil || reflect.TypeOf(err) != reflect.TypeOf(e) || e.Cause != nil || e.TreeObservation != nil {
 		return false
 	}
 	return replayTreeRefusal{e.Class, e.Operation, e.Code, e.Diagnostic, e.ReopenRequired} == want
