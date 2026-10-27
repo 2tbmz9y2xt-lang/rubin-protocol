@@ -859,8 +859,9 @@ func icbH5RunCaseV1(t *testing.T, c icbH5CaseV1) {
 			logicalMDBXAssert(t, got.out.required.derived && got.out.required.root == f.header.UtxoRoot, "%s workers=%d fresh D: %+v", c.name, workers, got.out.required)
 			continue
 		}
-		var txErr *TxError
-		logicalMDBXAssert(t, errors.As(got.err, &txErr) && txErr.Code == c.code && txErr.Msg == c.msg && any(got.out.validationErr) == any(got.err), "%s workers=%d error %v, want %s/%s", c.name, workers, got.err, c.code, c.msg)
+		// The selected error is the bare TxError itself, not a join carrying it.
+		txErr, ok := got.err.(*TxError)
+		logicalMDBXAssert(t, ok && txErr.Code == c.code && txErr.Msg == c.msg && any(got.out.validationErr) == any(got.err), "%s workers=%d error %v, want %s/%s", c.name, workers, got.err, c.code, c.msg)
 		logicalMDBXAssert(t, got.out.attempted && got.summary == (BlockBasicSummary{}), "%s workers=%d result delivered: %+v", c.name, workers, got.summary)
 		if !c.derived {
 			logicalMDBXAssert(t, got.out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d D ran after earlier error: %+v", c.name, workers, got.out.required)
