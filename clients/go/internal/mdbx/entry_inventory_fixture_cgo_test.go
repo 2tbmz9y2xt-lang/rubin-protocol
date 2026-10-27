@@ -909,6 +909,7 @@ func eifCapacity(t *testing.T) {
 	x.unchanged(t)
 }
 
+// TestEntryInventoryV1NativeOutcomes checks native failures, equality and Store disposition.
 func TestEntryInventoryV1NativeOutcomes(t *testing.T) {
 	t.Run("physical-source-frontiers", eissFrontiers)
 	t.Run("required-native-content", eissRequired)
@@ -1273,6 +1274,7 @@ func eissReads(t *testing.T) {
 	}
 }
 
+// eissRetired checks source retirement under the surviving immutable mutex locator.
 func eissRetired(t *testing.T, token EntryInventoryV1, stream *entryStreamV1) {
 	t.Helper()
 	mu := token.scope.access.mu
@@ -1370,6 +1372,7 @@ func eissUnwind(t *testing.T) {
 	}
 }
 
+// eissExpiry covers callback expiry while a captured or obsolete header is parked.
 func eissExpiry(t *testing.T) {
 	for _, site := range []uint8{11, 17} {
 		for _, physical := range []bool{false, true} {
@@ -1378,6 +1381,7 @@ func eissExpiry(t *testing.T) {
 	}
 }
 
+// eissExpiryCase checks parked-header and row retirement at the selected callback source.
 func eissExpiryCase(t *testing.T, site uint8, physical bool) {
 	var cleanup []CleanupSpanV1
 	if site == 17 {
@@ -1531,6 +1535,7 @@ func eissExpiryCase(t *testing.T, site uint8, physical bool) {
 	tsFollowing(t, f.s, f.o)
 }
 
+// eissNoWrite checks attachment admission and the actual native write/commit frontier.
 func eissNoWrite(t *testing.T) {
 	for _, attach := range []bool{false, true} {
 		t.Run(fmt.Sprintf("attach%v", attach), func(t *testing.T) {
@@ -1582,6 +1587,7 @@ func eissNoWrite(t *testing.T) {
 	}
 }
 
+// eissGEN checks the first physical GEN failure and its incomplete-token result.
 func eissGEN(t *testing.T) {
 	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}})
 	// A real zero counter is still a selected GEN; it cannot authorize omission.
@@ -1867,6 +1873,7 @@ func eissLinkShapes(t *testing.T) {
 	}
 }
 
+// eicExactEquality checks residual bytes and key presence at all three equality positions.
 func eicExactEquality(t *testing.T) {
 	for _, domain := range []struct {
 		rank uint8
@@ -1944,6 +1951,7 @@ func eicExactEquality(t *testing.T) {
 	}
 }
 
+// eicMismatch pins mismatch truth/stage, native counts and the original commit cause.
 func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureLargeEvidence, mode uint32) {
 	t.Helper()
 	stage, truth, commits := UpdateStage(1), CommitTruth(1), uint32(0)
@@ -1973,6 +1981,7 @@ func eicMismatch(t *testing.T, f *eisFixture, result tsResult, evidence fixtureL
 	}
 }
 
+// eicLateDomain checks drift beyond 16,384 bodies after complete public traversal.
 func eicLateDomain(t *testing.T) {
 	t.Run("false-before-required-read", eicTruthContinuation)
 	t.Run("ordinary-OLD-residual-UNKNOWN", eicOldTruthContinuation)
@@ -2007,6 +2016,7 @@ func eicLateDomain(t *testing.T) {
 	}
 }
 
+// eicOldTruthContinuation requires UNKNOWN for ordinary OLD with a false ENTRY residual.
 func eicOldTruthContinuation(t *testing.T) {
 	f := eisNew(t, 17000, 2, nil)
 	pair := eisCapture(t, f, 1, 1, false, false)
@@ -2041,6 +2051,7 @@ func eicOldTruthContinuation(t *testing.T) {
 	eicMismatch(t, f, result, evidence, 7)
 }
 
+// eicLateRead checks late body-read cause/stage and owner disposal in each private pass.
 func eicLateRead(t *testing.T) {
 	for _, test := range []struct {
 		mode, gets, commits uint32
@@ -2092,6 +2103,7 @@ func eicLateRead(t *testing.T) {
 	}
 }
 
+// eicTruthContinuation checks that a false fold still preserves a later required-read error.
 func eicTruthContinuation(t *testing.T) {
 	f := eisNew(t, 3, 1, nil)
 	pair := eisCapture(t, f, 1, 1, false, false)
@@ -2120,6 +2132,7 @@ func eicTruthContinuation(t *testing.T) {
 	tsConsumed(t, f.s, f.o, 3, result.err)
 }
 
+// eicTargetExclusion checks exact-key exclusion against a same-family residual.
 func eicTargetExclusion(t *testing.T) {
 	for _, mode := range []uint32{14, 13, 3} {
 		t.Run(fmt.Sprintf("body-family-position%d", mode), func(t *testing.T) {
@@ -2138,6 +2151,7 @@ func eicTargetExclusion(t *testing.T) {
 	}
 }
 
+// eicFirstFailure pins first-source context and cause identity after expiry and retirement.
 func eicFirstFailure(t *testing.T) {
 	for _, source := range []uint8{17, 20, 23, 24, 28} {
 		for _, wrapped := range []bool{false, true} {
@@ -2208,6 +2222,7 @@ func eicFirstFailure(t *testing.T) {
 	}
 }
 
+// eicNodeRemnant checks native postorder/root-last traversal and reached-key failure.
 func eicNodeRemnant(t *testing.T) {
 	for _, malformed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("malformed-key%v", malformed), func(t *testing.T) {
@@ -2286,6 +2301,7 @@ func eicNodeRemnant(t *testing.T) {
 	}
 }
 
+// eicDisposition checks completed-callback/native outcomes and the next Store operation.
 func eicDisposition(t *testing.T) {
 	for _, cleanup := range []uint32{0, 9, 10} {
 		for _, application := range []string{"nil", "direct", "wrapped", "typed-nil", "panic", "panic-nil", "goexit"} {
@@ -2446,6 +2462,7 @@ func eicDisposition(t *testing.T) {
 	}
 }
 
+// eicTerminalNext checks terminal owner shape and rejects subsequent callbacks.
 func eicTerminalNext(t *testing.T, f *eisFixture, truth CommitTruth, retained bool) {
 	t.Helper()
 	want := storeCLOSED
@@ -2478,6 +2495,7 @@ func eicTerminalNext(t *testing.T, f *eisFixture, truth CommitTruth, retained bo
 	}
 }
 
+// eicPairRoles checks independent role controls and assurance sources through equality.
 func eicPairRoles(t *testing.T) {
 	for _, test := range []struct {
 		role uint8
@@ -2586,6 +2604,7 @@ func eicPairRoles(t *testing.T) {
 	}
 }
 
+// eicControlEquality checks both roles' controls in all three residual comparisons.
 func eicControlEquality(t *testing.T) {
 	for _, source := range []uint8{1, 2, 3, 4} {
 		for _, mode := range []uint32{14, 13, 3} {
@@ -2611,6 +2630,7 @@ func eicControlEquality(t *testing.T) {
 	}
 }
 
+// eicGENMaxKey checks full-length successor handling and selected-generation isolation.
 func eicGENMaxKey(t *testing.T) {
 	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}, {Kind: 1, GenerationID: 7}})
 	pair := eisCapture(t, f, 1, 1, false, false)
@@ -2646,6 +2666,7 @@ func eicGENMaxKey(t *testing.T) {
 	}
 }
 
+// eicOwnerPriority checks required-owner precedence; see entryWalkV1.ownerV1.
 func eicOwnerPriority(t *testing.T) {
 	for _, role := range []uint8{1, 2} {
 		for _, defect := range []string{"owner-width", "owner-height", "forward-absent", "forward-width", "forward-hash", "forward-work"} {
@@ -2697,6 +2718,7 @@ func eicOwnerPriority(t *testing.T) {
 	}
 }
 
+// eicProjectionResult checks Invalid versus Unverifiable; see entryWalkV1.indexV1.
 func eicProjectionResult(t *testing.T) {
 	for _, reverse := range []string{"missing-reverse", "short-reverse", "wrong-reverse"} {
 		t.Run(reverse, func(t *testing.T) {
@@ -2784,6 +2806,7 @@ func eicProjectionResult(t *testing.T) {
 	}
 }
 
+// eicPriorOrphan prevents orphan reverse rows from gaining prior-owner authority.
 func eicPriorOrphan(t *testing.T) {
 	f := eisNew(t, 3, 1, []CleanupSpanV1{{Kind: 1, GenerationID: 5}, {Kind: 1, GenerationID: 7}})
 	pair := eisCapture(t, f, 1, 1, false, false)
@@ -2823,6 +2846,7 @@ func eicPriorOrphan(t *testing.T) {
 	}
 }
 
+// eicPassRetirement observes source retirement at entryInventoryStateV1.equalV1 return.
 func eicPassRetirement(t *testing.T) {
 	eicOwnedBacking(t, func(s *entryInventoryStateV1, plan *treePlanV1, r *Reader) {
 		equal, err := s.equalV1(r.txn, plan)

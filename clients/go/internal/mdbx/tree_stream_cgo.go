@@ -231,6 +231,7 @@ type treePublicEntryV1 struct {
 	inventory *entryInventoryStateV1
 }
 
+// callbackV1 expires public borrows while retaining successful ENTRY recipes for admission.
 func (e *treePublicEntryV1) callbackV1(callback func(*Reader) (TreeOperationV1, error)) (TreeOperationV1, treeUnwindV1, error) {
 	returned := false
 	defer func() {
@@ -279,6 +280,7 @@ func (e *treePublicEntryV1) executeV1(account *OperationAccount, callback func(*
 	return truth, stage, index, unwind, err
 }
 
+// admittedV1 admits before cloning the Pair and rebinding ENTRY through native completion.
 func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(*Reader) (TreeOperationV1, error), saved error) (CommitTruth, UpdateStage, int, treeUnwindV1, error) {
 	op, unwind, err := e.callbackV1(callback)
 	if err != nil || unwind.kind != 0 {
@@ -297,6 +299,7 @@ func (e *treePublicEntryV1) admittedV1(account *OperationAccount, callback func(
 	return e.store.updateTreeLockedV1(e.old, treeAccountLedgerV1{e.hold}, &plan)
 }
 
+// prewriteV1 preserves ordinary/ENTRY/Proof/refusal priority before the owned-plan charge.
 func (e *treePublicEntryV1) prewriteV1(account *OperationAccount, op TreeOperationV1, saved error) error {
 	admissionErr := treeAdmitV1(op, account, e.store.databaseID)
 	if admissionErr != nil {

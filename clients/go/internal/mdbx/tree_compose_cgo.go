@@ -383,6 +383,7 @@ func (c *treeComposeV1) releaseV1() {
 	}
 }
 
+// runV1 checks preflight, applies the plan and preserves the first failure or unwind.
 func (c *treeComposeV1) runV1() {
 	w := c.writer
 	t, outcome := beginTreeSectionV1(w.s.env, w.s.dbis, w.old, w.ledger)
@@ -421,7 +422,7 @@ func (c *treeComposeV1) abortV1(err error, index int) {
 	c.outcome, c.index, c.done = c.writer.t.abortV1(err), index, true
 }
 
-// holdV1 emits the Pair, runs complete final pair equality and, with at least one primitive, charges
+// holdV1 emits the Pair, checks final Pair and ENTRY equality and, with at least one primitive, charges
 // H_r = S_r + B_r with B_r = W + F_fixed + C + R + V + L2 + descSize x max_j EventCount_j (D13-14).
 func (c *treeComposeV1) holdV1() error {
 	w := c.writer
@@ -497,6 +498,7 @@ func (c *treeComposeV1) reserveV1() error {
 	return nil
 }
 
+// commitV1 selects truthV1 or entryTruthV1; cleanupV1 owns an unwinding proof.
 func (c *treeComposeV1) commitV1() {
 	if c.unwind.kind != 0 {
 		return // a Proof panic or Goexit: cleanupV1 aborts after the release (T3)

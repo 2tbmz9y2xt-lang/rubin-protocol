@@ -3399,6 +3399,7 @@ func provenScalarOrSequence(types map[string]*ast.TypeSpec, expression ast.Expr,
 	return false
 }
 
+// TestNoPackageLocalEnvironmentEntrypointCaller pins native and metadata-write ownership.
 func TestNoPackageLocalEnvironmentEntrypointCaller(t *testing.T) {
 	require := func(ok bool, format string, args ...any) {
 		t.Helper()
