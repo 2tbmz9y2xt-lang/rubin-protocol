@@ -491,6 +491,7 @@ const (
 // tx2 (O1 + B -> O2). Final map: C, cb:0, tx2:0. Absent: A, B, the in-block
 // created-then-spent O1 and the nonspendable cb:1 anchor.
 type icbH5V1 struct {
+	h                         uint64
 	in                        initial148CompleteBlockInputV1
 	header                    Initial148Header
 	c, a, b, o1, cb0, o2      Outpoint
@@ -581,11 +582,11 @@ func icbBitV1(k [36]byte, i int) byte { return (k[i/8] >> (7 - i%8)) & 1 }
 
 // icbSeedV1 applies the parent block at height 4 through the real native
 // operation and returns its endpoint.
-func icbSeedV1(t *testing.T, w *btWorld, cov []byte) (blockTreeRequestV1, btTx, btTx) {
+func icbSeedV1(t *testing.T, w *btWorld, cov []byte, height uint64) (blockTreeRequestV1, btTx, btTx) {
 	t.Helper()
 	tx0 := btTransaction(41, 0, nil, [][]byte{btFrame(7, COV_TYPE_P2PK, validP2PKCovenantData())}, nil, []byte{0}, nil)
 	tx1 := btTransaction(42, 0, nil, [][]byte{btFrame(1000, COV_TYPE_P2PK, cov), btFrame(2000, COV_TYPE_P2PK, cov)}, nil, []byte{0}, nil)
-	seed := btRequest(btBody(148, 41, [32]byte{}, tx0, tx1), icbHeightV1-1)
+	seed := btRequest(btBody(148, 41, [32]byte{}, tx0, tx1), height-1)
 	result, _, _ := w.run(t, []blockTreeRequestV1{seed}, nil)
 	logicalMDBXAssert(t, result.err == nil, "parent seed: %v", result.err)
 	return seed, tx0, tx1
@@ -600,18 +601,22 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 // unseeded outpoint (missing), tx1's signature is corrupted (badSig), tx2
 // creates one unit more than it spends (overspend), the coinbase pays
 // cbExtra above the fee-only output, or header root byte flip-1 is inverted.
+// height (0: icbHeightV1) moves the whole fixture; split pays the coinbase
+// as two P2PK outputs of 10 (net +1 row, +89 logical bytes); dup makes tx2
+// spend A again after tx1's in-block spend (tombstone) instead of B.
 type icbH5OptsV1 struct {
-	missing, badSig, overspend bool
-	cbExtra                    uint64
-	flip                       int
+	missing, badSig, overspend, split, dup bool
+	cbExtra, height                        uint64
+	flip                                   int
 }
 
 func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	t.Helper()
 	kp := icbKeyV1(t)
 	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
-	seed, tx0, seedTx := icbSeedV1(t, w, cov)
-	f := icbH5V1{c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}}
+	h := max(opts.height, icbHeightV1)
+	seed, tx0, seedTx := icbSeedV1(t, w, cov, h)
+	f := icbH5V1{h: h, c: Outpoint{Txid: tx0.id}, a: Outpoint{Txid: seedTx.id}, b: Outpoint{Txid: seedTx.id, Vout: 1}}
 	spend1 := f.a
 	if opts.missing {
 		spend1 = Outpoint{Txid: [32]byte{0x99}}
@@ -624,7 +629,11 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 		raw1 = icbSignedRawV1(t, tx1)
 	}
 	f.o1 = Outpoint{Txid: testTxID(t, raw1)}
-	tx2 := inputViewTx(2, f.o1, f.b)
+	spend2 := f.b
+	if opts.dup {
+		spend2 = f.a
+	}
+	tx2 := inputViewTx(2, f.o1, spend2)
 	tx2.Outputs[0] = TxOutput{Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov}
 	if opts.overspend {
 		tx2.Outputs[0].Value = 2991
@@ -632,9 +641,16 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	raw2 := icbSignV1(t, kp, tx2, 990, 2000)
 	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
 	commit := initial148BlockWitnessCommit(t, raw1, raw2)
-	cb := coinbaseTxWithOutputs(icbHeightV1, []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	cbOuts := []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
+	if opts.split {
+		cbOuts = []testOutput{{value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {value: 10, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
+	}
+	cb := coinbaseTxWithOutputs(uint32(h), append(cbOuts, testOutput{covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}))
 	f.cb0 = Outpoint{Txid: testTxID(t, cb)}
-	f.icbLeavesV1(cov, 20+opts.cbExtra)
+	f.icbLeavesV1(cov, cbOuts[0].value)
+	if opts.split {
+		icbLeafV1(f.finalLeaves, Outpoint{Txid: f.cb0.Txid, Vout: 1}, 10, validP2PKCovenantData(), h, true)
+	}
 	root := icbRootV1(f.finalLeaves)
 	if opts.flip > 0 {
 		root[opts.flip-1] ^= 0x80
@@ -645,14 +661,14 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	f.header, err = ParseInitial148HeaderBytes(raw[:Initial148HeaderBytes])
 	logicalMDBXAssert(t, err == nil, "header: %v", err)
 	f.in = icbInputV1()
-	f.in.Raw, f.in.Height, f.in.ParentHash, f.in.ExpectedTarget = raw, icbHeightV1, seed.Block, POW_LIMIT
-	f.in.ParentTimestamps = []uint64{blockStepsMedian, blockStepsMedian, blockStepsMedian, blockStepsMedian, blockStepsMedian}
-	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(icbHeightV1)
+	f.in.Raw, f.in.Height, f.in.ParentHash, f.in.ExpectedTarget = raw, h, seed.Block, POW_LIMIT
+	f.in.ParentTimestamps = slices.Repeat([]uint64{blockStepsMedian}, int(min(h, 11)))
+	f.in.AlreadyGenerated, f.in.Parent, f.in.Rotation = Uint128{Lo: icbGenerated5V1}, seed.Endpoint, icbFrozenV1(h)
 	f.in.Registry = DefaultSuiteRegistry()
-	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: icbHeightV1, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
+	f.in.Endpoint = mdbx.TreeEndpointV1{Kind: mdbx.TreeEndpointAppliedV1, Height: h, BlockHash: hash, CumulativeChainwork: [40]byte{39: 100}}
 	f.created = map[Outpoint]UtxoEntry{
-		f.cb0: {Value: 20 + opts.cbExtra, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: icbHeightV1, CreatedByCoinbase: true},
-		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: icbHeightV1},
+		f.cb0: {Value: 20 + opts.cbExtra, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: h, CreatedByCoinbase: true},
+		f.o2:  {Value: 2980, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: h},
 	}
 	return f
 }
@@ -662,16 +678,16 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 func (f *icbH5V1) icbLeavesV1(cov []byte, cbValue uint64) {
 	f.parentLeaves, f.preSpendLeaves, f.finalLeaves = map[[36]byte][]byte{}, map[[36]byte][]byte{}, map[[36]byte][]byte{}
 	for _, m := range []map[[36]byte][]byte{f.parentLeaves, f.preSpendLeaves, f.finalLeaves} {
-		icbLeafV1(m, f.c, 7, validP2PKCovenantData(), icbHeightV1-1, true)
+		icbLeafV1(m, f.c, 7, validP2PKCovenantData(), f.h-1, true)
 	}
-	icbLeafV1(f.parentLeaves, f.a, 1000, cov, icbHeightV1-1, false)
-	icbLeafV1(f.parentLeaves, f.b, 2000, cov, icbHeightV1-1, false)
+	icbLeafV1(f.parentLeaves, f.a, 1000, cov, f.h-1, false)
+	icbLeafV1(f.parentLeaves, f.b, 2000, cov, f.h-1, false)
 	for _, m := range []map[[36]byte][]byte{f.preSpendLeaves, f.finalLeaves} {
-		icbLeafV1(m, f.cb0, cbValue, validP2PKCovenantData(), icbHeightV1, true)
+		icbLeafV1(m, f.cb0, cbValue, validP2PKCovenantData(), f.h, true)
 	}
-	icbLeafV1(f.preSpendLeaves, f.b, 2000, cov, icbHeightV1-1, false)
-	icbLeafV1(f.preSpendLeaves, f.o1, 990, cov, icbHeightV1, false)
-	icbLeafV1(f.finalLeaves, f.o2, 2980, cov, icbHeightV1, false)
+	icbLeafV1(f.preSpendLeaves, f.b, 2000, cov, f.h-1, false)
+	icbLeafV1(f.preSpendLeaves, f.o1, 990, cov, f.h, false)
+	icbLeafV1(f.finalLeaves, f.o2, 2980, cov, f.h, false)
 }
 
 // icbSpentV1 drains the single-pass preblock spent stream: tx2's in-block O1
@@ -941,4 +957,49 @@ func icbWrapsCauseV1(err, cause error) bool {
 	}
 	var failure *logicalStateFailure
 	return cause != nil && errors.As(err, &failure) && any(failure.cause) == any(cause)
+}
+
+// icbCapHeightV1 = 4800 >= ceil(maxLogicalStateBytes / maxCreatedLogicalStateBytes)
+// = 4765, the least height whose counter envelope admits S0 >= max.
+// icbCapMaxEntriesV1 keeps max/65,596 <= entries <= max/56.
+const (
+	icbCapHeightV1     = 4800
+	icbCapMaxEntriesV1 = 6_300_000
+	icbCapRootHexV1    = "0c8f866a6478b8365f1c7bf1de0d92977e830762d85ff230207d26adf2209f0e"
+)
+
+// TestInitial148CompleteBlockCapBoundaryV1 (C02, C06) runs every cap variant
+// on ONE h=4800 final map whose header root is the literal CSM 2.6 recursion
+// over its leaf bytes: stable S1==max, draining S1==S0>max, below-bound and
+// inactive accept with fresh D; a split coinbase (+89 bytes) over S0==max is
+// BLOCK_ERR_STATE_CAP_EXCEEDED before D despite a wrong header root.
+func TestInitial148CompleteBlockCapBoundaryV1(t *testing.T) {
+	w := btNew(t)
+	f := icbH5VariantV1(t, w, icbH5OptsV1{height: icbCapHeightV1})
+	logicalMDBXAssert(t, hex.EncodeToString(f.header.UtxoRoot[:]) == icbCapRootHexV1, "C02 header root %x is not the pinned literal", f.header.UtxoRoot)
+	at := icbH5OptsV1{height: icbCapHeightV1}
+	stable := [2]uint64{maxLogicalStateBytes, icbCapMaxEntriesV1}
+	for _, c := range []icbH5CaseV1{
+		{name: "stable-S1-equals-max", opts: at, capFrom: icbCapHeightV1, counters: stable},
+		{name: "draining-S1-equals-S0", opts: at, capFrom: icbCapHeightV1, counters: [2]uint64{maxLogicalStateBytes + 89*1000, icbCapMaxEntriesV1}},
+		{name: "below-bound-native", opts: at, capFrom: icbCapHeightV1},
+		{name: "inactive-malformed", opts: at, capFrom: icbCapHeightV1 + 1, counters: [2]uint64{1, 1}},
+		{name: "cap-exceeded-before-root", opts: icbH5OptsV1{height: icbCapHeightV1, split: true, flip: 1}, capFrom: icbCapHeightV1, counters: stable,
+			code: BLOCK_ERR_STATE_CAP_EXCEEDED, msg: "logical state cap exceeded"},
+	} {
+		icbH5RunCaseV1(t, c)
+	}
+}
+
+// TestInitial148CompleteBlockTombstoneH5 (C09 subset) spends A twice in one
+// block on the shared input-view path: the in-block tombstone yields R1
+// TX_ERR_MISSING_UTXO through every entry, and a pending invalid signature
+// in tx1 is selected over tx2's later tombstone refusal; no result, no D.
+func TestInitial148CompleteBlockTombstoneH5(t *testing.T) {
+	missing := icbH5CaseV1{code: TX_ERR_MISSING_UTXO, msg: "utxo not found"}
+	pending := icbH5CaseV1{code: TX_ERR_SIG_INVALID, msg: "CORE_P2PK signature invalid"}
+	missing.name, missing.opts = "duplicate-spend-tombstone", icbH5OptsV1{dup: true, flip: 1}
+	pending.name, pending.opts = "pending-signature-over-tombstone", icbH5OptsV1{dup: true, badSig: true, flip: 1}
+	icbH5RunCaseV1(t, missing)
+	icbH5RunCaseV1(t, pending)
 }
