@@ -604,10 +604,12 @@ func icbH5FixtureV1(t *testing.T, w *btWorld) icbH5V1 {
 // height (0: icbHeightV1) moves the whole fixture; split pays the coinbase
 // as two P2PK outputs of 10 (net +1 row, +89 logical bytes); dup makes tx2
 // spend A again after tx1's in-block spend (tombstone) instead of B.
+// tx2 edits tx2 before it is signed; post2 edits the signed tx2.
 type icbH5OptsV1 struct {
 	missing, badSig, overspend, split, dup bool
 	cbExtra, height                        uint64
 	flip                                   int
+	tx2, post2                             func(*Tx)
 }
 
 func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
@@ -638,7 +640,14 @@ func icbH5VariantV1(t *testing.T, w *btWorld, opts icbH5OptsV1) icbH5V1 {
 	if opts.overspend {
 		tx2.Outputs[0].Value = 2991
 	}
+	if opts.tx2 != nil {
+		opts.tx2(tx2)
+	}
 	raw2 := icbSignV1(t, kp, tx2, 990, 2000)
+	if opts.post2 != nil {
+		opts.post2(tx2)
+		raw2 = icbSignedRawV1(t, tx2)
+	}
 	f.o2 = Outpoint{Txid: testTxID(t, raw2)}
 	commit := initial148BlockWitnessCommit(t, raw1, raw2)
 	cbOuts := []testOutput{{value: 20 + opts.cbExtra, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}}
@@ -1025,25 +1034,70 @@ func icbDiscardRunV1(w *btWorld, account *mdbx.OperationAccount, in initial148Co
 	return out, delivered, err
 }
 
-// TestInitial148CompleteBlockDiscardH5 (C09 discard) rejects the pending
-// signature plus later tombstone block, then on the same account: the whole
-// lane is free again (W, R and source released), and a fresh invocation of
-// the valid block over the same parent succeeds with fresh D.
-func TestInitial148CompleteBlockDiscardH5(t *testing.T) {
+// icbPendingDiscardV1 (C09 discard) rejects opts plus tx1's pending invalid
+// signature through every entry, then on the same account: the whole lane is
+// free again (W, R and source released), and a fresh invocation of the valid
+// block over the same parent succeeds with fresh D.
+func icbPendingDiscardV1(t *testing.T, name string, opts icbH5OptsV1) {
+	t.Helper()
+	opts.badSig = true
 	for _, workers := range []int{-1, 1, 4} {
 		w := btNew(t)
-		bad := icbH5VariantV1(t, w, icbH5OptsV1{dup: true, badSig: true, flip: 1})
+		bad := icbH5VariantV1(t, w, opts)
 		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{})
-		logicalMDBXAssert(t, good.in.Parent == bad.in.Parent, "workers=%d fixtures do not share the parent", workers)
+		logicalMDBXAssert(t, good.in.Parent == bad.in.Parent, "%s workers=%d fixtures do not share the parent", name, workers)
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
 			out, delivered, err := icbDiscardRunV1(w, account, bad.in, workers)
 			var txErr *TxError
 			exact := errors.As(err, &txErr) && any(txErr) == any(err) && txErr.Code == TX_ERR_SIG_INVALID && txErr.Msg == "CORE_P2PK signature invalid"
-			logicalMDBXAssert(t, exact && !delivered && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "workers=%d rejected tuple: %v / %+v", workers, err, out)
+			logicalMDBXAssert(t, exact && !delivered && out.attempted && any(out.validationErr) == any(err) && out.required == (initial148RootReadOutcomeV1{}), "%s workers=%d rejected tuple: %v / %+v", name, workers, err, out)
 			free := account.WithReservation(402_653_184, func() error { return nil })
-			logicalMDBXAssert(t, free == nil, "workers=%d residual hold after rejection: %v", workers, free)
+			logicalMDBXAssert(t, free == nil, "%s workers=%d residual hold after rejection: %v", name, workers, free)
 			out, delivered, err = icbDiscardRunV1(w, account, good.in, workers)
-			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "workers=%d fresh second invocation: %v / %+v", workers, err, out)
+			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "%s workers=%d fresh second invocation: %v / %+v", name, workers, err, out)
 		})
+	}
+}
+
+// TestInitial148CompleteBlockDiscardH5 (C09 discard) is the duplicate-spend
+// tombstone behind tx1's pending invalid signature.
+func TestInitial148CompleteBlockDiscardH5(t *testing.T) {
+	icbPendingDiscardV1(t, "pending-signature-over-tombstone", icbH5OptsV1{dup: true, flip: 1})
+}
+
+// TestInitial148CompleteBlockPendingStagesH5 (C09) gives tx2 one later error
+// at each reachable stage while tx1's queued signature task is pending: the
+// earlier invalid signature is selected through every entry with the discard
+// tuple of icbPendingDiscardV1; the valid-signature control selects tx2's own
+// exact stage error, so the two outcomes are distinguishable. Header root
+// byte 1 is wrong throughout, so any D or mismatch would also be visible.
+func TestInitial148CompleteBlockPendingStagesH5(t *testing.T) {
+	cases := []struct {
+		stage, msg string
+		code       ErrorCode
+		tx2, post2 func(*Tx)
+	}{
+		// S1B is block work (connect_block_inmem.go validateNonCoinbaseBlockTx).
+		{"S1B", "duplicate tx_nonce in block", TX_ERR_NONCE_REPLAY, func(tx *Tx) { tx.TxNonce = 1 }, nil},
+		// covenant_genesis.go validateP2PKGenesisOutput.
+		{"S2", "invalid CORE_P2PK covenant_data length", TX_ERR_COVENANT_TYPE_INVALID, func(tx *Tx) { tx.Outputs[0].CovenantData = tx.Outputs[0].CovenantData[:32] }, nil},
+		// utxo_basic_stages.go assignInputWitness: two P2PK inputs, one witness.
+		{"R3", "witness underflow", TX_ERR_PARSE, nil, func(tx *Tx) { tx.Witness = tx.Witness[:1] }},
+		// utxo_basic_vault.go validateVaultCreations: owner lock 0x77.. is no input lock.
+		{"S3b", "missing owner-authorized input for CORE_VAULT creation", TX_ERR_VAULT_OWNER_AUTH_REQUIRED, func(tx *Tx) {
+			tx.Outputs[0] = TxOutput{Value: 2980, CovenantType: COV_TYPE_VAULT, CovenantData: encodeVaultCovenantData([32]byte{0x77}, 1, [][32]byte{{0x01}}, [][32]byte{{0x02}})}
+		}, nil},
+		// sig_verify_queued.go verifyMLDSAKeyAndSigQ: synchronous before any Push.
+		{"S4", "CORE_P2PK key binding mismatch", TX_ERR_SIG_INVALID, nil, func(tx *Tx) {
+			tx.Witness[1].Pubkey = bytes.Clone(tx.Witness[1].Pubkey)
+			tx.Witness[1].Pubkey[0] ^= 0x01
+		}},
+		// S5: CheckValueConservationTxWide.
+		{"S5", "sum_out exceeds sum_in", TX_ERR_VALUE_CONSERVATION, func(tx *Tx) { tx.Outputs[0].Value = 2991 }, nil},
+	}
+	for _, c := range cases {
+		opts := icbH5OptsV1{flip: 1, tx2: c.tx2, post2: c.post2}
+		icbH5RunCaseV1(t, icbH5CaseV1{name: c.stage + "-control", opts: opts, code: c.code, msg: c.msg})
+		icbPendingDiscardV1(t, c.stage+"-pending", opts)
 	}
 }
