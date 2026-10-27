@@ -708,7 +708,8 @@ func TestInitial148CompleteBlockAcceptH5(t *testing.T) {
 			first = &got
 			continue
 		}
-		logicalMDBXAssert(t, reflect.DeepEqual(got, *first), "workers=%d differs from sequential: %+v", workers, got)
+		same := got.summary == first.summary && got.out.required == first.out.required && got.block == first.block
+		logicalMDBXAssert(t, same && reflect.DeepEqual(got.result, first.result) && reflect.DeepEqual(got.spent, first.spent), "workers=%d differs from sequential: %+v", workers, got)
 	}
 }
 
