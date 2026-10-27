@@ -428,3 +428,36 @@ func TestInitial148CompleteBlockEarlierConnectErrorBeforeD(t *testing.T) {
 		})
 	}
 }
+
+// TestInitial148CompleteBlockDeriveCapacityNoResult (C10) leaves room on the
+// same account for W, the source scratch and R, but not D: derived=false keeps
+// the raw capacity cause as the validation error, never a root mismatch, and
+// no result is delivered. R=69,656+196,824E and D=288,408+104E use the
+// genesis source EventCount E.
+func TestInitial148CompleteBlockDeriveCapacityNoResult(t *testing.T) {
+	// The published genesis source records one event (E=1).
+	const genesisEvents = 1
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, _ := icbGenesisInputV1(t, -1)
+		tariff, ok := initial148CompleteTariffV1(in)
+		logicalMDBXAssert(t, ok, "tariff")
+		hold := uint64(402_653_184) - tariff - (69_656 + 196_824*genesisEvents) - (288_408 + 104*genesisEvents)
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			// Control: with exactly D remaining the same input derives and is delivered.
+			logicalMDBXAssert(t, account.WithReservation(hold, func() error {
+				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+				logicalMDBXAssert(t, err == nil && delivered != nil && out.required.derived, "parallel=%v exact D residual: %v / %+v", parallel, err, out)
+				return nil
+			}) == nil, "pre-hold control")
+			logicalMDBXAssert(t, account.WithReservation(hold+1, func() error {
+				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+				var txErr *TxError
+				logicalMDBXAssert(t, !errors.As(err, &txErr), "parallel=%v derive capacity became a TxError: %v", parallel, err)
+				logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(err) && any(out.validationErr) == any(err) && any(out.required.cause) == any(err), "parallel=%v raw D cause lost: %v / %+v", parallel, err, out)
+				logicalMDBXAssert(t, delivered == nil && out.attempted && !out.required.derived && out.required.root == ([32]byte{}) && !out.required.hasObservation, "parallel=%v D capacity outcome: %+v", parallel, out)
+				return nil
+			}) == nil, "pre-hold")
+		})
+	}
+}
