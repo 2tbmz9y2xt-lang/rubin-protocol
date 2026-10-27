@@ -1005,3 +1005,45 @@ func TestInitial148CompleteBlockTombstoneH5(t *testing.T) {
 	icbH5RunCaseV1(t, missing)
 	icbH5RunCaseV1(t, pending)
 }
+
+// icbDiscardRunV1 validates in through one entry on account and returns the
+// outcome, the error and whether a result was delivered.
+func icbDiscardRunV1(w *btWorld, account *mdbx.OperationAccount, in initial148CompleteBlockInputV1, workers int) (initial148CompleteBlockOutcomeV1, bool, error) {
+	delivered := false
+	run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+		return w.s.View(func(reader *mdbx.Reader) error {
+			result, err := validate(reader)
+			delivered = result != nil
+			return err
+		})
+	}
+	if workers < 0 {
+		out, err := withInitial148CompleteBlockV1(account, in, run)
+		return out, delivered, err
+	}
+	out, err := withInitial148CompleteBlockParallelV1(account, in, workers, run)
+	return out, delivered, err
+}
+
+// TestInitial148CompleteBlockDiscardH5 (C09 discard) rejects the pending
+// signature plus later tombstone block, then on the same account: the whole
+// lane is free again (W, R and source released), and a fresh invocation of
+// the valid block over the same parent succeeds with fresh D.
+func TestInitial148CompleteBlockDiscardH5(t *testing.T) {
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		bad := icbH5VariantV1(t, w, icbH5OptsV1{dup: true, badSig: true, flip: 1})
+		good := icbH5VariantV1(t, btNew(t), icbH5OptsV1{})
+		logicalMDBXAssert(t, good.in.Parent == bad.in.Parent, "workers=%d fixtures do not share the parent", workers)
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, delivered, err := icbDiscardRunV1(w, account, bad.in, workers)
+			var txErr *TxError
+			exact := errors.As(err, &txErr) && any(txErr) == any(err) && txErr.Code == TX_ERR_SIG_INVALID && txErr.Msg == "CORE_P2PK signature invalid"
+			logicalMDBXAssert(t, exact && !delivered && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "workers=%d rejected tuple: %v / %+v", workers, err, out)
+			free := account.WithReservation(402_653_184, func() error { return nil })
+			logicalMDBXAssert(t, free == nil, "workers=%d residual hold after rejection: %v", workers, free)
+			out, delivered, err = icbDiscardRunV1(w, account, good.in, workers)
+			logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == good.header.UtxoRoot, "workers=%d fresh second invocation: %v / %+v", workers, err, out)
+		})
+	}
+}
