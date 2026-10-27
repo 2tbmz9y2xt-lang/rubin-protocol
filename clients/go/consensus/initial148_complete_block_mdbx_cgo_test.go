@@ -327,3 +327,54 @@ func TestInitial148CompleteBlockRootMismatch(t *testing.T) {
 		}
 	}
 }
+
+// TestInitial148CompleteBlockEarlierErrorBeforeD (C06) flips the coinbase
+// da_payload_len byte (the last body byte) and the header root together: the prefix merkle refusal wins and D
+// never runs, so no derived root or observation is reported.
+func TestInitial148CompleteBlockEarlierErrorBeforeD(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, _ := icbGenesisInputV1(t, 0)
+		raw := append([]byte(nil), in.Raw...)
+		raw[len(raw)-1] ^= 0x01
+		in.Raw, in.PublishedGenesis = raw, raw
+		hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
+		logicalMDBXAssert(t, err == nil, "hash: %v", err)
+		in.Endpoint.BlockHash = hash
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, err, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+			var txErr *TxError
+			logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == TX_ERR_PARSE && txErr.Msg == "da_payload_len must be 0 for tx_kind=0x00" && any(out.validationErr) == any(err), "parallel=%v earlier error must win: %v", parallel, err)
+			logicalMDBXAssert(t, delivered == nil && out.attempted && out.required == (initial148RootReadOutcomeV1{}), "parallel=%v no D after earlier error: %+v", parallel, out)
+		})
+	}
+}
+
+// TestInitial148CompleteBlockRunErrorAfterSuccess (C13) keeps the enclosing
+// run error after a root-valid validation; the captured success is not a
+// commit and the run error is never replaced by a validation projection.
+func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		w := btNew(t)
+		in, header := icbGenesisInputV1(t, -1)
+		native := errors.New("native writer failure after builder return")
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, err := icbEntryV1(parallel)(account, in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				verr := w.s.View(func(reader *mdbx.Reader) error {
+					result, verr := validate(reader)
+					logicalMDBXAssert(t, result != nil && verr == nil, "parallel=%v success: %v", parallel, verr)
+					return verr
+				})
+				if verr != nil {
+					return verr
+				}
+				return native
+			})
+			logicalMDBXAssert(t, err == native && out.attempted && out.validationErr == nil, "parallel=%v run error kept: %v / %+v", parallel, err, out)
+			logicalMDBXAssert(t, out.required.derived && out.required.root == header.UtxoRoot, "parallel=%v D evidence kept: %+v", parallel, out.required)
+			// A fresh next invocation succeeds on the same account.
+			out2, err2, delivered, _ := icbValidateOnceV1(t, w, account, in, parallel)
+			logicalMDBXAssert(t, err2 == nil && delivered != nil && out2.required.derived, "parallel=%v fresh retry: %v", parallel, err2)
+		})
+	}
+}
