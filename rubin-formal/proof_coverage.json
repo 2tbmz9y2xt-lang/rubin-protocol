@@ -452,7 +452,8 @@
       "limitations": [
         "Executable stage and fixture evidence do not prove the exact-one matching-anchor fallback criterion.",
         "A formal re-proof of that criterion is deferred under RUB-1033.",
-        "Cross-domain txid/wtxid tagged-root anti-aliasing is not claimed in this row and is tracked separately in `witness_commitment_crypto_residual`."
+        "Cross-domain txid/wtxid tagged-root anti-aliasing is not claimed in this row and is tracked separately in `witness_commitment_crypto_residual`.",
+        "CV-BLOCK-BASIC replay and the checkWitnessCommitment stage reduction run on BlockBasicV1.parseBlock and 116-byte header vectors; they do not cover the 148-byte Section 10.1 header grammar."
       ],
       "evidence_level": "machine_checked_contract"
     },
@@ -1123,7 +1124,8 @@
         "CORE_SIMPLICITY 0x0106 and other non-retained types are outside this bounded replay model; its invalid-type refusal, including covenant tag 0x0105, is not a live-consensus claim. The manifest pin alone establishes no client behavior.",
         "RBMap-level operational equivalence is not fully proved end-to-end; the current closure relies on the explicit list-to-RBMap bridge and query-level semantics now available in CoinbaseBehavioral.",
         "vault_policy_default_order_safe_proved covers the spend-side safe subset / default-order path only and is not a full L1↔L2 equivalence theorem for every vault-policy branch.",
-        "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication."
+        "The current UTXO evidence does not prove RUB-1217's P0-S6 atomic publication boundary, accepted-nonce publication, transaction-index arbitration, or rejection-time absence of partial UTXO, replay, queue, or candidate-state publication.",
+        "The registered UTXO theorems do not prove the canonical complete-state UTXO tree or its root bytes (RUBIN_CONSENSUS_STATE_MACHINE.md §2.6, RUBIN_L1_CANONICAL.md §18.5), the derivation of Root(U_candidate), or any IMAGE entry, cover, historical-membership, persisted-seed or COMPLETE obligation (RUBIN_MEMPOOL_POLICY.md §6.4.1.8); the registered theorems do not relate a matching root or a received image to execution of the skipped history."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1368,7 +1370,8 @@
       "notes": "Universal theorem lane: `medianTimePast_value` plus `medianTimePast_index_valid` close the list-to-MTP extraction path on the live helper, `timestampBounds_*_iff` characterizes the canonical old/future/ok boundary, and the new constrained LIVE bridge theorems lift that boundary to the real `validateBlockBasicCheck` path once the parse/pow/target/linkage/merkle/witness prefix has passed. The top-level counted surface now includes exact acceptance and old/future rejection theorems on the live block-basic path rather than concrete regression wrappers. Separate fixture lane: CV-TIMESTAMP replay on shipped timestamp-bounds and block-basic vectors. That executable lane remains complementary evidence only and does not replace the universal theorem lane.",
       "limitations": [
         "The counted LIVE bridge theorems are constrained to the real `validateBlockBasicCheck` path after parse/pow/target/linkage/merkle/witness prefix success, and the accept theorem additionally assumes nonce replay passes on the remaining suffix. This row does not claim unrelated block-basic stages beyond that covered timestamp gate.",
-        "No chain-wide timestamp monotonicity claim beyond the covered `timestampBounds` gate and current replayed integration path is asserted here."
+        "No chain-wide timestamp monotonicity claim beyond the covered `timestampBounds` gate and current replayed integration path is asserted here.",
+        "The constrained LIVE bridge theorems run on BlockBasicV1.parseBlock, whose header grammar is 116 bytes without utxo_root; they do not cover the 148-byte Section 10.1 header grammar or the Section 10.3 block_hash and Proof-of-Work preimage over all 148 header bytes."
       ],
       "evidence_level": "machine_checked_universal"
     },
@@ -1418,7 +1421,8 @@
         "forkSelect models the runtime fork_choice_select. Go/Rust code follows identical if/else chain. Structural equivalence evident from inspection but not proved via rfl (Go/Rust not importable to Lean).",
         "The 32-byte hash length premise (hL/hR) is a protocol type invariant (SHA3-256 output), not a semantic precondition. Runtime block hashes are always 32 bytes by construction.",
         "Distinct candidates with equal work and equal 32-byte hash are not distinguished; candidate identity and hash-collision exclusion are unproved premises deferred under RUB-1033.",
-        "The generated Lean contract covers six positive fork_choice_select rows only. Negative expect_ok=false rows are runtime conformance-only, and standalone-only extra vectors are outside this registry claim."
+        "The generated Lean contract covers six positive fork_choice_select rows only. Negative expect_ok=false rows are runtime conformance-only, and standalone-only extra vectors are outside this registry claim.",
+        "The registered fork-choice model and fixtures do not prove Section 23 Conditional imported-state eligibility or Conditional continuation (pinned, target and base (b,hash_b,utxo_root_b) binding, IMAGE COMPLETE evidence, full validation of blocks b+1..H, E0 inheritance); only target-range validity, chainwork derivation and work and hash comparison of represented candidates are modeled."
       ],
       "evidence_level": "machine_checked_model"
     },
@@ -1439,7 +1443,8 @@
         "RUB-1453's Section 25 genesis rule (step 4 prev_block_hash linkage not checked at h = 0) and step 1 truncation outcomes (a stream ending at a transaction boundary before tx_count as BLOCK_ERR_PARSE, a mid-transaction truncation as that transaction's own Section 5/7 code, no allocation proportional to an unverified tx_count) are not proved by section25_validation_total_proved.",
         "RUB-1252's activation-first step 13 ordering, inactive-path skip, height-zero U_parent selection and genesis S0 = 0, Section 19.2 genesis exception, active S0/S1 derivation and cap check, two-condition publication gate, NO_VALIDITY_RESULT and existing-error priority, and zero-effect rejection are not proved by section25_validation_total_proved.",
         "This model totality theorem does not prove the normative gate order or error-precedence requirements.",
-        "A full order/error-precedence re-proof is deferred under RUB-1033."
+        "A full order/error-precedence re-proof is deferred under RUB-1033.",
+        "section25_validation_total_proved does not prove the Section 25 UTXO root condition (header utxo_root at bytes [108:140] equal to Root(U_candidate) as the last work of the state step at every height, BLOCK_ERR_UTXO_ROOT_MISMATCH with zero canonical effect); the model parses the 116-byte BlockBasicV1 header without utxo_root, not the 148-byte Section 10.1 header."
       ],
       "evidence_level": "machine_checked_model"
     },
