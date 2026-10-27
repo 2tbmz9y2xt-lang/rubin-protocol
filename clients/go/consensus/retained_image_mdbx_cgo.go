@@ -261,7 +261,7 @@ type retainedRawV1 struct {
 }
 
 // pageV1 drops the public page before returning fixed evidence and one continuation.
-func (read *retainedReadV1) pageV1(g uint64, class mdbx.ObsoleteClassV1, after []byte) (retainedRawV1, []byte, bool, error) {
+func (read *retainedReadV1) pageV1(g uint64, class mdbx.ObsoleteClassV1, after, target []byte) (retainedRawV1, []byte, bool, error) {
 	var raw retainedRawV1
 	var next []byte
 	exhausted, ran := false, false
@@ -278,7 +278,7 @@ func (read *retainedReadV1) pageV1(g uint64, class mdbx.ObsoleteClassV1, after [
 		row, key := page.Rows[0], page.Rows[0].Key()
 		raw.keyLength = len(key)
 		copy(raw.key[:], key)
-		return raw.observeV1(row, class, key)
+		return raw.observeV1(row, class, key, target)
 	})
 	if !ran {
 		err = retainedFailureV1("storage_capacity", err)
@@ -287,12 +287,12 @@ func (read *retainedReadV1) pageV1(g uint64, class mdbx.ObsoleteClassV1, after [
 }
 
 // observeV1 classifies raw kind before any value or subsequent-page observation.
-func (raw *retainedRawV1) observeV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteClassV1, key []byte) error {
+func (raw *retainedRawV1) observeV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteClassV1, key, target []byte) error {
 	switch class {
 	case mdbx.ObsoleteUTXOV1:
 		return raw.stateV1(row)
 	case mdbx.ObsoleteIndexV1, mdbx.ObsoleteDerivedV1:
-		return raw.fixedV1(row, class)
+		return raw.fixedV1(row, class, target == nil || bytes.Equal(key, target))
 	case mdbx.ObsoleteNodeV1:
 		_, id, err := mdbx.DecodeTreeNodeKey(key)
 		if err != nil {
@@ -323,13 +323,13 @@ func (raw *retainedRawV1) stateV1(row mdbx.ObsoleteRowV1) error {
 	return nil
 }
 
-// fixedV1 extracts bounded forward or reverse evidence without active-owner promotion.
-func (raw *retainedRawV1) fixedV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteClassV1) error {
+// fixedV1 reads bounded forward/reverse evidence only for traversal or an exact match.
+func (raw *retainedRawV1) fixedV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteClassV1, matched bool) error {
 	keySize, valueSize := 40, 8
 	if class == mdbx.ObsoleteIndexV1 {
 		raw.charge, keySize, valueSize = RetainedIndexChargeV1, 16, 104
 	}
-	if raw.keyLength != keySize || row.Length() != uint64(valueSize) {
+	if !matched || raw.keyLength != keySize || row.Length() != uint64(valueSize) {
 		return nil
 	}
 	if _, err := row.ReadAt(raw.value[:valueSize], 0); err != nil {
@@ -344,7 +344,7 @@ func (raw *retainedRawV1) fixedV1(row mdbx.ObsoleteRowV1, class mdbx.ObsoleteCla
 
 // exactV1 distinguishes an exact row, a conclusive successor and an unverifiable gap.
 func (read *retainedReadV1) exactV1(g uint64, class mdbx.ObsoleteClassV1, key []byte) (retainedRawV1, bool, error) {
-	raw, _, _, err := read.pageV1(g, class, cleanupDrainPredecessor(key))
+	raw, _, _, err := read.pageV1(g, class, cleanupDrainPredecessor(key), key)
 	if err != nil || raw.keyLength == 0 {
 		return raw, false, err
 	}
@@ -398,7 +398,7 @@ func (w *retainedWalkV1) generationV1(at int) error {
 	for _, class := range [4]mdbx.ObsoleteClassV1{mdbx.ObsoleteUTXOV1, mdbx.ObsoleteIndexV1, mdbx.ObsoleteNodeV1, mdbx.ObsoleteRootV1} {
 		var after []byte
 		for {
-			raw, next, exhausted, err := w.read.pageV1(w.pre.complete[at].generation, class, after)
+			raw, next, exhausted, err := w.read.pageV1(w.pre.complete[at].generation, class, after, nil)
 			if err != nil {
 				return err
 			}

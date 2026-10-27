@@ -34,7 +34,7 @@ func TestRetainedImageMDBXCommitOutcomes(t *testing.T) {
 }
 
 func rifEdges(t *testing.T) {
-	for _, name := range []string{"missing-prior-true", "wrong-hash-prior-true", "unverifiable-gap", "no-header-false", "unhealthy-header-true", "invalid-work-no-R", "R-before-body", "stronger-all-kinds-false", "orphan-R"} {
+	for _, name := range []string{"missing-prior-true", "missing-reverse-successor", "matching-reverse-IO", "wrong-hash-prior-true", "unverifiable-gap", "no-header-false", "unhealthy-header-true", "invalid-work-no-R", "R-before-body", "stronger-all-kinds-false", "orphan-R"} {
 		t.Run(name, func(t *testing.T) {
 			w := rifWorld(t, 3)
 			z, _ := rifBody(t, w, 0)
@@ -43,6 +43,14 @@ func rifEdges(t *testing.T) {
 			switch name {
 			case "missing-prior-true":
 				rifForward(t, w, 3, 1, z, [32]byte{})
+				rifReverse(t, w, 3, 0, z)
+			case "missing-reverse-successor":
+				y = [32]byte{0xff}
+				logicalMDBXAssert(t, bytes.Compare(z[:], y[:]) < 0, "reverse successor must be strictly above target")
+				rifForward(t, w, 3, 0, z, [32]byte{})
+				rifReverse(t, w, 3, 0, y)
+			case "matching-reverse-IO":
+				rifForward(t, w, 3, 0, z, [32]byte{})
 				rifReverse(t, w, 3, 0, z)
 			case "wrong-hash-prior-true":
 				rifForward(t, w, 3, 0, y, [32]byte{})
@@ -86,7 +94,30 @@ func rifEdges(t *testing.T) {
 				want, complete = 64, true
 			}
 			var out rifResult
-			if name == "R-before-body" || name == "invalid-work-no-R" {
+			if name == "missing-reverse-successor" || name == "matching-reverse-IO" {
+				hash := y
+				if name == "matching-reverse-IO" {
+					hash = z
+				}
+				key, _ := mdbx.CanonicalOwnerKey(3, hash)
+				evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 7, key, func() { out = rifRun(t, w, nil, "source") })
+				out.native.want(t, 1, 1, -1)
+				logicalMDBXAssert(t, evidence.BeginOld == 1 && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldAborts == 1, "exact probe native effects: %+v/%+v", out, evidence)
+				if name == "matching-reverse-IO" {
+					logicalMDBXAssert(t, harness == nil && evidence.Faults == 1 && evidence.OldGets[4] == 0 && out.image == (retainedPreImageV1{}), "matching reverse Get must be reached: %+v/%v", evidence, harness)
+					f := riResource(t, out.source, "branch_data")
+					btfEngine(t, f.Cause, "get", "IO", 5, "error 5")
+					parts := genesisMDBXCauses(out.native.err)
+					logicalMDBXAssert(t, len(parts) == 2 && parts[0] == out.source && parts[1] == f.Cause, "exact probe application/Reader cause order: %v", parts)
+					undoNativeConsumed(t, w.s, out.native.err)
+					return
+				}
+				logicalMDBXAssert(t, harness != nil && harness.Error() == "selected damage fixture site was not reached exactly as armed" && evidence.Faults == 0 && out.native.err == rifComplete, "absent reverse read successor value: %+v/%v", evidence, harness)
+			} else if name == "missing-prior-true" {
+				evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageProbeOnly, 2, nil, func() { out = rifRun(t, w, nil, "source") })
+				logicalMDBXAssert(t, harness == nil && evidence.Faults == 0 && evidence.OldGets[2] == 1 && evidence.OldAborts == 1 && evidence.BeginWrite == 0 && evidence.Commits == 0 && out.native.err == rifComplete, "absent earlier forward reread h1 value: %+v/%v", evidence, harness)
+				out.native.want(t, 1, 1, -1)
+			} else if name == "R-before-body" || name == "invalid-work-no-R" {
 				key, _ := mdbx.CanonicalOwnerKey(3, z)
 				evidence, harness := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageStartupPullEIO, 7, append(cleanupDrainPredecessor(key), 0), func() { out = rifRun(t, w, nil, "source") })
 				if name == "R-before-body" {
