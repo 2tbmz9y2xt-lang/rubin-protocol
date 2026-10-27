@@ -171,10 +171,10 @@ func rifMalformedHeaders(t *testing.T) {
 			logicalMDBXAssert(t, f.Cause.Error() == "retained header is malformed" && out.image == (retainedPreImageV1{}), "header refusal cause or partial image: %+v/%v", out.image, out.source)
 			if resource == "selected_damage" {
 				d := f.Damage
-				logicalMDBXAssert(t, d.Generation == 3 && d.Height == 5 && d.Hash == hash && d.Artifact == "header" && d.Cause == f.Cause, "exact malformed selected header tuple: %+v", d)
+				logicalMDBXAssert(t, d.Generation == 3 && d.Height == 5 && d.Hash == hash && d.Artifact == "header" && any(d.Cause) == any(f.Cause), "exact malformed selected header tuple: %+v", d)
 			}
 			out.native.want(t, 1, 1, -1)
-			logicalMDBXAssert(t, out.native.err == out.source && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldAborts == 1, "header refusal changed native outcome: %+v/%+v", out, evidence)
+			logicalMDBXAssert(t, any(out.native.err) == any(out.source) && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldAborts == 1, "header refusal changed native outcome: %+v/%+v", out, evidence)
 			w.read(t, 0, []byte{2}, encoded)
 			rifOpen(t, w)
 		})
