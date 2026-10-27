@@ -489,7 +489,7 @@ func (read *retainedReadV1) headerV1(hash [32]byte) ([]byte, bool, error) {
 	if read.omitHeader && hash == read.lateHeader {
 		return nil, false, nil
 	}
-	row, err := read.reader.GetOptionalSide(mdbx.TreeSchemaV1DBIs()[3], hash[:])
+	row, err := read.reader.GetInitial148OptionalSide(mdbx.TreeSchemaV1DBIs()[3], hash[:])
 	return row.Value, row.Present, err
 }
 
