@@ -762,7 +762,7 @@ func (w *q148World) recompute(t *testing.T, view HeaderCandidateViewV1, a mdbx.S
 }
 
 // q148Recomputation builds the active index 0..2 of a slow sequence and a target index forked at 2 with tip T at
-// height 4; active extends the active index beyond 2 (unlisted, so it is only the published comparand).
+// height 4; active extends the active index beyond 2, so its tip competes in selection and is the published comparand.
 func q148Recomputation(t *testing.T, active int) (*q148World, *q148Seq, *q148Seq) {
 	s := q148Slow(t, active)
 	w := newQ148World(t, s, active, nil)
@@ -785,9 +785,14 @@ func TestReplayQualifier148Recompute(t *testing.T) {
 	child.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
 	heavy := s.clone(2)
 	heavy.extend(t, 3, 4*TARGET_BLOCK_INTERVAL, false) // not T's headers (those are spaced 3 intervals)
-	wd, _, tgd := q148Recomputation(t, 5)
+	// (d): the fresh best tip descends from T and has strictly more work than the active tip at 5, so only the
+	// comparand (the active tip, outranking T) decides PLAN_CHANGE.
+	wd, sd, tgd := q148Recomputation(t, 5)
 	childD := tgd.clone(4)
-	childD.extend(t, 1, 3*TARGET_BLOCK_INTERVAL, false)
+	childD.extend(t, 2, 3*TARGET_BLOCK_INTERVAL, false)
+	if wd6, wa := childD.work(t, 6), sd.work(t, 5); bytes.Compare(wd6[:], wa[:]) <= 0 {
+		t.Fatalf("fixture (d): best work %x not above the active tip's %x", wd6, wa)
+	}
 	for _, c := range []struct {
 		label  string
 		w      *q148World
@@ -849,14 +854,35 @@ func TestReplayQualifier148RecomputeRefusals(t *testing.T) {
 		if v, ok := c.view.(*q148View); ok && (len(v.versions) != 0 || c.label == "below M148" && len(v.limits) != 0) {
 			t.Fatalf("R8 %s: ProtectV1 %v limits %v", c.label, v.versions, v.limits)
 		}
+		if v, ok := c.view.(*replayView); ok && (v.calls != 0 || len(v.versions) != 0) {
+			t.Fatalf("R2 %s: 116 view called: inventory %d protect %d", c.label, v.calls, len(v.versions))
+		}
+	}
+	// R1 CapacityRefused on a world whose active index has a height gap: the refusal is decided before the walk (which
+	// would report the gap, as the complete-inventory control shows) and before ProtectV1.
+	gs := q148Slow(t, 2)
+	gap := newQ148World(t, gs, 2, func(h int, rows []mdbx.Mutation) []mdbx.Mutation {
+		if h == 1 {
+			return rows[:1]
+		}
+		return rows
+	})
+	gtg := gs.clone(2)
+	gtg.extend(t, 2, 3*TARGET_BLOCK_INTERVAL, false)
+	_, _, err := gap.recompute(t, ok(), q148Replay(gap, gtg, 4, t), mdbx.MaxOperationDataBytes)
+	q148Defect(t, err, "replay canonical index height gap", "R1 control")
+	capacity := &q148View{inv: HeaderCandidateInventory148V1{Status: HeaderCandidateCapacityRefusedV1}}
+	out, _, err := gap.recompute(t, capacity, q148Replay(gap, gtg, 4, t), mdbx.MaxOperationDataBytes)
+	if err != nil || out.Report != ReplayRecomputationRefusedV1 || out.Result != selectedSideCapacity || out.Release != nil || len(capacity.versions) != 0 || len(capacity.limits) != 1 {
+		t.Fatalf("R1 capacity refused: %+v %v ProtectV1 %v limits %v", out, err, capacity.versions, capacity.limits)
 	}
 	bad := &q148View{inv: HeaderCandidateInventory148V1{Status: HeaderCandidateCompleteV1, Tips: [][32]byte{{1}}, Bytes: 31}}
-	_, _, err := w.recompute(t, bad, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes)
+	_, _, err = w.recompute(t, bad, q148Replay(w, tg, 4, t), mdbx.MaxOperationDataBytes)
 	var failure *selectedSideFailure
 	if !errors.As(err, &failure) || failure.result != selectedSideInvariant || len(bad.versions) != 0 {
 		t.Fatalf("R1 invariant: %v", err)
 	}
-	out, _, err := w.recompute(t, ok(), q148Replay(w, tg, 4, t), replayRecoveryMin148Bytes)
+	out, _, err = w.recompute(t, ok(), q148Replay(w, tg, 4, t), replayRecoveryMin148Bytes)
 	if err != nil || out.Report != ReplayRecomputationActivationEligibleV1 {
 		t.Fatalf("R8 at M148: %+v %v", out, err)
 	}
