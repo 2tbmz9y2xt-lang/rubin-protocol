@@ -44,6 +44,9 @@ type connectBlockInMemoryValidationContext struct {
 	rotation  RotationProvider
 	registry  *SuiteRegistry
 	inputView *blockInputViewState
+	// sigQueue, when non-nil, defers S4 signature checks through the shared
+	// queued transaction interval; its owner settles and Flushes it.
+	sigQueue *SigCheckQueue
 }
 
 type connectBlockInputViewResult struct {
@@ -78,7 +81,19 @@ func connectBlockBasicWithInputView(
 	if err != nil {
 		return nil, err
 	}
-	work := blockInputViewConnectWork{
+	return newBlockInputViewConnectWork(input, view, off, count, blockMTP).connect(alreadyGenerated)
+}
+
+// newBlockInputViewConnectWork is the one private candidate constructor for
+// every input-view entry. The view and its row backing stay owned by the caller.
+func newBlockInputViewConnectWork(
+	input connectBlockBasicInMemorySuiteContext,
+	view logicalStateView,
+	off int,
+	count uint64,
+	blockMTP uint64,
+) *blockInputViewConnectWork {
+	return &blockInputViewConnectWork{
 		raw: input.BlockBytes, offset: off, count: count, height: input.BlockHeight, blockMTP: blockMTP,
 		created: make(map[Outpoint]UtxoEntry), seenNonces: make(map[uint64]struct{}),
 		validation: connectBlockInMemoryValidationContext{
@@ -86,6 +101,11 @@ func connectBlockBasicWithInputView(
 			inputView: &blockInputViewState{view: view, height: input.BlockHeight, spent: make(map[Outpoint]uint32)},
 		},
 	}
+}
+
+// connect applies coinbase and suffix in block order. With a queue, every
+// deferred signature result is Flushed before the subsidy and finish checks.
+func (work *blockInputViewConnectWork) connect(alreadyGenerated Uint128) (*connectBlockInputViewResult, error) {
 	if err := work.applyCoinbase(); err != nil {
 		return nil, err
 	}
@@ -93,12 +113,24 @@ func connectBlockBasicWithInputView(
 	if err := work.applySuffix(); err != nil {
 		return nil, err
 	}
+	if err := work.flushQueue(); err != nil {
+		return nil, err
+	}
 	return work.finish(alreadyGenerated, suffixStart)
+}
+
+func (work *blockInputViewConnectWork) flushQueue() error {
+	if work.validation.sigQueue == nil {
+		return nil
+	}
+	return work.validation.sigQueue.Flush()
 }
 
 func (work *blockInputViewConnectWork) finish(alreadyGenerated Uint128, suffixStart int) (*connectBlockInputViewResult, error) {
 	alreadyGeneratedBig := alreadyGenerated.Big()
-	if err := validateCoinbaseValueTotal(work.coinbaseTotal, work.coinbaseError, work.height, alreadyGeneratedBig, work.sumFees); err != nil {
+	// Only the Section 19.2 value bound has a genesis exception; every other
+	// finish check applies at every height.
+	if err := work.validateCoinbaseValue(alreadyGeneratedBig); err != nil {
 		return nil, err
 	}
 	alreadyGeneratedN1, err := checkedAdvanceAlreadyGenerated(work.height, alreadyGenerated, alreadyGeneratedBig)
@@ -112,6 +144,13 @@ func (work *blockInputViewConnectWork) finish(alreadyGenerated Uint128, suffixSt
 		spentInputs:  &blockSpentInputSource{raw: work.raw, spent: spent, offset: suffixStart, count: work.count, nextTx: 1},
 		createdUtxos: work.created,
 	}, nil
+}
+
+func (work *blockInputViewConnectWork) validateCoinbaseValue(alreadyGeneratedBig *big.Int) error {
+	if work.height == 0 {
+		return nil
+	}
+	return validateCoinbaseValueTotal(work.coinbaseTotal, work.coinbaseError, work.height, alreadyGeneratedBig, work.sumFees)
 }
 
 // validateInputViewPlacement is a pure one-current-Tx prepass. Q has already
@@ -194,7 +233,7 @@ func (work *blockInputViewConnectWork) applyTransaction(ordinal uint64) error {
 	// Q's <=68,000,125-byte body bounds ordinal below 2^31; the mask is
 	// identity on that domain and makes the platform-independent int bound explicit.
 	work.validation.inputView.txIndex = int(ordinal & 0x7fffffff)
-	next, fee, err := applyNonCoinbaseTxBasicWork(nonCoinbaseApplyWorkInput{
+	next, fee, err := work.applyStage(nonCoinbaseApplyWorkInput{
 		tx: tx, txid: txid, utxoSet: work.created, height: work.height, blockMTP: work.blockMTP,
 		chainID: work.validation.chainID, rotation: work.validation.rotation, registry: work.validation.registry,
 		inputView: work.validation.inputView,
@@ -209,6 +248,13 @@ func (work *blockInputViewConnectWork) applyTransaction(ordinal uint64) error {
 	}
 	work.sumFees = sum
 	return nil
+}
+
+func (work *blockInputViewConnectWork) applyStage(input nonCoinbaseApplyWorkInput) (map[Outpoint]UtxoEntry, Uint128, error) {
+	if work.validation.sigQueue == nil {
+		return applyNonCoinbaseTxBasicWork(input)
+	}
+	return applyNonCoinbaseTxWorkInputQ(input, work.validation.sigQueue)
 }
 
 // blockSpentInputSource owns the same compact map after successful connect.

@@ -99,22 +99,7 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 
 	defer sigQueue.rollbackTo(sigCheckQueueMark{})
 	completed := false
-	defer func() {
-		if completed {
-			if err != nil {
-				if earlier := sigQueue.settleRange(sigCheckQueueMark{}, sigQueue.mark()); earlier != nil {
-					err = earlier
-				}
-			}
-			return
-		}
-		laterPanic := recover()
-		if earlier := sigQueue.settleRange(sigCheckQueueMark{}, sigQueue.mark()); earlier != nil {
-			summary, err = nil, earlier
-			return
-		}
-		panic(laterPanic) //nolint:forbidigo // RUB-721: preserve the later raw panic after the earlier interval succeeds.
-	}()
+	defer settleBlockQueueInterval(sigQueue, &completed, &summary, &err)
 
 	summary, err = func() (*ConnectBlockBasicSummary, error) {
 		// Apply all non-coinbase transactions with deferred sig verification.
@@ -187,6 +172,44 @@ func ConnectBlockParallelSigVerifyWithSuiteContext(
 	return
 }
 
+// settleBlockQueueInterval is the deferred block-interval selector: an earlier
+// produced queued result replaces a later returned error or a later raw panic;
+// otherwise the later panic is re-raised unchanged. It must be deferred
+// directly so that recover observes the panic of its caller.
+func settleBlockQueueInterval[T any](sigQueue *SigCheckQueue, completed *bool, result **T, err *error) {
+	if *completed {
+		if *err != nil {
+			if earlier := sigQueue.settleRange(sigCheckQueueMark{}, sigQueue.mark()); earlier != nil {
+				*err = earlier
+			}
+		}
+		return
+	}
+	laterPanic := recover()
+	if earlier := sigQueue.settleRange(sigCheckQueueMark{}, sigQueue.mark()); earlier != nil {
+		*result, *err = nil, earlier
+		return
+	}
+	panic(laterPanic) //nolint:forbidigo // RUB-721: preserve the later raw panic after the earlier interval succeeds.
+}
+
+// connectBlockInputViewQueued runs one input-view candidate through sigQueue
+// with the same block-interval selection as ConnectBlockParallelSigVerify.
+// Every exit clears the queue; the caller owns queue construction.
+func connectBlockInputViewQueued(
+	work *blockInputViewConnectWork,
+	sigQueue *SigCheckQueue,
+	alreadyGenerated Uint128,
+) (result *connectBlockInputViewResult, err error) {
+	work.validation.sigQueue = sigQueue
+	defer sigQueue.rollbackTo(sigCheckQueueMark{})
+	completed := false
+	defer settleBlockQueueInterval(sigQueue, &completed, &result, &err)
+	result, err = work.connect(alreadyGenerated)
+	completed = true
+	return
+}
+
 // applyNonCoinbaseTxBasicUpdateWithMTPQ is the queue-aware
 // wrapper around applyNonCoinbaseTxBasicWorkQ. The SigCheckQueue is used for
 // deferred signature verification.
@@ -231,6 +254,19 @@ func applyNonCoinbaseTxBasicWorkQ(
 	sigQueue *SigCheckQueue,
 	rotation RotationProvider,
 	registry *SuiteRegistry,
+) (map[Outpoint]UtxoEntry, Uint128, error) {
+	return applyNonCoinbaseTxWorkInputQ(nonCoinbaseApplyWorkInput{
+		tx: tx, txid: txid, utxoSet: utxoSet, height: height, blockMTP: blockMTP,
+		chainID: chainID, rotation: rotation, registry: registry,
+	}, sigQueue)
+}
+
+// applyNonCoinbaseTxWorkInputQ is the single queued transaction interval for
+// both the nil-view in-memory path and the input-view block path. It never
+// mutates input.utxoSet; a nil input.inputView keeps the map-only stage lookup.
+func applyNonCoinbaseTxWorkInputQ(
+	input nonCoinbaseApplyWorkInput,
+	sigQueue *SigCheckQueue,
 ) (result map[Outpoint]UtxoEntry, resultFee Uint128, err error) {
 	entryMark := sigQueue.mark()
 	completed := false
@@ -257,20 +293,21 @@ func applyNonCoinbaseTxBasicWorkQ(
 	}()
 
 	// Private work map so the delta never aliases the caller's map.
-	work := make(map[Outpoint]UtxoEntry, len(utxoSet))
-	for k, v := range utxoSet {
+	work := make(map[Outpoint]UtxoEntry, len(input.utxoSet))
+	for k, v := range input.utxoSet {
 		work[k] = v
 	}
 	result, resultFee, err = (&nonCoinbaseApplyContext{
-		tx:       tx,
-		txid:     txid,
-		work:     work,
-		height:   height,
-		blockMTP: blockMTP,
-		chainID:  chainID,
-		rotation: rotation,
-		registry: registry,
-		sigQueue: sigQueue,
+		tx:        input.tx,
+		txid:      input.txid,
+		work:      work,
+		height:    input.height,
+		blockMTP:  input.blockMTP,
+		chainID:   input.chainID,
+		rotation:  input.rotation,
+		registry:  input.registry,
+		sigQueue:  sigQueue,
+		inputView: input.inputView,
 	}).apply()
 	completed = true
 	return

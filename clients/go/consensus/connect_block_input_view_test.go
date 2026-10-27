@@ -1525,3 +1525,201 @@ func TestConnectBlockInputViewNoSimplicityContext(t *testing.T) {
 	}
 	assertInputViewReads(t, view, op)
 }
+
+// inputViewQueuedConnect frames exactly as connectBlockBasicWithInputView and
+// then runs the same work body through the shared queued interval.
+func inputViewQueuedConnect(t *testing.T, input connectBlockBasicInMemorySuiteContext, view logicalStateView, generated Uint128, workers int) (*connectBlockInputViewResult, *SigCheckQueue, error) {
+	t.Helper()
+	header, off, count, err := storedCommitmentFrame(input.BlockBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateInputViewPlacement(input.BlockBytes, off, count); err != nil {
+		t.Fatal(err)
+	}
+	blockMTP, err := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, header.Timestamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue := NewSigCheckQueue(workers)
+	result, err := connectBlockInputViewQueued(newBlockInputViewConnectWork(input, view, off, count, blockMTP), queue, generated)
+	if err != nil && result != nil {
+		t.Fatal("queued connect published a partial result")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("queued connect retained %d tasks", queue.Len())
+	}
+	return result, queue, err
+}
+
+func TestConnectBlockInputViewQueuedMatchesSequential(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	pre := make(map[Outpoint]UtxoEntry)
+	ops := make([]Outpoint, 4)
+	for i := range ops {
+		ops[i] = Outpoint{Txid: hashWithPrefix(byte(0x60 + i)), Vout: uint32(i)}
+		pre[ops[i]] = UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}
+	}
+	tx1 := inputViewSignedTx(t, 1, pre, kp, ops[0:2]...)
+	tx2 := inputViewSignedTx(t, 2, pre, kp, ops[2:4]...)
+	// tx3 spends tx1's output created earlier in this block: a same-block
+	// spend through the queued view path, never a view read.
+	created := map[Outpoint]UtxoEntry{{Txid: testTxIDOf(t, tx1)}: {Value: tx1.Outputs[0].Value, CovenantType: COV_TYPE_P2PK, CovenantData: tx1.Outputs[0].CovenantData, CreationHeight: 100}}
+	tx3 := inputViewSignedTx(t, 3, created, kp, Outpoint{Txid: testTxIDOf(t, tx1)})
+	input := inputViewBlock(t, 100, 1, tx1, tx2, tx3)
+	want, err := inputViewConnect(t, input, inputViewNew(pre), Uint128{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRows := inputViewConsume(t, want.spentInputs)
+	for _, workers := range []int{1, 4} {
+		view := inputViewNew(pre)
+		got, _, err := inputViewQueuedConnect(t, input, view, Uint128{}, workers)
+		if err != nil {
+			t.Fatalf("workers=%d: %v", workers, err)
+		}
+		assertInputViewReads(t, view, ops...)
+		if got.sumFees != want.sumFees || got.alreadyGeneratedN1 != want.alreadyGeneratedN1 || !reflect.DeepEqual(got.createdUtxos, want.createdUtxos) {
+			t.Fatalf("workers=%d queued result differs: %#v want %#v", workers, got, want)
+		}
+		if rows := inputViewConsume(t, got.spentInputs); !reflect.DeepEqual(rows, wantRows) {
+			t.Fatalf("workers=%d spent rows %v want %v", workers, rows, wantRows)
+		}
+	}
+}
+
+func testTxIDOf(t *testing.T, tx *Tx) [32]byte {
+	t.Helper()
+	raw, err := MarshalTx(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testTxID(t, raw)
+}
+
+func TestConnectBlockInputViewQueuedEarlierSignatureWins(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	pre := make(map[Outpoint]UtxoEntry)
+	ops := []Outpoint{{Txid: hashWithPrefix(0x71)}, {Txid: hashWithPrefix(0x72)}}
+	for _, op := range ops {
+		pre[op] = UtxoEntry{Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}
+	}
+	missing := Outpoint{Txid: hashWithPrefix(0x73)}
+	cases := []struct {
+		name      string
+		badSig    bool
+		laterRow  logicalStateRowRead
+		wantCode  string
+		wantMsg   string
+		wantPanic bool
+	}{
+		{name: "earlier_sig_before_later_missing", badSig: true, laterRow: logicalStateRowRead{kind: logicalStateRowAbsent}, wantCode: "TX_ERR_SIG_INVALID"},
+		{name: "control_valid_sig_later_missing", laterRow: logicalStateRowRead{kind: logicalStateRowAbsent}, wantCode: "TX_ERR_MISSING_UTXO", wantMsg: "utxo not found"},
+		{name: "earlier_sig_before_later_unavailable", badSig: true, laterRow: logicalStateRowRead{kind: logicalStateRowUnavailable, cause: errors.New("later read fault")}, wantCode: "TX_ERR_SIG_INVALID"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx1 := inputViewSignedTx(t, 1, pre, kp, ops...)
+			if tc.badSig {
+				tx1.Witness[0].Signature[0] ^= 0x01
+			}
+			input := inputViewBlock(t, 100, 1, tx1, inputViewTx(2, missing))
+			view := inputViewNew(pre)
+			view.rows[missing] = tc.laterRow
+			result, _, err := inputViewQueuedConnect(t, input, view, Uint128{}, 2)
+			if result != nil {
+				t.Fatal("rejected candidate delivered a result")
+			}
+			var got *TxError
+			if !errors.As(err, &got) || got.Code != ErrorCode(tc.wantCode) || (tc.wantMsg != "" && got.Msg != tc.wantMsg) {
+				t.Fatalf("error=%v, want %s", err, tc.wantCode)
+			}
+		})
+	}
+}
+
+func TestConnectBlockInputViewQueuedEarlierSignatureBeforeLaterPanic(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	op := Outpoint{Txid: hashWithPrefix(0x74)}
+	pre := map[Outpoint]UtxoEntry{op: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}}
+	for _, badSig := range []bool{true, false} {
+		tx1 := inputViewSignedTx(t, 1, pre, kp, op)
+		if badSig {
+			tx1.Witness[0].Signature[0] ^= 0x01
+		}
+		input := inputViewBlock(t, 100, 1, tx1, inputViewTx(2, Outpoint{Txid: hashWithPrefix(0x75)}))
+		view := &inputViewPanicAfterView{entries: pre}
+		queue := NewSigCheckQueue(2)
+		header, off, count, err := storedCommitmentFrame(input.BlockBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockMTP, _ := inMemoryConnectBlockMTP(input.BlockHeight, input.PrevTimestamps, header.Timestamp)
+		var result *connectBlockInputViewResult
+		recovered := func() (r any) {
+			defer func() { r = recover() }()
+			result, err = connectBlockInputViewQueued(newBlockInputViewConnectWork(input, view, off, count, blockMTP), queue, Uint128{})
+			return nil
+		}()
+		if queue.Len() != 0 || result != nil {
+			t.Fatalf("badSig=%v: retained tasks=%d result=%v", badSig, queue.Len(), result)
+		}
+		if badSig {
+			var got *TxError
+			if recovered != nil || !errors.As(err, &got) || got.Code != TX_ERR_SIG_INVALID {
+				t.Fatalf("earlier signature must replace later panic: recovered=%v err=%v", recovered, err)
+			}
+			continue
+		}
+		if recovered != "later view panic" {
+			t.Fatalf("valid earlier interval must re-raise the later panic, got %v (err=%v)", recovered, err)
+		}
+	}
+}
+
+type inputViewPanicAfterView struct{ entries map[Outpoint]UtxoEntry }
+
+func (*inputViewPanicAfterView) Counters() logicalStateCounterRead { panic("unexpected counters read") }
+
+func (v *inputViewPanicAfterView) Lookup(op Outpoint) logicalStateRowRead {
+	if entry, ok := v.entries[op]; ok {
+		return logicalStateRowRead{kind: logicalStateRowPresent, entry: entry}
+	}
+	panic("later view panic")
+}
+
+func TestConnectBlockInputViewFinishGenesisValueException(t *testing.T) {
+	const excess = uint64(1) << 62
+	for _, height := range []uint64{0, 1} {
+		input := inputViewBlock(t, height, excess)
+		_, off, count, err := storedCommitmentFrame(input.BlockBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		work := newBlockInputViewConnectWork(input, inputViewNew(nil), off, count, 0)
+		result, err := work.connect(Uint128{})
+		if height == 0 {
+			if err != nil || result == nil || result.alreadyGeneratedN1 != (Uint128{}) || len(result.createdUtxos) != 1 {
+				t.Fatalf("genesis value bound must not be evaluated: result=%#v err=%v", result, err)
+			}
+			continue
+		}
+		if result != nil {
+			t.Fatal("subsidy rejection delivered a result")
+		}
+		assertInputViewTxError(t, err, "BLOCK_ERR_SUBSIDY_EXCEEDED", "coinbase outputs exceed subsidy+fees bound")
+	}
+}
+
+func TestConnectBlockInputViewQueuedFlushBeforeFinish(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	op := Outpoint{Txid: hashWithPrefix(0x76)}
+	pre := map[Outpoint]UtxoEntry{op: {Value: 100, CovenantType: COV_TYPE_P2PK, CovenantData: p2pkCovenantDataForPubkey(kp.PubkeyBytes()), CreationHeight: 1}}
+	tx := inputViewSignedTx(t, 1, pre, kp, op)
+	tx.Witness[0].Signature[0] ^= 0x01
+	result, _, err := inputViewQueuedConnect(t, inputViewBlock(t, 100, 1, tx), inputViewNew(pre), Uint128{}, 1)
+	var got *TxError
+	if result != nil || !errors.As(err, &got) || got.Code != TX_ERR_SIG_INVALID {
+		t.Fatalf("deferred-only invalid signature must reject before finish: result=%v err=%v", result, err)
+	}
+}
