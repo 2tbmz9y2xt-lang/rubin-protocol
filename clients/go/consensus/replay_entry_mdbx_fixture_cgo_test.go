@@ -656,3 +656,41 @@ func TestReplayTreeFixtureEntryIntegrity(t *testing.T) {
 		logicalMDBXAssert(t, out.Result == selectedSideIntegrity && out.Truth == mdbx.CommitTruthOld && out.Stage == mdbx.UpdateStagePrewrite && out.CanonicalTruth == "OLD" && out.Replay == nil, "%s: %+v", label, out)
 	}
 }
+
+// D3 inside the callback: a failed envelope get or census get is returned by the entry plan and the direct entry as
+// the native EngineIO error itself, never a D4 decision, a sentinel, a Q5 call or a plan (M5).
+func TestReplayTreeFixtureEntryCallbackEIO(t *testing.T) {
+	for _, c := range []struct {
+		label  string
+		empty  bool
+		key    []byte
+		direct bool
+	}{{"entry envelope get", false, []byte{2}, false}, {"entry census", true, []byte{0}, false}, {"direct envelope get", false, []byte{2}, true}, {"direct census", true, []byte{0}, true}} {
+		w, _, view := rtEntryWorld(t, nil)
+		if c.empty {
+			w.q148Empty(t)
+		}
+		owner := NewReplayEntryOwnerV1(view, w.g)
+		call := &replayEntryCall{owner: owner, sentinel: errors.New("d3 decision"), lane: replayTreeOwnBytes}
+		var got error
+		var plan ReplayRecoveryPlanV1
+		var batch mdbx.Batch
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() {
+			_ = w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+				_, _, _, _ = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+					if c.direct {
+						plan, _, got = owner.PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
+					} else {
+						batch, got = call.treeBatch(r)
+					}
+					return mdbx.TreeOperationV1{}, got
+				})
+				return nil
+			})
+		})
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "%s fixture: %v %+v", c.label, err, evidence)
+		logicalMDBXAssert(t, errors.As(got, &engine) && engine.Class == mdbx.EngineIO && !errors.Is(got, call.sentinel) && call.decision == "" && call.result == "" &&
+			reflect.ValueOf(plan).IsZero() && reflect.ValueOf(batch).IsZero() && view.limits == nil && view.versions == nil, "%s: %v decision %q result %q plan %+v", c.label, got, call.decision, call.result, plan)
+	}
+}
