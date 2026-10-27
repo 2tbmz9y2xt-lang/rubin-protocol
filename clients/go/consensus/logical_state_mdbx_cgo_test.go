@@ -824,7 +824,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 	logicalMDBXAssert(t, requiredReadErr == nil, "required state fixture read: %v", requiredReadErr)
 	requiredExpression, requiredParseErr := constraint.Parse(strings.SplitN(string(requiredFixture), "\n", 2)[0])
 	logicalMDBXAssert(t, requiredParseErr == nil && requiredExpression.String() == "rubin_mdbx_fixture && "+logicalMDBXConstraint, "required state fixture constraint: %v/%v", requiredExpression, requiredParseErr)
-	for _, name := range []string{"retained_image_mdbx_cgo.go", "retained_image_mdbx_cgo_test.go", "retained_image_mdbx_fixture_cgo_test.go"} {
+	for _, name := range []string{"retained_image_mdbx_cgo.go", "retained_artifact_mdbx_cgo.go", "retained_image_mdbx_cgo_test.go", "retained_image_mdbx_fixture_cgo_test.go"} {
 		source, readErr := os.ReadFile(name)
 		logicalMDBXAssert(t, readErr == nil, "retained source read: %v", readErr)
 		expression, parseErr := constraint.Parse(strings.SplitN(string(source), "\n", 2)[0])
@@ -864,7 +864,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		for _, spec := range parsed.Imports {
 			if strings.HasSuffix(spec.Path.Value, `/internal/mdbx"`) {
 				imports++
-				if name == "retained_image_mdbx_cgo.go" || name == "retained_charge.go" {
+				if name == "retained_image_mdbx_cgo.go" || name == "retained_artifact_mdbx_cgo.go" || name == "retained_charge.go" {
 					continue
 				}
 				logicalMDBXAssert(t, name == "initial148_required_state_mdbx_cgo.go" || name == "block_tree_source_mdbx_cgo.go" || name == "logical_state_mdbx_cgo.go" || name == "selected_side_damage_mdbx_cgo.go" || name == "archive_profile_mdbx_cgo.go" || name == "cleanup_generation_mdbx_cgo.go" || name == "detached_drain_mdbx_cgo.go" || name == "replay_entry_mdbx_cgo.go" || name == "replay_recovery_mdbx_cgo.go" || name == "replay_path_mdbx_cgo.go" || name == "canonical_undo_mdbx_cgo.go" || name == "startup_mdbx_cgo.go" || name == "replay_step_mdbx_cgo.go" || name == "replay_header148_mdbx_cgo.go" || name == "replay_qualifier148_mdbx_cgo.go" || name == "replay_tree_route_mdbx_cgo.go", "bridge lost dormancy: %s imports internal/mdbx", name)
@@ -872,7 +872,7 @@ func TestLogicalMDBXBridgeDormantCensus(t *testing.T) {
 		}
 		files = append(files, parsed)
 	}
-	logicalMDBXAssert(t, imports == 18, "bridge lost dormancy: %d non-test internal/mdbx imports, want 18", imports)
+	logicalMDBXAssert(t, imports == 19, "bridge lost dormancy: %d non-test internal/mdbx imports, want 19", imports)
 	native := startupCensusNative(t)
 	info, config := &types.Info{Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}, &types.Config{FakeImportC: true, DisableUnusedImportCheck: true, Error: func(error) {}, Importer: logicalMDBXStubImporter{native: native}}
 	consensusPackage, _ := config.Check("consensus", fset, files, info)
