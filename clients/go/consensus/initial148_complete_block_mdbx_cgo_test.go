@@ -222,7 +222,7 @@ func TestInitial148CompleteBlockRunProtocol(t *testing.T) {
 
 			native := errors.New("native admission before validate")
 			out, err = entry(account, in, func(func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error { return native })
-			logicalMDBXAssert(t, !out.attempted && err == native && out.validationErr == nil, "run error before validate: %v", err)
+			logicalMDBXAssert(t, !out.attempted && errors.Is(err, native) && out.validationErr == nil, "run error before validate: %v", err)
 		})
 	}
 }
