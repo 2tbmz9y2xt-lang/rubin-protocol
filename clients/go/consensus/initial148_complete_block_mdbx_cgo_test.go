@@ -378,3 +378,25 @@ func TestInitial148CompleteBlockRunErrorAfterSuccess(t *testing.T) {
 		})
 	}
 }
+
+// TestInitial148CompleteBlockRunErrorAfterRejection (C13) returns a distinct
+// enclosing error after a validation rejection: the outer entry returns that
+// run error exactly and keeps the rejection only as validationErr.
+func TestInitial148CompleteBlockRunErrorAfterRejection(t *testing.T) {
+	w := btNew(t)
+	in := icbInputV1()
+	want := icbStepsErrorV1(t, in)
+	native := errors.New("enclosing cleanup failure after rejection")
+	for _, parallel := range []bool{false, true} {
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			out, err := icbEntryV1(parallel)(account, in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				_ = w.s.View(func(reader *mdbx.Reader) error {
+					_, verr := validate(reader)
+					return verr
+				})
+				return native
+			})
+			logicalMDBXAssert(t, err == native && out.attempted && reflect.DeepEqual(out.validationErr, want), "parallel=%v run error not overwritten: %v / %+v", parallel, err, out)
+		})
+	}
+}
