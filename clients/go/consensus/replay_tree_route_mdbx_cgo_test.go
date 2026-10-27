@@ -808,7 +808,7 @@ func TestReplayTreeDirectBindingAbsent(t *testing.T) {
 	rtSet(t, w.btWorld, rtStable(), mdbx.Mutation{DBI: mdbx.TreeSchemaV1DBIs()[0], Key: btMeta(0x11, 1), BeforePresent: true, AfterKind: mdbx.AfterAbsent})
 	view := &q148View{inv: q148Complete([][32]byte{b.tip()}, b.headers[3:])}
 	ran := false
-	_ = w.s.View(func(r *mdbx.Reader) error { // the integrity refusal latches the Store
+	err := w.s.View(func(r *mdbx.Reader) error {
 		plan, release, perr := NewReplayEntryOwnerV1(view, w.g).PlanDirectReplayEntryMDBX(r, mdbx.MaxOperationDataBytes)
 		logicalMDBXAssert(t, reflect.ValueOf(plan.Batch).IsZero() && perr != nil, "D5 direct: %+v %v", plan, perr)
 		logicalMDBXAssert(t, plan.ReadResource == "" && recoveryClass(perr, plan.ReadResource) == selectedSideIntegrity, "D5 direct read class: %q %v", plan.ReadResource, perr)
@@ -818,6 +818,7 @@ func TestReplayTreeDirectBindingAbsent(t *testing.T) {
 		ran = true
 		return nil
 	})
+	logicalMDBXAssert(t, err == nil, "D5 direct view: %v", err)
 	logicalMDBXAssert(t, ran && len(view.limits) == 1 && view.releases == 1, "D5 direct: Q5 limits %v releases %d", view.limits, view.releases)
 }
 
