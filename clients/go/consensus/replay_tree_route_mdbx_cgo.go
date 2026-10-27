@@ -91,3 +91,40 @@ func replayTreeIntentOnly(envelope mdbx.TreeAuthorityV1) (ReplayRecoveryPlanV1, 
 	}
 	return ReplayRecoveryPlanV1{Batch: replayRecoveryAuthorityBatch(literal, nil)}, nil
 }
+
+// replayTreeRecompute is RecomputeReplayTargetMDBX after its context and LANE_MAX gates on a tree Reader: a read error
+// (integrity, non-empty absence or a native failure) is returned with ReadResource empty; proved exact-empty absence is
+// NOT_APPLICABLE; otherwise recompute148 decides for the envelope's authority and the report carries the read envelope.
+func (o *ReplayEntryOwnerV1) replayTreeRecompute(reader *mdbx.Reader, limit uint64) (ReplayRecomputationV1, error) {
+	envelope, present, err := reader.ReadTreeAuthorityV1()
+	switch {
+	case err != nil:
+		return ReplayRecomputationV1{}, err
+	case !present:
+		return ReplayRecomputationV1{Report: ReplayRecomputationNotApplicableV1}, nil
+	}
+	report, err := o.recompute148(reader, envelope.Authority, limit)
+	report.envelope = envelope
+	return report, err
+}
+
+// replayTreeConversion is the whole-target conversion of a PLAN_CHANGE report's REPLAY envelope (GEN 1185-1188, REPLAY
+// 4369-4384): PRUNE_GC/RECOVERY_REQUIRED, pending = the target profile, ReplayV1 none, CleanupV1 exactly the two
+// target generations as ascending GENERATION spans, and the target lag, source kind and progress none; every other
+// envelope field is the read one. It reads no cursor. Consulted is the baseline observation set of the active tip.
+func replayTreeConversion(report ReplayRecomputationV1) (mdbx.Batch, error) {
+	envelope := report.envelope
+	a := &envelope.Authority
+	target, lag, profile := a.Replay.TargetGenerationID, envelope.TargetLagGenerationID, a.Replay.TargetProfile
+	a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{
+		{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: min(target, lag)},
+		{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: max(target, lag)},
+	}}
+	a.Phase, a.Lifecycle, a.PendingTargetProfile, a.Replay = mdbx.StoragePhasePruneGCV1, mdbx.StorageLifecycleRecoveryRequiredV1, &profile, nil
+	envelope.TargetLagGenerationID, envelope.SourceKind, envelope.Progress = 0, mdbx.TreeSourceNoneV1, mdbx.TreeProgressV1{}
+	literal, err := replayTreeEncode(envelope)
+	if err != nil {
+		return mdbx.Batch{}, err
+	}
+	return replayRecoveryAuthorityBatch(literal, replayEntryConsulted(a.ActiveGenerationID, report.activeTip)), nil
+}

@@ -57,7 +57,7 @@ const (
 // storage_capacity) for REFUSED, STALE_LOCAL_PLAN for STALE and empty otherwise; Evidence is non-zero exactly for
 // TARGET_LOCAL (the canonical-v1 row of the first target-local defect); Release is non-nil exactly for STALE,
 // PLAN_CHANGE and ACTIVATION_ELIGIBLE and the caller runs it exactly once after its own commit; on an error only
-// ReadResource is set.
+// ReadResource is set. On a tree Reader the report also carries the read TreeAuthorityV1 envelope (replayTreeRecompute).
 type ReplayRecomputationV1 struct {
 	Report       ReplayRecomputationReportV1
 	Result       string
@@ -67,6 +67,7 @@ type ReplayRecomputationV1 struct {
 	reader       *mdbx.Reader
 	authority    mdbx.StorageAuthorityV1
 	activeTip    uint64
+	envelope     mdbx.TreeAuthorityV1
 }
 
 // replayInvLimit is invLimit(lane) = floor((lane - M) * 116 / 244) for M <= lane <= LANE_MAX; zero is the full lane.
@@ -211,10 +212,14 @@ func (o *ReplayEntryOwnerV1) replayRecoveryGates(reader *mdbx.Reader, limit uint
 // PlanReplayTargetConversionMDBX plans the target-to-GENERATION plan change (MP 2508-2512) for a PLAN_CHANGE report
 // returned by RecomputeReplayTargetMDBX on this same Reader; any other report is the empty Batch and nil. It reads
 // nothing: PRUNE_GC/RECOVERY_REQUIRED, pending = ReplayV1.target_profile, ReplayV1 cleared and CleanupV1 exactly
-// {GENERATION(target_generation_id)}; no row is deleted, no counter written and no target index row touched.
+// {GENERATION(target_generation_id)}; no row is deleted, no counter written and no target index row touched. A report
+// carrying a tree envelope is planned by replayTreeConversion (both target generations become GENERATION spans).
 func PlanReplayTargetConversionMDBX(reader *mdbx.Reader, report ReplayRecomputationV1) (mdbx.Batch, error) {
 	if report.Report != ReplayRecomputationPlanChangeV1 || report.reader == nil || report.reader != reader {
 		return mdbx.Batch{}, nil
+	}
+	if report.envelope.Authority.Version != 0 {
+		return replayTreeConversion(report)
 	}
 	a := report.authority
 	a.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: a.Replay.TargetGenerationID}}}
@@ -250,10 +255,13 @@ type replayRecompute struct {
 // RecomputeReplayTargetMDBX is the pre-activation recomputation (MP 2789-2803, 2873-2916) at REPLAY with the cursor
 // APPLIED at the target height: the active index walk, then the target index stream through the cursor, then
 // stitching and selection over the complete candidate set, then the fresh-best-tip and published-comparand
-// classification and one ProtectV1. It writes nothing and returns no Batch; any other authority is NOT_APPLICABLE.
+// classification and one ProtectV1. It writes nothing and returns no Batch; any other authority is NOT_APPLICABLE. On a
+// tree Reader the gates' authority read refusal selects replayTreeRecompute.
 func (o *ReplayEntryOwnerV1) RecomputeReplayTargetMDBX(reader *mdbx.Reader, limit uint64) (ReplayRecomputationV1, error) {
 	a, done, err := o.replayRecoveryGates(reader, limit)
 	switch {
+	case done && replayTreeRefused(err, replayTreeReaderRefusal):
+		return o.replayTreeRecompute(reader, limit)
 	case done:
 		return ReplayRecomputationV1{}, err
 	case !replayRecomputeDomain(a):

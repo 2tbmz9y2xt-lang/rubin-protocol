@@ -390,3 +390,55 @@ func rtIllegalStablePending(t *testing.T) []byte {
 	t.Fatal("no lifecycle byte")
 	return nil
 }
+
+// D1, H1 (format-3 recomputation and conversion): a REPLAY meta key 2 row whose target lag equals the active id, the
+// lag id or the target CURRENT id, or is zero, is TERMINAL_STORE_INTEGRITY(canonical) with ReadResource empty before
+// Q6 (no inventory call), never a three-role conversion; nothing is written.
+func TestReplayTreeFixtureRecomputeUndecodable(t *testing.T) {
+	replay := rtReplayEnvelope(mdbx.StorageAuthorityV1{ActiveGenerationID: 1, Phase: mdbx.StoragePhaseReplayV1, Replay: &mdbx.ReplayV1{
+		TargetGenerationID: 2,
+		Target:             mdbx.RecoveryTargetV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}, TipHash: [32]byte{1}, TipHeight: 1, CumulativeChainwork: [40]byte{39: 1}}, Cursor: mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: 1, BlockHash: [32]byte{1}},
+	}})
+	legal, err := replay.Encode()
+	logicalMDBXAssert(t, err == nil, "REPLAY encode: %v", err)
+	logicalMDBXAssert(t, bytes.Equal(legal[10:18], []byte{0, 0, 0, 0, 0, 0, 0, 4}), "REPLAY target lag premise: %x", legal[10:18])
+	for label, lag := range map[string]byte{"control": 4, "zero": 0, "= active": 1, "= target": 2, "= lag": 3} {
+		damaged := bytes.Clone(legal)
+		damaged[17] = lag
+		w := rtNew(t, rtStable())
+		logicalMDBXAssert(t, mdbx.FixtureSeedRawRow(w.s, 0, []byte{2}, damaged) == nil, "%s seed", label)
+		view := &q148View{}
+		c := rtRecompute(t, w, NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}), false)
+		if lag == 4 {
+			logicalMDBXAssert(t, recoveryClass(c.recErr, c.report.ReadResource) != selectedSideIntegrity && c.report.envelope.TargetLagGenerationID == 4 && len(view.limits) == 1,
+				"H1 control: the legal envelope did not reach Q6: %+v %v", c.report, c.recErr)
+			continue
+		}
+		logicalMDBXAssert(t, c.recErr != nil && errors.Is(c.err, c.recErr) && reflect.ValueOf(c.report).IsZero() && recoveryClass(c.recErr, c.report.ReadResource) == selectedSideIntegrity,
+			"H1 %s: %+v %v", label, c.report, c.recErr)
+		logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite && view.limits == nil && view.versions == nil, "H1 %s: %d/%d view %+v", label, c.truth, c.stage, view)
+	}
+}
+
+// D3 (format-3 recomputation): a transient native failure of the envelope get or inside the absence census is
+// LOCAL_RESOURCE_UNAVAILABLE(storage_io) with ReadResource empty before Q6, never NOT_APPLICABLE, and nothing written.
+func TestReplayTreeFixtureRecomputeEIO(t *testing.T) {
+	for label, c := range map[string]struct {
+		envelope mdbx.TreeAuthorityV1
+		key      []byte
+	}{"envelope get": {rtStable(), []byte{2}}, "absence census": {mdbx.TreeAuthorityV1{}, []byte{0}}} {
+		w := rtNew(t, c.envelope)
+		image := rtImage(t, w)
+		view := &q148View{}
+		var out rtRecomputed
+		evidence, err := mdbx.FixtureSelectedDamage(w.s, w.owner, mdbx.SelectedDamageGetEIO, 0, c.key, func() {
+			out = rtRecompute(t, w, NewReplayEntryOwnerV1(view, PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}), false)
+		})
+		logicalMDBXAssert(t, err == nil && evidence.Faults == 1, "D3 %s fixture: %v %+v", label, err, evidence)
+		var engine *mdbx.EngineError
+		logicalMDBXAssert(t, out.recErr != nil && errors.As(out.recErr, &engine) && engine.Class == mdbx.EngineIO && reflect.ValueOf(out.report).IsZero() && out.truth == mdbx.CommitTruthOld &&
+			recoveryClass(out.recErr, out.report.ReadResource) == "LOCAL_RESOURCE_UNAVAILABLE(storage_io)" && view.limits == nil, "D3 %s: %+v %v %v", label, out.report, out.recErr, out.err)
+		w.reopen(t)
+		logicalMDBXAssert(t, reflect.DeepEqual(image, rtImage(t, w)), "D3 %s: image changed", label)
+	}
+}

@@ -273,3 +273,191 @@ func TestReplayTreeIntentNonEmptyAbsence(t *testing.T) {
 		"D2: %+v %v %v", c.plan, c.planErr, c.err)
 	logicalMDBXAssert(t, c.stage == mdbx.UpdateStagePrewrite && c.index == -1, "D2: the refusal reached stage %d", c.stage)
 }
+
+// rtReplayEnvelope is REPLAY/RECOVERY_REQUIRED GENESIS_REPLAY with active 1, lag 3, target 2 (target profile ARCHIVE,
+// the active profile PRUNED), target lag 4 and next 5 over authority a (q148Replay).
+func rtReplayEnvelope(a mdbx.StorageAuthorityV1) mdbx.TreeAuthorityV1 {
+	a.Version, a.ActiveProfile, a.NextGenerationID, a.Lifecycle = 1, mdbx.StorageProfilePrunedV1, 5, mdbx.StorageLifecycleRecoveryRequiredV1
+	a.Replay.TargetProfile = mdbx.StorageProfileArchiveV1
+	return mdbx.TreeAuthorityV1{Authority: a, LagGenerationID: 3, TargetLagGenerationID: 4, SourceKind: mdbx.TreeSourceGenesisReplayV1}
+}
+
+// rtReplayWorld is q148Recomputation's world (active tip 2, target index of generation 2 with tip 4) whose envelope is
+// rewritten to rtReplayEnvelope, with counter and binding rows for generations 3 and 4.
+func rtReplayWorld(t *testing.T) (*q148World, mdbx.TreeAuthorityV1, *q148View) {
+	t.Helper()
+	w, s, tg := q148Recomputation(t, 2)
+	heavy := s.clone(2)
+	heavy.extend(t, 3, 4*TARGET_BLOCK_INTERVAL, false)
+	envelope := rtReplayEnvelope(q148Replay(w, tg, 4, t))
+	literal, err := envelope.Encode()
+	logicalMDBXAssert(t, err == nil, "REPLAY envelope: %v", err)
+	root := rtImageRow(t, w.btWorld, btMeta(0x11, 1))
+	rows := []mdbx.Mutation{btMutation(0, []byte{2}, literal)}
+	rows[0].BeforePresent = true
+	for _, g := range []uint64{3, 4} {
+		rows = append(rows, btMutation(0, btMeta(0x10, g), make([]byte, 16)), btMutation(0, btMeta(0x11, g), root))
+	}
+	w.pair(t, rows...)
+	return w, envelope, &q148View{inv: q148Complete([][32]byte{heavy.tip()}, heavy.headers[3:])}
+}
+
+func rtImageRow(t *testing.T, w *btWorld, key []byte) []byte {
+	t.Helper()
+	var value []byte
+	err := w.s.View(func(r *mdbx.Reader) error {
+		v, present, gerr := r.Get(mdbx.TreeSchemaV1DBIs()[0], key)
+		logicalMDBXAssert(t, gerr == nil && present, "row %x: %t %v", key, present, gerr)
+		value = bytes.Clone(v)
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "row view: %v", err)
+	return value
+}
+
+type rtRecomputed struct {
+	report  ReplayRecomputationV1
+	recErr  error
+	batch   mdbx.Batch
+	convErr error
+	direct  ReplayRecomputationV1
+	rtCommit
+}
+
+// rtRecompute runs RecomputeReplayTargetMDBX and PlanReplayTargetConversionMDBX inside UpdateTreeV1's callback and
+// hands the Batch to replayTreeOperation; with direct it also runs Q6 on the read authority under the same Reader.
+// Every Release runs after the commit call.
+func rtRecompute(t *testing.T, w *btWorld, owner *ReplayEntryOwnerV1, direct bool) rtRecomputed {
+	t.Helper()
+	var c rtRecomputed
+	err := w.owner.WithOperation(mdbx.LaneOperation, func(a *mdbx.OperationAccount) error {
+		c.truth, c.stage, c.index, c.err = w.s.UpdateTreeV1(a, func(r *mdbx.Reader) (mdbx.TreeOperationV1, error) {
+			c.report, c.recErr = owner.RecomputeReplayTargetMDBX(r, mdbx.MaxOperationDataBytes)
+			if c.recErr != nil {
+				return mdbx.TreeOperationV1{}, c.recErr
+			}
+			if direct {
+				c.direct, _ = owner.recompute148(r, c.report.envelope.Authority, mdbx.MaxOperationDataBytes)
+			}
+			c.batch, c.convErr = PlanReplayTargetConversionMDBX(r, c.report)
+			return replayTreeOperation(c.batch)
+		})
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "recompute account: %v", err)
+	for _, release := range []func(){c.report.Release, c.direct.Release} {
+		if release != nil {
+			release()
+		}
+	}
+	return c
+}
+
+// rtConverted is the C plan's envelope from the aliases: PRUNE_GC/RECOVERY_REQUIRED, pending = the target profile,
+// ReplayV1 none, CleanupV1 [GENERATION(lo), GENERATION(hi)], target lag, source kind and progress none.
+func rtConverted(before mdbx.TreeAuthorityV1, lo, hi uint64) mdbx.TreeAuthorityV1 {
+	want := before
+	profile := before.Authority.Replay.TargetProfile
+	want.Authority.Phase, want.Authority.Lifecycle, want.Authority.PendingTargetProfile, want.Authority.Replay = mdbx.StoragePhasePruneGCV1, mdbx.StorageLifecycleRecoveryRequiredV1, &profile, nil
+	want.Authority.Cleanup = &mdbx.CleanupV1{Spans: []mdbx.CleanupSpanV1{{Kind: mdbx.CleanupSpanGenerationV1, GenerationID: lo}, {Kind: mdbx.CleanupSpanGenerationV1, GenerationID: hi}}}
+	want.TargetLagGenerationID, want.SourceKind, want.Progress = 0, mdbx.TreeSourceNoneV1, mdbx.TreeProgressV1{}
+	return want
+}
+
+// rtConsulted is the active generation-1 index rows at heights 0, 1, tip and tip+1 for an active tip of 2.
+func rtConsulted(t *testing.T) []mdbx.ConsultedRow {
+	t.Helper()
+	var rows []mdbx.ConsultedRow
+	for _, h := range []uint64{0, 1, 2, 3} {
+		key, err := mdbx.HeightKey(1, h)
+		logicalMDBXAssert(t, err == nil, "height key: %v", err)
+		rows = append(rows, mdbx.ConsultedRow{DBI: mdbx.TreeSchemaV1DBIs()[2], Key: key})
+	}
+	return rows
+}
+
+// Y1, C1, H2, X1: on a tree Reader RecomputeReplayTargetMDBX returns Q6's report for the envelope's authority with the
+// read envelope; its PLAN_CHANGE converts both target generations into ascending GENERATION spans and nothing else.
+func TestReplayTreeConversion(t *testing.T) {
+	w, before, view := rtReplayWorld(t)
+	image := rtImage(t, w.btWorld)
+	c := rtRecompute(t, w.btWorld, NewReplayEntryOwnerV1(view, w.g), true)
+	logicalMDBXAssert(t, c.recErr == nil && c.convErr == nil && c.report.Report == ReplayRecomputationPlanChangeV1 && c.report.activeTip == 2, "Y1 report: %+v %v %v", c.report, c.recErr, c.convErr)
+	logicalMDBXAssert(t, reflect.DeepEqual(c.report.envelope, before) && reflect.DeepEqual(c.report.authority, before.Authority), "Y1 envelope: %+v", c.report.envelope)
+	logicalMDBXAssert(t, c.direct.Report == c.report.Report && c.direct.Result == c.report.Result && c.direct.activeTip == c.report.activeTip && c.direct.reader == c.report.reader &&
+		reflect.DeepEqual(c.direct.authority, c.report.authority) && c.direct.ReadResource == c.report.ReadResource && c.direct.Evidence.Key == nil && c.report.Evidence.Key == nil, "Y1: not Q6's report: %+v %+v", c.direct, c.report)
+	logicalMDBXAssert(t, c.err == nil && c.truth == mdbx.CommitTruthNew && c.index == -1, "C1 commit: %d/%d/%d %v", c.truth, c.stage, c.index, c.err)
+	logicalMDBXAssert(t, len(c.batch.Mutations) == 1 && reflect.DeepEqual(c.batch.Consulted, rtConsulted(t)), "C1 plan: %+v", c.batch)
+	m := c.batch.Mutations[0]
+	logicalMDBXAssert(t, m.DBI == mdbx.TreeSchemaV1DBIs()[0] && bytes.Equal(m.Key, []byte{2}) && m.AfterKind == mdbx.AfterLiteral && m.BeforePresent, "C1 mutation: %+v", m)
+	want := rtConverted(before, 2, 4)
+	decoded := rtLegal(t, m.Literal, "C1")
+	got := rtEnvelope(t, w.btWorld)
+	logicalMDBXAssert(t, reflect.DeepEqual(got, want) && reflect.DeepEqual(decoded, want), "C1 readback: %+v want %+v", got, want)
+	after := rtImage(t, w.btWorld)
+	logicalMDBXAssert(t, len(after) == len(image), "C1 image shape")
+	for i := range image {
+		logicalMDBXAssert(t, i == 3 || bytes.Equal(image[i], after[i]), "C1: row %d other than the envelope changed", i)
+	}
+	logicalMDBXAssert(t, view.releases == 2, "C1: releases %d", view.releases)
+}
+
+// C2, H2: the C plan reads no cursor and orders the spans ascending whichever target role is lower.
+func TestReplayTreeConversionNoCursor(t *testing.T) {
+	w, before, view := rtReplayWorld(t)
+	owner := NewReplayEntryOwnerV1(view, w.g)
+	err := w.s.View(func(r *mdbx.Reader) error {
+		base, rerr := owner.RecomputeReplayTargetMDBX(r, mdbx.MaxOperationDataBytes)
+		logicalMDBXAssert(t, rerr == nil && base.Report == ReplayRecomputationPlanChangeV1, "C2 premise: %+v %v", base, rerr)
+		defer base.Release()
+		reference, rerr := PlanReplayTargetConversionMDBX(r, base)
+		logicalMDBXAssert(t, rerr == nil, "C2 reference: %v", rerr)
+		for label, edit := range map[string]func(e *mdbx.TreeAuthorityV1) (uint64, uint64){
+			"PRE_GENESIS": func(e *mdbx.TreeAuthorityV1) (uint64, uint64) {
+				e.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorPreGenesisV1}
+				return 2, 4
+			},
+			"partial": func(e *mdbx.TreeAuthorityV1) (uint64, uint64) {
+				e.Authority.Replay.Cursor = mdbx.ReplayCursorV1{Kind: mdbx.ReplayCursorAppliedV1, Height: 1, BlockHash: [32]byte{1}}
+				return 2, 4
+			},
+			"target above lag": func(e *mdbx.TreeAuthorityV1) (uint64, uint64) {
+				e.Authority.Replay.TargetGenerationID, e.TargetLagGenerationID = 4, 2
+				return 2, 4
+			},
+		} {
+			report := base
+			replay := *before.Authority.Replay
+			report.envelope = before
+			report.envelope.Authority.Replay = &replay
+			lo, hi := edit(&report.envelope)
+			batch, cerr := PlanReplayTargetConversionMDBX(r, report)
+			logicalMDBXAssert(t, cerr == nil && len(batch.Mutations) == 1, "C2 %s: %v", label, cerr)
+			decoded := rtLegal(t, batch.Mutations[0].Literal, "C2 "+label)
+			logicalMDBXAssert(t, reflect.DeepEqual(decoded, rtConverted(before, lo, hi)) && bytes.Equal(batch.Mutations[0].Literal, reference.Mutations[0].Literal) && reflect.DeepEqual(batch.Consulted, reference.Consulted), "C2 %s: %+v", label, decoded)
+		}
+		return nil
+	})
+	logicalMDBXAssert(t, err == nil, "C2 view: %v", err)
+}
+
+// Y1 domain, D4, D2: NONE/STABLE is Q6's NOT_APPLICABLE and exact-empty absence is NOT_APPLICABLE, both with no
+// inventory call and the empty conversion; a non-empty absence is TERMINAL_STORE_INTEGRITY(canonical) before Q6.
+func TestReplayTreeRecomputeDomain(t *testing.T) {
+	g := PublishedGenesisContextV1{ChainID: [32]byte{0xc1}, GenesisHash: [32]byte{0xc2}}
+	for label, envelope := range map[string]mdbx.TreeAuthorityV1{"NONE/STABLE": rtStable(), "D4 exact-empty": {}, "PRUNE_GC/STABLE": rtPrune()} {
+		w := rtNew(t, envelope)
+		image := rtImage(t, w)
+		view := &q148View{}
+		c := rtRecompute(t, w, NewReplayEntryOwnerV1(view, g), false)
+		logicalMDBXAssert(t, c.recErr == nil && c.report.Report == ReplayRecomputationNotApplicableV1 && c.report.Release == nil && reflect.DeepEqual(c.report.envelope, envelope), "%s: %+v %v", label, c.report, c.recErr)
+		logicalMDBXAssert(t, c.convErr == nil && reflect.ValueOf(c.batch).IsZero() && view.limits == nil && view.calls116 == 0 && view.versions == nil, "%s: conversion %+v view %+v", label, c.batch, view)
+		logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite && reflect.DeepEqual(image, rtImage(t, w)), "%s: %d/%d %v", label, c.truth, c.stage, c.err)
+	}
+	w := rtNew(t, mdbx.TreeAuthorityV1{}, btMutation(0, btMeta(0x10, 1), make([]byte, 16)))
+	view := &q148View{}
+	c := rtRecompute(t, w, NewReplayEntryOwnerV1(view, g), false)
+	logicalMDBXAssert(t, c.recErr != nil && errors.Is(c.err, c.recErr) && reflect.ValueOf(c.report).IsZero() && recoveryClass(c.recErr, c.report.ReadResource) == selectedSideIntegrity && view.limits == nil,
+		"D2: %+v %v", c.report, c.recErr)
+	logicalMDBXAssert(t, c.truth == mdbx.CommitTruthOld && c.stage == mdbx.UpdateStagePrewrite, "D2: %d/%d", c.truth, c.stage)
+}
