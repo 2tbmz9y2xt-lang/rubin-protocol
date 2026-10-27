@@ -1058,10 +1058,29 @@ func TestInitial148CompleteBlockAcceptH5(t *testing.T) {
 	}
 }
 
+// icbNativeSourceV1 is the Source composed into the native operation. The
+// native writer calls it on its own goroutine (internal/mdbx/tree_call_cgo.go
+// runTreeLockedV1), so it only records; tests assert after UpdateTreeV1.
+type icbNativeSourceV1 struct {
+	source    *blockTreeSourceV1
+	before    func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error
+	badWindow int
+}
+
+func (s *icbNativeSourceV1) TreeDeltaV1(p mdbx.TreePositionV1, r *mdbx.Reader, sink *mdbx.TreeDeltaSinkV1) error {
+	if len(sink.WindowV1()) != 65536 {
+		s.badWindow++
+	}
+	if err := s.before(p, r, sink); err != nil {
+		return err
+	}
+	return s.source.TreeDeltaV1(p, r, sink)
+}
+
 // icbComposeV1 is the enclosing builder: the root-valid result is composed
 // into one TreeOperationV1 (header row, Primitive, both Index rows and
 // CurrentBody), exactly as the existing bt operation composes a source.
-func icbComposeV1(result *initial148CompleteBlockResultV1, observed *btObserved, header []byte, present bool) mdbx.TreeOperationV1 {
+func icbComposeV1(result *initial148CompleteBlockResultV1, observed *icbNativeSourceV1, header []byte, present bool) mdbx.TreeOperationV1 {
 	var op mdbx.TreeOperationV1
 	if !present {
 		op.Pair.Mutations = append(op.Pair.Mutations, btMutation(3, bytes.Clone(result.effect.Primitive.Block[:]), bytes.Clone(header)))
@@ -1090,7 +1109,7 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 		var native btResult
 		builderReturned, consumed, early, released := false, 0, 0, 0
 		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-			observed := &btObserved{t: t}
+			observed := &icbNativeSourceV1{}
 			// The native writer may run this on its own goroutine: record only;
 			// the assertions run on the test goroutine after UpdateTreeV1.
 			observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
@@ -1125,6 +1144,7 @@ func TestInitial148CompleteBlockUpdateTreeH5(t *testing.T) {
 			logicalMDBXAssert(t, err == nil && out.attempted && out.validationErr == nil && out.required.root == f.header.UtxoRoot, "parallel=%v composed acceptance: %v / %+v", parallel, err, out)
 			logicalMDBXAssert(t, early == 0, "parallel=%v source consumed before the builder returned (%d)", parallel, early)
 			logicalMDBXAssert(t, released == 0, "parallel=%v W released before native last use (%d)", parallel, released)
+			logicalMDBXAssert(t, observed.badWindow == 0, "parallel=%v native source window length differs from 65536 (%d)", parallel, observed.badWindow)
 		})
 		native.want(t, 2, 3, -1)
 		logicalMDBXAssert(t, consumed > 0, "parallel=%v native writer never consumed the source", parallel)
@@ -1161,7 +1181,7 @@ func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 			composed, consumed, released := false, 0, 0
 			var nativeOut error
 			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
-				observed := &btObserved{t: t}
+				observed := &icbNativeSourceV1{}
 				// Possibly on the native writer goroutine: record only; asserted below.
 				observed.before = func(mdbx.TreePositionV1, *mdbx.Reader, *mdbx.TreeDeltaSinkV1) error {
 					consumed++
@@ -1194,6 +1214,7 @@ func TestInitial148CompleteBlockUpdateTreeFailuresH5(t *testing.T) {
 				}
 				logicalMDBXAssert(t, errors.Is(err, nativeErr) && any(err) == any(nativeOut) && out.attempted && out.validationErr == nil && out.required.derived, "%s parallel=%v run error replaced: %v / %+v", mode, parallel, err, out)
 				logicalMDBXAssert(t, released == 0, "%s parallel=%v W released before native failure (%d)", mode, parallel, released)
+				logicalMDBXAssert(t, observed.badWindow == 0, "%s parallel=%v native source window length differs from 65536 (%d)", mode, parallel, observed.badWindow)
 				logicalMDBXAssert(t, composed && consumed > 0 && icbHoldsExactlyV1(account, 0), "%s parallel=%v composed=%v consumed=%d or residual hold", mode, parallel, composed, consumed)
 			})
 			if mode == "native" {
