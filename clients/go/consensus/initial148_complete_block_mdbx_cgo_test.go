@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
@@ -1289,5 +1290,261 @@ func TestInitial148CompleteBlockDeriveCapacityH5(t *testing.T) {
 				return nil
 			}) == nil, "pre-hold")
 		})
+	}
+}
+
+// icbLaneV1 is TREE_LANE_MAX=402,653,184, the TreeOperation account ceiling.
+const icbLaneV1 = 402_653_184
+
+// icbW5V1 is the RUB-1654 W of an h=5 fixture input from literal counts:
+// n=len(Raw); d=0, c=0 (inactive empty cap registry); DefaultSuiteRegistry
+// has r=1 suite named "ML-DSA-87" (a=9); p=min(5,11)=5 parent timestamps; g=0.
+func icbW5V1(n int) uint64 {
+	return 16_777_216 + 8_192*uint64(n) + 16_384*0 + 128*0 + 1_024*1 + 2*9 + 8*5 + 0
+}
+
+// icbHoldsExactlyV1 reports whether the account holds exactly held bytes:
+// the remaining lane fits icbLaneV1-held and not one byte more.
+func icbHoldsExactlyV1(account *mdbx.OperationAccount, held uint64) bool {
+	fits := account.WithReservation(icbLaneV1-held, func() error { return nil }) == nil
+	over := account.WithReservation(icbLaneV1-held+1, func() error { return nil })
+	return fits && mdbx.IsOperationReservationCapacity(over)
+}
+
+// icbHugeLenV1 returns a slice header of length n over one element. Only
+// len() is read by the tariff; no element beyond the first is ever indexed.
+func icbHugeLenV1(n int) []SimplicityDeploymentDescriptor {
+	s := make([]SimplicityDeploymentDescriptor, 1)
+	header := (*struct {
+		data     unsafe.Pointer
+		len, cap int
+	})(unsafe.Pointer(&s))
+	header.len, header.cap = n, n
+	return s
+}
+
+// TestInitial148CompleteBlockTariffOverflow (C12 overflow) drives the checked
+// uint64 recipe on icbInputV1 (fixed part 18,417,692, d the only varied
+// count) across multiplication overflow (16,384*2^50 = 2^64), addition carry
+// (16,384*(2^50-2^10) = 2^64-2^24, plus 2^24), the int64 domain bound and its
+// largest admitted value. The refusals return the local invariant failure
+// before W and never invoke run.
+func TestInitial148CompleteBlockTariffOverflow(t *testing.T) {
+	const fixed = 18_417_692
+	const largest = (1<<63 - 1 - fixed) / 16_384
+	cases := []struct {
+		name string
+		d    int
+		ok   bool
+		w    uint64
+	}{
+		{"multiplication-overflow", 1 << 50, false, 0},
+		{"addition-carry", 1<<50 - 1<<10, false, 0},
+		{"above-int64", 1 << 49, false, 0},
+		{"largest-admitted", largest, true, fixed + 16_384*largest},
+		{"one-above-largest", largest + 1, false, 0},
+	}
+	w := btNew(t)
+	for _, c := range cases {
+		in := icbInputV1()
+		in.Rotation = &boundSpendSurfaceWithDeployment{boundSpendSurface: icbFrozenV1(1), descriptors: icbHugeLenV1(c.d), have: true}
+		got, ok := initial148CompleteTariffV1(in)
+		logicalMDBXAssert(t, ok == c.ok && (!c.ok || got == c.w), "%s: W=%d ok=%v want %d/%v", c.name, got, ok, c.w, c.ok)
+		if c.ok {
+			continue
+		}
+		icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+			called := false
+			out, err := withInitial148CompleteBlockParallelV1(account, in, 4, func(func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+				called = true
+				return nil
+			})
+			var failure *logicalStateFailure
+			local := errors.As(err, &failure) && failure.kind == logicalStateFailureLocalInvariant
+			logicalMDBXAssert(t, local && !called && out == (initial148CompleteBlockOutcomeV1{}) && icbHoldsExactlyV1(account, 0), "%s entry: err=%v called=%v out=%+v", c.name, err, called, out)
+		})
+	}
+}
+
+// TestInitial148CompleteBlockTariffH5 (C12 exact residual) pins the h=5 W
+// from literal counts and, on the same account pre-holding everything but W
+// plus the nested source scratch 4,824, R=69,656+196,824E and D=288,408+104E,
+// walks every reserve boundary through each entry: one byte below the source
+// scratch, R and D each refuses with the raw capacity cause at its own charge
+// (only D's refusal is the D cause), the exact sum accepts, and W-1 refuses
+// before run. E is the control's delivered source EventCount.
+func TestInitial148CompleteBlockTariffH5(t *testing.T) {
+	for _, workers := range []int{-1, 1, 4} {
+		w := btNew(t)
+		f := icbH5FixtureV1(t, w)
+		tariff := icbW5V1(len(f.in.Raw))
+		got, ok := initial148CompleteTariffV1(f.in)
+		logicalMDBXAssert(t, ok && got == tariff, "h5 W %d/%v want literal %d", got, ok, tariff)
+		events := icbEventsV1(t, w, f.in)
+		r, d := uint64(69_656+196_824*events), uint64(288_408+104*events)
+		cases := []struct {
+			name             string
+			free             uint64
+			called, accepted bool
+			dCause           bool
+		}{
+			{"W-1", tariff - 1, false, false, false},
+			{"source-scratch-1", tariff + 4_824 - 1, true, false, false},
+			{"R-1", tariff + r - 1, true, false, false},
+			{"D-1", tariff + r + d - 1, true, false, true},
+			{"exact", tariff + r + d, true, true, false},
+		}
+		for _, c := range cases {
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				logicalMDBXAssert(t, account.WithReservation(icbLaneV1-c.free, func() error {
+					called := false
+					var out initial148CompleteBlockOutcomeV1
+					var delivered bool
+					var err error
+					run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+						called = true
+						return w.s.View(func(reader *mdbx.Reader) error {
+							result, verr := validate(reader)
+							delivered = result != nil
+							return verr
+						})
+					}
+					if workers < 0 {
+						out, err = withInitial148CompleteBlockV1(account, f.in, run)
+					} else {
+						out, err = withInitial148CompleteBlockParallelV1(account, f.in, workers, run)
+					}
+					logicalMDBXAssert(t, called == c.called && delivered == c.accepted, "%s workers=%d called=%v delivered=%v err=%v", c.name, workers, called, delivered, err)
+					if c.accepted {
+						logicalMDBXAssert(t, err == nil && out.required.derived && out.required.root == f.header.UtxoRoot, "%s workers=%d: %v / %+v", c.name, workers, err, out)
+						return nil
+					}
+					var txErr *TxError
+					logicalMDBXAssert(t, mdbx.IsOperationReservationCapacity(err) && !errors.As(err, &txErr) && out.attempted == c.called, "%s workers=%d capacity: %v / %+v", c.name, workers, err, out)
+					logicalMDBXAssert(t, (any(out.required.cause) == any(err)) == c.dCause && !out.required.derived && !out.required.hasObservation, "%s workers=%d required: %+v", c.name, workers, out.required)
+					return nil
+				}) == nil, "%s pre-hold", c.name)
+			})
+		}
+	}
+}
+
+// icbEventsV1 returns the source EventCount of a delivered control validation.
+func icbEventsV1(t *testing.T, w *btWorld, in initial148CompleteBlockInputV1) uint64 {
+	t.Helper()
+	var events uint64
+	icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+		_, err := withInitial148CompleteBlockV1(account, in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+			return w.s.View(func(reader *mdbx.Reader) error {
+				result, verr := validate(reader)
+				if result != nil {
+					events = uint64(result.effect.Primitive.Coverage.BlockMeta.EventCount)
+				}
+				return verr
+			})
+		})
+		logicalMDBXAssert(t, err == nil && events != 0, "event count control: %v", err)
+	})
+	return events
+}
+
+// TestInitial148CompleteBlockStageHoldsH5 (C12 last-use holds) probes the
+// same account at every run-visible stage of the h=5 block through each
+// entry: before validate, inside the Reader after validate returned (source
+// scratch, R and D already released), after the builder's Reader expired, and
+// for a rejected variant after validate returned; each holds exactly W. After
+// the entry returns, nothing is held.
+func TestInitial148CompleteBlockStageHoldsH5(t *testing.T) {
+	for _, flip := range []int{0, 1} {
+		for _, workers := range []int{-1, 1, 4} {
+			w := btNew(t)
+			f := icbH5VariantV1(t, w, icbH5OptsV1{flip: flip})
+			tariff := icbW5V1(len(f.in.Raw))
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				var stages []string
+				probe := func(stage string) {
+					if !icbHoldsExactlyV1(account, tariff) {
+						stages = append(stages, stage)
+					}
+				}
+				run := func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+					probe("before-validate")
+					err := w.s.View(func(reader *mdbx.Reader) error {
+						_, verr := validate(reader)
+						probe("after-validate")
+						return verr
+					})
+					probe("after-builder")
+					return err
+				}
+				var err error
+				if workers < 0 {
+					_, err = withInitial148CompleteBlockV1(account, f.in, run)
+				} else {
+					_, err = withInitial148CompleteBlockParallelV1(account, f.in, workers, run)
+				}
+				logicalMDBXAssert(t, (err == nil) == (flip == 0) && len(stages) == 0, "flip=%d workers=%d W not exactly held at %v (err %v)", flip, workers, stages, err)
+				logicalMDBXAssert(t, icbHoldsExactlyV1(account, 0), "flip=%d workers=%d residual hold after return", flip, workers)
+			})
+		}
+	}
+}
+
+// TestInitial148CompleteBlockUnwindReleaseH5 (C12 release, C13) delivers the
+// root-valid h=5 result and then ends run by error, panic or Goexit through
+// each entry: the error or panic is propagated exactly, the account holds
+// nothing afterwards and a fresh invocation on the same account accepts with
+// a fresh D.
+func TestInitial148CompleteBlockUnwindReleaseH5(t *testing.T) {
+	for _, delivery := range []string{"error", "panic", "goexit"} {
+		for _, workers := range []int{-1, 1, 4} {
+			w := btNew(t)
+			f := icbH5FixtureV1(t, w)
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				failure, panicValue := errors.New("enclosing failure after success"), new(int)
+				var err error
+				var recovered any
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					defer func() { recovered = recover() }()
+					_, err = icbEntryWorkersV1(workers)(account, f.in, func(validate func(*mdbx.Reader) (*initial148CompleteBlockResultV1, error)) error {
+						verr := w.s.View(func(reader *mdbx.Reader) error {
+							result, verr := validate(reader)
+							logicalMDBXAssert(t, result != nil && verr == nil, "%s workers=%d success: %v", delivery, workers, verr)
+							return verr
+						})
+						switch delivery {
+						case "panic":
+							panic(panicValue)
+						case "goexit":
+							runtime.Goexit()
+						}
+						return errors.Join(verr, failure)
+					})
+				}()
+				<-done
+				switch delivery {
+				case "error":
+					logicalMDBXAssert(t, errors.Is(err, failure) && recovered == nil, "%s workers=%d: %v", delivery, workers, err)
+				case "panic":
+					logicalMDBXAssert(t, recovered == panicValue, "%s workers=%d panic changed: %v", delivery, workers, recovered)
+				default:
+					logicalMDBXAssert(t, recovered == nil && err == nil, "%s workers=%d Goexit continued: %v / %v", delivery, workers, recovered, err)
+				}
+				logicalMDBXAssert(t, icbHoldsExactlyV1(account, 0), "%s workers=%d residual hold after unwind", delivery, workers)
+				out, delivered, err := icbDiscardRunV1(w, account, f.in, workers)
+				logicalMDBXAssert(t, err == nil && delivered && out.required.derived && out.required.root == f.header.UtxoRoot, "%s workers=%d fresh retry: %v / %+v", delivery, workers, err, out)
+			})
+		}
+	}
+}
+
+func icbEntryWorkersV1(workers int) func(*mdbx.OperationAccount, initial148CompleteBlockInputV1, initial148CompleteRunV1) (initial148CompleteBlockOutcomeV1, error) {
+	if workers < 0 {
+		return withInitial148CompleteBlockV1
+	}
+	return func(a *mdbx.OperationAccount, in initial148CompleteBlockInputV1, run initial148CompleteRunV1) (initial148CompleteBlockOutcomeV1, error) {
+		return withInitial148CompleteBlockParallelV1(a, in, workers, run)
 	}
 }
