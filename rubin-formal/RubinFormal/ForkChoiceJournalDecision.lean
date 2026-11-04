@@ -147,10 +147,16 @@ def originQualified (ctx : Context) (block : Point) : Origin → Bool
   | .fullHistory c executed => c == ctx && executed
   | .conditional o executed => originalSourceQualified ctx o && executed && block.height > o.base.height
 
+/-- Original identity excludes later completion and selection observations. -/
+def sameOriginalBinding (o p : Original) : Bool :=
+  o.context == p.context && o.base == p.base && o.root == p.root && o.target == p.target &&
+  o.pin == p.pin && o.minimumWork == p.minimumWork && o.appliedLagBase == p.appliedLagBase &&
+  o.completeCurrent == p.completeCurrent && o.completeLag == p.completeLag
+
 def coversOrigin : Origin → Origin → Bool
   | .fullHistory c _, .fullHistory d _ => c == d
   | .conditional o _, .fullHistory c _ => o.context == c
-  | .conditional o _, .conditional p _ => o == p
+  | .conditional o _, .conditional p _ => sameOriginalBinding o p
   | .fullHistory _ _, .conditional _ _ => false
 
 structure Correction where
@@ -220,7 +226,12 @@ def relation (ctx : Context) (path : List Point) (f : Fact) : Relation :=
   else match f.scope with
     | .unresolved => .unresolved
     | .different =>
-        if originQualified ctx f.block f.origin && f.originalSources && f.health == .qualified
+        let ownContext := match f.origin with
+          | .fullHistory c _ => c
+          | .conditional o _ => o.context
+        if ownContext.network == ctx.network && ownContext.genesis == ctx.genesis &&
+            ownContext.chainId == ctx.chainId && originQualified ownContext f.block f.origin &&
+            f.originalSources && f.health == .qualified
         then .eligible else .unresolved
     | .same => match f.disposition with
       | .activeOriginal =>
@@ -236,9 +247,14 @@ def candidateRelation (ctx : Context) (records : List Record) (c : Candidate) : 
     | .rejection f => some f
     | _ => none
   let relations := facts.map fun f =>
+    let result := relation ctx c.path f
     if c.path.any (fun p => p.hash == f.block.hash) && facts.any (fun other =>
-        other.block.hash == f.block.hash && other.block.height != f.block.height)
-    then .unresolved else relation ctx c.path f
+        other.block.hash == f.block.hash && (other.block.height != f.block.height ||
+          (f.scope == .same && other.scope == .same &&
+            coversOrigin f.origin other.origin && coversOrigin other.origin f.origin &&
+            ((result == .excluded && relation ctx c.path other == .eligible) ||
+             (result == .eligible && relation ctx c.path other == .excluded)))))
+    then .unresolved else result
   if relations.contains .excluded then .excluded
   else if relations.contains .unresolved then .unresolved else .eligible
 
@@ -499,6 +515,31 @@ example : candidateRelation ctx conflicting disputed = .unresolved ∧
     outcome (request .headers [independent,disputed] conflicting) = .unavailable ∧
     outcome (request .headers [independent,disputed]
       (conflicting ++ [.rejection { fact with block := disputed.tip.point }])) = .scheduled 1 := by decide
+
+-- F06–F09: contradictory same-scope acceptance, immutable coverage and own historical law.
+private def sameScopeConflict : List Record := [.rejection fact,corrected]
+private def lowerIndependent : Candidate := { independent with tip := ⟨independent.tip.point,100⟩ }
+example : candidateRelation ctx sameScopeConflict disputed = .unresolved ∧
+    outcome (request .headers [lowerIndependent,disputed] sameScopeConflict) = .unavailable ∧
+    outcome (request .headers [lowerIndependent,disputed] (sameScopeConflict ++ [.rejection { fact with block := disputed.tip.point }])) = .scheduled 1 ∧
+    candidateRelation ctx [.rejection fact,.rejection fact] disputed = .excluded ∧
+    candidateRelation ctx [corrected,corrected] disputed = .eligible := by decide
+private def anotherBase : Original := { original with base := ⟨5,hashG⟩, appliedLagBase := 5, headerPath := [pin,⟨5,hashG⟩,original.target.point] }
+example : relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional original true, executed := ⟨6,hashD⟩ } } = .eligible ∧
+    originalSourceQualified ctx anotherBase = true ∧
+    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional anotherBase true, executed := ⟨6,hashD⟩ } } = .unresolved ∧
+    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional { original with completeCurrent := some 99 } true, executed := ⟨6,hashD⟩ } } = .unresolved := by decide
+private def historical : Context := { ctx with law := 40, history := 50, release := 60 }
+private def differentFact : Fact := { fact with origin := .fullHistory historical true, scope := .different }
+example : relation ctx disputed.path differentFact = .eligible ∧
+    outcome (request .headers [lowerIndependent,disputed] [.rejection differentFact]) = .scheduled 2 ∧
+    relation ctx disputed.path { differentFact with scopeQualified := false } = .unresolved ∧
+    relation ctx disputed.path { differentFact with origin := .fullHistory historical false } = .unresolved ∧
+    relation ctx disputed.path { differentFact with originalSources := false } = .unresolved ∧
+    relation ctx (equalUnresolved 105).path { reachedFact with origin := .conditional { reachedOriginal with context := historical } true, scope := .different } = .eligible ∧
+    relation ctx (equalUnresolved 105).path { reachedFact with origin := .conditional { reachedOriginal with context := historical, historicalMembership := false } true, scope := .different } = .unresolved := by decide
+example : ([ { historical with network := 9 }, { historical with genesis := 9 }, { historical with chainId := 9 } ] : List Context).all (fun otherContext =>
+    relation ctx disputed.path { differentFact with origin := .fullHistory otherContext true } == .unresolved) = true := by decide
 
 -- F10–F13: immutable initial E0 versus selected continuation, actual T, no H0 floor.
 private def initial : Candidate := { candidate 1 150 hashC (.initial { original with selected := false }) with
