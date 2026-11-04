@@ -567,9 +567,9 @@ example : ([ { low with actualWork := false }, { low with pathComplete := false 
 -- A malformed tip and a separately malformed record each keep their source refusal.
 example :
     let c := { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] }
-    match outcome (request .headers [high,c] [.rejection { uncertain with block := c.tip.point, refusal := inventoryFailure }]) with
-    | .missing ds => ds.length = 2 ∧ ds.contains inventoryFailure = true ∧ ds.contains failure = true
-    | _ => False := by decide
+    (match outcome (request .headers [high,c] [.rejection { uncertain with block := c.tip.point, refusal := inventoryFailure }]) with
+     | .missing ds => ds.length == 2 && ds.contains inventoryFailure && ds.contains failure
+     | _ => false) = true := by rfl
 example : outcome { ordinary with membership := .unreadable failure } = .missing [failure] ∧
     outcome { ordinary with membership := .partialView failure } = .missing [failure] ∧
     outcome { ordinary with membership := .complete [.malformed failure] } = .missing [failure] ∧
