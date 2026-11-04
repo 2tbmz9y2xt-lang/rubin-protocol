@@ -203,7 +203,7 @@ deriving BEq, DecidableEq, Repr
 
 inductive Membership where
   | complete (records : List Record)
-  | partial (refusal : Refusal)
+  | partialView (refusal : Refusal)
   | unreadable (refusal : Refusal)
 deriving BEq, DecidableEq, Repr
 
@@ -343,7 +343,7 @@ private def requiredQualified (r : Request) : Bool :=
     a source's already observed first outcome is handled separately. -/
 def missingPremises (r : Request) : List Refusal :=
   let membershipFailures := match r.membership with
-    | .partial f | .unreadable f => [f]
+    | .partialView f | .unreadable f => [f]
     | .complete rs => rs.filterMap fun x => match x with
         | .malformed f => some f
         | .rejection f => if f.block.hash.length == 32 then none else some f.refusal
@@ -433,13 +433,13 @@ private def request (domain : Domain) (cs : List Candidate) (rs : List Record :=
   ⟨domain,basis,basis,inventory,scanned,.complete rs,
     required,inventoryFailure,none,none,⟨42,[5],[],[]⟩⟩
 private def outcome (r : Request) : Decision := (evaluate r).decision
-private def high := candidate 1 101
-private def low := candidate 2 100 hashB
+private def high : Candidate := candidate 1 101
+private def low : Candidate := candidate 2 100 hashB
 private def unresolvedAt (c : Candidate) : Record := .rejection { uncertain with block := c.tip.point }
 private def equalUnresolved (work : Nat) : Candidate :=
   { candidate 2 work with path := [pin,base,⟨6,hashD⟩,⟨10,hashA⟩] }
 private def equalFact : Record := .rejection { uncertain with block := ⟨6,hashD⟩ }
-private def ordinary := request .headers [high,low] [unresolvedAt low]
+private def ordinary : Request := request .headers [high,low] [unresolvedAt low]
 
 -- F01/F03: both dispositions, reversed inventory, defeating work, complete retained input.
 example : outcome ordinary = .scheduled 1 ∧
@@ -471,11 +471,11 @@ example : relation ctx high.path { fact with block := ⟨1,hashC⟩, scopeQualif
     relation ctx high.path { fact with scope := .different } = .eligible ∧
     relation ctx high.path { fact with scope := .different, scopeQualified := false } = .unresolved ∧
     relation ctx high.path { fact with block := ⟨5,hashE⟩ } = .unresolved := by decide
-example : [Health.suspect,.unresolved].all (fun h =>
+example : ([Health.suspect,.unresolved] : List Health).all (fun h =>
     relation ctx high.path { fact with health := h } == .unresolved) = true ∧
     relation ctx high.path { fact with scope := .unresolved } = .unresolved ∧
     relation ctx high.path { fact with originalSources := false } = .unresolved := by decide
-private def corrected := Record.rejection { fact with disposition := .corrected proof }
+private def corrected : Record := Record.rejection { fact with disposition := .corrected proof }
 example : outcome (request .headers [high] [corrected]) = .scheduled 1 ∧
     outcome { request .headers [high] [corrected] with nativeDiagnostic := some base } = .scheduled 1 ∧
     relation ctx high.path { fact with disposition := .corrected { proof with retainedSources := false } } = .unresolved ∧
@@ -505,12 +505,11 @@ private def initial : Candidate := { candidate 1 150 hashC (.initial { original 
   tip := original.target, path := original.headerPath }
 private def continued : Candidate := candidate 1 100 hashA (.continued original continuation)
 private def reconstructed : Continuation := { continuation with common := ⟨⟨6,hashD⟩,40⟩ }
-private def stateRequest (c : Candidate) := request (.states .outerSelection) [c]
+private def stateRequest (c : Candidate) : Request := request (.states .outerSelection) [c]
 example : outcome (stateRequest high) = .selected 1 .fullHistory ∧
     outcome (stateRequest initial) = .selected 1 .conditionalImportedBase ∧
     outcome (stateRequest continued) = .selected 1 .conditionalImportedBase := by decide
-example : outcome (stateRequest { continued with provenance := .continued
-    { original with completeCurrent := some 0, completeLag := some 0 } continuation }) =
+example : outcome (stateRequest { continued with provenance := .continued { original with completeCurrent := some 0, completeLag := some 0 } continuation }) =
       .selected 1 .conditionalImportedBase := by decide
 example : outcome (stateRequest { initial with provenance := .initial { original with imageEntry := false } }) = .missing [failure] ∧
     outcome (stateRequest { initial with tip := ⟨initial.tip.point,151⟩ }) = .missing [failure] ∧
@@ -521,7 +520,7 @@ example : outcome (stateRequest { continued with provenance := .continued origin
     outcome (stateRequest { continued with tip := ⟨continued.tip.point,99⟩ }) = .missing [failure] := by decide
 example : outcome (request (.states .entry) [continued,equalUnresolved 100] [equalFact]) = .unavailable ∧
     outcome (stateRequest { continued with tip := ⟨⟨6,hashD⟩,100⟩, path := [pin,base,⟨6,hashD⟩] }) = .selected 1 .conditionalImportedBase := by decide
-example : [ { original with completeCurrent := none }, { original with completeLag := none },
+example : ([ { original with completeCurrent := none }, { original with completeLag := none },
     { original with context := { ctx with network := 9 } }, { original with context := { ctx with genesis := 9 } },
     { original with context := { ctx with chainId := 9 } }, { original with context := { ctx with law := 9 } },
     { original with context := { ctx with history := 9 } }, { original with context := { ctx with release := 9 } },
@@ -529,11 +528,11 @@ example : [ { original with completeCurrent := none }, { original with completeL
     { original with historicalMembership := false }, { original with bothSeedCorrespondence := false },
     { original with rootIdentityMetadata := false }, { original with originalTailValidated := false },
     { original with originalPairComplete := false }, { original with appliedLagBase := 5 },
-    { original with headersQualified := false } ].all (fun o =>
+    { original with headersQualified := false } ] : List Original).all (fun o =>
       outcome (stateRequest { continued with provenance := .continued o continuation }) == .missing [failure]) = true := by decide
-example : [ { continuation with reconstructedPrefix := false }, { continuation with actualState := false },
+example : ([ { continuation with reconstructedPrefix := false }, { continuation with actualState := false },
     { continuation with undoSources := false }, { continuation with bodySources := false },
-    { continuation with suffixSection25 := false } ].all (fun k =>
+    { continuation with suffixSection25 := false } ] : List Continuation).all (fun k =>
       outcome (stateRequest { continued with provenance := .continued original k }) == .missing [failure]) = true ∧
     outcome (stateRequest { continued with provenance := .continued original { continuation with common := ⟨⟨3,hashD⟩,30⟩ }, path := [pin,⟨3,hashD⟩,base,continued.tip.point] }) = .missing [failure] ∧
     outcome (stateRequest { continued with provenance := .continued original reconstructed, path := [pin,reconstructed.common.point,continued.tip.point] }) = .missing [failure] ∧
@@ -542,7 +541,7 @@ example : [ { continuation with reconstructedPrefix := false }, { continuation w
 -- F14/F15: T is not its heavier descendant; unknown state participates only in scheduling.
 private def unknown : Candidate := { candidate 3 110 hashC .headerOnly with
   tip := ⟨⟨12,hashC⟩,110⟩, path := [pin,base,⟨10,hashA⟩,⟨12,hashC⟩] }
-private def other := candidate 2 105 hashB
+private def other : Candidate := candidate 2 105 hashB
 private def headerPrefix : Candidate := { old with provenance := .headerOnly }
 example : outcome { request .headers [unknown] with inventory := [headerPrefix,unknown], scanned := [headerPrefix,unknown], required := ⟨.notRequired,some headerPrefix,true,none,failure⟩ } =
       .scheduled 3 := by decide
@@ -555,18 +554,18 @@ example : outcome (request .headers [candidate 1 100,other,unknown] [unresolvedA
 -- F16/F17: fixed STEP owns local comparands; every global boundary keeps its inventory.
 example : outcome (request (.fixedStep [1]) [high,other] [unresolvedAt other]) = .selected 1 .fullHistory ∧
     outcome { request (.fixedStep [1]) [high,other] with scanned := [old,{ high with pathComplete := false }], inventory := [old,{ high with pathComplete := false },other] } = .missing [failure] := by decide
-example : [Boundary.entry,.reentry,.preactivation,.outerSelection].all (fun b =>
+example : ([Boundary.entry,.reentry,.preactivation,.outerSelection] : List Boundary).all (fun b =>
     outcome { request (.states b) [high,other] [unresolvedAt other] with scanned := [old,high] } ==
       .missing [inventoryFailure]) = true := by decide
 
 -- F18/F19: alleged low rank cannot waive missing mandatory evidence or source owners.
-example : [ { low with actualWork := false }, { low with pathComplete := false },
+example : ([ { low with actualWork := false }, { low with pathComplete := false },
     { low with headerRules := false }, { low with requiredSources := false },
     { low with context := { ctx with law := 9 } },
-    { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] } ].all (fun c =>
+    { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] } ] : List Candidate).all (fun c =>
       outcome (request .headers [high,c] [unresolvedAt c]) == .missing [failure]) = true := by decide
 example : outcome { ordinary with membership := .unreadable failure } = .missing [failure] ∧
-    outcome { ordinary with membership := .partial failure } = .missing [failure] ∧
+    outcome { ordinary with membership := .partialView failure } = .missing [failure] ∧
     outcome { ordinary with membership := .complete [.malformed failure] } = .missing [failure] ∧
     outcome { request (.states .entry) [high] with
       required := ⟨.required none,some old,true,some true,failure⟩ } = .missing [failure] ∧
@@ -578,11 +577,11 @@ example : outcome { ordinary with membership := .unreadable failure } = .missing
       required := ⟨.required (some old),some old,true,some false,failure⟩ } = .missing [failure] := by decide
 
 -- F20/F21: protected changes invalidate reuse; later failures cannot replace first truth.
-example : [ { basis with installation := 9 }, { basis with control := 9 },
+example : ([ { basis with installation := 9 }, { basis with control := 9 },
     { basis with membershipVersion := 9 }, { basis with originalRevisions := [9] },
     { basis with correctiveRevisions := [9] }, { basis with sourceGuards := [9] },
     { basis with inventory := 9 }, { basis with path := 9 }, { basis with target := 8 },
-    { basis with native := 9 }, { basis with comparands := 9 }, { basis with historicalScope := 9 } ].all (fun b =>
+    { basis with native := 9 }, { basis with comparands := 9 }, { basis with historicalScope := 9 } ] : List Basis).all (fun b =>
       outcome { ordinary with currentBasis := b } == .stale) = true ∧
     outcome { ordinary with basis := { basis with membershipVersion := 9 }, currentBasis := { basis with membershipVersion := 9 } } = .scheduled 1 := by decide
 example : outcome { ordinary with firstObserved := some failure, membership := .unreadable inventoryFailure, currentBasis := { basis with native := 9 } } = .observed failure := by decide
