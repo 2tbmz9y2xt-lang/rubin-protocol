@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import io
 import json
 import sys
 import tempfile
 import unittest
 import unittest.mock as mock
+from collections import Counter
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -301,6 +303,71 @@ class FormalCoverageSummaryTests(unittest.TestCase):
 
         self.assertIn("RubinFormal.Example.present_theorem", names)
         self.assertNotIn("present_theorem", names)
+
+
+class StateModelRegistrationTests(unittest.TestCase):
+    def test_public_entrypoint_accepts_model_and_retains_independent_refusals(self) -> None:
+        original = json.loads((TOOLS_DIR.parent / "rubin-formal" / "proof_coverage.json").read_text())
+
+        def check(doc: dict) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / "tools").mkdir()
+                (root / "conformance").symlink_to(TOOLS_DIR.parent / "conformance", target_is_directory=True)
+                formal = root / "rubin-formal"
+                formal.mkdir()
+                for path in (TOOLS_DIR.parent / "rubin-formal").iterdir():
+                    if path.name != "proof_coverage.json":
+                        (formal / path.name).symlink_to(path, target_is_directory=path.is_dir())
+                (formal / "proof_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
+                stderr = io.StringIO()
+                with mock.patch.object(m, "__file__", str(root / "tools" / "check_formal_coverage.py")), contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                    result = m.main()
+                return result, stderr.getvalue()
+
+        self.assertEqual(check(original), (0, ""))
+        for defect in ("unknown", "duplicate", "missing", "evidence", "theorem", "summary", "candidate_hash", "source_hash"):
+            with self.subTest(defect=defect):
+                doc = json.loads(json.dumps(original))
+                rows = doc["coverage"]
+                row = next(r for r in rows if r["section_key"] == "canonical_utxo_state_model")
+                key = row["section_key"]
+                if defect == "unknown":
+                    row["section_key"] = "unrelated_state_model"
+                    expected = f"ERROR: unknown section_key in coverage[{rows.index(row)}]: unrelated_state_model\n"
+                elif defect == "duplicate":
+                    rows.append(json.loads(json.dumps(row)))
+                    expected = f"ERROR: duplicate section_key in coverage: {key}\n"
+                elif defect == "missing":
+                    rows.remove(row)
+                    expected = f"ERROR: missing section keys in proof coverage:\n  - {key}\n"
+                elif defect == "evidence":
+                    row["evidence_level"] = "machine_checked_universal"
+                    expected = f"ERROR: evidence_level drift for {key}: expected machine_checked_model, got machine_checked_universal\n"
+                elif defect == "theorem":
+                    row["theorems"] = ["RubinFormal.StateConsensusV1.absent_contract"]
+                    expected = f"ERROR: {key} references missing Lean theorem declaration: RubinFormal.StateConsensusV1.absent_contract\n"
+                elif defect == "summary":
+                    doc["coverage_summary"]["section_rows"] = 31
+                    expected = "ERROR: coverage_summary.section_rows drift: expected 32, got 31\n"
+                else:
+                    path = "tools/check_formal_registry_truth.py"
+                    record = doc["source_rebind"]["active_path_manifest"][path]
+                    record["candidate_sha256" if defect == "candidate_hash" else "source_sha256"] = "0" * 64
+                    expected = (f"ERROR: source_rebind.active_path_manifest candidate hash drift: {path}\n"
+                                if defect == "candidate_hash" else "ERROR: source_rebind.active_path_manifest source digest drift\n")
+                if defect in {"duplicate", "missing", "theorem"}:
+                    # Keep the unrelated summary valid so the intended refusal is reached.
+                    refs = Counter(t for r in rows for t in r["theorems"])
+                    statuses = Counter(r["status"] for r in rows)
+                    doc["coverage_summary"].update(
+                        section_rows=len(rows), theorem_references=sum(refs.values()),
+                        unique_theorem_names=len(refs), reused_theorem_names=sorted(t for t, n in refs.items() if n > 1),
+                        **{f"{status}_rows": statuses[status] for status in ("proved", "proved_with_axiom", "stated", "deferred")},
+                    )
+                result, stderr = check(doc)
+                self.assertEqual(result, 1)
+                self.assertIn(expected, stderr)
         self.assertNotIn("helper_definition", names)
 
 
