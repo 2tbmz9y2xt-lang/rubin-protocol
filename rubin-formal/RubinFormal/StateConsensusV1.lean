@@ -444,21 +444,25 @@ example : logicalStateBytes (genesis 51506).candidate = 773120 ∧
     result (genesis 51507) = some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) := by decide
 
 -- C09: exact evolving parents, imported base, first refusal, retry, no publication.
-example : let r := runSuffix (sized 89) (sized 10000000)
+example :
+    let r := runSuffix (sized 89) (sized 10000000)
       [input 0 9000000, { input 0 9773121 with height := ⟨3000001, by decide⟩ },
-       { input 0 89 with height := ⟨3000002, by decide⟩, root := .Mismatch }];
+       { input 0 89 with height := ⟨3000002, by decide⟩, root := .Mismatch }]
     r.result = some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) ∧
     r.steps.length = 2 ∧ r.comparisonCandidate = none ∧ r.canonicalAfter = sized 89 := by decide
-example : let r := runSuffix (sized 89) (sized 10000000) [input 0 10773120];
+example :
+    let r := runSuffix (sized 89) (sized 10000000) [input 0 10773120]
     r.result = some .Accepted ∧ r.comparisonCandidate = some (sized 10773120) ∧
     r.canonicalAfter = sized 89 := by decide
-example : let r := runSuffix (sized 89) (sized 10000000)
-      [input 0 9000000, { input 0 9773120 with height := ⟨3000001, by decide⟩ }];
+example :
+    let r := runSuffix (sized 89) (sized 10000000)
+      [input 0 9000000, { input 0 9773120 with height := ⟨3000001, by decide⟩ }]
     r.result = some .Accepted ∧ r.comparisonCandidate = some (sized 9773120) ∧
     r.steps.length = 2 ∧ r.canonicalAfter = sized 89 := by decide
-example : let r := runSuffix (sized 89) (sized 10000000)
+example :
+    let r := runSuffix (sized 89) (sized 10000000)
       [{ input 0 10000000 with root := .Unavailable },
-       { input 0 89 with height := ⟨3000001, by decide⟩ }];
+       { input 0 89 with height := ⟨3000001, by decide⟩ }]
     r.result = some (.NoValidity (.Unavailable .Root)) ∧ r.retryable = true ∧
     r.steps.length = 1 ∧ r.comparisonCandidate = none ∧ r.canonicalAfter = sized 89 := by decide
 
