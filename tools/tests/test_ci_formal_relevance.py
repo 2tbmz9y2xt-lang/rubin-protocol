@@ -82,9 +82,13 @@ class FormalRelevanceTests(unittest.TestCase):
         paths.remove(choice_model)
         formal = {path for path in paths if subject.is_formal_input(path)}
         refinement = {path for path in paths if subject.is_refinement_input(path)}
+        state_model = "rubin-formal/RubinFormal/StateConsensusV1.lean"
+        self.assertIn(state_model, formal)
+        self.assertIn(state_model, refinement)
+        self.assert_jobs(state_model, True, True)
         self.assertEqual(
             (len(formal), len(refinement), len(formal & refinement), len(formal | refinement)),
-            (440, 363, 348, 455),
+            (441, 364, 349, 456),
         )
 
     def test_every_exact_input_uses_its_job_profile(self):

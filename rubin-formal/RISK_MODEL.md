@@ -9,7 +9,7 @@
 
 - `rubin-formal/proof_coverage.json`
   - `proof_level`; `package_maturity`: уровни строгости и текущего доверенного состояния пакета
-  - `coverage[]`: exactly 31 registered formal coverage rows and their statuses; this registry is independent of `spec/SECTION_HASHES.json` membership
+  - `coverage[]`: exactly 32 registered formal coverage rows and their statuses; this registry is independent of `spec/SECTION_HASHES.json` membership
   - `claims.allowed` / `claims.forbidden`: рамка допустимых публичных формулировок (обязательно)
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
@@ -17,11 +17,11 @@
 ## Термины
 
 - **Pinned section**: a member of `spec/SECTION_HASHES.json`, hash-pinned to the specification. Manifest membership and formal `coverage[]` registry membership are independent sets, not a one-to-one mapping.
-- **Registered formal coverage row**: one of exactly 31 entries in `coverage[]`. Its `section_heading` is a registry row label: some labels are exact specification headings; others identify residual, bridge, model, or other bounded formal scopes. Row status, evidence, and claims apply to that registered row, not automatically to a manifest member.
+- **Registered formal coverage row**: one of exactly 32 entries in `coverage[]`. Its `section_heading` is a registry row label: some labels are exact specification headings; others identify residual, bridge, model, or other bounded formal scopes. Row status, evidence, and claims apply to that registered row, not automatically to a manifest member.
 - An unregistered manifest H2 is not thereby formally proved, and a registered formal row need not remain an independent manifest member.
 - `status=proved`: assertions for the registered row are proved within the current `proof_level`.
 - `status=proved_with_axiom`: утверждения доказаны, но proof опирается на один или более явно названных допущений. Для hash/commitment-секций это обычно означает reduction к collision resistance, а не аксиомо-свободную невозможность коллизии.
-- `status=stated`: row сохраняет полезное machine-checked model/contract evidence, но не заявляет более широкий proof closure. В текущем registry таких строк `3`.
+- `status=stated`: row сохраняет полезное machine-checked model/contract evidence, но не заявляет более широкий proof closure. В текущем registry таких строк `4`.
 - `status=deferred`: резервный статус для сознательно не покрытой секции. В текущем registry таких строк нет.
 - `evidence_level`: главный truth-correction field для честного public claim ceiling. Он отделяет universal, behavioral, assumption-backed, contract-level и model-level entries даже когда registry status уже `proved`.
 
@@ -77,12 +77,21 @@ re-verification/maturity.
 - `5` rows со статусом `proved_with_axiom`;
 - `22` universal entries;
 - `5` assumption-backed entries;
-- `3` model-level entries;
+- `4` model-level entries;
 - `1` contract-level entry;
-- `3` stated rows;
+- `4` stated rows;
 - `0` deferred rows.
 
 Это сильнее старого bootstrap narrative, но всё ещё не даёт права заявлять universal proof of full CANONICAL semantics.
+
+`canonical_utxo_state_model` adds one kernel-checked bounded model theorem of
+proposed PR 441 at `500dbe9dc58351832847fa1da4492110c4535996`. It proves the
+represented final-map/order/release relation, conditional on complete valid
+maps, supplied earlier/read/integrity outcomes and supplied root equality.
+It does not prove real root bytes, client/storage behavior, concrete local
+handoffs, imported history or physical capacity. Success permits comparison
+only. Preparation, the separate manifest pin and human spec adoption are
+distinct events; this row changes neither package maturity nor existing claims.
 
 Отдельно по Lean ↔ Go/Rust bridge ceiling:
 
