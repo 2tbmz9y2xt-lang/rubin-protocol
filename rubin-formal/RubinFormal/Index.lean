@@ -17,6 +17,7 @@ import RubinFormal.DevnetProperties
 import RubinFormal.BlockHeaderRoundtrip
 import RubinFormal.BlockTimestampBehavioral
 import RubinFormal.BlockValidationOrder
+import RubinFormal.StateConsensusV1
 import RubinFormal.BlockValidationOrderBehavioral
 import RubinFormal.ByteWireLegacy
 import RubinFormal.BytesEqLemmas

@@ -5,7 +5,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 ## Contents
 
 - Lean 4 package `RubinFormal`
-- `proof_coverage.json` — machine-readable registry with exactly 31 formal coverage entries
+- `proof_coverage.json` — machine-readable registry with exactly 32 formal coverage entries
 - Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
@@ -48,6 +48,18 @@ Local spec preparation precedes spec draft publication, then metadata human
 merge, then spec merge. Old canonical spec/new pin comparison
 necessarily rejects between the metadata and matching spec merges.
 
+`canonical_utxo_state_model` registers the separate `StateConsensusV1` bounded
+model of proposed spec PR 441 at `500dbe9dc58351832847fa1da4492110c4535996`
+(CANONICAL §§4/13/18/23/25, state machine §§2/2.5). Its kernel-checked theorem
+characterizes final-map accounting, first-result order and private-candidate
+release for later comparison. It does not adopt the proposal or publish state.
+Complete valid map membership/unique real outpoints, typed read/integrity
+outcomes and root equality are supplied premises. Scalar 100→50 tests only the
+signed-growth arithmetic; the complete-map shrink example is 100→56.
+Root bytes, Go/Rust parity, storage, inverse/LAG local checks and physical
+effects remain outside this row. The separate manifest pin and original
+116→102 source census are unchanged; the new model is local source.
+
 Native-rotation replay uses a manual legacy bounded stub, unwritten by current
 generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
 `suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
@@ -79,9 +91,9 @@ Wire model notes:
 
 - This is **not** a freeze-ready package at the level of "universal byte-accurate wire + state transition model for all sections"
 - Consensus rules are not changed by this formal package
-- The formal coverage registry currently contains exactly 31 machine-checked entries
-- Registry status counts: 23 `proved`, 5 `proved_with_axiom`, 3 `stated`, 0 `deferred`
-- Claim strength breakdown: 22 universal, 5 assumption-backed, 3 model-level, 1 contract-level
+- The formal coverage registry currently contains exactly 32 machine-checked entries
+- Registry status counts: 23 `proved`, 5 `proved_with_axiom`, 4 `stated`, 0 `deferred`
+- Claim strength breakdown: 22 universal, 5 assumption-backed, 4 model-level, 1 contract-level
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
 - Extra formal-only theorems do not establish a registered formal coverage row unless registered in the machine-readable registry
 
