@@ -563,7 +563,11 @@ example : ([ { low with actualWork := false }, { low with pathComplete := false 
     { low with headerRules := false }, { low with requiredSources := false },
     { low with context := { ctx with law := 9 } },
     { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] } ] : List Candidate).all (fun c =>
-      outcome (request .headers [high,c] [unresolvedAt c]) == .missing [failure]) = true := by decide
+      outcome (request .headers [high,c] [unresolvedAt low]) == .missing [failure]) = true := by decide
+-- A malformed tip and a separately malformed record each keep their source refusal.
+example : let c := { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] };
+    outcome (request .headers [high,c] [.rejection { uncertain with block := c.tip.point, refusal := inventoryFailure }]) =
+      .missing [inventoryFailure,failure] := by decide
 example : outcome { ordinary with membership := .unreadable failure } = .missing [failure] ∧
     outcome { ordinary with membership := .partialView failure } = .missing [failure] ∧
     outcome { ordinary with membership := .complete [.malformed failure] } = .missing [failure] ∧
