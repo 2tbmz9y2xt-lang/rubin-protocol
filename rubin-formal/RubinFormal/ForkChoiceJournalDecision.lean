@@ -60,13 +60,18 @@ private def referencePresent : Option Nat → Bool
   | some _ => true -- Abstract identifiers have no reserved numeric encoding.
   | none => false
 
+/-- The zero-debt Phi at original H0; PRE_GENESIS has no conditional base. -/
+def appliedBaseHeight (height : Nat) : Option Nat :=
+  if height < 15120 then none else some (720 * ((height - 15120) / 720))
+
 /-- COMPLETE supplies the authenticated base before the whole IMAGE tail succeeds. -/
 def originalSourceQualified (ctx : Context) (o : Original) : Bool :=
   o.context == ctx && referencePresent o.completeCurrent && referencePresent o.completeLag &&
   o.headersQualified && o.headerPath.all (fun p => p.hash.length == 32) &&
   o.headerPath.contains o.pin && o.headerPath.contains o.base &&
   o.headerPath.contains o.target.point && o.pin.height <= o.target.point.height &&
-  o.base.height == o.appliedLagBase && o.target.work >= o.minimumWork &&
+  appliedBaseHeight o.target.point.height == some o.base.height &&
+  appliedBaseHeight o.target.point.height == some o.appliedLagBase && o.target.work >= o.minimumWork &&
   o.imageEntry && o.imageCover && o.historicalMembership && o.bothSeedCorrespondence &&
   o.rootIdentityMetadata
 
@@ -230,6 +235,7 @@ def relation (ctx : Context) (path : List Point) (f : Fact) : Relation :=
           | .fullHistory c _ => c
           | .conditional o _ => o.context
         if ownContext.network == ctx.network && ownContext.genesis == ctx.genesis &&
+            (ownContext.law != ctx.law || ownContext.history != ctx.history) &&
             ownContext.chainId == ctx.chainId && originQualified ownContext f.block f.origin &&
             f.originalSources && f.health == .qualified
         then .eligible else .unresolved
@@ -246,15 +252,18 @@ def candidateRelation (ctx : Context) (records : List Record) (c : Candidate) : 
   let facts := records.filterMap fun r => match r with
     | .rejection f => some f
     | _ => none
+  let qualifiedSame := fun (f : Fact) =>
+    f.scope == .same && f.scopeQualified && f.originalSources &&
+      originQualified ctx f.block f.origin
   let relations := facts.map fun f =>
-    let result := relation ctx c.path f
     if c.path.any (fun p => p.hash == f.block.hash) && facts.any (fun other =>
         other.block.hash == f.block.hash && (other.block.height != f.block.height ||
-          (f.scope == .same && other.scope == .same &&
+          (qualifiedSame f && qualifiedSame other &&
             coversOrigin f.origin other.origin && coversOrigin other.origin f.origin &&
-            ((result == .excluded && relation ctx c.path other == .eligible) ||
-             (result == .eligible && relation ctx c.path other == .excluded)))))
-    then .unresolved else result
+            (match f.disposition, other.disposition with
+             | .activeOriginal, .corrected _ | .corrected _, .activeOriginal => true
+             | _, _ => false))))
+    then .unresolved else relation ctx c.path f
   if relations.contains .excluded then .excluded
   else if relations.contains .unresolved then .unresolved else .eligible
 
@@ -423,15 +432,15 @@ private def hashG : List UInt8 := [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 private def ctx : Context := ⟨1,2,3,4,5,6⟩
 private def failure : Refusal := ⟨1,"SOURCE_INTEGRITY","original cause",7,8,9⟩
 private def inventoryFailure : Refusal := ⟨2,"INVENTORY_UNAVAILABLE","membership",0,3,4⟩
-private def base : Point := ⟨4,hashE⟩
+private def base : Point := ⟨720,hashE⟩
 private def pin : Point := ⟨2,hashF⟩
 private def original : Original :=
-  ⟨ctx,base,77,⟨⟨20,hashC⟩,150⟩,pin,100,4,some 11,some 12,
-    [pin,base,⟨20,hashC⟩],true,true,true,true,true,true,true,true,true⟩
+  ⟨ctx,base,77,⟨⟨15840,hashC⟩,150⟩,pin,100,720,some 11,some 12,
+    [pin,base,⟨15840,hashC⟩],true,true,true,true,true,true,true,true,true⟩
 private def continuation : Continuation := ⟨⟨base,30⟩,true,true,true,true,true⟩
 private def candidate (id work : Nat) (hash : List UInt8 := hashA)
     (provenance : Provenance := .fullHistory true) : Candidate :=
-  ⟨id,⟨⟨10,hash⟩,work⟩,ctx,[pin,base,⟨10,hash⟩],true,true,true,true,provenance,failure⟩
+  ⟨id,⟨⟨726,hash⟩,work⟩,ctx,[pin,base,⟨726,hash⟩],true,true,true,true,provenance,failure⟩
 private def old : Candidate := candidate 0 0 hashG
 private def basis : Basis := ⟨ctx,1,2,3,[4],[5],[6],7,8,9,10,11,12⟩
 private def fact : Fact := ⟨base,.fullHistory ctx true,true,.same,true,.qualified,.activeOriginal,failure⟩
@@ -453,8 +462,8 @@ private def high : Candidate := candidate 1 101
 private def low : Candidate := candidate 2 100 hashB
 private def unresolvedAt (c : Candidate) : Record := .rejection { uncertain with block := c.tip.point }
 private def equalUnresolved (work : Nat) : Candidate :=
-  { candidate 2 work with path := [pin,base,⟨6,hashD⟩,⟨10,hashA⟩] }
-private def equalFact : Record := .rejection { uncertain with block := ⟨6,hashD⟩ }
+  { candidate 2 work with path := [pin,base,⟨722,hashD⟩,⟨726,hashA⟩] }
+private def equalFact : Record := .rejection { uncertain with block := ⟨722,hashD⟩ }
 private def ordinary : Request := request .headers [high,low] [unresolvedAt low]
 
 -- F01/F03: both dispositions, reversed inventory, defeating work, complete retained input.
@@ -484,9 +493,9 @@ example : outcome (request .headers [high,candidate 2 101]) = .indistinguishable
 -- F05–F09: all records participate; correction leaves the diagnostic nonoperative.
 example : relation ctx high.path { fact with block := ⟨1,hashC⟩, scopeQualified := false } = .eligible ∧
     relation ctx high.path fact = .excluded ∧
-    relation ctx high.path { fact with scope := .different } = .eligible ∧
+    relation ctx high.path { fact with scope := .different } = .unresolved ∧
     relation ctx high.path { fact with scope := .different, scopeQualified := false } = .unresolved ∧
-    relation ctx high.path { fact with block := ⟨5,hashE⟩ } = .unresolved := by decide
+    relation ctx high.path { fact with block := ⟨721,hashE⟩ } = .unresolved := by decide
 example : ([Health.suspect,.unresolved] : List Health).all (fun h =>
     relation ctx high.path { fact with health := h } == .unresolved) = true ∧
     relation ctx high.path { fact with scope := .unresolved } = .unresolved ∧
@@ -495,20 +504,20 @@ private def corrected : Record := Record.rejection { fact with disposition := .c
 example : outcome (request .headers [high] [corrected]) = .scheduled 1 ∧
     outcome { request .headers [high] [corrected] with nativeDiagnostic := some base } = .scheduled 1 ∧
     relation ctx high.path { fact with disposition := .corrected { proof with retainedSources := false } } = .unresolved ∧
-    relation ctx (equalUnresolved 101).path { fact with block := ⟨6,hashD⟩, disposition := .corrected { proof with origin := .conditional original true, executed := ⟨6,hashD⟩ } } = .unresolved := by decide
+    relation ctx (equalUnresolved 101).path { fact with block := ⟨722,hashD⟩, disposition := .corrected { proof with origin := .conditional original true, executed := ⟨722,hashD⟩ } } = .unresolved := by decide
 example : relation ctx high.path { fact with health := .suspect, disposition := .corrected proof } = .eligible ∧
     relation ctx high.path { fact with health := .suspect, disposition := .corrected { proof with retainedSources := false } } = .unresolved := by decide
 private def reachedOriginal : Original :=
   { original with originalTailValidated := false, originalPairComplete := false, selected := false }
-private def reachedFact : Fact := { fact with block := ⟨6,hashD⟩, origin := .conditional reachedOriginal true }
+private def reachedFact : Fact := { fact with block := ⟨722,hashD⟩, origin := .conditional reachedOriginal true }
 example : relation ctx (equalUnresolved 105).path reachedFact = .excluded ∧
     relation ctx (equalUnresolved 105).path { reachedFact with block := base } = .unresolved ∧
-    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with executed := ⟨6,hashD⟩ } } = .eligible := by decide
+    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with executed := ⟨722,hashD⟩ } } = .eligible := by decide
 example : outcome (request .headers [high,low,candidate 3 102 hashD]
     [unresolvedAt low,unresolvedAt (candidate 3 102 hashD),corrected,
       .nonoperative .reservation,.nonoperative .audit,.nonoperative .disposition]) = .unavailable ∧
     candidateRelation ctx [.rejection uncertain,.rejection fact] high = .excluded := by decide
-private def conflicting : List Record := [.rejection fact,.rejection { fact with block := ⟨5,hashE⟩ }]
+private def conflicting : List Record := [.rejection fact,.rejection { fact with block := ⟨721,hashE⟩ }]
 private def independent : Candidate := { high with path := [pin,high.tip.point] }
 private def disputed : Candidate := candidate 2 105 hashB
 example : candidateRelation ctx conflicting disputed = .unresolved ∧
@@ -519,16 +528,46 @@ example : candidateRelation ctx conflicting disputed = .unresolved ∧
 -- F06–F09: contradictory same-scope acceptance, immutable coverage and own historical law.
 private def sameScopeConflict : List Record := [.rejection fact,corrected]
 private def lowerIndependent : Candidate := { independent with tip := ⟨independent.tip.point,100⟩ }
-example : candidateRelation ctx sameScopeConflict disputed = .unresolved ∧
-    outcome (request .headers [lowerIndependent,disputed] sameScopeConflict) = .unavailable ∧
-    outcome (request .headers [lowerIndependent,disputed] (sameScopeConflict ++ [.rejection { fact with block := disputed.tip.point }])) = .scheduled 1 ∧
+private def lostCorrected : Fact := { fact with disposition := .corrected { proof with retainedSources := false } }
+private def lostScopeConflict : List Record := [.rejection fact,.rejection lostCorrected]
+example :
+    ([sameScopeConflict, sameScopeConflict.reverse,
+      lostScopeConflict, lostScopeConflict.reverse,
+      [.rejection lostCorrected,.rejection lostCorrected]] : List (List Record)).all (fun rs =>
+      candidateRelation ctx rs disputed == .unresolved &&
+      candidateRelation ctx rs lowerIndependent == .eligible &&
+      outcome (request .headers [lowerIndependent,disputed] rs) == .unavailable &&
+      outcome (request .headers [lowerIndependent,disputed]
+        (rs ++ [.rejection { fact with block := disputed.tip.point }])) == .scheduled 1) = true ∧
     candidateRelation ctx [.rejection fact,.rejection fact] disputed = .excluded ∧
-    candidateRelation ctx [corrected,corrected] disputed = .eligible := by decide
-private def anotherBase : Original := { original with base := ⟨5,hashG⟩, appliedLagBase := 5, headerPath := [pin,⟨5,hashG⟩,original.target.point] }
-example : relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional original true, executed := ⟨6,hashD⟩ } } = .eligible ∧
+    outcome (request .headers [lowerIndependent,disputed]
+      [.rejection fact,.rejection fact]) = .scheduled 1 ∧
+    candidateRelation ctx [corrected,corrected] disputed = .eligible ∧
+    outcome (request .headers [lowerIndependent,disputed]
+      [corrected,corrected]) = .scheduled 2 := by decide
+example :
+    ([{ lostCorrected with scopeQualified := false },
+      { lostCorrected with originalSources := false },
+      { lostCorrected with origin := .fullHistory ctx false }] : List Fact).all (fun f =>
+      candidateRelation ctx [.rejection fact,.rejection f] disputed == .excluded &&
+      outcome (request .headers [lowerIndependent,disputed]
+        [.rejection fact,.rejection f]) == .scheduled 1) = true := by decide
+private def otherScope : List Record :=
+  [.rejection { fact with block := ⟨722,hashD⟩ },
+   .rejection { reachedFact with
+     disposition := .corrected { proof with
+       origin := .conditional reachedOriginal true,
+       executed := ⟨722,hashD⟩,
+       retainedSources := false } }]
+private def tailDisputed : Candidate := { disputed with path := [pin,base,⟨722,hashD⟩,disputed.tip.point] }
+example : ([otherScope,otherScope.reverse] : List (List Record)).all (fun rs =>
+    candidateRelation ctx rs tailDisputed == .excluded &&
+    outcome (request .headers [lowerIndependent,tailDisputed] rs) == .scheduled 1) = true := by decide
+private def anotherBase : Original := { original with base := ⟨720,hashG⟩, appliedLagBase := 720, headerPath := [pin,⟨720,hashG⟩,original.target.point] }
+example : relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional original true, executed := ⟨722,hashD⟩ } } = .eligible ∧
     originalSourceQualified ctx anotherBase = true ∧
-    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional anotherBase true, executed := ⟨6,hashD⟩ } } = .unresolved ∧
-    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional { original with completeCurrent := some 99 } true, executed := ⟨6,hashD⟩ } } = .unresolved := by decide
+    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional anotherBase true, executed := ⟨722,hashD⟩ } } = .unresolved ∧
+    relation ctx (equalUnresolved 105).path { reachedFact with disposition := .corrected { proof with origin := .conditional { original with completeCurrent := some 99 } true, executed := ⟨722,hashD⟩ } } = .unresolved := by decide
 private def historical : Context := { ctx with law := 40, history := 50, release := 60 }
 private def differentFact : Fact := { fact with origin := .fullHistory historical true, scope := .different }
 example : relation ctx disputed.path differentFact = .eligible ∧
@@ -540,18 +579,54 @@ example : relation ctx disputed.path differentFact = .eligible ∧
     relation ctx (equalUnresolved 105).path { reachedFact with origin := .conditional { reachedOriginal with context := historical, historicalMembership := false } true, scope := .different } = .unresolved := by decide
 example : ([ { historical with network := 9 }, { historical with genesis := 9 }, { historical with chainId := 9 } ] : List Context).all (fun otherContext =>
     relation ctx disputed.path { differentFact with origin := .fullHistory otherContext true } == .unresolved) = true := by decide
+example : ([ctx,{ ctx with release := 60 }] : List Context).all (fun own =>
+    relation ctx disputed.path { differentFact with origin := .fullHistory own true } == .unresolved &&
+    outcome (request .headers [lowerIndependent,disputed]
+      [.rejection { differentFact with origin := .fullHistory own true }]) == .unavailable) = true := by decide
+example : ([{ ctx with law := 40 },{ ctx with history := 50 }] : List Context).all (fun own =>
+    relation ctx disputed.path { differentFact with origin := .fullHistory own true } == .eligible &&
+    outcome (request .headers [lowerIndependent,disputed]
+      [.rejection { differentFact with origin := .fullHistory own true }]) == .scheduled 2) = true := by decide
 
 -- F10–F13: immutable initial E0 versus selected continuation, actual T, no H0 floor.
 private def initial : Candidate := { candidate 1 150 hashC (.initial { original with selected := false }) with
   tip := original.target, path := original.headerPath }
 private def continued : Candidate := candidate 1 100 hashA (.continued original continuation)
-private def reconstructed : Continuation := { continuation with common := ⟨⟨6,hashD⟩,40⟩ }
+private def reconstructed : Continuation := { continuation with common := ⟨⟨722,hashD⟩,40⟩ }
 private def stateRequest (c : Candidate) : Request := request (.states .outerSelection) [c]
 example : outcome (stateRequest high) = .selected 1 .fullHistory ∧
-    outcome (stateRequest initial) = .selected 1 .conditionalImportedBase ∧
-    outcome (stateRequest continued) = .selected 1 .conditionalImportedBase := by decide
-example : outcome (stateRequest { continued with provenance := .continued { original with completeCurrent := some 0, completeLag := some 0 } continuation }) =
-      .selected 1 .conditionalImportedBase := by decide
+    ([initial,continued,
+      { continued with
+        provenance :=
+          .continued
+            { original with completeCurrent := some 0, completeLag := some 0 }
+            continuation }
+     ] : List Candidate).all (fun c =>
+      outcome (stateRequest c) == .selected 1 .conditionalImportedBase) = true := by decide
+private def initialAt (h b applied : Nat) : Candidate :=
+  let o : Original := { original with
+    target := ⟨⟨h,hashC⟩,150⟩,
+    base := ⟨b,hashE⟩,
+    appliedLagBase := applied,
+    headerPath := if b == 0 then [⟨b,hashE⟩,pin,⟨h,hashC⟩] else [pin,⟨b,hashE⟩,⟨h,hashC⟩],
+    selected := false }
+  { initial with tip := o.target, path := o.headerPath, provenance := .initial o }
+example : appliedBaseHeight 15119 = none ∧
+    appliedBaseHeight 15120 = some 0 ∧
+    appliedBaseHeight 15839 = some 0 ∧
+    appliedBaseHeight 15840 = some 720 := by decide
+example :
+    ([(15120,0,0), (15839,0,0), (15840,720,720)] : List (Nat × Nat × Nat)).all (fun x =>
+      outcome (stateRequest (initialAt x.1 x.2.1 x.2.2)) ==
+        .selected 1 .conditionalImportedBase) = true ∧
+    ([(15119,0,0),
+      (15840,15841,720), (15840,721,720),
+      (15840,720,721)] : List (Nat × Nat × Nat)).all (fun x =>
+      outcome (stateRequest (initialAt x.1 x.2.1 x.2.2)) == .missing [failure]) = true := by decide
+example : outcome (stateRequest (initialAt 15840 15841 15841)) =
+    .missing [failure] := by decide
+example : outcome (stateRequest (initialAt 15840 721 721)) =
+    .missing [failure] := by decide
 example : outcome (stateRequest { initial with provenance := .initial { original with imageEntry := false } }) = .missing [failure] ∧
     outcome (stateRequest { initial with tip := ⟨initial.tip.point,151⟩ }) = .missing [failure] ∧
     outcome (stateRequest { initial with path := initial.path.reverse }) = .missing [failure] ∧
@@ -560,7 +635,7 @@ example : outcome (stateRequest { initial with provenance := .initial { original
 example : outcome (stateRequest { continued with provenance := .continued original reconstructed, path := [pin,base,reconstructed.common.point,continued.tip.point] }) = .selected 1 .conditionalImportedBase ∧
     outcome (stateRequest { continued with tip := ⟨continued.tip.point,99⟩ }) = .missing [failure] := by decide
 example : outcome (request (.states .entry) [continued,equalUnresolved 100] [equalFact]) = .unavailable ∧
-    outcome (stateRequest { continued with tip := ⟨⟨6,hashD⟩,100⟩, path := [pin,base,⟨6,hashD⟩] }) = .selected 1 .conditionalImportedBase := by decide
+    outcome (stateRequest { continued with tip := ⟨⟨722,hashD⟩,100⟩, path := [pin,base,⟨722,hashD⟩] }) = .selected 1 .conditionalImportedBase := by decide
 example : ([ { original with completeCurrent := none }, { original with completeLag := none },
     { original with context := { ctx with network := 9 } }, { original with context := { ctx with genesis := 9 } },
     { original with context := { ctx with chainId := 9 } }, { original with context := { ctx with law := 9 } },
@@ -568,20 +643,20 @@ example : ([ { original with completeCurrent := none }, { original with complete
     { original with imageEntry := false }, { original with imageCover := false },
     { original with historicalMembership := false }, { original with bothSeedCorrespondence := false },
     { original with rootIdentityMetadata := false }, { original with originalTailValidated := false },
-    { original with originalPairComplete := false }, { original with appliedLagBase := 5 },
+    { original with originalPairComplete := false }, { original with appliedLagBase := 721 },
     { original with headersQualified := false } ] : List Original).all (fun o =>
       outcome (stateRequest { continued with provenance := .continued o continuation }) == .missing [failure]) = true := by decide
 example : ([ { continuation with reconstructedPrefix := false }, { continuation with actualState := false },
     { continuation with undoSources := false }, { continuation with bodySources := false },
     { continuation with suffixSection25 := false } ] : List Continuation).all (fun k =>
       outcome (stateRequest { continued with provenance := .continued original k }) == .missing [failure]) = true ∧
-    outcome (stateRequest { continued with provenance := .continued original { continuation with common := ⟨⟨3,hashD⟩,30⟩ }, path := [pin,⟨3,hashD⟩,base,continued.tip.point] }) = .missing [failure] ∧
+    outcome (stateRequest { continued with provenance := .continued original { continuation with common := ⟨⟨719,hashD⟩,30⟩ }, path := [pin,⟨719,hashD⟩,base,continued.tip.point] }) = .missing [failure] ∧
     outcome (stateRequest { continued with provenance := .continued original reconstructed, path := [pin,reconstructed.common.point,continued.tip.point] }) = .missing [failure] ∧
     outcome (stateRequest { continued with path := [base,continued.tip.point] }) = .missing [failure] := by decide
 
 -- F14/F15: T is not its heavier descendant; unknown state participates only in scheduling.
 private def unknown : Candidate := { candidate 3 110 hashC .headerOnly with
-  tip := ⟨⟨12,hashC⟩,110⟩, path := [pin,base,⟨10,hashA⟩,⟨12,hashC⟩] }
+  tip := ⟨⟨728,hashC⟩,110⟩, path := [pin,base,⟨726,hashA⟩,⟨728,hashC⟩] }
 private def other : Candidate := candidate 2 105 hashB
 private def headerPrefix : Candidate := { old with provenance := .headerOnly }
 example : outcome { request .headers [unknown] with inventory := [headerPrefix,unknown], scanned := [headerPrefix,unknown], required := ⟨.notRequired,some headerPrefix,true,none,failure⟩ } =
@@ -603,11 +678,11 @@ example : ([Boundary.entry,.reentry,.preactivation,.outerSelection] : List Bound
 example : ([ { low with actualWork := false }, { low with pathComplete := false },
     { low with headerRules := false }, { low with requiredSources := false },
     { low with context := { ctx with law := 9 } },
-    { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] } ] : List Candidate).all (fun c =>
+    { low with tip := ⟨⟨726,[1]⟩,100⟩, path := [pin,base,⟨726,[1]⟩] } ] : List Candidate).all (fun c =>
       outcome (request .headers [high,c] [unresolvedAt low]) == .missing [failure]) = true := by decide
 -- A malformed tip and a separately malformed record each keep their source refusal.
 example :
-    let c := { low with tip := ⟨⟨10,[1]⟩,100⟩, path := [pin,base,⟨10,[1]⟩] }
+    let c := { low with tip := ⟨⟨726,[1]⟩,100⟩, path := [pin,base,⟨726,[1]⟩] }
     (match outcome (request .headers [high,c] [.rejection { uncertain with block := c.tip.point, refusal := inventoryFailure }]) with
      | .missing ds => ds.length == 2 && ds.contains inventoryFailure && ds.contains failure
      | _ => false) = true := by rfl
