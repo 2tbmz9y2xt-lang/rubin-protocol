@@ -303,6 +303,7 @@ class FormalCoverageSummaryTests(unittest.TestCase):
 
         self.assertIn("RubinFormal.Example.present_theorem", names)
         self.assertNotIn("present_theorem", names)
+        self.assertNotIn("helper_definition", names)
 
 
 class StateModelRegistrationTests(unittest.TestCase):
@@ -368,7 +369,6 @@ class StateModelRegistrationTests(unittest.TestCase):
                 result, stderr = check(doc)
                 self.assertEqual(result, 1)
                 self.assertIn(expected, stderr)
-        self.assertNotIn("helper_definition", names)
 
 
 if __name__ == "__main__":
