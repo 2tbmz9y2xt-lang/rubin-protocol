@@ -85,8 +85,11 @@ universal/model section proof evidence.
 additional unregistered finite decision assertions against proposed
 rubin-spec#441@500dbe9dc58351832847fa1da4492110c4535996 (§23 and MEMPOOL
 §6.4.1.4). It derives candidate qualification, strict work/raw32 preference,
-operation-domain completeness, journal relations and protected-basis refusal
-from explicit abstract header/path/state/source/context premises. Initial and
+operation-domain completeness, journal use and protected-basis refusal
+from explicit abstract header/path/state/source/context premises. Intermediate
+SAME/DIFFERENT scope is assumed from its qualified external owner on the exact
+consumer basis, including full provenance; Context labels alone prove no scope.
+Final independence and the winner are computed by the model. Initial and
 continued imported states retain original b0/H0/E0 and conditional assurance;
 actual T is compared separately from a heavier scheduling header. Its pure
 consumer retains public state and source-owned observations. These assertions

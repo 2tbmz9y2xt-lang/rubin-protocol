@@ -177,6 +177,8 @@ inductive Disposition where
   | corrected (proof : Correction)
 deriving BEq, DecidableEq, Repr
 
+/-- The scope owner qualifies SAME/DIFFERENT on the exact consumer basis and
+    full provenance; the projected Context does not derive that relation. -/
 inductive Scope where
   | same
   | different
@@ -194,6 +196,7 @@ structure Fact where
   origin : Origin
   originalSources : Bool
   scope : Scope
+  /-- Positive external evidence for scope on the exact consumer basis. -/
   scopeQualified : Bool
   health : Health
   disposition : Disposition
@@ -235,7 +238,6 @@ def relation (ctx : Context) (path : List Point) (f : Fact) : Relation :=
           | .fullHistory c _ => c
           | .conditional o _ => o.context
         if ownContext.network == ctx.network && ownContext.genesis == ctx.genesis &&
-            (ownContext.law != ctx.law || ownContext.history != ctx.history) &&
             ownContext.chainId == ctx.chainId && originQualified ownContext f.block f.origin &&
             f.originalSources && f.health == .qualified
         then .eligible else .unresolved
@@ -493,7 +495,7 @@ example : outcome (request .headers [high,candidate 2 101]) = .indistinguishable
 -- F05–F09: all records participate; correction leaves the diagnostic nonoperative.
 example : relation ctx high.path { fact with block := ⟨1,hashC⟩, scopeQualified := false } = .eligible ∧
     relation ctx high.path fact = .excluded ∧
-    relation ctx high.path { fact with scope := .different } = .unresolved ∧
+    relation ctx high.path { fact with scope := .different } = .eligible ∧
     relation ctx high.path { fact with scope := .different, scopeQualified := false } = .unresolved ∧
     relation ctx high.path { fact with block := ⟨721,hashE⟩ } = .unresolved := by decide
 example : ([Health.suspect,.unresolved] : List Health).all (fun h =>
@@ -580,13 +582,16 @@ example : relation ctx disputed.path differentFact = .eligible ∧
 example : ([ { historical with network := 9 }, { historical with genesis := 9 }, { historical with chainId := 9 } ] : List Context).all (fun otherContext =>
     relation ctx disputed.path { differentFact with origin := .fullHistory otherContext true } == .unresolved) = true := by decide
 example : ([ctx,{ ctx with release := 60 }] : List Context).all (fun own =>
-    relation ctx disputed.path { differentFact with origin := .fullHistory own true } == .unresolved &&
+    relation ctx disputed.path { differentFact with origin := .fullHistory own true, scopeQualified := false } == .unresolved &&
     outcome (request .headers [lowerIndependent,disputed]
-      [.rejection { differentFact with origin := .fullHistory own true }]) == .unavailable) = true := by decide
-example : ([{ ctx with law := 40 },{ ctx with history := 50 }] : List Context).all (fun own =>
+      [.rejection { differentFact with origin := .fullHistory own true, scopeQualified := false }]) == .unavailable) = true := by decide
+example : ([ctx,{ ctx with release := 60 },{ ctx with law := 40 },{ ctx with history := 50 }] : List Context).all (fun own =>
     relation ctx disputed.path { differentFact with origin := .fullHistory own true } == .eligible &&
     outcome (request .headers [lowerIndependent,disputed]
       [.rejection { differentFact with origin := .fullHistory own true }]) == .scheduled 2) = true := by decide
+example : relation ctx tailDisputed.path { reachedFact with scope := .different } = .eligible ∧
+    outcome (request .headers [lowerIndependent,tailDisputed]
+      [.rejection { reachedFact with scope := .different }]) = .scheduled 2 := by decide
 
 -- F10–F13: immutable initial E0 versus selected continuation, actual T, no H0 floor.
 private def initial : Candidate := { candidate 1 150 hashC (.initial { original with selected := false }) with
