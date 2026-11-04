@@ -258,6 +258,7 @@ theorem state_consensus_contract (i : Input) :
             · cases hRoot : i.root <;>
                 simp [evaluate, evaluateForward, hEarlier, hAccounting, afterAccounting,
                   hCap, hGrowth, hRoot, observe, SuccessConditions, FirstResult]
+              exact ⟨s0, s1, ⟨rfl, rfl⟩, hCap, hGrowth⟩
             · simp [evaluate, evaluateForward, hEarlier, hAccounting, afterAccounting,
                 hCap, hGrowth, observe, SuccessConditions, FirstResult]
           · simp [evaluate, evaluateForward, hEarlier, hAccounting, afterAccounting,
@@ -309,7 +310,8 @@ private def active (s0 s1 : Nat) : Input :=
 
 private def result (i : Input) : Option Outcome := (evaluate .Forward i).result
 
-private def effects (r : Observation) :=
+private def effects (r : Observation) :
+    Option Outcome × List Stage × Bool × Bool × Option StateMap × Bool :=
   (r.result, r.reached, r.parentRequested, r.comparisonEligible, r.candidate, r.canonicalPublished)
 
 -- C01: constants and each startup-selected cap branch/height boundary.
@@ -323,8 +325,8 @@ example : [selectCap (.Matching ⟨1000, by decide⟩) ⟨999, by decide⟩,
 example : selectCap (.Matching ⟨0, by decide⟩) ⟨0, by decide⟩ = .Active := by decide
 example : result { input 1000000 1773121 with registry := .Unmatched } =
     some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) ∧
-    result { input 1000000 1773121 with height := ⟨999, by decide⟩,
-      registry := .Matching ⟨1000, by decide⟩ } =
+    result { input 1000000 1773121 with
+      height := ⟨999, by decide⟩, registry := .Matching ⟨1000, by decide⟩ } =
     some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) := by decide
 
 -- C02: CompactSize boundaries and complete final-map membership abstraction.
@@ -362,7 +364,10 @@ example : result (input 1649272441664 1649273214784) = some .Accepted ∧
 -- C05: a spent parent entry plus a bounded complete final map; no gross field.
 example : logicalStateBytes (sized 773209) = 773209 ∧
     accounting (input 89 773209) = .ok (89, 773209) ∧
-    result (input 89 773209) = some .Accepted := by decide
+    result (input 89 773209) = some .Accepted := by
+  constructor
+  · rfl
+  · constructor <;> rfl
 -- A further retained entry must count; an absent created-then-spent entry is
 -- not a member of the supplied final map. Transaction history is not an input.
 example : logicalStateBytes (run 1 33 :: sized 773209) = 773298 ∧
@@ -373,7 +378,7 @@ example : logicalStateBytes (run 1 33 :: sized 773209) = 773298 ∧
 example : [ParentRead.AbsentTotal, .AbsentCount].map (fun p =>
     effects (evaluate .Forward { input 89 89 with height := ⟨1, by decide⟩, parentRead := p })) =
     [(some (.NoValidity .STORE_INTEGRITY), [.Earlier, .Accounting], true, false, none, false),
-     (some (.NoValidity .STORE_INTEGRITY), [.Earlier, .Accounting], true, false, none, false)] := by decide
+     (some (.NoValidity .STORE_INTEGRITY), [.Earlier, .Accounting], true, false, none, false)] := by rfl
 example : result { input 89 89 with height := ⟨1, by decide⟩, parentRead := .UnavailableTotal } =
     some (.NoValidity (.Unavailable .ParentTotal)) ∧
     result { input 89 89 with height := ⟨1, by decide⟩, parentRead := .UnavailableCount } =
@@ -387,25 +392,26 @@ example : [CandidateRead.Unavailable, .Malformed, .Inconsistent].map (fun c =>
     result { input 89 89 with candidateRead := c, arithmetic := .Contradiction }) =
     [some (.NoValidity (.Unavailable .Candidate)), some (.NoValidity .STORE_INTEGRITY),
      some (.NoValidity .STORE_INTEGRITY)] := by decide
-example : result { input 89 89 with earlier := .Failed .TX_ERR_MISSING_UTXO,
-    parentRead := .AbsentTotal } = some (.ConsensusError (.Earlier .TX_ERR_MISSING_UTXO)) := by decide
+example : result { input 89 89 with
+    earlier := .Failed .TX_ERR_MISSING_UTXO, parentRead := .AbsentTotal } =
+    some (.ConsensusError (.Earlier .TX_ERR_MISSING_UTXO)) := by decide
 
 -- C07: exact first result, reachability, and no candidate on simultaneous failures.
 example : [EarlierError.TX_ERR_VALUE_CONSERVATION, .BLOCK_ERR_SUBSIDY_EXCEEDED].map
     (fun e => effects (evaluate .Forward { active 1649267441664 1649268214785 with
       earlier := .Failed e, parentRead := .Malformed, root := .Unavailable })) =
     [(some (.ConsensusError (.Earlier .TX_ERR_VALUE_CONSERVATION)), [.Earlier], false, false, none, false),
-     (some (.ConsensusError (.Earlier .BLOCK_ERR_SUBSIDY_EXCEEDED)), [.Earlier], false, false, none, false)] := by decide
+     (some (.ConsensusError (.Earlier .BLOCK_ERR_SUBSIDY_EXCEEDED)), [.Earlier], false, false, none, false)] := by rfl
 example : effects (evaluate .Forward { active 1649267441664 1649268214785 with parentRead := .Malformed }) =
-    (some (.NoValidity .STORE_INTEGRITY), [.Earlier, .Accounting], true, false, none, false) := by decide
+    (some (.NoValidity .STORE_INTEGRITY), [.Earlier, .Accounting], true, false, none, false) := by rfl
 example : [RootRead.Mismatch, .Unavailable].map (fun root =>
     effects (evaluate .Forward { active 1649267441664 1649268214785 with root := root })) =
     [(some (.ConsensusError .BLOCK_ERR_STATE_CAP_EXCEEDED), [.Earlier, .Accounting, .Cap], true, false, none, false),
-     (some (.ConsensusError .BLOCK_ERR_STATE_CAP_EXCEEDED), [.Earlier, .Accounting, .Cap], true, false, none, false)] := by decide
+     (some (.ConsensusError .BLOCK_ERR_STATE_CAP_EXCEEDED), [.Earlier, .Accounting, .Cap], true, false, none, false)] := by rfl
 example : [RootRead.Mismatch, .Unavailable].map (fun root =>
     effects (evaluate .Forward { input 1000000 1773121 with root := root })) =
     [(some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED), [.Earlier, .Accounting, .Growth], true, false, none, false),
-     (some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED), [.Earlier, .Accounting, .Growth], true, false, none, false)] := by decide
+     (some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED), [.Earlier, .Accounting, .Growth], true, false, none, false)] := by rfl
 example : result { input 1000000 1773120 with root := .Mismatch } =
     some (.ConsensusError .BLOCK_ERR_UTXO_ROOT_MISMATCH) ∧
     result { input 1000000 1773120 with root := .Unavailable } =
@@ -421,14 +427,17 @@ example : (evaluate .Forward { input 89 773210 with root := .Unavailable }).cand
 
 -- C08: unique empty genesis parent, no persisted parent request or growth exemption.
 private def genesis (lastDataLength : Fin 65537) : Input :=
-  { active 10000000 0 with height := ⟨0, by decide⟩, parentRead := .AbsentTotal,
+  { active 10000000 0 with
+    height := ⟨0, by decide⟩, parentRead := .AbsentTotal,
     registry := .Matching ⟨0, by decide⟩, candidate := [run 11 65536, run 1 lastDataLength] }
-example : accounting { input 10000000 89 with height := ⟨0, by decide⟩,
-    parentRead := .UnavailableCount } = .ok (0, 89) ∧
-    (evaluate .Forward { input 10000000 89 with height := ⟨0, by decide⟩,
-      parentRead := .Malformed }).parentRequested = false := by decide
-example : result { input 10000000 89 with height := ⟨0, by decide⟩,
-    registry := .Matching ⟨0, by decide⟩, parentRead := .AbsentCount } = some .Accepted := by decide
+example : accounting { input 10000000 89 with
+    height := ⟨0, by decide⟩, parentRead := .UnavailableCount } = .ok (0, 89) ∧
+    (evaluate .Forward { input 10000000 89 with
+      height := ⟨0, by decide⟩, parentRead := .Malformed }).parentRequested = false := by
+  constructor <;> rfl
+example : result { input 10000000 89 with
+    height := ⟨0, by decide⟩, registry := .Matching ⟨0, by decide⟩,
+    parentRead := .AbsentCount } = some .Accepted := by decide
 example : logicalStateBytes (genesis 51506).candidate = 773120 ∧
     result (genesis 51506) = some .Accepted ∧
     logicalStateBytes (genesis 51507).candidate = 773121 ∧
@@ -437,19 +446,19 @@ example : logicalStateBytes (genesis 51506).candidate = 773120 ∧
 -- C09: exact evolving parents, imported base, first refusal, retry, no publication.
 example : let r := runSuffix (sized 89) (sized 10000000)
       [input 0 9000000, { input 0 9773121 with height := ⟨3000001, by decide⟩ },
-       { input 0 89 with height := ⟨3000002, by decide⟩, root := .Mismatch }]
+       { input 0 89 with height := ⟨3000002, by decide⟩, root := .Mismatch }];
     r.result = some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) ∧
     r.steps.length = 2 ∧ r.comparisonCandidate = none ∧ r.canonicalAfter = sized 89 := by decide
-example : let r := runSuffix (sized 89) (sized 10000000) [input 0 10773120]
+example : let r := runSuffix (sized 89) (sized 10000000) [input 0 10773120];
     r.result = some .Accepted ∧ r.comparisonCandidate = some (sized 10773120) ∧
     r.canonicalAfter = sized 89 := by decide
 example : let r := runSuffix (sized 89) (sized 10000000)
-      [input 0 9000000, { input 0 9773120 with height := ⟨3000001, by decide⟩ }]
+      [input 0 9000000, { input 0 9773120 with height := ⟨3000001, by decide⟩ }];
     r.result = some .Accepted ∧ r.comparisonCandidate = some (sized 9773120) ∧
     r.steps.length = 2 ∧ r.canonicalAfter = sized 89 := by decide
 example : let r := runSuffix (sized 89) (sized 10000000)
       [{ input 0 10000000 with root := .Unavailable },
-       { input 0 89 with height := ⟨3000001, by decide⟩ }]
+       { input 0 89 with height := ⟨3000001, by decide⟩ }];
     r.result = some (.NoValidity (.Unavailable .Root)) ∧ r.retryable = true ∧
     r.steps.length = 1 ∧ r.comparisonCandidate = none ∧ r.canonicalAfter = sized 89 := by decide
 
@@ -457,8 +466,9 @@ example : let r := runSuffix (sized 89) (sized 10000000)
 example : result (input 10000000 9000000) = some .Accepted := by decide
 example : [Direction.Disconnect, .RestoreOld, .LagPrimitive].map (fun d =>
     evaluate d { active 9000000 10000000 with parentRead := .Malformed, root := .Mismatch }) =
-    List.replicate 3 { result := none, reached := [], parentRequested := false,
-      comparisonEligible := false, candidate := none, canonicalPublished := false } := by decide
+    List.replicate 3 ({
+      result := none, reached := [], parentRequested := false,
+      comparisonEligible := false, candidate := none, canonicalPublished := false } : Observation) := by rfl
 
 end StateConsensusV1
 end RubinFormal
