@@ -69,6 +69,22 @@ universal/model section proof evidence.
 - Extra formal-only theorems do not establish a registered formal coverage row
   unless they are represented by a registry entry.
 
+`RubinFormal.ForkChoiceJournalDecision`, imported by the package root, contains
+additional unregistered finite decision assertions against proposed
+rubin-spec#441@500dbe9dc58351832847fa1da4492110c4535996 (§23 and MEMPOOL
+§6.4.1.4). It derives candidate qualification, strict work/raw32 preference,
+operation-domain completeness, journal relations and protected-basis refusal
+from explicit abstract header/path/state/source/context premises. Initial and
+continued imported states retain original b0/H0/E0 and conditional assurance;
+actual T is compared separately from a heavier scheduling header. Its pure
+consumer retains public state and source-owned observations. These assertions
+prove neither premise acquisition/authenticity nor journal producers, P/H1,
+persistence, runtime refinement, collision freedom, publication or READY.
+Existing registered theorem/file/trust/status/evidence scope and the six-positive
+CV bridge remain unchanged. PR3801 separately owns the merge-only Part A pin;
+the proposed source and this evidence are not canonical adoption or whole-§23
+closure.
+
 ## Текущая раскладка evidence levels
 
 - `machine_checked_universal`: 22
