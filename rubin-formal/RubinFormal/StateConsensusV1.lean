@@ -341,9 +341,12 @@ example : (evaluate .Forward (input 1000000 1773121)).reached =
     some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) := by decide
 example : (afterAccounting .Inactive 100 50 .Equal [] true).result = some .Accepted := by decide
 example : result (input 100 56) = some .Accepted := by decide
-example : (runSuffix [] (sized 10000000)
-    [input 10000000 9000000, { input 9000000 9773121 with height := ⟨3000001, by decide⟩ }]).result =
-    some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) := by decide
+example :
+    let r := runSuffix [] (sized 10000000)
+      [input 10000000 9000000, { input 9000000 9773121 with height := ⟨3000001, by decide⟩ }]
+    r.steps.map (fun step => step.result) =
+      [some .Accepted, some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED)] ∧
+    r.result = some (.ConsensusError .BLOCK_ERR_STATE_GROWTH_EXCEEDED) := by decide
 
 -- C04: active cap equality/drain; oversize parents model delayed activation at
 -- this height, not an oversize state produced under an always-active cap.
