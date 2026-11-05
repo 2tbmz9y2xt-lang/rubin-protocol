@@ -85,11 +85,6 @@ Wire model notes:
 - `RubinFormal.ByteWireV2` — real CompactSize / byte-accurate proof surface for current wire claims
 - `RubinFormal.ByteWireLegacy` — toy bootstrap model for single-byte CompactSize only (`n < 253`) and `TxMini`
 
-`compact_size` records eleven existing declarations as `stated/machine_checked_model`:
-canonical-prefix decoding, bounded encoder roundtrip and encoder lengths.
-The required `TX_ERR_PARSE` / `BLOCK_ERR_PARSE` rejection of non-minimal
-encodings remains outside these declarations.
-
 ## Risk model / CI gate
 
 - Documentation: `RISK_MODEL.md`
