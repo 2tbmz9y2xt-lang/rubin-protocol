@@ -31,6 +31,7 @@ EXPECTED_CLAIM_BY_PROOF = {
     "refinement": "refined",
 }
 REQUIRED_SECTION_EVIDENCE_LEVELS = {
+    "compact_size": "machine_checked_model",
     "consensus_constants": "machine_checked_universal",
     "consensus_constants_witness_lengths_pre_rotation": "machine_checked_universal",
     "consensus_constants_native_binding_manifest_pre_rotation": "machine_checked_universal",
