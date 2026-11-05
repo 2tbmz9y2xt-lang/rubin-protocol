@@ -327,15 +327,25 @@ class StateModelRegistrationTests(unittest.TestCase):
                 return result, stderr.getvalue()
 
         self.assertEqual(check(original), (0, ""))
-        for defect in ("unknown", "duplicate", "missing", "evidence", "theorem", "summary", "candidate_hash", "source_hash"):
-            with self.subTest(defect=defect):
+        for key, defect in (
+            (key, defect)
+            for key, defects in (
+                ("canonical_utxo_state_model", ("unknown", "duplicate", "missing", "evidence", "theorem", "summary", "candidate_hash", "source_hash")),
+                ("compact_size", ("unknown", "duplicate", "missing", "evidence", "theorem")),
+                ("primitive_encodings", ("unknown", "duplicate", "missing", "evidence", "theorem")),
+                ("deterministic_parse_error_mapping", ("unknown", "duplicate", "missing", "evidence", "theorem")),
+                ("canonical_replay_domain_checks", ("unknown", "duplicate", "missing", "evidence", "theorem")),
+            )
+            for defect in defects
+        ):
+            with self.subTest(key=key, defect=defect):
                 doc = json.loads(json.dumps(original))
                 rows = doc["coverage"]
-                row = next(r for r in rows if r["section_key"] == "canonical_utxo_state_model")
-                key = row["section_key"]
+                row = next(r for r in rows if r["section_key"] == key)
                 if defect == "unknown":
                     row["section_key"] = "unrelated_state_model"
-                    expected = f"ERROR: unknown section_key in coverage[{rows.index(row)}]: unrelated_state_model\n"
+                    expected = (f"ERROR: unknown section_key in coverage[{rows.index(row)}]: unrelated_state_model\n"
+                                f"ERROR: missing section keys in proof coverage:\n  - {key}\n")
                 elif defect == "duplicate":
                     rows.append(json.loads(json.dumps(row)))
                     expected = f"ERROR: duplicate section_key in coverage: {key}\n"
@@ -346,11 +356,14 @@ class StateModelRegistrationTests(unittest.TestCase):
                     row["evidence_level"] = "machine_checked_universal"
                     expected = f"ERROR: evidence_level drift for {key}: expected machine_checked_model, got machine_checked_universal\n"
                 elif defect == "theorem":
-                    row["theorems"] = ["RubinFormal.StateConsensusV1.absent_contract"]
+                    theorem = row["theorems"][0]
+                    absent = "RubinFormal.StateConsensusV1.absent_contract"
+                    row["theorems"][0] = absent
+                    row["theorem_files"][absent] = row["theorem_files"].pop(theorem)
                     expected = f"ERROR: {key} references missing Lean theorem declaration: RubinFormal.StateConsensusV1.absent_contract\n"
                 elif defect == "summary":
-                    doc["coverage_summary"]["section_rows"] = 31
-                    expected = "ERROR: coverage_summary.section_rows drift: expected 32, got 31\n"
+                    doc["coverage_summary"]["section_rows"] = 35
+                    expected = "ERROR: coverage_summary.section_rows drift: expected 36, got 35\n"
                 else:
                     path = "tools/check_formal_registry_truth.py"
                     record = doc["source_rebind"]["active_path_manifest"][path]
@@ -368,7 +381,7 @@ class StateModelRegistrationTests(unittest.TestCase):
                     )
                 result, stderr = check(doc)
                 self.assertEqual(result, 1)
-                self.assertIn(expected, stderr)
+                self.assertEqual(stderr, expected)
 
 
 if __name__ == "__main__":

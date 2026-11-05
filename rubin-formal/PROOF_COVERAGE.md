@@ -4,7 +4,7 @@
 Машинный реестр: `rubin-formal/proof_coverage.json`
 
 Текущее состояние: machine-readable source-of-truth (`proof_coverage.json`) фиксирует
-`proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 32 current coverage entries и явные
+`proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`, полный registry по 36 current coverage entries и явные
 `notes` / `limitations` для non-universal claims. Lean replay/refinement evidence
 is bounded by the models imported by `RubinFormal.Conformance.Index`;
 runtime/parallel-only `CV-PV-*` gates remain outside this scope.
@@ -19,7 +19,7 @@ their replay evidence does not prove
 live-client correctness or Go/Rust parity.
 
 `SECTION_HASHES` manifest membership and formal `coverage[]` registry membership
-are independent sets, not a one-to-one mapping. The registry has exactly 32
+are independent sets, not a one-to-one mapping. The registry has exactly 36
 formal coverage entries. A `section_heading` is a registry row label: some
 values are exact specification headings; others identify residual, bridge,
 model, or other bounded formal scopes. Row status, evidence, and claims apply
@@ -46,10 +46,13 @@ No result transfers to existing rows, actual root bytes, clients, storage,
 IMAGE history or physical qualification. The proposal, separate metadata
 pin and human adoption remain separate; the original source census is unchanged.
 
-Конечный CV replay — это compiled conformance evidence. Теорема
-`cv_*_vectors_pass` section-registered только там, где она является
-claim-bearing `machine_checked_contract` evidence; она не является
-universal/model section proof evidence.
+Finite CV replay is compiled conformance evidence. A `cv_*_vectors_pass`
+theorem is section-registered as claim-bearing `machine_checked_contract`
+evidence. The sole model-row exception here is
+`deterministic_parse_error_mapping`: its `cv_parse_vectors_pass` component
+retains that finite evidence scope for the pinned generated CV-PARSE set,
+alongside separate parse-stage model declarations. It is not universal/model
+section proof evidence and does not promote the row's evidence level.
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
 
@@ -75,9 +78,9 @@ universal/model section proof evidence.
 
 Связка с hash-pinning:
 
-- `proof_coverage.json` сейчас содержит 32 machine-checked registry entries.
-- Status counts: `23` `proved`, `5` `proved_with_axiom`, `4` `stated`, `0` `deferred`.
-- Не все 32 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
+- `proof_coverage.json` сейчас содержит 36 machine-checked registry entries.
+- Status counts: `23` `proved`, `5` `proved_with_axiom`, `8` `stated`, `0` `deferred`.
+- Не все 36 entries равны по силе claims: честная граница определяется `evidence_level` и `limitations`.
 - Extra formal-only theorems do not establish a registered formal coverage row
   unless they are represented by a registry entry.
 
@@ -104,7 +107,7 @@ closure.
 
 - `machine_checked_universal`: 22
 - `machine_checked_assumption_backed`: 5
-- `machine_checked_model`: 4
+- `machine_checked_model`: 8
 - `machine_checked_contract`: 1
 
 ## Lean ↔ Go/Rust bridge ceiling

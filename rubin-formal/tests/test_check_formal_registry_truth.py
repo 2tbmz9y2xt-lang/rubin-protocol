@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+from collections import Counter
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
@@ -16,27 +17,43 @@ from tools.check_formal_registry_truth import extract_declared_names, parse_axio
 class RegistryTruthCheckerTests(unittest.TestCase):
     def test_public_entrypoint_rejects_model_theorem_misbindings(self) -> None:
         source = Path(__file__).resolve().parents[1]
-        for defect in ("file", "name", "trust"):
-            with self.subTest(defect=defect), TemporaryDirectory() as tmp:
+        cases = (
+            ("canonical_utxo_state_model", "RubinFormal.StateConsensusV1.state_consensus_contract", "kernel_checked"),
+            ("compact_size", "RubinFormal.Wire.compactSize_roundtrip", "kernel_checked"),
+            ("primitive_encodings", "RubinFormal.encodeU16le_length", "kernel_checked"),
+            ("deterministic_parse_error_mapping", "RubinFormal.parse_stage_txkind_live", "compiler_trusted"),
+            ("canonical_replay_domain_checks", "RubinFormal.replay_domain_checks_proved", "kernel_checked"),
+        )
+        for key, theorem, expected_trust, defect in (
+            (key, theorem, expected_trust, defect)
+            for key, theorem, expected_trust in cases
+            for defect in ("file", "name", "trust")
+        ):
+            with self.subTest(key=key, defect=defect), TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 (root / "tools").mkdir()
                 for path in source.iterdir():
                     if path.name not in {"tools", "proof_coverage.json"}:
                         (root / path.name).symlink_to(path, target_is_directory=path.is_dir())
                 doc = json.loads((source / "proof_coverage.json").read_text())
-                row = next(r for r in doc["coverage"] if r["section_key"] == "canonical_utxo_state_model")
-                theorem = "RubinFormal.StateConsensusV1.state_consensus_contract"
+                row = next(r for r in doc["coverage"] if r["section_key"] == key)
                 if defect == "file":
                     row["theorem_files"][theorem] = "rubin-formal/RubinFormal/UtxoBasicV1.lean"
                     expected = f"ERROR: proof_coverage theorem `{theorem}` not found in declared file `rubin-formal/RubinFormal/UtxoBasicV1.lean`\n"
                 elif defect == "name":
                     absent = "RubinFormal.StateConsensusV1.absent_contract"
-                    row["theorems"] = [absent]
-                    row["theorem_files"] = {absent: row["file"]}
+                    row["theorems"] = [absent if name == theorem else name for name in row["theorems"]]
+                    row["theorem_files"][absent] = row["theorem_files"].pop(theorem)
+                    refs = Counter(name for entry in doc["coverage"] for name in entry["theorems"])
+                    doc["coverage_summary"].update(
+                        unique_theorem_names=len(refs),
+                        reused_theorem_names=sorted(name for name, count in refs.items() if count > 1),
+                    )
                     expected = f"ERROR: proof_coverage theorem `{absent}` not found in declared file `{row['file']}`\n"
                 else:
-                    row["proof_trust"] = "compiler_trusted"
-                    expected = "ERROR: proof_coverage `canonical_utxo_state_model` proof_trust drift: expected kernel_checked, got compiler_trusted\n"
+                    wrong_trust = "compiler_trusted" if expected_trust == "kernel_checked" else "kernel_checked"
+                    row["proof_trust"] = wrong_trust
+                    expected = f"ERROR: proof_coverage `{key}` proof_trust drift: expected {expected_trust}, got {wrong_trust}\n"
                 (root / "proof_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
                 stderr = io.StringIO()
                 with mock.patch.object(registry, "__file__", str(root / "tools" / "check_formal_registry_truth.py")), contextlib.redirect_stderr(stderr):
