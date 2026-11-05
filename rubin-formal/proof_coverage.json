@@ -162,7 +162,7 @@
       "RubinFormal/WitnessCommitmentPregate.lean": {"disposition":"BYTE_EXACT","source_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535","candidate_sha256":"5d523572039be8a7ed6f17c68f2050b480a1792b2bcc523ad416f47afd2ee535"},
       "RubinFormal/WitnessCommitmentV1.lean": {"disposition":"BYTE_EXACT","source_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866","candidate_sha256":"b8853ab1eb8f1fe35089b7a9ed0104498e2431766bf24e3823e88c3f6547c866"},
       "scripts/check.sh": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"7ee36e514edb40d2182160165b9d43c82acd4aafe3b37a09a2da98fa1edf08a0","candidate_sha256":"b3795268916f36020cd52a31b9321592d83aaa1f2f6deb0bf8e04433f1e82c59"},
-      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"63fe2e6c3397047ee1c3d15fa9593c61003983e58d6005f663f8ea2ffa47f9da"},
+      "tests/test_check_formal_registry_truth.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"6e6550c095f77c9281d64db9d94817777eaed9465a3af3b7d8a6a3c332d824a0","candidate_sha256":"194429d53a8c260e3c98622df125ca57f3ebcdf83b8f9c2ebcae386e16badc0b"},
       "tests/test_covenant_registry_disposition.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"7fd85a8ed5415d948046c54bb44ec0c5a91b7d90bb3e02aa6f4e9bbe9b37a630","candidate_sha256":"290f7ccdf7dcab1fb1c4c291df193aee1c03d482374c267cd6a7a0c777c04e1a"},
       "tests/test_integration.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"90cef0cf7dfc542cbe3cd4e5f745d64971352a6a93ec9cf08cd76f076614e01d","candidate_sha256":"dc33402b488e6c15a1fe7f8c3568a63ed17e10fdd7e82853fb5ceb3ba5189818"},
       "tests/test_path_resolution.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"ad32d9edad27a0a0dfff71c9a75ee13b76b4f92c4ff42f691d5e1c8abed33050","candidate_sha256":"96aaf0a25b2dfe01bc60f68cd3e48760ad8f486d13d24fbc8c82a6a3dedb708f"},
@@ -171,10 +171,54 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"5bbd11a6d76731ed5359213caee9222e04afbc0c4ef6b9170a1ecbb7ddd56222"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"a7d8b75b5a3ba1f1ac1225c34470bd95b4e495041c1dba97917657260534a7c6"}
     }
   },
   "coverage": [
+    {
+      "section_key": "deterministic_parse_error_mapping",
+      "section_heading": "## 7. Deterministic Parse Error Mapping (Wire)",
+      "status": "stated",
+      "proof_trust": "compiler_trusted",
+      "theorems": [
+        "RubinFormal.parse_stage_txkind_live",
+        "RubinFormal.parse_stage_inputmin_live",
+        "RubinFormal.parse_stage_outputmin_live",
+        "RubinFormal.parse_stage_witness_overflow_live",
+        "RubinFormal.bridge_parse_txkind",
+        "RubinFormal.bridge_parse_inputmin",
+        "RubinFormal.bridge_parse_outputmin",
+        "RubinFormal.bridge_parse_witness",
+        "RubinFormal.bridge_parse_dalen",
+        "RubinFormal.parse_stage_chain",
+        "RubinFormal.txParseStageOrd_injective",
+        "RubinFormal.tx_parse_pipeline_deterministic",
+        "RubinFormal.Conformance.cv_parse_vectors_pass"
+      ],
+      "file": "rubin-formal/RubinFormal/ErrorPriority.lean",
+      "theorem_files": {
+        "RubinFormal.parse_stage_txkind_live": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.parse_stage_inputmin_live": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.parse_stage_outputmin_live": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.parse_stage_witness_overflow_live": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.bridge_parse_txkind": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.bridge_parse_inputmin": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.bridge_parse_outputmin": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.bridge_parse_witness": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.bridge_parse_dalen": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.parse_stage_chain": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.txParseStageOrd_injective": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.tx_parse_pipeline_deterministic": "rubin-formal/RubinFormal/ErrorPriority.lean",
+        "RubinFormal.Conformance.cv_parse_vectors_pass": "rubin-formal/RubinFormal/Conformance/CVParseReplay.lean"
+      },
+      "notes": "Bound to deterministic_parse_error_mapping hash 08002a4984064c4e8ced37f74dc6134b13237612e5ffab85c455cfc1d84c4b0e at rubin-spec 2340c04918960108c7e26f69aa9c29f00b85ba93. Part A (rubin-spec PR 441, merged as 2340c04918960108c7e26f69aa9c29f00b85ba93) changes none of compact_size, primitive_encodings, deterministic_parse_error_mapping or canonical_replay_domain_checks. The declarations record a strict, injective ordinal chain for the represented transaction-parse stages and selected helper error bridges. cv_parse_vectors_pass adds only finite contract evidence for the pinned generated CV-PARSE set; its native_decide proof makes this row compiler_trusted.",
+      "limitations": [
+        "The Section 7 wire-order rule is represented by the model's strict ordinal stage chain and per-stage helper bridges, not by a theorem over parseTx on arbitrary bytes. tx_parse_pipeline_deterministic omits DA-core and payload-read failures.",
+        "Version precedence; Section 5.2 tx_kind and DaCoreFields position checks; step 2 da_payload_len rules beyond minimality; step 3 premature EOF and trailing bytes; the per-item order of step 5; and steps 5a, 5b and 5c have no dedicated theorem in this row.",
+        "cv_parse_vectors_pass binds exactly the generated CV-PARSE vectors at the pinned generated set. It is finite contract evidence, not universal/model section proof evidence or Go/Rust refinement."
+      ],
+      "evidence_level": "machine_checked_model"
+    },
     {
       "section_key": "primitive_encodings",
       "section_heading": "## 2. Primitive Encodings",
@@ -1796,13 +1840,13 @@
     }
   ],
   "coverage_summary": {
-    "section_rows": 34,
+    "section_rows": 35,
     "proved_rows": 23,
     "proved_with_axiom_rows": 5,
-    "stated_rows": 6,
+    "stated_rows": 7,
     "deferred_rows": 0,
-    "theorem_references": 517,
-    "unique_theorem_names": 489,
+    "theorem_references": 530,
+    "unique_theorem_names": 491,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",
@@ -1810,6 +1854,11 @@
       "RubinFormal.Wire.compactSize_encode_roundtrip",
       "RubinFormal.Wire.compactSize_overflow_safety",
       "RubinFormal.Wire.compactSize_roundtrip",
+      "RubinFormal.bridge_parse_dalen",
+      "RubinFormal.bridge_parse_inputmin",
+      "RubinFormal.bridge_parse_outputmin",
+      "RubinFormal.bridge_parse_txkind",
+      "RubinFormal.bridge_parse_witness",
       "RubinFormal.cov_type_da_commit_value",
       "RubinFormal.dispatch_unknown_covenant_error",
       "RubinFormal.encodeU16le_length",
@@ -1818,9 +1867,15 @@
       "RubinFormal.mldsa87_empty_sig_rejected_registry_pre_rotation",
       "RubinFormal.mldsa87_sig_too_large_rejected_registry_pre_rotation",
       "RubinFormal.mldsa87_wrong_pubkey_rejected_registry_pre_rotation",
+      "RubinFormal.parse_stage_chain",
+      "RubinFormal.parse_stage_inputmin_live",
+      "RubinFormal.parse_stage_outputmin_live",
+      "RubinFormal.parse_stage_txkind_live",
+      "RubinFormal.parse_stage_witness_overflow_live",
       "RubinFormal.sentinel_empty_accepted_registry_pre_rotation",
       "RubinFormal.sentinel_nonempty_rejected_registry_pre_rotation",
       "RubinFormal.subsidy_u128_safety_proved",
+      "RubinFormal.txParseStageOrd_injective",
       "RubinFormal.u16le_roundtrip_0",
       "RubinFormal.u16le_roundtrip_258",
       "RubinFormal.u16le_roundtrip_max",
@@ -1840,7 +1895,7 @@
     "allowed": [
       "Lean executable replay/refinement evidence is bounded by the models and modules imported by RubinFormal.Conformance.Index; runtime/parallel-only CV-PV gates remain outside Lean replay scope. The native-rotation manual legacy stub is not written by current generators: JSON *-02 rows use create_height=100, height=199, suite_id=2 and expect_ok=true, whereas Lean uses spendHeight=200 and expectOk=false. rotation_spend_suite_check ignores covenant_type after parsing, so these labels do not prove individual covenant spends or full JSON/manual-stub semantic equivalence",
       "Lean evidence is op-scoped and mixed; any correspondence to Go/Rust is human-reviewed rather than machine-checked implementation equivalence",
-      "The registry currently covers 34 machine-checked coverage entries: 23 proved, 5 proved_with_axiom, and 6 stated. Evidence levels comprise 22 universal, 5 assumption-backed, 6 model, and 1 contract entries.",
+      "The registry currently covers 35 machine-checked coverage entries: 23 proved, 5 proved_with_axiom, and 7 stated. Evidence levels comprise 22 universal, 5 assumption-backed, 7 model, and 1 contract entries.",
       "canonical_utxo_state_model is a kernel-checked bounded model of proposed spec PR 441 at 500dbe9dc58351832847fa1da4492110c4535996, not spec adoption or live-client/root/physical correctness. Successful forward evaluation permits subsequent canonical comparison only; read integrity, real map validity and root equality are explicit supplied premises.",
       "Formal claims are row-scoped and bounded by the explicit forbidden claims below. spec_section_hashes_sha3_256 is the single-manifest disposition of the exact approved locally prepared covenant-registry snapshot, not proof of model applicability, canonical validity, or client parity. Release order is local spec preparation, spec draft publication, metadata human merge, then spec merge; the old canonical spec/new pin comparison necessarily fails closed between the metadata and matching spec merges",
       "Bridge theorems (LIVE/BRIDGE class) prove properties of Lean transcriptions of Go/Rust functions. Lean-to-Go/Rust parity is verified by human code review, not machine-checked. The behavioral claim applies to the Lean transcription; transfer to Go/Rust binary relies on the reviewed parity."

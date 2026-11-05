@@ -5,7 +5,7 @@ Machine-checked formal proof surface for the RUBIN L1 blockchain protocol.
 ## Contents
 
 - Lean 4 package `RubinFormal`
-- `proof_coverage.json` — machine-readable registry with exactly 34 formal coverage entries
+- `proof_coverage.json` — machine-readable registry with exactly 35 formal coverage entries
 - Each registry entry carries explicit `evidence_level`, `proof_trust`, `notes`, and `limitations` so that public claims never outrun the actual proof boundary
 
 ## Source rebind: 116 original → 102 active (4 `DROP_RETIRED_GENERATED_SOURCE` + 3 `DROP_RETIRED_SOURCE` + 7 `DROP_STALE_SOURCE`; `CoreExtRefinement.lean` is separately `SEMANTIC_THEOREM_RECONCILIATION`-retired)
@@ -19,9 +19,13 @@ their registered scopes. It provides reproducible machine-checked evidence but
 
 Current machine-readable status: `proof_level=refinement`, `claim_level=refined`, `package_maturity=experimental_pending_reverification`.
 
-Finite CV replay is compiled conformance evidence. A `cv_*_vectors_pass` theorem
-is section-registered only where it is claim-bearing `machine_checked_contract`
-evidence; it is not universal/model section proof evidence.
+Finite CV replay is compiled conformance evidence. A `cv_*_vectors_pass`
+theorem is section-registered as claim-bearing `machine_checked_contract`
+evidence. The sole model-row exception here is
+`deterministic_parse_error_mapping`: its `cv_parse_vectors_pass` component
+retains that finite evidence scope for the pinned generated CV-PARSE set,
+alongside separate parse-stage model declarations. It is not universal/model
+section proof evidence and does not promote the row's evidence level.
 
 Permitted claim formulations (OK):
 
@@ -96,9 +100,9 @@ encodings remains outside these declarations.
 
 - This is **not** a freeze-ready package at the level of "universal byte-accurate wire + state transition model for all sections"
 - Consensus rules are not changed by this formal package
-- The formal coverage registry currently contains exactly 34 machine-checked entries
-- Registry status counts: 23 `proved`, 5 `proved_with_axiom`, 6 `stated`, 0 `deferred`
-- Claim strength breakdown: 22 universal, 5 assumption-backed, 6 model-level, 1 contract-level
+- The formal coverage registry currently contains exactly 35 machine-checked entries
+- Registry status counts: 23 `proved`, 5 `proved_with_axiom`, 7 `stated`, 0 `deferred`
+- Claim strength breakdown: 22 universal, 5 assumption-backed, 7 model-level, 1 contract-level
 - Machine-checked status does not imply uniform claim strength — the honest boundary is set by `status`, `evidence_level`, and `limitations`
 - Extra formal-only theorems do not establish a registered formal coverage row unless registered in the machine-readable registry
 

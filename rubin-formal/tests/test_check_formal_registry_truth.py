@@ -18,13 +18,14 @@ class RegistryTruthCheckerTests(unittest.TestCase):
     def test_public_entrypoint_rejects_model_theorem_misbindings(self) -> None:
         source = Path(__file__).resolve().parents[1]
         cases = (
-            ("canonical_utxo_state_model", "RubinFormal.StateConsensusV1.state_consensus_contract"),
-            ("compact_size", "RubinFormal.Wire.compactSize_roundtrip"),
-            ("primitive_encodings", "RubinFormal.encodeU16le_length"),
+            ("canonical_utxo_state_model", "RubinFormal.StateConsensusV1.state_consensus_contract", "kernel_checked"),
+            ("compact_size", "RubinFormal.Wire.compactSize_roundtrip", "kernel_checked"),
+            ("primitive_encodings", "RubinFormal.encodeU16le_length", "kernel_checked"),
+            ("deterministic_parse_error_mapping", "RubinFormal.parse_stage_txkind_live", "compiler_trusted"),
         )
-        for key, theorem, defect in (
-            (key, theorem, defect)
-            for key, theorem in cases
+        for key, theorem, expected_trust, defect in (
+            (key, theorem, expected_trust, defect)
+            for key, theorem, expected_trust in cases
             for defect in ("file", "name", "trust")
         ):
             with self.subTest(key=key, defect=defect), TemporaryDirectory() as tmp:
@@ -49,8 +50,9 @@ class RegistryTruthCheckerTests(unittest.TestCase):
                     )
                     expected = f"ERROR: proof_coverage theorem `{absent}` not found in declared file `{row['file']}`\n"
                 else:
-                    row["proof_trust"] = "compiler_trusted"
-                    expected = f"ERROR: proof_coverage `{key}` proof_trust drift: expected kernel_checked, got compiler_trusted\n"
+                    wrong_trust = "compiler_trusted" if expected_trust == "kernel_checked" else "kernel_checked"
+                    row["proof_trust"] = wrong_trust
+                    expected = f"ERROR: proof_coverage `{key}` proof_trust drift: expected {expected_trust}, got {wrong_trust}\n"
                 (root / "proof_coverage.json").write_text(json.dumps(doc), encoding="utf-8")
                 stderr = io.StringIO()
                 with mock.patch.object(registry, "__file__", str(root / "tools" / "check_formal_registry_truth.py")), contextlib.redirect_stderr(stderr):

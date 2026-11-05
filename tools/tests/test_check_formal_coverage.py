@@ -333,6 +333,7 @@ class StateModelRegistrationTests(unittest.TestCase):
                 ("canonical_utxo_state_model", ("unknown", "duplicate", "missing", "evidence", "theorem", "summary", "candidate_hash", "source_hash")),
                 ("compact_size", ("unknown", "duplicate", "missing", "evidence", "theorem")),
                 ("primitive_encodings", ("unknown", "duplicate", "missing", "evidence", "theorem")),
+                ("deterministic_parse_error_mapping", ("unknown", "duplicate", "missing", "evidence", "theorem")),
             )
             for defect in defects
         ):
@@ -360,8 +361,8 @@ class StateModelRegistrationTests(unittest.TestCase):
                     row["theorem_files"][absent] = row["theorem_files"].pop(theorem)
                     expected = f"ERROR: {key} references missing Lean theorem declaration: RubinFormal.StateConsensusV1.absent_contract\n"
                 elif defect == "summary":
-                    doc["coverage_summary"]["section_rows"] = 33
-                    expected = "ERROR: coverage_summary.section_rows drift: expected 34, got 33\n"
+                    doc["coverage_summary"]["section_rows"] = 34
+                    expected = "ERROR: coverage_summary.section_rows drift: expected 35, got 34\n"
                 else:
                     path = "tools/check_formal_registry_truth.py"
                     record = doc["source_rebind"]["active_path_manifest"][path]

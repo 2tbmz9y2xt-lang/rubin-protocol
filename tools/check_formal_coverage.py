@@ -31,6 +31,7 @@ EXPECTED_CLAIM_BY_PROOF = {
     "refinement": "refined",
 }
 REQUIRED_SECTION_EVIDENCE_LEVELS = {
+    "deterministic_parse_error_mapping": "machine_checked_model",
     "primitive_encodings": "machine_checked_model",
     "compact_size": "machine_checked_model",
     "consensus_constants": "machine_checked_universal",
