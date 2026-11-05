@@ -201,8 +201,9 @@
       },
       "notes": "Bound to canonical_replay_domain_checks hash 270b8823cfed5bccedb773ad86033c0e73c0a4b7c97b4c297ab2d374503a4ed0 at rubin-spec 2340c04918960108c7e26f69aa9c29f00b85ba93. Part A (rubin-spec PR 441, merged as 2340c04918960108c7e26f69aa9c29f00b85ba93) changes none of compact_size, primitive_encodings, deterministic_parse_error_mapping or canonical_replay_domain_checks. Section 17 incorporates CONSENSUS_STATE_MACHINE Section 1 by reference; this row records the same seven declarations as replay_domain_checks for the Section 17 member. It does not promote either row or change the evidence level of replay_domain_checks.",
       "limitations": [
-        "The Section 17 coinbase-maturity clause is owned by CONSENSUS_STATE_MACHINE Section 2.1 and CANONICAL Section 25 step 13, represented separately by the utxo_state_model and block_validation_order rows; it is not proved by these replay-domain declarations.",
-        "The Section 17 clause that this document prevails at conflict is governance text with no executable outcome and is not carried by these declarations."
+        "The Section 17 coinbase-maturity clause is owned by CONSENSUS_STATE_MACHINE Section 2.1 and CANONICAL Section 25 step 13, represented separately by the utxo_state_model and block_validation_order rows; it is not proved by these replay-domain declarations. Section 17 conflict precedence is governance text with no executable outcome and is not carried by these declarations.",
+        "The declarations do not prove the UTXO-exhaustion mechanism or the tx_nonce signature binding in preimage_tx_sig described in CONSENSUS_STATE_MACHINE Section 1.",
+        "They do not prove SpendTx S1B placement after S1A and before S2/R1, use of only earlier non-coinbase transactions successful through S6 to form N_seen(i), or absence of replay-state publication upon duplicate rejection."
       ],
       "evidence_level": "machine_checked_model"
     },
