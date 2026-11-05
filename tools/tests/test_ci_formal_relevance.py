@@ -75,6 +75,11 @@ class FormalRelevanceTests(unittest.TestCase):
         paths = subprocess.run(
             ["git", "ls-files"], check=True, stdout=subprocess.PIPE, text=True
         ).stdout.splitlines()
+        choice_model = "rubin-formal/RubinFormal/ForkChoiceJournalDecision.lean"
+        self.assertIn(choice_model, paths)
+        self.assert_jobs(choice_model, True, True)
+        # This module accounts for one extra path in each of the four totals.
+        paths.remove(choice_model)
         formal = {path for path in paths if subject.is_formal_input(path)}
         refinement = {path for path in paths if subject.is_refinement_input(path)}
         state_model = "rubin-formal/RubinFormal/StateConsensusV1.lean"

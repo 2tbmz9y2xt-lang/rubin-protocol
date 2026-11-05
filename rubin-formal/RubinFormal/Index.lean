@@ -36,6 +36,7 @@ import RubinFormal.ErrorPriority
 import RubinFormal.FeatureActivationFSM
 import RubinFormal.FeatureActivationLiveBridge
 import RubinFormal.ForkChoiceSelect
+import RubinFormal.ForkChoiceJournalDecision
 import RubinFormal.ForkChoiceTiebreak
 import RubinFormal.ForkChoiceV1
 import RubinFormal.GenesisRuleBehavioral
