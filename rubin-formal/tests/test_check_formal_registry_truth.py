@@ -22,6 +22,7 @@ class RegistryTruthCheckerTests(unittest.TestCase):
             ("compact_size", "RubinFormal.Wire.compactSize_roundtrip", "kernel_checked"),
             ("primitive_encodings", "RubinFormal.encodeU16le_length", "kernel_checked"),
             ("deterministic_parse_error_mapping", "RubinFormal.parse_stage_txkind_live", "compiler_trusted"),
+            ("canonical_replay_domain_checks", "RubinFormal.replay_domain_checks_proved", "kernel_checked"),
         )
         for key, theorem, expected_trust, defect in (
             (key, theorem, expected_trust, defect)
