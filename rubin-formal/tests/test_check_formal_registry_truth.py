@@ -20,6 +20,7 @@ class RegistryTruthCheckerTests(unittest.TestCase):
         cases = (
             ("canonical_utxo_state_model", "RubinFormal.StateConsensusV1.state_consensus_contract"),
             ("compact_size", "RubinFormal.Wire.compactSize_roundtrip"),
+            ("primitive_encodings", "RubinFormal.encodeU16le_length"),
         )
         for key, theorem, defect in (
             (key, theorem, defect)
