@@ -121,7 +121,10 @@ not physical qualification. Actual ordered public C04 and client/native C19,
 codec/source/DB/crash correctness, all-C/universal coverage and future C20
 publication X/independent D→X correspondence remain external. Local registration
 adds one theorem reference and one unique theorem without changing row/global
-status, trust, evidence, bridge, source-manifest disposition or spec pin.
+status, trust or evidence. Neither local model registration nor refinement
+changes the bridge, source-manifest disposition or manifest pin. The separate
+publication update in this PR advances `spec_section_hashes_sha3_256` in
+`proof_coverage.json` to the reviewed specification-manifest digest.
 
 ## Текущая раскладка evidence levels
 

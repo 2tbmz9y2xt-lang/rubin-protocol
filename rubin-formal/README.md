@@ -77,8 +77,11 @@ historical meaning, complete immutable source/census and actual native readback
 remain assumptions. Arithmetic bounds prove no physical fit or crash recovery.
 Actual ordered public C04, client/native C19 and future C20 publication X/D→X
 remain external. Old `JournalChoice` assertions in the same file remain
-unregistered. The row stays `stated/compiler_trusted/machine_checked_model`;
-the bridge, source-manifest disposition and spec pin are unchanged.
+unregistered. The row stays `stated/compiler_trusted/machine_checked_model`.
+Neither local model registration nor refinement changes the bridge,
+source-manifest disposition or manifest pin. The separate publication update
+in this PR advances `spec_section_hashes_sha3_256` in `proof_coverage.json`
+to the reviewed specification-manifest digest.
 
 Native-rotation replay uses a manual legacy bounded stub, unwritten by current
 generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
