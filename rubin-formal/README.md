@@ -64,6 +64,22 @@ Root bytes, Go/Rust parity, storage, inverse/LAG local checks and physical
 effects remain outside this row. The separate manifest pin and original
 116→102 source census are unchanged; the new model is local source.
 
+The existing `fork_choice` row also registers the single
+`RubinFormal.RecoveryCore.recovery_core_contract` in
+`ForkChoiceJournalDecision.lean`. Its seven named finite groups model RUB-1795's
+selected proposed recovery-only R1–R7: structural predicate, scoped qualification,
+filter-before-rank selection, bounded proof capture, independent P/native
+disposition, actual-R/SAME-D H1 preservation and unchanged public observations.
+Expectations are fixed independently at those computed model owners. Canonical
+premises bind rubin-spec `c5e701492940c407a9267be9e194f98e54241149`; the proposed
+rule is not adopted by this registration. Parse/header/root authenticity,
+historical meaning, complete immutable source/census and actual native readback
+remain assumptions. Arithmetic bounds prove no physical fit or crash recovery.
+Actual ordered public C04, client/native C19 and future C20 publication X/D→X
+remain external. Old `JournalChoice` assertions in the same file remain
+unregistered. The row stays `stated/compiler_trusted/machine_checked_model`;
+the bridge, source-manifest disposition and spec pin are unchanged.
+
 Native-rotation replay uses a manual legacy bounded stub, unwritten by current
 generators. Its `*-02` JSON rows have `create_height=100`, `height=199`,
 `suite_id=2`, `expect_ok=true`; Lean uses `spendHeight=200`, `expectOk=false`.
