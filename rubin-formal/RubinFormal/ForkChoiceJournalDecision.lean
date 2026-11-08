@@ -1748,8 +1748,10 @@ set_option maxHeartbeats 800000 in
 /-- Checks finite preservation of supplied public observations, not actual ordered client-error or native behavior. -/
 private theorem noPublicInvalidCases_checked : noPublicInvalidCases = true := by decide
 
-/-- Conjoins the seven finite proposed-model case groups under supplied parse/header/path/history/source/readback
-observations. It proves no universal protocol, client/native correspondence or physical durability claim. -/
+/-- Checks finite invariants for qualified independently retained core evidence bound to the current consumer,
+duplicate preservation of the original proof/source/current observation, and separate P/native truth through
+target conversion/cleanup. The seven concrete groups assume canonical parse/header/path/history/source and
+actual readback observations; this is no universal protocol/client/native correspondence or physical proof. -/
 theorem recovery_core_contract :
     predicateCases = true ∧ qualificationCases = true ∧ selectionCases = true ∧
     captureCases = true ∧ dispositionCases = true ∧ h1Cases = true ∧
