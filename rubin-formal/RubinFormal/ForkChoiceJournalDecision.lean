@@ -765,9 +765,9 @@ structure Core where
   commitmentWrong : Bool
 deriving BEq, DecidableEq, Repr
 
-/-- The final three flags are copy observations, not authenticated core fields. -/
+/-- TxCoreBytes commits kind/outputs; payloadLength and the flags describe the acquired copy. -/
 def sameCommittedCore (a b : Core) : Bool :=
-  a.kind == b.kind && a.payloadLength == b.payloadLength && a.outputs == b.outputs
+  a.kind == b.kind && a.outputs == b.outputs
 
 inductive Reason where
   | anchorCount
@@ -1099,10 +1099,10 @@ def capturePayload (r : CaptureRequest) (why : Reason) : Payload :=
   ⟨r.identity, r.block, r.probeInput.core, anchorCount r.probeInput.core, why,
     r.source, r.probeInput.acquisition, r.position⟩
 
-/-- Provenance labels are not fact identity; original binding/source are. -/
+/-- Original binding/core identify a fact; physical backing and provenance labels do not. -/
 def sameFact (a b : Payload) : Bool :=
   a.identity == b.identity && a.block == b.block && sameCommittedCore a.core b.core &&
-  a.count == b.count && a.reason == b.reason && a.source == b.source
+  a.count == b.count && a.reason == b.reason
 
 def captureCharge (j : Journal) (r : CaptureRequest) : Nat :=
   r.recordBytes + r.controlBytes + r.operationHeldBytes +
@@ -1336,6 +1336,8 @@ private def conflictingBWithC : Membership := .complete [.recoveryCoreImpossible
     block := descendant,
     identity := { identity with context := { ctx with release := 7 } },
     position := 11, source := { source with identity := 78, backing := .retained 100 } } }]
+-- The canonical length2 copy has one more payload byte in separately retained backing.
+private def longerSource : Source := ⟨79,.retained 101,65,4,true,true,true,true⟩
 
 -- F02: raw absence precedes row-only dependencies; tuple mismatch is not absence.
 def qualificationCases : Bool :=
@@ -1371,6 +1373,14 @@ def qualificationCases : Bool :=
   rel conflictingBWithC == .excluded &&
   rel (.complete [.recoveryCoreImpossible fact,.recoveryCoreImpossible
     { fact with payload := { fact.payload with core := { chunk with outputs := [{ anchor with payload := 88 }] } } }]) == .unresolved
+  && rel (.complete [.recoveryCoreImpossible fact,.recoveryCoreImpossible
+    { fact with payload := { fact.payload with
+      core := { chunk with payloadLength := 2 }, source := longerSource } }]) == .excluded
+  && rel (.complete [
+    .recoveryCoreImpossible { fact with payload := { fact.payload with
+      core := { ordinary with outputs := [] }, count := 0, reason := .anchorCount } },
+    .recoveryCoreImpossible { fact with payload := { fact.payload with
+      core := { chunk with outputs := [] }, count := 0, reason := .anchorCount } }]) == .unresolved
   && ([{ chunk with witnessNonempty := true },{ chunk with manifestNonempty := true },
     { chunk with commitmentWrong := true }] : List Core).all (fun c =>
       rel (.complete [.recoveryCoreImpossible fact,.recoveryCoreImpossible
@@ -1438,6 +1448,16 @@ private def captureRequest : CaptureRequest :=
   ⟨acquired,identity,b,10,source,[12,11],42,8,16,4,4,1000,7,some 7,
     true,true,true,false,.new,1,2,3⟩
 private def captured : Journal := (capture journal captureRequest).journal
+-- Separate retained backing for the same assumed canonical bytes, with room for a wrong append.
+private def alternateSource : Source := ⟨78,.retained 100,64,4,true,true,true,true⟩
+private def duplicateJournal : Journal :=
+  ⟨.complete [.recoveryCoreImpossible fact],1,1,[42],100,[source],10,20,some alternateSource,observed⟩
+private def alternateRequest : CaptureRequest := { captureRequest with source := alternateSource }
+private def longerRequest : CaptureRequest := { captureRequest with source := longerSource, probeInput := { acquired with core := { chunk with payloadLength := 2 } } }
+private def unavailableOriginal : Journal :=
+  { duplicateJournal with membership := .complete [.recoveryCoreImpossible { fact with sourceAvailable := false }] }
+private def distinctOriginal : Identity :=
+  { identity with context := { ctx with law := 40, history := 50, release := 60 } }
 private def captureImage (r : CaptureResult) :
     CaptureStatus × Nat × Nat × Nat × Nat × Nat × List Nat × List Source × Option Source :=
   (r.status,r.journal.slots,r.journal.contexts,r.journal.bytes,r.journal.sequence,
@@ -1453,6 +1473,27 @@ def captureCases : Bool :=
       [(1,.positionZeroChunk,77,identity)] &&
   capture captured { captureRequest with peer := 90, requestLabel := 91, generationLabel := 92 } ==
     ⟨.duplicate,captured⟩ &&
+  capture duplicateJournal alternateRequest == ⟨.duplicate,duplicateJournal⟩ &&
+  captureImage (capture duplicateJournal alternateRequest) ==
+    (.duplicate,1,1,100,10,20,[42],[source],some alternateSource) &&
+  (views (capture duplicateJournal alternateRequest).journal.membership).map
+    (fun v => (v.payload.source.identity,v.payload.core.payloadLength)) == [(77,1)] &&
+  capture { duplicateJournal with heldSource := some longerSource } longerRequest ==
+    ⟨.duplicate,{ duplicateJournal with heldSource := some longerSource }⟩ &&
+  (views (capture { duplicateJournal with heldSource := some longerSource } longerRequest).journal.membership).map
+    (fun v => (v.payload.source.identity,v.payload.core.payloadLength)) == [(77,1)] &&
+  rel unavailableOriginal.membership == .unresolved &&
+  capture unavailableOriginal alternateRequest == ⟨.duplicate,unavailableOriginal⟩ &&
+  rel (capture unavailableOriginal alternateRequest).journal.membership == .unresolved &&
+  (views (capture unavailableOriginal alternateRequest).journal.membership).map
+    (fun v => (v.payload.source.identity,v.sourceAvailable)) == [(77,false)] &&
+  captureImage (capture duplicateJournal
+    { alternateRequest with identity := distinctOriginal, contextId := 43 }) ==
+      (.new,2,2,200,11,21,[42,43],[source,alternateSource],some alternateSource) &&
+  (views (capture duplicateJournal
+    { alternateRequest with identity := distinctOriginal, contextId := 43 }).journal.membership).map
+    (fun v => (v.payload.identity.context.law,v.payload.source.identity,v.originalQualified,v.scopeQualified)) ==
+      [(4,77,true,true),(40,78,true,true)] &&
   ([{ chunk with witnessNonempty := true },{ chunk with manifestNonempty := true },
     { chunk with commitmentWrong := true }] : List Core).all (fun c =>
       capture captured { captureRequest with probeInput := { acquired with core := c } } ==
