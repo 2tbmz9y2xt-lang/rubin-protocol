@@ -5,7 +5,7 @@
   "package_maturity": "experimental_pending_reverification",
   "spec_source_file": "spec/RUBIN_L1_CANONICAL.md",
   "spec_section_hashes_file": "spec/SECTION_HASHES.json",
-  "spec_section_hashes_sha3_256": "a9511180302740a69e7aec42df626d8cb68b4e32f949d091763f38544d739d69",
+  "spec_section_hashes_sha3_256": "2ff5fd00a63e1dde76763533e906c937737db57361724931483b417474c3a2fa",
   "lean_toolchain_file": "rubin-formal/lean-toolchain",
   "refinement_bridge_file": "rubin-formal/refinement_bridge.json",
   "source_rebind": {
@@ -171,7 +171,7 @@
       "tests/test_strip_lean_comments.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"5ec65a9f9dec186017230df464355492ad930143955d3ed9afffd71e0fdc6017","candidate_sha256":"f7076c904203aa4417322cd961c0ce8402ea631b09732aed15230b15dc9b3ab3"},
       "tests/test_validation.py": {"disposition":"IMPORT_PACKAGE_CHECK_OR_TEST","source_sha256":"077d0c6894e2f8a496e1136b5c078efbd3bbe19b63a49a27524c5506b76604a3","candidate_sha256":"8ce69c12f3b713f960bed3c04f2f5e400c08b7e6f1896d5e68a1c2ebf8d8b93f"},
       "tools/LOCAL_CODEX_EXEC_REVIEW.md": {"disposition":"BYTE_EXACT","source_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5","candidate_sha256":"8b273376471f3d55955b53109adf56abffc9609b89bf09570d77b678cf474ba5"},
-      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"05504e4afc09311d9863c5e7162f7d1234a3c8728a3503b28cd13b936ecae930"}
+      "tools/check_formal_registry_truth.py": {"disposition":"TRANSPLANT_CHECK_LOGIC","source_sha256":"43e89e7b12ade218119edd0e03401bf9508e75c3cd713f8f8d636aeac970f804","candidate_sha256":"e22bb736ef6e3b012ba3042c030ce4c129c196421141c60591d7ca53217c337d"}
     }
   },
   "coverage": [
@@ -1578,7 +1578,8 @@
         "RubinFormal.forkSelect_lighter_loses",
         "RubinFormal.forkSelect_chainwork_bridge",
         "RubinFormal.forkSelect_equal_chains",
-        "RubinFormal.forkSelect_exhaustive"
+        "RubinFormal.forkSelect_exhaustive",
+        "RubinFormal.RecoveryCore.recovery_core_contract"
       ],
       "file": "rubin-formal/RubinFormal/ForkChoiceV1.lean",
       "theorem_files": {
@@ -1596,9 +1597,10 @@
         "RubinFormal.forkSelect_lighter_loses": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal.forkSelect_chainwork_bridge": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
         "RubinFormal.forkSelect_equal_chains": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
-        "RubinFormal.forkSelect_exhaustive": "rubin-formal/RubinFormal/ForkChoiceSelect.lean"
+        "RubinFormal.forkSelect_exhaustive": "rubin-formal/RubinFormal/ForkChoiceSelect.lean",
+        "RubinFormal.RecoveryCore.recovery_core_contract": "rubin-formal/RubinFormal/ForkChoiceJournalDecision.lean"
       },
-      "notes": "Current Lean model evidence establishes deterministic selection for represented chainwork/hash values: `forkSelect_exhaustive` covers the model cases, `forkSelect_equal_chains` covers equal represented values, `forkSelect_total_det` covers model-distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture evidence: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Distinct candidates with equal work and equal 32-byte hash are not distinguished by this model; candidate identity/hash-collision exclusion is an unproved premise tracked by RUB-1033. `compiler_trusted` records a `Lean.ofReduceBool` compiler/evaluator dependency in the registered fixture contract; it does not assert absence of ordinary Lean foundations. Supplementary unregistered ForkChoiceJournalDecision.lean definitions/assertions consume proposed rubin-spec#441@500dbe9dc58351832847fa1da4492110c4535996 for finite current-basis ordinary selection, explicit abstract provenance/source qualifications and journal-only unresolved dominance. They add no registered theorem/file binding or generated bridge scope.",
+      "notes": "Current Lean model evidence establishes deterministic selection for represented chainwork/hash values: `forkSelect_exhaustive` covers the model cases, `forkSelect_equal_chains` covers equal represented values, `forkSelect_total_det` covers model-distinguishable pairs, and `bytesLT_antisym` plus `bytesLT_total_of_ne` provide the tie-break properties. Separate generated fixture evidence: `fork_choice_select_cv_contract_proved` machine-checks exactly the six current positive protocol-generated CV-FORK-CHOICE fork_choice_select vectors in their pinned order. Distinct candidates with equal work and equal 32-byte hash are not distinguished by this model; candidate identity/hash-collision exclusion is an unproved premise tracked by RUB-1033. `compiler_trusted` records a `Lean.ofReduceBool` compiler/evaluator dependency in the registered fixture contract; it does not assert absence of ordinary Lean foundations. The JournalChoice namespace in ForkChoiceJournalDecision.lean remains supplementary and unregistered against proposed rubin-spec#441@500dbe9dc58351832847fa1da4492110c4535996. The separately registered RecoveryCore.recovery_core_contract represents RUB-1795 selected proposed R1–R7 through seven named finite groups: predicate, qualification, selection, capture, disposition, H1 and public-observation preservation. It computes recovery-only decisions and abstract owner effects from explicit premises bound to canonical rubin-spec c5e701492940c407a9267be9e194f98e54241149; it changes no generated bridge scope or canonical rule.",
       "limitations": [
         "RUB-1774's proposed mandatory accounting/cap/growth/root path and exact-parent suffix/no-validity retry are represented only by the separate bounded canonical_utxo_state_model. This fork-choice model still does not prove STAGED_NONCANONICAL, STORED_NONCANONICAL or KNOWN_BLOCK_NOOP(STORED_NONCANONICAL) projections, prospective scheduling or concrete zero-effect behavior; the separate result transfers no claim to this row, actual root bytes, client parity or physical effects.",
         "forkSelect models the runtime fork_choice_select. Go/Rust code follows identical if/else chain. Structural equivalence evident from inspection but not proved via rfl (Go/Rust not importable to Lean).",
@@ -1606,7 +1608,8 @@
         "Distinct candidates with equal work and equal 32-byte hash are not distinguished; candidate identity and hash-collision exclusion are unproved premises deferred under RUB-1033.",
         "The generated Lean contract covers six positive fork_choice_select rows only. Negative expect_ok=false rows are runtime conformance-only, and standalone-only extra vectors are outside this registry claim.",
         "The registered fork-choice model and fixtures do not prove Section 23 Conditional imported-state eligibility or Conditional continuation (pinned, target and base (b,hash_b,utxo_root_b) binding, IMAGE COMPLETE evidence, full validation of blocks b+1..H, E0 inheritance); only target-range validity, chainwork derivation and work and hash comparison of represented candidates are modeled.",
-        "The supplementary unregistered decision model assumes qualified header/path/state/source/context evidence; its finite assertions prove no acquisition, cryptographic authenticity, journal producer/health/P/H1/persistence, live-client refinement, collision freedom, publication/READY permission or canonical adoption. Conditional assurance is retained. Protocol PR3801 separately owns the merge-only Part A manifest pin; this model changes no pin or registered trust/status/evidence classification."
+        "The supplementary unregistered JournalChoice decision model assumes qualified header/path/state/source/context evidence; its finite assertions prove no acquisition, cryptographic authenticity, journal producer/health/P/H1/persistence, live-client refinement, collision freedom, publication/READY permission or canonical adoption. Conditional assurance is retained. Protocol PR3801 separately owns the merge-only Part A manifest pin; this model changes no pin or registered trust/status/evidence classification.",
+        "RecoveryCore covers only the named finite F01–F07 projections of C01–C03/C05–C18 under the selected proposed R1–R7. Complete canonical parsing/kind legality, header/path/root authentication, historical scope, independent immutable source bytes/finite census, current guards and actual P/native truth are supplied observations. Resource counters are arithmetic over abstract unrelated occupancy, not physical capacity. Actual ordered public C04 and client/native C19 paths, codec/source/DB/crash correctness and universal C01–C20 coverage remain external. Local C20 registration is not future specification publication X or independent D→X correspondence."
       ],
       "evidence_level": "machine_checked_model"
     },
@@ -1877,8 +1880,8 @@
     "proved_with_axiom_rows": 5,
     "stated_rows": 8,
     "deferred_rows": 0,
-    "theorem_references": 537,
-    "unique_theorem_names": 491,
+    "theorem_references": 538,
+    "unique_theorem_names": 492,
     "reused_theorem_names": [
       "RubinFormal.RegistryResolutionLiveBridge.ml_dsa_87_params_bridge",
       "RubinFormal.RegistryResolutionLiveBridge.pre_rotation_registered_iff",

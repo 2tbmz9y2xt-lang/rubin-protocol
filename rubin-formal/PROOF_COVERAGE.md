@@ -84,8 +84,8 @@ section proof evidence and does not promote the row's evidence level.
 - Extra formal-only theorems do not establish a registered formal coverage row
   unless they are represented by a registry entry.
 
-`RubinFormal.ForkChoiceJournalDecision`, imported by the package root, contains
-additional unregistered finite decision assertions against proposed
+`ForkChoiceJournalDecision.lean`, imported by the package root, contains
+the supplementary unregistered `RubinFormal.JournalChoice` finite assertions against proposed
 rubin-spec#441@500dbe9dc58351832847fa1da4492110c4535996 (§23 and MEMPOOL
 §6.4.1.4). It derives candidate qualification, strict work/raw32 preference,
 operation-domain completeness, journal use and protected-basis refusal
@@ -98,10 +98,33 @@ actual T is compared separately from a heavier scheduling header. Its pure
 consumer retains public state and source-owned observations. These assertions
 prove neither premise acquisition/authenticity nor journal producers, P/H1,
 persistence, runtime refinement, collision freedom, publication or READY.
-Existing registered theorem/file/trust/status/evidence scope and the six-positive
-CV bridge remain unchanged. PR3801 separately owns the merge-only Part A pin;
+The old ordinary assertions remain unregistered and the six-positive CV bridge
+is unchanged. PR3801 separately owns the merge-only Part A pin;
 the proposed source and this evidence are not canonical adoption or whole-§23
 closure.
+
+The distinct `RubinFormal.RecoveryCore` namespace in that same file has exactly
+one registered aggregate, `recovery_core_contract`, in the existing `fork_choice`
+row. It checks seven named finite groups for RUB-1795's selected proposed R1–R7:
+`predicateCases`, `qualificationCases`, `selectionCases`, `captureCases`,
+`dispositionCases`, `h1Cases` and `noPublicInvalidCases`. Count/reason, complete
+raw-hash membership qualification, filter-before-rank W/U choice, byte/count
+admission and abstract P/native conversion/drain effects are computed. Fixed
+expectations distinguish nearest wrong rules at those owners. Canonical premises
+bind rubin-spec `c5e701492940c407a9267be9e194f98e54241149`; adoption is separate.
+
+Coverage is only the stated finite projections of C01–C03/C05–C18. Canonical
+parse/kind legality, expected headers/path/root, historical law, independent
+immutable source bytes and complete finite census, guarded basis and actual
+P/native truth/readback remain supplied observations. Arithmetic capacity is
+not physical qualification. Actual ordered public C04 and client/native C19,
+codec/source/DB/crash correctness, all-C/universal coverage and future C20
+publication X/independent D→X correspondence remain external. Local registration
+adds one theorem reference and one unique theorem without changing row/global
+status, trust or evidence. Neither local model registration nor refinement
+changes the bridge, source-manifest disposition or manifest pin. The separate
+publication update in this PR advances `spec_section_hashes_sha3_256` in
+`proof_coverage.json` to the reviewed specification-manifest digest.
 
 ## Текущая раскладка evidence levels
 
