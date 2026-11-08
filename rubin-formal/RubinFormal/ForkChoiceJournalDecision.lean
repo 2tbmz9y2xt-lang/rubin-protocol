@@ -888,6 +888,7 @@ deriving BEq, DecidableEq, Repr
 /-- Current external qualification observations, distinct from the stored payload. -/
 structure ProofView where
   payload : Payload
+  consumerContext : Context
   scope : Scope
   scopeQualified : Bool
   originalQualified : Bool
@@ -932,7 +933,7 @@ def proofRelation (ctx : Context) (installation : Nat) (path : List Key)
     (v : ProofView) : Relation :=
   if !(path.any (fun b => b.hash == v.payload.block.hash)) then .eligible
   else if !(path.contains v.payload.block) then .unresolved
-  else if !v.scopeQualified || !v.originalQualified || !v.sourceAvailable ||
+  else if v.consumerContext != ctx || !v.scopeQualified || !v.originalQualified || !v.sourceAvailable ||
       v.health != .qualified || v.conflictingCore || v.sameLawAcceptance ||
       v.payload.identity.installation != installation ||
       v.payload.identity.context.network != ctx.network ||
@@ -1144,7 +1145,7 @@ def capture (j : Journal) (r : CaptureRequest) : CaptureResult :=
       | .old => ⟨.old, j⟩
       | .unknown => ⟨.unknown, j⟩
       | .new =>
-        let row : ProofView := ⟨payload, .same, true, true, true, .qualified, false, false⟩
+        let row : ProofView := ⟨payload, r.identity.context, .same, true, true, true, .qualified, false, false⟩
         let rows := match j.membership with | .complete rs => rs | _ => []
         ⟨.new, { j with
           membership := .complete (rows ++ [.recoveryCoreImpossible row])
@@ -1286,10 +1287,17 @@ private def source : Source := ⟨77,.retained 99,64,4,true,true,true,true⟩
 private def identity : Identity := ⟨8,ctx,11,12,9,15,16,17,.conditionalImportedBase⟩
 private def fact : ProofView :=
   ⟨⟨identity,b,chunk,1,.positionZeroChunk,source,.genesisReplay,10⟩,
-    .same,true,true,true,.qualified,false,false⟩
+    ctx,.same,true,true,true,.qualified,false,false⟩
 private def member : Membership := .complete [.recoveryCoreImpossible fact]
 private def observed : Observations := ⟨[21],[22],23,[24],[25],[26],some 27,some 28⟩
 private def emptyObserved : Observations := ⟨[],[],0,[],[],[],none,none⟩
+private def changedConsumers : List Context :=
+  [{ ctx with law := 40 },{ ctx with history := 50 },{ ctx with release := 60 }]
+private def journal : Journal := ⟨.complete [],65535,1023,[],900,[],10,20,some source,observed⟩
+private def captureRequest : CaptureRequest :=
+  ⟨acquired,identity,b,10,source,[12,11],42,8,16,4,4,1000,7,some 7,
+    true,true,true,false,.new,1,2,3⟩
+private def captured : Journal := (capture journal captureRequest).journal
 
 -- F01: each false gate is otherwise admitted and cannot produce a proof.
 def predicateCases : Bool :=
@@ -1341,6 +1349,23 @@ private def longerSource : Source := ⟨79,.retained 101,65,4,true,true,true,tru
 
 -- F02: raw absence precedes row-only dependencies; tuple mismatch is not absence.
 def qualificationCases : Bool :=
+  changedConsumers.all (fun current =>
+    let fresh := fun (scope : Scope) (qualified : Bool) => Membership.complete
+      ((views captured.membership).map (fun v => .recoveryCoreImpossible
+        { v with consumerContext := current, scope := scope, scopeQualified := qualified }))
+    relation captured.membership current 8 true true [parent,b,descendant] == .unresolved &&
+    relation captured.membership current 8 true true [parent,sibling] == .eligible &&
+    relation (fresh .same true) current 8 true true [parent,b,descendant] == .excluded &&
+    relation (fresh .different true) current 8 true true [parent,b,descendant] == .eligible &&
+    relation (fresh .unresolved true) current 8 true true [parent,b,descendant] == .unresolved &&
+    ([Scope.same,.different,.unresolved] : List Scope).all (fun scope =>
+      let stale := Membership.complete ((views captured.membership).map
+        (fun v => .recoveryCoreImpossible { v with scope := scope }))
+      relation stale current 8 true true [parent,b,descendant] == .unresolved &&
+      relation (fresh scope false) current 8 true true [parent,b,descendant] == .unresolved) &&
+    relation (.complete ((views captured.membership).map (fun v => .recoveryCoreImpossible
+      { v with scopeQualified := false, originalQualified := false, sourceAvailable := false })))
+      current 8 true true [parent,sibling] == .eligible) &&
   rel member == .excluded &&
   rel member [parent,sibling] == .eligible && rel member [parent] == .eligible &&
   rel (row { fact with
@@ -1400,6 +1425,17 @@ private def nonStateU : Candidate := { blocked with eligibleState := false }
 
 -- F03: complete filtering precedes rank; only journal uncertainty admits W/U independence.
 def selectionCases : Bool :=
+  changedConsumers.all (fun current =>
+    let request := { selection with context := current, candidates := [blocked,w] }
+    let fresh := fun (scope : Scope) (qualified : Bool) => Membership.complete
+      ((views captured.membership).map (fun v => .recoveryCoreImpossible
+        { v with consumerContext := current, scope := scope, scopeQualified := qualified }))
+    select { request with membership := captured.membership } == .pending &&
+    select { request with membership := fresh .different true } == .winner 1 .conditionalImportedBase &&
+    select { request with membership := fresh .same true } == .winner 2 .conditionalImportedBase &&
+    select { request with membership := fresh .unresolved true } == .pending &&
+    ([Scope.same,.different,.unresolved] : List Scope).all (fun scope =>
+      select { request with membership := fresh scope false } == .pending)) &&
   select selection == .winner 2 .conditionalImportedBase &&
   select { selection with candidates := selection.candidates.reverse } == .winner 2 .conditionalImportedBase &&
   select { selection with candidates := [candidate 4 100 b [parent,b],w] } == .winner 2 .conditionalImportedBase &&
@@ -1443,11 +1479,6 @@ def selectionCases : Bool :=
   (evaluateSelection selection).retained.observations == observed &&
   select { selection with firstObserved := some first, inventoryComplete := false } == .observed first
 
-private def journal : Journal := ⟨.complete [],65535,1023,[],900,[],10,20,some source,observed⟩
-private def captureRequest : CaptureRequest :=
-  ⟨acquired,identity,b,10,source,[12,11],42,8,16,4,4,1000,7,some 7,
-    true,true,true,false,.new,1,2,3⟩
-private def captured : Journal := (capture journal captureRequest).journal
 -- Separate retained backing for the same assumed canonical bytes, with room for a wrong append.
 private def alternateSource : Source := ⟨78,.retained 100,64,4,true,true,true,true⟩
 private def duplicateJournal : Journal :=
@@ -1465,6 +1496,20 @@ private def captureImage (r : CaptureResult) :
 
 -- F04: aggregate counters abstract unrelated rows; source/metadata/held-byte union is charged here.
 def captureCases : Bool :=
+  (views captured.membership).map (fun v =>
+    (v.consumerContext,v.scope,v.scopeQualified,v.payload.identity.context,v.payload.source.identity)) ==
+      [(ctx,.same,true,ctx,77)] &&
+  changedConsumers.all (fun current =>
+    ([Scope.different,.unresolved] : List Scope).all (fun scope =>
+      ([true,false] : List Bool).all (fun qualified =>
+        let j := { captured with
+          membership := .complete ((views captured.membership).map (fun v => .recoveryCoreImpossible
+            { v with consumerContext := current, scope := scope, scopeQualified := qualified }))
+          heldSource := some alternateSource }
+        capture j alternateRequest == ⟨.duplicate,j⟩ &&
+        (views (capture j alternateRequest).journal.membership).map (fun v =>
+          (v.consumerContext,v.scope,v.scopeQualified,v.payload.identity.context,v.payload.source.identity)) ==
+            [(current,scope,qualified,ctx,77)]))) &&
   captureImage (capture journal captureRequest) ==
     (.new,65536,1024,1000,11,21,[42],[source],some source) &&
   membershipReady captured.membership &&
@@ -1550,6 +1595,51 @@ private def retainedImage (n : Native) : Nat × Nat × Nat × Nat × Nat × Cont
 
 -- F05: P and native readbacks are independent; restart resumes the actual phase.
 def dispositionCases : Bool :=
+  changedConsumers.all (fun current =>
+    let g := { guards with context := current }
+    let fresh := fun (scope : Scope) (qualified : Bool) => Membership.complete
+      ((views captured.membership).map (fun v => .recoveryCoreImpossible
+        { v with consumerContext := current, scope := scope, scopeQualified := qualified }))
+    let expectedConversion := { native with
+      phase := .cleanup, replay := false, cursor := none, q := none, maps := [], both := []
+      cleanup := [11,12], conversions := 1 }
+    let cleanupInput := { native with
+      phase := .cleanup, replay := false, cursor := none, q := none, maps := [], both := []
+      cleanup := [12], drained := [11], conversions := 1 }
+    let expectedDrain := { cleanupInput with cleanup := [], drained := [11,12] }
+    let pendingInput := { expectedDrain with phase := .pending, actualR := none, path := [] }
+    let independent := Membership.complete
+      ((views captured.membership).map Record.recoveryCoreImpossible ++
+        [.recoveryCoreImpossible { fact with
+          consumerContext := current,
+          payload := { fact.payload with
+            block := descendant, identity := { identity with context := { ctx with release := 7 } }
+            source := { source with identity := 78, backing := .retained 100 }, position := 11 } }])
+    nativeStep captured.membership g native == ⟨.blocked,native⟩ &&
+    nativeStep captured.membership g cleanupInput == ⟨.blocked,cleanupInput⟩ &&
+    nativeStep captured.membership g pendingInput == ⟨.pending,pendingInput⟩ &&
+    nativeStep (fresh .different true) g native == ⟨.unchanged,native⟩ &&
+    nativeStep (fresh .same true) g native == ⟨.converted,expectedConversion⟩ &&
+    nativeStep (fresh .unresolved true) g native == ⟨.blocked,native⟩ &&
+    nativeStep (fresh .unresolved true) g cleanupInput == ⟨.blocked,cleanupInput⟩ &&
+    ([Scope.same,.different,.unresolved] : List Scope).all (fun scope =>
+      let stale := Membership.complete ((views captured.membership).map
+        (fun v => .recoveryCoreImpossible { v with scope := scope }))
+      nativeStep stale g native == ⟨.blocked,native⟩ &&
+      nativeStep stale g cleanupInput == ⟨.blocked,cleanupInput⟩ &&
+      nativeStep (fresh scope false) g native == ⟨.blocked,native⟩ &&
+      nativeStep (fresh scope false) g cleanupInput == ⟨.blocked,cleanupInput⟩) &&
+    ([Scope.same,.different] : List Scope).all (fun scope =>
+      let m := fresh scope true
+      let drain := nativeStep m g cleanupInput
+      let finish := nativeStep m g drain.state
+      drain == ⟨.drained 12,expectedDrain⟩ &&
+      finish == ⟨.pending,pendingInput⟩ &&
+      nativeStep m g finish.state == ⟨.pending,pendingInput⟩) &&
+    relation independent current 8 true true [parent,b,descendant] == .excluded &&
+    select { selection with context := current, membership := independent, candidates := [blocked,w] } ==
+      .winner 2 .conditionalImportedBase &&
+    nativeStep independent g native == ⟨.converted,expectedConversion⟩) &&
   nativeStep captured.membership { guards with nativeTruth := .old } native == ⟨.old,native⟩ &&
   nativeStep captured.membership { guards with nativeTruth := .unknown } native == ⟨.unknown,native⟩ &&
   nativeStep captured.membership { guards with pTruth := .old } native == ⟨.old,native⟩ &&
@@ -1631,27 +1721,35 @@ def noPublicInvalidCases : Bool :=
 
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite acquisition/count/reason cases under supplied canonical/header/root/source observations. -/
 private theorem predicateCases_checked : predicateCases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite membership and current-consumer scope cases, assuming complete paths and qualified original evidence. -/
 private theorem qualificationCases_checked : qualificationCases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite actual-state filtering/rank cases; inventory, work, OLD and source qualifications are supplied. -/
 private theorem selectionCases_checked : selectionCases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite admission and duplicate-observation preservation with assumed source ownership and P readback. -/
 private theorem captureCases_checked : captureCases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite capture-to-consumer replay/cleanup effects under supplied guards and P/native truth, not physical storage. -/
 private theorem dispositionCases_checked : dispositionCases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite actual-R/SAME-D preservation, with terminal observations and forensic/control ownership supplied. -/
 private theorem h1Cases_checked : h1Cases = true := by decide
 set_option maxRecDepth 8192 in
 set_option maxHeartbeats 800000 in
+/-- Checks finite preservation of supplied public observations, not actual ordered client-error or native behavior. -/
 private theorem noPublicInvalidCases_checked : noPublicInvalidCases = true := by decide
 
-/-- Registered finite proposed-design evidence, conditional on the stated inputs. -/
+/-- Conjoins the seven finite proposed-model case groups under supplied parse/header/path/history/source/readback
+observations. It proves no universal protocol, client/native correspondence or physical durability claim. -/
 theorem recovery_core_contract :
     predicateCases = true ∧ qualificationCases = true ∧ selectionCases = true ∧
     captureCases = true ∧ dispositionCases = true ∧ h1Cases = true ∧
