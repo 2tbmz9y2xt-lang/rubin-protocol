@@ -955,15 +955,14 @@ def relation (m : Membership) (ctx : Context) (installation : Nat)
   if !membershipReady m || !currentBasis || !pathComplete then .unresolved
   else
     let vs := views m
-    let conflict := vs.any fun v =>
-      path.any (fun b => b.hash == v.payload.block.hash) && vs.any (fun w =>
-        w.payload.block.hash == v.payload.block.hash &&
-        (w.payload.block != v.payload.block ||
-          (w.payload.identity == v.payload.identity &&
-            !sameCommittedCore w.payload.core v.payload.core)))
-    let rs := vs.map (proofRelation ctx installation path)
-    if conflict then .unresolved
-    else if rs.contains .excluded then .excluded
+    let rs := vs.map fun v =>
+      if path.any (fun b => b.hash == v.payload.block.hash) && vs.any (fun w =>
+          w.payload.block.hash == v.payload.block.hash &&
+          (w.payload.block != v.payload.block ||
+            (w.payload.identity == v.payload.identity &&
+              !sameCommittedCore w.payload.core v.payload.core)))
+      then .unresolved else proofRelation ctx installation path v
+    if rs.contains .excluded then .excluded
     else if rs.contains .unresolved then .unresolved else .eligible
 
 structure Observations where
@@ -1022,6 +1021,7 @@ def candidateReady (c : Candidate) : Bool :=
     b.hash.length == 32 && b.parent.length == 32) &&
   c.path.any (fun b => b.height == c.tip.point.height && b.hash == c.tip.point.hash)
 
+/-- Actual-state comparison projection; header-only scheduling is outside this model. -/
 def select (r : SelectionRequest) : Choice :=
   match r.firstObserved with
   | some first => .observed first
@@ -1032,14 +1032,14 @@ def select (r : SelectionRequest) : Choice :=
     else
       let rel := fun (c : Candidate) => relation r.membership r.context r.installation
         r.currentBasis c.pathComplete c.path
-      let eligible := r.candidates.filter (fun c => c.eligibleState &&
-        c.tip.point.height > 0 && rel c == .eligible)
+      let stateDomain := r.candidates.filter (fun c => c.eligibleState && c.tip.point.height > 0)
+      let eligible := stateDomain.filter (fun c => rel c == .eligible)
       match eligible with
       | [] => .pending
       | first :: rest =>
         let winner := rest.foldl (fun w c => if strictlyOutranks c.tip w.tip then c else w) first
         if !strictlyOutranks winner.tip r.oldTip ||
-            !(r.candidates.all (fun u => rel u != .unresolved ||
+            !(stateDomain.all (fun u => rel u != .unresolved ||
               strictlyOutranks winner.tip u.tip)) ||
             eligible.any (fun c => c.id != winner.id && c.tip == winner.tip)
         then .pending else .winner winner.id winner.assurance
@@ -1326,6 +1326,12 @@ def predicateCases : Bool :=
 private def rel (m : Membership) (path : List Key := [parent,b,descendant]) : Relation :=
   relation m ctx 8 true true path
 private def row (v : ProofView) : Membership := .complete [.recoveryCoreImpossible v]
+private def conflictingB : Membership := .complete [.recoveryCoreImpossible fact,
+  .recoveryCoreImpossible { fact with payload := { fact.payload with block := { b with parent := h 9 } } }]
+private def conflictingBWithC : Membership := .complete [.recoveryCoreImpossible fact,
+  .recoveryCoreImpossible { fact with payload := { fact.payload with block := { b with parent := h 9 } } },
+  .recoveryCoreImpossible { fact with payload := { fact.payload with block := descendant,
+    position := 11, source := { source with identity := 78, backing := .retained 100 } } }]
 
 -- F02: raw absence precedes row-only dependencies; tuple mismatch is not absence.
 def qualificationCases : Bool :=
@@ -1356,8 +1362,8 @@ def qualificationCases : Bool :=
     (fun m => rel m [parent,sibling] == .unresolved) &&
   relation member ctx 8 false true [parent,b] == .unresolved &&
   relation member ctx 8 true false [parent,sibling] == .unresolved &&
-  rel (.complete [.recoveryCoreImpossible fact,.recoveryCoreImpossible
-    { fact with payload := { fact.payload with block := { b with parent := h 9 } } }]) == .unresolved &&
+  rel conflictingB == .unresolved &&
+  rel conflictingBWithC == .excluded &&
   rel (.complete [.recoveryCoreImpossible fact,.recoveryCoreImpossible
     { fact with payload := { fact.payload with core := { chunk with outputs := [{ anchor with payload := 88 }] } } }]) == .unresolved
   && ([{ chunk with witnessNonempty := true },{ chunk with manifestNonempty := true },
@@ -1375,6 +1381,7 @@ private def selection : SelectionRequest :=
     31,32,33,0,0,observed,none⟩
 private def u : Candidate := { blocked with tip := ⟨blocked.tip.point,80⟩ }
 private def uncertainMember : Membership := row { fact with sourceAvailable := false }
+private def nonStateU : Candidate := { blocked with eligibleState := false }
 
 -- F03: complete filtering precedes rank; only journal uncertainty admits W/U independence.
 def selectionCases : Bool :=
@@ -1382,6 +1389,11 @@ def selectionCases : Bool :=
   select { selection with candidates := selection.candidates.reverse } == .winner 2 .conditionalImportedBase &&
   select { selection with candidates := [candidate 4 100 b [parent,b],w] } == .winner 2 .conditionalImportedBase &&
   select { selection with candidates := [candidate 4 95 parent [parent]] } == .winner 4 .conditionalImportedBase &&
+  select { selection with membership := conflictingB, candidates := [blocked,w] } == .pending &&
+  select { selection with membership := conflictingBWithC, candidates := [blocked,w] } == .winner 2 .conditionalImportedBase &&
+  select { selection with membership := .complete [], candidates := [w,nonStateU] } == .winner 2 .conditionalImportedBase &&
+  select { selection with membership := uncertainMember, candidates := [w,nonStateU] } == .winner 2 .conditionalImportedBase &&
+  select { selection with membership := uncertainMember, candidates := [w,blocked] } == .pending &&
   select { selection with membership := uncertainMember, candidates := [w,u] } == .winner 2 .conditionalImportedBase &&
   select { selection with membership := uncertainMember, candidates := [u,w] } == .winner 2 .conditionalImportedBase &&
   select { selection with membership := uncertainMember,
@@ -1398,7 +1410,9 @@ def selectionCases : Bool :=
     { selection with requiredSources := false },{ selection with membership := .unreadable }] : List SelectionRequest).all
     (fun r => select r == .refused) &&
   ([{ u with pathComplete := false },{ u with headers := false },
-    { u with actualWork := false },{ u with sources := false }] : List Candidate).all
+    { u with actualWork := false },{ u with sources := false },
+    { nonStateU with pathComplete := false },{ nonStateU with headers := false },
+    { nonStateU with actualWork := false },{ nonStateU with sources := false }] : List Candidate).all
     (fun c => select { selection with membership := uncertainMember, candidates := [w,c] } == .refused) &&
   ([[],[blocked],[{ w with eligibleState := false }],
     [candidate 4 200 ⟨0,h 9,h 0⟩ [⟨0,h 9,h 0⟩]],
