@@ -1328,9 +1328,11 @@ private def rel (m : Membership) (path : List Key := [parent,b,descendant]) : Re
 private def row (v : ProofView) : Membership := .complete [.recoveryCoreImpossible v]
 private def conflictingB : Membership := .complete [.recoveryCoreImpossible fact,
   .recoveryCoreImpossible { fact with payload := { fact.payload with block := { b with parent := h 9 } } }]
+-- C has a distinct original context/source, positively SAME law, outside B's affected context.
 private def conflictingBWithC : Membership := .complete [.recoveryCoreImpossible fact,
   .recoveryCoreImpossible { fact with payload := { fact.payload with block := { b with parent := h 9 } } },
   .recoveryCoreImpossible { fact with payload := { fact.payload with block := descendant,
+    identity := { identity with context := { ctx with release := 7 } },
     position := 11, source := { source with identity := 78, backing := .retained 100 } } }]
 
 -- F02: raw absence precedes row-only dependencies; tuple mismatch is not absence.
