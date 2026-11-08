@@ -1254,7 +1254,8 @@ def nativeStep (m : Membership) (g : NativeGuards) (n : Native) : NativeResult :
           | some generations =>
             if !n.replay || n.actualR == none || n.both != n.targetGenerations ||
                 !n.cleanup.isEmpty || !n.drained.isEmpty then ⟨.blocked, n⟩
-            else ⟨.converted, { n with phase := .cleanup, replay := false,
+            else ⟨.converted, { n with
+              phase := .cleanup, replay := false,
               cursor := none, q := none, maps := [], both := [], cleanup := generations,
               conversions := n.conversions + 1 }⟩
       | .cleanup =>
@@ -1331,7 +1332,8 @@ private def conflictingB : Membership := .complete [.recoveryCoreImpossible fact
 -- C has a distinct original context/source, positively SAME law, outside B's affected context.
 private def conflictingBWithC : Membership := .complete [.recoveryCoreImpossible fact,
   .recoveryCoreImpossible { fact with payload := { fact.payload with block := { b with parent := h 9 } } },
-  .recoveryCoreImpossible { fact with payload := { fact.payload with block := descendant,
+  .recoveryCoreImpossible { fact with payload := { fact.payload with
+    block := descendant,
     identity := { identity with context := { ctx with release := 7 } },
     position := 11, source := { source with identity := 78, backing := .retained 100 } } }]
 
@@ -1339,7 +1341,8 @@ private def conflictingBWithC : Membership := .complete [.recoveryCoreImpossible
 def qualificationCases : Bool :=
   rel member == .excluded &&
   rel member [parent,sibling] == .eligible && rel member [parent] == .eligible &&
-  rel (row { fact with scope := .unresolved, sourceAvailable := false,
+  rel (row { fact with
+    scope := .unresolved, sourceAvailable := false,
     originalQualified := false, scopeQualified := false }) [parent,sibling] == .eligible &&
   rel member [parent,{ b with height := 12 }] == .unresolved &&
   rel member [parent,{ b with parent := h 9 }] == .unresolved &&
@@ -1398,14 +1401,19 @@ def selectionCases : Bool :=
   select { selection with membership := uncertainMember, candidates := [w,blocked] } == .pending &&
   select { selection with membership := uncertainMember, candidates := [w,u] } == .winner 2 .conditionalImportedBase &&
   select { selection with membership := uncertainMember, candidates := [u,w] } == .winner 2 .conditionalImportedBase &&
-  select { selection with membership := uncertainMember,
+  select { selection with
+    membership := uncertainMember,
     candidates := [w,{ u with tip := ⟨u.tip.point,91⟩ }] } == .pending &&
-  select { selection with membership := uncertainMember,
+  select { selection with
+    membership := uncertainMember,
     candidates := [{ w with tip := ⟨w.tip.point,80⟩ },u] } == .pending &&
-  select { selection with membership := uncertainMember,
-    candidates := [{ w with tip := ⟨⟨sibling.height,h 1⟩,80⟩,
+  select { selection with
+    membership := uncertainMember,
+    candidates := [{ w with
+      tip := ⟨⟨sibling.height,h 1⟩,80⟩,
       path := [parent,{ sibling with hash := h 1 }] },u] } == .winner 2 .conditionalImportedBase &&
-  select { selection with membership := uncertainMember,
+  select { selection with
+    membership := uncertainMember,
     candidates := [{ w with tip := u.tip, path := [parent,{ sibling with hash := h 3, height := 11 }] },u] } == .pending &&
   ([{ selection with currentBasis := false },{ selection with inventoryComplete := false },
     { selection with oldComplete := false },{ selection with oldEligible := false },
@@ -1534,7 +1542,8 @@ def dispositionCases : Bool :=
     ⟨.blocked,{ drainedFirst with cleanup := [11,12] }⟩
 
 private def unrelatedR : Native :=
-  { native with path := [parent,sibling], actualR := some 62,
+  { native with
+    path := [parent,sibling], actualR := some 62,
     control := { control with diagnosticPath := [parent,b,descendant] } }
 private def rEqualsT0 : Native :=
   { native with actualR := some 52, control := { control with diagnosticPath := [parent,b,descendant] } }
