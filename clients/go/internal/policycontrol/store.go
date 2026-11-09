@@ -56,9 +56,28 @@ var errInjectedCrash = errors.New("policycontrol: injected crash")
 type hooks struct {
 	acquire func(string) (*filelock.Handle, filelock.Result, error)
 	fault   func(stage) error // nil in production
+	ops     fsOps
 }
 
-var productionHooks = hooks{acquire: filelock.AcquireDirectory}
+// fsOps is the crossing's file-system seam; realFS makes the real calls.
+type fsOps struct {
+	remove, syncDir func(string) error
+	open            func(string) (*os.File, error)
+	write           func(*os.File, []byte) error
+	sync, close     func(*os.File) error
+	rename          func(string, string) error
+}
+
+var realFS = fsOps{
+	remove: os.Remove, syncDir: syncDir, sync: (*os.File).Sync, close: (*os.File).Close, rename: os.Rename,
+	open: func(path string) (*os.File, error) {
+		// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
+		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
+	},
+	write: func(f *os.File, b []byte) error { _, err := f.Write(b); return err },
+}
+
+var productionHooks = hooks{acquire: filelock.AcquireDirectory, ops: realFS}
 
 // Store is an open P holding the store directory's exclusive inode lock from
 // Create or Open until Close. All methods are safe for concurrent use.
@@ -66,6 +85,7 @@ type Store struct {
 	dir            string
 	lock           *filelock.Handle
 	fault          func(stage) error
+	ops            fsOps
 	mu             sync.Mutex
 	st             *state   // last qualified committed state
 	image          []byte   // its exact bytes
@@ -110,7 +130,7 @@ func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Stor
 		}
 		return nil, fmt.Errorf("%w: store directory lock result %q: %v", ErrUnreadable, res, err)
 	}
-	s := &Store{dir: dir, lock: lock, fault: h.fault}
+	s := &Store{dir: dir, lock: lock, fault: h.fault, ops: h.ops}
 	if proof != nil {
 		err = s.create(id)
 	} else if _, e := os.Lstat(filepath.Join(dir, unresolvedFile)); !errors.Is(e, fs.ErrNotExist) {
@@ -235,28 +255,27 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 		}
 	}
 	step(stageCreate, func() (err error) {
-		if err = os.Remove(scratch); err == nil || errors.Is(err, fs.ErrNotExist) {
-			// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
-			f, err = os.OpenFile(scratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
+		if err = s.ops.remove(scratch); err == nil || errors.Is(err, fs.ErrNotExist) {
+			f, err = s.ops.open(scratch)
 		}
 		return err
 	})
-	step(stageWrite, func() error { _, err := f.Write(image); return err })
-	step(stageFileSync, func() error { return f.Sync() })
-	step(stageRename, func() error { return os.Rename(scratch, filepath.Join(s.dir, controlFile)) })
+	step(stageWrite, func() error { return s.ops.write(f, image) })
+	step(stageFileSync, func() error { return s.ops.sync(f) })
+	step(stageRename, func() error { return s.ops.rename(scratch, filepath.Join(s.dir, controlFile)) })
 	c.committed = c.err == nil
-	step(stageDirSync, func() error { return syncDir(s.dir) })
-	step(stageClose, func() error { h := f; f = nil; return h.Close() })
+	step(stageDirSync, func() error { return s.ops.syncDir(s.dir) })
+	step(stageClose, func() error { h := f; f = nil; return s.ops.close(h) })
 	if c.crashed = errors.Is(c.err, errInjectedCrash); c.crashed {
 		c.handle = f
 		return c
 	}
 	if f != nil {
-		_ = f.Close()
+		_ = s.ops.close(f)
 	}
 	if c.err != nil && !c.committed {
-		_ = os.Remove(scratch)
-		_ = syncDir(s.dir)
+		_ = s.ops.remove(scratch)
+		_ = s.ops.syncDir(s.dir)
 	}
 	if c.poisoned = c.err != nil && c.committed; c.poisoned {
 		c.err = errors.Join(c.err, markUnresolved(s.dir))
