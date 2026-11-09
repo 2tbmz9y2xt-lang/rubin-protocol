@@ -2,6 +2,8 @@ package p2p
 
 import (
 	"errors"
+	"net"
+	"net/netip"
 
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/consensus"
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/node"
@@ -14,6 +16,29 @@ const (
 	maxDAPeerIdentityBytes  = 263
 	maxDAQuotaIdentityBytes = 255
 )
+
+// daQuotaIdentityForEndpoint derives the DA quota identity (RUBIN_COMPACT_BLOCKS.md Section 5.0.1
+// quota_identity) from a connected socket's actual remote endpoint: the IP host of a host:port
+// string, or the whole string as a bare IP, with any zone removed, an IPv4-mapped IPv6 address
+// unmapped to IPv4, and the port dropped, encoded by netip's canonical Addr.String (an injective
+// text form of the exact 4- or 16-byte address). A nil, empty or non-IP endpoint has no identity:
+// no lookup, configured/advertised-name fallback or substitute key exists. DA-only; the
+// block-orphan peerQuotaKey keeps its own independent policy.
+func daQuotaIdentityForEndpoint(remote net.Addr) (string, bool) {
+	if remote == nil {
+		return "", false
+	}
+	text := remote.String()
+	host, _, err := net.SplitHostPort(text)
+	if err != nil {
+		host = text
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return "", false
+	}
+	return addr.WithZone("").Unmap().String(), true
+}
 
 // COMPETING_SCORE_V1: the connection-local peer-quality policy (RUBIN_COMPACT_BLOCKS.md Section 14
 // score shape, local magnitudes). A connection starts at 50; a validated distinct commit competing
@@ -99,7 +124,7 @@ func (s *Service) admitDetachedReorgDA(txBytes []byte) (completion func(bool), e
 // handleRelayDATx is the ONE production remote DA admission path: a remote tx_kind 0x01/0x02
 // transaction past the message bound and full canonical parse invokes AdmitDA exactly once before any
 // standard-pool, seen-set, metadata or inventory effect. The identity is captured once from the peer
-// state handleConn normalized; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
+// state handleConn normalized, the quota key from the connection's actual socket endpoint; one outside IDENTITY_BOUNDS_V1 (a defense-in-depth ceiling no normalized
 // address reaches) exits nil with zero effect. Every other identity reaches AdmitDA with no terminal-latch
 // shortcut; the key is held only around AdmitDA and released before any effect; this function performs no
 // candidate validation of its own before calling AdmitDA; errors.Is on the hash sentinel is the only peer fault. RETAINED without conflict
@@ -128,11 +153,13 @@ func (p *peer) handleRelayDATx(txBytes []byte) error {
 	return nil
 }
 
-// remoteDAProvenance: the identity is captured once, the quota key derived from it and IDENTITY_BOUNDS_V1
-// applied before any provenance; ok=false exits nil with zero effect; the nonempty check keeps NewPeerDAProvenance's refusal unreachable.
+// remoteDAProvenance: the logical identity is captured once, the quota key is the connection's immutable
+// daQuotaIdentity (never derived from the logical identity) and IDENTITY_BOUNDS_V1 applied before any
+// provenance; ok=false (including a connection with no IP endpoint, hence no quota key) exits nil with
+// zero effect; the nonempty check keeps NewPeerDAProvenance's refusal unreachable.
 func (p *peer) remoteDAProvenance() (peerIdentity, quotaIdentity string, provenance node.DAProvenance, ok bool) {
 	peerIdentity = p.addr()
-	quotaIdentity = peerQuotaKey(peerIdentity)
+	quotaIdentity = p.daQuotaIdentity
 	if peerIdentity == "" || len(peerIdentity) > maxDAPeerIdentityBytes || quotaIdentity == "" || len(quotaIdentity) > maxDAQuotaIdentityBytes {
 		return "", "", node.DAProvenance{}, false
 	}

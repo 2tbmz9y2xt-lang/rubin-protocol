@@ -115,6 +115,8 @@ type scriptedConn struct {
 	readDeadlineErr error
 	readDeadlines   []time.Time
 	writeDeadlines  []time.Time
+	// remote is an optional explicit RemoteAddr fixture; nil keeps the non-IP default "remote".
+	remote net.Addr
 }
 
 func (c *scriptedConn) Read(p []byte) (int, error) {
@@ -159,9 +161,14 @@ func (c *scriptedConn) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
-func (c *scriptedConn) Close() error                { return nil }
-func (c *scriptedConn) LocalAddr() net.Addr         { return stubAddr("local") }
-func (c *scriptedConn) RemoteAddr() net.Addr        { return stubAddr("remote") }
+func (c *scriptedConn) Close() error        { return nil }
+func (c *scriptedConn) LocalAddr() net.Addr { return stubAddr("local") }
+func (c *scriptedConn) RemoteAddr() net.Addr {
+	if c.remote != nil {
+		return c.remote
+	}
+	return stubAddr("remote")
+}
 func (c *scriptedConn) SetDeadline(time.Time) error { return nil }
 func (c *scriptedConn) SetReadDeadline(t time.Time) error {
 	c.readDeadlines = append(c.readDeadlines, t)

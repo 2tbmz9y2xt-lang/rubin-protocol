@@ -39,12 +39,18 @@ func (s *Service) handleConn(conn net.Conn, outboundAddr string) error {
 		return err
 	}
 
+	var remote net.Addr
+	if conn != nil {
+		remote = conn.RemoteAddr()
+	}
+	daQuotaIdentity, _ := daQuotaIdentityForEndpoint(remote)
 	current := &peer{
-		conn:          conn,
-		service:       s,
-		state:         state,
-		qualityScore:  qualityScoreInitial,
-		qualityHeight: s.cfg.SyncEngine.LocalTipHeight(),
+		conn:            conn,
+		service:         s,
+		state:           state,
+		qualityScore:    qualityScoreInitial,
+		qualityHeight:   s.cfg.SyncEngine.LocalTipHeight(),
+		daQuotaIdentity: daQuotaIdentity,
 	}
 	current.state.Addr = peerAddressKey(outboundAddr, current.state.Addr)
 	if err := s.registerPeer(current); err != nil {
@@ -81,8 +87,10 @@ func (s *Service) sendPostHandshakeAnnouncements(current *peer) error {
 }
 
 func (s *Service) registerPeer(p *peer) error {
-	unlockQuota := s.lockPeerQuotaKey(peerQuotaKey(p.addr()))
-	defer unlockQuota()
+	if quotaKey := p.daQuotaIdentity; quotaKey != "" {
+		unlockQuota := s.lockPeerQuotaKey(quotaKey)
+		defer unlockQuota()
+	}
 	if err := s.cfg.PeerManager.AddPeer(&p.state); err != nil {
 		return err
 	}
@@ -103,9 +111,13 @@ func (s *Service) unregisterPeer(p *peer) {
 		return
 	}
 	addr := p.addr()
-	quotaKey := peerQuotaKey(addr)
-	unlockQuota := s.lockPeerQuotaKey(quotaKey)
-	defer unlockQuota()
+	// An empty daQuotaIdentity (no IP endpoint) never owned DA quota: no key lock, no lock row, no
+	// DA cleanup; ordinary removal still happens exactly once.
+	quotaKey := p.daQuotaIdentity
+	if quotaKey != "" {
+		unlockQuota := s.lockPeerQuotaKey(quotaKey)
+		defer unlockQuota()
+	}
 	remove := s.removePeerEntries(p)
 	if remove {
 		s.cfg.PeerManager.RemovePeer(addr)
@@ -142,6 +154,9 @@ func (s *Service) removePeerEntries(p *peer) bool {
 }
 
 func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
+	if quotaKey == "" {
+		return nil
+	}
 	unlockQuota := s.lockPeerQuotaKey(quotaKey)
 	defer unlockQuota()
 	return s.releaseDAQuotaIfInactiveLocked(quotaKey)
@@ -149,7 +164,8 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 
 // releaseDAQuotaIfInactiveLocked releases the retained incomplete DA data owned
 // by quotaKey once no live peer still holds that key, under the caller's per-key
-// peer quota lock.
+// peer quota lock. An empty quotaKey is no DA quota identity and is refused with no
+// node call.
 //
 // The release is best-effort cleanup, so an already-latched engine skips it. If
 // a latch lands after this check, the shared admission fence returns unavailable
@@ -158,7 +174,7 @@ func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {
 // documented contract, and no constructed Service reaches this gate with a
 // nil engine: validateServiceConfig rejects a nil SyncEngine.
 func (s *Service) releaseDAQuotaIfInactiveLocked(quotaKey string) error {
-	if s.daRelay == nil {
+	if quotaKey == "" || s.daRelay == nil {
 		return nil
 	}
 	s.peersMu.RLock()
@@ -197,7 +213,7 @@ func (s *Service) lockPeerQuotaKey(quotaKey string) func() {
 
 func (s *Service) hasActivePeerQuotaKeyLocked(quotaKey string) bool {
 	for _, current := range s.peers {
-		if current != nil && peerQuotaKey(current.addr()) == quotaKey {
+		if current != nil && current.daQuotaIdentity == quotaKey {
 			return true
 		}
 	}

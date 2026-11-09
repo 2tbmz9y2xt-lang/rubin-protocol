@@ -133,6 +133,13 @@ type peer struct {
 	// setLastError and sendcmpct never reset them; zero is a valid score.
 	qualityScore  uint8
 	qualityHeight uint64
+	// daQuotaIdentity is the connection's DA quota identity, derived once by handleConn from the
+	// actual conn.RemoteAddr() via daQuotaIdentityForEndpoint before registerPeer publishes the peer
+	// and immutable for the connection's lifetime. It is never derived from the configured dial
+	// name, PeerState.Addr, an alias or an advertised address. DA provenance, ingress serialization,
+	// prefetch grouping and disconnect release all key on it; empty means no IP endpoint, so the
+	// connection takes no DA admission, DA quota lock, DA cleanup or prefetch candidacy.
+	daQuotaIdentity string
 
 	writeMu sync.Mutex
 
