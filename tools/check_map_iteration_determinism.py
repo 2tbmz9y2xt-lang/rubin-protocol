@@ -35,6 +35,12 @@ GO_ALLOWLIST = {
     "state_digest.go:UtxoSetHash",
     # collect Outpoints → sort by routing key before deterministic tree hashing
     "utxo_tree_root.go:canonicalUTXORoot",
+    # every row passes one fixed-result check, order-neutral
+    "logical_state.go:completeMapFinalLogicalStateBytes",
+    # every row passes one fixed-result check, order-neutral
+    "logical_state.go:completeMapParentLogicalStateBytes",
+    # commutative checked sum with one fixed failure, order-neutral
+    "logical_state.go:sumLogicalStateEntryBytes",
     # deep-copy map→map, order-neutral
     "utxo_basic.go:cloneUtxoSet",
     # shallow-copy map→map, order-neutral

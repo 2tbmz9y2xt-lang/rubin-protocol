@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"runtime"
@@ -638,7 +639,7 @@ const icbKeyDERV1 = "3034020100300b060960864801650304031304228020" +
 	"a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
 
 // icbFixedSigsV1 maps the three base-fixture sighash digests (tx1 input 0,
-// tx2 inputs 0 and 1; identical at heights 5 and 4800) to signatures produced
+// tx2 inputs 0 and 1; identical at icbHeightV1 and icbCapHeightV1) to signatures produced
 // once by hedged SignDigest32 under icbKeyDERV1. They fix the wtxids, hence the
 // coinbase witness commitment, cb:0 txid and the pinned literal roots.
 var icbFixedSigsV1 = map[string]string{
@@ -1353,24 +1354,34 @@ func icbH5RunCaseV1(t *testing.T, c icbH5CaseV1) {
 }
 
 // TestInitial148CompleteBlockCapH5 (C02, C08) keeps the h=5 final map. The
-// active cap reads the native parent counters (and a nondefault valid
-// below-bound state) and still requires fresh D; an inactive registry with
-// malformed counters proves zero cap-only reads while D still runs; active
-// malformed counters are a store-integrity no-result before D.
+// parent counters are read in both activation states and accepted blocks
+// still require fresh D; malformed counters are a store-integrity no-result
+// before D whether the cap is active or inactive.
 func TestInitial148CompleteBlockCapH5(t *testing.T) {
-	malformed := [2]uint64{1, 1}
 	for _, c := range []icbH5CaseV1{
 		{name: "active-native-counters", capFrom: icbHeightV1},
 		{name: "active-below-bound-nondefault", capFrom: icbHeightV1, counters: [2]uint64{89 * 10, 10}},
-		{name: "inactive-malformed-counters", capFrom: icbHeightV1 + 1, counters: malformed},
-		{name: "inactive-empty-registry-malformed-counters", counters: malformed},
+		{name: "inactive-native-counters", capFrom: icbHeightV1 + 1},
+		{name: "inactive-empty-registry-native-counters"},
 	} {
 		icbH5RunCaseV1(t, c)
 	}
+	for _, capFrom := range []uint64{icbHeightV1, icbHeightV1 + 1, 0} {
+		icbMalformedCountersV1(t, icbH5OptsV1{flip: 1}, capFrom)
+	}
+}
+
+// icbMalformedCountersV1 pins the store-integrity no-result before D for a
+// malformed parent counter, whether the cap is active or inactive.
+func icbMalformedCountersV1(t *testing.T, opts icbH5OptsV1, capFrom uint64) {
+	t.Helper()
+	malformed := [2]uint64{1, 1}
 	for _, workers := range []int{-1, 4} {
 		w := btNew(t)
-		f := icbH5VariantV1(t, w, icbH5OptsV1{flip: 1})
-		icbCapAtV1(&f.in, icbHeightV1)
+		f := icbH5VariantV1(t, w, opts)
+		if capFrom != 0 {
+			icbCapAtV1(&f.in, capFrom)
+		}
 		irCounterV1(t, w, malformed[0], malformed[1])
 		got := icbObserveV1(t, w, f.in, workers)
 		// The required producer validates the counter envelope on the cap's first Counters read.
@@ -1423,17 +1434,18 @@ func icbWrapsCauseV1(err, cause error) bool {
 	return cause != nil && errors.As(err, &failure) && any(failure.cause) == any(cause)
 }
 
-// icbCapHeightV1 = 4800 >= ceil(maxLogicalStateBytes / maxCreatedLogicalStateBytes)
-// = 4765, the least height whose counter envelope admits S0 >= max.
-// icbCapMaxEntriesV1 keeps max/65,596 <= entries <= max/56.
+// icbCapHeightV1 = 20000 >= ceil(maxLogicalStateBytes / maxCreatedLogicalStateBytes)
+// = 19057, the least height whose counter envelope admits S0 >= max.
+// icbCapMaxEntriesV1 keeps residual/65,596 <= entries <= residual/56 after the
+// spent rows are removed, at both S0 values used below.
 const (
-	icbCapHeightV1     = 4800
-	icbCapMaxEntriesV1 = 6_300_000
-	icbCapRootHexV1    = "e0fd3b958eeb0f0f5bb8f375b55c5d0274b2ae6bec37d5f906b0d144be4dd2d0"
+	icbCapHeightV1     = 20000
+	icbCapMaxEntriesV1 = 25_200_000
+	icbCapRootHexV1    = "f6cf2670b422ffd961b3d2055e3fd9233aaa03fad2c09c595864e5f9ea9ab6f3"
 )
 
 // TestInitial148CompleteBlockCapBoundaryV1 (C02, C06) runs every cap variant
-// on ONE h=4800 final map whose header root is the literal CSM 2.6 recursion
+// on ONE h=20000 final map whose header root is the literal CSM 2.6 recursion
 // over its leaf bytes: stable S1==max, draining S1==S0>max, below-bound and
 // inactive accept with fresh D; a split coinbase (+89 bytes) over S0==max is
 // BLOCK_ERR_STATE_CAP_EXCEEDED before D despite a wrong header root.
@@ -1447,7 +1459,6 @@ func TestInitial148CompleteBlockCapBoundaryV1(t *testing.T) {
 		{name: "stable-S1-equals-max", opts: at, capFrom: icbCapHeightV1, counters: stable},
 		{name: "draining-S1-equals-S0", opts: at, capFrom: icbCapHeightV1, counters: [2]uint64{maxLogicalStateBytes + 89*1000, icbCapMaxEntriesV1}},
 		{name: "below-bound-native", opts: at, capFrom: icbCapHeightV1},
-		{name: "inactive-malformed", opts: at, capFrom: icbCapHeightV1 + 1, counters: [2]uint64{1, 1}},
 		{
 			name: "cap-exceeded-before-root", opts: icbH5OptsV1{height: icbCapHeightV1, split: true, flip: 1}, capFrom: icbCapHeightV1, counters: stable,
 			code: BLOCK_ERR_STATE_CAP_EXCEEDED, msg: "logical state cap exceeded",
@@ -1455,6 +1466,7 @@ func TestInitial148CompleteBlockCapBoundaryV1(t *testing.T) {
 	} {
 		icbH5RunCaseV1(t, c)
 	}
+	icbMalformedCountersV1(t, at, icbCapHeightV1+1)
 }
 
 // TestInitial148CompleteBlockTombstoneH5 (C09 subset) spends A twice in one
@@ -1927,5 +1939,233 @@ func icbEntryWorkersV1(workers int) func(*mdbx.OperationAccount, initial148Compl
 	}
 	return func(a *mdbx.OperationAccount, in initial148CompleteBlockInputV1, run initial148CompleteRunV1) (initial148CompleteBlockOutcomeV1, error) {
 		return withInitial148CompleteBlockParallelV1(a, in, workers, run)
+	}
+}
+
+// icbPassiveViewV1 is a typed candidate view: no root work is reachable from it.
+type icbPassiveViewV1 struct {
+	counters logicalStateCounterRead
+	rows     map[Outpoint]UtxoEntry
+}
+
+func (v *icbPassiveViewV1) Counters() logicalStateCounterRead { return v.counters }
+
+func (v *icbPassiveViewV1) Lookup(op Outpoint) logicalStateRowRead {
+	if entry, ok := v.rows[op]; ok {
+		return logicalStateRowRead{kind: logicalStateRowPresent, entry: entry}
+	}
+	return logicalStateRowRead{kind: logicalStateRowAbsent}
+}
+
+func icbPresentCountersV1(total, count uint64) logicalStateCounterRead {
+	return logicalStateCounterRead{kind: logicalStateCountersPresent, counters: logicalStateCounters{bytes: total, entries: count}}
+}
+
+func icbAssertTerminalV1(t *testing.T, name string, spent *blockSpentInputSource) {
+	t.Helper()
+	logicalMDBXAssert(t, spent != nil && reflect.DeepEqual(*spent, blockSpentInputSource{}), "post-connect refusal retained spent source: %s", name)
+}
+
+// icbSpentCaptureViewV1 retains the transition's original spent source at the
+// first Counters read after candidateV1 assigns the transition. Reads during
+// connect see a nil transition and capture nothing.
+type icbSpentCaptureViewV1 struct {
+	icbPassiveViewV1
+	result   *initial148CompleteBlockResultV1
+	original *blockSpentInputSource
+}
+
+func icbNewSpentCaptureV1(result *initial148CompleteBlockResultV1, counters logicalStateCounterRead, rows map[Outpoint]UtxoEntry) *icbSpentCaptureViewV1 {
+	return &icbSpentCaptureViewV1{icbPassiveViewV1: icbPassiveViewV1{counters: counters, rows: rows}, result: result}
+}
+
+func (v *icbSpentCaptureViewV1) Counters() logicalStateCounterRead {
+	if v.original == nil && v.result.transition != nil {
+		v.original = v.result.transition.spentInputs
+	}
+	return v.icbPassiveViewV1.Counters()
+}
+
+// assertRetainedTerminal requires the captured object itself to be cleared and
+// still be the object the result holds.
+func (v *icbSpentCaptureViewV1) assertRetainedTerminal(t *testing.T, name string) {
+	t.Helper()
+	logicalMDBXAssert(t, v.original != nil, "original spent source not captured: %s", name)
+	icbAssertTerminalV1(t, name, v.original)
+	logicalMDBXAssert(t, v.result.transition.spentInputs == v.original, "spent source pointer replaced: %s", name)
+}
+
+// assertDeliveredLive requires the captured object to be the delivered, live one.
+func (v *icbSpentCaptureViewV1) assertDeliveredLive(t *testing.T, name string) {
+	t.Helper()
+	logicalMDBXAssert(t, v.original != nil && v.result.transition.spentInputs == v.original && v.original.raw != nil, "success must keep the original spent source live: %s", name)
+}
+
+// icbGrowthFrameV1 builds the valid funded census as a complete-frame body.
+func icbGrowthFrameV1(t *testing.T, kp *MLDSA87Keypair, census logicalGrowthCensus, height uint64) initial148CompleteBlockInputV1 {
+	t.Helper()
+	raws := logicalGrowthMarshal(t, logicalGrowthTxs(t, kp, [32]byte{}, census))
+	commit := initial148BlockWitnessCommit(t, raws...)
+	cb := coinbaseTxWithOutputs(uint32(height), []testOutput{{value: 1, covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}, {covenantType: COV_TYPE_ANCHOR, covenantData: commit[:]}})
+	in := icbInputV1()
+	in.Raw, in.Height, in.Rotation = initial148BlockFrame(t, append([][]byte{cb}, raws...), nil), height, icbFrozenV1(height)
+	in.ParentTimestamps, in.Registry = slices.Repeat([]uint64{blockStepsMedian}, 11), DefaultSuiteRegistry()
+	return in
+}
+
+// icbGrowthOrderCaseV1 is one candidate-boundary row; root is the header root.
+type icbGrowthOrderCaseV1 struct {
+	name     string
+	census   logicalGrowthCensus
+	height   uint64
+	capFrom  uint64 // 0: inactive registry
+	counters [2]uint64
+	outcome  initial148RootReadOutcomeV1
+	check    func(error) bool // nil: acceptance control
+	derived  int
+}
+
+func icbExactTxErrV1(code ErrorCode, text string) func(error) bool {
+	return func(err error) bool {
+		txErr, ok := any(err).(*TxError)
+		return ok && txErr.Code == code && err.Error() == text
+	}
+}
+
+func icbGrowthOrderCasesV1(header [32]byte, readCause error) []icbGrowthOrderCaseV1 {
+	base := [2]uint64{801, 9}
+	wrong := initial148RootReadOutcomeV1{root: [32]byte{0x78}, derived: true}
+	failed := initial148RootReadOutcomeV1{cause: readCause}
+	growth := icbExactTxErrV1(BLOCK_ERR_STATE_GROWTH_EXCEEDED, testLogicalGrowthMsg)
+	mismatch := icbExactTxErrV1(BLOCK_ERR_UTXO_ROOT_MISMATCH, "BLOCK_ERR_UTXO_ROOT_MISMATCH: utxo_root mismatch")
+	return []icbGrowthOrderCaseV1{
+		{"over-wrong-root", logicalGrowthOver, 200, 0, base, wrong, growth, 0},
+		{"over-would-fail-read", logicalGrowthOver, 200, 0, base, failed, growth, 0},
+		{"over-active-below-cap-wrong-root", logicalGrowthOver, 200, 200, base, wrong, growth, 0},
+		// S0 = C-G = 1649266668544 and net 773121 give S1 = C+1: both rules fail.
+		{"dual-violation-cap-wins", logicalGrowthOver, icbCapHeightV1, icbCapHeightV1, [2]uint64{1649266668544, icbCapMaxEntriesV1}, wrong, icbExactTxErrV1(BLOCK_ERR_STATE_CAP_EXCEEDED, testLogicalCapMsg), 0},
+		{"equal-root-equal", logicalGrowthEqual, 200, 0, base, initial148RootReadOutcomeV1{root: header, derived: true}, nil, 1},
+		{"equal-root-mismatch", logicalGrowthEqual, 200, 0, base, wrong, mismatch, 1},
+		{"equal-root-read-cause", logicalGrowthEqual, 200, 0, base, failed, func(err error) bool { return any(err) == any(readCause) }, 1},
+		{"equal-no-result", logicalGrowthEqual, 200, 0, base, initial148RootReadOutcomeV1{}, func(err error) bool { return err.Error() == "complete initial148 derive returned no result" }, 1},
+	}
+}
+
+// icbRunGrowthOrderV1 runs one row at candidateV1 through one entry.
+func icbRunGrowthOrderV1(t *testing.T, in initial148CompleteBlockInputV1, tc icbGrowthOrderCaseV1, header [32]byte, rows map[Outpoint]UtxoEntry, workers int) {
+	t.Helper()
+	f := &initial148CompleteBlockFrameV1{input: in, workers: workers, parallel: workers >= 0}
+	var result initial148CompleteBlockResultV1
+	view := icbNewSpentCaptureV1(&result, icbPresentCountersV1(tc.counters[0], tc.counters[1]), rows)
+	derived := 0
+	derive := func() initial148RootReadOutcomeV1 {
+		derived++
+		return tc.outcome
+	}
+	err := f.candidateV1(view, derive, header, initial148PendingGeneratedV1(in), &result)
+	name := fmt.Sprintf("%s workers=%d", tc.name, workers)
+	if tc.check == nil {
+		logicalMDBXAssert(t, err == nil && derived == tc.derived, "%s control: %v derived=%d", name, err, derived)
+		view.assertDeliveredLive(t, name)
+		return
+	}
+	logicalMDBXAssert(t, err != nil && tc.check(err), "%s error: %T %v", name, err, err)
+	logicalMDBXAssert(t, derived == tc.derived, "%s derive calls %d, want %d", name, derived, tc.derived)
+	if tc.derived == 0 {
+		logicalMDBXAssert(t, f.outcome.required == (initial148RootReadOutcomeV1{}), "%s root work ran before refusal", name)
+	}
+	view.assertRetainedTerminal(t, name)
+}
+
+// TestInitial148CompleteBlockCandidateGrowthOrder is candidate-boundary
+// ordering and disposal evidence for the valid funded census. It is not a
+// public-wrapper result: that wrapper's resource ceiling cannot admit this body.
+func TestInitial148CompleteBlockCandidateGrowthOrder(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	rows := logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes()))
+	header := [32]byte{0x77}
+	for _, tc := range icbGrowthOrderCasesV1(header, errors.New("root read failed")) {
+		in := icbGrowthFrameV1(t, kp, tc.census, tc.height)
+		if tc.capFrom != 0 {
+			icbCapAtV1(&in, tc.capFrom)
+		}
+		for _, workers := range []int{-1, 1, 4} {
+			icbRunGrowthOrderV1(t, in, tc, header, rows, workers)
+		}
+	}
+}
+
+// TestInitial148CompleteBlockCandidateDisposal covers each remaining
+// post-connect refusal on a small admitted candidate.
+func TestInitial148CompleteBlockCandidateDisposal(t *testing.T) {
+	kp := icbKeyV1(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	readCause := errors.New("root read failed")
+	accountCause := errors.New("counter unavailable")
+	for _, workers := range []int{-1, 1, 4} {
+		fx := icbH5FixtureV1(t, btNew(t))
+		generated := initial148PendingGeneratedV1(fx.in)
+		rows := map[Outpoint]UtxoEntry{
+			fx.c: {Value: 7, CovenantType: COV_TYPE_P2PK, CovenantData: validP2PKCovenantData(), CreationHeight: 4, CreatedByCoinbase: true},
+			fx.a: {Value: 1000, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: 4},
+			fx.b: {Value: 2000, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: 4},
+		}
+		good := icbPresentCountersV1(267, 3)
+		bad := fx.header.UtxoRoot
+		bad[0] ^= 0x80
+		for _, tc := range []struct {
+			name     string
+			counters logicalStateCounterRead
+			scalar   Uint128
+			outcome  initial148RootReadOutcomeV1
+			check    func(error) bool
+			derived  int
+		}{
+			{"generated-scalar", good, Uint128{Lo: generated.Lo + 1}, initial148RootReadOutcomeV1{}, func(e error) bool { return e.Error() == "complete initial148 generated scalar differs" }, 0},
+			{"accounting", logicalStateCounterRead{kind: logicalStateCountersUnavailable, cause: accountCause}, generated, initial148RootReadOutcomeV1{}, func(e error) bool {
+				f, ok := any(e).(*logicalStateFailure)
+				return ok && f.kind == logicalStateFailureUnavailable && any(f.cause) == any(accountCause)
+			}, 0},
+			{"root-read", good, generated, initial148RootReadOutcomeV1{cause: readCause}, func(e error) bool { return any(e) == any(readCause) }, 1},
+			{"root-mismatch", good, generated, initial148RootReadOutcomeV1{root: bad, derived: true}, func(e error) bool {
+				x, ok := any(e).(*TxError)
+				return ok && x.Code == BLOCK_ERR_UTXO_ROOT_MISMATCH
+			}, 1},
+		} {
+			f := &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
+			derived := 0
+			var result initial148CompleteBlockResultV1
+			view := icbNewSpentCaptureV1(&result, tc.counters, rows)
+			err := f.candidateV1(view, func() initial148RootReadOutcomeV1 {
+				derived++
+				return tc.outcome
+			}, fx.header.UtxoRoot, tc.scalar, &result)
+			name := fmt.Sprintf("%s workers=%d", tc.name, workers)
+			logicalMDBXAssert(t, err != nil && tc.check(err) && derived == tc.derived, "%s: %v derived=%d", name, err, derived)
+			if tc.scalar != generated {
+				// The scalar refusal returns before capV1: no callback can capture.
+				icbAssertTerminalV1(t, name, result.transition.spentInputs)
+				continue
+			}
+			view.assertRetainedTerminal(t, name)
+		}
+		// An unwind before accepted handoff disposes of the same source.
+		f := &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
+		var result initial148CompleteBlockResultV1
+		unwind := icbNewSpentCaptureV1(&result, good, rows)
+		func() {
+			defer func() { logicalMDBXAssert(t, recover() != nil, "derive panic not propagated") }()
+			_ = f.candidateV1(unwind, func() initial148RootReadOutcomeV1 { panic("derive") }, fx.header.UtxoRoot, generated, &result)
+		}()
+		unwind.assertRetainedTerminal(t, "unwind")
+		// Root success keeps the source live for the accepted handoff.
+		f = &initial148CompleteBlockFrameV1{input: fx.in, workers: workers, parallel: workers >= 0}
+		result = initial148CompleteBlockResultV1{}
+		control := icbNewSpentCaptureV1(&result, good, rows)
+		err := f.candidateV1(control, func() initial148RootReadOutcomeV1 {
+			return initial148RootReadOutcomeV1{root: fx.header.UtxoRoot, derived: true}
+		}, fx.header.UtxoRoot, generated, &result)
+		logicalMDBXAssert(t, err == nil, "success must not dispose: %v", err)
+		control.assertDeliveredLive(t, "success")
 	}
 }

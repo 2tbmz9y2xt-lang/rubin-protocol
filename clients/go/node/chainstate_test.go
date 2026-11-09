@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -785,4 +786,136 @@ func TestSyncDirFailsOnMissingDirectory(t *testing.T) {
 	if err := syncDir(missing); err == nil {
 		t.Fatalf("syncDir on missing dir: expected error, got nil")
 	}
+}
+
+// chainStateGrowthParents is nine mature P2PK rows of the valid funded census.
+func chainStateGrowthParents(cov []byte) map[consensus.Outpoint]consensus.UtxoEntry {
+	parents := make(map[consensus.Outpoint]consensus.UtxoEntry, 9)
+	for i := byte(0); i < 9; i++ {
+		parents[consensus.Outpoint{Txid: [32]byte{0xb0 + i}}] = consensus.UtxoEntry{Value: 2000, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: cov, CreatedByCoinbase: true}
+	}
+	return parents
+}
+
+func chainStateGrowthTx(t *testing.T, kp *consensus.MLDSA87Keypair, nonce uint64, outs []consensus.TxOutput) []byte {
+	t.Helper()
+	tx := &consensus.Tx{Version: 1, TxNonce: nonce, Inputs: []consensus.TxInput{{PrevTxid: [32]byte{0xb0 + byte(nonce-1)}}}, Outputs: outs}
+	digest, err := consensus.SighashV1DigestWithType(tx, 0, 2000, [32]byte{}, consensus.SIGHASH_ALL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := kp.SignDigest32(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx.Witness = []consensus.WitnessItem{{SuiteID: consensus.SUITE_ID_ML_DSA_87, Pubkey: kp.PubkeyBytes(), Signature: append(sig, consensus.SIGHASH_ALL)}}
+	raw, err := consensus.MarshalTx(tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// chainStateGrowthBlock is the h=200 census: value-1 outputs, eight full P2PK
+// transactions, and the remainder plus every HTLC in the ninth.
+func chainStateGrowthBlock(t *testing.T, kp *consensus.MLDSA87Keypair, cov []byte, tip, target [32]byte, p2pk, htlc int) []byte {
+	t.Helper()
+	outputs := func(p, h int) []consensus.TxOutput {
+		data := append(bytes.Repeat([]byte{0x41}, 32), consensus.LOCK_MODE_HEIGHT, 1, 0, 0, 0, 0, 0, 0, 0)
+		data = append(append(data, bytes.Repeat([]byte{0x42}, 32)...), bytes.Repeat([]byte{0x43}, 32)...)
+		outs := slices.Repeat([]consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_P2PK, CovenantData: cov}}, p)
+		return append(outs, slices.Repeat([]consensus.TxOutput{{Value: 1, CovenantType: consensus.COV_TYPE_HTLC, CovenantData: data}}, h)...)
+	}
+	txs := make([][]byte, 0, 10)
+	for nonce := uint64(1); nonce <= 8; nonce++ {
+		txs = append(txs, chainStateGrowthTx(t, kp, nonce, outputs(1024, 0)))
+	}
+	txs = append(txs, chainStateGrowthTx(t, kp, 9, outputs(p2pk-8192, htlc)))
+	wtxids := [][32]byte{{}}
+	for _, raw := range txs {
+		_, _, wtxid, _, err := consensus.ParseTx(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wtxids = append(wtxids, wtxid)
+	}
+	wroot, err := consensus.WitnessMerkleRootWtxids(wtxids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitment := consensus.WitnessCommitmentHash(wroot)
+	coinbase := coinbaseTxWithOutputs(200, []testOutput{{value: 1, covenantType: consensus.COV_TYPE_P2PK, covenantData: testP2PKCovenantData(0x11)}, {covenantType: consensus.COV_TYPE_ANCHOR, covenantData: commitment[:]}})
+	txs = append([][]byte{coinbase}, txs...)
+	txids := make([][32]byte, len(txs))
+	for i, raw := range txs {
+		if _, txids[i], _, _, err = consensus.ParseTx(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := consensus.MerkleRootTxids(txids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := consensus.AppendU32le(make([]byte, 0, 1<<20), 1)
+	block = append(append(block, tip[:]...), root[:]...)
+	block = consensus.AppendU64le(block, 1)
+	block = append(block, target[:]...)
+	block = consensus.AppendCompactSize(consensus.AppendU64le(block, 7), uint64(len(txs)))
+	return append(block, bytes.Join(txs, nil)...)
+}
+
+func TestChainStateConnectBlockLogicalStateGrowth(t *testing.T) {
+	kp, err := consensus.NewMLDSA87Keypair()
+	if err != nil {
+		t.Skipf("ML-DSA backend unavailable: %v", err)
+	}
+	t.Cleanup(kp.Close)
+	cov := make([]byte, consensus.MAX_P2PK_COVENANT_DATA)
+	keyID := sha3.Sum256(kp.PubkeyBytes())
+	cov[0] = consensus.SUITE_ID_ML_DSA_87
+	copy(cov[1:], keyID[:])
+	target := bytes.Repeat([]byte{0xff}, 32)
+	timestamps := slices.Repeat([]uint64{0}, 11)
+	tip := [32]byte{0x22}
+	over := chainStateGrowthBlock(t, kp, cov, tip, [32]byte(target), 8664, 17)
+	equal := chainStateGrowthBlock(t, kp, cov, tip, [32]byte(target), 8626, 38)
+	for _, tc := range []struct {
+		name string
+		call func(*ChainState, []byte) (*ChainStateConnectSummary, error)
+	}{
+		{"sequential", func(s *ChainState, b []byte) (*ChainStateConnectSummary, error) {
+			return s.ConnectBlock(b, (*[32]byte)(target), timestamps, [32]byte{})
+		}},
+		{"queued", func(s *ChainState, b []byte) (*ChainStateConnectSummary, error) {
+			return s.ConnectBlockParallelSigs(b, (*[32]byte)(target), timestamps, [32]byte{}, 4)
+		}},
+	} {
+		st := NewChainState()
+		st.HasTip, st.Height, st.TipHash = true, 199, tip
+		st.Utxos = chainStateGrowthParents(cov)
+		before, err := stateToDisk(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, err := tc.call(st, over)
+		if summary != nil || consensusErrorCode(err) != consensus.BLOCK_ERR_STATE_GROWTH_EXCEEDED {
+			t.Fatalf("%s over: summary=%v err=%v", tc.name, summary, err)
+		}
+		after, err := stateToDisk(st)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("%s: chainstate mutated on growth refusal (%v)", tc.name, err)
+		}
+		summary, err = tc.call(st, equal)
+		if err != nil || summary == nil || st.Height != 200 || len(st.Utxos) != 8626+38+1 {
+			t.Fatalf("%s next valid call: %v height=%d rows=%d", tc.name, err, st.Height, len(st.Utxos))
+		}
+	}
+}
+
+func consensusErrorCode(err error) consensus.ErrorCode {
+	var txErr *consensus.TxError
+	if errors.As(err, &txErr) {
+		return txErr.Code
+	}
+	return ""
 }

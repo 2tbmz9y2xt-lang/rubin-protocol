@@ -8,11 +8,15 @@ import (
 )
 
 const (
-	maxLogicalStateBytes        uint64 = 412_316_860_416
+	maxLogicalStateBytes        uint64 = 1_649_267_441_664
 	minLogicalStateEntryBytes   uint64 = 56
 	maxLogicalStateEntryBytes   uint64 = 65_596
 	maxCreatedLogicalStateBytes uint64 = 86_545_430
+	logicalStateValidTotalLimit uint64 = 1 << 59
 )
+
+// MAX_BLOCK_NET_STATE_GROWTH_BYTES is the per-block logical-state growth limit.
+const MAX_BLOCK_NET_STATE_GROWTH_BYTES uint64 = 773_120
 
 type logicalStateFailureKind uint8
 
@@ -297,18 +301,91 @@ func evaluateLogicalStateCap[M any](prior *TxError, registry validatedLogicalSta
 	if prior != nil {
 		return logicalStateCapResult[M]{}, prior
 	}
-	if !registry.active(chainID, height) {
-		return logicalStateCapResult[M]{}, nil
-	}
+	active := registry.active(chainID, height)
 	plan, failure := buildLogicalStatePlan(height, view, touched, metadata)
 	if failure != nil {
 		return logicalStateCapResult[M]{}, failure
 	}
-	if (plan.Parent.bytes <= maxLogicalStateBytes && plan.Result.bytes > maxLogicalStateBytes) ||
-		(plan.Parent.bytes > maxLogicalStateBytes && plan.Result.bytes > plan.Parent.bytes) {
-		return logicalStateCapResult[M]{}, txerr(BLOCK_ERR_STATE_CAP_EXCEEDED, "logical state cap exceeded")
+	if err := checkLogicalStateCapAndGrowth(plan.Parent.bytes, plan.Result.bytes, active); err != nil {
+		return logicalStateCapResult[M]{}, err
 	}
-	return logicalStateCapResult[M]{active: true, plan: plan}, nil
+	return logicalStateCapResult[M]{active: active, plan: plan}, nil
+}
+
+// checkLogicalStateCapAndGrowth applies the active cap, then the unconditional
+// growth limit, to already-proven exact totals.
+func checkLogicalStateCapAndGrowth(s0, s1 uint64, capActive bool) error {
+	if capActive && logicalStateCapViolated(s0, s1) {
+		return txerr(BLOCK_ERR_STATE_CAP_EXCEEDED, "logical state cap exceeded")
+	}
+	if s1 > s0 && s1-s0 > MAX_BLOCK_NET_STATE_GROWTH_BYTES {
+		return txerr(BLOCK_ERR_STATE_GROWTH_EXCEEDED, "logical state growth exceeded")
+	}
+	return nil
+}
+
+func logicalStateCapViolated(s0, s1 uint64) bool {
+	if s0 <= maxLogicalStateBytes {
+		return s1 > maxLogicalStateBytes
+	}
+	return s1 > s0
+}
+
+// checkCompleteMapLogicalState is the complete-map projection of the cap and
+// growth law. These paths have no cap-registry input, so the cap is inactive.
+func checkCompleteMapLogicalState(height uint64, parent, final map[Outpoint]UtxoEntry) error {
+	s0, failure := completeMapParentLogicalStateBytes(height, parent)
+	if failure != nil {
+		return failure
+	}
+	s1, failure := completeMapFinalLogicalStateBytes(final)
+	if failure != nil {
+		return failure
+	}
+	return checkLogicalStateCapAndGrowth(s0, s1, false)
+}
+
+// completeMapParentLogicalStateBytes sums a computed parent, so it applies the
+// row domain to every row, then checked accumulation, and no height envelope.
+func completeMapParentLogicalStateBytes(height uint64, parent map[Outpoint]UtxoEntry) (uint64, *logicalStateFailure) {
+	if height == 0 {
+		return 0, nil
+	}
+	for _, entry := range parent {
+		if logicalStateSuccessRowMalformed(logicalStateRowRead{entry: entry}, true) {
+			return 0, &logicalStateFailure{kind: logicalStateFailureStoreIntegrity, cause: errors.New("invalid present logical state row")}
+		}
+	}
+	return sumLogicalStateEntryBytes(parent)
+}
+
+func completeMapFinalLogicalStateBytes(final map[Outpoint]UtxoEntry) (uint64, *logicalStateFailure) {
+	for _, entry := range final {
+		if failure := logicalStateFinalFailure(logicalTouchedState{FinalPresent: true, Final: entry}); failure != nil {
+			return 0, failure
+		}
+	}
+	return sumLogicalStateEntryBytes(final)
+}
+
+func sumLogicalStateEntryBytes(rows map[Outpoint]UtxoEntry) (uint64, *logicalStateFailure) {
+	var total uint64
+	for _, entry := range rows {
+		var failure *logicalStateFailure
+		if total, failure = addLogicalStateEntryBytes(total, entry); failure != nil {
+			return 0, failure
+		}
+	}
+	return total, nil
+}
+
+// addLogicalStateEntryBytes enforces the proven valid-total bound of CSM 2.5.
+func addLogicalStateEntryBytes(total uint64, entry UtxoEntry) (uint64, *logicalStateFailure) {
+	n := logicalStateEntryLength(entry)
+	if total >= logicalStateValidTotalLimit || n >= logicalStateValidTotalLimit-total {
+		return 0, localLogicalStateFailure("derived logical state counters exceed bounds")
+	}
+	return total + n, nil
 }
 
 func logicalOutpointLess(a, b Outpoint) bool {
