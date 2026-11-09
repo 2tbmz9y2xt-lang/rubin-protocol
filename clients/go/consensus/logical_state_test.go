@@ -461,7 +461,9 @@ func TestLogicalStateCapThenGrowthScalar(t *testing.T) {
 	}
 }
 
-// logicalGrowthTouched creates exactly delta logical bytes of absent-parent puts.
+// logicalGrowthTouched creates exactly delta logical bytes of absent-parent puts,
+// or stops the test when a nonzero final remainder is outside 311..65593, the entry
+// lengths of data lengths 253..65535 whose CompactSize prefix is 3 bytes.
 func logicalGrowthTouched(t *testing.T, delta uint64) ([]logicalTouchedState, map[Outpoint]logicalStateRowRead) {
 	t.Helper()
 	var touched []logicalTouchedState
@@ -481,7 +483,7 @@ func logicalGrowthTouched(t *testing.T, delta uint64) ([]logicalTouchedState, ma
 	if delta == 0 {
 		return touched, rows
 	}
-	if delta < 311 || delta > 65596 {
+	if delta < 311 || delta > 65593 {
 		t.Fatalf("delta remainder %d not representable by this helper", delta)
 	}
 	add(int(delta) - 58)
