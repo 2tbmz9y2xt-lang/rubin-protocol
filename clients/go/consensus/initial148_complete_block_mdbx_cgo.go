@@ -379,19 +379,31 @@ func initial148SelectedReadV1(selected, first error) bool {
 	return errors.Is(selected, first) || errors.As(selected, &failure) && any(failure.cause) == any(first)
 }
 
+// candidateV1 owns the transition's spent source from connect until the root
+// condition succeeds; every exit before that disposes of it here.
 func (f *initial148CompleteBlockFrameV1) candidateV1(view logicalStateView, derive func() initial148RootReadOutcomeV1, headerRoot [32]byte, generated Uint128, result *initial148CompleteBlockResultV1) error {
 	transition, err := f.connectV1(view)
 	if err != nil {
 		return err
 	}
 	result.transition = transition
+	handedOff := false
+	defer func() {
+		if !handedOff && transition.spentInputs != nil {
+			transition.spentInputs.discard()
+		}
+	}()
 	if transition.alreadyGeneratedN1 != generated {
 		return localLogicalStateFailure("complete initial148 generated scalar differs")
 	}
 	if err := f.capV1(view, transition); err != nil {
 		return err
 	}
-	return f.compareRootV1(derive(), headerRoot)
+	if err := f.compareRootV1(derive(), headerRoot); err != nil {
+		return err
+	}
+	handedOff = true
+	return nil
 }
 
 func (f *initial148CompleteBlockFrameV1) connectV1(view logicalStateView) (*connectBlockInputViewResult, error) {
@@ -417,14 +429,10 @@ func (f *initial148CompleteBlockFrameV1) connectV1(view logicalStateView) (*conn
 	return connectBlockInputViewQueued(work, NewSigCheckQueue(f.workers).WithRegistry(in.Registry), in.AlreadyGenerated)
 }
 
-// capV1 constructs cap-only touched data only on the active path; the plan is
-// consumed here and never escapes.
+// capV1 derives the exact totals in both activation states and applies cap then
+// growth; the plan is consumed here and never escapes.
 func (f *initial148CompleteBlockFrameV1) capV1(view logicalStateView, transition *connectBlockInputViewResult) error {
-	registry := *f.input.CapRegistry
-	if !registry.active(f.input.ChainID, f.input.Height) {
-		return nil
-	}
-	_, err := evaluateLogicalStateCap(nil, registry, f.input.ChainID, f.input.Height, view, replayStepTouched(transition), struct{}{})
+	_, err := evaluateLogicalStateCap(nil, *f.input.CapRegistry, f.input.ChainID, f.input.Height, view, replayStepTouched(transition), struct{}{})
 	return err
 }
 

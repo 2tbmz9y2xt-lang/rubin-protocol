@@ -1,7 +1,10 @@
 package consensus
 
 import (
+	"maps"
 	"math/big"
+	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -388,5 +391,258 @@ func TestConnectBlockInMemory_SumFeesBindsAnIndividualFeeAboveU64(t *testing.T) 
 	}
 	if seq.SumFees.Cmp(par.SumFees) != 0 {
 		t.Fatalf("sequential/parallel divergence: %s vs %s", seq.SumFees.String(), par.SumFees.String())
+	}
+}
+
+// logicalGrowthCensus is the valid funded nine-signature block census. Outputs
+// are value 1; the first eight transactions create 1024 P2PK each and the ninth
+// the remainder plus every HTLC.
+type logicalGrowthCensus struct {
+	p2pk, htlc           int
+	spendCreated, badSig bool
+}
+
+var (
+	logicalGrowthEqual = logicalGrowthCensus{p2pk: 8626, htlc: 38}
+	logicalGrowthBelow = logicalGrowthCensus{p2pk: 8588, htlc: 59}
+	logicalGrowthOver  = logicalGrowthCensus{p2pk: 8664, htlc: 17}
+)
+
+func logicalGrowthParents(cov []byte) map[Outpoint]UtxoEntry {
+	parents := make(map[Outpoint]UtxoEntry, 9)
+	for i := byte(0); i < 9; i++ {
+		parents[Outpoint{Txid: hashWithPrefix(0xb0 + i)}] = UtxoEntry{Value: 2000, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreatedByCoinbase: true}
+	}
+	return parents
+}
+
+func logicalGrowthOutputs(cov []byte, p2pk, htlc int) []TxOutput {
+	outs := make([]TxOutput, 0, p2pk+htlc)
+	for range p2pk {
+		outs = append(outs, TxOutput{Value: 1, CovenantType: COV_TYPE_P2PK, CovenantData: cov})
+	}
+	data := encodeHTLCCovenantData(filledHash(0x41), LOCK_MODE_HEIGHT, 1, filledHash(0x42), filledHash(0x43))
+	for range htlc {
+		outs = append(outs, TxOutput{Value: 1, CovenantType: COV_TYPE_HTLC, CovenantData: data})
+	}
+	return outs
+}
+
+func logicalGrowthSignedTx(t *testing.T, kp *MLDSA87Keypair, chainID [32]byte, nonce uint64, outs []TxOutput, created *Outpoint) *Tx {
+	t.Helper()
+	tx := &Tx{Version: 1, TxNonce: nonce, Inputs: []TxInput{{PrevTxid: hashWithPrefix(0xb0 + byte(nonce-1))}}, Outputs: outs}
+	values := []uint64{2000}
+	if created != nil {
+		tx.Inputs, values = append(tx.Inputs, TxInput{PrevTxid: created.Txid, PrevVout: created.Vout}), append(values, 1)
+	}
+	for i, value := range values {
+		tx.Witness = append(tx.Witness[:i:i], signP2PKInputWitness(t, tx, uint32(i), value, chainID, kp))
+	}
+	return tx
+}
+
+func logicalGrowthMarshal(t *testing.T, txs []*Tx) [][]byte {
+	t.Helper()
+	raws := make([][]byte, len(txs))
+	for i, tx := range txs {
+		raw, err := MarshalTx(tx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raws[i] = raw
+	}
+	return raws
+}
+
+func logicalGrowthTxs(t *testing.T, kp *MLDSA87Keypair, chainID [32]byte, census logicalGrowthCensus) []*Tx {
+	t.Helper()
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	txs := make([]*Tx, 0, 9)
+	for nonce := uint64(1); nonce <= 8; nonce++ {
+		txs = append(txs, logicalGrowthSignedTx(t, kp, chainID, nonce, logicalGrowthOutputs(cov, 1024, 0), nil))
+	}
+	var created *Outpoint
+	if census.spendCreated {
+		created = &Outpoint{Txid: testTxID(t, logicalGrowthMarshal(t, txs[7:])[0])}
+	}
+	last := logicalGrowthSignedTx(t, kp, chainID, 9, logicalGrowthOutputs(cov, census.p2pk-8192, census.htlc), created)
+	if census.badSig {
+		last.Witness[0].Signature[0] ^= 1
+	}
+	return append(txs, last)
+}
+
+type logicalGrowthBlock struct {
+	raw          []byte
+	prev, target [32]byte
+}
+
+func logicalGrowthBlock116(t *testing.T, raws [][]byte, coinbaseValue uint64) logicalGrowthBlock {
+	t.Helper()
+	prev, target := hashWithPrefix(0xd2), filledHash(0xff)
+	encoded := append([][]byte{coinbaseWithWitnessCommitmentAndP2PKValueAtHeight(t, 200, coinbaseValue, raws...)}, raws...)
+	txids := make([][32]byte, len(encoded))
+	for i, tx := range encoded {
+		txids[i] = testTxID(t, tx)
+	}
+	root, err := MerkleRootTxids(txids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return logicalGrowthBlock{raw: buildBlockBytes(t, prev, root, target, 1, encoded), prev: prev, target: target}
+}
+
+type logicalGrowthDispatch struct {
+	name string
+	run  func(logicalGrowthBlock, *InMemoryChainState) (*ConnectBlockBasicSummary, error)
+}
+
+func logicalGrowthDispatches() []logicalGrowthDispatch {
+	ts := slices.Repeat([]uint64{0}, 11)
+	queued := func(workers int) func(logicalGrowthBlock, *InMemoryChainState) (*ConnectBlockBasicSummary, error) {
+		return func(b logicalGrowthBlock, s *InMemoryChainState) (*ConnectBlockBasicSummary, error) {
+			return ConnectBlockParallelSigVerify(b.raw, &b.prev, &b.target, 200, ts, s, [32]byte{}, workers)
+		}
+	}
+	return []logicalGrowthDispatch{
+		{"sequential", func(b logicalGrowthBlock, s *InMemoryChainState) (*ConnectBlockBasicSummary, error) {
+			return ConnectBlockBasicInMemoryAtHeight(b.raw, &b.prev, &b.target, 200, ts, s, [32]byte{})
+		}},
+		{"queued1", queued(1)},
+		{"queued4", queued(4)},
+	}
+}
+
+// logicalGrowthCensusBytes sums CSM entry lengths with the written formula,
+// independently of the production helper.
+func logicalGrowthCensusBytes(rows map[Outpoint]UtxoEntry) uint64 {
+	var total uint64
+	for _, e := range rows {
+		n := uint64(len(e.CovenantData))
+		switch {
+		case n < 253:
+			total += 45 + 1 + n + 10
+		case n < 1<<16:
+			total += 45 + 3 + n + 10
+		default:
+			total += 45 + 5 + n + 10
+		}
+	}
+	return total
+}
+
+func logicalGrowthState(cov []byte) *InMemoryChainState {
+	return &InMemoryChainState{Utxos: logicalGrowthParents(cov), AlreadyGenerated: new(big.Int)}
+}
+
+func assertLogicalGrowthRefused(t *testing.T, name string, s *ConnectBlockBasicSummary, err error, state *InMemoryChainState, before map[Outpoint]UtxoEntry, code ErrorCode) {
+	t.Helper()
+	txErr, ok := any(err).(*TxError)
+	if !ok || txErr.Code != code || s != nil {
+		t.Fatalf("%s: summary=%v err=%T %v, want %s", name, s, err, err, code)
+	}
+	if !reflect.DeepEqual(state.Utxos, before) || state.AlreadyGenerated.Sign() != 0 {
+		t.Fatalf("%s: refused connect mutated state", name)
+	}
+}
+
+func TestConnectBlockLogicalStateGrowthBoundary(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	build := func(c logicalGrowthCensus, coinbase uint64) logicalGrowthBlock {
+		return logicalGrowthBlock116(t, logicalGrowthMarshal(t, logicalGrowthTxs(t, kp, [32]byte{}, c)), coinbase)
+	}
+	equal, below, over := build(logicalGrowthEqual, 1), build(logicalGrowthBelow, 1), build(logicalGrowthOver, 1)
+	if len(equal.raw) >= 1<<20 || len(over.raw) >= 1<<20 {
+		t.Fatalf("fixture wire sizes %d/%d", len(equal.raw), len(over.raw))
+	}
+	var first map[Outpoint]UtxoEntry
+	for _, d := range logicalGrowthDispatches() {
+		for _, tc := range []struct {
+			name  string
+			block logicalGrowthBlock
+			rows  int
+			total uint64
+		}{{"equal", equal, 8626 + 38 + 1, 773921}, {"below", below, 8588 + 59 + 1, 773920}} {
+			state := logicalGrowthState(cov)
+			if census := logicalGrowthCensusBytes(state.Utxos); census != 801 {
+				t.Fatalf("parent census %d", census)
+			}
+			summary, err := d.run(tc.block, state)
+			if err != nil || summary == nil || len(state.Utxos) != tc.rows || logicalGrowthCensusBytes(state.Utxos) != tc.total {
+				t.Fatalf("%s/%s: %v rows=%d total=%d", d.name, tc.name, err, len(state.Utxos), logicalGrowthCensusBytes(state.Utxos))
+			}
+			if tc.name != "equal" {
+				continue
+			}
+			if first == nil {
+				first = maps.Clone(state.Utxos)
+			} else if !reflect.DeepEqual(first, state.Utxos) {
+				t.Fatalf("%s accepted state differs from sequential", d.name)
+			}
+		}
+		state := logicalGrowthState(cov)
+		before := logicalGrowthParents(cov)
+		summary, err := d.run(over, state)
+		assertLogicalGrowthRefused(t, d.name+"/over", summary, err, state, before, BLOCK_ERR_STATE_GROWTH_EXCEEDED)
+		if err.Error() != testLogicalGrowthMsg {
+			t.Fatalf("%s growth text: %v", d.name, err)
+		}
+		// The next corrected operation is legal and publishes only its own state.
+		if summary, err = d.run(equal, state); err != nil || summary == nil || !reflect.DeepEqual(first, state.Utxos) {
+			t.Fatalf("%s next call: %v", d.name, err)
+		}
+	}
+}
+
+func TestConnectBlockLogicalStatePrecedenceAndAccounting(t *testing.T) {
+	kp := mustMLDSA87Keypair(t)
+	cov := p2pkCovenantDataForPubkey(kp.PubkeyBytes())
+	build := func(c logicalGrowthCensus, coinbase uint64) logicalGrowthBlock {
+		return logicalGrowthBlock116(t, logicalGrowthMarshal(t, logicalGrowthTxs(t, kp, [32]byte{}, c)), coinbase)
+	}
+	badSig := logicalGrowthOver
+	badSig.badSig = true
+	sigBlock := build(badSig, 1)
+	subsidyBlock := build(logicalGrowthOver, BlockSubsidyBig(200, new(big.Int))+9319+1)
+	created := logicalGrowthOver
+	created.spendCreated = true
+	createdBlock := build(created, 1)
+	over := build(logicalGrowthOver, 1)
+	for _, d := range logicalGrowthDispatches() {
+		before := logicalGrowthParents(cov)
+		state := logicalGrowthState(cov)
+		summary, err := d.run(sigBlock, state)
+		assertLogicalGrowthRefused(t, d.name+"/sig", summary, err, state, before, TX_ERR_SIG_INVALID)
+		state = logicalGrowthState(cov)
+		summary, err = d.run(subsidyBlock, state)
+		assertLogicalGrowthRefused(t, d.name+"/subsidy", summary, err, state, before, BLOCK_ERR_SUBSIDY_EXCEEDED)
+
+		// An output created and spent in the block contributes zero, so the
+		// over census minus that one 89-byte row is accepted.
+		state = logicalGrowthState(cov)
+		if summary, err = d.run(createdBlock, state); err != nil || summary == nil || logicalGrowthCensusBytes(state.Utxos) != 773922-89 {
+			t.Fatalf("%s created-and-spent: %v total=%d", d.name, err, logicalGrowthCensusBytes(state.Utxos))
+		}
+
+		// An untouched parent row counts on both sides and stays byte-exact.
+		state = logicalGrowthState(cov)
+		kept := Outpoint{Txid: hashWithPrefix(0xc9), Vout: 4}
+		keptEntry := UtxoEntry{Value: 5, CovenantType: COV_TYPE_P2PK, CovenantData: cov, CreationHeight: 3}
+		state.Utxos[kept] = keptEntry
+		wantBefore := maps.Clone(state.Utxos)
+		summary, err = d.run(over, state)
+		assertLogicalGrowthRefused(t, d.name+"/untouched", summary, err, state, wantBefore, BLOCK_ERR_STATE_GROWTH_EXCEEDED)
+
+		// A malformed untouched parent row is the store-integrity no-result,
+		// not a growth refusal, and nothing is published.
+		state = logicalGrowthState(cov)
+		state.Utxos[kept] = UtxoEntry{Value: 5, CovenantType: COV_TYPE_P2PK, CovenantData: make([]byte, 65537)}
+		wantBefore = maps.Clone(state.Utxos)
+		summary, err = d.run(over, state)
+		failure, ok := any(err).(*logicalStateFailure)
+		if !ok || failure.kind != logicalStateFailureStoreIntegrity || failure.Error() != "invalid present logical state row" || summary != nil || !reflect.DeepEqual(wantBefore, state.Utxos) {
+			t.Fatalf("%s malformed parent row: %T %v", d.name, err, err)
+		}
 	}
 }
