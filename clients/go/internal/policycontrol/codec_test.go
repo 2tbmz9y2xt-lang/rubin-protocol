@@ -261,7 +261,6 @@ func TestEncodeRefusesOverCeilingField(t *testing.T) {
 	}
 }
 
-// cross refuses an unencodable state before any file-system effect.
 func TestCrossRefusesUnencodableState(t *testing.T) {
 	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	before := fileBytes(t, dir)

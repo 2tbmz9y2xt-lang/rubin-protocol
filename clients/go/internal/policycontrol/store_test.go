@@ -236,8 +236,7 @@ func TestLockAndPathResults(t *testing.T) {
 	}
 	fifoDir := storeDir(t)
 	must(t, syscall.Mkfifo(filepath.Join(fifoDir, controlFile), 0o600))
-	// A FIFO P refuses within a bounded deadline (a liveness bound only), first
-	// without a writer and then with a live writer that writes nothing.
+	// A FIFO P refuses within a bounded deadline (a liveness bound only), first without a writer and then with a live writer that writes nothing.
 	for _, live := range []bool{false, true} {
 		if live {
 			writer, err := os.OpenFile(filepath.Join(fifoDir, controlFile), os.O_RDWR, 0)

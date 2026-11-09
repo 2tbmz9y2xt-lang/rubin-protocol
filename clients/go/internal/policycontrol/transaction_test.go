@@ -204,8 +204,7 @@ func TestPureReadsEmptyCommitAndAbort(t *testing.T) {
 	if _, err := s.Membership(); err != nil {
 		t.Fatal(err)
 	}
-	// Empty and identical-payload commits declare a valid owner and operation,
-	// so OLD comes from the empty-change-set path, not from an unrelated refusal.
+	// Empty and identical-payload commits declare a valid owner and operation, so OLD comes from the empty-change-set path, not from an unrelated refusal.
 	for _, identical := range []bool{false, true} {
 		tx := mustBegin(t, s)
 		tx.Ownerless()
@@ -542,5 +541,18 @@ func TestGuardQualification(t *testing.T) {
 	tx.Require(Qualified{})
 	if r, err := tx.Commit(); r.Truth != OLD || !errors.Is(err, ErrRefused) {
 		t.Fatalf("zero guard: %v %v", r.Truth, err)
+	}
+}
+
+func TestUnreadableReadbackStaysUnknown(t *testing.T) {
+	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	s.fault = func(st stage) error {
+		return map[bool]error{true: errors.New("EIO")}[st == stageAck || st == stageRead]
+	}
+	_, _ = controlTx(t, s, "a").Commit()
+	_, _ = s.Recover()
+	s.fault = nil
+	if r, err := s.Recover(); r.Truth != UNKNOWN || !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("second Recover: %v %v", r, err)
 	}
 }

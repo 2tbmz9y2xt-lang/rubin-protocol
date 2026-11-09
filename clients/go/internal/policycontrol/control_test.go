@@ -350,8 +350,7 @@ func TestLatchRequestLifetime(t *testing.T) {
 	}
 	wantLatch(t, s, LatchStatus{Durable: true})
 
-	// Latch UNKNOWN with readback false: an intervening request is retained
-	// for fresh qualification; without one, none remains.
+	// Latch UNKNOWN with readback false: an intervening request is retained for fresh qualification; without one, none remains.
 	for _, intervening := range []bool{true, false} {
 		dir, s := seedStore(t, ownerlessState(id, 40))
 		s.RequestLatch()
