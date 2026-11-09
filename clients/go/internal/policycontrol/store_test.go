@@ -295,3 +295,18 @@ func TestLockAndPathResults(t *testing.T) {
 		t.Fatalf("symlinked P: %v", err)
 	}
 }
+
+// A1: Create reads the new image back; a readback that differs refuses.
+func TestCreateReadbackRefusesTamperedImage(t *testing.T) {
+	dir, id := storeDir(t), testIdentity(1)
+	h := productionHooks
+	h.fault = func(st stage) error {
+		if st == stageRead {
+			return os.WriteFile(filepath.Join(dir, controlFile), append(fileBytes(t, dir), 0), 0o600)
+		}
+		return nil
+	}
+	if s, err := start(dir, id, &NewInstallationProof{Identity: id}, h); s != nil || !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("tampered readback: %v", err)
+	}
+}

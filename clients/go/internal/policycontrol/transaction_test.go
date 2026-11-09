@@ -202,11 +202,21 @@ func TestPureReadsEmptyCommitAndAbort(t *testing.T) {
 	if _, err := s.Membership(); err != nil {
 		t.Fatal(err)
 	}
-	mustCommit(t, mustBegin(t, s), OLD, 41)
-	tx := mustBegin(t, s)
-	put(t, tx, KindAudit, "a", "v")
-	mustCommit(t, tx, OLD, 41)
-	tx = controlTx(t, s, "b")
+	// Empty and identical-payload commits declare a valid owner and operation,
+	// so OLD comes from the empty-change-set path, not from an unrelated refusal.
+	for _, identical := range []bool{false, true} {
+		tx := mustBegin(t, s)
+		tx.Ownerless()
+		tx.Operation(ClassControl, 0)
+		if identical {
+			put(t, tx, KindAudit, "a", "v")
+		}
+		r, err := tx.Commit()
+		if wantResult(t, r, OLD, 41); err != nil || !bytes.Equal(fileBytes(t, dir), before) {
+			t.Fatalf("empty commit (identical %t): %v", identical, err)
+		}
+	}
+	tx := controlTx(t, s, "b")
 	r, err := tx.Abort()
 	if wantResult(t, r, OLD, 41); err != nil {
 		t.Fatal(err)
