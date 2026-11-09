@@ -217,3 +217,22 @@ func TestWriterExclusionAcrossProcessesAndGoroutines(t *testing.T) {
 		t.Fatalf("child: %v", err)
 	}
 }
+
+// H1: the crossing syncs the scratch before the rename and the directory after
+// it, and the old P stays in place until the rename.
+func TestCrossingStageOrder(t *testing.T) {
+	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	old := fileBytes(t, dir)
+	var seen []stage
+	s.fault = func(st stage) error {
+		if seen = append(seen, st); st <= stageRename && !bytes.Equal(fileBytes(t, dir), old) {
+			t.Errorf("stage %d: old P changed before the rename", st)
+		}
+		return nil
+	}
+	mustCommit(t, controlTx(t, s, "a"), NEW, 41)
+	want := []stage{stageCreate, stageWrite, stageFileSync, stageRename, stageDirSync, stageClose, stageAck}
+	if fmt.Sprint(seen) != fmt.Sprint(want) {
+		t.Fatalf("crossing stages %v, want %v", seen, want)
+	}
+}

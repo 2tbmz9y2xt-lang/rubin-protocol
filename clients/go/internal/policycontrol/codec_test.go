@@ -137,6 +137,10 @@ func TestDecodeRejectsStructuralCorpus(t *testing.T) {
 	mustIntegrity(t, "count over ceiling", rows(maxRows+1, row1, row2))
 	overKey := append([]byte{1, 0, MaxKeyBytes + 1}, make([]byte, MaxKeyBytes+1+8+2)...)
 	mustIntegrity(t, "over-ceiling key", rows(1, overKey))
+	// The coder ceiling refuses before allocation, not later validation.
+	if _, err := decode(rows(1, overKey)); err == nil || !strings.Contains(err.Error(), "ceiling") {
+		t.Fatalf("over-ceiling key not refused by the coder ceiling: %v", err)
+	}
 	overPayload := binary.BigEndian.AppendUint16([]byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MaxPayloadBytes+1)
 	mustIntegrity(t, "over-ceiling payload", rows(1, append(overPayload, make([]byte, MaxPayloadBytes+1)...)))
 	const receiptAt, receiptLen = 8 + 96 + 1 + 8, 1 + 8 + 8 + 32 + 1 + 8 + 11 + 1 + 8 + 1 + 16
@@ -232,7 +236,7 @@ func TestDecodeSingleByteMutationCorpus(t *testing.T) {
 				}
 				continue
 			}
-			if reflect.DeepEqual(st, want) || !bytes.Equal(encode(st), bad) {
+			if reflect.DeepEqual(st, want) || !bytes.Equal(encode(st), bad) || validateState(st) != nil {
 				t.Fatalf("byte %d^%#x decoded to a non-distinct or non-canonical value", i, x)
 			}
 			if i >= 8 && i < 8+96 && st.id == want.id {
