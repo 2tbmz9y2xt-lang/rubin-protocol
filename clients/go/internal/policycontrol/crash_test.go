@@ -116,7 +116,7 @@ const childEnv = "RUBIN_POLICYCONTROL_CHILD"
 func TestChildContender(t *testing.T) {
 	arg := os.Getenv(childEnv)
 	if arg == "" {
-		t.Skip("H2 child process only")
+		return
 	}
 	dir, idHex, _ := bytes.Cut([]byte(arg), []byte{'|'})
 	raw, _ := hex.DecodeString(string(idHex))
