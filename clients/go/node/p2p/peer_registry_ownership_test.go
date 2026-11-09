@@ -203,6 +203,79 @@ func TestPeerRegistryOwnershipSingleConnectionPaths(t *testing.T) {
 	requireOwner(t, h, "configured-2.example:2", refused, "the refused connection after capacity freed")
 }
 
+// P12: a replaced connection whose alias equals its logical address holds no Service.peers entry
+// but stays live: it exits exactly once while still hidden, and the owner's exit hands it the
+// address; each connection exits exactly once.
+func TestPeerRegistryOwnershipHiddenLiveConnection(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	const addr = "198.51.100.40:9000"
+	hidden, newer := registryPeer(h, addr, addr), registryPeer(h, addr, addr)
+	mustRegister(t, h, hidden, newer)
+	exits := h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(hidden)
+	h.service.unregisterPeer(hidden)
+	require(t, h.service.PeerLifecycleExits() == exits+1, "hidden exit counted %d times", h.service.PeerLifecycleExits()-exits)
+	requireOwner(t, h, addr, newer, "after the hidden connection's exit")
+	hidden = registryPeer(h, addr, addr)
+	mustRegister(t, h, hidden)
+	h.service.unregisterPeer(newer) // a stale same-address exit after the new owner registered
+	hidden.setLastError("hidden state")
+	requireOwner(t, h, addr, hidden, "after the replaced connection's exit")
+	newer = registryPeer(h, addr, addr)
+	mustRegister(t, h, newer)
+	exits = h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(newer)
+	require(t, h.service.PeerLifecycleExits() == exits+1, "owner exit counted %d times", h.service.PeerLifecycleExits()-exits)
+	requireOwner(t, h, addr, hidden, "after the owner's exit hands the address to the hidden connection")
+	h.service.unregisterPeer(hidden)
+	h.service.unregisterPeer(hidden)
+	require(t, h.service.PeerLifecycleExits() == exits+2, "hidden exit counted %d times", h.service.PeerLifecycleExits()-exits-1)
+	requireOwner(t, h, addr, nil, "after the hidden connection's exit")
+}
+
+// P13: no same-key DA release runs while a hidden live connection holds the key, even when the
+// exiting same-key connection has another logical address; the hidden connection's own exit,
+// taken while it is still hidden, releases the key's retained state.
+func TestPeerRegistryOwnershipHiddenConnectionKeepsDAQuota(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	const addr = "198.51.100.41:9000"
+	hidden, newer := registryPeer(h, addr, addr), registryPeer(h, addr, "198.51.100.44:9000")
+	sameKey := registryPeer(h, "configured.example:19120", "198.51.100.41:5")
+	mustRegister(t, h, hidden)
+	chunk := f.chunk(daRelayTestID(0xf8), 0, []byte("hidden"))
+	must(t, hidden.handleTx(chunk), "hidden connection chunk")
+	mustRegister(t, h, newer, sameKey)
+	h.service.unregisterPeer(sameKey)
+	f.requireRetained(chunk, "the hidden connection's chunk after another same-key connection's exit")
+	h.service.unregisterPeer(hidden)
+	f.requireAbsent(chunk, "the chunk after the hidden connection's exit")
+	requireOwner(t, h, addr, newer, "the owner after the hidden connection's exit")
+}
+
+// P14: a connection whose only alias key is another connection's logical address and whose
+// logical entry was replaced still exits once, with the successor and DA decisions intact.
+func TestPeerRegistryOwnershipAliasHeldByAnotherOwner(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	f := newDAIngressFixture(t, h)
+	const shared, addr = "198.51.100.42:7", "configured.example:19119"
+	owner := registryPeer(h, shared, shared)
+	hidden, newer := registryPeer(h, addr, shared), registryPeer(h, addr, "198.51.100.43:8")
+	mustRegister(t, h, owner, hidden, newer)
+	chunk := f.chunk(daRelayTestID(0xf9), 0, []byte("aliased"))
+	must(t, hidden.handleTx(chunk), "hidden connection chunk")
+	exits := h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(newer)
+	requireOwner(t, h, addr, hidden, "after the owner of the hidden connection's address exits")
+	h.service.unregisterPeer(owner)
+	requireOwner(t, h, shared, nil, "after the alias-key owner exits")
+	f.requireRetained(chunk, "the hidden connection's chunk after a same-key exit")
+	h.service.unregisterPeer(hidden)
+	require(t, h.service.PeerLifecycleExits() == exits+3, "exits=%d, want one per connection", h.service.PeerLifecycleExits()-exits)
+	requireOwner(t, h, addr, nil, "after the hidden connection's exit")
+	f.requireAbsent(chunk, "the chunk after the hidden connection's exit")
+}
+
 // registerPeerParkedOnPeersMu reports whether some goroutine is blocked acquiring an RWMutex
 // write lock directly from registerPeer, read from the full goroutine dump.
 func registerPeerParkedOnPeersMu() bool {
