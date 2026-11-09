@@ -98,13 +98,21 @@ func awaitPendingRelayWriter(t *testing.T, guard *admissionMutex) {
 }
 
 // awaitOwnerMutexWaiter observes, from goroutine stacks, a reader parked on
-// owner.mu inside PendingOutpointOwner.AdmissionContext (and, when caller is
-// set, below that frame). It proves the read really waits on the contended
-// source mutex instead of returning early; no production hook is involved.
-func awaitOwnerMutexWaiter(t *testing.T, caller string) {
+// owner.mu inside PendingOutpointOwner.AdmissionContext below a frame matching
+// caller. It proves the read really waits on the contended source mutex; no
+// production hook is involved. A reader that returns instead of waiting is
+// judged on the value it returned: it cannot carry want, which is installed
+// only after this wait.
+func awaitOwnerMutexWaiter(t *testing.T, caller string, result <-chan relayObservation, want PendingOutpointAdmissionContext, name string) {
 	t.Helper()
 	deadline, stack := time.Now().Add(relayObserverLiveness), make([]byte, 1<<20)
 	for time.Now().Before(deadline) {
+		select {
+		case got := <-result:
+			requireRelayObservation(t, got, want, true, name+" (returned without waiting on owner.mu)")
+			t.Fatalf("%s: returned without waiting on owner.mu", name)
+		default:
+		}
 		n := runtime.Stack(stack, true)
 		if n == len(stack) {
 			stack = make([]byte, 2*len(stack))
@@ -117,7 +125,7 @@ func awaitOwnerMutexWaiter(t *testing.T, caller string) {
 		}
 		runtime.Gosched()
 	}
-	t.Fatalf("no %q reader parked on owner.mu in AdmissionContext", caller)
+	t.Fatalf("%s: no %q reader parked on owner.mu in AdmissionContext", name, caller)
 }
 
 func awaitRelaySignal(t *testing.T, ch <-chan struct{}, name string) {
@@ -247,7 +255,7 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 		// reported as unavailability.
 		owner.mu.Lock()
 		done := observeRelayAsync(m)
-		awaitOwnerMutexWaiter(t, "(*Mempool).AdmissionContextForRelay(")
+		awaitOwnerMutexWaiter(t, "(*Mempool).AdmissionContextForRelay(", done, want, "contended public read")
 		owner.stableTip, owner.generation = want.StableTip, want.Generation
 		owner.mu.Unlock()
 		requireRelayObservation(t, awaitRelayObservation(t, done, "contended public read"), want, true, "contended public read")
@@ -264,7 +272,7 @@ func TestRelayAdmissionContextForRelay(t *testing.T) {
 			ctx, ok := m.relaySource.owner.AdmissionContext()
 			read <- relayObservation{ctx: ctx, ok: ok}
 		}()
-		awaitOwnerMutexWaiter(t, "")
+		awaitOwnerMutexWaiter(t, "relay_admission_context_test.go", read, PendingOutpointAdmissionContext{StableTip: want.StableTip, Generation: 8}, "late writer")
 		acquired, release, writerDone := startRelayWriter(guard)
 		awaitPendingRelayWriter(t, guard)
 		want.Generation = 8
