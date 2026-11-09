@@ -97,12 +97,17 @@ func awaitPendingRelayWriter(t *testing.T, guard *admissionMutex) {
 	}
 }
 
-// awaitOwnerMutexWaiter observes, from goroutine stacks, a reader parked on
+// awaitOwnerMutexWaiter observes, from goroutine stacks, a reader waiting on
 // owner.mu inside PendingOutpointOwner.AdmissionContext below a frame matching
-// caller. It proves the read really waits on the contended source mutex; no
-// production hook is involved. A reader that returns instead of waiting is
-// judged on the value it returned: it cannot carry want, which is installed
-// only after this wait.
+// caller. Within one goroutine's traceback block it matches only public,
+// release-stable frames: caller, "(*PendingOutpointOwner).AdmissionContext("
+// and "sync.(*Mutex).Lock(" (the substring also matches the
+// internal/sync.(*Mutex).Lock( frame of current toolchains); no runtime-internal
+// symbol and no production hook is involved. This suffices because the test
+// holds owner.mu throughout the wait, so a reader observed inside Mutex.Lock
+// must block there. A TryLock-based reader never shows that frame and returns
+// instead; it is judged on the value it returned, which cannot carry want,
+// installed only after this wait.
 func awaitOwnerMutexWaiter(t *testing.T, caller string, result <-chan relayObservation, want PendingOutpointAdmissionContext, name string) {
 	t.Helper()
 	deadline, stack := time.Now().Add(relayObserverLiveness), make([]byte, 1<<20)
@@ -119,7 +124,7 @@ func awaitOwnerMutexWaiter(t *testing.T, caller string, result <-chan relayObser
 			continue
 		}
 		for _, g := range strings.Split(string(stack[:n]), "\n\n") {
-			if strings.Contains(g, "SemacquireMutex") && strings.Contains(g, "(*PendingOutpointOwner).AdmissionContext(") && strings.Contains(g, caller) {
+			if strings.Contains(g, "sync.(*Mutex).Lock(") && strings.Contains(g, "(*PendingOutpointOwner).AdmissionContext(") && strings.Contains(g, caller) {
 				return
 			}
 		}
