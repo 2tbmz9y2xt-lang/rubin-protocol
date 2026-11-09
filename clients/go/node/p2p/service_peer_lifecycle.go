@@ -183,14 +183,16 @@ func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	return remove
 }
 
-// publishPeerStateIfOwner publishes p's state snapshot to the PeerManager only while p is the
-// logical owner of the snapshot's address, checked under peersMu in the same step: a replaced or
-// removed connection never overwrites or recreates another connection's entry.
-func (s *Service) publishPeerStateIfOwner(p *peer, state *node.PeerState) {
+// publishPeerStateIfOwner publishes p's current state to the PeerManager only while p is the
+// logical owner of its address; the owner check and the state snapshot are taken under peersMu in
+// the same step as the UpsertPeer, so a replaced or removed connection never overwrites or
+// recreates another connection's entry and a handover is not followed by an older snapshot taken
+// before it.
+func (s *Service) publishPeerStateIfOwner(p *peer) {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
-	if s.peers[state.Addr] == p {
-		_ = s.cfg.PeerManager.UpsertPeer(state)
+	if state := p.snapshotState(); s.peers[state.Addr] == p {
+		_ = s.cfg.PeerManager.UpsertPeer(&state)
 	}
 }
 

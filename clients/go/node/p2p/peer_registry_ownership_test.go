@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ func requireOwner(t *testing.T, h *testHarness, addr string, owner *peer, label 
 		return
 	}
 	want := owner.snapshotState()
-	require(t, got == owner && len(states) == 1 && states[0].LastError == want.LastError && states[0].BanScore == want.BanScore && h.service.isConnected(addr), "%s: owner=%s manager=%+v, want %s's state %q/%d", label, peerAddrOrNil(got), states, owner.daQuotaIdentity, want.LastError, want.BanScore)
+	require(t, got == owner && len(states) == 1 && reflect.DeepEqual(states[0], want) && h.service.isConnected(addr), "%s: owner=%s manager=%+v, want %s's state %q/%d", label, peerAddrOrNil(got), states, owner.daQuotaIdentity, want.LastError, want.BanScore)
 }
 
 func mustRegister(t *testing.T, h *testHarness, peers ...*peer) {
