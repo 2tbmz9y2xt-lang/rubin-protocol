@@ -576,3 +576,19 @@ func TestSelectedSideQualificationReservation(t *testing.T) {
 	fullLane("after panic")
 	w.wantImage("after reservation adapter")
 }
+
+// TestSelectedSideQualificationFixtureBinding owns the native side of B11 at qualification: a fresh pin-only refusal
+// consults exactly what an earlier steps1-12 refusal at the same position consults. The live side and unselected parent
+// give selection its tip read, the later read this comparison would see.
+func TestSelectedSideQualificationFixtureBinding(t *testing.T) {
+	const label = "binding B11 qualification native"
+	w := newSSQFixtureWorld(t, ssqSpec{tip: 5, side: &ssqSideSpec{f: 2, tip: 4, rows: 2, work: 6}})
+	parent := w.canonical[5]
+	got, err, control := w.fixture(mdbx.SelectedDamageProbeOnly, 0, nil, retainWitness(w.childAt(parent, 0, consensus.POW_LIMIT, nil)))
+	ssqWantTx(t, label+" control", got, err, consensus.BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
+	got, err, evidence := w.fixture(mdbx.SelectedDamageProbeOnly, 0, nil, retainWitness(w.child(parent, 6, nil)))
+	if evidence.OldGets != control.OldGets {
+		t.Fatalf("%s consulted: %+v vs %+v", label, evidence, control)
+	}
+	ssqWantTx(t, label, got, err, consensus.BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
+}

@@ -50,9 +50,10 @@ func (f *storedCommitmentFrontier) root() [32]byte {
 }
 
 // verifyStoredBlockCommitmentsStream is ParseBlockBytes followed by ValidateStoredBlockCommitments with the same result
-// and error order (RUBIN_L1_CANONICAL.md Sections 10.4, 10.4.1, 10.5): complete framing and trailing bytes first, then
-// coinbase, transaction root and witness commitment. It retains only the first and current transaction and two fixed
-// frontiers; the witness tree uses a zero id for the coinbase.
+// and error order for the commitment part of complete body binding (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8): complete
+// framing and trailing bytes first, then transaction root, strict singleton witness commitment and the two empty
+// position-zero ranges. It retains only the first and current transaction and two fixed frontiers; the witness tree
+// uses a zero id for the coinbase.
 func verifyStoredBlockCommitmentsStream(b []byte) error {
 	header, off, count, err := storedCommitmentFrame(b)
 	if err != nil {
@@ -109,14 +110,11 @@ func storedCommitmentTransactions(b []byte, off int, count uint64) (*Tx, [32]byt
 }
 
 func storedCommitmentChecks(first *Tx, merkleRoot, txRoot, witnessRoot [32]byte) error {
-	if !isCoinbaseTx(first) {
-		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
-	}
 	if txRoot != merkleRoot {
 		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	}
-	if countWitnessCommitmentMatches(first.Outputs, WitnessCommitmentHash(witnessRoot)) != 1 {
+	if !witnessCommitmentSingleton(first.Outputs, WitnessCommitmentHash(witnessRoot)) {
 		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
 	}
-	return nil
+	return validateBindingPositionZeroPins(first)
 }

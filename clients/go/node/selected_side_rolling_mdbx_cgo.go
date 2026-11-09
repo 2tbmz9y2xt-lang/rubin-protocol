@@ -110,7 +110,7 @@ type selectedRefillFirst struct {
 // qualifySelectedRefillMDBX runs, in one Reader: authority/control/raw, candidate header, the cleaned one-slot domain,
 // first-row evidence (link, keyed header, link parent, body by keyed owner height), the candidate hash against the
 // first header's parent, absence of SideLink(g,first-1), restored link work, parent evidence, the existing context
-// (target, MTP), steps 1-12 and the work recurrence/domain. Every error returns the zero qualification.
+// (target, MTP), steps 1-12, complete body binding and the work recurrence/domain. Every error returns the zero qualification.
 func qualifySelectedRefillMDBX(reader *mdbx.Reader, raw []byte) (selectedSideRefillQualification, error) {
 	authority, err := selectedQualAuthority(reader, len(raw))
 	if err != nil {
@@ -270,7 +270,7 @@ func (q *selectedSideQualifier) refillParent(hash [32]byte, height uint64) (sele
 	return parent, nil
 }
 
-// refillChild runs the existing context (expected target and newest-first MTP window), steps 1-12, then the work
+// refillChild runs the existing context (expected target and newest-first MTP window), steps 1-12, the binding pins, then the work
 // recurrence against an Owned parent and the height/work domain; no selection against the incumbent tip.
 func (q *selectedSideQualifier) refillChild(raw []byte, header consensus.BlockHeader, parent selectedQualParent, work [40]byte, linking uint64) (selectedSideRefillQualification, error) {
 	height, target, timestamps, err := q.childContext(parent)
@@ -282,6 +282,9 @@ func (q *selectedSideQualifier) refillChild(raw []byte, header consensus.BlockHe
 		return selectedSideRefillQualification{}, &selectedSideQualificationError{Result: selectedQualBranch, Cause: err}
 	}
 	if err != nil {
+		return selectedSideRefillQualification{}, err
+	}
+	if err := consensus.ValidateBlockBodyCommitments(raw); err != nil {
 		return selectedSideRefillQualification{}, err
 	}
 	if err := selectedRefillRecurrence(parent, header.Target, work); err != nil {

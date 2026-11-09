@@ -18,7 +18,7 @@ var sideWorldConfig = mdbx.ConfigV1{Lower: 1 << 20, Now: 2 << 20, Upper: 256 << 
 
 // sideWorldSpec describes one persisted image: canonical generation 1 heights 0..canonicalTip, selected generation 2
 // (F, tip, rows); override[j]=k makes SideLink j name the canonical block at k; custom[j] builds side block j of a
-// named body kind; canonicalBody[k] seeds canonical body k ("valid" or "trailing").
+// named body kind; canonicalBody[k] seeds canonical body k ("" leaves it absent, else "valid", "trailing", "witness pin" or "anchor pair").
 type sideWorldSpec struct {
 	f, tip        uint64
 	rows          uint16
@@ -103,13 +103,23 @@ func sideKindBlock(t *testing.T, kind string, parent [32]byte, nonce uint64) []b
 		return append(append(slices.Clone(block[:BLOCK_HEADER_BYTES]), 0), block[BLOCK_HEADER_BYTES+1:]...)
 	case "root":
 		return buildBlockBytes(t, parent, [32]byte{0x01}, POW_LIMIT, nonce, all)
-	case "coinbase":
+	case "no anchor":
 		return buildBlockBytes(t, parent, storedCommitmentsRoot(t, txs), POW_LIMIT, nonce, txs)
+	case "witness pin":
+		dirty := append([][]byte{bindingWithWitness(all[0])}, txs...)
+		return buildBlockBytes(t, parent, storedCommitmentsRoot(t, dirty), POW_LIMIT, nonce, dirty)
+	case "anchor pair":
+		commit := initial148BlockWitnessCommit(t, txs...)
+		pair := append([][]byte{coinbaseTxWithOutputs(0, []testOutput{bindingAnchor(commit[:], 0), bindingAnchor(make([]byte, 32), 0)})}, txs...)
+		return buildBlockBytes(t, parent, storedCommitmentsRoot(t, pair), POW_LIMIT, nonce, pair)
 	case "witness":
 		bare := append([][]byte{coinbaseTxWithOutputs(0, []testOutput{{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: make([]byte, 32)}})}, txs...)
 		return buildBlockBytes(t, parent, storedCommitmentsRoot(t, bare), POW_LIMIT, nonce, bare)
+	case "valid":
+		return block
 	}
-	return block
+	t.Fatalf("unknown side body kind %q", kind)
+	return nil
 }
 
 func sideWorldWork(n uint64) (work [40]byte) {
@@ -154,21 +164,27 @@ func (w *sideWorld) canonicalRows() []mdbx.Mutation {
 	var parent [32]byte
 	var rows []mdbx.Mutation
 	for k := uint64(0); k <= w.spec.canonicalTip; k++ {
-		header, body, hash := w.block(sideWorldBlock(parent, k))
+		raw := sideWorldBlock(parent, k)
+		if kind := w.spec.canonicalBody[k]; kind == "witness pin" || kind == "anchor pair" {
+			raw = sideKindBlock(w.t, kind, parent, k)
+		}
+		header, body, hash := w.block(raw)
 		if k == 0 && w.spec.published {
 			w.publishedGenesis(hash)
 			parent = hash
 			continue
 		}
 		switch w.spec.canonicalBody[k] {
-		case "valid":
+		case "valid", "witness pin", "anchor pair":
 			rows = append(rows, body)
 		case "trailing":
 			body.Literal = append(bytes.Clone(body.Literal), 0)
 			w.bodies[hash] = body.Literal
 			rows = append(rows, body)
-		default:
+		case "":
 			w.bodies[hash] = nil
+		default:
+			w.t.Fatalf("unknown canonical body kind %q", w.spec.canonicalBody[k])
 		}
 		w.entries[k], w.owners[hash] = mdbx.ChainValue(hash, parent, sideWorldWork(k+1)), mdbx.CanonicalOwnerValue(k)
 		rows = append(rows, header,
@@ -755,7 +771,7 @@ func TestSelectedSideDamageFullClear(t *testing.T) {
 			})
 		}
 	}
-	for _, kind := range []string{"trailing", "short final", "zero count", "root", "coinbase", "witness"} {
+	for _, kind := range []string{"trailing", "short final", "zero count", "root", "no anchor", "witness", "witness pin", "anchor pair"} {
 		t.Run("body "+kind, func(t *testing.T) {
 			w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, custom: map[uint64]string{3: kind}})
 			sideWantCleared(t, w, w.run(3), kind)
@@ -782,7 +798,7 @@ func TestSelectedSideDamageSameHeightOwner(t *testing.T) {
 	for _, row := range []struct {
 		b    uint64
 		body string
-	}{{1, ""}, {1, "trailing"}, {2, ""}} {
+	}{{1, ""}, {1, "trailing"}, {1, "witness pin"}, {1, "anchor pair"}, {2, ""}} {
 		label := fmt.Sprintf("required body B=%d %q", row.b, row.body)
 		w = newSideWorld(t, spec(row.b, row.body))
 		sideWantDefect(t, w.run(2), label)

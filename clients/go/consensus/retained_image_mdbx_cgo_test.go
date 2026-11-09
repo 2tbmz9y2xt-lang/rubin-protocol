@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -75,14 +76,44 @@ func riEmptyRole(r *mdbx.Reader, g uint64) error {
 
 func riGenesis(t *testing.T) (*btWorld, []byte, [32]byte) {
 	t.Helper()
-	w := riNew(t)
 	raw := initial148BlockGenesis(t)
+	w, hash := riGenesisBody(t, raw)
+	logicalMDBXAssert(t, len(raw) == 298 && ValidateInitial148BlockBodyCommitments(raw) == nil, "healthy actual genesis")
+	return w, raw, hash
+}
+
+// riBindingDefect is one stored body that fails complete binding: stored is the row value under the identity of raw.
+type riBindingDefect struct {
+	name, suffix string
+	raw, stored  []byte
+	code         ErrorCode
+	msg          string
+}
+
+// riBindingDefects pairs the pin row with an equal/distinct anchor pair: one anchor equals the commitment, so only the
+// strict singleton of Section 10.4.1 refuses it, and the second anchor is committed by a header of its own.
+func riBindingDefects(t *testing.T) []riBindingDefect {
+	t.Helper()
+	raw := initial148BlockGenesis(t)
+	commit := initial148BlockWitnessCommit(t)
+	pairTx := coinbaseTxWithOutputs(0, []testOutput{bindingAnchor(commit[:], 0), bindingAnchor(make([]byte, 32), 0)})
+	pair := initial148BlockFrame(t, [][]byte{pairTx}, func(h *initial148BlockHead) { h.parent = [32]byte{} })
+	return []riBindingDefect{
+		{"witness pin", "", raw, bindingWithWitness(raw), BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+		{"anchor pair", " anchor pair", pair, pair, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+	}
+}
+
+// riGenesisBody commits raw as the height-0 required body and returns its 148-byte identity.
+func riGenesisBody(t *testing.T, raw []byte) (*btWorld, [32]byte) {
+	t.Helper()
+	w := riNew(t)
 	r := btRequest(raw, 0)
 	r.Kind, r.Endpoint.CumulativeChainwork = 4, [40]byte{39: 1}
 	result, _, _ := w.run(t, []blockTreeRequestV1{r}, nil)
 	result.want(t, 2, 3, -1)
-	logicalMDBXAssert(t, result.err == nil && len(raw) == 298 && ValidateInitial148BlockBodyCommitments(raw) == nil, "healthy actual genesis: %v", result.err)
-	return w, raw, r.Block
+	logicalMDBXAssert(t, result.err == nil, "genesis body commit: %v", result.err)
+	return w, r.Block
 }
 
 // The outer grant funds copied scalar controls; the read grant spans every context use and clear.
@@ -564,5 +595,87 @@ func riFrames(t *testing.T) {
 			wantCalls = 0
 		}
 		logicalMDBXAssert(t, (err != nil) == (r < 805306368) && ran == wantCalls, "reservation first refusal r%d: %d/%v", r, ran, err)
+	}
+}
+
+// riSelectedBody stores a keyed retained selected body under hash and returns the retained walk result.
+func riSelectedBody(t *testing.T, header, body []byte, hash [32]byte) (retainedPreImageV1, error) {
+	t.Helper()
+	w := riSelectedWorld(t, header, body, hash)
+	return riRead(t, w, nil)
+}
+
+func riSelectedWorld(t *testing.T, header, body []byte, hash [32]byte) *btWorld {
+	t.Helper()
+	w := riNew(t)
+	key, _ := mdbx.HeightKey(3, 5)
+	w.pair(t, btMutation(3, hash[:], header), btMutation(4, hash[:], body), btMutation(6, key, mdbx.ChainValue(hash, [32]byte{}, [40]byte{39: 1})))
+	riAuthority(t, w, func(a *mdbx.TreeAuthorityV1) {
+		a.Authority.SelectedSide = &mdbx.SelectedSideV1{GenerationID: 3, F: 4, TipHeight: 5, TipHash: hash, RowCount: 1, LogicalBytes: uint64(len(body)), CumulativeChainwork: [40]byte{39: 1}}
+	})
+	return w
+}
+
+// TestRetainedImageMDBXBindingCharge owns B12's charge position: addV1 runs only after identity and binding pass.
+func TestRetainedImageMDBXBindingCharge(t *testing.T) {
+	const label = "binding B12 retained charge"
+	raw := initial148BlockGenesis(t)
+	item := retainedArtifactV1{hash: sha3.Sum256(raw[:148]), height: 5, generation: 0, bits: 3, selected: true}
+	pair := riBindingDefects(t)[1].raw
+	pairItem := item
+	pairItem.hash = sha3.Sum256(pair[:148])
+	tampered := bytes.Clone(raw)
+	tampered[108] ^= 1
+	for _, c := range []struct {
+		name  string
+		item  retainedArtifactV1
+		start uint64
+		body  []byte
+		add   uint64
+		cause string
+	}{
+		{"identity refusal", item, 7, tampered, 0, "retained body identity differs"},
+		{"binding refusal", item, 7, bindingWithWitness(raw), 0, bindingPinMsg},
+		{"anchor pair refusal", pairItem, 7, pair, 0, bindingWitnessMsg},
+		{"healthy", item, 7, raw, uint64(len(raw)), ""},
+		{"binding at overflow boundary", item, math.MaxUint64 - 1, bindingWithWitness(raw), 0, bindingPinMsg},
+		{"anchor pair at overflow boundary", pairItem, math.MaxUint64 - 1, pair, 0, bindingWitnessMsg},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := retainedWalkV1{pre: retainedPreImageV1{exactRet: c.start}}
+			err := w.bodyHealthV1(c.item, c.body)
+			logicalMDBXAssert(t, w.pre.exactRet == c.start+c.add, "%s %s: exactRet %d", label, c.name, w.pre.exactRet)
+			if c.cause == "" {
+				logicalMDBXAssert(t, err == nil, "%s %s: %v", label, c.name, err)
+				return
+			}
+			var f *RetainedProofFailureV1
+			logicalMDBXAssert(t, errors.As(err, &f) && f.Resource == "selected_damage" && strings.HasSuffix(f.Cause.Error(), c.cause), "%s %s: %T %v", label, c.name, err, err)
+		})
+	}
+	w := retainedWalkV1{pre: retainedPreImageV1{exactRet: math.MaxUint64 - 1}}
+	var f *RetainedProofFailureV1
+	err := w.bodyHealthV1(item, raw)
+	logicalMDBXAssert(t, errors.As(err, &f) && f.Resource == "storage_capacity" && w.pre.exactRet == math.MaxUint64-1, "%s healthy overflow control: %v", label, err)
+}
+
+// TestRetainedImageMDBXBinding owns the 148-byte stored owner: identity against the full key, then the corrected
+// subpredicate, with the original cause carried by the selected damage tuple and no partial quantity.
+func TestRetainedImageMDBXBinding(t *testing.T) {
+	raw := initial148BlockGenesis(t)
+	hash := sha3.Sum256(raw[:148])
+	if got, err := riSelectedBody(t, raw[:148], raw, hash); err != nil || got.exactRet != 510 {
+		t.Fatalf("binding B01 healthy selected body: %+v/%v want510", got, err)
+	}
+	for _, d := range riBindingDefects(t) {
+		t.Run(d.name, func(t *testing.T) {
+			label := "binding B12 original source" + d.suffix
+			defectHash := sha3.Sum256(d.raw[:148])
+			got, err := riSelectedBody(t, d.raw[:148], d.stored, defectHash)
+			logicalMDBXAssert(t, got == (retainedPreImageV1{}), "%s: partial quantity %+v", label, got)
+			failure := riResource(t, err, "selected_damage")
+			e, ok := any(failure.Damage.Cause).(*TxError)
+			logicalMDBXAssert(t, ok && e.Code == d.code && e.Msg == d.msg && failure.Damage.Artifact == "body" && failure.Damage.Hash == defectHash && any(failure.Cause) == any(failure.Damage.Cause), "%s: %+v", label, failure.Damage)
+		})
 	}
 }

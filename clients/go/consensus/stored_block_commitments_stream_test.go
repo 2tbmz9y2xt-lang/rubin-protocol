@@ -92,7 +92,7 @@ func TestStoredBlockCommitmentsStreamDifferential(t *testing.T) {
 	duplicated := coinbaseTxWithOutputs(0, []testOutput{{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: anchor}, {value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: anchor}})
 	vectors = append(vectors,
 		vector{"header only", genesisMDBXHex(genesisMDBXPublishedHex)[:BLOCK_HEADER_BYTES], false},
-		vector{"non-coinbase first", storedCommitmentsAssemble(t, txs[0], txs[1:]), false},
+		vector{"first transaction without anchor", storedCommitmentsAssemble(t, txs[0], txs[1:]), false},
 		vector{"witness commitment absent", storedCommitmentsAssemble(t, coinbaseTxWithOutputs(0, []testOutput{{value: 0, covenantType: COV_TYPE_ANCHOR, covenantData: make([]byte, 32)}}), txs), false},
 		vector{"witness commitment duplicated", storedCommitmentsAssemble(t, duplicated, txs), false})
 	for _, v := range vectors {
@@ -100,6 +100,38 @@ func TestStoredBlockCommitmentsStreamDifferential(t *testing.T) {
 		if !storedCommitmentsSame(got, want) || (got == nil) != v.valid {
 			t.Fatalf("%s: stream=%v oracle=%v valid=%v", v.name, got, want, v.valid)
 		}
+	}
+}
+
+// TestStoredBlockCommitmentsStreamBindingVectors owns the correspondence of the streaming frontiers with the parsed
+// entry at a multi-transaction tree: each written code holds on both, whatever the anchor values or core fields.
+func TestStoredBlockCommitmentsStreamBindingVectors(t *testing.T) {
+	txs := storedCommitmentsTxs(3, 50)
+	commit := initial148BlockWitnessCommit(t, txs...)
+	eq, ne := bindingAnchor(commit[:], 0), bindingAnchor(make([]byte, 32), 9)
+	clean := coinbaseTxWithOutputs(0, []testOutput{eq})
+	cb := func(outs ...testOutput) []byte { return coinbaseTxWithOutputs(0, outs) }
+	type vector struct {
+		name  string
+		first []byte
+		code  ErrorCode
+		msg   string
+	}
+	vectors := []vector{
+		{"valid", clean, "", ""},
+		{"sole nonzero value", cb(bindingAnchor(commit[:], 9)), "", ""},
+		{"equal/distinct", cb(eq, ne), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"distinct/equal", cb(ne, eq), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"equal/equal second nonzero", cb(eq, bindingAnchor(commit[:], 9)), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"witness pin", bindingWithWitness(clean), BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+	}
+	for _, core := range bindingCoreEdits() {
+		vectors = append(vectors, vector{"bound core " + core.name, core.edit(clean), "", ""})
+	}
+	for _, c := range vectors {
+		block := storedCommitmentsAssemble(t, c.first, txs)
+		bindingCheck(t, "binding stream vector "+c.name+" [stream]", verifyStoredBlockCommitmentsStream(block), c.code, c.msg)
+		bindingCheck(t, "binding stream vector "+c.name+" [parsed]", storedCommitmentsOracle(block), c.code, c.msg)
 	}
 }
 

@@ -116,7 +116,7 @@ type selectedSideQualifier struct {
 }
 
 // qualifySelectedSideMDBX runs authority/control, raw bound, candidate header, eligible parent evidence, context,
-// steps 1-12, B102 selection and the selected domain in that order. Every error returns the zero qualification; the
+// steps 1-12, complete body binding, B102 selection and the selected domain in that order. Every error returns the zero qualification; the
 // evidence workspace is allocated only after the authority prefix passes.
 func qualifySelectedSideMDBX(reader *mdbx.Reader, raw []byte) (selectedSideQualification, error) {
 	authority, err := selectedQualAuthority(reader, len(raw))
@@ -361,7 +361,7 @@ func (q *selectedSideQualifier) linkingBody(tip selectedQualTip) error {
 	return q.request(q.side.TipHeight)
 }
 
-// qualifyChild runs context, steps 1-12, selection and the winner's domain.
+// qualifyChild runs context, steps 1-12, the post-steps binding pins, selection and the winner's domain.
 func (q *selectedSideQualifier) qualifyChild(raw []byte, header consensus.BlockHeader, parent selectedQualParent) (selectedSideQualification, error) {
 	height, target, timestamps, err := q.childContext(parent)
 	if err != nil {
@@ -372,6 +372,9 @@ func (q *selectedSideQualifier) qualifyChild(raw []byte, header consensus.BlockH
 		return selectedSideQualification{}, &selectedSideQualificationError{Result: selectedQualBranch, Cause: err}
 	}
 	if err != nil {
+		return selectedSideQualification{}, err
+	}
+	if err := consensus.ValidateBlockBodyCommitments(raw); err != nil {
 		return selectedSideQualification{}, err
 	}
 	work, selected, err := q.selection(parent, header.Target, summary.BlockHash)

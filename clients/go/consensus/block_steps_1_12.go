@@ -90,7 +90,8 @@ func ValidateBlockSteps1To12(raw []byte, parentHash [32]byte, expectedTarget [32
 }
 
 // ValidateBlockBodyCommitments is the commitment-only entry: the same raw bound, complete frame/Tx/trailing parse,
-// tx-root equality, then the witness commitment. It has no context and no coinbase-structure check.
+// then the shared binding subpredicate: tx-root equality, strict singleton witness commitment and both position-zero
+// pins. It has no context, no expected-header identity and no coinbase-structure check.
 func ValidateBlockBodyCommitments(raw []byte) error {
 	if len(raw) > blockSteps1To12MaxBytes {
 		return ErrBlockSteps1To12Capacity
@@ -103,7 +104,7 @@ func ValidateBlockBodyCommitments(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	return blockStepsCommitments(header, first, txRoot, witnessRoot)
+	return storedCommitmentChecks(first, header.MerkleRoot, txRoot, witnessRoot)
 }
 
 func blockStepsContextValid(expectedTarget [32]byte, height uint64, parentTimestamps []uint64) bool {
@@ -188,7 +189,7 @@ func blockStepsCommitments(header BlockHeader, first *Tx, txRoot, witnessRoot [3
 	if txRoot != header.MerkleRoot {
 		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	}
-	if countWitnessCommitmentMatches(first.Outputs, WitnessCommitmentHash(witnessRoot)) != 1 {
+	if !witnessCommitmentSingleton(first.Outputs, WitnessCommitmentHash(witnessRoot)) {
 		return txerr(BLOCK_ERR_WITNESS_COMMITMENT, "coinbase witness commitment missing or duplicated")
 	}
 	return nil

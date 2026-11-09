@@ -678,6 +678,47 @@ func TestSelectedSideRolling(t *testing.T) {
 		})
 		rfRefused(t, w, raw, "refill parent is canonical at another height", "parent Owned at another height")
 	})
+	t.Run("binding-B11-prepare", func(t *testing.T) {
+		w, raw := rollWorld(t)
+		retainWantPin(t, w, "binding B11 fresh prerequisite prepare", w.prepareSide(retainWitness(raw), w.tipAt(2)))
+		w.wantIncomingAbsent("binding B11 prepare", raw)
+		retainWant(t, "binding B11 fresh prerequisite prepare good copy", w.prepareSide(raw, w.tipAt(2)), "", "", retainNA, newT, crossed, true)
+	})
+	t.Run("binding-B11-refill", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		retainWantPin(t, w, "binding B11 fresh prerequisite refill", w.refill(retainWitness(raw)))
+		w.wantAbsent("binding B11 refill no link", 6, ssqMust(mdbx.HeightKey(2, 2)))
+		retainWant(t, "binding B11 fresh prerequisite refill good copy", w.refill(raw), retainStored, "", retainNA, newT, crossed, true)
+	})
+	t.Run("binding-B11-refill-earlier-Q-time", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, func(w *ssqWorld, prev [32]byte) []byte {
+			return w.childAt(prev, 0, consensus.POW_LIMIT, nil)
+		})
+		retainWantTimeOld(t, w, "binding B11 earlier Q time refill", w.refill(retainWitness(raw)))
+	})
+	t.Run("binding-B11-refill-before-recurrence", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 2, 113, nil)
+		w.apply([]mdbx.Mutation{w.literal(6, ssqMust(mdbx.HeightKey(2, 2)), mdbx.ChainValue(w.side[2], ssqHash(raw), ssqWork(4)), true)})
+		retainWantRefusal(t, "binding B11 recurrence control", w.refill(raw), ssqBranch, "refill work does not extend its canonical parent")
+		retainWantPin(t, w, "binding B11 before refill recurrence", w.refill(retainWitness(raw)))
+	})
+	t.Run("binding-B11-refill-first-body-required-pin", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		rfOwnFirst(w)
+		bad := retainWitness(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		w.apply([]mdbx.Mutation{w.literal(4, w.sideKey(3), bad, false)})
+		retainWantRefusal(t, "binding B11 required first body pin", w.refill(raw), ssqIntegrity, "required canonical body does not match its header or commitments")
+		w.wantImage("binding B11 required first body image")
+	})
+	t.Run("binding-B11-refill-first-body-optional-pin", func(t *testing.T) {
+		w, raw := rfWorld(t, 2, 0, 3, 113, nil)
+		bad := retainWitness(w.rows[string(append([]byte{4}, w.sideKey(3)...))].value)
+		w.apply([]mdbx.Mutation{w.absentRow(4, w.sideKey(3))})
+		w.apply([]mdbx.Mutation{w.literal(4, w.sideKey(3), bad, false)})
+		retainWant(t, "binding B11 optional first body pin", w.refill(raw), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("binding B11 optional first body clear", 3, 1_441)
+	})
 	t.Run("RF-first-body-required", func(t *testing.T) {
 		// First row Owned at k 12 >= B 0 with commitment-invalid body: required canonical body integrity, no locator.
 		w, raw := rfWorld(t, 2, 0, 3, 113, nil)

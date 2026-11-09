@@ -236,7 +236,8 @@ func retainMerkle(raw []byte) []byte {
 	return out
 }
 
-// retainWitness adds an empty coinbase witness item: wtxid commits as zero, txid excludes it, so only body bytes differ.
+// retainWitness adds an empty coinbase witness item: wtxid commits as zero, txid excludes it, so only body bytes differ
+// and the copy is pin-dirty under complete body binding.
 func retainWitness(raw []byte) []byte {
 	return append(bytes.Clone(raw[:len(raw)-2]), 1, consensus.SUITE_ID_SENTINEL, 0, 0, 0)
 }
@@ -469,6 +470,26 @@ func retainWantConsensus(t *testing.T, label string, out SelectedSideMutationOut
 	if !ok || tx.Code != code {
 		t.Fatalf("%s: consensus error %v", label, out.Err)
 	}
+}
+
+// retainWantPin requires the direct position-zero pin refusal, OLD with no write, and an unchanged image.
+func retainWantPin(t *testing.T, w *ssqWorld, label string, out SelectedSideMutationOutcome) {
+	t.Helper()
+	retainWantConsensus(t, label, out, consensus.BLOCK_ERR_COINBASE_INVALID)
+	if out.Err.Error() != "BLOCK_ERR_COINBASE_INVALID: first tx must be canonical coinbase" {
+		t.Fatalf("%s: diagnostic %v", label, out.Err)
+	}
+	w.wantImage(label)
+}
+
+// retainWantTimeOld requires the earlier step-7 refusal of a body that is also pin-dirty, OLD and an unchanged image.
+func retainWantTimeOld(t *testing.T, w *ssqWorld, label string, out SelectedSideMutationOutcome) {
+	t.Helper()
+	retainWantConsensus(t, label, out, consensus.BLOCK_ERR_TIMESTAMP_OLD)
+	if out.Err.Error() != "BLOCK_ERR_TIMESTAMP_OLD: timestamp <= MTP median" {
+		t.Fatalf("%s: diagnostic %v", label, out.Err)
+	}
+	w.wantImage(label)
 }
 
 func retainWantEngine(t *testing.T, label string, err error, operation string, class mdbx.EngineClass, code int, diagnostic string) {
@@ -840,8 +861,8 @@ func TestSelectedSideRetention(t *testing.T) {
 	t.Run("R-k-different", func(t *testing.T) {
 		w := newRetainWorld(t, ssqSpec{tip: 10})
 		blocks := w.retainSide(3, 8, 5, 9, false)
-		out := w.retain(retainWitness(blocks[8]), w.tipAt(10))
-		retainWantRefusal(t, "valid differing bytes branch_data/no overwrite", out, ssqBranch, "stored selected row differs from the supplied block")
+		retainWantPin(t, w, "binding B11 fresh prerequisite matched row", w.retain(retainWitness(blocks[8]), w.tipAt(10)))
+		retainWant(t, "binding B11 fresh prerequisite later good copy", w.retain(blocks[8], w.tipAt(10)), retainDuplicate, "", retainNA, old, pre, true)
 		w.wantImage("stored row kept")
 		// An exact match whose stored work (99) outranks the canonical tip (11) is the K23 ORDINARY winner, not a duplicate.
 		w = newRetainWorld(t, ssqSpec{tip: 10})
@@ -924,8 +945,8 @@ func TestSelectedSideRetention(t *testing.T) {
 		for _, rows := range []uint16{1, 3} {
 			w := newRetainWorld(t, ssqSpec{tip: 10})
 			blocks := w.retainSide(5, 5+uint64(rows), rows, 6+uint64(rows), false)
-			out := w.retain(retainWitness(blocks[6]), w.tipAt(10))
-			retainWantRefusal(t, "healthy differing first row branch_data/no overwrite", out, ssqBranch, "stored selected row differs from the supplied block")
+			retainWantPin(t, w, "binding B11 fresh prerequisite first row", w.retain(retainWitness(blocks[6]), w.tipAt(10)))
+			retainWant(t, "binding B11 fresh prerequisite first-row later good copy", w.retain(blocks[6], w.tipAt(10)), retainDuplicate, "", retainNA, old, pre, true)
 			w.wantImage("first row kept")
 		}
 	})
@@ -940,6 +961,10 @@ func TestSelectedSideRetention(t *testing.T) {
 			{"stored body commitments", func(w *ssqWorld, hash [32]byte, block []byte) {
 				w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
 				w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainMerkle(block), false)})
+			}},
+			{"stored body witness pin", func(w *ssqWorld, hash [32]byte, block []byte) {
+				w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+				w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainWitness(block), false)})
 			}},
 			{"stored header absent", func(w *ssqWorld, hash [32]byte, _ []byte) {
 				w.apply([]mdbx.Mutation{w.absentRow(3, bytes.Clone(hash[:]))})
@@ -1175,6 +1200,84 @@ func TestSelectedSideRetention(t *testing.T) {
 		out := w.retain(w.child(tip, 7, nil), w.tipAt(10))
 		retainWantRefusal(t, "required present linking body terminal/no clear", out, ssqIntegrity, "required canonical body does not match its header or commitments")
 		w.wantImage("required commitment-invalid linking body kept")
+	})
+	t.Run("N2-linking-required-pin", func(t *testing.T) {
+		// Owned at k=12 >= B=0, a pin-dirty linking body is required stored damage: integrity, no clear.
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(tip, w.canonical[5], ssqWork(13)), false), w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, tip)), mdbx.CanonicalOwnerValue(12), false)})
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainWitness(blocks[6]), false)})
+		retainWantRefusal(t, "binding B11 required pin-dirty linking body", w.retain(w.child(tip, 7, nil), w.tipAt(10)), ssqIntegrity, "required canonical body does not match its header or commitments")
+		w.wantImage("required pin-dirty linking body kept")
+	})
+	t.Run("binding-B11-create", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10, authority: nextTwo})
+		raw := w.child(w.canonical[5], 6, nil)
+		retainWantPin(t, w, "binding B11 fresh prerequisite create", w.retain(retainWitness(raw), w.tipAt(10)))
+		retainWant(t, "binding B11 fresh prerequisite create good copy is fresh", w.retain(raw, w.tipAt(10)), retainStored, "", retainNA, newT, crossed, true)
+	})
+	t.Run("binding-B11-replace", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 20})
+		w.retainSide(10, 15, 5, 16, false)
+		raw := w.child(w.canonical[17], 18, nil)
+		retainWantPin(t, w, "binding B11 fresh prerequisite replace", w.replaceSide(retainWitness(raw), w.tipAt(20)))
+		replaced(t, w, raw, w.tipAt(20))
+	})
+	t.Run("binding-B11-append", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		w.retainSide(5, 7, 2, 8, false)
+		raw := w.child(w.side[7], 8, nil)
+		retainWantPin(t, w, "binding B11 fresh prerequisite append", w.retain(retainWitness(raw), w.tipAt(10)))
+		retainWant(t, "binding B11 fresh prerequisite append good copy is fresh", w.retain(raw, w.tipAt(10)), retainStored, "", retainNA, newT, crossed, true)
+	})
+	t.Run("binding-B11-earlier-Q-time", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10, authority: nextTwo})
+		raw := retainWitness(w.childAt(w.canonical[5], 0, consensus.POW_LIMIT, nil))
+		retainWantTimeOld(t, w, "binding B11 earlier Q time create", w.retain(raw, w.tipAt(10)))
+	})
+	t.Run("binding-B11-matched-earlier-Q-time", func(t *testing.T) {
+		// The stored row has the same header, so the Q error must be in that header: a stored tip whose timestamp is old.
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		w.retainSide(3, 7, 4, 8, false)
+		prev := w.side[7]
+		block := ssqMine(t, prev, 0, [32]byte(w.headers[prev][76:108]), nil)
+		hash := ssqHash(block)
+		w.headers[hash], w.side[8] = block[:consensus.BLOCK_HEADER_BYTES], hash
+		w.apply([]mdbx.Mutation{w.literal(3, bytes.Clone(hash[:]), block[:consensus.BLOCK_HEADER_BYTES], false), w.literal(4, bytes.Clone(hash[:]), block, false), w.literal(6, ssqMust(mdbx.HeightKey(2, 8)), mdbx.ChainValue(hash, prev, ssqWork(9)), false)})
+		w.setSide(func(s *mdbx.SelectedSideV1) {
+			s.TipHeight, s.TipHash, s.CumulativeChainwork, s.RowCount, s.LogicalBytes = 8, hash, ssqWork(9), 5, 5_000
+		})
+		retainWantTimeOld(t, w, "binding B11 earlier Q time matched", w.retain(retainWitness(block), w.tipAt(10)))
+	})
+	t.Run("binding-B11-linking-optional-pin", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 6, 1, 7, false)
+		tip := w.side[6]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(tip[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(tip[:]), retainWitness(blocks[6]), false)})
+		retainWant(t, "binding B11 optional linking pin", w.retain(w.child(tip, 7, nil), w.tipAt(10)), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("binding B11 optional linking pin clear", 6, 6)
+	})
+	t.Run("binding-B11-matched-optional-pin", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 8, 3, 9, false)
+		hash := w.side[7]
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainWitness(blocks[7]), false)})
+		retainWant(t, "binding B11 matched optional pin", w.retain(blocks[7], w.tipAt(10)), retainCleared, "", retainNA, newT, crossed, true)
+		w.wantCleared("binding B11 matched optional pin clear", 6, 8)
+	})
+	t.Run("binding-B11-matched-required-pin", func(t *testing.T) {
+		w := newRetainWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 8, 3, 9, false)
+		hash := w.side[7]
+		w.apply([]mdbx.Mutation{w.literal(2, ssqMust(mdbx.HeightKey(1, 12)), mdbx.ChainValue(hash, w.side[6], ssqWork(13)), false), w.literal(7, ssqMust(mdbx.CanonicalOwnerKey(1, hash)), mdbx.CanonicalOwnerValue(12), false)})
+		w.apply([]mdbx.Mutation{w.absentRow(4, bytes.Clone(hash[:]))})
+		w.apply([]mdbx.Mutation{w.literal(4, bytes.Clone(hash[:]), retainWitness(blocks[7]), false)})
+		retainWantRefusal(t, "binding B11 matched required pin", w.retain(blocks[7], w.tipAt(10)), ssqIntegrity, "required canonical body commitments do not verify")
+		w.wantImage("binding B11 matched required pin kept")
 	})
 	t.Run("R-k-first-replace", func(t *testing.T) {
 		// Replace has no admitted first-row probe: the exact stored first row of a count-1 and a count-3 side is a clean

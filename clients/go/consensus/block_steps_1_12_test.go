@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -432,8 +434,10 @@ func TestBlockSteps1To12Boundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseBlockBytes: %v", err)
 	}
-	blockStepsWantCode(t, "stored checker", BlockBasicSummary{}, ValidateStoredBlockCommitments(parsed), BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
-	// The commitment-only entry checks the raw bound, then the complete parse, root and witness commitment only.
+	if err := ValidateStoredBlockCommitments(parsed); err != nil {
+		t.Fatalf("stored checker keeps a step13-invalid first tx bound: %v", err)
+	}
+	// The commitment-only entry checks the raw bound, the complete parse, the root, the witness commitment and both pins.
 	blockStepsWantCode(t, "commitments trailing", BlockBasicSummary{}, ValidateBlockBodyCommitments(append(slices.Clone(raw), 0)), BLOCK_ERR_PARSE, "trailing bytes after tx list")
 	if err := ValidateBlockBodyCommitments(make([]byte, blockSteps1To12MaxBytes+1)); !errors.Is(err, ErrBlockSteps1To12Capacity) {
 		t.Fatalf("commitments capacity: %v", err)
@@ -789,4 +793,562 @@ func TestBlockSteps1To12MixedOrder(t *testing.T) {
 	// Target before parent is the header-order row; incomplete before set cap and duplicate before incomplete are DAOrder rows.
 	summary, err := ValidateBlockSteps1To12(blockStepsStd(t, func(h *blockStepsHead) { h.target, h.mine = [32]byte{}, false }), blockStepsOther, POW_LIMIT, blockStepsHeight, blockStepsTimes)
 	blockStepsWantCode(t, "target and parent", summary, err, BLOCK_ERR_TARGET_INVALID, "target out of range")
+}
+
+const (
+	bindingWitnessMsg = "coinbase witness commitment missing or duplicated"
+	bindingRootMsg    = "merkle_root mismatch"
+	bindingPinMsg     = "first tx must be canonical coinbase"
+)
+
+// bindingFrame is one explicitly selected header width with every raw partial entry and its steps1-12 validator.
+type bindingFrame struct {
+	name      string
+	headerLen int
+	build     func(*testing.T, [][]byte, uint64, bool) []byte
+	partials  map[string]func([]byte) error
+	q         func([]byte) (BlockBasicSummary, error)
+}
+
+func bindingFrames() []bindingFrame {
+	return []bindingFrame{
+		{
+			name: "116", headerLen: BLOCK_HEADER_BYTES,
+			build: func(t *testing.T, txs [][]byte, timestamp uint64, wrongRoot bool) []byte {
+				return blockStepsMake(t, txs, func(h *blockStepsHead) {
+					h.timestamp = timestamp
+					if wrongRoot {
+						h.root = [32]byte{1}
+					}
+				})
+			},
+			partials: map[string]func([]byte) error{
+				"parsed": func(raw []byte) error {
+					parsed, err := ParseBlockBytes(raw)
+					if err != nil {
+						return err
+					}
+					return ValidateStoredBlockCommitments(parsed)
+				},
+				"body":   ValidateBlockBodyCommitments,
+				"stream": verifyStoredBlockCommitmentsStream,
+			},
+			q: blockStepsRun,
+		},
+		{
+			name: "148", headerLen: Initial148HeaderBytes,
+			build: func(t *testing.T, txs [][]byte, timestamp uint64, wrongRoot bool) []byte {
+				return initial148BlockFrame(t, txs, func(h *initial148BlockHead) {
+					h.timestamp = timestamp
+					h.root = [32]byte{0xde, 0xad}
+					if wrongRoot {
+						h.merkle = [32]byte{1}
+					}
+				})
+			},
+			partials: map[string]func([]byte) error{"body": ValidateInitial148BlockBodyCommitments},
+			q: func(raw []byte) (BlockBasicSummary, error) {
+				return ValidateInitial148BlockSteps1To12(raw, blockStepsParent, POW_LIMIT, blockStepsHeight, blockStepsTimes)
+			},
+		},
+	}
+}
+
+func bindingAnchor(data []byte, value uint64) testOutput {
+	return testOutput{value: value, covenantType: COV_TYPE_ANCHOR, covenantData: data}
+}
+
+// bindingWithWitness appends one sentinel witness item; the wire stays canonical and txid is unchanged.
+func bindingWithWitness(tx []byte) []byte { return bindingWithWitnessItems(tx, 1) }
+
+// bindingWithWitnessItems appends count sentinel witness items.
+func bindingWithWitnessItems(tx []byte, count byte) []byte {
+	out := append(slices.Clone(tx[:len(tx)-2]), count)
+	for range count {
+		out = append(out, SUITE_ID_SENTINEL, 0, 0)
+	}
+	return append(out, 0)
+}
+
+func bindingWithPayload(tx []byte, payload ...byte) []byte {
+	return append(AppendCompactSize(slices.Clone(tx[:len(tx)-1]), uint64(len(payload))), payload...)
+}
+
+func bindingWithNonce(tx []byte, nonce byte) []byte {
+	out := slices.Clone(tx)
+	out[5] = nonce
+	return out
+}
+
+// bindingChunkAnchored is a position-zero tx_kind 0x02 carrying the sole matching anchor, so only its payload is defective.
+func bindingChunkAnchored(commit []byte) []byte {
+	payload := []byte{0x42}
+	hash := sha3_256(payload)
+	b := append(AppendU32le(nil, 1), 0x02)
+	b = AppendCompactSize(AppendCompactSize(AppendU64le(b, 1), 0), 1)
+	b = AppendCompactSize(AppendU16le(AppendU64le(b, 0), COV_TYPE_ANCHOR), uint64(len(commit)))
+	b = append(b, commit...)
+	b = append(AppendU32le(b, 0), blockStepsIDs[0][:]...)
+	b = append(AppendU16le(b, 0), hash[:]...)
+	b = AppendCompactSize(AppendCompactSize(b, 0), uint64(len(payload)))
+	return append(b, payload...)
+}
+
+// bindingCoreEdits are the coinbase-core defects of step 13 that stay parse-valid and leave the root inputs, singleton
+// and pins untouched. Offsets are those of coinbaseTxWithOutputs; msg is the ordered step-13 refusal.
+func bindingCoreEdits() []struct {
+	name string
+	edit func([]byte) []byte
+	msg  string
+} {
+	const inputStart, inputEnd = 14, 55
+	return []struct {
+		name string
+		edit func([]byte) []byte
+		msg  string
+	}{
+		{"nonce", func(tx []byte) []byte { return bindingWithNonce(tx, 1) }, bindingPinMsg},
+		{"prevout", bindingWithPrevout, bindingPinMsg},
+		{"prev_vout", func(tx []byte) []byte { out := slices.Clone(tx); out[46] = 0; return out }, bindingPinMsg},
+		{"script_sig", func(tx []byte) []byte { out := slices.Clone(tx); out[50] = 1; return slices.Insert(out, 51, 0x00) }, bindingPinMsg},
+		{"sequence", func(tx []byte) []byte { out := slices.Clone(tx); out[51] = 0; return out }, bindingPinMsg},
+		{"no input", func(tx []byte) []byte {
+			out := slices.Clone(tx)
+			out[13] = 0
+			return slices.Delete(out, inputStart, inputEnd)
+		}, bindingPinMsg},
+		{"two inputs", func(tx []byte) []byte {
+			out := slices.Clone(tx)
+			out[13] = 2
+			return slices.Insert(out, inputEnd, slices.Clone(tx[inputStart:inputEnd])...)
+		}, bindingPinMsg},
+		{"locktime", func(tx []byte) []byte { out := slices.Clone(tx); out[len(out)-6] ^= 1; return out }, "coinbase locktime must equal block height"},
+	}
+}
+
+func bindingWithPrevout(tx []byte) []byte {
+	out := slices.Clone(tx)
+	out[14] = 1
+	return out
+}
+
+func bindingCheck(t *testing.T, label string, err error, code ErrorCode, msg string) {
+	t.Helper()
+	if code == "" {
+		if err != nil {
+			t.Fatalf("%s: unexpected refusal %v", label, err)
+		}
+		return
+	}
+	initial148BlockWantError(t, label, err, code, msg)
+}
+
+func bindingCheckPartials(t *testing.T, f bindingFrame, label string, raw []byte, code ErrorCode, msg string) {
+	t.Helper()
+	before := slices.Clone(raw)
+	failed := false
+	for _, name := range slices.Sorted(maps.Keys(f.partials)) {
+		failed = !t.Run(f.name+"/"+name, func(t *testing.T) {
+			bindingCheck(t, label+" ["+f.name+"/"+name+"]", f.partials[name](raw), code, msg)
+		}) || failed
+	}
+	if !bytes.Equal(raw, before) {
+		t.Errorf("%s: input mutated", label)
+		failed = true
+	}
+	if failed {
+		t.FailNow()
+	}
+}
+
+// TestGoBlockBodyBindingShapes owns B01-B03, B05 and B07: the commitment comes from the written tagged-root and SHA3
+// definition, never from the selector under test.
+func TestGoBlockBodyBindingShapes(t *testing.T) {
+	others := blockStepsPlain(1)
+	commit := initial148BlockWitnessCommit(t, others...)
+	other := [32]byte{0x77}
+	cb := func(outs ...testOutput) []byte { return coinbaseTxWithOutputs(0, outs) }
+	sole := bindingAnchor(commit[:], 0)
+	wrong := bindingAnchor(other[:], 0)
+	clean := cb(sole)
+	p2pk32 := testOutput{covenantType: COV_TYPE_P2PK, covenantData: other[:]}
+	short, long := bindingAnchor(make([]byte, 31), 0), bindingAnchor(make([]byte, 33), 0)
+
+	id, payload := blockStepsIDs[0], []byte{0x42}
+	hash := sha3_256(payload)
+	chunk := blockStepsChunk(id, 0, payload, hash)
+	daCommit := initial148BlockWitnessCommit(t, chunk)
+	daFirst := blockStepsCommit(id, 1, blockStepsDAOut(hash), bindingAnchor(daCommit[:], 0))
+
+	const anyQ = ErrorCode("*")
+	for _, c := range []struct {
+		name   string
+		first  []byte
+		others [][]byte
+		code   ErrorCode
+		msg    string
+		qCode  ErrorCode
+		qMsg   string
+	}{
+		{name: "binding B01 clean", first: clean, others: others},
+		{name: "binding B02 shape ignores value", first: cb(bindingAnchor(commit[:], 9)), others: others},
+		{name: "binding B02 excluded output non-anchor", first: cb(p2pk32, sole), others: others},
+		{name: "binding B02 excluded output length31", first: cb(short, sole), others: others},
+		{name: "binding B02 excluded output length33", first: cb(sole, long), others: others},
+		{name: "binding B03 core remains bound zero-payload DA_COMMIT", first: daFirst, others: [][]byte{chunk}, qCode: anyQ},
+		{name: "binding B05 singleton cardinality zero", first: cb(p2pk32), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B05 singleton cardinality equal/equal", first: cb(sole, sole), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B05 singleton cardinality equal/distinct", first: cb(sole, wrong), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B05 singleton cardinality distinct/equal", first: cb(wrong, sole), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B05 singleton cardinality distinct/distinct", first: cb(wrong, bindingAnchor(make([]byte, 32), 0)), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B05 sole payload", first: cb(wrong), others: others, code: BLOCK_ERR_WITNESS_COMMITMENT, msg: bindingWitnessMsg, qCode: BLOCK_ERR_WITNESS_COMMITMENT, qMsg: bindingWitnessMsg},
+		{name: "binding B07 witness pin", first: bindingWithWitness(clean), others: others, code: BLOCK_ERR_COINBASE_INVALID, msg: bindingPinMsg},
+		{name: "binding B07 payload pin", first: bindingWithPayload(daFirst, 0x42), others: [][]byte{chunk}, code: BLOCK_ERR_COINBASE_INVALID, msg: bindingPinMsg, qCode: anyQ},
+	} {
+		for _, f := range bindingFrames() {
+			raw := f.build(t, append([][]byte{c.first}, c.others...), blockStepsMedian+1, false)
+			bindingCheckPartials(t, f, c.name, raw, c.code, c.msg)
+			if c.qCode == anyQ {
+				continue
+			}
+			_, err := f.q(raw)
+			bindingCheck(t, c.name+" ["+f.name+"/Q]", err, c.qCode, c.qMsg)
+		}
+	}
+	for _, core := range bindingCoreEdits() {
+		label := "binding B03 core remains bound " + core.name
+		for _, f := range bindingFrames() {
+			raw := f.build(t, append([][]byte{core.edit(clean)}, others...), blockStepsMedian+1, false)
+			bindingCheckPartials(t, f, label, raw, "", "")
+			_, err := f.q(raw)
+			bindingCheck(t, label+" ["+f.name+"/Q]", err, "", "")
+		}
+	}
+	// A parse-canonical witness on a later transaction is ordinary: it only enters the witness root.
+	witnessed := bindingWithWitness(txWithOneOutput(10, COV_TYPE_P2PK, validP2PKCovenantData()))
+	for _, f := range bindingFrames() {
+		raw := f.build(t, [][]byte{initial148BlockCoinbase(t, witnessed), witnessed}, blockStepsMedian+1, false)
+		bindingCheckPartials(t, f, "binding B07 later witness allowed", raw, "", "")
+	}
+}
+
+// bindingChunkOutputs is a position-zero tx_kind 0x02 with the given outputs; its parser requires the payload, so only
+// the witness range varies.
+func bindingChunkOutputs(outs []testOutput, witnesses byte, payload ...byte) []byte {
+	hash := sha3_256(payload)
+	b := append(AppendU32le(nil, 1), 0x02)
+	b = AppendCompactSize(AppendCompactSize(AppendU64le(b, 1), 0), uint64(len(outs)))
+	for _, out := range outs {
+		b = AppendCompactSize(AppendU16le(AppendU64le(b, out.value), out.covenantType), uint64(len(out.covenantData)))
+		b = append(b, out.covenantData...)
+	}
+	b = append(AppendU32le(b, 0), blockStepsIDs[0][:]...)
+	b = append(AppendU16le(b, 0), hash[:]...)
+	b = append(b, witnesses)
+	for range witnesses {
+		b = append(b, SUITE_ID_SENTINEL, 0, 0)
+	}
+	return append(AppendCompactSize(b, uint64(len(payload))), payload...)
+}
+
+type bindingKindRow struct {
+	name  string
+	first func([]testOutput) []byte
+	dirty bool
+}
+
+type bindingShapeRow struct {
+	name  string
+	outs  []testOutput
+	bound bool
+}
+
+// bindingKindRows is every legal position-zero kind and pin state. A tx_kind 0x00 payload (B13) and a tx_kind 0x02 without
+// payload do not parse; TestGoBlockBodyBindingFirstError owns both refusals.
+func bindingKindRows() []bindingKindRow {
+	cb := func(outs []testOutput) []byte { return coinbaseTxWithOutputs(0, outs) }
+	commitTx := func(outs []testOutput) []byte {
+		return blockStepsCommit(blockStepsIDs[0], 1, append([]testOutput{blockStepsDAOut(sha3_256([]byte{0x42}))}, outs...)...)
+	}
+	return []bindingKindRow{
+		{"kind0 clean", cb, false},
+		{"kind0 witness", func(o []testOutput) []byte { return bindingWithWitness(cb(o)) }, true},
+		{"kind0 two witness", func(o []testOutput) []byte { return bindingWithWitnessItems(cb(o), 2) }, true},
+		{"kind1 clean", commitTx, false},
+		{"kind1 witness", func(o []testOutput) []byte { return bindingWithWitness(commitTx(o)) }, true},
+		{"kind1 two witness", func(o []testOutput) []byte { return bindingWithWitnessItems(commitTx(o), 2) }, true},
+		{"kind1 payload", func(o []testOutput) []byte { return bindingWithPayload(commitTx(o), 0x42) }, true},
+		{"kind1 two byte payload", func(o []testOutput) []byte { return bindingWithPayload(commitTx(o), 0x42, 0x43) }, true},
+		{"kind1 witness and payload", func(o []testOutput) []byte { return bindingWithPayload(bindingWithWitness(commitTx(o)), 0x42) }, true},
+		{"kind2 payload", func(o []testOutput) []byte { return bindingChunkOutputs(o, 0, 0x42) }, true},
+		{"kind2 two byte payload", func(o []testOutput) []byte { return bindingChunkOutputs(o, 0, 0x42, 0x43) }, true},
+		{"kind2 witness and payload", func(o []testOutput) []byte { return bindingChunkOutputs(o, 1, 0x42) }, true},
+		{"kind2 two witness and payload", func(o []testOutput) []byte { return bindingChunkOutputs(o, 2, 0x42) }, true},
+	}
+}
+
+// bindingShapeRows spells the qualified-anchor domain. Only the bound column decides: exactly one qualified anchor,
+// with the committed data, at any value.
+func bindingShapeRows(commit [32]byte) []bindingShapeRow {
+	other := [32]byte{0x77}
+	eq := func(v uint64) testOutput { return bindingAnchor(commit[:], v) }
+	ne := func(v uint64) testOutput { return bindingAnchor(other[:], v) }
+	zero := bindingAnchor(make([]byte, 32), 0)
+	rows := []bindingShapeRow{
+		{"k0", nil, false},
+		{"k1 wrong v0", []testOutput{ne(0)}, false},
+		{"k1 wrong v9", []testOutput{ne(9)}, false},
+		{"k1 wrong v1", []testOutput{ne(1)}, false},
+		{"k1 wrong vmax", []testOutput{ne(math.MaxUint64)}, false},
+		{"k1 right v0", []testOutput{eq(0)}, true},
+		{"k1 right v9", []testOutput{eq(9)}, true},
+		{"k1 right v1", []testOutput{eq(1)}, true},
+		{"k1 right vmax", []testOutput{eq(math.MaxUint64)}, true},
+		{"k3 equal/distinct/distinct", []testOutput{eq(0), ne(0), ne(0)}, false},
+		{"k3 distinct/equal/distinct", []testOutput{ne(0), eq(0), ne(0)}, false},
+		{"k3 distinct/distinct/equal", []testOutput{ne(0), ne(0), eq(0)}, false},
+		{"k3 equal/equal/equal", []testOutput{eq(0), eq(0), eq(0)}, false},
+		{"k3 distinct/distinct/equal mixed values", []testOutput{ne(9), ne(1), eq(math.MaxUint64)}, false},
+		{"k4 distinct/distinct/distinct/equal", []testOutput{ne(0), ne(0), ne(0), eq(0)}, false},
+		{"k4 equal/equal/equal/equal", []testOutput{eq(0), eq(0), eq(0), eq(0)}, false},
+		{"k5 distinct/distinct/distinct/distinct/equal", []testOutput{ne(0), ne(0), ne(0), ne(0), eq(0)}, false},
+	}
+	for _, v := range [][2]uint64{{0, 0}, {0, 9}, {9, 0}, {9, 9}, {0, 1}, {1, 0}, {0, math.MaxUint64}, {math.MaxUint64, 0}} {
+		suffix := fmt.Sprintf(" v%d/v%d", v[0], v[1])
+		last := ne(v[1])
+		last.covenantData = zero.covenantData
+		rows = append(rows,
+			bindingShapeRow{"k2 equal/equal" + suffix, []testOutput{eq(v[0]), eq(v[1])}, false},
+			bindingShapeRow{"k2 equal/distinct" + suffix, []testOutput{eq(v[0]), ne(v[1])}, false},
+			bindingShapeRow{"k2 distinct/equal" + suffix, []testOutput{ne(v[0]), eq(v[1])}, false},
+			bindingShapeRow{"k2 distinct/distinct" + suffix, []testOutput{ne(v[0]), last}, false})
+	}
+	return rows
+}
+
+// TestGoBlockBodyBindingKindMatrix owns the closed domain of position-zero kind x anchor shape x value x pins on the raw
+// partial entries and the ordered step-6 family: no kind or value escapes the singleton, and the pins follow it.
+func TestGoBlockBodyBindingKindMatrix(t *testing.T) {
+	others := blockStepsPlain(1)
+	commit := initial148BlockWitnessCommit(t, others...)
+	for _, kind := range bindingKindRows() {
+		for _, shape := range bindingShapeRows(commit) {
+			label := "binding B05 kind matrix " + kind.name + " " + shape.name
+			code, msg := ErrorCode(BLOCK_ERR_WITNESS_COMMITMENT), bindingWitnessMsg
+			if shape.bound {
+				code, msg = "", ""
+				if kind.dirty {
+					code, msg = BLOCK_ERR_COINBASE_INVALID, bindingPinMsg
+				}
+			}
+			for _, f := range bindingFrames() {
+				raw := f.build(t, append([][]byte{kind.first(shape.outs)}, others...), blockStepsMedian+1, false)
+				bindingCheckPartials(t, f, label, raw, code, msg)
+				if shape.bound {
+					continue
+				}
+				_, err := f.q(raw)
+				bindingCheck(t, label+" ["+f.name+"/Q]", err, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
+				if f.headerLen == BLOCK_HEADER_BYTES {
+					target := POW_LIMIT
+					_, err = ValidateBlockBasicWithContextAtHeight(raw, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+					bindingCheck(t, label+" [ordered]", err, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
+				}
+			}
+		}
+	}
+}
+
+// TestGoBlockBodyBindingFirstError owns B06, B09 and B13 for the raw partial entries: parsing first, then txid root,
+// singleton and the pins.
+func TestGoBlockBodyBindingFirstError(t *testing.T) {
+	others := blockStepsPlain(1)
+	commit := initial148BlockWitnessCommit(t, others...)
+	clean := coinbaseTxWithOutputs(0, []testOutput{bindingAnchor(commit[:], 0)})
+	noAnchor := coinbaseTxWithOutputs(0, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}})
+	zeroOutputs := coinbaseTxWithOutputs(0, nil)
+	dirty := bindingWithWitness(clean)
+	dirtyNoAnchor := bindingWithWitness(noAnchor)
+	for _, f := range bindingFrames() {
+		build := func(first []byte, wrongRoot bool) []byte {
+			return f.build(t, append([][]byte{first}, others...), blockStepsMedian+1, wrongRoot)
+		}
+		header := build(clean, false)[:f.headerLen]
+		for _, c := range []struct {
+			name string
+			raw  []byte
+			code ErrorCode
+			msg  string
+		}{
+			{"binding B09 commitment order root before witness", build(noAnchor, true), BLOCK_ERR_MERKLE_INVALID, bindingRootMsg},
+			{"binding B09 commitment order root before pin", build(dirty, true), BLOCK_ERR_MERKLE_INVALID, bindingRootMsg},
+			{"binding B09 commitment order witness before pin", build(dirtyNoAnchor, false), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+			{"binding B09 commitment order zero outputs", build(zeroOutputs, false), BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+			{"binding B09 commitment order zero outputs wrong root", build(zeroOutputs, true), BLOCK_ERR_MERKLE_INVALID, bindingRootMsg},
+			{"binding B06 trailing before root", append(build(noAnchor, true), 0), BLOCK_ERR_PARSE, "trailing bytes after tx list"},
+			{"binding B06 truncated tx", func() []byte { r := build(noAnchor, true); return r[:len(r)-1] }(), TX_ERR_PARSE, "unexpected EOF (u8)"},
+			{"binding B06 header only", slices.Clone(header), BLOCK_ERR_PARSE, "block too short"},
+			{"binding B06 boundary EOF", append(append(slices.Clone(header), 2), clean...), BLOCK_ERR_PARSE, "unexpected EOF in tx list"},
+			{"binding B06 nonminimal count", append(append(slices.Clone(header), 0xfd, 1, 0), clean...), BLOCK_ERR_PARSE, "invalid tx_count"},
+			{"binding B06 incomplete count", append(slices.Clone(header), 0xfd, 1), BLOCK_ERR_PARSE, "invalid tx_count"},
+			{"binding B07 DA_CHUNK payload pin", build(bindingChunkAnchored(commit[:]), false), BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+			{"binding B06 zero count", append(slices.Clone(header), 0), BLOCK_ERR_COINBASE_INVALID, "empty block tx list"},
+			{"binding B13 kind0 payload", blockStepsRaw(header, [][]byte{bindingWithPayload(clean, 0x07)}), TX_ERR_PARSE, "da_payload_len must be 0 for tx_kind=0x00"},
+			{"binding B09 raw parsing first kind2 empty payload", blockStepsRaw(header, [][]byte{blockStepsChunk(blockStepsIDs[0], 0, nil, [32]byte{})}), TX_ERR_PARSE, "da_payload_len out of range for tx_kind=0x02"},
+		} {
+			bindingCheckPartials(t, f, c.name, c.raw, c.code, c.msg)
+		}
+	}
+}
+
+// TestGoBlockBodyBindingSection25Order owns the ordered side of B09: a pin defect is step 13 only.
+func TestGoBlockBodyBindingSection25Order(t *testing.T) {
+	const late = blockStepsMedian
+	cb := func(txs ...[]byte) []byte {
+		commit := initial148BlockWitnessCommit(t, txs...)
+		return coinbaseTxWithOutputs(0, []testOutput{bindingAnchor(commit[:], 0)})
+	}
+	plain := blockStepsPlain(1)
+	badWitness := coinbaseTxWithOutputs(0, []testOutput{{covenantType: COV_TYPE_P2PK, covenantData: validP2PKCovenantData()}})
+	payload := []byte{0x42}
+	orphan := blockStepsChunk(blockStepsIDs[0], 0, payload, sha3_256(payload))
+	heavy := blockStepsWeighted(t, MAX_BLOCK_WEIGHT+1)
+	for _, f := range bindingFrames() {
+		for _, c := range []struct {
+			name      string
+			first     []byte
+			others    [][]byte
+			timestamp uint64
+			code      ErrorCode
+			msg       string
+		}{
+			{"binding B09 Section25 order pin behind timestamp", bindingWithWitness(cb(plain...)), plain, late, BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median"},
+			{"binding B09 Section25 order pin behind weight", bindingWithWitness(cb(heavy...)), heavy, blockStepsMedian + 1, BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded"},
+			{"binding B09 Section25 order pin behind DA", bindingWithWitness(cb(orphan)), [][]byte{orphan}, blockStepsMedian + 1, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
+			{"binding B09 Section25 order witness before timestamp", bindingWithWitness(badWitness), plain, late, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+			{"binding B09 Section25 order witness before weight", badWitness, heavy, blockStepsMedian + 1, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+			{"binding B09 Section25 order witness before DA", badWitness, [][]byte{orphan}, blockStepsMedian + 1, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+			{"binding B09 Section25 order Q admits pin-only", bindingWithWitness(cb(plain...)), plain, blockStepsMedian + 1, "", ""},
+		} {
+			raw := f.build(t, append([][]byte{c.first}, c.others...), c.timestamp, false)
+			_, err := f.q(raw)
+			bindingCheck(t, c.name+" ["+f.name+"/Q]", err, c.code, c.msg)
+		}
+	}
+	// The complete 116 validator runs step 13 only after every earlier step.
+	target := POW_LIMIT
+	dirty := bindingWithWitness(coinbaseWithWitnessCommitmentAtHeight(t, blockStepsHeight, plain...))
+	old := blockStepsMake(t, append([][]byte{dirty}, plain...), func(h *blockStepsHead) { h.timestamp = late })
+	_, err := ValidateBlockBasicWithContextAtHeight(old, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+	initial148BlockWantError(t, "binding B09 Section25 order full timestamp", err, BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median")
+	pinOnly := blockStepsMake(t, append([][]byte{dirty}, plain...), nil)
+	_, err = ValidateBlockBasicWithContextAtHeight(pinOnly, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+	initial148BlockWantError(t, "binding B09 Section25 order full step13", err, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg)
+	for _, c := range []struct {
+		name   string
+		others [][]byte
+		code   ErrorCode
+		msg    string
+	}{
+		{"binding B09 Section25 order full pin behind weight", heavy, BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded"},
+		{"binding B09 Section25 order full pin behind DA", [][]byte{orphan}, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
+	} {
+		first := bindingWithWitness(coinbaseWithWitnessCommitmentAtHeight(t, blockStepsHeight, c.others...))
+		mixed := blockStepsMake(t, append([][]byte{first}, c.others...), nil)
+		_, err = ValidateBlockBasicWithContextAtHeight(mixed, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+		initial148BlockWantError(t, c.name, err, c.code, c.msg)
+	}
+	for _, core := range bindingCoreEdits() {
+		first := core.edit(coinbaseWithWitnessCommitmentAtHeight(t, blockStepsHeight, plain...))
+		block := blockStepsMake(t, append([][]byte{first}, plain...), nil)
+		_, err = ValidateBlockBasicWithContextAtHeight(block, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+		initial148BlockWantError(t, "binding B03 full step13 "+core.name, err, BLOCK_ERR_COINBASE_INVALID, core.msg)
+	}
+}
+
+// bindingPinKinds are the position-zero transactions the parser admits with a dirty pin half, each with the DA set that
+// makes the block's DA rules pass. A kind0 payload is a parse refusal and a kind2 always carries its payload (B07).
+func bindingPinKinds() []struct {
+	name  string
+	set   [][]byte
+	first func(t *testing.T, extra []testOutput, others ...[]byte) []byte
+} {
+	payload := []byte{0x42}
+	hash := sha3_256(payload)
+	id := blockStepsIDs[0]
+	commit := func(t *testing.T, extra []testOutput, others ...[]byte) []byte {
+		anchor := initial148BlockWitnessCommit(t, others...)
+		return blockStepsCommit(id, 1, append(slices.Clone(extra), blockStepsDAOut(hash), bindingAnchor(anchor[:], 0))...)
+	}
+	return []struct {
+		name  string
+		set   [][]byte
+		first func(t *testing.T, extra []testOutput, others ...[]byte) []byte
+	}{
+		{"kind1 payload", [][]byte{blockStepsChunk(id, 0, payload, hash)}, func(t *testing.T, extra []testOutput, others ...[]byte) []byte {
+			return bindingWithPayload(commit(t, extra, others...), 0x42)
+		}},
+		{"kind1 witness", [][]byte{blockStepsChunk(id, 0, payload, hash)}, func(t *testing.T, extra []testOutput, others ...[]byte) []byte {
+			return bindingWithWitness(commit(t, extra, others...))
+		}},
+		{"kind2 payload", [][]byte{blockStepsCommit(id, 1, blockStepsDAOut(hash))}, func(t *testing.T, extra []testOutput, others ...[]byte) []byte {
+			anchor := initial148BlockWitnessCommit(t, others...)
+			return bindingChunkOutputs(append(slices.Clone(extra), bindingAnchor(anchor[:], 0)), 0, 0x42)
+		}},
+	}
+}
+
+// TestGoBlockBodyBindingPinKindOrder owns the ordered side of B09 for every parser-admitted dirty pin outside kind0: an
+// earlier Section 25 violation wins in Q and in the full validator, and Q admits the pin alone. The full validator
+// refuses that lone body at step 13 through its tx_kind, before any pin is read.
+func TestGoBlockBodyBindingPinKindOrder(t *testing.T) {
+	const late = blockStepsMedian
+	payload := []byte{0x77}
+	orphan := blockStepsChunk(blockStepsIDs[1], 0, payload, sha3_256(payload))
+	heavy := blockStepsWeighted(t, MAX_BLOCK_WEIGHT+1)
+	target := POW_LIMIT
+	for _, kind := range bindingPinKinds() {
+		for _, c := range []struct {
+			name      string
+			others    [][]byte
+			timestamp uint64
+			code      ErrorCode
+			msg       string
+			fullCode  ErrorCode
+			fullMsg   string
+		}{
+			{"pin behind timestamp", kind.set, late, BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median", BLOCK_ERR_TIMESTAMP_OLD, "timestamp <= MTP median"},
+			{"pin behind weight", append(slices.Clone(kind.set), heavy...), blockStepsMedian + 1, BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded", BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded"},
+			{"pin behind DA", append(slices.Clone(kind.set), orphan), blockStepsMedian + 1, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit", BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
+			{"pin only", kind.set, blockStepsMedian + 1, "", "", BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+		} {
+			label := "binding B09 Section25 order " + kind.name + " " + c.name
+			txs := append([][]byte{kind.first(t, nil, c.others...)}, c.others...)
+			for _, f := range bindingFrames() {
+				_, err := f.q(f.build(t, txs, c.timestamp, false))
+				bindingCheck(t, label+" ["+f.name+"/Q]", err, c.code, c.msg)
+			}
+			full := blockStepsMake(t, txs, func(h *blockStepsHead) { h.timestamp = c.timestamp })
+			_, err := ValidateBlockBasicWithContextAtHeight(full, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+			fullLabel := label + " [full]"
+			if c.code == "" {
+				fullLabel = "binding B09 Section25 order " + kind.name + " step13 tx_kind refusal [full]"
+			}
+			initial148BlockWantError(t, fullLabel, err, c.fullCode, c.fullMsg)
+		}
+	}
+}
+
+// TestGoBlockBodyBindingCapacity owns B08: the local sentinel precedes parsing at M+1 and is absent at M.
+func TestGoBlockBodyBindingCapacity(t *testing.T) {
+	if blockSteps1To12MaxBytes != 68_000_125 {
+		t.Fatalf("116 bound %d", blockSteps1To12MaxBytes)
+	}
+	atBound := make([]byte, 68_000_125)
+	if err := ValidateBlockBodyCommitments(atBound); errors.Is(err, ErrBlockSteps1To12Capacity) || err == nil {
+		t.Fatalf("binding B08 M: %v", err)
+	}
+	if err := ValidateBlockBodyCommitments(make([]byte, 68_000_126)); any(err) != any(ErrBlockSteps1To12Capacity) {
+		t.Fatalf("binding B08 M+1: %v", err)
+	}
 }

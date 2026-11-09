@@ -9,6 +9,14 @@ import (
 	"github.com/2tbmz9y2xt-lang/rubin-protocol/clients/go/internal/mdbx"
 )
 
+// The OLD-snapshot Gets by rank of one binding-defect run, and the later operation's result after the optional clear.
+var (
+	bindingRequiredGets = [8]uint64{1, 0, 2, 1, 1, 0, 1, 1}
+	bindingOptionalGets = [8]uint64{3, 0, 0, 9, 4, 0, 12, 12}
+)
+
+const bindingOptionalNext = "selected side damage request does not match committed authority"
+
 // rawSideWorld is a side world whose image oracle compares committed rows natively, so seeded malformed rows are
 // observed exactly instead of being refused by Reader.Get's width bound.
 func rawSideWorld(t *testing.T, spec sideWorldSpec) *sideWorld {
@@ -305,6 +313,37 @@ func sideRunBridge(t *testing.T, row sideBridgeCase) {
 			w.wantImage(row.name, w.authority, false)
 		}
 	})
+}
+
+// TestSelectedSideDamageFixtureBinding owns the selected-damage body consumer of B12 with its native evidence: a
+// binding defect in a required body is callback-only integrity, in an optional body the planned clear.
+func TestSelectedSideDamageFixtureBinding(t *testing.T) {
+	const cause = "required canonical body commitments do not verify"
+	for _, kind := range []string{"witness pin", "anchor pair", "trailing"} {
+		t.Run("required "+kind, func(t *testing.T) {
+			const label = "binding B12 selected damage required"
+			w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, b: 1, canonicalTip: 2, override: map[uint64]uint64{2: 2}, canonicalBody: map[uint64]string{2: kind}})
+			var out selectedSideOutcome
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.run(2) })
+			sideWantCause(t, out, cause, label+" cause")
+			logicalMDBXAssert(t, err == nil && evidence.OldGets == bindingRequiredGets && evidence.BeginWrite == 0 && evidence.Commits == 0 && evidence.Deletes == 0 && evidence.OldAborts == 1, "%s consulted: %+v/%v", label, evidence, err)
+			sideWantReleased(t, w.owner, label)
+			w.wantOpen(label)
+			w.wantImage(label, w.authority, false)
+			sideWantCause(t, w.run(2), cause, label+" next")
+			w.wantImage(label+" next", w.authority, false)
+		})
+		t.Run("optional "+kind, func(t *testing.T) {
+			const label = "binding B12 selected damage optional"
+			w := newSideWorld(t, sideWorldSpec{f: 1, tip: 4, rows: 3, canonicalTip: 1, custom: map[uint64]string{3: kind}})
+			var out selectedSideOutcome
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.run(3) })
+			logicalMDBXAssert(t, err == nil && evidence.OldGets == bindingOptionalGets && evidence.BeginWrite == 1 && evidence.Commits == 1 && evidence.OldAborts == 1, "%s consulted: %+v/%v", label, evidence, err)
+			sideWantCleared(t, w, out, label)
+			next := w.run(3)
+			logicalMDBXAssert(t, next.Result == "" && next.CanonicalTruth == "OLD" && next.Stage == mdbx.UpdateStagePrewrite && next.Err != nil && next.Err.Error() == bindingOptionalNext, "%s next: %+v", label, next)
+		})
+	}
 }
 
 // TestSelectedSideDamageFixtureLaneLifetime observes the full lane synchronously at every reached native site of a

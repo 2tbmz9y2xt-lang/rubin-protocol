@@ -2169,3 +2169,101 @@ func TestInitial148CompleteBlockCandidateDisposal(t *testing.T) {
 		control.assertDeliveredLive(t, "success")
 	}
 }
+
+// TestInitial148CompleteBlockStrictWitness reaches step 6 through the complete validator with a re-framed genesis: an
+// equal/distinct anchor pair is the witness refusal, and a pin-only copy passes step 6 and fails only at step 13.
+func TestInitial148CompleteBlockStrictWitness(t *testing.T) {
+	reframed := func(in *initial148CompleteBlockInputV1, txs ...[]byte) {
+		head := in.Raw[:Initial148HeaderBytes]
+		raw := initial148BlockFrame(t, txs, func(h *initial148BlockHead) {
+			h.parent = [32]byte(head[4:36])
+			h.timestamp = binary.LittleEndian.Uint64(head[68:76])
+			h.target = [32]byte(head[76:108])
+			h.root = [32]byte(head[108:140])
+		})
+		hash, err := Initial148BlockHash(raw[:Initial148HeaderBytes])
+		logicalMDBXAssert(t, err == nil, "hash: %v", err)
+		in.Raw, in.PublishedGenesis, in.Endpoint.BlockHash = raw, raw, hash
+	}
+	genesisTx := initial148BlockGenesisTx(t)
+	parsed, _, _, _, err := ParseTx(genesisTx)
+	logicalMDBXAssert(t, err == nil, "genesis parse: %v", err)
+	pair := *parsed
+	pair.Outputs = append(append([]TxOutput(nil), parsed.Outputs...), TxOutput{CovenantType: COV_TYPE_ANCHOR, CovenantData: make([]byte, 32)})
+	pairTx, err := MarshalTx(&pair)
+	logicalMDBXAssert(t, err == nil, "pair marshal: %v", err)
+	// The coinbase whose sole anchor commits to the given later transactions.
+	committed := func(others ...[]byte) []byte {
+		commit := initial148BlockWitnessCommit(t, others...)
+		tx := *parsed
+		tx.Outputs = append([]TxOutput(nil), parsed.Outputs...)
+		for i := range tx.Outputs {
+			if tx.Outputs[i].CovenantType == COV_TYPE_ANCHOR && len(tx.Outputs[i].CovenantData) == 32 {
+				tx.Outputs[i].CovenantData = commit[:]
+			}
+		}
+		raw, err := MarshalTx(&tx)
+		logicalMDBXAssert(t, err == nil, "committed marshal: %v", err)
+		return raw
+	}
+	// This test world's operation account refuses the tariff for a weight-exceeding body, so this row enters at the
+	// height-0 steps that the complete path runs.
+	heavy := blockStepsWeighted(t, MAX_BLOCK_WEIGHT+1)
+	over, _ := icbGenesisInputV1(t, 0)
+	reframed(&over, append([][]byte{bindingWithWitness(committed(heavy...))}, heavy...)...)
+	_, err = initial148GenesisStepsV1(over.Raw, over.ExpectedTarget)
+	initial148BlockWantError(t, "binding B09 Section25 order genesis steps pin behind weight", err, BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
+	payload := []byte{0x42}
+	orphan := [][]byte{blockStepsChunk(blockStepsIDs[0], 0, payload, sha3_256(payload))}
+	type row struct {
+		name   string
+		tx     []byte
+		others [][]byte
+		code   ErrorCode
+		msg    string
+	}
+	rows := []row{
+		{"binding B05 singleton cardinality complete", pairTx, nil, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg},
+		{"binding B09 Section25 order complete pin", bindingWithWitness(genesisTx), nil, BLOCK_ERR_COINBASE_INVALID, bindingPinMsg},
+		{"binding B09 Section25 order complete pin behind DA", bindingWithWitness(committed(orphan...)), orphan, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"},
+	}
+	// A position-zero DA transaction keeps the genesis spendable outputs, so these rows differ from it only as named.
+	var spendable []testOutput
+	for _, out := range parsed.Outputs {
+		if out.CovenantType != COV_TYPE_ANCHOR {
+			spendable = append(spendable, testOutput{value: out.Value, covenantType: out.CovenantType, covenantData: out.CovenantData})
+		}
+	}
+	otherOrphan := blockStepsChunk(blockStepsIDs[1], 0, payload, sha3_256(payload))
+	for _, kind := range bindingPinKinds() {
+		withOrphan := append(slices.Clone(kind.set), otherOrphan)
+		rows = append(rows, row{"binding B09 Section25 order complete " + kind.name + " pin behind DA", kind.first(t, spendable, withOrphan...), withOrphan, BLOCK_ERR_DA_SET_INVALID, "DA chunks without DA commit"})
+	}
+	for _, core := range bindingCoreEdits() {
+		rows = append(rows, row{"binding B03 complete step13 " + core.name, core.edit(genesisTx), nil, BLOCK_ERR_COINBASE_INVALID, core.msg})
+	}
+	for _, c := range rows {
+		for _, parallel := range []bool{false, true} {
+			w := btNew(t)
+			in, _ := icbGenesisInputV1(t, 0)
+			reframed(&in, append([][]byte{c.tx}, c.others...)...)
+			icbWithAccountV1(t, w, func(account *mdbx.OperationAccount) {
+				out, delivered, _, err := icbValidateOnceV1(t, w, account, in, parallel)
+				var txErr *TxError
+				logicalMDBXAssert(t, errors.As(err, &txErr) && txErr.Code == c.code && txErr.Msg == c.msg && any(out.validationErr) == any(err) && delivered == nil, "%s parallel=%v: %v/%+v", c.name, parallel, err, out)
+			})
+		}
+	}
+	for _, kind := range bindingPinKinds() {
+		// Height 0 holds one transaction in the tree source, so a DA pin-only body stops at framing; its steps still admit it.
+		admitted, _ := icbGenesisInputV1(t, 0)
+		reframed(&admitted, append([][]byte{kind.first(t, spendable, kind.set...)}, kind.set...)...)
+		_, admitErr := initial148GenesisStepsV1(admitted.Raw, admitted.ExpectedTarget)
+		logicalMDBXAssert(t, admitErr == nil, "binding B09 Section25 order genesis steps %s admits pin: %v", kind.name, admitErr)
+		weighty := append(slices.Clone(kind.set), heavy...)
+		overKind, _ := icbGenesisInputV1(t, 0)
+		reframed(&overKind, append([][]byte{kind.first(t, spendable, weighty...)}, weighty...)...)
+		_, err := initial148GenesisStepsV1(overKind.Raw, overKind.ExpectedTarget)
+		initial148BlockWantError(t, "binding B09 Section25 order genesis steps "+kind.name+" pin behind weight", err, BLOCK_ERR_WEIGHT_EXCEEDED, "block weight exceeded")
+	}
+}

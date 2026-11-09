@@ -348,10 +348,6 @@ func (c *replayStepCall) qualify() error {
 		return nil
 	}
 	summary, err := ValidateBlockSteps1To12(c.body, c.parent, c.target, c.h, c.timestamps)
-	if err == nil {
-		c.count = summary.TxCount
-		return nil
-	}
 	switch any(err) {
 	case ErrBlockSteps1To12Capacity, ErrBlockSteps1To12Context:
 		return replayRecoveryRefusal(selectedSideInvariant, "replay qualification context or capacity invariant")
@@ -359,7 +355,11 @@ func (c *replayStepCall) qualify() error {
 	if binding := ValidateBlockBodyCommitments(c.body); binding != nil {
 		return c.unbound()
 	}
-	return c.consensus(err)
+	if err != nil {
+		return c.consensus(err)
+	}
+	c.count = summary.TxCount
+	return nil
 }
 
 func (c *replayStepCall) consensus(err error) error {

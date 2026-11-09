@@ -909,3 +909,59 @@ func TestSelectedSideRetentionFixture(t *testing.T) {
 		w.wantImage("unverified owner abort")
 	})
 }
+
+// retainBindingNoWrite requires the no-write native record of a refused Update.
+func retainBindingNoWrite(t *testing.T, label string, e mdbx.SelectedDamageEvidence) {
+	t.Helper()
+	if e.BeginWrite != 0 || e.Commits != 0 || e.Deletes != 0 || e.OldAborts != 1 {
+		t.Fatalf("%s native: %+v", label, e)
+	}
+}
+
+// TestSelectedSideRetentionFixtureBinding owns the native side of B11 for retention: a fresh pin-only refusal begins no
+// write, and where a same-position steps1-12 refusal exists it consults exactly what that refusal consults.
+func TestSelectedSideRetentionFixtureBinding(t *testing.T) {
+	nextTwo := func(a *mdbx.StorageAuthorityV1) { a.NextGenerationID = 2 }
+	for _, c := range []struct {
+		name   string
+		spec   ssqSpec
+		parent func(*ssqWorld) [32]byte
+		height uint64
+		tip    uint64
+		op     func(*ssqWorld, []byte, *mdbx.AuthorityPointV1) SelectedSideMutationOutcome
+	}{
+		{"create", ssqSpec{tip: 10, authority: nextTwo}, func(w *ssqWorld) [32]byte { return w.canonical[5] }, 6, 10, (*ssqWorld).retain},
+		{"replace", ssqSpec{tip: 20}, func(w *ssqWorld) [32]byte { w.retainSide(10, 15, 5, 16, false); return w.canonical[17] }, 18, 20, (*ssqWorld).replaceSide},
+		{"append", ssqSpec{tip: 10}, func(w *ssqWorld) [32]byte { w.retainSide(5, 7, 2, 8, false); return w.side[7] }, 8, 10, (*ssqWorld).retain},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			label := "binding B11 retention native " + c.name
+			w := newRetainFixtureWorld(t, c.spec)
+			parent := c.parent(w)
+			run := func(raw []byte) (SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
+				var out SelectedSideMutationOutcome
+				evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = c.op(w, raw, w.tipAt(c.tip)) })
+				if err != nil {
+					t.Fatalf("%s fixture: %v (%+v)", label, err, evidence)
+				}
+				return out, evidence
+			}
+			control, early := run(retainWitness(w.childAt(parent, 0, consensus.POW_LIMIT, nil)))
+			retainWantTimeOld(t, w, label+" control", control)
+			out, evidence := run(retainWitness(w.child(parent, c.height, nil)))
+			retainBindingNoWrite(t, label, evidence)
+			if evidence.OldGets != early.OldGets {
+				t.Fatalf("%s consulted: %+v vs %+v", label, evidence, early)
+			}
+			retainWantPin(t, w, label, out)
+		})
+	}
+	t.Run("matched", func(t *testing.T) {
+		const label = "binding B11 retention native matched"
+		w := newRetainFixtureWorld(t, ssqSpec{tip: 10})
+		blocks := w.retainSide(5, 8, 3, 9, false)
+		out, evidence := w.armed(mdbx.SelectedDamageProbeOnly, 0, nil, retainWitness(blocks[7]), w.tipAt(10))
+		retainBindingNoWrite(t, label, evidence)
+		retainWantPin(t, w, label, out)
+	})
+}

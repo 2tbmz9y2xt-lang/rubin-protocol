@@ -119,3 +119,22 @@ func TestValidateBlockBasic_AnchorBytesPrecedeCoinbaseStructure(t *testing.T) {
 		t.Fatalf("code=%s, want %s", got, BLOCK_ERR_ANCHOR_BYTES_EXCEEDED)
 	}
 }
+
+// TestValidateBlockBasic_WitnessCommitmentSingleton pins the ordered step-6 family: an equal/distinct anchor pair is
+// the witness refusal and precedes the later timestamp step.
+func TestValidateBlockBasic_WitnessCommitmentSingleton(t *testing.T) {
+	plain := blockStepsPlain(1)
+	commit := initial148BlockWitnessCommit(t, plain...)
+	pair := coinbaseTxWithOutputs(blockStepsHeight, []testOutput{bindingAnchor(commit[:], 0), bindingAnchor(make([]byte, 32), 0)})
+	target := POW_LIMIT
+	for _, c := range []struct {
+		name      string
+		timestamp uint64
+	}{{"valid time", blockStepsMedian + 1}, {"old time", blockStepsMedian}} {
+		t.Run(c.name, func(t *testing.T) {
+			raw := blockStepsMake(t, append([][]byte{pair}, plain...), func(h *blockStepsHead) { h.timestamp = c.timestamp })
+			_, err := ValidateBlockBasicWithContextAtHeight(raw, &blockStepsParent, &target, blockStepsHeight, blockStepsTimes)
+			initial148BlockWantError(t, "binding B05 singleton cardinality ordered "+c.name, err, BLOCK_ERR_WITNESS_COMMITMENT, bindingWitnessMsg)
+		})
+	}
+}

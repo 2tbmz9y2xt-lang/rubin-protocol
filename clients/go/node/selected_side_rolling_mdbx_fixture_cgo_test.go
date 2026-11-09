@@ -836,3 +836,45 @@ func TestSelectedSideRollingFixture(t *testing.T) {
 		w.wantImage("16385 persisted image after reopen")
 	})
 }
+
+// TestSelectedSideRollingFixtureBinding owns the native side of B11 for prepare and refill: a fresh pin-only refusal
+// begins no write and consults exactly what a same-position steps1-12 refusal consults.
+func TestSelectedSideRollingFixtureBinding(t *testing.T) {
+	t.Run("prepare", func(t *testing.T) {
+		const label = "binding B11 rolling native prepare"
+		w, raw := rollFixtureWorld(t)
+		control, early := w.armedPrepare(mdbx.SelectedDamageProbeOnly, 0, nil, retainWitness(w.childAt(w.side[1_440], 0, consensus.POW_LIMIT, nil)))
+		retainWantTimeOld(t, w, label+" control", control)
+		out, evidence := w.armedPrepare(mdbx.SelectedDamageProbeOnly, 0, nil, retainWitness(raw))
+		retainBindingNoWrite(t, label, evidence)
+		if evidence.OldGets != early.OldGets {
+			t.Fatalf("%s consulted: %+v vs %+v", label, evidence, early)
+		}
+		retainWantPin(t, w, label, out)
+	})
+	t.Run("refill", func(t *testing.T) {
+		const label = "binding B11 rolling native refill"
+		run := func(t *testing.T, cand func(*ssqWorld, [32]byte) []byte) (*ssqWorld, SelectedSideMutationOutcome, mdbx.SelectedDamageEvidence) {
+			t.Helper()
+			w, raw := rfWorld(t, 2, 0, 3, 113, cand)
+			w.rawEqual = func(rank uint8, key, want []byte) (bool, error) {
+				return mdbx.FixtureRawRowEqual(w.store, rank, key, want)
+			}
+			var out SelectedSideMutationOutcome
+			body := retainWitness(raw)
+			evidence, err := mdbx.FixtureSelectedDamage(w.store, w.owner, mdbx.SelectedDamageProbeOnly, 0, nil, func() { out = w.refill(body) })
+			if err != nil {
+				t.Fatalf("%s fixture: %v (%+v)", label, err, evidence)
+			}
+			return w, out, evidence
+		}
+		cw, control, early := run(t, func(w *ssqWorld, prev [32]byte) []byte { return w.childAt(prev, 0, consensus.POW_LIMIT, nil) })
+		retainWantTimeOld(t, cw, label+" control", control)
+		w, out, evidence := run(t, nil)
+		retainBindingNoWrite(t, label, evidence)
+		if evidence.OldGets != early.OldGets {
+			t.Fatalf("%s consulted: %+v vs %+v", label, evidence, early)
+		}
+		retainWantPin(t, w, label, out)
+	})
+}

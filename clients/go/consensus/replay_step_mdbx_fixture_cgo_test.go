@@ -689,28 +689,6 @@ func TestReplayStepMDBXFixtureCardinality(t *testing.T) {
 	}
 }
 
-func stepFixHeader(t *testing.T, w *stepWorld, raw []byte, timestamp uint64) []byte {
-	t.Helper()
-	copy(raw[4:36], w.hashes[0][:])
-	binary.LittleEndian.PutUint64(raw[68:76], timestamp)
-	for nonce := uint64(0); ; nonce++ {
-		binary.LittleEndian.PutUint64(raw[108:116], nonce)
-		if PowCheck(raw[:116], filledHash(0xff)) == nil {
-			return raw
-		}
-	}
-}
-
-func stepReplaceRaw(t *testing.T, w *stepWorld, raw []byte) {
-	t.Helper()
-	old := w.hashes[1]
-	w.bodies[1], w.headers[1], w.hashes[1] = raw, [116]byte(raw[:116]), mustHash([116]byte(raw[:116]))
-	stepDrop(w, 3, old[:])
-	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: w.hashes[1][:], AfterKind: mdbx.AfterLiteral, Literal: w.headers[1][:]})
-	w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHash = w.hashes[1] })
-	w.step.DiscardV1()
-}
-
 func TestReplayStepMDBXFixtureQualifierBindingPriority(t *testing.T) {
 	for _, source := range []string{"supplied", "stored", "bound_control"} {
 		t.Run(source, func(t *testing.T) {

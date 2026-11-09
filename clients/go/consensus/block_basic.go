@@ -111,12 +111,15 @@ func ParseBlockBytes(b []byte) (*ParsedBlock, error) {
 	}, nil
 }
 
-// ValidateStoredBlockCommitments verifies only the stored-block coinbase, txid, and witness commitments.
+// ValidateStoredBlockCommitments checks an actual unmodified ParseBlockBytes result for the commitment part of complete
+// body binding (RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8), in order: txid root, strict singleton witness commitment,
+// then both empty position-zero ranges. It does not check raw-byte parsing, the expected header identity, which its
+// caller owns, or coinbase structure.
 func ValidateStoredBlockCommitments(pb *ParsedBlock) error {
 	if pb == nil {
 		return txerr(BLOCK_ERR_PARSE, "nil parsed block")
 	}
-	if len(pb.Txs) == 0 || !isCoinbaseTx(pb.Txs[0]) {
+	if len(pb.Txs) == 0 || pb.Txs[0] == nil {
 		return txerr(BLOCK_ERR_COINBASE_INVALID, "first tx must be canonical coinbase")
 	}
 	root, err := MerkleRootTxids(pb.Txids)
@@ -126,7 +129,10 @@ func ValidateStoredBlockCommitments(pb *ParsedBlock) error {
 	if root != pb.Header.MerkleRoot {
 		return txerr(BLOCK_ERR_MERKLE_INVALID, "merkle_root mismatch")
 	}
-	return validateCoinbaseWitnessCommitment(pb)
+	if err := validateCoinbaseWitnessCommitment(pb); err != nil {
+		return err
+	}
+	return validateBindingPositionZeroPins(pb.Txs[0])
 }
 
 // parseBlockTx parses a single transaction from b at the given offset,
