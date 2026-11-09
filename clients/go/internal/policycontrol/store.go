@@ -15,10 +15,9 @@ import (
 )
 
 const (
-	controlFile = "policy-control"
-	scratchFile = "policy-control.scratch"
-	// unresolvedFile durably records a post-rename durability failure; Open then refuses forever.
-	unresolvedFile = "policy-control.unresolved"
+	controlFile    = "policy-control"
+	scratchFile    = "policy-control.scratch"
+	unresolvedFile = "policy-control.unresolved" // durable post-rename durability failure; Open then refuses forever
 )
 
 // NewInstallationProof names the identity it attests; a zero value or another identity refuses.
@@ -47,7 +46,6 @@ const (
 	stageRead
 )
 
-// errInjectedCrash stops a crossing at the faulted stage with no cleanup.
 var errInjectedCrash = errors.New("policycontrol: injected crash")
 
 type hooks struct {
@@ -56,7 +54,6 @@ type hooks struct {
 	ops     fsOps
 }
 
-// fsOps is the crossing's file-system seam; realFS makes the real calls.
 type fsOps struct {
 	remove, syncDir func(string) error
 	open            func(string) (*os.File, error)
@@ -77,18 +74,18 @@ var productionHooks = hooks{acquire: filelock.AcquireDirectory, ops: realFS}
 
 // Store is an open P holding the directory's exclusive inode lock until Close; safe for concurrent use.
 type Store struct {
-	dir            string
-	lock           *filelock.Handle
-	fault          func(stage) error
-	ops            fsOps
-	mu             sync.Mutex
-	st             *state   // last qualified committed state
-	image          []byte   // its exact bytes
-	tx             *Tx      // the held transaction
-	crossing       bool     // commit or recovery I/O in progress
-	pending        *attempt // unresolved UNKNOWN attempt
-	closed         bool
-	latchRequested bool // the one coalesced RAM latch request
+	dir                          string
+	lock                         *filelock.Handle
+	fault                        func(stage) error
+	ops                          fsOps
+	mu                           sync.Mutex
+	st                           *state   // last qualified committed state
+	image                        []byte   // its exact bytes
+	tx                           *Tx      // the held transaction
+	crossing                     bool     // commit or recovery I/O in progress
+	pending                      *attempt // unresolved UNKNOWN attempt
+	closed                       bool
+	latchRequested, latchRenewed bool // the one coalesced RAM latch request; recorded during the current crossing
 }
 
 // Create creates positively new P (sequence 0, empty receipt, both booleans
@@ -352,6 +349,6 @@ func (s *Store) Close() error {
 		_ = p.handle.Close()
 		p.handle = nil
 	}
-	s.closed = true
+	s.closed, s.latchRequested = true, false
 	return s.lock.Release()
 }

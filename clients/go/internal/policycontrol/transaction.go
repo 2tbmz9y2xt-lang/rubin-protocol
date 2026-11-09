@@ -224,7 +224,7 @@ func (tx *Tx) enterCommit() (old Result, proceed bool, err error) {
 		}
 		return old, false, nil
 	}
-	tx.done, s.crossing = true, true // Abort and a second Commit now see a finished Tx
+	tx.done, s.crossing, s.latchRenewed = true, true, false // Abort and a second Commit now see a finished Tx
 	return old, true, nil
 }
 

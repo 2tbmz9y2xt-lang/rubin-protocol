@@ -24,12 +24,7 @@ func TestCrashPointsReopenOldOrNew(t *testing.T) {
 	for _, at := range append(crossingStages, stageAck) {
 		dir, s := seedStore(t, ownerlessState(id, 40))
 		old := fileBytes(t, dir)
-		s.fault = func(st stage) error {
-			if st == at {
-				return errInjectedCrash
-			}
-			return nil
-		}
+		s.fault = failWith(errInjectedCrash, at)
 		r, _ := batchTx(t, s, 0, 128, "b").Commit()
 		if r.Truth != UNKNOWN {
 			t.Fatalf("stage %d: crash returned %v", at, r.Truth)
@@ -53,12 +48,7 @@ func TestFailurePointsClassification(t *testing.T) {
 	want := map[stage]Truth{stageCreate: OLD, stageWrite: OLD, stageFileSync: OLD, stageRename: OLD, stageDirSync: UNKNOWN, stageClose: UNKNOWN, stageAck: UNKNOWN}
 	for at, truth := range want {
 		_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
-		s.fault = func(st stage) error {
-			if st == at {
-				return errors.New("injected")
-			}
-			return nil
-		}
+		s.fault = failAt(at)
 		r, err := controlTx(t, s, "a").Commit()
 		if r.Truth != truth || err == nil {
 			t.Fatalf("stage %d: %v %v, want %v", at, r.Truth, err, truth)
@@ -82,12 +72,7 @@ func TestCreateCrashPoints(t *testing.T) {
 	for _, at := range crossingStages {
 		dir := storeDir(t)
 		h := productionHooks
-		h.fault = func(st stage) error {
-			if st == at {
-				return errInjectedCrash
-			}
-			return nil
-		}
+		h.fault = failWith(errInjectedCrash, at)
 		if s, err := start(dir, id, &proof, h); s != nil || !errors.Is(err, errInjectedCrash) {
 			t.Fatalf("stage %d: create %v", at, err)
 		}
@@ -269,12 +254,7 @@ func TestCrossingFileSystemCalls(t *testing.T) {
 	// A7, X7: readback establishes durability before classifying; a failed synchronization stays UNKNOWN.
 	for fail, truth := range map[string]Truth{"": NEW, "sync": UNKNOWN, "syncDir": UNKNOWN} {
 		dir, s := seedStore(t, ownerlessState(id, 40))
-		s.fault = func(st stage) error {
-			if st == stageAck {
-				return errors.New("ack lost")
-			}
-			return nil
-		}
+		s.fault = failAt(stageAck)
 		wantResult(t, func() Result { r, _ := controlTx(t, s, "a").Commit(); return r }(), UNKNOWN, 0)
 		s.fault, calls, s.ops = nil, nil, recordFS(&calls, dir, fail)
 		if r, _ := s.Recover(); r.Truth != truth || !slices.Contains(calls, "syncDir") || !slices.Contains(calls, "sync") {

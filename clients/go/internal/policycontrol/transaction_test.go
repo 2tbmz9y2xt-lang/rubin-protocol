@@ -242,29 +242,18 @@ func TestLostAcknowledgementRecovery(t *testing.T) {
 	}{{"durable", 0, NEW, 41, 128}, {"aborted before commit", stageRename, OLD, 40, 0}} {
 		dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 		old := fileBytes(t, dir)
-		s.fault = func(st stage) error {
-			if st == tc.failAt || st == stageAck {
-				return errors.New("injected")
-			}
-			return nil
-		}
+		s.fault = failAt(tc.failAt, stageAck)
 		r, err := batchTx(t, s, 0, 128, "b").Commit()
 		if wantResult(t, r, UNKNOWN, 0); !errors.Is(err, ErrUnresolved) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		s.fault = nil
-		if _, err := s.Begin(); !errors.Is(err, ErrBusy) {
-			t.Fatalf("%s: next writer not refused: %v", tc.name, err)
-		}
+		wantErr(t, ErrBusy)(s.Begin())
 		if g := s.Gate(); g != (Gate{}) {
 			t.Fatalf("%s: gate %+v", tc.name, g)
 		}
-		if _, err := s.View(); !errors.Is(err, ErrBusy) {
-			t.Fatalf("%s: view %v", tc.name, err)
-		}
-		if _, err := s.Membership(); !errors.Is(err, ErrBusy) {
-			t.Fatalf("%s: membership %v", tc.name, err)
-		}
+		wantErr(t, ErrBusy)(s.View())
+		wantErr(t, ErrBusy)(s.Membership())
 		r, err = s.Recover()
 		if wantResult(t, r, tc.truth, tc.seq); err != nil {
 			t.Fatalf("%s: recover %v", tc.name, err)
@@ -297,15 +286,8 @@ func TestRecoveryReadbackDisagreement(t *testing.T) {
 		"zero cursor substitute":  func(n *state) { n.receipt.Cursors = &Cursors{} },
 	} {
 		dir, s := seedStore(t, ownerlessState(id, 40))
-		s.fault = func(st stage) error {
-			if st == stageAck {
-				return errors.New("lost")
-			}
-			return nil
-		}
-		if r, _ := batchTx(t, s, 0, 128, "b").Commit(); r.Truth != UNKNOWN {
-			t.Fatalf("%s: commit %v", name, r.Truth)
-		}
+		s.fault = failAt(stageAck)
+		wantTruth(t, UNKNOWN)(batchTx(t, s, 0, 128, "b").Commit())
 		s.fault = nil
 		next := *s.pending.next
 		next.receipt = func() *Receipt { r := *next.receipt; return &r }()
@@ -319,9 +301,7 @@ func TestRecoveryReadbackDisagreement(t *testing.T) {
 		if wantResult(t, r, UNKNOWN, 0); err == nil {
 			t.Fatalf("%s: no error", name)
 		}
-		if _, err := s.Begin(); !errors.Is(err, ErrBusy) {
-			t.Fatalf("%s: writer released after UNKNOWN", name)
-		}
+		wantErr(t, ErrBusy)(s.Begin())
 	}
 }
 
@@ -329,12 +309,7 @@ func TestRecoveryReadbackDisagreement(t *testing.T) {
 func TestUnestablishedDurabilityStaysUnknown(t *testing.T) {
 	for name, fault := range map[string]error{"directory sync failed": errors.New("EIO"), "handle retained": errInjectedCrash} {
 		dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
-		s.fault = func(st stage) error {
-			if st == stageDirSync {
-				return fault
-			}
-			return nil
-		}
+		s.fault = failWith(fault, stageDirSync)
 		r, err := controlTx(t, s, "a").Commit()
 		if wantResult(t, r, UNKNOWN, 0); err == nil {
 			t.Fatalf("%s: no error", name)
@@ -375,12 +350,7 @@ func TestUnestablishedDurabilityStaysUnknown(t *testing.T) {
 	}
 	dir := storeDir(t)
 	h := productionHooks
-	h.fault = func(st stage) error {
-		if st == stageDirSync {
-			return errors.New("EIO")
-		}
-		return nil
-	}
+	h.fault = failAt(stageDirSync)
 	if s, err := start(dir, testIdentity(1), &NewInstallationProof{Identity: testIdentity(1)}, h); s != nil || err == nil {
 		t.Fatalf("create with failed sync: %v", err)
 	}
@@ -435,9 +405,7 @@ func TestPrecommitFailureIsOld(t *testing.T) {
 func TestNoWaiterDuringCrossing(t *testing.T) {
 	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	tx := controlTx(t, s, "a")
-	if _, err := s.Begin(); !errors.Is(err, ErrBusy) {
-		t.Fatalf("second Begin: %v", err)
-	}
+	wantErr(t, ErrBusy)(s.Begin())
 	if g := s.Gate(); g != (Gate{}) {
 		t.Fatalf("held gate %+v", g)
 	}
@@ -479,15 +447,8 @@ func TestRestartContinuation(t *testing.T) {
 	id := testIdentity(1)
 	dir, s := seedStore(t, ownerlessState(id, 40))
 	mustCommit(t, batchTx(t, s, 0, 128, "b"), NEW, 41)
-	s.fault = func(st stage) error {
-		if st == stageRename {
-			return errInjectedCrash
-		}
-		return nil
-	}
-	if r, _ := batchTx(t, s, 128, 256, "b").Commit(); r.Truth != UNKNOWN {
-		t.Fatalf("crash commit %v", r.Truth)
-	}
+	s.fault = failWith(errInjectedCrash, stageRename)
+	wantTruth(t, UNKNOWN)(batchTx(t, s, 128, 256, "b").Commit())
 	must(t, s.Close())
 	s = mustOpen(t, dir, id)
 	v := mustView(t, s)

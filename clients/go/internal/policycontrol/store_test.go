@@ -111,9 +111,7 @@ func TestCreateRefusesWithoutProofOrDirectory(t *testing.T) {
 			t.Fatalf("%s: created %v", name, names)
 		}
 	}
-	if _, err := Create(storeDir(t), Identity{}, NewInstallationProof{}); !errors.Is(err, ErrRefused) {
-		t.Fatalf("zero identity: %v", err)
-	}
+	wantErr(t, ErrRefused)(Create(storeDir(t), Identity{}, NewInstallationProof{}))
 	absent := filepath.Join(t.TempDir(), "absent")
 	if s, err := Create(absent, id, NewInstallationProof{Identity: id}); s != nil || !errors.Is(err, ErrUnreadable) {
 		t.Fatalf("absent directory: %v", err)
@@ -180,9 +178,7 @@ func TestOpenRejectsMalformedOrMismatchedControl(t *testing.T) {
 			t.Fatalf("%s: malformed P was reset or recreated", name)
 		}
 	}
-	if _, err := Open(dir, Identity{}); !errors.Is(err, ErrRefused) {
-		t.Fatalf("invalid expected identity: %v", err)
-	}
+	wantErr(t, ErrRefused)(Open(dir, Identity{}))
 }
 
 // X14, X4: the lock result decides before any read; nothing is created and no invalid result is treated as unlocked or fresh.

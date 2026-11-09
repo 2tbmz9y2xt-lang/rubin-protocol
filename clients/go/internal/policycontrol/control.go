@@ -5,19 +5,19 @@ import (
 	"errors"
 )
 
-// ObserveIncident stages the first OBSERVED (attempted=false) record when no
-// incident exists, preserving initial_sync_completed and has_attempt. The same
-// hash, height and error is a no-op returning the incident unchanged. The same
-// hash with another height or error is ErrContradiction; another hash while an
-// incident exists is refused (see ReplaceObserved). A refusal stages nothing.
+// ObserveIncident stages the first OBSERVED (attempted=false) record when no incident exists and
+// no change is staged, preserving initial_sync_completed and has_attempt. A request equal in hash,
+// height and error to the staged, else the committed, incident is a no-op returning it. The same
+// hash with another height or error is ErrContradiction; another hash is refused (see
+// ReplaceObserved). A transaction carries at most one incident change; a refusal stages nothing.
 func (tx *Tx) ObserveIncident(d Diagnosis) (Incident, error) {
 	if err := validDiagnosis(d); err != nil {
 		return Incident{}, err
 	}
 	switch cur := tx.ctl.incident; {
-	case cur == nil:
+	case cur == nil && !tx.incidentStaged():
 		tx.ctl.incident = (&Incident{Diagnosis: d, State: StateObserved}).clone()
-	case cur.Diagnosis.Hash != d.Hash:
+	case cur == nil || cur.Diagnosis.Hash != d.Hash:
 		return Incident{}, refused("another incident is current")
 	case cur.Diagnosis.Height != d.Height || !bytes.Equal(cur.Diagnosis.Error, d.Error):
 		return Incident{}, ErrContradiction
@@ -32,11 +32,15 @@ func (tx *Tx) ReplaceObserved(d Diagnosis) error {
 	if err := validDiagnosis(d); err != nil {
 		return err
 	}
-	if cur := tx.ctl.incident; cur == nil || cur.State != StateObserved || cur.Attempted || cur.Diagnosis.Hash == d.Hash {
+	if cur := tx.ctl.incident; tx.incidentStaged() || cur == nil || cur.State != StateObserved || cur.Attempted || cur.Diagnosis.Hash == d.Hash {
 		return refused("replacement needs OBSERVED, attempted=false and a different hash")
 	}
 	tx.ctl.incident = (&Incident{Diagnosis: d, State: StateObserved}).clone()
 	return nil
+}
+
+func (tx *Tx) incidentStaged() bool {
+	return !bytes.Equal(incidentBytes(tx.ctl.incident), incidentBytes(tx.base.ctl.incident))
 }
 
 func (in *Incident) admits(destination []byte) bool {
@@ -53,7 +57,7 @@ func (tx *Tx) ConsumeIntent(a Admission) error {
 		return err
 	}
 	cur := tx.ctl.incident
-	if !cur.admits(a.Destination) {
+	if tx.incidentStaged() || !cur.admits(a.Destination) {
 		return refused("intent needs OBSERVED with attempted=false, or AUTO_BLOCKED and a distinct destination")
 	}
 	next := cur.clone()
@@ -65,7 +69,7 @@ func (tx *Tx) ConsumeIntent(a Admission) error {
 // AutoBlock stages INTENT to AUTO_BLOCKED, preserving every diagnosis and
 // admission field and has_attempt.
 func (tx *Tx) AutoBlock() error {
-	if tx.ctl.incident == nil || tx.ctl.incident.State != StateIntent {
+	if tx.incidentStaged() || tx.ctl.incident == nil || tx.ctl.incident.State != StateIntent {
 		return refused("AUTO_BLOCKED needs INTENT")
 	}
 	tx.ctl.incident.State = StateAutoBlocked
@@ -75,7 +79,7 @@ func (tx *Tx) AutoBlock() error {
 // RemoveOnSuccess stages the qualified SUCCESS removal of an INTENT
 // incident, preserving has_attempt and initial_sync_completed.
 func (tx *Tx) RemoveOnSuccess() error {
-	if tx.ctl.incident == nil || tx.ctl.incident.State != StateIntent {
+	if tx.incidentStaged() || tx.ctl.incident == nil || tx.ctl.incident.State != StateIntent {
 		return refused("SUCCESS removal needs INTENT")
 	}
 	tx.ctl.incident = nil
@@ -99,23 +103,23 @@ func (s *Store) Latch() LatchStatus {
 	return LatchStatus{s.st.ctl.initialSync, s.latchRequested, s.pending != nil && s.pending.latch}
 }
 
-// RequestLatch records a named observation with the predicate true as at
-// most one coalesced RAM request. It starts no persistence, also while an
-// attempt is UNKNOWN, and is a no-op once the latch is durably true. Close
-// discards it.
+// RequestLatch records a named observation with the predicate true as at most one coalesced RAM
+// request. It starts no persistence, also while an attempt is UNKNOWN, and is a no-op once the
+// latch is durably true or the store is closed. Made while a latch attempt crosses, it is a new
+// request that the attempt's own OLD or UNKNOWN leaves in place. Close discards it.
 func (s *Store) RequestLatch() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.latchRequested = !s.st.ctl.initialSync
+	s.latchRequested, s.latchRenewed = !s.closed && !s.st.ctl.initialSync, s.crossing
 }
 
 // PersistLatch services the request. A durably true latch consumes it with
 // no write; a false predicate writes nothing and retains it; otherwise it
 // commits false to true as one ownerless control transaction: NEW latches
-// durably and clears the request, OLD clears it (STALE_LOCAL_PLAN retains it
-// for fresh qualification), UNKNOWN clears it and leaves the
-// pending-persistence owner to Recover. Nothing starts while a transaction is
-// held, crossing or UNKNOWN. No exported operation clears a true latch.
+// durably and clears every request, OLD clears the serviced request (STALE_LOCAL_PLAN retains it
+// for fresh qualification), UNKNOWN clears the serviced request and leaves the pending-persistence
+// owner to Recover. Nothing starts while a transaction is held, crossing or UNKNOWN. No exported
+// operation clears a true latch.
 func (s *Store) PersistLatch(p LatchProof) (Result, error) {
 	res, proceed, err := s.latchDecision(p)
 	if !proceed {
@@ -132,7 +136,6 @@ func (s *Store) PersistLatch(p LatchProof) (Result, error) {
 	return tx.Commit()
 }
 
-// latchDecision services every PersistLatch outcome that writes nothing.
 func (s *Store) latchDecision(p LatchProof) (Result, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,7 +160,7 @@ func (s *Store) latchDecision(p LatchProof) (Result, bool, error) {
 
 // afterLatchLocked applies the request law after Commit or Recover readback.
 func (s *Store) afterLatchLocked(direct bool, err error) {
-	if s.st.ctl.initialSync || (direct && !errors.Is(err, ErrStaleLocalPlan)) {
+	if s.st.ctl.initialSync || (direct && !s.latchRenewed && !errors.Is(err, ErrStaleLocalPlan)) {
 		s.latchRequested = false
 	}
 }

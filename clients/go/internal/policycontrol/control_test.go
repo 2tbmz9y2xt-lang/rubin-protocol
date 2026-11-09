@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 )
@@ -14,6 +15,38 @@ func diag(hash byte, height uint64, errText string) Diagnosis {
 
 func admission(dest string) Admission {
 	return Admission{Old: []byte("OLD"), Destination: []byte(dest), Source: SourceGenesisReplay, Profile: ProfileV1, Ownership: []byte("h1-owner")}
+}
+
+// failWith faults exactly the named stages with err.
+func failWith(err error, stages ...stage) func(stage) error {
+	return func(st stage) error {
+		if slices.Contains(stages, st) {
+			return err
+		}
+		return nil
+	}
+}
+
+func failAt(stages ...stage) func(stage) error { return failWith(errors.New("injected"), stages...) }
+
+// wantTruth checks the Truth of a (Result, error) call.
+func wantTruth(t *testing.T, want Truth) func(Result, error) {
+	return func(r Result, err error) {
+		t.Helper()
+		if r.Truth != want {
+			t.Fatalf("truth %v (%v), want %v", r.Truth, err, want)
+		}
+	}
+}
+
+// wantErr checks the trailing error of a call.
+func wantErr(t *testing.T, target error) func(...any) {
+	return func(v ...any) {
+		t.Helper()
+		if err, _ := v[len(v)-1].(error); !errors.Is(err, target) {
+			t.Fatalf("error %v, want %v", err, target)
+		}
+	}
 }
 
 // controlCommit runs one control transaction with stage and returns its result.
@@ -80,11 +113,9 @@ func TestSameIncidentAndContradiction(t *testing.T) {
 		t.Fatalf("same incident: %+v %v", got, err)
 	}
 	mustCommit(t, tx, OLD, 42)
-	for name, d := range map[string]Diagnosis{"other height": diag(1, 101, "e"), "other error": diag(1, 100, "x")} {
+	for _, d := range map[string]Diagnosis{"other height": diag(1, 101, "e"), "other error": diag(1, 100, "x")} {
 		tx := mustBegin(t, s)
-		if _, err := tx.ObserveIncident(d); !errors.Is(err, ErrContradiction) {
-			t.Fatalf("%s: %v", name, err)
-		}
+		wantErr(t, ErrContradiction)(tx.ObserveIncident(d))
 		mustCommit(t, tx, OLD, 42)
 	}
 	for name, fn := range map[string]func(tx *Tx) error{
@@ -109,15 +140,8 @@ func TestSameIncidentAndContradiction(t *testing.T) {
 func TestObservedReplacement(t *testing.T) {
 	_, s := seedStore(t, latchedAttemptedState())
 	mustControl(t, s, observe(diag(1, 100, "e")))
-	s.fault = func(st stage) error {
-		if st == stageRename {
-			return errors.New("injected")
-		}
-		return nil
-	}
-	if r, _ := controlCommit(t, s, func(tx *Tx) error { return tx.ReplaceObserved(diag(2, 200, "f")) }); r.Truth != OLD {
-		t.Fatalf("replacement precommit failure %v", r.Truth)
-	}
+	s.fault = failAt(stageRename)
+	wantTruth(t, OLD)(controlCommit(t, s, func(tx *Tx) error { return tx.ReplaceObserved(diag(2, 200, "f")) }))
 	if v := mustView(t, s); v.Incident.Diagnosis.Hash != fill32(1) {
 		t.Fatal("OLD replacement lost the old OBSERVED")
 	}
@@ -132,9 +156,7 @@ func TestObservedReplacement(t *testing.T) {
 	}
 	mustControl(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D1")) })
 	mustControl(t, s, func(tx *Tx) error { return tx.AutoBlock() })
-	if _, err := controlCommit(t, s, func(tx *Tx) error { return tx.ReplaceObserved(diag(3, 1, "h")) }); !errors.Is(err, ErrRefused) {
-		t.Fatalf("AUTO_BLOCKED replaced: %v", err)
-	}
+	wantErr(t, ErrRefused)(controlCommit(t, s, func(tx *Tx) error { return tx.ReplaceObserved(diag(3, 1, "h")) }))
 }
 
 // X9: an OBSERVED record with attempted=true is neither replaced nor consumed.
@@ -157,13 +179,11 @@ func TestAttemptedObservedIsNotReplaced(t *testing.T) {
 func TestIntentAndTerminalTransitions(t *testing.T) {
 	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	mustControl(t, s, observe(diag(1, 100, "e")))
-	for name, fn := range map[string]func(tx *Tx) error{
+	for _, fn := range map[string]func(tx *Tx) error{
 		"auto-block OBSERVED": func(tx *Tx) error { return tx.AutoBlock() },
 		"remove OBSERVED":     func(tx *Tx) error { return tx.RemoveOnSuccess() },
 	} {
-		if _, err := controlCommit(t, s, fn); !errors.Is(err, ErrRefused) {
-			t.Fatalf("%s: %v", name, err)
-		}
+		wantErr(t, ErrRefused)(controlCommit(t, s, fn))
 	}
 	r, err := controlCommit(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D1")) })
 	if wantResult(t, r, NEW, 42); err != nil {
@@ -174,27 +194,18 @@ func TestIntentAndTerminalTransitions(t *testing.T) {
 	if v.Incident.State != StateIntent || !v.Incident.Attempted || !v.HasAttempt || !reflect.DeepEqual(v.Incident.Admission, &a) {
 		t.Fatalf("INTENT view %+v", v.Incident)
 	}
-	s.fault = func(st stage) error {
-		if st == stageWrite {
-			return errors.New("injected")
-		}
-		return nil
-	}
+	s.fault = failAt(stageWrite)
 	if r, _ := controlCommit(t, s, func(tx *Tx) error { return tx.AutoBlock() }); r.Truth != OLD || mustView(t, s).Incident.State != StateIntent {
 		t.Fatal("handoff OLD did not keep INTENT")
 	}
 	s.fault = nil
-	if _, err := controlCommit(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D9")) }); !errors.Is(err, ErrRefused) {
-		t.Fatalf("OLD allowed a new intent: %v", err)
-	}
+	wantErr(t, ErrRefused)(controlCommit(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D9")) }))
 	mustControl(t, s, func(tx *Tx) error { return tx.AutoBlock() })
 	blocked := mustView(t, s).Incident
 	if blocked.State != StateAutoBlocked || blocked.Diagnosis.Hash != fill32(1) || !reflect.DeepEqual(blocked.Admission, &a) || !mustView(t, s).HasAttempt {
 		t.Fatalf("AUTO_BLOCKED %+v", blocked)
 	}
-	if _, err := controlCommit(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D1")) }); !errors.Is(err, ErrRefused) {
-		t.Fatalf("manual intent reused destination: %v", err)
-	}
+	wantErr(t, ErrRefused)(controlCommit(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D1")) }))
 	mustControl(t, s, func(tx *Tx) error { return tx.ConsumeIntent(admission("D2")) })
 	if in := mustView(t, s).Incident; in.State != StateIntent || !in.Attempted || in.Diagnosis.Hash != fill32(1) || string(in.Admission.Destination) != "D2" {
 		t.Fatalf("manual INTENT %+v", in)
@@ -262,15 +273,8 @@ func TestLatchPersistence(t *testing.T) {
 	if g := s.Gate(); g.AutomaticH1 {
 		t.Fatal("automatic H1 permitted before the latch")
 	}
-	s.fault = func(st stage) error {
-		if st == stageFileSync {
-			return errors.New("injected")
-		}
-		return nil
-	}
-	if r, _ := s.PersistLatch(stableProof(g)); r.Truth != OLD {
-		t.Fatalf("injected OLD: %v", r.Truth)
-	}
+	s.fault = failAt(stageFileSync)
+	wantTruth(t, OLD)(s.PersistLatch(stableProof(g)))
 	wantLatch(t, s, LatchStatus{})
 	s.fault = nil
 	s.RequestLatch()
@@ -300,14 +304,6 @@ func TestLatchPersistence(t *testing.T) {
 // A10, H5: requests during UNKNOWN start no persistence; readback true consumes them, readback false retains an intervening one; restart drops the RAM request; unrelated commits keep it.
 func TestLatchRequestLifetime(t *testing.T) {
 	id := testIdentity(1)
-	ackLost := func(also stage) func(stage) error {
-		return func(st stage) error {
-			if st == stageAck || st == also {
-				return errors.New("injected")
-			}
-			return nil
-		}
-	}
 	g := &Guard{}
 
 	// Unrelated UNKNOWN: request and OBSERVED start no persistence or writer.
@@ -315,32 +311,24 @@ func TestLatchRequestLifetime(t *testing.T) {
 	s.RequestLatch()
 	mustCommit(t, controlTx(t, s, "x"), NEW, 41)
 	wantLatch(t, s, LatchStatus{Requested: true})
-	s.fault = ackLost(0)
-	if r, _ := controlTx(t, s, "y").Commit(); r.Truth != UNKNOWN {
-		t.Fatal("expected UNKNOWN")
-	}
+	s.fault = failAt(stageAck)
+	wantTruth(t, UNKNOWN)(controlTx(t, s, "y").Commit())
 	s.fault = nil
 	before := fileBytes(t, dir)
 	s.RequestLatch()
 	if r, err := s.PersistLatch(stableProof(g)); r != (Result{}) || !errors.Is(err, ErrBusy) {
 		t.Fatalf("persistence during UNKNOWN: %v %v", r.Truth, err)
 	}
-	if _, err := s.Begin(); !errors.Is(err, ErrBusy) {
-		t.Fatal("OBSERVED writer started during UNKNOWN")
-	}
+	wantErr(t, ErrBusy)(s.Begin())
 	if !bytes.Equal(fileBytes(t, dir), before) {
 		t.Fatal("UNKNOWN readback wrote")
 	}
-	if r, _ := s.Recover(); r.Truth != NEW {
-		t.Fatalf("recover %v", r.Truth)
-	}
+	wantTruth(t, NEW)(s.Recover())
 	wantLatch(t, s, LatchStatus{Requested: true})
 
 	// Latch UNKNOWN, intervening request, readback true: consumed, no second write.
-	s.fault = ackLost(0)
-	if r, _ := s.PersistLatch(stableProof(g)); r.Truth != UNKNOWN {
-		t.Fatal("expected latch UNKNOWN")
-	}
+	s.fault = failAt(stageAck)
+	wantTruth(t, UNKNOWN)(s.PersistLatch(stableProof(g)))
 	s.fault = nil
 	wantLatch(t, s, LatchStatus{PendingPersistence: true})
 	s.RequestLatch()
@@ -354,24 +342,18 @@ func TestLatchRequestLifetime(t *testing.T) {
 	for _, intervening := range []bool{true, false} {
 		dir, s := seedStore(t, ownerlessState(id, 40))
 		s.RequestLatch()
-		s.fault = ackLost(stageRename)
-		if r, _ := s.PersistLatch(stableProof(g)); r.Truth != UNKNOWN {
-			t.Fatal("expected latch UNKNOWN")
-		}
+		s.fault = failAt(stageAck, stageRename)
+		wantTruth(t, UNKNOWN)(s.PersistLatch(stableProof(g)))
 		s.fault = nil
 		if intervening {
 			s.RequestLatch()
 		}
-		if r, _ := s.Recover(); r.Truth != OLD {
-			t.Fatalf("readback %v", r.Truth)
-		}
+		wantTruth(t, OLD)(s.Recover())
 		wantLatch(t, s, LatchStatus{Requested: intervening})
 		if !intervening {
 			continue
 		}
-		if r, _ := s.PersistLatch(LatchProof{Basis: g.Qualify()}); r.Truth != OLD {
-			t.Fatal("false predicate wrote")
-		}
+		wantTruth(t, OLD)(s.PersistLatch(LatchProof{Basis: g.Qualify()}))
 		mustCommit(t, controlTx(t, s, "z"), NEW, 41)
 		wantLatch(t, s, LatchStatus{Requested: true})
 		must(t, s.Close())
@@ -381,10 +363,8 @@ func TestLatchRequestLifetime(t *testing.T) {
 	// Restart before readback: RAM request lost, durable readback true enables.
 	dir, s = seedStore(t, ownerlessState(id, 40))
 	s.RequestLatch()
-	s.fault = ackLost(0)
-	if r, _ := s.PersistLatch(stableProof(g)); r.Truth != UNKNOWN {
-		t.Fatal("expected latch UNKNOWN")
-	}
+	s.fault = failAt(stageAck)
+	wantTruth(t, UNKNOWN)(s.PersistLatch(stableProof(g)))
 	s.RequestLatch()
 	must(t, s.Close())
 	wantLatch(t, mustOpen(t, dir, id), LatchStatus{Durable: true})
@@ -432,4 +412,85 @@ func TestEmptyLatchCommitConsumesRequest(t *testing.T) {
 	if r, err := tx.Commit(); err != nil || r.Truth != OLD || s.latchRequested {
 		t.Fatalf("%v %v requested=%t", r, err, s.latchRequested)
 	}
+}
+
+// X9: a transaction carries one incident change; every other change is refused, the staged state stays and commits alone.
+func TestOneIncidentChangePerTransaction(t *testing.T) {
+	type op = func(tx *Tx) error
+	replace := func(h byte) op { return func(tx *Tx) error { return tx.ReplaceObserved(diag(h, 200, "f")) } }
+	consume := func(dest string) op { return func(tx *Tx) error { return tx.ConsumeIntent(admission(dest)) } }
+	block, remove := op(func(tx *Tx) error { return tx.AutoBlock() }), op(func(tx *Tx) error { return tx.RemoveOnSuccess() })
+	committed := observe(diag(1, 100, "e"))
+	// ops[0] is the staged change; every later op must be refused.
+	for name, tc := range map[string]struct{ prior, ops []op }{
+		"first OBSERVED": {nil, []op{committed, replace(2), consume("D1"), observe(diag(2, 100, "e"))}},
+		"replacement":    {[]op{committed}, []op{replace(2), replace(3), consume("D1"), committed}},
+		"intent":         {[]op{committed}, []op{consume("D1"), block, remove, consume("D2")}},
+		"auto-block":     {[]op{committed, consume("D1")}, []op{block, consume("D2"), remove}},
+		"removal":        {[]op{committed, consume("D1")}, []op{remove, observe(diag(2, 100, "e")), committed}},
+	} {
+		_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+		for _, fn := range tc.prior {
+			mustControl(t, s, fn)
+		}
+		tx := controlTx(t, s, "x")
+		must(t, tc.ops[0](tx))
+		staged := incidentBytes(tx.ctl.incident)
+		for i, fn := range tc.ops[1:] {
+			if err := fn(tx); !errors.Is(err, ErrRefused) || !bytes.Equal(incidentBytes(tx.ctl.incident), staged) {
+				t.Fatalf("%s: second change %d: %v", name, i, err)
+			}
+		}
+		r, err := tx.Commit()
+		if r.Truth != NEW || err != nil || !bytes.Equal(incidentBytes(s.st.ctl.incident), staged) {
+			t.Fatalf("%s: commit %v %v", name, r.Truth, err)
+		}
+	}
+	// A12, X10: a record request compares with the staged incident ahead of the committed one.
+	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	mustControl(t, s, observe(diag(1, 100, "e")))
+	tx := mustBegin(t, s)
+	must(t, tx.ReplaceObserved(diag(2, 200, "f")))
+	if got, err := tx.ObserveIncident(diag(2, 200, "f")); err != nil || got.Diagnosis.Hash != fill32(2) {
+		t.Fatalf("staged no-op: %+v %v", got, err)
+	}
+	wantErr(t, ErrContradiction)(tx.ObserveIncident(diag(2, 201, "f")))
+}
+
+// A10: a request recorded while a latch attempt crosses survives its OLD or UNKNOWN; a durable NEW consumes it; a request from an earlier crossing marks nothing.
+func TestLatchRequestDuringCrossing(t *testing.T) {
+	g := &Guard{}
+	requestDuring := func(s *Store, faults ...stage) func(stage) error {
+		fail := failAt(faults...)
+		return func(st stage) error {
+			if st == stageCreate {
+				s.RequestLatch()
+			}
+			return fail(st)
+		}
+	}
+	want := map[Truth]LatchStatus{OLD: {Requested: true}, UNKNOWN: {Requested: true, PendingPersistence: true}, NEW: {Durable: true}}
+	for truth, faults := range map[Truth][]stage{OLD: {stageWrite}, UNKNOWN: {stageAck}, NEW: nil} {
+		_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+		s.RequestLatch()
+		s.fault = requestDuring(s, faults...)
+		wantTruth(t, truth)(s.PersistLatch(stableProof(g)))
+		wantLatch(t, s, want[truth])
+	}
+	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	s.fault = requestDuring(s)
+	mustCommit(t, controlTx(t, s, "x"), NEW, 41)
+	s.fault = failAt(stageWrite)
+	wantTruth(t, OLD)(s.PersistLatch(stableProof(g)))
+	wantLatch(t, s, LatchStatus{})
+}
+
+// A10: Close discards the RAM request, and a closed store records none.
+func TestCloseDiscardsLatchRequest(t *testing.T) {
+	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	s.RequestLatch()
+	must(t, s.Close())
+	wantLatch(t, s, LatchStatus{})
+	s.RequestLatch()
+	wantLatch(t, s, LatchStatus{})
 }
