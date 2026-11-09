@@ -62,21 +62,9 @@ func TestCanonicalMempoolTxPoolAdmissionContextForRelay(t *testing.T) {
 		}
 	}
 
-	dir := t.TempDir()
-	store, err := node.CreateBlockStore(node.BlockStorePath(dir))
-	if err != nil {
-		t.Fatalf("CreateBlockStore: %v", err)
-	}
-	chainState := node.NewChainState()
-	engine, err := node.NewSyncEngine(chainState, store, node.DefaultSyncConfig(nil, node.DevnetGenesisChainID(), node.ChainStatePath(dir)))
-	if err != nil {
-		t.Fatalf("NewSyncEngine: %v", err)
-	}
-	mempool, err := node.NewMempool(chainState, store, node.DevnetGenesisChainID())
-	if err != nil {
-		t.Fatalf("NewMempool: %v", err)
-	}
-	engine.SetMempool(mempool)
+	// The harness binds one empty mempool to its SyncEngine before any tip.
+	h := newTestHarness(t, 0, "127.0.0.1:0", nil)
+	mempool := h.mempool
 	adapters := []*CanonicalMempoolTxPool{NewCanonicalMempoolTxPool(mempool), NewCanonicalMempoolTxPool(mempool)}
 	requireForwarded := func(stage string, wantOK bool) {
 		t.Helper()
@@ -94,18 +82,33 @@ func TestCanonicalMempoolTxPoolAdmissionContextForRelay(t *testing.T) {
 		}
 	}
 
+	// requireSourceTip pins the literal connected tip and a strictly advanced
+	// generation, and requires every adapter to forward that exact tuple.
+	var previous uint64
+	requireSourceTip := func(stage string, height uint64) {
+		t.Helper()
+		requireForwarded(stage, true)
+		hash, _ := testHarnessBlockAtHeight(t, h, height)
+		internal, ok := mempool.PendingOutpointOwner().AdmissionContext()
+		if !ok || internal.StableTip != (node.PendingOutpointTip{HasTip: true, Height: height, Hash: hash}) || internal.Generation <= previous {
+			t.Fatalf("%s: source=(%+v,%v), want tip (%d,%x) after generation %d", stage, internal, ok, height, hash, previous)
+		}
+		for i, adapter := range adapters {
+			if got, _ := adapter.AdmissionContextForRelay(); got != internal {
+				t.Fatalf("%s: adapter %d=%+v, want the source tuple %+v", stage, i, got, internal)
+			}
+		}
+		previous = internal.Generation
+	}
+
 	requireForwarded("no tip", false)
-	if _, err := engine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
+	if _, err := h.syncEngine.ApplyBlock(node.DevnetGenesisBlockBytes(), nil); err != nil {
 		t.Fatalf("ApplyBlock(genesis): %v", err)
 	}
-	requireForwarded("after genesis", true)
-	internal, ok := mempool.PendingOutpointOwner().AdmissionContext()
-	if !ok || internal.StableTip != (node.PendingOutpointTip{HasTip: true, Height: chainState.Height, Hash: chainState.TipHash}) {
-		t.Fatalf("source after genesis=(%+v,%v), want the connected tip", internal, ok)
-	}
-	if got, _ := adapters[0].AdmissionContextForRelay(); got != internal {
-		t.Fatalf("adapter=%+v, want the source tuple %+v", got, internal)
-	}
+	requireSourceTip("after genesis", 0)
+	// A nonzero height distinguishes an adapter that drops or zeroes Height.
+	h.mineNextBlockBytes(t)
+	requireSourceTip("after height 1", 1)
 
 	var generic TxPool = NewMemoryTxPool()
 	if _, widened := generic.(interface {
