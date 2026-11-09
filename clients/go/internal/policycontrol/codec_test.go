@@ -45,8 +45,7 @@ func header(b *builder, id Identity, seq uint64) *builder {
 	return b.raw([]byte("RBNPCTL\x01")).raw(id.InstallationID[:]).raw(id.ChainID[:]).raw(id.GenesisHash[:]).u8(1).u64(seq)
 }
 
-// richImage is a hand-built image at sequence 41: H1 batch receipt with
-// cursors 0..128, latched control with an INTENT incident and two rows.
+// richImage is a hand-built image at sequence 41: H1 batch receipt with cursors 0..128, latched control with an INTENT incident and two rows.
 func richImage() ([]byte, *state) {
 	id := codecIdentity()
 	op := independentOpID(id, 41)
@@ -133,6 +132,9 @@ func TestDecodeRejectsStructuralCorpus(t *testing.T) {
 	mustIntegrity(t, "count above rows", rows(3, row1, row2))
 	mustIntegrity(t, "count below rows", rows(1, row1, row2))
 	mustIntegrity(t, "count over ceiling", rows(maxRows+1, row1, row2))
+	if _, err := decode(rows(maxRows+1, make([]byte, (maxRows+1)*minRowBytes))); err == nil || !strings.Contains(err.Error(), "row count") {
+		t.Fatalf("count over ceiling with enough bytes not refused by the count ceiling: %v", err)
+	}
 	overKey := append([]byte{1, 0, MaxKeyBytes + 1}, make([]byte, MaxKeyBytes+1+8+2)...)
 	mustIntegrity(t, "over-ceiling key", rows(1, overKey))
 	// The coder ceiling refuses before allocation, not later validation.
@@ -218,9 +220,7 @@ func TestDecodeRejectsDomainCorpus(t *testing.T) {
 	}
 }
 
-// H3: a single-byte mutation either refuses or decodes to another exact legal
-// value whose canonical encoding is the mutated image; a mutated identity
-// byte is then caught by the expected-binding check.
+// H3: a single-byte mutation either refuses or decodes to another exact legal value whose canonical encoding is the mutated image; a mutated identity byte is then caught by the expected-binding check.
 func TestDecodeSingleByteMutationCorpus(t *testing.T) {
 	img, want := richImage()
 	for i := range img {
@@ -244,8 +244,7 @@ func TestDecodeSingleByteMutationCorpus(t *testing.T) {
 	}
 }
 
-// The encoder refuses an over-ceiling field before any narrowing, independently
-// of callers' validation.
+// The encoder refuses an over-ceiling field before any narrowing, independently of callers' validation.
 func TestEncodeRefusesOverCeilingField(t *testing.T) {
 	for name, mutate := range map[string]func(st *state){
 		"intent": func(st *state) { st.receipt.Owner.Intent = make([]byte, MaxIntentBytes+1) },

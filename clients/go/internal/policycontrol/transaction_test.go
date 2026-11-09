@@ -135,8 +135,7 @@ func TestBatchCommitWithCursor(t *testing.T) {
 	}
 }
 
-// A4, H6: admission gets epoch n+1; continuation, handoff and ending keep
-// the original epoch and intent; nothing re-epochs an owned descriptor.
+// A4, H6: admission gets epoch n+1; continuation, handoff and ending keep the original epoch and intent; nothing re-epochs an owned descriptor.
 func TestOwnerEpochRules(t *testing.T) {
 	id := testIdentity(1)
 	for name, c := range map[string]struct {
@@ -327,8 +326,7 @@ func TestRecoveryReadbackDisagreement(t *testing.T) {
 	}
 }
 
-// X7, X8: a failed post-rename synchronization or a retained crossing handle
-// stays UNKNOWN; Recover neither synchronizes nor reads again.
+// X7, X8: a failed post-rename synchronization or a retained crossing handle stays UNKNOWN; Recover neither synchronizes nor reads again.
 func TestUnestablishedDurabilityStaysUnknown(t *testing.T) {
 	for name, fault := range map[string]error{"directory sync failed": errors.New("EIO"), "handle retained": errInjectedCrash} {
 		dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
@@ -407,8 +405,7 @@ func TestSequenceBoundary(t *testing.T) {
 	noScratch(t, dir)
 }
 
-// X5: a failure at any pre-rename stage, including a partial scratch write,
-// aborts everything: OLD with durable bytes identical.
+// X5: a failure at any pre-rename stage, including a partial scratch write, aborts everything: OLD with durable bytes identical.
 func TestPrecommitFailureIsOld(t *testing.T) {
 	for _, at := range []stage{stageCreate, stageWrite, stageFileSync, stageRename} {
 		dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
@@ -435,8 +432,7 @@ func TestPrecommitFailureIsOld(t *testing.T) {
 	}
 }
 
-// A18, X4: Begin, Gate, View, Recover and Close never wait on a crossing; a
-// second writer gets the immediate concurrency result.
+// A18, X4: Begin, Gate, View, Recover and Close never wait on a crossing; a second writer gets the immediate concurrency result.
 func TestNoWaiterDuringCrossing(t *testing.T) {
 	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	tx := controlTx(t, s, "a")
@@ -479,8 +475,7 @@ func TestNoWaiterDuringCrossing(t *testing.T) {
 	}
 }
 
-// A19: restart continues the committed batch with its next cursor; an
-// uncommitted batch keeps the preceding cursor; nothing is replayed.
+// A19: restart continues the committed batch with its next cursor; an uncommitted batch keeps the preceding cursor; nothing is replayed.
 func TestRestartContinuation(t *testing.T) {
 	id := testIdentity(1)
 	dir, s := seedStore(t, ownerlessState(id, 40))
@@ -511,8 +506,7 @@ func TestRestartContinuation(t *testing.T) {
 	}
 }
 
-// A20: a guard advanced after qualification is STALE_LOCAL_PLAN with OLD
-// retained; guards stay held through the crossing; fresh qualification commits.
+// A20: a guard advanced after qualification is STALE_LOCAL_PLAN with OLD retained; guards stay held through the crossing; fresh qualification commits.
 func TestGuardQualification(t *testing.T) {
 	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	before := fileBytes(t, dir)

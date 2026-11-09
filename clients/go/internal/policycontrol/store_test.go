@@ -147,8 +147,7 @@ func TestOpenMissingControl(t *testing.T) {
 	}
 }
 
-// X2, H4: malformed, unreadable or mismatched P is an integrity error and is
-// never reset, recreated or adopted; Create over an existing store refuses.
+// X2, H4: malformed, unreadable or mismatched P is an integrity error and is never reset, recreated or adopted; Create over an existing store refuses.
 func TestOpenRejectsMalformedOrMismatchedControl(t *testing.T) {
 	id := testIdentity(1)
 	dir := storeDir(t)
@@ -186,8 +185,7 @@ func TestOpenRejectsMalformedOrMismatchedControl(t *testing.T) {
 	}
 }
 
-// X14, X4: the lock result decides before any read; nothing is created and
-// no invalid result is treated as unlocked or fresh.
+// X14, X4: the lock result decides before any read; nothing is created and no invalid result is treated as unlocked or fresh.
 func TestLockAndPathResults(t *testing.T) {
 	id := testIdentity(1)
 	base := t.TempDir()

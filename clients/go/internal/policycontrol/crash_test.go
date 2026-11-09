@@ -18,8 +18,7 @@ import (
 
 var crossingStages = []stage{stageCreate, stageWrite, stageFileSync, stageRename, stageDirSync, stageClose}
 
-// H1: a crash at every crossing stage reopens to exactly the predecessor or
-// the successor image, never a third image or partial rows.
+// H1: a crash at every crossing stage reopens to exactly the predecessor or the successor image, never a third image or partial rows.
 func TestCrashPointsReopenOldOrNew(t *testing.T) {
 	id := testIdentity(1)
 	for _, at := range append(crossingStages, stageAck) {
@@ -49,8 +48,7 @@ func TestCrashPointsReopenOldOrNew(t *testing.T) {
 	}
 }
 
-// H1: a non-crash failure at each stage is OLD before the rename, UNKNOWN
-// after it, and a lost acknowledgement resolves by Recover.
+// H1: a non-crash failure at each stage is OLD before the rename, UNKNOWN after it, and a lost acknowledgement resolves by Recover.
 func TestFailurePointsClassification(t *testing.T) {
 	want := map[stage]Truth{stageCreate: OLD, stageWrite: OLD, stageFileSync: OLD, stageRename: OLD, stageDirSync: UNKNOWN, stageClose: UNKNOWN, stageAck: UNKNOWN}
 	for at, truth := range want {
@@ -77,8 +75,7 @@ func TestFailurePointsClassification(t *testing.T) {
 	}
 }
 
-// H1, A1: a crash while creating leaves either no P (missing control, Create
-// may run again) or exactly the initial image.
+// H1, A1: a crash while creating leaves either no P (missing control, Create may run again) or exactly the initial image.
 func TestCreateCrashPoints(t *testing.T) {
 	id := testIdentity(1)
 	proof := NewInstallationProof{Identity: id}
@@ -140,9 +137,7 @@ func TestChildContender(t *testing.T) {
 	}
 }
 
-// H2, X4: a second process contends on the directory inode after every one
-// of many commits (each atomically replacing the P file); goroutines race
-// Begin with exactly one winner and no lost update.
+// H2, X4: a second process contends on the directory inode after every one of many commits (each atomically replacing the P file); goroutines race Begin with exactly one winner and no lost update.
 func TestWriterExclusionAcrossProcessesAndGoroutines(t *testing.T) {
 	id := testIdentity(1)
 	dir := storeDir(t)
@@ -209,8 +204,7 @@ func TestWriterExclusionAcrossProcessesAndGoroutines(t *testing.T) {
 	}
 }
 
-// H1: the crossing syncs the scratch before the rename and the directory after
-// it, and the old P stays in place until the rename.
+// H1: the crossing syncs the scratch before the rename and the directory after it, and the old P stays in place until the rename.
 func TestCrossingStageOrder(t *testing.T) {
 	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	old := fileBytes(t, dir)
@@ -228,8 +222,7 @@ func TestCrossingStageOrder(t *testing.T) {
 	}
 }
 
-// recordFS wraps realFS, records each call (marking the control path as P)
-// and fails the call named fail.
+// recordFS wraps realFS, records each call (marking the control path as P) and fails the call named fail.
 func recordFS(calls *[]string, dir, fail string) fsOps {
 	do := func(op, path string, real func() error) error {
 		if path == filepath.Join(dir, controlFile) {
@@ -255,15 +248,13 @@ func recordFS(calls *[]string, dir, fail string) fsOps {
 	}
 }
 
-// H1: Create and a commit sync the scratch, rename it over P and sync the
-// directory, in that order, never remove P, and propagate each failure into
-// its stage's OLD/UNKNOWN classification.
+// H1: Create and a commit sync the scratch, rename it over P and sync the directory, in that order, never remove P, and propagate each failure into its stage's OLD/UNKNOWN classification.
 func TestCrossingFileSystemCalls(t *testing.T) {
 	id, want := testIdentity(1), "[remove open write sync rename(P) syncDir close]"
 	var calls []string
 	dir, h := storeDir(t), productionHooks
 	h.ops = recordFS(&calls, dir, "")
-	if s, err := start(dir, id, &NewInstallationProof{Identity: id}, h); err != nil || fmt.Sprint(calls) != want {
+	if s, err := start(dir, id, &NewInstallationProof{Identity: id}, h); err != nil || fmt.Sprint(calls) != want[:len(want)-1]+" sync syncDir]" {
 		t.Fatalf("Create calls %v: %v", calls, err)
 	} else {
 		_ = s.Close()
@@ -273,6 +264,21 @@ func TestCrossingFileSystemCalls(t *testing.T) {
 		calls, s.ops = nil, recordFS(&calls, dir, fail)
 		if r, _ := controlTx(t, s, "a").Commit(); r.Truth != truth || bytes.Contains([]byte(fmt.Sprint(calls)), []byte("remove(P)")) || (fail == "" && fmt.Sprint(calls) != want) {
 			t.Fatalf("fail %q: %v with calls %v, want %v", fail, r.Truth, calls, truth)
+		}
+	}
+	// A7, X7: readback establishes durability before classifying; a failed synchronization stays UNKNOWN.
+	for fail, truth := range map[string]Truth{"": NEW, "sync": UNKNOWN, "syncDir": UNKNOWN} {
+		dir, s := seedStore(t, ownerlessState(id, 40))
+		s.fault = func(st stage) error {
+			if st == stageAck {
+				return errors.New("ack lost")
+			}
+			return nil
+		}
+		wantResult(t, func() Result { r, _ := controlTx(t, s, "a").Commit(); return r }(), UNKNOWN, 0)
+		s.fault, calls, s.ops = nil, nil, recordFS(&calls, dir, fail)
+		if r, _ := s.Recover(); r.Truth != truth || !slices.Contains(calls, "syncDir") || !slices.Contains(calls, "sync") {
+			t.Fatalf("readback fail %q: %v with calls %v, want %v", fail, r.Truth, calls, truth)
 		}
 	}
 }

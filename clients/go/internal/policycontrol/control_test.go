@@ -47,8 +47,7 @@ func latchedAttemptedState() *state {
 	return st
 }
 
-// A11, H6: first OBSERVED is one control commit that preserves both
-// booleans and allocates nothing; height u32max is accepted, above refused.
+// A11, H6: first OBSERVED is one control commit that preserves both booleans and allocates nothing; height u32max is accepted, above refused.
 func TestFirstObserved(t *testing.T) {
 	dir, s := seedStore(t, latchedAttemptedState())
 	before := fileBytes(t, dir)
@@ -67,8 +66,7 @@ func TestFirstObserved(t *testing.T) {
 	}
 }
 
-// A12, X10, X9: SAME incident is a no-op that never resets attempted;
-// contradictions and second incidents are refused with P unchanged.
+// A12, X10, X9: SAME incident is a no-op that never resets attempted; contradictions and second incidents are refused with P unchanged.
 func TestSameIncidentAndContradiction(t *testing.T) {
 	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	mustControl(t, s, observe(diag(1, 100, "e")))
@@ -107,8 +105,7 @@ func TestSameIncidentAndContradiction(t *testing.T) {
 	}
 }
 
-// A13, X9: only OBSERVED attempted=false is replaced, atomically, keeping
-// both booleans; replacement OLD keeps the old OBSERVED.
+// A13, X9: only OBSERVED attempted=false is replaced, atomically, keeping both booleans; replacement OLD keeps the old OBSERVED.
 func TestObservedReplacement(t *testing.T) {
 	_, s := seedStore(t, latchedAttemptedState())
 	mustControl(t, s, observe(diag(1, 100, "e")))
@@ -156,8 +153,7 @@ func TestAttemptedObservedIsNotReplaced(t *testing.T) {
 	}
 }
 
-// A14, A15: intent consumption, AUTO_BLOCKED, manual re-intent and SUCCESS
-// removal keep diagnosis and has_attempt; OLD keeps INTENT for handoff retry only.
+// A14, A15: intent consumption, AUTO_BLOCKED, manual re-intent and SUCCESS removal keep diagnosis and has_attempt; OLD keeps INTENT for handoff retry only.
 func TestIntentAndTerminalTransitions(t *testing.T) {
 	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	mustControl(t, s, observe(diag(1, 100, "e")))
@@ -209,8 +205,7 @@ func TestIntentAndTerminalTransitions(t *testing.T) {
 	}
 }
 
-// A20: a P-INTENT transaction whose guard advanced is STALE_LOCAL_PLAN with
-// the predecessor unchanged; fresh qualification commits n+1.
+// A20: a P-INTENT transaction whose guard advanced is STALE_LOCAL_PLAN with the predecessor unchanged; fresh qualification commits n+1.
 func TestIntentGuardQualification(t *testing.T) {
 	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
 	mustControl(t, s, observe(diag(1, 100, "e")))
@@ -241,8 +236,7 @@ func wantLatch(t *testing.T, s *Store, want LatchStatus) {
 	}
 }
 
-// A9, X11: false predicate writes nothing and retains; stale basis retains;
-// OLD clears; NEW latches durably and nothing clears it afterwards.
+// A9, X11: false predicate writes nothing and retains; stale basis retains; OLD clears; NEW latches durably and nothing clears it afterwards.
 func TestLatchPersistence(t *testing.T) {
 	id := testIdentity(1)
 	dir, s := seedStore(t, ownerlessState(id, 40))
@@ -303,9 +297,7 @@ func TestLatchPersistence(t *testing.T) {
 	}
 }
 
-// A10, H5: requests during UNKNOWN start no persistence; readback true
-// consumes them, readback false retains an intervening one; restart drops
-// the RAM request; unrelated commits keep it.
+// A10, H5: requests during UNKNOWN start no persistence; readback true consumes them, readback false retains an intervening one; restart drops the RAM request; unrelated commits keep it.
 func TestLatchRequestLifetime(t *testing.T) {
 	id := testIdentity(1)
 	ackLost := func(also stage) func(stage) error {
@@ -399,9 +391,7 @@ func TestLatchRequestLifetime(t *testing.T) {
 	wantLatch(t, mustOpen(t, dir, id), LatchStatus{Durable: true})
 }
 
-// X11, X13: API census. No exported path sets the latch outside PersistLatch's
-// P transaction or clears it, and no exported operation resets or recreates
-// P; the result type carries only P truth.
+// X11, X13: API census. No exported path sets the latch outside PersistLatch's P transaction or clears it, and no exported operation resets or recreates P; the result type carries only P truth.
 func TestAPICensus(t *testing.T) {
 	methods := func(v any) []string {
 		typ := reflect.TypeOf(v)
@@ -432,5 +422,15 @@ func TestAPICensus(t *testing.T) {
 		if gt.Field(i).Type.Kind() != reflect.Bool {
 			t.Fatal("Gate carries more than refusal bits")
 		}
+	}
+}
+
+// A9: a latch transaction found empty (already durably true) still consumes the request.
+func TestEmptyLatchCommitConsumesRequest(t *testing.T) {
+	_, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	tx := mustBegin(t, s)
+	tx.latch, s.latchRequested = true, true
+	if r, err := tx.Commit(); err != nil || r.Truth != OLD || s.latchRequested {
+		t.Fatalf("%v %v requested=%t", r, err, s.latchRequested)
 	}
 }

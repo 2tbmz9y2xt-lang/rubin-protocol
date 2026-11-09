@@ -230,7 +230,7 @@ func (s *Store) readDurable(f *os.File) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Size() > maxImageBytes {
 		return nil, errors.New("policy control is not a regular file within its size ceiling")
 	}
-	if err = errors.Join(f.Sync(), syncDir(s.dir)); err != nil {
+	if err = errors.Join(s.ops.sync(f), s.ops.syncDir(s.dir)); err != nil {
 		return nil, errors.Join(err, markUnresolved(s.dir))
 	}
 	b := make([]byte, info.Size())

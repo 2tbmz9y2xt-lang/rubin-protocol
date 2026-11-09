@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// boundedState seeds slots counted rows (a mix of the five counted kinds,
-// including RECOVERY_CORE_IMPOSSIBLE) and contexts context rows at sequence 40.
+// boundedState seeds slots counted rows (a mix of the five counted kinds, including RECOVERY_CORE_IMPOSSIBLE) and contexts context rows at sequence 40.
 func boundedState(slots, contexts int) *state {
 	st := ownerlessState(testIdentity(1), 40)
 	counted := []RowKind{KindOriginalRejection, KindRecoveryCoreImpossible, KindCorrectiveAcceptance, KindAudit, KindDisposition}
@@ -54,9 +53,7 @@ func counts(t *testing.T, s *Store) (slots, contexts, reservations, working int)
 	return n[0], n[1], n[2], n[3]
 }
 
-// A16: exactly 65,536 slots and 1,024 contexts commit; one more refuses
-// before effects; reservation and working rows count in neither bound; a
-// second working row refuses; lasting rows are never removed.
+// A16: exactly 65,536 slots and 1,024 contexts commit; one more refuses before effects; reservation and working rows count in neither bound; a second working row refuses; lasting rows are never removed.
 func TestJournalBounds(t *testing.T) {
 	dir, s := seedStore(t, boundedState(MaxLastingSlots-1, MaxContexts-1))
 	mustCommit2 := func(fn func(tx *Tx) error, seq uint64) {
@@ -113,8 +110,7 @@ func TestJournalBounds(t *testing.T) {
 	}
 }
 
-// A21: a RECOVERY_CORE_IMPOSSIBLE row commits as a member of the closed
-// kind domain with its committing sequence and counts one lasting slot.
+// A21: a RECOVERY_CORE_IMPOSSIBLE row commits as a member of the closed kind domain with its committing sequence and counts one lasting slot.
 func TestRecoveryCoreImpossibleRow(t *testing.T) {
 	dir, s := seedStore(t, boundedState(MaxLastingSlots-1, 0))
 	r, err := rowCommit(t, s, putFn(KindRecoveryCoreImpossible, "core"))
@@ -137,8 +133,7 @@ func TestRecoveryCoreImpossibleRow(t *testing.T) {
 	}
 }
 
-// A17, X12: membership is the complete committed set read from rows, not
-// the receipt; a malformed row is an integrity error, never a partial list.
+// A17, X12: membership is the complete committed set read from rows, not the receipt; a malformed row is an integrity error, never a partial list.
 func TestStrictMembership(t *testing.T) {
 	id := testIdentity(1)
 	dir, s := seedStore(t, ownerlessState(id, 40))
