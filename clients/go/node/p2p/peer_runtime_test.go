@@ -1547,6 +1547,9 @@ func TestCanonicalTxIDAcceptsCanonicalAndRejectsTrailingBytes(t *testing.T) {
 
 func TestSetLastErrorAndBumpBanPersistState(t *testing.T) {
 	p := newPeerRuntimeTestPeer(t)
+	p.service.peersMu.Lock()
+	p.service.peers[p.addr()] = p // the fixture is its logical address's owner, whose state the PeerManager publishes
+	p.service.peersMu.Unlock()
 	p.setLastError("read failed")
 	snap := p.snapshotState()
 	if snap.LastError != "read failed" {
