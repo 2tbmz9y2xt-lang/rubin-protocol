@@ -63,16 +63,17 @@ var productionHooks = hooks{acquire: filelock.AcquireDirectory}
 // Store is an open P holding the store directory's exclusive inode lock from
 // Create or Open until Close. All methods are safe for concurrent use.
 type Store struct {
-	dir      string
-	lock     *filelock.Handle
-	fault    func(stage) error
-	mu       sync.Mutex
-	st       *state   // last qualified committed state
-	image    []byte   // its exact bytes
-	tx       *Tx      // the held transaction
-	crossing bool     // commit or recovery I/O in progress
-	pending  *attempt // unresolved UNKNOWN attempt
-	closed   bool
+	dir            string
+	lock           *filelock.Handle
+	fault          func(stage) error
+	mu             sync.Mutex
+	st             *state   // last qualified committed state
+	image          []byte   // its exact bytes
+	tx             *Tx      // the held transaction
+	crossing       bool     // commit or recovery I/O in progress
+	pending        *attempt // unresolved UNKNOWN attempt
+	closed         bool
+	latchRequested bool // the one coalesced RAM latch request
 }
 
 // Create creates positively new P (sequence 0, empty receipt, both booleans
