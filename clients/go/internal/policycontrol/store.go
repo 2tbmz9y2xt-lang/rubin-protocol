@@ -154,7 +154,8 @@ func (s *Store) create(id Identity) error {
 // markUnresolved records that readable P bytes must never qualify again: a
 // repeated synchronization after a reported failure proves nothing.
 func markUnresolved(dir string) error {
-	f, err := os.OpenFile(filepath.Join(dir, unresolvedFile), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+	// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
+	f, err := os.OpenFile(filepath.Join(dir, unresolvedFile), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
 	if err != nil {
 		return err
 	}
@@ -177,7 +178,8 @@ func (s *Store) readImage() ([]byte, error) {
 			return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
 		}
 	}
-	f, err := os.OpenFile(filepath.Join(s.dir, controlFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0)
+	// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
+	f, err := os.OpenFile(filepath.Join(s.dir, controlFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0) // nosemgrep
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrMissingControl
 	} else if err != nil {
@@ -229,7 +231,8 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 	}
 	step(stageCreate, func() (err error) {
 		if err = os.Remove(scratch); err == nil || errors.Is(err, fs.ErrNotExist) {
-			f, err = os.OpenFile(scratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
+			// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
+			f, err = os.OpenFile(scratch, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
 		}
 		return err
 	})
