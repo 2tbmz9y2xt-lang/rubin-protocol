@@ -418,6 +418,9 @@ func connectBlockBasicInMemoryAtHeightAndSuiteContext(
 	if err != nil {
 		return nil, err
 	}
+	if err := checkCompleteMapLogicalState(input.BlockHeight, input.State.Utxos, workUtxos); err != nil {
+		return nil, err
+	}
 	return commitInMemoryConnectSummary(input.State, workUtxos, alreadyGeneratedU128, alreadyGeneratedN1, sumFees, 0, 0), nil
 }
 

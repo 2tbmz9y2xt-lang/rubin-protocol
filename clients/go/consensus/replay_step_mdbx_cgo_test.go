@@ -1254,3 +1254,39 @@ func testStepHistorical(t *testing.T) {
 		logicalMDBXAssert(t, h == 1, "supplied spend context height drifted")
 	}
 }
+
+// stepGrowthWorld seeds nine mature coinbase parents and replaces the h=100 suffix.
+func stepGrowthWorld(t *testing.T, census logicalGrowthCensus) *stepWorld {
+	t.Helper()
+	const h = uint64(100)
+	w := newStepWorld(t, int(h), false)
+	w.prefix(t, h)
+	kp := mustMLDSA87Keypair(t)
+	stepSeedInputs(t, w, logicalGrowthParents(p2pkCovenantDataForPubkey(kp.PubkeyBytes())))
+	txs := logicalGrowthTxs(t, kp, w.genesis.ChainID, census)
+	old := w.hashes[h]
+	raw := stepBlock(t, h, w.hashes[h-1], w.lastTime+h*240, txs...)
+	w.bodies[h], w.headers[h], w.hashes[h] = raw, [116]byte(raw[:116]), mustHash([116]byte(raw[:116]))
+	stepDrop(w, 3, old[:])
+	w.apply(mdbx.Mutation{DBI: logicalMDBXDBIs[3], Key: w.hashes[h][:], AfterKind: mdbx.AfterLiteral, Literal: w.headers[h][:]})
+	w.setAuthority(func(a *mdbx.StorageAuthorityV1) { a.Replay.Target.TipHash = w.hashes[h] })
+	w.step.DiscardV1()
+	return w
+}
+
+// TestReplayStepMDBXV1LogicalStateGrowth pins the replay projection of the growth law.
+func TestReplayStepMDBXV1LogicalStateGrowth(t *testing.T) {
+	const h = uint64(100)
+	w := stepGrowthWorld(t, logicalGrowthOver)
+	before := w.image()
+	i := replayStepRun(w.step, w.store, w.owner, w.bodies[h])
+	stepTuple(t, i.out, "", "consensus invalid", "OLD", 1, 1, true)
+	e, ok := any(i.observation.incoming).(*TxError)
+	logicalMDBXAssert(t, ok && e != nil && e.Code == BLOCK_ERR_STATE_GROWTH_EXCEEDED && e.Msg == "logical state growth exceeded" && i.observation.h == h && i.observation.x == w.hashes[h] && i.observation.failure == nil && i.observation.cause == nil, "R5 exact growth observation: %+v", i.observation)
+	replaySameImage(t, before, w.image(), "R5 growth refusal")
+	stepReleased(t, w)
+
+	control := stepGrowthWorld(t, logicalGrowthEqual)
+	got := replayStepRun(control.step, control.store, control.owner, control.bodies[h])
+	logicalMDBXAssert(t, got.out.Err == nil && got.out.Decision != "consensus invalid" && got.observation.incoming == nil, "equality must pass the growth law: %+v / %+v", got.out, got.observation)
+}
