@@ -302,6 +302,9 @@ func TestLatchPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLatch(t, mustOpen(t, dir, id), LatchStatus{Durable: true})
+	if r, err := s.PersistLatch(stableProof(g)); r != (Result{}) || !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed store: %v %v", r, err)
+	}
 }
 
 // A10, H5: requests during UNKNOWN start no persistence; readback true

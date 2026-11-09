@@ -266,15 +266,26 @@ func TestLockAndPathResults(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(fifoDir, controlFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
-	go func() { _, err := Open(fifoDir, id); done <- err }()
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrUnreadable) {
-			t.Fatalf("FIFO P: %v", err)
+	// A FIFO P refuses within a bounded deadline (a liveness bound only), first
+	// without a writer and then with a live writer that writes nothing.
+	for _, live := range []bool{false, true} {
+		if live {
+			writer, err := os.OpenFile(filepath.Join(fifoDir, controlFile), os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = writer.Close() })
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Open waited on a FIFO P")
+		done := make(chan error, 1)
+		go func() { _, err := Open(fifoDir, id); done <- err }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrUnreadable) {
+				t.Fatalf("FIFO P (live writer %t): %v", live, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Open waited on a FIFO P (live writer %t)", live)
+		}
 	}
 	pdir := storeDir(t)
 	if err := os.Symlink(filepath.Join(dir, controlFile), filepath.Join(pdir, controlFile)); err != nil {

@@ -190,17 +190,22 @@ func (s *Store) readImage() ([]byte, error) {
 	if err == nil && (!info.Mode().IsRegular() || info.Size() > maxImageBytes) {
 		err = errors.New("policy control is not a regular file within its size ceiling")
 	}
-	var b []byte
 	if err == nil {
 		if err = errors.Join(f.Sync(), syncDir(s.dir)); err != nil {
 			err = errors.Join(err, markUnresolved(s.dir))
-		} else {
-			b = make([]byte, info.Size())
-			_, err = io.ReadFull(f, b)
 		}
 	}
-	if n, rerr := f.Read(make([]byte, 1)); err == nil && (n != 0 || rerr != io.EOF) {
-		err = errors.New("policy control changed size while read")
+	var b []byte
+	if err == nil {
+		b = make([]byte, info.Size())
+		_, err = io.ReadFull(f, b)
+	}
+	// The growth probe runs only on a regular file that was fully read; on a
+	// non-regular file (a FIFO with a live writer) it could block.
+	if err == nil {
+		if n, rerr := f.Read(make([]byte, 1)); n != 0 || rerr != io.EOF {
+			err = errors.New("policy control changed size while read")
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)

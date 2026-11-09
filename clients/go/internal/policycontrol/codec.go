@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -256,6 +257,8 @@ func validateIncident(in *Incident, hasAttempt bool) error {
 	switch {
 	case validDiagnosis(in.Diagnosis) != nil:
 		return validDiagnosis(in.Diagnosis)
+	case in.Attempted && !hasAttempt:
+		return errors.New("attempted incident without has_attempt")
 	case in.State == StateObserved && in.Admission == nil:
 		return nil
 	case (in.State == StateIntent || in.State == StateAutoBlocked) && in.Attempted && hasAttempt:
@@ -408,6 +411,9 @@ func (c *coder) bools(vs ...*bool) {
 
 func (c *coder) bytes(max int, vs ...*[]byte) {
 	for _, v := range vs {
+		if !c.dec && (len(*v) > max || len(*v) > math.MaxUint16) {
+			panic(fmt.Sprintf("policycontrol: encode invariant: field length %d above ceiling %d", len(*v), max))
+		}
 		buf := binary.BigEndian.AppendUint16(nil, uint16(len(*v)))
 		c.raw(buf)
 		if n := int(binary.BigEndian.Uint16(buf)); !c.dec {
