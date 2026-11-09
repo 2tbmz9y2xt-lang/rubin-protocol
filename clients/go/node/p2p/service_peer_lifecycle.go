@@ -91,18 +91,27 @@ func (s *Service) registerPeer(p *peer) error {
 		unlockQuota := s.lockPeerQuotaKey(quotaKey)
 		defer unlockQuota()
 	}
+	addr := p.addr()
+	// One peersMu section admits p to the PeerManager and, only on success, makes it the owner of
+	// its logical address (the newest registration replaces an older one) and installs its alias
+	// unless that key is another connection's logical address.
+	s.peersMu.Lock()
 	if err := s.cfg.PeerManager.AddPeer(&p.state); err != nil {
+		s.peersMu.Unlock()
 		return err
 	}
-	s.peersMu.Lock()
-	s.peers[p.addr()] = p
+	s.peerRegistrations++
+	p.registrationOrder = s.peerRegistrations
+	s.peers[addr] = p
 	if p.conn != nil {
-		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != p.addr() {
-			s.peers[alias] = p
+		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != addr {
+			if holder := s.peers[alias]; holder == nil || holder.addr() != alias {
+				s.peers[alias] = p
+			}
 		}
 	}
 	s.peersMu.Unlock()
-	s.resetReconnect(p.addr())
+	s.resetReconnect(addr)
 	return nil
 }
 
@@ -118,9 +127,8 @@ func (s *Service) unregisterPeer(p *peer) {
 		unlockQuota := s.lockPeerQuotaKey(quotaKey)
 		defer unlockQuota()
 	}
-	remove := s.removePeerEntries(p)
+	remove := s.removePeerEntries(p, addr)
 	if remove {
-		s.cfg.PeerManager.RemovePeer(addr)
 		if err := s.releaseDAQuotaIfInactiveLocked(quotaKey); err != nil {
 			p.setLastError(err.Error())
 		}
@@ -140,9 +148,15 @@ func (s *Service) unregisterPeer(p *peer) {
 	}
 }
 
-func (s *Service) removePeerEntries(p *peer) bool {
+// removePeerEntries deletes every Service.peers entry of p and, in the same peersMu section,
+// applies p's PeerManager effect for its logical address addr: only the logical owner has one.
+// An exiting owner hands addr to the live connection with the same logical address and the
+// highest registration order (its current state is published), or removes addr when none is
+// left; a replaced connection's exit leaves the PeerManager untouched.
+func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
+	owner := s.peers[addr] == p
 	remove := false
 	for key, current := range s.peers {
 		if current == p {
@@ -150,7 +164,34 @@ func (s *Service) removePeerEntries(p *peer) bool {
 			remove = true
 		}
 	}
+	if !owner {
+		return remove
+	}
+	var successor *peer
+	for _, current := range s.peers {
+		if current != nil && current.addr() == addr && (successor == nil || current.registrationOrder > successor.registrationOrder) {
+			successor = current
+		}
+	}
+	if successor == nil {
+		s.cfg.PeerManager.RemovePeer(addr)
+		return remove
+	}
+	s.peers[addr] = successor
+	state := successor.snapshotState()
+	_ = s.cfg.PeerManager.UpsertPeer(&state)
 	return remove
+}
+
+// publishPeerStateIfOwner publishes p's state snapshot to the PeerManager only while p is the
+// logical owner of the snapshot's address, checked under peersMu in the same step: a replaced or
+// removed connection never overwrites or recreates another connection's entry.
+func (s *Service) publishPeerStateIfOwner(p *peer, state *node.PeerState) {
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	if s.peers[state.Addr] == p {
+		_ = s.cfg.PeerManager.UpsertPeer(state)
+	}
 }
 
 func (s *Service) releaseDAQuotaIfInactive(quotaKey string) error {

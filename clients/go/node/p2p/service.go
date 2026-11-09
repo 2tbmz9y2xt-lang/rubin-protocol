@@ -53,10 +53,14 @@ type Service struct {
 	cancel   context.CancelFunc
 	listener net.Listener
 
-	peersMu          sync.RWMutex
-	peers            map[string]*peer
-	peerQuotaLocksMu sync.Mutex
-	peerQuotaLocks   map[string]*peerQuotaLock
+	peersMu sync.RWMutex
+	peers   map[string]*peer
+	// peerRegistrations is the last registration order handed out by registerPeer; a newer
+	// registration of one logical address owns it, and unregisterPeer hands an exiting owner's
+	// address to the live same-address connection with the highest order. Guarded by peersMu.
+	peerRegistrations uint64
+	peerQuotaLocksMu  sync.Mutex
+	peerQuotaLocks    map[string]*peerQuotaLock
 	// closed is set to true by Close. A Service instance is single-use: once
 	// Close has returned, Start refuses to restart the same Service and the
 	// accept/reconnect loops must not be revived. Guarded by peersMu.
@@ -140,6 +144,9 @@ type peer struct {
 	// prefetch grouping and disconnect release all key on it; empty means no IP endpoint, so the
 	// connection takes no DA admission, DA quota lock, DA cleanup or prefetch candidacy.
 	daQuotaIdentity string
+	// registrationOrder is this connection's Service.peerRegistrations value, set once by
+	// registerPeer under Service.peersMu and read only under it.
+	registrationOrder uint64
 
 	writeMu sync.Mutex
 
