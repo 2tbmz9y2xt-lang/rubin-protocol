@@ -599,7 +599,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 	t.Run("blocked write and writeMu remain inside lease", func(t *testing.T) {
 		h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 		h.service.cfg.EnableCompactReceive = true
-		current := addDAPrefetchTestPeer(h.service, "127.0.0.7:19119", nil)
+		current := addDAPrefetchTestPeer(h.service, "127.0.0.7:19119", "127.0.0.7:19119", nil)
 		current.writeMu.Lock()
 		unlocked := false
 		defer func() {
@@ -637,7 +637,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		local, remote := net.Pipe()
 		defer remote.Close()
 		entered, release := make(chan struct{}), make(chan struct{})
-		current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+		current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
 		current.conn = &lifecycleGateConn{Conn: local, entered: entered, release: release, writeErr: errors.New("paused write failure")}
 		f, daID := newDAIngressFixture(t, h), daRelayTestID(0xf1)
 		raw := f.commit(daID, 2)
@@ -678,7 +678,7 @@ func TestServiceDetachedDAWorkLifecycle(t *testing.T) {
 		releaseWrite()
 		requireReturned(t, admitted, "detached admission after scheduler Write failure")
 		requireReturned(t, closeDone, "Close after scheduler Write failure")
-		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+		retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"192.0.2.1"}, h.service.cfg.Now())
 		require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "scheduler Write cleanup retry=%+v diagnostic=%q", retry, diagnostic)
 	})
 }
@@ -1148,7 +1148,7 @@ func TestTerminalPersistenceNewSkipsTheFencedTTLAdvance(t *testing.T) {
 	must(t, err, "processRelayedBlock")
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(109), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111").handleTx(commit), "retain the commit")
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")
 	// Primed to ONE tick from expiry, so the tick this row skips is the one that
 	// decides: with the gate reverted the record is released and the replay
 	// below readmits instead of reporting the DUPLICATE.
@@ -1274,7 +1274,7 @@ func TestResolvedOrphanTerminalResultSkipsTheFencedTTLAdvance(t *testing.T) {
 	must(t, err, "processRelayedBlock")
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(111), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111").handleTx(commit), "retain the commit")
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "retain the commit")
 	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
 	must(t, h.service.daRelay.AdvanceOrphanTTL(), "prime the TTL")
 	terminal := errors.New("storage persistence fault")

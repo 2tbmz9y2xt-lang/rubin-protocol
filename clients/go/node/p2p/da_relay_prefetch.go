@@ -58,7 +58,7 @@ func (s *Service) daPrefetchPeers(peerAddr string) (map[string]*peer, []string) 
 	return peers, preferDAPrefetchPeer(keys, s.preferredDAPrefetchPeerKeyLocked(peerAddr, height, peers))
 }
 
-// preferredDAPrefetchPeerKeyLocked returns the trigger's quota key when the peer is
+// preferredDAPrefetchPeerKeyLocked returns the trigger's daQuotaIdentity when the peer is
 // present, accepts prefetch, still meets the preference minimum after its quality
 // score drifts to height, and that key is nonempty and present in peersByKey (the
 // contract's fail-closed bound; the production caller's trigger is always listed by
@@ -73,7 +73,7 @@ func (s *Service) preferredDAPrefetchPeerKeyLocked(peerAddr string, height uint6
 	if !acceptsDAPrefetch(current) || !current.qualityPreferred(height) {
 		return ""
 	}
-	key := peerQuotaKey(current.addr())
+	key := current.daQuotaIdentity
 	if _, ok := peersByKey[key]; key == "" || !ok {
 		return ""
 	}
@@ -87,7 +87,7 @@ func (s *Service) allDAPrefetchPeersLocked() (map[string]*peer, []string) {
 		if !acceptsDAPrefetch(current) {
 			continue
 		}
-		if key := peerQuotaKey(current.addr()); key != "" {
+		if key := current.daQuotaIdentity; key != "" {
 			peers[key] = current
 		}
 	}

@@ -466,7 +466,7 @@ func TestProcessRelayedBlockDropsRetainedDAOrphanNotValidAgainstC1(t *testing.T)
 	sink.service.cfg.Now = func() time.Time { return time.Unix(0, 0) }
 	f := newDAIngressFixture(t, sink)
 	commit := f.commit(daRelayTestID(100), 2)
-	must(t, daRelayTestPeer(sink, "127.0.0.1:19111").handleTx(commit), "handleTx")
+	must(t, daRelayTestPeer(sink, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "handleTx")
 	f.requireRetained(commit, "before any block was applied")
 	input, entry := f.lastOp, sink.chainState.Utxos[f.lastOp]
 	delete(sink.chainState.Utxos, input)
@@ -489,7 +489,7 @@ func TestAnnounceBlockAdvancesDARelayTTL(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	commit := f.commit(daRelayTestID(101), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.1:19111").handleTx(commit), "handleTx")
+	must(t, daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111").handleTx(commit), "handleTx")
 	if _, err := testPeerForService(h.service, "remote", 3).processRelayedBlock(blockAtHeight(t, source, 1)); err != nil {
 		t.Fatalf("processRelayedBlock(1): %v", err)
 	}
@@ -506,7 +506,7 @@ func TestUnregisterPeerReleasesDAChunkPeerAccountingAndDropsOwnedChunk(t *testin
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	ownedID, otherID := daRelayTestID(106), daRelayTestID(128)
-	p := daRelayTestPeer(h, "127.0.0.1:19111")
+	p := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111")
 	must(t, h.service.registerPeer(p), "register peer")
 	commit, chunk, other := f.commit(ownedID, 2), f.chunk(ownedID, 0, []byte("owned")), f.commit(otherID, 2)
 	f.admit(commit, "127.0.0.2:19112")
@@ -526,23 +526,23 @@ func TestUnregisterPeerReleasesDACommitPeerAccountingAndRetiresPeerOnlyRecord(t 
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
 	daID := daRelayTestID(109)
-	p := daRelayTestPeer(h, "127.0.0.1:19111")
+	p := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111")
 	must(t, h.service.registerPeer(p), "register peer")
 	commit, chunk := f.commit(daID, 2), f.chunk(daID, 0, []byte("other"))
 	must(t, p.handleTx(commit), "owned commit")
-	must(t, daRelayTestPeer(h, "127.0.0.2:19112").handleTx(chunk), "other peer chunk")
+	must(t, daRelayTestPeer(h, "127.0.0.2:19112", "127.0.0.2:19112").handleTx(chunk), "other peer chunk")
 	h.service.unregisterPeer(p)
 	f.requireAbsent(commit, "the owned commit after the whole-record release")
 	f.requireAbsent(chunk, "the other peer's chunk after the whole-record release")
 	third := f.commit(daRelayTestID(110), 2)
-	must(t, daRelayTestPeer(h, "127.0.0.3:19113").handleTx(third), "a third peer's commit after the release")
+	must(t, daRelayTestPeer(h, "127.0.0.3:19113", "127.0.0.3:19113").handleTx(third), "a third peer's commit after the release")
 	f.requireRetained(third, "the third peer's commit")
 }
 
 func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	oldPeer, activePeer := daRelayTestPeer(h, "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.1:19112")
+	oldPeer, activePeer := daRelayTestPeer(h, "127.0.0.1:19111", "127.0.0.1:19111"), daRelayTestPeer(h, "127.0.0.1:19112", "127.0.0.1:19112")
 	for _, peer := range []*peer{oldPeer, activePeer} {
 		must(t, h.service.registerPeer(peer), "register peer")
 	}
@@ -550,6 +550,32 @@ func TestUnregisterPeerKeepsDAAccountingForActiveQuotaKey(t *testing.T) {
 	must(t, activePeer.handleTx(chunk), "active peer chunk")
 	h.service.unregisterPeer(oldPeer)
 	f.requireRetained(chunk, "the active session's chunk")
+	// H2: configured names that differ from the sockets; a stale IPv4 session exits (twice) while
+	// its IPv4-mapped replacement holds the same socket key "127.0.0.3" and a State B record.
+	stale := daRelayTestPeer(h, "configured-stale.example:19121", "127.0.0.3:19121")
+	replacement := daRelayTestPeer(h, "configured-replacement.example:19122", "[::ffff:127.0.0.3]:19122")
+	for _, peer := range []*peer{stale, replacement} {
+		must(t, h.service.registerPeer(peer), "register same-key peer")
+	}
+	stagedID := daRelayTestID(108)
+	commit, staged := f.commit(stagedID, 2), f.chunk(stagedID, 0, []byte("staged"))
+	must(t, replacement.handleTx(commit), "replacement commit")
+	must(t, replacement.handleTx(staged), "replacement chunk")
+	exits := h.service.PeerLifecycleExits()
+	h.service.unregisterPeer(stale)
+	h.service.unregisterPeer(stale)
+	require(t, h.service.PeerLifecycleExits() == exits+1, "stale exits=%d, want exactly one more than %d", h.service.PeerLifecycleExits(), exits)
+	f.requireRetained(commit, "the replacement's State B commit after the stale exit")
+	f.requireRetained(staged, "the replacement's State B chunk after the stale exit")
+	f.requireRetained(chunk, "the distinct key's chunk after the stale exit")
+	h.service.unregisterPeer(replacement)
+	f.requireAbsent(commit, "the final same-key exit's commit")
+	f.requireAbsent(staged, "the final same-key exit's chunk")
+	f.requireRetained(chunk, "the distinct key's chunk after the final same-key exit")
+	h.service.unregisterPeer(replacement)
+	h.service.unregisterPeer(stale)
+	require(t, h.service.PeerLifecycleExits() == exits+2, "repeated exits=%d, want %d", h.service.PeerLifecycleExits(), exits+2)
+	f.requireRetained(chunk, "the distinct key's chunk after repeated cleanup")
 }
 
 func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
@@ -558,14 +584,16 @@ func TestUnregisterPeerHoldsQuotaLockThroughPeerManagerRemoval(t *testing.T) {
 	runtimeCfg := node.DefaultPeerRuntimeConfig("devnet", 1)
 	h.peerManager = node.NewPeerManager(runtimeCfg)
 	h.service.cfg.PeerManager, h.service.cfg.PeerRuntimeConfig = h.peerManager, runtimeCfg
-	oldPeer := daRelayTestPeer(h, "127.0.0.1:19111")
-	newPeer := daRelayTestPeer(h, "127.0.0.1:19112")
+	// Configured names differ from the sockets; the replacement reaches the IPv4 host over an
+	// IPv4-mapped socket, so both sessions share the canonical socket key "127.0.0.1".
+	oldPeer := daRelayTestPeer(h, "configured-old.example:19111", "127.0.0.1:19111")
+	newPeer := daRelayTestPeer(h, "configured-new.example:19112", "[::ffff:127.0.0.1]:19112")
 	if err := h.service.registerPeer(oldPeer); err != nil {
 		t.Fatalf("register old peer: %v", err)
 	}
 	chunk := f.chunk(daRelayTestID(112), 0, []byte("old"))
 	must(t, oldPeer.handleTx(chunk), "old peer chunk")
-	key := peerQuotaKey(oldPeer.addr())
+	key := "127.0.0.1"
 	unlock := h.service.lockPeerQuotaKey(key)
 	unregistered := make(chan struct{})
 	go func() { h.service.unregisterPeer(oldPeer); close(unregistered) }()

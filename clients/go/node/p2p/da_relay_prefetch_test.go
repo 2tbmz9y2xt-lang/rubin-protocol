@@ -45,8 +45,8 @@ func TestDAPrefetchTracksCurrentMissingIndexesAndCompletion(t *testing.T) {
 func TestScheduleLocalDAPrefetchUsesAllEligiblePeers(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
-	a := addDAPrefetchTestPeer(h.service, "127.0.0.2:1", nil)
-	b := addDAPrefetchTestPeer(h.service, "127.0.0.3:1", nil)
+	a := addDAPrefetchTestPeer(h.service, "127.0.0.2:1", "127.0.0.2:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "127.0.0.3:1", "127.0.0.3:1", nil)
 	daID := daRelayTestID(0xd1)
 	result, err := h.service.AdmitLocalDA(newDAIngressFixture(t, h).commit(daID, 2))
 	require(t, err == nil && result == (node.DAAdmissionResult{DAID: daID, Disposition: node.DAAdmissionRetained}) && h.service.txSeen.Len() == 0, "local admission=(%+v,%v) txSeen=%d", result, err, h.service.txSeen.Len())
@@ -58,7 +58,7 @@ func TestDAPrefetchSendWritesGetDAChunkFrame(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
 	daID := daRelayTestID(141)
 	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
@@ -70,12 +70,12 @@ func TestDAPrefetchSendFailureReleasesPlan(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", errors.New("write failed"))
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", errors.New("write failed"))
 	daID := daRelayTestID(132)
 	f.admit(f.commit(daID, 2), "127.0.0.9:19119")
 	h.service.scheduleDAPrefetch("peer-a", daID)
 	require(t, current.snapshotState().BanScore == 0 && current.snapshotState().LastError != "", "state=%+v, want diagnostic without ban", current.snapshotState())
-	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"peer-a"}, h.service.cfg.Now())
+	retry, diagnostic := h.service.daRelay.PlanPrefetch(daID, []string{"192.0.2.1"}, h.service.cfg.Now())
 	require(t, len(retry) == 1 && len(retry[0].Indexes) == 2 && diagnostic == "", "released retry plans=%+v diagnostic=%q, want one plan with two indexes", retry, diagnostic)
 }
 
@@ -93,7 +93,7 @@ func TestDAPrefetchMissingPeerReleasesPlan(t *testing.T) {
 
 func TestDAPrefetchReportsDiagnostic(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
-	current := addDAPrefetchTestPeer(h.service, "peer-a", nil)
+	current := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
 	reportDAPrefetchDiagnostic(map[string]*peer{"peer-a": current}, []string{"peer-a"}, "diagnostic")
 	if state := current.snapshotState(); state.LastError != "diagnostic" || state.BanScore != 0 {
 		t.Fatalf("state=%+v, want diagnostic without ban", state)
@@ -108,9 +108,9 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	a := addDAPrefetchTestPeer(h.service, "peer-a", nil)
-	b := addDAPrefetchTestPeer(h.service, "peer-b", nil)
-	c := addDAPrefetchTestPeer(h.service, "peer-c", nil)
+	a := addDAPrefetchTestPeer(h.service, "peer-a", "192.0.2.1:19111", nil)
+	b := addDAPrefetchTestPeer(h.service, "peer-b", "192.0.2.2:19111", nil)
+	c := addDAPrefetchTestPeer(h.service, "peer-c", "192.0.2.3:19111", nil)
 	disabled := testPeerForService(h.service, "peer-disabled", 0)
 	disabled.state.Addr = "peer-disabled"
 	h.service.peersMu.Lock()
@@ -121,7 +121,7 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 		_, keys := h.service.daPrefetchPeers(trigger)
 		require(t, reflect.DeepEqual(keys, want), "%s: keys=%v, want %v", label, keys, want)
 	}
-	all, bFirst := []string{"peer-a", "peer-b", "peer-c"}, []string{"peer-b", "peer-a", "peer-c"}
+	all, bFirst := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}, []string{"192.0.2.2", "192.0.2.1", "192.0.2.3"}
 	expect("a preferred trigger leads", "peer-b", bFirst)
 	expect("an alias of the preferred trigger", "alias-of-b", bFirst)
 	expect("an absent trigger", "peer-x", all)
@@ -150,13 +150,13 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	delete(h.service.peers, "peer-a")
 	delete(h.service.peers, "peer-c")
 	h.service.peersMu.Unlock()
-	expect("a sole low-score peer", "peer-b", []string{"peer-b"})
+	expect("a sole low-score peer", "peer-b", []string{"192.0.2.2"})
 	sole := daRelayTestID(0xb3)
 	must(t, b.handleTx(f.commit(sole, 2)), "a fresh set with the sole peer")
 	expectPrefetchRequests(t, h, wire, "sole peer", sole, 2, b)
-	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
-	addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
-	expect("sessions sharing a quota key", "127.0.0.5:2", []string{"127.0.0.5", "peer-b"})
+	addDAPrefetchTestPeer(h.service, "127.0.0.5:1", "127.0.0.5:1", nil)
+	addDAPrefetchTestPeer(h.service, "127.0.0.5:2", "127.0.0.5:2", nil)
+	expect("sessions sharing a quota key", "127.0.0.5:2", []string{"127.0.0.5", "192.0.2.2"})
 	h.service.cfg.EnableCompactReceive = false
 	expect("compact receive disabled", "peer-b", []string{})
 	// 288 blocks later: a synthetic tip move breaks the owner's tip coherence, so the tuple the
@@ -164,7 +164,7 @@ func TestDAPrefetchPeersPreferTriggerWithoutDroppingOthers(t *testing.T) {
 	later := highTipHarness(t, 1728)
 	later.service.cfg.EnableCompactReceive = true
 	lf := newDAIngressFixture(t, later)
-	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", nil), addDAPrefetchTestPeer(later.service, "peer-b", nil), addDAPrefetchTestPeer(later.service, "peer-c", nil)
+	la, lb, lc := addDAPrefetchTestPeer(later.service, "peer-a", "192.0.2.1:19111", nil), addDAPrefetchTestPeer(later.service, "peer-b", "192.0.2.2:19111", nil), addDAPrefetchTestPeer(later.service, "peer-c", "192.0.2.3:19111", nil)
 	lb.stateMu.Lock()
 	lb.qualityScore, lb.qualityHeight = 38, 1440
 	lb.stateMu.Unlock()
@@ -186,11 +186,11 @@ func TestDAPrefetchPreferredConnectionOwnsQuotaKey(t *testing.T) {
 	h := highTipHarness(t, 1440)
 	h.service.cfg.EnableCompactReceive = true
 	f := newDAIngressFixture(t, h)
-	a := addDAPrefetchTestPeer(h.service, "127.0.0.5:1", nil)
-	b := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", nil)
-	c := addDAPrefetchTestPeer(h.service, "127.0.0.4:1", nil)
-	blank := addDAPrefetchTestPeer(h.service, "blank", nil)
-	blank.state.Addr = "" // an accepting session whose address yields no quota key
+	a := addDAPrefetchTestPeer(h.service, "127.0.0.5:1", "127.0.0.5:1", nil)
+	b := addDAPrefetchTestPeer(h.service, "127.0.0.5:2", "127.0.0.5:2", nil)
+	c := addDAPrefetchTestPeer(h.service, "127.0.0.4:1", "127.0.0.4:1", nil)
+	blank := addDAPrefetchTestPeer(h.service, "blank", "remote", nil)
+	blank.state.Addr = "" // an accepting session whose non-IP socket endpoint yields no quota key
 	disabled := testPeerForService(h.service, "peer-disabled", 0)
 	disabled.state.Addr = "peer-disabled"
 	h.service.peersMu.Lock()
@@ -266,10 +266,14 @@ func daRelayTestID(seed byte) (out [32]byte) {
 	return out
 }
 
-func addDAPrefetchTestPeer(svc *Service, addr string, writeErr error) *peer {
+// addDAPrefetchTestPeer registers an accepting session under the logical address addr whose
+// connected socket reports the explicit literal endpoint; its DA quota identity is captured from
+// that RemoteAddr as handleConn does, so a non-IP endpoint captures none.
+func addDAPrefetchTestPeer(svc *Service, addr, endpoint string, writeErr error) *peer {
 	current := testPeerForService(svc, addr, 0)
 	current.state.Addr = addr
-	current.conn = &scriptedConn{writeErr: writeErr}
+	current.conn = &scriptedConn{writeErr: writeErr, remote: stubAddr(endpoint)}
+	current.daQuotaIdentity, _ = daQuotaIdentityForEndpoint(current.conn.RemoteAddr())
 	current.setRemoteCompactMode(compactModeSnapshot{Mode: 1, Version: compactRelayVersion})
 	svc.peersMu.Lock()
 	svc.peers[addr] = current

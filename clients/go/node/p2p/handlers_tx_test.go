@@ -108,12 +108,17 @@ func daChunkRelayTxBytes(t *testing.T, daID [32]byte, index uint16, nonce uint64
 	return raw
 }
 
-func daRelayTestPeer(h *testHarness, addr string) *peer {
+// daRelayTestPeer builds a handshaken DA session with logical address addr whose connected
+// socket endpoint is the explicit literal endpoint; its DA quota identity is captured from that
+// endpoint as handleConn does, so a non-IP endpoint captures none and no fallback exists.
+func daRelayTestPeer(h *testHarness, addr, endpoint string) *peer {
+	quotaIdentity, _ := daQuotaIdentityForEndpoint(stubAddr(endpoint))
 	return &peer{
-		service:       h.service,
-		state:         node.PeerState{Addr: addr, HandshakeComplete: true},
-		qualityScore:  50,
-		qualityHeight: h.service.cfg.SyncEngine.LocalTipHeight(),
+		service:         h.service,
+		state:           node.PeerState{Addr: addr, HandshakeComplete: true},
+		qualityScore:    50,
+		qualityHeight:   h.service.cfg.SyncEngine.LocalTipHeight(),
+		daQuotaIdentity: quotaIdentity,
 	}
 }
 
@@ -348,7 +353,7 @@ func TestHandleTxNonCanonical(t *testing.T) {
 func TestHandleTxDAAdmissionRejectsDoNotMutateRelayState(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	p := daRelayTestPeer(h, "127.0.0.1:19112")
+	p := daRelayTestPeer(h, "127.0.0.1:19112", "127.0.0.1:19112")
 	daID := daRelayTestID(121)
 	must(t, p.handleTx(append(f.commit(daID, 2), 0x00)), "handleTx non-canonical DA commit")
 	must(t, p.handleTx(f.tx(daTxSpec{kind: 0x02, daID: daID, payload: []byte("bad"), chunkHash: [32]byte{0xff}})), "handleTx DA chunk hash mismatch")
@@ -410,7 +415,7 @@ func TestAnnounceTx(t *testing.T) {
 func TestAnnounceTxStagesDAOnceAcrossLocalAndInbound(t *testing.T) {
 	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
 	f := newDAIngressFixture(t, h)
-	p := daRelayTestPeer(h, "127.0.0.1:19113")
+	p := daRelayTestPeer(h, "127.0.0.1:19113", "127.0.0.1:19113")
 	frames, closeProbe := registerRelayFrameProbe(t, h.service, "127.0.0.1:19119")
 	defer closeProbe()
 	calls := nowCalls(h)
@@ -832,7 +837,7 @@ func TestHandleTxRetriesTransientRelayPoolGetMissAfterSeen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalTxID: %v", err)
 	}
-	if err := daRelayTestPeer(h, "127.0.0.1:19117").handleTx(txBytes); err != nil {
+	if err := daRelayTestPeer(h, "127.0.0.1:19117", "127.0.0.1:19117").handleTx(txBytes); err != nil {
 		t.Fatalf("handleTx after transient pool misses: %v", err)
 	}
 	if !h.service.txSeen.Has(txid) {
@@ -862,7 +867,7 @@ func TestHandleTxRejectsBadDAChunkBeforeSeenOrAdmission(t *testing.T) {
 	f := newDAIngressFixture(t, h)
 	txBytes := f.chunk(daRelayTestID(121), 0, []byte("admitted-da-payload"))
 	badPayloadTx, txid := badPayloadVariant(t, txBytes)
-	p := daRelayTestPeer(h, "127.0.0.1:19115")
+	p := daRelayTestPeer(h, "127.0.0.1:19115", "127.0.0.1:19115")
 	err := p.handleTx(badPayloadTx)
 	require(t, err == node.ErrDARelayChunkHashMismatch, "handle bad DA chunk err=%v, want the hash-mismatch sentinel itself at ban threshold", err) //nolint:errorlint // the threshold returns the sentinel, never a wrapper
 	state := p.snapshotState()
@@ -905,7 +910,7 @@ func TestHandleTxAlreadySeenRejectsBadDAChunkVariant(t *testing.T) {
 	badPayloadTx, txid := badPayloadVariant(t, txBytes)
 	must(t, h.service.AnnounceTx(txBytes), "AnnounceTx setup DA chunk")
 	require(t, h.service.txSeen.Add(txid), "the seen-set row this test arranges for itself")
-	err := daRelayTestPeer(h, "127.0.0.1:19116").handleTx(badPayloadTx)
+	err := daRelayTestPeer(h, "127.0.0.1:19116", "127.0.0.1:19116").handleTx(badPayloadTx)
 	require(t, err == node.ErrDARelayChunkHashMismatch, "handle seen bad DA chunk err=%v, want the hash-mismatch sentinel itself at ban threshold", err) //nolint:errorlint // the threshold returns the sentinel, never a wrapper
 	require(t, !h.service.cfg.TxPool.Has(txid), "the bad already-seen DA variant reached the standard pool")
 	f.requireRetained(txBytes, "the retained DA member after the bad already-seen variant")
