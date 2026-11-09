@@ -72,7 +72,7 @@ var realFS = fsOps{
 
 var productionHooks = hooks{acquire: filelock.AcquireDirectory, ops: realFS}
 
-// Store is an open P holding the directory's exclusive inode lock until Close; safe for concurrent use.
+// Store is an open P holding the directory's exclusive inode lock until Close; safe for concurrent use, unlike the Tx it returns.
 type Store struct {
 	dir                          string
 	lock                         *filelock.Handle
@@ -88,19 +88,21 @@ type Store struct {
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
-// Create creates positively new P (sequence 0, empty receipt, both booleans false, no incident, empty journal) in the existing
-// mode-0700 directory dir, which must hold nothing but a stale scratch file, keeps the directory's exclusive lock until Close and
-// reads P back. It never creates the directory. Every failure returns no Store and releases the lock. An invalid identity, a zero or mismatched proof or a
-// directory holding anything else is ErrRefused; a contended lock ErrBusy; any other lock failure, an absent directory included, or an unlistable directory ErrUnreadable.
-// A failed crossing returns its error naming whether the rename happened: before it no P exists; after it P stays with the unresolved marker. A readback that fails or differs is ErrIntegrity with P left in place.
+// Create creates positively new P (sequence 0, empty receipt, both booleans false, no incident, empty journal) in the existing mode-0700 directory dir
+// and reads it back, keeping the directory's exclusive lock until Close. It never creates dir. Every failure returns no Store and releases the lock.
+// An invalid identity, a zero or mismatched proof or any entry not bearing the scratch name is ErrRefused; a contended lock ErrBusy; any other lock failure,
+// an absent directory included, or an unlistable directory ErrUnreadable. An entry bearing the scratch name that cannot be removed fails the crossing.
+// A failed crossing returns its error naming whether the rename happened: before it no P exists; after it P stays and the unresolved marker is attempted.
+// A readback that fails or differs is ErrIntegrity with P left in place; a failed synchronization during it also attempts the marker.
 func Create(dir string, id Identity, proof NewInstallationProof) (*Store, error) {
 	return start(dir, id, &proof, productionHooks)
 }
 
 // Open qualifies existing P in dir against expected, keeping the directory's exclusive lock until Close; every failure returns no Store and releases it.
-// An invalid identity is ErrRefused, an absent directory or P ErrMissingControl, a contended lock ErrBusy, any other lock failure or unobtainable bytes ErrUnreadable,
-// malformed or mismatched P ErrIntegrity, and a recorded durability failure ErrUnresolved until operator resolution. P is never reset, recreated or defaulted to fresh.
-// Open creates nothing, except that a failed synchronization of existing P records the durable unresolved marker with its ErrUnreadable.
+// An invalid identity is ErrRefused, a contended lock ErrBusy, an absent directory ErrMissingControl, any other lock failure ErrUnreadable. Before P is read,
+// the unresolved marker, or a failure to rule it out, is ErrUnresolved until operator resolution. Then an absent P is ErrMissingControl, unobtainable bytes
+// ErrUnreadable, malformed or mismatched P ErrIntegrity. P is never reset, recreated or defaulted to fresh and the directory is never created.
+// A failed synchronization of existing P attempts the durable unresolved marker; Open creates nothing else.
 func Open(dir string, expected Identity) (*Store, error) {
 	return start(dir, expected, nil, productionHooks)
 }
