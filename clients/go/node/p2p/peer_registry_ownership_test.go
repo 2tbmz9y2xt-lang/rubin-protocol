@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -276,6 +277,41 @@ func TestPeerRegistryOwnershipAliasHeldByAnotherOwner(t *testing.T) {
 	require(t, h.service.PeerLifecycleExits() == exits+3, "exits=%d, want one per connection", h.service.PeerLifecycleExits()-exits)
 	requireOwner(t, h, addr, nil, "after the hidden connection's exit")
 	f.requireAbsent(chunk, "the chunk after the hidden connection's exit")
+}
+
+// closeCountingConn counts Close calls on a scripted connection with an explicit endpoint.
+type closeCountingConn struct {
+	scriptedConn
+	closes int32
+}
+
+func (c *closeCountingConn) Close() error { atomic.AddInt32(&c.closes, 1); return nil }
+
+// P16: Service.Close closes a hidden live connection directly, and every live connection once.
+func TestPeerRegistryOwnershipCloseReachesHiddenConnection(t *testing.T) {
+	h := newTestHarness(t, 1, "127.0.0.1:0", nil)
+	const addr = "198.51.100.45:9000"
+	hidden, owner := registryPeer(h, addr, addr), registryPeer(h, "configured.example:19121", "198.51.100.46:1")
+	hiddenConn, ownerConn := &closeCountingConn{scriptedConn: scriptedConn{remote: stubAddr(addr)}}, &closeCountingConn{scriptedConn: scriptedConn{remote: stubAddr("198.51.100.46:1")}}
+	hidden.conn, owner.conn = hiddenConn, ownerConn
+	newer := registryPeer(h, addr, addr)
+	newerConn := &closeCountingConn{scriptedConn: scriptedConn{remote: stubAddr(addr)}}
+	newer.conn = newerConn
+	mustRegister(t, h, hidden, owner, newer)
+	h.service.peersMu.RLock()
+	_, visible := h.service.peers[addr]
+	hiddenListed := false
+	for _, current := range h.service.peers {
+		hiddenListed = hiddenListed || current == hidden
+	}
+	h.service.peersMu.RUnlock()
+	require(t, visible && !hiddenListed, "fixture: the replaced connection still has a Service.peers entry")
+	closed := make(chan error, 1)
+	go func() { closed <- h.service.Close() }()
+	requireReturned(t, closed, "Service.Close")
+	for label, conn := range map[string]*closeCountingConn{"hidden": hiddenConn, "aliased owner": ownerConn, "newer": newerConn} {
+		require(t, atomic.LoadInt32(&conn.closes) == 1, "%s connection closed %d times, want exactly once", label, atomic.LoadInt32(&conn.closes))
+	}
 }
 
 // registerPeerParkedOnPeersMu reports whether some goroutine is blocked acquiring an RWMutex
