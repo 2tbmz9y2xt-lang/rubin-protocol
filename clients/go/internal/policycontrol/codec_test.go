@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -178,14 +180,18 @@ func TestDecodeRejectsDomainCorpus(t *testing.T) {
 		"INTENT without admission":   func(st *state) { st.ctl.incident.Admission = nil },
 		"INTENT not attempted":       func(st *state) { st.ctl.incident.Attempted = false },
 		"INTENT without has_attempt": func(st *state) { st.ctl.hasAttempt = false },
-		"OBSERVED with destination":  func(st *state) { st.ctl.incident.State = StateObserved },
-		"destination equals OLD":     func(st *state) { st.ctl.incident.Admission.Destination = []byte("old") },
-		"non GENESIS_REPLAY source":  func(st *state) { st.ctl.incident.Admission.Source = 2 },
-		"admission profile":          func(st *state) { st.ctl.incident.Admission.Profile = 2 },
-		"empty ownership":            func(st *state) { st.ctl.incident.Admission.Ownership = nil },
-		"unknown row kind":           func(st *state) { st.rows["\x09"] = Row{Kind: 9, Sequence: 1} },
-		"row seq above P":            func(st *state) { st.rows["\x05r"] = Row{Kind: KindReservation, Key: []byte("r"), Sequence: 42} },
-		"row seq zero":               func(st *state) { st.rows["\x05r"] = Row{Kind: KindReservation, Key: []byte("r")} },
+		"attempted OBSERVED without has_attempt": func(st *state) {
+			st.ctl.incident = &Incident{Diagnosis: st.ctl.incident.Diagnosis, Attempted: true, State: StateObserved}
+			st.ctl.hasAttempt = false
+		},
+		"OBSERVED with destination": func(st *state) { st.ctl.incident.State = StateObserved },
+		"destination equals OLD":    func(st *state) { st.ctl.incident.Admission.Destination = []byte("old") },
+		"non GENESIS_REPLAY source": func(st *state) { st.ctl.incident.Admission.Source = 2 },
+		"admission profile":         func(st *state) { st.ctl.incident.Admission.Profile = 2 },
+		"empty ownership":           func(st *state) { st.ctl.incident.Admission.Ownership = nil },
+		"unknown row kind":          func(st *state) { st.rows["\x09"] = Row{Kind: 9, Sequence: 1} },
+		"row seq above P":           func(st *state) { st.rows["\x05r"] = Row{Kind: KindReservation, Key: []byte("r"), Sequence: 42} },
+		"row seq zero":              func(st *state) { st.rows["\x05r"] = Row{Kind: KindReservation, Key: []byte("r")} },
 		"second working row": func(st *state) {
 			st.rows["\x08a"] = Row{Kind: KindWorkingReservation, Key: []byte("a"), Sequence: 1}
 			st.rows["\x08b"] = Row{Kind: KindWorkingReservation, Key: []byte("b"), Sequence: 1}
@@ -233,5 +239,28 @@ func TestDecodeSingleByteMutationCorpus(t *testing.T) {
 				t.Fatalf("byte %d^%#x changed identity bytes without changing identity", i, x)
 			}
 		}
+	}
+}
+
+// The encoder refuses an over-ceiling field before any narrowing, independently
+// of callers' validation.
+func TestEncodeRefusesOverCeilingField(t *testing.T) {
+	for name, mutate := range map[string]func(st *state){
+		"intent": func(st *state) { st.receipt.Owner.Intent = make([]byte, MaxIntentBytes+1) },
+		"field":  func(st *state) { st.ctl.incident.Diagnosis.Error = make([]byte, 1<<16) },
+		"payload": func(st *state) {
+			st.rows["\x01k1"] = Row{Kind: KindOriginalRejection, Key: []byte("k1"), Sequence: 41, Payload: make([]byte, MaxPayloadBytes+1)}
+		},
+	} {
+		_, st := richImage()
+		mutate(st)
+		func() {
+			defer func() {
+				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "encode invariant") {
+					t.Fatalf("%s: encode did not refuse: %v", name, r)
+				}
+			}()
+			encode(st)
+		}()
 	}
 }

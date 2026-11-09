@@ -118,9 +118,11 @@ func (s *Store) RequestLatch() {
 // held, crossing or UNKNOWN. No exported operation clears a true latch.
 func (s *Store) PersistLatch(p LatchProof) (Result, error) {
 	s.mu.Lock()
-	old, busy := Result{Truth: OLD, sequence: s.st.seq}, s.closed || s.tx != nil || s.crossing || s.pending != nil
+	old, busy := Result{Truth: OLD, sequence: s.st.seq}, s.tx != nil || s.crossing || s.pending != nil
 	var err error
 	switch {
+	case s.closed:
+		old, err = Result{}, ErrClosed
 	case busy:
 		old, err = Result{}, ErrBusy
 	case s.st.ctl.initialSync:
