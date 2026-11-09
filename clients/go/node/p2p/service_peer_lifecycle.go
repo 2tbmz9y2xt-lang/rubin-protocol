@@ -102,6 +102,10 @@ func (s *Service) registerPeer(p *peer) error {
 	}
 	s.peerRegistrations++
 	p.registrationOrder = s.peerRegistrations
+	if s.livePeers == nil {
+		s.livePeers = make(map[*peer]struct{})
+	}
+	s.livePeers[p] = struct{}{}
 	s.peers[addr] = p
 	if p.conn != nil {
 		if alias := normalizeNetAddr(p.conn.RemoteAddr().String()); alias != "" && alias != addr {
@@ -135,8 +139,8 @@ func (s *Service) unregisterPeer(p *peer) {
 	}
 	if remove {
 		// Lifecycle-exit counter increments here, exactly once per
-		// unregisterPeer call that actually deleted peer entries from
-		// the s.peers map. Repeat calls on the same already-removed
+		// exiting live connection (removePeerEntries ended its
+		// liveness). Repeat calls on the same already-removed
 		// peer leave remove==false above and do not reach this line,
 		// so cleanup retries cannot double-count. atomic.Uint64.Add is
 		// safe to call without peersMu (the lock has been released
@@ -148,39 +152,56 @@ func (s *Service) unregisterPeer(p *peer) {
 	}
 }
 
-// removePeerEntries deletes every Service.peers entry of p and, in the same peersMu section,
-// applies p's PeerManager effect for its logical address addr: only the logical owner has one.
-// An exiting owner hands addr to the live connection with the same logical address and the
-// highest registration order (its current state is published), or removes addr when none is
+// livePeersLocked returns the live connections (R5): the registered set together with any
+// connection still referenced by Service.peers (fixtures that insert there directly; in
+// production the two coincide). The caller holds peersMu.
+func (s *Service) livePeersLocked() map[*peer]struct{} {
+	live := make(map[*peer]struct{}, len(s.livePeers)+len(s.peers))
+	for current := range s.livePeers {
+		live[current] = struct{}{}
+	}
+	for _, current := range s.peers {
+		if current != nil {
+			live[current] = struct{}{}
+		}
+	}
+	return live
+}
+
+// removePeerEntries ends p's liveness and, in the same peersMu section, deletes its Service.peers
+// entries and applies its PeerManager effect for its logical address addr; it reports whether p
+// was live, so a connection's exit takes effect exactly once. Only the logical owner has a
+// PeerManager effect: it hands addr to the live connection with the same logical address and
+// the highest registration order (publishing its current state), or removes addr when none is
 // left; a replaced connection's exit leaves the PeerManager untouched.
 func (s *Service) removePeerEntries(p *peer, addr string) bool {
 	s.peersMu.Lock()
 	defer s.peersMu.Unlock()
+	_, live := s.livePeersLocked()[p]
 	owner := s.peers[addr] == p
-	remove := false
 	for key, current := range s.peers {
 		if current == p {
 			delete(s.peers, key)
-			remove = true
 		}
 	}
+	delete(s.livePeers, p)
 	if !owner {
-		return remove
+		return live
 	}
 	var successor *peer
-	for _, current := range s.peers {
-		if current != nil && current.addr() == addr && (successor == nil || current.registrationOrder > successor.registrationOrder) {
+	for current := range s.livePeersLocked() {
+		if current.addr() == addr && (successor == nil || current.registrationOrder > successor.registrationOrder) {
 			successor = current
 		}
 	}
 	if successor == nil {
 		s.cfg.PeerManager.RemovePeer(addr)
-		return remove
+		return live
 	}
 	s.peers[addr] = successor
 	state := successor.snapshotState()
 	_ = s.cfg.PeerManager.UpsertPeer(&state)
-	return remove
+	return live
 }
 
 // publishPeerStateIfOwner publishes p's current state to the PeerManager only while p is the
@@ -255,8 +276,8 @@ func (s *Service) lockPeerQuotaKey(quotaKey string) func() {
 }
 
 func (s *Service) hasActivePeerQuotaKeyLocked(quotaKey string) bool {
-	for _, current := range s.peers {
-		if current != nil && current.daQuotaIdentity == quotaKey {
+	for current := range s.livePeersLocked() {
+		if current.daQuotaIdentity == quotaKey {
 			return true
 		}
 	}

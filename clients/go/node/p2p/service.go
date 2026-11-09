@@ -59,8 +59,13 @@ type Service struct {
 	// registration of one logical address owns it, and unregisterPeer hands an exiting owner's
 	// address to the live same-address connection with the highest order. Guarded by peersMu.
 	peerRegistrations uint64
-	peerQuotaLocksMu  sync.Mutex
-	peerQuotaLocks    map[string]*peerQuotaLock
+	// livePeers is the set of registered connections that have not exited (R5): a live
+	// connection can hold no Service.peers entry once a newer registration took its logical
+	// address and its alias equals that address or another connection's. Mutated only in the
+	// registerPeer and unregisterPeer peersMu sections. Guarded by peersMu.
+	livePeers        map[*peer]struct{}
+	peerQuotaLocksMu sync.Mutex
+	peerQuotaLocks   map[string]*peerQuotaLock
 	// closed is set to true by Close. A Service instance is single-use: once
 	// Close has returned, Start refuses to restart the same Service and the
 	// accept/reconnect loops must not be revived. Guarded by peersMu.
@@ -105,11 +110,11 @@ type Service struct {
 
 	// peerLifecycleExits counts peer lifecycle exits at the single
 	// canonical removal boundary inside unregisterPeer. The counter is
-	// incremented exactly once per unregisterPeer call that actually
-	// deletes one or more entries from the s.peers map (i.e. when the
-	// dedupe flag remove==true). Repeated unregisterPeer calls on the
-	// same already-removed peer leave remove==false and do not bump
-	// the counter. The metric is intentionally unlabeled: the
+	// incremented exactly once per exiting live connection (the
+	// dedupe flag remove==true, decided by livePeers together with
+	// s.peers). Repeated unregisterPeer calls on the same
+	// already-removed peer leave remove==false and do not bump the
+	// counter. The metric is intentionally unlabeled: the
 	// underlying exit cause (remote EOF, protocol error, local
 	// Service.Close ctx cancel, request/send error) is not available
 	// at the unregisterPeer site without plumbing it through, and
