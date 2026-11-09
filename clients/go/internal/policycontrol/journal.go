@@ -20,6 +20,20 @@ func (tx *Tx) PutRow(kind RowKind, key, payload []byte) error {
 	return nil
 }
 
+// DeleteRow stages removal of a reservation or working-reservation row; an
+// absent row stages nothing. Lasting slots and contexts are never removed,
+// reused, evicted or reset.
+func (tx *Tx) DeleteRow(kind RowKind, key []byte) error {
+	if kind != KindReservation && kind != KindWorkingReservation {
+		return refused("lasting slots and contexts are never removed")
+	}
+	id := rowID(kind, key)
+	if delete(tx.puts, id); tx.base.rows[id].Kind != 0 {
+		tx.dels[id] = struct{}{}
+	}
+	return nil
+}
+
 // Membership returns the complete committed membership in (kind, key) order,
 // each row with its committing sequence, or an error; never a partial or
 // empty substitute, and never inferred from the receipt.
