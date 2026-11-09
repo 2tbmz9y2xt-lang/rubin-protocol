@@ -6,11 +6,10 @@ import (
 )
 
 // ObserveIncident stages the first OBSERVED (attempted=false) record when no
-// incident exists, preserving initial_sync_completed and has_attempt. The
-// same hash at the same height and error is the SAME incident: a no-op that
-// returns it unchanged, attempted bit included. The same hash with another
-// height or error is ErrContradiction; another hash while an incident exists
-// is refused (see ReplaceObserved). A refusal stages nothing.
+// incident exists, preserving initial_sync_completed and has_attempt. The same
+// hash, height and error is a no-op returning the incident unchanged. The same
+// hash with another height or error is ErrContradiction; another hash while an
+// incident exists is refused (see ReplaceObserved). A refusal stages nothing.
 func (tx *Tx) ObserveIncident(d Diagnosis) (Incident, error) {
 	if err := validDiagnosis(d); err != nil {
 		return Incident{}, err
@@ -26,10 +25,9 @@ func (tx *Tx) ObserveIncident(d Diagnosis) (Incident, error) {
 	return *tx.ctl.incident.clone(), nil
 }
 
-// ReplaceObserved stages the one atomic replacement of OBSERVED with
-// attempted=false by a new OBSERVED (attempted=false) of a different hash;
-// staleness qualification is the caller's. INTENT, AUTO_BLOCKED and
-// attempted=true are never replaced.
+// ReplaceObserved stages the one atomic replacement of OBSERVED, attempted=false
+// by a new OBSERVED of a different hash; staleness qualification is the caller's.
+// INTENT, AUTO_BLOCKED and attempted=true are never replaced.
 func (tx *Tx) ReplaceObserved(d Diagnosis) error {
 	if err := validDiagnosis(d); err != nil {
 		return err
@@ -41,6 +39,11 @@ func (tx *Tx) ReplaceObserved(d Diagnosis) error {
 	return nil
 }
 
+func (in *Incident) admits(destination []byte) bool {
+	return in != nil && (in.State == StateObserved && !in.Attempted ||
+		in.State == StateAutoBlocked && !bytes.Equal(in.Admission.Destination, destination))
+}
+
 // ConsumeIntent stages INTENT with the exact admission, attempted=true and
 // has_attempt=true, from OBSERVED with attempted=false or, as a new manual
 // intent with a distinct destination, from AUTO_BLOCKED. A live INTENT is
@@ -50,8 +53,7 @@ func (tx *Tx) ConsumeIntent(a Admission) error {
 		return err
 	}
 	cur := tx.ctl.incident
-	if cur == nil || !(cur.State == StateObserved && !cur.Attempted ||
-		cur.State == StateAutoBlocked && !bytes.Equal(cur.Admission.Destination, a.Destination)) {
+	if !cur.admits(a.Destination) {
 		return refused("intent needs OBSERVED with attempted=false, or AUTO_BLOCKED and a distinct destination")
 	}
 	next := cur.clone()
@@ -80,16 +82,14 @@ func (tx *Tx) RemoveOnSuccess() error {
 	return nil
 }
 
-// LatchProof is a caller's fresh STABLE qualification of the unchanged
-// predicate on the selected source and pair, bound to the guard whose
-// change before commit voids it.
+// LatchProof is a fresh STABLE predicate qualification bound to the guard
+// whose change before commit voids it.
 type LatchProof struct {
 	PredicateTrue bool
 	Basis         Qualified
 }
 
-// LatchStatus is the durable latch of the last qualified committed P, the
-// one coalesced RAM request and the pending-persistence owner.
+// LatchStatus is the durable latch, the RAM request and the pending-persistence owner.
 type LatchStatus struct{ Durable, Requested, PendingPersistence bool }
 
 // Latch reports the latch status; it never waits.
@@ -117,38 +117,45 @@ func (s *Store) RequestLatch() {
 // pending-persistence owner to Recover. Nothing starts while a transaction is
 // held, crossing or UNKNOWN. No exported operation clears a true latch.
 func (s *Store) PersistLatch(p LatchProof) (Result, error) {
-	s.mu.Lock()
-	old, busy := Result{Truth: OLD, sequence: s.st.seq}, s.tx != nil || s.crossing || s.pending != nil
-	var err error
-	switch {
-	case s.closed:
-		old, err = Result{}, ErrClosed
-	case busy:
-		old, err = Result{}, ErrBusy
-	case s.st.ctl.initialSync:
-		s.latchRequested = false
-	case !s.latchRequested:
-		err = ErrNoRequest
-	case p.PredicateTrue && p.Basis.guard == nil:
-		err = refused("latch proof without basis")
-	case p.PredicateTrue:
-		s.mu.Unlock()
-		tx, err := s.Begin()
-		if err != nil {
-			return Result{}, err
-		}
-		tx.latch, tx.ctl.initialSync = true, true
-		tx.Ownerless()
-		tx.Operation(ClassControl, 0)
-		tx.Require(p.Basis)
-		return tx.Commit()
+	res, proceed, err := s.latchDecision(p)
+	if !proceed {
+		return res, err
 	}
-	s.mu.Unlock()
-	return old, err
+	tx, err := s.Begin()
+	if err != nil {
+		return Result{}, err
+	}
+	tx.latch, tx.ctl.initialSync = true, true
+	tx.Ownerless()
+	tx.Operation(ClassControl, 0)
+	tx.Require(p.Basis)
+	return tx.Commit()
 }
 
-// afterLatchLocked applies the request law to a latch persistence attempt
-// resolved directly by Commit or by Recover readback.
+// latchDecision services every PersistLatch outcome that writes nothing.
+func (s *Store) latchDecision(p LatchProof) (Result, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := Result{Truth: OLD, sequence: s.st.seq}
+	switch {
+	case s.closed:
+		return Result{}, false, ErrClosed
+	case s.heldLocked():
+		return Result{}, false, ErrBusy
+	case s.st.ctl.initialSync:
+		s.latchRequested = false
+		return old, false, nil
+	case !s.latchRequested:
+		return old, false, ErrNoRequest
+	case !p.PredicateTrue:
+		return old, false, nil
+	case p.Basis.guard == nil:
+		return old, false, refused("latch proof without basis")
+	}
+	return old, true, nil
+}
+
+// afterLatchLocked applies the request law after Commit or Recover readback.
 func (s *Store) afterLatchLocked(direct bool, err error) {
 	if s.st.ctl.initialSync || (direct && !errors.Is(err, ErrStaleLocalPlan)) {
 		s.latchRequested = false

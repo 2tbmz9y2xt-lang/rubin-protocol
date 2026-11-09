@@ -220,9 +220,7 @@ func TestIntentGuardQualification(t *testing.T) {
 	tx.AdmitOwner(OwnerH1, []byte("i"))
 	tx.Operation(ClassControl, 1)
 	tx.Require(g.Qualify())
-	if err := tx.ConsumeIntent(admission("D1")); err != nil {
-		t.Fatal(err)
-	}
+	must(t, tx.ConsumeIntent(admission("D1")))
 	g.Advance()
 	r, err := tx.Commit()
 	if wantResult(t, r, OLD, 41); !errors.Is(err, ErrStaleLocalPlan) || !bytes.Equal(fileBytes(t, dir), before) {
@@ -298,9 +296,7 @@ func TestLatchPersistence(t *testing.T) {
 	mustControl(t, s, func(tx *Tx) error { return tx.AutoBlock() })
 	s.RequestLatch()
 	wantLatch(t, s, LatchStatus{Durable: true})
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	wantLatch(t, mustOpen(t, dir, id), LatchStatus{Durable: true})
 	if r, err := s.PersistLatch(stableProof(g)); r != (Result{}) || !errors.Is(err, ErrClosed) {
 		t.Fatalf("closed store: %v %v", r, err)
@@ -387,9 +383,7 @@ func TestLatchRequestLifetime(t *testing.T) {
 		}
 		mustCommit(t, controlTx(t, s, "z"), NEW, 41)
 		wantLatch(t, s, LatchStatus{Requested: true})
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
+		must(t, s.Close())
 		wantLatch(t, mustOpen(t, dir, id), LatchStatus{})
 	}
 
@@ -401,9 +395,7 @@ func TestLatchRequestLifetime(t *testing.T) {
 		t.Fatal("expected latch UNKNOWN")
 	}
 	s.RequestLatch()
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	wantLatch(t, mustOpen(t, dir, id), LatchStatus{Durable: true})
 }
 

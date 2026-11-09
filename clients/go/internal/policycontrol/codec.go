@@ -1,10 +1,7 @@
-// Package policycontrol is the dormant Go installation/network policy control
-// P of RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8: one journal bound to an
-// immutable installation identity, exact chain_id/genesis_hash and one
-// supported client-local profile, changed only by exclusive backend-atomic
-// durable transactions with a checked u64 sequence and one last receipt. It
-// has no production caller. Its file layout is a private client-local
-// encoding, not a shared schema; decode accepts exactly what encode produces.
+// Package policycontrol is the dormant installation/network policy control P of
+// RUBIN_MEMPOOL_POLICY.md Section 6.4.1.8: one immutably identified journal changed
+// only by exclusive atomic durable transactions with a checked sequence and one
+// last receipt. Its file layout is client-local; decode accepts exactly what encode produces.
 package policycontrol
 
 import (
@@ -13,8 +10,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
-	"sort"
+	"slices"
 )
 
 // Profile is the client-local storage profile token; ProfileV1 is the one supported.
@@ -33,7 +31,6 @@ func (id Identity) valid() bool {
 	return id.InstallationID != z && id.ChainID != z && id.GenesisHash != z && id.Profile == ProfileV1
 }
 
-// OwnerKind is the closed receipt owner-kind domain.
 type OwnerKind uint8
 
 const (
@@ -45,7 +42,6 @@ const (
 	OwnerPendingNativeDisposition
 )
 
-// OpClass is the closed receipt operation-class domain.
 type OpClass uint8
 
 const (
@@ -58,18 +54,15 @@ const (
 	ClassCompoundControl
 )
 
-// Owner is a receipt's semantic owner kind, epoch and intent.
 type Owner struct {
 	Kind   OwnerKind
 	Epoch  uint64
 	Intent []byte
 }
 
-// Cursors are a participating reconciliation batch's before/after cursors.
 type Cursors struct{ Before, After uint64 }
 
-// Receipt is the one last-commit receipt: not an operation history, and no
-// proof of any affected row by itself.
+// Receipt is the one last-commit receipt: no history and no proof of any affected row.
 type Receipt struct {
 	Predecessor, Successor uint64
 	Operation              [32]byte
@@ -79,7 +72,6 @@ type Receipt struct {
 	Cursors                *Cursors // nil: no batch participated (distinct from zero)
 }
 
-// IncidentState is the H1 incident state domain.
 type IncidentState uint8
 
 const (
@@ -100,8 +92,7 @@ type Diagnosis struct {
 	Error, Source, Trigger []byte
 }
 
-// Admission is the exact OLD, destination, source, profile and ownership
-// intent of an INTENT or AUTO_BLOCKED incident.
+// Admission is the exact intent of an INTENT or AUTO_BLOCKED incident.
 type Admission struct {
 	Old, Destination []byte
 	Source           ReplaySource
@@ -109,7 +100,6 @@ type Admission struct {
 	Ownership        []byte
 }
 
-// Incident is the zero-or-one current H1 incident.
 type Incident struct {
 	Diagnosis Diagnosis
 	Attempted bool
@@ -117,7 +107,6 @@ type Incident struct {
 	Admission *Admission // nil exactly when State is StateObserved
 }
 
-// RowKind is the closed exclusion-journal row-kind domain.
 type RowKind uint8
 
 const (
@@ -131,8 +120,7 @@ const (
 	KindWorkingReservation
 )
 
-// Row is one journal member with its committing P sequence. Payload
-// semantics belong to the journal producer; P only frames them.
+// Row is one journal member; payload semantics belong to the journal producer.
 type Row struct {
 	Kind     RowKind
 	Key      []byte
@@ -227,14 +215,8 @@ func (in *Incident) clone() *Incident {
 	return &out
 }
 
-func fields(bs ...[]byte) bool {
-	for _, b := range bs {
-		if len(b) == 0 || len(b) > MaxFieldBytes {
-			return false
-		}
-	}
-	return true
-}
+func badField(b []byte) bool   { return len(b) == 0 || len(b) > MaxFieldBytes }
+func fields(bs ...[]byte) bool { return !slices.ContainsFunc(bs, badField) }
 
 func refused(what string) error { return fmt.Errorf("%w: %s", ErrRefused, what) }
 
@@ -253,31 +235,42 @@ func validAdmission(a *Admission) error {
 	return nil
 }
 
+func (st IncidentState) admitted() bool { return st == StateIntent || st == StateAutoBlocked }
+
 func validateIncident(in *Incident, hasAttempt bool) error {
-	switch {
-	case validDiagnosis(in.Diagnosis) != nil:
-		return validDiagnosis(in.Diagnosis)
-	case in.Attempted && !hasAttempt:
+	if err := validDiagnosis(in.Diagnosis); err != nil {
+		return err
+	}
+	if in.Attempted && !hasAttempt {
 		return errors.New("attempted incident without has_attempt")
+	}
+	switch {
 	case in.State == StateObserved && in.Admission == nil:
 		return nil
-	case (in.State == StateIntent || in.State == StateAutoBlocked) && in.Attempted && hasAttempt:
+	case in.State.admitted() && in.Attempted:
 		return validAdmission(in.Admission)
 	}
 	return errors.New("incident state, attempted bit or destination outside its domain")
 }
 
-func validateReceipt(id Identity, seq uint64, r *Receipt) error {
-	o := r.Owner
+func (o Owner) ownedAt(seq uint64) bool {
+	return o.Epoch != 0 && o.Epoch <= seq && len(o.Intent) != 0 && len(o.Intent) <= MaxIntentBytes
+}
+
+func validateReceiptOwner(o Owner, seq uint64) error {
 	switch {
-	case r.Successor != seq || r.Predecessor != seq-1 || r.Operation != operationID(id, seq):
-		return errors.New("receipt is not bound to this journal and successor")
 	case o.Kind < OwnerlessControl || o.Kind > OwnerPendingNativeDisposition:
 		return errors.New("unknown owner kind")
 	case o.Kind == OwnerlessControl && (o.Epoch != seq || len(o.Intent) != 0):
 		return errors.New("ownerless control receipt needs epoch n+1 and empty intent")
-	case o.Kind != OwnerlessControl && (o.Epoch == 0 || o.Epoch > seq || len(o.Intent) == 0 || len(o.Intent) > MaxIntentBytes):
+	case o.Kind != OwnerlessControl && !o.ownedAt(seq):
 		return errors.New("owned receipt epoch or intent outside its domain")
+	}
+	return nil
+}
+
+func validateReceiptOperation(r *Receipt) error {
+	switch {
 	case r.Class < ClassControl || r.Class > ClassCompoundControl:
 		return errors.New("unknown operation class")
 	case (r.Class == ClassReconciliationBatch) != (r.Cursors != nil) && r.Class != ClassCompoundControl:
@@ -288,30 +281,63 @@ func validateReceipt(id Identity, seq uint64, r *Receipt) error {
 	return nil
 }
 
-// countRows returns counted lasting slots, contexts, reservations and working reservations.
+func validateReceipt(id Identity, seq uint64, r *Receipt) error {
+	if r.Successor != seq || r.Predecessor != seq-1 || r.Operation != operationID(id, seq) {
+		return errors.New("receipt is not bound to this journal and successor")
+	}
+	if err := validateReceiptOwner(r.Owner, seq); err != nil {
+		return err
+	}
+	return validateReceiptOperation(r)
+}
+
+var rowBound = map[RowKind]int{KindContext: 1, KindReservation: 2, KindWorkingReservation: 3}
+
+// countRows returns lasting slots, contexts, reservations and working reservations.
 func countRows(rows map[string]Row) (n [4]int) {
 	for _, r := range rows {
-		switch r.Kind {
-		case KindContext:
-			n[1]++
-		case KindReservation:
-			n[2]++
-		case KindWorkingReservation:
-			n[3]++
-		default:
-			n[0]++
-		}
+		n[rowBound[r.Kind]]++
 	}
 	return n
 }
 
-// validateState checks every logical and client-local domain of a P image.
+func validateControl(st *state) error {
+	if st.ctl.sequence > st.seq || (st.ctl.sequence == 0) != st.ctl.initial() {
+		return errors.New("control committing sequence outside its domain")
+	}
+	if st.ctl.incident == nil {
+		return nil
+	}
+	return validateIncident(st.ctl.incident, st.ctl.hasAttempt)
+}
+
+func (r Row) domainValid(seq uint64) bool {
+	return r.Kind >= KindOriginalRejection && r.Kind <= KindWorkingReservation && len(r.Key) <= MaxKeyBytes &&
+		len(r.Payload) <= MaxPayloadBytes && r.Sequence != 0 && r.Sequence <= seq
+}
+
+func validateRows(st *state) error {
+	for id, r := range st.rows {
+		if !r.domainValid(st.seq) || id != rowID(r.Kind, r.Key) {
+			return errors.New("journal row outside its domain")
+		}
+	}
+	if n := countRows(st.rows); n[0] > MaxLastingSlots || n[1] > MaxContexts || n[2] > MaxReservations || n[3] > 1 {
+		return errors.New("journal membership exceeds its bounds")
+	}
+	return nil
+}
+
+func (st *state) initialEmpty() bool {
+	return st.receipt == nil && st.ctl.initial() && len(st.rows) == 0
+}
+
 func validateState(st *state) error {
 	if !st.id.valid() {
 		return errors.New("identity or profile outside its domain")
 	}
 	if st.seq == 0 {
-		if st.receipt != nil || !st.ctl.initial() || len(st.rows) != 0 {
+		if !st.initialEmpty() {
 			return errors.New("sequence 0 must hold the initial empty state")
 		}
 		return nil
@@ -322,29 +348,14 @@ func validateState(st *state) error {
 	if err := validateReceipt(st.id, st.seq, st.receipt); err != nil {
 		return err
 	}
-	if st.ctl.sequence > st.seq || (st.ctl.sequence == 0) != st.ctl.initial() {
-		return errors.New("control committing sequence outside its domain")
+	if err := validateControl(st); err != nil {
+		return err
 	}
-	if st.ctl.incident != nil {
-		if err := validateIncident(st.ctl.incident, st.ctl.hasAttempt); err != nil {
-			return err
-		}
-	}
-	for id, r := range st.rows {
-		if r.Kind < KindOriginalRejection || r.Kind > KindWorkingReservation || id != rowID(r.Kind, r.Key) ||
-			len(r.Key) > MaxKeyBytes || len(r.Payload) > MaxPayloadBytes || r.Sequence == 0 || r.Sequence > st.seq {
-			return errors.New("journal row outside its domain")
-		}
-	}
-	if n := countRows(st.rows); n[0] > MaxLastingSlots || n[1] > MaxContexts || n[2] > MaxReservations || n[3] > 1 {
-		return errors.New("journal membership exceeds its bounds")
-	}
-	return nil
+	return validateRows(st)
 }
 
-// coder walks one P image field by field: it appends when encoding and, when
-// decoding, strictly consumes, checking each length against its ceiling and
-// the remaining input before allocating. Encoding never writes the state.
+// coder appends when encoding and strictly consumes when decoding, checking each
+// length against its ceiling and the remaining input before allocating.
 type coder struct {
 	dec bool
 	b   []byte
@@ -389,7 +400,6 @@ func (c *coder) u64s(vs ...*uint64) {
 	}
 }
 
-// flag codes a canonical 0/1 boolean or presence tag and reports it.
 func (c *coder) flag(v bool) bool {
 	u := uint8(0)
 	if v {
@@ -409,29 +419,33 @@ func (c *coder) bools(vs ...*bool) {
 	}
 }
 
-func (c *coder) bytes(max int, vs ...*[]byte) {
-	for _, v := range vs {
-		if !c.dec && (len(*v) > max || len(*v) > math.MaxUint16) {
-			panic(fmt.Sprintf("policycontrol: encode invariant: field length %d above ceiling %d", len(*v), max))
-		}
-		buf := binary.BigEndian.AppendUint16(nil, uint16(len(*v)))
-		c.raw(buf)
-		if n := int(binary.BigEndian.Uint16(buf)); !c.dec {
-			c.b = append(c.b, *v...)
-		} else if n > max || n > len(c.b) {
-			c.fail("length above its ceiling or the remaining input")
-		} else if c.err == nil {
-			*v, c.b = clone(c.b[:n]), c.b[n:]
-		}
+func (c *coder) field(limit int, v *[]byte) {
+	n := len(*v)
+	if n > math.MaxUint16 || (!c.dec && n > limit) {
+		c.fail("field above its ceiling")
+		return
+	}
+	buf := binary.BigEndian.AppendUint16(nil, uint16(n))
+	c.raw(buf)
+	if !c.dec {
+		c.b = append(c.b, *v...)
+		return
+	}
+	if n = int(binary.BigEndian.Uint16(buf)); n > limit || n > len(c.b) {
+		c.fail("length above its ceiling or the remaining input")
+	} else if c.err == nil {
+		*v, c.b = clone(c.b[:n]), c.b[n:]
 	}
 }
 
-// present codes the presence tag of *p, allocating a decoded present value.
+func (c *coder) bytes(limit int, vs ...*[]byte) {
+	for _, v := range vs {
+		c.field(limit, v)
+	}
+}
+
 func present[T any](c *coder, p **T) bool {
 	if !c.flag(*p != nil) {
-		if c.dec {
-			*p = nil
-		}
 		return false
 	}
 	if *p == nil {
@@ -482,7 +496,10 @@ func (c *coder) image(st *state) {
 	c.u64s(&st.ctl.sequence)
 	c.bools(&st.ctl.initialSync, &st.ctl.hasAttempt)
 	c.incident(&st.ctl.incident)
-	ids := sortedRowIDs(st.rows)
+	c.rows(st)
+}
+
+func (c *coder) rowCount(st *state, ids []string) uint64 {
 	n := uint64(len(ids))
 	if c.u64s(&n); c.dec && (n > maxRows || n*minRowBytes > uint64(len(c.b))) {
 		c.fail("row count above its ceiling or the remaining input")
@@ -490,6 +507,24 @@ func (c *coder) image(st *state) {
 	if c.dec && c.err == nil {
 		st.rows = make(map[string]Row, n)
 	}
+	return n
+}
+
+func (c *coder) decodedRow(st *state, r Row, prev string) string {
+	if c.err != nil {
+		return prev
+	}
+	id := rowID(r.Kind, r.Key)
+	if prev != "" && id <= prev {
+		c.fail("rows not strictly ordered by kind and key")
+	}
+	st.rows[id] = r
+	return id
+}
+
+func (c *coder) rows(st *state) {
+	ids := sortedRowIDs(st.rows)
+	n := c.rowCount(st, ids)
 	for i, prev := uint64(0), ""; c.err == nil && i < n; i++ {
 		var r Row
 		if !c.dec {
@@ -499,27 +534,20 @@ func (c *coder) image(st *state) {
 		c.bytes(MaxKeyBytes, &r.Key)
 		c.u64s(&r.Sequence)
 		c.bytes(MaxPayloadBytes, &r.Payload)
-		if id := rowID(r.Kind, r.Key); c.dec && c.err == nil {
-			if i > 0 && id <= prev {
-				c.fail("rows not strictly ordered by kind and key")
-			}
-			prev, st.rows[id] = id, r
+		if c.dec {
+			prev = c.decodedRow(st, r, prev)
 		}
 	}
 }
 
-func sortedRowIDs(rows map[string]Row) []string {
-	ids := make([]string, 0, len(rows))
-	for id := range rows {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
+func sortedRowIDs(rows map[string]Row) []string { return slices.Sorted(maps.Keys(rows)) }
 
+// encode returns the canonical image, or nil when a field exceeds its ceiling.
 func encode(st *state) []byte {
 	c := &coder{}
-	c.image(st)
+	if c.image(st); c.err != nil {
+		return nil
+	}
 	return c.b
 }
 
@@ -529,9 +557,7 @@ func incidentBytes(in *Incident) []byte {
 	return c.b
 }
 
-// decode strictly parses one canonical P image: strict lengths and tags, rows
-// strictly ordered by (kind, key), no trailing byte and every field domain
-// checked. Every failure wraps ErrIntegrity.
+// decode strictly parses one canonical P image; every failure wraps only ErrIntegrity.
 func decode(b []byte) (*state, error) {
 	c, st := &coder{dec: true, b: b}, &state{}
 	if c.image(st); len(c.b) != 0 {
@@ -541,7 +567,7 @@ func decode(b []byte) (*state, error) {
 		c.err = validateState(st)
 	}
 	if c.err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrIntegrity, c.err)
+		return nil, fmt.Errorf("%w: %s", ErrIntegrity, c.err.Error())
 	}
 	return st, nil
 }

@@ -45,9 +45,7 @@ func putFn(kind RowKind, key string) func(tx *Tx) error {
 func counts(t *testing.T, s *Store) (slots, contexts, reservations, working int) {
 	t.Helper()
 	rows, err := s.Membership()
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	m := map[string]Row{}
 	for _, r := range rows {
 		m[rowID(r.Kind, r.Key)] = r
@@ -154,9 +152,7 @@ func TestStrictMembership(t *testing.T) {
 	if again, _ := s.Membership(); again[0].Key[0] != 'b' {
 		t.Fatal("membership exposed committed bytes")
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	good, _ := decode(fileBytes(t, dir))
 	for name, tamper := range map[string]func(st *state){
 		"unknown kind":    func(st *state) { st.rows["\x0Bk"] = Row{Kind: 11, Key: []byte("k"), Sequence: 41} },
@@ -168,18 +164,14 @@ func TestStrictMembership(t *testing.T) {
 			st.rows[k] = v
 		}
 		tamper(&st)
-		if err := os.WriteFile(filepath.Join(dir, controlFile), encode(&st), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(filepath.Join(dir, controlFile), encode(&st), 0o600))
 		if s, err := Open(dir, id); s != nil || !errors.Is(err, ErrIntegrity) {
 			t.Fatalf("%s: open %v", name, err)
 		}
 	}
 	img := encode(good)
 	for name, bad := range map[string][]byte{"missing field": img[:len(img)-1], "extra field": append(bytes.Clone(img), 0)} {
-		if err := os.WriteFile(filepath.Join(dir, controlFile), bad, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(filepath.Join(dir, controlFile), bad, 0o600))
 		if s, err := Open(dir, id); s != nil || !errors.Is(err, ErrIntegrity) {
 			t.Fatalf("%s: open %v", name, err)
 		}

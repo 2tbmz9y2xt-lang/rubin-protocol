@@ -3,6 +3,7 @@ package policycontrol
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -34,9 +36,7 @@ func TestCrashPointsReopenOldOrNew(t *testing.T) {
 			t.Fatalf("stage %d: crash returned %v", at, r.Truth)
 		}
 		successor := s.pending.new
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
+		must(t, s.Close())
 		got := fileBytes(t, dir)
 		reopened := mustView(t, mustOpen(t, dir, id))
 		wantImage, wantSeq := old, uint64(40)
@@ -146,24 +146,16 @@ func TestChildContender(t *testing.T) {
 func TestWriterExclusionAcrossProcessesAndGoroutines(t *testing.T) {
 	id := testIdentity(1)
 	dir := storeDir(t)
-	if err := mustCreate(t, dir, id).Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, mustCreate(t, dir, id).Close())
 	s := mustOpen(t, dir, id)
 	idHex := hex.EncodeToString(append(append(id.InstallationID[:], id.ChainID[:]...), id.GenesisHash[:]...))
-	cmd := exec.Command(os.Args[0], "-test.run=^TestChildContender$", "-test.count=1")
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestChildContender$", "-test.count=1")
 	cmd.Env = append(os.Environ(), childEnv+"="+dir+"|"+idHex)
 	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
+	must(t, cmd.Start())
 	out := bufio.NewReader(stdout)
 	ask := func() string {
 		if _, err := io.WriteString(stdin, "try\n"); err != nil {
@@ -207,9 +199,7 @@ func TestWriterExclusionAcrossProcessesAndGoroutines(t *testing.T) {
 	if rows, _ := s.Membership(); len(rows) != rounds {
 		t.Fatalf("lost update: %d rows", len(rows))
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	if got := ask(); got != "open\n" {
 		t.Fatalf("child after release: %q", got)
 	}
@@ -233,7 +223,7 @@ func TestCrossingStageOrder(t *testing.T) {
 	}
 	mustCommit(t, controlTx(t, s, "a"), NEW, 41)
 	want := []stage{stageCreate, stageWrite, stageFileSync, stageRename, stageDirSync, stageClose, stageAck}
-	if fmt.Sprint(seen) != fmt.Sprint(want) {
+	if !slices.Equal(seen, want) {
 		t.Fatalf("crossing stages %v, want %v", seen, want)
 	}
 }

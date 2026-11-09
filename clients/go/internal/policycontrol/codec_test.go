@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,8 +60,7 @@ func richImage() ([]byte, *state) {
 	b.u8(3).v16("").u64(7).v16("")
 	st := &state{
 		id: id, seq: 41,
-		receipt: &Receipt{Predecessor: 40, Successor: 41, Operation: op, Owner: Owner{Kind: OwnerH1, Epoch: 10, Intent: []byte("intent_10")},
-			Class: ClassReconciliationBatch, Ordinal: 7, Cursors: &Cursors{Before: 0, After: 128}},
+		receipt: &Receipt{Predecessor: 40, Successor: 41, Operation: op, Owner: Owner{Kind: OwnerH1, Epoch: 10, Intent: []byte("intent_10")}, Class: ClassReconciliationBatch, Ordinal: 7, Cursors: &Cursors{Before: 0, After: 128}},
 		ctl: control{sequence: 41, initialSync: true, hasAttempt: true, incident: &Incident{
 			Diagnosis: Diagnosis{Height: 4294967295, Hash: fill32(0xEE), Error: []byte("err"), Source: []byte("src"), Trigger: []byte("trig")},
 			Attempted: true, State: StateIntent,
@@ -258,13 +256,19 @@ func TestEncodeRefusesOverCeilingField(t *testing.T) {
 	} {
 		_, st := richImage()
 		mutate(st)
-		func() {
-			defer func() {
-				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), "encode invariant") {
-					t.Fatalf("%s: encode did not refuse: %v", name, r)
-				}
-			}()
-			encode(st)
-		}()
+		if img := encode(st); img != nil {
+			t.Fatalf("%s: encode did not refuse an over-ceiling field", name)
+		}
+	}
+}
+
+// cross refuses an unencodable state before any file-system effect.
+func TestCrossRefusesUnencodableState(t *testing.T) {
+	dir, s := seedStore(t, ownerlessState(testIdentity(1), 40))
+	before := fileBytes(t, dir)
+	_, st := richImage()
+	st.receipt.Owner.Intent = make([]byte, MaxIntentBytes+1)
+	if c := s.cross(st); c.committed || c.image != nil || !errors.Is(c.err, ErrRefused) || !bytes.Equal(fileBytes(t, dir), before) {
+		t.Fatalf("crossing %+v", c)
 	}
 }

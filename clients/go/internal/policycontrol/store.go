@@ -17,13 +17,11 @@ import (
 const (
 	controlFile = "policy-control"
 	scratchFile = "policy-control.scratch"
-	// unresolvedFile durably records an observed post-rename durability
-	// failure; Open then refuses forever (no API removes it).
+	// unresolvedFile durably records a post-rename durability failure; Open then refuses forever.
 	unresolvedFile = "policy-control.unresolved"
 )
 
-// NewInstallationProof is the caller-built positive new-installation/network
-// proof naming the identity it attests; a zero value or another identity refuses.
+// NewInstallationProof names the identity it attests; a zero value or another identity refuses.
 type NewInstallationProof struct{ Identity Identity }
 
 // View is a protected copy of the last qualified committed P.
@@ -49,8 +47,7 @@ const (
 	stageRead
 )
 
-// errInjectedCrash, returned by a fault hook, stops a crossing at that stage
-// with no cleanup, as a process loss would.
+// errInjectedCrash stops a crossing at the faulted stage with no cleanup.
 var errInjectedCrash = errors.New("policycontrol: injected crash")
 
 type hooks struct {
@@ -71,16 +68,14 @@ type fsOps struct {
 var realFS = fsOps{
 	remove: os.Remove, syncDir: syncDir, sync: (*os.File).Sync, close: (*os.File).Close, rename: os.Rename,
 	open: func(path string) (*os.File, error) {
-		// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
-		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
+		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
 	},
 	write: func(f *os.File, b []byte) error { _, err := f.Write(b); return err },
 }
 
 var productionHooks = hooks{acquire: filelock.AcquireDirectory, ops: realFS}
 
-// Store is an open P holding the store directory's exclusive inode lock from
-// Create or Open until Close. All methods are safe for concurrent use.
+// Store is an open P holding the directory's exclusive inode lock until Close; safe for concurrent use.
 type Store struct {
 	dir            string
 	lock           *filelock.Handle
@@ -111,45 +106,55 @@ func Open(dir string, expected Identity) (*Store, error) {
 	return start(dir, expected, nil, productionHooks)
 }
 
-// start decides from the lock result before any read: only a held handle
-// proceeds, contention is ErrBusy and every other result is unreadable.
+func refuseLock(lock *filelock.Handle, res filelock.Result, err error, creating bool) error {
+	if lock != nil {
+		_ = lock.Release()
+	}
+	switch {
+	case res == filelock.ResultContended:
+		return fmt.Errorf("%w: store directory is held: %w", ErrBusy, err)
+	case res == filelock.ResultInvalidOrUnopenable && errors.Is(err, fs.ErrNotExist) && !creating:
+		return fmt.Errorf("%w: store directory absent", ErrMissingControl)
+	}
+	return fmt.Errorf("%w: store directory lock result %q: %w", ErrUnreadable, res, err)
+}
+
+// start decides from the lock result before any read: only a held handle proceeds.
 func start(dir string, id Identity, proof *NewInstallationProof, h hooks) (*Store, error) {
 	if !id.valid() || (proof != nil && proof.Identity != id) {
 		return nil, refused("invalid identity or new-installation proof")
 	}
 	lock, res, err := h.acquire(dir)
-	switch {
-	case lock != nil && res == "" && err == nil:
-	case res == filelock.ResultContended:
-		return nil, fmt.Errorf("%w: store directory is held: %v", ErrBusy, err)
-	case res == filelock.ResultInvalidOrUnopenable && errors.Is(err, fs.ErrNotExist) && proof == nil:
-		return nil, fmt.Errorf("%w: store directory absent", ErrMissingControl)
-	default:
-		if lock != nil {
-			_ = lock.Release()
-		}
-		return nil, fmt.Errorf("%w: store directory lock result %q: %v", ErrUnreadable, res, err)
+	if lock == nil || res != "" || err != nil {
+		return nil, refuseLock(lock, res, err, proof != nil)
 	}
 	s := &Store{dir: dir, lock: lock, fault: h.fault, ops: h.ops}
-	if proof != nil {
-		err = s.create(id)
-	} else if _, e := os.Lstat(filepath.Join(dir, unresolvedFile)); !errors.Is(e, fs.ErrNotExist) {
-		err = fmt.Errorf("%w: a post-rename durability failure was recorded; operator resolution required", ErrUnresolved)
-	} else if s.image, err = s.readImage(); err == nil {
-		if s.st, err = decode(s.image); err == nil && s.st.id != id {
-			err = fmt.Errorf("%w: %w", ErrIntegrity, ErrIdentityMismatch)
-		}
-	}
-	if err != nil {
+	if err = s.load(id, proof != nil); err != nil {
 		return nil, errors.Join(err, lock.Release())
 	}
 	return s, nil
 }
 
+func (s *Store) load(id Identity, creating bool) (err error) {
+	if creating {
+		return s.create(id)
+	}
+	if _, e := os.Lstat(filepath.Join(s.dir, unresolvedFile)); !errors.Is(e, fs.ErrNotExist) {
+		return fmt.Errorf("%w: a post-rename durability failure was recorded; operator resolution required", ErrUnresolved)
+	}
+	if s.image, err = s.readImage(); err != nil {
+		return err
+	}
+	if s.st, err = decode(s.image); err == nil && s.st.id != id {
+		err = fmt.Errorf("%w: %w", ErrIntegrity, ErrIdentityMismatch)
+	}
+	return err
+}
+
 func (s *Store) create(id Identity) error {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnreadable, err)
+		return unreadable(err)
 	}
 	for _, e := range entries {
 		if e.Name() != scratchFile {
@@ -157,25 +162,23 @@ func (s *Store) create(id Identity) error {
 		}
 	}
 	st := &state{id: id}
-	image := encode(st)
-	if c := s.cross(image); c.err != nil {
+	c := s.cross(st)
+	if c.err != nil {
 		if c.handle != nil {
 			_ = c.handle.Close()
 		}
 		return fmt.Errorf("create policy control (namespace committed=%t): %w", c.committed, c.err)
 	}
-	if got, err := s.readImage(); err != nil || !bytes.Equal(got, image) {
+	if got, err := s.readImage(); err != nil || !bytes.Equal(got, c.image) {
 		return errors.Join(fmt.Errorf("%w: created image did not read back exactly", ErrIntegrity), err)
 	}
-	s.st, s.image = st, image
+	s.st, s.image = st, c.image
 	return nil
 }
 
-// markUnresolved records that readable P bytes must never qualify again: a
-// repeated synchronization after a reported failure proves nothing.
+// markUnresolved records that readable P bytes must never qualify again.
 func markUnresolved(dir string) error {
-	// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
-	f, err := os.OpenFile(filepath.Join(dir, unresolvedFile), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep
+	f, err := os.OpenFile(filepath.Join(dir, unresolvedFile), os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600) // nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
 	if err != nil {
 		return err
 	}
@@ -190,65 +193,75 @@ func syncDir(dir string) error {
 	return errors.Join(d.Sync(), d.Close())
 }
 
-// readImage establishes durability of the current P bytes (file and
-// directory synchronization), then reads them with the size checked first.
-func (s *Store) readImage() ([]byte, error) {
-	if s.fault != nil {
-		if err := s.fault(stageRead); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
-		}
+func unreadable(err error) error { return fmt.Errorf("%w: %w", ErrUnreadable, err) }
+
+func (s *Store) inject(st stage) error {
+	if s.fault == nil {
+		return nil
 	}
-	// nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
-	f, err := os.OpenFile(filepath.Join(s.dir, controlFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0) // nosemgrep
+	return s.fault(st)
+}
+
+// readImage establishes durability of the current P bytes, then reads them.
+func (s *Store) readImage() ([]byte, error) {
+	if err := s.inject(stageRead); err != nil {
+		return nil, unreadable(err)
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, controlFile), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0) // nosemgrep: Semgrep_go_filesystem_rule-fileread -- caller-owned store directory plus a fixed package-constant leaf, opened with O_NOFOLLOW.
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrMissingControl
 	} else if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
+		return nil, unreadable(err)
 	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err == nil && (!info.Mode().IsRegular() || info.Size() > maxImageBytes) {
-		err = errors.New("policy control is not a regular file within its size ceiling")
-	}
-	if err == nil {
-		if err = errors.Join(f.Sync(), syncDir(s.dir)); err != nil {
-			err = errors.Join(err, markUnresolved(s.dir))
-		}
-	}
-	var b []byte
-	if err == nil {
-		b = make([]byte, info.Size())
-		_, err = io.ReadFull(f, b)
-	}
-	// The growth probe runs only on a regular file that was fully read; on a
-	// non-regular file (a FIFO with a live writer) it could block.
-	if err == nil {
-		if n, rerr := f.Read(make([]byte, 1)); n != 0 || rerr != io.EOF {
-			err = errors.New("policy control changed size while read")
-		}
-	}
+	defer func() { _ = f.Close() }()
+	b, err := s.readDurable(f)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnreadable, err)
+		return nil, unreadable(err)
+	}
+	return b, nil
+}
+
+// readDurable probes for growth only on a fully read regular file: a FIFO could block.
+func (s *Store) readDurable(f *os.File) ([]byte, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maxImageBytes {
+		return nil, errors.New("policy control is not a regular file within its size ceiling")
+	}
+	if err = errors.Join(f.Sync(), syncDir(s.dir)); err != nil {
+		return nil, errors.Join(err, markUnresolved(s.dir))
+	}
+	b := make([]byte, info.Size())
+	if _, err = io.ReadFull(f, b); err != nil {
+		return nil, err
+	}
+	if n, rerr := f.Read(make([]byte, 1)); n != 0 || rerr != io.EOF {
+		return nil, errors.New("policy control changed size while read")
 	}
 	return b, nil
 }
 
 type crossingResult struct {
 	committed, poisoned, crashed, ackLost bool
+	image                                 []byte   // the encoded successor
 	handle                                *os.File // scratch handle retained by a crash
 	err                                   error
 }
 
-// cross atomically replaces P with image: fixed 0600 scratch, write, file
-// sync, rename, directory sync, handle close, acknowledgement. A failure
-// before the rename removes the scratch (OLD); one after it leaves durability
-// unestablished (poisoned, UNKNOWN); a crash retains the open handle.
-func (s *Store) cross(image []byte) (c crossingResult) {
+// cross atomically replaces P with st's image. A failure before the rename leaves
+// OLD; one after it is poisoned UNKNOWN; a crash retains the open handle.
+func (s *Store) cross(st *state) (c crossingResult) {
+	if c.image = encode(st); c.image == nil {
+		c.err = refused("state does not encode within its ceilings")
+		return c
+	}
 	scratch := filepath.Join(s.dir, scratchFile)
 	var f *os.File
 	step := func(st stage, op func() error) {
-		if c.err == nil && s.fault != nil {
-			c.err = s.fault(st)
+		if c.err == nil {
+			c.err = s.inject(st)
 		}
 		if c.err == nil {
 			c.err = op()
@@ -260,7 +273,7 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 		}
 		return err
 	})
-	step(stageWrite, func() error { return s.ops.write(f, image) })
+	step(stageWrite, func() error { return s.ops.write(f, c.image) })
 	step(stageFileSync, func() error { return s.ops.sync(f) })
 	step(stageRename, func() error { return s.ops.rename(scratch, filepath.Join(s.dir, controlFile)) })
 	c.committed = c.err == nil
@@ -270,6 +283,11 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 		c.handle = f
 		return c
 	}
+	s.settleCrossing(&c, scratch, f)
+	return c
+}
+
+func (s *Store) settleCrossing(c *crossingResult, scratch string, f *os.File) {
 	if f != nil {
 		_ = s.ops.close(f)
 	}
@@ -280,12 +298,9 @@ func (s *Store) cross(image []byte) (c crossingResult) {
 	if c.poisoned = c.err != nil && c.committed; c.poisoned {
 		c.err = errors.Join(c.err, markUnresolved(s.dir))
 	}
-	if s.fault != nil {
-		if err := s.fault(stageAck); err != nil {
-			c.ackLost, c.err = true, errors.Join(c.err, err)
-		}
+	if err := s.inject(stageAck); err != nil {
+		c.ackLost, c.err = true, errors.Join(c.err, err)
 	}
-	return c
 }
 
 // View returns a protected copy of the last qualified committed P; it refuses
@@ -297,8 +312,7 @@ func (s *Store) View() (View, error) {
 		return View{}, err
 	}
 	st := s.st
-	v := View{Identity: st.id, Sequence: st.seq, InitialSyncCompleted: st.ctl.initialSync, HasAttempt: st.ctl.hasAttempt,
-		ControlSequence: st.ctl.sequence, Incident: st.ctl.incident.clone()}
+	v := View{Identity: st.id, Sequence: st.seq, InitialSyncCompleted: st.ctl.initialSync, HasAttempt: st.ctl.hasAttempt, ControlSequence: st.ctl.sequence, Incident: st.ctl.incident.clone()}
 	if r := st.receipt; r != nil {
 		rc := *r
 		rc.Owner.Intent = clone(r.Owner.Intent)
@@ -311,10 +325,10 @@ func (s *Store) View() (View, error) {
 }
 
 func (s *Store) readableLocked() error {
-	if s.closed {
+	switch {
+	case s.closed:
 		return ErrClosed
-	}
-	if s.crossing || s.pending != nil {
+	case s.crossing || s.pending != nil:
 		return fmt.Errorf("%w: %w", ErrBusy, ErrUnresolved)
 	}
 	return nil

@@ -13,18 +13,22 @@ import (
 	"time"
 )
 
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ownerlessState is a valid state at seq whose last commit was ownerless control.
 func ownerlessState(id Identity, seq uint64) *state {
-	return &state{id: id, seq: seq, rows: map[string]Row{}, receipt: &Receipt{Predecessor: seq - 1, Successor: seq,
-		Operation: operationID(id, seq), Owner: Owner{Kind: OwnerlessControl, Epoch: seq}, Class: ClassControl}}
+	return &state{id: id, seq: seq, rows: map[string]Row{}, receipt: &Receipt{Predecessor: seq - 1, Successor: seq, Operation: operationID(id, seq), Owner: Owner{Kind: OwnerlessControl, Epoch: seq}, Class: ClassControl}}
 }
 
 func seedStore(t *testing.T, st *state) (string, *Store) {
 	t.Helper()
 	dir := storeDir(t)
-	if err := os.WriteFile(filepath.Join(dir, controlFile), encode(st), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(filepath.Join(dir, controlFile), encode(st), 0o600))
 	return dir, mustOpen(t, dir, st.id)
 }
 
@@ -141,9 +145,8 @@ func TestOwnerEpochRules(t *testing.T) {
 	}{
 		"admission":    {func(tx *Tx) { tx.AdmitOwner(OwnerH1, []byte("i")) }, Owner{OwnerH1, 150, []byte("i")}},
 		"continuation": {func(tx *Tx) { tx.RetainOwner(Owner{OwnerH1, 100, []byte("i")}) }, Owner{OwnerH1, 100, []byte("i")}},
-		"handoff": {func(tx *Tx) { tx.RetainOwner(Owner{OwnerOrdinaryRestoration, 100, []byte("m")}) },
-			Owner{OwnerOrdinaryRestoration, 100, []byte("m")}},
-		"ending at n": {func(tx *Tx) { tx.RetainOwner(Owner{OwnerGenericManual, 149, []byte("m")}) }, Owner{OwnerGenericManual, 149, []byte("m")}},
+		"handoff":      {func(tx *Tx) { tx.RetainOwner(Owner{OwnerOrdinaryRestoration, 100, []byte("m")}) }, Owner{OwnerOrdinaryRestoration, 100, []byte("m")}},
+		"ending at n":  {func(tx *Tx) { tx.RetainOwner(Owner{OwnerGenericManual, 149, []byte("m")}) }, Owner{OwnerGenericManual, 149, []byte("m")}},
 	} {
 		_, s := seedStore(t, ownerlessState(id, 149))
 		tx := mustBegin(t, s)
@@ -313,9 +316,7 @@ func TestRecoveryReadbackDisagreement(t *testing.T) {
 			next.rows[k] = v
 		}
 		tamper(&next)
-		if err := os.WriteFile(filepath.Join(dir, controlFile), encode(&next), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(filepath.Join(dir, controlFile), encode(&next), 0o600))
 		r, err := s.Recover()
 		if wantResult(t, r, UNKNOWN, 0); err == nil {
 			t.Fatalf("%s: no error", name)
@@ -357,10 +358,8 @@ func TestUnestablishedDurabilityStaysUnknown(t *testing.T) {
 		if g := s.Gate(); g != (Gate{}) {
 			t.Fatalf("%s: gate %+v", name, g)
 		}
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if fault == errInjectedCrash {
+		must(t, s.Close())
+		if errors.Is(fault, errInjectedCrash) {
 			// Process loss with no observed sync failure: reopen performs the first synchronization.
 			if v := mustView(t, mustOpen(t, dir, testIdentity(1))); v.Sequence != 41 {
 				t.Fatalf("%s: reopen saw %d", name, v.Sequence)
@@ -495,9 +494,7 @@ func TestRestartContinuation(t *testing.T) {
 	if r, _ := batchTx(t, s, 128, 256, "b").Commit(); r.Truth != UNKNOWN {
 		t.Fatalf("crash commit %v", r.Truth)
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	s = mustOpen(t, dir, id)
 	v := mustView(t, s)
 	rows, _ := s.Membership()
@@ -505,9 +502,7 @@ func TestRestartContinuation(t *testing.T) {
 		t.Fatalf("reopened at %d cursors %+v rows %d", v.Sequence, v.Receipt.Cursors, len(rows))
 	}
 	mustCommit(t, batchTx(t, s, 128, 256, "b"), NEW, 42)
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	s = mustOpen(t, dir, id)
 	v = mustView(t, s)
 	rows, _ = s.Membership()

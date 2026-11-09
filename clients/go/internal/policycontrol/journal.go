@@ -2,10 +2,9 @@ package policycontrol
 
 import "bytes"
 
-// PutRow stages an insert or payload replacement of the (kind, key) row,
-// stamped with the committing sequence. An unknown kind or an over-ceiling
-// key or payload refuses before effects; an identical payload stages nothing.
-// Bounds are checked on the committed successor by Commit.
+// PutRow stages an insert or payload replacement of the (kind, key) row, stamped
+// with the committing sequence. An unknown kind or over-ceiling key or payload
+// refuses before effects; an identical payload stages nothing; Commit checks bounds.
 func (tx *Tx) PutRow(kind RowKind, key, payload []byte) error {
 	if kind < KindOriginalRejection || kind > KindWorkingReservation || len(key) > MaxKeyBytes || len(payload) > MaxPayloadBytes {
 		return refused("journal row outside its domain or ceilings")

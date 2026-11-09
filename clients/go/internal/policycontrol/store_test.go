@@ -21,12 +21,8 @@ func testIdentity(b byte) Identity {
 func storeDir(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "policy")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Mkdir(dir, 0o700))
+	must(t, os.Chmod(dir, 0o700))
 	return dir
 }
 
@@ -53,9 +49,7 @@ func mustOpen(t *testing.T, dir string, id Identity) *Store {
 func dirNames(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	names := []string{}
 	for _, e := range entries {
 		names = append(names, e.Name())
@@ -67,9 +61,7 @@ func dirNames(t *testing.T, dir string) []string {
 func fileBytes(t *testing.T, dir string) []byte {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(dir, controlFile))
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	return b
 }
 
@@ -100,9 +92,7 @@ func TestCreateNewInstallation(t *testing.T) {
 	if got := fileBytes(t, dir); !bytes.Equal(got[8+96:], img[8+96:]) {
 		t.Fatal("initial image differs from the independent initial shape")
 	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Close())
 	if v := mustView(t, mustOpen(t, dir, id)); !reflect.DeepEqual(v, want) {
 		t.Fatalf("reopened view %+v", v)
 	}
@@ -162,23 +152,17 @@ func TestOpenMissingControl(t *testing.T) {
 func TestOpenRejectsMalformedOrMismatchedControl(t *testing.T) {
 	id := testIdentity(1)
 	dir := storeDir(t)
-	if err := mustCreate(t, dir, id).Close(); err != nil {
-		t.Fatal(err)
-	}
+	must(t, mustCreate(t, dir, id).Close())
 	good := fileBytes(t, dir)
 	if s, err := Create(dir, id, NewInstallationProof{Identity: id}); s != nil || !errors.Is(err, ErrRefused) {
 		t.Fatalf("Create over existing store: %v", err)
 	}
 	foreignDir := storeDir(t)
 	for _, other := range []Identity{testIdentity(7), func() Identity { o := id; o.ChainID = fill32(0x77); return o }()} {
-		if err := mustCreate(t, foreignDir, other).Close(); err != nil {
-			t.Fatal(err)
-		}
+		must(t, mustCreate(t, foreignDir, other).Close())
 		foreign := fileBytes(t, foreignDir)
 		_ = os.Remove(filepath.Join(foreignDir, controlFile))
-		if err := os.WriteFile(filepath.Join(dir, controlFile), foreign, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(filepath.Join(dir, controlFile), foreign, 0o600))
 		if s, err := Open(dir, id); s != nil || !errors.Is(err, ErrIdentityMismatch) || !errors.Is(err, ErrIntegrity) {
 			t.Fatalf("foreign identity adopted: %v", err)
 		}
@@ -189,9 +173,7 @@ func TestOpenRejectsMalformedOrMismatchedControl(t *testing.T) {
 	profile := bytes.Clone(good)
 	profile[8+96] = 2
 	for name, img := range map[string][]byte{"truncated": good[:len(good)-1], "trailing": append(bytes.Clone(good), 0), "profile": profile, "empty": {}} {
-		if err := os.WriteFile(filepath.Join(dir, controlFile), img, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(filepath.Join(dir, controlFile), img, 0o600))
 		if s, err := Open(dir, id); s != nil || !errors.Is(err, ErrIntegrity) {
 			t.Fatalf("%s: Open err=%v", name, err)
 		}
@@ -210,21 +192,13 @@ func TestLockAndPathResults(t *testing.T) {
 	id := testIdentity(1)
 	base := t.TempDir()
 	regular := filepath.Join(base, "regular")
-	if err := os.WriteFile(regular, nil, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(regular, nil, 0o700))
 	wide := filepath.Join(base, "wide")
-	if err := os.Mkdir(wide, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(wide, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Mkdir(wide, 0o700))
+	must(t, os.Chmod(wide, 0o755))
 	target := storeDir(t)
 	link := filepath.Join(base, "link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Symlink(target, link))
 	for name, path := range map[string]string{"regular": regular, "mode 0755": wide, "symlink": link} {
 		if s, err := Open(path, id); s != nil || !errors.Is(err, ErrUnreadable) {
 			t.Fatalf("Open %s: %v", name, err)
@@ -263,17 +237,13 @@ func TestLockAndPathResults(t *testing.T) {
 		t.Fatalf("second Open in process: %v", err)
 	}
 	fifoDir := storeDir(t)
-	if err := syscall.Mkfifo(filepath.Join(fifoDir, controlFile), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, syscall.Mkfifo(filepath.Join(fifoDir, controlFile), 0o600))
 	// A FIFO P refuses within a bounded deadline (a liveness bound only), first
 	// without a writer and then with a live writer that writes nothing.
 	for _, live := range []bool{false, true} {
 		if live {
 			writer, err := os.OpenFile(filepath.Join(fifoDir, controlFile), os.O_RDWR, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
+			must(t, err)
 			t.Cleanup(func() { _ = writer.Close() })
 		}
 		done := make(chan error, 1)
@@ -288,9 +258,7 @@ func TestLockAndPathResults(t *testing.T) {
 		}
 	}
 	pdir := storeDir(t)
-	if err := os.Symlink(filepath.Join(dir, controlFile), filepath.Join(pdir, controlFile)); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Symlink(filepath.Join(dir, controlFile), filepath.Join(pdir, controlFile)))
 	if s, err := Open(pdir, id); s != nil || !errors.Is(err, ErrUnreadable) {
 		t.Fatalf("symlinked P: %v", err)
 	}

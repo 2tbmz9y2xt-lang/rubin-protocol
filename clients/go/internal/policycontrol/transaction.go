@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"sync"
 )
 
-// Truth is the P truth of one attempted transaction.
 type Truth uint8
 
 const (
@@ -31,21 +31,18 @@ func (r Result) Sequence() (uint64, bool) {
 	return r.sequence, r.Truth == OLD || r.Truth == NEW
 }
 
-// Guard is a caller-owned revision of a consulted input. A commit requiring
-// it holds it from its check through the durable crossing.
+// Guard is a caller-owned revision; a commit requiring it holds it through the crossing.
 type Guard struct {
 	mu      sync.Mutex
 	version uint64
 }
 
-// Qualified is a guard revision observed at qualification.
 type Qualified struct {
 	guard   *Guard
 	version uint64
 }
 
-// Advance records a change of the guarded input; it waits for a crossing
-// that protects this guard.
+// Advance records a change of the guarded input; it waits for a crossing protecting this guard.
 func (g *Guard) Advance() {
 	g.mu.Lock()
 	g.version++
@@ -62,8 +59,7 @@ func (g *Guard) Qualify() Qualified {
 type ownerMode uint8
 
 const (
-	ownerUnset ownerMode = iota
-	ownerNone
+	ownerNone ownerMode = iota + 1
 	ownerAdmit
 	ownerRetain
 )
@@ -96,10 +92,10 @@ type attempt struct {
 func (s *Store) Begin() (*Tx, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	switch {
+	case s.closed:
 		return nil, ErrClosed
-	}
-	if s.tx != nil || s.crossing || s.pending != nil {
+	case s.heldLocked():
 		return nil, ErrBusy
 	}
 	s.tx = &Tx{s: s, base: s.st, ctl: s.st.ctl.clone(), puts: map[string]Row{}, dels: map[string]struct{}{}}
@@ -129,42 +125,49 @@ func (tx *Tx) Batch(before, after uint64) { tx.cursors = &Cursors{Before: before
 // Require adds a qualified guard that Commit checks and protects through the crossing.
 func (tx *Tx) Require(q Qualified) { tx.guards = append(tx.guards, q) }
 
-// successor builds and fully validates state n+1; every failure is before effects.
+func (tx *Tx) receiptOwner(n1 uint64) (Owner, error) {
+	o := tx.owner
+	switch {
+	case tx.mode == ownerNone:
+		return Owner{Kind: OwnerlessControl, Epoch: n1}, nil
+	case tx.mode == ownerAdmit && o.Kind != OwnerlessControl:
+		o.Epoch = n1
+		return o, nil
+	case tx.mode == ownerRetain && o.Epoch <= tx.base.seq:
+		return o, nil
+	}
+	return Owner{}, refused("owner undeclared, ownerless admission or re-epoched retained owner")
+}
+
+func (tx *Tx) successorRows(n1 uint64) map[string]Row {
+	if len(tx.puts)+len(tx.dels) == 0 {
+		return tx.base.rows
+	}
+	rows := make(map[string]Row, len(tx.base.rows)+len(tx.puts))
+	maps.Copy(rows, tx.base.rows)
+	for id := range tx.dels {
+		delete(rows, id)
+	}
+	for id, r := range tx.puts {
+		r.Sequence = n1
+		rows[id] = r
+	}
+	return rows
+}
+
 func (tx *Tx) successor() (*state, error) {
 	b := tx.base
 	if b.seq == math.MaxUint64 {
 		return nil, refused("sequence exhausted")
 	}
-	n1, o := b.seq+1, tx.owner
-	switch {
-	case tx.mode == ownerNone:
-		o = Owner{Kind: OwnerlessControl, Epoch: n1}
-	case tx.mode == ownerAdmit && o.Kind != OwnerlessControl:
-		o.Epoch = n1
-	case tx.mode == ownerRetain && o.Epoch <= b.seq:
-	default:
-		return nil, refused("owner undeclared, ownerless admission or re-epoched retained owner")
+	n1 := b.seq + 1
+	o, err := tx.receiptOwner(n1)
+	if err != nil {
+		return nil, err
 	}
-	next := &state{id: b.id, seq: n1, ctl: tx.ctl.clone(), rows: b.rows, receipt: &Receipt{Predecessor: b.seq, Successor: n1,
-		Operation: operationID(b.id, n1), Owner: o, Class: tx.class, Ordinal: tx.ordinal}}
-	if tx.cursors != nil {
-		next.receipt.Cursors = &Cursors{tx.cursors.Before, tx.cursors.After}
-	}
+	next := &state{id: b.id, seq: n1, ctl: tx.ctl.clone(), rows: tx.successorRows(n1), receipt: &Receipt{Predecessor: b.seq, Successor: n1, Operation: operationID(b.id, n1), Owner: o, Class: tx.class, Ordinal: tx.ordinal, Cursors: tx.cursors}}
 	if !tx.ctl.equal(b.ctl) {
 		next.ctl.sequence = n1
-	}
-	if len(tx.puts)+len(tx.dels) != 0 {
-		next.rows = make(map[string]Row, len(b.rows)+len(tx.puts))
-		for id, r := range b.rows {
-			next.rows[id] = r
-		}
-		for id := range tx.dels {
-			delete(next.rows, id)
-		}
-		for id, r := range tx.puts {
-			r.Sequence = n1
-			next.rows[id] = r
-		}
 	}
 	if err := validateState(next); err != nil {
 		return nil, refused(err.Error())
@@ -172,8 +175,7 @@ func (tx *Tx) successor() (*state, error) {
 	return next, nil
 }
 
-// lockGuards takes every required guard without waiting and checks its
-// revision; the held guards stay locked through the crossing.
+// lockGuards locks and checks every guard without waiting; held guards stay locked.
 func lockGuards(qs []Qualified) (held []*Guard, err error) {
 	seen := map[*Guard]uint64{}
 	for _, q := range qs {
@@ -199,52 +201,64 @@ func lockGuards(qs []Qualified) (held []*Guard, err error) {
 // A successful durable crossing is NEW with no compulsory second read. A
 // failure after the rename or a lost acknowledgement is UNKNOWN: the store
 // then refuses Begin, views and dependent effects until Recover resolves it.
-func (tx *Tx) Commit() (res Result, err error) {
+func (tx *Tx) Commit() (Result, error) {
+	old, proceed, err := tx.enterCommit()
+	if !proceed {
+		return old, err
+	}
+	next, c, err := tx.crossGuarded()
+	return tx.finishCommit(old, next, c, err)
+}
+
+func (tx *Tx) enterCommit() (old Result, proceed bool, err error) {
 	s := tx.s
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if tx.done || s.tx != tx {
-		s.mu.Unlock()
-		return Result{}, ErrFinished
+		return Result{}, false, ErrFinished
 	}
-	old := Result{Truth: OLD, sequence: tx.base.seq}
+	old = Result{Truth: OLD, sequence: tx.base.seq}
 	if len(tx.puts) == 0 && len(tx.dels) == 0 && tx.ctl.equal(tx.base.ctl) {
 		if tx.done, s.tx = true, nil; tx.latch {
 			s.afterLatchLocked(true, nil)
 		}
-		s.mu.Unlock()
-		return old, nil
+		return old, false, nil
 	}
 	tx.done, s.crossing = true, true // Abort and a second Commit now see a finished Tx
-	s.mu.Unlock()
+	return old, true, nil
+}
+
+func (tx *Tx) crossGuarded() (next *state, c crossingResult, err error) {
 	held, err := lockGuards(tx.guards)
-	var next *state
-	var image []byte
-	var c crossingResult
 	if err == nil {
 		next, err = tx.successor()
 	}
 	if err == nil {
-		image = encode(next)
-		c = s.cross(image)
+		c = tx.s.cross(next)
 	}
 	for _, g := range held {
 		g.mu.Unlock()
 	}
+	return next, c, err
+}
+
+func (tx *Tx) finishCommit(old Result, next *state, c crossingResult, failure error) (res Result, err error) {
+	s := tx.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if tx.done, s.tx, s.crossing = true, nil, false; tx.latch {
 		defer func() { s.afterLatchLocked(true, err) }()
 	}
 	switch {
-	case err != nil:
-		return old, err
+	case failure != nil:
+		return old, failure
 	case c.crashed || c.ackLost || c.poisoned:
-		s.pending = &attempt{old: s.image, new: image, next: next, handle: c.handle, poisoned: c.crashed || c.poisoned, latch: tx.latch}
+		s.pending = &attempt{old: s.image, new: c.image, next: next, handle: c.handle, poisoned: c.crashed || c.poisoned, latch: tx.latch}
 		return Result{Truth: UNKNOWN}, fmt.Errorf("%w: %w", ErrUnresolved, c.err)
 	case c.err != nil:
 		return old, c.err
 	}
-	s.st, s.image = next, image
+	s.st, s.image = next, c.image
 	return Result{Truth: NEW, sequence: next.seq}, nil
 }
 
@@ -267,45 +281,57 @@ func (tx *Tx) Abort() (Result, error) {
 // predecessor image is OLD, the exact successor image (sequence, receipt,
 // rows, cursors) is NEW, anything else UNKNOWN (or the integrity error).
 func (s *Store) Recover() (Result, error) {
+	p, res, err := s.enterRecover()
+	if p == nil {
+		return res, err
+	}
+	return s.finishRecover(p)
+}
+
+func (s *Store) enterRecover() (*attempt, Result, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.pending
 	switch {
 	case s.closed:
-		s.mu.Unlock()
-		return Result{}, ErrClosed
+		return nil, Result{}, ErrClosed
 	case s.crossing || s.tx != nil:
-		s.mu.Unlock()
-		return Result{}, ErrBusy
+		return nil, Result{}, ErrBusy
 	case p == nil:
-		s.mu.Unlock()
-		return Result{}, nil
+		return nil, Result{}, nil
 	case p.handle != nil || p.poisoned:
-		s.mu.Unlock()
-		return Result{Truth: UNKNOWN}, fmt.Errorf("%w: crossing handle retained or durability failed", ErrUnresolved)
+		return nil, Result{Truth: UNKNOWN}, fmt.Errorf("%w: crossing handle retained or durability failed", ErrUnresolved)
 	}
 	s.crossing = true
-	s.mu.Unlock()
+	return p, Result{}, nil
+}
+
+func (s *Store) classifyReadback(p *attempt) (Truth, error) {
 	got, err := s.readImage()
-	truth := UNKNOWN
 	switch {
 	case err != nil:
+		return UNKNOWN, err
 	case bytes.Equal(got, p.old):
-		truth = OLD
+		return OLD, nil
 	case bytes.Equal(got, p.new):
-		truth = NEW
-	default:
-		if _, err = decode(got); err == nil {
-			err = fmt.Errorf("%w: readback is neither the predecessor nor the successor", ErrUnresolved)
-		}
+		return NEW, nil
 	}
+	if _, err = decode(got); err == nil {
+		err = fmt.Errorf("%w: readback is neither the predecessor nor the successor", ErrUnresolved)
+	}
+	return UNKNOWN, err
+}
+
+func (s *Store) finishRecover(p *attempt) (Result, error) {
+	truth, err := s.classifyReadback(p)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.crossing = false
-	switch truth {
-	case UNKNOWN:
+	if truth == UNKNOWN {
 		p.poisoned = p.poisoned || errors.Is(err, ErrUnreadable)
 		return Result{Truth: UNKNOWN}, err
-	case NEW:
+	}
+	if truth == NEW {
 		s.st, s.image = p.next, p.new
 	}
 	if s.pending = nil; p.latch {
@@ -314,15 +340,16 @@ func (s *Store) Recover() (Result, error) {
 	return Result{Truth: truth, sequence: s.st.seq}, nil
 }
 
-// Gate reports which P-dependent uses the store permits now: none while a
-// transaction is held, crossing or UNKNOWN; AutomaticH1 also needs the
-// durable latch. The store holds no lock over independent native work.
+// Gate reports the P-dependent uses permitted now: none while a transaction is
+// held, crossing or UNKNOWN; AutomaticH1 also needs the durable latch.
 type Gate struct{ DependentEffects, AutomaticH1, LatchUse bool }
 
-// Gate never waits.
+func (s *Store) heldLocked() bool { return s.tx != nil || s.crossing || s.pending != nil }
+
+// Gate never waits and holds no lock over independent native work.
 func (s *Store) Gate() Gate {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ok := !s.closed && s.tx == nil && !s.crossing && s.pending == nil
+	ok := !s.closed && !s.heldLocked()
 	return Gate{DependentEffects: ok, AutomaticH1: ok && s.st.ctl.initialSync, LatchUse: ok}
 }
