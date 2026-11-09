@@ -64,7 +64,7 @@ const (
 	ownerRetain
 )
 
-// Tx is the one exclusive P transaction; its changes stay staged until Commit.
+// Tx is the one exclusive P transaction; its changes stay staged until Commit, and staging on a finished Tx has no effect. Staging refusals wrap ErrRefused unless a method names another error.
 type Tx struct {
 	s           *Store
 	base        *state
@@ -87,8 +87,8 @@ type attempt struct {
 	poisoned, latch bool
 }
 
-// Begin is try-or-refuse: it never waits and returns ErrBusy while another
-// transaction is held, a crossing runs or an attempted transaction is UNKNOWN.
+// Begin is try-or-refuse: it never waits, returns ErrClosed after Close and ErrBusy while
+// another transaction is held, a crossing runs or an attempted transaction is UNKNOWN.
 func (s *Store) Begin() (*Tx, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -199,12 +199,10 @@ func lockGuards(qs []Qualified) (held []*Guard, err error) {
 	return held, nil
 }
 
-// Commit ends a live transaction with exactly one of OLD, NEW or UNKNOWN and the sequence that truth
-// establishes. A finished Tx attempts nothing: zero Result and ErrFinished. An empty change set writes
-// nothing and is OLD. A refusal before the rename (guard, sequence, domain, bound, scratch I/O) is OLD
-// with nothing changed. A successful durable crossing is NEW with no compulsory second read. A failure
-// after the rename or a lost acknowledgement is UNKNOWN: the store then refuses Begin, views and
-// dependent effects until Recover resolves it.
+// Commit ends a live transaction with exactly one of OLD, NEW or UNKNOWN and the sequence that truth establishes. A finished Tx attempts nothing: zero Result and
+// ErrFinished. An empty change set writes nothing: OLD, nil. A refusal before the rename is OLD with nothing changed and its error: ErrStaleLocalPlan for a changed or
+// busy guard, ErrRefused for sequence, domain or bound, the I/O error for scratch or rename. A durable crossing is NEW, nil with no compulsory second read. A failure after
+// the rename or a lost acknowledgement is UNKNOWN and ErrUnresolved: the store then refuses Begin, views and dependent effects until Recover resolves it.
 func (tx *Tx) Commit() (Result, error) {
 	old, proceed, err := tx.enterCommit()
 	if !proceed {
@@ -276,12 +274,10 @@ func (tx *Tx) Abort() (Result, error) {
 	return Result{Truth: OLD, sequence: tx.base.seq}, nil
 }
 
-// Recover classifies a retained UNKNOWN attempt. A retained crossing handle
-// or an observed post-rename durability failure stays UNKNOWN with no
-// synchronization or read. Otherwise, under the held writer with no
-// transaction, it establishes durability and reads P once: the exact
-// predecessor image is OLD, the exact successor image (sequence, receipt,
-// rows, cursors) is NEW, anything else UNKNOWN (or the integrity error).
+// Recover classifies a retained UNKNOWN attempt. After Close it is the zero Result and ErrClosed; during a crossing or with a transaction held the zero Result and ErrBusy;
+// with no attempt the zero Result and nil. A retained crossing handle or an observed post-rename durability failure stays UNKNOWN and ErrUnresolved with no synchronization or
+// read. Otherwise, under the held writer with no transaction, it establishes durability and reads P once: the exact predecessor image is OLD, nil; the exact successor image
+// (sequence, receipt, rows, cursors) NEW, nil; anything else UNKNOWN with ErrUnresolved, ErrIntegrity, ErrMissingControl or ErrUnreadable.
 func (s *Store) Recover() (Result, error) {
 	p, res, err := s.enterRecover()
 	if p == nil {
@@ -342,7 +338,7 @@ func (s *Store) finishRecover(p *attempt) (Result, error) {
 	return Result{Truth: truth, sequence: s.st.seq}, nil
 }
 
-// Gate reports the P-dependent uses permitted now: none while a transaction is
+// Gate reports the P-dependent uses permitted now: none after Close or while a transaction is
 // held, crossing or UNKNOWN; AutomaticH1 also needs the durable latch.
 type Gate struct{ DependentEffects, AutomaticH1, LatchUse bool }
 

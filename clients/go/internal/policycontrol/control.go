@@ -114,13 +114,12 @@ func (s *Store) RequestLatch() {
 	s.latchRequested, s.latchRenewed = !s.closed && !s.st.ctl.initialSync, true
 }
 
-// PersistLatch services the request. A durably true latch consumes it with
-// no write; a false predicate writes nothing and retains it; otherwise it
-// commits false to true as one ownerless control transaction: NEW latches
-// durably and clears every request, OLD clears the serviced request (STALE_LOCAL_PLAN retains it
-// for fresh qualification), UNKNOWN clears the serviced request and leaves the pending-persistence
-// owner to Recover. Nothing starts while a transaction is held, crossing or UNKNOWN; the decision
-// and taking the writer are one step. No exported operation clears a true latch.
+// PersistLatch services the request; the decision and taking the writer are one step. After Close it is the zero Result and ErrClosed; while a transaction is
+// held, crossing or UNKNOWN the zero Result and ErrBusy, starting nothing. A Close before the commit starts gives the zero Result and ErrFinished. A durably true
+// latch holds no request: OLD, nil, no write. Otherwise it writes nothing and returns OLD with ErrNoRequest without a request; OLD, nil for a false predicate, retaining
+// the request; OLD and ErrRefused for a proof without basis, retaining it. Else it commits false to true as one ownerless control transaction, with Commit's results:
+// NEW latches durably and clears every request; OLD clears the serviced request (ErrStaleLocalPlan retains it for fresh qualification);
+// UNKNOWN clears the serviced request and leaves the pending-persistence owner to Recover. No exported operation clears a true latch.
 func (s *Store) PersistLatch(p LatchProof) (Result, error) {
 	tx, res, err := s.beginLatch(p)
 	if tx == nil {
@@ -139,7 +138,6 @@ func (s *Store) beginLatch(p LatchProof) (*Tx, Result, error) {
 	case s.heldLocked():
 		return nil, Result{}, ErrBusy
 	case s.st.ctl.initialSync:
-		s.latchRequested = false
 		return nil, old, nil
 	case !s.latchRequested:
 		return nil, old, ErrNoRequest

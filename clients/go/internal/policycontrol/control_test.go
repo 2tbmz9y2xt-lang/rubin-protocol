@@ -283,6 +283,9 @@ func TestLatchPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLatch(t, s, LatchStatus{Durable: true})
+	if r, err = s.PersistLatch(stableProof(g)); r != (Result{Truth: OLD, sequence: 41}) || err != nil || !bytes.Equal(fileBytes(t, dir), s.image) {
+		t.Fatalf("durably true latch: %v %v", r, err)
+	}
 	if v := mustView(t, s); v.Receipt.Owner.Kind != OwnerlessControl || v.ControlSequence != 41 {
 		t.Fatalf("latch receipt %+v", v.Receipt)
 	}

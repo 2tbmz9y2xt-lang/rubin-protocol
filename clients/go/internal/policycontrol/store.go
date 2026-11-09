@@ -88,17 +88,19 @@ type Store struct {
 	latchRequested, latchRenewed bool // the one coalesced RAM latch request; one recorded since the latest latch decision
 }
 
-// Create creates positively new P (sequence 0, empty receipt, both booleans false, no incident, empty
-// journal) in the existing mode-0700 directory dir, which must hold nothing but a stale scratch file,
-// holding the directory's exclusive lock until Close, then reads it back. It never creates the directory;
-// a zero or mismatched proof refuses, a contended lock is ErrBusy, any other lock failure ErrUnreadable.
+// Create creates positively new P (sequence 0, empty receipt, both booleans false, no incident, empty journal) in the existing
+// mode-0700 directory dir, which must hold nothing but a stale scratch file, keeps the directory's exclusive lock until Close and
+// reads P back. It never creates the directory. Every failure returns no Store and releases the lock. An invalid identity, a zero or mismatched proof or a
+// directory holding anything else is ErrRefused; a contended lock ErrBusy; any other lock failure, an absent directory included, or an unlistable directory ErrUnreadable.
+// A failed crossing returns its error naming whether the rename happened: before it no P exists; after it P stays with the unresolved marker. A readback that fails or differs is ErrIntegrity with P left in place.
 func Create(dir string, id Identity, proof NewInstallationProof) (*Store, error) {
 	return start(dir, id, &proof, productionHooks)
 }
 
-// Open qualifies existing P in dir against expected, holding the directory's exclusive lock until Close.
-// It creates nothing: an absent directory or P is ErrMissingControl, a contended lock ErrBusy, unobtainable
-// bytes ErrUnreadable, malformed or mismatched P ErrIntegrity. P is never reset, recreated or defaulted to fresh.
+// Open qualifies existing P in dir against expected, keeping the directory's exclusive lock until Close; every failure returns no Store and releases it.
+// An invalid identity is ErrRefused, an absent directory or P ErrMissingControl, a contended lock ErrBusy, any other lock failure or unobtainable bytes ErrUnreadable,
+// malformed or mismatched P ErrIntegrity, and a recorded durability failure ErrUnresolved until operator resolution. P is never reset, recreated or defaulted to fresh.
+// Open creates nothing, except that a failed synchronization of existing P records the durable unresolved marker with its ErrUnreadable.
 func Open(dir string, expected Identity) (*Store, error) {
 	return start(dir, expected, nil, productionHooks)
 }
@@ -300,8 +302,8 @@ func (s *Store) settleCrossing(c *crossingResult, scratch string, f *os.File) {
 	}
 }
 
-// View returns a protected copy of the last qualified committed P; it refuses
-// with ErrBusy during a crossing or while an attempt is UNKNOWN.
+// View returns a protected copy of the last qualified committed P. It refuses
+// with ErrClosed after Close and ErrBusy during a crossing or while an attempt is UNKNOWN.
 func (s *Store) View() (View, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -331,8 +333,8 @@ func (s *Store) readableLocked() error {
 	return nil
 }
 
-// Close ends a held transaction as OLD, disposes a retained crossing handle
-// and releases the directory lock. It refuses with ErrBusy during a crossing.
+// Close ends a held transaction as OLD, disposes a retained crossing handle and releases the directory lock, returning
+// any release failure. It refuses with ErrBusy during a crossing; a second Close returns nil and does nothing.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

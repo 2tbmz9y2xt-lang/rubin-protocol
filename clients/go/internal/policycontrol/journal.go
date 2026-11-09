@@ -34,8 +34,8 @@ func (tx *Tx) DeleteRow(kind RowKind, key []byte) error {
 }
 
 // Membership returns the complete committed membership in (kind, key) order,
-// each row with its committing sequence, or an error; never a partial or
-// empty substitute, and never inferred from the receipt.
+// each row with its committing sequence, or ErrClosed after Close or ErrBusy during a crossing or
+// while an attempt is UNKNOWN; never a partial or empty substitute, and never inferred from the receipt.
 func (s *Store) Membership() ([]Row, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
